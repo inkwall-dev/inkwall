@@ -120,7 +120,13 @@ shop   Detect   True    3/3       2m
 ## Contributing
 
 Contributions and design feedback are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for commit
-conventions, branching, and releases.
+conventions, branching, and releases. Everyone taking part is expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Security
+
+Please report vulnerabilities privately as described in [SECURITY.md](SECURITY.md), never in public
+issues.
 
 ## License
 
