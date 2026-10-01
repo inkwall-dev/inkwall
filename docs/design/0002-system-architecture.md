@@ -280,7 +280,7 @@ spec:
     endpoint: grpcs://agents.inkwall.example.com:443
     enrollmentSecretRef: {name: inkwall-enrollment, namespace: inkwall-system}
   engine:
-    image: ghcr.io/nmn3m/inkwall-engine:v0.1.0
+    image: ghcr.io/inkwall-dev/inkwall-engine:v0.1.0
     resources:
       requests: {cpu: "500m", memory: 256Mi}
       limits:   {memory: 512Mi}      # no CPU limit by default: throttling = p99 latency
@@ -793,7 +793,7 @@ shop.example.com {
 }
 ```
 
-Build: `xcaddy build --with github.com/nmn3m/inkwall/adapters/caddy`.
+Build: `xcaddy build --with github.com/inkwall-dev/inkwall/adapters/caddy`.
 
 ### 6.6 Standalone reverse proxy (universal fallback)
 
