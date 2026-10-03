@@ -154,19 +154,27 @@ func (e *Evaluator) Evaluate(_ context.Context, r *request.Request) (rules.Resul
 
 func result(tx types.Transaction, it *types.Interruption) rules.Result {
 	var res rules.Result
-	for _, mr := range tx.MatchedRules() {
-		// Rules without matched data are configuration actions (SecAction).
-		if len(mr.MatchedDatas()) == 0 {
-			continue
-		}
-		res.MatchedRuleIDs = append(res.MatchedRuleIDs, mr.Rule().ID())
-	}
 	if it != nil {
 		res.Interrupted = true
 		res.Status = it.Status
 		res.RuleID = it.RuleID
 	}
+	for _, mr := range tx.MatchedRules() {
+		// CRS setup, initialization and flow-control rules "match" on every
+		// request; only detection rules carry a severity. The interrupting
+		// rule is always reported. Custom rules need a severity to be
+		// reported when they only contribute to a score.
+		id := mr.Rule().ID()
+		if !hasSeverity(mr.Rule().Severity()) && (it == nil || id != it.RuleID) {
+			continue
+		}
+		res.MatchedRuleIDs = append(res.MatchedRuleIDs, id)
+	}
 	return res
+}
+
+func hasSeverity(s types.RuleSeverity) bool {
+	return s >= types.RuleSeverityEmergency && s <= types.RuleSeverityDebug
 }
 
 func hostname(hostport string) string {

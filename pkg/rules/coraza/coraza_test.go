@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/inkwall-dev/inkwall/pkg/request"
@@ -31,6 +32,7 @@ func newRequest(method, uri string, headers http.Header, body string) *request.R
 	}
 	if body != "" {
 		r.Body = []byte(body)
+		r.Headers.Set("Content-Length", strconv.Itoa(len(body)))
 	}
 	return r
 }
@@ -73,6 +75,9 @@ func TestEvaluateCRS(t *testing.T) {
 			}
 			if tt.blocked && len(res.MatchedRuleIDs) == 0 {
 				t.Fatal("blocked request reports no matched rules")
+			}
+			if !tt.blocked && len(res.MatchedRuleIDs) != 0 {
+				t.Fatalf("benign request matched rules %v", res.MatchedRuleIDs)
 			}
 		})
 	}
@@ -121,6 +126,12 @@ func TestExclusionDirectiveRemovesRule(t *testing.T) {
 	}
 	if !slices.Contains(res.MatchedRuleIDs, 942100) {
 		t.Fatalf("control: rule 942100 did not match, got %v", res.MatchedRuleIDs)
+	}
+	// CRS bookkeeping rules (setup, initialization) must not be reported.
+	for _, id := range res.MatchedRuleIDs {
+		if id >= 900000 && id < 902000 {
+			t.Fatalf("bookkeeping rule %d reported as a match: %v", id, res.MatchedRuleIDs)
+		}
 	}
 
 	// A false-positive exclusion: allow SQL-like text in the "q" argument.
