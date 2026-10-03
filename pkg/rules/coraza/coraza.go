@@ -84,6 +84,7 @@ func buildDirectives(cfg Config) (string, error) {
 	// Enforce, and leave audit logging to Inkwall's own event pipeline.
 	b.WriteString("SecRuleEngine On\n")
 	b.WriteString("SecAuditEngine Off\n")
+	b.WriteString("SecRxPreFilter On\n")
 	if !cfg.DisableCRS {
 		b.WriteString("Include @crs-setup.conf.example\n")
 		fmt.Fprintf(&b,
