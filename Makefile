@@ -28,6 +28,10 @@ test: ## Run unit tests with the race detector
 bench: ## Run benchmarks (BENCH=regexp COUNT=n)
 	$(GO) test -run='^$$' -bench='$(BENCH)' -benchmem -count=$(COUNT) ./...
 
+.PHONY: crs-test
+crs-test: ## Run the OWASP CRS regression suite through the proxy (test/crs)
+	cd test/crs && $(GO) test -count=1 -timeout 30m -v ./...
+
 .PHONY: lint
 lint: ## Run golangci-lint
 	$(GOLANGCI_LINT) run ./...

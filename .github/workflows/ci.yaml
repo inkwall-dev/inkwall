@@ -32,6 +32,17 @@ jobs:
       - run: make test
       - run: make build
 
+  crs:
+    # Detection regression gate: the OWASP CRS test suite through the proxy.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: test/crs/go.mod
+          cache-dependency-path: test/crs/go.sum
+      - run: make crs-test
+
   vuln:
     runs-on: ubuntu-latest
     steps:
