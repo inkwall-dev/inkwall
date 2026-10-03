@@ -42,6 +42,46 @@ Measured as **added** latency vs the same proxy with Inkwall disabled, at 70% CP
 Hard per-request deadline (default 20 ms, configurable per policy): when it is exceeded the request
 follows the policy's failure mode (default **fail-open**) and an event is emitted.
 
+### 3.1 Measured baseline (2026-10-03)
+
+First measurement of the engine alone (`BenchmarkEvaluate`, `BenchmarkEvaluateArgs`): Coraza 3.8.1,
+CRS 4.25, paranoia level 1, regex prefilter on (`SecRxPreFilter`), single core of an i7-1255U.
+This is rule evaluation only, without any proxy hop.
+
+| Request | Time | Budget it maps to |
+|---|---|---|
+| Benign GET, no body | ~0.46 ms | Header-only p50 ≤ 0.15 ms (sidecar) |
+| Benign form POST, 2 fields | ~0.62 ms | |
+| Form POST, 10 / 50 / 150 fields | 1.1 / 4.6 / 14.6 ms | Body p99 ≤ 0.5 ms per 8 KB |
+| JSON POST, 10 / 50 / 150 fields | 1.6 / 6.8 / 21.5 ms | |
+| JSON POST, 8 KB, ~450 fields | ~75 ms | |
+
+Findings:
+
+- **The header-only path is about 3× over budget.** Cost is spread across Coraza evaluating all CRS
+  rules (regex ~22%, rule evaluation and collection lookups, GC ~14%); there is no single hotspot.
+- **Body cost is linear in the number of arguments,** about 0.1 ms per form field and 0.15 ms per
+  JSON field, because CRS runs most rules once per argument. No CRS family dominates: SQLi 26%,
+  XSS 23%, RCE 12%, PHP 9%, the rest small.
+- **The 20 ms deadline is reached at ~150 JSON fields.** With fail-open, bodies beyond that are
+  effectively uninspected. This is the most important gap.
+
+Measured and not adopted: `coraza-wasilibs` (crashes on Go 1.26), multiphase evaluation (7%
+slower), `no_regex_multiline` (3% faster, not worth the behaviour change). `GOGC=400` gives ~7% and
+is left as a deployment setting.
+
+Next levers, in order of expected gain:
+
+1. Per-route policy so static and low-risk routes skip inspection, and bodies are inspected only for
+   routes and content types that need them (§4, T0).
+2. Policy controls on body size and argument count, paired with CRS's "too many arguments" rule so
+   that padding a body past the limit is itself detected.
+3. Reducing Coraza's per-rule, per-argument overhead (transformation cache hashing, allocations),
+   preferably as upstream contributions.
+4. A single-pass prefilter across all rules (§5.2), which needs changes inside Coraza.
+
+The budgets above stay as targets; they are not met yet.
+
 ## 4. Request pipeline: tiered, cheapest first
 
 Most requests must exit in the earliest tiers.
@@ -89,10 +129,11 @@ Workflow: onboard a route in detect mode, tune false positives in the UI, then p
 
 ### 5.2 Rule evaluation
 
-1. **Start:** Coraza + OWASP CRS, built with `coraza.rule.multiphase_evaluation` so a request can
-   be stopped as early as possible, plus `coraza-wasilibs` for faster `@rx` (RE2), `@pm`
-   (Aho-Corasick), `@detectSQLi` and `@detectXSS`.
-2. **Prefilter (Stage 6):** extract required literals from every rule and compile them into a single
+1. **Start:** Coraza + OWASP CRS with Coraza's per-rule regex prefilter (`SecRxPreFilter On`),
+   which skips a regex when the value is too short or lacks a literal the pattern requires.
+   Multiphase evaluation and `coraza-wasilibs` were planned here but measured worse or broken
+   (§3.1).
+2. **Single-pass prefilter (Stage 6):** extract required literals from every rule and compile them into a single
    multi-pattern automaton (Aho-Corasick in pure Go; Hyperscan via cgo as an optional build).
    One pass over the request tells us which rules can possibly match; the rest are skipped. Most
    benign requests match no literals, so they skip regex evaluation entirely.
