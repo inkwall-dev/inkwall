@@ -45,40 +45,46 @@ follows the policy's failure mode (default **fail-open**) and an event is emitte
 ### 3.1 Measured baseline (2026-10-03)
 
 First measurement of the engine alone (`BenchmarkEvaluate`, `BenchmarkEvaluateArgs`): Coraza 3.8.1,
-CRS 4.25, paranoia level 1, regex prefilter on (`SecRxPreFilter`), single core of an i7-1255U.
-This is rule evaluation only, without any proxy hop.
+CRS 4.25, paranoia level 1, single core of an i7-1255U. This is rule evaluation only, without any
+proxy hop.
 
 | Request | Time | Budget it maps to |
 |---|---|---|
-| Benign GET, no body | ~0.46 ms | Header-only p50 ≤ 0.15 ms (sidecar) |
-| Benign form POST, 2 fields | ~0.62 ms | |
-| Form POST, 10 / 50 / 150 fields | 1.1 / 4.6 / 14.6 ms | Body p99 ≤ 0.5 ms per 8 KB |
-| JSON POST, 10 / 50 / 150 fields | 1.6 / 6.8 / 21.5 ms | |
-| JSON POST, 8 KB, ~450 fields | ~75 ms | |
+| Benign GET, no body | ~0.51 ms | Header-only p50 ≤ 0.15 ms (sidecar) |
+| Benign form POST, 2 fields | ~0.74 ms | |
+| Form POST, 10 / 50 / 150 fields | 1.4 / 5.8 / 18.8 ms | Body p99 ≤ 0.5 ms per 8 KB |
+| JSON POST, 10 / 50 / 150 fields | 2.3 / 9.6 / 29.3 ms | |
+| JSON POST, 8 KB, ~450 fields | ~100 ms | |
 
 Findings:
 
 - **The header-only path is about 3× over budget.** Cost is spread across Coraza evaluating all CRS
   rules (regex ~22%, rule evaluation and collection lookups, GC ~14%); there is no single hotspot.
-- **Body cost is linear in the number of arguments,** about 0.1 ms per form field and 0.15 ms per
+- **Body cost is linear in the number of arguments,** about 0.13 ms per form field and 0.2 ms per
   JSON field, because CRS runs most rules once per argument. No CRS family dominates: SQLi 26%,
   XSS 23%, RCE 12%, PHP 9%, the rest small.
-- **The 20 ms deadline is reached at ~150 JSON fields.** With fail-open, bodies beyond that are
-  effectively uninspected. This is the most important gap.
+- **The 20 ms deadline is reached at ~100 JSON fields.** With fail-open, bodies beyond that are
+  effectively uninspected. This is the most important gap. Admission control (`MaxConcurrent`)
+  keeps abandoned evaluations from exhausting the CPU, and `--oversize-body deny` plus
+  `--max-args` stop padding from hiding payloads, but neither makes inspection faster.
 
-Measured and not adopted: `coraza-wasilibs` (crashes on Go 1.26), multiphase evaluation (7%
-slower), `no_regex_multiline` (3% faster, not worth the behaviour change). `GOGC=400` gives ~7% and
-is left as a deployment setting.
+Measured and not adopted:
+
+- **Coraza's regex prefilter (`SecRxPreFilter`)**: 10–25% faster, but the CRS regression suite
+  (`test/crs`) showed it **misses attacks** (CRS tests 942220-2 and 932311-7). Left off until the
+  suite passes with it on.
+- `coraza-wasilibs` (crashes on Go 1.26), multiphase evaluation (7% slower), `no_regex_multiline`
+  (3% faster, not worth the behaviour change). `GOGC=400` gives ~7% and is left as a deployment
+  setting.
 
 Next levers, in order of expected gain:
 
 1. Per-route policy so static and low-risk routes skip inspection, and bodies are inspected only for
    routes and content types that need them (§4, T0).
-2. Policy controls on body size and argument count, paired with CRS's "too many arguments" rule so
-   that padding a body past the limit is itself detected.
-3. Reducing Coraza's per-rule, per-argument overhead (transformation cache hashing, allocations),
-   preferably as upstream contributions.
-4. A single-pass prefilter across all rules (§5.2), which needs changes inside Coraza.
+2. Reducing Coraza's per-rule, per-argument overhead (transformation cache hashing, allocations),
+   preferably as upstream contributions, together with a fix for the prefilter's false negatives.
+3. A single-pass prefilter across all rules (§5.2), which needs changes inside Coraza. Any
+   prefilter must pass the CRS regression suite before it is enabled.
 
 The budgets above stay as targets; they are not met yet.
 
@@ -129,10 +135,8 @@ Workflow: onboard a route in detect mode, tune false positives in the UI, then p
 
 ### 5.2 Rule evaluation
 
-1. **Start:** Coraza + OWASP CRS with Coraza's per-rule regex prefilter (`SecRxPreFilter On`),
-   which skips a regex when the value is too short or lacks a literal the pattern requires.
-   Multiphase evaluation and `coraza-wasilibs` were planned here but measured worse or broken
-   (§3.1).
+1. **Start:** Coraza + OWASP CRS. Coraza's per-rule regex prefilter, multiphase evaluation and
+   `coraza-wasilibs` were planned here but were measured as unsafe, slower or broken (§3.1).
 2. **Single-pass prefilter (Stage 6):** extract required literals from every rule and compile them into a single
    multi-pattern automaton (Aho-Corasick in pure Go; Hyperscan via cgo as an optional build).
    One pass over the request tells us which rules can possibly match; the rest are skipped. Most
