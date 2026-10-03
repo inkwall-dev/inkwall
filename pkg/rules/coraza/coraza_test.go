@@ -5,11 +5,13 @@ package coraza
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/netip"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/inkwall-dev/inkwall/pkg/request"
@@ -182,6 +184,40 @@ func BenchmarkEvaluate(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// BenchmarkEvaluateArgs shows how cost grows with the number of request
+// arguments: CRS evaluates most rules once per argument, so this is the main
+// driver of body inspection time.
+func BenchmarkEvaluateArgs(b *testing.B) {
+	e, err := New(Config{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	jsonHeaders := http.Header{"Content-Type": {"application/json"}}
+	for _, n := range []int{10, 50, 150} {
+		items := make([]string, n)
+		fields := make([]string, n)
+		for i := range n {
+			items[i] = fmt.Sprintf(`{"v":"value %d"}`, i)
+			fields[i] = fmt.Sprintf("f%d=value+%d", i, i)
+		}
+		cases := map[string]*request.Request{
+			fmt.Sprintf("json_%d", n): newRequest("POST", "/api", jsonHeaders, `{"items":[`+strings.Join(items, ",")+`]}`),
+			fmt.Sprintf("form_%d", n): newRequest("POST", "/api", formHeaders, strings.Join(fields, "&")),
+		}
+		for name, req := range cases {
+			b.Run(name, func(b *testing.B) {
+				ctx := context.Background()
+				b.ReportAllocs()
+				for b.Loop() {
+					if _, err := e.Evaluate(ctx, req); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
 	}
 }
 
