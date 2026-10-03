@@ -150,6 +150,26 @@ func TestExclusionDirectiveRemovesRule(t *testing.T) {
 	}
 }
 
+func TestNeedsCompleteBody(t *testing.T) {
+	for ct, want := range map[string]bool{
+		"application/json":                  true,
+		"application/json; charset=utf-8":   true,
+		"application/vnd.api+json":          true,
+		"application/xml":                   true,
+		"text/xml":                          true,
+		"application/soap+xml":              true,
+		"multipart/form-data; boundary=x":   true,
+		"application/x-www-form-urlencoded": false,
+		"text/plain":                        false,
+		"":                                  false,
+		"not a media type;;":                false,
+	} {
+		if got := needsCompleteBody(ct); got != want {
+			t.Errorf("needsCompleteBody(%q) = %v, want %v", ct, got, want)
+		}
+	}
+}
+
 func TestNewRejectsInvalidConfig(t *testing.T) {
 	for _, cfg := range []Config{
 		{ParanoiaLevel: 5},

@@ -8,6 +8,7 @@ package coraza
 import (
 	"context"
 	"fmt"
+	"mime"
 	"net"
 	"strings"
 
@@ -136,7 +137,8 @@ func (e *Evaluator) Evaluate(_ context.Context, r *request.Request) (rules.Resul
 	if it := tx.ProcessRequestHeaders(); it != nil {
 		return result(tx, it), nil
 	}
-	if len(r.Body) > 0 {
+	unparsablePrefix := r.BodyTruncated && needsCompleteBody(r.Headers.Get("Content-Type"))
+	if len(r.Body) > 0 && !unparsablePrefix {
 		it, _, err := tx.WriteRequestBody(r.Body)
 		if err != nil {
 			return rules.Result{}, fmt.Errorf("write request body: %w", err)
@@ -172,6 +174,25 @@ func result(tx types.Transaction, it *types.Interruption) rules.Result {
 		res.MatchedRuleIDs = append(res.MatchedRuleIDs, id)
 	}
 	return res
+}
+
+// needsCompleteBody reports whether a body of this content type can only be
+// parsed whole. A truncated JSON, XML or multipart prefix fails to parse, and
+// the recommended rules then deny the request (rules 200002 and 200003), so
+// such prefixes are not inspected at all. URL-encoded and plain-text
+// prefixes are still inspected.
+func needsCompleteBody(contentType string) bool {
+	mt, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return false
+	}
+	switch {
+	case mt == "application/json", strings.HasSuffix(mt, "+json"),
+		mt == "application/xml", mt == "text/xml", strings.HasSuffix(mt, "+xml"),
+		strings.HasPrefix(mt, "multipart/"):
+		return true
+	}
+	return false
 }
 
 func hasSeverity(s types.RuleSeverity) bool {

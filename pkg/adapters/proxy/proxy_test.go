@@ -140,6 +140,30 @@ func TestBodyIsForwardedIntact(t *testing.T) {
 	}
 }
 
+func TestOversizedBodies(t *testing.T) {
+	up := newUpstream(t)
+	var logs bytes.Buffer
+	// Inspect only the first 1 KB of each body.
+	h := newHandler(t, pipeline.ModeBlock, 1<<10, up, &logs)
+	pad := strings.Repeat("a", 4<<10)
+
+	// A valid JSON body larger than the limit must not be rejected because
+	// its truncated prefix does not parse.
+	if w := do(h, "POST", "/upload", "application/json", `{"blob":"`+pad+`"}`); w.Code != http.StatusOK {
+		t.Fatalf("valid oversized JSON: got %d, want 200\n%s", w.Code, logs.String())
+	}
+	// URL-encoded prefixes are still inspected: an attack in the first 1 KB
+	// is blocked even when the body is longer.
+	if w := do(h, "POST", "/comments", "application/x-www-form-urlencoded",
+		"comment=%3Cscript%3Ealert(1)%3C%2Fscript%3E&pad="+pad); w.Code != http.StatusForbidden {
+		t.Fatalf("attack in form prefix: got %d, want 403", w.Code)
+	}
+	// Complete JSON bodies within the limit are still inspected.
+	if w := do(h, "POST", "/api/search", "application/json", `{"q":"1' OR '1'='1' -- "}`); w.Code != http.StatusForbidden {
+		t.Fatalf("attack in small JSON: got %d, want 403", w.Code)
+	}
+}
+
 func TestBodyInspectionDisabled(t *testing.T) {
 	up := newUpstream(t)
 	var logs bytes.Buffer
