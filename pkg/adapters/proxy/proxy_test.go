@@ -197,6 +197,39 @@ func TestTransferEncodingIsRestored(t *testing.T) {
 	}
 }
 
+func TestInspectedHeadersAreASnapshot(t *testing.T) {
+	up := newUpstream(t)
+	var logs bytes.Buffer
+	h := newHandler(t, pipeline.ModeBlock, 64<<10, up, &logs)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("X-Test", "before")
+	req, err := h.toRequest(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("X-Test", "after")
+	if got := req.Headers.Get("X-Test"); got != "before" {
+		t.Fatalf("inspected headers changed with the live request: %q", got)
+	}
+}
+
+func TestRequestID(t *testing.T) {
+	for id, want := range map[string]string{
+		"":                       "",
+		"abc-123_DEF.4:5":        "abc-123_DEF.4:5",
+		"has space":              "",
+		"inject\nnewline":        "",
+		"<script>":               "",
+		strings.Repeat("a", 128): strings.Repeat("a", 128),
+		strings.Repeat("a", 129): "",
+	} {
+		if got := requestID(id); got != want {
+			t.Errorf("requestID(%q) = %q, want %q", id, got, want)
+		}
+	}
+}
+
 func TestContentLengthIsRestored(t *testing.T) {
 	up := newUpstream(t)
 	var logs bytes.Buffer

@@ -62,6 +62,7 @@ func run(args []string, stderr io.Writer) int {
 
 type proxyConfig struct {
 	listen         string
+	readTimeout    time.Duration
 	upstream       *url.URL
 	mode           pipeline.Mode
 	failureMode    pipeline.FailureMode
@@ -78,6 +79,7 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 	fs := flag.NewFlagSet("proxy", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	listen := fs.String("listen", ":8080", "address to listen on")
+	readTimeout := fs.Duration("read-timeout", 60*time.Second, "maximum time to read a whole request, including the body (0 = no limit)")
 	upstream := fs.String("upstream", "", "upstream URL that allowed requests are forwarded to (required)")
 	mode := fs.String("mode", "detect", "enforcement mode: detect or block")
 	failure := fs.String("failure-mode", "open", "on inspection error or timeout: open (allow) or closed (deny with 503)")
@@ -94,6 +96,7 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 
 	cfg := proxyConfig{
 		listen:        *listen,
+		readTimeout:   *readTimeout,
 		timeout:       *timeout,
 		maxConcurrent: *maxConcurrent,
 		maxBodyBytes:  *maxBody,
@@ -165,7 +168,10 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 		Addr:              cfg.listen,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		// Bounds slow uploads that would otherwise hold a connection and a
+		// goroutine open indefinitely.
+		ReadTimeout: cfg.readTimeout,
+		IdleTimeout: 120 * time.Second,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

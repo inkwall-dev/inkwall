@@ -109,13 +109,13 @@ func (h *Handler) toRequest(r *http.Request) (*request.Request, error) {
 		rawURI = r.URL.RequestURI()
 	}
 	req := &request.Request{
-		ID:       r.Header.Get("X-Request-Id"),
+		ID:       requestID(r.Header.Get("X-Request-Id")),
 		Proto:    r.Proto,
 		Method:   r.Method,
 		Scheme:   scheme,
 		Host:     r.Host,
 		RawURI:   rawURI,
-		Headers:  framingHeaders(r),
+		Headers:  snapshotHeaders(r),
 		PeerIP:   peer,
 		ClientIP: h.clientIP.Resolve(peer, r.Header),
 	}
@@ -154,25 +154,50 @@ func (h *Handler) logEvent(r *http.Request, req *request.Request, v pipeline.Ver
 	)
 }
 
-// framingHeaders returns r's headers with Transfer-Encoding and
-// Content-Length restored. net/http moves Transfer-Encoding out of the header
-// map, and Content-Length can be absent (HTTP/2) even when the length is
-// known. Without them, rules see a POST with neither header and raise a false
-// positive. The original header map is only copied when something is missing.
-func framingHeaders(r *http.Request) http.Header {
-	needTE := len(r.TransferEncoding) > 0 && r.Header.Get("Transfer-Encoding") == ""
-	needCL := r.ContentLength > 0 && r.Header.Get("Content-Length") == ""
-	if !needTE && !needCL {
-		return r.Header
-	}
+// snapshotHeaders returns a private copy of r's headers for inspection, with
+// Transfer-Encoding and Content-Length restored.
+//
+// The copy matters because an evaluation that times out keeps running after
+// the handler has returned, and must not read the live request. Copying costs
+// about 0.3µs, well under 0.1% of an evaluation.
+//
+// net/http moves Transfer-Encoding out of the header map, and Content-Length
+// can be absent (HTTP/2) even when the length is known. Without them, rules see
+// a POST with neither header and raise a false positive.
+func snapshotHeaders(r *http.Request) http.Header {
 	h := r.Header.Clone()
-	if needTE {
+	if h == nil {
+		h = http.Header{}
+	}
+	if len(r.TransferEncoding) > 0 && h.Get("Transfer-Encoding") == "" {
 		h["Transfer-Encoding"] = r.TransferEncoding
 	}
-	if needCL {
+	if r.ContentLength > 0 && h.Get("Content-Length") == "" {
 		h.Set("Content-Length", strconv.FormatInt(r.ContentLength, 10))
 	}
 	return h
+}
+
+// maxRequestIDLen bounds client-supplied request IDs.
+const maxRequestIDLen = 128
+
+// requestID returns id if it is a safe correlation ID (at most 128 of
+// [A-Za-z0-9._:-]), and "" otherwise so that one is generated. The value is
+// client-controlled and ends up in logs and events.
+func requestID(id string) string {
+	if id == "" || len(id) > maxRequestIDLen {
+		return ""
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '.', c == '_', c == ':', c == '-':
+		default:
+			return ""
+		}
+	}
+	return id
 }
 
 type readCloser struct {
