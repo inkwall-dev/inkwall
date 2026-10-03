@@ -88,6 +88,45 @@ func TestCheckReportsMatchedRules(t *testing.T) {
 	}
 }
 
+func TestCheckShedsLoadWhenSlotsAreBusy(t *testing.T) {
+	// One slot, held by an evaluation that outlives its 5ms deadline.
+	p := New(fakeEvaluator{delay: 200 * time.Millisecond}, Config{
+		Mode: ModeBlock, Timeout: 5 * time.Millisecond, MaxConcurrent: 1,
+	})
+	if v := p.Check(context.Background(), &request.Request{}); v.Reason != ReasonTimeout {
+		t.Fatalf("first request: reason = %s, want timeout", v.Reason)
+	}
+
+	// The abandoned evaluation still holds the slot: the next request is shed
+	// immediately rather than starting more work.
+	start := time.Now()
+	v := p.Check(context.Background(), &request.Request{})
+	if v.Reason != ReasonOverload || v.Action != ActionAllow {
+		t.Fatalf("second request: got action=%s reason=%s, want allow/overload", v.Action, v.Reason)
+	}
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Fatalf("shed request took %s, want immediate", elapsed)
+	}
+
+	// Fail-closed policies reject shed requests.
+	closed := New(fakeEvaluator{delay: 200 * time.Millisecond}, Config{
+		Mode: ModeBlock, FailureMode: FailClosed, Timeout: 5 * time.Millisecond, MaxConcurrent: 1,
+	})
+	closed.Check(context.Background(), &request.Request{})
+	if v := closed.Check(context.Background(), &request.Request{}); v.Reason != ReasonOverload || v.Status != http.StatusServiceUnavailable {
+		t.Fatalf("fail-closed shed: got status=%d reason=%s, want 503/overload", v.Status, v.Reason)
+	}
+}
+
+func TestCheckReleasesSlots(t *testing.T) {
+	p := New(fakeEvaluator{}, Config{Mode: ModeBlock, MaxConcurrent: 1})
+	for range 100 {
+		if v := p.Check(context.Background(), &request.Request{}); v.Reason == ReasonOverload {
+			t.Fatal("slot not released after a completed evaluation")
+		}
+	}
+}
+
 func TestCheckCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

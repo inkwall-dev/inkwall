@@ -45,6 +45,9 @@ const (
 	ReasonError
 	// ReasonCanceled means the caller canceled the request.
 	ReasonCanceled
+	// ReasonOverload means all evaluation slots were busy, so the request
+	// was not inspected.
+	ReasonOverload
 )
 
 func (r Reason) String() string {
@@ -59,6 +62,8 @@ func (r Reason) String() string {
 		return "error"
 	case ReasonCanceled:
 		return "canceled"
+	case ReasonOverload:
+		return "overload"
 	default:
 		return "unknown"
 	}

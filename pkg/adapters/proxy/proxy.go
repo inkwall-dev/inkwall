@@ -86,7 +86,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	v := h.pipeline.Check(r.Context(), req)
-	if v.Action != pipeline.ActionAllow || v.Reason == pipeline.ReasonTimeout || v.Reason == pipeline.ReasonError {
+	// Log blocks and detections, and every request that went uninspected
+	// (timeout, error, overload). Client cancellations are not events.
+	if v.Action != pipeline.ActionAllow || (v.Reason != pipeline.ReasonNone && v.Reason != pipeline.ReasonCanceled) {
 		h.logEvent(r, req, v)
 	}
 	if v.Action == pipeline.ActionDeny {

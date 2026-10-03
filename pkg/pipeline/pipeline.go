@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"runtime"
 	"time"
 
 	"github.com/inkwall-dev/inkwall/pkg/request"
@@ -47,6 +48,11 @@ type Config struct {
 	FailureMode FailureMode
 	// Timeout bounds inspection time per request. Zero means DefaultTimeout.
 	Timeout time.Duration
+	// MaxConcurrent bounds how many evaluations run at once, including ones
+	// that already timed out and are still finishing. When all slots are
+	// busy, new requests get the failure mode immediately (ReasonOverload)
+	// instead of adding work. Zero means 2 * GOMAXPROCS.
+	MaxConcurrent int
 }
 
 // Pipeline evaluates requests. It is safe for concurrent use.
@@ -55,6 +61,7 @@ type Pipeline struct {
 	mode    Mode
 	failure FailureMode
 	timeout time.Duration
+	slots   chan struct{}
 }
 
 // New returns a pipeline that evaluates requests with eval.
@@ -63,7 +70,17 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	return &Pipeline{eval: eval, mode: cfg.Mode, failure: cfg.FailureMode, timeout: timeout}
+	maxConcurrent := cfg.MaxConcurrent
+	if maxConcurrent <= 0 {
+		maxConcurrent = 2 * runtime.GOMAXPROCS(0)
+	}
+	return &Pipeline{
+		eval:    eval,
+		mode:    cfg.Mode,
+		failure: cfg.FailureMode,
+		timeout: timeout,
+		slots:   make(chan struct{}, maxConcurrent),
+	}
 }
 
 type outcome struct {
@@ -75,14 +92,28 @@ type outcome struct {
 // timeout even if the evaluator does not.
 func (p *Pipeline) Check(ctx context.Context, r *request.Request) Verdict {
 	start := time.Now()
+
+	// Admission control. Evaluations cannot be interrupted, so a timed-out
+	// evaluation keeps using CPU until it finishes. Without a bound, a flood
+	// of expensive requests saturates every core and makes all requests time
+	// out, which with fail-open switches inspection off.
+	select {
+	case p.slots <- struct{}{}:
+	default:
+		v := p.failed(ReasonOverload)
+		v.Duration = time.Since(start)
+		return v
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	// The evaluator is not interruptible, so it runs on its own goroutine and
-	// the deadline is enforced here. A late result is discarded; the buffered
-	// channel lets that goroutine finish without leaking.
+	// The evaluator runs on its own goroutine so the deadline can be enforced
+	// here. A late result is discarded; the buffered channel lets that
+	// goroutine finish without leaking, and it releases its slot only then.
 	done := make(chan outcome, 1)
 	go func() {
+		defer func() { <-p.slots }()
 		res, err := p.eval.Evaluate(ctx, r)
 		done <- outcome{res: res, err: err}
 	}()

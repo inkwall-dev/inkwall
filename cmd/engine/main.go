@@ -66,6 +66,7 @@ type proxyConfig struct {
 	mode           pipeline.Mode
 	failureMode    pipeline.FailureMode
 	timeout        time.Duration
+	maxConcurrent  int
 	maxBodyBytes   int64
 	paranoiaLevel  int
 	threshold      int
@@ -81,6 +82,7 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 	mode := fs.String("mode", "detect", "enforcement mode: detect or block")
 	failure := fs.String("failure-mode", "open", "on inspection error or timeout: open (allow) or closed (deny with 503)")
 	timeout := fs.Duration("timeout", pipeline.DefaultTimeout, "per-request inspection deadline")
+	maxConcurrent := fs.Int("max-concurrent", 0, "maximum concurrent evaluations; extra requests get the failure mode (0 = 2 * CPUs)")
 	maxBody := fs.Int64("max-body-bytes", 64<<10, "request body bytes to inspect (0 disables body inspection)")
 	paranoia := fs.Int("paranoia-level", coraza.DefaultParanoiaLevel, "OWASP CRS paranoia level (1-4)")
 	threshold := fs.Int("anomaly-threshold", coraza.DefaultInboundAnomalyThreshold, "OWASP CRS inbound anomaly score threshold")
@@ -93,6 +95,7 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 	cfg := proxyConfig{
 		listen:        *listen,
 		timeout:       *timeout,
+		maxConcurrent: *maxConcurrent,
 		maxBodyBytes:  *maxBody,
 		paranoiaLevel: *paranoia,
 		threshold:     *threshold,
@@ -151,7 +154,7 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 		return err
 	}
 	handler, err := proxy.New(
-		pipeline.New(eval, pipeline.Config{Mode: cfg.mode, FailureMode: cfg.failureMode, Timeout: cfg.timeout}),
+		pipeline.New(eval, pipeline.Config{Mode: cfg.mode, FailureMode: cfg.failureMode, Timeout: cfg.timeout, MaxConcurrent: cfg.maxConcurrent}),
 		proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: cfg.maxBodyBytes, ClientIP: resolver, Logger: logger},
 	)
 	if err != nil {
