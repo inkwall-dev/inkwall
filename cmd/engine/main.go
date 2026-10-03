@@ -69,6 +69,8 @@ type proxyConfig struct {
 	timeout        time.Duration
 	maxConcurrent  int
 	maxBodyBytes   int64
+	oversize       pipeline.OversizeAction
+	maxArgs        int
 	paranoiaLevel  int
 	threshold      int
 	rulesFile      string
@@ -86,6 +88,8 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 	timeout := fs.Duration("timeout", pipeline.DefaultTimeout, "per-request inspection deadline")
 	maxConcurrent := fs.Int("max-concurrent", 0, "maximum concurrent evaluations; extra requests get the failure mode (0 = 2 * CPUs)")
 	maxBody := fs.Int64("max-body-bytes", 64<<10, "request body bytes to inspect (0 disables body inspection)")
+	oversize := fs.String("oversize-body", "inspect-prefix", "bodies over --max-body-bytes: inspect-prefix (rest uninspected) or deny (413 in block mode)")
+	maxArgs := fs.Int("max-args", 0, "OWASP CRS limit on request arguments; more is a critical match (0 = no limit)")
 	paranoia := fs.Int("paranoia-level", coraza.DefaultParanoiaLevel, "OWASP CRS paranoia level (1-4)")
 	threshold := fs.Int("anomaly-threshold", coraza.DefaultInboundAnomalyThreshold, "OWASP CRS inbound anomaly score threshold")
 	rulesFile := fs.String("rules", "", "file with extra SecLang rules or exclusions, loaded after CRS")
@@ -100,6 +104,7 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 		timeout:       *timeout,
 		maxConcurrent: *maxConcurrent,
 		maxBodyBytes:  *maxBody,
+		maxArgs:       *maxArgs,
 		paranoiaLevel: *paranoia,
 		threshold:     *threshold,
 		rulesFile:     *rulesFile,
@@ -129,6 +134,14 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 	default:
 		return cfg, fmt.Errorf("--failure-mode must be open or closed, got %q", *failure)
 	}
+	switch *oversize {
+	case "inspect-prefix":
+		cfg.oversize = pipeline.OversizeInspectPrefix
+	case "deny":
+		cfg.oversize = pipeline.OversizeDeny
+	default:
+		return cfg, fmt.Errorf("--oversize-body must be inspect-prefix or deny, got %q", *oversize)
+	}
 	if *trusted != "" {
 		cfg.trustedProxies = strings.Split(*trusted, ",")
 	}
@@ -147,6 +160,7 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 	eval, err := coraza.New(coraza.Config{
 		ParanoiaLevel:           cfg.paranoiaLevel,
 		InboundAnomalyThreshold: cfg.threshold,
+		MaxArgs:                 cfg.maxArgs,
 		Directives:              directives,
 	})
 	if err != nil {
@@ -157,7 +171,7 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 		return err
 	}
 	handler, err := proxy.New(
-		pipeline.New(eval, pipeline.Config{Mode: cfg.mode, FailureMode: cfg.failureMode, Timeout: cfg.timeout, MaxConcurrent: cfg.maxConcurrent}),
+		pipeline.New(eval, pipeline.Config{Mode: cfg.mode, FailureMode: cfg.failureMode, Timeout: cfg.timeout, MaxConcurrent: cfg.maxConcurrent, Oversize: cfg.oversize}),
 		proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: cfg.maxBodyBytes, ClientIP: resolver, Logger: logger},
 	)
 	if err != nil {

@@ -13,13 +13,16 @@ import (
 func TestParseProxyFlags(t *testing.T) {
 	cfg, err := parseProxyFlags([]string{
 		"--upstream", "http://app:8080", "--mode", "block", "--failure-mode", "closed",
-		"--trusted-proxies", "10.0.0.0/8,192.0.2.1",
+		"--trusted-proxies", "10.0.0.0/8,192.0.2.1", "--oversize-body", "deny", "--max-args", "255",
 	}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.upstream.Host != "app:8080" || cfg.mode != pipeline.ModeBlock || cfg.failureMode != pipeline.FailClosed {
 		t.Fatalf("unexpected config: %+v", cfg)
+	}
+	if cfg.oversize != pipeline.OversizeDeny || cfg.maxArgs != 255 {
+		t.Fatalf("oversize/max-args not parsed: %+v", cfg)
 	}
 	if len(cfg.trustedProxies) != 2 {
 		t.Fatalf("trusted proxies = %v", cfg.trustedProxies)
@@ -41,6 +44,7 @@ func TestParseProxyFlagsErrors(t *testing.T) {
 		{},
 		{"--upstream", "http://app", "--mode", "enforce"},
 		{"--upstream", "http://app", "--failure-mode", "maybe"},
+		{"--upstream", "http://app", "--oversize-body", "truncate"},
 	} {
 		if _, err := parseProxyFlags(args, io.Discard); err == nil {
 			t.Errorf("parseProxyFlags(%v) succeeded, want error", args)

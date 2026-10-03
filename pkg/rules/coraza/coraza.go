@@ -34,6 +34,12 @@ type Config struct {
 	// InboundAnomalyThreshold is the CRS inbound anomaly score at which a
 	// request is blocked. Defaults to 5 (one critical match).
 	InboundAnomalyThreshold int
+	// MaxArgs sets the CRS limit on the number of request arguments
+	// (tx.max_num_args). Requests with more arguments match rule 920380, a
+	// critical match that blocks at the default threshold. Zero leaves the
+	// limit unset. Combined with a body size limit, it detects padding meant
+	// to push a payload past what is inspected.
+	MaxArgs int
 	// Directives are extra SecLang directives loaded after CRS, for custom
 	// rules and rule exclusions.
 	Directives string
@@ -79,6 +85,9 @@ func buildDirectives(cfg Config) (string, error) {
 	if threshold < 1 {
 		return "", fmt.Errorf("inbound anomaly threshold %d must be positive", threshold)
 	}
+	if cfg.MaxArgs < 0 {
+		return "", fmt.Errorf("max args %d must not be negative", cfg.MaxArgs)
+	}
 
 	var b strings.Builder
 	b.WriteString("Include @coraza.conf-recommended\n")
@@ -92,6 +101,10 @@ func buildDirectives(cfg Config) (string, error) {
 			"SecAction \"id:900000,phase:1,pass,t:none,nolog,setvar:tx.blocking_paranoia_level=%d\"\n", pl)
 		fmt.Fprintf(&b,
 			"SecAction \"id:900110,phase:1,pass,t:none,nolog,setvar:tx.inbound_anomaly_score_threshold=%d\"\n", threshold)
+		if cfg.MaxArgs > 0 {
+			fmt.Fprintf(&b,
+				"SecAction \"id:900300,phase:1,pass,t:none,nolog,setvar:tx.max_num_args=%d\"\n", cfg.MaxArgs)
+		}
 		b.WriteString("Include @owasp_crs/*.conf\n")
 	}
 	if cfg.Directives != "" {

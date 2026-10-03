@@ -42,6 +42,20 @@ const (
 	FailClosed
 )
 
+// OversizeAction decides what happens to a request whose body is longer than
+// the inspection limit.
+type OversizeAction uint8
+
+const (
+	// OversizeInspectPrefix inspects the part of the body within the limit
+	// and forwards the rest uninspected. It is the default. JSON, XML and
+	// multipart prefixes cannot be parsed, so their bodies go uninspected.
+	OversizeInspectPrefix OversizeAction = iota
+	// OversizeDeny rejects oversized bodies with 413 Content Too Large in
+	// block mode (detect mode logs them), so no body escapes inspection.
+	OversizeDeny
+)
+
 // Config configures a Pipeline.
 type Config struct {
 	Mode        Mode
@@ -53,15 +67,19 @@ type Config struct {
 	// busy, new requests get the failure mode immediately (ReasonOverload)
 	// instead of adding work. Zero means 2 * GOMAXPROCS.
 	MaxConcurrent int
+	// Oversize decides what happens to bodies longer than the inspection
+	// limit (request.Request.BodyTruncated).
+	Oversize OversizeAction
 }
 
 // Pipeline evaluates requests. It is safe for concurrent use.
 type Pipeline struct {
-	eval    rules.Evaluator
-	mode    Mode
-	failure FailureMode
-	timeout time.Duration
-	slots   chan struct{}
+	eval     rules.Evaluator
+	mode     Mode
+	failure  FailureMode
+	timeout  time.Duration
+	slots    chan struct{}
+	oversize OversizeAction
 }
 
 // New returns a pipeline that evaluates requests with eval.
@@ -75,11 +93,12 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 		maxConcurrent = 2 * runtime.GOMAXPROCS(0)
 	}
 	return &Pipeline{
-		eval:    eval,
-		mode:    cfg.Mode,
-		failure: cfg.FailureMode,
-		timeout: timeout,
-		slots:   make(chan struct{}, maxConcurrent),
+		eval:     eval,
+		mode:     cfg.Mode,
+		failure:  cfg.FailureMode,
+		timeout:  timeout,
+		slots:    make(chan struct{}, maxConcurrent),
+		oversize: cfg.Oversize,
 	}
 }
 
@@ -92,6 +111,12 @@ type outcome struct {
 // timeout even if the evaluator does not.
 func (p *Pipeline) Check(ctx context.Context, r *request.Request) Verdict {
 	start := time.Now()
+
+	if r.BodyTruncated && p.oversize == OversizeDeny {
+		v := p.enforce(Verdict{Reason: ReasonOversize}, http.StatusRequestEntityTooLarge)
+		v.Duration = time.Since(start)
+		return v
+	}
 
 	// Admission control. Evaluations cannot be interrupted, so a timed-out
 	// evaluation keeps using CPU until it finishes. Without a bound, a flood
@@ -143,15 +168,22 @@ func (p *Pipeline) decide(res rules.Result) Verdict {
 		return v
 	}
 	v.Reason = ReasonRule
+	status := res.Status
+	if status < 400 || status > 599 {
+		status = http.StatusForbidden
+	}
+	return p.enforce(v, status)
+}
+
+// enforce turns a would-block verdict into a deny with status in block mode,
+// or a log in detect mode.
+func (p *Pipeline) enforce(v Verdict, status int) Verdict {
 	if p.mode == ModeDetect {
 		v.Action = ActionLog
 		return v
 	}
 	v.Action = ActionDeny
-	v.Status = res.Status
-	if v.Status < 400 || v.Status > 599 {
-		v.Status = http.StatusForbidden
-	}
+	v.Status = status
 	return v
 }
 

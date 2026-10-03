@@ -48,6 +48,9 @@ const (
 	// ReasonOverload means all evaluation slots were busy, so the request
 	// was not inspected.
 	ReasonOverload
+	// ReasonOversize means the body was longer than the inspection limit
+	// and the policy rejects oversized bodies.
+	ReasonOversize
 )
 
 func (r Reason) String() string {
@@ -64,6 +67,8 @@ func (r Reason) String() string {
 		return "canceled"
 	case ReasonOverload:
 		return "overload"
+	case ReasonOversize:
+		return "oversize"
 	default:
 		return "unknown"
 	}

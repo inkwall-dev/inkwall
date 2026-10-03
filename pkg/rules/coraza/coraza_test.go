@@ -150,6 +150,32 @@ func TestExclusionDirectiveRemovesRule(t *testing.T) {
 	}
 }
 
+func TestMaxArgs(t *testing.T) {
+	e, err := New(Config{MaxArgs: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := make([]string, 30)
+	for i := range fields {
+		fields[i] = fmt.Sprintf("f%d=v", i)
+	}
+	res, err := e.Evaluate(context.Background(), newRequest("POST", "/api", formHeaders, strings.Join(fields, "&")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Interrupted || !slices.Contains(res.MatchedRuleIDs, 920380) {
+		t.Fatalf("30 args with MaxArgs 10: got %+v, want block by rule 920380", res)
+	}
+
+	res, err = e.Evaluate(context.Background(), newRequest("POST", "/api", formHeaders, strings.Join(fields[:5], "&")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Interrupted {
+		t.Fatalf("5 args with MaxArgs 10: got %+v, want allowed", res)
+	}
+}
+
 func TestNeedsCompleteBody(t *testing.T) {
 	for ct, want := range map[string]bool{
 		"application/json":                  true,
@@ -174,6 +200,7 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 	for _, cfg := range []Config{
 		{ParanoiaLevel: 5},
 		{InboundAnomalyThreshold: -1},
+		{MaxArgs: -1},
 		{DisableCRS: true, Directives: `SecRule ARGS "@nosuchoperator x" "id:1,deny"`},
 	} {
 		if _, err := New(cfg); err == nil {

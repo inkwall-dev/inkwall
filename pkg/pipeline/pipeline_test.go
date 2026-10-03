@@ -135,3 +135,33 @@ func TestCheckCanceledContext(t *testing.T) {
 		t.Fatalf("got action=%s reason=%s, want allow/canceled", v.Action, v.Reason)
 	}
 }
+
+func TestOversizedBodyPolicy(t *testing.T) {
+	truncated := &request.Request{BodyTruncated: true}
+	tests := []struct {
+		name       string
+		cfg        Config
+		req        *request.Request
+		wantAction Action
+		wantStatus int
+		wantReason Reason
+	}{
+		{name: "inspect prefix by default", cfg: Config{Mode: ModeBlock}, req: truncated,
+			wantAction: ActionAllow, wantReason: ReasonNone},
+		{name: "deny in block mode", cfg: Config{Mode: ModeBlock, Oversize: OversizeDeny}, req: truncated,
+			wantAction: ActionDeny, wantStatus: http.StatusRequestEntityTooLarge, wantReason: ReasonOversize},
+		{name: "log in detect mode", cfg: Config{Mode: ModeDetect, Oversize: OversizeDeny}, req: truncated,
+			wantAction: ActionLog, wantReason: ReasonOversize},
+		{name: "complete body unaffected", cfg: Config{Mode: ModeBlock, Oversize: OversizeDeny}, req: &request.Request{},
+			wantAction: ActionAllow, wantReason: ReasonNone},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := New(fakeEvaluator{}, tt.cfg).Check(context.Background(), tt.req)
+			if v.Action != tt.wantAction || v.Status != tt.wantStatus || v.Reason != tt.wantReason {
+				t.Fatalf("got action=%s status=%d reason=%s, want action=%s status=%d reason=%s",
+					v.Action, v.Status, v.Reason, tt.wantAction, tt.wantStatus, tt.wantReason)
+			}
+		})
+	}
+}
