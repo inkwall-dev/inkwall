@@ -66,6 +66,8 @@ func TestEvaluateCRS(t *testing.T) {
 		{name: "xss in form body", req: newRequest("POST", "/comments", formHeaders, "comment=%3Cscript%3Ealert(1)%3C%2Fscript%3E"), blocked: true},
 		{name: "sql injection in json body", req: newRequest("POST", "/api/search",
 			http.Header{"Content-Type": {"application/json"}}, `{"q":"1' OR '1'='1' -- "}`), blocked: true},
+		// Caught by rule 942220; Coraza's regex prefilter used to miss it.
+		{name: "magic number dos", req: newRequest("GET", "/get?i=2.2250738585072011e-308", nil, ""), blocked: true},
 		{name: "scanner user agent", req: newRequest("GET", "/", http.Header{"User-Agent": {"sqlmap/1.7.2#stable (https://sqlmap.org)"}}, ""), blocked: true},
 	}
 	for _, tt := range tests {

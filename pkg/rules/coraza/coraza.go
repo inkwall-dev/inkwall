@@ -105,7 +105,9 @@ func buildDirectives(cfg Config) (string, error) {
 	// Enforce, and leave audit logging to Inkwall's own event pipeline.
 	b.WriteString("SecRuleEngine On\n")
 	b.WriteString("SecAuditEngine Off\n")
-	b.WriteString("SecRxPreFilter On\n")
+	// Coraza's regex prefilter (SecRxPreFilter) is deliberately left off: with
+	// Coraza 3.8.1 it misses CRS regression tests 942220-2 and 932311-7. Only
+	// re-enable it once the CRS suite (test/crs) passes with it on.
 	if cfg.DirectivesBeforeCRS != "" {
 		b.WriteString(cfg.DirectivesBeforeCRS)
 		b.WriteString("\n")
