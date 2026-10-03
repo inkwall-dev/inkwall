@@ -3,9 +3,10 @@
 **A Kubernetes-native web application firewall. Install one operator, and every ingress and gateway
 in your cluster is protected by the same policy.**
 
-> **Status: design phase.** No release exists yet. The architecture is written up in
-> [`docs/design`](docs/design/README.md) and the engine is the first thing being built. Everything
-> below describes the target, not shipped features.
+> **Status: early development.** No release exists yet. The inspection engine works as a standalone
+> reverse proxy (see [Try it](#try-it)); proxy integrations and the Kubernetes operator are not built
+> yet. The architecture is written up in [`docs/design`](docs/design/README.md). Sections other than
+> "Try it" describe the target, not shipped features.
 
 ---
 
@@ -87,6 +88,42 @@ shop   Detect   True    3/3       2m
 ```
 
 (Illustrative. The API is `v1alpha1` and will change.)
+
+## Try it
+
+The engine runs today as a standalone reverse proxy in front of any HTTP service. It inspects requests
+with the OWASP Core Rule Set, which is embedded in the binary.
+
+```console
+$ make build
+$ ./bin/inkwall-engine proxy --upstream http://localhost:3000 --mode block
+$ curl -s -o /dev/null -w '%{http_code}\n' 'localhost:8080/?id=1%27%20OR%20%271%27%3D%271'
+403
+```
+
+Each blocked or detected request produces one JSON log line with the matching rule IDs. Metrics are on
+`:9090/metrics`, health on `:9090/healthz` and `:9090/readyz`.
+
+Defaults are deliberately safe: **detect mode** (log, never block) and **fail-open** (if inspection
+errors, times out or is overloaded, the request is allowed and logged). Useful flags:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--mode` | `detect` | `block` to enforce |
+| `--paranoia-level` | `1` | CRS paranoia level, 1-4 |
+| `--max-body-bytes` | `65536` | Body bytes to inspect |
+| `--oversize-body` | `inspect-prefix` | `deny` rejects bodies over the limit (413) |
+| `--max-args` | `0` (off) | CRS limit on request arguments |
+| `--rules` | | Extra SecLang rules or exclusions |
+| `--trusted-proxies` | | CIDRs whose `X-Forwarded-For` is trusted |
+| `--failure-mode` | `open` | `closed` returns 503 when a request cannot be inspected |
+
+Run `./bin/inkwall-engine proxy -h` for all flags. Inspection currently costs about 0.5 ms per
+request plus roughly 0.15 ms per request argument; see the
+[performance baseline](docs/design/0001-performance-first-architecture.md#31-measured-baseline-2026-10-03).
+
+Development checks: `make check` (lint, tests, vulnerability scan) and `make crs-test` (the OWASP CRS
+regression suite, about 4,500 tests, through the proxy).
 
 ## Planned integrations
 
