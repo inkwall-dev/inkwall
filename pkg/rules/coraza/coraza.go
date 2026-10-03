@@ -40,11 +40,18 @@ type Config struct {
 	// limit unset. Combined with a body size limit, it detects padding meant
 	// to push a payload past what is inspected.
 	MaxArgs int
-	// Directives are extra SecLang directives loaded after CRS, for custom
-	// rules and rule exclusions.
+	// DirectivesBeforeCRS are SecLang directives loaded before CRS. CRS
+	// runtime rule exclusions (rules using ctl:ruleRemoveById and similar)
+	// must be placed here.
+	DirectivesBeforeCRS string
+	// Directives are SecLang directives loaded after CRS, for custom rules
+	// and configure-time exclusions (SecRuleRemoveById, SecRuleUpdateTargetById).
 	Directives string
-	// DisableCRS loads only Directives, without the Core Rule Set.
+	// DisableCRS loads only the directives, without the Core Rule Set.
 	DisableCRS bool
+	// OnMatch, if set, is called for every rule that matches and logs. It
+	// runs on the request path and must be fast and safe for concurrent use.
+	OnMatch func(types.MatchedRule)
 }
 
 // Evaluator evaluates requests with a compiled Coraza WAF. It is safe for
@@ -61,9 +68,13 @@ func New(cfg Config) (*Evaluator, error) {
 	if err != nil {
 		return nil, err
 	}
-	waf, err := coraza.NewWAF(coraza.NewWAFConfig().
+	wafCfg := coraza.NewWAFConfig().
 		WithRootFS(coreruleset.FS).
-		WithDirectives(directives))
+		WithDirectives(directives)
+	if cfg.OnMatch != nil {
+		wafCfg = wafCfg.WithErrorCallback(cfg.OnMatch)
+	}
+	waf, err := coraza.NewWAF(wafCfg)
 	if err != nil {
 		return nil, fmt.Errorf("compile rules: %w", err)
 	}
@@ -95,6 +106,10 @@ func buildDirectives(cfg Config) (string, error) {
 	b.WriteString("SecRuleEngine On\n")
 	b.WriteString("SecAuditEngine Off\n")
 	b.WriteString("SecRxPreFilter On\n")
+	if cfg.DirectivesBeforeCRS != "" {
+		b.WriteString(cfg.DirectivesBeforeCRS)
+		b.WriteString("\n")
+	}
 	if !cfg.DisableCRS {
 		b.WriteString("Include @crs-setup.conf.example\n")
 		fmt.Fprintf(&b,

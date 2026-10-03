@@ -12,7 +12,10 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/corazawaf/coraza/v3/types"
 
 	"github.com/inkwall-dev/inkwall/pkg/request"
 )
@@ -275,4 +278,45 @@ func largeJSON(size int) string {
 	}
 	buf[len(buf)-1] = ']'
 	return string(append(buf, '}'))
+}
+
+func TestDirectivesBeforeCRSAndOnMatch(t *testing.T) {
+	var mu sync.Mutex
+	var logs []string
+	e, err := New(Config{
+		// A runtime exclusion must run before CRS: drop SQLi detection for
+		// requests to /search.
+		DirectivesBeforeCRS: `SecRule REQUEST_FILENAME "@streq /search" "id:1000,phase:1,pass,nolog,ctl:ruleRemoveById=942100"`,
+		OnMatch: func(mr types.MatchedRule) {
+			mu.Lock()
+			defer mu.Unlock()
+			logs = append(logs, mr.ErrorLog())
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sqli := "?q=1%27%20OR%20%271%27%3D%271"
+	res, err := e.Evaluate(context.Background(), newRequest("GET", "/search"+sqli, nil, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(res.MatchedRuleIDs, 942100) {
+		t.Fatalf("runtime exclusion did not apply: %v", res.MatchedRuleIDs)
+	}
+
+	res, err = e.Evaluate(context.Background(), newRequest("GET", "/products"+sqli, nil, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(res.MatchedRuleIDs, 942100) {
+		t.Fatalf("exclusion leaked to other paths: %v", res.MatchedRuleIDs)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.ContainsFunc(logs, func(l string) bool { return strings.Contains(l, `[id "942100"]`) }) {
+		t.Fatalf("OnMatch did not report rule 942100; got %d log lines", len(logs))
+	}
 }
