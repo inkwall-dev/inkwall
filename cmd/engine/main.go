@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
+	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
 
 func main() {
@@ -62,6 +64,7 @@ func run(args []string, stderr io.Writer) int {
 
 type proxyConfig struct {
 	listen         string
+	adminListen    string
 	readTimeout    time.Duration
 	upstream       *url.URL
 	mode           pipeline.Mode
@@ -81,6 +84,7 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 	fs := flag.NewFlagSet("proxy", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	listen := fs.String("listen", ":8080", "address to listen on")
+	adminListen := fs.String("admin-listen", ":9090", "address for /metrics, /healthz and /readyz (empty disables)")
 	readTimeout := fs.Duration("read-timeout", 60*time.Second, "maximum time to read a whole request, including the body (0 = no limit)")
 	upstream := fs.String("upstream", "", "upstream URL that allowed requests are forwarded to (required)")
 	mode := fs.String("mode", "detect", "enforcement mode: detect or block")
@@ -100,6 +104,7 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 
 	cfg := proxyConfig{
 		listen:        *listen,
+		adminListen:   *adminListen,
 		readTimeout:   *readTimeout,
 		timeout:       *timeout,
 		maxConcurrent: *maxConcurrent,
@@ -170,8 +175,17 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	handler, err := proxy.New(
-		pipeline.New(eval, pipeline.Config{Mode: cfg.mode, FailureMode: cfg.failureMode, Timeout: cfg.timeout, MaxConcurrent: cfg.maxConcurrent, Oversize: cfg.oversize}),
+	metrics := telemetry.NewMetrics("proxy")
+	p := pipeline.New(eval, pipeline.Config{
+		Mode:          cfg.mode,
+		FailureMode:   cfg.failureMode,
+		Timeout:       cfg.timeout,
+		MaxConcurrent: cfg.maxConcurrent,
+		Oversize:      cfg.oversize,
+		Observer:      metrics,
+	})
+	metrics.WatchPipeline(p)
+	handler, err := proxy.New(p,
 		proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: cfg.maxBodyBytes, ClientIP: resolver, Logger: logger},
 	)
 	if err != nil {
@@ -190,11 +204,26 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	errc := make(chan error, 1)
+	errc := make(chan error, 2)
 	go func() { errc <- srv.ListenAndServe() }()
+
+	// Rules are compiled before anything listens, so the engine is ready as
+	// soon as it serves; readiness turns off again during shutdown.
+	var ready atomic.Bool
+	ready.Store(true)
+	var admin *http.Server
+	if cfg.adminListen != "" {
+		admin = &http.Server{
+			Addr:              cfg.adminListen,
+			Handler:           metrics.AdminHandler(ready.Load),
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		go func() { errc <- admin.ListenAndServe() }()
+	}
 
 	logger.Info("inkwall-engine proxy started",
 		slog.String("listen", cfg.listen),
+		slog.String("admin_listen", cfg.adminListen),
 		slog.String("upstream", cfg.upstream.String()),
 		slog.String("mode", modeName(cfg.mode)),
 		slog.Int("paranoia_level", cfg.paranoiaLevel))
@@ -204,10 +233,15 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 		return err
 	case <-ctx.Done():
 	}
+	ready.Store(false)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	logger.Info("shutting down")
-	return srv.Shutdown(shutdownCtx)
+	err = srv.Shutdown(shutdownCtx)
+	if admin != nil {
+		err = errors.Join(err, admin.Shutdown(shutdownCtx))
+	}
+	return err
 }
 
 func modeName(m pipeline.Mode) string {

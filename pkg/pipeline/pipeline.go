@@ -70,6 +70,14 @@ type Config struct {
 	// Oversize decides what happens to bodies longer than the inspection
 	// limit (request.Request.BodyTruncated).
 	Oversize OversizeAction
+	// Observer, if set, is told about every verdict (metrics).
+	Observer Observer
+}
+
+// Observer receives every verdict. Implementations must be fast and safe for
+// concurrent use: they run on the request path.
+type Observer interface {
+	ObserveVerdict(v Verdict)
 }
 
 // Pipeline evaluates requests. It is safe for concurrent use.
@@ -80,6 +88,7 @@ type Pipeline struct {
 	timeout  time.Duration
 	slots    chan struct{}
 	oversize OversizeAction
+	observer Observer
 }
 
 // New returns a pipeline that evaluates requests with eval.
@@ -99,8 +108,16 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 		timeout:  timeout,
 		slots:    make(chan struct{}, maxConcurrent),
 		oversize: cfg.Oversize,
+		observer: cfg.Observer,
 	}
 }
+
+// InFlight returns the number of evaluations running now, including ones
+// that timed out and are still finishing.
+func (p *Pipeline) InFlight() int { return len(p.slots) }
+
+// Capacity returns the maximum number of concurrent evaluations.
+func (p *Pipeline) Capacity() int { return cap(p.slots) }
 
 type outcome struct {
 	res rules.Result
@@ -111,11 +128,18 @@ type outcome struct {
 // timeout even if the evaluator does not.
 func (p *Pipeline) Check(ctx context.Context, r *request.Request) Verdict {
 	start := time.Now()
+	v := p.check(ctx, r)
+	v.Duration = time.Since(start)
+	if p.observer != nil {
+		p.observer.ObserveVerdict(v)
+	}
+	return v
+}
+
+func (p *Pipeline) check(ctx context.Context, r *request.Request) Verdict {
 
 	if r.BodyTruncated && p.oversize == OversizeDeny {
-		v := p.enforce(Verdict{Reason: ReasonOversize}, http.StatusRequestEntityTooLarge)
-		v.Duration = time.Since(start)
-		return v
+		return p.enforce(Verdict{Reason: ReasonOversize}, http.StatusRequestEntityTooLarge)
 	}
 
 	// Admission control. Evaluations cannot be interrupted, so a timed-out
@@ -125,9 +149,7 @@ func (p *Pipeline) Check(ctx context.Context, r *request.Request) Verdict {
 	select {
 	case p.slots <- struct{}{}:
 	default:
-		v := p.failed(ReasonOverload)
-		v.Duration = time.Since(start)
-		return v
+		return p.failed(ReasonOverload)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
@@ -143,23 +165,18 @@ func (p *Pipeline) Check(ctx context.Context, r *request.Request) Verdict {
 		done <- outcome{res: res, err: err}
 	}()
 
-	var v Verdict
 	select {
 	case o := <-done:
 		if o.err != nil {
-			v = p.failed(ReasonError)
-		} else {
-			v = p.decide(o.res)
+			return p.failed(ReasonError)
 		}
+		return p.decide(o.res)
 	case <-ctx.Done():
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			v = p.failed(ReasonTimeout)
-		} else {
-			v = p.failed(ReasonCanceled)
+			return p.failed(ReasonTimeout)
 		}
+		return p.failed(ReasonCanceled)
 	}
-	v.Duration = time.Since(start)
-	return v
 }
 
 func (p *Pipeline) decide(res rules.Result) Verdict {
