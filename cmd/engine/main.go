@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -193,7 +194,6 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 	}
 
 	srv := &http.Server{
-		Addr:              cfg.listen,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		// Bounds slow uploads that would otherwise hold a connection and a
@@ -202,27 +202,39 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 		IdleTimeout: 120 * time.Second,
 	}
 
+	// Bind before announcing, so "started" means the ports are really open.
+	ln, err := net.Listen("tcp", cfg.listen)
+	if err != nil {
+		return err
+	}
+	var adminLn net.Listener
+	if cfg.adminListen != "" {
+		if adminLn, err = net.Listen("tcp", cfg.adminListen); err != nil {
+			_ = ln.Close()
+			return err
+		}
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	errc := make(chan error, 2)
-	go func() { errc <- srv.ListenAndServe() }()
+	go func() { errc <- srv.Serve(ln) }()
 
 	// Rules are compiled before anything listens, so the engine is ready as
 	// soon as it serves; readiness turns off again during shutdown.
 	var ready atomic.Bool
 	ready.Store(true)
 	var admin *http.Server
-	if cfg.adminListen != "" {
+	if adminLn != nil {
 		admin = &http.Server{
-			Addr:              cfg.adminListen,
 			Handler:           metrics.AdminHandler(ready.Load),
 			ReadHeaderTimeout: 5 * time.Second,
 		}
-		go func() { errc <- admin.ListenAndServe() }()
+		go func() { errc <- admin.Serve(adminLn) }()
 	}
 
 	logger.Info("inkwall-engine proxy started",
-		slog.String("listen", cfg.listen),
+		slog.String("listen", ln.Addr().String()),
 		slog.String("admin_listen", cfg.adminListen),
 		slog.String("upstream", cfg.upstream.String()),
 		slog.String("mode", modeName(cfg.mode)),
