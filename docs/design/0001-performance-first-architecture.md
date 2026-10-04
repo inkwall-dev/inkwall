@@ -80,7 +80,8 @@ Measured and not adopted:
 Next levers, in order of expected gain:
 
 1. Per-route policy so static and low-risk routes skip inspection, and bodies are inspected only for
-   routes and content types that need them (§4, T0).
+   routes that need them (§4, T0). **Done for standalone mode** (`--skip-paths`,
+   `--skip-body-paths`, `pkg/router`); the operator will set these per route.
 2. Reducing Coraza's per-rule, per-argument overhead (transformation cache hashing, allocations),
    preferably as upstream contributions, together with a fix for the prefilter's false negatives.
 3. A single-pass prefilter across all rules (§5.2), which needs changes inside Coraza. Any
