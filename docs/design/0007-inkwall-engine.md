@@ -298,19 +298,19 @@ sets that use SecLang features the engine does not support.
 
 ## 9. Milestones
 
-| # | Milestone | Exit criteria | Rough effort |
-|---|---|---|---|
-| N0 | Parser + IR for pinned CRS, no execution | CI check: 100% of pinned CRS parses and compiles; paranoia folding verified | 2–3 weeks |
-| N1 | Transformations and operators | Byte-for-byte conformance fuzzing against Coraza for every one | 3–4 weeks |
-| N2 | Runtime, phases 1–2, no prefilter, URL-encoded bodies | CRS suite passes at PL1 on GET/form tests; differential tests clean | 4–6 weeks |
-| N3 | Prefilter, views, lazy transforms | 0 soundness violations; PL1 targets of §6 met for GET and form | 3–4 weeks |
-| N4 | JSON, XML, multipart body processors | Full CRS suite passes (all request tests); JSON target met | 3–4 weeks |
-| N5 | Integration: `--engine`, `auto` fallback, shadow mode | A clean shadow period on real traffic; default switches to `auto` | 2 weeks |
-| N6 | PL2–4, custom-rule subset docs, response phases (T4) | CRS suite at PL4; response tests enabled in `test/crs` | later |
+| # | Milestone | Exit criteria |
+|---|---|---|
+| N0 | Parser + IR for pinned CRS, no execution | CI check: 100% of pinned CRS parses and compiles; paranoia folding verified |
+| N1 | Transformations and operators | Byte-for-byte conformance fuzzing against Coraza for every one |
+| N2 | Runtime, phases 1–2, no prefilter, URL-encoded bodies | CRS suite passes at PL1 on GET/form tests; differential tests clean |
+| N3 | Prefilter, views, lazy transforms | 0 soundness violations; PL1 targets of §6 met for GET and form |
+| N4 | JSON, XML, multipart body processors | Full CRS suite passes (all request tests); JSON target met |
+| N5 | Integration: `--engine`, `auto` fallback, shadow mode | A clean shadow period on real traffic; default switches to `auto` |
+| N6 | PL2–4, custom-rule subset docs, response phases (T4) | CRS suite at PL4; response tests enabled in `test/crs` |
 
-Total to N5: roughly 4–6 months for one engineer, which is optimistic: the long tail of parity
-differences (multipart, transformations, JSON naming) usually dominates. Plan for 6–8 months and
-treat the N3 gate as the go/no-go point. Each milestone is useful on its own because of the
+The long tail of parity differences (multipart, transformations, JSON naming) is usually the
+largest part of the work, so the N3 gate is the go/no-go point: it measures the real gain before
+body processors and integration are built. Each milestone is useful on its own because of the
 fallback, and N0–N1 also strengthen the Coraza path (conformance tests, coverage check).
 
 ## 10. Risks
@@ -325,7 +325,7 @@ fallback, and N0–N1 also strengthen the Coraza path (conformance tests, covera
 | CRS release uses a new feature | Lost rules after upgrade | CI coverage check fails the upgrade; `auto` falls back to Coraza |
 | Multipart edge cases (a common evasion area) | Bypass | Port Coraza's processor first; fuzz against it; CRS 922xxx tests |
 | Maintenance cost | Slower CRS upgrades | Keep the subset to what CRS uses; port rather than reinvent; Coraza remains the fallback |
-| Targets not met | Months spent for less gain | N3 exit criteria measure the gain early, before body processors and integration |
+| Targets not met | Large investment for less gain | N3 exit criteria measure the gain early, before body processors and integration |
 
 ## 11. Open questions
 

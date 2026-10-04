@@ -236,14 +236,14 @@ Detection is the hardest and most security-sensitive part of a WAF. A usable eng
 - **anomaly scoring**, persistent collections, and audit logging,
 - a large, maintained **rule set** with a regression test suite.
 
-Writing that from scratch is years of work, and every subtle parsing difference is a potential
+Writing that from scratch is a large effort, and every subtle parsing difference is a potential
 bypass. That's the bar any choice has to clear.
 
 ### 6.2 Why Coraza fits
 
 | Need | Coraza |
 |---|---|
-| Mature, standard rules | Implements the ModSecurity SecLang language and runs **OWASP CRS**, the de facto open rule set with its own regression tests. We get years of detection work on day one |
+| Mature, standard rules | Implements the ModSecurity SecLang language and runs **OWASP CRS**, the de facto open rule set with its own regression tests. We get mature detection from the start |
 | Go-native | Pure Go, no cgo: static binaries, trivial cross-compilation, no C memory-safety bugs in the hot path, and it can run **in-process** (Caddy module) |
 | Compatible with what users already run | Existing ModSecurity rules and CRS exclusions work, which gives ingress-nginx + ModSecurity users a migration path |
 | License | Apache-2.0, same as Inkwall, and CRS is Apache-2.0 too |
@@ -255,7 +255,7 @@ bypass. That's the bar any choice has to clear.
 
 | Alternative | Why not (for now) |
 |---|---|
-| **Write our own engine** | Years of work before parity with CRS, high bypass risk, and users can't bring existing rules. Kept as a later option behind the `Evaluator` interface (the prefilter is the first step) |
+| **Write our own engine** | A large effort before parity with CRS, with high bypass risk, so not the starting point. Later chosen for performance, running CRS itself so users keep their rules, with Coraza as oracle and fallback ([0007](0007-inkwall-engine.md)) |
 | **libmodsecurity v3 via cgo** | C++ dependency: cgo call overhead on every request, harder builds and cross-compiles, C memory-safety bugs in-process. Trustwave ended its stewardship in 2024 and handed it to OWASP |
 | **libinjection only** | Detects SQLi/XSS only; no rule language, no CRS coverage |
 | **ML / signature-less detection** | Needs training data and a feedback loop we don't have yet; hard to explain verdicts. A possible later `Evaluator` |
