@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	coreruleset "github.com/corazawaf/coraza-coreruleset/v4"
@@ -45,7 +46,9 @@ type rule struct {
 	transf    []string
 	paranoia  int
 	re        *regexp.Regexp
-	lits      []string // required literals (lowercased); nil = no constraint
+	lits      []string // required literals, raw; nil = no constraint
+	litsFold  []string // lits under Unicode case folding (canonical rune per fold orbit)
+	litsLower []string // lits under strings.ToLower (the earlier, unsound method)
 	filterOK  bool
 	unfilterW string // why not filterable
 }
@@ -205,7 +208,7 @@ func dedupe(in []string) []string {
 func required(re *syntax.Regexp) lset {
 	switch re.Op {
 	case syntax.OpLiteral:
-		return lset{ok: true, lits: []string{strings.ToLower(string(re.Rune))}}
+		return lset{ok: true, lits: []string{string(re.Rune)}}
 	case syntax.OpCharClass:
 		n := 0
 		var lits []string
@@ -215,7 +218,7 @@ func required(re *syntax.Regexp) lset {
 				return lset{}
 			}
 			for r := re.Rune[i]; r <= re.Rune[i+1]; r++ {
-				lits = append(lits, strings.ToLower(string(r)))
+				lits = append(lits, string(r))
 			}
 		}
 		if len(lits) == 0 {
@@ -234,7 +237,7 @@ func required(re *syntax.Regexp) lset {
 		var run strings.Builder
 		flush := func() {
 			if run.Len() > 0 {
-				c := lset{ok: true, lits: []string{strings.ToLower(run.String())}}
+				c := lset{ok: true, lits: []string{run.String()}}
 				if better(c, best) {
 					best = c
 				}
@@ -321,14 +324,107 @@ func transform(s string, ts []string) string {
 	return s
 }
 
-func candidate(r *rule, transformed string) bool {
-	v := strings.ToLower(transformed)
-	for _, l := range r.lits {
+// fold maps every rune to a canonical member of its Unicode simple-fold
+// orbit (the smallest), which is the equivalence Go's (?i) matching uses.
+// Invalid UTF-8 bytes are copied unchanged.
+func fold(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		b.WriteRune(canonical(r))
+		i += size
+	}
+	return b.String()
+}
+
+func canonical(r rune) rune {
+	min := r
+	for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+		if f < min {
+			min = f
+		}
+	}
+	return min
+}
+
+// orbit returns the other members of r's simple-fold orbit.
+func orbit(r rune) []rune {
+	var out []rune
+	for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+		out = append(out, f)
+	}
+	return out
+}
+
+func containsAny(v string, lits []string) bool {
+	for _, l := range lits {
 		if strings.Contains(v, l) {
 			return true
 		}
 	}
 	return false
+}
+
+// candidate is the sound check: case folding on both sides.
+func candidate(r *rule, transformed string) bool {
+	return containsAny(fold(transformed), r.litsFold)
+}
+
+// candidateLower is the earlier check, kept to show its gap.
+func candidateLower(r *rule, transformed string) bool {
+	return containsAny(strings.ToLower(transformed), r.litsLower)
+}
+
+// foldVariants returns attack-style inputs that spell each literal with
+// other members of its fold orbits (for example "ſelect" for "select"),
+// capped per rule so every rule's literals are represented.
+func foldVariants(rules []*rule, perRule int) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range rules {
+		if !r.filterOK {
+			continue
+		}
+		n := 0
+		add := func(v string) {
+			for _, x := range []string{v, "x " + v + " y"} {
+				if n < perRule && !seen[x] {
+					seen[x] = true
+					out = append(out, x)
+					n++
+				}
+			}
+		}
+		for _, l := range r.lits {
+			runes := []rune(l)
+			if len(runes) > 32 {
+				continue
+			}
+			all := slices.Clone(runes)
+			changed := false
+			for i, c := range runes {
+				for _, m := range orbit(c) {
+					v := slices.Clone(runes)
+					v[i] = m
+					add(string(v))
+				}
+				if o := orbit(c); len(o) > 0 {
+					all[i] = o[len(o)-1]
+					changed = true
+				}
+			}
+			if changed {
+				add(string(all))
+			}
+		}
+	}
+	return out
 }
 
 func matches(r *rule, transformed string) bool {
@@ -515,7 +611,7 @@ func main() {
 					r.unfilterW = "regex has no required literal"
 				}
 			case name == "pm":
-				r.lits = dedupe(strings.Fields(strings.ToLower(arg)))
+				r.lits = dedupe(strings.Fields(arg))
 				r.filterOK = true
 			case name == "pmFromFile":
 				data, err := fs.ReadFile(coreruleset.FS, "@owasp_crs/"+strings.TrimSpace(arg))
@@ -526,12 +622,12 @@ func main() {
 				for _, line := range strings.Split(string(data), "\n") {
 					line = strings.TrimSpace(line)
 					if line != "" && !strings.HasPrefix(line, "#") {
-						r.lits = append(r.lits, strings.ToLower(line))
+						r.lits = append(r.lits, line)
 					}
 				}
 				r.lits, r.filterOK = dedupe(r.lits), true
 			case name == "contains" || name == "beginsWith" || name == "endsWith" || name == "streq":
-				r.lits, r.filterOK = []string{strings.ToLower(arg)}, true
+				r.lits, r.filterOK = []string{arg}, true
 			case name == "detectSQLi" || name == "detectXSS":
 				r.unfilterW = "libinjection operator"
 			default:
@@ -541,9 +637,17 @@ func main() {
 		}
 	}
 
+	for _, r := range rules {
+		for _, l := range r.lits {
+			r.litsFold = append(r.litsFold, fold(l))
+			r.litsLower = append(r.litsLower, strings.ToLower(l))
+		}
+		r.litsFold, r.litsLower = dedupe(r.litsFold), dedupe(r.litsLower)
+	}
 	attacks := attackStrings()
+	variants := foldVariants(rules, 600)
 	fmt.Printf("CRS request SecRules: %d; per-argument rules (chain heads): %d\n", totalSecRules, len(rules))
-	fmt.Printf("benign corpus: %d values; CRS attack strings: %d\n\n", len(benign), len(attacks))
+	fmt.Printf("benign corpus: %d values; CRS attack strings: %d; Unicode fold variants: %d\n\n", len(benign), len(attacks), len(variants))
 
 	for _, pl := range []int{1, 4} {
 		var active []*rule
@@ -601,24 +705,54 @@ func main() {
 		fmt.Printf("    benign, weighted by measured operator cost: %.1f%% of operator time skippable -> operator time / %.1f\n",
 			100*(1-float64(costKept)/float64(costAll)), float64(costAll)/float64(costKept))
 
-		// Soundness: whenever the operator matches, the literal check must pass.
-		violations := map[string][]string{}
-		checked := 0
-		for _, r := range active {
-			if !r.filterOK || r.op != "rx" {
-				continue
-			}
-			for _, s := range append(slices.Clone(benign), attacks...) {
-				tv := transform(s, r.transf)
-				checked++
-				if r.re.MatchString(tv) && !candidate(r, tv) {
-					violations[r.id] = append(violations[r.id], s)
+		// Soundness: whenever the operator matches, the literal check must
+		// pass. Checked for the case-folding method (used for the skip rates
+		// above) and for the earlier lowercase method, on three corpora.
+		corpora := []struct {
+			name   string
+			inputs []string
+		}{{"benign", benign}, {"CRS attacks", attacks}, {"Unicode fold variants", variants}}
+		for _, c := range corpora {
+			foldViol := map[string][]string{}
+			lowerViol := map[string][]string{}
+			checked := 0
+			for _, r := range active {
+				if !r.filterOK || r.op != "rx" {
+					continue
+				}
+				for _, in := range c.inputs {
+					tv := transform(in, r.transf)
+					checked++
+					if !r.re.MatchString(tv) {
+						continue
+					}
+					if !candidate(r, tv) {
+						foldViol[r.id] = append(foldViol[r.id], in)
+					}
+					if !candidateLower(r, tv) {
+						lowerViol[r.id] = append(lowerViol[r.id], in)
+					}
 				}
 			}
-		}
-		fmt.Printf("    soundness: %d regex evaluations checked, %d rules with violations\n", checked, len(violations))
-		for id, ex := range violations {
-			fmt.Printf("      VIOLATION rule %s: %d inputs, e.g. %q\n", id, len(ex), ex[0])
+			fmt.Printf("    soundness on %-22s %9d checks: case folding %d rules violated, lowercase %d rules violated\n",
+				c.name+":", checked, len(foldViol), len(lowerViol))
+			for _, v := range []struct {
+				method string
+				m      map[string][]string
+			}{{"case folding", foldViol}, {"lowercase", lowerViol}} {
+				ids := make([]string, 0, len(v.m))
+				for id := range v.m {
+					ids = append(ids, id)
+				}
+				sort.Strings(ids)
+				for i, id := range ids {
+					if i == 5 {
+						fmt.Printf("      ... %d more (%s)\n", len(ids)-5, v.method)
+						break
+					}
+					fmt.Printf("      %-12s violation, rule %s: %d inputs, e.g. %q\n", v.method, id, len(v.m[id]), v.m[id][0])
+				}
+			}
 		}
 		fmt.Println()
 	}

@@ -150,12 +150,15 @@ Workflow: onboard a route in detect mode, tune false positives in the UI, then p
    | CRS rules that run per argument | 104 | 196 |
    | Of those, filterable by required literals | 100 | 181 |
    | Benign rule-value evaluations skippable | 90.5% | 86.2% |
-   | Operator time skippable (weighted by measured cost) | 72% (÷3.5) | 69% (÷3.2) |
-   | Soundness violations (regex matched but filter said skip) | 0 of 890k checks | 0 of 1.67M checks |
+   | Operator time skippable (weighted by measured cost) | 72% (÷3.6) | 69% (÷3.2) |
+   | Soundness violations (regex matched but filter said skip) | 0 of ~2.1M checks | 0 of ~3.9M checks |
 
-   The soundness check includes all 9,747 CRS regression-test payloads, but no Unicode inputs: the
-   tool lowercases instead of applying Unicode case folding, so it misses cases such as `(?i)select`
-   matching `ſelect`. The engine design fixes this (0007 §4.3). The extraction treats any
+   The soundness check covers the benign corpus, all 9,747 CRS regression-test payloads and 13,314
+   Unicode fold variants of the extracted literals (for example `ſ` for `s`). Literals and values are
+   compared under Unicode case folding: a first version lowercased instead and was unsound — fold
+   variants such as `;BAſE64` (rule 932260) and `@@VERſION` (942480) matched a rule that the
+   lowercase check would have skipped (2 rules at PL1, 5 at PL4). With case folding there are 0
+   violations in about 2.1M checks at PL1 and 3.9M at PL4 (0007 §4.3). The extraction treats any
    non-literal node (for example an unescaped `.`) as breaking a literal, which is where Coraza's own
    prefilter goes wrong. What cannot be filtered is mostly the two libinjection rules (941100,
    942100), which are cheap per value.

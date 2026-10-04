@@ -51,8 +51,8 @@ What limits Coraza, structurally:
 
 The feasibility measurement (`test/perf/prefilter`) showed that at paranoia level 1, 100 of the 104
 per-argument CRS rules have a usable required literal, 90.5% of benign rule-field evaluations can
-be skipped, and the literal extraction is sound (0 violations in 890k checks, including all 9,747
-CRS test payloads).
+be skipped, and the literal extraction is sound under Unicode case folding (0 violations in about
+2.1M checks, covering all 9,747 CRS test payloads and 13,314 Unicode fold variants).
 
 Improving Coraza from outside covers only part of this (an `@rx` operator override saves operator
 time, ~30%). The rest needs control of the rule loop.
@@ -195,9 +195,13 @@ Soundness rules that apply to every view:
 
 This is the central design risk, so it is a milestone of its own (N3) with an explicit exit
 criterion: zero soundness violations across the CRS payloads, the benign corpus, a Unicode corpus
-(fold-orbit variants of every literal) and a fuzzing run. The feasibility tool in
-`test/perf/prefilter` lowercases instead of case-folding and had no Unicode corpus, so its
-zero-violation result does not cover this case; N3 fixes the tool first.
+(fold-orbit variants of every literal) and a fuzzing run.
+
+The feasibility tool (`test/perf/prefilter`) already applies case folding and the fold-variant
+corpus: 0 violations in about 2.1M checks at PL1 and 3.9M at PL4, while the lowercase method it
+replaced fails on 2 rules at PL1 and 5 at PL4 (for example `;BAſE64` against rule 932260,
+`@@VERſION` against 942480). Skip rates are unchanged by the fix (90.5% of benign evaluations, 72%
+of operator time at PL1).
 
 ### 4.4 Supported SecLang subset
 
