@@ -104,8 +104,11 @@ $ curl -s -o /dev/null -w '%{http_code}\n' 'localhost:8480/?id=1%27%20OR%20%271%
 Each blocked or detected request produces one JSON log line with the matching rule IDs. Metrics are on
 `:9480/metrics`, health on `:9480/healthz` and `:9480/readyz`.
 
-Defaults are deliberately safe: **detect mode** (log, never block) and **fail-open** (if inspection
-errors, times out or is overloaded, the request is allowed and logged). Useful flags:
+Defaults are deliberately safe. The engine starts in **detect mode**: it logs what it would block
+and never blocks. In **block mode**, a request that cannot be fully inspected (inspection timed out,
+failed, or the engine is overloaded) is **rejected with 503**, so padding a request until inspection
+times out cannot get an attack through; in detect mode such requests are allowed and logged. Use
+`--failure-mode open` to prefer availability in block mode. Useful flags:
 
 | Flag | Default | Purpose |
 |---|---|---|
@@ -119,7 +122,8 @@ errors, times out or is overloaded, the request is allowed and logged). Useful f
 | `--skip-paths` | | Paths never inspected, e.g. `/healthz,/static/*` |
 | `--skip-body-paths` | | Paths whose body is not inspected, e.g. `/upload/*` |
 | `--disable-rule-groups` | | CRS families the app can't be vulnerable to, e.g. `php,java` (~13-15% faster) |
-| `--failure-mode` | `open` | `closed` returns 503 when a request cannot be inspected |
+| `--failure-mode` | `auto` | `auto` = closed in block mode, open in detect; or `open` / `closed` |
+| `--timeout` | `250ms` | Inspection deadline per request (a safety cap, not typical latency) |
 
 Run `./bin/inkwall-engine proxy -h` for all flags. Inspection currently costs about 0.5 ms per
 request plus roughly 0.15 ms per request argument, so skipping static and trusted routes matters; see

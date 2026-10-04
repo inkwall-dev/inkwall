@@ -20,8 +20,10 @@ import (
 )
 
 // DefaultTimeout is the per-request inspection deadline used when Config
-// does not set one.
-const DefaultTimeout = 20 * time.Millisecond
+// does not set one. It is a safety cap, not the expected latency: it is set
+// so that requests within the default argument and body limits finish in
+// time, because in block mode a timeout rejects the request.
+const DefaultTimeout = 250 * time.Millisecond
 
 // Mode is the enforcement mode.
 type Mode uint8
@@ -33,16 +35,31 @@ const (
 	ModeBlock
 )
 
-// FailureMode decides what happens when inspection fails or times out.
+// FailureMode decides what happens when a request cannot be inspected:
+// inspection timed out, failed, or was shed under overload.
 type FailureMode uint8
 
 const (
-	// FailOpen allows the request. It is the default: Inkwall must not take
-	// down the traffic it protects.
-	FailOpen FailureMode = iota
+	// FailAuto is the default: fail closed in block mode and open in detect
+	// mode. A fail-open block mode is bypassable: padding a request until
+	// inspection times out gets it forwarded uninspected.
+	FailAuto FailureMode = iota
+	// FailOpen allows the request, choosing availability over enforcement.
+	FailOpen
 	// FailClosed rejects the request with 503 Service Unavailable.
 	FailClosed
 )
+
+// Resolve returns the effective failure mode for an enforcement mode.
+func (f FailureMode) Resolve(m Mode) FailureMode {
+	if f != FailAuto {
+		return f
+	}
+	if m == ModeBlock {
+		return FailClosed
+	}
+	return FailOpen
+}
 
 // OversizeAction decides what happens to a request whose body is longer than
 // the inspection limit.
@@ -110,7 +127,7 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 	return &Pipeline{
 		eval:     eval,
 		mode:     cfg.Mode,
-		failure:  cfg.FailureMode,
+		failure:  cfg.FailureMode.Resolve(cfg.Mode),
 		timeout:  timeout,
 		slots:    make(chan struct{}, maxConcurrent),
 		oversize: cfg.Oversize,

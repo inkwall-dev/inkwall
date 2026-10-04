@@ -48,12 +48,12 @@ func TestCheck(t *testing.T) {
 		{name: "custom status is kept", eval: fakeEvaluator{res: rules.Result{Interrupted: true, Status: 429}}, cfg: Config{Mode: ModeBlock},
 			wantAction: ActionDeny, wantStatus: 429, wantReason: ReasonRule},
 		{name: "timeout fails open", eval: fakeEvaluator{res: blocked, delay: 50 * time.Millisecond},
-			cfg:        Config{Mode: ModeBlock, Timeout: 5 * time.Millisecond},
+			cfg:        Config{Mode: ModeBlock, FailureMode: FailOpen, Timeout: 5 * time.Millisecond},
 			wantAction: ActionAllow, wantReason: ReasonTimeout},
 		{name: "timeout fails closed", eval: fakeEvaluator{delay: 50 * time.Millisecond},
 			cfg:        Config{Mode: ModeBlock, FailureMode: FailClosed, Timeout: 5 * time.Millisecond},
 			wantAction: ActionDeny, wantStatus: http.StatusServiceUnavailable, wantReason: ReasonTimeout},
-		{name: "evaluator error fails open", eval: fakeEvaluator{err: errors.New("boom")}, cfg: Config{Mode: ModeBlock},
+		{name: "evaluator error fails open", eval: fakeEvaluator{err: errors.New("boom")}, cfg: Config{Mode: ModeBlock, FailureMode: FailOpen},
 			wantAction: ActionAllow, wantReason: ReasonError},
 		{name: "evaluator error fails closed", eval: fakeEvaluator{err: errors.New("boom")},
 			cfg:        Config{Mode: ModeBlock, FailureMode: FailClosed},
@@ -92,7 +92,7 @@ func TestCheckReportsMatchedRules(t *testing.T) {
 func TestCheckShedsLoadWhenSlotsAreBusy(t *testing.T) {
 	// One slot, held by an evaluation that outlives its 5ms deadline.
 	p := New(fakeEvaluator{delay: 200 * time.Millisecond}, Config{
-		Mode: ModeBlock, Timeout: 5 * time.Millisecond, MaxConcurrent: 1,
+		Mode: ModeBlock, FailureMode: FailOpen, Timeout: 5 * time.Millisecond, MaxConcurrent: 1,
 	})
 	if v := p.Check(context.Background(), &request.Request{}); v.Reason != ReasonTimeout {
 		t.Fatalf("first request: reason = %s, want timeout", v.Reason)
@@ -234,6 +234,40 @@ func TestEvaluatorPanicBecomesError(t *testing.T) {
 		// The slot must be released despite the panic.
 		if v := p.Check(context.Background(), &request.Request{}); v.Reason == ReasonOverload {
 			t.Fatal("slot leaked after panic")
+		}
+	}
+}
+
+func TestDefaultFailureModeDependsOnEnforcementMode(t *testing.T) {
+	slow := fakeEvaluator{res: blocked, delay: 50 * time.Millisecond}
+
+	// Block mode: a request that cannot be inspected in time is rejected,
+	// so padding a request past the deadline cannot get it through.
+	v := New(slow, Config{Mode: ModeBlock, Timeout: 5 * time.Millisecond}).Check(context.Background(), &request.Request{})
+	if v.Action != ActionDeny || v.Status != http.StatusServiceUnavailable || v.Reason != ReasonTimeout {
+		t.Fatalf("block mode default: got action=%s status=%d reason=%s, want deny/503/timeout", v.Action, v.Status, v.Reason)
+	}
+
+	// Detect mode never blocks, so it fails open.
+	v = New(slow, Config{Mode: ModeDetect, Timeout: 5 * time.Millisecond}).Check(context.Background(), &request.Request{})
+	if v.Action != ActionAllow || v.Reason != ReasonTimeout {
+		t.Fatalf("detect mode default: got action=%s reason=%s, want allow/timeout", v.Action, v.Reason)
+	}
+}
+
+func TestFailureModeResolve(t *testing.T) {
+	for _, tt := range []struct {
+		f    FailureMode
+		m    Mode
+		want FailureMode
+	}{
+		{FailAuto, ModeBlock, FailClosed},
+		{FailAuto, ModeDetect, FailOpen},
+		{FailOpen, ModeBlock, FailOpen},
+		{FailClosed, ModeDetect, FailClosed},
+	} {
+		if got := tt.f.Resolve(tt.m); got != tt.want {
+			t.Errorf("%d.Resolve(%d) = %d, want %d", tt.f, tt.m, got, tt.want)
 		}
 	}
 }

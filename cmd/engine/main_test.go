@@ -42,8 +42,8 @@ func TestParseProxyFlagsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.mode != pipeline.ModeDetect || cfg.failureMode != pipeline.FailOpen {
-		t.Fatalf("defaults must be detect and fail-open, got %+v", cfg)
+	if cfg.mode != pipeline.ModeDetect || cfg.failureMode != pipeline.FailAuto {
+		t.Fatalf("defaults must be detect mode and the auto failure mode, got %+v", cfg)
 	}
 	if cfg.listen != ":8480" || cfg.adminListen != ":9480" {
 		t.Fatalf("default ports = %s / %s, want :8480 / :9480", cfg.listen, cfg.adminListen)

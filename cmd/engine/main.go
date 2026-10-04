@@ -93,7 +93,7 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 	readTimeout := fs.Duration("read-timeout", 60*time.Second, "maximum time to read a whole request, including the body (0 = no limit)")
 	upstream := fs.String("upstream", "", "upstream URL that allowed requests are forwarded to (required)")
 	mode := fs.String("mode", "detect", "enforcement mode: detect or block")
-	failure := fs.String("failure-mode", "open", "on inspection error or timeout: open (allow) or closed (deny with 503)")
+	failure := fs.String("failure-mode", "auto", "when a request cannot be inspected (timeout, error, overload): open (allow), closed (deny with 503), or auto (closed in block mode, open in detect mode)")
 	timeout := fs.Duration("timeout", pipeline.DefaultTimeout, "per-request inspection deadline")
 	maxConcurrent := fs.Int("max-concurrent", 0, "maximum concurrent evaluations; extra requests get the failure mode (0 = 2 * CPUs)")
 	maxBody := fs.Int64("max-body-bytes", 64<<10, "request body bytes to inspect (0 disables body inspection)")
@@ -140,12 +140,14 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 		return cfg, fmt.Errorf("--mode must be detect or block, got %q", *mode)
 	}
 	switch *failure {
+	case "auto":
+		cfg.failureMode = pipeline.FailAuto
 	case "open":
 		cfg.failureMode = pipeline.FailOpen
 	case "closed":
 		cfg.failureMode = pipeline.FailClosed
 	default:
-		return cfg, fmt.Errorf("--failure-mode must be open or closed, got %q", *failure)
+		return cfg, fmt.Errorf("--failure-mode must be auto, open or closed, got %q", *failure)
 	}
 	switch *oversize {
 	case "inspect-prefix":
@@ -267,6 +269,7 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 		slog.String("admin_listen", cfg.adminListen),
 		slog.String("upstream", cfg.upstream.String()),
 		slog.String("mode", modeName(cfg.mode)),
+		slog.String("failure_mode", failureModeName(cfg.failureMode.Resolve(cfg.mode))),
 		slog.Int("paranoia_level", cfg.paranoiaLevel),
 		slog.Any("disabled_rule_groups", cfg.ruleGroupsOff))
 
@@ -284,6 +287,13 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 		err = errors.Join(err, admin.Shutdown(shutdownCtx))
 	}
 	return err
+}
+
+func failureModeName(f pipeline.FailureMode) string {
+	if f == pipeline.FailClosed {
+		return "closed"
+	}
+	return "open"
 }
 
 func modeName(m pipeline.Mode) string {
