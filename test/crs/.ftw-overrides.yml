@@ -11,15 +11,6 @@ test_overrides:
   #   reason: "Invalid uri, Coraza not reached - 301 returned"
   #   output:
   #     status: 301
-  - rule_id: 920100
-    test_ids: [8]
-    reason: |
-      On Apache is not allowed to put a colon in the path. Go/http allows it.
-      Note that the colon is a legal character in a regular path segment, according to the RFC.
-    output:
-      status: 200
-      log:
-        no_expect_ids: [920100]
   - rule_id: 920270
     test_ids: [4]
     reason: "Rule works, Apache test expects status 400"

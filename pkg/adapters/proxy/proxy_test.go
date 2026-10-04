@@ -449,3 +449,20 @@ func TestForwardedHeadersFromUntrustedClientAreReplaced(t *testing.T) {
 		t.Errorf("X-Forwarded-Proto = %q, want http (spoofed value dropped)", proto)
 	}
 }
+
+func TestRawFragmentIsRejected(t *testing.T) {
+	up := newUpstream(t)
+	var logs bytes.Buffer
+	h := newHandler(t, pipeline.ModeDetect, 64<<10, up, &logs)
+
+	r := httptest.NewRequest("GET", "/search", nil)
+	r.RequestURI = "/search?x=1#&q=%3Cscript%3Ealert(1)%3C/script%3E"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("raw '#' in the request target: got %d, want 400", w.Code)
+	}
+	if up.hits.Load() != 0 {
+		t.Fatal("request with a raw '#' reached the upstream")
+	}
+}

@@ -85,6 +85,14 @@ func New(p *pipeline.Pipeline, cfg Config) (*Handler, error) {
 
 // ServeHTTP inspects r, then denies it or forwards it to the upstream.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// A raw '#' is not valid in a request target (RFC 9112), and clients
+	// never send fragments. Coraza stops reading the URI at '#' while the
+	// upstream still parses what follows, so parameters after it would
+	// reach the application uninspected.
+	if strings.ContainsRune(r.RequestURI, '#') {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
 	req, err := h.toRequest(r)
 	if err != nil {
 		http.Error(w, "Bad Request", http.StatusBadRequest)
