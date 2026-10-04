@@ -26,6 +26,8 @@ import (
 const (
 	DefaultParanoiaLevel           = 1
 	DefaultInboundAnomalyThreshold = 5
+	// DefaultMaxArgs matches Coraza's own default argument limit.
+	DefaultMaxArgs = 1000
 )
 
 // RuleGroups maps the CRS attack families that can be disabled to their
@@ -52,11 +54,11 @@ type Config struct {
 	// InboundAnomalyThreshold is the CRS inbound anomaly score at which a
 	// request is blocked. Defaults to 5 (one critical match).
 	InboundAnomalyThreshold int
-	// MaxArgs sets the CRS limit on the number of request arguments
-	// (tx.max_num_args). Requests with more arguments match rule 920380, a
-	// critical match that blocks at the default threshold. Zero leaves the
-	// limit unset. Combined with a body size limit, it detects padding meant
-	// to push a payload past what is inspected.
+	// MaxArgs is the maximum number of arguments per source (query, body,
+	// path). Requests with more are rejected with 400 by rules 200004
+	// (phase 1) and 200005 (phase 2) before any CRS argument rule runs, so
+	// padding a request with arguments is cheap to reject and cannot hide a
+	// payload past the limit. Zero means DefaultMaxArgs.
 	MaxArgs int
 	// DirectivesBeforeCRS are SecLang directives loaded before CRS. CRS
 	// runtime rule exclusions (rules using ctl:ruleRemoveById and similar)
@@ -118,7 +120,11 @@ func buildDirectives(cfg Config) (string, error) {
 	if threshold < 1 {
 		return "", fmt.Errorf("inbound anomaly threshold %d must be positive", threshold)
 	}
-	if cfg.MaxArgs < 0 {
+	maxArgs := cfg.MaxArgs
+	if maxArgs == 0 {
+		maxArgs = DefaultMaxArgs
+	}
+	if maxArgs < 0 {
 		return "", fmt.Errorf("max args %d must not be negative", cfg.MaxArgs)
 	}
 	var removeGroups []int
@@ -132,6 +138,13 @@ func buildDirectives(cfg Config) (string, error) {
 
 	var b strings.Builder
 	b.WriteString("Include @coraza.conf-recommended\n")
+	// Coraza drops arguments past SecArgumentsLimit from ARGS and relies on
+	// rules 200004/200005 to reject such requests, but the
+	// coraza.conf-recommended bundled with coraza-coreruleset lacks them, so
+	// arguments past the limit were silently not inspected. The rules are
+	// copied from Coraza 3.8.1's coraza.conf-recommended (Apache-2.0).
+	fmt.Fprintf(&b, "SecArgumentsLimit %d\n", maxArgs)
+	b.WriteString(argumentLimitRules)
 	// Enforce, and leave audit logging to Inkwall's own event pipeline.
 	b.WriteString("SecRuleEngine On\n")
 	b.WriteString("SecAuditEngine Off\n")
@@ -148,10 +161,6 @@ func buildDirectives(cfg Config) (string, error) {
 			"SecAction \"id:900000,phase:1,pass,t:none,nolog,setvar:tx.blocking_paranoia_level=%d\"\n", pl)
 		fmt.Fprintf(&b,
 			"SecAction \"id:900110,phase:1,pass,t:none,nolog,setvar:tx.inbound_anomaly_score_threshold=%d\"\n", threshold)
-		if cfg.MaxArgs > 0 {
-			fmt.Fprintf(&b,
-				"SecAction \"id:900300,phase:1,pass,t:none,nolog,setvar:tx.max_num_args=%d\"\n", cfg.MaxArgs)
-		}
 		b.WriteString("Include @owasp_crs/*.conf\n")
 		for _, prefix := range removeGroups {
 			fmt.Fprintf(&b, "SecRuleRemoveById %d000-%d999\n", prefix, prefix)
@@ -238,6 +247,14 @@ func result(tx types.Transaction, it *types.Interruption) rules.Result {
 	}
 	return res
 }
+
+// argumentLimitRules reject requests whose arguments exceed
+// SecArgumentsLimit, from Coraza 3.8.1's coraza.conf-recommended.
+const argumentLimitRules = `SecRule ARGUMENTS_LIMIT_REACHED "@eq 1" \
+    "id:'200004',phase:1,t:none,log,deny,status:400,msg:'Argument limit reached; request rejected (GET/PATH args)'"
+SecRule ARGUMENTS_LIMIT_REACHED "@eq 1" \
+    "id:'200005',phase:2,t:none,log,deny,status:400,msg:'Argument limit reached; request rejected (POST args)'"
+`
 
 // RuleGroupNames returns the names in RuleGroups, sorted.
 func RuleGroupNames() []string {

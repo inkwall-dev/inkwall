@@ -164,12 +164,23 @@ func TestMaxArgs(t *testing.T) {
 	for i := range fields {
 		fields[i] = fmt.Sprintf("f%d=v", i)
 	}
+
+	// Body arguments over the limit: rejected in phase 2 by rule 200005.
 	res, err := e.Evaluate(context.Background(), newRequest("POST", "/api", formHeaders, strings.Join(fields, "&")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Interrupted || !slices.Contains(res.MatchedRuleIDs, 920380) {
-		t.Fatalf("30 args with MaxArgs 10: got %+v, want block by rule 920380", res)
+	if !res.Interrupted || res.RuleID != 200005 || res.Status != 400 {
+		t.Fatalf("30 body args with MaxArgs 10: got %+v, want 400 from rule 200005", res)
+	}
+
+	// Query arguments over the limit: rejected in phase 1 by rule 200004.
+	res, err = e.Evaluate(context.Background(), newRequest("GET", "/?"+strings.Join(fields, "&"), nil, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Interrupted || res.RuleID != 200004 {
+		t.Fatalf("30 query args with MaxArgs 10: got %+v, want rule 200004", res)
 	}
 
 	res, err = e.Evaluate(context.Background(), newRequest("POST", "/api", formHeaders, strings.Join(fields[:5], "&")))
@@ -178,6 +189,32 @@ func TestMaxArgs(t *testing.T) {
 	}
 	if res.Interrupted {
 		t.Fatalf("5 args with MaxArgs 10: got %+v, want allowed", res)
+	}
+}
+
+func TestArgumentsPastTheDefaultLimitAreNotHidden(t *testing.T) {
+	// 1000 harmless arguments followed by an attack. Coraza drops arguments
+	// past its limit from inspection; the request must be rejected instead.
+	e, err := New(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := make([]string, DefaultMaxArgs)
+	for i := range fields {
+		fields[i] = fmt.Sprintf("f%d=1", i)
+	}
+	attack := "q=%3Cscript%3Ealert(1)%3C%2Fscript%3E"
+	for _, req := range []*request.Request{
+		newRequest("GET", "/?"+strings.Join(fields, "&")+"&"+attack, nil, ""),
+		newRequest("POST", "/", formHeaders, strings.Join(fields, "&")+"&"+attack),
+	} {
+		res, err := e.Evaluate(context.Background(), req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !res.Interrupted {
+			t.Fatalf("%s with %d fillers before an attack was not interrupted: %+v", req.Method, len(fields), res)
+		}
 	}
 }
 

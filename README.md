@@ -113,7 +113,7 @@ errors, times out or is overloaded, the request is allowed and logged). Useful f
 | `--paranoia-level` | `1` | CRS paranoia level, 1-4 |
 | `--max-body-bytes` | `65536` | Body bytes to inspect |
 | `--oversize-body` | `inspect-prefix` | `deny` rejects bodies over the limit (413) |
-| `--max-args` | `0` (off) | CRS limit on request arguments |
+| `--max-args` | `1000` | Maximum arguments per source; more is rejected with 400 |
 | `--rules` | | Extra SecLang rules or exclusions |
 | `--trusted-proxies` | | CIDRs whose `X-Forwarded-For` is trusted |
 | `--skip-paths` | | Paths never inspected, e.g. `/healthz,/static/*` |

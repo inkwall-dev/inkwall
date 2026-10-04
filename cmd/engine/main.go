@@ -98,7 +98,7 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 	maxConcurrent := fs.Int("max-concurrent", 0, "maximum concurrent evaluations; extra requests get the failure mode (0 = 2 * CPUs)")
 	maxBody := fs.Int64("max-body-bytes", 64<<10, "request body bytes to inspect (0 disables body inspection)")
 	oversize := fs.String("oversize-body", "inspect-prefix", "bodies over --max-body-bytes: inspect-prefix (rest uninspected) or deny (413 in block mode)")
-	maxArgs := fs.Int("max-args", 0, "OWASP CRS limit on request arguments; more is a critical match (0 = no limit)")
+	maxArgs := fs.Int("max-args", 0, "maximum arguments per source (query, body); more is rejected with 400 before CRS runs (0 = 1000)")
 	paranoia := fs.Int("paranoia-level", coraza.DefaultParanoiaLevel, "OWASP CRS paranoia level (1-4)")
 	threshold := fs.Int("anomaly-threshold", coraza.DefaultInboundAnomalyThreshold, "OWASP CRS inbound anomaly score threshold")
 	rulesFile := fs.String("rules", "", "file with extra SecLang rules or exclusions, loaded after CRS")
