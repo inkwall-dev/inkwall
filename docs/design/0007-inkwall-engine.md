@@ -285,12 +285,31 @@ test/diff/        # differential harness and fuzzers (separate module, imports C
 
 Code ported from Coraza keeps its copyright header and is listed in a `NOTICE` file.
 
-**Repository.** The engine starts inside the `inkwall` repo: during development it changes together
-with the pipeline, the CRS suite and the differential harness, and one repo and one CI keep that
-fast. `pkg/rules/native` must not import other Inkwall packages except `pkg/request` and
-`pkg/rules` (enforced with golangci-lint's `depguard`), so it can later move to its own repository and Go module
-(for example `github.com/inkwall-dev/engine`) once its API is stable and other projects want to
-use it, the way Coraza is used today.
+**Repository.** The engine starts inside the `inkwall` repo: while it is being built, the engine,
+the pipeline, the CRS suite and the differential harness change together, and separate repos would
+turn every change into cross-repo pull requests and version juggling.
+
+It moves to its own repository and Go module (for example `github.com/inkwall-dev/engine`) when all
+of these hold:
+
+1. **It is the default evaluator:** milestone N5 is done, after a clean shadow period on real
+   traffic.
+2. **Its API is stable:** the public surface (compile rules into a program, evaluate a request) has
+   needed no breaking change for a while, because a separate module means real compatibility
+   promises.
+3. **There is a reason to split:** another project wants to embed it (the way Caddy or HAProxy
+   integrations embed Coraza), or it needs its own release cadence, for example a release for every
+   CRS update independent of Inkwall releases.
+
+To keep that move mechanical:
+
+- `pkg/rules/native` must not import other Inkwall packages except `pkg/request` and `pkg/rules`,
+  enforced with golangci-lint's `depguard`;
+- all of its code and tests live under that directory.
+
+The move itself: extract the directory with its history (`git filter-repo --subdirectory-filter
+pkg/rules/native`) into the new repository, give it its own module path and a `v0.x` tag, have
+Inkwall import it as a dependency, and run the CRS suite and differential tests in both repos.
 
 **Relationship to Coraza.** The engine replaces Coraza as the default evaluator after milestone N5.
 Coraza is not removed: it remains the oracle for differential testing and the fallback for rule
