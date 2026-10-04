@@ -418,3 +418,25 @@ func TestDisabledRuleGroups(t *testing.T) {
 		t.Fatal("unknown group accepted")
 	}
 }
+
+func TestUserSettingsBeforeCRSWinOverInkwallDefaults(t *testing.T) {
+	sqli := newRequest("GET", "/products?id=1%27%20OR%20%271%27%3D%271", nil, "")
+
+	// A user raising the anomaly threshold before CRS, using CRS's documented
+	// setup ID, must neither collide with Inkwall's own setting nor be
+	// overwritten by it.
+	e, err := New(Config{DirectivesBeforeCRS: `SecAction "id:900110,phase:1,pass,t:none,nolog,setvar:tx.inbound_anomaly_score_threshold=100"`})
+	if err != nil {
+		t.Fatalf("CRS setup ID 900110 rejected: %v", err)
+	}
+	res, err := e.Evaluate(context.Background(), sqli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Interrupted {
+		t.Fatalf("user threshold 100 was overwritten: a single SQLi match blocked (%+v)", res)
+	}
+	if !slices.Contains(res.MatchedRuleIDs, 942100) {
+		t.Fatalf("SQLi not detected at all: %v", res.MatchedRuleIDs)
+	}
+}

@@ -158,16 +158,22 @@ func buildDirectives(cfg Config) (string, error) {
 	// Coraza's regex prefilter (SecRxPreFilter) is deliberately left off: with
 	// Coraza 3.8.1 it misses CRS regression tests 942220-2 and 932311-7. Only
 	// re-enable it once the CRS suite (test/crs) passes with it on.
+	if !cfg.DisableCRS {
+		// Inkwall's CRS settings come before the user's pre-CRS directives so
+		// that a user rule setting the same variables (globally or per path)
+		// wins. They use Inkwall's own ID range, so users can keep CRS's
+		// documented setup IDs (900000, 900110, ...).
+		fmt.Fprintf(&b,
+			"SecAction \"id:%d,phase:1,pass,t:none,nolog,setvar:tx.blocking_paranoia_level=%d\"\n", idParanoiaLevel, pl)
+		fmt.Fprintf(&b,
+			"SecAction \"id:%d,phase:1,pass,t:none,nolog,setvar:tx.inbound_anomaly_score_threshold=%d\"\n", idAnomalyThreshold, threshold)
+	}
 	if cfg.DirectivesBeforeCRS != "" {
 		b.WriteString(cfg.DirectivesBeforeCRS)
 		b.WriteString("\n")
 	}
 	if !cfg.DisableCRS {
 		b.WriteString("Include @crs-setup.conf.example\n")
-		fmt.Fprintf(&b,
-			"SecAction \"id:900000,phase:1,pass,t:none,nolog,setvar:tx.blocking_paranoia_level=%d\"\n", pl)
-		fmt.Fprintf(&b,
-			"SecAction \"id:900110,phase:1,pass,t:none,nolog,setvar:tx.inbound_anomaly_score_threshold=%d\"\n", threshold)
 		b.WriteString("Include @owasp_crs/*.conf\n")
 		for _, prefix := range removeGroups {
 			fmt.Fprintf(&b, "SecRuleRemoveById %d000-%d999\n", prefix, prefix)
@@ -256,6 +262,13 @@ func result(tx types.Transaction, it *types.Interruption) rules.Result {
 	}
 	return res
 }
+
+// Inkwall's internal rules use IDs 7700000-7700099, outside the ranges CRS
+// and Coraza use, so they never collide with user or CRS rules.
+const (
+	idParanoiaLevel    = 7700001
+	idAnomalyThreshold = 7700002
+)
 
 // argumentLimitRules reject requests whose arguments exceed
 // SecArgumentsLimit, from Coraza 3.8.1's coraza.conf-recommended.

@@ -117,7 +117,8 @@ times out cannot get an attack through; in detect mode such requests are allowed
 | `--max-body-bytes` | `65536` | Body bytes to inspect |
 | `--oversize-body` | `auto` | Bodies over the limit: `deny` (413), `allow` (forwarded uninspected, logged), `auto` = deny in block mode |
 | `--max-args` | `1000` | Maximum arguments per source; more is rejected with 400 |
-| `--rules` | | Extra SecLang rules or exclusions |
+| `--rules` | | SecLang rules and configure-time exclusions, loaded after CRS |
+| `--rules-before-crs` | | Runtime exclusions (`ctl:ruleRemoveById` …) and settings, loaded before CRS |
 | `--trusted-proxies` | | CIDRs whose `X-Forwarded-For` is trusted |
 | `--skip-paths` | | Paths never inspected, e.g. `/healthz,/static/*` |
 | `--skip-body-paths` | | Paths whose body is not inspected, e.g. `/upload/*` |

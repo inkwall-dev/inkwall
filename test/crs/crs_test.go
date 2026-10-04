@@ -87,9 +87,8 @@ func TestCRSRegression(t *testing.T) {
 	logWriter := bufio.NewWriter(logFile)
 
 	eval, err := coraza.New(coraza.Config{
-		// The test setup sets paranoia level 4 itself, but Inkwall's own
-		// setting is applied after it, so it must match.
-		ParanoiaLevel:       4,
+		// The test setup sets paranoia level 4 itself; it is loaded after
+		// Inkwall's own defaults and therefore takes effect.
 		DirectivesBeforeCRS: testingConfig,
 		OnMatch: func(mr types.MatchedRule) {
 			mu.Lock()

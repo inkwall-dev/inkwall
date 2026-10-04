@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -79,6 +80,7 @@ type proxyConfig struct {
 	paranoiaLevel  int
 	threshold      int
 	rulesFile      string
+	rulesBeforeCRS string
 	trustedProxies []string
 	skipPaths      []string
 	skipBodyPaths  []string
@@ -101,7 +103,8 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 	maxArgs := fs.Int("max-args", 0, "maximum arguments per source (query, body); more is rejected with 400 before CRS runs (0 = 1000)")
 	paranoia := fs.Int("paranoia-level", coraza.DefaultParanoiaLevel, "OWASP CRS paranoia level (1-4)")
 	threshold := fs.Int("anomaly-threshold", coraza.DefaultInboundAnomalyThreshold, "OWASP CRS inbound anomaly score threshold")
-	rulesFile := fs.String("rules", "", "file with extra SecLang rules or exclusions, loaded after CRS")
+	rulesFile := fs.String("rules", "", "file with SecLang rules and configure-time exclusions (SecRuleRemoveById, SecRuleUpdateTargetById), loaded after CRS")
+	rulesBeforeCRS := fs.String("rules-before-crs", "", "file with SecLang runtime exclusions (rules using ctl:ruleRemoveById and similar) and settings, loaded before CRS")
 	trusted := fs.String("trusted-proxies", "", "comma-separated CIDRs whose X-Forwarded-For is trusted")
 	skipPaths := fs.String("skip-paths", "", "comma-separated paths never inspected, exact (/healthz) or prefix (/static/*); ambiguous paths are always inspected")
 	disableGroups := fs.String("disable-rule-groups", "", "comma-separated CRS attack families to remove when the application cannot be vulnerable to them: "+strings.Join(coraza.RuleGroupNames(), ", "))
@@ -111,16 +114,17 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 	}
 
 	cfg := proxyConfig{
-		listen:        *listen,
-		adminListen:   *adminListen,
-		readTimeout:   *readTimeout,
-		timeout:       *timeout,
-		maxConcurrent: *maxConcurrent,
-		maxBodyBytes:  *maxBody,
-		maxArgs:       *maxArgs,
-		paranoiaLevel: *paranoia,
-		threshold:     *threshold,
-		rulesFile:     *rulesFile,
+		listen:         *listen,
+		adminListen:    *adminListen,
+		readTimeout:    *readTimeout,
+		timeout:        *timeout,
+		maxConcurrent:  *maxConcurrent,
+		maxBodyBytes:   *maxBody,
+		maxArgs:        *maxArgs,
+		paranoiaLevel:  *paranoia,
+		threshold:      *threshold,
+		rulesFile:      *rulesFile,
+		rulesBeforeCRS: *rulesBeforeCRS,
 	}
 	if *upstream == "" {
 		return cfg, errors.New("--upstream is required")
@@ -174,6 +178,15 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 	return cfg, nil
 }
 
+func readOptional(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	// The path comes from the operator's own command line.
+	b, err := os.ReadFile(filepath.Clean(path))
+	return string(b), err
+}
+
 func splitList(s string) []string {
 	if s == "" {
 		return nil
@@ -182,13 +195,13 @@ func splitList(s string) []string {
 }
 
 func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
-	var directives string
-	if cfg.rulesFile != "" {
-		b, err := os.ReadFile(cfg.rulesFile)
-		if err != nil {
-			return fmt.Errorf("read rules: %w", err)
-		}
-		directives = string(b)
+	directives, err := readOptional(cfg.rulesFile)
+	if err != nil {
+		return fmt.Errorf("read --rules: %w", err)
+	}
+	directivesBeforeCRS, err := readOptional(cfg.rulesBeforeCRS)
+	if err != nil {
+		return fmt.Errorf("read --rules-before-crs: %w", err)
 	}
 	eval, err := coraza.New(coraza.Config{
 		ParanoiaLevel:           cfg.paranoiaLevel,
@@ -196,6 +209,7 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 		MaxArgs:                 cfg.maxArgs,
 		BodyLimit:               int(cfg.maxBodyBytes),
 		DisabledRuleGroups:      cfg.ruleGroupsOff,
+		DirectivesBeforeCRS:     directivesBeforeCRS,
 		Directives:              directives,
 	})
 	if err != nil {
