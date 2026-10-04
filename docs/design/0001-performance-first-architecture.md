@@ -39,8 +39,11 @@ Measured as **added** latency vs the same proxy with Inkwall disabled, at 70% CP
 | Sidecar over localhost TCP (Traefik ForwardAuth) | ≤ 250 µs | ≤ 1.5 ms | n/a |
 | Detect mode (async / mirrored) | ~0 | ~0 | ~0 |
 
-Hard per-request deadline (default 20 ms, configurable per policy): when it is exceeded the request
-follows the policy's failure mode (default **fail-open**) and an event is emitted.
+Hard per-request deadline (default 250 ms, configurable per policy; a safety cap, not the expected
+latency): when it is exceeded the request follows the policy's failure mode and an event is emitted.
+The default failure mode is **closed in block mode and open in detect mode**: a fail-open block
+mode is bypassable, because padding a request until inspection times out gets it forwarded
+uninspected (found in review: ~5 KiB of padding sufficed with a 20 ms deadline).
 
 ### 3.1 Measured baseline (2026-10-03)
 
@@ -63,10 +66,12 @@ Findings:
 - **Body cost is linear in the number of arguments,** about 0.13 ms per form field and 0.2 ms per
   JSON field, because CRS runs most rules once per argument. No CRS family dominates: SQLi 26%,
   XSS 23%, RCE 12%, PHP 9%, the rest small.
-- **The 20 ms deadline is reached at ~100 JSON fields.** With fail-open, bodies beyond that are
-  effectively uninspected. This is the most important gap. Admission control (`MaxConcurrent`)
-  keeps abandoned evaluations from exhausting the CPU, and `--oversize-body deny` plus
-  `--max-args` stop padding from hiding payloads, but neither makes inspection faster.
+- **Inspection time grows with request size,** so a fixed deadline is reachable by padding. This is
+  the most important gap. It is contained, not solved: block mode fails closed on timeout, requests
+  over the argument limit (`--max-args`, default 1000) are rejected before CRS runs, oversized bodies
+  are denied in block mode, and admission control (`MaxConcurrent`) keeps abandoned evaluations from
+  exhausting the CPU. None of that makes inspection faster; legitimate large requests need a
+  deadline that fits them.
 
 Measured and not adopted:
 
@@ -217,7 +222,8 @@ documented as the slower mode.
 
 - Proxy-side timeouts are always set (ext_authz/ext_proc `timeout`, SPOE `timeout processing`,
   nginx `proxy_read_timeout`) and set just above the engine deadline.
-- Default is **fail-open** (`failure_mode_allow: true` etc.); fail-closed is per policy.
+- The failure mode defaults to **closed in block mode and open in detect mode** (`failure_mode_allow`
+  and equivalents are rendered from it); either can be set per policy.
 - Engine overload: admission control sheds inspection (not traffic) once queue depth crosses a
   threshold, and emits a metric.
 - Control plane down: the engine keeps enforcing the last-known-good policy indefinitely.
@@ -232,8 +238,9 @@ documented as the slower mode.
    and the reported number is the delta. This is the number the budgets in section 3 refer to.
 4. **Profiling:** pprof endpoints behind a flag, flamegraphs attached to benchmark CI runs,
    optional continuous profiling (Pyroscope).
-5. **Soak / chaos:** 24 h soak for GC and memory; kill the engine mid-load and verify fail-open
-   with no request errors.
+5. **Soak / chaos:** 24 h soak for GC and memory; kill the engine mid-load and verify the
+   configured failure mode (open: no request errors; closed: 503, no request forwarded
+   uninspected).
 
 ## 9. Open questions
 

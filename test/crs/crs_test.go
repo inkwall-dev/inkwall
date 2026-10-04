@@ -3,8 +3,8 @@
 
 // Package crs runs the OWASP CRS regression test suite against Inkwall's
 // standalone reverse proxy, so detection is verified through the same code
-// path as production: request translation, the inspection pipeline, the regex
-// prefilter and the Coraza evaluator.
+// path as production: request translation, the inspection pipeline and the
+// Coraza evaluator.
 //
 // The harness is adapted from Coraza's (testing/coreruleset, Apache-2.0).
 // It lives in its own module so go-ftw's dependencies stay out of the engine.

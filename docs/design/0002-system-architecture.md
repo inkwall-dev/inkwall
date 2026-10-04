@@ -314,7 +314,7 @@ spec:
     name: shop-api
   mode: Detect                        # Detect | Block | BlockHighConfidence
   failureMode: Open                   # Open | Closed
-  timeout: 20ms
+  timeout: 250ms
   skip:                               # T0: never inspected
     paths: ["/healthz", "/static/*"]
     methods: []
@@ -748,8 +748,9 @@ spoe-group check
 
 Body inspection requires `option http-buffer-request` on the frontend; the operator enables it only
 when some policy needs bodies. SPOP pipelines many requests over few connections, which keeps it
-efficient. Fail-open is the default: if the variable is unset (error or timeout), no deny rule
-matches.
+efficient. If the agent errors or times out the variable stays unset: with a fail-open policy no
+deny rule matches and the request passes; with fail-closed (the block-mode default) the operator
+also renders `http-request deny deny_status 503 unless { var(txn.inkwall.action) -m found }`.
 
 ### 6.5 Caddy
 
@@ -1027,7 +1028,7 @@ level is tested the same way at every other level.
 | D5 | Full-snapshot signed bundles | Deltas; unsigned ConfigMaps | Simple, idempotent, tamper-resistant |
 | D6 | Operator resolves routes to host/path | Engine watches Kubernetes | Engine stays K8s-agnostic and reusable outside K8s |
 | D7 | Detect mode default for new routes | Block by default | Zero latency and no false-positive outages on onboarding |
-| D8 | Fail-open default | Fail-closed default | Inkwall must not take down customer traffic |
+| D8 | Fail open in detect mode, fail closed in block mode | Fail open everywhere | Detect mode must never take down traffic; a fail-open block mode is bypassable by padding a request past the deadline |
 | D9 | One source of truth per cluster | Merge SaaS + CRD per route | Avoids ambiguous conflicts |
 
 ## 12. Open questions

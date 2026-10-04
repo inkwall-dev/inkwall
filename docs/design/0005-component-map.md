@@ -110,8 +110,8 @@ flowchart LR
     end
 
     subgraph RULES["pkg/rules - Evaluator interface"]
-        CZ["coraza evaluator<br/>+ CRS + wasilibs operators"]
-        PF["prefilter evaluator<br/>Aho-Corasick / Hyperscan, later"]
+        CZ["coraza evaluator<br/>+ CRS"]
+        PF["native engine<br/>see 0007, later"]
     end
 
     SNAP["pkg/snapshot<br/>atomic.Pointer, immutable"]
@@ -191,7 +191,7 @@ sequenceDiagram
     A-->>P: 200
     P-->>C: 200
     Note over E: Attack case: T2 score ≥ threshold →<br/>ImmediateResponse 403, event to ring buffer
-    Note over P,E: Engine down or slow: proxy timeout →<br/>fail-open (default), forward to app
+    Note over P,E: Engine down or slow: proxy timeout →<br/>block mode: 503 (fail closed), detect mode: forward
 ```
 
 ### 5.2 Policy change (GitOps mode)
@@ -248,7 +248,7 @@ bypass. That's the bar any choice has to clear.
 | Compatible with what users already run | Existing ModSecurity rules and CRS exclusions work, which gives ingress-nginx + ModSecurity users a migration path |
 | License | Apache-2.0, same as Inkwall, and CRS is Apache-2.0 too |
 | Community | OWASP project; already used for Caddy (`coraza-caddy`), HAProxy (`coraza-spoa`) and Envoy (`coraza-proxy-wasm`), so each integration idea is proven |
-| Performance hooks | Build tags for multiphase evaluation (stop early), and pluggable operators (`coraza-wasilibs`: faster regex, Aho-Corasick, libinjection) |
+| Extension points | A plugin API for operators and transformations, so parts can be replaced without forking (multiphase evaluation and `coraza-wasilibs` were evaluated and rejected, 0001 §3.1) |
 | Reuse across components | The **same** library runs in the engine, in the operator's validating webhook (reject bad rules at `kubectl apply`), and in `inkwallctl test`, so all three always agree |
 
 ### 6.3 Alternatives considered
@@ -265,7 +265,7 @@ bypass. That's the bar any choice has to clear.
 
 | Risk | Mitigation |
 |---|---|
-| CRS evaluation is regex-heavy and can be slow | `coraza-wasilibs` operators, multiphase evaluation, tiered pipeline (most requests exit before rules), prefilter later, per-request deadline, benchmarks in CI (0001) |
+| CRS evaluation is regex-heavy and can be slow | Tiered pipeline (skip routes, argument and body limits), admission control, fail-closed block mode, benchmarks in CI (0001); Inkwall's own engine for the long term (0007) |
 | Dependency on a community project | Coraza stays behind `pkg/rules.Evaluator`; version pinned; go-ftw conformance tests catch behaviour changes on upgrade; contribute fixes upstream; fork only as a last resort |
 | Coraza upgrade changes detection | CRS and Coraza versions pinned per Inkwall release (0002 §8.6) and exposed as a named builtin rule set |
 | Go GC pauses with many transactions | Transaction pooling, `GOMEMLIMIT`, allocs/op gated in CI |

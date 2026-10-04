@@ -28,7 +28,8 @@ Inkwall makes the WAF a Kubernetes primitive, the way cert-manager did for TLS:
   in-process for Caddy), with tiered checks so most requests never touch a regex. Latency budgets are
   part of the design, and CI will fail on regressions.
 - **Safe by default.** New routes start in detect mode (no added latency, no false-positive
-  outages). Fail-open unless you choose otherwise. Policies are signed.
+  outages). In block mode nothing is forwarded uninspected; detect mode never blocks. Policies are
+  signed.
 - **GitOps first, SaaS optional.** CRDs in Git are the source of truth. Everything enforces fully
   offline; an optional control plane adds fleet management and attack analytics.
 - **A way off ingress-nginx.** Protect ingress-nginx today, move routes to a Gateway API
