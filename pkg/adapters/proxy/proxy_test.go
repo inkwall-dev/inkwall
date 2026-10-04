@@ -5,16 +5,19 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
@@ -307,5 +310,111 @@ func BenchmarkServeHTTP(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// recordingUpstream captures what the upstream receives.
+type recordingUpstream struct {
+	srv  *httptest.Server
+	mu   sync.Mutex
+	last *http.Request
+}
+
+func newRecordingUpstream(t *testing.T) *recordingUpstream {
+	t.Helper()
+	u := &recordingUpstream{}
+	u.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u.mu.Lock()
+		u.last = r.Clone(context.Background())
+		u.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(u.srv.Close)
+	return u
+}
+
+func (u *recordingUpstream) request() *http.Request {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.last
+}
+
+func newForwardingHandler(t *testing.T, up *recordingUpstream, trusted ...string) *Handler {
+	t.Helper()
+	eval, err := coraza.New(coraza.Config{DisableCRS: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, _ := url.Parse(up.srv.URL)
+	resolver, err := clientip.NewResolver(trusted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := New(pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock}), Config{
+		Upstream: target, ClientIP: resolver, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+func TestForwardsHostAndRawQuery(t *testing.T) {
+	up := newRecordingUpstream(t)
+	h := newForwardingHandler(t, up)
+
+	r := httptest.NewRequest("GET", "/search?filter=a;b&discount=100%&page=2", nil)
+	r.Host = "shop.example.com"
+	h.ServeHTTP(httptest.NewRecorder(), r)
+
+	got := up.request()
+	if got == nil {
+		t.Fatal("upstream not reached")
+	}
+	if got.Host != "shop.example.com" {
+		t.Errorf("upstream Host = %q, want the client's shop.example.com", got.Host)
+	}
+	if got.URL.RawQuery != "filter=a;b&discount=100%&page=2" {
+		t.Errorf("upstream query = %q, want it unchanged", got.URL.RawQuery)
+	}
+}
+
+func TestForwardedHeadersFromTrustedProxy(t *testing.T) {
+	up := newRecordingUpstream(t)
+	h := newForwardingHandler(t, up, "192.0.2.0/24") // httptest's RemoteAddr is 192.0.2.1
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Host = "shop.example.com"
+	r.Header.Set("X-Forwarded-For", "203.0.113.9")
+	r.Header.Set("X-Forwarded-Proto", "https")
+	h.ServeHTTP(httptest.NewRecorder(), r)
+
+	got := up.request()
+	if xff := got.Header.Get("X-Forwarded-For"); xff != "203.0.113.9, 192.0.2.1" {
+		t.Errorf("X-Forwarded-For = %q, want the client chain plus the proxy", xff)
+	}
+	if proto := got.Header.Get("X-Forwarded-Proto"); proto != "https" {
+		t.Errorf("X-Forwarded-Proto = %q, want https from the trusted proxy", proto)
+	}
+	if host := got.Header.Get("X-Forwarded-Host"); host != "shop.example.com" {
+		t.Errorf("X-Forwarded-Host = %q", host)
+	}
+}
+
+func TestForwardedHeadersFromUntrustedClientAreReplaced(t *testing.T) {
+	up := newRecordingUpstream(t)
+	h := newForwardingHandler(t, up) // trusts nobody
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("X-Forwarded-For", "6.6.6.6")
+	r.Header.Set("X-Forwarded-Proto", "https")
+	h.ServeHTTP(httptest.NewRecorder(), r)
+
+	got := up.request()
+	if xff := got.Header.Get("X-Forwarded-For"); xff != "192.0.2.1" {
+		t.Errorf("X-Forwarded-For = %q, want only the real peer", xff)
+	}
+	if proto := got.Header.Get("X-Forwarded-Proto"); proto != "http" {
+		t.Errorf("X-Forwarded-Proto = %q, want http (spoofed value dropped)", proto)
 	}
 }

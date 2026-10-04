@@ -20,6 +20,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
@@ -70,7 +71,12 @@ func New(p *pipeline.Pipeline, cfg Config) (*Handler, error) {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(upstream)
-			pr.SetXForwarded()
+			// Forward what was inspected: the client's Host and the query
+			// exactly as received. SetURL replaces the Host, and Rewrite mode
+			// drops query pairs containing ';' or a malformed '%'.
+			pr.Out.Host = pr.In.Host
+			pr.Out.URL.RawQuery = joinQuery(upstream.RawQuery, pr.In.URL.RawQuery)
+			setForwarded(pr, resolver)
 		},
 		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
@@ -200,6 +206,54 @@ func requestID(id string) string {
 		}
 	}
 	return id
+}
+
+// setForwarded sets X-Forwarded-For, -Proto and -Host on the outbound
+// request. Rewrite mode removes the incoming values first. From a trusted
+// proxy they are kept and the proxy's address is appended, so the upstream
+// still sees the real client and the original scheme; from anyone else they
+// are rebuilt from the connection, so clients cannot spoof them.
+func setForwarded(pr *httputil.ProxyRequest, resolver *clientip.Resolver) {
+	peer := peerAddr(pr.In.RemoteAddr)
+	if !resolver.Trusts(peer) {
+		pr.SetXForwarded()
+		return
+	}
+	in := pr.In.Header
+	xff := strings.Join(in.Values("X-Forwarded-For"), ", ")
+	if peer.IsValid() {
+		if xff != "" {
+			xff += ", "
+		}
+		xff += peer.String()
+	}
+	if xff != "" {
+		pr.Out.Header.Set("X-Forwarded-For", xff)
+	}
+	proto := in.Get("X-Forwarded-Proto")
+	if proto == "" {
+		proto = "http"
+		if pr.In.TLS != nil {
+			proto = "https"
+		}
+	}
+	pr.Out.Header.Set("X-Forwarded-Proto", proto)
+	host := in.Get("X-Forwarded-Host")
+	if host == "" {
+		host = pr.In.Host
+	}
+	pr.Out.Header.Set("X-Forwarded-Host", host)
+}
+
+func joinQuery(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	default:
+		return a + "&" + b
+	}
 }
 
 type readCloser struct {

@@ -83,6 +83,12 @@ func (r *Resolver) Resolve(peer netip.Addr, h http.Header) netip.Addr {
 	return client
 }
 
+// Trusts reports whether addr is a trusted proxy, whose forwarding headers
+// may be relied on and passed on.
+func (r *Resolver) Trusts(addr netip.Addr) bool {
+	return r.isTrusted(addr.Unmap())
+}
+
 func (r *Resolver) isTrusted(addr netip.Addr) bool {
 	if r == nil {
 		return false
