@@ -84,8 +84,8 @@ type proxyConfig struct {
 func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 	fs := flag.NewFlagSet("proxy", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	listen := fs.String("listen", ":8080", "address to listen on")
-	adminListen := fs.String("admin-listen", ":9090", "address for /metrics, /healthz and /readyz (empty disables)")
+	listen := fs.String("listen", ":8480", "address to listen on")
+	adminListen := fs.String("admin-listen", ":9480", "address for /metrics, /healthz and /readyz (empty disables)")
 	readTimeout := fs.Duration("read-timeout", 60*time.Second, "maximum time to read a whole request, including the body (0 = no limit)")
 	upstream := fs.String("upstream", "", "upstream URL that allowed requests are forwarded to (required)")
 	mode := fs.String("mode", "detect", "enforcement mode: detect or block")

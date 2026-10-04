@@ -97,12 +97,12 @@ with the OWASP Core Rule Set, which is embedded in the binary.
 ```console
 $ make build
 $ ./bin/inkwall-engine proxy --upstream http://localhost:3000 --mode block
-$ curl -s -o /dev/null -w '%{http_code}\n' 'localhost:8080/?id=1%27%20OR%20%271%27%3D%271'
+$ curl -s -o /dev/null -w '%{http_code}\n' 'localhost:8480/?id=1%27%20OR%20%271%27%3D%271'
 403
 ```
 
 Each blocked or detected request produces one JSON log line with the matching rule IDs. Metrics are on
-`:9090/metrics`, health on `:9090/healthz` and `:9090/readyz`.
+`:9480/metrics`, health on `:9480/healthz` and `:9480/readyz`.
 
 Defaults are deliberately safe: **detect mode** (log, never block) and **fail-open** (if inspection
 errors, times out or is overloaded, the request is allowed and logged). Useful flags:
