@@ -153,7 +153,9 @@ Workflow: onboard a route in detect mode, tune false positives in the UI, then p
    | Operator time skippable (weighted by measured cost) | 72% (÷3.5) | 69% (÷3.2) |
    | Soundness violations (regex matched but filter said skip) | 0 of 890k checks | 0 of 1.67M checks |
 
-   The soundness check includes all 9,747 CRS regression-test payloads. The extraction treats any
+   The soundness check includes all 9,747 CRS regression-test payloads, but no Unicode inputs: the
+   tool lowercases instead of applying Unicode case folding, so it misses cases such as `(?i)select`
+   matching `ſelect`. The engine design fixes this (0007 §4.3). The extraction treats any
    non-literal node (for example an unescaped `.`) as breaking a literal, which is where Coraza's own
    prefilter goes wrong. What cannot be filtered is mostly the two libinjection rules (941100,
    942100), which are cheap per value.
