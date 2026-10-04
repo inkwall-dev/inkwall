@@ -142,6 +142,28 @@ Workflow: onboard a route in detect mode, tune false positives in the UI, then p
    multi-pattern automaton (Aho-Corasick in pure Go; Hyperscan via cgo as an optional build).
    One pass over the request tells us which rules can possibly match; the rest are skipped. Most
    benign requests match no literals, so they skip regex evaluation entirely.
+
+   **Feasibility measured (2026-10-04,** `test/perf/prefilter`**):**
+
+   | | Paranoia level 1 | Paranoia level 4 |
+   |---|---|---|
+   | CRS rules that run per argument | 104 | 196 |
+   | Of those, filterable by required literals | 100 | 181 |
+   | Benign rule-value evaluations skippable | 90.5% | 86.2% |
+   | Operator time skippable (weighted by measured cost) | 72% (÷3.5) | 69% (÷3.2) |
+   | Soundness violations (regex matched but filter said skip) | 0 of 890k checks | 0 of 1.67M checks |
+
+   The soundness check includes all 9,747 CRS regression-test payloads. The extraction treats any
+   non-literal node (for example an unescaped `.`) as breaking a literal, which is where Coraza's own
+   prefilter goes wrong. What cannot be filtered is mostly the two libinjection rules (941100,
+   942100), which are cheap per value.
+
+   The end-to-end gain depends on where the filter runs. Inside Coraza's rule loop, after
+   transformations, it saves only operator time (about 36–45% of the total), so roughly 30%
+   overall. Before transformations it also skips transformation and per-rule overhead, where 3–5×
+   is realistic; that needs a sound "maximally decoded" form of each value to match literals
+   against. Either way it needs a hook inside Coraza (upstream API or fork), and it ships only after
+   passing the CRS suite and differential fuzzing.
 3. Rule evaluation stays behind the `pkg/rules.Evaluator` interface (0002 §3.1) so a custom
    engine can replace Coraza without touching adapters.
 
