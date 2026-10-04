@@ -83,6 +83,7 @@ type proxyConfig struct {
 	rulesBeforeCRS string
 	trustedProxies []string
 	skipPaths      []string
+	routes         *router.Table
 	skipBodyPaths  []string
 	ruleGroupsOff  []string
 }
@@ -172,9 +173,11 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 			return cfg, fmt.Errorf("--disable-rule-groups: unknown group %q (known: %s)", g, strings.Join(coraza.RuleGroupNames(), ", "))
 		}
 	}
-	if _, err := router.New(cfg.skipPaths, cfg.skipBodyPaths); err != nil {
+	routes, err := router.New(cfg.skipPaths, cfg.skipBodyPaths)
+	if err != nil {
 		return cfg, err
 	}
+	cfg.routes = routes
 	return cfg, nil
 }
 
@@ -187,11 +190,16 @@ func readOptional(path string) (string, error) {
 	return string(b), err
 }
 
+// splitList splits a comma-separated flag value, trimming spaces and
+// dropping empty entries, so "php, java" works like "php,java".
 func splitList(s string) []string {
-	if s == "" {
-		return nil
+	var out []string
+	for _, item := range strings.Split(s, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
 	}
-	return strings.Split(s, ",")
+	return out
 }
 
 func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
@@ -219,10 +227,6 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	routes, err := router.New(cfg.skipPaths, cfg.skipBodyPaths)
-	if err != nil {
-		return err
-	}
 	metrics := telemetry.NewMetrics("proxy")
 	p := pipeline.New(eval, pipeline.Config{
 		Mode:          cfg.mode,
@@ -231,7 +235,7 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 		MaxConcurrent: cfg.maxConcurrent,
 		Oversize:      cfg.oversize,
 		Observer:      metrics,
-		Routes:        routes,
+		Routes:        cfg.routes,
 	})
 	metrics.WatchPipeline(p)
 	handler, err := proxy.New(p,

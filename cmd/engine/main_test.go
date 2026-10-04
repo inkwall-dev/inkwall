@@ -15,7 +15,7 @@ func TestParseProxyFlags(t *testing.T) {
 		"--upstream", "http://app:8080", "--mode", "block", "--failure-mode", "closed",
 		"--trusted-proxies", "10.0.0.0/8,192.0.2.1", "--oversize-body", "deny", "--max-args", "255",
 		"--skip-paths", "/healthz,/static/*", "--skip-body-paths", "/upload/*",
-		"--disable-rule-groups", "php,java",
+		"--disable-rule-groups", "php, java",
 	}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
