@@ -15,6 +15,7 @@ func TestParseProxyFlags(t *testing.T) {
 		"--upstream", "http://app:8080", "--mode", "block", "--failure-mode", "closed",
 		"--trusted-proxies", "10.0.0.0/8,192.0.2.1", "--oversize-body", "deny", "--max-args", "255",
 		"--skip-paths", "/healthz,/static/*", "--skip-body-paths", "/upload/*",
+		"--disable-rule-groups", "php,java",
 	}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -27,6 +28,9 @@ func TestParseProxyFlags(t *testing.T) {
 	}
 	if len(cfg.skipPaths) != 2 || len(cfg.skipBodyPaths) != 1 {
 		t.Fatalf("skip paths not parsed: %v %v", cfg.skipPaths, cfg.skipBodyPaths)
+	}
+	if len(cfg.ruleGroupsOff) != 2 {
+		t.Fatalf("rule groups not parsed: %v", cfg.ruleGroupsOff)
 	}
 	if len(cfg.trustedProxies) != 2 {
 		t.Fatalf("trusted proxies = %v", cfg.trustedProxies)
@@ -53,6 +57,7 @@ func TestParseProxyFlagsErrors(t *testing.T) {
 		{"--upstream", "http://app", "--failure-mode", "maybe"},
 		{"--upstream", "http://app", "--oversize-body", "truncate"},
 		{"--upstream", "http://app", "--skip-paths", "static/*"},
+		{"--upstream", "http://app", "--disable-rule-groups", "php,cobol"},
 	} {
 		if _, err := parseProxyFlags(args, io.Discard); err == nil {
 			t.Errorf("parseProxyFlags(%v) succeeded, want error", args)

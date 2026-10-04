@@ -82,6 +82,7 @@ type proxyConfig struct {
 	trustedProxies []string
 	skipPaths      []string
 	skipBodyPaths  []string
+	ruleGroupsOff  []string
 }
 
 func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
@@ -103,6 +104,7 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 	rulesFile := fs.String("rules", "", "file with extra SecLang rules or exclusions, loaded after CRS")
 	trusted := fs.String("trusted-proxies", "", "comma-separated CIDRs whose X-Forwarded-For is trusted")
 	skipPaths := fs.String("skip-paths", "", "comma-separated paths never inspected, exact (/healthz) or prefix (/static/*); ambiguous paths are always inspected")
+	disableGroups := fs.String("disable-rule-groups", "", "comma-separated CRS attack families to remove when the application cannot be vulnerable to them: "+strings.Join(coraza.RuleGroupNames(), ", "))
 	skipBodyPaths := fs.String("skip-body-paths", "", "comma-separated paths whose body is not inspected (headers and URI still are), same syntax as --skip-paths")
 	if err := fs.Parse(args); err != nil {
 		return proxyConfig{}, err
@@ -156,6 +158,12 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 	cfg.trustedProxies = splitList(*trusted)
 	cfg.skipPaths = splitList(*skipPaths)
 	cfg.skipBodyPaths = splitList(*skipBodyPaths)
+	cfg.ruleGroupsOff = splitList(*disableGroups)
+	for _, g := range cfg.ruleGroupsOff {
+		if _, ok := coraza.RuleGroups[g]; !ok {
+			return cfg, fmt.Errorf("--disable-rule-groups: unknown group %q (known: %s)", g, strings.Join(coraza.RuleGroupNames(), ", "))
+		}
+	}
 	if _, err := router.New(cfg.skipPaths, cfg.skipBodyPaths); err != nil {
 		return cfg, err
 	}
@@ -182,6 +190,7 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 		ParanoiaLevel:           cfg.paranoiaLevel,
 		InboundAnomalyThreshold: cfg.threshold,
 		MaxArgs:                 cfg.maxArgs,
+		DisabledRuleGroups:      cfg.ruleGroupsOff,
 		Directives:              directives,
 	})
 	if err != nil {
@@ -258,7 +267,8 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 		slog.String("admin_listen", cfg.adminListen),
 		slog.String("upstream", cfg.upstream.String()),
 		slog.String("mode", modeName(cfg.mode)),
-		slog.Int("paranoia_level", cfg.paranoiaLevel))
+		slog.Int("paranoia_level", cfg.paranoiaLevel),
+		slog.Any("disabled_rule_groups", cfg.ruleGroupsOff))
 
 	select {
 	case err := <-errc:

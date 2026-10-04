@@ -8,8 +8,10 @@ package coraza
 import (
 	"context"
 	"fmt"
+	"maps"
 	"mime"
 	"net"
+	"slices"
 	"strings"
 
 	coreruleset "github.com/corazawaf/coraza-coreruleset/v4"
@@ -25,6 +27,22 @@ const (
 	DefaultParanoiaLevel           = 1
 	DefaultInboundAnomalyThreshold = 5
 )
+
+// RuleGroups maps the CRS attack families that can be disabled to their
+// rule ID prefix. Disabling a family the application cannot be vulnerable to
+// (for example "php" for a Go service) removes its rules from every request.
+var RuleGroups = map[string]int{
+	"scanner":          913,
+	"lfi":              930,
+	"rfi":              931,
+	"rce":              932,
+	"php":              933,
+	"generic":          934, // Node.js, Ruby, Perl, SSRF and other generic attacks
+	"xss":              941,
+	"sqli":             942,
+	"session-fixation": 943,
+	"java":             944,
+}
 
 // Config configures the evaluator.
 type Config struct {
@@ -47,6 +65,10 @@ type Config struct {
 	// Directives are SecLang directives loaded after CRS, for custom rules
 	// and configure-time exclusions (SecRuleRemoveById, SecRuleUpdateTargetById).
 	Directives string
+	// DisabledRuleGroups lists CRS attack families (keys of RuleGroups) to
+	// remove. Only disable families the protected application cannot be
+	// vulnerable to.
+	DisabledRuleGroups []string
 	// DisableCRS loads only the directives, without the Core Rule Set.
 	DisableCRS bool
 	// OnMatch, if set, is called for every rule that matches and logs. It
@@ -99,6 +121,14 @@ func buildDirectives(cfg Config) (string, error) {
 	if cfg.MaxArgs < 0 {
 		return "", fmt.Errorf("max args %d must not be negative", cfg.MaxArgs)
 	}
+	var removeGroups []int
+	for _, g := range cfg.DisabledRuleGroups {
+		prefix, ok := RuleGroups[g]
+		if !ok {
+			return "", fmt.Errorf("unknown rule group %q (known: %s)", g, strings.Join(RuleGroupNames(), ", "))
+		}
+		removeGroups = append(removeGroups, prefix)
+	}
 
 	var b strings.Builder
 	b.WriteString("Include @coraza.conf-recommended\n")
@@ -123,6 +153,9 @@ func buildDirectives(cfg Config) (string, error) {
 				"SecAction \"id:900300,phase:1,pass,t:none,nolog,setvar:tx.max_num_args=%d\"\n", cfg.MaxArgs)
 		}
 		b.WriteString("Include @owasp_crs/*.conf\n")
+		for _, prefix := range removeGroups {
+			fmt.Fprintf(&b, "SecRuleRemoveById %d000-%d999\n", prefix, prefix)
+		}
 	}
 	if cfg.Directives != "" {
 		b.WriteString(cfg.Directives)
@@ -204,6 +237,11 @@ func result(tx types.Transaction, it *types.Interruption) rules.Result {
 		res.MatchedRuleIDs = append(res.MatchedRuleIDs, id)
 	}
 	return res
+}
+
+// RuleGroupNames returns the names in RuleGroups, sorted.
+func RuleGroupNames() []string {
+	return slices.Sorted(maps.Keys(RuleGroups))
 }
 
 // needsCompleteBody reports whether a body of this content type can only be

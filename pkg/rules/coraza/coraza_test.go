@@ -322,3 +322,48 @@ func TestDirectivesBeforeCRSAndOnMatch(t *testing.T) {
 		t.Fatalf("OnMatch did not report rule 942100; got %d log lines", len(logs))
 	}
 }
+
+func TestDisabledRuleGroups(t *testing.T) {
+	php := newRequest("GET", "/?q=%3C%3Fphp%20system(%24_GET%5Bcmd%5D)%3B%20%3F%3E", nil, "")
+	hasGroup := func(ids []int, prefix int) bool {
+		return slices.ContainsFunc(ids, func(id int) bool { return id/1000 == prefix })
+	}
+
+	// Control: the PHP family matches the payload.
+	all, err := New(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := all.Evaluate(context.Background(), php)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasGroup(res.MatchedRuleIDs, 933) {
+		t.Fatalf("control: no 933xxx rule matched, got %v", res.MatchedRuleIDs)
+	}
+
+	pruned, err := New(Config{DisabledRuleGroups: []string{"php", "java"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = pruned.Evaluate(context.Background(), php)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasGroup(res.MatchedRuleIDs, 933) {
+		t.Fatalf("php group disabled but 933xxx matched: %v", res.MatchedRuleIDs)
+	}
+
+	// Other families still work.
+	res, err = pruned.Evaluate(context.Background(), newRequest("GET", "/products?id=1%27%20OR%20%271%27%3D%271", nil, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Interrupted {
+		t.Fatal("sqli no longer blocked with php and java disabled")
+	}
+
+	if _, err := New(Config{DisabledRuleGroups: []string{"cobol"}}); err == nil {
+		t.Fatal("unknown group accepted")
+	}
+}

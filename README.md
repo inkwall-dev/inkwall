@@ -118,6 +118,7 @@ errors, times out or is overloaded, the request is allowed and logged). Useful f
 | `--trusted-proxies` | | CIDRs whose `X-Forwarded-For` is trusted |
 | `--skip-paths` | | Paths never inspected, e.g. `/healthz,/static/*` |
 | `--skip-body-paths` | | Paths whose body is not inspected, e.g. `/upload/*` |
+| `--disable-rule-groups` | | CRS families the app can't be vulnerable to, e.g. `php,java` (~13-15% faster) |
 | `--failure-mode` | `open` | `closed` returns 503 when a request cannot be inspected |
 
 Run `./bin/inkwall-engine proxy -h` for all flags. Inspection currently costs about 0.5 ms per
