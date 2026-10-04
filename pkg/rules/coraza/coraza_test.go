@@ -440,3 +440,28 @@ func TestUserSettingsBeforeCRSWinOverInkwallDefaults(t *testing.T) {
 		t.Fatalf("SQLi not detected at all: %v", res.MatchedRuleIDs)
 	}
 }
+
+func TestScoreOnlyCustomRulesAreReported(t *testing.T) {
+	e, err := New(Config{
+		DirectivesBeforeCRS: `SecAction "id:10000,phase:1,pass,nolog,setvar:tx.custom_flag=1"`,
+		Directives:          `SecRule ARGS:q "@contains forbidden" "id:10001,phase:2,block,setvar:'tx.inbound_anomaly_score_pl1=+5'"`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.Evaluate(context.Background(), newRequest("GET", "/search?q=forbidden", nil, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(res.MatchedRuleIDs, 10001) {
+		t.Fatalf("score-only custom rule not reported: %v", res.MatchedRuleIDs)
+	}
+	if slices.Contains(res.MatchedRuleIDs, 10000) {
+		t.Fatalf("custom SecAction reported as a match: %v", res.MatchedRuleIDs)
+	}
+	for _, id := range res.MatchedRuleIDs {
+		if inRange(id, internalIDMin, internalIDMax) || (inRange(id, 900000, 901999)) {
+			t.Fatalf("setup rule %d reported: %v", id, res.MatchedRuleIDs)
+		}
+	}
+}

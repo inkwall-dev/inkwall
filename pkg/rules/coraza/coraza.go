@@ -250,15 +250,9 @@ func result(tx types.Transaction, it *types.Interruption) rules.Result {
 		res.RuleID = it.RuleID
 	}
 	for _, mr := range tx.MatchedRules() {
-		// CRS setup, initialization and flow-control rules "match" on every
-		// request; only detection rules carry a severity. The interrupting
-		// rule is always reported. Custom rules need a severity to be
-		// reported when they only contribute to a score.
-		id := mr.Rule().ID()
-		if !hasSeverity(mr.Rule().Severity()) && (it == nil || id != it.RuleID) {
-			continue
+		if reportable(mr, it) {
+			res.MatchedRuleIDs = append(res.MatchedRuleIDs, mr.Rule().ID())
 		}
-		res.MatchedRuleIDs = append(res.MatchedRuleIDs, id)
 	}
 	return res
 }
@@ -268,6 +262,15 @@ func result(tx types.Transaction, it *types.Interruption) rules.Result {
 const (
 	idParanoiaLevel    = 7700001
 	idAnomalyThreshold = 7700002
+
+	internalIDMin = 7700000
+	internalIDMax = 7700099
+	// crsIDMin and crsIDMax bound the IDs reserved for OWASP CRS.
+	crsIDMin = 900000
+	crsIDMax = 999999
+	// corazaIDMin and corazaIDMax bound coraza.conf-recommended's rules.
+	corazaIDMin = 200000
+	corazaIDMax = 200099
 )
 
 // argumentLimitRules reject requests whose arguments exceed
@@ -282,6 +285,35 @@ SecRule ARGUMENTS_LIMIT_REACHED "@eq 1" \
 func RuleGroupNames() []string {
 	return slices.Sorted(maps.Keys(RuleGroups))
 }
+
+// reportable decides whether a matched rule is reported. CRS and Coraza
+// setup, initialization and flow-control rules "match" on every request, so
+// only these are reported:
+//   - the rule that interrupted the request;
+//   - detection rules, which carry a severity;
+//   - custom rules (outside the CRS, Coraza and Inkwall ID ranges) that
+//     matched request data, including rules that only add anomaly score.
+//     SecAction directives match no variable ("UNKNOWN") and are skipped.
+func reportable(mr types.MatchedRule, it *types.Interruption) bool {
+	id := mr.Rule().ID()
+	if it != nil && id == it.RuleID {
+		return true
+	}
+	if hasSeverity(mr.Rule().Severity()) {
+		return true
+	}
+	if inRange(id, crsIDMin, crsIDMax) || inRange(id, corazaIDMin, corazaIDMax) || inRange(id, internalIDMin, internalIDMax) {
+		return false
+	}
+	for _, md := range mr.MatchedDatas() {
+		if md.Variable().Name() != "UNKNOWN" {
+			return true
+		}
+	}
+	return false
+}
+
+func inRange(id, lo, hi int) bool { return id >= lo && id <= hi }
 
 func hasSeverity(s types.RuleSeverity) bool {
 	return s >= types.RuleSeverityEmergency && s <= types.RuleSeverityDebug
