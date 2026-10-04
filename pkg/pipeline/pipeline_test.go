@@ -214,3 +214,26 @@ func TestRoutes(t *testing.T) {
 		t.Fatal("caller's request was modified")
 	}
 }
+
+type panickingEvaluator struct{}
+
+func (panickingEvaluator) Evaluate(context.Context, *request.Request) (rules.Result, error) {
+	panic("boom")
+}
+
+func TestEvaluatorPanicBecomesError(t *testing.T) {
+	for _, tt := range []struct {
+		failure    FailureMode
+		wantAction Action
+	}{{FailOpen, ActionAllow}, {FailClosed, ActionDeny}} {
+		p := New(panickingEvaluator{}, Config{Mode: ModeBlock, FailureMode: tt.failure, MaxConcurrent: 1})
+		v := p.Check(context.Background(), &request.Request{})
+		if v.Reason != ReasonError || v.Action != tt.wantAction {
+			t.Fatalf("failure mode %d: got action=%s reason=%s, want %s/error", tt.failure, v.Action, v.Reason, tt.wantAction)
+		}
+		// The slot must be released despite the panic.
+		if v := p.Check(context.Background(), &request.Request{}); v.Reason == ReasonOverload {
+			t.Fatal("slot leaked after panic")
+		}
+	}
+}

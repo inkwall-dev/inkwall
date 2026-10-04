@@ -9,6 +9,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"runtime"
 	"time"
@@ -177,6 +178,14 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request) Verdict {
 	done := make(chan outcome, 1)
 	go func() {
 		defer func() { <-p.slots }()
+		// net/http recovers panics only on the handler goroutine; a panic
+		// here (in the rule engine or a callback it runs) would kill the
+		// process. Turn it into an evaluation error instead.
+		defer func() {
+			if v := recover(); v != nil {
+				done <- outcome{err: fmt.Errorf("evaluator panic: %v", v)}
+			}
+		}()
 		res, err := p.eval.Evaluate(ctx, r)
 		done <- outcome{res: res, err: err}
 	}()
