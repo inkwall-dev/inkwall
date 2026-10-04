@@ -277,6 +277,11 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 		admin = &http.Server{
 			Handler:           metrics.AdminHandler(ready.Load),
 			ReadHeaderTimeout: 5 * time.Second,
+			// Admin requests are tiny; without these, idle keep-alive
+			// connections are never closed and can exhaust fds and memory.
+			ReadTimeout:  10 * time.Second,
+			WriteTimeout: 10 * time.Second,
+			IdleTimeout:  30 * time.Second,
 		}
 		go func() { errc <- admin.Serve(adminLn) }()
 	}
