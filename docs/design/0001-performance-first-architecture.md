@@ -163,7 +163,8 @@ Workflow: onboard a route in detect mode, tune false positives in the UI, then p
    overall. Before transformations it also skips transformation and per-rule overhead, where 3–5×
    is realistic; that needs a sound "maximally decoded" form of each value to match literals
    against. Either way it needs a hook inside Coraza (upstream API or fork), and it ships only after
-   passing the CRS suite and differential fuzzing.
+   passing the CRS suite and differential fuzzing. Decision: build it into Inkwall's own rule engine
+   instead, which controls the rule loop ([0007](0007-inkwall-engine.md)).
 3. Rule evaluation stays behind the `pkg/rules.Evaluator` interface (0002 §3.1) so a custom
    engine can replace Coraza without touching adapters.
 
