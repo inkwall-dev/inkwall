@@ -116,10 +116,13 @@ errors, times out or is overloaded, the request is allowed and logged). Useful f
 | `--max-args` | `0` (off) | CRS limit on request arguments |
 | `--rules` | | Extra SecLang rules or exclusions |
 | `--trusted-proxies` | | CIDRs whose `X-Forwarded-For` is trusted |
+| `--skip-paths` | | Paths never inspected, e.g. `/healthz,/static/*` |
+| `--skip-body-paths` | | Paths whose body is not inspected, e.g. `/upload/*` |
 | `--failure-mode` | `open` | `closed` returns 503 when a request cannot be inspected |
 
 Run `./bin/inkwall-engine proxy -h` for all flags. Inspection currently costs about 0.5 ms per
-request plus roughly 0.15 ms per request argument; see the
+request plus roughly 0.15 ms per request argument, so skipping static and trusted routes matters; see
+the
 [performance baseline](docs/design/0001-performance-first-architecture.md#31-measured-baseline-2026-10-03).
 
 Development checks: `make check` (lint, tests, vulnerability scan) and `make crs-test` (the OWASP CRS
