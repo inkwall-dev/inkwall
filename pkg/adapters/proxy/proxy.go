@@ -11,6 +11,8 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -124,8 +126,15 @@ func (h *Handler) toRequest(r *http.Request) (*request.Request, error) {
 	if rawURI == "" {
 		rawURI = r.URL.RequestURI()
 	}
+	id := requestID(r.Header.Get("X-Request-Id"))
+	if id == "" {
+		// Generate one so events can always be correlated; the upstream
+		// receives it as X-Request-Id.
+		id = newRequestID()
+		r.Header.Set("X-Request-Id", id)
+	}
 	req := &request.Request{
-		ID:       requestID(r.Header.Get("X-Request-Id")),
+		ID:       id,
 		Proto:    r.Proto,
 		Method:   r.Method,
 		Scheme:   scheme,
@@ -192,6 +201,13 @@ func snapshotHeaders(r *http.Request) http.Header {
 		h.Set("Content-Length", strconv.FormatInt(r.ContentLength, 10))
 	}
 	return h
+}
+
+// newRequestID returns a random 16-hex-digit request ID.
+func newRequestID() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:]) // crypto/rand.Read never fails on supported platforms
+	return hex.EncodeToString(b[:])
 }
 
 // maxRequestIDLen bounds client-supplied request IDs.

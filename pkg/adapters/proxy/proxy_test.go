@@ -466,3 +466,22 @@ func TestRawFragmentIsRejected(t *testing.T) {
 		t.Fatal("request with a raw '#' reached the upstream")
 	}
 }
+
+func TestRequestIDIsGeneratedAndForwarded(t *testing.T) {
+	up := newRecordingUpstream(t)
+	h := newForwardingHandler(t, up)
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
+	id := up.request().Header.Get("X-Request-Id")
+	if len(id) != 16 {
+		t.Fatalf("generated X-Request-Id = %q, want 16 hex digits", id)
+	}
+
+	// A valid client ID is kept.
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("X-Request-Id", "client-123")
+	h.ServeHTTP(httptest.NewRecorder(), r)
+	if got := up.request().Header.Get("X-Request-Id"); got != "client-123" {
+		t.Fatalf("X-Request-Id = %q, want the client's", got)
+	}
+}
