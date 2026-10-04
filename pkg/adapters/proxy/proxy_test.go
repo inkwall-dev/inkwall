@@ -19,6 +19,7 @@ import (
 
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/router"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
@@ -483,5 +484,38 @@ func TestRequestIDIsGeneratedAndForwarded(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), r)
 	if got := up.request().Header.Get("X-Request-Id"); got != "client-123" {
 		t.Fatalf("X-Request-Id = %q, want the client's", got)
+	}
+}
+
+func TestSkippedRoutesDoNotBufferTheBody(t *testing.T) {
+	eval, err := coraza.New(coraza.Config{DisableCRS: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := router.New([]string{"/static/*"}, []string{"/upload/*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := New(pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Routes: routes}), Config{
+		Upstream: &url.URL{Scheme: "http", Host: "upstream.invalid"}, MaxBodyBytes: 64 << 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/static/app.css", "/upload/avatar"} {
+		req, err := h.toRequest(httptest.NewRequest("POST", path, strings.NewReader("data")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if req.Body != nil {
+			t.Errorf("%s: body was buffered for a route that skips body inspection", path)
+		}
+	}
+	req, err := h.toRequest(httptest.NewRequest("POST", "/api", strings.NewReader("data")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(req.Body) != "data" {
+		t.Errorf("/api: body = %q, want it buffered for inspection", req.Body)
 	}
 }

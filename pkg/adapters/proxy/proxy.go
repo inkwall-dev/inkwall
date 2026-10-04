@@ -145,7 +145,7 @@ func (h *Handler) toRequest(r *http.Request) (*request.Request, error) {
 		ClientIP: h.clientIP.Resolve(peer, r.Header),
 	}
 
-	if h.maxBody > 0 && r.Body != nil && r.Body != http.NoBody {
+	if h.maxBody > 0 && r.Body != nil && r.Body != http.NoBody && h.pipeline.InspectsBody(rawURI) {
 		prefix, err := io.ReadAll(io.LimitReader(r.Body, h.maxBody+1))
 		if err != nil {
 			return nil, fmt.Errorf("read body: %w", err)

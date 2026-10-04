@@ -151,6 +151,12 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 	}
 }
 
+// InspectsBody reports whether a request to rawURI would have its body
+// inspected, so adapters can avoid buffering bodies that are skipped.
+func (p *Pipeline) InspectsBody(rawURI string) bool {
+	return p.routes.Decide(rawURI) == router.InspectAll
+}
+
 // InFlight returns the number of evaluations running now, including ones
 // that timed out and are still finishing.
 func (p *Pipeline) InFlight() int { return len(p.slots) }
