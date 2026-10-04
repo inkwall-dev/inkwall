@@ -39,6 +39,9 @@ func TestDecide(t *testing.T) {
 		{"//static/app.css", InspectAll},
 		{"/static//app.css", InspectAll},
 		{"/upload/../api/login", InspectAll},
+		{"/static/\uff0e\uff0e/admin", InspectAll},     // fullwidth full stops
+		{"/static/\xc0\xae\xc0\xae/admin", InspectAll}, // overlong-UTF-8 dots
+		{"/static/caf\u00e9.css", InspectAll},          // any non-ASCII byte
 		{"http://evil.example/static/x", InspectAll},
 		{"*", InspectAll},
 		{"", InspectAll},
@@ -65,7 +68,7 @@ func TestEmptyAndNilTablesInspectEverything(t *testing.T) {
 }
 
 func TestNewRejectsBadPatterns(t *testing.T) {
-	for _, p := range []string{"static/*", "/st*tic/", "/a/../b", "/a/./b"} {
+	for _, p := range []string{"static/*", "/st*tic/", "/a/../b", "/a/./b", "/a%2fb", "/a;b", "/a?b", "/a\\b", "/caf\u00e9"} {
 		if _, err := New([]string{p}, nil); err == nil {
 			t.Errorf("New(%q) succeeded, want error", p)
 		}

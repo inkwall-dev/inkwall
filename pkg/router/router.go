@@ -9,7 +9,6 @@ package router
 
 import (
 	"fmt"
-	"net/url"
 	"path"
 	"strings"
 )
@@ -67,6 +66,9 @@ func compile(patterns []string) ([]pattern, error) {
 		if strings.Contains(value, "*") {
 			return nil, fmt.Errorf("path pattern %q: * is only allowed at the end", p)
 		}
+		if !plainPath(value) {
+			return nil, fmt.Errorf("path pattern %q can never match: only plain ASCII path characters are matched (no %%, ;, ?, #, backslash or non-ASCII)", p)
+		}
 		// Compare against the cleaned form, keeping a trailing slash.
 		if c := path.Clean(value); c != strings.TrimSuffix(value, "/") && c != value {
 			return nil, fmt.Errorf("path pattern %q is not clean (use %q)", p, c)
@@ -96,20 +98,18 @@ func (t *Table) Decide(rawURI string) Decision {
 }
 
 // unambiguousPath returns the request path if every component that sees it
-// (Inkwall, the proxy, the application) would read it the same way. Paths
-// with percent-encoding, dot segments, backslashes, semicolons (path
-// parameters) or repeated slashes are rejected, because applications differ
-// in how they interpret them, and that difference is how a skip rule
-// becomes a bypass.
+// (Inkwall, the proxy, the application) would read it the same way. Only
+// plain ASCII path characters are accepted (see plainPath); percent-encoding,
+// non-ASCII or invalid UTF-8 bytes (fullwidth or overlong dots), backslashes,
+// semicolons, repeated slashes and dot segments are rejected, because
+// applications differ in how they interpret them, and that difference is how
+// a skip rule becomes a bypass.
 func unambiguousPath(rawURI string) (string, bool) {
 	rawPath, _, _ := strings.Cut(rawURI, "?")
 	if rawPath == "" || rawPath[0] != '/' {
 		return "", false
 	}
-	if strings.ContainsAny(rawPath, "%\\;#") || strings.Contains(rawPath, "//") {
-		return "", false
-	}
-	if _, err := url.ParseRequestURI(rawPath); err != nil {
+	if !plainPath(rawPath) || strings.Contains(rawPath, "//") {
 		return "", false
 	}
 	clean := path.Clean(rawPath)
@@ -120,6 +120,23 @@ func unambiguousPath(rawURI string) (string, bool) {
 		return "", false // contained "." or ".." segments
 	}
 	return rawPath, true
+}
+
+// plainPath reports whether s consists only of RFC 3986 path characters that
+// need no decoding: unreserved (ALPHA, DIGIT, "-", ".", "_", "~"), "/", ":",
+// "@" and the sub-delims except ";". An allowlist, so that no byte an
+// application might normalize differently can reach a skip decision.
+func plainPath(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("-._~/:@!$&'()*+,=", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func matchAny(patterns []pattern, p string) bool {
