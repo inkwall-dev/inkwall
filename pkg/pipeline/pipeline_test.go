@@ -138,32 +138,47 @@ func TestCheckCanceledContext(t *testing.T) {
 }
 
 func TestOversizedBodyPolicy(t *testing.T) {
-	truncated := &request.Request{BodyTruncated: true}
+	truncated := &request.Request{BodyTruncated: true, Body: []byte("x")}
 	tests := []struct {
 		name       string
+		eval       fakeEvaluator
 		cfg        Config
 		req        *request.Request
 		wantAction Action
 		wantStatus int
 		wantReason Reason
 	}{
-		{name: "inspect prefix by default", cfg: Config{Mode: ModeBlock}, req: truncated,
-			wantAction: ActionAllow, wantReason: ReasonNone},
-		{name: "deny in block mode", cfg: Config{Mode: ModeBlock, Oversize: OversizeDeny}, req: truncated,
+		{name: "block mode denies by default", cfg: Config{Mode: ModeBlock}, req: truncated,
 			wantAction: ActionDeny, wantStatus: http.StatusRequestEntityTooLarge, wantReason: ReasonOversize},
-		{name: "log in detect mode", cfg: Config{Mode: ModeDetect, Oversize: OversizeDeny}, req: truncated,
+		{name: "detect mode allows by default, flagged", cfg: Config{Mode: ModeDetect}, req: truncated,
+			wantAction: ActionAllow, wantReason: ReasonOversize},
+		{name: "allow in block mode, flagged", cfg: Config{Mode: ModeBlock, Oversize: OversizeAllow}, req: truncated,
+			wantAction: ActionAllow, wantReason: ReasonOversize},
+		{name: "allow still inspects headers", eval: fakeEvaluator{res: blocked},
+			cfg: Config{Mode: ModeBlock, Oversize: OversizeAllow}, req: truncated,
+			wantAction: ActionDeny, wantStatus: http.StatusForbidden, wantReason: ReasonRule},
+		{name: "deny in detect mode logs", cfg: Config{Mode: ModeDetect, Oversize: OversizeDeny}, req: truncated,
 			wantAction: ActionLog, wantReason: ReasonOversize},
-		{name: "complete body unaffected", cfg: Config{Mode: ModeBlock, Oversize: OversizeDeny}, req: &request.Request{},
+		{name: "complete body unaffected", cfg: Config{Mode: ModeBlock}, req: &request.Request{Body: []byte("x")},
 			wantAction: ActionAllow, wantReason: ReasonNone},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			v := New(fakeEvaluator{}, tt.cfg).Check(context.Background(), tt.req)
+			v := New(tt.eval, tt.cfg).Check(context.Background(), tt.req)
 			if v.Action != tt.wantAction || v.Status != tt.wantStatus || v.Reason != tt.wantReason {
 				t.Fatalf("got action=%s status=%d reason=%s, want action=%s status=%d reason=%s",
 					v.Action, v.Status, v.Reason, tt.wantAction, tt.wantStatus, tt.wantReason)
 			}
 		})
+	}
+}
+
+func TestOversizedBodyIsNeverPassedToTheEvaluator(t *testing.T) {
+	eval := &recordingEvaluator{}
+	p := New(eval, Config{Mode: ModeBlock, Oversize: OversizeAllow})
+	p.Check(context.Background(), &request.Request{Body: []byte("prefix"), BodyTruncated: true})
+	if eval.got == nil || eval.got.Body != nil || eval.got.BodyTruncated {
+		t.Fatalf("evaluator received a truncated body: %+v", eval.got)
 	}
 }
 

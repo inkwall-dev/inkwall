@@ -9,7 +9,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"mime"
 	"net"
 	"slices"
 	"strings"
@@ -67,6 +66,11 @@ type Config struct {
 	// Directives are SecLang directives loaded after CRS, for custom rules
 	// and configure-time exclusions (SecRuleRemoveById, SecRuleUpdateTargetById).
 	Directives string
+	// BodyLimit, if positive, sets Coraza's request body limits
+	// (SecRequestBodyLimit and SecRequestBodyInMemoryLimit) to the largest
+	// body the caller will pass, so bodies within the caller's limit are
+	// neither rejected by Coraza nor buffered to temporary files.
+	BodyLimit int
 	// DisabledRuleGroups lists CRS attack families (keys of RuleGroups) to
 	// remove. Only disable families the protected application cannot be
 	// vulnerable to.
@@ -144,6 +148,9 @@ func buildDirectives(cfg Config) (string, error) {
 	// arguments past the limit were silently not inspected. The rules are
 	// copied from Coraza 3.8.1's coraza.conf-recommended (Apache-2.0).
 	fmt.Fprintf(&b, "SecArgumentsLimit %d\n", maxArgs)
+	if cfg.BodyLimit > 0 {
+		fmt.Fprintf(&b, "SecRequestBodyLimit %d\nSecRequestBodyInMemoryLimit %d\n", cfg.BodyLimit, cfg.BodyLimit)
+	}
 	b.WriteString(argumentLimitRules)
 	// Enforce, and leave audit logging to Inkwall's own event pipeline.
 	b.WriteString("SecRuleEngine On\n")
@@ -209,8 +216,10 @@ func (e *Evaluator) Evaluate(_ context.Context, r *request.Request) (rules.Resul
 	if it := tx.ProcessRequestHeaders(); it != nil {
 		return result(tx, it), nil
 	}
-	unparsablePrefix := r.BodyTruncated && needsCompleteBody(r.Headers.Get("Content-Type"))
-	if len(r.Body) > 0 && !unparsablePrefix {
+	// A truncated body is never inspected: a prefix of JSON, XML or
+	// multipart fails to parse (and rules 200002/200003 would deny it), and
+	// the pipeline decides what happens to oversized bodies.
+	if len(r.Body) > 0 && !r.BodyTruncated {
 		it, _, err := tx.WriteRequestBody(r.Body)
 		if err != nil {
 			return rules.Result{}, fmt.Errorf("write request body: %w", err)
@@ -259,25 +268,6 @@ SecRule ARGUMENTS_LIMIT_REACHED "@eq 1" \
 // RuleGroupNames returns the names in RuleGroups, sorted.
 func RuleGroupNames() []string {
 	return slices.Sorted(maps.Keys(RuleGroups))
-}
-
-// needsCompleteBody reports whether a body of this content type can only be
-// parsed whole. A truncated JSON, XML or multipart prefix fails to parse, and
-// the recommended rules then deny the request (rules 200002 and 200003), so
-// such prefixes are not inspected at all. URL-encoded and plain-text
-// prefixes are still inspected.
-func needsCompleteBody(contentType string) bool {
-	mt, _, err := mime.ParseMediaType(contentType)
-	if err != nil {
-		return false
-	}
-	switch {
-	case mt == "application/json", strings.HasSuffix(mt, "+json"),
-		mt == "application/xml", mt == "text/xml", strings.HasSuffix(mt, "+xml"),
-		strings.HasPrefix(mt, "multipart/"):
-		return true
-	}
-	return false
 }
 
 func hasSeverity(s types.RuleSeverity) bool {

@@ -66,14 +66,29 @@ func (f FailureMode) Resolve(m Mode) FailureMode {
 type OversizeAction uint8
 
 const (
-	// OversizeInspectPrefix inspects the part of the body within the limit
-	// and forwards the rest uninspected. It is the default. JSON, XML and
-	// multipart prefixes cannot be parsed, so their bodies go uninspected.
-	OversizeInspectPrefix OversizeAction = iota
+	// OversizeAuto is the default: deny in block mode, allow in detect mode.
+	OversizeAuto OversizeAction = iota
+	// OversizeAllow inspects headers and URI only and forwards the body
+	// uninspected; the verdict carries ReasonOversize so it is logged and
+	// counted. A truncated body is never inspected: a prefix of JSON, XML
+	// or multipart cannot be parsed, and inspecting a prefix of any body
+	// leaves the rest as a hiding place.
+	OversizeAllow
 	// OversizeDeny rejects oversized bodies with 413 Content Too Large in
 	// block mode (detect mode logs them), so no body escapes inspection.
 	OversizeDeny
 )
+
+// Resolve returns the effective oversize action for an enforcement mode.
+func (o OversizeAction) Resolve(m Mode) OversizeAction {
+	if o != OversizeAuto {
+		return o
+	}
+	if m == ModeBlock {
+		return OversizeDeny
+	}
+	return OversizeAllow
+}
 
 // Config configures a Pipeline.
 type Config struct {
@@ -130,7 +145,7 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 		failure:  cfg.FailureMode.Resolve(cfg.Mode),
 		timeout:  timeout,
 		slots:    make(chan struct{}, maxConcurrent),
-		oversize: cfg.Oversize,
+		oversize: cfg.Oversize.Resolve(cfg.Mode),
 		observer: cfg.Observer,
 		routes:   cfg.Routes,
 	}
@@ -172,10 +187,29 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request) Verdict {
 	case router.InspectAll:
 	}
 
-	if r.BodyTruncated && p.oversize == OversizeDeny {
+	if !r.BodyTruncated {
+		return p.evaluate(ctx, r)
+	}
+	if p.oversize == OversizeDeny && p.mode == ModeBlock {
 		return p.enforce(Verdict{Reason: ReasonOversize}, http.StatusRequestEntityTooLarge)
 	}
+	withoutBody := *r
+	withoutBody.Body = nil
+	withoutBody.BodyTruncated = false
+	v := p.evaluate(ctx, &withoutBody)
+	if v.Reason != ReasonNone {
+		return v
+	}
+	// Headers and URI were clean, but the body went uninspected.
+	v.Reason = ReasonOversize
+	if p.oversize == OversizeDeny { // detect mode: report what block mode would do
+		return p.enforce(v, http.StatusRequestEntityTooLarge)
+	}
+	return v
+}
 
+// evaluate runs the rule evaluator under admission control and the deadline.
+func (p *Pipeline) evaluate(ctx context.Context, r *request.Request) Verdict {
 	// Admission control. Evaluations cannot be interrupted, so a timed-out
 	// evaluation keeps using CPU until it finishes. Without a bound, a flood
 	// of expensive requests saturates every core and makes all requests time

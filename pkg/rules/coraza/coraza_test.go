@@ -218,26 +218,40 @@ func TestArgumentsPastTheDefaultLimitAreNotHidden(t *testing.T) {
 	}
 }
 
-func TestNeedsCompleteBody(t *testing.T) {
-	for ct, want := range map[string]bool{
-		"application/json":                  true,
-		"application/json; charset=utf-8":   true,
-		"application/vnd.api+json":          true,
-		"application/xml":                   true,
-		"text/xml":                          true,
-		"application/soap+xml":              true,
-		"multipart/form-data; boundary=x":   true,
-		"application/x-www-form-urlencoded": false,
-		"text/plain":                        false,
-		"":                                  false,
-		"not a media type;;":                false,
-	} {
-		if got := needsCompleteBody(ct); got != want {
-			t.Errorf("needsCompleteBody(%q) = %v, want %v", ct, got, want)
-		}
+func TestTruncatedBodyIsNotInspected(t *testing.T) {
+	// A truncated JSON prefix must not reach the JSON parser: it would fail to
+	// parse and rule 200002 would reject a valid request.
+	e, err := New(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := newRequest("POST", "/api", http.Header{"Content-Type": {"application/json"}}, `{"note":"unterminated`)
+	req.BodyTruncated = true
+	res, err := e.Evaluate(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Interrupted {
+		t.Fatalf("truncated body was parsed: %+v", res)
 	}
 }
 
+func TestBodyLimitAllowsLargeBodies(t *testing.T) {
+	// Coraza's default SecRequestBodyLimit is 12.5 MiB; with BodyLimit set
+	// higher, a body within the caller's limit is not rejected by Coraza.
+	e, err := New(Config{DisableCRS: true, BodyLimit: 14 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Repeat("a", 13<<20)
+	res, err := e.Evaluate(context.Background(), newRequest("POST", "/upload", http.Header{"Content-Type": {"text/plain"}}, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Interrupted {
+		t.Fatalf("13 MiB body rejected despite BodyLimit 14 MiB: %+v", res)
+	}
+}
 func TestNewRejectsInvalidConfig(t *testing.T) {
 	for _, cfg := range []Config{
 		{ParanoiaLevel: 5},

@@ -115,7 +115,7 @@ times out cannot get an attack through; in detect mode such requests are allowed
 | `--mode` | `detect` | `block` to enforce |
 | `--paranoia-level` | `1` | CRS paranoia level, 1-4 |
 | `--max-body-bytes` | `65536` | Body bytes to inspect |
-| `--oversize-body` | `inspect-prefix` | `deny` rejects bodies over the limit (413) |
+| `--oversize-body` | `auto` | Bodies over the limit: `deny` (413), `allow` (forwarded uninspected, logged), `auto` = deny in block mode |
 | `--max-args` | `1000` | Maximum arguments per source; more is rejected with 400 |
 | `--rules` | | Extra SecLang rules or exclusions |
 | `--trusted-proxies` | | CIDRs whose `X-Forwarded-For` is trusted |

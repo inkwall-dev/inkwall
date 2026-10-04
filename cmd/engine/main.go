@@ -97,7 +97,7 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 	timeout := fs.Duration("timeout", pipeline.DefaultTimeout, "per-request inspection deadline")
 	maxConcurrent := fs.Int("max-concurrent", 0, "maximum concurrent evaluations; extra requests get the failure mode (0 = 2 * CPUs)")
 	maxBody := fs.Int64("max-body-bytes", 64<<10, "request body bytes to inspect (0 disables body inspection)")
-	oversize := fs.String("oversize-body", "inspect-prefix", "bodies over --max-body-bytes: inspect-prefix (rest uninspected) or deny (413 in block mode)")
+	oversize := fs.String("oversize-body", "auto", "bodies over --max-body-bytes: deny (413 in block mode), allow (forward with the body uninspected, logged), or auto (deny in block mode, allow in detect mode)")
 	maxArgs := fs.Int("max-args", 0, "maximum arguments per source (query, body); more is rejected with 400 before CRS runs (0 = 1000)")
 	paranoia := fs.Int("paranoia-level", coraza.DefaultParanoiaLevel, "OWASP CRS paranoia level (1-4)")
 	threshold := fs.Int("anomaly-threshold", coraza.DefaultInboundAnomalyThreshold, "OWASP CRS inbound anomaly score threshold")
@@ -150,12 +150,14 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 		return cfg, fmt.Errorf("--failure-mode must be auto, open or closed, got %q", *failure)
 	}
 	switch *oversize {
-	case "inspect-prefix":
-		cfg.oversize = pipeline.OversizeInspectPrefix
+	case "auto":
+		cfg.oversize = pipeline.OversizeAuto
+	case "allow":
+		cfg.oversize = pipeline.OversizeAllow
 	case "deny":
 		cfg.oversize = pipeline.OversizeDeny
 	default:
-		return cfg, fmt.Errorf("--oversize-body must be inspect-prefix or deny, got %q", *oversize)
+		return cfg, fmt.Errorf("--oversize-body must be auto, allow or deny, got %q", *oversize)
 	}
 	cfg.trustedProxies = splitList(*trusted)
 	cfg.skipPaths = splitList(*skipPaths)
@@ -192,6 +194,7 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 		ParanoiaLevel:           cfg.paranoiaLevel,
 		InboundAnomalyThreshold: cfg.threshold,
 		MaxArgs:                 cfg.maxArgs,
+		BodyLimit:               int(cfg.maxBodyBytes),
 		DisabledRuleGroups:      cfg.ruleGroupsOff,
 		Directives:              directives,
 	})

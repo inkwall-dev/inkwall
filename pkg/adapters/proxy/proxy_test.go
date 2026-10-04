@@ -131,8 +131,7 @@ func TestBenignRequestsAreNotLogged(t *testing.T) {
 func TestBodyIsForwardedIntact(t *testing.T) {
 	up := newUpstream(t)
 	var logs bytes.Buffer
-	// Inspect only the first 16 bytes; the upstream must still get everything.
-	h := newHandler(t, pipeline.ModeBlock, 16, up, &logs)
+	h := newHandler(t, pipeline.ModeBlock, 64<<10, up, &logs)
 
 	body := "user=alice&note=" + strings.Repeat("a", 1000)
 	if w := do(h, "POST", "/notes", "application/x-www-form-urlencoded", body); w.Code != http.StatusOK {
@@ -143,28 +142,60 @@ func TestBodyIsForwardedIntact(t *testing.T) {
 	}
 }
 
-func TestOversizedBodies(t *testing.T) {
-	up := newUpstream(t)
-	var logs bytes.Buffer
-	// Inspect only the first 1 KB of each body.
-	h := newHandler(t, pipeline.ModeBlock, 1<<10, up, &logs)
-	pad := strings.Repeat("a", 4<<10)
+func newOversizeHandler(t *testing.T, oversize pipeline.OversizeAction, up *upstream, logs *bytes.Buffer) *Handler {
+	t.Helper()
+	eval, err := coraza.New(coraza.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, _ := url.Parse(up.srv.URL)
+	h, err := New(pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Oversize: oversize, Timeout: 500 * time.Millisecond}), Config{
+		Upstream: target, MaxBodyBytes: 1 << 10, Logger: slog.New(slog.NewJSONHandler(logs, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
 
-	// A valid JSON body larger than the limit must not be rejected because
-	// its truncated prefix does not parse.
-	if w := do(h, "POST", "/upload", "application/json", `{"blob":"`+pad+`"}`); w.Code != http.StatusOK {
-		t.Fatalf("valid oversized JSON: got %d, want 200\n%s", w.Code, logs.String())
-	}
-	// URL-encoded prefixes are still inspected: an attack in the first 1 KB
-	// is blocked even when the body is longer.
-	if w := do(h, "POST", "/comments", "application/x-www-form-urlencoded",
-		"comment=%3Cscript%3Ealert(1)%3C%2Fscript%3E&pad="+pad); w.Code != http.StatusForbidden {
-		t.Fatalf("attack in form prefix: got %d, want 403", w.Code)
-	}
-	// Complete JSON bodies within the limit are still inspected.
-	if w := do(h, "POST", "/api/search", "application/json", `{"q":"1' OR '1'='1' -- "}`); w.Code != http.StatusForbidden {
-		t.Fatalf("attack in small JSON: got %d, want 403", w.Code)
-	}
+func TestOversizedBodies(t *testing.T) {
+	pad := strings.Repeat("a", 4<<10) // over the 1 KiB inspection limit
+	json := `{"blob":"` + pad + `"}`
+
+	t.Run("block mode rejects by default", func(t *testing.T) {
+		up := newUpstream(t)
+		var logs bytes.Buffer
+		h := newOversizeHandler(t, pipeline.OversizeAuto, up, &logs)
+		if w := do(h, "POST", "/upload", "application/json", json); w.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("oversized JSON: got %d, want 413", w.Code)
+		}
+		if w := do(h, "POST", "/comments", "application/x-www-form-urlencoded",
+			"comment=%3Cscript%3Ealert(1)%3C%2Fscript%3E&pad="+pad); w.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("oversized form: got %d, want 413", w.Code)
+		}
+		if up.hits.Load() != 0 {
+			t.Fatal("an oversized body reached the upstream")
+		}
+	})
+
+	t.Run("allow forwards intact and logs", func(t *testing.T) {
+		up := newUpstream(t)
+		var logs bytes.Buffer
+		h := newOversizeHandler(t, pipeline.OversizeAllow, up, &logs)
+		if w := do(h, "POST", "/upload", "application/json", json); w.Code != http.StatusOK {
+			t.Fatalf("oversized JSON with allow: got %d, want 200\n%s", w.Code, logs.String())
+		}
+		if got, _ := up.lastBody.Load().(string); got != json {
+			t.Fatalf("upstream received %d bytes, want %d", len(got), len(json))
+		}
+		if !strings.Contains(logs.String(), `"reason":"oversize"`) {
+			t.Fatalf("uninspected body was not logged:\n%s", logs.String())
+		}
+		// Headers and URI are still inspected.
+		if w := do(h, "POST", "/upload?id=1%27%20OR%20%271%27%3D%271", "application/json", json); w.Code != http.StatusForbidden {
+			t.Fatalf("attack in the URI with an oversized body: got %d, want 403", w.Code)
+		}
+	})
 }
 
 func TestBodyInspectionDisabled(t *testing.T) {
