@@ -87,8 +87,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	v := h.pipeline.Check(r.Context(), req)
 	// Log blocks and detections, and every request that went uninspected
-	// (timeout, error, overload). Client cancellations are not events.
-	if v.Action != pipeline.ActionAllow || (v.Reason != pipeline.ReasonNone && v.Reason != pipeline.ReasonCanceled) {
+	// unexpectedly (timeout, error, overload). Client cancellations and
+	// routes configured to skip inspection are not events.
+	if v.Action != pipeline.ActionAllow ||
+		(v.Reason != pipeline.ReasonNone && v.Reason != pipeline.ReasonCanceled && v.Reason != pipeline.ReasonSkipped) {
 		h.logEvent(r, req, v)
 	}
 	if v.Action == pipeline.ActionDeny {

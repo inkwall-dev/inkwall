@@ -38,7 +38,7 @@ func NewMetrics(adapter string) *Metrics {
 		registry: reg,
 		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name:        "inkwall_requests_total",
-			Help:        "Requests checked, by action (allow, deny, log) and reason (none, rule, timeout, error, canceled, overload, oversize). Reasons timeout, error and overload mean the request was not inspected.",
+			Help:        "Requests checked, by action (allow, deny, log) and reason (none, rule, timeout, error, canceled, overload, oversize, skipped). Reasons timeout, error and overload mean the request was not inspected.",
 			ConstLabels: labels,
 		}, []string{"action", "reason"}),
 		duration: prometheus.NewHistogram(prometheus.HistogramOpts{

@@ -14,6 +14,7 @@ func TestParseProxyFlags(t *testing.T) {
 	cfg, err := parseProxyFlags([]string{
 		"--upstream", "http://app:8080", "--mode", "block", "--failure-mode", "closed",
 		"--trusted-proxies", "10.0.0.0/8,192.0.2.1", "--oversize-body", "deny", "--max-args", "255",
+		"--skip-paths", "/healthz,/static/*", "--skip-body-paths", "/upload/*",
 	}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -23,6 +24,9 @@ func TestParseProxyFlags(t *testing.T) {
 	}
 	if cfg.oversize != pipeline.OversizeDeny || cfg.maxArgs != 255 {
 		t.Fatalf("oversize/max-args not parsed: %+v", cfg)
+	}
+	if len(cfg.skipPaths) != 2 || len(cfg.skipBodyPaths) != 1 {
+		t.Fatalf("skip paths not parsed: %v %v", cfg.skipPaths, cfg.skipBodyPaths)
 	}
 	if len(cfg.trustedProxies) != 2 {
 		t.Fatalf("trusted proxies = %v", cfg.trustedProxies)
@@ -48,6 +52,7 @@ func TestParseProxyFlagsErrors(t *testing.T) {
 		{"--upstream", "http://app", "--mode", "enforce"},
 		{"--upstream", "http://app", "--failure-mode", "maybe"},
 		{"--upstream", "http://app", "--oversize-body", "truncate"},
+		{"--upstream", "http://app", "--skip-paths", "static/*"},
 	} {
 		if _, err := parseProxyFlags(args, io.Discard); err == nil {
 			t.Errorf("parseProxyFlags(%v) succeeded, want error", args)

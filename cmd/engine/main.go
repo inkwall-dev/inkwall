@@ -32,6 +32,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/adapters/proxy"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/router"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
@@ -79,6 +80,8 @@ type proxyConfig struct {
 	threshold      int
 	rulesFile      string
 	trustedProxies []string
+	skipPaths      []string
+	skipBodyPaths  []string
 }
 
 func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
@@ -99,6 +102,8 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 	threshold := fs.Int("anomaly-threshold", coraza.DefaultInboundAnomalyThreshold, "OWASP CRS inbound anomaly score threshold")
 	rulesFile := fs.String("rules", "", "file with extra SecLang rules or exclusions, loaded after CRS")
 	trusted := fs.String("trusted-proxies", "", "comma-separated CIDRs whose X-Forwarded-For is trusted")
+	skipPaths := fs.String("skip-paths", "", "comma-separated paths never inspected, exact (/healthz) or prefix (/static/*); ambiguous paths are always inspected")
+	skipBodyPaths := fs.String("skip-body-paths", "", "comma-separated paths whose body is not inspected (headers and URI still are), same syntax as --skip-paths")
 	if err := fs.Parse(args); err != nil {
 		return proxyConfig{}, err
 	}
@@ -148,10 +153,20 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 	default:
 		return cfg, fmt.Errorf("--oversize-body must be inspect-prefix or deny, got %q", *oversize)
 	}
-	if *trusted != "" {
-		cfg.trustedProxies = strings.Split(*trusted, ",")
+	cfg.trustedProxies = splitList(*trusted)
+	cfg.skipPaths = splitList(*skipPaths)
+	cfg.skipBodyPaths = splitList(*skipBodyPaths)
+	if _, err := router.New(cfg.skipPaths, cfg.skipBodyPaths); err != nil {
+		return cfg, err
 	}
 	return cfg, nil
+}
+
+func splitList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
 }
 
 func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
@@ -176,6 +191,10 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	routes, err := router.New(cfg.skipPaths, cfg.skipBodyPaths)
+	if err != nil {
+		return err
+	}
 	metrics := telemetry.NewMetrics("proxy")
 	p := pipeline.New(eval, pipeline.Config{
 		Mode:          cfg.mode,
@@ -184,6 +203,7 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 		MaxConcurrent: cfg.maxConcurrent,
 		Oversize:      cfg.oversize,
 		Observer:      metrics,
+		Routes:        routes,
 	})
 	metrics.WatchPipeline(p)
 	handler, err := proxy.New(p,

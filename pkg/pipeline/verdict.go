@@ -51,6 +51,8 @@ const (
 	// ReasonOversize means the body was longer than the inspection limit
 	// and the policy rejects oversized bodies.
 	ReasonOversize
+	// ReasonSkipped means the route is configured to skip inspection.
+	ReasonSkipped
 )
 
 func (r Reason) String() string {
@@ -69,6 +71,8 @@ func (r Reason) String() string {
 		return "overload"
 	case ReasonOversize:
 		return "oversize"
+	case ReasonSkipped:
+		return "skipped"
 	default:
 		return "unknown"
 	}

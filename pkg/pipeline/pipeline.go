@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/router"
 	"github.com/inkwall-dev/inkwall/pkg/rules"
 )
 
@@ -72,6 +73,9 @@ type Config struct {
 	Oversize OversizeAction
 	// Observer, if set, is told about every verdict (metrics).
 	Observer Observer
+	// Routes decides which paths skip inspection entirely or skip only body
+	// inspection (tier T0). Nil inspects everything.
+	Routes *router.Table
 }
 
 // Observer receives every verdict. Implementations must be fast and safe for
@@ -89,6 +93,7 @@ type Pipeline struct {
 	slots    chan struct{}
 	oversize OversizeAction
 	observer Observer
+	routes   *router.Table
 }
 
 // New returns a pipeline that evaluates requests with eval.
@@ -109,6 +114,7 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 		slots:    make(chan struct{}, maxConcurrent),
 		oversize: cfg.Oversize,
 		observer: cfg.Observer,
+		routes:   cfg.Routes,
 	}
 }
 
@@ -137,6 +143,16 @@ func (p *Pipeline) Check(ctx context.Context, r *request.Request) Verdict {
 }
 
 func (p *Pipeline) check(ctx context.Context, r *request.Request) Verdict {
+	switch p.routes.Decide(r.RawURI) {
+	case router.SkipAll:
+		return Verdict{Action: ActionAllow, Reason: ReasonSkipped}
+	case router.SkipBody:
+		withoutBody := *r
+		withoutBody.Body = nil
+		withoutBody.BodyTruncated = false
+		r = &withoutBody
+	case router.InspectAll:
+	}
 
 	if r.BodyTruncated && p.oversize == OversizeDeny {
 		return p.enforce(Verdict{Reason: ReasonOversize}, http.StatusRequestEntityTooLarge)

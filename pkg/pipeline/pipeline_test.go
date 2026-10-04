@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/router"
 	"github.com/inkwall-dev/inkwall/pkg/rules"
 )
 
@@ -163,5 +164,53 @@ func TestOversizedBodyPolicy(t *testing.T) {
 					v.Action, v.Status, v.Reason, tt.wantAction, tt.wantStatus, tt.wantReason)
 			}
 		})
+	}
+}
+
+// recordingEvaluator remembers the request it was asked to evaluate.
+type recordingEvaluator struct {
+	got *request.Request
+	res rules.Result
+}
+
+func (e *recordingEvaluator) Evaluate(_ context.Context, r *request.Request) (rules.Result, error) {
+	e.got = r
+	return e.res, nil
+}
+
+func TestRoutes(t *testing.T) {
+	table, err := router.New([]string{"/static/*"}, []string{"/upload/*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eval := &recordingEvaluator{res: blocked}
+	p := New(eval, Config{Mode: ModeBlock, Routes: table, Oversize: OversizeDeny})
+
+	// Skipped routes never reach the evaluator.
+	v := p.Check(context.Background(), &request.Request{RawURI: "/static/app.css"})
+	if v.Action != ActionAllow || v.Reason != ReasonSkipped || eval.got != nil {
+		t.Fatalf("skip route: action=%s reason=%s evaluated=%v", v.Action, v.Reason, eval.got != nil)
+	}
+
+	// An ambiguous path that resembles a skipped route is inspected.
+	v = p.Check(context.Background(), &request.Request{RawURI: "/static/../api/login"})
+	if v.Action != ActionDeny || eval.got == nil {
+		t.Fatalf("traversal past skip route: action=%s evaluated=%v", v.Action, eval.got != nil)
+	}
+
+	// Skip-body routes are evaluated without the body, and are not rejected
+	// as oversized, while the caller's request is left untouched.
+	eval.got = nil
+	orig := &request.Request{RawURI: "/upload/avatar", Body: []byte("big"), BodyTruncated: true}
+	v = p.Check(context.Background(), orig)
+	if eval.got == nil || eval.got.Body != nil || eval.got.BodyTruncated {
+		t.Fatalf("skip-body route: evaluator got body=%v truncated=%v", eval.got.Body, eval.got.BodyTruncated)
+	}
+	if v.Reason == ReasonOversize {
+		t.Fatal("skip-body route rejected as oversized")
+	}
+	if orig.Body == nil || !orig.BodyTruncated {
+		t.Fatal("caller's request was modified")
 	}
 }
