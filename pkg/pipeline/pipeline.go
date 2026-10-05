@@ -232,19 +232,13 @@ func (p *Pipeline) evaluate(ctx context.Context, r *request.Request) Verdict {
 	// The evaluator runs on its own goroutine so the deadline can be enforced
 	// here. A late result is discarded; the buffered channel lets that
 	// goroutine finish without leaking, and it releases its slot only then.
+	// The slot is released before the result is sent, so a caller that has
+	// its verdict never sees its own evaluation still holding a slot.
 	done := make(chan outcome, 1)
 	go func() {
-		defer func() { <-p.slots }()
-		// net/http recovers panics only on the handler goroutine; a panic
-		// here (in the rule engine or a callback it runs) would kill the
-		// process. Turn it into an evaluation error instead.
-		defer func() {
-			if v := recover(); v != nil {
-				done <- outcome{err: fmt.Errorf("evaluator panic: %v", v)}
-			}
-		}()
-		res, err := p.eval.Evaluate(ctx, r)
-		done <- outcome{res: res, err: err}
+		o := p.run(ctx, r)
+		<-p.slots
+		done <- o
 	}()
 
 	select {
@@ -259,6 +253,19 @@ func (p *Pipeline) evaluate(ctx context.Context, r *request.Request) Verdict {
 		}
 		return p.failed(ReasonCanceled)
 	}
+}
+
+// run calls the evaluator. net/http recovers panics only on the handler
+// goroutine; a panic here (in the rule engine or a callback it runs) would
+// kill the process, so it becomes an evaluation error instead.
+func (p *Pipeline) run(ctx context.Context, r *request.Request) (o outcome) {
+	defer func() {
+		if v := recover(); v != nil {
+			o = outcome{err: fmt.Errorf("evaluator panic: %v", v)}
+		}
+	}()
+	res, err := p.eval.Evaluate(ctx, r)
+	return outcome{res: res, err: err}
 }
 
 func (p *Pipeline) decide(res rules.Result) Verdict {
