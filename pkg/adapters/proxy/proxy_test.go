@@ -249,22 +249,6 @@ func TestInspectedHeadersAreASnapshot(t *testing.T) {
 	}
 }
 
-func TestRequestID(t *testing.T) {
-	for id, want := range map[string]string{
-		"":                       "",
-		"abc-123_DEF.4:5":        "abc-123_DEF.4:5",
-		"has space":              "",
-		"inject\nnewline":        "",
-		"<script>":               "",
-		strings.Repeat("a", 128): strings.Repeat("a", 128),
-		strings.Repeat("a", 129): "",
-	} {
-		if got := requestID(id); got != want {
-			t.Errorf("requestID(%q) = %q, want %q", id, got, want)
-		}
-	}
-}
-
 func TestContentLengthIsRestored(t *testing.T) {
 	up := newUpstream(t)
 	var logs bytes.Buffer

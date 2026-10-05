@@ -11,19 +11,16 @@ package proxy
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
-	"net/netip"
 	"net/url"
-	"strconv"
 	"strings"
 
+	"github.com/inkwall-dev/inkwall/pkg/adapters/internal/httpadapter"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
@@ -102,12 +99,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	v := h.pipeline.Check(r.Context(), req)
-	// Log blocks and detections, and every request that went uninspected
-	// unexpectedly (timeout, error, overload). Client cancellations and
-	// routes configured to skip inspection are not events.
-	if v.Action != pipeline.ActionAllow ||
-		(v.Reason != pipeline.ReasonNone && v.Reason != pipeline.ReasonCanceled && v.Reason != pipeline.ReasonSkipped) {
-		h.logEvent(r, req, v)
+	if httpadapter.IsEvent(v) {
+		httpadapter.LogEvent(r.Context(), h.logger, req, r.URL.Path, v)
 	}
 	if v.Action == pipeline.ActionDeny {
 		http.Error(w, http.StatusText(v.Status), v.Status)
@@ -117,7 +110,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) toRequest(r *http.Request) (*request.Request, error) {
-	peer := peerAddr(r.RemoteAddr)
+	peer := httpadapter.PeerAddr(r.RemoteAddr)
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
@@ -126,11 +119,11 @@ func (h *Handler) toRequest(r *http.Request) (*request.Request, error) {
 	if rawURI == "" {
 		rawURI = r.URL.RequestURI()
 	}
-	id := requestID(r.Header.Get("X-Request-Id"))
+	id := httpadapter.RequestID(r.Header.Get("X-Request-Id"))
 	if id == "" {
 		// Generate one so events can always be correlated; the upstream
 		// receives it as X-Request-Id.
-		id = newRequestID()
+		id = httpadapter.NewRequestID()
 		r.Header.Set("X-Request-Id", id)
 	}
 	req := &request.Request{
@@ -140,7 +133,7 @@ func (h *Handler) toRequest(r *http.Request) (*request.Request, error) {
 		Scheme:   scheme,
 		Host:     r.Host,
 		RawURI:   rawURI,
-		Headers:  snapshotHeaders(r),
+		Headers:  httpadapter.SnapshotHeaders(r),
 		PeerIP:   peer,
 		ClientIP: h.clientIP.Resolve(peer, r.Header),
 	}
@@ -163,82 +156,13 @@ func (h *Handler) toRequest(r *http.Request) (*request.Request, error) {
 	return req, nil
 }
 
-func (h *Handler) logEvent(r *http.Request, req *request.Request, v pipeline.Verdict) {
-	h.logger.LogAttrs(r.Context(), slog.LevelWarn, "security event",
-		slog.String("action", v.Action.String()),
-		slog.String("reason", v.Reason.String()),
-		slog.Int("status", v.Status),
-		slog.Int("interrupting_rule_id", v.InterruptingRuleID),
-		slog.Any("rule_ids", v.RuleIDs),
-		slog.String("client_ip", addrString(req.ClientIP)),
-		slog.String("method", req.Method),
-		slog.String("host", req.Host),
-		slog.String("path", r.URL.Path),
-		slog.String("request_id", req.ID),
-		slog.Duration("inspection_time", v.Duration),
-	)
-}
-
-// snapshotHeaders returns a private copy of r's headers for inspection, with
-// Transfer-Encoding and Content-Length restored.
-//
-// The copy matters because an evaluation that times out keeps running after
-// the handler has returned, and must not read the live request. Copying costs
-// about 0.3µs, well under 0.1% of an evaluation.
-//
-// net/http moves Transfer-Encoding out of the header map, and Content-Length
-// can be absent (HTTP/2) even when the length is known. Without them, rules see
-// a POST with neither header and raise a false positive.
-func snapshotHeaders(r *http.Request) http.Header {
-	h := r.Header.Clone()
-	if h == nil {
-		h = http.Header{}
-	}
-	if len(r.TransferEncoding) > 0 && h.Get("Transfer-Encoding") == "" {
-		h["Transfer-Encoding"] = r.TransferEncoding
-	}
-	if r.ContentLength > 0 && h.Get("Content-Length") == "" {
-		h.Set("Content-Length", strconv.FormatInt(r.ContentLength, 10))
-	}
-	return h
-}
-
-// newRequestID returns a random 16-hex-digit request ID.
-func newRequestID() string {
-	var b [8]byte
-	_, _ = rand.Read(b[:]) // crypto/rand.Read never fails on supported platforms
-	return hex.EncodeToString(b[:])
-}
-
-// maxRequestIDLen bounds client-supplied request IDs.
-const maxRequestIDLen = 128
-
-// requestID returns id if it is a safe correlation ID (at most 128 of
-// [A-Za-z0-9._:-]), and "" otherwise so that one is generated. The value is
-// client-controlled and ends up in logs and events.
-func requestID(id string) string {
-	if id == "" || len(id) > maxRequestIDLen {
-		return ""
-	}
-	for i := 0; i < len(id); i++ {
-		c := id[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
-			c == '.', c == '_', c == ':', c == '-':
-		default:
-			return ""
-		}
-	}
-	return id
-}
-
 // setForwarded sets X-Forwarded-For, -Proto and -Host on the outbound
 // request. Rewrite mode removes the incoming values first. From a trusted
 // proxy they are kept and the proxy's address is appended, so the upstream
 // still sees the real client and the original scheme; from anyone else they
 // are rebuilt from the connection, so clients cannot spoof them.
 func setForwarded(pr *httputil.ProxyRequest, resolver *clientip.Resolver) {
-	peer := peerAddr(pr.In.RemoteAddr)
+	peer := httpadapter.PeerAddr(pr.In.RemoteAddr)
 	if !resolver.Trusts(peer) {
 		pr.SetXForwarded()
 		return
@@ -283,21 +207,4 @@ func joinQuery(a, b string) string {
 type readCloser struct {
 	io.Reader
 	io.Closer
-}
-
-func peerAddr(remoteAddr string) netip.Addr {
-	if ap, err := netip.ParseAddrPort(remoteAddr); err == nil {
-		return ap.Addr().Unmap()
-	}
-	if a, err := netip.ParseAddr(remoteAddr); err == nil {
-		return a.Unmap()
-	}
-	return netip.Addr{}
-}
-
-func addrString(a netip.Addr) string {
-	if !a.IsValid() {
-		return ""
-	}
-	return a.String()
 }
