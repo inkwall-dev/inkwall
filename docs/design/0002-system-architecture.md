@@ -717,6 +717,10 @@ does not inspect them as client headers.
   `-Uri` / `-Host` with 400, even in detect mode: they can't be inspected, so they must not be
   allowed.
 - Allowed requests get an `X-Request-Id`, which `authResponseHeaders` copies to the upstream.
+- Known limitation: with `trustForwardHeader: false`, Traefik replaces `X-Forwarded-For` with its
+  direct peer, so behind a load balancer the engine sees the load balancer as the client (logs,
+  future per-IP rate limits). Fixing this needs Traefik to pass the resolved client IP separately,
+  or the Traefik plugin.
 
 **B. Traefik plugin (later):** Yaegi-interpreted Go plugins can't run Coraza efficiently (no cgo,
 interpreter overhead), so the plugin is a **thin client** that sends a compact binary check request
