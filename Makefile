@@ -6,6 +6,10 @@ BIN_DIR         ?= bin
 GOLANGCI_LINT   ?= $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
 GOVULNCHECK     ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@v1.8.0
 
+# Container image and local kind cluster (hack/kind).
+IMAGE           ?= inkwall-engine:dev
+KIND_CLUSTER    ?= inkwall
+
 # Benchmarks: set BENCH to a regexp to narrow, COUNT for benchstat-friendly repeats.
 BENCH           ?= .
 COUNT           ?= 1
@@ -50,6 +54,22 @@ tidy: ## Tidy go.mod and go.sum
 
 .PHONY: check
 check: lint test vuln ## Run everything CI runs
+
+.PHONY: image
+image: ## Build the inkwall-engine container image (IMAGE=name:tag)
+	docker build -t $(IMAGE) .
+
+.PHONY: kind-up
+kind-up: ## Create the kind cluster and deploy the demo app behind the engine (hack/kind)
+	KIND_CLUSTER=$(KIND_CLUSTER) IMAGE=$(IMAGE) hack/kind/up.sh
+
+.PHONY: kind-test
+kind-test: ## Send benign and attack requests to the kind demo and check verdicts
+	hack/kind/smoke.sh
+
+.PHONY: kind-down
+kind-down: ## Delete the kind cluster
+	kind delete cluster --name $(KIND_CLUSTER)
 
 .PHONY: clean
 clean: ## Remove build output

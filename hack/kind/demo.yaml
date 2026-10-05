@@ -1,0 +1,95 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# A demo app with inkwall-engine as a sidecar reverse proxy in front of it,
+# the way the engine runs today (standalone mode). Traffic enters on the
+# engine's port and only allowed requests reach the app on localhost.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: inkwall-demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo
+  namespace: inkwall-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo
+  template:
+    metadata:
+      labels:
+        app: demo
+    spec:
+      containers:
+        - name: app
+          image: traefik/whoami:v1.10.3
+          args: ["--port", "8080"]
+          ports:
+            - name: app
+              containerPort: 8080
+        - name: inkwall-engine
+          image: inkwall-engine:dev
+          imagePullPolicy: Never
+          args:
+            - proxy
+            - --upstream=http://127.0.0.1:8080
+            - --mode=block
+            - --skip-paths=/health
+          ports:
+            - name: http
+              containerPort: 8480
+            - name: admin
+              containerPort: 9480
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: admin
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: admin
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          # Coraza checks at startup that it can create files in the temp dir.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo
+  namespace: inkwall-demo
+spec:
+  type: NodePort
+  selector:
+    app: demo
+  ports:
+    - name: http
+      port: 8480
+      targetPort: http
+      nodePort: 30480
+    - name: admin
+      port: 9480
+      targetPort: admin
+      nodePort: 30481
