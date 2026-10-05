@@ -1,0 +1,17 @@
+# go-ftw configuration for the CRS regression suite (crs_test.go).
+# Adapted from Coraza's testing/coreruleset (Apache-2.0); these ignores are
+# Coraza's known differences from the reference Apache/ModSecurity setup.
+#
+# Prefer setting a new expectation in .ftw-overrides.yml over ignoring a test
+# here, and give every entry a reason.
+---
+testoverride:
+  ignore:
+    920100-4: 'Invalid uri, Coraza not reached - 404 page not found' 
+    920100-5: 'Invalid uri, Coraza not reached - 404 page not found'
+    # TODO: investigate
+    920280-3: ''
+    920430-3: ''
+    920430-5: ''
+    920430-9: ''
+    920610-2: 'fragments, Coraza might just happly accept them. Run and check it.'

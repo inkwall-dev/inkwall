@@ -91,7 +91,8 @@ sequenceDiagram
   rules act on them (`http-request deny if { var(txn.inkwall.action) -m str deny }`).
 - Many requests are pipelined over a few persistent connections, so it is very efficient.
 - The engine never blocks directly: it sets variables and HAProxy config decides. If we time out or
-  error, no variable is set, no deny rule matches, and the request passes (fail-open).
+  error, no variable is set: with a fail-open policy no deny rule matches and the request passes;
+  with fail-closed (the block-mode default) an extra rule denies when the variable is missing.
 - Async groups allow detect mode without waiting.
 
 ```mermaid

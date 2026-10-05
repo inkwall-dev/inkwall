@@ -20,8 +20,9 @@ the user. This document details how it works. The CRD shapes are in 0002 §4.2 a
 2. **Never on the request path.** Operator downtime never affects traffic (0002 §2).
 3. **GitOps-friendly.** Don't mutate user-owned objects when avoidable; when unavoidable, touch
    the minimum number of fields and document how to ignore them in Argo CD / Flux.
-4. **Safe by default.** Every step can fail without dropping traffic (fail-open), and every change
-   is reversible by uninstalling.
+4. **Safe by default.** In detect mode every step can fail without dropping traffic. In block mode
+   nothing is forwarded uninspected, so failures surface as rejected requests and conditions
+   rather than silent gaps. Every change is reversible by uninstalling.
 5. **Observable.** Every CRD tells the user exactly how far its policy got: accepted → programmed
    into the proxy → enforced by every engine.
 
@@ -198,8 +199,11 @@ sync (drift fight).
 - The engine is added as a **native sidecar** (`initContainers` with `restartPolicy: Always`,
   Kubernetes ≥ 1.29): it starts and becomes ready **before** the proxy container and stops **after**
   it, so there is no window where the proxy runs without its engine at startup or shutdown.
-- `failurePolicy: Ignore`: if the operator is down, ingress pods still start (without the engine,
-  meaning fail-open). The Injection controller then reports `SidecarMissing` on affected policies.
+- `failurePolicy` follows the enforcement mode of the policies a controller serves. **Detect only:**
+  `Ignore` — if the operator is down, ingress pods still start without the engine (uninspected) and
+  the Injection controller reports `SidecarMissing`. **Any policy in block mode:** `Fail` — a pod
+  started without its engine would have its proxy hook fail closed and reject all traffic, so pod
+  creation is refused instead; existing pods keep serving while the operator is down.
 - Adds: the engine container, an `emptyDir` at `/var/run/inkwall`, a projected ServiceAccount token
   (audience `inkwall-operator`) for bundle stream auth, the operator's CA bundle (to verify the
   distribution server's TLS), and the bundle-signing public key.
@@ -365,7 +369,7 @@ Removal must never leave a proxy pointing at a missing engine with fail-closed b
 |---|---|---|---|
 | Operator down (both replicas) | None: engines keep last bundle | Engines' `bundle_age_seconds` grows; operator absent | Restart; engines reconnect and resync |
 | Leader down, follower up | None | Leader election | Follower takes over building within the lease duration (~15 s) |
-| Webhook down, ingress pod restarts | Pod starts **without** engine → fail-open on that pod | `SidecarMissing` condition, alert | Restart pod after operator recovers |
+| Webhook down, ingress pod restarts | Detect mode: pod starts **without** engine (uninspected). Block mode: pod creation is refused; existing pods keep serving | `SidecarMissing` condition, alert | Restart pod after operator recovers |
 | Invalid rule committed | Rejected at admission | Webhook error returned to `kubectl` / Argo CD sync | Fix the rule |
 | Rule valid at admission, engine can't compile (version skew) | Engine keeps previous bundle | NACK → `Enforced=False, reason=EngineNack` | Upgrade engines or fix the rule |
 | Bundle Secret deleted | None | Builder recreates it on next reconcile | Automatic |

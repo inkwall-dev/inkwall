@@ -39,8 +39,60 @@ Measured as **added** latency vs the same proxy with Inkwall disabled, at 70% CP
 | Sidecar over localhost TCP (Traefik ForwardAuth) | ≤ 250 µs | ≤ 1.5 ms | n/a |
 | Detect mode (async / mirrored) | ~0 | ~0 | ~0 |
 
-Hard per-request deadline (default 20 ms, configurable per policy): when it is exceeded the request
-follows the policy's failure mode (default **fail-open**) and an event is emitted.
+Hard per-request deadline (default 250 ms, configurable per policy; a safety cap, not the expected
+latency): when it is exceeded the request follows the policy's failure mode and an event is emitted.
+The default failure mode is **closed in block mode and open in detect mode**: a fail-open block
+mode is bypassable, because padding a request until inspection times out gets it forwarded
+uninspected (found in review: ~5 KiB of padding sufficed with a 20 ms deadline).
+
+### 3.1 Measured baseline (2026-10-03)
+
+First measurement of the engine alone (`BenchmarkEvaluate`, `BenchmarkEvaluateArgs`): Coraza 3.8.1,
+CRS 4.25, paranoia level 1, single core of an i7-1255U. This is rule evaluation only, without any
+proxy hop.
+
+| Request | Time | Budget it maps to |
+|---|---|---|
+| Benign GET, no body | ~0.51 ms | Header-only p50 ≤ 0.15 ms (sidecar) |
+| Benign form POST, 2 fields | ~0.74 ms | |
+| Form POST, 10 / 50 / 150 fields | 1.4 / 5.8 / 18.8 ms | Body p99 ≤ 0.5 ms per 8 KB |
+| JSON POST, 10 / 50 / 150 fields | 2.3 / 9.6 / 29.3 ms | |
+| JSON POST, 8 KB, ~450 fields | ~100 ms | |
+
+Findings:
+
+- **The header-only path is about 3× over budget.** Cost is spread across Coraza evaluating all CRS
+  rules (regex ~22%, rule evaluation and collection lookups, GC ~14%); there is no single hotspot.
+- **Body cost is linear in the number of arguments,** about 0.13 ms per form field and 0.2 ms per
+  JSON field, because CRS runs most rules once per argument. No CRS family dominates: SQLi 26%,
+  XSS 23%, RCE 12%, PHP 9%, the rest small.
+- **Inspection time grows with request size,** so a fixed deadline is reachable by padding. This is
+  the most important gap. It is contained, not solved: block mode fails closed on timeout, requests
+  over the argument limit (`--max-args`, default 1000) are rejected before CRS runs, oversized bodies
+  are denied in block mode, and admission control (`MaxConcurrent`) keeps abandoned evaluations from
+  exhausting the CPU. None of that makes inspection faster; legitimate large requests need a
+  deadline that fits them.
+
+Measured and not adopted:
+
+- **Coraza's regex prefilter (`SecRxPreFilter`)**: 10–25% faster, but the CRS regression suite
+  (`test/crs`) showed it **misses attacks** (CRS tests 942220-2 and 932311-7). Left off until the
+  suite passes with it on.
+- `coraza-wasilibs` (crashes on Go 1.26), multiphase evaluation (7% slower), `no_regex_multiline`
+  (3% faster, not worth the behaviour change). `GOGC=400` gives ~7% and is left as a deployment
+  setting.
+
+Next levers, in order of expected gain:
+
+1. Per-route policy so static and low-risk routes skip inspection, and bodies are inspected only for
+   routes that need them (§4, T0). **Done for standalone mode** (`--skip-paths`,
+   `--skip-body-paths`, `pkg/router`); the operator will set these per route.
+2. Reducing Coraza's per-rule, per-argument overhead (transformation cache hashing, allocations),
+   preferably as upstream contributions, together with a fix for the prefilter's false negatives.
+3. A single-pass prefilter across all rules (§5.2), which needs changes inside Coraza. Any
+   prefilter must pass the CRS regression suite before it is enabled.
+
+The budgets above stay as targets; they are not met yet.
 
 ## 4. Request pipeline: tiered, cheapest first
 
@@ -89,13 +141,40 @@ Workflow: onboard a route in detect mode, tune false positives in the UI, then p
 
 ### 5.2 Rule evaluation
 
-1. **Start:** Coraza + OWASP CRS, built with `coraza.rule.multiphase_evaluation` so a request can
-   be stopped as early as possible, plus `coraza-wasilibs` for faster `@rx` (RE2), `@pm`
-   (Aho-Corasick), `@detectSQLi` and `@detectXSS`.
-2. **Prefilter (Stage 6):** extract required literals from every rule and compile them into a single
+1. **Start:** Coraza + OWASP CRS. Coraza's per-rule regex prefilter, multiphase evaluation and
+   `coraza-wasilibs` were planned here but were measured as unsafe, slower or broken (§3.1).
+2. **Single-pass prefilter (Stage 6):** extract required literals from every rule and compile them into a single
    multi-pattern automaton (Aho-Corasick in pure Go; Hyperscan via cgo as an optional build).
    One pass over the request tells us which rules can possibly match; the rest are skipped. Most
    benign requests match no literals, so they skip regex evaluation entirely.
+
+   **Feasibility measured (2026-10-04,** `test/perf/prefilter`**):**
+
+   | | Paranoia level 1 | Paranoia level 4 |
+   |---|---|---|
+   | CRS rules that run per argument | 104 | 196 |
+   | Of those, filterable by required literals | 100 | 181 |
+   | Benign rule-value evaluations skippable | 90.5% | 86.2% |
+   | Operator time skippable (weighted by measured cost) | 72% (÷3.6) | 69% (÷3.2) |
+   | Soundness violations (regex matched but filter said skip) | 0 of ~2.1M checks | 0 of ~3.9M checks |
+
+   The soundness check covers the benign corpus, all 9,747 CRS regression-test payloads and 13,314
+   Unicode fold variants of the extracted literals (for example `ſ` for `s`). Literals and values are
+   compared under Unicode case folding: a first version lowercased instead and was unsound — fold
+   variants such as `;BAſE64` (rule 932260) and `@@VERſION` (942480) matched a rule that the
+   lowercase check would have skipped (2 rules at PL1, 5 at PL4). With case folding there are 0
+   violations in about 2.1M checks at PL1 and 3.9M at PL4 (0007 §4.3). The extraction treats any
+   non-literal node (for example an unescaped `.`) as breaking a literal, which is where Coraza's own
+   prefilter goes wrong. What cannot be filtered is mostly the two libinjection rules (941100,
+   942100), which are cheap per value.
+
+   The end-to-end gain depends on where the filter runs. Inside Coraza's rule loop, after
+   transformations, it saves only operator time (about 36–45% of the total), so roughly 30%
+   overall. Before transformations it also skips transformation and per-rule overhead, where 3–5×
+   is realistic; that needs a sound "maximally decoded" form of each value to match literals
+   against. Either way it needs a hook inside Coraza (upstream API or fork), and it ships only after
+   passing the CRS suite and differential fuzzing. Decision: build it into Inkwall's own rule engine
+   instead, which controls the rule loop ([0007](0007-inkwall-engine.md)).
 3. Rule evaluation stays behind the `pkg/rules.Evaluator` interface (0002 §3.1) so a custom
    engine can replace Coraza without touching adapters.
 
@@ -143,7 +222,8 @@ documented as the slower mode.
 
 - Proxy-side timeouts are always set (ext_authz/ext_proc `timeout`, SPOE `timeout processing`,
   nginx `proxy_read_timeout`) and set just above the engine deadline.
-- Default is **fail-open** (`failure_mode_allow: true` etc.); fail-closed is per policy.
+- The failure mode defaults to **closed in block mode and open in detect mode** (`failure_mode_allow`
+  and equivalents are rendered from it); either can be set per policy.
 - Engine overload: admission control sheds inspection (not traffic) once queue depth crosses a
   threshold, and emits a metric.
 - Control plane down: the engine keeps enforcing the last-known-good policy indefinitely.
@@ -158,8 +238,9 @@ documented as the slower mode.
    and the reported number is the delta. This is the number the budgets in section 3 refer to.
 4. **Profiling:** pprof endpoints behind a flag, flamegraphs attached to benchmark CI runs,
    optional continuous profiling (Pyroscope).
-5. **Soak / chaos:** 24 h soak for GC and memory; kill the engine mid-load and verify fail-open
-   with no request errors.
+5. **Soak / chaos:** 24 h soak for GC and memory; kill the engine mid-load and verify the
+   configured failure mode (open: no request errors; closed: 503, no request forwarded
+   uninspected).
 
 ## 9. Open questions
 

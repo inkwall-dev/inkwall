@@ -7,5 +7,6 @@
 | [0004](0004-operator.md) | Kubernetes Operator | Draft |
 | [0005](0005-component-map.md) | Component Map and Rule Engine Choice | Draft |
 | [0006](0006-adapter-protocols.md) | Adapter Protocols Primer | Draft |
+| [0007](0007-inkwall-engine.md) | Inkwall Rule Engine | Draft |
 
 New documents: copy the header block (Status, Date, Owner), number sequentially, add a row here.

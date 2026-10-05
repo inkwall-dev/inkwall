@@ -1,0 +1,15 @@
+# Build output
+/bin/
+/dist/
+
+# Test and profiling artifacts
+*.test
+*.out
+*.prof
+coverage.*
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

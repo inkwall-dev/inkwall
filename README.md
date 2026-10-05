@@ -3,9 +3,10 @@
 **A Kubernetes-native web application firewall. Install one operator, and every ingress and gateway
 in your cluster is protected by the same policy.**
 
-> **Status: design phase.** No release exists yet. The architecture is written up in
-> [`docs/design`](docs/design/README.md) and the engine is the first thing being built. Everything
-> below describes the target, not shipped features.
+> **Status: early development.** No release exists yet. The inspection engine works as a standalone
+> reverse proxy (see [Try it](#try-it)); proxy integrations and the Kubernetes operator are not built
+> yet. The architecture is written up in [`docs/design`](docs/design/README.md). Sections other than
+> "Try it" describe the target, not shipped features.
 
 ---
 
@@ -27,7 +28,8 @@ Inkwall makes the WAF a Kubernetes primitive, the way cert-manager did for TLS:
   in-process for Caddy), with tiered checks so most requests never touch a regex. Latency budgets are
   part of the design, and CI will fail on regressions.
 - **Safe by default.** New routes start in detect mode (no added latency, no false-positive
-  outages). Fail-open unless you choose otherwise. Policies are signed.
+  outages). In block mode nothing is forwarded uninspected; detect mode never blocks. Policies are
+  signed.
 - **GitOps first, SaaS optional.** CRDs in Git are the source of truth. Everything enforces fully
   offline; an optional control plane adds fleet management and attack analytics.
 - **A way off ingress-nginx.** Protect ingress-nginx today, move routes to a Gateway API
@@ -87,6 +89,51 @@ shop   Detect   True    3/3       2m
 ```
 
 (Illustrative. The API is `v1alpha1` and will change.)
+
+## Try it
+
+The engine runs today as a standalone reverse proxy in front of any HTTP service. It inspects requests
+with the OWASP Core Rule Set, which is embedded in the binary.
+
+```console
+$ make build
+$ ./bin/inkwall-engine proxy --upstream http://localhost:3000 --mode block
+$ curl -s -o /dev/null -w '%{http_code}\n' 'localhost:8480/?id=1%27%20OR%20%271%27%3D%271'
+403
+```
+
+Each blocked or detected request produces one JSON log line with the matching rule IDs. Metrics are on
+`:9480/metrics`, health on `:9480/healthz` and `:9480/readyz`.
+
+Defaults are deliberately safe. The engine starts in **detect mode**: it logs what it would block
+and never blocks. In **block mode**, a request that cannot be fully inspected (inspection timed out,
+failed, or the engine is overloaded) is **rejected with 503**, so padding a request until inspection
+times out cannot get an attack through; in detect mode such requests are allowed and logged. Use
+`--failure-mode open` to prefer availability in block mode. Useful flags:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--mode` | `detect` | `block` to enforce |
+| `--paranoia-level` | `1` | CRS paranoia level, 1-4 |
+| `--max-body-bytes` | `65536` | Body bytes to inspect |
+| `--oversize-body` | `auto` | Bodies over the limit: `deny` (413), `allow` (forwarded uninspected, logged), `auto` = deny in block mode |
+| `--max-args` | `1000` | Maximum arguments per source; more is rejected with 400 |
+| `--rules` | | SecLang rules and configure-time exclusions, loaded after CRS |
+| `--rules-before-crs` | | Runtime exclusions (`ctl:ruleRemoveById` …) and settings, loaded before CRS |
+| `--trusted-proxies` | | CIDRs whose `X-Forwarded-For` is trusted |
+| `--skip-paths` | | Paths never inspected, e.g. `/healthz,/static/*` |
+| `--skip-body-paths` | | Paths whose body is not inspected, e.g. `/upload/*` |
+| `--disable-rule-groups` | | CRS families the app can't be vulnerable to, e.g. `php,java` (~13-15% faster) |
+| `--failure-mode` | `auto` | `auto` = closed in block mode, open in detect; or `open` / `closed` |
+| `--timeout` | `250ms` | Inspection deadline per request (a safety cap, not typical latency) |
+
+Run `./bin/inkwall-engine proxy -h` for all flags. Inspection currently costs about 0.5 ms per
+request plus roughly 0.15 ms per request argument, so skipping static and trusted routes matters; see
+the
+[performance baseline](docs/design/0001-performance-first-architecture.md#31-measured-baseline-2026-10-03).
+
+Development checks: `make check` (lint, tests, vulnerability scan) and `make crs-test` (the OWASP CRS
+regression suite, about 4,500 tests, through the proxy).
 
 ## Planned integrations
 
