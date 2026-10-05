@@ -11,7 +11,7 @@ import (
 )
 
 func TestParseProxyFlags(t *testing.T) {
-	cfg, err := parseProxyFlags([]string{
+	cfg, err := parseFlags(cmdProxy, []string{
 		"--upstream", "http://app:8080", "--mode", "block", "--failure-mode", "closed",
 		"--trusted-proxies", "10.0.0.0/8,192.0.2.1", "--oversize-body", "deny", "--max-args", "255",
 		"--skip-paths", "/healthz,/static/*", "--skip-body-paths", "/upload/*",
@@ -38,7 +38,7 @@ func TestParseProxyFlags(t *testing.T) {
 }
 
 func TestParseProxyFlagsDefaults(t *testing.T) {
-	cfg, err := parseProxyFlags([]string{"--upstream", "http://app"}, io.Discard)
+	cfg, err := parseFlags(cmdProxy, []string{"--upstream", "http://app"}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,8 +59,8 @@ func TestParseProxyFlagsErrors(t *testing.T) {
 		{"--upstream", "http://app", "--skip-paths", "static/*"},
 		{"--upstream", "http://app", "--disable-rule-groups", "php,cobol"},
 	} {
-		if _, err := parseProxyFlags(args, io.Discard); err == nil {
-			t.Errorf("parseProxyFlags(%v) succeeded, want error", args)
+		if _, err := parseFlags(cmdProxy, args, io.Discard); err == nil {
+			t.Errorf("parseFlags(proxy, %v) succeeded, want error", args)
 		}
 	}
 }
@@ -68,5 +68,27 @@ func TestParseProxyFlagsErrors(t *testing.T) {
 func TestRunUsage(t *testing.T) {
 	if code := run(nil, io.Discard); code != 2 {
 		t.Fatalf("run() = %d, want 2", code)
+	}
+}
+
+func TestParseForwardAuthFlags(t *testing.T) {
+	cfg, err := parseFlags(cmdForwardAuth, []string{"--mode", "block", "--trusted-proxies", "127.0.0.1/32"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.listen != "127.0.0.1:9001" || cfg.adminListen != ":9480" {
+		t.Fatalf("default ports = %s / %s, want 127.0.0.1:9001 / :9480", cfg.listen, cfg.adminListen)
+	}
+	if cfg.upstream != nil || cfg.mode != pipeline.ModeBlock {
+		t.Fatalf("unexpected config: %+v", cfg)
+	}
+	if _, err := parseFlags(cmdForwardAuth, []string{"--upstream", "http://app"}, io.Discard); err == nil {
+		t.Fatal("forward-auth accepted --upstream")
+	}
+}
+
+func TestRunUnknownCommand(t *testing.T) {
+	if code := run([]string{"serve"}, io.Discard); code != 2 {
+		t.Fatalf("run(serve) = %d, want 2", code)
 	}
 }
