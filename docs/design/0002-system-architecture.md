@@ -691,17 +691,32 @@ metadata: {name: inkwall, namespace: shop}
 spec:
   forwardAuth:
     address: http://127.0.0.1:9001/v1/forward-auth
-    trustForwardHeader: true
-    authResponseHeaders: ["X-Inkwall-Action"]
-    # forwardBody: true      # recent Traefik v3 versions; enable only when body inspection is on
-    # maxBodySize: 65536
+    trustForwardHeader: false   # required, see below
+    forwardBody: true           # required for body inspection (Traefik v3)
+    maxBodySize: 1048576        # above the engine's body limit
+    authResponseHeaders: ["X-Request-Id"]
 ```
 
 The operator attaches it to protected routes (IngressRoute `middlewares`, or the
 `traefik.ingress.kubernetes.io/router.middlewares` annotation for Ingress).
 
 ForwardAuth does not send the original method and URI as-is; they arrive as `X-Forwarded-Method`
-and `X-Forwarded-Uri`. The `forwardauth` adapter reconstructs the request from these headers.
+and `X-Forwarded-Uri`. The `forwardauth` adapter reconstructs the request from these headers and
+does not inspect them as client headers.
+
+- **`trustForwardHeader` must be `false`.** With `true`, Traefik keeps a client's own
+  `X-Forwarded-Uri` and `X-Forwarded-Method` if present, so the engine inspects a URI chosen by the
+  attacker while Traefik forwards the real one. Traefik's entrypoint already strips these headers
+  from untrusted peers, but not from addresses in `forwardedHeaders.trustedIPs`, which is the usual
+  setup behind a cloud load balancer. Verified on Traefik v3.7.13: with a trusted load balancer and
+  `true`, a SQL injection behind `X-Forwarded-Uri: /harmless` reached the application.
+- **`forwardBody` must be on**, or bodies reach the application uninspected. Traefik buffers the
+  body up to `maxBodySize` and answers 401 itself above it; setting it above the engine's
+  `--max-body-bytes` lets the engine's oversize policy decide (413 in block mode).
+- The adapter rejects subrequests with missing, duplicated or invalid `X-Forwarded-Method` /
+  `-Uri` / `-Host` with 400, even in detect mode: they can't be inspected, so they must not be
+  allowed.
+- Allowed requests get an `X-Request-Id`, which `authResponseHeaders` copies to the upstream.
 
 **B. Traefik plugin (later):** Yaegi-interpreted Go plugins can't run Coraza efficiently (no cgo,
 interpreter overhead), so the plugin is a **thin client** that sends a compact binary check request
