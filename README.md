@@ -132,6 +132,11 @@ request plus roughly 0.15 ms per request argument, so skipping static and truste
 the
 [performance baseline](docs/design/0001-performance-first-architecture.md#31-measured-baseline-2026-10-03).
 
+To run it in Kubernetes, `make kind-up` creates a [kind](https://kind.sigs.k8s.io/) cluster with a
+demo app behind the engine (a sidecar in block mode, on `127.0.0.1:30480`), and `make kind-test`
+sends benign and attack requests and checks the verdicts. `make kind-down` deletes the cluster. The
+setup is in [`hack/kind`](hack/kind).
+
 Development checks: `make check` (lint, tests, vulnerability scan) and `make crs-test` (the OWASP CRS
 regression suite, about 4,500 tests, through the proxy).
 

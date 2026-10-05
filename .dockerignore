@@ -1,0 +1,8 @@
+.git
+.github
+bin
+dist
+docs
+hack
+test
+*.md
