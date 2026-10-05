@@ -147,6 +147,14 @@ func (h *Handler) toRequest(r *http.Request) (*request.Request, string, error) {
 	for _, name := range synthesized {
 		headers.Del(name)
 	}
+	// Traefik sends no Content-Length when the forwarded body is empty, while
+	// clients send "Content-Length: 0" for an empty POST, PUT or PATCH.
+	// Without it, rule 920180 (POST without Content-Length) scores every
+	// empty POST.
+	if r.ContentLength == 0 && len(r.TransferEncoding) == 0 && headers.Get("Content-Length") == "" &&
+		(method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch) {
+		headers.Set("Content-Length", "0")
+	}
 	id := httpadapter.RequestID(headers.Get("X-Request-Id"))
 	if id == "" {
 		id = httpadapter.NewRequestID()

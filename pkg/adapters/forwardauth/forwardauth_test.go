@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -183,16 +184,37 @@ func TestNewValidatesConfig(t *testing.T) {
 	}
 }
 
+// lastVerdict records the most recent verdict of a pipeline.
+type lastVerdict struct{ v pipeline.Verdict }
+
+func (l *lastVerdict) ObserveVerdict(v pipeline.Verdict) { l.v = v }
+
+func observedPipeline(t *testing.T, obs pipeline.Observer) *pipeline.Pipeline {
+	t.Helper()
+	eval, err := coraza.New(coraza.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 500 * time.Millisecond, Observer: obs})
+}
+
 // TestSameVerdictAsReverseProxy checks the package contract: the reverse
 // proxy is the reference adapter, and forward-auth must reach the same
-// verdict for the same client request.
+// verdict, with the same matched rules, for the same client request. Rules
+// that match below the blocking threshold still count: they change how close
+// a request is to being blocked.
 func TestSameVerdictAsReverseProxy(t *testing.T) {
-	var logs bytes.Buffer
-	fa := newHandler(t, pipeline.ModeBlock, 64<<10, &logs)
+	var faSeen, rpSeen lastVerdict
+	fa, err := New(observedPipeline(t, &faSeen), Config{MaxBodyBytes: 64 << 10, Logger: slog.New(slog.DiscardHandler)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	t.Cleanup(upstream.Close)
 	target, _ := url.Parse(upstream.URL)
-	rp, err := proxy.New(newPipeline(t, pipeline.ModeBlock), proxy.Config{Upstream: target, MaxBodyBytes: 64 << 10})
+	rp, err := proxy.New(observedPipeline(t, &rpSeen), proxy.Config{
+		Upstream: target, MaxBodyBytes: 64 << 10, Logger: slog.New(slog.DiscardHandler),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,6 +224,9 @@ func TestSameVerdictAsReverseProxy(t *testing.T) {
 		{"GET", "/search?q=running+shoes&page=2", "", ""},
 		{"POST", "/login", "application/x-www-form-urlencoded", "user=alice&password=hunter2"},
 		{"POST", "/api/cart", "application/json", `{"sku":"A-1","qty":2}`},
+		{"POST", "/logout", "", ""},
+		{"DELETE", "/api/cart/1", "", ""},
+		{"OPTIONS", "/api/cart", "", ""},
 		{"GET", "/products?id=1%27%20OR%20%271%27%3D%271", "", ""},
 		{"GET", "/?file=../../../../etc/passwd", "", ""},
 		{"POST", "/ping", "application/x-www-form-urlencoded", "host=127.0.0.1;cat /etc/passwd"},
@@ -213,12 +238,18 @@ func TestSameVerdictAsReverseProxy(t *testing.T) {
 		direct.Header.Set("Accept", "text/html")
 		if tc.body != "" {
 			direct.Header.Set("Content-Type", tc.contentType)
+		} else if tc.method == "POST" {
+			// What clients send for an empty POST.
+			direct.Header.Set("Content-Length", "0")
 		}
 		want := serve(rp, direct).Code
 		got := serve(fa, subrequest(tc.method, tc.uri, tc.contentType, tc.body)).Code
 		allowed := func(code int) bool { return code < 300 }
 		if allowed(got) != allowed(want) || (!allowed(got) && got != want) {
 			t.Errorf("%s %s: forward-auth %d, reverse proxy %d", tc.method, tc.uri, got, want)
+		}
+		if !slices.Equal(faSeen.v.RuleIDs, rpSeen.v.RuleIDs) {
+			t.Errorf("%s %s: forward-auth matched %v, reverse proxy %v", tc.method, tc.uri, faSeen.v.RuleIDs, rpSeen.v.RuleIDs)
 		}
 	}
 }
