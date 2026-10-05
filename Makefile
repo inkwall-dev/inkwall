@@ -60,12 +60,13 @@ image: ## Build the inkwall-engine container image (IMAGE=name:tag)
 	docker build -t $(IMAGE) .
 
 .PHONY: kind-up
-kind-up: ## Create the kind cluster and deploy the demo app behind the engine (hack/kind)
+kind-up: ## Create the kind cluster and deploy the demo app behind the engine and behind Traefik (hack/kind)
 	KIND_CLUSTER=$(KIND_CLUSTER) IMAGE=$(IMAGE) hack/kind/up.sh
 
 .PHONY: kind-test
 kind-test: ## Send benign and attack requests to the kind demo and check verdicts
 	hack/kind/smoke.sh
+	NAME=traefik PROXY=http://127.0.0.1:30080 ADMIN=http://127.0.0.1:30482 hack/kind/smoke.sh
 
 .PHONY: kind-down
 kind-down: ## Delete the kind cluster

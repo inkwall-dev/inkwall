@@ -1,0 +1,61 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Traefik (chart traefik/traefik) with inkwall-engine as a sidecar in its pod.
+# Traefik's ForwardAuth middleware calls the engine on 127.0.0.1:9001; see
+# traefik-demo.yaml for the Middleware and the protected Ingress.
+deployment:
+  additionalContainers:
+    - name: inkwall-engine
+      image: inkwall-engine:dev
+      imagePullPolicy: Never
+      args:
+        - forward-auth
+        - --mode=block
+        - --skip-paths=/health
+        # Traefik is the direct peer; its X-Forwarded-For holds the client.
+        - --trusted-proxies=127.0.0.1/32,::1/128
+      ports:
+        - name: inkwall-admin
+          containerPort: 9480
+      readinessProbe:
+        httpGet:
+          path: /readyz
+          port: inkwall-admin
+      livenessProbe:
+        httpGet:
+          path: /healthz
+          port: inkwall-admin
+      resources:
+        requests:
+          cpu: 100m
+          memory: 64Mi
+        limits:
+          memory: 256Mi
+      # Coraza checks at startup that it can create files in the temp dir.
+      volumeMounts:
+        - name: inkwall-tmp
+          mountPath: /tmp
+      securityContext:
+        runAsNonRoot: true
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+  additionalVolumes:
+    - name: inkwall-tmp
+      emptyDir:
+        sizeLimit: 16Mi
+
+ports:
+  web:
+    nodePort: 30080
+  websecure:
+    expose:
+      default: false
+
+service:
+  spec:
+    type: NodePort
