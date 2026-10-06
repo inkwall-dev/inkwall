@@ -4,8 +4,8 @@
 in your cluster is protected by the same policy.**
 
 > **Status: early development.** No release exists yet. The inspection engine works as a standalone
-> reverse proxy (see [Try it](#try-it)); proxy integrations and the Kubernetes operator are not built
-> yet. The architecture is written up in [`docs/design`](docs/design/README.md). Sections other than
+> reverse proxy and behind Traefik's ForwardAuth (see [Try it](#try-it)); the other proxy
+> integrations and the Kubernetes operator are not built yet. The architecture is written up in [`docs/design`](docs/design/README.md). Sections other than
 > "Try it" describe the target, not shipped features.
 
 ---
@@ -132,10 +132,19 @@ request plus roughly 0.15 ms per request argument, so skipping static and truste
 the
 [performance baseline](docs/design/0001-performance-first-architecture.md#31-measured-baseline-2026-10-03).
 
+**Behind Traefik**, `inkwall-engine forward-auth` answers Traefik's ForwardAuth middleware on
+`127.0.0.1:9001/v1/forward-auth`, with the same flags minus `--upstream`. Run it as a sidecar in
+Traefik's pod with `--trusted-proxies=127.0.0.1/32`, and configure the middleware with
+`trustForwardHeader: false` (otherwise clients can make the engine inspect a URI of their choice) and
+`forwardBody: true` (otherwise bodies are not inspected). See
+[`hack/kind/traefik-demo.yaml`](hack/kind/traefik-demo.yaml) and the
+[design notes](docs/design/0002-system-architecture.md#63-traefik).
+
 To run it in Kubernetes, `make kind-up` creates a [kind](https://kind.sigs.k8s.io/) cluster with a
-demo app behind the engine (a sidecar in block mode, on `127.0.0.1:30480`), and `make kind-test`
-sends benign and attack requests and checks the verdicts. `make kind-down` deletes the cluster. The
-setup is in [`hack/kind`](hack/kind).
+demo app published twice: behind the engine's reverse proxy (`127.0.0.1:30480`) and through Traefik
+with the engine as a forward-auth sidecar (`127.0.0.1:30080`), both in block mode. `make kind-test`
+sends benign and attack requests through both and checks the verdicts. `make kind-down` deletes the
+cluster. The setup is in [`hack/kind`](hack/kind).
 
 Development checks: `make check` (lint, tests, vulnerability scan) and `make crs-test` (the OWASP CRS
 regression suite, about 4,500 tests, through the proxy).
@@ -147,7 +156,7 @@ regression suite, about 4,500 tests, through the proxy).
 | Envoy, Envoy Gateway, Istio, Contour | `ext_proc` (or `ext_authz`) | streamed |
 | HAProxy (both Kubernetes ingress controllers) | SPOE | yes |
 | ingress-nginx | Lua plugin (or global auth URL) | yes (plugin) |
-| Traefik | ForwardAuth, later a plugin | limited |
+| Traefik | ForwardAuth (works today), later a plugin | yes, with `forwardBody` (buffered) |
 | Caddy | native module, in-process | yes |
 | Anything else | standalone reverse proxy | yes |
 

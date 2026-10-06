@@ -6,10 +6,15 @@
 // Usage:
 //
 //	inkwall-engine proxy --upstream http://app:8080 [flags]
+//	inkwall-engine forward-auth [flags]
 //
 // The proxy subcommand runs the standalone reverse proxy: it inspects each
 // request with the OWASP Core Rule Set and forwards allowed requests to the
 // upstream.
+//
+// The forward-auth subcommand answers forward-auth subrequests from a proxy
+// such as Traefik (ForwardAuth middleware) on /v1/forward-auth: 200 allows
+// the request, any other status is returned to the client.
 package main
 
 import (
@@ -30,6 +35,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/inkwall-dev/inkwall/pkg/adapters/forwardauth"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/proxy"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
@@ -43,14 +49,15 @@ func main() {
 }
 
 func run(args []string, stderr io.Writer) int {
-	if len(args) == 0 || args[0] != "proxy" {
+	if len(args) == 0 || (args[0] != cmdProxy && args[0] != cmdForwardAuth) {
 		fmt.Fprintln(stderr, "usage: inkwall-engine proxy --upstream URL [flags]")
-		fmt.Fprintln(stderr, "run 'inkwall-engine proxy -h' for flags")
+		fmt.Fprintln(stderr, "       inkwall-engine forward-auth [flags]")
+		fmt.Fprintln(stderr, "run 'inkwall-engine <command> -h' for flags")
 		return 2
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	cfg, err := parseProxyFlags(args[1:], stderr)
+	cfg, err := parseFlags(args[0], args[1:], stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -58,14 +65,22 @@ func run(args []string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
 	}
-	if err := serveProxy(cfg, logger); err != nil {
+	if err := serve(cfg, logger); err != nil {
 		logger.Error("engine stopped", slog.Any("error", err))
 		return 1
 	}
 	return 0
 }
 
-type proxyConfig struct {
+// Subcommands. Both run the same engine and differ only in how requests
+// arrive and how the verdict is returned.
+const (
+	cmdProxy       = "proxy"
+	cmdForwardAuth = "forward-auth"
+)
+
+type engineConfig struct {
+	command        string
 	listen         string
 	adminListen    string
 	readTimeout    time.Duration
@@ -88,13 +103,22 @@ type proxyConfig struct {
 	ruleGroupsOff  []string
 }
 
-func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
-	fs := flag.NewFlagSet("proxy", flag.ContinueOnError)
+func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, error) {
+	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	listen := fs.String("listen", ":8480", "address to listen on")
+	// forward-auth runs next to the proxy that calls it, so by default it is
+	// reachable only from inside the pod.
+	defaultListen := ":8480"
+	if command == cmdForwardAuth {
+		defaultListen = "127.0.0.1:9001"
+	}
+	listen := fs.String("listen", defaultListen, "address to listen on")
 	adminListen := fs.String("admin-listen", ":9480", "address for /metrics, /healthz and /readyz (empty disables)")
 	readTimeout := fs.Duration("read-timeout", 60*time.Second, "maximum time to read a whole request, including the body (0 = no limit)")
-	upstream := fs.String("upstream", "", "upstream URL that allowed requests are forwarded to (required)")
+	var upstream *string
+	if command == cmdProxy {
+		upstream = fs.String("upstream", "", "upstream URL that allowed requests are forwarded to (required)")
+	}
 	mode := fs.String("mode", "detect", "enforcement mode: detect or block")
 	failure := fs.String("failure-mode", "auto", "when a request cannot be inspected (timeout, error, overload): open (allow), closed (deny with 503), or auto (closed in block mode, open in detect mode)")
 	timeout := fs.Duration("timeout", pipeline.DefaultTimeout, "per-request inspection deadline")
@@ -111,10 +135,11 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 	disableGroups := fs.String("disable-rule-groups", "", "comma-separated CRS attack families to remove when the application cannot be vulnerable to them: "+strings.Join(coraza.RuleGroupNames(), ", "))
 	skipBodyPaths := fs.String("skip-body-paths", "", "comma-separated paths whose body is not inspected (headers and URI still are), same syntax as --skip-paths")
 	if err := fs.Parse(args); err != nil {
-		return proxyConfig{}, err
+		return engineConfig{}, err
 	}
 
-	cfg := proxyConfig{
+	cfg := engineConfig{
+		command:        command,
 		listen:         *listen,
 		adminListen:    *adminListen,
 		readTimeout:    *readTimeout,
@@ -127,14 +152,16 @@ func parseProxyFlags(args []string, stderr io.Writer) (proxyConfig, error) {
 		rulesFile:      *rulesFile,
 		rulesBeforeCRS: *rulesBeforeCRS,
 	}
-	if *upstream == "" {
-		return cfg, errors.New("--upstream is required")
+	if command == cmdProxy {
+		if *upstream == "" {
+			return cfg, errors.New("--upstream is required")
+		}
+		u, err := url.Parse(*upstream)
+		if err != nil {
+			return cfg, fmt.Errorf("--upstream: %w", err)
+		}
+		cfg.upstream = u
 	}
-	u, err := url.Parse(*upstream)
-	if err != nil {
-		return cfg, fmt.Errorf("--upstream: %w", err)
-	}
-	cfg.upstream = u
 
 	switch *mode {
 	case "detect":
@@ -202,7 +229,7 @@ func splitList(s string) []string {
 	return out
 }
 
-func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
+func serve(cfg engineConfig, logger *slog.Logger) error {
 	directives, err := readOptional(cfg.rulesFile)
 	if err != nil {
 		return fmt.Errorf("read --rules: %w", err)
@@ -227,7 +254,11 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	metrics := telemetry.NewMetrics("proxy")
+	adapter := "proxy"
+	if cfg.command == cmdForwardAuth {
+		adapter = "forwardauth"
+	}
+	metrics := telemetry.NewMetrics(adapter)
 	p := pipeline.New(eval, pipeline.Config{
 		Mode:          cfg.mode,
 		FailureMode:   cfg.failureMode,
@@ -238,9 +269,16 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 		Routes:        cfg.routes,
 	})
 	metrics.WatchPipeline(p)
-	handler, err := proxy.New(p,
-		proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: cfg.maxBodyBytes, ClientIP: resolver, Logger: logger},
-	)
+	var handler http.Handler
+	if cfg.command == cmdForwardAuth {
+		handler, err = forwardauth.New(p,
+			forwardauth.Config{MaxBodyBytes: cfg.maxBodyBytes, ClientIP: resolver, Logger: logger},
+		)
+	} else {
+		handler, err = proxy.New(p,
+			proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: cfg.maxBodyBytes, ClientIP: resolver, Logger: logger},
+		)
+	}
 	if err != nil {
 		return err
 	}
@@ -290,14 +328,18 @@ func serveProxy(cfg proxyConfig, logger *slog.Logger) error {
 		go func() { errc <- admin.Serve(adminLn) }()
 	}
 
-	logger.Info("inkwall-engine proxy started",
+	attrs := []any{
 		slog.String("listen", ln.Addr().String()),
 		slog.String("admin_listen", cfg.adminListen),
-		slog.String("upstream", cfg.upstream.String()),
+	}
+	if cfg.upstream != nil {
+		attrs = append(attrs, slog.String("upstream", cfg.upstream.String()))
+	}
+	logger.Info("inkwall-engine "+cfg.command+" started", append(attrs,
 		slog.String("mode", modeName(cfg.mode)),
 		slog.String("failure_mode", failureModeName(cfg.failureMode.Resolve(cfg.mode))),
 		slog.Int("paranoia_level", cfg.paranoiaLevel),
-		slog.Any("disabled_rule_groups", cfg.ruleGroupsOff))
+		slog.Any("disabled_rule_groups", cfg.ruleGroupsOff))...)
 
 	select {
 	case err := <-errc:
