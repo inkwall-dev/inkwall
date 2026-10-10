@@ -1,0 +1,16 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+version: v2
+modules:
+  - path: api
+lint:
+  use:
+    - STANDARD
+  except:
+    # Files live in api/<name>/v1 (0002 §9); the package carries the
+    # inkwall prefix so it is unique among other protobuf packages.
+    - PACKAGE_DIRECTORY_MATCH
+breaking:
+  use:
+    - FILE
