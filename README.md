@@ -154,6 +154,18 @@ $ curl -s --unix-socket /run/inkwall/engine.sock -H 'Content-Type: application/j
 {"action":"ACTION_DENY","status":403,"rule_ids":[942100,949110],"reason":"REASON_RULE",...}
 ```
 
+**Testing rules without traffic.** `inkwallctl test` shows the verdict and the matching rules for a
+request given like a curl command, as raw HTTP in a file (`--request`), or as a browser HAR export
+(`--har`). It runs the engine's checks in-process with the same flags (`--paranoia-level`,
+`--rules`, ...), or against a running engine with `--engine`. `--expect allow|deny` makes it a CI
+check for rule changes:
+
+```console
+$ ./bin/inkwallctl test 'http://shop.example.com/?id=1%27%20OR%20%271%27%3D%271'
+deny  403  GET /?id=1%27%20OR%20%271%27%3D%271  reason=rule  rules=942100,949110  interrupting=949110  847µs
+$ ./bin/inkwallctl test --rules my-exclusions.conf --expect allow --har checkout-flow.har
+```
+
 To run it in Kubernetes, `make kind-up` creates a [kind](https://kind.sigs.k8s.io/) cluster with a
 demo app published twice: behind the engine's reverse proxy (`127.0.0.1:30480`) and through Traefik
 with the engine as a forward-auth sidecar (`127.0.0.1:30080`), both in block mode. `make kind-test`
