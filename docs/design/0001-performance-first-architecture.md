@@ -73,6 +73,12 @@ Findings:
   exhausting the CPU. None of that makes inspection faster; legitimate large requests need a
   deadline that fits them.
 
+Under load (2026-10-10, `inkwallctl bench`, in-process, same machine, 12 threads): one worker
+reaches ~780 req/s with a benign header-only GET at p50 0.73 ms (the corpus sends more headers than
+`BenchmarkEvaluate`). Throughput tops out around 3,700 req/s; at ~70% of that (`--rate 2600`) the
+whole mix has p50 1.9 ms and p99 19.5 ms, dominated by queueing behind JSON and form bodies.
+Laptop numbers, for orientation only; comparisons need the same machine.
+
 Measured and not adopted:
 
 - **Coraza's regex prefilter (`SecRxPreFilter`)**: 10–25% faster, but the CRS regression suite
@@ -241,6 +247,16 @@ documented as the slower mode.
 5. **Soak / chaos:** 24 h soak for GC and memory; kill the engine mid-load and verify the
    configured failure mode (open: no request errors; closed: 503, no request forwarded
    uninspected).
+
+Status:
+
+| Layer | Where | State |
+|---|---|---|
+| Micro | `make bench-compare`, CI job `bench` | Done. Base and head run interleaved 8 times; `hack/benchgate` fails a PR when benchstat finds a significant change (p < 0.05) above 5% in `sec/op`, `B/op` or `allocs/op` |
+| Engine | `inkwallctl bench` | Done. Fixed corpus (`cmd/inkwallctl/corpus.go`), closed-loop for throughput or `--rate` for latency at a set load, measured from each request's scheduled time so queueing is not hidden. Any wrong verdict, timeout or overload makes the run fail |
+| End-to-end on kind | | Next, with the Traefik scenarios |
+| Profiling | `--pprof` on the admin listener | Endpoints done; flamegraphs in CI and Pyroscope not yet |
+| Soak / chaos | | Engine-kill test next, with the Traefik scenarios; 24 h soak not yet |
 
 ## 9. Open questions
 

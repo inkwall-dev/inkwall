@@ -14,6 +14,8 @@ KIND_CLUSTER    ?= inkwall
 # Benchmarks: set BENCH to a regexp to narrow, COUNT for benchstat-friendly repeats.
 BENCH           ?= .
 COUNT           ?= 1
+# bench-compare: the revision to compare against.
+BASE            ?= origin/main
 
 .DEFAULT_GOAL := help
 
@@ -33,6 +35,10 @@ test: ## Run unit tests with the race detector
 .PHONY: bench
 bench: ## Run benchmarks (BENCH=regexp COUNT=n)
 	$(GO) test -run='^$$' -bench='$(BENCH)' -benchmem -count=$(COUNT) ./...
+
+.PHONY: bench-compare
+bench-compare: ## Compare benchmarks with BASE (origin/main) and fail on a significant regression over 5%
+	BENCH='$(BENCH)' hack/bench/compare.sh $(BASE)
 
 .PHONY: crs-test
 crs-test: ## Run the OWASP CRS regression suite through the proxy (test/crs)

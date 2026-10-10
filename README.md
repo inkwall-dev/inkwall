@@ -172,8 +172,14 @@ with the engine as a forward-auth sidecar (`127.0.0.1:30080`), both in block mod
 sends benign and attack requests through both and checks the verdicts. `make kind-down` deletes the
 cluster. The setup is in [`hack/kind`](hack/kind).
 
-Development checks: `make check` (lint, tests, vulnerability scan) and `make crs-test` (the OWASP CRS
-regression suite, about 4,500 tests, through the proxy).
+Development checks: `make check` (lint, tests, vulnerability scan), `make crs-test` (the OWASP CRS
+regression suite, about 4,500 tests, through the proxy) and `make bench-compare` (benchmarks against
+`origin/main`; fails on a significant regression over 5%, as CI does on every PR).
+
+**Measuring performance.** `inkwallctl bench` replays a fixed mix of benign and attack requests and
+reports p50/p99/p99.9 per request class and throughput per core; `--rate 2000` holds a fixed load to
+measure latency below saturation, and `--engine` measures a running engine instead. `--pprof` on the
+engine serves `/debug/pprof/` on the admin listener; keep that listener private when it is on.
 
 ## Planned integrations
 
