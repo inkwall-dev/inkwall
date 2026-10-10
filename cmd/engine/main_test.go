@@ -5,6 +5,10 @@ package main
 
 import (
 	"io"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
@@ -90,5 +94,65 @@ func TestParseForwardAuthFlags(t *testing.T) {
 func TestRunUnknownCommand(t *testing.T) {
 	if code := run([]string{"serve"}, io.Discard); code != 2 {
 		t.Fatalf("run(serve) = %d, want 2", code)
+	}
+}
+
+func TestParseCheckFlags(t *testing.T) {
+	cfg, err := parseFlags(cmdCheck, []string{"--listen", "unix:/run/inkwall/engine.sock", "--mode", "block"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.listen != "unix:/run/inkwall/engine.sock" || cfg.mode != pipeline.ModeBlock {
+		t.Fatalf("unexpected config: %+v", cfg)
+	}
+	if cfg, _ := parseFlags(cmdCheck, nil, io.Discard); cfg.listen != "127.0.0.1:9002" {
+		t.Fatalf("default listen = %s, want 127.0.0.1:9002", cfg.listen)
+	}
+	// The caller sends the resolved client address; there is no
+	// X-Forwarded-For to trust.
+	for _, args := range [][]string{{"--upstream", "http://app"}, {"--trusted-proxies", "10.0.0.0/8"}} {
+		if _, err := parseFlags(cmdCheck, args, io.Discard); err == nil {
+			t.Fatalf("check accepted %v", args)
+		}
+	}
+}
+
+func TestListenUnixSocket(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "engine.sock")
+	ln, err := listen("unix:" + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ln.Addr().Network() != "unix" {
+		t.Fatalf("network %s, want unix", ln.Addr().Network())
+	}
+
+	// A socket left by a crashed run is replaced.
+	stale, err := net.Listen("unix", filepath.Join(t.TempDir(), "stale.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stalePath := stale.Addr().String()
+	stale.(*net.UnixListener).SetUnlinkOnClose(false)
+	_ = stale.Close()
+	again, err := listen("unix:" + stalePath)
+	if err != nil {
+		t.Fatalf("stale socket not replaced: %v", err)
+	}
+	_ = again.Close()
+
+	// Anything else at the path is left alone.
+	_ = ln.Close()
+	if err := os.WriteFile(path, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := listen("unix:" + path); err == nil {
+		t.Fatal("listen replaced a regular file")
+	}
+	if _, err := listen("unix:"); err == nil {
+		t.Fatal("empty socket path accepted")
+	}
+	if _, err := listen("unix:/" + strings.Repeat("a", 103)); err == nil || !strings.Contains(err.Error(), "103") {
+		t.Fatalf("over-long socket path: %v", err)
 	}
 }

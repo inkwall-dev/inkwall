@@ -114,8 +114,8 @@ sequenceDiagram
 - Exists for clients with no native protocol: the ingress-nginx **Lua plugin**, the **Traefik
   plugin**, `inkwallctl test`, and our tests.
 - Because we own it, we control exactly what is sent and how compact it is.
-- Served over HTTP (`POST /v1/check`) and gRPC (`CheckService/Check`), on the Unix socket in
-  sidecar mode.
+- Served over HTTP (`POST /v1/check`, `inkwall-engine check`) and, with the Envoy adapters, gRPC
+  (`CheckService/Check`), on the Unix socket in sidecar mode.
 
 ```mermaid
 sequenceDiagram

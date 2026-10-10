@@ -21,12 +21,10 @@
 package forwardauth
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/inkwall-dev/inkwall/pkg/adapters/internal/httpadapter"
@@ -123,16 +121,16 @@ func (h *Handler) toRequest(r *http.Request) (*request.Request, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	if !isToken(method) {
+	if !httpadapter.IsToken(method) {
 		return nil, "", fmt.Errorf("invalid X-Forwarded-Method %q", method)
 	}
 	rawURI, err := single(r.Header, "X-Forwarded-Uri")
 	if err != nil {
 		return nil, "", err
 	}
-	path, err := uriPath(rawURI)
+	path, err := httpadapter.URIPath(rawURI)
 	if err != nil {
-		return nil, "", err
+		return nil, "", fmt.Errorf("X-Forwarded-Uri: %w", err)
 	}
 	host, err := optional(r.Header, "X-Forwarded-Host")
 	if err != nil {
@@ -209,42 +207,4 @@ func optional(h http.Header, name string) (string, error) {
 		return "", fmt.Errorf("%d values for %s", len(vs), name)
 	}
 	return h.Get(name), nil
-}
-
-// uriPath validates a forwarded request target and returns its decoded path.
-func uriPath(rawURI string) (string, error) {
-	if rawURI == "*" {
-		return rawURI, nil
-	}
-	if !strings.HasPrefix(rawURI, "/") {
-		return "", fmt.Errorf("X-Forwarded-Uri %q is not an origin-form request target", rawURI)
-	}
-	// Same rule as the reverse proxy: rules stop reading the URI at '#'
-	// while the application may not.
-	if strings.ContainsRune(rawURI, '#') {
-		return "", errors.New("X-Forwarded-Uri contains a fragment")
-	}
-	u, err := url.ParseRequestURI(rawURI)
-	if err != nil {
-		return "", fmt.Errorf("X-Forwarded-Uri: %w", err)
-	}
-	return u.Path, nil
-}
-
-// isToken reports whether s is an HTTP token (RFC 9110), the syntax of a
-// method.
-func isToken(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
-		default:
-			return false
-		}
-	}
-	return true
 }

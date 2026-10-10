@@ -9,10 +9,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
@@ -113,4 +117,42 @@ func addrString(a netip.Addr) string {
 		return ""
 	}
 	return a.String()
+}
+
+// URIPath validates a request target received from a proxy and returns its
+// decoded path. The target must be in origin form and must not contain a
+// fragment: rules stop reading the URI at '#' while the application may not.
+func URIPath(rawURI string) (string, error) {
+	if rawURI == "*" {
+		return rawURI, nil
+	}
+	if !strings.HasPrefix(rawURI, "/") {
+		return "", fmt.Errorf("request target %q is not in origin form", rawURI)
+	}
+	if strings.ContainsRune(rawURI, '#') {
+		return "", errors.New("request target contains a fragment")
+	}
+	u, err := url.ParseRequestURI(rawURI)
+	if err != nil {
+		return "", fmt.Errorf("request target: %w", err)
+	}
+	return u.Path, nil
+}
+
+// IsToken reports whether s is an HTTP token (RFC 9110), the syntax of a
+// method.
+func IsToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
 }

@@ -140,6 +140,20 @@ Traefik's pod with `--trusted-proxies=127.0.0.1/32`, and configure the middlewar
 [`hack/kind/traefik-demo.yaml`](hack/kind/traefik-demo.yaml) and the
 [design notes](docs/design/0002-system-architecture.md#63-traefik).
 
+**The check API.** `inkwall-engine check` serves the engine's own API, `POST /v1/check`
+([`api/engine/v1`](api/engine/v1/engine.proto)), for proxies without a native protocol: the proxy
+describes one request as a `CheckRequest`, in protobuf (`application/x-protobuf`) or JSON
+(`application/json`), and gets the verdict back. It listens on `127.0.0.1:9002` by default. It trusts
+the caller's `client_ip`, so expose it only to the proxy, for example on a Unix socket:
+
+```console
+$ ./bin/inkwall-engine check --listen unix:/run/inkwall/engine.sock --mode block
+$ curl -s --unix-socket /run/inkwall/engine.sock -H 'Content-Type: application/json' \
+    -d '{"method":"GET","raw_uri":"/?id=1%27%20OR%20%271%27%3D%271","authority":"shop.example.com"}' \
+    http://engine/v1/check
+{"action":"ACTION_DENY","status":403,"rule_ids":[942100,949110],"reason":"REASON_RULE",...}
+```
+
 To run it in Kubernetes, `make kind-up` creates a [kind](https://kind.sigs.k8s.io/) cluster with a
 demo app published twice: behind the engine's reverse proxy (`127.0.0.1:30480`) and through Traefik
 with the engine as a forward-auth sidecar (`127.0.0.1:30080`), both in block mode. `make kind-test`

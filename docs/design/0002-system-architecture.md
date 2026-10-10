@@ -426,7 +426,7 @@ does not need Kubernetes knowledge. Bundles are immutable; every change produces
 ### 5.1 Engine check API (for Lua, generic HTTP clients, and tests)
 
 ```protobuf
-// api/engine/v1/engine.proto
+// api/engine/v1/engine.proto (abridged; the file is the reference)
 service CheckService {
   rpc Check(CheckRequest) returns (CheckResponse);
 }
@@ -437,12 +437,13 @@ message CheckRequest {
   string scheme = 3;
   string authority = 4;
   string raw_uri = 5;
-  repeated Header headers = 6;
-  bytes client_ip = 7;       // 4 or 16 bytes
-  bytes peer_ip = 8;
-  bytes body = 9;            // optional, already capped by the proxy
+  repeated Header headers = 6;   // value, or raw_value for non-UTF-8 bytes
+  string client_ip = 7;          // textual, resolved by the proxy; empty = peer_ip
+  string peer_ip = 8;
+  bytes body = 9;                // optional; cut to --max-body-bytes by the engine
   bool body_truncated = 10;
-  string route_hint = 11;
+  string route_hint = 11;        // reserved for bundles
+  string protocol = 12;          // "HTTP/1.1" if empty
 }
 
 message CheckResponse {
@@ -450,11 +451,20 @@ message CheckResponse {
   uint32 status = 2;
   repeated Header response_headers = 3;
   repeated uint32 rule_ids = 4;
+  Reason reason = 5;
+  uint32 interrupting_rule_id = 6;
+  string request_id = 7;
+  google.protobuf.Duration inspection_time = 8;
 }
 ```
 
+Addresses are text rather than 4/16 raw bytes so JSON clients (the Lua plugin) can write them
+directly; parsing costs well under a microsecond.
+
 The same message is exposed as `POST /v1/check` with a compact binary (protobuf) or JSON body, for
 proxies without gRPC clients.
+`POST /v1/check` is served today (`inkwall-engine check`, `pkg/adapters/httpcheck`). The gRPC
+`CheckService` comes with the Envoy adapters, which bring the gRPC server into the engine.
 
 For Envoy the engine implements the **native** `envoy.service.auth.v3.Authorization` and
 `envoy.service.ext_proc.v3.ExternalProcessor` services directly; there is no translation proxy.

@@ -1,0 +1,115 @@
+// Copyright 2026 The Inkwall Authors
+// SPDX-License-Identifier: Apache-2.0
+
+// The engine's own check API (0006 §5). A proxy without a native protocol
+// describes one client request in a CheckRequest and acts on the verdict in
+// the CheckResponse. Served as POST /v1/check with a protobuf or JSON body.
+syntax = "proto3";
+
+package inkwall.engine.v1;
+
+import "google/protobuf/duration.proto";
+
+option go_package = "github.com/inkwall-dev/inkwall/api/engine/v1;enginev1";
+
+// CheckService is the gRPC form of POST /v1/check.
+service CheckService {
+  // Check inspects one request and returns the verdict.
+  rpc Check(CheckRequest) returns (CheckResponse);
+}
+
+// CheckRequest describes one client request as the proxy received it.
+message CheckRequest {
+  // Correlates the request across proxy, engine and events. Empty or unsafe
+  // values (anything but 1-128 of [A-Za-z0-9._:-]) are replaced by a
+  // generated ID, returned in CheckResponse.request_id.
+  string request_id = 1;
+  // HTTP method, e.g. "GET".
+  string method = 2;
+  // "http" or "https" as seen by the proxy. Empty means "http".
+  string scheme = 3;
+  // Request authority (Host header or :authority).
+  string authority = 4;
+  // Path and query exactly as received, before any normalization. Must be in
+  // origin form ("/path?query") and must not contain a fragment.
+  string raw_uri = 5;
+  // Request headers in received order. A Host header is ignored in favour of
+  // authority. Send Content-Length and Transfer-Encoding as received: rules
+  // check for their presence.
+  repeated Header headers = 6;
+  // End client address after the proxy's own trusted-proxy resolution, e.g.
+  // "203.0.113.7" or "2001:db8::1". Empty means peer_ip.
+  string client_ip = 7;
+  // Address of the proxy's direct TCP peer.
+  string peer_ip = 8;
+  // Body prefix. Bytes beyond the engine's --max-body-bytes are dropped and
+  // the body is treated as truncated.
+  bytes body = 9;
+  // The real body was longer than body.
+  bool body_truncated = 10;
+  // Reserved for selecting a policy by route once bundles exist; ignored.
+  string route_hint = 11;
+  // Protocol version, e.g. "HTTP/1.1" or "HTTP/2.0". Empty means "HTTP/1.1".
+  string protocol = 12;
+}
+
+// Header is one request or response header field.
+message Header {
+  string name = 1;
+  // Value, when it is valid UTF-8.
+  string value = 2;
+  // Value as raw bytes, for values that are not valid UTF-8 (obs-text).
+  // Takes precedence over value when set.
+  bytes raw_value = 3;
+}
+
+// Action tells the proxy what to do with the request.
+enum Action {
+  ACTION_UNSPECIFIED = 0;
+  // Forward the request.
+  ACTION_ALLOW = 1;
+  // Reject the request with CheckResponse.status.
+  ACTION_DENY = 2;
+  // Forward the request; it would have been blocked in block mode.
+  ACTION_LOG = 3;
+}
+
+// Reason explains a verdict.
+enum Reason {
+  REASON_UNSPECIFIED = 0;
+  // No rule interrupted the request.
+  REASON_NONE = 1;
+  // A rule interrupted the request.
+  REASON_RULE = 2;
+  // Inspection exceeded the deadline.
+  REASON_TIMEOUT = 3;
+  // The evaluator failed.
+  REASON_ERROR = 4;
+  // The caller canceled the check.
+  REASON_CANCELED = 5;
+  // All evaluation slots were busy; the request was not inspected.
+  REASON_OVERLOAD = 6;
+  // The body was longer than the inspection limit.
+  REASON_OVERSIZE = 7;
+  // The route is configured to skip inspection.
+  REASON_SKIPPED = 8;
+}
+
+// CheckResponse is the verdict for one CheckRequest.
+message CheckResponse {
+  Action action = 1;
+  // HTTP status to return to the client when action is ACTION_DENY.
+  uint32 status = 2;
+  // Headers to add to the forwarded request (allow, log) or to the denial.
+  repeated Header response_headers = 3;
+  // Every rule that matched, including rules that only added to an anomaly
+  // score.
+  repeated uint32 rule_ids = 4;
+  Reason reason = 5;
+  // Rule that interrupted the request, or 0.
+  uint32 interrupting_rule_id = 6;
+  // The request ID used in the engine's events.
+  string request_id = 7;
+  // Time spent inspecting.
+  google.protobuf.Duration inspection_time = 8;
+}

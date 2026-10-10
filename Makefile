@@ -5,6 +5,7 @@ GO              ?= go
 BIN_DIR         ?= bin
 GOLANGCI_LINT   ?= $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
 GOVULNCHECK     ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@v1.8.0
+BUF             ?= $(GO) run github.com/bufbuild/buf/cmd/buf@v1.50.0
 
 # Container image and local kind cluster (hack/kind).
 IMAGE           ?= inkwall-engine:dev
@@ -47,6 +48,11 @@ fmt: ## Format code
 .PHONY: vuln
 vuln: ## Check dependencies for known vulnerabilities
 	$(GOVULNCHECK) ./...
+
+.PHONY: generate
+generate: ## Lint the protobuf APIs (api/) and regenerate their Go code
+	$(BUF) lint
+	$(BUF) generate
 
 .PHONY: tidy
 tidy: ## Tidy go.mod and go.sum
