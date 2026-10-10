@@ -7,6 +7,7 @@
 //
 //	inkwall-engine proxy --upstream http://app:8080 [flags]
 //	inkwall-engine forward-auth [flags]
+//	inkwall-engine check [flags]
 //
 // The proxy subcommand runs the standalone reverse proxy: it inspects each
 // request with the OWASP Core Rule Set and forwards allowed requests to the
@@ -15,6 +16,12 @@
 // The forward-auth subcommand answers forward-auth subrequests from a proxy
 // such as Traefik (ForwardAuth middleware) on /v1/forward-auth: 200 allows
 // the request, any other status is returned to the client.
+//
+// The check subcommand serves the engine's own check API (api/engine/v1) on
+// POST /v1/check, for proxies without a native protocol and for inkwallctl.
+//
+// --listen and --admin-listen take a TCP address (127.0.0.1:9001) or a Unix
+// socket (unix:/run/inkwall/engine.sock).
 package main
 
 import (
@@ -36,6 +43,7 @@ import (
 	"time"
 
 	"github.com/inkwall-dev/inkwall/pkg/adapters/forwardauth"
+	"github.com/inkwall-dev/inkwall/pkg/adapters/httpcheck"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/proxy"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
@@ -49,9 +57,10 @@ func main() {
 }
 
 func run(args []string, stderr io.Writer) int {
-	if len(args) == 0 || (args[0] != cmdProxy && args[0] != cmdForwardAuth) {
+	if len(args) == 0 || (args[0] != cmdProxy && args[0] != cmdForwardAuth && args[0] != cmdCheck) {
 		fmt.Fprintln(stderr, "usage: inkwall-engine proxy --upstream URL [flags]")
 		fmt.Fprintln(stderr, "       inkwall-engine forward-auth [flags]")
+		fmt.Fprintln(stderr, "       inkwall-engine check [flags]")
 		fmt.Fprintln(stderr, "run 'inkwall-engine <command> -h' for flags")
 		return 2
 	}
@@ -72,11 +81,12 @@ func run(args []string, stderr io.Writer) int {
 	return 0
 }
 
-// Subcommands. Both run the same engine and differ only in how requests
+// Subcommands. All run the same engine and differ only in how requests
 // arrive and how the verdict is returned.
 const (
 	cmdProxy       = "proxy"
 	cmdForwardAuth = "forward-auth"
+	cmdCheck       = "check"
 )
 
 type engineConfig struct {
@@ -106,13 +116,16 @@ type engineConfig struct {
 func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, error) {
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	// forward-auth runs next to the proxy that calls it, so by default it is
-	// reachable only from inside the pod.
+	// forward-auth and check run next to the proxy that calls them, so by
+	// default they are reachable only from inside the pod.
 	defaultListen := ":8480"
-	if command == cmdForwardAuth {
+	switch command {
+	case cmdForwardAuth:
 		defaultListen = "127.0.0.1:9001"
+	case cmdCheck:
+		defaultListen = "127.0.0.1:9002"
 	}
-	listen := fs.String("listen", defaultListen, "address to listen on")
+	listen := fs.String("listen", defaultListen, "address to listen on: host:port or unix:/path/to/socket")
 	adminListen := fs.String("admin-listen", ":9480", "address for /metrics, /healthz and /readyz (empty disables)")
 	readTimeout := fs.Duration("read-timeout", 60*time.Second, "maximum time to read a whole request, including the body (0 = no limit)")
 	var upstream *string
@@ -130,7 +143,11 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	threshold := fs.Int("anomaly-threshold", coraza.DefaultInboundAnomalyThreshold, "OWASP CRS inbound anomaly score threshold")
 	rulesFile := fs.String("rules", "", "file with SecLang rules and configure-time exclusions (SecRuleRemoveById, SecRuleUpdateTargetById), loaded after CRS")
 	rulesBeforeCRS := fs.String("rules-before-crs", "", "file with SecLang runtime exclusions (rules using ctl:ruleRemoveById and similar) and settings, loaded before CRS")
-	trusted := fs.String("trusted-proxies", "", "comma-separated CIDRs whose X-Forwarded-For is trusted")
+	// The check API carries the client address resolved by the proxy.
+	trusted := new(string)
+	if command != cmdCheck {
+		trusted = fs.String("trusted-proxies", "", "comma-separated CIDRs whose X-Forwarded-For is trusted")
+	}
 	skipPaths := fs.String("skip-paths", "", "comma-separated paths never inspected, exact (/healthz) or prefix (/static/*); ambiguous paths are always inspected")
 	disableGroups := fs.String("disable-rule-groups", "", "comma-separated CRS attack families to remove when the application cannot be vulnerable to them: "+strings.Join(coraza.RuleGroupNames(), ", "))
 	skipBodyPaths := fs.String("skip-body-paths", "", "comma-separated paths whose body is not inspected (headers and URI still are), same syntax as --skip-paths")
@@ -255,8 +272,11 @@ func serve(cfg engineConfig, logger *slog.Logger) error {
 		return err
 	}
 	adapter := "proxy"
-	if cfg.command == cmdForwardAuth {
+	switch cfg.command {
+	case cmdForwardAuth:
 		adapter = "forwardauth"
+	case cmdCheck:
+		adapter = "httpcheck"
 	}
 	metrics := telemetry.NewMetrics(adapter)
 	p := pipeline.New(eval, pipeline.Config{
@@ -270,11 +290,14 @@ func serve(cfg engineConfig, logger *slog.Logger) error {
 	})
 	metrics.WatchPipeline(p)
 	var handler http.Handler
-	if cfg.command == cmdForwardAuth {
+	switch cfg.command {
+	case cmdForwardAuth:
 		handler, err = forwardauth.New(p,
 			forwardauth.Config{MaxBodyBytes: cfg.maxBodyBytes, ClientIP: resolver, Logger: logger},
 		)
-	} else {
+	case cmdCheck:
+		handler, err = httpcheck.New(p, httpcheck.Config{MaxBodyBytes: cfg.maxBodyBytes, Logger: logger})
+	default:
 		handler, err = proxy.New(p,
 			proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: cfg.maxBodyBytes, ClientIP: resolver, Logger: logger},
 		)
@@ -293,13 +316,13 @@ func serve(cfg engineConfig, logger *slog.Logger) error {
 	}
 
 	// Bind before announcing, so "started" means the ports are really open.
-	ln, err := net.Listen("tcp", cfg.listen)
+	ln, err := listen(cfg.listen)
 	if err != nil {
 		return err
 	}
 	var adminLn net.Listener
 	if cfg.adminListen != "" {
-		if adminLn, err = net.Listen("tcp", cfg.adminListen); err != nil {
+		if adminLn, err = listen(cfg.adminListen); err != nil {
 			_ = ln.Close()
 			return err
 		}
@@ -355,6 +378,30 @@ func serve(cfg engineConfig, logger *slog.Logger) error {
 		err = errors.Join(err, admin.Shutdown(shutdownCtx))
 	}
 	return err
+}
+
+// listen opens a TCP address or, with a "unix:" prefix, a Unix socket. A
+// socket file left behind by a previous run is removed first; the listener
+// removes its socket when it is closed.
+func listen(addr string) (net.Listener, error) {
+	path, ok := strings.CutPrefix(addr, "unix:")
+	if !ok {
+		return net.Listen("tcp", addr)
+	}
+	if path == "" {
+		return nil, errors.New("unix: listen address without a socket path")
+	}
+	// sun_path is 108 bytes on Linux and 104 on macOS, including the NUL;
+	// the kernel reports a longer path only as "invalid argument".
+	if len(path) > 103 {
+		return nil, fmt.Errorf("unix socket path %q is %d bytes, longer than the 103 the OS allows", path, len(path))
+	}
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSocket != 0 {
+		if err := os.Remove(path); err != nil {
+			return nil, err
+		}
+	}
+	return net.Listen("unix", path)
 }
 
 func failureModeName(f pipeline.FailureMode) string {
