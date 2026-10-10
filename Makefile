@@ -22,8 +22,9 @@ help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 .PHONY: build
-build: ## Build inkwall-engine into ./bin
+build: ## Build inkwall-engine and inkwallctl into ./bin
 	$(GO) build -trimpath -o $(BIN_DIR)/inkwall-engine ./cmd/engine
+	$(GO) build -trimpath -o $(BIN_DIR)/inkwallctl ./cmd/inkwallctl
 
 .PHONY: test
 test: ## Run unit tests with the race detector
