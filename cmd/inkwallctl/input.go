@@ -23,7 +23,7 @@ import (
 )
 
 // loadRequests turns the input flags into check requests.
-func loadRequests(cfg testConfig) ([]*enginev1.CheckRequest, error) {
+func loadRequests(cfg config) ([]*enginev1.CheckRequest, error) {
 	switch {
 	case cfg.url != "":
 		in, err := fromCommandLine(cfg)
@@ -48,7 +48,7 @@ func loadRequests(cfg testConfig) ([]*enginev1.CheckRequest, error) {
 }
 
 // fromCommandLine builds a request the way curl would send it.
-func fromCommandLine(cfg testConfig) (*enginev1.CheckRequest, error) {
+func fromCommandLine(cfg config) (*enginev1.CheckRequest, error) {
 	scheme, authority, rawURI, err := splitURL(cfg.url)
 	if err != nil {
 		return nil, err

@@ -200,7 +200,7 @@ func TestRunFilesAndExpect(t *testing.T) {
 func TestRunUsageErrors(t *testing.T) {
 	for _, args := range [][]string{
 		nil,
-		{"bench"},
+		{"lint"},
 		{"test"},
 		{"test", "http://a/", "http://b/"},
 		{"test", "--har", "x.har", "http://a/"},
