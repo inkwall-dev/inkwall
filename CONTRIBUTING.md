@@ -79,6 +79,9 @@ Existing objects must be updated before upgrading.
 3. Pull requests are squash-merged; the PR title must itself be a valid conventional commit, since
    it becomes the commit on `main`.
 4. No AI or tool attribution trailers (e.g. `Co-Authored-By` for tools) in commit messages.
+5. Every pull request has an issue. Open the issue first, give it a label (`enhancement`, `bug`,
+   `documentation`, ...), and link it from the PR by starting the PR description with
+   `Closes #<issue>`, so merging the PR closes the issue.
 
 ## Branches and releases
 
