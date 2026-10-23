@@ -6,6 +6,8 @@ package main
 import (
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -154,5 +156,25 @@ func TestListenUnixSocket(t *testing.T) {
 	}
 	if _, err := listen("unix:/" + strings.Repeat("a", 103)); err == nil || !strings.Contains(err.Error(), "103") {
 		t.Fatalf("over-long socket path: %v", err)
+	}
+}
+
+func TestPprofHandler(t *testing.T) {
+	admin := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })
+	h := withPprof(admin)
+	for path, want := range map[string]int{
+		"/debug/pprof/":        http.StatusOK,
+		"/debug/pprof/heap":    http.StatusOK,
+		"/debug/pprof/cmdline": http.StatusOK,
+		"/metrics":             http.StatusTeapot,
+	} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != want {
+			t.Errorf("GET %s: %d, want %d", path, w.Code, want)
+		}
+	}
+	if cfg, _ := parseFlags(cmdProxy, []string{"--upstream", "http://app"}, io.Discard); cfg.pprof {
+		t.Error("pprof on by default")
 	}
 }

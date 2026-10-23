@@ -48,13 +48,22 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 || args[0] != "test" {
+	if len(args) == 0 || (args[0] != "test" && args[0] != "bench") {
 		fmt.Fprintln(stderr, "usage: inkwallctl test [flags] URL")
 		fmt.Fprintln(stderr, "       inkwallctl test [flags] --request FILE | --har FILE")
-		fmt.Fprintln(stderr, "run 'inkwallctl test -h' for flags")
+		fmt.Fprintln(stderr, "       inkwallctl bench [flags] [--request FILE | --har FILE]")
+		fmt.Fprintln(stderr, "run 'inkwallctl <command> -h' for flags")
 		return 2
 	}
-	cfg, err := parseTestFlags(args[1:], stderr)
+	var (
+		cfg config
+		err error
+	)
+	if args[0] == "test" {
+		cfg, err = parseTestFlags(args[1:], stderr)
+	} else {
+		cfg, err = parseBenchFlags(args[1:], stderr)
+	}
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -62,7 +71,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
 	}
-	return runTest(cfg, stdout, stderr)
+	if args[0] == "test" {
+		return runTest(cfg, stdout, stderr)
+	}
+	return runBench(cfg, stdout, stderr)
 }
 
 // headerList collects repeated -H flags.
@@ -71,8 +83,8 @@ type headerList []string
 func (h *headerList) String() string     { return strings.Join(*h, ", ") }
 func (h *headerList) Set(v string) error { *h = append(*h, v); return nil }
 
-type testConfig struct {
-	// Input: exactly one of url, requestFile, harFile.
+type config struct {
+	// Input: at most one of url, requestFile, harFile.
 	url         string
 	method      string
 	headers     headerList
@@ -80,8 +92,11 @@ type testConfig struct {
 	requestFile string
 	harFile     string
 
+	// Where requests are checked: a running engine, or in-process with the
+	// rest of these settings.
 	engine        string
 	mode          pipeline.Mode
+	timeout       time.Duration
 	maxBodyBytes  int64
 	paranoiaLevel int
 	threshold     int
@@ -89,19 +104,35 @@ type testConfig struct {
 	rulesBefore   string
 	disabled      []string
 
+	// test
 	expect string
-	json   bool
+	// test: one CheckResponse per line; bench: the report.
+	json bool
+
+	// bench
+	duration    time.Duration
+	warmup      time.Duration
+	concurrency int
+	rate        float64
 }
 
-func parseTestFlags(args []string, stderr io.Writer) (testConfig, error) {
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+// flagSet registers the flags test and bench share. finish validates them
+// after parsing.
+type flagSet struct {
+	*flag.FlagSet
+	cfg      *config
+	mode     *string
+	disabled *string
+}
+
+func newFlagSet(name string, cfg *config, stderr io.Writer, inputHelp string) flagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	var cfg testConfig
 	fs.StringVar(&cfg.method, "X", "", "request method (default GET, or POST with -d)")
 	fs.Var(&cfg.headers, "H", `request header "Name: value" (repeatable)`)
 	fs.StringVar(&cfg.data, "d", "", "request body; @file reads it from a file")
-	fs.StringVar(&cfg.requestFile, "request", "", "file with one or more raw HTTP/1.1 requests")
-	fs.StringVar(&cfg.harFile, "har", "", "HAR file; every request in it is checked")
+	fs.StringVar(&cfg.requestFile, "request", "", "file with one or more raw HTTP/1.1 requests"+inputHelp)
+	fs.StringVar(&cfg.harFile, "har", "", "HAR file"+inputHelp)
 	fs.StringVar(&cfg.engine, "engine", "", "check API of a running engine (http://127.0.0.1:9002 or unix:/path); default is in-process")
 	mode := fs.String("mode", "block", "enforcement mode for in-process checks: block or detect")
 	fs.Int64Var(&cfg.maxBodyBytes, "max-body-bytes", 64<<10, "request body bytes to inspect, in-process")
@@ -110,15 +141,19 @@ func parseTestFlags(args []string, stderr io.Writer) (testConfig, error) {
 	fs.StringVar(&cfg.rules, "rules", "", "SecLang rules file loaded after CRS, in-process (as the engine's --rules)")
 	fs.StringVar(&cfg.rulesBefore, "rules-before-crs", "", "SecLang file loaded before CRS, in-process (as the engine's --rules-before-crs)")
 	disabled := fs.String("disable-rule-groups", "", "comma-separated CRS attack families to remove, in-process: "+strings.Join(coraza.RuleGroupNames(), ", "))
-	fs.StringVar(&cfg.expect, "expect", "", "exit 1 unless every request gets this verdict: allow or deny")
-	fs.BoolVar(&cfg.json, "json", false, "print each CheckResponse as a JSON line")
-	if err := fs.Parse(args); err != nil {
-		return cfg, err
-	}
+	return flagSet{FlagSet: fs, cfg: cfg, mode: mode, disabled: disabled}
+}
 
+// finish parses args and validates the shared flags. With inputRequired,
+// exactly one input must be given; otherwise at most one.
+func (fs flagSet) finish(args []string, inputRequired bool) error {
+	cfg := fs.cfg
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 	inputs := 0
 	if fs.NArg() > 1 {
-		return cfg, fmt.Errorf("one URL expected, got %d arguments", fs.NArg())
+		return fmt.Errorf("one URL expected, got %d arguments", fs.NArg())
 	}
 	if fs.NArg() == 1 {
 		cfg.url = fs.Arg(0)
@@ -130,38 +165,51 @@ func parseTestFlags(args []string, stderr io.Writer) (testConfig, error) {
 	if cfg.harFile != "" {
 		inputs++
 	}
-	if inputs != 1 {
-		return cfg, errors.New("give exactly one of URL, --request or --har")
+	if inputs > 1 || (inputRequired && inputs == 0) {
+		return errors.New("give exactly one of URL, --request or --har")
 	}
 	if cfg.url == "" && (cfg.method != "" || len(cfg.headers) > 0 || cfg.data != "") {
-		return cfg, errors.New("-X, -H and -d apply only to a URL")
+		return errors.New("-X, -H and -d apply only to a URL")
 	}
-	switch *mode {
+	switch *fs.mode {
 	case "block":
 		cfg.mode = pipeline.ModeBlock
 	case "detect":
 		cfg.mode = pipeline.ModeDetect
 	default:
-		return cfg, fmt.Errorf("--mode must be block or detect, got %q", *mode)
+		return fmt.Errorf("--mode must be block or detect, got %q", *fs.mode)
+	}
+	for _, g := range strings.Split(*fs.disabled, ",") {
+		if g = strings.TrimSpace(g); g == "" {
+			continue
+		}
+		if _, ok := coraza.RuleGroups[g]; !ok {
+			return fmt.Errorf("--disable-rule-groups: unknown group %q", g)
+		}
+		cfg.disabled = append(cfg.disabled, g)
+	}
+	return nil
+}
+
+func parseTestFlags(args []string, stderr io.Writer) (config, error) {
+	// One request at a time and no load: a long deadline keeps a slow
+	// machine from turning a verdict into a timeout.
+	cfg := config{timeout: 10 * time.Second}
+	fs := newFlagSet("test", &cfg, stderr, "; every request in it is checked")
+	fs.StringVar(&cfg.expect, "expect", "", "exit 1 unless every request gets this verdict: allow or deny")
+	fs.BoolVar(&cfg.json, "json", false, "print each CheckResponse as a JSON line")
+	if err := fs.finish(args, true); err != nil {
+		return cfg, err
 	}
 	switch cfg.expect {
 	case "", "allow", "deny":
 	default:
 		return cfg, fmt.Errorf("--expect must be allow or deny, got %q", cfg.expect)
 	}
-	for _, g := range strings.Split(*disabled, ",") {
-		if g = strings.TrimSpace(g); g == "" {
-			continue
-		}
-		if _, ok := coraza.RuleGroups[g]; !ok {
-			return cfg, fmt.Errorf("--disable-rule-groups: unknown group %q", g)
-		}
-		cfg.disabled = append(cfg.disabled, g)
-	}
 	return cfg, nil
 }
 
-func runTest(cfg testConfig, stdout, stderr io.Writer) int {
+func runTest(cfg config, stdout, stderr io.Writer) int {
 	reqs, err := loadRequests(cfg)
 	if err != nil {
 		fmt.Fprintln(stderr, "error:", err)
@@ -233,7 +281,7 @@ func describe(in *enginev1.CheckRequest, out *enginev1.CheckResponse) string {
 // checker returns the verdict for one request.
 type checker func(*enginev1.CheckRequest) (*enginev1.CheckResponse, error)
 
-func newChecker(cfg testConfig) (checker, error) {
+func newChecker(cfg config) (checker, error) {
 	if cfg.engine != "" {
 		return remoteChecker(cfg.engine)
 	}
@@ -242,7 +290,7 @@ func newChecker(cfg testConfig) (checker, error) {
 
 // localChecker runs the engine's check API in-process, so verdicts are the
 // engine's own.
-func localChecker(cfg testConfig) (checker, error) {
+func localChecker(cfg config) (checker, error) {
 	rules, err := readOptional(cfg.rules)
 	if err != nil {
 		return nil, fmt.Errorf("read --rules: %w", err)
@@ -262,9 +310,7 @@ func localChecker(cfg testConfig) (checker, error) {
 	if err != nil {
 		return nil, err
 	}
-	// One request at a time and no load: a long deadline keeps a slow
-	// machine from turning a verdict into a timeout.
-	p := pipeline.New(eval, pipeline.Config{Mode: cfg.mode, Timeout: 10 * time.Second})
+	p := pipeline.New(eval, pipeline.Config{Mode: cfg.mode, Timeout: cfg.timeout})
 	h, err := httpcheck.New(p, httpcheck.Config{MaxBodyBytes: cfg.maxBodyBytes, Logger: slog.New(slog.DiscardHandler)})
 	if err != nil {
 		return nil, err

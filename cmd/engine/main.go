@@ -33,6 +33,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"net/url"
 	"os"
 	"os/signal"
@@ -110,6 +111,7 @@ type engineConfig struct {
 	skipPaths      []string
 	routes         *router.Table
 	skipBodyPaths  []string
+	pprof          bool
 	ruleGroupsOff  []string
 }
 
@@ -150,6 +152,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	}
 	skipPaths := fs.String("skip-paths", "", "comma-separated paths never inspected, exact (/healthz) or prefix (/static/*); ambiguous paths are always inspected")
 	disableGroups := fs.String("disable-rule-groups", "", "comma-separated CRS attack families to remove when the application cannot be vulnerable to them: "+strings.Join(coraza.RuleGroupNames(), ", "))
+	pprof := fs.Bool("pprof", false, "serve /debug/pprof on the admin listener (exposes internals: keep that listener private)")
 	skipBodyPaths := fs.String("skip-body-paths", "", "comma-separated paths whose body is not inspected (headers and URI still are), same syntax as --skip-paths")
 	if err := fs.Parse(args); err != nil {
 		return engineConfig{}, err
@@ -211,6 +214,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	cfg.trustedProxies = splitList(*trusted)
 	cfg.skipPaths = splitList(*skipPaths)
 	cfg.skipBodyPaths = splitList(*skipBodyPaths)
+	cfg.pprof = *pprof
 	cfg.ruleGroupsOff = splitList(*disableGroups)
 	for _, g := range cfg.ruleGroupsOff {
 		if _, ok := coraza.RuleGroups[g]; !ok {
@@ -339,13 +343,21 @@ func serve(cfg engineConfig, logger *slog.Logger) error {
 	ready.Store(true)
 	var admin *http.Server
 	if adminLn != nil {
+		adminHandler := metrics.AdminHandler(ready.Load)
+		// A CPU or trace profile streams for its whole duration (30s by
+		// default), longer than any other admin response.
+		writeTimeout := 10 * time.Second
+		if cfg.pprof {
+			adminHandler = withPprof(adminHandler)
+			writeTimeout = 2 * time.Minute
+		}
 		admin = &http.Server{
-			Handler:           metrics.AdminHandler(ready.Load),
+			Handler:           adminHandler,
 			ReadHeaderTimeout: 5 * time.Second,
 			// Admin requests are tiny; without these, idle keep-alive
 			// connections are never closed and can exhaust fds and memory.
 			ReadTimeout:  10 * time.Second,
-			WriteTimeout: 10 * time.Second,
+			WriteTimeout: writeTimeout,
 			IdleTimeout:  30 * time.Second,
 		}
 		go func() { errc <- admin.Serve(adminLn) }()
@@ -378,6 +390,18 @@ func serve(cfg engineConfig, logger *slog.Logger) error {
 		err = errors.Join(err, admin.Shutdown(shutdownCtx))
 	}
 	return err
+}
+
+// withPprof adds the net/http/pprof handlers under /debug/pprof/.
+func withPprof(admin http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.Handle("/", admin)
+	return mux
 }
 
 // listen opens a TCP address or, with a "unix:" prefix, a Unix socket. A

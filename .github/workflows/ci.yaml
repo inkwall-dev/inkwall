@@ -58,6 +58,35 @@ jobs:
           cache-dependency-path: test/crs/go.sum
       - run: make crs-test
 
+  bench:
+    # Performance regression gate (0001 §8): benchmarks of the PR against its
+    # base, interleaved, compared with benchstat.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+      - run: hack/bench/compare.sh "origin/$BASE_REF"
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          OUT: bench-out
+      - if: always()
+        run: |
+          if [ -f bench-out/benchstat.txt ]; then
+            { echo '```'; cat bench-out/benchstat.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmarks
+          path: bench-out
+          if-no-files-found: ignore
+
   vuln:
     runs-on: ubuntu-latest
     steps:
