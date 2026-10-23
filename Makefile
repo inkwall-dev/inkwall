@@ -55,6 +55,10 @@ generate: ## Lint the protobuf APIs (api/) and regenerate their Go code
 	$(BUF) lint
 	$(BUF) generate
 
+.PHONY: diagrams
+diagrams: ## Render docs/diagrams/src with Archify and export the SVGs the docs embed (needs node and Chrome)
+	hack/docs/diagrams.sh
+
 .PHONY: tidy
 tidy: ## Tidy go.mod and go.sum
 	$(GO) mod tidy

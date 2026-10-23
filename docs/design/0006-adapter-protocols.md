@@ -72,13 +72,11 @@ sequenceDiagram
   forward the body with `forwardBody`) and never the response.
 - ingress-nginx `global-auth-url` uses this mechanism.
 
-```mermaid
-sequenceDiagram
-    participant P as Traefik / nginx
-    participant E as engine
-    P->>E: GET /v1/forward-auth + X-Forwarded-Method/Uri/Host + headers
-    E-->>P: 200 (allow) or 403 / 429 (returned to client)
-```
+![Traefik forward-auth sequence: for a benign request Traefik sends a subrequest to the engine, gets 200 with X-Request-Id and forwards to the app; for an attack the engine answers 403 and Traefik returns it to the client](../diagrams/forward-auth.svg)
+
+The middleware must use `trustForwardHeader: false` (otherwise the engine inspects a client's own
+`X-Forwarded-Uri` instead of the real one) and `forwardBody: true` with a `maxBodySize` above the
+engine's `--max-body-bytes` (otherwise bodies pass uninspected).
 
 **Adapter:** `pkg/adapters/forwardauth`.
 
@@ -117,14 +115,11 @@ sequenceDiagram
 - Served over HTTP (`POST /v1/check`, `inkwall-engine check`) and, with the Envoy adapters, gRPC
   (`CheckService/Check`), on the Unix socket in sidecar mode.
 
-```mermaid
-sequenceDiagram
-    participant P as nginx Lua plugin
-    participant E as engine
-    P->>E: POST /v1/check (CheckRequest, protobuf)
-    E-->>P: CheckResponse(action=DENY, status=403, rule_ids)
-    Note over P: ngx.exit(403)
-```
+![POST /v1/check sequence: the caller sends a CheckRequest and the engine always answers 200 with a CheckResponse; ACTION_ALLOW lets the caller forward with X-Request-Id, ACTION_DENY with status 403 makes the caller return 403](../diagrams/check-api.svg)
+
+Callers today are `inkwallctl test` and `inkwallctl bench` (`--engine`); the ingress-nginx Lua plugin
+and the Traefik plugin will use the same API. The engine takes `client_ip` as given, so the API is
+exposed only to the proxy, on a Unix socket or localhost.
 
 **Adapter:** `pkg/adapters/httpcheck`.
 
@@ -138,18 +133,7 @@ sequenceDiagram
   adapter must produce the same verdict as this one for the same request (adapter parity tests,
   0002 §10).
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant E as engine (reverse proxy)
-    participant A as App
-    C->>E: request
-    E->>E: inspect
-    E->>A: forward (if allowed)
-    A-->>E: response
-    E->>E: inspect response (optional)
-    E-->>C: response or 403
-```
+![Reverse proxy sequence: a benign request is inspected and forwarded to the app with X-Request-Id and X-Forwarded headers; an attack gets 403 without reaching the app; an inspection timeout in block mode gets 503](../diagrams/reverse-proxy.svg)
 
 **Adapter:** `pkg/adapters/proxy`.
 

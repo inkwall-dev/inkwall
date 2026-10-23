@@ -1,0 +1,219 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "POST /v1/check: the caller enforces the verdict",
+    "output": ".archify/check-api/check-api.html",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/inkwall-dev/inkwall.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "6508397baa4cb1fafeb34aeb7f40700b057d31f1"
+    }
+  },
+  "participants": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Client",
+      "sublabel": "browser or API client"
+    },
+    {
+      "id": "caller",
+      "type": "cloud",
+      "label": "Proxy plugin or inkwallctl",
+      "sublabel": "check API client",
+      "sources": [
+        {
+          "path": "cmd/inkwallctl/main.go",
+          "line": 286,
+          "end_line": 315
+        }
+      ]
+    },
+    {
+      "id": "engine",
+      "type": "security",
+      "label": "inkwall-engine",
+      "sublabel": "check · Unix socket or :9002",
+      "sources": [
+        {
+          "path": "pkg/adapters/httpcheck/httpcheck.go",
+          "line": 84,
+          "end_line": 143
+        },
+        {
+          "path": "pkg/adapters/httpcheck/httpcheck.go",
+          "line": 163,
+          "end_line": 238
+        },
+        {
+          "path": "pkg/adapters/httpcheck/httpcheck.go",
+          "line": 251,
+          "end_line": 266
+        }
+      ]
+    },
+    {
+      "id": "app",
+      "type": "backend",
+      "label": "App",
+      "sublabel": "protected Service"
+    }
+  ],
+  "segments": [
+    {
+      "from": 140,
+      "to": 415,
+      "label": "Benign request"
+    },
+    {
+      "from": 430,
+      "to": 640,
+      "label": "Attack, block mode"
+    }
+  ],
+  "messages": [
+    {
+      "id": "request",
+      "from": "client",
+      "to": "caller",
+      "y": 185,
+      "label": "POST /comments",
+      "variant": "emphasis"
+    },
+    {
+      "id": "check",
+      "from": "caller",
+      "to": "engine",
+      "y": 221,
+      "label": "POST /v1/check",
+      "variant": "emphasis",
+      "note": "CheckRequest, protobuf or JSON: method, raw_uri, headers, client_ip, body"
+    },
+    {
+      "id": "allow",
+      "from": "engine",
+      "to": "caller",
+      "y": 283,
+      "label": "200 · ACTION_ALLOW",
+      "variant": "return",
+      "note": "CheckResponse with matched rule_ids and X-Request-Id in response_headers"
+    },
+    {
+      "id": "forward",
+      "from": "caller",
+      "to": "app",
+      "y": 343,
+      "label": "POST /comments + X-Request-Id",
+      "variant": "emphasis"
+    },
+    {
+      "id": "response",
+      "from": "app",
+      "to": "caller",
+      "y": 371,
+      "label": "200 OK",
+      "variant": "return"
+    },
+    {
+      "id": "reply",
+      "from": "caller",
+      "to": "client",
+      "y": 399,
+      "label": "200 OK",
+      "variant": "return"
+    },
+    {
+      "id": "attack",
+      "from": "client",
+      "to": "caller",
+      "y": 475,
+      "label": "GET /?q=<script>alert(1)</script>"
+    },
+    {
+      "id": "attack-check",
+      "from": "caller",
+      "to": "engine",
+      "y": 503,
+      "label": "POST /v1/check"
+    },
+    {
+      "id": "deny",
+      "from": "engine",
+      "to": "caller",
+      "y": 531,
+      "label": "200 · ACTION_DENY, status 403",
+      "variant": "security",
+      "note": "reason REASON_RULE, interrupting_rule_id and rule_ids for the log"
+    },
+    {
+      "id": "blocked",
+      "from": "caller",
+      "to": "client",
+      "y": 593,
+      "label": "403 Forbidden",
+      "variant": "security",
+      "note": "The caller enforces the verdict: the check itself always answers 200"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "caller",
+      "from": 185,
+      "to": 399,
+      "type": "cloud"
+    },
+    {
+      "participant": "engine",
+      "from": 221,
+      "to": 283,
+      "type": "security"
+    },
+    {
+      "participant": "app",
+      "from": 343,
+      "to": 371,
+      "type": "backend"
+    },
+    {
+      "participant": "caller",
+      "from": 475,
+      "to": 593,
+      "type": "cloud"
+    },
+    {
+      "participant": "engine",
+      "from": 503,
+      "to": 531,
+      "type": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Callers",
+      "items": [
+        "Today: inkwallctl test and bench (--engine)",
+        "Planned: the ingress-nginx Lua plugin and the Traefik plugin"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Trust",
+      "items": [
+        "The engine takes client_ip as given, so expose the check API only to the proxy: a Unix socket or localhost"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Other verdicts",
+      "items": [
+        "Detect mode: ACTION_LOG, forward and record",
+        "Body over --max-body-bytes: REASON_OVERSIZE, status 413 in block mode"
+      ]
+    }
+  ]
+}

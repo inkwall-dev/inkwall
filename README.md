@@ -37,18 +37,7 @@ Inkwall makes the WAF a Kubernetes primitive, the way cert-manager did for TLS:
 
 ## How it works
 
-```mermaid
-flowchart LR
-    U([clients]) --> P
-    subgraph POD["ingress controller pod"]
-        P["proxy<br/>Envoy · HAProxy · nginx · Traefik"]
-        E["inkwall-engine<br/>sidecar"]
-        P <-->|"Unix socket<br/>check / verdict"| E
-    end
-    P --> A["your services"]
-    OP["inkwall-operator"] -->|"signed policy bundles"| E
-    K["WAFPolicy · HTTPRoute · Ingress"] --> OP
-```
+![Inkwall target architecture: clients reach the proxy, which asks the inkwall-engine sidecar for a verdict before forwarding allowed requests; the operator watches WAFPolicy, HTTPRoute and Ingress objects and pushes signed policy bundles to the engine](docs/diagrams/system-overview.svg)
 
 1. **`inkwall-operator`** watches your routes and `WAFPolicy` objects, injects the engine into your
    ingress controller pods, wires the proxy, and pushes signed policy bundles to every engine.
