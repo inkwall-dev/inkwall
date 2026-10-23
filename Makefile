@@ -6,6 +6,11 @@ BIN_DIR         ?= bin
 GOLANGCI_LINT   ?= $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
 GOVULNCHECK     ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@v1.8.0
 BUF             ?= $(GO) run github.com/bufbuild/buf/cmd/buf@v1.50.0
+CONTROLLER_GEN  ?= $(GO) run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.23.0
+SETUP_ENVTEST   ?= $(GO) run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.2
+# The API server the operator tests run against: the oldest supported
+# Kubernetes version, so CRDs that pass here work on every newer one.
+ENVTEST_K8S_VERSION ?= 1.29.5
 
 # Container image and local kind cluster (hack/kind).
 IMAGE           ?= inkwall-engine:dev
@@ -21,16 +26,17 @@ BASE            ?= origin/main
 
 .PHONY: help
 help: ## Show available targets
-	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-14s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 .PHONY: build
 build: ## Build inkwall-engine and inkwallctl into ./bin
 	$(GO) build -trimpath -o $(BIN_DIR)/inkwall-engine ./cmd/engine
 	$(GO) build -trimpath -o $(BIN_DIR)/inkwallctl ./cmd/inkwallctl
+	$(GO) build -trimpath -o $(BIN_DIR)/inkwall-operator ./cmd/operator
 
 .PHONY: test
-test: ## Run unit tests with the race detector
-	$(GO) test -race -count=1 ./...
+test: ## Run unit tests with the race detector (operator tests run against a local API server, envtest)
+	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))" $(GO) test -race -count=1 ./...
 
 .PHONY: bench
 bench: ## Run benchmarks (BENCH=regexp COUNT=n)
@@ -57,13 +63,16 @@ vuln: ## Check dependencies for known vulnerabilities
 	$(GOVULNCHECK) ./...
 
 .PHONY: generate
-generate: ## Lint the protobuf APIs (api/) and regenerate their Go code
+generate: ## Lint the protobuf APIs (api/), regenerate their Go code, and regenerate the operator's deepcopy code and CRDs
 	$(BUF) lint
 	$(BUF) generate
+	$(CONTROLLER_GEN) object:headerFile=hack/boilerplate.go.txt paths=./operator/api/...
+	$(CONTROLLER_GEN) crd paths=./operator/api/... output:crd:artifacts:config=operator/config/crd/bases
 
 .PHONY: tidy
-tidy: ## Tidy go.mod and go.sum
+tidy: ## Tidy go.mod and go.sum, here and in test/crs (which builds against this module)
 	$(GO) mod tidy
+	cd test/crs && $(GO) mod tidy
 
 .PHONY: check
 check: lint test vuln ## Run everything CI runs

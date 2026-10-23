@@ -1,0 +1,14 @@
+# The cluster-wide configuration: one per cluster, named default.
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: InkwallConfig
+metadata:
+  name: default
+spec:
+  mode: Standalone
+  engine:
+    resources:
+      requests: {cpu: 500m, memory: 256Mi}
+      limits: {memory: 512Mi} # no CPU limit: throttling shows up as tail latency
+  integrations:
+  - controller: traefik
+    adapter: ForwardAuth
