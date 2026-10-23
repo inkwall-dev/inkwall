@@ -14,5 +14,6 @@ coverage.*
 *.swp
 .DS_Store
 
-# Archify working folders (docs/diagrams holds the published output)
-.archify/*
+# Local diagram tooling; only the exported images in docs/diagrams are committed
+/.archify/
+/.claude/skills/archify/
