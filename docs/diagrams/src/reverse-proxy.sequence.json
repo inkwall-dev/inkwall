@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Reverse proxy: inspect, then forward or answer",
+    "output": ".archify/reverse-proxy/reverse-proxy.html",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/inkwall-dev/inkwall.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "6508397baa4cb1fafeb34aeb7f40700b057d31f1"
+    }
+  },
+  "participants": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Client",
+      "sublabel": "browser or API client"
+    },
+    {
+      "id": "engine",
+      "type": "security",
+      "label": "inkwall-engine",
+      "sublabel": "proxy · :8480",
+      "sources": [
+        {
+          "path": "pkg/adapters/proxy/proxy.go",
+          "line": 86,
+          "end_line": 110
+        },
+        {
+          "path": "pkg/adapters/proxy/proxy.go",
+          "line": 164,
+          "end_line": 194
+        },
+        {
+          "path": "pkg/pipeline/pipeline.go",
+          "line": 296,
+          "end_line": 301
+        }
+      ]
+    },
+    {
+      "id": "app",
+      "type": "backend",
+      "label": "App",
+      "sublabel": "--upstream",
+      "sources": [
+        {
+          "path": "pkg/adapters/proxy/proxy.go",
+          "line": 70,
+          "end_line": 81
+        }
+      ]
+    }
+  ],
+  "segments": [
+    {
+      "from": 140,
+      "to": 340,
+      "label": "Benign request"
+    },
+    {
+      "from": 355,
+      "to": 475,
+      "label": "Attack, block mode"
+    },
+    {
+      "from": 490,
+      "to": 635,
+      "label": "Inspection timeout, block mode"
+    }
+  ],
+  "messages": [
+    {
+      "id": "request",
+      "from": "client",
+      "to": "engine",
+      "y": 185,
+      "label": "POST /login",
+      "variant": "emphasis"
+    },
+    {
+      "id": "forward",
+      "from": "engine",
+      "to": "app",
+      "y": 221,
+      "label": "POST /login",
+      "variant": "emphasis",
+      "note": "pipeline.Check allowed it; adds X-Request-Id and X-Forwarded-For, -Proto, -Host"
+    },
+    {
+      "id": "response",
+      "from": "app",
+      "to": "engine",
+      "y": 297,
+      "label": "200 OK",
+      "variant": "return"
+    },
+    {
+      "id": "reply",
+      "from": "engine",
+      "to": "client",
+      "y": 325,
+      "label": "200 OK",
+      "variant": "return"
+    },
+    {
+      "id": "attack",
+      "from": "client",
+      "to": "engine",
+      "y": 400,
+      "label": "POST /ping host=…;cat /etc/passwd"
+    },
+    {
+      "id": "blocked",
+      "from": "engine",
+      "to": "client",
+      "y": 428,
+      "label": "403 Forbidden",
+      "variant": "security",
+      "note": "CRS command-injection rules match; the app never sees it"
+    },
+    {
+      "id": "slow",
+      "from": "client",
+      "to": "engine",
+      "y": 535,
+      "label": "POST /search (padded body)"
+    },
+    {
+      "id": "failed",
+      "from": "engine",
+      "to": "client",
+      "y": 563,
+      "label": "503 Service Unavailable",
+      "variant": "security",
+      "note": "Inspection passed --timeout: block mode fails closed; detect mode forwards and logs"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "engine",
+      "from": 185,
+      "to": 325,
+      "type": "security"
+    },
+    {
+      "participant": "app",
+      "from": 221,
+      "to": 297,
+      "type": "backend"
+    },
+    {
+      "participant": "engine",
+      "from": 400,
+      "to": 428,
+      "type": "security"
+    },
+    {
+      "participant": "engine",
+      "from": 535,
+      "to": 563,
+      "type": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Reference adapter",
+      "items": [
+        "Every other adapter must reach the same verdict for the same request (adapter parity tests)"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Cheaper paths",
+      "items": [
+        "--skip-paths: forwarded without inspection",
+        "--skip-body-paths: headers and URI inspected, body streamed through"
+      ]
+    }
+  ]
+}

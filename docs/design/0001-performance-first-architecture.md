@@ -220,6 +220,12 @@ documented as the slower mode.
 
 ## 7. Failure behaviour
 
+![How a request gets its verdict: route skip lists, body size, an evaluation slot and evaluation under the deadline lead to allow, deny or log; overload, timeout and evaluator errors lead to "not inspected", which fails closed with 503 in block mode and open in detect mode](../diagrams/verdict-lifecycle.svg)
+
+In detect mode nothing is denied: would-be blocks are logged and forwarded, and an oversized body is
+forwarded after its headers and URI are inspected. `--oversize-body` and `--failure-mode` override
+the per-mode defaults.
+
 - Proxy-side timeouts are always set (ext_authz/ext_proc `timeout`, SPOE `timeout processing`,
   nginx `proxy_read_timeout`) and set just above the engine deadline.
 - The failure mode defaults to **closed in block mode and open in detect mode** (`failure_mode_allow`

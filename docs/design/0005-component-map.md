@@ -86,47 +86,21 @@ only adds management, analytics, and threat intel on top.
 
 ## 3. Engine internals
 
-```mermaid
-flowchart LR
-    subgraph LIS["listeners - pkg/adapters"]
-        EA["extauthz<br/>gRPC"]
-        EP["extproc<br/>gRPC stream"]
-        FA["forwardauth<br/>HTTP"]
-        SP["spoe<br/>SPOP"]
-        HC["httpcheck<br/>/v1/check"]
-        RP["proxy<br/>reverse proxy"]
-    end
+![inkwall-engine internals as built today: the reverse-proxy, forward-auth and check-API adapters turn their input into a request.Request and call pipeline.Check, which consults the route table, runs the Coraza evaluator with the OWASP CRS and reports every verdict to telemetry](../diagrams/engine-internals.svg)
 
-    REQ["pkg/request<br/>canonical Request, pooled"]
-    CIP["pkg/clientip<br/>trusted proxies"]
+The diagram shows the engine as built, with each component linked to its source. The full design
+adds, in the same places:
 
-    subgraph PIPE["pkg/pipeline - deadline enforced"]
-        T0["T0 pkg/router<br/>route → policy, skip list"]
-        T1["T1 pkg/iplist + pkg/ratelimit"]
-        T2["T2 headers / URI rules"]
-        T3["T3 body rules"]
-        V["Verdict"]
-        T0 --> T1 --> T2 --> T3 --> V
-    end
-
-    subgraph RULES["pkg/rules - Evaluator interface"]
-        CZ["coraza evaluator<br/>+ CRS"]
-        PF["native engine<br/>see 0007, later"]
-    end
-
-    SNAP["pkg/snapshot<br/>atomic.Pointer, immutable"]
-    BUN["pkg/bundle<br/>operator stream · file · disk cache"]
-    EVT["pkg/events<br/>ring buffer → batch shipper"]
-    TEL["pkg/telemetry<br/>metrics · traces · pprof"]
-
-    EA & EP & FA & SP & HC & RP --> REQ --> CIP --> T0
-    T2 & T3 --> RULES
-    BUN -->|"compile, then swap"| SNAP
-    SNAP -.->|"read, lock-free"| T0 & T1 & RULES
-    V --> EVT
-    V --> LIS
-    PIPE --> TEL
-```
+- **Adapters:** `extauthz` (gRPC), `extproc` (gRPC stream) and `spoe` (SPOP), next to the three
+  shown.
+- **Pipeline tiers:** T1 IP lists and rate limits (`pkg/iplist`, `pkg/ratelimit`) between the route
+  table and rule evaluation, with header and URI rules (T2) before body rules (T3).
+- **Policy state:** `pkg/bundle` receives signed bundles from the operator stream, a file or the disk
+  cache; `pkg/snapshot` compiles each one and swaps it in through an `atomic.Pointer`, read lock-free
+  by the router, the tiers and the rules.
+- **Events and telemetry:** `pkg/events` ships verdicts through a ring buffer and batch shipper;
+  telemetry adds traces next to metrics and pprof.
+- **Rules:** the native engine (0007) as a second `pkg/rules` evaluator.
 
 ## 4. Operator internals
 

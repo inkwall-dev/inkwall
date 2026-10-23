@@ -13,3 +13,6 @@ coverage.*
 .vscode/
 *.swp
 .DS_Store
+
+# Archify working folders (docs/diagrams holds the published output)
+.archify/*
