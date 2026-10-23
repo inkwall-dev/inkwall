@@ -419,6 +419,13 @@ message Policy {
 Routes are resolved to concrete `(host, path, method)` matches **by the operator**, so the engine
 does not need Kubernetes knowledge. Bundles are immutable; every change produces a new version.
 
+As built ([`api/bundle/v1`](../../api/bundle/v1/bundle.proto)), the signature is not a field of
+`Bundle`: protobuf encoding is not canonical, so a signature over "the rest" could break when a
+bundle is re-encoded. A `SignedBundle` envelope carries the serialized `Bundle` bytes, an ed25519
+signature over exactly those bytes, and the signing key's ID (for key rotation); the engine
+verifies before decoding. `Bundle` also carries a `content_hash` (equal hashes, equal policy) and
+`suspended` (the emergency switch). IP lists and rate limits are added with their features.
+
 ---
 
 ## 5. Protocols
@@ -498,6 +505,11 @@ message OperatorMessage {
 
 Full snapshots, not deltas, in v1: simpler, idempotent, and bundles are small. Deltas can come later
 (xDS-style) if bundle size grows.
+
+As built ([`api/agent/v1`](../../api/agent/v1/agent.proto)), the stream messages are named
+`WatchRequest` and `WatchResponse` (buf's naming rules for RPCs), the operator sends a
+`bundle.v1.SignedBundle`, and the event batch and directive fields are reserved until those
+features exist.
 
 ### 5.3 Operator ↔ SaaS
 
