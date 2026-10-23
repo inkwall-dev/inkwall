@@ -70,8 +70,9 @@ generate: ## Lint the protobuf APIs (api/), regenerate their Go code, and regene
 	$(CONTROLLER_GEN) crd paths=./operator/api/... output:crd:artifacts:config=operator/config/crd/bases
 
 .PHONY: tidy
-tidy: ## Tidy go.mod and go.sum
+tidy: ## Tidy go.mod and go.sum, here and in test/crs (which builds against this module)
 	$(GO) mod tidy
+	cd test/crs && $(GO) mod tidy
 
 .PHONY: check
 check: lint test vuln ## Run everything CI runs
