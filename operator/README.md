@@ -1,8 +1,9 @@
 # inkwall-operator
 
 The Kubernetes operator ([design](../docs/design/0004-operator.md)). It is being built in the
-milestones of 0004 §11; today it has the API, the validating webhook, and the manager the
-controllers will run in.
+milestones of 0004 §11; today it has the API, the validating webhook, and the bundle builder:
+it compiles `WAFPolicy` objects and the Ingresses they target into a signed bundle, and reports
+each policy's `Accepted` condition. Sending bundles to the engines comes next.
 
 | Path | What |
 |---|---|
@@ -11,6 +12,10 @@ controllers will run in.
 | `config/rbac/`, `config/webhook/` | The operator's RBAC and webhook configuration, generated from markers |
 | `config/samples/` | One example of each kind |
 | `webhook/` | The validating webhook and its certificate |
+| `manager/` | Assembles the operator: controllers, webhooks, probes ([`../cmd/operator`](../cmd/operator) parses flags into it) |
+| `internal/resolver/` | `WAFPolicy` + Ingresses + rule sets → bundle policies and `Accepted` conditions |
+| `internal/bundle/` | Content hash, versions, ed25519 signing, the bundle and signing key Secrets |
+| `internal/controller/` | The bundle builder (leader only) |
 | `test/testenv/` | Starts a local API server (envtest) for tests |
 | [`../cmd/operator`](../cmd/operator) | The `inkwall-operator` binary |
 
@@ -42,6 +47,19 @@ Its certificate is self-signed and rotated by the operator ([cert-controller](ht
 the CA and serving certificate live in the `inkwall-operator-webhook-tls` Secret, the CA is
 injected into the webhook configuration, and each replica copies the certificate to its webhook
 server, so no volume mount is needed. With cert-manager instead, run with `--webhook-certs=external`.
+
+## Bundles
+
+The leader rebuilds the bundle a second after any change to a `WAFPolicy`, a rule set, a targeted
+Ingress, a labeled ConfigMap or `InkwallConfig`, and every 10 minutes. It publishes a new version
+only when the content changed, signed with the cluster's ed25519 key, in the `inkwall-bundle`
+Secret. A policy that can't be resolved keeps its previous version in force and says why in its
+`Accepted` condition. Rules read from a ConfigMap need the label `waf.inkwall.dev/rules=true`.
+
+```sh
+kubectl get wafpolicy -A            # BUNDLE: the version that contains the current spec
+kubectl -n inkwall-system get secret inkwall-bundle -o jsonpath='{.metadata.annotations}'
+```
 
 ## Changing the API
 

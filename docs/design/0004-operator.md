@@ -305,6 +305,23 @@ Turns the policy CRDs plus Kubernetes routing objects into `ResolvedPolicy` valu
 Watches: routes and Gateways changes re-trigger resolution for the policies that target them
 (index by target).
 
+As built (`operator/internal/resolver`, Ingress targets so far):
+
+- **Conflicts:** when policies target the same object, the oldest (creation time, then name) wins
+  and the others get `Accepted=False, reason=Conflict`, as in Gateway API. Rejecting both would
+  leave a protected route without a policy. Identical routes from two Ingresses go to the older
+  policy the same way.
+- **Errors fall back:** a policy that can't be resolved (a missing or invalid rule set, a
+  conflict) keeps the version it has in the current bundle, so a bad edit never removes or weakens
+  protection in force; a policy never resolved before is left out until fixed. A missing target
+  is not an error of the policy: it still applies to its other targets.
+- **ConfigMap rules** are read only from ConfigMaps labeled `waf.inkwall.dev/rules=true`, so the
+  operator caches those instead of every ConfigMap in the cluster, and checked like inline rules.
+- `ImplementationSpecific` Ingress paths are prefixes (Traefik and ingress-nginx treat them so).
+  A default backend is covered only for an Ingress without rules.
+- Cross-namespace `WAFRuleSet` references are rejected until a grant mechanism exists; use a
+  `ClusterWAFRuleSet`.
+
 ### 4.6 Bundle builder (leader only)
 
 1. Debounce changes (default 1 s) so a GitOps sync of 200 objects produces one bundle, not 200.
@@ -321,6 +338,14 @@ Watches: routes and Gateways changes re-trigger resolution for the policies that
 
 The bundle object doubles as the **cold-start source**: an engine that can't reach the operator
 loads it from the Kubernetes API (read-only RBAC on that one object) or from its on-disk cache.
+
+As built (`operator/internal/bundle`): the bundle Secret `inkwall-bundle` holds the gzip-compressed
+`SignedBundle` and the public key; the key is generated on first use into
+`inkwall-bundle-signing-key`. The content hash covers everything but the version and creation
+time, so a rebuild with no effective change publishes nothing. The version continues from the
+Secret, and from the leader's memory if the Secret is deleted. The cluster ID is the
+`kube-system` Namespace's UID. Chunking is not implemented yet: a bundle over 900 KiB compressed
+is not published, and the current one stays.
 
 ### 4.7 Distribution server (all replicas)
 
