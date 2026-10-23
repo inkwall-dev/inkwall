@@ -1,0 +1,82 @@
+// Copyright 2026 The Inkwall Authors
+// SPDX-License-Identifier: Apache-2.0
+
+// Bundle distribution between the operator and the engines (0002 §5.2).
+// Each engine keeps one long-lived stream open; the operator pushes the
+// current bundle, and the engine reports what it applied. Full bundles, not
+// deltas: bundles are small, and a full snapshot is idempotent.
+syntax = "proto3";
+
+package inkwall.agent.v1;
+
+import "bundle/v1/bundle.proto";
+
+option go_package = "github.com/inkwall-dev/inkwall/api/agent/v1;agentv1";
+
+// BundleService is served by every operator replica.
+service BundleService {
+  // Watch is the engine's stream. The engine sends Hello first; the operator
+  // answers with the current bundle, then with every new one. The engine
+  // answers each bundle with Ack or Nack and sends heartbeats.
+  rpc Watch(stream WatchRequest) returns (stream WatchResponse);
+}
+
+// WatchRequest is a message from the engine (EngineMessage in 0002 §5.2).
+message WatchRequest {
+  oneof msg {
+    Hello hello = 1;
+    Ack ack = 2;
+    Nack nack = 3;
+    Heartbeat heartbeat = 4;
+  }
+  // 5 is reserved for batches of security events (0002 §5.4).
+  reserved 5;
+}
+
+// WatchResponse is a message from the operator (OperatorMessage in 0002
+// §5.2).
+message WatchResponse {
+  oneof msg {
+    inkwall.bundle.v1.SignedBundle bundle = 1;
+  }
+  // 2 is reserved for directives to the engine (rotate logs, dump a
+  // profile).
+  reserved 2;
+}
+
+// Hello opens the stream.
+message Hello {
+  // Unique per engine process.
+  string engine_id = 1;
+  // The engine's pod.
+  string pod_namespace = 2;
+  string pod_name = 3;
+  string node_name = 4;
+  // The bundle the engine runs (0: none): the operator skips sending it
+  // again when it is current.
+  uint64 bundle_version = 5;
+  // The engine's version.
+  string engine_version = 6;
+}
+
+// Ack reports a bundle the engine applied.
+message Ack {
+  uint64 bundle_version = 1;
+}
+
+// Nack reports a bundle the engine rejected; it keeps running the previous
+// one.
+message Nack {
+  uint64 bundle_version = 1;
+  // Why, e.g. a bad signature or a rule that doesn't compile.
+  string error = 2;
+}
+
+// Heartbeat reports the engine's state, every few seconds.
+message Heartbeat {
+  // The bundle the engine runs.
+  uint64 bundle_version = 1;
+  // Requests being inspected, and the most that can be.
+  uint32 in_flight = 2;
+  uint32 capacity = 3;
+}

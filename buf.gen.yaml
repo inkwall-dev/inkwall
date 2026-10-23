@@ -7,3 +7,7 @@ plugins:
   - local: ["go", "run", "google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11"]
     out: api
     opt: paths=source_relative
+  # gRPC clients and servers (BundleService, CheckService).
+  - local: ["go", "run", "google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2"]
+    out: api
+    opt: paths=source_relative

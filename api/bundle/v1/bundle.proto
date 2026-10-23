@@ -1,0 +1,181 @@
+// Copyright 2026 The Inkwall Authors
+// SPDX-License-Identifier: Apache-2.0
+
+// The policy bundle (0002 §4.3): everything an engine enforces, compiled by
+// the operator from the cluster's WAFPolicy and rule set objects. Routes are
+// resolved to concrete host / path / method matches by the operator, so the
+// engine needs no Kubernetes knowledge. A bundle is immutable: every change
+// produces a new version.
+syntax = "proto3";
+
+package inkwall.bundle.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/inkwall-dev/inkwall/api/bundle/v1;bundlev1";
+
+// SignedBundle carries a Bundle with its signature. The signature covers the
+// exact bytes of bundle, so the engine verifies before decoding, and
+// re-encoding never invalidates it (protobuf encoding is not canonical).
+message SignedBundle {
+  // A serialized Bundle.
+  bytes bundle = 1;
+  // Ed25519 signature of bundle.
+  bytes signature = 2;
+  // The signing key, so engines can hold the old and the new public key
+  // while the key rotates.
+  string key_id = 3;
+}
+
+// Bundle is the complete policy of one cluster.
+message Bundle {
+  // Increases with every new bundle of the cluster; an engine never applies
+  // a version older than the one it runs.
+  uint64 version = 1;
+  // The cluster the bundle was built for.
+  string cluster_id = 2;
+  google.protobuf.Timestamp created_at = 3;
+  // SHA-256 of the bundle's content, without version, created_at and
+  // content_hash itself: equal hashes mean equal policy.
+  bytes content_hash = 4;
+  repeated Policy policies = 5;
+  // The rule sets the policies use, each once.
+  repeated RuleSet rule_sets = 6;
+  // The emergency switch (InkwallConfig.spec.suspend): every request is
+  // allowed uninspected.
+  bool suspended = 7;
+}
+
+// Policy is one WAFPolicy, applied to the requests its routes match. A
+// request matching no route of any policy is not inspected.
+message Policy {
+  // The WAFPolicy, as "namespace/name".
+  string id = 1;
+  // The requests the policy applies to. When routes of several policies
+  // match a request, the most specific match wins (longest host, then
+  // exact path over prefix, then longest path); the operator rejects
+  // policies that would tie.
+  repeated RouteMatch routes = 2;
+  Mode mode = 3;
+  FailureMode failure_mode = 4;
+  // Inspection deadline per request. Unset: the engine's default.
+  google.protobuf.Duration timeout = 5;
+  // Paths never inspected, and paths whose body is not inspected, in the
+  // engine router's syntax: exact ("/healthz") or prefix ("/static/*").
+  repeated string skip_paths = 6;
+  repeated string skip_body_paths = 7;
+  // The rule sets to run, in order. Empty: the built-in OWASP CRS with its
+  // defaults.
+  repeated RuleSetBinding rule_sets = 8;
+  repeated Exclusion exclusions = 9;
+  // Unset: the engine's body defaults.
+  BodyConfig body = 10;
+}
+
+// RouteMatch matches requests by host, path and method.
+message RouteMatch {
+  // Exact host ("shop.example.com") or a wildcard for one leading label
+  // ("*.example.com"), without a port, lower case. Empty: any host.
+  string host = 1;
+  PathMatch path = 2;
+  // Methods to match, upper case. Empty: any method.
+  repeated string methods = 3;
+}
+
+// PathMatch matches the request path.
+message PathMatch {
+  PathMatchType type = 1;
+  // An absolute, clean path.
+  string value = 2;
+}
+
+// PathMatchType is how PathMatch.value is compared.
+enum PathMatchType {
+  PATH_MATCH_TYPE_UNSPECIFIED = 0;
+  // The whole path equals value.
+  PATH_MATCH_TYPE_EXACT = 1;
+  // The path starts with value element by element, as Kubernetes Ingress
+  // and Gateway API prefix matches do: "/foo" matches "/foo" and
+  // "/foo/bar", not "/foobar".
+  PATH_MATCH_TYPE_PREFIX = 2;
+}
+
+// Mode is what the engine does with a request the rules flag.
+enum Mode {
+  MODE_UNSPECIFIED = 0;
+  // Log the verdict, let the request through.
+  MODE_DETECT = 1;
+  // Reject the request.
+  MODE_BLOCK = 2;
+}
+
+// FailureMode is what happens to a request that can't be inspected in time.
+enum FailureMode {
+  // Closed in block mode, open in detect mode.
+  FAILURE_MODE_UNSPECIFIED = 0;
+  // Let the request through uninspected.
+  FAILURE_MODE_OPEN = 1;
+  // Reject the request with 503.
+  FAILURE_MODE_CLOSED = 2;
+}
+
+// RuleSetBinding uses a rule set in a policy.
+message RuleSetBinding {
+  // RuleSet.id.
+  string rule_set_id = 1;
+  // OWASP CRS paranoia level, 1-4; 0: the default. Built-in CRS only.
+  int32 paranoia_level = 2;
+  // OWASP CRS inbound anomaly threshold; 0: the default. Built-in CRS only.
+  int32 inbound_anomaly_threshold = 3;
+}
+
+// RuleSet is a WAFRuleSet or ClusterWAFRuleSet, with its rules resolved.
+message RuleSet {
+  // "WAFRuleSet/namespace/name" or "ClusterWAFRuleSet/name".
+  string id = 1;
+  oneof source {
+    // A rule set shipped in the engine image.
+    BuiltinRuleSet builtin = 2;
+    // SecLang rules, loaded after the Core Rule Set. Rules read from a
+    // ConfigMap are inlined here by the operator.
+    string seclang = 3;
+  }
+}
+
+// BuiltinRuleSet names a rule set shipped in the engine image, pinned to the
+// engine's version.
+enum BuiltinRuleSet {
+  BUILTIN_RULE_SET_UNSPECIFIED = 0;
+  // OWASP Core Rule Set v4.
+  BUILTIN_RULE_SET_CRS_V4 = 1;
+}
+
+// Exclusion turns rules off, everywhere or for a path, an argument or both.
+message Exclusion {
+  repeated uint32 rule_ids = 1;
+  // Exact or prefix path in the router's syntax. Empty: every path.
+  string path = 2;
+  // A query or body argument the rules stop looking at. Empty: the rules
+  // are off entirely (on path, when set).
+  string argument = 3;
+}
+
+// BodyConfig configures request body inspection.
+message BodyConfig {
+  // Inspect request bodies.
+  bool inspect = 1;
+  // Bytes of a body that are inspected; 0: the engine's default.
+  int64 max_bytes = 2;
+  OversizeAction on_oversize = 3;
+}
+
+// OversizeAction is what happens to a body larger than max_bytes.
+enum OversizeAction {
+  // Deny in block mode, allow in detect mode.
+  OVERSIZE_ACTION_UNSPECIFIED = 0;
+  // Forward with the body uninspected, and log.
+  OVERSIZE_ACTION_ALLOW = 1;
+  // Reject with 413 in block mode.
+  OVERSIZE_ACTION_DENY = 2;
+}
