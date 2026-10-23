@@ -1,0 +1,10 @@
+# Rules of one application, usable by the policies in its namespace.
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFRuleSet
+metadata:
+  name: shop-custom
+  namespace: inkwall-demo
+spec:
+  source:
+    seclang: |
+      SecRule REQUEST_HEADERS:User-Agent "@contains sqlmap" "id:100001,phase:1,deny,status:403,msg:'sqlmap'"

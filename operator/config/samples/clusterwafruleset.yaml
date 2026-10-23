@@ -1,0 +1,8 @@
+# The OWASP Core Rule Set shipped in the engine image, for every namespace.
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: ClusterWAFRuleSet
+metadata:
+  name: owasp-crs-v4
+spec:
+  source:
+    builtin: crs-v4

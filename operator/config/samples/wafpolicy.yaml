@@ -1,0 +1,25 @@
+# Protects the demo app's Ingress (hack/kind): CRS at paranoia level 1 plus
+# the app's own rules, in block mode.
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: demo
+  namespace: inkwall-demo
+spec:
+  targetRefs:
+  - kind: Ingress
+    name: demo
+  mode: Block
+  timeout: 250ms
+  skip:
+    paths: ["/health"]
+  ruleSets:
+  - ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}
+    paranoiaLevel: 1
+    inboundAnomalyThreshold: 5
+  - ref: {kind: WAFRuleSet, name: shop-custom}
+  exclusions:
+  - ruleIDs: [942100]
+    when: {path: "/search", argument: q}
+  body:
+    maxBytes: 65536
