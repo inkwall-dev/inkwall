@@ -90,6 +90,13 @@ Validation happens at three levels, cheapest first:
    - in `Managed` mode, reject create/update/delete of policy CRDs not made by the operator itself.
    The webhook has a 2 s timeout and `failurePolicy: Fail` for WAF CRDs only (a bad rule must not
    slip in because the webhook was briefly down; users retry).
+   Rule sets are compiled after the Core Rule Set, as the engine loads them, and may only use rule
+   directives (`SecRule`, `SecAction`, `SecMarker`, `SecRuleRemoveBy*`, `SecRuleUpdate*`): app teams
+   write `WAFRuleSet`, so settings that change the whole engine (`SecRuleEngine`, body limits) or
+   write files (`SecAuditLog`, `SecDebugLog`, `Include`) are Inkwall's alone. Updates that leave
+   the spec unchanged are accepted, so an object a newer engine would reject stays deletable.
+   The serving certificate is self-signed and rotated by the operator (cert-controller), its CA
+   injected into the webhook configuration; cert-manager can supply it instead.
 3. **Resolver** (async, reported in status): references that exist at admission time but not later,
    conflicts between policies, targets served by a controller Inkwall can't wire.
 

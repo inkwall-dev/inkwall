@@ -15,7 +15,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
@@ -26,14 +25,14 @@ import (
 // §3.1): these tests send objects, as a user would write them, to a real API
 // server with the generated CRDs installed.
 
-var cfg *rest.Config
+var env *testenv.Env
 
 func TestMain(m *testing.M) {
 	var (
 		stop func()
 		err  error
 	)
-	cfg, stop, err = testenv.Start()
+	env, stop, err = testenv.Start(testenv.Options{})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "envtest:", err)
 		os.Exit(1)
@@ -45,8 +44,8 @@ func TestMain(m *testing.M) {
 
 func newClient(t *testing.T) client.Client {
 	t.Helper()
-	testenv.Skip(t, cfg)
-	c, err := client.New(cfg, client.Options{})
+	testenv.Skip(t, env)
+	c, err := client.New(env.Config, client.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +260,7 @@ func TestSamples(t *testing.T) {
 	if err := c.Create(context.Background(), ns); err != nil {
 		t.Fatal(err)
 	}
-	files, err := filepath.Glob(filepath.Join(testenv.CRDDir(), "..", "..", "samples", "*.yaml"))
+	files, err := filepath.Glob(filepath.Join(testenv.SamplesDir(), "*.yaml"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no samples found (%v)", err)
 	}

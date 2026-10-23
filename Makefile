@@ -63,11 +63,13 @@ vuln: ## Check dependencies for known vulnerabilities
 	$(GOVULNCHECK) ./...
 
 .PHONY: generate
-generate: ## Lint the protobuf APIs (api/), regenerate their Go code, and regenerate the operator's deepcopy code and CRDs
+generate: ## Lint the protobuf APIs (api/), regenerate their Go code, and regenerate the operator's deepcopy code, CRDs, RBAC and webhook configuration
 	$(BUF) lint
 	$(BUF) generate
 	$(CONTROLLER_GEN) object:headerFile=hack/boilerplate.go.txt paths=./operator/api/...
 	$(CONTROLLER_GEN) crd paths=./operator/api/... output:crd:artifacts:config=operator/config/crd/bases
+	$(CONTROLLER_GEN) rbac:roleName=inkwall-operator webhook paths=./operator/... paths=./cmd/operator/... \
+		output:rbac:artifacts:config=operator/config/rbac output:webhook:artifacts:config=operator/config/webhook
 
 .PHONY: tidy
 tidy: ## Tidy go.mod and go.sum, here and in test/crs (which builds against this module)
