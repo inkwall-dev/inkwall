@@ -6,6 +6,7 @@ package main
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -100,11 +101,25 @@ func TestRunBench(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &rep); err != nil {
 		t.Fatalf("report is not JSON: %v\n%s", err, out)
 	}
-	if rep.Total.Requests == 0 || rep.RPS <= 0 || rep.Cores != 2 || rep.Total.P50 <= 0 || rep.Total.P50 > rep.Total.P99 {
+	if rep.Total.Requests == 0 || rep.RPS <= 0 || rep.Cores != min(2, runtime.GOMAXPROCS(0)) || rep.Total.P50 <= 0 || rep.Total.P50 > rep.Total.P99 {
 		t.Fatalf("implausible report: %+v", rep)
 	}
-	if len(rep.Classes) == 0 || rep.Classes[0].Class != "benign-get" {
-		t.Fatalf("classes: %+v", rep.Classes)
+	// A slow run (CI under -race) may not reach every class, so check the
+	// shape: known classes in corpus order whose requests add up to the total.
+	pos := map[string]int{}
+	for i, e := range defaultCorpus() {
+		pos[e.class] = i
+	}
+	last, sum := -1, 0
+	for _, c := range rep.Classes {
+		i, ok := pos[c.Class]
+		if !ok || i <= last || c.Requests == 0 {
+			t.Fatalf("classes: %+v", rep.Classes)
+		}
+		last, sum = i, sum+c.Requests
+	}
+	if len(rep.Classes) == 0 || sum != rep.Total.Requests {
+		t.Fatalf("classes add up to %d requests, total is %d: %+v", sum, rep.Total.Requests, rep.Classes)
 	}
 
 	// Open loop: about rate * duration requests, no more.
