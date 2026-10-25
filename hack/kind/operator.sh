@@ -83,6 +83,27 @@ if "${KUBECTL[@]}" -n "$NAMESPACE" get secret inkwall-bundle >/dev/null 2>&1; th
 else
   fail "no bundle Secret"
 fi
+# The samples live in the demo namespace and target its Ingress (make
+# kind-up); on a cluster without the demo, create both for the check.
+created_demo=false
+if ! "${KUBECTL[@]}" get namespace inkwall-demo >/dev/null 2>&1; then
+  created_demo=true
+  "${KUBECTL[@]}" apply -f - >/dev/null <<'YAML'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: inkwall-demo
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: demo
+  namespace: inkwall-demo
+spec:
+  defaultBackend:
+    service: {name: demo, port: {number: 8480}}
+YAML
+fi
 "${KUBECTL[@]}" apply --server-side -f operator/config/samples/clusterwafruleset.yaml -f operator/config/samples/wafruleset.yaml \
   -f operator/config/samples/wafpolicy.yaml >/dev/null
 accepted=""
@@ -95,6 +116,13 @@ if [[ $accepted == True/NoEngines ]]; then
   ok "sample policy accepted, waiting for engines"
 else
   fail "sample policy: Accepted/Enforced reason is $accepted, want True/NoEngines"
+fi
+# The sample policy targets the demo Ingress, which has no host: left in
+# place it would cover every host in the cluster.
+"${KUBECTL[@]}" delete -f operator/config/samples/wafpolicy.yaml -f operator/config/samples/wafruleset.yaml \
+  -f operator/config/samples/clusterwafruleset.yaml --ignore-not-found >/dev/null
+if $created_demo; then
+  "${KUBECTL[@]}" delete namespace inkwall-demo --wait=false >/dev/null
 fi
 
 if [[ $failures -gt 0 ]]; then

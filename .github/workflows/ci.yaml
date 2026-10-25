@@ -53,6 +53,30 @@ jobs:
           version: v3.19.0
       - run: make helm-lint
 
+  e2e:
+    # Operator milestone O2 end to end (#26): the operator installed with the
+    # Helm chart, and a WAFPolicy enforced by an engine in bundle mode, on
+    # kind's newest Kubernetes (the local kind cluster runs the oldest
+    # supported one).
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+      - run: go install sigs.k8s.io/kind@v0.33.0
+      - run: kind create cluster --config hack/kind/cluster.yaml --wait 120s
+      - run: make kind-e2e
+      - if: failure()
+        run: |
+          kubectl get pods -A
+          kubectl -n inkwall-system logs deployment/inkwall-operator --tail=100 || true
+
   generate:
     # Generated code is committed: the protobuf code must match api/*.proto,
     # and the operator's CRDs, RBAC and webhooks (also in the Helm chart)

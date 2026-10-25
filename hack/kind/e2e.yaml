@@ -1,0 +1,140 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# The end-to-end test's app (hack/kind/e2e.sh): whoami behind an engine in
+# bundle mode, which takes its policy from the operator. Everything here is
+# what injection (#27) will set up for a proxy's pods: a ServiceAccount
+# allowed to read the bundle Secret, a projected token for the operator's
+# audience, and the trust ConfigMap (inkwall-trust, created by e2e.sh) with
+# the operator's CA and the bundle public key.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: inkwall-e2e
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: app
+  namespace: inkwall-e2e
+---
+# The operator authorizes an engine by this permission.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: inkwall-e2e-bundle-reader
+  namespace: inkwall-system
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [inkwall-bundle]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: inkwall-e2e-bundle-reader
+  namespace: inkwall-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: inkwall-e2e-bundle-reader
+subjects:
+  - kind: ServiceAccount
+    name: app
+    namespace: inkwall-e2e
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: inkwall-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: e2e}
+  template:
+    metadata:
+      labels: {app: e2e}
+    spec:
+      serviceAccountName: app
+      # The engine reads its token from the projected volume, not the
+      # default one.
+      automountServiceAccountToken: false
+      containers:
+        - name: app
+          image: traefik/whoami:v1.10.3
+          args: ["--port", "8080"]
+        - name: inkwall-engine
+          image: inkwall-engine:dev
+          imagePullPolicy: Never
+          args:
+            - proxy
+            - --upstream=http://127.0.0.1:8080
+            - --operator=inkwall-operator.inkwall-system.svc:9445
+            - --bundle-cache=/var/run/inkwall/bundle.pb
+          env:
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+          ports:
+            - name: http
+              containerPort: 8480
+            - name: admin
+              containerPort: 9480
+          readinessProbe:
+            httpGet: {path: /readyz, port: admin}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: inkwall, mountPath: /var/run/secrets/inkwall, readOnly: true}
+            - {name: cache, mountPath: /var/run/inkwall}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: inkwall
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: inkwall-operator
+                  expirationSeconds: 3600
+                  path: token
+              - configMap:
+                  name: inkwall-trust
+        - name: cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: app
+  namespace: inkwall-e2e
+spec:
+  selector: {app: e2e}
+  ports:
+    - {name: http, port: 8480, targetPort: http}
+    - {name: admin, port: 9480, targetPort: admin}
+---
+# The route the policy protects. Nothing serves it as an Ingress: the
+# operator resolves it into the policy's routes, and the test sends its
+# host to the engine.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: app
+  namespace: inkwall-e2e
+spec:
+  rules:
+    - host: e2e.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: {name: app, port: {number: 8480}}
