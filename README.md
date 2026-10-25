@@ -129,6 +129,10 @@ Traefik's pod with `--trusted-proxies=127.0.0.1/32`, and configure the middlewar
 [`hack/kind/traefik-demo.yaml`](hack/kind/traefik-demo.yaml) and the
 [design notes](docs/design/0002-system-architecture.md#63-traefik).
 
+With the operator ([Helm chart](deploy/helm/inkwall)), all of this is automatic: Traefik pods get
+the engine injected when they start, and every Ingress a `WAFPolicy` targets gets the ForwardAuth
+Middleware, until the policy reports `Ready`.
+
 **The check API.** `inkwall-engine check` serves the engine's own API, `POST /v1/check`
 ([`api/engine/v1`](api/engine/v1/engine.proto)), for proxies without a native protocol: the proxy
 describes one request as a `CheckRequest`, in protobuf (`application/x-protobuf`) or JSON

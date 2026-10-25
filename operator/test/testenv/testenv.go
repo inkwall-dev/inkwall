@@ -105,7 +105,8 @@ func Start(o Options) (*Env, func(), error) {
 		return nil, func() {}, nil
 	}
 	env := &envtest.Environment{
-		CRDDirectoryPaths:     []string{CRDDir()},
+		// The Inkwall CRDs, and a stand-in for Traefik's Middleware.
+		CRDDirectoryPaths:     []string{CRDDir(), filepath.Join(filepath.Dir(configDir()), "test", "testenv", "crds")},
 		ErrorIfCRDPathMissing: true,
 	}
 	if o.Webhooks {

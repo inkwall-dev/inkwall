@@ -17,6 +17,9 @@ each policy's `Accepted` condition, and serves the bundle to the engines over gR
 | `internal/resolver/` | `WAFPolicy` + Ingresses + rule sets → bundle policies and `Accepted` conditions |
 | `internal/bundle/` | Content hash, versions, ed25519 signing, the bundle and signing key Secrets |
 | `internal/controller/` | The bundle builder (leader only) |
+| `internal/injection/` | The engine sidecar, the trust ConfigMap and the RBAC grant |
+| `internal/wiring/` | Traefik wiring: the Middleware, the Ingress annotation, `Programmed` |
+| `integrations/` | The proxies Inkwall knows (Traefik) |
 | `internal/distribution/` | The `BundleService` server, engine authentication, engine reports, `Enforced` |
 | `test/fakeengine/` | A lightweight engine that speaks the bundle protocol, for tests |
 | `test/testenv/` | Starts a local API server (envtest) for tests |
@@ -84,7 +87,22 @@ native sidecar, in bundle mode, connected to the operator; the operator keeps th
 ConfigMap in their namespace and grants their ServiceAccount read access to the bundle. Pods that
 already ran are injected when they restart (`kubectl rollout restart`). Annotate a pod
 `waf.inkwall.dev/inject: "false"` to keep the engine out; `--inject=false` (chart:
-`injection.enabled`) turns injection off. Wiring Traefik's routes to the engine comes next (#27).
+`injection.enabled`) turns injection off.
+
+## Wiring
+
+For every Ingress a `WAFPolicy` targets that Traefik serves, the operator creates an `inkwall-waf`
+ForwardAuth Middleware in the namespace and adds it to the Ingress's
+`traefik.ingress.kubernetes.io/router.middlewares` annotation (first, keeping your own
+Middlewares); deleting the policy removes only that entry. Each policy then reports:
+
+```sh
+kubectl get wafpolicy -A        # READY: True once accepted, wired and enforced by every engine
+kubectl -n shop get wafpolicy shop -o jsonpath='{.status.conditions[?(@.type=="Programmed")].message}'
+```
+
+`Programmed=False` explains what's missing, e.g. `PendingRestart` with the Traefik pods that need
+a restart to get the engine.
 
 ## Changing the API
 
