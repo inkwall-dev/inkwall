@@ -1,0 +1,103 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Release binaries, checksums (signed) and the changelog, for a v* tag on
+# main (.github/workflows/release.yaml). Images and the Helm chart are built
+# by that workflow. Try it locally: make release-snapshot.
+version: 2
+project_name: inkwall
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: inkwall-engine
+    main: ./cmd/engine
+    binary: inkwall-engine
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{ .Version }}"]
+  - id: inkwall-operator
+    main: ./cmd/operator
+    binary: inkwall-operator
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{ .Version }}"]
+  - id: inkwallctl
+    main: ./cmd/inkwallctl
+    binary: inkwallctl
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: ["-s -w"]
+
+archives:
+  - id: inkwall
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [LICENSE, README.md]
+
+checksum:
+  name_template: checksums.txt
+
+# The checksums are signed keyless with the workflow's identity; verify:
+#   cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+#     --certificate-identity-regexp '^https://github.com/inkwall-dev/inkwall/\.github/workflows/release\.yaml@refs/tags/v' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args: ["sign-blob", "--bundle=${signature}", "--yes", "${artifact}"]
+
+# The release notes, from the Conventional Commit types (CONTRIBUTING.md).
+changelog:
+  use: git
+  sort: asc
+  groups:
+    - title: Breaking changes
+      regexp: '^[a-z]+(\([^)]+\))?!:'
+      order: 0
+    - title: Features
+      regexp: '^feat(\([^)]+\))?:'
+      order: 1
+    - title: Security
+      regexp: '^security(\([^)]+\))?:'
+      order: 2
+    - title: Bug fixes
+      regexp: '^fix(\([^)]+\))?:'
+      order: 3
+    - title: Performance
+      regexp: '^perf(\([^)]+\))?:'
+      order: 4
+    - title: Other changes
+      order: 999
+  filters:
+    exclude:
+      - '^(docs|test|ci|chore|build|refactor)(\([^)]+\))?:'
+
+release:
+  github:
+    owner: inkwall-dev
+    name: inkwall
+  # v0.1.0-rc.1 and the like are pre-releases.
+  prerelease: auto
+  # Only the highest stable version is the latest release, not a patch of
+  # an older minor version (set by the release workflow).
+  make_latest: '{{ envOrDefault "MAKE_LATEST" "true" }}'
+  footer: |
+    ## Install
+
+    ```sh
+    helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version {{ .Version }} \
+      --namespace inkwall-system --create-namespace
+    ```
+
+    Images: `ghcr.io/inkwall-dev/inkwall-engine:{{ .Version }}`, `ghcr.io/inkwall-dev/inkwall-operator:{{ .Version }}`
+    (linux/amd64, linux/arm64), signed with cosign, with SBOM and provenance attestations.

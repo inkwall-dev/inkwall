@@ -114,6 +114,40 @@ branches, and release branches only for patching released versions.
 - Separately versioned Go modules are tagged with their path prefix, as Go requires:
   `adapters/caddy/v0.3.0`, `adapters/traefik-plugin/v0.3.0`.
 
+### Cutting a release
+
+1. Check that CI is green on the commit to release, and try the build: `make release-snapshot`
+   (binaries and archives in `dist/`, nothing signed or published).
+2. Tag it with a signed, annotated tag, and push the tag:
+
+   ```sh
+   git tag -s v0.3.0 -m v0.3.0
+   git push origin v0.3.0
+   ```
+
+3. The [release workflow](.github/workflows/release.yaml) checks the tag is on `main` or a
+   `release-X.Y` branch, then publishes, in order:
+   - the images `ghcr.io/inkwall-dev/inkwall-engine` and `ghcr.io/inkwall-dev/inkwall-operator`
+     (`0.3.0`, `0.3`, and `latest` for the highest stable version; linux/amd64 and linux/arm64),
+     with SBOM and provenance attestations;
+   - the Helm chart `oci://ghcr.io/inkwall-dev/charts/inkwall`, versioned from the tag (the
+     version in `Chart.yaml` is only for development);
+   - the binaries, `checksums.txt` and the GitHub release with the changelog.
+
+   Images, chart and checksums are signed keyless with cosign. To verify an image:
+
+   ```sh
+   cosign verify ghcr.io/inkwall-dev/inkwall-engine:0.3.0 \
+     --certificate-identity-regexp '^https://github.com/inkwall-dev/inkwall/\.github/workflows/release\.yaml@refs/tags/v' \
+     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+   ```
+
+4. The first time, make the three new GHCR packages (`inkwall-engine`, `inkwall-operator`,
+   `charts/inkwall`) public in the organization's package settings: they are created private.
+
+A failed run can be re-run from the Actions tab. If something was already published, fix it on
+`main` and release the next patch version instead of moving the tag.
+
 ### Release branches and patches
 
 - When a minor version is released, cut `release-X.Y` from its tag (e.g. `release-0.3` from

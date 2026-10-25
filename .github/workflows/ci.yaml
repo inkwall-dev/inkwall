@@ -44,6 +44,18 @@ jobs:
       - run: docker buildx build --target engine .
       - run: docker buildx build --target operator .
 
+  release:
+    # The release configuration must stay valid: a broken one only shows
+    # when a tag is pushed (.github/workflows/release.yaml).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: v2.18.3
+          args: check
+
   helm:
     runs-on: ubuntu-latest
     steps:
