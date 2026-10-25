@@ -4,9 +4,13 @@
 package main
 
 import (
+	"context"
 	"io"
+	"log/slog"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // The manager itself is tested in operator/manager.
@@ -27,5 +31,28 @@ func TestFlags(t *testing.T) {
 	t.Setenv("POD_NAMESPACE", "security")
 	if o, err := parseFlags(nil, io.Discard); err != nil || o.Namespace != "security" {
 		t.Errorf("namespace from POD_NAMESPACE: got %q, %v", o.Namespace, err)
+	}
+}
+
+func TestDrain(t *testing.T) {
+	signal, stop := context.WithCancel(context.Background())
+	var draining atomic.Bool
+	ctx := drain(signal, 200*time.Millisecond, &draining, slog.New(slog.DiscardHandler))
+	if draining.Load() || ctx.Err() != nil {
+		t.Fatal("draining before the signal")
+	}
+	stop()
+	time.Sleep(50 * time.Millisecond)
+	// Not ready, still serving.
+	if !draining.Load() || ctx.Err() != nil {
+		t.Fatalf("right after the signal: draining=%v, stopped=%v", draining.Load(), ctx.Err() != nil)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("not stopped after the delay")
+	}
+	if o, err := parseFlags(nil, io.Discard); err != nil || o.shutdownDelay != 5*time.Second {
+		t.Errorf("default shutdown delay %v, %v", o.shutdownDelay, err)
 	}
 }

@@ -430,6 +430,7 @@ Removal must never leave a proxy pointing at a missing engine with fail-closed b
 |---|---|---|---|
 | Operator down (both replicas) | None: engines keep last bundle | Engines' `bundle_age_seconds` grows; operator absent | Restart; engines reconnect and resync |
 | Leader down, follower up | None | Leader election | Follower takes over building within the lease duration (~15 s) |
+| Operator rollout (a replica stops) | None: a stopping replica keeps serving the webhook and bundles for `--shutdown-delay` (5 s), not ready, while Kubernetes stops routing to it | — | Automatic; engines reconnect to another replica |
 | Webhook down, ingress pod restarts | Detect mode: pod starts **without** engine (uninspected). Block mode: pod creation is refused; existing pods keep serving | `SidecarMissing` condition, alert | Restart pod after operator recovers |
 | Invalid rule committed | Rejected at admission | Webhook error returned to `kubectl` / Argo CD sync | Fix the rule |
 | Rule valid at admission, engine can't compile (version skew) | Engine keeps previous bundle | NACK → `Enforced=False, reason=EngineNack` | Upgrade engines or fix the rule |
