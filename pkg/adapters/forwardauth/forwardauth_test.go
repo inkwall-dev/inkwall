@@ -5,6 +5,7 @@ package forwardauth
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/adapters/proxy"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
@@ -250,6 +252,44 @@ func TestSameVerdictAsReverseProxy(t *testing.T) {
 		}
 		if !slices.Equal(faSeen.v.RuleIDs, rpSeen.v.RuleIDs) {
 			t.Errorf("%s %s: forward-auth matched %v, reverse proxy %v", tc.method, tc.uri, faSeen.v.RuleIDs, rpSeen.v.RuleIDs)
+		}
+	}
+}
+
+// limitInspector allows everything, reads bodies up to a limit per path,
+// and records the bodies it saw.
+type limitInspector struct {
+	limits map[string]int64
+	seen   []request.Request
+}
+
+func (l *limitInspector) Check(_ context.Context, r *request.Request) pipeline.Verdict {
+	l.seen = append(l.seen, *r)
+	return pipeline.Verdict{Action: pipeline.ActionAllow}
+}
+
+func (l *limitInspector) BodyLimit(r *request.Request, _ int64) int64 { return l.limits[r.RawURI] }
+
+// The inspector decides how much body to read for each route (a policy's
+// body.maxBytes in bundle mode), not the adapter's own limit.
+func TestBodyLimitPerRoute(t *testing.T) {
+	insp := &limitInspector{limits: map[string]int64{"/small": 4, "/large": 1 << 20, "/none": 0}}
+	h, err := New(insp, Config{MaxBodyBytes: 8, Logger: slog.New(slog.DiscardHandler)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Repeat("x", 100)
+	for _, uri := range []string{"/small", "/large", "/none"} {
+		if w := serve(h, subrequest("POST", uri, "text/plain", body)); w.Code != http.StatusOK {
+			t.Fatalf("%s: %d", uri, w.Code)
+		}
+	}
+	for i, want := range []struct {
+		n         int
+		truncated bool
+	}{{4, true}, {100, false}, {0, false}} {
+		if got := insp.seen[i]; len(got.Body) != want.n || got.BodyTruncated != want.truncated {
+			t.Errorf("%s: read %d bytes (truncated %v), want %d (%v)", got.RawURI, len(got.Body), got.BodyTruncated, want.n, want.truncated)
 		}
 	}
 }

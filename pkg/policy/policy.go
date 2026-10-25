@@ -25,6 +25,10 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
+// MaxBodyBytes is the largest body a policy may inspect, as WAFPolicy's
+// body.maxBytes allows; adapters in bundle mode accept bodies up to it.
+const MaxBodyBytes = 10 << 20
+
 // Options are the engine-wide settings every policy shares.
 type Options struct {
 	// Admission bounds concurrent evaluations across all policies.
@@ -79,7 +83,9 @@ func (s *Set) Check(ctx context.Context, r *request.Request) pipeline.Verdict {
 	if p == nil {
 		return pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy}
 	}
-	return p.pipeline.Check(ctx, r)
+	v := p.pipeline.Check(ctx, r)
+	v.Policy = p.ID
+	return v
 }
 
 // BodyLimit implements pipeline.Inspector: the policy's body limit, or 0

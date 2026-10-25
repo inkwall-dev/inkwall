@@ -143,6 +143,17 @@ $ curl -s --unix-socket /run/inkwall/engine.sock -H 'Content-Type: application/j
 {"action":"ACTION_DENY","status":403,"rule_ids":[942100,949110],"reason":"REASON_RULE",...}
 ```
 
+**Policies from the operator (bundle mode).** With `--operator host:port`, any of the three
+commands takes its policies from the operator's signed bundles instead of the flags that define a
+policy (`--mode`, `--rules`, `--skip-paths`, ...; setting one is then an error). Each request is
+inspected by the policy of its route, matched on host, decoded path and method; a host no policy
+covers is allowed and reported as `no-policy`. The engine authenticates with a projected
+ServiceAccount token (`--operator-token`), verifies the operator's certificate (`--operator-ca`) and
+every bundle's ed25519 signature (`--bundle-key`) before applying it, and swaps policies without a
+restart. Without the operator it keeps enforcing the last bundle, also across restarts with
+`--bundle-cache`. The operator injects this configuration (#27); see
+[0002 §5.2](docs/design/0002-system-architecture.md#52-engine--operator-bundle-distribution).
+
 **Testing rules without traffic.** `inkwallctl test` shows the verdict and the matching rules for a
 request given like a curl command, as raw HTTP in a file (`--request`), or as a browser HAR export
 (`--har`). It runs the engine's checks in-process with the same flags (`--paranoia-level`,

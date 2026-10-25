@@ -5,6 +5,7 @@ package main
 
 import (
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
 
 func TestParseProxyFlags(t *testing.T) {
@@ -176,5 +178,43 @@ func TestPprofHandler(t *testing.T) {
 	}
 	if cfg, _ := parseFlags(cmdProxy, []string{"--upstream", "http://app"}, io.Discard); cfg.pprof {
 		t.Error("pprof on by default")
+	}
+}
+
+func TestParseBundleModeFlags(t *testing.T) {
+	cfg, err := parseFlags(cmdForwardAuth, []string{
+		"--operator", "inkwall-operator.inkwall-system.svc:9445",
+		"--bundle-cache", "/var/run/inkwall/bundle.pb",
+		"--max-body-bytes", "131072",
+	}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.operator != "inkwall-operator.inkwall-system.svc:9445" || cfg.bundleCache != "/var/run/inkwall/bundle.pb" ||
+		cfg.operatorToken != "/var/run/secrets/inkwall/token" || cfg.bundleKey != "/var/run/secrets/inkwall/ed25519.pub" {
+		t.Errorf("got %+v", cfg)
+	}
+
+	// Flags that define a policy come from the bundle in bundle mode.
+	for _, args := range [][]string{
+		{"--mode", "block"},
+		{"--rules", "rules.conf"},
+		{"--skip-paths", "/healthz"},
+		{"--paranoia-level", "2"},
+	} {
+		_, err := parseFlags(cmdForwardAuth, append([]string{"--operator", "op:9445"}, args...), io.Discard)
+		if err == nil || !strings.Contains(err.Error(), args[0]) || !strings.Contains(err.Error(), "bundle") {
+			t.Errorf("%v with --operator: got %v", args, err)
+		}
+	}
+}
+
+func TestBundleModeNeedsItsFiles(t *testing.T) {
+	cfg, err := parseFlags(cmdCheck, []string{"--operator", "op:9445", "--bundle-key", "/nonexistent/ed25519.pub"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := bundleMode(cfg, telemetry.NewMetrics("httpcheck"), slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "public key") {
+		t.Fatalf("got %v, want an error about the public key", err)
 	}
 }

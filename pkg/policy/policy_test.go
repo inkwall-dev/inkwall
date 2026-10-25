@@ -99,6 +99,9 @@ func TestSet(t *testing.T) {
 		if v.Action != tc.action || v.Reason != tc.reason {
 			t.Errorf("%s: got %s/%s, want %s/%s", tc.name, v.Action, v.Reason, tc.action, tc.reason)
 		}
+		if p := set.Lookup(tc.r); p != nil && v.Policy != p.ID {
+			t.Errorf("%s: verdict names policy %q, want %q", tc.name, v.Policy, p.ID)
+		}
 	}
 
 	for _, tc := range []struct {

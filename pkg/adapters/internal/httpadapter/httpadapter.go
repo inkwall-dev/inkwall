@@ -88,16 +88,25 @@ func PeerAddr(remoteAddr string) netip.Addr {
 
 // IsEvent reports whether a verdict is logged as a security event: blocks and
 // detections, and every request that went uninspected unexpectedly (timeout,
-// error, overload). Client cancellations and routes configured to skip
-// inspection are not events.
+// error, overload). Client cancellations and requests uninspected by
+// configuration (a skipped route, no policy for the route, inspection
+// suspended) are not events: they are counted in the metrics, and logging
+// each would flood the logs.
 func IsEvent(v pipeline.Verdict) bool {
-	return v.Action != pipeline.ActionAllow ||
-		(v.Reason != pipeline.ReasonNone && v.Reason != pipeline.ReasonCanceled && v.Reason != pipeline.ReasonSkipped)
+	if v.Action != pipeline.ActionAllow {
+		return true
+	}
+	switch v.Reason {
+	case pipeline.ReasonNone, pipeline.ReasonCanceled, pipeline.ReasonSkipped, pipeline.ReasonNoPolicy, pipeline.ReasonSuspended:
+		return false
+	}
+	return true
 }
 
 // LogEvent writes one security event for req.
 func LogEvent(ctx context.Context, logger *slog.Logger, req *request.Request, path string, v pipeline.Verdict) {
 	logger.LogAttrs(ctx, slog.LevelWarn, "security event",
+		slog.String("policy", v.Policy),
 		slog.String("action", v.Action.String()),
 		slog.String("reason", v.Reason.String()),
 		slog.Int("status", v.Status),
