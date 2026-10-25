@@ -1,0 +1,18 @@
+apiVersion: v2
+name: inkwall
+description: Inkwall, a Kubernetes-native web application firewall. Installs the operator, its CRDs and its validating webhook.
+type: application
+# The chart and the operator are released together, from the same tag.
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.29.0-0"
+home: https://github.com/inkwall-dev/inkwall
+sources:
+  - https://github.com/inkwall-dev/inkwall
+license: Apache-2.0
+keywords:
+  - waf
+  - security
+  - coraza
+  - owasp-crs
+  - operator

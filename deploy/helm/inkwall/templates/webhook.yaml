@@ -1,0 +1,91 @@
+{{- /*
+The webhooks come from the operator's kubebuilder:webhook markers
+(files/webhook/manifests.yaml, generated), pointed at the chart's Service.
+The configuration's name is fixed: the operator injects the CA into it by
+name.
+*/}}
+{{- $certManager := eq .Values.webhook.certs.mode "certManager" }}
+{{- if not (has .Values.webhook.certs.mode (list "rotate" "certManager")) }}
+{{- fail (printf "webhook.certs.mode must be rotate or certManager, not %q" .Values.webhook.certs.mode) }}
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "inkwall.webhook.service" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inkwall.operator.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "inkwall.operator.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: webhook
+{{- range (include "inkwall.generated" (dict "root" . "path" "files/webhook/manifests.yaml") | fromJsonArray) }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: {{ .kind }}
+metadata:
+  name: {{ .metadata.name }}
+  labels:
+    {{- include "inkwall.operator.labels" $ | nindent 4 }}
+  {{- if $certManager }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ $.Release.Namespace }}/{{ include "inkwall.webhook.secret" $ }}
+  {{- end }}
+webhooks:
+  {{- range .webhooks }}
+  {{- $_ := set .clientConfig.service "name" (include "inkwall.webhook.service" $) }}
+  {{- $_ := set .clientConfig.service "namespace" $.Release.Namespace }}
+  {{- $_ := set .clientConfig.service "port" 443 }}
+  {{- $_ := set . "timeoutSeconds" $.Values.webhook.timeoutSeconds }}
+  - {{ toYaml . | indent 4 | trim }}
+  {{- end }}
+{{- end }}
+{{- if not $certManager }}
+---
+# Filled and renewed by the operator; listed here so uninstall removes it.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "inkwall.webhook.secret" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inkwall.operator.labels" . | nindent 4 }}
+{{- else }}
+{{- if not .Values.webhook.certs.certManager.issuerRef }}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "inkwall.operator.name" . }}-selfsigned
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inkwall.operator.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+{{- end }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "inkwall.webhook.secret" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inkwall.operator.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "inkwall.webhook.secret" . }}
+  dnsNames:
+    - {{ include "inkwall.webhook.service" . }}.{{ .Release.Namespace }}.svc
+    - {{ include "inkwall.webhook.service" . }}.{{ .Release.Namespace }}.svc.cluster.local
+    - {{ include "inkwall.distribution.service" . }}.{{ .Release.Namespace }}.svc
+    - {{ include "inkwall.distribution.service" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    {{- with .Values.webhook.certs.certManager.issuerRef }}
+    {{- toYaml . | nindent 4 }}
+    {{- else }}
+    kind: Issuer
+    name: {{ include "inkwall.operator.name" . }}-selfsigned
+    {{- end }}
+{{- end }}

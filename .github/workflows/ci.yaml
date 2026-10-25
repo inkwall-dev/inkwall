@@ -44,8 +44,19 @@ jobs:
       - run: docker buildx build --target engine .
       - run: docker buildx build --target operator .
 
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+      - run: make helm-lint
+
   generate:
-    # The generated protobuf code is committed; it must match api/*.proto.
+    # Generated code is committed: the protobuf code must match api/*.proto,
+    # and the operator's CRDs, RBAC and webhooks (also in the Helm chart)
+    # must match its markers.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

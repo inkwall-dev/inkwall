@@ -1,0 +1,369 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
+  name: wafpolicies.waf.inkwall.dev
+spec:
+  group: waf.inkwall.dev
+  names:
+    categories:
+    - inkwall
+    kind: WAFPolicy
+    listKind: WAFPolicyList
+    plural: wafpolicies
+    shortNames:
+    - wafp
+    singular: wafpolicy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.bundleVersion
+      name: Bundle
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          WAFPolicy protects routes: which rules run, in which mode, and what
+          happens when inspection fails.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: WAFPolicySpec is what to enforce on which routes.
+            properties:
+              body:
+                description: Body configures request body inspection.
+                properties:
+                  inspect:
+                    default: true
+                    description: Inspect turns body inspection on or off.
+                    type: boolean
+                  maxBytes:
+                    description: |-
+                      MaxBytes is how much of a body is inspected, at most 10 MiB. Unset:
+                      the engine's default (64 KiB).
+                    format: int64
+                    maximum: 10485760
+                    minimum: 1
+                    type: integer
+                  onOversize:
+                    description: |-
+                      OnOversize is what happens to a body over maxBytes: Deny (413 in
+                      Block mode) or Allow (forwarded uninspected, and logged). Unset: Deny
+                      in Block mode, Allow in Detect mode.
+                    enum:
+                    - Allow
+                    - Deny
+                    type: string
+                type: object
+              exclusions:
+                description: Exclusions turn rules off where they cause false positives.
+                items:
+                  description: Exclusion turns rules off, everywhere or only for one
+                    path or argument.
+                  properties:
+                    ruleIDs:
+                      description: RuleIDs are the rules to turn off.
+                      items:
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxItems: 64
+                      minItems: 1
+                      type: array
+                    when:
+                      description: |-
+                        When narrows the exclusion. Unset: the rules are off for every request
+                        this policy covers.
+                      properties:
+                        argument:
+                          description: Argument is a query or body argument the rules
+                            stop looking at.
+                          maxLength: 256
+                          minLength: 1
+                          pattern: ^[A-Za-z0-9_.\-\[\]]+$
+                          type: string
+                        path:
+                          description: Path the exclusion applies to.
+                          maxLength: 1024
+                          pattern: ^/[A-Za-z0-9._~/:@!$&'()+,=-]*\*?$
+                          type: string
+                      type: object
+                      x-kubernetes-validations:
+                      - message: when needs a path, an argument, or both
+                        rule: has(self.path) || has(self.argument)
+                  required:
+                  - ruleIDs
+                  type: object
+                maxItems: 128
+                type: array
+              failureMode:
+                description: |-
+                  FailureMode is what happens to a request that can't be inspected in
+                  time. Unset: Closed in Block mode, Open in Detect mode.
+                enum:
+                - Open
+                - Closed
+                type: string
+              mode:
+                default: Detect
+                description: Mode is Detect (log, let through) or Block (reject).
+                enum:
+                - Detect
+                - Block
+                type: string
+              ruleSets:
+                description: |-
+                  RuleSets are the rules to run, in order. Empty: the built-in OWASP CRS
+                  with its default paranoia level and threshold.
+                items:
+                  description: RuleSetBinding uses a rule set in a policy.
+                  properties:
+                    inboundAnomalyThreshold:
+                      description: |-
+                        InboundAnomalyThreshold is the OWASP CRS anomaly score at which a
+                        request is flagged. Only used by the built-in CRS.
+                      format: int32
+                      maximum: 10000
+                      minimum: 1
+                      type: integer
+                    paranoiaLevel:
+                      description: |-
+                        ParanoiaLevel is the OWASP CRS paranoia level, 1 to 4. Only used by
+                        the built-in CRS.
+                      format: int32
+                      maximum: 4
+                      minimum: 1
+                      type: integer
+                    ref:
+                      description: Ref is the rule set.
+                      properties:
+                        kind:
+                          description: Kind is WAFRuleSet or ClusterWAFRuleSet.
+                          enum:
+                          - WAFRuleSet
+                          - ClusterWAFRuleSet
+                          type: string
+                        name:
+                          description: Name of the rule set.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        namespace:
+                          description: 'Namespace of a WAFRuleSet. Unset: the policy''s
+                            namespace.'
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      type: object
+                      x-kubernetes-validations:
+                      - message: namespace is only allowed for a WAFRuleSet
+                        rule: self.kind == 'WAFRuleSet' || !has(self.__namespace__)
+                  required:
+                  - ref
+                  type: object
+                maxItems: 8
+                type: array
+              skip:
+                description: Skip lists requests that are never inspected.
+                properties:
+                  bodyPaths:
+                    description: |-
+                      BodyPaths are paths whose body is not inspected; their headers and URI
+                      still are.
+                    items:
+                      description: |-
+                        PathPattern is an exact path ("/healthz") or a prefix ending in "*"
+                        ("/static/*"), using only plain ASCII path characters, as the engine
+                        matches paths (pkg/router).
+                      maxLength: 1024
+                      pattern: ^/[A-Za-z0-9._~/:@!$&'()+,=-]*\*?$
+                      type: string
+                    maxItems: 64
+                    type: array
+                  paths:
+                    description: Paths that are never inspected.
+                    items:
+                      description: |-
+                        PathPattern is an exact path ("/healthz") or a prefix ending in "*"
+                        ("/static/*"), using only plain ASCII path characters, as the engine
+                        matches paths (pkg/router).
+                      maxLength: 1024
+                      pattern: ^/[A-Za-z0-9._~/:@!$&'()+,=-]*\*?$
+                      type: string
+                    maxItems: 64
+                    type: array
+                type: object
+              targetRefs:
+                description: |-
+                  TargetRefs are the routes this policy protects, in the policy's
+                  namespace.
+                items:
+                  description: TargetRef names a route in the policy's namespace.
+                  properties:
+                    group:
+                      description: |-
+                        Group of the target: networking.k8s.io (the default, for Ingress) or
+                        gateway.networking.k8s.io (for HTTPRoute).
+                      maxLength: 253
+                      type: string
+                    kind:
+                      description: 'Kind of the target: Ingress or HTTPRoute.'
+                      enum:
+                      - Ingress
+                      - HTTPRoute
+                      type: string
+                    name:
+                      description: Name of the target.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    sectionName:
+                      description: SectionName narrows an HTTPRoute target to one
+                        named rule.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                  x-kubernetes-validations:
+                  - message: target must be a networking.k8s.io Ingress or a gateway.networking.k8s.io
+                      HTTPRoute
+                    rule: (self.kind == 'Ingress' && (!has(self.group) || self.group
+                      == 'networking.k8s.io')) || (self.kind == 'HTTPRoute' && has(self.group)
+                      && self.group == 'gateway.networking.k8s.io')
+                  - message: sectionName is only allowed for an HTTPRoute
+                    rule: '!has(self.sectionName) || self.kind == ''HTTPRoute'''
+                maxItems: 16
+                minItems: 1
+                type: array
+                x-kubernetes-validations:
+                - message: targetRefs must not repeat a target
+                  rule: 'self.all(a, self.exists_one(b, b.kind == a.kind && b.name
+                    == a.name && (has(b.sectionName) ? b.sectionName : '''') == (has(a.sectionName)
+                    ? a.sectionName : '''')))'
+              timeout:
+                description: |-
+                  Timeout is the inspection deadline per request, at most 1s. Unset:
+                  the engine's default (250ms).
+                type: string
+                x-kubernetes-validations:
+                - message: timeout must be more than 0s and at most 1s
+                  rule: duration(self) > duration('0s') && duration(self) <= duration('1s')
+            required:
+            - targetRefs
+            type: object
+          status:
+            description: |-
+              WAFPolicyStatus reports how far the policy got: accepted, programmed into
+              the proxy, enforced by every engine (0004 §3.2).
+            properties:
+              bundleVersion:
+                description: BundleVersion is the newest bundle that contains this
+                  generation.
+                format: int64
+                type: integer
+              conditions:
+                description: Conditions are Accepted, Programmed, Enforced and Ready.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the generation the status describes.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

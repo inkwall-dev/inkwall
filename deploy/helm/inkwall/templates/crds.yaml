@@ -1,0 +1,9 @@
+{{- if .Values.crds.install }}
+{{- range $path, $_ := .Files.Glob "files/crds/*.yaml" }}
+{{- $crd := fromYaml ($.Files.Get $path) }}
+{{- $_ := set $crd.metadata "annotations" (merge (default dict $crd.metadata.annotations) (dict "helm.sh/resource-policy" "keep")) }}
+{{- $_ := set $crd.metadata "labels" (merge (default dict $crd.metadata.labels) (fromYaml (include "inkwall.labels" $))) }}
+---
+{{ toYaml $crd }}
+{{- end }}
+{{- end }}

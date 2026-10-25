@@ -1,0 +1,16 @@
+Inkwall {{ .Chart.AppVersion }} is installed in {{ .Release.Namespace }}.
+
+Wait for the operator:
+
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "inkwall.operator.name" . }}
+
+Then protect a route with a WAFPolicy (examples: operator/config/samples in
+the repository) and list the Inkwall objects:
+
+  kubectl get inkwall -A
+
+The operator validates rule sets and policies when they are saved, builds
+them into a signed bundle and serves it to engines on
+{{ include "inkwall.distribution.service" . }}.{{ .Release.Namespace }}.svc:{{ .Values.distribution.port }}.
+Injecting the engine into Traefik and wiring it comes next (#27); until
+then, policies show Enforced=False with reason NoEngines.
