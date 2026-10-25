@@ -152,13 +152,7 @@ func testBundles(ctx context.Context, t *testing.T, c client.Client) {
 	wantPolicyStatus("accepted", metav1.ConditionTrue, resolver.ReasonAccepted, v1)
 
 	// An edit publishes a new version.
-	if err := c.Get(ctx, client.ObjectKeyFromObject(pol), pol); err != nil {
-		t.Fatal(err)
-	}
-	pol.Spec.Mode = wafv1alpha1.PolicyDetect
-	if err := c.Update(ctx, pol); err != nil {
-		t.Fatal(err)
-	}
+	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) { p.Spec.Mode = wafv1alpha1.PolicyDetect })
 	var v2 uint64
 	eventually(t, "edit published", func() string {
 		b := current(ctx, t, c)
@@ -174,13 +168,7 @@ func testBundles(ctx context.Context, t *testing.T, c client.Client) {
 	wantPolicyStatus("edit reported", metav1.ConditionTrue, resolver.ReasonAccepted, v2)
 
 	// A label change is not a new policy.
-	if err := c.Get(ctx, client.ObjectKeyFromObject(pol), pol); err != nil {
-		t.Fatal(err)
-	}
-	pol.Labels = map[string]string{"team": "shop"}
-	if err := c.Update(ctx, pol); err != nil {
-		t.Fatal(err)
-	}
+	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) { p.Labels = map[string]string{"team": "shop"} })
 	time.Sleep(500 * time.Millisecond)
 	if v := current(ctx, t, c).GetVersion(); v != v2 {
 		t.Fatalf("a label change published version %d", v)
@@ -188,14 +176,10 @@ func testBundles(ctx context.Context, t *testing.T, c client.Client) {
 
 	// A broken edit (a missing rule set) leaves the previous version in
 	// force.
-	if err := c.Get(ctx, client.ObjectKeyFromObject(pol), pol); err != nil {
-		t.Fatal(err)
-	}
-	pol.Spec.Mode = wafv1alpha1.PolicyBlock
-	pol.Spec.RuleSets = append(pol.Spec.RuleSets, wafv1alpha1.RuleSetBinding{Ref: wafv1alpha1.RuleSetRef{Kind: "WAFRuleSet", Name: "missing"}})
-	if err := c.Update(ctx, pol); err != nil {
-		t.Fatal(err)
-	}
+	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) {
+		p.Spec.Mode = wafv1alpha1.PolicyBlock
+		p.Spec.RuleSets = append(p.Spec.RuleSets, wafv1alpha1.RuleSetBinding{Ref: wafv1alpha1.RuleSetRef{Kind: "WAFRuleSet", Name: "missing"}})
+	})
 	wantPolicyStatus("broken edit reported", metav1.ConditionFalse, resolver.ReasonInvalidRef, v2)
 	if p := findPolicy(current(ctx, t, c), "shop/shop"); p.GetMode() != bundlev1.Mode_MODE_DETECT {
 		t.Fatalf("the broken edit took effect: %v", p)

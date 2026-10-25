@@ -181,13 +181,7 @@ func testDistribution(ctx context.Context, t *testing.T, c client.Client) {
 	wantEnforced("one engine", metav1.ConditionTrue, distribution.ReasonEnforced, "1/1 engines on bundle")
 
 	// An edit reaches the running engine without reconnecting.
-	if err := c.Get(ctx, client.ObjectKeyFromObject(pol), pol); err != nil {
-		t.Fatal(err)
-	}
-	pol.Spec.Mode = wafv1alpha1.PolicyBlock
-	if err := c.Update(ctx, pol); err != nil {
-		t.Fatal(err)
-	}
+	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) { p.Spec.Mode = wafv1alpha1.PolicyBlock })
 	eventually(t, "the edit pushed", func() string {
 		for _, p := range good.Applied().GetPolicies() {
 			if p.GetId() == "web/web" && p.GetMode() == bundlev1.Mode_MODE_BLOCK {
