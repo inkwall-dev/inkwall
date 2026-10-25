@@ -12,6 +12,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -94,6 +95,11 @@ func (e *Engine) run(ctx context.Context) error {
 	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{
 		EngineId: e.ID, PodNamespace: "test", PodName: e.ID, EngineVersion: "fake", BundleVersion: current,
 	}}}); err != nil {
+		// The operator may have ended the stream first (rejected the
+		// engine): its status comes with Recv.
+		if errors.Is(err, io.EOF) {
+			_, err = stream.Recv()
+		}
 		return err
 	}
 

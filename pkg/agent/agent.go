@@ -16,6 +16,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand/v2"
 	"os"
@@ -243,7 +244,7 @@ func (a *Agent) stream(ctx context.Context) error {
 		defer sendMu.Unlock()
 		return stream.Send(m)
 	}
-	if err := send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{
+	if err := sendFirst(stream, &agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{
 		EngineId:      a.cfg.EngineID,
 		PodNamespace:  a.cfg.PodNamespace,
 		PodName:       a.cfg.PodName,
@@ -297,6 +298,17 @@ func (a *Agent) stream(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+// sendFirst sends a stream's first message. The operator may have ended the
+// stream already (it rejected the engine): Send then only says io.EOF, and
+// the reason, such as PermissionDenied, comes with Recv.
+func sendFirst(stream agentv1.BundleService_WatchClient, m *agentv1.WatchRequest) error {
+	err := stream.Send(m)
+	if errors.Is(err, io.EOF) {
+		_, err = stream.Recv()
+	}
+	return err
 }
 
 // apply verifies, compiles and activates a bundle, returning its version
