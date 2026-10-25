@@ -12,12 +12,16 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
+	"sync/atomic"
+	"time"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/types"
@@ -30,15 +34,23 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stderr))
 }
 
-func parseFlags(args []string, stderr io.Writer) (manager.Options, error) {
+// options are the operator's: the manager's, and how it shuts down.
+type options struct {
+	manager.Options
+	// shutdownDelay keeps serving after SIGTERM, not ready, while
+	// Kubernetes stops routing to the pod.
+	shutdownDelay time.Duration
+}
+
+func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fs := flag.NewFlagSet("inkwall-operator", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	// The downward API sets these in a cluster.
-	o := manager.Options{
+	o := options{Options: manager.Options{
 		Namespace:  os.Getenv("POD_NAMESPACE"),
 		Replica:    os.Getenv("POD_NAME"),
 		ReplicaUID: types.UID(os.Getenv("POD_UID")),
-	}
+	}}
 	if o.Namespace == "" {
 		o.Namespace = "inkwall-system"
 	}
@@ -52,6 +64,7 @@ func parseFlags(args []string, stderr io.Writer) (manager.Options, error) {
 	fs.StringVar(&o.WebhookCerts, "webhook-certs", manager.CertsRotate, "where the webhook certificate comes from: rotate (the operator creates and renews it, and injects its CA) or external (files in --webhook-cert-dir, e.g. from cert-manager)")
 	fs.StringVar(&o.WebhookService, "webhook-service", "inkwall-operator-webhook", "Service the API server reaches the webhook through, named in the certificate")
 	fs.StringVar(&o.WebhookSecret, "webhook-cert-secret", "inkwall-operator-webhook-tls", "Secret, in --namespace, that holds the rotated certificate (shared with the distribution server)")
+	fs.DurationVar(&o.shutdownDelay, "shutdown-delay", 5*time.Second, "on SIGTERM, keep serving the webhook and the bundles this long, not ready, so Kubernetes stops routing to the pod before it stops; keep it below the pod's termination grace period")
 	fs.IntVar(&o.DistributionPort, "distribution-port", 9445, "port of the gRPC server that sends bundles to the engines, over TLS with the webhook's certificate (0 disables)")
 	fs.StringVar(&o.DistributionService, "distribution-service", "inkwall-operator", "Service engines reach the distribution server through, named in the certificate")
 	if err := fs.Parse(args); err != nil {
@@ -84,16 +97,44 @@ func run(args []string, stderr io.Writer) int {
 		logger.Error("no Kubernetes API configuration", slog.Any("error", err))
 		return 1
 	}
-	mgr, err := manager.New(cfg, o)
+	mgr, err := manager.New(cfg, o.Options)
 	if err != nil {
+		logger.Error("cannot create the manager", slog.Any("error", err))
+		return 1
+	}
+	var draining atomic.Bool
+	if err := mgr.AddReadyzCheck("shutdown", func(*http.Request) error {
+		if draining.Load() {
+			return errors.New("shutting down")
+		}
+		return nil
+	}); err != nil {
 		logger.Error("cannot create the manager", slog.Any("error", err))
 		return 1
 	}
 	logger.Info("operator starting", slog.String("namespace", o.Namespace),
 		slog.Bool("leader_elect", o.LeaderElect), slog.Bool("webhooks", o.Webhooks))
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	ctx := drain(ctrl.SetupSignalHandler(), o.shutdownDelay, &draining, logger)
+	if err := mgr.Start(ctx); err != nil {
 		logger.Error("operator stopped", slog.Any("error", err))
 		return 1
 	}
 	return 0
+}
+
+// drain returns a context that ends shutdownDelay after signal does. In
+// between, draining is set (the replica reports not ready) and the servers
+// keep answering: Kubernetes removes a terminating pod from its Services
+// asynchronously, and the webhook fails closed, so stopping at once would
+// refuse the API server's calls still routed here.
+func drain(signal context.Context, delay time.Duration, draining *atomic.Bool, logger *slog.Logger) context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-signal.Done()
+		draining.Store(true)
+		logger.Info("shutting down", slog.Duration("drain", delay))
+		time.Sleep(delay)
+		cancel()
+	}()
+	return ctx
 }
