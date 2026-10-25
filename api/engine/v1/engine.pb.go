@@ -106,20 +106,26 @@ const (
 	Reason_REASON_OVERSIZE Reason = 7
 	// The route is configured to skip inspection.
 	Reason_REASON_SKIPPED Reason = 8
+	// No policy covers the route, so the request was not inspected.
+	Reason_REASON_NO_POLICY Reason = 9
+	// Inspection is suspended (the emergency switch).
+	Reason_REASON_SUSPENDED Reason = 10
 )
 
 // Enum value maps for Reason.
 var (
 	Reason_name = map[int32]string{
-		0: "REASON_UNSPECIFIED",
-		1: "REASON_NONE",
-		2: "REASON_RULE",
-		3: "REASON_TIMEOUT",
-		4: "REASON_ERROR",
-		5: "REASON_CANCELED",
-		6: "REASON_OVERLOAD",
-		7: "REASON_OVERSIZE",
-		8: "REASON_SKIPPED",
+		0:  "REASON_UNSPECIFIED",
+		1:  "REASON_NONE",
+		2:  "REASON_RULE",
+		3:  "REASON_TIMEOUT",
+		4:  "REASON_ERROR",
+		5:  "REASON_CANCELED",
+		6:  "REASON_OVERLOAD",
+		7:  "REASON_OVERSIZE",
+		8:  "REASON_SKIPPED",
+		9:  "REASON_NO_POLICY",
+		10: "REASON_SUSPENDED",
 	}
 	Reason_value = map[string]int32{
 		"REASON_UNSPECIFIED": 0,
@@ -131,6 +137,8 @@ var (
 		"REASON_OVERLOAD":    6,
 		"REASON_OVERSIZE":    7,
 		"REASON_SKIPPED":     8,
+		"REASON_NO_POLICY":   9,
+		"REASON_SUSPENDED":   10,
 	}
 )
 
@@ -525,7 +533,7 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\fACTION_ALLOW\x10\x01\x12\x0f\n" +
 	"\vACTION_DENY\x10\x02\x12\x0e\n" +
 	"\n" +
-	"ACTION_LOG\x10\x03*\xbb\x01\n" +
+	"ACTION_LOG\x10\x03*\xe7\x01\n" +
 	"\x06Reason\x12\x16\n" +
 	"\x12REASON_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vREASON_NONE\x10\x01\x12\x0f\n" +
@@ -535,7 +543,10 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\x0fREASON_CANCELED\x10\x05\x12\x13\n" +
 	"\x0fREASON_OVERLOAD\x10\x06\x12\x13\n" +
 	"\x0fREASON_OVERSIZE\x10\a\x12\x12\n" +
-	"\x0eREASON_SKIPPED\x10\b2Z\n" +
+	"\x0eREASON_SKIPPED\x10\b\x12\x14\n" +
+	"\x10REASON_NO_POLICY\x10\t\x12\x14\n" +
+	"\x10REASON_SUSPENDED\x10\n" +
+	"2Z\n" +
 	"\fCheckService\x12J\n" +
 	"\x05Check\x12\x1f.inkwall.engine.v1.CheckRequest\x1a .inkwall.engine.v1.CheckResponseB7Z5github.com/inkwall-dev/inkwall/api/engine/v1;enginev1b\x06proto3"
 

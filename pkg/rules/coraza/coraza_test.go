@@ -465,3 +465,94 @@ func TestScoreOnlyCustomRulesAreReported(t *testing.T) {
 		}
 	}
 }
+
+func TestExclusions(t *testing.T) {
+	const rule = `SecRule ARGS "@contains attack" "id:100001,phase:2,deny,status:403,log"`
+	type check struct {
+		uri     string
+		blocked bool
+	}
+	for _, tc := range []struct {
+		name      string
+		exclusion Exclusion
+		checks    []check
+	}{
+		{"everywhere", Exclusion{RuleIDs: []int{100001}}, []check{
+			{"/search?q=attack", false}, {"/other?p=attack", false},
+		}},
+		{"one argument", Exclusion{RuleIDs: []int{100001}, Argument: "q"}, []check{
+			{"/search?q=attack", false}, {"/search?p=attack", true},
+		}},
+		{"exact path", Exclusion{RuleIDs: []int{100001}, Path: "/search"}, []check{
+			{"/search?q=attack", false}, {"/search/x?q=attack", true}, {"/other?q=attack", true},
+		}},
+		{"path prefix", Exclusion{RuleIDs: []int{100001}, Path: "/api/*"}, []check{
+			{"/api/v1?q=attack", false}, {"/apix?q=attack", true}, {"/?q=attack", true},
+			// Paths a proxy would route outside /api/ don't get its
+			// exclusions, however they are spelled.
+			{"/api/../admin?q=attack", true},
+			{"/api/..%2fadmin?q=attack", true},
+			{"/api/%2e%2e/admin?q=attack", true},
+			{"/api//../admin?q=attack", true},
+			{"/api/./v1?q=attack", true},
+			{"/api/v1/..?q=attack", true},
+		}},
+		{"path and argument", Exclusion{RuleIDs: []int{100001}, Path: "/search", Argument: "q"}, []check{
+			{"/search?q=attack", false}, {"/search?p=attack", true}, {"/other?q=attack", true},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, err := New(Config{DisableCRS: true, Directives: rule, Exclusions: []Exclusion{tc.exclusion}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range tc.checks {
+				res, err := e.Evaluate(context.Background(), newRequest("GET", c.uri, nil, ""))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if res.Interrupted != c.blocked {
+					t.Errorf("%s: blocked=%v, want %v", c.uri, res.Interrupted, c.blocked)
+				}
+			}
+		})
+	}
+}
+
+func TestExclusionsWithCRS(t *testing.T) {
+	// The documented example: rule 942100 (libinjection SQLi) off for the
+	// search box only.
+	sqli := "?q=1%27%20OR%20%271%27%3D%271"
+	plain, err := New(Config{Exclusions: []Exclusion{{RuleIDs: []int{942100}, Path: "/search", Argument: "q"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := func(uri string) []int {
+		res, err := plain.Evaluate(context.Background(), newRequest("GET", uri, nil, ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.MatchedRuleIDs
+	}
+	if slices.Contains(ids("/search"+sqli), 942100) {
+		t.Error("942100 matched q on /search despite the exclusion")
+	}
+	if !slices.Contains(ids("/other"+sqli), 942100) {
+		t.Error("942100 no longer matches elsewhere")
+	}
+}
+
+func TestExclusionsRejectUnsafeValues(t *testing.T) {
+	for _, e := range []Exclusion{
+		{},
+		{RuleIDs: []int{0}},
+		{RuleIDs: []int{1}, Path: `/a" "id:1`},
+		{RuleIDs: []int{1}, Path: "relative"},
+		{RuleIDs: []int{1}, Argument: `q" "id:1`},
+		{RuleIDs: []int{1}, Argument: "a b"},
+	} {
+		if _, err := New(Config{DisableCRS: true, Exclusions: []Exclusion{e}}); err == nil {
+			t.Errorf("%+v: accepted", e)
+		}
+	}
+}

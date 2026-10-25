@@ -53,6 +53,11 @@ const (
 	ReasonOversize
 	// ReasonSkipped means the route is configured to skip inspection.
 	ReasonSkipped
+	// ReasonNoPolicy means no policy covers the request's route, so it was
+	// not inspected.
+	ReasonNoPolicy
+	// ReasonSuspended means inspection is suspended (the emergency switch).
+	ReasonSuspended
 )
 
 func (r Reason) String() string {
@@ -73,6 +78,10 @@ func (r Reason) String() string {
 		return "oversize"
 	case ReasonSkipped:
 		return "skipped"
+	case ReasonNoPolicy:
+		return "no-policy"
+	case ReasonSuspended:
+		return "suspended"
 	default:
 		return "unknown"
 	}

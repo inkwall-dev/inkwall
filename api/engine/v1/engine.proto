@@ -93,6 +93,10 @@ enum Reason {
   REASON_OVERSIZE = 7;
   // The route is configured to skip inspection.
   REASON_SKIPPED = 8;
+  // No policy covers the route, so the request was not inspected.
+  REASON_NO_POLICY = 9;
+  // Inspection is suspended (the emergency switch).
+  REASON_SUSPENDED = 10;
 }
 
 // CheckResponse is the verdict for one CheckRequest.

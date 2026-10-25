@@ -40,7 +40,7 @@ func TestMetricsRecordVerdicts(t *testing.T) {
 	p := pipeline.New(evaluator{res: rules.Result{Interrupted: true, Status: 403}}, pipeline.Config{
 		Mode: pipeline.ModeBlock, Observer: m,
 	})
-	m.WatchPipeline(p)
+	m.WatchAdmission(p.Admission())
 	p.Check(context.Background(), &request.Request{})
 	p.Check(context.Background(), &request.Request{})
 
