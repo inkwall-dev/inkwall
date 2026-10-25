@@ -34,6 +34,21 @@ operator:
     enabled: true
     minAvailable: 1
 
+# The engine the operator injects into proxy pods (Traefik) as a sidecar.
+engine:
+  image:
+    repository: ghcr.io/inkwall-dev/inkwall-engine
+    # Empty: the chart's appVersion. InkwallConfig.spec.engine.image
+    # overrides both.
+    tag: ""
+    pullPolicy: IfNotPresent
+
+injection:
+  # Inject the engine into proxy pods when they are created (a Pod webhook
+  # that fails open: proxy pods start even when the operator is down).
+  # Pods that already run are injected when they restart.
+  enabled: true
+
 serviceAccount:
   # Empty: the release's full name.
   name: ""

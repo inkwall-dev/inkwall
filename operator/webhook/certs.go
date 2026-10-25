@@ -24,7 +24,7 @@ import (
 // webhook configuration.
 //
 // +kubebuilder:rbac:groups="",namespace=inkwall-system,resources=secrets,verbs=get;list;watch;create;update;patch
-// +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations;mutatingwebhookconfigurations,verbs=get;list;watch;update;patch
 
 // CertOptions configures the webhook's serving certificate.
 type CertOptions struct {
@@ -40,6 +40,9 @@ type CertOptions struct {
 	// InjectWebhooks injects the CA into the validating webhook
 	// configuration; off when the webhook is disabled.
 	InjectWebhooks bool
+	// InjectPodWebhook also injects it into the mutating configuration of
+	// the Pod webhook.
+	InjectPodWebhook bool
 }
 
 // ServiceDNSNames returns the names of a Service, for CertOptions.DNSNames.
@@ -84,7 +87,10 @@ func AddCertRotator(mgr manager.Manager, o CertOptions, ready chan struct{}) err
 	}
 	var webhooks []rotator.WebhookInfo
 	if o.InjectWebhooks {
-		webhooks = []rotator.WebhookInfo{{Name: ValidatingConfigName, Type: rotator.Validating}}
+		webhooks = append(webhooks, rotator.WebhookInfo{Name: ValidatingConfigName, Type: rotator.Validating})
+		if o.InjectPodWebhook {
+			webhooks = append(webhooks, rotator.WebhookInfo{Name: MutatingConfigName, Type: rotator.Mutating})
+		}
 	}
 	return rotator.AddRotator(mgr, &rotator.CertRotator{
 		SecretKey:             o.Secret,

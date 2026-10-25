@@ -103,7 +103,7 @@ kind-up: ## Create the kind cluster and deploy the demo app behind the engine an
 
 .PHONY: kind-operator
 kind-operator: ## Build the operator image, install the Helm chart on the kind cluster and check the webhook
-	KIND_CLUSTER=$(KIND_CLUSTER) OPERATOR_IMAGE=$(OPERATOR_IMAGE) CHART=$(CHART) hack/kind/operator.sh
+	KIND_CLUSTER=$(KIND_CLUSTER) OPERATOR_IMAGE=$(OPERATOR_IMAGE) IMAGE_ENGINE=$(IMAGE) CHART=$(CHART) hack/kind/operator.sh
 
 .PHONY: kind-test
 kind-test: ## Send benign and attack requests to the kind demo and check verdicts

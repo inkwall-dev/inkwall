@@ -23,6 +23,7 @@ spec:
       port: 443
       targetPort: webhook
 {{- range (include "inkwall.generated" (dict "root" . "path" "files/webhook/manifests.yaml") | fromJsonArray) }}
+{{- if or (ne .kind "MutatingWebhookConfiguration") $.Values.injection.enabled }}
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: {{ .kind }}
@@ -42,6 +43,7 @@ webhooks:
   {{- $_ := set . "timeoutSeconds" $.Values.webhook.timeoutSeconds }}
   - {{ toYaml . | indent 4 | trim }}
   {{- end }}
+{{- end }}
 {{- end }}
 {{- if not $certManager }}
 ---

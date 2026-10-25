@@ -23,6 +23,7 @@ bundle, and serves it to the engines. Injecting the engine into the proxies is t
 | `PodDisruptionBudget` | When `operator.replicas` > 1 |
 | `ServiceAccount`, `ClusterRole`, `Role` and bindings | Rules generated from the operator's code; the `Role` covers the release namespace only |
 | `ValidatingWebhookConfiguration` `inkwall-operator-validating` | WAF kinds only, fails closed, 2 s timeout |
+| `MutatingWebhookConfiguration` `inkwall-operator-mutating` | Traefik pods only, at creation, fails open (`injection.enabled`) |
 | `Service` `inkwall-operator-webhook` | |
 | `Service` `inkwall-operator` | Bundle distribution to the engines, gRPC over TLS on port 9445 |
 | Webhook certificate | `Secret` filled by the operator, or a cert-manager `Certificate` |
@@ -52,3 +53,5 @@ the operator's generated manifests: don't edit `files/` by hand.
 | `webhook.certs.certManager.issuerRef` | a self-signed `Issuer` | |
 | `webhook.port`, `webhook.timeoutSeconds` | `9443`, `2` | |
 | `distribution.port` | `9445` | Port engines connect to |
+| `engine.image.repository`, `tag`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-engine`, the chart's `appVersion` | The engine injected into Traefik's pods; `InkwallConfig.spec.engine.image` overrides it |
+| `injection.enabled` | `true` | Inject the engine into Traefik pods when they are created |

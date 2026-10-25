@@ -15,6 +15,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -28,10 +29,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/controller"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
+	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/operator/internal/resolver"
 	"github.com/inkwall-dev/inkwall/operator/webhook"
 )
@@ -89,6 +93,12 @@ type Options struct {
 	// EngineReportInterval is how often replicas publish their engines and
 	// the leader updates Enforced; 0: 2s.
 	EngineReportInterval time.Duration
+
+	// Inject adds the engine to proxy pods (needs Webhooks and
+	// DistributionPort), with EngineImage unless InkwallConfig sets one.
+	Inject           bool
+	EngineImage      string
+	EnginePullPolicy corev1.PullPolicy
 }
 
 // NewScheme returns the types the operator reads and writes.
@@ -117,6 +127,10 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			// rules: neither is read cluster-wide.
 			&corev1.Secret{}:    {Namespaces: map[string]cache.Config{o.Namespace: {}}},
 			&corev1.ConfigMap{}: {Label: labels.SelectorFromSet(labels.Set{resolver.RulesLabel: "true"})},
+			// Only proxy pods, and RBAC in the operator's namespace.
+			&corev1.Pod{}:         {Label: integrations.PodSelector()},
+			&rbacv1.Role{}:        {Namespaces: map[string]cache.Config{o.Namespace: {}}},
+			&rbacv1.RoleBinding{}: {Namespaces: map[string]cache.Config{o.Namespace: {}}},
 		}},
 		Metrics:                 metricsserver.Options{BindAddress: o.MetricsAddr},
 		HealthProbeBindAddress:  o.ProbeAddr,
@@ -149,8 +163,27 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	if err != nil {
 		return nil, err
 	}
+	inject := o.Inject && o.Webhooks && o.DistributionPort != 0
+	var injector *webhook.PodInjector
+	if inject {
+		injector = &webhook.PodInjector{
+			Client:       mgr.GetClient(),
+			Decoder:      admission.NewDecoder(mgr.GetScheme()),
+			Image:        o.EngineImage,
+			PullPolicy:   o.EnginePullPolicy,
+			OperatorAddr: fmt.Sprintf("%s.%s.svc:%d", o.DistributionService, o.Namespace, o.DistributionPort),
+		}
+		if err := (&injection.Reconciler{
+			Client:     mgr.GetClient(),
+			APIReader:  mgr.GetAPIReader(),
+			Namespace:  o.Namespace,
+			CertSecret: o.WebhookSecret,
+		}).SetupWithManager(mgr); err != nil {
+			return nil, err
+		}
+	}
 	if o.Webhooks {
-		starter := &webhookStarter{mgr: mgr, ready: ready}
+		starter := &webhookStarter{mgr: mgr, ready: ready, inject: injector}
 		if err := mgr.Add(starter); err != nil {
 			return nil, err
 		}
@@ -203,10 +236,11 @@ func addCerts(mgr manager.Manager, o Options) (<-chan struct{}, error) {
 		return nil, err
 	}
 	err = webhook.AddCertRotator(mgr, webhook.CertOptions{
-		Secret:         secret,
-		CertDir:        o.WebhookCertDir,
-		DNSNames:       dns,
-		InjectWebhooks: o.Webhooks,
+		Secret:           secret,
+		CertDir:          o.WebhookCertDir,
+		DNSNames:         dns,
+		InjectWebhooks:   o.Webhooks,
+		InjectPodWebhook: o.Inject && o.DistributionPort != 0,
 	}, ready)
 	return ready, err
 }
@@ -273,6 +307,7 @@ func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}) erro
 // runs on every replica, leader or not: all of them serve the webhook.
 type webhookStarter struct {
 	mgr        manager.Manager
+	inject     *webhook.PodInjector
 	ready      <-chan struct{}
 	registered atomic.Bool
 }
@@ -283,7 +318,7 @@ func (w *webhookStarter) Start(ctx context.Context) error {
 	case <-ctx.Done():
 		return nil
 	}
-	if err := webhook.Setup(w.mgr); err != nil {
+	if err := webhook.Setup(w.mgr, w.inject); err != nil {
 		return fmt.Errorf("register webhooks: %w", err)
 	}
 	w.registered.Store(true)

@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
@@ -36,8 +37,12 @@ const ValidatingConfigName = "inkwall-operator-validating"
 // +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-clusterwafruleset,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=clusterwafrulesets,verbs=create;update,versions=v1alpha1,name=clusterwafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
 // +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafpolicy,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=wafpolicies,verbs=create;update,versions=v1alpha1,name=wafpolicies.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
 
-// Setup registers the validating webhooks with mgr's webhook server.
-func Setup(mgr manager.Manager) error {
+// Setup registers the validating webhooks with mgr's webhook server, and
+// the Pod webhook when inject is set.
+func Setup(mgr manager.Manager, inject *PodInjector) error {
+	if inject != nil {
+		mgr.GetWebhookServer().Register(InjectPath, &ctrlwebhook.Admission{Handler: inject})
+	}
 	if err := builder.WebhookManagedBy(mgr, &wafv1alpha1.WAFRuleSet{}).
 		WithValidator(specValidator[*wafv1alpha1.WAFRuleSet]{validateWAFRuleSet}).Complete(); err != nil {
 		return err
