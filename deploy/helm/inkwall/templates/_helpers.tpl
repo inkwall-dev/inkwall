@@ -43,6 +43,10 @@ app.kubernetes.io/component: operator
 {{- printf "%s:%s" .Values.operator.image.repository (default .Chart.AppVersion .Values.operator.image.tag) -}}
 {{- end -}}
 
+{{- define "inkwall.engine.image" -}}
+{{- printf "%s:%s" .Values.engine.image.repository (default .Chart.AppVersion .Values.engine.image.tag) -}}
+{{- end -}}
+
 {{/* The webhook Service, named in the serving certificate. */}}
 {{- define "inkwall.webhook.service" -}}
 {{- printf "%s-webhook" (include "inkwall.operator.name" .) | trunc 63 | trimSuffix "-" -}}

@@ -1,5 +1,35 @@
 ---
 apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: inkwall-operator-mutating
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-v1-pod
+  failurePolicy: Ignore
+  name: pods.waf.inkwall.dev
+  objectSelector:
+    matchLabels:
+      app.kubernetes.io/name: traefik
+  reinvocationPolicy: Never
+  rules:
+  - apiGroups:
+    - ""
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    resources:
+    - pods
+  sideEffects: None
+  timeoutSeconds: 2
+---
+apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
   name: inkwall-operator-validating

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
@@ -65,10 +66,19 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fs.StringVar(&o.WebhookService, "webhook-service", "inkwall-operator-webhook", "Service the API server reaches the webhook through, named in the certificate")
 	fs.StringVar(&o.WebhookSecret, "webhook-cert-secret", "inkwall-operator-webhook-tls", "Secret, in --namespace, that holds the rotated certificate (shared with the distribution server)")
 	fs.DurationVar(&o.shutdownDelay, "shutdown-delay", 5*time.Second, "on SIGTERM, keep serving the webhook and the bundles this long, not ready, so Kubernetes stops routing to the pod before it stops; keep it below the pod's termination grace period")
+	fs.BoolVar(&o.Inject, "inject", true, "inject the engine into proxy pods (Traefik) as a sidecar; needs the webhooks and the distribution server")
+	fs.StringVar(&o.EngineImage, "engine-image", "ghcr.io/inkwall-dev/inkwall-engine:latest", "engine image injected into proxy pods, unless InkwallConfig.spec.engine.image sets one")
+	pullPolicy := fs.String("engine-image-pull-policy", "IfNotPresent", "pull policy of the injected engine: Always, IfNotPresent or Never")
 	fs.IntVar(&o.DistributionPort, "distribution-port", 9445, "port of the gRPC server that sends bundles to the engines, over TLS with the webhook's certificate (0 disables)")
 	fs.StringVar(&o.DistributionService, "distribution-service", "inkwall-operator", "Service engines reach the distribution server through, named in the certificate")
 	if err := fs.Parse(args); err != nil {
 		return o, err
+	}
+	switch p := corev1.PullPolicy(*pullPolicy); p {
+	case corev1.PullAlways, corev1.PullIfNotPresent, corev1.PullNever:
+		o.EnginePullPolicy = p
+	default:
+		return o, fmt.Errorf("--engine-image-pull-policy must be Always, IfNotPresent or Never, not %q", *pullPolicy)
 	}
 	if fs.NArg() > 0 {
 		return o, fmt.Errorf("unexpected arguments: %v", fs.Args())

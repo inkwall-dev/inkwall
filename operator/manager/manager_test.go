@@ -106,6 +106,9 @@ func startOperator(t *testing.T) (context.Context, client.Client, *warnings) {
 		WebhookDNSNames: []string{"localhost"},
 
 		DistributionPort:     distPort,
+		Inject:               true,
+		EngineImage:          "inkwall-engine:test",
+		EnginePullPolicy:     corev1.PullNever,
 		Replica:              "operator-0",
 		EngineReportInterval: 200 * time.Millisecond,
 	})
@@ -168,6 +171,7 @@ func TestOperator(t *testing.T) {
 	t.Run("bundles", func(t *testing.T) { testBundles(ctx, t, c) })
 	t.Run("distribution", func(t *testing.T) { testDistribution(ctx, t, c) })
 	t.Run("engine", func(t *testing.T) { testEngine(ctx, t, c) })
+	t.Run("injection", func(t *testing.T) { testInjection(ctx, t, c) })
 }
 
 // testWebhook checks the webhook as deployed: the operator creates the

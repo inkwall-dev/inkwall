@@ -12,6 +12,7 @@ cd "$(dirname "$0")/../.."
 
 CLUSTER=${KIND_CLUSTER:-inkwall}
 IMAGE=${OPERATOR_IMAGE:-inkwall-operator:dev}
+ENGINE_IMAGE=${IMAGE_ENGINE:-inkwall-engine:dev}
 CHART=${CHART:-deploy/helm/inkwall}
 NAMESPACE=inkwall-system
 KUBECTL=(kubectl --context "kind-$CLUSTER")
@@ -22,7 +23,9 @@ if ! kind get clusters | grep -qx "$CLUSTER"; then
 fi
 
 docker build --target operator -t "$IMAGE" .
-kind load docker-image "$IMAGE" --name "$CLUSTER"
+# The engine image, injected into proxy pods.
+docker build --target engine -t "$ENGINE_IMAGE" .
+kind load docker-image "$IMAGE" "$ENGINE_IMAGE" --name "$CLUSTER"
 
 existed=false
 "${KUBECTL[@]}" -n "$NAMESPACE" get deployment/inkwall-operator >/dev/null 2>&1 && existed=true
@@ -30,7 +33,10 @@ helm --kube-context "kind-$CLUSTER" upgrade --install inkwall "$CHART" \
   --namespace "$NAMESPACE" --create-namespace \
   --set operator.image.repository="${IMAGE%:*}" \
   --set operator.image.tag="${IMAGE##*:}" \
-  --set operator.image.pullPolicy=Never
+  --set operator.image.pullPolicy=Never \
+  --set engine.image.repository="${ENGINE_IMAGE%:*}" \
+  --set engine.image.tag="${ENGINE_IMAGE##*:}" \
+  --set engine.image.pullPolicy=Never
 # Pick up a rebuilt image with the same tag.
 if $existed; then
   "${KUBECTL[@]}" -n "$NAMESPACE" rollout restart deployment/inkwall-operator
@@ -124,6 +130,52 @@ fi
 if $created_demo; then
   "${KUBECTL[@]}" delete namespace inkwall-demo --wait=false >/dev/null
 fi
+
+# Injection on a real kubelet: a pod labeled like Traefik's gets the engine
+# as a native sidecar, which starts with its token and trust ConfigMap and
+# connects to the operator.
+CHECK_NS=inkwall-inject-check
+"${KUBECTL[@]}" apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $CHECK_NS
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: proxy
+  namespace: $CHECK_NS
+  labels:
+    app.kubernetes.io/name: traefik
+spec:
+  containers:
+    - name: proxy
+      image: traefik/whoami:v1.10.3
+YAML
+if "${KUBECTL[@]}" -n "$CHECK_NS" wait pod/proxy --for=condition=Ready --timeout=120s >/dev/null 2>&1 &&
+  [[ $("${KUBECTL[@]}" -n "$CHECK_NS" get pod proxy -o jsonpath='{.spec.initContainers[0].name}') == inkwall-engine ]]; then
+  ok "a Traefik pod starts with the injected engine"
+else
+  fail "the injected engine didn't start"
+  "${KUBECTL[@]}" -n "$CHECK_NS" describe pod proxy | tail -20 || true
+fi
+connected=false
+for _ in $(seq 30); do
+  if "${KUBECTL[@]}" -n "$NAMESPACE" get configmap -l waf.inkwall.dev/engines=true -o jsonpath='{.items[*].data.engines\.json}' |
+    grep -q "\"podName\":\"proxy\""; then
+    connected=true
+    break
+  fi
+  sleep 1
+done
+if $connected; then
+  ok "the injected engine is connected to the operator"
+else
+  fail "the injected engine isn't connected to the operator"
+  "${KUBECTL[@]}" -n "$CHECK_NS" logs proxy -c inkwall-engine --tail=20 || true
+fi
+"${KUBECTL[@]}" delete namespace "$CHECK_NS" --wait=false >/dev/null
 
 if [[ $failures -gt 0 ]]; then
   echo "$failures check(s) failed"

@@ -11,7 +11,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+
+	admissionv1 "k8s.io/api/admissionregistration/v1"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/yaml"
 
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -28,6 +33,53 @@ func CRDDir() string { return filepath.Join(configDir(), "crd", "bases") }
 
 // SamplesDir is the directory of the sample objects.
 func SamplesDir() string { return filepath.Join(configDir(), "samples") }
+
+// testWebhookTimeout replaces the webhooks' 2s timeout in tests: under the
+// race detector, compiling the Core Rule Set takes several times longer,
+// and a busy CI runner can push the first compile past 2s.
+const testWebhookTimeout = 10
+
+// webhooks reads the generated webhook configurations, with the test
+// timeout.
+func webhooks() ([]*admissionv1.MutatingWebhookConfiguration, []*admissionv1.ValidatingWebhookConfiguration, error) {
+	raw, err := os.ReadFile(filepath.Join(configDir(), "webhook", "manifests.yaml"))
+	if err != nil {
+		return nil, nil, err
+	}
+	var (
+		mutating   []*admissionv1.MutatingWebhookConfiguration
+		validating []*admissionv1.ValidatingWebhookConfiguration
+	)
+	for _, doc := range strings.Split(string(raw), "\n---\n") {
+		var meta struct {
+			Kind string `json:"kind"`
+		}
+		if err := yaml.Unmarshal([]byte(doc), &meta); err != nil {
+			return nil, nil, err
+		}
+		switch meta.Kind {
+		case "MutatingWebhookConfiguration":
+			var c admissionv1.MutatingWebhookConfiguration
+			if err := yaml.Unmarshal([]byte(doc), &c); err != nil {
+				return nil, nil, err
+			}
+			for i := range c.Webhooks {
+				c.Webhooks[i].TimeoutSeconds = ptr.To(int32(testWebhookTimeout))
+			}
+			mutating = append(mutating, &c)
+		case "ValidatingWebhookConfiguration":
+			var c admissionv1.ValidatingWebhookConfiguration
+			if err := yaml.Unmarshal([]byte(doc), &c); err != nil {
+				return nil, nil, err
+			}
+			for i := range c.Webhooks {
+				c.Webhooks[i].TimeoutSeconds = ptr.To(int32(testWebhookTimeout))
+			}
+			validating = append(validating, &c)
+		}
+	}
+	return mutating, validating, nil
+}
 
 // Env is a running API server.
 type Env struct {
@@ -57,8 +109,13 @@ func Start(o Options) (*Env, func(), error) {
 		ErrorIfCRDPathMissing: true,
 	}
 	if o.Webhooks {
+		mutating, validating, err := webhooks()
+		if err != nil {
+			return nil, func() {}, err
+		}
 		env.WebhookInstallOptions = envtest.WebhookInstallOptions{
-			Paths: []string{filepath.Join(configDir(), "webhook")},
+			MutatingWebhooks:   mutating,
+			ValidatingWebhooks: validating,
 			// A name, not an IP, in the webhook URLs, so a certificate
 			// issued for "localhost" is valid.
 			LocalServingHostExternalName: "localhost",

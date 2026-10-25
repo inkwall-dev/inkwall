@@ -77,6 +77,15 @@ kubectl get wafpolicy web -n web -o jsonpath='{.status.conditions[?(@.type=="Enf
 # 3/3 engines on bundle 42
 ```
 
+## Injection
+
+Traefik pods (`app.kubernetes.io/name=traefik`) created while the operator runs get the engine as a
+native sidecar, in bundle mode, connected to the operator; the operator keeps the `inkwall-trust`
+ConfigMap in their namespace and grants their ServiceAccount read access to the bundle. Pods that
+already ran are injected when they restart (`kubectl rollout restart`). Annotate a pod
+`waf.inkwall.dev/inject: "false"` to keep the engine out; `--inject=false` (chart:
+`injection.enabled`) turns injection off. Wiring Traefik's routes to the engine comes next (#27).
+
 ## Changing the API
 
 1. Edit the types in `api/v1alpha1/`. Validation is written as kubebuilder markers: OpenAPI

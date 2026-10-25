@@ -103,7 +103,7 @@ kind-up: ## Create the kind cluster and deploy the demo app behind the engine an
 
 .PHONY: kind-operator
 kind-operator: ## Build the operator image, install the Helm chart on the kind cluster and check the webhook
-	KIND_CLUSTER=$(KIND_CLUSTER) OPERATOR_IMAGE=$(OPERATOR_IMAGE) CHART=$(CHART) hack/kind/operator.sh
+	KIND_CLUSTER=$(KIND_CLUSTER) OPERATOR_IMAGE=$(OPERATOR_IMAGE) IMAGE_ENGINE=$(IMAGE) CHART=$(CHART) hack/kind/operator.sh
 
 .PHONY: kind-e2e
 kind-e2e: kind-operator ## End-to-end test on kind: a WAFPolicy is enforced by an engine in bundle mode (installs the operator first)

@@ -234,6 +234,25 @@ opt-in drift) and respects PodDisruptionBudgets.
 **Engine upgrades** follow the same path: a new engine image marks instances `EngineOutdated` and
 restarts only on opt-in.
 
+As built (`operator/internal/injection`, `operator/webhook/inject.go`, Traefik so far):
+
+- The Pod webhook (`inkwall-operator-mutating`) sees only pods labeled
+  `app.kubernetes.io/name=traefik`, at creation, and fails open (`Ignore`) for now: a proxy pod
+  always starts; switching to `Fail` while a policy is in block mode is a follow-up. A selector from
+  `InkwallConfig.spec.integrations` is not applied to the webhook yet.
+- The engine is the first init container, with `restartPolicy: Always` (native sidecar), a startup
+  probe so the proxy starts once it serves, `forward-auth` in bundle mode, a projected token for the
+  audience `inkwall-operator` and the trust ConfigMap in one read-only directory, an `emptyDir` for
+  the bundle cache, non-root with a read-only root filesystem. Image and resources come from
+  `InkwallConfig.spec.engine`, else the operator's `--engine-image`. A pod annotated
+  `waf.inkwall.dev/inject: "false"`, or that already has an `inkwall-engine` container, is left alone.
+- The injection controller (leader) keeps an `inkwall-trust` ConfigMap (`ca.crt`, `ed25519.pub`)
+  in every namespace with proxy pods, updated when the certificate or key changes and removed with
+  the last proxy pod, and one `Role` + `RoleBinding` (`inkwall-bundle-reader`) in the operator's
+  namespace for every proxy pod's ServiceAccount. Writing the ConfigMap needs ConfigMap write access
+  in any namespace; the operator only deletes ConfigMaps it labeled.
+- Pods that ran before the operator are injected when they restart (`rollout: Manual`).
+
 ### 4.4 Wiring controller
 
 Renders and applies the proxy-side objects that send traffic to the engine.
