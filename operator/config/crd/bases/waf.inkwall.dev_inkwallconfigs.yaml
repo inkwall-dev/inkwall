@@ -89,6 +89,19 @@ spec:
               engine:
                 description: Engine configures the engine sidecars the operator injects.
                 properties:
+                  bootstrapMode:
+                    default: AllowAll
+                    description: |-
+                      BootstrapMode is what a new engine does with requests when it has no
+                      bundle yet: no cached bundle, the bundle Secret unreadable and the
+                      operator unreachable. It waits up to 10 seconds for one before its
+                      proxy takes traffic, then allows (AllowAll) or rejects (DenyAll) the
+                      requests until a bundle arrives. Applies to pods injected from then
+                      on.
+                    enum:
+                    - AllowAll
+                    - DenyAll
+                    type: string
                   image:
                     description: |-
                       Image is the engine image. Empty means the image released with this

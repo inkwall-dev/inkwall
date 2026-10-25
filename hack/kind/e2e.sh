@@ -144,6 +144,17 @@ echo "== operator down"
 eventually "operator stopped" bash -c "[[ -z \$(${KUBECTL[*]} -n $OPERATOR_NS get pods -l app.kubernetes.io/component=operator -o name) ]]"
 check "the engine still blocks without the operator" status_is 403 "$SQLI"
 check "benign traffic unaffected" status_is 200 /products/42
+# A new pod, with no cached bundle, while the operator is down: it reads the
+# bundle Secret (#40).
+"${KUBECTL[@]}" -n "$NS" rollout restart deployment/app >/dev/null
+"${KUBECTL[@]}" -n "$NS" rollout status deployment/app --timeout=120s >/dev/null
+eventually "the old engine pod is gone" bash -c "[[ \$(${KUBECTL[*]} -n $NS get pods -l app=e2e --no-headers | wc -l) == 1 ]]"
+kill "$pf" 2>/dev/null || true
+"${KUBECTL[@]}" -n "$NS" port-forward svc/app "$PORT:8480" >/dev/null 2>&1 &
+pf=$!
+eventually "a new engine pod blocks without the operator (bundle Secret)" status_is 403 "$SQLI"
+secret_logged() { "${KUBECTL[@]}" -n "$NS" logs deployment/app -c inkwall-engine | grep -q "bundle applied from the Secret"; }
+check "it took the bundle from the Secret" secret_logged
 "${KUBECTL[@]}" -n "$OPERATOR_NS" scale deployment/inkwall-operator --replicas=2 >/dev/null
 "${KUBECTL[@]}" -n "$OPERATOR_NS" rollout status deployment/inkwall-operator --timeout=180s >/dev/null
 eventually "Enforced again once the operator is back" enforced_by_all

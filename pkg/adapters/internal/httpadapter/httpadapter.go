@@ -91,8 +91,12 @@ func PeerAddr(remoteAddr string) netip.Addr {
 // error, overload). Client cancellations and requests uninspected by
 // configuration (a skipped route, no policy for the route, inspection
 // suspended) are not events: they are counted in the metrics, and logging
-// each would flood the logs.
+// each would flood the logs. Neither are the requests an engine denies
+// before it has a policy bundle (bootstrap deny): the engine logs that once.
 func IsEvent(v pipeline.Verdict) bool {
+	if v.Reason == pipeline.ReasonNoPolicy {
+		return false
+	}
 	if v.Action != pipeline.ActionAllow {
 		return true
 	}

@@ -74,7 +74,7 @@ field to `v1alpha1` later is compatible but removing one is not. Not in the API 
 `WAFIPList` / `ClusterWAFIPList` and `WAFPolicy.spec.ipLists` (with the T1 IP list tier),
 `spec.rateLimits` (rate limiting), `spec.response` (response inspection), the
 `BlockHighConfidence` mode, `body.contentTypes`, the `InspectPrefix` oversize action,
-`InkwallConfig.spec.events` (event export), `engine.bootstrapMode`, and `WAFPolicyDefault`.
+`InkwallConfig.spec.events` (event export), and `WAFPolicyDefault`.
 
 ### 3.1 Validation
 
@@ -357,6 +357,10 @@ As built (`operator/internal/resolver`, Ingress targets so far):
 
 The bundle object doubles as the **cold-start source**: an engine that can't reach the operator
 loads it from the Kubernetes API (read-only RBAC on that one object) or from its on-disk cache.
+As built: the cache first; without one, the Secret (`pkg/agent`, `--bundle-secret`), read with a
+second projected token for the API server's audience and the namespace's `kube-root-ca.crt`, both
+in the injected volume. The bundle is verified like the operator's, so the Secret is trusted no
+more than the stream.
 
 As built (`operator/internal/bundle`): the bundle Secret `inkwall-bundle` holds the gzip-compressed
 `SignedBundle` and the public key; the key is generated on first use into

@@ -33,6 +33,7 @@ import (
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
+	"github.com/inkwall-dev/inkwall/operator/internal/bundle"
 	"github.com/inkwall-dev/inkwall/operator/internal/controller"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
@@ -172,6 +173,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			Image:        o.EngineImage,
 			PullPolicy:   o.EnginePullPolicy,
 			OperatorAddr: fmt.Sprintf("%s.%s.svc:%d", o.DistributionService, o.Namespace, o.DistributionPort),
+			BundleSecret: o.Namespace + "/" + bundle.BundleSecret,
 		}
 		if err := (&injection.Reconciler{
 			Client:     mgr.GetClient(),

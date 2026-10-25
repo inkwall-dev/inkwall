@@ -48,6 +48,11 @@ type Sidecar struct {
 	Resources *corev1.ResourceRequirements
 	// OperatorAddr is the distribution server, host:port.
 	OperatorAddr string
+	// BundleSecret is the bundle Secret, namespace/name, that a new engine
+	// reads when the operator is unreachable.
+	BundleSecret string
+	// DenyBeforeBundle rejects requests until the engine has a bundle.
+	DenyBeforeBundle bool
 	// Args are the adapter's command and its own flags, e.g.
 	// ["forward-auth"].
 	Args []string
@@ -80,6 +85,28 @@ func Inject(pod *corev1.Pod, s Sidecar) bool {
 		}
 	}
 
+	args := append(slices.Clone(s.Args),
+		"--operator="+s.OperatorAddr,
+		"--operator-ca="+secretsDir+"/ca.crt",
+		"--operator-token="+secretsDir+"/token",
+		"--bundle-key="+secretsDir+"/ed25519.pub",
+		"--bundle-cache="+cacheDir+"/bundle.pb",
+		fmt.Sprintf("--admin-listen=:%d", adminPort),
+		// The proxy is the engine's peer, on the loopback; its
+		// X-Forwarded-For carries the client.
+		"--trusted-proxies=127.0.0.1/32,::1/128",
+	)
+	if s.BundleSecret != "" {
+		args = append(args,
+			"--bundle-secret="+s.BundleSecret,
+			"--kube-token="+secretsDir+"/kube-token",
+			"--kube-ca="+secretsDir+"/kube-ca.crt",
+		)
+	}
+	if s.DenyBeforeBundle {
+		args = append(args, "--bootstrap=deny")
+	}
+
 	resources := defaultResources()
 	if s.Resources != nil {
 		resources = *s.Resources
@@ -95,17 +122,7 @@ func Inject(pod *corev1.Pod, s Sidecar) bool {
 		Name:            ContainerName,
 		Image:           s.Image,
 		ImagePullPolicy: s.PullPolicy,
-		Args: append(slices.Clone(s.Args),
-			"--operator="+s.OperatorAddr,
-			"--operator-ca="+secretsDir+"/ca.crt",
-			"--operator-token="+secretsDir+"/token",
-			"--bundle-key="+secretsDir+"/ed25519.pub",
-			"--bundle-cache="+cacheDir+"/bundle.pb",
-			fmt.Sprintf("--admin-listen=:%d", adminPort),
-			// The proxy is the engine's peer, on the loopback; its
-			// X-Forwarded-For carries the client.
-			"--trusted-proxies=127.0.0.1/32,::1/128",
-		),
+		Args:            args,
 		Env: []corev1.EnvVar{
 			fieldEnv("POD_NAME", "metadata.name"),
 			fieldEnv("POD_NAMESPACE", "metadata.namespace"),
@@ -142,6 +159,18 @@ func Inject(pod *corev1.Pod, s Sidecar) bool {
 					Audience: distribution.Audience, ExpirationSeconds: ptr.To(int64(3600)), Path: "token",
 				}},
 				{ConfigMap: &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: TrustConfigMap}}},
+				// For the bundle Secret: a token for the API server's own
+				// audience, and its CA (kube-root-ca.crt is in every
+				// namespace). The proxy's own token mount, if any, isn't
+				// the engine's: webhooks run after the ServiceAccount
+				// admission plugin mounts it.
+				{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+					ExpirationSeconds: ptr.To(int64(3600)), Path: "kube-token",
+				}},
+				{ConfigMap: &corev1.ConfigMapProjection{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "kube-root-ca.crt"},
+					Items:                []corev1.KeyToPath{{Key: "ca.crt", Path: "kube-ca.crt"}},
+				}},
 			},
 		}}},
 		corev1.Volume{Name: cacheVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},

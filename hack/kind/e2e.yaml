@@ -6,7 +6,8 @@
 # what injection (#27) will set up for a proxy's pods: a ServiceAccount
 # allowed to read the bundle Secret, a projected token for the operator's
 # audience, and the trust ConfigMap (inkwall-trust, created by e2e.sh) with
-# the operator's CA and the bundle public key.
+# the operator's CA and the bundle public key; and, to read the bundle Secret
+# when the operator is down, a token for the API server and its CA.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -73,6 +74,8 @@ spec:
             - --upstream=http://127.0.0.1:8080
             - --operator=inkwall-operator.inkwall-system.svc:9445
             - --bundle-cache=/var/run/inkwall/bundle.pb
+            # Read when the engine has no bundle and the operator is down.
+            - --bundle-secret=inkwall-system/inkwall-bundle
           env:
             - name: POD_NAME
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
@@ -105,6 +108,13 @@ spec:
                   path: token
               - configMap:
                   name: inkwall-trust
+              # For the bundle Secret: a token for the API server, its CA.
+              - serviceAccountToken:
+                  expirationSeconds: 3600
+                  path: kube-token
+              - configMap:
+                  name: kube-root-ca.crt
+                  items: [{key: ca.crt, path: kube-ca.crt}]
         - name: cache
           emptyDir: {}
         - name: tmp

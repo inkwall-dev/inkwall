@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	"github.com/inkwall-dev/inkwall/pkg/agent"
 )
 
 func content(ids ...string) *bundlev1.Bundle {
@@ -28,6 +29,13 @@ func content(ids ...string) *bundlev1.Bundle {
 		b.Policies = append(b.Policies, &bundlev1.Policy{Id: id, Mode: bundlev1.Mode_MODE_BLOCK})
 	}
 	return b
+}
+
+// Engines read the bundle Secret directly when the operator is down.
+func TestSecretKeyMatchesEngines(t *testing.T) {
+	if BundleKey != agent.SecretBundleKey {
+		t.Fatalf("the operator writes %q, engines read %q", BundleKey, agent.SecretBundleKey)
+	}
 }
 
 func TestNext(t *testing.T) {

@@ -47,6 +47,7 @@ func injector(t *testing.T, objs ...client.Object) *PodInjector {
 		Image:        "ghcr.io/inkwall-dev/inkwall-engine:0.1.0",
 		PullPolicy:   corev1.PullIfNotPresent,
 		OperatorAddr: "inkwall-operator.inkwall-system.svc:9445",
+		BundleSecret: "inkwall-system/inkwall-bundle",
 	}
 }
 
@@ -64,7 +65,7 @@ func TestPodInjector(t *testing.T) {
 		t.Fatalf("a Traefik pod: allowed=%v, %d patches", resp.Allowed, len(resp.Patches))
 	}
 	p := patched(resp)
-	for _, want := range []string{"inkwall-engine", "ghcr.io/inkwall-dev/inkwall-engine:0.1.0", "--operator=inkwall-operator.inkwall-system.svc:9445", "forward-auth", "inkwall-trust"} {
+	for _, want := range []string{"inkwall-engine", "ghcr.io/inkwall-dev/inkwall-engine:0.1.0", "--operator=inkwall-operator.inkwall-system.svc:9445", "forward-auth", "inkwall-trust", "--bundle-secret=inkwall-system/inkwall-bundle"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("patch lacks %s", want)
 		}
@@ -84,5 +85,15 @@ func TestPodInjector(t *testing.T) {
 	resp = injector(t, cfg).Handle(ctx, podRequest(t, traefik))
 	if !strings.Contains(patched(resp), "registry.example.com/inkwall-engine:pinned") {
 		t.Error("InkwallConfig's image not used")
+	}
+	if strings.Contains(p, "--bootstrap=deny") {
+		t.Error("bootstrap deny without InkwallConfig")
+	}
+
+	// And the bootstrap mode.
+	cfg.Spec.Engine.BootstrapMode = wafv1alpha1.BootstrapDenyAll
+	resp = injector(t, cfg).Handle(ctx, podRequest(t, traefik))
+	if !strings.Contains(patched(resp), "--bootstrap=deny") {
+		t.Error("InkwallConfig's bootstrap mode not used")
 	}
 }

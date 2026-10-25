@@ -41,6 +41,9 @@ func TestIsEvent(t *testing.T) {
 		// Uninspected by configuration: counted, not logged per request.
 		{pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy}, false},
 		{pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonSuspended}, false},
+		// Denied before the first bundle (bootstrap deny): logged once by
+		// the engine, not per request.
+		{pipeline.Verdict{Action: pipeline.ActionDeny, Status: 503, Reason: pipeline.ReasonNoPolicy}, false},
 	} {
 		if got := IsEvent(tc.v); got != tc.want {
 			t.Errorf("%s/%s: IsEvent = %v, want %v", tc.v.Action, tc.v.Reason, got, tc.want)
