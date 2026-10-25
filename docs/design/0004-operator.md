@@ -245,8 +245,13 @@ As built (`operator/internal/injection`, `operator/webhook/inject.go`, Traefik s
   `waf.inkwall.dev/inject: "false"` are excluded by the `objectSelector`, so they start even while
   the webhook fails closed and the operator is down: the documented way out when the proxy must
   scale before the operator returns (the chart's README). The annotation of that name also opts a
-  pod out, but only while the webhook answers. A selector from
-  `InkwallConfig.spec.integrations` is not applied to the webhook yet.
+  pod out, but only while the webhook answers.
+- `InkwallConfig.spec.integrations[].selector` replaces Traefik's default label (it must not be
+  empty). The operator reads it at startup: its cache of proxy pods, the webhook handler, the
+  injection and wiring controllers and the webhook's `objectSelector` all use it. When it changes,
+  each replica restarts after a random delay of up to 30 s, so they don't restart together; pods
+  already running are injected when they restart. Selectors for controllers Inkwall doesn't
+  integrate yet are ignored (logged).
 - The engine is the first init container, with `restartPolicy: Always` (native sidecar), a startup
   probe so the proxy starts once it serves, `forward-auth` in bundle mode, a projected token for the
   audience `inkwall-operator` and the trust ConfigMap in one read-only directory, an `emptyDir` for

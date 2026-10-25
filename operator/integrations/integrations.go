@@ -16,8 +16,9 @@ type Integration struct {
 	Name string
 	// Controller is the IngressClass spec.controller of the proxy.
 	Controller string
-	// PodSelector matches the proxy's data-plane pods (the labels its
-	// official Helm chart sets).
+	// PodSelector matches the proxy's data-plane pods by default (the
+	// labels its official Helm chart sets); InkwallConfig can override it
+	// (Selectors).
 	PodSelector labels.Set
 	// Adapter is the engine command and its flags for this proxy.
 	Adapter []string
@@ -35,16 +36,6 @@ var Traefik = Integration{
 // All are the known integrations.
 var All = []Integration{Traefik}
 
-// ForPod returns the integration whose pods carry podLabels, or nil.
-func ForPod(podLabels map[string]string) *Integration {
-	for i := range All {
-		if labels.SelectorFromSet(All[i].PodSelector).Matches(labels.Set(podLabels)) {
-			return &All[i]
-		}
-	}
-	return nil
-}
-
 // ForController returns the integration of an IngressClass controller, or
 // nil when Inkwall doesn't know it.
 func ForController(controller string) *Integration {
@@ -56,9 +47,11 @@ func ForController(controller string) *Integration {
 	return nil
 }
 
-// PodSelector matches every known integration's pods, for the operator's
-// cache and the Pod webhook's objectSelector.
-func PodSelector() labels.Selector {
-	// One label key today; a set-based selector when integrations differ.
-	return labels.SelectorFromSet(Traefik.PodSelector)
+func byName(name string) *Integration {
+	for i := range All {
+		if All[i].Name == name {
+			return &All[i]
+		}
+	}
+	return nil
 }

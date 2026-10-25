@@ -52,6 +52,8 @@ type PodInjector struct {
 	PullPolicy corev1.PullPolicy
 	// OperatorAddr is the distribution server engines connect to.
 	OperatorAddr string
+	// Integrations recognise proxy pods; nil: the defaults.
+	Integrations *integrations.Selectors
 	// BundleSecret is the bundle Secret, namespace/name, engines read when
 	// the operator is unreachable.
 	BundleSecret string
@@ -65,7 +67,7 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 	if err := p.Decoder.Decode(req, &pod); err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
 	}
-	integ := integrations.ForPod(pod.Labels)
+	integ := p.Integrations.ForPod(pod.Labels)
 	if integ == nil {
 		return admission.Allowed("not a proxy pod")
 	}

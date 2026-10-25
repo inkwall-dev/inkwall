@@ -209,6 +209,9 @@ func TestInkwallConfigValidation(t *testing.T) {
 		{name: "relative socket dir", doc: inkwallConfig("default", "  engine: {socketDir: run/inkwall}\n"), wantErr: "socketDir must be an absolute path"},
 		{name: "unknown adapter", doc: inkwallConfig("default", "  integrations: [{controller: traefik, adapter: Plugin}]\n"), wantErr: `Unsupported value: "Plugin"`},
 		{name: "integration listed twice", doc: inkwallConfig("default", "  integrations: [{controller: traefik}, {controller: traefik}]\n"), wantErr: "Duplicate value"},
+		{name: "empty selector", doc: inkwallConfig("default", "  integrations: [{controller: traefik, selector: {}}]\n"), wantErr: "selector must not be empty"},
+		{name: "selector with empty labels", doc: inkwallConfig("default", "  integrations: [{controller: traefik, selector: {matchLabels: {}}}]\n"), wantErr: "selector must not be empty"},
+		{name: "selector by expression", doc: inkwallConfig("default", "  integrations: [{controller: traefik, selector: {matchExpressions: [{key: app, operator: In, values: [edge]}]}}]\n")},
 	})
 }
 

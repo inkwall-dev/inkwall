@@ -136,7 +136,10 @@ type IntegrationSpec struct {
 	Controller string `json:"controller"`
 
 	// Selector matches the controller's proxy pods, when they don't carry
-	// the controller's default labels.
+	// the controller's default labels. It must select by something (an
+	// empty selector would match every pod). The operator restarts to
+	// apply a change; pods already running are injected when they restart.
+	// +kubebuilder:validation:XValidation:rule="(has(self.matchLabels) && size(self.matchLabels) > 0) || (has(self.matchExpressions) && size(self.matchExpressions) > 0)",message="selector must not be empty: it would select every pod"
 	// +optional
 	Selector *metav1.LabelSelector `json:"selector,omitempty"`
 

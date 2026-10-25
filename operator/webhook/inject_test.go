@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 )
 
 func podRequest(t *testing.T, labels map[string]string) admission.Request {
@@ -69,6 +70,20 @@ func TestPodInjector(t *testing.T) {
 		if !strings.Contains(p, want) {
 			t.Errorf("patch lacks %s", want)
 		}
+	}
+
+	// Traefik deployed with other labels, named in InkwallConfig.
+	custom, _, err := integrations.FromConfig([]wafv1alpha1.IntegrationSpec{{Controller: "traefik", Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "edge"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inj := injector(t)
+	inj.Integrations = custom
+	if resp := inj.Handle(ctx, podRequest(t, map[string]string{"app": "edge"})); len(resp.Patches) == 0 {
+		t.Error("a pod of the custom selector was not injected")
+	}
+	if resp := inj.Handle(ctx, podRequest(t, traefik)); len(resp.Patches) != 0 {
+		t.Error("the default labels still match with a custom selector")
 	}
 
 	// Another pod (the objectSelector would normally keep it away).

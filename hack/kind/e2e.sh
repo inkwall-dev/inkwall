@@ -153,15 +153,17 @@ pod_webhook_policy() {
 }
 fails() { [[ $(pod_webhook_policy) == "$1" ]]; }
 eventually "the Pod webhook fails closed (a policy blocks)" fails Fail
-# proxy_pod [EXTRA_LABELS]: creates a Traefik pod (dry run).
+# proxy_pod [EXTRA_LABELS [KUBECTL_ARGS...]]: creates a Traefik pod (dry run).
 proxy_pod() {
-  "${KUBECTL[@]}" apply --dry-run=server -f - <<YAML
+  local extra=${1:-}
+  shift || true
+  "${KUBECTL[@]}" apply --dry-run=server "$@" -f - <<YAML
 apiVersion: v1
 kind: Pod
 metadata:
   name: traefik-check
   namespace: $NS
-  labels: {app.kubernetes.io/name: traefik${1:+, $1}}
+  labels: {app.kubernetes.io/name: traefik${extra:+, $extra}}
 spec:
   containers: [{name: traefik, image: traefik:v3.7.13}]
 YAML
@@ -294,6 +296,52 @@ eventually "the policy is Ready" ready
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy web >/dev/null
 eventually "unwired when the policy is deleted" unwired
 eventually "the attack passes again" tstatus_is 200 "$SQLI"
+
+# Traefik deployed with other labels (#50): InkwallConfig names them, the
+# operator restarts with them, and their pods get the engine.
+injected() {
+  [[ $(proxy_pod "$1" -o jsonpath='{.spec.initContainers[0].name}' 2>/dev/null) == inkwall-engine ]]
+}
+not_injected() { proxy_pod "$1" >/dev/null 2>&1 && ! injected "$1"; }
+selector_is() {
+  [[ $("${KUBECTL[@]}" get mutatingwebhookconfiguration inkwall-operator-mutating \
+    -o jsonpath='{.webhooks[?(@.name=="pods.waf.inkwall.dev")].objectSelector.matchLabels}') == "$1" ]]
+}
+# eventually_long DESCRIPTION COMMAND...: like eventually, for up to 2
+# minutes (the replicas restart up to 30s apart).
+eventually_long() {
+  local what=$1
+  shift
+  for _ in $(seq 240); do
+    if "$@" >/dev/null 2>&1; then
+      ok "$what"
+      return 0
+    fi
+    sleep 0.5
+  done
+  fail "$what"
+}
+echo "== custom proxy labels"
+if "${KUBECTL[@]}" get inkwallconfig default >/dev/null 2>&1; then
+  echo "skip  an InkwallConfig exists; not changing its integrations"
+else
+  "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: InkwallConfig
+metadata:
+  name: default
+spec:
+  integrations:
+  - controller: traefik
+    selector: {matchLabels: {app.kubernetes.io/component: edge-proxy}}
+YAML
+  eventually_long "the Pod webhook follows the InkwallConfig's selector" selector_is '{"app.kubernetes.io/component":"edge-proxy"}'
+  eventually_long "a pod with the custom labels gets the engine" injected "app.kubernetes.io/component: edge-proxy"
+  check "the default labels alone no longer match" not_injected ""
+  "${KUBECTL[@]}" delete inkwallconfig default >/dev/null
+  eventually_long "back to the default selector" selector_is '{"app.kubernetes.io/name":"traefik"}'
+  "${KUBECTL[@]}" -n "$OPERATOR_NS" rollout status deployment/inkwall-operator --timeout=180s >/dev/null
+fi
 
 if [[ $failures -gt 0 ]]; then
   echo "$failures check(s) failed; engine logs:"

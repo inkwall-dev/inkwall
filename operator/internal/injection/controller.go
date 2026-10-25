@@ -17,6 +17,7 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -26,7 +27,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/bundle"
 )
 
@@ -60,6 +60,8 @@ type Reconciler struct {
 	Namespace string
 	// CertSecret holds the operator's CA (ca.crt).
 	CertSecret string
+	// Pods selects the proxy pods (integrations.Selectors.PodSelector).
+	Pods labels.Selector
 }
 
 // SetupWithManager registers the controller.
@@ -79,7 +81,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 func (r *Reconciler) allNamespaces(ctx context.Context, _ client.Object) []reconcile.Request {
 	var pods corev1.PodList
-	if err := r.Client.List(ctx, &pods, client.MatchingLabelsSelector{Selector: integrations.PodSelector()}); err != nil {
+	if err := r.Client.List(ctx, &pods, client.MatchingLabelsSelector{Selector: r.Pods}); err != nil {
 		return nil
 	}
 	seen := map[string]bool{}
@@ -107,7 +109,7 @@ func managed() map[string]string {
 
 func (r *Reconciler) reconcileTrust(ctx context.Context, namespace string) (reconcile.Result, error) {
 	var pods corev1.PodList
-	if err := r.Client.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabelsSelector{Selector: integrations.PodSelector()}); err != nil {
+	if err := r.Client.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabelsSelector{Selector: r.Pods}); err != nil {
 		return reconcile.Result{}, err
 	}
 	key := types.NamespacedName{Namespace: namespace, Name: TrustConfigMap}
@@ -168,7 +170,7 @@ func (r *Reconciler) reconcileTrust(ctx context.Context, namespace string) (reco
 // that let every proxy pod's ServiceAccount get the bundle Secret.
 func (r *Reconciler) reconcileGrant(ctx context.Context) error {
 	var pods corev1.PodList
-	if err := r.Client.List(ctx, &pods, client.MatchingLabelsSelector{Selector: integrations.PodSelector()}); err != nil {
+	if err := r.Client.List(ctx, &pods, client.MatchingLabelsSelector{Selector: r.Pods}); err != nil {
 		return err
 	}
 	subjects := map[string]rbacv1.Subject{}
