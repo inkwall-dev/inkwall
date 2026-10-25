@@ -50,6 +50,15 @@ fail() {
   failures=$((failures + 1))
 }
 
+# A ready operator pod can take a moment to be reachable through its
+# Service (kube-proxy programs the new endpoints): wait until the webhook
+# answers before checking what it says.
+for _ in $(seq 30); do
+  out=$("${KUBECTL[@]}" apply --dry-run=server -f operator/config/samples/clusterwafruleset.yaml 2>&1) && break
+  grep -q "failed calling webhook" <<<"$out" || break
+  sleep 1
+done
+
 if "${KUBECTL[@]}" apply --dry-run=server -f operator/config/samples/clusterwafruleset.yaml >/dev/null; then
   ok "valid rule set accepted"
 else
