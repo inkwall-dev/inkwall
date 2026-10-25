@@ -172,6 +172,12 @@ with the engine as a forward-auth sidecar (`127.0.0.1:30080`), both in block mod
 sends benign and attack requests through both and checks the verdicts. `make kind-down` deletes the
 cluster. The setup is in [`hack/kind`](hack/kind).
 
+On the same cluster, `make kind-operator` installs the operator with the
+[Helm chart](deploy/helm/inkwall) and checks its webhook and bundles, and `make kind-e2e` runs the
+end-to-end test: a `WAFPolicy` applied in the cluster is enforced by an engine that takes it from
+the operator, follows edits without a restart, keeps enforcing while the operator is down, and stops
+when the policy is deleted. CI runs it on every pull request.
+
 Development checks: `make check` (lint, tests, vulnerability scan), `make crs-test` (the OWASP CRS
 regression suite, about 4,500 tests, through the proxy) and `make bench-compare` (benchmarks against
 `origin/main`; fails on a significant regression over 5%, as CI does on every PR).

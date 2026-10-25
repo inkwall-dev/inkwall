@@ -96,6 +96,10 @@ if [[ $accepted == True/NoEngines ]]; then
 else
   fail "sample policy: Accepted/Enforced reason is $accepted, want True/NoEngines"
 fi
+# The sample policy targets the demo Ingress, which has no host: left in
+# place it would cover every host in the cluster.
+"${KUBECTL[@]}" delete -f operator/config/samples/wafpolicy.yaml -f operator/config/samples/wafruleset.yaml \
+  -f operator/config/samples/clusterwafruleset.yaml --ignore-not-found >/dev/null
 
 if [[ $failures -gt 0 ]]; then
   echo "$failures check(s) failed"
