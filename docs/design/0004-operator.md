@@ -237,8 +237,15 @@ restarts only on opt-in.
 As built (`operator/internal/injection`, `operator/webhook/inject.go`, Traefik so far):
 
 - The Pod webhook (`inkwall-operator-mutating`) sees only pods labeled
-  `app.kubernetes.io/name=traefik`, at creation, and fails open (`Ignore`) for now: a proxy pod
-  always starts; switching to `Fail` while a policy is in block mode is a follow-up. A selector from
+  `app.kubernetes.io/name=traefik`, at creation. It is installed with `Ignore`; the leader sets
+  `failurePolicy: Fail` while any `WAFPolicy` is in block mode and `Ignore` otherwise, and undoes a
+  reset (a Helm upgrade). The patch carries the configuration's `resourceVersion`, so it can't undo
+  a CA bundle the certificate rotator wrote meanwhile. If the `InkwallConfig` can't be read, the
+  engine is injected with the operator's defaults rather than left out. Pods labeled
+  `waf.inkwall.dev/inject: "false"` are excluded by the `objectSelector`, so they start even while
+  the webhook fails closed and the operator is down: the documented way out when the proxy must
+  scale before the operator returns (the chart's README). The annotation of that name also opts a
+  pod out, but only while the webhook answers. A selector from
   `InkwallConfig.spec.integrations` is not applied to the webhook yet.
 - The engine is the first init container, with `restartPolicy: Always` (native sidecar), a startup
   probe so the proxy starts once it serves, `forward-auth` in bundle mode, a projected token for the
@@ -312,8 +319,10 @@ As built for Traefik (`operator/internal/wiring`):
   Ingress is no longer protected, only that entry is removed. Level-based: no finalizers.
 - `Programmed`: `True` when the policy's Traefik Ingresses are wired and every running Traefik pod
   has the engine; otherwise `ControllerUnsupported` (another controller, or not an Ingress),
-  `WiringFailed` (no Traefik CRDs, a Middleware name clash), `PendingRestart` (Traefik pods started
-  before the operator, listed), `SidecarMissing` (no Traefik pod), `NoTargets`. `Ready` is `True`
+  `WiringFailed` (no Traefik CRDs, a Middleware name clash), `PendingRestart` (Traefik pods created
+  before the Pod webhook was installed, listed), `SidecarMissing` (no Traefik pod; or Traefik pods
+  created after it without the engine, because the operator was down in detect mode or the pod
+  opted out, listed), `NoTargets`. `Ready` is `True`
   when `Accepted`, `Programmed` and `Enforced` are, and otherwise carries the first failing
   condition's reason and message.
 - Not yet: IngressRoute and Gateway API `HTTPRoute` targets, a GitOps listing of the annotation in
@@ -477,7 +486,7 @@ Removal must never leave a proxy pointing at a missing engine with fail-closed b
 | Operator down (both replicas) | None: engines keep last bundle | Engines' `bundle_age_seconds` grows; operator absent | Restart; engines reconnect and resync |
 | Leader down, follower up | None | Leader election | Follower takes over building within the lease duration (~15 s) |
 | Operator rollout (a replica stops) | None: a stopping replica keeps serving the webhook and bundles for `--shutdown-delay` (5 s), not ready, while Kubernetes stops routing to it | — | Automatic; engines reconnect to another replica |
-| Webhook down, ingress pod restarts | Detect mode: pod starts **without** engine (uninspected). Block mode: pod creation is refused; existing pods keep serving | `SidecarMissing` condition, alert | Restart pod after operator recovers |
+| Webhook down, ingress pod restarts | Detect mode: pod starts **without** engine (uninspected). Block mode: pod creation is refused; existing pods keep serving | `SidecarMissing` condition, alert | Restart pod after operator recovers; to scale before that, label the proxy's pods `waf.inkwall.dev/inject: "false"` (uninspected) |
 | Invalid rule committed | Rejected at admission | Webhook error returned to `kubectl` / Argo CD sync | Fix the rule |
 | Rule valid at admission, engine can't compile (version skew) | Engine keeps previous bundle | NACK → `Enforced=False, reason=EngineNack` | Upgrade engines or fix the rule |
 | Bundle Secret deleted | None | Builder recreates it on next reconcile | Automatic |

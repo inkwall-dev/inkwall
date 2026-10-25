@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -117,7 +118,13 @@ func TestProgrammed(t *testing.T) {
 	}
 	withEngine := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "traefik", Name: "t-1"},
 		Spec: corev1.PodSpec{InitContainers: []corev1.Container{{Name: injection.ContainerName}}}}
-	without := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "traefik", Name: "t-old"}}
+	// The Pod webhook was installed at since: t-old started before it,
+	// t-missed after it without the engine (the operator was down).
+	since := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	without := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "traefik", Name: "t-old", CreationTimestamp: metav1.NewTime(since.Add(-time.Hour))}}
+	missed := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "traefik", Name: "t-missed", CreationTimestamp: metav1.NewTime(since.Add(time.Hour))}}
+	optedOut := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "traefik", Name: "t-out", CreationTimestamp: metav1.NewTime(since.Add(time.Hour)),
+		Annotations: map[string]string{injection.InjectAnnotation: "false"}}}
 	now := metav1.Now()
 	terminating := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "traefik", Name: "t-gone", DeletionTimestamp: &now}}
 
@@ -137,11 +144,28 @@ func TestProgrammed(t *testing.T) {
 		{"name clash", pol("web"), true, map[string]string{"shop": "Middleware shop/inkwall-waf exists"}, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonWiringFailed, "exists"},
 		{"old pod", pol("web"), true, nil, []corev1.Pod{withEngine, without}, metav1.ConditionFalse, ReasonPendingRestart, "traefik/t-old"},
 		{"no pods", pol("web"), true, nil, []corev1.Pod{terminating}, metav1.ConditionFalse, ReasonSidecarMissing, "no Traefik pod"},
+		{"missed by the webhook", pol("web"), true, nil, []corev1.Pod{withEngine, without, missed}, metav1.ConditionFalse, ReasonSidecarMissing, "restart them once it is back: traefik/t-missed"},
+		{"opted out", pol("web"), true, nil, []corev1.Pod{withEngine, optedOut}, metav1.ConditionFalse, ReasonSidecarMissing, `opted out with waf.inkwall.dev/inject: "false": traefik/t-out`},
 		{"missing target", pol("gone"), true, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonNoTargets, "none"},
 	} {
-		st, reason, msg := programmed(tc.p, ings, wire, tc.crds, tc.mwErr, tc.pods)
+		st, reason, msg := programmed(tc.p, ings, wire, tc.crds, tc.mwErr, tc.pods, since)
 		if st != tc.status || reason != tc.reason || !strings.Contains(msg, tc.msg) {
 			t.Errorf("%s: %s %s %q", tc.name, st, reason, msg)
 		}
+	}
+}
+
+// Without the webhook's creation time, a pod without the engine is
+// assumed to predate it.
+func TestProgrammedUnknownSince(t *testing.T) {
+	k := types.NamespacedName{Namespace: "shop", Name: "web"}
+	ing := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "web"}}
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"},
+		Spec: wafv1alpha1.WAFPolicySpec{TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}}}}
+	pod := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "traefik", Name: "t", CreationTimestamp: metav1.Now()}}
+	_, reason, _ := programmed(p, map[types.NamespacedName]*networkingv1.Ingress{k: ing},
+		map[types.NamespacedName]target{k: {ing: ing, controller: integrations.Traefik.Controller}}, true, nil, []corev1.Pod{pod}, time.Time{})
+	if reason != ReasonPendingRestart {
+		t.Errorf("reason %s, want %s", reason, ReasonPendingRestart)
 	}
 }

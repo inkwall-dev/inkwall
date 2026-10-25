@@ -44,8 +44,11 @@ engine:
     pullPolicy: IfNotPresent
 
 injection:
-  # Inject the engine into proxy pods when they are created (a Pod webhook
-  # that fails open: proxy pods start even when the operator is down).
+  # Inject the engine into proxy pods when they are created (a Pod webhook).
+  # While no policy is in block mode it fails open: proxy pods start even
+  # when the operator is down, without the engine. Once a policy blocks, the
+  # operator makes it fail closed: proxy pods can't start without the
+  # engine; running ones keep serving.
   # Pods that already run are injected when they restart.
   enabled: true
 
