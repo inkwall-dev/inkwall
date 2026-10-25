@@ -22,7 +22,7 @@ if ! docker port "$CLUSTER-control-plane" | grep -q '^30080/tcp'; then
   exit 1
 fi
 
-docker build -t "$IMAGE" .
+docker build --target engine -t "$IMAGE" .
 kind load docker-image "$IMAGE" --name "$CLUSTER"
 
 KUBECTL=(kubectl --context "kind-$CLUSTER")
