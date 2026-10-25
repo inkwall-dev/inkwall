@@ -1,0 +1,132 @@
+{{- $certManager := eq .Values.webhook.certs.mode "certManager" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "inkwall.operator.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inkwall.operator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.operator.replicas }}
+  selector:
+    matchLabels:
+      {{- include "inkwall.operator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "inkwall.operator.labels" . | nindent 8 }}
+        {{- with .Values.operator.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.operator.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "inkwall.serviceAccountName" . }}
+      {{- with .Values.operator.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          image: {{ include "inkwall.operator.image" . }}
+          imagePullPolicy: {{ .Values.operator.image.pullPolicy }}
+          args:
+            - --leader-elect={{ gt (int .Values.operator.replicas) 1 }}
+            - --webhook-port={{ .Values.webhook.port }}
+            - --webhook-service={{ include "inkwall.webhook.service" . }}
+            - --webhook-cert-secret={{ include "inkwall.webhook.secret" . }}
+            - --distribution-port={{ .Values.distribution.port }}
+            - --distribution-service={{ include "inkwall.distribution.service" . }}
+            {{- if $certManager }}
+            - --webhook-certs=external
+            - --webhook-cert-dir=/certs
+            {{- else }}
+            - --webhook-certs=rotate
+            - --webhook-cert-dir=/tmp/webhook-certs
+            {{- end }}
+            {{- with .Values.operator.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Each replica's engine report is owned by its pod.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: probes
+              containerPort: 8081
+            - name: webhook
+              containerPort: {{ .Values.webhook.port }}
+            - name: distribution
+              containerPort: {{ .Values.distribution.port }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probes
+            periodSeconds: 10
+          # Ready once the replica serves the webhook and the bundles.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probes
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if $certManager }}
+            - name: certs
+              mountPath: /certs
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if $certManager }}
+        - name: certs
+          secret:
+            secretName: {{ include "inkwall.webhook.secret" . }}
+        {{- end }}
+      {{- with .Values.operator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        {{- with .Values.operator.affinity }}
+        {{- toYaml . | nindent 8 }}
+        {{- else }}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "inkwall.operator.selectorLabels" . | nindent 20 }}
+        {{- end }}

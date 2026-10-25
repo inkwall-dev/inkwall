@@ -15,6 +15,7 @@ ENVTEST_K8S_VERSION ?= 1.29.5
 # Container images and local kind cluster (hack/kind).
 IMAGE           ?= inkwall-engine:dev
 OPERATOR_IMAGE  ?= inkwall-operator:dev
+CHART           ?= deploy/helm/inkwall
 KIND_CLUSTER    ?= inkwall
 
 # Benchmarks: set BENCH to a regexp to narrow, COUNT for benchstat-friendly repeats.
@@ -64,13 +65,24 @@ vuln: ## Check dependencies for known vulnerabilities
 	$(GOVULNCHECK) ./...
 
 .PHONY: generate
-generate: ## Lint the protobuf APIs (api/), regenerate their Go code, and regenerate the operator's deepcopy code, CRDs, RBAC and webhook configuration
+generate: ## Lint the protobuf APIs (api/), regenerate their Go code, and regenerate the operator's deepcopy code, CRDs, RBAC and webhook configuration (also copied into the Helm chart)
 	$(BUF) lint
 	$(BUF) generate
 	$(CONTROLLER_GEN) object:headerFile=hack/boilerplate.go.txt paths=./operator/api/...
 	$(CONTROLLER_GEN) crd paths=./operator/api/... output:crd:artifacts:config=operator/config/crd/bases
 	$(CONTROLLER_GEN) rbac:roleName=inkwall-operator webhook paths=./operator/... paths=./cmd/operator/... \
 		output:rbac:artifacts:config=operator/config/rbac output:webhook:artifacts:config=operator/config/webhook
+	@# The chart renders the generated CRDs, RBAC and webhooks from its files/.
+	rm -rf $(CHART)/files && mkdir -p $(CHART)/files/crds $(CHART)/files/rbac $(CHART)/files/webhook
+	cp operator/config/crd/bases/*.yaml $(CHART)/files/crds/
+	cp operator/config/rbac/role.yaml $(CHART)/files/rbac/
+	cp operator/config/webhook/manifests.yaml $(CHART)/files/webhook/
+
+.PHONY: helm-lint
+helm-lint: ## Lint the Helm chart and render it with each webhook certificate mode
+	helm lint --strict $(CHART)
+	helm template inkwall $(CHART) --namespace inkwall-system >/dev/null
+	helm template inkwall $(CHART) --namespace inkwall-system --set webhook.certs.mode=certManager >/dev/null
 
 .PHONY: tidy
 tidy: ## Tidy go.mod and go.sum, here and in test/crs (which builds against this module)
@@ -88,6 +100,10 @@ image: ## Build the engine and operator container images (IMAGE=name:tag, OPERAT
 .PHONY: kind-up
 kind-up: ## Create the kind cluster and deploy the demo app behind the engine and behind Traefik (hack/kind)
 	KIND_CLUSTER=$(KIND_CLUSTER) IMAGE=$(IMAGE) hack/kind/up.sh
+
+.PHONY: kind-operator
+kind-operator: ## Build the operator image, install the Helm chart on the kind cluster and check the webhook
+	KIND_CLUSTER=$(KIND_CLUSTER) OPERATOR_IMAGE=$(OPERATOR_IMAGE) CHART=$(CHART) hack/kind/operator.sh
 
 .PHONY: kind-test
 kind-test: ## Send benign and attack requests to the kind demo and check verdicts

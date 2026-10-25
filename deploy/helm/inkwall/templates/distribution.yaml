@@ -1,0 +1,16 @@
+# Engines connect to any replica: each serves the bundles.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "inkwall.distribution.service" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inkwall.operator.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "inkwall.operator.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: grpc
+      port: {{ .Values.distribution.port }}
+      targetPort: distribution
+      appProtocol: grpc

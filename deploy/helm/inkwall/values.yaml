@@ -1,0 +1,67 @@
+# Default values for the inkwall chart.
+
+operator:
+  image:
+    repository: ghcr.io/inkwall-dev/inkwall-operator
+    # Empty: the chart's appVersion.
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  # Two replicas: one leads (builds bundles), all serve the webhook. The
+  # operator is never on the request path, so traffic doesn't depend on it.
+  replicas: 2
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+  # Extra inkwall-operator flags.
+  extraArgs: []
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  # Empty: spread the replicas across nodes when possible.
+  affinity: {}
+  priorityClassName: ""
+
+  podDisruptionBudget:
+    # Created when replicas > 1.
+    enabled: true
+    minAvailable: 1
+
+serviceAccount:
+  # Empty: the release's full name.
+  name: ""
+  annotations: {}
+
+crds:
+  # Install and upgrade the CRDs with the chart. They are kept on uninstall
+  # (deleting a CRD deletes every object of its kind).
+  install: true
+
+distribution:
+  # Engines connect here (gRPC over TLS, with the webhook's certificate) to
+  # receive the policy bundles.
+  port: 9445
+
+webhook:
+  # The validating webhook checks rule sets and policies before they are
+  # saved. It only sees the waf.inkwall.dev kinds.
+  port: 9443
+  timeoutSeconds: 2
+  certs:
+    # rotate: the operator creates a self-signed CA and certificate, renews
+    #   them, and injects the CA into the webhook configuration.
+    # certManager: cert-manager issues the certificate (it must be
+    #   installed); a self-signed Issuer is created unless issuerRef is set.
+    mode: rotate
+    certManager:
+      # Empty: a self-signed Issuer created by the chart.
+      issuerRef: {}
+      #   kind: ClusterIssuer
+      #   name: my-issuer
