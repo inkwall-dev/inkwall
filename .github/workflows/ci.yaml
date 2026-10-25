@@ -34,6 +34,16 @@ jobs:
       - run: make test
       - run: make build
 
+  image:
+    # The engine and operator images must build; they are what the Helm
+    # chart deploys.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - run: docker buildx build --target engine .
+      - run: docker buildx build --target operator .
+
   generate:
     # The generated protobuf code is committed; it must match api/*.proto.
     runs-on: ubuntu-latest

@@ -12,8 +12,9 @@ SETUP_ENVTEST   ?= $(GO) run sigs.k8s.io/controller-runtime/tools/setup-envtest@
 # Kubernetes version, so CRDs that pass here work on every newer one.
 ENVTEST_K8S_VERSION ?= 1.29.5
 
-# Container image and local kind cluster (hack/kind).
+# Container images and local kind cluster (hack/kind).
 IMAGE           ?= inkwall-engine:dev
+OPERATOR_IMAGE  ?= inkwall-operator:dev
 KIND_CLUSTER    ?= inkwall
 
 # Benchmarks: set BENCH to a regexp to narrow, COUNT for benchstat-friendly repeats.
@@ -80,8 +81,9 @@ tidy: ## Tidy go.mod and go.sum, here and in test/crs (which builds against this
 check: lint test vuln ## Run everything CI runs
 
 .PHONY: image
-image: ## Build the inkwall-engine container image (IMAGE=name:tag)
-	docker build -t $(IMAGE) .
+image: ## Build the engine and operator container images (IMAGE=name:tag, OPERATOR_IMAGE=name:tag)
+	docker build --target engine -t $(IMAGE) .
+	docker build --target operator -t $(OPERATOR_IMAGE) .
 
 .PHONY: kind-up
 kind-up: ## Create the kind cluster and deploy the demo app behind the engine and behind Traefik (hack/kind)
