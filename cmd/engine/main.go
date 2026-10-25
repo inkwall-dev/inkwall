@@ -25,6 +25,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -38,16 +39,21 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/forwardauth"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/httpcheck"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/proxy"
+	"github.com/inkwall-dev/inkwall/pkg/agent"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/router"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 	"github.com/inkwall-dev/inkwall/pkg/telemetry"
@@ -113,6 +119,21 @@ type engineConfig struct {
 	skipBodyPaths  []string
 	pprof          bool
 	ruleGroupsOff  []string
+
+	// Bundle mode: policies come from the operator.
+	operator           string
+	operatorCA         string
+	operatorServerName string
+	operatorToken      string
+	bundleKey          string
+	bundleCache        string
+}
+
+// policyFlags define a policy: in bundle mode the operator's bundle does, so
+// they can't be set.
+var policyFlags = []string{
+	"mode", "failure-mode", "timeout", "oversize-body", "paranoia-level", "anomaly-threshold",
+	"rules", "rules-before-crs", "skip-paths", "skip-body-paths", "disable-rule-groups",
 }
 
 func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, error) {
@@ -138,7 +159,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	failure := fs.String("failure-mode", "auto", "when a request cannot be inspected (timeout, error, overload): open (allow), closed (deny with 503), or auto (closed in block mode, open in detect mode)")
 	timeout := fs.Duration("timeout", pipeline.DefaultTimeout, "per-request inspection deadline")
 	maxConcurrent := fs.Int("max-concurrent", 0, "maximum concurrent evaluations; extra requests get the failure mode (0 = 2 * CPUs)")
-	maxBody := fs.Int64("max-body-bytes", 64<<10, "request body bytes to inspect (0 disables body inspection)")
+	maxBody := fs.Int64("max-body-bytes", 64<<10, "request body bytes to inspect (0 disables body inspection); in bundle mode, for policies that don't set body.maxBytes")
 	oversize := fs.String("oversize-body", "auto", "bodies over --max-body-bytes: deny (413 in block mode), allow (forward with the body uninspected, logged), or auto (deny in block mode, allow in detect mode)")
 	maxArgs := fs.Int("max-args", 0, "maximum arguments per source (query, body); more is rejected with 400 before CRS runs (0 = 1000)")
 	paranoia := fs.Int("paranoia-level", coraza.DefaultParanoiaLevel, "OWASP CRS paranoia level (1-4)")
@@ -154,8 +175,25 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	disableGroups := fs.String("disable-rule-groups", "", "comma-separated CRS attack families to remove when the application cannot be vulnerable to them: "+strings.Join(coraza.RuleGroupNames(), ", "))
 	pprof := fs.Bool("pprof", false, "serve /debug/pprof on the admin listener (exposes internals: keep that listener private)")
 	skipBodyPaths := fs.String("skip-body-paths", "", "comma-separated paths whose body is not inspected (headers and URI still are), same syntax as --skip-paths")
+	operator := fs.String("operator", "", "bundle mode: the operator's distribution server, host:port; policies come from its bundles, per route, instead of the flags that define a policy")
+	operatorCA := fs.String("operator-ca", "/var/run/secrets/inkwall/ca.crt", "bundle mode: CA certificate (PEM) of the operator's server")
+	operatorServerName := fs.String("operator-server-name", "", "bundle mode: name the operator's certificate must have (default: the host of --operator)")
+	operatorToken := fs.String("operator-token", "/var/run/secrets/inkwall/token", "bundle mode: ServiceAccount token for the audience inkwall-operator, re-read on every connection")
+	bundleKey := fs.String("bundle-key", "/var/run/secrets/inkwall/ed25519.pub", "bundle mode: the cluster's ed25519 public key (raw 32 bytes) that bundles are signed with")
+	bundleCache := fs.String("bundle-cache", "", "bundle mode: file that keeps the last applied bundle, enforced at startup before the operator is reachable (empty: no cache)")
 	if err := fs.Parse(args); err != nil {
 		return engineConfig{}, err
+	}
+	if *operator != "" {
+		var conflicts []string
+		fs.Visit(func(f *flag.Flag) {
+			if slices.Contains(policyFlags, f.Name) {
+				conflicts = append(conflicts, "--"+f.Name)
+			}
+		})
+		if len(conflicts) > 0 {
+			return engineConfig{}, fmt.Errorf("%s: set by the operator's bundle with --operator", strings.Join(conflicts, ", "))
+		}
 	}
 
 	cfg := engineConfig{
@@ -171,6 +209,13 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 		threshold:      *threshold,
 		rulesFile:      *rulesFile,
 		rulesBeforeCRS: *rulesBeforeCRS,
+
+		operator:           *operator,
+		operatorCA:         *operatorCA,
+		operatorServerName: *operatorServerName,
+		operatorToken:      *operatorToken,
+		bundleKey:          *bundleKey,
+		bundleCache:        *bundleCache,
 	}
 	if command == cmdProxy {
 		if *upstream == "" {
@@ -251,26 +296,6 @@ func splitList(s string) []string {
 }
 
 func serve(cfg engineConfig, logger *slog.Logger) error {
-	directives, err := readOptional(cfg.rulesFile)
-	if err != nil {
-		return fmt.Errorf("read --rules: %w", err)
-	}
-	directivesBeforeCRS, err := readOptional(cfg.rulesBeforeCRS)
-	if err != nil {
-		return fmt.Errorf("read --rules-before-crs: %w", err)
-	}
-	eval, err := coraza.New(coraza.Config{
-		ParanoiaLevel:           cfg.paranoiaLevel,
-		InboundAnomalyThreshold: cfg.threshold,
-		MaxArgs:                 cfg.maxArgs,
-		BodyLimit:               int(cfg.maxBodyBytes),
-		DisabledRuleGroups:      cfg.ruleGroupsOff,
-		DirectivesBeforeCRS:     directivesBeforeCRS,
-		Directives:              directives,
-	})
-	if err != nil {
-		return err
-	}
 	resolver, err := clientip.NewResolver(cfg.trustedProxies)
 	if err != nil {
 		return err
@@ -283,27 +308,39 @@ func serve(cfg engineConfig, logger *slog.Logger) error {
 		adapter = "httpcheck"
 	}
 	metrics := telemetry.NewMetrics(adapter)
-	p := pipeline.New(eval, pipeline.Config{
-		Mode:          cfg.mode,
-		FailureMode:   cfg.failureMode,
-		Timeout:       cfg.timeout,
-		MaxConcurrent: cfg.maxConcurrent,
-		Oversize:      cfg.oversize,
-		Observer:      metrics,
-		Routes:        cfg.routes,
-	})
-	metrics.WatchAdmission(p.Admission())
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	var (
+		p  pipeline.Inspector
+		ag *agent.Agent
+	)
+	if cfg.operator != "" {
+		ag, p, err = bundleMode(cfg, metrics, logger)
+	} else {
+		p, err = flagMode(cfg, metrics)
+	}
+	if err != nil {
+		return err
+	}
+	// In bundle mode each policy sets its body limit, up to the CRD's
+	// maximum; the adapters must accept bodies that large.
+	maxBody := cfg.maxBodyBytes
+	if ag != nil {
+		maxBody = max(maxBody, policy.MaxBodyBytes)
+	}
 	var handler http.Handler
 	switch cfg.command {
 	case cmdForwardAuth:
 		handler, err = forwardauth.New(p,
-			forwardauth.Config{MaxBodyBytes: cfg.maxBodyBytes, ClientIP: resolver, Logger: logger},
+			forwardauth.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger},
 		)
 	case cmdCheck:
-		handler, err = httpcheck.New(p, httpcheck.Config{MaxBodyBytes: cfg.maxBodyBytes, Logger: logger})
+		handler, err = httpcheck.New(p, httpcheck.Config{MaxBodyBytes: maxBody, Logger: logger})
 	default:
 		handler, err = proxy.New(p,
-			proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: cfg.maxBodyBytes, ClientIP: resolver, Logger: logger},
+			proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger},
 		)
 	}
 	if err != nil {
@@ -332,10 +369,11 @@ func serve(cfg engineConfig, logger *slog.Logger) error {
 		}
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	errc := make(chan error, 2)
 	go func() { errc <- srv.Serve(ln) }()
+	if ag != nil {
+		go func() { _ = ag.Run(ctx) }()
+	}
 
 	// Rules are compiled before anything listens, so the engine is ready as
 	// soon as it serves; readiness turns off again during shutdown.
@@ -370,11 +408,16 @@ func serve(cfg engineConfig, logger *slog.Logger) error {
 	if cfg.upstream != nil {
 		attrs = append(attrs, slog.String("upstream", cfg.upstream.String()))
 	}
-	logger.Info("inkwall-engine "+cfg.command+" started", append(attrs,
-		slog.String("mode", modeName(cfg.mode)),
-		slog.String("failure_mode", failureModeName(cfg.failureMode.Resolve(cfg.mode))),
-		slog.Int("paranoia_level", cfg.paranoiaLevel),
-		slog.Any("disabled_rule_groups", cfg.ruleGroupsOff))...)
+	if ag != nil {
+		attrs = append(attrs, slog.String("operator", cfg.operator), slog.String("bundle_cache", cfg.bundleCache))
+	} else {
+		attrs = append(attrs,
+			slog.String("mode", modeName(cfg.mode)),
+			slog.String("failure_mode", failureModeName(cfg.failureMode.Resolve(cfg.mode))),
+			slog.Int("paranoia_level", cfg.paranoiaLevel),
+			slog.Any("disabled_rule_groups", cfg.ruleGroupsOff))
+	}
+	logger.Info("inkwall-engine "+cfg.command+" started", attrs...)
 
 	select {
 	case err := <-errc:
@@ -390,6 +433,91 @@ func serve(cfg engineConfig, logger *slog.Logger) error {
 		err = errors.Join(err, admin.Shutdown(shutdownCtx))
 	}
 	return err
+}
+
+// flagMode builds the one pipeline the flags define.
+func flagMode(cfg engineConfig, metrics *telemetry.Metrics) (pipeline.Inspector, error) {
+	directives, err := readOptional(cfg.rulesFile)
+	if err != nil {
+		return nil, fmt.Errorf("read --rules: %w", err)
+	}
+	directivesBeforeCRS, err := readOptional(cfg.rulesBeforeCRS)
+	if err != nil {
+		return nil, fmt.Errorf("read --rules-before-crs: %w", err)
+	}
+	eval, err := coraza.New(coraza.Config{
+		ParanoiaLevel:           cfg.paranoiaLevel,
+		InboundAnomalyThreshold: cfg.threshold,
+		MaxArgs:                 cfg.maxArgs,
+		BodyLimit:               int(cfg.maxBodyBytes),
+		DisabledRuleGroups:      cfg.ruleGroupsOff,
+		DirectivesBeforeCRS:     directivesBeforeCRS,
+		Directives:              directives,
+	})
+	if err != nil {
+		return nil, err
+	}
+	p := pipeline.New(eval, pipeline.Config{
+		Mode:          cfg.mode,
+		FailureMode:   cfg.failureMode,
+		Timeout:       cfg.timeout,
+		MaxConcurrent: cfg.maxConcurrent,
+		Oversize:      cfg.oversize,
+		Observer:      metrics,
+		Routes:        cfg.routes,
+	})
+	metrics.WatchAdmission(p.Admission())
+	return p, nil
+}
+
+// bundleMode inspects with the policies of the operator's bundles, per
+// route. Until the first bundle (or the cached one) is applied, requests
+// are allowed and reported with reason no-policy.
+func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logger) (*agent.Agent, pipeline.Inspector, error) {
+	adm := pipeline.NewAdmission(cfg.maxConcurrent)
+	metrics.WatchAdmission(adm)
+	opts := policy.Options{
+		Admission:  adm,
+		Observer:   metrics,
+		MaxArgs:    cfg.maxArgs,
+		BodyLimit:  cfg.maxBodyBytes,
+		Evaluators: policy.NewEvaluators(),
+	}
+	holder := &policy.Holder{}
+	host, _ := os.Hostname()
+	podName := cmp.Or(os.Getenv("POD_NAME"), host)
+	ag, err := agent.New(agent.Config{
+		Addr:          cfg.operator,
+		CAFile:        cfg.operatorCA,
+		ServerName:    cfg.operatorServerName,
+		TokenFile:     cfg.operatorToken,
+		PublicKeyFile: cfg.bundleKey,
+		CacheFile:     cfg.bundleCache,
+		// One engine per pod; the operator replaces a restarted engine's
+		// record.
+		EngineID:      podName,
+		PodNamespace:  os.Getenv("POD_NAMESPACE"),
+		PodName:       podName,
+		NodeName:      os.Getenv("NODE_NAME"),
+		EngineVersion: engineVersion(),
+		Compile:       func(b *bundlev1.Bundle) (*policy.Set, error) { return policy.Compile(b, opts) },
+		Holder:        holder,
+		Admission:     adm,
+		Logger:        logger,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	metrics.Register(ag.Collectors()...)
+	return ag, holder, nil
+}
+
+// engineVersion is the module version the binary was built from.
+func engineVersion() string {
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" {
+		return bi.Main.Version
+	}
+	return "unknown"
 }
 
 // withPprof adds the net/http/pprof handlers under /debug/pprof/.

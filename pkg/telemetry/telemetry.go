@@ -59,6 +59,12 @@ func (m *Metrics) ObserveVerdict(v pipeline.Verdict) {
 	m.duration.Observe(v.Duration.Seconds())
 }
 
+// Register adds collectors, such as the bundle agent's, to the engine's
+// metrics.
+func (m *Metrics) Register(cs ...prometheus.Collector) {
+	m.registry.MustRegister(cs...)
+}
+
 // WatchAdmission exports evaluation slot usage, so saturation (and with it,
 // shed requests) is visible before it happens.
 func (m *Metrics) WatchAdmission(p *pipeline.Admission) {

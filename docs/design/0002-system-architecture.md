@@ -506,6 +506,19 @@ message OperatorMessage {
 Full snapshots, not deltas, in v1: simpler, idempotent, and bundles are small. Deltas can come later
 (xDS-style) if bundle size grows.
 
+The engine side ([`pkg/agent`](../../pkg/agent), [`pkg/policy`](../../pkg/policy)), enabled with
+`--operator`: the engine verifies a bundle's signature before decoding it, refuses a version older
+than the one it runs unless the bundle was created later (the operator lost its sequence), compiles
+it (each policy its own pipeline; identical rule configurations share one compiled rule set), swaps
+it in atomically, writes it to `--bundle-cache`, and acks; any failure is a nack with the reason, and
+the previous bundle stays in force. It reconnects with jittered backoff, re-reading its projected
+token each time, and starts from the cache before the operator is reachable. Cold start from the
+bundle Secret through the Kubernetes API is not implemented yet. Requests are matched to a policy
+on host (exact, wildcard, any), the decoded and cleaned path (exact, element-wise prefix) and
+method, most specific first; a host no policy covers is not inspected (`no-policy`), and a covered
+host whose path matches none of its routes gets the host's most general policy, so a normalization
+difference between the proxy and the engine can't skip inspection.
+
 As built ([`api/agent/v1`](../../api/agent/v1/agent.proto)), the stream messages are named
 `WatchRequest` and `WatchResponse` (buf's naming rules for RPCs), the operator sends a
 `bundle.v1.SignedBundle`, and the event batch and directive fields are reserved until those

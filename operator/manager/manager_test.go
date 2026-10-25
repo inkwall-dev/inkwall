@@ -167,6 +167,7 @@ func TestOperator(t *testing.T) {
 	t.Run("webhook", func(t *testing.T) { testWebhook(ctx, t, c, warn) })
 	t.Run("bundles", func(t *testing.T) { testBundles(ctx, t, c) })
 	t.Run("distribution", func(t *testing.T) { testDistribution(ctx, t, c) })
+	t.Run("engine", func(t *testing.T) { testEngine(ctx, t, c) })
 }
 
 // testWebhook checks the webhook as deployed: the operator creates the

@@ -99,4 +99,6 @@ type Verdict struct {
 	RuleIDs []int
 	// Duration is the time spent inspecting.
 	Duration time.Duration
+	// Policy is the policy that decided, in bundle mode ("namespace/name").
+	Policy string
 }
