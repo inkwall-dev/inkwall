@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
@@ -72,6 +73,8 @@ type Reconciler struct {
 	// by the webhook (SidecarMissing), one created before it predates
 	// Inkwall (PendingRestart).
 	PodWebhook string
+	// TraefikPods selects Traefik's pods (integrations.Selectors).
+	TraefikPods labels.Selector
 }
 
 // SetupWithManager registers the controller.
@@ -127,7 +130,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			return reconcile.Result{}, err
 		}
 	}
-	if err := r.Client.List(ctx, &pods, client.MatchingLabels(integrations.Traefik.PodSelector)); err != nil {
+	if err := r.Client.List(ctx, &pods, client.MatchingLabelsSelector{Selector: r.TraefikPods}); err != nil {
 		return reconcile.Result{}, err
 	}
 	classes, defaultClass := map[string]string{}, ""

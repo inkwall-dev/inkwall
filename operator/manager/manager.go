@@ -103,6 +103,10 @@ type Options struct {
 	Inject           bool
 	EngineImage      string
 	EnginePullPolicy corev1.PullPolicy
+	// Integrations select the proxy pods; nil: read from the InkwallConfig
+	// when the manager is created. The operator restarts when they change
+	// (its cache of proxy pods is built from them).
+	Integrations *integrations.Selectors
 }
 
 // NewScheme returns the types the operator reads and writes.
@@ -124,6 +128,12 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	if err != nil {
 		return nil, err
 	}
+	selectors := o.Integrations
+	if selectors == nil {
+		if selectors, err = readSelectors(cfg, s); err != nil {
+			return nil, err
+		}
+	}
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: s,
 		Cache: cache.Options{ByObject: map[client.Object]cache.ByObject{
@@ -132,7 +142,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			&corev1.Secret{}:    {Namespaces: map[string]cache.Config{o.Namespace: {}}},
 			&corev1.ConfigMap{}: {Label: labels.SelectorFromSet(labels.Set{resolver.RulesLabel: "true"})},
 			// Only proxy pods, and RBAC in the operator's namespace.
-			&corev1.Pod{}:         {Label: integrations.PodSelector()},
+			&corev1.Pod{}:         {Label: selectors.PodSelector()},
 			&rbacv1.Role{}:        {Namespaces: map[string]cache.Config{o.Namespace: {}}},
 			&rbacv1.RoleBinding{}: {Namespaces: map[string]cache.Config{o.Namespace: {}}},
 			// Only the Pod webhook's configuration.
@@ -179,13 +189,21 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			PullPolicy:   o.EnginePullPolicy,
 			OperatorAddr: fmt.Sprintf("%s.%s.svc:%d", o.DistributionService, o.Namespace, o.DistributionPort),
 			BundleSecret: o.Namespace + "/" + bundle.BundleSecret,
+			Integrations: selectors,
 		}
-		if err := (&wiring.Reconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), PodWebhook: webhook.MutatingConfigName}).SetupWithManager(mgr); err != nil {
+		if err := (&wiring.Reconciler{
+			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), PodWebhook: webhook.MutatingConfigName,
+			TraefikPods: selectors.Selector(integrations.Traefik.Name),
+		}).SetupWithManager(mgr); err != nil {
 			return nil, err
 		}
-		if err := (&injection.FailurePolicyReconciler{
+		if err := (&injection.PodWebhookReconciler{
 			Client: mgr.GetClient(), ConfigName: webhook.MutatingConfigName, WebhookName: webhook.PodWebhookName,
+			Pods: selectors.LabelSelector(integrations.Traefik.Name),
 		}).SetupWithManager(mgr); err != nil {
+			return nil, err
+		}
+		if err := mgr.Add(&selectorWatch{client: mgr.GetClient(), current: selectors}); err != nil {
 			return nil, err
 		}
 		if err := (&injection.Reconciler{
@@ -193,6 +211,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			APIReader:  mgr.GetAPIReader(),
 			Namespace:  o.Namespace,
 			CertSecret: o.WebhookSecret,
+			Pods:       selectors.PodSelector(),
 		}).SetupWithManager(mgr); err != nil {
 			return nil, err
 		}
