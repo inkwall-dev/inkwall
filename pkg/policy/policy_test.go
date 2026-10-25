@@ -228,4 +228,14 @@ func TestHolder(t *testing.T) {
 	if h.Load() != set {
 		t.Error("Load")
 	}
+
+	// Bootstrap deny: 503 until the first bundle.
+	deny := Holder{DenyBeforeFirst: true}
+	if v := deny.Check(context.Background(), req("shop.example.com", "/")); v.Action != pipeline.ActionDeny || v.Status != 503 || v.Reason != pipeline.ReasonNoPolicy {
+		t.Errorf("deny before a bundle: got %s/%d/%s", v.Action, v.Status, v.Reason)
+	}
+	deny.Store(set)
+	if v := deny.Check(context.Background(), req("shop.example.com", "/")); v.Action != pipeline.ActionAllow {
+		t.Errorf("deny after a bundle: got %s/%s", v.Action, v.Reason)
+	}
 }

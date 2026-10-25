@@ -127,6 +127,13 @@ type engineConfig struct {
 	operatorToken      string
 	bundleKey          string
 	bundleCache        string
+	// bundleSecret is namespace/name of the bundle Secret, read through the
+	// API server when the engine has no bundle.
+	bundleSecret     string
+	kubeToken        string
+	kubeCA           string
+	bootstrapDeny    bool
+	bootstrapTimeout time.Duration
 }
 
 // policyFlags define a policy: in bundle mode the operator's bundle does, so
@@ -181,8 +188,24 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	operatorToken := fs.String("operator-token", "/var/run/secrets/inkwall/token", "bundle mode: ServiceAccount token for the audience inkwall-operator, re-read on every connection")
 	bundleKey := fs.String("bundle-key", "/var/run/secrets/inkwall/ed25519.pub", "bundle mode: the cluster's ed25519 public key (raw 32 bytes) that bundles are signed with")
 	bundleCache := fs.String("bundle-cache", "", "bundle mode: file that keeps the last applied bundle, enforced at startup before the operator is reachable (empty: no cache)")
+	bundleSecret := fs.String("bundle-secret", "", "bundle mode: namespace/name of the operator's bundle Secret, read through the Kubernetes API when the engine has no bundle (a new pod while the operator is unreachable); empty: not read")
+	kubeToken := fs.String("kube-token", "/var/run/secrets/inkwall/kube-token", "bundle mode: ServiceAccount token for the Kubernetes API, to read --bundle-secret")
+	kubeCA := fs.String("kube-ca", "/var/run/secrets/inkwall/kube-ca.crt", "bundle mode: CA certificate (PEM) of the Kubernetes API server, to read --bundle-secret")
+	bootstrap := fs.String("bootstrap", "allow", "bundle mode: requests before the first bundle (no cache, no Secret, no operator): allow (uninspected) or deny (503)")
+	bootstrapTimeout := fs.Duration("bootstrap-timeout", 10*time.Second, "bundle mode: how long the engine stays unready waiting for its first bundle, so the proxy doesn't take traffic before it (0: ready at once)")
 	if err := fs.Parse(args); err != nil {
 		return engineConfig{}, err
+	}
+	if *bootstrap != "allow" && *bootstrap != "deny" {
+		return engineConfig{}, fmt.Errorf("--bootstrap: %q, want allow or deny", *bootstrap)
+	}
+	if *bundleSecret != "" {
+		if *operator == "" {
+			return engineConfig{}, errors.New("--bundle-secret: only with --operator")
+		}
+		if ns, name, ok := strings.Cut(*bundleSecret, "/"); !ok || ns == "" || name == "" || strings.Contains(name, "/") {
+			return engineConfig{}, fmt.Errorf("--bundle-secret: %q, want namespace/name", *bundleSecret)
+		}
 	}
 	if *operator != "" {
 		var conflicts []string
@@ -216,6 +239,11 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 		operatorToken:      *operatorToken,
 		bundleKey:          *bundleKey,
 		bundleCache:        *bundleCache,
+		bundleSecret:       *bundleSecret,
+		kubeToken:          *kubeToken,
+		kubeCA:             *kubeCA,
+		bootstrapDeny:      *bootstrap == "deny",
+		bootstrapTimeout:   *bootstrapTimeout,
 	}
 	if command == cmdProxy {
 		if *upstream == "" {
@@ -376,9 +404,15 @@ func serve(cfg engineConfig, logger *slog.Logger) error {
 	}
 
 	// Rules are compiled before anything listens, so the engine is ready as
-	// soon as it serves; readiness turns off again during shutdown.
+	// soon as it serves; readiness turns off again during shutdown. In
+	// bundle mode it waits for the first bundle, for a while: the proxy
+	// takes no traffic before the policy is in place.
 	var ready atomic.Bool
-	ready.Store(true)
+	if ag != nil {
+		go waitForBundle(ctx, ag, cfg, &ready, logger)
+	} else {
+		ready.Store(true)
+	}
 	var admin *http.Server
 	if adminLn != nil {
 		adminHandler := metrics.AdminHandler(ready.Load)
@@ -409,7 +443,8 @@ func serve(cfg engineConfig, logger *slog.Logger) error {
 		attrs = append(attrs, slog.String("upstream", cfg.upstream.String()))
 	}
 	if ag != nil {
-		attrs = append(attrs, slog.String("operator", cfg.operator), slog.String("bundle_cache", cfg.bundleCache))
+		attrs = append(attrs, slog.String("operator", cfg.operator), slog.String("bundle_cache", cfg.bundleCache),
+			slog.String("bundle_secret", cfg.bundleSecret), slog.Bool("bootstrap_deny", cfg.bootstrapDeny))
 	} else {
 		attrs = append(attrs,
 			slog.String("mode", modeName(cfg.mode)),
@@ -483,7 +518,11 @@ func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logge
 		BodyLimit:  cfg.maxBodyBytes,
 		Evaluators: policy.NewEvaluators(),
 	}
-	holder := &policy.Holder{}
+	holder := &policy.Holder{DenyBeforeFirst: cfg.bootstrapDeny}
+	var secret *agent.SecretSource
+	if ns, name, ok := strings.Cut(cfg.bundleSecret, "/"); ok {
+		secret = &agent.SecretSource{Namespace: ns, Name: name, CAFile: cfg.kubeCA, TokenFile: cfg.kubeToken}
+	}
 	host, _ := os.Hostname()
 	podName := cmp.Or(os.Getenv("POD_NAME"), host)
 	ag, err := agent.New(agent.Config{
@@ -493,6 +532,7 @@ func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logge
 		TokenFile:     cfg.operatorToken,
 		PublicKeyFile: cfg.bundleKey,
 		CacheFile:     cfg.bundleCache,
+		Secret:        secret,
 		// One engine per pod; the operator replaces a restarted engine's
 		// record.
 		EngineID:      podName,
@@ -510,6 +550,26 @@ func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logge
 	}
 	metrics.Register(ag.Collectors()...)
 	return ag, holder, nil
+}
+
+// waitForBundle marks the engine ready once the first bundle is applied,
+// or after cfg.bootstrapTimeout without one.
+func waitForBundle(ctx context.Context, ag *agent.Agent, cfg engineConfig, ready *atomic.Bool, logger *slog.Logger) {
+	timeout := time.NewTimer(cfg.bootstrapTimeout)
+	defer timeout.Stop()
+	select {
+	case <-ag.Applied():
+	case <-timeout.C:
+		action := "allowing requests uninspected"
+		if cfg.bootstrapDeny {
+			action = "denying requests with 503"
+		}
+		logger.Warn("no policy bundle yet (no cache, bundle Secret and operator unavailable); ready, "+action+" until one is applied",
+			slog.Duration("waited", cfg.bootstrapTimeout))
+	case <-ctx.Done():
+		return
+	}
+	ready.Store(true)
 }
 
 // engineVersion is the module version the binary was built from.

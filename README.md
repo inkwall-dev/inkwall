@@ -155,7 +155,10 @@ covers is allowed and reported as `no-policy`. The engine authenticates with a p
 ServiceAccount token (`--operator-token`), verifies the operator's certificate (`--operator-ca`) and
 every bundle's ed25519 signature (`--bundle-key`) before applying it, and swaps policies without a
 restart. Without the operator it keeps enforcing the last bundle, also across restarts with
-`--bundle-cache`. The operator injects this configuration (#27); see
+`--bundle-cache`; a new engine with no cache reads the operator's bundle Secret through the
+Kubernetes API (`--bundle-secret`). Until it has a bundle it stays unready for up to
+`--bootstrap-timeout` (10s), then allows requests uninspected or, with `--bootstrap deny`, rejects
+them with 503. The operator injects this configuration (#27); see
 [0002 §5.2](docs/design/0002-system-architecture.md#52-engine--operator-bundle-distribution).
 
 **Testing rules without traffic.** `inkwallctl test` shows the verdict and the matching rules for a

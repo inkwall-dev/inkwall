@@ -22,6 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -202,10 +203,7 @@ func testWebhook(ctx context.Context, t *testing.T, c client.Client, warn *warni
 		t.Fatalf("good rules: %v", err)
 	}
 	// Labels can change without the rules being compiled again.
-	good.Labels = map[string]string{"team": "shop"}
-	if err := c.Update(ctx, good); err != nil {
-		t.Fatalf("label update: %v", err)
-	}
+	update(ctx, t, c, good, func(rs *wafv1alpha1.WAFRuleSet) { rs.Labels = map[string]string{"team": "shop"} })
 
 	fromConfigMap := ruleSet("from-configmap", wafv1alpha1.RuleSetSource{ConfigMapRef: &wafv1alpha1.ConfigMapKeyRef{Name: "rules", Key: "rules.conf"}})
 	warn.take()
@@ -237,5 +235,22 @@ func testWebhook(ctx context.Context, t *testing.T, c client.Client, warn *warni
 	policy.Spec.Skip.Paths[1] = "/static/*"
 	if err := c.Create(ctx, policy); err != nil {
 		t.Fatalf("valid policy: %v", err)
+	}
+}
+
+// update reads obj, changes it with mutate and saves it, again on a
+// conflict: the operator writes the status, a new resourceVersion, at any
+// time.
+func update[T client.Object](ctx context.Context, t *testing.T, c client.Client, obj T, mutate func(T)) {
+	t.Helper()
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := c.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
+			return err
+		}
+		mutate(obj)
+		return c.Update(ctx, obj)
+	})
+	if err != nil {
+		t.Fatalf("update %s: %v", client.ObjectKeyFromObject(obj), err)
 	}
 }

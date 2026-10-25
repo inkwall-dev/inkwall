@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -272,9 +273,12 @@ func (e *Evaluators) Len() int {
 // the set it loaded. (An adapter's BodyLimit and Check calls may straddle a
 // swap; the request is then inspected by the new set, with the body read to
 // the old set's limit.) Before the first set it allows every request, with
-// ReasonNoPolicy.
+// ReasonNoPolicy, or denies it with DenyBeforeFirst.
 type Holder struct {
 	set atomic.Pointer[Set]
+	// DenyBeforeFirst rejects requests with 503 until the first set is
+	// stored, instead of letting them through uninspected.
+	DenyBeforeFirst bool
 }
 
 var _ pipeline.Inspector = (*Holder)(nil)
@@ -289,6 +293,9 @@ func (h *Holder) Load() *Set { return h.set.Load() }
 func (h *Holder) Check(ctx context.Context, r *request.Request) pipeline.Verdict {
 	s := h.set.Load()
 	if s == nil {
+		if h.DenyBeforeFirst {
+			return pipeline.Verdict{Action: pipeline.ActionDeny, Status: http.StatusServiceUnavailable, Reason: pipeline.ReasonNoPolicy}
+		}
 		return pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy}
 	}
 	return s.Check(ctx, r)

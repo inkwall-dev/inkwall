@@ -191,7 +191,9 @@ type Evaluator interface {
 5. Shutdown: stop accepting, drain in-flight requests (bounded), flush events.
 
 If no bundle has ever been loaded, the engine answers according to its **bootstrap mode** flag:
-`allow-all` (default) or `deny-all`.
+`allow-all` (default) or `deny-all` (as built: `--bootstrap allow|deny`, set from
+`InkwallConfig.spec.engine.bootstrapMode`; the engine first stays unready for up to
+`--bootstrap-timeout` waiting for a bundle, so its proxy takes no traffic before one).
 
 ### 3.2 Adapters
 
@@ -512,8 +514,10 @@ than the one it runs unless the bundle was created later (the operator lost its 
 it (each policy its own pipeline; identical rule configurations share one compiled rule set), swaps
 it in atomically, writes it to `--bundle-cache`, and acks; any failure is a nack with the reason, and
 the previous bundle stays in force. It reconnects with jittered backoff, re-reading its projected
-token each time, and starts from the cache before the operator is reachable. Cold start from the
-bundle Secret through the Kubernetes API is not implemented yet. Requests are matched to a policy
+token each time, and starts from the cache before the operator is reachable. With no usable cache
+it reads the bundle Secret through the Kubernetes API (`--bundle-secret`, a plain HTTPS GET with a
+projected token for the API server's audience, no client-go), verifies and applies it, and reads it
+again between reconnection attempts until it has a bundle. Requests are matched to a policy
 on host (exact, wildcard, any), the decoded and cleaned path (exact, element-wise prefix) and
 method, most specific first; a host no policy covers is not inspected (`no-policy`), and a covered
 host whose path matches none of its routes gets the host's most general policy, so a normalization

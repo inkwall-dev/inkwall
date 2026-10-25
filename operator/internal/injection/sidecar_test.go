@@ -27,6 +27,7 @@ var sidecar = Sidecar{
 	Image:        "inkwall-engine:dev",
 	PullPolicy:   corev1.PullNever,
 	OperatorAddr: "inkwall-operator.inkwall-system.svc:9445",
+	BundleSecret: "inkwall-system/inkwall-bundle",
 	Args:         []string{"forward-auth"},
 }
 
@@ -55,10 +56,16 @@ func TestInject(t *testing.T) {
 		"--bundle-key=/var/run/secrets/inkwall/ed25519.pub",
 		"--bundle-cache=/var/run/inkwall/bundle.pb",
 		"--trusted-proxies=127.0.0.1/32,::1/128",
+		"--bundle-secret=inkwall-system/inkwall-bundle",
+		"--kube-token=/var/run/secrets/inkwall/kube-token",
+		"--kube-ca=/var/run/secrets/inkwall/kube-ca.crt",
 	} {
 		if !slices.Contains(engine.Args, want) {
 			t.Errorf("args %v lack %s", engine.Args, want)
 		}
+	}
+	if slices.Contains(engine.Args, "--bootstrap=deny") {
+		t.Error("bootstrap deny by default")
 	}
 	if engine.Args[0] != "forward-auth" {
 		t.Errorf("the adapter must come first: %v", engine.Args)
@@ -71,7 +78,8 @@ func TestInject(t *testing.T) {
 		t.Errorf("probes or default resources missing")
 	}
 
-	// The token for the operator's audience and the trust ConfigMap, in one
+	// The token for the operator's audience and the trust ConfigMap, then a
+	// token for the API server and its CA (for the bundle Secret), in one
 	// read-only directory.
 	var secrets *corev1.Volume
 	for i := range pod.Spec.Volumes {
@@ -79,13 +87,26 @@ func TestInject(t *testing.T) {
 			secrets = &pod.Spec.Volumes[i]
 		}
 	}
-	if secrets == nil || secrets.Projected == nil || len(secrets.Projected.Sources) != 2 ||
-		secrets.Projected.Sources[0].ServiceAccountToken.Audience != "inkwall-operator" ||
-		secrets.Projected.Sources[1].ConfigMap.Name != TrustConfigMap {
+	if secrets == nil || secrets.Projected == nil || len(secrets.Projected.Sources) != 4 {
 		t.Fatalf("secrets volume %+v", secrets)
+	}
+	src := secrets.Projected.Sources
+	if src[0].ServiceAccountToken.Audience != "inkwall-operator" || src[1].ConfigMap.Name != TrustConfigMap ||
+		src[2].ServiceAccountToken.Audience != "" || src[2].ServiceAccountToken.Path != "kube-token" ||
+		src[3].ConfigMap.Name != "kube-root-ca.crt" || src[3].ConfigMap.Items[0].Path != "kube-ca.crt" {
+		t.Fatalf("secrets volume sources %+v", src)
 	}
 	if len(pod.Spec.Volumes) != 4 || pod.Annotations[InjectedAnnotation] != "true" {
 		t.Errorf("volumes %d, annotations %v", len(pod.Spec.Volumes), pod.Annotations)
+	}
+
+	// Bootstrap deny.
+	deny := traefikPod()
+	s := sidecar
+	s.DenyBeforeBundle = true
+	Inject(deny, s)
+	if !slices.Contains(deny.Spec.InitContainers[0].Args, "--bootstrap=deny") {
+		t.Error("bootstrap deny not passed")
 	}
 
 	// Injecting again changes nothing.

@@ -4,7 +4,8 @@
 // Package agent connects the engine to the operator (0002 §5.2): it keeps
 // one stream open, verifies and applies every bundle the operator sends, and
 // reports what it applied. Without the operator the engine keeps enforcing
-// the last bundle it applied, also across restarts through an on-disk cache.
+// the last bundle it applied, also across restarts through an on-disk cache;
+// a new engine with no cache reads the bundle Secret instead.
 package agent
 
 import (
@@ -58,6 +59,10 @@ type Config struct {
 	// CacheFile, if set, keeps the last applied bundle, so a restarted
 	// engine enforces it before the operator is reachable.
 	CacheFile string
+	// Secret, if set, is read when the engine has no bundle: at startup
+	// without a usable cache, and between attempts to reach the operator
+	// until a bundle is applied.
+	Secret *SecretSource
 
 	EngineID      string
 	PodNamespace  string
@@ -87,6 +92,8 @@ type Agent struct {
 	mu sync.Mutex
 	// current is the applied bundle, nil before the first.
 	current *bundlev1.Bundle
+	// applied is closed when the first bundle is applied.
+	applied chan struct{}
 
 	connected prometheus.Gauge
 	version   prometheus.Gauge
@@ -121,9 +128,10 @@ func New(cfg Config) (*Agent, error) {
 		cfg.MaxBackoff = DefaultMaxBackoff
 	}
 	return &Agent{
-		cfg: cfg,
-		key: key,
-		log: cfg.Logger.With(slog.String("component", "agent")),
+		cfg:     cfg,
+		key:     key,
+		log:     cfg.Logger.With(slog.String("component", "agent")),
+		applied: make(chan struct{}),
 		connected: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "inkwall_operator_connected",
 			Help: "1 while the engine has a stream open to the operator.",
@@ -151,10 +159,15 @@ func (a *Agent) Version() uint64 {
 	return a.current.GetVersion()
 }
 
-// Run loads the cached bundle, then keeps a stream to the operator open
-// until ctx ends, reconnecting with backoff.
+// Applied is closed once a bundle is applied: the cached one, the
+// Secret's or the operator's.
+func (a *Agent) Applied() <-chan struct{} { return a.applied }
+
+// Run loads the cached bundle, or else the bundle Secret's, then keeps a
+// stream to the operator open until ctx ends, reconnecting with backoff.
 func (a *Agent) Run(ctx context.Context) error {
 	a.loadCache()
+	a.loadSecret(ctx)
 	backoff := a.cfg.MinBackoff
 	for {
 		start := time.Now()
@@ -163,6 +176,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
+		// Still nothing to enforce, and the operator is unreachable: the
+		// Secret may be readable by now.
+		a.loadSecret(ctx)
 		// A stream that lasted resets the backoff.
 		if time.Since(start) > a.cfg.MaxBackoff {
 			backoff = a.cfg.MinBackoff
@@ -322,6 +338,9 @@ func (a *Agent) apply(signed *bundlev1.SignedBundle, cache bool) (uint64, error)
 		return b.GetVersion(), err
 	}
 	a.cfg.Holder.Store(set)
+	if a.current == nil {
+		close(a.applied)
+	}
 	a.current = &b
 	a.version.Set(float64(b.GetVersion()))
 	a.applies.WithLabelValues("applied").Inc()
@@ -358,6 +377,26 @@ func (a *Agent) loadCache() {
 		}
 	}
 	a.log.Warn("cached bundle not usable; waiting for the operator", slog.String("file", a.cfg.CacheFile), slog.Any("error", err))
+}
+
+// loadSecret applies the bundle Secret's bundle, if the engine has none.
+func (a *Agent) loadSecret(ctx context.Context) {
+	if a.cfg.Secret == nil || a.Version() != 0 || ctx.Err() != nil {
+		return
+	}
+	signed, err := a.cfg.Secret.fetch(ctx)
+	if err == nil {
+		var version uint64
+		// Cached, so a restart doesn't need the Secret again.
+		version, err = a.apply(signed, true)
+		if err == nil {
+			a.log.Info("bundle applied from the Secret", slog.String("secret", a.cfg.Secret.Namespace+"/"+a.cfg.Secret.Name), slog.Uint64("version", version))
+			return
+		}
+	}
+	if ctx.Err() == nil {
+		a.log.Warn("can't read the bundle Secret; waiting for the operator", slog.String("secret", a.cfg.Secret.Namespace+"/"+a.cfg.Secret.Name), slog.Any("error", err))
+	}
 }
 
 // writeCache replaces the cache file atomically.

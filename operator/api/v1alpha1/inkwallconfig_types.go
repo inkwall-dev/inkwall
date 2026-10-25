@@ -38,6 +38,20 @@ const (
 	AdapterModule      AdapterKind = "Module"
 )
 
+// BootstrapMode is what an engine does with requests before it has a policy
+// bundle (0004 §4.6).
+// +kubebuilder:validation:Enum=AllowAll;DenyAll
+type BootstrapMode string
+
+// The bootstrap modes.
+const (
+	// BootstrapAllowAll lets requests through uninspected: availability
+	// first.
+	BootstrapAllowAll BootstrapMode = "AllowAll"
+	// BootstrapDenyAll rejects them with 503.
+	BootstrapDenyAll BootstrapMode = "DenyAll"
+)
+
 // InkwallConfigSpec is the cluster-wide configuration.
 // +kubebuilder:validation:XValidation:rule="!has(self.mode) || self.mode == 'Standalone' || has(self.controlPlane)",message="controlPlane is required in GitOps and Managed mode"
 type InkwallConfigSpec struct {
@@ -102,6 +116,16 @@ type EngineSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self.startsWith('/')",message="socketDir must be an absolute path"
 	// +optional
 	SocketDir string `json:"socketDir,omitempty"`
+
+	// BootstrapMode is what a new engine does with requests when it has no
+	// bundle yet: no cached bundle, the bundle Secret unreadable and the
+	// operator unreachable. It waits up to 10 seconds for one before its
+	// proxy takes traffic, then allows (AllowAll) or rejects (DenyAll) the
+	// requests until a bundle arrives. Applies to pods injected from then
+	// on.
+	// +kubebuilder:default=AllowAll
+	// +optional
+	BootstrapMode BootstrapMode `json:"bootstrapMode,omitempty"`
 }
 
 // IntegrationSpec overrides discovery for one proxy controller.

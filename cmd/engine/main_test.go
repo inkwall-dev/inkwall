@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/telemetry"
@@ -205,6 +206,36 @@ func TestParseBundleModeFlags(t *testing.T) {
 		_, err := parseFlags(cmdForwardAuth, append([]string{"--operator", "op:9445"}, args...), io.Discard)
 		if err == nil || !strings.Contains(err.Error(), args[0]) || !strings.Contains(err.Error(), "bundle") {
 			t.Errorf("%v with --operator: got %v", args, err)
+		}
+	}
+}
+
+func TestParseBootstrapFlags(t *testing.T) {
+	cfg, err := parseFlags(cmdForwardAuth, []string{"--operator", "op:9445"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.bundleSecret != "" || cfg.bootstrapDeny || cfg.bootstrapTimeout != 10*time.Second ||
+		cfg.kubeToken != "/var/run/secrets/inkwall/kube-token" || cfg.kubeCA != "/var/run/secrets/inkwall/kube-ca.crt" {
+		t.Errorf("defaults: %+v", cfg)
+	}
+	cfg, err = parseFlags(cmdForwardAuth, []string{
+		"--operator", "op:9445", "--bundle-secret", "inkwall-system/inkwall-bundle", "--bootstrap", "deny", "--bootstrap-timeout", "0",
+	}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.bundleSecret != "inkwall-system/inkwall-bundle" || !cfg.bootstrapDeny || cfg.bootstrapTimeout != 0 {
+		t.Errorf("got %+v", cfg)
+	}
+	for _, args := range [][]string{
+		{"--operator", "op:9445", "--bootstrap", "maybe"},
+		{"--operator", "op:9445", "--bundle-secret", "inkwall-bundle"},
+		{"--operator", "op:9445", "--bundle-secret", "a/b/c"},
+		{"--bundle-secret", "inkwall-system/inkwall-bundle"},
+	} {
+		if _, err := parseFlags(cmdForwardAuth, args, io.Discard); err == nil {
+			t.Errorf("%v: accepted", args)
 		}
 	}
 }

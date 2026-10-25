@@ -45,6 +45,9 @@ type PodInjector struct {
 	PullPolicy corev1.PullPolicy
 	// OperatorAddr is the distribution server engines connect to.
 	OperatorAddr string
+	// BundleSecret is the bundle Secret, namespace/name, engines read when
+	// the operator is unreachable.
+	BundleSecret string
 }
 
 var _ admission.Handler = (*PodInjector)(nil)
@@ -59,7 +62,7 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 	if integ == nil {
 		return admission.Allowed("not a proxy pod")
 	}
-	s := injection.Sidecar{Image: p.Image, PullPolicy: p.PullPolicy, OperatorAddr: p.OperatorAddr, Args: integ.Adapter}
+	s := injection.Sidecar{Image: p.Image, PullPolicy: p.PullPolicy, OperatorAddr: p.OperatorAddr, BundleSecret: p.BundleSecret, Args: integ.Adapter}
 	var cfg wafv1alpha1.InkwallConfig
 	switch err := p.Client.Get(ctx, types.NamespacedName{Name: "default"}, &cfg); {
 	case err == nil:
@@ -67,6 +70,7 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 			s.Image = cfg.Spec.Engine.Image
 		}
 		s.Resources = cfg.Spec.Engine.Resources
+		s.DenyBeforeBundle = cfg.Spec.Engine.BootstrapMode == wafv1alpha1.BootstrapDenyAll
 	case !apierrors.IsNotFound(err):
 		// Fail open, as the webhook does: the pod starts without the engine.
 		log.FromContext(ctx).Error(err, "reading the InkwallConfig; the pod starts without the engine", "namespace", req.Namespace)
