@@ -10,10 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -29,6 +31,7 @@ import (
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/internal/controller"
+	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/operator/internal/resolver"
 	"github.com/inkwall-dev/inkwall/operator/webhook"
 )
@@ -69,9 +72,23 @@ type Options struct {
 	WebhookCerts   string
 	WebhookService string
 	WebhookSecret  string
-	// WebhookDNSNames replaces the webhook Service's names in the serving
-	// certificate; for tests, where the API server calls localhost.
+	// WebhookDNSNames replaces the Services' names in the serving
+	// certificate; for tests, where everything calls localhost.
 	WebhookDNSNames []string
+
+	// DistributionPort serves bundles to the engines (gRPC over TLS, with
+	// the webhook's certificate); 0 disables.
+	DistributionPort int
+	// DistributionService is the Service engines reach it through, named in
+	// the certificate.
+	DistributionService string
+	// Replica names this replica (its Pod; default: the host name), and
+	// ReplicaUID, if set, makes its engine report go with the Pod.
+	Replica    string
+	ReplicaUID types.UID
+	// EngineReportInterval is how often replicas publish their engines and
+	// the leader updates Enforced; 0: 2s.
+	EngineReportInterval time.Duration
 }
 
 // NewScheme returns the types the operator reads and writes.
@@ -128,54 +145,128 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
+	ready, err := addCerts(mgr, o)
+	if err != nil {
+		return nil, err
+	}
 	if o.Webhooks {
-		if err := addWebhooks(mgr, o); err != nil {
+		starter := &webhookStarter{mgr: mgr, ready: ready}
+		if err := mgr.Add(starter); err != nil {
 			return nil, err
 		}
-	} else if err := mgr.AddReadyzCheck("ping", healthz.Ping); err != nil {
-		return nil, err
+		if err := mgr.AddReadyzCheck("webhook", starter.check); err != nil {
+			return nil, err
+		}
+	}
+	if o.DistributionPort != 0 {
+		if err := addDistribution(mgr, o, ready); err != nil {
+			return nil, err
+		}
+	}
+	if !o.Webhooks && o.DistributionPort == 0 {
+		if err := mgr.AddReadyzCheck("ping", healthz.Ping); err != nil {
+			return nil, err
+		}
 	}
 	return mgr, nil
 }
 
-// addWebhooks starts the webhook server once its certificate is in place.
-// The server reads the certificate files when it starts, so registering the
-// webhooks (which adds the server to the manager) waits for the rotator.
-// The replica reports ready only once it serves the webhook.
-func addWebhooks(mgr manager.Manager, o Options) error {
+// addCerts sets up the serving certificate the webhook and the
+// distribution server share, and returns a channel closed once it is in
+// place: the servers read it when they start.
+func addCerts(mgr manager.Manager, o Options) (<-chan struct{}, error) {
 	ready := make(chan struct{})
-	switch o.WebhookCerts {
-	case CertsRotate:
-		dns := o.WebhookDNSNames
-		if len(dns) == 0 {
-			dns = webhook.ServiceDNSNames(o.WebhookService, o.Namespace)
-		}
-		secret := types.NamespacedName{Namespace: o.Namespace, Name: o.WebhookSecret}
-		c, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
-		if err != nil {
-			return err
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := webhook.EnsureCertSecret(ctx, c, secret); err != nil {
-			return err
-		}
-		err = webhook.AddCertRotator(mgr, webhook.CertOptions{
-			Secret:   secret,
-			CertDir:  o.WebhookCertDir,
-			DNSNames: dns,
-		}, ready)
-		if err != nil {
-			return err
-		}
-	case CertsExternal:
-		close(ready)
+	if !o.Webhooks && o.DistributionPort == 0 {
+		return ready, nil
 	}
-	starter := &webhookStarter{mgr: mgr, ready: ready}
-	if err := mgr.Add(starter); err != nil {
+	if o.WebhookCerts == CertsExternal {
+		close(ready)
+		return ready, nil
+	}
+	dns := o.WebhookDNSNames
+	if len(dns) == 0 {
+		if o.Webhooks {
+			dns = append(dns, webhook.ServiceDNSNames(o.WebhookService, o.Namespace)...)
+		}
+		if o.DistributionPort != 0 {
+			dns = append(dns, webhook.ServiceDNSNames(o.DistributionService, o.Namespace)...)
+		}
+	}
+	secret := types.NamespacedName{Namespace: o.Namespace, Name: o.WebhookSecret}
+	c, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := webhook.EnsureCertSecret(ctx, c, secret); err != nil {
+		return nil, err
+	}
+	err = webhook.AddCertRotator(mgr, webhook.CertOptions{
+		Secret:         secret,
+		CertDir:        o.WebhookCertDir,
+		DNSNames:       dns,
+		InjectWebhooks: o.Webhooks,
+	}, ready)
+	return ready, err
+}
+
+// addDistribution serves bundles to the engines on every replica, and
+// reports Enforced from the leader.
+func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}) error {
+	replica := o.Replica
+	if replica == "" {
+		h, err := os.Hostname()
+		if err != nil {
+			return err
+		}
+		replica = h
+	}
+	interval := o.EngineReportInterval
+	if interval == 0 {
+		interval = 2 * time.Second
+	}
+	store, table := distribution.NewStore(), distribution.NewTable()
+	if err := (&distribution.BundleSource{Client: mgr.GetClient(), Namespace: o.Namespace, Store: store}).SetupWithManager(mgr); err != nil {
 		return err
 	}
-	return mgr.AddReadyzCheck("webhook", starter.check)
+	auth := &distribution.KubeAuthenticator{Client: mgr.GetClient(), Namespace: o.Namespace, TTL: time.Minute}
+	srv := &distribution.GRPCServer{
+		Port:    o.DistributionPort,
+		CertDir: o.WebhookCertDir,
+		Ready:   ready,
+		Service: distribution.NewServer(store, table, auth, replica, ctrl.Log.WithName("distribution")),
+	}
+	if err := mgr.Add(srv); err != nil {
+		return err
+	}
+	if err := mgr.AddReadyzCheck("distribution", srv.Check); err != nil {
+		return err
+	}
+	pub := &distribution.Publisher{
+		Client:    mgr.GetClient(),
+		Reader:    mgr.GetAPIReader(),
+		Namespace: o.Namespace,
+		Replica:   replica,
+		Engines:   table,
+		Interval:  interval,
+		// The leader ignores a report older than three refreshes.
+		Refresh: 5 * interval,
+	}
+	if o.ReplicaUID != "" {
+		pub.Owner = &metav1.OwnerReference{APIVersion: "v1", Kind: "Pod", Name: replica, UID: o.ReplicaUID}
+	}
+	if err := mgr.Add(pub); err != nil {
+		return err
+	}
+	return mgr.Add(&distribution.Reporter{
+		Client:    mgr.GetClient(),
+		Reader:    mgr.GetAPIReader(),
+		Namespace: o.Namespace,
+		Interval:  interval,
+		Stale:     15 * interval,
+		Store:     store,
+	})
 }
 
 // webhookStarter registers the webhooks once the certificate is ready. It

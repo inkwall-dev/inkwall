@@ -20,6 +20,7 @@ import (
 	"os"
 
 	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/inkwall-dev/inkwall/operator/manager"
@@ -32,7 +33,12 @@ func main() {
 func parseFlags(args []string, stderr io.Writer) (manager.Options, error) {
 	fs := flag.NewFlagSet("inkwall-operator", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	o := manager.Options{Namespace: os.Getenv("POD_NAMESPACE")}
+	// The downward API sets these in a cluster.
+	o := manager.Options{
+		Namespace:  os.Getenv("POD_NAMESPACE"),
+		Replica:    os.Getenv("POD_NAME"),
+		ReplicaUID: types.UID(os.Getenv("POD_UID")),
+	}
 	if o.Namespace == "" {
 		o.Namespace = "inkwall-system"
 	}
@@ -45,7 +51,9 @@ func parseFlags(args []string, stderr io.Writer) (manager.Options, error) {
 	fs.StringVar(&o.WebhookCertDir, "webhook-cert-dir", "/tmp/k8s-webhook-server/serving-certs", "directory of the webhook's tls.crt and tls.key")
 	fs.StringVar(&o.WebhookCerts, "webhook-certs", manager.CertsRotate, "where the webhook certificate comes from: rotate (the operator creates and renews it, and injects its CA) or external (files in --webhook-cert-dir, e.g. from cert-manager)")
 	fs.StringVar(&o.WebhookService, "webhook-service", "inkwall-operator-webhook", "Service the API server reaches the webhook through, named in the certificate")
-	fs.StringVar(&o.WebhookSecret, "webhook-cert-secret", "inkwall-operator-webhook-tls", "Secret, in --namespace, that holds the rotated certificate")
+	fs.StringVar(&o.WebhookSecret, "webhook-cert-secret", "inkwall-operator-webhook-tls", "Secret, in --namespace, that holds the rotated certificate (shared with the distribution server)")
+	fs.IntVar(&o.DistributionPort, "distribution-port", 9445, "port of the gRPC server that sends bundles to the engines, over TLS with the webhook's certificate (0 disables)")
+	fs.StringVar(&o.DistributionService, "distribution-service", "inkwall-operator", "Service engines reach the distribution server through, named in the certificate")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}

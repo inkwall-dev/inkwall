@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +30,9 @@ import (
 )
 
 var env *testenv.Env
+
+// distAddr is the operator's distribution server in the test.
+var distAddr string
 
 func TestMain(m *testing.M) {
 	// Operator logs go to stderr, shown for failing tests with -v.
@@ -85,6 +89,9 @@ func startOperator(t *testing.T) (context.Context, client.Client, *warnings) {
 	t.Helper()
 	testenv.Skip(t, env)
 	probe := freeAddr(t)
+	distAddr = freeAddr(t)
+	_, port, _ := net.SplitHostPort(distAddr)
+	distPort, _ := strconv.Atoi(port)
 	mgr, err := New(env.Config, Options{
 		MetricsAddr:     "0",
 		ProbeAddr:       probe,
@@ -97,6 +104,10 @@ func startOperator(t *testing.T) (context.Context, client.Client, *warnings) {
 		WebhookCerts:    CertsRotate,
 		WebhookSecret:   "inkwall-operator-webhook-tls",
 		WebhookDNSNames: []string{"localhost"},
+
+		DistributionPort:     distPort,
+		Replica:              "operator-0",
+		EngineReportInterval: 200 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -155,6 +166,7 @@ func TestOperator(t *testing.T) {
 	ctx, c, warn := startOperator(t)
 	t.Run("webhook", func(t *testing.T) { testWebhook(ctx, t, c, warn) })
 	t.Run("bundles", func(t *testing.T) { testBundles(ctx, t, c) })
+	t.Run("distribution", func(t *testing.T) { testDistribution(ctx, t, c) })
 }
 
 // testWebhook checks the webhook as deployed: the operator creates the
