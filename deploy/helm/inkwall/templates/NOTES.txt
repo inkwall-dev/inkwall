@@ -10,7 +10,12 @@ the repository) and list the Inkwall objects:
   kubectl get inkwall -A
 
 The operator validates rule sets and policies when they are saved, builds
-them into a signed bundle and serves it to engines on
-{{ include "inkwall.distribution.service" . }}.{{ .Release.Namespace }}.svc:{{ .Values.distribution.port }}.
-Injecting the engine into Traefik and wiring it comes next (#27); until
-then, policies show Enforced=False with reason NoEngines.
+them into a signed bundle, injects the engine into Traefik's pods when they
+start, and wires every Ingress a WAFPolicy targets to it. Traefik pods that
+ran before the install are injected when restarted:
+
+  kubectl -n <traefik namespace> rollout restart deployment/<traefik>
+
+A policy is Ready once accepted, wired and enforced by every engine:
+
+  kubectl get wafpolicy -A

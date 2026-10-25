@@ -297,6 +297,29 @@ it isn't.
 Every field the operator writes on a non-operator object is listed in `docs/gitops.md` with
 ready-to-paste Argo CD `ignoreDifferences` and Flux equivalents.
 
+As built for Traefik (`operator/internal/wiring`):
+
+- Every Ingress a `WAFPolicy` targets and Traefik serves (its class's controller is
+  `traefik.io/ingress-controller`, by `ingressClassName`, the legacy `kubernetes.io/ingress.class`
+  annotation or the default class) is wired, accepted or not: until the policy's rules are in a
+  bundle the engine lets its routes through (`no-policy`).
+- One operator-owned ForwardAuth `Middleware`, `inkwall-waf`, in each namespace with such
+  Ingresses (`trustForwardHeader: false`, `forwardBody: true`, `maxBodySize` 10 MiB, the largest
+  `body.maxBytes`), removed when the namespace has none left. A `Middleware` of that name the
+  operator didn't create is left alone and reported (`WiringFailed`).
+- The Ingress's `traefik.ingress.kubernetes.io/router.middlewares` annotation gets the operator's
+  Middleware first, keeping the user's in order, and `waf.inkwall.dev/wired` records it; when the
+  Ingress is no longer protected, only that entry is removed. Level-based: no finalizers.
+- `Programmed`: `True` when the policy's Traefik Ingresses are wired and every running Traefik pod
+  has the engine; otherwise `ControllerUnsupported` (another controller, or not an Ingress),
+  `WiringFailed` (no Traefik CRDs, a Middleware name clash), `PendingRestart` (Traefik pods started
+  before the operator, listed), `SidecarMissing` (no Traefik pod), `NoTargets`. `Ready` is `True`
+  when `Accepted`, `Programmed` and `Enforced` are, and otherwise carries the first failing
+  condition's reason and message.
+- Not yet: IngressRoute and Gateway API `HTTPRoute` targets, a GitOps listing of the annotation in
+  `docs/gitops.md`, matching engines to the Traefik pods that serve a policy's class (every engine
+  counts for `Enforced`).
+
 **Apply semantics:**
 
 - Server-side apply, field manager `inkwall-operator`, `force: true` only on objects the operator

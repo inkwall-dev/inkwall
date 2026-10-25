@@ -752,6 +752,9 @@ does not inspect them as client headers.
   `-Uri` / `-Host` with 400, even in detect mode: they can't be inspected, so they must not be
   allowed.
 - Allowed requests get an `X-Request-Id`, which `authResponseHeaders` copies to the upstream.
+- Known limitation: Traefik answers bodies over `maxBodySize` with 401 itself. The operator sets it
+  to 10 MiB, the largest body a policy can inspect, so larger uploads through a protected route are
+  refused by Traefik regardless of the policy's `body.onOversize`.
 - Known limitation: with `trustForwardHeader: false`, Traefik replaces `X-Forwarded-For` with its
   direct peer, so behind a load balancer the engine sees the load balancer as the client (logs,
   future per-IP rate limits). Fixing this needs Traefik to pass the resolved client IP separately,

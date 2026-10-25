@@ -87,6 +87,25 @@ func engineName(e Engine) string {
 	return e.ID
 }
 
+// Ready combines a policy's conditions (0004 §3.2): True when Accepted,
+// Programmed and Enforced all are; otherwise the first that isn't, by its
+// reason, so kubectl shows what is missing.
+func Ready(conds []metav1.Condition, generation int64) metav1.Condition {
+	for _, t := range []string{wafv1alpha1.ConditionAccepted, wafv1alpha1.ConditionProgrammed, wafv1alpha1.ConditionEnforced} {
+		c := meta.FindStatusCondition(conds, t)
+		if c == nil {
+			return metav1.Condition{Type: wafv1alpha1.ConditionReady, Status: metav1.ConditionFalse, Reason: "Not" + t,
+				Message: t + " is not reported yet", ObservedGeneration: generation}
+		}
+		if c.Status != metav1.ConditionTrue {
+			return metav1.Condition{Type: wafv1alpha1.ConditionReady, Status: metav1.ConditionFalse, Reason: c.Reason,
+				Message: t + ": " + c.Message, ObservedGeneration: generation}
+		}
+	}
+	return metav1.Condition{Type: wafv1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: "Ready",
+		Message: "accepted, programmed into the proxy and enforced by every engine", ObservedGeneration: generation}
+}
+
 // Reporter writes the Enforced condition of every policy. It runs on the
 // leader, from the replicas' engine reports.
 type Reporter struct {
@@ -170,9 +189,13 @@ func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, engines 
 		}
 		first = false
 		st, reason, msg := Enforced(p.Status.BundleVersion, engines)
-		if !meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
+		changed := meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
 			Type: wafv1alpha1.ConditionEnforced, Status: st, Reason: reason, Message: msg, ObservedGeneration: p.Generation,
-		}) {
+		})
+		if meta.SetStatusCondition(&p.Status.Conditions, Ready(p.Status.Conditions, p.Generation)) {
+			changed = true
+		}
+		if !changed {
 			return nil
 		}
 		return r.Client.Status().Update(ctx, p)

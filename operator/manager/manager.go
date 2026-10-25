@@ -37,6 +37,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/operator/internal/resolver"
+	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
 	"github.com/inkwall-dev/inkwall/operator/webhook"
 )
 
@@ -172,6 +173,9 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			Image:        o.EngineImage,
 			PullPolicy:   o.EnginePullPolicy,
 			OperatorAddr: fmt.Sprintf("%s.%s.svc:%d", o.DistributionService, o.Namespace, o.DistributionPort),
+		}
+		if err := (&wiring.Reconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader()}).SetupWithManager(mgr); err != nil {
+			return nil, err
 		}
 		if err := (&injection.Reconciler{
 			Client:     mgr.GetClient(),

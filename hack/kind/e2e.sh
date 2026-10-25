@@ -16,6 +16,10 @@ OPERATOR_NS=inkwall-system
 NS=inkwall-e2e
 HOST=e2e.example.com
 PORT=${E2E_PORT:-18480}
+TRAEFIK_PORT=${E2E_TRAEFIK_PORT:-18080}
+TRAEFIK_NS=traefik-e2e
+TRAEFIK_HOST=traefik.e2e.example.com
+TRAEFIK_CHART_VERSION=41.6.1 # Traefik v3.7.13, as hack/kind/up.sh
 KUBECTL=(kubectl --context "kind-$CLUSTER")
 SQLI='/?id=1%27%20OR%20%271%27%3D%271'
 
@@ -93,10 +97,13 @@ kind load docker-image "$IMAGE" --name "$CLUSTER"
 trust=$(mktemp -d)
 cleanup() {
   if [[ -n ${pf:-} ]]; then kill "$pf" 2>/dev/null || true; fi
+  if [[ -n ${tpf:-} ]]; then kill "$tpf" 2>/dev/null || true; fi
   rm -rf "$trust"
   if [[ ${KEEP:-} != 1 ]]; then
     "${KUBECTL[@]}" delete namespace "$NS" --wait=false >/dev/null 2>&1 || true
     "${KUBECTL[@]}" -n "$OPERATOR_NS" delete role,rolebinding inkwall-e2e-bundle-reader >/dev/null 2>&1 || true
+    helm --kube-context "kind-$CLUSTER" -n "$TRAEFIK_NS" uninstall traefik-e2e >/dev/null 2>&1 || true
+    "${KUBECTL[@]}" delete namespace "$TRAEFIK_NS" --wait=false >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
@@ -151,6 +158,96 @@ eventually "Enforced again once the operator is back" enforced_by_all
 echo "== the policy deleted"
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy app >/dev/null
 eventually "enforcement stops" status_is 200 "$SQLI"
+
+# Through Traefik (#27): a Traefik installed with nothing about Inkwall gets
+# the engine injected, and a policy on an Ingress it serves is wired,
+# enforced in Traefik's pod and Ready.
+tcode() {
+  curl -s -o /dev/null -w '%{http_code}' -H "Host: $TRAEFIK_HOST" "http://127.0.0.1:$TRAEFIK_PORT$1" || true
+}
+tstatus_is() { [[ $(tcode "$2") == "$1" ]]; }
+tcondition() {
+  "${KUBECTL[@]}" -n "$NS" get wafpolicy web -o jsonpath="{.status.conditions[?(@.type==\"$1\")].$2}" 2>/dev/null
+}
+ready() { [[ $(tcondition Ready status) == True ]]; }
+wired() {
+  [[ $("${KUBECTL[@]}" -n "$NS" get ingress web -o jsonpath='{.metadata.annotations.traefik\.ingress\.kubernetes\.io/router\.middlewares}') == *inkwall-waf@kubernetescrd* ]]
+}
+unwired() { ! wired; }
+traefik_injected() {
+  [[ $("${KUBECTL[@]}" -n "$TRAEFIK_NS" get pods -l app.kubernetes.io/name=traefik -o jsonpath='{.items[*].spec.initContainers[0].name}') == inkwall-engine ]]
+}
+
+echo "== through Traefik"
+helm --kube-context "kind-$CLUSTER" upgrade --install traefik-e2e traefik --repo https://traefik.github.io/charts \
+  --version "$TRAEFIK_CHART_VERSION" --namespace "$TRAEFIK_NS" --create-namespace --values hack/kind/traefik-e2e-values.yaml >/dev/null
+"${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout status deployment/traefik-e2e --timeout=180s >/dev/null
+check "Traefik's pod has the injected engine" traefik_injected
+"${KUBECTL[@]}" apply -f - >/dev/null <<YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: $NS
+spec:
+  selector: {matchLabels: {app: web}}
+  template:
+    metadata:
+      labels: {app: web}
+    spec:
+      containers:
+        - name: web
+          image: traefik/whoami:v1.10.3
+          args: ["--port", "8080"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: $NS
+spec:
+  selector: {app: web}
+  ports: [{name: http, port: 8080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+  namespace: $NS
+spec:
+  ingressClassName: traefik-e2e
+  rules:
+    - host: $TRAEFIK_HOST
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: {service: {name: web, port: {number: 8080}}}
+YAML
+"${KUBECTL[@]}" -n "$NS" rollout status deployment/web --timeout=120s >/dev/null
+"${KUBECTL[@]}" -n "$TRAEFIK_NS" port-forward svc/traefik-e2e "$TRAEFIK_PORT:80" >/dev/null 2>&1 &
+tpf=$!
+eventually "Traefik serves the app" tstatus_is 200 /
+check "no policy yet: the attack passes through Traefik" tstatus_is 200 "$SQLI"
+
+"${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: web
+  namespace: $NS
+spec:
+  targetRefs: [{kind: Ingress, name: web}]
+  mode: Block
+YAML
+eventually "the operator wired the Ingress" wired
+eventually "the engine in Traefik's pod blocks the attack" tstatus_is 403 "$SQLI"
+check "benign traffic passes through Traefik" tstatus_is 200 /products/42
+eventually "the policy is Ready" ready
+
+"${KUBECTL[@]}" -n "$NS" delete wafpolicy web >/dev/null
+eventually "unwired when the policy is deleted" unwired
+eventually "the attack passes again" tstatus_is 200 "$SQLI"
 
 if [[ $failures -gt 0 ]]; then
   echo "$failures check(s) failed; engine logs:"
