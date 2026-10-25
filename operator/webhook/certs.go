@@ -34,9 +34,12 @@ type CertOptions struct {
 	// CertDir is where the certificate files are written for the webhook
 	// server.
 	CertDir string
-	// DNSNames are the names the API server reaches the webhook at,
-	// normally the webhook Service's.
+	// DNSNames are the names the certificate is valid for: the webhook
+	// Service's, and the distribution Service's.
 	DNSNames []string
+	// InjectWebhooks injects the CA into the validating webhook
+	// configuration; off when the webhook is disabled.
+	InjectWebhooks bool
 }
 
 // ServiceDNSNames returns the names of a Service, for CertOptions.DNSNames.
@@ -79,17 +82,19 @@ func AddCertRotator(mgr manager.Manager, o CertOptions, ready chan struct{}) err
 	if err := mgr.Add(&certFileSync{reader: mgr.GetAPIReader(), secret: o.Secret, dir: o.CertDir}); err != nil {
 		return err
 	}
+	var webhooks []rotator.WebhookInfo
+	if o.InjectWebhooks {
+		webhooks = []rotator.WebhookInfo{{Name: ValidatingConfigName, Type: rotator.Validating}}
+	}
 	return rotator.AddRotator(mgr, &rotator.CertRotator{
-		SecretKey:      o.Secret,
-		CertDir:        o.CertDir,
-		CAName:         "inkwall-operator-webhook-ca",
-		CAOrganization: "Inkwall",
-		DNSName:        o.DNSNames[0],
-		ExtraDNSNames:  o.DNSNames[1:],
-		IsReady:        ready,
-		Webhooks: []rotator.WebhookInfo{
-			{Name: ValidatingConfigName, Type: rotator.Validating},
-		},
+		SecretKey:             o.Secret,
+		CertDir:               o.CertDir,
+		CAName:                "inkwall-operator-webhook-ca",
+		CAOrganization:        "Inkwall",
+		DNSName:               o.DNSNames[0],
+		ExtraDNSNames:         o.DNSNames[1:],
+		IsReady:               ready,
+		Webhooks:              webhooks,
 		FieldOwner:            "inkwall-operator",
 		RequireLeaderElection: false,
 		// Renew well before expiry, and check often enough to notice.

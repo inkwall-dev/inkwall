@@ -3,7 +3,8 @@
 The Kubernetes operator ([design](../docs/design/0004-operator.md)). It is being built in the
 milestones of 0004 §11; today it has the API, the validating webhook, and the bundle builder:
 it compiles `WAFPolicy` objects and the Ingresses they target into a signed bundle, and reports
-each policy's `Accepted` condition. Sending bundles to the engines comes next.
+each policy's `Accepted` condition, and serves the bundle to the engines over gRPC, reporting
+`Enforced` from their acknowledgements.
 
 | Path | What |
 |---|---|
@@ -16,6 +17,8 @@ each policy's `Accepted` condition. Sending bundles to the engines comes next.
 | `internal/resolver/` | `WAFPolicy` + Ingresses + rule sets → bundle policies and `Accepted` conditions |
 | `internal/bundle/` | Content hash, versions, ed25519 signing, the bundle and signing key Secrets |
 | `internal/controller/` | The bundle builder (leader only) |
+| `internal/distribution/` | The `BundleService` server, engine authentication, engine reports, `Enforced` |
+| `test/fakeengine/` | A lightweight engine that speaks the bundle protocol, for tests |
 | `test/testenv/` | Starts a local API server (envtest) for tests |
 | [`../cmd/operator`](../cmd/operator) | The `inkwall-operator` binary |
 
@@ -59,6 +62,19 @@ Secret. A policy that can't be resolved keeps its previous version in force and 
 ```sh
 kubectl get wafpolicy -A            # BUNDLE: the version that contains the current spec
 kubectl -n inkwall-system get secret inkwall-bundle -o jsonpath='{.metadata.annotations}'
+```
+
+## Engines
+
+Every replica serves the bundle on port 9445 (gRPC, TLS). An engine authenticates with a projected
+ServiceAccount token for the audience `inkwall-operator`, and its ServiceAccount must be allowed to
+`get` the `inkwall-bundle` Secret, the same grant it needs to start from that Secret when the
+operator is down. The operator pushes each new bundle; the engine answers with an ack or a nack, and
+`Enforced` on each policy says how many engines run it:
+
+```sh
+kubectl get wafpolicy web -n web -o jsonpath='{.status.conditions[?(@.type=="Enforced")].message}'
+# 3/3 engines on bundle 42
 ```
 
 ## Changing the API

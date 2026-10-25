@@ -362,10 +362,32 @@ is not published, and the current one stays.
   merges them (via a small aggregation endpoint between replicas, or through a status ConfigMap
   written at most every few seconds).
 
+As built (`operator/internal/distribution`):
+
+- Port 9445 (`--distribution-port`), TLS with the webhook's certificate, which also names the
+  `inkwall-operator` Service. Engines verify it with the operator's CA.
+- **Authorization uses Kubernetes RBAC:** after `TokenReview` (audience `inkwall-operator`), a
+  `SubjectAccessReview` checks that the engine's ServiceAccount may `get` the bundle Secret: the
+  grant injection makes for cold start (§4.3). Results are cached for a minute.
+- The first message must be `Hello`; an engine already on the current version is not sent it again.
+  A stream silent for 30 s (no heartbeat) is closed. At most 50 bundle sends run at once.
+- **Aggregation through ConfigMaps:** each replica writes its connected engines to
+  `inkwall-engines-<pod>` (owned by its Pod) when they change and every 10 s; the leader merges the
+  reports every 2 s, ignoring any not refreshed for 30 s, and counts an engine that moved between
+  replicas once.
+
 ### 4.8 Status aggregator
 
 Combines resolver results, wiring health, and engine ACKs into the conditions of §3.2. Writes are
 rate-limited (at most one status update per object per 2 s) to avoid API server churn at scale.
+
+As built: `Enforced` is True when every connected engine runs a bundle at least as new as the
+policy's `status.bundleVersion`; otherwise `NoEngines`, `EnginesBehind` (`1/3 engines on bundle
+42`) or `EngineNack` (with the first engine's error), or `NotInBundle` before the policy's spec is in
+a bundle. Every engine receives the same bundle, so every engine counts, until injection matches
+engines to the routes they serve. Status is written only when it changes. `Ready` follows once
+`Programmed` exists (wiring, #27). Metrics: `inkwall_operator_bundle_version` and
+`inkwall_operator_engines{state}`.
 
 Metrics: `inkwall_operator_bundle_version`, `inkwall_operator_engines{integration,state}`,
 `inkwall_operator_reconcile_duration_seconds{controller}`,
