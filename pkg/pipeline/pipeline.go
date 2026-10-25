@@ -99,8 +99,12 @@ type Config struct {
 	// MaxConcurrent bounds how many evaluations run at once, including ones
 	// that already timed out and are still finishing. When all slots are
 	// busy, new requests get the failure mode immediately (ReasonOverload)
-	// instead of adding work. Zero means 2 * GOMAXPROCS.
+	// instead of adding work. Zero means 2 * GOMAXPROCS. Ignored when
+	// Admission is set.
 	MaxConcurrent int
+	// Admission, if set, is shared with other pipelines (one per policy),
+	// so the bound holds for the whole engine.
+	Admission *Admission
 	// Oversize decides what happens to bodies longer than the inspection
 	// limit (request.Request.BodyTruncated).
 	Oversize OversizeAction
@@ -117,6 +121,38 @@ type Observer interface {
 	ObserveVerdict(v Verdict)
 }
 
+// Inspector is what adapters inspect requests with: one Pipeline, or a set
+// of policies that picks a pipeline per route.
+type Inspector interface {
+	// Check inspects r and returns the verdict.
+	Check(ctx context.Context, r *request.Request) Verdict
+	// BodyLimit returns how many body bytes to read for r, which carries
+	// no body yet: 0 means the body isn't inspected, so it isn't read. max
+	// is the adapter's own limit, used when nothing more specific applies.
+	BodyLimit(r *request.Request, max int64) int64
+}
+
+// Admission bounds how many evaluations run at once.
+type Admission struct {
+	slots chan struct{}
+}
+
+// NewAdmission returns an Admission for n concurrent evaluations; n <= 0
+// means 2 * GOMAXPROCS.
+func NewAdmission(n int) *Admission {
+	if n <= 0 {
+		n = 2 * runtime.GOMAXPROCS(0)
+	}
+	return &Admission{slots: make(chan struct{}, n)}
+}
+
+// InFlight returns the number of evaluations running now, including ones
+// that timed out and are still finishing.
+func (a *Admission) InFlight() int { return len(a.slots) }
+
+// Capacity returns the maximum number of concurrent evaluations.
+func (a *Admission) Capacity() int { return cap(a.slots) }
+
 // Pipeline evaluates requests. It is safe for concurrent use.
 type Pipeline struct {
 	eval     rules.Evaluator
@@ -124,6 +160,7 @@ type Pipeline struct {
 	failure  FailureMode
 	timeout  time.Duration
 	slots    chan struct{}
+	adm      *Admission
 	oversize OversizeAction
 	observer Observer
 	routes   *router.Table
@@ -135,34 +172,36 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	maxConcurrent := cfg.MaxConcurrent
-	if maxConcurrent <= 0 {
-		maxConcurrent = 2 * runtime.GOMAXPROCS(0)
+	adm := cfg.Admission
+	if adm == nil {
+		adm = NewAdmission(cfg.MaxConcurrent)
 	}
 	return &Pipeline{
 		eval:     eval,
 		mode:     cfg.Mode,
 		failure:  cfg.FailureMode.Resolve(cfg.Mode),
 		timeout:  timeout,
-		slots:    make(chan struct{}, maxConcurrent),
+		slots:    adm.slots,
+		adm:      adm,
 		oversize: cfg.Oversize.Resolve(cfg.Mode),
 		observer: cfg.Observer,
 		routes:   cfg.Routes,
 	}
 }
 
-// InspectsBody reports whether a request to rawURI would have its body
-// inspected, so adapters can avoid buffering bodies that are skipped.
-func (p *Pipeline) InspectsBody(rawURI string) bool {
-	return p.routes.Decide(rawURI) == router.InspectAll
+var _ Inspector = (*Pipeline)(nil)
+
+// BodyLimit implements Inspector: max, or 0 for a path whose body is
+// skipped, so adapters don't buffer bodies that aren't inspected.
+func (p *Pipeline) BodyLimit(r *request.Request, max int64) int64 {
+	if p.routes.Decide(r.RawURI) != router.InspectAll {
+		return 0
+	}
+	return max
 }
 
-// InFlight returns the number of evaluations running now, including ones
-// that timed out and are still finishing.
-func (p *Pipeline) InFlight() int { return len(p.slots) }
-
-// Capacity returns the maximum number of concurrent evaluations.
-func (p *Pipeline) Capacity() int { return cap(p.slots) }
+// Admission returns the pipeline's admission limit.
+func (p *Pipeline) Admission() *Admission { return p.adm }
 
 type outcome struct {
 	res rules.Result

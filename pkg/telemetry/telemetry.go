@@ -38,7 +38,7 @@ func NewMetrics(adapter string) *Metrics {
 		registry: reg,
 		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name:        "inkwall_requests_total",
-			Help:        "Requests checked, by action (allow, deny, log) and reason (none, rule, timeout, error, canceled, overload, oversize, skipped). Reasons timeout, error and overload mean the request was not inspected.",
+			Help:        "Requests checked, by action (allow, deny, log) and reason (none, rule, timeout, error, canceled, overload, oversize, skipped, no-policy, suspended). Reasons timeout, error and overload mean the request was not inspected.",
 			ConstLabels: labels,
 		}, []string{"action", "reason"}),
 		duration: prometheus.NewHistogram(prometheus.HistogramOpts{
@@ -59,9 +59,9 @@ func (m *Metrics) ObserveVerdict(v pipeline.Verdict) {
 	m.duration.Observe(v.Duration.Seconds())
 }
 
-// WatchPipeline exports the pipeline's evaluation slot usage, so saturation
-// (and with it, shed requests) is visible before it happens.
-func (m *Metrics) WatchPipeline(p *pipeline.Pipeline) {
+// WatchAdmission exports evaluation slot usage, so saturation (and with it,
+// shed requests) is visible before it happens.
+func (m *Metrics) WatchAdmission(p *pipeline.Admission) {
 	m.registry.MustRegister(
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 			Name: "inkwall_evaluations_in_flight",

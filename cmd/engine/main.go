@@ -292,7 +292,7 @@ func serve(cfg engineConfig, logger *slog.Logger) error {
 		Observer:      metrics,
 		Routes:        cfg.routes,
 	})
-	metrics.WatchPipeline(p)
+	metrics.WatchAdmission(p.Admission())
 	var handler http.Handler
 	switch cfg.command {
 	case cmdForwardAuth:

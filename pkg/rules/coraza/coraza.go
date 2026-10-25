@@ -7,9 +7,11 @@ package coraza
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"maps"
 	"net"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -77,9 +79,108 @@ type Config struct {
 	DisabledRuleGroups []string
 	// DisableCRS loads only the directives, without the Core Rule Set.
 	DisableCRS bool
+	// Exclusions turn rules off, everywhere or for a path or an argument.
+	// They are rendered as SecLang after the Core Rule Set (everywhere, or
+	// for an argument) or before it (for a path, decided per request).
+	Exclusions []Exclusion
 	// OnMatch, if set, is called for every rule that matches and logs. It
 	// runs on the request path and must be fast and safe for concurrent use.
 	OnMatch func(types.MatchedRule)
+}
+
+// Key identifies the rules cfg compiles to: equal keys, equal rule sets.
+// OnMatch is not part of it.
+func (cfg Config) Key() [sha256.Size]byte {
+	h := sha256.New()
+	fmt.Fprintf(h, "pl=%d\nthreshold=%d\nargs=%d\nbody=%d\ncrs=%v\ngroups=%q\n",
+		cfg.ParanoiaLevel, cfg.InboundAnomalyThreshold, cfg.MaxArgs, cfg.BodyLimit, !cfg.DisableCRS, cfg.DisabledRuleGroups)
+	for _, e := range cfg.Exclusions {
+		fmt.Fprintf(h, "exclusion=%v|%q|%q\n", e.RuleIDs, e.Path, e.Argument)
+	}
+	// Lengths first, so no text can pass for a boundary.
+	fmt.Fprintf(h, "before=%d\n%s\nafter=%d\n%s", len(cfg.DirectivesBeforeCRS), cfg.DirectivesBeforeCRS, len(cfg.Directives), cfg.Directives)
+	var k [sha256.Size]byte
+	h.Sum(k[:0])
+	return k
+}
+
+// Exclusion turns rules off where they cause false positives.
+type Exclusion struct {
+	// RuleIDs are the rules to turn off.
+	RuleIDs []int
+	// Path limits the exclusion to an exact path ("/search") or a prefix
+	// ("/api/*"), in the router's syntax. Empty: every path.
+	Path string
+	// Argument limits it to one query or body argument. Empty: the whole
+	// rule.
+	Argument string
+}
+
+// Paths and argument names end up inside SecLang directives: only plain
+// characters, as the WAFPolicy CRD allows, so they can't change a directive.
+var (
+	exclusionPath     = regexp.MustCompile(`^/[A-Za-z0-9._~/:@!$&'()+,=-]*\*?$`)
+	exclusionArgument = regexp.MustCompile(`^[A-Za-z0-9_.\-\[\]]+$`)
+)
+
+// renderExclusions returns the directives for exclusions: those loaded
+// before CRS (decided per request) and after it (configure time).
+func renderExclusions(exclusions []Exclusion) (before, after string, err error) {
+	var b, a strings.Builder
+	id := idExclusionMin
+	for i, e := range exclusions {
+		if len(e.RuleIDs) == 0 {
+			return "", "", fmt.Errorf("exclusion %d: no rule IDs", i)
+		}
+		for _, r := range e.RuleIDs {
+			if r <= 0 {
+				return "", "", fmt.Errorf("exclusion %d: rule ID %d", i, r)
+			}
+		}
+		if e.Path != "" && !exclusionPath.MatchString(e.Path) {
+			return "", "", fmt.Errorf("exclusion %d: path %q is not a plain path pattern", i, e.Path)
+		}
+		if e.Argument != "" && !exclusionArgument.MatchString(e.Argument) {
+			return "", "", fmt.Errorf("exclusion %d: argument %q has characters other than letters, digits and _.-[]", i, e.Argument)
+		}
+		switch {
+		case e.Path == "" && e.Argument == "":
+			a.WriteString("SecRuleRemoveById")
+			for _, r := range e.RuleIDs {
+				fmt.Fprintf(&a, " %d", r)
+			}
+			a.WriteString("\n")
+		case e.Path == "":
+			for _, r := range e.RuleIDs {
+				fmt.Fprintf(&a, "SecRuleUpdateTargetById %d \"!ARGS:%s\"\n", r, e.Argument)
+			}
+		default:
+			if id > idExclusionMax {
+				return "", "", fmt.Errorf("more than %d path exclusions", idExclusionMax-idExclusionMin+1)
+			}
+			// REQUEST_FILENAME is the decoded path. A prefix exclusion only
+			// applies to a path without dot segments or empty segments:
+			// "/api/../admin" starts with "/api/" but a proxy routes it to
+			// "/admin", so it must not get /api's exclusions. An exact path
+			// can't contain them and still equal a clean path.
+			if p, ok := strings.CutSuffix(e.Path, "*"); ok {
+				fmt.Fprintf(&b, "SecRule REQUEST_FILENAME \"@beginsWith %s\" \"id:%d,phase:1,pass,t:none,nolog,chain\"\n", p, id)
+				b.WriteString("SecRule REQUEST_FILENAME \"!@rx (?:^|/)\\.\\.?(?:/|$)|//\" \"t:none")
+			} else {
+				fmt.Fprintf(&b, "SecRule REQUEST_FILENAME \"@streq %s\" \"id:%d,phase:1,pass,t:none,nolog", e.Path, id)
+			}
+			for _, r := range e.RuleIDs {
+				if e.Argument == "" {
+					fmt.Fprintf(&b, ",ctl:ruleRemoveById=%d", r)
+				} else {
+					fmt.Fprintf(&b, ",ctl:ruleRemoveTargetById=%d;ARGS:%s", r, e.Argument)
+				}
+			}
+			b.WriteString("\"\n")
+			id++
+		}
+	}
+	return b.String(), a.String(), nil
 }
 
 // Evaluator evaluates requests with a compiled Coraza WAF. It is safe for
@@ -168,6 +269,11 @@ func buildDirectives(cfg Config) (string, error) {
 		fmt.Fprintf(&b,
 			"SecAction \"id:%d,phase:1,pass,t:none,nolog,setvar:tx.inbound_anomaly_score_threshold=%d\"\n", idAnomalyThreshold, threshold)
 	}
+	exclBefore, exclAfter, err := renderExclusions(cfg.Exclusions)
+	if err != nil {
+		return "", err
+	}
+	b.WriteString(exclBefore)
 	if cfg.DirectivesBeforeCRS != "" {
 		b.WriteString(cfg.DirectivesBeforeCRS)
 		b.WriteString("\n")
@@ -183,6 +289,8 @@ func buildDirectives(cfg Config) (string, error) {
 		b.WriteString(cfg.Directives)
 		b.WriteString("\n")
 	}
+	// After the user's rules, so exclusions apply to them too.
+	b.WriteString(exclAfter)
 	return b.String(), nil
 }
 
@@ -257,14 +365,17 @@ func result(tx types.Transaction, it *types.Interruption) rules.Result {
 	return res
 }
 
-// Inkwall's internal rules use IDs 7700000-7700099, outside the ranges CRS
+// Inkwall's internal rules use IDs 7700000-7709999, outside the ranges CRS
 // and Coraza use, so they never collide with user or CRS rules.
 const (
 	idParanoiaLevel    = 7700001
 	idAnomalyThreshold = 7700002
+	// Path exclusions, one rule each.
+	idExclusionMin = 7701000
+	idExclusionMax = 7709999
 
 	internalIDMin = 7700000
-	internalIDMax = 7700099
+	internalIDMax = 7709999
 	// crsIDMin and crsIDMax bound the IDs reserved for OWASP CRS.
 	crsIDMin = 900000
 	crsIDMax = 999999

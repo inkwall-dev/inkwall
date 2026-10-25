@@ -60,13 +60,13 @@ type Config struct {
 
 // Handler answers check requests.
 type Handler struct {
-	pipeline *pipeline.Pipeline
+	pipeline pipeline.Inspector
 	maxBody  int64
 	logger   *slog.Logger
 }
 
 // New returns a Handler that inspects requests with p.
-func New(p *pipeline.Pipeline, cfg Config) (*Handler, error) {
+func New(p pipeline.Inspector, cfg Config) (*Handler, error) {
 	if cfg.MaxBodyBytes < 0 {
 		return nil, fmt.Errorf("max body bytes %d must not be negative", cfg.MaxBodyBytes)
 	}
@@ -224,10 +224,12 @@ func (h *Handler) toRequest(in *enginev1.CheckRequest) (*request.Request, string
 		ClientIP: client,
 		PeerIP:   peer,
 	}
-	if h.maxBody > 0 {
+	// The caller sent the body; inspect as much of it as applies to the
+	// route.
+	if limit := h.pipeline.BodyLimit(req, h.maxBody); limit > 0 {
 		body := in.GetBody()
-		if int64(len(body)) > h.maxBody {
-			req.Body = body[:h.maxBody]
+		if int64(len(body)) > limit {
+			req.Body = body[:limit]
 			req.BodyTruncated = true
 		} else {
 			req.Body = body
@@ -296,6 +298,10 @@ func reason(r pipeline.Reason) enginev1.Reason {
 		return enginev1.Reason_REASON_OVERSIZE
 	case pipeline.ReasonSkipped:
 		return enginev1.Reason_REASON_SKIPPED
+	case pipeline.ReasonNoPolicy:
+		return enginev1.Reason_REASON_NO_POLICY
+	case pipeline.ReasonSuspended:
+		return enginev1.Reason_REASON_SUSPENDED
 	default:
 		return enginev1.Reason_REASON_UNSPECIFIED
 	}

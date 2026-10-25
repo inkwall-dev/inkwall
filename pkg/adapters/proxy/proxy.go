@@ -43,7 +43,7 @@ type Config struct {
 
 // Handler is an inspecting reverse proxy.
 type Handler struct {
-	pipeline *pipeline.Pipeline
+	pipeline pipeline.Inspector
 	proxy    *httputil.ReverseProxy
 	maxBody  int64
 	clientIP *clientip.Resolver
@@ -51,7 +51,7 @@ type Handler struct {
 }
 
 // New returns a Handler that inspects requests with p.
-func New(p *pipeline.Pipeline, cfg Config) (*Handler, error) {
+func New(p pipeline.Inspector, cfg Config) (*Handler, error) {
 	if cfg.Upstream == nil || cfg.Upstream.Scheme == "" || cfg.Upstream.Host == "" {
 		return nil, errors.New("upstream must be an absolute URL")
 	}
@@ -138,16 +138,19 @@ func (h *Handler) toRequest(r *http.Request) (*request.Request, error) {
 		ClientIP: h.clientIP.Resolve(peer, r.Header),
 	}
 
-	if h.maxBody > 0 && r.Body != nil && r.Body != http.NoBody && h.pipeline.InspectsBody(rawURI) {
-		prefix, err := io.ReadAll(io.LimitReader(r.Body, h.maxBody+1))
+	if r.Body == nil || r.Body == http.NoBody {
+		return req, nil
+	}
+	if limit := h.pipeline.BodyLimit(req, h.maxBody); limit > 0 {
+		prefix, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
 		if err != nil {
 			return nil, fmt.Errorf("read body: %w", err)
 		}
 		// Hand the upstream the full body: the inspected prefix followed by
 		// whatever was not read.
 		r.Body = readCloser{Reader: io.MultiReader(bytes.NewReader(prefix), r.Body), Closer: r.Body}
-		if int64(len(prefix)) > h.maxBody {
-			req.Body = prefix[:h.maxBody]
+		if int64(len(prefix)) > limit {
+			req.Body = prefix[:limit]
 			req.BodyTruncated = true
 		} else {
 			req.Body = prefix
