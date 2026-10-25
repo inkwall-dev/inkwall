@@ -14,6 +14,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"io"
 	"log/slog"
 	"math/big"
 	"net"
@@ -27,8 +28,10 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -397,5 +400,24 @@ func TestNewErrors(t *testing.T) {
 				t.Fatal("accepted")
 			}
 		})
+	}
+}
+
+// closedStream is a stream the operator ended with err before the first
+// message was sent.
+type closedStream struct {
+	agentv1.BundleService_WatchClient
+	err error
+}
+
+func (closedStream) Send(*agentv1.WatchRequest) error        { return io.EOF }
+func (s closedStream) Recv() (*agentv1.WatchResponse, error) { return nil, s.err }
+
+// The operator's reason reaches the engine when the stream ended before
+// the engine's hello was sent.
+func TestSendFirst(t *testing.T) {
+	err := sendFirst(closedStream{err: status.Error(codes.PermissionDenied, "no access to the bundle")}, &agentv1.WatchRequest{})
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("got %v, want PermissionDenied", err)
 	}
 }
