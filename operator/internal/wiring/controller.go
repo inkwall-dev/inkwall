@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -66,6 +67,11 @@ type Reconciler struct {
 	Client client.Client
 	// APIReader reads Middlewares uncached.
 	APIReader client.Reader
+	// PodWebhook is the MutatingWebhookConfiguration that injects the
+	// engine: a proxy pod created after it without the engine was missed
+	// by the webhook (SidecarMissing), one created before it predates
+	// Inkwall (PendingRestart).
+	PodWebhook string
 }
 
 // SetupWithManager registers the controller.
@@ -187,10 +193,22 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		}
 	}
 
-	if err := r.report(ctx, policies.Items, byKey, wire, traefikCRDs, middlewareErr, pods.Items); err != nil {
+	if err := r.report(ctx, policies.Items, byKey, wire, traefikCRDs, middlewareErr, pods.Items, r.injectingSince(ctx)); err != nil {
 		return reconcile.Result{}, err
 	}
 	return reconcile.Result{RequeueAfter: resync}, nil
+}
+
+// injectingSince is when the Pod webhook was installed; zero if unknown.
+func (r *Reconciler) injectingSince(ctx context.Context) time.Time {
+	if r.PodWebhook == "" {
+		return time.Time{}
+	}
+	var cfg admissionregistrationv1.MutatingWebhookConfiguration
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: r.PodWebhook}, &cfg); err != nil {
+		return time.Time{}
+	}
+	return cfg.CreationTimestamp.Time
 }
 
 func (r *Reconciler) middlewaresInstalled() bool {
@@ -279,7 +297,7 @@ func (r *Reconciler) annotate(ctx context.Context, ing *networkingv1.Ingress, wa
 
 // programmed computes a policy's Programmed condition.
 func programmed(p *wafv1alpha1.WAFPolicy, byKey map[types.NamespacedName]*networkingv1.Ingress, wire map[types.NamespacedName]target,
-	traefikCRDs bool, middlewareErr map[string]string, pods []corev1.Pod) (metav1.ConditionStatus, string, string) {
+	traefikCRDs bool, middlewareErr map[string]string, pods []corev1.Pod, injectingSince time.Time) (metav1.ConditionStatus, string, string) {
 	var unsupported, failed []string
 	wired := 0
 	for _, t := range p.Spec.TargetRefs {
@@ -317,25 +335,43 @@ func programmed(p *wafv1alpha1.WAFPolicy, byKey map[types.NamespacedName]*networ
 	}
 
 	// The routes go to Traefik's pods, whose sidecar must be there.
-	var missing []string
+	var missed, optedOut, before []string
 	running := 0
 	for _, pod := range pods {
 		if pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 			continue
 		}
 		running++
-		if !hasEngine(&pod) {
-			missing = append(missing, pod.Namespace+"/"+pod.Name)
+		name := pod.Namespace + "/" + pod.Name
+		switch {
+		case hasEngine(&pod):
+		case injection.OptedOut(&pod):
+			optedOut = append(optedOut, name)
+		case !injectingSince.IsZero() && pod.CreationTimestamp.After(injectingSince):
+			missed = append(missed, name)
+		default:
+			before = append(before, name)
 		}
+	}
+	for _, l := range [][]string{missed, optedOut, before} {
+		slices.Sort(l)
 	}
 	switch {
 	case running == 0:
 		return metav1.ConditionFalse, ReasonSidecarMissing, "no Traefik pod is running"
-	case len(missing) > 0:
-		slices.Sort(missing)
+	case len(missed) > 0 || len(optedOut) > 0:
+		var why []string
+		if len(missed) > 0 {
+			why = append(why, "created while the operator was unavailable (the injection webhook fails open in detect mode), restart them once it is back: "+strings.Join(missed, ", "))
+		}
+		if len(optedOut) > 0 {
+			why = append(why, "opted out with "+injection.InjectAnnotation+": \"false\": "+strings.Join(optedOut, ", "))
+		}
+		return metav1.ConditionFalse, ReasonSidecarMissing, "Traefik pods run without the engine, their traffic is not inspected; " + strings.Join(why, "; ")
+	case len(before) > 0:
 		return metav1.ConditionFalse, ReasonPendingRestart, fmt.Sprintf(
 			"Traefik pods started before Inkwall run without the engine; restart them (kubectl rollout restart) to inject it: %s",
-			strings.Join(missing, ", "))
+			strings.Join(before, ", "))
 	}
 	return metav1.ConditionTrue, ReasonProgrammed, fmt.Sprintf("%d Ingress(es) wired to the engine in Traefik", wired)
 }
@@ -350,10 +386,10 @@ func hasEngine(pod *corev1.Pod) bool {
 }
 
 func (r *Reconciler) report(ctx context.Context, policies []wafv1alpha1.WAFPolicy, byKey map[types.NamespacedName]*networkingv1.Ingress,
-	wire map[types.NamespacedName]target, traefikCRDs bool, middlewareErr map[string]string, pods []corev1.Pod) error {
+	wire map[types.NamespacedName]target, traefikCRDs bool, middlewareErr map[string]string, pods []corev1.Pod, injectingSince time.Time) error {
 	for i := range policies {
 		p := &policies[i]
-		st, reason, msg := programmed(p, byKey, wire, traefikCRDs, middlewareErr, pods)
+		st, reason, msg := programmed(p, byKey, wire, traefikCRDs, middlewareErr, pods, injectingSince)
 		first := true
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			if !first {

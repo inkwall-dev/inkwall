@@ -23,7 +23,7 @@ bundle, and serves it to the engines. Injecting the engine into the proxies is t
 | `PodDisruptionBudget` | When `operator.replicas` > 1 |
 | `ServiceAccount`, `ClusterRole`, `Role` and bindings | Rules generated from the operator's code; the `Role` covers the release namespace only |
 | `ValidatingWebhookConfiguration` `inkwall-operator-validating` | WAF kinds only, fails closed, 2 s timeout |
-| `MutatingWebhookConfiguration` `inkwall-operator-mutating` | Traefik pods only, at creation, fails open (`injection.enabled`) |
+| `MutatingWebhookConfiguration` `inkwall-operator-mutating` | Traefik pods only, at creation; fails open, or closed while a policy is in block mode (`injection.enabled`) |
 | `Service` `inkwall-operator-webhook` | |
 | `Service` `inkwall-operator` | Bundle distribution to the engines, gRPC over TLS on port 9445 |
 | Webhook certificate | `Secret` filled by the operator, or a cert-manager `Certificate` |
@@ -35,6 +35,36 @@ that first unwires the proxies is part of milestone O5 (0004 §5).
 
 The CRDs, RBAC rules and webhooks are rendered from `files/`, which `make generate` copies from
 the operator's generated manifests: don't edit `files/` by hand.
+
+## When the operator is down
+
+Traffic is unaffected: every engine keeps enforcing its last bundle, and a new engine pod reads the
+bundle Secret. What depends on the operator is **creating proxy pods**:
+
+- **No policy in block mode:** the Pod webhook fails open. New Traefik pods start without the engine,
+  so their traffic is not inspected. Affected policies report `Programmed=False`
+  (`SidecarMissing`) with the pods to restart once the operator is back.
+- **A policy in block mode:** the Pod webhook fails closed. A Traefik pod can't be created without
+  its engine, so Traefik can't scale up or replace pods (after a node drain or failure) until the
+  operator is back. Pods already running keep serving.
+
+If Traefik must start pods before the operator is back, in order of preference:
+
+1. Bring the operator back: check its pods and events (`kubectl -n <namespace> get pods,events`).
+   Replacement Traefik pods are then created with the engine.
+2. Let Traefik start **uninspected**: label its pods to opt out, which the webhook doesn't even
+   see, for example:
+
+   ```sh
+   kubectl -n <traefik namespace> patch deployment <traefik> --type merge \
+     -p '{"spec":{"template":{"metadata":{"labels":{"waf.inkwall.dev/inject":"false"}}}}}'
+   ```
+
+   Remove the label once the operator is back (the pods restart and get the engine). Until then the
+   policies report `SidecarMissing`.
+
+Don't edit the `MutatingWebhookConfiguration` instead: the operator sets its `failurePolicy` back
+when it returns, and a `helm upgrade` resets it.
 
 ## Values
 

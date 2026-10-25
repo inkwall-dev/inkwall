@@ -122,6 +122,13 @@ func TestInjectOptOutAndResources(t *testing.T) {
 	if Inject(pod, sidecar) {
 		t.Fatal("injected a pod that opted out")
 	}
+	// The label too (the webhook doesn't see such pods; a pod created
+	// while it was off may still carry it).
+	pod = traefikPod()
+	pod.Labels[InjectLabel] = "false"
+	if Inject(pod, sidecar) || !OptedOut(pod) {
+		t.Fatal("injected a pod labeled to opt out")
+	}
 	// A pod that already has an engine container (e.g. hand-made).
 	pod = traefikPod()
 	pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{Name: ContainerName})

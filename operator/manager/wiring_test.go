@@ -123,14 +123,15 @@ func testWiring(ctx context.Context, t *testing.T, c client.Client) {
 	// No engine runs the bundle in this test: Ready says so.
 	want("Ready names what's missing", condition(web, wafv1alpha1.ConditionReady), metav1.ConditionFalse, "NoEngines", "Enforced:")
 
-	// A Traefik pod that started without the engine.
+	// A Traefik pod that runs without the engine: opted out here (a pod
+	// older than the webhook, PendingRestart, can't be made in envtest).
 	old := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "proxy", Name: "traefik-old", Labels: map[string]string{"app.kubernetes.io/name": "traefik"},
 			Annotations: map[string]string{injection.InjectAnnotation: "false"}},
 		Spec: corev1.PodSpec{ServiceAccountName: "traefik", Containers: []corev1.Container{{Name: "traefik", Image: "traefik:v3.7.13"}}},
 	}
 	create(old)
-	want("PendingRestart", condition(web, wafv1alpha1.ConditionProgrammed), metav1.ConditionFalse, wiring.ReasonPendingRestart, "proxy/traefik-old")
+	want("SidecarMissing", condition(web, wafv1alpha1.ConditionProgrammed), metav1.ConditionFalse, wiring.ReasonSidecarMissing, "opted out with waf.inkwall.dev/inject: \"false\": proxy/traefik-old")
 	if err := c.Delete(ctx, old, client.GracePeriodSeconds(0)); err != nil {
 		t.Fatal(err)
 	}

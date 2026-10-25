@@ -34,8 +34,11 @@ const (
 
 	// InjectedAnnotation marks a pod the engine was injected into.
 	InjectedAnnotation = "waf.inkwall.dev/injected"
-	// InjectAnnotation set to "false" on a pod keeps the engine out.
+	// InjectAnnotation set to "false" on a pod keeps the engine out. As a
+	// label (InjectLabel), the Pod webhook isn't even called: the pod
+	// starts while the operator is down, when the webhook fails closed.
 	InjectAnnotation = "waf.inkwall.dev/inject"
+	InjectLabel      = InjectAnnotation
 
 	adminPort = 9480
 )
@@ -76,7 +79,7 @@ func defaultResources() corev1.ResourceRequirements {
 // it), and the volumes it needs. It reports false, changing nothing, for a
 // pod that already has the engine or opted out.
 func Inject(pod *corev1.Pod, s Sidecar) bool {
-	if pod.Annotations[InjectAnnotation] == "false" || pod.Annotations[InjectedAnnotation] == "true" {
+	if OptedOut(pod) || pod.Annotations[InjectedAnnotation] == "true" {
 		return false
 	}
 	for _, c := range slices.Concat(pod.Spec.InitContainers, pod.Spec.Containers) {
@@ -183,6 +186,12 @@ func Inject(pod *corev1.Pod, s Sidecar) bool {
 	}
 	pod.Annotations[InjectedAnnotation] = "true"
 	return true
+}
+
+// OptedOut reports whether pod keeps the engine out, with the annotation
+// or the label.
+func OptedOut(pod *corev1.Pod) bool {
+	return pod.Annotations[InjectAnnotation] == "false" || pod.Labels[InjectLabel] == "false"
 }
 
 func fieldEnv(name, path string) corev1.EnvVar {

@@ -147,10 +147,39 @@ policy Block
 eventually "block mode again" status_is 403 "$SQLI"
 
 echo "== operator down"
+# A policy blocks: proxy pods must not start without the engine (#51).
+pod_webhook_policy() {
+  "${KUBECTL[@]}" get mutatingwebhookconfiguration inkwall-operator-mutating -o jsonpath='{.webhooks[?(@.name=="pods.waf.inkwall.dev")].failurePolicy}'
+}
+fails() { [[ $(pod_webhook_policy) == "$1" ]]; }
+eventually "the Pod webhook fails closed (a policy blocks)" fails Fail
+# proxy_pod [EXTRA_LABELS]: creates a Traefik pod (dry run).
+proxy_pod() {
+  "${KUBECTL[@]}" apply --dry-run=server -f - <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: traefik-check
+  namespace: $NS
+  labels: {app.kubernetes.io/name: traefik${1:+, $1}}
+spec:
+  containers: [{name: traefik, image: traefik:v3.7.13}]
+YAML
+}
 "${KUBECTL[@]}" -n "$OPERATOR_NS" scale deployment/inkwall-operator --replicas=0 >/dev/null
 eventually "operator stopped" bash -c "[[ -z \$(${KUBECTL[*]} -n $OPERATOR_NS get pods -l app.kubernetes.io/component=operator -o name) ]]"
 check "the engine still blocks without the operator" status_is 403 "$SQLI"
 check "benign traffic unaffected" status_is 200 /products/42
+# Refused by the webhook itself, not for another reason.
+refused() {
+  local out
+  out=$(proxy_pod 2>&1) && return 1
+  grep -q "failed calling webhook" <<<"$out"
+}
+eventually "a new proxy pod is refused without the operator" refused
+# The way out: a pod labeled to opt out skips the webhook and starts.
+opted_out() { proxy_pod 'waf.inkwall.dev/inject: "false"' >/dev/null 2>&1; }
+check "a proxy pod labeled to opt out starts without the operator" opted_out
 # A new pod, with no cached bundle, while the operator is down: it reads the
 # bundle Secret (#40).
 "${KUBECTL[@]}" -n "$NS" rollout restart deployment/app >/dev/null
@@ -169,6 +198,12 @@ eventually "Enforced again once the operator is back" enforced_by_all
 echo "== the policy deleted"
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy app >/dev/null
 eventually "enforcement stops" status_is 200 "$SQLI"
+blocking=$("${KUBECTL[@]}" get wafpolicy -A -o jsonpath='{.items[?(@.spec.mode=="Block")].metadata.name}' 2>/dev/null)
+if [[ -z $blocking ]]; then
+  eventually "the Pod webhook fails open again (no policy blocks)" fails Ignore
+else
+  echo "skip  other policies block: $blocking"
+fi
 
 # Through Traefik (#27): a Traefik installed with nothing about Inkwall gets
 # the engine injected, and a policy on an Ingress it serves is wired,

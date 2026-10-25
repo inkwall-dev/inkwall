@@ -14,9 +14,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -133,6 +135,8 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			&corev1.Pod{}:         {Label: integrations.PodSelector()},
 			&rbacv1.Role{}:        {Namespaces: map[string]cache.Config{o.Namespace: {}}},
 			&rbacv1.RoleBinding{}: {Namespaces: map[string]cache.Config{o.Namespace: {}}},
+			// Only the Pod webhook's configuration.
+			&admissionregistrationv1.MutatingWebhookConfiguration{}: {Field: fields.OneTermEqualSelector("metadata.name", webhook.MutatingConfigName)},
 		}},
 		Metrics:                 metricsserver.Options{BindAddress: o.MetricsAddr},
 		HealthProbeBindAddress:  o.ProbeAddr,
@@ -176,7 +180,12 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			OperatorAddr: fmt.Sprintf("%s.%s.svc:%d", o.DistributionService, o.Namespace, o.DistributionPort),
 			BundleSecret: o.Namespace + "/" + bundle.BundleSecret,
 		}
-		if err := (&wiring.Reconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader()}).SetupWithManager(mgr); err != nil {
+		if err := (&wiring.Reconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), PodWebhook: webhook.MutatingConfigName}).SetupWithManager(mgr); err != nil {
+			return nil, err
+		}
+		if err := (&injection.FailurePolicyReconciler{
+			Client: mgr.GetClient(), ConfigName: webhook.MutatingConfigName, WebhookName: webhook.PodWebhookName,
+		}).SetupWithManager(mgr); err != nil {
 			return nil, err
 		}
 		if err := (&injection.Reconciler{

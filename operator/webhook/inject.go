@@ -27,12 +27,19 @@ const MutatingConfigName = "inkwall-operator-mutating"
 // InjectPath is the Pod webhook's path.
 const InjectPath = "/mutate-v1-pod"
 
+// PodWebhookName is the Pod webhook in MutatingConfigName.
+const PodWebhookName = "pods.waf.inkwall.dev"
+
 // The Pod webhook only sees pods of known proxies (objectSelector), at
-// creation. It fails open: a proxy pod must start even when the operator is
-// down; it then runs without the engine and is reported until restarted.
+// creation. It is installed failing open (Ignore): a proxy pod starts even
+// when the operator is down, runs without the engine and is reported until
+// restarted. The operator switches it to Fail while a policy is in block
+// mode (injection.FailurePolicyReconciler). A pod labeled
+// waf.inkwall.dev/inject: "false" is never sent to it, so it starts even
+// then: the way out when the operator is down and the proxy must scale.
 //
 // +kubebuilder:webhookconfiguration:mutating=true,name=inkwall-operator-mutating
-// +kubebuilder:webhook:path=/mutate-v1-pod,mutating=true,failurePolicy=ignore,sideEffects=None,groups="",resources=pods,verbs=create,versions=v1,name=pods.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,reinvocationPolicy=Never,patch=`{"objectSelector":{"matchLabels":{"app.kubernetes.io/name":"traefik"}}}`
+// +kubebuilder:webhook:path=/mutate-v1-pod,mutating=true,failurePolicy=ignore,sideEffects=None,groups="",resources=pods,verbs=create,versions=v1,name=pods.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,reinvocationPolicy=Never,patch=`{"objectSelector":{"matchLabels":{"app.kubernetes.io/name":"traefik"},"matchExpressions":[{"key":"waf.inkwall.dev/inject","operator":"NotIn","values":["false"]}]}}`
 
 // PodInjector adds the engine to proxy pods.
 type PodInjector struct {
@@ -72,9 +79,9 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 		s.Resources = cfg.Spec.Engine.Resources
 		s.DenyBeforeBundle = cfg.Spec.Engine.BootstrapMode == wafv1alpha1.BootstrapDenyAll
 	case !apierrors.IsNotFound(err):
-		// Fail open, as the webhook does: the pod starts without the engine.
-		log.FromContext(ctx).Error(err, "reading the InkwallConfig; the pod starts without the engine", "namespace", req.Namespace)
-		return admission.Allowed("InkwallConfig unreadable")
+		// The pod still gets the engine, with the operator's defaults:
+		// better than none, and the webhook may be failing closed.
+		log.FromContext(ctx).Error(err, "reading the InkwallConfig; injecting the engine with the defaults", "namespace", req.Namespace)
 	}
 	mutated := pod.DeepCopy()
 	if !injection.Inject(mutated, s) {
