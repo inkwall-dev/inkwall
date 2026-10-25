@@ -4,6 +4,7 @@
 GO              ?= go
 BIN_DIR         ?= bin
 GOLANGCI_LINT   ?= $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+GORELEASER      ?= $(GO) run github.com/goreleaser/goreleaser/v2@v2.18.3
 GOVULNCHECK     ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@v1.8.0
 BUF             ?= $(GO) run github.com/bufbuild/buf/cmd/buf@v1.50.0
 CONTROLLER_GEN  ?= $(GO) run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.23.0
@@ -97,6 +98,14 @@ image: ## Build the engine and operator container images (IMAGE=name:tag, OPERAT
 	docker build --target engine -t $(IMAGE) .
 	docker build --target operator -t $(OPERATOR_IMAGE) .
 
+.PHONY: release-snapshot
+release-snapshot: ## Build the release binaries and archives into ./dist, as a tag would, without signing or publishing
+	$(GORELEASER) release --snapshot --clean --skip=sign,publish
+
+.PHONY: release-check
+release-check: ## Check the goreleaser configuration
+	$(GORELEASER) check
+
 .PHONY: kind-up
 kind-up: ## Create the kind cluster and deploy the demo app behind the engine and behind Traefik (hack/kind)
 	KIND_CLUSTER=$(KIND_CLUSTER) IMAGE=$(IMAGE) hack/kind/up.sh
@@ -120,4 +129,4 @@ kind-down: ## Delete the kind cluster
 
 .PHONY: clean
 clean: ## Remove build output
-	rm -rf $(BIN_DIR)
+	rm -rf $(BIN_DIR) dist

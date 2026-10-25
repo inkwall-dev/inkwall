@@ -12,6 +12,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -30,6 +31,9 @@ import (
 
 	"github.com/inkwall-dev/inkwall/operator/manager"
 )
+
+// version is set at release builds (-ldflags "-X main.version=...").
+var version string
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stderr))
@@ -122,7 +126,7 @@ func run(args []string, stderr io.Writer) int {
 		logger.Error("cannot create the manager", slog.Any("error", err))
 		return 1
 	}
-	logger.Info("operator starting", slog.String("namespace", o.Namespace),
+	logger.Info("operator starting", slog.String("version", cmp.Or(version, "unknown")), slog.String("namespace", o.Namespace),
 		slog.Bool("leader_elect", o.LeaderElect), slog.Bool("webhooks", o.Webhooks))
 	ctx := drain(ctrl.SetupSignalHandler(), o.shutdownDelay, &draining, logger)
 	if err := mgr.Start(ctx); err != nil {

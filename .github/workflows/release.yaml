@@ -1,0 +1,189 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# A release, from a v* tag on main or on a release-X.Y branch (CONTRIBUTING.md):
+#   1. the engine and operator images (linux/amd64, linux/arm64) on GHCR,
+#      with SBOM and provenance attestations, signed with cosign;
+#   2. the Helm chart on GHCR (OCI), versioned from the tag, signed;
+#   3. the binaries, signed checksums and the GitHub release with the
+#      changelog (goreleaser, .goreleaser.yaml), last, so the release notes
+#      never point at images or a chart that aren't published yet.
+# Signatures are keyless, with this workflow's identity.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GORELEASER_VERSION: v2.18.3
+  COSIGN_VERSION: v3.1.3
+  HELM_VERSION: v3.19.0
+  REGISTRY: ghcr.io/inkwall-dev
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      latest: ${{ steps.tag.outputs.latest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! $TAG =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::$TAG is not a version tag (v1.2.3 or v1.2.3-rc.1)"
+            exit 1
+          fi
+          # Released commits are reviewed: on main, or on a release branch.
+          on_branch=false
+          for b in $(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/main' 'refs/remotes/origin/release-*'); do
+            if git merge-base --is-ancestor "$GITHUB_SHA" "$b"; then on_branch=true; fi
+          done
+          if [[ $on_branch != true ]]; then
+            echo "::error::$TAG is not on main or a release-X.Y branch"
+            exit 1
+          fi
+          # latest is the highest stable version, not the newest tag: a patch
+          # of an older minor version doesn't take it.
+          highest=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+          latest=false
+          if [[ $TAG == "$highest" ]]; then latest=true; fi
+          {
+            echo "version=${TAG#v}"
+            echo "latest=$latest"
+          } >> "$GITHUB_OUTPUT"
+          echo "Releasing ${TAG#v} (latest: $latest)" >> "$GITHUB_STEP_SUMMARY"
+
+  images:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    strategy:
+      matrix:
+        component: [engine, operator]
+    env:
+      IMAGE: ghcr.io/inkwall-dev/inkwall-${{ matrix.component }}
+    steps:
+      - uses: actions/checkout@v4
+      # No QEMU: Go cross-compiles on the build platform, and the final
+      # stages only copy the binary.
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          # 0.1.0 and 0.1, without "v", as the chart's appVersion; X.Y only
+          # for stable versions.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          flavor: |
+            latest=${{ needs.verify.outputs.latest }}
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: ${{ matrix.component }}
+          platforms: linux/amd64,linux/arm64
+          build-args: VERSION=${{ needs.verify.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          sbom: true
+          provenance: mode=max
+          push: true
+      - uses: sigstore/cosign-installer@v4
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+      # By digest: a tag can be moved, the digest can't.
+      - env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign sign --yes "$IMAGE@$DIGEST"
+          echo "$IMAGE@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+
+  chart:
+    needs: [verify, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      # For cosign; helm keeps its own login.
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@v4
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+      # The chart and the images share the version: the chart deploys the
+      # images of its appVersion.
+      - env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          helm package deploy/helm/inkwall --version "$VERSION" --app-version "$VERSION" --destination out
+          echo "$GITHUB_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          helm push "out/inkwall-$VERSION.tgz" "oci://$REGISTRY/charts" 2>&1 | tee out/push.log
+          digest=$(awk '/^Digest:/ {print $2}' out/push.log)
+          if [[ -z $digest ]]; then
+            echo "::error::no digest in the helm push output"
+            exit 1
+          fi
+          cosign sign --yes "$REGISTRY/charts/inkwall@$digest"
+          echo "$REGISTRY/charts/inkwall:$VERSION@$digest" >> "$GITHUB_STEP_SUMMARY"
+
+  binaries:
+    needs: [verify, images, chart]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The changelog is computed from the history since the last tag.
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+      - uses: sigstore/cosign-installer@v4
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: ${{ env.GORELEASER_VERSION }}
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAKE_LATEST: ${{ needs.verify.outputs.latest }}

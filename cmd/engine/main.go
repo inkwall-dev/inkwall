@@ -572,9 +572,16 @@ func waitForBundle(ctx context.Context, ag *agent.Agent, cfg engineConfig, ready
 	ready.Store(true)
 }
 
-// engineVersion is the module version the binary was built from.
+// version is set at release builds (-ldflags "-X main.version=...").
+var version string
+
+// engineVersion is the release version, else the module version the binary
+// was built from.
 func engineVersion() string {
-	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" {
+	if version != "" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
 		return bi.Main.Version
 	}
 	return "unknown"
