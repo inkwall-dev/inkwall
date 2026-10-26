@@ -1,113 +1,66 @@
 # inkwall-operator
 
-The Kubernetes operator ([design](../docs/design/0004-operator.md)). It is being built in the
-milestones of 0004 §11; today it has the API, the validating webhook, and the bundle builder:
-it compiles `WAFPolicy` objects and the Ingresses they target into a signed bundle, and reports
-each policy's `Accepted` condition, and serves the bundle to the engines over gRPC, reporting
-`Enforced` from their acknowledgements.
+The Kubernetes operator ([design](../docs/design/0004-operator.md)). It:
+
+- **validates** `WAFPolicy` and rule set objects with a webhook: `seclang` rules must compile with
+  the engine's Coraza version after the Core Rule Set, and only rule directives are allowed
+  (0004 §3.1). It fails closed for the WAF kinds only; updates that don't change the spec are
+  always accepted;
+- **builds** the policies and the Ingresses they target into a bundle, signed with the cluster's
+  ed25519 key, in the `inkwall-bundle` Secret (leader only; a second after a change, and every
+  10 minutes), and reports `Accepted` on each policy;
+- **serves** the bundle to the engines over gRPC/TLS on port 9445 and reports `Enforced` from their
+  acknowledgements;
+- **injects** the engine as a native sidecar into Traefik pods at creation (selected by
+  `app.kubernetes.io/name=traefik`, or `InkwallConfig.spec.integrations[].selector`), with the
+  `inkwall-trust` ConfigMap and read access to the bundle. Opt a pod out with the label
+  `waf.inkwall.dev/inject: "false"`; `--inject=false` turns injection off;
+- **wires** each targeted Ingress to an `inkwall-waf` ForwardAuth Middleware (prepended to
+  `traefik.ingress.kubernetes.io/router.middlewares`) and reports `Programmed`.
+
+`kubectl get wafpolicy -A` shows `READY` once a policy is accepted, wired and enforced by every
+engine; the condition messages say what's missing (e.g. `PendingRestart`). Rules read from a
+ConfigMap need the label `waf.inkwall.dev/rules=true`. The webhook certificate is self-signed and
+rotated by the operator, in the `inkwall-operator-webhook-tls` Secret; with cert-manager, run with
+`--webhook-certs=external`.
+
+Install it with the [Helm chart](../deploy/helm/inkwall).
+
+## Develop
+
+`make help` lists every target. The ones for the operator:
+
+| Target | What |
+|---|---|
+| `make generate` | Regenerate deepcopy code, CRDs, RBAC and webhook configuration, and copy them into the chart |
+| `make test` | Unit tests, operator tests against a local API server (envtest) at `ENVTEST_K8S_VERSION`, the oldest supported Kubernetes |
+| `make helm-lint` | Lint and render the chart |
+| `make kind-operator` | Build the images, install the chart on the kind cluster of `make kind-up`, check the webhook |
+| `make kind-e2e` | End to end on kind: a `WAFPolicy` enforced by an engine in bundle mode |
+
+To change the API: edit the types in `api/v1alpha1/` (validation as kubebuilder markers, CEL in
+`+kubebuilder:validation:XValidation`), run `make generate` and commit the generated files, and add
+cases to `api/v1alpha1/validation_test.go`.
+
+The CRDs validate on their own, without the operator:
+
+```sh
+kubectl apply --server-side -f operator/config/crd/bases -f operator/config/samples
+```
+
+## Layout
 
 | Path | What |
 |---|---|
-| `api/v1alpha1/` | The `waf.inkwall.dev/v1alpha1` types: `InkwallConfig`, `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet` |
-| `config/crd/bases/` | The CRDs generated from the types (`make generate`); don't edit them by hand |
-| `config/rbac/`, `config/webhook/` | The operator's RBAC and webhook configuration, generated from markers |
-| `config/samples/` | One example of each kind |
-| `webhook/` | The validating webhook and its certificate |
-| `manager/` | Assembles the operator: controllers, webhooks, probes ([`../cmd/operator`](../cmd/operator) parses flags into it) |
-| `internal/resolver/` | `WAFPolicy` + Ingresses + rule sets → bundle policies and `Accepted` conditions |
-| `internal/bundle/` | Content hash, versions, ed25519 signing, the bundle and signing key Secrets |
-| `internal/controller/` | The bundle builder (leader only) |
-| `internal/injection/` | The engine sidecar, the trust ConfigMap and the RBAC grant |
-| `internal/wiring/` | Traefik wiring: the Middleware, the Ingress annotation, `Programmed` |
-| `integrations/` | The proxies Inkwall knows (Traefik) |
-| `internal/distribution/` | The `BundleService` server, engine authentication, engine reports, `Enforced` |
-| `test/fakeengine/` | A lightweight engine that speaks the bundle protocol, for tests |
-| `test/testenv/` | Starts a local API server (envtest) for tests |
-| [`../cmd/operator`](../cmd/operator) | The `inkwall-operator` binary |
-
-## Trying the API
-
-The CRDs validate objects on their own, without the operator running:
-
-```sh
-kubectl apply --server-side -f operator/config/crd/bases
-kubectl apply --server-side -f operator/config/samples
-kubectl get inkwall -A
-```
-
-## Validating webhook
-
-The CRD schemas catch malformed objects. The webhook checks what they can't (0004 §3.1):
-
-- **Rule sets** (`seclang`) must compile with the engine's Coraza version, loaded after the Core
-  Rule Set as the engine loads them, so exclusions of CRS rules are checked too. Errors name the
-  line. Only rule directives are allowed (`SecRule`, `SecAction`, `SecMarker`, `SecRuleRemoveBy*`,
-  `SecRuleUpdate*`): settings that change the engine as a whole or write files are rejected.
-  Rules read from a ConfigMap are checked when the bundle is built; the webhook warns about that.
-- **Policies**: skip and exclusion paths must be clean, as the engine's router requires.
-
-Updates that don't change the spec are always accepted, so an object stays editable and
-deletable. The webhook fails closed for the WAF kinds only (`failurePolicy: Fail`, 2 s timeout).
-
-Its certificate is self-signed and rotated by the operator ([cert-controller](https://github.com/open-policy-agent/cert-controller)):
-the CA and serving certificate live in the `inkwall-operator-webhook-tls` Secret, the CA is
-injected into the webhook configuration, and each replica copies the certificate to its webhook
-server, so no volume mount is needed. With cert-manager instead, run with `--webhook-certs=external`.
-
-## Bundles
-
-The leader rebuilds the bundle a second after any change to a `WAFPolicy`, a rule set, a targeted
-Ingress, a labeled ConfigMap or `InkwallConfig`, and every 10 minutes. It publishes a new version
-only when the content changed, signed with the cluster's ed25519 key, in the `inkwall-bundle`
-Secret. A policy that can't be resolved keeps its previous version in force and says why in its
-`Accepted` condition. Rules read from a ConfigMap need the label `waf.inkwall.dev/rules=true`.
-
-```sh
-kubectl get wafpolicy -A            # BUNDLE: the version that contains the current spec
-kubectl -n inkwall-system get secret inkwall-bundle -o jsonpath='{.metadata.annotations}'
-```
-
-## Engines
-
-Every replica serves the bundle on port 9445 (gRPC, TLS). An engine authenticates with a projected
-ServiceAccount token for the audience `inkwall-operator`, and its ServiceAccount must be allowed to
-`get` the `inkwall-bundle` Secret, the same grant it needs to start from that Secret when the
-operator is down. The operator pushes each new bundle; the engine answers with an ack or a nack, and
-`Enforced` on each policy says how many engines run it:
-
-```sh
-kubectl get wafpolicy web -n web -o jsonpath='{.status.conditions[?(@.type=="Enforced")].message}'
-# 3/3 engines on bundle 42
-```
-
-## Injection
-
-Traefik pods (`app.kubernetes.io/name=traefik`) created while the operator runs get the engine as a
-native sidecar, in bundle mode, connected to the operator; the operator keeps the `inkwall-trust`
-ConfigMap in their namespace and grants their ServiceAccount read access to the bundle. Pods that
-already ran are injected when they restart (`kubectl rollout restart`). Annotate a pod
-`waf.inkwall.dev/inject: "false"` to keep the engine out; `--inject=false` (chart:
-`injection.enabled`) turns injection off.
-
-## Wiring
-
-For every Ingress a `WAFPolicy` targets that Traefik serves, the operator creates an `inkwall-waf`
-ForwardAuth Middleware in the namespace and adds it to the Ingress's
-`traefik.ingress.kubernetes.io/router.middlewares` annotation (first, keeping your own
-Middlewares); deleting the policy removes only that entry. Each policy then reports:
-
-```sh
-kubectl get wafpolicy -A        # READY: True once accepted, wired and enforced by every engine
-kubectl -n shop get wafpolicy shop -o jsonpath='{.status.conditions[?(@.type=="Programmed")].message}'
-```
-
-`Programmed=False` explains what's missing, e.g. `PendingRestart` with the Traefik pods that need
-a restart to get the engine.
-
-## Changing the API
-
-1. Edit the types in `api/v1alpha1/`. Validation is written as kubebuilder markers: OpenAPI
-   constraints and CEL rules (`+kubebuilder:validation:XValidation`).
-2. Run `make generate` to regenerate the deepcopy code and the CRDs, and commit both.
-3. Add cases to `api/v1alpha1/validation_test.go`. `make test` runs them against a real API server
-   at the oldest supported Kubernetes version (`ENVTEST_K8S_VERSION`).
+| `api/v1alpha1/` | `waf.inkwall.dev/v1alpha1` types: `InkwallConfig`, `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet` |
+| `config/` | Generated CRDs, RBAC and webhook configuration (don't edit by hand); `samples/` has one of each kind |
+| `manager/` | Assembles controllers, webhooks and probes ([`../cmd/operator`](../cmd/operator) is the binary) |
+| `webhook/` | Validating webhook and its certificate |
+| `integrations/` | The proxies Inkwall knows (Traefik) and their pod selectors |
+| `internal/resolver/` | `WAFPolicy` + Ingresses + rule sets → bundle policies and `Accepted` |
+| `internal/bundle/` | Content hash, versions, ed25519 signing, bundle and signing key Secrets |
+| `internal/controller/` | Bundle builder |
+| `internal/distribution/` | `BundleService` server, engine authentication and reports, `Enforced` |
+| `internal/injection/` | Engine sidecar, trust ConfigMap, RBAC grant |
+| `internal/wiring/` | Traefik Middleware, Ingress annotation, `Programmed` |
+| `test/fakeengine/`, `test/testenv/` | Fake engine speaking the bundle protocol; envtest API server |
