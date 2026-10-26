@@ -212,14 +212,43 @@ deltas: simpler, idempotent, small), the engine ACKs or NACKs.
 
 ### 5.3 Operator ↔ SaaS
 
-One mTLS stream per cluster: bundles and IP reputation down; cluster state, events, heartbeat up.
-Events buffer to a bounded disk queue when the SaaS is unreachable (oldest dropped). Standalone:
-events go to logs and optionally OTLP. **Not yet** built.
+[`api/controlplane/v1`](../../api/controlplane/v1/controlplane.proto) (`ControlPlaneService`), over
+mTLS; the cluster's identity is its client certificate (§7.5), never a message field. Two stream
+roles: one **primary** stream per cluster from the leader (state, policies, directives,
+certificates; when the leader moves, the newer primary wins), and one **events** stream per replica,
+for the engines connected to it (engines connect to any replica). gRPC status codes say what the
+operator does: re-enroll (`UNAUTHENTICATED`), stop (`PERMISSION_DENIED`), back off
+(`RESOURCE_EXHAUSTED`) or reconnect.
+
+- `Connect`, up: `Hello` (versions, mode, last policy version, capabilities), `ClusterState` (a
+  full snapshot: every Inkwall object with its conditions, integrations, engines, bundle version),
+  `EventBatch` (§5.4), `Heartbeat`, `PolicyAck`/`PolicyNack`, `RenewCertificate`.
+- `Connect`, down: `Welcome` (heartbeat interval, whether events are accepted), `PolicySnapshot`
+  (Managed mode), the renewed `Certificate`, `Directive` (e.g. resync).
+- **Managed mode carries policy objects, not signed bundles**: the operator writes them as CRDs
+  (0004 §4.9) and signs bundles with the cluster's own key, so engines trust only that key.
+- Objects travel as their JSON spec, and integrations, kinds and condition reasons as strings: new
+  CRD fields, proxies and target kinds need no contract change. No proxy-specific fields.
+- Both sides compress (gzip) and accept messages up to 16 MiB. In Managed mode, rule sets come
+  inline (`seclang`, `builtin`): the control plane can't create the ConfigMap a `configMapRef` needs.
+- Events: at-least-once, per replica. Each `EventUpload` names its buffer and a sequence;
+  `EventsAck` frees that buffer up to it, unacknowledged batches are resent after a reconnect, and
+  event IDs (never sequences) remove duplicates. The bounded
+  disk queue drops the oldest when full, and the next batch says how many.
+- A `PolicySnapshot` is all or nothing (server-side dry run of every object first); the cluster's
+  `InkwallConfig` decides the mode, and a cluster not in Managed mode refuses snapshots. Only
+  `WAFPolicy` and the rule set kinds are accepted, and the operator sets the source label itself.
+  Standalone: events go to logs and optionally OTLP.
+
+**Built:** the contract (#86). **Not yet:** the operator side (O6, 0004 §11).
 
 ### 5.4 Event schema
 
-`SecurityEvent`: IDs, bundle version, action, reason, matches (rule, variable, redacted snippet),
-score, method, host, path (no query), client IP, user agent, status, latency. **Not yet** built.
+`SecurityEvent` ([`api/events/v1`](../../api/events/v1/events.proto)): IDs, engine and pod, policy
+and bundle version, action, reason, matches (rule, variable, redacted snippet), score, method, host,
+path (no query), client IP, user agent, request ID, status, latency. The same message goes engine →
+operator (`agent.v1` `Watch`) and operator → control plane, in `EventBatch` with a count of dropped
+events. **Built:** the schema. **Not yet:** producing and forwarding events.
 
 ---
 
@@ -331,8 +360,14 @@ Argo CD applies `WAFPolicy` → operator builds and signs bundle → engines swa
 
 ### 7.5 Cluster enrollment (Managed / GitOps mode)
 
-One-time token (TTL 1h) → operator sends CSR + token → SaaS issues a 24h cert bound to
-`cluster_id`, rotated over the stream → token burned. **Not yet** built.
+One-time token (TTL 1h) → operator generates a key and calls `Enroll(token, CSR)` over
+server-authenticated TLS → the control plane burns the token and returns a 24h client certificate
+bound to its `cluster_id` → the operator stores it in a Secret and renews it over the stream
+(`RenewCertificate` → `Certificate`). A retry with the same token and public key within the TTL
+returns the same certificate, so a lost response doesn't cost a new token. Renewal needs the current
+certificate: a cluster offline longer than its lifetime enrolls again with a new token. Keys: ECDSA
+P-256 or Ed25519. **Built:** the contract.
+**Not yet:** the operator side.
 
 ---
 

@@ -1,0 +1,80 @@
+// Copyright 2026 The Inkwall Authors
+// SPDX-License-Identifier: Apache-2.0
+
+// Security events (0002 §5.4): what the engine records about a request it
+// blocked or detected. The engine sends them to the operator (agent.v1
+// Watch), and the operator forwards them to the optional control plane
+// (controlplane.v1 Connect). Redacted in the engine before they leave it
+// (0002 §8.3): no bodies, no query strings, no Authorization or cookies.
+syntax = "proto3";
+
+package inkwall.events.v1;
+
+import "engine/v1/engine.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/inkwall-dev/inkwall/api/events/v1;eventsv1";
+
+// SecurityEvent is one blocked or detected request. The request's fields
+// are attacker-controlled: they are truncated to their limits (in bytes)
+// in the engine, and must be escaped wherever they are shown.
+message SecurityEvent {
+  // Unique per event (a ULID): repeated sends of the same event are
+  // deduplicated by it.
+  string event_id = 1;
+  google.protobuf.Timestamp time = 2;
+  // The engine that inspected the request, and its pod.
+  string engine_id = 3;
+  string pod_namespace = 4;
+  string pod_name = 5;
+  // The policy that decided, "namespace/name", and the bundle it came from.
+  string policy = 6;
+  uint64 bundle_version = 7;
+
+  inkwall.engine.v1.Action action = 8;
+  inkwall.engine.v1.Reason reason = 9;
+  // The rule that interrupted the request, if any.
+  int32 interrupting_rule_id = 10;
+  // Every rule that matched, including score-only matches.
+  repeated Match matches = 11;
+  // The CRS inbound anomaly score.
+  int32 anomaly_score = 12;
+
+  // The request, without its query string or body.
+  string method = 13;
+  // At most 255.
+  string host = 14;
+  // As received (percent-encoded), without the query string; at most 1,024.
+  string path = 15;
+  // The client's address after the trusted proxies (0002 §8.2).
+  string client_ip = 16;
+  // At most 256.
+  string user_agent = 17;
+  // The proxy's request ID, to find the request in its logs; at most 128
+  // (often from a header the client can set).
+  string request_id = 18;
+  // The status the client got (0 when the request was forwarded and the
+  // response isn't known).
+  int32 status = 19;
+  // Time spent inspecting.
+  google.protobuf.Duration latency = 20;
+}
+
+// Match is one rule that matched.
+message Match {
+  int32 rule_id = 1;
+  // Where it matched, e.g. ARGS:id or REQUEST_HEADERS:User-Agent; at most
+  // 128.
+  string variable = 2;
+  // At most 64 bytes of the matched value, redacted.
+  string snippet = 3;
+}
+
+// EventBatch carries events in order of time.
+message EventBatch {
+  repeated SecurityEvent events = 1;
+  // Events dropped since the previous batch (a full buffer drops the
+  // oldest), so a gap is visible.
+  uint64 dropped = 2;
+}
