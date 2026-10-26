@@ -9,7 +9,7 @@ The operator injects the engine next to each proxy, wires the proxy to it, and p
 bundles. CRD shapes: 0002 §4.2.
 
 **Built (v0.1.0):** Traefik with `Ingress` targets (ForwardAuth). **Not yet:** other proxies,
-`HTTPRoute` / `IngressRoute` targets, ordered uninstall (O5), GitOps/Managed modes.
+`HTTPRoute` / `IngressRoute` targets, unwiring on `InkwallConfig` delete (O5), GitOps/Managed modes.
 
 ## 1. Goals and non-goals
 
@@ -268,11 +268,15 @@ other edits. Enrollment: 0002 §7.5.
 Removal must never leave a proxy failing closed on a missing engine.
 
 **Built (v0.1.0):** `InkwallConfig.spec.suspend: true` puts every engine in allow-all within
-seconds, removing nothing. Unprotected Ingresses are unwired level-based (§4.4).
+seconds, removing nothing. Unprotected Ingresses are unwired level-based (§4.4). `helm uninstall`
+runs a pre-delete hook, `inkwall-operator unwire` (`operator/manager/unwire.go`): scale the
+operator to 0 and wait for its pods (a draining replica still wires), set the Pod webhook to
+`Ignore`, then remove Inkwall's Middleware from every wired Ingress (keeping the user's) and delete
+the Middlewares it created. `WAFPolicy` objects stay; sidecars leave as proxy pods restart. Tested
+on kind: after the uninstall, a restarted Traefik serves the route without the engine.
 
-**Not yet (O5):** a `waf.inkwall.dev/unwire` finalizer on `WAFPolicy`; on `InkwallConfig` delete or
-`helm uninstall` (pre-delete hook): allow-all bundle → remove wiring and restore saved values →
-wait until unwired → remove webhooks. Leftover sidecars stay idle until restart.
+**Not yet (O5):** a `waf.inkwall.dev/unwire` finalizer on `WAFPolicy`, and the same unwiring on
+`InkwallConfig` delete.
 
 ## 6. Failure modes
 
