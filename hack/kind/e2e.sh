@@ -222,15 +222,25 @@ wired() {
   [[ $("${KUBECTL[@]}" -n "$NS" get ingress web -o jsonpath='{.metadata.annotations.traefik\.ingress\.kubernetes\.io/router\.middlewares}') == *inkwall-waf@kubernetescrd* ]]
 }
 unwired() { ! wired; }
+# Running pods (not terminating) and their init containers, one per line.
+traefik_pods() {
+  "${KUBECTL[@]}" -n "$TRAEFIK_NS" get pods -l app.kubernetes.io/name=traefik \
+    -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}|{.spec.initContainers[*].name}{"\n"}{end}' | grep '^|'
+}
+# Every running Traefik pod has the engine, first.
 traefik_injected() {
-  [[ $("${KUBECTL[@]}" -n "$TRAEFIK_NS" get pods -l app.kubernetes.io/name=traefik -o jsonpath='{.items[*].spec.initContainers[0].name}') == inkwall-engine ]]
+  local pods
+  pods=$(traefik_pods) && ! grep -qv '^|inkwall-engine' <<<"$pods"
 }
 
 echo "== through Traefik"
 helm --kube-context "kind-$CLUSTER" upgrade --install traefik-e2e traefik --repo https://traefik.github.io/charts \
   --version "$TRAEFIK_CHART_VERSION" --namespace "$TRAEFIK_NS" --create-namespace --values hack/kind/traefik-e2e-values.yaml >/dev/null
+# Restarted: pods from an earlier run may predate this operator (or an
+# uninstall).
+"${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout restart deployment/traefik-e2e >/dev/null
 "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout status deployment/traefik-e2e --timeout=180s >/dev/null
-check "Traefik's pod has the injected engine" traefik_injected
+eventually "Traefik's pod has the injected engine" traefik_injected
 "${KUBECTL[@]}" apply -f - >/dev/null <<YAML
 apiVersion: apps/v1
 kind: Deployment
@@ -342,6 +352,41 @@ YAML
   eventually_long "back to the default selector" selector_is '{"app.kubernetes.io/name":"traefik"}'
   "${KUBECTL[@]}" -n "$OPERATOR_NS" rollout status deployment/inkwall-operator --timeout=180s >/dev/null
 fi
+
+# Uninstall (#68): the operator unwires the routes before it goes, so a
+# Traefik pod started afterwards, without the engine, still serves them.
+echo "== uninstall"
+"${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: web
+  namespace: $NS
+spec:
+  targetRefs: [{kind: Ingress, name: web}]
+  mode: Block
+YAML
+eventually "wired again before the uninstall" wired
+eventually "blocking before the uninstall" tstatus_is 403 "$SQLI"
+if helm --kube-context "kind-$CLUSTER" uninstall inkwall --namespace "$OPERATOR_NS" --wait --timeout 5m >/dev/null; then
+  ok "helm uninstall (with the unwire hook)"
+else
+  fail "helm uninstall"
+fi
+check "the Ingress is unwired" unwired
+no_middleware() { ! "${KUBECTL[@]}" -n "$NS" get middlewares.traefik.io inkwall-waf >/dev/null 2>&1; }
+check "the Middleware is deleted" no_middleware
+kept() { "${KUBECTL[@]}" -n "$NS" get wafpolicy web >/dev/null 2>&1; }
+check "the WAFPolicy is kept" kept
+"${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout restart deployment/traefik-e2e >/dev/null
+"${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout status deployment/traefik-e2e --timeout=180s >/dev/null
+no_engine() { traefik_pods >/dev/null && ! traefik_pods | grep -q inkwall-engine; }
+eventually "a new Traefik pod has no engine" no_engine
+kill "$tpf" 2>/dev/null || true
+"${KUBECTL[@]}" -n "$TRAEFIK_NS" port-forward svc/traefik-e2e "$TRAEFIK_PORT:80" >/dev/null 2>&1 &
+tpf=$!
+eventually "the route still answers after the uninstall (uninspected)" tstatus_is 200 "$SQLI"
+"${KUBECTL[@]}" -n "$NS" delete wafpolicy web --ignore-not-found >/dev/null
 
 if [[ $failures -gt 0 ]]; then
   echo "$failures check(s) failed; engine logs:"

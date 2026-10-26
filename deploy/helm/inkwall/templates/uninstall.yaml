@@ -1,0 +1,98 @@
+{{- /*
+helm uninstall: before the chart's objects go, stop the operator and undo
+the wiring (`inkwall-operator unwire`), so the protected routes keep working,
+uninspected, once the engine is no longer injected. It runs with the
+operator's ServiceAccount (Ingresses, Middlewares, the webhook
+configuration); the Role below adds scaling the operator to 0.
+*/}}
+{{- if and .Values.injection.enabled .Values.uninstall.unwire }}
+{{- $name := printf "%s-unwire" (include "inkwall.operator.name" .) | trunc 63 | trimSuffix "-" }}
+{{- $hook := dict "helm.sh/hook" "pre-delete" "helm.sh/hook-delete-policy" "before-hook-creation,hook-succeeded" }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inkwall.labels" . | nindent 4 }}
+    app.kubernetes.io/component: unwire
+  annotations:
+    {{- toYaml $hook | nindent 4 }}
+    helm.sh/hook-weight: "-5"
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [{{ include "inkwall.operator.name" . }}]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inkwall.labels" . | nindent 4 }}
+    app.kubernetes.io/component: unwire
+  annotations:
+    {{- toYaml $hook | nindent 4 }}
+    helm.sh/hook-weight: "-5"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "inkwall.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inkwall.labels" . | nindent 4 }}
+    app.kubernetes.io/component: unwire
+  annotations:
+    {{- toYaml $hook | nindent 4 }}
+    helm.sh/hook-weight: "0"
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        {{- include "inkwall.labels" . | nindent 8 }}
+        app.kubernetes.io/component: unwire
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "inkwall.serviceAccountName" . }}
+      {{- with .Values.operator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: unwire
+          image: {{ include "inkwall.operator.image" . }}
+          imagePullPolicy: {{ .Values.operator.image.pullPolicy }}
+          args:
+            - unwire
+            - --namespace={{ .Release.Namespace }}
+            - --deployment={{ include "inkwall.operator.name" . }}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+{{- end }}

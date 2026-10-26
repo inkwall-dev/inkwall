@@ -23,6 +23,7 @@ kind cluster of `make kind-up`.
 | `PodDisruptionBudget` | When `operator.replicas` > 1 |
 | `ServiceAccount`, `ClusterRole`, `Role` and bindings | Rules generated from the operator's code; the `Role` covers the release namespace only |
 | `ValidatingWebhookConfiguration` `inkwall-operator-validating` | WAF kinds only, fails closed, 2 s timeout |
+| Pre-delete hook (`Job`, `Role`, `RoleBinding` `<release>-inkwall-operator-unwire`) | Runs only on `helm uninstall`: unwires the routes (`uninstall.unwire`) |
 | `MutatingWebhookConfiguration` `inkwall-operator-mutating` | Traefik pods only, at creation; fails open, or closed while a policy is in block mode (`injection.enabled`) |
 | `Service` `inkwall-operator-webhook` | |
 | `Service` `inkwall-operator` | Bundle distribution to the engines, gRPC over TLS on port 9445 |
@@ -45,6 +46,7 @@ See [`values.yaml`](values.yaml) for all of them.
 | `operator.podDisruptionBudget.enabled`, `minAvailable` | `true`, `1` | |
 | `engine.image.repository`, `tag`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-engine`, the chart's `appVersion`, `IfNotPresent` | The engine injected into Traefik pods; `InkwallConfig.spec.engine.image` overrides it |
 | `injection.enabled` | `true` | Inject the engine into Traefik pods when they are created |
+| `uninstall.unwire` | `true` | On `helm uninstall`, unwire the routes first (a pre-delete hook), so they keep working |
 | `serviceAccount.name`, `annotations` | the release's full name, `{}` | |
 | `crds.install` | `true` | |
 | `distribution.port` | `9445` | Port engines connect to |
@@ -56,8 +58,16 @@ See [`values.yaml`](values.yaml) for all of them.
 
 `helm uninstall` keeps the CRDs (and so every WAF object) and the two Secrets the operator creates
 in its namespace, `inkwall-bundle` and `inkwall-bundle-signing-key`. A reinstall continues with the
-same signing key, so engines keep trusting it. Delete the namespace to remove the Secrets. Uninstall
-does not yet unwire the proxies first (milestone O5, 0004 §5).
+same signing key, so engines keep trusting it. Delete the namespace to remove the Secrets.
+
+Before anything is deleted, a pre-delete hook (`uninstall.unwire`, on by default) runs
+`inkwall-operator unwire`: it stops the operator, sets the Pod webhook to `Ignore`, and removes
+Inkwall's Middleware from every route it wired, keeping your own middlewares. The routes then keep
+working, uninspected; Traefik pods drop the engine when they restart. If the hook fails, the
+uninstall stops: fix the cause (`kubectl -n <namespace> logs job/<release>-inkwall-operator-unwire`)
+and run it again, or skip the hook with `helm uninstall --no-hooks` and remove the
+`inkwall-waf` entries from the Ingresses' `traefik.ingress.kubernetes.io/router.middlewares`
+annotations yourself.
 
 ## When the operator is down
 

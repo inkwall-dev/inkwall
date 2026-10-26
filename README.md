@@ -116,7 +116,6 @@ deny  403  GET /?id=1%27%20OR%20%271%27%3D%271  reason=rule  rules=942100,949110
 - Proxies: **Traefik** only (and the standalone proxy). Envoy, HAProxy, ingress-nginx and Caddy are
   designed, not built.
 - Targets: **`Ingress`** only; not Traefik `IngressRoute` or Gateway API `HTTPRoute` yet.
-- No uninstall step that unwires routes first: remove the policies before uninstalling.
 - One cluster; the optional control plane (fleet management, analytics) isn't built.
 
 ## Roadmap

@@ -52,6 +52,14 @@ injection:
   # Pods that already run are injected when they restart.
   enabled: true
 
+uninstall:
+  # On helm uninstall, stop the operator and remove Inkwall's Middleware from
+  # the routes it wired before anything else is deleted (a pre-delete hook),
+  # so the routes keep working, uninspected. WAFPolicy objects are kept.
+  # Without it, Traefik pods started after the uninstall fail every
+  # protected route: they have no engine, but the routes still call it.
+  unwire: true
+
 serviceAccount:
   # Empty: the release's full name.
   name: ""

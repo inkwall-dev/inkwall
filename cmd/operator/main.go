@@ -94,6 +94,9 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 }
 
 func run(args []string, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "unwire" {
+		return unwire(args[1:], stderr, slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	}
 	o, err := parseFlags(args, stderr)
 	if errors.Is(err, flag.ErrHelp) {
 		return 0
