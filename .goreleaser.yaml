@@ -7,6 +7,12 @@
 version: 2
 project_name: inkwall
 
+# Release candidates are never the "previous" release: the notes of v0.2.0
+# and of v0.2.0-rc.N cover everything since v0.1.0, not since the last rc.
+git:
+  ignore_tags:
+    - "v*-*"
+
 before:
   hooks:
     - go mod download
@@ -60,6 +66,8 @@ signs:
 changelog:
   use: git
   sort: asc
+  # Commit titles only: the PR number in each title links the change.
+  abbrev: -1
   groups:
     - title: Breaking changes
       regexp: '^[a-z]+(\([^)]+\))?!:'
