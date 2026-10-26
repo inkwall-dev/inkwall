@@ -187,3 +187,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MAKE_LATEST: ${{ needs.verify.outputs.latest }}
+          # The tag that started the run. Without it GoReleaser picks among the
+          # tags on the commit, and git sorts v0.1.0-rc.2 after v0.1.0: tagging
+          # a release on its last rc's commit built the rc instead.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
