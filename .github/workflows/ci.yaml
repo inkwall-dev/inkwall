@@ -162,7 +162,7 @@ jobs:
     steps:
       # Squash merges use the PR title as the commit message on main, so it
       # must follow Conventional Commits (see CONTRIBUTING.md).
-      - uses: amannn/action-semantic-pull-request@v5
+      - uses: amannn/action-semantic-pull-request@v6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
