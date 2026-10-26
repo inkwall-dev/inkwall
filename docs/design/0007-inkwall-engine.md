@@ -6,241 +6,158 @@
 - Depends on: [0001](0001-performance-first-architecture.md) (budgets, measurements), [0002](0002-system-architecture.md) §3.1, [0005](0005-component-map.md) §6
 - License: Apache-2.0, like the rest of the data plane
 
-Inkwall's own rule engine, built to run the OWASP Core Rule Set (CRS) within the latency budgets of
-0001, which the Coraza-based evaluator cannot reach. Coraza stays as the reference implementation
-and as a fallback.
+Inkwall's own CRS evaluator, to reach the 0001 budgets Coraza cannot. Coraza stays as oracle and
+fallback.
+
+**Built (v0.1.0):** none of the engine; evaluation uses Coraza (`pkg/rules/coraza`). The CRS suite
+(`test/crs`) and the prefilter feasibility tool (`test/perf/prefilter`) exist.
+**Not yet:** `pkg/rules/native`, `test/diff`, `--engine`, shadow mode.
 
 ---
 
 ## 1. Summary
 
-The engine compiles CRS (written in SecLang, the ModSecurity rule language) ahead of time into a
-flat program and evaluates requests with three techniques Coraza's architecture rules out:
+Compile CRS (SecLang) ahead of time into a flat program, then evaluate with:
 
-1. **One literal scan per field** selects the few rules that can possibly match; the rest are
-   skipped before any transformation or regex runs.
-2. **Lazy, shared transformations** without map lookups: a field is decoded only if a candidate
-   rule needs it, and each result is reused by every rule that shares the transformation prefix.
-3. **A zero-allocation, interruptible runtime**: pooled transactions, slices instead of maps, and a
-   deadline check between rules, so a request can be abandoned without burning CPU.
+1. **One literal scan per field** to select candidate rules; the rest skip transforms and regex.
+2. **Lazy, shared transformations** without maps: decode only for candidates, reuse results across
+   rules sharing a chain prefix.
+3. **Zero-allocation, interruptible runtime:** pooled transactions, slices, deadline checks between
+   rules.
 
-Detection must be **identical** to Coraza's: same matched rule IDs, same anomaly scores, same
-block decisions. That is verified against Coraza as an oracle and against the CRS regression suite
-(4,572 tests) on every change.
-
-Target: benign requests at 50–100 µs of engine time (5–10× faster than Coraza + CRS today).
+Detection must be **identical** to Coraza's (rule IDs, scores, block decisions). Target: benign
+requests at 50–100 µs, 5–10× faster than Coraza.
 
 ## 2. Why
 
-Measured in 0001 §3.1 and §5.2 (Coraza 3.8.1, CRS 4.25, paranoia level 1, one core):
+Coraza 3.8.1 + CRS 4.25, PL1, one core (0001 §3.1, §5.2): benign GET ~0.51 ms (budget ≤ 0.15 ms
+p50); JSON with 150 fields ~29 ms (budget ≤ 0.5 ms per 8 KB). Causes:
 
-| Request | Coraza today | Budget (0001 §3) |
-|---|---|---|
-| Benign GET | ~0.51 ms | ≤ 0.15 ms p50 (sidecar) |
-| JSON, 150 fields | ~29 ms | ≤ 0.5 ms per 8 KB |
+- Every rule runs on every field; Coraza's regex prefilter misses attacks (CRS 942220-2, 932311-7)
+  and is disabled.
+- Transformations run before the operator; the map-based transform cache costs ~25%.
+- ~2,800 allocations per request (~14% GC); no interruption (hence admission control).
 
-What limits Coraza, structurally:
-
-- **Every rule runs on every field.** No candidate-rule selection exists; Coraza's per-rule regex
-  prefilter misses attacks (CRS tests 942220-2, 932311-7) and is disabled.
-- **Transformations run before the operator,** so even a skipped regex pays for decoding.
-- **A map-based transformation cache** hashes a struct per rule per field (~25% of time).
-- **~2,800 allocations per request,** driving ~14% GC time.
-- **Evaluation cannot be interrupted,** which forced the admission-control workaround in the
-  pipeline.
-
-The feasibility measurement (`test/perf/prefilter`) showed that at paranoia level 1, 100 of the 104
-per-argument CRS rules have a usable required literal, 90.5% of benign rule-field evaluations can
-be skipped, and the literal extraction is sound under Unicode case folding (0 violations in about
-2.1M checks, covering all 9,747 CRS test payloads and 13,314 Unicode fold variants).
-
-Improving Coraza from outside covers only part of this (an `@rx` operator override saves operator
-time, ~30%). The rest needs control of the rule loop.
+At PL1, 100 of 104 per-argument rules have a required literal and 90.5% of benign rule-field
+evaluations can be skipped (`test/perf/prefilter`). Overriding `@rx` from outside saves only ~30%;
+the rest needs the rule loop.
 
 ## 3. Goals and non-goals
 
-### Goals
+Goals:
 
-1. Run CRS v4 (the version pinned per Inkwall release) with **detection parity** with Coraza: for
-   every request, the same interruption decision and anomaly score, and — with early exit off
-   (§4.2) — the same matched rule IDs. Parity includes Coraza's own deviations from ModSecurity;
-   any deliberate difference (for example fixing a Coraza bug) is listed in a reviewed allowlist in
-   the differential harness, with a reason and a test.
-2. Meet the 0001 budgets for engine time, and keep allocations near zero.
-3. Bound work per request: linear-time matching, size caps, and deadline checks between rules.
-4. Implement `pkg/rules.Evaluator`, so adapters and the pipeline do not change.
-5. Fall back to Coraza for rule sets that use features the engine does not support.
+1. **Parity** with Coraza on pinned CRS v4: same interruption and score; with early exit off
+   (§4.2), same rule IDs. Deliberate deviations go in a reviewed allowlist with a reason and test.
+2. 0001 engine-time budgets, near-zero allocations.
+3. Bounded work: linear-time matching, size caps, deadline checks.
+4. Implement `pkg/rules.Evaluator`, so adapters and pipeline don't change.
+5. Fall back to Coraza on unsupported features.
 
-### Non-goals (v1)
-
-- Full SecLang. The engine supports what pinned CRS uses, plus a documented subset for custom rules.
-- Response inspection (phases 3–4) and audit logging (phase 5) — later, with tier T4.
-- Being a general ModSecurity replacement outside Inkwall.
+Non-goals (v1): full SecLang (pinned CRS plus a documented custom-rule subset); phases 3–5
+(response, audit log; later with T4); a general ModSecurity replacement.
 
 ## 4. Architecture
 
 ```mermaid
 flowchart LR
     subgraph COMPILE["compile time (policy load)"]
-        SRC["SecLang<br/>CRS + custom rules"] --> PARSE["parser<br/>→ AST"]
-        PARSE --> RES["resolver<br/>defaults, exclusions,<br/>paranoia constant-folding"]
-        RES --> IR["program (IR)<br/>flat rules, compiled<br/>operators, chain trie"]
-        IR --> PF["prefilter builder<br/>required literals →<br/>Aho-Corasick per view"]
+        SRC["SecLang"] --> PARSE["parser → AST"] --> RES["resolver"] --> IR["program (IR)"] --> PF["prefilter<br/>Aho-Corasick per view"]
     end
     subgraph RUN["request time"]
-        REQ["request.Request"] --> EXT["extract variables<br/>+ body processors"]
-        EXT --> SCAN["literal scan per field<br/>→ candidate-rule bitset"]
-        SCAN --> LOOP["rule loop<br/>skip non-candidates,<br/>lazy transforms, operators,<br/>actions, scoring"]
-        LOOP --> RES2["rules.Result"]
+        REQ["request.Request"] --> EXT["extract + body processors"] --> SCAN["literal scan<br/>→ candidate bitset"] --> LOOP["rule loop"] --> OUT["rules.Result"]
     end
     IR --> LOOP
     PF --> SCAN
 ```
 
-Compilation happens once per policy bundle; the resulting program is immutable and shared by all
-requests (0001 §5.1: atomic snapshot swap).
+Compiled once per bundle; immutable, shared, swapped atomically (0001 §5.1).
 
 ### 4.1 Compiler
 
-1. **Parser.** SecLang directives into an AST, with file/line positions for errors. Unsupported
-   directives, variables, operators, transformations or actions are compile errors that name the
-   feature, so the pipeline can fall back to Coraza (§8).
-2. **Resolver.**
-   - Applies `SecDefaultAction`, configure-time exclusions (`SecRuleRemoveById`, `...ByTag`,
-     `SecRuleUpdateTargetById`, `...ByTag`) and rule-group pruning.
-   - **Constant-folds paranoia gating.** CRS skips rules at runtime with
-     `skipAfter` markers that compare `tx.blocking_paranoia_level` and
-     `tx.detection_paranoia_level`. In pinned CRS only the setup and initialization rules write
-     those variables, so their values are fixed by configuration and rules above the configured
-     level are removed from the program entirely. If any other rule writes them (for example a
-     custom rule raising the paranoia level per path), folding is disabled for that program and
-     the runtime gating is kept.
-   - Resolves `skipAfter` targets to program indexes.
-3. **IR (the program).** A flat, ordered slice of rules per phase. Each rule holds:
-   - compiled variable selectors (collection, key/regex selector, exclusions, count `&`),
-   - a **transformation chain ID** into a trie of all chains, so rules sharing a prefix share work,
-   - a compiled operator (regex, Aho-Corasick set, numeric comparison, ...),
-   - precompiled actions (`setvar` with macros compiled to templates, `ctl`, flow, disruptive),
-   - chain links and its required-literal set (§4.3).
-4. **Prefilter builder.** Extracts each rule's required literals (the algorithm validated in
-   `test/perf/prefilter`: a literal set such that any match must contain one of them) and builds
-   one Aho-Corasick automaton per normalization view (§4.3).
+- **Parser:** AST with file/line positions; any unsupported feature is a named compile error, so
+  `auto` falls back (§7).
+- **Resolver:** `SecDefaultAction`, configure-time exclusions, rule-group pruning, `skipAfter` →
+  indexes. **Paranoia gating is constant-folded:** in pinned CRS only setup rules write the
+  paranoia `tx` variables, so rules above the level are removed; if any other rule writes them,
+  folding is off.
+- **IR:** flat rules per phase with compiled selectors, a chain ID into a transformation trie
+  (shared prefixes share work), compiled operator and actions, chain links, required literals.
+- **Prefilter:** required literals (any match contains one) → one Aho-Corasick automaton per view.
 
 ### 4.2 Runtime
 
-- **Transaction** from a `sync.Pool`, reset per request; arena-style byte buffers; collections
-  stored as slices of `(name, lowercased name, value, source)` — no maps on the hot path.
-- **Variable extraction** once per phase: URI, query arguments, headers, cookies, then body
-  arguments from the body processors.
-- **Literal scan.** For each field and each view, one Aho-Corasick pass sets bits in a
-  candidate-rule bitset (rules indexed 0..n).
-- **Rule loop** in program order:
-  1. resolve the rule's targets to fields;
-  2. for a prefilterable rule, skip the field unless its candidate bit is set — no transformation,
-     no operator;
-  3. otherwise get the transformed value from the field's **memo slots indexed by chain-prefix
-     ID** (no map hashing), computing missing steps. Slots are allocated lazily per field from the
-     transaction's pool and capped per request, so a request with thousands of fields cannot make
-     the memo table grow without bound;
-  4. run the operator; on match, run actions (scoring, captures, `MATCHED_VAR*`, chain);
-  5. check the context deadline every N rules — evaluation is **interruptible** between rules. A
-     single operator call is not interrupted, so per-field size caps bound the longest step.
-- **Early exit (block mode only, off by default):** once the inbound anomaly score reaches the
-  threshold, the block is certain, and remaining rules may be skipped. It changes which rules are
-  reported for blocked requests, so the differential harness, the CRS suite and shadow mode run
-  with it off, and detect mode never uses it.
-- **Body processors:** URL-encoded, JSON (Coraza-compatible flattened names such as
-  `json.items.0.sku`), XML (for `XML:/*`), and multipart with the strict-validation flags CRS checks
-  (`MULTIPART_STRICT_ERROR` and sub-flags, `REQBODY_ERROR`). Initially ported from Coraza
-  (Apache-2.0, attributed) for parity, then optimized.
-- **Regex:** Go's `regexp` (RE2 semantics, linear time — the same engine Coraza uses, so match
-  semantics are identical), with Coraza's default `(?sm)` flags and `binaryregexp` for byte
-  patterns. libinjection via `corazawaf/libinjection-go`.
+- Transactions from `sync.Pool`; collections as slices, no maps on the hot path.
+- Extract variables once per phase; one Aho-Corasick pass per field and view sets candidate bits.
+- Rule loop: skip non-candidate fields; transformed values from per-field memo slots indexed by
+  chain-prefix ID (lazy, capped per request); operator, then actions; deadline check every N
+  rules. Single operator calls aren't interrupted, so field size caps bound the longest step.
+- **Early exit** (block mode, off by default): stop once the score reaches the threshold. It
+  changes reported rules, so parity tests, shadow and detect mode never use it.
+- **Body processors:** URL-encoded, JSON (Coraza names like `json.items.0.sku`), XML, multipart
+  with CRS's strict flags. Ported from Coraza (attributed) for parity.
+- **Regex:** Go `regexp` (RE2, same as Coraza, so same semantics), Coraza's `(?sm)` defaults;
+  libinjection via `corazawaf/libinjection-go`.
 
 ### 4.3 Prefilter and normalization views
 
-Literals must be checked against **transformed** values, but transformations are what we want to
-avoid running. The engine resolves this with a small number of **normalization views** per field,
-computed once each:
+Literals must match transformed values without running transformations, so each field gets a few
+views, computed once:
 
-| View | Computed as | Covers rules whose chains use |
+| View | Computed as | Covers chains with |
 |---|---|---|
-| `raw` | case-folded only, no decoding | chains without decoders (rules that look for encoded sequences such as `%u` or `\x` themselves) |
-| `decoded` | URL-decode (incl. `%u`), HTML-entity decode, remove NULs, case-folded | chains made of these decoders and case changes |
-| `cmdline` | `decoded` + `cmdLine` rules (drop `\ " ' ^`, `,;` → space) | `cmdLine` chains (RCE family) |
-| `nospace` | `decoded` with all whitespace removed | `removeWhitespace` chains |
-| `nocomments` | `decoded` with comments removed | `replaceComments` / `removeComments` chains |
+| `raw` | case-folded only | no decoders (rules matching `%u`, `\x` themselves) |
+| `decoded` | URL (incl. `%u`) + HTML-entity decode, NULs removed, case-folded | these decoders, case changes |
+| `cmdline` | `decoded` + `cmdLine` | `cmdLine` (RCE) |
+| `nospace` | `decoded`, no whitespace | `removeWhitespace` |
+| `nocomments` | `decoded`, no comments | `replaceComments` / `removeComments` |
 
-Each rule is assigned the view that **dominates** its chain: for every input, if the rule's
-transformed value contains a literal, the view also contains it. Domination is established per
-chain by property tests and differential fuzzing; a chain with no proven dominating view falls back
-to **post-transformation filtering** (literal check on the transformed value inside the loop —
-still sound, saves only operator time).
+A rule uses a view that **dominates** its chain (literal in transformed value ⇒ literal in view),
+proven by property tests and fuzzing; otherwise it filters after transformation (sound, saves only
+operator time). Soundness rules:
 
-Soundness rules that apply to every view:
+- **Case folding, not lowercasing:** `(?i)select` matches `ſelect`; `ToLower` misses it. Map runes
+  to a canonical fold-orbit member (`unicode.SimpleFold`).
+- **No over-decoding:** a view never decodes more than its chain, or literals in encoded form are
+  lost.
+- **Never prefiltered:** negated operators, `multiMatch` rules (unless every intermediate value is
+  dominated), and operators not implied by a literal (numeric, `validate*`, libinjection,
+  `within`).
 
-- **Case folding, not lowercasing.** Go's `(?i)` matching uses Unicode case folding: `(?i)select`
-  matches `ſelect` (U+017F, long s), but `strings.ToLower("ſelect")` does not contain `select`. A
-  lowercase-based filter would skip a rule that matches. Views and literals are mapped to a
-  canonical rune per fold orbit (consistent with `unicode.SimpleFold`), which is what the regex
-  engine treats as equal.
-- **No over-decoding.** A view must not decode more than the chain it covers: decoding destroys
-  literals that a rule matches in encoded form. That is why `raw` exists, and why a chain that
-  decodes twice (`urlDecodeUni,urlDecodeUni`) needs a view that does the same or falls back.
-- **Rules that are never prefiltered:** negated operators (`!@rx` matches when the pattern is
-  *absent*; none in pinned CRS target arguments, but custom rules may), `multiMatch` rules (the
-  operator runs on every intermediate transformation; 8 rules in pinned CRS, in the 930, 934 and
-  942 families) unless the view dominates every intermediate value, and operators whose match is
-  not implied by a literal (numeric comparisons, `validate*`, libinjection, `within`).
-
-This is the central design risk, so it is a milestone of its own (N3) with an explicit exit
-criterion: zero soundness violations across the CRS payloads, the benign corpus, a Unicode corpus
-(fold-orbit variants of every literal) and a fuzzing run.
-
-The feasibility tool (`test/perf/prefilter`) already applies case folding and the fold-variant
-corpus: 0 violations in about 2.1M checks at PL1 and 3.9M at PL4, while the lowercase method it
-replaced fails on 2 rules at PL1 and 5 at PL4 (for example `;BAſE64` against rule 932260,
-`@@VERſION` against 942480). Skip rates are unchanged by the fix (90.5% of benign evaluations, 72%
-of operator time at PL1).
+This is the central risk, gated by N3: zero violations on CRS payloads, benign, Unicode fold-variant
+and fuzz corpora. The feasibility tool has 0 violations in ~2.1M checks at PL1 and ~3.9M at PL4;
+plain lowercasing failed on 2 rules at PL1 and 5 at PL4.
 
 ### 4.4 Supported SecLang subset
 
-The pinned CRS defines the minimum. A CI check parses the pinned CRS with the engine's parser and
-fails if anything is unsupported, so a CRS upgrade cannot silently lose rules. The table below is
-indicative; the CI check produces the authoritative list in N0.
+Pinned CRS defines the minimum; a CI check (N0) fails on any unsupported feature, so CRS upgrades
+can't silently lose rules, and produces the authoritative list. Indicative:
 
 | Area | v1 support |
 |---|---|
-| Directives | `SecRule`, `SecAction`, `SecMarker`, `SecDefaultAction`, `SecRuleRemoveById/ByTag`, `SecRuleUpdateTargetById/ByTag`, `SecComponentSignature` (ignored), body-related config used by Inkwall |
-| Variables | `ARGS*`, `ARGS_NAMES*`, `ARGS_COMBINED_SIZE`, `REQUEST_HEADERS*`, `REQUEST_HEADERS_NAMES`, `REQUEST_COOKIES*`, `REQUEST_COOKIES_NAMES`, `REQUEST_URI(_RAW)`, `REQUEST_FILENAME`, `REQUEST_BASENAME`, `REQUEST_LINE`, `REQUEST_METHOD`, `REQUEST_PROTOCOL`, `QUERY_STRING`, `REQUEST_BODY(_LENGTH)`, `FILES*`, `FILES_COMBINED_SIZE`, `MULTIPART_*`, `REQBODY_ERROR*`, `XML:/*`, `TX`, `MATCHED_VAR(S)(_NAME(S))`, `UNIQUE_ID`, `REMOTE_ADDR`, `&` counts, `:key` and `:/regex/` selectors, `!` exclusions |
-| Operators | `rx`, `pm`, `pmFromFile`/`pmf`, `streq`, `contains`, `beginsWith`, `endsWith`, `within`, `eq`/`ge`/`gt`/`le`/`lt`, `ipMatch(FromFile)`, `validateByteRange`, `validateUrlEncoding`, `validateUtf8Encoding`, `detectSQLi`, `detectXSS`, `unconditionalMatch`, negation `!` |
-| Transformations | about 25: `none`, `lowercase`, `urlDecode`, `urlDecodeUni`, `htmlEntityDecode`, `jsDecode`, `cssDecode`, `cmdLine`, `compressWhitespace`, `removeWhitespace`, `removeNulls`, `replaceNulls`, `removeComments`, `replaceComments`, `normalizePath`, `normalizePathWin`, `utf8toUnicode`, `base64Decode`, `base64DecodeExt`, `hexDecode`, `sqlHexDecode`, `escapeSeqDecode`, `length`, `trim`, `trimLeft`, `trimRight` (final list from the CI check) |
-| Actions | `id`, `phase`, `msg`, `logdata`, `tag`, `severity`, `ver`, `t:`, `chain`, `block`, `deny`, `pass`, `allow`, `drop`, `status`, `setvar`, `capture`, `multiMatch`, `skipAfter`, `log`/`nolog`, `auditlog`/`noauditlog`, `ctl:ruleRemoveById`, `ctl:ruleRemoveByTag`, `ctl:ruleRemoveTargetById`, `ctl:ruleRemoveTargetByTag`, `ctl:requestBodyProcessor`, `ctl:ruleEngine`, `ctl:forceRequestBodyVariable`; metadata (`rev`, `maturity`, `accuracy`) parsed and ignored |
+| Directives | `SecRule`, `SecAction`, `SecMarker`, `SecDefaultAction`, `SecRuleRemoveById/ByTag`, `SecRuleUpdateTargetById/ByTag`, `SecComponentSignature` (ignored), body config |
+| Variables | `ARGS*`, `ARGS_NAMES*`, `ARGS_COMBINED_SIZE`, `REQUEST_HEADERS*(_NAMES)`, `REQUEST_COOKIES*(_NAMES)`, `REQUEST_URI(_RAW)`, `REQUEST_FILENAME`, `REQUEST_BASENAME`, `REQUEST_LINE`, `REQUEST_METHOD`, `REQUEST_PROTOCOL`, `QUERY_STRING`, `REQUEST_BODY(_LENGTH)`, `FILES*`, `FILES_COMBINED_SIZE`, `MULTIPART_*`, `REQBODY_ERROR*`, `XML:/*`, `TX`, `MATCHED_VAR(S)(_NAME(S))`, `UNIQUE_ID`, `REMOTE_ADDR`; `&`, `:key`, `:/regex/`, `!` |
+| Operators | `rx`, `pm`, `pmFromFile`/`pmf`, `streq`, `contains`, `beginsWith`, `endsWith`, `within`, `eq`/`ge`/`gt`/`le`/`lt`, `ipMatch(FromFile)`, `validateByteRange`, `validateUrlEncoding`, `validateUtf8Encoding`, `detectSQLi`, `detectXSS`, `unconditionalMatch`, `!` |
+| Transformations | ~25: `none`, `lowercase`, `urlDecode(Uni)`, `htmlEntityDecode`, `jsDecode`, `cssDecode`, `cmdLine`, `compressWhitespace`, `removeWhitespace`, `removeNulls`, `replaceNulls`, `removeComments`, `replaceComments`, `normalizePath(Win)`, `utf8toUnicode`, `base64Decode(Ext)`, `hexDecode`, `sqlHexDecode`, `escapeSeqDecode`, `length`, `trim(Left/Right)` |
+| Actions | `id`, `phase`, `msg`, `logdata`, `tag`, `severity`, `ver`, `t:`, `chain`, `block`, `deny`, `pass`, `allow`, `drop`, `status`, `setvar`, `capture`, `multiMatch`, `skipAfter`, `(no)log`, `(no)auditlog`, `ctl:ruleRemoveById/ByTag`, `ctl:ruleRemoveTargetById/ByTag`, `ctl:requestBodyProcessor`, `ctl:ruleEngine`, `ctl:forceRequestBodyVariable`; `rev`, `maturity`, `accuracy` ignored |
 
 ## 5. Verification
 
-Detection parity is the product. Four independent checks:
+Parity is the product:
 
-1. **CRS regression suite** (`test/crs`) runs against both evaluators; the engine must pass the
-   same 4,572 tests as Coraza.
-2. **Differential testing against Coraza** (`test/diff`): the same requests through both
-   evaluators must yield the same matched rule IDs, scores and interruption. Corpora: the CRS
-   payloads, the benign corpus, recorded traffic samples, and **differential fuzzing** with Go's
-   native fuzzer generating requests.
-3. **Component conformance:** each transformation and body processor is fuzzed against Coraza's
-   output (obtained through rules that capture the transformed value), byte for byte.
-4. **Shadow mode in production:** the pipeline can run both evaluators on a sampled share of
-   traffic and export `inkwall_engine_disagreements_total{rule_id}`; the engine is enabled for a
-   policy only after a clean shadow period. The shadow evaluation runs off the request path, uses
-   its own small slot budget, and is dropped first under load, so it never affects latency or
-   admission control.
+1. **CRS suite** (`test/crs`, built): same 4,572 tests as Coraza.
+2. **Differential tests** (`test/diff`): same IDs, scores, interruption on CRS payloads, benign
+   corpus, recorded traffic and fuzzing.
+3. **Component conformance:** each transformation and body processor fuzzed byte for byte against
+   Coraza.
+4. **Shadow mode:** both evaluators on sampled traffic, `inkwall_engine_disagreements_total{rule_id}`;
+   enable per policy after a clean period. Off the request path, own slot budget, dropped first
+   under load.
 
-Plus the prefilter soundness check from `test/perf/prefilter`, run in CI against the compiled
-program.
+Plus the prefilter soundness check in CI.
 
 ## 6. Performance targets
 
-Engine time, single core, CRS paranoia level 1, gated in CI with `benchstat` (0001 §8):
+One core, PL1, gated by `benchstat` in CI (0001 §8):
 
 | Request | Target | Coraza today |
 |---|---|---|
@@ -249,111 +166,68 @@ Engine time, single core, CRS paranoia level 1, gated in CI with `benchstat` (00
 | JSON, 150 fields | ≤ 3 ms | ~29 ms |
 | Allocations, benign GET | ≤ 50 | ~2,800 |
 
-Attack requests may cost more (candidate rules run in full), which is acceptable: they are rare,
-and admission control bounds their impact.
-
-These targets are provisional. The feasibility measurement covered only the 104 per-argument rules;
-the rules that inspect headers, the URI and protocol details (the 920/921 families) also contribute
-to the benign-GET cost and were not measured. N0 measures their share, and the targets are
-confirmed or revised at the end of N3.
+Attacks may cost more (rare; bounded by admission control). Provisional: header/URI rules
+(920/921) weren't measured; N0 measures them, N3 confirms the targets.
 
 ## 7. Integration
 
-- New package `pkg/rules/native` implementing `rules.Evaluator`; `pkg/rules/coraza` stays.
-- Policy option `engine: native | coraza | auto` (flag `--engine` in standalone mode). `auto`
-  compiles with the engine and falls back to Coraza, with a logged reason, if the rule set uses an
-  unsupported feature.
-- Shadow mode: `--engine-shadow coraza --shadow-sample 0.01` evaluates a sample with both and
-  reports disagreements (never affects the verdict).
-- Default stays `coraza` until milestone N5's exit criteria are met; then `auto`.
+- `pkg/rules/native` implements `rules.Evaluator`; `pkg/rules/coraza` stays.
+- Policy `engine: native | coraza | auto` (`--engine` standalone); `auto` falls back to Coraza with
+  a logged reason.
+- `--engine-shadow coraza --shadow-sample 0.01` reports disagreements, never changes the verdict.
+- Default `coraza` until N5, then `auto`.
 
 ## 8. Code layout
 
 ```
 pkg/rules/native/
-├── seclang/      # lexer, parser, AST, positions, errors
-├── compile/      # resolver, paranoia folding, exclusions, IR builder
-├── program/      # IR types, chain trie, skipAfter resolution
-├── prefilter/    # literal extraction, views, Aho-Corasick, candidate bitsets
-├── transform/    # transformations
-├── operators/    # operators
-├── bodyproc/     # urlencoded, json, xml, multipart
-├── runtime/      # transaction, collections, rule loop, actions, scoring
-└── evaluator.go  # rules.Evaluator implementation
-test/diff/        # differential harness and fuzzers (separate module, imports Coraza)
+├── seclang/   compile/   program/   prefilter/
+├── transform/ operators/ bodyproc/  runtime/
+└── evaluator.go   # rules.Evaluator
+test/diff/         # differential harness (separate module, imports Coraza)
 ```
 
-Code ported from Coraza keeps its copyright header and is listed in a `NOTICE` file.
-
-**Repository.** The engine starts inside the `inkwall` repo: while it is being built, the engine,
-the pipeline, the CRS suite and the differential harness change together, and separate repos would
-turn every change into cross-repo pull requests and version juggling.
-
-It moves to its own repository and Go module (for example `github.com/inkwall-dev/engine`) when all
-of these hold:
-
-1. **It is the default evaluator:** milestone N5 is done, after a clean shadow period on real
-   traffic.
-2. **Its API is stable:** the public surface (compile rules into a program, evaluate a request) has
-   needed no breaking change for a while, because a separate module means real compatibility
-   promises.
-3. **There is a reason to split:** another project wants to embed it (the way Caddy or HAProxy
-   integrations embed Coraza), or it needs its own release cadence, for example a release for every
-   CRS update independent of Inkwall releases.
-
-To keep that move mechanical:
-
-- `pkg/rules/native` must not import other Inkwall packages except `pkg/request` and `pkg/rules`,
-  enforced with golangci-lint's `depguard`;
-- all of its code and tests live under that directory.
-
-The move itself: extract the directory with its history (`git filter-repo --subdirectory-filter
-pkg/rules/native`) into the new repository, give it its own module path and a `v0.x` tag, have
-Inkwall import it as a dependency, and run the CRS suite and differential tests in both repos.
-
-**Relationship to Coraza.** The engine replaces Coraza as the default evaluator after milestone N5.
-Coraza is not removed: it remains the oracle for differential testing and the fallback for rule
-sets that use SecLang features the engine does not support.
+- Ported Coraza code keeps its copyright header and is listed in `NOTICE`.
+- **Starts in this repo:** engine, pipeline and test harnesses change together.
+- **Own module** (e.g. `github.com/inkwall-dev/engine`) only when it is the default (N5), its API
+  has been stable, and there is a reason (an embedder, or per-CRS release cadence).
+- **Keep that move mechanical:** imports only `pkg/request` and `pkg/rules` (`depguard`), all code
+  and tests under the directory; extract with `git filter-repo --subdirectory-filter`.
+- Coraza is never removed: it stays oracle and fallback.
 
 ## 9. Milestones
 
 | # | Milestone | Exit criteria |
 |---|---|---|
-| N0 | Parser + IR for pinned CRS, no execution | CI check: 100% of pinned CRS parses and compiles; paranoia folding verified |
-| N1 | Transformations and operators | Byte-for-byte conformance fuzzing against Coraza for every one |
-| N2 | Runtime, phases 1–2, no prefilter, URL-encoded bodies | CRS suite passes at PL1 on GET/form tests; differential tests clean |
-| N3 | Prefilter, views, lazy transforms | 0 soundness violations; PL1 targets of §6 met for GET and form |
-| N4 | JSON, XML, multipart body processors | Full CRS suite passes (all request tests); JSON target met |
-| N5 | Integration: `--engine`, `auto` fallback, shadow mode | A clean shadow period on real traffic; default switches to `auto` |
-| N6 | PL2–4, custom-rule subset docs, response phases (T4) | CRS suite at PL4; response tests enabled in `test/crs` |
+| N0 | Parser + IR for pinned CRS, no execution | 100% of pinned CRS compiles; paranoia folding verified |
+| N1 | Transformations and operators | Byte-for-byte conformance fuzzing against Coraza |
+| N2 | Runtime, phases 1–2, no prefilter, URL-encoded bodies | CRS suite at PL1 on GET/form; differential tests clean |
+| N3 | Prefilter, views, lazy transforms | 0 soundness violations; §6 GET and form targets met |
+| N4 | JSON, XML, multipart | Full CRS request suite; JSON target met |
+| N5 | `--engine`, `auto` fallback, shadow mode | Clean shadow period; default becomes `auto` |
+| N6 | PL2–4, custom-rule docs, response phases (T4) | CRS suite at PL4 with response tests |
 
-The long tail of parity differences (multipart, transformations, JSON naming) is usually the
-largest part of the work, so the N3 gate is the go/no-go point: it measures the real gain before
-body processors and integration are built. Each milestone is useful on its own because of the
-fallback, and N0–N1 also strengthen the Coraza path (conformance tests, coverage check).
+N3 is go/no-go: it measures the gain before the parity long tail. The fallback makes each milestone
+useful alone.
 
 ## 10. Risks
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Semantic drift from Coraza in a transformation, parser or operator | Bypass or false positives | Differential fuzzing per component and end to end; CRS suite gate; shadow mode before enabling |
-| Prefilter view that does not dominate its chain | Bypass | Domination proven per chain by property tests; otherwise post-transformation filtering; soundness check in CI |
-| Case-folding mismatch (lowercase vs Unicode fold, e.g. `ſ`/`s`, `K`/`k`) | Bypass | Canonical fold mapping; Unicode fold-orbit corpus in the soundness check |
-| Over-decoding in a view destroys a literal the rule matches in encoded form | Bypass | `raw` view; views never decode more than their chains; property tests per chain |
-| Parity bugs inherited from Coraza | Same false negatives as Coraza | Allowlisted, reviewed deviations; CRS suite as the independent reference |
-| CRS release uses a new feature | Lost rules after upgrade | CI coverage check fails the upgrade; `auto` falls back to Coraza |
-| Multipart edge cases (a common evasion area) | Bypass | Port Coraza's processor first; fuzz against it; CRS 922xxx tests |
-| Maintenance cost | Slower CRS upgrades | Keep the subset to what CRS uses; port rather than reinvent; Coraza remains the fallback |
-| Targets not met | Large investment for less gain | N3 exit criteria measure the gain early, before body processors and integration |
+| Semantic drift from Coraza | Bypass, false positives | Differential fuzzing; CRS gate; shadow mode |
+| View doesn't dominate its chain | Bypass | Property tests; post-transform filtering; CI soundness check |
+| Case-folding mismatch (`ſ`/`s`, `K`/`k`) | Bypass | Canonical fold mapping; fold-orbit corpus |
+| Over-decoding loses encoded literals | Bypass | `raw` view; views never decode more than chains |
+| Coraza's own parity bugs | Same false negatives | Reviewed allowlist; CRS suite as reference |
+| New CRS feature | Lost rules | CI coverage check; `auto` fallback |
+| Multipart edge cases | Bypass | Port Coraza's processor; fuzz; CRS 922xxx |
+| Maintenance cost | Slower CRS upgrades | CRS-only subset; port, don't reinvent |
+| Targets missed | Little gain for the cost | N3 measures early |
 
 ## 11. Open questions
 
-1. Should bundles (0002 §4.3) carry the compiled program, so engines skip compilation, or SecLang,
-   compiled on each engine? (Compile cost decides; measure in N0.) A shipped program must be signed
-   like the bundle and tied to the engine version that compiled it.
-2. Should early exit (off by default) ever be on by default in block mode, given it changes which
-   rules are reported for blocked requests? Alternative: finish evaluation asynchronously for
-   reporting.
-3. Optional `go-re2` (cgo) regex backend for the remaining regex cost, as a build tag?
-4. Custom rules: which SecLang features beyond the CRS subset do users need most? Collect from
-   design-partner rule sets before N6.
+1. Bundles (0002 §4.3) carry the compiled program or SecLang? Compile cost decides (N0); a program
+   must be signed and tied to the engine version.
+2. Early exit on by default in block mode? Or finish evaluation asynchronously for reporting.
+3. Optional `go-re2` (cgo) backend behind a build tag?
+4. Which SecLang features do custom rules need beyond CRS? Ask design partners before N6.

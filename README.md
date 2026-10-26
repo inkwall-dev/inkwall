@@ -1,239 +1,147 @@
 # Inkwall
 
-**A Kubernetes-native web application firewall. Install one operator, and every ingress and gateway
-in your cluster is protected by the same policy.**
+**A Kubernetes-native web application firewall.** Install one operator; it injects an inspection
+engine (OWASP [Coraza](https://coraza.io/) with the [Core Rule Set](https://coreruleset.org/)) next
+to your ingress controller and enforces the `WAFPolicy` objects you attach to your routes.
 
-> **Status: early development.** No release exists yet. The inspection engine works as a standalone
-> reverse proxy and behind Traefik's ForwardAuth (see [Try it](#try-it)); the other proxy
-> integrations and the Kubernetes operator are not built yet. The architecture is written up in [`docs/design`](docs/design/README.md). Sections other than
-> "Try it" describe the target, not shipped features.
-
----
-
-## Why Inkwall
-
-Running a WAF in Kubernetes today means picking one per proxy: ModSecurity for ingress-nginx, a
-plugin for Traefik, a WASM filter for Envoy, an SPOA agent for HAProxy, each with its own config,
-rules, and failure modes. Change your ingress, and you rebuild your WAF.
-
-Inkwall makes the WAF a Kubernetes primitive, the way cert-manager did for TLS:
-
-- **One policy, every proxy.** Write a `WAFPolicy` against an `Ingress` or `HTTPRoute`. The
-  operator discovers which controller serves it and wires the engine in using that proxy's native
-  hook.
-- **Standard rules.** Built on [OWASP Coraza](https://coraza.io/) and the
-  [OWASP Core Rule Set](https://coreruleset.org/). Existing ModSecurity rules and exclusions keep
-  working.
-- **Fast by design.** The engine runs as a sidecar next to the proxy over a Unix socket (or
-  in-process for Caddy), with tiered checks so most requests never touch a regex. Latency budgets are
-  part of the design, and CI will fail on regressions.
-- **Safe by default.** New routes start in detect mode (no added latency, no false-positive
-  outages). In block mode nothing is forwarded uninspected; detect mode never blocks. Policies are
-  signed.
-- **GitOps first, SaaS optional.** CRDs in Git are the source of truth. Everything enforces fully
-  offline; an optional control plane adds fleet management and attack analytics.
-- **A way off ingress-nginx.** Protect ingress-nginx today, move routes to a Gateway API
-  implementation tomorrow, and keep the same policies.
+> **Status: v0.1.0, early.** Works today with **Traefik** and **`Ingress`** routes, plus a
+> standalone reverse proxy for anything else. The API is `v1alpha1` and will change. See
+> [Limits](#limits) and the [roadmap](#roadmap).
 
 ## How it works
 
-![Inkwall target architecture: clients reach the proxy, which asks the inkwall-engine sidecar for a verdict before forwarding allowed requests; the operator watches WAFPolicy, HTTPRoute and Ingress objects and pushes signed policy bundles to the engine](docs/diagrams/system-overview.svg)
+![Inkwall architecture: the proxy asks the inkwall-engine sidecar for a verdict before forwarding; the operator watches WAFPolicy and route objects and pushes signed policy bundles to every engine](docs/diagrams/system-overview.svg)
 
-1. **`inkwall-operator`** watches your routes and `WAFPolicy` objects, injects the engine into your
-   ingress controller pods, wires the proxy, and pushes signed policy bundles to every engine.
-2. **`inkwall-engine`** answers each proxy's native protocol (Envoy `ext_proc`/`ext_authz`, HAProxy
-   SPOE, forward-auth, a Lua plugin for ingress-nginx) and returns allow / deny in microseconds.
-3. **Status** on each policy tells you how far it got: `Accepted` → `Programmed` → `Enforced`
-   on every engine.
+1. **`inkwall-operator`** injects `inkwall-engine` into Traefik's pods as a sidecar, attaches a
+   ForwardAuth Middleware to every `Ingress` a policy targets, and pushes signed policy bundles to
+   every engine.
+2. **`inkwall-engine`** inspects each request with CRS and answers allow or deny. It keeps
+   enforcing its last bundle when the operator is down.
+3. **Status** on each policy shows how far it got: `Accepted` → `Programmed` (wired) →
+   `Enforced` (every engine runs it) → `Ready`.
 
-## Example
+## Install
+
+Needs Kubernetes 1.29+ and Helm 3.
+
+```sh
+helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.1.0 \
+  --namespace inkwall-system --create-namespace
+```
+
+Then install or restart Traefik: pods started after the operator get the engine. Chart options are in
+the [chart README](deploy/helm/inkwall/README.md).
+
+Images, chart and checksums are signed keyless with cosign. To verify:
+
+```sh
+cosign verify ghcr.io/inkwall-dev/inkwall-engine:0.1.0 \
+  --certificate-identity-regexp '^https://github.com/inkwall-dev/inkwall/\.github/workflows/release\.yaml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Binaries (`inkwall-engine`, `inkwall-operator`, `inkwallctl`) are on the
+[releases page](https://github.com/inkwall-dev/inkwall/releases).
+
+## Protect a route
 
 ```yaml
 apiVersion: waf.inkwall.dev/v1alpha1
 kind: WAFPolicy
 metadata:
-  name: shop
+  name: web
   namespace: shop
 spec:
-  targetRefs:
-  - group: gateway.networking.k8s.io
-    kind: HTTPRoute
-    name: shop-api
-  mode: Detect            # switch to Block once false positives are tuned
-  ruleSets:
-  - ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}
-    paranoiaLevel: 1
-  rateLimits:
-  - name: login
-    match: {path: /api/login, methods: [POST]}
-    key: ClientIP
-    limit: 10
-    window: 1m
+  targetRefs: [{kind: Ingress, name: web}]   # an Ingress Traefik serves
+  mode: Block                                # default Detect: log, never block
 ```
 
 ```console
 $ kubectl get wafpolicy -n shop
-NAME   MODE     READY   ENGINES   AGE
-shop   Detect   True    3/3       2m
+NAME   MODE    READY   BUNDLE   AGE
+web    Block   True    2        3s
+$ curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: shop.example.com' "http://$TRAEFIK/?id=1%27%20OR%20%271%27%3D%271"
+403
 ```
 
-(Illustrative. The API is `v1alpha1` and will change.)
+Start in `Detect`, tune false positives on the policy (`exclusions`, `skip` paths, the rule set's
+`paranoiaLevel`), then switch to `Block`. Extra rules come from `WAFRuleSet` and `ClusterWAFRuleSet`
+objects (built-in, SecLang or a ConfigMap). Samples are in
+[`operator/config/samples`](operator/config/samples).
 
-## Try it
+**Safe by default.** In block mode, a request that can't be inspected in time is rejected (503), so
+padding a request past the deadline doesn't get an attack through; detect mode never blocks. Bundles
+are signed and verified by every engine. While a policy blocks, Traefik pods can't start without
+the engine; see [when the operator is down](deploy/helm/inkwall/README.md#when-the-operator-is-down).
 
-The engine runs today as a standalone reverse proxy in front of any HTTP service. It inspects requests
-with the OWASP Core Rule Set, which is embedded in the binary.
+## Without Kubernetes
+
+The engine also runs as a standalone reverse proxy in front of any HTTP service:
 
 ```console
-$ make build
-$ ./bin/inkwall-engine proxy --upstream http://localhost:3000 --mode block
+$ inkwall-engine proxy --upstream http://localhost:3000 --mode block
 $ curl -s -o /dev/null -w '%{http_code}\n' 'localhost:8480/?id=1%27%20OR%20%271%27%3D%271'
 403
 ```
 
-Each blocked or detected request produces one JSON log line with the matching rule IDs. Metrics are on
-`:9480/metrics`, health on `:9480/healthz` and `:9480/readyz`.
-
-Defaults are deliberately safe. The engine starts in **detect mode**: it logs what it would block
-and never blocks. In **block mode**, a request that cannot be fully inspected (inspection timed out,
-failed, or the engine is overloaded) is **rejected with 503**, so padding a request until inspection
-times out cannot get an attack through; in detect mode such requests are allowed and logged. Use
-`--failure-mode open` to prefer availability in block mode. Useful flags:
+Main flags (`inkwall-engine proxy -h` for all):
 
 | Flag | Default | Purpose |
 |---|---|---|
 | `--mode` | `detect` | `block` to enforce |
 | `--paranoia-level` | `1` | CRS paranoia level, 1-4 |
-| `--max-body-bytes` | `65536` | Body bytes to inspect |
-| `--oversize-body` | `auto` | Bodies over the limit: `deny` (413), `allow` (forwarded uninspected, logged), `auto` = deny in block mode |
-| `--max-args` | `1000` | Maximum arguments per source; more is rejected with 400 |
-| `--rules` | | SecLang rules and configure-time exclusions, loaded after CRS |
-| `--rules-before-crs` | | Runtime exclusions (`ctl:ruleRemoveById` …) and settings, loaded before CRS |
+| `--rules` / `--rules-before-crs` | | SecLang rules and exclusions, after / before CRS |
+| `--skip-paths`, `--skip-body-paths` | | Routes not inspected, or without body inspection |
+| `--disable-rule-groups` | | CRS families the app can't be vulnerable to, e.g. `php,java` |
+| `--max-body-bytes` | `65536` | Body bytes inspected; `--oversize-body` decides the rest |
+| `--failure-mode` | `auto` | Uninspectable requests: closed in block mode, open in detect |
 | `--trusted-proxies` | | CIDRs whose `X-Forwarded-For` is trusted |
-| `--skip-paths` | | Paths never inspected, e.g. `/healthz,/static/*` |
-| `--skip-body-paths` | | Paths whose body is not inspected, e.g. `/upload/*` |
-| `--disable-rule-groups` | | CRS families the app can't be vulnerable to, e.g. `php,java` (~13-15% faster) |
-| `--failure-mode` | `auto` | `auto` = closed in block mode, open in detect; or `open` / `closed` |
-| `--timeout` | `250ms` | Inspection deadline per request (a safety cap, not typical latency) |
 
-Run `./bin/inkwall-engine proxy -h` for all flags. Inspection currently costs about 0.5 ms per
-request plus roughly 0.15 ms per request argument, so skipping static and trusted routes matters; see
-the
-[performance baseline](docs/design/0001-performance-first-architecture.md#31-measured-baseline-2026-10-03).
+Other modes: `inkwall-engine forward-auth` (Traefik ForwardAuth, `127.0.0.1:9001`) and
+`inkwall-engine check` (the `POST /v1/check` API, [`api/engine/v1`](api/engine/v1/engine.proto)).
+Each blocked or detected request logs one JSON line with the rule IDs; metrics are on
+`:9480/metrics`. Inspection costs about 0.5 ms per request
+([baseline](docs/design/0001-performance-first-architecture.md#31-measured-baseline-2026-10-03)).
 
-**Behind Traefik**, `inkwall-engine forward-auth` answers Traefik's ForwardAuth middleware on
-`127.0.0.1:9001/v1/forward-auth`, with the same flags minus `--upstream`. Run it as a sidecar in
-Traefik's pod with `--trusted-proxies=127.0.0.1/32`, and configure the middleware with
-`trustForwardHeader: false` (otherwise clients can make the engine inspect a URI of their choice) and
-`forwardBody: true` (otherwise bodies are not inspected). See
-[`hack/kind/traefik-demo.yaml`](hack/kind/traefik-demo.yaml) and the
-[design notes](docs/design/0002-system-architecture.md#63-traefik).
-
-With the operator ([Helm chart](deploy/helm/inkwall)), all of this is automatic: Traefik pods get
-the engine injected when they start, and every Ingress a `WAFPolicy` targets gets the ForwardAuth
-Middleware, until the policy reports `Ready`.
-
-**The check API.** `inkwall-engine check` serves the engine's own API, `POST /v1/check`
-([`api/engine/v1`](api/engine/v1/engine.proto)), for proxies without a native protocol: the proxy
-describes one request as a `CheckRequest`, in protobuf (`application/x-protobuf`) or JSON
-(`application/json`), and gets the verdict back. It listens on `127.0.0.1:9002` by default. It trusts
-the caller's `client_ip`, so expose it only to the proxy, for example on a Unix socket:
+**Test rules offline** with `inkwallctl test`: a URL, a raw request (`--request`) or a browser HAR
+(`--har`), with the same flags; `--expect allow|deny` makes it a CI check.
 
 ```console
-$ ./bin/inkwall-engine check --listen unix:/run/inkwall/engine.sock --mode block
-$ curl -s --unix-socket /run/inkwall/engine.sock -H 'Content-Type: application/json' \
-    -d '{"method":"GET","raw_uri":"/?id=1%27%20OR%20%271%27%3D%271","authority":"shop.example.com"}' \
-    http://engine/v1/check
-{"action":"ACTION_DENY","status":403,"rule_ids":[942100,949110],"reason":"REASON_RULE",...}
-```
-
-**Policies from the operator (bundle mode).** With `--operator host:port`, any of the three
-commands takes its policies from the operator's signed bundles instead of the flags that define a
-policy (`--mode`, `--rules`, `--skip-paths`, ...; setting one is then an error). Each request is
-inspected by the policy of its route, matched on host, decoded path and method; a host no policy
-covers is allowed and reported as `no-policy`. The engine authenticates with a projected
-ServiceAccount token (`--operator-token`), verifies the operator's certificate (`--operator-ca`) and
-every bundle's ed25519 signature (`--bundle-key`) before applying it, and swaps policies without a
-restart. Without the operator it keeps enforcing the last bundle, also across restarts with
-`--bundle-cache`; a new engine with no cache reads the operator's bundle Secret through the
-Kubernetes API (`--bundle-secret`). Until it has a bundle it stays unready for up to
-`--bootstrap-timeout` (10s), then allows requests uninspected or, with `--bootstrap deny`, rejects
-them with 503. The operator injects this configuration (#27); see
-[0002 §5.2](docs/design/0002-system-architecture.md#52-engine--operator-bundle-distribution).
-
-**Testing rules without traffic.** `inkwallctl test` shows the verdict and the matching rules for a
-request given like a curl command, as raw HTTP in a file (`--request`), or as a browser HAR export
-(`--har`). It runs the engine's checks in-process with the same flags (`--paranoia-level`,
-`--rules`, ...), or against a running engine with `--engine`. `--expect allow|deny` makes it a CI
-check for rule changes:
-
-```console
-$ ./bin/inkwallctl test 'http://shop.example.com/?id=1%27%20OR%20%271%27%3D%271'
+$ inkwallctl test 'http://shop.example.com/?id=1%27%20OR%20%271%27%3D%271'
 deny  403  GET /?id=1%27%20OR%20%271%27%3D%271  reason=rule  rules=942100,949110  interrupting=949110  847µs
-$ ./bin/inkwallctl test --rules my-exclusions.conf --expect allow --har checkout-flow.har
 ```
 
-To run it in Kubernetes, `make kind-up` creates a [kind](https://kind.sigs.k8s.io/) cluster with a
-demo app published twice: behind the engine's reverse proxy (`127.0.0.1:30480`) and through Traefik
-with the engine as a forward-auth sidecar (`127.0.0.1:30080`), both in block mode. `make kind-test`
-sends benign and attack requests through both and checks the verdicts. `make kind-down` deletes the
-cluster. The setup is in [`hack/kind`](hack/kind).
+## Limits
 
-On the same cluster, `make kind-operator` installs the operator with the
-[Helm chart](deploy/helm/inkwall) and checks its webhook and bundles, and `make kind-e2e` runs the
-end-to-end test: a `WAFPolicy` applied in the cluster is enforced by an engine that takes it from
-the operator, follows edits without a restart, keeps enforcing while the operator is down, and stops
-when the policy is deleted. CI runs it on every pull request.
-
-Development checks: `make check` (lint, tests, vulnerability scan), `make crs-test` (the OWASP CRS
-regression suite, about 4,500 tests, through the proxy) and `make bench-compare` (benchmarks against
-`origin/main`; fails on a significant regression over 5%, as CI does on every PR).
-
-**Measuring performance.** `inkwallctl bench` replays a fixed mix of benign and attack requests and
-reports p50/p99/p99.9 per request class and throughput per core; `--rate 2000` holds a fixed load to
-measure latency below saturation, and `--engine` measures a running engine instead. `--pprof` on the
-engine serves `/debug/pprof/` on the admin listener; keep that listener private when it is on.
-
-## Planned integrations
-
-| Proxy / controller | Hook | Body inspection |
-|---|---|---|
-| Envoy, Envoy Gateway, Istio, Contour | `ext_proc` (or `ext_authz`) | streamed |
-| HAProxy (both Kubernetes ingress controllers) | SPOE | yes |
-| ingress-nginx | Lua plugin (or global auth URL) | yes (plugin) |
-| Traefik | ForwardAuth (works today), later a plugin | yes, with `forwardBody` (buffered) |
-| Caddy | native module, in-process | yes |
-| Anything else | standalone reverse proxy | yes |
+- Proxies: **Traefik** only (and the standalone proxy). Envoy, HAProxy, ingress-nginx and Caddy are
+  designed, not built.
+- Targets: **`Ingress`** only; not Traefik `IngressRoute` or Gateway API `HTTPRoute` yet.
+- No uninstall step that unwires routes first: remove the policies before uninstalling.
+- One cluster; the optional control plane (fleet management, analytics) isn't built.
 
 ## Roadmap
 
-1. **Engine:** Coraza + CRS, tiered pipeline, standalone reverse-proxy mode, benchmark harness.
-2. **Envoy integration** end to end on kind.
-3. **HAProxy, ingress-nginx, Traefik, Caddy** integrations.
-4. **Operator + Helm chart:** discovery, injection, wiring, signed bundles, status.
-5. **Optional control plane:** multi-cluster policy management and attack analytics.
+Tracked on the [project board](https://github.com/orgs/inkwall-dev/projects/1) and in
+[milestones](https://github.com/inkwall-dev/inkwall/milestones):
 
-## Documentation
+- **v0.2.0**: signing key rotation, memory at scale, offline tests of `WAFPolicy` objects.
+- **v1.0.0**: a stable API (out of `v1alpha1`) with an upgrade path.
+- Then more proxies: Envoy and Gateway API, HAProxy, ingress-nginx, Caddy.
 
-| Doc | What it covers |
-|---|---|
-| [Component map](docs/design/0005-component-map.md) | Start here: diagrams of every component, where it runs, why Coraza |
-| [Performance-first architecture](docs/design/0001-performance-first-architecture.md) | Latency budgets, tiered pipeline, failure behaviour |
-| [System architecture](docs/design/0002-system-architecture.md) | Engine, CRDs, protocols, per-proxy integration |
-| [Kubernetes operator](docs/design/0004-operator.md) | Discovery, injection, wiring, bundles, status, uninstall |
-| [Adapter protocols](docs/design/0006-adapter-protocols.md) | ext_authz, ext_proc, forward-auth, SPOE explained |
+## Development
 
-## Contributing
+```sh
+make check        # lint, tests, vulnerability scan
+make crs-test     # OWASP CRS regression suite through the proxy
+make kind-up      # kind cluster with a demo behind the engine and Traefik
+make kind-e2e     # operator end to end on kind (what CI runs)
+```
 
-Contributions and design feedback are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for commit
-conventions, branching, and releases. Everyone taking part is expected to follow the
-[Code of Conduct](CODE_OF_CONDUCT.md).
+`make help` lists every target. Design docs are in [`docs/design`](docs/design/README.md); start with
+the [component map](docs/design/0005-component-map.md).
 
-## Security
+## Contributing, security, license
 
-Please report vulnerabilities privately as described in [SECURITY.md](SECURITY.md), never in public
-issues.
-
-## License
-
-Inkwall is licensed under the [Apache License 2.0](LICENSE).
+Read [CONTRIBUTING.md](CONTRIBUTING.md) (commit format, branches, releases) and follow the
+[Code of Conduct](CODE_OF_CONDUCT.md). Report vulnerabilities privately as described in
+[SECURITY.md](SECURITY.md). Inkwall is licensed under the [Apache License 2.0](LICENSE).

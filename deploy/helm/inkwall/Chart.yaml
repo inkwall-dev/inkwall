@@ -1,6 +1,6 @@
 apiVersion: v2
 name: inkwall
-description: Inkwall, a Kubernetes-native web application firewall. Installs the operator, its CRDs and its validating webhook.
+description: Inkwall, a Kubernetes-native web application firewall. Installs the operator, its CRDs and webhooks; the operator injects the engine into Traefik and wires its routes.
 type: application
 # The chart and the operator are released together, from the same tag.
 version: 0.1.0

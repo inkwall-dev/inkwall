@@ -5,150 +5,96 @@
 - Owner: noureldin
 - Depends on: [0002](0002-system-architecture.md) §3.2 and §6
 
-All six adapters answer the same question: **the proxy asking the engine "should I let this request
-through?"** They differ in who defines the protocol, how much of the request is sent, and whether
-the engine can see the body or the response.
+Each adapter answers the proxy's question "should I let this request through?". Adapters are thin
+listeners in `pkg/adapters/<name>` that convert the protocol's message to `request.Request` and the
+`Verdict` back, so detection is identical whichever proxy asked. Proxy configuration: 0002 §6.
 
-In the engine, each one is a thin listener in `pkg/adapters/<name>`. It converts that protocol's
-message into the canonical `request.Request` and converts our `Verdict` back into the protocol's
-reply. Detection code is identical whichever proxy asked. Concrete proxy configuration for each
-adapter is in 0002 §6.
+**Built (v0.1.0):** forward-auth (§3), `/v1/check` over HTTP (§5), reverse proxy (§6).
+**Not yet:** ext_authz (§1), ext_proc (§2), SPOE (§4).
 
 ---
 
 ## 1. ext_authz (Envoy external authorization)
 
-- Envoy **pauses** the request and makes one gRPC call (`envoy.service.auth.v3.Authorization/Check`)
-  containing the headers, plus the body if `with_request_body` buffering is configured.
-- The engine replies **OK** (continue, optionally adding headers) or **Denied** (Envoy returns the
-  status we choose, e.g. 403).
-- One question, one answer. Never sees the response.
-- Designed for authentication services (OAuth, API keys), so it is simple and supported by every
-  Envoy-based product.
-
-```mermaid
-sequenceDiagram
-    participant P as Envoy
-    participant E as engine
-    P->>E: Check(headers, optional buffered body)
-    E-->>P: OK or Denied(403)
-```
-
-**Adapter:** `pkg/adapters/extauthz`. Used when `ext_proc` is unavailable or not wanted.
+- One gRPC call per request (`envoy.service.auth.v3.Authorization/Check`) with headers, plus the
+  body if `with_request_body` is set. Reply **OK** or **Denied** (with our status).
+- No response visibility; supported by every Envoy-based product, so it is the Envoy fallback.
 
 ## 2. ext_proc (Envoy external processing)
 
-- A **bidirectional gRPC stream** that stays open for the lifetime of the HTTP request.
-- Envoy sends each stage as it happens: request headers → request body chunks → response headers →
-  response body chunks. For each stage the engine answers **continue**, **modify** (add or remove
-  headers, rewrite the body), or **immediate response** (block now).
-- Envoy chooses per stage what to send (`processing_mode`), so we ask for headers only and turn on
-  body stages only for routes whose policy needs them.
-- **Observability mode** (`observability_mode: true`): Envoy sends the data but does not wait for
-  our answer. This is how detect mode adds ~0 latency (0001 §4).
-- The most capable of the six, and the reason Envoy is the first integration.
-
-```mermaid
-sequenceDiagram
-    participant P as Envoy
-    participant E as engine
-    P->>E: request_headers
-    E-->>P: continue
-    P->>E: request_body chunk (only if policy needs it)
-    E-->>P: continue or immediate_response(403)
-    P->>E: response_headers (optional)
-    E-->>P: continue / modify headers
-```
-
-**Adapter:** `pkg/adapters/extproc`. Preferred for Envoy, Envoy Gateway, Istio, Contour.
+- A bidirectional gRPC stream per request: request headers, body chunks, response headers and body,
+  each answered with **continue**, **modify** or **immediate response** (block).
+- `processing_mode` asks for headers only, body stages only for routes whose policy needs them.
+- `observability_mode: true` doesn't wait for answers: detect mode at ~0 latency (0001 §4).
+- Most capable, so the planned first choice for Envoy, Envoy Gateway, Istio and Contour.
 
 ## 3. forward-auth (Traefik `ForwardAuth`, nginx `auth_request`)
 
-- Before forwarding, the proxy makes a **plain HTTP subrequest** to our URL with the original
-  request's headers. The original method and URI arrive as headers (`X-Forwarded-Method`,
-  `X-Forwarded-Uri`, `X-Forwarded-Host`, ...), and the adapter reconstructs the request from them.
-- **2xx** → allow. Any other status → the proxy returns it to the client (403, 429, ...).
-- Works with almost any proxy, but usually sends **headers only** (recent Traefik v3 versions can
-  forward the body with `forwardBody`) and never the response.
-- ingress-nginx `global-auth-url` uses this mechanism.
+- The proxy sends an HTTP subrequest to `/v1/forward-auth` with the client's headers; the original
+  request comes in `X-Forwarded-Method`, `-Uri`, `-Host`, `-Proto`, `-Port`, which the adapter
+  rebuilds the request from and strips before inspection.
+- **200** + `X-Request-Id` → allow. Deny → the verdict's status (403, 413, 503, ...), returned by the
+  proxy to the client. Missing or malformed `X-Forwarded-Method`/`-Uri` → 400 (never let through).
+- No response visibility; body only if the proxy forwards it. ingress-nginx `global-auth-url` uses
+  the same mechanism.
 
 ![Traefik forward-auth sequence: for a benign request Traefik sends a subrequest to the engine, gets 200 with X-Request-Id and forwards to the app; for an attack the engine answers 403 and Traefik returns it to the client](../diagrams/forward-auth.svg)
 
-The middleware must use `trustForwardHeader: false` (otherwise the engine inspects a client's own
-`X-Forwarded-Uri` instead of the real one) and `forwardBody: true` with a `maxBodySize` above the
-engine's `--max-body-bytes` (otherwise bodies pass uninspected).
+Traefik middleware must set:
 
-**Adapter:** `pkg/adapters/forwardauth`.
+- `trustForwardHeader: false`, else the engine inspects a client-supplied `X-Forwarded-Uri`.
+- `forwardBody: true` with `maxBodySize` above `--max-body-bytes`, else bodies pass uninspected.
+- `authResponseHeaders: X-Request-Id` to pass the request ID upstream.
+
+**Built:** `pkg/adapters/forwardauth`, `inkwall-engine forward-auth`.
 
 ## 4. SPOE (HAProxy Stream Processing Offload Engine)
 
-- HAProxy's own **binary protocol (SPOP)** for sending data to an external "agent" (SPOA). The
-  engine implements the agent side.
-- HAProxy sends a message with the fields its config lists (method, path, headers, source IP,
-  body). We reply by **setting variables** such as `txn.inkwall.action=deny`, and HAProxy's own
-  rules act on them (`http-request deny if { var(txn.inkwall.action) -m str deny }`).
-- Many requests are pipelined over a few persistent connections, so it is very efficient.
-- The engine never blocks directly: it sets variables and HAProxy config decides. If we time out or
-  error, no variable is set: with a fail-open policy no deny rule matches and the request passes;
-  with fail-closed (the block-mode default) an extra rule denies when the variable is missing.
+- HAProxy's binary SPOP, pipelined over a few connections; the engine is the agent (SPOA).
+- The engine sets variables (`txn.inkwall.action=deny`); HAProxy rules act on them. On timeout or
+  error none is set, so fail-closed needs an extra rule denying when the variable is missing.
 - Async groups allow detect mode without waiting.
-
-```mermaid
-sequenceDiagram
-    participant P as HAProxy
-    participant E as engine (SPOA)
-    P->>E: NOTIFY check-request(method, path, headers, ip, body)
-    E-->>P: ACK set-var txn.inkwall.action=deny
-    Note over P: http-request deny if var(txn.inkwall.action) == deny
-```
-
-**Adapter:** `pkg/adapters/spoe`.
 
 ## 5. `/v1/check` (Inkwall's own API)
 
-- A simple endpoint we define: send a compact description of the request (`CheckRequest`,
-  protobuf or JSON), get back a `CheckResponse` verdict (action, status, headers, matched rule IDs).
-  Schema: 0002 §5.1.
-- Exists for clients with no native protocol: the ingress-nginx **Lua plugin**, the **Traefik
-  plugin**, `inkwallctl test`, and our tests.
-- Because we own it, we control exactly what is sent and how compact it is.
-- Served over HTTP (`POST /v1/check`, `inkwall-engine check`) and, with the Envoy adapters, gRPC
-  (`CheckService/Check`), on the Unix socket in sidecar mode.
+- `POST /v1/check` with a `CheckRequest` (`api/engine/v1`, schema 0002 §5.1) as protobuf
+  (`application/x-protobuf`) or JSON (`application/json`); `CheckResponse` (action, status, headers,
+  matched rule IDs) comes back in the same encoding.
+- For clients with no native protocol; we control what is sent.
+- Every well-formed check gets **200**, verdict in the body. Errors: 405 (not POST), 415 (content
+  type), 413 (too large), 400 (undecodable or invalid).
+- `client_ip` is taken as given: listen only where the proxy alone can reach it (Unix socket or
+  localhost).
 
 ![POST /v1/check sequence: the caller sends a CheckRequest and the engine always answers 200 with a CheckResponse; ACTION_ALLOW lets the caller forward with X-Request-Id, ACTION_DENY with status 403 makes the caller return 403](../diagrams/check-api.svg)
 
-Callers today are `inkwallctl test` and `inkwallctl bench` (`--engine`); the ingress-nginx Lua plugin
-and the Traefik plugin will use the same API. The engine takes `client_ip` as given, so the API is
-exposed only to the proxy, on a Unix socket or localhost.
-
-**Adapter:** `pkg/adapters/httpcheck`.
+**Built:** `pkg/adapters/httpcheck`, `inkwall-engine check`; used by `inkwallctl test`,
+`inkwallctl bench --engine` and tests.
+**Not yet:** gRPC `CheckService/Check` (defined in `api/engine/v1`, not served), the ingress-nginx
+Lua plugin and the Traefik plugin.
 
 ## 6. Reverse proxy (standalone mode)
 
-- The engine **is** the proxy: clients connect to Inkwall, it inspects the request, then forwards
-  it to the application itself. No other proxy is involved.
-- Sees everything, including the full body and the response, at the cost of being an extra hop in
-  the traffic path.
-- Used for VMs, unsupported proxies, and as the **reference implementation** in tests: every other
-  adapter must produce the same verdict as this one for the same request (adapter parity tests,
-  0002 §10).
+- The engine is the proxy: inspects each request, forwards allowed ones to `--upstream`. Sees the
+  full body, at the cost of an extra hop.
+- For VMs and unsupported proxies, and the **reference** in tests: every adapter must give the same
+  verdict for the same request (0002 §10).
 
 ![Reverse proxy sequence: a benign request is inspected and forwarded to the app with X-Request-Id and X-Forwarded headers; an attack gets 403 without reaching the app; an inspection timeout in block mode gets 503](../diagrams/reverse-proxy.svg)
 
-**Adapter:** `pkg/adapters/proxy`.
+**Built:** `pkg/adapters/proxy`, `inkwall-engine proxy`.
 
 ---
 
 ## 7. Comparison
 
-| | Defined by | Transport | Body | Response | Waits for answer? | Used for |
+| | Transport | Body | Response | Waits? | For | Status |
 |---|---|---|---|---|---|---|
-| ext_authz | Envoy | gRPC, one call | buffered, optional | no | yes | Envoy fallback |
-| ext_proc | Envoy | gRPC bidirectional stream | streamed | yes | yes, or no in observability mode | Envoy, Envoy Gateway, Istio, Contour |
-| forward-auth | Traefik / nginx | HTTP subrequest | usually no | no | yes | Traefik, ingress-nginx fallback |
-| SPOE | HAProxy | SPOP (binary, pipelined) | yes | possible | yes, or no with async groups | HAProxy |
-| `/v1/check` | Inkwall | HTTP / gRPC | yes | no | yes | nginx Lua, Traefik plugin, CLI, tests |
-| reverse proxy | Inkwall | full HTTP proxying | yes | yes | it is the traffic path | VMs, unsupported proxies, test reference |
+| ext_authz | gRPC call | buffered, optional | no | yes | Envoy fallback | not yet |
+| ext_proc | gRPC stream | streamed | yes | yes, or no (observability) | Envoy, Istio, Contour | not yet |
+| forward-auth | HTTP subrequest | if forwarded | no | yes | Traefik, ingress-nginx | built |
+| SPOE | SPOP | yes | possible | yes, or no (async) | HAProxy | not yet |
+| `/v1/check` | HTTP (gRPC planned) | yes | no | yes | CLI, tests; Lua/Traefik plugins planned | built |
+| reverse proxy | HTTP proxying | yes | yes | is the path | VMs, test reference | built |
 
-Caddy is not listed: the engine is compiled into Caddy as a module and called as a Go function, so
-there is no protocol at all (0002 §6.5).
+Caddy needs no protocol: the planned module compiles the engine into Caddy (0002 §6.5).
