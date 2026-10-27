@@ -74,6 +74,16 @@ func defaultResources() corev1.ResourceRequirements {
 	}
 }
 
+// HasEngine reports whether pod has the engine container.
+func HasEngine(pod *corev1.Pod) bool {
+	for _, c := range slices.Concat(pod.Spec.InitContainers, pod.Spec.Containers) {
+		if c.Name == ContainerName {
+			return true
+		}
+	}
+	return false
+}
+
 // Inject adds the engine to pod as a native sidecar (an init container
 // with restartPolicy Always, so it starts before the proxy and stops after
 // it), and the volumes it needs. It reports false, changing nothing, for a

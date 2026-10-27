@@ -428,6 +428,31 @@ primary_hello() { stub_stats | grep -q '"STREAM_ROLE_PRIMARY CLUSTER_MODE_GITOPS
 check "the stub got a primary Hello in GitOps mode" primary_hello
 beats() { [[ $(stub_stats | sed -n 's/.*"heartbeats":\([0-9]*\).*/\1/p') -ge 1 ]]; }
 eventually "heartbeats arrive" beats
+# State sync (#90): the leader reports the cluster, and every change
+# within seconds; it never writes the objects.
+state_has() { stub_stats | grep -qF "\"$1\""; }
+eventually "the stub got the cluster state (InkwallConfig)" state_has "InkwallConfig /default"
+last_state() { stub_stats | sed -n "s/.*\"lastState\":{[^}]*\"$1\":\([0-9]*\).*/\1/p"; }
+engines_seen() { [[ $(last_state engines) -ge 1 && $(last_state podsWithEngine) -ge 1 && $(last_state bundleVersion) -ge 1 ]]; }
+# The operator just restarted: its engines reconnect and are reported again
+# within seconds, and the change is sent.
+eventually "the state has the engines, Traefik pods with the engine and the bundle" engines_seen ||
+  echo "      stub stats: $(stub_stats)"
+"${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: cp-sync
+  namespace: $NS
+spec:
+  # No such Ingress: the policy changes nothing, it only has to be reported.
+  targetRefs: [{kind: Ingress, name: cp-sync}]
+  mode: Detect
+YAML
+eventually "a new WAFPolicy reaches the control plane" state_has "WAFPolicy $NS/cp-sync"
+"${KUBECTL[@]}" -n "$NS" delete wafpolicy cp-sync --wait >/dev/null
+state_lacks() { ! state_has "$1"; }
+eventually "and so does its deletion" state_lacks "WAFPolicy $NS/cp-sync"
 # A restarted operator without its certificate (lost, say) can only enroll
 # again: the token is used, so the stub refuses it. A running stream keeps
 # its certificate in memory, hence the restart.

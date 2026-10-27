@@ -7,7 +7,8 @@
 // a real control plane. Not for production.
 //
 // An admin listener serves the CA (/ca.crt), for the operator's trust
-// bundle, and what the stub saw (/stats, JSON), for the test's checks.
+// bundle, and what the stub saw (/stats, JSON: calls, Hellos, heartbeats,
+// and a summary of the newest ClusterState), for the test's checks.
 package main
 
 import (
@@ -47,6 +48,19 @@ type stats struct {
 	Heartbeats   int      `json:"heartbeats"`
 	Renewals     int      `json:"renewals"`
 	Hellos       []string `json:"hellos"`
+	States       int      `json:"states"`
+	// LastState summarizes the newest ClusterState.
+	LastState *state `json:"lastState,omitempty"`
+}
+
+type state struct {
+	// Objects are "Kind namespace/name".
+	Objects []string `json:"objects"`
+	// Pods and PodsWithEngine are Traefik's.
+	Pods           uint32 `json:"pods"`
+	PodsWithEngine uint32 `json:"podsWithEngine"`
+	Engines        int    `json:"engines"`
+	BundleVersion  uint64 `json:"bundleVersion"`
 }
 
 func run() error {
@@ -79,6 +93,19 @@ func run() error {
 			Heartbeats: st.Heartbeats, Renewals: st.Renewals}
 		for _, h := range st.Hellos {
 			out.Hellos = append(out.Hellos, fmt.Sprintf("%s %s %s", h.GetRole(), h.GetMode(), h.GetClusterUid()))
+		}
+		out.States = len(st.States)
+		if n := len(st.States); n > 0 {
+			last := st.States[n-1]
+			ls := &state{Objects: []string{}, Engines: len(last.GetEngines()), BundleVersion: last.GetBundleVersion()}
+			for _, o := range last.GetObjects() {
+				ls.Objects = append(ls.Objects, fmt.Sprintf("%s %s/%s", o.GetKind(), o.GetNamespace(), o.GetName()))
+			}
+			for _, in := range last.GetIntegrations() {
+				ls.Pods += in.GetPods()
+				ls.PodsWithEngine += in.GetPodsWithEngine()
+			}
+			out.LastState = ls
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
