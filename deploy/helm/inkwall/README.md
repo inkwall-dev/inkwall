@@ -24,6 +24,7 @@ kind cluster of `make kind-up`.
 | `ServiceAccount`, `ClusterRole`, `Role` and bindings | Rules generated from the operator's code; the `Role` covers the release namespace only |
 | `ValidatingWebhookConfiguration` `inkwall-operator-validating` | WAF kinds only, fails closed, 2 s timeout |
 | Pre-delete hook (`Job`, `Role`, `RoleBinding` `<release>-inkwall-operator-unwire`) | Runs only on `helm uninstall`: unwires the routes (`uninstall.unwire`) |
+| `ConfigMap` `inkwall-control-plane-ca`, `Secret` `inkwall-enrollment` | Only with `controlPlane.caBundle` / `controlPlane.enrollmentToken` (names for a release named `inkwall`) |
 | `MutatingWebhookConfiguration` `inkwall-operator-mutating` | Traefik pods only, at creation; fails open, or closed while a policy is in block mode (`injection.enabled`) |
 | `Service` `inkwall-operator-webhook` | |
 | `Service` `inkwall-operator` | Bundle distribution to the engines, gRPC over TLS on port 9445 |
@@ -46,6 +47,8 @@ See [`values.yaml`](values.yaml) for all of them.
 | `operator.podDisruptionBudget.enabled`, `minAvailable` | `true`, `1` | |
 | `engine.image.repository`, `tag`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-engine`, the chart's `appVersion`, `IfNotPresent` | The engine injected into Traefik pods; `InkwallConfig.spec.engine.image` overrides it |
 | `injection.enabled` | `true` | Inject the engine into Traefik pods when they are created |
+| `controlPlane.caBundle` | `""` | The optional control plane's CA (PEM), when its certificate isn't from a public CA; e.g. `--set-file controlPlane.caBundle=ca.crt` |
+| `controlPlane.enrollmentToken` | `""` | Its one-time enrollment token, stored in the Secret `inkwall-enrollment` (key `token`; `<release>-inkwall-enrollment` for a release not named `inkwall`); or create that Secret yourself |
 | `uninstall.unwire` | `true` | On `helm uninstall`, unwire the routes first (a pre-delete hook), so they keep working |
 | `serviceAccount.name`, `annotations` | the release's full name, `{}` | |
 | `crds.install` | `true` | |
@@ -53,6 +56,35 @@ See [`values.yaml`](values.yaml) for all of them.
 | `webhook.port`, `timeoutSeconds` | `9443`, `2` | |
 | `webhook.certs.mode` | `rotate` | `rotate`: the operator creates, renews and injects a self-signed certificate. `certManager`: cert-manager issues it |
 | `webhook.certs.certManager.issuerRef` | a self-signed `Issuer` | |
+
+## Connecting to a control plane
+
+Optional: Standalone, the default, never connects. For GitOps or Managed mode, install with the
+control plane's CA (if private) and the one-time enrollment token it gave you, then point the
+cluster at it:
+
+```sh
+helm upgrade --install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \
+  --namespace inkwall-system --create-namespace \
+  --set-file controlPlane.caBundle=ca.crt --set controlPlane.enrollmentToken=<token>
+kubectl apply -f - <<'YAML'
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: InkwallConfig
+metadata: {name: default}
+spec:
+  mode: GitOps
+  controlPlane:
+    endpoint: grpcs://<host>:<port>
+    enrollmentSecretRef: {name: inkwall-enrollment, namespace: inkwall-system}
+YAML
+kubectl get inkwallconfig default -o jsonpath='{.status.conditions}'
+```
+
+The token Secret must be in the release namespace (`inkwall-enrollment` above is its name for a
+release named `inkwall`). The operator enrolls once, keeps the cluster's
+certificate in `inkwall-control-plane-identity`, and reports `ControlPlaneConnected`. The
+`InkwallConfig` isn't part of the chart: a release can't create a custom resource of a CRD it
+installs itself.
 
 ## Uninstalling
 
