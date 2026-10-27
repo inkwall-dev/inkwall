@@ -505,15 +505,21 @@ func connectedMessage(id *identity) string {
 // dial connects to the control plane over TLS, with the cluster's
 // certificate when there is one (Connect) and without (Enroll).
 func (c *Connector) dial(target, host string, cert *tls.Certificate) (*grpc.ClientConn, error) {
+	return dial(c.CAFile, target, host, cert)
+}
+
+// dial connects to the control plane at target over TLS, trusting caFile
+// (empty: the system roots).
+func dial(caFile, target, host string, cert *tls.Certificate) (*grpc.ClientConn, error) {
 	cfg := &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
-	if c.CAFile != "" {
-		pem, err := os.ReadFile(filepath.Clean(c.CAFile))
+	if caFile != "" {
+		pem, err := os.ReadFile(filepath.Clean(caFile))
 		if err != nil {
 			return nil, fmt.Errorf("control plane CA: %w", err)
 		}
 		cfg.RootCAs = x509.NewCertPool()
 		if !cfg.RootCAs.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("control plane CA %s: no PEM certificate", c.CAFile)
+			return nil, fmt.Errorf("control plane CA %s: no PEM certificate", caFile)
 		}
 	}
 	if cert != nil {
