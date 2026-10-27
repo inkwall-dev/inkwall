@@ -4,7 +4,7 @@
 
 # The stub control plane for the end-to-end test (hack/kind/e2e.sh); test
 # only, never released.
-FROM --platform=$BUILDPLATFORM golang:1.26 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27 AS build
 ARG TARGETOS TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
