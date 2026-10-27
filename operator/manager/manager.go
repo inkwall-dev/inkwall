@@ -245,6 +245,8 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		Namespace: o.Namespace, Replica: replicaName(o), OperatorVersion: o.Version,
 		KubernetesVersion: kubernetesVersion(cfg),
 		CAFile:            o.ControlPlaneCAFile,
+		ProxyPods:         selectors.Selector(integrations.Traefik.Name),
+		EngineStale:       15 * engineReportInterval(o),
 	}); err != nil {
 		return nil, err
 	}
@@ -308,10 +310,7 @@ func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}) erro
 		}
 		replica = h
 	}
-	interval := o.EngineReportInterval
-	if interval == 0 {
-		interval = 2 * time.Second
-	}
+	interval := engineReportInterval(o)
 	store, table := distribution.NewStore(), distribution.NewTable()
 	if err := (&distribution.BundleSource{Client: mgr.GetClient(), Namespace: o.Namespace, Store: store}).SetupWithManager(mgr); err != nil {
 		return err
@@ -414,4 +413,12 @@ func kubernetesVersion(cfg *rest.Config) func() string {
 		})
 		return v
 	}
+}
+
+// engineReportInterval is how often replicas publish their engines.
+func engineReportInterval(o Options) time.Duration {
+	if o.EngineReportInterval == 0 {
+		return 2 * time.Second
+	}
+	return o.EngineReportInterval
 }

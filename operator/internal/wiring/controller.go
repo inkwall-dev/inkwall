@@ -347,7 +347,7 @@ func programmed(p *wafv1alpha1.WAFPolicy, byKey map[types.NamespacedName]*networ
 		running++
 		name := pod.Namespace + "/" + pod.Name
 		switch {
-		case hasEngine(&pod):
+		case injection.HasEngine(&pod):
 		case injection.OptedOut(&pod):
 			optedOut = append(optedOut, name)
 		case !injectingSince.IsZero() && pod.CreationTimestamp.After(injectingSince):
@@ -377,15 +377,6 @@ func programmed(p *wafv1alpha1.WAFPolicy, byKey map[types.NamespacedName]*networ
 			strings.Join(before, ", "))
 	}
 	return metav1.ConditionTrue, ReasonProgrammed, fmt.Sprintf("%d Ingress(es) wired to the engine in Traefik", wired)
-}
-
-func hasEngine(pod *corev1.Pod) bool {
-	for _, c := range slices.Concat(pod.Spec.InitContainers, pod.Spec.Containers) {
-		if c.Name == injection.ContainerName {
-			return true
-		}
-	}
-	return false
 }
 
 func (r *Reconciler) report(ctx context.Context, policies []wafv1alpha1.WAFPolicy, byKey map[types.NamespacedName]*networkingv1.Ingress,

@@ -71,9 +71,14 @@ type Server struct {
 	enrollCalls  int
 	connectCalls int
 	hellos       []*controlplanev1.Hello
-	heartbeats   int
-	renewals     int
-	clusters     int
+	states       []*controlplanev1.ClusterState
+	// primary sends on the open primary stream, for Resync; primaryID
+	// tells which stream that is.
+	primary    func(*controlplanev1.ConnectResponse) error
+	primaryID  uint64
+	heartbeats int
+	renewals   int
+	clusters   int
 }
 
 type enrollment struct {
@@ -166,8 +171,10 @@ type Stats struct {
 	EnrollCalls  int
 	ConnectCalls int
 	Hellos       []*controlplanev1.Hello
-	Heartbeats   int
-	Renewals     int
+	// States are the ClusterStates received, oldest first.
+	States     []*controlplanev1.ClusterState
+	Heartbeats int
+	Renewals   int
 	// Clusters is how many distinct clusters enrolled.
 	Clusters int
 }
@@ -177,7 +184,21 @@ func (s *Server) Stats() Stats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return Stats{EnrollCalls: s.enrollCalls, ConnectCalls: s.connectCalls, Hellos: append([]*controlplanev1.Hello(nil), s.hellos...),
-		Heartbeats: s.heartbeats, Renewals: s.renewals, Clusters: s.clusters}
+		States: append([]*controlplanev1.ClusterState(nil), s.states...), Heartbeats: s.heartbeats, Renewals: s.renewals, Clusters: s.clusters}
+}
+
+// Resync asks the cluster on the open primary stream for a full
+// ClusterState, and reports whether one was open.
+func (s *Server) Resync() (bool, error) {
+	s.mu.Lock()
+	send := s.primary
+	s.mu.Unlock()
+	if send == nil {
+		return false, nil
+	}
+	return true, send(&controlplanev1.ConnectResponse{Msg: &controlplanev1.ConnectResponse_Directive{Directive: &controlplanev1.Directive{
+		Action: &controlplanev1.Directive_Resync{Resync: &controlplanev1.Resync{}},
+	}}})
 }
 
 // Enroll implements the contract: the first call burns the token; a retry
@@ -216,8 +237,8 @@ func (s *Server) Enroll(_ context.Context, req *controlplanev1.EnrollRequest) (*
 	return resp, nil
 }
 
-// Connect implements the stream: Hello first, then Welcome; heartbeats and
-// certificate renewal.
+// Connect implements the stream: Hello first, then Welcome; ClusterState,
+// heartbeats and certificate renewal.
 func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer) error {
 	clusterID, err := s.clusterOf(stream.Context())
 	if err != nil {
@@ -238,10 +259,30 @@ func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer
 	if hello == nil {
 		return status.Error(codes.FailedPrecondition, "Hello must come first")
 	}
+	// Sends come from this goroutine and from Resync.
+	var sendMu sync.Mutex
+	send := func(m *controlplanev1.ConnectResponse) error {
+		sendMu.Lock()
+		defer sendMu.Unlock()
+		return stream.Send(m)
+	}
 	s.mu.Lock()
 	s.hellos = append(s.hellos, hello)
+	if hello.GetRole() == controlplanev1.StreamRole_STREAM_ROLE_PRIMARY {
+		// The newer primary stream wins.
+		s.primaryID++
+		id := s.primaryID
+		s.primary = send
+		defer func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if s.primaryID == id {
+				s.primary = nil
+			}
+		}()
+	}
 	s.mu.Unlock()
-	if err := stream.Send(&controlplanev1.ConnectResponse{Msg: &controlplanev1.ConnectResponse_Welcome{Welcome: &controlplanev1.Welcome{
+	if err := send(&controlplanev1.ConnectResponse{Msg: &controlplanev1.ConnectResponse_Welcome{Welcome: &controlplanev1.Welcome{
 		HeartbeatInterval: durationpb.New(s.HeartbeatInterval),
 	}}}); err != nil {
 		return err
@@ -252,6 +293,13 @@ func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer
 			return err
 		}
 		switch m := msg.GetMsg().(type) {
+		case *controlplanev1.ConnectRequest_ClusterState:
+			if hello.GetRole() != controlplanev1.StreamRole_STREAM_ROLE_PRIMARY {
+				return status.Error(codes.FailedPrecondition, "ClusterState on a non-primary stream")
+			}
+			s.mu.Lock()
+			s.states = append(s.states, m.ClusterState)
+			s.mu.Unlock()
 		case *controlplanev1.ConnectRequest_Heartbeat:
 			s.mu.Lock()
 			s.heartbeats++
@@ -271,7 +319,7 @@ func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer
 			if err != nil {
 				return status.Error(codes.Internal, err.Error())
 			}
-			if err := stream.Send(&controlplanev1.ConnectResponse{Msg: &controlplanev1.ConnectResponse_Certificate{Certificate: &controlplanev1.Certificate{
+			if err := send(&controlplanev1.ConnectResponse{Msg: &controlplanev1.ConnectResponse_Certificate{Certificate: &controlplanev1.Certificate{
 				Certificates: resp.GetCertificates(), NotAfter: resp.GetNotAfter(),
 			}}}); err != nil {
 				return err
