@@ -32,6 +32,7 @@ import (
 
 	agentv1 "github.com/inkwall-dev/inkwall/api/agent/v1"
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
 )
@@ -41,6 +42,9 @@ const (
 	DefaultHeartbeat  = 5 * time.Second
 	DefaultMinBackoff = time.Second
 	DefaultMaxBackoff = 30 * time.Second
+	// eventBatch keeps a batch of events well under gRPC's default 4 MiB
+	// message limit at the contract's field limits.
+	eventBatch = 256
 )
 
 // Config configures an Agent.
@@ -77,6 +81,9 @@ type Config struct {
 	Holder  *policy.Holder
 	// Admission is reported in heartbeats.
 	Admission *pipeline.Admission
+	// Events holds the security events to send to the operator (nil:
+	// none).
+	Events *events.Buffer
 
 	Logger     *slog.Logger
 	Heartbeat  time.Duration
@@ -253,6 +260,23 @@ func (a *Agent) stream(ctx context.Context) error {
 		EngineVersion: a.cfg.EngineVersion,
 	}}}); err != nil {
 		return err
+	}
+
+	if buf := a.cfg.Events; buf != nil {
+		go func() {
+			for {
+				batch := buf.Next(ctx, eventBatch)
+				if batch == nil {
+					return
+				}
+				if send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Events{Events: batch}}) != nil {
+					// Kept for the next stream.
+					buf.Return(batch)
+					cancel()
+					return
+				}
+			}
+		}()
 	}
 
 	go func() {

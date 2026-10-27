@@ -3,13 +3,15 @@
 
 // Bundle distribution between the operator and the engines (0002 §5.2).
 // Each engine keeps one long-lived stream open; the operator pushes the
-// current bundle, and the engine reports what it applied. Full bundles, not
-// deltas: bundles are small, and a full snapshot is idempotent.
+// current bundle, and the engine reports what it applied and sends its
+// security events. Full bundles, not deltas: bundles are small, and a full
+// snapshot is idempotent.
 syntax = "proto3";
 
 package inkwall.agent.v1;
 
 import "bundle/v1/bundle.proto";
+import "events/v1/events.proto";
 
 option go_package = "github.com/inkwall-dev/inkwall/api/agent/v1;agentv1";
 
@@ -28,9 +30,11 @@ message WatchRequest {
     Ack ack = 2;
     Nack nack = 3;
     Heartbeat heartbeat = 4;
+    // Security events (0002 §5.4), redacted, in order of time, at most
+    // 1,000 per batch. Best effort: an engine keeps a bounded buffer and
+    // drops the oldest when it is full, counted in the next batch.
+    inkwall.events.v1.EventBatch events = 5;
   }
-  // 5 is reserved for batches of security events (0002 §5.4).
-  reserved 5;
 }
 
 // WatchResponse is a message from the operator (OperatorMessage in 0002

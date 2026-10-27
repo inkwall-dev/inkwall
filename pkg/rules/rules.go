@@ -27,6 +27,20 @@ type Result struct {
 	// MatchedRuleIDs lists every rule that matched request data, including
 	// rules that only contributed to an anomaly score.
 	MatchedRuleIDs []int
+	// Matches says where each of those rules matched, unredacted: the
+	// caller redacts before anything leaves the engine.
+	Matches []Match
+	// AnomalyScore is the CRS inbound anomaly score (0 without CRS).
+	AnomalyScore int
+}
+
+// Match is where a rule matched.
+type Match struct {
+	RuleID int
+	// Variable is the collection and key, e.g. ARGS:id.
+	Variable string
+	// Value is the matched data.
+	Value string
 }
 
 // Evaluator evaluates requests against a compiled rule set. Implementations

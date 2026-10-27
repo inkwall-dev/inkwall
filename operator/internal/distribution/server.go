@@ -16,6 +16,7 @@ import (
 
 	agentv1 "github.com/inkwall-dev/inkwall/api/agent/v1"
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 )
 
 // Defaults of the Server.
@@ -43,6 +44,10 @@ type Server struct {
 
 	HelloTimeout time.Duration
 	IdleTimeout  time.Duration
+
+	// Events receives the engines' security events, stamped with the
+	// stream's engine and pod. Nil: they are counted and discarded.
+	Events func(*eventsv1.EventBatch)
 
 	sends chan struct{}
 }
@@ -170,6 +175,10 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 				<-idle.C
 			}
 			idle.Reset(s.IdleTimeout)
+			if batch := r.msg.GetEvents(); batch != nil {
+				s.events(e, batch)
+				continue
+			}
 			s.record(engineID, r.msg, log)
 		case <-idle.C:
 			return status.Error(codes.DeadlineExceeded, "no message from the engine in "+s.IdleTimeout.String())
@@ -187,6 +196,19 @@ func (s *Server) send(ctx context.Context, stream agentv1.BundleService_WatchSer
 	}
 	defer func() { <-s.sends }()
 	return stream.Send(&agentv1.WatchResponse{Msg: &agentv1.WatchResponse_Bundle{Bundle: signed}})
+}
+
+// events takes a batch from engine e. The engine and pod come from the
+// stream, which the operator authenticated, not from the events.
+func (s *Server) events(e Engine, batch *eventsv1.EventBatch) {
+	eventsReceived.Add(float64(len(batch.GetEvents())))
+	eventsDroppedByEngines.Add(float64(batch.GetDropped()))
+	for _, ev := range batch.GetEvents() {
+		ev.EngineId, ev.PodNamespace, ev.PodName = e.ID, e.PodNamespace, e.PodName
+	}
+	if s.Events != nil {
+		s.Events(batch)
+	}
 }
 
 func (s *Server) record(engineID string, msg *agentv1.WatchRequest, log logr.Logger) {

@@ -31,6 +31,7 @@ import (
 
 	enginev1 "github.com/inkwall-dev/inkwall/api/engine/v1"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/internal/httpadapter"
+	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 )
@@ -56,6 +57,9 @@ type Config struct {
 	// Logger receives one security event per denied or logged request.
 	// Nil uses slog.Default().
 	Logger *slog.Logger
+	// Events records each security event for the operator (nil: logged
+	// only).
+	Events *events.Recorder
 }
 
 // Handler answers check requests.
@@ -63,6 +67,7 @@ type Handler struct {
 	pipeline pipeline.Inspector
 	maxBody  int64
 	logger   *slog.Logger
+	events   *events.Recorder
 }
 
 // New returns a Handler that inspects requests with p.
@@ -74,7 +79,7 @@ func New(p pipeline.Inspector, cfg Config) (*Handler, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Handler{pipeline: p, maxBody: cfg.MaxBodyBytes, logger: logger}, nil
+	return &Handler{pipeline: p, maxBody: cfg.MaxBodyBytes, logger: logger, events: cfg.Events}, nil
 }
 
 var jsonOut = protojson.MarshalOptions{UseProtoNames: true}
@@ -123,7 +128,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	v := h.pipeline.Check(r.Context(), req)
 	if httpadapter.IsEvent(v) {
-		httpadapter.LogEvent(r.Context(), h.logger, req, path, v)
+		httpadapter.LogEvent(r.Context(), h.logger, h.events, req, path, v)
 	}
 
 	out := toResponse(req.ID, v)
@@ -256,53 +261,13 @@ func toResponse(id string, v pipeline.Verdict) *enginev1.CheckResponse {
 		ids = append(ids, uint32(rid)) // #nosec G115 -- rule IDs are positive and below 2^32
 	}
 	return &enginev1.CheckResponse{
-		Action:             action(v.Action),
+		Action:             events.Action(v.Action),
 		Status:             uint32(v.Status), // #nosec G115 -- an HTTP status
 		ResponseHeaders:    []*enginev1.Header{{Name: "X-Request-Id", Value: id}},
 		RuleIds:            ids,
-		Reason:             reason(v.Reason),
+		Reason:             events.Reason(v.Reason),
 		InterruptingRuleId: uint32(v.InterruptingRuleID), // #nosec G115 -- a rule ID
 		RequestId:          id,
 		InspectionTime:     durationpb.New(v.Duration),
-	}
-}
-
-func action(a pipeline.Action) enginev1.Action {
-	switch a {
-	case pipeline.ActionAllow:
-		return enginev1.Action_ACTION_ALLOW
-	case pipeline.ActionDeny:
-		return enginev1.Action_ACTION_DENY
-	case pipeline.ActionLog:
-		return enginev1.Action_ACTION_LOG
-	default:
-		return enginev1.Action_ACTION_UNSPECIFIED
-	}
-}
-
-func reason(r pipeline.Reason) enginev1.Reason {
-	switch r {
-	case pipeline.ReasonNone:
-		return enginev1.Reason_REASON_NONE
-	case pipeline.ReasonRule:
-		return enginev1.Reason_REASON_RULE
-	case pipeline.ReasonTimeout:
-		return enginev1.Reason_REASON_TIMEOUT
-	case pipeline.ReasonError:
-		return enginev1.Reason_REASON_ERROR
-	case pipeline.ReasonCanceled:
-		return enginev1.Reason_REASON_CANCELED
-	case pipeline.ReasonOverload:
-		return enginev1.Reason_REASON_OVERLOAD
-	case pipeline.ReasonOversize:
-		return enginev1.Reason_REASON_OVERSIZE
-	case pipeline.ReasonSkipped:
-		return enginev1.Reason_REASON_SKIPPED
-	case pipeline.ReasonNoPolicy:
-		return enginev1.Reason_REASON_NO_POLICY
-	case pipeline.ReasonSuspended:
-		return enginev1.Reason_REASON_SUSPENDED
-	default:
-		return enginev1.Reason_REASON_UNSPECIFIED
 	}
 }

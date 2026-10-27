@@ -18,6 +18,7 @@ import (
 	"github.com/corazawaf/coraza/v3/types"
 
 	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/rules"
 )
 
 func newRequest(method, uri string, headers http.Header, body string) *request.Request {
@@ -554,5 +555,43 @@ func TestExclusionsRejectUnsafeValues(t *testing.T) {
 		if _, err := New(Config{DisableCRS: true, Exclusions: []Exclusion{e}}); err == nil {
 			t.Errorf("%+v: accepted", e)
 		}
+	}
+}
+
+func TestMatchesAndAnomalyScore(t *testing.T) {
+	e, err := New(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.Evaluate(context.Background(), newRequest("GET", "/search?q=1%27%20OR%20%271%27%3D%271", nil, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sqli *rules.Match
+	for i, m := range res.Matches {
+		if !slices.Contains(res.MatchedRuleIDs, m.RuleID) {
+			t.Errorf("match %+v for a rule not in MatchedRuleIDs %v", m, res.MatchedRuleIDs)
+		}
+		if m.RuleID == 942100 {
+			sqli = &res.Matches[i]
+		}
+	}
+	if sqli == nil {
+		t.Fatalf("no match for 942100: %+v", res.Matches)
+	}
+	if sqli.Variable != "ARGS:q" || !strings.Contains(sqli.Value, "OR") {
+		t.Errorf("942100 matched %s = %q, want ARGS:q with the payload", sqli.Variable, sqli.Value)
+	}
+	// 942100 alone is critical (5); the threshold is 5 by default.
+	if res.AnomalyScore < 5 {
+		t.Errorf("anomaly score %d, want at least 5", res.AnomalyScore)
+	}
+
+	benign, err := e.Evaluate(context.Background(), newRequest("GET", "/search?q=shoes", nil, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if benign.AnomalyScore != 0 || len(benign.Matches) != 0 {
+		t.Errorf("benign request: score %d, matches %+v", benign.AnomalyScore, benign.Matches)
 	}
 }

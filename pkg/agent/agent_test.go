@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +38,8 @@ import (
 
 	agentv1 "github.com/inkwall-dev/inkwall/api/agent/v1"
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
+	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/request"
@@ -56,6 +59,7 @@ type fakeOperator struct {
 	acks     []uint64
 	nacks    []*agentv1.Nack
 	beats    int
+	events   []string
 	sawHello chan struct{}
 }
 
@@ -92,6 +96,10 @@ func (f *fakeOperator) Watch(stream agentv1.BundleService_WatchServer) error {
 				f.nacks = append(f.nacks, x.Nack)
 			case *agentv1.WatchRequest_Heartbeat:
 				f.beats++
+			case *agentv1.WatchRequest_Events:
+				for _, ev := range x.Events.GetEvents() {
+					f.events = append(f.events, ev.GetEventId())
+				}
 			}
 			f.mu.Unlock()
 		}
@@ -419,5 +427,32 @@ func TestSendFirst(t *testing.T) {
 	err := sendFirst(closedStream{err: status.Error(codes.PermissionDenied, "no access to the bundle")}, &agentv1.WatchRequest{})
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("got %v, want PermissionDenied", err)
+	}
+}
+
+func (f *fakeOperator) eventIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.events...)
+}
+
+func TestEvents(t *testing.T) {
+	e := newEnv(t)
+	buf := events.NewBuffer(0)
+	a, _, _ := e.agent(t, func(c *Config) { c.Events = buf })
+	// Recorded before the stream is up: kept until it is.
+	buf.Add(&eventsv1.SecurityEvent{EventId: "1"})
+	run(t, a)
+	<-e.op.sawHello
+	buf.Add(&eventsv1.SecurityEvent{EventId: "2"})
+	waitFor(t, "both events", func() bool { return slices.Equal(e.op.eventIDs(), []string{"1", "2"}) })
+
+	// Across a reconnect, nothing is lost.
+	e.op.closeStream <- struct{}{}
+	<-e.op.sawHello
+	buf.Add(&eventsv1.SecurityEvent{EventId: "3"})
+	waitFor(t, "the third event", func() bool { ids := e.op.eventIDs(); return len(ids) == 3 && ids[2] == "3" })
+	if n := buf.Len(); n != 0 {
+		t.Errorf("%d events left in the buffer", n)
 	}
 }

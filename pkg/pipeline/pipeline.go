@@ -308,7 +308,8 @@ func (p *Pipeline) run(ctx context.Context, r *request.Request) (o outcome) {
 }
 
 func (p *Pipeline) decide(res rules.Result) Verdict {
-	v := Verdict{Action: ActionAllow, RuleIDs: res.MatchedRuleIDs, InterruptingRuleID: res.RuleID}
+	v := Verdict{Action: ActionAllow, RuleIDs: res.MatchedRuleIDs, InterruptingRuleID: res.RuleID,
+		Matches: res.Matches, AnomalyScore: res.AnomalyScore}
 	if !res.Interrupted {
 		return v
 	}

@@ -3,7 +3,11 @@
 
 package pipeline
 
-import "time"
+import (
+	"time"
+
+	"github.com/inkwall-dev/inkwall/pkg/rules"
+)
 
 // Action is what the proxy should do with the request.
 type Action uint8
@@ -97,6 +101,10 @@ type Verdict struct {
 	InterruptingRuleID int
 	// RuleIDs lists every rule that matched, including score-only matches.
 	RuleIDs []int
+	// Matches says where they matched (unredacted), and AnomalyScore is the
+	// CRS inbound anomaly score.
+	Matches      []rules.Match
+	AnomalyScore int
 	// Duration is the time spent inspecting.
 	Duration time.Duration
 	// Policy is the policy that decided, in bundle mode ("namespace/name").
