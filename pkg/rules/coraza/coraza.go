@@ -13,10 +13,12 @@ import (
 	"net"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	coreruleset "github.com/corazawaf/coraza-coreruleset/v4"
 	"github.com/corazawaf/coraza/v3"
+	"github.com/corazawaf/coraza/v3/experimental/plugins/plugintypes"
 	"github.com/corazawaf/coraza/v3/types"
 
 	"github.com/inkwall-dev/inkwall/pkg/request"
@@ -358,11 +360,41 @@ func result(tx types.Transaction, it *types.Interruption) rules.Result {
 		res.RuleID = it.RuleID
 	}
 	for _, mr := range tx.MatchedRules() {
-		if reportable(mr, it) {
-			res.MatchedRuleIDs = append(res.MatchedRuleIDs, mr.Rule().ID())
+		if !reportable(mr, it) {
+			continue
+		}
+		id := mr.Rule().ID()
+		res.MatchedRuleIDs = append(res.MatchedRuleIDs, id)
+		// Where it matched: the first variable with data.
+		for _, md := range mr.MatchedDatas() {
+			if md.Variable().Name() == "UNKNOWN" {
+				continue
+			}
+			variable := md.Variable().Name()
+			if k := md.Key(); k != "" {
+				variable += ":" + k
+			}
+			res.Matches = append(res.Matches, rules.Match{RuleID: id, Variable: variable, Value: md.Value()})
+			break
 		}
 	}
+	res.AnomalyScore = anomalyScore(tx)
 	return res
+}
+
+// anomalyScore reads the CRS inbound anomaly score, which CRS sums in
+// TX:blocking_inbound_anomaly_score (0 without CRS).
+func anomalyScore(tx types.Transaction) int {
+	st, ok := tx.(plugintypes.TransactionState)
+	if !ok {
+		return 0
+	}
+	vals := st.Variables().TX().Get("blocking_inbound_anomaly_score")
+	if len(vals) == 0 {
+		return 0
+	}
+	n, _ := strconv.Atoi(vals[0])
+	return n
 }
 
 // Inkwall's internal rules use IDs 7700000-7709999, outside the ranges CRS

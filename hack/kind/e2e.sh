@@ -312,6 +312,17 @@ eventually "the operator wired the Ingress" wired
 eventually "the engine in Traefik's pod blocks the attack" tstatus_is 403 "$SQLI"
 check "benign traffic passes through Traefik" tstatus_is 200 /products/42
 eventually "the policy is Ready" ready
+# Security events (#91): the engine sends what it blocked to the operator.
+events_received() {
+  local pod n total=0
+  for pod in $("${KUBECTL[@]}" -n "$OPERATOR_NS" get pods -l app.kubernetes.io/component=operator -o name); do
+    n=$("${KUBECTL[@]}" get --raw "/api/v1/namespaces/$OPERATOR_NS/pods/${pod#pod/}:8080/proxy/metrics" |
+      sed -n 's/^inkwall_operator_events_received_total \([0-9.e+]*\)$/\1/p')
+    total=$(awk -v a="$total" -v b="${n:-0}" 'BEGIN { print a + b }')
+  done
+  awk -v t="$total" 'BEGIN { exit !(t >= 1) }'
+}
+eventually "the operator received the engine's security events" events_received
 
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy web >/dev/null
 eventually "unwired when the policy is deleted" unwired

@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 )
@@ -107,8 +108,10 @@ func IsEvent(v pipeline.Verdict) bool {
 	return true
 }
 
-// LogEvent writes one security event for req.
-func LogEvent(ctx context.Context, logger *slog.Logger, req *request.Request, path string, v pipeline.Verdict) {
+// LogEvent writes one security event for req, and records it for the
+// operator when rec is set.
+func LogEvent(ctx context.Context, logger *slog.Logger, rec *events.Recorder, req *request.Request, path string, v pipeline.Verdict) {
+	rec.Record(req, path, v)
 	logger.LogAttrs(ctx, slog.LevelWarn, "security event",
 		slog.String("policy", v.Policy),
 		slog.String("action", v.Action.String()),
@@ -116,6 +119,7 @@ func LogEvent(ctx context.Context, logger *slog.Logger, req *request.Request, pa
 		slog.Int("status", v.Status),
 		slog.Int("interrupting_rule_id", v.InterruptingRuleID),
 		slog.Any("rule_ids", v.RuleIDs),
+		slog.Int("anomaly_score", v.AnomalyScore),
 		slog.String("client_ip", addrString(req.ClientIP)),
 		slog.String("method", req.Method),
 		slog.String("host", req.Host),
