@@ -172,7 +172,7 @@ jobs:
         with:
           # The changelog is computed from the history since the last tag.
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.27.x'
           check-latest: true
