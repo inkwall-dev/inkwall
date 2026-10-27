@@ -259,9 +259,24 @@ condition counts, bundle bytes.
 
 ### 4.9 Upstream sync (leader only)
 
-**Not yet;** only `Standalone`. `GitOps` would push CRD snapshots and status to the SaaS and never
-write CRDs. `Managed` would write SaaS policies as CRDs labeled `inkwall.dev/source: saas` and reject
-other edits. Enrollment: 0002 §7.5.
+`GitOps` pushes CRD snapshots and status to the control plane and never writes CRDs. `Managed`
+writes its policies as CRDs labeled `inkwall.dev/source: saas` and rejects other edits. Contract:
+0002 §5.3, §7.5.
+
+**Built (`operator/internal/controlplane`):** enrollment and the primary stream, leader only, idle in
+`Standalone` (the default). The leader reads the token from
+`spec.controlPlane.enrollmentSecretRef` (it must be in the operator's namespace, key `token`),
+generates an ECDSA P-256 key and enrolls; a retry after a lost response reuses the key. The
+certificate and key go in the `inkwall-control-plane-identity` Secret (`kubernetes.io/tls`, plus
+`cluster-id`). It then holds the primary stream (Hello, Welcome, heartbeats), renews the certificate
+two thirds into its lifetime, and refuses policy snapshots. `--control-plane-ca` trusts a private CA.
+`InkwallConfig` reports `ControlPlaneConnected`: `Connected`, or `EnrollmentTokenMissing`,
+`EnrollmentTokenNotInOperatorNamespace`, `EnrollmentTokenRejected` (waits for a new token),
+`EnrollFailed`, `CertificateRejected` and `CertificateExpired` (the identity is deleted; waits for a
+new token),
+`ClusterDisabled` (waits for a configuration change), `Unreachable`, `InvalidEndpoint`.
+
+**Not yet:** `ClusterState` (GitOps sync), events streams, applying snapshots (Managed).
 
 ## 5. Uninstall and disable
 

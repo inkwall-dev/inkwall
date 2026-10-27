@@ -64,8 +64,11 @@ type ControlPlaneServiceClient interface {
 	// heartbeats; every replica opens one for the events of its engines.
 	//
 	// Errors (gRPC status codes) and what the operator does:
-	//   - UNAUTHENTICATED: the certificate isn't valid (e.g. expired). Enroll
-	//     again with a new token.
+	//   - UNAUTHENTICATED: the certificate isn't valid (e.g. expired or
+	//     revoked). Enroll again with a new token. The control plane checks the
+	//     certificate in the RPC and answers with this code; failing the TLS
+	//     handshake instead would look like UNAVAILABLE, and the operator would
+	//     keep retrying.
 	//   - PERMISSION_DENIED: the cluster was removed or disabled. Stop
 	//     reconnecting until the configuration changes.
 	//   - RESOURCE_EXHAUSTED: over a quota (e.g. events). Back off; the
@@ -134,8 +137,11 @@ type ControlPlaneServiceServer interface {
 	// heartbeats; every replica opens one for the events of its engines.
 	//
 	// Errors (gRPC status codes) and what the operator does:
-	//   - UNAUTHENTICATED: the certificate isn't valid (e.g. expired). Enroll
-	//     again with a new token.
+	//   - UNAUTHENTICATED: the certificate isn't valid (e.g. expired or
+	//     revoked). Enroll again with a new token. The control plane checks the
+	//     certificate in the RPC and answers with this code; failing the TLS
+	//     handshake instead would look like UNAVAILABLE, and the operator would
+	//     keep retrying.
 	//   - PERMISSION_DENIED: the cluster was removed or disabled. Stop
 	//     reconnecting until the configuration changes.
 	//   - RESOURCE_EXHAUSTED: over a quota (e.g. events). Back off; the

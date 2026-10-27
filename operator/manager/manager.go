@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -37,6 +39,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/bundle"
 	"github.com/inkwall-dev/inkwall/operator/internal/controller"
+	"github.com/inkwall-dev/inkwall/operator/internal/controlplane"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/operator/internal/resolver"
@@ -107,6 +110,12 @@ type Options struct {
 	// when the manager is created. The operator restarts when they change
 	// (its cache of proxy pods is built from them).
 	Integrations *integrations.Selectors
+
+	// Version is the operator's, sent to the optional control plane.
+	Version string
+	// ControlPlaneCAFile trusts the control plane's server certificate;
+	// empty: the system roots.
+	ControlPlaneCAFile string
 }
 
 // NewScheme returns the types the operator reads and writes.
@@ -229,6 +238,15 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		if err := addDistribution(mgr, o, ready); err != nil {
 			return nil, err
 		}
+	}
+	// The optional control plane: idle in Standalone mode (the default).
+	if err := mgr.Add(&controlplane.Connector{
+		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(),
+		Namespace: o.Namespace, Replica: replicaName(o), OperatorVersion: o.Version,
+		KubernetesVersion: kubernetesVersion(cfg),
+		CAFile:            o.ControlPlaneCAFile,
+	}); err != nil {
+		return nil, err
 	}
 	if !o.Webhooks && o.DistributionPort == 0 {
 		if err := mgr.AddReadyzCheck("ping", healthz.Ping); err != nil {
@@ -366,4 +384,34 @@ func (w *webhookStarter) check(req *http.Request) error {
 		return errors.New("webhook certificate not ready")
 	}
 	return w.mgr.GetWebhookServer().StartedChecker()(req)
+}
+
+// replicaName is this replica's name: its pod, else the host name.
+func replicaName(o Options) string {
+	if o.Replica != "" {
+		return o.Replica
+	}
+	host, _ := os.Hostname()
+	return host
+}
+
+// kubernetesVersion returns a function that asks the API server its
+// version once.
+func kubernetesVersion(cfg *rest.Config) func() string {
+	var (
+		once sync.Once
+		v    string
+	)
+	return func() string {
+		once.Do(func() {
+			dc, err := discovery.NewDiscoveryClientForConfig(cfg)
+			if err != nil {
+				return
+			}
+			if info, err := dc.ServerVersion(); err == nil {
+				v = info.GitVersion
+			}
+		})
+		return v
+	}
 }
