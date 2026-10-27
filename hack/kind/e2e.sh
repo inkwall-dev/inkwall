@@ -13,6 +13,7 @@ cd "$(dirname "$0")/../.."
 CLUSTER=${KIND_CLUSTER:-inkwall}
 IMAGE=${IMAGE:-inkwall-engine:dev}
 OPERATOR_NS=inkwall-system
+CHART=${CHART:-deploy/helm/inkwall}
 NS=inkwall-e2e
 HOST=e2e.example.com
 PORT=${E2E_PORT:-18480}
@@ -95,8 +96,17 @@ kind load docker-image "$IMAGE" --name "$CLUSTER"
 # public, copied into the app's namespace.
 "${KUBECTL[@]}" create namespace "$NS" --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f - >/dev/null
 trust=$(mktemp -d)
+# cp_cleanup undoes the control plane section, also when it fails midway:
+# a GitOps InkwallConfig left behind would change the next run.
+cp_cleanup() {
+  if [[ -n ${cp_ca:-} ]]; then rm -f "$cp_ca"; fi
+  "${KUBECTL[@]}" delete inkwallconfig default --ignore-not-found >/dev/null 2>&1 || true
+  "${KUBECTL[@]}" -n "$OPERATOR_NS" delete secret inkwall-control-plane-identity --ignore-not-found >/dev/null 2>&1 || true
+  "${KUBECTL[@]}" delete namespace inkwall-cp-stub --ignore-not-found --wait=false >/dev/null 2>&1 || true
+}
 cleanup() {
   if [[ -n ${pf:-} ]]; then kill "$pf" 2>/dev/null || true; fi
+  if [[ ${KEEP:-} != 1 ]]; then cp_cleanup; fi
   if [[ -n ${tpf:-} ]]; then kill "$tpf" 2>/dev/null || true; fi
   rm -rf "$trust"
   if [[ ${KEEP:-} != 1 ]]; then
@@ -352,6 +362,82 @@ YAML
   eventually_long "back to the default selector" selector_is '{"app.kubernetes.io/name":"traefik"}'
   "${KUBECTL[@]}" -n "$OPERATOR_NS" rollout status deployment/inkwall-operator --timeout=180s >/dev/null
 fi
+
+# The optional control plane (#88): a stub in the cluster (never a real one),
+# the operator trusting its CA through the chart (#89), enrollment with a
+# one-time token, the primary stream, and the token refused a second time.
+echo "== control plane (stub)"
+CP_NS=inkwall-cp-stub
+CP_HOST=stub.$CP_NS.svc
+CP_TOKEN=e2e-token-$RANDOM
+docker build -q -f hack/kind/stub.Dockerfile -t inkwall-cp-stub:dev . >/dev/null
+kind load docker-image inkwall-cp-stub:dev --name "$CLUSTER" >/dev/null
+"${KUBECTL[@]}" create namespace "$CP_NS" --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f - >/dev/null
+"${KUBECTL[@]}" apply -f - >/dev/null <<YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: stub, namespace: $CP_NS}
+spec:
+  selector: {matchLabels: {app: cp-stub}}
+  template:
+    metadata: {labels: {app: cp-stub}}
+    spec:
+      containers:
+        - name: stub
+          image: inkwall-cp-stub:dev
+          imagePullPolicy: Never
+          args: ["--host=$CP_HOST", "--token=$CP_TOKEN"]
+          ports: [{containerPort: 8443}, {containerPort: 8080}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: stub, namespace: $CP_NS}
+spec:
+  selector: {app: cp-stub}
+  ports: [{name: grpc, port: 8443}, {name: admin, port: 8080}]
+YAML
+"${KUBECTL[@]}" -n "$CP_NS" rollout status deployment/stub --timeout=120s >/dev/null
+# Through the API server's service proxy: no local port to collide with.
+stub_get() { "${KUBECTL[@]}" get --raw "/api/v1/namespaces/$CP_NS/services/stub:admin/proxy/$1"; }
+stub_stats() { stub_get stats; }
+eventually "the stub control plane serves" stub_stats
+cp_ca=$(mktemp)
+stub_get ca.crt >"$cp_ca"
+
+helm --kube-context "kind-$CLUSTER" upgrade inkwall "$CHART" --namespace "$OPERATOR_NS" --reuse-values \
+  --set-file controlPlane.caBundle="$cp_ca" --set controlPlane.enrollmentToken="$CP_TOKEN" >/dev/null
+"${KUBECTL[@]}" -n "$OPERATOR_NS" rollout status deployment/inkwall-operator --timeout=180s >/dev/null
+"${KUBECTL[@]}" apply -f - >/dev/null <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: InkwallConfig
+metadata: {name: default}
+spec:
+  mode: GitOps
+  controlPlane:
+    endpoint: grpcs://$CP_HOST:8443
+    enrollmentSecretRef: {name: inkwall-enrollment, namespace: $OPERATOR_NS}
+YAML
+cp_reason() {
+  "${KUBECTL[@]}" get inkwallconfig default -o jsonpath='{.status.conditions[?(@.type=="ControlPlaneConnected")].reason}'
+}
+cp_is() { [[ $(cp_reason) == "$1" ]]; }
+eventually_long "the cluster enrolls and connects (ControlPlaneConnected)" cp_is Connected
+identity() { "${KUBECTL[@]}" -n "$OPERATOR_NS" get secret inkwall-control-plane-identity >/dev/null 2>&1; }
+check "its certificate is stored" identity
+primary_hello() { stub_stats | grep -q '"STREAM_ROLE_PRIMARY CLUSTER_MODE_GITOPS'; }
+check "the stub got a primary Hello in GitOps mode" primary_hello
+beats() { [[ $(stub_stats | sed -n 's/.*"heartbeats":\([0-9]*\).*/\1/p') -ge 1 ]]; }
+eventually "heartbeats arrive" beats
+# A restarted operator without its certificate (lost, say) can only enroll
+# again: the token is used, so the stub refuses it. A running stream keeps
+# its certificate in memory, hence the restart.
+"${KUBECTL[@]}" -n "$OPERATOR_NS" delete secret inkwall-control-plane-identity --ignore-not-found >/dev/null
+"${KUBECTL[@]}" -n "$OPERATOR_NS" rollout restart deployment/inkwall-operator >/dev/null
+"${KUBECTL[@]}" -n "$OPERATOR_NS" rollout status deployment/inkwall-operator --timeout=180s >/dev/null
+eventually_long "a used token is refused (EnrollmentTokenRejected)" cp_is EnrollmentTokenRejected
+
+cp_cleanup
+eventually "back to Standalone: the InkwallConfig is gone" bash -c "[[ -z \$(${KUBECTL[*]} get inkwallconfig default -o name 2>/dev/null) ]]"
 
 # Uninstall (#68): the operator unwires the routes before it goes, so a
 # Traefik pod started afterwards, without the engine, still serves them.
