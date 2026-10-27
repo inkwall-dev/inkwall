@@ -75,3 +75,12 @@ of dicts. Argument: the file's path in the chart.
 {{- end -}}
 {{- toJson $docs -}}
 {{- end -}}
+
+{{/* The control plane's CA bundle, and the enrollment token Secret. */}}
+{{- define "inkwall.controlPlane.ca" -}}
+{{- printf "%s-control-plane-ca" (include "inkwall.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "inkwall.controlPlane.enrollment" -}}
+{{- printf "%s-enrollment" (include "inkwall.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}

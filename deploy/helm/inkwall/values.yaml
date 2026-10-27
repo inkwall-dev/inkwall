@@ -52,6 +52,21 @@ injection:
   # Pods that already run are injected when they restart.
   enabled: true
 
+controlPlane:
+  # The optional control plane (0002 §3.4), for GitOps and Managed mode.
+  # Nothing here connects by itself: set InkwallConfig.spec.mode and
+  # spec.controlPlane (endpoint, enrollmentSecretRef), see the README.
+  #
+  # The control plane's CA (PEM), when its server certificate isn't from a
+  # public CA; e.g. --set-file controlPlane.caBundle=ca.crt.
+  caBundle: ""
+  # The one-time enrollment token from the control plane. Set, the chart
+  # stores it in a Secret in the release namespace (key "token") for
+  # InkwallConfig's enrollmentSecretRef: inkwall-enrollment for a release
+  # named inkwall, else <release>-inkwall-enrollment. It is used once; leave
+  # it empty to create that Secret yourself.
+  enrollmentToken: ""
+
 uninstall:
   # On helm uninstall, stop the operator and remove Inkwall's Middleware from
   # the routes it wired before anything else is deleted (a pre-delete hook),

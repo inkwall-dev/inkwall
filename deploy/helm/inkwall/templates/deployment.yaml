@@ -52,6 +52,9 @@ spec:
             - --webhook-certs=rotate
             - --webhook-cert-dir=/tmp/webhook-certs
             {{- end }}
+            {{- if .Values.controlPlane.caBundle }}
+            - --control-plane-ca=/etc/inkwall/control-plane/ca.crt
+            {{- end }}
             {{- with .Values.operator.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -104,6 +107,11 @@ spec:
               mountPath: /certs
               readOnly: true
             {{- end }}
+            {{- if .Values.controlPlane.caBundle }}
+            - name: control-plane-ca
+              mountPath: /etc/inkwall/control-plane
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
@@ -111,6 +119,11 @@ spec:
         - name: certs
           secret:
             secretName: {{ include "inkwall.webhook.secret" . }}
+        {{- end }}
+        {{- if .Values.controlPlane.caBundle }}
+        - name: control-plane-ca
+          configMap:
+            name: {{ include "inkwall.controlPlane.ca" . }}
         {{- end }}
       {{- with .Values.operator.nodeSelector }}
       nodeSelector:

@@ -1,0 +1,31 @@
+{{- /*
+The optional control plane (GitOps and Managed mode): the CA the operator
+trusts for it, and the one-time enrollment token. The InkwallConfig that
+points at it is yours to apply (README): the chart installs the CRDs, and a
+custom resource can't be created in the same release that installs its CRD.
+*/}}
+{{- with .Values.controlPlane.caBundle }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "inkwall.controlPlane.ca" $ }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "inkwall.operator.labels" $ | nindent 4 }}
+data:
+  ca.crt: |
+    {{- . | nindent 4 }}
+{{- end }}
+{{- with .Values.controlPlane.enrollmentToken }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "inkwall.controlPlane.enrollment" $ }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "inkwall.operator.labels" $ | nindent 4 }}
+type: Opaque
+stringData:
+  token: {{ . | quote }}
+{{- end }}
