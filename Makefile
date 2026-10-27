@@ -2,6 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 GO              ?= go
+# Every recipe, and the tools it runs with `go run tool@version` (which ignores go.mod), uses the
+# toolchain go.mod asks for, whatever Go the machine has: golangci-lint refuses code for a newer Go
+# than it was built with, and gofmt's output (in generated code) changes between versions.
+export GOTOOLCHAIN := $(shell GOTOOLCHAIN=auto $(GO) env GOVERSION)
 BIN_DIR         ?= bin
 GOLANGCI_LINT   ?= $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
 GORELEASER      ?= $(GO) run github.com/goreleaser/goreleaser/v2@v2.18.3

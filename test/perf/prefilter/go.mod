@@ -1,6 +1,8 @@
 module github.com/inkwall-dev/inkwall/test/perf/prefilter
 
-go 1.26.0
+go 1.27.0
+
+toolchain go1.27.3
 
 require (
 	github.com/corazawaf/coraza-coreruleset/v4 v4.25.0

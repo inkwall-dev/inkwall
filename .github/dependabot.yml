@@ -10,6 +10,11 @@ updates:
     directories: ["/", "/test/crs"]
     schedule: {interval: weekly}
     commit-message: {prefix: build, include: scope}
+    ignore:
+      # 2.6 refuses CRS tests that send a raw CR/LF in a header, which breaks
+      # make crs-test (#82). Unpin once the suite or our harness handles it.
+      - dependency-name: github.com/coreruleset/go-ftw/v2
+        versions: [">=2.6.0"]
     groups:
       go:
         update-types: [minor, patch]
