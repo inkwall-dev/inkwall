@@ -397,7 +397,7 @@ spec:
         - name: stub
           image: inkwall-cp-stub:dev
           imagePullPolicy: Never
-          args: ["--host=$CP_HOST", "--token=$CP_TOKEN"]
+          args: ["--host=$CP_HOST", "--token=$CP_TOKEN", "--accept-events"]
           ports: [{containerPort: 8443}, {containerPort: 8080}]
 ---
 apiVersion: v1
@@ -464,6 +464,24 @@ eventually "a new WAFPolicy reaches the control plane" state_has "WAFPolicy $NS/
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy cp-sync --wait >/dev/null
 state_lacks() { ! state_has "$1"; }
 eventually "and so does its deletion" state_lacks "WAFPolicy $NS/cp-sync"
+# Events (#92): an attack blocked in Traefik reaches the control plane, on
+# the events streams of the operator's replicas.
+"${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: web
+  namespace: $NS
+spec:
+  targetRefs: [{kind: Ingress, name: web}]
+  mode: Block
+YAML
+eventually "a policy blocks through Traefik" tstatus_is 403 "$SQLI"
+events_stream() { stub_stats | grep -q '"STREAM_ROLE_EVENTS CLUSTER_MODE_GITOPS'; }
+eventually "the replicas opened events streams" events_stream
+stub_events() { [[ $(stub_stats | sed -n 's/.*"events":\([0-9]*\).*/\1/p') -ge 1 ]]; }
+eventually "the blocked attack reaches the control plane as a security event" stub_events
+"${KUBECTL[@]}" -n "$NS" delete wafpolicy web --wait >/dev/null
 # A restarted operator without its certificate (lost, say) can only enroll
 # again: the token is used, so the stub refuses it. A running stream keeps
 # its certificate in memory, hence the restart.

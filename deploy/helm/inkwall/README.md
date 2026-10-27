@@ -49,6 +49,7 @@ See [`values.yaml`](values.yaml) for all of them.
 | `injection.enabled` | `true` | Inject the engine into Traefik pods when they are created |
 | `controlPlane.caBundle` | `""` | The optional control plane's CA (PEM), when its certificate isn't from a public CA; e.g. `--set-file controlPlane.caBundle=ca.crt` |
 | `controlPlane.enrollmentToken` | `""` | Its one-time enrollment token, stored in the Secret `inkwall-enrollment` (key `token`; `<release>-inkwall-enrollment` for a release not named `inkwall`); or create that Secret yourself |
+| `controlPlane.eventsBufferMiB` | `64` | Each replica's buffer of security events while the control plane is unreachable (an `emptyDir`); when full, the oldest are dropped and counted |
 | `uninstall.unwire` | `true` | On `helm uninstall`, unwire the routes first (a pre-delete hook), so they keep working |
 | `serviceAccount.name`, `annotations` | the release's full name, `{}` | |
 | `crds.install` | `true` | |

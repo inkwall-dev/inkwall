@@ -35,6 +35,7 @@ import (
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
+	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/bundle"
@@ -116,6 +117,10 @@ type Options struct {
 	// ControlPlaneCAFile trusts the control plane's server certificate;
 	// empty: the system roots.
 	ControlPlaneCAFile string
+	// EventsDir holds the replica's buffer of security events for the
+	// control plane ("": in memory); EventsBufferBytes bounds it.
+	EventsDir         string
+	EventsBufferBytes int64
 }
 
 // NewScheme returns the types the operator reads and writes.
@@ -234,8 +239,17 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			return nil, err
 		}
 	}
+	// Every replica forwards its engines' events, when the control plane
+	// accepts them.
+	forwarder := &controlplane.Forwarder{
+		Client: mgr.GetClient(), Namespace: o.Namespace, Replica: replicaName(o), OperatorVersion: o.Version,
+		CAFile: o.ControlPlaneCAFile, Dir: o.EventsDir, MaxBytes: o.EventsBufferBytes,
+	}
+	if err := mgr.Add(forwarder); err != nil {
+		return nil, err
+	}
 	if o.DistributionPort != 0 {
-		if err := addDistribution(mgr, o, ready); err != nil {
+		if err := addDistribution(mgr, o, ready, forwarder.Add); err != nil {
 			return nil, err
 		}
 	}
@@ -301,7 +315,7 @@ func addCerts(mgr manager.Manager, o Options) (<-chan struct{}, error) {
 
 // addDistribution serves bundles to the engines on every replica, and
 // reports Enforced from the leader.
-func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}) error {
+func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}, events func(*eventsv1.EventBatch)) error {
 	replica := o.Replica
 	if replica == "" {
 		h, err := os.Hostname()
@@ -316,11 +330,13 @@ func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}) erro
 		return err
 	}
 	auth := &distribution.KubeAuthenticator{Client: mgr.GetClient(), Namespace: o.Namespace, TTL: time.Minute}
+	service := distribution.NewServer(store, table, auth, replica, ctrl.Log.WithName("distribution"))
+	service.Events = events
 	srv := &distribution.GRPCServer{
 		Port:    o.DistributionPort,
 		CertDir: o.WebhookCertDir,
 		Ready:   ready,
-		Service: distribution.NewServer(store, table, auth, replica, ctrl.Log.WithName("distribution")),
+		Service: service,
 	}
 	if err := mgr.Add(srv); err != nil {
 		return err
@@ -414,6 +430,9 @@ func kubernetesVersion(cfg *rest.Config) func() string {
 		return v
 	}
 }
+
+// DefaultEventsBufferBytes bounds each replica's events buffer by default.
+const DefaultEventsBufferBytes = controlplane.DefaultEventsBufferBytes
 
 // engineReportInterval is how often replicas publish their engines.
 func engineReportInterval(o Options) time.Duration {

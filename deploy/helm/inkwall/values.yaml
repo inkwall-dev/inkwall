@@ -66,6 +66,11 @@ controlPlane:
   # named inkwall, else <release>-inkwall-enrollment. It is used once; leave
   # it empty to create that Secret yourself.
   enrollmentToken: ""
+  # Each replica's buffer of security events while the control plane is
+  # unreachable (an emptyDir, kept across container restarts): when full,
+  # the oldest are dropped and counted. Only used when the control plane
+  # accepts events.
+  eventsBufferMiB: 64
 
 uninstall:
   # On helm uninstall, stop the operator and remove Inkwall's Middleware from

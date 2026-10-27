@@ -37,6 +37,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	controlplanev1 "github.com/inkwall-dev/inkwall/api/controlplane/v1"
+	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 )
 
 // Server is a fake control plane.
@@ -47,6 +48,8 @@ type Server struct {
 	CertLifetime time.Duration
 	// HeartbeatInterval is sent in Welcome.
 	HeartbeatInterval time.Duration
+	// AcceptEvents is sent in Welcome: whether replicas send events.
+	AcceptEvents bool
 
 	ca     *x509.Certificate
 	caKey  crypto.Signer
@@ -72,6 +75,12 @@ type Server struct {
 	connectCalls int
 	hellos       []*controlplanev1.Hello
 	states       []*controlplanev1.ClusterState
+	// events are the security events stored, by ID (resends dedup);
+	// uploads, the (buffer, sequence) pairs seen, so dropped counts once.
+	events        map[string]*eventsv1.SecurityEvent
+	uploads       map[string]bool
+	eventsDropped uint64
+	eventUploads  int
 	// primary sends on the open primary stream, for Resync; primaryID
 	// tells which stream that is.
 	primary    func(*controlplanev1.ConnectResponse) error
@@ -112,6 +121,8 @@ func StartWith(o Options) (*Server, error) {
 		HeartbeatInterval: time.Second,
 		tokens:            map[string]bool{},
 		enrolled:          map[string]enrollment{},
+		events:            map[string]*eventsv1.SecurityEvent{},
+		uploads:           map[string]bool{},
 	}
 	if err := s.newCA(); err != nil {
 		return nil, err
@@ -174,7 +185,13 @@ type Stats struct {
 	// States are the ClusterStates received, oldest first.
 	States     []*controlplanev1.ClusterState
 	Heartbeats int
-	Renewals   int
+	// Events counts the distinct events stored; EventUploads the uploads
+	// received (resends included); EventsDropped what replicas reported
+	// dropping, once per buffer and sequence.
+	Events        int
+	EventUploads  int
+	EventsDropped uint64
+	Renewals      int
 	// Clusters is how many distinct clusters enrolled.
 	Clusters int
 }
@@ -184,7 +201,8 @@ func (s *Server) Stats() Stats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return Stats{EnrollCalls: s.enrollCalls, ConnectCalls: s.connectCalls, Hellos: append([]*controlplanev1.Hello(nil), s.hellos...),
-		States: append([]*controlplanev1.ClusterState(nil), s.states...), Heartbeats: s.heartbeats, Renewals: s.renewals, Clusters: s.clusters}
+		States: append([]*controlplanev1.ClusterState(nil), s.states...),
+		Events: len(s.events), EventUploads: s.eventUploads, EventsDropped: s.eventsDropped, Heartbeats: s.heartbeats, Renewals: s.renewals, Clusters: s.clusters}
 }
 
 // Resync asks the cluster on the open primary stream for a full
@@ -199,6 +217,24 @@ func (s *Server) Resync() (bool, error) {
 	return true, send(&controlplanev1.ConnectResponse{Msg: &controlplanev1.ConnectResponse_Directive{Directive: &controlplanev1.Directive{
 		Action: &controlplanev1.Directive_Resync{Resync: &controlplanev1.Resync{}},
 	}}})
+}
+
+// Events returns the distinct events stored, in no order.
+func (s *Server) Events() []*eventsv1.SecurityEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*eventsv1.SecurityEvent, 0, len(s.events))
+	for _, ev := range s.events {
+		out = append(out, ev)
+	}
+	return out
+}
+
+// SetAcceptEvents changes what the next Welcome says.
+func (s *Server) SetAcceptEvents(accept bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.AcceptEvents = accept
 }
 
 // Enroll implements the contract: the first call burns the token; a retry
@@ -268,6 +304,7 @@ func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer
 	}
 	s.mu.Lock()
 	s.hellos = append(s.hellos, hello)
+	accept := s.AcceptEvents
 	if hello.GetRole() == controlplanev1.StreamRole_STREAM_ROLE_PRIMARY {
 		// The newer primary stream wins.
 		s.primaryID++
@@ -283,7 +320,7 @@ func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer
 	}
 	s.mu.Unlock()
 	if err := send(&controlplanev1.ConnectResponse{Msg: &controlplanev1.ConnectResponse_Welcome{Welcome: &controlplanev1.Welcome{
-		HeartbeatInterval: durationpb.New(s.HeartbeatInterval),
+		HeartbeatInterval: durationpb.New(s.HeartbeatInterval), AcceptEvents: accept,
 	}}}); err != nil {
 		return err
 	}
@@ -300,6 +337,31 @@ func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer
 			s.mu.Lock()
 			s.states = append(s.states, m.ClusterState)
 			s.mu.Unlock()
+		case *controlplanev1.ConnectRequest_Events:
+			if hello.GetRole() != controlplanev1.StreamRole_STREAM_ROLE_EVENTS {
+				return status.Error(codes.FailedPrecondition, "EventUpload on a non-events stream")
+			}
+			up := m.Events
+			s.mu.Lock()
+			if !s.AcceptEvents {
+				s.mu.Unlock()
+				return status.Error(codes.FailedPrecondition, "events are not accepted")
+			}
+			s.eventUploads++
+			key := fmt.Sprintf("%s/%d", up.GetBufferId(), up.GetSequence())
+			if !s.uploads[key] {
+				s.uploads[key] = true
+				s.eventsDropped += up.GetBatch().GetDropped()
+			}
+			for _, ev := range up.GetBatch().GetEvents() {
+				s.events[ev.GetEventId()] = ev
+			}
+			s.mu.Unlock()
+			if err := send(&controlplanev1.ConnectResponse{Msg: &controlplanev1.ConnectResponse_EventsAck{EventsAck: &controlplanev1.EventsAck{
+				BufferId: up.GetBufferId(), Sequence: up.GetSequence(),
+			}}}); err != nil {
+				return err
+			}
 		case *controlplanev1.ConnectRequest_Heartbeat:
 			s.mu.Lock()
 			s.heartbeats++

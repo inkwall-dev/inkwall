@@ -240,8 +240,9 @@ operator does: re-enroll (`UNAUTHENTICATED`), stop (`PERMISSION_DENIED`), back o
   `WAFPolicy` and the rule set kinds are accepted, and the operator sets the source label itself.
   Standalone: events go to logs and optionally OTLP.
 
-**Built:** the contract (#86), enrollment and the primary stream (0004 §4.9). **Not yet:** state
-sync, events and Managed mode (O6, 0004 §11).
+**Built:** the contract (#86), enrollment and the primary stream, state sync (`ClusterState`) and
+events streams with each replica's disk buffer (0004 §4.9). **Not yet:** Managed mode (O6,
+0004 §11).
 
 ### 5.4 Event schema
 
@@ -249,7 +250,8 @@ sync, events and Managed mode (O6, 0004 §11).
 and bundle version, action, reason, matches (rule, variable, redacted snippet), score, method, host,
 path (no query), client IP, user agent, request ID, status, latency. The same message goes engine →
 operator (`agent.v1` `Watch`) and operator → control plane, in `EventBatch` with a count of dropped
-events. **Built:** the schema. **Not yet:** producing and forwarding events.
+events. **Built:** the schema; engines produce redacted events and send them to their operator
+replica, which forwards them to the control plane on its events stream (#91, #92).
 
 ---
 

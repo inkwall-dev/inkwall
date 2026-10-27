@@ -49,6 +49,11 @@ type stats struct {
 	Renewals     int      `json:"renewals"`
 	Hellos       []string `json:"hellos"`
 	States       int      `json:"states"`
+	// Events counts the distinct security events received; EventUploads
+	// the uploads (resends included).
+	Events       int    `json:"events"`
+	EventUploads int    `json:"eventUploads"`
+	EventsDrop   uint64 `json:"eventsDropped"`
 	// LastState summarizes the newest ClusterState.
 	LastState *state `json:"lastState,omitempty"`
 }
@@ -70,6 +75,7 @@ func run() error {
 	flag.Var(&hosts, "host", "a host name the server certificate is valid for (repeatable; the first is the endpoint)")
 	flag.Var(&tokens, "token", "a valid one-time enrollment token (repeatable)")
 	lifetime := flag.Duration("cert-lifetime", 24*time.Hour, "lifetime of the client certificates it issues")
+	acceptEvents := flag.Bool("accept-events", false, "accept security events from the replicas (Welcome.accept_events)")
 	flag.Parse()
 
 	srv, err := fakecontrolplane.StartWith(fakecontrolplane.Options{Addr: *listen, Hosts: hosts})
@@ -78,6 +84,7 @@ func run() error {
 	}
 	defer srv.Stop()
 	srv.CertLifetime = *lifetime
+	srv.SetAcceptEvents(*acceptEvents)
 	for _, t := range tokens {
 		srv.AddToken(t)
 	}
@@ -95,6 +102,7 @@ func run() error {
 			out.Hellos = append(out.Hellos, fmt.Sprintf("%s %s %s", h.GetRole(), h.GetMode(), h.GetClusterUid()))
 		}
 		out.States = len(st.States)
+		out.Events, out.EventUploads, out.EventsDrop = st.Events, st.EventUploads, st.EventsDropped
 		if n := len(st.States); n > 0 {
 			last := st.States[n-1]
 			ls := &state{Objects: []string{}, Engines: len(last.GetEngines()), BundleVersion: last.GetBundleVersion()}

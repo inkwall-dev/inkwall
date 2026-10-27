@@ -281,7 +281,11 @@ Tested on kind against a stub control plane (`operator/test/stubcontrolplane`, b
 refused. Chart values `controlPlane.caBundle` and `controlPlane.enrollmentToken` supply the CA and
 the token.
 
-**Not yet:** `ClusterState` (GitOps sync), events streams, applying snapshots (Managed).
+**Built:** the leader sends `ClusterState` after `Welcome`, on any change (checked every 5 s), on
+`Resync` and every 5 min, reading only. Every replica forwards its engines' security events on
+its own events stream while the control plane accepts them, from a bounded disk buffer
+(`--events-dir`, an `emptyDir`; when full, the oldest are dropped and counted), resending what
+wasn't acknowledged after a reconnect or a restart. **Not yet:** applying snapshots (Managed).
 
 ## 5. Uninstall and disable
 
