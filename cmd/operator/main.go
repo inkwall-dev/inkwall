@@ -73,6 +73,7 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fs.BoolVar(&o.Inject, "inject", true, "inject the engine into proxy pods (Traefik) as a sidecar; needs the webhooks and the distribution server")
 	fs.StringVar(&o.EngineImage, "engine-image", "ghcr.io/inkwall-dev/inkwall-engine:latest", "engine image injected into proxy pods, unless InkwallConfig.spec.engine.image sets one")
 	pullPolicy := fs.String("engine-image-pull-policy", "IfNotPresent", "pull policy of the injected engine: Always, IfNotPresent or Never")
+	fs.StringVar(&o.ControlPlaneCAFile, "control-plane-ca", "", "CA certificate (PEM) trusted for the optional control plane's server certificate, in GitOps and Managed mode (empty: the system roots)")
 	fs.IntVar(&o.DistributionPort, "distribution-port", 9445, "port of the gRPC server that sends bundles to the engines, over TLS with the webhook's certificate (0 disables)")
 	fs.StringVar(&o.DistributionService, "distribution-service", "inkwall-operator", "Service engines reach the distribution server through, named in the certificate")
 	if err := fs.Parse(args); err != nil {
@@ -114,6 +115,7 @@ func run(args []string, stderr io.Writer) int {
 		logger.Error("no Kubernetes API configuration", slog.Any("error", err))
 		return 1
 	}
+	o.Version = cmp.Or(version, "unknown")
 	mgr, err := manager.New(cfg, o.Options)
 	if err != nil {
 		logger.Error("cannot create the manager", slog.Any("error", err))

@@ -240,7 +240,8 @@ operator does: re-enroll (`UNAUTHENTICATED`), stop (`PERMISSION_DENIED`), back o
   `WAFPolicy` and the rule set kinds are accepted, and the operator sets the source label itself.
   Standalone: events go to logs and optionally OTLP.
 
-**Built:** the contract (#86). **Not yet:** the operator side (O6, 0004 §11).
+**Built:** the contract (#86), enrollment and the primary stream (0004 §4.9). **Not yet:** state
+sync, events and Managed mode (O6, 0004 §11).
 
 ### 5.4 Event schema
 
@@ -366,8 +367,8 @@ bound to its `cluster_id` → the operator stores it in a Secret and renews it o
 (`RenewCertificate` → `Certificate`). A retry with the same token and public key within the TTL
 returns the same certificate, so a lost response doesn't cost a new token. Renewal needs the current
 certificate: a cluster offline longer than its lifetime enrolls again with a new token. Keys: ECDSA
-P-256 or Ed25519. **Built:** the contract.
-**Not yet:** the operator side.
+P-256 or Ed25519. **Built:** the contract, and the operator side
+(0004 §4.9).
 
 ---
 

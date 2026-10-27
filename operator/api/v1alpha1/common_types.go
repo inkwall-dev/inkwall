@@ -17,6 +17,10 @@ const (
 	ConditionEnforced = "Enforced"
 	// ConditionReady is True when Accepted, Programmed and Enforced are.
 	ConditionReady = "Ready"
+	// ConditionControlPlaneConnected, on the InkwallConfig, says whether the
+	// cluster is enrolled and connected to the optional control plane
+	// (GitOps and Managed mode only).
+	ConditionControlPlaneConnected = "ControlPlaneConnected"
 )
 
 // SecretReference names a Secret in a given namespace.
