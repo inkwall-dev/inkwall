@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 GO              ?= go
+# Every recipe, and the tools it runs with `go run tool@version` (which ignores go.mod), uses the
+# toolchain go.mod asks for, whatever Go the machine has: golangci-lint refuses code for a newer Go
+# than it was built with, and gofmt's output (in generated code) changes between versions.
+export GOTOOLCHAIN := $(shell GOTOOLCHAIN=auto $(GO) env GOVERSION)
 BIN_DIR         ?= bin
-# Tools that analyse the code are built with the repository's Go version (go.mod), not the oldest
-# one they allow: golangci-lint refuses code for a newer Go than it was built with.
-GO_TOOLCHAIN    := $(shell $(GO) env GOVERSION)
-GOLANGCI_LINT   ?= GOTOOLCHAIN=$(GO_TOOLCHAIN) $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+GOLANGCI_LINT   ?= $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
 GORELEASER      ?= $(GO) run github.com/goreleaser/goreleaser/v2@v2.18.3
-GOVULNCHECK     ?= GOTOOLCHAIN=$(GO_TOOLCHAIN) $(GO) run golang.org/x/vuln/cmd/govulncheck@v1.8.0
+GOVULNCHECK     ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@v1.8.0
 BUF             ?= $(GO) run github.com/bufbuild/buf/cmd/buf@v1.50.0
 CONTROLLER_GEN  ?= $(GO) run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.23.0
 SETUP_ENVTEST   ?= $(GO) run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.2
