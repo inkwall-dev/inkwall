@@ -54,6 +54,7 @@ type Server struct {
 	server tls.Certificate
 	grpc   *grpc.Server
 	addr   string
+	hosts  []string
 
 	mu sync.Mutex
 	// tokens: unused (false) or burned (true).
@@ -80,9 +81,28 @@ type enrollment struct {
 	resp    *controlplanev1.EnrollResponse
 }
 
+// Options configure a server.
+type Options struct {
+	// Addr to listen on; default a random local port.
+	Addr string
+	// Hosts its server certificate is valid for, the first one in
+	// Endpoint; default localhost and 127.0.0.1.
+	Hosts []string
+}
+
 // Start serves on a random local port until Stop.
-func Start() (*Server, error) {
+func Start() (*Server, error) { return StartWith(Options{}) }
+
+// StartWith serves as configured until Stop.
+func StartWith(o Options) (*Server, error) {
+	if o.Addr == "" {
+		o.Addr = "127.0.0.1:0"
+	}
+	if len(o.Hosts) == 0 {
+		o.Hosts = []string{"localhost", "127.0.0.1"}
+	}
 	s := &Server{
+		hosts:             o.Hosts,
 		CertLifetime:      24 * time.Hour,
 		HeartbeatInterval: time.Second,
 		tokens:            map[string]bool{},
@@ -91,7 +111,7 @@ func Start() (*Server, error) {
 	if err := s.newCA(); err != nil {
 		return nil, err
 	}
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	lis, err := net.Listen("tcp", o.Addr)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +132,9 @@ func Start() (*Server, error) {
 func (s *Server) Stop() { s.grpc.Stop() }
 
 // Endpoint is the address for InkwallConfig.spec.controlPlane.endpoint.
-func (s *Server) Endpoint() string { return "grpcs://localhost:" + portOf(s.addr) }
+func (s *Server) Endpoint() string {
+	return "grpcs://" + net.JoinHostPort(s.hosts[0], portOf(s.addr))
+}
 
 // CAPEM is the CA that signs the server and client certificates.
 func (s *Server) CAPEM() []byte { return s.caPEM }
@@ -358,11 +380,20 @@ func (s *Server) newCA() error {
 	if err != nil {
 		return err
 	}
+	var dns []string
+	var ips []net.IP
+	for _, h := range s.hosts {
+		if ip := net.ParseIP(h); ip != nil {
+			ips = append(ips, ip)
+		} else {
+			dns = append(dns, h)
+		}
+	}
 	stmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: "localhost"},
-		DNSNames:     []string{"localhost"},
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		Subject:      pkix.Name{CommonName: s.hosts[0]},
+		DNSNames:     dns,
+		IPAddresses:  ips,
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,

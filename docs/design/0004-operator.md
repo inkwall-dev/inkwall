@@ -276,6 +276,11 @@ two thirds into its lifetime, and refuses policy snapshots. `--control-plane-ca`
 new token),
 `ClusterDisabled` (waits for a configuration change), `Unreachable`, `InvalidEndpoint`.
 
+Tested on kind against a stub control plane (`operator/test/stubcontrolplane`, built on
+`operator/test/fakecontrolplane`; never a real one): enroll, connect, heartbeats, and a used token
+refused. Chart values `controlPlane.caBundle` and `controlPlane.enrollmentToken` supply the CA and
+the token.
+
 **Not yet:** `ClusterState` (GitOps sync), events streams, applying snapshots (Managed).
 
 ## 5. Uninstall and disable
