@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/protobuf/proto"
 
 	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
@@ -149,6 +151,53 @@ func TestQueueBound(t *testing.T) {
 	}
 }
 
+func TestQueueGauge(t *testing.T) {
+	g := prometheus.NewGauge(prometheus.GaugeOpts{Name: "test_buffered"})
+	dir := t.TempDir()
+	q, _ := openQueue(dir, 1<<20)
+	_ = q.add(batchOf(0, "a", "b"))
+	// Untracked until track; then it says what is already there.
+	if v := testutil.ToFloat64(g); v != 0 {
+		t.Fatalf("untracked gauge %v", v)
+	}
+	q.track(g)
+	expect := func(when string, want float64) {
+		t.Helper()
+		if v := testutil.ToFloat64(g); v != want {
+			t.Errorf("%s: gauge %v, want %v", when, v, want)
+		}
+	}
+	expect("tracked", 2)
+	_ = q.add(batchOf(4, "c"))
+	expect("add", 3)
+	q.ack(1)
+	expect("ack", 1)
+	q.clear()
+	expect("clear", 0)
+
+	// A restarted operator counts what it loads.
+	_ = q.add(batchOf(0, "d", "e"))
+	again, _ := openQueue(dir, 1<<20)
+	again.track(g)
+	expect("reopened", 2)
+
+	// Dropping the oldest leaves the newest counted; an oversized batch
+	// adds nothing.
+	id := func(n string) string { return fmt.Sprintf("%026s", n) }
+	one, _ := proto.Marshal(batchOf(0, id("x")))
+	small, _ := openQueue("", int64(len(one)+8))
+	small.track(g)
+	_ = small.add(batchOf(0, id("1")))
+	_ = small.add(batchOf(0, id("2")))
+	expect("full", 1)
+	big := batchOf(0)
+	for i := range 10 {
+		big.Events = append(big.Events, &eventsv1.SecurityEvent{EventId: fmt.Sprint("big", i)})
+	}
+	_ = small.add(big)
+	expect("oversized", 1)
+}
+
 func TestQueueClear(t *testing.T) {
 	dir := t.TempDir()
 	q, _ := openQueue(dir, 1<<20)
@@ -174,21 +223,34 @@ func TestQueueClear(t *testing.T) {
 // forwarder on a replica.
 func forwarderEnv(t *testing.T, accept bool) (*env, *Forwarder) {
 	t.Helper()
+	e := connectedEnv(t, accept)
+	return e, startForwarder(t, e, t.TempDir())
+}
+
+// connectedEnv is a cluster its leader enrolled and connected.
+func connectedEnv(t *testing.T, accept bool) *env {
+	t.Helper()
 	e := newEnv(t, wafv1alpha1.ModeGitOps, "tok-1")
 	e.cp.AddToken("tok-1")
 	e.cp.SetAcceptEvents(accept)
 	e.run(t)
 	e.waitReason(t, ReasonConnected)
+	return e
+}
+
+// startForwarder runs a replica's forwarder with its buffer in dir.
+func startForwarder(t *testing.T, e *env, dir string) *Forwarder {
+	t.Helper()
 	f := &Forwarder{
 		Client: e.client, Namespace: ns, Replica: "op-1", OperatorVersion: "0.2.0-test", CAFile: e.conn.CAFile,
-		Dir: t.TempDir(), Poll: 50 * time.Millisecond, Refused: 50 * time.Millisecond,
+		Dir: dir, Poll: 50 * time.Millisecond, Refused: 50 * time.Millisecond,
 		MinBackoff: 20 * time.Millisecond, MaxBackoff: 100 * time.Millisecond,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { _ = f.Start(ctx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
-	return e, f
+	return f
 }
 
 func TestForwarderSendsEvents(t *testing.T) {
@@ -221,6 +283,53 @@ func TestForwarderResendsAfterReconnect(t *testing.T) {
 	e.cp.FailConnect(nil)
 	waitFor(t, "both events after the outage", func() bool { return e.cp.Stats().Events >= 2 })
 	waitFor(t, "the acks", func() bool { return f.q.Load().events() == 0 })
+}
+
+func TestForwarderOutage(t *testing.T) {
+	e := connectedEnv(t, true)
+	// The control plane goes down with a batch on disk, and the operator
+	// restarts: the stream can't come up, and the buffer grows.
+	e.cp.FailConnect(fmt.Errorf("down"))
+	dir := t.TempDir()
+	q, err := openQueue(dir, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = q.add(batchOf(0, "a"))
+	f := startForwarder(t, e, dir)
+	// The gauge is set before the queue is published.
+	waitFor(t, "the queue", func() bool { return f.q.Load() != nil })
+	if v := testutil.ToFloat64(eventsBuffered); v != 1 {
+		t.Errorf("buffered %v from disk, want 1", v)
+	}
+	f.Add(batchOf(0, "b", "c"))
+	if v := testutil.ToFloat64(eventsBuffered); v != 3 {
+		t.Errorf("buffered %v during the outage, want 3", v)
+	}
+	// Long enough for the backoff to reach its bound several times over.
+	time.Sleep(10 * f.MaxBackoff)
+	if n := e.cp.Stats().Events; n != 0 {
+		t.Fatalf("%d events during the outage", n)
+	}
+
+	// Back: the backlog drains within the bound, not the leader's.
+	e.cp.FailConnect(nil)
+	back := time.Now()
+	waitFor(t, "the backlog", func() bool { return e.cp.Stats().Events == 3 })
+	if d := time.Since(back); d > f.MaxBackoff+time.Second {
+		t.Errorf("events arrived %v after the outage, want within about %v", d, f.MaxBackoff)
+	}
+	waitFor(t, "the gauge after the acks", func() bool { return testutil.ToFloat64(eventsBuffered) == 0 })
+}
+
+func TestForwarderDefaults(t *testing.T) {
+	var f Forwarder
+	f.defaults()
+	var c Connector
+	c.defaults()
+	if f.MaxBackoff != 10*time.Second || f.MaxBackoff >= c.MaxBackoff {
+		t.Errorf("events stream backoff bound %v, want 10 s, below the leader's %v", f.MaxBackoff, c.MaxBackoff)
+	}
 }
 
 func TestForwarderNotAccepted(t *testing.T) {
