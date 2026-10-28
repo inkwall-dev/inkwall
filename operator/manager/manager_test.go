@@ -112,6 +112,7 @@ func startOperator(t *testing.T) (context.Context, client.Client, *warnings) {
 		EnginePullPolicy:     corev1.PullNever,
 		Replica:              "operator-0",
 		EngineReportInterval: 200 * time.Millisecond,
+		CRDInterval:          200 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -174,6 +175,7 @@ func TestOperator(t *testing.T) {
 	t.Run("engine", func(t *testing.T) { testEngine(ctx, t, c) })
 	t.Run("injection", func(t *testing.T) { testInjection(ctx, t, c) })
 	t.Run("wiring", func(t *testing.T) { testWiring(ctx, t, c) })
+	t.Run("ingressroutes", func(t *testing.T) { testIngressRoutes(ctx, t, c) })
 	t.Run("failure policy", func(t *testing.T) { testFailurePolicy(ctx, t, c) })
 }
 
