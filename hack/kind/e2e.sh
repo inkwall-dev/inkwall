@@ -243,6 +243,41 @@ traefik_injected() {
   local pods
   pods=$(traefik_pods) && ! grep -qv '^|inkwall-engine' <<<"$pods"
 }
+no_engine() { traefik_pods >/dev/null && ! traefik_pods | grep -q inkwall-engine; }
+# restart_traefik replaces Traefik's pods, and the port-forward to them.
+restart_traefik() {
+  "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout restart deployment/traefik-e2e >/dev/null
+  "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout status deployment/traefik-e2e --timeout=180s >/dev/null
+  if [[ -n ${tpf:-} ]]; then kill "$tpf" 2>/dev/null || true; fi
+  "${KUBECTL[@]}" -n "$TRAEFIK_NS" port-forward svc/traefik-e2e "$TRAEFIK_PORT:80" >/dev/null 2>&1 &
+  tpf=$!
+}
+web_policy() {
+  "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: web
+  namespace: $NS
+spec:
+  targetRefs: [$1]
+  mode: Block
+YAML
+}
+# held POLICY: the operator's finalizer holds it.
+held() {
+  [[ $("${KUBECTL[@]}" -n "$NS" get wafpolicy "$1" -o jsonpath='{.metadata.finalizers}' 2>/dev/null) == *waf.inkwall.dev/unwire* ]]
+}
+policy_gone() { ! "${KUBECTL[@]}" -n "$NS" get wafpolicy "$1" >/dev/null 2>&1; }
+no_middleware() { ! "${KUBECTL[@]}" -n "$NS" get middlewares.traefik.io inkwall-waf >/dev/null 2>&1; }
+stop_operator() {
+  "${KUBECTL[@]}" -n "$OPERATOR_NS" scale deployment/inkwall-operator --replicas=0 >/dev/null
+  eventually "operator stopped" bash -c "[[ -z \$(${KUBECTL[*]} -n $OPERATOR_NS get pods -l app.kubernetes.io/component=operator -o name) ]]"
+}
+start_operator() {
+  "${KUBECTL[@]}" -n "$OPERATOR_NS" scale deployment/inkwall-operator --replicas=2 >/dev/null
+  "${KUBECTL[@]}" -n "$OPERATOR_NS" rollout status deployment/inkwall-operator --timeout=180s >/dev/null
+}
 
 echo "== through Traefik"
 helm --kube-context "kind-$CLUSTER" upgrade --install traefik-e2e traefik --repo https://traefik.github.io/charts \
@@ -299,16 +334,7 @@ tpf=$!
 eventually "Traefik serves the app" tstatus_is 200 /
 check "no policy yet: the attack passes through Traefik" tstatus_is 200 "$SQLI"
 
-"${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
-apiVersion: waf.inkwall.dev/v1alpha1
-kind: WAFPolicy
-metadata:
-  name: web
-  namespace: $NS
-spec:
-  targetRefs: [{kind: Ingress, name: web}]
-  mode: Block
-YAML
+web_policy "{kind: Ingress, name: web}"
 eventually "the operator wired the Ingress" wired
 eventually "the engine in Traefik's pod blocks the attack" tstatus_is 403 "$SQLI"
 check "benign traffic passes through Traefik" tstatus_is 200 /products/42
@@ -325,8 +351,17 @@ events_received() {
 }
 eventually "the operator received the engine's security events" events_received
 
-"${KUBECTL[@]}" -n "$NS" delete wafpolicy web >/dev/null
-eventually "unwired when the policy is deleted" unwired
+# Deleted while the operator is down (#81): the finalizer keeps the policy,
+# and the route wired, until the operator is back and unwires it.
+check "the policy is held by the unwire finalizer" held web
+stop_operator
+"${KUBECTL[@]}" -n "$NS" delete wafpolicy web --wait=false >/dev/null
+terminating() { [[ -n $("${KUBECTL[@]}" -n "$NS" get wafpolicy web -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null) ]]; }
+check "deleted while the operator is down: the policy waits" terminating
+check "and the Ingress stays wired" wired
+start_operator
+eventually "unwired once the operator is back" unwired
+eventually "then the policy is gone" policy_gone web
 eventually "the attack passes again" tstatus_is 200 "$SQLI"
 
 # A Traefik IngressRoute (#79): its routes get the operator's Middleware
@@ -421,6 +456,8 @@ echo "== custom proxy labels"
 if "${KUBECTL[@]}" get inkwallconfig default >/dev/null 2>&1; then
   echo "skip  an InkwallConfig exists; not changing its integrations"
 else
+  web_policy "{kind: Ingress, name: web}"
+  eventually "a policy blocks through Traefik" tstatus_is 403 "$SQLI"
   "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
 apiVersion: waf.inkwall.dev/v1alpha1
 kind: InkwallConfig
@@ -434,9 +471,17 @@ YAML
   eventually_long "the Pod webhook follows the InkwallConfig's selector" selector_is '{"app.kubernetes.io/component":"edge-proxy"}'
   eventually_long "a pod with the custom labels gets the engine" injected "app.kubernetes.io/component: edge-proxy"
   check "the default labels alone no longer match" not_injected ""
+  # Traefik's pods aren't selected any more: new ones would get no engine
+  # (#81), so the route is unwired, and served uninspected.
+  eventually_long "Traefik's pods not selected: the Ingress is unwired" unwired
+  eventually "the route is served, uninspected" tstatus_is 200 "$SQLI"
   "${KUBECTL[@]}" delete inkwallconfig default >/dev/null
   eventually_long "back to the default selector" selector_is '{"app.kubernetes.io/name":"traefik"}'
   "${KUBECTL[@]}" -n "$OPERATOR_NS" rollout status deployment/inkwall-operator --timeout=180s >/dev/null
+  eventually_long "the InkwallConfig deleted, Traefik's pods selected again: wired" wired
+  eventually "blocking again" tstatus_is 403 "$SQLI"
+  "${KUBECTL[@]}" -n "$NS" delete wafpolicy web --wait >/dev/null
+  eventually "unwired when the policy is deleted" unwired
 fi
 
 # The optional control plane (#88): a stub in the cluster (never a real one),
@@ -558,19 +603,58 @@ eventually_long "a used token is refused (EnrollmentTokenRejected)" cp_is Enroll
 cp_cleanup
 eventually "back to Standalone: the InkwallConfig is gone" bash -c "[[ -z \$(${KUBECTL[*]} get inkwallconfig default -o name 2>/dev/null) ]]"
 
+# Injection off (#81): new Traefik pods get no engine, so the operator
+# unwires the routes and releases the policies; on again, it wires them.
+pprogrammed() {
+  "${KUBECTL[@]}" -n "$NS" get wafpolicy web -o jsonpath='{.status.conditions[?(@.type=="Programmed")].reason}' 2>/dev/null
+}
+programmed_is() { [[ $(pprogrammed) == "$1" ]]; }
+no_pod_webhook() { ! "${KUBECTL[@]}" get mutatingwebhookconfiguration inkwall-operator-mutating >/dev/null 2>&1; }
+not_held() { ! held web; }
+inject() {
+  helm --kube-context "kind-$CLUSTER" upgrade inkwall "$CHART" --namespace "$OPERATOR_NS" --reuse-values \
+    --set injection.enabled="$1" >/dev/null
+  "${KUBECTL[@]}" -n "$OPERATOR_NS" rollout status deployment/inkwall-operator --timeout=180s >/dev/null
+}
+echo "== injection off"
+both="{kind: Ingress, name: web}, {group: traefik.io, kind: IngressRoute, name: web}"
+web_policy "$both"
+eventually "wired" wired
+eventually "the IngressRoute wired" route_wired
+eventually "blocking" tstatus_is 403 "$SQLI"
+inject false
+check "the Pod webhook is removed" no_pod_webhook
+eventually "the Ingress is unwired" unwired
+eventually "the IngressRoute is unwired, the user's Middleware kept" route_unwired
+eventually "the Middleware is deleted" no_middleware
+eventually "the policy is released from the finalizer" not_held
+eventually "Programmed=False (InjectionDisabled)" programmed_is InjectionDisabled
+eventually "the route is served, uninspected" tstatus_is 200 "$SQLI"
+check "so is the IngressRoute" rstatus_is 200 "$SQLI"
+restart_traefik
+eventually "a new Traefik pod has no engine" no_engine
+eventually "and serves the route, uninspected" tstatus_is 200 "$SQLI"
+check "and the IngressRoute" rstatus_is 200 "$SQLI"
+inject true
+# The Pod webhook, created again, injects once it has its CA and fails
+# closed (a policy blocks): a pod created before would start without the
+# engine (fail open).
+pod_webhook_ready() {
+  [[ -n $("${KUBECTL[@]}" get mutatingwebhookconfiguration inkwall-operator-mutating -o jsonpath='{.webhooks[0].clientConfig.caBundle}') ]] &&
+    fails Fail
+}
+eventually "the Pod webhook is back, failing closed" pod_webhook_ready
+restart_traefik
+eventually "injection on again: Traefik's pod has the engine" traefik_injected
+eventually "wired again" wired
+eventually "the IngressRoute wired again" route_wired
+eventually "held again" held web
+eventually "blocking again" tstatus_is 403 "$SQLI"
+
 # Uninstall (#68): the operator unwires the routes before it goes, so a
 # Traefik pod started afterwards, without the engine, still serves them.
 echo "== uninstall"
-"${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
-apiVersion: waf.inkwall.dev/v1alpha1
-kind: WAFPolicy
-metadata:
-  name: web
-  namespace: $NS
-spec:
-  targetRefs: [{kind: Ingress, name: web}, {group: traefik.io, kind: IngressRoute, name: web}]
-  mode: Block
-YAML
+web_policy "$both"
 eventually "wired again before the uninstall" wired
 eventually "the IngressRoute wired again before the uninstall" route_wired
 eventually "blocking before the uninstall" tstatus_is 403 "$SQLI"
@@ -582,20 +666,16 @@ else
 fi
 check "the Ingress is unwired" unwired
 check "the IngressRoute is unwired, the user's Middleware kept" route_unwired
-no_middleware() { ! "${KUBECTL[@]}" -n "$NS" get middlewares.traefik.io inkwall-waf >/dev/null 2>&1; }
 check "the Middleware is deleted" no_middleware
 kept() { "${KUBECTL[@]}" -n "$NS" get wafpolicy web >/dev/null 2>&1; }
 check "the WAFPolicy is kept" kept
-"${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout restart deployment/traefik-e2e >/dev/null
-"${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout status deployment/traefik-e2e --timeout=180s >/dev/null
-no_engine() { traefik_pods >/dev/null && ! traefik_pods | grep -q inkwall-engine; }
+check "released from the finalizer: deleting it won't wait for an operator" not_held
+restart_traefik
 eventually "a new Traefik pod has no engine" no_engine
-kill "$tpf" 2>/dev/null || true
-"${KUBECTL[@]}" -n "$TRAEFIK_NS" port-forward svc/traefik-e2e "$TRAEFIK_PORT:80" >/dev/null 2>&1 &
-tpf=$!
 eventually "the route still answers after the uninstall (uninspected)" tstatus_is 200 "$SQLI"
 check "so does the IngressRoute" rstatus_is 200 "$SQLI"
-"${KUBECTL[@]}" -n "$NS" delete wafpolicy web --ignore-not-found >/dev/null
+"${KUBECTL[@]}" -n "$NS" delete wafpolicy web --ignore-not-found --timeout=30s >/dev/null || true
+check "and it is deleted without the operator" policy_gone web
 
 if [[ $failures -gt 0 ]]; then
   echo "$failures check(s) failed; engine logs:"

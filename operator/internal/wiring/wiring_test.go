@@ -193,10 +193,12 @@ func TestProgrammed(t *testing.T) {
 	ings := map[types.NamespacedName]*networkingv1.Ingress{
 		k("web"): {ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "web"}},
 		k("api"): {ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "api"}},
+		k("bad"): {ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "bad"}},
 	}
 	wire := map[types.NamespacedName]target{
 		k("web"): {ing: ings[k("web")], controller: traefik},
 		k("api"): {ing: ings[k("api")], controller: "k8s.io/ingress-nginx"},
+		k("bad"): {ing: ings[k("bad")], controller: traefik},
 	}
 	routes := map[types.NamespacedName]*unstructured.Unstructured{k("app"): ingressRoute("shop", "app", nil), k("bad"): ingressRoute("shop", "bad", nil)}
 	// Targets are Ingresses, or IngressRoutes as "route/<name>".
@@ -239,6 +241,7 @@ func TestProgrammed(t *testing.T) {
 		{"both wired", pol("web", "route/app"), true, nil, []corev1.Pod{withEngine}, metav1.ConditionTrue, ReasonProgrammed, "1 Ingress(es) and 1 IngressRoute(s) wired", true},
 		{"no IngressRoute CRD", pol("web", "route/app"), true, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonWiringFailed, "IngressRoute CRD is not installed", false},
 		{"IngressRoute not written", pol("route/bad"), true, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonWiringFailed, "IngressRoute bad: forbidden", true},
+		{"Ingress not written", pol("bad"), true, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonWiringFailed, "Ingress bad: forbidden", true},
 		{"IngressRoute without the Middleware CRD", pol("route/app"), false, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonWiringFailed, "Middleware CRD is not installed", true},
 		{"IngressRoute, name clash", pol("route/app"), true, map[string]string{"shop": "Middleware shop/inkwall-waf exists"}, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonWiringFailed, "exists", true},
 		{"IngressRoute, old pod", pol("route/app"), true, nil, []corev1.Pod{withEngine, without}, metav1.ConditionFalse, ReasonPendingRestart, "traefik/t-old", true},
@@ -249,13 +252,14 @@ func TestProgrammed(t *testing.T) {
 		{"no CRDs", pol("web"), false, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonWiringFailed, "CRD is not installed", true},
 		{"name clash", pol("web"), true, map[string]string{"shop": "Middleware shop/inkwall-waf exists"}, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonWiringFailed, "exists", true},
 		{"old pod", pol("web"), true, nil, []corev1.Pod{withEngine, without}, metav1.ConditionFalse, ReasonPendingRestart, "traefik/t-old", true},
-		{"no pods", pol("web"), true, nil, []corev1.Pod{terminating}, metav1.ConditionFalse, ReasonSidecarMissing, "no Traefik pod", true},
+		{"no pods", pol("web"), true, nil, []corev1.Pod{terminating}, metav1.ConditionFalse, ReasonSidecarMissing, "no Traefik pod selected for the engine is running, so the routes are not wired", true},
 		{"missed by the webhook", pol("web"), true, nil, []corev1.Pod{withEngine, without, missed}, metav1.ConditionFalse, ReasonSidecarMissing, "restart them once it is back: traefik/t-missed", true},
 		{"opted out", pol("web"), true, nil, []corev1.Pod{withEngine, optedOut}, metav1.ConditionFalse, ReasonSidecarMissing, `opted out with waf.inkwall.dev/inject: "false": traefik/t-out`, true},
 		{"missing target", pol("gone"), true, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonNoTargets, "none", true},
 	} {
 		st, reason, msg := programmed(tc.p, &state{ingresses: ings, wire: wire, routes: routes, routeCRD: tc.routeCRD,
 			routeErr:    map[types.NamespacedName]string{k("bad"): "IngressRoute bad: forbidden"},
+			ingressErr:  map[types.NamespacedName]string{k("bad"): "Ingress bad: forbidden"},
 			traefikCRDs: tc.crds, middlewareErr: tc.mwErr, pods: tc.pods, injectingSince: since})
 		if st != tc.status || reason != tc.reason || !strings.Contains(msg, tc.msg) {
 			t.Errorf("%s: %s %s %q", tc.name, st, reason, msg)
@@ -275,5 +279,13 @@ func TestProgrammedUnknownSince(t *testing.T) {
 		wire: map[types.NamespacedName]target{k: {ing: ing, controller: integrations.Traefik.Controller}}, traefikCRDs: true, pods: []corev1.Pod{pod}})
 	if reason != ReasonPendingRestart {
 		t.Errorf("reason %s, want %s", reason, ReasonPendingRestart)
+	}
+}
+
+// With injection off, nothing is wired, whatever the targets.
+func TestProgrammedDisabled(t *testing.T) {
+	p := &wafv1alpha1.WAFPolicy{Spec: wafv1alpha1.WAFPolicySpec{TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}}}}
+	if st, reason, _ := programmed(p, &state{disabled: true, traefikCRDs: true}); st != metav1.ConditionFalse || reason != ReasonInjectionDisabled {
+		t.Errorf("%s %s, want False %s", st, reason, ReasonInjectionDisabled)
 	}
 }

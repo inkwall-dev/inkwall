@@ -100,7 +100,6 @@ rules:
   resources:
   - clusterwafrulesets
   - inkwallconfigs
-  - wafpolicies
   - wafrulesets
   verbs:
   - get
@@ -117,6 +116,16 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - waf.inkwall.dev
+  resources:
+  - wafpolicies
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
