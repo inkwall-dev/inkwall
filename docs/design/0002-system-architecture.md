@@ -175,7 +175,8 @@ knowledge. Immutable; ed25519-signed.
 
 **Built ([`api/bundle/v1`](../../api/bundle/v1/bundle.proto)):** a `SignedBundle` holds the
 serialized `Bundle` bytes, a signature over exactly those bytes (protobuf encoding isn't canonical)
-and a key ID for rotation; the engine verifies before decoding. `Bundle` has `content_hash` and
+and the signing key's ID; the engine verifies with the key that ID names, before decoding. Engines
+trust several keys while the operator rotates its key (0004 §4.6). `Bundle` has `content_hash` and
 `suspended` (emergency switch). **Not yet:** IP lists, rate limits.
 
 ---
@@ -202,6 +203,9 @@ deltas: simpler, idempotent, small), the engine ACKs or NACKs.
 - Messages `WatchRequest`/`WatchResponse`; payload `SignedBundle`.
 - Engine verifies, refuses an older version unless created later (operator lost its sequence),
   compiles, swaps, writes `--bundle-cache`, ACKs. Failure NACKs and keeps the old bundle.
+- `Hello` and `Heartbeat` carry the IDs of the keys the engine trusts (`--bundle-key`, re-read
+  every 10 s), so the operator signs with a new key only once every engine has it. A bundle
+  rejected for an unknown key is asked for again (a new stream) once the keys change.
 - Reconnects with jittered backoff. With no cache it reads the bundle Secret from the API server
   (`--bundle-secret`, plain HTTPS, no client-go).
 - Matching: host, cleaned path, method, most specific first. Uncovered host: not inspected. Covered

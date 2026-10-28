@@ -187,7 +187,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	operatorCA := fs.String("operator-ca", "/var/run/secrets/inkwall/ca.crt", "bundle mode: CA certificate (PEM) of the operator's server")
 	operatorServerName := fs.String("operator-server-name", "", "bundle mode: name the operator's certificate must have (default: the host of --operator)")
 	operatorToken := fs.String("operator-token", "/var/run/secrets/inkwall/token", "bundle mode: ServiceAccount token for the audience inkwall-operator, re-read on every connection")
-	bundleKey := fs.String("bundle-key", "/var/run/secrets/inkwall/ed25519.pub", "bundle mode: the cluster's ed25519 public key (raw 32 bytes) that bundles are signed with")
+	bundleKey := fs.String("bundle-key", "/var/run/secrets/inkwall/ed25519.pub", "bundle mode: the ed25519 public keys bundles may be signed with: one or more raw 32-byte keys, concatenated (the trust ConfigMap's trusted-keys.pub), re-read when the file changes, so the operator can rotate its signing key")
 	bundleCache := fs.String("bundle-cache", "", "bundle mode: file that keeps the last applied bundle, enforced at startup before the operator is reachable (empty: no cache)")
 	bundleSecret := fs.String("bundle-secret", "", "bundle mode: namespace/name of the operator's bundle Secret, read through the Kubernetes API when the engine has no bundle (a new pod while the operator is unreachable); empty: not read")
 	kubeToken := fs.String("kube-token", "/var/run/secrets/inkwall/kube-token", "bundle mode: ServiceAccount token for the Kubernetes API, to read --bundle-secret")

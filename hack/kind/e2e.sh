@@ -92,8 +92,10 @@ fi
 docker build --target engine -t "$IMAGE" .
 kind load docker-image "$IMAGE" --name "$CLUSTER"
 
-# The trust ConfigMap: the operator's CA and the bundle public key, both
-# public, copied into the app's namespace.
+# The trust ConfigMap: the operator's CA and the bundle public keys, all
+# public, copied into the app's namespace (app_trust), as someone who sets
+# up an engine by hand does; the operator keeps it for the proxies it
+# injects.
 "${KUBECTL[@]}" create namespace "$NS" --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f - >/dev/null
 trust=$(mktemp -d)
 # cp_cleanup undoes the control plane section, also when it fails midway:
@@ -117,10 +119,14 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-"${KUBECTL[@]}" -n "$OPERATOR_NS" get secret inkwall-operator-webhook-tls -o jsonpath='{.data.ca\.crt}' | base64 -d >"$trust/ca.crt"
-"${KUBECTL[@]}" -n "$OPERATOR_NS" get secret inkwall-bundle-signing-key -o jsonpath='{.data.ed25519\.pub}' | base64 -d >"$trust/ed25519.pub"
-"${KUBECTL[@]}" -n "$NS" create configmap inkwall-trust --from-file="$trust/ca.crt" --from-file="$trust/ed25519.pub" \
-  --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f - >/dev/null
+app_trust() {
+  "${KUBECTL[@]}" -n "$OPERATOR_NS" get secret inkwall-operator-webhook-tls -o jsonpath='{.data.ca\.crt}' | base64 -d >"$trust/ca.crt"
+  "${KUBECTL[@]}" -n "$OPERATOR_NS" get secret inkwall-bundle-signing-key -o jsonpath='{.data.ed25519\.pub}' | base64 -d >"$trust/ed25519.pub"
+  "${KUBECTL[@]}" -n "$OPERATOR_NS" get secret inkwall-bundle-signing-key -o jsonpath='{.data.trusted-keys\.pub}' | base64 -d >"$trust/trusted-keys.pub"
+  "${KUBECTL[@]}" -n "$NS" create configmap inkwall-trust --from-file="$trust/ca.crt" --from-file="$trust/ed25519.pub" \
+    --from-file="$trust/trusted-keys.pub" --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f - >/dev/null
+}
+app_trust
 
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy app --ignore-not-found >/dev/null
 "${KUBECTL[@]}" apply -f hack/kind/e2e.yaml >/dev/null
@@ -323,6 +329,79 @@ events_received() {
   awk -v t="$total" 'BEGIN { exit !(t >= 1) }'
 }
 eventually "the operator received the engine's security events" events_received
+
+# Signing key rotation (#41), requested on the InkwallConfig with two
+# engines connected: Traefik's, whose trust ConfigMap the operator keeps,
+# and the app's, whose ConfigMap this test keeps (app_trust). The operator
+# signs with the new key only once both trust it, and retires the old key
+# once both run a bundle it signed: no engine rejects a bundle or restarts.
+echo "== signing key rotation"
+# eventually_within SECONDS DESCRIPTION COMMAND...: the kubelet takes a
+# minute or so to update a mounted ConfigMap.
+eventually_within() {
+  local secs=$1 what=$2
+  shift 2
+  for _ in $(seq $((secs * 2))); do
+    if "$@" >/dev/null 2>&1; then
+      ok "$what"
+      return 0
+    fi
+    sleep 0.5
+  done
+  fail "$what"
+}
+key_secret() { "${KUBECTL[@]}" -n "$OPERATOR_NS" get secret inkwall-bundle-signing-key -o jsonpath="$1"; }
+phase_is() { [[ $(key_secret '{.metadata.annotations.waf\.inkwall\.dev/rotation-phase}') == "$1" ]]; }
+trusted_keys() { key_secret '{.data.trusted-keys\.pub}' | base64 -d; }
+trusted_count_is() { [[ $(trusted_keys | wc -c) == $(($1 * 32)) ]]; }
+signed_with() {
+  [[ $("${KUBECTL[@]}" -n "$OPERATOR_NS" get secret inkwall-bundle -o jsonpath='{.metadata.annotations.waf\.inkwall\.dev/key-id}') == "$1" ]]
+}
+# An engine in NAMESPACE reports trusting KEY_ID (the replicas' reports).
+reports_key() {
+  "${KUBECTL[@]}" -n "$OPERATOR_NS" get configmaps -l waf.inkwall.dev/engines=true -o jsonpath='{.items[*].data.engines\.json}' |
+    grep -o '{[^{}]*}' | grep "\"podNamespace\":\"$1\"" | grep -q "\"$2\""
+}
+engine_logs() {
+  "${KUBECTL[@]}" -n "$NS" logs deployment/app -c inkwall-engine
+  "${KUBECTL[@]}" -n "$TRAEFIK_NS" logs deployment/traefik-e2e -c inkwall-engine
+}
+no_rejection() { ! engine_logs | grep -q '"bundle rejected"'; }
+traefik_engine() {
+  "${KUBECTL[@]}" -n "$TRAEFIK_NS" get pods -l app.kubernetes.io/name=traefik \
+    -o jsonpath='{range .items[*]}{.metadata.name}/{.status.initContainerStatuses[?(@.name=="inkwall-engine")].restartCount}{"\n"}{end}'
+}
+same_engines() { [[ $(engine_pod)/$(restarts) == "$app_engine/0" && $(traefik_engine) == "$traefik_before" ]]; }
+app_engine=$(engine_pod)
+traefik_before=$(traefik_engine)
+old_key=$(key_secret '{.data.key-id}' | base64 -d)
+created_config=false
+if ! "${KUBECTL[@]}" get inkwallconfig default >/dev/null 2>&1; then
+  "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: InkwallConfig
+metadata: {name: default}
+YAML
+  created_config=true
+fi
+"${KUBECTL[@]}" annotate inkwallconfig default --overwrite "waf.inkwall.dev/rotate-signing-key=e2e-$(date +%s)" >/dev/null
+published() { phase_is Publishing && trusted_count_is 2; }
+eventually "the new key is published" published
+new_key=$(trusted_keys | tail -c 32 | sha256sum | cut -c1-16)
+eventually_within 180 "Traefik's engine reloads its keys and reports the new one" reports_key "$TRAEFIK_NS" "$new_key"
+check "the old key still signs: the app's engine doesn't trust the new one" signed_with "$old_key"
+not_reported() { reports_key "$NS" "$old_key" && ! reports_key "$NS" "$new_key"; }
+check "the app's engine reports only the old key" not_reported
+app_trust
+eventually_within 180 "the new key signs once every engine trusts it" signed_with "$new_key"
+retired() { phase_is "" && trusted_count_is 1 && [[ $(trusted_keys | sha256sum | cut -c1-16) == "$new_key" ]]; }
+eventually_within 180 "the old key is retired" retired
+app_trust
+check "no engine rejected a bundle" no_rejection
+check "neither engine restarted" same_engines
+eventually "the engine in Traefik's pod still blocks the attack" tstatus_is 403 "$SQLI"
+eventually "the policy is still Ready" ready
+if $created_config; then "${KUBECTL[@]}" delete inkwallconfig default >/dev/null; fi
 
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy web >/dev/null
 eventually "unwired when the policy is deleted" unwired

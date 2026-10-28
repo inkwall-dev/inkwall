@@ -23,7 +23,10 @@ import (
 const (
 	ContainerName = "inkwall-engine"
 	// TrustConfigMap holds the operator's CA (ca.crt) and the bundle public
-	// key (ed25519.pub) in the pod's namespace; both are public.
+	// keys in the pod's namespace: trusted-keys.pub, every key the engine
+	// accepts, and ed25519.pub, the active one. All are public. The kubelet
+	// updates the mounted files when it changes, and the engine reloads
+	// the keys.
 	TrustConfigMap = "inkwall-trust"
 
 	secretsVolume = "inkwall-secrets"
@@ -102,7 +105,7 @@ func Inject(pod *corev1.Pod, s Sidecar) bool {
 		"--operator="+s.OperatorAddr,
 		"--operator-ca="+secretsDir+"/ca.crt",
 		"--operator-token="+secretsDir+"/token",
-		"--bundle-key="+secretsDir+"/ed25519.pub",
+		"--bundle-key="+secretsDir+"/trusted-keys.pub",
 		"--bundle-cache="+cacheDir+"/bundle.pb",
 		fmt.Sprintf("--admin-listen=:%d", adminPort),
 		// The proxy is the engine's peer, on the loopback; its

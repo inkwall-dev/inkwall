@@ -87,11 +87,40 @@ certificate in `inkwall-control-plane-identity`, and reports `ControlPlaneConnec
 `InkwallConfig` isn't part of the chart: a release can't create a custom resource of a CRD it
 installs itself.
 
+## Rotating the signing key
+
+The operator signs policy bundles with an ed25519 key it generates on first use, in the
+`inkwall-bundle-signing-key` Secret. To rotate it, give the `InkwallConfig` a new value of the
+`waf.inkwall.dev/rotate-signing-key` annotation (any value: each new one starts a rotation), or
+rotate it on a schedule with `spec.signingKey.rotationInterval`:
+
+```sh
+kubectl annotate inkwallconfig default --overwrite waf.inkwall.dev/rotate-signing-key="$(date +%s)"
+kubectl -n inkwall-system get secret inkwall-bundle-signing-key \
+  -o jsonpath='{.metadata.annotations.waf\.inkwall\.dev/rotation-phase}'
+```
+
+```yaml
+spec:
+  signingKey:
+    rotationInterval: 2160h # 90 days
+```
+
+Traffic is unaffected. The operator publishes the new key to every engine first (the `inkwall-trust`
+ConfigMaps; engines reload them without restarting), keeps signing with the old key until every
+connected engine reports the new one, then switches, and drops the old key once every engine runs a
+bundle the new key signed. The phase reads `Publishing`, then `Retiring`, then nothing. Each phase
+lasts at least a minute, the time the kubelet takes to update a mounted ConfigMap. The operator logs
+the engines it waits for; an engine from before Inkwall supported rotation never reports the new key,
+so restart its pod to give it the current image. An engine you configured yourself reads its keys
+from `--bundle-key`: keep that file in sync with the Secret's `trusted-keys.pub` during a rotation.
+
 ## Uninstalling
 
 `helm uninstall` keeps the CRDs (and so every WAF object) and the two Secrets the operator creates
 in its namespace, `inkwall-bundle` and `inkwall-bundle-signing-key`. A reinstall continues with the
-same signing key, so engines keep trusting it. Delete the namespace to remove the Secrets.
+same signing keys (and a rotation in progress), so engines keep trusting them. Delete the namespace
+to remove the Secrets.
 
 Before anything is deleted, a pre-delete hook (`uninstall.unwire`, on by default) runs
 `inkwall-operator unwire`: it stops the operator, sets the Pod webhook to `Ignore`, and removes
