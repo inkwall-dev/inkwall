@@ -1,0 +1,26 @@
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: ClusterWAFRuleSet
+metadata:
+  name: owasp-crs-v4
+spec:
+  source:
+    builtin: crs-v4
+---
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFRuleSet
+metadata:
+  name: shop-custom
+  namespace: shop
+spec:
+  source:
+    seclang: |
+      SecRule REQUEST_HEADERS:User-Agent "@contains sqlmap" "id:100001,phase:1,deny,status:403,msg:'sqlmap'"
+---
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFRuleSet
+metadata:
+  name: api-rules
+  namespace: shop
+spec:
+  source:
+    configMapRef: {name: api-rules, key: rules.conf}

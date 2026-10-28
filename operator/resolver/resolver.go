@@ -44,6 +44,10 @@ const (
 	ReasonTargetUnsupported = "TargetUnsupported"
 )
 
+// PolicyValid is the Accepted message of a policy that resolved with
+// nothing to report.
+const PolicyValid = "the policy is valid"
+
 // Input is the cluster state to resolve.
 type Input struct {
 	Policies  []wafv1alpha1.WAFPolicy
@@ -295,7 +299,7 @@ func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.Nam
 	c := &candidate{
 		obj:    p,
 		key:    types.NamespacedName{Namespace: p.Namespace, Name: p.Name},
-		status: Status{Accepted: true, Reason: ReasonAccepted, Message: "the policy is valid"},
+		status: Status{Accepted: true, Reason: ReasonAccepted, Message: PolicyValid},
 	}
 	c.policy = convertSpec(PolicyID(p.Namespace, p.Name), p.Spec)
 

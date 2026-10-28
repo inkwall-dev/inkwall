@@ -269,5 +269,6 @@ func toResponse(id string, v pipeline.Verdict) *enginev1.CheckResponse {
 		InterruptingRuleId: uint32(v.InterruptingRuleID), // #nosec G115 -- a rule ID
 		RequestId:          id,
 		InspectionTime:     durationpb.New(v.Duration),
+		Policy:             v.Policy,
 	}
 }

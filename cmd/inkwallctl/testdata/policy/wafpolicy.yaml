@@ -1,0 +1,32 @@
+# The shop's two policies: the storefront in block mode with the Core Rule
+# Set and the shop's rules, the API in detect mode with its own rules only.
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: storefront
+  namespace: shop
+spec:
+  targetRefs:
+  - kind: Ingress
+    name: storefront
+  mode: Block
+  skip:
+    paths: ["/health"]
+  ruleSets:
+  - ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}
+    paranoiaLevel: 1
+    inboundAnomalyThreshold: 5
+  - ref: {kind: WAFRuleSet, name: shop-custom}
+---
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: api
+  namespace: shop
+spec:
+  targetRefs:
+  - kind: Ingress
+    name: api
+  mode: Detect
+  ruleSets:
+  - ref: {kind: WAFRuleSet, name: api-rules}

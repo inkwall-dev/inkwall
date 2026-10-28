@@ -21,8 +21,8 @@ import (
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
-	"github.com/inkwall-dev/inkwall/operator/internal/bundle"
-	"github.com/inkwall-dev/inkwall/operator/internal/resolver"
+	"github.com/inkwall-dev/inkwall/operator/bundle"
+	"github.com/inkwall-dev/inkwall/operator/resolver"
 )
 
 // eventually retries cond until it returns "" or 20s pass.

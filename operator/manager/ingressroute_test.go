@@ -18,8 +18,8 @@ import (
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
-	"github.com/inkwall-dev/inkwall/operator/internal/resolver"
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
+	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/operator/test/testenv"
 )
 

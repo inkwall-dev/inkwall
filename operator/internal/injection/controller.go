@@ -27,7 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"github.com/inkwall-dev/inkwall/operator/internal/bundle"
+	"github.com/inkwall-dev/inkwall/operator/bundle"
 )
 
 // The controller reads proxy pods, writes the trust ConfigMap in their

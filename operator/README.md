@@ -60,8 +60,8 @@ kubectl apply --server-side -f operator/config/crd/bases -f operator/config/samp
 | `manager/` | Assembles controllers, webhooks and probes ([`../cmd/operator`](../cmd/operator) is the binary) |
 | `webhook/` | Validating webhook and its certificate |
 | `integrations/` | The proxies Inkwall knows (Traefik) and their pod selectors |
-| `internal/resolver/` | `WAFPolicy` + Ingresses + rule sets → bundle policies and `Accepted` |
-| `internal/bundle/` | Content hash, versions, ed25519 signing and key rotation, bundle and signing key Secrets |
+| `resolver/` | `WAFPolicy` + Ingresses and IngressRoutes + rule sets → bundle policies and `Accepted` (pure; `inkwallctl test --policy` uses it too) |
+| `bundle/` | Content hash, versions, ed25519 signing and key rotation, bundle and signing key Secrets |
 | `internal/controller/` | Bundle builder |
 | `internal/distribution/` | `BundleService` server, engine authentication and reports, `Enforced` |
 | `internal/injection/` | Engine sidecar, trust ConfigMap, RBAC grant |

@@ -217,7 +217,7 @@ D6): expand hosts × paths; for `HTTPRoute`, wire every Gateway's integration; m
 wins (0002 §4.2); apply `WAFPolicyDefault`; resolve rule set and IP list references. Re-runs when a
 targeted route changes (indexed by target).
 
-**Built (v0.1.0)** (`operator/internal/resolver`, Ingress; IngressRoute since):
+**Built (v0.1.0)** (`operator/resolver`, Ingress; IngressRoute since):
 
 - **Conflicts:** the oldest policy (creation time, then name) wins, others get `Conflict`, as in
   Gateway API; rejecting both would leave the route unprotected. Identical routes from two Ingresses
@@ -245,7 +245,7 @@ targeted route changes (indexed by target).
 5. Sign with the cluster ed25519 key.
 6. Store gzipped in Secret `inkwall-bundle`, which is also the engines' cold-start source.
 
-**Built (v0.1.0)** (`operator/internal/bundle`, `pkg/agent`):
+**Built (v0.1.0)** (`operator/bundle`, `pkg/agent`):
 
 - The Secret holds the `SignedBundle` and public key; the key is generated on first use into
   `inkwall-bundle-signing-key`.
@@ -256,7 +256,7 @@ targeted route changes (indexed by target).
 - **Not yet:** chunking (Secrets cap at 1 MiB). A bundle over 900 KiB compressed is not published;
   the current one stays.
 
-**Built: signing key rotation** (`operator/internal/bundle/keyring.go`, `pkg/agent`,
+**Built: signing key rotation** (`operator/bundle/keyring.go`, `pkg/agent`,
 `pkg/bundlekey`). Requested by a new value of the `waf.inkwall.dev/rotate-signing-key` annotation on
 the `InkwallConfig` (GitOps-friendly, next to the rest of the cluster's configuration, and no write
 access to the operator's Secrets needed), or due after `spec.signingKey.rotationInterval` (≥ 1h).

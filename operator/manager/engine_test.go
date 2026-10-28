@@ -18,7 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
-	"github.com/inkwall-dev/inkwall/operator/internal/bundle"
+	"github.com/inkwall-dev/inkwall/operator/bundle"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/pkg/agent"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"

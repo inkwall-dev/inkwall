@@ -26,7 +26,7 @@ import (
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
-	"github.com/inkwall-dev/inkwall/operator/internal/bundle"
+	"github.com/inkwall-dev/inkwall/operator/bundle"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/operator/test/fakeengine"
 	"github.com/inkwall-dev/inkwall/pkg/agent"

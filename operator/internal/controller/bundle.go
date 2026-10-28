@@ -32,11 +32,11 @@ import (
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
-	"github.com/inkwall-dev/inkwall/operator/internal/bundle"
+	"github.com/inkwall-dev/inkwall/operator/bundle"
 	"github.com/inkwall-dev/inkwall/operator/internal/crdwatch"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
-	"github.com/inkwall-dev/inkwall/operator/internal/resolver"
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
+	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )

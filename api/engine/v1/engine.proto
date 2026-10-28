@@ -116,4 +116,8 @@ message CheckResponse {
   string request_id = 7;
   // Time spent inspecting.
   google.protobuf.Duration inspection_time = 8;
+  // The policy that decided, in bundle mode ("namespace/name"); empty when
+  // none did (no policy covers the request, or inspection is suspended),
+  // or outside bundle mode.
+  string policy = 9;
 }
