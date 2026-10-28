@@ -24,6 +24,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
@@ -49,8 +50,11 @@ const PolicyValid = "the policy is valid"
 
 // Input is the cluster state to resolve.
 type Input struct {
-	Policies        []wafv1alpha1.WAFPolicy
-	Ingresses       []networkingv1.Ingress
+	Policies  []wafv1alpha1.WAFPolicy
+	Ingresses []networkingv1.Ingress
+	// IngressRoutes are Traefik's (traefik.io/v1alpha1); none when its
+	// CRD isn't installed.
+	IngressRoutes   []unstructured.Unstructured
 	RuleSets        []wafv1alpha1.WAFRuleSet
 	ClusterRuleSets []wafv1alpha1.ClusterWAFRuleSet
 	// ConfigMaps rule sets read rules from (labeled RulesLabel).
@@ -188,6 +192,11 @@ func (r *resolution) resolvePolicies() {
 		ing := &r.in.Ingresses[i]
 		ingresses[types.NamespacedName{Namespace: ing.Namespace, Name: ing.Name}] = ing
 	}
+	ingressRoutes := map[types.NamespacedName]*unstructured.Unstructured{}
+	for i := range r.in.IngressRoutes {
+		ir := &r.in.IngressRoutes[i]
+		ingressRoutes[types.NamespacedName{Namespace: ir.GetNamespace(), Name: ir.GetName()}] = ir
+	}
 
 	// Oldest first: on a conflict the older policy wins, as in Gateway API,
 	// so a new policy can't take protection away from a route.
@@ -202,7 +211,7 @@ func (r *resolution) resolvePolicies() {
 	var cands []*candidate
 	owner := map[string]*candidate{} // target -> the policy that has it
 	for i := range policies {
-		c := r.candidate(&policies[i], ingresses)
+		c := r.candidate(&policies[i], ingresses, ingressRoutes)
 		for _, t := range c.obj.Spec.TargetRefs {
 			k := targetKey(c.key.Namespace, t)
 			if prev, ok := owner[k]; ok {
@@ -241,8 +250,8 @@ func (r *resolution) resolvePolicies() {
 			pol = proto.Clone(prev).(*bundlev1.Policy)
 			usedRuleSets = previousRuleSets
 		}
-		// A route of two policies (from two Ingresses with the same host
-		// and path) goes to the older one.
+		// A route of two policies (from two routes with the same host and
+		// path) goes to the older one.
 		var kept []*bundlev1.RouteMatch
 		var shadowed []string
 		for _, m := range pol.GetRoutes() {
@@ -285,7 +294,8 @@ func (c *candidate) fail(reason, message string) {
 	c.status.Message += "; " + message
 }
 
-func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.NamespacedName]*networkingv1.Ingress) *candidate {
+func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.NamespacedName]*networkingv1.Ingress,
+	ingressRoutes map[types.NamespacedName]*unstructured.Unstructured) *candidate {
 	c := &candidate{
 		obj:    p,
 		key:    types.NamespacedName{Namespace: p.Namespace, Name: p.Name},
@@ -321,9 +331,21 @@ func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.Nam
 				missing = append(missing, "Ingress "+t.Name)
 				continue
 			}
-			c.policy.Routes = append(c.policy.Routes, ingressRoutes(ing)...)
+			c.policy.Routes = append(c.policy.Routes, ingressMatches(ing)...)
+		case "IngressRoute":
+			ir, ok := ingressRoutes[types.NamespacedName{Namespace: p.Namespace, Name: t.Name}]
+			if !ok {
+				missing = append(missing, "IngressRoute "+t.Name)
+				continue
+			}
+			routes, err := ingressRouteMatches(ir)
+			if err != nil {
+				c.fail(ReasonTargetUnsupported, fmt.Sprintf("IngressRoute %s: %v", t.Name, err))
+				continue
+			}
+			c.policy.Routes = append(c.policy.Routes, routes...)
 		default:
-			c.fail(ReasonTargetUnsupported, fmt.Sprintf("%s %s: only Ingress targets are resolved so far", t.Kind, t.Name))
+			c.fail(ReasonTargetUnsupported, fmt.Sprintf("%s %s: only Ingress and IngressRoute targets are resolved so far", t.Kind, t.Name))
 		}
 	}
 	if len(missing) > 0 {
@@ -406,11 +428,11 @@ func namespaceOf(policyID string) string {
 	return ns
 }
 
-// ingressRoutes expands an Ingress into route matches: one per host and
+// ingressMatches expands an Ingress into route matches: one per host and
 // path. ImplementationSpecific paths are treated as prefixes, as Traefik
 // and ingress-nginx do. An Ingress with only a default backend matches any
 // host and path; a default backend next to rules is not covered.
-func ingressRoutes(ing *networkingv1.Ingress) []*bundlev1.RouteMatch {
+func ingressMatches(ing *networkingv1.Ingress) []*bundlev1.RouteMatch {
 	var out []*bundlev1.RouteMatch
 	if len(ing.Spec.Rules) == 0 && ing.Spec.DefaultBackend != nil {
 		return []*bundlev1.RouteMatch{{Path: &bundlev1.PathMatch{Type: bundlev1.PathMatchType_PATH_MATCH_TYPE_PREFIX, Value: "/"}}}

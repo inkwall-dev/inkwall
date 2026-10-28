@@ -2,7 +2,8 @@
 
 Installs the Inkwall operator, its CRDs and its webhooks ([design](../../../docs/design/0004-operator.md)).
 The operator validates policies and rule sets, builds them into a signed bundle, serves it to the
-engines, injects the engine into Traefik pods and wires their Ingresses. Kubernetes 1.29 or later.
+engines, injects the engine into Traefik pods and wires their Ingresses and IngressRoutes.
+Kubernetes 1.29 or later.
 
 ```sh
 helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \
@@ -87,11 +88,56 @@ certificate in `inkwall-control-plane-identity`, and reports `ControlPlaneConnec
 `InkwallConfig` isn't part of the chart: a release can't create a custom resource of a CRD it
 installs itself.
 
+### Managed mode
+
+With `mode: Managed`, policies come from the control plane. The operator writes each policy
+snapshot it sends as `WAFPolicy`, `WAFRuleSet` and `ClusterWAFRuleSet` objects labelled
+`inkwall.dev/source: saas`, all or nothing (a server-side dry run of every object first; one
+refused object refuses the snapshot and nothing changes), deletes the labelled objects a snapshot no
+longer has, and acknowledges it. They are enforced like any other policy, in bundles signed with the
+cluster's own key, and their `Enforced` condition goes back to the control plane.
+
+Change them in the control plane, not with `kubectl`: while the cluster is in Managed mode the
+validating webhook refuses anyone but the operator creating, editing or deleting a labelled object,
+or adding or removing the label. Your own, unlabelled objects stay yours, and the operator never
+overwrites one with a policy of the same name (it refuses the snapshot instead). Rule sets from the
+control plane carry their rules inline: `configMapRef` is refused. Switching back to `GitOps` or
+`Standalone` leaves the labelled objects in place, as ordinary objects you can edit or delete.
+
+## Rotating the signing key
+
+The operator signs policy bundles with an ed25519 key it generates on first use, in the
+`inkwall-bundle-signing-key` Secret. To rotate it, give the `InkwallConfig` a new value of the
+`waf.inkwall.dev/rotate-signing-key` annotation (any value: each new one starts a rotation), or
+rotate it on a schedule with `spec.signingKey.rotationInterval`:
+
+```sh
+kubectl annotate inkwallconfig default --overwrite waf.inkwall.dev/rotate-signing-key="$(date +%s)"
+kubectl -n inkwall-system get secret inkwall-bundle-signing-key \
+  -o jsonpath='{.metadata.annotations.waf\.inkwall\.dev/rotation-phase}'
+```
+
+```yaml
+spec:
+  signingKey:
+    rotationInterval: 2160h # 90 days
+```
+
+Traffic is unaffected. The operator publishes the new key to every engine first (the `inkwall-trust`
+ConfigMaps; engines reload them without restarting), keeps signing with the old key until every
+connected engine reports the new one, then switches, and drops the old key once every engine runs a
+bundle the new key signed. The phase reads `Publishing`, then `Retiring`, then nothing. Each phase
+lasts at least a minute, the time the kubelet takes to update a mounted ConfigMap. The operator logs
+the engines it waits for; an engine from before Inkwall supported rotation never reports the new key,
+so restart its pod to give it the current image. An engine you configured yourself reads its keys
+from `--bundle-key`: keep that file in sync with the Secret's `trusted-keys.pub` during a rotation.
+
 ## Uninstalling
 
 `helm uninstall` keeps the CRDs (and so every WAF object) and the two Secrets the operator creates
 in its namespace, `inkwall-bundle` and `inkwall-bundle-signing-key`. A reinstall continues with the
-same signing key, so engines keep trusting it. Delete the namespace to remove the Secrets.
+same signing keys (and a rotation in progress), so engines keep trusting them. Delete the namespace
+to remove the Secrets.
 
 Before anything is deleted, a pre-delete hook (`uninstall.unwire`, on by default) runs
 `inkwall-operator unwire`: it stops the operator, sets the Pod webhook to `Ignore`, and removes
@@ -100,7 +146,8 @@ working, uninspected; Traefik pods drop the engine when they restart. If the hoo
 uninstall stops: fix the cause (`kubectl -n <namespace> logs job/<release>-inkwall-operator-unwire`)
 and run it again, or skip the hook with `helm uninstall --no-hooks` and remove the
 `inkwall-waf` entries from the Ingresses' `traefik.ingress.kubernetes.io/router.middlewares`
-annotations yourself.
+annotations and from the IngressRoutes' `spec.routes[*].middlewares` yourself (the objects Inkwall
+wired are annotated `waf.inkwall.dev/wired`).
 
 ## When the operator is down
 

@@ -53,7 +53,7 @@ func TestInject(t *testing.T) {
 		"--operator=inkwall-operator.inkwall-system.svc:9445",
 		"--operator-token=/var/run/secrets/inkwall/token",
 		"--operator-ca=/var/run/secrets/inkwall/ca.crt",
-		"--bundle-key=/var/run/secrets/inkwall/ed25519.pub",
+		"--bundle-key=/var/run/secrets/inkwall/trusted-keys.pub",
 		"--bundle-cache=/var/run/inkwall/bundle.pb",
 		"--trusted-proxies=127.0.0.1/32,::1/128",
 		"--bundle-secret=inkwall-system/inkwall-bundle",

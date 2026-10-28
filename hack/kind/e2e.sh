@@ -20,6 +20,7 @@ PORT=${E2E_PORT:-18480}
 TRAEFIK_PORT=${E2E_TRAEFIK_PORT:-18080}
 TRAEFIK_NS=traefik-e2e
 TRAEFIK_HOST=traefik.e2e.example.com
+ROUTE_HOST=route.e2e.example.com
 TRAEFIK_CHART_VERSION=41.6.1 # Traefik v3.7.13, as hack/kind/up.sh
 KUBECTL=(kubectl --context "kind-$CLUSTER")
 SQLI='/?id=1%27%20OR%20%271%27%3D%271'
@@ -92,15 +93,24 @@ fi
 docker build --target engine -t "$IMAGE" .
 kind load docker-image "$IMAGE" --name "$CLUSTER"
 
-# The trust ConfigMap: the operator's CA and the bundle public key, both
-# public, copied into the app's namespace.
+# The trust ConfigMap: the operator's CA and the bundle public keys, all
+# public, copied into the app's namespace (app_trust), as someone who sets
+# up an engine by hand does; the operator keeps it for the proxies it
+# injects.
 "${KUBECTL[@]}" create namespace "$NS" --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f - >/dev/null
 trust=$(mktemp -d)
 # cp_cleanup undoes the control plane section, also when it fails midway:
 # a GitOps InkwallConfig left behind would change the next run.
 cp_cleanup() {
   if [[ -n ${cp_ca:-} ]]; then rm -f "$cp_ca"; fi
+  if [[ -n ${snap:-} ]]; then rm -f "$snap"; fi
   "${KUBECTL[@]}" delete inkwallconfig default --ignore-not-found >/dev/null 2>&1 || true
+  # The control plane's policies, if a Managed run stopped midway: out of
+  # Managed mode (once the webhook sees it) anyone may delete them.
+  for _ in $(seq 20); do
+    "${KUBECTL[@]}" delete wafpolicies,wafrulesets,clusterwafrulesets -A -l inkwall.dev/source=saas >/dev/null 2>&1 && break
+    sleep 0.5
+  done
   "${KUBECTL[@]}" -n "$OPERATOR_NS" delete secret inkwall-control-plane-identity --ignore-not-found >/dev/null 2>&1 || true
   "${KUBECTL[@]}" delete namespace inkwall-cp-stub --ignore-not-found --wait=false >/dev/null 2>&1 || true
 }
@@ -117,10 +127,14 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-"${KUBECTL[@]}" -n "$OPERATOR_NS" get secret inkwall-operator-webhook-tls -o jsonpath='{.data.ca\.crt}' | base64 -d >"$trust/ca.crt"
-"${KUBECTL[@]}" -n "$OPERATOR_NS" get secret inkwall-bundle-signing-key -o jsonpath='{.data.ed25519\.pub}' | base64 -d >"$trust/ed25519.pub"
-"${KUBECTL[@]}" -n "$NS" create configmap inkwall-trust --from-file="$trust/ca.crt" --from-file="$trust/ed25519.pub" \
-  --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f - >/dev/null
+app_trust() {
+  "${KUBECTL[@]}" -n "$OPERATOR_NS" get secret inkwall-operator-webhook-tls -o jsonpath='{.data.ca\.crt}' | base64 -d >"$trust/ca.crt"
+  "${KUBECTL[@]}" -n "$OPERATOR_NS" get secret inkwall-bundle-signing-key -o jsonpath='{.data.ed25519\.pub}' | base64 -d >"$trust/ed25519.pub"
+  "${KUBECTL[@]}" -n "$OPERATOR_NS" get secret inkwall-bundle-signing-key -o jsonpath='{.data.trusted-keys\.pub}' | base64 -d >"$trust/trusted-keys.pub"
+  "${KUBECTL[@]}" -n "$NS" create configmap inkwall-trust --from-file="$trust/ca.crt" --from-file="$trust/ed25519.pub" \
+    --from-file="$trust/trusted-keys.pub" --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f - >/dev/null
+}
+app_trust
 
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy app --ignore-not-found >/dev/null
 "${KUBECTL[@]}" apply -f hack/kind/e2e.yaml >/dev/null
@@ -324,9 +338,146 @@ events_received() {
 }
 eventually "the operator received the engine's security events" events_received
 
+# Signing key rotation (#41), requested on the InkwallConfig with two
+# engines connected: Traefik's, whose trust ConfigMap the operator keeps,
+# and the app's, whose ConfigMap this test keeps (app_trust). The operator
+# signs with the new key only once both trust it, and retires the old key
+# once both run a bundle it signed: no engine rejects a bundle or restarts.
+echo "== signing key rotation"
+# eventually_within SECONDS DESCRIPTION COMMAND...: the kubelet takes a
+# minute or so to update a mounted ConfigMap.
+eventually_within() {
+  local secs=$1 what=$2
+  shift 2
+  for _ in $(seq $((secs * 2))); do
+    if "$@" >/dev/null 2>&1; then
+      ok "$what"
+      return 0
+    fi
+    sleep 0.5
+  done
+  fail "$what"
+}
+key_secret() { "${KUBECTL[@]}" -n "$OPERATOR_NS" get secret inkwall-bundle-signing-key -o jsonpath="$1"; }
+phase_is() { [[ $(key_secret '{.metadata.annotations.waf\.inkwall\.dev/rotation-phase}') == "$1" ]]; }
+trusted_keys() { key_secret '{.data.trusted-keys\.pub}' | base64 -d; }
+trusted_count_is() { [[ $(trusted_keys | wc -c) == $(($1 * 32)) ]]; }
+signed_with() {
+  [[ $("${KUBECTL[@]}" -n "$OPERATOR_NS" get secret inkwall-bundle -o jsonpath='{.metadata.annotations.waf\.inkwall\.dev/key-id}') == "$1" ]]
+}
+# An engine in NAMESPACE reports trusting KEY_ID (the replicas' reports).
+reports_key() {
+  "${KUBECTL[@]}" -n "$OPERATOR_NS" get configmaps -l waf.inkwall.dev/engines=true -o jsonpath='{.items[*].data.engines\.json}' |
+    grep -o '{[^{}]*}' | grep "\"podNamespace\":\"$1\"" | grep -q "\"$2\""
+}
+engine_logs() {
+  "${KUBECTL[@]}" -n "$NS" logs deployment/app -c inkwall-engine
+  "${KUBECTL[@]}" -n "$TRAEFIK_NS" logs deployment/traefik-e2e -c inkwall-engine
+}
+no_rejection() { ! engine_logs | grep -q '"bundle rejected"'; }
+traefik_engine() {
+  "${KUBECTL[@]}" -n "$TRAEFIK_NS" get pods -l app.kubernetes.io/name=traefik \
+    -o jsonpath='{range .items[*]}{.metadata.name}/{.status.initContainerStatuses[?(@.name=="inkwall-engine")].restartCount}{"\n"}{end}'
+}
+same_engines() { [[ $(engine_pod)/$(restarts) == "$app_engine/0" && $(traefik_engine) == "$traefik_before" ]]; }
+app_engine=$(engine_pod)
+traefik_before=$(traefik_engine)
+old_key=$(key_secret '{.data.key-id}' | base64 -d)
+created_config=false
+if ! "${KUBECTL[@]}" get inkwallconfig default >/dev/null 2>&1; then
+  "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: InkwallConfig
+metadata: {name: default}
+YAML
+  created_config=true
+fi
+"${KUBECTL[@]}" annotate inkwallconfig default --overwrite "waf.inkwall.dev/rotate-signing-key=e2e-$(date +%s)" >/dev/null
+published() { phase_is Publishing && trusted_count_is 2; }
+eventually "the new key is published" published
+new_key=$(trusted_keys | tail -c 32 | sha256sum | cut -c1-16)
+eventually_within 180 "Traefik's engine reloads its keys and reports the new one" reports_key "$TRAEFIK_NS" "$new_key"
+check "the old key still signs: the app's engine doesn't trust the new one" signed_with "$old_key"
+not_reported() { reports_key "$NS" "$old_key" && ! reports_key "$NS" "$new_key"; }
+check "the app's engine reports only the old key" not_reported
+app_trust
+eventually_within 180 "the new key signs once every engine trusts it" signed_with "$new_key"
+retired() { phase_is "" && trusted_count_is 1 && [[ $(trusted_keys | sha256sum | cut -c1-16) == "$new_key" ]]; }
+eventually_within 180 "the old key is retired" retired
+app_trust
+check "no engine rejected a bundle" no_rejection
+check "neither engine restarted" same_engines
+eventually "the engine in Traefik's pod still blocks the attack" tstatus_is 403 "$SQLI"
+eventually "the policy is still Ready" ready
+if $created_config; then "${KUBECTL[@]}" delete inkwallconfig default >/dev/null; fi
+
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy web >/dev/null
 eventually "unwired when the policy is deleted" unwired
 eventually "the attack passes again" tstatus_is 200 "$SQLI"
+
+# A Traefik IngressRoute (#79): its routes get the operator's Middleware
+# first, the user's own kept, and lose it when the policy goes.
+rget() { curl -s -H "Host: $ROUTE_HOST" "http://127.0.0.1:$TRAEFIK_PORT$1" || true; }
+rcode() {
+  curl -s -o /dev/null -w '%{http_code}' -H "Host: $ROUTE_HOST" "http://127.0.0.1:$TRAEFIK_PORT$1" || true
+}
+rstatus_is() { [[ $(rcode "$2") == "$1" ]]; }
+route_middlewares() {
+  "${KUBECTL[@]}" -n "$NS" get ingressroutes.traefik.io web -o jsonpath='{.spec.routes[*].middlewares[*].name}|{.metadata.annotations.waf\.inkwall\.dev/wired}'
+}
+route_wired() { [[ $(route_middlewares) == "inkwall-waf e2e-header|inkwall-waf" ]]; }
+route_unwired() { [[ $(route_middlewares) == "e2e-header|" ]]; }
+# whoami echoes the request headers: the user's Middleware still applies.
+user_middleware() { rget /products/42 | grep -q '^X-E2e: route'; }
+rready() {
+  [[ $("${KUBECTL[@]}" -n "$NS" get wafpolicy web-route -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}') == True ]]
+}
+
+echo "== an IngressRoute through Traefik"
+"${KUBECTL[@]}" apply -f - >/dev/null <<YAML
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: e2e-header
+  namespace: $NS
+spec:
+  headers:
+    customRequestHeaders: {X-E2E: route}
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: web
+  namespace: $NS
+spec:
+  ingressClassName: traefik-e2e
+  entryPoints: [web]
+  routes:
+    - kind: Rule
+      match: Host(\`$ROUTE_HOST\`) && PathPrefix(\`/\`)
+      middlewares: [{name: e2e-header}]
+      services: [{name: web, port: 8080}]
+YAML
+eventually "Traefik serves the IngressRoute" rstatus_is 200 /
+check "no policy yet: the attack passes through the IngressRoute" rstatus_is 200 "$SQLI"
+"${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: web-route
+  namespace: $NS
+spec:
+  targetRefs: [{group: traefik.io, kind: IngressRoute, name: web}]
+  mode: Block
+YAML
+eventually "the operator wired the IngressRoute, first, keeping the user's Middleware" route_wired
+eventually "the engine blocks the attack on the IngressRoute" rstatus_is 403 "$SQLI"
+check "benign traffic passes the IngressRoute" rstatus_is 200 /products/42
+check "the user's Middleware still applies" user_middleware
+eventually "the IngressRoute's policy is Ready" rready
+"${KUBECTL[@]}" -n "$NS" delete wafpolicy web-route >/dev/null
+eventually "the IngressRoute is unwired when the policy is deleted, the user's Middleware kept" route_unwired
+eventually "the attack passes the IngressRoute again" rstatus_is 200 "$SQLI"
 
 # Traefik deployed with other labels (#50): InkwallConfig names them, the
 # operator restarts with them, and their pods get the engine.
@@ -482,6 +633,86 @@ eventually "the replicas opened events streams" events_stream
 stub_events() { [[ $(stub_stats | sed -n 's/.*"events":\([0-9]*\).*/\1/p') -ge 1 ]]; }
 eventually "the blocked attack reaches the control plane as a security event" stub_events
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy web --wait >/dev/null
+
+# Managed mode (#93, #94): the stub's policies are written as CRDs labelled
+# inkwall.dev/source: saas, enforced, acknowledged and reported Enforced;
+# no one else may change them, a refused snapshot changes nothing, and a
+# snapshot without a policy deletes it.
+echo "== control plane (stub): Managed mode"
+"${KUBECTL[@]}" patch inkwallconfig default --type=merge -p '{"spec":{"mode":"Managed"}}' >/dev/null
+managed_hello() { stub_stats | grep -q '"STREAM_ROLE_PRIMARY CLUSTER_MODE_MANAGED'; }
+eventually "the operator reconnects in Managed mode" managed_hello
+snap=$(mktemp)
+# send_snapshot VERSION: sends the YAML list on stdin as that snapshot.
+send_snapshot() {
+  cat >"$snap"
+  "${KUBECTL[@]}" create --raw "/api/v1/namespaces/$CP_NS/services/stub:admin/proxy/snapshot?version=$1" -f "$snap" >/dev/null
+}
+acked() { stub_stats | grep -Eq "\"acks\":\[([0-9]+,)*$1[],]"; }
+nacked() { stub_stats | grep -q "\"$1: "; }
+managed_policy() {
+  cat <<YAML
+- apiVersion: waf.inkwall.dev/v1alpha1
+  kind: WAFPolicy
+  metadata: {name: managed, namespace: $NS}
+  spec:
+    targetRefs: [{kind: Ingress, name: web}]
+    mode: Block
+YAML
+}
+managed_policy | send_snapshot 1
+eventually "the stub's snapshot is acknowledged (PolicyAck)" acked 1
+saas_label() { [[ $("${KUBECTL[@]}" -n "$NS" get wafpolicy managed -o jsonpath='{.metadata.labels.inkwall\.dev/source}') == saas ]]; }
+check "its policy is written, labelled inkwall.dev/source: saas" saas_label
+eventually "Traefik blocks the attack under the stub's policy" tstatus_is 403 "$SQLI"
+enforced_in_state() {
+  stub_stats | sed -n 's/.*"enforced":\[\([^]]*\)\].*/\1/p' | grep -qF "\"WAFPolicy $NS/managed\""
+}
+eventually "the stub gets it back Enforced in the ClusterState" enforced_in_state
+# guarded COMMAND...: the webhook refuses it, naming the control plane.
+guarded() {
+  local out
+  out=$("$@" 2>&1) && return 1
+  grep -q "come from the control plane" <<<"$out"
+}
+check "kubectl edit of the policy is refused" guarded env KUBE_EDITOR="sed -i 's/mode: Block/mode: Detect/'" "${KUBECTL[@]}" -n "$NS" edit wafpolicy managed
+check "kubectl patch of the policy is refused" guarded "${KUBECTL[@]}" -n "$NS" patch wafpolicy managed --type=merge -p '{"spec":{"mode":"Detect"}}'
+check "removing its label is refused" guarded "${KUBECTL[@]}" -n "$NS" label wafpolicy managed inkwall.dev/source-
+check "deleting it is refused" guarded "${KUBECTL[@]}" -n "$NS" delete wafpolicy managed --wait=false
+forged() {
+  "${KUBECTL[@]}" apply -f - <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata: {name: forged, namespace: $NS, labels: {inkwall.dev/source: saas}}
+spec: {targetRefs: [{kind: Ingress, name: web}]}
+YAML
+}
+check "creating one labelled saas is refused" guarded forged
+still_block() { [[ $("${KUBECTL[@]}" -n "$NS" get wafpolicy managed -o jsonpath='{.spec.mode}') == Block ]]; }
+check "the policy is unchanged" still_block
+# All or nothing: one object the webhook refuses (an unclean path) refuses
+# the snapshot, and the policy in force stays.
+{
+  managed_policy
+  cat <<YAML
+- apiVersion: waf.inkwall.dev/v1alpha1
+  kind: WAFPolicy
+  metadata: {name: broken, namespace: $NS}
+  spec:
+    targetRefs: [{kind: Ingress, name: web}]
+    skip: {paths: ["/a/../b"]}
+YAML
+} | send_snapshot 2
+eventually "a snapshot with a bad object is refused (PolicyNack)" nacked 2
+no_broken() { ! "${KUBECTL[@]}" -n "$NS" get wafpolicy broken >/dev/null 2>&1; }
+check "nothing of it is written" no_broken
+check "the policy in force stays" tstatus_is 403 "$SQLI"
+echo '[]' | send_snapshot 3
+eventually "an empty snapshot is acknowledged" acked 3
+no_managed() { ! "${KUBECTL[@]}" -n "$NS" get wafpolicy managed >/dev/null 2>&1; }
+eventually "and deletes the stub's policy" no_managed
+eventually "the attack passes again" tstatus_is 200 "$SQLI"
+
 # A restarted operator without its certificate (lost, say) can only enroll
 # again: the token is used, so the stub refuses it. A running stream keeps
 # its certificate in memory, hence the restart.
@@ -503,17 +734,20 @@ metadata:
   name: web
   namespace: $NS
 spec:
-  targetRefs: [{kind: Ingress, name: web}]
+  targetRefs: [{kind: Ingress, name: web}, {group: traefik.io, kind: IngressRoute, name: web}]
   mode: Block
 YAML
 eventually "wired again before the uninstall" wired
+eventually "the IngressRoute wired again before the uninstall" route_wired
 eventually "blocking before the uninstall" tstatus_is 403 "$SQLI"
+eventually "blocking on the IngressRoute before the uninstall" rstatus_is 403 "$SQLI"
 if helm --kube-context "kind-$CLUSTER" uninstall inkwall --namespace "$OPERATOR_NS" --wait --timeout 5m >/dev/null; then
   ok "helm uninstall (with the unwire hook)"
 else
   fail "helm uninstall"
 fi
 check "the Ingress is unwired" unwired
+check "the IngressRoute is unwired, the user's Middleware kept" route_unwired
 no_middleware() { ! "${KUBECTL[@]}" -n "$NS" get middlewares.traefik.io inkwall-waf >/dev/null 2>&1; }
 check "the Middleware is deleted" no_middleware
 kept() { "${KUBECTL[@]}" -n "$NS" get wafpolicy web >/dev/null 2>&1; }
@@ -526,6 +760,7 @@ kill "$tpf" 2>/dev/null || true
 "${KUBECTL[@]}" -n "$TRAEFIK_NS" port-forward svc/traefik-e2e "$TRAEFIK_PORT:80" >/dev/null 2>&1 &
 tpf=$!
 eventually "the route still answers after the uninstall (uninspected)" tstatus_is 200 "$SQLI"
+check "so does the IngressRoute" rstatus_is 200 "$SQLI"
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy web --ignore-not-found >/dev/null
 
 if [[ $failures -gt 0 ]]; then

@@ -72,7 +72,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, o client.Object) []reconcile.Request {
 			return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: o.GetNamespace()}}, grantRequest}
 		})).
-		// A new CA or signing key: every trust ConfigMap.
+		// A new CA or signing key (a rotation step): every trust ConfigMap.
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.allNamespaces), builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
 			return o.GetNamespace() == r.Namespace && (o.GetName() == r.CertSecret || o.GetName() == bundle.SigningKeySecret)
 		}))).
@@ -137,13 +137,19 @@ func (r *Reconciler) reconcileTrust(ctx context.Context, namespace string) (reco
 		// back.
 		return reconcile.Result{RequeueAfter: 5 * time.Second}, client.IgnoreNotFound(err)
 	}
-	ca, pub := certs.Data["ca.crt"], keys.Data[bundle.PublicKeyKey]
+	ca, pub, trusted := certs.Data["ca.crt"], keys.Data[bundle.PublicKeyKey], keys.Data[bundle.TrustedKeysKey]
+	if len(trusted) == 0 {
+		// Written by an operator older than key rotation: one key.
+		trusted = pub
+	}
 	if len(ca) == 0 || len(pub) == 0 {
 		return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	data := map[string]string{"ca.crt": string(ca)}
-	binary := map[string][]byte{"ed25519.pub": pub}
+	// ed25519.pub, the active key, for engines older than key rotation;
+	// trusted-keys.pub, every key engines must accept now.
+	binary := map[string][]byte{bundle.PublicKeyKey: pub, bundle.TrustedKeysKey: trusted}
 	if !exists {
 		cm = corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: TrustConfigMap, Labels: managed()},

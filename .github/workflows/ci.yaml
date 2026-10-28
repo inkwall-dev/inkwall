@@ -117,7 +117,9 @@ jobs:
 
   bench:
     # Performance regression gate (0001 §8): benchmarks of the PR against its
-    # base, interleaved, compared with benchstat.
+    # base, interleaved, compared with benchstat. Packages whose test binary
+    # the PR does not change are skipped, and a regression must repeat on a
+    # re-check of the flagged benchmarks to fail (hack/bench/compare.sh).
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -134,8 +136,8 @@ jobs:
           OUT: bench-out
       - if: always()
         run: |
-          if [ -f bench-out/benchstat.txt ]; then
-            { echo '```'; cat bench-out/benchstat.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f bench-out/summary.md ]; then
+            cat bench-out/summary.md >> "$GITHUB_STEP_SUMMARY"
           fi
       - if: always()
         uses: actions/upload-artifact@v4

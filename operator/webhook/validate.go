@@ -4,7 +4,8 @@
 // Package webhook holds the operator's admission webhooks. The validating
 // webhook checks what the CRD schemas can't (0004 §3.1, level 2): rule sets
 // must compile the way the engine loads them, and policy paths must be ones
-// the engine's router can match.
+// the engine's router can match. In Managed mode it also keeps the control
+// plane's policies to the operator (SourceGuard).
 package webhook
 
 import (
@@ -36,51 +37,68 @@ const ValidatingConfigName = "inkwall-operator-validating"
 // +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafruleset,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=wafrulesets,verbs=create;update,versions=v1alpha1,name=wafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
 // +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-clusterwafruleset,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=clusterwafrulesets,verbs=create;update,versions=v1alpha1,name=clusterwafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
 // +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafpolicy,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=wafpolicies,verbs=create;update,versions=v1alpha1,name=wafpolicies.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
+//
+// Deletes go to the same webhooks only for the control plane's objects (the
+// objectSelector), so deleting any other object never needs the operator.
+//
+// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafruleset,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=wafrulesets,verbs=delete,versions=v1alpha1,name=delete.wafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,patch=`{"objectSelector":{"matchLabels":{"inkwall.dev/source":"saas"}}}`
+// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-clusterwafruleset,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=clusterwafrulesets,verbs=delete,versions=v1alpha1,name=delete.clusterwafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,patch=`{"objectSelector":{"matchLabels":{"inkwall.dev/source":"saas"}}}`
+// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafpolicy,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=wafpolicies,verbs=delete,versions=v1alpha1,name=delete.wafpolicies.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,patch=`{"objectSelector":{"matchLabels":{"inkwall.dev/source":"saas"}}}`
 
 // Setup registers the validating webhooks with mgr's webhook server, and
-// the Pod webhook when inject is set.
-func Setup(mgr manager.Manager, inject *PodInjector) error {
+// the Pod webhook when inject is set. guard keeps the control plane's
+// objects to the operator.
+func Setup(mgr manager.Manager, inject *PodInjector, guard *SourceGuard) error {
 	if inject != nil {
 		mgr.GetWebhookServer().Register(InjectPath, &ctrlwebhook.Admission{Handler: inject})
 	}
 	if err := builder.WebhookManagedBy(mgr, &wafv1alpha1.WAFRuleSet{}).
-		WithValidator(specValidator[*wafv1alpha1.WAFRuleSet]{validateWAFRuleSet}).Complete(); err != nil {
+		WithValidator(specValidator[*wafv1alpha1.WAFRuleSet]{validateWAFRuleSet, guard}).Complete(); err != nil {
 		return err
 	}
 	if err := builder.WebhookManagedBy(mgr, &wafv1alpha1.ClusterWAFRuleSet{}).
-		WithValidator(specValidator[*wafv1alpha1.ClusterWAFRuleSet]{validateClusterWAFRuleSet}).Complete(); err != nil {
+		WithValidator(specValidator[*wafv1alpha1.ClusterWAFRuleSet]{validateClusterWAFRuleSet, guard}).Complete(); err != nil {
 		return err
 	}
 	return builder.WebhookManagedBy(mgr, &wafv1alpha1.WAFPolicy{}).
-		WithValidator(specValidator[*wafv1alpha1.WAFPolicy]{validateWAFPolicy}).Complete()
+		WithValidator(specValidator[*wafv1alpha1.WAFPolicy]{validateWAFPolicy, guard}).Complete()
 }
 
 // object is a WAF kind with a spec.
 type object interface {
 	*wafv1alpha1.WAFRuleSet | *wafv1alpha1.ClusterWAFRuleSet | *wafv1alpha1.WAFPolicy
 	GetName() string
+	GetLabels() map[string]string
 }
 
 // specValidator runs validate on create, and on update only when the spec
 // changed: an object accepted earlier must stay editable (labels,
-// finalizers, deletion) even if a newer engine would reject its spec.
+// finalizers, deletion) even if a newer engine would reject its spec. The
+// guard comes first, on every operation.
 type specValidator[T object] struct {
 	validate func(T) (admission.Warnings, error)
+	guard    *SourceGuard
 }
 
-func (v specValidator[T]) ValidateCreate(_ context.Context, obj T) (admission.Warnings, error) {
+func (v specValidator[T]) ValidateCreate(ctx context.Context, obj T) (admission.Warnings, error) {
+	if err := v.guard.check(ctx, obj.GetName(), nil, obj.GetLabels()); err != nil {
+		return nil, err
+	}
 	return v.validate(obj)
 }
 
-func (v specValidator[T]) ValidateUpdate(_ context.Context, oldObj, newObj T) (admission.Warnings, error) {
+func (v specValidator[T]) ValidateUpdate(ctx context.Context, oldObj, newObj T) (admission.Warnings, error) {
+	if err := v.guard.check(ctx, newObj.GetName(), oldObj.GetLabels(), newObj.GetLabels()); err != nil {
+		return nil, err
+	}
 	if apiequality.Semantic.DeepEqual(spec(oldObj), spec(newObj)) {
 		return nil, nil
 	}
 	return v.validate(newObj)
 }
 
-func (specValidator[T]) ValidateDelete(context.Context, T) (admission.Warnings, error) {
-	return nil, nil
+func (v specValidator[T]) ValidateDelete(ctx context.Context, obj T) (admission.Warnings, error) {
+	return nil, v.guard.check(ctx, obj.GetName(), obj.GetLabels(), nil)
 }
 
 func spec(obj any) any {

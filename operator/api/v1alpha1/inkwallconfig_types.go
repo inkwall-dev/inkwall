@@ -83,6 +83,29 @@ type InkwallConfigSpec struct {
 	// removing anything: the emergency switch (0004 §5).
 	// +optional
 	Suspend bool `json:"suspend,omitempty"`
+
+	// SigningKey configures the key the operator signs policy bundles with.
+	// +optional
+	SigningKey SigningKeySpec `json:"signingKey,omitempty"`
+}
+
+// RotateSigningKeyAnnotation on the InkwallConfig requests a rotation of the
+// bundle signing key: each new value starts one (a timestamp, say). The
+// operator publishes a new key to the engines, switches to it once every
+// connected engine trusts it, and retires the old key once every engine
+// runs a bundle signed with the new one. A request made during a rotation
+// starts another one after it.
+const RotateSigningKeyAnnotation = "waf.inkwall.dev/rotate-signing-key"
+
+// SigningKeySpec configures the bundle signing key.
+type SigningKeySpec struct {
+	// RotationInterval rotates the signing key once it has signed for this
+	// long, e.g. 2160h (90 days); at least 1h. Empty: the key rotates only
+	// when requested with the waf.inkwall.dev/rotate-signing-key
+	// annotation.
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1h')",message="rotationInterval must be at least 1h"
+	// +optional
+	RotationInterval *metav1.Duration `json:"rotationInterval,omitempty"`
 }
 
 // ControlPlane is the connection to the optional control plane.

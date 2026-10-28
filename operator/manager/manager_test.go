@@ -112,6 +112,8 @@ func startOperator(t *testing.T) (context.Context, client.Client, *warnings) {
 		EnginePullPolicy:     corev1.PullNever,
 		Replica:              "operator-0",
 		EngineReportInterval: 200 * time.Millisecond,
+		SigningKeyGrace:      time.Second,
+		CRDInterval:          200 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -172,9 +174,12 @@ func TestOperator(t *testing.T) {
 	t.Run("bundles", func(t *testing.T) { testBundles(ctx, t, c) })
 	t.Run("distribution", func(t *testing.T) { testDistribution(ctx, t, c) })
 	t.Run("engine", func(t *testing.T) { testEngine(ctx, t, c) })
+	t.Run("key rotation", func(t *testing.T) { testKeyRotation(ctx, t, c) })
 	t.Run("injection", func(t *testing.T) { testInjection(ctx, t, c) })
 	t.Run("wiring", func(t *testing.T) { testWiring(ctx, t, c) })
+	t.Run("ingressroutes", func(t *testing.T) { testIngressRoutes(ctx, t, c) })
 	t.Run("failure policy", func(t *testing.T) { testFailurePolicy(ctx, t, c) })
+	t.Run("source guard", func(t *testing.T) { testSourceGuard(ctx, t, c) })
 }
 
 // testWebhook checks the webhook as deployed: the operator creates the

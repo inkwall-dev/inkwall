@@ -30,8 +30,8 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 )
 
-// The leader reports every Inkwall object to the control plane, never
-// writing them (GitOps mode).
+// The leader reports every Inkwall object to the control plane (and
+// writes only the control plane's own, in Managed mode: snapshot.go).
 //
 // +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies;wafrulesets;clusterwafrulesets;inkwallconfigs,verbs=get;list;watch
 

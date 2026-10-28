@@ -5,6 +5,7 @@ package wiring
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -34,16 +35,18 @@ import (
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
+	"github.com/inkwall-dev/inkwall/operator/internal/crdwatch"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 )
 
 // The wiring controller reads routes and proxy pods, writes the Traefik
-// Middleware in protected namespaces, adds it to protected Ingresses, and
-// reports Programmed.
+// Middleware in protected namespaces, adds it to protected Ingresses and
+// IngressRoutes, and reports Programmed.
 //
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingressclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=traefik.io,resources=middlewares,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=traefik.io,resources=ingressroutes,verbs=get;list;watch;update;patch
 
 // Reasons of the Programmed condition.
 const (
@@ -75,6 +78,9 @@ type Reconciler struct {
 	PodWebhook string
 	// TraefikPods selects Traefik's pods (integrations.Selectors).
 	TraefikPods labels.Selector
+	// IngressRoutes watches Traefik's IngressRoutes once their CRD is
+	// installed; nil: they are only read at each reconcile.
+	IngressRoutes *crdwatch.Kind
 }
 
 // SetupWithManager registers the controller.
@@ -95,7 +101,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	start := make(chan event.GenericEvent, 1)
 	start <- event.GenericEvent{Object: &corev1.Pod{}}
-	return ctrl.NewControllerManagedBy(mgr).
+	c, err := ctrl.NewControllerManagedBy(mgr).
 		Named("wiring").
 		Watches(&wafv1alpha1.WAFPolicy{}, enqueue, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		// Ingress annotations matter (the operator's own included).
@@ -106,7 +112,15 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Pod{}, enqueue).
 		WatchesRawSource(source.Channel(start, enqueue)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
-		Complete(r)
+		Build(r)
+	if err != nil {
+		return err
+	}
+	if r.IngressRoutes != nil {
+		// Their middlewares matter (the operator's own included).
+		r.IngressRoutes.Add(c, enqueue)
+	}
+	return nil
 }
 
 // target is an Ingress some policy protects.
@@ -115,8 +129,40 @@ type target struct {
 	controller string
 }
 
-// Reconcile wires every protected Traefik Ingress, unwires the rest, and
-// reports Programmed.
+// state is what a reconcile found, for Programmed.
+type state struct {
+	ingresses map[types.NamespacedName]*networkingv1.Ingress
+	// wire are the Ingress targets.
+	wire map[types.NamespacedName]target
+	// routes are the IngressRoutes, when routeCRD (their CRD is
+	// installed); routeErr says why one couldn't be wired.
+	routes   map[types.NamespacedName]*unstructured.Unstructured
+	routeCRD bool
+	routeErr map[types.NamespacedName]string
+	// traefikCRDs: the Middleware CRD is installed.
+	traefikCRDs bool
+	// middlewareErr: namespace -> why its Middleware can't be used.
+	middlewareErr  map[string]string
+	pods           []corev1.Pod
+	injectingSince time.Time
+}
+
+// IngressRoutes lists Traefik's IngressRoutes; installed is false, with
+// none, when their CRD isn't.
+func IngressRoutes(ctx context.Context, c client.Client) (routes []unstructured.Unstructured, installed bool, err error) {
+	if installed, err = crdwatch.Installed(c.RESTMapper(), IngressRouteGVK); !installed || err != nil {
+		return nil, false, err
+	}
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(IngressRouteGVK.GroupVersion().WithKind("IngressRouteList"))
+	if err := c.List(ctx, list); err != nil {
+		return nil, true, err
+	}
+	return list.Items, true, nil
+}
+
+// Reconcile wires every protected Traefik Ingress and IngressRoute, unwires
+// the rest, and reports Programmed.
 func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
 	logger := log.FromContext(ctx)
 	var (
@@ -147,40 +193,56 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		byKey[types.NamespacedName{Namespace: ing.Namespace, Name: ing.Name}] = ing
 	}
 
-	// The Ingresses to wire: every Ingress target of a policy that Traefik
-	// serves. A policy that isn't accepted yet is wired too: until its rules
-	// are in a bundle, the engine lets its routes through (no-policy).
-	wire := map[types.NamespacedName]target{}
+	routes, routeCRD, err := IngressRoutes(ctx, r.Client)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	st := &state{
+		ingresses: byKey, wire: map[types.NamespacedName]target{},
+		routes: map[types.NamespacedName]*unstructured.Unstructured{}, routeCRD: routeCRD, routeErr: map[types.NamespacedName]string{},
+		traefikCRDs: r.middlewaresInstalled(), middlewareErr: map[string]string{},
+	}
+	for i := range routes {
+		ir := &routes[i]
+		st.routes[types.NamespacedName{Namespace: ir.GetNamespace(), Name: ir.GetName()}] = ir
+	}
+
+	// The routes to wire: every Ingress target of a policy that Traefik
+	// serves, and every IngressRoute target. A policy that isn't accepted
+	// yet is wired too: until its rules are in a bundle, the engine lets its
+	// routes through (no-policy).
+	wireRoutes := map[types.NamespacedName]bool{}
 	for _, p := range policies.Items {
 		for _, t := range p.Spec.TargetRefs {
-			if t.Kind != "Ingress" {
-				continue
-			}
 			k := types.NamespacedName{Namespace: p.Namespace, Name: t.Name}
-			if ing, ok := byKey[k]; ok {
-				wire[k] = target{ing: ing, controller: Controller(ing, classes, defaultClass)}
+			switch t.Kind {
+			case "Ingress":
+				if ing, ok := byKey[k]; ok {
+					st.wire[k] = target{ing: ing, controller: Controller(ing, classes, defaultClass)}
+				}
+			case "IngressRoute":
+				if _, ok := st.routes[k]; ok {
+					wireRoutes[k] = true
+				}
 			}
 		}
 	}
 
-	traefikCRDs := r.middlewaresInstalled()
-	// Namespace -> why its Middleware can't be used ("" when it can).
-	middlewareErr := map[string]string{}
-	if traefikCRDs {
-		needed := map[string]bool{}
-		for _, t := range wire {
+	needed := map[string]bool{} // namespaces whose Middleware is used
+	if st.traefikCRDs {
+		for _, t := range st.wire {
 			if t.controller == integrations.Traefik.Controller {
 				needed[t.ing.Namespace] = true
 			}
 		}
+		for k := range wireRoutes {
+			needed[k.Namespace] = true
+		}
 		for ns := range needed {
 			if err := r.ensureMiddleware(ctx, ns); err != nil {
-				middlewareErr[ns] = err.Error()
+				st.middlewareErr[ns] = err.Error()
 				logger.Error(err, "Middleware not wired", "namespace", ns)
 			}
-		}
-		if err := r.pruneMiddlewares(ctx, needed); err != nil {
-			return reconcile.Result{}, err
 		}
 	}
 
@@ -189,15 +251,41 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	for i := range ingresses.Items {
 		ing := &ingresses.Items[i]
 		k := types.NamespacedName{Namespace: ing.Namespace, Name: ing.Name}
-		t, protected := wire[k]
-		want := protected && traefikCRDs && t.controller == integrations.Traefik.Controller && middlewareErr[ing.Namespace] == ""
+		t, protected := st.wire[k]
+		want := protected && st.traefikCRDs && t.controller == integrations.Traefik.Controller && st.middlewareErr[ing.Namespace] == ""
 		if err := r.annotate(ctx, ing, want); err != nil {
 			return reconcile.Result{}, fmt.Errorf("wire ingress %s: %w", k, err)
 		}
 	}
 
-	if err := r.report(ctx, policies.Items, byKey, wire, traefikCRDs, middlewareErr, pods.Items, r.injectingSince(ctx)); err != nil {
+	// IngressRoutes: the same, in each route's middlewares. One that can't
+	// be written is reported, the others are still wired.
+	var conflicts error
+	for k, ir := range st.routes {
+		want := wireRoutes[k] && st.traefikCRDs && st.middlewareErr[k.Namespace] == ""
+		switch err := r.wireRoute(ctx, ir, want); {
+		case apierrors.IsConflict(err):
+			// Changed since the cache saw it: again, once it has.
+			conflicts = errors.Join(conflicts, fmt.Errorf("wire IngressRoute %s: %w", k, err))
+		case err != nil:
+			st.routeErr[k] = fmt.Sprintf("IngressRoute %s: %v", k.Name, err)
+			logger.Error(err, "IngressRoute not wired", "ingressroute", k)
+		}
+	}
+
+	// After the routes: a router referring to a missing Middleware fails.
+	if st.traefikCRDs {
+		if err := r.pruneMiddlewares(ctx, needed); err != nil {
+			return reconcile.Result{}, err
+		}
+	}
+
+	st.pods, st.injectingSince = pods.Items, r.injectingSince(ctx)
+	if err := r.report(ctx, policies.Items, st); err != nil {
 		return reconcile.Result{}, err
+	}
+	if conflicts != nil || len(st.routeErr) > 0 {
+		return reconcile.Result{}, errors.Join(conflicts, errors.New("IngressRoutes not wired"))
 	}
 	return reconcile.Result{RequeueAfter: resync}, nil
 }
@@ -298,49 +386,106 @@ func (r *Reconciler) annotate(ctx context.Context, ing *networkingv1.Ingress, wa
 	return r.Client.Patch(ctx, ing, patch)
 }
 
+// wireRoute adds the operator's Middleware to an IngressRoute's routes
+// (want), or removes it if the operator added it before. Only the
+// operator's entries change; Middlewares the user listed stay, in order.
+func (r *Reconciler) wireRoute(ctx context.Context, ir *unstructured.Unstructured, want bool) error {
+	wired := ir.GetAnnotations()[WiredAnnotation] == MiddlewareName
+	if !want && !wired {
+		return nil
+	}
+	orig := ir.DeepCopy()
+	changed, err := WithRouteMiddleware(ir, want)
+	if err != nil {
+		return err
+	}
+	if want && !changed && wired {
+		return nil
+	}
+	annotations := ir.GetAnnotations()
+	if want {
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations[WiredAnnotation] = MiddlewareName
+	} else {
+		delete(annotations, WiredAnnotation)
+	}
+	ir.SetAnnotations(annotations)
+	// spec.routes is one list to a merge patch: the resourceVersion makes
+	// sure it doesn't overwrite a change the cache hasn't seen.
+	return r.Client.Patch(ctx, ir, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{}))
+}
+
 // programmed computes a policy's Programmed condition.
-func programmed(p *wafv1alpha1.WAFPolicy, byKey map[types.NamespacedName]*networkingv1.Ingress, wire map[types.NamespacedName]target,
-	traefikCRDs bool, middlewareErr map[string]string, pods []corev1.Pod, injectingSince time.Time) (metav1.ConditionStatus, string, string) {
+func programmed(p *wafv1alpha1.WAFPolicy, st *state) (metav1.ConditionStatus, string, string) {
 	var unsupported, failed []string
-	wired := 0
+	ingresses, routes := 0, 0
 	for _, t := range p.Spec.TargetRefs {
-		if t.Kind != "Ingress" {
-			unsupported = append(unsupported, fmt.Sprintf("%s %s (only Ingress targets are wired so far)", t.Kind, t.Name))
-			continue
-		}
 		k := types.NamespacedName{Namespace: p.Namespace, Name: t.Name}
-		if _, ok := byKey[k]; !ok {
-			continue // reported by Accepted
-		}
-		tg := wire[k]
-		switch {
-		case tg.controller != integrations.Traefik.Controller:
-			c := tg.controller
-			if c == "" {
-				c = "no known IngressClass"
+		switch t.Kind {
+		case "Ingress":
+			if _, ok := st.ingresses[k]; !ok {
+				continue // reported by Accepted
 			}
-			unsupported = append(unsupported, fmt.Sprintf("Ingress %s is served by %s, which Inkwall doesn't wire yet", t.Name, c))
-		case !traefikCRDs:
-			failed = append(failed, "Traefik's Middleware CRD is not installed")
-		case middlewareErr[p.Namespace] != "":
-			failed = append(failed, middlewareErr[p.Namespace])
+			tg := st.wire[k]
+			switch {
+			case tg.controller != integrations.Traefik.Controller:
+				c := tg.controller
+				if c == "" {
+					c = "no known IngressClass"
+				}
+				unsupported = append(unsupported, fmt.Sprintf("Ingress %s is served by %s, which Inkwall doesn't wire yet", t.Name, c))
+			case !st.traefikCRDs:
+				failed = append(failed, "Traefik's Middleware CRD is not installed")
+			case st.middlewareErr[p.Namespace] != "":
+				failed = append(failed, st.middlewareErr[p.Namespace])
+			default:
+				ingresses++
+			}
+		case "IngressRoute":
+			if !st.routeCRD {
+				failed = append(failed, "Traefik's IngressRoute CRD is not installed")
+				continue
+			}
+			if _, ok := st.routes[k]; !ok {
+				continue // reported by Accepted
+			}
+			switch {
+			case !st.traefikCRDs:
+				failed = append(failed, "Traefik's Middleware CRD is not installed")
+			case st.middlewareErr[p.Namespace] != "":
+				failed = append(failed, st.middlewareErr[p.Namespace])
+			case st.routeErr[k] != "":
+				failed = append(failed, st.routeErr[k])
+			default:
+				routes++
+			}
 		default:
-			wired++
+			unsupported = append(unsupported, fmt.Sprintf("%s %s (only Ingress and IngressRoute targets are wired so far)", t.Kind, t.Name))
 		}
 	}
+	slices.Sort(failed)
 	switch {
 	case len(failed) > 0:
 		return metav1.ConditionFalse, ReasonWiringFailed, strings.Join(slices.Compact(failed), "; ")
 	case len(unsupported) > 0:
 		return metav1.ConditionFalse, ReasonControllerUnsupported, strings.Join(unsupported, "; ")
-	case wired == 0:
+	case ingresses+routes == 0:
 		return metav1.ConditionFalse, ReasonNoTargets, "none of the policy's targets exists"
+	}
+	var wired []string
+	if ingresses > 0 {
+		wired = append(wired, fmt.Sprintf("%d Ingress(es)", ingresses))
+	}
+	if routes > 0 {
+		wired = append(wired, fmt.Sprintf("%d IngressRoute(s)", routes))
 	}
 
 	// The routes go to Traefik's pods, whose sidecar must be there.
 	var missed, optedOut, before []string
 	running := 0
-	for _, pod := range pods {
+	for _, pod := range st.pods {
 		if pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 			continue
 		}
@@ -350,7 +495,7 @@ func programmed(p *wafv1alpha1.WAFPolicy, byKey map[types.NamespacedName]*networ
 		case injection.HasEngine(&pod):
 		case injection.OptedOut(&pod):
 			optedOut = append(optedOut, name)
-		case !injectingSince.IsZero() && pod.CreationTimestamp.After(injectingSince):
+		case !st.injectingSince.IsZero() && pod.CreationTimestamp.After(st.injectingSince):
 			missed = append(missed, name)
 		default:
 			before = append(before, name)
@@ -376,14 +521,13 @@ func programmed(p *wafv1alpha1.WAFPolicy, byKey map[types.NamespacedName]*networ
 			"Traefik pods started before Inkwall run without the engine; restart them (kubectl rollout restart) to inject it: %s",
 			strings.Join(before, ", "))
 	}
-	return metav1.ConditionTrue, ReasonProgrammed, fmt.Sprintf("%d Ingress(es) wired to the engine in Traefik", wired)
+	return metav1.ConditionTrue, ReasonProgrammed, strings.Join(wired, " and ") + " wired to the engine in Traefik"
 }
 
-func (r *Reconciler) report(ctx context.Context, policies []wafv1alpha1.WAFPolicy, byKey map[types.NamespacedName]*networkingv1.Ingress,
-	wire map[types.NamespacedName]target, traefikCRDs bool, middlewareErr map[string]string, pods []corev1.Pod, injectingSince time.Time) error {
+func (r *Reconciler) report(ctx context.Context, policies []wafv1alpha1.WAFPolicy, s *state) error {
 	for i := range policies {
 		p := &policies[i]
-		st, reason, msg := programmed(p, byKey, wire, traefikCRDs, middlewareErr, pods, injectingSince)
+		st, reason, msg := programmed(p, s)
 		first := true
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			if !first {

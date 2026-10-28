@@ -103,6 +103,7 @@ func TestWAFPolicyValidation(t *testing.T) {
   - {group: networking.k8s.io, kind: Ingress, name: shop-admin}
   - {group: gateway.networking.k8s.io, kind: HTTPRoute, name: shop-api}
   - {group: gateway.networking.k8s.io, kind: HTTPRoute, name: shop-api, sectionName: checkout}
+  - {group: traefik.io, kind: IngressRoute, name: shop}
   mode: Block
   failureMode: Closed
   timeout: 250ms
@@ -129,6 +130,9 @@ func TestWAFPolicyValidation(t *testing.T) {
 		{name: "unknown target kind", doc: policy("  targetRefs: [{kind: Service, name: shop}]\n"), wantErr: `Unsupported value: "Service"`},
 		{name: "Ingress in the Gateway API group", doc: policy("  targetRefs: [{group: gateway.networking.k8s.io, kind: Ingress, name: shop}]\n"), wantErr: "target must be a networking.k8s.io Ingress"},
 		{name: "HTTPRoute without its group", doc: policy("  targetRefs: [{kind: HTTPRoute, name: shop}]\n"), wantErr: "target must be a networking.k8s.io Ingress"},
+		{name: "IngressRoute without its group", doc: policy("  targetRefs: [{kind: IngressRoute, name: shop}]\n"), wantErr: "or a traefik.io IngressRoute"},
+		{name: "IngressRoute in another group", doc: policy("  targetRefs: [{group: networking.k8s.io, kind: IngressRoute, name: shop}]\n"), wantErr: "or a traefik.io IngressRoute"},
+		{name: "sectionName on an IngressRoute", doc: policy("  targetRefs: [{group: traefik.io, kind: IngressRoute, name: shop, sectionName: a}]\n"), wantErr: "sectionName is only allowed for an HTTPRoute"},
 		{name: "sectionName on an Ingress", doc: policy("  targetRefs: [{kind: Ingress, name: shop, sectionName: a}]\n"), wantErr: "sectionName is only allowed for an HTTPRoute"},
 		{name: "repeated target", doc: policy("  targetRefs: [{kind: Ingress, name: shop}, {group: networking.k8s.io, kind: Ingress, name: shop}]\n"), wantErr: "targetRefs must not repeat a target"},
 

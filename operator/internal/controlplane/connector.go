@@ -5,7 +5,8 @@
 // (0002 §3.4, §5.3, §7.5; api/controlplane/v1). In GitOps and Managed mode
 // the leader enrolls the cluster with a one-time token, keeps its client
 // certificate in a Secret, renews it over the primary stream, sends the
-// cluster's state (ClusterState) on change, and reports
+// cluster's state (ClusterState) on change, in Managed mode writes the
+// control plane's policy snapshots as CRDs, and reports
 // ControlPlaneConnected on the InkwallConfig. Standalone runs none of it.
 // Enforcement never depends on it.
 package controlplane
@@ -30,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -80,7 +82,8 @@ var errIdle = errors.New("idle")
 type Connector struct {
 	Client client.Client
 	// APIReader reads the kube-system Namespace (its UID identifies the
-	// cluster), which the manager doesn't cache.
+	// cluster), which the manager doesn't cache, and what a policy snapshot
+	// changes, as it is now.
 	APIReader client.Reader
 	// Namespace is the operator's: the identity Secret is there, and so must
 	// the enrollment token be.
@@ -107,6 +110,9 @@ type Connector struct {
 	// (default 5 s); StateResend, how often it sends ClusterState even
 	// unchanged (default 5 min).
 	StatePoll, StateResend time.Duration
+	// ApplyBackoff paces the retries of a policy snapshot write that
+	// failed after its dry run passed (default: about 15 s in all).
+	ApplyBackoff wait.Backoff
 
 	clusterUID string
 	// enrollKey is kept per token, so a retry after a lost Enroll response
@@ -142,6 +148,9 @@ func (c *Connector) defaults() {
 	}
 	if c.StateResend == 0 {
 		c.StateResend = 5 * time.Minute
+	}
+	if c.ApplyBackoff.Steps == 0 {
+		c.ApplyBackoff = defaultApplyBackoff
 	}
 }
 
@@ -321,6 +330,7 @@ func (c *Connector) connect(ctx context.Context, cfg *wafv1alpha1.InkwallConfig,
 		Mode:              mode,
 		ClusterUid:        uid,
 		KubernetesVersion: k8s,
+		PolicyVersion:     id.policyVersion,
 		Capabilities:      []string{wafv1alpha1.GroupVersion.String()},
 	}}}); err != nil {
 		return false, c.streamError(ctx, cfg, id, false, err)
@@ -373,12 +383,30 @@ func (c *Connector) connect(ctx context.Context, cfg *wafv1alpha1.InkwallConfig,
 	defer state.Stop()
 	var pending *ecdsa.PrivateKey
 
+	// Policy snapshots are applied beside the stream, which keeps its
+	// heartbeats meanwhile; snapshots holds the next one.
+	snapshots := make(chan *controlplanev1.PolicySnapshot, 1)
+	replies := make(chan reply)
+	go (&applier{
+		client: c.Client, reader: c.APIReader, namespace: c.Namespace,
+		applied: id.policyVersion, backoff: c.ApplyBackoff,
+	}).run(sctx, snapshots, replies)
+
 	for {
 		select {
 		case <-ctx.Done():
 			return true, nil
 		case err := <-recvErr:
 			return true, c.streamError(ctx, cfg, id, true, err)
+		case r := <-replies:
+			if r.err != nil {
+				// Partly written: reconnect, and the control plane sends the
+				// snapshot again.
+				return true, r.err
+			}
+			if err := stream.Send(r.msg); err != nil {
+				return true, c.streamError(ctx, cfg, id, true, err)
+			}
 		case <-heartbeat.C:
 			if err := stream.Send(&controlplanev1.ConnectRequest{Msg: &controlplanev1.ConnectRequest_Heartbeat{
 				Heartbeat: &controlplanev1.Heartbeat{Time: timestamppb.Now()},
@@ -436,12 +464,17 @@ func (c *Connector) connect(ctx context.Context, cfg *wafv1alpha1.InkwallConfig,
 					return true, c.streamError(ctx, cfg, id, true, err)
 				}
 			case *controlplanev1.ConnectResponse_PolicySnapshot:
-				// Managed mode isn't built yet: refuse, so nothing changes.
-				if err := stream.Send(&controlplanev1.ConnectRequest{Msg: &controlplanev1.ConnectRequest_PolicyNack{PolicyNack: &controlplanev1.PolicyNack{
-					Version: msg.PolicySnapshot.GetVersion(), Error: "this operator doesn't apply policy snapshots yet",
-				}}}); err != nil {
-					return true, c.streamError(ctx, cfg, id, true, err)
+				// A snapshot still waiting is replaced: the newer one has
+				// everything.
+				select {
+				case old := <-snapshots:
+					if err := stream.Send(nack(old.GetVersion(), fmt.Sprintf(
+						"superseded by snapshot %d before it was applied: nothing was written", msg.PolicySnapshot.GetVersion()))); err != nil {
+						return true, c.streamError(ctx, cfg, id, true, err)
+					}
+				default:
 				}
+				snapshots <- msg.PolicySnapshot
 			}
 		}
 	}

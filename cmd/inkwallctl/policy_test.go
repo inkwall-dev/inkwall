@@ -75,7 +75,7 @@ func buildBundle(t *testing.T) ([]byte, *bundlev1.SignedBundle, ed25519.PublicKe
 	in.CheckRules = coraza.CheckUserRules
 	res := resolver.Resolve(in)
 	next, _, err := bundle.Next(nil, &bundlev1.Bundle{ClusterId: "test", Policies: res.Policies, RuleSets: res.RuleSets}, 6,
-		time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC))
+		time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC), false)
 	if err != nil {
 		t.Fatal(err)
 	}

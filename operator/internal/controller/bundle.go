@@ -33,7 +33,11 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/bundle"
+	"github.com/inkwall-dev/inkwall/operator/internal/crdwatch"
+	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
+	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
+	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
@@ -45,6 +49,7 @@ import (
 // +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies;wafrulesets;clusterwafrulesets;inkwallconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies/status;wafrulesets/status;clusterwafrulesets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch
+// +kubebuilder:rbac:groups=traefik.io,resources=ingressroutes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=namespaces,resourceNames=kube-system,verbs=get
 
@@ -55,6 +60,13 @@ const (
 	DefaultDebounce = time.Second
 	// resync rebuilds periodically, in case an event was missed.
 	resync = 10 * time.Minute
+	// DefaultRotationGrace is the least time each phase of a key rotation
+	// lasts: the kubelet updates a mounted ConfigMap within a minute or two.
+	DefaultRotationGrace = time.Minute
+	// DefaultEngineStale is the distribution Reporter's default Stale.
+	DefaultEngineStale = 30 * time.Second
+	// rotationPoll checks a rotation's progress.
+	rotationPoll = 5 * time.Second
 )
 
 // clusterRequest is the single work item: every change rebuilds the whole
@@ -71,8 +83,23 @@ type BundleReconciler struct {
 	Namespace string
 	Debounce  time.Duration
 	Now       func() time.Time
+	// EngineStale is how old a replica's engine report may be (the
+	// distribution Reporter's Stale); a new leader waits this long before
+	// a key rotation trusts the reports to list every engine. 0:
+	// DefaultEngineStale.
+	EngineStale time.Duration
+	// RotationGrace is the least time each phase of a key rotation lasts;
+	// 0: DefaultRotationGrace.
+	RotationGrace time.Duration
+	// IngressRoutes watches Traefik's IngressRoutes once their CRD is
+	// installed; nil: they are only read at each build.
+	IngressRoutes *crdwatch.Kind
 
-	signer      *bundle.Signer
+	// keys is the keyring last read or written, to recreate the signing
+	// key Secret if it is deleted: engines trust these keys.
+	keys        *bundle.Keyring
+	started     time.Time
+	lastWait    string
 	clusterID   string
 	lastVersion uint64
 	// checked caches CheckUserRules results by rule text: compiling with
@@ -87,6 +114,13 @@ func (r *BundleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if r.Now == nil {
 		r.Now = time.Now
+	}
+	if r.RotationGrace == 0 {
+		r.RotationGrace = DefaultRotationGrace
+	}
+	if r.EngineStale == 0 {
+		// Every report would be stale: no engine would hold a rotation.
+		r.EngineStale = DefaultEngineStale
 	}
 	r.checked = map[[sha256.Size]byte]error{}
 
@@ -106,33 +140,47 @@ func (r *BundleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	// Status writes, ours included, don't change the generation.
 	spec := builder.WithPredicates(predicate.GenerationChangedPredicate{})
-	bundleSecret := builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
-		return o.GetNamespace() == r.Namespace && o.GetName() == bundle.BundleSecret
+	// The rotation request is an annotation.
+	config := builder.WithPredicates(predicate.Or(predicate.GenerationChangedPredicate{}, predicate.AnnotationChangedPredicate{}))
+	secrets := builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
+		return o.GetNamespace() == r.Namespace && (o.GetName() == bundle.BundleSecret || o.GetName() == bundle.SigningKeySecret)
 	}))
 	// One build at startup, even in an empty cluster: engines need a bundle.
 	start := make(chan event.GenericEvent, 1)
 	start <- event.GenericEvent{Object: &corev1.Secret{}}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	c, err := ctrl.NewControllerManagedBy(mgr).
 		Named("bundle").
 		Watches(&wafv1alpha1.WAFPolicy{}, enqueue, spec).
 		Watches(&wafv1alpha1.WAFRuleSet{}, enqueue, spec).
 		Watches(&wafv1alpha1.ClusterWAFRuleSet{}, enqueue, spec).
-		Watches(&wafv1alpha1.InkwallConfig{}, enqueue, spec).
+		Watches(&wafv1alpha1.InkwallConfig{}, enqueue, config).
 		Watches(&networkingv1.Ingress{}, enqueue, spec).
 		// The manager only caches ConfigMaps labeled resolver.RulesLabel.
 		Watches(&corev1.ConfigMap{}, enqueue).
-		// Recreate the bundle Secret if it is deleted or edited.
-		Watches(&corev1.Secret{}, enqueue, bundleSecret).
+		// Recreate the bundle and signing key Secrets if they are deleted
+		// or edited.
+		Watches(&corev1.Secret{}, enqueue, secrets).
 		WatchesRawSource(source.Channel(start, enqueue)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
-		Complete(r)
+		Build(r)
+	if err != nil {
+		return err
+	}
+	if r.IngressRoutes != nil {
+		r.IngressRoutes.Add(c, enqueue, predicate.GenerationChangedPredicate{})
+	}
+	return nil
 }
 
 // Reconcile rebuilds the bundle.
 func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
 	logger := log.FromContext(ctx)
 	if err := r.init(ctx); err != nil {
+		return reconcile.Result{}, err
+	}
+	keys, keySecret, err := r.loadKeys(ctx)
+	if err != nil {
 		return reconcile.Result{}, err
 	}
 
@@ -151,17 +199,21 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	}
 	in.Policies, in.Ingresses, in.RuleSets, in.ClusterRuleSets, in.ConfigMaps =
 		policies.Items, ingresses.Items, ruleSets.Items, clusterRuleSets.Items, configMaps.Items
+	// An error here is not "no IngressRoutes": building without them would
+	// drop their protection.
+	routes, _, err := wiring.IngressRoutes(ctx, r.Client)
+	if err != nil {
+		return reconcile.Result{}, fmt.Errorf("list IngressRoutes: %w", err)
+	}
+	in.IngressRoutes = routes
 
-	var cfg wafv1alpha1.InkwallConfig
-	suspended := false
-	switch err := r.Client.Get(ctx, types.NamespacedName{Name: "default"}, &cfg); {
-	case err == nil:
-		suspended = cfg.Spec.Suspend
-	case !apierrors.IsNotFound(err):
+	cfg, err := r.config(ctx)
+	if err != nil {
 		return reconcile.Result{}, err
 	}
+	suspended := cfg != nil && cfg.Spec.Suspend
 
-	current, err := bundle.Load(ctx, r.APIReader, r.Namespace)
+	current, currentKey, err := bundle.Load(ctx, r.APIReader, r.Namespace)
 	if err != nil {
 		// An unreadable bundle can't be continued safely: report, don't
 		// overwrite it blindly.
@@ -169,22 +221,31 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	}
 	in.Previous = current
 
+	if keys, err = r.rotate(ctx, keys, keySecret, cfg, current.GetVersion(), currentKey); err != nil {
+		return reconcile.Result{}, err
+	}
+	signer := keys.Active
+
 	res := resolver.Resolve(in)
+	// A bundle signed with another key than the active one (it just
+	// rotated) is signed again, as a new version: engines then cache a
+	// bundle the active key signed.
+	resign := current != nil && currentKey != signer.KeyID()
 	next, changed, err := bundle.Next(current, &bundlev1.Bundle{
 		ClusterId: r.clusterID,
 		Policies:  res.Policies,
 		RuleSets:  res.RuleSets,
 		Suspended: suspended,
-	}, r.lastVersion, r.Now())
+	}, r.lastVersion, r.Now(), resign)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
 	if changed {
-		signed, err := r.signer.Sign(next)
+		signed, err := signer.Sign(next)
 		if err != nil {
 			return reconcile.Result{}, err
 		}
-		if err := bundle.Store(ctx, r.Client, r.Namespace, next, signed, r.signer.Public()); err != nil {
+		if err := bundle.Store(ctx, r.Client, r.Namespace, next, signed, signer.Public()); err != nil {
 			if errors.Is(err, bundle.ErrTooLarge) {
 				// Retrying won't help until the policy shrinks; keep the
 				// current bundle.
@@ -195,22 +256,122 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 		}
 		r.lastVersion = next.GetVersion()
 		logger.Info("bundle published", "version", next.GetVersion(), "policies", len(next.GetPolicies()),
-			"rule_sets", len(next.GetRuleSets()), "suspended", suspended)
+			"rule_sets", len(next.GetRuleSets()), "suspended", suspended, "key", signer.KeyID())
 	}
 
 	if err := r.writeStatus(ctx, res, next.GetVersion(), policies.Items, ruleSets.Items, clusterRuleSets.Items); err != nil {
 		return reconcile.Result{}, err
 	}
+	if keys.Phase() != bundle.PhaseIdle {
+		return reconcile.Result{RequeueAfter: min(rotationPoll, r.RotationGrace)}, nil
+	}
 	return reconcile.Result{RequeueAfter: resync}, nil
 }
 
-func (r *BundleReconciler) init(ctx context.Context) error {
-	if r.signer == nil {
-		s, err := bundle.LoadOrCreateSigner(ctx, r.Client, r.Namespace)
-		if err != nil {
-			return err
+// config reads the InkwallConfig; nil if there is none.
+func (r *BundleReconciler) config(ctx context.Context) (*wafv1alpha1.InkwallConfig, error) {
+	var cfg wafv1alpha1.InkwallConfig
+	err := r.Client.Get(ctx, types.NamespacedName{Name: "default"}, &cfg)
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// loadKeys reads the keyring, uncached: a stale copy would undo a
+// rotation step. A missing signing key Secret is created: with a new key
+// on first use, and with the keys in memory if it was deleted, so engines
+// keep trusting them.
+func (r *BundleReconciler) loadKeys(ctx context.Context) (*bundle.Keyring, *corev1.Secret, error) {
+	k, s, err := bundle.LoadKeyring(ctx, r.APIReader, r.Namespace)
+	if err != nil || s != nil {
+		if k != nil {
+			r.keys = k
 		}
-		r.signer = s
+		return k, s, err
+	}
+	k = r.keys
+	if k == nil {
+		if k, err = bundle.NewKeyring(r.Now()); err != nil {
+			return nil, nil, err
+		}
+	}
+	if err := bundle.SaveKeyring(ctx, r.Client, r.Namespace, k, nil); err != nil {
+		return nil, nil, fmt.Errorf("create the signing key Secret: %w", err)
+	}
+	log.FromContext(ctx).Info("signing key Secret created", "key", k.Active.KeyID(), "trusted", k.TrustedIDs())
+	k, s, err = bundle.LoadKeyring(ctx, r.APIReader, r.Namespace)
+	if err == nil && s == nil {
+		err = errors.New("the signing key Secret is gone again")
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	r.keys = k
+	return k, s, nil
+}
+
+// rotate takes the next step of a signing key rotation, if one is
+// requested, due or in progress, and returns the keyring to sign with.
+func (r *BundleReconciler) rotate(ctx context.Context, k *bundle.Keyring, s *corev1.Secret, cfg *wafv1alpha1.InkwallConfig,
+	version uint64, keyID string) (*bundle.Keyring, error) {
+	now := r.Now()
+	in := bundle.RotationInput{Now: now, Grace: r.RotationGrace, BundleVersion: version, BundleKeyID: keyID}
+	if cfg != nil {
+		in.Request = cfg.Annotations[wafv1alpha1.RotateSigningKeyAnnotation]
+		if iv := cfg.Spec.SigningKey.RotationInterval; iv != nil {
+			in.Interval = iv.Duration
+		}
+	}
+	if k.Phase() != bundle.PhaseIdle {
+		engines, err := distribution.ReadEngines(ctx, r.APIReader, r.Namespace, r.EngineStale, now)
+		if err != nil {
+			return nil, fmt.Errorf("read the engine reports: %w", err)
+		}
+		for _, e := range engines {
+			name := e.ID
+			if e.PodName != "" {
+				name = e.PodNamespace + "/" + e.PodName
+			}
+			in.Engines = append(in.Engines, bundle.EngineKeys{Name: name, TrustedKeys: e.TrustedKeys, Applied: e.Applied})
+		}
+		in.EnginesKnown = now.Sub(r.started) >= r.EngineStale
+	}
+	step, err := bundle.Rotate(k, in)
+	if err != nil {
+		return nil, err
+	}
+	logger := log.FromContext(ctx)
+	if step.Waiting != r.lastWait {
+		r.lastWait = step.Waiting
+		if step.Waiting != "" {
+			logger.Info("signing key rotation: " + step.Waiting)
+		}
+	}
+	if !step.Changed {
+		return k, nil
+	}
+	if err := bundle.SaveKeyring(ctx, r.Client, r.Namespace, step.Keyring, s); err != nil {
+		return nil, fmt.Errorf("save the signing key Secret: %w", err)
+	}
+	r.keys = step.Keyring
+	switch step.Event {
+	case "started":
+		logger.Info("signing key rotation started: new key published", "key", step.Keyring.Next.KeyID(), "signing", step.Keyring.Active.KeyID())
+	case "switched":
+		logger.Info("signing key rotation: switched to the new key", "key", step.Keyring.Active.KeyID(), "previous", bundlekey.ID(step.Keyring.Previous))
+	case "retired":
+		logger.Info("signing key rotation done: previous key retired", "key", step.Keyring.Active.KeyID())
+	}
+	return step.Keyring, nil
+}
+
+func (r *BundleReconciler) init(ctx context.Context) error {
+	if r.started.IsZero() {
+		r.started = r.Now()
 	}
 	if r.clusterID == "" {
 		var ns corev1.Namespace
