@@ -188,7 +188,7 @@ waits on the network; small over-admission accepted.
 
 | Layer | What | State |
 |---|---|---|
-| Micro | `make bench-compare`, CI job `bench`: base and head interleaved 8×; `hack/benchgate` fails on a significant (p < 0.05) change > 5% in `sec/op`, `B/op`, `allocs/op` | Built |
+| Micro | `make bench-compare`, CI job `bench`: packages whose test binary is unchanged are skipped, the rest run base and head interleaved 8×; `hack/benchgate` flags a significant (p < 0.05) change > 5% in `sec/op`, `B/op`, `allocs/op`, and the gate fails only if a re-run of the flagged benchmarks shows it again | Built |
 | Engine | `inkwallctl bench`: fixed corpus (`cmd/inkwallctl/corpus.go`), closed-loop or `--rate`, latency from scheduled time; any wrong verdict, timeout or overload fails | Built |
 | End-to-end on kind | k6 per proxy with and without Inkwall; the delta is what §3 means | Not yet |
 | Profiling | `--pprof` on the admin listener; flamegraphs in CI, Pyroscope | Endpoints built |
