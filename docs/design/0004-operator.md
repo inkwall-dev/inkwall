@@ -9,8 +9,8 @@ The operator injects the engine next to each proxy, wires the proxy to it, and p
 bundles. CRD shapes: 0002 §4.2.
 
 **Built (v0.1.0):** Traefik with `Ingress` targets (ForwardAuth). **Built since:** Traefik
-`IngressRoute` targets. **Not yet:** other proxies, `HTTPRoute` targets, unwiring on
-`InkwallConfig` delete (O5), GitOps/Managed modes.
+`IngressRoute` targets, the `waf.inkwall.dev/unwire` finalizer and unwiring with injection off
+(§5). **Not yet:** other proxies, `HTTPRoute` targets, GitOps/Managed modes.
 
 ## 1. Goals and non-goals
 
@@ -75,7 +75,7 @@ Cheapest first:
 | Condition | True when | False reasons |
 |---|---|---|
 | `Accepted` | Spec valid, references resolve | `InvalidRef`, `Conflict`, `RuleCompileError` |
-| `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `NoTargets` |
+| `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `NoTargets`, `InjectionDisabled` |
 | `Enforced` | Every serving engine ACKed a bundle with this generation | `EnginesBehind` (`3/6`), `EngineNack`, `NoEngines`, `NotInBundle` |
 | `Ready` | The three above are True | first failing condition's reason |
 
@@ -182,8 +182,9 @@ longer rendered.
   `forwardBody: true`, `maxBodySize` 10 MiB = largest `body.maxBytes`), removed when unused. A
   same-named one the operator didn't create is left alone (`WiringFailed`).
 - The annotation gets the operator's Middleware first, user entries kept in order;
-  `waf.inkwall.dev/wired` records it; unprotecting removes only that entry. Level-based, no
-  finalizers.
+  `waf.inkwall.dev/wired` records it; unprotecting removes only that entry. Level-based; the
+  `waf.inkwall.dev/unwire` finalizer only makes a policy deleted while the operator is down wait
+  for it (§5).
 - An IngressRoute gets `{name: inkwall-waf}` first in every route's `middlewares`, the user's kept
   in order, and `waf.inkwall.dev/wired: inkwall-waf`; unprotecting removes the entries naming it in
   the route's namespace (a same-named one elsewhere is the user's), and an emptied list. The
@@ -191,6 +192,10 @@ longer rendered.
   so it works with `allowCrossNamespace` off (the default).
   `spec.routes` is one list to a merge patch, so the patch carries the `resourceVersion` and a
   conflict retries.
+- Wired only while a Traefik pod the webhook selects runs, with injection on: otherwise new
+  Traefik pods would get no engine to call, so everything is unwired (`SidecarMissing`, or
+  `InjectionDisabled`, §5). A Traefik scaled to 0 is wired again when its first injected pod is
+  created, a second after.
 - Works without Traefik's CRDs: no wiring, no crash. The leader looks for the IngressRoute CRD every
   30 s and, once installed, the bundle builder and the wiring watch IngressRoutes
   (`operator/internal/crdwatch`); the wiring's resync (1 min) notices a Middleware CRD installed
@@ -198,8 +203,9 @@ longer rendered.
 - `Programmed=True` when all the policy's Traefik Ingresses and IngressRoutes are wired and every
   running Traefik pod has the engine. Else `ControllerUnsupported` (other controller or kind),
   `WiringFailed` (no Traefik CRDs, name clash, an IngressRoute that can't be written),
-  `PendingRestart` (pods older than the webhook, listed), `SidecarMissing` (no Traefik pod, or pods
-  without the engine: operator down in detect mode or opted out, listed), `NoTargets`.
+  `PendingRestart` (pods older than the webhook, listed), `SidecarMissing` (no Traefik pod
+  selected, or pods without the engine: operator down in detect mode or opted out, listed),
+  `NoTargets`, `InjectionDisabled`.
 - **Not yet:** `HTTPRoute` targets, `docs/gitops.md`, matching engines to the pods serving a
   policy's class (all engines count for `Enforced`), IngressRoutes nested with `parentRefs`. Traefik
   attachment default is open (§12).
@@ -377,8 +383,32 @@ user's) and delete the Middlewares it created. `WAFPolicy` objects stay; sidecar
 pods restart. Tested on kind: after the uninstall, a restarted Traefik serves the routes (an
 Ingress and an IngressRoute) without the engine.
 
-**Not yet (O5):** a `waf.inkwall.dev/unwire` finalizer on `WAFPolicy`, and the same unwiring on
-`InkwallConfig` delete.
+**Built since (O5)** (`operator/internal/wiring`):
+
+- **Finalizer `waf.inkwall.dev/unwire`** on every `WAFPolicy`, added by the wiring controller (on
+  the leader) before its routes are wired; a policy it can't add it to yet is wired anyway (unwiring
+  would drop its protection), and retried. A deleted policy is no longer wired; the finalizer goes
+  once none of its targets is still wired for it alone, read from the API server (the cache may lag
+  a wiring just done). A route that can't be written holds it, retried, and keeps its namespace's
+  Middleware; a target that doesn't exist, or whose CRD doesn't, holds nothing; a target another
+  policy protects stays wired. Deleted while the operator is down, the policy, its routes' wiring
+  and enforcement stay until it is back. Patches carry the `resourceVersion`, so another
+  controller's finalizer is never dropped.
+- **Injection off** (`--inject=false`, `injection.enabled=false`, which removes the Pod webhook):
+  the wiring controller still runs and unwires every route it wired, deletes its Middlewares,
+  removes the finalizer from every policy and reports `Programmed=False` (`InjectionDisabled`).
+  Likewise, no Traefik pod selected (§4.4): an `InkwallConfig` selector that doesn't match Traefik's
+  pods, or deleted when they don't have the default labels. Deleting an `InkwallConfig` doesn't
+  unwire by itself: without one the operator uses the defaults, and keeps wiring the routes of the
+  pods they still select.
+- **Uninstall:** the hook runs with injection off too. It also sets the `WAFPolicy` webhook to
+  `Ignore` (no replica answers it, and it would refuse the update) and removes the finalizer from
+  every policy, so deleting one, or its namespace, never waits for an operator that is gone.
+  Without the hook (`--no-hooks`, `uninstall.unwire=false`) the chart README says how to.
+- Tested on kind: a policy deleted while the operator is scaled to 0 stays, wired, until it is
+  back; `helm upgrade --set injection.enabled=false` unwires, and Traefik serves the routes
+  uninspected, also from a new pod; an `InkwallConfig` selecting other pods unwires, deleting it
+  wires again.
 
 ## 6. Failure modes
 
@@ -405,6 +435,7 @@ Least privilege. Built rules ([`role.yaml`](../../operator/config/rbac/role.yaml
 | Resources | Verbs | Why |
 |---|---|---|
 | `waf.inkwall.dev/*` | read; update status | Own CRDs |
+| `wafpolicies` | update, patch | The `waf.inkwall.dev/unwire` finalizer (§5) |
 | `wafpolicies`, `wafrulesets`, `clusterwafrulesets` | create, update, delete | Managed mode (§4.9); the webhook keeps others off them |
 | `ingressclasses`, `ingresses`, `pods` | read | Resolution, injection checks |
 | `ingresses` | patch | Traefik annotation |

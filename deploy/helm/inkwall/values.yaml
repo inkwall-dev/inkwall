@@ -50,6 +50,8 @@ injection:
   # operator makes it fail closed: proxy pods can't start without the
   # engine; running ones keep serving.
   # Pods that already run are injected when they restart.
+  # false: no engine is injected, and the operator unwires every route it
+  # wired (new proxy pods have no engine to call), serving them uninspected.
   enabled: true
 
 controlPlane:
@@ -76,8 +78,11 @@ uninstall:
   # On helm uninstall, stop the operator and remove Inkwall's Middleware from
   # the routes it wired before anything else is deleted (a pre-delete hook),
   # so the routes keep working, uninspected. WAFPolicy objects are kept.
-  # Without it, Traefik pods started after the uninstall fail every
-  # protected route: they have no engine, but the routes still call it.
+  # It also removes the operator's finalizer from the WAFPolicies, so
+  # deleting them or their namespace doesn't wait for an operator that is
+  # gone. Without the hook, Traefik pods started after the uninstall fail
+  # every protected route (they have no engine, but the routes still call
+  # it), and the policies keep the finalizer: see the README.
   unwire: true
 
 serviceAccount:

@@ -29,6 +29,9 @@ import (
 // below are registered in; the certificate rotator injects its CA bundle.
 const ValidatingConfigName = "inkwall-operator-validating"
 
+// PolicyWebhookName is the WAFPolicy webhook in ValidatingConfigName.
+const PolicyWebhookName = "wafpolicies.waf.inkwall.dev"
+
 // The webhooks only see the WAF kinds, never other objects, so failing
 // closed can't block anything else in the cluster. A rule that slipped in
 // while the webhook was down would only fail later, in every engine.
