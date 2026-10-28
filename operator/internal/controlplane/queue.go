@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/protobuf/proto"
 
 	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
@@ -35,10 +36,13 @@ type queue struct {
 	next    uint64 // the sequence of the next batch
 	batches []queued
 	bytes   int64
+	count   uint64 // the events in batches
 	// dropped counts the events dropped since the last batch, carried by
 	// the next one.
 	dropped uint64
 	changed chan struct{}
+	// gauge, when set, follows count.
+	gauge prometheus.Gauge
 }
 
 type queued struct {
@@ -105,6 +109,7 @@ func openQueue(dir string, maxBytes int64) (*queue, error) {
 		}
 		q.batches = append(q.batches, queued{seq: seq, size: int64(len(raw)), batch: &b})
 		q.bytes += int64(len(raw))
+		q.count += uint64(len(b.Events))
 		q.next = max(q.next, seq+1)
 	}
 	slices.SortFunc(q.batches, func(a, b queued) int { return compare(a.seq, b.seq) })
@@ -143,6 +148,8 @@ func newBufferID() string {
 func (q *queue) add(in *eventsv1.EventBatch) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	// Old batches may go even when this one doesn't make it.
+	defer q.report()
 	b := &eventsv1.EventBatch{Events: in.GetEvents(), Dropped: in.GetDropped() + q.dropped}
 	raw, err := proto.Marshal(b)
 	if err != nil {
@@ -158,6 +165,7 @@ func (q *queue) add(in *eventsv1.EventBatch) error {
 		old := q.batches[0]
 		q.batches = q.batches[1:]
 		q.bytes -= old.size
+		q.count -= uint64(len(old.batch.GetEvents()))
 		// Its own dropped count goes on, with its events.
 		b.Dropped += uint64(len(old.batch.GetEvents())) + old.batch.GetDropped()
 		q.remove(old.seq)
@@ -180,11 +188,27 @@ func (q *queue) add(in *eventsv1.EventBatch) error {
 	q.dropped = 0
 	q.batches = append(q.batches, queued{seq: seq, size: size, batch: b})
 	q.bytes += size
+	q.count += uint64(len(b.Events))
 	select {
 	case q.changed <- struct{}{}:
 	default:
 	}
 	return nil
+}
+
+// track makes g follow the number of events waiting.
+func (q *queue) track(g prometheus.Gauge) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.gauge = g
+	q.report()
+}
+
+// report sets the gauge, with q.mu held.
+func (q *queue) report() {
+	if q.gauge != nil {
+		q.gauge.Set(float64(q.count))
+	}
 }
 
 func (q *queue) write(seq uint64, raw []byte) error {
@@ -241,10 +265,12 @@ func (q *queue) ack(seq uint64) {
 			break
 		}
 		q.bytes -= b.size
+		q.count -= uint64(len(b.batch.GetEvents()))
 		q.remove(b.seq)
 		n++
 	}
 	q.batches = q.batches[n:]
+	q.report()
 }
 
 // clear drops everything, when the control plane stops accepting events.
@@ -254,16 +280,13 @@ func (q *queue) clear() {
 	for _, b := range q.batches {
 		q.remove(b.seq)
 	}
-	q.batches, q.bytes, q.dropped = nil, 0, 0
+	q.batches, q.bytes, q.count, q.dropped = nil, 0, 0, 0
+	q.report()
 }
 
 // events counts the events waiting.
 func (q *queue) events() uint64 {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	var n uint64
-	for _, b := range q.batches {
-		n += uint64(len(b.batch.GetEvents()))
-	}
-	return n
+	return q.count
 }

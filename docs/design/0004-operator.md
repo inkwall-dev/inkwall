@@ -285,7 +285,10 @@ the token.
 `Resync` and every 5 min, reading only. Every replica forwards its engines' security events on
 its own events stream while the control plane accepts them, from a bounded disk buffer
 (`--events-dir`, an `emptyDir`; when full, the oldest are dropped and counted), resending what
-wasn't acknowledged after a reconnect or a restart. **Not yet:** applying snapshots (Managed).
+wasn't acknowledged after a reconnect or a restart. `inkwall_operator_events_buffered` follows the
+buffer, outages included. The events stream reconnects with jittered backoff bounded at 10 s (the
+leader's: 1 min), so the backlog drains soon after an outage. **Not yet:** applying snapshots
+(Managed).
 
 ## 5. Uninstall and disable
 
