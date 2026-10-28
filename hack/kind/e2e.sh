@@ -131,6 +131,8 @@ app_trust() {
   "${KUBECTL[@]}" -n "$OPERATOR_NS" get secret inkwall-operator-webhook-tls -o jsonpath='{.data.ca\.crt}' | base64 -d >"$trust/ca.crt"
   "${KUBECTL[@]}" -n "$OPERATOR_NS" get secret inkwall-bundle-signing-key -o jsonpath='{.data.ed25519\.pub}' | base64 -d >"$trust/ed25519.pub"
   "${KUBECTL[@]}" -n "$OPERATOR_NS" get secret inkwall-bundle-signing-key -o jsonpath='{.data.trusted-keys\.pub}' | base64 -d >"$trust/trusted-keys.pub"
+  # A Secret written before key rotation has one key, as the operator assumes.
+  if [[ ! -s $trust/trusted-keys.pub ]]; then cp "$trust/ed25519.pub" "$trust/trusted-keys.pub"; fi
   "${KUBECTL[@]}" -n "$NS" create configmap inkwall-trust --from-file="$trust/ca.crt" --from-file="$trust/ed25519.pub" \
     --from-file="$trust/trusted-keys.pub" --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f - >/dev/null
 }
@@ -363,6 +365,65 @@ events_received() {
   awk -v t="$total" 'BEGIN { exit !(t >= 1) }'
 }
 eventually "the operator received the engine's security events" events_received
+
+# The client IP behind a load balancer (#120): Traefik's web entry point
+# takes the PROXY protocol from the pod network only (traefik-e2e-values.yaml).
+# A pod there stands in for the load balancer; the port-forward, from
+# 127.0.0.1, is an untrusted source. Each request carries its own request ID,
+# to find its security event in the engine's log.
+echo "== client IP through the PROXY protocol"
+LB_IP=203.0.113.50 # documentation range (RFC 5737)
+"${KUBECTL[@]}" apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lb
+  namespace: $NS
+spec:
+  containers:
+    - name: curl
+      image: curlimages/curl:8.11.1 # --haproxy-clientip needs curl 8.2+
+      command: ["sleep", "3600"]
+YAML
+"${KUBECTL[@]}" -n "$NS" wait --for=condition=Ready pod/lb --timeout=120s >/dev/null
+pp_id=e2e-pp-$RANDOM
+# lb_attack ID [CURL_ARGS...]: the attack through Traefik's Service, sent
+# from the load balancer's pod.
+lb_attack() {
+  local id=$1
+  shift
+  "${KUBECTL[@]}" -n "$NS" exec lb -- curl -s -o /dev/null -w '%{http_code}' -H "Host: $TRAEFIK_HOST" \
+    -H "X-Request-Id: $id" "$@" "http://traefik-e2e.$TRAEFIK_NS.svc$SQLI" || true
+}
+# event_ip ID: the client IP of the security event for request ID.
+event_ip() {
+  "${KUBECTL[@]}" -n "$TRAEFIK_NS" logs deployment/traefik-e2e -c inkwall-engine |
+    grep -F '"msg":"security event"' | grep -F "\"request_id\":\"$1\"" |
+    sed -n 's/.*"client_ip":"\([^"]*\)".*/\1/p' | tail -1
+}
+event_ip_is() { [[ $(event_ip "$1") == "$2" ]]; }
+# pp_check DESCRIPTION ID WANT: the event for ID has client IP WANT.
+pp_check() {
+  eventually "$1" event_ip_is "$2" "$3"
+  event_ip_is "$2" "$3" || echo "      client IP: '$(event_ip "$2")', want $3"
+}
+is_403() { [[ $1 == 403 ]]; }
+check "a PROXY header from the load balancer: the attack is blocked" \
+  is_403 "$(lb_attack "$pp_id-a" --haproxy-protocol --haproxy-clientip "$LB_IP")"
+pp_check "its security event has the PROXY header's client IP" "$pp_id-a" "$LB_IP"
+check "with a client-sent X-Forwarded-For too: blocked" \
+  is_403 "$(lb_attack "$pp_id-b" --haproxy-protocol --haproxy-clientip "$LB_IP" -H 'X-Forwarded-For: 6.6.6.6')"
+pp_check "the client's X-Forwarded-For doesn't change the client IP" "$pp_id-b" "$LB_IP"
+check "no PROXY header from the load balancer: blocked" is_403 "$(lb_attack "$pp_id-c")"
+lb_ip=$("${KUBECTL[@]}" -n "$NS" get pod lb -o jsonpath='{.status.podIP}')
+pp_check "its event has the load balancer's own IP" "$pp_id-c" "$lb_ip"
+# From the port-forward, outside trustedIPs: Traefik reads the header but
+# ignores its address.
+untrusted=$(curl -s -o /dev/null -w '%{http_code}' --haproxy-protocol --haproxy-clientip "$LB_IP" \
+  -H "Host: $TRAEFIK_HOST" -H "X-Request-Id: $pp_id-d" "http://127.0.0.1:$TRAEFIK_PORT$SQLI" || true)
+check "a PROXY header from an untrusted source: blocked" is_403 "$untrusted"
+pp_check "its address is ignored: the event has the real peer (127.0.0.1)" "$pp_id-d" 127.0.0.1
+"${KUBECTL[@]}" -n "$NS" delete pod lb --wait=false >/dev/null
 
 # Signing key rotation (#41), requested on the InkwallConfig with two
 # engines connected: Traefik's, whose trust ConfigMap the operator keeps,

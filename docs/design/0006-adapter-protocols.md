@@ -43,6 +43,8 @@ listeners in `pkg/adapters/<name>` that convert the protocol's message to `reque
 Traefik middleware must set:
 
 - `trustForwardHeader: false`, else the engine inspects a client-supplied `X-Forwarded-Uri`.
+  Behind a load balancer the client IP then comes from the PROXY protocol on Traefik's entry
+  point, not from the LB's `X-Forwarded-For` ([client IP](../client-ip.md)).
 - `forwardBody: true` with `maxBodySize` above `--max-body-bytes`, else bodies pass uninspected.
 - `authResponseHeaders: X-Request-Id` to pass the request ID upstream.
 
