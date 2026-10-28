@@ -8,7 +8,11 @@
 //
 // An admin listener serves the CA (/ca.crt), for the operator's trust
 // bundle, and what the stub saw (/stats, JSON: calls, Hellos, heartbeats,
-// and a summary of the newest ClusterState), for the test's checks.
+// policy acks and nacks, and a summary of the newest ClusterState), for the
+// test's checks. POST /snapshot sends a PolicySnapshot (Managed mode): the
+// body is a YAML or JSON list of WAFPolicy, WAFRuleSet and
+// ClusterWAFRuleSet objects ([] for none), and ?version=N its version
+// (default: one more than the last).
 package main
 
 import (
@@ -17,14 +21,19 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"sigs.k8s.io/yaml"
+
+	controlplanev1 "github.com/inkwall-dev/inkwall/api/controlplane/v1"
 	"github.com/inkwall-dev/inkwall/operator/test/fakecontrolplane"
 )
 
@@ -54,13 +63,19 @@ type stats struct {
 	Events       int    `json:"events"`
 	EventUploads int    `json:"eventUploads"`
 	EventsDrop   uint64 `json:"eventsDropped"`
+	// Acks are the snapshot versions applied; Nacks, those refused, as
+	// "version: error; Kind namespace/name: error...".
+	Acks  []uint64 `json:"acks"`
+	Nacks []string `json:"nacks"`
 	// LastState summarizes the newest ClusterState.
 	LastState *state `json:"lastState,omitempty"`
 }
 
 type state struct {
-	// Objects are "Kind namespace/name".
-	Objects []string `json:"objects"`
+	// Objects are "Kind namespace/name"; Enforced, those whose Enforced
+	// condition is True.
+	Objects  []string `json:"objects"`
+	Enforced []string `json:"enforced"`
 	// Pods and PodsWithEngine are Traefik's.
 	Pods           uint32 `json:"pods"`
 	PodsWithEngine uint32 `json:"podsWithEngine"`
@@ -103,11 +118,25 @@ func run() error {
 		}
 		out.States = len(st.States)
 		out.Events, out.EventUploads, out.EventsDrop = st.Events, st.EventUploads, st.EventsDropped
+		out.Acks, out.Nacks = append([]uint64{}, st.Acks...), []string{}
+		for _, n := range st.Nacks {
+			msg := fmt.Sprintf("%d: %s", n.GetVersion(), n.GetError())
+			for _, o := range n.GetObjects() {
+				msg += fmt.Sprintf("; %s %s/%s: %s", o.GetKind(), o.GetNamespace(), o.GetName(), o.GetError())
+			}
+			out.Nacks = append(out.Nacks, msg)
+		}
 		if n := len(st.States); n > 0 {
 			last := st.States[n-1]
-			ls := &state{Objects: []string{}, Engines: len(last.GetEngines()), BundleVersion: last.GetBundleVersion()}
+			ls := &state{Objects: []string{}, Enforced: []string{}, Engines: len(last.GetEngines()), BundleVersion: last.GetBundleVersion()}
 			for _, o := range last.GetObjects() {
-				ls.Objects = append(ls.Objects, fmt.Sprintf("%s %s/%s", o.GetKind(), o.GetNamespace(), o.GetName()))
+				name := fmt.Sprintf("%s %s/%s", o.GetKind(), o.GetNamespace(), o.GetName())
+				ls.Objects = append(ls.Objects, name)
+				for _, c := range o.GetConditions() {
+					if c.GetType() == "Enforced" && c.GetStatus() == "True" {
+						ls.Enforced = append(ls.Enforced, name)
+					}
+				}
 			}
 			for _, in := range last.GetIntegrations() {
 				ls.Pods += in.GetPods()
@@ -117,6 +146,23 @@ func run() error {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
+	})
+	mux.HandleFunc("POST /snapshot", func(w http.ResponseWriter, r *http.Request) {
+		snap, err := readSnapshot(r, srv.SnapshotVersion()+1)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		sent, err := srv.SendSnapshot(snap)
+		switch {
+		case err != nil:
+			http.Error(w, err.Error(), http.StatusBadGateway)
+		case !sent:
+			http.Error(w, fmt.Sprintf("snapshot %d kept, but no primary stream is open: sent when the cluster connects", snap.GetVersion()), http.StatusAccepted)
+		default:
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = io.WriteString(w, "snapshot "+strconv.FormatUint(snap.GetVersion(), 10)+" sent\n")
+		}
 	})
 	hs := &http.Server{Addr: *admin, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	errc := make(chan error, 1)
@@ -135,4 +181,46 @@ func run() error {
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return hs.Shutdown(sctx)
+}
+
+// readSnapshot reads a PolicySnapshot from a YAML or JSON list of objects,
+// with ?version=N or next as its version.
+func readSnapshot(r *http.Request, next uint64) (*controlplanev1.PolicySnapshot, error) {
+	version := next
+	if v := r.URL.Query().Get("version"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("version: %w", err)
+		}
+		version = n
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 16<<20))
+	if err != nil {
+		return nil, err
+	}
+	js, err := yaml.YAMLToJSON(raw)
+	if err != nil {
+		return nil, err
+	}
+	var objs []struct {
+		APIVersion string `json:"apiVersion"`
+		Kind       string `json:"kind"`
+		Metadata   struct {
+			Name      string            `json:"name"`
+			Namespace string            `json:"namespace"`
+			Labels    map[string]string `json:"labels"`
+		} `json:"metadata"`
+		Spec json.RawMessage `json:"spec"`
+	}
+	if err := json.Unmarshal(js, &objs); err != nil {
+		return nil, fmt.Errorf("want a list of objects: %w", err)
+	}
+	snap := &controlplanev1.PolicySnapshot{Version: version}
+	for _, o := range objs {
+		snap.Objects = append(snap.Objects, &controlplanev1.Object{
+			ApiVersion: o.APIVersion, Kind: o.Kind, Namespace: o.Metadata.Namespace, Name: o.Metadata.Name,
+			Labels: o.Metadata.Labels, Spec: o.Spec,
+		})
+	}
+	return snap, nil
 }

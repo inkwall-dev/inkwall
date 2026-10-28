@@ -99,11 +99,13 @@ rules:
   - waf.inkwall.dev
   resources:
   - clusterwafrulesets
-  - inkwallconfigs
   - wafrulesets
   verbs:
+  - create
+  - delete
   - get
   - list
+  - update
   - watch
 - apiGroups:
   - waf.inkwall.dev
@@ -119,8 +121,18 @@ rules:
 - apiGroups:
   - waf.inkwall.dev
   resources:
+  - inkwallconfigs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - waf.inkwall.dev
+  resources:
   - wafpolicies
   verbs:
+  - create
+  - delete
   - get
   - list
   - patch

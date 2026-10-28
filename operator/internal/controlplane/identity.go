@@ -15,12 +15,14 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -44,6 +46,8 @@ type identity struct {
 	notBefore time.Time
 	notAfter  time.Time
 	tokenHash string
+	// policyVersion is the last PolicySnapshot applied (Managed mode).
+	policyVersion uint64
 }
 
 // newKey generates the cluster's key: ECDSA P-256, as the contract allows.
@@ -105,12 +109,15 @@ func loadIdentity(ctx context.Context, c client.Reader, namespace string) (*iden
 	if err != nil {
 		return nil, fmt.Errorf("identity Secret: %w", err)
 	}
+	// Unset or unreadable: 0, and the control plane sends its snapshot.
+	version, _ := strconv.ParseUint(s.Annotations[policyVersionAnnotation], 10, 64)
 	return &identity{
-		clusterID: string(s.Data[clusterIDKey]),
-		cert:      cert,
-		notBefore: cert.Leaf.NotBefore,
-		notAfter:  cert.Leaf.NotAfter,
-		tokenHash: s.Annotations[tokenAnnotation],
+		clusterID:     string(s.Data[clusterIDKey]),
+		cert:          cert,
+		notBefore:     cert.Leaf.NotBefore,
+		notAfter:      cert.Leaf.NotAfter,
+		tokenHash:     s.Annotations[tokenAnnotation],
+		policyVersion: version,
 	}, nil
 }
 
@@ -129,24 +136,31 @@ func storeIdentity(ctx context.Context, c client.Client, namespace string, id *i
 		corev1.TLSPrivateKeyKey: pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}),
 		clusterIDKey:            []byte(id.clusterID),
 	}
-	s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: IdentitySecret}}
-	err = c.Get(ctx, client.ObjectKeyFromObject(s), s)
-	switch {
-	case apierrors.IsNotFound(err):
-		s.Type = corev1.SecretTypeTLS
-		s.Labels = map[string]string{"app.kubernetes.io/managed-by": "inkwall-operator"}
-		s.Annotations = map[string]string{tokenAnnotation: id.tokenHash}
+	// The leader also records the policy version on it (storePolicyVersion).
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: IdentitySecret}}
+		err := c.Get(ctx, client.ObjectKeyFromObject(s), s)
+		switch {
+		case apierrors.IsNotFound(err):
+			s.Type = corev1.SecretTypeTLS
+			s.Labels = map[string]string{"app.kubernetes.io/managed-by": "inkwall-operator"}
+			s.Annotations = map[string]string{tokenAnnotation: id.tokenHash}
+			s.Data = data
+			return c.Create(ctx, s)
+		case err != nil:
+			return err
+		}
+		if s.Annotations == nil {
+			s.Annotations = map[string]string{}
+		}
+		if string(s.Data[clusterIDKey]) != id.clusterID {
+			// Another cluster's policy version.
+			delete(s.Annotations, policyVersionAnnotation)
+		}
 		s.Data = data
-		return c.Create(ctx, s)
-	case err != nil:
-		return err
-	}
-	s.Data = data
-	if s.Annotations == nil {
-		s.Annotations = map[string]string{}
-	}
-	s.Annotations[tokenAnnotation] = id.tokenHash
-	return c.Update(ctx, s)
+		s.Annotations[tokenAnnotation] = id.tokenHash
+		return c.Update(ctx, s)
+	})
 }
 
 // deleteIdentity removes a certificate the control plane rejected.

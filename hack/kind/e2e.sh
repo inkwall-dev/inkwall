@@ -101,7 +101,14 @@ trust=$(mktemp -d)
 # a GitOps InkwallConfig left behind would change the next run.
 cp_cleanup() {
   if [[ -n ${cp_ca:-} ]]; then rm -f "$cp_ca"; fi
+  if [[ -n ${snap:-} ]]; then rm -f "$snap"; fi
   "${KUBECTL[@]}" delete inkwallconfig default --ignore-not-found >/dev/null 2>&1 || true
+  # The control plane's policies, if a Managed run stopped midway: out of
+  # Managed mode (once the webhook sees it) anyone may delete them.
+  for _ in $(seq 20); do
+    "${KUBECTL[@]}" delete wafpolicies,wafrulesets,clusterwafrulesets -A -l inkwall.dev/source=saas >/dev/null 2>&1 && break
+    sleep 0.5
+  done
   "${KUBECTL[@]}" -n "$OPERATOR_NS" delete secret inkwall-control-plane-identity --ignore-not-found >/dev/null 2>&1 || true
   "${KUBECTL[@]}" delete namespace inkwall-cp-stub --ignore-not-found --wait=false >/dev/null 2>&1 || true
 }
@@ -592,6 +599,86 @@ eventually "the replicas opened events streams" events_stream
 stub_events() { [[ $(stub_stats | sed -n 's/.*"events":\([0-9]*\).*/\1/p') -ge 1 ]]; }
 eventually "the blocked attack reaches the control plane as a security event" stub_events
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy web --wait >/dev/null
+
+# Managed mode (#93, #94): the stub's policies are written as CRDs labelled
+# inkwall.dev/source: saas, enforced, acknowledged and reported Enforced;
+# no one else may change them, a refused snapshot changes nothing, and a
+# snapshot without a policy deletes it.
+echo "== control plane (stub): Managed mode"
+"${KUBECTL[@]}" patch inkwallconfig default --type=merge -p '{"spec":{"mode":"Managed"}}' >/dev/null
+managed_hello() { stub_stats | grep -q '"STREAM_ROLE_PRIMARY CLUSTER_MODE_MANAGED'; }
+eventually "the operator reconnects in Managed mode" managed_hello
+snap=$(mktemp)
+# send_snapshot VERSION: sends the YAML list on stdin as that snapshot.
+send_snapshot() {
+  cat >"$snap"
+  "${KUBECTL[@]}" create --raw "/api/v1/namespaces/$CP_NS/services/stub:admin/proxy/snapshot?version=$1" -f "$snap" >/dev/null
+}
+acked() { stub_stats | grep -Eq "\"acks\":\[([0-9]+,)*$1[],]"; }
+nacked() { stub_stats | grep -q "\"$1: "; }
+managed_policy() {
+  cat <<YAML
+- apiVersion: waf.inkwall.dev/v1alpha1
+  kind: WAFPolicy
+  metadata: {name: managed, namespace: $NS}
+  spec:
+    targetRefs: [{kind: Ingress, name: web}]
+    mode: Block
+YAML
+}
+managed_policy | send_snapshot 1
+eventually "the stub's snapshot is acknowledged (PolicyAck)" acked 1
+saas_label() { [[ $("${KUBECTL[@]}" -n "$NS" get wafpolicy managed -o jsonpath='{.metadata.labels.inkwall\.dev/source}') == saas ]]; }
+check "its policy is written, labelled inkwall.dev/source: saas" saas_label
+eventually "Traefik blocks the attack under the stub's policy" tstatus_is 403 "$SQLI"
+enforced_in_state() {
+  stub_stats | sed -n 's/.*"enforced":\[\([^]]*\)\].*/\1/p' | grep -qF "\"WAFPolicy $NS/managed\""
+}
+eventually "the stub gets it back Enforced in the ClusterState" enforced_in_state
+# guarded COMMAND...: the webhook refuses it, naming the control plane.
+guarded() {
+  local out
+  out=$("$@" 2>&1) && return 1
+  grep -q "come from the control plane" <<<"$out"
+}
+check "kubectl edit of the policy is refused" guarded env KUBE_EDITOR="sed -i 's/mode: Block/mode: Detect/'" "${KUBECTL[@]}" -n "$NS" edit wafpolicy managed
+check "kubectl patch of the policy is refused" guarded "${KUBECTL[@]}" -n "$NS" patch wafpolicy managed --type=merge -p '{"spec":{"mode":"Detect"}}'
+check "removing its label is refused" guarded "${KUBECTL[@]}" -n "$NS" label wafpolicy managed inkwall.dev/source-
+check "deleting it is refused" guarded "${KUBECTL[@]}" -n "$NS" delete wafpolicy managed --wait=false
+forged() {
+  "${KUBECTL[@]}" apply -f - <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata: {name: forged, namespace: $NS, labels: {inkwall.dev/source: saas}}
+spec: {targetRefs: [{kind: Ingress, name: web}]}
+YAML
+}
+check "creating one labelled saas is refused" guarded forged
+still_block() { [[ $("${KUBECTL[@]}" -n "$NS" get wafpolicy managed -o jsonpath='{.spec.mode}') == Block ]]; }
+check "the policy is unchanged" still_block
+# All or nothing: one object the webhook refuses (an unclean path) refuses
+# the snapshot, and the policy in force stays.
+{
+  managed_policy
+  cat <<YAML
+- apiVersion: waf.inkwall.dev/v1alpha1
+  kind: WAFPolicy
+  metadata: {name: broken, namespace: $NS}
+  spec:
+    targetRefs: [{kind: Ingress, name: web}]
+    skip: {paths: ["/a/../b"]}
+YAML
+} | send_snapshot 2
+eventually "a snapshot with a bad object is refused (PolicyNack)" nacked 2
+no_broken() { ! "${KUBECTL[@]}" -n "$NS" get wafpolicy broken >/dev/null 2>&1; }
+check "nothing of it is written" no_broken
+check "the policy in force stays" tstatus_is 403 "$SQLI"
+echo '[]' | send_snapshot 3
+eventually "an empty snapshot is acknowledged" acked 3
+no_managed() { ! "${KUBECTL[@]}" -n "$NS" get wafpolicy managed >/dev/null 2>&1; }
+eventually "and deletes the stub's policy" no_managed
+eventually "the attack passes again" tstatus_is 200 "$SQLI"
+
 # A restarted operator without its certificate (lost, say) can only enroll
 # again: the token is used, so the stub refuses it. A running stream keeps
 # its certificate in memory, hence the restart.
