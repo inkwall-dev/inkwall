@@ -50,7 +50,7 @@ bench: ## Run benchmarks (BENCH=regexp COUNT=n)
 	$(GO) test -run='^$$' -bench='$(BENCH)' -benchmem -count=$(COUNT) ./...
 
 .PHONY: bench-compare
-bench-compare: ## Compare benchmarks with BASE (origin/main) and fail on a significant regression over 5%
+bench-compare: ## Compare benchmarks of changed packages with BASE (origin/main); fail on a repeated significant regression over 5%
 	BENCH='$(BENCH)' hack/bench/compare.sh $(BASE)
 
 .PHONY: crs-test
