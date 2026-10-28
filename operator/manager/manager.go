@@ -102,6 +102,9 @@ type Options struct {
 	// EngineReportInterval is how often replicas publish their engines and
 	// the leader updates Enforced; 0: 2s.
 	EngineReportInterval time.Duration
+	// SigningKeyGrace is the least time each phase of a signing key
+	// rotation lasts; 0: controller.DefaultRotationGrace.
+	SigningKeyGrace time.Duration
 
 	// Inject adds the engine to proxy pods (needs Webhooks and
 	// DistributionPort), with EngineImage unless InkwallConfig sets one.
@@ -197,6 +200,8 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		APIReader:     mgr.GetAPIReader(),
 		Namespace:     o.Namespace,
 		Debounce:      o.Debounce,
+		EngineStale:   engineStale(o),
+		RotationGrace: o.SigningKeyGrace,
 		IngressRoutes: ingressRoutes,
 	}).SetupWithManager(mgr); err != nil {
 		return nil, err
@@ -277,7 +282,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		KubernetesVersion: kubernetesVersion(cfg),
 		CAFile:            o.ControlPlaneCAFile,
 		ProxyPods:         selectors.Selector(integrations.Traefik.Name),
-		EngineStale:       15 * engineReportInterval(o),
+		EngineStale:       engineStale(o),
 	}); err != nil {
 		return nil, err
 	}
@@ -382,7 +387,7 @@ func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}, even
 		Reader:    mgr.GetAPIReader(),
 		Namespace: o.Namespace,
 		Interval:  interval,
-		Stale:     15 * interval,
+		Stale:     engineStale(o),
 		Store:     store,
 	})
 }
@@ -467,6 +472,10 @@ func kubernetesVersion(cfg *rest.Config) func() string {
 
 // DefaultEventsBufferBytes bounds each replica's events buffer by default.
 const DefaultEventsBufferBytes = controlplane.DefaultEventsBufferBytes
+
+// engineStale is how old a replica's engine report may be before the
+// leader ignores it: three of the replicas' refreshes (Publisher.Refresh).
+func engineStale(o Options) time.Duration { return 15 * engineReportInterval(o) }
 
 // engineReportInterval is how often replicas publish their engines.
 func engineReportInterval(o Options) time.Duration {

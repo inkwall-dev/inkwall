@@ -6,6 +6,7 @@ package distribution
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -138,6 +139,7 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 		NodeName:       hello.GetNodeName(),
 		EngineVersion:  hello.GetEngineVersion(),
 		Applied:        hello.GetBundleVersion(),
+		TrustedKeys:    hello.GetTrustedKeyIds(),
 		Replica:        s.Replica,
 		ConnectedAt:    time.Now().UTC(),
 	}
@@ -226,8 +228,14 @@ func (s *Server) record(engineID string, msg *agentv1.WatchRequest, log logr.Log
 		log.Info("bundle rejected", "version", v, "error", reason)
 	case *agentv1.WatchRequest_Heartbeat:
 		// Mostly unchanged: it keeps the stream alive.
-		v := m.Heartbeat.GetBundleVersion()
-		s.Engines.Update(engineID, func(e *Engine) bool { return set(&e.Applied, v) })
+		v, keys := m.Heartbeat.GetBundleVersion(), m.Heartbeat.GetTrustedKeyIds()
+		s.Engines.Update(engineID, func(e *Engine) bool {
+			changed := set(&e.Applied, v)
+			if !slices.Equal(e.TrustedKeys, keys) {
+				e.TrustedKeys, changed = keys, true
+			}
+			return changed
+		})
 	}
 }
 

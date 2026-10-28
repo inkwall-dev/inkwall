@@ -248,6 +248,10 @@ type Hello struct {
 	BundleVersion uint64 `protobuf:"varint,5,opt,name=bundle_version,json=bundleVersion,proto3" json:"bundle_version,omitempty"`
 	// The engine's version.
 	EngineVersion string `protobuf:"bytes,6,opt,name=engine_version,json=engineVersion,proto3" json:"engine_version,omitempty"`
+	// The IDs of the bundle signing keys the engine trusts (SignedBundle
+	// key_id), so the operator signs with a new key only once every engine
+	// has it. Empty from engines that predate key rotation.
+	TrustedKeyIds []string `protobuf:"bytes,7,rep,name=trusted_key_ids,json=trustedKeyIds,proto3" json:"trusted_key_ids,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -322,6 +326,13 @@ func (x *Hello) GetEngineVersion() string {
 		return x.EngineVersion
 	}
 	return ""
+}
+
+func (x *Hello) GetTrustedKeyIds() []string {
+	if x != nil {
+		return x.TrustedKeyIds
+	}
+	return nil
 }
 
 // Ack reports a bundle the engine applied.
@@ -430,8 +441,11 @@ type Heartbeat struct {
 	// The bundle the engine runs.
 	BundleVersion uint64 `protobuf:"varint,1,opt,name=bundle_version,json=bundleVersion,proto3" json:"bundle_version,omitempty"`
 	// Requests being inspected, and the most that can be.
-	InFlight      uint32 `protobuf:"varint,2,opt,name=in_flight,json=inFlight,proto3" json:"in_flight,omitempty"`
-	Capacity      uint32 `protobuf:"varint,3,opt,name=capacity,proto3" json:"capacity,omitempty"`
+	InFlight uint32 `protobuf:"varint,2,opt,name=in_flight,json=inFlight,proto3" json:"in_flight,omitempty"`
+	Capacity uint32 `protobuf:"varint,3,opt,name=capacity,proto3" json:"capacity,omitempty"`
+	// The signing keys the engine trusts, as in Hello: they change while
+	// the stream is open when the engine reloads its key file.
+	TrustedKeyIds []string `protobuf:"bytes,4,rep,name=trusted_key_ids,json=trustedKeyIds,proto3" json:"trusted_key_ids,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -487,6 +501,13 @@ func (x *Heartbeat) GetCapacity() uint32 {
 	return 0
 }
 
+func (x *Heartbeat) GetTrustedKeyIds() []string {
+	if x != nil {
+		return x.TrustedKeyIds
+	}
+	return nil
+}
+
 var File_agent_v1_agent_proto protoreflect.FileDescriptor
 
 const file_agent_v1_agent_proto_rawDesc = "" +
@@ -501,23 +522,25 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"\x03msg\"W\n" +
 	"\rWatchResponse\x129\n" +
 	"\x06bundle\x18\x01 \x01(\v2\x1f.inkwall.bundle.v1.SignedBundleH\x00R\x06bundleB\x05\n" +
-	"\x03msgJ\x04\b\x02\x10\x03\"\xcf\x01\n" +
+	"\x03msgJ\x04\b\x02\x10\x03\"\xf7\x01\n" +
 	"\x05Hello\x12\x1b\n" +
 	"\tengine_id\x18\x01 \x01(\tR\bengineId\x12#\n" +
 	"\rpod_namespace\x18\x02 \x01(\tR\fpodNamespace\x12\x19\n" +
 	"\bpod_name\x18\x03 \x01(\tR\apodName\x12\x1b\n" +
 	"\tnode_name\x18\x04 \x01(\tR\bnodeName\x12%\n" +
 	"\x0ebundle_version\x18\x05 \x01(\x04R\rbundleVersion\x12%\n" +
-	"\x0eengine_version\x18\x06 \x01(\tR\rengineVersion\",\n" +
+	"\x0eengine_version\x18\x06 \x01(\tR\rengineVersion\x12&\n" +
+	"\x0ftrusted_key_ids\x18\a \x03(\tR\rtrustedKeyIds\",\n" +
 	"\x03Ack\x12%\n" +
 	"\x0ebundle_version\x18\x01 \x01(\x04R\rbundleVersion\"C\n" +
 	"\x04Nack\x12%\n" +
 	"\x0ebundle_version\x18\x01 \x01(\x04R\rbundleVersion\x12\x14\n" +
-	"\x05error\x18\x02 \x01(\tR\x05error\"k\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\"\x93\x01\n" +
 	"\tHeartbeat\x12%\n" +
 	"\x0ebundle_version\x18\x01 \x01(\x04R\rbundleVersion\x12\x1b\n" +
 	"\tin_flight\x18\x02 \x01(\rR\binFlight\x12\x1a\n" +
-	"\bcapacity\x18\x03 \x01(\rR\bcapacity2]\n" +
+	"\bcapacity\x18\x03 \x01(\rR\bcapacity\x12&\n" +
+	"\x0ftrusted_key_ids\x18\x04 \x03(\tR\rtrustedKeyIds2]\n" +
 	"\rBundleService\x12L\n" +
 	"\x05Watch\x12\x1e.inkwall.agent.v1.WatchRequest\x1a\x1f.inkwall.agent.v1.WatchResponse(\x010\x01B5Z3github.com/inkwall-dev/inkwall/api/agent/v1;agentv1b\x06proto3"
 

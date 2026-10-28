@@ -61,6 +61,10 @@ message Hello {
   uint64 bundle_version = 5;
   // The engine's version.
   string engine_version = 6;
+  // The IDs of the bundle signing keys the engine trusts (SignedBundle
+  // key_id), so the operator signs with a new key only once every engine
+  // has it. Empty from engines that predate key rotation.
+  repeated string trusted_key_ids = 7;
 }
 
 // Ack reports a bundle the engine applied.
@@ -83,4 +87,7 @@ message Heartbeat {
   // Requests being inspected, and the most that can be.
   uint32 in_flight = 2;
   uint32 capacity = 3;
+  // The signing keys the engine trusts, as in Hello: they change while
+  // the stream is open when the engine reloads its key file.
+  repeated string trusted_key_ids = 4;
 }
