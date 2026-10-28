@@ -26,7 +26,7 @@ func wantInvalid(t *testing.T, err error, field, detail string) {
 
 func TestRuleSetValidation(t *testing.T) {
 	ctx := context.Background()
-	v := specValidator[*wafv1alpha1.WAFRuleSet]{validateWAFRuleSet}
+	v := specValidator[*wafv1alpha1.WAFRuleSet]{validate: validateWAFRuleSet}
 	rs := func(src wafv1alpha1.RuleSetSource) *wafv1alpha1.WAFRuleSet {
 		return &wafv1alpha1.WAFRuleSet{ObjectMeta: metav1.ObjectMeta{Name: "rules"}, Spec: wafv1alpha1.WAFRuleSetSpec{Source: src}}
 	}
@@ -60,7 +60,7 @@ func TestRuleSetValidation(t *testing.T) {
 }
 
 func TestClusterRuleSetValidation(t *testing.T) {
-	v := specValidator[*wafv1alpha1.ClusterWAFRuleSet]{validateClusterWAFRuleSet}
+	v := specValidator[*wafv1alpha1.ClusterWAFRuleSet]{validate: validateClusterWAFRuleSet}
 	_, err := v.ValidateCreate(context.Background(), &wafv1alpha1.ClusterWAFRuleSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "rules"},
 		Spec:       wafv1alpha1.ClusterWAFRuleSetSpec{Source: wafv1alpha1.ClusterRuleSetSource{SecLang: "SecDebugLog /tmp/debug.log"}},
@@ -70,7 +70,7 @@ func TestClusterRuleSetValidation(t *testing.T) {
 
 func TestPolicyValidation(t *testing.T) {
 	ctx := context.Background()
-	v := specValidator[*wafv1alpha1.WAFPolicy]{validateWAFPolicy}
+	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy}
 	p := &wafv1alpha1.WAFPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "shop"},
 		Spec: wafv1alpha1.WAFPolicySpec{

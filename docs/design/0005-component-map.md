@@ -64,8 +64,8 @@ disk cache) and `pkg/clientip`.
 | Bundle builder | Leader only: debounce changes (1 s), build, sign, version, write Secret | `operator/internal/bundle`, `operator/internal/controller` | Built |
 | Distribution server | All replicas, gRPC; ACK/NACK/heartbeat | `operator/internal/distribution` | Built |
 | Status | `Enforced` condition (engines on current bundle) | `operator/internal/distribution` | Built |
-| Validating webhook | Compile rule sets as the engine does; check paths | `operator/webhook` | Built |
-| Upstream sync | Leader only, mTLS to the control plane | — | Not yet |
+| Validating webhook | Compile rule sets as the engine does; check paths; in Managed mode, only the operator writes the control plane's objects | `operator/webhook` | Built |
+| Upstream sync | Leader only, mTLS to the control plane: enrollment, state sync, events (every replica), Managed mode | `operator/internal/controlplane` | Built (tested against a stub) |
 | WAFIPList CRD | IP lists | — | Not yet |
 
 ## 5. Key flows

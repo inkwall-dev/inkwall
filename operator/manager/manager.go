@@ -385,7 +385,24 @@ func (w *webhookStarter) Start(ctx context.Context) error {
 	case <-ctx.Done():
 		return nil
 	}
-	if err := webhook.Setup(w.mgr, w.inject); err != nil {
+	user, err := webhook.OperatorUser(ctx, w.mgr.GetClient())
+	if ctx.Err() != nil {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// The guard reads the mode from the cache: start its informer now, not
+	// in the first request, which has 2 s.
+	var cfg wafv1alpha1.InkwallConfig
+	if err := w.mgr.GetClient().Get(ctx, types.NamespacedName{Name: "default"}, &cfg); client.IgnoreNotFound(err) != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		return fmt.Errorf("read the InkwallConfig: %w", err)
+	}
+	guard := &webhook.SourceGuard{Operator: user, Reader: w.mgr.GetClient()}
+	if err := webhook.Setup(w.mgr, w.inject, guard); err != nil {
 		return fmt.Errorf("register webhooks: %w", err)
 	}
 	w.registered.Store(true)
