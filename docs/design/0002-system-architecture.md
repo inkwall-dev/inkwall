@@ -110,8 +110,9 @@ controller-runtime, leader election, 2 replicas. Details: [0004 — Kubernetes O
 Never on the request path. While it is down, engines keep their snapshot and new pods use their
 cache or the bundle Secret (0004 §4.6).
 
-**Built:** injection, Traefik wiring, resolver, bundle builder, distribution, status.
-**Not yet:** upstream sync, other proxies.
+**Built:** injection, Traefik wiring, resolver, bundle builder, distribution, status, upstream sync
+(GitOps and Managed, §5.3).
+**Not yet:** other proxies.
 
 ### 3.4 Control plane (optional)
 
@@ -237,12 +238,15 @@ operator does: re-enroll (`UNAUTHENTICATED`), stop (`PERMISSION_DENIED`), back o
   disk queue drops the oldest when full, and the next batch says how many.
 - A `PolicySnapshot` is all or nothing (server-side dry run of every object first); the cluster's
   `InkwallConfig` decides the mode, and a cluster not in Managed mode refuses snapshots. Only
-  `WAFPolicy` and the rule set kinds are accepted, and the operator sets the source label itself.
+  `WAFPolicy` and the rule set kinds are accepted, and the operator sets the source label itself
+  (`inkwall.dev/source: saas`), deletes the labelled objects a snapshot no longer has, and records
+  the last version applied (sent in `Hello`; an older snapshot is refused). In Managed mode the
+  validating webhook lets only the operator write the labelled objects, fail closed.
   Standalone: events go to logs and optionally OTLP.
 
-**Built:** the contract (#86), enrollment and the primary stream, state sync (`ClusterState`) and
-events streams with each replica's disk buffer (0004 §4.9). **Not yet:** Managed mode (O6,
-0004 §11).
+**Built:** the contract (#86), enrollment and the primary stream, state sync (`ClusterState`),
+events streams with each replica's disk buffer, and Managed mode (policy snapshots written as CRDs,
+pruned, acknowledged; the webhook guard), tested on kind against a stub control plane (0004 §4.9).
 
 ### 5.4 Event schema
 

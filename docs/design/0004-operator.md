@@ -289,7 +289,7 @@ writes its policies as CRDs labeled `inkwall.dev/source: saas` and rejects other
 generates an ECDSA P-256 key and enrolls; a retry after a lost response reuses the key. The
 certificate and key go in the `inkwall-control-plane-identity` Secret (`kubernetes.io/tls`, plus
 `cluster-id`). It then holds the primary stream (Hello, Welcome, heartbeats), renews the certificate
-two thirds into its lifetime, and refuses policy snapshots. `--control-plane-ca` trusts a private CA.
+two thirds into its lifetime. `--control-plane-ca` trusts a private CA.
 `InkwallConfig` reports `ControlPlaneConnected`: `Connected`, or `EnrollmentTokenMissing`,
 `EnrollmentTokenNotInOperatorNamespace`, `EnrollmentTokenRejected` (waits for a new token),
 `EnrollFailed`, `CertificateRejected` and `CertificateExpired` (the identity is deleted; waits for a
@@ -297,8 +297,11 @@ new token),
 `ClusterDisabled` (waits for a configuration change), `Unreachable`, `InvalidEndpoint`.
 
 Tested on kind against a stub control plane (`operator/test/stubcontrolplane`, built on
-`operator/test/fakecontrolplane`; never a real one): enroll, connect, heartbeats, and a used token
-refused. Chart values `controlPlane.caBundle` and `controlPlane.enrollmentToken` supply the CA and
+`operator/test/fakecontrolplane`; never a real one): enroll, connect, heartbeats, state sync,
+events, a Managed round trip (a policy sent through the stub's `POST /snapshot` is written, blocks
+through Traefik, is acknowledged and comes back `Enforced`; `kubectl edit`, `patch`, label removal and
+delete are refused; a bad snapshot changes nothing; an empty one prunes), and a used token refused.
+Chart values `controlPlane.caBundle` and `controlPlane.enrollmentToken` supply the CA and
 the token.
 
 **Built:** the leader sends `ClusterState` after `Welcome`, on any change (checked every 5 s), on
@@ -307,8 +310,34 @@ its own events stream while the control plane accepts them, from a bounded disk 
 (`--events-dir`, an `emptyDir`; when full, the oldest are dropped and counted), resending what
 wasn't acknowledged after a reconnect or a restart. `inkwall_operator_events_buffered` follows the
 buffer, outages included. The events stream reconnects with jittered backoff bounded at 10 s (the
-leader's: 1 min), so the backlog drains soon after an outage. **Not yet:** applying snapshots
-(Managed).
+leader's: 1 min), so the backlog drains soon after an outage.
+
+**Built: Managed mode.** The leader applies each `PolicySnapshot` beside the stream, all or nothing:
+it refuses (`PolicyNack`, nothing written) a cluster not in `Managed` mode, version 0 or a version
+older than the last applied, any kind but `WAFPolicy`, `WAFRuleSet` and `ClusterWAFRuleSet`, a rule
+set with `configMapRef`, an object without the namespace its kind needs or listed twice, and an
+existing object it didn't write (no source label: it never takes one over). Then it dry-runs
+(`dryRun: All`, strict field validation, so the CRD schema and the validating webhook see each
+object, and an unknown field is refused rather than dropped) every create, update and the deletes;
+one refused object refuses the snapshot. A dry run that can't be done (the API server or the webhook
+unreachable) isn't a refusal: the stream is dropped and the snapshot comes again. Only then it
+writes them, rule sets first, labelled `inkwall.dev/source: saas` (set by the operator: the
+snapshot's own value is ignored), deletes the labelled objects the snapshot no longer has (policies
+first), records the version on the identity Secret (`waf.inkwall.dev/policy-version`, sent in
+`Hello`) and answers `PolicyAck`. A write that
+fails after the dry run is retried for about 15 s; then the stream is dropped, and the control plane
+sends the snapshot again on reconnect (`Hello` has the older version). The same version again is
+applied again (idempotent) and acknowledged; a snapshot still waiting when a newer one arrives is
+refused as superseded. Nothing new feeds the engines: the bundle builder signs these CRDs with the
+cluster's key like any other, and `ClusterState` reports their `Enforced` back.
+
+The validating webhook guards them: in `Managed` mode, only the operator (its identity from a
+`SelfSubjectReview` at start-up) may create, change or delete an object labelled
+`inkwall.dev/source: saas`, or add or remove that label; the namespace controller may still delete
+them with their namespace. It fails closed, also when it can't read the mode. Deletes reach it only
+for labelled objects (an `objectSelector`), so deleting anything else never needs the operator. Out
+of `Managed` mode they are ordinary objects again, which their owners can edit or delete (the
+operator no longer writes them); whoever can edit the `InkwallConfig` can leave `Managed` mode.
 
 ## 5. Uninstall and disable
 
@@ -351,6 +380,7 @@ Least privilege. Built rules ([`role.yaml`](../../operator/config/rbac/role.yaml
 | Resources | Verbs | Why |
 |---|---|---|
 | `waf.inkwall.dev/*` | read; update status | Own CRDs |
+| `wafpolicies`, `wafrulesets`, `clusterwafrulesets` | create, update, delete | Managed mode (§4.9); the webhook keeps others off them |
 | `ingressclasses`, `ingresses`, `pods` | read | Resolution, injection checks |
 | `ingresses` | patch | Traefik annotation |
 | `ingressroutes` (traefik.io) | read, patch | Traefik routes' `middlewares` |

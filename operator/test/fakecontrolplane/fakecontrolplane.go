@@ -4,8 +4,8 @@
 // Package fakecontrolplane is a control plane that implements
 // api/controlplane/v1 for tests: enrollment with one-time tokens, client
 // certificates from its own CA, and the Connect stream. It records what the
-// operator sends and can be told to fail. It is not a control plane: no
-// storage, no tenants.
+// operator sends, sends policy snapshots when told to, and can be told to
+// fail. It is not a control plane: no storage, no tenants.
 package fakecontrolplane
 
 import (
@@ -88,6 +88,12 @@ type Server struct {
 	heartbeats int
 	renewals   int
 	clusters   int
+	// snapshot is the newest PolicySnapshot, sent again to a Managed
+	// cluster whose Hello has an older policy version; acks and nacks are
+	// the answers.
+	snapshot *controlplanev1.PolicySnapshot
+	acks     []uint64
+	nacks    []*controlplanev1.PolicyNack
 }
 
 type enrollment struct {
@@ -194,6 +200,9 @@ type Stats struct {
 	Renewals      int
 	// Clusters is how many distinct clusters enrolled.
 	Clusters int
+	// Acks and Nacks answered the policy snapshots, oldest first.
+	Acks  []uint64
+	Nacks []*controlplanev1.PolicyNack
 }
 
 // Stats returns what the server saw so far.
@@ -202,7 +211,29 @@ func (s *Server) Stats() Stats {
 	defer s.mu.Unlock()
 	return Stats{EnrollCalls: s.enrollCalls, ConnectCalls: s.connectCalls, Hellos: append([]*controlplanev1.Hello(nil), s.hellos...),
 		States: append([]*controlplanev1.ClusterState(nil), s.states...),
-		Events: len(s.events), EventUploads: s.eventUploads, EventsDropped: s.eventsDropped, Heartbeats: s.heartbeats, Renewals: s.renewals, Clusters: s.clusters}
+		Events: len(s.events), EventUploads: s.eventUploads, EventsDropped: s.eventsDropped, Heartbeats: s.heartbeats, Renewals: s.renewals, Clusters: s.clusters,
+		Acks: append([]uint64(nil), s.acks...), Nacks: append([]*controlplanev1.PolicyNack(nil), s.nacks...)}
+}
+
+// SendSnapshot sends snap on the open primary stream, and reports whether
+// one was open. Either way, a Managed cluster gets it when it connects with
+// an older policy version, as from a control plane.
+func (s *Server) SendSnapshot(snap *controlplanev1.PolicySnapshot) (bool, error) {
+	s.mu.Lock()
+	s.snapshot = snap
+	send := s.primary
+	s.mu.Unlock()
+	if send == nil {
+		return false, nil
+	}
+	return true, send(&controlplanev1.ConnectResponse{Msg: &controlplanev1.ConnectResponse_PolicySnapshot{PolicySnapshot: snap}})
+}
+
+// SnapshotVersion is the version of the newest snapshot (0: none).
+func (s *Server) SnapshotVersion() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.snapshot.GetVersion()
 }
 
 // Resync asks the cluster on the open primary stream for a full
@@ -274,7 +305,7 @@ func (s *Server) Enroll(_ context.Context, req *controlplanev1.EnrollRequest) (*
 }
 
 // Connect implements the stream: Hello first, then Welcome; ClusterState,
-// heartbeats and certificate renewal.
+// heartbeats, policy snapshots and their answers, and certificate renewal.
 func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer) error {
 	clusterID, err := s.clusterOf(stream.Context())
 	if err != nil {
@@ -305,7 +336,11 @@ func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer
 	s.mu.Lock()
 	s.hellos = append(s.hellos, hello)
 	accept := s.AcceptEvents
+	var resend *controlplanev1.PolicySnapshot
 	if hello.GetRole() == controlplanev1.StreamRole_STREAM_ROLE_PRIMARY {
+		if hello.GetMode() == controlplanev1.ClusterMode_CLUSTER_MODE_MANAGED && s.snapshot.GetVersion() > hello.GetPolicyVersion() {
+			resend = s.snapshot
+		}
 		// The newer primary stream wins.
 		s.primaryID++
 		id := s.primaryID
@@ -323,6 +358,11 @@ func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer
 		HeartbeatInterval: durationpb.New(s.HeartbeatInterval), AcceptEvents: accept,
 	}}}); err != nil {
 		return err
+	}
+	if resend != nil {
+		if err := send(&controlplanev1.ConnectResponse{Msg: &controlplanev1.ConnectResponse_PolicySnapshot{PolicySnapshot: resend}}); err != nil {
+			return err
+		}
 	}
 	for {
 		msg, err := stream.Recv()
@@ -365,6 +405,14 @@ func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer
 		case *controlplanev1.ConnectRequest_Heartbeat:
 			s.mu.Lock()
 			s.heartbeats++
+			s.mu.Unlock()
+		case *controlplanev1.ConnectRequest_PolicyAck:
+			s.mu.Lock()
+			s.acks = append(s.acks, m.PolicyAck.GetVersion())
+			s.mu.Unlock()
+		case *controlplanev1.ConnectRequest_PolicyNack:
+			s.mu.Lock()
+			s.nacks = append(s.nacks, m.PolicyNack)
 			s.mu.Unlock()
 		case *controlplanev1.ConnectRequest_RenewCertificate:
 			if hello.GetRole() != controlplanev1.StreamRole_STREAM_ROLE_PRIMARY {
