@@ -88,6 +88,22 @@ certificate in `inkwall-control-plane-identity`, and reports `ControlPlaneConnec
 `InkwallConfig` isn't part of the chart: a release can't create a custom resource of a CRD it
 installs itself.
 
+### Managed mode
+
+With `mode: Managed`, policies come from the control plane. The operator writes each policy
+snapshot it sends as `WAFPolicy`, `WAFRuleSet` and `ClusterWAFRuleSet` objects labelled
+`inkwall.dev/source: saas`, all or nothing (a server-side dry run of every object first; one
+refused object refuses the snapshot and nothing changes), deletes the labelled objects a snapshot no
+longer has, and acknowledges it. They are enforced like any other policy, in bundles signed with the
+cluster's own key, and their `Enforced` condition goes back to the control plane.
+
+Change them in the control plane, not with `kubectl`: while the cluster is in Managed mode the
+validating webhook refuses anyone but the operator creating, editing or deleting a labelled object,
+or adding or removing the label. Your own, unlabelled objects stay yours, and the operator never
+overwrites one with a policy of the same name (it refuses the snapshot instead). Rule sets from the
+control plane carry their rules inline: `configMapRef` is refused. Switching back to `GitOps` or
+`Standalone` leaves the labelled objects in place, as ordinary objects you can edit or delete.
+
 ## Rotating the signing key
 
 The operator signs policy bundles with an ed25519 key it generates on first use, in the
