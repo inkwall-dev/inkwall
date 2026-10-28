@@ -41,6 +41,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/internal/bundle"
 	"github.com/inkwall-dev/inkwall/operator/internal/controller"
 	"github.com/inkwall-dev/inkwall/operator/internal/controlplane"
+	"github.com/inkwall-dev/inkwall/operator/internal/crdwatch"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/operator/internal/resolver"
@@ -120,6 +121,10 @@ type Options struct {
 	// ControlPlaneCAFile trusts the control plane's server certificate;
 	// empty: the system roots.
 	ControlPlaneCAFile string
+	// CRDInterval is how often the leader looks for Traefik's IngressRoute
+	// CRD until it is installed; 0: 30s.
+	CRDInterval time.Duration
+
 	// EventsDir holds the replica's buffer of security events for the
 	// control plane ("": in memory); EventsBufferBytes bounds it.
 	EventsDir         string
@@ -165,6 +170,9 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			// Only the Pod webhook's configuration.
 			&admissionregistrationv1.MutatingWebhookConfiguration{}: {Field: fields.OneTermEqualSelector("metadata.name", webhook.MutatingConfigName)},
 		}},
+		// Unstructured objects (Traefik's IngressRoutes) are read from the
+		// cache too: the wiring and the bundle read them all at every change.
+		Client:                  client.Options{Cache: &client.CacheOptions{Unstructured: true}},
 		Metrics:                 metricsserver.Options{BindAddress: o.MetricsAddr},
 		HealthProbeBindAddress:  o.ProbeAddr,
 		LeaderElection:          o.LeaderElect,
@@ -184,6 +192,8 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
 		return nil, err
 	}
+	// Traefik's IngressRoute CRD may be installed after the operator.
+	ingressRoutes := &crdwatch.Kind{GVK: wiring.IngressRouteGVK, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
 	if err := (&controller.BundleReconciler{
 		Client:        mgr.GetClient(),
 		APIReader:     mgr.GetAPIReader(),
@@ -191,6 +201,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		Debounce:      o.Debounce,
 		EngineStale:   engineStale(o),
 		RotationGrace: o.SigningKeyGrace,
+		IngressRoutes: ingressRoutes,
 	}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
@@ -212,7 +223,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		}
 		if err := (&wiring.Reconciler{
 			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), PodWebhook: webhook.MutatingConfigName,
-			TraefikPods: selectors.Selector(integrations.Traefik.Name),
+			TraefikPods: selectors.Selector(integrations.Traefik.Name), IngressRoutes: ingressRoutes,
 		}).SetupWithManager(mgr); err != nil {
 			return nil, err
 		}
@@ -234,6 +245,9 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		}).SetupWithManager(mgr); err != nil {
 			return nil, err
 		}
+	}
+	if err := mgr.Add(ingressRoutes); err != nil {
+		return nil, err
 	}
 	if o.Webhooks {
 		starter := &webhookStarter{mgr: mgr, ready: ready, inject: injector}

@@ -76,6 +76,16 @@ rules:
 - apiGroups:
   - traefik.io
   resources:
+  - ingressroutes
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - traefik.io
+  resources:
   - middlewares
   verbs:
   - create

@@ -22,8 +22,13 @@ import (
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 )
 
-// DefaultEventsBufferBytes bounds a replica's events buffer.
-const DefaultEventsBufferBytes = 64 << 20
+const (
+	// DefaultEventsBufferBytes bounds a replica's events buffer.
+	DefaultEventsBufferBytes = 64 << 20
+	// DefaultEventsMaxBackoff bounds the wait between events stream
+	// reconnects.
+	DefaultEventsMaxBackoff = 10 * time.Second
+)
 
 // Forwarder sends the security events of the engines connected to this
 // replica to the control plane, on the replica's own events stream (0002
@@ -45,7 +50,8 @@ type Forwarder struct {
 	// Poll is how often an idle forwarder looks again (default 5 s);
 	// Refused, how long it waits after the control plane said it doesn't
 	// accept events (default 1 min); MinBackoff and MaxBackoff bound
-	// reconnects (default 1 s and 1 min).
+	// reconnects (default 1 s and 10 s: lower than the leader's, so the
+	// buffer drains soon after an outage).
 	Poll, Refused, MinBackoff, MaxBackoff time.Duration
 
 	// q is set by Start; Add may run before.
@@ -68,7 +74,7 @@ func (f *Forwarder) defaults() {
 		f.MinBackoff = time.Second
 	}
 	if f.MaxBackoff == 0 {
-		f.MaxBackoff = time.Minute
+		f.MaxBackoff = DefaultEventsMaxBackoff
 	}
 	if f.MaxBytes == 0 {
 		f.MaxBytes = DefaultEventsBufferBytes
@@ -98,6 +104,7 @@ func (f *Forwarder) Start(ctx context.Context) error {
 			return err
 		}
 	}
+	q.track(eventsBuffered)
 	f.q.Store(q)
 	// What's on disk is resent once the control plane accepts events
 	// again.
@@ -116,8 +123,8 @@ func (f *Forwarder) Start(ctx context.Context) error {
 		case errors.Is(err, errRefused):
 			wait = f.Refused
 		case !errors.Is(err, errIdle):
-			logger.Info("events stream ended; retrying", "error", err, "in", backoff)
 			wait = backoff/2 + rand.N(backoff/2+1) // #nosec G404 -- jitter, not security
+			logger.Info("events stream ended; retrying", "error", err, "in", wait)
 			backoff = min(2*backoff, f.MaxBackoff)
 		}
 		select {
@@ -248,7 +255,6 @@ func (f *Forwarder) run(ctx context.Context) (bool, error) {
 				return true, errors.New("configuration changed")
 			}
 		}
-		eventsBuffered.Set(float64(q.events()))
 	}
 }
 
@@ -259,5 +265,4 @@ func (f *Forwarder) stop() {
 	if q := f.q.Load(); q != nil {
 		q.clear()
 	}
-	eventsBuffered.Set(0)
 }

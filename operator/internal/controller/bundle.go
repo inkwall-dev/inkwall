@@ -33,8 +33,10 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/internal/bundle"
+	"github.com/inkwall-dev/inkwall/operator/internal/crdwatch"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/operator/internal/resolver"
+	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
 	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
@@ -47,6 +49,7 @@ import (
 // +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies;wafrulesets;clusterwafrulesets;inkwallconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies/status;wafrulesets/status;clusterwafrulesets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch
+// +kubebuilder:rbac:groups=traefik.io,resources=ingressroutes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=namespaces,resourceNames=kube-system,verbs=get
 
@@ -88,6 +91,9 @@ type BundleReconciler struct {
 	// RotationGrace is the least time each phase of a key rotation lasts;
 	// 0: DefaultRotationGrace.
 	RotationGrace time.Duration
+	// IngressRoutes watches Traefik's IngressRoutes once their CRD is
+	// installed; nil: they are only read at each build.
+	IngressRoutes *crdwatch.Kind
 
 	// keys is the keyring last read or written, to recreate the signing
 	// key Secret if it is deleted: engines trust these keys.
@@ -143,7 +149,7 @@ func (r *BundleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	start := make(chan event.GenericEvent, 1)
 	start <- event.GenericEvent{Object: &corev1.Secret{}}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	c, err := ctrl.NewControllerManagedBy(mgr).
 		Named("bundle").
 		Watches(&wafv1alpha1.WAFPolicy{}, enqueue, spec).
 		Watches(&wafv1alpha1.WAFRuleSet{}, enqueue, spec).
@@ -157,7 +163,14 @@ func (r *BundleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Secret{}, enqueue, secrets).
 		WatchesRawSource(source.Channel(start, enqueue)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
-		Complete(r)
+		Build(r)
+	if err != nil {
+		return err
+	}
+	if r.IngressRoutes != nil {
+		r.IngressRoutes.Add(c, enqueue, predicate.GenerationChangedPredicate{})
+	}
+	return nil
 }
 
 // Reconcile rebuilds the bundle.
@@ -186,6 +199,13 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	}
 	in.Policies, in.Ingresses, in.RuleSets, in.ClusterRuleSets, in.ConfigMaps =
 		policies.Items, ingresses.Items, ruleSets.Items, clusterRuleSets.Items, configMaps.Items
+	// An error here is not "no IngressRoutes": building without them would
+	// drop their protection.
+	routes, _, err := wiring.IngressRoutes(ctx, r.Client)
+	if err != nil {
+		return reconcile.Result{}, fmt.Errorf("list IngressRoutes: %w", err)
+	}
+	in.IngressRoutes = routes
 
 	cfg, err := r.config(ctx)
 	if err != nil {

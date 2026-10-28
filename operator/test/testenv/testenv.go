@@ -130,6 +130,16 @@ func Start(o Options) (*Env, func(), error) {
 	return e, func() { _ = env.Stop() }, nil
 }
 
+// InstallLater installs the CRDs a test adds while the operator runs
+// (testenv/later: Traefik's IngressRoute), and waits until they are served.
+func InstallLater(e *Env) error {
+	_, err := envtest.InstallCRDs(e.Config, envtest.CRDInstallOptions{
+		Paths:              []string{filepath.Join(filepath.Dir(configDir()), "test", "testenv", "later")},
+		ErrorIfPathMissing: true,
+	})
+	return err
+}
+
 // Skip skips t when there is no API server.
 func Skip(t testing.TB, e *Env) {
 	t.Helper()

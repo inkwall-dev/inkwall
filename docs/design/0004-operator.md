@@ -8,8 +8,9 @@
 The operator injects the engine next to each proxy, wires the proxy to it, and pushes signed policy
 bundles. CRD shapes: 0002 §4.2.
 
-**Built (v0.1.0):** Traefik with `Ingress` targets (ForwardAuth). **Not yet:** other proxies,
-`HTTPRoute` / `IngressRoute` targets, unwiring on `InkwallConfig` delete (O5), GitOps/Managed modes.
+**Built (v0.1.0):** Traefik with `Ingress` targets (ForwardAuth). **Built since:** Traefik
+`IngressRoute` targets. **Not yet:** other proxies, `HTTPRoute` targets, unwiring on
+`InkwallConfig` delete (O5), GitOps/Managed modes.
 
 ## 1. Goals and non-goals
 
@@ -165,8 +166,9 @@ attachment or a local skip check.
 
 User-owned objects touched (minimum fields, SSA): Envoy Gateway `EnvoyProxy` (sidecar patch, or an
 operator-made one plus `parametersRef`); ingress-nginx `data.plugins` (merged, original saved for
-uninstall); Traefik's `router.middlewares` annotation on `Ingress`. Every such field is to be listed
-in `docs/gitops.md` with Argo CD / Flux ignore rules.
+uninstall); Traefik's `router.middlewares` annotation on `Ingress`, and `spec.routes[*].middlewares`
+on `IngressRoute`. Every such field is to be listed in `docs/gitops.md` with Argo CD / Flux ignore
+rules.
 
 Apply: field manager `inkwall-operator`, `force` only on own objects, prune managed-by objects no
 longer rendered.
@@ -174,22 +176,33 @@ longer rendered.
 **Built (v0.1.0)** (`operator/internal/wiring`, Traefik):
 
 - Each targeted Ingress Traefik serves (by `ingressClassName`, legacy `kubernetes.io/ingress.class`
-  or the default class) is wired, accepted or not; until its rules are in a bundle the engine
-  passes its routes (`no-policy`).
+  or the default class), and each targeted `IngressRoute` (`traefik.io/v1alpha1`), is wired,
+  accepted or not; until its rules are in a bundle the engine passes its routes (`no-policy`).
 - One ForwardAuth `Middleware` `inkwall-waf` per such namespace (`trustForwardHeader: false`,
   `forwardBody: true`, `maxBodySize` 10 MiB = largest `body.maxBytes`), removed when unused. A
   same-named one the operator didn't create is left alone (`WiringFailed`).
 - The annotation gets the operator's Middleware first, user entries kept in order;
   `waf.inkwall.dev/wired` records it; unprotecting removes only that entry. Level-based, no
   finalizers.
-- `Programmed=True` when all the policy's Traefik Ingresses are wired and every running Traefik pod
-  has the engine. Else `ControllerUnsupported` (other controller or kind), `WiringFailed` (no
-  Traefik CRDs, name clash), `PendingRestart` (pods older than the webhook, listed),
-  `SidecarMissing` (no Traefik pod, or pods without the engine: operator down in detect mode or
-  opted out, listed), `NoTargets`.
-- **Not yet:** `IngressRoute` / `HTTPRoute` targets, `docs/gitops.md`, matching engines to the pods
-  serving a policy's class (all engines count for `Enforced`). Traefik attachment default is open
-  (§12).
+- An IngressRoute gets `{name: inkwall-waf}` first in every route's `middlewares`, the user's kept
+  in order, and `waf.inkwall.dev/wired: inkwall-waf`; unprotecting removes the entries naming it in
+  the route's namespace (a same-named one elsewhere is the user's), and an emptied list. The
+  reference has no namespace: Traefik resolves it in the IngressRoute's, where the Middleware is,
+  so it works with `allowCrossNamespace` off (the default).
+  `spec.routes` is one list to a merge patch, so the patch carries the `resourceVersion` and a
+  conflict retries.
+- Works without Traefik's CRDs: no wiring, no crash. The leader looks for the IngressRoute CRD every
+  30 s and, once installed, the bundle builder and the wiring watch IngressRoutes
+  (`operator/internal/crdwatch`); the wiring's resync (1 min) notices a Middleware CRD installed
+  later.
+- `Programmed=True` when all the policy's Traefik Ingresses and IngressRoutes are wired and every
+  running Traefik pod has the engine. Else `ControllerUnsupported` (other controller or kind),
+  `WiringFailed` (no Traefik CRDs, name clash, an IngressRoute that can't be written),
+  `PendingRestart` (pods older than the webhook, listed), `SidecarMissing` (no Traefik pod, or pods
+  without the engine: operator down in detect mode or opted out, listed), `NoTargets`.
+- **Not yet:** `HTTPRoute` targets, `docs/gitops.md`, matching engines to the pods serving a
+  policy's class (all engines count for `Enforced`), IngressRoutes nested with `parentRefs`. Traefik
+  attachment default is open (§12).
 
 ### 4.5 Resolver
 
@@ -198,7 +211,7 @@ D6): expand hosts × paths; for `HTTPRoute`, wire every Gateway's integration; m
 wins (0002 §4.2); apply `WAFPolicyDefault`; resolve rule set and IP list references. Re-runs when a
 targeted route changes (indexed by target).
 
-**Built (v0.1.0)** (`operator/internal/resolver`, Ingress):
+**Built (v0.1.0)** (`operator/internal/resolver`, Ingress; IngressRoute since):
 
 - **Conflicts:** the oldest policy (creation time, then name) wins, others get `Conflict`, as in
   Gateway API; rejecting both would leave the route unprotected. Identical routes from two Ingresses
@@ -208,6 +221,13 @@ targeted route changes (indexed by target).
 - ConfigMap rules come only from ConfigMaps labeled `waf.inkwall.dev/rules=true` (smaller cache).
 - `ImplementationSpecific` paths are prefixes (as Traefik and ingress-nginx do). A default backend
   is covered only for an Ingress without rules.
+- An IngressRoute's routes come from each route's `match`: `Host`, `Path` (exact) and `PathPrefix`,
+  one string each (`` `…` `` or `"…"`), joined by `&&`, in parentheses or not. No `Host` is any host,
+  no path is `/`. Anything else (`||`, `!`, `HostRegexp`, `Method`, `Header`, `Query`, `ClientIP`,
+  two Hosts or two paths, several values) is `Accepted=False` (`TargetUnsupported`), naming the
+  route (`spec.routes[1]`), its rule and what can't be read; the previous version stays in force.
+  Traefik's `PathPrefix` is a string prefix, read element-wise: other paths of a covered host get
+  its most general policy in the engine, so none goes uninspected.
 - Cross-namespace `WAFRuleSet` references are rejected until a grant exists; use `ClusterWAFRuleSet`.
 
 ### 4.6 Bundle builder (leader only)
@@ -310,19 +330,23 @@ the token.
 `Resync` and every 5 min, reading only. Every replica forwards its engines' security events on
 its own events stream while the control plane accepts them, from a bounded disk buffer
 (`--events-dir`, an `emptyDir`; when full, the oldest are dropped and counted), resending what
-wasn't acknowledged after a reconnect or a restart. **Not yet:** applying snapshots (Managed).
+wasn't acknowledged after a reconnect or a restart. `inkwall_operator_events_buffered` follows the
+buffer, outages included. The events stream reconnects with jittered backoff bounded at 10 s (the
+leader's: 1 min), so the backlog drains soon after an outage. **Not yet:** applying snapshots
+(Managed).
 
 ## 5. Uninstall and disable
 
 Removal must never leave a proxy failing closed on a missing engine.
 
 **Built (v0.1.0):** `InkwallConfig.spec.suspend: true` puts every engine in allow-all within
-seconds, removing nothing. Unprotected Ingresses are unwired level-based (§4.4). `helm uninstall`
-runs a pre-delete hook, `inkwall-operator unwire` (`operator/manager/unwire.go`): scale the
-operator to 0 and wait for its pods (a draining replica still wires), set the Pod webhook to
-`Ignore`, then remove Inkwall's Middleware from every wired Ingress (keeping the user's) and delete
-the Middlewares it created. `WAFPolicy` objects stay; sidecars leave as proxy pods restart. Tested
-on kind: after the uninstall, a restarted Traefik serves the route without the engine.
+seconds, removing nothing. Unprotected Ingresses and IngressRoutes are unwired level-based (§4.4).
+`helm uninstall` runs a pre-delete hook, `inkwall-operator unwire` (`operator/manager/unwire.go`):
+scale the operator to 0 and wait for its pods (a draining replica still wires), set the Pod webhook
+to `Ignore`, then remove Inkwall's Middleware from every wired Ingress and IngressRoute (keeping the
+user's) and delete the Middlewares it created. `WAFPolicy` objects stay; sidecars leave as proxy
+pods restart. Tested on kind: after the uninstall, a restarted Traefik serves the routes (an
+Ingress and an IngressRoute) without the engine.
 
 **Not yet (O5):** a `waf.inkwall.dev/unwire` finalizer on `WAFPolicy`, and the same unwiring on
 `InkwallConfig` delete.
@@ -354,6 +378,7 @@ Least privilege. Built rules ([`role.yaml`](../../operator/config/rbac/role.yaml
 | `waf.inkwall.dev/*` | read; update status | Own CRDs |
 | `ingressclasses`, `ingresses`, `pods` | read | Resolution, injection checks |
 | `ingresses` | patch | Traefik annotation |
+| `ingressroutes` (traefik.io) | read, patch | Traefik routes' `middlewares` |
 | `middlewares` (traefik.io) | full | Traefik wiring |
 | `configmaps` | full, cluster-wide | `inkwall-trust` per namespace, engine reports |
 | `secrets` | in `inkwall-system` | Bundle, signing key, certs |

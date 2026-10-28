@@ -4,17 +4,17 @@
 engine (OWASP [Coraza](https://coraza.io/) with the [Core Rule Set](https://coreruleset.org/)) next
 to your ingress controller and enforces the `WAFPolicy` objects you attach to your routes.
 
-> **Status: v0.1.0, early.** Works today with **Traefik** and **`Ingress`** routes, plus a
-> standalone reverse proxy for anything else. The API is `v1alpha1` and will change. See
-> [Limits](#limits) and the [roadmap](#roadmap).
+> **Status: v0.1.0, early.** Works today with **Traefik** and **`Ingress`** or **`IngressRoute`**
+> routes, plus a standalone reverse proxy for anything else. The API is `v1alpha1` and will
+> change. See [Limits](#limits) and the [roadmap](#roadmap).
 
 ## How it works
 
 ![Inkwall architecture: the proxy asks the inkwall-engine sidecar for a verdict before forwarding; the operator watches WAFPolicy and route objects and pushes signed policy bundles to every engine](docs/diagrams/system-overview.svg)
 
 1. **`inkwall-operator`** injects `inkwall-engine` into Traefik's pods as a sidecar, attaches a
-   ForwardAuth Middleware to every `Ingress` a policy targets, and pushes signed policy bundles to
-   every engine.
+   ForwardAuth Middleware to every `Ingress` or `IngressRoute` a policy targets, and pushes signed
+   policy bundles to every engine.
 2. **`inkwall-engine`** inspects each request with CRS and answers allow or deny. It keeps
    enforcing its last bundle when the operator is down.
 3. **Status** on each policy shows how far it got: `Accepted` → `Programmed` (wired) →
@@ -115,7 +115,8 @@ deny  403  GET /?id=1%27%20OR%20%271%27%3D%271  reason=rule  rules=942100,949110
 
 - Proxies: **Traefik** only (and the standalone proxy). Envoy, HAProxy, ingress-nginx and Caddy are
   designed, not built.
-- Targets: **`Ingress`** only; not Traefik `IngressRoute` or Gateway API `HTTPRoute` yet.
+- Targets: **`Ingress`** and Traefik **`IngressRoute`** (rules of `Host`, `Path` and `PathPrefix`
+  joined by `&&`); not Gateway API `HTTPRoute` yet.
 - One cluster; the optional control plane (fleet management, analytics) isn't built.
 
 ## Roadmap

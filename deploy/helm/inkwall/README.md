@@ -2,7 +2,8 @@
 
 Installs the Inkwall operator, its CRDs and its webhooks ([design](../../../docs/design/0004-operator.md)).
 The operator validates policies and rule sets, builds them into a signed bundle, serves it to the
-engines, injects the engine into Traefik pods and wires their Ingresses. Kubernetes 1.29 or later.
+engines, injects the engine into Traefik pods and wires their Ingresses and IngressRoutes.
+Kubernetes 1.29 or later.
 
 ```sh
 helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \
@@ -129,7 +130,8 @@ working, uninspected; Traefik pods drop the engine when they restart. If the hoo
 uninstall stops: fix the cause (`kubectl -n <namespace> logs job/<release>-inkwall-operator-unwire`)
 and run it again, or skip the hook with `helm uninstall --no-hooks` and remove the
 `inkwall-waf` entries from the Ingresses' `traefik.ingress.kubernetes.io/router.middlewares`
-annotations yourself.
+annotations and from the IngressRoutes' `spec.routes[*].middlewares` yourself (the objects Inkwall
+wired are annotated `waf.inkwall.dev/wired`).
 
 ## When the operator is down
 
