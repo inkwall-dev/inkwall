@@ -59,7 +59,7 @@ Traefik middleware must set:
 
 - `POST /v1/check` with a `CheckRequest` (`api/engine/v1`, schema 0002 §5.1) as protobuf
   (`application/x-protobuf`) or JSON (`application/json`); `CheckResponse` (action, status, headers,
-  matched rule IDs) comes back in the same encoding.
+  matched rule IDs, the deciding policy in bundle mode) comes back in the same encoding.
 - For clients with no native protocol; we control what is sent.
 - Every well-formed check gets **200**, verdict in the body. Errors: 405 (not POST), 415 (content
   type), 413 (too large), 400 (undecodable or invalid).

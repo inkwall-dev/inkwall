@@ -384,3 +384,22 @@ func TestSameVerdictAsReverseProxy(t *testing.T) {
 type lastVerdict struct{ v pipeline.Verdict }
 
 func (l *lastVerdict) ObserveVerdict(v pipeline.Verdict) { l.v = v }
+
+// policyInspector decides as one policy of a bundle.
+type policyInspector struct{}
+
+func (policyInspector) Check(context.Context, *request.Request) pipeline.Verdict {
+	return pipeline.Verdict{Action: pipeline.ActionAllow, Policy: "shop/storefront"}
+}
+
+func (policyInspector) BodyLimit(*request.Request, int64) int64 { return 0 }
+
+func TestResponseNamesThePolicy(t *testing.T) {
+	h, err := New(policyInspector{}, Config{Logger: slog.New(slog.DiscardHandler)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := send(t, h, checkRequest("GET", "/", "", "")); out.GetPolicy() != "shop/storefront" {
+		t.Fatalf("policy %q, want shop/storefront", out.GetPolicy())
+	}
+}

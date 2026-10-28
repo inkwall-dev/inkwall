@@ -111,6 +111,40 @@ $ inkwallctl test 'http://shop.example.com/?id=1%27%20OR%20%271%27%3D%271'
 deny  403  GET /?id=1%27%20OR%20%271%27%3D%271  reason=rule  rules=942100,949110  interrupting=949110  847µs
 ```
 
+**Test `WAFPolicy` objects** before they reach the cluster: `--policy` with the rule sets, ConfigMaps
+and Ingresses they use resolves them as the operator does (each request goes to the policy of its
+host and path, `policy=` names it) and compiles them as the engine does. Files (or directories
+of them) may hold several YAML documents of any of these kinds, or `kubectl get -o yaml` output. Without `--ingress`, a single
+policy applies to every request. Objects the operator would reject (a missing rule set, rules that
+don't compile) are errors. Inspection deadlines are raised to 10 s, so a slow CI runner can't turn a
+verdict into a timeout.
+
+```console
+$ inkwallctl test --policy wafpolicy.yaml --rule-set wafruleset.yaml --configmap configmap.yaml \
+    --ingress ingress.yaml --request requests.http
+allow      GET /products/42  policy=shop/storefront  580µs
+deny  403  GET /?id=1%27%20OR%20%271%27%3D%271  policy=shop/storefront  reason=rule  rules=942100,949110  interrupting=949110  623µs
+log        GET /api/orders?debug=true  policy=shop/api  reason=rule  rules=100100  interrupting=100100  20µs
+allow      GET /?id=1%27%20OR%20%271%27%3D%271  reason=no_policy  0s
+```
+
+Or test the bundle the cluster enforces, its signature checked with the cluster's key:
+
+```sh
+kubectl -n inkwall-system get secret inkwall-bundle -o yaml > bundle.yaml
+kubectl -n inkwall-system get secret inkwall-bundle -o jsonpath='{.data.ed25519\.pub}' > bundle.pub
+inkwallctl test --bundle bundle.yaml --bundle-key bundle.pub --har traffic.har
+```
+
+In CI, with attacks and legitimate traffic kept next to the policies (exit 1 on a wrong verdict, 2
+on an error):
+
+```yaml
+- run: |
+    inkwallctl test --policy k8s/waf/ --expect deny --request test/waf/attacks.http
+    inkwallctl test --policy k8s/waf/ --expect allow --har test/waf/legitimate.har
+```
+
 ## Limits
 
 - Proxies: **Traefik** only (and the standalone proxy). Envoy, HAProxy, ingress-nginx and Caddy are

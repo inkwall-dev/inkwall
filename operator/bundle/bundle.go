@@ -206,25 +206,35 @@ func Decode(data []byte) (*bundlev1.SignedBundle, error) {
 	return &signed, nil
 }
 
-// Store writes a signed bundle to the bundle Secret.
-func Store(ctx context.Context, c client.Client, namespace string, b *bundlev1.Bundle, signed *bundlev1.SignedBundle, pub ed25519.PublicKey) error {
+// Encode returns the content of the bundle Secret's BundleKey for signed:
+// the reverse of Decode.
+func Encode(signed *bundlev1.SignedBundle) ([]byte, error) {
 	raw, err := proto.Marshal(signed)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
 	if _, err := zw.Write(raw); err != nil {
-		return err
+		return nil, err
 	}
 	if err := zw.Close(); err != nil {
-		return err
+		return nil, err
 	}
 	if buf.Len() > MaxCompressedBytes {
-		return fmt.Errorf("%w: %d bytes compressed, at most %d", ErrTooLarge, buf.Len(), MaxCompressedBytes)
+		return nil, fmt.Errorf("%w: %d bytes compressed, at most %d", ErrTooLarge, buf.Len(), MaxCompressedBytes)
+	}
+	return buf.Bytes(), nil
+}
+
+// Store writes a signed bundle to the bundle Secret.
+func Store(ctx context.Context, c client.Client, namespace string, b *bundlev1.Bundle, signed *bundlev1.SignedBundle, pub ed25519.PublicKey) error {
+	encoded, err := Encode(signed)
+	if err != nil {
+		return err
 	}
 	s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: BundleSecret}}
-	data := map[string][]byte{BundleKey: buf.Bytes(), PublicKeyKey: pub}
+	data := map[string][]byte{BundleKey: encoded, PublicKeyKey: pub}
 	annotations := map[string]string{
 		VersionAnnotation: strconv.FormatUint(b.GetVersion(), 10),
 		HashAnnotation:    hex.EncodeToString(b.GetContentHash()),

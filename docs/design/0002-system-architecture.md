@@ -121,8 +121,10 @@ never engines: fewer connections, no engine egress, air-gap uses the same path. 
 
 ### 3.5 `inkwallctl` (CLI)
 
-`test` (replay a request/HAR, show matches) and `bench` (benchmark corpus) are built. Planned:
-`bundle build/verify` (offline, for CI) and `status` (engine versions, drift).
+`test` (replay a request/HAR, show matches) and `bench` (benchmark corpus) are built. `test` checks
+the flags' policy, `WAFPolicy` objects (`--policy`: resolved with the operator's resolver, compiled
+as the engine compiles a bundle) or a bundle (`--bundle`, signature checked with `--bundle-key`),
+offline, for CI. Planned: `status` (engine versions, drift).
 
 ---
 
