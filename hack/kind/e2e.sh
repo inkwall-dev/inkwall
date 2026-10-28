@@ -20,6 +20,7 @@ PORT=${E2E_PORT:-18480}
 TRAEFIK_PORT=${E2E_TRAEFIK_PORT:-18080}
 TRAEFIK_NS=traefik-e2e
 TRAEFIK_HOST=traefik.e2e.example.com
+ROUTE_HOST=route.e2e.example.com
 TRAEFIK_CHART_VERSION=41.6.1 # Traefik v3.7.13, as hack/kind/up.sh
 KUBECTL=(kubectl --context "kind-$CLUSTER")
 SQLI='/?id=1%27%20OR%20%271%27%3D%271'
@@ -328,6 +329,70 @@ eventually "the operator received the engine's security events" events_received
 eventually "unwired when the policy is deleted" unwired
 eventually "the attack passes again" tstatus_is 200 "$SQLI"
 
+# A Traefik IngressRoute (#79): its routes get the operator's Middleware
+# first, the user's own kept, and lose it when the policy goes.
+rget() { curl -s -H "Host: $ROUTE_HOST" "http://127.0.0.1:$TRAEFIK_PORT$1" || true; }
+rcode() {
+  curl -s -o /dev/null -w '%{http_code}' -H "Host: $ROUTE_HOST" "http://127.0.0.1:$TRAEFIK_PORT$1" || true
+}
+rstatus_is() { [[ $(rcode "$2") == "$1" ]]; }
+route_middlewares() {
+  "${KUBECTL[@]}" -n "$NS" get ingressroutes.traefik.io web -o jsonpath='{.spec.routes[*].middlewares[*].name}|{.metadata.annotations.waf\.inkwall\.dev/wired}'
+}
+route_wired() { [[ $(route_middlewares) == "inkwall-waf e2e-header|inkwall-waf" ]]; }
+route_unwired() { [[ $(route_middlewares) == "e2e-header|" ]]; }
+# whoami echoes the request headers: the user's Middleware still applies.
+user_middleware() { rget /products/42 | grep -q '^X-E2e: route'; }
+rready() {
+  [[ $("${KUBECTL[@]}" -n "$NS" get wafpolicy web-route -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}') == True ]]
+}
+
+echo "== an IngressRoute through Traefik"
+"${KUBECTL[@]}" apply -f - >/dev/null <<YAML
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: e2e-header
+  namespace: $NS
+spec:
+  headers:
+    customRequestHeaders: {X-E2E: route}
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: web
+  namespace: $NS
+spec:
+  ingressClassName: traefik-e2e
+  entryPoints: [web]
+  routes:
+    - kind: Rule
+      match: Host(\`$ROUTE_HOST\`) && PathPrefix(\`/\`)
+      middlewares: [{name: e2e-header}]
+      services: [{name: web, port: 8080}]
+YAML
+eventually "Traefik serves the IngressRoute" rstatus_is 200 /
+check "no policy yet: the attack passes through the IngressRoute" rstatus_is 200 "$SQLI"
+"${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: web-route
+  namespace: $NS
+spec:
+  targetRefs: [{group: traefik.io, kind: IngressRoute, name: web}]
+  mode: Block
+YAML
+eventually "the operator wired the IngressRoute, first, keeping the user's Middleware" route_wired
+eventually "the engine blocks the attack on the IngressRoute" rstatus_is 403 "$SQLI"
+check "benign traffic passes the IngressRoute" rstatus_is 200 /products/42
+check "the user's Middleware still applies" user_middleware
+eventually "the IngressRoute's policy is Ready" rready
+"${KUBECTL[@]}" -n "$NS" delete wafpolicy web-route >/dev/null
+eventually "the IngressRoute is unwired when the policy is deleted, the user's Middleware kept" route_unwired
+eventually "the attack passes the IngressRoute again" rstatus_is 200 "$SQLI"
+
 # Traefik deployed with other labels (#50): InkwallConfig names them, the
 # operator restarts with them, and their pods get the engine.
 injected() {
@@ -503,17 +568,20 @@ metadata:
   name: web
   namespace: $NS
 spec:
-  targetRefs: [{kind: Ingress, name: web}]
+  targetRefs: [{kind: Ingress, name: web}, {group: traefik.io, kind: IngressRoute, name: web}]
   mode: Block
 YAML
 eventually "wired again before the uninstall" wired
+eventually "the IngressRoute wired again before the uninstall" route_wired
 eventually "blocking before the uninstall" tstatus_is 403 "$SQLI"
+eventually "blocking on the IngressRoute before the uninstall" rstatus_is 403 "$SQLI"
 if helm --kube-context "kind-$CLUSTER" uninstall inkwall --namespace "$OPERATOR_NS" --wait --timeout 5m >/dev/null; then
   ok "helm uninstall (with the unwire hook)"
 else
   fail "helm uninstall"
 fi
 check "the Ingress is unwired" unwired
+check "the IngressRoute is unwired, the user's Middleware kept" route_unwired
 no_middleware() { ! "${KUBECTL[@]}" -n "$NS" get middlewares.traefik.io inkwall-waf >/dev/null 2>&1; }
 check "the Middleware is deleted" no_middleware
 kept() { "${KUBECTL[@]}" -n "$NS" get wafpolicy web >/dev/null 2>&1; }
@@ -526,6 +594,7 @@ kill "$tpf" 2>/dev/null || true
 "${KUBECTL[@]}" -n "$TRAEFIK_NS" port-forward svc/traefik-e2e "$TRAEFIK_PORT:80" >/dev/null 2>&1 &
 tpf=$!
 eventually "the route still answers after the uninstall (uninspected)" tstatus_is 200 "$SQLI"
+check "so does the IngressRoute" rstatus_is 200 "$SQLI"
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy web --ignore-not-found >/dev/null
 
 if [[ $failures -gt 0 ]]; then

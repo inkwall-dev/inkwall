@@ -3,8 +3,9 @@
 
 # A second Traefik for the end-to-end test (e2e.sh), with nothing about
 # Inkwall in it: the operator injects the engine into its pod and wires the
-# Ingresses its policies protect. It serves only its own IngressClass, so it
-# leaves the demo's Traefik (traefik-values.yaml) alone.
+# Ingresses and IngressRoutes its policies protect. It serves only its own
+# class, so it leaves the demo's Traefik (traefik-values.yaml) alone, which
+# in turn ignores the test's IngressRoutes (ingressClassName traefik-e2e).
 ingressClass:
   enabled: true
   isDefaultClass: false
@@ -12,6 +13,8 @@ ingressClass:
 
 providers:
   kubernetesIngress:
+    ingressClass: traefik-e2e
+  kubernetesCRD:
     ingressClass: traefik-e2e
 
 ports:

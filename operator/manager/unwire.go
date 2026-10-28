@@ -68,11 +68,12 @@ func Unwire(ctx context.Context, c client.Client, namespace, deployment string, 
 	}
 
 	// 3. The routes stop going through the engine.
-	ingresses, middlewares, err := wiring.Unwire(ctx, c)
+	n, err := wiring.Unwire(ctx, c)
 	if err != nil {
 		return err
 	}
-	logger.Info("routes unwired", slog.Int("ingresses", ingresses), slog.Int("middlewares", middlewares))
+	logger.Info("routes unwired", slog.Int("ingresses", n.Ingresses), slog.Int("ingressroutes", n.IngressRoutes),
+		slog.Int("middlewares", n.Middlewares))
 	return nil
 }
 
