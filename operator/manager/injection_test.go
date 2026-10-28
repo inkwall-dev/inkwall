@@ -4,6 +4,7 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -68,6 +69,10 @@ func testInjection(ctx context.Context, t *testing.T, c client.Client) {
 		}
 		if cm.Data["ca.crt"] == "" || len(cm.BinaryData["ed25519.pub"]) != 32 {
 			return "incomplete"
+		}
+		// Between rotations, the one key, also as the set engines trust.
+		if !bytes.Equal(cm.BinaryData["trusted-keys.pub"], cm.BinaryData["ed25519.pub"]) {
+			return "trusted-keys.pub is not the signing key"
 		}
 		return ""
 	})

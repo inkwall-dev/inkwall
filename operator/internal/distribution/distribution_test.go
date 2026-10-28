@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -172,7 +173,9 @@ func TestWatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{EngineId: "e1", PodName: "traefik-1"}}}); err != nil {
+	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{
+		EngineId: "e1", PodName: "traefik-1", TrustedKeyIds: []string{"k"},
+	}}}); err != nil {
 		t.Fatal(err)
 	}
 	// The current bundle comes first.
@@ -185,7 +188,18 @@ func TestWatch(t *testing.T) {
 	}
 	waitFor(t, "the ack", func() bool {
 		got, _ := table.Snapshot()
-		return len(got) == 1 && got[0].Applied == 1 && got[0].ServiceAccount == "edge/engine" && got[0].Replica == "replica-0"
+		return len(got) == 1 && got[0].Applied == 1 && got[0].ServiceAccount == "edge/engine" && got[0].Replica == "replica-0" &&
+			slices.Equal(got[0].TrustedKeys, []string{"k"})
+	})
+	// The engine reloaded its keys: heartbeats report them.
+	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Heartbeat{Heartbeat: &agentv1.Heartbeat{
+		BundleVersion: 1, TrustedKeyIds: []string{"k", "k2"},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the new trusted keys", func() bool {
+		got, _ := table.Snapshot()
+		return len(got) == 1 && slices.Equal(got[0].TrustedKeys, []string{"k", "k2"})
 	})
 
 	// A new bundle is pushed; a rejection is recorded.

@@ -39,7 +39,7 @@ Tooling: kubebuilder v4 layout, controller-runtime, server-side apply, CEL in CR
 
 | Kind | Scope | Purpose |
 |---|---|---|
-| `InkwallConfig` | Cluster, singleton `default` | Mode, engine, integrations, SaaS, `suspend` |
+| `InkwallConfig` | Cluster, singleton `default` | Mode, engine, integrations, SaaS, `suspend`, signing key rotation |
 | `WAFPolicy` | Namespace | What to enforce on which routes |
 | `WAFRuleSet` / `ClusterWAFRuleSet` | Namespace / Cluster | Rules: builtin CRS, SecLang, ConfigMap |
 | `WAFIPList` / `ClusterWAFIPList` | Namespace / Cluster | CIDR lists (planned) |
@@ -143,9 +143,10 @@ Puts the engine into proxy pods as a sidecar sharing a socket directory.
   `forward-auth` in bundle mode, projected token (audience `inkwall-operator`) and trust ConfigMap
   in one read-only directory, `emptyDir` bundle cache, non-root, read-only root filesystem. Image
   and resources from `InkwallConfig.spec.engine`, else `--engine-image`.
-- The leader keeps an `inkwall-trust` ConfigMap (`ca.crt`, `ed25519.pub`) in each namespace with
-  proxy pods (removed with the last one), and a `Role` + `RoleBinding` `inkwall-bundle-reader` for
-  each proxy ServiceAccount. It deletes only ConfigMaps it labeled.
+- The leader keeps an `inkwall-trust` ConfigMap (`ca.crt`; `trusted-keys.pub`, every bundle key
+  engines must accept, which the engine reads; `ed25519.pub`, the active key, for older engines) in
+  each namespace with proxy pods (removed with the last one), and a `Role` + `RoleBinding`
+  `inkwall-bundle-reader` for each proxy ServiceAccount. It deletes only ConfigMaps it labeled.
 - **Not yet:** `rollout: Automatic`; pods running before the operator are injected on restart.
 
 ### 4.4 Wiring controller
@@ -248,6 +249,30 @@ targeted route changes (indexed by target).
   for the API server and `kube-root-ca.crt`; verified like a streamed bundle.
 - **Not yet:** chunking (Secrets cap at 1 MiB). A bundle over 900 KiB compressed is not published;
   the current one stays.
+
+**Built: signing key rotation** (`operator/internal/bundle/keyring.go`, `pkg/agent`,
+`pkg/bundlekey`). Requested by a new value of the `waf.inkwall.dev/rotate-signing-key` annotation on
+the `InkwallConfig` (GitOps-friendly, next to the rest of the cluster's configuration, and no write
+access to the operator's Secrets needed), or due after `spec.signingKey.rotationInterval` (≥ 1h).
+The keys and the rotation's state live in `inkwall-bundle-signing-key`, so a new leader continues it:
+
+1. **Publishing:** a new key is generated and added to `trusted-keys.pub` (the trust ConfigMaps
+   follow); the old key still signs. Engines re-read their key file every 10 s and report the key
+   IDs they trust in `Hello` and `Heartbeat`.
+2. **Switch** once at least a grace period (1 min, the kubelet's ConfigMap update delay) has passed
+   and every connected engine reports the new key; a new leader first waits for the replicas'
+   reports (30 s). The current content is signed again with the new key, as a new version, so
+   engines cache a bundle the new key signed. The old public key stays trusted.
+3. **Retire** the old key once the grace has passed again and every connected engine runs a
+   bundle signed with the new key: `trusted-keys.pub` has the one key.
+
+An engine that reports no keys (older than rotation) blocks the switch until it is replaced; the
+operator logs the engines it waits for. The phase is the Secret's
+`waf.inkwall.dev/rotation-phase` annotation (`Publishing`, `Retiring`); the bundle Secret's
+`waf.inkwall.dev/key-id` names the key that signed it. A deleted signing key Secret is recreated
+with the keys in the leader's memory. Tested: unit (multi-key verification, reload, the state
+machine), envtest (an engine that gets the key late holds the switch; no NACK) and kind (Traefik's
+injected engine and a hand-configured one; no NACK, no restart).
 
 ### 4.7 Distribution server (all replicas)
 
@@ -366,7 +391,7 @@ Ingress and an IngressRoute) without the engine.
 | Invalid rule | Rejected at admission | Error to `kubectl` / Argo CD | Fix the rule |
 | Engine can't compile (skew) | Engine keeps previous bundle | `EngineNack` | Upgrade engines or fix rule |
 | Bundle Secret deleted | None | Builder recreates it | Automatic |
-| Signing key rotated | None | New key rolled out first; both accepted during overlap | Automatic |
+| Signing key rotated | None: signs with the new key only once every connected engine trusts it | Secret's `rotation-phase`; operator logs the engines it waits for | Automatic (§4.6); replace engines older than rotation |
 | Unknown controller version | Wiring may break | `Programmed=False` | Update or pin integration |
 | API server down | None | — | Automatic |
 

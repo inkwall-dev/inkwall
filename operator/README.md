@@ -8,7 +8,9 @@ The Kubernetes operator ([design](../docs/design/0004-operator.md)). It:
   always accepted;
 - **builds** the policies and the Ingresses they target into a bundle, signed with the cluster's
   ed25519 key, in the `inkwall-bundle` Secret (leader only; a second after a change, and every
-  10 minutes), and reports `Accepted` on each policy;
+  10 minutes), and reports `Accepted` on each policy. It rotates the key on request (the
+  `waf.inkwall.dev/rotate-signing-key` annotation on the `InkwallConfig`) or on a schedule, without
+  an engine ever rejecting a bundle;
 - **serves** the bundle to the engines over gRPC/TLS on port 9445 and reports `Enforced` from their
   acknowledgements;
 - **injects** the engine as a native sidecar into Traefik pods at creation (selected by
@@ -58,7 +60,7 @@ kubectl apply --server-side -f operator/config/crd/bases -f operator/config/samp
 | `webhook/` | Validating webhook and its certificate |
 | `integrations/` | The proxies Inkwall knows (Traefik) and their pod selectors |
 | `internal/resolver/` | `WAFPolicy` + Ingresses + rule sets → bundle policies and `Accepted` |
-| `internal/bundle/` | Content hash, versions, ed25519 signing, bundle and signing key Secrets |
+| `internal/bundle/` | Content hash, versions, ed25519 signing and key rotation, bundle and signing key Secrets |
 | `internal/controller/` | Bundle builder |
 | `internal/distribution/` | `BundleService` server, engine authentication and reports, `Enforced` |
 | `internal/injection/` | Engine sidecar, trust ConfigMap, RBAC grant |

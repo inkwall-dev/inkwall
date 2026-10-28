@@ -5,9 +5,9 @@
 # bundle mode, which takes its policy from the operator. Everything here is
 # what injection (#27) will set up for a proxy's pods: a ServiceAccount
 # allowed to read the bundle Secret, a projected token for the operator's
-# audience, and the trust ConfigMap (inkwall-trust, created by e2e.sh) with
-# the operator's CA and the bundle public key; and, to read the bundle Secret
-# when the operator is down, a token for the API server and its CA.
+# audience, and the trust ConfigMap (inkwall-trust, kept by e2e.sh) with
+# the operator's CA and the bundle public keys; and, to read the bundle
+# Secret when the operator is down, a token for the API server and its CA.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -74,6 +74,8 @@ spec:
             - --upstream=http://127.0.0.1:8080
             - --operator=inkwall-operator.inkwall-system.svc:9445
             - --bundle-cache=/var/run/inkwall/bundle.pb
+            # Every key the engine trusts, reloaded when it changes.
+            - --bundle-key=/var/run/secrets/inkwall/trusted-keys.pub
             # Read when the engine has no bundle and the operator is down.
             - --bundle-secret=inkwall-system/inkwall-bundle
           env:
