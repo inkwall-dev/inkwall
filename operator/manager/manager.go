@@ -108,6 +108,7 @@ type Options struct {
 
 	// Inject adds the engine to proxy pods (needs Webhooks and
 	// DistributionPort), with EngineImage unless InkwallConfig sets one.
+	// Without it, the routes the operator wired are unwired.
 	Inject           bool
 	EngineImage      string
 	EnginePullPolicy corev1.PullPolicy
@@ -221,12 +222,6 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			BundleSecret: o.Namespace + "/" + bundle.BundleSecret,
 			Integrations: selectors,
 		}
-		if err := (&wiring.Reconciler{
-			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), PodWebhook: webhook.MutatingConfigName,
-			TraefikPods: selectors.Selector(integrations.Traefik.Name), IngressRoutes: ingressRoutes,
-		}).SetupWithManager(mgr); err != nil {
-			return nil, err
-		}
 		if err := (&injection.PodWebhookReconciler{
 			Client: mgr.GetClient(), ConfigName: webhook.MutatingConfigName, WebhookName: webhook.PodWebhookName,
 			Pods: selectors.LabelSelector(integrations.Traefik.Name),
@@ -245,6 +240,14 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		}).SetupWithManager(mgr); err != nil {
 			return nil, err
 		}
+	}
+	// Without injection, the wiring controller unwires what was wired: new
+	// proxy pods won't have the engine.
+	if err := (&wiring.Reconciler{
+		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), PodWebhook: webhook.MutatingConfigName,
+		TraefikPods: selectors.Selector(integrations.Traefik.Name), IngressRoutes: ingressRoutes, Disabled: !inject,
+	}).SetupWithManager(mgr); err != nil {
+		return nil, err
 	}
 	if err := mgr.Add(ingressRoutes); err != nil {
 		return nil, err

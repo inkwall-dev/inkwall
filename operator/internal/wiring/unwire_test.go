@@ -5,6 +5,7 @@ package wiring
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	networkingv1 "k8s.io/api/networking/v1"
@@ -14,9 +15,12 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+
+	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 )
 
 func TestUnwire(t *testing.T) {
@@ -45,16 +49,28 @@ func TestUnwire(t *testing.T) {
 	wiredRoute.SetAnnotations(map[string]string{WiredAnnotation: MiddlewareName})
 	userRoute := ingressRoute("shop", "mine", []any{map[string]any{"name": MiddlewareName}})
 
-	s := runtime.NewScheme()
-	_ = clientgoscheme.AddToScheme(s)
-	c := fake.NewClientBuilder().WithScheme(s).WithObjects(wired, onlyOurs, untouched, ours, theirs, wiredRoute, userRoute).Build()
+	// Policies the operator holds: one is kept, one is being deleted; and
+	// another controller's finalizer, which stays.
+	kept := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "kept", Finalizers: []string{Finalizer, "example.com/other"}}}
+	deleting := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "deleting", Finalizers: []string{Finalizer},
+		DeletionTimestamp: ptr.To(metav1.Now())}}
+
+	c := fake.NewClientBuilder().WithScheme(scheme()).
+		WithObjects(wired, onlyOurs, untouched, ours, theirs, wiredRoute, userRoute, kept, deleting).Build()
 
 	n, err := Unwire(ctx, c)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != (Unwired{Ingresses: 2, IngressRoutes: 1, Middlewares: 1}) {
-		t.Errorf("unwired %+v, want 2 Ingresses, 1 IngressRoute and 1 Middleware", n)
+	if n != (Unwired{Ingresses: 2, IngressRoutes: 1, Middlewares: 1, Policies: 2}) {
+		t.Errorf("unwired %+v, want 2 Ingresses, 1 IngressRoute, 1 Middleware and 2 policies", n)
+	}
+	var p wafv1alpha1.WAFPolicy
+	if err := c.Get(ctx, client.ObjectKeyFromObject(kept), &p); err != nil || !slices.Equal(p.Finalizers, []string{"example.com/other"}) {
+		t.Errorf("kept policy: %v, finalizers %v; want only the other controller's", err, p.Finalizers)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(deleting), &p); !apierrors.IsNotFound(err) {
+		t.Errorf("a policy being deleted, released: %v, want it gone", err)
 	}
 
 	get := func(name string) *networkingv1.Ingress {
@@ -113,9 +129,7 @@ func TestUnwireWithoutTraefikCRDs(t *testing.T) {
 	ref := MiddlewareRef("shop")
 	wired := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "web",
 		Annotations: map[string]string{MiddlewaresAnnotation: ref, WiredAnnotation: ref}}}
-	s := runtime.NewScheme()
-	_ = clientgoscheme.AddToScheme(s)
-	c := fake.NewClientBuilder().WithScheme(s).WithObjects(wired).WithInterceptorFuncs(interceptor.Funcs{
+	c := fake.NewClientBuilder().WithScheme(scheme()).WithObjects(wired).WithInterceptorFuncs(interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 			if u, ok := list.(*unstructured.UnstructuredList); ok {
 				return &meta.NoKindMatchError{GroupKind: u.GroupVersionKind().GroupKind()}
@@ -127,4 +141,11 @@ func TestUnwireWithoutTraefikCRDs(t *testing.T) {
 	if err != nil || n != (Unwired{Ingresses: 1}) {
 		t.Errorf("unwired %+v, %v; want 1 Ingress", n, err)
 	}
+}
+
+func scheme() *runtime.Scheme {
+	s := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(s)
+	_ = wafv1alpha1.AddToScheme(s)
+	return s
 }

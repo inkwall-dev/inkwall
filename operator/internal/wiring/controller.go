@@ -19,6 +19,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
@@ -26,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -41,8 +43,10 @@ import (
 
 // The wiring controller reads routes and proxy pods, writes the Traefik
 // Middleware in protected namespaces, adds it to protected Ingresses and
-// IngressRoutes, and reports Programmed.
+// IngressRoutes, holds each WAFPolicy with a finalizer until its routes are
+// unwired, and reports Programmed.
 //
+// +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingressclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=traefik.io,resources=middlewares,verbs=get;list;watch;create;update;patch;delete
@@ -56,7 +60,14 @@ const (
 	ReasonPendingRestart        = "PendingRestart"
 	ReasonSidecarMissing        = "SidecarMissing"
 	ReasonNoTargets             = "NoTargets"
+	ReasonInjectionDisabled     = "InjectionDisabled"
 )
+
+// Finalizer holds a WAFPolicy until the operator has unwired its routes, so
+// a policy deleted while the operator is down is unwired once it is back.
+// Only the wiring controller adds it; it and `inkwall-operator unwire`
+// remove it.
+const Finalizer = "waf.inkwall.dev/unwire"
 
 const (
 	debounce = time.Second
@@ -81,7 +92,19 @@ type Reconciler struct {
 	// IngressRoutes watches Traefik's IngressRoutes once their CRD is
 	// installed; nil: they are only read at each reconcile.
 	IngressRoutes *crdwatch.Kind
+	// Disabled: the engine isn't injected (--inject=false), so new proxy
+	// pods won't have it. Every route the operator wired is unwired, and
+	// the policies are released from the finalizer.
+	Disabled bool
 }
+
+// policyChanged: a WAFPolicy's spec, its deletion or its finalizers.
+var policyChanged = predicate.Or[client.Object](predicate.GenerationChangedPredicate{}, predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		return !slices.Equal(e.ObjectOld.GetFinalizers(), e.ObjectNew.GetFinalizers()) ||
+			!e.ObjectOld.GetDeletionTimestamp().Equal(e.ObjectNew.GetDeletionTimestamp())
+	},
+})
 
 // SetupWithManager registers the controller.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -103,7 +126,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	start <- event.GenericEvent{Object: &corev1.Pod{}}
 	c, err := ctrl.NewControllerManagedBy(mgr).
 		Named("wiring").
-		Watches(&wafv1alpha1.WAFPolicy{}, enqueue, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(&wafv1alpha1.WAFPolicy{}, enqueue, builder.WithPredicates(policyChanged)).
 		// Ingress annotations matter (the operator's own included).
 		Watches(&networkingv1.Ingress{}, enqueue).
 		Watches(&networkingv1.IngressClass{}, enqueue).
@@ -139,12 +162,16 @@ type state struct {
 	routes   map[types.NamespacedName]*unstructured.Unstructured
 	routeCRD bool
 	routeErr map[types.NamespacedName]string
+	// ingressErr says why an Ingress couldn't be wired.
+	ingressErr map[types.NamespacedName]string
 	// traefikCRDs: the Middleware CRD is installed.
 	traefikCRDs bool
 	// middlewareErr: namespace -> why its Middleware can't be used.
 	middlewareErr  map[string]string
 	pods           []corev1.Pod
 	injectingSince time.Time
+	// disabled: the engine isn't injected, nothing is wired.
+	disabled bool
 }
 
 // IngressRoutes lists Traefik's IngressRoutes; installed is false, with
@@ -162,7 +189,8 @@ func IngressRoutes(ctx context.Context, c client.Client) (routes []unstructured.
 }
 
 // Reconcile wires every protected Traefik Ingress and IngressRoute, unwires
-// the rest, and reports Programmed.
+// the rest, releases the deleted policies once their routes are unwired, and
+// reports Programmed.
 func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
 	logger := log.FromContext(ctx)
 	var (
@@ -200,6 +228,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	st := &state{
 		ingresses: byKey, wire: map[types.NamespacedName]target{},
 		routes: map[types.NamespacedName]*unstructured.Unstructured{}, routeCRD: routeCRD, routeErr: map[types.NamespacedName]string{},
+		ingressErr:  map[types.NamespacedName]string{},
 		traefikCRDs: r.middlewaresInstalled(), middlewareErr: map[string]string{},
 	}
 	for i := range routes {
@@ -207,12 +236,38 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		st.routes[types.NamespacedName{Namespace: ir.GetNamespace(), Name: ir.GetName()}] = ir
 	}
 
+	// A policy is held by the finalizer before its routes are wired; one
+	// being deleted isn't wired. One that couldn't be held yet (say, the
+	// webhook isn't answering yet) is wired anyway, and retried: unwiring
+	// it would drop its protection.
+	var errs error
+	var live []*wafv1alpha1.WAFPolicy
+	for i := range policies.Items {
+		p := &policies.Items[i]
+		if r.Disabled || p.DeletionTimestamp != nil {
+			continue
+		}
+		switch err := r.setFinalizer(ctx, p, true); {
+		case apierrors.IsNotFound(err):
+			continue
+		case err != nil:
+			errs = errors.Join(errs, fmt.Errorf("add the finalizer to WAFPolicy %s/%s: %w", p.Namespace, p.Name, err))
+		}
+		live = append(live, p)
+	}
+
+	// The routes go to the engine only while a Traefik pod that gets it
+	// runs. With injection off, or no Traefik pod selected (the
+	// InkwallConfig's selector changed, or was deleted), new proxy pods
+	// would have no engine: nothing is wired.
+	on := !r.Disabled && len(running(pods.Items)) > 0 && st.traefikCRDs
+
 	// The routes to wire: every Ingress target of a policy that Traefik
 	// serves, and every IngressRoute target. A policy that isn't accepted
 	// yet is wired too: until its rules are in a bundle, the engine lets its
 	// routes through (no-policy).
 	wireRoutes := map[types.NamespacedName]bool{}
-	for _, p := range policies.Items {
+	for _, p := range live {
 		for _, t := range p.Spec.TargetRefs {
 			k := types.NamespacedName{Namespace: p.Namespace, Name: t.Name}
 			switch t.Kind {
@@ -229,7 +284,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	}
 
 	needed := map[string]bool{} // namespaces whose Middleware is used
-	if st.traefikCRDs {
+	if on {
 		for _, t := range st.wire {
 			if t.controller == integrations.Traefik.Controller {
 				needed[t.ing.Namespace] = true
@@ -247,47 +302,133 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	}
 
 	// Ingress annotations: add the Middleware to protected Traefik
-	// Ingresses, remove it from those the operator wired before.
+	// Ingresses, remove it from those the operator wired before. One that
+	// can't be written is reported, the others are still wired, and its
+	// namespace keeps the Middleware: a router referring to a missing one
+	// fails.
+	wanted := map[schema.GroupKind]map[types.NamespacedName]bool{ingressKind: {}, IngressRouteGVK.GroupKind(): {}}
 	for i := range ingresses.Items {
 		ing := &ingresses.Items[i]
 		k := types.NamespacedName{Namespace: ing.Namespace, Name: ing.Name}
 		t, protected := st.wire[k]
-		want := protected && st.traefikCRDs && t.controller == integrations.Traefik.Controller && st.middlewareErr[ing.Namespace] == ""
+		want := protected && on && t.controller == integrations.Traefik.Controller && st.middlewareErr[ing.Namespace] == ""
+		wanted[ingressKind][k] = want
 		if err := r.annotate(ctx, ing, want); err != nil {
-			return reconcile.Result{}, fmt.Errorf("wire ingress %s: %w", k, err)
+			errs = errors.Join(errs, fmt.Errorf("wire Ingress %s: %w", k, err))
+			st.ingressErr[k] = fmt.Sprintf("Ingress %s: %v", k.Name, err)
+			needed[k.Namespace] = true
 		}
 	}
 
-	// IngressRoutes: the same, in each route's middlewares. One that can't
-	// be written is reported, the others are still wired.
-	var conflicts error
+	// IngressRoutes: the same, in each route's middlewares.
 	for k, ir := range st.routes {
-		want := wireRoutes[k] && st.traefikCRDs && st.middlewareErr[k.Namespace] == ""
+		want := wireRoutes[k] && on && st.middlewareErr[k.Namespace] == ""
+		wanted[IngressRouteGVK.GroupKind()][k] = want
 		switch err := r.wireRoute(ctx, ir, want); {
 		case apierrors.IsConflict(err):
 			// Changed since the cache saw it: again, once it has.
-			conflicts = errors.Join(conflicts, fmt.Errorf("wire IngressRoute %s: %w", k, err))
+			errs = errors.Join(errs, fmt.Errorf("wire IngressRoute %s: %w", k, err))
+			needed[k.Namespace] = true
 		case err != nil:
+			errs = errors.Join(errs, fmt.Errorf("wire IngressRoute %s: %w", k, err))
 			st.routeErr[k] = fmt.Sprintf("IngressRoute %s: %v", k.Name, err)
 			logger.Error(err, "IngressRoute not wired", "ingressroute", k)
+			needed[k.Namespace] = true
 		}
 	}
 
 	// After the routes: a router referring to a missing Middleware fails.
 	if st.traefikCRDs {
 		if err := r.pruneMiddlewares(ctx, needed); err != nil {
-			return reconcile.Result{}, err
+			errs = errors.Join(errs, err)
 		}
 	}
 
-	st.pods, st.injectingSince = pods.Items, r.injectingSince(ctx)
+	st.pods, st.injectingSince, st.disabled = pods.Items, r.injectingSince(ctx), r.Disabled
 	if err := r.report(ctx, policies.Items, st); err != nil {
-		return reconcile.Result{}, err
+		errs = errors.Join(errs, err)
 	}
-	if conflicts != nil || len(st.routeErr) > 0 {
-		return reconcile.Result{}, errors.Join(conflicts, errors.New("IngressRoutes not wired"))
+
+	// Release the policies being deleted once none of their targets is
+	// still wired for them alone. With the engine not injected, the
+	// unwiring doesn't depend on the policies: all are released.
+	for i := range policies.Items {
+		p := &policies.Items[i]
+		if !r.Disabled {
+			if p.DeletionTimestamp == nil || !controllerutil.ContainsFinalizer(p, Finalizer) {
+				continue
+			}
+			if err := r.unwiredFor(ctx, p, wanted); err != nil {
+				errs = errors.Join(errs, fmt.Errorf("WAFPolicy %s/%s deleted: %w", p.Namespace, p.Name, err))
+				continue
+			}
+		}
+		if err := r.setFinalizer(ctx, p, false); client.IgnoreNotFound(err) != nil {
+			errs = errors.Join(errs, fmt.Errorf("remove the finalizer from WAFPolicy %s/%s: %w", p.Namespace, p.Name, err))
+		}
+	}
+	if errs != nil {
+		return reconcile.Result{}, errs
 	}
 	return reconcile.Result{RequeueAfter: resync}, nil
+}
+
+var ingressKind = schema.GroupKind{Group: networkingv1.GroupName, Kind: "Ingress"}
+
+// unwiredFor returns an error while one of a deleted policy's targets is
+// still wired and no other policy wants it (wanted, by kind). It reads them
+// from the API server: the cache may not show yet a wiring done a moment
+// ago. A target that doesn't exist, or whose CRD doesn't, is unwired.
+func (r *Reconciler) unwiredFor(ctx context.Context, p *wafv1alpha1.WAFPolicy, wanted map[schema.GroupKind]map[types.NamespacedName]bool) error {
+	for _, t := range p.Spec.TargetRefs {
+		var obj client.Object
+		gk := ingressKind
+		switch t.Kind {
+		case "Ingress":
+			obj = &networkingv1.Ingress{}
+		case "IngressRoute":
+			gk = IngressRouteGVK.GroupKind()
+			u := &unstructured.Unstructured{}
+			u.SetGroupVersionKind(IngressRouteGVK)
+			obj = u
+		default:
+			continue // never wired
+		}
+		k := types.NamespacedName{Namespace: p.Namespace, Name: t.Name}
+		switch err := r.APIReader.Get(ctx, k, obj); {
+		case apierrors.IsNotFound(err) || meta.IsNoMatchError(err):
+			continue
+		case err != nil:
+			return err
+		}
+		if obj.GetAnnotations()[WiredAnnotation] != "" && !wanted[gk][k] {
+			return fmt.Errorf("%s %s is still wired", t.Kind, t.Name)
+		}
+	}
+	return nil
+}
+
+// setFinalizer adds the finalizer to a policy (on) or removes it.
+func (r *Reconciler) setFinalizer(ctx context.Context, p *wafv1alpha1.WAFPolicy, on bool) error {
+	orig := p.DeepCopy()
+	if on && !controllerutil.AddFinalizer(p, Finalizer) || !on && !controllerutil.RemoveFinalizer(p, Finalizer) {
+		return nil
+	}
+	// metadata.finalizers is one list to a merge patch: the resourceVersion
+	// makes sure it doesn't drop another controller's.
+	return r.Client.Patch(ctx, p, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{}))
+}
+
+// running are the pods that run or start: not finished or terminating.
+func running(pods []corev1.Pod) []*corev1.Pod {
+	var out []*corev1.Pod
+	for i := range pods {
+		pod := &pods[i]
+		if pod.DeletionTimestamp == nil && pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
+			out = append(out, pod)
+		}
+	}
+	return out
 }
 
 // injectingSince is when the Pod webhook was installed; zero if unknown.
@@ -419,6 +560,9 @@ func (r *Reconciler) wireRoute(ctx context.Context, ir *unstructured.Unstructure
 
 // programmed computes a policy's Programmed condition.
 func programmed(p *wafv1alpha1.WAFPolicy, st *state) (metav1.ConditionStatus, string, string) {
+	if st.disabled {
+		return metav1.ConditionFalse, ReasonInjectionDisabled, "the engine is not injected into proxy pods (injection is off): the routes are not wired"
+	}
 	var unsupported, failed []string
 	ingresses, routes := 0, 0
 	for _, t := range p.Spec.TargetRefs {
@@ -440,6 +584,8 @@ func programmed(p *wafv1alpha1.WAFPolicy, st *state) (metav1.ConditionStatus, st
 				failed = append(failed, "Traefik's Middleware CRD is not installed")
 			case st.middlewareErr[p.Namespace] != "":
 				failed = append(failed, st.middlewareErr[p.Namespace])
+			case st.ingressErr[k] != "":
+				failed = append(failed, st.ingressErr[k])
 			default:
 				ingresses++
 			}
@@ -484,16 +630,12 @@ func programmed(p *wafv1alpha1.WAFPolicy, st *state) (metav1.ConditionStatus, st
 
 	// The routes go to Traefik's pods, whose sidecar must be there.
 	var missed, optedOut, before []string
-	running := 0
-	for _, pod := range st.pods {
-		if pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
-			continue
-		}
-		running++
+	pods := running(st.pods)
+	for _, pod := range pods {
 		name := pod.Namespace + "/" + pod.Name
 		switch {
-		case injection.HasEngine(&pod):
-		case injection.OptedOut(&pod):
+		case injection.HasEngine(pod):
+		case injection.OptedOut(pod):
 			optedOut = append(optedOut, name)
 		case !st.injectingSince.IsZero() && pod.CreationTimestamp.After(st.injectingSince):
 			missed = append(missed, name)
@@ -505,8 +647,10 @@ func programmed(p *wafv1alpha1.WAFPolicy, st *state) (metav1.ConditionStatus, st
 		slices.Sort(l)
 	}
 	switch {
-	case running == 0:
-		return metav1.ConditionFalse, ReasonSidecarMissing, "no Traefik pod is running"
+	case len(pods) == 0:
+		// Nothing is wired then (Reconcile).
+		return metav1.ConditionFalse, ReasonSidecarMissing, "no Traefik pod selected for the engine is running, so the routes are not wired " +
+			"(new Traefik pods would have no engine to call); if Traefik runs, the InkwallConfig's selector for it doesn't match its pods"
 	case len(missed) > 0 || len(optedOut) > 0:
 		var why []string
 		if len(missed) > 0 {
@@ -527,6 +671,9 @@ func programmed(p *wafv1alpha1.WAFPolicy, st *state) (metav1.ConditionStatus, st
 func (r *Reconciler) report(ctx context.Context, policies []wafv1alpha1.WAFPolicy, s *state) error {
 	for i := range policies {
 		p := &policies[i]
+		if p.DeletionTimestamp != nil {
+			continue
+		}
 		st, reason, msg := programmed(p, s)
 		first := true
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {

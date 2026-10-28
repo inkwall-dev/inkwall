@@ -16,9 +16,10 @@ The Kubernetes operator ([design](../docs/design/0004-operator.md)). It:
 - **injects** the engine as a native sidecar into Traefik pods at creation (selected by
   `app.kubernetes.io/name=traefik`, or `InkwallConfig.spec.integrations[].selector`), with the
   `inkwall-trust` ConfigMap and read access to the bundle. Opt a pod out with the label
-  `waf.inkwall.dev/inject: "false"`; `--inject=false` turns injection off;
+  `waf.inkwall.dev/inject: "false"`; `--inject=false` turns injection off, and unwires the routes;
 - **wires** each targeted Ingress to an `inkwall-waf` ForwardAuth Middleware (prepended to
-  `traefik.ingress.kubernetes.io/router.middlewares`) and reports `Programmed`.
+  `traefik.ingress.kubernetes.io/router.middlewares`) and reports `Programmed`. The
+  `waf.inkwall.dev/unwire` finalizer keeps a deleted policy until its routes are unwired.
 
 `kubectl get wafpolicy -A` shows `READY` once a policy is accepted, wired and enforced by every
 engine; the condition messages say what's missing (e.g. `PendingRestart`). Rules read from a
