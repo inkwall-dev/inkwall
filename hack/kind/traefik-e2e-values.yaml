@@ -18,6 +18,13 @@ providers:
     ingressClass: traefik-e2e
 
 ports:
+  # The PROXY protocol, taken only from the pod network (kind's default pod
+  # subnet), where e2e.sh runs its stand-in load balancer. A port-forward
+  # connects from 127.0.0.1, outside it: Traefik ignores its PROXY header's
+  # address. Connections without the header are accepted from both.
+  web:
+    proxyProtocol:
+      trustedIPs: [10.244.0.0/16]
   websecure:
     expose:
       default: false

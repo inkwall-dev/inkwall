@@ -152,6 +152,8 @@ on an error):
 - Targets: **`Ingress`** and Traefik **`IngressRoute`** (rules of `Host`, `Path` and `PathPrefix`
   joined by `&&`); not Gateway API `HTTPRoute` yet.
 - One cluster; the optional control plane (fleet management, analytics) isn't built.
+- Behind a load balancer the engine sees the client's IP only with the PROXY protocol on Traefik's
+  entry points or `externalTrafficPolicy: Local`: see [client IP](docs/client-ip.md).
 
 ## Roadmap
 

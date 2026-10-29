@@ -309,7 +309,17 @@ rebuilds the request from `X-Forwarded-Method`/`-Uri`.
 - Missing or invalid forwarded headers → 400, even in detect mode (can't inspect, can't allow).
 - Limitation: Traefik itself rejects bodies over `maxBodySize` (operator sets 10 MiB, the largest
   inspectable body), whatever `body.onOversize` says.
-- Limitation: behind a load balancer the engine sees the LB as client IP.
+
+**Client IP behind a load balancer.** Behind an LB, Traefik's peer is the LB or a node, and the
+engine would see it as the client. `X-Forwarded-For` from the LB can't help: the engine sees it
+only with `trustForwardHeader: true`, which lets the client choose `X-Forwarded-Uri` (above). So
+the address comes from the connection: the LB sends a PROXY header (v1 or v2) that Traefik accepts
+only from the LB's CIDRs (`entryPoints.<name>.proxyProtocol.trustedIPs`, never `0.0.0.0/0`), or
+`externalTrafficPolicy: Local` keeps the source address. Traefik uses it as the remote address,
+ForwardAuth sends it as `X-Forwarded-For`, and the engine trusts that from loopback only (§8.2).
+No engine change. Setup per LB: [client IP](../client-ip.md); the kind e2e checks a PROXY address,
+a client-sent `X-Forwarded-For` ignored, and an untrusted PROXY header ignored (verified on
+v3.7.13).
 
 **B. Traefik plugin (later):** Yaegi can't run Coraza well, so it would be a thin client to the
 sidecar (or http-wasm).
@@ -399,6 +409,8 @@ P-256 or Ed25519. **Built:** the contract, and the operator side
 
 A wrong IP makes rate limits and IP lists worse than none. Order: the proxy's resolved client IP;
 `X-Forwarded-For` walked right to left, skipping only `trustedProxies`; the peer IP.
+Behind a load balancer the proxy must learn the client first: the PROXY protocol or
+`externalTrafficPolicy: Local` (§6.3).
 
 ### 8.3 Data privacy
 

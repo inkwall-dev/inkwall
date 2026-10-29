@@ -180,7 +180,9 @@ longer rendered.
   accepted or not; until its rules are in a bundle the engine passes its routes (`no-policy`).
 - One ForwardAuth `Middleware` `inkwall-waf` per such namespace (`trustForwardHeader: false`,
   `forwardBody: true`, `maxBodySize` 10 MiB = largest `body.maxBytes`), removed when unused. A
-  same-named one the operator didn't create is left alone (`WiringFailed`).
+  same-named one the operator didn't create is left alone (`WiringFailed`). The operator doesn't
+  configure Traefik's entry points: behind a load balancer the user turns on the PROXY protocol
+  there for the client IP ([client IP](../client-ip.md)).
 - The annotation gets the operator's Middleware first, user entries kept in order;
   `waf.inkwall.dev/wired` records it; unprotecting removes only that entry. Level-based; the
   `waf.inkwall.dev/unwire` finalizer only makes a policy deleted while the operator is down wait
