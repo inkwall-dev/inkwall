@@ -12,6 +12,16 @@ listeners in `pkg/adapters/<name>` that convert the protocol's message to `reque
 **Built (v0.1.0):** forward-auth (§3), `/v1/check` over HTTP (§5), reverse proxy (§6).
 **Not yet:** ext_authz (§1), ext_proc (§2), SPOE (§4).
 
+## Contents
+
+- [1. ext_authz (Envoy external authorization)](#1-ext_authz-envoy-external-authorization)
+- [2. ext_proc (Envoy external processing)](#2-ext_proc-envoy-external-processing)
+- [3. forward-auth (Traefik `ForwardAuth`, nginx `auth_request`)](#3-forward-auth-traefik-forwardauth-nginx-auth_request)
+- [4. SPOE (HAProxy Stream Processing Offload Engine)](#4-spoe-haproxy-stream-processing-offload-engine)
+- [5. `/v1/check` (Inkwall's own API)](#5-v1check-inkwalls-own-api)
+- [6. Reverse proxy (standalone mode)](#6-reverse-proxy-standalone-mode)
+- [7. Comparison](#7-comparison)
+
 ---
 
 ## 1. ext_authz (Envoy external authorization)

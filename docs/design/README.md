@@ -1,5 +1,7 @@
 # Design documents
 
+The numbered design documents behind Inkwall, and the status of each.
+
 | # | Title | Status |
 |---|---|---|
 | [0001](0001-performance-first-architecture.md) | Performance-First Architecture | Draft |
@@ -8,5 +10,7 @@
 | [0005](0005-component-map.md) | Component Map and Rule Engine Choice | Draft |
 | [0006](0006-adapter-protocols.md) | Adapter Protocols Primer | Draft |
 | [0007](0007-inkwall-engine.md) | Inkwall Rule Engine | Draft |
+
+There is no 0003: no document with that number was ever published in this repository.
 
 New documents: copy the header block (Status, Date, Owner), number sequentially, add a row here.

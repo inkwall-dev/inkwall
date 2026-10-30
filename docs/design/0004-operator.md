@@ -14,6 +14,32 @@ bundles. CRD shapes: 0002 §4.2.
 plane: enrollment, GitOps and Managed modes, security events (§4.9). **Not yet:** other proxies,
 `HTTPRoute` targets.
 
+## Contents
+
+- [1. Goals and non-goals](#1-goals-and-non-goals)
+- [2. Overview](#2-overview)
+- [3. API (`waf.inkwall.dev/v1alpha1`)](#3-api-wafinkwalldevv1alpha1)
+  - [3.1 Validation](#31-validation)
+  - [3.2 Status contract](#32-status-contract)
+- [4. Controllers](#4-controllers)
+  - [4.1 Discovery controller](#41-discovery-controller)
+  - [4.2 Integration interface](#42-integration-interface)
+  - [4.3 Injection controller](#43-injection-controller)
+  - [4.4 Wiring controller](#44-wiring-controller)
+  - [4.5 Resolver](#45-resolver)
+  - [4.6 Bundle builder (leader only)](#46-bundle-builder-leader-only)
+  - [4.7 Distribution server (all replicas)](#47-distribution-server-all-replicas)
+  - [4.8 Status aggregator](#48-status-aggregator)
+  - [4.9 Upstream sync (leader only)](#49-upstream-sync-leader-only)
+- [5. Uninstall and disable](#5-uninstall-and-disable)
+- [6. Failure modes](#6-failure-modes)
+- [7. RBAC](#7-rbac)
+- [8. Scale targets (v1)](#8-scale-targets-v1)
+- [9. Testing](#9-testing)
+- [10. Code layout](#10-code-layout)
+- [11. Milestones](#11-milestones)
+- [12. Open questions](#12-open-questions)
+
 ## 1. Goals and non-goals
 
 1. **No proxy knowledge for users:** they write a `WAFPolicy` against an `Ingress` or `HTTPRoute`.

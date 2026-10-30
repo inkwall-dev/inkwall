@@ -13,6 +13,24 @@ fallback.
 (`test/crs`) and the prefilter feasibility tool (`test/perf/prefilter`) exist.
 **Not yet:** `pkg/rules/native`, `test/diff`, `--engine`, shadow mode.
 
+## Contents
+
+- [1. Summary](#1-summary)
+- [2. Why](#2-why)
+- [3. Goals and non-goals](#3-goals-and-non-goals)
+- [4. Architecture](#4-architecture)
+  - [4.1 Compiler](#41-compiler)
+  - [4.2 Runtime](#42-runtime)
+  - [4.3 Prefilter and normalization views](#43-prefilter-and-normalization-views)
+  - [4.4 Supported SecLang subset](#44-supported-seclang-subset)
+- [5. Verification](#5-verification)
+- [6. Performance targets](#6-performance-targets)
+- [7. Integration](#7-integration)
+- [8. Code layout](#8-code-layout)
+- [9. Milestones](#9-milestones)
+- [10. Risks](#10-risks)
+- [11. Open questions](#11-open-questions)
+
 ---
 
 ## 1. Summary
