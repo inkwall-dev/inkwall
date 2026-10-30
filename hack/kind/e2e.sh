@@ -634,7 +634,11 @@ fi
 # The optional control plane (#88): a stub in the cluster (never a real one),
 # the operator trusting its CA through the chart (#89), enrollment with a
 # one-time token, the primary stream, and the token refused a second time.
-echo "== control plane (stub)"
+# With the Managed section below, this is the O6 exit (0004 §11): a GitOps
+# mirror (an applied WAFPolicy reaches the stub Enforced) and a Managed
+# round-trip (the stub's policy blocks in Traefik, comes back Enforced, and
+# kubectl edit is refused).
+echo "== control plane (stub): GitOps mirror"
 CP_NS=inkwall-cp-stub
 CP_HOST=stub.$CP_NS.svc
 CP_TOKEN=e2e-token-$RANDOM
@@ -734,6 +738,12 @@ spec:
   mode: Block
 YAML
 eventually "a policy blocks through Traefik" tstatus_is 403 "$SQLI"
+# enforced_in_state NAME: the stub's last ClusterState has the policy
+# Enforced=True.
+enforced_in_state() {
+  stub_stats | sed -n 's/.*"enforced":\[\([^]]*\)\].*/\1/p' | grep -F "\"WAFPolicy $NS/$1\"" >/dev/null
+}
+eventually "the mirror shows it Enforced to the stub" enforced_in_state web
 events_stream() { stub_stats | grep -q '"STREAM_ROLE_EVENTS CLUSTER_MODE_GITOPS'; }
 eventually "the replicas opened events streams" events_stream
 stub_events() { [[ $(stub_stats | sed -n 's/.*"events":\([0-9]*\).*/\1/p') -ge 1 ]]; }
@@ -771,10 +781,7 @@ eventually "the stub's snapshot is acknowledged (PolicyAck)" acked 1
 saas_label() { [[ $("${KUBECTL[@]}" -n "$NS" get wafpolicy managed -o jsonpath='{.metadata.labels.inkwall\.dev/source}') == saas ]]; }
 check "its policy is written, labelled inkwall.dev/source: saas" saas_label
 eventually "Traefik blocks the attack under the stub's policy" tstatus_is 403 "$SQLI"
-enforced_in_state() {
-  stub_stats | sed -n 's/.*"enforced":\[\([^]]*\)\].*/\1/p' | grep -qF "\"WAFPolicy $NS/managed\""
-}
-eventually "the stub gets it back Enforced in the ClusterState" enforced_in_state
+eventually "the stub gets it back Enforced in the ClusterState" enforced_in_state managed
 # guarded COMMAND...: the webhook refuses it, naming the control plane.
 guarded() {
   local out
