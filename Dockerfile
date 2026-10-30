@@ -6,7 +6,7 @@
 #   docker build --target engine   -t inkwall-engine .    (the default)
 #   docker build --target operator -t inkwall-operator .
 
-FROM --platform=$BUILDPLATFORM golang:1.26 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27 AS build
 ARG TARGETOS TARGETARCH
 # The release version (without "v"), stamped into the binaries.
 ARG VERSION=

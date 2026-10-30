@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
@@ -161,7 +162,11 @@ func testWiring(ctx context.Context, t *testing.T, c client.Client) {
 	}
 
 	// The policy deleted: the operator's entry and Middleware go, the
-	// user's stays.
+	// user's stays, and then the policy, which the finalizer held.
+	var got wafv1alpha1.WAFPolicy
+	if err := c.Get(ctx, client.ObjectKeyFromObject(web), &got); err != nil || !controllerutil.ContainsFinalizer(&got, wiring.Finalizer) {
+		t.Fatalf("a wired policy without the finalizer: %v %v", err, got.Finalizers)
+	}
 	if err := c.Delete(ctx, web); err != nil {
 		t.Fatal(err)
 	}
@@ -177,6 +182,9 @@ func testWiring(ctx context.Context, t *testing.T, c client.Client) {
 		m.SetGroupVersionKind(wiring.MiddlewareGVK)
 		if err := c.Get(ctx, types.NamespacedName{Namespace: "store", Name: wiring.MiddlewareName}, m); !apierrors.IsNotFound(err) {
 			return "Middleware still there"
+		}
+		if err := c.Get(ctx, client.ObjectKeyFromObject(web), &got); !apierrors.IsNotFound(err) {
+			return "policy still there"
 		}
 		return ""
 	})

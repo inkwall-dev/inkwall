@@ -2,7 +2,8 @@
 
 Installs the Inkwall operator, its CRDs and its webhooks ([design](../../../docs/design/0004-operator.md)).
 The operator validates policies and rule sets, builds them into a signed bundle, serves it to the
-engines, injects the engine into Traefik pods and wires their Ingresses. Kubernetes 1.29 or later.
+engines, injects the engine into Traefik pods and wires their Ingresses and IngressRoutes.
+Kubernetes 1.29 or later.
 
 ```sh
 helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \
@@ -23,7 +24,8 @@ kind cluster of `make kind-up`.
 | `PodDisruptionBudget` | When `operator.replicas` > 1 |
 | `ServiceAccount`, `ClusterRole`, `Role` and bindings | Rules generated from the operator's code; the `Role` covers the release namespace only |
 | `ValidatingWebhookConfiguration` `inkwall-operator-validating` | WAF kinds only, fails closed, 2 s timeout |
-| Pre-delete hook (`Job`, `Role`, `RoleBinding` `<release>-inkwall-operator-unwire`) | Runs only on `helm uninstall`: unwires the routes (`uninstall.unwire`) |
+| Pre-delete hook (`Job`, `Role`, `RoleBinding` `<release>-inkwall-operator-unwire`) | Runs only on `helm uninstall`: unwires the routes and releases the `WAFPolicy` objects (`uninstall.unwire`) |
+| `ConfigMap` `inkwall-control-plane-ca`, `Secret` `inkwall-enrollment` | Only with `controlPlane.caBundle` / `controlPlane.enrollmentToken` (names for a release named `inkwall`) |
 | `MutatingWebhookConfiguration` `inkwall-operator-mutating` | Traefik pods only, at creation; fails open, or closed while a policy is in block mode (`injection.enabled`) |
 | `Service` `inkwall-operator-webhook` | |
 | `Service` `inkwall-operator` | Bundle distribution to the engines, gRPC over TLS on port 9445 |
@@ -45,8 +47,11 @@ See [`values.yaml`](values.yaml) for all of them.
 | `operator.podAnnotations`, `podLabels`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName` | | Default affinity spreads replicas across nodes |
 | `operator.podDisruptionBudget.enabled`, `minAvailable` | `true`, `1` | |
 | `engine.image.repository`, `tag`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-engine`, the chart's `appVersion`, `IfNotPresent` | The engine injected into Traefik pods; `InkwallConfig.spec.engine.image` overrides it |
-| `injection.enabled` | `true` | Inject the engine into Traefik pods when they are created |
-| `uninstall.unwire` | `true` | On `helm uninstall`, unwire the routes first (a pre-delete hook), so they keep working |
+| `injection.enabled` | `true` | Inject the engine into Traefik pods when they are created. `false`: the operator unwires every route it wired, so new Traefik pods, without the engine, serve them (uninspected) |
+| `controlPlane.caBundle` | `""` | The optional control plane's CA (PEM), when its certificate isn't from a public CA; e.g. `--set-file controlPlane.caBundle=ca.crt` |
+| `controlPlane.enrollmentToken` | `""` | Its one-time enrollment token, stored in the Secret `inkwall-enrollment` (key `token`; `<release>-inkwall-enrollment` for a release not named `inkwall`); or create that Secret yourself |
+| `controlPlane.eventsBufferMiB` | `64` | Each replica's buffer of security events while the control plane is unreachable (an `emptyDir`); when full, the oldest are dropped and counted |
+| `uninstall.unwire` | `true` | On `helm uninstall`, unwire the routes first (a pre-delete hook), so they keep working, and remove the operator's finalizer from the `WAFPolicy` objects |
 | `serviceAccount.name`, `annotations` | the release's full name, `{}` | |
 | `crds.install` | `true` | |
 | `distribution.port` | `9445` | Port engines connect to |
@@ -54,20 +59,122 @@ See [`values.yaml`](values.yaml) for all of them.
 | `webhook.certs.mode` | `rotate` | `rotate`: the operator creates, renews and injects a self-signed certificate. `certManager`: cert-manager issues it |
 | `webhook.certs.certManager.issuerRef` | a self-signed `Issuer` | |
 
+## Connecting to a control plane
+
+Optional: Standalone, the default, never connects. For GitOps or Managed mode, install with the
+control plane's CA (if private) and the one-time enrollment token it gave you, then point the
+cluster at it:
+
+```sh
+helm upgrade --install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \
+  --namespace inkwall-system --create-namespace \
+  --set-file controlPlane.caBundle=ca.crt --set controlPlane.enrollmentToken=<token>
+kubectl apply -f - <<'YAML'
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: InkwallConfig
+metadata: {name: default}
+spec:
+  mode: GitOps
+  controlPlane:
+    endpoint: grpcs://<host>:<port>
+    enrollmentSecretRef: {name: inkwall-enrollment, namespace: inkwall-system}
+YAML
+kubectl get inkwallconfig default -o jsonpath='{.status.conditions}'
+```
+
+The token Secret must be in the release namespace (`inkwall-enrollment` above is its name for a
+release named `inkwall`). The operator enrolls once, keeps the cluster's
+certificate in `inkwall-control-plane-identity`, and reports `ControlPlaneConnected`. The
+`InkwallConfig` isn't part of the chart: a release can't create a custom resource of a CRD it
+installs itself.
+
+### Managed mode
+
+With `mode: Managed`, policies come from the control plane. The operator writes each policy
+snapshot it sends as `WAFPolicy`, `WAFRuleSet` and `ClusterWAFRuleSet` objects labelled
+`inkwall.dev/source: saas`, all or nothing (a server-side dry run of every object first; one
+refused object refuses the snapshot and nothing changes), deletes the labelled objects a snapshot no
+longer has, and acknowledges it. They are enforced like any other policy, in bundles signed with the
+cluster's own key, and their `Enforced` condition goes back to the control plane.
+
+Change them in the control plane, not with `kubectl`: while the cluster is in Managed mode the
+validating webhook refuses anyone but the operator creating, editing or deleting a labelled object,
+or adding or removing the label. Your own, unlabelled objects stay yours, and the operator never
+overwrites one with a policy of the same name (it refuses the snapshot instead). Rule sets from the
+control plane carry their rules inline: `configMapRef` is refused. Switching back to `GitOps` or
+`Standalone` leaves the labelled objects in place, as ordinary objects you can edit or delete.
+
+## Rotating the signing key
+
+The operator signs policy bundles with an ed25519 key it generates on first use, in the
+`inkwall-bundle-signing-key` Secret. To rotate it, give the `InkwallConfig` a new value of the
+`waf.inkwall.dev/rotate-signing-key` annotation (any value: each new one starts a rotation), or
+rotate it on a schedule with `spec.signingKey.rotationInterval`:
+
+```sh
+kubectl annotate inkwallconfig default --overwrite waf.inkwall.dev/rotate-signing-key="$(date +%s)"
+kubectl -n inkwall-system get secret inkwall-bundle-signing-key \
+  -o jsonpath='{.metadata.annotations.waf\.inkwall\.dev/rotation-phase}'
+```
+
+```yaml
+spec:
+  signingKey:
+    rotationInterval: 2160h # 90 days
+```
+
+Traffic is unaffected. The operator publishes the new key to every engine first (the `inkwall-trust`
+ConfigMaps; engines reload them without restarting), keeps signing with the old key until every
+connected engine reports the new one, then switches, and drops the old key once every engine runs a
+bundle the new key signed. The phase reads `Publishing`, then `Retiring`, then nothing. Each phase
+lasts at least a minute, the time the kubelet takes to update a mounted ConfigMap. The operator logs
+the engines it waits for; an engine from before Inkwall supported rotation never reports the new key,
+so restart its pod to give it the current image. An engine you configured yourself reads its keys
+from `--bundle-key`: keep that file in sync with the Secret's `trusted-keys.pub` during a rotation.
+
 ## Uninstalling
 
 `helm uninstall` keeps the CRDs (and so every WAF object) and the two Secrets the operator creates
 in its namespace, `inkwall-bundle` and `inkwall-bundle-signing-key`. A reinstall continues with the
-same signing key, so engines keep trusting it. Delete the namespace to remove the Secrets.
+same signing keys (and a rotation in progress), so engines keep trusting them. Delete the namespace
+to remove the Secrets.
 
 Before anything is deleted, a pre-delete hook (`uninstall.unwire`, on by default) runs
-`inkwall-operator unwire`: it stops the operator, sets the Pod webhook to `Ignore`, and removes
-Inkwall's Middleware from every route it wired, keeping your own middlewares. The routes then keep
-working, uninspected; Traefik pods drop the engine when they restart. If the hook fails, the
-uninstall stops: fix the cause (`kubectl -n <namespace> logs job/<release>-inkwall-operator-unwire`)
-and run it again, or skip the hook with `helm uninstall --no-hooks` and remove the
-`inkwall-waf` entries from the Ingresses' `traefik.ingress.kubernetes.io/router.middlewares`
-annotations yourself.
+`inkwall-operator unwire`: it stops the operator, sets the Pod and `WAFPolicy` webhooks to
+`Ignore`, removes Inkwall's Middleware from every route it wired, keeping your own middlewares, and
+removes the `waf.inkwall.dev/unwire` finalizer from every `WAFPolicy`. The routes then keep
+working, uninspected; Traefik pods drop the engine when they restart; deleting a policy, or its
+namespace, doesn't wait for the operator. If the hook fails, the uninstall stops: fix the cause
+(`kubectl -n <namespace> logs job/<release>-inkwall-operator-unwire`) and run it again, or skip the
+hook with `helm uninstall --no-hooks` (or `uninstall.unwire=false`) and undo it yourself: remove
+the `inkwall-waf` entries from the Ingresses' `traefik.ingress.kubernetes.io/router.middlewares`
+annotations and from the IngressRoutes' `spec.routes[*].middlewares` (the objects Inkwall wired are
+annotated `waf.inkwall.dev/wired`), then the finalizer from the policies, or they can't be deleted:
+
+```sh
+kubectl get wafpolicy -A -o jsonpath='{range .items[*]}{.metadata.namespace} {.metadata.name}{"\n"}{end}' |
+  while read -r ns name; do
+    kubectl -n "$ns" patch wafpolicy "$name" --type merge -p '{"metadata":{"finalizers":null}}'
+  done
+```
+
+### Turning injection off
+
+`--set injection.enabled=false` removes the Pod webhook: Traefik pods started from then on have no
+engine. The operator keeps running, unwires every route it wired, deletes its Middlewares and
+releases the policies (`Programmed=False`, `InjectionDisabled`); the routes are served,
+uninspected. The same happens to Traefik routes when no running pod matches the integration's
+selector any more (an `InkwallConfig` selector that doesn't match Traefik's pods, or one deleted
+when Traefik's pods don't have the default labels): new pods wouldn't get the engine
+(`SidecarMissing`). Turned on again, the routes are wired again at once: restart Traefik to inject
+the engine (`PendingRestart`).
+
+### Deleting a policy
+
+The operator holds each `WAFPolicy` with the `waf.inkwall.dev/unwire` finalizer until it has
+unwired its routes. Deleted while the operator is down, a policy (and its namespace) waits for it;
+the routes stay wired and enforced meanwhile. Before going back to a version without the finalizer,
+remove it from the policies as above, or they can't be deleted.
 
 ## When the operator is down
 

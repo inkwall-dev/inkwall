@@ -23,7 +23,10 @@ import (
 const (
 	ContainerName = "inkwall-engine"
 	// TrustConfigMap holds the operator's CA (ca.crt) and the bundle public
-	// key (ed25519.pub) in the pod's namespace; both are public.
+	// keys in the pod's namespace: trusted-keys.pub, every key the engine
+	// accepts, and ed25519.pub, the active one. All are public. The kubelet
+	// updates the mounted files when it changes, and the engine reloads
+	// the keys.
 	TrustConfigMap = "inkwall-trust"
 
 	secretsVolume = "inkwall-secrets"
@@ -74,6 +77,16 @@ func defaultResources() corev1.ResourceRequirements {
 	}
 }
 
+// HasEngine reports whether pod has the engine container.
+func HasEngine(pod *corev1.Pod) bool {
+	for _, c := range slices.Concat(pod.Spec.InitContainers, pod.Spec.Containers) {
+		if c.Name == ContainerName {
+			return true
+		}
+	}
+	return false
+}
+
 // Inject adds the engine to pod as a native sidecar (an init container
 // with restartPolicy Always, so it starts before the proxy and stops after
 // it), and the volumes it needs. It reports false, changing nothing, for a
@@ -92,7 +105,7 @@ func Inject(pod *corev1.Pod, s Sidecar) bool {
 		"--operator="+s.OperatorAddr,
 		"--operator-ca="+secretsDir+"/ca.crt",
 		"--operator-token="+secretsDir+"/token",
-		"--bundle-key="+secretsDir+"/ed25519.pub",
+		"--bundle-key="+secretsDir+"/trusted-keys.pub",
 		"--bundle-cache="+cacheDir+"/bundle.pb",
 		fmt.Sprintf("--admin-listen=:%d", adminPort),
 		// The proxy is the engine's peer, on the loopback; its

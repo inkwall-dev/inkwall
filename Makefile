@@ -2,6 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 GO              ?= go
+# Every recipe, and the tools it runs with `go run tool@version` (which ignores go.mod), uses the
+# toolchain go.mod asks for, whatever Go the machine has: golangci-lint refuses code for a newer Go
+# than it was built with, and gofmt's output (in generated code) changes between versions.
+export GOTOOLCHAIN := $(shell GOTOOLCHAIN=auto $(GO) env GOVERSION)
 BIN_DIR         ?= bin
 GOLANGCI_LINT   ?= $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
 GORELEASER      ?= $(GO) run github.com/goreleaser/goreleaser/v2@v2.18.3
@@ -46,7 +50,7 @@ bench: ## Run benchmarks (BENCH=regexp COUNT=n)
 	$(GO) test -run='^$$' -bench='$(BENCH)' -benchmem -count=$(COUNT) ./...
 
 .PHONY: bench-compare
-bench-compare: ## Compare benchmarks with BASE (origin/main) and fail on a significant regression over 5%
+bench-compare: ## Compare benchmarks of changed packages with BASE (origin/main); fail on a repeated significant regression over 5%
 	BENCH='$(BENCH)' hack/bench/compare.sh $(BASE)
 
 .PHONY: crs-test
@@ -84,6 +88,7 @@ helm-lint: ## Lint the Helm chart and render it with each webhook certificate mo
 	helm lint --strict $(CHART)
 	helm template inkwall $(CHART) --namespace inkwall-system >/dev/null
 	helm template inkwall $(CHART) --namespace inkwall-system --set webhook.certs.mode=certManager >/dev/null
+	helm template inkwall $(CHART) --namespace inkwall-system --set controlPlane.caBundle=ca --set controlPlane.enrollmentToken=t >/dev/null
 
 .PHONY: tidy
 tidy: ## Tidy go.mod and go.sum, here and in test/crs (which builds against this module)

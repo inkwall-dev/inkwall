@@ -29,7 +29,7 @@ import (
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
-	"github.com/inkwall-dev/inkwall/operator/internal/bundle"
+	"github.com/inkwall-dev/inkwall/operator/bundle"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/operator/test/fakeengine"
 )
@@ -91,12 +91,12 @@ func testDistribution(ctx context.Context, t *testing.T, c client.Client) {
 	_, port, _ := net.SplitHostPort(distAddr)
 	engine := func(id, sa string) *fakeengine.Engine {
 		return &fakeengine.Engine{
-			ID:        id,
-			Addr:      "localhost:" + port,
-			TLS:       &tls.Config{RootCAs: roots, ServerName: "localhost", MinVersion: tls.VersionTLS12},
-			Token:     token(ctx, t, "edge", sa),
-			PublicKey: ed25519.PublicKey(keys.Data[bundle.PublicKeyKey]),
-			Heartbeat: 200 * time.Millisecond,
+			ID:         id,
+			Addr:       "localhost:" + port,
+			TLS:        &tls.Config{RootCAs: roots, ServerName: "localhost", MinVersion: tls.VersionTLS12},
+			Token:      token(ctx, t, "edge", sa),
+			PublicKeys: []ed25519.PublicKey{keys.Data[bundle.PublicKeyKey]},
+			Heartbeat:  200 * time.Millisecond,
 		}
 	}
 	run := func(e *fakeengine.Engine) context.CancelFunc {

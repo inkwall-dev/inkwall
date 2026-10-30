@@ -43,6 +43,8 @@ listeners in `pkg/adapters/<name>` that convert the protocol's message to `reque
 Traefik middleware must set:
 
 - `trustForwardHeader: false`, else the engine inspects a client-supplied `X-Forwarded-Uri`.
+  Behind a load balancer the client IP then comes from the PROXY protocol on Traefik's entry
+  point, not from the LB's `X-Forwarded-For` ([client IP](../client-ip.md)).
 - `forwardBody: true` with `maxBodySize` above `--max-body-bytes`, else bodies pass uninspected.
 - `authResponseHeaders: X-Request-Id` to pass the request ID upstream.
 
@@ -59,7 +61,7 @@ Traefik middleware must set:
 
 - `POST /v1/check` with a `CheckRequest` (`api/engine/v1`, schema 0002 §5.1) as protobuf
   (`application/x-protobuf`) or JSON (`application/json`); `CheckResponse` (action, status, headers,
-  matched rule IDs) comes back in the same encoding.
+  matched rule IDs, the deciding policy in bundle mode) comes back in the same encoding.
 - For clients with no native protocol; we control what is sent.
 - Every well-formed check gets **200**, verdict in the body. Errors: 405 (not POST), 415 (content
   type), 413 (too large), 400 (undecodable or invalid).

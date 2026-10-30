@@ -8,15 +8,18 @@ The Kubernetes operator ([design](../docs/design/0004-operator.md)). It:
   always accepted;
 - **builds** the policies and the Ingresses they target into a bundle, signed with the cluster's
   ed25519 key, in the `inkwall-bundle` Secret (leader only; a second after a change, and every
-  10 minutes), and reports `Accepted` on each policy;
+  10 minutes), and reports `Accepted` on each policy. It rotates the key on request (the
+  `waf.inkwall.dev/rotate-signing-key` annotation on the `InkwallConfig`) or on a schedule, without
+  an engine ever rejecting a bundle;
 - **serves** the bundle to the engines over gRPC/TLS on port 9445 and reports `Enforced` from their
   acknowledgements;
 - **injects** the engine as a native sidecar into Traefik pods at creation (selected by
   `app.kubernetes.io/name=traefik`, or `InkwallConfig.spec.integrations[].selector`), with the
   `inkwall-trust` ConfigMap and read access to the bundle. Opt a pod out with the label
-  `waf.inkwall.dev/inject: "false"`; `--inject=false` turns injection off;
+  `waf.inkwall.dev/inject: "false"`; `--inject=false` turns injection off, and unwires the routes;
 - **wires** each targeted Ingress to an `inkwall-waf` ForwardAuth Middleware (prepended to
-  `traefik.ingress.kubernetes.io/router.middlewares`) and reports `Programmed`.
+  `traefik.ingress.kubernetes.io/router.middlewares`) and reports `Programmed`. The
+  `waf.inkwall.dev/unwire` finalizer keeps a deleted policy until its routes are unwired.
 
 `kubectl get wafpolicy -A` shows `READY` once a policy is accepted, wired and enforced by every
 engine; the condition messages say what's missing (e.g. `PendingRestart`). Rules read from a
@@ -57,8 +60,8 @@ kubectl apply --server-side -f operator/config/crd/bases -f operator/config/samp
 | `manager/` | Assembles controllers, webhooks and probes ([`../cmd/operator`](../cmd/operator) is the binary) |
 | `webhook/` | Validating webhook and its certificate |
 | `integrations/` | The proxies Inkwall knows (Traefik) and their pod selectors |
-| `internal/resolver/` | `WAFPolicy` + Ingresses + rule sets → bundle policies and `Accepted` |
-| `internal/bundle/` | Content hash, versions, ed25519 signing, bundle and signing key Secrets |
+| `resolver/` | `WAFPolicy` + Ingresses and IngressRoutes + rule sets → bundle policies and `Accepted` (pure; `inkwallctl test --policy` uses it too) |
+| `bundle/` | Content hash, versions, ed25519 signing and key rotation, bundle and signing key Secrets |
 | `internal/controller/` | Bundle builder |
 | `internal/distribution/` | `BundleService` server, engine authentication and reports, `Enforced` |
 | `internal/injection/` | Engine sidecar, trust ConfigMap, RBAC grant |

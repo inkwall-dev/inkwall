@@ -17,6 +17,10 @@ const (
 	ConditionEnforced = "Enforced"
 	// ConditionReady is True when Accepted, Programmed and Enforced are.
 	ConditionReady = "Ready"
+	// ConditionControlPlaneConnected, on the InkwallConfig, says whether the
+	// cluster is enrolled and connected to the optional control plane
+	// (GitOps and Managed mode only).
+	ConditionControlPlaneConnected = "ControlPlaneConnected"
 )
 
 // SecretReference names a Secret in a given namespace.
@@ -31,3 +35,12 @@ type SecretReference struct {
 	// +kubebuilder:validation:MaxLength=63
 	Namespace string `json:"namespace"`
 }
+
+// SourceLabel says where a WAFPolicy, WAFRuleSet or ClusterWAFRuleSet comes
+// from. In Managed mode the operator writes the control plane's policies
+// labelled SourceSaaS (0004 §4.9), and the validating webhook lets no one
+// else create, change or delete them, or add or remove the label.
+const (
+	SourceLabel = "inkwall.dev/source"
+	SourceSaaS  = "saas"
+)

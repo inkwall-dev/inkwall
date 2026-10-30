@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.x'
+          go-version: '1.27.x'
           check-latest: true
       - run: make lint
 
@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.x'
+          go-version: '1.27.x'
           check-latest: true
       - run: make test
       - run: make build
@@ -60,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           version: v3.19.0
       - run: make helm-lint
@@ -76,9 +76,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.x'
+          go-version: '1.27.x'
           check-latest: true
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           version: v3.19.0
       - run: go install sigs.k8s.io/kind@v0.33.0
@@ -98,7 +98,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.x'
+          go-version: '1.27.x'
           check-latest: true
       - run: make generate
       - run: git diff --exit-code
@@ -110,14 +110,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.x'
+          go-version: '1.27.x'
           check-latest: true
           cache-dependency-path: test/crs/go.sum
       - run: make crs-test
 
   bench:
     # Performance regression gate (0001 §8): benchmarks of the PR against its
-    # base, interleaved, compared with benchstat.
+    # base, interleaved, compared with benchstat. Packages whose test binary
+    # the PR does not change are skipped, and a regression must repeat on a
+    # re-check of the flagged benchmarks to fail (hack/bench/compare.sh).
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -126,7 +128,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.x'
+          go-version: '1.27.x'
           check-latest: true
       - run: hack/bench/compare.sh "origin/$BASE_REF"
         env:
@@ -134,8 +136,8 @@ jobs:
           OUT: bench-out
       - if: always()
         run: |
-          if [ -f bench-out/benchstat.txt ]; then
-            { echo '```'; cat bench-out/benchstat.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f bench-out/summary.md ]; then
+            cat bench-out/summary.md >> "$GITHUB_STEP_SUMMARY"
           fi
       - if: always()
         uses: actions/upload-artifact@v4
@@ -150,7 +152,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.x'
+          go-version: '1.27.x'
           check-latest: true
       - run: make vuln
 

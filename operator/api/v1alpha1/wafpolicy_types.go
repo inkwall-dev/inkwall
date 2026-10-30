@@ -88,17 +88,21 @@ type WAFPolicySpec struct {
 }
 
 // TargetRef names a route in the policy's namespace.
-// +kubebuilder:validation:XValidation:rule="(self.kind == 'Ingress' && (!has(self.group) || self.group == 'networking.k8s.io')) || (self.kind == 'HTTPRoute' && has(self.group) && self.group == 'gateway.networking.k8s.io')",message="target must be a networking.k8s.io Ingress or a gateway.networking.k8s.io HTTPRoute"
+// +kubebuilder:validation:XValidation:rule="(self.kind == 'Ingress' && (!has(self.group) || self.group == 'networking.k8s.io')) || (self.kind == 'HTTPRoute' && has(self.group) && self.group == 'gateway.networking.k8s.io') || (self.kind == 'IngressRoute' && has(self.group) && self.group == 'traefik.io')",message="target must be a networking.k8s.io Ingress, a gateway.networking.k8s.io HTTPRoute or a traefik.io IngressRoute"
 // +kubebuilder:validation:XValidation:rule="!has(self.sectionName) || self.kind == 'HTTPRoute'",message="sectionName is only allowed for an HTTPRoute"
 type TargetRef struct {
-	// Group of the target: networking.k8s.io (the default, for Ingress) or
-	// gateway.networking.k8s.io (for HTTPRoute).
+	// Group of the target: networking.k8s.io (the default, for Ingress),
+	// gateway.networking.k8s.io (for HTTPRoute) or traefik.io (for
+	// Traefik's IngressRoute).
 	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	Group string `json:"group,omitempty"`
 
-	// Kind of the target: Ingress or HTTPRoute.
-	// +kubebuilder:validation:Enum=Ingress;HTTPRoute
+	// Kind of the target: Ingress, HTTPRoute or IngressRoute. An
+	// IngressRoute's hosts and paths come from its routes' match rules,
+	// which may combine Host, Path and PathPrefix with &&; a rule with
+	// anything else (||, !, other matchers) is not accepted.
+	// +kubebuilder:validation:Enum=Ingress;HTTPRoute;IngressRoute
 	Kind string `json:"kind"`
 
 	// Name of the target.
@@ -175,7 +179,7 @@ type RuleSetRef struct {
 
 // Exclusion turns rules off, everywhere or only for one path or argument.
 type Exclusion struct {
-	// RuleIDs are the rules to turn off.
+	// RuleIDs are the rules to turn off. An ID no rule has is ignored.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=64
 	// +kubebuilder:validation:items:Minimum=1
@@ -194,7 +198,10 @@ type ExclusionMatch struct {
 	// +optional
 	Path PathPattern `json:"path,omitempty"`
 
-	// Argument is a query or body argument the rules stop looking at.
+	// Argument is a query or body argument the rules, and the rules chained
+	// to them, stop looking at. With a rule set whose own SecLang negates
+	// ARGS targets (!ARGS:name), the policy gets its own compiled rules, and
+	// the exclusion covers the rule only, not its chained rules.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.\-\[\]]+$`

@@ -29,6 +29,7 @@ import (
 
 	"github.com/inkwall-dev/inkwall/pkg/adapters/internal/httpadapter"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
+	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 )
@@ -58,6 +59,9 @@ type Config struct {
 	// Logger receives one security event per denied or logged request.
 	// Nil uses slog.Default().
 	Logger *slog.Logger
+	// Events records each security event for the operator (nil: logged
+	// only).
+	Events *events.Recorder
 }
 
 // Handler answers forward-auth subrequests.
@@ -66,6 +70,7 @@ type Handler struct {
 	maxBody  int64
 	clientIP *clientip.Resolver
 	logger   *slog.Logger
+	events   *events.Recorder
 }
 
 // New returns a Handler that inspects requests with p.
@@ -81,7 +86,7 @@ func New(p pipeline.Inspector, cfg Config) (*Handler, error) {
 	if resolver == nil {
 		resolver = &clientip.Resolver{}
 	}
-	return &Handler{pipeline: p, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger}, nil
+	return &Handler{pipeline: p, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events}, nil
 }
 
 // ServeHTTP inspects the request described by r and answers 200 to allow it,
@@ -102,7 +107,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	v := h.pipeline.Check(r.Context(), req)
 	if httpadapter.IsEvent(v) {
-		httpadapter.LogEvent(r.Context(), h.logger, req, path, v)
+		httpadapter.LogEvent(r.Context(), h.logger, h.events, req, path, v)
 	}
 	if v.Action == pipeline.ActionDeny {
 		http.Error(w, http.StatusText(v.Status), v.Status)

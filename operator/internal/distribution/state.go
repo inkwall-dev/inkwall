@@ -33,6 +33,9 @@ type Engine struct {
 	// Rejected is the newest version the engine refused, and why.
 	Rejected    uint64 `json:"rejected,omitempty"`
 	RejectError string `json:"rejectError,omitempty"`
+	// TrustedKeys are the IDs of the bundle signing keys the engine
+	// accepts; empty from an engine older than key rotation.
+	TrustedKeys []string `json:"trustedKeys,omitempty"`
 	// Replica is the operator replica the engine is connected to.
 	Replica     string    `json:"replica"`
 	ConnectedAt time.Time `json:"connectedAt"`

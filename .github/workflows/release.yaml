@@ -132,7 +132,7 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           version: ${{ env.HELM_VERSION }}
       # For cosign; helm keeps its own login.
@@ -174,7 +174,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.x'
+          go-version: '1.27.x'
           check-latest: true
       - uses: sigstore/cosign-installer@v4.1.2
         with:
@@ -187,3 +187,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MAKE_LATEST: ${{ needs.verify.outputs.latest }}
+          # The tag that started the run. Without it GoReleaser picks among the
+          # tags on the commit, and git sorts v0.1.0-rc.2 after v0.1.0: tagging
+          # a release on its last rc's commit built the rc instead.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}

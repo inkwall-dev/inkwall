@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 
 	agentv1 "github.com/inkwall-dev/inkwall/api/agent/v1"
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
 )
 
 // Engine is a fake engine.
@@ -33,8 +35,9 @@ type Engine struct {
 	TLS *tls.Config
 	// Token is the ServiceAccount token sent as a bearer token.
 	Token string
-	// PublicKey verifies bundles.
-	PublicKey ed25519.PublicKey
+	// PublicKeys verify bundles, chosen by their key ID; SetPublicKeys
+	// changes them while the engine runs, as a reloaded key file does.
+	PublicKeys []ed25519.PublicKey
 	// Reject, if set, decides whether to refuse a bundle (Nack).
 	Reject func(*bundlev1.Bundle) error
 	// Heartbeat is the interval of heartbeats; 0 means 1s.
@@ -42,7 +45,37 @@ type Engine struct {
 
 	mu      sync.Mutex
 	applied *bundlev1.Bundle
+	nacks   int
 	err     error
+}
+
+// SetPublicKeys replaces the trusted keys; heartbeats report them.
+func (e *Engine) SetPublicKeys(keys ...ed25519.PublicKey) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.PublicKeys = keys
+}
+
+func (e *Engine) keys() []ed25519.PublicKey {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.PublicKeys
+}
+
+// TrustedKeys returns the IDs of the trusted keys.
+func (e *Engine) TrustedKeys() []string {
+	var ids []string
+	for _, k := range e.keys() {
+		ids = append(ids, bundlekey.ID(k))
+	}
+	return ids
+}
+
+// Nacks returns how many bundles the engine rejected.
+func (e *Engine) Nacks() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.nacks
 }
 
 // Applied returns the bundle the engine runs, nil before the first.
@@ -94,6 +127,7 @@ func (e *Engine) run(ctx context.Context) error {
 	}
 	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{
 		EngineId: e.ID, PodNamespace: "test", PodName: e.ID, EngineVersion: "fake", BundleVersion: current,
+		TrustedKeyIds: e.TrustedKeys(),
 	}}}); err != nil {
 		// The operator may have ended the stream first (rejected the
 		// engine): its status comes with Recv.
@@ -123,7 +157,8 @@ func (e *Engine) run(ctx context.Context) error {
 				if a := e.Applied(); a != nil {
 					v = a.GetVersion()
 				}
-				if send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Heartbeat{Heartbeat: &agentv1.Heartbeat{BundleVersion: v}}}) != nil {
+				hb := &agentv1.Heartbeat{BundleVersion: v, TrustedKeyIds: e.TrustedKeys()}
+				if send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Heartbeat{Heartbeat: hb}}) != nil {
 					return
 				}
 			case <-stream.Context().Done():
@@ -146,6 +181,9 @@ func (e *Engine) run(ctx context.Context) error {
 			verr = e.Reject(b)
 		}
 		if verr != nil {
+			e.mu.Lock()
+			e.nacks++
+			e.mu.Unlock()
 			var v uint64
 			if b != nil {
 				v = b.GetVersion()
@@ -167,7 +205,12 @@ func (e *Engine) run(ctx context.Context) error {
 // verify checks the signature before decoding, as a real engine must: an
 // unverified bundle's content, its version included, can't be trusted.
 func (e *Engine) verify(signed *bundlev1.SignedBundle) (*bundlev1.Bundle, error) {
-	if !ed25519.Verify(e.PublicKey, signed.GetBundle(), signed.GetSignature()) {
+	keys := e.keys()
+	i := slices.IndexFunc(keys, func(k ed25519.PublicKey) bool { return bundlekey.ID(k) == signed.GetKeyId() })
+	if i < 0 {
+		return nil, fmt.Errorf("unknown key %q", signed.GetKeyId())
+	}
+	if !ed25519.Verify(keys[i], signed.GetBundle(), signed.GetSignature()) {
 		return nil, errors.New("bad signature")
 	}
 	var b bundlev1.Bundle

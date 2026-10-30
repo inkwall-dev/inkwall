@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +38,9 @@ import (
 
 	agentv1 "github.com/inkwall-dev/inkwall/api/agent/v1"
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
+	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
+	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/request"
@@ -56,6 +60,8 @@ type fakeOperator struct {
 	acks     []uint64
 	nacks    []*agentv1.Nack
 	beats    int
+	beatKeys []string
+	events   []string
 	sawHello chan struct{}
 }
 
@@ -92,6 +98,11 @@ func (f *fakeOperator) Watch(stream agentv1.BundleService_WatchServer) error {
 				f.nacks = append(f.nacks, x.Nack)
 			case *agentv1.WatchRequest_Heartbeat:
 				f.beats++
+				f.beatKeys = x.Heartbeat.GetTrustedKeyIds()
+			case *agentv1.WatchRequest_Events:
+				for _, ev := range x.Events.GetEvents() {
+					f.events = append(f.events, ev.GetEventId())
+				}
 			}
 			f.mu.Unlock()
 		}
@@ -202,7 +213,7 @@ func bundle(t *testing.T, key ed25519.PrivateKey, version uint64, created time.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &bundlev1.SignedBundle{Bundle: raw, Signature: ed25519.Sign(key, raw), KeyId: "k1"}
+	return &bundlev1.SignedBundle{Bundle: raw, Signature: ed25519.Sign(key, raw), KeyId: bundlekey.ID(key.Public().(ed25519.PublicKey))}
 }
 
 const blockAttack = `SecRule ARGS "@contains attack" "id:100001,phase:2,deny,status:403,log"`
@@ -294,21 +305,30 @@ func TestRejections(t *testing.T) {
 	e.op.bundles <- bundle(t, e.priv, 5, now, blockAttack)
 	waitFor(t, "v5", func() bool { return a.Version() == 5 })
 
-	// A bad signature, an older bundle, rules that don't compile: each is
+	// An unknown key, a bad signature (of a trusted key's ID, and
+	// without an ID), an older bundle, rules that don't compile: each is
 	// nacked, and v5 stays enforced.
 	_, other, _ := ed25519.GenerateKey(rand.Reader)
 	e.op.bundles <- bundle(t, other, 6, now, "SecMarker A")
+	forged := bundle(t, other, 6, now, "SecMarker A")
+	forged.KeyId = bundle(t, e.priv, 6, now, "SecMarker A").GetKeyId()
+	e.op.bundles <- forged
+	anonymous := bundle(t, other, 6, now, "SecMarker A")
+	anonymous.KeyId = ""
+	e.op.bundles <- anonymous
 	e.op.bundles <- bundle(t, e.priv, 4, now.Add(-time.Minute), "SecMarker B")
 	e.op.bundles <- bundle(t, e.priv, 7, now, `SecRule ARGS "@nosuchop a" "id:100002,phase:1,deny"`)
-	waitFor(t, "three nacks", func() bool { _, nacks, _, _, _ := e.op.snapshot(); return len(nacks) == 3 })
+	waitFor(t, "five nacks", func() bool { _, nacks, _, _, _ := e.op.snapshot(); return len(nacks) == 5 })
 	_, nacks, _, _, _ := e.op.snapshot()
-	for i, want := range []string{"bad signature", "older than the applied 5", "nosuchop"} {
+	for i, want := range []string{"doesn't trust", "bad signature", "bad signature", "older than the applied 5", "nosuchop"} {
 		if !strings.Contains(nacks[i].GetError(), want) {
 			t.Errorf("nack %d: %q, want %q", i, nacks[i].GetError(), want)
 		}
 	}
-	if nacks[0].GetBundleVersion() != 0 {
-		t.Error("the version of an unverified bundle was trusted")
+	for i := range 3 {
+		if nacks[i].GetBundleVersion() != 0 {
+			t.Errorf("nack %d: the version of an unverified bundle was trusted", i)
+		}
 	}
 	if a.Version() != 5 || !blocks(holder) {
 		t.Fatalf("a rejected bundle replaced v5 (now %d)", a.Version())
@@ -378,6 +398,80 @@ func TestReconnect(t *testing.T) {
 	}
 }
 
+func (f *fakeOperator) heartbeatKeys() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.beatKeys
+}
+
+// TestKeyRotation follows the engine through a signing key rotation: it
+// reports the keys it trusts, reloads them from the file without a
+// restart, verifies each bundle with the key its key_id names, and asks
+// again for a bundle it rejected for its key once the key arrives.
+func TestKeyRotation(t *testing.T) {
+	e := newEnv(t)
+	keyFile := filepath.Join(e.dir, "ed25519.pub")
+	oldPub := e.priv.Public().(ed25519.PublicKey)
+	oldID := bundlekey.ID(oldPub)
+	newPub, newPriv, _ := ed25519.GenerateKey(rand.Reader)
+	newID := bundlekey.ID(newPub)
+
+	a, holder, _ := e.agent(t, func(c *Config) { c.KeyReload = 10 * time.Millisecond })
+	run(t, a)
+	<-e.op.sawHello
+	if _, _, hellos, _, _ := e.op.snapshot(); !slices.Equal(hellos[0].GetTrustedKeyIds(), []string{oldID}) {
+		t.Fatalf("hello reports keys %q, want %q", hellos[0].GetTrustedKeyIds(), oldID)
+	}
+	now := time.Now()
+	e.op.bundles <- bundle(t, e.priv, 1, now, blockAttack)
+	waitFor(t, "v1", func() bool { return a.Version() == 1 })
+
+	// Signed with the new key before the engine has it (the operator
+	// waits for every engine to report it, so this shouldn't happen):
+	// rejected, then asked for again once the key file has the key.
+	e.op.bundles <- bundle(t, newPriv, 2, now, blockAttack)
+	waitFor(t, "the nack", func() bool { _, nacks, _, _, _ := e.op.snapshot(); return len(nacks) == 1 })
+	writeFile(t, keyFile, bundlekey.Format(oldPub, newPub))
+	<-e.op.sawHello
+	both := []string{oldID, newID}
+	slices.Sort(both)
+	_, _, hellos, _, _ := e.op.snapshot()
+	if len(hellos) != 2 || !slices.Equal(hellos[1].GetTrustedKeyIds(), both) || hellos[1].GetBundleVersion() != 1 {
+		t.Fatalf("after the reload: hellos %v, want a second one with keys %q", hellos, both)
+	}
+	waitFor(t, "heartbeats with both keys", func() bool { return slices.Equal(e.op.heartbeatKeys(), both) })
+	// Same content, signed with the new key: applied without compiling,
+	// and cached, so a restart doesn't need the old key.
+	e.op.bundles <- bundle(t, newPriv, 2, now, blockAttack)
+	waitFor(t, "v2", func() bool { return a.Version() == 2 })
+	waitFor(t, "the cache signed with the new key", func() bool {
+		raw, err := os.ReadFile(filepath.Join(e.dir, "bundle.pb"))
+		var cached bundlev1.SignedBundle
+		return err == nil && proto.Unmarshal(raw, &cached) == nil && cached.GetKeyId() == newID
+	})
+
+	// The old key is retired: bundles it signs are rejected.
+	writeFile(t, keyFile, newPub)
+	waitFor(t, "the old key retired", func() bool { return slices.Equal(a.TrustedKeys(), []string{newID}) })
+	e.op.bundles <- bundle(t, e.priv, 3, now, "SecMarker OLD")
+	waitFor(t, "the old key's bundle rejected", func() bool { _, nacks, _, _, _ := e.op.snapshot(); return len(nacks) == 2 })
+
+	// A broken key file keeps the keys in use.
+	writeFile(t, keyFile, []byte("garbage"))
+	time.Sleep(50 * time.Millisecond)
+	if !slices.Equal(a.TrustedKeys(), []string{newID}) {
+		t.Fatalf("a broken key file changed the keys to %q", a.TrustedKeys())
+	}
+	e.op.bundles <- bundle(t, newPriv, 4, now, blockAttack+"\nSecMarker NEW")
+	waitFor(t, "v4", func() bool { return a.Version() == 4 })
+	if !blocks(holder) {
+		t.Fatal("v4 is not enforced")
+	}
+	if _, nacks, _, _, _ := e.op.snapshot(); len(nacks) != 2 {
+		t.Fatalf("nacks: %v", nacks)
+	}
+}
+
 func TestNewErrors(t *testing.T) {
 	e := newEnv(t)
 	for _, tc := range []struct {
@@ -419,5 +513,32 @@ func TestSendFirst(t *testing.T) {
 	err := sendFirst(closedStream{err: status.Error(codes.PermissionDenied, "no access to the bundle")}, &agentv1.WatchRequest{})
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("got %v, want PermissionDenied", err)
+	}
+}
+
+func (f *fakeOperator) eventIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.events...)
+}
+
+func TestEvents(t *testing.T) {
+	e := newEnv(t)
+	buf := events.NewBuffer(0)
+	a, _, _ := e.agent(t, func(c *Config) { c.Events = buf })
+	// Recorded before the stream is up: kept until it is.
+	buf.Add(&eventsv1.SecurityEvent{EventId: "1"})
+	run(t, a)
+	<-e.op.sawHello
+	buf.Add(&eventsv1.SecurityEvent{EventId: "2"})
+	waitFor(t, "both events", func() bool { return slices.Equal(e.op.eventIDs(), []string{"1", "2"}) })
+
+	// Across a reconnect, nothing is lost.
+	e.op.closeStream <- struct{}{}
+	<-e.op.sawHello
+	buf.Add(&eventsv1.SecurityEvent{EventId: "3"})
+	waitFor(t, "the third event", func() bool { ids := e.op.eventIDs(); return len(ids) == 3 && ids[2] == "3" })
+	if n := buf.Len(); n != 0 {
+		t.Errorf("%d events left in the buffer", n)
 	}
 }

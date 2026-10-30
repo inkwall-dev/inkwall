@@ -38,10 +38,18 @@ var (
 		Name: "inkwall_operator_engines",
 		Help: "Connected engines, by whether they run the current bundle (current, behind, rejected). Reported by the leader.",
 	}, []string{"state"})
+	eventsReceived = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "inkwall_operator_events_received_total",
+		Help: "Security events received from the engines on this replica.",
+	})
+	eventsDroppedByEngines = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "inkwall_operator_engine_events_dropped_total",
+		Help: "Security events the engines on this replica reported dropping (their buffer was full).",
+	})
 )
 
 func init() {
-	metrics.Registry.MustRegister(bundleVersion, engineCount)
+	metrics.Registry.MustRegister(bundleVersion, engineCount, eventsReceived, eventsDroppedByEngines)
 }
 
 // Enforced computes a policy's Enforced condition: whether every connected

@@ -1,0 +1,347 @@
+// Copyright 2026 The Inkwall Authors
+// SPDX-License-Identifier: Apache-2.0
+
+// The contract between the operator and the optional control plane
+// (0002 §3.4, §5.3, §7.5). The control plane talks only to operators, never
+// to engines: one primary stream per cluster, from the elected leader, and
+// one events stream per operator replica, for the engines connected to it.
+// Enforcement never depends on it: while it is unreachable, engines keep
+// their bundles and events wait in the operator's buffers.
+//
+// Within controlplane.v1, changes stay backward compatible.
+//
+// Both sides compress messages (gzip) and accept messages up to 16 MiB: a
+// ClusterState carries every Inkwall object of the cluster.
+syntax = "proto3";
+
+package inkwall.controlplane.v1;
+
+import "events/v1/events.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/inkwall-dev/inkwall/api/controlplane/v1;controlplanev1";
+
+// ControlPlaneService is served by the control plane; the operator calls it.
+service ControlPlaneService {
+  // Enroll exchanges a one-time enrollment token and a certificate signing
+  // request for the cluster's client certificate (0002 §7.5). It is the
+  // only call made without a client certificate (server-authenticated TLS).
+  // The first call burns the token. A retry with the same token and the same
+  // public key, within the token's TTL, returns the same certificate, so a
+  // lost response doesn't cost a new token; any other reuse is refused.
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+
+  // Connect is a stream from the cluster, over mTLS. The cluster's identity
+  // is the client certificate, never a field of a message. The operator
+  // sends Hello first; the control plane answers with Welcome.
+  //
+  // A primary stream (the leader's) then carries ClusterState, heartbeats,
+  // policy snapshots (Managed mode), directives and certificate renewal.
+  // There is one per cluster: when the leader moves, the newer primary
+  // stream wins and the control plane closes the older one.
+  //
+  // An events stream carries only EventUpload and EventsAck, and
+  // heartbeats; every replica opens one for the events of its engines.
+  //
+  // Errors (gRPC status codes) and what the operator does:
+  // - UNAUTHENTICATED: the certificate isn't valid (e.g. expired or
+  //   revoked). Enroll again with a new token. The control plane checks the
+  //   certificate in the RPC and answers with this code; failing the TLS
+  //   handshake instead would look like UNAVAILABLE, and the operator would
+  //   keep retrying.
+  // - PERMISSION_DENIED: the cluster was removed or disabled. Stop
+  //   reconnecting until the configuration changes.
+  // - RESOURCE_EXHAUSTED: over a quota (e.g. events). Back off; the
+  //   control plane says when in the status details if it can.
+  // - FAILED_PRECONDITION: Hello didn't come first, or a message doesn't
+  //   fit the stream's role. A bug: reconnect with backoff.
+  // - UNAVAILABLE and others: reconnect with exponential backoff and
+  //   jitter.
+  rpc Connect(stream ConnectRequest) returns (stream ConnectResponse);
+}
+
+// EnrollRequest is sent once, with the token from
+// InkwallConfig.spec.controlPlane.enrollmentSecretRef.
+message EnrollRequest {
+  // The one-time enrollment token (TTL 1 h).
+  string token = 1;
+  // A PKCS #10 certificate signing request, DER, for an ECDSA P-256 or
+  // Ed25519 key the operator generated and keeps. Its subject is ignored:
+  // the control plane decides the identity.
+  bytes csr = 2;
+  // The kube-system Namespace UID, which also identifies the cluster in
+  // bundles (bundle.v1 Bundle.cluster_id). Informational.
+  string cluster_uid = 3;
+  // The operator's version.
+  string operator_version = 4;
+}
+
+// Enroll errors: PERMISSION_DENIED for a token that is unknown, expired or
+// already used (other than a retry); INVALID_ARGUMENT for a CSR that isn't
+// valid or uses another key type. Neither is retried with the same input.
+
+// EnrollResponse carries the cluster's identity.
+message EnrollResponse {
+  // The control plane's ID for this cluster.
+  string cluster_id = 1;
+  // The client certificate, then its intermediates, each DER.
+  repeated bytes certificates = 2;
+  google.protobuf.Timestamp not_after = 3;
+}
+
+// ConnectRequest is a message from the operator.
+message ConnectRequest {
+  oneof msg {
+    Hello hello = 1;
+    ClusterState cluster_state = 2;
+    EventUpload events = 3;
+    Heartbeat heartbeat = 4;
+    PolicyAck policy_ack = 5;
+    PolicyNack policy_nack = 6;
+    RenewCertificate renew_certificate = 7;
+  }
+}
+
+// ConnectResponse is a message from the control plane.
+message ConnectResponse {
+  oneof msg {
+    Welcome welcome = 1;
+    PolicySnapshot policy_snapshot = 2;
+    Certificate certificate = 3;
+    Directive directive = 4;
+    EventsAck events_ack = 5;
+  }
+}
+
+// ClusterMode is where a cluster's policy comes from (0002 §4.1).
+enum ClusterMode {
+  CLUSTER_MODE_UNSPECIFIED = 0;
+  // The CRDs; the cluster doesn't connect.
+  CLUSTER_MODE_STANDALONE = 1;
+  // The CRDs, mirrored read-only to the control plane.
+  CLUSTER_MODE_GITOPS = 2;
+  // The control plane: the operator writes its policies as CRDs.
+  CLUSTER_MODE_MANAGED = 3;
+}
+
+// StreamRole is what a Connect stream carries.
+enum StreamRole {
+  STREAM_ROLE_UNSPECIFIED = 0;
+  // The leader's stream: state, policies, directives, certificates.
+  STREAM_ROLE_PRIMARY = 1;
+  // A replica's stream for the events of its engines.
+  STREAM_ROLE_EVENTS = 2;
+}
+
+// Hello opens the stream.
+message Hello {
+  StreamRole role = 1;
+  // The replica that opened the stream (its pod name).
+  string replica = 2;
+  string operator_version = 3;
+  ClusterMode mode = 4;
+  // The kube-system Namespace UID (as in EnrollRequest).
+  string cluster_uid = 5;
+  string kubernetes_version = 6;
+  // The last PolicySnapshot the operator applied (0: none): the control
+  // plane skips resending it when it is current.
+  uint64 policy_version = 7;
+  // Optional features the operator supports, e.g. "events", and the API
+  // versions it writes, e.g. "waf.inkwall.dev/v1alpha1", so a newer control
+  // plane can tell what an older operator can do.
+  repeated string capabilities = 8;
+}
+
+// Welcome answers Hello.
+message Welcome {
+  // How often the operator sends a Heartbeat; unset: 30 s.
+  google.protobuf.Duration heartbeat_interval = 1;
+  // Whether the control plane accepts security events from this cluster.
+  // When false (the default), replicas neither send nor buffer events: they
+  // log them, as in Standalone mode.
+  bool accept_events = 2;
+}
+
+// Object is a Kubernetes object in Inkwall's API (waf.inkwall.dev):
+// WAFPolicy, WAFRuleSet, ClusterWAFRuleSet or InkwallConfig. Carried as the
+// object's JSON, so the contract doesn't repeat the CRD schemas and new
+// fields need no change here; the CRD schema and the validating webhook
+// check it where it is written.
+message Object {
+  // e.g. "waf.inkwall.dev/v1alpha1" and "WAFPolicy".
+  string api_version = 1;
+  string kind = 2;
+  // Empty for cluster-scoped kinds.
+  string namespace = 3;
+  string name = 4;
+  // The metadata.generation the status refers to (0 in a PolicySnapshot).
+  int64 generation = 5;
+  map<string, string> labels = 6;
+  // The object's spec, JSON.
+  bytes spec = 7;
+  // Its status conditions, in ClusterState only.
+  repeated Condition conditions = 8;
+}
+
+// Condition is a status condition (metav1.Condition), e.g. Ready: the
+// condition types and reasons are strings, so new ones need no change here.
+message Condition {
+  string type = 1;
+  // "True", "False" or "Unknown".
+  string status = 2;
+  string reason = 3;
+  string message = 4;
+  int64 observed_generation = 5;
+  google.protobuf.Timestamp last_transition_time = 6;
+}
+
+// ClusterState is a full snapshot of the cluster, sent after Hello, when
+// something changes, and periodically. Full, not deltas: idempotent.
+message ClusterState {
+  google.protobuf.Timestamp time = 1;
+  // Every Inkwall object in the cluster, with its conditions.
+  repeated Object objects = 2;
+  // The proxies the operator found.
+  repeated Integration integrations = 3;
+  // The engines connected to the operator.
+  repeated Engine engines = 4;
+  // The bundle the operator serves.
+  uint64 bundle_version = 5;
+  bytes bundle_content_hash = 6;
+}
+
+// Integration is a proxy controller the operator wires.
+message Integration {
+  // The integration, e.g. "traefik".
+  string name = 1;
+  // Its IngressClass controller, e.g. "traefik.io/ingress-controller".
+  string controller = 2;
+  // Its running pods, and how many of them have the engine.
+  uint32 pods = 3;
+  uint32 pods_with_engine = 4;
+}
+
+// Engine is one engine connected to the operator.
+message Engine {
+  string engine_id = 1;
+  string pod_namespace = 2;
+  string pod_name = 3;
+  string node_name = 4;
+  string engine_version = 5;
+  // The newest bundle it runs, and the newest it rejected, with why.
+  uint64 applied_bundle_version = 6;
+  uint64 rejected_bundle_version = 7;
+  string reject_error = 8;
+  google.protobuf.Timestamp connected_at = 9;
+}
+
+// EventUpload is a batch of security events from a replica's buffer, on an
+// events stream, at most 1,000 events. Delivery is at least once: the replica keeps a batch until
+// it is acknowledged, and sends unacknowledged batches again after
+// reconnecting. The control plane drops duplicates by
+// SecurityEvent.event_id, never by sequence: sequences are per buffer.
+message EventUpload {
+  // The buffer the batch comes from: random, chosen when the buffer is
+  // created, so a replica's new buffer (e.g. after its disk was lost) never
+  // looks like an old one.
+  string buffer_id = 1;
+  // Increases with every batch from this buffer, across reconnects.
+  uint64 sequence = 2;
+  inkwall.events.v1.EventBatch batch = 3;
+}
+
+// EventsAck acknowledges every batch of buffer_id up to sequence, once
+// stored: the replica frees them from its buffer. A resent batch carries
+// the same EventBatch.dropped: count it once per buffer_id and sequence.
+message EventsAck {
+  string buffer_id = 1;
+  uint64 sequence = 2;
+}
+
+// Heartbeat shows the stream is alive between other messages.
+message Heartbeat {
+  google.protobuf.Timestamp time = 1;
+  // Events waiting in the operator's buffer.
+  uint64 buffered_events = 2;
+}
+
+// PolicySnapshot is the full set of policies for a cluster in Managed mode
+// (0004 §4.9): the operator writes them as CRDs labelled
+// inkwall.dev/source: saas, deletes those of that label that are missing,
+// and builds and signs the bundle with the cluster's own key, as for any
+// CRD. Policy objects, not bundles: the engines trust only the cluster's
+// key.
+//
+// All or nothing: the operator checks every object with a server-side dry
+// run before writing any. If one is refused, it writes none and answers
+// PolicyNack. A failure while writing is retried; the snapshot is
+// acknowledged only once fully written.
+//
+// The cluster's InkwallConfig decides its mode: a cluster that isn't in
+// Managed mode answers PolicyNack and writes nothing.
+//
+// Only WAFPolicy, WAFRuleSet and ClusterWAFRuleSet are accepted: any other
+// kind (InkwallConfig included) refuses the snapshot. The operator sets the
+// inkwall.dev/source label itself; a snapshot's labels can't change it.
+message PolicySnapshot {
+  // Increases with every snapshot for the cluster.
+  uint64 version = 1;
+  // WAFPolicy, WAFRuleSet and ClusterWAFRuleSet objects. Rule sets carry
+  // their rules inline (source.seclang or source.builtin): the operator
+  // refuses a configMapRef, which would point at a ConfigMap the control
+  // plane can't create, with a PolicyNack naming the object.
+  repeated Object objects = 2;
+}
+
+// PolicyAck reports a snapshot the operator applied. Whether the engines
+// enforce it shows in the next ClusterState (the Enforced conditions).
+message PolicyAck {
+  uint64 version = 1;
+}
+
+// PolicyNack reports a snapshot the operator didn't apply, so nothing of
+// it was written: the previous one stays in force.
+message PolicyNack {
+  uint64 version = 1;
+  string error = 2;
+  // The objects that were refused, and why.
+  repeated ObjectError objects = 3;
+}
+
+// ObjectError is why one object was refused, e.g. by the CRD schema or
+// the validating webhook.
+message ObjectError {
+  string kind = 1;
+  string namespace = 2;
+  string name = 3;
+  string error = 4;
+}
+
+// RenewCertificate asks for a new client certificate before the current
+// one expires (it needs the current one, over mTLS). A cluster whose
+// certificate expired, e.g. while the operator was down longer than its
+// lifetime, enrolls again with a new token.
+message RenewCertificate {
+  // A PKCS #10 certificate signing request, DER, for a new key (ECDSA P-256
+  // or Ed25519).
+  bytes csr = 1;
+}
+
+// Certificate is a renewed client certificate.
+message Certificate {
+  // The client certificate, then its intermediates, each DER.
+  repeated bytes certificates = 1;
+  google.protobuf.Timestamp not_after = 2;
+}
+
+// Directive asks the operator to do something now.
+message Directive {
+  oneof action {
+    // Send a full ClusterState now.
+    Resync resync = 1;
+  }
+}
+
+// Resync asks for a full ClusterState.
+message Resync {}
