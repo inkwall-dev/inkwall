@@ -258,8 +258,14 @@ Unix socket.** There is no hop to another node, no [Service](https://kubernetes.
   are forwarded after the header and URI checks.
 - **Failure mode:** the engine fails closed in block mode and fails open in detect mode. Set per policy, or with
   `--failure-mode` and `--oversize-body` when the engine is configured by flags.
-- **Proxy timeouts:** by design always set, just above the engine's deadline. Not yet for Traefik:
-  the operator's ForwardAuth Middleware sets no timeout.
+- **Proxy timeouts:** by design always set, just above the engine's deadline. Not with Traefik:
+  ForwardAuth has no timeout setting, only a fixed 30 s client timeout
+  ([traefik/traefik#9857](https://github.com/traefik/traefik/issues/9857)), far above the engine's
+  deadline (at most 1 s).
+- **Engine unreachable, with Traefik:** Traefik answers 500 itself and doesn't forward the request,
+  in both modes: at once when the connection is refused (the engine crashed or is restarting), after
+  30 s when the engine hangs. Detect mode's "denies nothing" holds only while the engine answers
+  ([0002 §7.3](0002-system-architecture.md#73-engine-unavailable)).
 - **Overload:** admission control sheds inspection, not traffic, and emits a metric.
 - **Control plane down:** the engine enforces the last known good policy, indefinitely.
 

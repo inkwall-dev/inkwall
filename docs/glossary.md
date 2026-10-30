@@ -31,7 +31,8 @@ first time they mention it.
   verdicts.
 - <a id="failure-mode"></a>**Failure mode**: What happens to a request that can't be inspected: the
   engine **fails open** (lets it through) or **fails closed** (rejects it with 503). By default it
-  fails closed in block mode and open in detect mode.
+  fails closed in block mode and open in detect mode. It applies only while the engine answers:
+  Traefik answers 500 when it can't reach the engine, in both modes.
 - <a id="injection"></a>**Injection**: Adding the engine to proxy [pods](#pod) as a
   [sidecar](#sidecar) (a container in the same pod).
 - <a id="inkwallconfig"></a>**InkwallConfig**: The cluster-wide singleton, named `default`, that

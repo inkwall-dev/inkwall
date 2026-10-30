@@ -138,8 +138,10 @@ resources ([0002 §4.1](0002-system-architecture.md#41-sources-of-truth)).
    - **Engine unreachable, by design** (Envoy and the other planned proxies): the proxy's timeout,
      set just above the engine's deadline, expires, and the proxy applies the failure mode: 503 in
      block mode, forward in detect mode.
-   - **Engine unreachable, with Traefik** (built): Traefik's [ForwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/) decides on its own. The
-     operator's Middleware has no failure-mode setting, so Inkwall's failure mode does not apply.
+   - **Engine unreachable, with Traefik** (built): Traefik's [ForwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/) has no timeout or
+     failure setting, so Inkwall's failure mode does not apply: Traefik answers 500 and doesn't
+     forward the request, in both modes. A refused connection gets it at once, a hung engine
+     after Traefik's fixed 30 s timeout ([0002 §7.3](0002-system-architecture.md#73-engine-unavailable)).
 
 ### 5.2 Policy change (GitOps mode)
 

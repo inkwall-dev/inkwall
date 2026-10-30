@@ -72,6 +72,13 @@ func middleware(namespace string, responseLimit bool) *unstructured.Unstructured
 	return m
 }
 
+// forwardAuth is the Middleware's spec. It sets no timeout or failure
+// behaviour: Traefik has neither. When Traefik can't reach the engine, it
+// answers 500 itself and doesn't forward the request, at once on a refused
+// connection, after its fixed 30 s client timeout on a hung engine
+// (pkg/middlewares/auth/forward.go, v3.7; traefik/traefik#9857). The
+// policy's mode and failure mode apply only while the engine answers
+// (0002 §7.3).
 func forwardAuth(responseLimit bool) map[string]any {
 	fa := map[string]any{
 		"address": forwardAuthAddress,

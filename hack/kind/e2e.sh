@@ -321,7 +321,8 @@ spec:
       containers:
         - name: web
           image: traefik/whoami:v1.10.3
-          args: ["--port", "8080"]
+          # --verbose logs each request: the engine-down check looks for one.
+          args: ["--port", "8080", "--verbose"]
 ---
 apiVersion: v1
 kind: Service
@@ -369,6 +370,65 @@ events_received() {
   awk -v t="$total" 'BEGIN { exit !(t >= 1) }'
 }
 eventually "the operator received the engine's security events" events_received
+
+# The engine unreachable (#168): Traefik's ForwardAuth has no failure
+# setting, and answers 500 itself, without forwarding the request, whatever
+# the policy's mode (0002 §7.3). The engine is stopped twice, so the kubelet
+# waits 10 s before restarting it: refused connections, not a hang (a hung
+# engine gets the same 500 after Traefik's fixed 30 s timeout, not tested
+# here, for time).
+echo "== Traefik with its engine down"
+# traefik_engine_ctr: the running engine container in Traefik's pod, on its
+# kind node (a Docker container named after the node).
+traefik_node() { "${KUBECTL[@]}" -n "$TRAEFIK_NS" get pods -l app.kubernetes.io/name=traefik -o jsonpath='{.items[0].spec.nodeName}'; }
+traefik_engine_ctr() {
+  docker exec "$(traefik_node)" crictl ps --no-trunc -q --name inkwall-engine --label "io.kubernetes.pod.namespace=$TRAEFIK_NS"
+}
+stop_traefik_engine() {
+  local id
+  id=$(traefik_engine_ctr)
+  [[ -n $id ]] && docker exec "$(traefik_node)" crictl stop -t 0 "$id"
+}
+engine_back() { [[ -n $(traefik_engine_ctr) ]]; }
+engine_down() { [[ -z $(traefik_engine_ctr) ]]; }
+# down_answer PATH: the body, status and time of Traefik's answer.
+down_answer() {
+  curl -s -m 10 -w '|%{http_code}|%{time_total}' -H "Host: $TRAEFIK_HOST" "http://127.0.0.1:$TRAEFIK_PORT$1" || true
+}
+# fails_closed PATH: 500 at once, with Traefik's empty body.
+fails_closed() {
+  local a
+  a=$(down_answer "$1")
+  [[ $a == "|500|"* ]] && awk -v t="${a##*|}" 'BEGIN { exit !(t < 1) }'
+}
+# app_saw MARK: the app (whoami --verbose) logged a request with MARK.
+app_saw() {
+  local log
+  log=$("${KUBECTL[@]}" -n "$NS" logs deployment/web) && grep "$1" >/dev/null <<<"$log"
+}
+never_reached_app() {
+  "${KUBECTL[@]}" -n "$NS" logs deployment/web >/dev/null && ! app_saw "$1"
+}
+traefik_unready() { ! traefik_ready; }
+traefik_ready() {
+  [[ $("${KUBECTL[@]}" -n "$TRAEFIK_NS" get pods -l app.kubernetes.io/name=traefik \
+    -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}') == True ]]
+}
+stop_traefik_engine >/dev/null 2>&1 || true
+eventually "the engine restarted once" engine_back
+stop_traefik_engine >/dev/null 2>&1 || true
+check "the engine is down" engine_down
+down_id=engine-down-$RANDOM
+check "engine down: benign traffic fails closed (500) at once" fails_closed "/$down_id"
+check "engine down: the attack fails closed (500) at once" fails_closed "/$down_id$SQLI"
+check "engine down: the requests never reach the app" never_reached_app "$down_id"
+# The engine's readiness is the pod's: a Service stops sending Traefik's pod
+# new connections, but Traefik serves those it gets (here, a port-forward).
+check "engine down: Traefik's pod is not ready" traefik_unready
+eventually "the engine is back: it blocks the attack" tstatus_is 403 "$SQLI"
+check "the engine is back: benign traffic passes" tstatus_is 200 "/$down_id-back"
+check "the engine is back: requests reach the app" app_saw "$down_id-back"
+eventually "the engine is back: Traefik's pod is ready" traefik_ready
 
 # The client IP behind a load balancer (#120): Traefik's web entry point
 # takes the PROXY protocol from the pod network only (traefik-e2e-values.yaml).

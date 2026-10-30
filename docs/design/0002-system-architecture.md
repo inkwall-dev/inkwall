@@ -464,6 +464,8 @@ on an `Ingress`, or in each route's `middlewares` on an `IngressRoute`
   the request, so it can't allow it.
 - Limitation: Traefik itself rejects bodies over `maxBodySize`, whatever `body.onOversize` says.
   The operator sets it to 10 MiB, the largest inspectable body.
+- Limitation: ForwardAuth has no timeout or failure setting. An unreachable engine gets a 500
+  from Traefik in both modes ([§7.3](#73-engine-unavailable)).
 
 **Client IP behind a load balancer.** Behind a load balancer, Traefik's peer is the load balancer
 or a node, and the engine would see that as the client. The load balancer's [`X-Forwarded-For`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For)
@@ -553,9 +555,25 @@ inspects inline and always allows (`pkg/pipeline`).
 ### 7.3 Engine unavailable
 
 - **Engine unreachable** (timeout or refused connection): by design, the proxy applies the
-  failure mode. With Traefik (built), ForwardAuth decides on its own, so Inkwall's failure mode
-  does not apply. The engine can't count a request it never received. A proxy-side failure
+  failure mode. The engine can't count a request it never received. A proxy-side failure
   counter is a target, not built yet.
+- **Engine unreachable, with Traefik (built):** Traefik's ForwardAuth has no timeout, failure or
+  fallback setting, so Inkwall's failure mode does not apply. On any error calling the engine,
+  Traefik answers **500** with an empty body and doesn't forward the request, in **both** modes
+  (`pkg/middlewares/auth/forward.go` in v3.7). Measured on kind with v3.7.13:
+
+  | Engine | Detect mode | Block mode |
+  |---|---|---|
+  | Refused (crashed, restarting) | 500 in a few ms, app not reached | 500 in a few ms, app not reached |
+  | Hung (no answer) | 500 after 30 s, app not reached | 500 after 30 s, app not reached |
+
+  So an engine outage fails closed whatever the mode and failure mode, with Traefik's 500
+  rather than the engine's 503: against the policy in detect mode ("never blocks") and with
+  `failureMode: Open`. What limits an outage: the engine is a native sidecar, so Traefik starts only once the engine is ready (startup probe); the kubelet restarts a
+  crashed engine at once (then with back-off), and a hung one when its liveness probe fails
+  (30 s); while the engine isn't ready, neither is Traefik's pod, so a Service sends it no new
+  connections. Traefik still serves the connections it has. The kind e2e test checks the refused
+  case.
 - **Engine reachable, deadline passed:** the engine applies the failure mode itself. Failing
   closed, it answers 503 (`pkg/pipeline`). It counts the request in
   `inkwall_requests_total{reason="timeout"}`. The reasons `timeout`, `error` and `overload` all
