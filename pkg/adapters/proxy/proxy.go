@@ -20,6 +20,8 @@ import (
 	"net/url"
 	"strings"
 
+	"golang.org/x/net/http/httpguts"
+
 	"github.com/inkwall-dev/inkwall/pkg/adapters/internal/httpadapter"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/events"
@@ -94,6 +96,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// upstream still parses what follows, so parameters after it would
 	// reach the application uninspected.
 	if strings.ContainsRune(r.RequestURI, '#') {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+	// Only the origin form ("/path?query"). For an absolute-form target
+	// ("http://host/path"), Go takes the Host from the URL without checking
+	// it, and the client forwarding the request sends another one (punycode,
+	// or none if it is invalid): the engine would choose the policy by a Host
+	// the upstream never sees. The asterisk form would be forwarded as "/*".
+	if r.RequestURI != "" && !strings.HasPrefix(r.RequestURI, "/") {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+	// Forward only a Host the client sends as it is: what was inspected.
+	if !httpguts.ValidHostHeader(r.Host) {
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
