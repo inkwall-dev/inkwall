@@ -403,8 +403,12 @@ type CheckResponse struct {
 	RequestId string `protobuf:"bytes,7,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	// Time spent inspecting.
 	InspectionTime *durationpb.Duration `protobuf:"bytes,8,opt,name=inspection_time,json=inspectionTime,proto3" json:"inspection_time,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// The policy that decided, in bundle mode ("namespace/name"); empty when
+	// none did (no policy covers the request, or inspection is suspended),
+	// or outside bundle mode.
+	Policy        string `protobuf:"bytes,9,opt,name=policy,proto3" json:"policy,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CheckResponse) Reset() {
@@ -493,6 +497,13 @@ func (x *CheckResponse) GetInspectionTime() *durationpb.Duration {
 	return nil
 }
 
+func (x *CheckResponse) GetPolicy() string {
+	if x != nil {
+		return x.Policy
+	}
+	return ""
+}
+
 var File_engine_v1_engine_proto protoreflect.FileDescriptor
 
 const file_engine_v1_engine_proto_rawDesc = "" +
@@ -517,7 +528,7 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\x06Header\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value\x12\x1b\n" +
-	"\traw_value\x18\x03 \x01(\fR\brawValue\"\x83\x03\n" +
+	"\traw_value\x18\x03 \x01(\fR\brawValue\"\x9b\x03\n" +
 	"\rCheckResponse\x121\n" +
 	"\x06action\x18\x01 \x01(\x0e2\x19.inkwall.engine.v1.ActionR\x06action\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\rR\x06status\x12D\n" +
@@ -527,7 +538,8 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\x14interrupting_rule_id\x18\x06 \x01(\rR\x12interruptingRuleId\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\a \x01(\tR\trequestId\x12B\n" +
-	"\x0finspection_time\x18\b \x01(\v2\x19.google.protobuf.DurationR\x0einspectionTime*S\n" +
+	"\x0finspection_time\x18\b \x01(\v2\x19.google.protobuf.DurationR\x0einspectionTime\x12\x16\n" +
+	"\x06policy\x18\t \x01(\tR\x06policy*S\n" +
 	"\x06Action\x12\x16\n" +
 	"\x12ACTION_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fACTION_ALLOW\x10\x01\x12\x0f\n" +

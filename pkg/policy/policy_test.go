@@ -5,8 +5,11 @@ package policy
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -185,6 +188,74 @@ func TestEvaluatorsShared(t *testing.T) {
 	}
 }
 
+func TestEvaluatorsSharedAcrossExclusions(t *testing.T) {
+	custom := []*bundlev1.RuleSetBinding{{RuleSetId: "WAFRuleSet/shop/custom"}}
+	b := &bundlev1.Bundle{
+		Version: 1,
+		Policies: []*bundlev1.Policy{
+			{
+				Id: "a/site", Mode: bundlev1.Mode_MODE_BLOCK, RuleSets: custom,
+				Routes: []*bundlev1.RouteMatch{rm("a.example.com", false, "/")},
+				Exclusions: []*bundlev1.Exclusion{
+					{RuleIds: []uint32{100001}, Argument: "a"},
+					{RuleIds: []uint32{100001}, Path: "/a/*"},
+				},
+			},
+			{
+				Id: "b/site", Mode: bundlev1.Mode_MODE_BLOCK, RuleSets: custom,
+				Routes: []*bundlev1.RouteMatch{rm("b.example.com", false, "/")},
+				Exclusions: []*bundlev1.Exclusion{
+					{RuleIds: []uint32{100001}, Argument: "b"},
+					{RuleIds: []uint32{100001}, Path: "/b", Argument: "q"},
+				},
+			},
+			{
+				Id: "c/site", Mode: bundlev1.Mode_MODE_BLOCK, RuleSets: custom,
+				Routes: []*bundlev1.RouteMatch{rm("c.example.com", false, "/")},
+			},
+		},
+		RuleSets: testBundle().RuleSets,
+	}
+	ev := NewEvaluators()
+	set, err := Compile(b, Options{Evaluators: ev})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Len() != 1 {
+		t.Fatalf("%d rule sets compiled for policies that differ only in exclusions", ev.Len())
+	}
+	checks := []struct {
+		host, uri string
+		blocked   bool
+	}{
+		{"a.example.com", "/x?a=attack", false},
+		{"a.example.com", "/x?b=attack", true},
+		{"a.example.com", "/a/1?q=attack", false},
+		{"a.example.com", "/b?q=attack", true},
+		{"b.example.com", "/x?b=attack", false},
+		{"b.example.com", "/x?a=attack", true},
+		{"b.example.com", "/b?q=attack", false},
+		{"b.example.com", "/b?p=attack", true},
+		{"b.example.com", "/a/1?q=attack", true},
+		{"c.example.com", "/x?a=attack", true},
+		{"c.example.com", "/b?q=attack", true},
+		{"c.example.com", "/a/1?q=attack", true},
+	}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for i := range 120 {
+				c := checks[i%len(checks)]
+				v := set.Check(context.Background(), req(c.host, c.uri))
+				if blocked := v.Action == pipeline.ActionDeny; blocked != c.blocked {
+					t.Errorf("%s%s: %s/%s, want blocked=%v", c.host, c.uri, v.Action, v.Reason, c.blocked)
+				}
+			}
+		})
+	}
+	wg.Wait()
+}
+
 func TestCompileErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -237,5 +308,58 @@ func TestHolder(t *testing.T) {
 	deny.Store(set)
 	if v := deny.Check(context.Background(), req("shop.example.com", "/")); v.Action != pipeline.ActionAllow {
 		t.Errorf("deny after a bundle: got %s/%s", v.Action, v.Reason)
+	}
+}
+
+// exclusionBundle has n policies with the CRS and its defaults, each on its
+// own host and with its own exclusions: an argument everywhere, a rule on a
+// path, and an argument on a path prefix.
+func exclusionBundle(n int) *bundlev1.Bundle {
+	b := &bundlev1.Bundle{Version: 1}
+	for i := range n {
+		b.Policies = append(b.Policies, &bundlev1.Policy{
+			Id:     fmt.Sprintf("ns/p%d", i),
+			Mode:   bundlev1.Mode_MODE_BLOCK,
+			Routes: []*bundlev1.RouteMatch{rm(fmt.Sprintf("p%d.example.com", i), false, "/")},
+			Exclusions: []*bundlev1.Exclusion{
+				{RuleIds: []uint32{942100}, Argument: fmt.Sprintf("q%d", i)},
+				{RuleIds: []uint32{941100}, Path: fmt.Sprintf("/p%d/editor", i)},
+				{RuleIds: []uint32{942100, 932100}, Path: fmt.Sprintf("/p%d/api/*", i), Argument: "query"},
+			},
+		})
+	}
+	return b
+}
+
+// BenchmarkCompile compiles bundles of policies that differ only in their
+// exclusions, from an empty cache (as an engine starts), and reports the
+// heap the compiled set keeps alive (live-B).
+func BenchmarkCompile(b *testing.B) {
+	live := func() uint64 {
+		runtime.GC()
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		return ms.HeapAlloc
+	}
+	for _, n := range []int{1, 100, 1000} {
+		bundle := exclusionBundle(n)
+		b.Run(fmt.Sprintf("policies=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			var heap int64
+			for b.Loop() {
+				b.StopTimer()
+				before := live()
+				b.StartTimer()
+				set, err := Compile(bundle, Options{Evaluators: NewEvaluators()})
+				if err != nil {
+					b.Fatal(err)
+				}
+				b.StopTimer()
+				heap = int64(live()) - int64(before)
+				runtime.KeepAlive(set)
+				b.StartTimer()
+			}
+			b.ReportMetric(float64(heap), "live-B")
+		})
 	}
 }

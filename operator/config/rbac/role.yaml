@@ -76,6 +76,16 @@ rules:
 - apiGroups:
   - traefik.io
   resources:
+  - ingressroutes
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - traefik.io
+  resources:
   - middlewares
   verbs:
   - create
@@ -89,12 +99,13 @@ rules:
   - waf.inkwall.dev
   resources:
   - clusterwafrulesets
-  - inkwallconfigs
-  - wafpolicies
   - wafrulesets
   verbs:
+  - create
+  - delete
   - get
   - list
+  - update
   - watch
 - apiGroups:
   - waf.inkwall.dev
@@ -107,6 +118,26 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - waf.inkwall.dev
+  resources:
+  - inkwallconfigs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - waf.inkwall.dev
+  resources:
+  - wafpolicies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

@@ -40,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - run: docker buildx build --target engine .
       - run: docker buildx build --target operator .
 
@@ -60,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           version: v3.19.0
       - run: make helm-lint
@@ -78,7 +78,7 @@ jobs:
         with:
           go-version: '1.27.x'
           check-latest: true
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           version: v3.19.0
       - run: go install sigs.k8s.io/kind@v0.33.0
@@ -117,7 +117,9 @@ jobs:
 
   bench:
     # Performance regression gate (0001 §8): benchmarks of the PR against its
-    # base, interleaved, compared with benchstat.
+    # base, interleaved, compared with benchstat. Packages whose test binary
+    # the PR does not change are skipped, and a regression must repeat on a
+    # re-check of the flagged benchmarks to fail (hack/bench/compare.sh).
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -134,8 +136,8 @@ jobs:
           OUT: bench-out
       - if: always()
         run: |
-          if [ -f bench-out/benchstat.txt ]; then
-            { echo '```'; cat bench-out/benchstat.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f bench-out/summary.md ]; then
+            cat bench-out/summary.md >> "$GITHUB_STEP_SUMMARY"
           fi
       - if: always()
         uses: actions/upload-artifact@v4
@@ -162,7 +164,7 @@ jobs:
     steps:
       # Squash merges use the PR title as the commit message on main, so it
       # must follow Conventional Commits (see CONTRIBUTING.md).
-      - uses: amannn/action-semantic-pull-request@v5
+      - uses: amannn/action-semantic-pull-request@v6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

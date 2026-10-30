@@ -8,16 +8,21 @@ package coraza
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"maps"
 	"net"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	coreruleset "github.com/corazawaf/coraza-coreruleset/v4"
 	"github.com/corazawaf/coraza/v3"
+	"github.com/corazawaf/coraza/v3/experimental"
+	"github.com/corazawaf/coraza/v3/experimental/plugins/plugintypes"
 	"github.com/corazawaf/coraza/v3/types"
+	"github.com/corazawaf/coraza/v3/types/variables"
 
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/rules"
@@ -80,8 +85,9 @@ type Config struct {
 	// DisableCRS loads only the directives, without the Core Rule Set.
 	DisableCRS bool
 	// Exclusions turn rules off, everywhere or for a path or an argument.
-	// They are rendered as SecLang after the Core Rule Set (everywhere, or
-	// for an argument) or before it (for a path, decided per request).
+	// They are applied to each transaction, not compiled into the rules, so
+	// they are not part of Key: Evaluator.WithExclusions gives configs that
+	// differ only in exclusions one compiled rule set.
 	Exclusions []Exclusion
 	// OnMatch, if set, is called for every rule that matches and logs. It
 	// runs on the request path and must be fast and safe for concurrent use.
@@ -89,14 +95,11 @@ type Config struct {
 }
 
 // Key identifies the rules cfg compiles to: equal keys, equal rule sets.
-// OnMatch is not part of it.
+// OnMatch and Exclusions are not part of it.
 func (cfg Config) Key() [sha256.Size]byte {
 	h := sha256.New()
 	fmt.Fprintf(h, "pl=%d\nthreshold=%d\nargs=%d\nbody=%d\ncrs=%v\ngroups=%q\n",
 		cfg.ParanoiaLevel, cfg.InboundAnomalyThreshold, cfg.MaxArgs, cfg.BodyLimit, !cfg.DisableCRS, cfg.DisabledRuleGroups)
-	for _, e := range cfg.Exclusions {
-		fmt.Fprintf(h, "exclusion=%v|%q|%q\n", e.RuleIDs, e.Path, e.Argument)
-	}
 	// Lengths first, so no text can pass for a boundary.
 	fmt.Fprintf(h, "before=%d\n%s\nafter=%d\n%s", len(cfg.DirectivesBeforeCRS), cfg.DirectivesBeforeCRS, len(cfg.Directives), cfg.Directives)
 	var k [sha256.Size]byte
@@ -111,8 +114,8 @@ type Exclusion struct {
 	// Path limits the exclusion to an exact path ("/search") or a prefix
 	// ("/api/*"), in the router's syntax. Empty: every path.
 	Path string
-	// Argument limits it to one query or body argument. Empty: the whole
-	// rule.
+	// Argument limits it to one query or body argument (ARGS:<argument>),
+	// in the rule and the rules chained to it. Empty: the whole rule.
 	Argument string
 }
 
@@ -123,76 +126,220 @@ var (
 	exclusionArgument = regexp.MustCompile(`^[A-Za-z0-9_.\-\[\]]+$`)
 )
 
-// renderExclusions returns the directives for exclusions: those loaded
-// before CRS (decided per request) and after it (configure time).
-func renderExclusions(exclusions []Exclusion) (before, after string, err error) {
-	var b, a strings.Builder
-	id := idExclusionMin
-	for i, e := range exclusions {
+// exclusions are compiled Exclusions. Coraza's ctl actions
+// (ctl:ruleRemoveById, ctl:ruleRemoveTargetById) apply them to one
+// transaction, before phase 1, so one compiled rule set serves policies with
+// different exclusions. They are immutable once in an Evaluator.
+type exclusions struct {
+	// Everywhere: rules off, and arguments the rules don't look at.
+	rules   []int
+	targets []target
+	paths   []pathExclusion
+}
+
+type target struct {
+	rule int
+	arg  string // lower case, as ctl:ruleRemoveTargetById stores it
+}
+
+// pathExclusion applies on a path. It is decided on REQUEST_FILENAME, as the
+// SecRule it replaces was:
+//
+//	SecRule REQUEST_FILENAME "@streq <path>" "phase:1,t:none,ctl:..."
+//	SecRule REQUEST_FILENAME "@beginsWith <prefix>" "phase:1,t:none,chain"
+//	  SecRule REQUEST_FILENAME "!@rx (?:^|/)\.\.?(?:/|$)|//" "t:none,ctl:..."
+type pathExclusion struct {
+	path    string
+	prefix  bool
+	rules   []int
+	targets []target
+}
+
+// dotSegments is the @rx above, with the (?sm) flags Coraza's @rx adds. A
+// prefix exclusion only applies to a path without dot segments or empty
+// segments: "/api/../admin" starts with "/api/" but a proxy routes it to
+// "/admin", so it must not get /api's exclusions. An exact path can't
+// contain them and still equal a clean path.
+var dotSegments = regexp.MustCompile(`(?sm)(?:^|/)\.\.?(?:/|$)|//`)
+
+func (p *pathExclusion) matches(filename string) bool {
+	if p.prefix {
+		return strings.HasPrefix(filename, p.path) && !dotSegments.MatchString(filename)
+	}
+	return filename == p.path
+}
+
+// setupRules are the phase 1 rules that ran before the path exclusion
+// rules when those were compiled in (coraza.conf-recommended's body
+// processor rules, the phase 1 argument limit, Inkwall's CRS settings).
+// Their ctl actions came too late to turn these off, so a path exclusion
+// still doesn't: a path can't, say, switch off JSON body parsing and with it
+// the inspection of JSON arguments.
+var setupRules = map[int]bool{
+	200000: true, 200001: true, 200006: true, 200004: true,
+	idParanoiaLevel: true, idAnomalyThreshold: true,
+}
+
+// compileExclusions checks and compiles exclusions.
+func compileExclusions(list []Exclusion) (*exclusions, error) {
+	x := &exclusions{}
+	for i, e := range list {
 		if len(e.RuleIDs) == 0 {
-			return "", "", fmt.Errorf("exclusion %d: no rule IDs", i)
+			return nil, fmt.Errorf("exclusion %d: no rule IDs", i)
 		}
 		for _, r := range e.RuleIDs {
 			if r <= 0 {
-				return "", "", fmt.Errorf("exclusion %d: rule ID %d", i, r)
+				return nil, fmt.Errorf("exclusion %d: rule ID %d", i, r)
 			}
 		}
 		if e.Path != "" && !exclusionPath.MatchString(e.Path) {
-			return "", "", fmt.Errorf("exclusion %d: path %q is not a plain path pattern", i, e.Path)
+			return nil, fmt.Errorf("exclusion %d: path %q is not a plain path pattern", i, e.Path)
 		}
 		if e.Argument != "" && !exclusionArgument.MatchString(e.Argument) {
-			return "", "", fmt.Errorf("exclusion %d: argument %q has characters other than letters, digits and _.-[]", i, e.Argument)
+			return nil, fmt.Errorf("exclusion %d: argument %q has characters other than letters, digits and _.-[]", i, e.Argument)
 		}
-		switch {
-		case e.Path == "" && e.Argument == "":
-			a.WriteString("SecRuleRemoveById")
-			for _, r := range e.RuleIDs {
-				fmt.Fprintf(&a, " %d", r)
+		ids, targets := &x.rules, &x.targets
+		if e.Path != "" {
+			path, prefix := strings.CutSuffix(e.Path, "*")
+			x.paths = append(x.paths, pathExclusion{path: path, prefix: prefix})
+			p := &x.paths[len(x.paths)-1]
+			ids, targets = &p.rules, &p.targets
+		}
+		for _, r := range e.RuleIDs {
+			switch {
+			case e.Path != "" && setupRules[r]:
+			case e.Argument == "":
+				*ids = append(*ids, r)
+			default:
+				*targets = append(*targets, target{rule: r, arg: strings.ToLower(e.Argument)})
 			}
-			a.WriteString("\n")
-		case e.Path == "":
-			for _, r := range e.RuleIDs {
-				fmt.Fprintf(&a, "SecRuleUpdateTargetById %d \"!ARGS:%s\"\n", r, e.Argument)
-			}
-		default:
-			if id > idExclusionMax {
-				return "", "", fmt.Errorf("more than %d path exclusions", idExclusionMax-idExclusionMin+1)
-			}
-			// REQUEST_FILENAME is the decoded path. A prefix exclusion only
-			// applies to a path without dot segments or empty segments:
-			// "/api/../admin" starts with "/api/" but a proxy routes it to
-			// "/admin", so it must not get /api's exclusions. An exact path
-			// can't contain them and still equal a clean path.
-			if p, ok := strings.CutSuffix(e.Path, "*"); ok {
-				fmt.Fprintf(&b, "SecRule REQUEST_FILENAME \"@beginsWith %s\" \"id:%d,phase:1,pass,t:none,nolog,chain\"\n", p, id)
-				b.WriteString("SecRule REQUEST_FILENAME \"!@rx (?:^|/)\\.\\.?(?:/|$)|//\" \"t:none")
-			} else {
-				fmt.Fprintf(&b, "SecRule REQUEST_FILENAME \"@streq %s\" \"id:%d,phase:1,pass,t:none,nolog", e.Path, id)
-			}
-			for _, r := range e.RuleIDs {
-				if e.Argument == "" {
-					fmt.Fprintf(&b, ",ctl:ruleRemoveById=%d", r)
-				} else {
-					fmt.Fprintf(&b, ",ctl:ruleRemoveTargetById=%d;ARGS:%s", r, e.Argument)
-				}
-			}
-			b.WriteString("\"\n")
-			id++
 		}
 	}
-	return b.String(), a.String(), nil
+	if len(x.rules) == 0 && len(x.targets) == 0 && len(x.paths) == 0 {
+		return nil, nil
+	}
+	return x, nil
 }
 
-// Evaluator evaluates requests with a compiled Coraza WAF. It is safe for
-// concurrent use.
+func (x *exclusions) hasTargets() bool {
+	if x == nil {
+		return false
+	}
+	if len(x.targets) > 0 {
+		return true
+	}
+	for i := range x.paths {
+		if len(x.paths[i].targets) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// ruleRemover is what Coraza's ctl actions call on a transaction. Coraza
+// doesn't export it in types.Transaction, but its transactions have it; New
+// fails if they stop having it.
+type ruleRemover interface {
+	RemoveRuleByID(id int)
+	RemoveRuleTargetByID(id int, variable variables.RuleVariable, key string, keyRx *regexp.Regexp)
+}
+
+var errNoRuleRemoval = errors.New("this Coraza version's transactions can't turn rules off (RemoveRuleByID, RemoveRuleTargetByID)")
+
+// apply turns the exclusions on for tx, after ProcessURI (which sets
+// REQUEST_FILENAME) and before ProcessRequestHeaders (phase 1).
+func (x *exclusions) apply(tx types.Transaction) error {
+	rm, ok := tx.(ruleRemover)
+	if !ok {
+		return errNoRuleRemoval
+	}
+	remove := func(ids []int, targets []target) {
+		for _, r := range ids {
+			rm.RemoveRuleByID(r)
+		}
+		for _, t := range targets {
+			rm.RemoveRuleTargetByID(t.rule, variables.Args, t.arg, nil)
+		}
+	}
+	remove(x.rules, x.targets)
+	if len(x.paths) == 0 {
+		return nil
+	}
+	st, ok := tx.(plugintypes.TransactionState)
+	if !ok {
+		return errNoRuleRemoval
+	}
+	filename := st.Variables().RequestFilename().Get()
+	for i := range x.paths {
+		if p := &x.paths[i]; p.matches(filename) {
+			remove(p.rules, p.targets)
+		}
+	}
+	return nil
+}
+
+// argsNegation finds SecLang that negates ARGS targets itself
+// ("ARGS|!ARGS:q", SecRuleUpdateTargetById 942100 "!ARGS:q"), conservatively.
+// Coraza 3.8.1 adds a transaction's target exclusions
+// (ctl:ruleRemoveTargetById) to the rule's own negations in place: when that
+// slice has spare capacity, concurrent transactions overwrite each other's
+// exclusions, and a request can get another request's. Rules from Inkwall and
+// the CRS negate no ARGS targets, so their rules take target exclusions per
+// transaction. Rules that do never do: a policy with argument exclusions gets
+// rule sets of its own with them compiled in (argsVariants).
+var argsNegation = regexp.MustCompile(`(?i)!\s*args`)
+
+// Evaluator evaluates requests with a compiled Coraza WAF and its
+// exclusions. It is safe for concurrent use.
 type Evaluator struct {
-	waf coraza.WAF
+	waf        coraza.WAF
+	exclusions *exclusions // nil: none
+	// base is the compiled rules without exclusions: waf, unless the
+	// argument exclusions are compiled in (variants).
+	base coraza.WAF
+	// private is set when the rules negate ARGS targets themselves
+	// (argsNegation).
+	private *privateRules
+	// variants, if set, replace waf: the rules with the argument
+	// exclusions compiled in.
+	variants *argsVariants
+}
+
+// privateRules are rules that negate ARGS targets themselves.
+type privateRules struct {
+	cfg Config
+	ids map[int]bool // the rules cfg compiles to
 }
 
 var _ rules.Evaluator = (*Evaluator)(nil)
 
 // New compiles the rule set described by cfg.
 func New(cfg Config) (*Evaluator, error) {
+	list := cfg.Exclusions
+	cfg.Exclusions = nil
+	if _, err := compileExclusions(list); err != nil {
+		return nil, err
+	}
+	var private *privateRules
+	if argsNegation.MatchString(cfg.DirectivesBeforeCRS) || argsNegation.MatchString(cfg.Directives) {
+		private = &privateRules{cfg: cfg, ids: map[int]bool{}}
+	}
+	var observe func(types.RuleMetadata)
+	if private != nil {
+		observe = func(r types.RuleMetadata) { private.ids[r.ID()] = true }
+	}
+	waf, err := compile(cfg, observe)
+	if err != nil {
+		return nil, err
+	}
+	if private != nil && len(private.ids) == 0 {
+		return nil, errors.New("this Coraza version doesn't list the rules it compiles")
+	}
+	e := &Evaluator{waf: waf, base: waf, private: private}
+	return e.WithExclusions(list)
+}
+
+func compile(cfg Config, observe func(types.RuleMetadata)) (coraza.WAF, error) {
 	directives, err := buildDirectives(cfg)
 	if err != nil {
 		return nil, err
@@ -203,11 +350,165 @@ func New(cfg Config) (*Evaluator, error) {
 	if cfg.OnMatch != nil {
 		wafCfg = wafCfg.WithErrorCallback(cfg.OnMatch)
 	}
+	if observe != nil {
+		wafCfg = experimental.WAFConfigWithRuleObserver(wafCfg, observe)
+	}
 	waf, err := coraza.NewWAF(wafCfg)
 	if err != nil {
 		return nil, fmt.Errorf("compile rules: %w", err)
 	}
-	return &Evaluator{waf: waf}, nil
+	return waf, nil
+}
+
+// WithExclusions returns an evaluator with e's compiled rules and the
+// exclusions list instead of e's. It compiles no rules, so policies that
+// differ only in exclusions share one rule set; except when e's rules negate
+// ARGS targets themselves and list excludes arguments (see argsNegation).
+func (e *Evaluator) WithExclusions(list []Exclusion) (*Evaluator, error) {
+	x, err := compileExclusions(list)
+	if err != nil {
+		return nil, err
+	}
+	ev := &Evaluator{waf: e.base, base: e.base, private: e.private}
+	if e.private != nil && x.hasTargets() {
+		if ev.variants, err = e.private.variants(x); err != nil {
+			return nil, err
+		}
+		if len(x.rules) == 0 && len(x.paths) == 0 {
+			x = nil
+		}
+	}
+	if x != nil {
+		tx := ev.waf.NewTransaction()
+		_, ok := tx.(ruleRemover)
+		_, hasState := tx.(plugintypes.TransactionState)
+		_ = tx.Close()
+		if !ok || !hasState {
+			return nil, errNoRuleRemoval
+		}
+	}
+	ev.exclusions = x
+	return ev, nil
+}
+
+// argsVariants are the rule sets of a policy whose rules negate ARGS targets
+// themselves (argsNegation) and that has argument exclusions. No argument
+// exclusion is applied per transaction: each rule set has the ones
+// everywhere and those of one set of path exclusions compiled in, as
+// SecRuleUpdateTargetById after the user's rules (which, unlike
+// ctl:ruleRemoveTargetById, leaves chained rules alone). A request gets the
+// rule set for the path exclusions it is on.
+type argsVariants struct {
+	everywhere []target
+	paths      []pathExclusion // those with argument exclusions
+	wafs       map[string]coraza.WAF
+}
+
+// variants compiles the rule sets for x's argument exclusions, and takes
+// them out of x.
+func (p *privateRules) variants(x *exclusions) (*argsVariants, error) {
+	v := &argsVariants{everywhere: x.targets, wafs: map[string]coraza.WAF{}}
+	x.targets = nil
+	for i := range x.paths {
+		if px := &x.paths[i]; len(px.targets) > 0 {
+			v.paths = append(v.paths, pathExclusion{path: px.path, prefix: px.prefix, targets: px.targets})
+			px.targets = nil
+		}
+	}
+	x.paths = slices.DeleteFunc(x.paths, func(px pathExclusion) bool { return len(px.rules) == 0 })
+	// The sets of path exclusions a request can be on: none; those a path
+	// equal to an exact one is on; and, for a clean path whose longest
+	// matching prefix is a given one, that prefix and the shorter ones it
+	// starts with.
+	sets := [][]target{nil}
+	for _, a := range v.paths {
+		var set []target
+		for _, b := range v.paths {
+			if a.prefix && b.prefix && strings.HasPrefix(a.path, b.path) || !a.prefix && b.matches(a.path) {
+				set = append(set, b.targets...)
+			}
+		}
+		sets = append(sets, set)
+	}
+	for _, set := range sets {
+		targets := v.targets(set)
+		k := targetsKey(targets)
+		if _, ok := v.wafs[k]; ok {
+			continue
+		}
+		cfg := p.cfg
+		var b strings.Builder
+		b.WriteString(cfg.Directives)
+		for _, t := range targets {
+			// A rule that isn't there is ignored, as by
+			// ctl:ruleRemoveTargetById.
+			if p.ids[t.rule] {
+				fmt.Fprintf(&b, "\nSecRuleUpdateTargetById %d \"!ARGS:%s\"", t.rule, t.arg)
+			}
+		}
+		cfg.Directives = b.String()
+		waf, err := compile(cfg, nil)
+		if err != nil {
+			return nil, err
+		}
+		v.wafs[k] = waf
+	}
+	return v, nil
+}
+
+// targets returns the exclusions everywhere and set, sorted and without
+// duplicates.
+func (v *argsVariants) targets(set []target) []target {
+	all := append(slices.Clone(v.everywhere), set...)
+	slices.SortFunc(all, func(a, b target) int {
+		if a.rule != b.rule {
+			return a.rule - b.rule
+		}
+		return strings.Compare(a.arg, b.arg)
+	})
+	return slices.Compact(all)
+}
+
+func targetsKey(targets []target) string {
+	var b strings.Builder
+	for _, t := range targets {
+		fmt.Fprintf(&b, "%d|%s\n", t.rule, t.arg)
+	}
+	return b.String()
+}
+
+// waf returns the rule set for a request with REQUEST_FILENAME filename.
+func (v *argsVariants) waf(filename string) (coraza.WAF, error) {
+	var set []target
+	for i := range v.paths {
+		if v.paths[i].matches(filename) {
+			set = append(set, v.paths[i].targets...)
+		}
+	}
+	waf, ok := v.wafs[targetsKey(v.targets(set))]
+	if !ok {
+		return nil, fmt.Errorf("no rule set for the argument exclusions on %q", filename)
+	}
+	return waf, nil
+}
+
+// wafFor returns the rule set for r.
+func (e *Evaluator) wafFor(r *request.Request) (coraza.WAF, error) {
+	if e.variants == nil {
+		return e.waf, nil
+	}
+	// REQUEST_FILENAME as Coraza decodes it, from a transaction that runs
+	// no rules.
+	tx := e.base.NewTransaction()
+	tx.ProcessURI(r.RawURI, r.Method, r.Proto)
+	st, ok := tx.(plugintypes.TransactionState)
+	if !ok {
+		_ = tx.Close()
+		return nil, errNoRuleRemoval
+	}
+	filename := st.Variables().RequestFilename().Get()
+	_ = tx.Close()
+	return e.variants.waf(filename)
 }
 
 func buildDirectives(cfg Config) (string, error) {
@@ -269,11 +570,6 @@ func buildDirectives(cfg Config) (string, error) {
 		fmt.Fprintf(&b,
 			"SecAction \"id:%d,phase:1,pass,t:none,nolog,setvar:tx.inbound_anomaly_score_threshold=%d\"\n", idAnomalyThreshold, threshold)
 	}
-	exclBefore, exclAfter, err := renderExclusions(cfg.Exclusions)
-	if err != nil {
-		return "", err
-	}
-	b.WriteString(exclBefore)
 	if cfg.DirectivesBeforeCRS != "" {
 		b.WriteString(cfg.DirectivesBeforeCRS)
 		b.WriteString("\n")
@@ -289,18 +585,20 @@ func buildDirectives(cfg Config) (string, error) {
 		b.WriteString(cfg.Directives)
 		b.WriteString("\n")
 	}
-	// After the user's rules, so exclusions apply to them too.
-	b.WriteString(exclAfter)
 	return b.String(), nil
 }
 
 // Evaluate runs the request through phases 1 and 2 (headers and body).
 func (e *Evaluator) Evaluate(_ context.Context, r *request.Request) (rules.Result, error) {
+	waf, err := e.wafFor(r)
+	if err != nil {
+		return rules.Result{}, err
+	}
 	var tx types.Transaction
 	if r.ID != "" {
-		tx = e.waf.NewTransactionWithID(r.ID)
+		tx = waf.NewTransactionWithID(r.ID)
 	} else {
-		tx = e.waf.NewTransaction()
+		tx = waf.NewTransaction()
 	}
 	defer func() {
 		tx.ProcessLogging()
@@ -317,6 +615,11 @@ func (e *Evaluator) Evaluate(_ context.Context, r *request.Request) (rules.Resul
 	}
 	tx.ProcessConnection(client, 0, "", 0)
 	tx.ProcessURI(r.RawURI, r.Method, r.Proto)
+	if e.exclusions != nil {
+		if err := e.exclusions.apply(tx); err != nil {
+			return rules.Result{}, err
+		}
+	}
 	if r.Host != "" {
 		tx.AddRequestHeader("Host", r.Host)
 		tx.SetServerName(hostname(r.Host))
@@ -358,11 +661,41 @@ func result(tx types.Transaction, it *types.Interruption) rules.Result {
 		res.RuleID = it.RuleID
 	}
 	for _, mr := range tx.MatchedRules() {
-		if reportable(mr, it) {
-			res.MatchedRuleIDs = append(res.MatchedRuleIDs, mr.Rule().ID())
+		if !reportable(mr, it) {
+			continue
+		}
+		id := mr.Rule().ID()
+		res.MatchedRuleIDs = append(res.MatchedRuleIDs, id)
+		// Where it matched: the first variable with data.
+		for _, md := range mr.MatchedDatas() {
+			if md.Variable().Name() == "UNKNOWN" {
+				continue
+			}
+			variable := md.Variable().Name()
+			if k := md.Key(); k != "" {
+				variable += ":" + k
+			}
+			res.Matches = append(res.Matches, rules.Match{RuleID: id, Variable: variable, Value: md.Value()})
+			break
 		}
 	}
+	res.AnomalyScore = anomalyScore(tx)
 	return res
+}
+
+// anomalyScore reads the CRS inbound anomaly score, which CRS sums in
+// TX:blocking_inbound_anomaly_score (0 without CRS).
+func anomalyScore(tx types.Transaction) int {
+	st, ok := tx.(plugintypes.TransactionState)
+	if !ok {
+		return 0
+	}
+	vals := st.Variables().TX().Get("blocking_inbound_anomaly_score")
+	if len(vals) == 0 {
+		return 0
+	}
+	n, _ := strconv.Atoi(vals[0])
+	return n
 }
 
 // Inkwall's internal rules use IDs 7700000-7709999, outside the ranges CRS
@@ -370,9 +703,6 @@ func result(tx types.Transaction, it *types.Interruption) rules.Result {
 const (
 	idParanoiaLevel    = 7700001
 	idAnomalyThreshold = 7700002
-	// Path exclusions, one rule each.
-	idExclusionMin = 7701000
-	idExclusionMax = 7709999
 
 	internalIDMin = 7700000
 	internalIDMax = 7709999

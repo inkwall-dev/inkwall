@@ -3,11 +3,14 @@
 
 // Package wiring sends a proxy's protected routes to the engine (0004
 // §4.4). For Traefik: an operator-owned ForwardAuth Middleware in each
-// namespace with protected Ingresses, attached to those Ingresses through
-// Traefik's router.middlewares annotation.
+// namespace with protected routes, attached to protected Ingresses through
+// Traefik's router.middlewares annotation, and to protected IngressRoutes'
+// routes through their middlewares.
 package wiring
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 
 	networkingv1 "k8s.io/api/networking/v1"
@@ -25,8 +28,9 @@ const (
 	MiddlewareName = "inkwall-waf"
 	// MiddlewaresAnnotation lists an Ingress router's Middlewares.
 	MiddlewaresAnnotation = "traefik.ingress.kubernetes.io/router.middlewares"
-	// WiredAnnotation marks an Ingress the operator wired, with the
-	// Middleware it added, so it removes exactly that.
+	// WiredAnnotation marks an Ingress or IngressRoute the operator wired,
+	// with the Middleware it added (MiddlewareRef on an Ingress,
+	// MiddlewareName on an IngressRoute), so it removes exactly that.
 	WiredAnnotation = "waf.inkwall.dev/wired"
 	// legacyClassAnnotation is the class before ingressClassName.
 	legacyClassAnnotation  = "kubernetes.io/ingress.class"
@@ -36,8 +40,11 @@ const (
 	forwardAuthAddress = "http://127.0.0.1:9001/v1/forward-auth"
 )
 
-// MiddlewareGVK is Traefik's Middleware.
-var MiddlewareGVK = schema.GroupVersionKind{Group: "traefik.io", Version: "v1alpha1", Kind: "Middleware"}
+// Traefik's kinds the operator reads and writes.
+var (
+	MiddlewareGVK   = schema.GroupVersionKind{Group: "traefik.io", Version: "v1alpha1", Kind: "Middleware"}
+	IngressRouteGVK = schema.GroupVersionKind{Group: "traefik.io", Version: "v1alpha1", Kind: "IngressRoute"}
+)
 
 // MiddlewareRef is how an Ingress in namespace refers to the operator's
 // Middleware there.
@@ -135,6 +142,49 @@ func WithoutMiddleware(current, ref string) string {
 		}
 	}
 	return strings.Join(out, ",")
+}
+
+// WithRouteMiddleware adds the operator's Middleware to every route of an
+// IngressRoute (want), first, or removes it from them. A route refers to it
+// by name only: Traefik looks it up in the IngressRoute's namespace, which
+// needs no allowCrossNamespace. The user's Middlewares stay, in order. It
+// reports whether ir changed.
+func WithRouteMiddleware(ir *unstructured.Unstructured, want bool) (bool, error) {
+	routes, _, err := unstructured.NestedSlice(ir.Object, "spec", "routes")
+	if err != nil {
+		return false, err
+	}
+	ours := func(m any) bool {
+		ref, _ := m.(map[string]any)
+		ns, _ := ref["namespace"].(string)
+		return ref["name"] == MiddlewareName && (ns == "" || ns == ir.GetNamespace())
+	}
+	changed := false
+	for i, r := range routes {
+		route, ok := r.(map[string]any)
+		if !ok {
+			return false, fmt.Errorf("spec.routes[%d] is not an object", i)
+		}
+		mws, _ := route["middlewares"].([]any)
+		has := slices.ContainsFunc(mws, ours)
+		switch {
+		case want && !has:
+			route["middlewares"] = append([]any{map[string]any{"name": MiddlewareName}}, mws...)
+		case !want && has:
+			if mws = slices.DeleteFunc(mws, ours); len(mws) == 0 {
+				delete(route, "middlewares")
+			} else {
+				route["middlewares"] = mws
+			}
+		default:
+			continue
+		}
+		changed = true
+	}
+	if !changed {
+		return false, nil
+	}
+	return true, unstructured.SetNestedSlice(ir.Object, routes, "spec", "routes")
 }
 
 func splitMiddlewares(s string) []string {

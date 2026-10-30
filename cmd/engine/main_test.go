@@ -245,7 +245,7 @@ func TestBundleModeNeedsItsFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := bundleMode(cfg, telemetry.NewMetrics("httpcheck"), slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "public key") {
+	if _, _, _, err := bundleMode(cfg, telemetry.NewMetrics("httpcheck"), slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "public key") {
 		t.Fatalf("got %v, want an error about the public key", err)
 	}
 }

@@ -52,6 +52,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/adapters/proxy"
 	"github.com/inkwall-dev/inkwall/pkg/agent"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
+	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/router"
@@ -186,7 +187,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	operatorCA := fs.String("operator-ca", "/var/run/secrets/inkwall/ca.crt", "bundle mode: CA certificate (PEM) of the operator's server")
 	operatorServerName := fs.String("operator-server-name", "", "bundle mode: name the operator's certificate must have (default: the host of --operator)")
 	operatorToken := fs.String("operator-token", "/var/run/secrets/inkwall/token", "bundle mode: ServiceAccount token for the audience inkwall-operator, re-read on every connection")
-	bundleKey := fs.String("bundle-key", "/var/run/secrets/inkwall/ed25519.pub", "bundle mode: the cluster's ed25519 public key (raw 32 bytes) that bundles are signed with")
+	bundleKey := fs.String("bundle-key", "/var/run/secrets/inkwall/ed25519.pub", "bundle mode: the ed25519 public keys bundles may be signed with: one or more raw 32-byte keys, concatenated (the trust ConfigMap's trusted-keys.pub), re-read when the file changes, so the operator can rotate its signing key")
 	bundleCache := fs.String("bundle-cache", "", "bundle mode: file that keeps the last applied bundle, enforced at startup before the operator is reachable (empty: no cache)")
 	bundleSecret := fs.String("bundle-secret", "", "bundle mode: namespace/name of the operator's bundle Secret, read through the Kubernetes API when the engine has no bundle (a new pod while the operator is unreachable); empty: not read")
 	kubeToken := fs.String("kube-token", "/var/run/secrets/inkwall/kube-token", "bundle mode: ServiceAccount token for the Kubernetes API, to read --bundle-secret")
@@ -341,11 +342,12 @@ func serve(cfg engineConfig, logger *slog.Logger) error {
 	defer stop()
 
 	var (
-		p  pipeline.Inspector
-		ag *agent.Agent
+		p   pipeline.Inspector
+		ag  *agent.Agent
+		rec *events.Recorder // nil without an operator: events are only logged
 	)
 	if cfg.operator != "" {
-		ag, p, err = bundleMode(cfg, metrics, logger)
+		ag, p, rec, err = bundleMode(cfg, metrics, logger)
 	} else {
 		p, err = flagMode(cfg, metrics)
 	}
@@ -362,13 +364,13 @@ func serve(cfg engineConfig, logger *slog.Logger) error {
 	switch cfg.command {
 	case cmdForwardAuth:
 		handler, err = forwardauth.New(p,
-			forwardauth.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger},
+			forwardauth.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec},
 		)
 	case cmdCheck:
-		handler, err = httpcheck.New(p, httpcheck.Config{MaxBodyBytes: maxBody, Logger: logger})
+		handler, err = httpcheck.New(p, httpcheck.Config{MaxBodyBytes: maxBody, Logger: logger, Events: rec})
 	default:
 		handler, err = proxy.New(p,
-			proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger},
+			proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec},
 		)
 	}
 	if err != nil {
@@ -507,8 +509,9 @@ func flagMode(cfg engineConfig, metrics *telemetry.Metrics) (pipeline.Inspector,
 
 // bundleMode inspects with the policies of the operator's bundles, per
 // route. Until the first bundle (or the cached one) is applied, requests
-// are allowed and reported with reason no-policy.
-func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logger) (*agent.Agent, pipeline.Inspector, error) {
+// are allowed and reported with reason no-policy. Security events go to the
+// operator through the agent.
+func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logger) (*agent.Agent, pipeline.Inspector, *events.Recorder, error) {
 	adm := pipeline.NewAdmission(cfg.maxConcurrent)
 	metrics.WatchAdmission(adm)
 	opts := policy.Options{
@@ -525,6 +528,7 @@ func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logge
 	}
 	host, _ := os.Hostname()
 	podName := cmp.Or(os.Getenv("POD_NAME"), host)
+	buf := events.NewBuffer(events.DefaultCapacity)
 	ag, err := agent.New(agent.Config{
 		Addr:          cfg.operator,
 		CAFile:        cfg.operatorCA,
@@ -543,13 +547,18 @@ func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logge
 		Compile:       func(b *bundlev1.Bundle) (*policy.Set, error) { return policy.Compile(b, opts) },
 		Holder:        holder,
 		Admission:     adm,
+		Events:        buf,
 		Logger:        logger,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	metrics.Register(ag.Collectors()...)
-	return ag, holder, nil
+	metrics.Register(buf.Collectors()...)
+	rec := &events.Recorder{Buffer: buf, Source: events.Source{
+		EngineID: podName, PodNamespace: os.Getenv("POD_NAMESPACE"), PodName: podName, BundleVersion: ag.Version,
+	}}
+	return ag, holder, rec, nil
 }
 
 // waitForBundle marks the engine ready once the first bundle is applied,

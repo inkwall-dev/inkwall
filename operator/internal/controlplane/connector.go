@@ -4,7 +4,9 @@
 // Package controlplane connects the operator to the optional control plane
 // (0002 §3.4, §5.3, §7.5; api/controlplane/v1). In GitOps and Managed mode
 // the leader enrolls the cluster with a one-time token, keeps its client
-// certificate in a Secret, renews it over the primary stream, and reports
+// certificate in a Secret, renews it over the primary stream, sends the
+// cluster's state (ClusterState) on change, in Managed mode writes the
+// control plane's policy snapshots as CRDs, and reports
 // ControlPlaneConnected on the InkwallConfig. Standalone runs none of it.
 // Enforcement never depends on it.
 package controlplane
@@ -27,7 +29,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -78,7 +82,8 @@ var errIdle = errors.New("idle")
 type Connector struct {
 	Client client.Client
 	// APIReader reads the kube-system Namespace (its UID identifies the
-	// cluster), which the manager doesn't cache.
+	// cluster), which the manager doesn't cache, and what a policy snapshot
+	// changes, as it is now.
 	APIReader client.Reader
 	// Namespace is the operator's: the identity Secret is there, and so must
 	// the enrollment token be.
@@ -91,9 +96,23 @@ type Connector struct {
 	// system roots.
 	CAFile string
 
+	// ProxyPods selects the proxies' pods, for ClusterState (default:
+	// Traefik's default labels).
+	ProxyPods labels.Selector
+	// EngineStale is how old a replica's engine report may be before
+	// ClusterState leaves it out (default 30 s).
+	EngineStale time.Duration
+
 	// Poll is how often an idle connector looks again (default 5 s);
 	// MinBackoff and MaxBackoff bound reconnects (default 1 s and 1 min).
 	Poll, MinBackoff, MaxBackoff time.Duration
+	// StatePoll is how often the leader looks for a change to send
+	// (default 5 s); StateResend, how often it sends ClusterState even
+	// unchanged (default 5 min).
+	StatePoll, StateResend time.Duration
+	// ApplyBackoff paces the retries of a policy snapshot write that
+	// failed after its dry run passed (default: about 15 s in all).
+	ApplyBackoff wait.Backoff
 
 	clusterUID string
 	// enrollKey is kept per token, so a retry after a lost Enroll response
@@ -120,6 +139,18 @@ func (c *Connector) defaults() {
 	}
 	if c.MaxBackoff == 0 {
 		c.MaxBackoff = time.Minute
+	}
+	if c.EngineStale == 0 {
+		c.EngineStale = 30 * time.Second
+	}
+	if c.StatePoll == 0 {
+		c.StatePoll = 5 * time.Second
+	}
+	if c.StateResend == 0 {
+		c.StateResend = 5 * time.Minute
+	}
+	if c.ApplyBackoff.Steps == 0 {
+		c.ApplyBackoff = defaultApplyBackoff
 	}
 }
 
@@ -266,8 +297,8 @@ func (c *Connector) enroll(ctx context.Context, cfg *wafv1alpha1.InkwallConfig, 
 	return id, nil
 }
 
-// connect holds the primary stream open: Hello, Welcome, heartbeats and
-// certificate renewal.
+// connect holds the primary stream open: Hello, Welcome, ClusterState,
+// heartbeats and certificate renewal.
 func (c *Connector) connect(ctx context.Context, cfg *wafv1alpha1.InkwallConfig, target, host string, id *identity) (bool, error) {
 	conn, err := c.dial(target, host, &id.cert)
 	if err != nil {
@@ -299,6 +330,7 @@ func (c *Connector) connect(ctx context.Context, cfg *wafv1alpha1.InkwallConfig,
 		Mode:              mode,
 		ClusterUid:        uid,
 		KubernetesVersion: k8s,
+		PolicyVersion:     id.policyVersion,
 		Capabilities:      []string{wafv1alpha1.GroupVersion.String()},
 	}}}); err != nil {
 		return false, c.streamError(ctx, cfg, id, false, err)
@@ -313,6 +345,10 @@ func (c *Connector) connect(ctx context.Context, cfg *wafv1alpha1.InkwallConfig,
 	}
 	if err := c.setCondition(ctx, cfg, metav1.ConditionTrue, ReasonConnected, connectedMessage(id)); err != nil {
 		return true, err
+	}
+	states := &stateSender{resend: c.StateResend}
+	if err := c.sendState(ctx, stream, states, true); err != nil {
+		return true, c.streamError(ctx, cfg, id, true, err)
 	}
 
 	msgs := make(chan *controlplanev1.ConnectResponse)
@@ -343,7 +379,18 @@ func (c *Connector) connect(ctx context.Context, cfg *wafv1alpha1.InkwallConfig,
 	defer reconfigure.Stop()
 	renew := time.NewTimer(time.Until(id.renewAt()))
 	defer renew.Stop()
+	state := time.NewTicker(c.StatePoll)
+	defer state.Stop()
 	var pending *ecdsa.PrivateKey
+
+	// Policy snapshots are applied beside the stream, which keeps its
+	// heartbeats meanwhile; snapshots holds the next one.
+	snapshots := make(chan *controlplanev1.PolicySnapshot, 1)
+	replies := make(chan reply)
+	go (&applier{
+		client: c.Client, reader: c.APIReader, namespace: c.Namespace,
+		applied: id.policyVersion, backoff: c.ApplyBackoff,
+	}).run(sctx, snapshots, replies)
 
 	for {
 		select {
@@ -351,10 +398,23 @@ func (c *Connector) connect(ctx context.Context, cfg *wafv1alpha1.InkwallConfig,
 			return true, nil
 		case err := <-recvErr:
 			return true, c.streamError(ctx, cfg, id, true, err)
+		case r := <-replies:
+			if r.err != nil {
+				// Partly written: reconnect, and the control plane sends the
+				// snapshot again.
+				return true, r.err
+			}
+			if err := stream.Send(r.msg); err != nil {
+				return true, c.streamError(ctx, cfg, id, true, err)
+			}
 		case <-heartbeat.C:
 			if err := stream.Send(&controlplanev1.ConnectRequest{Msg: &controlplanev1.ConnectRequest_Heartbeat{
 				Heartbeat: &controlplanev1.Heartbeat{Time: timestamppb.Now()},
 			}}); err != nil {
+				return true, c.streamError(ctx, cfg, id, true, err)
+			}
+		case <-state.C:
+			if err := c.sendState(ctx, stream, states, false); err != nil {
 				return true, c.streamError(ctx, cfg, id, true, err)
 			}
 		case <-reconfigure.C:
@@ -396,16 +456,48 @@ func (c *Connector) connect(ctx context.Context, cfg *wafv1alpha1.InkwallConfig,
 				if err := c.setCondition(ctx, cfg, metav1.ConditionTrue, ReasonConnected, connectedMessage(id)); err != nil {
 					return true, err
 				}
-			case *controlplanev1.ConnectResponse_PolicySnapshot:
-				// Managed mode isn't built yet: refuse, so nothing changes.
-				if err := stream.Send(&controlplanev1.ConnectRequest{Msg: &controlplanev1.ConnectRequest_PolicyNack{PolicyNack: &controlplanev1.PolicyNack{
-					Version: msg.PolicySnapshot.GetVersion(), Error: "this operator doesn't apply policy snapshots yet",
-				}}}); err != nil {
+			case *controlplanev1.ConnectResponse_Directive:
+				if msg.Directive.GetResync() == nil {
+					continue
+				}
+				if err := c.sendState(ctx, stream, states, true); err != nil {
 					return true, c.streamError(ctx, cfg, id, true, err)
 				}
+			case *controlplanev1.ConnectResponse_PolicySnapshot:
+				// A snapshot still waiting is replaced: the newer one has
+				// everything.
+				select {
+				case old := <-snapshots:
+					if err := stream.Send(nack(old.GetVersion(), fmt.Sprintf(
+						"superseded by snapshot %d before it was applied: nothing was written", msg.PolicySnapshot.GetVersion()))); err != nil {
+						return true, c.streamError(ctx, cfg, id, true, err)
+					}
+				default:
+				}
+				snapshots <- msg.PolicySnapshot
 			}
 		}
 	}
+}
+
+// sendState sends ClusterState when it changed, is due, or force is set.
+// A snapshot that can't be built is logged and skipped: the stream stays
+// up, and the next tick tries again. Only a failed send ends the stream.
+func (c *Connector) sendState(ctx context.Context, stream grpc.BidiStreamingClient[controlplanev1.ConnectRequest, controlplanev1.ConnectResponse], s *stateSender, force bool) error {
+	st, err := c.clusterState(ctx)
+	if err != nil {
+		log.FromContext(ctx).Error(err, "can't build the cluster state for the control plane")
+		return nil
+	}
+	send, sum := s.changed(st, force)
+	if !send {
+		return nil
+	}
+	if err := stream.Send(&controlplanev1.ConnectRequest{Msg: &controlplanev1.ConnectRequest_ClusterState{ClusterState: st}}); err != nil {
+		return err
+	}
+	s.last, s.sentAt = sum, time.Now()
+	return nil
 }
 
 // streamError reports why the stream ended, and decides what comes next
@@ -446,15 +538,21 @@ func connectedMessage(id *identity) string {
 // dial connects to the control plane over TLS, with the cluster's
 // certificate when there is one (Connect) and without (Enroll).
 func (c *Connector) dial(target, host string, cert *tls.Certificate) (*grpc.ClientConn, error) {
+	return dial(c.CAFile, target, host, cert)
+}
+
+// dial connects to the control plane at target over TLS, trusting caFile
+// (empty: the system roots).
+func dial(caFile, target, host string, cert *tls.Certificate) (*grpc.ClientConn, error) {
 	cfg := &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
-	if c.CAFile != "" {
-		pem, err := os.ReadFile(filepath.Clean(c.CAFile))
+	if caFile != "" {
+		pem, err := os.ReadFile(filepath.Clean(caFile))
 		if err != nil {
 			return nil, fmt.Errorf("control plane CA: %w", err)
 		}
 		cfg.RootCAs = x509.NewCertPool()
 		if !cfg.RootCAs.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("control plane CA %s: no PEM certificate", c.CAFile)
+			return nil, fmt.Errorf("control plane CA %s: no PEM certificate", caFile)
 		}
 	}
 	if cert != nil {

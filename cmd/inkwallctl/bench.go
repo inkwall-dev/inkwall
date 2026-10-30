@@ -96,7 +96,7 @@ func runBench(cfg config, stdout, stderr io.Writer) int {
 		}
 		corpus = userCorpus(reqs)
 	}
-	check, err := newChecker(cfg)
+	check, err := newChecker(cfg, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2

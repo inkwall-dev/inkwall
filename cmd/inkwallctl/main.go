@@ -14,8 +14,11 @@
 // curl command line (URL, -X, -H, -d), as raw HTTP in a file, or as a HAR
 // file exported from a browser. By default the requests are inspected
 // in-process with the OWASP Core Rule Set embedded in inkwallctl, the same
-// code the engine runs; with --engine they are sent to a running engine's
-// check API (inkwall-engine check).
+// code the engine runs, configured by flags. With --policy they are
+// inspected by WAFPolicy objects, resolved the way the operator does and
+// compiled the way the engine does; with --bundle, by a bundle the operator
+// built; with --engine they are sent to a running engine's check API
+// (inkwall-engine check).
 package main
 
 import (
@@ -37,9 +40,12 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
+	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	enginev1 "github.com/inkwall-dev/inkwall/api/engine/v1"
+	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/httpcheck"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
@@ -51,6 +57,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || (args[0] != "test" && args[0] != "bench") {
 		fmt.Fprintln(stderr, "usage: inkwallctl test [flags] URL")
 		fmt.Fprintln(stderr, "       inkwallctl test [flags] --request FILE | --har FILE")
+		fmt.Fprintln(stderr, "       inkwallctl test --policy FILE [--rule-set FILE] [--ingress FILE] ... URL | --request FILE | --har FILE")
+		fmt.Fprintln(stderr, "       inkwallctl test --bundle FILE [--bundle-key FILE] URL | --request FILE | --har FILE")
 		fmt.Fprintln(stderr, "       inkwallctl bench [flags] [--request FILE | --har FILE]")
 		fmt.Fprintln(stderr, "run 'inkwallctl <command> -h' for flags")
 		return 2
@@ -77,17 +85,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return runBench(cfg, stdout, stderr)
 }
 
-// headerList collects repeated -H flags.
-type headerList []string
+// listFlag collects a repeated flag.
+type listFlag []string
 
-func (h *headerList) String() string     { return strings.Join(*h, ", ") }
-func (h *headerList) Set(v string) error { *h = append(*h, v); return nil }
+func (l *listFlag) String() string     { return strings.Join(*l, ", ") }
+func (l *listFlag) Set(v string) error { *l = append(*l, v); return nil }
 
 type config struct {
 	// Input: at most one of url, requestFile, harFile.
 	url         string
 	method      string
-	headers     headerList
+	headers     listFlag
 	data        string
 	requestFile string
 	harFile     string
@@ -103,6 +111,16 @@ type config struct {
 	rules         string
 	rulesBefore   string
 	disabled      []string
+
+	// test: WAF objects to resolve, or a bundle, instead of the flags
+	// that define a policy.
+	policies   listFlag
+	ruleSets   listFlag
+	configMaps listFlag
+	ingresses  listFlag
+	namespace  string
+	bundle     string
+	bundleKey  string
 
 	// test
 	expect string
@@ -198,6 +216,14 @@ func parseTestFlags(args []string, stderr io.Writer) (config, error) {
 	fs := newFlagSet("test", &cfg, stderr, "; every request in it is checked")
 	fs.StringVar(&cfg.expect, "expect", "", "exit 1 unless every request gets this verdict: allow or deny")
 	fs.BoolVar(&cfg.json, "json", false, "print each CheckResponse as a JSON line")
+	const objects = "; a file (or a directory of .yaml, .yml and .json files) may hold several YAML documents or a kubectl List, of any of the kinds --policy, --rule-set, --configmap and --ingress read (repeatable)"
+	fs.Var(&cfg.policies, "policy", "WAFPolicy YAML file: inspect with the policies, resolved as the operator does, instead of the flags that define a policy"+objects)
+	fs.Var(&cfg.ruleSets, "rule-set", "WAFRuleSet or ClusterWAFRuleSet YAML file the policies use"+objects)
+	fs.Var(&cfg.configMaps, "configmap", "ConfigMap YAML file rule sets read rules from (labeled "+resolver.RulesLabel+"=true)"+objects)
+	fs.Var(&cfg.ingresses, "ingress", "Ingress YAML file the policies target, to route requests by host and path; without one, a single policy applies to every request"+objects)
+	fs.StringVar(&cfg.namespace, "namespace", "default", "namespace of the objects in the files that don't name one, as kubectl apply -n")
+	fs.StringVar(&cfg.bundle, "bundle", "", "bundle file: inspect with its policies instead of the flags that define a policy; the inkwall-bundle Secret's bundle.pb.gz (compressed or not), or the Secret as YAML or JSON")
+	fs.StringVar(&cfg.bundleKey, "bundle-key", "", "with --bundle: check the bundle's signature with this ed25519 public key (raw 32 bytes, as the Secret's ed25519.pub, or base64)")
 	if err := fs.finish(args, true); err != nil {
 		return cfg, err
 	}
@@ -206,7 +232,51 @@ func parseTestFlags(args []string, stderr io.Writer) (config, error) {
 	default:
 		return cfg, fmt.Errorf("--expect must be allow or deny, got %q", cfg.expect)
 	}
+	if err := fs.checkPolicySource(); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
+}
+
+// policyFiles reports whether requests are inspected by WAF objects.
+func (cfg *config) policyFiles() bool {
+	return len(cfg.policies)+len(cfg.ruleSets)+len(cfg.configMaps)+len(cfg.ingresses) > 0
+}
+
+// checkPolicySource validates where test's policy comes from: the flags,
+// WAF objects, a bundle or a running engine.
+func (fs flagSet) checkPolicySource() error {
+	cfg := fs.cfg
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	sources := 0
+	for _, b := range []bool{cfg.policyFiles(), cfg.bundle != "", cfg.engine != ""} {
+		if b {
+			sources++
+		}
+	}
+	switch {
+	case sources > 1:
+		return errors.New("give at most one of --policy (with --rule-set, --configmap, --ingress), --bundle and --engine")
+	case cfg.bundleKey != "" && cfg.bundle == "":
+		return errors.New("--bundle-key applies only to --bundle")
+	case set["namespace"] && !cfg.policyFiles():
+		return errors.New("--namespace applies only to --policy")
+	case sources == 1 && cfg.engine != "":
+		return nil
+	case sources == 1:
+		// As in the engine's bundle mode: the policies set these.
+		var conflicts []string
+		for _, name := range []string{"mode", "paranoia-level", "anomaly-threshold", "rules", "rules-before-crs", "disable-rule-groups"} {
+			if set[name] {
+				conflicts = append(conflicts, "--"+name)
+			}
+		}
+		if len(conflicts) > 0 {
+			return fmt.Errorf("%s: set by the policies with --policy or --bundle", strings.Join(conflicts, ", "))
+		}
+	}
+	return nil
 }
 
 func runTest(cfg config, stdout, stderr io.Writer) int {
@@ -215,7 +285,7 @@ func runTest(cfg config, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
 	}
-	check, err := newChecker(cfg)
+	check, err := newChecker(cfg, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
@@ -261,6 +331,9 @@ func describe(in *enginev1.CheckRequest, out *enginev1.CheckResponse) string {
 		b.WriteString("    ")
 	}
 	fmt.Fprintf(&b, "  %s %s", in.GetMethod(), in.GetRawUri())
+	if p := out.GetPolicy(); p != "" {
+		fmt.Fprintf(&b, "  policy=%s", p)
+	}
 	if r := out.GetReason(); r != enginev1.Reason_REASON_NONE {
 		fmt.Fprintf(&b, "  reason=%s", strings.ToLower(strings.TrimPrefix(r.String(), "REASON_")))
 	}
@@ -281,16 +354,36 @@ func describe(in *enginev1.CheckRequest, out *enginev1.CheckResponse) string {
 // checker returns the verdict for one request.
 type checker func(*enginev1.CheckRequest) (*enginev1.CheckResponse, error)
 
-func newChecker(cfg config) (checker, error) {
-	if cfg.engine != "" {
+// newChecker returns the checker cfg selects. Notes about the policies
+// go to notes.
+func newChecker(cfg config, notes io.Writer) (checker, error) {
+	var b *bundlev1.Bundle
+	var err error
+	switch {
+	case cfg.engine != "":
 		return remoteChecker(cfg.engine)
+	case cfg.policyFiles():
+		b, err = policyBundle(cfg, notes)
+	case cfg.bundle != "":
+		b, err = fileBundle(cfg.bundle, cfg.bundleKey, notes)
+	default:
+		return flagChecker(cfg)
 	}
-	return localChecker(cfg)
+	if err != nil {
+		return nil, err
+	}
+	set, err := policy.Compile(withDeadline(b, cfg.timeout), policy.Options{BodyLimit: cfg.maxBodyBytes})
+	if err != nil {
+		return nil, fmt.Errorf("the engine would reject the bundle: %w", err)
+	}
+	// As the engine in bundle mode: each policy sets its body limit, up to
+	// the CRD's maximum.
+	return localChecker(set, max(cfg.maxBodyBytes, policy.MaxBodyBytes))
 }
 
-// localChecker runs the engine's check API in-process, so verdicts are the
-// engine's own.
-func localChecker(cfg config) (checker, error) {
+// flagChecker inspects with the pipeline the flags define, as the engine
+// does without a bundle.
+func flagChecker(cfg config) (checker, error) {
 	rules, err := readOptional(cfg.rules)
 	if err != nil {
 		return nil, fmt.Errorf("read --rules: %w", err)
@@ -311,7 +404,13 @@ func localChecker(cfg config) (checker, error) {
 		return nil, err
 	}
 	p := pipeline.New(eval, pipeline.Config{Mode: cfg.mode, Timeout: cfg.timeout})
-	h, err := httpcheck.New(p, httpcheck.Config{MaxBodyBytes: cfg.maxBodyBytes, Logger: slog.New(slog.DiscardHandler)})
+	return localChecker(p, cfg.maxBodyBytes)
+}
+
+// localChecker runs the engine's check API in-process with insp, so
+// verdicts are the engine's own.
+func localChecker(insp pipeline.Inspector, maxBodyBytes int64) (checker, error) {
+	h, err := httpcheck.New(insp, httpcheck.Config{MaxBodyBytes: maxBodyBytes, Logger: slog.New(slog.DiscardHandler)})
 	if err != nil {
 		return nil, err
 	}

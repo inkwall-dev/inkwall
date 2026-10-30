@@ -5,6 +5,7 @@ package wiring
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -69,6 +70,94 @@ func TestAnnotation(t *testing.T) {
 	}
 }
 
+// ingressRoute returns an IngressRoute with one route per list of
+// Middleware references (nil: none).
+func ingressRoute(ns, name string, middlewares ...[]any) *unstructured.Unstructured {
+	var routes []any
+	for i, m := range middlewares {
+		route := map[string]any{"kind": "Rule", "match": fmt.Sprintf("Host(`%s.example.com`) && PathPrefix(`/%d`)", name, i)}
+		if m != nil {
+			route["middlewares"] = m
+		}
+		routes = append(routes, route)
+	}
+	u := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"routes": routes}}}
+	u.SetGroupVersionKind(IngressRouteGVK)
+	u.SetNamespace(ns)
+	u.SetName(name)
+	return u
+}
+
+// middlewares lists an IngressRoute's Middleware names, "," between
+// Middlewares and "|" between routes.
+func middlewares(ir *unstructured.Unstructured) string {
+	routes, _, _ := unstructured.NestedSlice(ir.Object, "spec", "routes")
+	var out []string
+	for _, r := range routes {
+		var names []string
+		mws, _ := r.(map[string]any)["middlewares"].([]any)
+		for _, m := range mws {
+			names = append(names, m.(map[string]any)["name"].(string))
+		}
+		out = append(out, strings.Join(names, ","))
+	}
+	return strings.Join(out, "|")
+}
+
+func TestWithRouteMiddleware(t *testing.T) {
+	ref := func(name string, ns ...string) any {
+		m := map[string]any{"name": name}
+		if len(ns) > 0 {
+			m["namespace"] = ns[0]
+		}
+		return m
+	}
+	// Routes without Middlewares, with the user's, and already with Inkwall's.
+	ir := ingressRoute("shop", "app", nil, []any{ref("auth"), ref("gzip", "shop")}, []any{ref("auth"), ref(MiddlewareName)})
+	changed, err := WithRouteMiddleware(ir, true)
+	if err != nil || !changed {
+		t.Fatalf("wire: %v %v", changed, err)
+	}
+	if got := middlewares(ir); got != "inkwall-waf|inkwall-waf,auth,gzip|auth,inkwall-waf" {
+		t.Errorf("wired: %s", got)
+	}
+	// By name only: Traefik looks it up in the route's namespace.
+	routes, _, _ := unstructured.NestedSlice(ir.Object, "spec", "routes")
+	if first := routes[0].(map[string]any)["middlewares"].([]any)[0]; len(first.(map[string]any)) != 1 {
+		t.Errorf("the reference must have only a name: %v", first)
+	}
+	if changed, _ := WithRouteMiddleware(ir, true); changed {
+		t.Error("wiring twice changed the routes")
+	}
+
+	changed, err = WithRouteMiddleware(ir, false)
+	if err != nil || !changed {
+		t.Fatalf("unwire: %v %v", changed, err)
+	}
+	if got := middlewares(ir); got != "|auth,gzip|auth" {
+		t.Errorf("unwired: %s", got)
+	}
+	routes, _, _ = unstructured.NestedSlice(ir.Object, "spec", "routes")
+	if _, ok := routes[0].(map[string]any)["middlewares"]; ok {
+		t.Error("a route left without Middlewares keeps an empty list")
+	}
+
+	// A same-named Middleware in another namespace is the user's.
+	other := ingressRoute("shop", "other", []any{ref(MiddlewareName, "edge")})
+	if changed, _ := WithRouteMiddleware(other, false); changed {
+		t.Error("removed a Middleware of another namespace")
+	}
+	if changed, _ := WithRouteMiddleware(other, true); !changed || middlewares(other) != "inkwall-waf,inkwall-waf" {
+		t.Errorf("wired: %s", middlewares(other))
+	}
+
+	bad := ingressRoute("shop", "bad")
+	bad.Object["spec"] = map[string]any{"routes": []any{"nope"}}
+	if _, err := WithRouteMiddleware(bad, true); err == nil {
+		t.Error("a route that isn't an object was wired")
+	}
+}
+
 func TestController(t *testing.T) {
 	classes := map[string]string{"traefik": integrations.Traefik.Controller, "nginx": "k8s.io/ingress-nginx"}
 	ing := func(class *string, annotation string) *networkingv1.Ingress {
@@ -104,14 +193,22 @@ func TestProgrammed(t *testing.T) {
 	ings := map[types.NamespacedName]*networkingv1.Ingress{
 		k("web"): {ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "web"}},
 		k("api"): {ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "api"}},
+		k("bad"): {ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "bad"}},
 	}
 	wire := map[types.NamespacedName]target{
 		k("web"): {ing: ings[k("web")], controller: traefik},
 		k("api"): {ing: ings[k("api")], controller: "k8s.io/ingress-nginx"},
+		k("bad"): {ing: ings[k("bad")], controller: traefik},
 	}
+	routes := map[types.NamespacedName]*unstructured.Unstructured{k("app"): ingressRoute("shop", "app", nil), k("bad"): ingressRoute("shop", "bad", nil)}
+	// Targets are Ingresses, or IngressRoutes as "route/<name>".
 	pol := func(targets ...string) *wafv1alpha1.WAFPolicy {
 		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}}
 		for _, t := range targets {
+			if name, ok := strings.CutPrefix(t, "route/"); ok {
+				p.Spec.TargetRefs = append(p.Spec.TargetRefs, wafv1alpha1.TargetRef{Group: "traefik.io", Kind: "IngressRoute", Name: name})
+				continue
+			}
 			p.Spec.TargetRefs = append(p.Spec.TargetRefs, wafv1alpha1.TargetRef{Kind: "Ingress", Name: t})
 		}
 		return p
@@ -129,26 +226,41 @@ func TestProgrammed(t *testing.T) {
 	terminating := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "traefik", Name: "t-gone", DeletionTimestamp: &now}}
 
 	for _, tc := range []struct {
-		name   string
-		p      *wafv1alpha1.WAFPolicy
-		crds   bool
-		mwErr  map[string]string
-		pods   []corev1.Pod
-		status metav1.ConditionStatus
-		reason string
-		msg    string
+		name     string
+		p        *wafv1alpha1.WAFPolicy
+		crds     bool
+		mwErr    map[string]string
+		pods     []corev1.Pod
+		status   metav1.ConditionStatus
+		reason   string
+		msg      string
+		routeCRD bool
 	}{
-		{"wired", pol("web"), true, nil, []corev1.Pod{withEngine, terminating}, metav1.ConditionTrue, ReasonProgrammed, "1 Ingress"},
-		{"not Traefik", pol("web", "api"), true, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonControllerUnsupported, "api is served by k8s.io/ingress-nginx"},
-		{"no CRDs", pol("web"), false, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonWiringFailed, "CRD is not installed"},
-		{"name clash", pol("web"), true, map[string]string{"shop": "Middleware shop/inkwall-waf exists"}, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonWiringFailed, "exists"},
-		{"old pod", pol("web"), true, nil, []corev1.Pod{withEngine, without}, metav1.ConditionFalse, ReasonPendingRestart, "traefik/t-old"},
-		{"no pods", pol("web"), true, nil, []corev1.Pod{terminating}, metav1.ConditionFalse, ReasonSidecarMissing, "no Traefik pod"},
-		{"missed by the webhook", pol("web"), true, nil, []corev1.Pod{withEngine, without, missed}, metav1.ConditionFalse, ReasonSidecarMissing, "restart them once it is back: traefik/t-missed"},
-		{"opted out", pol("web"), true, nil, []corev1.Pod{withEngine, optedOut}, metav1.ConditionFalse, ReasonSidecarMissing, `opted out with waf.inkwall.dev/inject: "false": traefik/t-out`},
-		{"missing target", pol("gone"), true, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonNoTargets, "none"},
+		{"wired", pol("web"), true, nil, []corev1.Pod{withEngine, terminating}, metav1.ConditionTrue, ReasonProgrammed, "1 Ingress(es) wired", true},
+		{"IngressRoute wired", pol("route/app"), true, nil, []corev1.Pod{withEngine}, metav1.ConditionTrue, ReasonProgrammed, "1 IngressRoute(s) wired", true},
+		{"both wired", pol("web", "route/app"), true, nil, []corev1.Pod{withEngine}, metav1.ConditionTrue, ReasonProgrammed, "1 Ingress(es) and 1 IngressRoute(s) wired", true},
+		{"no IngressRoute CRD", pol("web", "route/app"), true, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonWiringFailed, "IngressRoute CRD is not installed", false},
+		{"IngressRoute not written", pol("route/bad"), true, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonWiringFailed, "IngressRoute bad: forbidden", true},
+		{"Ingress not written", pol("bad"), true, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonWiringFailed, "Ingress bad: forbidden", true},
+		{"IngressRoute without the Middleware CRD", pol("route/app"), false, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonWiringFailed, "Middleware CRD is not installed", true},
+		{"IngressRoute, name clash", pol("route/app"), true, map[string]string{"shop": "Middleware shop/inkwall-waf exists"}, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonWiringFailed, "exists", true},
+		{"IngressRoute, old pod", pol("route/app"), true, nil, []corev1.Pod{withEngine, without}, metav1.ConditionFalse, ReasonPendingRestart, "traefik/t-old", true},
+		{"missing IngressRoute", pol("route/gone"), true, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonNoTargets, "none", true},
+		{"HTTPRoute", &wafv1alpha1.WAFPolicy{Spec: wafv1alpha1.WAFPolicySpec{TargetRefs: []wafv1alpha1.TargetRef{{Kind: "HTTPRoute", Name: "h"}}}},
+			true, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonControllerUnsupported, "only Ingress and IngressRoute targets", true},
+		{"not Traefik", pol("web", "api"), true, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonControllerUnsupported, "api is served by k8s.io/ingress-nginx", true},
+		{"no CRDs", pol("web"), false, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonWiringFailed, "CRD is not installed", true},
+		{"name clash", pol("web"), true, map[string]string{"shop": "Middleware shop/inkwall-waf exists"}, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonWiringFailed, "exists", true},
+		{"old pod", pol("web"), true, nil, []corev1.Pod{withEngine, without}, metav1.ConditionFalse, ReasonPendingRestart, "traefik/t-old", true},
+		{"no pods", pol("web"), true, nil, []corev1.Pod{terminating}, metav1.ConditionFalse, ReasonSidecarMissing, "no Traefik pod selected for the engine is running, so the routes are not wired", true},
+		{"missed by the webhook", pol("web"), true, nil, []corev1.Pod{withEngine, without, missed}, metav1.ConditionFalse, ReasonSidecarMissing, "restart them once it is back: traefik/t-missed", true},
+		{"opted out", pol("web"), true, nil, []corev1.Pod{withEngine, optedOut}, metav1.ConditionFalse, ReasonSidecarMissing, `opted out with waf.inkwall.dev/inject: "false": traefik/t-out`, true},
+		{"missing target", pol("gone"), true, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonNoTargets, "none", true},
 	} {
-		st, reason, msg := programmed(tc.p, ings, wire, tc.crds, tc.mwErr, tc.pods, since)
+		st, reason, msg := programmed(tc.p, &state{ingresses: ings, wire: wire, routes: routes, routeCRD: tc.routeCRD,
+			routeErr:    map[types.NamespacedName]string{k("bad"): "IngressRoute bad: forbidden"},
+			ingressErr:  map[types.NamespacedName]string{k("bad"): "Ingress bad: forbidden"},
+			traefikCRDs: tc.crds, middlewareErr: tc.mwErr, pods: tc.pods, injectingSince: since})
 		if st != tc.status || reason != tc.reason || !strings.Contains(msg, tc.msg) {
 			t.Errorf("%s: %s %s %q", tc.name, st, reason, msg)
 		}
@@ -163,9 +275,17 @@ func TestProgrammedUnknownSince(t *testing.T) {
 	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"},
 		Spec: wafv1alpha1.WAFPolicySpec{TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}}}}
 	pod := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "traefik", Name: "t", CreationTimestamp: metav1.Now()}}
-	_, reason, _ := programmed(p, map[types.NamespacedName]*networkingv1.Ingress{k: ing},
-		map[types.NamespacedName]target{k: {ing: ing, controller: integrations.Traefik.Controller}}, true, nil, []corev1.Pod{pod}, time.Time{})
+	_, reason, _ := programmed(p, &state{ingresses: map[types.NamespacedName]*networkingv1.Ingress{k: ing},
+		wire: map[types.NamespacedName]target{k: {ing: ing, controller: integrations.Traefik.Controller}}, traefikCRDs: true, pods: []corev1.Pod{pod}})
 	if reason != ReasonPendingRestart {
 		t.Errorf("reason %s, want %s", reason, ReasonPendingRestart)
+	}
+}
+
+// With injection off, nothing is wired, whatever the targets.
+func TestProgrammedDisabled(t *testing.T) {
+	p := &wafv1alpha1.WAFPolicy{Spec: wafv1alpha1.WAFPolicySpec{TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}}}}
+	if st, reason, _ := programmed(p, &state{disabled: true, traefikCRDs: true}); st != metav1.ConditionFalse || reason != ReasonInjectionDisabled {
+		t.Errorf("%s %s, want False %s", st, reason, ReasonInjectionDisabled)
 	}
 }

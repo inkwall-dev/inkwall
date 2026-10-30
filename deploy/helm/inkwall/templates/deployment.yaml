@@ -55,6 +55,8 @@ spec:
             {{- if .Values.controlPlane.caBundle }}
             - --control-plane-ca=/etc/inkwall/control-plane/ca.crt
             {{- end }}
+            - --events-dir=/var/lib/inkwall/events
+            - --events-buffer-bytes={{ mul .Values.controlPlane.eventsBufferMiB 1048576 }}
             {{- with .Values.operator.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -102,6 +104,8 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: events
+              mountPath: /var/lib/inkwall/events
             {{- if $certManager }}
             - name: certs
               mountPath: /certs
@@ -115,6 +119,11 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+        # Security events waiting for the optional control plane; kept
+        # across container restarts. Room for the buffer and a margin.
+        - name: events
+          emptyDir:
+            sizeLimit: {{ add .Values.controlPlane.eventsBufferMiB 16 }}Mi
         {{- if $certManager }}
         - name: certs
           secret:

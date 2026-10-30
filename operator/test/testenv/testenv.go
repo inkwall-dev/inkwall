@@ -88,6 +88,18 @@ type Env struct {
 	// WebhookPort is where the API server calls the webhooks, on
 	// localhost, when they are installed.
 	WebhookPort int
+
+	env *envtest.Environment
+}
+
+// User returns a configuration for another user of the API server, in the
+// given groups ("system:masters" may do anything).
+func (e *Env) User(name string, groups ...string) (*rest.Config, error) {
+	u, err := e.env.AddUser(envtest.User{Name: name, Groups: groups}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return u.Config(), nil
 }
 
 // Options configures Start.
@@ -126,8 +138,18 @@ func Start(o Options) (*Env, func(), error) {
 	if err != nil {
 		return nil, func() {}, err
 	}
-	e := &Env{Config: cfg, WebhookPort: env.WebhookInstallOptions.LocalServingPort}
+	e := &Env{Config: cfg, WebhookPort: env.WebhookInstallOptions.LocalServingPort, env: env}
 	return e, func() { _ = env.Stop() }, nil
+}
+
+// InstallLater installs the CRDs a test adds while the operator runs
+// (testenv/later: Traefik's IngressRoute), and waits until they are served.
+func InstallLater(e *Env) error {
+	_, err := envtest.InstallCRDs(e.Config, envtest.CRDInstallOptions{
+		Paths:              []string{filepath.Join(filepath.Dir(configDir()), "test", "testenv", "later")},
+		ErrorIfPathMissing: true,
+	})
+	return err
 }
 
 // Skip skips t when there is no API server.

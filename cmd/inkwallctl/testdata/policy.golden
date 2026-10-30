@@ -1,0 +1,7 @@
+allow      GET /products/42  policy=shop/storefront  <time>
+deny  403  GET /?id=1%27%20OR%20%271%27%3D%271  policy=shop/storefront  reason=rule  rules=942100,949110  interrupting=949110  <time>
+deny  403  GET /products/42  policy=shop/storefront  reason=rule  rules=913100,100001  interrupting=100001  <time>
+allow      GET /health?id=1%27%20OR%20%271%27%3D%271  policy=shop/storefront  reason=skipped  <time>
+log        GET /api/orders?debug=true  policy=shop/api  reason=rule  rules=100100  interrupting=100100  <time>
+allow      GET /api/orders?id=1%27%20OR%20%271%27%3D%271  policy=shop/api  <time>
+allow      GET /?id=1%27%20OR%20%271%27%3D%271  reason=no_policy  <time>

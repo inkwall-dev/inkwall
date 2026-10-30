@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http/httptest"
 	"runtime"
 	"slices"
@@ -77,7 +78,7 @@ func TestWrongVerdict(t *testing.T) {
 
 func TestDefaultCorpusVerdicts(t *testing.T) {
 	// The corpus's expectations must hold, or every bench run fails.
-	check, err := newChecker(config{timeout: 10 * time.Second, maxBodyBytes: 64 << 10, paranoiaLevel: 1, threshold: 5})
+	check, err := newChecker(config{timeout: 10 * time.Second, maxBodyBytes: 64 << 10, paranoiaLevel: 1, threshold: 5}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}

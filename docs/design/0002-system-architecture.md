@@ -110,8 +110,9 @@ controller-runtime, leader election, 2 replicas. Details: [0004 — Kubernetes O
 Never on the request path. While it is down, engines keep their snapshot and new pods use their
 cache or the bundle Secret (0004 §4.6).
 
-**Built:** injection, Traefik wiring, resolver, bundle builder, distribution, status.
-**Not yet:** upstream sync, other proxies.
+**Built:** injection, Traefik wiring, resolver, bundle builder, distribution, status, upstream sync
+(GitOps and Managed, §5.3).
+**Not yet:** other proxies.
 
 ### 3.4 Control plane (optional)
 
@@ -121,8 +122,10 @@ never engines: fewer connections, no engine egress, air-gap uses the same path. 
 
 ### 3.5 `inkwallctl` (CLI)
 
-`test` (replay a request/HAR, show matches) and `bench` (benchmark corpus) are built. Planned:
-`bundle build/verify` (offline, for CI) and `status` (engine versions, drift).
+`test` (replay a request/HAR, show matches) and `bench` (benchmark corpus) are built. `test` checks
+the flags' policy, `WAFPolicy` objects (`--policy`: resolved with the operator's resolver, compiled
+as the engine compiles a bundle) or a bundle (`--bundle`, signature checked with `--bundle-key`),
+offline, for CI. Planned: `status` (engine versions, drift).
 
 ---
 
@@ -175,7 +178,8 @@ knowledge. Immutable; ed25519-signed.
 
 **Built ([`api/bundle/v1`](../../api/bundle/v1/bundle.proto)):** a `SignedBundle` holds the
 serialized `Bundle` bytes, a signature over exactly those bytes (protobuf encoding isn't canonical)
-and a key ID for rotation; the engine verifies before decoding. `Bundle` has `content_hash` and
+and the signing key's ID; the engine verifies with the key that ID names, before decoding. Engines
+trust several keys while the operator rotates its key (0004 §4.6). `Bundle` has `content_hash` and
 `suspended` (emergency switch). **Not yet:** IP lists, rate limits.
 
 ---
@@ -202,6 +206,9 @@ deltas: simpler, idempotent, small), the engine ACKs or NACKs.
 - Messages `WatchRequest`/`WatchResponse`; payload `SignedBundle`.
 - Engine verifies, refuses an older version unless created later (operator lost its sequence),
   compiles, swaps, writes `--bundle-cache`, ACKs. Failure NACKs and keeps the old bundle.
+- `Hello` and `Heartbeat` carry the IDs of the keys the engine trusts (`--bundle-key`, re-read
+  every 10 s), so the operator signs with a new key only once every engine has it. A bundle
+  rejected for an unknown key is asked for again (a new stream) once the keys change.
 - Reconnects with jittered backoff. With no cache it reads the bundle Secret from the API server
   (`--bundle-secret`, plain HTTPS, no client-go).
 - Matching: host, cleaned path, method, most specific first. Uncovered host: not inspected. Covered
@@ -237,11 +244,15 @@ operator does: re-enroll (`UNAUTHENTICATED`), stop (`PERMISSION_DENIED`), back o
   disk queue drops the oldest when full, and the next batch says how many.
 - A `PolicySnapshot` is all or nothing (server-side dry run of every object first); the cluster's
   `InkwallConfig` decides the mode, and a cluster not in Managed mode refuses snapshots. Only
-  `WAFPolicy` and the rule set kinds are accepted, and the operator sets the source label itself.
+  `WAFPolicy` and the rule set kinds are accepted, and the operator sets the source label itself
+  (`inkwall.dev/source: saas`), deletes the labelled objects a snapshot no longer has, and records
+  the last version applied (sent in `Hello`; an older snapshot is refused). In Managed mode the
+  validating webhook lets only the operator write the labelled objects, fail closed.
   Standalone: events go to logs and optionally OTLP.
 
-**Built:** the contract (#86), enrollment and the primary stream (0004 §4.9). **Not yet:** state
-sync, events and Managed mode (O6, 0004 §11).
+**Built:** the contract (#86), enrollment and the primary stream, state sync (`ClusterState`),
+events streams with each replica's disk buffer, and Managed mode (policy snapshots written as CRDs,
+pruned, acknowledged; the webhook guard), tested on kind against a stub control plane (0004 §4.9).
 
 ### 5.4 Event schema
 
@@ -249,7 +260,8 @@ sync, events and Managed mode (O6, 0004 §11).
 and bundle version, action, reason, matches (rule, variable, redacted snippet), score, method, host,
 path (no query), client IP, user agent, request ID, status, latency. The same message goes engine →
 operator (`agent.v1` `Watch`) and operator → control plane, in `EventBatch` with a count of dropped
-events. **Built:** the schema. **Not yet:** producing and forwarding events.
+events. **Built:** the schema; engines produce redacted events and send them to their operator
+replica, which forwards them to the control plane on its events stream (#91, #92).
 
 ---
 
@@ -297,7 +309,17 @@ rebuilds the request from `X-Forwarded-Method`/`-Uri`.
 - Missing or invalid forwarded headers → 400, even in detect mode (can't inspect, can't allow).
 - Limitation: Traefik itself rejects bodies over `maxBodySize` (operator sets 10 MiB, the largest
   inspectable body), whatever `body.onOversize` says.
-- Limitation: behind a load balancer the engine sees the LB as client IP.
+
+**Client IP behind a load balancer.** Behind an LB, Traefik's peer is the LB or a node, and the
+engine would see it as the client. `X-Forwarded-For` from the LB can't help: the engine sees it
+only with `trustForwardHeader: true`, which lets the client choose `X-Forwarded-Uri` (above). So
+the address comes from the connection: the LB sends a PROXY header (v1 or v2) that Traefik accepts
+only from the LB's CIDRs (`entryPoints.<name>.proxyProtocol.trustedIPs`, never `0.0.0.0/0`), or
+`externalTrafficPolicy: Local` keeps the source address. Traefik uses it as the remote address,
+ForwardAuth sends it as `X-Forwarded-For`, and the engine trusts that from loopback only (§8.2).
+No engine change. Setup per LB: [client IP](../client-ip.md); the kind e2e checks a PROXY address,
+a client-sent `X-Forwarded-For` ignored, and an untrusted PROXY header ignored (verified on
+v3.7.13).
 
 **B. Traefik plugin (later):** Yaegi can't run Coraza well, so it would be a thin client to the
 sidecar (or http-wasm).
@@ -387,6 +409,8 @@ P-256 or Ed25519. **Built:** the contract, and the operator side
 
 A wrong IP makes rate limits and IP lists worse than none. Order: the proxy's resolved client IP;
 `X-Forwarded-For` walked right to left, skipping only `trustedProxies`; the peer IP.
+Behind a load balancer the proxy must learn the client first: the PROXY protocol or
+`externalTrafficPolicy: Local` (§6.3).
 
 ### 8.3 Data privacy
 

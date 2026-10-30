@@ -7,7 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +28,7 @@ import (
 
 	agentv1 "github.com/inkwall-dev/inkwall/api/agent/v1"
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 )
 
 func TestEnforced(t *testing.T) {
@@ -170,7 +173,9 @@ func TestWatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{EngineId: "e1", PodName: "traefik-1"}}}); err != nil {
+	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{
+		EngineId: "e1", PodName: "traefik-1", TrustedKeyIds: []string{"k"},
+	}}}); err != nil {
 		t.Fatal(err)
 	}
 	// The current bundle comes first.
@@ -183,7 +188,18 @@ func TestWatch(t *testing.T) {
 	}
 	waitFor(t, "the ack", func() bool {
 		got, _ := table.Snapshot()
-		return len(got) == 1 && got[0].Applied == 1 && got[0].ServiceAccount == "edge/engine" && got[0].Replica == "replica-0"
+		return len(got) == 1 && got[0].Applied == 1 && got[0].ServiceAccount == "edge/engine" && got[0].Replica == "replica-0" &&
+			slices.Equal(got[0].TrustedKeys, []string{"k"})
+	})
+	// The engine reloaded its keys: heartbeats report them.
+	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Heartbeat{Heartbeat: &agentv1.Heartbeat{
+		BundleVersion: 1, TrustedKeyIds: []string{"k", "k2"},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the new trusted keys", func() bool {
+		got, _ := table.Snapshot()
+		return len(got) == 1 && slices.Equal(got[0].TrustedKeys, []string{"k", "k2"})
 	})
 
 	// A new bundle is pushed; a rejection is recorded.
@@ -255,5 +271,51 @@ func TestWatchIdle(t *testing.T) {
 	_ = stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{EngineId: "e"}}})
 	if _, err := stream.Recv(); status.Code(err) != codes.DeadlineExceeded {
 		t.Fatalf("a silent engine: got %v, want DeadlineExceeded", err)
+	}
+}
+
+// podAuth binds the token to a pod, as a projected token does.
+type podAuth struct{}
+
+func (podAuth) Authenticate(_ context.Context, token string) (Identity, error) {
+	return Identity{ServiceAccount: "edge/traefik", PodNamespace: "edge", PodName: token}, nil
+}
+
+func TestWatchEvents(t *testing.T) {
+	var (
+		mu  sync.Mutex
+		got []*eventsv1.SecurityEvent
+	)
+	s := NewServer(NewStore(), NewTable(), podAuth{}, "replica-0", logr.Discard())
+	s.Events = func(b *eventsv1.EventBatch) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, b.GetEvents()...)
+	}
+	c := serve(t, s)
+	ctx, cancel := context.WithCancel(withToken(context.Background(), "traefik-1"))
+	defer cancel()
+	stream, err := c.Watch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{EngineId: "e1", PodNamespace: "edge", PodName: "traefik-1"}}}); err != nil {
+		t.Fatal(err)
+	}
+	// The engine claims another pod in its events: the stream's identity wins.
+	batch := &eventsv1.EventBatch{Dropped: 3, Events: []*eventsv1.SecurityEvent{
+		{EventId: "a", EngineId: "forged", PodNamespace: "kube-system", PodName: "other"},
+		{EventId: "b"},
+	}}
+	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Events{Events: batch}}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the events", func() bool { mu.Lock(); defer mu.Unlock(); return len(got) == 2 })
+	mu.Lock()
+	defer mu.Unlock()
+	for _, ev := range got {
+		if ev.GetEngineId() != "e1" || ev.GetPodNamespace() != "edge" || ev.GetPodName() != "traefik-1" {
+			t.Errorf("event %s from %s %s/%s, want e1 edge/traefik-1", ev.GetEventId(), ev.GetEngineId(), ev.GetPodNamespace(), ev.GetPodName())
+		}
 	}
 }

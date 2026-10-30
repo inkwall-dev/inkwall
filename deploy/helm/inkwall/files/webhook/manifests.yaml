@@ -66,6 +66,75 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /validate-waf-inkwall-dev-v1alpha1-clusterwafruleset
+  failurePolicy: Fail
+  name: delete.clusterwafrulesets.waf.inkwall.dev
+  objectSelector:
+    matchLabels:
+      inkwall.dev/source: saas
+  rules:
+  - apiGroups:
+    - waf.inkwall.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - DELETE
+    resources:
+    - clusterwafrulesets
+  sideEffects: None
+  timeoutSeconds: 2
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-waf-inkwall-dev-v1alpha1-wafpolicy
+  failurePolicy: Fail
+  name: delete.wafpolicies.waf.inkwall.dev
+  objectSelector:
+    matchLabels:
+      inkwall.dev/source: saas
+  rules:
+  - apiGroups:
+    - waf.inkwall.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - DELETE
+    resources:
+    - wafpolicies
+  sideEffects: None
+  timeoutSeconds: 2
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-waf-inkwall-dev-v1alpha1-wafruleset
+  failurePolicy: Fail
+  name: delete.wafrulesets.waf.inkwall.dev
+  objectSelector:
+    matchLabels:
+      inkwall.dev/source: saas
+  rules:
+  - apiGroups:
+    - waf.inkwall.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - DELETE
+    resources:
+    - wafrulesets
+  sideEffects: None
+  timeoutSeconds: 2
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /validate-waf-inkwall-dev-v1alpha1-wafpolicy
   failurePolicy: Fail
   name: wafpolicies.waf.inkwall.dev

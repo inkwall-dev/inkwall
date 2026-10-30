@@ -4,8 +4,8 @@
 // Package fakecontrolplane is a control plane that implements
 // api/controlplane/v1 for tests: enrollment with one-time tokens, client
 // certificates from its own CA, and the Connect stream. It records what the
-// operator sends and can be told to fail. It is not a control plane: no
-// storage, no tenants.
+// operator sends, sends policy snapshots when told to, and can be told to
+// fail. It is not a control plane: no storage, no tenants.
 package fakecontrolplane
 
 import (
@@ -37,6 +37,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	controlplanev1 "github.com/inkwall-dev/inkwall/api/controlplane/v1"
+	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 )
 
 // Server is a fake control plane.
@@ -47,6 +48,8 @@ type Server struct {
 	CertLifetime time.Duration
 	// HeartbeatInterval is sent in Welcome.
 	HeartbeatInterval time.Duration
+	// AcceptEvents is sent in Welcome: whether replicas send events.
+	AcceptEvents bool
 
 	ca     *x509.Certificate
 	caKey  crypto.Signer
@@ -71,9 +74,26 @@ type Server struct {
 	enrollCalls  int
 	connectCalls int
 	hellos       []*controlplanev1.Hello
-	heartbeats   int
-	renewals     int
-	clusters     int
+	states       []*controlplanev1.ClusterState
+	// events are the security events stored, by ID (resends dedup);
+	// uploads, the (buffer, sequence) pairs seen, so dropped counts once.
+	events        map[string]*eventsv1.SecurityEvent
+	uploads       map[string]bool
+	eventsDropped uint64
+	eventUploads  int
+	// primary sends on the open primary stream, for Resync; primaryID
+	// tells which stream that is.
+	primary    func(*controlplanev1.ConnectResponse) error
+	primaryID  uint64
+	heartbeats int
+	renewals   int
+	clusters   int
+	// snapshot is the newest PolicySnapshot, sent again to a Managed
+	// cluster whose Hello has an older policy version; acks and nacks are
+	// the answers.
+	snapshot *controlplanev1.PolicySnapshot
+	acks     []uint64
+	nacks    []*controlplanev1.PolicyNack
 }
 
 type enrollment struct {
@@ -107,6 +127,8 @@ func StartWith(o Options) (*Server, error) {
 		HeartbeatInterval: time.Second,
 		tokens:            map[string]bool{},
 		enrolled:          map[string]enrollment{},
+		events:            map[string]*eventsv1.SecurityEvent{},
+		uploads:           map[string]bool{},
 	}
 	if err := s.newCA(); err != nil {
 		return nil, err
@@ -166,10 +188,21 @@ type Stats struct {
 	EnrollCalls  int
 	ConnectCalls int
 	Hellos       []*controlplanev1.Hello
-	Heartbeats   int
-	Renewals     int
+	// States are the ClusterStates received, oldest first.
+	States     []*controlplanev1.ClusterState
+	Heartbeats int
+	// Events counts the distinct events stored; EventUploads the uploads
+	// received (resends included); EventsDropped what replicas reported
+	// dropping, once per buffer and sequence.
+	Events        int
+	EventUploads  int
+	EventsDropped uint64
+	Renewals      int
 	// Clusters is how many distinct clusters enrolled.
 	Clusters int
+	// Acks and Nacks answered the policy snapshots, oldest first.
+	Acks  []uint64
+	Nacks []*controlplanev1.PolicyNack
 }
 
 // Stats returns what the server saw so far.
@@ -177,7 +210,62 @@ func (s *Server) Stats() Stats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return Stats{EnrollCalls: s.enrollCalls, ConnectCalls: s.connectCalls, Hellos: append([]*controlplanev1.Hello(nil), s.hellos...),
-		Heartbeats: s.heartbeats, Renewals: s.renewals, Clusters: s.clusters}
+		States: append([]*controlplanev1.ClusterState(nil), s.states...),
+		Events: len(s.events), EventUploads: s.eventUploads, EventsDropped: s.eventsDropped, Heartbeats: s.heartbeats, Renewals: s.renewals, Clusters: s.clusters,
+		Acks: append([]uint64(nil), s.acks...), Nacks: append([]*controlplanev1.PolicyNack(nil), s.nacks...)}
+}
+
+// SendSnapshot sends snap on the open primary stream, and reports whether
+// one was open. Either way, a Managed cluster gets it when it connects with
+// an older policy version, as from a control plane.
+func (s *Server) SendSnapshot(snap *controlplanev1.PolicySnapshot) (bool, error) {
+	s.mu.Lock()
+	s.snapshot = snap
+	send := s.primary
+	s.mu.Unlock()
+	if send == nil {
+		return false, nil
+	}
+	return true, send(&controlplanev1.ConnectResponse{Msg: &controlplanev1.ConnectResponse_PolicySnapshot{PolicySnapshot: snap}})
+}
+
+// SnapshotVersion is the version of the newest snapshot (0: none).
+func (s *Server) SnapshotVersion() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.snapshot.GetVersion()
+}
+
+// Resync asks the cluster on the open primary stream for a full
+// ClusterState, and reports whether one was open.
+func (s *Server) Resync() (bool, error) {
+	s.mu.Lock()
+	send := s.primary
+	s.mu.Unlock()
+	if send == nil {
+		return false, nil
+	}
+	return true, send(&controlplanev1.ConnectResponse{Msg: &controlplanev1.ConnectResponse_Directive{Directive: &controlplanev1.Directive{
+		Action: &controlplanev1.Directive_Resync{Resync: &controlplanev1.Resync{}},
+	}}})
+}
+
+// Events returns the distinct events stored, in no order.
+func (s *Server) Events() []*eventsv1.SecurityEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*eventsv1.SecurityEvent, 0, len(s.events))
+	for _, ev := range s.events {
+		out = append(out, ev)
+	}
+	return out
+}
+
+// SetAcceptEvents changes what the next Welcome says.
+func (s *Server) SetAcceptEvents(accept bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.AcceptEvents = accept
 }
 
 // Enroll implements the contract: the first call burns the token; a retry
@@ -216,8 +304,8 @@ func (s *Server) Enroll(_ context.Context, req *controlplanev1.EnrollRequest) (*
 	return resp, nil
 }
 
-// Connect implements the stream: Hello first, then Welcome; heartbeats and
-// certificate renewal.
+// Connect implements the stream: Hello first, then Welcome; ClusterState,
+// heartbeats, policy snapshots and their answers, and certificate renewal.
 func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer) error {
 	clusterID, err := s.clusterOf(stream.Context())
 	if err != nil {
@@ -238,13 +326,43 @@ func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer
 	if hello == nil {
 		return status.Error(codes.FailedPrecondition, "Hello must come first")
 	}
+	// Sends come from this goroutine and from Resync.
+	var sendMu sync.Mutex
+	send := func(m *controlplanev1.ConnectResponse) error {
+		sendMu.Lock()
+		defer sendMu.Unlock()
+		return stream.Send(m)
+	}
 	s.mu.Lock()
 	s.hellos = append(s.hellos, hello)
+	accept := s.AcceptEvents
+	var resend *controlplanev1.PolicySnapshot
+	if hello.GetRole() == controlplanev1.StreamRole_STREAM_ROLE_PRIMARY {
+		if hello.GetMode() == controlplanev1.ClusterMode_CLUSTER_MODE_MANAGED && s.snapshot.GetVersion() > hello.GetPolicyVersion() {
+			resend = s.snapshot
+		}
+		// The newer primary stream wins.
+		s.primaryID++
+		id := s.primaryID
+		s.primary = send
+		defer func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if s.primaryID == id {
+				s.primary = nil
+			}
+		}()
+	}
 	s.mu.Unlock()
-	if err := stream.Send(&controlplanev1.ConnectResponse{Msg: &controlplanev1.ConnectResponse_Welcome{Welcome: &controlplanev1.Welcome{
-		HeartbeatInterval: durationpb.New(s.HeartbeatInterval),
+	if err := send(&controlplanev1.ConnectResponse{Msg: &controlplanev1.ConnectResponse_Welcome{Welcome: &controlplanev1.Welcome{
+		HeartbeatInterval: durationpb.New(s.HeartbeatInterval), AcceptEvents: accept,
 	}}}); err != nil {
 		return err
+	}
+	if resend != nil {
+		if err := send(&controlplanev1.ConnectResponse{Msg: &controlplanev1.ConnectResponse_PolicySnapshot{PolicySnapshot: resend}}); err != nil {
+			return err
+		}
 	}
 	for {
 		msg, err := stream.Recv()
@@ -252,9 +370,49 @@ func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer
 			return err
 		}
 		switch m := msg.GetMsg().(type) {
+		case *controlplanev1.ConnectRequest_ClusterState:
+			if hello.GetRole() != controlplanev1.StreamRole_STREAM_ROLE_PRIMARY {
+				return status.Error(codes.FailedPrecondition, "ClusterState on a non-primary stream")
+			}
+			s.mu.Lock()
+			s.states = append(s.states, m.ClusterState)
+			s.mu.Unlock()
+		case *controlplanev1.ConnectRequest_Events:
+			if hello.GetRole() != controlplanev1.StreamRole_STREAM_ROLE_EVENTS {
+				return status.Error(codes.FailedPrecondition, "EventUpload on a non-events stream")
+			}
+			up := m.Events
+			s.mu.Lock()
+			if !s.AcceptEvents {
+				s.mu.Unlock()
+				return status.Error(codes.FailedPrecondition, "events are not accepted")
+			}
+			s.eventUploads++
+			key := fmt.Sprintf("%s/%d", up.GetBufferId(), up.GetSequence())
+			if !s.uploads[key] {
+				s.uploads[key] = true
+				s.eventsDropped += up.GetBatch().GetDropped()
+			}
+			for _, ev := range up.GetBatch().GetEvents() {
+				s.events[ev.GetEventId()] = ev
+			}
+			s.mu.Unlock()
+			if err := send(&controlplanev1.ConnectResponse{Msg: &controlplanev1.ConnectResponse_EventsAck{EventsAck: &controlplanev1.EventsAck{
+				BufferId: up.GetBufferId(), Sequence: up.GetSequence(),
+			}}}); err != nil {
+				return err
+			}
 		case *controlplanev1.ConnectRequest_Heartbeat:
 			s.mu.Lock()
 			s.heartbeats++
+			s.mu.Unlock()
+		case *controlplanev1.ConnectRequest_PolicyAck:
+			s.mu.Lock()
+			s.acks = append(s.acks, m.PolicyAck.GetVersion())
+			s.mu.Unlock()
+		case *controlplanev1.ConnectRequest_PolicyNack:
+			s.mu.Lock()
+			s.nacks = append(s.nacks, m.PolicyNack)
 			s.mu.Unlock()
 		case *controlplanev1.ConnectRequest_RenewCertificate:
 			if hello.GetRole() != controlplanev1.StreamRole_STREAM_ROLE_PRIMARY {
@@ -271,7 +429,7 @@ func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer
 			if err != nil {
 				return status.Error(codes.Internal, err.Error())
 			}
-			if err := stream.Send(&controlplanev1.ConnectResponse{Msg: &controlplanev1.ConnectResponse_Certificate{Certificate: &controlplanev1.Certificate{
+			if err := send(&controlplanev1.ConnectResponse{Msg: &controlplanev1.ConnectResponse_Certificate{Certificate: &controlplanev1.Certificate{
 				Certificates: resp.GetCertificates(), NotAfter: resp.GetNotAfter(),
 			}}}); err != nil {
 				return err

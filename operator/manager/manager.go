@@ -35,15 +35,17 @@ import (
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
+	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/bundle"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
-	"github.com/inkwall-dev/inkwall/operator/internal/bundle"
 	"github.com/inkwall-dev/inkwall/operator/internal/controller"
 	"github.com/inkwall-dev/inkwall/operator/internal/controlplane"
+	"github.com/inkwall-dev/inkwall/operator/internal/crdwatch"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
-	"github.com/inkwall-dev/inkwall/operator/internal/resolver"
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
+	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/operator/webhook"
 )
 
@@ -100,9 +102,13 @@ type Options struct {
 	// EngineReportInterval is how often replicas publish their engines and
 	// the leader updates Enforced; 0: 2s.
 	EngineReportInterval time.Duration
+	// SigningKeyGrace is the least time each phase of a signing key
+	// rotation lasts; 0: controller.DefaultRotationGrace.
+	SigningKeyGrace time.Duration
 
 	// Inject adds the engine to proxy pods (needs Webhooks and
 	// DistributionPort), with EngineImage unless InkwallConfig sets one.
+	// Without it, the routes the operator wired are unwired.
 	Inject           bool
 	EngineImage      string
 	EnginePullPolicy corev1.PullPolicy
@@ -116,6 +122,14 @@ type Options struct {
 	// ControlPlaneCAFile trusts the control plane's server certificate;
 	// empty: the system roots.
 	ControlPlaneCAFile string
+	// CRDInterval is how often the leader looks for Traefik's IngressRoute
+	// CRD until it is installed; 0: 30s.
+	CRDInterval time.Duration
+
+	// EventsDir holds the replica's buffer of security events for the
+	// control plane ("": in memory); EventsBufferBytes bounds it.
+	EventsDir         string
+	EventsBufferBytes int64
 }
 
 // NewScheme returns the types the operator reads and writes.
@@ -157,6 +171,9 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			// Only the Pod webhook's configuration.
 			&admissionregistrationv1.MutatingWebhookConfiguration{}: {Field: fields.OneTermEqualSelector("metadata.name", webhook.MutatingConfigName)},
 		}},
+		// Unstructured objects (Traefik's IngressRoutes) are read from the
+		// cache too: the wiring and the bundle read them all at every change.
+		Client:                  client.Options{Cache: &client.CacheOptions{Unstructured: true}},
 		Metrics:                 metricsserver.Options{BindAddress: o.MetricsAddr},
 		HealthProbeBindAddress:  o.ProbeAddr,
 		LeaderElection:          o.LeaderElect,
@@ -176,11 +193,16 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
 		return nil, err
 	}
+	// Traefik's IngressRoute CRD may be installed after the operator.
+	ingressRoutes := &crdwatch.Kind{GVK: wiring.IngressRouteGVK, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
 	if err := (&controller.BundleReconciler{
-		Client:    mgr.GetClient(),
-		APIReader: mgr.GetAPIReader(),
-		Namespace: o.Namespace,
-		Debounce:  o.Debounce,
+		Client:        mgr.GetClient(),
+		APIReader:     mgr.GetAPIReader(),
+		Namespace:     o.Namespace,
+		Debounce:      o.Debounce,
+		EngineStale:   engineStale(o),
+		RotationGrace: o.SigningKeyGrace,
+		IngressRoutes: ingressRoutes,
 	}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
@@ -199,12 +221,6 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			OperatorAddr: fmt.Sprintf("%s.%s.svc:%d", o.DistributionService, o.Namespace, o.DistributionPort),
 			BundleSecret: o.Namespace + "/" + bundle.BundleSecret,
 			Integrations: selectors,
-		}
-		if err := (&wiring.Reconciler{
-			Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), PodWebhook: webhook.MutatingConfigName,
-			TraefikPods: selectors.Selector(integrations.Traefik.Name),
-		}).SetupWithManager(mgr); err != nil {
-			return nil, err
 		}
 		if err := (&injection.PodWebhookReconciler{
 			Client: mgr.GetClient(), ConfigName: webhook.MutatingConfigName, WebhookName: webhook.PodWebhookName,
@@ -225,6 +241,17 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			return nil, err
 		}
 	}
+	// Without injection, the wiring controller unwires what was wired: new
+	// proxy pods won't have the engine.
+	if err := (&wiring.Reconciler{
+		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), PodWebhook: webhook.MutatingConfigName,
+		TraefikPods: selectors.Selector(integrations.Traefik.Name), IngressRoutes: ingressRoutes, Disabled: !inject,
+	}).SetupWithManager(mgr); err != nil {
+		return nil, err
+	}
+	if err := mgr.Add(ingressRoutes); err != nil {
+		return nil, err
+	}
 	if o.Webhooks {
 		starter := &webhookStarter{mgr: mgr, ready: ready, inject: injector}
 		if err := mgr.Add(starter); err != nil {
@@ -234,8 +261,17 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			return nil, err
 		}
 	}
+	// Every replica forwards its engines' events, when the control plane
+	// accepts them.
+	forwarder := &controlplane.Forwarder{
+		Client: mgr.GetClient(), Namespace: o.Namespace, Replica: replicaName(o), OperatorVersion: o.Version,
+		CAFile: o.ControlPlaneCAFile, Dir: o.EventsDir, MaxBytes: o.EventsBufferBytes,
+	}
+	if err := mgr.Add(forwarder); err != nil {
+		return nil, err
+	}
 	if o.DistributionPort != 0 {
-		if err := addDistribution(mgr, o, ready); err != nil {
+		if err := addDistribution(mgr, o, ready, forwarder.Add); err != nil {
 			return nil, err
 		}
 	}
@@ -245,6 +281,8 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		Namespace: o.Namespace, Replica: replicaName(o), OperatorVersion: o.Version,
 		KubernetesVersion: kubernetesVersion(cfg),
 		CAFile:            o.ControlPlaneCAFile,
+		ProxyPods:         selectors.Selector(integrations.Traefik.Name),
+		EngineStale:       engineStale(o),
 	}); err != nil {
 		return nil, err
 	}
@@ -299,7 +337,7 @@ func addCerts(mgr manager.Manager, o Options) (<-chan struct{}, error) {
 
 // addDistribution serves bundles to the engines on every replica, and
 // reports Enforced from the leader.
-func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}) error {
+func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}, events func(*eventsv1.EventBatch)) error {
 	replica := o.Replica
 	if replica == "" {
 		h, err := os.Hostname()
@@ -308,20 +346,19 @@ func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}) erro
 		}
 		replica = h
 	}
-	interval := o.EngineReportInterval
-	if interval == 0 {
-		interval = 2 * time.Second
-	}
+	interval := engineReportInterval(o)
 	store, table := distribution.NewStore(), distribution.NewTable()
 	if err := (&distribution.BundleSource{Client: mgr.GetClient(), Namespace: o.Namespace, Store: store}).SetupWithManager(mgr); err != nil {
 		return err
 	}
 	auth := &distribution.KubeAuthenticator{Client: mgr.GetClient(), Namespace: o.Namespace, TTL: time.Minute}
+	service := distribution.NewServer(store, table, auth, replica, ctrl.Log.WithName("distribution"))
+	service.Events = events
 	srv := &distribution.GRPCServer{
 		Port:    o.DistributionPort,
 		CertDir: o.WebhookCertDir,
 		Ready:   ready,
-		Service: distribution.NewServer(store, table, auth, replica, ctrl.Log.WithName("distribution")),
+		Service: service,
 	}
 	if err := mgr.Add(srv); err != nil {
 		return err
@@ -350,7 +387,7 @@ func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}) erro
 		Reader:    mgr.GetAPIReader(),
 		Namespace: o.Namespace,
 		Interval:  interval,
-		Stale:     15 * interval,
+		Stale:     engineStale(o),
 		Store:     store,
 	})
 }
@@ -370,7 +407,24 @@ func (w *webhookStarter) Start(ctx context.Context) error {
 	case <-ctx.Done():
 		return nil
 	}
-	if err := webhook.Setup(w.mgr, w.inject); err != nil {
+	user, err := webhook.OperatorUser(ctx, w.mgr.GetClient())
+	if ctx.Err() != nil {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// The guard reads the mode from the cache: start its informer now, not
+	// in the first request, which has 2 s.
+	var cfg wafv1alpha1.InkwallConfig
+	if err := w.mgr.GetClient().Get(ctx, types.NamespacedName{Name: "default"}, &cfg); client.IgnoreNotFound(err) != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		return fmt.Errorf("read the InkwallConfig: %w", err)
+	}
+	guard := &webhook.SourceGuard{Operator: user, Reader: w.mgr.GetClient()}
+	if err := webhook.Setup(w.mgr, w.inject, guard); err != nil {
 		return fmt.Errorf("register webhooks: %w", err)
 	}
 	w.registered.Store(true)
@@ -414,4 +468,19 @@ func kubernetesVersion(cfg *rest.Config) func() string {
 		})
 		return v
 	}
+}
+
+// DefaultEventsBufferBytes bounds each replica's events buffer by default.
+const DefaultEventsBufferBytes = controlplane.DefaultEventsBufferBytes
+
+// engineStale is how old a replica's engine report may be before the
+// leader ignores it: three of the replicas' refreshes (Publisher.Refresh).
+func engineStale(o Options) time.Duration { return 15 * engineReportInterval(o) }
+
+// engineReportInterval is how often replicas publish their engines.
+func engineReportInterval(o Options) time.Duration {
+	if o.EngineReportInterval == 0 {
+		return 2 * time.Second
+	}
+	return o.EngineReportInterval
 }

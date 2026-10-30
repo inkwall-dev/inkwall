@@ -34,7 +34,7 @@ analytics and threat intel.
 | **CRDs** | kube-apiserver | `operator/api/v1alpha1`, `operator/config/crd` | Built: WAFPolicy, WAFRuleSet, ClusterWAFRuleSet, InkwallConfig |
 | **Helm chart** | User install | `deploy/helm/inkwall` | Built |
 | **OLM bundle** | OperatorHub | operator-sdk | Not yet (Stage 6) |
-| **inkwallctl** | Developer machine, CI | `cmd/inkwallctl` | Built: `test`, `bench`. Not yet: `bundle verify`, `migrate` |
+| **inkwallctl** | Developer machine, CI | `cmd/inkwallctl` | Built: `test` (flags, `--policy`, `--bundle`), `bench`. Not yet: `migrate` |
 | **Protobuf APIs** (engine, agent, bundle) | Engine, operator, control plane | `api/` | Built |
 | **Control plane** (SaaS) | Inkwall-hosted | separate product | Not yet (Stage 5) |
 
@@ -60,12 +60,12 @@ disk cache) and `pkg/clientip`.
 | Discovery + integration registry | Find controller pods (design: also IngressClass, GatewayClass) | `operator/integrations` | Built: Traefik, by selectors. Not yet: envoygateway, istio, ingressnginx, haproxy, caddy |
 | Injection | Native sidecar via Pod webhook | `operator/internal/injection` | Built |
 | Wiring | Render proxy config, server-side apply | `operator/internal/wiring` | Built (Traefik) |
-| Resolver | Policy targets → host/path/method | `operator/internal/resolver` | Built |
-| Bundle builder | Leader only: debounce changes (1 s), build, sign, version, write Secret | `operator/internal/bundle`, `operator/internal/controller` | Built |
+| Resolver | Policy targets → host/path/method | `operator/resolver` | Built |
+| Bundle builder | Leader only: debounce changes (1 s), build, sign, version, write Secret | `operator/bundle`, `operator/internal/controller` | Built |
 | Distribution server | All replicas, gRPC; ACK/NACK/heartbeat | `operator/internal/distribution` | Built |
 | Status | `Enforced` condition (engines on current bundle) | `operator/internal/distribution` | Built |
-| Validating webhook | Compile rule sets as the engine does; check paths | `operator/webhook` | Built |
-| Upstream sync | Leader only, mTLS to the control plane | — | Not yet |
+| Validating webhook | Compile rule sets as the engine does; check paths; in Managed mode, only the operator writes the control plane's objects | `operator/webhook` | Built |
+| Upstream sync | Leader only, mTLS to the control plane: enrollment, state sync, events (every replica), Managed mode | `operator/internal/controlplane` | Built (tested against a stub) |
 | WAFIPList CRD | IP lists | — | Not yet |
 
 ## 5. Key flows
@@ -132,7 +132,7 @@ every parsing difference is a potential bypass.
 |---|---|---|
 | inkwall-engine (`pkg/rules/coraza`) | Yes | T2 / T3 / T4 rules |
 | Operator validating webhook | Yes | Compiling rules at admission |
-| inkwallctl (`test`, `bundle verify`) | Yes | Local and CI validation |
+| inkwallctl (`test`, with flags, `--policy` or `--bundle`) | Yes | Local and CI validation |
 | Caddy module (not yet) | Yes (embeds the engine) | In-process evaluation |
 | Adapters, router, IP lists, rate limiter | No | Inkwall code; runs before rules |
 | Traefik Yaegi plugin, nginx Lua plugin (not yet) | No | Thin clients calling the engine |

@@ -90,7 +90,8 @@ spec:
                     path or argument.
                   properties:
                     ruleIDs:
-                      description: RuleIDs are the rules to turn off.
+                      description: RuleIDs are the rules to turn off. An ID no rule
+                        has is ignored.
                       items:
                         format: int32
                         minimum: 1
@@ -104,8 +105,11 @@ spec:
                         this policy covers.
                       properties:
                         argument:
-                          description: Argument is a query or body argument the rules
-                            stop looking at.
+                          description: |-
+                            Argument is a query or body argument the rules, and the rules chained
+                            to them, stop looking at. With a rule set whose own SecLang negates
+                            ARGS targets (!ARGS:name), the policy gets its own compiled rules, and
+                            the exclusion covers the rule only, not its chained rules.
                           maxLength: 256
                           minLength: 1
                           pattern: ^[A-Za-z0-9_.\-\[\]]+$
@@ -233,15 +237,21 @@ spec:
                   properties:
                     group:
                       description: |-
-                        Group of the target: networking.k8s.io (the default, for Ingress) or
-                        gateway.networking.k8s.io (for HTTPRoute).
+                        Group of the target: networking.k8s.io (the default, for Ingress),
+                        gateway.networking.k8s.io (for HTTPRoute) or traefik.io (for
+                        Traefik's IngressRoute).
                       maxLength: 253
                       type: string
                     kind:
-                      description: 'Kind of the target: Ingress or HTTPRoute.'
+                      description: |-
+                        Kind of the target: Ingress, HTTPRoute or IngressRoute. An
+                        IngressRoute's hosts and paths come from its routes' match rules,
+                        which may combine Host, Path and PathPrefix with &&; a rule with
+                        anything else (||, !, other matchers) is not accepted.
                       enum:
                       - Ingress
                       - HTTPRoute
+                      - IngressRoute
                       type: string
                     name:
                       description: Name of the target.
@@ -259,11 +269,12 @@ spec:
                   - name
                   type: object
                   x-kubernetes-validations:
-                  - message: target must be a networking.k8s.io Ingress or a gateway.networking.k8s.io
-                      HTTPRoute
+                  - message: target must be a networking.k8s.io Ingress, a gateway.networking.k8s.io
+                      HTTPRoute or a traefik.io IngressRoute
                     rule: (self.kind == 'Ingress' && (!has(self.group) || self.group
                       == 'networking.k8s.io')) || (self.kind == 'HTTPRoute' && has(self.group)
-                      && self.group == 'gateway.networking.k8s.io')
+                      && self.group == 'gateway.networking.k8s.io') || (self.kind
+                      == 'IngressRoute' && has(self.group) && self.group == 'traefik.io')
                   - message: sectionName is only allowed for an HTTPRoute
                     rule: '!has(self.sectionName) || self.kind == ''HTTPRoute'''
                 maxItems: 16

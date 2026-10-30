@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
 )
 
 // Names of the Secrets in the operator's namespace.
@@ -43,20 +44,17 @@ const (
 	// BundleKey holds the gzip-compressed, serialized SignedBundle.
 	BundleKey = "bundle.pb.gz"
 	// PublicKeyKey holds the ed25519 public key the bundle is signed with,
-	// so an engine reading the Secret can check which key it needs.
+	// so an engine reading the Secret can check which key it needs. In the
+	// signing key Secret and the trust ConfigMap it is the active key.
 	PublicKeyKey = "ed25519.pub"
-)
-
-// Keys of the signing key Secret.
-const (
-	privateKeyKey = "ed25519.key"
-	keyIDKey      = "key-id"
 )
 
 // Annotations on the bundle Secret, for people and tools.
 const (
 	VersionAnnotation = "waf.inkwall.dev/bundle-version"
 	HashAnnotation    = "waf.inkwall.dev/content-hash"
+	// KeyIDAnnotation names the key the bundle is signed with.
+	KeyIDAnnotation = "waf.inkwall.dev/key-id"
 )
 
 // MaxCompressedBytes is the largest bundle stored: Secrets are limited to
@@ -83,14 +81,15 @@ func ContentHash(b *bundlev1.Bundle) ([]byte, error) {
 
 // Next returns the bundle to publish for content, given the current one
 // (nil if none), and whether it differs: unchanged content keeps the current
-// version. lastVersion is the highest version this process published, so a
-// deleted Secret doesn't restart the sequence while the leader runs.
-func Next(current, content *bundlev1.Bundle, lastVersion uint64, now time.Time) (*bundlev1.Bundle, bool, error) {
+// version, unless resign asks for a new one (the signing key changed).
+// lastVersion is the highest version this process published, so a deleted
+// Secret doesn't restart the sequence while the leader runs.
+func Next(current, content *bundlev1.Bundle, lastVersion uint64, now time.Time, resign bool) (*bundlev1.Bundle, bool, error) {
 	hash, err := ContentHash(content)
 	if err != nil {
 		return nil, false, err
 	}
-	if current != nil && bytes.Equal(current.GetContentHash(), hash) {
+	if current != nil && !resign && bytes.Equal(current.GetContentHash(), hash) {
 		return current, false, nil
 	}
 	next := proto.Clone(content).(*bundlev1.Bundle)
@@ -107,11 +106,18 @@ type Signer struct {
 }
 
 // NewSigner returns a Signer for key, with a key ID derived from its public
-// key.
+// key (bundlekey.ID).
 func NewSigner(key ed25519.PrivateKey) *Signer {
-	pub := key.Public().(ed25519.PublicKey)
-	sum := sha256.Sum256(pub)
-	return &Signer{key: key, keyID: hex.EncodeToString(sum[:8])}
+	return &Signer{key: key, keyID: bundlekey.ID(key.Public().(ed25519.PublicKey))}
+}
+
+// GenerateSigner returns a Signer for a new key.
+func GenerateSigner() (*Signer, error) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	return NewSigner(priv), nil
 }
 
 // Public returns the public key.
@@ -129,64 +135,26 @@ func (s *Signer) Sign(b *bundlev1.Bundle) (*bundlev1.SignedBundle, error) {
 	return &bundlev1.SignedBundle{Bundle: raw, Signature: ed25519.Sign(s.key, raw), KeyId: s.keyID}, nil
 }
 
-// LoadOrCreateSigner reads the cluster's signing key from its Secret, and
-// generates it on first use.
-func LoadOrCreateSigner(ctx context.Context, c client.Client, namespace string) (*Signer, error) {
-	key := types.NamespacedName{Namespace: namespace, Name: SigningKeySecret}
-	var s corev1.Secret
-	err := c.Get(ctx, key, &s)
-	if apierrors.IsNotFound(err) {
-		_, priv, gerr := ed25519.GenerateKey(rand.Reader)
-		if gerr != nil {
-			return nil, gerr
-		}
-		signer := NewSigner(priv)
-		s = corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: SigningKeySecret, Labels: managedLabels()},
-			Data: map[string][]byte{
-				privateKeyKey: priv.Seed(),
-				PublicKeyKey:  signer.Public(),
-				keyIDKey:      []byte(signer.KeyID()),
-			},
-		}
-		err = c.Create(ctx, &s)
-		if err == nil {
-			return signer, nil
-		}
-		if !apierrors.IsAlreadyExists(err) {
-			return nil, fmt.Errorf("create the signing key Secret: %w", err)
-		}
-		err = c.Get(ctx, key, &s)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read the signing key Secret: %w", err)
-	}
-	seed := s.Data[privateKeyKey]
-	if len(seed) != ed25519.SeedSize {
-		return nil, fmt.Errorf("signing key Secret %s: %s is not an ed25519 seed", key, privateKeyKey)
-	}
-	return NewSigner(ed25519.NewKeyFromSeed(seed)), nil
-}
-
-// Load reads the current bundle from its Secret; nil if there is none.
-func Load(ctx context.Context, c client.Reader, namespace string) (*bundlev1.Bundle, error) {
+// Load reads the current bundle from its Secret, and the ID of the key it
+// is signed with; nil if there is none.
+func Load(ctx context.Context, c client.Reader, namespace string) (*bundlev1.Bundle, string, error) {
 	var s corev1.Secret
 	err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: BundleSecret}, &s)
 	if apierrors.IsNotFound(err) {
-		return nil, nil
+		return nil, "", nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	signed, err := Decode(s.Data[BundleKey])
 	if err != nil {
-		return nil, fmt.Errorf("bundle Secret: %w", err)
+		return nil, "", fmt.Errorf("bundle Secret: %w", err)
 	}
 	var b bundlev1.Bundle
 	if err := proto.Unmarshal(signed.GetBundle(), &b); err != nil {
-		return nil, fmt.Errorf("bundle Secret: %w", err)
+		return nil, "", fmt.Errorf("bundle Secret: %w", err)
 	}
-	return &b, nil
+	return &b, signed.GetKeyId(), nil
 }
 
 // Decode reads the content of the bundle Secret's BundleKey.
@@ -206,28 +174,39 @@ func Decode(data []byte) (*bundlev1.SignedBundle, error) {
 	return &signed, nil
 }
 
-// Store writes a signed bundle to the bundle Secret.
-func Store(ctx context.Context, c client.Client, namespace string, b *bundlev1.Bundle, signed *bundlev1.SignedBundle, pub ed25519.PublicKey) error {
+// Encode returns the content of the bundle Secret's BundleKey for signed:
+// the reverse of Decode.
+func Encode(signed *bundlev1.SignedBundle) ([]byte, error) {
 	raw, err := proto.Marshal(signed)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
 	if _, err := zw.Write(raw); err != nil {
-		return err
+		return nil, err
 	}
 	if err := zw.Close(); err != nil {
-		return err
+		return nil, err
 	}
 	if buf.Len() > MaxCompressedBytes {
-		return fmt.Errorf("%w: %d bytes compressed, at most %d", ErrTooLarge, buf.Len(), MaxCompressedBytes)
+		return nil, fmt.Errorf("%w: %d bytes compressed, at most %d", ErrTooLarge, buf.Len(), MaxCompressedBytes)
+	}
+	return buf.Bytes(), nil
+}
+
+// Store writes a signed bundle to the bundle Secret.
+func Store(ctx context.Context, c client.Client, namespace string, b *bundlev1.Bundle, signed *bundlev1.SignedBundle, pub ed25519.PublicKey) error {
+	encoded, err := Encode(signed)
+	if err != nil {
+		return err
 	}
 	s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: BundleSecret}}
-	data := map[string][]byte{BundleKey: buf.Bytes(), PublicKeyKey: pub}
+	data := map[string][]byte{BundleKey: encoded, PublicKeyKey: pub}
 	annotations := map[string]string{
 		VersionAnnotation: strconv.FormatUint(b.GetVersion(), 10),
 		HashAnnotation:    hex.EncodeToString(b.GetContentHash()),
+		KeyIDAnnotation:   signed.GetKeyId(),
 	}
 	err = c.Get(ctx, client.ObjectKeyFromObject(s), s)
 	switch {

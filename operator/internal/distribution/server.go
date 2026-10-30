@@ -6,6 +6,7 @@ package distribution
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 
 	agentv1 "github.com/inkwall-dev/inkwall/api/agent/v1"
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 )
 
 // Defaults of the Server.
@@ -43,6 +45,10 @@ type Server struct {
 
 	HelloTimeout time.Duration
 	IdleTimeout  time.Duration
+
+	// Events receives the engines' security events, stamped with the
+	// stream's engine and pod. Nil: they are counted and discarded.
+	Events func(*eventsv1.EventBatch)
 
 	sends chan struct{}
 }
@@ -133,6 +139,7 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 		NodeName:       hello.GetNodeName(),
 		EngineVersion:  hello.GetEngineVersion(),
 		Applied:        hello.GetBundleVersion(),
+		TrustedKeys:    hello.GetTrustedKeyIds(),
 		Replica:        s.Replica,
 		ConnectedAt:    time.Now().UTC(),
 	}
@@ -170,6 +177,10 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 				<-idle.C
 			}
 			idle.Reset(s.IdleTimeout)
+			if batch := r.msg.GetEvents(); batch != nil {
+				s.events(e, batch)
+				continue
+			}
 			s.record(engineID, r.msg, log)
 		case <-idle.C:
 			return status.Error(codes.DeadlineExceeded, "no message from the engine in "+s.IdleTimeout.String())
@@ -189,6 +200,19 @@ func (s *Server) send(ctx context.Context, stream agentv1.BundleService_WatchSer
 	return stream.Send(&agentv1.WatchResponse{Msg: &agentv1.WatchResponse_Bundle{Bundle: signed}})
 }
 
+// events takes a batch from engine e. The engine and pod come from the
+// stream, which the operator authenticated, not from the events.
+func (s *Server) events(e Engine, batch *eventsv1.EventBatch) {
+	eventsReceived.Add(float64(len(batch.GetEvents())))
+	eventsDroppedByEngines.Add(float64(batch.GetDropped()))
+	for _, ev := range batch.GetEvents() {
+		ev.EngineId, ev.PodNamespace, ev.PodName = e.ID, e.PodNamespace, e.PodName
+	}
+	if s.Events != nil {
+		s.Events(batch)
+	}
+}
+
 func (s *Server) record(engineID string, msg *agentv1.WatchRequest, log logr.Logger) {
 	switch m := msg.GetMsg().(type) {
 	case *agentv1.WatchRequest_Ack:
@@ -204,8 +228,14 @@ func (s *Server) record(engineID string, msg *agentv1.WatchRequest, log logr.Log
 		log.Info("bundle rejected", "version", v, "error", reason)
 	case *agentv1.WatchRequest_Heartbeat:
 		// Mostly unchanged: it keeps the stream alive.
-		v := m.Heartbeat.GetBundleVersion()
-		s.Engines.Update(engineID, func(e *Engine) bool { return set(&e.Applied, v) })
+		v, keys := m.Heartbeat.GetBundleVersion(), m.Heartbeat.GetTrustedKeyIds()
+		s.Engines.Update(engineID, func(e *Engine) bool {
+			changed := set(&e.Applied, v)
+			if !slices.Equal(e.TrustedKeys, keys) {
+				e.TrustedKeys, changed = keys, true
+			}
+			return changed
+		})
 	}
 }
 

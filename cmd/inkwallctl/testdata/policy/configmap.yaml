@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-rules
+  namespace: shop
+  labels:
+    waf.inkwall.dev/rules: "true"
+data:
+  rules.conf: |
+    SecRule ARGS:debug "@streq true" "id:100100,phase:1,deny,status:403,msg:'debug switch'"

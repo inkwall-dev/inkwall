@@ -84,9 +84,10 @@ func (w *warnings) take() []string {
 }
 
 // startOperator runs the manager the way it runs in a cluster, in
-// namespace default, until the test ends. It waits until the replica is
-// ready and leads, and returns a client that records API warnings.
-func startOperator(t *testing.T) (context.Context, client.Client, *warnings) {
+// namespace default, until the test ends or stop is called. It waits until
+// the replica is ready and leads, and returns a client that records API
+// warnings.
+func startOperator(t *testing.T) (_ context.Context, _ client.Client, _ *warnings, stop func()) {
 	t.Helper()
 	testenv.Skip(t, env)
 	probe := freeAddr(t)
@@ -112,6 +113,8 @@ func startOperator(t *testing.T) (context.Context, client.Client, *warnings) {
 		EnginePullPolicy:     corev1.PullNever,
 		Replica:              "operator-0",
 		EngineReportInterval: 200 * time.Millisecond,
+		SigningKeyGrace:      time.Second,
+		CRDInterval:          200 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -119,17 +122,21 @@ func startOperator(t *testing.T) (context.Context, client.Client, *warnings) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- mgr.Start(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Errorf("manager stopped with %v", err)
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("manager stopped with %v", err)
+				}
+			case <-time.After(20 * time.Second):
+				t.Error("manager did not stop after 20s")
 			}
-		case <-time.After(20 * time.Second):
-			t.Error("manager did not stop after 20s")
-		}
-	})
+		})
+	}
+	t.Cleanup(stop)
 
 	deadline := time.Now().Add(30 * time.Second)
 	for {
@@ -161,20 +168,25 @@ func startOperator(t *testing.T) (context.Context, client.Client, *warnings) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return ctx, c, warn
+	return ctx, c, warn, stop
 }
 
 // TestOperator runs one operator for all the checks: controller-runtime
 // allows one manager per process.
 func TestOperator(t *testing.T) {
-	ctx, c, warn := startOperator(t)
+	ctx, c, warn, stop := startOperator(t)
 	t.Run("webhook", func(t *testing.T) { testWebhook(ctx, t, c, warn) })
 	t.Run("bundles", func(t *testing.T) { testBundles(ctx, t, c) })
 	t.Run("distribution", func(t *testing.T) { testDistribution(ctx, t, c) })
 	t.Run("engine", func(t *testing.T) { testEngine(ctx, t, c) })
+	t.Run("key rotation", func(t *testing.T) { testKeyRotation(ctx, t, c) })
 	t.Run("injection", func(t *testing.T) { testInjection(ctx, t, c) })
 	t.Run("wiring", func(t *testing.T) { testWiring(ctx, t, c) })
+	t.Run("ingressroutes", func(t *testing.T) { testIngressRoutes(ctx, t, c) })
 	t.Run("failure policy", func(t *testing.T) { testFailurePolicy(ctx, t, c) })
+	t.Run("source guard", func(t *testing.T) { testSourceGuard(ctx, t, c) })
+	// Last: it stops the operator.
+	t.Run("uninstall", func(t *testing.T) { testUninstall(ctx, t, c, stop) })
 }
 
 // testWebhook checks the webhook as deployed: the operator creates the

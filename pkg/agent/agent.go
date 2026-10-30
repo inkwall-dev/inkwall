@@ -21,7 +21,9 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -32,6 +34,8 @@ import (
 
 	agentv1 "github.com/inkwall-dev/inkwall/api/agent/v1"
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
+	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
 )
@@ -41,6 +45,14 @@ const (
 	DefaultHeartbeat  = 5 * time.Second
 	DefaultMinBackoff = time.Second
 	DefaultMaxBackoff = 30 * time.Second
+	// DefaultKeyReload is how often the public key file is checked for
+	// changes: the kubelet updates a mounted ConfigMap within a minute or
+	// two, and the operator waits for every engine to report a new key
+	// before it signs with it.
+	DefaultKeyReload = 10 * time.Second
+	// eventBatch keeps a batch of events well under gRPC's default 4 MiB
+	// message limit at the contract's field limits.
+	eventBatch = 256
 )
 
 // Config configures an Agent.
@@ -54,8 +66,11 @@ type Config struct {
 	// TokenFile holds the projected ServiceAccount token, re-read on every
 	// connection since the kubelet rotates it.
 	TokenFile string
-	// PublicKeyFile holds the cluster's ed25519 public key (the raw 32 bytes,
-	// as in the bundle Secret's ed25519.pub).
+	// PublicKeyFile holds the ed25519 public keys bundles may be signed
+	// with: one or more raw 32-byte keys, concatenated (the trust
+	// ConfigMap's trusted-keys.pub; a single key, as ed25519.pub, works
+	// too). It is re-read every KeyReload, so the keys rotate without a
+	// restart.
 	PublicKeyFile string
 	// CacheFile, if set, keeps the last applied bundle, so a restarted
 	// engine enforces it before the operator is reachable.
@@ -77,18 +92,79 @@ type Config struct {
 	Holder  *policy.Holder
 	// Admission is reported in heartbeats.
 	Admission *pipeline.Admission
+	// Events holds the security events to send to the operator (nil:
+	// none).
+	Events *events.Buffer
 
 	Logger     *slog.Logger
 	Heartbeat  time.Duration
 	MinBackoff time.Duration
 	MaxBackoff time.Duration
+	KeyReload  time.Duration
+}
+
+// errUnknownKey rejects a bundle signed with a key the engine doesn't
+// trust (yet): during a key rotation, the key file may lag.
+var errUnknownKey = errors.New("signed with a key this engine doesn't trust")
+
+// keySet is the trusted public keys, by key ID.
+type keySet struct {
+	byID map[string]ed25519.PublicKey
+	// ids, sorted, as reported to the operator.
+	ids []string
+}
+
+func parseKeys(data []byte) (*keySet, error) {
+	keys, err := bundlekey.Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	ks := &keySet{byID: map[string]ed25519.PublicKey{}}
+	for _, k := range keys {
+		id := bundlekey.ID(k)
+		if _, dup := ks.byID[id]; !dup {
+			ks.byID[id] = k
+			ks.ids = append(ks.ids, id)
+		}
+	}
+	slices.Sort(ks.ids)
+	return ks, nil
+}
+
+// verify checks a bundle's signature with the key its key_id names. A
+// bundle without a key ID (none is sent today) is checked against every
+// trusted key: any of them is as good.
+func (ks *keySet) verify(signed *bundlev1.SignedBundle) error {
+	if id := signed.GetKeyId(); id != "" {
+		key, ok := ks.byID[id]
+		if !ok {
+			return fmt.Errorf("%w: key %q, trusted %q", errUnknownKey, id, ks.ids)
+		}
+		if !ed25519.Verify(key, signed.GetBundle(), signed.GetSignature()) {
+			return fmt.Errorf("bad signature (key %q)", id)
+		}
+		return nil
+	}
+	for _, key := range ks.byID {
+		if ed25519.Verify(key, signed.GetBundle(), signed.GetSignature()) {
+			return nil
+		}
+	}
+	return errors.New("bad signature (no key ID)")
 }
 
 // Agent keeps the engine's policy in sync with the operator.
 type Agent struct {
 	cfg Config
-	key ed25519.PublicKey
 	log *slog.Logger
+
+	keys atomic.Pointer[keySet]
+	// keyFile is the key file's content last read, by the reload loop.
+	keyFile []byte
+	// unknownKey is set when a bundle was rejected for its key: a reload
+	// that changes the keys then reconnects, to be sent it again.
+	unknownKey atomic.Bool
+	reconnect  chan struct{}
 
 	mu sync.Mutex
 	// current is the applied bundle, nil before the first.
@@ -101,7 +177,7 @@ type Agent struct {
 	applies   *prometheus.CounterVec
 }
 
-// New checks cfg and reads the public key.
+// New checks cfg and reads the public keys.
 func New(cfg Config) (*Agent, error) {
 	if cfg.Addr == "" || cfg.CAFile == "" || cfg.TokenFile == "" || cfg.PublicKeyFile == "" {
 		return nil, errors.New("the operator address, CA, token and public key files are all required")
@@ -109,12 +185,13 @@ func New(cfg Config) (*Agent, error) {
 	if cfg.Compile == nil || cfg.Holder == nil || cfg.EngineID == "" {
 		return nil, errors.New("the Compile function, Holder and engine ID are required")
 	}
-	key, err := os.ReadFile(filepath.Clean(cfg.PublicKeyFile))
+	keyFile, err := os.ReadFile(filepath.Clean(cfg.PublicKeyFile))
 	if err != nil {
-		return nil, fmt.Errorf("bundle public key: %w", err)
+		return nil, fmt.Errorf("bundle public keys: %w", err)
 	}
-	if len(key) != ed25519.PublicKeySize {
-		return nil, fmt.Errorf("bundle public key %s: %d bytes, want a raw %d-byte ed25519 key", cfg.PublicKeyFile, len(key), ed25519.PublicKeySize)
+	keys, err := parseKeys(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("bundle public keys %s: %w", cfg.PublicKeyFile, err)
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -128,11 +205,15 @@ func New(cfg Config) (*Agent, error) {
 	if cfg.MaxBackoff == 0 {
 		cfg.MaxBackoff = DefaultMaxBackoff
 	}
-	return &Agent{
-		cfg:     cfg,
-		key:     key,
-		log:     cfg.Logger.With(slog.String("component", "agent")),
-		applied: make(chan struct{}),
+	if cfg.KeyReload == 0 {
+		cfg.KeyReload = DefaultKeyReload
+	}
+	a := &Agent{
+		cfg:       cfg,
+		log:       cfg.Logger.With(slog.String("component", "agent")),
+		keyFile:   keyFile,
+		reconnect: make(chan struct{}, 1),
+		applied:   make(chan struct{}),
 		connected: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "inkwall_operator_connected",
 			Help: "1 while the engine has a stream open to the operator.",
@@ -145,8 +226,13 @@ func New(cfg Config) (*Agent, error) {
 			Name: "inkwall_bundle_updates_total",
 			Help: "Bundles received, by result: applied, or rejected (bad signature, older, doesn't compile).",
 		}, []string{"result"}),
-	}, nil
+	}
+	a.keys.Store(keys)
+	return a, nil
 }
+
+// TrustedKeys returns the IDs of the public keys bundles are verified with.
+func (a *Agent) TrustedKeys() []string { return slices.Clone(a.keys.Load().ids) }
 
 // Collectors returns the agent's metrics, to register with the engine's.
 func (a *Agent) Collectors() []prometheus.Collector {
@@ -167,6 +253,7 @@ func (a *Agent) Applied() <-chan struct{} { return a.applied }
 // Run loads the cached bundle, or else the bundle Secret's, then keeps a
 // stream to the operator open until ctx ends, reconnecting with backoff.
 func (a *Agent) Run(ctx context.Context) error {
+	go a.watchKeys(ctx)
 	a.loadCache()
 	a.loadSecret(ctx)
 	backoff := a.cfg.MinBackoff
@@ -244,6 +331,11 @@ func (a *Agent) stream(ctx context.Context) error {
 		defer sendMu.Unlock()
 		return stream.Send(m)
 	}
+	// This stream's Hello gets the current bundle anyway.
+	select {
+	case <-a.reconnect:
+	default:
+	}
 	if err := sendFirst(stream, &agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{
 		EngineId:      a.cfg.EngineID,
 		PodNamespace:  a.cfg.PodNamespace,
@@ -251,8 +343,36 @@ func (a *Agent) stream(ctx context.Context) error {
 		NodeName:      a.cfg.NodeName,
 		BundleVersion: a.Version(),
 		EngineVersion: a.cfg.EngineVersion,
+		TrustedKeyIds: a.TrustedKeys(),
 	}}}); err != nil {
 		return err
+	}
+	// A bundle was rejected for its key, and the keys changed since: a new
+	// stream gets it again (the operator sends a version only once).
+	go func() {
+		select {
+		case <-a.reconnect:
+			a.log.Info("bundle keys changed after a bundle was rejected for its key; reconnecting")
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	if buf := a.cfg.Events; buf != nil {
+		go func() {
+			for {
+				batch := buf.Next(ctx, eventBatch)
+				if batch == nil {
+					return
+				}
+				if send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Events{Events: batch}}) != nil {
+					// Kept for the next stream.
+					buf.Return(batch)
+					cancel()
+					return
+				}
+			}
+		}()
 	}
 
 	go func() {
@@ -261,7 +381,7 @@ func (a *Agent) stream(ctx context.Context) error {
 		for {
 			select {
 			case <-t.C:
-				hb := &agentv1.Heartbeat{BundleVersion: a.Version()}
+				hb := &agentv1.Heartbeat{BundleVersion: a.Version(), TrustedKeyIds: a.TrustedKeys()}
 				if adm := a.cfg.Admission; adm != nil {
 					hb.InFlight, hb.Capacity = uint32(adm.InFlight()), uint32(adm.Capacity()) // #nosec G115 -- small counts
 				}
@@ -317,9 +437,17 @@ func sendFirst(stream agentv1.BundleService_WatchClient, m *agentv1.WatchRequest
 func (a *Agent) apply(signed *bundlev1.SignedBundle, cache bool) (uint64, error) {
 	// Verify before decoding: nothing in an unverified bundle, its version
 	// included, can be trusted.
-	if !ed25519.Verify(a.key, signed.GetBundle(), signed.GetSignature()) {
+	keys := a.keys.Load()
+	if err := keys.verify(signed); err != nil {
 		a.applies.WithLabelValues("rejected").Inc()
-		return 0, fmt.Errorf("bad signature (key %q)", signed.GetKeyId())
+		if errors.Is(err, errUnknownKey) {
+			a.unknownKey.Store(true)
+			if a.keys.Load() != keys {
+				// Reloaded meanwhile: the reload may have missed the flag.
+				a.requestReconnect()
+			}
+		}
+		return 0, err
 	}
 	var b bundlev1.Bundle
 	if err := proto.Unmarshal(signed.GetBundle(), &b); err != nil {
@@ -332,10 +460,13 @@ func (a *Agent) apply(signed *bundlev1.SignedBundle, cache bool) (uint64, error)
 	cur := a.current
 	switch {
 	case cur != nil && bytes.Equal(cur.GetContentHash(), b.GetContentHash()) && len(b.GetContentHash()) > 0:
-		// Already enforced (e.g. resent after a reconnect): nothing to
-		// compile, but report its version from now on.
+		// Already enforced (e.g. resent after a reconnect, or signed again
+		// with a new key): nothing to compile, but report its version from
+		// now on, and cache it, so a restart doesn't need the old key.
 		a.current = &b
 		a.version.Set(float64(b.GetVersion()))
+		a.unknownKey.Store(false)
+		a.cacheBundle(cache, signed)
 		return b.GetVersion(), nil
 	case cur != nil && b.GetVersion() < cur.GetVersion() && !b.GetCreatedAt().AsTime().After(cur.GetCreatedAt().AsTime()):
 		// Never go back, unless the bundle is newer than ours: the operator
@@ -355,16 +486,69 @@ func (a *Agent) apply(signed *bundlev1.SignedBundle, cache bool) (uint64, error)
 	}
 	a.current = &b
 	a.version.Set(float64(b.GetVersion()))
+	a.unknownKey.Store(false)
 	a.applies.WithLabelValues("applied").Inc()
 	a.log.Info("bundle applied", slog.Uint64("version", b.GetVersion()), slog.Int("policies", set.Policies()), slog.Bool("suspended", b.GetSuspended()))
-	if cache && a.cfg.CacheFile != "" {
-		if err := writeCache(a.cfg.CacheFile, signed); err != nil {
-			// The bundle is applied; only a restart without the operator
-			// would miss it.
-			a.log.Warn("can't cache the bundle", slog.Any("error", err))
+	a.cacheBundle(cache, signed)
+	return b.GetVersion(), nil
+}
+
+func (a *Agent) cacheBundle(cache bool, signed *bundlev1.SignedBundle) {
+	if !cache || a.cfg.CacheFile == "" {
+		return
+	}
+	if err := writeCache(a.cfg.CacheFile, signed); err != nil {
+		// The bundle is applied; only a restart without the operator
+		// would miss it.
+		a.log.Warn("can't cache the bundle", slog.Any("error", err))
+	}
+}
+
+// watchKeys reloads the public keys when their file changes, until ctx
+// ends.
+func (a *Agent) watchKeys(ctx context.Context) {
+	t := time.NewTicker(a.cfg.KeyReload)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			a.reloadKeys()
+		case <-ctx.Done():
+			return
 		}
 	}
-	return b.GetVersion(), nil
+}
+
+// reloadKeys re-reads the key file. A file that can't be read or parsed
+// (the kubelet swaps it atomically, so it shouldn't be) keeps the keys in
+// use.
+func (a *Agent) reloadKeys() {
+	data, err := os.ReadFile(filepath.Clean(a.cfg.PublicKeyFile))
+	if err != nil {
+		a.log.Warn("can't read the bundle public keys; keeping the current ones", slog.Any("error", err))
+		return
+	}
+	if bytes.Equal(data, a.keyFile) {
+		return
+	}
+	a.keyFile = data
+	keys, err := parseKeys(data)
+	if err != nil {
+		a.log.Warn("bundle public keys not reloaded; keeping the current ones", slog.String("file", a.cfg.PublicKeyFile), slog.Any("error", err))
+		return
+	}
+	a.keys.Store(keys)
+	a.log.Info("bundle public keys reloaded", slog.Any("trusted", keys.ids))
+	if a.unknownKey.Swap(false) {
+		a.requestReconnect()
+	}
+}
+
+func (a *Agent) requestReconnect() {
+	select {
+	case a.reconnect <- struct{}{}:
+	default:
+	}
 }
 
 // loadCache applies the cached bundle, if there is a valid one.
