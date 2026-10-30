@@ -6,6 +6,11 @@ meta:
     - purpose: "Overrides for the CRS test suite running against Inkwall's standalone proxy (Coraza)"
     - origin: "Adapted from Coraza testing/coreruleset (Apache-2.0)"
 test_overrides:
+  - rule_id: 920100
+    test_ids: [16]
+    reason: "Absolute-form request target (GET http://localhost): the standalone proxy refuses it with 400 before inspection, so it never reaches the upstream"
+    output:
+      status: 400
   # - rule_id: 920100
   #   test_ids: [5]
   #   reason: "Invalid uri, Coraza not reached - 301 returned"
