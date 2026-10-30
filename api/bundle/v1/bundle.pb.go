@@ -869,12 +869,13 @@ func (*RuleSet_Seclang) isRuleSet_Source() {}
 
 // Exclusion turns rules off, everywhere or for a path, an argument or both.
 type Exclusion struct {
-	state   protoimpl.MessageState `protogen:"open.v1"`
-	RuleIds []uint32               `protobuf:"varint,1,rep,packed,name=rule_ids,json=ruleIds,proto3" json:"rule_ids,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The rules to turn off; an ID no rule has is ignored.
+	RuleIds []uint32 `protobuf:"varint,1,rep,packed,name=rule_ids,json=ruleIds,proto3" json:"rule_ids,omitempty"`
 	// Exact or prefix path in the router's syntax. Empty: every path.
 	Path string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
-	// A query or body argument the rules stop looking at. Empty: the rules
-	// are off entirely (on path, when set).
+	// A query or body argument the rules (and the rules chained to them) stop
+	// looking at. Empty: the rules are off entirely (on path, when set).
 	Argument      string `protobuf:"bytes,3,opt,name=argument,proto3" json:"argument,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
