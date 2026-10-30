@@ -171,6 +171,8 @@ type Agent struct {
 	current *bundlev1.Bundle
 	// applied is closed when the first bundle is applied.
 	applied chan struct{}
+	// cacheOnce loads the cache once: LoadCache, or else Run.
+	cacheOnce sync.Once
 
 	connected prometheus.Gauge
 	version   prometheus.Gauge
@@ -250,11 +252,21 @@ func (a *Agent) Version() uint64 {
 // Secret's or the operator's.
 func (a *Agent) Applied() <-chan struct{} { return a.applied }
 
-// Run loads the cached bundle, or else the bundle Secret's, then keeps a
-// stream to the operator open until ctx ends, reconnecting with backoff.
+// LoadCache applies the cached bundle, if there is a valid one, and
+// reports whether a bundle is applied. Only the first call (of LoadCache or
+// Run) reads the cache. The engine calls it before it serves, so a
+// restarted engine never answers before it enforces the cached bundle.
+func (a *Agent) LoadCache() bool {
+	a.cacheOnce.Do(a.loadCache)
+	return a.Version() != 0
+}
+
+// Run loads the cached bundle (unless LoadCache did), or else the bundle
+// Secret's, then keeps a stream to the operator open until ctx ends,
+// reconnecting with backoff.
 func (a *Agent) Run(ctx context.Context) error {
 	go a.watchKeys(ctx)
-	a.loadCache()
+	a.LoadCache()
 	a.loadSecret(ctx)
 	backoff := a.cfg.MinBackoff
 	for {

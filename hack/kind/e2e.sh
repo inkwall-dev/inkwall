@@ -429,6 +429,25 @@ eventually "the engine is back: it blocks the attack" tstatus_is 403 "$SQLI"
 check "the engine is back: benign traffic passes" tstatus_is 200 "/$down_id-back"
 check "the engine is back: requests reach the app" app_saw "$down_id-back"
 eventually "the engine is back: Traefik's pod is ready" traefik_ready
+# restart_never_allows: the engine stopped once more; attacks through
+# Traefik, back to back, until it blocks them again (a run of 403s). While
+# it restarts, each is refused (500) or blocked, never let through.
+restart_never_allows() {
+  local c down=false n=0 end=$((SECONDS + 90))
+  stop_traefik_engine >/dev/null 2>&1 || return 1
+  while ((SECONDS < end)); do
+    c=$(tcode "$SQLI")
+    [[ $c == 200 ]] && return 1
+    if [[ $c == 403 ]]; then
+      $down && ((++n >= 100)) && return 0
+    else
+      down=true n=0
+    fi
+  done
+  return 1
+}
+check "the engine restarts: no attack passes before it blocks again" restart_never_allows
+eventually "the engine restarted: Traefik's pod is ready" traefik_ready
 
 # The client IP behind a load balancer (#120): Traefik's web entry point
 # takes the PROXY protocol from the pod network only (traefik-e2e-values.yaml).

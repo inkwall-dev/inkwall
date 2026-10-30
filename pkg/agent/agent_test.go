@@ -392,11 +392,25 @@ func TestCache(t *testing.T) {
 		t.Fatal("the cached bundle is not enforced")
 	}
 
+	// LoadCache applies it synchronously, without Run (the engine calls it
+	// before it listens), and only once.
+	l, lholder, compiles := e.agent(t, func(c *Config) { c.Addr = "127.0.0.1:1" })
+	if !l.LoadCache() || l.Version() != 3 || !blocks(lholder) {
+		t.Fatalf("LoadCache: version %d, blocks %v", l.Version(), blocks(lholder))
+	}
+	select {
+	case <-l.Applied():
+	default:
+		t.Error("Applied not closed after LoadCache")
+	}
+	if !l.LoadCache() || compiles.n.Load() != 1 {
+		t.Errorf("the cache was compiled %d times, want once", compiles.n.Load())
+	}
+
 	// A corrupt cache is ignored.
 	writeFile(t, filepath.Join(e.dir, "bundle.pb"), []byte("garbage"))
 	c, _, _ := e.agent(t, func(c *Config) { c.Addr = "127.0.0.1:1" })
-	c.loadCache()
-	if c.Version() != 0 {
+	if c.LoadCache() || c.Version() != 0 {
 		t.Fatal("a corrupt cache was applied")
 	}
 }
