@@ -1,0 +1,7 @@
+# URLs the external link check (make docs-check-external) skips: one regular
+# expression per line, matched against the URL without its fragment. List
+# hosts that block bots or fail for reasons other than a broken link, with
+# the reason. Local, private and example hosts are skipped without a line here.
+
+# Release assets and package registries that need auth or answer bots with 403.
+^https://ghcr\.io/

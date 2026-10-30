@@ -37,6 +37,12 @@ COUNT           ?= 1
 # bench-compare: the revision to compare against.
 BASE            ?= origin/main
 
+# docs-check (hack/docscheck). Contents lists and the docs index are only
+# checked where they exist; #134, which adds them, makes the check strict
+# with DOCS_CHECK_STRICT = -contents-min-lines=80 -require-index.
+DOCS_CHECK_STRICT ?=
+DOCS_CHECK        ?= $(GO) run ./hack/docscheck $(DOCS_CHECK_STRICT)
+
 # scale-test: sizes as <policies>x<engines>, one operator each; "full" is 0004 §8's matrix.
 # SCALE_CHANGES single-policy edits are timed; SCALE_OUT, if set, collects the results as JSON lines.
 SCALE           ?= 100x50
@@ -88,6 +94,14 @@ lint: ## Run golangci-lint
 fmt: ## Format code
 	$(GOLANGCI_LINT) fmt ./...
 
+.PHONY: docs-check
+docs-check: ## Check the Markdown docs: internal links and anchors, Contents lists, the docs index
+	$(DOCS_CHECK)
+
+.PHONY: docs-check-external
+docs-check-external: ## Check the Markdown docs' external links as well (slow; CI runs it nightly)
+	$(DOCS_CHECK) -external
+
 .PHONY: vuln
 vuln: ## Check dependencies for known vulnerabilities
 	$(GOVULNCHECK) ./...
@@ -121,7 +135,7 @@ tidy: ## Tidy go.mod and go.sum, here and in test/crs (which builds against this
 	cd test/crs && $(GO) mod tidy
 
 .PHONY: check
-check: lint test vuln ## Run everything CI runs
+check: lint test vuln docs-check ## Run everything CI runs
 
 .PHONY: image
 image: ## Build the engine and operator container images (IMAGE=name:tag, OPERATOR_IMAGE=name:tag)

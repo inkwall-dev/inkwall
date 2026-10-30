@@ -1,0 +1,25 @@
+name: docs-links
+
+# The external links in the Markdown docs (make docs-check-external), checked
+# nightly and on demand rather than on every PR: other sites are slow, flaky
+# and rate limit, which must not fail an unrelated change. Hosts that fail
+# for reasons other than a broken link go in hack/docscheck/external-ignore.txt.
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  external-links:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+      - run: make docs-check-external
