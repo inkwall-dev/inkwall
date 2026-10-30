@@ -60,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           version: v3.19.0
       - run: make helm-lint
@@ -78,7 +78,7 @@ jobs:
         with:
           go-version: '1.27.x'
           check-latest: true
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           version: v3.19.0
       - run: go install sigs.k8s.io/kind@v0.33.0
