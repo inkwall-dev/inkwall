@@ -2,10 +2,30 @@
 
 - Status: Draft
 - Date: 2026-09-27
+- Updated: 2026-10-30
 - Owner: noureldin
-- Depends on: [0002](0002-system-architecture.md), [0004](0004-operator.md)
+- Depends on: [0002 — System Architecture](0002-system-architecture.md),
+  [0004 — Kubernetes Operator](0004-operator.md)
 
-Every Inkwall component, where it runs, and why the engine is built on Coraza.
+This document lists every Inkwall component, where it runs, where its code lives, and whether it
+is built. It then traces two key flows: a request in block mode and a policy change. Last, it
+explains why the engine evaluates rules with Coraza today.
+
+Terms used here:
+
+- **Engine:** `inkwall-engine`, the process that inspects requests and returns verdicts.
+- **Proxy:** the ingress controller's data-plane process (Traefik, Envoy, ...), which asks the
+  engine about each request.
+- **Adapter:** an engine listener that speaks one proxy's protocol, plus the proxy-side
+  configuration or plugin that calls it ([0006](0006-adapter-protocols.md)).
+- **Operator:** `inkwall-operator`, which injects the engine into proxy pods, wires the proxy to
+  it and distributes policy.
+- **Wiring:** configuring the proxy to call the engine on protected routes.
+- **Bundle:** the policy bundle, an immutable, versioned, signed snapshot of all of a cluster's
+  policies, built by the operator and enforced by every engine.
+- **Control plane:** the optional hosted service that manages clusters. It is a separate product,
+  not in this repository.
+- **Coraza:** the Go WAF library that evaluates rules today. **CRS:** the OWASP Core Rule Set (CRS).
 
 ## Contents
 
@@ -27,132 +47,167 @@ Every Inkwall component, where it runs, and why the engine is built on Coraza.
 
 ![Inkwall architecture: the proxy asks the inkwall-engine sidecar for a verdict before forwarding; the operator watches WAFPolicy and route objects and pushes signed policy bundles to every engine](../diagrams/system-overview.svg)
 
-- Request path: client → proxy → engine sidecar (verdict over UDS or localhost) → app.
-- Control path: Git / `kubectl` → kube-apiserver → operator (webhooks, bundle Secret) → signed
-  bundle stream to engines → status back on the CRDs.
-- Planned: Caddy with an in-process engine. Optional: a SaaS control plane, connected over one
-  primary mTLS stream per cluster (plus an events stream per operator replica); the operator's side
-  is built (0004 §4.9).
+- **Request path:** the client sends a request to the proxy. The proxy asks the engine sidecar for
+  a verdict, over a Unix socket or localhost, then forwards the request to the app.
+- **Control path:** policies come from Git or `kubectl` and reach the kube-apiserver. The operator
+  validates them in its webhooks, stores a signed bundle in a Secret and streams it to the engines.
+  Status goes back onto the custom resources.
+- **Planned:** Caddy, with the engine compiled in.
+- **Optional:** a control plane, connected over one primary mTLS stream per cluster, plus an
+  events stream per operator replica. The operator's side is built
+  ([0004 §4.9](0004-operator.md#49-upstream-sync-leader-only)).
 
 ## 2. Where each component runs and when it is built
 
-All Apache-2.0. Everything in the cluster works without the SaaS, which only adds management,
-analytics and threat intel.
+All components are licensed Apache-2.0. Everything in the cluster works without the control plane,
+which only adds management, analytics and threat intelligence.
 
 | Component | Runs in | Code | Status |
 |---|---|---|---|
 | **inkwall-engine** | Sidecar in ingress controller pods, or standalone | `cmd/engine`, `pkg/` | Built |
 | **Engine adapters** | Engine process | `pkg/adapters/*` | Built: `forwardauth`, `httpcheck` (`/v1/check`), `proxy`. Not yet: ext_authz, ext_proc, SPOE |
-| **Proxy-side glue** | Proxy config | `operator/integrations`, `operator/internal/wiring` | Built: Traefik Middleware. Not yet: nginx Lua, SPOE, Envoy config |
-| **Caddy module** | Compiled into Caddy | `adapters/caddy` (own go.mod) | Not yet |
-| **Traefik plugin** (thin client) | Traefik (Yaegi) | `adapters/traefik-plugin` (own go.mod) | Not yet |
+| **Proxy-side glue** | Proxy configuration | `operator/integrations`, `operator/internal/wiring` | Built: Traefik Middleware. Not yet: nginx Lua, SPOE, Envoy configuration |
+| **Caddy module** | Compiled into Caddy | `adapters/caddy` (own `go.mod`) | Not yet |
+| **Traefik plugin** (thin client) | Traefik (Yaegi) | `adapters/traefik-plugin` (own `go.mod`) | Not yet |
 | **inkwall-operator** | `inkwall-system`, 2 replicas | `cmd/operator`, `operator/` | Built |
 | **Admission webhooks** | Operator process | `operator/webhook` | Built (validate, inject) |
 | **CRDs** | kube-apiserver | `operator/api/v1alpha1`, `operator/config/crd` | Built: WAFPolicy, WAFRuleSet, ClusterWAFRuleSet, InkwallConfig |
 | **Helm chart** | User install | `deploy/helm/inkwall` | Built |
-| **OLM bundle** | OperatorHub | operator-sdk | Not yet (Stage 6) |
+| **OLM bundle** (Operator Lifecycle Manager package) | OperatorHub | operator-sdk | Not yet |
 | **inkwallctl** | Developer machine, CI | `cmd/inkwallctl` | Built: `test` (flags, `--policy`, `--bundle`), `bench`. Not yet: `migrate` |
 | **Protobuf APIs** (engine, agent, bundle, events, controlplane) | Engine, operator, control plane | `api/` | Built |
-| **Control plane** (SaaS) | Inkwall-hosted | separate product | Not in this repository; the operator's side is built (`operator/internal/controlplane`) |
+| **Control plane** | Hosted by Inkwall | Separate product | Not in this repository; the operator's side is built (`operator/internal/controlplane`) |
 
 ## 3. Engine internals
 
 ![inkwall-engine internals as built today: the reverse-proxy, forward-auth and check-API adapters turn their input into a request.Request and call pipeline.Check, which consults the route table, runs the Coraza evaluator with the OWASP CRS and reports every verdict to telemetry](../diagrams/engine-internals.svg)
 
-**Built (v0.1.0):** as in the diagram; each component links to its source. Also `pkg/policy` (one
-pipeline per bundle policy, swapped atomically), `pkg/agent` (operator stream, bundle verify,
-disk cache) and `pkg/clientip`. **Built since:** `pkg/events` (redacted security events in a
-bounded ring buffer, sent to the operator in batches on the agent stream), `pkg/bundlekey`
-(trusted signing keys) and `pkg/bundlesecret` (the bundle Secret's format, chunks included).
+**Built (v0.1.0):** everything in the diagram; each component in it links to its source. Also:
+
+- `pkg/policy`: one pipeline per policy in the bundle, swapped atomically;
+- `pkg/agent`: the stream from the operator, bundle verification and the disk cache;
+- `pkg/clientip`: the client IP.
+
+**Built since:**
+
+- `pkg/events`: redacted security events in a bounded ring buffer, sent to the operator in batches
+  on the agent stream;
+- `pkg/bundlekey`: the trusted signing keys;
+- `pkg/bundlesecret`: the bundle Secret's format, chunks included.
 
 **Not yet:**
 
-- Adapters `extauthz` (gRPC), `extproc` (gRPC stream), `spoe` (SPOP).
-- T1 tier: `pkg/iplist`, `pkg/ratelimit`, between the route table and rules.
+- The adapters `extauthz` (gRPC), `extproc` (gRPC stream) and `spoe` (SPOP).
+- Tier T1, IP lists and rate limits (`pkg/iplist`, `pkg/ratelimit`), between the route table and
+  the rules ([0001 §4](0001-performance-first-architecture.md#4-request-pipeline-tiered-cheapest-first)).
 - Traces in telemetry.
-- The native engine (0007) as a second `pkg/rules` evaluator.
+- Inkwall's own rule engine ([0007](0007-inkwall-engine.md)) as a second `pkg/rules` evaluator.
 
 ## 4. Operator internals
 
 | Part | Does | Code | Status |
 |---|---|---|---|
-| Discovery + integration registry | Find controller pods (design: also IngressClass, GatewayClass) | `operator/integrations` | Built: Traefik, by selectors. Not yet: envoygateway, istio, ingressnginx, haproxy, caddy |
-| Injection | Native sidecar via Pod webhook | `operator/internal/injection` | Built |
-| Wiring | Render proxy config, merge-patch user-owned routes | `operator/internal/wiring` | Built (Traefik) |
-| Resolver | Policy targets → host/path/method | `operator/resolver` | Built |
-| Bundle builder | Leader only: debounce changes (1 s), build, sign, version, write Secret | `operator/bundle`, `operator/internal/controller` | Built |
-| Distribution server | All replicas, gRPC; ACK/NACK/heartbeat | `operator/internal/distribution` | Built |
-| Status | `Enforced` condition (engines on current bundle) | `operator/internal/distribution` | Built |
-| Validating webhook | Compile rule sets as the engine does; check paths; in Managed mode, only the operator writes the control plane's objects | `operator/webhook` | Built |
-| Upstream sync | Leader only, mTLS to the control plane: enrollment, state sync, events (every replica), Managed mode | `operator/internal/controlplane` | Built (tested against a stub) |
+| Discovery and integration registry | Find the ingress controller's pods (by design, also from IngressClass and GatewayClass) | `operator/integrations` | Built: Traefik, by label selectors. Not yet: envoygateway, istio, ingressnginx, haproxy, caddy |
+| Injection | Add the engine as a native sidecar through the Pod webhook | `operator/internal/injection` | Built |
+| Wiring | Render proxy configuration; merge-patch user-owned routes | `operator/internal/wiring` | Built (Traefik) |
+| Resolver | Turn policy targets into host, path and method | `operator/resolver` | Built |
+| Bundle builder | Leader only: debounce changes (1 s), build, sign, version, write the Secret | `operator/bundle`, `operator/internal/controller` | Built |
+| Distribution server | Every replica, over gRPC; ACK, NACK, heartbeat | `operator/internal/distribution` | Built |
+| Status | The `Enforced` condition (engines on the current bundle) | `operator/internal/distribution` | Built |
+| Validating webhook | Compile rule sets as the engine does; check paths; in Managed mode, let only the operator write the control plane's objects | `operator/webhook` | Built |
+| Upstream sync | Leader only, mTLS to the control plane: enrollment, state sync, events (from every replica), Managed mode | `operator/internal/controlplane` | Built (tested against a stub) |
 | WAFIPList CRD | IP lists | — | Not yet |
+
+The leader is the operator replica that holds the leader-election lease. Managed mode is the
+cluster mode in which the control plane owns the policies and the operator writes them as custom
+resources ([0002 §4.1](0002-system-architecture.md#41-sources-of-truth)).
 
 ## 5. Key flows
 
 ### 5.1 Request in block mode
 
-1. Proxy terminates TLS, matches the route, asks the engine.
-2. Engine: T0 route → policy, T1 IP/rate (not yet), T2/T3 CRS rules.
-3. Below threshold: continue, proxy forwards. Score ≥ threshold: 403 and an event.
-4. Engine down or slow: proxy timeout → 503 in block mode, forward in detect mode.
+1. The proxy terminates TLS, matches the route and asks the engine.
+2. The engine runs its tiers: T0 maps the route to a policy; T1 checks IP lists and rate limits
+   (not built yet); T2 and T3 run the CRS rules on headers, URI and body.
+3. If the anomaly score stays below the threshold, the engine answers "continue" and the proxy
+   forwards the request. If the score reaches the threshold, the engine answers 403 and emits an
+   event.
+4. If the engine is slow or down:
+   - **Engine too slow** (built): the engine's own deadline passes, and it applies the failure
+     mode itself. It answers 503 in block mode and allows the request in detect mode.
+   - **Engine unreachable, by design** (Envoy and the other planned proxies): the proxy's timeout,
+     set just above the engine's deadline, expires, and the proxy applies the failure mode: 503 in
+     block mode, forward in detect mode.
+   - **Engine unreachable, with Traefik** (built): Traefik's ForwardAuth decides on its own. The
+     operator's Middleware has no failure-mode setting, so Inkwall's failure mode does not apply.
 
 ### 5.2 Policy change (GitOps mode)
 
+GitOps mode is the cluster mode in which policies are custom resources applied from Git, and
+mirrored to the control plane if one is connected.
 
-1. Git / Argo CD applies a WAFPolicy; the validating webhook compiles its rules.
-2. Leader resolves targets, debounces 1 s, writes a signed, versioned bundle Secret.
-3. Every replica pushes the bundle to its engines; engines compile in the background, swap
-   atomically and ACK.
-4. Leader sets `Enforced=True` with the engine count (e.g. 6/6).
+1. Git (through Argo CD, for example) applies a WAFPolicy. The validating webhook compiles its
+   rules.
+2. The leader resolves the policy's targets, waits 1 s for more changes, then writes a signed,
+   versioned bundle Secret.
+3. Every replica pushes the bundle to its engines. Each engine compiles it in the background, swaps
+   it in atomically and acknowledges it (ACK).
+4. The leader sets `Enforced=True` with the engine count (for example, 6/6).
 
 ## 6. Why Coraza
 
 ### 6.1 What a WAF rule engine must do
 
-A rule language (variables, operators, transformations, actions, chaining, phases); anti-evasion
-transformations; body processors for forms, multipart, JSON and XML; anomaly scoring, collections,
-audit logs; and a maintained rule set with regression tests. Writing it from scratch is large, and
-every parsing difference is a potential bypass.
+A WAF rule engine needs:
+
+- a rule language: variables, operators, transformations, actions, chaining, phases;
+- transformations that defeat evasion;
+- body processors for forms, multipart, JSON and XML;
+- anomaly scoring, collections and audit logs;
+- a maintained rule set with regression tests.
+
+Writing all of that from scratch is a large job, and every parsing difference is a potential
+bypass.
 
 ### 6.2 Why Coraza fits
 
 | Need | Coraza |
 |---|---|
-| Mature rules | Runs ModSecurity SecLang and **OWASP CRS** with its regression tests |
+| Mature rules | Runs ModSecurity's rule language (SecLang) and the **OWASP CRS**, with the CRS regression tests |
 | Go-native | Pure Go, no cgo: static binaries, easy cross-compiles, can run in-process |
-| Compatibility | Existing ModSecurity rules and CRS exclusions work: a migration path from ingress-nginx + ModSecurity |
-| License | Apache-2.0, as are Inkwall and CRS |
-| Community | OWASP project; proven in `coraza-caddy`, `coraza-spoa`, `coraza-proxy-wasm` |
-| Extension points | Plugin API for operators and transformations (multiphase and `coraza-wasilibs` rejected, 0001 §3.1) |
-| Reuse | Same library in the engine, the validating webhook and `inkwallctl test`, so all three agree |
+| Compatibility | Existing ModSecurity rules and CRS exclusions work, so there is a migration path from ingress-nginx with ModSecurity |
+| License | Apache-2.0, like Inkwall and CRS |
+| Community | An OWASP project; proven in `coraza-caddy`, `coraza-spoa` and `coraza-proxy-wasm` |
+| Extension points | A plugin API for operators and transformations (multiphase evaluation and `coraza-wasilibs` were rejected: [0001 §3.1](0001-performance-first-architecture.md#31-measured-baseline-2026-10-03)) |
+| Reuse | The same library runs in the engine, the validating webhook and `inkwallctl test`, so all three agree |
 
 ### 6.3 Alternatives considered
 
 | Alternative | Why not (for now) |
 |---|---|
-| **Write our own engine** | Large effort, high bypass risk as a start. Later chosen for performance, running CRS, with Coraza as oracle and fallback ([0007](0007-inkwall-engine.md)) |
-| **libmodsecurity v3 via cgo** | cgo overhead per request, harder builds, C memory bugs in-process; Trustwave handed it to OWASP in 2024 |
-| **libinjection only** | SQLi/XSS only; no rule language or CRS |
-| **ML detection** | No training data or feedback loop yet; verdicts hard to explain. Possible later `Evaluator` |
-| **Proprietary rule DSL** | Lock-in, no rules to start from |
+| **Write our own engine** | A large effort, and a high bypass risk as a starting point. Later chosen for performance: it runs the CRS, with Coraza as the reference (oracle) and fallback ([0007](0007-inkwall-engine.md)) |
+| **libmodsecurity v3 through cgo** | cgo overhead on every request, harder builds, and C memory bugs inside our process. Trustwave handed it to OWASP in 2024 |
+| **libinjection only** | Detects only SQL injection and XSS; no rule language, no CRS |
+| **Machine-learning detection** | No training data or feedback loop yet, and its verdicts are hard to explain. Possible later as another `Evaluator` |
+| **Our own rule language** | Lock-in, and no existing rules to start from |
 
 ### 6.4 Risks and mitigations
 
 | Risk | Mitigation |
 |---|---|
-| CRS is regex-heavy and slow | Tiered pipeline, argument and body limits, admission control, fail-closed block, CI benchmarks (0001); own engine long term (0007) |
-| Community dependency | Behind `pkg/rules.Evaluator`; pinned; go-ftw tests on upgrade; fixes upstream; fork last |
-| Upgrade changes detection | Coraza and CRS pinned per release (0002 §8.6), exposed as a named builtin rule set |
-| GC pauses | Transaction pooling, `GOMEMLIMIT`, allocs/op gated in CI |
+| CRS is regex-heavy and slow | Tiered pipeline, argument and body limits, admission control, fail-closed block mode, CI benchmarks ([0001](0001-performance-first-architecture.md)); Inkwall's own engine in the long term ([0007](0007-inkwall-engine.md)) |
+| Dependence on the community | Coraza sits behind `pkg/rules.Evaluator` and is pinned; go-ftw tests run on every upgrade; fixes go upstream; forking is the last resort |
+| An upgrade changes detection | Coraza and CRS are pinned per release ([0002 §8.6](0002-system-architecture.md#86-versioning-and-compatibility)) and exposed as a named built-in rule set |
+| Garbage-collection pauses | Transaction pooling, `GOMEMLIMIT`, allocs/op gated in CI |
 
 ### 6.5 Where Coraza is used, and where it is not
 
 | Component | Uses Coraza? | For |
 |---|---|---|
-| inkwall-engine (`pkg/rules/coraza`) | Yes | T2 / T3 / T4 rules |
-| Operator validating webhook | Yes | Compiling rules at admission |
+| inkwall-engine (`pkg/rules/coraza`) | Yes | Tier T2, T3 and T4 rules (headers and URI, body, response) |
+| Operator's validating webhook | Yes | Compiling rules at admission |
 | inkwallctl (`test`, with flags, `--policy` or `--bundle`) | Yes | Local and CI validation |
 | Caddy module (not yet) | Yes (embeds the engine) | In-process evaluation |
-| Adapters, router, IP lists, rate limiter | No | Inkwall code; runs before rules |
-| Traefik Yaegi plugin, nginx Lua plugin (not yet) | No | Thin clients calling the engine |
-| Control plane (not yet) | For validation | Rejecting bad rules before clusters |
+| Adapters, router, IP lists, rate limiter | No | Inkwall's own code; runs before the rules |
+| Traefik Yaegi plugin, nginx Lua plugin (not yet) | No | Thin clients that call the engine |
+| Control plane (not yet) | For validation | Rejecting bad rules before they reach clusters |
