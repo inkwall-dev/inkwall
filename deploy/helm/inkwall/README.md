@@ -1,9 +1,9 @@
 # inkwall Helm chart
 
-This chart installs the Inkwall operator, its CRDs and its webhooks
+This [chart](https://helm.sh/docs/topics/charts/) installs the Inkwall [operator](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/), its [CRDs](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/) and its [webhooks](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/)
 ([design](../../../docs/design/0004-operator.md)). The operator validates policies and rule sets,
-builds them into a signed bundle, serves the bundle to the engines, injects the engine into Traefik
-pods, and wires the `Ingress` and `IngressRoute` objects your policies target.
+builds them into a signed [bundle](../../../docs/glossary.md#bundle), serves the bundle to the engines, injects the engine into [Traefik](https://doc.traefik.io/traefik/)
+[pods](https://kubernetes.io/docs/concepts/workloads/pods/), and wires the [`Ingress`](https://kubernetes.io/docs/concepts/services-networking/ingress/) and [`IngressRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) objects your policies target.
 
 ## Contents
 
@@ -19,7 +19,7 @@ pods, and wires the `Ingress` and `IngressRoute` objects your policies target.
 
 ## Install
 
-You need Kubernetes 1.29 or later and Helm 3.
+You need [Kubernetes](https://kubernetes.io/docs/concepts/overview/) 1.29 or later and [Helm](https://helm.sh/docs/) 3.
 
 ```sh
 helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \
@@ -30,9 +30,9 @@ kubectl -n inkwall-system rollout status deployment/inkwall-operator
 The rollout finishing means the operator is running. Traefik pods created from then on get the
 engine; restart the ones already running. To upgrade, see [upgrading](../../../docs/upgrading.md).
 
-The chart is signed with cosign: see [CONTRIBUTING.md](../../../CONTRIBUTING.md#cutting-a-release)
+The chart is signed with [cosign](https://docs.sigstore.dev/cosign/signing/overview/): see [CONTRIBUTING.md](../../../CONTRIBUTING.md#cutting-a-release)
 for how to verify it. From a checkout, `make kind-operator` builds the images and installs
-`deploy/helm/inkwall` on the kind cluster of `make kind-up`.
+`deploy/helm/inkwall` on the [kind](https://kind.sigs.k8s.io/) cluster of `make kind-up`.
 
 ## What it installs
 
@@ -41,18 +41,18 @@ The names below are for a release named `inkwall`.
 | Object | Notes |
 |---|---|
 | CRDs (`waf.inkwall.dev`) | Installed and upgraded with the chart, kept on uninstall (`crds.install`) |
-| `Deployment` `inkwall-operator` | 2 replicas with leader election; non-root, read-only root filesystem, no capabilities |
-| `PodDisruptionBudget` | When `operator.replicas` is more than 1 |
-| `ServiceAccount`, `ClusterRole`, `Role` and bindings | Rules generated from the operator's code; the `Role` covers the release namespace only |
+| [`Deployment`](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) `inkwall-operator` | 2 replicas with [leader election](https://kubernetes.io/docs/concepts/architecture/leases/#leader-election); non-root, read-only root filesystem, no capabilities |
+| [`PodDisruptionBudget`](https://kubernetes.io/docs/concepts/workloads/pods/disruptions/#pod-disruption-budgets) | When `operator.replicas` is more than 1 |
+| [`ServiceAccount`](https://kubernetes.io/docs/concepts/security/service-accounts/), [`ClusterRole`, `Role` and bindings](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) | Rules generated from the operator's code; the `Role` covers the release namespace only |
 | `ValidatingWebhookConfiguration` `inkwall-operator-validating` | WAF kinds only; fails closed, 2 s timeout |
 | `MutatingWebhookConfiguration` `inkwall-operator-mutating` | Traefik pods only, at creation; fails open, or closed while a policy is in block mode (`injection.enabled`) |
-| `Service` `inkwall-operator-webhook` | The webhooks |
-| `Service` `inkwall-operator` | Bundle distribution to the engines: gRPC over TLS on port 9445 |
-| Webhook certificate | A `Secret` the operator fills, or a cert-manager `Certificate` |
-| `ConfigMap` `inkwall-control-plane-ca`, `Secret` `inkwall-enrollment` | Only with `controlPlane.caBundle` or `controlPlane.enrollmentToken` |
-| Pre-delete hook: `Job`, `Role` and `RoleBinding` `inkwall-operator-unwire` | Runs only on `helm uninstall`: unwires the routes and releases the `WAFPolicy` objects (`uninstall.unwire`) |
+| [`Service`](https://kubernetes.io/docs/concepts/services-networking/service/) `inkwall-operator-webhook` | The webhooks |
+| `Service` `inkwall-operator` | Bundle distribution to the engines: [gRPC](https://grpc.io/docs/) over [TLS](https://www.rfc-editor.org/rfc/rfc8446) on port 9445 |
+| Webhook certificate | A [`Secret`](https://kubernetes.io/docs/concepts/configuration/secret/) the operator fills, or a [cert-manager](https://cert-manager.io/docs/) [`Certificate`](https://cert-manager.io/docs/usage/certificate/) |
+| [`ConfigMap`](https://kubernetes.io/docs/concepts/configuration/configmap/) `inkwall-control-plane-ca`, `Secret` `inkwall-enrollment` | Only with `controlPlane.caBundle` or `controlPlane.enrollmentToken` |
+| [Pre-delete hook](https://helm.sh/docs/topics/charts_hooks/): [`Job`](https://kubernetes.io/docs/concepts/workloads/controllers/job/), `Role` and `RoleBinding` `inkwall-operator-unwire` | Runs only on `helm uninstall`: unwires the routes and releases the `WAFPolicy` objects (`uninstall.unwire`) |
 
-The chart renders the CRDs, RBAC rules and webhooks from `files/`, which `make generate` copies
+The chart renders the CRDs, [RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) rules and webhooks from `files/`, which `make generate` copies
 from the operator's generated manifests. Don't edit `files/` by hand.
 
 ## Values
@@ -65,14 +65,14 @@ from the operator's generated manifests. Don't edit `files/` by hand.
 | `operator.replicas` | `2` | One leads; all serve the webhooks |
 | `operator.resources` | 100m CPU and 128Mi requested; 512Mi limit | |
 | `operator.extraArgs` | `[]` | Extra `inkwall-operator` flags |
-| `operator.podAnnotations`, `podLabels`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName` | | The default affinity spreads the replicas across nodes |
+| `operator.podAnnotations`, `podLabels`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName` | | The default [affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/) spreads the replicas across nodes |
 | `operator.podDisruptionBudget.enabled`, `minAvailable` | `true`, `1` | |
 | `engine.image.repository`, `tag`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-engine`, the chart's `appVersion`, `IfNotPresent` | The engine injected into Traefik pods; `InkwallConfig.spec.engine.image` overrides it |
 | `injection.enabled` | `true` | Inject the engine into Traefik pods when they are created. `false`: see [turning injection off](#turning-injection-off) |
 | `controlPlane.caBundle` | `""` | The optional control plane's CA (PEM), when its certificate isn't from a public CA, e.g. `--set-file controlPlane.caBundle=ca.crt` |
 | `controlPlane.enrollmentToken` | `""` | The control plane's one-time enrollment token, stored in the Secret `inkwall-enrollment` (key `token`); or leave it empty and create that Secret yourself |
-| `controlPlane.eventsBufferMiB` | `64` | Each replica's buffer of security events while the control plane is unreachable (an `emptyDir`); when it is full, the oldest events are dropped and counted |
-| `uninstall.unwire` | `true` | On `helm uninstall`, unwire the routes first (a pre-delete hook), so they keep working, and remove the operator's finalizer from the `WAFPolicy` objects |
+| `controlPlane.eventsBufferMiB` | `64` | Each replica's buffer of security events while the control plane is unreachable (an [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir)); when it is full, the oldest events are dropped and counted |
+| `uninstall.unwire` | `true` | On `helm uninstall`, unwire the routes first (a pre-delete hook), so they keep working, and remove the operator's [finalizer](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/) from the `WAFPolicy` objects |
 | `serviceAccount.name`, `annotations` | the operator's name (`inkwall-operator`), `{}` | |
 | `crds.install` | `true` | |
 | `distribution.port` | `9445` | The port engines connect to |
@@ -103,9 +103,9 @@ create it, check the connection, use Managed mode and disconnect.
 
 ## Rotating the signing key
 
-The operator signs policy bundles with an Ed25519 key it generates on first use, in the Secret
+The operator signs policy bundles with an [Ed25519](https://www.rfc-editor.org/rfc/rfc8032) key it generates on first use, in the Secret
 `inkwall-bundle-signing-key`. To rotate it now, change the `waf.inkwall.dev/rotate-signing-key`
-annotation on the `InkwallConfig`:
+[annotation](https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/) on the `InkwallConfig`:
 
 ```sh
 kubectl annotate inkwallconfig default --overwrite waf.inkwall.dev/rotate-signing-key="$(date +%s)"
@@ -192,7 +192,7 @@ bundle Secret. What depends on the operator is **creating Traefik pods**:
   engine, so their traffic is not inspected. The affected policies report `Programmed=False`
   (reason `SidecarMissing`), with the pods to restart once the operator is back.
 - **A policy in block mode:** the Pod webhook fails closed. A Traefik pod can't be created without
-  its engine, so Traefik can't scale up or replace pods (after a node drain or failure) until the
+  its engine, so Traefik can't scale up or replace pods (after a [node drain](https://kubernetes.io/docs/tasks/administer-cluster/safely-drain-node/) or failure) until the
   operator is back. Pods already running keep serving.
 
 If Traefik must start pods before the operator is back, in order of preference:
@@ -210,5 +210,5 @@ If Traefik must start pods before the operator is back, in order of preference:
    Remove the label once the operator is back; the pods restart and get the engine. Until then, the
    policies report `SidecarMissing`.
 
-Don't edit the `MutatingWebhookConfiguration` instead: the operator sets its `failurePolicy` back
+Don't edit the `MutatingWebhookConfiguration` instead: the operator sets its [`failurePolicy`](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/#failure-policy) back
 when it returns, and a `helm upgrade` resets it.

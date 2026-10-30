@@ -5,22 +5,22 @@
 - Updated: 2026-10-30
 - Owner: noureldin
 
-Inkwall is a web application firewall (WAF) that sits in the request path, so every request pays
+Inkwall is a [web application firewall](https://owasp.org/www-community/Web_Application_Firewall) (WAF) that sits in the request path, so every request pays
 for it in latency. This document sets the performance rules every component follows: the latency
 budgets, the order in which a request is checked, how the engine is built, where it runs, and
 what happens when it fails. It also records what has been measured so far: the budgets are not met
 yet.
 
-Terms used here:
+[Terms](../glossary.md) used here:
 
 - **Engine:** `inkwall-engine`, the process that inspects requests and returns verdicts.
-- **Proxy:** the ingress controller's data-plane process (Traefik, Envoy, ...), which asks the
+- **Proxy:** the [ingress controller](https://kubernetes.io/docs/concepts/services-networking/ingress-controllers/)'s data-plane process ([Traefik](https://doc.traefik.io/traefik/), [Envoy](https://www.envoyproxy.io/docs/envoy/latest/), ...), which asks the
   engine about each request.
 - **Verdict:** the engine's answer: allow, deny, or log (in detect mode), plus metadata.
 - **Policy:** a `WAFPolicy`: the mode, rule sets, limits and exclusions for a set of routes.
 - **Bundle:** the policy bundle, an immutable, signed snapshot of all of a cluster's policies,
   which the operator builds and every engine enforces.
-- **CRS:** the OWASP Core Rule Set (CRS). **Coraza:** the Go WAF library that evaluates it today.
+- **CRS:** the [OWASP Core Rule Set](https://coreruleset.org/) (CRS). **[Coraza](https://coraza.io/):** the [Go](https://go.dev/) WAF library that evaluates it today.
 
 ## Contents
 
@@ -55,13 +55,13 @@ and new routes start in detect mode, which adds no latency.
 
 | Source | Typical cost | Mitigation |
 |---|---|---|
-| Hop from the proxy to an engine on another node | 0.3–2 ms, bad tails | Run in-process, or as a sidecar over a Unix socket |
-| Connection setup per request | 0.1–1 ms | Persistent HTTP/2 streams, keepalive pools, SPOE pipelining |
+| Hop from the proxy to an engine on another node | 0.3–2 ms, bad tails | Run in-process, or as a [sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/) over a [Unix socket](https://man7.org/linux/man-pages/man7/unix.7.html) |
+| Connection setup per request | 0.1–1 ms | Persistent [HTTP/2](https://www.rfc-editor.org/rfc/rfc9113) streams, keepalive pools, [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) pipelining |
 | Body buffering | Grows with the body | Headers only by default; bodies only where needed, with a size cap |
 | CRS regex evaluation | 50 µs to several ms | Prefilter ([§5.2](#52-rule-evaluation)), precompiled rules, early exit |
-| Allocation and garbage collection | p99 spikes | Pooling, a zero-allocation hot path, `GOMEMLIMIT`, allocs/op gated in CI |
-| Lock contention | p99 spikes | Lock-free policy reads (`atomic.Pointer`), sharded counters |
-| Logging and telemetry | Blocking I/O | Ring buffer and a background shipper; drop events, never apply backpressure |
+| Allocation and [garbage collection](https://go.dev/doc/gc-guide) | p99 spikes | Pooling, a zero-allocation hot path, [`GOMEMLIMIT`](https://go.dev/doc/gc-guide#Memory_limit), allocs/op gated in CI |
+| Lock contention | p99 spikes | Lock-free policy reads ([`atomic.Pointer`](https://pkg.go.dev/sync/atomic#Pointer)), sharded counters |
+| Logging and telemetry | Blocking I/O | [Ring buffer](https://en.wikipedia.org/wiki/Circular_buffer) and a background shipper; drop events, never apply backpressure |
 | Control plane down | Unbounded | The hot path never calls it; the last known good policy is local |
 
 ## 3. Latency budgets
@@ -74,9 +74,9 @@ engine at 70% CPU.
 
 | Integration mode | Header-only p50 | Header-only p99 | Body (per 8 KB) p99 |
 |---|---|---|---|
-| In-process (Caddy module, Envoy Go filter) | ≤ 50 µs | ≤ 300 µs | ≤ 300 µs |
-| Sidecar over a Unix socket (Envoy, HAProxy, nginx) | ≤ 150 µs | ≤ 1 ms | ≤ 500 µs |
-| Sidecar over localhost TCP (Traefik ForwardAuth) | ≤ 250 µs | ≤ 1.5 ms | n/a |
+| In-process ([Caddy](https://caddyserver.com/docs/) [module](https://caddyserver.com/docs/extending-caddy), Envoy [Go filter](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/golang_filter)) | ≤ 50 µs | ≤ 300 µs | ≤ 300 µs |
+| Sidecar over a Unix socket (Envoy, [HAProxy](https://docs.haproxy.org/), [nginx](https://nginx.org/en/docs/)) | ≤ 150 µs | ≤ 1 ms | ≤ 500 µs |
+| Sidecar over localhost TCP (Traefik [ForwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/)) | ≤ 250 µs | ≤ 1.5 ms | n/a |
 | Detect mode (asynchronous or mirrored) | ~0 | ~0 | ~0 |
 
 - **Per-request deadline:** 250 ms by default, set per policy. It is a safety cap. When it
@@ -88,8 +88,8 @@ engine at 70% CPU.
 
 ### 3.1 Measured baseline (2026-10-03)
 
-Engine only (`BenchmarkEvaluate`, `BenchmarkEvaluateArgs`): Coraza 3.8.1, CRS 4.25 at paranoia
-level 1 (PL1), on one core of an i7-1255U.
+Engine only (`BenchmarkEvaluate`, `BenchmarkEvaluateArgs`): Coraza 3.8.1, CRS 4.25 at [paranoia
+level](https://coreruleset.org/docs/concepts/paranoia_levels/) 1 (PL1), on one core of an i7-1255U.
 
 | Request | Time | Budget it maps to |
 |---|---|---|
@@ -102,8 +102,8 @@ level 1 (PL1), on one core of an i7-1255U.
 - **Header-only requests are about 3× over budget.** There is no single hotspot: regex takes about
   22% of the time, garbage collection about 14%.
 - **Body cost grows linearly with the number of arguments:** about 0.13 ms per form field and
-  0.2 ms per JSON field, because CRS runs most rules once per argument. By rule family: SQL
-  injection 26%, XSS 23%, remote command execution 12%, PHP 9%.
+  0.2 ms per JSON field, because CRS runs most rules once per argument. By rule family: [SQL
+  injection](https://owasp.org/www-community/attacks/SQL_Injection) 26%, [XSS](https://owasp.org/www-community/attacks/xss/) 23%, [remote command execution](https://owasp.org/www-community/attacks/Command_Injection) 12%, PHP 9%.
 - **An attacker can pad a request past any fixed deadline.** This is contained, not solved:
   - the engine fails closed on a timeout;
   - `--max-args` (default 1000) rejects a request before CRS runs;
@@ -118,8 +118,8 @@ Measured, but not adopted:
 
 - Coraza's `SecRxPreFilter`: 10–25% faster, but it **misses attacks** in `test/crs` (CRS tests
   942220-2 and 932311-7).
-- `coraza-wasilibs` crashes on Go 1.26. Coraza's multiphase evaluation is 7% slower.
-  `no_regex_multiline` gains 3% but changes behaviour. `GOGC=400` gains about 7%; it is left as a
+- [`coraza-wasilibs`](https://github.com/corazawaf/coraza-wasilibs) crashes on Go 1.26. Coraza's multiphase evaluation is 7% slower.
+  `no_regex_multiline` gains 3% but changes behaviour. [`GOGC=400`](https://go.dev/doc/gc-guide#GOGC) gains about 7%; it is left as a
   deployment setting.
 
 Next levers, by expected gain:
@@ -170,11 +170,11 @@ it to block mode.
 ### 5.1 Process model
 
 - One binary, `inkwall-engine`. All its listeners share one core. **Built:** the forward-auth
-  listener, `/v1/check` and the reverse proxy. **Not yet:** ext_authz, ext_proc and SPOE. (Each
+  listener, `/v1/check` and the reverse proxy. **Not yet:** [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter), [ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter) and SPOE. (Each
   protocol is described in [0006](0006-adapter-protocols.md).)
 - Policies are compiled once into an immutable set and swapped through an `atomic.Pointer`, so
   reads take no lock. **Built** (`pkg/policy`).
-- **Not yet:** `sync.Pool` buffers, automaxprocs, `GOMEMLIMIT` at 90% of the memory limit, a tuned
+- **Not yet:** [`sync.Pool`](https://pkg.go.dev/sync#Pool) buffers, [automaxprocs](https://github.com/uber-go/automaxprocs), `GOMEMLIMIT` at 90% of the memory limit, a tuned
   `GOGC`.
 
 ### 5.2 Rule evaluation
@@ -182,7 +182,7 @@ it to block mode.
 1. **Start with Coraza and the OWASP CRS. Built.** Coraza's own prefilter, multiphase evaluation
    and `coraza-wasilibs` were rejected ([§3.1](#31-measured-baseline-2026-10-03)).
 2. **Single-pass prefilter (not built yet).** Put the required literals of every rule into one
-   Aho-Corasick automaton (Hyperscan optional). One pass over a value then picks the rules that can
+   [Aho-Corasick](https://en.wikipedia.org/wiki/Aho%E2%80%93Corasick_algorithm) automaton ([Hyperscan](https://github.com/intel/hyperscan) optional). One pass over a value then picks the rules that can
    match it.
 
    **Feasibility measured (2026-10-04,** `test/perf/prefilter`**):**
@@ -196,13 +196,13 @@ it to block mode.
    | Soundness violations (regex matched but filter said skip) | 0 of ~2.1M checks | 0 of ~3.9M checks |
 
    - Checked on the benign corpus, 9,747 CRS payloads and 13,314 Unicode case-fold variants.
-   - Literals must match under Unicode case folding. Plain lowercasing was unsound: it missed
+   - Literals must match under [Unicode case folding](https://www.unicode.org/faq/casemap_charprop.html). Plain lowercasing was unsound: it missed
      `;BAſE64` (rule 932260) and `@@VERſION` (rule 942480); see
      [0007 §4.3](0007-inkwall-engine.md#43-prefilter-and-normalization-views).
    - A non-literal regex node (such as `.`) breaks a literal. Coraza gets this wrong.
    - Gain: about 30% if the filter runs after transformations, and 3–5× if it runs before them,
      which needs a sound decoded form of each value.
-   - It ships only after the CRS test suite and differential fuzzing pass.
+   - It ships only after the CRS test suite and differential [fuzzing](https://go.dev/doc/security/fuzz/) pass.
    - **Decision:** build it into Inkwall's own rule engine, which owns the rule loop
      ([0007](0007-inkwall-engine.md)).
 3. Rules sit behind the `pkg/rules.Evaluator` interface
@@ -211,7 +211,7 @@ it to block mode.
 
 ### 5.3 State (rate limits, reputation)
 
-**Not built yet.** Each CPU keeps local token buckets. Cluster-wide limits sync asynchronously,
+**Not built yet.** Each CPU keeps local [token buckets](https://en.wikipedia.org/wiki/Token_bucket). Cluster-wide limits sync asynchronously,
 about every 100 ms. The hot path never waits on the network, and we accept a little
 over-admission.
 
@@ -219,32 +219,32 @@ over-admission.
 
 - Design: events go to a lock-free ring buffer and are shipped in batches. Audit logs cover only
   matched or sampled requests. When the buffer overflows, events are dropped and counted.
-- **Built:** Prometheus metrics, `/healthz` and `/readyz` (`pkg/telemetry`), and pprof
+- **Built:** [Prometheus](https://prometheus.io/docs/introduction/overview/) metrics, `/healthz` and `/readyz` (`pkg/telemetry`), and [pprof](https://pkg.go.dev/net/http/pprof)
   (`--pprof`). Security events go to a bounded ring buffer and are shipped to the operator in
   batches (`pkg/events`); that buffer uses a mutex, not a lock-free design. **Not yet:** a
   lock-free buffer, audit logs.
 
 ### 5.5 Wire format
 
-- Design: protobuf with `vtprotobuf` marshalers, and gRPC over long-lived HTTP/2 streams.
+- Design: [protobuf](https://protobuf.dev/) with [`vtprotobuf`](https://github.com/planetscale/vtprotobuf) marshalers, and [gRPC](https://grpc.io/docs/) over long-lived HTTP/2 streams.
   **Built:** protobuf and the gRPC streams. **Not yet:** `vtprotobuf`.
 - Adapters send only the fields the policy reads.
 
 ## 6. Deployment topology
 
 **By default, the engine runs as a sidecar in the ingress controller's pod and is reached over a
-Unix socket.** There is no hop to another node, no Service and no TLS.
+Unix socket.** There is no hop to another node, no [Service](https://kubernetes.io/docs/concepts/services-networking/service/) and no [TLS](https://www.rfc-editor.org/rfc/rfc8446).
 
 | Proxy | Integration | Transport |
 |---|---|---|
 | Caddy | Native module (in-process) | Function call |
-| Envoy / Envoy Gateway / Istio | ext_proc; optional Envoy Go filter | gRPC over a Unix socket |
+| Envoy / [Envoy Gateway](https://gateway.envoyproxy.io/) / [Istio](https://istio.io/latest/docs/) | ext_proc; optional Envoy Go filter | gRPC over a Unix socket |
 | HAProxy | SPOE agent | Unix socket |
-| ingress-nginx | Lua plugin (auth-url as a fallback) | Unix socket |
+| [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) | [Lua](https://github.com/openresty/lua-nginx-module) plugin ([auth-url](https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/annotations/#external-authentication) as a fallback) | Unix socket |
 | Traefik | ForwardAuth; a plugin later | HTTP keepalive over localhost |
 
-- The engine is injected through the ingress controller's extension point or a Pod webhook, never
-  by patching the controller's Deployment ([0004 §4.3](0004-operator.md#43-injection-controller)).
+- The engine is injected through the ingress controller's extension point or a Pod [webhook](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/), never
+  by patching the controller's [Deployment](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) ([0004 §4.3](0004-operator.md#43-injection-controller)).
 - Its resources are sized from the policy: a CPU-throttled engine means a bad p99.
 - A standalone engine Deployment behind a Service is supported, but slower.
 - **Built (v0.1.0):** Traefik, with the engine injected by the Pod webhook; the standalone reverse
@@ -269,13 +269,13 @@ Unix socket.** There is no hop to another node, no Service and no TLS.
 |---|---|---|
 | Micro | `make bench-compare` and the CI job `bench`. Packages whose test binary is unchanged are skipped; the rest run base and head interleaved, 8 times. `hack/benchgate` flags a significant change (p < 0.05) of more than 5% in `sec/op`, `B/op` or `allocs/op`. The gate fails only if a re-run of the flagged benchmarks shows the change again | Built |
 | Engine | `inkwallctl bench`: a fixed corpus (`cmd/inkwallctl/corpus.go`), closed-loop or at a fixed `--rate`, latency measured from the scheduled time. Any wrong verdict, timeout or overload fails the run | Built |
-| End-to-end on kind | k6 against each proxy, with and without Inkwall; the difference is what [§3](#3-latency-budgets) budgets | Not yet |
-| Profiling | `--pprof` on the admin listener; flame graphs in CI; Pyroscope | Endpoints built |
+| End-to-end on [kind](https://kind.sigs.k8s.io/) | [k6](https://grafana.com/docs/k6/latest/) against each proxy, with and without Inkwall; the difference is what [§3](#3-latency-budgets) budgets | Not yet |
+| Profiling | `--pprof` on the admin listener; [flame graphs](https://www.brendangregg.com/flamegraphs.html) in CI; [Pyroscope](https://grafana.com/docs/pyroscope/latest/) | Endpoints built |
 | Soak and chaos | A 24 h soak; kill the engine under load and check the failure mode | Not yet |
 
 ## 9. Open questions
 
-1. Hyperscan (cgo) as an optional build, or pure Go only?
+1. Hyperscan ([cgo](https://pkg.go.dev/cmd/cgo)) as an optional build, or pure Go only?
 2. Envoy Go filter: supported or experimental?
 3. Default body cap: 8 KB, 64 KB, or per content type?
 4. Detect mode by default: is it acceptable to customers who expect blocking on day one?

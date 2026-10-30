@@ -1,6 +1,6 @@
 # Rotating the bundle signing key
 
-This guide replaces the key the operator signs policy bundles with, on demand or on a schedule,
+This guide replaces the key the operator signs [policy bundles](glossary.md#bundle) with, on demand or on a schedule,
 without interrupting traffic.
 
 ## Contents
@@ -26,7 +26,7 @@ their pod's namespace (file `trusted-keys.pub`), and reject a bundle signed with
 A rotation never signs with a key an engine doesn't trust yet:
 
 1. **Publishing.** The operator generates the next key and adds its public key to every
-   `inkwall-trust` ConfigMap. The old key still signs. The kubelet updates the
+   `inkwall-trust` ConfigMap. The old key still signs. The [kubelet](https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet/) updates the
    [mounted ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/#mounted-configmaps-are-updated-automatically)
    in each pod within a minute or two, and the engine rereads its keys every 10 seconds without
    restarting. The operator waits until every connected engine reports the new key.
@@ -73,7 +73,7 @@ kubectl annotate inkwallconfig default --overwrite waf.inkwall.dev/rotate-signin
 
 A new value set while a rotation runs starts another rotation once the current one is done.
 
-If the `InkwallConfig` lives in Git, change the annotation there instead and let your GitOps tool
+If the `InkwallConfig` lives in Git, change the annotation there instead and let your [GitOps](https://opengitops.dev/) tool
 apply it. The operator only reads the annotation; it never writes it, so the tool shows no drift.
 
 ## Rotate on a schedule
@@ -102,7 +102,7 @@ Without `rotationInterval`, the key rotates only when you ask.
 | `Retiring` | the new key | the new key and the previous key |
 
 An engine accepts a bundle signed by any key in its `trusted-keys.pub`. It looks the key up by the
-key ID in the signed bundle (the first 8 bytes of the key's SHA-256, in hex). A bundle signed
+key ID in the signed bundle (the first 8 bytes of the key's [SHA-256](https://csrc.nist.gov/pubs/fips/180-4/upd1/final), in hex). A bundle signed
 with a key it doesn't trust is rejected: the engine logs `bundle rejected`, counts it in
 `inkwall_bundle_updates_total{result="rejected"}`, and keeps enforcing the bundle it has. Once
 its key file changes, it reconnects and gets the bundle again.
@@ -128,7 +128,7 @@ kubectl -n inkwall-system get secret inkwall-bundle -o jsonpath='{.metadata.anno
 kubectl -n inkwall-system get secret inkwall-bundle-signing-key -o jsonpath='{.data.trusted-keys\.pub}' | base64 -d | wc -c
 ```
 
-The leader logs each step: `signing key rotation started: new key published`,
+The [leader](https://kubernetes.io/docs/concepts/architecture/leases/#leader-election) logs each step: `signing key rotation started: new key published`,
 `signing key rotation: switched to the new key` and
 `signing key rotation done: previous key retired`, and, while it waits, what it waits for.
 
