@@ -103,6 +103,8 @@ operator removes its Middleware from the route, and Traefik serves it uninspecte
 
 **Safe by default.** In block mode, a request that can't be inspected in time is rejected (503),
 so padding a request past the deadline doesn't get an attack through; detect mode never blocks.
+If Traefik can't reach the engine at all (crashed, restarting or hung), Traefik answers 500 in
+both modes: see [when the engine is down](deploy/helm/inkwall/README.md#when-the-engine-is-down).
 Every engine verifies the signature of each bundle. While a policy blocks, Traefik pods can't start
 without the engine: see
 [when the operator is down](deploy/helm/inkwall/README.md#when-the-operator-is-down).

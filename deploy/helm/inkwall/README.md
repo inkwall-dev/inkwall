@@ -16,6 +16,7 @@ builds them into a signed [bundle](../../../docs/glossary.md#bundle), serves the
   - [Turning injection off](#turning-injection-off)
   - [Deleting a policy](#deleting-a-policy)
 - [When the operator is down](#when-the-operator-is-down)
+- [When the engine is down](#when-the-engine-is-down)
 
 ## Install
 
@@ -212,3 +213,29 @@ If Traefik must start pods before the operator is back, in order of preference:
 
 Don't edit the `MutatingWebhookConfiguration` instead: the operator sets its [`failurePolicy`](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/#failure-policy) back
 when it returns, and a `helm upgrade` resets it.
+
+## When the engine is down
+
+The policy's mode and failure mode are applied by the engine, so they hold only while it answers.
+When Traefik can't reach the engine in its pod, Traefik answers **500** and doesn't forward the
+request, **in detect mode as in block mode**: Traefik's [ForwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/) has no setting to let requests
+through, or to change its timeout ([traefik/traefik#9857](https://github.com/traefik/traefik/issues/9857)).
+
+| The engine | What Traefik's clients get |
+|---|---|
+| Crashed or restarting (connection refused) | 500 at once |
+| Hung (no answer) | 500 after 30 s, Traefik's fixed timeout |
+| Slower than the policy's `timeout` | The policy's failure mode: 503 in block mode, allowed in detect mode |
+
+What keeps an outage short:
+
+- Traefik starts only once its engine is ready (the engine is a [native sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/) with a startup
+  probe).
+- The kubelet restarts a crashed engine at once, then with a back-off, and a hung one once its
+  liveness probe fails (about 30 s).
+- While the engine isn't ready, neither is Traefik's pod, so its Service sends it no new
+  connections. Run several Traefik replicas: an engine down in one pod then costs only the
+  connections that pod already has.
+
+To find an engine outage: `kubectl -n <traefik namespace> get pods` shows the restarts, and Traefik
+logs `Error calling http://127.0.0.1:9001/v1/forward-auth` for each request it answered 500.

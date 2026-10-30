@@ -6,7 +6,7 @@ Every doc in this repository, by topic, with the question each one answers.
 
 - [README](../README.md): what is Inkwall, and how do I install it and protect my first route?
 - [Helm chart](../deploy/helm/inkwall/README.md): what does the chart install, which values can I
-  set, and how do I uninstall it?
+  set, how do I uninstall it, and what happens when the operator or the engine is down?
 
 ## Guides
 
