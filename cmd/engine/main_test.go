@@ -18,6 +18,10 @@ import (
 	"testing"
 	"time"
 
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -128,6 +132,96 @@ func TestParseCheckFlags(t *testing.T) {
 			t.Fatalf("check accepted %v", args)
 		}
 	}
+}
+
+func TestParseExtProcFlags(t *testing.T) {
+	cfg, err := parseFlags(cmdExtProc, []string{"--trusted-proxies", "127.0.0.1/32"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.listen != "127.0.0.1:9003" || len(cfg.trustedProxies) != 1 {
+		t.Fatalf("unexpected config: %+v", cfg)
+	}
+	if _, err := parseFlags(cmdExtProc, []string{"--upstream", "http://app"}, io.Discard); err == nil {
+		t.Fatal("ext-proc accepted --upstream")
+	}
+}
+
+// TestServeExtProc runs the ext-proc engine on a Unix socket: an attack
+// gets an immediate 403, counted with the adapter label extproc.
+func TestServeExtProc(t *testing.T) {
+	dir := t.TempDir()
+	sock, adminSock := filepath.Join(dir, "extproc.sock"), filepath.Join(dir, "admin.sock")
+	cfg, err := parseFlags(cmdExtProc, []string{"--listen", "unix:" + sock, "--admin-listen", "unix:" + adminSock, "--mode", "block"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, cfg, slog.New(slog.DiscardHandler)) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("serve: %v", err)
+		}
+	}()
+	dial := func(ctx context.Context, path string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", path)
+	}
+	conn, err := grpc.NewClient("passthrough:///engine", grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return dial(ctx, sock) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	var resp *extprocv3.ProcessingResponse
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		if resp, err = processOnce(conn); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the engine never answered: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if code := resp.GetImmediateResponse().GetStatus().GetCode(); code != 403 {
+		t.Fatalf("attack answered %v, want 403", resp)
+	}
+
+	admin := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return dial(ctx, adminSock)
+	}}}
+	r, err := admin.Get("http://engine/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Body.Close() }()
+	metrics, _ := io.ReadAll(r.Body)
+	if want := `inkwall_requests_total{action="deny",adapter="extproc",reason="rule"} 1`; !strings.Contains(string(metrics), want) {
+		t.Errorf("metrics lack %s", want)
+	}
+}
+
+// processOnce sends Envoy's request headers for an attack and returns the
+// answer.
+func processOnce(conn *grpc.ClientConn) (*extprocv3.ProcessingResponse, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := extprocv3.NewExternalProcessorClient(conn).Process(ctx)
+	if err != nil {
+		return nil, err
+	}
+	h := func(k, v string) *corev3.HeaderValue { return &corev3.HeaderValue{Key: k, RawValue: []byte(v)} }
+	err = stream.Send(&extprocv3.ProcessingRequest{Request: &extprocv3.ProcessingRequest_RequestHeaders{
+		RequestHeaders: &extprocv3.HttpHeaders{EndOfStream: true, Headers: &corev3.HeaderMap{Headers: []*corev3.HeaderValue{
+			h(":method", "GET"), h(":path", "/?q=<script>alert(1)</script>"), h(":authority", "shop.example.com"),
+			h(":scheme", "http"), h("user-agent", "Mozilla/5.0"), h("accept", "text/html"),
+		}}},
+	}})
+	if err != nil {
+		return nil, err
+	}
+	return stream.Recv()
 }
 
 func TestListenUnixSocket(t *testing.T) {
