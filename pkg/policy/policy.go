@@ -22,7 +22,6 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/router"
-	"github.com/inkwall-dev/inkwall/pkg/rules"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
@@ -161,12 +160,13 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 		}
 		cfg.Directives = strings.Join(directives, "\n")
 	}
+	var exclusions []coraza.Exclusion
 	for _, e := range bp.GetExclusions() {
 		ex := coraza.Exclusion{Path: e.GetPath(), Argument: e.GetArgument()}
 		for _, id := range e.GetRuleIds() {
 			ex.RuleIDs = append(ex.RuleIDs, int(id))
 		}
-		cfg.Exclusions = append(cfg.Exclusions, ex)
+		exclusions = append(exclusions, ex)
 	}
 
 	bodyLimit := o.BodyLimit
@@ -186,14 +186,20 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 	}
 	cfg.BodyLimit = int(bodyLimit)
 
-	var eval rules.Evaluator
+	// The compiled rules, shared by every policy with the same key whatever
+	// its exclusions, then this policy's exclusions on top.
+	var shared *coraza.Evaluator
 	var err error
 	key = cfg.Key()
 	if o.Evaluators != nil {
-		eval, err = o.Evaluators.get(key, cfg)
+		shared, err = o.Evaluators.get(key, cfg)
 	} else {
-		eval, err = coraza.New(cfg)
+		shared, err = coraza.New(cfg)
 	}
+	if err != nil {
+		return nil, key, err
+	}
+	eval, err := shared.WithExclusions(exclusions)
 	if err != nil {
 		return nil, key, err
 	}
@@ -224,9 +230,11 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 	return &Policy{ID: bp.GetId(), pipeline: pipeline.New(eval, pc), bodyLimit: bodyLimit}, key, nil
 }
 
-// Evaluators caches compiled rule sets by configuration: policies with the
-// same rules share one (a Coraza WAF with the CRS holds megabytes), and an
-// unchanged policy isn't recompiled when a new bundle arrives.
+// Evaluators caches compiled rule sets by configuration (coraza.Config.Key,
+// without exclusions): policies with the same rules share one (a Coraza WAF
+// with the CRS holds megabytes) whatever their exclusions, and an unchanged
+// policy isn't recompiled when a new bundle arrives. Cached evaluators have
+// no exclusions.
 type Evaluators struct {
 	mu    sync.Mutex
 	cache map[[sha256.Size]byte]*coraza.Evaluator
@@ -243,6 +251,8 @@ func (e *Evaluators) get(key [sha256.Size]byte, cfg coraza.Config) (*coraza.Eval
 	if ev, ok := e.cache[key]; ok {
 		return ev, nil
 	}
+	// Shared by every policy with this key: none's exclusions.
+	cfg.Exclusions = nil
 	ev, err := coraza.New(cfg)
 	if err != nil {
 		return nil, err

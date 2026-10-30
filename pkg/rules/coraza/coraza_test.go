@@ -6,15 +6,19 @@ package coraza
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"maps"
 	"net/http"
 	"net/netip"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
+	coreruleset "github.com/corazawaf/coraza-coreruleset/v4"
+	"github.com/corazawaf/coraza/v3/experimental/plugins/plugintypes"
 	"github.com/corazawaf/coraza/v3/types"
 
 	"github.com/inkwall-dev/inkwall/pkg/request"
@@ -325,6 +329,40 @@ func BenchmarkEvaluateArgs(b *testing.B) {
 	}
 }
 
+// BenchmarkEvaluateExclusions is BenchmarkEvaluate's benign GET with a
+// policy's worth of exclusions: arguments everywhere, and rules on paths the
+// request is on or isn't.
+func BenchmarkEvaluateExclusions(b *testing.B) {
+	excl := []Exclusion{
+		{RuleIDs: []int{942100}, Argument: "q"},
+		{RuleIDs: []int{941100, 941110}, Argument: "comment"},
+		{RuleIDs: []int{920350}},
+	}
+	for i := range 8 {
+		excl = append(excl, Exclusion{RuleIDs: []int{942100, 932100}, Path: fmt.Sprintf("/app%d/*", i), Argument: "query"})
+	}
+	excl = append(excl, Exclusion{RuleIDs: []int{941100}, Path: "/products"})
+	e, err := New(Config{Exclusions: excl})
+	if err != nil {
+		b.Fatal(err)
+	}
+	cases := map[string]*request.Request{
+		"benign_get":      newRequest("GET", "/products?id=42&sort=price", nil, ""),
+		"benign_get_app3": newRequest("GET", "/app3/search?query=shoes&page=2", nil, ""),
+	}
+	for name, req := range cases {
+		b.Run(name, func(b *testing.B) {
+			ctx := context.Background()
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := e.Evaluate(ctx, req); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func largeJSON(size int) string {
 	buf := []byte(`{"items":[`)
 	for len(buf) < size {
@@ -540,6 +578,392 @@ func TestExclusionsWithCRS(t *testing.T) {
 	}
 	if !slices.Contains(ids("/other"+sqli), 942100) {
 		t.Error("942100 no longer matches elsewhere")
+	}
+}
+
+func TestExclusionsShareRules(t *testing.T) {
+	const rule = `SecRule ARGS "@contains attack" "id:100001,phase:2,deny,status:403,log"
+SecRule ARGS "@contains exploit" "id:100002,phase:2,deny,status:403,log"`
+	shared, err := New(Config{DisableCRS: true, Directives: rule})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := shared.WithExclusions([]Exclusion{{RuleIDs: []int{100001}, Argument: "a"}, {RuleIDs: []int{100002}, Path: "/a/*"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := shared.WithExclusions([]Exclusion{{RuleIDs: []int{100001}, Argument: "b"}, {RuleIDs: []int{100002}, Path: "/b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.waf != shared.waf || b.waf != shared.waf {
+		t.Fatal("WithExclusions compiled its own rules")
+	}
+	// Each evaluator gets its own exclusions only; the shared one none.
+	checks := []struct {
+		uri              string
+		shared, inA, inB bool // blocked
+	}{
+		{"/x?a=attack", true, false, true},
+		{"/x?b=attack", true, true, false},
+		{"/x?c=attack", true, true, true},
+		{"/a/1?q=exploit", true, false, true},
+		{"/b?q=exploit", true, true, false},
+		{"/b/1?q=exploit", true, true, true},
+	}
+	evals := []*Evaluator{shared, a, b}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for i := range 50 {
+				c := checks[i%len(checks)]
+				for j, want := range []bool{c.shared, c.inA, c.inB} {
+					res, err := evals[j].Evaluate(context.Background(), newRequest("GET", c.uri, nil, ""))
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					if res.Interrupted != want {
+						t.Errorf("evaluator %d, %s: blocked=%v, want %v", j, c.uri, res.Interrupted, want)
+					}
+				}
+			}
+		})
+	}
+	wg.Wait()
+
+	// Replacing, not adding to, the exclusions.
+	none, err := a.WithExclusions(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err := none.Evaluate(context.Background(), newRequest("GET", "/x?a=attack", nil, "")); err != nil || !res.Interrupted {
+		t.Errorf("a's exclusions survived WithExclusions(nil): %+v, %v", res, err)
+	}
+}
+
+// leaks evaluates "/<x>?<y>=attack" concurrently on each evaluator, which
+// must block it (none excludes y on x), and counts the requests let through.
+func leaks(t *testing.T, cases map[*Evaluator][]string) int {
+	t.Helper()
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	leaked := 0
+	for e, uris := range cases {
+		for _, uri := range uris {
+			for range 4 {
+				wg.Go(func() {
+					for range 300 {
+						res, err := e.Evaluate(context.Background(), newRequest("GET", uri, nil, ""))
+						if err != nil {
+							t.Error(err)
+							return
+						}
+						if !res.Interrupted {
+							mu.Lock()
+							leaked++
+							mu.Unlock()
+						}
+					}
+				})
+			}
+		}
+	}
+	wg.Wait()
+	return leaked
+}
+
+// Coraza 3.8.1 appends a transaction's target exclusions to the rule's own
+// negations in place (see argsNegation). Before exclusions were applied per
+// transaction, three argument exclusions everywhere (compiled in as
+// negations) and a path one for the same rule let concurrent requests swap
+// exclusions.
+func TestExclusionsDontLeakAcrossRequests(t *testing.T) {
+	const rule = `SecRule ARGS "@contains attack" "id:100001,phase:2,deny,status:403,log"`
+	e, err := New(Config{DisableCRS: true, Directives: rule, Exclusions: []Exclusion{
+		{RuleIDs: []int{100001}, Argument: "z1"}, {RuleIDs: []int{100001}, Argument: "z2"}, {RuleIDs: []int{100001}, Argument: "z3"},
+		{RuleIDs: []int{100001}, Path: "/a", Argument: "a"}, {RuleIDs: []int{100001}, Path: "/b", Argument: "b"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := leaks(t, map[*Evaluator][]string{e: {"/a?b=attack", "/b?a=attack"}}); n != 0 {
+		t.Errorf("%d requests got another request's exclusions", n)
+	}
+}
+
+// Rules that negate ARGS targets themselves get a rule set of their own for
+// argument exclusions, so policies can't swap them.
+func TestExclusionsWithArgsNegatingRules(t *testing.T) {
+	const rule = `SecRule ARGS|!ARGS:z1|!ARGS:z2|!ARGS:z3 "@contains attack" "id:100001,phase:2,deny,status:403,log"`
+	shared, err := New(Config{DisableCRS: true, Directives: rule})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := shared.WithExclusions([]Exclusion{{RuleIDs: []int{100001}, Argument: "a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := shared.WithExclusions([]Exclusion{{RuleIDs: []int{100001}, Argument: "b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ruleOff, err := shared.WithExclusions([]Exclusion{{RuleIDs: []int{100001}, Path: "/off"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.variants == nil || b.variants == nil {
+		t.Error("argument exclusions share rules that negate ARGS targets")
+	}
+	if ruleOff.variants != nil {
+		t.Error("an exclusion without arguments compiled its own rules")
+	}
+	if n := leaks(t, map[*Evaluator][]string{a: {"/x?b=attack"}, b: {"/x?a=attack"}, shared: {"/x?a=attack"}}); n != 0 {
+		t.Errorf("%d requests got another policy's exclusions", n)
+	}
+	// Their own exclusions, and none from a's compiled rules once replaced.
+	for _, c := range []struct {
+		e       *Evaluator
+		uri     string
+		blocked bool
+	}{{a, "/x?a=attack", false}, {b, "/x?b=attack", false}, {ruleOff, "/off?a=attack", false}, {ruleOff, "/on?a=attack", true}} {
+		if res, err := c.e.Evaluate(context.Background(), newRequest("GET", c.uri, nil, "")); err != nil || res.Interrupted != c.blocked {
+			t.Errorf("%s: %+v, %v; want blocked=%v", c.uri, res, err, c.blocked)
+		}
+	}
+	none, err := a.WithExclusions(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err := none.Evaluate(context.Background(), newRequest("GET", "/x?a=attack", nil, "")); err != nil || !res.Interrupted {
+		t.Errorf("a's compiled exclusions survived WithExclusions(nil): %+v, %v", res, err)
+	}
+}
+
+// With rules that negate ARGS targets themselves, argument exclusions on
+// paths are compiled in too, one rule set for each set of path exclusions a
+// request can be on.
+func TestPathExclusionsWithArgsNegatingRules(t *testing.T) {
+	const rule = `SecRule ARGS|!ARGS:z1|!ARGS:z2|!ARGS:z3 "@contains attack" "id:100001,phase:2,deny,status:403,log"`
+	e, err := New(Config{DisableCRS: true, Directives: rule, Exclusions: []Exclusion{
+		{RuleIDs: []int{100001}, Argument: "all"},
+		{RuleIDs: []int{100001}, Path: "/a", Argument: "a"},
+		{RuleIDs: []int{100001}, Path: "/b", Argument: "b"},
+		{RuleIDs: []int{100001}, Path: "/api/*", Argument: "p1"},
+		{RuleIDs: []int{100001}, Path: "/api/v1/*", Argument: "p2"},
+		{RuleIDs: []int{100001}, Path: "/api/v1/x", Argument: "x"},
+		{RuleIDs: []int{100001}, Path: "/off"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.variants == nil {
+		t.Fatal("argument exclusions applied per transaction to rules that negate ARGS targets")
+	}
+	// none, /a, /b, /api/*, /api/v1/*, /api/v1/x
+	if n := len(e.variants.wafs); n != 6 {
+		t.Errorf("%d rule sets, want 6", n)
+	}
+	if n := leaks(t, map[*Evaluator][]string{e: {"/a?b=attack", "/b?a=attack", "/api/v1/x?b=attack", "/api/x?p2=attack"}}); n != 0 {
+		t.Errorf("%d requests got another request's exclusions", n)
+	}
+	for _, c := range []struct {
+		uri     string
+		blocked bool
+	}{
+		{"/x?all=attack", false}, {"/a?all=attack", false}, {"/x?a=attack", true},
+		{"/a?a=attack", false}, {"/b?b=attack", false}, {"/a/?a=attack", true},
+		{"/api/x?p1=attack", false}, {"/api/x?p2=attack", true},
+		{"/api/v1/y?p1=attack", false}, {"/api/v1/y?p2=attack", false}, {"/api/v1/y?x=attack", true},
+		{"/api/v1/x?p1=attack", false}, {"/api/v1/x?p2=attack", false}, {"/api/v1/x?x=attack", false},
+		{"/api/../b?p1=attack", true}, {"/api//v1/y?p1=attack", true},
+		{"/off?q=attack", false}, {"/on?q=attack", true},
+	} {
+		res, err := e.Evaluate(context.Background(), newRequest("GET", c.uri, nil, ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Interrupted != c.blocked {
+			t.Errorf("%s: blocked=%v, want %v", c.uri, res.Interrupted, c.blocked)
+		}
+	}
+}
+
+// A rule ID no rule has is ignored, with rules that negate ARGS targets
+// themselves or not.
+func TestExclusionsIgnoreUnknownRules(t *testing.T) {
+	for _, rule := range []string{
+		`SecRule ARGS "@contains attack" "id:100001,phase:2,deny,status:403,log"`,
+		`SecRule ARGS|!ARGS:z "@contains attack" "id:100001,phase:2,deny,status:403,log"`,
+	} {
+		e, err := New(Config{DisableCRS: true, Directives: rule, Exclusions: []Exclusion{
+			{RuleIDs: []int{999999}},
+			{RuleIDs: []int{999998, 100001}, Argument: "q"},
+			{RuleIDs: []int{999997}, Path: "/p", Argument: "q"},
+			{RuleIDs: []int{999996}, Path: "/p"},
+		}})
+		if err != nil {
+			t.Fatalf("%s: %v", rule, err)
+		}
+		for _, c := range []struct {
+			uri     string
+			blocked bool
+		}{{"/x?q=attack", false}, {"/x?p=attack", true}, {"/p?p=attack", true}} {
+			res, err := e.Evaluate(context.Background(), newRequest("GET", c.uri, nil, ""))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Interrupted != c.blocked {
+				t.Errorf("%s, %s: blocked=%v, want %v", rule, c.uri, res.Interrupted, c.blocked)
+			}
+		}
+	}
+}
+
+// An argument exclusion covers the rules chained to the rule too
+// (ctl:ruleRemoveTargetById); with rules that negate ARGS targets
+// themselves it is compiled in and covers the rule only
+// (SecRuleUpdateTargetById).
+func TestArgumentExclusionsAndChainedRules(t *testing.T) {
+	const chain = `SecRule REQUEST_METHOD "@streq GET" "id:100001,phase:2,deny,status:403,log,chain"
+SecRule ARGS "@contains attack" "t:none"`
+	for _, tc := range []struct {
+		directives string
+		blocked    bool
+	}{
+		{chain, false},
+		{chain + "\nSecRule ARGS|!ARGS:z \"@contains never\" \"id:100002,phase:2,pass,nolog\"", true},
+	} {
+		for _, path := range []string{"", "/x"} {
+			e, err := New(Config{DisableCRS: true, Directives: tc.directives, Exclusions: []Exclusion{{RuleIDs: []int{100001}, Path: path, Argument: "q"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := e.Evaluate(context.Background(), newRequest("GET", "/x?q=attack", nil, ""))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Interrupted != tc.blocked {
+				t.Errorf("path %q, private %v: blocked=%v, want %v", path, e.variants != nil, res.Interrupted, tc.blocked)
+			}
+		}
+	}
+}
+
+// Sharing rules across argument exclusions is safe only while the CRS
+// negates no ARGS targets itself (see argsNegation).
+func TestCRSNegatesNoArgs(t *testing.T) {
+	negation := regexp.MustCompile(`(?i)!\s*args(?:[^a-z_]|$)`)
+	err := fs.WalkDir(coreruleset.FS, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := fs.ReadFile(coreruleset.FS, path)
+		if err != nil {
+			return err
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if !strings.HasPrefix(strings.TrimSpace(line), "#") && negation.MatchString(line) {
+				t.Errorf("%s negates ARGS: %s", path, strings.TrimSpace(line))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPathExclusionMatchesSecLang checks that path exclusions are decided
+// as the SecLang rules they replace decided them, on tricky paths.
+func TestPathExclusionMatchesSecLang(t *testing.T) {
+	uris := []string{
+		"/", "/api", "/api/", "/api/v1", "/apix", "/api/v1/", "/API/v1", "/api/./v1", "/api/../admin",
+		"/api/..%2fadmin", "/api/%2e%2e/admin", "/api//v1", "/api/v1/..", "/api/v1/.", "/api/.hidden",
+		"/api/..x", "/api/x..", "/api/x%0a../admin", "/api/x%0a/../admin", "/api/x%0d%0a..", "/api/%00/..",
+		"/api/v1%3fq", "/api/v1?q=1", "/api%2fv1", "/search", "/search/", "/search%2f", "/searc%68",
+		"//api/v1", "/api/v1#frag", "http://host/api/v1", "/api/v1;x=1",
+	}
+	for _, pattern := range []string{"/api/*", "/search", "/"} {
+		x, err := compileExclusions([]Exclusion{{RuleIDs: []int{1}, Path: pattern}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := &x.paths[0]
+		var rule string
+		if prefix, ok := strings.CutSuffix(pattern, "*"); ok {
+			rule = fmt.Sprintf("SecRule REQUEST_FILENAME \"@beginsWith %s\" \"id:100001,phase:1,deny,status:403,t:none,nolog,chain\"\n", prefix) +
+				"SecRule REQUEST_FILENAME \"!@rx (?:^|/)\\.\\.?(?:/|$)|//\" \"t:none\""
+		} else {
+			rule = fmt.Sprintf("SecRule REQUEST_FILENAME \"@streq %s\" \"id:100001,phase:1,deny,status:403,t:none,nolog\"", pattern)
+		}
+		e, err := New(Config{DisableCRS: true, Directives: rule})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := map[bool]bool{}
+		for _, uri := range uris {
+			tx := e.waf.NewTransaction()
+			tx.ProcessURI(uri, "GET", "HTTP/1.1")
+			filename := tx.(plugintypes.TransactionState).Variables().RequestFilename().Get()
+			want := tx.ProcessRequestHeaders() != nil
+			_ = tx.Close()
+			if got := p.matches(filename); got != want {
+				t.Errorf("%s on %q (REQUEST_FILENAME %q): matches=%v, SecLang %v", pattern, uri, filename, got, want)
+			}
+			seen[want] = true
+		}
+		if !seen[true] || !seen[false] {
+			t.Errorf("%s: the paths don't test both outcomes: %v", pattern, seen)
+		}
+	}
+}
+
+// TestPathExclusionsKeepSetupRules: the phase 1 rules that ran before path
+// exclusions when they were SecLang rules are still not turned off by them.
+func TestPathExclusionsKeepSetupRules(t *testing.T) {
+	conf, err := fs.ReadFile(coreruleset.FS, "@coraza.conf-recommended")
+	if err != nil {
+		t.Fatal(err)
+	}
+	phase1 := regexp.MustCompile(`id:'?(\d+)'?,\s*phase:1`)
+	var ids []int
+	for _, m := range phase1.FindAllStringSubmatch(string(conf)+argumentLimitRules, -1) {
+		id, _ := strconv.Atoi(m[1])
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		t.Fatal("no phase 1 rules found")
+	}
+	for _, id := range append(ids, idParanoiaLevel, idAnomalyThreshold) {
+		if !setupRules[id] {
+			t.Errorf("phase 1 setup rule %d missing from setupRules", id)
+		}
+	}
+
+	// A path exclusion of the JSON body processor rule leaves JSON parsed
+	// (and inspected); one everywhere turns it off, as before.
+	json := http.Header{"Content-Type": {"application/json"}}
+	body := `{"q":"1' OR '1'='1"}`
+	for _, tc := range []struct {
+		exclusion Exclusion
+		blocked   bool
+	}{
+		{Exclusion{RuleIDs: []int{200001}, Path: "/api/*"}, true},
+		{Exclusion{RuleIDs: []int{200001, 942100}, Path: "/api/*"}, false},
+		{Exclusion{RuleIDs: []int{200001}}, false},
+	} {
+		e, err := New(Config{Exclusions: []Exclusion{tc.exclusion}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := e.Evaluate(context.Background(), newRequest("POST", "/api/search", json, body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Interrupted != tc.blocked {
+			t.Errorf("%+v: blocked=%v, want %v (%v)", tc.exclusion, res.Interrupted, tc.blocked, res.MatchedRuleIDs)
+		}
 	}
 }
 
