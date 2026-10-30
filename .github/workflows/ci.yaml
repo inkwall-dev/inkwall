@@ -207,6 +207,19 @@ jobs:
           check-latest: true
       - run: make vuln
 
+  docs:
+    # The Markdown docs must not rot (#135): internal links and anchors,
+    # Contents lists and the docs index (hack/docscheck). External links are
+    # too slow and flaky for every PR; docs-links.yaml checks them nightly.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+      - run: make docs-check
+
   pr-title:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
