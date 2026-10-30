@@ -144,9 +144,16 @@ func Start(o Options) (*Env, func(), error) {
 
 // InstallLater installs the CRDs a test adds while the operator runs
 // (testenv/later: Traefik's IngressRoute), and waits until they are served.
-func InstallLater(e *Env) error {
+func InstallLater(e *Env) error { return install(e, "later") }
+
+// InstallGatewayAPI installs stand-ins for Gateway API's CRDs
+// (testenv/gateway-api) while the operator runs, and waits until they are
+// served.
+func InstallGatewayAPI(e *Env) error { return install(e, "gateway-api") }
+
+func install(e *Env, dir string) error {
 	_, err := envtest.InstallCRDs(e.Config, envtest.CRDInstallOptions{
-		Paths:              []string{filepath.Join(filepath.Dir(configDir()), "test", "testenv", "later")},
+		Paths:              []string{filepath.Join(filepath.Dir(configDir()), "test", "testenv", dir)},
 		ErrorIfPathMissing: true,
 	})
 	return err

@@ -31,6 +31,9 @@ func TestMain(m *testing.M) {
 		err  error
 	)
 	env, stop, err = testenv.Start(testenv.Options{})
+	if err == nil && env != nil {
+		err = testenv.InstallGatewayAPI(env)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "envtest:", err)
 		os.Exit(1)

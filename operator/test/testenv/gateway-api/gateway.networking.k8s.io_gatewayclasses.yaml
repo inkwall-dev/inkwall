@@ -1,6 +1,6 @@
 # A stand-in for the Gateway API's GatewayClass CRD
 # (gateway.networking.k8s.io/v1), for operator tests: discovery reads only
-# spec.controllerName.
+# spec.controllerName. Not installed at start (testenv.InstallGatewayAPI).
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:

@@ -35,6 +35,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
@@ -127,8 +128,8 @@ type Options struct {
 	// empty: the system roots.
 	ControlPlaneCAFile string
 	// CRDInterval is how often the leader looks for Traefik's IngressRoute
-	// CRD, and the Gateway API's GatewayClass CRD, until it is installed;
-	// 0: 30s.
+	// CRD, Gateway API's HTTPRoute and GatewayClass CRDs, until they are
+	// installed; 0: 30s.
 	CRDInterval time.Duration
 
 	// EventsDir holds the replica's buffer of security events for the
@@ -144,6 +145,9 @@ func NewScheme() (*runtime.Scheme, error) {
 		return nil, err
 	}
 	if err := wafv1alpha1.AddToScheme(s); err != nil {
+		return nil, err
+	}
+	if err := gatewayv1.Install(s); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -200,6 +204,8 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	}
 	// Traefik's IngressRoute CRD may be installed after the operator.
 	ingressRoutes := &crdwatch.Kind{GVK: wiring.IngressRouteGVK, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
+	// So may Gateway API's.
+	httpRoutes := &crdwatch.Kind{GVK: controller.HTTPRouteGVK, Object: &gatewayv1.HTTPRoute{}, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
 	if err := (&controller.BundleReconciler{
 		Client:        mgr.GetClient(),
 		APIReader:     mgr.GetAPIReader(),
@@ -208,6 +214,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		EngineStale:   engineStale(o),
 		RotationGrace: o.SigningKeyGrace,
 		IngressRoutes: ingressRoutes,
+		HTTPRoutes:    httpRoutes,
 	}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
@@ -254,9 +261,6 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
-	if err := mgr.Add(ingressRoutes); err != nil {
-		return nil, err
-	}
 	// The Gateway API's CRDs may be installed after the operator, or never.
 	gatewayClasses := &crdwatch.Kind{GVK: proxydiscovery.GatewayClassGVK, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
 	kinds := map[string][]schema.GroupKind{}
@@ -266,8 +270,10 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	if err := (&proxydiscovery.Reconciler{Client: mgr.GetClient(), GatewayClasses: gatewayClasses, Kinds: kinds}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
-	if err := mgr.Add(gatewayClasses); err != nil {
-		return nil, err
+	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gatewayClasses} {
+		if err := mgr.Add(k); err != nil {
+			return nil, err
+		}
 	}
 	if o.Webhooks {
 		starter := &webhookStarter{mgr: mgr, ready: ready, inject: injector}
