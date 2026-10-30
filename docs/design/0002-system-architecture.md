@@ -20,6 +20,8 @@ Components, protocols and proxy integrations. 0001's performance rules apply.
 4. 0001 performance budgets are release blockers.
 
 **Built (v0.1.0):** Traefik ForwardAuth for `Ingress` targets; standalone reverse proxy.
+**Built since:** Traefik `IngressRoute` targets; the operator side of the optional control plane
+(§3.4).
 
 ### 1.2 Non-goals (for v1)
 
@@ -67,7 +69,7 @@ Pipeline: adapter → pooled `Request` → T0 router → T1 IP/rate → T2 heade
 (action, status, rule IDs, score, policy + bundle version, reason). The compiled policy sits in an
 `atomic.Pointer[Snapshot]`.
 
-| Package | Responsibility | v0.1.0 |
+| Package | Responsibility | Status |
 |---|---|---|
 | `pkg/request` | Canonical `Request`, zero-copy headers | built |
 | `pkg/router` | `(host, path, method)` → policy | built |
@@ -77,7 +79,8 @@ Pipeline: adapter → pooled `Request` → T0 router → T1 IP/rate → T2 heade
 | `pkg/agent`, `pkg/policy` | Bundle stream, verify, compile, swap (§5.2) | built |
 | `pkg/telemetry` | Metrics, tracing, `slog` | built |
 | `pkg/adapters/*` | One per listener | `forwardauth`, `httpcheck`, `proxy` built; `extauthz`, `extproc`, `spoe` not yet |
-| `pkg/ratelimit`, `pkg/iplist`, `pkg/events` | Token buckets, CIDR trie, events | not yet |
+| `pkg/events` | Redacted security events, bounded buffer (§5.4) | built |
+| `pkg/ratelimit`, `pkg/iplist` | Token buckets, CIDR trie | not yet |
 
 Lifecycle: listeners start not ready → load bundle (disk cache, else bundle Secret) → ready after
 the first successful compile → updates compile in the background and swap atomically; a failed
@@ -118,7 +121,9 @@ cache or the bundle Secret (0004 §4.6).
 
 Separate product; out of scope here. OSS depends only on the operator ↔ CP stream (§5.3),
 enrollment (§7.5) and modes (§4.1); enforcement works without it. It talks only to operators,
-never engines: fewer connections, no engine egress, air-gap uses the same path. **Not yet** built.
+never engines: fewer connections, no engine egress, air-gap uses the same path. **Built:** the
+operator side (enrollment, GitOps and Managed modes, events; 0004 §4.9), tested against a stub; the
+control plane itself is not in this repository.
 
 ### 3.5 `inkwallctl` (CLI)
 
@@ -167,8 +172,10 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
   `configMapRef`.
 - **`WAFIPList` / `ClusterWAFIPList`:** CIDRs, or a URL fetched by the operator (never the engine).
 
-**Built:** `InkwallConfig`, `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet`.
-**Not yet:** IP lists, policy `rateLimits`/`ipLists`, `HTTPRoute` targets.
+**Built:** `InkwallConfig`, `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet`; `Ingress` and Traefik
+`IngressRoute` targets.
+**Not yet:** IP lists, policy `rateLimits`/`ipLists`, `HTTPRoute` targets, `BlockHighConfidence`,
+the `InspectPrefix` oversize action, `InkwallConfig.events`.
 
 ### 4.3 Bundle format
 
@@ -214,8 +221,10 @@ deltas: simpler, idempotent, small), the engine ACKs or NACKs.
 - Matching: host, cleaned path, method, most specific first. Uncovered host: not inspected. Covered
   host, no path match: the host's most general policy, so normalization differences can't skip
   inspection.
+- Engines send their security events on the same stream, in `EventBatch`es of up to 1,000
+  (`pkg/events`, §5.4).
 
-**Not yet:** event batches, directives (fields reserved).
+**Not yet:** directives (field reserved).
 
 ### 5.3 Operator ↔ SaaS
 
@@ -248,7 +257,7 @@ operator does: re-enroll (`UNAUTHENTICATED`), stop (`PERMISSION_DENIED`), back o
   (`inkwall.dev/source: saas`), deletes the labelled objects a snapshot no longer has, and records
   the last version applied (sent in `Hello`; an older snapshot is refused). In Managed mode the
   validating webhook lets only the operator write the labelled objects, fail closed.
-  Standalone: events go to logs and optionally OTLP.
+  Standalone: events go to logs and optionally OTLP (not yet: the engine's log only).
 
 **Built:** the contract (#86), enrollment and the primary stream, state sync (`ClusterState`),
 events streams with each replica's disk buffer, and Managed mode (policy snapshots written as CRDs,
@@ -290,18 +299,20 @@ ingress-nginx is retired upstream (2026): existing users only. **Not yet** built
 ```yaml
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
-metadata: {name: inkwall, namespace: shop}
+metadata: {name: inkwall-waf, namespace: shop}
 spec:
   forwardAuth:
     address: http://127.0.0.1:9001/v1/forward-auth
     trustForwardHeader: false   # required, see below
     forwardBody: true           # required for body inspection (Traefik v3)
-    maxBodySize: 1048576        # above the engine's body limit
+    maxBodySize: 10485760       # the largest body.maxBytes
+    maxResponseBodySize: 65536  # the engine's answer (Traefik v3.7+)
     authResponseHeaders: ["X-Request-Id"]
 ```
 
-Attached with the `traefik.ingress.kubernetes.io/router.middlewares` annotation. The adapter
-rebuilds the request from `X-Forwarded-Method`/`-Uri`.
+Attached with the `traefik.ingress.kubernetes.io/router.middlewares` annotation on an `Ingress`, or
+in each route's `middlewares` on an `IngressRoute` (0004 §4.4). The adapter rebuilds the request
+from `X-Forwarded-Method`/`-Uri`.
 
 - **`trustForwardHeader: false`**: with `true`, Traefik keeps client-sent `X-Forwarded-Uri` from
   `trustedIPs` peers, so the engine inspects an attacker's URI (verified on v3.7.13).
@@ -324,7 +335,7 @@ v3.7.13).
 **B. Traefik plugin (later):** Yaegi can't run Coraza well, so it would be a thin client to the
 sidecar (or http-wasm).
 
-**Built:** A, for `Ingress` targets. **Not yet:** B.
+**Built:** A, for `Ingress` and `IngressRoute` targets. **Not yet:** B.
 
 ### 6.4 HAProxy (HAProxy Kubernetes Ingress Controller, HAProxy Ingress)
 
@@ -399,11 +410,14 @@ P-256 or Ed25519. **Built:** the contract, and the operator side
 ### 8.1 Security of Inkwall itself
 
 - Distroless, non-root, read-only FS, no capabilities, seccomp `RuntimeDefault`.
-- UDS socket `0660`; TCP listeners need mTLS or localhost.
+- UDS socket `0660`; TCP listeners need mTLS or localhost. **Built:** the injected engine's check
+  listener is on localhost (`127.0.0.1:9001`); its admin listener (`:9480`: metrics, health, pprof
+  only with `--pprof`) is plain HTTP. **Not yet:** the socket mode, mTLS.
 - Signed bundles: editing the bundle Secret can't disable the WAF without the key.
 - Scoped operator RBAC (0004 §7).
 - Supply chain: goreleaser, cosign, SBOM (syft), SLSA provenance, `govulncheck` and Trivy in CI,
-  pinned Actions; `SECURITY.md`.
+  pinned Actions; `SECURITY.md`. **Built:** all but Trivy; Actions are pinned by version tag, not
+  by commit.
 
 ### 8.2 Client IP correctness
 
@@ -416,7 +430,9 @@ Behind a load balancer the proxy must learn the client first: the PROXY protocol
 
 Bodies never leave the engine; events carry only a redacted snippet (≤ 64 bytes). `events.redact`
 headers (default `Authorization`, `Cookie`, `Set-Cookie`) and query strings are dropped. Enforced
-before anything leaves the cluster.
+before anything leaves the cluster. **Built** (`pkg/events`), in the engine: the list is fixed
+(`Authorization`, `Cookie`, `Set-Cookie`, `Proxy-Authorization`, and cookie variables); a
+configurable `events.redact` is not yet.
 
 ### 8.4 Multi-tenancy
 
@@ -430,14 +446,21 @@ cardinality, adapter failures, bundle version/age, dropped events, rate-limit de
 sampled OTel tracing (one engine span); `slog` JSON, one line per security event at most; Grafana
 dashboard and alerts in Helm.
 
-**Built:** `inkwall_requests_total`, `_check_duration_seconds`, `_bundle_version`,
-`_bundle_updates_total`, `_operator_connected`, `_evaluations_in_flight`, `_evaluation_slots`.
+**Built:** engine: `inkwall_requests_total`, `_check_duration_seconds`, `_bundle_version`,
+`_bundle_updates_total`, `_operator_connected`, `_evaluations_in_flight`, `_evaluation_slots`,
+`_engine_events_total`, `_engine_events_dropped_total`. Operator: `inkwall_operator_bundle_version`,
+`_operator_bundle_compressed_bytes`, `_operator_engines{state}`, `_operator_events_received_total`,
+`_operator_engine_events_dropped_total`, and, toward the control plane,
+`_operator_events_forwarded_total`, `_operator_events_buffered`,
+`_operator_events_buffer_errors_total`.
 
 ### 8.6 Versioning and compatibility
 
 Semver data plane; CRDs `v1alpha1` → `v1beta1` → `v1` with conversion webhooks. Protocol versioned
 in hello; operator supports engines at N-1 minor. CRS pinned per release as a builtin, so upgrades
 never silently change detection. Tested on the last 3 Kubernetes minors (`docs/compatibility.md`).
+**Not yet:** a version matrix and `docs/compatibility.md` (CI's kind e2e runs kind's newest
+Kubernetes, envtest 1.29), conversion webhooks (only `v1alpha1` exists).
 
 ---
 
@@ -476,6 +499,11 @@ exact bytes reaches compilation), event redaction (`FuzzNew`: valid UTF-8, withi
 no query strings or credential snippets) and `inkwallctl test`'s URL, raw HTTP and HAR input.
 Their seed corpora (`testdata/fuzz/`) run in every `make test`; `.github/workflows/fuzz.yaml`
 runs each target for 5 minutes nightly and uploads the failing inputs.
+
+**Built (other levels):** rule conformance (`make crs-test`, go-ftw), E2E and upgrade on kind
+(`make kind-e2e`, `make kind-upgrade`: `helm upgrade` from the last release keeps routes
+protected; shell scripts in `hack/kind`, every PR), benchmarks (`testing.B`, the CI `bench` gate,
+0001 §8). **Not yet:** adapter parity, e2e-framework, k6, soak and chaos.
 
 ---
 

@@ -10,7 +10,9 @@ bundles. CRD shapes: 0002 §4.2.
 
 **Built (v0.1.0):** Traefik with `Ingress` targets (ForwardAuth). **Built since:** Traefik
 `IngressRoute` targets, the `waf.inkwall.dev/unwire` finalizer and unwiring with injection off
-(§5). **Not yet:** other proxies, `HTTPRoute` targets, GitOps/Managed modes.
+(§5), signing key rotation and bundle chunks (§4.6), the operator side of the optional control
+plane: enrollment, GitOps and Managed modes, security events (§4.9). **Not yet:** other proxies,
+`HTTPRoute` targets.
 
 ## 1. Goals and non-goals
 
@@ -32,8 +34,8 @@ objects). **Resolver** → **Bundle builder** (leader) → signed bundle Secret 
 (gRPC, every replica) → engines, whose ACKs feed the **Status aggregator**. **Upstream sync** talks
 to the SaaS. **Admission webhooks** validate CRDs and inject the sidecar.
 
-Tooling: kubebuilder v4 layout, controller-runtime, server-side apply, CEL in CRDs, cert-controller
-(or cert-manager) for webhook certificates.
+Tooling: kubebuilder v4 layout, controller-runtime, JSON merge patches on user-owned objects (§4.4),
+CEL in CRDs, cert-controller (or cert-manager) for webhook certificates.
 
 ## 3. API (`waf.inkwall.dev/v1alpha1`)
 
@@ -64,8 +66,9 @@ Cheapest first:
      `SecRuleUpdate*`): engine-wide settings and file writes (`SecRuleEngine`, body limits,
      `SecAuditLog`, `SecDebugLog`, `Include`) stay Inkwall's, since app teams write rule sets;
    - accepts updates that leave the spec unchanged, so objects a newer engine rejects stay deletable;
-   - certificate self-signed and rotated by the operator, CA injected; cert-manager optional.
-   - Not yet: rejecting non-operator edits in `Managed` mode (§4.9).
+   - certificate self-signed and rotated by the operator, CA injected; cert-manager optional;
+   - in `Managed` mode, rejects edits of the control plane's objects by anyone but the operator
+     (`operator/webhook/source.go`, §4.9).
 3. **Resolver** (async, in status): dangling references, conflicts, unwirable targets.
 
 ### 3.2 Status contract
@@ -74,7 +77,7 @@ Cheapest first:
 
 | Condition | True when | False reasons |
 |---|---|---|
-| `Accepted` | Spec valid, references resolve | `InvalidRef`, `Conflict`, `RuleCompileError` |
+| `Accepted` | Spec valid, references resolve | `InvalidRef`, `Conflict`, `RuleCompileError`, `TargetUnsupported` |
 | `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `NoTargets`, `InjectionDisabled` |
 | `Enforced` | Every serving engine ACKed a bundle with this generation | `EnginesBehind` (`3/6`), `EngineNack`, `NoEngines`, `NotInBundle` |
 | `Ready` | The three above are True | first failing condition's reason |
@@ -165,14 +168,18 @@ attachment or a local skip check.
 | HAProxy | SPOE config + map of protected routes in an ACL | ~0 (map lookup) |
 | Caddy | nothing | 0 |
 
-User-owned objects touched (minimum fields, SSA): Envoy Gateway `EnvoyProxy` (sidecar patch, or an
+User-owned objects touched (minimum fields): Envoy Gateway `EnvoyProxy` (sidecar patch, or an
 operator-made one plus `parametersRef`); ingress-nginx `data.plugins` (merged, original saved for
 uninstall); Traefik's `router.middlewares` annotation on `Ingress`, and `spec.routes[*].middlewares`
-on `IngressRoute`. Every such field is to be listed in `docs/gitops.md` with Argo CD / Flux ignore
-rules.
+on `IngressRoute`; the `waf.inkwall.dev/unwire` finalizer on `WAFPolicy` (§5). Of the chart's own
+objects, the Pod webhook's `failurePolicy` and `objectSelector` (§4.3), and the `caBundle` of both
+webhook configurations. Each built one is listed in [GitOps](../gitops.md) with Argo CD / Flux
+ignore rules.
 
-Apply: field manager `inkwall-operator`, `force` only on own objects, prune managed-by objects no
-longer rendered.
+Write: JSON merge patches on user-owned objects (with the `resourceVersion` where a whole list is
+sent), not server-side apply. The field manager is `inkwall-operator`, from the binary's user agent;
+only the webhook certificate rotator sets it explicitly. Objects the operator creates carry
+`app.kubernetes.io/managed-by: inkwall-operator` and are deleted once no longer needed.
 
 **Built (v0.1.0)** (`operator/internal/wiring`, Traefik):
 
@@ -211,9 +218,9 @@ longer rendered.
   `PendingRestart` (pods older than the webhook, listed), `SidecarMissing` (no Traefik pod
   selected, or pods without the engine: operator down in detect mode or opted out, listed),
   `NoTargets`, `InjectionDisabled`.
-- **Not yet:** `HTTPRoute` targets, `docs/gitops.md`, matching engines to the pods serving a
-  policy's class (all engines count for `Enforced`), IngressRoutes nested with `parentRefs`. Traefik
-  attachment default is open (§12).
+- **Not yet:** `HTTPRoute` targets, matching engines to the pods serving a policy's class (all
+  engines count for `Enforced`), IngressRoutes nested with `parentRefs`. Traefik attachment default
+  is open (§12).
 
 ### 4.5 Resolver
 
@@ -440,7 +447,7 @@ Ingress and an IngressRoute) without the engine.
 
 | Failure | Traffic | Detection | Recovery |
 |---|---|---|---|
-| Operator down | None: engines keep last bundle | `bundle_age_seconds` grows | Restart; engines resync |
+| Operator down | None: engines keep last bundle | Engines' `inkwall_operator_connected` is 0 | Restart; engines resync |
 | Leader down | None | Leader election | Follower builds within ~15 s |
 | Operator rollout | None: stopping replica serves for `--shutdown-delay` (5 s), not ready | — | Engines reconnect |
 | Webhook down, proxy pod created | Detect: starts uninspected. Block: refused; running pods serve | `SidecarMissing` | Restart pod after recovery, or label it `waf.inkwall.dev/inject: "false"` to scale (uninspected) |
@@ -572,46 +579,53 @@ Applying exclusions per request changes three things from v0.1.0:
 ## 9. Testing
 
 Unit tests (resolver, bundle hashing/versioning, conflicts); golden files for `Render` per
-controller version; envtest (`operator/test/testenv`) for reconcilers, conditions, SSA ownership and
-webhooks; kind e2e (injection → wiring → attack blocked → `Ready`, clean uninstall; `make kind-e2e`
-installs the operator with a 15 s `--signing-key-grace`, its kind cluster's kubelet updating
-ConfigMaps within 10 s, and a 2 s `--selector-restart-max-delay`, so the same steps wait less).
-Scale with fake engines in envtest (`make scale-test`, §8; 100 policies × 50 engines in CI). Planned:
-chaos (kill leader, delete Secret, webhook down), upgrade N-1 → N with traffic.
+controller version (not yet: no `Render`, §4.2); envtest (`operator/test/testenv`) for reconcilers,
+conditions, wiring that keeps the user's entries, and webhooks; kind e2e (injection → wiring →
+attack blocked → `Ready`, clean uninstall; `make kind-e2e` installs the operator with a 15 s
+`--signing-key-grace`, its kind cluster's kubelet updating ConfigMaps within 10 s, and a 2 s
+`--selector-restart-max-delay`, so the same steps wait less). Scale with fake engines in envtest
+(`make scale-test`, §8; 100 policies × 50 engines in CI). Upgrade from the last release on kind
+(`make kind-upgrade`, every PR: routes stay protected through Traefik, wired once). Planned: chaos
+(kill leader, delete Secret, webhook down).
 
 ## 10. Code layout
 
 ```
 operator/
 ├── api/v1alpha1/       # CRD types, CEL rules
+├── bundle/             # builder, signer, signing key rotation
 ├── integrations/       # known proxies (Traefik)
 ├── internal/
-│   ├── bundle/         # builder, signer
 │   ├── controller/     # reconcilers
+│   ├── controlplane/   # upstream sync (§4.9)
+│   ├── crdwatch/       # watches added once a CRD is installed
 │   ├── distribution/   # BundleService server, auth, status
 │   ├── injection/
-│   ├── resolver/
 │   └── wiring/
 ├── manager/
-├── webhook/            # validating + mutating handlers
+├── resolver/
+├── webhook/            # validating + mutating handlers, Managed-mode guard
 ├── config/             # kubebuilder kustomize bases
-└── test/               # testenv, fakeengine
+└── test/               # testenv, fakeengine, fakecontrolplane, stubcontrolplane, scale
 ```
 
-`main` is in `cmd/operator`. Planned: `internal/discovery`, `internal/upstream`, one package per
-proxy under `integrations/`. The Helm chart `deploy/helm/inkwall` is the supported install;
-kustomize is for development.
+`main` is in `cmd/operator`. Planned: `internal/discovery`, one package per proxy under
+`integrations/`. The Helm chart `deploy/helm/inkwall` is the supported install; kustomize is for
+development.
 
 ## 11. Milestones
 
-| # | Milestone | Exit criteria |
-|---|---|---|
-| O1 | Scaffold + CRDs + validation | CRDs with CEL, webhook compiles SecLang, envtest green |
-| O2 | Resolver + bundle + distribution | Standalone engine gets signed bundles; `Enforced` works |
-| O3 | Envoy Gateway | kind: one `WAFPolicy`, attack blocked, `Ready=True` |
-| O4 | Pod webhook + ingress-nginx, Traefik, HAProxy | Same attack blocked via all four in one cluster |
-| O5 | Uninstall, suspend, chaos, scale | §5 and §6 verified in CI |
-| O6 | Upstream sync | Enroll with a SaaS stub; policy round-trip |
+| # | Milestone | Exit criteria | Status |
+|---|---|---|---|
+| O1 | Scaffold + CRDs + validation | CRDs with CEL, webhook compiles SecLang, envtest green | Done (v0.1.0) |
+| O2 | Resolver + bundle + distribution | Standalone engine gets signed bundles; `Enforced` works | Done (v0.1.0) |
+| O3 | Envoy Gateway | kind: one `WAFPolicy`, attack blocked, `Ready=True` | Not yet (v0.3.0) |
+| O4 | Pod webhook + ingress-nginx, Traefik, HAProxy | Same attack blocked via all four in one cluster | Pod webhook and Traefik done (v0.1.0); ingress-nginx, HAProxy not yet |
+| O5 | Uninstall, suspend, chaos, scale | §5 and §6 verified in CI | Uninstall, suspend, scale done; chaos not yet (§9) |
+| O6 | Upstream sync | Enroll with a SaaS stub; policy round-trip | Done, against the stub (§4.9) |
+
+Shipped out of order: the Pod webhook and Traefik (O4) came first, in v0.1.0, before Envoy
+Gateway (O3).
 
 ## 12. Open questions
 

@@ -72,8 +72,10 @@ Measured, not adopted:
 
 Next levers, by expected gain:
 
-1. Per-route skip of routes and bodies (§4, T0). **Built** for standalone mode (`--skip-paths`,
-   `--skip-body-paths`, `pkg/router`); **not yet** set per route by the operator.
+1. Per-route skip of routes and bodies (§4, T0). **Built** in the engine (`pkg/router`): flags
+   `--skip-paths`, `--skip-body-paths` in standalone mode, and a `WAFPolicy`'s `skip` carried in the
+   bundle (`skip_paths`, `skip_body_paths`) per policy. **Not yet:** skipping in the proxy, so
+   skipped requests still reach the engine.
 2. Less Coraza per-rule, per-argument overhead, ideally upstream, with a prefilter fix.
 3. Single-pass prefilter (§5.2); must pass the CRS suite first.
 
@@ -148,12 +150,14 @@ waits on the network; small over-admission accepted.
 
 - Events to a lock-free ring buffer, shipped in batches; audit logs only for matched or sampled
   requests; overflow drops and counts.
-- **Built:** Prometheus metrics, `/healthz`, `/readyz` (`pkg/telemetry`), pprof (`--pprof`).
-  **Not yet:** ring buffer, shipper, audit logs.
+- **Built:** Prometheus metrics, `/healthz`, `/readyz` (`pkg/telemetry`), pprof (`--pprof`);
+  security events in a bounded ring buffer (a mutex, not lock-free) shipped to the operator in
+  batches (`pkg/events`). **Not yet:** a lock-free buffer, audit logs.
 
 ### 5.5 Wire format
 
-- Protobuf with `vtprotobuf` marshalers, gRPC over long-lived HTTP/2 streams.
+- Protobuf with `vtprotobuf` marshalers, gRPC over long-lived HTTP/2 streams. **Built:** protobuf
+  and gRPC streams; **not yet:** `vtprotobuf`.
 - Adapters send only fields the policy reads.
 
 ## 6. Deployment topology

@@ -4,9 +4,9 @@
 engine (OWASP [Coraza](https://coraza.io/) with the [Core Rule Set](https://coreruleset.org/)) next
 to your ingress controller and enforces the `WAFPolicy` objects you attach to your routes.
 
-> **Status: v0.1.0, early.** Works today with **Traefik** and **`Ingress`** or **`IngressRoute`**
-> routes, plus a standalone reverse proxy for anything else. The API is `v1alpha1` and will
-> change. See [Limits](#limits) and the [roadmap](#roadmap).
+> **Status: v0.1.2, early; v0.2.0 is next.** Works today with **Traefik** and **`Ingress`** or
+> **`IngressRoute`** routes, plus a standalone reverse proxy for anything else. The API is
+> `v1alpha1` and will change. See [Limits](#limits) and the [roadmap](#roadmap).
 
 ## How it works
 
@@ -25,7 +25,7 @@ to your ingress controller and enforces the `WAFPolicy` objects you attach to yo
 Needs Kubernetes 1.29+ and Helm 3.
 
 ```sh
-helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.1.0 \
+helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.1.2 \
   --namespace inkwall-system --create-namespace
 ```
 
@@ -39,7 +39,7 @@ Guides: [upgrading](docs/upgrading.md), [GitOps with Argo CD and Flux](docs/gito
 Images, chart and checksums are signed keyless with cosign. To verify:
 
 ```sh
-cosign verify ghcr.io/inkwall-dev/inkwall-engine:0.1.0 \
+cosign verify ghcr.io/inkwall-dev/inkwall-engine:0.1.2 \
   --certificate-identity-regexp '^https://github.com/inkwall-dev/inkwall/\.github/workflows/release\.yaml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
@@ -158,7 +158,12 @@ on an error):
   designed, not built.
 - Targets: **`Ingress`** and Traefik **`IngressRoute`** (rules of `Host`, `Path` and `PathPrefix`
   joined by `&&`); not Gateway API `HTTPRoute` yet.
-- One cluster; the optional control plane (fleet management, analytics) isn't built.
+- One cluster per operator. The operator can connect to an optional control plane, which isn't in
+  this repository: in `GitOps` mode it sends it a read-only copy of your policies, in `Managed` mode
+  it writes the policies the control plane sends, and in both it forwards the engines' security
+  events. `Standalone`, the default, connects nothing. See [control plane](docs/control-plane.md).
+- A cluster's policies fit in a bundle of up to 7.2 MiB compressed, split over several Secrets past
+  900 KiB.
 - Behind a load balancer the engine sees the client's IP only with the PROXY protocol on Traefik's
   entry points or `externalTrafficPolicy: Local`: see [client IP](docs/client-ip.md).
 
@@ -167,9 +172,13 @@ on an error):
 Tracked on the [project board](https://github.com/orgs/inkwall-dev/projects/1) and in
 [milestones](https://github.com/inkwall-dev/inkwall/milestones):
 
-- **v0.2.0**: signing key rotation, memory at scale, offline tests of `WAFPolicy` objects.
+- **v0.2.0** (next): signing key rotation, offline tests of `WAFPolicy` objects, `IngressRoute`
+  targets and the operator side of the optional control plane, all shipped in 0.1.1; bundle chunks
+  and memory at scale, on `main`.
+- **v0.3.0**: Gateway API `HTTPRoute` targets with Traefik and Envoy Gateway, proxy discovery,
+  engine request metrics to the control plane, migrating ingress-nginx ModSecurity annotations.
 - **v1.0.0**: a stable API (out of `v1alpha1`) with an upgrade path.
-- Then more proxies: Envoy and Gateway API, HAProxy, ingress-nginx, Caddy.
+- Then more proxies: HAProxy, ingress-nginx, Caddy.
 
 ## Development
 
