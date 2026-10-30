@@ -5,8 +5,10 @@
 # input runs for a few minutes. Their seed corpora (testdata/fuzz) also run
 # in every `make test`. A failure uploads the inputs it found; reproduce one
 # with `go test -run '<Target>/<file>' ./<package>` after copying it into
-# <package>/testdata/fuzz/<Target>/. A crash may be a vulnerability: report
-# it privately (SECURITY.md) rather than in an issue.
+# <package>/testdata/fuzz/<Target>/. A crash may be a vulnerability, and this
+# repository's logs and artifacts are public: the run's output and inputs are
+# encrypted to the maintainer's key (.github/fuzz-crash-key.asc), never
+# printed. Report a crash privately (SECURITY.md), not in an issue.
 name: fuzz
 
 on:
@@ -53,18 +55,30 @@ jobs:
         with:
           go-version: '1.27.x'
           check-latest: true
-      - run: go test -run='^$' -fuzz="^${TARGET}\$" -fuzztime="${FUZZTIME}" "${PACKAGE}"
+      # The output names the failing input, so it goes to a file, not the log.
+      - run: |
+          if go test -run='^$' -fuzz="^${TARGET}\$" -fuzztime="${FUZZTIME}" "${PACKAGE}" >fuzz.log 2>&1; then
+            tail -3 fuzz.log
+          else
+            echo "::error::${TARGET} failed; its output and inputs are in the encrypted artifact"
+            exit 1
+          fi
         env:
           PACKAGE: ${{ matrix.package }}
           TARGET: ${{ matrix.target }}
           FUZZTIME: ${{ inputs.fuzztime || '5m' }}
       - if: failure()
         # The failing inputs are the files the run added to the corpus.
+        # Encrypted to the maintainer's key: decrypt with gpg -d.
         run: |
           mkdir -p crashers
           git ls-files --others --exclude-standard -- "${PACKAGE}/testdata/fuzz/${TARGET}" |
             xargs -r cp -t crashers
-          ls -l crashers
+          cp fuzz.log crashers/
+          gpg --batch --import .github/fuzz-crash-key.asc
+          tar -czf - crashers | gpg --batch --trust-model always --encrypt \
+            --recipient 0277D560C39AB55D376F03FC69AC239DF03A5023 --output crashers.tar.gz.gpg
+          rm -rf crashers
         env:
           PACKAGE: ${{ matrix.package }}
           TARGET: ${{ matrix.target }}
@@ -72,6 +86,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: crashers-${{ matrix.target }}
-          path: crashers
+          path: crashers.tar.gz.gpg
           if-no-files-found: ignore
           retention-days: 14
