@@ -49,7 +49,8 @@ enrollment, GitOps and Managed modes, and security events ([§4.9](#49-upstream-
 the discovery controller ([§4.1](#41-discovery-controller)) and the wiring's `Integration` interface
 ([§4.2](#42-integration-interface)).
 
-**Not yet:** other proxies, [`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) targets.
+**Not yet:** other proxies, wiring [`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) targets (the resolver reads them,
+[§4.5](#45-resolver)).
 
 ## Contents
 
@@ -388,11 +389,14 @@ engine matches on. This is decision D6, the operator resolves routes
 
 It runs again when a targeted route changes (routes are indexed by target).
 
-**Built (v0.1.0)** (`operator/resolver`; Ingress, and IngressRoute since):
+**Built (v0.1.0)** (`operator/resolver`; Ingress, and IngressRoute and HTTPRoute since):
 
 - **Conflicts:** the oldest policy wins (by creation time, then name), and the others get
-  `Conflict`, as in [Gateway API](https://gateway-api.sigs.k8s.io/). Rejecting both would leave the route unprotected. Identical routes
-  from two Ingresses also go to the older policy.
+  `Conflict`, as in [Gateway API](https://gateway-api.sigs.k8s.io/). Rejecting both would leave the route unprotected.
+- **Precedence.** Identical routes (host, path and methods) from two targets go to the most
+  specific one: an HTTPRoute rule (`sectionName`), then a whole HTTPRoute, then an Ingress or an
+  IngressRoute. Between targets of the same kind, they go to the older policy. The other policy
+  keeps its other routes, and its `Accepted` message lists the ones it lost.
 - **Errors fall back.** A policy that can't be resolved keeps its version in the current bundle, so
   a bad edit never weakens protection. A policy that was never resolved is left out. A missing
   target is not an error.
@@ -409,6 +413,20 @@ It runs again when a targeted route changes (routes are indexed by target).
     force.
   - Traefik's `PathPrefix` is a string prefix, but it is read element-wise. Other paths of a covered
     host get that host's most general policy in the engine, so none goes uninspected.
+- **HTTPRoute routes** are its `hostnames` × each rule's `matches`.
+  - `Exact` and `PathPrefix` paths, cleaned; a `method` is kept. No `hostnames` means any host (the
+    listeners' hostnames aren't read); a rule without `matches`, or a match without a path, is
+    `PathPrefix /`.
+  - `sectionName` narrows the target to the rule of that `name`. A name no rule has is a missing
+    target.
+  - `RegularExpression` paths, `headers` and `queryParams` are `Accepted=False`
+    (`TargetUnsupported`), naming the rule (`spec.rules[1].matches[0] (rule admin)`). The previous
+    version stays in force. A rule the target doesn't select isn't read.
+  - Read once the HTTPRoute CRD (`gateway.networking.k8s.io/v1`) is installed: the leader looks for
+    it every 30 s, then the bundle builder watches HTTPRoutes (`operator/internal/crdwatch`).
+    Without it nothing changes.
+  - No proxy wires an HTTPRoute yet: such a policy is `Programmed=False`
+    (`ControllerUnsupported`).
 - **Cross-namespace `WAFRuleSet` references** are rejected until a grant mechanism exists. Use a
   `ClusterWAFRuleSet` instead.
 
@@ -722,6 +740,7 @@ Least privilege. The built rules are in [`role.yaml`](../../operator/config/rbac
 | `gatewayclasses` (gateway.networking.k8s.io) | read | Discovery |
 | `ingresses` | patch | Traefik annotation |
 | `ingressroutes` (traefik.io) | read, patch | Traefik routes' `middlewares` |
+| `httproutes`, `gateways`, `gatewayclasses` (gateway.networking.k8s.io) | read | HTTPRoute targets ([§4.5](#45-resolver)) |
 | `middlewares` (traefik.io) | full | Traefik wiring |
 | `configmaps` | full, cluster-wide | `inkwall-trust` per namespace, engine reports |
 | `secrets` | in `inkwall-system` | Bundle, signing key, certificates |
@@ -736,7 +755,7 @@ Least privilege. The built rules are in [`role.yaml`](../../operator/config/rbac
 - one `ClusterRole` per controller, aggregated by the chart, with rules for absent proxies left out
   (`.Capabilities.APIVersions`). The markers are already grouped by integration; controller-gen
   merges them into one role;
-- rules for Gateway API routes, Envoy Gateway, Istio and controller ConfigMaps;
+- rules for writing Gateway API objects, Envoy Gateway, Istio and controller ConfigMaps;
 - a `deployments` restart patch, only with `rollout: Automatic`.
 
 ## 8. Scale targets (v1)
