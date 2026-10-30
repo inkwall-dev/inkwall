@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("POST /upload HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n14\r\n world, and much more\r\n0\r\n\r\n")

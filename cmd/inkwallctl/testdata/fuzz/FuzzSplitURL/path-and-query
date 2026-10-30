@@ -1,0 +1,2 @@
+go test fuzz v1
+string("http://shop.example/search?q=1#frag")

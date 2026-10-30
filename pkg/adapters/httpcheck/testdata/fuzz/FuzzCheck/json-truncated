@@ -1,0 +1,3 @@
+go test fuzz v1
+[]byte("{\"method\":\"PUT\",\"raw_uri\":\"*\",\"body\":\"YQ==\",\"body_truncated\":true}")
+bool(true)

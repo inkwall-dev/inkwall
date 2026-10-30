@@ -1,0 +1,8 @@
+go test fuzz v1
+string("GET")
+string("/")
+string("shop.example.com")
+string("https")
+string("x-forwarded-method")
+string("POST")
+[]byte("")

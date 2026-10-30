@@ -1,0 +1,10 @@
+go test fuzz v1
+string("GET")
+string("")
+string("/")
+string("")
+string("")
+string("")
+string("request_headers:cookie")
+string("session=s3cr3t")
+int(1)

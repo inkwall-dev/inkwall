@@ -1,0 +1,2 @@
+go test fuzz v1
+string("/search?q=1' OR '1'='1")

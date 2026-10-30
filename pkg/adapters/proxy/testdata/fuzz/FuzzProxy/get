@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("GET /search?q=shoes&a=1;b=2 HTTP/1.1\r\nHost: shop.example.com\r\nX-Request-Id: req-1\r\n\r\n")

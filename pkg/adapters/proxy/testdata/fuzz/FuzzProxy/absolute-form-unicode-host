@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("GET http://\xce\xb2.example/x HTTP/1.1\r\nHost: shop.example\r\n\r\n")

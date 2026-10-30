@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"log\":{\"entries\":[{\"request\":{\"method\":\"G\xffT\",\"url\":\"http://h\xff/\xfe\",\"headers\":[{\"name\":\"X\",\"value\":\"\xff\"}]}}]}}")

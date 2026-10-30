@@ -1,0 +1,2 @@
+go test fuzz v1
+string("/caf%C3%A9/%2Fadmin")

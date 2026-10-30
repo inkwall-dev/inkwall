@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("zET /%1e9 HTTP/1.0\r\n\r\n")
