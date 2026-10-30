@@ -42,6 +42,13 @@ type Engine struct {
 	Reject func(*bundlev1.Bundle) error
 	// Heartbeat is the interval of heartbeats; 0 means 1s.
 	Heartbeat time.Duration
+	// OnApply, if set, is called with each bundle the engine applies,
+	// before its Ack.
+	OnApply func(*bundlev1.Bundle)
+	// KeepVersionOnly keeps only the version of the applied bundle, not
+	// its policies: hundreds of engines with a large bundle each would
+	// take gigabytes (the scale test, operator/test/scale).
+	KeepVersionOnly bool
 
 	mu      sync.Mutex
 	applied *bundlev1.Bundle
@@ -192,6 +199,12 @@ func (e *Engine) run(ctx context.Context) error {
 				return err
 			}
 			continue
+		}
+		if e.OnApply != nil {
+			e.OnApply(b)
+		}
+		if e.KeepVersionOnly {
+			b = &bundlev1.Bundle{Version: b.GetVersion()}
 		}
 		e.mu.Lock()
 		e.applied = b
