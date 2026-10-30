@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -317,5 +318,51 @@ func TestWatchEvents(t *testing.T) {
 		if ev.GetEngineId() != "e1" || ev.GetPodNamespace() != "edge" || ev.GetPodName() != "traefik-1" {
 			t.Errorf("event %s from %s %s/%s, want e1 edge/traefik-1", ev.GetEventId(), ev.GetEngineId(), ev.GetPodNamespace(), ev.GetPodName())
 		}
+	}
+}
+
+func TestWatchWaitingForASendSlot(t *testing.T) {
+	// Every send slot is taken for longer than the idle timeout (#148).
+	store, table := NewStore(), NewTable()
+	store.Set(signed(1), 1)
+	s := NewServer(store, table, fakeAuth{}, "r", logr.Discard())
+	s.IdleTimeout = 200 * time.Millisecond
+	s.sends = make(chan struct{}, 1)
+	s.sends <- struct{}{}
+	c := serve(t, s)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	hello := func(id string) agentv1.BundleService_WatchClient {
+		stream, err := c.Watch(withToken(ctx, id))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{EngineId: id}}}); err != nil {
+			t.Fatal(err)
+		}
+		return stream
+	}
+	alive, silent := hello("alive"), hello("silent")
+
+	// An engine that heartbeats keeps its stream, and its heartbeats are
+	// recorded while it waits.
+	for i := range 10 {
+		hb := &agentv1.Heartbeat{TrustedKeyIds: []string{"k", strconv.Itoa(i)}}
+		if err := alive.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Heartbeat{Heartbeat: hb}}); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// A silent engine is still cut off, slot or not.
+	if _, err := silent.Recv(); !strings.Contains(status.Convert(err).Message(), "no message from the engine") {
+		t.Fatalf("a silent engine waiting for a slot: got %v, want the idle timeout", err)
+	}
+	waitFor(t, "the heartbeats", func() bool {
+		got, _ := table.Snapshot()
+		return len(got) == 1 && got[0].ID == "alive" && slices.Equal(got[0].TrustedKeys, []string{"k", "9"})
+	})
+	<-s.sends
+	if resp, err := alive.Recv(); err != nil || resp.GetBundle() == nil {
+		t.Fatalf("an engine that waited for a slot: got %v, %v, want the bundle", resp, err)
 	}
 }
