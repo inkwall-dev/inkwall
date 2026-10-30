@@ -405,7 +405,7 @@ check "Inkwall's Middleware is deleted" no_middleware
 "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout status deployment/traefik-e2e --timeout=180s >/dev/null
 eventually "a new Traefik pod has no engine" engine_image_is ""
 eventually "the Ingress is served (uninspected)" status_is 200 "$HOST" "$SQLI"
-check "so is the IngressRoute" status_is 200 "$ROUTE_HOST" "$SQLI"
+eventually "so is the IngressRoute" status_is 200 "$ROUTE_HOST" "$SQLI"
 eventually "the user's Middleware still applies" user_header "$HOST"
 
 if [[ $failures -gt 0 ]]; then
