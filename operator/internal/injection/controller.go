@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/inkwall-dev/inkwall/operator/bundle"
+	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 )
 
 // The controller reads proxy pods, writes the trust ConfigMap in their
@@ -173,7 +174,8 @@ func (r *Reconciler) reconcileTrust(ctx context.Context, namespace string) (reco
 }
 
 // reconcileGrant keeps one Role and RoleBinding in the operator's namespace
-// that let every proxy pod's ServiceAccount get the bundle Secret.
+// that let every proxy pod's ServiceAccount get the bundle Secret and its
+// chunks.
 func (r *Reconciler) reconcileGrant(ctx context.Context) error {
 	var pods corev1.PodList
 	if err := r.Client.List(ctx, &pods, client.MatchingLabelsSelector{Selector: r.Pods}); err != nil {
@@ -192,7 +194,7 @@ func (r *Reconciler) reconcileGrant(ctx context.Context) error {
 		ObjectMeta: metav1.ObjectMeta{Namespace: r.Namespace, Name: GrantName, Labels: managed()},
 		Rules: []rbacv1.PolicyRule{{
 			APIGroups: []string{""}, Resources: []string{"secrets"},
-			ResourceNames: []string{bundle.BundleSecret}, Verbs: []string{"get"},
+			ResourceNames: append([]string{bundle.BundleSecret}, bundlesecret.ChunkNames(bundle.BundleSecret)...), Verbs: []string{"get"},
 		}},
 	}
 	if err := r.apply(ctx, role, func(cur client.Object) bool {

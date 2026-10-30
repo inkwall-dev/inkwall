@@ -136,6 +136,9 @@ kubectl -n inkwall-system get secret inkwall-bundle -o jsonpath='{.data.ed25519\
 inkwallctl test --bundle bundle.yaml --bundle-key bundle.pub --har traffic.har
 ```
 
+A bundle too large for one Secret is split into chunks: `inkwallctl` then prints the `kubectl get
+secret` command that saves the Secret with them.
+
 In CI, with attacks and legitimate traffic kept next to the policies (exit 1 on a wrong verdict, 2
 on an error):
 

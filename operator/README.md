@@ -7,8 +7,8 @@ The Kubernetes operator ([design](../docs/design/0004-operator.md)). It:
   (0004 §3.1). It fails closed for the WAF kinds only; updates that don't change the spec are
   always accepted;
 - **builds** the policies and the Ingresses they target into a bundle, signed with the cluster's
-  ed25519 key, in the `inkwall-bundle` Secret (leader only; a second after a change, and every
-  10 minutes), and reports `Accepted` on each policy. It rotates the key on request (the
+  ed25519 key, in the `inkwall-bundle` Secret, split into chunk Secrets over 900 KiB compressed
+  (leader only; a second after a change, and every 10 minutes), and reports `Accepted` on each policy. It rotates the key on request (the
   `waf.inkwall.dev/rotate-signing-key` annotation on the `InkwallConfig`) or on a schedule, without
   an engine ever rejecting a bundle;
 - **serves** the bundle to the engines over gRPC/TLS on port 9445 and reports `Enforced` from their

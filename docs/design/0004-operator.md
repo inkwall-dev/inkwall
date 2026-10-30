@@ -245,7 +245,8 @@ targeted route changes (indexed by target).
 3. Same content hash as the current bundle → stop.
 4. Bump the monotonic version, continued from the stored bundle across leader changes.
 5. Sign with the cluster ed25519 key.
-6. Store gzipped in Secret `inkwall-bundle`, which is also the engines' cold-start source.
+6. Store gzipped in Secret `inkwall-bundle`, which is also the engines' cold-start source; split
+   into chunk Secrets if it doesn't fit in one.
 
 **Built (v0.1.0)** (`operator/bundle`, `pkg/agent`):
 
@@ -255,8 +256,27 @@ targeted route changes (indexed by target).
   memory if it was deleted. Cluster ID = `kube-system` Namespace UID.
 - Engine cold start: on-disk cache, else the Secret (`--bundle-secret`) via a second projected token
   for the API server and `kube-root-ca.crt`; verified like a streamed bundle.
-- **Not yet:** chunking (Secrets cap at 1 MiB). A bundle over 900 KiB compressed is not published;
-  the current one stays.
+- **Chunks** (`pkg/bundlesecret`; Secrets cap at 1 MiB): a bundle up to 900 KiB compressed is
+  `bundle.pb.gz` in `inkwall-bundle`, as before, so older engines read it. A larger one is split
+  into Secrets of 900 KiB, `inkwall-bundle-a-0`… or `inkwall-bundle-b-0`…, labeled
+  `waf.inkwall.dev/bundle-chunk`, and `inkwall-bundle` holds `manifest.json` instead (SHA-256 and
+  size of the compressed bundle, chunk names). The chunks are written to the set the current
+  manifest doesn't use, then the manifest; chunks it doesn't list are deleted after, at every
+  build. A reader never sees a manifest before its chunks, and checks the hash, so one that read
+  the manifest just before the next bundle replaced its chunks fails and retries. At most 8 chunks
+  (7.2 MiB) and 64 MiB decompressed; over that, a bundle is not published and the current one
+  stays. The builder warns when it publishes a bundle over 75% of that;
+  `inkwall_operator_bundle_compressed_bytes` is the size each replica serves. A chunk deleted or
+  edited makes the builder publish the bundle again, as a new version (with no previous version
+  for an unresolvable policy to fall back on). `inkwall-bundle-reader` grants `get` on every chunk
+  name, and so must the Role of an engine configured by hand with `--bundle-secret`. The stream
+  carries the bundle whole: engines accept messages up to 65 MiB (gRPC's default was 4 MiB).
+- **Compatibility:** an engine without chunk support finds no `bundle.pb.gz` in a chunked Secret,
+  so it keeps its cache, or waits for the operator; it never applies part of a bundle. Such
+  engines also refuse a streamed bundle over 4 MiB decompressed, and keep their last one. An
+  operator without chunk support can't read a chunked Secret and builds nothing: before rolling
+  back, delete `inkwall-bundle` and its chunks (`-l waf.inkwall.dev/bundle-chunk`); engines accept
+  bundles of the restarted version sequence, as they are newer.
 
 **Built: signing key rotation** (`operator/bundle/keyring.go`, `pkg/agent`,
 `pkg/bundlekey`). Requested by a new value of the `waf.inkwall.dev/rotate-signing-key` annotation on
@@ -307,8 +327,8 @@ object per 2 s.
 **Built (v0.1.0):** `Enforced=True` when every connected engine runs a bundle ≥ the policy's
 `status.bundleVersion`; else `NoEngines`, `EnginesBehind` (`1/3 engines on bundle 42`),
 `EngineNack` (first error) or `NotInBundle`. Metrics: `inkwall_operator_bundle_version`,
-`inkwall_operator_engines{state}`. **Not yet:** `integration` label, reconcile duration, policy
-condition counts, bundle bytes.
+`inkwall_operator_engines{state}`, `inkwall_operator_bundle_compressed_bytes` (§4.6). **Not yet:**
+`integration` label, reconcile duration, policy condition counts.
 
 ### 4.9 Upstream sync (leader only)
 
@@ -423,6 +443,8 @@ Ingress and an IngressRoute) without the engine.
 | Invalid rule | Rejected at admission | Error to `kubectl` / Argo CD | Fix the rule |
 | Engine can't compile (skew) | Engine keeps previous bundle | `EngineNack` | Upgrade engines or fix rule |
 | Bundle Secret deleted | None | Builder recreates it | Automatic |
+| Bundle chunk deleted or edited | None; new engines can't cold start from the Secret meanwhile | Builder logs it | Automatic: published again |
+| Bundle over 7.2 MiB compressed | None: the current bundle stays; changes are not published | Builder error; warning past 75%, `inkwall_operator_bundle_compressed_bytes` | Shrink the policies (fewer, or smaller rule sets) |
 | Signing key rotated | None: signs with the new key only once every connected engine trusts it | Secret's `rotation-phase`; operator logs the engines it waits for | Automatic (§4.6); replace engines older than rotation |
 | Unknown controller version | Wiring may break | `Programmed=False` | Update or pin integration |
 | API server down | None | — | Automatic |
@@ -464,7 +486,7 @@ proxies omitted (`.Capabilities.APIVersions`); Gateway API, Envoy Gateway, Istio
 | Engines per cluster | 500 |
 | Change → enforced everywhere (p95) | < 10 s |
 | Operator memory | < 512 MiB |
-| Bundle (compressed) | < 900 KiB, or chunked |
+| Bundle (compressed) | < 900 KiB in one Secret; up to 7.2 MiB in chunks |
 
 To verify on kind with fake engines that speak the bundle protocol.
 

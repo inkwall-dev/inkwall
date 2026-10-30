@@ -296,6 +296,28 @@ func TestApplyAndAck(t *testing.T) {
 	waitFor(t, "heartbeats", func() bool { _, _, _, _, beats := e.op.snapshot(); return beats >= 2 })
 }
 
+// A bundle over gRPC's default message limit (4 MiB) is received: the
+// operator sends bundles whole, decompressed.
+func TestApplyLargeBundle(t *testing.T) {
+	e := newEnv(t)
+	a, holder, _ := e.agent(t, nil)
+	run(t, a)
+	<-e.op.sawHello
+	signed := bundle(t, e.priv, 1, time.Now(), blockAttack)
+	var b bundlev1.Bundle
+	if err := proto.Unmarshal(signed.GetBundle(), &b); err != nil {
+		t.Fatal(err)
+	}
+	b.ClusterId = strings.Repeat("x", 6<<20)
+	raw, _ := proto.Marshal(&b)
+	signed.Bundle, signed.Signature = raw, ed25519.Sign(e.priv, raw)
+	e.op.bundles <- signed
+	waitFor(t, "the ack", func() bool { acks, _, _, _, _ := e.op.snapshot(); return len(acks) == 1 && acks[0] == 1 })
+	if !blocks(holder) {
+		t.Fatal("the large bundle is not enforced")
+	}
+}
+
 func TestRejections(t *testing.T) {
 	e := newEnv(t)
 	a, holder, compiles := e.agent(t, nil)

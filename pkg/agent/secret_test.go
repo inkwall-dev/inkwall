@@ -10,10 +10,12 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,6 +24,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 )
 
 // fakeAPI serves the bundle Secret as the Kubernetes API does.
@@ -31,9 +34,18 @@ type fakeAPI struct {
 
 	mu     sync.Mutex
 	signed *bundlev1.SignedBundle // nil: 404
+	// chunked serves the bundle in chunks; missing is a chunk not found,
+	// stale one of another bundle.
+	chunked        bool
+	missing, stale string
+	// gz is signed compressed, computed once: under the race detector,
+	// compressing a large bundle on every read takes seconds.
+	gz     []byte
 	tokens []string
 	reads  atomic.Int32
 }
+
+const secretsPath = "/api/v1/namespaces/inkwall-system/secrets/"
 
 func newFakeAPI(t *testing.T, dir string) *fakeAPI {
 	t.Helper()
@@ -43,24 +55,18 @@ func newFakeAPI(t *testing.T, dir string) *fakeAPI {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.tokens = append(f.tokens, r.Header.Get("Authorization"))
-		if r.URL.Path != "/api/v1/namespaces/inkwall-system/secrets/inkwall-bundle" {
+		name, ok := strings.CutPrefix(r.URL.Path, secretsPath)
+		if !ok {
 			http.Error(w, "unexpected path "+r.URL.Path, http.StatusBadRequest)
 			return
 		}
-		if f.signed == nil {
+		data := f.secrets(t)[name]
+		if data == nil {
 			w.WriteHeader(http.StatusNotFound)
-			_, _ = w.Write([]byte(`{"kind":"Status","message":"secrets \"inkwall-bundle\" not found"}`))
+			_, _ = w.Write([]byte(`{"kind":"Status","message":"secrets \"` + name + `\" not found"}`))
 			return
 		}
-		raw, _ := proto.Marshal(f.signed)
-		var gz bytes.Buffer
-		zw := gzip.NewWriter(&gz)
-		_, _ = zw.Write(raw)
-		_ = zw.Close()
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"kind": "Secret",
-			"data": map[string][]byte{SecretBundleKey: gz.Bytes(), "ed25519.pub": []byte("ignored")},
-		})
+		_ = json.NewEncoder(w).Encode(map[string]any{"kind": "Secret", "data": data})
 	}))
 	t.Cleanup(f.srv.Close)
 	f.caFile = filepath.Join(dir, "kube-ca.crt")
@@ -69,10 +75,44 @@ func newFakeAPI(t *testing.T, dir string) *fakeAPI {
 	return f
 }
 
+// secrets returns the Secrets' data by name, as the operator writes them.
+func (f *fakeAPI) secrets(t *testing.T) map[string]map[string][]byte {
+	if f.signed == nil {
+		return nil
+	}
+	if f.gz == nil {
+		raw, _ := proto.Marshal(f.signed)
+		var gz bytes.Buffer
+		zw := gzip.NewWriter(&gz)
+		_, _ = zw.Write(raw)
+		_ = zw.Close()
+		f.gz = gz.Bytes()
+	}
+	if !f.chunked {
+		return map[string]map[string][]byte{"inkwall-bundle": {SecretBundleKey: f.gz, "ed25519.pub": []byte("ignored")}}
+	}
+	m, chunks, err := bundlesecret.Split("inkwall-bundle", "a", f.gz)
+	if err != nil {
+		t.Error(err)
+	}
+	manifest, _ := m.Marshal()
+	out := map[string]map[string][]byte{"inkwall-bundle": {bundlesecret.ManifestKey: manifest, "ed25519.pub": []byte("ignored")}}
+	for i, c := range chunks {
+		if m.Chunks[i] == f.stale {
+			c = bytes.Clone(c)
+			c[len(c)/2] ^= 1
+		}
+		if m.Chunks[i] != f.missing {
+			out[m.Chunks[i]] = map[string][]byte{bundlesecret.ChunkKey: c}
+		}
+	}
+	return out
+}
+
 func (f *fakeAPI) set(signed *bundlev1.SignedBundle) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.signed = signed
+	f.signed, f.gz = signed, nil
 }
 
 func (f *fakeAPI) source(dir string) *SecretSource {
@@ -115,6 +155,74 @@ func TestSecretColdStart(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	if api.reads.Load() != reads {
 		t.Error("the Secret is read again after a bundle is applied")
+	}
+}
+
+// largeBundle is a bundle just over one Secret, compressed: random bytes
+// don't compress.
+func largeBundle(t *testing.T, key ed25519.PrivateKey, version uint64) *bundlev1.SignedBundle {
+	t.Helper()
+	signed := bundle(t, key, version, time.Now(), blockAttack)
+	var b bundlev1.Bundle
+	if err := proto.Unmarshal(signed.GetBundle(), &b); err != nil {
+		t.Fatal(err)
+	}
+	noise := make([]byte, bundlesecret.ChunkBytes)
+	_, _ = rand.Read(noise)
+	b.ContentHash = append(b.ContentHash, noise...)
+	raw, err := proto.Marshal(&b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed.Bundle, signed.Signature = raw, ed25519.Sign(key, raw)
+	return signed
+}
+
+// A bundle too large for one Secret is read from its chunks.
+func TestSecretColdStartChunks(t *testing.T) {
+	e := newEnv(t)
+	api := newFakeAPI(t, e.dir)
+	api.set(largeBundle(t, e.priv, 6))
+	api.mu.Lock()
+	api.chunked = true
+	api.mu.Unlock()
+	a, holder, _ := e.agent(t, func(c *Config) {
+		c.Addr = "127.0.0.1:1"
+		c.Secret = api.source(e.dir)
+	})
+	run(t, a)
+	waitFor(t, "the chunked bundle", func() bool { return a.Version() == 6 })
+	if !blocks(holder) {
+		t.Fatal("the chunked bundle is not enforced")
+	}
+	if n := api.reads.Load(); n != 3 {
+		t.Errorf("%d reads, want the Secret and its 2 chunks", n)
+	}
+}
+
+// A chunk missing, or of another bundle (the operator writing the next
+// one), is never joined into a bundle; once complete, it is.
+func TestSecretChunksIncomplete(t *testing.T) {
+	e := newEnv(t)
+	api := newFakeAPI(t, e.dir)
+	api.set(largeBundle(t, e.priv, 6))
+	src := api.source(e.dir)
+	for _, tc := range []struct{ name, missing, stale string }{
+		{name: "missing", missing: "inkwall-bundle-a-1"},
+		{name: "stale", stale: "inkwall-bundle-a-0"},
+	} {
+		api.mu.Lock()
+		api.chunked, api.missing, api.stale = true, tc.missing, tc.stale
+		api.mu.Unlock()
+		if _, err := src.fetch(t.Context()); !errors.Is(err, bundlesecret.ErrIncomplete) {
+			t.Errorf("%s chunk: %v, want ErrIncomplete", tc.name, err)
+		}
+	}
+	api.mu.Lock()
+	api.missing, api.stale = "", ""
+	api.mu.Unlock()
+	if signed, err := src.fetch(t.Context()); err != nil || len(signed.GetBundle()) < bundlesecret.ChunkBytes {
+		t.Fatalf("complete: %v", err)
 	}
 }
 

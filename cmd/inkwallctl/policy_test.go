@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"flag"
 	"io"
 	"os"
@@ -24,6 +25,7 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	"github.com/inkwall-dev/inkwall/operator/bundle"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
+	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
@@ -145,12 +147,73 @@ func TestTestPolicy(t *testing.T) {
 		})
 	}
 
+	// A bundle too large for one Secret: the bundle Secret and its chunks,
+	// or the bundle Secret alone, which says how to get them.
+	list, main := chunkedSecrets(t, signed)
+	if code, out, errOut := runCLI(t, "test", "--request", sampleRequests, "--bundle", writeFile(t, "bundle", list)); code != 0 {
+		t.Fatalf("chunks: exit %d, stderr %q", code, errOut)
+	} else {
+		golden(t, "policy.golden", out)
+	}
+	code, _, errOut = runCLI(t, "test", "--request", sampleRequests, "--bundle", writeFile(t, "bundle", main))
+	if code != 2 || !strings.Contains(errOut, "kubectl get secret inkwall-bundle inkwall-bundle-a-0 inkwall-bundle-a-1 -o yaml") {
+		t.Fatalf("chunked Secret alone: exit %d, stderr %q", code, errOut)
+	}
+
 	_, other, _ := ed25519.GenerateKey(rand.Reader)
 	code, _, errOut = runCLI(t, "test", "--request", sampleRequests, "--bundle", writeFile(t, "bundle", string(encoded)),
 		"--bundle-key", writeFile(t, "other.pub", string(other.Public().(ed25519.PublicKey))))
 	if code != 2 || !strings.Contains(errOut, "bad signature") {
 		t.Fatalf("other key: exit %d, stderr %q", code, errOut)
 	}
+}
+
+// chunkedSecrets returns signed's bundle, made too large for one Secret, as
+// kubectl prints the bundle Secret and its chunks, and the bundle Secret
+// alone.
+func chunkedSecrets(t *testing.T, signed *bundlev1.SignedBundle) (list, main string) {
+	t.Helper()
+	var b bundlev1.Bundle
+	if err := proto.Unmarshal(signed.GetBundle(), &b); err != nil {
+		t.Fatal(err)
+	}
+	noise := make([]byte, bundlesecret.ChunkBytes*3/2)
+	_, _ = rand.Read(noise)
+	b.ClusterId = hex.EncodeToString(noise)
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	large, err := bundle.NewSigner(priv).Sign(&b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := bundle.Encode(large)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, chunks, err := bundlesecret.Split("inkwall-bundle", "a", encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, _ := m.Marshal()
+	secret := func(name string, data map[string][]byte) corev1.Secret {
+		return corev1.Secret{
+			TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "inkwall-system"},
+			Data:       data,
+		}
+	}
+	items := []corev1.Secret{secret("inkwall-bundle", map[string][]byte{bundlesecret.ManifestKey: manifest})}
+	for i, c := range chunks {
+		items = append(items, secret(m.Chunks[i], map[string][]byte{bundlesecret.ChunkKey: c}))
+	}
+	l, err := yaml.Marshal(map[string]any{"apiVersion": "v1", "kind": "List", "items": items})
+	if err != nil {
+		t.Fatal(err)
+	}
+	one, err := yaml.Marshal(&items[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(l), string(one)
 }
 
 const singlePolicy = `apiVersion: waf.inkwall.dev/v1alpha1

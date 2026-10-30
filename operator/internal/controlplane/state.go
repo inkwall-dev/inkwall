@@ -179,7 +179,7 @@ func (c *Connector) bundle(ctx context.Context) (uint64, []byte, error) {
 	if err != nil {
 		return 0, nil, fmt.Errorf("bundle Secret: %w", err)
 	}
-	signed, err := bundle.Decode(s.Data[bundle.BundleKey])
+	signed, err := bundle.Read(ctx, c.Client, &s)
 	if err != nil {
 		return 0, nil, fmt.Errorf("bundle Secret: %w", err)
 	}

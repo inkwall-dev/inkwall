@@ -33,15 +33,16 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
+	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
 // secretBundleKey is the bundle Secret's key that holds the gzip-compressed
 // SignedBundle (operator/bundle.BundleKey).
-const secretBundleKey = "bundle.pb.gz" // #nosec G101 -- a data key, not a credential
+const secretBundleKey = bundlesecret.BundleKey
 
 // maxBundleBytes bounds a decompressed bundle, as the engine does.
-const maxBundleBytes = 64 << 20
+const maxBundleBytes = bundlesecret.MaxBundleBytes
 
 // policyBundle resolves the objects in the --policy, --rule-set, --configmap
 // and --ingress files the way the operator does, into the bundle it would
@@ -344,11 +345,19 @@ func fileBundle(file, keyFile string, notes io.Writer) (*bundlev1.Bundle, error)
 func decodeSignedBundle(data []byte) (*bundlev1.SignedBundle, error) {
 	if !isGzip(data) {
 		var s corev1.Secret
-		if yaml.Unmarshal(data, &s) == nil && s.Kind == "Secret" {
-			var ok bool
-			if data, ok = s.Data[secretBundleKey]; !ok {
-				return nil, fmt.Errorf("the Secret %s has no %s", s.Name, secretBundleKey)
-			}
+		var list struct {
+			Kind  string          `json:"kind"`
+			Items []corev1.Secret `json:"items"`
+		}
+		var err error
+		switch {
+		case yaml.Unmarshal(data, &s) == nil && s.Kind == "Secret":
+			data, err = secretsBundle([]corev1.Secret{s})
+		case yaml.Unmarshal(data, &list) == nil && strings.HasSuffix(list.Kind, "List"):
+			data, err = secretsBundle(list.Items)
+		}
+		if err != nil {
+			return nil, err
 		}
 	}
 	if isGzip(data) {
@@ -368,6 +377,39 @@ func decodeSignedBundle(data []byte) (*bundlev1.SignedBundle, error) {
 		return nil, errors.New("not a signed bundle (bundle.pb.gz of the inkwall-bundle Secret, compressed or not, or the Secret)")
 	}
 	return &signed, nil
+}
+
+// secretsBundle returns the compressed bundle of the bundle Secret among
+// secrets, joined from its chunks, also among them, if it has a manifest.
+func secretsBundle(secrets []corev1.Secret) ([]byte, error) {
+	byName := map[string]*corev1.Secret{}
+	for i := range secrets {
+		byName[secrets[i].Name] = &secrets[i]
+	}
+	for _, s := range secrets {
+		if data, ok := s.Data[secretBundleKey]; ok {
+			return data, nil
+		}
+		if s.Data[bundlesecret.ManifestKey] == nil {
+			continue
+		}
+		m, err := bundlesecret.ParseManifest(s.Name, s.Data[bundlesecret.ManifestKey])
+		if err != nil {
+			return nil, fmt.Errorf("the Secret %s: %w", s.Name, err)
+		}
+		return bundlesecret.Join(m, func(name string) ([]byte, error) {
+			chunk, ok := byName[name]
+			if !ok {
+				return nil, fmt.Errorf("the bundle is in chunks: get them with the Secret (kubectl get secret %s %s -o yaml)",
+					s.Name, strings.Join(m.Chunks, " "))
+			}
+			return chunk.Data[bundlesecret.ChunkKey], nil
+		})
+	}
+	if len(secrets) == 1 {
+		return nil, fmt.Errorf("the Secret %s has no %s", secrets[0].Name, secretBundleKey)
+	}
+	return nil, fmt.Errorf("no Secret has %s or %s", secretBundleKey, bundlesecret.ManifestKey)
 }
 
 func isGzip(b []byte) bool { return bytes.HasPrefix(b, []byte{0x1f, 0x8b}) }

@@ -179,6 +179,7 @@ func TestOperator(t *testing.T) {
 	t.Run("bundles", func(t *testing.T) { testBundles(ctx, t, c) })
 	t.Run("distribution", func(t *testing.T) { testDistribution(ctx, t, c) })
 	t.Run("engine", func(t *testing.T) { testEngine(ctx, t, c) })
+	t.Run("bundle chunks", func(t *testing.T) { testBundleChunks(ctx, t, c) })
 	t.Run("key rotation", func(t *testing.T) { testKeyRotation(ctx, t, c) })
 	t.Run("injection", func(t *testing.T) { testInjection(ctx, t, c) })
 	t.Run("wiring", func(t *testing.T) { testWiring(ctx, t, c) })
