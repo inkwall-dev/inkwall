@@ -424,7 +424,7 @@ check "engine down: the attack fails closed (500) at once" fails_closed "/$down_
 check "engine down: the requests never reach the app" never_reached_app "$down_id"
 # The engine's readiness is the pod's: a Service stops sending Traefik's pod
 # new connections, but Traefik serves those it gets (here, a port-forward).
-check "engine down: Traefik's pod is not ready" traefik_unready
+eventually "engine down: Traefik's pod is not ready" traefik_unready
 eventually "the engine is back: it blocks the attack" tstatus_is 403 "$SQLI"
 check "the engine is back: benign traffic passes" tstatus_is 200 "/$down_id-back"
 check "the engine is back: requests reach the app" app_saw "$down_id-back"
