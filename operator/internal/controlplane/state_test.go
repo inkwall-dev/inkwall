@@ -74,7 +74,7 @@ func stateEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := bundle.Store(ctx, e.client, ns, b, signed, signer.Public()); err != nil {
+	if _, err := bundle.Store(ctx, e.client, e.client, ns, b, signed, signer.Public()); err != nil {
 		t.Fatal(err)
 	}
 	return e

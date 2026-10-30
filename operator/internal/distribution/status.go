@@ -34,6 +34,10 @@ var (
 		Name: "inkwall_operator_bundle_version",
 		Help: "Version of the bundle this replica serves.",
 	})
+	bundleBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "inkwall_operator_bundle_compressed_bytes",
+		Help: "Size of the bundle this replica serves, gzip-compressed, as stored in its Secrets: over 900 KiB it is split into chunks, over 7.2 MiB it can't be published.",
+	})
 	engineCount = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "inkwall_operator_engines",
 		Help: "Connected engines, by whether they run the current bundle (current, behind, rejected). Reported by the leader.",
@@ -49,7 +53,7 @@ var (
 )
 
 func init() {
-	metrics.Registry.MustRegister(bundleVersion, engineCount, eventsReceived, eventsDroppedByEngines)
+	metrics.Registry.MustRegister(bundleVersion, bundleBytes, engineCount, eventsReceived, eventsDroppedByEngines)
 }
 
 // Enforced computes a policy's Enforced condition: whether every connected

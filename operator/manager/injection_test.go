@@ -6,6 +6,8 @@ package manager
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"slices"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -15,7 +17,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/inkwall-dev/inkwall/operator/bundle"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
+	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 )
 
 // testInjection creates proxy pods as Traefik's Deployment would: the Pod
@@ -77,6 +81,15 @@ func testInjection(ctx context.Context, t *testing.T, c client.Client) {
 		return ""
 	})
 	eventually(t, "the RBAC grant", func() string {
+		var role rbacv1.Role
+		if err := c.Get(ctx, types.NamespacedName{Namespace: "default", Name: injection.GrantName}, &role); err != nil {
+			return err.Error()
+		}
+		// The bundle Secret, and its chunks for a bundle too large for one.
+		if want := append([]string{bundle.BundleSecret}, bundlesecret.ChunkNames(bundle.BundleSecret)...); len(role.Rules) != 1 ||
+			!slices.Equal(role.Rules[0].ResourceNames, want) || !slices.Equal(role.Rules[0].Verbs, []string{"get"}) {
+			return fmt.Sprintf("Role rules %v", role.Rules)
+		}
 		var rb rbacv1.RoleBinding
 		if err := c.Get(ctx, types.NamespacedName{Namespace: "default", Name: injection.GrantName}, &rb); err != nil {
 			return err.Error()

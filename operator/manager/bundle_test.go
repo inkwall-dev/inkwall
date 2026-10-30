@@ -48,7 +48,7 @@ func current(ctx context.Context, t *testing.T, c client.Client) *bundlev1.Bundl
 	if err := c.Get(ctx, types.NamespacedName{Namespace: "default", Name: bundle.BundleSecret}, &s); err != nil {
 		return nil
 	}
-	signed, err := bundle.Decode(s.Data[bundle.BundleKey])
+	signed, err := bundle.Read(ctx, c, &s)
 	if err != nil {
 		t.Fatalf("bundle Secret: %v", err)
 	}

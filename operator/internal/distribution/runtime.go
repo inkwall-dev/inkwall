@@ -69,7 +69,7 @@ func (b *BundleSource) Reconcile(ctx context.Context, req reconcile.Request) (re
 		// writes a new one.
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
-	signed, err := bundle.Decode(s.Data[bundle.BundleKey])
+	signed, err := bundle.Read(ctx, b.Client, &s)
 	if err != nil {
 		return reconcile.Result{}, fmt.Errorf("bundle Secret: %w", err)
 	}
@@ -79,6 +79,7 @@ func (b *BundleSource) Reconcile(ctx context.Context, req reconcile.Request) (re
 	}
 	b.Store.Set(signed, bun.GetVersion())
 	bundleVersion.Set(float64(bun.GetVersion()))
+	bundleBytes.Set(float64(bundle.CompressedSize(&s)))
 	log.FromContext(ctx).V(1).Info("serving bundle", "version", bun.GetVersion())
 	return reconcile.Result{}, nil
 }

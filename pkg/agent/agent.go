@@ -310,6 +310,8 @@ func (a *Agent) dial() (*grpc.ClientConn, error) {
 		})),
 		grpc.WithPerRPCCredentials(bearer(bytes.TrimSpace(token))),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 30 * time.Second, Timeout: 10 * time.Second}),
+		// A bundle is sent whole, decompressed; gRPC's default is 4 MiB.
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxBundleBytes+(1<<20))),
 	)
 }
 

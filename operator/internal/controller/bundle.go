@@ -38,6 +38,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
+	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
@@ -68,6 +69,9 @@ const (
 	// rotationPoll checks a rotation's progress.
 	rotationPoll = 5 * time.Second
 )
+
+// warnBytes is the compressed size past which publishing a bundle warns.
+const warnBytes = bundle.MaxCompressedBytes * 3 / 4
 
 // clusterRequest is the single work item: every change rebuilds the whole
 // bundle.
@@ -143,7 +147,8 @@ func (r *BundleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// The rotation request is an annotation.
 	config := builder.WithPredicates(predicate.Or(predicate.GenerationChangedPredicate{}, predicate.AnnotationChangedPredicate{}))
 	secrets := builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
-		return o.GetNamespace() == r.Namespace && (o.GetName() == bundle.BundleSecret || o.GetName() == bundle.SigningKeySecret)
+		return o.GetNamespace() == r.Namespace && (o.GetName() == bundle.BundleSecret || o.GetName() == bundle.SigningKeySecret ||
+			bundlesecret.IsChunk(bundle.BundleSecret, o.GetName()))
 	}))
 	// One build at startup, even in an empty cluster: engines need a bundle.
 	start := make(chan event.GenericEvent, 1)
@@ -158,8 +163,8 @@ func (r *BundleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&networkingv1.Ingress{}, enqueue, spec).
 		// The manager only caches ConfigMaps labeled resolver.RulesLabel.
 		Watches(&corev1.ConfigMap{}, enqueue).
-		// Recreate the bundle and signing key Secrets if they are deleted
-		// or edited.
+		// Recreate the bundle, its chunks and the signing key Secret if
+		// they are deleted or edited.
 		Watches(&corev1.Secret{}, enqueue, secrets).
 		WatchesRawSource(source.Channel(start, enqueue)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
@@ -214,6 +219,13 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	suspended := cfg != nil && cfg.Spec.Suspend
 
 	current, currentKey, err := bundle.Load(ctx, r.APIReader, r.Namespace)
+	if errors.Is(err, bundlesecret.ErrIncomplete) {
+		// A chunk deleted or edited: write the bundle again, continuing
+		// the version sequence.
+		logger.Error(err, "current bundle incomplete; publishing it again")
+		r.lastVersion = max(r.lastVersion, current.GetVersion())
+		current, currentKey, err = nil, "", nil
+	}
 	if err != nil {
 		// An unreadable bundle can't be continued safely: report, don't
 		// overwrite it blindly.
@@ -245,7 +257,8 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 		if err != nil {
 			return reconcile.Result{}, err
 		}
-		if err := bundle.Store(ctx, r.Client, r.Namespace, next, signed, signer.Public()); err != nil {
+		size, err := bundle.Store(ctx, r.Client, r.APIReader, r.Namespace, next, signed, signer.Public())
+		if err != nil {
 			if errors.Is(err, bundle.ErrTooLarge) {
 				// Retrying won't help until the policy shrinks; keep the
 				// current bundle.
@@ -255,8 +268,20 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 			return reconcile.Result{}, fmt.Errorf("store bundle %d: %w", next.GetVersion(), err)
 		}
 		r.lastVersion = next.GetVersion()
+		chunks := 0
+		if size > bundlesecret.ChunkBytes {
+			chunks = (size + bundlesecret.ChunkBytes - 1) / bundlesecret.ChunkBytes
+		}
 		logger.Info("bundle published", "version", next.GetVersion(), "policies", len(next.GetPolicies()),
-			"rule_sets", len(next.GetRuleSets()), "suspended", suspended, "key", signer.KeyID())
+			"rule_sets", len(next.GetRuleSets()), "suspended", suspended, "key", signer.KeyID(), "bytes", size, "chunks", chunks)
+		if size > warnBytes {
+			// Warn well before builds fail.
+			logger.Info("bundle nears its size limit: past it, policy changes are not published",
+				"bytes", size, "limit", bundle.MaxCompressedBytes)
+		}
+	}
+	if err := bundle.Prune(ctx, r.Client, r.APIReader, r.Namespace); err != nil {
+		return reconcile.Result{}, fmt.Errorf("delete stale bundle chunks: %w", err)
 	}
 
 	if err := r.writeStatus(ctx, res, next.GetVersion(), policies.Items, ruleSets.Items, clusterRuleSets.Items); err != nil {
