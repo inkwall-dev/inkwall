@@ -22,6 +22,8 @@ IMAGE           ?= inkwall-engine:dev
 OPERATOR_IMAGE  ?= inkwall-operator:dev
 CHART           ?= deploy/helm/inkwall
 KIND_CLUSTER    ?= inkwall
+# kind-upgrade: its own cluster, since it installs a release of its own.
+UPGRADE_CLUSTER ?= inkwall-upgrade
 
 # Benchmarks: set BENCH to a regexp to narrow, COUNT for benchstat-friendly repeats.
 BENCH           ?= .
@@ -104,6 +106,8 @@ helm-lint: ## Lint the Helm chart and render it with each webhook certificate mo
 	helm template inkwall $(CHART) --namespace inkwall-system >/dev/null
 	helm template inkwall $(CHART) --namespace inkwall-system --set webhook.certs.mode=certManager >/dev/null
 	helm template inkwall $(CHART) --namespace inkwall-system --set controlPlane.caBundle=ca --set controlPlane.enrollmentToken=t >/dev/null
+	@# As helm upgrade --reuse-values from 0.1.0 renders it: values without controlPlane.
+	helm template inkwall $(CHART) --namespace inkwall-system --set controlPlane=null >/dev/null
 
 .PHONY: tidy
 tidy: ## Tidy go.mod and go.sum, here and in test/crs (which builds against this module)
@@ -137,6 +141,10 @@ kind-operator: ## Build the operator image, install the Helm chart on the kind c
 .PHONY: kind-e2e
 kind-e2e: kind-operator ## End-to-end test on kind: a WAFPolicy is enforced by an engine in bundle mode (installs the operator first)
 	KIND_CLUSTER=$(KIND_CLUSTER) IMAGE=$(IMAGE) hack/kind/e2e.sh
+
+.PHONY: kind-upgrade
+kind-upgrade: ## Upgrade test on kind: helm upgrade from the last release to this checkout keeps routes protected, uninstall restores them (own cluster, UPGRADE_CLUSTER)
+	UPGRADE_CLUSTER=$(UPGRADE_CLUSTER) OPERATOR_IMAGE=$(OPERATOR_IMAGE) IMAGE=$(IMAGE) CHART=$(CHART) hack/kind/upgrade.sh
 
 .PHONY: kind-test
 kind-test: ## Send benign and attack requests to the kind demo and check verdicts

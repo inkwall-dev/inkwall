@@ -18,6 +18,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"strconv"
 	"time"
 
@@ -31,6 +33,7 @@ import (
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
+	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 )
 
 // Names of the Secrets in the operator's namespace.
@@ -41,13 +44,18 @@ const (
 
 // Keys of the bundle Secret.
 const (
-	// BundleKey holds the gzip-compressed, serialized SignedBundle.
-	BundleKey = "bundle.pb.gz"
+	// BundleKey holds the gzip-compressed, serialized SignedBundle, when it
+	// fits in one Secret; else ManifestKey lists its chunks.
+	BundleKey   = bundlesecret.BundleKey
+	ManifestKey = bundlesecret.ManifestKey
 	// PublicKeyKey holds the ed25519 public key the bundle is signed with,
 	// so an engine reading the Secret can check which key it needs. In the
 	// signing key Secret and the trust ConfigMap it is the active key.
 	PublicKeyKey = "ed25519.pub"
 )
+
+// ChunkLabel marks the chunk Secrets of a bundle too large for one Secret.
+const ChunkLabel = "waf.inkwall.dev/bundle-chunk"
 
 // Annotations on the bundle Secret, for people and tools.
 const (
@@ -57,13 +65,14 @@ const (
 	KeyIDAnnotation = "waf.inkwall.dev/key-id"
 )
 
-// MaxCompressedBytes is the largest bundle stored: Secrets are limited to
-// 1 MiB. Bundles reference the Core Rule Set by name, so this takes many
-// thousands of policies.
-const MaxCompressedBytes = 900 << 10
+// MaxCompressedBytes is the largest bundle stored, in chunks of
+// bundlesecret.ChunkBytes: Secrets are limited to 1 MiB. Bundles reference
+// the Core Rule Set by name, so one Secret takes many thousands of policies.
+const MaxCompressedBytes = bundlesecret.MaxBytes
 
-// ErrTooLarge is returned for a bundle over MaxCompressedBytes.
-var ErrTooLarge = errors.New("bundle too large for a Secret")
+// ErrTooLarge is returned for a bundle over MaxCompressedBytes, or over
+// bundlesecret.MaxBundleBytes decompressed.
+var ErrTooLarge = errors.New("bundle too large for its Secrets")
 
 // ContentHash hashes what a bundle enforces: everything but its version,
 // creation time and the hash itself. Encoding is deterministic, so equal
@@ -136,7 +145,9 @@ func (s *Signer) Sign(b *bundlev1.Bundle) (*bundlev1.SignedBundle, error) {
 }
 
 // Load reads the current bundle from its Secret, and the ID of the key it
-// is signed with; nil if there is none.
+// is signed with; nil if there is none. If its chunks don't match its
+// manifest (bundlesecret.ErrIncomplete), the bundle has only the version of
+// the Secret's annotation, to continue the sequence.
 func Load(ctx context.Context, c client.Reader, namespace string) (*bundlev1.Bundle, string, error) {
 	var s corev1.Secret
 	err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: BundleSecret}, &s)
@@ -146,7 +157,11 @@ func Load(ctx context.Context, c client.Reader, namespace string) (*bundlev1.Bun
 	if err != nil {
 		return nil, "", err
 	}
-	signed, err := Decode(s.Data[BundleKey])
+	signed, err := Read(ctx, c, &s)
+	if errors.Is(err, bundlesecret.ErrIncomplete) {
+		v, _ := strconv.ParseUint(s.Annotations[VersionAnnotation], 10, 64)
+		return &bundlev1.Bundle{Version: v}, "", fmt.Errorf("bundle Secret: %w", err)
+	}
 	if err != nil {
 		return nil, "", fmt.Errorf("bundle Secret: %w", err)
 	}
@@ -157,13 +172,50 @@ func Load(ctx context.Context, c client.Reader, namespace string) (*bundlev1.Bun
 	return &b, signed.GetKeyId(), nil
 }
 
-// Decode reads the content of the bundle Secret's BundleKey.
+// Read returns the signed bundle of the bundle Secret s, reading its chunks
+// with c if it has a manifest.
+func Read(ctx context.Context, c client.Reader, s *corev1.Secret) (*bundlev1.SignedBundle, error) {
+	data, ok := s.Data[BundleKey]
+	if !ok && s.Data[ManifestKey] != nil {
+		m, err := bundlesecret.ParseManifest(s.Name, s.Data[ManifestKey])
+		if err != nil {
+			return nil, err
+		}
+		data, err = bundlesecret.Join(m, func(name string) ([]byte, error) {
+			var chunk corev1.Secret
+			err := c.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: name}, &chunk)
+			if apierrors.IsNotFound(err) {
+				return nil, fmt.Errorf("%w: Secret %s not found", bundlesecret.ErrIncomplete, name)
+			}
+			return chunk.Data[bundlesecret.ChunkKey], err
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return Decode(data)
+}
+
+// CompressedSize returns the size of the bundle Secret s's compressed
+// bundle, in one Secret or in chunks.
+func CompressedSize(s *corev1.Secret) int {
+	if data, ok := s.Data[BundleKey]; ok {
+		return len(data)
+	}
+	if m, err := bundlesecret.ParseManifest(s.Name, s.Data[ManifestKey]); err == nil {
+		return m.Size
+	}
+	return 0
+}
+
+// Decode reads the compressed bundle of the bundle Secret's BundleKey, or
+// of its chunks joined.
 func Decode(data []byte) (*bundlev1.SignedBundle, error) {
 	zr, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
-	raw, err := io.ReadAll(io.LimitReader(zr, 64<<20))
+	raw, err := io.ReadAll(io.LimitReader(zr, bundlesecret.MaxBundleBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -174,12 +226,14 @@ func Decode(data []byte) (*bundlev1.SignedBundle, error) {
 	return &signed, nil
 }
 
-// Encode returns the content of the bundle Secret's BundleKey for signed:
-// the reverse of Decode.
+// Encode returns the compressed bundle for signed: the reverse of Decode.
 func Encode(signed *bundlev1.SignedBundle) ([]byte, error) {
 	raw, err := proto.Marshal(signed)
 	if err != nil {
 		return nil, err
+	}
+	if len(raw) > bundlesecret.MaxBundleBytes {
+		return nil, fmt.Errorf("%w: %d bytes, at most %d", ErrTooLarge, len(raw), bundlesecret.MaxBundleBytes)
 	}
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
@@ -190,40 +244,116 @@ func Encode(signed *bundlev1.SignedBundle) ([]byte, error) {
 		return nil, err
 	}
 	if buf.Len() > MaxCompressedBytes {
-		return nil, fmt.Errorf("%w: %d bytes compressed, at most %d", ErrTooLarge, buf.Len(), MaxCompressedBytes)
+		return buf.Bytes(), fmt.Errorf("%w: %d bytes compressed, at most %d", ErrTooLarge, buf.Len(), MaxCompressedBytes)
 	}
 	return buf.Bytes(), nil
 }
 
-// Store writes a signed bundle to the bundle Secret.
-func Store(ctx context.Context, c client.Client, namespace string, b *bundlev1.Bundle, signed *bundlev1.SignedBundle, pub ed25519.PublicKey) error {
+// Store writes a signed bundle to the bundle Secret, and returns its
+// compressed size (also with ErrTooLarge, when known). A bundle over
+// bundlesecret.ChunkBytes is split into chunk Secrets, written before the
+// manifest that points at them, to the names the current manifest doesn't
+// use; Prune deletes the others after. c writes, r reads uncached: the
+// current manifest decides where the chunks go.
+func Store(ctx context.Context, c client.Client, r client.Reader, namespace string, b *bundlev1.Bundle,
+	signed *bundlev1.SignedBundle, pub ed25519.PublicKey) (int, error) {
 	encoded, err := Encode(signed)
 	if err != nil {
-		return err
+		return len(encoded), err
 	}
-	s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: BundleSecret}}
-	data := map[string][]byte{BundleKey: encoded, PublicKeyKey: pub}
 	annotations := map[string]string{
 		VersionAnnotation: strconv.FormatUint(b.GetVersion(), 10),
 		HashAnnotation:    hex.EncodeToString(b.GetContentHash()),
 		KeyIDAnnotation:   signed.GetKeyId(),
 	}
-	err = c.Get(ctx, client.ObjectKeyFromObject(s), s)
-	switch {
-	case apierrors.IsNotFound(err):
-		s.Labels, s.Annotations, s.Data = managedLabels(), annotations, data
-		return c.Create(ctx, s)
-	case err != nil:
+	s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: BundleSecret}}
+	err = r.Get(ctx, client.ObjectKeyFromObject(s), s)
+	exists := err == nil
+	if err != nil && !apierrors.IsNotFound(err) {
+		return len(encoded), err
+	}
+	data := map[string][]byte{BundleKey: encoded, PublicKeyKey: pub}
+	if len(encoded) > bundlesecret.ChunkBytes {
+		// An unreadable manifest is overwritten: its chunks are useless.
+		current, _ := bundlesecret.ParseManifest(BundleSecret, s.Data[ManifestKey])
+		m, chunks, err := bundlesecret.Split(BundleSecret, bundlesecret.NextSlot(BundleSecret, current), encoded)
+		if err != nil {
+			return len(encoded), err
+		}
+		for i, chunk := range chunks {
+			if err := writeChunk(ctx, c, r, namespace, m.Chunks[i], chunk, annotations); err != nil {
+				return len(encoded), fmt.Errorf("chunk %s: %w", m.Chunks[i], err)
+			}
+		}
+		manifest, err := m.Marshal()
+		if err != nil {
+			return len(encoded), err
+		}
+		data = map[string][]byte{ManifestKey: manifest, PublicKeyKey: pub}
+	}
+	return len(encoded), save(ctx, c, s, exists, managedLabels(), annotations, data)
+}
+
+func writeChunk(ctx context.Context, c client.Client, r client.Reader, namespace, name string, chunk []byte, annotations map[string]string) error {
+	s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}
+	err := r.Get(ctx, client.ObjectKeyFromObject(s), s)
+	if err != nil && !apierrors.IsNotFound(err) {
 		return err
+	}
+	labels := managedLabels()
+	labels[ChunkLabel] = BundleSecret
+	return save(ctx, c, s, err == nil, labels, annotations, map[string][]byte{bundlesecret.ChunkKey: chunk})
+}
+
+// save creates s, or updates it if it exists, with labels and annotations
+// added and data replaced.
+func save(ctx context.Context, c client.Client, s *corev1.Secret, exists bool, labels, annotations map[string]string, data map[string][]byte) error {
+	if s.Labels == nil {
+		s.Labels = map[string]string{}
 	}
 	if s.Annotations == nil {
 		s.Annotations = map[string]string{}
 	}
-	for k, v := range annotations {
-		s.Annotations[k] = v
-	}
+	maps.Copy(s.Labels, labels)
+	maps.Copy(s.Annotations, annotations)
 	s.Data = data
+	if !exists {
+		return c.Create(ctx, s)
+	}
 	return c.Update(ctx, s)
+}
+
+// Prune deletes the chunk Secrets the bundle Secret's manifest doesn't list:
+// those of a bundle replaced since. r reads the bundle Secret uncached, c
+// lists the chunks.
+func Prune(ctx context.Context, c client.Client, r client.Reader, namespace string) error {
+	var s corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: BundleSecret}, &s); err != nil {
+		// No bundle yet, or none to read: keep everything.
+		return client.IgnoreNotFound(err)
+	}
+	var keep []string
+	if _, ok := s.Data[BundleKey]; !ok {
+		m, err := bundlesecret.ParseManifest(BundleSecret, s.Data[ManifestKey])
+		if err != nil {
+			return nil
+		}
+		keep = m.Chunks
+	}
+	var chunks corev1.SecretList
+	if err := c.List(ctx, &chunks, client.InNamespace(namespace), client.MatchingLabels{ChunkLabel: BundleSecret}); err != nil {
+		return err
+	}
+	for i := range chunks.Items {
+		ch := &chunks.Items[i]
+		if !bundlesecret.IsChunk(BundleSecret, ch.Name) || slices.Contains(keep, ch.Name) {
+			continue
+		}
+		if err := c.Delete(ctx, ch); client.IgnoreNotFound(err) != nil {
+			return fmt.Errorf("delete chunk %s: %w", ch.Name, err)
+		}
+	}
+	return nil
 }
 
 func managedLabels() map[string]string {

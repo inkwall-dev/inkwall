@@ -134,8 +134,9 @@ from `--bundle-key`: keep that file in sync with the Secret's `trusted-keys.pub`
 
 ## Uninstalling
 
-`helm uninstall` keeps the CRDs (and so every WAF object) and the two Secrets the operator creates
-in its namespace, `inkwall-bundle` and `inkwall-bundle-signing-key`. A reinstall continues with the
+`helm uninstall` keeps the CRDs (and so every WAF object) and the Secrets the operator creates in
+its namespace: `inkwall-bundle`, `inkwall-bundle-signing-key` and, for a bundle too large for one
+Secret, its chunks (labeled `waf.inkwall.dev/bundle-chunk`). A reinstall continues with the
 same signing keys (and a rotation in progress), so engines keep trusting them. Delete the namespace
 to remove the Secrets.
 

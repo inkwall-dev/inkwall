@@ -1,0 +1,147 @@
+# Upgrading
+
+This guide upgrades an Inkwall installation from 0.1.0 to 0.1.1 or later, and lists what changes
+on the way.
+
+## Contents
+
+- [Prerequisites](#prerequisites)
+- [What's new](#whats-new)
+- [What changes by itself](#what-changes-by-itself)
+- [Upgrading](#upgrading-the-chart)
+- [Checking it worked](#checking-it-worked)
+- [Rolling back](#rolling-back)
+
+## Prerequisites
+
+- Inkwall 0.1.0 installed with the chart, and the values you installed it with.
+- [Helm](https://helm.sh/docs/) 3.14 or later, for
+  [`--reset-then-reuse-values`](https://helm.sh/docs/helm/helm_upgrade/).
+
+## What's new
+
+New fields in the existing [CRDs](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/),
+and fields that now take effect; there are no new kinds:
+
+| Object | Field | |
+|---|---|---|
+| `WAFPolicy` | `spec.targetRefs[*].kind: IngressRoute` (`group: traefik.io`) | Protect [Traefik](https://doc.traefik.io/traefik/) `IngressRoute` objects |
+| `InkwallConfig` | `spec.signingKey.rotationInterval` | Rotate the signing key on a schedule ([key rotation](key-rotation.md)) |
+| `InkwallConfig` | annotation `waf.inkwall.dev/rotate-signing-key` | Rotate it now |
+| `InkwallConfig` | `spec.mode: GitOps` or `Managed`, `spec.controlPlane` | Connect to a control plane ([control plane](control-plane.md)). In 0.1.0 they existed but did nothing |
+| `InkwallConfig` | condition `ControlPlaneConnected` | The connection's state |
+| `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet` | label `inkwall.dev/source: saas` | Objects written by the control plane in Managed mode |
+
+New chart values, all off or idle by default:
+
+| Value | Default | |
+|---|---|---|
+| `controlPlane.caBundle` | `""` | The control plane's CA, if private |
+| `controlPlane.enrollmentToken` | `""` | Its one-time enrollment token |
+| `controlPlane.eventsBufferMiB` | `64` | Each operator replica's buffer of security events while the control plane is unreachable |
+
+Nothing connects to a control plane until you set `spec.mode` to `GitOps` or `Managed`:
+Standalone stays the default. An `InkwallConfig` already set to `GitOps` or `Managed` under 0.1.0
+starts connecting after the upgrade.
+
+## What changes by itself
+
+Without any configuration, the upgrade changes this:
+
+- **A finalizer on every `WAFPolicy`.** The operator adds
+  [finalizer](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/)
+  `waf.inkwall.dev/unwire`. A deleted policy then waits until the operator has unwired its
+  routes. If you manage policies with Argo CD or Flux, read [GitOps](gitops.md).
+- **Unwiring when the engine can't be injected.** With `injection.enabled=false`, or when no
+  running pod matches Traefik's selector, the operator unwires every route it wired and
+  reports `Programmed=False` (`InjectionDisabled` or `SidecarMissing`), so the routes keep
+  working, uninspected. 0.1.0 left them wired. The `helm uninstall` hook now also runs with injection off,
+  and removes the finalizers.
+- **Signing keys in a new format.** The Secret `inkwall-bundle-signing-key` and the `inkwall-trust`
+  ConfigMaps get `trusted-keys.pub`, the list of keys engines accept. The key doesn't change.
+  New engines read `trusted-keys.pub`; engines from 0.1.0 keep reading `ed25519.pub`, which
+  stays.
+- **New webhooks.** The `ValidatingWebhookConfiguration` gets webhooks for deleting objects
+  labelled `inkwall.dev/source: saas`. Unlabelled objects never reach them.
+- **An events buffer** on each operator pod: an
+  [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir) of
+  `controlPlane.eventsBufferMiB` + 16 MiB. It stays empty in Standalone.
+
+Traefik pods keep their 0.1.0 engine until they restart. It keeps working, but blocks a signing
+key rotation: restart Traefik after the upgrade.
+
+## Upgrading the chart
+
+1. Upgrade the chart, with the values you installed it with:
+
+   ```sh
+   helm upgrade inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \
+     --namespace inkwall-system --reset-then-reuse-values
+   ```
+
+   Prefer it to `--reuse-values`, which keeps the 0.1.0 values without the new chart's defaults.
+   Upgrading to 0.1.1 with `--reuse-values` fails with `nil pointer evaluating interface
+   {}.caBundle`; charts after 0.1.1 default those values (#143).
+   `--reset-then-reuse-values` takes the new defaults and then your values. Passing your values
+   file again (`-f values.yaml`) works too.
+
+   The chart upgrades the CRDs with it (`crds.install`, on by default). If you install the CRDs
+   yourself, apply the new ones first:
+
+   ```sh
+   helm template inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \
+     --show-only templates/crds.yaml | kubectl apply --server-side -f -
+   ```
+
+2. Wait for the operator:
+
+   ```sh
+   kubectl -n inkwall-system rollout status deployment/inkwall-operator
+   ```
+
+3. Restart Traefik, so its pods get the new engine:
+
+   ```sh
+   kubectl -n <traefik namespace> rollout restart deployment/<traefik>
+   ```
+
+If [Argo CD](https://argo-cd.readthedocs.io/en/stable/) or [Flux](https://fluxcd.io/flux/) installs the chart, change the chart version in Git instead, and see
+[GitOps](gitops.md#installing-the-chart-with-a-gitops-tool).
+
+## Checking it worked
+
+```sh
+helm -n inkwall-system list
+kubectl get wafpolicy -A
+kubectl get wafpolicy -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {.metadata.finalizers}{"\n"}{end}'
+kubectl -n <traefik namespace> get pods -l app.kubernetes.io/name=traefik \
+  -o jsonpath='{range .items[*]}{.metadata.name} {.spec.initContainers[?(@.name=="inkwall-engine")].image}{"\n"}{end}'
+```
+
+The chart shows the new version, the policies are `Ready` and carry `waf.inkwall.dev/unwire`, and
+Traefik's pods run the new engine image.
+
+## Rolling back
+
+0.1.0 doesn't know the finalizer, IngressRoute targets, Managed mode or key rotation. Before
+`helm rollback`:
+
+1. Switch to Standalone if you set another mode
+   ([disconnecting](control-plane.md#disconnecting)), and wait for any signing key rotation to
+   finish (the Secret's `waf.inkwall.dev/rotation-phase` is empty).
+2. Delete the policies that target an `IngressRoute`.
+3. Remove the finalizer from every policy, or none of them can be deleted under 0.1.0:
+
+   ```sh
+   kubectl get wafpolicy -A -o jsonpath='{range .items[*]}{.metadata.namespace} {.metadata.name}{"\n"}{end}' |
+     while read -r ns name; do
+       kubectl -n "$ns" patch wafpolicy "$name" --type merge -p '{"metadata":{"finalizers":null}}'
+     done
+   ```
+
+Then roll back, and restart Traefik so its pods run the 0.1.0 engine again:
+
+```sh
+helm -n inkwall-system rollback inkwall
+kubectl -n <traefik namespace> rollout restart deployment/<traefik>
+```

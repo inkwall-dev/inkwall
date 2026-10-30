@@ -32,6 +32,10 @@ helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.1.0 \
 Then install or restart Traefik: pods started after the operator get the engine. Chart options are in
 the [chart README](deploy/helm/inkwall/README.md).
 
+Guides: [upgrading](docs/upgrading.md), [GitOps with Argo CD and Flux](docs/gitops.md),
+[rotating the signing key](docs/key-rotation.md), [connecting to a control plane](docs/control-plane.md),
+[client IP behind a load balancer](docs/client-ip.md).
+
 Images, chart and checksums are signed keyless with cosign. To verify:
 
 ```sh
@@ -135,6 +139,9 @@ kubectl -n inkwall-system get secret inkwall-bundle -o yaml > bundle.yaml
 kubectl -n inkwall-system get secret inkwall-bundle -o jsonpath='{.data.ed25519\.pub}' > bundle.pub
 inkwallctl test --bundle bundle.yaml --bundle-key bundle.pub --har traffic.har
 ```
+
+A bundle too large for one Secret is split into chunks: `inkwallctl` then prints the `kubectl get
+secret` command that saves the Secret with them.
 
 In CI, with attacks and legitimate traffic kept next to the policies (exit 1 on a wrong verdict, 2
 on an error):

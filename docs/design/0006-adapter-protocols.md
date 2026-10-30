@@ -84,7 +84,9 @@ Lua plugin and the Traefik plugin.
 
 ![Reverse proxy sequence: a benign request is inspected and forwarded to the app with X-Request-Id and X-Forwarded headers; an attack gets 403 without reaching the app; an inspection timeout in block mode gets 503](../diagrams/reverse-proxy.svg)
 
-**Built:** `pkg/adapters/proxy`, `inkwall-engine proxy`.
+**Built:** `pkg/adapters/proxy`, `inkwall-engine proxy`. It forwards what it inspected: only an
+origin-form request target (`/path?query`) and a valid Host header; anything else, such as
+`GET http://host/path`, gets 400, since Go's client would forward another Host.
 
 ---
 
