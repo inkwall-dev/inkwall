@@ -98,8 +98,7 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 		return status.Error(codes.Unavailable, "can't authenticate the engine now; retry")
 	}
 
-	// Receive in the background, so the loop below can also wait for new
-	// bundles and for the idle timeout.
+	// Receive in the background, so the waits below can also time out.
 	recv := make(chan received)
 	go func() {
 		for {
@@ -154,22 +153,25 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 	log.Info("engine connected", "bundle", hello.GetBundleVersion())
 	defer log.Info("engine disconnected")
 
-	sent := hello.GetBundleVersion()
+	// Bundles are sent from their own goroutine, so the engine's messages
+	// are still read, and its heartbeats still keep the stream alive, while
+	// a send waits for a slot or for the engine to take the bundle (#148).
+	sendCtx, stopSending := context.WithCancel(ctx)
+	sendErr, sending := make(chan error, 1), make(chan struct{})
+	go func() {
+		defer close(sending)
+		sendErr <- s.sendBundles(sendCtx, stream, hello.GetBundleVersion())
+	}()
+	// The stream may not be used once Watch returns. A Send stuck on a dead
+	// engine ends when keepalive closes its connection.
+	defer func() { stopSending(); <-sending }()
+
 	idle := time.NewTimer(s.IdleTimeout)
 	defer idle.Stop()
 	for {
-		signed, version, changed := s.Bundles.Current()
-		// Any other version is sent, even an older one: after the operator
-		// lost its bundle Secret, the engine's newer version is not one
-		// this cluster's operator can vouch for.
-		if signed != nil && version != sent {
-			if err := s.send(ctx, stream, signed); err != nil {
-				return err
-			}
-			sent = version
-		}
 		select {
-		case <-changed:
+		case err := <-sendErr:
+			return err
 		case r := <-recv:
 			if r.err != nil {
 				return r.err
@@ -185,6 +187,28 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 			s.record(engineID, r.msg, log)
 		case <-idle.C:
 			return status.Error(codes.DeadlineExceeded, "no message from the engine in "+s.IdleTimeout.String())
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// sendBundles sends the current bundle and every new one, starting from
+// the engine's version sent, until ctx is done or a send fails.
+func (s *Server) sendBundles(ctx context.Context, stream agentv1.BundleService_WatchServer, sent uint64) error {
+	for {
+		signed, version, changed := s.Bundles.Current()
+		// Any other version is sent, even an older one: after the operator
+		// lost its bundle Secret, the engine's newer version is not one
+		// this cluster's operator can vouch for.
+		if signed != nil && version != sent {
+			if err := s.send(ctx, stream, signed); err != nil {
+				return err
+			}
+			sent = version
+		}
+		select {
+		case <-changed:
 		case <-ctx.Done():
 			return ctx.Err()
 		}

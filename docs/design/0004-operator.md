@@ -316,7 +316,8 @@ from the Secret (only building is leader-only), so losing one just moves its eng
 - **Auth:** `TokenReview` (audience `inkwall-operator`), then a `SubjectAccessReview` that the
   engine's ServiceAccount may `get` the bundle Secret (§4.3 grant). Cached 1 min.
 - First message must be `Hello`; engines already current aren't resent. Streams silent for 30 s
-  close. At most 50 concurrent sends.
+  close. At most 50 concurrent sends; a stream waiting for one, or sending, still reads its
+  engine's heartbeats (#148).
 - **Aggregation via ConfigMaps:** each replica writes its engines to `inkwall-engines-<pod>` (owned
   by its Pod) on change and every 10 s; the leader merges every 2 s, drops reports older than 30 s,
   counts a moved engine once.
@@ -518,9 +519,11 @@ p95 is the slowest. Against the targets:
 - **Bundle size: met.** 134 KiB compressed at 5,000 policies, far under 900 KiB. Uncompressed it is
   1.9 MiB, nearly half of gRPC's default 4 MiB receive limit, which engines keep.
 - **Change → every engine: met up to 5,000 × 50** (1.5 s), not at 5,000 × 500: 4 s typically, but
-  one edit took 47 s. Waiting for one of the 50 send slots counts against a stream's 30 s idle
-  timeout, while its heartbeats aren't read, so engines were disconnected ("no message from the
-  engine in 30s") and got the bundle again after reconnecting.
+  one edit took 47 s. Waiting for one of the 50 send slots counted against a stream's 30 s idle
+  timeout, while its heartbeats weren't read, so engines were disconnected and got the bundle again
+  after reconnecting. Fixed (#148): bundles are sent from a goroutine of their own, so heartbeats
+  are read meanwhile; reruns at 5,000 × 500 since have no disconnects, but one edit in ten can
+  still take 24–28 s, before as after the fix, so another cause remains.
 - **Operator memory: just over at 5,000 × 500** (518 MiB), met everywhere else. Each stream used to
   marshal the bundle itself, and a stream's send returns once the message is queued on its
   connection, not once it is written, so the operator held engines × bundle bytes (1,004 MiB at
