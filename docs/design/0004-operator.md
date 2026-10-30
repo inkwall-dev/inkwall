@@ -2,17 +2,52 @@
 
 - Status: Draft
 - Date: 2026-09-27
+- Updated: 2026-10-30
 - Owner: noureldin
-- Depends on: [0001](0001-performance-first-architecture.md), [0002](0002-system-architecture.md)
+- Depends on: [0001 — Performance-First Architecture](0001-performance-first-architecture.md),
+  [0002 — System Architecture](0002-system-architecture.md)
 
-The operator injects the engine next to each proxy, wires the proxy to it, and pushes signed policy
-bundles. CRD shapes: 0002 §4.2.
+The operator (`inkwall-operator`) connects Inkwall to a cluster's proxies. It injects the engine
+next to each proxy, wires the proxy to call it, and pushes signed policy bundles to every engine.
+It is never on the request path. The CRD shapes are in
+[0002 §4.2](0002-system-architecture.md#42-crds-wafinkwalldevv1alpha1).
 
-**Built (v0.1.0):** Traefik with `Ingress` targets (ForwardAuth). **Built since:** Traefik
-`IngressRoute` targets, the `waf.inkwall.dev/unwire` finalizer and unwiring with injection off
-(§5), signing key rotation and bundle chunks (§4.6), the operator side of the optional control
-plane: enrollment, GitOps and Managed modes, security events (§4.9). **Not yet:** other proxies,
-`HTTPRoute` targets.
+Terms used throughout:
+
+- **Engine:** `inkwall-engine`, the process that inspects requests and returns verdicts.
+- **Proxy:** the ingress controller's data-plane process (Traefik, Envoy, ...) that asks the
+  engine for a verdict.
+- **Integration:** the operator's support for one proxy: finding its pods, injection and wiring.
+- **Injection:** adding the engine to proxy pods as a sidecar, a container in the same pod.
+- **Wiring:** configuring the proxy to call the engine on protected routes. For Traefik, that is
+  the `inkwall-waf` Middleware and the references to it.
+- **Policy:** a `WAFPolicy` object: mode, rule sets, limits and exclusions for some routes.
+- **Bundle** (policy bundle): the immutable, versioned, signed snapshot of all of a cluster's
+  policies. The operator builds it; every engine enforces it.
+- **Leader:** the operator replica that holds the leader-election lease.
+- **Control plane:** the optional hosted service that manages clusters. It is a separate product,
+  not in this repository.
+- **Cluster modes** (`InkwallConfig.spec.mode`): **Standalone** (the default) connects to no
+  control plane. In **GitOps** mode the policies are CRDs, typically applied from Git, and the
+  operator mirrors them to the control plane. In **Managed** mode the control plane owns the
+  policies, and the operator writes them as CRDs.
+- **Policy snapshot:** a `PolicySnapshot`, the policy objects the control plane sends in Managed
+  mode. It is not a bundle.
+- **Enforcement modes:** in **detect mode** the engine only logs what it would block; in **block
+  mode** it rejects attacks.
+- **Failure mode:** what happens to a request that can't be inspected. The engine either **fails
+  open** (lets it through) or **fails closed** (rejects it).
+- **CRS:** the OWASP Core Rule Set (CRS), the rules the engine runs through Coraza, the Go WAF
+  library.
+
+**Built (v0.1.0):** Traefik with `Ingress` targets (ForwardAuth).
+
+**Built since:** Traefik `IngressRoute` targets; the `waf.inkwall.dev/unwire` finalizer and
+unwiring with injection off ([§5](#5-uninstall-and-disable)); signing key rotation and bundle
+chunks ([§4.6](#46-bundle-builder-leader-only)); the operator side of the optional control plane:
+enrollment, GitOps and Managed modes, and security events ([§4.9](#49-upstream-sync-leader-only)).
+
+**Not yet:** other proxies, `HTTPRoute` targets.
 
 ## Contents
 
@@ -43,63 +78,77 @@ plane: enrollment, GitOps and Managed modes, security events (§4.9). **Not yet:
 ## 1. Goals and non-goals
 
 1. **No proxy knowledge for users:** they write a `WAFPolicy` against an `Ingress` or `HTTPRoute`.
-2. **Never on the request path:** operator downtime never affects traffic (0002 §2).
-3. **GitOps-friendly:** avoid mutating user-owned objects; when unavoidable, touch the fewest
-   fields and document how to ignore them.
-4. **Safe by default:** in detect mode any step can fail without dropping traffic; in block mode
-   nothing passes uninspected, so failures show as rejected requests and conditions, not silent
-   gaps. Uninstall reverses every change.
-5. **Observable:** each policy reports accepted → programmed → enforced.
+2. **Never on the request path:** operator downtime never affects traffic
+   ([0002 §2](0002-system-architecture.md#2-system-context)).
+3. **GitOps-friendly:** avoid changing objects the user owns. When that is unavoidable, touch the
+   fewest fields and document how to ignore them.
+4. **Safe by default:** in detect mode, any step can fail without dropping traffic. In block mode,
+   nothing passes uninspected, so failures show as rejected requests and conditions, not as silent
+   gaps. Uninstalling reverses every change.
+5. **Observable:** each policy reports its progress: accepted, then programmed, then enforced.
 
-Non-goals: installing ingress controllers; managing TLS, DNS or routes; unasked restarts.
+Non-goals: installing ingress controllers; managing TLS, DNS or routes; restarting workloads
+without being asked.
 
 ## 2. Overview
 
-One Deployment, 2 replicas. Discovery feeds **Injection** (sidecar) and **Wiring** (proxy
-objects). **Resolver** → **Bundle builder** (leader) → signed bundle Secret → **Distribution**
-(gRPC, every replica) → engines, whose ACKs feed the **Status aggregator**. **Upstream sync** talks
-to the SaaS. **Admission webhooks** validate CRDs and inject the sidecar.
+The operator is one Deployment with 2 replicas. Its parts:
 
-Tooling: kubebuilder v4 layout, controller-runtime, JSON merge patches on user-owned objects (§4.4),
-CEL in CRDs, cert-controller (or cert-manager) for webhook certificates.
+- **Discovery** finds the proxies. It feeds **Injection**, which adds the engine sidecar, and
+  **Wiring**, which writes the proxy objects.
+- The **Resolver** turns policies into routes. The **Bundle builder**, on the leader, turns them
+  into a signed bundle and stores it in a Secret.
+- **Distribution**, a gRPC server on every replica, streams the bundle to the engines. Their
+  acknowledgements (ACKs) feed the **Status aggregator**.
+- **Upstream sync** talks to the control plane.
+- **Admission webhooks** validate the CRDs and inject the sidecar.
+
+Tooling: the kubebuilder v4 layout, controller-runtime, JSON merge patches on user-owned objects
+([§4.4](#44-wiring-controller)), CEL rules in the CRDs, and cert-controller (or cert-manager) for
+the webhook certificates.
 
 ## 3. API (`waf.inkwall.dev/v1alpha1`)
 
 | Kind | Scope | Purpose |
 |---|---|---|
-| `InkwallConfig` | Cluster, singleton `default` | Mode, engine, integrations, SaaS, `suspend`, signing key rotation |
+| `InkwallConfig` | Cluster, singleton `default` | Mode, engine, integrations, control plane, `suspend`, signing key rotation |
 | `WAFPolicy` | Namespace | What to enforce on which routes |
 | `WAFRuleSet` / `ClusterWAFRuleSet` | Namespace / Cluster | Rules: builtin CRS, SecLang, ConfigMap |
 | `WAFIPList` / `ClusterWAFIPList` | Namespace / Cluster | CIDR lists (planned) |
 | `WAFPolicyDefault` | Namespace | Default for routes with no policy (planned) |
 
-A field is added only once the engine honours it: adding to `v1alpha1` later is compatible,
-removing is not. **Not yet:** IP lists and `spec.ipLists`, `spec.rateLimits`, `spec.response`,
+A field is added only once the engine honours it. Adding a field to `v1alpha1` later is
+compatible; removing one is not.
+
+**Not yet:** IP lists and `spec.ipLists`, `spec.rateLimits`, `spec.response`,
 `BlockHighConfidence`, `body.contentTypes`, the `InspectPrefix` oversize action,
 `InkwallConfig.spec.events`, `WAFPolicyDefault`.
 
 ### 3.1 Validation
 
-Cheapest first:
+Validation runs in three steps, cheapest first:
 
-1. **Schema + CEL:** enums, ranges (`timeout <= 1s`, `body.maxBytes <= 10Mi`), exactly one rule
-   source, allowed `targetRefs` kinds.
-2. **Validating webhook** (2 s timeout, `failurePolicy: Fail` for WAF CRDs only, so a bad rule
-   can't slip in while it is down):
-   - compiles SecLang with the engine's Coraza, after CRS, and returns the failing line; rejects
-     unknown `builtin` sets;
+1. **Schema and CEL:** enums, ranges (`timeout <= 1s`, `body.maxBytes <= 10Mi`), exactly one rule
+   source, and the allowed `targetRefs` kinds.
+2. **Validating webhook.** It has a 2 s timeout and `failurePolicy: Fail` for the WAF CRDs only, so
+   a bad rule can't slip in while the webhook is down. It:
+   - compiles SecLang with the engine's Coraza, after the CRS, and returns the failing line; it
+     rejects unknown `builtin` sets;
    - allows only rule directives (`SecRule`, `SecAction`, `SecMarker`, `SecRuleRemoveBy*`,
-     `SecRuleUpdate*`): engine-wide settings and file writes (`SecRuleEngine`, body limits,
+     `SecRuleUpdate*`). Engine-wide settings and file writes (`SecRuleEngine`, body limits,
      `SecAuditLog`, `SecDebugLog`, `Include`) stay Inkwall's, since app teams write rule sets;
-   - accepts updates that leave the spec unchanged, so objects a newer engine rejects stay deletable;
-   - certificate self-signed and rotated by the operator, CA injected; cert-manager optional;
-   - in `Managed` mode, rejects edits of the control plane's objects by anyone but the operator
-     (`operator/webhook/source.go`, §4.9).
-3. **Resolver** (async, in status): dangling references, conflicts, unwirable targets.
+   - accepts updates that leave the spec unchanged, so objects a newer engine rejects can still be
+     deleted;
+   - uses a self-signed certificate that the operator rotates, with the CA injected; cert-manager
+     is optional;
+   - in Managed mode, rejects edits of the control plane's objects by anyone but the operator
+     (`operator/webhook/source.go`, [§4.9](#49-upstream-sync-leader-only)).
+3. **Resolver** (asynchronous, reported in status): dangling references, conflicts, and targets
+   that can't be wired.
 
 ### 3.2 Status contract
 
-`WAFPolicy` conditions (kstatus-compatible, for `kubectl wait` and Argo CD health):
+`WAFPolicy` conditions are kstatus-compatible, so `kubectl wait` and Argo CD health checks work:
 
 | Condition | True when | False reasons |
 |---|---|---|
@@ -108,411 +157,537 @@ Cheapest first:
 | `Enforced` | Every serving engine ACKed a bundle with this generation | `EnginesBehind` (`3/6`), `EngineNack`, `NoEngines`, `NotInBundle` |
 | `Ready` | The three above are True | first failing condition's reason |
 
-Status also has `bundleVersion` and `observedGeneration`. **Not yet:** per-target status
-(`targets[]` with controller, gateway, programmed, engine counts) and the `InkwallConfig.status`
-cluster view (integrations, engine counts, bundle versions, SaaS state); it has only
-`observedGeneration` and `conditions` today.
+Status also has `bundleVersion` and `observedGeneration`.
+
+**Not yet:** per-target status (`targets[]` with controller, gateway, programmed and engine
+counts), and the cluster view in `InkwallConfig.status` (integrations, engine counts, bundle
+versions, control plane state). Today `InkwallConfig.status` has only `observedGeneration` and
+`conditions`.
 
 ## 4. Controllers
 
-Idempotent, level-triggered reconcilers. Created objects carry
+The controllers are idempotent, level-triggered reconcilers. Objects they create carry
 `app.kubernetes.io/managed-by: inkwall-operator` and, where namespacing allows, an owner reference
 for garbage collection.
 
 ### 4.1 Discovery controller
 
-Planned: watch `IngressClass` / `GatewayClass`, map controller names to integrations (registry
-tested per controller version), find their data-plane workloads, and list them in
-`InkwallConfig.status` as `Full | Partial | Unsupported`, so unknown controllers are visible rather
-than silently unprotected.
+Planned: watch `IngressClass` and `GatewayClass`, and map controller names to integrations, with
+the registry tested per controller version. Find each controller's data-plane workloads, and list
+them in `InkwallConfig.status` as `Full | Partial | Unsupported`. Unknown controllers are then
+visible rather than silently unprotected.
 
-**Built:** no controller. [`operator/integrations`](../../operator/integrations/integrations.go)
-lists Traefik only (controller `traefik.io/ingress-controller`, pods `app.kubernetes.io/name=traefik`,
-adapter `forward-auth`).
+**Built:** no controller yet. [`operator/integrations`](../../operator/integrations/integrations.go)
+lists Traefik only: controller `traefik.io/ingress-controller`, pods
+`app.kubernetes.io/name=traefik`, adapter `forward-auth`. (An adapter is the engine listener that
+speaks one proxy's protocol; see [0006](0006-adapter-protocols.md).)
 
 ### 4.2 Integration interface
 
-Planned: one package per proxy under `operator/integrations/<name>/` implementing `Name`, `Match`,
-`Discover`, `Injection`, `Render` (pure, golden-file tested) and `Health`, so adding a proxy changes
-no controller. **Built:** a plain `Integration` struct; injection and wiring are Traefik-specific.
+Planned: one package per proxy under `operator/integrations/<name>/`, implementing `Name`,
+`Match`, `Discover`, `Injection`, `Render` (pure, tested with golden files) and `Health`. Adding a
+proxy would then change no controller.
+
+**Built:** a plain `Integration` struct. Injection and wiring are Traefik-specific.
 
 ### 4.3 Injection controller
 
-Puts the engine into proxy pods as a sidecar sharing a socket directory.
+Injection puts the engine into proxy pods as a sidecar that shares a socket directory with the
+proxy.
 
-- **Native extension point first** (Envoy Gateway `EnvoyProxy`; Caddy compiles the engine in),
-  **Pod webhook otherwise** (Istio, ingress-nginx, Traefik, HAProxy), or `injection: Manual`
-  (operator prints Helm values and only verifies). Never patch the controller's Deployment:
-  Helm / Argo CD would revert it.
-- **Native sidecar** (`restartPolicy: Always` init container, Kubernetes ≥ 1.29): starts before and
-  stops after the proxy, so the proxy never runs without it.
-- **`failurePolicy` follows the mode:** `Ignore` when all policies detect (pods start uninspected,
-  `SidecarMissing`); `Fail` when any blocks, since a pod without its engine would reject all
-  traffic. Existing pods keep serving.
-- **The sidecar uses the proxy's ServiceAccount**, which gets `get` on the bundle Secret only, for
-  cold start (§4.6).
-- **Rollout:** injection applies to new pods only. `rollout: Manual` (default) reports
-  `PendingRestart` naming the workload; `rollout: Automatic` would restart it respecting PDBs.
-  Engine upgrades follow the same path.
+- **Native extension point first, Pod webhook otherwise.** Envoy Gateway has an extension point
+  (`EnvoyProxy`), and Caddy compiles the engine in. Istio, ingress-nginx, Traefik and HAProxy get
+  a Pod webhook. With `injection: Manual`, the operator prints Helm values and only verifies.
+  It never patches the controller's Deployment: Helm or Argo CD would revert it.
+- **Native sidecar** (an init container with `restartPolicy: Always`, Kubernetes ≥ 1.29). It
+  starts before the proxy and stops after it, so the proxy never runs without it.
+- **The webhook's `failurePolicy` follows the enforcement mode.** It is `Ignore` when every policy
+  is in detect mode: pods then start uninspected, reported as `SidecarMissing`. It is `Fail` when
+  any policy blocks, since a pod without its engine would reject all traffic. Pods already running
+  keep serving.
+- **The sidecar uses the proxy's ServiceAccount.** That account gets `get` on the bundle Secret
+  only, for cold start ([§4.6](#46-bundle-builder-leader-only)).
+- **Rollout:** injection applies to new pods only. With `rollout: Manual` (the default), the
+  operator reports `PendingRestart` and names the workload. `rollout: Automatic` would restart it,
+  respecting PodDisruptionBudgets. Engine upgrades follow the same path.
 
 **Built (v0.1.0)** (`operator/internal/injection`, `operator/webhook/inject.go`):
 
-- Webhook `inkwall-operator-mutating` sees only Traefik pods (`app.kubernetes.io/name=traefik`) at
-  creation. Installed `Ignore`; the leader sets `Fail` while any policy blocks and re-applies it
-  after a Helm upgrade, patching with the `resourceVersion` so it never overwrites a fresh CA bundle.
-  If `InkwallConfig` can't be read, the engine is injected with defaults, not left out.
-- Opt-out: the label `waf.inkwall.dev/inject: "false"` is excluded by `objectSelector`, so those
-  pods start even while the webhook fails closed and the operator is down (the way to scale the
-  proxy before it returns). The same-named annotation works only while the webhook answers. Pods
-  with an `inkwall-engine` container are left alone.
-- `InkwallConfig.spec.integrations[].selector` (non-empty) replaces Traefik's label everywhere
-  (pod cache, webhook, controllers, `objectSelector`). Read at startup; on change each replica
-  restarts after a random delay up to 30 s (`--selector-restart-max-delay`). Selectors for unknown
-  controllers are logged and ignored.
-- Injected: engine as first init container, startup probe (proxy starts once it serves),
-  `forward-auth` in bundle mode, projected token (audience `inkwall-operator`) and trust ConfigMap
-  in one read-only directory, `emptyDir` bundle cache, non-root, read-only root filesystem. Image
-  and resources from `InkwallConfig.spec.engine`, else `--engine-image`.
-- The leader keeps an `inkwall-trust` ConfigMap (`ca.crt`; `trusted-keys.pub`, every bundle key
-  engines must accept, which the engine reads; `ed25519.pub`, the active key, for older engines) in
-  each namespace with proxy pods (removed with the last one), and a `Role` + `RoleBinding`
-  `inkwall-bundle-reader` for each proxy ServiceAccount. It deletes only ConfigMaps it labeled.
-- **Not yet:** `rollout: Automatic`; pods running before the operator are injected on restart.
+- **The webhook.** `inkwall-operator-mutating` sees only Traefik pods
+  (`app.kubernetes.io/name=traefik`), at creation. It is installed with `Ignore`. The leader sets
+  `Fail` while any policy blocks, and sets it again after a Helm upgrade. It patches with the
+  `resourceVersion`, so it never overwrites a fresh CA bundle. If `InkwallConfig` can't be read,
+  the engine is injected with defaults rather than left out.
+- **Opting out.** Pods labelled `waf.inkwall.dev/inject: "false"` are excluded by the webhook's
+  `objectSelector`. They start even while the webhook fails closed and the operator is down: this
+  is how to scale the proxy before the operator returns. The annotation of the same name works only
+  while the webhook answers. Pods that already have an `inkwall-engine` container are left alone.
+- **Custom selectors.** A non-empty `InkwallConfig.spec.integrations[].selector` replaces Traefik's
+  label everywhere: the pod cache, the webhook, the controllers and the `objectSelector`. It is read
+  at startup. When it changes, each replica restarts after a random delay of up to 30 s
+  (`--selector-restart-max-delay`). Selectors for unknown controllers are logged and ignored.
+- **What is injected:**
+  - the engine as the first init container, with a startup probe, so the proxy starts once the
+    engine serves;
+  - the `forward-auth` adapter in bundle mode (policies come from the operator's bundles);
+  - a projected token (audience `inkwall-operator`) and the trust ConfigMap, in one read-only
+    directory;
+  - an `emptyDir` bundle cache;
+  - non-root, with a read-only root filesystem;
+  - image and resources from `InkwallConfig.spec.engine`, else from `--engine-image`.
+- **Trust and access per namespace.** The leader keeps an `inkwall-trust` ConfigMap in each
+  namespace with proxy pods, and removes it with the last one. It holds `ca.crt`,
+  `trusted-keys.pub` (every bundle key engines must accept; the engine reads this) and
+  `ed25519.pub` (the active key, for older engines). The leader also keeps a `Role` and
+  `RoleBinding`, `inkwall-bundle-reader`, for each proxy ServiceAccount. It deletes only ConfigMaps
+  it labelled.
+- **Not yet:** `rollout: Automatic`. Pods that were running before the operator are injected when
+  they restart.
 
 ### 4.4 Wiring controller
 
-**Hook globally once, decide per route locally:** the engine's router knows which routes have a
-policy, so the proxy hook touches few objects, and unprotected routes cost ~0 (0001) by per-route
-attachment or a local skip check.
+**Hook in globally once, decide per route locally.** The engine's router knows which routes have a
+policy. So the proxy hook touches few objects, and unprotected routes cost about nothing
+([0001](0001-performance-first-architecture.md)), through per-route attachment or a local skip
+check.
 
 | Proxy | Operator writes | Unprotected-route cost |
 |---|---|---|
-| Envoy Gateway | `Backend` (unix socket) + `EnvoyExtensionPolicy` per protected `HTTPRoute` | 0 |
+| Envoy Gateway | `Backend` (Unix socket) + `EnvoyExtensionPolicy` per protected `HTTPRoute` | 0 |
 | Istio | gateway-scoped `EnvoyFilter` | ~0 (per-route disable) |
 | ingress-nginx | Lua plugin ConfigMap + `plugins` key | ~0 (in-memory route set) |
 | Traefik | `Middleware` per namespace, attached to protected routes | 0 |
 | HAProxy | SPOE config + map of protected routes in an ACL | ~0 (map lookup) |
 | Caddy | nothing | 0 |
 
-User-owned objects touched (minimum fields): Envoy Gateway `EnvoyProxy` (sidecar patch, or an
-operator-made one plus `parametersRef`); ingress-nginx `data.plugins` (merged, original saved for
-uninstall); Traefik's `router.middlewares` annotation on `Ingress`, and `spec.routes[*].middlewares`
-on `IngressRoute`; the `waf.inkwall.dev/unwire` finalizer on `WAFPolicy` (§5). Of the chart's own
-objects, the Pod webhook's `failurePolicy` and `objectSelector` (§4.3), and the `caBundle` of both
-webhook configurations. Each built one is listed in [GitOps](../gitops.md) with Argo CD / Flux
-ignore rules.
+User-owned objects touched, with the fewest fields:
 
-Write: JSON merge patches on user-owned objects (with the `resourceVersion` where a whole list is
-sent), not server-side apply. The field manager is `inkwall-operator`, from the binary's user agent;
-only the webhook certificate rotator sets it explicitly. Objects the operator creates carry
-`app.kubernetes.io/managed-by: inkwall-operator` and are deleted once no longer needed.
+- Envoy Gateway's `EnvoyProxy`: a sidecar patch, or an operator-made one plus `parametersRef`.
+- ingress-nginx's `data.plugins`: merged, with the original saved for uninstall.
+- Traefik's `router.middlewares` annotation on an `Ingress`, and `spec.routes[*].middlewares` on
+  an `IngressRoute`.
+- The `waf.inkwall.dev/unwire` finalizer on a `WAFPolicy` ([§5](#5-uninstall-and-disable)).
+
+Of the chart's own objects, the operator changes the Pod webhook's `failurePolicy` and
+`objectSelector` ([§4.3](#43-injection-controller)), and the `caBundle` of both webhook
+configurations. Each field the operator writes today is listed in [GitOps](../gitops.md), with
+Argo CD and Flux ignore rules.
+
+How it writes: JSON merge patches on user-owned objects, not server-side apply. Where a patch sends
+a whole list, it carries the `resourceVersion`. The field manager is `inkwall-operator`, taken from
+the binary's user agent; only the webhook certificate rotator sets it explicitly. Objects the
+operator creates carry `app.kubernetes.io/managed-by: inkwall-operator` and are deleted once no
+longer needed.
 
 **Built (v0.1.0)** (`operator/internal/wiring`, Traefik):
 
-- Each targeted Ingress Traefik serves (by `ingressClassName`, legacy `kubernetes.io/ingress.class`
-  or the default class), and each targeted `IngressRoute` (`traefik.io/v1alpha1`), is wired,
-  accepted or not; until its rules are in a bundle the engine passes its routes (`no-policy`).
-- One ForwardAuth `Middleware` `inkwall-waf` per such namespace (`trustForwardHeader: false`,
-  `forwardBody: true`, `maxBodySize` 10 MiB = largest `body.maxBytes`, `maxResponseBodySize` 64 KiB
-  for the engine's answer; left out on Traefik before v3.7, whose CRD has no such field), removed
-  when unused. A
-  same-named one the operator didn't create is left alone (`WiringFailed`). The operator doesn't
-  configure Traefik's entry points: behind a load balancer the user turns on the PROXY protocol
-  there for the client IP ([client IP](../client-ip.md)).
-- The annotation gets the operator's Middleware first, user entries kept in order;
-  `waf.inkwall.dev/wired` records it; unprotecting removes only that entry. Level-based; the
-  `waf.inkwall.dev/unwire` finalizer only makes a policy deleted while the operator is down wait
-  for it (§5).
-- An IngressRoute gets `{name: inkwall-waf}` first in every route's `middlewares`, the user's kept
-  in order, and `waf.inkwall.dev/wired: inkwall-waf`; unprotecting removes the entries naming it in
-  the route's namespace (a same-named one elsewhere is the user's), and an emptied list. The
-  reference has no namespace: Traefik resolves it in the IngressRoute's, where the Middleware is,
-  so it works with `allowCrossNamespace` off (the default).
-  `spec.routes` is one list to a merge patch, so the patch carries the `resourceVersion` and a
-  conflict retries.
-- Wired only while a Traefik pod the webhook selects runs, with injection on: otherwise new
-  Traefik pods would get no engine to call, so everything is unwired (`SidecarMissing`, or
-  `InjectionDisabled`, §5). A Traefik scaled to 0 is wired again when its first injected pod is
-  created, a second after.
-- Works without Traefik's CRDs: no wiring, no crash. The leader looks for the IngressRoute CRD every
-  30 s and, once installed, the bundle builder and the wiring watch IngressRoutes
-  (`operator/internal/crdwatch`); the wiring's resync (1 min) notices a Middleware CRD installed
-  later.
-- `Programmed=True` when all the policy's Traefik Ingresses and IngressRoutes are wired and every
-  running Traefik pod has the engine. Else `ControllerUnsupported` (other controller or kind),
-  `WiringFailed` (no Traefik CRDs, name clash, an IngressRoute that can't be written),
-  `PendingRestart` (pods older than the webhook, listed), `SidecarMissing` (no Traefik pod
-  selected, or pods without the engine: operator down in detect mode or opted out, listed),
-  `NoTargets`, `InjectionDisabled`.
-- **Not yet:** `HTTPRoute` targets, matching engines to the pods serving a policy's class (all
-  engines count for `Enforced`), IngressRoutes nested with `parentRefs`. Traefik attachment default
-  is open (§12).
+- **What is wired.** Each targeted Ingress that Traefik serves is wired, whether its policy is
+  accepted or not. Traefik serves it by `ingressClassName`, the legacy `kubernetes.io/ingress.class`,
+  or the default class. Each targeted `IngressRoute` (`traefik.io/v1alpha1`) is wired too. Until a
+  route's rules are in a bundle, the engine passes it (reason `no-policy`).
+- **The Middleware.** There is one ForwardAuth `Middleware`, `inkwall-waf`, per such namespace,
+  removed when unused. It sets:
+  - `trustForwardHeader: false`;
+  - `forwardBody: true`;
+  - `maxBodySize` 10 MiB, the largest `body.maxBytes`;
+  - `maxResponseBodySize` 64 KiB for the engine's answer. This is left out on Traefik before v3.7,
+    whose CRD has no such field.
+
+  A Middleware of the same name that the operator didn't create is left alone (`WiringFailed`).
+  The operator doesn't configure Traefik's entry points. Behind a load balancer, the user turns on
+  the PROXY protocol there, so the engine sees the client IP ([client IP](../client-ip.md)).
+- **Ingress.** The annotation gets the operator's Middleware first, with the user's entries kept in
+  order. `waf.inkwall.dev/wired` records it. Unprotecting removes only that entry. Wiring is
+  level-based: the `waf.inkwall.dev/unwire` finalizer only makes a policy deleted while the
+  operator is down wait for it ([§5](#5-uninstall-and-disable)).
+- **IngressRoute.** `{name: inkwall-waf}` goes first in every route's `middlewares`, with the user's
+  entries kept in order, and `waf.inkwall.dev/wired: inkwall-waf` is set. Unprotecting removes the
+  entries that name it in the route's namespace (a same-named one elsewhere is the user's), and any
+  list it leaves empty.
+  - The reference has no namespace. Traefik resolves it in the IngressRoute's namespace, where the
+    Middleware is, so it works with `allowCrossNamespace` off (the default).
+  - To a merge patch, `spec.routes` is one list. So the patch carries the `resourceVersion`, and a
+    conflict retries.
+- **Only with an injected Traefik.** Routes are wired only while a Traefik pod that the webhook
+  selects is running, with injection on. Otherwise new Traefik pods would get no engine to call, so
+  everything is unwired (`SidecarMissing`, or `InjectionDisabled`, [§5](#5-uninstall-and-disable)).
+  A Traefik scaled to 0 is wired again when its first injected pod is created, about a second later.
+- **Without Traefik's CRDs** nothing is wired, and nothing crashes. The leader looks for the
+  IngressRoute CRD every 30 s. Once it is installed, the bundle builder and the wiring watch
+  IngressRoutes (`operator/internal/crdwatch`). The wiring's resync (1 min) notices a Middleware CRD
+  installed later.
+- **`Programmed=True`** when all the policy's Traefik Ingresses and IngressRoutes are wired and
+  every running Traefik pod has the engine. Otherwise the reason is one of:
+  - `ControllerUnsupported`: another controller or kind;
+  - `WiringFailed`: no Traefik CRDs, a name clash, or an IngressRoute that can't be written;
+  - `PendingRestart`: pods older than the webhook, listed;
+  - `SidecarMissing`: no Traefik pod selected, or pods without the engine (the operator was down
+    in detect mode, or they opted out), listed;
+  - `NoTargets`;
+  - `InjectionDisabled`.
+- **Not yet:** `HTTPRoute` targets; matching engines to the pods that serve a policy's class (all
+  engines count for `Enforced`); IngressRoutes nested with `parentRefs`. Whether Traefik attachment
+  should default to something else is open ([§12](#12-open-questions)).
 
 ### 4.5 Resolver
 
-Turns policies and routes into `(host, pathMatch, method)` sets, all the engine matches on (0002
-D6): expand hosts × paths; for `HTTPRoute`, wire every Gateway's integration; most specific target
-wins (0002 §4.2); apply `WAFPolicyDefault`; resolve rule set and IP list references. Re-runs when a
-targeted route changes (indexed by target).
+The resolver turns policies and routes into `(host, pathMatch, method)` sets, which is all the
+engine matches on. This is decision D6, the operator resolves routes
+([0002 §11](0002-system-architecture.md#11-decisions-adr-log)). It:
 
-**Built (v0.1.0)** (`operator/resolver`, Ingress; IngressRoute since):
+- expands hosts × paths;
+- for an `HTTPRoute`, wires the integration of every Gateway;
+- lets the most specific target win ([0002 §4.2](0002-system-architecture.md#42-crds-wafinkwalldevv1alpha1));
+- applies `WAFPolicyDefault`;
+- resolves rule set and IP list references.
 
-- **Conflicts:** the oldest policy (creation time, then name) wins, others get `Conflict`, as in
-  Gateway API; rejecting both would leave the route unprotected. Identical routes from two Ingresses
-  go to the older policy too.
-- **Errors fall back:** an unresolvable policy keeps its version in the current bundle, so a bad edit
-  never weakens protection; a never-resolved one is left out. A missing target is not an error.
-- ConfigMap rules come only from ConfigMaps labeled `waf.inkwall.dev/rules=true` (smaller cache).
-- `ImplementationSpecific` paths are prefixes (as Traefik and ingress-nginx do). A default backend
-  is covered only for an Ingress without rules.
-- An IngressRoute's routes come from each route's `match`: `Host`, `Path` (exact) and `PathPrefix`,
-  one string each (`` `…` `` or `"…"`), joined by `&&`, in parentheses or not. No `Host` is any host,
-  no path is `/`. Anything else (`||`, `!`, `HostRegexp`, `Method`, `Header`, `Query`, `ClientIP`,
-  two Hosts or two paths, several values) is `Accepted=False` (`TargetUnsupported`), naming the
-  route (`spec.routes[1]`), its rule and what can't be read; the previous version stays in force.
-  Traefik's `PathPrefix` is a string prefix, read element-wise: other paths of a covered host get
-  its most general policy in the engine, so none goes uninspected.
-- Cross-namespace `WAFRuleSet` references are rejected until a grant exists; use `ClusterWAFRuleSet`.
+It runs again when a targeted route changes (routes are indexed by target).
+
+**Built (v0.1.0)** (`operator/resolver`; Ingress, and IngressRoute since):
+
+- **Conflicts:** the oldest policy wins (by creation time, then name), and the others get
+  `Conflict`, as in Gateway API. Rejecting both would leave the route unprotected. Identical routes
+  from two Ingresses also go to the older policy.
+- **Errors fall back.** A policy that can't be resolved keeps its version in the current bundle, so
+  a bad edit never weakens protection. A policy that was never resolved is left out. A missing
+  target is not an error.
+- **ConfigMap rules** come only from ConfigMaps labelled `waf.inkwall.dev/rules=true`, which keeps
+  the cache small.
+- **Ingress paths.** `ImplementationSpecific` paths are prefixes, as in Traefik and ingress-nginx.
+  A default backend is covered only for an Ingress without rules.
+- **IngressRoute routes** come from each route's `match`.
+  - Supported: `Host`, `Path` (exact) and `PathPrefix`, one string each (`` `…` `` or `"…"`),
+    joined by `&&`, in parentheses or not. No `Host` means any host; no path means `/`.
+  - Anything else is `Accepted=False` (`TargetUnsupported`): `||`, `!`, `HostRegexp`, `Method`,
+    `Header`, `Query`, `ClientIP`, two Hosts or two paths, or several values. The condition names
+    the route (`spec.routes[1]`), its rule and what can't be read. The previous version stays in
+    force.
+  - Traefik's `PathPrefix` is a string prefix, but it is read element-wise. Other paths of a covered
+    host get that host's most general policy in the engine, so none goes uninspected.
+- **Cross-namespace `WAFRuleSet` references** are rejected until a grant mechanism exists. Use a
+  `ClusterWAFRuleSet` instead.
 
 ### 4.6 Bundle builder (leader only)
 
-1. Debounce 1 s, so a 200-object GitOps sync makes one bundle.
-2. Build the `Bundle` proto (0002 §4.3); builtin rules referenced by name + version, not embedded.
-3. Same content hash as the current bundle → stop.
-4. Bump the monotonic version, continued from the stored bundle across leader changes.
-5. Sign with the cluster ed25519 key.
-6. Store gzipped in Secret `inkwall-bundle`, which is also the engines' cold-start source; split
-   into chunk Secrets if it doesn't fit in one.
+1. Debounce for 1 s, so a 200-object GitOps sync makes one bundle.
+2. Build the `Bundle` proto ([0002 §4.3](0002-system-architecture.md#43-bundle-format)). Builtin
+   rules are referenced by name and version, not embedded.
+3. If the content hash matches the current bundle's, stop.
+4. Bump the monotonic version. It continues from the stored bundle across leader changes.
+5. Sign with the cluster's Ed25519 key.
+6. Store it gzipped in the Secret `inkwall-bundle`, which is also the engines' cold-start source.
+   Split it into chunk Secrets if it doesn't fit in one.
 
 **Built (v0.1.0)** (`operator/bundle`, `pkg/agent`):
 
-- The Secret holds the `SignedBundle` and public key; the key is generated on first use into
+- The Secret holds the `SignedBundle` and the public key. The key is generated on first use into
   `inkwall-bundle-signing-key`.
-- The hash skips version and creation time. The version continues from the Secret, or the leader's
-  memory if it was deleted. Cluster ID = `kube-system` Namespace UID.
-- Engine cold start: on-disk cache, else the Secret (`--bundle-secret`) via a second projected token
-  for the API server and `kube-root-ca.crt`; verified like a streamed bundle.
-- **Chunks** (`pkg/bundlesecret`; Secrets cap at 1 MiB): a bundle up to 900 KiB compressed is
-  `bundle.pb.gz` in `inkwall-bundle`, as before, so older engines read it. A larger one is split
-  into Secrets of 900 KiB, `inkwall-bundle-a-0`… or `inkwall-bundle-b-0`…, labeled
-  `waf.inkwall.dev/bundle-chunk`, and `inkwall-bundle` holds `manifest.json` instead (SHA-256 and
-  size of the compressed bundle, chunk names). The chunks are written to the set the current
-  manifest doesn't use, then the manifest; chunks it doesn't list are deleted after, at every
-  build. A reader never sees a manifest before its chunks, and checks the hash, so one that read
-  the manifest just before the next bundle replaced its chunks fails and retries. At most 8 chunks
-  (7.2 MiB) and 64 MiB decompressed; over that, a bundle is not published and the current one
-  stays. The builder warns when it publishes a bundle over 75% of that;
-  `inkwall_operator_bundle_compressed_bytes` is the size each replica serves. A chunk deleted or
-  edited makes the builder publish the bundle again, as a new version (with no previous version
-  for an unresolvable policy to fall back on). `inkwall-bundle-reader` grants `get` on every chunk
-  name, and so must the Role of an engine configured by hand with `--bundle-secret`. The stream
-  carries the bundle whole: engines accept messages up to 65 MiB (gRPC's default was 4 MiB).
-- **Compatibility:** an engine without chunk support finds no `bundle.pb.gz` in a chunked Secret,
-  so it keeps its cache, or waits for the operator; it never applies part of a bundle. Such
-  engines also refuse a streamed bundle over 4 MiB decompressed, and keep their last one. An
-  operator without chunk support can't read a chunked Secret and builds nothing: before rolling
-  back, delete `inkwall-bundle` and its chunks (`-l waf.inkwall.dev/bundle-chunk`); engines accept
-  bundles of the restarted version sequence, as they are newer.
+- The hash skips the version and creation time. The version continues from the Secret, or from the
+  leader's memory if the Secret was deleted. The cluster ID is the UID of the `kube-system`
+  Namespace.
+- **Engine cold start:** the engine uses its on-disk cache, or else reads the Secret
+  (`--bundle-secret`). It reads it with a second projected token for the API server and
+  `kube-root-ca.crt`, and verifies it like a streamed bundle.
 
-**Built: signing key rotation** (`operator/bundle/keyring.go`, `pkg/agent`,
-`pkg/bundlekey`). Requested by a new value of the `waf.inkwall.dev/rotate-signing-key` annotation on
-the `InkwallConfig` (GitOps-friendly, next to the rest of the cluster's configuration, and no write
-access to the operator's Secrets needed), or due after `spec.signingKey.rotationInterval` (≥ 1h).
-The keys and the rotation's state live in `inkwall-bundle-signing-key`, so a new leader continues it:
+**Chunks** (`pkg/bundlesecret`). Secrets are capped at 1 MiB.
 
-1. **Publishing:** a new key is generated and added to `trusted-keys.pub` (the trust ConfigMaps
-   follow); the old key still signs. Engines re-read their key file every 10 s and report the key
-   IDs they trust in `Hello` and `Heartbeat`.
-2. **Switch** once at least a grace period (`--signing-key-grace`, 1 min: the kubelet's ConfigMap
-   update delay) has passed and every connected engine reports the new key; a new leader first
-   waits for the replicas' reports (30 s). The current content is signed again with the new key, as
-   a new version, so engines cache a bundle the new key signed. The old public key stays trusted.
-3. **Retire** the old key once the grace has passed again and every connected engine runs a
-   bundle signed with the new key: `trusted-keys.pub` has the one key.
+- A bundle of up to 900 KiB compressed is stored as `bundle.pb.gz` in `inkwall-bundle`, as before,
+  so older engines can read it.
+- A larger one is split into Secrets of 900 KiB, named `inkwall-bundle-a-0`… or
+  `inkwall-bundle-b-0`… and labelled `waf.inkwall.dev/bundle-chunk`. `inkwall-bundle` then holds a
+  `manifest.json` instead: the SHA-256 and size of the compressed bundle, and the chunk names.
+- **Write order.** At every build, the chunks are written to the set (`a` or `b`) that the current
+  manifest doesn't use, then the manifest. Chunks the manifest doesn't list are deleted after.
+  A reader therefore never sees a manifest before its chunks. It also checks the hash: a reader that
+  read the manifest just before the next bundle replaced its chunks fails and retries.
+- **Limits.** At most 8 chunks (7.2 MiB) and 64 MiB decompressed. A bundle over that is not
+  published, and the current one stays. The builder warns when it publishes a bundle over 75% of
+  the limit. `inkwall_operator_bundle_compressed_bytes` is the size each replica serves.
+- **Repair.** A chunk deleted or edited makes the builder publish the bundle again, as a new
+  version. That new version has no previous version for an unresolvable policy to fall back on.
+- **Access.** `inkwall-bundle-reader` grants `get` on every chunk name. So must the Role of an
+  engine configured by hand with `--bundle-secret`.
+- **Streaming.** The stream carries the bundle whole. Engines accept messages of up to 65 MiB
+  (gRPC's default is 4 MiB).
+- **Compatibility.**
+  - An engine without chunk support finds no `bundle.pb.gz` in a chunked Secret. It keeps its
+    cache, or waits for the operator; it never applies part of a bundle. Such engines also refuse a
+    streamed bundle over 4 MiB decompressed, and keep their last one.
+  - An operator without chunk support can't read a chunked Secret, and builds nothing. Before
+    rolling back, delete `inkwall-bundle` and its chunks (`-l waf.inkwall.dev/bundle-chunk`).
+    Engines accept bundles of the restarted version sequence, as they are newer.
 
-An engine that reports no keys (older than rotation) blocks the switch until it is replaced; the
-operator logs the engines it waits for. The phase is the Secret's
-`waf.inkwall.dev/rotation-phase` annotation (`Publishing`, `Retiring`); the bundle Secret's
-`waf.inkwall.dev/key-id` names the key that signed it. A deleted signing key Secret is recreated
-with the keys in the leader's memory. Tested: unit (multi-key verification, reload, the state
-machine), envtest (an engine that gets the key late holds the switch; no NACK) and kind (Traefik's
-injected engine and a hand-configured one; no NACK, no restart).
+**Built: signing key rotation** (`operator/bundle/keyring.go`, `pkg/agent`, `pkg/bundlekey`).
+
+A rotation starts in one of two ways:
+
+- on request, by a new value of the `waf.inkwall.dev/rotate-signing-key` annotation on the
+  `InkwallConfig`. This is GitOps-friendly, sits next to the rest of the cluster's configuration,
+  and needs no write access to the operator's Secrets;
+- on schedule, when `spec.signingKey.rotationInterval` (≥ 1h) has passed.
+
+The keys and the rotation's state live in `inkwall-bundle-signing-key`, so a new leader continues
+a rotation. It has three phases:
+
+1. **Publishing.** A new key is generated and added to `trusted-keys.pub`; the trust ConfigMaps
+   follow. The old key still signs. Engines re-read their key file every 10 s, and report the IDs of
+   the keys they trust in `Hello` and `Heartbeat`.
+2. **Switch.** The operator switches once two things hold: at least a grace period has passed
+   (`--signing-key-grace`, 1 min: the kubelet's ConfigMap update delay), and every connected engine
+   reports the new key. A new leader first waits 30 s for the replicas' reports. The current content
+   is then signed again with the new key, as a new version, so engines cache a bundle the new key
+   signed. The old public key stays trusted.
+3. **Retire.** Once the grace period has passed again and every connected engine runs a bundle
+   signed with the new key, the old key is removed: `trusted-keys.pub` has one key.
+
+Details:
+
+- An engine that reports no keys (older than rotation) blocks the switch until it is replaced. The
+  operator logs the engines it waits for.
+- The phase is the Secret's `waf.inkwall.dev/rotation-phase` annotation (`Publishing`,
+  `Retiring`). The bundle Secret's `waf.inkwall.dev/key-id` names the key that signed it.
+- A deleted signing key Secret is recreated with the keys in the leader's memory.
+- Tested at three levels. Unit tests cover multi-key verification, reloading and the state machine.
+  envtest covers an engine that gets the key late: it holds the switch, and nothing is NACKed. On
+  kind, both Traefik's injected engine and a hand-configured one rotate with no NACK and no
+  restart.
 
 ### 4.7 Distribution server (all replicas)
 
-gRPC `BundleService.Watch` (0002 §5.2) via Service `inkwall-operator`. Every replica serves streams
-from the Secret (only building is leader-only), so losing one just moves its engines.
+The distribution server serves gRPC `BundleService.Watch`
+([0002 §5.2](0002-system-architecture.md#52-engine--operator-bundle-distribution)) through the
+Service `inkwall-operator`. Every replica serves streams from the Secret; only building is
+leader-only. Losing a replica just moves its engines to another.
 
 **Built (v0.1.0)** (`operator/internal/distribution`):
 
-- Port 9445 (`--distribution-port`), TLS with the webhook certificate (also names the Service),
-  verified by engines with the operator CA.
-- **Auth:** `TokenReview` (audience `inkwall-operator`), then a `SubjectAccessReview` that the
-  engine's ServiceAccount may `get` the bundle Secret (§4.3 grant). Cached 1 min.
-- First message must be `Hello`; engines already current aren't resent. Streams silent for 30 s
-  close. At most 50 concurrent sends; a stream waiting for one, or sending, still reads its
-  engine's heartbeats (#148).
-- **Aggregation via ConfigMaps:** each replica writes its engines to `inkwall-engines-<pod>` (owned
-  by its Pod) on change and every 10 s; the leader merges every 2 s, drops reports older than 30 s,
-  counts a moved engine once.
+- **Port and TLS.** Port 9445 (`--distribution-port`). TLS uses the webhook certificate, which also
+  names the Service; engines verify it with the operator CA.
+- **Authentication.** A `TokenReview` (audience `inkwall-operator`), then a `SubjectAccessReview`
+  that the engine's ServiceAccount may `get` the bundle Secret (the grant from
+  [§4.3](#43-injection-controller)). Results are cached for 1 min.
+- **Streams.** The first message must be `Hello`. Engines that are already current aren't sent the
+  bundle again. Streams silent for 30 s are closed. At most 50 sends run at once. A stream waiting
+  for a send slot, or sending, still reads its engine's heartbeats (#148).
+- **Aggregation through ConfigMaps.** Each replica writes its engines to `inkwall-engines-<pod>`
+  (owned by its Pod) on change and every 10 s. The leader merges them every 2 s, drops reports
+  older than 30 s, and counts an engine that moved between replicas once.
 
 ### 4.8 Status aggregator
 
-Turns resolver, wiring and ACK results into §3.2 conditions; writes only on change, at most once per
-object per 2 s.
+The status aggregator turns the results of the resolver, the wiring and the engines' ACKs into the
+conditions of [§3.2](#32-status-contract). It writes only on change, at most once per object every
+2 s.
 
-**Built (v0.1.0):** `Enforced=True` when every connected engine runs a bundle ≥ the policy's
-`status.bundleVersion`; else `NoEngines`, `EnginesBehind` (`1/3 engines on bundle 42`),
-`EngineNack` (first error) or `NotInBundle`. Metrics: `inkwall_operator_bundle_version`,
-`inkwall_operator_engines{state}`, `inkwall_operator_bundle_compressed_bytes` (§4.6). **Not yet:**
-`integration` label, reconcile duration, policy condition counts.
+**Built (v0.1.0):** `Enforced=True` when every connected engine runs a bundle whose version is at
+least the policy's `status.bundleVersion`. Otherwise the reason is `NoEngines`, `EnginesBehind`
+(`1/3 engines on bundle 42`), `EngineNack` (with the first error) or `NotInBundle`.
+
+Metrics: `inkwall_operator_bundle_version`, `inkwall_operator_engines{state}`,
+`inkwall_operator_bundle_compressed_bytes` ([§4.6](#46-bundle-builder-leader-only)).
+
+**Not yet:** an `integration` label, reconcile duration, policy condition counts.
 
 ### 4.9 Upstream sync (leader only)
 
-`GitOps` pushes CRD snapshots and status to the control plane and never writes CRDs. `Managed`
-writes its policies as CRDs labeled `inkwall.dev/source: saas` and rejects other edits. Contract:
-0002 §5.3, §7.5.
+Upstream sync connects the operator to the control plane.
 
-**Built (`operator/internal/controlplane`):** enrollment and the primary stream, leader only, idle in
-`Standalone` (the default). The leader reads the token from
-`spec.controlPlane.enrollmentSecretRef` (it must be in the operator's namespace, key `token`),
-generates an ECDSA P-256 key and enrolls; a retry after a lost response reuses the key. The
-certificate and key go in the `inkwall-control-plane-identity` Secret (`kubernetes.io/tls`, plus
-`cluster-id`). It then holds the primary stream (Hello, Welcome, heartbeats), renews the certificate
-two thirds into its lifetime. `--control-plane-ca` trusts a private CA.
-`InkwallConfig` reports `ControlPlaneConnected`: `Connected`, or `EnrollmentTokenMissing`,
-`EnrollmentTokenNotInOperatorNamespace`, `EnrollmentTokenRejected` (waits for a new token),
-`EnrollFailed`, `CertificateRejected` and `CertificateExpired` (the identity is deleted; waits for a
-new token),
-`ClusterDisabled` (waits for a configuration change), `Unreachable`, `InvalidEndpoint`.
+- In **GitOps** mode it pushes CRD snapshots and status to the control plane, and never writes
+  CRDs.
+- In **Managed** mode it writes the control plane's policies as CRDs labelled
+  `inkwall.dev/source: saas`, and rejects other edits of them.
 
-Tested on kind against a stub control plane (`operator/test/stubcontrolplane`, built on
-`operator/test/fakecontrolplane`; never a real one): enroll, connect, heartbeats, state sync,
-events, a Managed round trip (a policy sent through the stub's `POST /snapshot` is written, blocks
-through Traefik, is acknowledged and comes back `Enforced`; `kubectl edit`, `patch`, label removal and
-delete are refused; a bad snapshot changes nothing; an empty one prunes), and a used token refused.
-Chart values `controlPlane.caBundle` and `controlPlane.enrollmentToken` supply the CA and
-the token.
+The contract is in [0002 §5.3](0002-system-architecture.md#53-operator--saas) and
+[0002 §7.5](0002-system-architecture.md#75-cluster-enrollment-managed--gitops-mode).
 
-**Built:** the leader sends `ClusterState` after `Welcome`, on any change (checked every 5 s), on
-`Resync` and every 5 min, reading only. Every replica forwards its engines' security events on
-its own events stream while the control plane accepts them, from a bounded disk buffer
-(`--events-dir`, an `emptyDir`; when full, the oldest are dropped and counted), resending what
-wasn't acknowledged after a reconnect or a restart. `inkwall_operator_events_buffered` follows the
-buffer, outages included. The events stream reconnects with jittered backoff bounded at 10 s (the
-leader's: 1 min), so the backlog drains soon after an outage.
+**Built: enrollment and the primary stream** (`operator/internal/controlplane`). This runs on the
+leader only, and is idle in Standalone mode (the default).
 
-**Built: Managed mode.** The leader applies each `PolicySnapshot` beside the stream, all or nothing:
-it refuses (`PolicyNack`, nothing written) a cluster not in `Managed` mode, version 0 or a version
-older than the last applied, any kind but `WAFPolicy`, `WAFRuleSet` and `ClusterWAFRuleSet`, a rule
-set with `configMapRef`, an object without the namespace its kind needs or listed twice, and an
-existing object it didn't write (no source label: it never takes one over). Then it dry-runs
-(`dryRun: All`, strict field validation, so the CRD schema and the validating webhook see each
-object, and an unknown field is refused rather than dropped) every create, update and the deletes;
-one refused object refuses the snapshot. A dry run that can't be done (the API server or the webhook
-unreachable) isn't a refusal: the stream is dropped and the snapshot comes again. Only then it
-writes them, rule sets first, labelled `inkwall.dev/source: saas` (set by the operator: the
-snapshot's own value is ignored), deletes the labelled objects the snapshot no longer has (policies
-first), records the version on the identity Secret (`waf.inkwall.dev/policy-version`, sent in
-`Hello`) and answers `PolicyAck`. A write that
-fails after the dry run is retried for about 15 s; then the stream is dropped, and the control plane
-sends the snapshot again on reconnect (`Hello` has the older version). The same version again is
-applied again (idempotent) and acknowledged; a snapshot still waiting when a newer one arrives is
-refused as superseded. Nothing new feeds the engines: the bundle builder signs these CRDs with the
-cluster's key like any other, and `ClusterState` reports their `Enforced` back.
+- **Enrollment.** The leader reads the enrollment token from
+  `spec.controlPlane.enrollmentSecretRef`, key `token`; the Secret must be in the operator's
+  namespace. It generates an ECDSA P-256 key and enrolls. A retry after a lost response reuses the
+  key.
+- **Identity.** The certificate and key go in the `inkwall-control-plane-identity` Secret (type
+  `kubernetes.io/tls`, plus `cluster-id`).
+- **Primary stream.** The leader then holds the primary stream (`Hello`, `Welcome`, heartbeats),
+  and renews the certificate two thirds into its lifetime. `--control-plane-ca` trusts a private CA.
+- **Condition.** `InkwallConfig` reports `ControlPlaneConnected`:
+  - `Connected`;
+  - `EnrollmentTokenMissing`, `EnrollmentTokenNotInOperatorNamespace`;
+  - `EnrollmentTokenRejected` (waits for a new token);
+  - `EnrollFailed`;
+  - `CertificateRejected` and `CertificateExpired` (the identity is deleted; waits for a new token);
+  - `ClusterDisabled` (waits for a configuration change);
+  - `Unreachable`, `InvalidEndpoint`.
+- **Chart values.** `controlPlane.caBundle` and `controlPlane.enrollmentToken` supply the CA and
+  the token.
 
-The validating webhook guards them: in `Managed` mode, only the operator (its identity from a
-`SelfSubjectReview` at start-up) may create, change or delete an object labelled
-`inkwall.dev/source: saas`, or add or remove that label; the namespace controller may still delete
-them with their namespace. It fails closed, also when it can't read the mode. Deletes reach it only
-for labelled objects (an `objectSelector`), so deleting anything else never needs the operator. Out
-of `Managed` mode they are ordinary objects again, which their owners can edit or delete (the
-operator no longer writes them); whoever can edit the `InkwallConfig` can leave `Managed` mode.
+**Tested** on kind against a stub control plane (`operator/test/stubcontrolplane`, built on
+`operator/test/fakecontrolplane`), never a real one:
+
+- enroll, connect, heartbeats, state sync, events;
+- a Managed round trip: a policy sent through the stub's `POST /snapshot` is written, blocks
+  through Traefik, is acknowledged and comes back `Enforced`. `kubectl edit`, `patch`, label
+  removal and delete are refused. A bad snapshot changes nothing; an empty one prunes;
+- a used token, refused.
+
+**Built: state sync and events.**
+
+- The leader sends `ClusterState` after `Welcome`, on any change (checked every 5 s), on `Resync`,
+  and every 5 min. It only reads the cluster to do so.
+- Every replica forwards its engines' security events on its own events stream, while the control
+  plane accepts them. They go through a bounded disk buffer (`--events-dir`, an `emptyDir`). When it
+  is full, the oldest events are dropped and counted.
+- What wasn't acknowledged is sent again after a reconnect or a restart.
+  `inkwall_operator_events_buffered` follows the buffer, outages included.
+- The events stream reconnects with jittered backoff bounded at 10 s (the leader's primary stream:
+  1 min), so the backlog drains soon after an outage.
+
+**Built: Managed mode.** The leader applies each policy snapshot beside the stream, all or nothing.
+
+1. **Refuse** (`PolicyNack`, nothing written):
+   - a cluster not in Managed mode;
+   - version 0, or a version older than the last applied;
+   - any kind but `WAFPolicy`, `WAFRuleSet` and `ClusterWAFRuleSet`;
+   - a rule set with `configMapRef`;
+   - an object without the namespace its kind needs, or listed twice;
+   - an existing object the operator didn't write (no source label): it never takes one over.
+2. **Dry run** every create, update and delete (`dryRun: All`, with strict field validation, so the
+   CRD schema and the validating webhook see each object, and an unknown field is refused rather
+   than dropped). One refused object refuses the snapshot. A dry run that can't be done (the API
+   server or the webhook is unreachable) isn't a refusal: the stream is dropped and the snapshot
+   comes again.
+3. **Write** the objects, rule sets first, labelled `inkwall.dev/source: saas`. The operator sets
+   the label itself and ignores the snapshot's own value.
+4. **Prune** the labelled objects the snapshot no longer has, policies first.
+5. **Record** the version on the identity Secret (`waf.inkwall.dev/policy-version`, sent in
+   `Hello`), and answer `PolicyAck`.
+
+Retries and ordering:
+
+- A write that fails after the dry run is retried for about 15 s. Then the stream is dropped, and
+  the control plane sends the snapshot again on reconnect (`Hello` has the older version).
+- The same version again is applied again (idempotent) and acknowledged.
+- A snapshot still waiting when a newer one arrives is refused as superseded.
+
+Nothing new feeds the engines. The bundle builder signs these CRDs with the cluster's key like any
+other, and `ClusterState` reports their `Enforced` back.
+
+**The validating webhook guards these objects.**
+
+- In Managed mode, only the operator may create, change or delete an object labelled
+  `inkwall.dev/source: saas`, or add or remove that label. The operator learns its own identity
+  from a `SelfSubjectReview` at start-up. The namespace controller may still delete the objects
+  with their namespace.
+- It fails closed, also when it can't read the mode.
+- Deletes reach the webhook only for labelled objects (an `objectSelector`), so deleting anything
+  else never needs the operator.
+- Out of Managed mode, they are ordinary objects again: their owners can edit or delete them, and
+  the operator no longer writes them. Whoever can edit the `InkwallConfig` can leave Managed mode.
 
 ## 5. Uninstall and disable
 
 Removal must never leave a proxy failing closed on a missing engine.
 
-**Built (v0.1.0):** `InkwallConfig.spec.suspend: true` puts every engine in allow-all within
-seconds, removing nothing. Unprotected Ingresses and IngressRoutes are unwired level-based (§4.4).
-`helm uninstall` runs a pre-delete hook, `inkwall-operator unwire` (`operator/manager/unwire.go`):
-scale the operator to 0 and wait for its pods (a draining replica still wires), set the Pod webhook
-to `Ignore`, then remove Inkwall's Middleware from every wired Ingress and IngressRoute (keeping the
-user's) and delete the Middlewares it created. `WAFPolicy` objects stay; sidecars leave as proxy
-pods restart. Tested on kind: after the uninstall, a restarted Traefik serves the routes (an
-Ingress and an IngressRoute) without the engine.
+**Built (v0.1.0):**
 
-**Built since (O5)** (`operator/internal/wiring`):
+- **Suspend.** `InkwallConfig.spec.suspend: true` puts every engine in allow-all within seconds,
+  and removes nothing.
+- **Unprotected routes.** Ingresses and IngressRoutes that are no longer protected are unwired,
+  level-based ([§4.4](#44-wiring-controller)).
+- **`helm uninstall`** runs a pre-delete hook, `inkwall-operator unwire`
+  (`operator/manager/unwire.go`). It:
+  1. scales the operator to 0 and waits for its pods (a draining replica still wires);
+  2. sets the Pod webhook to `Ignore`;
+  3. removes Inkwall's Middleware from every wired Ingress and IngressRoute, keeping the user's;
+  4. deletes the Middlewares it created.
 
-- **Finalizer `waf.inkwall.dev/unwire`** on every `WAFPolicy`, added by the wiring controller (on
-  the leader) before its routes are wired; a policy it can't add it to yet is wired anyway (unwiring
-  would drop its protection), and retried. A deleted policy is no longer wired; the finalizer goes
-  once none of its targets is still wired for it alone, read from the API server (the cache may lag
-  a wiring just done). A route that can't be written holds it, retried, and keeps its namespace's
-  Middleware; a target that doesn't exist, or whose CRD doesn't, holds nothing; a target another
-  policy protects stays wired. Deleted while the operator is down, the policy, its routes' wiring
-  and enforcement stay until it is back. Patches carry the `resourceVersion`, so another
-  controller's finalizer is never dropped.
-- **Injection off** (`--inject=false`, `injection.enabled=false`, which removes the Pod webhook):
-  the wiring controller still runs and unwires every route it wired, deletes its Middlewares,
-  removes the finalizer from every policy and reports `Programmed=False` (`InjectionDisabled`).
-  Likewise, no Traefik pod selected (§4.4): an `InkwallConfig` selector that doesn't match Traefik's
-  pods, or deleted when they don't have the default labels. Deleting an `InkwallConfig` doesn't
-  unwire by itself: without one the operator uses the defaults, and keeps wiring the routes of the
-  pods they still select.
-- **Uninstall:** the hook runs with injection off too. It also sets the `WAFPolicy` webhook to
-  `Ignore` (no replica answers it, and it would refuse the update) and removes the finalizer from
-  every policy, so deleting one, or its namespace, never waits for an operator that is gone.
-  Without the hook (`--no-hooks`, `uninstall.unwire=false`) the chart README says how to.
-- Tested on kind: a policy deleted while the operator is scaled to 0 stays, wired, until it is
-  back; `helm upgrade --set injection.enabled=false` unwires, and Traefik serves the routes
-  uninspected, also from a new pod; an `InkwallConfig` selecting other pods unwires, deleting it
-  wires again.
+  `WAFPolicy` objects stay. Sidecars leave as proxy pods restart.
+- Tested on kind: after the uninstall, a restarted Traefik serves the routes (an Ingress and an
+  IngressRoute) without the engine.
+
+**Built since, in milestone O5 (uninstall, suspend, chaos, scale; [§11](#11-milestones))**
+(`operator/internal/wiring`):
+
+- **Finalizer `waf.inkwall.dev/unwire`** on every `WAFPolicy`.
+  - The wiring controller, on the leader, adds it before the policy's routes are wired. A policy it
+    can't add it to yet is wired anyway (unwiring would drop its protection), and the add is
+    retried.
+  - A deleted policy is no longer wired. The finalizer is removed once none of its targets is still
+    wired for it alone. This is read from the API server, since the cache may lag a wiring just
+    done.
+  - A route that can't be written holds the finalizer, retried, and keeps its namespace's
+    Middleware. A target that doesn't exist, or whose CRD doesn't, holds nothing. A target another
+    policy protects stays wired.
+  - Deleted while the operator is down, the policy, its routes' wiring and enforcement stay until
+    the operator is back.
+  - Patches carry the `resourceVersion`, so another controller's finalizer is never dropped.
+- **Injection off** (`--inject=false`, or the chart's `injection.enabled=false`, which removes the
+  Pod webhook). The wiring controller still runs. It unwires every route it wired, deletes its
+  Middlewares, removes the finalizer from every policy, and reports `Programmed=False`
+  (`InjectionDisabled`).
+  - The same happens when no Traefik pod is selected ([§4.4](#44-wiring-controller)): an
+    `InkwallConfig` selector that doesn't match Traefik's pods, or an `InkwallConfig` deleted when
+    the pods don't have the default labels.
+  - Deleting an `InkwallConfig` doesn't unwire by itself. Without one, the operator uses the
+    defaults, and keeps wiring the routes of the pods they still select.
+- **Uninstall** runs the hook with injection off too. The hook also sets the `WAFPolicy` webhook to
+  `Ignore` (no replica answers it, and it would refuse the update), and removes the finalizer from
+  every policy. Deleting a policy, or its namespace, then never waits for an operator that is gone.
+  Without the hook (`--no-hooks`, `uninstall.unwire=false`), the chart README says how to clean up.
+- Tested on kind:
+  - a policy deleted while the operator is scaled to 0 stays, wired, until the operator is back;
+  - `helm upgrade --set injection.enabled=false` unwires, and Traefik serves the routes
+    uninspected, also from a new pod;
+  - an `InkwallConfig` selecting other pods unwires, and deleting it wires again.
 
 ## 6. Failure modes
 
 | Failure | Traffic | Detection | Recovery |
 |---|---|---|---|
-| Operator down | None: engines keep last bundle | Engines' `inkwall_operator_connected` is 0 | Restart; engines resync |
-| Leader down | None | Leader election | Follower builds within ~15 s |
-| Operator rollout | None: stopping replica serves for `--shutdown-delay` (5 s), not ready | — | Engines reconnect |
-| Webhook down, proxy pod created | Detect: starts uninspected. Block: refused; running pods serve | `SidecarMissing` | Restart pod after recovery, or label it `waf.inkwall.dev/inject: "false"` to scale (uninspected) |
+| Operator down | None: engines keep their last bundle | Engines' `inkwall_operator_connected` is 0 | Restart; engines resync |
+| Leader down | None | Leader election | A follower builds within ~15 s |
+| Operator rollout | None: a stopping replica keeps serving for `--shutdown-delay` (5 s), not ready | — | Engines reconnect |
+| Webhook down, proxy pod created | Detect mode: the pod starts uninspected. Block mode: the pod is refused; running pods serve | `SidecarMissing` | Restart the pod after recovery, or label it `waf.inkwall.dev/inject: "false"` to scale (uninspected) |
 | Invalid rule | Rejected at admission | Error to `kubectl` / Argo CD | Fix the rule |
-| Engine can't compile (skew) | Engine keeps previous bundle | `EngineNack` | Upgrade engines or fix rule |
+| Engine can't compile (version skew) | Engine keeps its previous bundle | `EngineNack` | Upgrade the engines or fix the rule |
 | Bundle Secret deleted | None | Builder recreates it | Automatic |
-| Bundle chunk deleted or edited | None; new engines can't cold start from the Secret meanwhile | Builder logs it | Automatic: published again |
-| Bundle over 7.2 MiB compressed | None: the current bundle stays; changes are not published | Builder error; warning past 75%, `inkwall_operator_bundle_compressed_bytes` | Shrink the policies (fewer, or smaller rule sets) |
-| Signing key rotated | None: signs with the new key only once every connected engine trusts it | Secret's `rotation-phase`; operator logs the engines it waits for | Automatic (§4.6); replace engines older than rotation |
-| Unknown controller version | Wiring may break | `Programmed=False` | Update or pin integration |
+| Bundle chunk deleted or edited | None; meanwhile new engines can't cold start from the Secret | Builder logs it | Automatic: published again |
+| Bundle over 7.2 MiB compressed | None: the current bundle stays; changes are not published | Builder error; warning past 75%; `inkwall_operator_bundle_compressed_bytes` | Shrink the policies (fewer, or smaller rule sets) |
+| Signing key rotated | None: the operator signs with the new key only once every connected engine trusts it | Secret's `rotation-phase`; operator logs the engines it waits for | Automatic ([§4.6](#46-bundle-builder-leader-only)); replace engines older than rotation |
+| Unknown controller version | Wiring may break | `Programmed=False` | Update or pin the integration |
 | API server down | None | — | Automatic |
 
 Runbook: [When the operator is down](../../deploy/helm/inkwall/README.md#when-the-operator-is-down).
 
 ## 7. RBAC
 
-Least privilege. Built rules ([`role.yaml`](../../operator/config/rbac/role.yaml)): a `ClusterRole` plus a
-`Role` in `inkwall-system`.
+Least privilege. The built rules are in [`role.yaml`](../../operator/config/rbac/role.yaml): a
+`ClusterRole`, plus a `Role` in `inkwall-system`.
 
 | Resources | Verbs | Why |
 |---|---|---|
 | `waf.inkwall.dev/*` | read; update status | Own CRDs |
-| `wafpolicies` | update, patch | The `waf.inkwall.dev/unwire` finalizer (§5) |
-| `wafpolicies`, `wafrulesets`, `clusterwafrulesets` | create, update, delete | Managed mode (§4.9); the webhook keeps others off them |
+| `wafpolicies` | update, patch | The `waf.inkwall.dev/unwire` finalizer ([§5](#5-uninstall-and-disable)) |
+| `wafpolicies`, `wafrulesets`, `clusterwafrulesets` | create, update, delete | Managed mode ([§4.9](#49-upstream-sync-leader-only)); the webhook keeps others off them |
 | `ingressclasses`, `ingresses`, `pods` | read | Resolution, injection checks |
 | `ingresses` | patch | Traefik annotation |
 | `ingressroutes` (traefik.io) | read, patch | Traefik routes' `middlewares` |
 | `middlewares` (traefik.io) | full | Traefik wiring |
 | `configmaps` | full, cluster-wide | `inkwall-trust` per namespace, engine reports |
-| `secrets` | in `inkwall-system` | Bundle, signing key, certs |
-| `roles`, `rolebindings` | in `inkwall-system` | Bundle Secret grant (§4.3) |
-| `tokenreviews`, `subjectaccessreviews` | create | Engine auth (§4.7) |
+| `secrets` | in `inkwall-system` | Bundle, signing key, certificates |
+| `roles`, `rolebindings` | in `inkwall-system` | Bundle Secret grant ([§4.3](#43-injection-controller)) |
+| `tokenreviews`, `subjectaccessreviews` | create | Engine authentication ([§4.7](#47-distribution-server-all-replicas)) |
 | webhook configurations | patch | `failurePolicy`, CA bundle |
 | `namespaces/kube-system` | get | Cluster ID |
 | `leases`, `events` | write | Leader election, events |
 
-**Not yet:** one `ClusterRole` per controller, aggregated by the chart, with rules for absent
-proxies omitted (`.Capabilities.APIVersions`); Gateway API, Envoy Gateway, Istio and controller-ConfigMap rules;
-`deployments` restart patch only with `rollout: Automatic`.
+**Not yet:**
+
+- one `ClusterRole` per controller, aggregated by the chart, with rules for absent proxies left out
+  (`.Capabilities.APIVersions`);
+- rules for Gateway API, Envoy Gateway, Istio and controller ConfigMaps;
+- a `deployments` restart patch, only with `rollout: Automatic`.
 
 ## 8. Scale targets (v1)
 
@@ -525,18 +700,25 @@ proxies omitted (`.Capabilities.APIVersions`); Gateway API, Envoy Gateway, Istio
 | Operator memory | < 512 MiB |
 | Bundle (compressed) | < 900 KiB in one Secret; up to 7.2 MiB in chunks |
 
-**Measured** (#115) by `make scale-test SCALE=full` (`operator/test/scale`): the operator, with its
-production defaults (1 s debounce, 2 s engine reports, unthrottled client), runs in the test process
-against envtest's API server and etcd (Kubernetes 1.29), which are separate processes and not
-counted. Each policy targets its own route object, half Ingresses and half IngressRoutes, with 10
-routes each (2 hosts × 5 path prefixes). Fake engines (`operator/test/fakeengine`, 5 s heartbeats,
-one token each) run in a child process, also not counted; they verify and decode every bundle. After
-a sync of all objects at once, 10 edits of one policy each, the operator idle between them, are timed
-until every engine acks the new bundle. Memory is this process's: Go heap (`runtime.MemStats`, the
-peak sampled every 250 ms, garbage included) and peak RSS (`VmHWM`), the harness's share being small.
-Reconcile is the bundle reconciler's mean during the edits (controller-runtime's histogram), resolve
-is `resolver.Resolve` alone. One run per size on a 12-thread i7-1255U with 16 GiB, API server,
-operator and engines sharing it, so times are pessimistic:
+**Measured** (#115) by `make scale-test SCALE=full` (`operator/test/scale`).
+
+How the test runs:
+
+- **Operator.** It runs with its production defaults (1 s debounce, 2 s engine reports, unthrottled
+  client), in the test process. It talks to envtest's API server and etcd (Kubernetes 1.29), which
+  are separate processes and not counted.
+- **Objects.** Each policy targets its own route object: half Ingresses, half IngressRoutes. Each
+  has 10 routes (2 hosts × 5 path prefixes).
+- **Engines.** Fake engines (`operator/test/fakeengine`, 5 s heartbeats, one token each) run in a
+  child process, also not counted. They verify and decode every bundle.
+- **Timing.** First all objects are synced at once. Then 10 edits, of one policy each, with the
+  operator idle between them, are timed until every engine ACKs the new bundle.
+- **Memory** is the test process's: the Go heap (`runtime.MemStats`, the peak sampled every 250 ms,
+  garbage included) and peak RSS (`VmHWM`). The harness's share is small.
+- **Reconcile** is the bundle reconciler's mean time during the edits (controller-runtime's
+  histogram). **Resolve** is `resolver.Resolve` alone.
+- **Machine.** One run per size, on a 12-thread i7-1255U with 16 GiB. The API server, the operator
+  and the engines share it, so the times are pessimistic.
 
 | Policies / routes | Engines | Peak RSS | Peak heap | Bundle gzip (raw) | Reconcile | Resolve | Initial sync | Change → all engines, p50 / max |
 |---|---|---|---|---|---|---|---|---|
@@ -547,36 +729,48 @@ operator and engines sharing it, so times are pessimistic:
 | 5,000 / 50,000 | 50 | 507 MiB | 432 MiB | 134 KiB (1.9 MiB) | 8.7 s | 41 ms | 21.6 s | 1.4 / 1.5 s |
 | 5,000 / 50,000 | 500 | **518 MiB** | 369 MiB | 134 KiB (1.9 MiB) | 14 s | 52 ms | 16.1 s | 3.5 / 6.2 s |
 
-Initial sync is from the last object created to every engine having all policies; with 10 edits the
-p95 is the slowest. Against the targets:
+Initial sync is the time from the last object created until every engine has all policies. With 10
+edits, the p95 is the slowest edit.
 
-- **Bundle size: met.** 134 KiB compressed at 5,000 policies, far under 900 KiB. Uncompressed it is
-  1.9 MiB, nearly half of gRPC's default 4 MiB receive limit, which engines keep.
-- **Change → every engine: met up to 5,000 × 50** (1.5 s), not at 5,000 × 500: 4 s typically, but
-  one edit took 47 s. Waiting for one of the 50 send slots counted against a stream's 30 s idle
-  timeout, while its heartbeats weren't read, so engines were disconnected and got the bundle again
-  after reconnecting. Fixed (#148): bundles are sent from a goroutine of their own, so heartbeats
-  are read meanwhile; reruns at 5,000 × 500 since have no disconnects, but one edit in ten can
-  still take 24–28 s, before as after the fix, so another cause remains.
-- **Operator memory: just over at 5,000 × 500** (518 MiB), met everywhere else. Each stream used to
-  marshal the bundle itself, and a stream's send returns once the message is queued on its
-  connection, not once it is written, so the operator held engines × bundle bytes (1,004 MiB at
-  1,000 × 500, 2,038 MiB at 5,000 × 500). Now each bundle is encoded once (`grpc.PreparedMsg`, per
-  send compressor) and every stream queues that one buffer (#147), so memory no longer grows with
-  engines: 5,000 × 500 is at 5,000 × 50's level, the rest being the reconcile. The live heap after a
-  GC is under 110 MiB at every size. The 1,000 × 500 and 5,000 × 500 rows are after #147 (before, on the
-  same machine and harness: 988 MiB / 953 MiB heap at 1,000 × 500, 2,007 MiB / 1,886 MiB at
-  5,000 × 500); both runs shared the machine with a kind e2e test, so their times are noisier.
-- **Not a target yet, but slow:** each new bundle writes the `status.bundleVersion` of every policy
-  (then `Enforced`), so a reconcile takes 9–19 s at 5,000 policies; changes during it wait, and the
-  initial sync takes 20–25 s.
+Against the targets:
 
-**Engine memory per policy.** A compiled Coraza WAF with the CRS keeps about 2.1 MiB of heap and
-takes 10–15 ms to compile. Policies with the same rule sets and CRS settings share one, whatever
-their exclusions: exclusions are applied to each request (the transaction-level
-`ctl:ruleRemoveById` / `ruleRemoveTargetById`, paths decided on `REQUEST_FILENAME` as before), not
-compiled into the rule set (#42). `BenchmarkCompile` (`pkg/policy`, in the CI bench gate) compiles
-a bundle of CRS policies that differ only in exclusions, from an empty cache (i7-1255U, medians):
+- **Bundle size: met.** It is 134 KiB compressed at 5,000 policies, far under 900 KiB.
+  Uncompressed it is 1.9 MiB, nearly half of gRPC's default 4 MiB receive limit, which engines
+  keep.
+- **Change → every engine: met up to 5,000 policies × 50 engines** (1.5 s), but not at
+  5,000 × 500. There it took 4 s typically, but one edit took 47 s.
+  - Cause: waiting for one of the 50 send slots counted against a stream's 30 s idle timeout, and
+    its heartbeats weren't read meanwhile. So engines were disconnected, and got the bundle again
+    after reconnecting.
+  - Fixed (#148): bundles are sent from a goroutine of their own, so heartbeats are read meanwhile.
+    Reruns at 5,000 × 500 since have no disconnects.
+  - Still open: one edit in ten can take 24–28 s, before as after the fix, so another cause
+    remains.
+- **Operator memory: just over the target at 5,000 × 500** (518 MiB); met everywhere else.
+  - Before: each stream marshalled the bundle itself. A stream's send returns once the message is
+    queued on its connection, not once it is written. So the operator held engines × bundle bytes
+    (1,004 MiB at 1,000 × 500, 2,038 MiB at 5,000 × 500).
+  - Now (#147): each bundle is encoded once (`grpc.PreparedMsg`, per send compressor), and every
+    stream queues that one buffer. Memory no longer grows with the number of engines: 5,000 × 500
+    is at 5,000 × 50's level, and the rest is the reconcile.
+  - The live heap after a GC is under 110 MiB at every size.
+  - The 1,000 × 500 and 5,000 × 500 rows are from after #147. Before it, on the same machine and
+    harness: 988 MiB / 953 MiB heap at 1,000 × 500, and 2,007 MiB / 1,886 MiB at 5,000 × 500.
+    Both runs shared the machine with a kind e2e test, so their times are noisier.
+- **Not a target yet, but slow: the reconcile.** Each new bundle writes the `status.bundleVersion`
+  of every policy (then `Enforced`). So a reconcile takes 9–19 s at 5,000 policies, changes during
+  it wait, and the initial sync takes 20–25 s.
+
+**Engine memory per policy.** A compiled Coraza WAF with the CRS keeps
+about 2.1 MiB of heap, and takes 10–15 ms to compile.
+
+- Policies with the same rule sets and CRS settings share one compiled WAF, whatever their
+  exclusions (#42).
+- Exclusions are applied to each request, not compiled into the rule set. They use the
+  transaction-level `ctl:ruleRemoveById` / `ruleRemoveTargetById`, with paths decided on
+  `REQUEST_FILENAME` as before.
+- `BenchmarkCompile` (`pkg/policy`, in the CI bench gate) compiles a bundle of CRS policies that
+  differ only in exclusions, from an empty cache (i7-1255U, medians):
 
 | Policies | Before: time | Before: live heap | After: time | After: live heap |
 |---|---|---|---|---|
@@ -584,35 +778,43 @@ a bundle of CRS policies that differ only in exclusions, from an empty cache (i7
 | 100 | 0.89 s | 205 MiB | 11 ms | 2.2 MiB |
 | 1,000 | 9.3 s | 2.0 GiB | 15 ms | 2.9 MiB |
 
-Rule sets whose own SecLang negates `ARGS` targets (`!ARGS:q`) take no argument exclusion per
-request: Coraza 3.8.1 adds a transaction's target exclusions to the rule's own negations in place,
-so concurrent requests could get each other's. A policy with argument exclusions on such rules
-gets compiled rule sets of its own, with them compiled in (`SecRuleUpdateTargetById` after the
-user's rules): one for requests on no path exclusion, plus at most one per path exclusion with an
-argument, the request's chosen by its path (`argsNegation` in `pkg/rules/coraza`). The CRS and
-Inkwall's own rules negate no `ARGS` targets (`TestCRSNegatesNoArgs`).
+**One exception: rule sets that negate `ARGS` targets.** If a rule set's own SecLang negates an
+`ARGS` target (`!ARGS:q`), it takes no argument exclusion per request. Coraza 3.8.1 adds a
+transaction's target exclusions to the rule's own negations in place, so concurrent requests could
+get each other's.
+
+- A policy with argument exclusions on such rules gets compiled rule sets of its own, with the
+  exclusions compiled in (`SecRuleUpdateTargetById` after the user's rules).
+- That is one rule set for requests on no path exclusion, plus at most one per path exclusion with
+  an argument. A request's rule set is chosen by its path (`argsNegation` in `pkg/rules/coraza`).
+- The CRS and Inkwall's own rules negate no `ARGS` targets (`TestCRSNegatesNoArgs`).
 
 Applying exclusions per request changes three things from v0.1.0:
 
-- An argument exclusion (`when.argument`, without a path) also covers the rules chained to the
+- An argument exclusion (`when.argument`, without a path) now also covers the rules chained to the
   excluded rule, as one with a path already did. With rule sets that negate `ARGS` targets
-  themselves it is compiled in and covers the rule only, as before.
-- A rule ID no rule has, in an argument exclusion without a path, is ignored as in every other
-  exclusion, instead of failing the bundle (`SecRuleUpdateTargetById` rejected it, and the engine
-  kept its previous set).
-- A rule set whose own SecLang negates `ARGS` targets falls back to rule sets per policy, above.
+  themselves, it is compiled in and covers the rule only, as before.
+- A rule ID that no rule has, in an argument exclusion without a path, is ignored, as in every
+  other exclusion. Before, it failed the bundle: `SecRuleUpdateTargetById` rejected it, and the
+  engine kept its previous set.
+- A rule set whose own SecLang negates `ARGS` targets falls back to rule sets per policy, as above.
 
 ## 9. Testing
 
-Unit tests (resolver, bundle hashing/versioning, conflicts); golden files for `Render` per
-controller version (not yet: no `Render`, §4.2); envtest (`operator/test/testenv`) for reconcilers,
-conditions, wiring that keeps the user's entries, and webhooks; kind e2e (injection → wiring →
-attack blocked → `Ready`, clean uninstall; `make kind-e2e` installs the operator with a 15 s
-`--signing-key-grace`, its kind cluster's kubelet updating ConfigMaps within 10 s, and a 2 s
-`--selector-restart-max-delay`, so the same steps wait less). Scale with fake engines in envtest
-(`make scale-test`, §8; 100 policies × 50 engines in CI). Upgrade from the last release on kind
-(`make kind-upgrade`, every PR: routes stay protected through Traefik, wired once). Planned: chaos
-(kill leader, delete Secret, webhook down).
+- **Unit tests:** the resolver, bundle hashing and versioning, conflicts.
+- **Golden files** for `Render` per controller version. Not yet: there is no `Render`
+  ([§4.2](#42-integration-interface)).
+- **envtest** (`operator/test/testenv`): reconcilers, conditions, wiring that keeps the user's
+  entries, and webhooks.
+- **kind e2e test** (`make kind-e2e`): injection, then wiring, then an attack blocked, then
+  `Ready`, and a clean uninstall. It installs the operator with shorter waits, so the same steps
+  take less time: a 15 s `--signing-key-grace` (its kind cluster's kubelet updates ConfigMaps
+  within 10 s) and a 2 s `--selector-restart-max-delay`.
+- **Scale**, with fake engines in envtest (`make scale-test`, [§8](#8-scale-targets-v1)). CI runs
+  100 policies × 50 engines.
+- **Upgrade** from the last release on kind (`make kind-upgrade`, every PR): routes stay protected
+  through Traefik, wired once.
+- **Planned:** chaos tests (kill the leader, delete the Secret, take the webhook down).
 
 ## 10. Code layout
 
@@ -635,7 +837,7 @@ operator/
 └── test/               # testenv, fakeengine, fakecontrolplane, stubcontrolplane, scale
 ```
 
-`main` is in `cmd/operator`. Planned: `internal/discovery`, one package per proxy under
+`main` is in `cmd/operator`. Planned: `internal/discovery`, and one package per proxy under
 `integrations/`. The Helm chart `deploy/helm/inkwall` is the supported install; kustomize is for
 development.
 
@@ -644,20 +846,21 @@ development.
 | # | Milestone | Exit criteria | Status |
 |---|---|---|---|
 | O1 | Scaffold + CRDs + validation | CRDs with CEL, webhook compiles SecLang, envtest green | Done (v0.1.0) |
-| O2 | Resolver + bundle + distribution | Standalone engine gets signed bundles; `Enforced` works | Done (v0.1.0) |
+| O2 | Resolver + bundle + distribution | An engine on its own (not injected) gets signed bundles; `Enforced` works | Done (v0.1.0) |
 | O3 | Envoy Gateway | kind: one `WAFPolicy`, attack blocked, `Ready=True` | Not yet (v0.3.0) |
 | O4 | Pod webhook + ingress-nginx, Traefik, HAProxy | Same attack blocked via all four in one cluster | Pod webhook and Traefik done (v0.1.0); ingress-nginx, HAProxy not yet |
-| O5 | Uninstall, suspend, chaos, scale | §5 and §6 verified in CI | Uninstall, suspend, scale done; chaos not yet (§9) |
-| O6 | Upstream sync | Enroll with a SaaS stub; policy round-trip | Done, against the stub (§4.9) |
+| O5 | Uninstall, suspend, chaos, scale | [§5](#5-uninstall-and-disable) and [§6](#6-failure-modes) verified in CI | Uninstall, suspend, scale done; chaos not yet ([§9](#9-testing)) |
+| O6 | Upstream sync | Enroll with a control plane stub; policy round-trip | Done, against the stub ([§4.9](#49-upstream-sync-leader-only)) |
 
-Shipped out of order: the Pod webhook and Traefik (O4) came first, in v0.1.0, before Envoy
-Gateway (O3).
+Shipped out of order: the Pod webhook and Traefik (part of O4) came first, in v0.1.0, before
+Envoy Gateway (O3).
 
 ## 12. Open questions
 
 1. Require Kubernetes ≥ 1.29 for native sidecars, or support older clusters with a regular sidecar
    and a documented startup race?
-2. Traefik on plain `Ingress`: Ingress mutating webhook (current: operator patches the annotation)
-   or an entry-point middleware as default?
-3. Manage standalone engine Deployments where injection is impossible, or leave it to Helm?
-4. Replica aggregation: gRPC between replicas or ConfigMaps (v0.1.0 uses ConfigMaps)?
+2. Traefik on a plain `Ingress`: an Ingress mutating webhook (today the operator patches the
+   annotation), or an entry-point middleware as the default?
+3. Manage standalone engine Deployments (an engine behind a Service) where injection is
+   impossible, or leave that to Helm?
+4. Replica aggregation: gRPC between replicas, or ConfigMaps (v0.1.0 uses ConfigMaps)?
