@@ -105,6 +105,41 @@ func testBundles(ctx context.Context, t *testing.T, c client.Client) {
 			RuleSets:   []wafv1alpha1.RuleSetBinding{{Ref: wafv1alpha1.RuleSetRef{Kind: "WAFRuleSet", Name: "custom"}}},
 		},
 	}
+	// Another policy, on another Ingress, published first: bundles that
+	// don't change it don't change its bundleVersion (#149).
+	otherIng := ing.DeepCopy()
+	otherIng.Name, otherIng.Spec.Rules[0].Host = "other", "other.example.com"
+	other := &wafv1alpha1.WAFPolicy{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "other"},
+		Spec:       wafv1alpha1.WAFPolicySpec{TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "other"}}},
+	}
+	for _, o := range []client.Object{otherIng, other} {
+		if err := c.Create(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	otherVersion := func() int64 {
+		t.Helper()
+		var got wafv1alpha1.WAFPolicy
+		if err := c.Get(ctx, client.ObjectKeyFromObject(other), &got); err != nil {
+			t.Fatal(err)
+		}
+		return got.Status.BundleVersion
+	}
+	var o1 int64
+	eventually(t, "other policy reported", func() string {
+		if o1 = otherVersion(); o1 == 0 {
+			return "no bundleVersion"
+		}
+		return ""
+	})
+	wantOther := func(what string) {
+		t.Helper()
+		if v := otherVersion(); v != o1 {
+			t.Fatalf("%s: the other policy's bundleVersion went from %d to %d", what, o1, v)
+		}
+	}
+
 	for _, o := range []client.Object{ing, rules, pol} {
 		if err := c.Create(ctx, o); err != nil {
 			t.Fatal(err)
@@ -150,6 +185,7 @@ func testBundles(ctx context.Context, t *testing.T, c client.Client) {
 		})
 	}
 	wantPolicyStatus("accepted", metav1.ConditionTrue, resolver.ReasonAccepted, v1)
+	wantOther("shop published")
 
 	// An edit publishes a new version.
 	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) { p.Spec.Mode = wafv1alpha1.PolicyDetect })
@@ -166,6 +202,7 @@ func testBundles(ctx context.Context, t *testing.T, c client.Client) {
 		t.Fatalf("version went from %d to %d", v1, v2)
 	}
 	wantPolicyStatus("edit reported", metav1.ConditionTrue, resolver.ReasonAccepted, v2)
+	wantOther("shop edited")
 
 	// A label change is not a new policy.
 	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) { p.Labels = map[string]string{"team": "shop"} })
@@ -174,13 +211,27 @@ func testBundles(ctx context.Context, t *testing.T, c client.Client) {
 		t.Fatalf("a label change published version %d", v)
 	}
 
+	// A rule set edit is a new version of the policies that bind it.
+	update(ctx, t, c, rules, func(rs *wafv1alpha1.WAFRuleSet) {
+		rs.Spec.Source.SecLang = `SecRule REQUEST_HEADERS:User-Agent "@contains nikto" "id:100001,phase:1,deny,status:403"`
+	})
+	var v3 uint64
+	eventually(t, "rule set edit published", func() string {
+		if v3 = current(ctx, t, c).GetVersion(); v3 == v2 {
+			return "not yet"
+		}
+		return ""
+	})
+	wantPolicyStatus("rule set edit reported", metav1.ConditionTrue, resolver.ReasonAccepted, v3)
+	wantOther("rule set edited")
+
 	// A broken edit (a missing rule set) leaves the previous version in
 	// force.
 	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) {
 		p.Spec.Mode = wafv1alpha1.PolicyBlock
 		p.Spec.RuleSets = append(p.Spec.RuleSets, wafv1alpha1.RuleSetBinding{Ref: wafv1alpha1.RuleSetRef{Kind: "WAFRuleSet", Name: "missing"}})
 	})
-	wantPolicyStatus("broken edit reported", metav1.ConditionFalse, resolver.ReasonInvalidRef, v2)
+	wantPolicyStatus("broken edit reported", metav1.ConditionFalse, resolver.ReasonInvalidRef, v3)
 	if p := findPolicy(current(ctx, t, c), "shop/shop"); p.GetMode() != bundlev1.Mode_MODE_DETECT {
 		t.Fatalf("the broken edit took effect: %v", p)
 	}
@@ -230,6 +281,13 @@ func testBundles(ctx context.Context, t *testing.T, c client.Client) {
 	eventually(t, "suspended", func() string {
 		if !current(ctx, t, c).GetSuspended() {
 			return "not suspended"
+		}
+		return ""
+	})
+	// Suspending changes what every policy enforces.
+	eventually(t, "the other policy on the suspended bundle", func() string {
+		if v, want := otherVersion(), int64(current(ctx, t, c).GetVersion()); v != want { // #nosec G115
+			return fmt.Sprintf("bundleVersion %d, want %d", v, want)
 		}
 		return ""
 	})
