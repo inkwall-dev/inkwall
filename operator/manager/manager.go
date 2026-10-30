@@ -103,7 +103,7 @@ type Options struct {
 	// the leader updates Enforced; 0: 2s.
 	EngineReportInterval time.Duration
 	// SigningKeyGrace is the least time each phase of a signing key
-	// rotation lasts; 0: controller.DefaultRotationGrace.
+	// rotation lasts; 0: DefaultSigningKeyGrace.
 	SigningKeyGrace time.Duration
 
 	// Inject adds the engine to proxy pods (needs Webhooks and
@@ -114,8 +114,10 @@ type Options struct {
 	EnginePullPolicy corev1.PullPolicy
 	// Integrations select the proxy pods; nil: read from the InkwallConfig
 	// when the manager is created. The operator restarts when they change
-	// (its cache of proxy pods is built from them).
-	Integrations *integrations.Selectors
+	// (its cache of proxy pods is built from them), after a random delay
+	// up to SelectorRestartMaxDelay (0: DefaultSelectorRestartMaxDelay).
+	Integrations            *integrations.Selectors
+	SelectorRestartMaxDelay time.Duration
 
 	// Version is the operator's, sent to the optional control plane.
 	Version string
@@ -228,7 +230,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		}).SetupWithManager(mgr); err != nil {
 			return nil, err
 		}
-		if err := mgr.Add(&selectorWatch{client: mgr.GetClient(), current: selectors}); err != nil {
+		if err := mgr.Add(&selectorWatch{client: mgr.GetClient(), current: selectors, maxDelay: o.SelectorRestartMaxDelay}); err != nil {
 			return nil, err
 		}
 		if err := (&injection.Reconciler{
@@ -472,6 +474,11 @@ func kubernetesVersion(cfg *rest.Config) func() string {
 
 // DefaultEventsBufferBytes bounds each replica's events buffer by default.
 const DefaultEventsBufferBytes = controlplane.DefaultEventsBufferBytes
+
+// DefaultSigningKeyGrace is the least time each phase of a signing key
+// rotation lasts by default: the kubelet's delay to update a mounted
+// ConfigMap.
+const DefaultSigningKeyGrace = controller.DefaultRotationGrace
 
 // engineStale is how old a replica's engine report may be before the
 // leader ignores it: three of the replicas' refreshes (Publisher.Refresh).
