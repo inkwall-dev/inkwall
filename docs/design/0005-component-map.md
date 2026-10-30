@@ -14,15 +14,16 @@ Every Inkwall component, where it runs, and why the engine is built on Coraza.
 - Request path: client → proxy → engine sidecar (verdict over UDS or localhost) → app.
 - Control path: Git / `kubectl` → kube-apiserver → operator (webhooks, bundle Secret) → signed
   bundle stream to engines → status back on the CRDs.
-- Planned: Caddy with an in-process engine, and an optional SaaS control plane connected over one
-  mTLS stream per cluster.
+- Planned: Caddy with an in-process engine. Optional: a SaaS control plane, connected over one
+  primary mTLS stream per cluster (plus an events stream per operator replica); the operator's side
+  is built (0004 §4.9).
 
 ## 2. Where each component runs and when it is built
 
 All Apache-2.0. Everything in the cluster works without the SaaS, which only adds management,
 analytics and threat intel.
 
-| Component | Runs in | Code | v0.1.0 |
+| Component | Runs in | Code | Status |
 |---|---|---|---|
 | **inkwall-engine** | Sidecar in ingress controller pods, or standalone | `cmd/engine`, `pkg/` | Built |
 | **Engine adapters** | Engine process | `pkg/adapters/*` | Built: `forwardauth`, `httpcheck` (`/v1/check`), `proxy`. Not yet: ext_authz, ext_proc, SPOE |
@@ -35,8 +36,8 @@ analytics and threat intel.
 | **Helm chart** | User install | `deploy/helm/inkwall` | Built |
 | **OLM bundle** | OperatorHub | operator-sdk | Not yet (Stage 6) |
 | **inkwallctl** | Developer machine, CI | `cmd/inkwallctl` | Built: `test` (flags, `--policy`, `--bundle`), `bench`. Not yet: `migrate` |
-| **Protobuf APIs** (engine, agent, bundle) | Engine, operator, control plane | `api/` | Built |
-| **Control plane** (SaaS) | Inkwall-hosted | separate product | Not yet (Stage 5) |
+| **Protobuf APIs** (engine, agent, bundle, events, controlplane) | Engine, operator, control plane | `api/` | Built |
+| **Control plane** (SaaS) | Inkwall-hosted | separate product | Not in this repository; the operator's side is built (`operator/internal/controlplane`) |
 
 ## 3. Engine internals
 
@@ -44,22 +45,24 @@ analytics and threat intel.
 
 **Built (v0.1.0):** as in the diagram; each component links to its source. Also `pkg/policy` (one
 pipeline per bundle policy, swapped atomically), `pkg/agent` (operator stream, bundle verify,
-disk cache) and `pkg/clientip`.
+disk cache) and `pkg/clientip`. **Built since:** `pkg/events` (redacted security events in a
+bounded ring buffer, sent to the operator in batches on the agent stream), `pkg/bundlekey`
+(trusted signing keys) and `pkg/bundlesecret` (the bundle Secret's format, chunks included).
 
 **Not yet:**
 
 - Adapters `extauthz` (gRPC), `extproc` (gRPC stream), `spoe` (SPOP).
 - T1 tier: `pkg/iplist`, `pkg/ratelimit`, between the route table and rules.
-- `pkg/events`: verdicts through a ring buffer and batch shipper; traces in telemetry.
+- Traces in telemetry.
 - The native engine (0007) as a second `pkg/rules` evaluator.
 
 ## 4. Operator internals
 
-| Part | Does | Code | v0.1.0 |
+| Part | Does | Code | Status |
 |---|---|---|---|
 | Discovery + integration registry | Find controller pods (design: also IngressClass, GatewayClass) | `operator/integrations` | Built: Traefik, by selectors. Not yet: envoygateway, istio, ingressnginx, haproxy, caddy |
 | Injection | Native sidecar via Pod webhook | `operator/internal/injection` | Built |
-| Wiring | Render proxy config, server-side apply | `operator/internal/wiring` | Built (Traefik) |
+| Wiring | Render proxy config, merge-patch user-owned routes | `operator/internal/wiring` | Built (Traefik) |
 | Resolver | Policy targets → host/path/method | `operator/resolver` | Built |
 | Bundle builder | Leader only: debounce changes (1 s), build, sign, version, write Secret | `operator/bundle`, `operator/internal/controller` | Built |
 | Distribution server | All replicas, gRPC; ACK/NACK/heartbeat | `operator/internal/distribution` | Built |
