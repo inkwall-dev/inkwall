@@ -5,7 +5,9 @@
 # End-to-end test of operator milestone O2 on the kind cluster (#26): a
 # WAFPolicy applied in the cluster is enforced by an engine, which takes it
 # from the operator. Needs the operator installed (make kind-operator, which
-# make kind-e2e runs first). KEEP=1 leaves the test's objects in place.
+# make kind-e2e runs first). KEEP=1 leaves the test's objects in place;
+# SKIP_BUILD=1 uses the engine image already loaded (make kind-e2e: by
+# kind-operator).
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -90,8 +92,10 @@ if ! "${KUBECTL[@]}" -n "$OPERATOR_NS" get deployment/inkwall-operator >/dev/nul
 fi
 
 # The engine image with bundle mode.
-docker build --target engine -t "$IMAGE" .
-kind load docker-image "$IMAGE" --name "$CLUSTER"
+if [[ ${SKIP_BUILD:-} != 1 ]]; then
+  docker build --target engine -t "$IMAGE" .
+  kind load docker-image "$IMAGE" --name "$CLUSTER"
+fi
 
 # The trust ConfigMap: the operator's CA and the bundle public keys, all
 # public, copied into the app's namespace (app_trust), as someone who sets
@@ -432,7 +436,9 @@ pp_check "its address is ignored: the event has the real peer (127.0.0.1)" "$pp_
 # once both run a bundle it signed: no engine rejects a bundle or restarts.
 echo "== signing key rotation"
 # eventually_within SECONDS DESCRIPTION COMMAND...: the kubelet takes a
-# minute or so to update a mounted ConfigMap.
+# minute or so to update a mounted ConfigMap (10 s or so on a cluster from
+# hack/kind/cluster.yaml, where make kind-e2e shortens the operator's
+# --signing-key-grace to match).
 eventually_within() {
   local secs=$1 what=$2
   shift 2
@@ -586,7 +592,8 @@ selector_is() {
     -o jsonpath='{.webhooks[?(@.name=="pods.waf.inkwall.dev")].objectSelector.matchLabels}') == "$1" ]]
 }
 # eventually_long DESCRIPTION COMMAND...: like eventually, for up to 2
-# minutes (the replicas restart up to 30s apart).
+# minutes (the replicas restart up to --selector-restart-max-delay apart:
+# 30 s by default, 2 s with make kind-e2e).
 eventually_long() {
   local what=$1
   shift

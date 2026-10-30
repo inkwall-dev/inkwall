@@ -24,6 +24,12 @@ CHART           ?= deploy/helm/inkwall
 KIND_CLUSTER    ?= inkwall
 # kind-upgrade: its own cluster, since it installs a release of its own.
 UPGRADE_CLUSTER ?= inkwall-upgrade
+# Extra inkwall-operator flags for kind-operator (operator.extraArgs). kind-e2e shortens waits
+# that only spread or pace work in a real cluster: a key rotation phase lasts at least the
+# kubelet's ConfigMap update delay, 10 s in hack/kind/cluster.yaml (1 min by default), and a
+# selector change restarts the replicas within 2 s of each other instead of 30 s.
+OPERATOR_ARGS     ?=
+E2E_OPERATOR_ARGS ?= --signing-key-grace=15s --selector-restart-max-delay=2s
 
 # Benchmarks: set BENCH to a regexp to narrow, COUNT for benchstat-friendly repeats.
 BENCH           ?= .
@@ -136,11 +142,14 @@ kind-up: ## Create the kind cluster and deploy the demo app behind the engine an
 
 .PHONY: kind-operator
 kind-operator: ## Build the operator image, install the Helm chart on the kind cluster and check the webhook
-	KIND_CLUSTER=$(KIND_CLUSTER) OPERATOR_IMAGE=$(OPERATOR_IMAGE) IMAGE_ENGINE=$(IMAGE) CHART=$(CHART) hack/kind/operator.sh
+	KIND_CLUSTER=$(KIND_CLUSTER) OPERATOR_IMAGE=$(OPERATOR_IMAGE) IMAGE_ENGINE=$(IMAGE) CHART=$(CHART) \
+		OPERATOR_ARGS="$(OPERATOR_ARGS)" hack/kind/operator.sh
 
 .PHONY: kind-e2e
+kind-e2e: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
 kind-e2e: kind-operator ## End-to-end test on kind: a WAFPolicy is enforced by an engine in bundle mode (installs the operator first)
-	KIND_CLUSTER=$(KIND_CLUSTER) IMAGE=$(IMAGE) hack/kind/e2e.sh
+	@# kind-operator built and loaded the engine image.
+	KIND_CLUSTER=$(KIND_CLUSTER) IMAGE=$(IMAGE) SKIP_BUILD=1 hack/kind/e2e.sh
 
 .PHONY: kind-upgrade
 kind-upgrade: ## Upgrade test on kind: helm upgrade from the last release to this checkout keeps routes protected, uninstall restores them (own cluster, UPGRADE_CLUSTER)

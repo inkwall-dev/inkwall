@@ -86,7 +86,24 @@ jobs:
           version: v3.19.0
       - run: go install sigs.k8s.io/kind@v0.33.0
       - run: kind create cluster --config hack/kind/cluster.yaml --wait 120s
+      # The images' Go build cache (hack/kind/go-build-cache.sh), so they
+      # compile little more than this repository's packages: about 1.2 GB,
+      # saved from main once per go.sum and Dockerfile.
+      - id: go-build
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/go-build
+          key: image-go-build-${{ hashFiles('go.sum', 'Dockerfile') }}
+          restore-keys: image-go-build-
+      - run: hack/kind/go-build-cache.sh inject "$RUNNER_TEMP/go-build"
       - run: make kind-e2e
+      - if: github.event_name == 'push' && steps.go-build.outputs.cache-hit != 'true'
+        run: hack/kind/go-build-cache.sh extract "$RUNNER_TEMP/go-build"
+      - if: github.event_name == 'push' && steps.go-build.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/go-build
+          key: image-go-build-${{ hashFiles('go.sum', 'Dockerfile') }}
       - if: failure()
         run: |
           kubectl get pods -A
@@ -110,6 +127,13 @@ jobs:
           check-latest: true
       - run: go install sigs.k8s.io/kind@v0.33.0
       - run: kind create cluster --name inkwall-upgrade --wait 120s
+      # The images' Go build cache, as in e2e (which saves it).
+      - uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/go-build
+          key: image-go-build-${{ hashFiles('go.sum', 'Dockerfile') }}
+          restore-keys: image-go-build-
+      - run: hack/kind/go-build-cache.sh inject "$RUNNER_TEMP/go-build"
       - run: make kind-upgrade
       - if: failure()
         run: |

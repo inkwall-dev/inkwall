@@ -14,6 +14,8 @@ CLUSTER=${KIND_CLUSTER:-inkwall}
 IMAGE=${OPERATOR_IMAGE:-inkwall-operator:dev}
 ENGINE_IMAGE=${IMAGE_ENGINE:-inkwall-engine:dev}
 CHART=${CHART:-deploy/helm/inkwall}
+# Extra inkwall-operator flags, space-separated (operator.extraArgs).
+read -r -a OPERATOR_ARGS <<<"${OPERATOR_ARGS:-}"
 NAMESPACE=inkwall-system
 KUBECTL=(kubectl --context "kind-$CLUSTER")
 
@@ -27,6 +29,10 @@ docker build --target operator -t "$IMAGE" .
 docker build --target engine -t "$ENGINE_IMAGE" .
 kind load docker-image "$IMAGE" "$ENGINE_IMAGE" --name "$CLUSTER"
 
+extra_args=()
+for i in "${!OPERATOR_ARGS[@]}"; do
+  extra_args+=(--set-string "operator.extraArgs[$i]=${OPERATOR_ARGS[$i]}")
+done
 existed=false
 "${KUBECTL[@]}" -n "$NAMESPACE" get deployment/inkwall-operator >/dev/null 2>&1 && existed=true
 helm --kube-context "kind-$CLUSTER" upgrade --install inkwall "$CHART" \
@@ -36,7 +42,8 @@ helm --kube-context "kind-$CLUSTER" upgrade --install inkwall "$CHART" \
   --set operator.image.pullPolicy=Never \
   --set engine.image.repository="${ENGINE_IMAGE%:*}" \
   --set engine.image.tag="${ENGINE_IMAGE##*:}" \
-  --set engine.image.pullPolicy=Never
+  --set engine.image.pullPolicy=Never \
+  ${extra_args[@]+"${extra_args[@]}"}
 # Pick up a rebuilt image with the same tag.
 if $existed; then
   "${KUBECTL[@]}" -n "$NAMESPACE" rollout restart deployment/inkwall-operator

@@ -4,6 +4,7 @@
 package manager
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -60,13 +61,17 @@ func readSelectors(cfg *rest.Config, s *runtime.Scheme) (*integrations.Selectors
 type selectorWatch struct {
 	client  client.Reader
 	current *integrations.Selectors
+	// maxDelay bounds the random wait before the restart; 0:
+	// DefaultSelectorRestartMaxDelay.
+	maxDelay time.Duration
 }
 
-// Variables for the tests.
-var (
-	selectorCheckInterval = 10 * time.Second
-	selectorMaxDelay      = 30 * time.Second
-)
+// DefaultSelectorRestartMaxDelay bounds the random wait of each replica
+// before it restarts with changed integration selectors.
+const DefaultSelectorRestartMaxDelay = 30 * time.Second
+
+// selectorCheckInterval is a variable for the tests.
+var selectorCheckInterval = 10 * time.Second
 
 // errSelectorsChanged ends the manager; the container restarts.
 var errSelectorsChanged = errors.New("the InkwallConfig's integration selectors changed: restarting to apply them")
@@ -86,7 +91,7 @@ func (w *selectorWatch) Start(ctx context.Context) error {
 		if !ok || next.Equal(w.current) {
 			continue
 		}
-		delay := rand.N(selectorMaxDelay) // #nosec G404 -- spreading restarts, not security
+		delay := rand.N(cmp.Or(w.maxDelay, DefaultSelectorRestartMaxDelay)) // #nosec G404 -- spreading restarts, not security
 		logger.Info("integration selectors changed; restarting", "from", w.current.String(), "to", next.String(), "in", delay)
 		select {
 		case <-ctx.Done():

@@ -138,7 +138,8 @@ Puts the engine into proxy pods as a sidecar sharing a socket directory.
   with an `inkwall-engine` container are left alone.
 - `InkwallConfig.spec.integrations[].selector` (non-empty) replaces Traefik's label everywhere
   (pod cache, webhook, controllers, `objectSelector`). Read at startup; on change each replica
-  restarts after a random delay up to 30 s. Selectors for unknown controllers are logged and ignored.
+  restarts after a random delay up to 30 s (`--selector-restart-max-delay`). Selectors for unknown
+  controllers are logged and ignored.
 - Injected: engine as first init container, startup probe (proxy starts once it serves),
   `forward-auth` in bundle mode, projected token (audience `inkwall-operator`) and trust ConfigMap
   in one read-only directory, `emptyDir` bundle cache, non-root, read-only root filesystem. Image
@@ -289,10 +290,10 @@ The keys and the rotation's state live in `inkwall-bundle-signing-key`, so a new
 1. **Publishing:** a new key is generated and added to `trusted-keys.pub` (the trust ConfigMaps
    follow); the old key still signs. Engines re-read their key file every 10 s and report the key
    IDs they trust in `Hello` and `Heartbeat`.
-2. **Switch** once at least a grace period (1 min, the kubelet's ConfigMap update delay) has passed
-   and every connected engine reports the new key; a new leader first waits for the replicas'
-   reports (30 s). The current content is signed again with the new key, as a new version, so
-   engines cache a bundle the new key signed. The old public key stays trusted.
+2. **Switch** once at least a grace period (`--signing-key-grace`, 1 min: the kubelet's ConfigMap
+   update delay) has passed and every connected engine reports the new key; a new leader first
+   waits for the replicas' reports (30 s). The current content is signed again with the new key, as
+   a new version, so engines cache a bundle the new key signed. The old public key stays trusted.
 3. **Retire** the old key once the grace has passed again and every connected engine runs a
    bundle signed with the new key: `trusted-keys.pub` has the one key.
 
@@ -572,9 +573,11 @@ Applying exclusions per request changes three things from v0.1.0:
 
 Unit tests (resolver, bundle hashing/versioning, conflicts); golden files for `Render` per
 controller version; envtest (`operator/test/testenv`) for reconcilers, conditions, SSA ownership and
-webhooks; kind e2e (injection → wiring → attack blocked → `Ready`, clean uninstall). Scale with fake engines in
-envtest (`make scale-test`, §8; 100 policies × 50 engines in CI). Planned: chaos (kill leader, delete
-Secret, webhook down), upgrade N-1 → N with traffic.
+webhooks; kind e2e (injection → wiring → attack blocked → `Ready`, clean uninstall; `make kind-e2e`
+installs the operator with a 15 s `--signing-key-grace`, its kind cluster's kubelet updating
+ConfigMaps within 10 s, and a 2 s `--selector-restart-max-delay`, so the same steps wait less).
+Scale with fake engines in envtest (`make scale-test`, §8; 100 policies × 50 engines in CI). Planned:
+chaos (kill leader, delete Secret, webhook down), upgrade N-1 → N with traffic.
 
 ## 10. Code layout
 

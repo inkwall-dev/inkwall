@@ -5,9 +5,18 @@
 # host, so they don't clash with an engine running locally on 8480/9480:
 #   30480/30481  demo app behind the engine's reverse proxy, and its admin
 #   30080/30482  demo app through Traefik + forward-auth, and the engine's admin
+#
+# The kubelet updates mounted ConfigMaps within 10 s instead of a minute or
+# so: make kind-e2e's signing key rotation waits that long for the engines'
+# trust ConfigMaps, with a grace period to match (Makefile:
+# E2E_OPERATOR_ARGS).
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: inkwall
+kubeadmConfigPatches:
+  - |
+    kind: KubeletConfiguration
+    syncFrequency: 10s
 nodes:
   - role: control-plane
     extraPortMappings:

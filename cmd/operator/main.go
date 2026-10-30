@@ -71,10 +71,12 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fs.StringVar(&o.WebhookSecret, "webhook-cert-secret", "inkwall-operator-webhook-tls", "Secret, in --namespace, that holds the rotated certificate (shared with the distribution server)")
 	fs.DurationVar(&o.shutdownDelay, "shutdown-delay", 5*time.Second, "on SIGTERM, keep serving the webhook and the bundles this long, not ready, so Kubernetes stops routing to the pod before it stops; keep it below the pod's termination grace period")
 	fs.BoolVar(&o.Inject, "inject", true, "inject the engine into proxy pods (Traefik) as a sidecar; needs the webhooks and the distribution server. Off, the routes wired before are unwired")
+	fs.DurationVar(&o.SelectorRestartMaxDelay, "selector-restart-max-delay", manager.DefaultSelectorRestartMaxDelay, "when the InkwallConfig's integration selectors change, each replica restarts after a random delay up to this, so they don't all restart at once")
 	fs.StringVar(&o.EngineImage, "engine-image", "ghcr.io/inkwall-dev/inkwall-engine:latest", "engine image injected into proxy pods, unless InkwallConfig.spec.engine.image sets one")
 	pullPolicy := fs.String("engine-image-pull-policy", "IfNotPresent", "pull policy of the injected engine: Always, IfNotPresent or Never")
 	fs.StringVar(&o.EventsDir, "events-dir", "", "directory of this replica's buffer of security events for the optional control plane, kept across restarts (empty: in memory)")
 	fs.Int64Var(&o.EventsBufferBytes, "events-buffer-bytes", manager.DefaultEventsBufferBytes, "bound of the events buffer; when full, the oldest events are dropped and counted")
+	fs.DurationVar(&o.SigningKeyGrace, "signing-key-grace", manager.DefaultSigningKeyGrace, "least time each phase of a signing key rotation lasts; keep it above the kubelet's delay to update a mounted ConfigMap (about a minute by default)")
 	fs.StringVar(&o.ControlPlaneCAFile, "control-plane-ca", "", "CA certificate (PEM) trusted for the optional control plane's server certificate, in GitOps and Managed mode (empty: the system roots)")
 	fs.IntVar(&o.DistributionPort, "distribution-port", 9445, "port of the gRPC server that sends bundles to the engines, over TLS with the webhook's certificate (0 disables)")
 	fs.StringVar(&o.DistributionService, "distribution-service", "inkwall-operator", "Service engines reach the distribution server through, named in the certificate")
@@ -89,6 +91,9 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	}
 	if fs.NArg() > 0 {
 		return o, fmt.Errorf("unexpected arguments: %v", fs.Args())
+	}
+	if o.SigningKeyGrace <= 0 || o.SelectorRestartMaxDelay <= 0 {
+		return o, errors.New("--signing-key-grace and --selector-restart-max-delay must be positive")
 	}
 	if o.WebhookCerts != manager.CertsRotate && o.WebhookCerts != manager.CertsExternal {
 		return o, fmt.Errorf("--webhook-certs must be %s or %s, not %q", manager.CertsRotate, manager.CertsExternal, o.WebhookCerts)

@@ -19,8 +19,8 @@ import (
 )
 
 func TestSelectorWatch(t *testing.T) {
-	selectorCheckInterval, selectorMaxDelay = 10*time.Millisecond, time.Millisecond
-	t.Cleanup(func() { selectorCheckInterval, selectorMaxDelay = 10*time.Second, 30*time.Second })
+	selectorCheckInterval = 10 * time.Millisecond
+	t.Cleanup(func() { selectorCheckInterval = 10 * time.Second })
 
 	s := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(s)
@@ -32,7 +32,7 @@ func TestSelectorWatch(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 		go func() {
 			defer cancel()
-			done <- (&selectorWatch{client: c, current: integrations.Defaults()}).Start(ctx)
+			done <- (&selectorWatch{client: c, current: integrations.Defaults(), maxDelay: time.Millisecond}).Start(ctx)
 		}()
 		return done
 	}
