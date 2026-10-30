@@ -24,7 +24,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 CLUSTER=${UPGRADE_CLUSTER:-inkwall-upgrade}
-FROM_VERSION=${FROM_VERSION:-0.1.1} # the last release
+FROM_VERSION=${FROM_VERSION:-0.1.2} # the last release
 FROM_CHART=oci://ghcr.io/inkwall-dev/charts/inkwall
 CHART=${CHART:-deploy/helm/inkwall}
 OPERATOR_IMAGE=${OPERATOR_IMAGE:-inkwall-operator:dev}
