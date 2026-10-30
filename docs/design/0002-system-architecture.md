@@ -206,13 +206,16 @@ plane itself is not in this repository.
 
 ### 3.5 `inkwallctl` (CLI)
 
-Two commands are built:
+Three commands are built:
 
 - `test` replays a request or a [HAR](https://w3c.github.io/web-performance/specs/HAR/Overview.html) file and shows the rules that match. It runs offline, for CI.
   It checks one of three things: the policy set by its flags; `WAFPolicy` objects (`--policy`,
   resolved with the operator's resolver and compiled as the engine compiles a bundle); or a bundle
   (`--bundle`, with its signature checked against `--bundle-key`).
 - `bench` benchmarks the engine on a fixed corpus.
+- `migrate ingress-nginx` converts ingress-nginx's ModSecurity annotations and ConfigMap settings
+  into `WAFPolicy` and `WAFRuleSet` objects targeting the Ingresses, and lists what it can't
+  convert ([migrating from ingress-nginx](../migrating-from-ingress-nginx.md)). It only reads.
 
 Planned: `status` (engine versions, drift).
 

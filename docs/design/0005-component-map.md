@@ -74,7 +74,7 @@ which only adds management, analytics and threat intelligence.
 | **[CRDs](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)** | kube-apiserver | `operator/api/v1alpha1`, `operator/config/crd` | Built: WAFPolicy, WAFRuleSet, ClusterWAFRuleSet, InkwallConfig |
 | **[Helm](https://helm.sh/docs/) chart** | User install | `deploy/helm/inkwall` | Built |
 | **OLM bundle** ([Operator Lifecycle Manager](https://olm.operatorframework.io/) package) | [OperatorHub](https://operatorhub.io/) | [operator-sdk](https://sdk.operatorframework.io/) | Not yet |
-| **inkwallctl** | Developer machine, CI | `cmd/inkwallctl` | Built: `test` (flags, `--policy`, `--bundle`), `bench`. Not yet: `migrate` |
+| **inkwallctl** | Developer machine, CI | `cmd/inkwallctl` | Built: `test` (flags, `--policy`, `--bundle`), `bench`, `migrate ingress-nginx` |
 | **[Protobuf](https://protobuf.dev/) APIs** (engine, agent, bundle, events, controlplane) | Engine, operator, control plane | `api/` | Built |
 | **Control plane** | Hosted by Inkwall | Separate product | Not in this repository; the operator's side is built (`operator/internal/controlplane`) |
 

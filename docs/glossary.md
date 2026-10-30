@@ -40,7 +40,8 @@ first time they mention it.
   rotation.
 - <a id="inkwallctl"></a>**inkwallctl**: Inkwall's command-line tool: `inkwallctl test` checks
   rules, policies and bundles offline ([testing policies](testing-policies.md)); `inkwallctl bench`
-  benchmarks the engine.
+  benchmarks the engine; `inkwallctl migrate ingress-nginx` converts ingress-nginx's ModSecurity
+  settings into policies ([migrating from ingress-nginx](migrating-from-ingress-nginx.md)).
 - <a id="integration"></a>**Integration**: The operator's support for one proxy: finding its pods,
   injection and wiring.
 - <a id="leader"></a>**Leader**: The operator replica that holds the [leader-election

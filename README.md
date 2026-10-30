@@ -98,6 +98,8 @@ Start in `Detect` mode, tune [false positives](https://coreruleset.org/docs/conc
 `ClusterWAFRuleSet` objects: built-in, [SecLang](https://coraza.io/docs/seclang/) or a [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/).
 [`operator/config/samples`](operator/config/samples) has one object of each kind. To test
 policies before they reach the cluster, see [testing policies offline](docs/testing-policies.md).
+Coming from ingress-nginx with ModSecurity? `inkwallctl migrate ingress-nginx` converts its
+annotations into policies: see [migrating from ingress-nginx](docs/migrating-from-ingress-nginx.md).
 
 To stop protecting the route, delete the policy or remove the route from its `targetRefs`: the
 operator removes its Middleware from the route, and Traefik serves it uninspected.
