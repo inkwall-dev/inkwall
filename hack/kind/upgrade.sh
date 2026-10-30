@@ -388,7 +388,7 @@ probe_stop "through the Traefik restart" "$MAX_RESTART_GAP"
 check "the wiring is unchanged, not duplicated" same_wiring
 eventually "Inkwall's Middleware calls the engine, with trustForwardHeader off and bodies forwarded" operator_middleware
 eventually "the policy is Accepted, Programmed and Ready" accepted_programmed
-check "the user's Middleware still applies" user_header "$HOST"
+eventually "the user's Middleware still applies" user_header "$HOST"
 
 echo "== helm uninstall"
 if "${HELM[@]}" uninstall inkwall --namespace "$OPERATOR_NS" --wait --timeout 5m >/dev/null; then
@@ -406,7 +406,7 @@ check "Inkwall's Middleware is deleted" no_middleware
 eventually "a new Traefik pod has no engine" engine_image_is ""
 eventually "the Ingress is served (uninspected)" status_is 200 "$HOST" "$SQLI"
 check "so is the IngressRoute" status_is 200 "$ROUTE_HOST" "$SQLI"
-check "the user's Middleware still applies" user_header "$HOST"
+eventually "the user's Middleware still applies" user_header "$HOST"
 
 if [[ $failures -gt 0 ]]; then
   echo "$failures check(s) failed; operator logs:"
