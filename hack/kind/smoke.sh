@@ -46,7 +46,7 @@ expect 200 "healthz" "$ADMIN/healthz"
 expect 200 "readyz" "$ADMIN/readyz"
 
 # The demo app echoes the request headers it received.
-if curl -s "$PROXY/" | grep -qi '^X-Request-Id: [0-9a-f]'; then
+if curl -s "$PROXY/" | grep -i '^X-Request-Id: [0-9a-f]' >/dev/null; then
   echo "ok    request ID reaches the app"
 else
   echo "FAIL  no X-Request-Id at the app"

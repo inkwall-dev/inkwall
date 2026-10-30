@@ -217,7 +217,7 @@ kill "$pf" 2>/dev/null || true
 "${KUBECTL[@]}" -n "$NS" port-forward svc/app "$PORT:8480" >/dev/null 2>&1 &
 pf=$!
 eventually "a new engine pod blocks without the operator (bundle Secret)" status_is 403 "$SQLI"
-secret_logged() { "${KUBECTL[@]}" -n "$NS" logs deployment/app -c inkwall-engine | grep -q "bundle applied from the Secret"; }
+secret_logged() { "${KUBECTL[@]}" -n "$NS" logs deployment/app -c inkwall-engine | grep "bundle applied from the Secret" >/dev/null; }
 check "it took the bundle from the Secret" secret_logged
 "${KUBECTL[@]}" -n "$OPERATOR_NS" scale deployment/inkwall-operator --replicas=2 >/dev/null
 "${KUBECTL[@]}" -n "$OPERATOR_NS" rollout status deployment/inkwall-operator --timeout=180s >/dev/null
@@ -258,7 +258,7 @@ traefik_injected() {
   local pods
   pods=$(traefik_pods) && ! grep -qv '^|inkwall-engine' <<<"$pods"
 }
-no_engine() { traefik_pods >/dev/null && ! traefik_pods | grep -q inkwall-engine; }
+no_engine() { traefik_pods >/dev/null && ! traefik_pods | grep inkwall-engine >/dev/null; }
 # restart_traefik replaces Traefik's pods, and the port-forward to them.
 restart_traefik() {
   "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout restart deployment/traefik-e2e >/dev/null
@@ -455,13 +455,13 @@ signed_with() {
 # An engine in NAMESPACE reports trusting KEY_ID (the replicas' reports).
 reports_key() {
   "${KUBECTL[@]}" -n "$OPERATOR_NS" get configmaps -l waf.inkwall.dev/engines=true -o jsonpath='{.items[*].data.engines\.json}' |
-    grep -o '{[^{}]*}' | grep "\"podNamespace\":\"$1\"" | grep -q "\"$2\""
+    grep -o '{[^{}]*}' | grep "\"podNamespace\":\"$1\"" | grep "\"$2\"" >/dev/null
 }
 engine_logs() {
   "${KUBECTL[@]}" -n "$NS" logs deployment/app -c inkwall-engine
   "${KUBECTL[@]}" -n "$TRAEFIK_NS" logs deployment/traefik-e2e -c inkwall-engine
 }
-no_rejection() { ! engine_logs | grep -q '"bundle rejected"'; }
+no_rejection() { ! engine_logs | grep '"bundle rejected"' >/dev/null; }
 traefik_engine() {
   "${KUBECTL[@]}" -n "$TRAEFIK_NS" get pods -l app.kubernetes.io/name=traefik \
     -o jsonpath='{range .items[*]}{.metadata.name}/{.status.initContainerStatuses[?(@.name=="inkwall-engine")].restartCount}{"\n"}{end}'
@@ -524,7 +524,7 @@ route_middlewares() {
 route_wired() { [[ $(route_middlewares) == "inkwall-waf e2e-header|inkwall-waf" ]]; }
 route_unwired() { [[ $(route_middlewares) == "e2e-header|" ]]; }
 # whoami echoes the request headers: the user's Middleware still applies.
-user_middleware() { rget /products/42 | grep -q '^X-E2e: route'; }
+user_middleware() { rget /products/42 | grep '^X-E2e: route' >/dev/null; }
 rready() {
   [[ $("${KUBECTL[@]}" -n "$NS" get wafpolicy web-route -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}') == True ]]
 }
@@ -696,13 +696,13 @@ cp_is() { [[ $(cp_reason) == "$1" ]]; }
 eventually_long "the cluster enrolls and connects (ControlPlaneConnected)" cp_is Connected
 identity() { "${KUBECTL[@]}" -n "$OPERATOR_NS" get secret inkwall-control-plane-identity >/dev/null 2>&1; }
 check "its certificate is stored" identity
-primary_hello() { stub_stats | grep -q '"STREAM_ROLE_PRIMARY CLUSTER_MODE_GITOPS'; }
+primary_hello() { stub_stats | grep '"STREAM_ROLE_PRIMARY CLUSTER_MODE_GITOPS' >/dev/null; }
 check "the stub got a primary Hello in GitOps mode" primary_hello
 beats() { [[ $(stub_stats | sed -n 's/.*"heartbeats":\([0-9]*\).*/\1/p') -ge 1 ]]; }
 eventually "heartbeats arrive" beats
 # State sync (#90): the leader reports the cluster, and every change
 # within seconds; it never writes the objects.
-state_has() { stub_stats | grep -qF "\"$1\""; }
+state_has() { stub_stats | grep -F "\"$1\"" >/dev/null; }
 eventually "the stub got the cluster state (InkwallConfig)" state_has "InkwallConfig /default"
 last_state() { stub_stats | sed -n "s/.*\"lastState\":{[^}]*\"$1\":\([0-9]*\).*/\1/p"; }
 engines_seen() { [[ $(last_state engines) -ge 1 && $(last_state podsWithEngine) -ge 1 && $(last_state bundleVersion) -ge 1 ]]; }
@@ -744,7 +744,7 @@ enforced_in_state() {
   stub_stats | sed -n 's/.*"enforced":\[\([^]]*\)\].*/\1/p' | grep -F "\"WAFPolicy $NS/$1\"" >/dev/null
 }
 eventually "the mirror shows it Enforced to the stub" enforced_in_state web
-events_stream() { stub_stats | grep -q '"STREAM_ROLE_EVENTS CLUSTER_MODE_GITOPS'; }
+events_stream() { stub_stats | grep '"STREAM_ROLE_EVENTS CLUSTER_MODE_GITOPS' >/dev/null; }
 eventually "the replicas opened events streams" events_stream
 stub_events() { [[ $(stub_stats | sed -n 's/.*"events":\([0-9]*\).*/\1/p') -ge 1 ]]; }
 eventually "the blocked attack reaches the control plane as a security event" stub_events
@@ -756,7 +756,7 @@ eventually "the blocked attack reaches the control plane as a security event" st
 # snapshot without a policy deletes it.
 echo "== control plane (stub): Managed mode"
 "${KUBECTL[@]}" patch inkwallconfig default --type=merge -p '{"spec":{"mode":"Managed"}}' >/dev/null
-managed_hello() { stub_stats | grep -q '"STREAM_ROLE_PRIMARY CLUSTER_MODE_MANAGED'; }
+managed_hello() { stub_stats | grep '"STREAM_ROLE_PRIMARY CLUSTER_MODE_MANAGED' >/dev/null; }
 eventually "the operator reconnects in Managed mode" managed_hello
 snap=$(mktemp)
 # send_snapshot VERSION: sends the YAML list on stdin as that snapshot.
@@ -765,7 +765,7 @@ send_snapshot() {
   "${KUBECTL[@]}" create --raw "/api/v1/namespaces/$CP_NS/services/stub:admin/proxy/snapshot?version=$1" -f "$snap" >/dev/null
 }
 acked() { stub_stats | grep -Eq "\"acks\":\[([0-9]+,)*$1[],]"; }
-nacked() { stub_stats | grep -q "\"$1: "; }
+nacked() { stub_stats | grep "\"$1: " >/dev/null; }
 managed_policy() {
   cat <<YAML
 - apiVersion: waf.inkwall.dev/v1alpha1
