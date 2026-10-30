@@ -31,7 +31,7 @@ kubectl -n inkwall-system rollout status deployment/inkwall-operator
 The rollout finishing means the operator is running. Traefik pods created from then on get the
 engine; restart the ones already running. To upgrade, see [upgrading](../../../docs/upgrading.md).
 
-The chart is signed with [cosign](https://docs.sigstore.dev/cosign/signing/overview/): see [CONTRIBUTING.md](../../../CONTRIBUTING.md#cutting-a-release)
+The chart is signed with [cosign](https://docs.sigstore.dev/cosign/signing/overview/) v3: see [CONTRIBUTING.md](../../../CONTRIBUTING.md#cutting-a-release)
 for how to verify it. From a checkout, `make kind-operator` builds the images and installs
 `deploy/helm/inkwall` on the [kind](https://kind.sigs.k8s.io/) cluster of `make kind-up`.
 

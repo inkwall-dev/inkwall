@@ -1,7 +1,7 @@
 # Upgrading
 
-This guide upgrades an Inkwall installation from 0.1.0 to 0.1.1 or later, and lists what changes
-on the way.
+This guide upgrades an Inkwall installation from 0.1.x (0.1.0 to 0.1.3) to 0.2.0, and lists what
+changes on the way.
 
 ## Contents
 
@@ -14,14 +14,23 @@ on the way.
 
 ## Prerequisites
 
-- Inkwall 0.1.0 installed with the chart, and the values you installed it with.
+- Inkwall 0.1.x installed with the chart, and the values you installed it with.
 - [Helm](https://helm.sh/docs/) 3.14 or later, for
   [`--reset-then-reuse-values`](https://helm.sh/docs/helm/helm_upgrade/).
 
 ## What's new
 
-The upgrade adds fields to the existing [CRDs](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/),
-and makes some existing fields take effect. It adds no new kinds.
+From 0.1.1 or later, the upgrade changes no [CRDs](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
+and no chart values. The operator gets two flags, with the defaults it used before; set them with
+`operator.extraArgs` if you need others:
+
+| Flag | Default | |
+|---|---|---|
+| `--signing-key-grace` | `1m` | The least time each phase of a [signing key rotation](key-rotation.md) lasts |
+| `--selector-restart-max-delay` | `30s` | When the `InkwallConfig`'s integration selectors change, each replica restarts after a random delay up to this |
+
+From 0.1.0, the upgrade also adds fields to the existing CRDs, and makes some existing fields take
+effect. It adds no new kinds.
 
 | Object | Field | |
 |---|---|---|
@@ -46,7 +55,26 @@ starts connecting after the upgrade.
 
 ## What changes by itself
 
-Without any configuration on your part, the upgrade changes the following:
+Without any configuration on your part, the upgrade from any 0.1.x changes the following:
+
+- **Bundles split into chunks past 900 KiB.** A [bundle](glossary.md#bundle) of up to 900 KiB
+  compressed stays in the [Secret](https://kubernetes.io/docs/concepts/configuration/secret/) `inkwall-bundle`, as before. A larger one, which 0.1.x
+  couldn't publish, is split into Secrets named `inkwall-bundle-a-0`… or `inkwall-bundle-b-0`…,
+  labelled `waf.inkwall.dev/bundle-chunk`, up to 7.2 MiB. The `inkwall-bundle-reader` Role, which
+  lets Traefik's engines read the bundle, now also grants `get` on every chunk name. If you run an
+  engine with `--bundle-secret` and a Role of your own, add the chunk names to it. Engines from
+  0.1.x can't read a chunked Secret when they start, and refuse a streamed bundle over 4 MiB
+  decompressed: they keep their last bundle, or wait for the operator.
+- **The engine's answer to Traefik capped.** Each `inkwall-waf` ForwardAuth
+  [Middleware](https://doc.traefik.io/traefik/middlewares/http/forwardauth/) gets
+  `maxResponseBodySize: 65536`, except on Traefik before v3.7, whose CRD has no such field. Already
+  set since 0.1.2.
+- **The engine enforces its cached bundle from its first request.** A restarted engine container
+  no longer answers before it applies its cached bundle
+  ([GHSA-9x6c-5v2m-835r](https://github.com/inkwall-dev/inkwall/security/advisories/GHSA-9x6c-5v2m-835r),
+  also fixed in 0.1.3). The fix is in the engine, so it takes effect when Traefik restarts.
+
+From 0.1.0, the upgrade also changes the following:
 
 - **A finalizer on every `WAFPolicy`.** The operator adds the
   [finalizer](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/)
@@ -57,7 +85,7 @@ Without any configuration on your part, the upgrade changes the following:
   `Programmed=False` (reason `InjectionDisabled` or `SidecarMissing`), so the routes keep working,
   uninspected. 0.1.0 left them wired. The `helm uninstall` hook now also runs with injection off,
   and removes the finalizers.
-- **Signing keys in a new format.** The [Secret](https://kubernetes.io/docs/concepts/configuration/secret/) `inkwall-bundle-signing-key` and the `inkwall-trust`
+- **Signing keys in a new format.** The Secret `inkwall-bundle-signing-key` and the `inkwall-trust`
   [ConfigMaps](https://kubernetes.io/docs/concepts/configuration/configmap/) get `trusted-keys.pub`, the list of keys engines accept. The key doesn't change.
   New engines read `trusted-keys.pub`; engines from 0.1.0 keep reading `ed25519.pub`, which
   stays.
@@ -67,28 +95,31 @@ Without any configuration on your part, the upgrade changes the following:
   [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir) of
   `controlPlane.eventsBufferMiB` + 16 MiB. It stays empty in Standalone.
 
-Traefik pods keep their 0.1.0 engine until they restart. That engine keeps working, but holds up
-any signing key rotation: restart Traefik after the upgrade.
+Traefik pods keep their 0.1.x engine until they restart. That engine keeps working, but misses the
+engine fixes made since, doesn't read chunks, and, from 0.1.0, holds up any signing key
+rotation: restart Traefik after the upgrade. An engine image set in
+`InkwallConfig.spec.engine.image` stays as it is: change it to 0.2.0 yourself.
 
 ## Upgrading the chart
 
 1. Upgrade the chart, with the values you installed it with:
 
    ```sh
-   helm upgrade inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \
+   helm upgrade inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.2.0 \
      --namespace inkwall-system --reset-then-reuse-values
    ```
 
    `--reset-then-reuse-values` takes the new chart's defaults, then your values. Passing your
-   values file again (`-f values.yaml`) works too. Avoid `--reuse-values`, which keeps the 0.1.0
-   values without the new defaults: upgrading to 0.1.1 with it fails with
-   `nil pointer evaluating interface {}.caBundle`. The 0.1.2 chart defaults those values (#143).
+   values file again (`-f values.yaml`) works too. Avoid `--reuse-values`, which keeps the old
+   values without the new defaults. From 0.1.0, it failed on 0.1.1 with
+   `nil pointer evaluating interface {}.caBundle`; the chart defaults those values since 0.1.2
+   (#143).
 
    The chart upgrades the CRDs too (`crds.install`, on by default). If you install the CRDs
    yourself, apply the new ones first:
 
    ```sh
-   helm template inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \
+   helm template inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.2.0 \
      --show-only templates/crds.yaml | kubectl apply --server-side -f -
    ```
 
@@ -116,15 +147,37 @@ kubectl get wafpolicy -A
 kubectl get wafpolicy -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {.metadata.finalizers}{"\n"}{end}'
 kubectl -n <traefik namespace> get pods -l app.kubernetes.io/name=traefik \
   -o jsonpath='{range .items[*]}{.metadata.name} {.spec.initContainers[?(@.name=="inkwall-engine")].image}{"\n"}{end}'
+kubectl get middlewares.traefik.io -A --field-selector metadata.name=inkwall-waf \
+  -o jsonpath='{range .items[*]}{.metadata.namespace} {.spec.forwardAuth.maxResponseBodySize}{"\n"}{end}'
 ```
 
-It worked if the release shows the new chart version, the policies are `Ready` and carry
-`waf.inkwall.dev/unwire`, and Traefik's pods run the new engine image.
+It worked if the release shows chart version 0.2.0, the policies are `Ready` and carry
+`waf.inkwall.dev/unwire`, Traefik's pods run the `inkwall-engine:0.2.0` image, and each
+`inkwall-waf` Middleware has `maxResponseBodySize` 65536 (none on Traefik before v3.7). Send an
+attack through a protected route, as in the [README](../README.md#protect-a-route), to check it's
+blocked.
 
 ## Rolling back
 
-0.1.0 doesn't know the finalizer, `IngressRoute` targets, Managed mode or key rotation. Before
-`helm rollback`:
+0.1.x can't read a bundle split into chunks, and never publishes a bundle over 900 KiB. Before
+`helm rollback`, check there are no chunks:
+
+```sh
+kubectl -n inkwall-system get secret -l waf.inkwall.dev/bundle-chunk
+```
+
+If there are, shrink the policies until the bundle fits again: 0.2.0 then stores it in
+`inkwall-bundle` alone, and deletes the chunks. Otherwise the rolled-back operator can't read the
+bundle and builds nothing. Then delete `inkwall-bundle` and its chunks, so it builds a new one, if
+the policies fit:
+
+```sh
+kubectl -n inkwall-system delete secret inkwall-bundle
+kubectl -n inkwall-system delete secret -l waf.inkwall.dev/bundle-chunk
+```
+
+Rolling back to 0.1.0 needs more: 0.1.0 doesn't know the finalizer, `IngressRoute` targets, Managed
+mode or key rotation. Before `helm rollback`:
 
 1. Switch to `Standalone` if you set another mode
    ([disconnecting](control-plane.md#disconnecting)), and wait for any signing key rotation to
@@ -139,7 +192,7 @@ It worked if the release shows the new chart version, the policies are `Ready` a
      done
    ```
 
-Then roll back, and restart Traefik so its pods run the 0.1.0 engine again:
+Then roll back, and restart Traefik so its pods run the older engine again:
 
 ```sh
 helm -n inkwall-system rollback inkwall

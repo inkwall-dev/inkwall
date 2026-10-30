@@ -128,7 +128,9 @@ for patching released versions.
      version in `Chart.yaml` is only for development);
    - the binaries, `checksums.txt` and the GitHub release with the changelog.
 
-   Images, chart and checksums are signed keyless with [cosign](https://docs.sigstore.dev/cosign/signing/overview/). To verify an image:
+   Images, chart and checksums are signed keyless with [cosign](https://docs.sigstore.dev/cosign/signing/overview/) v3 (`COSIGN_VERSION` in
+   the workflow): verify them with cosign v3, as cosign v2 reports "no signatures found". To
+   verify an image:
 
    ```sh
    cosign verify ghcr.io/inkwall-dev/inkwall-engine:0.3.0 \

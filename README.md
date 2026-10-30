@@ -5,7 +5,7 @@ inspection engine next to your [ingress controller](https://kubernetes.io/docs/c
 to your routes. The engine runs OWASP [Coraza](https://coraza.io/) with the
 [Core Rule Set](https://coreruleset.org/) (CRS).
 
-> **Status: v0.1.2, early; v0.2.0 is next.** Inkwall works with [**Traefik**](https://doc.traefik.io/traefik/) and its [**`Ingress`**](https://kubernetes.io/docs/concepts/services-networking/ingress/)
+> **Status: v0.2.0, early.** Inkwall works with [**Traefik**](https://doc.traefik.io/traefik/) and its [**`Ingress`**](https://kubernetes.io/docs/concepts/services-networking/ingress/)
 > and [**`IngressRoute`**](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) routes, and as a standalone reverse proxy in front of anything else. The
 > API is `v1alpha1` and will change. See [Limits](#limits) and the [roadmap](#roadmap).
 
@@ -39,7 +39,7 @@ The [docs index](docs/README.md) lists every guide, reference and design doc.
 You need [Kubernetes](https://kubernetes.io/docs/concepts/overview/) 1.29 or later and [Helm](https://helm.sh/docs/) 3.
 
 ```sh
-helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.1.2 \
+helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.2.0 \
   --namespace inkwall-system --create-namespace
 kubectl -n inkwall-system rollout status deployment/inkwall-operator
 ```
@@ -56,10 +56,11 @@ uninstall. The guides cover [upgrading](docs/upgrading.md),
 [connecting to a control plane](docs/control-plane.md) and
 [the client IP behind a load balancer](docs/client-ip.md).
 
-The images, the chart and the checksums are signed keyless with [cosign](https://docs.sigstore.dev/cosign/signing/overview/). To verify an image:
+The images, the chart and the checksums are signed keyless with [cosign](https://docs.sigstore.dev/cosign/signing/overview/) v3: verify them
+with cosign v3, as cosign v2 reports "no signatures found". To verify an image:
 
 ```sh
-cosign verify ghcr.io/inkwall-dev/inkwall-engine:0.1.2 \
+cosign verify ghcr.io/inkwall-dev/inkwall-engine:0.2.0 \
   --certificate-identity-regexp '^https://github.com/inkwall-dev/inkwall/\.github/workflows/release\.yaml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
@@ -143,10 +144,11 @@ modes, and [testing policies offline](docs/testing-policies.md) for `inkwallctl 
 Tracked on the [project board](https://github.com/orgs/inkwall-dev/projects/1) and in
 [milestones](https://github.com/inkwall-dev/inkwall/milestones):
 
-- **v0.2.0** (next): signing key rotation, offline tests of `WAFPolicy` objects, `IngressRoute`
-  targets and the operator side of the optional control plane, all shipped in 0.1.1; bundle chunks
-  and memory at scale, on `main`.
-- **v0.3.0**: Gateway API `HTTPRoute` targets with Traefik and [Envoy Gateway](https://gateway.envoyproxy.io/), proxy discovery,
+- **v0.2.0** (shipped): signing key rotation, offline tests of `WAFPolicy` objects, `IngressRoute`
+  targets, unwiring with a finalizer and the operator side of the optional control plane, first
+  shipped in 0.1.1; bundles split into chunk Secrets, operator memory that no longer grows with
+  engines, the ForwardAuth answer capped, user guides, and fuzzing, scale and upgrade tests.
+- **v0.3.0** (next): Gateway API `HTTPRoute` targets with Traefik and [Envoy Gateway](https://gateway.envoyproxy.io/), proxy discovery,
   engine request metrics sent to the control plane, and migration of ingress-nginx [ModSecurity](https://kubernetes.github.io/ingress-nginx/user-guide/third-party-addons/modsecurity/)
   annotations.
 - **v1.0.0**: a stable API (out of `v1alpha1`) with an upgrade path.
