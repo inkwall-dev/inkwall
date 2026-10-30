@@ -74,8 +74,32 @@ func TestInject(t *testing.T) {
 	if !*sc.RunAsNonRoot || !*sc.ReadOnlyRootFilesystem || *sc.AllowPrivilegeEscalation || sc.Capabilities.Drop[0] != "ALL" {
 		t.Errorf("security context %+v", sc)
 	}
-	if engine.StartupProbe == nil || engine.Resources.Limits.Memory().Cmp(resource.MustParse("512Mi")) != 0 {
-		t.Errorf("probes or default resources missing")
+	if engine.Resources.Limits.Memory().Cmp(resource.MustParse("512Mi")) != 0 {
+		t.Errorf("default resources missing")
+	}
+	// The proxy starts once the engine is ready: its first bundle applied,
+	// or the engine's --bootstrap-timeout (10s) passed, so the proxy takes
+	// no traffic before the policy is in place. The startup probe allows
+	// for that timeout, with margin for compiling the rules; liveness only
+	// asks whether the process is alive, so waiting for a bundle never
+	// restarts the engine.
+	probePath := func(p *corev1.Probe) string {
+		if p == nil || p.HTTPGet == nil || p.HTTPGet.Port.IntValue() != adminPort {
+			return ""
+		}
+		return p.HTTPGet.Path
+	}
+	if got := probePath(engine.StartupProbe); got != "/readyz" {
+		t.Errorf("startup probe %q, want /readyz on the admin port", got)
+	}
+	if sp := engine.StartupProbe; sp != nil && sp.PeriodSeconds*sp.FailureThreshold < 20 {
+		t.Errorf("startup probe gives up after %ds, within the bootstrap timeout plus margin", sp.PeriodSeconds*sp.FailureThreshold)
+	}
+	if got := probePath(engine.ReadinessProbe); got != "/readyz" {
+		t.Errorf("readiness probe %q, want /readyz", got)
+	}
+	if got := probePath(engine.LivenessProbe); got != "/healthz" {
+		t.Errorf("liveness probe %q, want /healthz", got)
 	}
 
 	// The token for the operator's audience and the trust ConfigMap, then a

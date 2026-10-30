@@ -4,6 +4,9 @@
 package main
 
 import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"io"
 	"log/slog"
 	"net"
@@ -15,6 +18,11 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
@@ -247,5 +255,103 @@ func TestBundleModeNeedsItsFiles(t *testing.T) {
 	}
 	if _, _, _, err := bundleMode(cfg, telemetry.NewMetrics("httpcheck"), slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "public key") {
 		t.Fatalf("got %v, want an error about the public key", err)
+	}
+}
+
+// serve applies a valid cached bundle before it listens: the first request
+// a restarted engine answers is inspected with it, and before that the
+// proxy's requests are refused, never let through. An unusable cache is not
+// an error: the engine serves, waiting for the operator.
+func TestServeAppliesTheCacheBeforeListening(t *testing.T) {
+	dir := t.TempDir()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	write := func(name string, data []byte) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	b := &bundlev1.Bundle{
+		Version:     7,
+		CreatedAt:   timestamppb.Now(),
+		ContentHash: []byte("block"),
+		Policies: []*bundlev1.Policy{{
+			Id:       "shop/shop",
+			Mode:     bundlev1.Mode_MODE_BLOCK,
+			Routes:   []*bundlev1.RouteMatch{{Host: "shop.example.com", Path: &bundlev1.PathMatch{Type: bundlev1.PathMatchType_PATH_MATCH_TYPE_PREFIX, Value: "/"}}},
+			RuleSets: []*bundlev1.RuleSetBinding{{RuleSetId: "WAFRuleSet/shop/rules"}},
+		}},
+		RuleSets: []*bundlev1.RuleSet{{Id: "WAFRuleSet/shop/rules", Source: &bundlev1.RuleSet_Seclang{
+			Seclang: `SecRule ARGS "@contains attack" "id:100001,phase:2,deny,status:403,log"`,
+		}}},
+	}
+	raw, err := proto.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := proto.Marshal(&bundlev1.SignedBundle{Bundle: raw, Signature: ed25519.Sign(priv, raw), KeyId: bundlekey.ID(pub)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := write("ed25519.pub", pub)
+
+	// firstAnswer starts the engine with cache and returns the status of
+	// the first attack it answers, sent again at once while it refuses, as
+	// Traefik's requests are.
+	firstAnswer := func(cache []byte) int {
+		t.Helper()
+		sock := filepath.Join(dir, "engine.sock")
+		cfg, err := parseFlags(cmdForwardAuth, []string{
+			"--listen", "unix:" + sock,
+			"--admin-listen", "unix:" + filepath.Join(dir, "admin.sock"),
+			// Nothing listens there: only the cache can supply the bundle.
+			"--operator", "127.0.0.1:1",
+			"--operator-ca", filepath.Join(dir, "ca.crt"),
+			"--operator-token", filepath.Join(dir, "token"),
+			"--bundle-key", key,
+			"--bundle-cache", write("bundle.pb", cache),
+		}, io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- serve(ctx, cfg, slog.New(slog.DiscardHandler)) }()
+		defer func() {
+			cancel()
+			if err := <-done; err != nil {
+				t.Errorf("serve: %v", err)
+			}
+		}()
+		client := &http.Client{Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+			},
+			DisableKeepAlives: true,
+		}}
+		for deadline := time.Now().Add(10 * time.Second); ; {
+			req, _ := http.NewRequest(http.MethodGet, "http://engine/v1/forward-auth", nil)
+			req.Header.Set("X-Forwarded-Method", "GET")
+			req.Header.Set("X-Forwarded-Proto", "http")
+			req.Header.Set("X-Forwarded-Host", "shop.example.com")
+			req.Header.Set("X-Forwarded-Uri", "/?q=attack")
+			resp, err := client.Do(req)
+			if err == nil {
+				_ = resp.Body.Close()
+				return resp.StatusCode
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the engine never answered: %v", err)
+			}
+		}
+	}
+
+	if code := firstAnswer(signed); code != http.StatusForbidden {
+		t.Errorf("first answer to an attack %d, want 403 from the cached bundle", code)
+	}
+	if code := firstAnswer([]byte("garbage")); code != http.StatusOK {
+		t.Errorf("first answer with a corrupt cache %d, want 200 (no policy, bootstrap allow)", code)
 	}
 }

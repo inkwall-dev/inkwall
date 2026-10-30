@@ -82,7 +82,9 @@ func run(args []string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
 	}
-	if err := serve(cfg, logger); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := serve(ctx, cfg, logger); err != nil {
 		logger.Error("engine stopped", slog.Any("error", err))
 		return 1
 	}
@@ -324,7 +326,7 @@ func splitList(s string) []string {
 	return out
 }
 
-func serve(cfg engineConfig, logger *slog.Logger) error {
+func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 	resolver, err := clientip.NewResolver(cfg.trustedProxies)
 	if err != nil {
 		return err
@@ -337,9 +339,6 @@ func serve(cfg engineConfig, logger *slog.Logger) error {
 		adapter = "httpcheck"
 	}
 	metrics := telemetry.NewMetrics(adapter)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	var (
 		p   pipeline.Inspector
@@ -387,34 +386,26 @@ func serve(cfg engineConfig, logger *slog.Logger) error {
 	}
 
 	// Bind before announcing, so "started" means the ports are really open.
-	ln, err := listen(cfg.listen)
-	if err != nil {
-		return err
-	}
+	// The admin listener comes first, so /healthz answers while a cached
+	// bundle is compiled; /readyz waits for it.
 	var adminLn net.Listener
 	if cfg.adminListen != "" {
 		if adminLn, err = listen(cfg.adminListen); err != nil {
-			_ = ln.Close()
 			return err
 		}
 	}
 
-	errc := make(chan error, 2)
-	go func() { errc <- srv.Serve(ln) }()
-	if ag != nil {
-		go func() { _ = ag.Run(ctx) }()
-	}
-
-	// Rules are compiled before anything listens, so the engine is ready as
-	// soon as it serves; readiness turns off again during shutdown. In
-	// bundle mode it waits for the first bundle, for a while: the proxy
-	// takes no traffic before the policy is in place.
+	// Rules are compiled before the engine listens, so it is ready as soon
+	// as it serves; readiness turns off again during shutdown. In bundle
+	// mode it waits for the first bundle (ready at once with a cached one),
+	// for a while: the proxy takes no traffic before the policy is in place.
 	var ready atomic.Bool
 	if ag != nil {
 		go waitForBundle(ctx, ag, cfg, &ready, logger)
 	} else {
 		ready.Store(true)
 	}
+	errc := make(chan error, 2)
 	var admin *http.Server
 	if adminLn != nil {
 		adminHandler := metrics.AdminHandler(ready.Load)
@@ -435,6 +426,25 @@ func serve(cfg engineConfig, logger *slog.Logger) error {
 			IdleTimeout:  30 * time.Second,
 		}
 		go func() { errc <- admin.Serve(adminLn) }()
+	}
+
+	// A restarted engine (its pod's cache survives) enforces the cached
+	// bundle from its first request: until it listens, the proxy's requests
+	// fail rather than pass uninspected. An unusable cache is logged, and
+	// the engine waits for the Secret or the operator.
+	if ag != nil {
+		ag.LoadCache()
+	}
+	ln, err := listen(cfg.listen)
+	if err != nil {
+		if admin != nil {
+			_ = admin.Close()
+		}
+		return err
+	}
+	go func() { errc <- srv.Serve(ln) }()
+	if ag != nil {
+		go func() { _ = ag.Run(ctx) }()
 	}
 
 	attrs := []any{
