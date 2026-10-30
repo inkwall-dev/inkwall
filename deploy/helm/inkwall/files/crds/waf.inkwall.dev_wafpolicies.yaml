@@ -90,7 +90,8 @@ spec:
                     path or argument.
                   properties:
                     ruleIDs:
-                      description: RuleIDs are the rules to turn off.
+                      description: RuleIDs are the rules to turn off. An ID no rule
+                        has is ignored.
                       items:
                         format: int32
                         minimum: 1
@@ -104,8 +105,11 @@ spec:
                         this policy covers.
                       properties:
                         argument:
-                          description: Argument is a query or body argument the rules
-                            stop looking at.
+                          description: |-
+                            Argument is a query or body argument the rules, and the rules chained
+                            to them, stop looking at. With a rule set whose own SecLang negates
+                            ARGS targets (!ARGS:name), the policy gets its own compiled rules, and
+                            the exclusion covers the rule only, not its chained rules.
                           maxLength: 256
                           minLength: 1
                           pattern: ^[A-Za-z0-9_.\-\[\]]+$

@@ -153,11 +153,12 @@ enum BuiltinRuleSet {
 
 // Exclusion turns rules off, everywhere or for a path, an argument or both.
 message Exclusion {
+  // The rules to turn off; an ID no rule has is ignored.
   repeated uint32 rule_ids = 1;
   // Exact or prefix path in the router's syntax. Empty: every path.
   string path = 2;
-  // A query or body argument the rules stop looking at. Empty: the rules
-  // are off entirely (on path, when set).
+  // A query or body argument the rules (and the rules chained to them) stop
+  // looking at. Empty: the rules are off entirely (on path, when set).
   string argument = 3;
 }
 
