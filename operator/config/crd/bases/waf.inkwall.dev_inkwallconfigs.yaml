@@ -372,6 +372,54 @@ spec:
                 description: ObservedGeneration is the generation the status describes.
                 format: int64
                 type: integer
+              proxies:
+                description: |-
+                  Proxies are the proxy controllers the cluster's IngressClasses and
+                  GatewayClasses name, and how far Inkwall wires each.
+                items:
+                  description: ProxyStatus is a proxy controller found in the cluster.
+                  properties:
+                    controllerName:
+                      description: |-
+                        ControllerName is the controller its classes name: an IngressClass's
+                        spec.controller, a GatewayClass's spec.controllerName.
+                      maxLength: 253
+                      type: string
+                    gatewayClasses:
+                      description: GatewayClasses are the GatewayClasses of the controller.
+                      items:
+                        type: string
+                      type: array
+                    ingressClasses:
+                      description: IngressClasses are the IngressClasses of the controller.
+                      items:
+                        type: string
+                      type: array
+                    integration:
+                      description: |-
+                        Integration is Inkwall's integration for the controller, such as
+                        traefik; empty when Inkwall has none.
+                      maxLength: 63
+                      type: string
+                    message:
+                      description: Message says what isn't wired.
+                      maxLength: 1024
+                      type: string
+                    support:
+                      description: Support is Full, Partial or Unsupported.
+                      enum:
+                      - Full
+                      - Partial
+                      - Unsupported
+                      type: string
+                  required:
+                  - controllerName
+                  - support
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - controllerName
+                x-kubernetes-list-type: map
             type: object
         type: object
         x-kubernetes-validations:
