@@ -2,20 +2,33 @@
 
 This guide gets the real client address to the engine when Traefik runs behind a load balancer.
 
-The engine keys IP rules, IP lists, rate limits and the `clientIp` of security events on the
-client's address. Behind a load balancer (LB) Traefik sees the LB, or a node, as its peer, and so
-does the engine, unless the real address reaches Traefik. A wrong client IP is worse than none:
-an IP list would block the LB, and every client would share one rate limit.
+The engine gives the client's address to the rules (SecLang's `REMOTE_ADDR`) and records it in
+security events; the planned IP lists and rate limits will key on it too. Behind a load balancer
+(LB), Traefik sees the LB, or a node, as its peer, and so does the engine, unless the real address
+reaches Traefik. A wrong client IP is worse than none: a rule against one address would block the
+LB, and every client would look like the same one.
+
+There are two ways to get the address to Traefik: the [PROXY protocol](#the-proxy-protocol-recommended)
+(recommended), or [`externalTrafficPolicy: Local`](#externaltrafficpolicy-local-without-the-proxy-protocol)
+on Traefik's Service.
 
 ## Contents
 
+- [Prerequisites](#prerequisites)
 - [How the address reaches the engine](#how-the-address-reaches-the-engine)
 - [Why not `X-Forwarded-For` from the LB](#why-not-x-forwarded-for-from-the-lb)
 - [The PROXY protocol (recommended)](#the-proxy-protocol-recommended)
   - [Traefik (Helm chart `traefik/traefik`)](#traefik-helm-chart-traefiktraefik)
   - [Load balancers](#load-balancers)
 - [`externalTrafficPolicy: Local` (without the PROXY protocol)](#externaltrafficpolicy-local-without-the-proxy-protocol)
-- [Checking it](#checking-it)
+- [Checking it worked](#checking-it-worked)
+- [Undoing it](#undoing-it)
+
+## Prerequisites
+
+- Inkwall installed, with the engine injected into Traefik's pods.
+- Traefik exposed through a `LoadBalancer` or `NodePort` Service, and access to its configuration
+  (here, the Helm chart `traefik/traefik`) and to the load balancer's settings.
 
 ## How the address reaches the engine
 
@@ -26,7 +39,7 @@ an IP list would block the LB, and every client would share one rate limit.
 3. The injected engine trusts `X-Forwarded-For` only from its loopback peer, Traefik
    (`--trusted-proxies=127.0.0.1/32,::1/128`), and walks it right to left.
 
-No engine or operator setting is needed: configure Traefik and the LB.
+Inkwall needs no setting for this: configure Traefik and the LB.
 
 ## Why not `X-Forwarded-For` from the LB
 
@@ -63,7 +76,7 @@ Traefik detects the version (v1 or v2) by itself.
   address, get past IP rules and frame others in your events.
 - A PROXY header from an untrusted address is read and its address ignored; the connection
   keeps its real peer. A connection without a header is accepted from any address. Neither is
-  logged as an error, so check an event's `clientIp` after the change.
+  logged as an error, so check an event's client IP after the change.
 - `trustedIPs` must contain the peer Traefik actually sees. With `externalTrafficPolicy: Cluster`
   (the default) on an LB that targets nodes, that is the node that forwarded the packet, not the
   LB; with the LB targeting pods directly, it is the LB.
@@ -109,16 +122,25 @@ SNAT, so Traefik sees the client's address. Trade-offs
 - The LB weighs nodes, not pods: a node with two Traefik pods gets the same share as one with one.
 - With MetalLB in layer 2 mode, only the leader node's pods get traffic.
 
-## Checking it
+## Checking it worked
 
-Send a blocked request through the LB and look at the engine's `security event` log line in a
-Traefik pod (or the event in your control plane):
+Send a request that a policy blocks or detects through the LB, then read the engine's
+`security event` log line in a Traefik pod (or the event in your control plane):
 
 ```sh
-kubectl -n traefik logs deploy/traefik -c inkwall-engine | grep '"security event"' | tail -1
+kubectl -n <traefik namespace> logs deploy/<traefik> -c inkwall-engine | grep '"security event"' | tail -1
 ```
 
-`client_ip` should be your address, not the LB's, a node's or a pod's. The kind end-to-end test
+Its `client_ip` should be your address, not the LB's, a node's or a pod's. The kind end-to-end test
 (`make kind-e2e`) checks this with a PROXY header for a public address, a client-sent
 `X-Forwarded-For` that must not change it, and a PROXY header from an untrusted source that must be
 ignored.
+
+## Undoing it
+
+Undo the changes in the reverse order: turn the PROXY protocol off on the LB first, then remove
+`proxyProtocol` from Traefik's entry points. A Traefik that expects the PROXY protocol still accepts
+plain connections, but requests the LB sends with a PROXY header fail on a Traefik that doesn't
+expect one.
+To undo `externalTrafficPolicy: Local`, set it back to `Cluster`, the default. In both cases the
+engine sees the LB's or a node's address again.

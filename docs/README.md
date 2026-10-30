@@ -19,6 +19,10 @@ Every doc in this repository, by topic, with the question each one answers.
   what does the operator send it, and how do I disconnect?
 - [GitOps](gitops.md): which fields does the operator write, and how do I keep Argo CD and Flux
   from reporting them as drift?
+- [Testing policies offline](testing-policies.md): how do I test rules, `WAFPolicy` objects and
+  the cluster's bundle with `inkwallctl`, locally or in CI?
+- [Running the engine without Kubernetes](standalone-proxy.md): how do I put the engine in front
+  of any HTTP service as a reverse proxy, and which flags does it take?
 
 ## Reference
 

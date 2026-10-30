@@ -16,7 +16,7 @@ without interrupting traffic.
 
 ## How it works
 
-The operator signs every bundle with an [Ed25519](https://www.rfc-editor.org/rfc/rfc8032) key.
+The operator signs every policy bundle with an [Ed25519](https://www.rfc-editor.org/rfc/rfc8032) key.
 It generates the key on first use and keeps it in the
 [Secret](https://kubernetes.io/docs/concepts/configuration/secret/) `inkwall-bundle-signing-key`
 in its namespace. Engines check each bundle's signature against the public keys in the
@@ -35,19 +35,22 @@ A rotation never signs with a key an engine doesn't trust yet:
    new key signed.
 3. **Done.** The old key is removed from the ConfigMaps. Only the new key is trusted.
 
-Each phase lasts at least one minute.
+Each phase lasts at least one minute, the time the kubelet may take to update a mounted ConfigMap
+(the operator's `--signing-key-grace`).
 
 ## Prerequisites
 
 - Inkwall 0.1.1 or later.
 - Every engine from 0.1.1 or later. An older engine never reports the new key, so the rotation
-  waits for it. Restart [Traefik](https://doc.traefik.io/traefik/) after upgrading the chart, so its pods get the current engine:
+  waits for it. Restart [Traefik](https://doc.traefik.io/traefik/) after upgrading the chart, so
+  its pods get the current engine:
 
   ```sh
   kubectl -n <traefik namespace> rollout restart deployment/<traefik>
   ```
 
-- An `InkwallConfig` named `default`. Without one, create it; an empty spec keeps every default:
+- An `InkwallConfig` named `default`. If there is none, create one; an empty spec keeps every
+  default:
 
   ```sh
   kubectl apply -f - <<'YAML'
@@ -147,8 +150,9 @@ The leader logs what it waits for, and names up to three engines. For example:
 - **An engine from before 0.1.1.** It reports no keys, and the log says
   `reports no keys: an engine older than key rotation`. Restart its pod so it gets the current
   engine.
-- **An engine you configured yourself**, outside a pod the operator injected. It reads its keys from `--bundle-key`. During a rotation, copy the
-  Secret's `trusted-keys.pub` into that file; the engine rereads it on change:
+- **An engine you configured yourself**, outside a pod the operator injected. It reads its keys
+  from `--bundle-key`. During a rotation, copy the Secret's `trusted-keys.pub` into that file; the
+  engine rereads it when it changes:
 
   ```sh
   kubectl -n inkwall-system get secret inkwall-bundle-signing-key \

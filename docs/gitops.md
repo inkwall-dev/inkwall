@@ -9,8 +9,12 @@ Argo CD and Flux so they neither report it as drift nor undo it.
 - [What the operator writes](#what-the-operator-writes)
 - [When there is drift](#when-there-is-drift)
 - [Argo CD](#argo-cd)
+  - [Deleting policies with Argo CD](#deleting-policies-with-argo-cd)
+  - [Managed mode](#managed-mode)
 - [Flux](#flux)
 - [Installing the chart with a GitOps tool](#installing-the-chart-with-a-gitops-tool)
+  - [Argo CD](#argo-cd-1)
+  - [Flux](#flux-1)
 - [Checking it worked](#checking-it-worked)
 - [Undoing it](#undoing-it)
 
@@ -220,8 +224,9 @@ policy blocks; the operator sets it back once it sees the change.
 
 The `InkwallConfig` is not part of the chart, because the chart installs its CRD. Keep it, and
 your policies, in Git apart from the chart: in another Argo CD Application, or in a Flux
-Kustomization whose `dependsOn` names the one that installs the chart. The validating webhook refuses `WAF*` objects while
-no operator replica answers, so let the tool retry until the operator is ready.
+Kustomization whose `dependsOn` names the one that installs the chart. The validating webhook
+refuses `WAF*` objects while no operator replica answers, so let the tool retry until the operator
+is ready.
 
 Upgrade the chart with the tool, not with `helm upgrade`. The chart's values (such as
 `controlPlane.enrollmentToken`) then live in Git: create the token Secret yourself rather than
