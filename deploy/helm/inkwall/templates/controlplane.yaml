@@ -4,7 +4,8 @@ trusts for it, and the one-time enrollment token. The InkwallConfig that
 points at it is yours to apply (README): the chart installs the CRDs, and a
 custom resource can't be created in the same release that installs its CRD.
 */}}
-{{- with .Values.controlPlane.caBundle }}
+{{- $cp := include "inkwall.controlPlane.values" . | fromYaml }}
+{{- with $cp.caBundle }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -16,7 +17,7 @@ data:
   ca.crt: |
     {{- . | nindent 4 }}
 {{- end }}
-{{- with .Values.controlPlane.enrollmentToken }}
+{{- with $cp.enrollmentToken }}
 ---
 apiVersion: v1
 kind: Secret

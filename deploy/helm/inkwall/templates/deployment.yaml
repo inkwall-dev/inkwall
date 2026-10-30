@@ -1,4 +1,5 @@
 {{- $certManager := eq .Values.webhook.certs.mode "certManager" }}
+{{- $cp := include "inkwall.controlPlane.values" . | fromYaml }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -52,11 +53,11 @@ spec:
             - --webhook-certs=rotate
             - --webhook-cert-dir=/tmp/webhook-certs
             {{- end }}
-            {{- if .Values.controlPlane.caBundle }}
+            {{- if $cp.caBundle }}
             - --control-plane-ca=/etc/inkwall/control-plane/ca.crt
             {{- end }}
             - --events-dir=/var/lib/inkwall/events
-            - --events-buffer-bytes={{ mul .Values.controlPlane.eventsBufferMiB 1048576 }}
+            - --events-buffer-bytes={{ mul $cp.eventsBufferMiB 1048576 }}
             {{- with .Values.operator.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -111,7 +112,7 @@ spec:
               mountPath: /certs
               readOnly: true
             {{- end }}
-            {{- if .Values.controlPlane.caBundle }}
+            {{- if $cp.caBundle }}
             - name: control-plane-ca
               mountPath: /etc/inkwall/control-plane
               readOnly: true
@@ -123,13 +124,13 @@ spec:
         # across container restarts. Room for the buffer and a margin.
         - name: events
           emptyDir:
-            sizeLimit: {{ add .Values.controlPlane.eventsBufferMiB 16 }}Mi
+            sizeLimit: {{ add $cp.eventsBufferMiB 16 }}Mi
         {{- if $certManager }}
         - name: certs
           secret:
             secretName: {{ include "inkwall.webhook.secret" . }}
         {{- end }}
-        {{- if .Values.controlPlane.caBundle }}
+        {{- if $cp.caBundle }}
         - name: control-plane-ca
           configMap:
             name: {{ include "inkwall.controlPlane.ca" . }}
