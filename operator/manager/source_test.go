@@ -9,6 +9,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
@@ -77,12 +78,17 @@ func testSourceGuard(ctx context.Context, t *testing.T, c client.Client) {
 	if err := alice.Delete(ctx, managed.DeepCopy()); !apierrors.IsForbidden(err) {
 		t.Errorf("alice deletes it: %v", err)
 	}
-	p := managed.DeepCopy()
-	if err := alice.Get(ctx, client.ObjectKeyFromObject(p), p); err != nil {
-		t.Fatal(err)
-	}
-	delete(p.Labels, wafv1alpha1.SourceLabel)
-	if err := alice.Update(ctx, p); !apierrors.IsForbidden(err) {
+	// The operator writes the policy too (its finalizer, its status): a
+	// conflict means alice read it before that write, so she reads again.
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		p := managed.DeepCopy()
+		if err := alice.Get(ctx, client.ObjectKeyFromObject(p), p); err != nil {
+			return err
+		}
+		delete(p.Labels, wafv1alpha1.SourceLabel)
+		return alice.Update(ctx, p)
+	})
+	if !apierrors.IsForbidden(err) {
 		t.Errorf("alice removes the label: %v", err)
 	}
 	if err := alice.Create(ctx, policy("forged", saas)); !apierrors.IsForbidden(err) {

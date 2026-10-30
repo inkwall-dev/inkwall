@@ -179,7 +179,9 @@ longer rendered.
   or the default class), and each targeted `IngressRoute` (`traefik.io/v1alpha1`), is wired,
   accepted or not; until its rules are in a bundle the engine passes its routes (`no-policy`).
 - One ForwardAuth `Middleware` `inkwall-waf` per such namespace (`trustForwardHeader: false`,
-  `forwardBody: true`, `maxBodySize` 10 MiB = largest `body.maxBytes`), removed when unused. A
+  `forwardBody: true`, `maxBodySize` 10 MiB = largest `body.maxBytes`, `maxResponseBodySize` 64 KiB
+  for the engine's answer; left out on Traefik before v3.7, whose CRD has no such field), removed
+  when unused. A
   same-named one the operator didn't create is left alone (`WiringFailed`). The operator doesn't
   configure Traefik's entry points: behind a load balancer the user turns on the PROXY protocol
   there for the client IP ([client IP](../client-ip.md)).

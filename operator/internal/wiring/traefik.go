@@ -38,6 +38,9 @@ const (
 
 	// forwardAuthAddress is the injected engine, in Traefik's pod.
 	forwardAuthAddress = "http://127.0.0.1:9001/v1/forward-auth"
+	// maxAuthResponseBytes caps the engine's answer that Traefik reads: a
+	// status line's worth today, with room for a block page.
+	maxAuthResponseBytes = 64 << 10
 )
 
 // Traefik's kinds the operator reads and writes.
@@ -54,17 +57,23 @@ func MiddlewareRef(namespace string) string {
 
 // Middleware returns the operator's Middleware for namespace.
 func Middleware(namespace string) *unstructured.Unstructured {
+	return middleware(namespace, true)
+}
+
+// middleware is Middleware, with maxResponseBodySize or without it: Traefik
+// before v3.7 has no such field, and its API server drops it.
+func middleware(namespace string, responseLimit bool) *unstructured.Unstructured {
 	m := &unstructured.Unstructured{}
 	m.SetGroupVersionKind(MiddlewareGVK)
 	m.SetNamespace(namespace)
 	m.SetName(MiddlewareName)
 	m.SetLabels(map[string]string{"app.kubernetes.io/managed-by": "inkwall-operator"})
-	m.Object["spec"] = map[string]any{"forwardAuth": forwardAuth()}
+	m.Object["spec"] = map[string]any{"forwardAuth": forwardAuth(responseLimit)}
 	return m
 }
 
-func forwardAuth() map[string]any {
-	return map[string]any{
+func forwardAuth(responseLimit bool) map[string]any {
+	fa := map[string]any{
 		"address": forwardAuthAddress,
 		// Must be false: with true, Traefik keeps a client's own
 		// X-Forwarded-Uri, and the engine would inspect that instead of
@@ -78,15 +87,25 @@ func forwardAuth() map[string]any {
 		"maxBodySize":         int64(policy.MaxBodyBytes),
 		"authResponseHeaders": []any{"X-Request-Id"},
 	}
+	if responseLimit {
+		// Without it, Traefik reads any size of answer from the engine,
+		// and warns about it.
+		fa["maxResponseBodySize"] = int64(maxAuthResponseBytes)
+	}
+	return fa
 }
 
 // ForwardAuthMatches reports whether a Middleware's spec is the operator's.
 func ForwardAuthMatches(m *unstructured.Unstructured) bool {
+	return forwardAuthMatches(m, true)
+}
+
+func forwardAuthMatches(m *unstructured.Unstructured, responseLimit bool) bool {
 	got, ok, _ := unstructured.NestedMap(m.Object, "spec", "forwardAuth")
 	if !ok {
 		return false
 	}
-	want := forwardAuth()
+	want := forwardAuth(responseLimit)
 	if len(got) != len(want) {
 		return false
 	}
@@ -118,6 +137,13 @@ func ForwardAuthMatches(m *unstructured.Unstructured) bool {
 		}
 	}
 	return true
+}
+
+// hasResponseLimit reports whether a Middleware, as the API server stored
+// it, kept maxResponseBodySize.
+func hasResponseLimit(m *unstructured.Unstructured) bool {
+	_, ok, _ := unstructured.NestedFieldNoCopy(m.Object, "spec", "forwardAuth", "maxResponseBodySize")
+	return ok
 }
 
 // WithMiddleware returns the annotation value with ref added (first, so the

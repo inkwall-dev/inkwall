@@ -13,11 +13,11 @@ CLUSTER=${KIND_CLUSTER:-inkwall}
 IMAGE=${IMAGE:-inkwall-engine:dev}
 TRAEFIK_CHART_VERSION=41.6.1 # Traefik v3.7.13
 
-if ! kind get clusters | grep -qx "$CLUSTER"; then
+if ! kind get clusters | grep -x "$CLUSTER" >/dev/null; then
   kind create cluster --name "$CLUSTER" --config hack/kind/cluster.yaml
 fi
 # Port mappings are fixed when a kind cluster is created.
-if ! docker port "$CLUSTER-control-plane" | grep -q '^30080/tcp'; then
+if ! docker port "$CLUSTER-control-plane" | grep '^30080/tcp' >/dev/null; then
   echo "cluster $CLUSTER predates the Traefik port mappings; recreate it: make kind-down kind-up" >&2
   exit 1
 fi

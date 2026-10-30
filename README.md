@@ -32,6 +32,10 @@ helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.1.0 \
 Then install or restart Traefik: pods started after the operator get the engine. Chart options are in
 the [chart README](deploy/helm/inkwall/README.md).
 
+Guides: [upgrading](docs/upgrading.md), [GitOps with Argo CD and Flux](docs/gitops.md),
+[rotating the signing key](docs/key-rotation.md), [connecting to a control plane](docs/control-plane.md),
+[client IP behind a load balancer](docs/client-ip.md).
+
 Images, chart and checksums are signed keyless with cosign. To verify:
 
 ```sh

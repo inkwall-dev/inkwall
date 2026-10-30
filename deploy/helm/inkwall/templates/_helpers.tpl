@@ -84,3 +84,11 @@ of dicts. Argument: the file's path in the chart.
 {{- define "inkwall.controlPlane.enrollment" -}}
 {{- printf "%s-enrollment" (include "inkwall.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
+
+{{- /*
+controlPlane values, defaulted: an upgrade with --reuse-values from a release
+whose values had no controlPlane (0.1.0) has none. Use with fromYaml.
+*/}}
+{{- define "inkwall.controlPlane.values" -}}
+{{- toYaml (mergeOverwrite (dict "caBundle" "" "enrollmentToken" "" "eventsBufferMiB" 64) (deepCopy (.Values.controlPlane | default dict))) }}
+{{- end }}
