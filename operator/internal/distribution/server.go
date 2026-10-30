@@ -51,6 +51,7 @@ type Server struct {
 	Events func(*eventsv1.EventBatch)
 
 	sends chan struct{}
+	enc   encoder
 }
 
 // NewServer returns a Server with the defaults.
@@ -221,7 +222,11 @@ func (s *Server) send(ctx context.Context, stream agentv1.BundleService_WatchSer
 		return ctx.Err()
 	}
 	defer func() { <-s.sends }()
-	return stream.Send(&agentv1.WatchResponse{Msg: &agentv1.WatchResponse_Bundle{Bundle: signed}})
+	msg, err := s.enc.message(stream, signed)
+	if err != nil {
+		return err
+	}
+	return stream.SendMsg(msg)
 }
 
 // events takes a batch from engine e. The engine and pod come from the

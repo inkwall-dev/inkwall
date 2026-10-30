@@ -128,10 +128,10 @@ func (f fakeAuth) Authenticate(_ context.Context, token string) (Identity, error
 }
 
 // serve runs a Server on an in-memory listener and returns a client.
-func serve(t *testing.T, s *Server) agentv1.BundleServiceClient {
+func serve(t *testing.T, s *Server, opts ...grpc.ServerOption) agentv1.BundleServiceClient {
 	t.Helper()
 	lis := bufconn.Listen(1 << 20)
-	g := grpc.NewServer()
+	g := grpc.NewServer(opts...)
 	agentv1.RegisterBundleServiceServer(g, s)
 	go func() { _ = g.Serve(lis) }()
 	t.Cleanup(g.Stop)

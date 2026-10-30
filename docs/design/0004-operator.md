@@ -509,9 +509,9 @@ operator and engines sharing it, so times are pessimistic:
 | 100 / 1,000 | 50 | 139 MiB | 116 MiB | 3 KiB (37 KiB) | 0.16 s | 1 ms | 1.0 s | 1.0 / 1.0 s |
 | 100 / 1,000 | 500 | 198 MiB | 135 MiB | 3 KiB (37 KiB) | 0.32 s | 1 ms | 1.1 s | 1.1 / 1.1 s |
 | 1,000 / 10,000 | 50 | 178 MiB | 146 MiB | 26 KiB (381 KiB) | 1.5 s | 12 ms | 0.6 s | 1.1 / 1.1 s |
-| 1,000 / 10,000 | 500 | **1,004 MiB** | 918 MiB | 26 KiB (381 KiB) | 2.5 s | 8 ms | 1.0 s | 1.5 / 1.6 s |
+| 1,000 / 10,000 | 500 | 193 MiB | 135 MiB | 26 KiB (381 KiB) | 3.4 s | 14 ms | 1.3 s | 1.6 / 7.9 s |
 | 5,000 / 50,000 | 50 | 507 MiB | 432 MiB | 134 KiB (1.9 MiB) | 8.7 s | 41 ms | 21.6 s | 1.4 / 1.5 s |
-| 5,000 / 50,000 | 500 | **2,038 MiB** | 1,836 MiB | 134 KiB (1.9 MiB) | 19 s | 54 ms | 25.5 s | 4.0 / **47.2 s** |
+| 5,000 / 50,000 | 500 | **518 MiB** | 369 MiB | 134 KiB (1.9 MiB) | 14 s | 52 ms | 16.1 s | 3.5 / 6.2 s |
 
 Initial sync is from the last object created to every engine having all policies; with 10 edits the
 p95 is the slowest. Against the targets:
@@ -524,9 +524,15 @@ p95 is the slowest. Against the targets:
   after reconnecting. Fixed (#148): bundles are sent from a goroutine of their own, so heartbeats
   are read meanwhile; reruns at 5,000 × 500 since have no disconnects, but one edit in ten can
   still take 24–28 s, before as after the fix, so another cause remains.
-- **Operator memory: not met with 500 engines.** The heap grows with engines × bundle size, as each
-  stream marshals the bundle itself (gRPC buffers, ~20% of all bytes allocated at 1,000 × 500); the
-  live heap after a GC is under 100 MiB at every size. 5,000 × 50 is just under 512 MiB.
+- **Operator memory: just over at 5,000 × 500** (518 MiB), met everywhere else. Each stream used to
+  marshal the bundle itself, and a stream's send returns once the message is queued on its
+  connection, not once it is written, so the operator held engines × bundle bytes (1,004 MiB at
+  1,000 × 500, 2,038 MiB at 5,000 × 500). Now each bundle is encoded once (`grpc.PreparedMsg`, per
+  send compressor) and every stream queues that one buffer (#147), so memory no longer grows with
+  engines: 5,000 × 500 is at 5,000 × 50's level, the rest being the reconcile. The live heap after a
+  GC is under 110 MiB at every size. The 1,000 × 500 and 5,000 × 500 rows are after #147 (before, on the
+  same machine and harness: 988 MiB / 953 MiB heap at 1,000 × 500, 2,007 MiB / 1,886 MiB at
+  5,000 × 500); both runs shared the machine with a kind e2e test, so their times are noisier.
 - **Not a target yet, but slow:** each new bundle writes the `status.bundleVersion` of every policy
   (then `Enforced`), so a reconcile takes 9–19 s at 5,000 policies; changes during it wait, and the
   initial sync takes 20–25 s.
