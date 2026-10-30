@@ -1,5 +1,16 @@
 # Contributing to Inkwall
 
+This guide sets the rules for commit messages, branch names and releases.
+
+## Contents
+
+- [Commit messages](#commit-messages)
+  - [Rules](#rules)
+- [Branches](#branches)
+- [Releases](#releases)
+  - [Cutting a release](#cutting-a-release)
+  - [Release branches and patches](#release-branches-and-patches)
+
 ## Commit messages
 
 Commits follow [Conventional Commits 1.0](https://www.conventionalcommits.org/en/v1.0.0/), enforced

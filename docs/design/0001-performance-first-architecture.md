@@ -4,6 +4,28 @@
 - Date: 2026-09-27
 - Owner: noureldin
 
+The performance rules every Inkwall component follows: latency budgets, the request pipeline,
+engine internals, deployment and failure behaviour.
+
+## Contents
+
+- [1. Goal](#1-goal)
+- [2. Where latency comes from (and how we kill each source)](#2-where-latency-comes-from-and-how-we-kill-each-source)
+- [3. Latency budgets (initial targets, validated in Stage 1)](#3-latency-budgets-initial-targets-validated-in-stage-1)
+  - [3.1 Measured baseline (2026-10-03)](#31-measured-baseline-2026-10-03)
+- [4. Request pipeline: tiered, cheapest first](#4-request-pipeline-tiered-cheapest-first)
+  - [Enforcement modes (per route)](#enforcement-modes-per-route)
+- [5. Engine internals](#5-engine-internals)
+  - [5.1 Process model](#51-process-model)
+  - [5.2 Rule evaluation](#52-rule-evaluation)
+  - [5.3 State (rate limits, reputation)](#53-state-rate-limits-reputation)
+  - [5.4 Telemetry](#54-telemetry)
+  - [5.5 Wire format](#55-wire-format)
+- [6. Deployment topology](#6-deployment-topology)
+- [7. Failure behaviour](#7-failure-behaviour)
+- [8. Proving it: the performance test harness (built in Stage 1)](#8-proving-it-the-performance-test-harness-built-in-stage-1)
+- [9. Open questions](#9-open-questions)
+
 ## 1. Goal
 
 1. Added latency for a passing request stays below network jitter.

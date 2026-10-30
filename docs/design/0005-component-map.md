@@ -7,6 +7,22 @@
 
 Every Inkwall component, where it runs, and why the engine is built on Coraza.
 
+## Contents
+
+- [1. Component overview](#1-component-overview)
+- [2. Where each component runs and when it is built](#2-where-each-component-runs-and-when-it-is-built)
+- [3. Engine internals](#3-engine-internals)
+- [4. Operator internals](#4-operator-internals)
+- [5. Key flows](#5-key-flows)
+  - [5.1 Request in block mode](#51-request-in-block-mode)
+  - [5.2 Policy change (GitOps mode)](#52-policy-change-gitops-mode)
+- [6. Why Coraza](#6-why-coraza)
+  - [6.1 What a WAF rule engine must do](#61-what-a-waf-rule-engine-must-do)
+  - [6.2 Why Coraza fits](#62-why-coraza-fits)
+  - [6.3 Alternatives considered](#63-alternatives-considered)
+  - [6.4 Risks and mitigations](#64-risks-and-mitigations)
+  - [6.5 Where Coraza is used, and where it is not](#65-where-coraza-is-used-and-where-it-is-not)
+
 ## 1. Component overview
 
 ![Inkwall architecture: the proxy asks the inkwall-engine sidecar for a verdict before forwarding; the operator watches WAFPolicy and route objects and pushes signed policy bundles to every engine](../diagrams/system-overview.svg)

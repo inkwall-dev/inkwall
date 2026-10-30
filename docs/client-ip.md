@@ -1,9 +1,21 @@
 # Client IP behind a load balancer
 
+This guide gets the real client address to the engine when Traefik runs behind a load balancer.
+
 The engine keys IP rules, IP lists, rate limits and the `clientIp` of security events on the
 client's address. Behind a load balancer (LB) Traefik sees the LB, or a node, as its peer, and so
 does the engine, unless the real address reaches Traefik. A wrong client IP is worse than none:
 an IP list would block the LB, and every client would share one rate limit.
+
+## Contents
+
+- [How the address reaches the engine](#how-the-address-reaches-the-engine)
+- [Why not `X-Forwarded-For` from the LB](#why-not-x-forwarded-for-from-the-lb)
+- [The PROXY protocol (recommended)](#the-proxy-protocol-recommended)
+  - [Traefik (Helm chart `traefik/traefik`)](#traefik-helm-chart-traefiktraefik)
+  - [Load balancers](#load-balancers)
+- [`externalTrafficPolicy: Local` (without the PROXY protocol)](#externaltrafficpolicy-local-without-the-proxy-protocol)
+- [Checking it](#checking-it)
 
 ## How the address reaches the engine
 

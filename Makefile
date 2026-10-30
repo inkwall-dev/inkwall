@@ -37,10 +37,11 @@ COUNT           ?= 1
 # bench-compare: the revision to compare against.
 BASE            ?= origin/main
 
-# docs-check (hack/docscheck). Contents lists and the docs index are only
-# checked where they exist; #134, which adds them, makes the check strict
-# with DOCS_CHECK_STRICT = -contents-min-lines=80 -require-index.
-DOCS_CHECK_STRICT ?=
+# docs-check (hack/docscheck). Strict: every doc over 80 lines needs a
+# ## Contents section, and docs/README.md must exist and list every doc
+# (CLAUDE.md is exempt by default). CODE_OF_CONDUCT.md needs no Contents:
+# it is the Contributor Covenant 2.1, kept verbatim.
+DOCS_CHECK_STRICT ?= -contents-min-lines=80 -require-index -contents-exempt=CODE_OF_CONDUCT.md
 DOCS_CHECK        ?= $(GO) run ./hack/docscheck $(DOCS_CHECK_STRICT)
 
 # scale-test: sizes as <policies>x<engines>, one operator each; "full" is 0004 §8's matrix.

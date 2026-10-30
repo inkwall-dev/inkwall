@@ -15,6 +15,18 @@ The chart is signed with cosign (see [CONTRIBUTING.md](../../../CONTRIBUTING.md#
 From a checkout, `make kind-operator` builds the images and installs `deploy/helm/inkwall` on the
 kind cluster of `make kind-up`.
 
+## Contents
+
+- [What it installs](#what-it-installs)
+- [Values](#values)
+- [Connecting to a control plane](#connecting-to-a-control-plane)
+  - [Managed mode](#managed-mode)
+- [Rotating the signing key](#rotating-the-signing-key)
+- [Uninstalling](#uninstalling)
+  - [Turning injection off](#turning-injection-off)
+  - [Deleting a policy](#deleting-a-policy)
+- [When the operator is down](#when-the-operator-is-down)
+
 ## What it installs
 
 | Object | Notes |

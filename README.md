@@ -4,9 +4,22 @@
 engine (OWASP [Coraza](https://coraza.io/) with the [Core Rule Set](https://coreruleset.org/)) next
 to your ingress controller and enforces the `WAFPolicy` objects you attach to your routes.
 
+**Docs:** the [docs index](docs/README.md) lists every guide, reference and design doc.
+
 > **Status: v0.1.2, early; v0.2.0 is next.** Works today with **Traefik** and **`Ingress`** or
 > **`IngressRoute`** routes, plus a standalone reverse proxy for anything else. The API is
 > `v1alpha1` and will change. See [Limits](#limits) and the [roadmap](#roadmap).
+
+## Contents
+
+- [How it works](#how-it-works)
+- [Install](#install)
+- [Protect a route](#protect-a-route)
+- [Without Kubernetes](#without-kubernetes)
+- [Limits](#limits)
+- [Roadmap](#roadmap)
+- [Development](#development)
+- [Contributing, security, license](#contributing-security-license)
 
 ## How it works
 

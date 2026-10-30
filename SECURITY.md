@@ -1,5 +1,8 @@
 # Security Policy
 
+This policy covers how to report a vulnerability, what is in scope, which versions get fixes, and
+safe harbor for researchers.
+
 A vulnerability in Inkwall can expose the services it protects. Thank you for reporting
 responsibly.
 
