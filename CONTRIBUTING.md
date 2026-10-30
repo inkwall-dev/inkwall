@@ -1,6 +1,7 @@
 # Contributing to Inkwall
 
-This guide sets the rules for commit messages, branch names and releases.
+This guide sets the rules for commit messages, pull requests, branch names and releases. To build
+and test Inkwall, see [Development](README.md#development) in the README.
 
 ## Contents
 
@@ -13,8 +14,8 @@ This guide sets the rules for commit messages, branch names and releases.
 
 ## Commit messages
 
-Commits follow [Conventional Commits 1.0](https://www.conventionalcommits.org/en/v1.0.0/), enforced
-in CI: the types drive the changelog and the next version.
+Commits follow [Conventional Commits 1.0](https://www.conventionalcommits.org/en/v1.0.0/), and CI
+enforces it: the types drive the changelog and the next version.
 
 ```
 <type>(<scope>)!: <subject>
@@ -81,6 +82,9 @@ Existing objects must be updated before upgrading.
 5. Every pull request has an issue. Open the issue first with a label (`enhancement`, `bug`,
    `documentation`, ...), and start the PR description with `Closes #<issue>`, so merging the PR
    closes it.
+6. Run `make check` before opening a pull request: it runs the linter, the tests, the
+   vulnerability scan and the docs checks. CI also lints the chart and runs the end-to-end tests
+   on kind.
 
 ## Branches
 
@@ -101,8 +105,8 @@ for patching released versions.
 - A release is a **tag on `main`**, e.g. `v0.3.0`; the changelog is generated from the commit types.
 - Versions follow [Semantic Versioning](https://semver.org/); on `0.x`, breaking changes bump the
   minor version. Pre-releases use suffixes: `v0.3.0-rc.1`.
-- Separately versioned Go modules are tagged with their path prefix, as Go requires (e.g.
-  `adapters/caddy/v0.3.0`).
+- A separately versioned Go module is tagged with its path prefix, as Go requires: a future
+  Caddy adapter module in `adapters/caddy` would be tagged `adapters/caddy/v0.3.0`.
 
 ### Cutting a release
 
@@ -143,6 +147,6 @@ A failed run can be re-run from the Actions tab. If something was already publis
 - When a minor version is released, cut `release-X.Y` from its tag (`release-0.3` from `v0.3.0`).
 - Fixes land on `main` first, are cherry-picked to the supported release branches
   (`git cherry-pick -x`), and the patch is tagged from the release branch: `v0.3.1`.
-- The last **three** minor versions get fixes; security fixes may be backported further when
+- The latest **three** minor versions get fixes; security fixes may be backported further when
   practical.
 - Release branches never receive features.
