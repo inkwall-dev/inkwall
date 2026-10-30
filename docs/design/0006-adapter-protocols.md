@@ -8,13 +8,13 @@
   [0002 §6](0002-system-architecture.md#6-proxy-integrations)
 
 Every proxy has its own way to ask an outside service "should I let this request through?". This
-primer describes each of those protocols and the adapter that answers it. Forward-auth,
-`/v1/check` and the reverse proxy are built; ext_authz, ext_proc and SPOE are not yet.
+primer describes each of those protocols and the [adapter](../glossary.md#adapter) that answers it. [Forward-auth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/),
+`/v1/check` and the reverse proxy are built; [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter), [ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter) and [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) are not yet.
 
 An **adapter** is a thin listener in the engine (`inkwall-engine`), in `pkg/adapters/<name>`. It
 converts the protocol's message into a `request.Request`, and the engine's `Verdict` back into the
 protocol's answer. Detection is therefore identical whichever proxy asked. The **proxy** is the
-ingress controller's data-plane process (Traefik, Envoy, ...). How each proxy is configured to call
+[ingress controller](https://kubernetes.io/docs/concepts/services-networking/ingress-controllers/)'s data-plane process ([Traefik](https://doc.traefik.io/traefik/), [Envoy](https://www.envoyproxy.io/docs/envoy/latest/), ...). How each proxy is configured to call
 its adapter is in [0002 §6](0002-system-architecture.md#6-proxy-integrations).
 
 **Built (v0.1.0):** forward-auth ([§3](#3-forward-auth-traefik-forwardauth-nginx-auth_request)),
@@ -38,7 +38,7 @@ its adapter is in [0002 §6](0002-system-architecture.md#6-proxy-integrations).
 
 ## 1. ext_authz (Envoy external authorization)
 
-- Envoy makes one gRPC call per request (`envoy.service.auth.v3.Authorization/Check`) with the
+- Envoy makes one [gRPC](https://grpc.io/docs/) call per request (`envoy.service.auth.v3.Authorization/Check`) with the
   headers, plus the body if `with_request_body` is set.
 - The adapter replies **OK** or **Denied**, with our status code.
 - It gives no view of the response. Every Envoy-based product supports it, so it is the fallback
@@ -54,8 +54,8 @@ its adapter is in [0002 §6](0002-system-architecture.md#6-proxy-integrations).
   needs them.
 - `observability_mode: true` doesn't wait for the answers. That gives detect mode at about zero
   latency ([0001 §4](0001-performance-first-architecture.md#enforcement-modes-per-route)).
-- It is the most capable protocol, so it is the planned first choice for Envoy, Envoy Gateway,
-  Istio and Contour.
+- It is the most capable protocol, so it is the planned first choice for Envoy, [Envoy Gateway](https://gateway.envoyproxy.io/),
+  [Istio](https://istio.io/latest/docs/) and [Contour](https://projectcontour.io/docs/).
 
 ## 3. forward-auth (Traefik `ForwardAuth`, nginx `auth_request`)
 
@@ -69,15 +69,15 @@ its adapter is in [0002 §6](0002-system-architecture.md#6-proxy-integrations).
 - A missing or malformed `X-Forwarded-Method` or `X-Forwarded-Uri` gets **400**: such a request is
   never let through.
 - It gives no view of the response, and sees the body only if the proxy forwards it.
-  ingress-nginx's `global-auth-url` uses the same mechanism.
+  [ingress-nginx](https://kubernetes.github.io/ingress-nginx/)'s [`global-auth-url`](https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/configmap/#global-auth-url) uses the same mechanism.
 
 ![Traefik forward-auth sequence: for a benign request Traefik sends a subrequest to the engine, gets 200 with X-Request-Id and forwards to the app; for an attack the engine answers 403 and Traefik returns it to the client](../diagrams/forward-auth.svg)
 
 The Traefik middleware must set:
 
 - `trustForwardHeader: false`. Otherwise the engine inspects an `X-Forwarded-Uri` the client
-  supplied. Behind a load balancer, the client IP then comes from the PROXY protocol on Traefik's
-  entry point, not from the load balancer's `X-Forwarded-For` ([client IP](../client-ip.md)).
+  supplied. Behind a load balancer, the client IP then comes from the [PROXY protocol](https://github.com/haproxy/haproxy/blob/master/doc/proxy-protocol.txt) on Traefik's
+  [entry point](https://doc.traefik.io/traefik/routing/entrypoints/), not from the load balancer's [`X-Forwarded-For`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For) ([client IP](../client-ip.md)).
 - `forwardBody: true`, with `maxBodySize` above `--max-body-bytes`. Otherwise bodies pass
   uninspected.
 - `authResponseHeaders: X-Request-Id`, to pass the request ID on to the app.
@@ -86,7 +86,7 @@ The Traefik middleware must set:
 
 ## 4. SPOE (HAProxy Stream Processing Offload Engine)
 
-- HAProxy speaks its binary protocol, SPOP, pipelined over a few connections. The engine is the
+- [HAProxy](https://docs.haproxy.org/) speaks its binary protocol, SPOP, pipelined over a few connections. The engine is the
   agent (an SPOA).
 - The engine sets variables, such as `txn.inkwall.action=deny`, and HAProxy's rules act on them.
 - On a timeout or an error, no variable is set. Failing closed therefore needs an extra rule that
@@ -97,7 +97,7 @@ The Traefik middleware must set:
 
 - The client sends `POST /v1/check` with a `CheckRequest` (`api/engine/v1`; schema in
   [0002 §5.1](0002-system-architecture.md#51-engine-check-api-for-lua-generic-http-clients-and-tests)),
-  as protobuf (`application/x-protobuf`) or JSON (`application/json`).
+  as [protobuf](https://protobuf.dev/) (`application/x-protobuf`) or JSON (`application/json`).
 - The `CheckResponse` comes back in the same encoding: action, status, headers, matched rule IDs,
   and, in bundle mode, the policy that decided. (In bundle mode the engine gets its policies from
   the operator's bundles rather than from flags.)
@@ -105,7 +105,7 @@ The Traefik middleware must set:
 - Every well-formed check gets **200**, with the verdict in the body. Errors: 405 (not a POST), 415
   (content type), 413 (too large), 400 (can't be decoded, or invalid).
 - The engine takes `client_ip` as given. So it must listen only where the proxy alone can reach
-  it: a Unix socket or localhost.
+  it: a [Unix socket](https://man7.org/linux/man-pages/man7/unix.7.html) or localhost.
 
 ![POST /v1/check sequence: the caller sends a CheckRequest and the engine always answers 200 with a CheckResponse; ACTION_ALLOW lets the caller forward with X-Request-Id, ACTION_DENY with status 403 makes the caller return 403](../diagrams/check-api.svg)
 
@@ -129,7 +129,7 @@ inspected: an origin-form request target (`/path?query`) and a valid Host header
 such as `GET http://host/path`, gets 400, because Go's HTTP client would forward a different Host.
 
 "Standalone" in this heading means the engine runs on its own, without an ingress proxy. It is not
-the cluster's Standalone mode (no control plane).
+the cluster's [Standalone mode](../glossary.md#standalone) (no control plane).
 
 ---
 
@@ -144,5 +144,5 @@ the cluster's Standalone mode (no control plane).
 | `/v1/check` | HTTP (gRPC planned) | Yes | No | Yes | CLI, tests; Lua and Traefik plugins planned | Built |
 | Reverse proxy | HTTP proxying | Yes | Yes | It is the path | VMs, test reference | Built |
 
-Caddy needs no protocol: the planned module compiles the engine into Caddy
+[Caddy](https://caddyserver.com/docs/) needs no protocol: the planned module compiles the engine into Caddy
 ([0002 §6.5](0002-system-architecture.md#65-caddy)).

@@ -30,7 +30,7 @@ Argo CD and Flux so they neither report it as drift nor undo it.
 ## What the operator writes
 
 To protect a route, the operator adds its
-[ForwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/) Middleware,
+[ForwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/) [Middleware](https://doc.traefik.io/traefik/middlewares/overview/),
 `inkwall-waf`, to it. It changes only its own entries, keeps yours in order, and removes only
 its own entries when the route is no longer protected. It writes with
 [JSON merge patches](https://www.rfc-editor.org/rfc/rfc7386), under the
@@ -39,21 +39,21 @@ its own entries when the route is no longer protected. It writes with
 
 | Object | Field | Value |
 |---|---|---|
-| `Ingress` (Traefik's) | annotation `traefik.ingress.kubernetes.io/router.middlewares` | `<namespace>-inkwall-waf@kubernetescrd` added first; your entries kept after it |
+| `Ingress` (Traefik's) | [annotation](https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/) `traefik.ingress.kubernetes.io/router.middlewares` | `<namespace>-inkwall-waf@kubernetescrd` added first; your entries kept after it |
 | `Ingress` | annotation `waf.inkwall.dev/wired` | `<namespace>-inkwall-waf@kubernetescrd`: marks what the operator added |
 | `IngressRoute` (`traefik.io`) | `spec.routes[*].middlewares` | `{name: inkwall-waf}` added first in every route; your entries kept after it |
 | `IngressRoute` | annotation `waf.inkwall.dev/wired` | `inkwall-waf` |
 | `WAFPolicy` | `metadata.finalizers` | `waf.inkwall.dev/unwire` ([finalizer](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/)): the operator unwires the policy's routes before it can be deleted |
 | `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet`, `InkwallConfig` | `status` | Conditions, bundle version |
 
-Objects the operator creates and owns are not in your Git repository, and GitOps tools don't
-track them: the Middleware `inkwall-waf` in each namespace with a protected route, the ConfigMap
-`inkwall-trust` in each Traefik namespace, and the Secrets and ConfigMaps in `inkwall-system`.
-They carry the label `app.kubernetes.io/managed-by: inkwall-operator`.
+Objects the operator creates and owns are not in your Git repository, and [GitOps](https://opengitops.dev/) tools don't
+track them: the Middleware `inkwall-waf` in each namespace with a protected route, the [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/)
+`inkwall-trust` in each Traefik namespace, and the [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/) and ConfigMaps in `inkwall-system`.
+They carry the [label](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/) `app.kubernetes.io/managed-by: inkwall-operator`.
 
 The engine is injected into Traefik's pods when they are created, by a mutating
 [admission webhook](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/).
-Traefik's `Deployment` or `DaemonSet` isn't changed, so it doesn't drift.
+Traefik's [`Deployment`](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) or [`DaemonSet`](https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/) isn't changed, so it doesn't drift.
 
 The operator never writes your `InkwallConfig`'s spec or annotations. Bump
 `waf.inkwall.dev/rotate-signing-key` in Git to rotate the signing key
@@ -68,7 +68,7 @@ when your manifest sets the same field:
 |---|---|
 | An `Ingress` without the `router.middlewares` annotation | None |
 | An `Ingress` with its own `router.middlewares` annotation | The annotation |
-| Any `IngressRoute` | `spec.routes`. Traefik's CRD doesn't declare a list type for `routes`, so the whole list is one value to the API server and to both tools |
+| Any `IngressRoute` | `spec.routes`. Traefik's CRD doesn't declare a [list type](https://kubernetes.io/docs/reference/using-api/server-side-apply/#merge-strategy) for `routes`, so the whole list is one value to the API server and to both tools |
 | A `WAFPolicy` without `metadata.finalizers` | None |
 | `status` | None: both tools ignore it |
 
@@ -79,7 +79,7 @@ because it watches Ingresses and IngressRoutes, but the tool undoes it again on 
 ## Argo CD
 
 Argo CD's [`ignoreDifferences`](https://argo-cd.readthedocs.io/en/stable/user-guide/diffing/)
-removes fields from both sides before it compares. Add these rules to every Application that
+removes fields from both sides before it compares. Add these rules to every [Application](https://argo-cd.readthedocs.io/en/stable/operator-manual/declarative-setup/#applications) that
 deploys protected routes:
 
 ```yaml
@@ -152,7 +152,7 @@ included. Don't keep them in Git. Your unlabelled objects are not affected.
 
 ## Flux
 
-Flux's kustomize-controller applies manifests with
+Flux's [kustomize-controller](https://fluxcd.io/flux/components/kustomize/) applies manifests with
 [server-side apply](https://kubernetes.io/docs/reference/using-api/server-side-apply/), as the
 field manager `kustomize-controller`, forcing ownership of the fields in your manifests. At each
 interval it does a dry run and applies again when the result differs from the cluster. Fields your
@@ -265,7 +265,7 @@ before the operator goes.
 
 ### Flux
 
-helm-controller compares a `HelmRelease` with the cluster only when
+[helm-controller](https://fluxcd.io/flux/components/helm/) compares a `HelmRelease` with the cluster only when
 [drift detection](https://fluxcd.io/flux/components/helm/helmreleases/#drift-detection) is on. If
 you turn it on, ignore the fields above. The mutating configuration has one webhook:
 

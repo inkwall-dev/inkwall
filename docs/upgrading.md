@@ -25,12 +25,12 @@ and makes some existing fields take effect. It adds no new kinds.
 
 | Object | Field | |
 |---|---|---|
-| `WAFPolicy` | `spec.targetRefs[*].kind: IngressRoute` (`group: traefik.io`) | Protect [Traefik](https://doc.traefik.io/traefik/) `IngressRoute` objects |
+| `WAFPolicy` | `spec.targetRefs[*].kind: IngressRoute` (`group: traefik.io`) | Protect [Traefik](https://doc.traefik.io/traefik/) [`IngressRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) objects |
 | `InkwallConfig` | `spec.signingKey.rotationInterval` | Rotate the signing key on a schedule ([key rotation](key-rotation.md)) |
-| `InkwallConfig` | annotation `waf.inkwall.dev/rotate-signing-key` | Rotate it now |
+| `InkwallConfig` | [annotation](https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/) `waf.inkwall.dev/rotate-signing-key` | Rotate it now |
 | `InkwallConfig` | `spec.mode: GitOps` or `Managed`, `spec.controlPlane` | Connect to a control plane ([control plane](control-plane.md)). In 0.1.0 they existed but did nothing |
-| `InkwallConfig` | condition `ControlPlaneConnected` | The connection's state |
-| `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet` | label `inkwall.dev/source: saas` | Objects written by the control plane in Managed mode |
+| `InkwallConfig` | [condition](https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties) `ControlPlaneConnected` | The connection's state |
+| `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet` | [label](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/) `inkwall.dev/source: saas` | Objects written by the control plane in [Managed mode](glossary.md#cluster-mode) |
 
 It adds these chart values, all off or idle by default:
 
@@ -51,17 +51,17 @@ Without any configuration on your part, the upgrade changes the following:
 - **A finalizer on every `WAFPolicy`.** The operator adds the
   [finalizer](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/)
   `waf.inkwall.dev/unwire`. A deleted policy then waits until the operator has unwired its
-  routes. If you manage policies with Argo CD or Flux, read [GitOps](gitops.md).
+  routes. If you manage policies with [Argo CD](https://argo-cd.readthedocs.io/en/stable/) or [Flux](https://fluxcd.io/flux/), read [GitOps](gitops.md).
 - **Unwiring when the engine can't be injected.** With `injection.enabled=false`, or when no
   running pod matches Traefik's selector, the operator unwires every route it wired and reports
   `Programmed=False` (reason `InjectionDisabled` or `SidecarMissing`), so the routes keep working,
   uninspected. 0.1.0 left them wired. The `helm uninstall` hook now also runs with injection off,
   and removes the finalizers.
-- **Signing keys in a new format.** The Secret `inkwall-bundle-signing-key` and the `inkwall-trust`
-  ConfigMaps get `trusted-keys.pub`, the list of keys engines accept. The key doesn't change.
+- **Signing keys in a new format.** The [Secret](https://kubernetes.io/docs/concepts/configuration/secret/) `inkwall-bundle-signing-key` and the `inkwall-trust`
+  [ConfigMaps](https://kubernetes.io/docs/concepts/configuration/configmap/) get `trusted-keys.pub`, the list of keys engines accept. The key doesn't change.
   New engines read `trusted-keys.pub`; engines from 0.1.0 keep reading `ed25519.pub`, which
   stays.
-- **New webhooks.** The `ValidatingWebhookConfiguration` gets webhooks for deleting objects
+- **New webhooks.** The [`ValidatingWebhookConfiguration`](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/) gets webhooks for deleting objects
   labelled `inkwall.dev/source: saas`. Unlabelled objects never reach them.
 - **An events buffer** on each operator pod: an
   [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir) of
@@ -104,7 +104,7 @@ any signing key rotation: restart Traefik after the upgrade.
    kubectl -n <traefik namespace> rollout restart deployment/<traefik>
    ```
 
-If [Argo CD](https://argo-cd.readthedocs.io/en/stable/) or [Flux](https://fluxcd.io/flux/)
+If Argo CD or Flux
 installs the chart, change the chart version in Git instead: see
 [GitOps](gitops.md#installing-the-chart-with-a-gitops-tool).
 

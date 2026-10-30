@@ -7,11 +7,11 @@
 - Depends on: [0001](0001-performance-first-architecture.md) (budgets, measurements),
   [0002 §3.1](0002-system-architecture.md#31-inkwall-engine-data-plane),
   [0005 §6](0005-component-map.md#6-why-coraza)
-- License: Apache-2.0, like the rest of the data plane
+- License: [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0), like the rest of the data plane
 
-The engine (`inkwall-engine`) evaluates rules with Coraza today, and Coraza cannot reach the
+The engine (`inkwall-engine`) evaluates rules with [Coraza](https://coraza.io/) today, and Coraza cannot reach the
 latency budgets of [0001](0001-performance-first-architecture.md). This document designs
-Inkwall's own **rule engine** for the OWASP Core Rule Set (CRS): the part of the engine that
+Inkwall's own **rule engine** for the [OWASP Core Rule Set](https://coreruleset.org/) (CRS): the part of the engine that
 evaluates rules, behind the `pkg/rules.Evaluator` interface. We call it the **native** rule engine
 (`pkg/rules/native`). Coraza stays as the **oracle**, the reference whose results the native rule
 engine must reproduce, and as the fallback.
@@ -42,7 +42,7 @@ The CRS test suite (`test/crs`) and the prefilter feasibility tool (`test/perf/p
 
 ## 1. Summary
 
-Compile the CRS, written in ModSecurity's rule language (SecLang), ahead of time into a flat
+Compile the CRS, written in [ModSecurity](https://github.com/owasp-modsecurity/ModSecurity)'s rule language ([SecLang](https://coraza.io/docs/seclang/)), ahead of time into a flat
 program. Then evaluate it with:
 
 1. **One literal scan per field** to select the candidate rules. The other rules skip their
@@ -57,7 +57,7 @@ target is 50–100 µs for a benign request, 5–10× faster than Coraza.
 
 ## 2. Why
 
-Measured with Coraza 3.8.1 and CRS 4.25 at paranoia level 1 (PL1), on one core
+Measured with Coraza 3.8.1 and CRS 4.25 at [paranoia level](https://coreruleset.org/docs/concepts/paranoia_levels/) 1 (PL1), on one core
 ([0001 §3.1](0001-performance-first-architecture.md#31-measured-baseline-2026-10-03),
 [0001 §5.2](0001-performance-first-architecture.md#52-rule-evaluation)):
 
@@ -70,7 +70,7 @@ The causes:
   932311-7), so it is disabled.
 - Transformations run before the operator, and the map-based transformation cache costs about
   25%.
-- About 2,800 allocations per request, so about 14% of the time goes to garbage collection.
+- About 2,800 allocations per request, so about 14% of the time goes to [garbage collection](https://go.dev/doc/gc-guide).
 - Evaluation can't be interrupted, which is why admission control is needed.
 
 At PL1, 100 of the 104 rules that run per argument have a required literal, and 90.5% of the
@@ -87,14 +87,14 @@ Goals:
    allowlist, each with a reason and a test.
 2. Meet the engine-time budgets of [0001](0001-performance-first-architecture.md), with nearly zero
    allocations.
-3. Bounded work: linear-time matching, size caps, deadline checks.
+3. Bounded work: [linear-time matching](https://github.com/google/re2/wiki/WhyRE2), size caps, deadline checks.
 4. Implement `pkg/rules.Evaluator`, so the adapters and the pipeline don't change.
 5. Fall back to Coraza on unsupported features.
 
 Non-goals for v1:
 
 - Full SecLang. We support the pinned CRS plus a documented subset for custom rules.
-- Phases 3–5 (response and audit log). They come later, with tier T4 (response inspection).
+- [Phases](https://coraza.io/docs/seclang/execution-flow/#phases) 3–5 (response and audit log). They come later, with tier T4 (response inspection).
 - A general replacement for ModSecurity.
 
 ## 4. Architecture
@@ -111,13 +111,13 @@ flowchart LR
     PF --> SCAN
 ```
 
-The program is compiled once per bundle (the signed set of policies the engine enforces). It is
+The program is compiled once per [bundle](../glossary.md#bundle) (the signed set of policies the engine enforces). It is
 immutable and shared, and swapped in atomically
 ([0001 §5.1](0001-performance-first-architecture.md#51-process-model)).
 
 ### 4.1 Compiler
 
-- **Parser:** builds an abstract syntax tree (AST) with file and line positions. Any unsupported
+- **Parser:** builds an [abstract syntax tree](https://en.wikipedia.org/wiki/Abstract_syntax_tree) (AST) with file and line positions. Any unsupported
   feature is a named compile error, so the `auto` setting falls back to Coraza
   ([§7](#7-integration)).
 - **Resolver:** turns `SecDefaultAction`, configure-time exclusions, rule-group pruning and
@@ -125,15 +125,15 @@ immutable and shared, and swapped in atomically
 - **Paranoia gating is constant-folded.** In the pinned CRS, only setup rules write the paranoia
   `tx` variables, so the rules above the configured level are removed at compile time. If any
   other rule writes those variables, folding is off.
-- **Intermediate representation (IR):** flat rules per phase. Each rule has compiled selectors, a
-  chain ID into a transformation trie (shared prefixes share work), a compiled operator and
+- **[Intermediate representation](https://en.wikipedia.org/wiki/Intermediate_representation) (IR):** flat rules per phase. Each rule has compiled selectors, a
+  chain ID into a transformation [trie](https://en.wikipedia.org/wiki/Trie) (shared prefixes share work), a compiled operator and
   actions, chain links, and its required literals.
 - **Prefilter:** a rule's required literals are strings that every match contains. They go into
-  one Aho-Corasick automaton per view ([§4.3](#43-prefilter-and-normalization-views)).
+  one [Aho-Corasick](https://en.wikipedia.org/wiki/Aho%E2%80%93Corasick_algorithm) automaton per view ([§4.3](#43-prefilter-and-normalization-views)).
 
 ### 4.2 Runtime
 
-- Transactions come from a `sync.Pool`. Collections are slices: no maps on the hot path.
+- Transactions come from a [`sync.Pool`](https://pkg.go.dev/sync#Pool). Collections are slices: no maps on the hot path.
 - Variables are extracted once per phase. One Aho-Corasick pass per field and view sets the
   candidate bits.
 - **Rule loop:**
@@ -149,8 +149,8 @@ immutable and shared, and swapped in atomically
 - **Body processors:** URL-encoded, JSON (with Coraza's names, such as `json.items.0.sku`), XML,
   and multipart with CRS's strict flags. They are ported from Coraza, with attribution, for
   parity.
-- **Regex:** Go's `regexp` (RE2, as in Coraza, so with the same semantics), with Coraza's `(?sm)`
-  defaults. libinjection through `corazawaf/libinjection-go`.
+- **Regex:** [Go](https://go.dev/)'s [`regexp`](https://pkg.go.dev/regexp) ([RE2](https://github.com/google/re2/wiki/Syntax), as in Coraza, so with the same semantics), with Coraza's `(?sm)`
+  defaults. [libinjection](https://github.com/libinjection/libinjection) through [`corazawaf/libinjection-go`](https://github.com/corazawaf/libinjection-go).
 
 ### 4.3 Prefilter and normalization views
 
@@ -166,14 +166,14 @@ gets a few **views**, computed once:
 | `nocomments` | `decoded`, without comments | `replaceComments` / `removeComments` |
 
 A rule uses a view that **dominates** its transformation chain: if the literal is in the
-transformed value, it is in the view. Property tests and fuzzing prove each such claim. A rule
+transformed value, it is in the view. Property tests and [fuzzing](https://go.dev/doc/security/fuzz/) prove each such claim. A rule
 with no dominating view is filtered after its transformations instead; that is still sound, but
 saves only operator time.
 
 Soundness rules:
 
 - **Case folding, not lowercasing.** `(?i)select` matches `ſelect`, but `ToLower` misses it. Map
-  each rune to a canonical member of its fold orbit (`unicode.SimpleFold`).
+  each rune to a canonical member of its fold orbit ([`unicode.SimpleFold`](https://pkg.go.dev/unicode#SimpleFold)).
 - **No over-decoding.** A view never decodes more than the rule's chain does, or literals written
   in encoded form are lost.
 - **Never prefiltered:**
@@ -218,7 +218,7 @@ The prefilter soundness check also runs in CI.
 
 ## 6. Performance targets
 
-On one core, at PL1, gated by `benchstat` in CI
+On one core, at PL1, gated by [`benchstat`](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat) in CI
 ([0001 §8](0001-performance-first-architecture.md#8-proving-it-the-performance-test-harness)):
 
 | Request | Target | Coraza today |
@@ -235,7 +235,7 @@ IR) measures them, and milestone N3 (prefilter) confirms the targets.
 ## 7. Integration
 
 - `pkg/rules/native` implements `rules.Evaluator`. `pkg/rules/coraza` stays.
-- A policy selects the rule engine with `engine: native | coraza | auto`; the flag `--engine` does
+- A [policy](../glossary.md#policy) selects the rule engine with `engine: native | coraza | auto`; the flag `--engine` does
   the same when the engine is configured by flags. `auto` falls back to Coraza, and logs the
   reason.
 - `--engine-shadow coraza --shadow-sample 0.01` reports disagreements. It never changes the
@@ -261,7 +261,7 @@ test/diff/         # differential harness (separate module, imports Coraza)
   - its API has been stable;
   - and there is a reason, such as an outside embedder, or a release cadence that follows CRS.
 - **Keep that move mechanical:** import only `pkg/request` and `pkg/rules` (enforced by
-  `depguard`), and keep all code and tests under the directory. Then extract it with
+  [`depguard`](https://github.com/OpenPeeDeeP/depguard)), and keep all code and tests under the directory. Then extract it with
   `git filter-repo --subdirectory-filter`.
 - Coraza is never removed: it stays the oracle and the fallback.
 
@@ -284,7 +284,7 @@ Because of the fallback to Coraza, each milestone is useful on its own.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Semantics drift from Coraza's | Bypasses, false positives | Differential fuzzing; the CRS gate; shadow mode |
+| Semantics drift from Coraza's | Bypasses, [false positives](https://coreruleset.org/docs/concepts/false_positives_tuning/) | Differential fuzzing; the CRS gate; shadow mode |
 | A view doesn't dominate its chain | Bypass | Property tests; filtering after transformation; the CI soundness check |
 | Case-folding mismatch (`ſ`/`s`, `K`/`k`) | Bypass | Canonical fold mapping; a fold-orbit corpus |
 | Over-decoding loses encoded literals | Bypass | The `raw` view; views never decode more than their chains |
@@ -301,6 +301,6 @@ Because of the fallback to Coraza, each milestone is useful on its own.
    must be signed and tied to the engine version.
 2. Should early exit be on by default in block mode? Or should evaluation finish asynchronously,
    for reporting?
-3. An optional `go-re2` (cgo) backend behind a build tag?
+3. An optional [`go-re2`](https://github.com/wasilibs/go-re2) ([cgo](https://pkg.go.dev/cmd/cgo)) backend behind a build tag?
 4. Which SecLang features do custom rules need beyond the CRS? Ask design partners before
    milestone N6.

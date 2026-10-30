@@ -1,6 +1,6 @@
 # Connecting to a control plane
 
-This guide connects a cluster to an optional Inkwall control plane, explains what the operator
+This guide connects a cluster to an optional Inkwall [control plane](glossary.md#control-plane), explains what the operator
 sends it, and shows how to disconnect.
 
 ## Contents
@@ -25,9 +25,9 @@ contains only the cluster side: the operator's client and the protocol,
 - **Enforcement never depends on it.** Engines enforce the bundle the operator signs with the
   cluster's own key, whether or not the control plane is reachable. If the connection drops,
   traffic is unaffected.
-- **Only the operator connects**, and only its leader enrolls. Engines never connect to it, so
+- **Only the operator connects**, and only its [leader](https://kubernetes.io/docs/concepts/architecture/leases/#leader-election) enrolls. Engines never connect to it, so
   they need no egress.
-- **It never sends signed bundles.** In Managed mode it sends policy objects. The operator writes
+- **It never sends signed bundles.** In [Managed mode](glossary.md#cluster-mode) it sends policy objects. The operator writes
   them as [custom resources](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/),
   and they go through the same validation and signing as your own.
 - **`Standalone`, the default, never connects.** Installing or upgrading the chart connects
@@ -41,7 +41,7 @@ contains only the cluster side: the operator's client and the protocol,
 |---|---|---|---|
 | `Standalone` (default) | Your `WAFPolicy` and rule set objects | No | No |
 | `GitOps` | Your objects; the control plane gets a read-only copy | Yes | No |
-| `Managed` | The control plane, written as objects labelled `inkwall.dev/source: saas` | Yes | Yes, only its own labelled objects |
+| `Managed` | The control plane, written as objects [labelled](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/) `inkwall.dev/source: saas` | Yes | Yes, only its own labelled objects |
 
 `spec.controlPlane` (`endpoint` and `enrollmentSecretRef`) is required in `GitOps` and
 `Managed` mode and ignored in `Standalone`.
@@ -57,7 +57,7 @@ contains only the cluster side: the operator's client and the protocol,
     after you get it;
   - its CA certificate, if its server certificate doesn't come from a public CA.
 - Egress from the operator's pods in `inkwall-system` to that address over
-  [gRPC](https://grpc.io/docs/) with TLS.
+  [gRPC](https://grpc.io/docs/) with [TLS](https://www.rfc-editor.org/rfc/rfc8446).
 
 ## Enrolling a cluster
 
@@ -107,7 +107,7 @@ contains only the cluster side: the operator's client and the protocol,
    The `InkwallConfig` must be named `default`, and the endpoint must have the form
    `grpcs://host:port`.
 
-The leader generates an ECDSA P-256 key, sends a
+The leader generates an [ECDSA P-256](https://csrc.nist.gov/pubs/fips/186-5/final) key, sends a
 [certificate signing request](https://www.rfc-editor.org/rfc/rfc2986) with the token, and
 stores the certificate and key it gets back in the Secret `inkwall-control-plane-identity`
 (type `kubernetes.io/tls`, plus `cluster-id`). From then on the cluster authenticates with
@@ -169,7 +169,7 @@ kubectl -n inkwall-system get secret inkwall-control-plane-identity -o jsonpath=
 The leader holds one **primary** connection. Over it the operator sends:
 
 - **Hello:** the replica's pod name, the operator and Kubernetes versions, the mode, the
-  `kube-system` namespace UID, and the last policy snapshot applied.
+  `kube-system` namespace [UID](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids), and the last [policy snapshot](glossary.md#policy-snapshot) applied.
 - **Cluster state:** every `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet` and `InkwallConfig`,
   each with its name, namespace, labels, generation, spec (JSON) and status conditions. Also the
   number of running [Traefik](https://doc.traefik.io/traefik/) pods and how many have the engine,
@@ -224,8 +224,8 @@ With `mode: Managed`, policies come from the control plane:
 kubectl patch inkwallconfig default --type merge -p '{"spec":{"mode":"Managed"}}'
 ```
 
-The leader applies each policy snapshot all or nothing. It first does a server-side dry run of
-every object, so the CRD schema and the validating webhook check each one. One refused object
+The leader applies each policy snapshot all or nothing. It first does a [server-side dry run](https://kubernetes.io/docs/reference/using-api/api-concepts/#dry-run) of
+every object, so the CRD schema and the [validating webhook](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/) check each one. One refused object
 refuses the whole snapshot, and nothing changes. Then it writes the `WAFPolicy`, `WAFRuleSet` and
 `ClusterWAFRuleSet` objects labelled `inkwall.dev/source: saas`, deletes the labelled objects the
 snapshot no longer has, and acknowledges it. The bundle builder signs them with the cluster's key

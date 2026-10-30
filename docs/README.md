@@ -29,6 +29,8 @@ Every doc in this repository, by topic, with the question each one answers.
 - [Chart values](../deploy/helm/inkwall/README.md#values): what does each chart value do?
 - [Operator](../operator/README.md): what does the operator do, and how do I develop it?
 - [Diagrams](diagrams/README.md): which diagrams do the docs use, and how do I change one?
+- [Glossary](glossary.md): what does an Inkwall term, or an outside concept the docs use, mean,
+  and where is its authoritative source?
 
 ## Design
 

@@ -40,8 +40,8 @@ enforces it: the types drive the changelog and the next version.
 | `refactor` | Neither a fix nor a feature | none |
 | `docs` | Documentation only (including `docs/design`) | none |
 | `test` | Tests, benchmarks, corpus entries | none |
-| `build` | Build system, Dockerfiles, goreleaser, dependencies (`build(deps): ...`) | none |
-| `ci` | GitHub Actions and CI configuration | none |
+| `build` | Build system, Dockerfiles, [goreleaser](https://goreleaser.com/), dependencies (`build(deps): ...`) | none |
+| `ci` | [GitHub Actions](https://docs.github.com/en/actions) and CI configuration | none |
 | `chore` | Maintenance that fits nowhere else (tooling config, housekeeping) | none |
 | `revert` | Reverts a commit (`revert: feat(engine): ...`, body: `This reverts commit <sha>.`) | depends |
 | `security` | Fix for a vulnerability in Inkwall itself | patch |
@@ -52,11 +52,11 @@ enforces it: the types drive the changelog and the next version.
 |---|---|
 | `engine` | `pkg/` core engine, pipeline, rules |
 | `operator` | `operator/` controllers, CRDs, webhooks |
-| `api` | protobuf definitions in `api/` |
+| `api` | [protobuf](https://protobuf.dev/) definitions in `api/` |
 | `envoy`, `nginx`, `traefik`, `haproxy`, `caddy`, `proxy` | adapters (engine side and proxy side) |
 | `cli` | `inkwallctl` |
 | `helm` | `deploy/helm` chart |
-| `rules` | vendored CRS and builtin rule sets |
+| `rules` | vendored [CRS](https://coreruleset.org/) and builtin rule sets |
 | `design` | design documents in `docs/design` |
 | `deps` | dependency updates |
 
@@ -84,11 +84,11 @@ Existing objects must be updated before upgrading.
    closes it.
 6. Run `make check` before opening a pull request: it runs the linter, the tests, the
    vulnerability scan and the docs checks. CI also lints the chart and runs the end-to-end tests
-   on kind.
+   on [kind](https://kind.sigs.k8s.io/).
 
 ## Branches
 
-Trunk-based: one long-lived branch, `main`, short-lived work branches, and release branches only
+[Trunk-based](https://trunkbaseddevelopment.com/): one long-lived branch, `main`, short-lived work branches, and release branches only
 for patching released versions.
 
 - `main` is always releasable and protected: no direct pushes, required CI checks, at least one
@@ -105,14 +105,14 @@ for patching released versions.
 - A release is a **tag on `main`**, e.g. `v0.3.0`; the changelog is generated from the commit types.
 - Versions follow [Semantic Versioning](https://semver.org/); on `0.x`, breaking changes bump the
   minor version. Pre-releases use suffixes: `v0.3.0-rc.1`.
-- A separately versioned Go module is tagged with its path prefix, as Go requires: a future
+- A separately versioned Go module is tagged with its path prefix, [as Go requires](https://go.dev/ref/mod#vcs-version): a future
   Caddy adapter module in `adapters/caddy` would be tagged `adapters/caddy/v0.3.0`.
 
 ### Cutting a release
 
 1. Check that CI is green on the commit, and try the build with `make release-snapshot` (binaries
    and archives in `dist/`, nothing signed or published).
-2. Tag it with a signed, annotated tag and push the tag:
+2. Tag it with a [signed, annotated tag](https://git-scm.com/book/en/v2/Git-Tools-Signing-Your-Work) and push the tag:
 
    ```sh
    git tag -s v0.3.0 -m v0.3.0
@@ -123,12 +123,12 @@ for patching released versions.
    `release-X.Y` branch, then publishes, in order:
    - the images `ghcr.io/inkwall-dev/inkwall-engine` and `ghcr.io/inkwall-dev/inkwall-operator`
      (`0.3.0`, `0.3`, and `latest` for the highest stable version; linux/amd64 and linux/arm64),
-     with SBOM and provenance attestations;
-   - the Helm chart `oci://ghcr.io/inkwall-dev/charts/inkwall`, versioned from the tag (the
+     with [SBOM](https://www.cisa.gov/sbom) and [provenance](https://slsa.dev/spec/v1.0/provenance) [attestations](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds);
+   - the [Helm](https://helm.sh/docs/) chart [`oci://ghcr.io/inkwall-dev/charts/inkwall`](https://helm.sh/docs/topics/registries/), versioned from the tag (the
      version in `Chart.yaml` is only for development);
    - the binaries, `checksums.txt` and the GitHub release with the changelog.
 
-   Images, chart and checksums are signed keyless with cosign. To verify an image:
+   Images, chart and checksums are signed keyless with [cosign](https://docs.sigstore.dev/cosign/signing/overview/). To verify an image:
 
    ```sh
    cosign verify ghcr.io/inkwall-dev/inkwall-engine:0.3.0 \
@@ -136,7 +136,7 @@ for patching released versions.
      --certificate-oidc-issuer https://token.actions.githubusercontent.com
    ```
 
-4. The first time, make the three new GHCR packages (`inkwall-engine`, `inkwall-operator`,
+4. The first time, make the three new [GHCR](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry) packages (`inkwall-engine`, `inkwall-operator`,
    `charts/inkwall`) public in the organization's package settings: they are created private.
 
 A failed run can be re-run from the Actions tab. If something was already published, fix it on

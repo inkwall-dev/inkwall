@@ -1,6 +1,6 @@
 # Testing policies offline
 
-This guide tests rules, `WAFPolicy` objects and the cluster's policy bundle with `inkwallctl test`,
+This guide tests rules, `WAFPolicy` objects and the cluster's [policy bundle](glossary.md#bundle) with `inkwallctl test`,
 on your machine or in CI, before they block real traffic.
 
 ## Contents
@@ -15,13 +15,13 @@ on your machine or in CI, before they block real traffic.
 ## Prerequisites
 
 - `inkwallctl`, from the [releases page](https://github.com/inkwall-dev/inkwall/releases).
-- The requests to test: a URL, a file of raw HTTP/1.1 requests (`--request`), or a browser HAR
+- The requests to test: a URL, a file of raw [HTTP/1.1](https://www.rfc-editor.org/rfc/rfc9112) requests (`--request`), or a browser [HAR](https://w3c.github.io/web-performance/specs/HAR/Overview.html)
   file (`--har`).
 
 ## Test a request
 
 `inkwallctl test` checks each request in-process, with the same engine and rule flags as
-`inkwall-engine` (`--rules`, `--paranoia-level`, `--disable-rule-groups`, ...). Unlike the engine,
+`inkwall-engine` (`--rules`, [`--paranoia-level`](https://coreruleset.org/docs/concepts/paranoia_levels/), `--disable-rule-groups`, ...). Unlike the engine,
 its `--mode` defaults to `block`. `inkwallctl test -h` lists every flag.
 
 ```console
@@ -34,8 +34,8 @@ check took.
 
 ## Test `WAFPolicy` objects
 
-Give `--policy` the policies, with the rule sets (`--rule-set`), ConfigMaps (`--configmap`) and
-Ingresses (`--ingress`) they use. `inkwallctl` resolves them as the operator does, sends each
+Give `--policy` the policies, with the rule sets (`--rule-set`), [ConfigMaps](https://kubernetes.io/docs/concepts/configuration/configmap/) (`--configmap`) and
+[Ingresses](https://kubernetes.io/docs/concepts/services-networking/ingress/) (`--ingress`) they use. `inkwallctl` resolves them as the operator does, sends each
 request to the policy of its host and path (`policy=` names it), and compiles them as the engine
 does.
 
@@ -61,7 +61,7 @@ allow      GET /?id=1%27%20OR%20%271%27%3D%271  reason=no_policy  0s
 
 ## Test the cluster's bundle
 
-To test what the cluster enforces, save the bundle Secret and its public key, and give both to
+To test what the cluster enforces, save the bundle [Secret](https://kubernetes.io/docs/concepts/configuration/secret/) and its public key, and give both to
 `inkwallctl`, which checks the bundle's signature:
 
 ```sh

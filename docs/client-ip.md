@@ -1,8 +1,8 @@
 # Client IP behind a load balancer
 
-This guide gets the real client address to the engine when Traefik runs behind a load balancer.
+This guide gets the real client address to the engine when [Traefik](https://doc.traefik.io/traefik/) runs behind a load balancer.
 
-The engine gives the client's address to the rules (SecLang's `REMOTE_ADDR`) and records it in
+The engine gives the client's address to the rules ([SecLang](https://coraza.io/docs/seclang/)'s `REMOTE_ADDR`) and records it in
 security events; the planned IP lists and rate limits will key on it too. Behind a load balancer
 (LB), Traefik sees the LB, or a node, as its peer, and so does the engine, unless the real address
 reaches Traefik. A wrong client IP is worse than none: a rule against one address would block the
@@ -10,7 +10,7 @@ LB, and every client would look like the same one.
 
 There are two ways to get the address to Traefik: the [PROXY protocol](#the-proxy-protocol-recommended)
 (recommended), or [`externalTrafficPolicy: Local`](#externaltrafficpolicy-local-without-the-proxy-protocol)
-on Traefik's Service.
+on Traefik's [Service](https://kubernetes.io/docs/concepts/services-networking/service/).
 
 ## Contents
 
@@ -27,15 +27,15 @@ on Traefik's Service.
 ## Prerequisites
 
 - Inkwall installed, with the engine injected into Traefik's pods.
-- Traefik exposed through a `LoadBalancer` or `NodePort` Service, and access to its configuration
-  (here, the Helm chart `traefik/traefik`) and to the load balancer's settings.
+- Traefik exposed through a [`LoadBalancer` or `NodePort`](https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types) Service, and access to its configuration
+  (here, the [Helm chart `traefik/traefik`](https://github.com/traefik/traefik-helm-chart)) and to the load balancer's settings.
 
 ## How the address reaches the engine
 
-1. Traefik learns the client's address: from the PROXY protocol, or as the TCP peer when nothing
+1. Traefik learns the client's address: from the [PROXY protocol](https://github.com/haproxy/haproxy/blob/master/doc/proxy-protocol.txt), or as the TCP peer when nothing
    rewrites it (`externalTrafficPolicy: Local`).
-2. The ForwardAuth Middleware the operator creates (`trustForwardHeader: false`) sends Traefik's
-   view of the client to the engine as `X-Forwarded-For`, replacing any the client sent.
+2. The [ForwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/) Middleware the operator creates (`trustForwardHeader: false`) sends Traefik's
+   view of the client to the engine as [`X-Forwarded-For`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For), replacing any the client sent.
 3. The injected engine trusts `X-Forwarded-For` only from its loopback peer, Traefik
    (`--trusted-proxies=127.0.0.1/32,::1/128`), and walks it right to left.
 
@@ -71,7 +71,7 @@ ports:
 Without Helm: `--entryPoints.web.proxyProtocol.trustedIPs=10.0.0.0/16` (and `websecure`).
 Traefik detects the version (v1 or v2) by itself.
 
-- **Trust only the LB's CIDRs**, or the nodes' when kube-proxy forwards from them (see below).
+- **Trust only the LB's [CIDRs](https://www.rfc-editor.org/rfc/rfc4632)**, or the nodes' when [kube-proxy](https://kubernetes.io/docs/reference/command-line-tools-reference/kube-proxy/) forwards from them (see below).
   Never `0.0.0.0/0` and never `insecure: true`: anyone who reaches Traefik could then claim any
   address, get past IP rules and frame others in your events.
 - A PROXY header from an untrusted address is read and its address ignored; the connection
@@ -113,12 +113,12 @@ service:
 ```
 
 kube-proxy then delivers only to Traefik pods on the node that received the packet, without
-SNAT, so Traefik sees the client's address. Trade-offs
+[SNAT](https://kubernetes.io/docs/tutorials/services/source-ip/), so Traefik sees the client's address. Trade-offs
 ([Kubernetes docs](https://kubernetes.io/docs/tasks/access-application-cluster/create-external-load-balancer/#preserving-the-client-source-ip)):
 
 - Nodes without a ready Traefik pod drop the traffic; an LB learns this from the
   `healthCheckNodePort`, a NodePort reached directly doesn't. Run Traefik on every node that takes
-  traffic (a DaemonSet), or spread it with anti-affinity.
+  traffic (a [DaemonSet](https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/)), or spread it with [anti-affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#affinity-and-anti-affinity).
 - The LB weighs nodes, not pods: a node with two Traefik pods gets the same share as one with one.
 - With MetalLB in layer 2 mode, only the leader node's pods get traffic.
 
@@ -131,7 +131,7 @@ Send a request that a policy blocks or detects through the LB, then read the eng
 kubectl -n <traefik namespace> logs deploy/<traefik> -c inkwall-engine | grep '"security event"' | tail -1
 ```
 
-Its `client_ip` should be your address, not the LB's, a node's or a pod's. The kind end-to-end test
+Its `client_ip` should be your address, not the LB's, a node's or a pod's. The [kind](https://kind.sigs.k8s.io/) end-to-end test
 (`make kind-e2e`) checks this with a PROXY header for a public address, a client-sent
 `X-Forwarded-For` that must not change it, and a PROXY header from an untrusted source that must be
 ignored.
