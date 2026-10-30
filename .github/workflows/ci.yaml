@@ -89,6 +89,30 @@ jobs:
           kubectl get pods -A
           kubectl -n inkwall-system logs deployment/inkwall-operator --tail=100 || true
 
+  upgrade:
+    # helm upgrade from the last release to the chart and images of this
+    # commit keeps routes protected through Traefik, wired once, and their
+    # policies Accepted and Programmed; uninstall restores the routes
+    # (#129). Every run: it is as cheap as e2e, next to which it runs.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.19.0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+      - run: go install sigs.k8s.io/kind@v0.33.0
+      - run: kind create cluster --name inkwall-upgrade --wait 120s
+      - run: make kind-upgrade
+      - if: failure()
+        run: |
+          kubectl --context kind-inkwall-upgrade get pods -A
+          kubectl --context kind-inkwall-upgrade -n inkwall-system logs deployment/inkwall-operator --tail=100 || true
+
   generate:
     # Generated code is committed: the protobuf code must match api/*.proto,
     # and the operator's CRDs, RBAC and webhooks (also in the Helm chart)
