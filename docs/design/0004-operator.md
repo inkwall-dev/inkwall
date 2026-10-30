@@ -466,7 +466,43 @@ proxies omitted (`.Capabilities.APIVersions`); Gateway API, Envoy Gateway, Istio
 | Operator memory | < 512 MiB |
 | Bundle (compressed) | < 900 KiB, or chunked |
 
-To verify on kind with fake engines that speak the bundle protocol.
+**Measured** (#115) by `make scale-test SCALE=full` (`operator/test/scale`): the operator, with its
+production defaults (1 s debounce, 2 s engine reports, unthrottled client), runs in the test process
+against envtest's API server and etcd (Kubernetes 1.29), which are separate processes and not
+counted. Each policy targets its own route object, half Ingresses and half IngressRoutes, with 10
+routes each (2 hosts × 5 path prefixes). Fake engines (`operator/test/fakeengine`, 5 s heartbeats,
+one token each) run in a child process, also not counted; they verify and decode every bundle. After
+a sync of all objects at once, 10 edits of one policy each, the operator idle between them, are timed
+until every engine acks the new bundle. Memory is this process's: Go heap (`runtime.MemStats`, the
+peak sampled every 250 ms, garbage included) and peak RSS (`VmHWM`), the harness's share being small.
+Reconcile is the bundle reconciler's mean during the edits (controller-runtime's histogram), resolve
+is `resolver.Resolve` alone. One run per size on a 12-thread i7-1255U with 16 GiB, API server,
+operator and engines sharing it, so times are pessimistic:
+
+| Policies / routes | Engines | Peak RSS | Peak heap | Bundle gzip (raw) | Reconcile | Resolve | Initial sync | Change → all engines, p50 / max |
+|---|---|---|---|---|---|---|---|---|
+| 100 / 1,000 | 50 | 139 MiB | 116 MiB | 3 KiB (37 KiB) | 0.16 s | 1 ms | 1.0 s | 1.0 / 1.0 s |
+| 100 / 1,000 | 500 | 198 MiB | 135 MiB | 3 KiB (37 KiB) | 0.32 s | 1 ms | 1.1 s | 1.1 / 1.1 s |
+| 1,000 / 10,000 | 50 | 178 MiB | 146 MiB | 26 KiB (381 KiB) | 1.5 s | 12 ms | 0.6 s | 1.1 / 1.1 s |
+| 1,000 / 10,000 | 500 | **1,004 MiB** | 918 MiB | 26 KiB (381 KiB) | 2.5 s | 8 ms | 1.0 s | 1.5 / 1.6 s |
+| 5,000 / 50,000 | 50 | 507 MiB | 432 MiB | 134 KiB (1.9 MiB) | 8.7 s | 41 ms | 21.6 s | 1.4 / 1.5 s |
+| 5,000 / 50,000 | 500 | **2,038 MiB** | 1,836 MiB | 134 KiB (1.9 MiB) | 19 s | 54 ms | 25.5 s | 4.0 / **47.2 s** |
+
+Initial sync is from the last object created to every engine having all policies; with 10 edits the
+p95 is the slowest. Against the targets:
+
+- **Bundle size: met.** 134 KiB compressed at 5,000 policies, far under 900 KiB. Uncompressed it is
+  1.9 MiB, nearly half of gRPC's default 4 MiB receive limit, which engines keep.
+- **Change → every engine: met up to 5,000 × 50** (1.5 s), not at 5,000 × 500: 4 s typically, but
+  one edit took 47 s. Waiting for one of the 50 send slots counts against a stream's 30 s idle
+  timeout, while its heartbeats aren't read, so engines were disconnected ("no message from the
+  engine in 30s") and got the bundle again after reconnecting.
+- **Operator memory: not met with 500 engines.** The heap grows with engines × bundle size, as each
+  stream marshals the bundle itself (gRPC buffers, ~20% of all bytes allocated at 1,000 × 500); the
+  live heap after a GC is under 100 MiB at every size. 5,000 × 50 is just under 512 MiB.
+- **Not a target yet, but slow:** each new bundle writes the `status.bundleVersion` of every policy
+  (then `Enforced`), so a reconcile takes 9–19 s at 5,000 policies; changes during it wait, and the
+  initial sync takes 20–25 s.
 
 **Engine memory per policy.** A compiled Coraza WAF with the CRS keeps about 2.1 MiB of heap and
 takes 10–15 ms to compile. Policies with the same rule sets and CRS settings share one, whatever
@@ -503,9 +539,9 @@ Applying exclusions per request changes three things from v0.1.0:
 
 Unit tests (resolver, bundle hashing/versioning, conflicts); golden files for `Render` per
 controller version; envtest (`operator/test/testenv`) for reconcilers, conditions, SSA ownership and
-webhooks; kind e2e (injection → wiring → attack blocked → `Ready`, clean uninstall). Planned: chaos
-(kill leader, delete Secret, webhook down), scale with fake engines (§8), upgrade N-1 → N with
-traffic.
+webhooks; kind e2e (injection → wiring → attack blocked → `Ready`, clean uninstall). Scale with fake engines in
+envtest (`make scale-test`, §8; 100 policies × 50 engines in CI). Planned: chaos (kill leader, delete
+Secret, webhook down), upgrade N-1 → N with traffic.
 
 ## 10. Code layout
 

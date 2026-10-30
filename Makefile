@@ -29,6 +29,13 @@ COUNT           ?= 1
 # bench-compare: the revision to compare against.
 BASE            ?= origin/main
 
+# scale-test: sizes as <policies>x<engines>, one operator each; "full" is 0004 §8's matrix.
+# SCALE_CHANGES single-policy edits are timed; SCALE_OUT, if set, collects the results as JSON lines.
+SCALE           ?= 100x50
+SCALE_CHANGES   ?= 10
+SCALE_FULL      := 100x50 100x500 1000x50 1000x500 5000x50 5000x500
+SCALE_OUT       ?=
+
 .DEFAULT_GOAL := help
 
 .PHONY: help
@@ -44,6 +51,14 @@ build: ## Build inkwall-engine and inkwallctl into ./bin
 .PHONY: test
 test: ## Run unit tests with the race detector (operator tests run against a local API server, envtest)
 	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))" $(GO) test -race -count=1 ./...
+
+.PHONY: scale-test
+scale-test: ## Operator scale test with fake engines, in envtest (SCALE=<policies>x<engines>, default 100x50; SCALE=full)
+	@export KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; fail=0; \
+	for s in $(if $(filter full,$(SCALE)),$(SCALE_FULL),$(SCALE)); do \
+		echo "== scale $$s"; \
+		INKWALL_SCALE=$$s INKWALL_SCALE_CHANGES=$(SCALE_CHANGES) INKWALL_SCALE_OUT="$(SCALE_OUT)" $(GO) test -count=1 -timeout 60m -run '^TestScale$$' -v ./operator/test/scale || fail=1; \
+	done; exit $$fail
 
 .PHONY: bench
 bench: ## Run benchmarks (BENCH=regexp COUNT=n)
