@@ -91,6 +91,8 @@ helm-lint: ## Lint the Helm chart and render it with each webhook certificate mo
 	helm template inkwall $(CHART) --namespace inkwall-system >/dev/null
 	helm template inkwall $(CHART) --namespace inkwall-system --set webhook.certs.mode=certManager >/dev/null
 	helm template inkwall $(CHART) --namespace inkwall-system --set controlPlane.caBundle=ca --set controlPlane.enrollmentToken=t >/dev/null
+	@# As helm upgrade --reuse-values from 0.1.0 renders it: values without controlPlane.
+	helm template inkwall $(CHART) --namespace inkwall-system --set controlPlane=null >/dev/null
 
 .PHONY: tidy
 tidy: ## Tidy go.mod and go.sum, here and in test/crs (which builds against this module)

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -96,6 +97,11 @@ type Reconciler struct {
 	// pods won't have it. Every route the operator wired is unwired, and
 	// the policies are released from the finalizer.
 	Disabled bool
+
+	// noResponseLimit: the API server dropped the Middleware's
+	// maxResponseBodySize (Traefik before v3.7), so it isn't asked for
+	// again; otherwise every reconcile would rewrite the Middleware.
+	noResponseLimit atomic.Bool
 }
 
 // policyChanged: a WAFPolicy's spec, its deletion or its finalizers.
@@ -451,24 +457,41 @@ func (r *Reconciler) middlewaresInstalled() bool {
 // ensureMiddleware creates or corrects the operator's Middleware. One with
 // the same name the operator didn't create is left alone, and reported.
 func (r *Reconciler) ensureMiddleware(ctx context.Context, namespace string) error {
-	want := Middleware(namespace)
+	limit := !r.noResponseLimit.Load()
+	want := middleware(namespace, limit)
 	cur := &unstructured.Unstructured{}
 	cur.SetGroupVersionKind(MiddlewareGVK)
 	err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(want), cur)
 	switch {
 	case apierrors.IsNotFound(err):
-		return r.Client.Create(ctx, want)
+		if err := r.Client.Create(ctx, want); err != nil {
+			return err
+		}
+		r.noteResponseLimit(ctx, want, limit)
+		return nil
 	case err != nil:
 		return err
 	}
 	if cur.GetLabels()["app.kubernetes.io/managed-by"] != "inkwall-operator" {
 		return fmt.Errorf("Middleware %s/%s exists and wasn't created by Inkwall; rename or delete it", namespace, MiddlewareName)
 	}
-	if ForwardAuthMatches(cur) {
+	if forwardAuthMatches(cur, limit) {
 		return nil
 	}
 	cur.Object["spec"] = want.Object["spec"]
-	return r.Client.Update(ctx, cur)
+	if err := r.Client.Update(ctx, cur); err != nil {
+		return err
+	}
+	r.noteResponseLimit(ctx, cur, limit)
+	return nil
+}
+
+// noteResponseLimit stops asking for maxResponseBodySize once the API
+// server drops it from a Middleware it stored (m, as returned).
+func (r *Reconciler) noteResponseLimit(ctx context.Context, m *unstructured.Unstructured, asked bool) {
+	if asked && !hasResponseLimit(m) && !r.noResponseLimit.Swap(true) {
+		log.FromContext(ctx).Info("Traefik's Middleware CRD has no maxResponseBodySize (Traefik before v3.7); the engine's answers are not size-capped")
+	}
 }
 
 // pruneMiddlewares deletes the operator's Middlewares in namespaces that no

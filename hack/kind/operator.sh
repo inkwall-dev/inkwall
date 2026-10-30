@@ -17,7 +17,7 @@ CHART=${CHART:-deploy/helm/inkwall}
 NAMESPACE=inkwall-system
 KUBECTL=(kubectl --context "kind-$CLUSTER")
 
-if ! kind get clusters | grep -qx "$CLUSTER"; then
+if ! kind get clusters | grep -x "$CLUSTER" >/dev/null; then
   echo "no kind cluster $CLUSTER: run make kind-up first" >&2
   exit 1
 fi
@@ -172,7 +172,7 @@ fi
 connected=false
 for _ in $(seq 30); do
   if "${KUBECTL[@]}" -n "$NAMESPACE" get configmap -l waf.inkwall.dev/engines=true -o jsonpath='{.items[*].data.engines\.json}' |
-    grep -q "\"podName\":\"proxy\""; then
+    grep "\"podName\":\"proxy\"" >/dev/null; then
     connected=true
     break
   fi
