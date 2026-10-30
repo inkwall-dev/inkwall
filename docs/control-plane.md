@@ -12,6 +12,7 @@ sends it, and shows how to disconnect.
 - [Checking the connection](#checking-the-connection)
 - [Certificate renewal](#certificate-renewal)
 - [What the operator sends](#what-the-operator-sends)
+  - [During an outage](#during-an-outage)
 - [Managed mode](#managed-mode)
 - [Disconnecting](#disconnecting)
 
@@ -29,7 +30,8 @@ contains only the cluster side: the operator's client and the protocol,
 - **It never sends signed bundles.** In Managed mode it sends policy objects. The operator writes
   them as [custom resources](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/),
   and they go through the same validation and signing as your own.
-- **Standalone, the default, never connects.** Installing or upgrading the chart connects nothing.
+- **`Standalone`, the default, never connects.** Installing or upgrading the chart connects
+  nothing.
 
 ## Modes
 
@@ -71,8 +73,8 @@ contains only the cluster side: the operator's client and the protocol,
    The chart stores the CA in the
    [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/)
    `inkwall-control-plane-ca` and passes it to the operator (`--control-plane-ca`). It stores the
-   token in the Secret `inkwall-enrollment`, key `token`. For a release not named `inkwall`, the names are `<release>-inkwall-control-plane-ca`
-   and `<release>-inkwall-enrollment`.
+   token in the Secret `inkwall-enrollment`, key `token`. For a release whose name doesn't contain
+   `inkwall`, the names are `<release>-inkwall-control-plane-ca` and `<release>-inkwall-enrollment`.
 
    A value passed with `--set` ends up in the Helm release history. If that is a concern, or if
    your values live in Git, leave `controlPlane.enrollmentToken` empty and create the
@@ -170,15 +172,16 @@ The leader holds one **primary** connection. Over it the operator sends:
   `kube-system` namespace UID, and the last policy snapshot applied.
 - **Cluster state:** every `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet` and `InkwallConfig`,
   each with its name, namespace, labels, generation, spec (JSON) and status conditions. Also the
-  number of running [Traefik](https://doc.traefik.io/traefik/) pods and how many have the engine, each connected engine (pod,
-  node, version, the bundle version it runs or rejected), and the bundle version and content hash.
+  number of running [Traefik](https://doc.traefik.io/traefik/) pods and how many have the engine,
+  each connected engine (pod, node, version, the bundle version it runs or rejected), and the
+  bundle version and content hash.
   The leader sends it after connecting, within 5 seconds of a change, when asked, and every
   5 minutes.
 - **Heartbeats**, and certificate renewal requests.
 
 Every replica holds its own **events** connection, which carries the security events of the
 engines connected to that replica. It opens only if the control plane accepts events, which it
-says when the connection opens. Otherwise events stay in the engines' logs, as in Standalone.
+says when the connection opens. Otherwise events stay in the engines' logs, as in `Standalone`.
 The engine redacts each event before it leaves the pod
 ([`api/events/v1`](../api/events/v1/events.proto)): method, host, path without the query string,
 client IP, user agent, request ID, status, matched rule IDs with at most 64 bytes of each matched
@@ -242,7 +245,7 @@ like any other policy, and their `Enforced` condition goes back to the control p
 
 ## Disconnecting
 
-1. Switch back to Standalone:
+1. Switch back to `Standalone`:
 
    ```sh
    kubectl patch inkwallconfig default --type merge -p '{"spec":{"mode":"Standalone"}}'

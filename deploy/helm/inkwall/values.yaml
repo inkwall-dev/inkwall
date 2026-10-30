@@ -86,7 +86,7 @@ uninstall:
   unwire: true
 
 serviceAccount:
-  # Empty: the release's full name.
+  # Empty: the operator's name (inkwall-operator for a release named inkwall).
   name: ""
   annotations: {}
 
