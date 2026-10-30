@@ -36,7 +36,7 @@ jobs:
       version: ${{ steps.tag.outputs.version }}
       latest: ${{ steps.tag.outputs.latest }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: tag
@@ -80,7 +80,7 @@ jobs:
     env:
       IMAGE: ghcr.io/inkwall-dev/inkwall-${{ matrix.component }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # No QEMU: Go cross-compiles on the build platform, and the final
       # stages only copy the binary.
       - uses: docker/setup-buildx-action@v4
@@ -131,7 +131,7 @@ jobs:
       packages: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
         with:
           version: ${{ env.HELM_VERSION }}
@@ -168,7 +168,7 @@ jobs:
       contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The changelog is computed from the history since the last tag.
           fetch-depth: 0
