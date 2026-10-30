@@ -4,10 +4,13 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -501,5 +504,58 @@ func TestSkippedRoutesDoNotBufferTheBody(t *testing.T) {
 	}
 	if string(req.Body) != "data" {
 		t.Errorf("/api: body = %q, want it buffered for inspection", req.Body)
+	}
+}
+
+// TestAbsoluteFormIsRejected sends raw requests to a real server: Go takes
+// the Host of an absolute-form target from the URL, unvalidated, and the
+// proxy's client would forward another one (punycode, or empty), so the
+// engine would inspect a Host the upstream never sees.
+func TestAbsoluteFormIsRejected(t *testing.T) {
+	up := newUpstream(t)
+	var logs bytes.Buffer
+	front := httptest.NewServer(newHandler(t, pipeline.ModeDetect, 64<<10, up, &logs))
+	t.Cleanup(front.Close)
+	for _, target := range []string{
+		"http://β.example/x",
+		`http://other.examp"0/x`,
+		"http://shop.example.com/x",
+		"*",
+	} {
+		conn, err := net.Dial("tcp", front.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: shop.example.com\r\nConnection: close\r\n\r\n", target)
+		resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		if err != nil {
+			t.Fatalf("%s: %v", target, err)
+		}
+		resp.Body.Close()
+		conn.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: got %d, want 400", target, resp.StatusCode)
+		}
+	}
+	if n := up.hits.Load(); n != 0 {
+		t.Fatalf("%d requests reached the upstream", n)
+	}
+}
+
+func TestInvalidHostIsRejected(t *testing.T) {
+	up := newUpstream(t)
+	var logs bytes.Buffer
+	h := newHandler(t, pipeline.ModeDetect, 64<<10, up, &logs)
+	for _, host := range []string{"β.example", `other.examp"0`, "a b"} {
+		r := httptest.NewRequest("GET", "/x", nil)
+		r.Host = host
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("Host %q: got %d, want 400", host, w.Code)
+		}
+	}
+	if n := up.hits.Load(); n != 0 {
+		t.Fatalf("%d requests reached the upstream", n)
 	}
 }
