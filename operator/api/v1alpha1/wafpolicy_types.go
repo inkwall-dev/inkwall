@@ -179,7 +179,7 @@ type RuleSetRef struct {
 
 // Exclusion turns rules off, everywhere or only for one path or argument.
 type Exclusion struct {
-	// RuleIDs are the rules to turn off.
+	// RuleIDs are the rules to turn off. An ID no rule has is ignored.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=64
 	// +kubebuilder:validation:items:Minimum=1
@@ -198,7 +198,10 @@ type ExclusionMatch struct {
 	// +optional
 	Path PathPattern `json:"path,omitempty"`
 
-	// Argument is a query or body argument the rules stop looking at.
+	// Argument is a query or body argument the rules, and the rules chained
+	// to them, stop looking at. With a rule set whose own SecLang negates
+	// ARGS targets (!ARGS:name), the policy gets its own compiled rules, and
+	// the exclusion covers the rule only, not its chained rules.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.\-\[\]]+$`

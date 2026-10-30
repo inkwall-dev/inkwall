@@ -468,6 +468,37 @@ proxies omitted (`.Capabilities.APIVersions`); Gateway API, Envoy Gateway, Istio
 
 To verify on kind with fake engines that speak the bundle protocol.
 
+**Engine memory per policy.** A compiled Coraza WAF with the CRS keeps about 2.1 MiB of heap and
+takes 10–15 ms to compile. Policies with the same rule sets and CRS settings share one, whatever
+their exclusions: exclusions are applied to each request (the transaction-level
+`ctl:ruleRemoveById` / `ruleRemoveTargetById`, paths decided on `REQUEST_FILENAME` as before), not
+compiled into the rule set (#42). `BenchmarkCompile` (`pkg/policy`, in the CI bench gate) compiles
+a bundle of CRS policies that differ only in exclusions, from an empty cache (i7-1255U, medians):
+
+| Policies | Before: time | Before: live heap | After: time | After: live heap |
+|---|---|---|---|---|
+| 1 | 10 ms | 2.1 MiB | 10 ms | 2.1 MiB |
+| 100 | 0.89 s | 205 MiB | 11 ms | 2.2 MiB |
+| 1,000 | 9.3 s | 2.0 GiB | 15 ms | 2.9 MiB |
+
+Rule sets whose own SecLang negates `ARGS` targets (`!ARGS:q`) take no argument exclusion per
+request: Coraza 3.8.1 adds a transaction's target exclusions to the rule's own negations in place,
+so concurrent requests could get each other's. A policy with argument exclusions on such rules
+gets compiled rule sets of its own, with them compiled in (`SecRuleUpdateTargetById` after the
+user's rules): one for requests on no path exclusion, plus at most one per path exclusion with an
+argument, the request's chosen by its path (`argsNegation` in `pkg/rules/coraza`). The CRS and
+Inkwall's own rules negate no `ARGS` targets (`TestCRSNegatesNoArgs`).
+
+Applying exclusions per request changes three things from v0.1.0:
+
+- An argument exclusion (`when.argument`, without a path) also covers the rules chained to the
+  excluded rule, as one with a path already did. With rule sets that negate `ARGS` targets
+  themselves it is compiled in and covers the rule only, as before.
+- A rule ID no rule has, in an argument exclusion without a path, is ignored as in every other
+  exclusion, instead of failing the bundle (`SecRuleUpdateTargetById` rejected it, and the engine
+  kept its previous set).
+- A rule set whose own SecLang negates `ARGS` targets falls back to rule sets per policy, above.
+
 ## 9. Testing
 
 Unit tests (resolver, bundle hashing/versioning, conflicts); golden files for `Render` per
