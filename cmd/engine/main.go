@@ -8,6 +8,7 @@
 //	inkwall-engine proxy --upstream http://app:8080 [flags]
 //	inkwall-engine forward-auth [flags]
 //	inkwall-engine check [flags]
+//	inkwall-engine ext-proc [flags]
 //
 // The proxy subcommand runs the standalone reverse proxy: it inspects each
 // request with the OWASP Core Rule Set and forwards allowed requests to the
@@ -19,6 +20,9 @@
 //
 // The check subcommand serves the engine's own check API (api/engine/v1) on
 // POST /v1/check, for proxies without a native protocol and for inkwallctl.
+//
+// The ext-proc subcommand serves Envoy's external processing API
+// (envoy.service.ext_proc.v3) over gRPC: Envoy and Envoy Gateway call it.
 //
 // --listen and --admin-listen take a TCP address (127.0.0.1:9001) or a Unix
 // socket (unix:/run/inkwall/engine.sock).
@@ -46,7 +50,10 @@ import (
 	"syscall"
 	"time"
 
+	"google.golang.org/grpc"
+
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	"github.com/inkwall-dev/inkwall/pkg/adapters/extproc"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/forwardauth"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/httpcheck"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/proxy"
@@ -65,10 +72,11 @@ func main() {
 }
 
 func run(args []string, stderr io.Writer) int {
-	if len(args) == 0 || (args[0] != cmdProxy && args[0] != cmdForwardAuth && args[0] != cmdCheck) {
+	if len(args) == 0 || !slices.Contains([]string{cmdProxy, cmdForwardAuth, cmdCheck, cmdExtProc}, args[0]) {
 		fmt.Fprintln(stderr, "usage: inkwall-engine proxy --upstream URL [flags]")
 		fmt.Fprintln(stderr, "       inkwall-engine forward-auth [flags]")
 		fmt.Fprintln(stderr, "       inkwall-engine check [flags]")
+		fmt.Fprintln(stderr, "       inkwall-engine ext-proc [flags]")
 		fmt.Fprintln(stderr, "run 'inkwall-engine <command> -h' for flags")
 		return 2
 	}
@@ -97,6 +105,7 @@ const (
 	cmdProxy       = "proxy"
 	cmdForwardAuth = "forward-auth"
 	cmdCheck       = "check"
+	cmdExtProc     = "ext-proc"
 )
 
 type engineConfig struct {
@@ -149,7 +158,7 @@ var policyFlags = []string{
 func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, error) {
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	// forward-auth and check run next to the proxy that calls them, so by
+	// forward-auth, check and ext-proc run next to the proxy that calls them, so by
 	// default they are reachable only from inside the pod.
 	defaultListen := ":8480"
 	switch command {
@@ -157,10 +166,12 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 		defaultListen = "127.0.0.1:9001"
 	case cmdCheck:
 		defaultListen = "127.0.0.1:9002"
+	case cmdExtProc:
+		defaultListen = "127.0.0.1:9003"
 	}
 	listen := fs.String("listen", defaultListen, "address to listen on: host:port or unix:/path/to/socket")
 	adminListen := fs.String("admin-listen", ":9480", "address for /metrics, /healthz and /readyz (empty disables)")
-	readTimeout := fs.Duration("read-timeout", 60*time.Second, "maximum time to read a whole request, including the body (0 = no limit)")
+	readTimeout := fs.Duration("read-timeout", 60*time.Second, "maximum time to read a whole request, including the body (0 = no limit; HTTP listeners only, not ext-proc)")
 	var upstream *string
 	if command == cmdProxy {
 		upstream = fs.String("upstream", "", "upstream URL that allowed requests are forwarded to (required)")
@@ -337,6 +348,8 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 		adapter = "forwardauth"
 	case cmdCheck:
 		adapter = "httpcheck"
+	case cmdExtProc:
+		adapter = "extproc"
 	}
 	metrics := telemetry.NewMetrics(adapter)
 
@@ -359,8 +372,13 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 	if ag != nil {
 		maxBody = max(maxBody, policy.MaxBodyBytes)
 	}
-	var handler http.Handler
+	var (
+		handler http.Handler
+		ep      *extproc.Server
+	)
 	switch cfg.command {
+	case cmdExtProc:
+		ep, err = extproc.New(p, extproc.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec})
 	case cmdForwardAuth:
 		handler, err = forwardauth.New(p,
 			forwardauth.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec},
@@ -376,13 +394,16 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 		return err
 	}
 
-	srv := &http.Server{
+	var srv server = &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		// Bounds slow uploads that would otherwise hold a connection and a
 		// goroutine open indefinitely.
 		ReadTimeout: cfg.readTimeout,
 		IdleTimeout: 120 * time.Second,
+	}
+	if ep != nil {
+		srv = grpcServer{ep.NewGRPCServer()}
 	}
 
 	// Bind before announcing, so "started" means the ports are really open.
@@ -480,6 +501,32 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 		err = errors.Join(err, admin.Shutdown(shutdownCtx))
 	}
 	return err
+}
+
+// server is the request listener: an http.Server, or a gRPC one.
+type server interface {
+	Serve(net.Listener) error
+	Shutdown(context.Context) error
+}
+
+// grpcServer gives a gRPC server http.Server's Shutdown.
+type grpcServer struct{ *grpc.Server }
+
+// Shutdown waits for in-flight streams, each one request, until ctx ends,
+// then closes them.
+func (g grpcServer) Shutdown(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		g.GracefulStop()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		g.Stop()
+		return ctx.Err()
+	}
 }
 
 // flagMode builds the one pipeline the flags define.
