@@ -1,0 +1,10 @@
+go test fuzz v1
+string("POST")
+string("shop.example")
+string("/login")
+string("Mozilla/5.0")
+string("")
+string("")
+string("REQUEST_HEADERS:Authorization")
+string("Bearer secret")
+int(1)

@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("GET /search?q=shoes HTTP/1.1\r\nHost: shop.example.com\r\nUser-Agent: test\r\n\r\n\r\nPOST http://api.example.com/upload HTTP/1.1\r\nHost: ignored\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\nX-Bin: caf\xe9\r\n\r\n5\r\nhello\r\n0\r\n\r\n")

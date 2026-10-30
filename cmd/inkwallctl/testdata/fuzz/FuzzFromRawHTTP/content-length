@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("POST /a HTTP/1.0\r\nContent-Length: 3\r\n\r\nabc")

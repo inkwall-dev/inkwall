@@ -1,0 +1,8 @@
+go test fuzz v1
+string("GET")
+string("http://evil.example/x")
+string("")
+string("")
+string("Accept")
+string("*/*")
+[]byte("")

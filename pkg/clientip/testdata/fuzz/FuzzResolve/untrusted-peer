@@ -1,0 +1,4 @@
+go test fuzz v1
+string("203.0.113.9")
+string("198.51.100.1")
+string("")

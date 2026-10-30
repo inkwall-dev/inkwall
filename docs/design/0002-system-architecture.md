@@ -457,13 +457,25 @@ One shared request corpus drives every level.
 | Level | Tool | What it proves | Runs |
 |---|---|---|---|
 | Unit | `go test` | Package logic | every PR |
-| Fuzz | `go test -fuzz` | No panics, bounded allocation | nightly |
+| Fuzz | `go test -fuzz` | Parsers of untrusted input never panic and keep their properties | nightly; seeds every PR |
 | Rule conformance | go-ftw + CRS tests | Detection matches CRS | every PR |
 | Adapter parity | testcontainers-go | Adapters match the reverse proxy | every PR |
 | E2E | kind + e2e-framework | Wiring, enforcement, status, failure modes | every PR |
 | Performance | `testing.B`, k6 | 0001 budgets | every PR / nightly |
 | Upgrade | kind | N-1 → N with no drops | release |
 | Soak / chaos | kind + k6 | 24h stability; engine kill → fail-open | weekly |
+
+**Built (fuzz):** Go fuzz targets for every parser of untrusted input, each checking a property,
+not only the absence of panics: the adapters (`FuzzForwardAuth`: only the method and URI the proxy
+forwarded are inspected, without its X-Forwarded-* headers; `FuzzCheck`; `FuzzProxy`: a request is
+refused with 400 or inspected in origin form with a valid Host, and what reaches the upstream was
+inspected, with the same path, query, Host and body), the request target and
+request ID checks they share, client IP resolution from X-Forwarded-For, bundle key files, bundle
+signatures (`FuzzApply`, `FuzzSecretBundle`: nothing but the trusted key's own signature of the
+exact bytes reaches compilation), event redaction (`FuzzNew`: valid UTF-8, within the field limits,
+no query strings or credential snippets) and `inkwallctl test`'s URL, raw HTTP and HAR input.
+Their seed corpora (`testdata/fuzz/`) run in every `make test`; `.github/workflows/fuzz.yaml`
+runs each target for 5 minutes nightly and uploads the failing inputs.
 
 ---
 

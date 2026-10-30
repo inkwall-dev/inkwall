@@ -1,0 +1,77 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Nightly fuzzing (0002 §10): each Go fuzz target of the parsers of untrusted
+# input runs for a few minutes. Their seed corpora (testdata/fuzz) also run
+# in every `make test`. A failure uploads the inputs it found; reproduce one
+# with `go test -run '<Target>/<file>' ./<package>` after copying it into
+# <package>/testdata/fuzz/<Target>/. A crash may be a vulnerability: report
+# it privately (SECURITY.md) rather than in an issue.
+name: fuzz
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: How long each target runs (Go duration)
+        default: 5m
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { package: ./pkg/adapters/forwardauth, target: FuzzForwardAuth }
+          - { package: ./pkg/adapters/httpcheck, target: FuzzCheck }
+          - { package: ./pkg/adapters/proxy, target: FuzzProxy }
+          - { package: ./pkg/adapters/internal/httpadapter, target: FuzzURIPath }
+          - { package: ./pkg/adapters/internal/httpadapter, target: FuzzRequestID }
+          - { package: ./pkg/clientip, target: FuzzResolve }
+          - { package: ./pkg/bundlekey, target: FuzzParse }
+          - { package: ./pkg/agent, target: FuzzApply }
+          - { package: ./pkg/agent, target: FuzzSecretBundle }
+          - { package: ./pkg/events, target: FuzzNew }
+          - { package: ./cmd/inkwallctl, target: FuzzSplitURL }
+          - { package: ./cmd/inkwallctl, target: FuzzFromRawHTTP }
+          - { package: ./cmd/inkwallctl, target: FuzzFromHAR }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+      - run: go test -run='^$' -fuzz="^${TARGET}\$" -fuzztime="${FUZZTIME}" "${PACKAGE}"
+        env:
+          PACKAGE: ${{ matrix.package }}
+          TARGET: ${{ matrix.target }}
+          FUZZTIME: ${{ inputs.fuzztime || '5m' }}
+      - if: failure()
+        # The failing inputs are the files the run added to the corpus.
+        run: |
+          mkdir -p crashers
+          git ls-files --others --exclude-standard -- "${PACKAGE}/testdata/fuzz/${TARGET}" |
+            xargs -r cp -t crashers
+          ls -l crashers
+        env:
+          PACKAGE: ${{ matrix.package }}
+          TARGET: ${{ matrix.target }}
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crashers-${{ matrix.target }}
+          path: crashers
+          if-no-files-found: ignore
+          retention-days: 14

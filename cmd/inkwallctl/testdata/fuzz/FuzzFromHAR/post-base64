@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"log\":{\"entries\":[{\"request\":{\"method\":\"POST\",\"url\":\"http://h/upload\",\"httpVersion\":\"HTTP/1.1\",\"headers\":[],\"postData\":{\"mimeType\":\"application/octet-stream\",\"text\":\"/w==\",\"encoding\":\"base64\"}}}]}}")

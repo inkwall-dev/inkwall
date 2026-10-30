@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"log\":{\"entries\":[{\"request\":{\"method\":\"GET\",\"url\":\"https://shop.example/search?q=1\",\"httpVersion\":\"h2\",\"headers\":[{\"name\":\":authority\",\"value\":\"shop.example\"},{\"name\":\"Host\",\"value\":\"x\"},{\"name\":\"User-Agent\",\"value\":\"Mozilla\"}]}}]}}")
