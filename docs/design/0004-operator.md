@@ -156,7 +156,7 @@ Validation runs in three steps, cheapest first:
 | Condition | True when | False reasons |
 |---|---|---|
 | `Accepted` | Spec valid, references resolve | `InvalidRef`, `Conflict`, `RuleCompileError`, `TargetUnsupported` |
-| `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `NoTargets`, `InjectionDisabled` |
+| `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `NoTargets`, `InjectionDisabled`, `Unwired` |
 | `Enforced` | Every serving engine ACKed a bundle with this generation | `EnginesBehind` (`3/6`), `EngineNack`, `NoEngines`, `NotInBundle` |
 | `Ready` | The three above are True | first failing condition's reason |
 
@@ -373,7 +373,8 @@ longer needed.
   - `SidecarMissing`: no Traefik pod selected, or pods without the engine (the operator was down
     in detect mode, or they opted out), listed;
   - `NoTargets`;
-  - `InjectionDisabled`.
+  - `InjectionDisabled`;
+  - `Unwired`: set by the uninstall hook, with the operator stopped ([§5](#5-uninstall-and-disable)).
 - **Not yet:** `HTTPRoute` targets; matching engines to the pods that serve a policy's class (all
   engines count for `Enforced`); IngressRoutes nested with `parentRefs`. Whether Traefik attachment
   should default to something else is open ([§12](#12-open-questions)).
@@ -722,8 +723,9 @@ Removal must never leave a proxy failing closed on a missing engine.
   - Deleting an `InkwallConfig` doesn't unwire by itself. Without one, the operator uses the
     defaults, and keeps wiring the routes of the pods they still select.
 - **Uninstall** runs the hook with injection off too. The hook also sets the `WAFPolicy` webhook to
-  `Ignore` (no replica answers it, and it would refuse the update), and removes the finalizer from
-  every policy. Deleting a policy, or its namespace, then never waits for an operator that is gone.
+  `Ignore` (no replica answers it, and it would refuse the update), reports every policy
+  `Programmed=False` and `Ready=False` (`Unwired`, #195), and removes the finalizer from every
+  policy. Deleting a policy, or its namespace, then never waits for an operator that is gone.
   Without the hook (`--no-hooks`, `uninstall.unwire=false`), the chart README says how to clean up.
 - Tested on kind:
   - a policy deleted while the operator is scaled to 0 stays, wired, until the operator is back;
