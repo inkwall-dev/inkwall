@@ -1,0 +1,30 @@
+GET /?id=1%27%20OR%20%271%27%3D%271 HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0
+Accept: */*
+
+GET /healthz?id=1%27%20OR%20%271%27%3D%271 HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0
+Accept: */*
+
+GET /products/42 HTTP/1.1
+Host: shop.example.com
+User-Agent: sqlmap/1.8
+Accept: */*
+
+GET /?id=1%27%20OR%20%271%27%3D%271 HTTP/1.1
+Host: blog.example.com
+User-Agent: Mozilla/5.0
+Accept: */*
+
+GET /?debug=true HTTP/1.1
+Host: api.example.com
+User-Agent: Mozilla/5.0
+Accept: */*
+
+GET /?id=1%27%20OR%20%271%27%3D%271 HTTP/1.1
+Host: api.example.com
+User-Agent: Mozilla/5.0
+Accept: */*
+
