@@ -326,6 +326,9 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 				errs = errors.Join(errs, fmt.Errorf("ensure the ClientTrafficPolicy of Gateway %s: %w", gw, err))
 			case name != "":
 				limits[gw] = name
+			default:
+				// The user's own: the operator's goes.
+				delete(buffered, gw)
 			}
 		}
 		// 4. The rest goes, in reverse: a route stops calling the engine
@@ -978,8 +981,8 @@ func pruneEmpty(obj map[string]any, path []string) {
 
 // prune deletes the operator's EnvoyExtensionPolicies and Backends no
 // longer wanted, its ClientTrafficPolicies on Gateways without such
-// routes, and the engine from the Envoy pods of Gateways that no longer
-// need it.
+// routes or with the user's, and the engine from the Envoy pods of
+// Gateways that no longer need it.
 func (e *EnvoyGateway) prune(ctx context.Context, routes, buffered, gateways map[types.NamespacedName]bool) error {
 	namespaces := map[string]bool{}
 	for k := range routes {
