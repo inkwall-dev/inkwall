@@ -53,6 +53,9 @@ type Server struct {
 	// Events receives the engines' security events, stamped with the
 	// stream's engine and pod. Nil: they are counted and discarded.
 	Events func(*eventsv1.EventBatch)
+	// Stats receives what the engines counted per policy since their
+	// previous report. Nil: discarded.
+	Stats func([]*eventsv1.PolicyStats)
 
 	sends chan struct{}
 	enc   encoder
@@ -175,6 +178,9 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 
 	idle := time.NewTimer(s.IdleTimeout)
 	defer idle.Stop()
+	// The engine's request counts, by policy, as last reported on this
+	// stream.
+	counts := map[string]*eventsv1.PolicyStats{}
 	for {
 		select {
 		case err := <-sendErr:
@@ -189,6 +195,10 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 			idle.Reset(s.IdleTimeout)
 			if batch := r.msg.GetEvents(); batch != nil {
 				s.events(e, batch)
+				continue
+			}
+			if st := r.msg.GetStats(); st != nil {
+				s.stats(counts, st)
 				continue
 			}
 			s.record(engineID, r.msg, log)
@@ -254,6 +264,33 @@ func (s *Server) events(e Engine, batch *eventsv1.EventBatch) {
 		s.Events(batch)
 	}
 }
+
+// stats takes a report of request counts, cumulative over the stream, and
+// passes on what changed since the engine's previous report. Only the
+// current bundle's policies are taken, which bounds what is kept; latency
+// in other buckets than the operator's is left out.
+func (s *Server) stats(counts map[string]*eventsv1.PolicyStats, st *eventsv1.RequestStats) {
+	if s.Stats == nil {
+		return
+	}
+	sameBuckets := slices.Equal(st.GetLatencyBounds(), latencyBounds)
+	var deltas []*eventsv1.PolicyStats
+	for _, p := range st.GetPolicies() {
+		if !s.Bundles.HasPolicy(p.GetPolicy()) {
+			continue
+		}
+		if !sameBuckets {
+			p.LatencyCounts, p.LatencySum = nil, 0
+		}
+		deltas = append(deltas, events.DiffStats(p, counts[p.GetPolicy()]))
+		counts[p.GetPolicy()] = p
+	}
+	if len(deltas) > 0 {
+		s.Stats(deltas)
+	}
+}
+
+var latencyBounds = events.LatencyBounds()
 
 func (s *Server) record(engineID string, msg *agentv1.WatchRequest, log logr.Logger) {
 	switch m := msg.GetMsg().(type) {

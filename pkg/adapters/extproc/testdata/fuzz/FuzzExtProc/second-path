@@ -1,0 +1,11 @@
+go test fuzz v1
+string("GET")
+string("/")
+string("shop.example.com")
+string("http")
+string(":path")
+string("/admin")
+[]byte("")
+bool(true)
+bool(true)
+byte('\x00')

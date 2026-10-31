@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-09-27
-- Updated: 2026-10-30
+- Updated: 2026-10-31
 - Owner: noureldin
 - Depends on: [0001 — Performance-First Architecture](0001-performance-first-architecture.md),
   [0002 — System Architecture](0002-system-architecture.md)
@@ -45,9 +45,12 @@ It is never on the request path. The [CRD](https://kubernetes.io/docs/concepts/e
 **Built since:** Traefik [`IngressRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) targets; the `waf.inkwall.dev/unwire` [finalizer](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/) and
 unwiring with injection off ([§5](#5-uninstall-and-disable)); signing key rotation and bundle
 chunks ([§4.6](#46-bundle-builder-leader-only)); the operator side of the optional control plane:
-enrollment, GitOps and Managed modes, and security events ([§4.9](#49-upstream-sync-leader-only)).
+enrollment, GitOps and Managed modes, and security events ([§4.9](#49-upstream-sync-leader-only));
+the discovery controller ([§4.1](#41-discovery-controller)) and the wiring's `Integration` interface
+([§4.2](#42-integration-interface)).
 
-**Not yet:** other proxies, [`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) targets.
+**Not yet:** other proxies, wiring [`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) targets (the resolver reads them,
+[§4.5](#45-resolver)).
 
 ## Contents
 
@@ -157,12 +160,18 @@ Validation runs in three steps, cheapest first:
 | `Enforced` | Every serving engine ACKed a bundle with this generation | `EnginesBehind` (`3/6`), `EngineNack`, `NoEngines`, `NotInBundle` |
 | `Ready` | The three above are True | first failing condition's reason |
 
-Status also has `bundleVersion` and `observedGeneration`.
+Status also has `bundleVersion` and `observedGeneration`. `bundleVersion` is the first bundle that
+enforces the policy as it is now; later bundles do too, until one changes the policy. A bundle that
+changes only other policies doesn't change it (#149): before v0.3.0 it was the newest bundle, so
+every bundle rewrote every policy's status.
+
+`InkwallConfig.status` has `observedGeneration`, `conditions` (`ControlPlaneConnected`,
+[§4.9](#49-upstream-sync-leader-only)) and `proxies`, the discovered proxy controllers
+([§4.1](#41-discovery-controller)).
 
 **Not yet:** per-target status (`targets[]` with controller, gateway, programmed and engine
-counts), and the cluster view in `InkwallConfig.status` (integrations, engine counts, bundle
-versions, control plane state). Today `InkwallConfig.status` has only `observedGeneration` and
-`conditions`.
+counts), and the rest of the cluster view in `InkwallConfig.status` (engine counts, bundle
+versions, control plane state).
 
 ## 4. Controllers
 
@@ -172,15 +181,30 @@ for [garbage collection](https://kubernetes.io/docs/concepts/architecture/garbag
 
 ### 4.1 Discovery controller
 
-Planned: watch [`IngressClass`](https://kubernetes.io/docs/concepts/services-networking/ingress/#ingress-class) and [`GatewayClass`](https://gateway-api.sigs.k8s.io/reference/api-types/gatewayclass/), and map controller names to integrations, with
-the registry tested per controller version. Find each controller's data-plane workloads, and list
-them in `InkwallConfig.status` as `Full | Partial | Unsupported`. Unknown controllers are then
+The discovery controller watches [`IngressClass`](https://kubernetes.io/docs/concepts/services-networking/ingress/#ingress-class) and [`GatewayClass`](https://gateway-api.sigs.k8s.io/reference/api-types/gatewayclass/), maps controller names to
+integrations, and lists them in `InkwallConfig.status.proxies`. Unknown controllers are then
 visible rather than silently unprotected.
 
-**Built:** no controller yet. [`operator/integrations`](../../operator/integrations/integrations.go)
-lists Traefik only: controller `traefik.io/ingress-controller`, pods
-`app.kubernetes.io/name=traefik`, adapter `forward-auth`. (An adapter is the engine listener that
-speaks one proxy's protocol; see [0006](0006-adapter-protocols.md).)
+**Built** (`operator/internal/discovery`, leader only):
+
+- [`operator/integrations`](../../operator/integrations/integrations.go) lists Traefik only:
+  IngressClass controller `traefik.io/ingress-controller`, GatewayClass controller
+  `traefik.io/gateway-controller`, pods `app.kubernetes.io/name=traefik`, adapter `forward-auth`.
+  (An adapter is the engine listener that speaks one proxy's protocol; see
+  [0006](0006-adapter-protocols.md).)
+- One entry per controller: its `controllerName`, its `integration` (empty when Inkwall has none),
+  its `ingressClasses` and `gatewayClasses`, and `support`:
+  - `Full`: the integration's wiring takes the routes of all its classes: `Ingress` for an
+    IngressClass, `HTTPRoute` for a GatewayClass;
+  - `Partial`: of some of them; the `message` says which it doesn't;
+  - `Unsupported`: of none, or no integration. Today that includes Traefik's GatewayClasses.
+- It writes the status only when it changes, and only into an existing `InkwallConfig` `default`:
+  the operator doesn't create one.
+- Without the Gateway API's CRDs, GatewayClasses are left out; the leader looks for their CRD
+  every 30 s (`operator/internal/crdwatch`).
+
+**Not yet:** finding each controller's data-plane workloads from its classes (the pods are found by
+label selectors, [§4.3](#43-injection-controller)); a registry tested per controller version.
 
 ### 4.2 Integration interface
 
@@ -188,7 +212,32 @@ Planned: one package per proxy under `operator/integrations/<name>/`, implementi
 `Match`, `Discover`, `Injection`, `Render` (pure, tested with golden files) and `Health`. Adding a
 proxy would then change no controller.
 
-**Built:** a plain `Integration` struct. Injection and wiring are Traefik-specific.
+**Built:** two halves. `integrations.Integration`, a plain struct, describes a proxy to discovery
+and injection: its class controllers, pod selector and adapter. The wiring goes through the
+`Integration` interface in [`operator/internal/wiring`](../../operator/internal/wiring/integration.go),
+one implementation per proxy (`Traefik`):
+
+| Method | Does |
+|---|---|
+| `Name` | The integration's name, and the `integration` label of the wiring metrics ([§4.8](#48-status-aggregator)) |
+| `Kinds` | The target kinds it wires, by group and kind; several integrations may share one |
+| `Watch` | Adds the watches its wiring reads: routes, classes, its pods, its own objects |
+| `Wire` | Wires the targets its proxy serves, unwires the rest, and returns a state per target: served by another proxy (with why), failed (with why), or wired; plus its pods |
+| `Wired` | Whether a target is still wired, read uncached, before a deleted policy is released |
+| `Unwire` | Removes all of its wiring at uninstall ([§5](#5-uninstall-and-disable)) |
+
+The wiring controller owns what every proxy shares: the finalizer, collecting the targets of the
+live policies, the `Programmed` condition (a target counts for the integration whose proxy serves
+it; if none does, it is `ControllerUnsupported` with the first integration's reason) and the
+sidecar checks on each integration's pods. Each integration's RBAC markers sit next to its code.
+
+An `HTTPRoute` integration (Traefik's Gateway API, Envoy Gateway) adds its `HTTPRoute` kind,
+serves the routes whose parent Gateway has one of its GatewayClasses, wires each one (for example, Traefik's
+Middleware through an `ExtensionRef` filter, or Envoy Gateway's `EnvoyExtensionPolicy`), and is
+added to `wiring.Integrations`. Discovery then reports its GatewayClasses `Full`.
+
+**Not yet:** injection behind the interface (it is Traefik's Pod webhook); `Render` and golden
+files; `Health`.
 
 ### 4.3 Injection controller
 
@@ -343,11 +392,14 @@ engine matches on. This is decision D6, the operator resolves routes
 
 It runs again when a targeted route changes (routes are indexed by target).
 
-**Built (v0.1.0)** (`operator/resolver`; Ingress, and IngressRoute since):
+**Built (v0.1.0)** (`operator/resolver`; Ingress, and IngressRoute and HTTPRoute since):
 
 - **Conflicts:** the oldest policy wins (by creation time, then name), and the others get
-  `Conflict`, as in [Gateway API](https://gateway-api.sigs.k8s.io/). Rejecting both would leave the route unprotected. Identical routes
-  from two Ingresses also go to the older policy.
+  `Conflict`, as in [Gateway API](https://gateway-api.sigs.k8s.io/). Rejecting both would leave the route unprotected.
+- **Precedence.** Identical routes (host, path and methods) from two targets go to the most
+  specific one: an HTTPRoute rule (`sectionName`), then a whole HTTPRoute, then an Ingress or an
+  IngressRoute. Between targets of the same kind, they go to the older policy. The other policy
+  keeps its other routes, and its `Accepted` message lists the ones it lost.
 - **Errors fall back.** A policy that can't be resolved keeps its version in the current bundle, so
   a bad edit never weakens protection. A policy that was never resolved is left out. A missing
   target is not an error.
@@ -364,6 +416,20 @@ It runs again when a targeted route changes (routes are indexed by target).
     force.
   - Traefik's `PathPrefix` is a string prefix, but it is read element-wise. Other paths of a covered
     host get that host's most general policy in the engine, so none goes uninspected.
+- **HTTPRoute routes** are its `hostnames` × each rule's `matches`.
+  - `Exact` and `PathPrefix` paths, cleaned; a `method` is kept. No `hostnames` means any host (the
+    listeners' hostnames aren't read); a rule without `matches`, or a match without a path, is
+    `PathPrefix /`.
+  - `sectionName` narrows the target to the rule of that `name`. A name no rule has is a missing
+    target.
+  - `RegularExpression` paths, `headers` and `queryParams` are `Accepted=False`
+    (`TargetUnsupported`), naming the rule (`spec.rules[1].matches[0] (rule admin)`). The previous
+    version stays in force. A rule the target doesn't select isn't read.
+  - Read once the HTTPRoute CRD (`gateway.networking.k8s.io/v1`) is installed: the leader looks for
+    it every 30 s, then the bundle builder watches HTTPRoutes (`operator/internal/crdwatch`).
+    Without it nothing changes.
+  - No proxy wires an HTTPRoute yet: such a policy is `Programmed=False`
+    (`ControllerUnsupported`).
 - **Cross-namespace `WAFRuleSet` references** are rejected until a grant mechanism exists. Use a
   `ClusterWAFRuleSet` instead.
 
@@ -484,12 +550,22 @@ conditions of [§3.2](#32-status-contract). It writes only on change, at most on
 
 **Built (v0.1.0):** `Enforced=True` when every connected engine runs a bundle whose version is at
 least the policy's `status.bundleVersion`. Otherwise the reason is `NoEngines`, `EnginesBehind`
-(`1/3 engines on bundle 42`), `EngineNack` (with the first error) or `NotInBundle`.
+(`1/3 engines on bundle 42`), `EngineNack` (with the first error) or `NotInBundle`. It waits for
+the bundle builder to report the policy's current generation (`status.observedGeneration`).
+
+**Writes per bundle** (#149). The builder writes a policy's `bundleVersion` only when the bundle
+changes what the policy enforces: its own entry, the rule sets it binds, or suspension
+(`bundle.PolicyHashes`). It remembers the version per policy; a new leader keeps a policy's
+reported version when the bundle didn't change it. So a one-policy edit writes one policy's status,
+and the `Enforced` of the others, which name their own bundle, stays as it is.
 
 Metrics: `inkwall_operator_bundle_version`, `inkwall_operator_engines{state}`,
-`inkwall_operator_bundle_compressed_bytes` ([§4.6](#46-bundle-builder-leader-only)).
+`inkwall_operator_bundle_compressed_bytes` ([§4.6](#46-bundle-builder-leader-only)), and, from the
+wiring, `inkwall_operator_wired_targets{integration}` and
+`inkwall_operator_wiring_failures{integration}` (targets that are `WiringFailed`).
 
-**Not yet:** an `integration` label, reconcile duration, policy condition counts.
+**Not yet:** an `integration` label on the engine counts (engines aren't matched to proxies yet),
+reconcile duration, policy condition counts.
 
 ### 4.9 Upstream sync (leader only)
 
@@ -543,6 +619,8 @@ leader only, and is idle in Standalone mode (the default).
   is full, the oldest events are dropped and counted.
 - What wasn't acknowledged is sent again after a reconnect or a restart.
   `inkwall_operator_events_buffered` follows the buffer, outages included.
+- Every replica also sums its engines' request counts per policy and sends them on that stream
+  every 10 s, when the control plane accepts them, even if it doesn't accept events.
 - The events stream reconnects with jittered backoff bounded at 10 s (the leader's primary stream:
   1 min), so the backlog drains soon after an outage.
 
@@ -673,9 +751,11 @@ Least privilege. The built rules are in [`role.yaml`](../../operator/config/rbac
 | `waf.inkwall.dev/*` | read; update status | Own CRDs |
 | `wafpolicies` | update, patch | The `waf.inkwall.dev/unwire` finalizer ([§5](#5-uninstall-and-disable)) |
 | `wafpolicies`, `wafrulesets`, `clusterwafrulesets` | create, update, delete | Managed mode ([§4.9](#49-upstream-sync-leader-only)); the webhook keeps others off them |
-| `ingressclasses`, `ingresses`, `pods` | read | Resolution, injection checks |
+| `ingressclasses`, `ingresses`, `pods` | read | Resolution, injection checks, discovery |
+| `gatewayclasses` (gateway.networking.k8s.io) | read | Discovery |
 | `ingresses` | patch | Traefik annotation |
 | `ingressroutes` (traefik.io) | read, patch | Traefik routes' `middlewares` |
+| `httproutes`, `gateways`, `gatewayclasses` (gateway.networking.k8s.io) | read | HTTPRoute targets ([§4.5](#45-resolver)) |
 | `middlewares` (traefik.io) | full | Traefik wiring |
 | `configmaps` | full, cluster-wide | `inkwall-trust` per namespace, engine reports |
 | `secrets` | in `inkwall-system` | Bundle, signing key, certificates |
@@ -688,8 +768,9 @@ Least privilege. The built rules are in [`role.yaml`](../../operator/config/rbac
 **Not yet:**
 
 - one `ClusterRole` per controller, aggregated by the chart, with rules for absent proxies left out
-  (`.Capabilities.APIVersions`);
-- rules for Gateway API, Envoy Gateway, Istio and controller ConfigMaps;
+  (`.Capabilities.APIVersions`). The markers are already grouped by integration; controller-gen
+  merges them into one role;
+- rules for writing Gateway API objects, Envoy Gateway, Istio and controller ConfigMaps;
 - a `deployments` restart patch, only with `rollout: Automatic`.
 
 ## 8. Scale targets (v1)
@@ -740,15 +821,16 @@ Against the targets:
 - **Bundle size: met.** It is 134 KiB compressed at 5,000 policies, far under 900 KiB.
   Uncompressed it is 1.9 MiB, nearly half of gRPC's default 4 MiB receive limit, which engines
   keep.
-- **Change → every engine: met up to 5,000 policies × 50 engines** (1.5 s), but not at
-  5,000 × 500. There it took 4 s typically, but one edit took 47 s.
+- **Change → every engine: met** since #149 (5.3 s at 5,000 × 500). Before, it was met up to
+  5,000 policies × 50 engines (1.5 s), but not at 5,000 × 500: there it took 4 s typically, but one
+  edit took 47 s.
   - Cause: waiting for one of the 50 send slots counted against a stream's 30 s idle timeout, and
     its heartbeats weren't read meanwhile. So engines were disconnected, and got the bundle again
     after reconnecting.
   - Fixed (#148): bundles are sent from a [goroutine](https://go.dev/tour/concurrency/1) of their own, so heartbeats are read meanwhile.
     Reruns at 5,000 × 500 since have no disconnects.
-  - Still open: one edit in ten can take 24–28 s, before as after the fix, so another cause
-    remains.
+  - One edit in ten still took 11–28 s after it: the reconcile below. Since #149, the slowest of
+    10 edits takes 5–6 s.
 - **Operator memory: just over the target at 5,000 × 500** (518 MiB); met everywhere else.
   - Before: each stream marshalled the bundle itself. A stream's send returns once the message is
     queued on its connection, not once it is written. So the operator held engines × bundle bytes
@@ -760,9 +842,21 @@ Against the targets:
   - The 1,000 × 500 and 5,000 × 500 rows are from after #147. Before it, on the same machine and
     harness: 988 MiB / 953 MiB heap at 1,000 × 500, and 2,007 MiB / 1,886 MiB at 5,000 × 500.
     Both runs shared the machine with a kind e2e test, so their times are noisier.
-- **Not a target yet, but slow: the reconcile.** Each new bundle writes the `status.bundleVersion`
-  of every policy (then `Enforced`). So a reconcile takes 9–19 s at 5,000 policies, changes during
-  it wait, and the initial sync takes 20–25 s.
+- **The reconcile and the initial sync** (#149). Each new bundle wrote the `status.bundleVersion`
+  of every policy, then the Reporter rewrote every `Enforced`. So a reconcile took 9–19 s at 5,000
+  policies, and changes during it waited.
+  - Now a bundle writes the status of the policies it changes only
+    ([§4.8](#48-status-aggregator)), and the first build after a sync writes up to 8 statuses at
+    once.
+  - Same machine and harness, before → after:
+
+| Policies / engines | Reconcile | Initial sync | Change → all engines, p50 / p95 / max |
+|---|---|---|---|
+| 5,000 × 50 | 15.9 → 0.42 s | 25.0 → 3.2 s | 1.4 / 3.1 / 3.1 → 1.8 / 2.5 / 2.5 s |
+| 5,000 × 500 | 12.1 → 0.37 s | 15.8 → 5.2 s | 3.8 / 10.8 / 10.8 → 3.9 / 5.3 / 5.3 s |
+
+  The table above predates #149. With 10 edits, p95 and max are the same edit. Peak RSS at
+  5,000 × 500 was 404 MiB before and 509 MiB after, in one run each: under the target, but close.
 
 **Engine memory per policy.** A compiled Coraza WAF with the CRS keeps
 about 2.1 MiB of heap, and takes 10–15 ms to compile.
@@ -830,9 +924,10 @@ operator/
 │   ├── controller/     # reconcilers
 │   ├── controlplane/   # upstream sync (§4.9)
 │   ├── crdwatch/       # watches added once a CRD is installed
+│   ├── discovery/      # proxy controllers in InkwallConfig.status (§4.1)
 │   ├── distribution/   # BundleService server, auth, status
 │   ├── injection/
-│   └── wiring/
+│   └── wiring/         # the controller, Integration, Traefik
 ├── manager/
 ├── resolver/
 ├── webhook/            # validating + mutating handlers, Managed-mode guard
@@ -840,8 +935,7 @@ operator/
 └── test/               # testenv, fakeengine, fakecontrolplane, stubcontrolplane, scale
 ```
 
-`main` is in `cmd/operator`. Planned: `internal/discovery`, and one package per proxy under
-`integrations/`. The Helm chart `deploy/helm/inkwall` is the supported install; [kustomize](https://kubectl.docs.kubernetes.io/references/kustomize/) is for
+`main` is in `cmd/operator`. Planned: one package per proxy under `integrations/`. The Helm chart `deploy/helm/inkwall` is the supported install; [kustomize](https://kubectl.docs.kubernetes.io/references/kustomize/) is for
 development.
 
 ## 11. Milestones

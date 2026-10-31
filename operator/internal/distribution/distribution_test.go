@@ -453,3 +453,81 @@ func TestWatchWaitingForASendSlot(t *testing.T) {
 		t.Fatalf("an engine that waited for a slot: got %v, %v, want the bundle", resp, err)
 	}
 }
+
+// Request counts: the server passes on the differences between an
+// engine's reports, for the bundle's policies only. A restarted engine
+// opens a new stream that counts from zero again.
+func TestWatchStats(t *testing.T) {
+	store, table := NewStore(), NewTable()
+	store.Set(signed(1), 1)
+	store.SetPolicies(map[string]bool{"shop/site": true})
+	var mu sync.Mutex
+	var got []*eventsv1.PolicyStats
+	s := NewServer(store, table, fakeAuth{}, "replica-0", logr.Discard())
+	s.Stats = func(d []*eventsv1.PolicyStats) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, d...)
+	}
+	c := serve(t, s)
+	total := func() (allowed, denied, timed uint64) {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, p := range got {
+			allowed, denied = allowed+p.GetAllowed(), denied+p.GetDenied()
+			for _, n := range p.GetLatencyCounts() {
+				timed += n
+			}
+		}
+		return allowed, denied, timed
+	}
+	report := func(stream agentv1.BundleService_WatchClient, bounds []float64, policies ...*eventsv1.PolicyStats) {
+		t.Helper()
+		if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Stats{Stats: &eventsv1.RequestStats{
+			LatencyBounds: bounds, Policies: policies,
+		}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	site := func(allowed, denied uint64) *eventsv1.PolicyStats {
+		counts := make([]uint64, len(latencyBounds)+1)
+		counts[0] = allowed + denied
+		return &eventsv1.PolicyStats{Policy: "shop/site", Allowed: allowed, Denied: denied, LatencyCounts: counts}
+	}
+	open := func() agentv1.BundleService_WatchClient {
+		t.Helper()
+		stream, err := c.Watch(withToken(t.Context(), "engine"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{EngineId: "e1"}}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := stream.Recv(); err != nil {
+			t.Fatal(err)
+		}
+		return stream
+	}
+
+	stream := open()
+	report(stream, latencyBounds, site(3, 1), &eventsv1.PolicyStats{Policy: "gone/policy", Allowed: 100})
+	report(stream, latencyBounds, site(5, 2))
+	waitFor(t, "the differences", func() bool { a, d, n := total(); return a == 5 && d == 2 && n == 7 })
+
+	// The engine restarts: its new stream counts from zero.
+	_ = stream.CloseSend()
+	stream = open()
+	report(stream, latencyBounds, site(1, 0))
+	waitFor(t, "the restarted engine's counts", func() bool { a, d, n := total(); return a == 6 && d == 2 && n == 8 })
+
+	// Latency in other buckets is left out; the counts are taken.
+	report(stream, []float64{1, 2}, site(2, 0))
+	waitFor(t, "the counts without latency", func() bool { a, _, n := total(); return a == 7 && n == 8 })
+	mu.Lock()
+	defer mu.Unlock()
+	for _, p := range got {
+		if p.GetPolicy() != "shop/site" {
+			t.Errorf("counts of %s, which the bundle doesn't have", p.GetPolicy())
+		}
+	}
+}

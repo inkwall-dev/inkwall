@@ -42,7 +42,10 @@ func Installed(mapper meta.RESTMapper, gvk schema.GroupVersionKind) (bool, error
 // a leader-only manager runnable, like the controllers; Add every watch
 // before the manager starts.
 type Kind struct {
-	GVK    schema.GroupVersionKind
+	GVK schema.GroupVersionKind
+	// Object is the type watched, as the cache holds it; nil:
+	// unstructured.
+	Object client.Object
 	Mapper meta.RESTMapper
 	Cache  cache.Cache
 	// Interval between looks for the CRD; 0: DefaultInterval.
@@ -57,7 +60,7 @@ type watch struct {
 	predicates []predicate.Predicate
 }
 
-// Add watches GVK, as unstructured objects, for c once it is served.
+// Add watches GVK for c once it is served.
 func (k *Kind) Add(c controller.Controller, h handler.EventHandler, predicates ...predicate.Predicate) {
 	k.watches = append(k.watches, watch{controller: c, handler: h, predicates: predicates})
 }
@@ -84,8 +87,14 @@ func (k *Kind) Start(ctx context.Context) error {
 		}
 	}
 	for _, w := range k.watches {
-		obj := &unstructured.Unstructured{}
-		obj.SetGroupVersionKind(k.GVK)
+		var obj client.Object
+		if k.Object != nil {
+			obj = k.Object.DeepCopyObject().(client.Object)
+		} else {
+			u := &unstructured.Unstructured{}
+			u.SetGroupVersionKind(k.GVK)
+			obj = u
+		}
 		if err := w.controller.Watch(source.Kind[client.Object](k.Cache, obj, w.handler, w.predicates...)); err != nil {
 			return err
 		}

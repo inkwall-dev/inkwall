@@ -14,6 +14,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
@@ -187,6 +188,16 @@ func TestController(t *testing.T) {
 	}
 }
 
+// traefikProgrammed is a policy's Programmed with Traefik's integration
+// alone, which found st.
+func traefikProgrammed(p *wafv1alpha1.WAFPolicy, st *state, injectingSince time.Time) (metav1.ConditionStatus, string, string) {
+	targets := map[Target]bool{}
+	for _, ref := range p.Spec.TargetRefs {
+		targets[targetOf(p.Namespace, ref)] = true
+	}
+	return programmed(p, &report{kinds: (&Traefik{}).Kinds(), results: []*Result{st.result(targets)}, injectingSince: injectingSince})
+}
+
 func TestProgrammed(t *testing.T) {
 	traefik := integrations.Traefik.Controller
 	k := func(n string) types.NamespacedName { return types.NamespacedName{Namespace: "shop", Name: n} }
@@ -257,10 +268,10 @@ func TestProgrammed(t *testing.T) {
 		{"opted out", pol("web"), true, nil, []corev1.Pod{withEngine, optedOut}, metav1.ConditionFalse, ReasonSidecarMissing, `opted out with waf.inkwall.dev/inject: "false": traefik/t-out`, true},
 		{"missing target", pol("gone"), true, nil, []corev1.Pod{withEngine}, metav1.ConditionFalse, ReasonNoTargets, "none", true},
 	} {
-		st, reason, msg := programmed(tc.p, &state{ingresses: ings, wire: wire, routes: routes, routeCRD: tc.routeCRD,
+		st, reason, msg := traefikProgrammed(tc.p, &state{ingresses: ings, wire: wire, routes: routes, routeCRD: tc.routeCRD,
 			routeErr:    map[types.NamespacedName]string{k("bad"): "IngressRoute bad: forbidden"},
 			ingressErr:  map[types.NamespacedName]string{k("bad"): "Ingress bad: forbidden"},
-			traefikCRDs: tc.crds, middlewareErr: tc.mwErr, pods: tc.pods, injectingSince: since})
+			traefikCRDs: tc.crds, middlewareErr: tc.mwErr, pods: tc.pods}, since)
 		if st != tc.status || reason != tc.reason || !strings.Contains(msg, tc.msg) {
 			t.Errorf("%s: %s %s %q", tc.name, st, reason, msg)
 		}
@@ -275,8 +286,8 @@ func TestProgrammedUnknownSince(t *testing.T) {
 	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"},
 		Spec: wafv1alpha1.WAFPolicySpec{TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}}}}
 	pod := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "traefik", Name: "t", CreationTimestamp: metav1.Now()}}
-	_, reason, _ := programmed(p, &state{ingresses: map[types.NamespacedName]*networkingv1.Ingress{k: ing},
-		wire: map[types.NamespacedName]target{k: {ing: ing, controller: integrations.Traefik.Controller}}, traefikCRDs: true, pods: []corev1.Pod{pod}})
+	_, reason, _ := traefikProgrammed(p, &state{ingresses: map[types.NamespacedName]*networkingv1.Ingress{k: ing},
+		wire: map[types.NamespacedName]target{k: {ing: ing, controller: integrations.Traefik.Controller}}, traefikCRDs: true, pods: []corev1.Pod{pod}}, time.Time{})
 	if reason != ReasonPendingRestart {
 		t.Errorf("reason %s, want %s", reason, ReasonPendingRestart)
 	}
@@ -285,7 +296,42 @@ func TestProgrammedUnknownSince(t *testing.T) {
 // With injection off, nothing is wired, whatever the targets.
 func TestProgrammedDisabled(t *testing.T) {
 	p := &wafv1alpha1.WAFPolicy{Spec: wafv1alpha1.WAFPolicySpec{TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}}}}
-	if st, reason, _ := programmed(p, &state{disabled: true, traefikCRDs: true}); st != metav1.ConditionFalse || reason != ReasonInjectionDisabled {
+	if st, reason, _ := programmed(p, &report{disabled: true}); st != metav1.ConditionFalse || reason != ReasonInjectionDisabled {
 		t.Errorf("%s %s, want False %s", st, reason, ReasonInjectionDisabled)
+	}
+}
+
+// Two integrations share Ingress: each target is reported by the one whose
+// proxy serves it.
+func TestProgrammedShared(t *testing.T) {
+	ingress := func(name string) Target {
+		return Target{Kind: ingressKind, Key: types.NamespacedName{Namespace: "shop", Name: name}}
+	}
+	withEngine := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "edge", Name: "e"},
+		Spec: corev1.PodSpec{InitContainers: []corev1.Container{{Name: injection.ContainerName}}}}
+	traefik := &Result{Proxy: "Traefik", Pods: []corev1.Pod{withEngine}, Targets: map[Target]TargetState{
+		ingress("web"): {Wired: true},
+		ingress("api"): {Unsupported: "Ingress api is served by example.com/other, which Inkwall doesn't wire yet"},
+		ingress("old"): {Unsupported: "Ingress old is served by example.com/old, which Inkwall doesn't wire yet"},
+	}}
+	other := &Result{Proxy: "Other", Pods: []corev1.Pod{withEngine}, Targets: map[Target]TargetState{
+		ingress("web"): {Unsupported: "Ingress web is served by traefik.io/ingress-controller"},
+		ingress("api"): {Wired: true},
+		ingress("old"): {Unsupported: "Ingress old is served by example.com/old"},
+	}}
+	rep := &report{kinds: []schema.GroupKind{ingressKind, routeKind, ingressKind}, results: []*Result{traefik, other}}
+	pol := func(names ...string) *wafv1alpha1.WAFPolicy {
+		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}}
+		for _, n := range names {
+			p.Spec.TargetRefs = append(p.Spec.TargetRefs, wafv1alpha1.TargetRef{Kind: "Ingress", Name: n})
+		}
+		return p
+	}
+	if st, _, msg := programmed(pol("web", "api"), rep); st != metav1.ConditionTrue ||
+		msg != "1 Ingress(es) wired to the engine in Traefik; 1 Ingress(es) wired to the engine in Other" {
+		t.Errorf("both served: %s %q", st, msg)
+	}
+	if _, reason, msg := programmed(pol("web", "old"), rep); reason != ReasonControllerUnsupported || !strings.Contains(msg, "example.com/old, which") {
+		t.Errorf("served by neither: %s %q", reason, msg)
 	}
 }

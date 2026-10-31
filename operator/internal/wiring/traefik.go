@@ -2,22 +2,37 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package wiring sends a proxy's protected routes to the engine (0004
-// §4.4). For Traefik: an operator-owned ForwardAuth Middleware in each
-// namespace with protected routes, attached to protected Ingresses through
-// Traefik's router.middlewares annotation, and to protected IngressRoutes'
-// routes through their middlewares.
+// §4.4), through one Integration per proxy. For Traefik: an operator-owned
+// ForwardAuth Middleware in each namespace with protected routes, attached
+// to protected Ingresses through Traefik's router.middlewares annotation,
+// and to protected IngressRoutes' routes through their middlewares.
 package wiring
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 
+	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/inkwall-dev/inkwall/operator/integrations"
+	"github.com/inkwall-dev/inkwall/operator/internal/crdwatch"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
 )
 
@@ -256,4 +271,430 @@ func Controller(ing *networkingv1.Ingress, classes map[string]string, defaultCla
 // IsDefaultClass reports whether an IngressClass is the cluster default.
 func IsDefaultClass(ic *networkingv1.IngressClass) bool {
 	return ic.Annotations[defaultClassAnnotation] == "true"
+}
+
+// Traefik's wiring reads routes, classes and Traefik's pods, and writes the
+// Middleware in protected namespaces and the references to it.
+//
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingressclasses,verbs=get;list;watch
+// +kubebuilder:rbac:groups=traefik.io,resources=middlewares,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=traefik.io,resources=ingressroutes,verbs=get;list;watch;update;patch
+
+// Traefik is the wiring of Traefik: its Ingresses and IngressRoutes.
+type Traefik struct {
+	Client client.Client
+	// APIReader reads Middlewares and targets uncached.
+	APIReader client.Reader
+	// Pods selects Traefik's pods (integrations.Selectors).
+	Pods labels.Selector
+	// IngressRoutes watches Traefik's IngressRoutes once their CRD is
+	// installed; nil: they are only read at each reconcile.
+	IngressRoutes *crdwatch.Kind
+
+	// noResponseLimit: the API server dropped the Middleware's
+	// maxResponseBodySize (Traefik before v3.7), so it isn't asked for
+	// again; otherwise every reconcile would rewrite the Middleware.
+	noResponseLimit atomic.Bool
+}
+
+var (
+	ingressKind = schema.GroupKind{Group: networkingv1.GroupName, Kind: "Ingress"}
+	routeKind   = IngressRouteGVK.GroupKind()
+)
+
+// Name implements Integration.
+func (*Traefik) Name() string { return integrations.Traefik.Name }
+
+// Kinds implements Integration.
+func (*Traefik) Kinds() []schema.GroupKind { return []schema.GroupKind{ingressKind, routeKind} }
+
+// Watch implements Integration.
+func (t *Traefik) Watch(c controller.Controller, cache cache.Cache, h handler.EventHandler) error {
+	// Ingress annotations matter (the operator's own included). The
+	// manager caches only proxy pods: their sidecar decides PendingRestart.
+	for _, obj := range []client.Object{&networkingv1.Ingress{}, &networkingv1.IngressClass{}, &corev1.Pod{}} {
+		if err := c.Watch(source.Kind(cache, obj, h)); err != nil {
+			return err
+		}
+	}
+	if t.IngressRoutes != nil {
+		// Their middlewares matter (the operator's own included).
+		t.IngressRoutes.Add(c, h)
+	}
+	return nil
+}
+
+// target is an Ingress some policy protects.
+type target struct {
+	ing        *networkingv1.Ingress
+	controller string
+}
+
+// state is what Wire found, for its Result.
+type state struct {
+	ingresses map[types.NamespacedName]*networkingv1.Ingress
+	// wire are the Ingress targets.
+	wire map[types.NamespacedName]target
+	// routes are the IngressRoutes, when routeCRD (their CRD is
+	// installed); routeErr says why one couldn't be wired.
+	routes   map[types.NamespacedName]*unstructured.Unstructured
+	routeCRD bool
+	routeErr map[types.NamespacedName]string
+	// ingressErr says why an Ingress couldn't be wired.
+	ingressErr map[types.NamespacedName]string
+	// traefikCRDs: the Middleware CRD is installed.
+	traefikCRDs bool
+	// middlewareErr: namespace -> why its Middleware can't be used.
+	middlewareErr map[string]string
+	// wanted are the routes kept wired, by kind.
+	wanted map[schema.GroupKind]map[types.NamespacedName]bool
+	pods   []corev1.Pod
+}
+
+// IngressRoutes lists Traefik's IngressRoutes; installed is false, with
+// none, when their CRD isn't.
+func IngressRoutes(ctx context.Context, c client.Client) (routes []unstructured.Unstructured, installed bool, err error) {
+	if installed, err = crdwatch.Installed(c.RESTMapper(), IngressRouteGVK); !installed || err != nil {
+		return nil, false, err
+	}
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(IngressRouteGVK.GroupVersion().WithKind("IngressRouteList"))
+	if err := c.List(ctx, list); err != nil {
+		return nil, true, err
+	}
+	return list.Items, true, nil
+}
+
+// Wire implements Integration: it wires every protected Traefik Ingress and
+// IngressRoute, and unwires the rest.
+func (t *Traefik) Wire(ctx context.Context, targets map[Target]bool, off bool) (*Result, error) {
+	logger := log.FromContext(ctx)
+	var (
+		ingresses networkingv1.IngressList
+		classList networkingv1.IngressClassList
+		pods      corev1.PodList
+	)
+	for _, l := range []client.ObjectList{&ingresses, &classList} {
+		if err := t.Client.List(ctx, l); err != nil {
+			return nil, err
+		}
+	}
+	if err := t.Client.List(ctx, &pods, client.MatchingLabelsSelector{Selector: t.Pods}); err != nil {
+		return nil, err
+	}
+	classes, defaultClass := map[string]string{}, ""
+	for i := range classList.Items {
+		ic := &classList.Items[i]
+		classes[ic.Name] = ic.Spec.Controller
+		if IsDefaultClass(ic) {
+			defaultClass = ic.Name
+		}
+	}
+	byKey := map[types.NamespacedName]*networkingv1.Ingress{}
+	for i := range ingresses.Items {
+		ing := &ingresses.Items[i]
+		byKey[types.NamespacedName{Namespace: ing.Namespace, Name: ing.Name}] = ing
+	}
+
+	routes, routeCRD, err := IngressRoutes(ctx, t.Client)
+	if err != nil {
+		return nil, err
+	}
+	st := &state{
+		ingresses: byKey, wire: map[types.NamespacedName]target{},
+		routes: map[types.NamespacedName]*unstructured.Unstructured{}, routeCRD: routeCRD, routeErr: map[types.NamespacedName]string{},
+		ingressErr:  map[types.NamespacedName]string{},
+		traefikCRDs: t.middlewaresInstalled(), middlewareErr: map[string]string{},
+		wanted: map[schema.GroupKind]map[types.NamespacedName]bool{ingressKind: {}, routeKind: {}},
+		pods:   pods.Items,
+	}
+	for i := range routes {
+		ir := &routes[i]
+		st.routes[types.NamespacedName{Namespace: ir.GetNamespace(), Name: ir.GetName()}] = ir
+	}
+
+	// The routes go to the engine only while a Traefik pod that gets it
+	// runs. With injection off, or no Traefik pod selected (the
+	// InkwallConfig's selector changed, or was deleted), new proxy pods
+	// would have no engine: nothing is wired.
+	on := !off && len(running(pods.Items)) > 0 && st.traefikCRDs
+
+	// The routes to wire: every Ingress target that Traefik serves, and
+	// every IngressRoute target.
+	wireRoutes := map[types.NamespacedName]bool{}
+	for tg := range targets {
+		switch tg.Kind {
+		case ingressKind:
+			if ing, ok := byKey[tg.Key]; ok {
+				st.wire[tg.Key] = target{ing: ing, controller: Controller(ing, classes, defaultClass)}
+			}
+		case routeKind:
+			if _, ok := st.routes[tg.Key]; ok {
+				wireRoutes[tg.Key] = true
+			}
+		}
+	}
+
+	needed := map[string]bool{} // namespaces whose Middleware is used
+	if on {
+		for _, tg := range st.wire {
+			if tg.controller == integrations.Traefik.Controller {
+				needed[tg.ing.Namespace] = true
+			}
+		}
+		for k := range wireRoutes {
+			needed[k.Namespace] = true
+		}
+		for ns := range needed {
+			if err := t.ensureMiddleware(ctx, ns); err != nil {
+				st.middlewareErr[ns] = err.Error()
+				logger.Error(err, "Middleware not wired", "namespace", ns)
+			}
+		}
+	}
+
+	// Ingress annotations: add the Middleware to protected Traefik
+	// Ingresses, remove it from those the operator wired before. One that
+	// can't be written is reported, the others are still wired, and its
+	// namespace keeps the Middleware: a router referring to a missing one
+	// fails.
+	var errs error
+	for i := range ingresses.Items {
+		ing := &ingresses.Items[i]
+		k := types.NamespacedName{Namespace: ing.Namespace, Name: ing.Name}
+		tg, protected := st.wire[k]
+		want := protected && on && tg.controller == integrations.Traefik.Controller && st.middlewareErr[ing.Namespace] == ""
+		st.wanted[ingressKind][k] = want
+		if err := annotate(ctx, t.Client, ing, want); err != nil {
+			errs = errors.Join(errs, fmt.Errorf("wire Ingress %s: %w", k, err))
+			st.ingressErr[k] = fmt.Sprintf("Ingress %s: %v", k.Name, err)
+			needed[k.Namespace] = true
+		}
+	}
+
+	// IngressRoutes: the same, in each route's middlewares.
+	for k, ir := range st.routes {
+		want := wireRoutes[k] && on && st.middlewareErr[k.Namespace] == ""
+		st.wanted[routeKind][k] = want
+		switch err := wireRoute(ctx, t.Client, ir, want); {
+		case apierrors.IsConflict(err):
+			// Changed since the cache saw it: again, once it has.
+			errs = errors.Join(errs, fmt.Errorf("wire IngressRoute %s: %w", k, err))
+			needed[k.Namespace] = true
+		case err != nil:
+			errs = errors.Join(errs, fmt.Errorf("wire IngressRoute %s: %w", k, err))
+			st.routeErr[k] = fmt.Sprintf("IngressRoute %s: %v", k.Name, err)
+			logger.Error(err, "IngressRoute not wired", "ingressroute", k)
+			needed[k.Namespace] = true
+		}
+	}
+
+	// After the routes: a router referring to a missing Middleware fails.
+	if st.traefikCRDs {
+		if err := t.pruneMiddlewares(ctx, needed); err != nil {
+			errs = errors.Join(errs, err)
+		}
+	}
+	return st.result(targets), errs
+}
+
+// result reports on each target.
+func (st *state) result(targets map[Target]bool) *Result {
+	res := &Result{Proxy: "Traefik", Targets: map[Target]TargetState{}, Pods: st.pods}
+	for tg := range targets {
+		k := tg.Key
+		var s TargetState
+		switch tg.Kind {
+		case ingressKind:
+			if _, ok := st.ingresses[k]; !ok {
+				continue
+			}
+			switch c := st.wire[k].controller; {
+			case c != integrations.Traefik.Controller:
+				if c == "" {
+					c = "no known IngressClass"
+				}
+				s.Unsupported = fmt.Sprintf("Ingress %s is served by %s, which Inkwall doesn't wire yet", k.Name, c)
+			case !st.traefikCRDs:
+				s.Failed = "Traefik's Middleware CRD is not installed"
+			case st.middlewareErr[k.Namespace] != "":
+				s.Failed = st.middlewareErr[k.Namespace]
+			case st.ingressErr[k] != "":
+				s.Failed = st.ingressErr[k]
+			}
+		case routeKind:
+			switch {
+			case !st.routeCRD:
+				s.Failed = "Traefik's IngressRoute CRD is not installed"
+			case st.routes[k] == nil:
+				continue
+			case !st.traefikCRDs:
+				s.Failed = "Traefik's Middleware CRD is not installed"
+			case st.middlewareErr[k.Namespace] != "":
+				s.Failed = st.middlewareErr[k.Namespace]
+			case st.routeErr[k] != "":
+				s.Failed = st.routeErr[k]
+			}
+		default:
+			continue
+		}
+		s.Wired = st.wanted[tg.Kind][k]
+		res.Targets[tg] = s
+	}
+	return res
+}
+
+// Wired implements Integration: the target carries WiredAnnotation.
+func (t *Traefik) Wired(ctx context.Context, tg Target) (bool, error) {
+	var obj client.Object
+	switch tg.Kind {
+	case ingressKind:
+		obj = &networkingv1.Ingress{}
+	case routeKind:
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(IngressRouteGVK)
+		obj = u
+	default:
+		return false, nil
+	}
+	switch err := t.APIReader.Get(ctx, tg.Key, obj); {
+	case apierrors.IsNotFound(err) || meta.IsNoMatchError(err):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	return obj.GetAnnotations()[WiredAnnotation] != "", nil
+}
+
+func (t *Traefik) middlewaresInstalled() bool {
+	_, err := t.Client.RESTMapper().RESTMapping(MiddlewareGVK.GroupKind(), MiddlewareGVK.Version)
+	return err == nil
+}
+
+// ensureMiddleware creates or corrects the operator's Middleware. One with
+// the same name the operator didn't create is left alone, and reported.
+func (t *Traefik) ensureMiddleware(ctx context.Context, namespace string) error {
+	limit := !t.noResponseLimit.Load()
+	want := middleware(namespace, limit)
+	cur := &unstructured.Unstructured{}
+	cur.SetGroupVersionKind(MiddlewareGVK)
+	err := t.APIReader.Get(ctx, client.ObjectKeyFromObject(want), cur)
+	switch {
+	case apierrors.IsNotFound(err):
+		if err := t.Client.Create(ctx, want); err != nil {
+			return err
+		}
+		t.noteResponseLimit(ctx, want, limit)
+		return nil
+	case err != nil:
+		return err
+	}
+	if cur.GetLabels()["app.kubernetes.io/managed-by"] != "inkwall-operator" {
+		return fmt.Errorf("Middleware %s/%s exists and wasn't created by Inkwall; rename or delete it", namespace, MiddlewareName)
+	}
+	if forwardAuthMatches(cur, limit) {
+		return nil
+	}
+	cur.Object["spec"] = want.Object["spec"]
+	if err := t.Client.Update(ctx, cur); err != nil {
+		return err
+	}
+	t.noteResponseLimit(ctx, cur, limit)
+	return nil
+}
+
+// noteResponseLimit stops asking for maxResponseBodySize once the API
+// server drops it from a Middleware it stored (m, as returned).
+func (t *Traefik) noteResponseLimit(ctx context.Context, m *unstructured.Unstructured, asked bool) {
+	if asked && !hasResponseLimit(m) && !t.noResponseLimit.Swap(true) {
+		log.FromContext(ctx).Info("Traefik's Middleware CRD has no maxResponseBodySize (Traefik before v3.7); the engine's answers are not size-capped")
+	}
+}
+
+// pruneMiddlewares deletes the operator's Middlewares in namespaces that no
+// longer need one.
+func (t *Traefik) pruneMiddlewares(ctx context.Context, needed map[string]bool) error {
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(MiddlewareGVK.GroupVersion().WithKind("MiddlewareList"))
+	if err := t.APIReader.List(ctx, list, client.MatchingLabels{"app.kubernetes.io/managed-by": "inkwall-operator"}); err != nil {
+		return err
+	}
+	for i := range list.Items {
+		m := &list.Items[i]
+		if m.GetName() == MiddlewareName && !needed[m.GetNamespace()] {
+			if err := t.Client.Delete(ctx, m); client.IgnoreNotFound(err) != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// annotate adds the operator's Middleware to an Ingress (want), or removes
+// it if the operator added it before. Only the operator's entry changes;
+// Middlewares the user listed stay, in order.
+func annotate(ctx context.Context, c client.Client, ing *networkingv1.Ingress, want bool) error {
+	ref := MiddlewareRef(ing.Namespace)
+	cur := ing.Annotations[MiddlewaresAnnotation]
+	wired := ing.Annotations[WiredAnnotation] == ref
+	var next string
+	switch {
+	case want:
+		next = WithMiddleware(cur, ref)
+		if next == cur && wired {
+			return nil
+		}
+	case wired:
+		next = WithoutMiddleware(cur, ref)
+	default:
+		return nil
+	}
+	patch := client.MergeFrom(ing.DeepCopy())
+	if ing.Annotations == nil {
+		ing.Annotations = map[string]string{}
+	}
+	if want {
+		ing.Annotations[MiddlewaresAnnotation] = next
+		ing.Annotations[WiredAnnotation] = ref
+	} else {
+		if next == "" {
+			delete(ing.Annotations, MiddlewaresAnnotation)
+		} else {
+			ing.Annotations[MiddlewaresAnnotation] = next
+		}
+		delete(ing.Annotations, WiredAnnotation)
+	}
+	return c.Patch(ctx, ing, patch)
+}
+
+// wireRoute adds the operator's Middleware to an IngressRoute's routes
+// (want), or removes it if the operator added it before. Only the
+// operator's entries change; Middlewares the user listed stay, in order.
+func wireRoute(ctx context.Context, c client.Client, ir *unstructured.Unstructured, want bool) error {
+	wired := ir.GetAnnotations()[WiredAnnotation] == MiddlewareName
+	if !want && !wired {
+		return nil
+	}
+	orig := ir.DeepCopy()
+	changed, err := WithRouteMiddleware(ir, want)
+	if err != nil {
+		return err
+	}
+	if want && !changed && wired {
+		return nil
+	}
+	annotations := ir.GetAnnotations()
+	if want {
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations[WiredAnnotation] = MiddlewareName
+	} else {
+		delete(annotations, WiredAnnotation)
+	}
+	ir.SetAnnotations(annotations)
+	// spec.routes is one list to a merge patch: the resourceVersion makes
+	// sure it doesn't overwrite a change the cache hasn't seen.
+	return c.Patch(ctx, ir, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{}))
 }

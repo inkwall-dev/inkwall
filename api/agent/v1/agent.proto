@@ -12,6 +12,7 @@ package inkwall.agent.v1;
 
 import "bundle/v1/bundle.proto";
 import "events/v1/events.proto";
+import "events/v1/stats.proto";
 
 option go_package = "github.com/inkwall-dev/inkwall/api/agent/v1;agentv1";
 
@@ -19,7 +20,8 @@ option go_package = "github.com/inkwall-dev/inkwall/api/agent/v1;agentv1";
 service BundleService {
   // Watch is the engine's stream. The engine sends Hello first; the operator
   // answers with the current bundle, then with every new one. The engine
-  // answers each bundle with Ack or Nack and sends heartbeats.
+  // answers each bundle with Ack or Nack and sends heartbeats, its
+  // security events and its request counts.
   rpc Watch(stream WatchRequest) returns (stream WatchResponse);
 }
 
@@ -34,6 +36,14 @@ message WatchRequest {
     // 1,000 per batch. Best effort: an engine keeps a bounded buffer and
     // drops the oldest when it is full, counted in the next batch.
     inkwall.events.v1.EventBatch events = 5;
+    // Requests per policy (0002 §5.4), with the heartbeats. Cumulative over
+    // the stream: the first report on a stream counts from zero, and also
+    // has what the engine counted after its last report on the previous
+    // one. So the operator adds up the differences between reports, and an
+    // engine that moves to another replica, or restarts, is never counted
+    // twice. A report is split into messages of at most 32 KiB, each with
+    // different policies; only policies whose counts changed are sent.
+    inkwall.events.v1.RequestStats stats = 6;
   }
 }
 

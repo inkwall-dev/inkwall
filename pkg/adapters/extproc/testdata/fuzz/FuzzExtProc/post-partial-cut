@@ -1,0 +1,11 @@
+go test fuzz v1
+string("POST")
+string("/login")
+string("shop.example.com")
+string("http")
+string("content-length")
+string("100")
+[]byte("user=alice")
+bool(false)
+bool(false)
+byte('\x03')

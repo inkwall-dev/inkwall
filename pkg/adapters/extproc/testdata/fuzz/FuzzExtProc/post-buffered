@@ -1,0 +1,11 @@
+go test fuzz v1
+string("POST")
+string("/login")
+string("shop.example.com")
+string("http")
+string("content-type")
+string("application/x-www-form-urlencoded")
+[]byte("user=alice&password=x")
+bool(false)
+bool(true)
+byte('\x02')
