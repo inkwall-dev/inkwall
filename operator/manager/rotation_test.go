@@ -213,7 +213,7 @@ func testKeyRotation(ctx context.Context, t *testing.T, c client.Client) {
 		t.Errorf("phase %q, want Publishing", s.Annotations[bundle.RotationPhaseAnnotation])
 	}
 	eventually(t, "the engine reports the new key", func() string {
-		engines, err := distribution.ReadEngines(ctx, c, "default", time.Minute, time.Now())
+		engines, _, err := distribution.ReadEngines(ctx, c, "default", time.Minute, time.Now())
 		if err != nil {
 			return err.Error()
 		}
@@ -232,6 +232,22 @@ func testKeyRotation(ctx context.Context, t *testing.T, c client.Client) {
 		t.Fatalf("signed with %q while an engine doesn't trust it", id)
 	}
 	late.SetPublicKeys(oldKeys[0], newKey)
+	// A replica's report over its size limit left engines out: those may
+	// not trust the new key, so the old one keeps signing.
+	full := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "inkwall-engines-full", Labels: map[string]string{distribution.EnginesLabel: "true"}},
+		Data:       map[string]string{"engines.json": "[]", "updatedAt": time.Now().UTC().Format(time.RFC3339Nano), "leftOut": "1"},
+	}
+	if err := c.Create(ctx, full); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(3 * time.Second)
+	if id, _ := signedWith(); id != oldID {
+		t.Fatalf("signed with %q while a report left engines out", id)
+	}
+	if err := c.Delete(ctx, full); err != nil {
+		t.Fatal(err)
+	}
 	eventually(t, "the bundle signed with the new key", func() string {
 		if id, _ := signedWith(); id != newID {
 			return "signed with " + id

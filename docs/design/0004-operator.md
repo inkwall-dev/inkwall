@@ -551,8 +551,9 @@ leader-only. Losing a replica just moves its engines to another.
   older than 30 s, and counts an engine that moved between replicas once.
 - **Report size.** An engine's record is at most about 3.5 KiB with the limits above, a few hundred
   bytes in practice. A report holds at most 900 KiB of engines, by engine ID, so the ConfigMap
-  stays under 1 MiB. The engines left out are counted by `inkwall_operator_engines_left_out`.
-  They don't count in `Enforced` or in key rotation.
+  stays under 1 MiB. The engines left out are counted by `inkwall_operator_engines_left_out`, and
+  in the report (`leftOut`). While a report has engines left out, `Enforced` is `False`
+  (`EnginesUnreported`), and a key rotation waits as it does for a replica that hasn't reported.
 
 ### 4.8 Status aggregator
 
@@ -562,7 +563,8 @@ conditions of [§3.2](#32-status-contract). It writes only on change, at most on
 
 **Built (v0.1.0):** `Enforced=True` when every connected engine runs a bundle whose version is at
 least the policy's `status.bundleVersion`. Otherwise the reason is `NoEngines`, `EnginesBehind`
-(`1/3 engines on bundle 42`), `EngineNack` (with the first error) or `NotInBundle`. It waits for
+(`1/3 engines on bundle 42`), `EngineNack` (with the first error), `EnginesUnreported` (a replica's
+report left engines out, [§4.7](#47-distribution-server-all-replicas)) or `NotInBundle`. It waits for
 the bundle builder to report the policy's current generation (`status.observedGeneration`).
 
 **Writes per bundle** (#149). The builder writes a policy's `bundleVersion` only when the bundle

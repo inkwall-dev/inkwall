@@ -45,25 +45,31 @@ func TestEnforced(t *testing.T) {
 		name    string
 		version int64
 		engines []Engine
+		leftOut int
 		status  metav1.ConditionStatus
 		reason  string
 		message string
 	}{
-		{"not in a bundle", 0, []Engine{{Applied: 3}}, metav1.ConditionFalse, ReasonNotInBundle, "not in a bundle"},
-		{"no engines", 3, nil, metav1.ConditionFalse, ReasonNoEngines, "no engine"},
-		{"all current", 3, []Engine{{Applied: 3}, {Applied: 4}}, metav1.ConditionTrue, ReasonEnforced, "2/2 engines on bundle 3"},
-		{"one behind", 3, []Engine{{Applied: 3}, {Applied: 2}}, metav1.ConditionFalse, ReasonEnginesBehind, "1/2 engines on bundle 3"},
+		{"not in a bundle", 0, []Engine{{Applied: 3}}, 0, metav1.ConditionFalse, ReasonNotInBundle, "not in a bundle"},
+		{"no engines", 3, nil, 0, metav1.ConditionFalse, ReasonNoEngines, "no engine"},
+		{"all current", 3, []Engine{{Applied: 3}, {Applied: 4}}, 0, metav1.ConditionTrue, ReasonEnforced, "2/2 engines on bundle 3"},
+		{"one behind", 3, []Engine{{Applied: 3}, {Applied: 2}}, 0, metav1.ConditionFalse, ReasonEnginesBehind, "1/2 engines on bundle 3"},
 		{
 			"one rejected", 3,
-			[]Engine{{Applied: 3}, {Applied: 2, Rejected: 3, RejectError: "line 1: bad rule", PodNamespace: "traefik", PodName: "traefik-1"}},
+			[]Engine{{Applied: 3}, {Applied: 2, Rejected: 3, RejectError: "line 1: bad rule", PodNamespace: "traefik", PodName: "traefik-1"}}, 0,
 			metav1.ConditionFalse, ReasonEngineNack, "1/2 engines rejected bundle 3 (traefik/traefik-1: line 1: bad rule)",
 		},
 		// A rejection of an older bundle doesn't matter once the engine
 		// runs a newer one.
-		{"old rejection", 3, []Engine{{Applied: 3, Rejected: 2}}, metav1.ConditionTrue, ReasonEnforced, "1/1"},
+		{"old rejection", 3, []Engine{{Applied: 3, Rejected: 2}}, 0, metav1.ConditionTrue, ReasonEnforced, "1/1"},
+		// A report over its size limit: the engines left out may run
+		// anything.
+		{"engines left out", 3, []Engine{{Applied: 3}, {Applied: 3}}, 2, metav1.ConditionFalse, ReasonEnginesUnreported, "2/4 engines on bundle 3, 2 not in"},
+		{"only engines left out", 3, nil, 1, metav1.ConditionFalse, ReasonEnginesUnreported, "0/1 engines"},
+		{"rejected and left out", 3, []Engine{{Rejected: 3}}, 1, metav1.ConditionFalse, ReasonEngineNack, "1/2 engines rejected"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			st, reason, msg := Enforced(tc.version, tc.engines)
+			st, reason, msg := Enforced(tc.version, tc.engines, tc.leftOut)
 			if st != tc.status || reason != tc.reason || !strings.Contains(msg, tc.message) {
 				t.Fatalf("got %s %s %q, want %s %s %q", st, reason, msg, tc.status, tc.reason, tc.message)
 			}
@@ -113,9 +119,12 @@ func TestReadEngines(t *testing.T) {
 		report("c", now.Add(-time.Hour), Engine{ID: "e3", Applied: 3}),
 	).Build()
 
-	got, err := ReadEngines(context.Background(), c, "inkwall-system", 30*time.Second, now)
+	got, leftOut, err := ReadEngines(context.Background(), c, "inkwall-system", 30*time.Second, now)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if leftOut != 0 {
+		t.Errorf("%d engines left out, want 0", leftOut)
 	}
 	if !slices.IsSortedFunc(got, func(a, b Engine) int { return strings.Compare(a.ID, b.ID) }) {
 		t.Errorf("not sorted by ID: %+v", got)
@@ -354,13 +363,42 @@ func TestWatchNackErrorTruncated(t *testing.T) {
 	if e := got[0].RejectError; len(e) != maxRejectError-1 || !utf8.ValidString(e) || !strings.HasPrefix(reason, e) {
 		t.Fatalf("reject error of %d bytes (valid UTF-8: %t), want %d", len(e), utf8.ValidString(e), maxRejectError-1)
 	}
-	if _, msg, _ := (Enforced(2, got)); len(msg) > maxRejectError+200 {
+	if _, msg, _ := (Enforced(2, got, 0)); len(msg) > maxRejectError+200 {
 		t.Fatalf("Enforced message of %d bytes", len(msg))
 	}
 }
 
 // The largest record an engine can have fits a few hundred times in a
 // report; the engines beyond the report's limit are left out, and counted.
+// A report over its size limit says how many engines it left out, which
+// ReadEngines sums.
+func TestReadEnginesLeftOut(t *testing.T) {
+	s := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(s)
+	c := fake.NewClientBuilder().WithScheme(s).Build()
+	ctx := context.Background()
+	table := NewTable()
+	table.Connect(Engine{ID: "e1"})
+	p := &Publisher{Client: c, Reader: c, Namespace: "inkwall-system", Replica: "a", Engines: table}
+	engines, _ := table.Snapshot()
+	if err := p.write(ctx, engines); err != nil {
+		t.Fatal(err)
+	}
+	if got, left, err := ReadEngines(ctx, c, "inkwall-system", time.Minute, time.Now()); err != nil || len(got) != 1 || left != 0 {
+		t.Fatalf("complete report: %d engines, %d left out, %v", len(got), left, err)
+	}
+	full := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "inkwall-system", Name: reportNamePrefix + "b", Labels: map[string]string{EnginesLabel: "true"}},
+		Data:       reportData([]byte(`[{"id":"e2"}]`), 3),
+	}
+	if err := c.Create(ctx, full); err != nil {
+		t.Fatal(err)
+	}
+	if got, left, err := ReadEngines(ctx, c, "inkwall-system", time.Minute, time.Now()); err != nil || len(got) != 2 || left != 3 {
+		t.Fatalf("a full report: %d engines, %d left out, %v", len(got), left, err)
+	}
+}
+
 func TestEncodeEngines(t *testing.T) {
 	big := Engine{
 		ID: strings.Repeat("e", maxEngineID), ServiceAccount: strings.Repeat("s", 63) + "/" + strings.Repeat("a", 253),

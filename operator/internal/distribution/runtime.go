@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -167,9 +168,11 @@ func (g *GRPCServer) Check(*http.Request) error {
 
 // Report labels and keys of the replicas' engine ConfigMaps.
 const (
-	EnginesLabel     = "waf.inkwall.dev/engines"
-	enginesKey       = "engines.json"
-	updatedAtKey     = "updatedAt"
+	EnginesLabel = "waf.inkwall.dev/engines"
+	enginesKey   = "engines.json"
+	updatedAtKey = "updatedAt"
+	// leftOutKey counts the engines left out of a full report.
+	leftOutKey       = "leftOut"
 	reportNamePrefix = "inkwall-engines-"
 )
 
@@ -260,14 +263,22 @@ func (p *Publisher) write(ctx context.Context, engines []Engine) error {
 		if p.Owner != nil {
 			cm.OwnerReferences = []metav1.OwnerReference{*p.Owner}
 		}
-		cm.Data = map[string]string{enginesKey: string(data), updatedAtKey: time.Now().UTC().Format(time.RFC3339Nano)}
+		cm.Data = reportData(data, left)
 		return p.Client.Create(ctx, cm)
 	}
 	if err != nil {
 		return err
 	}
-	cm.Data = map[string]string{enginesKey: string(data), updatedAtKey: time.Now().UTC().Format(time.RFC3339Nano)}
+	cm.Data = reportData(data, left)
 	return p.Client.Update(ctx, cm)
+}
+
+func reportData(engines []byte, left int) map[string]string {
+	return map[string]string{
+		enginesKey:   string(engines),
+		updatedAtKey: time.Now().UTC().Format(time.RFC3339Nano),
+		leftOutKey:   strconv.Itoa(left),
+	}
 }
 
 // encodeEngines encodes engines as a JSON array of at most limit bytes: the
@@ -293,11 +304,12 @@ func encodeEngines(engines []Engine, limit int) ([]byte, int, error) {
 // ReadEngines merges the replicas' reports, skipping those not refreshed
 // within stale (their replica is gone). An engine listed twice, while it
 // moves between replicas, counts once, with its newest connection. They
-// are sorted by ID.
-func ReadEngines(ctx context.Context, c client.Reader, namespace string, stale time.Duration, now time.Time) ([]Engine, error) {
+// are sorted by ID. leftOut counts the engines left out of full reports:
+// while it isn't 0, the list is incomplete.
+func ReadEngines(ctx context.Context, c client.Reader, namespace string, stale time.Duration, now time.Time) (engines []Engine, leftOut int, err error) {
 	var list corev1.ConfigMapList
 	if err := c.List(ctx, &list, client.InNamespace(namespace), client.MatchingLabels{EnginesLabel: "true"}); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	byID := map[string]Engine{}
 	for _, cm := range list.Items {
@@ -305,20 +317,23 @@ func ReadEngines(ctx context.Context, c client.Reader, namespace string, stale t
 		if err != nil || now.Sub(updated) > stale {
 			continue
 		}
-		var engines []Engine
-		if err := json.Unmarshal([]byte(cm.Data[enginesKey]), &engines); err != nil {
+		var listed []Engine
+		if err := json.Unmarshal([]byte(cm.Data[enginesKey]), &listed); err != nil {
 			continue
 		}
-		for _, e := range engines {
+		// Missing from an older replica's report: 0.
+		n, _ := strconv.Atoi(cm.Data[leftOutKey])
+		leftOut += max(n, 0)
+		for _, e := range listed {
 			if old, ok := byID[e.ID]; !ok || e.ConnectedAt.After(old.ConnectedAt) {
 				byID[e.ID] = e
 			}
 		}
 	}
-	out := make([]Engine, 0, len(byID))
+	engines = make([]Engine, 0, len(byID))
 	for _, e := range byID {
-		out = append(out, e)
+		engines = append(engines, e)
 	}
-	slices.SortFunc(out, func(a, b Engine) int { return strings.Compare(a.ID, b.ID) })
-	return out, nil
+	slices.SortFunc(engines, func(a, b Engine) int { return strings.Compare(a.ID, b.ID) })
+	return engines, leftOut, nil
 }

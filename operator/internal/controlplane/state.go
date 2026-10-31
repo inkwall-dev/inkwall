@@ -55,7 +55,7 @@ func (c *Connector) clusterState(ctx context.Context) (*controlplanev1.ClusterSt
 	if st.BundleVersion, st.BundleContentHash, err = c.bundle(ctx); err != nil {
 		return nil, err
 	}
-	engines, err := distribution.ReadEngines(ctx, c.APIReader, c.Namespace, c.EngineStale, time.Now())
+	engines, _, err := distribution.ReadEngines(ctx, c.APIReader, c.Namespace, c.EngineStale, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("engines: %w", err)
 	}
