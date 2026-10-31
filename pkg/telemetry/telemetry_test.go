@@ -19,11 +19,13 @@ import (
 
 type evaluator struct {
 	res   rules.Result
-	delay time.Duration
+	block <-chan struct{} // if set, Evaluate waits for it to close
 }
 
 func (e evaluator) Evaluate(context.Context, *request.Request) (rules.Result, error) {
-	time.Sleep(e.delay)
+	if e.block != nil {
+		<-e.block
+	}
 	return e.res, nil
 }
 
@@ -63,7 +65,11 @@ func TestMetricsRecordVerdicts(t *testing.T) {
 
 func TestMetricsCountShedRequests(t *testing.T) {
 	m := NewMetrics("proxy")
-	p := pipeline.New(evaluator{delay: 200 * time.Millisecond}, pipeline.Config{
+	// The evaluation holds its slot until the test ends: a sleep could end,
+	// freeing the slot, before a slow machine gets to the second check.
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	p := pipeline.New(evaluator{block: block}, pipeline.Config{
 		Timeout: 5 * time.Millisecond, MaxConcurrent: 1, Observer: m,
 	})
 	p.Check(context.Background(), &request.Request{}) // times out, keeps the slot

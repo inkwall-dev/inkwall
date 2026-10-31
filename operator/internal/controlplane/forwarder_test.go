@@ -250,7 +250,7 @@ func startForwarder(t *testing.T, e *env, dir string) *Forwarder {
 	f := &Forwarder{
 		Client: e.client, Namespace: ns, Replica: "op-1", OperatorVersion: "0.2.0-test", CAFile: e.conn.CAFile,
 		Dir: dir, Poll: 50 * time.Millisecond, Refused: 50 * time.Millisecond,
-		MinBackoff: 20 * time.Millisecond, MaxBackoff: 100 * time.Millisecond,
+		MinBackoff: 20 * time.Millisecond, MaxBackoff: 100 * time.Millisecond, StatsInterval: 50 * time.Millisecond,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -264,7 +264,13 @@ func TestForwarderSendsEvents(t *testing.T) {
 	waitFor(t, "the events stream", func() bool { return f.accepts.Load() })
 	f.Add(batchOf(2, "a", "b"))
 	f.Add(batchOf(0, "c"))
+	// The control plane doesn't take request counts: none are sent.
+	f.AddStats([]*eventsv1.PolicyStats{{Policy: "shop/site", Allowed: 1}})
 	waitFor(t, "three events", func() bool { return e.cp.Stats().Events == 3 })
+	time.Sleep(3 * f.StatsInterval)
+	if n := e.cp.Stats().StatsUploads; n != 0 {
+		t.Errorf("%d request count uploads, none accepted", n)
+	}
 	if st := e.cp.Stats(); st.EventsDropped != 2 {
 		t.Errorf("dropped %d, want 2", st.EventsDropped)
 	}
@@ -398,5 +404,89 @@ func TestForwarderStandalone(t *testing.T) {
 	f.Add(batchOf(0, "a"))
 	if n := f.q.Load().events(); n != 0 {
 		t.Errorf("Standalone buffered %d events", n)
+	}
+}
+
+// Request counts go to a control plane that takes them, even without
+// events: per policy, summed over the engines, cumulative, so a new stream
+// sends them again without counting them twice.
+func TestForwarderSendsRequestStats(t *testing.T) {
+	e := newEnv(t, wafv1alpha1.ModeGitOps, "tok-1")
+	e.cp.AddToken("tok-1")
+	e.cp.SetAcceptRequestStats(true)
+	e.run(t)
+	e.waitReason(t, ReasonConnected)
+	f := startForwarder(t, e, t.TempDir())
+
+	latency := func(n uint64) []uint64 { return []uint64{n, 0} }
+	// Two engines' reports.
+	f.AddStats([]*eventsv1.PolicyStats{{Policy: "shop/site", Allowed: 2, Denied: 1, LatencyCounts: latency(3), LatencySum: 0.3}})
+	f.AddStats([]*eventsv1.PolicyStats{
+		{Policy: "shop/site", Allowed: 1, LatencyCounts: latency(1), LatencySum: 0.1},
+		{Policy: "shop/api", Detected: 4},
+	})
+	sent := func(policy string, allowed, denied, detected, timed uint64) func() bool {
+		return func() bool {
+			p := e.cp.RequestStats()[policy]
+			var n uint64
+			for _, c := range p.GetLatencyCounts() {
+				n += c
+			}
+			return p.GetAllowed() == allowed && p.GetDenied() == denied && p.GetDetected() == detected && n == timed
+		}
+	}
+	waitFor(t, "shop/site's counts", sent("shop/site", 3, 1, 0, 4))
+	waitFor(t, "shop/api's counts", sent("shop/api", 0, 0, 4, 0))
+	f.AddStats([]*eventsv1.PolicyStats{{Policy: "shop/site", Denied: 1, LatencyCounts: latency(1)}})
+	waitFor(t, "the new counts", sent("shop/site", 3, 2, 0, 5))
+
+	// Events aren't accepted: none are buffered.
+	f.Add(batchOf(0, "a"))
+	if q := f.q.Load(); q != nil && q.events() != 0 {
+		t.Errorf("%d events buffered while not accepted", q.events())
+	}
+	// A new stream sends every policy again, with the same totals.
+	uploads := e.cp.Stats().StatsUploads
+	e.cp.FailConnect(fmt.Errorf("down"))
+	time.Sleep(3 * f.StatsInterval)
+	e.cp.FailConnect(nil)
+	waitFor(t, "uploads on a new stream", func() bool { return e.cp.Stats().StatsUploads > uploads })
+	if !sent("shop/site", 3, 2, 0, 5)() || !sent("shop/api", 0, 0, 4, 0)() {
+		t.Errorf("counts after a reconnect: %v", e.cp.RequestStats())
+	}
+	var events int
+	for _, h := range e.cp.Stats().Hellos {
+		if h.GetRole().String() == "STREAM_ROLE_EVENTS" {
+			events++
+			if !slices.Contains(h.GetCapabilities(), statsCapability) {
+				t.Errorf("capabilities %v", h.GetCapabilities())
+			}
+		}
+	}
+	if events < 2 {
+		t.Errorf("%d events streams, want a new one after the outage", events)
+	}
+}
+
+func TestRequestStatsUpload(t *testing.T) {
+	var r requestStats
+	if r.upload(true) != nil {
+		t.Fatal("an upload with nothing counted")
+	}
+	r.add([]*eventsv1.PolicyStats{{Policy: "b", Allowed: 1}, {Policy: "a", Denied: 1}})
+	up := r.upload(false)
+	if p := up.GetStats().GetPolicies(); len(p) != 2 || p[0].GetPolicy() != "a" || up.GetSince() == nil ||
+		len(up.GetStats().GetLatencyBounds()) == 0 {
+		t.Fatalf("first upload: %v", up)
+	}
+	r.add([]*eventsv1.PolicyStats{{Policy: "b", Allowed: 2}})
+	if p := r.upload(false).GetStats().GetPolicies(); len(p) != 1 || p[0].GetAllowed() != 3 {
+		t.Errorf("changed only: %v", p)
+	}
+	if r.upload(false) != nil {
+		t.Error("an upload with nothing changed")
+	}
+	if p := r.upload(true).GetStats().GetPolicies(); len(p) != 2 {
+		t.Errorf("all: %v", p)
 	}
 }

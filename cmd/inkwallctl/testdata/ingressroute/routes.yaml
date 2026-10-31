@@ -1,0 +1,47 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: storefront
+  namespace: shop
+spec:
+  rules:
+  - host: shop.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service: {name: storefront, port: {number: 80}}
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: api
+  namespace: shop
+spec:
+  entryPoints: [websecure]
+  routes:
+  - match: Host(`shop.example.com`) && PathPrefix(`/api`)
+    kind: Rule
+    services:
+    - name: api
+      port: 80
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: admin
+  namespace: shop
+spec:
+  routes:
+  - match: Host(`admin.example.com`) && (Path(`/login`))
+    kind: Rule
+    services:
+    - name: admin
+      port: 80
+  - match: Host(`admin.example.com`) && PathPrefix(`/static/`)
+    kind: Rule
+    priority: 10
+    services:
+    - name: admin-static
+      port: 80

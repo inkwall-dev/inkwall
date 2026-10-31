@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,6 +35,7 @@ import (
 
 	agentv1 "github.com/inkwall-dev/inkwall/api/agent/v1"
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
 	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
@@ -52,6 +54,9 @@ const (
 	DefaultKeyReload = 10 * time.Second
 	// eventBatch is the most events taken from the buffer at once.
 	eventBatch = 256
+	// statsMessageBytes bounds a message of request counts: a report of
+	// many policies is split, so it never makes a large message.
+	statsMessageBytes = 32 << 10
 	// eventsMessage bounds a message of events, encoded: each fits in
 	// 64 KiB, which every operator version accepts from an engine.
 	eventsMessage = 60 << 10
@@ -97,6 +102,9 @@ type Config struct {
 	// Events holds the security events to send to the operator (nil:
 	// none).
 	Events *events.Buffer
+	// Stats counts the requests of each policy, reported to the operator
+	// with the heartbeats (nil: none).
+	Stats *events.Stats
 
 	Logger     *slog.Logger
 	Heartbeat  time.Duration
@@ -176,6 +184,11 @@ type Agent struct {
 	// cacheOnce loads the cache once: LoadCache, or else Run.
 	cacheOnce sync.Once
 
+	// unsent are the request counts taken from Stats but not sent yet, by
+	// policy: they go in the next report, on this stream or the next.
+	statsMu sync.Mutex
+	unsent  map[string]*eventsv1.PolicyStats
+
 	connected prometheus.Gauge
 	version   prometheus.Gauge
 	applies   *prometheus.CounterVec
@@ -218,6 +231,7 @@ func New(cfg Config) (*Agent, error) {
 		keyFile:   keyFile,
 		reconnect: make(chan struct{}, 1),
 		applied:   make(chan struct{}),
+		unsent:    map[string]*eventsv1.PolicyStats{},
 		connected: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "inkwall_operator_connected",
 			Help: "1 while the engine has a stream open to the operator.",
@@ -399,6 +413,8 @@ func (a *Agent) stream(ctx context.Context) error {
 	go func() {
 		t := time.NewTicker(a.cfg.Heartbeat)
 		defer t.Stop()
+		// This stream's request counts, by policy, as last sent.
+		totals := map[string]*eventsv1.PolicyStats{}
 		for {
 			select {
 			case <-t.C:
@@ -406,7 +422,8 @@ func (a *Agent) stream(ctx context.Context) error {
 				if adm := a.cfg.Admission; adm != nil {
 					hb.InFlight, hb.Capacity = uint32(adm.InFlight()), uint32(adm.Capacity()) // #nosec G115 -- small counts
 				}
-				if send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Heartbeat{Heartbeat: hb}}) != nil {
+				if send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Heartbeat{Heartbeat: hb}}) != nil ||
+					a.reportStats(send, totals) != nil {
 					cancel()
 					return
 				}
@@ -439,6 +456,45 @@ func (a *Agent) stream(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+// reportStats sends what the policies counted since the last report,
+// cumulative over the stream (totals, updated as sent): only the policies
+// whose counts changed, in messages of at most statsMessageBytes. What
+// isn't sent stays for the next report.
+func (a *Agent) reportStats(send func(*agentv1.WatchRequest) error, totals map[string]*eventsv1.PolicyStats) error {
+	if a.cfg.Stats == nil {
+		return nil
+	}
+	a.statsMu.Lock()
+	defer a.statsMu.Unlock()
+	for _, d := range a.cfg.Stats.Take() {
+		if u, ok := a.unsent[d.GetPolicy()]; ok {
+			events.AddStats(u, d)
+		} else {
+			a.unsent[d.GetPolicy()] = d
+		}
+	}
+	next := make([]*eventsv1.PolicyStats, 0, len(a.unsent))
+	for id, d := range a.unsent {
+		t := &eventsv1.PolicyStats{Policy: id}
+		if prev := totals[id]; prev != nil {
+			t = proto.CloneOf(prev)
+		}
+		events.AddStats(t, d)
+		next = append(next, t)
+	}
+	slices.SortFunc(next, func(x, y *eventsv1.PolicyStats) int { return strings.Compare(x.GetPolicy(), y.GetPolicy()) })
+	for _, m := range events.SplitStats(next, statsMessageBytes) {
+		if err := send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Stats{Stats: m}}); err != nil {
+			return err
+		}
+		for _, p := range m.GetPolicies() {
+			totals[p.GetPolicy()] = p
+			delete(a.unsent, p.GetPolicy())
+		}
+	}
+	return nil
 }
 
 // sendFirst sends a stream's first message. The operator may have ended the
