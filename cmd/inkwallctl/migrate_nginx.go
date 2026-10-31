@@ -31,11 +31,23 @@ const (
 	annCRS           = "enable-owasp-core-rules"
 	annSnippet       = "modsecurity-snippet"
 	annTransactionID = "modsecurity-transaction-id"
+	annCanary        = "canary"
 
 	cmEnable  = "enable-modsecurity"
 	cmCRS     = "enable-owasp-modsecurity-crs"
 	cmSnippet = "modsecurity-snippet"
 )
+
+// The nginx snippets, as annotations and ConfigMap keys, in which nginx's
+// own ModSecurity directives (modsecurity, modsecurity_rules...) can turn
+// ModSecurity on or add rules besides the settings above.
+var (
+	annNginxSnippets = []string{"configuration-snippet", "server-snippet"}
+	cmNginxSnippets  = []string{"http-snippet", "server-snippet", "location-snippet"}
+)
+
+// nginxModSecurity finds nginx's ModSecurity directives in a snippet.
+var nginxModSecurity = regexp.MustCompile(`(?i)(^|[\s;{}])modsecurity(_[a-z_]+)?\s`)
 
 // The files ingress-nginx ships: its recommended ModSecurity configuration
 // (SecRuleEngine DetectionOnly) and the OWASP CRS.
@@ -43,6 +55,9 @@ const (
 	nginxRecommendedConf = "/etc/nginx/modsecurity/modsecurity.conf"
 	nginxCRSConf         = "/etc/nginx/owasp-modsecurity-crs/nginx-modsecurity.conf"
 )
+
+// nginxBodyLimit is SecRequestBodyLimit in ingress-nginx's modsecurity.conf.
+const nginxBodyLimit = 13107200
 
 // crsRuleSetName is the ClusterWAFRuleSet with the built-in CRS that
 // migrated policies use when they set its paranoia level or threshold, or
@@ -53,6 +68,9 @@ const crsRuleSetName = "owasp-crs-v4"
 type nginxGlobal struct {
 	enable, crs bool
 	snippet     string
+	// nginxSnippets are the ConfigMap's nginx snippets with ModSecurity
+	// directives, as sources for the report.
+	nginxSnippets []string
 	// source names the ConfigMap in the report.
 	source string
 }
@@ -122,6 +140,13 @@ type modsec struct {
 	exclusions   []wafv1alpha1.Exclusion
 	skip         []wafv1alpha1.PathPattern
 	skipBody     []wafv1alpha1.PathPattern
+	// bodyLimit is the SecRequestBodyLimit of ingress-nginx's
+	// modsecurity.conf when it is loaded; 0 when unknown.
+	bodyLimit int64
+	// partial is the SecRequestBodyLimitAction ProcessPartial directive, if
+	// any, and partialItem the index of its item.
+	partial     string
+	partialItem int
 	// rules are directives kept as they are, in a WAFRuleSet loaded after
 	// the CRS, with where they came from.
 	rules []rule
@@ -138,6 +163,19 @@ type rule struct {
 // (nginx.ingress.kubernetes.io). It returns nil when ModSecurity doesn't
 // apply to the Ingress and it has no ModSecurity annotation.
 func migrateIngress(ing *networkingv1.Ingress, global nginxGlobal, prefix string) *migration {
+	m := migrateSettings(ing, global, prefix)
+	// ingress-nginx serves a canary Ingress's traffic with the main
+	// Ingress's settings, not its own.
+	if canary, err := strconv.ParseBool(ing.Annotations[prefix+"/"+annCanary]); m == nil || err != nil || !canary {
+		return m
+	}
+	m = &migration{namespace: ing.Namespace, name: ing.Name}
+	m.add(itemCheck, "annotation "+annCanary, "a canary Ingress: ingress-nginx applies the main Ingress's ModSecurity settings to it, not its own; no WAFPolicy: the main Ingress's policy covers its hosts and paths")
+	return m
+}
+
+// migrateSettings is migrateIngress without the canary case.
+func migrateSettings(ing *networkingv1.Ingress, global nginxGlobal, prefix string) *migration {
 	m := &migration{namespace: ing.Namespace, name: ing.Name}
 	ann := func(name string) (string, bool) {
 		v, ok := ing.Annotations[prefix+"/"+name]
@@ -169,9 +207,23 @@ func migrateIngress(ing *networkingv1.Ingress, global nginxGlobal, prefix string
 		}
 	}
 
+	// nginx's own ModSecurity directives can't be read with the settings.
+	nginxSnippets := slices.Clone(global.nginxSnippets)
+	for _, a := range annNginxSnippets {
+		if v, _ := ann(a); nginxModSecurity.MatchString(v) {
+			nginxSnippets = append(nginxSnippets, annSource(a))
+		}
+	}
+	for _, src := range nginxSnippets {
+		m.add(itemTodo, src, "not migrated: nginx's ModSecurity directives (modsecurity, modsecurity_rules...): only enable-modsecurity, enable-owasp-core-rules and modsecurity-snippet are converted; convert them by hand")
+	}
+
 	switch {
 	case !global.enable && !enable:
 		if !hasAnnotations {
+			if len(nginxSnippets) > 0 {
+				return m
+			}
 			return nil
 		}
 		m.add(itemCheck, annSource(annEnable), "ModSecurity is off for this Ingress (enable-modsecurity is not true, nor %s in the ConfigMap): its other ModSecurity annotations have no effect; nothing to migrate", cmEnable)
@@ -214,6 +266,7 @@ func migrateIngress(ing *networkingv1.Ingress, global nginxGlobal, prefix string
 // WAFPolicy, it only sets SecRuleEngine DetectionOnly.
 func (s *modsec) recommended(source string) {
 	s.engine, s.engineSource = engineDetectionOnly, source+" (ingress-nginx's modsecurity.conf)"
+	s.bodyLimit = nginxBodyLimit
 }
 
 // logOnly are directives that only configure ModSecurity's own logs:
@@ -294,9 +347,11 @@ func (s *modsec) apply(m *migration, snippet, source string) {
 			switch strings.ToLower(arg(1)) {
 			case "reject":
 				s.body.OnOversize = wafv1alpha1.OversizeDeny
+				s.partial = ""
 				m.add(itemMapped, src, "%s: body.onOversize: Deny", d.Text)
 			case "processpartial":
 				s.body.OnOversize = wafv1alpha1.OversizeAllow
+				s.partial, s.partialItem = d.Text, len(m.items)
 				m.add(itemCheck, src, "%s: body.onOversize: Allow; ModSecurity inspected the first part of an oversize body, Inkwall forwards it uninspected", d.Text)
 			default:
 				m.add(itemTodo, src, "not migrated: %s: want Reject or ProcessPartial", d.Text)
@@ -427,15 +482,17 @@ func (s *modsec) secRule(m *migration, text string, args []string, src string) {
 		targets  []target
 		skip     bool
 		skipBody bool
-		phase2   bool
+		// Without a phase action, a rule runs in phase 2.
+		phase2 = true
 		// expanded are the ranges expanded to CRS rule IDs.
 		expanded []string
 	)
 	for _, a := range acts {
 		if a.name == "phase" {
 			switch a.value {
-			case "1", "request":
-			case "2":
+			case "1":
+				phase2 = false
+			case "2", "request":
 				phase2 = true
 			default:
 				todo("an exclusion must run in phase 1 or 2")
@@ -538,6 +595,9 @@ func exclusionPath(variable, operator string) (wafv1alpha1.PathPattern, string) 
 		return "", "only an exclusion keyed on REQUEST_FILENAME or REQUEST_URI maps to a path"
 	case op == "@beginswith":
 		p = value + "*"
+	case op == "@streq" && variable == "REQUEST_FILENAME" && strings.Contains(value, "*"):
+		// A * ending a WAFPolicy path makes it a prefix.
+		return "", "@streq matches a path with * literally, which a WAFPolicy path can't"
 	case op == "@streq" && variable == "REQUEST_FILENAME":
 		p = value
 	default:
@@ -814,6 +874,19 @@ func (s *modsec) build(m *migration) {
 	}
 	if len(s.skip) > 0 || len(s.skipBody) > 0 {
 		p.Spec.Skip = &wafv1alpha1.SkipSpec{Paths: s.skip, BodyPaths: s.skipBody}
+	}
+	if s.partial != "" && s.body.MaxBytes == nil {
+		// ProcessPartial inspected bodies up to SecRequestBodyLimit, not
+		// up to the engine's default.
+		it := &m.items[s.partialItem]
+		if s.bodyLimit == 0 {
+			*it = item{kind: itemTodo, source: it.source, text: fmt.Sprintf("not migrated: %s without SecRequestBodyLimit: how much ModSecurity inspected is unknown; set body.maxBytes and body.onOversize: Allow", s.partial)}
+			s.body.OnOversize = ""
+		} else {
+			n := min(s.bodyLimit, policyMaxBodyBytes)
+			s.body.MaxBytes = &n
+			*it = item{kind: itemCheck, source: it.source, text: fmt.Sprintf("%s: body.onOversize: Allow and body.maxBytes: %d, modsecurity.conf's SecRequestBodyLimit (%d) capped at the most Inkwall inspects; ModSecurity inspected the first part of an oversize body, Inkwall forwards it uninspected", s.partial, n, s.bodyLimit)}
+		}
 	}
 	if s.body != (wafv1alpha1.BodySpec{}) {
 		p.Spec.Body = &s.body

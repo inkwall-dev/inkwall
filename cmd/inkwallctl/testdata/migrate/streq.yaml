@@ -1,0 +1,20 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+  namespace: shop
+  annotations:
+    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
+    nginx.ingress.kubernetes.io/modsecurity-snippet: |
+      SecRuleEngine On
+      SecRule REQUEST_FILENAME "@streq /static*" "id:1001,phase:1,pass,nolog,ctl:ruleEngine=Off"
+      SecRule REQUEST_FILENAME "@streq /search*" "id:1002,phase:1,pass,nolog,ctl:ruleRemoveById=942100"
+      SecRule REQUEST_FILENAME "@beginsWith /form" "id:1003,phase:request,pass,nolog,ctl:ruleRemoveById=920100"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: shop.example.com
+    http:
+      paths:
+      - {path: /, pathType: Prefix, backend: {service: {name: web, port: {number: 80}}}}

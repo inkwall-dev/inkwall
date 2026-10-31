@@ -95,6 +95,14 @@ settings are combined as ingress-nginx combines them: the ConfigMap's `enable-mo
 `modsecurity-transaction-id`. `enable-modsecurity: "false"` on an Ingress turns ModSecurity off for
 it, and the other annotations do nothing without ModSecurity on.
 
+- A canary Ingress (`canary: "true"`) gets no policy: ingress-nginx serves its traffic with the main
+  Ingress's settings, and the main Ingress's policy covers the same hosts and paths.
+- Ingresses whose policies match the same host and path are marked `check`: only one policy applies
+  to a request (the oldest), so merge their settings into the one that should.
+- nginx's own ModSecurity directives (`modsecurity`, `modsecurity_rules`...) in the
+  `configuration-snippet` or `server-snippet` annotations, or the ConfigMap's `http-snippet`,
+  `server-snippet` or `location-snippet`, are not read: they are `TODO`.
+
 | ingress-nginx | `WAFPolicy` |
 |---|---|
 | `enable-owasp-core-rules`, `enable-owasp-modsecurity-crs`, `Include .../nginx-modsecurity.conf` | The built-in OWASP CRS v4 |
@@ -103,11 +111,12 @@ it, and the other annotations do nothing without ModSecurity on.
 | `setvar:tx.paranoia_level` or `tx.blocking_paranoia_level`, `tx.inbound_anomaly_score_threshold` (in a `SecAction`) | `ruleSets[].paranoiaLevel`, `inboundAnomalyThreshold` |
 | `SecRuleRemoveById 942100 ...` | `exclusions` |
 | `SecRuleUpdateTargetById 942100 "!ARGS:password"` | `exclusions` with `when.argument` |
-| `SecRule REQUEST_FILENAME "@beginsWith /api/" "...,ctl:ruleRemoveById=942100"`, or `@streq` | `exclusions` with `when.path: /api/*` (or the exact path) |
+| `SecRule REQUEST_FILENAME "@beginsWith /api/" "...,ctl:ruleRemoveById=942100"`, or `@streq` | `exclusions` with `when.path: /api/*` (or the exact path; an `@streq` path with `*` is `TODO`) |
 | A range of CRS rules in such a rule, `ctl:ruleRemoveById=941100-941199` | `exclusions` with the IDs of the CRS rules in it |
 | `ctl:ruleRemoveTargetById=942100;ARGS:q` in such a rule | `exclusions` with `when.path` and `when.argument` |
 | `ctl:ruleEngine=Off` / `ctl:requestBodyAccess=Off` in such a rule | `skip.paths` / `skip.bodyPaths` |
 | `SecRequestBodyAccess`, `SecRequestBodyLimit`, `SecRequestBodyLimitAction` | `body.inspect`, `body.maxBytes`, `body.onOversize` |
+| `SecRequestBodyLimitAction ProcessPartial` without `SecRequestBodyLimit` | `body.onOversize: Allow` and `body.maxBytes` of `modsecurity.conf`'s limit (12.5 MiB) capped at 10 MiB; `TODO` when `modsecurity.conf` isn't loaded |
 | Other `SecRule` and `SecAction` rules, and `SecRuleRemoveById` ranges, tags and messages to remove | Kept as they are in a `WAFRuleSet` named `<ingress>-modsecurity`, loaded after the CRS |
 
 A policy that tunes the CRS or adds rules refers to a `ClusterWAFRuleSet` named `owasp-crs-v4` with
@@ -173,7 +182,9 @@ the routes instead, and apply once those routes serve the traffic.
 - **Rule ranges.** A `ctl:ruleRemoveById` range becomes the IDs of the CRS rules in it today; rules
   a later CRS adds to the range are not excluded (the summary marks these `check`).
 - **Order.** Kept rules load after the CRS, while snippet rules in ingress-nginx could load before
-  it. Path exclusions apply from the start of the request, as `ctl` rules in phase 1 did.
+  it. Path exclusions apply from the start of the request, as `ctl` rules in phase 1 did; a `ctl`
+  rule in phase 2 (`phase:2`, `phase:request` or no `phase`) is marked `check`, since the excluded
+  rules' phase 1 checks are now off on its path too.
 - **Failure mode.** In Block mode, a request that can't be inspected in time is rejected (503); see
   `failureMode` on the policy.
 

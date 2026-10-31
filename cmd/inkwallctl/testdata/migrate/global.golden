@@ -34,10 +34,12 @@ Ingress web/admin: WAFPolicy web/admin (Block)
   mapped  ConfigMap ingress-nginx/ingress-nginx-controller enable-owasp-modsecurity-crs: the built-in OWASP CRS v4
   mapped  annotation modsecurity-snippet, line 1: SecRule REQUEST_FILENAME "@beginsWith /admin/editor" "id:1200,phase:1,pass,nolog,ctl:ruleRemoveTargetById=941100;ARGS:body": exclusions on /admin/editor*
   mapped  ConfigMap ingress-nginx/ingress-nginx-controller modsecurity-snippet, line 1: SecRuleEngine On: mode: Block
+  check   host and path */ are also matched by the Ingress(es) web/web: only one policy applies to a request (the oldest); merge the settings into the policy that should apply
 Ingress web/metrics: no WAFPolicy
   check   annotation enable-modsecurity: false turns ModSecurity off for this Ingress, whatever the ConfigMap says: nothing to migrate
 Ingress web/web: WAFPolicy web/web (Block)
   check   ConfigMap ingress-nginx/ingress-nginx-controller modsecurity-snippet, line 2: not migrated: SecAuditLog /dev/stdout: ModSecurity's own logs; the engine logs verdicts itself (protection is unchanged)
   mapped  ConfigMap ingress-nginx/ingress-nginx-controller enable-owasp-modsecurity-crs: the built-in OWASP CRS v4
   mapped  ConfigMap ingress-nginx/ingress-nginx-controller modsecurity-snippet, line 1: SecRuleEngine On: mode: Block
+  check   host and path */ are also matched by the Ingress(es) web/admin: only one policy applies to a request (the oldest); merge the settings into the policy that should apply
 3 Ingress(es) read: 2 WAFPolicy, 0 WAFRuleSet; 0 setting(s) not migrated need a human (TODO)

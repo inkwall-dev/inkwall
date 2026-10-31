@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -49,6 +50,11 @@ func TestMigrateGolden(t *testing.T) {
 		{"ingress-class", []string{"-f", migrateIngresses, "--controller-configmap", "web/none", "--ingress-class", "traefik"}, 0},
 		{"httproute", []string{"-f", migrateIngresses, "-f", migrateHTTPRoutes, "--target", "httproute"}, 1},
 		{"ingressroute", []string{"-f", migrateIngresses, "-f", migrateIngressRoutes, "--target", "ingressroute"}, 1},
+		// What ingress-nginx treats specially: canary Ingresses, @streq,
+		// ProcessPartial and phases.
+		{"canary", []string{"-f", filepath.Join("testdata", "migrate", "canary.yaml")}, 0},
+		{"streq", []string{"-f", filepath.Join("testdata", "migrate", "streq.yaml")}, 1},
+		{"partial", []string{"-f", filepath.Join("testdata", "migrate", "partial.yaml")}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			code, out, errOut := runCLI(t, append([]string{"migrate", "ingress-nginx"}, tc.args...)...)
@@ -90,6 +96,38 @@ func TestMigrateRoundTrip(t *testing.T) {
 		if !strings.HasPrefix(verdicts[i], want) {
 			t.Errorf("request %d: %q, want %s", i+1, verdicts[i], want)
 		}
+	}
+}
+
+// TestMigrateStrictRoundTrip replays, against the migrated objects,
+// requests ingress-nginx denied: a canary Ingress's own settings, an
+// @streq path ending in *, and ProcessPartial must not let them through.
+func TestMigrateStrictRoundTrip(t *testing.T) {
+	sqli := "1%27%20or%201=1--"
+	// A 70 KB form: over the engine's default limit, under ingress-nginx's.
+	body := "a=" + strings.Repeat("x", 70000) + "&q=" + sqli
+	form := fmt.Sprintf("POST /submit HTTP/1.1\nHost: shop.example.com\nContent-Type: application/x-www-form-urlencoded\nContent-Length: %d\n\n%s", len(body), body)
+	for _, tc := range []struct {
+		name, requests string
+		code           int
+	}{
+		{"canary", "GET /?q=" + sqli + " HTTP/1.1\nHost: shop.example.com\n\n", 0},
+		{"streq", "GET /staticfoo/x?q=" + sqli + " HTTP/1.1\nHost: shop.example.com\n\n", 1},
+		{"partial", form, 0},
+	} {
+		// Each is denied by the main Ingress's policy, shop/web.
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			in := filepath.Join("testdata", "migrate", tc.name+".yaml")
+			if code, _, errOut := runCLI(t, "migrate", "ingress-nginx", "-f", in, "--output", dir); code != tc.code {
+				t.Fatalf("migrate: exit %d, stderr:\n%s", code, errOut)
+			}
+			code, out, errOut := runCLI(t, "test", "--policy", dir, "--ingress", in,
+				"--request", writeFile(t, "requests.http", tc.requests))
+			if code != 0 || !strings.HasPrefix(out, "deny") || !strings.Contains(out, "policy=shop/web ") {
+				t.Errorf("test: exit %d, want a deny as ingress-nginx's:\n%s%s", code, out, errOut)
+			}
+		})
 	}
 }
 
@@ -366,6 +404,28 @@ func TestMigrateIngress(t *testing.T) {
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1},
 		{name: "ctl path with a query", annotations: snippet(`SecRule REQUEST_FILENAME "@beginsWith /a?b" "id:1,phase:1,pass,ctl:ruleRemoveById=942100"`),
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1},
+		{name: "ctl without phase", annotations: snippet(`SecRule REQUEST_FILENAME "@beginsWith /api/" "id:1,pass,nolog,ctl:ruleRemoveById=942100"`),
+			want:     "exclusions:\n- ruleIDs:\n  - 942100\n  when:\n    path: /api/*\nmode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n",
+			contains: "phase 2"},
+		{name: "ctl streq with a star", annotations: snippet(`SecRule REQUEST_FILENAME "@streq /static*" "id:1,phase:1,pass,nolog,ctl:ruleEngine=Off"`),
+			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1, contains: "literally"},
+		{name: "process partial", annotations: map[string]string{annEnable: "true", annCRS: "true", annSnippet: "SecRuleEngine On\nInclude " + nginxRecommendedConf + "\nSecRequestBodyLimitAction ProcessPartial"},
+			want:     "body:\n  maxBytes: 10485760\n  onOversize: Allow\nmode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n",
+			contains: "capped"},
+		{name: "process partial with a limit", annotations: snippet("SecRequestBodyLimit 1048576\nSecRequestBodyLimitAction ProcessPartial"),
+			want: "body:\n  maxBytes: 1048576\n  onOversize: Allow\nmode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n"},
+		{name: "process partial without a known limit", annotations: snippet("SecRequestBodyLimitAction ProcessPartial"),
+			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1, contains: "unknown"},
+		{name: "nginx modsecurity directives", annotations: map[string]string{annEnable: "true", annCRS: "true", "configuration-snippet": "more_set_headers \"X: y\";\nmodsecurity_rules 'SecRuleRemoveById 942100';"},
+			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1, contains: "nginx's ModSecurity directives"},
+		{name: "nginx snippet without modsecurity", annotations: map[string]string{annEnable: "true", annCRS: "true", "server-snippet": "location /x { return 404; }"},
+			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n"},
+		{name: "global nginx modsecurity directives", global: nginxGlobal{nginxSnippets: []string{"ConfigMap http-snippet"}, source: "ConfigMap"},
+			todo: 1},
+		{name: "canary", annotations: map[string]string{annEnable: "true", annCRS: "true", annCanary: "true"},
+			contains: "canary Ingress"},
+		{name: "canary invalid", annotations: map[string]string{annEnable: "true", annCRS: "true", annCanary: "yes"},
+			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n"},
 		{name: "body", annotations: snippet("SecRequestBodyAccess Off\nSecRequestBodyLimit 1048576\nSecRequestBodyLimitAction Reject"),
 			want: "body:\n  inspect: false\n  maxBytes: 1048576\n  onOversize: Deny\nmode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n"},
 		{name: "custom rule", annotations: map[string]string{annEnable: "true", annSnippet: `SecRuleEngine On
@@ -592,5 +652,19 @@ items:
 	code, out, errOut := runCLI(t, "migrate", "ingress-nginx", "-f", "-", "--namespace", "shop")
 	if code != 0 || !strings.Contains(out, "namespace: shop") || !strings.Contains(errOut, "Service shop/web skipped") {
 		t.Errorf("exit %d, stdout:\n%s\nstderr:\n%s", code, out, errOut)
+	}
+}
+
+// TestGlobalNginxSnippets finds nginx's ModSecurity directives in the
+// ConfigMap's nginx snippets.
+func TestGlobalNginxSnippets(t *testing.T) {
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "ingress-nginx", Name: "c"}, Data: map[string]string{
+		"http-snippet":     "modsecurity on;\nmodsecurity_rules_file /etc/nginx/extra.conf;",
+		"server-snippet":   "gzip on;",
+		"location-snippet": "# not modsecurity",
+	}}
+	got := globalSettings(cm, io.Discard).nginxSnippets
+	if want := []string{"ConfigMap ingress-nginx/c http-snippet"}; !slices.Equal(got, want) {
+		t.Errorf("nginx snippets %q, want %q", got, want)
 	}
 }
