@@ -241,7 +241,7 @@ ambiguous.
 Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
 
 - **`InkwallConfig`** (a cluster singleton): `mode`, `controlPlane`, `engine`, `integrations` and
-  `events`. `engine` holds the image, resources, `bootstrapMode` and `socketDir`. Its resources
+  `events`. `engine` holds the image, resources and `bootstrapMode`; its `socketDir` is deprecated and ignored. Its resources
   have no CPU limit, since throttling hurts p99 latency.
 - **`WAFPolicy`**:
 
@@ -428,8 +428,10 @@ same path (#119).
 
 Every integration follows the same rules. It sends only what the policy needs, over a persistent
 connection (a Unix socket where possible). Its timeout is just above the engine's deadline. On an
-error it applies the failure mode. It passes the client IP and the request ID. The socket
-directory is a shared [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir) at `/var/run/inkwall`. (Traefik, built, is the exception to the
+error it applies the failure mode. It passes the client IP and the request ID. A Unix socket
+lives in an [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir) the
+engine and the proxy share, at a path the integration fixes (Envoy Gateway:
+`/var/run/inkwall-socket`). (Traefik, built, is the exception to the
 timeout and failure-mode rules: the operator's ForwardAuth Middleware sets no timeout and has no
 failure-mode setting; [§7.3](#73-engine-unavailable).)
 
