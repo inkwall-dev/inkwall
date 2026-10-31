@@ -162,9 +162,16 @@ kind-operator: ## Build the operator image, install the Helm chart on the kind c
 
 .PHONY: kind-e2e
 kind-e2e: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
-kind-e2e: kind-operator ## End-to-end test on kind: a WAFPolicy is enforced by an engine in bundle mode (installs the operator first)
+kind-e2e: kind-operator ## End-to-end test on kind: a WAFPolicy is enforced by an engine in bundle mode, through Traefik and Envoy Gateway (installs the operator first)
 	@# kind-operator built and loaded the engine image.
 	KIND_CLUSTER=$(KIND_CLUSTER) IMAGE=$(IMAGE) SKIP_BUILD=1 hack/kind/e2e.sh
+	@# e2e.sh ends with an uninstall.
+	$(MAKE) kind-e2e-envoy-gateway
+
+.PHONY: kind-e2e-envoy-gateway
+kind-e2e-envoy-gateway: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
+kind-e2e-envoy-gateway: kind-operator ## End-to-end test on kind through Envoy Gateway and Traefik with one WAFPolicy, ending with an uninstall (installs the operator first)
+	KIND_CLUSTER=$(KIND_CLUSTER) hack/kind/envoy-gateway-e2e.sh
 
 .PHONY: kind-upgrade
 kind-upgrade: ## Upgrade test on kind: helm upgrade from the last release to this checkout keeps routes protected, uninstall restores them (own cluster, UPGRADE_CLUSTER)

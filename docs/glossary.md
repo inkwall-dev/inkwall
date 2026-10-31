@@ -190,8 +190,16 @@ first time they mention it.
   Its Go filter runs Go code in-process. ([Envoy
   docs](https://www.envoyproxy.io/docs/envoy/latest/))
 - <a id="envoy-gateway"></a>**Envoy Gateway**: An implementation of the Gateway API on Envoy,
-  extended with objects such as `EnvoyExtensionPolicy`. ([Envoy Gateway
-  docs](https://gateway.envoyproxy.io/))
+  extended with objects such as `EnvoyExtensionPolicy`. Inkwall protects the HTTPRoutes it
+  serves. ([Envoy Gateway docs](https://gateway.envoyproxy.io/))
+- <a id="envoyextensionpolicy"></a>**EnvoyExtensionPolicy (Envoy Gateway)**: Adds filters, such as
+  ext_proc, to the routes or Gateways it targets. The operator makes one per protected HTTPRoute,
+  whose ext_proc filter calls the engine through a `Backend`, an Envoy Gateway object for an
+  endpoint such as a Unix socket. ([Envoy Gateway
+  docs](https://gateway.envoyproxy.io/docs/api/extension_types/#envoyextensionpolicy))
+- <a id="envoyproxy"></a>**EnvoyProxy (Envoy Gateway)**: The settings of the Envoy pods of a
+  GatewayClass or Gateway, including their pod template. The operator adds the engine there.
+  ([Envoy Gateway docs](https://gateway.envoyproxy.io/docs/api/extension_types/#envoyproxy))
 - <a id="envtest"></a>**envtest**: A test helper that runs a real Kubernetes API server and etcd,
   without nodes, for controller tests. ([kubebuilder
   book](https://book.kubebuilder.io/reference/envtest))

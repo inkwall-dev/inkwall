@@ -151,6 +151,11 @@ func InstallLater(e *Env) error { return install(e, "later") }
 // served.
 func InstallGatewayAPI(e *Env) error { return install(e, "gateway-api") }
 
+// InstallEnvoyGateway installs stand-ins for Envoy Gateway's CRDs
+// (testenv/envoy-gateway) while the operator runs, and waits until they are
+// served.
+func InstallEnvoyGateway(e *Env) error { return install(e, "envoy-gateway") }
+
 func install(e *Env, dir string) error {
 	_, err := envtest.InstallCRDs(e.Config, envtest.CRDInstallOptions{
 		Paths:              []string{filepath.Join(filepath.Dir(configDir()), "test", "testenv", dir)},

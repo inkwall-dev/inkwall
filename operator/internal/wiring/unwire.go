@@ -34,7 +34,7 @@ type Unwired struct {
 // doesn't have. Run it with the operator stopped, or it wires them again.
 func Unwire(ctx context.Context, c client.Client) (Unwired, error) {
 	n := Unwired{Objects: map[string]int{}}
-	for _, in := range Integrations(c, c, nil, nil) {
+	for _, in := range Integrations(c, c, Config{}) {
 		counts, err := in.Unwire(ctx, c)
 		maps.Copy(n.Objects, counts)
 		if err != nil {

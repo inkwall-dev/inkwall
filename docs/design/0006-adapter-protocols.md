@@ -20,7 +20,7 @@ its adapter is in [0002 §6](0002-system-architecture.md#6-proxy-integrations).
 **Built (v0.1.0):** forward-auth ([§3](#3-forward-auth-traefik-forwardauth-nginx-auth_request)),
 `/v1/check` over HTTP ([§5](#5-v1check-inkwalls-own-api)) and the reverse proxy
 ([§6](#6-reverse-proxy-standalone-mode)). **Built since:** ext_proc
-([§2](#2-ext_proc-envoy-external-processing)), engine side only. **Not yet:** ext_authz
+([§2](#2-ext_proc-envoy-external-processing)), with the operator's Envoy Gateway configuration. **Not yet:** ext_authz
 ([§1](#1-ext_authz-envoy-external-authorization)) and SPOE
 ([§4](#4-spoe-haproxy-stream-processing-offload-engine)).
 
@@ -98,10 +98,13 @@ wins on what comes next:
 - The cost: Envoy keeps a stream per request, and the body is buffered, not streamed. The
   benchmark shows the difference to forward-auth on the same rules.
 
-The operator's configuration (not built yet) is to set: `request_body_mode: BUFFERED_PARTIAL` on routes
+**Built: the operator's configuration** for Envoy Gateway ([0004 §4.4](0004-operator.md#44-wiring-controller)), one
+`EnvoyExtensionPolicy` per protected HTTPRoute: `request_body_mode: BUFFERED_PARTIAL` on routes
 whose policy inspects bodies (headers only otherwise), response stages `SKIP`, a message timeout
-just above the engine's deadline, and an Envoy buffer limit no lower than the largest
-`body.maxBytes`.
+100 ms above the engine's deadline, `failOpen` only when every policy on the route fails open, and
+an Envoy buffer limit (a `ClientTrafficPolicy` on the Gateway) of 10 MiB, the largest
+`body.maxBytes`. On kind, a body attack is blocked before the app sees the request: Envoy holds
+the headers until the engine answers the body. **Not yet:** `observability_mode` for detect mode.
 
 ## 3. forward-auth (Traefik `ForwardAuth`, nginx `auth_request`)
 
@@ -184,7 +187,7 @@ the cluster's [Standalone mode](../glossary.md#standalone) (no control plane).
 | | Transport | Body | Response | Proxy waits? | For | Status |
 |---|---|---|---|---|---|---|
 | ext_authz | gRPC call | Buffered, optional | No | Yes | Envoy fallback | Not yet |
-| ext_proc | gRPC stream | Buffered (streaming possible) | Yes (not used yet) | Yes, or no (observability mode) | Envoy Gateway, Envoy, Istio, Contour | Built (engine) |
+| ext_proc | gRPC stream | Buffered (streaming possible) | Yes (not used yet) | Yes, or no (observability mode) | Envoy Gateway, Envoy, Istio, Contour | Built (Envoy Gateway) |
 | forward-auth | HTTP subrequest | If forwarded | No | Yes | Traefik, ingress-nginx | Built |
 | SPOE | SPOP | Yes | Possible | Yes, or no (asynchronous) | HAProxy | Not yet |
 | `/v1/check` | HTTP (gRPC planned) | Yes | No | Yes | CLI, tests; Lua and Traefik plugins planned | Built |

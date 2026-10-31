@@ -75,11 +75,7 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 	var cfg wafv1alpha1.InkwallConfig
 	switch err := p.Client.Get(ctx, types.NamespacedName{Name: "default"}, &cfg); {
 	case err == nil:
-		if cfg.Spec.Engine.Image != "" {
-			s.Image = cfg.Spec.Engine.Image
-		}
-		s.Resources = cfg.Spec.Engine.Resources
-		s.DenyBeforeBundle = cfg.Spec.Engine.BootstrapMode == wafv1alpha1.BootstrapDenyAll
+		s = s.Configured(cfg.Spec.Engine)
 	case !apierrors.IsNotFound(err):
 		// The pod still gets the engine, with the operator's defaults:
 		// better than none, and the webhook may be failing closed.
