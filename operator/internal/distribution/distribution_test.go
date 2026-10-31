@@ -49,8 +49,8 @@ func TestEnforced(t *testing.T) {
 	}{
 		{"not in a bundle", 0, []Engine{{Applied: 3}}, metav1.ConditionFalse, ReasonNotInBundle, "not in a bundle"},
 		{"no engines", 3, nil, metav1.ConditionFalse, ReasonNoEngines, "no engine"},
-		{"all current", 3, []Engine{{Applied: 3}, {Applied: 4}}, metav1.ConditionTrue, ReasonEnforced, "2/2 engines on bundle 3"},
-		{"one behind", 3, []Engine{{Applied: 3}, {Applied: 2}}, metav1.ConditionFalse, ReasonEnginesBehind, "1/2 engines on bundle 3"},
+		{"all current", 3, []Engine{{Applied: 3}, {Applied: 4}}, metav1.ConditionTrue, ReasonEnforced, "every engine runs bundle 3 or later"},
+		{"one behind", 3, []Engine{{Applied: 3}, {Applied: 2}}, metav1.ConditionFalse, ReasonEnginesBehind, "some engines don't run bundle 3 yet"},
 		{
 			"one rejected", 3,
 			[]Engine{{Applied: 3}, {Applied: 2, Rejected: 3, RejectError: "line 1: bad rule", PodNamespace: "traefik", PodName: "traefik-1"}},
@@ -58,7 +58,7 @@ func TestEnforced(t *testing.T) {
 		},
 		// A rejection of an older bundle doesn't matter once the engine
 		// runs a newer one.
-		{"old rejection", 3, []Engine{{Applied: 3, Rejected: 2}}, metav1.ConditionTrue, ReasonEnforced, "1/1"},
+		{"old rejection", 3, []Engine{{Applied: 3, Rejected: 2}}, metav1.ConditionTrue, ReasonEnforced, "every engine runs bundle 3"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st, reason, msg := Enforced(tc.version, tc.engines)

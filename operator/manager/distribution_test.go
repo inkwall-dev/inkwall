@@ -178,7 +178,7 @@ func testDistribution(ctx context.Context, t *testing.T, c client.Client) {
 		}
 		return "policy not received"
 	})
-	wantEnforced("one engine", metav1.ConditionTrue, distribution.ReasonEnforced, "1/1 engines on bundle")
+	wantEnforced("one engine", metav1.ConditionTrue, distribution.ReasonEnforced, "every engine runs bundle")
 
 	// An edit reaches the running engine without reconnecting.
 	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) { p.Spec.Mode = wafv1alpha1.PolicyBlock })
@@ -190,7 +190,7 @@ func testDistribution(ctx context.Context, t *testing.T, c client.Client) {
 		}
 		return "still in detect mode"
 	})
-	wantEnforced("edit enforced", metav1.ConditionTrue, distribution.ReasonEnforced, "1/1 engines")
+	wantEnforced("edit enforced", metav1.ConditionTrue, distribution.ReasonEnforced, "every engine runs bundle")
 
 	// An engine that rejects the bundle shows up, until it goes away.
 	bad := engine("traefik-2", "traefik")
@@ -198,7 +198,7 @@ func testDistribution(ctx context.Context, t *testing.T, c client.Client) {
 	stopBad := run(bad)
 	wantEnforced("a rejecting engine", metav1.ConditionFalse, distribution.ReasonEngineNack, "1/2 engines rejected bundle")
 	stopBad()
-	wantEnforced("the rejecting engine gone", metav1.ConditionTrue, distribution.ReasonEnforced, "1/1 engines")
+	wantEnforced("the rejecting engine gone", metav1.ConditionTrue, distribution.ReasonEnforced, "every engine runs bundle")
 
 	stopGood()
 	wantEnforced("all engines gone", metav1.ConditionFalse, distribution.ReasonNoEngines, "no engine")

@@ -608,7 +608,7 @@ inspects inline and always allows (`pkg/pipeline`).
 1. [Argo CD](https://argo-cd.readthedocs.io/en/stable/) applies a `WAFPolicy`.
 2. The operator builds and signs a bundle.
 3. Engines swap it in and ACK.
-4. The policy reports `Enforced=True "6/6 engines on bundle N"`.
+4. The policy reports `Enforced=True "every engine runs bundle N or later"`.
 
 ### 7.5 Cluster enrollment (Managed / GitOps mode)
 
