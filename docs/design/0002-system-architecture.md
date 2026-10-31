@@ -575,8 +575,9 @@ This is the design flow; the Envoy integration is not built yet.
 ### 7.2 Detect mode
 
 By design, the proxy forwards the request without waiting. The engine logs matches with the
-action `LOG`. Built today, every adapter still waits for the verdict: in detect mode the engine
-inspects inline and always allows (`pkg/pipeline`).
+action `LOG`. Built today, Envoy Gateway doesn't wait: a route whose policies are all in detect
+mode and fail open gets ext_proc's `observability_mode`. The other adapters still wait for the
+verdict: in detect mode the engine inspects inline and always allows (`pkg/pipeline`).
 
 ### 7.3 Engine unavailable
 
