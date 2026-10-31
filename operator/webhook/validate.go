@@ -5,7 +5,8 @@
 // webhook checks what the CRD schemas can't (0004 §3.1, level 2): rule sets
 // must compile the way the engine loads them, and policy paths must be ones
 // the engine's router can match. In Managed mode it also keeps the control
-// plane's policies to the operator (SourceGuard).
+// plane's policies to the operator (SourceGuard), and warns about the
+// InkwallConfig's deprecated fields.
 package webhook
 
 import (
@@ -48,6 +49,12 @@ const PolicyWebhookName = "wafpolicies.waf.inkwall.dev"
 // +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-clusterwafruleset,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=clusterwafrulesets,verbs=delete,versions=v1alpha1,name=delete.clusterwafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,patch=`{"objectSelector":{"matchLabels":{"inkwall.dev/source":"saas"}}}`
 // +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafpolicy,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=wafpolicies,verbs=delete,versions=v1alpha1,name=delete.wafpolicies.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,patch=`{"objectSelector":{"matchLabels":{"inkwall.dev/source":"saas"}}}`
 
+// The InkwallConfig webhook only warns, so it fails open: the
+// InkwallConfig, and its spec.suspend switch, must stay editable while the
+// operator is down.
+//
+// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-inkwallconfig,mutating=false,failurePolicy=ignore,sideEffects=None,groups=waf.inkwall.dev,resources=inkwallconfigs,verbs=create;update,versions=v1alpha1,name=inkwallconfigs.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
+
 // Setup registers the validating webhooks with mgr's webhook server, and
 // the Pod webhook when inject is set. guard keeps the control plane's
 // objects to the operator.
@@ -63,8 +70,39 @@ func Setup(mgr manager.Manager, inject *PodInjector, guard *SourceGuard) error {
 		WithValidator(specValidator[*wafv1alpha1.ClusterWAFRuleSet]{validateClusterWAFRuleSet, guard}).Complete(); err != nil {
 		return err
 	}
-	return builder.WebhookManagedBy(mgr, &wafv1alpha1.WAFPolicy{}).
-		WithValidator(specValidator[*wafv1alpha1.WAFPolicy]{validateWAFPolicy, guard}).Complete()
+	if err := builder.WebhookManagedBy(mgr, &wafv1alpha1.WAFPolicy{}).
+		WithValidator(specValidator[*wafv1alpha1.WAFPolicy]{validateWAFPolicy, guard}).Complete(); err != nil {
+		return err
+	}
+	return builder.WebhookManagedBy(mgr, &wafv1alpha1.InkwallConfig{}).
+		WithValidator(configValidator{}).Complete()
+}
+
+const socketDirWarning = "spec.engine.socketDir is deprecated and ignored: each integration places the engine's socket itself; remove it"
+
+// configValidator warns about the InkwallConfig's deprecated fields; it
+// rejects nothing. It warns when socketDir is set or changed, not when an
+// update keeps it: InkwallConfigs created before v0.3.0 hold its old
+// default, which a client-side apply never removes.
+type configValidator struct{}
+
+func (configValidator) ValidateCreate(_ context.Context, cfg *wafv1alpha1.InkwallConfig) (admission.Warnings, error) {
+	return socketDirWarnings("", cfg), nil
+}
+
+func (configValidator) ValidateUpdate(_ context.Context, oldCfg, newCfg *wafv1alpha1.InkwallConfig) (admission.Warnings, error) {
+	return socketDirWarnings(oldCfg.Spec.Engine.SocketDir, newCfg), nil //nolint:staticcheck // warns about the deprecated field
+}
+
+func (configValidator) ValidateDelete(context.Context, *wafv1alpha1.InkwallConfig) (admission.Warnings, error) {
+	return nil, nil
+}
+
+func socketDirWarnings(old string, cfg *wafv1alpha1.InkwallConfig) admission.Warnings {
+	if dir := cfg.Spec.Engine.SocketDir; dir != "" && dir != old { //nolint:staticcheck // warns about the deprecated field
+		return admission.Warnings{socketDirWarning}
+	}
+	return nil
 }
 
 // object is a WAF kind with a spec.

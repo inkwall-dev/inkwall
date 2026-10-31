@@ -241,7 +241,7 @@ ambiguous.
 Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
 
 - **`InkwallConfig`** (a cluster singleton): `mode`, `controlPlane`, `engine`, `integrations` and
-  `events`. `engine` holds the image, resources, `bootstrapMode` and `socketDir`. Its resources
+  `events`. `engine` holds the image, resources and `bootstrapMode`; its `socketDir` is deprecated and ignored. Its resources
   have no CPU limit, since throttling hurts p99 latency.
 - **`WAFPolicy`**:
 
@@ -428,8 +428,10 @@ same path (#119).
 
 Every integration follows the same rules. It sends only what the policy needs, over a persistent
 connection (a Unix socket where possible). Its timeout is just above the engine's deadline. On an
-error it applies the failure mode. It passes the client IP and the request ID. The socket
-directory is a shared [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir) at `/var/run/inkwall`. (Traefik, built, is the exception to the
+error it applies the failure mode. It passes the client IP and the request ID. A Unix socket
+lives in an [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir) the
+engine and the proxy share, at a path the integration fixes (Envoy Gateway:
+`/var/run/inkwall-socket`). (Traefik, built, is the exception to the
 timeout and failure-mode rules: the operator's ForwardAuth Middleware sets no timeout and has no
 failure-mode setting; [§7.3](#73-engine-unavailable).)
 
@@ -577,8 +579,9 @@ This is the design flow; the Envoy integration is not built yet.
 ### 7.2 Detect mode
 
 By design, the proxy forwards the request without waiting. The engine logs matches with the
-action `LOG`. Built today, every adapter still waits for the verdict: in detect mode the engine
-inspects inline and always allows (`pkg/pipeline`).
+action `LOG`. Built today, Envoy Gateway doesn't wait: a route whose policies are all in detect
+mode and fail open gets ext_proc's `observability_mode`. The other adapters still wait for the
+verdict: in detect mode the engine inspects inline and always allows (`pkg/pipeline`).
 
 ### 7.3 Engine unavailable
 
@@ -711,7 +714,8 @@ rate-limit metrics, bundle age, tracing, the dashboard and alerts.
 - Tested on the last 3 Kubernetes minor versions (`docs/compatibility.md`).
 
 **Not yet:** a version matrix and `docs/compatibility.md` (CI's kind e2e test runs kind's newest
-Kubernetes, and [envtest](https://book.kubebuilder.io/reference/envtest) runs 1.29), and conversion webhooks (only `v1alpha1` exists).
+Kubernetes; the local kind cluster, the upgrade test and [envtest](https://book.kubebuilder.io/reference/envtest) run 1.34; the chart
+allows 1.29 and later), and conversion webhooks (only `v1alpha1` exists).
 
 ---
 
