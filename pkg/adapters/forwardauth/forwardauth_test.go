@@ -29,8 +29,9 @@ func newPipeline(t *testing.T, mode pipeline.Mode) *pipeline.Pipeline {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A generous timeout keeps the race detector from tripping the deadline.
-	return pipeline.New(eval, pipeline.Config{Mode: mode, Timeout: 500 * time.Millisecond})
+	// The deadline isn't under test: a generous one keeps the race detector
+	// and a loaded machine from tripping it (a 503 in block mode).
+	return pipeline.New(eval, pipeline.Config{Mode: mode, Timeout: 10 * time.Second})
 }
 
 func newHandler(t *testing.T, mode pipeline.Mode, maxBody int64, logs *bytes.Buffer) *Handler {
@@ -197,7 +198,7 @@ func observedPipeline(t *testing.T, obs pipeline.Observer) *pipeline.Pipeline {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 500 * time.Millisecond, Observer: obs})
+	return pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 10 * time.Second, Observer: obs})
 }
 
 // TestSameVerdictAsReverseProxy checks the package contract: the reverse

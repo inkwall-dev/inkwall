@@ -277,9 +277,11 @@ func (s *Server) stats(counts map[string]*eventsv1.PolicyStats, st *eventsv1.Req
 	var deltas []*eventsv1.PolicyStats
 	for _, p := range st.GetPolicies() {
 		if !s.Bundles.HasPolicy(p.GetPolicy()) {
+			RequestStatsDropped.WithLabelValues(DroppedNotInBundle).Inc()
 			continue
 		}
 		if !sameBuckets {
+			RequestStatsDropped.WithLabelValues(DroppedLatencyBuckets).Inc()
 			p.LatencyCounts, p.LatencySum = nil, 0
 		}
 		deltas = append(deltas, events.DiffStats(p, counts[p.GetPolicy()]))

@@ -210,20 +210,24 @@ control plane removes duplicates by event ID. Switching to `Standalone`, or a co
 stops accepting events, empties the buffer.
 
 Request counts need no buffer: each replica keeps its running totals in memory and sends them all
-again after reconnecting. A replica that restarts starts again from zero.
+again after reconnecting. A replica that restarts starts again from zero. It keeps the totals of
+at least 4096 policies; past that, it forgets those no longer in a bundle, and one that comes back
+starts again from zero. So a policy's total can go down: the control plane treats any decrease as
+a reset and counts the new value from zero, the rule the operator applies to its engines.
 
 The operator's [Prometheus metrics](https://prometheus.io/docs/concepts/metric_types/)
-(`:8080/metrics` on each replica) show the buffer:
+(`:8080/metrics` on each replica) show the buffer and what was dropped:
 
 | Metric | |
 |---|---|
 | `inkwall_operator_events_buffered` | Events in this replica's buffer, not yet acknowledged |
 | `inkwall_operator_events_forwarded_total` | Events sent, resends included |
 | `inkwall_operator_events_buffer_errors_total` | Batches that couldn't be written to the buffer (dropped) |
+| `inkwall_operator_request_stats_dropped_total{reason}` | Policies' request counts dropped: `not_in_bundle` (an engine reported a policy the replica's bundle doesn't have), `latency_buckets` (latency counted in other buckets), `evicted` (totals forgotten) |
 
 ```sh
 kubectl -n inkwall-system port-forward deploy/inkwall-operator 8080 &
-curl -s localhost:8080/metrics | grep '^inkwall_operator_events'
+curl -s localhost:8080/metrics | grep -E '^inkwall_operator_(events|request_stats)'
 ```
 
 ## Managed mode

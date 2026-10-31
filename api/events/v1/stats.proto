@@ -12,7 +12,8 @@ package inkwall.events.v1;
 option go_package = "github.com/inkwall-dev/inkwall/api/events/v1;eventsv1";
 
 // RequestStats counts requests per policy. The counts are cumulative; where
-// they start is up to the message carrying them.
+// they start is up to the message carrying them. A policy's count lower
+// than in the previous report is a reset: count the new value from zero.
 message RequestStats {
   // The upper bounds of the latency buckets, in seconds, increasing.
   repeated double latency_bounds = 1;
