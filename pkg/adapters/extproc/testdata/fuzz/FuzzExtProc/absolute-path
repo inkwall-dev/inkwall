@@ -1,0 +1,11 @@
+go test fuzz v1
+string("GET")
+string("http://evil.example/x")
+string("shop.example.com")
+string("http")
+string("accept")
+string("*/*")
+[]byte("")
+bool(true)
+bool(true)
+byte('\x00')

@@ -65,7 +65,7 @@ which only adds management, analytics and threat intelligence.
 | Component | Runs in | Code | Status |
 |---|---|---|---|
 | **inkwall-engine** | Sidecar in ingress controller pods, or standalone | `cmd/engine`, `pkg/` | Built |
-| **Engine adapters** | Engine process | `pkg/adapters/*` | Built: `forwardauth`, `httpcheck` (`/v1/check`), `proxy`. Not yet: [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter), [ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter), [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) |
+| **Engine adapters** | Engine process | `pkg/adapters/*` | Built: `forwardauth`, `httpcheck` (`/v1/check`), `proxy`, `extproc` ([ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter)). Not yet: [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter), [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) |
 | **Proxy-side glue** | Proxy configuration | `operator/integrations`, `operator/internal/wiring` | Built: Traefik [Middleware](https://doc.traefik.io/traefik/middlewares/overview/). Not yet: nginx [Lua](https://github.com/openresty/lua-nginx-module), SPOE, Envoy configuration |
 | **Caddy module** | Compiled into Caddy | `adapters/caddy` (own [`go.mod`](https://go.dev/ref/mod#go-mod-file)) | Not yet |
 | **Traefik plugin** (thin client) | Traefik ([Yaegi](https://github.com/traefik/yaegi)) | `adapters/traefik-plugin` (own `go.mod`) | Not yet |
@@ -93,11 +93,12 @@ which only adds management, analytics and threat intelligence.
 - `pkg/events`: redacted security events in a bounded [ring buffer](https://en.wikipedia.org/wiki/Circular_buffer), sent to the operator in batches
   on the agent stream;
 - `pkg/bundlekey`: the trusted signing keys;
-- `pkg/bundlesecret`: the bundle Secret's format, chunks included.
+- `pkg/bundlesecret`: the bundle Secret's format, chunks included;
+- `pkg/adapters/extproc`: Envoy's external processing over [gRPC](https://grpc.io/docs/) ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing)).
 
 **Not yet:**
 
-- The adapters `extauthz` ([gRPC](https://grpc.io/docs/)), `extproc` (gRPC stream) and `spoe` (SPOP).
+- The adapters `extauthz` (gRPC) and `spoe` (SPOP).
 - Tier T1, IP lists and rate limits (`pkg/iplist`, `pkg/ratelimit`), between the route table and
   the rules ([0001 §4](0001-performance-first-architecture.md#4-request-pipeline-tiered-cheapest-first)).
 - Traces in telemetry.

@@ -1,0 +1,11 @@
+go test fuzz v1
+string("POST")
+string("/upload")
+string("shop.example.com")
+string("https")
+string("content-length")
+string("5")
+[]byte("hello")
+bool(false)
+bool(true)
+byte('\x01')
