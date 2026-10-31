@@ -45,6 +45,11 @@ message Bundle {
   // The emergency switch (InkwallConfig.spec.suspend): every request is
   // allowed uninspected.
   bool suspended = 7;
+  // The operator's bookkeeping, not part of content_hash; engines ignore it.
+  // policy_versions[i] is the first bundle that enforces policies[i] as it
+  // is in this one (its status.bundleVersion), so a new leader continues it.
+  // Empty in bundles of operators before v0.3.0.
+  repeated uint64 policy_versions = 8;
 }
 
 // Policy is one WAFPolicy, applied to the requests its routes match. A

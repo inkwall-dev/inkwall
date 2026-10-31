@@ -82,10 +82,50 @@ func TestNext(t *testing.T) {
 	}
 }
 
+// Each policy's version is the first bundle that enforces it as it is,
+// carried from bundle to bundle.
+func TestPolicyVersions(t *testing.T) {
+	now := time.Now()
+	want := func(b *bundlev1.Bundle, want map[string]uint64) {
+		t.Helper()
+		if got := PolicyVersions(b); !maps.Equal(got, want) {
+			t.Fatalf("bundle %d: policy versions %v, want %v", b.GetVersion(), got, want)
+		}
+	}
+	b1, _, _ := Next(nil, content("shop/a", "shop/b"), 0, now, false)
+	want(b1, map[string]uint64{"shop/a": 1, "shop/b": 1})
+	edited := content("shop/a", "shop/b")
+	edited.Policies[1].Mode = bundlev1.Mode_MODE_DETECT
+	b2, _, _ := Next(b1, edited, 1, now, false)
+	want(b2, map[string]uint64{"shop/a": 1, "shop/b": 2})
+	added := proto.Clone(edited).(*bundlev1.Bundle)
+	added.Policies = append(added.Policies, &bundlev1.Policy{Id: "shop/c"})
+	b3, _, _ := Next(b2, added, 2, now, false)
+	want(b3, map[string]uint64{"shop/a": 1, "shop/b": 2, "shop/c": 3})
+	// Signed again: the same content, so the same versions.
+	b4, _, _ := Next(b3, proto.Clone(added).(*bundlev1.Bundle), 3, now, true)
+	want(b4, map[string]uint64{"shop/a": 1, "shop/b": 2, "shop/c": 3})
+	// Suspension changes every policy.
+	suspended := proto.Clone(added).(*bundlev1.Bundle)
+	suspended.Suspended = true
+	b5, _, _ := Next(b4, suspended, 4, now, false)
+	want(b5, map[string]uint64{"shop/a": 5, "shop/b": 5, "shop/c": 5})
+
+	// A bundle of an operator before v0.3.0 has no policy versions: its
+	// policies count from it.
+	old := content("shop/a", "shop/b")
+	old.Version = 7
+	want(old, map[string]uint64{"shop/a": 7, "shop/b": 7})
+	edited = content("shop/a", "shop/b")
+	edited.Policies[1].Mode = bundlev1.Mode_MODE_DETECT
+	b8, _, _ := Next(old, edited, 0, now, false)
+	want(b8, map[string]uint64{"shop/a": 7, "shop/b": 8})
+}
+
 func TestContentHashIgnoresMetadata(t *testing.T) {
 	a := content("shop/a")
 	b := proto.Clone(a).(*bundlev1.Bundle)
-	b.Version = 9
+	b.Version, b.PolicyVersions = 9, []uint64{7}
 	ha, _ := ContentHash(a)
 	hb, _ := ContentHash(b)
 	if string(ha) != string(hb) {

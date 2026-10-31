@@ -124,14 +124,6 @@ type BundleReconciler struct {
 	// checked caches CheckUserRules results by rule text: compiling with
 	// the Core Rule Set takes milliseconds, and rules rarely change.
 	checked map[[sha256.Size]byte]error
-	// since has, by policy id, the first bundle that enforces the policy as
-	// it is now (status.bundleVersion), with a hash of what it enforces.
-	since map[string]policySince
-}
-
-type policySince struct {
-	hash    [sha256.Size]byte
-	version uint64
 }
 
 // SetupWithManager registers the builder with mgr.
@@ -313,7 +305,7 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 		return reconcile.Result{}, fmt.Errorf("delete stale bundle chunks: %w", err)
 	}
 
-	if err := r.writeStatus(ctx, res, current, next, policies.Items, ruleSets.Items, clusterRuleSets.Items); err != nil {
+	if err := r.writeStatus(ctx, res, next, policies.Items, ruleSets.Items, clusterRuleSets.Items); err != nil {
 		return reconcile.Result{}, err
 	}
 	if keys.Phase() != bundle.PhaseIdle {
@@ -465,27 +457,11 @@ func condition(st resolver.Status, generation int64) metav1.Condition {
 
 // writeStatus updates what changed; unchanged objects aren't written. A
 // policy's bundleVersion is the first bundle that enforces it as it is
-// now, so a bundle that changes other policies doesn't write it.
-func (r *BundleReconciler) writeStatus(ctx context.Context, res resolver.Result, current, next *bundlev1.Bundle,
+// now, which the bundle records (bundle.PolicyVersions), so a bundle that
+// changes other policies doesn't write it, and a new leader continues it.
+func (r *BundleReconciler) writeStatus(ctx context.Context, res resolver.Result, next *bundlev1.Bundle,
 	policies []wafv1alpha1.WAFPolicy, ruleSets []wafv1alpha1.WAFRuleSet, clusterRuleSets []wafv1alpha1.ClusterWAFRuleSet) error {
-	hashes, err := bundle.PolicyHashes(next)
-	if err != nil {
-		return err
-	}
-	previous := hashes
-	if current != next {
-		if previous, err = bundle.PolicyHashes(current); err != nil {
-			return err
-		}
-	}
-	if r.since == nil {
-		r.since = map[string]policySince{}
-	}
-	for id := range r.since {
-		if _, ok := hashes[id]; !ok {
-			delete(r.since, id)
-		}
-	}
+	versions := bundle.PolicyVersions(next)
 	// The writes run in parallel: the first build after a GitOps sync of
 	// thousands of policies writes all of them.
 	g, gctx := errgroup.WithContext(ctx)
@@ -498,10 +474,7 @@ func (r *BundleReconciler) writeStatus(ctx context.Context, res resolver.Result,
 		}
 		var version int64
 		if st.Applied {
-			id := resolver.PolicyID(p.Namespace, p.Name)
-			prev, inPrevious := previous[id]
-			unchanged := current != nil && inPrevious && prev == hashes[id]
-			version = int64(r.policySince(id, hashes[id], unchanged, p.Status.BundleVersion, current.GetVersion(), next.GetVersion())) // #nosec G115 -- versions count builds
+			version = int64(versions[resolver.PolicyID(p.Namespace, p.Name)]) // #nosec G115 -- versions count builds
 		}
 		g.Go(func() error {
 			return r.updateStatus(gctx, p, func(o client.Object) bool {
@@ -535,22 +508,6 @@ func (r *BundleReconciler) writeStatus(ctx context.Context, res resolver.Result,
 	return nil
 }
 
-// policySince returns the first bundle that enforces policy id as it is
-// in the next bundle (hash). It is remembered; after a leader change, the
-// policy's reported version stands if the next bundle didn't change it
-// (unchanged) and the current one has it.
-func (r *BundleReconciler) policySince(id string, hash [sha256.Size]byte, unchanged bool, reported int64, current, next uint64) uint64 {
-	if s, ok := r.since[id]; ok && s.hash == hash {
-		return s.version
-	}
-	v := next
-	if unchanged && reported > 0 && uint64(reported) <= current {
-		v = uint64(reported)
-	}
-	r.since[id] = policySince{hash: hash, version: v}
-	return v
-}
-
 func (r *BundleReconciler) updateRuleSetStatus(ctx context.Context, obj client.Object, st resolver.Status) error {
 	return r.updateStatus(ctx, obj, func(o client.Object) bool {
 		var status *wafv1alpha1.RuleSetStatus
@@ -569,13 +526,19 @@ func (r *BundleReconciler) updateRuleSetStatus(ctx context.Context, obj client.O
 }
 
 // updateStatus applies mutate to the object and writes its status if
-// mutate reports a change, retrying on conflicts with a fresh copy.
+// mutate reports a change, retrying on conflicts with a fresh copy. A copy
+// of another generation isn't written: the status is the build's result
+// for the generation it read, and the edit requeues a build that writes
+// the new one.
 func (r *BundleReconciler) updateStatus(ctx context.Context, obj client.Object, mutate func(client.Object) bool) error {
-	first := true
+	first, generation := true, obj.GetGeneration()
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if !first {
 			if err := r.Client.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
 				return err
+			}
+			if obj.GetGeneration() != generation {
+				return nil
 			}
 		}
 		first = false

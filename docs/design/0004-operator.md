@@ -167,7 +167,9 @@ Validation runs in three steps, cheapest first:
 Status also has `bundleVersion` and `observedGeneration`. `bundleVersion` is the first bundle that
 enforces the policy as it is now; later bundles do too, until one changes the policy. A bundle that
 changes only other policies doesn't change it (#149): before v0.3.0 it was the newest bundle, so
-every bundle rewrote every policy's status.
+every bundle rewrote every policy's status. Both are written together, for the generation the
+bundle was built from: a status write that conflicts with an edit is left to the edit's build
+(#239).
 
 `InkwallConfig.status` has `observedGeneration`, `conditions` (`ControlPlaneConnected`,
 [§4.9](#49-upstream-sync-leader-only)) and `proxies`, the discovered proxy controllers
@@ -569,8 +571,8 @@ It runs again when a targeted route changes (routes are indexed by target).
 
 - The Secret holds the `SignedBundle` and the public key. The key is generated on first use into
   `inkwall-bundle-signing-key`.
-- The hash skips the version and creation time. The version continues from the Secret, or from the
-  leader's memory if the Secret was deleted. The cluster ID is the [UID](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids) of the `kube-system`
+- The hash skips the version, the creation time and the policy versions. The version continues from
+  the Secret, or from the leader's memory if the Secret was deleted. The cluster ID is the [UID](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids) of the `kube-system`
   Namespace.
 - The leader keeps the bundle it last read or stored, with its compressed form (#213). Each build
   still reads the Secret and its chunks, uncached, but decodes them only if they hold another
@@ -701,9 +703,12 @@ and writes up to 8 at once, like the bundle builder.
 
 **Writes per bundle** (#149). The builder writes a policy's `bundleVersion` only when the bundle
 changes what the policy enforces: its own entry, the rule sets it binds, or suspension
-(`bundle.PolicyHashes`). It remembers the version per policy; a new leader keeps a policy's
-reported version when the bundle didn't change it. So a one-policy edit writes one policy's status,
-and the `Enforced` of the others, which name their own bundle, stays as it is.
+(`bundle.PolicyHashes`). The bundle records each policy's version (`policy_versions`), so a new
+leader continues them: before, it trusted the version in a policy's status, which the previous
+leader may not have written for the bundle it published (#239). A bundle from an operator before
+v0.3.0 has none: each of its policies counts from it, one status write per policy. So a one-policy
+edit writes one policy's status, and the `Enforced` of the others, which name their own bundle,
+stays as it is.
 
 Metrics: `inkwall_operator_bundle_version`, `inkwall_operator_engines{state}`,
 `inkwall_operator_bundle_compressed_bytes` ([§4.6](#46-bundle-builder-leader-only)), and, from the

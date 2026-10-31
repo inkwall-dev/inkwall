@@ -75,12 +75,13 @@ const MaxCompressedBytes = bundlesecret.MaxBytes
 var ErrTooLarge = errors.New("bundle too large for its Secrets")
 
 // ContentHash hashes what a bundle enforces: everything but its version,
-// creation time and the hash itself. Encoding is deterministic, so equal
-// content gives an equal hash within one operator version.
+// creation time, policy versions and the hash itself. Encoding is
+// deterministic, so equal content gives an equal hash within one operator
+// version.
 func ContentHash(b *bundlev1.Bundle) ([]byte, error) {
-	if b.GetVersion() != 0 || b.GetCreatedAt() != nil || b.GetContentHash() != nil {
+	if b.GetVersion() != 0 || b.GetCreatedAt() != nil || b.GetContentHash() != nil || b.GetPolicyVersions() != nil {
 		b = proto.Clone(b).(*bundlev1.Bundle)
-		b.Version, b.CreatedAt, b.ContentHash = 0, nil, nil
+		b.Version, b.CreatedAt, b.ContentHash, b.PolicyVersions = 0, nil, nil, nil
 	}
 	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(b)
 	if err != nil {
@@ -136,9 +137,11 @@ func PolicyHashes(b *bundlev1.Bundle) (map[string][sha256.Size]byte, error) {
 // Secret doesn't restart the sequence while the leader runs.
 //
 // A new bundle is content itself, not a copy, with its version, creation
-// time and hash set: the caller gives content up.
+// time, hash and policy versions set: the caller gives content up. A
+// policy's version is the current bundle's for it if the new bundle doesn't
+// change what it enforces (PolicyHashes), else the new version.
 func Next(current, content *bundlev1.Bundle, lastVersion uint64, now time.Time, resign bool) (*bundlev1.Bundle, bool, error) {
-	content.Version, content.CreatedAt, content.ContentHash = 0, nil, nil
+	content.Version, content.CreatedAt, content.ContentHash, content.PolicyVersions = 0, nil, nil, nil
 	hash, err := ContentHash(content)
 	if err != nil {
 		return nil, false, err
@@ -149,7 +152,48 @@ func Next(current, content *bundlev1.Bundle, lastVersion uint64, now time.Time, 
 	content.Version = max(current.GetVersion(), lastVersion) + 1
 	content.CreatedAt = timestamppb.New(now)
 	content.ContentHash = hash
+	if err := setPolicyVersions(current, content); err != nil {
+		return nil, false, err
+	}
 	return content, true, nil
+}
+
+// setPolicyVersions sets next's policy versions, continuing current's.
+func setPolicyVersions(current, next *bundlev1.Bundle) error {
+	hashes, err := PolicyHashes(next)
+	if err != nil {
+		return err
+	}
+	previous, err := PolicyHashes(current)
+	if err != nil {
+		return err
+	}
+	versions := PolicyVersions(current)
+	next.PolicyVersions = make([]uint64, len(next.GetPolicies()))
+	for i, p := range next.GetPolicies() {
+		id := p.GetId()
+		next.PolicyVersions[i] = next.GetVersion()
+		if h, ok := previous[id]; ok && h == hashes[id] {
+			next.PolicyVersions[i] = versions[id]
+		}
+	}
+	return nil
+}
+
+// PolicyVersions returns, by policy id, the first bundle that enforces each
+// policy of b as it is in b. A bundle without them (from an operator before
+// v0.3.0) gives its own version: it enforces every policy it has.
+func PolicyVersions(b *bundlev1.Bundle) map[string]uint64 {
+	versions := b.GetPolicyVersions()
+	out := make(map[string]uint64, len(b.GetPolicies()))
+	for i, p := range b.GetPolicies() {
+		v := b.GetVersion()
+		if len(versions) == len(b.GetPolicies()) && versions[i] != 0 && versions[i] <= v {
+			v = versions[i]
+		}
+		out[p.GetId()] = v
+	}
+	return out
 }
 
 // Signer signs bundles.
