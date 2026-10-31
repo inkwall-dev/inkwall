@@ -13,15 +13,21 @@ GOVULNCHECK     ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@v1.8.0
 BUF             ?= $(GO) run github.com/bufbuild/buf/cmd/buf@v1.50.0
 CONTROLLER_GEN  ?= $(GO) run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.23.0
 SETUP_ENVTEST   ?= $(GO) run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.2
-# The API server the operator tests run against: the oldest supported
-# Kubernetes version, so CRDs that pass here work on every newer one.
-ENVTEST_K8S_VERSION ?= 1.29.5
+# The API server the operator tests run against: the oldest tested Kubernetes
+# version (as KIND_NODE_IMAGE), so CRDs that pass here work on every newer one.
+ENVTEST_K8S_VERSION ?= 1.34.1
 
 # Container images and local kind cluster (hack/kind).
 IMAGE           ?= inkwall-engine:dev
 OPERATOR_IMAGE  ?= inkwall-operator:dev
 CHART           ?= deploy/helm/inkwall
 KIND_CLUSTER    ?= inkwall
+# kind, installed into bin/, and the node image of its clusters: the oldest Kubernetes this kind
+# release ships. The Gateway API's CRDs and Envoy Gateway's chart install on it
+# as shipped. CI's e2e job runs kind's newest instead (KIND_NODE_IMAGE empty).
+KIND_VERSION    ?= v0.33.0
+KIND_NODE_IMAGE ?= kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d
+KIND_DIR        := $(abspath $(BIN_DIR))/kind-$(KIND_VERSION)
 # kind-upgrade: its own cluster, since it installs a release of its own.
 UPGRADE_CLUSTER ?= inkwall-upgrade
 # Extra inkwall-operator flags for kind-operator (operator.extraArgs). kind-e2e shortens waits
@@ -122,13 +128,14 @@ generate: ## Lint the protobuf APIs (api/), regenerate their Go code, and regene
 	cp operator/config/webhook/manifests.yaml $(CHART)/files/webhook/
 
 .PHONY: helm-lint
-helm-lint: ## Lint the Helm chart and render it with each webhook certificate mode
+helm-lint: ## Lint the Helm chart, render it with each webhook certificate mode, and check its integration roles (hack/helm-test.sh)
 	helm lint --strict $(CHART)
 	helm template inkwall $(CHART) --namespace inkwall-system >/dev/null
 	helm template inkwall $(CHART) --namespace inkwall-system --set webhook.certs.mode=certManager >/dev/null
 	helm template inkwall $(CHART) --namespace inkwall-system --set controlPlane.caBundle=ca --set controlPlane.enrollmentToken=t >/dev/null
 	@# As helm upgrade --reuse-values from 0.1.0 renders it: values without controlPlane.
 	helm template inkwall $(CHART) --namespace inkwall-system --set controlPlane=null >/dev/null
+	CHART=$(CHART) hack/helm-test.sh
 
 .PHONY: tidy
 tidy: ## Tidy go.mod and go.sum, here and in test/crs (which builds against this module)
@@ -151,8 +158,21 @@ release-snapshot: ## Build the release binaries and archives into ./dist, as a t
 release-check: ## Check the goreleaser configuration
 	$(GORELEASER) check
 
+# The kind targets, and the scripts they run, use the kind of KIND_VERSION.
+KIND_TARGETS := kind-cluster kind-up kind-operator kind-e2e kind-e2e-envoy-gateway kind-upgrade kind-down
+$(KIND_TARGETS): export PATH := $(KIND_DIR):$(PATH)
+$(KIND_TARGETS): $(KIND_DIR)/kind
+
+$(KIND_DIR)/kind:
+	GOBIN=$(KIND_DIR) $(GO) install sigs.k8s.io/kind@$(KIND_VERSION)
+
+.PHONY: kind-cluster
+kind-cluster: ## Create the kind cluster (KIND_NODE_IMAGE), unless it exists
+	kind get clusters | grep -x $(KIND_CLUSTER) >/dev/null || kind create cluster --name $(KIND_CLUSTER) \
+		--config hack/kind/cluster.yaml $(if $(KIND_NODE_IMAGE),--image $(KIND_NODE_IMAGE)) --wait 120s
+
 .PHONY: kind-up
-kind-up: ## Create the kind cluster and deploy the demo app behind the engine and behind Traefik (hack/kind)
+kind-up: kind-cluster ## Create the kind cluster and deploy the demo app behind the engine and behind Traefik (hack/kind)
 	KIND_CLUSTER=$(KIND_CLUSTER) IMAGE=$(IMAGE) hack/kind/up.sh
 
 .PHONY: kind-operator
@@ -175,7 +195,7 @@ kind-e2e-envoy-gateway: kind-operator ## End-to-end test on kind through Envoy G
 
 .PHONY: kind-upgrade
 kind-upgrade: ## Upgrade test on kind: helm upgrade from the last release to this checkout keeps routes protected, uninstall restores them (own cluster, UPGRADE_CLUSTER)
-	UPGRADE_CLUSTER=$(UPGRADE_CLUSTER) OPERATOR_IMAGE=$(OPERATOR_IMAGE) IMAGE=$(IMAGE) CHART=$(CHART) hack/kind/upgrade.sh
+	UPGRADE_CLUSTER=$(UPGRADE_CLUSTER) KIND_NODE_IMAGE=$(KIND_NODE_IMAGE) OPERATOR_IMAGE=$(OPERATOR_IMAGE) IMAGE=$(IMAGE) CHART=$(CHART) hack/kind/upgrade.sh
 
 .PHONY: kind-test
 kind-test: ## Send benign and attack requests to the kind demo and check verdicts

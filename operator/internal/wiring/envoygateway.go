@@ -52,11 +52,11 @@ import (
 // Envoy's buffer limit, so the body it holds for the engine isn't cut
 // short. Unprotected routes get nothing.
 //
-// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes;gatewayclasses,verbs=get;list;watch
-// +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=envoyproxies,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=envoyextensionpolicies;backends;clienttrafficpolicies,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=waf.inkwall.dev,resources=inkwallconfigs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;update;patch,roleName=inkwall-operator-envoy-gateway
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes;gatewayclasses,verbs=get;list;watch,roleName=inkwall-operator-envoy-gateway
+// +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=envoyproxies,verbs=get;list;watch;create;update;patch;delete,roleName=inkwall-operator-envoy-gateway
+// +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=envoyextensionpolicies;backends;clienttrafficpolicies,verbs=get;list;watch;create;update;patch;delete,roleName=inkwall-operator-envoy-gateway
+// +kubebuilder:rbac:groups=waf.inkwall.dev,resources=inkwallconfigs,verbs=get;list;watch,roleName=inkwall-operator-envoy-gateway
 
 // Names of the Envoy Gateway wiring.
 const (
@@ -158,11 +158,26 @@ type envoyRoute struct {
 	gateways []types.NamespacedName
 	// sections are the rules protected, or [""] for the whole route.
 	sections []string
-	// body, timeout and failOpen come from the policies that protect it.
-	body     bool
-	timeout  time.Duration
-	failOpen bool
+	routeSettings
 }
+
+// routeSettings are a route's ext_proc settings, from the policies that
+// protect it.
+type routeSettings struct {
+	// body: a policy inspects bodies.
+	body bool
+	// timeout is the longest engine deadline.
+	timeout time.Duration
+	// failOpen: every policy lets requests through when the engine fails.
+	failOpen bool
+	// detect: every policy is in detect mode and fails open, so the engine
+	// never rejects a request: Envoy needn't wait for it.
+	detect bool
+}
+
+// buffered reports whether Envoy holds the route's request body for the
+// engine.
+func (s routeSettings) buffered() bool { return s.body && !s.detect }
 
 // envoyState is what Wire read.
 type envoyState struct {
@@ -219,7 +234,7 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 		if r.sections[0] == "" {
 			r.sections = r.sections[:1]
 		}
-		r.body, r.timeout, r.failOpen = routeSettings(policies.Items, k)
+		r.routeSettings = settingsOf(policies.Items, k)
 	}
 
 	// The Gateways whose pods get the engine.
@@ -297,7 +312,7 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 				failed[k] = err.Error()
 				continue
 			}
-			if r.body {
+			if r.buffered() {
 				for _, gw := range r.gateways {
 					buffered[gw] = true
 				}
@@ -335,7 +350,7 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 			// its Gateways' buffer limit when the body is inspected.
 			check := []types.NamespacedName{{Namespace: tg.Key.Namespace, Name: envoyName(tg.Key.Name)}}
 			kinds := []schema.GroupVersionKind{EnvoyExtensionPolicyGVK}
-			if r := routes[tg.Key]; r.body {
+			if r := routes[tg.Key]; r.buffered() {
 				for _, gw := range r.gateways {
 					if name := limits[gw]; name != "" {
 						check = append(check, types.NamespacedName{Namespace: gw.Namespace, Name: name})
@@ -458,11 +473,10 @@ func (st *envoyState) podsOf(gw types.NamespacedName) []*corev1.Pod {
 	return out
 }
 
-// routeSettings returns, for a route, whether a policy protecting it
-// inspects bodies, the longest engine deadline, and whether every one of
-// them lets requests through when the engine fails.
-func routeSettings(policies []wafv1alpha1.WAFPolicy, route types.NamespacedName) (body bool, timeout time.Duration, failOpen bool) {
-	timeout, failOpen = pipeline.DefaultTimeout, true
+// settingsOf returns the settings of a route from the policies that
+// protect it.
+func settingsOf(policies []wafv1alpha1.WAFPolicy, route types.NamespacedName) routeSettings {
+	s := routeSettings{timeout: pipeline.DefaultTimeout, failOpen: true, detect: true}
 	for i := range policies {
 		p := &policies[i]
 		if p.Namespace != route.Namespace || p.DeletionTimestamp != nil ||
@@ -472,18 +486,20 @@ func routeSettings(policies []wafv1alpha1.WAFPolicy, route types.NamespacedName)
 			continue
 		}
 		if b := p.Spec.Body; b == nil || b.Inspect == nil || *b.Inspect {
-			body = true
+			s.body = true
 		}
 		if p.Spec.Timeout != nil {
-			timeout = max(timeout, p.Spec.Timeout.Duration)
+			s.timeout = max(s.timeout, p.Spec.Timeout.Duration)
 		}
 		mode := cmp.Or(p.Spec.FailureMode, wafv1alpha1.FailOpen)
 		if p.Spec.Mode == wafv1alpha1.PolicyBlock && p.Spec.FailureMode == "" {
 			mode = wafv1alpha1.FailClosed
 		}
-		failOpen = failOpen && mode == wafv1alpha1.FailOpen
+		s.failOpen = s.failOpen && mode == wafv1alpha1.FailOpen
+		s.detect = s.detect && p.Spec.Mode != wafv1alpha1.PolicyBlock
 	}
-	return body, timeout, failOpen
+	s.detect = s.detect && s.failOpen
+	return s
 }
 
 // envoyName is the name of an operator object for a route or Gateway:
@@ -531,12 +547,13 @@ func backend(namespace string) *unstructured.Unstructured {
 }
 
 // extensionPolicy is the operator's EnvoyExtensionPolicy for a route
-// (0006 §2): the request headers, and the body when a policy inspects it,
-// held by Envoy (BufferedPartial: up to its buffer limit) for the engine's
-// verdict; the response is not sent. Envoy waits for the engine a little
-// longer than its deadline, as the engine applies the policy's failure
-// mode; failOpen covers an engine that can't be reached, as the policies
-// would.
+// (0006 §2): the request headers, with the client's protocol, and the body
+// when a policy inspects it, held by Envoy (BufferedPartial: up to its
+// buffer limit) for the engine's verdict; the response is not sent. Envoy
+// waits for the engine a little longer than its deadline, as the engine
+// applies the policy's failure mode; failOpen covers an engine that can't
+// be reached, as the policies would. In detect mode Envoy doesn't wait
+// (shadowMode: ext_proc's observability_mode) and streams the body.
 func extensionPolicy(r *envoyRoute) *unstructured.Unstructured {
 	p := newObject(EnvoyExtensionPolicyGVK, r.route.Namespace, envoyName(r.route.Name))
 	owned(p, r.route, HTTPRouteGVK)
@@ -548,20 +565,24 @@ func extensionPolicy(r *envoyRoute) *unstructured.Unstructured {
 		}
 		refs = append(refs, ref)
 	}
-	request := map[string]any{}
-	if r.body {
+	request := map[string]any{"attributes": []any{"request.protocol"}}
+	switch {
+	case r.body && r.detect:
+		request["body"] = "Streamed"
+	case r.body:
 		request["body"] = "BufferedPartial"
 	}
-	p.Object["spec"] = map[string]any{
-		"targetRefs": refs,
-		"extProc": []any{map[string]any{
-			"backendRefs":    []any{map[string]any{"group": BackendGVK.Group, "kind": BackendGVK.Kind, "name": EnvoyBackend}},
-			"processingMode": map[string]any{"request": request},
-			// A Gateway API duration: whole units, no "1.5s".
-			"messageTimeout": fmt.Sprintf("%dms", (r.timeout + messageMargin).Milliseconds()),
-			"failOpen":       r.failOpen,
-		}},
+	extProc := map[string]any{
+		"backendRefs":    []any{map[string]any{"group": BackendGVK.Group, "kind": BackendGVK.Kind, "name": EnvoyBackend}},
+		"processingMode": map[string]any{"request": request},
+		// A Gateway API duration: whole units, no "1.5s".
+		"messageTimeout": fmt.Sprintf("%dms", (r.timeout + messageMargin).Milliseconds()),
+		"failOpen":       r.failOpen,
 	}
+	if r.detect {
+		extProc["shadowMode"] = true
+	}
+	p.Object["spec"] = map[string]any{"targetRefs": refs, "extProc": []any{extProc}}
 	return p
 }
 

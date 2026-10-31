@@ -76,6 +76,30 @@ of dicts. Argument: the file's path in the chart.
 {{- toJson $docs -}}
 {{- end -}}
 
+{{/*
+Whether an integration's ClusterRole is granted: rbac.integrations, by the
+integration's name in camelCase (envoy-gateway: envoyGateway). On unless
+set to false, also without rbac (helm upgrade --reuse-values from 0.2).
+Arguments: root, name.
+*/}}
+{{- define "inkwall.integration.enabled" -}}
+{{- $integrations := (.root.Values.rbac | default dict).integrations | default dict -}}
+{{- $key := .name | camelcase | untitle -}}
+{{- if or (not (hasKey $integrations $key)) (index $integrations $key) -}}true{{- end -}}
+{{- end -}}
+
+{{/* The integrations whose ClusterRole is granted, comma-separated. */}}
+{{- define "inkwall.integrations" -}}
+{{- $names := list -}}
+{{- range (include "inkwall.generated" (dict "root" . "path" "files/rbac/role.yaml") | fromJsonArray) -}}
+{{- $name := trimPrefix "inkwall-operator-" .metadata.name -}}
+{{- if and (ne .metadata.name "inkwall-operator") (include "inkwall.integration.enabled" (dict "root" $ "name" $name)) -}}
+{{- $names = append $names $name -}}
+{{- end -}}
+{{- end -}}
+{{- join "," $names -}}
+{{- end -}}
+
 {{/* The control plane's CA bundle, and the enrollment token Secret. */}}
 {{- define "inkwall.controlPlane.ca" -}}
 {{- printf "%s-control-plane-ca" (include "inkwall.fullname" .) | trunc 63 | trimSuffix "-" -}}

@@ -115,7 +115,7 @@ which only adds management, analytics and threat intelligence.
 | Bundle builder | Leader only: debounce changes (1 s), build, sign, version, write the Secret | `operator/bundle`, `operator/internal/controller` | Built |
 | Distribution server | Every replica, over gRPC; ACK, NACK, heartbeat | `operator/internal/distribution` | Built |
 | Status | The `Enforced` condition (engines on the current bundle) | `operator/internal/distribution` | Built |
-| Validating webhook | Compile rule sets as the engine does; check paths; in Managed mode, let only the operator write the control plane's objects | `operator/webhook` | Built |
+| Validating webhook | Compile rule sets as the engine does; check paths; in Managed mode, let only the operator write the control plane's objects; warn about deprecated `InkwallConfig` fields | `operator/webhook` | Built |
 | Upstream sync | Leader only, mTLS to the control plane: enrollment, state sync, events (from every replica), Managed mode | `operator/internal/controlplane` | Built (tested against a stub) |
 | WAFIPList CRD | IP lists | — | Not yet |
 

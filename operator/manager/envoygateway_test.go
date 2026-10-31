@@ -255,6 +255,21 @@ func testEnvoyGateway(ctx context.Context, t *testing.T, c client.Client) {
 	accept(wiring.EnvoyExtensionPolicyGVK, ns, "inkwall-waf-app", "True", "")
 	eventually(t, "Programmed again", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
 
+	// Detect mode: Envoy doesn't wait for the engine, nor buffers the body.
+	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) { p.Spec.Mode = wafv1alpha1.PolicyDetect })
+	eventually(t, "detect mode: shadowMode, a streamed body", func() string {
+		p, err := get(wiring.EnvoyExtensionPolicyGVK, ns, "inkwall-waf-app")
+		if err != nil {
+			return err.Error()
+		}
+		if s := specJSON(p); !strings.Contains(s, `"shadowMode":true`) || !strings.Contains(s, `"body":"Streamed"`) {
+			return s
+		}
+		return ""
+	})
+	eventually(t, "no buffer limit in detect mode", gone(wiring.ClientTrafficPolicyGVK, edge, "inkwall-waf-plain"))
+	eventually(t, "Programmed in detect mode", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
+
 	// Unprotected: everything goes, the user's objects as they were.
 	if err := c.Delete(ctx, pol); err != nil {
 		t.Fatal(err)

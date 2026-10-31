@@ -65,6 +65,7 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/bundle"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
 	"github.com/inkwall-dev/inkwall/operator/manager"
@@ -669,7 +670,7 @@ func routeObject(i, n int) (client.Object, wafv1alpha1.TargetRef) {
 		}
 	}
 	ir := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"entryPoints": []any{"web"}, "routes": routes}}}
-	ir.SetGroupVersionKind(wiring.IngressRouteGVK)
+	ir.SetGroupVersionKind(integrations.TraefikIngressRouteGVK)
 	ir.SetNamespace(ns)
 	ir.SetName(name(i))
 	return ir, wafv1alpha1.TargetRef{Group: "traefik.io", Kind: "IngressRoute", Name: name(i)}

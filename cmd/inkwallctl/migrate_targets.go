@@ -18,6 +18,7 @@ import (
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
 )
 
@@ -77,7 +78,7 @@ func newReplacements(kind string, httpRoutes []gatewayv1.HTTPRoute, ingressRoute
 	}
 	for _, ir := range ingressRoutes {
 		in := resolver.Input{IngressRoutes: []unstructured.Unstructured{ir}}
-		add(ir.GetNamespace(), wafv1alpha1.TargetRef{Group: ingressRouteGVK.Group, Kind: "IngressRoute", Name: ir.GetName()}, in)
+		add(ir.GetNamespace(), wafv1alpha1.TargetRef{Group: integrations.TraefikIngressRouteGVK.Group, Kind: "IngressRoute", Name: ir.GetName()}, in)
 	}
 	for _, cands := range r.candidates {
 		slices.SortFunc(cands, func(a, b candidate) int {

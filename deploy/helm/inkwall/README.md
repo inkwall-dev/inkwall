@@ -10,6 +10,7 @@ builds them into a signed [bundle](../../../docs/glossary.md#bundle), serves the
 - [Install](#install)
 - [What it installs](#what-it-installs)
 - [Values](#values)
+- [Integration permissions](#integration-permissions)
 - [Connecting to a control plane](#connecting-to-a-control-plane)
 - [Rotating the signing key](#rotating-the-signing-key)
 - [Uninstalling](#uninstalling)
@@ -20,7 +21,8 @@ builds them into a signed [bundle](../../../docs/glossary.md#bundle), serves the
 
 ## Install
 
-You need [Kubernetes](https://kubernetes.io/docs/concepts/overview/) 1.29 or later and [Helm](https://helm.sh/docs/) 3.
+You need [Kubernetes](https://kubernetes.io/docs/concepts/overview/) 1.29 or later and [Helm](https://helm.sh/docs/) 3. CI
+tests on Kubernetes 1.34 and on kind's newest (1.37).
 
 ```sh
 helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \
@@ -44,7 +46,7 @@ The names below are for a release named `inkwall`.
 | CRDs (`waf.inkwall.dev`) | Installed and upgraded with the chart, kept on uninstall (`crds.install`) |
 | [`Deployment`](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) `inkwall-operator` | 2 replicas with [leader election](https://kubernetes.io/docs/concepts/architecture/leases/#leader-election); non-root, read-only root filesystem, no capabilities |
 | [`PodDisruptionBudget`](https://kubernetes.io/docs/concepts/workloads/pods/disruptions/#pod-disruption-budgets) | When `operator.replicas` is more than 1 |
-| [`ServiceAccount`](https://kubernetes.io/docs/concepts/security/service-accounts/), [`ClusterRole`, `Role` and bindings](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) | Rules generated from the operator's code; the `Role` covers the release namespace only. They include writing Envoy Gateway's `EnvoyProxy`, `EnvoyExtensionPolicy`, `Backend` and `ClientTrafficPolicy` objects and patching Gateways, whether Envoy Gateway is installed or not |
+| [`ServiceAccount`](https://kubernetes.io/docs/concepts/security/service-accounts/), [`ClusterRole`, `Role` and bindings](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) | Rules generated from the operator's code; the `Role` covers the release namespace only. Each integration has a `ClusterRole` of its own, `inkwall-operator-traefik` and `inkwall-operator-envoy-gateway`, which `rbac.integrations` can leave out: see [integration permissions](#integration-permissions) |
 | `ValidatingWebhookConfiguration` `inkwall-operator-validating` | WAF kinds only; fails closed, 2 s timeout |
 | `MutatingWebhookConfiguration` `inkwall-operator-mutating` | Traefik pods only, at creation; fails open, or closed while a policy is in block mode (`injection.enabled`) |
 | [`Service`](https://kubernetes.io/docs/concepts/services-networking/service/) `inkwall-operator-webhook` | The webhooks |
@@ -73,6 +75,7 @@ from the operator's generated manifests. Don't edit `files/` by hand.
 | `controlPlane.caBundle` | `""` | The optional control plane's CA (PEM), when its certificate isn't from a public CA, e.g. `--set-file controlPlane.caBundle=ca.crt` |
 | `controlPlane.enrollmentToken` | `""` | The control plane's one-time enrollment token, stored in the Secret `inkwall-enrollment` (key `token`); or leave it empty and create that Secret yourself |
 | `controlPlane.eventsBufferMiB` | `64` | Each replica's buffer of security events while the control plane is unreachable (an [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir)); when it is full, the oldest events are dropped and counted |
+| `rbac.integrations.traefik`, `envoyGateway` | `true`, `true` | Grant each integration's `ClusterRole`. `false`: see [integration permissions](#integration-permissions) |
 | `uninstall.unwire` | `true` | On `helm uninstall`, unwire the routes first (a pre-delete hook), so they keep working, and remove the operator's [finalizer](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/) from the `WAFPolicy` objects |
 | `serviceAccount.name`, `annotations` | the operator's name (`inkwall-operator`), `{}` | |
 | `crds.install` | `true` | |
@@ -85,6 +88,34 @@ The chart names its namespaced objects after the release's full name: `inkwall` 
 whose name contains `inkwall`, else `<release>-inkwall`. For a release named `waf`, for example,
 the token Secret is `waf-inkwall-enrollment`. The webhook configurations keep the names in the
 table above.
+
+## Integration permissions
+
+Each integration's permissions are in a `ClusterRole` of its own: Traefik's writes its
+Middlewares, and the references to them in Ingresses, IngressRoutes and HTTPRoutes; Envoy Gateway's writes its `EnvoyProxy`,
+`EnvoyExtensionPolicy`, `Backend` and `ClientTrafficPolicy` objects and patches Gateways. Both are
+granted by default, whether the proxy is installed or not. For a proxy the cluster doesn't run,
+you can leave its role out:
+
+```sh
+helm upgrade --install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \
+  --namespace inkwall-system --create-namespace --set rbac.integrations.envoyGateway=false
+```
+
+The operator checks its permissions when it starts, and disables an integration it lacks some of
+instead of failing. The other integrations work. A policy on a route of the disabled
+integration's proxy reports `Programmed=False` with reason `IntegrationDisabled`, naming the
+permissions missing, and `InkwallConfig.status.proxies` lists that proxy as `Unsupported`, with
+the same message (when there is an `InkwallConfig`):
+
+```sh
+kubectl get inkwallconfig default -o jsonpath='{.status.proxies}'
+```
+
+Changing `rbac.integrations` restarts the operator, which then checks again. A role granted
+outside the chart is picked up within a minute; to revoke one outside the chart, restart the
+operator. Routes the integration wired before it was disabled stay wired: unprotect them (or
+uninstall) before leaving its role out.
 
 ## Connecting to a control plane
 
@@ -255,6 +286,8 @@ logs `Error calling http://127.0.0.1:9001/v1/forward-auth` for each request it a
 Through Envoy Gateway, Envoy answers 500 when it can't reach the engine, unless every policy on
 the route fails open (`failureMode: Open`, or detect mode without one): the route's
 `EnvoyExtensionPolicy` then has `failOpen: true`, and Envoy lets the request through uninspected.
+When those policies are all in detect mode, it also has `shadowMode: true`: Envoy doesn't wait for
+the engine at all, so a slow or hung engine delays nothing. Otherwise
 Envoy waits for the engine 500 ms longer than the policy's `timeout`. A request the engine can't
 inspect within the policy's `timeout` gets the policy's failure mode from the engine: 503 in block
 mode. Large bodies take longer: CRS takes about 200 ms on a 48 KB form field on a fast machine, so

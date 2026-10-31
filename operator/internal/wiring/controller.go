@@ -52,6 +52,9 @@ const (
 	ReasonNoTargets             = "NoTargets"
 	ReasonInjectionDisabled     = "InjectionDisabled"
 	ReasonPending               = "Pending"
+	// ReasonIntegrationDisabled: the operator may not wire the proxy that
+	// serves a target (Disable).
+	ReasonIntegrationDisabled = "IntegrationDisabled"
 	// ReasonUnwired: `inkwall-operator unwire` (helm uninstall) unwired
 	// the routes and stopped the operator.
 	ReasonUnwired = "Unwired"
@@ -288,7 +291,7 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 	if rep.disabled {
 		return metav1.ConditionFalse, ReasonInjectionDisabled, "the engine is not injected into proxy pods (injection is off): the routes are not wired"
 	}
-	var unsupported, failed, pending, partly []string
+	var unsupported, failed, disabled, pending, partly []string
 	// wired counts the wired targets by result, then kind.
 	wired := make([]map[schema.GroupKind]int, len(rep.results))
 	total := 0
@@ -321,6 +324,10 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 		}
 		for _, i := range served {
 			s := rep.results[i].Targets[t]
+			if why := rep.results[i].Disabled; why != "" {
+				disabled = append(disabled, why)
+				continue
+			}
 			if s.Failed != "" {
 				failed = append(failed, s.Failed)
 				continue
@@ -342,6 +349,9 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 	switch {
 	case len(failed) > 0:
 		return metav1.ConditionFalse, ReasonWiringFailed, strings.Join(slices.Compact(failed), "; ")
+	case len(disabled) > 0:
+		slices.Sort(disabled)
+		return metav1.ConditionFalse, ReasonIntegrationDisabled, strings.Join(slices.Compact(disabled), "; ")
 	case len(unsupported) > 0:
 		return metav1.ConditionFalse, ReasonControllerUnsupported, strings.Join(unsupported, "; ")
 	case total == 0:

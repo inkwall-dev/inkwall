@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
 )
 
@@ -520,7 +521,7 @@ func TestMigrateClusterRoutes(t *testing.T) {
 		"spec":       map[string]any{"hostnames": []any{"a.example.com"}, "rules": []any{map[string]any{}}},
 	}}
 	httpRoutes := schema.GroupVersionResource{Group: gatewayv1.GroupName, Version: "v1", Resource: "httproutes"}
-	ingressRoutes := ingressRouteGVK.GroupVersion().WithResource("ingressroutes")
+	ingressRoutes := integrations.TraefikIngressRouteGVK.GroupVersion().WithResource("ingressroutes")
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{httpRoutes: "HTTPRouteList", ingressRoutes: "IngressRouteList"}, route)
 	dyn.PrependReactor("list", "ingressroutes", func(k8stesting.Action) (bool, runtime.Object, error) {
