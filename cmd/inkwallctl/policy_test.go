@@ -187,6 +187,19 @@ func TestTestPolicyIngressRoute(t *testing.T) {
 	golden(t, "ingressroute.golden", out)
 }
 
+// TestTestPolicyHTTPRoute routes requests by Ingresses and Gateway API
+// HTTPRoutes together, whole routes and rules of one (sectionName).
+func TestTestPolicyHTTPRoute(t *testing.T) {
+	dir := filepath.Join("testdata", "httproute")
+	requests := filepath.Join(dir, "requests.http")
+	code, out, errOut := runCLI(t, "test", "--request", requests,
+		"--policy", filepath.Join(dir, "wafpolicy.yaml"), "--ingress", filepath.Join(dir, "routes.yaml"))
+	if code != 0 || errOut != "" {
+		t.Fatalf("exit %d, stderr %q", code, errOut)
+	}
+	golden(t, "httproute.golden", out)
+}
+
 // chunkedSecrets returns signed's bundle, made too large for one Secret, as
 // kubectl prints the bundle Secret and its chunks, and the bundle Secret
 // alone.
@@ -271,6 +284,19 @@ func TestTestPolicyOptions(t *testing.T) {
 			errOut: "note: no --ingress: WAFPolicy default/web applies to every host and path\n",
 		},
 		{
+			name:   "no --ingress: one policy of an HTTPRoute applies to every request",
+			args:   []string{"--policy", writeFile(t, "p.yaml", strings.Replace(singlePolicy, "kind: Ingress,", "kind: HTTPRoute,", 1)), "http://any.example.org" + sqli},
+			out:    "deny  403  GET " + sqli + "  policy=default/web  reason=rule",
+			errOut: "note: no --ingress: WAFPolicy default/web applies to every host and path\n",
+		},
+		{
+			name: "no --ingress: one policy of rules of an HTTPRoute applies to every request",
+			args: []string{"--policy", writeFile(t, "p.yaml", strings.Replace(singlePolicy, "[{kind: Ingress, name: web}]",
+				"[{kind: HTTPRoute, name: web, sectionName: a}, {kind: HTTPRoute, name: web, sectionName: b}, {kind: HTTPRoute, name: web}]", 1)), "http://any.example.org" + sqli},
+			out:    "deny  403  GET " + sqli + "  policy=default/web  reason=rule",
+			errOut: "note: no --ingress: WAFPolicy default/web applies to every host and path\n",
+		},
+		{
 			name:   "--namespace",
 			args:   []string{"--namespace", "shop", "--policy", writeFile(t, "p.yaml", singlePolicy), "http://a/"},
 			out:    "allow      GET /  policy=shop/web  ",
@@ -317,6 +343,14 @@ func TestTestPolicyOptions(t *testing.T) {
 			out:    "allow      GET /  policy=shop/web",
 			errOut: "note: WAFPolicy shop/web: InvalidRef: IngressRoute gone not found; the policy applies to its other targets",
 		},
+		{
+			name: "a missing HTTPRoute rule is a note",
+			args: []string{"--policy", writeFile(t, "p.yaml", strings.Replace(singlePolicy, "[{kind: Ingress, name: web}]", "[{kind: HTTPRoute, name: web}, {kind: HTTPRoute, name: web, sectionName: gone}]", 1)),
+				"--ingress", writeFile(t, "hr.yaml", "apiVersion: gateway.networking.k8s.io/v1\nkind: HTTPRoute\nmetadata: {name: web}\nspec:\n  hostnames: [a.example.com]\n  rules: [{name: web}]\n"),
+				"http://a.example.com/"},
+			out:    "allow      GET /  policy=default/web",
+			errOut: "note: WAFPolicy default/web: InvalidRef: rule gone of HTTPRoute web not found; the policy applies to its other targets",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			code, out, errOut := runCLI(t, append([]string{"test"}, tc.args...)...)
@@ -339,6 +373,10 @@ func TestTestPolicyErrors(t *testing.T) {
 	routeSpec := func(spec string) string {
 		return writeFile(t, "ir.yaml", "apiVersion: traefik.io/v1alpha1\nkind: IngressRoute\nmetadata: {name: web}\nspec:\n"+spec)
 	}
+	httpRoutePolicy := writeFile(t, "p.yaml", strings.Replace(singlePolicy, "kind: Ingress,", "kind: HTTPRoute,", 1))
+	httpRoute := func(apiVersion, spec string) string {
+		return writeFile(t, "hr.yaml", "apiVersion: "+apiVersion+"\nkind: HTTPRoute\nmetadata: {name: web}\nspec:\n"+spec)
+	}
 	withRuleSet := strings.Replace(singlePolicy, "mode: Block", "ruleSets: [{ref: {kind: WAFRuleSet, name: rs}}]", 1)
 	for _, tc := range []struct {
 		name   string
@@ -352,7 +390,7 @@ func TestTestPolicyErrors(t *testing.T) {
 		{"--bundle-key alone", []string{"--bundle-key", "k"}, "--bundle-key applies only to --bundle"},
 		{"--namespace alone", []string{"--namespace", "a"}, "--namespace applies only to --policy"},
 		{"no policy", []string{"--rule-set", sampleRuleSets}, "no WAFPolicy in the files"},
-		{"two policies, no routes", []string{"--policy", samplePolicies, "--rule-set", sampleRuleSets, "--configmap", sampleConfigMaps}, "give the Ingresses or IngressRoutes they target with --ingress"},
+		{"two policies, no routes", []string{"--policy", samplePolicies, "--rule-set", sampleRuleSets, "--configmap", sampleConfigMaps}, "give the Ingresses, IngressRoutes or HTTPRoutes they target with --ingress"},
 		{"IngressRoute with an unsupported matcher", []string{"--policy", routePolicy, "--ingress", ingressRoute("traefik.io/v1alpha1", "Host(`a`) && Header(`X-A`, `1`)")},
 			"WAFPolicy default/web: not enforced: TargetUnsupported: IngressRoute web: spec.routes[0] match \"Host(`a`) && Header(`X-A`, `1`)\": Header is not supported: only Host, Path and PathPrefix, joined by &&, can be protected"},
 		{"IngressRoute with ||", []string{"--policy", routePolicy, "--ingress", ingressRoute("traefik.io/v1alpha1", "Host(`a`) || Host(`b`)")},
@@ -371,6 +409,18 @@ func TestTestPolicyErrors(t *testing.T) {
 			`IngressRoute web: spec.routes[0].kind: "rule", want Rule`},
 		{"IngressRoute match not a string", []string{"--policy", routePolicy, "--ingress", routeSpec("  routes:\n  - match: [Host(`a`)]\n")},
 			"IngressRoute web: error unmarshaling JSON: while decoding JSON: json: cannot unmarshal array"},
+		{"HTTPRoute with a headers match", []string{"--policy", httpRoutePolicy, "--ingress", httpRoute("gateway.networking.k8s.io/v1", "  rules:\n  - name: api\n    matches: [{headers: [{name: X-A, value: \"1\"}]}]\n")},
+			"WAFPolicy default/web: not enforced: TargetUnsupported: HTTPRoute web: spec.rules[0].matches[0] (rule api): headers matches are not supported: only paths (Exact, PathPrefix) and methods can be protected"},
+		{"HTTPRoute with a regular expression path", []string{"--policy", httpRoutePolicy, "--ingress", httpRoute("gateway.networking.k8s.io/v1", "  rules:\n  - matches: [{path: {type: RegularExpression, value: /a.*}}]\n")},
+			"TargetUnsupported: HTTPRoute web: spec.rules[0].matches[0]: RegularExpression paths are not supported: only Exact and PathPrefix"},
+		{"HTTPRoute of an older API version", []string{"--policy", httpRoutePolicy, "--ingress", httpRoute("gateway.networking.k8s.io/v1beta1", "  rules: []\n")},
+			`HTTPRoute web: apiVersion "gateway.networking.k8s.io/v1beta1", want "gateway.networking.k8s.io/v1"`},
+		{"HTTPRoute with a misspelled spec field", []string{"--policy", httpRoutePolicy, "--ingress", httpRoute("gateway.networking.k8s.io/v1", "  hostname: [a.example.com]\n")},
+			`HTTPRoute web: error unmarshaling JSON: while decoding JSON: json: unknown field "hostname"`},
+		{"HTTPRoute with a misspelled match field", []string{"--policy", httpRoutePolicy, "--ingress", httpRoute("gateway.networking.k8s.io/v1", "  rules:\n  - matches: [{paths: {value: /a}}]\n")},
+			`HTTPRoute web: error unmarshaling JSON: while decoding JSON: json: unknown field "paths"`},
+		{"HTTPRoute hostnames not a list", []string{"--policy", httpRoutePolicy, "--ingress", httpRoute("gateway.networking.k8s.io/v1", "  hostnames: a.example.com\n")},
+			"HTTPRoute web: error unmarshaling JSON: while decoding JSON: json: cannot unmarshal string"},
 		{"missing rule set", []string{"--policy", writeFile(t, "p.yaml", withRuleSet)}, "WAFPolicy default/web: not enforced: InvalidRef: WAFRuleSet rs not found"},
 		{"inline rules the webhook rejects", []string{"--policy", writeFile(t, "p.yaml", withRuleSet), "--rule-set", ruleSet("    seclang: SecRuleEngine Off\n")}, "WAFRuleSet default/rs: rejected by the validating webhook"},
 		{"ConfigMap rules that don't compile", []string{"--policy", writeFile(t, "p.yaml", withRuleSet), "--rule-set", ruleSet("    configMapRef: {name: cm, key: r}\n"),
