@@ -381,6 +381,7 @@ func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}, forw
 	auth := &distribution.KubeAuthenticator{Client: mgr.GetClient(), Namespace: o.Namespace, TTL: time.Minute}
 	service := distribution.NewServer(store, table, auth, replica, ctrl.Log.WithName("distribution"))
 	service.Events, service.Stats = forwarder.Add, forwarder.AddStats
+	forwarder.HasPolicy = store.HasPolicy
 	srv := &distribution.GRPCServer{
 		Port:    o.DistributionPort,
 		CertDir: o.WebhookCertDir,
