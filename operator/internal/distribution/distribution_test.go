@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -251,6 +252,7 @@ func TestWatchErrors(t *testing.T) {
 		{"forbidden", fakeAuth{err: ErrForbidden}, nil, codes.PermissionDenied},
 		{"no hello first", fakeAuth{}, &agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Ack{Ack: &agentv1.Ack{}}}, codes.InvalidArgument},
 		{"hello without id", fakeAuth{}, &agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{}}}, codes.InvalidArgument},
+		{"id over 253 bytes", fakeAuth{}, &agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{EngineId: strings.Repeat("e", 254)}}}, codes.InvalidArgument},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := serve(t, NewServer(NewStore(), NewTable(), tc.auth, "r", logr.Discard()))
@@ -361,6 +363,49 @@ func TestWatchEventsMaximalBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "the batch", func() bool { mu.Lock(); defer mu.Unlock(); return got == 256 })
+}
+
+// A batch over the contract's MaxBatch keeps its first MaxBatch events;
+// the rest count as dropped by the engine.
+func TestWatchEventsOverMaxBatch(t *testing.T) {
+	var (
+		mu  sync.Mutex
+		got []*eventsv1.EventBatch
+	)
+	s := NewServer(NewStore(), NewTable(), podAuth{}, "replica-0", logr.Discard())
+	s.Events = func(b *eventsv1.EventBatch) { mu.Lock(); defer mu.Unlock(); got = append(got, b) }
+	c := serve(t, s)
+	ctx, cancel := context.WithCancel(withToken(context.Background(), "traefik-1"))
+	defer cancel()
+	stream, err := c.Watch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The longest engine ID, a pod name's, is accepted.
+	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{EngineId: strings.Repeat("e", 253)}}}); err != nil {
+		t.Fatal(err)
+	}
+	dropped := testutil.ToFloat64(eventsDroppedByEngines)
+	batch := &eventsv1.EventBatch{Dropped: 3}
+	for i := range events.MaxBatch + 5 {
+		batch.Events = append(batch.Events, &eventsv1.SecurityEvent{EventId: strconv.Itoa(i)})
+	}
+	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Events{Events: batch}}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the batch", func() bool { mu.Lock(); defer mu.Unlock(); return len(got) == 1 })
+	mu.Lock()
+	defer mu.Unlock()
+	b := got[0]
+	if n := len(b.GetEvents()); n != events.MaxBatch || b.GetEvents()[n-1].GetEventId() != strconv.Itoa(events.MaxBatch-1) {
+		t.Errorf("got %d events, want the first %d", n, events.MaxBatch)
+	}
+	if b.GetDropped() != 8 {
+		t.Errorf("dropped %d, want 8 (3 + 5 over the limit)", b.GetDropped())
+	}
+	if d := testutil.ToFloat64(eventsDroppedByEngines) - dropped; d != 8 {
+		t.Errorf("the engine-drop metric grew by %v, want 8", d)
+	}
 }
 
 func TestWatchWaitingForASendSlot(t *testing.T) {

@@ -466,9 +466,12 @@ leader-only. Losing a replica just moves its engines to another.
 - **Authentication.** A [`TokenReview`](https://kubernetes.io/docs/reference/kubernetes-api/authentication-resources/token-review-v1/) (audience `inkwall-operator`), then a [`SubjectAccessReview`](https://kubernetes.io/docs/reference/access-authn-authz/authorization/#checking-api-access)
   that the engine's ServiceAccount may `get` the bundle Secret (the grant from
   [§4.3](#43-injection-controller)). Results are cached for 1 min.
-- **Streams.** The first message must be `Hello`. Engines that are already current aren't sent the
-  bundle again. Streams silent for 30 s are closed. At most 50 sends run at once. A stream waiting
-  for a send slot, or sending, still reads its engine's heartbeats (#148).
+- **Streams.** The first message must be `Hello`, with an `engine_id` of 1 to 253 bytes (the
+  engine's pod name). Engines that are already current aren't sent the bundle again. Streams
+  silent for 30 s are closed. At most 50 sends run at once. A stream waiting for a send slot, or
+  sending, still reads its engine's heartbeats (#148).
+- **Events.** Each event gets the stream's engine ID and pod, not its own. Events beyond 1,000 in
+  one message are dropped and counted with the engine's own drops.
 - **Aggregation through ConfigMaps.** Each replica writes its engines to `inkwall-engines-<pod>`
   (owned by its Pod) on change and every 10 s. The leader merges them every 2 s, drops reports
   older than 30 s, and counts an engine that moved between replicas once.

@@ -18,6 +18,7 @@ import (
 	agentv1 "github.com/inkwall-dev/inkwall/api/agent/v1"
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
+	"github.com/inkwall-dev/inkwall/pkg/events"
 )
 
 // Defaults of the Server.
@@ -31,6 +32,9 @@ const (
 	// hundreds of engines doesn't spike the operator.
 	DefaultMaxSends = 50
 )
+
+// maxEngineID bounds the engine's ID, its pod name: a DNS subdomain.
+const maxEngineID = 253
 
 // Server implements BundleService.
 type Server struct {
@@ -128,6 +132,9 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 	}
 	if hello == nil || hello.GetEngineId() == "" {
 		return status.Error(codes.InvalidArgument, "the first message must be a Hello with an engine_id")
+	}
+	if len(hello.GetEngineId()) > maxEngineID {
+		return status.Errorf(codes.InvalidArgument, "the engine_id is over %d bytes", maxEngineID)
 	}
 
 	engineID := hello.GetEngineId()
@@ -230,8 +237,14 @@ func (s *Server) send(ctx context.Context, stream agentv1.BundleService_WatchSer
 }
 
 // events takes a batch from engine e. The engine and pod come from the
-// stream, which the operator authenticated, not from the events.
+// stream, which the operator authenticated, not from the events. Events
+// beyond the contract's events.MaxBatch are dropped and counted as the
+// engine's.
 func (s *Server) events(e Engine, batch *eventsv1.EventBatch) {
+	if extra := len(batch.GetEvents()) - events.MaxBatch; extra > 0 {
+		batch.Events = batch.Events[:events.MaxBatch]
+		batch.Dropped += uint64(extra)
+	}
 	eventsReceived.Add(float64(len(batch.GetEvents())))
 	eventsDroppedByEngines.Add(float64(batch.GetDropped()))
 	for _, ev := range batch.GetEvents() {

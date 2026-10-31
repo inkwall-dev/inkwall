@@ -324,7 +324,7 @@ ACK or a NACK.
   covers is not inspected. A request for a covered host that matches no path gets that host's most
   general policy, so normalization differences can't skip inspection.
 - Engines send their security events on the same stream, in `EventBatch`es of up to 1,000
-  (`pkg/events`, [§5.4](#54-event-schema)).
+  (`pkg/events`, [§5.4](#54-event-schema)). The operator drops and counts the events beyond that.
 
 **Not yet:** directives (the field is reserved).
 
