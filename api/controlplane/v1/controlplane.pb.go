@@ -299,6 +299,7 @@ type ConnectRequest struct {
 	//	*ConnectRequest_PolicyAck
 	//	*ConnectRequest_PolicyNack
 	//	*ConnectRequest_RenewCertificate
+	//	*ConnectRequest_RequestStats
 	Msg           isConnectRequest_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -404,6 +405,15 @@ func (x *ConnectRequest) GetRenewCertificate() *RenewCertificate {
 	return nil
 }
 
+func (x *ConnectRequest) GetRequestStats() *RequestStatsUpload {
+	if x != nil {
+		if x, ok := x.Msg.(*ConnectRequest_RequestStats); ok {
+			return x.RequestStats
+		}
+	}
+	return nil
+}
+
 type isConnectRequest_Msg interface {
 	isConnectRequest_Msg()
 }
@@ -436,6 +446,10 @@ type ConnectRequest_RenewCertificate struct {
 	RenewCertificate *RenewCertificate `protobuf:"bytes,7,opt,name=renew_certificate,json=renewCertificate,proto3,oneof"`
 }
 
+type ConnectRequest_RequestStats struct {
+	RequestStats *RequestStatsUpload `protobuf:"bytes,8,opt,name=request_stats,json=requestStats,proto3,oneof"`
+}
+
 func (*ConnectRequest_Hello) isConnectRequest_Msg() {}
 
 func (*ConnectRequest_ClusterState) isConnectRequest_Msg() {}
@@ -449,6 +463,8 @@ func (*ConnectRequest_PolicyAck) isConnectRequest_Msg() {}
 func (*ConnectRequest_PolicyNack) isConnectRequest_Msg() {}
 
 func (*ConnectRequest_RenewCertificate) isConnectRequest_Msg() {}
+
+func (*ConnectRequest_RequestStats) isConnectRequest_Msg() {}
 
 // ConnectResponse is a message from the control plane.
 type ConnectResponse struct {
@@ -595,7 +611,7 @@ type Hello struct {
 	// The last PolicySnapshot the operator applied (0: none): the control
 	// plane skips resending it when it is current.
 	PolicyVersion uint64 `protobuf:"varint,7,opt,name=policy_version,json=policyVersion,proto3" json:"policy_version,omitempty"`
-	// Optional features the operator supports, e.g. "events", and the API
+	// Optional features the operator supports, e.g. "request-stats", and the API
 	// versions it writes, e.g. "waf.inkwall.dev/v1alpha1", so a newer control
 	// plane can tell what an older operator can do.
 	Capabilities  []string `protobuf:"bytes,8,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
@@ -697,9 +713,13 @@ type Welcome struct {
 	// Whether the control plane accepts security events from this cluster.
 	// When false (the default), replicas neither send nor buffer events: they
 	// log them, as in Standalone mode.
-	AcceptEvents  bool `protobuf:"varint,2,opt,name=accept_events,json=acceptEvents,proto3" json:"accept_events,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	AcceptEvents bool `protobuf:"varint,2,opt,name=accept_events,json=acceptEvents,proto3" json:"accept_events,omitempty"`
+	// Whether the control plane takes request counts (RequestStatsUpload) on
+	// events streams. When false (the default), replicas don't send them.
+	// An events stream stays open while either is accepted.
+	AcceptRequestStats bool `protobuf:"varint,3,opt,name=accept_request_stats,json=acceptRequestStats,proto3" json:"accept_request_stats,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *Welcome) Reset() {
@@ -742,6 +762,13 @@ func (x *Welcome) GetHeartbeatInterval() *durationpb.Duration {
 func (x *Welcome) GetAcceptEvents() bool {
 	if x != nil {
 		return x.AcceptEvents
+	}
+	return false
+}
+
+func (x *Welcome) GetAcceptRequestStats() bool {
+	if x != nil {
+		return x.AcceptRequestStats
 	}
 	return false
 }
@@ -1339,6 +1366,72 @@ func (x *EventsAck) GetSequence() uint64 {
 	return 0
 }
 
+// RequestStatsUpload counts the requests of the engines connected to a
+// replica, per policy, on its events stream: every 10 s, the policies whose
+// counts changed, and every policy first on a new stream. The counts are
+// cumulative since `since` (when the replica started counting), so a lost
+// upload loses nothing; the sum over a cluster's replicas is the cluster's.
+// A replica that restarts counts from zero again, with a new `since`.
+type RequestStatsUpload struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Since         *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=since,proto3" json:"since,omitempty"`
+	Time          *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=time,proto3" json:"time,omitempty"`
+	Stats         *v1.RequestStats       `protobuf:"bytes,3,opt,name=stats,proto3" json:"stats,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RequestStatsUpload) Reset() {
+	*x = RequestStatsUpload{}
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequestStatsUpload) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequestStatsUpload) ProtoMessage() {}
+
+func (x *RequestStatsUpload) ProtoReflect() protoreflect.Message {
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequestStatsUpload.ProtoReflect.Descriptor instead.
+func (*RequestStatsUpload) Descriptor() ([]byte, []int) {
+	return file_controlplane_v1_controlplane_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *RequestStatsUpload) GetSince() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Since
+	}
+	return nil
+}
+
+func (x *RequestStatsUpload) GetTime() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Time
+	}
+	return nil
+}
+
+func (x *RequestStatsUpload) GetStats() *v1.RequestStats {
+	if x != nil {
+		return x.Stats
+	}
+	return nil
+}
+
 // Heartbeat shows the stream is alive between other messages.
 type Heartbeat struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -1351,7 +1444,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_controlplane_v1_controlplane_proto_msgTypes[13]
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1363,7 +1456,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_v1_controlplane_proto_msgTypes[13]
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1376,7 +1469,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_controlplane_v1_controlplane_proto_rawDescGZIP(), []int{13}
+	return file_controlplane_v1_controlplane_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Heartbeat) GetTime() *timestamppb.Timestamp {
@@ -1426,7 +1519,7 @@ type PolicySnapshot struct {
 
 func (x *PolicySnapshot) Reset() {
 	*x = PolicySnapshot{}
-	mi := &file_controlplane_v1_controlplane_proto_msgTypes[14]
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1438,7 +1531,7 @@ func (x *PolicySnapshot) String() string {
 func (*PolicySnapshot) ProtoMessage() {}
 
 func (x *PolicySnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_v1_controlplane_proto_msgTypes[14]
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1451,7 +1544,7 @@ func (x *PolicySnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PolicySnapshot.ProtoReflect.Descriptor instead.
 func (*PolicySnapshot) Descriptor() ([]byte, []int) {
-	return file_controlplane_v1_controlplane_proto_rawDescGZIP(), []int{14}
+	return file_controlplane_v1_controlplane_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *PolicySnapshot) GetVersion() uint64 {
@@ -1479,7 +1572,7 @@ type PolicyAck struct {
 
 func (x *PolicyAck) Reset() {
 	*x = PolicyAck{}
-	mi := &file_controlplane_v1_controlplane_proto_msgTypes[15]
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1491,7 +1584,7 @@ func (x *PolicyAck) String() string {
 func (*PolicyAck) ProtoMessage() {}
 
 func (x *PolicyAck) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_v1_controlplane_proto_msgTypes[15]
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1504,7 +1597,7 @@ func (x *PolicyAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PolicyAck.ProtoReflect.Descriptor instead.
 func (*PolicyAck) Descriptor() ([]byte, []int) {
-	return file_controlplane_v1_controlplane_proto_rawDescGZIP(), []int{15}
+	return file_controlplane_v1_controlplane_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *PolicyAck) GetVersion() uint64 {
@@ -1528,7 +1621,7 @@ type PolicyNack struct {
 
 func (x *PolicyNack) Reset() {
 	*x = PolicyNack{}
-	mi := &file_controlplane_v1_controlplane_proto_msgTypes[16]
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1540,7 +1633,7 @@ func (x *PolicyNack) String() string {
 func (*PolicyNack) ProtoMessage() {}
 
 func (x *PolicyNack) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_v1_controlplane_proto_msgTypes[16]
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1553,7 +1646,7 @@ func (x *PolicyNack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PolicyNack.ProtoReflect.Descriptor instead.
 func (*PolicyNack) Descriptor() ([]byte, []int) {
-	return file_controlplane_v1_controlplane_proto_rawDescGZIP(), []int{16}
+	return file_controlplane_v1_controlplane_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *PolicyNack) GetVersion() uint64 {
@@ -1591,7 +1684,7 @@ type ObjectError struct {
 
 func (x *ObjectError) Reset() {
 	*x = ObjectError{}
-	mi := &file_controlplane_v1_controlplane_proto_msgTypes[17]
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1603,7 +1696,7 @@ func (x *ObjectError) String() string {
 func (*ObjectError) ProtoMessage() {}
 
 func (x *ObjectError) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_v1_controlplane_proto_msgTypes[17]
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1616,7 +1709,7 @@ func (x *ObjectError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ObjectError.ProtoReflect.Descriptor instead.
 func (*ObjectError) Descriptor() ([]byte, []int) {
-	return file_controlplane_v1_controlplane_proto_rawDescGZIP(), []int{17}
+	return file_controlplane_v1_controlplane_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ObjectError) GetKind() string {
@@ -1662,7 +1755,7 @@ type RenewCertificate struct {
 
 func (x *RenewCertificate) Reset() {
 	*x = RenewCertificate{}
-	mi := &file_controlplane_v1_controlplane_proto_msgTypes[18]
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1674,7 +1767,7 @@ func (x *RenewCertificate) String() string {
 func (*RenewCertificate) ProtoMessage() {}
 
 func (x *RenewCertificate) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_v1_controlplane_proto_msgTypes[18]
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1687,7 +1780,7 @@ func (x *RenewCertificate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewCertificate.ProtoReflect.Descriptor instead.
 func (*RenewCertificate) Descriptor() ([]byte, []int) {
-	return file_controlplane_v1_controlplane_proto_rawDescGZIP(), []int{18}
+	return file_controlplane_v1_controlplane_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *RenewCertificate) GetCsr() []byte {
@@ -1709,7 +1802,7 @@ type Certificate struct {
 
 func (x *Certificate) Reset() {
 	*x = Certificate{}
-	mi := &file_controlplane_v1_controlplane_proto_msgTypes[19]
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1721,7 +1814,7 @@ func (x *Certificate) String() string {
 func (*Certificate) ProtoMessage() {}
 
 func (x *Certificate) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_v1_controlplane_proto_msgTypes[19]
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1734,7 +1827,7 @@ func (x *Certificate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Certificate.ProtoReflect.Descriptor instead.
 func (*Certificate) Descriptor() ([]byte, []int) {
-	return file_controlplane_v1_controlplane_proto_rawDescGZIP(), []int{19}
+	return file_controlplane_v1_controlplane_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *Certificate) GetCertificates() [][]byte {
@@ -1764,7 +1857,7 @@ type Directive struct {
 
 func (x *Directive) Reset() {
 	*x = Directive{}
-	mi := &file_controlplane_v1_controlplane_proto_msgTypes[20]
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1776,7 +1869,7 @@ func (x *Directive) String() string {
 func (*Directive) ProtoMessage() {}
 
 func (x *Directive) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_v1_controlplane_proto_msgTypes[20]
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1789,7 +1882,7 @@ func (x *Directive) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Directive.ProtoReflect.Descriptor instead.
 func (*Directive) Descriptor() ([]byte, []int) {
-	return file_controlplane_v1_controlplane_proto_rawDescGZIP(), []int{20}
+	return file_controlplane_v1_controlplane_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *Directive) GetAction() isDirective_Action {
@@ -1828,7 +1921,7 @@ type Resync struct {
 
 func (x *Resync) Reset() {
 	*x = Resync{}
-	mi := &file_controlplane_v1_controlplane_proto_msgTypes[21]
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1840,7 +1933,7 @@ func (x *Resync) String() string {
 func (*Resync) ProtoMessage() {}
 
 func (x *Resync) ProtoReflect() protoreflect.Message {
-	mi := &file_controlplane_v1_controlplane_proto_msgTypes[21]
+	mi := &file_controlplane_v1_controlplane_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1853,14 +1946,14 @@ func (x *Resync) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Resync.ProtoReflect.Descriptor instead.
 func (*Resync) Descriptor() ([]byte, []int) {
-	return file_controlplane_v1_controlplane_proto_rawDescGZIP(), []int{21}
+	return file_controlplane_v1_controlplane_proto_rawDescGZIP(), []int{22}
 }
 
 var File_controlplane_v1_controlplane_proto protoreflect.FileDescriptor
 
 const file_controlplane_v1_controlplane_proto_rawDesc = "" +
 	"\n" +
-	"\"controlplane/v1/controlplane.proto\x12\x17inkwall.controlplane.v1\x1a\x16events/v1/events.proto\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x83\x01\n" +
+	"\"controlplane/v1/controlplane.proto\x12\x17inkwall.controlplane.v1\x1a\x16events/v1/events.proto\x1a\x15events/v1/stats.proto\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x83\x01\n" +
 	"\rEnrollRequest\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\x12\x10\n" +
 	"\x03csr\x18\x02 \x01(\fR\x03csr\x12\x1f\n" +
@@ -1871,7 +1964,7 @@ const file_controlplane_v1_controlplane_proto_rawDesc = "" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\tR\tclusterId\x12\"\n" +
 	"\fcertificates\x18\x02 \x03(\fR\fcertificates\x127\n" +
-	"\tnot_after\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\bnotAfter\"\x88\x04\n" +
+	"\tnot_after\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\bnotAfter\"\xdc\x04\n" +
 	"\x0eConnectRequest\x126\n" +
 	"\x05hello\x18\x01 \x01(\v2\x1e.inkwall.controlplane.v1.HelloH\x00R\x05hello\x12L\n" +
 	"\rcluster_state\x18\x02 \x01(\v2%.inkwall.controlplane.v1.ClusterStateH\x00R\fclusterState\x12>\n" +
@@ -1881,7 +1974,8 @@ const file_controlplane_v1_controlplane_proto_rawDesc = "" +
 	"policy_ack\x18\x05 \x01(\v2\".inkwall.controlplane.v1.PolicyAckH\x00R\tpolicyAck\x12F\n" +
 	"\vpolicy_nack\x18\x06 \x01(\v2#.inkwall.controlplane.v1.PolicyNackH\x00R\n" +
 	"policyNack\x12X\n" +
-	"\x11renew_certificate\x18\a \x01(\v2).inkwall.controlplane.v1.RenewCertificateH\x00R\x10renewCertificateB\x05\n" +
+	"\x11renew_certificate\x18\a \x01(\v2).inkwall.controlplane.v1.RenewCertificateH\x00R\x10renewCertificate\x12R\n" +
+	"\rrequest_stats\x18\b \x01(\v2+.inkwall.controlplane.v1.RequestStatsUploadH\x00R\frequestStatsB\x05\n" +
 	"\x03msg\"\xfd\x02\n" +
 	"\x0fConnectResponse\x12<\n" +
 	"\awelcome\x18\x01 \x01(\v2 .inkwall.controlplane.v1.WelcomeH\x00R\awelcome\x12R\n" +
@@ -1900,10 +1994,11 @@ const file_controlplane_v1_controlplane_proto_rawDesc = "" +
 	"clusterUid\x12-\n" +
 	"\x12kubernetes_version\x18\x06 \x01(\tR\x11kubernetesVersion\x12%\n" +
 	"\x0epolicy_version\x18\a \x01(\x04R\rpolicyVersion\x12\"\n" +
-	"\fcapabilities\x18\b \x03(\tR\fcapabilities\"x\n" +
+	"\fcapabilities\x18\b \x03(\tR\fcapabilities\"\xaa\x01\n" +
 	"\aWelcome\x12H\n" +
 	"\x12heartbeat_interval\x18\x01 \x01(\v2\x19.google.protobuf.DurationR\x11heartbeatInterval\x12#\n" +
-	"\raccept_events\x18\x02 \x01(\bR\facceptEvents\"\xe7\x02\n" +
+	"\raccept_events\x18\x02 \x01(\bR\facceptEvents\x120\n" +
+	"\x14accept_request_stats\x18\x03 \x01(\bR\x12acceptRequestStats\"\xe7\x02\n" +
 	"\x06Object\x12\x1f\n" +
 	"\vapi_version\x18\x01 \x01(\tR\n" +
 	"apiVersion\x12\x12\n" +
@@ -1958,7 +2053,11 @@ const file_controlplane_v1_controlplane_proto_rawDesc = "" +
 	"\x05batch\x18\x03 \x01(\v2\x1d.inkwall.events.v1.EventBatchR\x05batch\"D\n" +
 	"\tEventsAck\x12\x1b\n" +
 	"\tbuffer_id\x18\x01 \x01(\tR\bbufferId\x12\x1a\n" +
-	"\bsequence\x18\x02 \x01(\x04R\bsequence\"d\n" +
+	"\bsequence\x18\x02 \x01(\x04R\bsequence\"\xad\x01\n" +
+	"\x12RequestStatsUpload\x120\n" +
+	"\x05since\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x05since\x12.\n" +
+	"\x04time\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x04time\x125\n" +
+	"\x05stats\x18\x03 \x01(\v2\x1f.inkwall.events.v1.RequestStatsR\x05stats\"d\n" +
 	"\tHeartbeat\x12.\n" +
 	"\x04time\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x04time\x12'\n" +
 	"\x0fbuffered_events\x18\x02 \x01(\x04R\x0ebufferedEvents\"e\n" +
@@ -2013,7 +2112,7 @@ func file_controlplane_v1_controlplane_proto_rawDescGZIP() []byte {
 }
 
 var file_controlplane_v1_controlplane_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_controlplane_v1_controlplane_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
+var file_controlplane_v1_controlplane_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
 var file_controlplane_v1_controlplane_proto_goTypes = []any{
 	(ClusterMode)(0),              // 0: inkwall.controlplane.v1.ClusterMode
 	(StreamRole)(0),               // 1: inkwall.controlplane.v1.StreamRole
@@ -2030,60 +2129,66 @@ var file_controlplane_v1_controlplane_proto_goTypes = []any{
 	(*Engine)(nil),                // 12: inkwall.controlplane.v1.Engine
 	(*EventUpload)(nil),           // 13: inkwall.controlplane.v1.EventUpload
 	(*EventsAck)(nil),             // 14: inkwall.controlplane.v1.EventsAck
-	(*Heartbeat)(nil),             // 15: inkwall.controlplane.v1.Heartbeat
-	(*PolicySnapshot)(nil),        // 16: inkwall.controlplane.v1.PolicySnapshot
-	(*PolicyAck)(nil),             // 17: inkwall.controlplane.v1.PolicyAck
-	(*PolicyNack)(nil),            // 18: inkwall.controlplane.v1.PolicyNack
-	(*ObjectError)(nil),           // 19: inkwall.controlplane.v1.ObjectError
-	(*RenewCertificate)(nil),      // 20: inkwall.controlplane.v1.RenewCertificate
-	(*Certificate)(nil),           // 21: inkwall.controlplane.v1.Certificate
-	(*Directive)(nil),             // 22: inkwall.controlplane.v1.Directive
-	(*Resync)(nil),                // 23: inkwall.controlplane.v1.Resync
-	nil,                           // 24: inkwall.controlplane.v1.Object.LabelsEntry
-	(*timestamppb.Timestamp)(nil), // 25: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),   // 26: google.protobuf.Duration
-	(*v1.EventBatch)(nil),         // 27: inkwall.events.v1.EventBatch
+	(*RequestStatsUpload)(nil),    // 15: inkwall.controlplane.v1.RequestStatsUpload
+	(*Heartbeat)(nil),             // 16: inkwall.controlplane.v1.Heartbeat
+	(*PolicySnapshot)(nil),        // 17: inkwall.controlplane.v1.PolicySnapshot
+	(*PolicyAck)(nil),             // 18: inkwall.controlplane.v1.PolicyAck
+	(*PolicyNack)(nil),            // 19: inkwall.controlplane.v1.PolicyNack
+	(*ObjectError)(nil),           // 20: inkwall.controlplane.v1.ObjectError
+	(*RenewCertificate)(nil),      // 21: inkwall.controlplane.v1.RenewCertificate
+	(*Certificate)(nil),           // 22: inkwall.controlplane.v1.Certificate
+	(*Directive)(nil),             // 23: inkwall.controlplane.v1.Directive
+	(*Resync)(nil),                // 24: inkwall.controlplane.v1.Resync
+	nil,                           // 25: inkwall.controlplane.v1.Object.LabelsEntry
+	(*timestamppb.Timestamp)(nil), // 26: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),   // 27: google.protobuf.Duration
+	(*v1.EventBatch)(nil),         // 28: inkwall.events.v1.EventBatch
+	(*v1.RequestStats)(nil),       // 29: inkwall.events.v1.RequestStats
 }
 var file_controlplane_v1_controlplane_proto_depIdxs = []int32{
-	25, // 0: inkwall.controlplane.v1.EnrollResponse.not_after:type_name -> google.protobuf.Timestamp
+	26, // 0: inkwall.controlplane.v1.EnrollResponse.not_after:type_name -> google.protobuf.Timestamp
 	6,  // 1: inkwall.controlplane.v1.ConnectRequest.hello:type_name -> inkwall.controlplane.v1.Hello
 	10, // 2: inkwall.controlplane.v1.ConnectRequest.cluster_state:type_name -> inkwall.controlplane.v1.ClusterState
 	13, // 3: inkwall.controlplane.v1.ConnectRequest.events:type_name -> inkwall.controlplane.v1.EventUpload
-	15, // 4: inkwall.controlplane.v1.ConnectRequest.heartbeat:type_name -> inkwall.controlplane.v1.Heartbeat
-	17, // 5: inkwall.controlplane.v1.ConnectRequest.policy_ack:type_name -> inkwall.controlplane.v1.PolicyAck
-	18, // 6: inkwall.controlplane.v1.ConnectRequest.policy_nack:type_name -> inkwall.controlplane.v1.PolicyNack
-	20, // 7: inkwall.controlplane.v1.ConnectRequest.renew_certificate:type_name -> inkwall.controlplane.v1.RenewCertificate
-	7,  // 8: inkwall.controlplane.v1.ConnectResponse.welcome:type_name -> inkwall.controlplane.v1.Welcome
-	16, // 9: inkwall.controlplane.v1.ConnectResponse.policy_snapshot:type_name -> inkwall.controlplane.v1.PolicySnapshot
-	21, // 10: inkwall.controlplane.v1.ConnectResponse.certificate:type_name -> inkwall.controlplane.v1.Certificate
-	22, // 11: inkwall.controlplane.v1.ConnectResponse.directive:type_name -> inkwall.controlplane.v1.Directive
-	14, // 12: inkwall.controlplane.v1.ConnectResponse.events_ack:type_name -> inkwall.controlplane.v1.EventsAck
-	1,  // 13: inkwall.controlplane.v1.Hello.role:type_name -> inkwall.controlplane.v1.StreamRole
-	0,  // 14: inkwall.controlplane.v1.Hello.mode:type_name -> inkwall.controlplane.v1.ClusterMode
-	26, // 15: inkwall.controlplane.v1.Welcome.heartbeat_interval:type_name -> google.protobuf.Duration
-	24, // 16: inkwall.controlplane.v1.Object.labels:type_name -> inkwall.controlplane.v1.Object.LabelsEntry
-	9,  // 17: inkwall.controlplane.v1.Object.conditions:type_name -> inkwall.controlplane.v1.Condition
-	25, // 18: inkwall.controlplane.v1.Condition.last_transition_time:type_name -> google.protobuf.Timestamp
-	25, // 19: inkwall.controlplane.v1.ClusterState.time:type_name -> google.protobuf.Timestamp
-	8,  // 20: inkwall.controlplane.v1.ClusterState.objects:type_name -> inkwall.controlplane.v1.Object
-	11, // 21: inkwall.controlplane.v1.ClusterState.integrations:type_name -> inkwall.controlplane.v1.Integration
-	12, // 22: inkwall.controlplane.v1.ClusterState.engines:type_name -> inkwall.controlplane.v1.Engine
-	25, // 23: inkwall.controlplane.v1.Engine.connected_at:type_name -> google.protobuf.Timestamp
-	27, // 24: inkwall.controlplane.v1.EventUpload.batch:type_name -> inkwall.events.v1.EventBatch
-	25, // 25: inkwall.controlplane.v1.Heartbeat.time:type_name -> google.protobuf.Timestamp
-	8,  // 26: inkwall.controlplane.v1.PolicySnapshot.objects:type_name -> inkwall.controlplane.v1.Object
-	19, // 27: inkwall.controlplane.v1.PolicyNack.objects:type_name -> inkwall.controlplane.v1.ObjectError
-	25, // 28: inkwall.controlplane.v1.Certificate.not_after:type_name -> google.protobuf.Timestamp
-	23, // 29: inkwall.controlplane.v1.Directive.resync:type_name -> inkwall.controlplane.v1.Resync
-	2,  // 30: inkwall.controlplane.v1.ControlPlaneService.Enroll:input_type -> inkwall.controlplane.v1.EnrollRequest
-	4,  // 31: inkwall.controlplane.v1.ControlPlaneService.Connect:input_type -> inkwall.controlplane.v1.ConnectRequest
-	3,  // 32: inkwall.controlplane.v1.ControlPlaneService.Enroll:output_type -> inkwall.controlplane.v1.EnrollResponse
-	5,  // 33: inkwall.controlplane.v1.ControlPlaneService.Connect:output_type -> inkwall.controlplane.v1.ConnectResponse
-	32, // [32:34] is the sub-list for method output_type
-	30, // [30:32] is the sub-list for method input_type
-	30, // [30:30] is the sub-list for extension type_name
-	30, // [30:30] is the sub-list for extension extendee
-	0,  // [0:30] is the sub-list for field type_name
+	16, // 4: inkwall.controlplane.v1.ConnectRequest.heartbeat:type_name -> inkwall.controlplane.v1.Heartbeat
+	18, // 5: inkwall.controlplane.v1.ConnectRequest.policy_ack:type_name -> inkwall.controlplane.v1.PolicyAck
+	19, // 6: inkwall.controlplane.v1.ConnectRequest.policy_nack:type_name -> inkwall.controlplane.v1.PolicyNack
+	21, // 7: inkwall.controlplane.v1.ConnectRequest.renew_certificate:type_name -> inkwall.controlplane.v1.RenewCertificate
+	15, // 8: inkwall.controlplane.v1.ConnectRequest.request_stats:type_name -> inkwall.controlplane.v1.RequestStatsUpload
+	7,  // 9: inkwall.controlplane.v1.ConnectResponse.welcome:type_name -> inkwall.controlplane.v1.Welcome
+	17, // 10: inkwall.controlplane.v1.ConnectResponse.policy_snapshot:type_name -> inkwall.controlplane.v1.PolicySnapshot
+	22, // 11: inkwall.controlplane.v1.ConnectResponse.certificate:type_name -> inkwall.controlplane.v1.Certificate
+	23, // 12: inkwall.controlplane.v1.ConnectResponse.directive:type_name -> inkwall.controlplane.v1.Directive
+	14, // 13: inkwall.controlplane.v1.ConnectResponse.events_ack:type_name -> inkwall.controlplane.v1.EventsAck
+	1,  // 14: inkwall.controlplane.v1.Hello.role:type_name -> inkwall.controlplane.v1.StreamRole
+	0,  // 15: inkwall.controlplane.v1.Hello.mode:type_name -> inkwall.controlplane.v1.ClusterMode
+	27, // 16: inkwall.controlplane.v1.Welcome.heartbeat_interval:type_name -> google.protobuf.Duration
+	25, // 17: inkwall.controlplane.v1.Object.labels:type_name -> inkwall.controlplane.v1.Object.LabelsEntry
+	9,  // 18: inkwall.controlplane.v1.Object.conditions:type_name -> inkwall.controlplane.v1.Condition
+	26, // 19: inkwall.controlplane.v1.Condition.last_transition_time:type_name -> google.protobuf.Timestamp
+	26, // 20: inkwall.controlplane.v1.ClusterState.time:type_name -> google.protobuf.Timestamp
+	8,  // 21: inkwall.controlplane.v1.ClusterState.objects:type_name -> inkwall.controlplane.v1.Object
+	11, // 22: inkwall.controlplane.v1.ClusterState.integrations:type_name -> inkwall.controlplane.v1.Integration
+	12, // 23: inkwall.controlplane.v1.ClusterState.engines:type_name -> inkwall.controlplane.v1.Engine
+	26, // 24: inkwall.controlplane.v1.Engine.connected_at:type_name -> google.protobuf.Timestamp
+	28, // 25: inkwall.controlplane.v1.EventUpload.batch:type_name -> inkwall.events.v1.EventBatch
+	26, // 26: inkwall.controlplane.v1.RequestStatsUpload.since:type_name -> google.protobuf.Timestamp
+	26, // 27: inkwall.controlplane.v1.RequestStatsUpload.time:type_name -> google.protobuf.Timestamp
+	29, // 28: inkwall.controlplane.v1.RequestStatsUpload.stats:type_name -> inkwall.events.v1.RequestStats
+	26, // 29: inkwall.controlplane.v1.Heartbeat.time:type_name -> google.protobuf.Timestamp
+	8,  // 30: inkwall.controlplane.v1.PolicySnapshot.objects:type_name -> inkwall.controlplane.v1.Object
+	20, // 31: inkwall.controlplane.v1.PolicyNack.objects:type_name -> inkwall.controlplane.v1.ObjectError
+	26, // 32: inkwall.controlplane.v1.Certificate.not_after:type_name -> google.protobuf.Timestamp
+	24, // 33: inkwall.controlplane.v1.Directive.resync:type_name -> inkwall.controlplane.v1.Resync
+	2,  // 34: inkwall.controlplane.v1.ControlPlaneService.Enroll:input_type -> inkwall.controlplane.v1.EnrollRequest
+	4,  // 35: inkwall.controlplane.v1.ControlPlaneService.Connect:input_type -> inkwall.controlplane.v1.ConnectRequest
+	3,  // 36: inkwall.controlplane.v1.ControlPlaneService.Enroll:output_type -> inkwall.controlplane.v1.EnrollResponse
+	5,  // 37: inkwall.controlplane.v1.ControlPlaneService.Connect:output_type -> inkwall.controlplane.v1.ConnectResponse
+	36, // [36:38] is the sub-list for method output_type
+	34, // [34:36] is the sub-list for method input_type
+	34, // [34:34] is the sub-list for extension type_name
+	34, // [34:34] is the sub-list for extension extendee
+	0,  // [0:34] is the sub-list for field type_name
 }
 
 func init() { file_controlplane_v1_controlplane_proto_init() }
@@ -2099,6 +2204,7 @@ func file_controlplane_v1_controlplane_proto_init() {
 		(*ConnectRequest_PolicyAck)(nil),
 		(*ConnectRequest_PolicyNack)(nil),
 		(*ConnectRequest_RenewCertificate)(nil),
+		(*ConnectRequest_RequestStats)(nil),
 	}
 	file_controlplane_v1_controlplane_proto_msgTypes[3].OneofWrappers = []any{
 		(*ConnectResponse_Welcome)(nil),
@@ -2107,7 +2213,7 @@ func file_controlplane_v1_controlplane_proto_init() {
 		(*ConnectResponse_Directive)(nil),
 		(*ConnectResponse_EventsAck)(nil),
 	}
-	file_controlplane_v1_controlplane_proto_msgTypes[20].OneofWrappers = []any{
+	file_controlplane_v1_controlplane_proto_msgTypes[21].OneofWrappers = []any{
 		(*Directive_Resync)(nil),
 	}
 	type x struct{}
@@ -2116,7 +2222,7 @@ func file_controlplane_v1_controlplane_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_controlplane_v1_controlplane_proto_rawDesc), len(file_controlplane_v1_controlplane_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   23,
+			NumMessages:   24,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -63,7 +63,7 @@ func TestEnsureMiddleware(t *testing.T) {
 				b = b.WithObjects(tc.existing)
 			}
 			c := b.Build()
-			r := &Reconciler{Client: c, APIReader: c}
+			r := &Traefik{Client: c, APIReader: c}
 			for range 3 {
 				if err := r.ensureMiddleware(ctx, "shop"); err != nil {
 					t.Fatal(err)

@@ -50,6 +50,9 @@ type Server struct {
 	HeartbeatInterval time.Duration
 	// AcceptEvents is sent in Welcome: whether replicas send events.
 	AcceptEvents bool
+	// AcceptRequestStats is sent in Welcome: whether replicas send request
+	// counts.
+	AcceptRequestStats bool
 
 	ca     *x509.Certificate
 	caKey  crypto.Signer
@@ -81,6 +84,11 @@ type Server struct {
 	uploads       map[string]bool
 	eventsDropped uint64
 	eventUploads  int
+	// requestStats are the newest counts of each replica's run (its
+	// Hello.replica and the upload's since), by policy; statsUploads
+	// counts the uploads.
+	requestStats map[string]map[string]*eventsv1.PolicyStats
+	statsUploads int
 	// primary sends on the open primary stream, for Resync; primaryID
 	// tells which stream that is.
 	primary    func(*controlplanev1.ConnectResponse) error
@@ -129,6 +137,7 @@ func StartWith(o Options) (*Server, error) {
 		enrolled:          map[string]enrollment{},
 		events:            map[string]*eventsv1.SecurityEvent{},
 		uploads:           map[string]bool{},
+		requestStats:      map[string]map[string]*eventsv1.PolicyStats{},
 	}
 	if err := s.newCA(); err != nil {
 		return nil, err
@@ -138,7 +147,8 @@ func StartWith(o Options) (*Server, error) {
 		return nil, err
 	}
 	s.addr = lis.Addr().String()
-	s.grpc = grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{
+	// The contract's message limit.
+	s.grpc = grpc.NewServer(grpc.MaxRecvMsgSize(16<<20), grpc.Creds(credentials.NewTLS(&tls.Config{
 		Certificates: []tls.Certificate{s.server},
 		// The certificate is checked in the RPC, not in the handshake, so a
 		// bad one gets UNAUTHENTICATED (the contract); Enroll has none.
@@ -197,7 +207,9 @@ type Stats struct {
 	Events        int
 	EventUploads  int
 	EventsDropped uint64
-	Renewals      int
+	// StatsUploads counts the request count uploads.
+	StatsUploads int
+	Renewals     int
 	// Clusters is how many distinct clusters enrolled.
 	Clusters int
 	// Acks and Nacks answered the policy snapshots, oldest first.
@@ -211,7 +223,7 @@ func (s *Server) Stats() Stats {
 	defer s.mu.Unlock()
 	return Stats{EnrollCalls: s.enrollCalls, ConnectCalls: s.connectCalls, Hellos: append([]*controlplanev1.Hello(nil), s.hellos...),
 		States: append([]*controlplanev1.ClusterState(nil), s.states...),
-		Events: len(s.events), EventUploads: s.eventUploads, EventsDropped: s.eventsDropped, Heartbeats: s.heartbeats, Renewals: s.renewals, Clusters: s.clusters,
+		Events: len(s.events), EventUploads: s.eventUploads, EventsDropped: s.eventsDropped, StatsUploads: s.statsUploads, Heartbeats: s.heartbeats, Renewals: s.renewals, Clusters: s.clusters,
 		Acks: append([]uint64(nil), s.acks...), Nacks: append([]*controlplanev1.PolicyNack(nil), s.nacks...)}
 }
 
@@ -261,6 +273,43 @@ func (s *Server) Events() []*eventsv1.SecurityEvent {
 	return out
 }
 
+// RequestStats returns the cluster's request counts per policy: the sum of
+// every replica run's newest counts.
+func (s *Server) RequestStats() map[string]*eventsv1.PolicyStats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]*eventsv1.PolicyStats{}
+	for _, run := range s.requestStats {
+		for id, p := range run {
+			t, ok := out[id]
+			if !ok {
+				t = &eventsv1.PolicyStats{Policy: id}
+				out[id] = t
+			}
+			t.Allowed += p.GetAllowed()
+			t.Denied += p.GetDenied()
+			t.Detected += p.GetDetected()
+			t.LatencySum += p.GetLatencySum()
+			if len(t.LatencyCounts) == 0 {
+				t.LatencyCounts = make([]uint64, len(p.GetLatencyCounts()))
+			}
+			for i, n := range p.GetLatencyCounts() {
+				if i < len(t.LatencyCounts) {
+					t.LatencyCounts[i] += n
+				}
+			}
+		}
+	}
+	return out
+}
+
+// SetAcceptRequestStats changes what the next Welcome says.
+func (s *Server) SetAcceptRequestStats(accept bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.AcceptRequestStats = accept
+}
+
 // SetAcceptEvents changes what the next Welcome says.
 func (s *Server) SetAcceptEvents(accept bool) {
 	s.mu.Lock()
@@ -305,7 +354,8 @@ func (s *Server) Enroll(_ context.Context, req *controlplanev1.EnrollRequest) (*
 }
 
 // Connect implements the stream: Hello first, then Welcome; ClusterState,
-// heartbeats, policy snapshots and their answers, and certificate renewal.
+// heartbeats, policy snapshots and their answers, certificate renewal,
+// events and request counts.
 func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer) error {
 	clusterID, err := s.clusterOf(stream.Context())
 	if err != nil {
@@ -335,7 +385,7 @@ func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer
 	}
 	s.mu.Lock()
 	s.hellos = append(s.hellos, hello)
-	accept := s.AcceptEvents
+	accept, acceptStats := s.AcceptEvents, s.AcceptRequestStats
 	var resend *controlplanev1.PolicySnapshot
 	if hello.GetRole() == controlplanev1.StreamRole_STREAM_ROLE_PRIMARY {
 		if hello.GetMode() == controlplanev1.ClusterMode_CLUSTER_MODE_MANAGED && s.snapshot.GetVersion() > hello.GetPolicyVersion() {
@@ -355,7 +405,7 @@ func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer
 	}
 	s.mu.Unlock()
 	if err := send(&controlplanev1.ConnectResponse{Msg: &controlplanev1.ConnectResponse_Welcome{Welcome: &controlplanev1.Welcome{
-		HeartbeatInterval: durationpb.New(s.HeartbeatInterval), AcceptEvents: accept,
+		HeartbeatInterval: durationpb.New(s.HeartbeatInterval), AcceptEvents: accept, AcceptRequestStats: acceptStats,
 	}}}); err != nil {
 		return err
 	}
@@ -402,6 +452,25 @@ func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer
 			}}}); err != nil {
 				return err
 			}
+		case *controlplanev1.ConnectRequest_RequestStats:
+			if hello.GetRole() != controlplanev1.StreamRole_STREAM_ROLE_EVENTS {
+				return status.Error(codes.FailedPrecondition, "RequestStatsUpload on a non-events stream")
+			}
+			if !acceptStats {
+				return status.Error(codes.FailedPrecondition, "request counts are not accepted")
+			}
+			up := m.RequestStats
+			// Cumulative since the upload's since: the newest replaces.
+			run := fmt.Sprintf("%s/%d", hello.GetReplica(), up.GetSince().AsTime().UnixNano())
+			s.mu.Lock()
+			s.statsUploads++
+			if s.requestStats[run] == nil {
+				s.requestStats[run] = map[string]*eventsv1.PolicyStats{}
+			}
+			for _, p := range up.GetStats().GetPolicies() {
+				s.requestStats[run][p.GetPolicy()] = p
+			}
+			s.mu.Unlock()
 		case *controlplanev1.ConnectRequest_Heartbeat:
 			s.mu.Lock()
 			s.heartbeats++

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -30,6 +32,10 @@ import (
 	agentv1 "github.com/inkwall-dev/inkwall/api/agent/v1"
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
+	"github.com/inkwall-dev/inkwall/pkg/events"
+	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/rules"
 )
 
 func TestEnforced(t *testing.T) {
@@ -246,6 +252,7 @@ func TestWatchErrors(t *testing.T) {
 		{"forbidden", fakeAuth{err: ErrForbidden}, nil, codes.PermissionDenied},
 		{"no hello first", fakeAuth{}, &agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Ack{Ack: &agentv1.Ack{}}}, codes.InvalidArgument},
 		{"hello without id", fakeAuth{}, &agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{}}}, codes.InvalidArgument},
+		{"id over 253 bytes", fakeAuth{}, &agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{EngineId: strings.Repeat("e", 254)}}}, codes.InvalidArgument},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := serve(t, NewServer(NewStore(), NewTable(), tc.auth, "r", logr.Discard()))
@@ -321,6 +328,86 @@ func TestWatchEvents(t *testing.T) {
 	}
 }
 
+// A batch as engines take from their buffer, 256 events at the contract's
+// field limits in one message (as older engines send it),
+// arrives whole.
+func TestWatchEventsMaximalBatch(t *testing.T) {
+	var (
+		mu  sync.Mutex
+		got int
+	)
+	s := NewServer(NewStore(), NewTable(), podAuth{}, "replica-0", logr.Discard())
+	s.Events = func(b *eventsv1.EventBatch) { mu.Lock(); defer mu.Unlock(); got += len(b.GetEvents()) }
+	c := serve(t, s, grpc.MaxRecvMsgSize(maxEngineMessage))
+	ctx, cancel := context.WithCancel(withToken(context.Background(), "traefik-1"))
+	defer cancel()
+	stream, err := c.Watch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{EngineId: "e1"}}}); err != nil {
+		t.Fatal(err)
+	}
+	long := strings.Repeat("x", 4096)
+	src := events.Source{EngineID: strings.Repeat("e", 253), PodNamespace: strings.Repeat("n", 63), PodName: strings.Repeat("p", 253)}
+	v := pipeline.Verdict{Action: pipeline.ActionDeny, Status: 403, Reason: pipeline.ReasonRule, Policy: long}
+	for i := range 64 {
+		v.Matches = append(v.Matches, rules.Match{RuleID: 900000 + i, Variable: "ARGS:" + long, Value: long})
+	}
+	req := &request.Request{ID: long, Method: long, Host: long, Headers: http.Header{"User-Agent": {long}}}
+	batch := &eventsv1.EventBatch{}
+	for range 256 {
+		batch.Events = append(batch.Events, events.New(src, req, "/"+long, v, time.Now()))
+	}
+	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Events{Events: batch}}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the batch", func() bool { mu.Lock(); defer mu.Unlock(); return got == 256 })
+}
+
+// A batch over the contract's MaxBatch keeps its first MaxBatch events;
+// the rest count as dropped by the engine.
+func TestWatchEventsOverMaxBatch(t *testing.T) {
+	var (
+		mu  sync.Mutex
+		got []*eventsv1.EventBatch
+	)
+	s := NewServer(NewStore(), NewTable(), podAuth{}, "replica-0", logr.Discard())
+	s.Events = func(b *eventsv1.EventBatch) { mu.Lock(); defer mu.Unlock(); got = append(got, b) }
+	c := serve(t, s)
+	ctx, cancel := context.WithCancel(withToken(context.Background(), "traefik-1"))
+	defer cancel()
+	stream, err := c.Watch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The longest engine ID, a pod name's, is accepted.
+	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{EngineId: strings.Repeat("e", 253)}}}); err != nil {
+		t.Fatal(err)
+	}
+	dropped := testutil.ToFloat64(eventsDroppedByEngines)
+	batch := &eventsv1.EventBatch{Dropped: 3}
+	for i := range events.MaxBatch + 5 {
+		batch.Events = append(batch.Events, &eventsv1.SecurityEvent{EventId: strconv.Itoa(i)})
+	}
+	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Events{Events: batch}}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the batch", func() bool { mu.Lock(); defer mu.Unlock(); return len(got) == 1 })
+	mu.Lock()
+	defer mu.Unlock()
+	b := got[0]
+	if n := len(b.GetEvents()); n != events.MaxBatch || b.GetEvents()[n-1].GetEventId() != strconv.Itoa(events.MaxBatch-1) {
+		t.Errorf("got %d events, want the first %d", n, events.MaxBatch)
+	}
+	if b.GetDropped() != 8 {
+		t.Errorf("dropped %d, want 8 (3 + 5 over the limit)", b.GetDropped())
+	}
+	if d := testutil.ToFloat64(eventsDroppedByEngines) - dropped; d != 8 {
+		t.Errorf("the engine-drop metric grew by %v, want 8", d)
+	}
+}
+
 func TestWatchWaitingForASendSlot(t *testing.T) {
 	// Every send slot is taken for longer than the idle timeout (#148).
 	store, table := NewStore(), NewTable()
@@ -364,5 +451,83 @@ func TestWatchWaitingForASendSlot(t *testing.T) {
 	<-s.sends
 	if resp, err := alive.Recv(); err != nil || resp.GetBundle() == nil {
 		t.Fatalf("an engine that waited for a slot: got %v, %v, want the bundle", resp, err)
+	}
+}
+
+// Request counts: the server passes on the differences between an
+// engine's reports, for the bundle's policies only. A restarted engine
+// opens a new stream that counts from zero again.
+func TestWatchStats(t *testing.T) {
+	store, table := NewStore(), NewTable()
+	store.Set(signed(1), 1)
+	store.SetPolicies(map[string]bool{"shop/site": true})
+	var mu sync.Mutex
+	var got []*eventsv1.PolicyStats
+	s := NewServer(store, table, fakeAuth{}, "replica-0", logr.Discard())
+	s.Stats = func(d []*eventsv1.PolicyStats) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, d...)
+	}
+	c := serve(t, s)
+	total := func() (allowed, denied, timed uint64) {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, p := range got {
+			allowed, denied = allowed+p.GetAllowed(), denied+p.GetDenied()
+			for _, n := range p.GetLatencyCounts() {
+				timed += n
+			}
+		}
+		return allowed, denied, timed
+	}
+	report := func(stream agentv1.BundleService_WatchClient, bounds []float64, policies ...*eventsv1.PolicyStats) {
+		t.Helper()
+		if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Stats{Stats: &eventsv1.RequestStats{
+			LatencyBounds: bounds, Policies: policies,
+		}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	site := func(allowed, denied uint64) *eventsv1.PolicyStats {
+		counts := make([]uint64, len(latencyBounds)+1)
+		counts[0] = allowed + denied
+		return &eventsv1.PolicyStats{Policy: "shop/site", Allowed: allowed, Denied: denied, LatencyCounts: counts}
+	}
+	open := func() agentv1.BundleService_WatchClient {
+		t.Helper()
+		stream, err := c.Watch(withToken(t.Context(), "engine"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{EngineId: "e1"}}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := stream.Recv(); err != nil {
+			t.Fatal(err)
+		}
+		return stream
+	}
+
+	stream := open()
+	report(stream, latencyBounds, site(3, 1), &eventsv1.PolicyStats{Policy: "gone/policy", Allowed: 100})
+	report(stream, latencyBounds, site(5, 2))
+	waitFor(t, "the differences", func() bool { a, d, n := total(); return a == 5 && d == 2 && n == 7 })
+
+	// The engine restarts: its new stream counts from zero.
+	_ = stream.CloseSend()
+	stream = open()
+	report(stream, latencyBounds, site(1, 0))
+	waitFor(t, "the restarted engine's counts", func() bool { a, d, n := total(); return a == 6 && d == 2 && n == 8 })
+
+	// Latency in other buckets is left out; the counts are taken.
+	report(stream, []float64{1, 2}, site(2, 0))
+	waitFor(t, "the counts without latency", func() bool { a, _, n := total(); return a == 7 && n == 8 })
+	mu.Lock()
+	defer mu.Unlock()
+	for _, p := range got {
+		if p.GetPolicy() != "shop/site" {
+			t.Errorf("counts of %s, which the bundle doesn't have", p.GetPolicy())
+		}
 	}
 }
