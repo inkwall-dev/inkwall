@@ -5,7 +5,8 @@
 // §4.4), through one Integration per proxy. For Traefik: an operator-owned
 // ForwardAuth Middleware in each namespace with protected routes, attached
 // to protected Ingresses through Traefik's router.middlewares annotation,
-// and to protected IngressRoutes' routes through their middlewares.
+// to protected IngressRoutes' routes through their middlewares, and to
+// protected HTTPRoutes' rules through an ExtensionRef filter.
 package wiring
 
 import (
@@ -30,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/source"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/crdwatch"
@@ -43,9 +45,9 @@ const (
 	MiddlewareName = "inkwall-waf"
 	// MiddlewaresAnnotation lists an Ingress router's Middlewares.
 	MiddlewaresAnnotation = "traefik.ingress.kubernetes.io/router.middlewares"
-	// WiredAnnotation marks an Ingress or IngressRoute the operator wired,
-	// with the Middleware it added (MiddlewareRef on an Ingress,
-	// MiddlewareName on an IngressRoute), so it removes exactly that.
+	// WiredAnnotation marks an Ingress, IngressRoute or HTTPRoute the
+	// operator wired, with the Middleware it added (MiddlewareRef on an
+	// Ingress, MiddlewareName on the others), so it removes exactly that.
 	WiredAnnotation = "waf.inkwall.dev/wired"
 	// legacyClassAnnotation is the class before ingressClassName.
 	legacyClassAnnotation  = "kubernetes.io/ingress.class"
@@ -280,17 +282,20 @@ func IsDefaultClass(ic *networkingv1.IngressClass) bool {
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingressclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=traefik.io,resources=middlewares,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=traefik.io,resources=ingressroutes,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways;gatewayclasses,verbs=get;list;watch
 
-// Traefik is the wiring of Traefik: its Ingresses and IngressRoutes.
+// Traefik is the wiring of Traefik: its Ingresses, IngressRoutes, and the
+// HTTPRoutes of its Gateway API provider.
 type Traefik struct {
 	Client client.Client
 	// APIReader reads Middlewares and targets uncached.
 	APIReader client.Reader
 	// Pods selects Traefik's pods (integrations.Selectors).
 	Pods labels.Selector
-	// IngressRoutes watches Traefik's IngressRoutes once their CRD is
-	// installed; nil: they are only read at each reconcile.
-	IngressRoutes *crdwatch.Kind
+	// Watches of IngressRoutes, HTTPRoutes, Gateways and GatewayClasses,
+	// once their CRDs are installed; nil: only read at each reconcile.
+	IngressRoutes, HTTPRoutes, Gateways, GatewayClasses *crdwatch.Kind
 
 	// noResponseLimit: the API server dropped the Middleware's
 	// maxResponseBodySize (Traefik before v3.7), so it isn't asked for
@@ -307,7 +312,9 @@ var (
 func (*Traefik) Name() string { return integrations.Traefik.Name }
 
 // Kinds implements Integration.
-func (*Traefik) Kinds() []schema.GroupKind { return []schema.GroupKind{ingressKind, routeKind} }
+func (*Traefik) Kinds() []schema.GroupKind {
+	return []schema.GroupKind{ingressKind, routeKind, httpRouteKind}
+}
 
 // Watch implements Integration.
 func (t *Traefik) Watch(c controller.Controller, cache cache.Cache, h handler.EventHandler) error {
@@ -318,9 +325,12 @@ func (t *Traefik) Watch(c controller.Controller, cache cache.Cache, h handler.Ev
 			return err
 		}
 	}
-	if t.IngressRoutes != nil {
-		// Their middlewares matter (the operator's own included).
-		t.IngressRoutes.Add(c, h)
+	// Their middlewares and filters matter (the operator's own included),
+	// and which Gateways, of which classes, serve an HTTPRoute.
+	for _, k := range []*crdwatch.Kind{t.IngressRoutes, t.HTTPRoutes, t.Gateways, t.GatewayClasses} {
+		if k != nil {
+			k.Add(c, h)
+		}
 	}
 	return nil
 }
@@ -341,6 +351,12 @@ type state struct {
 	routes   map[types.NamespacedName]*unstructured.Unstructured
 	routeCRD bool
 	routeErr map[types.NamespacedName]string
+	// httpRoutes are the HTTPRoutes (none without their CRD), with the
+	// controllers of their Gateways; httpRouteErr says why one couldn't be
+	// wired.
+	httpRoutes   map[types.NamespacedName]*gatewayv1.HTTPRoute
+	controllers  map[types.NamespacedName][]string
+	httpRouteErr map[types.NamespacedName]string
 	// ingressErr says why an Ingress couldn't be wired.
 	ingressErr map[types.NamespacedName]string
 	// traefikCRDs: the Middleware CRD is installed.
@@ -404,14 +420,18 @@ func (t *Traefik) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 	st := &state{
 		ingresses: byKey, wire: map[types.NamespacedName]target{},
 		routes: map[types.NamespacedName]*unstructured.Unstructured{}, routeCRD: routeCRD, routeErr: map[types.NamespacedName]string{},
-		ingressErr:  map[types.NamespacedName]string{},
-		traefikCRDs: t.middlewaresInstalled(), middlewareErr: map[string]string{},
-		wanted: map[schema.GroupKind]map[types.NamespacedName]bool{ingressKind: {}, routeKind: {}},
+		httpRouteErr: map[types.NamespacedName]string{},
+		ingressErr:   map[types.NamespacedName]string{},
+		traefikCRDs:  t.middlewaresInstalled(), middlewareErr: map[string]string{},
+		wanted: map[schema.GroupKind]map[types.NamespacedName]bool{ingressKind: {}, routeKind: {}, httpRouteKind: {}},
 		pods:   pods.Items,
 	}
 	for i := range routes {
 		ir := &routes[i]
 		st.routes[types.NamespacedName{Namespace: ir.GetNamespace(), Name: ir.GetName()}] = ir
+	}
+	if st.httpRoutes, st.controllers, err = t.httpRoutes(ctx); err != nil {
+		return nil, err
 	}
 
 	// The routes go to the engine only while a Traefik pod that gets it
@@ -420,11 +440,19 @@ func (t *Traefik) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 	// would have no engine: nothing is wired.
 	on := !off && len(running(pods.Items)) > 0 && st.traefikCRDs
 
-	// The routes to wire: every Ingress target that Traefik serves, and
-	// every IngressRoute target.
+	// The routes to wire: every Ingress target that Traefik serves, every
+	// IngressRoute target, and the rules of every HTTPRoute target that a
+	// Traefik Gateway serves.
 	wireRoutes := map[types.NamespacedName]bool{}
+	wireRules := map[types.NamespacedName]rules{}
 	for tg := range targets {
 		switch tg.Kind {
+		case httpRouteKind:
+			if hr, ok := st.httpRoutes[tg.Key]; ok && slices.Contains(st.controllers[tg.Key], integrations.Traefik.GatewayController) {
+				if wireRules[tg.Key] = wireRules[tg.Key].with(tg.Section); !wireRules[tg.Key].any(hr) {
+					delete(wireRules, tg.Key)
+				}
+			}
 		case ingressKind:
 			if ing, ok := byKey[tg.Key]; ok {
 				st.wire[tg.Key] = target{ing: ing, controller: Controller(ing, classes, defaultClass)}
@@ -444,6 +472,9 @@ func (t *Traefik) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 			}
 		}
 		for k := range wireRoutes {
+			needed[k.Namespace] = true
+		}
+		for k := range wireRules {
 			needed[k.Namespace] = true
 		}
 		for ns := range needed {
@@ -486,6 +517,25 @@ func (t *Traefik) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 			errs = errors.Join(errs, fmt.Errorf("wire IngressRoute %s: %w", k, err))
 			st.routeErr[k] = fmt.Sprintf("IngressRoute %s: %v", k.Name, err)
 			logger.Error(err, "IngressRoute not wired", "ingressroute", k)
+			needed[k.Namespace] = true
+		}
+	}
+
+	// HTTPRoutes: the same, in their rules' filters.
+	for k, hr := range st.httpRoutes {
+		var sel rules
+		if r, ok := wireRules[k]; ok && on && st.middlewareErr[k.Namespace] == "" {
+			sel = r
+		}
+		st.wanted[httpRouteKind][k] = sel != nil
+		switch err := t.wireHTTPRoute(ctx, hr, sel); {
+		case apierrors.IsConflict(err):
+			errs = errors.Join(errs, fmt.Errorf("wire HTTPRoute %s: %w", k, err))
+			needed[k.Namespace] = true
+		case err != nil:
+			errs = errors.Join(errs, fmt.Errorf("wire HTTPRoute %s: %w", k, err))
+			st.httpRouteErr[k] = fmt.Sprintf("HTTPRoute %s: %v", k.Name, err)
+			logger.Error(err, "HTTPRoute not wired", "httproute", k)
 			needed[k.Namespace] = true
 		}
 	}
@@ -536,6 +586,28 @@ func (st *state) result(targets map[Target]bool) *Result {
 			case st.routeErr[k] != "":
 				s.Failed = st.routeErr[k]
 			}
+		case httpRouteKind:
+			hr := st.httpRoutes[k]
+			if hr == nil || !rules(nil).with(tg.Section).any(hr) {
+				continue // Accepted reports it
+			}
+			mine, others := st.gatewayControllers(k)
+			switch {
+			case !mine:
+				s.Unsupported = fmt.Sprintf("HTTPRoute %s is attached to no Gateway of a known GatewayClass", k.Name)
+				if len(others) > 0 {
+					s.Unsupported = fmt.Sprintf("HTTPRoute %s is served by %s, which Inkwall doesn't wire yet", k.Name, strings.Join(others, ", "))
+				}
+			case !st.traefikCRDs:
+				s.Failed = "Traefik's Middleware CRD is not installed"
+			case st.middlewareErr[k.Namespace] != "":
+				s.Failed = st.middlewareErr[k.Namespace]
+			case st.httpRouteErr[k] != "":
+				s.Failed = st.httpRouteErr[k]
+			case len(unwired(others)) > 0:
+				s.Partly = fmt.Sprintf("HTTPRoute %s is also attached to Gateways of %s, which Inkwall doesn't wire yet: its traffic there is not inspected",
+					k.Name, strings.Join(unwired(others), ", "))
+			}
 		default:
 			continue
 		}
@@ -554,6 +626,10 @@ func (t *Traefik) Wired(ctx context.Context, tg Target) (bool, error) {
 	case routeKind:
 		u := &unstructured.Unstructured{}
 		u.SetGroupVersionKind(IngressRouteGVK)
+		obj = u
+	case httpRouteKind:
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(HTTPRouteGVK)
 		obj = u
 	default:
 		return false, nil

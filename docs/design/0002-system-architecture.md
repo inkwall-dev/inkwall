@@ -266,9 +266,11 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
 
 **Built:** `InkwallConfig`, `WAFPolicy`, `WAFRuleSet` and `ClusterWAFRuleSet`; `Ingress` and
 Traefik `IngressRoute` targets; `HTTPRoute` targets resolved, with the precedence above
-([0004 §4.5](0004-operator.md#45-resolver)), and wired through Envoy Gateway.
-**Not yet:** IP lists, the policy fields `rateLimits` and `ipLists`, Traefik's `HTTPRoute` targets,
-`BlockHighConfidence`, the `InspectPrefix` oversize action, and `InkwallConfig.events`.
+([0004 §4.5](0004-operator.md#45-resolver)), and wired through Envoy Gateway or Traefik's Gateway
+API provider ([0004 §4.4](0004-operator.md#44-wiring-controller)).
+**Not yet:** IP lists, the policy fields `rateLimits` and `ipLists`, wiring other controllers'
+`HTTPRoute` targets, `BlockHighConfidence`, the `InspectPrefix` oversize action, and
+`InkwallConfig.events`.
 
 ### 4.3 Bundle format
 
