@@ -213,6 +213,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	gatewayClasses := crd(proxydiscovery.GatewayClassGVK, nil)
 	envoyProxies := crd(wiring.EnvoyProxyGVK, nil)
 	extensionPolicies := crd(wiring.EnvoyExtensionPolicyGVK, nil)
+	trafficPolicies := crd(wiring.ClientTrafficPolicyGVK, nil)
 	if err := (&controller.BundleReconciler{
 		Client:        mgr.GetClient(),
 		APIReader:     mgr.GetAPIReader(),
@@ -272,7 +273,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	// proxy pods won't have the engine.
 	wirings := wiring.Integrations(mgr.GetClient(), mgr.GetAPIReader(), wiring.Config{
 		Pods: selectors, IngressRoutes: ingressRoutes, HTTPRoutes: httpRoutes, Gateways: gateways, GatewayClasses: gatewayClasses,
-		EnvoyProxies: envoyProxies, ExtensionPolicies: extensionPolicies, Sidecar: sidecar,
+		EnvoyProxies: envoyProxies, ExtensionPolicies: extensionPolicies, TrafficPolicies: trafficPolicies, Sidecar: sidecar,
 	})
 	if err := (&wiring.Reconciler{
 		Client: mgr.GetClient(), PodWebhook: webhook.MutatingConfigName, Integrations: wirings, Disabled: !inject,
@@ -286,7 +287,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	if err := (&proxydiscovery.Reconciler{Client: mgr.GetClient(), GatewayClasses: gatewayClasses, Kinds: kinds}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
-	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gateways, gatewayClasses, envoyProxies, extensionPolicies} {
+	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gateways, gatewayClasses, envoyProxies, extensionPolicies, trafficPolicies} {
 		if err := mgr.Add(k); err != nil {
 			return nil, err
 		}

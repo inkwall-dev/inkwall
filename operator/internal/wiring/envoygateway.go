@@ -122,7 +122,7 @@ type EnvoyGateway struct {
 	Sidecar injection.Sidecar
 	// Watches of kinds whose CRD may be missing; nil: only read at each
 	// reconcile.
-	HTTPRoutes, Gateways, GatewayClasses, EnvoyProxies, ExtensionPolicies *crdwatch.Kind
+	HTTPRoutes, Gateways, GatewayClasses, EnvoyProxies, ExtensionPolicies, TrafficPolicies *crdwatch.Kind
 }
 
 // Name implements Integration.
@@ -140,7 +140,8 @@ func (e *EnvoyGateway) Watch(c controller.Controller, cache cache.Cache, h handl
 			return err
 		}
 	}
-	for _, k := range []*crdwatch.Kind{e.HTTPRoutes, e.Gateways, e.GatewayClasses, e.EnvoyProxies, e.ExtensionPolicies} {
+	// The policies' status says when they are in force.
+	for _, k := range []*crdwatch.Kind{e.HTTPRoutes, e.Gateways, e.GatewayClasses, e.EnvoyProxies, e.ExtensionPolicies, e.TrafficPolicies} {
 		if k != nil {
 			k.Add(c, h)
 		}
@@ -243,6 +244,8 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 	var errs error
 	failed := map[types.NamespacedName]string{}
 	wanted := map[types.NamespacedName]bool{}
+	// limits are the operator's ClientTrafficPolicies, by Gateway.
+	limits := map[types.NamespacedName]string{}
 	if st.egCRDs {
 		sidecar, err := e.sidecar(ctx)
 		if err != nil {
@@ -301,8 +304,11 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 		// 3. Envoy's buffer limit on the Gateways with routes whose body
 		// is inspected.
 		for gw := range buffered {
-			if err := e.ensureBufferLimit(ctx, st.gateways[gw]); err != nil {
+			switch name, err := e.ensureBufferLimit(ctx, st.gateways[gw]); {
+			case err != nil:
 				errs = errors.Join(errs, fmt.Errorf("ensure the ClientTrafficPolicy of Gateway %s: %w", gw, err))
+			case name != "":
+				limits[gw] = name
 			}
 		}
 		// 4. The rest goes, in reverse: a route stops calling the engine
@@ -323,10 +329,28 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 		case failed[tg.Key] != "":
 			s.Failed = failed[tg.Key]
 		case s.Wired:
-			if why, err := e.rejected(ctx, tg.Key); err != nil {
-				errs = errors.Join(errs, err)
-			} else if why != "" {
-				s.Failed = why
+			// In force once Envoy Gateway accepted the route's policy, and
+			// its Gateways' buffer limit when the body is inspected.
+			check := []types.NamespacedName{{Namespace: tg.Key.Namespace, Name: envoyName(tg.Key.Name)}}
+			kinds := []schema.GroupVersionKind{EnvoyExtensionPolicyGVK}
+			if r := routes[tg.Key]; r.body {
+				for _, gw := range r.gateways {
+					if name := limits[gw]; name != "" {
+						check = append(check, types.NamespacedName{Namespace: gw.Namespace, Name: name})
+						kinds = append(kinds, ClientTrafficPolicyGVK)
+					}
+				}
+			}
+			for i, key := range check {
+				pending, why, err := e.accepted(ctx, kinds[i], key)
+				switch {
+				case err != nil:
+					errs = errors.Join(errs, err)
+				case why != "":
+					s.Failed = why
+				case pending != "" && s.Pending == "":
+					s.Pending = pending
+				}
 			}
 		}
 		res.Targets[tg] = s
@@ -633,22 +657,23 @@ func number(v any) (float64, bool) {
 	return 0, false
 }
 
-// ensureBufferLimit gives a Gateway the operator's ClientTrafficPolicy,
-// unless the user has one for it: Envoy Gateway applies one per Gateway,
-// so the operator's would take its place.
-func (e *EnvoyGateway) ensureBufferLimit(ctx context.Context, gw *gatewayv1.Gateway) error {
+// ensureBufferLimit gives a Gateway the operator's ClientTrafficPolicy, and
+// returns its name, unless the user has one for it: Envoy Gateway applies
+// one per Gateway, so the operator's would take its place.
+func (e *EnvoyGateway) ensureBufferLimit(ctx context.Context, gw *gatewayv1.Gateway) (string, error) {
 	if gw == nil {
-		return nil
+		return "", nil
 	}
 	theirs, err := e.userTrafficPolicy(ctx, gw)
 	switch {
 	case err != nil:
-		return err
+		return "", err
 	case theirs != "":
 		log.FromContext(ctx).V(1).Info("the Gateway has a ClientTrafficPolicy: its connection.bufferLimit caps the bodies inspected", "gateway", gw.Namespace+"/"+gw.Name, "clienttrafficpolicy", theirs)
-		return nil
+		return "", nil
 	}
-	return e.ensure(ctx, bufferLimit(gw))
+	p := bufferLimit(gw)
+	return p.GetName(), e.ensure(ctx, p)
 }
 
 // userTrafficPolicy names a ClientTrafficPolicy, not the operator's, that
@@ -677,25 +702,36 @@ func (e *EnvoyGateway) userTrafficPolicy(ctx context.Context, gw *gatewayv1.Gate
 	return "", nil
 }
 
-// rejected returns why Envoy Gateway didn't accept a route's
-// EnvoyExtensionPolicy, if it says so; "" while it hasn't said.
-func (e *EnvoyGateway) rejected(ctx context.Context, route types.NamespacedName) (string, error) {
+// accepted reads whether Envoy Gateway accepted one of the operator's
+// policies, from its status: why it refused it, or, while it hasn't said
+// for every Gateway, that it is pending.
+func (e *EnvoyGateway) accepted(ctx context.Context, gvk schema.GroupVersionKind, key types.NamespacedName) (pending, refused string, err error) {
 	p := &unstructured.Unstructured{}
-	p.SetGroupVersionKind(EnvoyExtensionPolicyGVK)
-	if err := e.Client.Get(ctx, types.NamespacedName{Namespace: route.Namespace, Name: envoyName(route.Name)}, p); err != nil {
-		return "", client.IgnoreNotFound(err)
+	p.SetGroupVersionKind(gvk)
+	if err := e.Client.Get(ctx, key, p); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Sprintf("waiting for %s %s", gvk.Kind, key.Name), "", nil
+		}
+		return "", "", err
 	}
 	ancestors, _, _ := unstructured.NestedSlice(p.Object, "status", "ancestors")
+	pending = fmt.Sprintf("waiting for Envoy Gateway to accept %s %s", gvk.Kind, key.Name)
 	for _, a := range ancestors {
 		conds, _, _ := unstructured.NestedSlice(a.(map[string]any), "conditions")
 		for _, c := range conds {
 			c, _ := c.(map[string]any)
-			if c["type"] == "Accepted" && c["status"] == "False" {
-				return fmt.Sprintf("Envoy Gateway didn't accept EnvoyExtensionPolicy %s (%v): %v", p.GetName(), c["reason"], c["message"]), nil
+			if c["type"] != "Accepted" {
+				continue
+			}
+			if c["status"] == "False" {
+				return "", fmt.Sprintf("Envoy Gateway didn't accept %s %s (%v): %v", gvk.Kind, key.Name, c["reason"], c["message"]), nil
+			}
+			if c["status"] == "True" {
+				pending = ""
 			}
 		}
 	}
-	return "", nil
+	return pending, "", nil
 }
 
 // sidecar is the engine for the Envoy pods, with the InkwallConfig's

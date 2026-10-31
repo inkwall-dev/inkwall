@@ -156,7 +156,7 @@ Validation runs in three steps, cheapest first:
 | Condition | True when | False reasons |
 |---|---|---|
 | `Accepted` | Spec valid, references resolve | `InvalidRef`, `Conflict`, `RuleCompileError`, `TargetUnsupported` |
-| `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `NoTargets`, `InjectionDisabled` |
+| `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `Pending`, `NoTargets`, `InjectionDisabled` |
 | `Enforced` | Every serving engine ACKed a bundle with this generation | `EnginesBehind` (`3/6`), `EngineNack`, `NoEngines`, `NotInBundle` |
 | `Ready` | The three above are True | first failing condition's reason |
 
@@ -438,14 +438,16 @@ integration), for `HTTPRoute` targets whose parent Gateways have a GatewayClass 
   inspected.
 - **Unprotected routes get nothing**, and cost 0. A route that is no longer protected loses its
   `EnvoyExtensionPolicy` first; the `Backend`, `ClientTrafficPolicy` and engine go after.
-- **`Programmed`** counts a route wired once its `EnvoyExtensionPolicy` exists and Envoy Gateway
-  hasn't refused it: `Accepted=False` in its status (a disabled Backend API, say) is
-  `WiringFailed` with Envoy Gateway's message. An object of the operator's name it didn't create
+- **`Programmed`** counts a route wired once Envoy Gateway has accepted (`Accepted=True` for every
+  Gateway, in their status) its `EnvoyExtensionPolicy` and, when its body is inspected, its
+  Gateways' `ClientTrafficPolicy`: until then the reason is `Pending`, so `Programmed=True` means
+  Envoy has the buffer limit and a body isn't cut short. `Accepted=False` (a disabled Backend API,
+  say) is `WiringFailed` with Envoy Gateway's message. The operator watches both kinds. An object of the operator's name it didn't create
   is left alone (`WiringFailed`).
 - **Without Envoy Gateway's CRDs** (`EnvoyProxy`, `EnvoyExtensionPolicy`, `Backend`,
   `ClientTrafficPolicy`), or the Gateway API's, nothing is wired and nothing crashes: the routes
   are `WiringFailed`. The leader looks for the CRDs every 30 s and watches Gateways,
-  EnvoyProxies and EnvoyExtensionPolicies once they are installed.
+  EnvoyProxies, EnvoyExtensionPolicies and ClientTrafficPolicies once they are installed.
 - Objects of Envoy Gateway's are read and written unstructured: the operator doesn't depend on
   its Go module.
 - **Not yet:** `mergeGateways` (one Envoy fleet for a GatewayClass) and Envoy as a `DaemonSet`;

@@ -207,6 +207,25 @@ func testEnvoyGateway(ctx context.Context, t *testing.T, c client.Client) {
 	if err := c.Delete(ctx, old); err != nil {
 		t.Fatal(err)
 	}
+	// Wired, in force once Envoy Gateway accepts the policies.
+	eventually(t, "Pending until Envoy Gateway accepts them", programmed("eg", metav1.ConditionFalse, wiring.ReasonPending, "waiting for Envoy Gateway to accept"))
+	accept := func(gvk schema.GroupVersionKind, namespace, name, status, msg string) {
+		t.Helper()
+		u, err := get(gvk, namespace, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		update(ctx, t, c, u, func(u *unstructured.Unstructured) {
+			_ = unstructured.SetNestedSlice(u.Object, []any{map[string]any{"conditions": []any{map[string]any{
+				"type": "Accepted", "status": status, "reason": "Test", "message": msg,
+			}}}}, "status", "ancestors")
+		})
+	}
+	accept(wiring.EnvoyExtensionPolicyGVK, ns, "inkwall-waf-app", "True", "")
+	accept(wiring.EnvoyExtensionPolicyGVK, ns, "inkwall-waf-api", "True", "")
+	accept(wiring.ClientTrafficPolicyGVK, edge, "inkwall-waf-custom", "True", "")
+	eventually(t, "Pending on the other buffer limit", programmed("eg", metav1.ConditionFalse, wiring.ReasonPending, "ClientTrafficPolicy inkwall-waf-plain"))
+	accept(wiring.ClientTrafficPolicyGVK, edge, "inkwall-waf-plain", "True", "")
 	eventually(t, "Programmed", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s) wired to the engine in Envoy Gateway"))
 	for _, o := range []struct {
 		gvk             schema.GroupVersionKind
@@ -231,19 +250,9 @@ func testEnvoyGateway(ctx context.Context, t *testing.T, c client.Client) {
 	})
 
 	// Envoy Gateway refuses a policy: reported.
-	eep, err := get(wiring.EnvoyExtensionPolicyGVK, ns, "inkwall-waf-app")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = unstructured.SetNestedSlice(eep.Object, []any{map[string]any{"conditions": []any{map[string]any{
-		"type": "Accepted", "status": "False", "reason": "Invalid", "message": "Backend is disabled",
-	}}}}, "status", "ancestors")
-	if err := c.Update(ctx, eep); err != nil {
-		t.Fatal(err)
-	}
+	accept(wiring.EnvoyExtensionPolicyGVK, ns, "inkwall-waf-app", "False", "Backend is disabled")
 	eventually(t, "WiringFailed when Envoy Gateway refuses it", programmed("eg", metav1.ConditionFalse, wiring.ReasonWiringFailed, "Backend is disabled"))
-	unstructured.RemoveNestedField(eep.Object, "status")
-	update(ctx, t, c, eep, func(u *unstructured.Unstructured) { unstructured.RemoveNestedField(u.Object, "status") })
+	accept(wiring.EnvoyExtensionPolicyGVK, ns, "inkwall-waf-app", "True", "")
 	eventually(t, "Programmed again", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
 
 	// Unprotected: everything goes, the user's objects as they were.

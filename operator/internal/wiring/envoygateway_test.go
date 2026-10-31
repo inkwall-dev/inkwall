@@ -334,6 +334,11 @@ func TestProgrammedRolling(t *testing.T) {
 		!strings.Contains(msg, "envoy-gateway-system/old") {
 		t.Errorf("%s %q", reason, msg)
 	}
+	pending := rep(withEngine)
+	pending.results[0].Targets[route] = TargetState{Wired: true, Pending: "waiting for Envoy Gateway to accept ClientTrafficPolicy inkwall-waf-gw"}
+	if st, reason, msg := programmed(p, pending); st != metav1.ConditionFalse || reason != ReasonPending || !strings.Contains(msg, "inkwall-waf-gw") {
+		t.Errorf("pending: %s %s %q", st, reason, msg)
+	}
 	if _, reason, msg := programmed(p, rep()); reason != ReasonSidecarMissing || !strings.Contains(msg, "no Envoy Gateway pod of the routes' Gateways") {
 		t.Errorf("%s %q", reason, msg)
 	}

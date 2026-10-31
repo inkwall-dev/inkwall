@@ -95,6 +95,9 @@ type TargetState struct {
 	Failed string
 	// Wired: the integration keeps the target wired.
 	Wired bool
+	// Pending: wired, but not in force yet, and why (the proxy hasn't
+	// accepted its configuration yet).
+	Pending string
 }
 
 // Config is what the integrations need besides the clients.
@@ -103,7 +106,7 @@ type Config struct {
 	Pods *integrations.Selectors
 	// Watches of kinds whose CRD may be missing, once it is installed;
 	// nil: only read at each reconcile.
-	IngressRoutes, HTTPRoutes, Gateways, GatewayClasses, EnvoyProxies, ExtensionPolicies *crdwatch.Kind
+	IngressRoutes, HTTPRoutes, Gateways, GatewayClasses, EnvoyProxies, ExtensionPolicies, TrafficPolicies *crdwatch.Kind
 	// Sidecar is the engine Envoy Gateway's pods get, before the
 	// InkwallConfig's settings.
 	Sidecar injection.Sidecar
@@ -117,7 +120,7 @@ func Integrations(c client.Client, reader client.Reader, cfg Config) []Integrati
 		&EnvoyGateway{
 			Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.EnvoyGateway.Name), Sidecar: cfg.Sidecar,
 			HTTPRoutes: cfg.HTTPRoutes, Gateways: cfg.Gateways, GatewayClasses: cfg.GatewayClasses,
-			EnvoyProxies: cfg.EnvoyProxies, ExtensionPolicies: cfg.ExtensionPolicies,
+			EnvoyProxies: cfg.EnvoyProxies, ExtensionPolicies: cfg.ExtensionPolicies, TrafficPolicies: cfg.TrafficPolicies,
 		},
 	}
 }

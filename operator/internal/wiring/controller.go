@@ -50,6 +50,7 @@ const (
 	ReasonSidecarMissing        = "SidecarMissing"
 	ReasonNoTargets             = "NoTargets"
 	ReasonInjectionDisabled     = "InjectionDisabled"
+	ReasonPending               = "Pending"
 )
 
 // Finalizer holds a WAFPolicy until the operator has unwired its routes, so
@@ -279,7 +280,7 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 	if rep.disabled {
 		return metav1.ConditionFalse, ReasonInjectionDisabled, "the engine is not injected into proxy pods (injection is off): the routes are not wired"
 	}
-	var unsupported, failed []string
+	var unsupported, failed, pending []string
 	// wired counts the wired targets by result, then kind.
 	wired := make([]map[schema.GroupKind]int, len(rep.results))
 	total := 0
@@ -306,9 +307,13 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 		}
 		switch {
 		case served >= 0:
-			if s := rep.results[served].Targets[t]; s.Failed != "" {
+			s := rep.results[served].Targets[t]
+			if s.Failed != "" {
 				failed = append(failed, s.Failed)
 				continue
+			}
+			if s.Pending != "" {
+				pending = append(pending, s.Pending)
 			}
 			if wired[served] == nil {
 				wired[served] = map[schema.GroupKind]int{}
@@ -347,6 +352,10 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 			}
 		}
 		msgs = append(msgs, strings.Join(counts, " and ")+" wired to the engine in "+res.Proxy)
+	}
+	if len(pending) > 0 {
+		slices.Sort(pending)
+		return metav1.ConditionFalse, ReasonPending, strings.Join(slices.Compact(pending), "; ")
 	}
 	return metav1.ConditionTrue, ReasonProgrammed, strings.Join(msgs, "; ")
 }

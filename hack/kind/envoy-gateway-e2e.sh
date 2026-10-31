@@ -301,6 +301,13 @@ names_ours() { [[ $("${KUBECTL[@]}" -n "$NS" get gateway plain -o jsonpath='{.sp
 labelled() { "${KUBECTL[@]}" -n "$EG_NS" get pods -l e2e=custom -o name | grep . >/dev/null; }
 # whoami --verbose logs each request it gets, with its headers.
 never_reached_app() { ! "${KUBECTL[@]}" -n "$NS" logs deployment/app --since=10m | grep -i "$1" >/dev/null; }
+# The operator's buffer limit, in force on both Gateways.
+limits_accepted() {
+  for gw in custom plain; do
+    [[ $("${KUBECTL[@]}" -n "$NS" get clienttrafficpolicy "inkwall-waf-$gw" \
+      -o jsonpath='{.status.ancestors[*].conditions[?(@.type=="Accepted")].status}') == True ]] || return 1
+  done
+}
 no_wiring() {
   ! "${KUBECTL[@]}" -n "$NS" get envoyextensionpolicy inkwall-waf-app >/dev/null 2>&1 &&
     ! "${KUBECTL[@]}" -n "$NS" get backend inkwall-engine >/dev/null 2>&1 &&
@@ -324,6 +331,7 @@ for gw in custom plain; do
     injected "$gw"
 done
 eventually "Envoy Gateway accepts the EnvoyExtensionPolicy on both Gateways" eep_accepted
+eventually "and the buffer limit on both Gateways" limits_accepted
 eventually "Programmed through Traefik and Envoy Gateway" programmed_both
 eventually "the policy is Ready" ready
 forward_all
@@ -333,8 +341,15 @@ check "the user's pod label is kept" labelled
 
 # The body: a benign one larger than Envoy's default buffer (32 KiB), so
 # the operator's ClientTrafficPolicy matters, and an attack in a body.
-head -c 48000 /dev/zero | tr '\0' a >"$work/big"
-check "a 48 KB benign body passes" envoy_are 200 / -H 'Content-Type: application/x-www-form-urlencoded' --data-binary "x=$(cat "$work/big")"
+{
+  printf x=
+  head -c 48000 /dev/zero | tr '\0' a
+} >"$work/big"
+big=$(for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
+  code "$port" / -H 'Content-Type: application/x-www-form-urlencoded' --data-binary "@$work/big"
+  echo -n " "
+done)
+if [[ $big == "200 200 " ]]; then ok "a 48 KB benign body passes"; else fail "a 48 KB benign body passes (got $big)"; fi
 check "an attack in the body is blocked" envoy_are 403 / --data-urlencode "q=1' OR '1'='1"
 # BufferedPartial: Envoy holds the headers until the engine has seen the
 # body, so the app never sees the blocked request.
