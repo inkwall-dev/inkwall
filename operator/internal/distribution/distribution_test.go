@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -29,6 +30,10 @@ import (
 	agentv1 "github.com/inkwall-dev/inkwall/api/agent/v1"
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
+	"github.com/inkwall-dev/inkwall/pkg/events"
+	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/rules"
 )
 
 func TestEnforced(t *testing.T) {
@@ -127,10 +132,10 @@ func (f fakeAuth) Authenticate(_ context.Context, token string) (Identity, error
 }
 
 // serve runs a Server on an in-memory listener and returns a client.
-func serve(t *testing.T, s *Server) agentv1.BundleServiceClient {
+func serve(t *testing.T, s *Server, opts ...grpc.ServerOption) agentv1.BundleServiceClient {
 	t.Helper()
 	lis := bufconn.Listen(1 << 20)
-	g := grpc.NewServer()
+	g := grpc.NewServer(opts...)
 	agentv1.RegisterBundleServiceServer(g, s)
 	go func() { _ = g.Serve(lis) }()
 	t.Cleanup(g.Stop)
@@ -318,4 +323,41 @@ func TestWatchEvents(t *testing.T) {
 			t.Errorf("event %s from %s %s/%s, want e1 edge/traefik-1", ev.GetEventId(), ev.GetEngineId(), ev.GetPodNamespace(), ev.GetPodName())
 		}
 	}
+}
+
+// A batch as engines take from their buffer, 256 events at the contract's
+// field limits in one message (as older engines send it),
+// arrives whole.
+func TestWatchEventsMaximalBatch(t *testing.T) {
+	var (
+		mu  sync.Mutex
+		got int
+	)
+	s := NewServer(NewStore(), NewTable(), podAuth{}, "replica-0", logr.Discard())
+	s.Events = func(b *eventsv1.EventBatch) { mu.Lock(); defer mu.Unlock(); got += len(b.GetEvents()) }
+	c := serve(t, s, grpc.MaxRecvMsgSize(maxEngineMessage))
+	ctx, cancel := context.WithCancel(withToken(context.Background(), "traefik-1"))
+	defer cancel()
+	stream, err := c.Watch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{EngineId: "e1"}}}); err != nil {
+		t.Fatal(err)
+	}
+	long := strings.Repeat("x", 4096)
+	src := events.Source{EngineID: strings.Repeat("e", 253), PodNamespace: strings.Repeat("n", 63), PodName: strings.Repeat("p", 253)}
+	v := pipeline.Verdict{Action: pipeline.ActionDeny, Status: 403, Reason: pipeline.ReasonRule, Policy: long}
+	for i := range 64 {
+		v.Matches = append(v.Matches, rules.Match{RuleID: 900000 + i, Variable: "ARGS:" + long, Value: long})
+	}
+	req := &request.Request{ID: long, Method: long, Host: long, Headers: http.Header{"User-Agent": {long}}}
+	batch := &eventsv1.EventBatch{}
+	for range 256 {
+		batch.Events = append(batch.Events, events.New(src, req, "/"+long, v, time.Now()))
+	}
+	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Events{Events: batch}}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the batch", func() bool { mu.Lock(); defer mu.Unlock(); return got == 256 })
 }
