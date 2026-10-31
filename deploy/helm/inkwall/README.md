@@ -125,9 +125,9 @@ helm -n inkwall-system uninstall inkwall
 Before anything is deleted, a pre-delete hook (`uninstall.unwire`, on by default) runs
 `inkwall-operator unwire`. It stops the operator and sets the Pod and `WAFPolicy` webhooks to
 `Ignore`. It removes Inkwall's Middleware from every route it wired, keeping your own
-Middlewares, and removes the `waf.inkwall.dev/unwire` finalizer from every `WAFPolicy`. The routes
-then keep working, uninspected; Traefik pods drop the engine when they restart; deleting a policy,
-or its namespace, no longer waits for the operator.
+Middlewares. Every `WAFPolicy` then reports `Programmed=False` (reason `Unwired`), and loses the
+`waf.inkwall.dev/unwire` finalizer. The routes then keep working, uninspected; Traefik pods drop the
+engine when they restart; deleting a policy, or its namespace, no longer waits for the operator.
 
 `helm uninstall` keeps:
 

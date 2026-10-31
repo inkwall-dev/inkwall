@@ -50,6 +50,9 @@ const (
 	ReasonSidecarMissing        = "SidecarMissing"
 	ReasonNoTargets             = "NoTargets"
 	ReasonInjectionDisabled     = "InjectionDisabled"
+	// ReasonUnwired: `inkwall-operator unwire` (helm uninstall) unwired
+	// the routes and stopped the operator.
+	ReasonUnwired = "Unwired"
 )
 
 // Finalizer holds a WAFPolicy until the operator has unwired its routes, so
@@ -399,24 +402,28 @@ func (r *Reconciler) report(ctx context.Context, policies []wafv1alpha1.WAFPolic
 			continue
 		}
 		st, reason, msg := programmed(p, rep)
-		first := true
-		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			if !first {
-				if err := r.Client.Get(ctx, client.ObjectKeyFromObject(p), p); err != nil {
-					return err
-				}
-			}
-			first = false
-			if !meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
-				Type: wafv1alpha1.ConditionProgrammed, Status: st, Reason: reason, Message: msg, ObservedGeneration: p.Generation,
-			}) {
-				return nil
-			}
-			return r.Client.Status().Update(ctx, p)
-		})
-		if client.IgnoreNotFound(err) != nil {
+		if err := setProgrammed(ctx, r.Client, p, st, reason, msg); client.IgnoreNotFound(err) != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// setProgrammed sets a policy's Programmed condition, if it changed.
+func setProgrammed(ctx context.Context, c client.Client, p *wafv1alpha1.WAFPolicy, st metav1.ConditionStatus, reason, msg string) error {
+	first := true
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if !first {
+			if err := c.Get(ctx, client.ObjectKeyFromObject(p), p); err != nil {
+				return err
+			}
+		}
+		first = false
+		if !meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
+			Type: wafv1alpha1.ConditionProgrammed, Status: st, Reason: reason, Message: msg, ObservedGeneration: p.Generation,
+		}) {
+			return nil
+		}
+		return c.Status().Update(ctx, p)
+	})
 }

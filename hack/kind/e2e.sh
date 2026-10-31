@@ -999,6 +999,7 @@ check "the Middleware is deleted" no_middleware
 kept() { "${KUBECTL[@]}" -n "$NS" get wafpolicy web >/dev/null 2>&1; }
 check "the WAFPolicy is kept" kept
 check "released from the finalizer: deleting it won't wait for an operator" not_held
+check "Programmed=False (Unwired)" programmed_is Unwired
 restart_traefik
 eventually "a new Traefik pod has no engine" no_engine
 eventually "the route still answers after the uninstall (uninspected)" tstatus_is 200 "$SQLI"
