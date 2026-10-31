@@ -7,7 +7,8 @@
 # protecting a Traefik Ingress and an HTTPRoute served by two Gateways (one
 # naming the user's EnvoyProxy, one naming none). The engine joins the
 # Envoy pods, attacks are blocked through both proxies, a body attack is
-# held back with its headers, and unprotecting or uninstalling leaves the
+# held back with its headers, one followed by HTTP/2 trailers is inspected
+# too, and unprotecting or uninstalling leaves the
 # user's objects as they were. Needs the operator installed (make
 # kind-operator); ends with helm uninstall. KEEP=1 leaves the test's objects.
 set -euo pipefail
@@ -296,6 +297,19 @@ logged() {
   "${KUBECTL[@]}" -n "$EG_NS" logs -l app.kubernetes.io/name=envoy -c inkwall-engine --tail=-1 |
     grep '"security event"' | grep '"action":"log"' | grep "\"path\":\"$1\"" >/dev/null
 }
+# logged_rule PATH: ... and the event is a rule's, not an oversized body's.
+logged_rule() {
+  "${KUBECTL[@]}" -n "$EG_NS" logs -l app.kubernetes.io/name=envoy -c inkwall-engine --tail=-1 |
+    grep '"security event"' | grep '"action":"log"' | grep "\"path\":\"$1\"" | grep '"reason":"rule"' >/dev/null
+}
+# h2_are STATUS PATH BODY: a form body followed by a trailer, over HTTP/2,
+# through both Gateways (curl can't send request trailers).
+h2_are() {
+  local want=$1 path=$2 body=$3
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
+    [[ $("$work/h2trailers" -host "$HOST" "http://127.0.0.1:$port$path" "$body") == "$want" ]] || return 1
+  done
+}
 no_limits() { ! "${KUBECTL[@]}" -n "$NS" get clienttrafficpolicy inkwall-waf-custom inkwall-waf-plain -o name 2>/dev/null | grep . >/dev/null; }
 # The operator's buffer limit, in force on both Gateways.
 limits_accepted() {
@@ -361,6 +375,11 @@ check "an attack in the body is blocked" envoy_are 403 / --data-urlencode "q=1' 
 mark=/held-$RANDOM$RANDOM
 check "a body attack on a marked path is blocked" envoy_are 403 "$mark" --data-urlencode "q=1' OR '1'='1"
 check "and never reached the app" never_reached_app "$mark"
+# Trailers: Envoy sends the body without end_of_stream, as one it cut at
+# its buffer limit; the engine still inspects it (#235).
+go build -o "$work/h2trailers" ./hack/h2trailers
+check "an attack in a body with trailers (HTTP/2) is blocked" h2_are 403 / "q=1%27%20OR%20%271%27%3D%271"
+check "a benign body with trailers (HTTP/2) passes" h2_are 200 / "q=hello"
 
 echo "== detect mode"
 policy Detect
@@ -374,6 +393,9 @@ body_path=/detect-body-$RANDOM$RANDOM
 check "a body attack passes" envoy_are 200 "$body_path" --data-urlencode "q=1' OR '1'='1"
 eventually "and reaches the app" reached_app "$body_path"
 eventually "the engines log the streamed body's attack" logged "$body_path"
+h2_path=/detect-h2-$RANDOM$RANDOM
+check "a body attack with trailers (HTTP/2) passes" h2_are 200 "$h2_path" "q=1%27%20OR%20%271%27%3D%271"
+eventually "the engines log its rule, not an oversized body" logged_rule "$h2_path"
 
 echo "== unprotected"
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy shared --timeout=60s >/dev/null

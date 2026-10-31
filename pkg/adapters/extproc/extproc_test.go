@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/netip"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -36,13 +37,20 @@ import (
 
 func newPipeline(t testing.TB, mode pipeline.Mode) *pipeline.Pipeline {
 	t.Helper()
+	return newPipelineOversize(t, mode, pipeline.OversizeAuto)
+}
+
+// newPipelineOversize returns a pipeline that handles oversized bodies
+// with oversize.
+func newPipelineOversize(t testing.TB, mode pipeline.Mode, oversize pipeline.OversizeAction) *pipeline.Pipeline {
+	t.Helper()
 	eval, err := coraza.New(coraza.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// A generous deadline: these tests are not about it, and CRS under the
 	// race detector on a loaded machine can take longer than a real one.
-	return pipeline.New(eval, pipeline.Config{Mode: mode, Timeout: 10 * time.Second})
+	return pipeline.New(eval, pipeline.Config{Mode: mode, Oversize: oversize, Timeout: 10 * time.Second})
 }
 
 // envoy is a fake Envoy: a client of the Server over an in-memory
@@ -239,30 +247,52 @@ func TestDetectMode(t *testing.T) {
 }
 
 func TestBody(t *testing.T) {
-	const attack = "user=admin'%20OR%201=1--&password=x"
-	form := []string{"content-type", "application/x-www-form-urlencoded", "content-length", "34"}
+	const (
+		attack = "user=admin'%20OR%201=1--&password=x"
+		benign = "user=alice&password=hunter2xx"
+	)
+	// The limit is 64 bytes. Envoy sends a body without end_of_stream when
+	// it cut it at its buffer limit, or when trailers follow (and then no
+	// trailers message).
 	tests := []struct {
-		name    string
-		mode    pipeline.Mode
-		bodyMod filterv3.ProcessingMode_BodySendMode
-		body    string
-		eos     bool
-		want    int // status of the denial; 0 allows
+		name     string
+		mode     pipeline.Mode
+		oversize pipeline.OversizeAction
+		bodyMod  filterv3.ProcessingMode_BodySendMode
+		length   string // Content-Length: "" for the body's, "-" for none
+		body     string
+		eos      bool
+		want     int // status of the denial; 0 allows
 	}{
-		{"buffered benign", pipeline.ModeBlock, filterv3.ProcessingMode_BUFFERED, "user=alice&password=hunter2xx", true, 0},
-		{"buffered attack", pipeline.ModeBlock, filterv3.ProcessingMode_BUFFERED, attack, true, 403},
-		{"buffered, trailers follow", pipeline.ModeBlock, filterv3.ProcessingMode_BUFFERED, attack, false, 403},
-		{"partial attack", pipeline.ModeBlock, filterv3.ProcessingMode_BUFFERED_PARTIAL, attack, true, 403},
+		{"buffered benign", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED, "", benign, true, 0},
+		{"buffered attack", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED, "", attack, true, 403},
+		{"buffered, trailers follow", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED, "", attack, false, 403},
+		{"partial attack", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED_PARTIAL, "", attack, true, 403},
+		{"partial attack, trailers", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED_PARTIAL, "", attack, false, 403},
+		{"partial attack, trailers, no content-length", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED_PARTIAL, "-", attack, false, 403},
+		{"partial attack, trailers, onOversize allow", pipeline.ModeBlock, pipeline.OversizeAllow, filterv3.ProcessingMode_BUFFERED_PARTIAL, "-", attack, false, 403},
+		{"partial benign, trailers", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED_PARTIAL, "-", benign, false, 0},
 		// Cut at Envoy's buffer limit: the rest goes uninspected.
-		{"partial, cut", pipeline.ModeBlock, filterv3.ProcessingMode_BUFFERED_PARTIAL, "user=alice", false, 413},
-		{"partial, cut, detect", pipeline.ModeDetect, filterv3.ProcessingMode_BUFFERED_PARTIAL, "user=alice", false, 0},
-		{"over the limit", pipeline.ModeBlock, filterv3.ProcessingMode_BUFFERED, strings.Repeat("a=b&", 20), true, 413},
+		{"partial, cut at the limit", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED_PARTIAL, "-", strings.Repeat("a=b&", 16), false, 413},
+		{"partial, cut over the limit", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED_PARTIAL, "-", strings.Repeat("a=b&", 20), false, 413},
+		{"partial, cut, onOversize allow", pipeline.ModeBlock, pipeline.OversizeAllow, filterv3.ProcessingMode_BUFFERED_PARTIAL, "-", strings.Repeat("a=b&", 20), false, 0},
+		// Cut at a smaller buffer (the Gateway's own ClientTrafficPolicy).
+		{"partial, short of its content-length", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED_PARTIAL, "100", benign, false, 413},
+		{"partial, short of its content-length, detect", pipeline.ModeDetect, 0, filterv3.ProcessingMode_BUFFERED_PARTIAL, "100", benign, false, 0},
+		{"over the limit", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED, "", strings.Repeat("a=b&", 20), true, 413},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var logs bytes.Buffer
-			e := newEnvoy(t, newPipeline(t, tt.mode), 64, &logs)
-			resps := e.exchange(t, withMode(headers("POST", "/login", false, form...), tt.bodyMod), body(tt.body, tt.eos))
+			e := newEnvoy(t, newPipelineOversize(t, tt.mode, tt.oversize), 64, io.Discard)
+			kv := []string{"content-type", "application/x-www-form-urlencoded"}
+			switch tt.length {
+			case "":
+				kv = append(kv, "content-length", strconv.Itoa(len(tt.body)))
+			case "-":
+			default:
+				kv = append(kv, "content-length", tt.length)
+			}
+			resps := e.exchange(t, withMode(headers("POST", "/login", false, kv...), tt.bodyMod), body(tt.body, tt.eos))
 			if len(resps) != 2 {
 				t.Fatalf("answers %v: the verdict must wait for the body", resps)
 			}
@@ -475,7 +505,13 @@ func TestObservabilityMode(t *testing.T) {
 		// The attack is split across chunks.
 		{"body attack", []*extprocv3.ProcessingRequest{
 			streamed(headers("POST", "/login", false, form...)), body("user=admin'%20OR", false), body("%201=1--", true)}, "rule"},
+		// Trailers follow: Envoy sends no last chunk, and no trailers
+		// message unless asked for them.
 		{"body attack, trailers", []*extprocv3.ProcessingRequest{
+			streamed(headers("POST", "/login", false, form...)), body("user=admin'%20OR", false), body("%201=1--", false)}, "rule"},
+		{"benign body, trailers", []*extprocv3.ProcessingRequest{
+			streamed(headers("POST", "/login", false, form...)), body("user=alice&", false), body("password=x", false)}, ""},
+		{"body attack, trailers message", []*extprocv3.ProcessingRequest{
 			streamed(headers("POST", "/login", false, form...)), body("user=admin'%20OR", false), body("%201=1--", false), trailers}, "rule"},
 		// Envoy may not say STREAMED: in observability mode the body comes
 		// in chunks anyway.
@@ -483,7 +519,7 @@ func TestObservabilityMode(t *testing.T) {
 			headers("POST", "/login", false, form...), body("user=admin'%20OR", false), body("%201=1--", true)}, "rule"},
 		// The stream ends before the body does: decided on what came.
 		{"cut short", []*extprocv3.ProcessingRequest{
-			streamed(headers("POST", "/login", false, form...)), body("user=alice", false)}, "oversize"},
+			streamed(headers("POST", "/login", false, append(form, "content-length", "40")...)), body("user=alice", false)}, "oversize"},
 		// Over the limit (64 bytes): the rest goes uninspected.
 		{"oversized body", []*extprocv3.ProcessingRequest{
 			streamed(headers("POST", "/login", false, form...)), body(strings.Repeat("a=b&", 10), false), body(strings.Repeat("a=b&", 10), false),
