@@ -161,7 +161,7 @@ Validation runs in three steps, cheapest first:
 |---|---|---|
 | `Accepted` | Spec valid, references resolve | `InvalidRef`, `Conflict`, `RuleCompileError`, `TargetUnsupported` |
 | `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `IntegrationDisabled`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `Pending`, `NoTargets`, `InjectionDisabled`, `Unwired` |
-| `Enforced` | Every serving engine ACKed a bundle with this generation | `EnginesBehind`, `EngineNack` (`1/6`), `EnginesUnreported`, `NoEngines`, `NotInBundle` |
+| `Enforced` | Every serving engine ACKed a bundle with this generation | `EnginesBehind`, `EngineNack` (first error), `EnginesUnreported`, `NoEngines`, `NotInBundle` |
 | `Ready` | The three above are True | first failing condition's reason |
 
 Status also has `bundleVersion` and `observedGeneration`. `bundleVersion` is the first bundle that
@@ -572,6 +572,9 @@ It runs again when a targeted route changes (routes are indexed by target).
 - The hash skips the version and creation time. The version continues from the Secret, or from the
   leader's memory if the Secret was deleted. The cluster ID is the [UID](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids) of the `kube-system`
   Namespace.
+- The leader keeps the bundle it last read or stored, with its compressed form (#213). Each build
+  still reads the Secret and its chunks, uncached, but decodes them only if they hold another
+  bundle: one another leader stored, or an edited chunk.
 - **Engine cold start:** the engine uses its on-disk cache, or else reads the Secret
   (`--bundle-secret`). It reads it with a second projected token for the API server and
   `kube-root-ca.crt`, and verifies it like a streamed bundle.
@@ -685,14 +688,15 @@ conditions of [§3.2](#32-status-contract). It writes only on change, at most on
 **Built (v0.1.0):** `Enforced=True` when every connected engine runs a bundle whose version is at
 least the policy's `status.bundleVersion` (`every engine runs bundle 42 or later`). Otherwise the
 reason is `NoEngines`, `EnginesBehind` (`some engines don't run bundle 42 yet`), `EngineNack`
-(`1/3 engines rejected bundle 42`, with the first error), `EnginesUnreported` (a replica's report
+(`some engines rejected bundle 42 (first: traefik/traefik-1: …)`), `EnginesUnreported` (a replica's report
 left engines out, [§4.7](#47-distribution-server-all-replicas)) or `NotInBundle`. It waits for the
 bundle builder to report the policy's current generation (`status.observedGeneration`).
 
 **Writes on change** (#197). The Reporter writes a policy's status only when its `Enforced` or
-`Ready` condition changes. Only the `EngineNack` message counts engines, so engines connecting or
-going away (a proxy rollout) don't rewrite every policy; `inkwall_operator_engines{state}` has the
-counts. It reads the policies from the cache without copying them, copies only those it writes,
+`Ready` condition changes. No message counts engines, so engines connecting or going away (a proxy
+rollout) don't rewrite every policy, even while one rejects the bundle (#213);
+`inkwall_operator_engines{state}` has the counts. `EngineNack` names the first rejecting engine by
+ID, with its error. It reads the policies from the cache without copying them, copies only those it writes,
 and writes up to 8 at once, like the bundle builder.
 
 **Writes per bundle** (#149). The builder writes a policy's `bundleVersion` only when the bundle
@@ -1075,8 +1079,39 @@ Against the targets:
 | After (#197) | 7 | 413 / 429 / 472 MiB | 0 |
 
   Change → all engines p95 was 4.0–8.3 s after. Listing the policies without copying in the bundle
-  reconciler and the Pod webhook reconciler too lowered the peak heap by about 4%, but not the
-  peak RSS measurably, so it isn't done.
+  reconciler too lowered the peak heap by about 4%, but not the peak RSS measurably, so it isn't
+  done.
+- **Allocations and `GOMEMLIMIT`** (#213). Profiling the runs above (#197) found allocations that don't
+  stay live but raise the heap goal:
+  - The Pod webhook reconciler copied every policy out of the cache at each generation change
+    (1.5–2.3 GB per run). It only reads them: it lists them without copying.
+  - The bundle builder decoded the current bundle from its Secret at every build (about 13 MiB
+    live at the peak), and `bundle.Next` and the content hash cloned the new one (about 9 MiB).
+    The builder now keeps the bundle it last read or stored, with its compressed form, and decodes
+    the Secret only when it holds another bundle ([§4.6](#46-bundle-builder-leader-only)); the new
+    bundle isn't copied. The live heap at rest grows by the bundle kept (about 10 MiB here).
+  - The wiring controller built its error with nested `errors.Join`, O(n²) to print: about
+    0.5 GB at the initial sync, from finalizer conflicts. The errors are now collected flat.
+  - The `EngineNack` message no longer counts engines ([§4.8](#48-status-aggregator)), so a
+    persistent Nack doesn't rewrite the policies whenever an engine comes or goes.
+  - `GOMEMLIMIT`: the chart passes the container's memory limit (`MEMORY_LIMIT`, from the
+    [downward API](https://kubernetes.io/docs/concepts/workloads/pods/downward-api/)), and the
+    operator sets the Go runtime's soft memory limit to 90% of it, unless `GOMEMLIMIT` is set. The
+    GC then runs more often near the limit, instead of letting the heap goal reach twice the live
+    heap. The scale test sets the same limit for the chart's default 512 MiB (`GOMEMLIMIT=off`
+    disables it).
+  - Same machine and harness, 5 runs each, interleaved, edits phase (the peak):
+
+| 5,000 × 500 | Peak RSS min / median / max | Peak heap median | Live heap | Change → all engines p95 |
+|---|---|---|---|---|
+| Before (#191) | 413 / 472 / 484 MiB | 298 MiB | 103 MiB | 3.8–6.3 s, one run 63 s |
+| After, `GOMEMLIMIT=off` | 404 / 411 / 420 MiB | 298 MiB | 113 MiB | 3.8–4.6 s |
+| After (461 MiB limit) | 396 / 409 / 421 MiB | 299 MiB | 113 MiB | 3.9–4.6 s |
+
+  The allocations removed narrow the peak RSS (a range of 16–25 MiB instead of 71 MiB): the heap
+  goal is reached less often. The limit changes little in these runs, which stay under it; it
+  matters when a run would pass it, as one in six did before #197. The 63 s edit before is an
+  outlier of a loaded machine (an earlier edit of that run took 11.7 s too).
 
 **Engine memory per policy.** A compiled Coraza WAF with the CRS keeps
 about 2.1 MiB of heap, and takes 10–15 ms to compile.

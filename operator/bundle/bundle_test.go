@@ -56,8 +56,10 @@ func TestNext(t *testing.T) {
 		t.Fatalf("unchanged content produced a new bundle: %v", same)
 	}
 
-	b2, changed, _ := Next(b1, content("shop/a", "shop/b"), 1, now, false)
-	if !changed || b2.GetVersion() != 2 {
+	// The new bundle is the content given, not a copy.
+	c2 := content("shop/a", "shop/b")
+	b2, changed, _ := Next(b1, c2, 1, now, false)
+	if !changed || b2.GetVersion() != 2 || b2 != c2 {
 		t.Fatalf("changed content: version %d changed=%v", b2.GetVersion(), changed)
 	}
 
@@ -341,6 +343,66 @@ func TestLoadMissingChunk(t *testing.T) {
 	}
 	if _, _, err := Load(ctx, e.c, "inkwall-system"); !errors.Is(err, bundlesecret.ErrIncomplete) {
 		t.Fatalf("edited chunk: %v, want ErrIncomplete", err)
+	}
+}
+
+// Current decodes the bundle Secret only when it holds another bundle than
+// the one it keeps (#213): one stored by someone else, or a chunk edited.
+func TestCurrent(t *testing.T) {
+	ctx := context.Background()
+	c := newClient(t)
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	signer := NewSigner(priv)
+	sign := func(b *bundlev1.Bundle) *bundlev1.SignedBundle {
+		t.Helper()
+		signed, err := signer.Sign(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return signed
+	}
+	var cur Current
+	for _, b := range []*bundlev1.Bundle{
+		content("shop/a"),
+		large(bundlesecret.ChunkBytes+(50<<10), "shop/b"),
+	} {
+		b, _, _ = Next(nil, b, 0, time.Now(), false)
+		if _, err := cur.Store(ctx, c, c, "inkwall-system", b, sign(b), signer.Public()); err != nil {
+			t.Fatal(err)
+		}
+		for range 2 {
+			got, keyID, err := cur.Load(ctx, c, "inkwall-system")
+			if err != nil || got != b || keyID != signer.KeyID() {
+				t.Fatalf("version %d: loaded %p (%v), want the stored %p", b.GetVersion(), got, err, b)
+			}
+		}
+	}
+
+	// Stored by another leader: decoded.
+	other, _, _ := Next(nil, large(bundlesecret.ChunkBytes+(50<<10), "shop/c"), 5, time.Now(), false)
+	if _, err := Store(ctx, c, c, "inkwall-system", other, sign(other), signer.Public()); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := cur.Load(ctx, c, "inkwall-system")
+	if err != nil || got == other || !proto.Equal(got, other) {
+		t.Fatalf("stored elsewhere: %v, want version 6 decoded", err)
+	}
+	if again, _, _ := cur.Load(ctx, c, "inkwall-system"); again != got {
+		t.Fatal("decoded again")
+	}
+
+	// A chunk edited: not the bundle kept.
+	var s corev1.Secret
+	_ = c.Get(ctx, client.ObjectKey{Namespace: "inkwall-system", Name: BundleSecret}, &s)
+	m, _ := bundlesecret.ParseManifest(BundleSecret, s.Data[ManifestKey])
+	var chunk corev1.Secret
+	_ = c.Get(ctx, client.ObjectKey{Namespace: "inkwall-system", Name: m.Chunks[1]}, &chunk)
+	chunk.Data[bundlesecret.ChunkKey][0] ^= 1
+	if err := c.Update(ctx, &chunk); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := cur.Load(ctx, c, "inkwall-system"); !errors.Is(err, bundlesecret.ErrIncomplete) || got.GetVersion() != 6 {
+		t.Fatalf("edited chunk: %v, %v; want ErrIncomplete and version 6", got, err)
 	}
 }
 

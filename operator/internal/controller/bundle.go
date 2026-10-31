@@ -111,6 +111,9 @@ type BundleReconciler struct {
 	// installed; nil: they are only read at each build.
 	HTTPRoutes *crdwatch.Kind
 
+	// current is the bundle last read or stored, so a build decodes the
+	// bundle Secret only when someone else changed it.
+	current bundle.Current
 	// keys is the keyring last read or written, to recreate the signing
 	// key Secret if it is deleted: engines trust these keys.
 	keys        *bundle.Keyring
@@ -244,7 +247,7 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	}
 	suspended := cfg != nil && cfg.Spec.Suspend
 
-	current, currentKey, err := bundle.Load(ctx, r.APIReader, r.Namespace)
+	current, currentKey, err := r.current.Load(ctx, r.APIReader, r.Namespace)
 	if errors.Is(err, bundlesecret.ErrIncomplete) {
 		// A chunk deleted or edited: write the bundle again, continuing
 		// the version sequence.
@@ -283,7 +286,7 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 		if err != nil {
 			return reconcile.Result{}, err
 		}
-		size, err := bundle.Store(ctx, r.Client, r.APIReader, r.Namespace, next, signed, signer.Public())
+		size, err := r.current.Store(ctx, r.Client, r.APIReader, r.Namespace, next, signed, signer.Public())
 		if err != nil {
 			if errors.Is(err, bundle.ErrTooLarge) {
 				// Retrying won't help until the policy shrinks; keep the

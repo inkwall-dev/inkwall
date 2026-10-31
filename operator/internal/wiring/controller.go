@@ -157,7 +157,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	// being deleted isn't wired. One that couldn't be held yet (say, the
 	// webhook isn't answering yet) is wired anyway, and retried: unwiring
 	// it would drop its protection.
-	var errs error
+	// The errors are collected flat: a nested errors.Join costs O(n²) to
+	// print, and the initial sync of thousands of policies can fail many.
+	var errs []error
 	targets := map[Target]bool{}
 	for i := range policies.Items {
 		p := &policies.Items[i]
@@ -168,7 +170,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		case apierrors.IsNotFound(err):
 			continue
 		case err != nil:
-			errs = errors.Join(errs, fmt.Errorf("add the finalizer to WAFPolicy %s/%s: %w", p.Namespace, p.Name, err))
+			errs = append(errs, fmt.Errorf("add the finalizer to WAFPolicy %s/%s: %w", p.Namespace, p.Name, err))
 		}
 		// A policy that isn't accepted yet is wired too: until its rules
 		// are in a bundle, the engine lets its routes through (no-policy).
@@ -188,15 +190,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		}
 		res, err := in.Wire(ctx, mine, r.Disabled)
 		if res == nil {
-			return reconcile.Result{}, errors.Join(errs, err)
+			return reconcile.Result{}, errors.Join(append(errs, err)...)
 		}
-		errs = errors.Join(errs, err)
+		if err != nil {
+			errs = append(errs, err)
+		}
 		record(in.Name(), res)
 		rep.kinds = append(rep.kinds, kinds...)
 		rep.results = append(rep.results, res)
 	}
 	if err := r.report(ctx, policies.Items, rep); err != nil {
-		errs = errors.Join(errs, err)
+		errs = append(errs, err)
 	}
 
 	// Release the policies being deleted once none of their targets is
@@ -209,16 +213,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 				continue
 			}
 			if err := r.unwiredFor(ctx, p, rep); err != nil {
-				errs = errors.Join(errs, fmt.Errorf("WAFPolicy %s/%s deleted: %w", p.Namespace, p.Name, err))
+				errs = append(errs, fmt.Errorf("WAFPolicy %s/%s deleted: %w", p.Namespace, p.Name, err))
 				continue
 			}
 		}
 		if err := setFinalizer(ctx, r.Client, p, false); client.IgnoreNotFound(err) != nil {
-			errs = errors.Join(errs, fmt.Errorf("remove the finalizer from WAFPolicy %s/%s: %w", p.Namespace, p.Name, err))
+			errs = append(errs, fmt.Errorf("remove the finalizer from WAFPolicy %s/%s: %w", p.Namespace, p.Name, err))
 		}
 	}
-	if errs != nil {
-		return reconcile.Result{}, errs
+	if len(errs) > 0 {
+		return reconcile.Result{}, errors.Join(errs...)
 	}
 	return reconcile.Result{RequeueAfter: resync}, nil
 }

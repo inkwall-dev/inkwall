@@ -89,8 +89,10 @@ func ObjectSelector(pods *metav1.LabelSelector) *metav1.LabelSelector {
 
 // Reconcile sets the objectSelector and failurePolicy.
 func (r *PodWebhookReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
+	// The cache's policies, not copies: they are only read. Each
+	// generation change lists them all.
 	var policies wafv1alpha1.WAFPolicyList
-	if err := r.Client.List(ctx, &policies); err != nil {
+	if err := r.Client.List(ctx, &policies, client.UnsafeDisableDeepCopy); err != nil {
 		return reconcile.Result{}, err
 	}
 	want := WantFailurePolicy(policies.Items)
