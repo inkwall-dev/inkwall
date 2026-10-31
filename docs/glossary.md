@@ -40,9 +40,11 @@ first time they mention it.
   rotation.
 - <a id="inkwallctl"></a>**inkwallctl**: Inkwall's command-line tool: `inkwallctl test` checks
   rules, policies and bundles offline ([testing policies](testing-policies.md)); `inkwallctl bench`
-  benchmarks the engine.
+  benchmarks the engine; `inkwallctl migrate ingress-nginx` converts ingress-nginx's ModSecurity
+  settings into policies ([migrating from ingress-nginx](migrating-from-ingress-nginx.md)).
 - <a id="integration"></a>**Integration**: The operator's support for one proxy: finding its pods,
-  injection and wiring.
+  injection and wiring. Discovery reports each proxy controller in the cluster as `Full`,
+  `Partial` or `Unsupported` in `InkwallConfig.status.proxies`.
 - <a id="leader"></a>**Leader**: The operator replica that holds the [leader-election
   lease](#leader-election). It builds bundles, wires routes and talks to the control plane.
 - <a id="operator"></a>**Operator**: `inkwall-operator`: reconciles the CRDs, injects engines, wires

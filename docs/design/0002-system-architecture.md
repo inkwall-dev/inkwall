@@ -143,7 +143,7 @@ The compiled policy sits in an [`atomic.Pointer[Snapshot]`](https://pkg.go.dev/s
 | `pkg/clientip` | Client IP ([§8.2](#82-client-ip-correctness)) | built |
 | `pkg/agent`, `pkg/policy` | Bundle stream, verify, compile, swap ([§5.2](#52-engine--operator-bundle-distribution)) | built |
 | `pkg/telemetry` | Metrics, tracing, [`slog`](https://pkg.go.dev/log/slog) | built |
-| `pkg/adapters/*` | One per listener | `forwardauth`, `httpcheck`, `proxy` built; `extauthz`, `extproc`, `spoe` not yet |
+| `pkg/adapters/*` | One per listener | `forwardauth`, `httpcheck`, `proxy`, `extproc` built; `extauthz`, `spoe` not yet |
 | `pkg/events` | Redacted security events, bounded buffer ([§5.4](#54-event-schema)) | built |
 | `pkg/ratelimit`, `pkg/iplist` | [Token buckets](https://en.wikipedia.org/wiki/Token_bucket), [CIDR](https://www.rfc-editor.org/rfc/rfc4632) trie | not yet |
 
@@ -206,13 +206,16 @@ plane itself is not in this repository.
 
 ### 3.5 `inkwallctl` (CLI)
 
-Two commands are built:
+Three commands are built:
 
 - `test` replays a request or a [HAR](https://w3c.github.io/web-performance/specs/HAR/Overview.html) file and shows the rules that match. It runs offline, for CI.
   It checks one of three things: the policy set by its flags; `WAFPolicy` objects (`--policy`,
   resolved with the operator's resolver and compiled as the engine compiles a bundle); or a bundle
   (`--bundle`, with its signature checked against `--bundle-key`).
 - `bench` benchmarks the engine on a fixed corpus.
+- `migrate ingress-nginx` converts ingress-nginx's ModSecurity annotations and ConfigMap settings
+  into `WAFPolicy` and `WAFRuleSet` objects targeting the Ingresses, and lists what it can't
+  convert ([migrating from ingress-nginx](../migrating-from-ingress-nginx.md)). It only reads.
 
 Planned: `status` (engine versions, drift).
 
@@ -262,8 +265,9 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
   engine).
 
 **Built:** `InkwallConfig`, `WAFPolicy`, `WAFRuleSet` and `ClusterWAFRuleSet`; `Ingress` and
-Traefik `IngressRoute` targets.
-**Not yet:** IP lists, the policy fields `rateLimits` and `ipLists`, `HTTPRoute` targets,
+Traefik `IngressRoute` targets; `HTTPRoute` targets resolved, with the precedence above (no proxy
+wires them yet, [0004 §4.5](0004-operator.md#45-resolver)).
+**Not yet:** IP lists, the policy fields `rateLimits` and `ipLists`, wiring `HTTPRoute` targets,
 `BlockHighConfidence`, the `InspectPrefix` oversize action, and `InkwallConfig.events`.
 
 ### 4.3 Bundle format
@@ -324,7 +328,13 @@ ACK or a NACK.
   covers is not inspected. A request for a covered host that matches no path gets that host's most
   general policy, so normalization differences can't skip inspection.
 - Engines send their security events on the same stream, in `EventBatch`es of up to 1,000
-  (`pkg/events`, [§5.4](#54-event-schema)).
+  (`pkg/events`, [§5.4](#54-event-schema)). The operator drops and counts the events beyond that.
+- With each heartbeat, engines also send how many requests each policy allowed, denied and
+  detected, with a latency histogram (`RequestStats`, [§5.4](#54-event-schema)). Only the policies
+  whose counts changed are sent, in messages of at most 32 KiB. The counts are cumulative over the
+  stream, and a new stream starts from zero. The operator adds up the differences between reports,
+  for the policies of its bundle only, so an engine that restarts or moves to another replica is
+  never counted twice.
 
 **Not yet:** directives (the field is reserved).
 
@@ -339,8 +349,8 @@ There are two kinds of stream:
 
 - One **primary stream** per cluster, from the leader. It carries state, policies, directives and
   certificates. When the leader moves, the newer primary stream wins.
-- One **events stream** per replica, for the engines connected to that replica. Engines connect to
-  any replica.
+- One **events stream** per replica, for the security events and request counts of the engines
+  connected to that replica. Engines connect to any replica.
 
 [gRPC status codes](https://grpc.io/docs/guides/status-codes/) tell the operator what to do: re-enroll (`UNAUTHENTICATED`), stop
 (`PERMISSION_DENIED`), back off (`RESOURCE_EXHAUSTED`), or reconnect.
@@ -349,11 +359,11 @@ Messages on `Connect`:
 
 - Up (operator to control plane): `Hello` (versions, mode, last policy version, capabilities);
   `ClusterState` (a full snapshot of every Inkwall object with its conditions, the integrations,
-  the engines and the bundle version); `EventBatch` ([§5.4](#54-event-schema)); `Heartbeat`;
-  `PolicyAck` / `PolicyNack`; `RenewCertificate`.
-- Down (control plane to operator): `Welcome` (the heartbeat interval, and whether events are
-  accepted); `PolicySnapshot` (Managed mode); the renewed `Certificate`; `Directive` (for example,
-  resync).
+  the engines and the bundle version); `EventBatch` ([§5.4](#54-event-schema)); `RequestStatsUpload`
+  (request counts per policy); `Heartbeat`; `PolicyAck` / `PolicyNack`; `RenewCertificate`.
+- Down (control plane to operator): `Welcome` (the heartbeat interval, and whether events and
+  request counts are accepted); `PolicySnapshot` (Managed mode); the renewed `Certificate`;
+  `Directive` (for example, resync).
 
 Rules of the contract:
 
@@ -370,6 +380,11 @@ Rules of the contract:
   sequence number. `EventsAck` frees that buffer up to that number. Unacknowledged batches are
   resent after a reconnect, and event IDs (never sequence numbers) remove duplicates. The bounded
   disk queue drops the oldest events when full, and the next batch says how many.
+- Request counts go only to a control plane whose `Welcome` accepts them; an older one never gets
+  them. Each replica sums its engines' counts per policy and sends them every 10 s: the policies
+  that changed, and all of them first on a new stream. They are cumulative since the replica
+  started counting (`since`), so a lost upload loses nothing, and the cluster's counts are the sum
+  over its replicas. They are per policy, never per route or client.
 - A policy snapshot is all or nothing: the operator first does a [server-side dry run](https://kubernetes.io/docs/reference/using-api/api-concepts/#dry-run) of every
   object. The cluster's `InkwallConfig` decides the mode, and a cluster not in Managed mode
   refuses policy snapshots. Only `WAFPolicy` and the rule set kinds are accepted.
@@ -381,7 +396,7 @@ Rules of the contract:
 - In Standalone mode, events go to logs and optionally to [OTLP](https://opentelemetry.io/docs/specs/otlp/). Not yet: only the engine's log.
 
 **Built:** the contract (#86), enrollment and the primary stream, state sync (`ClusterState`), the
-events streams with each replica's disk buffer, and Managed mode (policy snapshots written as
+events streams with each replica's disk buffer, request counts per policy (#119), and Managed mode (policy snapshots written as
 CRDs, pruned and acknowledged; the webhook guard). All of it is tested on [kind](https://kind.sigs.k8s.io/) against a stub
 control plane ([0004 §4.9](0004-operator.md#49-upstream-sync-leader-only)).
 
@@ -395,8 +410,14 @@ latency.
 The same message goes from engine to operator (`agent.v1` `Watch`) and from operator to control
 plane. Both carry it in an `EventBatch`, with a count of dropped events.
 
+`RequestStats` ([`api/events/v1`](../../api/events/v1/stats.proto)) counts requests per policy:
+allowed, denied and detected, and a latency histogram (time spent inspecting, in the buckets of
+`inkwall_check_duration_seconds`: 50 µs to about 0.8 s, doubling). Requests no policy covers aren't
+counted. There are no per-route or per-client counts.
+
 **Built:** the schema. Engines produce redacted events and send them to their operator replica,
-which forwards them to the control plane on its events stream (#91, #92).
+which forwards them to the control plane on its events stream (#91, #92). Request counts take the
+same path (#119).
 
 ---
 
@@ -421,7 +442,9 @@ is configured its own way:
 Detect mode uses `observability_mode`. Envoy's [Go filter](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/golang_filter) needs a contrib build, so it is
 experimental.
 
-**Not yet** built.
+**Built:** the engine's side, `inkwall-engine ext-proc` ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing)).
+Envoy Gateway will use `ext_proc`, not `ext_authz`. **Not yet:** the operator's Envoy Gateway
+configuration.
 
 ### 6.2 ingress-nginx
 
@@ -529,7 +552,8 @@ adapter must match.
 | Caddy | module | ✅ | ✅ | ✅ | ✅ | in-process |
 | Any | reverse proxy | ✅ | ✅ | ✅ | ✅ | TCP |
 
-Built: Traefik ForwardAuth and the reverse proxy.
+Built: Traefik ForwardAuth and the reverse proxy; the engine's ext_proc listener, without the
+operator's Envoy configuration yet.
 
 ---
 

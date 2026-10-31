@@ -98,6 +98,8 @@ Start in `Detect` mode, tune [false positives](https://coreruleset.org/docs/conc
 `ClusterWAFRuleSet` objects: built-in, [SecLang](https://coraza.io/docs/seclang/) or a [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/).
 [`operator/config/samples`](operator/config/samples) has one object of each kind. To test
 policies before they reach the cluster, see [testing policies offline](docs/testing-policies.md).
+Coming from ingress-nginx with ModSecurity? `inkwallctl migrate ingress-nginx` converts its
+annotations into policies: see [migrating from ingress-nginx](docs/migrating-from-ingress-nginx.md).
 
 To stop protecting the route, delete the policy or remove the route from its `targetRefs`: the
 operator removes its Middleware from the route, and Traefik serves it uninspected.
@@ -128,7 +130,8 @@ modes, and [testing policies offline](docs/testing-policies.md) for `inkwallctl 
 - Proxies: **Traefik** only, plus the standalone proxy. [Envoy](https://www.envoyproxy.io/docs/envoy/latest/), [HAProxy](https://docs.haproxy.org/), [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) and [Caddy](https://caddyserver.com/docs/)
   are designed, not built.
 - Targets: **`Ingress`** and Traefik **`IngressRoute`** (match rules that join `Host`, `Path` and
-  `PathPrefix` with `&&`); not [Gateway API](https://gateway-api.sigs.k8s.io/) [`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) yet.
+  `PathPrefix` with `&&`). [Gateway API](https://gateway-api.sigs.k8s.io/) [`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) targets are resolved into the
+  bundle, but no proxy is wired for them yet.
 - One cluster per operator. The operator can connect to an optional control plane, which isn't in
   this repository: in `GitOps` mode it sends it a read-only copy of your policies, in `Managed`
   mode it writes the policies the control plane sends, and in both it forwards the engines'

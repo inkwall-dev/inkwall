@@ -1,0 +1,34 @@
+# Three policies of the shop: the storefront's targets an Ingress, the
+# API's and the admin's Traefik IngressRoutes.
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: storefront
+  namespace: shop
+spec:
+  targetRefs:
+  - kind: Ingress
+    name: storefront
+  mode: Block
+---
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: api
+  namespace: shop
+spec:
+  targetRefs:
+  - kind: IngressRoute
+    name: api
+  mode: Detect
+---
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: admin
+  namespace: shop
+spec:
+  targetRefs:
+  - kind: IngressRoute
+    name: admin
+  mode: Block

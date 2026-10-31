@@ -302,8 +302,11 @@ spec:
               the proxy, enforced by every engine (0004 §3.2).
             properties:
               bundleVersion:
-                description: BundleVersion is the newest bundle that contains this
-                  generation.
+                description: |-
+                  BundleVersion is the first bundle that enforces this generation as it
+                  is now: later bundles do too, until one changes the policy (its
+                  spec, routes or rule sets) or suspends the cluster. Bundles that
+                  change only other policies leave it.
                 format: int64
                 type: integer
               conditions:

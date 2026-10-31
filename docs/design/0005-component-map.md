@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-09-27
-- Updated: 2026-10-30
+- Updated: 2026-10-31
 - Owner: noureldin
 - Depends on: [0002 — System Architecture](0002-system-architecture.md),
   [0004 — Kubernetes Operator](0004-operator.md)
@@ -65,7 +65,7 @@ which only adds management, analytics and threat intelligence.
 | Component | Runs in | Code | Status |
 |---|---|---|---|
 | **inkwall-engine** | Sidecar in ingress controller pods, or standalone | `cmd/engine`, `pkg/` | Built |
-| **Engine adapters** | Engine process | `pkg/adapters/*` | Built: `forwardauth`, `httpcheck` (`/v1/check`), `proxy`. Not yet: [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter), [ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter), [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) |
+| **Engine adapters** | Engine process | `pkg/adapters/*` | Built: `forwardauth`, `httpcheck` (`/v1/check`), `proxy`, `extproc` ([ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter)). Not yet: [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter), [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) |
 | **Proxy-side glue** | Proxy configuration | `operator/integrations`, `operator/internal/wiring` | Built: Traefik [Middleware](https://doc.traefik.io/traefik/middlewares/overview/). Not yet: nginx [Lua](https://github.com/openresty/lua-nginx-module), SPOE, Envoy configuration |
 | **Caddy module** | Compiled into Caddy | `adapters/caddy` (own [`go.mod`](https://go.dev/ref/mod#go-mod-file)) | Not yet |
 | **Traefik plugin** (thin client) | Traefik ([Yaegi](https://github.com/traefik/yaegi)) | `adapters/traefik-plugin` (own `go.mod`) | Not yet |
@@ -74,7 +74,7 @@ which only adds management, analytics and threat intelligence.
 | **[CRDs](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)** | kube-apiserver | `operator/api/v1alpha1`, `operator/config/crd` | Built: WAFPolicy, WAFRuleSet, ClusterWAFRuleSet, InkwallConfig |
 | **[Helm](https://helm.sh/docs/) chart** | User install | `deploy/helm/inkwall` | Built |
 | **OLM bundle** ([Operator Lifecycle Manager](https://olm.operatorframework.io/) package) | [OperatorHub](https://operatorhub.io/) | [operator-sdk](https://sdk.operatorframework.io/) | Not yet |
-| **inkwallctl** | Developer machine, CI | `cmd/inkwallctl` | Built: `test` (flags, `--policy`, `--bundle`), `bench`. Not yet: `migrate` |
+| **inkwallctl** | Developer machine, CI | `cmd/inkwallctl` | Built: `test` (flags, `--policy`, `--bundle`), `bench`, `migrate ingress-nginx` |
 | **[Protobuf](https://protobuf.dev/) APIs** (engine, agent, bundle, events, controlplane) | Engine, operator, control plane | `api/` | Built |
 | **Control plane** | Hosted by Inkwall | Separate product | Not in this repository; the operator's side is built (`operator/internal/controlplane`) |
 
@@ -93,11 +93,12 @@ which only adds management, analytics and threat intelligence.
 - `pkg/events`: redacted security events in a bounded [ring buffer](https://en.wikipedia.org/wiki/Circular_buffer), sent to the operator in batches
   on the agent stream;
 - `pkg/bundlekey`: the trusted signing keys;
-- `pkg/bundlesecret`: the bundle Secret's format, chunks included.
+- `pkg/bundlesecret`: the bundle Secret's format, chunks included;
+- `pkg/adapters/extproc`: Envoy's external processing over [gRPC](https://grpc.io/docs/) ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing)).
 
 **Not yet:**
 
-- The adapters `extauthz` ([gRPC](https://grpc.io/docs/)), `extproc` (gRPC stream) and `spoe` (SPOP).
+- The adapters `extauthz` (gRPC) and `spoe` (SPOP).
 - Tier T1, IP lists and rate limits (`pkg/iplist`, `pkg/ratelimit`), between the route table and
   the rules ([0001 §4](0001-performance-first-architecture.md#4-request-pipeline-tiered-cheapest-first)).
 - Traces in telemetry.
@@ -107,9 +108,9 @@ which only adds management, analytics and threat intelligence.
 
 | Part | Does | Code | Status |
 |---|---|---|---|
-| Discovery and integration registry | Find the ingress controller's pods (by design, also from [IngressClass](https://kubernetes.io/docs/concepts/services-networking/ingress/#ingress-class) and [GatewayClass](https://gateway-api.sigs.k8s.io/reference/api-types/gatewayclass/)) | `operator/integrations` | Built: Traefik, by [label selectors](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors). Not yet: envoygateway, istio, ingressnginx, haproxy, caddy |
+| Discovery and integration registry | Find the ingress controller's pods; list the proxy controllers of the [IngressClasses](https://kubernetes.io/docs/concepts/services-networking/ingress/#ingress-class) and [GatewayClasses](https://gateway-api.sigs.k8s.io/reference/api-types/gatewayclass/) in `InkwallConfig.status.proxies` | `operator/integrations`, `operator/internal/discovery` | Built: Traefik, its pods by [label selectors](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors); discovery. Not yet: envoygateway, istio, ingressnginx, haproxy, caddy |
 | Injection | Add the engine as a [native sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/) through the Pod webhook | `operator/internal/injection` | Built |
-| Wiring | Render proxy configuration; [merge-patch](https://www.rfc-editor.org/rfc/rfc7386) user-owned routes | `operator/internal/wiring` | Built (Traefik) |
+| Wiring | Render proxy configuration; [merge-patch](https://www.rfc-editor.org/rfc/rfc7386) user-owned routes; one `Integration` per proxy | `operator/internal/wiring` | Built (Traefik) |
 | Resolver | Turn policy targets into host, path and method | `operator/resolver` | Built |
 | Bundle builder | Leader only: debounce changes (1 s), build, sign, version, write the Secret | `operator/bundle`, `operator/internal/controller` | Built |
 | Distribution server | Every replica, over gRPC; ACK, NACK, heartbeat | `operator/internal/distribution` | Built |

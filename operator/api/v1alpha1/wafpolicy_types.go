@@ -237,7 +237,10 @@ type WAFPolicyStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// BundleVersion is the newest bundle that contains this generation.
+	// BundleVersion is the first bundle that enforces this generation as it
+	// is now: later bundles do too, until one changes the policy (its
+	// spec, routes or rule sets) or suspends the cluster. Bundles that
+	// change only other policies leave it.
 	// +optional
 	BundleVersion int64 `json:"bundleVersion,omitempty"`
 

@@ -6,6 +6,7 @@ package policy
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"runtime"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 )
@@ -374,5 +376,50 @@ func BenchmarkCompile(b *testing.B) {
 			}
 			b.ReportMetric(float64(heap), "live-B")
 		})
+	}
+}
+
+// Each policy counts the requests it decides, across bundles; requests no
+// policy covers aren't counted, and a policy the new bundle drops is
+// reported once more, then forgotten.
+func TestStats(t *testing.T) {
+	stats := events.NewStats()
+	set, err := Compile(testBundle(), Options{Stats: stats})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	set.Check(ctx, req("shop.example.com", "/"+sqli))
+	set.Check(ctx, req("shop.example.com", "/products/42"))
+	set.Check(ctx, req("shop.example.com", "/api/orders?q=attack"))
+	set.Check(ctx, req("other.example.com", "/"))
+
+	got := map[string][3]uint64{}
+	for _, p := range stats.Take() {
+		got[p.GetPolicy()] = [3]uint64{p.GetAllowed(), p.GetDenied(), p.GetDetected()}
+	}
+	want := map[string][3]uint64{"shop/site": {1, 1, 0}, "shop/api": {0, 0, 1}}
+	if !maps.Equal(got, want) {
+		t.Fatalf("counts %v, want %v", got, want)
+	}
+
+	// A new bundle without shop/api: the old set's requests still count
+	// once, then shop/api is gone; shop/site keeps its counter.
+	b := testBundle()
+	b.Policies = b.Policies[:1]
+	next, err := Compile(b, Options{Stats: stats})
+	if err != nil {
+		t.Fatal(err)
+	}
+	set.Check(ctx, req("shop.example.com", "/api/orders?q=attack"))
+	next.Check(ctx, req("shop.example.com", "/products/1"))
+	if p := stats.Take(); len(p) != 2 || p[0].GetPolicy() != "shop/api" || p[1].GetAllowed() != 1 {
+		t.Fatalf("after the new bundle: %v", p)
+	}
+	if p := stats.Take(); len(p) != 0 {
+		t.Fatalf("nothing counted, but got %v", p)
+	}
+	if set.policies[0].counter != next.policies[0].counter {
+		t.Error("shop/site has a new counter in the new bundle")
 	}
 }
