@@ -19,8 +19,10 @@ OPERATOR_NS=inkwall-system
 NS=eg-e2e
 EG_NS=envoy-gateway-e2e
 # Envoy Gateway v1.9.3 (Gateway API v1.6), on the Gateway API's standard
-# CRDs (v1.7.0, as operator/go.mod): the experimental ones its chart
-# bundles need Kubernetes 1.31's CEL, and the kind cluster runs 1.29.
+# CRDs (v1.7.0, as operator/go.mod). Their safe-upgrades policy refuses
+# the older ones Envoy Gateway's chart bundles, so Envoy Gateway is
+# installed as its docs say for Gateway API CRDs managed separately: its
+# own CRDs from gateway-crds-helm, then the chart with --skip-crds.
 EG_VERSION=v1.9.3
 GATEWAY_API_VERSION=v1.7.0
 TRAEFIK_NS=traefik-e2e
@@ -83,39 +85,17 @@ cleanup() {
   "${KUBECTL[@]}" delete namespace "$TRAEFIK_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   # The CRDs this run installed, and only those.
   if $eg_crds_installed; then "${KUBECTL[@]}" delete -f "$eg_crds" --ignore-not-found >/dev/null 2>&1 || true; fi
-  rm -rf "$work"
   if $gateway_api_installed; then "${KUBECTL[@]}" delete -f "$work/gateway-api.yaml" --ignore-not-found >/dev/null 2>&1 || true; fi
+  rm -rf "$work"
 }
 trap cleanup EXIT
 
 echo "== Envoy Gateway $EG_VERSION"
 # The Gateway API's CRDs, unless installed already (as by another test).
-# Kubernetes before 1.31 can't compile TLSRoute's isIP rule: it is
-# dropped there, as this test sends no TLSRoute.
 if ! "${KUBECTL[@]}" get crd gateways.gateway.networking.k8s.io >/dev/null 2>&1; then
   curl -fsSL "https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml" >"$work/gateway-api.yaml"
-  if ! "${KUBECTL[@]}" apply --server-side --force-conflicts -f "$work/gateway-api.yaml" >/dev/null 2>&1; then
-    python3 -c '
-import sys, yaml
-docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
-def strip(o):
-    if isinstance(o, dict):
-        rules = o.get("x-kubernetes-validations")
-        if rules:
-            o["x-kubernetes-validations"] = [r for r in rules if "isIP(" not in r.get("rule", "")]
-            if not o["x-kubernetes-validations"]:
-                del o["x-kubernetes-validations"]
-        for v in o.values():
-            strip(v)
-    elif isinstance(o, list):
-        for v in o:
-            strip(v)
-strip(docs)
-yaml.safe_dump_all(docs, open(sys.argv[1], "w"))
-' "$work/gateway-api.yaml"
-    "${KUBECTL[@]}" apply --server-side --force-conflicts -f "$work/gateway-api.yaml" >/dev/null
-  fi
   gateway_api_installed=true
+  "${KUBECTL[@]}" apply --server-side --force-conflicts -f "$work/gateway-api.yaml" >/dev/null
 fi
 helm template eg-crds oci://docker.io/envoyproxy/gateway-crds-helm --version "$EG_VERSION" \
   --set crds.gatewayAPI.enabled=false --set crds.envoyGateway.enabled=true >"$eg_crds" 2>/dev/null
