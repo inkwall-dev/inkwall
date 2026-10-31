@@ -34,8 +34,8 @@ func TestDisabled(t *testing.T) {
 	s := scheme()
 	_ = gatewayv1.Install(s)
 	// A mapper that finds a kind's version, as the API server's does.
-	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{IngressRouteGVK.GroupVersion(), GatewayGVK.GroupVersion(), networkingv1.SchemeGroupVersion})
-	for _, gvk := range []schema.GroupVersionKind{IngressRouteGVK, GatewayGVK, HTTPRouteGVK,
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{integrations.TraefikIngressRouteGVK.GroupVersion(), GatewayGVK.GroupVersion(), networkingv1.SchemeGroupVersion})
+	for _, gvk := range []schema.GroupVersionKind{integrations.TraefikIngressRouteGVK, GatewayGVK, HTTPRouteGVK,
 		networkingv1.SchemeGroupVersion.WithKind("Ingress"), networkingv1.SchemeGroupVersion.WithKind("IngressClass")} {
 		mapper.Add(gvk, meta.RESTScopeNamespace)
 	}
