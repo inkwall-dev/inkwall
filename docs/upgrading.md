@@ -50,6 +50,13 @@ provider](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/) 
   be removed from a later API version. An `InkwallConfig` that has it keeps working. One created
   before 0.3.0 may hold its old default, `/var/run/inkwall`; it is ignored, and keeping it as it
   is draws no warning.
+- **Check how the chart grants the integrations' permissions.** With the default,
+  `rbac.integrations.*: auto`, the chart grants an integration's role only if its proxy's CRDs are
+  installed when you run `helm upgrade`. Set the value to `true` for a proxy you install after
+  Inkwall, or run `helm upgrade` again once it is installed: until then its integration is
+  disabled (`IntegrationDisabled`). If Argo CD or Flux installs the chart, set both values to
+  `true` or `false` in Git: Argo CD renders without asking the cluster, so `auto` grants every
+  role, and Flux asks only when it upgrades the release ([GitOps](gitops.md)).
 - Anything that parses the `Enforced` condition's message (alerts, scripts) needs the new text:
   see [below](#what-changes-by-itself-in-030).
 
@@ -68,14 +75,32 @@ The `ValidatingWebhookConfiguration` gets a webhook for `InkwallConfig`, with
 `failurePolicy: Ignore`: it only warns, so the `InkwallConfig` stays editable while the operator
 is down.
 
-The operator's `ClusterRole` gains reads of `gatewayclasses`, and patches of `gateways` and
-`httproutes` (`gateway.networking.k8s.io`), and writes Envoy Gateway's `envoyproxies`,
-`envoyextensionpolicies`, `backends` and `clienttrafficpolicies` (`gateway.envoyproxy.io`),
-whether those proxies are installed or not.
-<!-- TODO(v0.3.0): after #222, the integrations' rules move into their own ClusterRoles, inkwall-operator-traefik and inkwall-operator-envoy-gateway, with the chart values rbac.integrations.traefik and rbac.integrations.envoyGateway (both true by default; missing with --reuse-values means granted). Describe them, the reason IntegrationDisabled (Programmed=False, discovery Unsupported) when a role isn't granted, and that changing rbac.integrations restarts the operator. After #219/#223, say what changed for custom InkwallConfig selectors (the pod cache) and for a disabled integration's pods (no injection), or list what is still open. -->
+Each integration's permissions move into a `ClusterRole` of its own, `inkwall-operator-traefik`
+and `inkwall-operator-envoy-gateway`; the base `inkwall-operator` role keeps what the resolver and
+discovery read (routes, Gateways and classes). Traefik's role writes its Middlewares and the
+references to them in Ingresses, IngressRoutes and now HTTPRoutes; Envoy Gateway's writes its
+`EnvoyProxy`, `EnvoyExtensionPolicy`, `Backend` and `ClientTrafficPolicy` objects and patches
+Gateways. The new chart values `rbac.integrations.traefik` and `rbac.integrations.envoyGateway`
+choose which are granted ([integration permissions](../deploy/helm/inkwall/README.md#integration-permissions)):
 
-No chart values change, and no operator flags are added.
-<!-- TODO(v0.3.0): after #226, the operator sets GOMEMLIMIT to 90% of its container's memory limit (MEMORY_LIMIT, from the downward API), unless GOMEMLIMIT is set in its environment: say so here, and how to override it. -->
+| Value | Default | |
+|---|---|---|
+| `rbac.integrations.traefik`, `envoyGateway` | `auto` | `auto` grants the role when the cluster serves the proxy's API group (`traefik.io/v1alpha1`, `gateway.envoyproxy.io/v1alpha1`) at install or upgrade time; when Helm can't ask the cluster (`helm template`, `--dry-run=client`), every role. `true` always grants it, `false` never. A value missing from your release (`--reuse-values`) means `auto` |
+
+The operator checks its permissions when it starts, and every minute. An integration it lacks some
+of is disabled instead of stalling the others: a policy on its proxy's routes is `Programmed=False`
+with the new reason `IntegrationDisabled`, naming the permissions missing, and
+`InkwallConfig.status.proxies` lists the proxy as `Unsupported`. Without Traefik's role, the Pod
+webhook selects no pod, so Traefik's pods start without an engine nothing would wire. When a role
+is granted or revoked, each replica restarts after a random delay (`--selector-restart-max-delay`).
+
+Besides `rbac.integrations`, no chart values change, and no operator flags are added.
+The operator now sets the Go runtime's soft memory limit
+([`GOMEMLIMIT`](https://go.dev/doc/gc-guide#Memory_limit)) to 90% of its container's memory limit
+(`operator.resources.limits.memory`, 512Mi by default), so its garbage collector works harder near
+the limit instead of letting the heap double. Without a memory limit, Kubernetes gives it the
+node's allocatable memory, so the limit is then harmless. To change it, change
+`operator.resources.limits.memory`.
 
 New operator [metrics](https://prometheus.io/docs/concepts/data_model/):
 
@@ -90,8 +115,9 @@ New operator [metrics](https://prometheus.io/docs/concepts/data_model/):
 `inkwall-engine` gets the `ext-proc` command, Envoy's [external processing](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter) over gRPC, which
 the operator uses for Envoy Gateway ([running the engine without Kubernetes](standalone-proxy.md)).
 `inkwallctl` gets `migrate ingress-nginx` ([migrating from ingress-nginx](migrating-from-ingress-nginx.md)), and
-`inkwallctl test --ingress` reads Traefik `IngressRoute` objects ([testing policies](testing-policies.md)).
-<!-- TODO(v0.3.0): after #216, inkwallctl test also reads HTTPRoutes (--ingress); after #217, it reads IngressRoutes strictly (a misspelled field is an error). Mention both here. -->
+`inkwallctl test --ingress` reads Traefik `IngressRoute` and Gateway API `HTTPRoute` objects, as the
+operator reads them, and checks their fields strictly: a misspelled field is an error
+([testing policies](testing-policies.md)).
 
 ### What changes by itself in 0.3.0
 
@@ -102,8 +128,8 @@ Without any configuration on your part, the upgrade changes the following:
   `every engine runs bundle 42 or later`, and `EnginesBehind` says `some engines don't run bundle
   42 yet`, instead of `5/6 engines on bundle 42`. So engines that come and go (a proxy rollout)
   no longer rewrite every policy's status. `inkwall_operator_engines{state}` has the counts.
-  `EngineNack` still says `1/6 engines rejected bundle 42`, with the first error.
-  <!-- TODO(v0.3.0): after #226, EngineNack no longer counts either: "some engines rejected bundle 42 (first: ns/pod: error)". Update this bullet. -->
+  `EngineNack` says `some engines rejected bundle 42 (first: shop/traefik-abc: error)`, naming
+  the first engine that rejected it.
 - **A new reason, `EnginesUnreported`**: `Enforced=False` while a replica's engine report leaves
   engines out (thousands of engines on one replica), and a key rotation waits meanwhile.
 - **A policy's status is written only when it changes.** `status.bundleVersion` moves only when a
@@ -120,6 +146,12 @@ Without any configuration on your part, the upgrade changes the following:
   carries oversized fields (an ID over 253 bytes, say), keeps the first 1,000 security events of
   a message and counts the rest as dropped, and cuts a rejection's error to 1 KiB. Engines from
   0.2.x stay well within these limits.
+- **Less of the cluster in the operator's cache.** It caches proxy pods with one informer per
+  integration selector. Before, custom `InkwallConfig` selectors that shared no label key with
+  Envoy Gateway's made it cache and watch every pod in the cluster.
+- **Your `ClientTrafficPolicy` wins.** When you add a `ClientTrafficPolicy` for a Gateway that has
+  the operator's (`inkwall-waf-<gateway>`), the operator deletes its own, and your
+  `connection.bufferLimit` then caps the bodies inspected ([client IP](client-ip.md#envoy-gateway)).
 
 Traefik's pods keep their 0.2.x engine until they restart. It keeps enforcing, but sends no
 request counts: restart Traefik after the upgrade. Envoy Gateway's
