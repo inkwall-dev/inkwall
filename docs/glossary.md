@@ -32,7 +32,8 @@ first time they mention it.
 - <a id="failure-mode"></a>**Failure mode**: What happens to a request that can't be inspected: the
   engine **fails open** (lets it through) or **fails closed** (rejects it with 503). By default it
   fails closed in block mode and open in detect mode. It applies only while the engine answers:
-  Traefik answers 500 when it can't reach the engine, in both modes.
+  Traefik answers 500 when it can't reach the engine, in both modes; Envoy, through Envoy Gateway,
+  answers 500 too, unless every policy on the route fails open.
 - <a id="injection"></a>**Injection**: Adding the engine to proxy [pods](#pod) as a
   [sidecar](#sidecar) (a container in the same pod).
 - <a id="inkwallconfig"></a>**InkwallConfig**: The cluster-wide singleton, named `default`, that
@@ -71,7 +72,9 @@ first time they mention it.
 - <a id="verdict"></a>**Verdict**: The engine's answer: allow, deny (or log, in detect mode), plus
   metadata.
 - <a id="wiring"></a>**Wiring**: Configuring the proxy to call the engine on protected routes. For
-  Traefik: the `inkwall-waf` [Middleware](#middleware) and the references to it.
+  Traefik: the `inkwall-waf` [Middleware](#middleware) and the references to it. For [Envoy
+  Gateway](#envoy-gateway): an [`EnvoyExtensionPolicy`](#envoyextensionpolicy) per protected
+  [`HTTPRoute`](#httproute), and the engine in the Gateway's [`EnvoyProxy`](#envoyproxy).
 
 ## Outside concepts
 

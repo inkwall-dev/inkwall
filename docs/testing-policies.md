@@ -56,6 +56,7 @@ allow      GET /?id=1%27%20OR%20%271%27%3D%271  reason=no_policy  0s
 - An IngressRoute's match rules are read as the operator reads them: `Host`, `Path` and
   `PathPrefix`, joined by `&&`. A policy whose IngressRoute has any other rule isn't enforced, and
   `inkwallctl` says which rule.
+  <!-- TODO(v0.3.0): after #216, --ingress also reads HTTPRoutes (gateway.networking.k8s.io/v1): add them to the kinds above and say how their hostnames, matches and sectionName are read. -->
 - Objects the operator would reject, such as a missing rule set or rules that don't compile, are
   errors.
 - Objects without a namespace go to `--namespace` (default `default`), as with `kubectl apply -n`.

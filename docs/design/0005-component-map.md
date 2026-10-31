@@ -66,7 +66,7 @@ which only adds management, analytics and threat intelligence.
 |---|---|---|---|
 | **inkwall-engine** | Sidecar in ingress controller pods, or standalone | `cmd/engine`, `pkg/` | Built |
 | **Engine adapters** | Engine process | `pkg/adapters/*` | Built: `forwardauth`, `httpcheck` (`/v1/check`), `proxy`, `extproc` ([ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter)). Not yet: [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter), [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) |
-| **Proxy-side glue** | Proxy configuration | `operator/integrations`, `operator/internal/wiring` | Built: Traefik [Middleware](https://doc.traefik.io/traefik/middlewares/overview/). Not yet: nginx [Lua](https://github.com/openresty/lua-nginx-module), SPOE, Envoy configuration |
+| **Proxy-side glue** | Proxy configuration | `operator/integrations`, `operator/internal/wiring` | Built: Traefik [Middleware](https://doc.traefik.io/traefik/middlewares/overview/); Envoy Gateway's `EnvoyProxy`, `EnvoyExtensionPolicy`, `Backend` and `ClientTrafficPolicy`. Not yet: nginx [Lua](https://github.com/openresty/lua-nginx-module), SPOE, other Envoy products |
 | **Caddy module** | Compiled into Caddy | `adapters/caddy` (own [`go.mod`](https://go.dev/ref/mod#go-mod-file)) | Not yet |
 | **Traefik plugin** (thin client) | Traefik ([Yaegi](https://github.com/traefik/yaegi)) | `adapters/traefik-plugin` (own `go.mod`) | Not yet |
 | **inkwall-operator** | `inkwall-system`, 2 replicas | `cmd/operator`, `operator/` | Built |
@@ -91,7 +91,7 @@ which only adds management, analytics and threat intelligence.
 **Built since:**
 
 - `pkg/events`: redacted security events in a bounded [ring buffer](https://en.wikipedia.org/wiki/Circular_buffer), sent to the operator in batches
-  on the agent stream;
+  on the agent stream, and per-policy request counts and latency (`RequestStats`);
 - `pkg/bundlekey`: the trusted signing keys;
 - `pkg/bundlesecret`: the bundle Secret's format, chunks included;
 - `pkg/adapters/extproc`: Envoy's external processing over [gRPC](https://grpc.io/docs/) ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing)).
@@ -108,9 +108,9 @@ which only adds management, analytics and threat intelligence.
 
 | Part | Does | Code | Status |
 |---|---|---|---|
-| Discovery and integration registry | Find the ingress controller's pods; list the proxy controllers of the [IngressClasses](https://kubernetes.io/docs/concepts/services-networking/ingress/#ingress-class) and [GatewayClasses](https://gateway-api.sigs.k8s.io/reference/api-types/gatewayclass/) in `InkwallConfig.status.proxies` | `operator/integrations`, `operator/internal/discovery` | Built: Traefik, its pods by [label selectors](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors); discovery. Not yet: envoygateway, istio, ingressnginx, haproxy, caddy |
+| Discovery and integration registry | Find the ingress controller's pods; list the proxy controllers of the [IngressClasses](https://kubernetes.io/docs/concepts/services-networking/ingress/#ingress-class) and [GatewayClasses](https://gateway-api.sigs.k8s.io/reference/api-types/gatewayclass/) in `InkwallConfig.status.proxies` | `operator/integrations`, `operator/internal/discovery` | Built: Traefik and Envoy Gateway, their pods by [label selectors](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors); discovery. Not yet: istio, ingressnginx, haproxy, caddy |
 | Injection | Add the engine as a [native sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/) through the Pod webhook | `operator/internal/injection` | Built |
-| Wiring | Render proxy configuration; [merge-patch](https://www.rfc-editor.org/rfc/rfc7386) user-owned routes; one `Integration` per proxy | `operator/internal/wiring` | Built (Traefik) |
+| Wiring | Render proxy configuration; [merge-patch](https://www.rfc-editor.org/rfc/rfc7386) user-owned routes; one `Integration` per proxy | `operator/internal/wiring` | Built (Traefik, Envoy Gateway) |
 | Resolver | Turn policy targets into host, path and method | `operator/resolver` | Built |
 | Bundle builder | Leader only: debounce changes (1 s), build, sign, version, write the Secret | `operator/bundle`, `operator/internal/controller` | Built |
 | Distribution server | Every replica, over gRPC; ACK, NACK, heartbeat | `operator/internal/distribution` | Built |
@@ -136,9 +136,13 @@ resources ([0002 §4.1](0002-system-architecture.md#41-sources-of-truth)).
 4. If the engine is slow or down:
    - **Engine too slow** (built): the engine's own deadline passes, and it applies the failure
      mode itself. It answers 503 in block mode and allows the request in detect mode.
-   - **Engine unreachable, by design** (Envoy and the other planned proxies): the proxy's timeout,
-     set just above the engine's deadline, expires, and the proxy applies the failure mode: 503 in
-     block mode, forward in detect mode.
+   - **Engine unreachable, by design** (the planned proxies): the proxy's timeout, set just above
+     the engine's deadline, expires, and the proxy applies the failure mode: 503 in block mode,
+     forward in detect mode.
+   - **Engine unreachable, with Envoy Gateway** (built): Envoy answers 500, or forwards the request
+     when every policy on the route fails open (ext_proc's `failOpen`); its timeout is 500 ms above
+     the policies' deadline. A route whose policies are all in detect mode doesn't wait for the
+     engine at all.
    - **Engine unreachable, with Traefik** (built): Traefik's [ForwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/) has no timeout or
      failure setting, so Inkwall's failure mode does not apply: Traefik answers 500 and doesn't
      forward the request, in both modes. A refused connection gets it at once, a hung engine

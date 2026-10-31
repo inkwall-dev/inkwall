@@ -186,8 +186,9 @@ The operator is never on the request path. While it is down, engines keep their 
 and new pods load their cache or the bundle Secret
 ([0004 §4.6](0004-operator.md#46-bundle-builder-leader-only)).
 
-**Built:** injection, Traefik wiring, the resolver, the bundle builder, distribution, status, and
-upstream sync (GitOps and Managed modes, [§5.3](#53-operator--saas)).
+**Built:** injection, proxy discovery, Traefik and Envoy Gateway wiring, the resolver, the bundle
+builder, distribution, status, and upstream sync (GitOps and Managed modes, security events and
+request counts, [§5.3](#53-operator--saas)).
 **Not yet:** other proxies.
 
 ### 3.4 Control plane (optional)
@@ -517,7 +518,8 @@ ignored, and that an untrusted PROXY header is ignored (verified on v3.7.13).
 **B. Traefik plugin (later):** Traefik runs [plugins](https://plugins.traefik.io/) in [Yaegi](https://github.com/traefik/yaegi), which can't run Coraza well. So the
 plugin would be a thin client to the sidecar (or use [http-wasm](https://http-wasm.io/)).
 
-**Built:** A, for `Ingress` and `IngressRoute` targets. **Not yet:** B.
+**Built:** A, for `Ingress`, `IngressRoute` and, through Traefik's Gateway API provider, `HTTPRoute`
+targets (an `ExtensionRef` filter to the Middleware). **Not yet:** B.
 
 ### 6.4 HAProxy (HAProxy Kubernetes Ingress Controller, HAProxy Ingress)
 
@@ -569,7 +571,7 @@ See the [verdict lifecycle](../diagrams/verdict-lifecycle.svg) diagram.
 
 ### 7.1 Block mode (Envoy example)
 
-This is the design flow; the Envoy integration is not built yet.
+Built with Envoy Gateway, through ext_proc ([§6.1](#61-envoy-raw-envoy-envoy-gateway-istio-contour)).
 
 1. The proxy sends the request headers to the engine.
 2. The router picks the policy.
@@ -695,10 +697,12 @@ Target:
   `_bundle_updates_total`, `_operator_connected`, `_evaluations_in_flight`, `_evaluation_slots`,
   `_engine_events_total`, `_engine_events_dropped_total`.
 - Operator: `inkwall_operator_bundle_version`, `_operator_bundle_compressed_bytes`,
-  `_operator_engines{state}`, `_operator_events_received_total`,
-  `_operator_engine_events_dropped_total`, and, toward the control plane,
+  `_operator_engines{state}`, `_operator_engines_left_out`, `_operator_events_received_total`,
+  `_operator_engine_events_dropped_total`, `_operator_wired_targets{integration}`,
+  `_operator_wiring_failures{integration}`, and, toward the control plane,
   `_operator_events_forwarded_total`, `_operator_events_buffered`,
-  `_operator_events_buffer_errors_total`.
+  `_operator_events_buffer_errors_total`, `_operator_request_stats_dropped_total{reason}`,
+  `_operator_state_engines_left_out`.
 
 **Not yet:** an adapter failure metric (see [§7.3](#73-engine-unavailable)), rule-match and
 rate-limit metrics, bundle age, tracing, the dashboard and alerts.

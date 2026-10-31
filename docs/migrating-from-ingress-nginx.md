@@ -2,7 +2,8 @@
 
 [ingress-nginx](glossary.md#ingress-nginx) is retired upstream. This guide converts its
 [ModSecurity](glossary.md#modsecurity) settings into `WAFPolicy` objects with
-`inkwallctl migrate ingress-nginx`, so the Ingresses keep their WAF when they move to Traefik.
+`inkwallctl migrate ingress-nginx`, so the routes keep their WAF when they move to Traefik, or to
+HTTPRoutes served by Traefik or Envoy Gateway.
 
 ## Contents
 
@@ -84,6 +85,7 @@ the same prefix, but a prefix and an `Exact` path are not.
 [`inkwallctl test`](testing-policies.md) routes requests through IngressRoutes (`--ingress
 ingressroutes.yaml`), so policies retargeted to IngressRoutes can be checked offline as below.
 It doesn't route HTTPRoutes yet.
+<!-- TODO(v0.3.0): after #216, inkwallctl test routes HTTPRoutes too: drop the sentence above and say both kinds can be checked. -->
 
 ## What is converted
 

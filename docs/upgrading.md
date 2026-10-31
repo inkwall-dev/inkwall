@@ -1,24 +1,239 @@
 # Upgrading
 
-This guide upgrades an Inkwall installation from 0.1.x (0.1.0 to 0.1.3) to 0.2.0, and lists what
-changes on the way.
+This guide upgrades an Inkwall installation from 0.2.x (0.2.0 or 0.2.1) to 0.3.0, and from 0.1.x
+(0.1.0 to 0.1.3) to 0.2.0, and lists what changes on the way. From 0.1.x, upgrade to 0.2.1 first,
+then to 0.3.0: the upgrade test (`make kind-upgrade`) starts from the last release.
 
 ## Contents
 
-- [Prerequisites](#prerequisites)
-- [What's new](#whats-new)
-- [What changes by itself](#what-changes-by-itself)
-- [Upgrading the chart](#upgrading-the-chart)
-- [Checking it worked](#checking-it-worked)
-- [Rolling back](#rolling-back)
+- [From 0.2.x to 0.3.0](#from-02x-to-030)
+  - [Before you upgrade](#before-you-upgrade)
+  - [What's new in 0.3.0](#whats-new-in-030)
+  - [What changes by itself in 0.3.0](#what-changes-by-itself-in-030)
+  - [Upgrading the chart to 0.3.0](#upgrading-the-chart-to-030)
+  - [Protecting HTTPRoutes](#protecting-httproutes)
+  - [Checking 0.3.0 worked](#checking-030-worked)
+  - [Rolling back to 0.2.x](#rolling-back-to-02x)
+- [From 0.1.x to 0.2.0](#from-01x-to-020)
+  - [Prerequisites](#prerequisites)
+  - [What's new](#whats-new)
+  - [What changes by itself](#what-changes-by-itself)
+  - [Upgrading the chart](#upgrading-the-chart)
+  - [Checking it worked](#checking-it-worked)
+  - [Rolling back](#rolling-back)
 
-## Prerequisites
+## From 0.2.x to 0.3.0
+
+0.3.0 protects [Gateway API](https://gateway-api.sigs.k8s.io/) [`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) objects served by [Traefik's Gateway API
+provider](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/) or by [Envoy Gateway](https://gateway.envoyproxy.io/). `Ingress` and `IngressRoute` targets are wired as before.
+
+### Before you upgrade
+
+- Inkwall 0.2.x installed with the chart, the values you installed it with, and
+  [Helm](https://helm.sh/docs/) 3.14 or later.
+- [Kubernetes](https://kubernetes.io/docs/concepts/overview/) 1.29 or later, as before. CI now tests 0.3.0 on Kubernetes 1.34 (the upgrade
+  test and [envtest](glossary.md#envtest)) and on kind's newest, 1.37. The Gateway API's v1.7 CRDs need
+  Kubernetes 1.31 or later.
+- **Check the policies that target an `HTTPRoute`.** 0.2.x accepted such targets but never
+  enforced them: those policies were `Accepted=False` (`TargetUnsupported`). From 0.3.0, every
+  `HTTPRoute` they target that Traefik or Envoy Gateway serves is wired and inspected, in the
+  policy's mode. List them, and set `mode: Detect` on any you aren't sure of:
+
+  ```sh
+  kubectl get wafpolicy -A -o json |
+    jq -r '.items[] | select(any(.spec.targetRefs[]; .kind == "HTTPRoute")) | "\(.metadata.namespace)/\(.metadata.name) \(.spec.mode // "Block")"'
+  ```
+
+- **Remove `spec.engine.socketDir` from your `InkwallConfig`**, if you set it. It never had an
+  effect: Envoy Gateway's engine socket is in `/var/run/inkwall-socket`, and Traefik reaches the
+  engine over loopback TCP. It is deprecated: setting or changing it draws a warning, and it will
+  be removed from a later API version. An `InkwallConfig` that has it keeps working. One created
+  before 0.3.0 may hold its old default, `/var/run/inkwall`; it is ignored, and keeping it as it
+  is draws no warning.
+- Anything that parses the `Enforced` condition's message (alerts, scripts) needs the new text:
+  see [below](#what-changes-by-itself-in-030).
+
+### What's new in 0.3.0
+
+The upgrade adds no new kinds, and changes the CRDs as follows:
+
+| Object | Field | |
+|---|---|---|
+| `WAFPolicy` | `spec.targetRefs[*].kind: HTTPRoute` (`group: gateway.networking.k8s.io`), optional `sectionName` | Now resolved and wired: through Traefik's Gateway API provider (an `ExtensionRef` filter to the `inkwall-waf` Middleware), or through Envoy Gateway (an `EnvoyExtensionPolicy` calling the engine over [ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter)). `sectionName` protects one named rule of the route, and takes precedence over a policy on the whole route |
+| `WAFPolicy` | `status.bundleVersion` | Now the first bundle that enforces the policy as it is now, not the newest bundle: a bundle that changes only other policies leaves it (#187) |
+| `InkwallConfig` | `status.proxies` | The proxy controllers named by the cluster's IngressClasses and GatewayClasses, their integration, and how far Inkwall wires their routes: `Full`, `Partial` or `Unsupported`. Written into an existing `InkwallConfig` `default` only |
+| `InkwallConfig` | `spec.engine.socketDir` | Deprecated and ignored ([above](#before-you-upgrade)); no default, no path rule |
+
+The `ValidatingWebhookConfiguration` gets a webhook for `InkwallConfig`, with
+`failurePolicy: Ignore`: it only warns, so the `InkwallConfig` stays editable while the operator
+is down.
+
+The operator's `ClusterRole` gains reads of `gatewayclasses`, and patches of `gateways` and
+`httproutes` (`gateway.networking.k8s.io`), and writes Envoy Gateway's `envoyproxies`,
+`envoyextensionpolicies`, `backends` and `clienttrafficpolicies` (`gateway.envoyproxy.io`),
+whether those proxies are installed or not.
+<!-- TODO(v0.3.0): after #222, the integrations' rules move into their own ClusterRoles, inkwall-operator-traefik and inkwall-operator-envoy-gateway, with the chart values rbac.integrations.traefik and rbac.integrations.envoyGateway (both true by default; missing with --reuse-values means granted). Describe them, the reason IntegrationDisabled (Programmed=False, discovery Unsupported) when a role isn't granted, and that changing rbac.integrations restarts the operator. After #219/#223, say what changed for custom InkwallConfig selectors (the pod cache) and for a disabled integration's pods (no injection), or list what is still open. -->
+
+No chart values change, and no operator flags are added.
+<!-- TODO(v0.3.0): after #226, the operator sets GOMEMLIMIT to 90% of its container's memory limit (MEMORY_LIMIT, from the downward API), unless GOMEMLIMIT is set in its environment: say so here, and how to override it. -->
+
+New operator [metrics](https://prometheus.io/docs/concepts/data_model/):
+
+| Metric | |
+|---|---|
+| `inkwall_operator_wired_targets{integration}` | Policy targets wired to the engine, by integration (`traefik`, `envoy-gateway`) |
+| `inkwall_operator_wiring_failures{integration}` | Targets that couldn't be wired (`Programmed=False`, `WiringFailed`) |
+| `inkwall_operator_engines_left_out` | Engines left out of a replica's engine report, over the ConfigMap's size limit; while any are, `Enforced` is `False` (`EnginesUnreported`) |
+| `inkwall_operator_request_stats_dropped_total{reason}` | Policies' request counts dropped on their way to a control plane ([connecting to a control plane](control-plane.md)) |
+| `inkwall_operator_state_engines_left_out` | Engines left out of the state sent to a control plane, over its message limit |
+
+`inkwall-engine` gets the `ext-proc` command, Envoy's [external processing](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter) over gRPC, which
+the operator uses for Envoy Gateway ([running the engine without Kubernetes](standalone-proxy.md)).
+`inkwallctl` gets `migrate ingress-nginx` ([migrating from ingress-nginx](migrating-from-ingress-nginx.md)), and
+`inkwallctl test --ingress` reads Traefik `IngressRoute` objects ([testing policies](testing-policies.md)).
+<!-- TODO(v0.3.0): after #216, inkwallctl test also reads HTTPRoutes (--ingress); after #217, it reads IngressRoutes strictly (a misspelled field is an error). Mention both here. -->
+
+### What changes by itself in 0.3.0
+
+Without any configuration on your part, the upgrade changes the following:
+
+- **`HTTPRoute` targets are enforced**, as [above](#before-you-upgrade).
+- **The `Enforced` condition's messages no longer count engines.** `Enforced=True` says
+  `every engine runs bundle 42 or later`, and `EnginesBehind` says `some engines don't run bundle
+  42 yet`, instead of `5/6 engines on bundle 42`. So engines that come and go (a proxy rollout)
+  no longer rewrite every policy's status. `inkwall_operator_engines{state}` has the counts.
+  `EngineNack` still says `1/6 engines rejected bundle 42`, with the first error.
+  <!-- TODO(v0.3.0): after #226, EngineNack no longer counts either: "some engines rejected bundle 42 (first: ns/pod: error)". Update this bullet. -->
+- **A new reason, `EnginesUnreported`**: `Enforced=False` while a replica's engine report leaves
+  engines out (thousands of engines on one replica), and a key rotation waits meanwhile.
+- **A policy's status is written only when it changes.** `status.bundleVersion` moves only when a
+  bundle changes what the policy enforces (#187), and `Enforced` and `Ready` are written only when
+  they change (#212). The `BUNDLE` column of `kubectl get wafpolicy` therefore differs between
+  policies. Policies upgraded from 0.2.x keep their version until their next change.
+- **`Programmed=False` after uninstall.** The `helm uninstall` hook now sets `Programmed=False`
+  and `Ready=False`, reason `Unwired`, on every policy whose routes it unwired. In 0.2.x they kept
+  `Programmed=True`.
+- **Request counts.** Engines count, per policy, the requests they allow, deny and detect, with
+  their latency, and the operator sends the totals to a connected control plane (GitOps or
+  Managed mode, if the control plane asks for them). `Standalone` sends nothing.
+- **Limits on what an engine sends.** The operator refuses an engine whose `Hello` or heartbeat
+  carries oversized fields (an ID over 253 bytes, say), keeps the first 1,000 security events of
+  a message and counts the rest as dropped, and cuts a rejection's error to 1 KiB. Engines from
+  0.2.x stay well within these limits.
+
+Traefik's pods keep their 0.2.x engine until they restart. It keeps enforcing, but sends no
+request counts: restart Traefik after the upgrade. Envoy Gateway's
+pods get the 0.3.0 engine when they first get one, with a Gateway's first protected route. An
+engine image set in `InkwallConfig.spec.engine.image` stays as it is: change it to 0.3.0 yourself.
+
+### Upgrading the chart to 0.3.0
+
+1. Upgrade the chart, with the values you installed it with:
+
+   ```sh
+   helm upgrade inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.3.0 \
+     --namespace inkwall-system --reset-then-reuse-values
+   ```
+
+   The chart upgrades the CRDs too (`crds.install`). If you install the CRDs yourself, apply the
+   new ones first:
+
+   ```sh
+   helm template inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.3.0 \
+     --show-only templates/crds.yaml | kubectl apply --server-side -f -
+   ```
+
+2. Wait for the operator:
+
+   ```sh
+   kubectl -n inkwall-system rollout status deployment/inkwall-operator
+   ```
+
+3. Restart Traefik, so its pods get the new engine:
+
+   ```sh
+   kubectl -n <traefik namespace> rollout restart deployment/<traefik>
+   ```
+
+If Argo CD or Flux installs the chart, change the chart version in Git instead: see
+[GitOps](gitops.md#installing-the-chart-with-a-gitops-tool). If they manage your `HTTPRoute`
+objects or Envoy Gateway's `EnvoyProxy` objects, read [GitOps](gitops.md) for the fields the
+operator now writes there.
+
+### Protecting HTTPRoutes
+
+To protect `HTTPRoute` objects, the proxy that serves them needs the Gateway API:
+
+- **Traefik:** install the Gateway API CRDs (the [standard channel](https://gateway-api.sigs.k8s.io/guides/getting-started/#installing-gateway-api)) and turn on
+  Traefik's Gateway API provider (`providers.kubernetesGateway.enabled=true` in its chart). The
+  operator wires the HTTPRoutes whose parent Gateway has a GatewayClass of controller
+  `traefik.io/gateway-controller`.
+- **Envoy Gateway** (v1.9; not with `mergeGateways`, nor Envoy as a DaemonSet): turn on its
+  Backend API, which the engine's socket needs, with
+  `--set config.envoyGateway.extensionApis.enableBackend=true` on its chart, as in the
+  [README](../README.md#install). The operator puts the engine into the Envoy pods through each
+  Gateway's `EnvoyProxy`, and Envoy Gateway rolls them: no restart on your part.
+
+The operator looks for the Gateway API's and Envoy Gateway's CRDs every 30 s, so they can be
+installed before or after the upgrade. Then target the routes, as in the
+[README](../README.md#protect-a-route):
+
+```yaml
+spec:
+  targetRefs:
+    - {group: gateway.networking.k8s.io, kind: HTTPRoute, name: web}
+    - {group: gateway.networking.k8s.io, kind: HTTPRoute, name: api, sectionName: orders}
+```
+
+A route of another Gateway API controller is resolved into the bundle, but not wired: the policy
+is `Programmed=False` (`ControllerUnsupported`). To see which controllers Inkwall wires, create
+an `InkwallConfig` named `default` if you have none, and read its `status.proxies`.
+
+### Checking 0.3.0 worked
+
+```sh
+helm -n inkwall-system list
+kubectl get wafpolicy -A
+kubectl get inkwallconfig default -o jsonpath='{range .status.proxies[*]}{.controllerName} {.support}{"\n"}{end}'
+kubectl -n <traefik namespace> get pods -l app.kubernetes.io/name=traefik \
+  -o jsonpath='{range .items[*]}{.metadata.name} {.spec.initContainers[?(@.name=="inkwall-engine")].image}{"\n"}{end}'
+```
+
+It worked if the release shows chart version 0.3.0, the policies are `Ready`, the proxies you run
+are `Full`, and Traefik's pods run the `inkwall-engine:0.3.0` image. Send an attack through a
+protected route, as in the [README](../README.md#protect-a-route), to check it's blocked.
+
+### Rolling back to 0.2.x
+
+0.2.x neither wires nor unwires HTTPRoutes. Before `helm rollback`, unprotect them: remove the
+`HTTPRoute` entries from every policy's `targetRefs`, or delete those policies. The operator then
+removes its filters from the HTTPRoutes, deletes its Envoy Gateway objects and takes the engine out
+of the `EnvoyProxy` objects. Wait until nothing of it is left:
+
+```sh
+kubectl get httproutes.gateway.networking.k8s.io,envoyproxies.gateway.envoyproxy.io -A \
+  -o jsonpath='{range .items[?(@.metadata.annotations.waf\.inkwall\.dev/wired)]}{.kind} {.metadata.namespace}/{.metadata.name}{"\n"}{end}'
+kubectl get envoyextensionpolicies.gateway.envoyproxy.io -A -l app.kubernetes.io/managed-by=inkwall-operator
+```
+
+Then roll back, and restart Traefik so its pods run the older engine again:
+
+```sh
+helm -n inkwall-system rollback inkwall
+kubectl -n <traefik namespace> rollout restart deployment/<traefik>
+```
+
+0.2.x's CRD has no `status.proxies`, so the API server drops it.
+
+## From 0.1.x to 0.2.0
+
+### Prerequisites
 
 - Inkwall 0.1.x installed with the chart, and the values you installed it with.
 - [Helm](https://helm.sh/docs/) 3.14 or later, for
   [`--reset-then-reuse-values`](https://helm.sh/docs/helm/helm_upgrade/).
 
-## What's new
+### What's new
 
 From 0.1.1 or later, the upgrade changes no [CRDs](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
 and no chart values. The operator gets two flags, with the defaults it used before; set them with
@@ -53,7 +268,7 @@ Nothing connects to a control plane until you set `spec.mode` to `GitOps` or `Ma
 `Standalone` stays the default. An `InkwallConfig` already set to `GitOps` or `Managed` under 0.1.0
 starts connecting after the upgrade.
 
-## What changes by itself
+### What changes by itself
 
 Without any configuration on your part, the upgrade from any 0.1.x changes the following:
 
@@ -100,7 +315,7 @@ engine fixes made since, doesn't read chunks, and, from 0.1.0, holds up any sign
 rotation: restart Traefik after the upgrade. An engine image set in
 `InkwallConfig.spec.engine.image` stays as it is: change it to 0.2.0 yourself.
 
-## Upgrading the chart
+### Upgrading the chart
 
 1. Upgrade the chart, with the values you installed it with:
 
@@ -139,7 +354,7 @@ If Argo CD or Flux
 installs the chart, change the chart version in Git instead: see
 [GitOps](gitops.md#installing-the-chart-with-a-gitops-tool).
 
-## Checking it worked
+### Checking it worked
 
 ```sh
 helm -n inkwall-system list
@@ -157,7 +372,7 @@ It worked if the release shows chart version 0.2.0, the policies are `Ready` and
 attack through a protected route, as in the [README](../README.md#protect-a-route), to check it's
 blocked.
 
-## Rolling back
+### Rolling back
 
 0.1.x can't read a bundle split into chunks, and never publishes a bundle over 900 KiB. Before
 `helm rollback`, check there are no chunks:

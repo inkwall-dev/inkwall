@@ -937,7 +937,7 @@ Least privilege. The built rules are in [`role.yaml`](../../operator/config/rbac
 How the test runs:
 
 - **Operator.** It runs with its production defaults (1 s debounce, 2 s engine reports, unthrottled
-  client), in the test process. It talks to envtest's API server and [etcd](https://etcd.io/docs/) (Kubernetes 1.29), which
+  client), in the test process. It talks to envtest's API server and [etcd](https://etcd.io/docs/) (Kubernetes 1.34), which
   are separate processes and not counted.
 - **Objects.** Each policy targets its own route object: half Ingresses, half IngressRoutes. Each
   has 10 routes (2 hosts × 5 path prefixes).
