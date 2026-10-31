@@ -318,6 +318,11 @@ func (s *modsec) apply(m *migration, snippet, source string) {
 				s.crs = true
 				m.add(itemMapped, src, "%s: the built-in OWASP CRS v4", d.Text)
 			case nginxRecommendedConf:
+				// It sets the body directives again, over those above it.
+				if s.body != (wafv1alpha1.BodySpec{}) {
+					s.body, s.partial = wafv1alpha1.BodySpec{}, ""
+					m.add(itemTodo, src, "not migrated: %s resets SecRequestBodyAccess, SecRequestBodyLimit and SecRequestBodyLimitAction set above it: those are left out; set body by hand", d.Text)
+				}
 				s.recommended(src)
 			default:
 				m.add(itemTodo, src, "not migrated: %s: Inkwall can't read files from the ingress-nginx pod; put the rules in a WAFRuleSet", d.Text)

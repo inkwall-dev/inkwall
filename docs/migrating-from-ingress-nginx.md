@@ -117,6 +117,7 @@ it, and the other annotations do nothing without ModSecurity on.
 | `ctl:ruleEngine=Off` / `ctl:requestBodyAccess=Off` in such a rule | `skip.paths` / `skip.bodyPaths` |
 | `SecRequestBodyAccess`, `SecRequestBodyLimit`, `SecRequestBodyLimitAction` | `body.inspect`, `body.maxBytes`, `body.onOversize` |
 | `SecRequestBodyLimitAction ProcessPartial` without `SecRequestBodyLimit` | `body.onOversize: Allow` and `body.maxBytes` of `modsecurity.conf`'s limit (12.5 MiB) capped at 10 MiB; `TODO` when `modsecurity.conf` isn't loaded |
+| `Include .../modsecurity.conf` after body directives | `TODO`: the file sets them again, so those above it are left out |
 | Other `SecRule` and `SecAction` rules, and `SecRuleRemoveById` ranges, tags and messages to remove | Kept as they are in a `WAFRuleSet` named `<ingress>-modsecurity`, loaded after the CRS |
 
 A policy that tunes the CRS or adds rules refers to a `ClusterWAFRuleSet` named `owasp-crs-v4` with
