@@ -18,12 +18,23 @@ import (
 type fakeEvaluator struct {
 	res   rules.Result
 	err   error
-	delay time.Duration
+	block <-chan struct{} // if set, Evaluate waits for it to close
 }
 
 func (f fakeEvaluator) Evaluate(_ context.Context, _ *request.Request) (rules.Result, error) {
-	time.Sleep(f.delay)
+	if f.block != nil {
+		<-f.block
+	}
 	return f.res, f.err
+}
+
+// hung returns a channel that holds an evaluation until the test ends: it
+// outlives any deadline however loaded the machine, where a sleep can end
+// first and win the race against the deadline.
+func hung(t *testing.T) <-chan struct{} {
+	c := make(chan struct{})
+	t.Cleanup(func() { close(c) })
+	return c
 }
 
 var blocked = rules.Result{Interrupted: true, Status: 403, RuleID: 949110, MatchedRuleIDs: []int{942100, 949110}}
@@ -47,10 +58,10 @@ func TestCheck(t *testing.T) {
 			wantAction: ActionDeny, wantStatus: http.StatusForbidden, wantReason: ReasonRule},
 		{name: "custom status is kept", eval: fakeEvaluator{res: rules.Result{Interrupted: true, Status: 429}}, cfg: Config{Mode: ModeBlock},
 			wantAction: ActionDeny, wantStatus: 429, wantReason: ReasonRule},
-		{name: "timeout fails open", eval: fakeEvaluator{res: blocked, delay: 50 * time.Millisecond},
+		{name: "timeout fails open", eval: fakeEvaluator{res: blocked, block: hung(t)},
 			cfg:        Config{Mode: ModeBlock, FailureMode: FailOpen, Timeout: 5 * time.Millisecond},
 			wantAction: ActionAllow, wantReason: ReasonTimeout},
-		{name: "timeout fails closed", eval: fakeEvaluator{delay: 50 * time.Millisecond},
+		{name: "timeout fails closed", eval: fakeEvaluator{block: hung(t)},
 			cfg:        Config{Mode: ModeBlock, FailureMode: FailClosed, Timeout: 5 * time.Millisecond},
 			wantAction: ActionDeny, wantStatus: http.StatusServiceUnavailable, wantReason: ReasonTimeout},
 		{name: "evaluator error fails open", eval: fakeEvaluator{err: errors.New("boom")}, cfg: Config{Mode: ModeBlock, FailureMode: FailOpen},
@@ -71,10 +82,12 @@ func TestCheck(t *testing.T) {
 }
 
 func TestCheckReturnsWithinTimeout(t *testing.T) {
-	p := New(fakeEvaluator{delay: time.Second}, Config{Timeout: 10 * time.Millisecond})
+	// The evaluation never ends, so Check returning at all shows the
+	// deadline; the bound only turns a hang into a failure.
+	p := New(fakeEvaluator{block: hung(t)}, Config{Timeout: 10 * time.Millisecond})
 	start := time.Now()
 	p.Check(context.Background(), &request.Request{})
-	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("Check took %s, want about the 10ms timeout", elapsed)
 	}
 }
@@ -90,8 +103,9 @@ func TestCheckReportsMatchedRules(t *testing.T) {
 }
 
 func TestCheckShedsLoadWhenSlotsAreBusy(t *testing.T) {
-	// One slot, held by an evaluation that outlives its 5ms deadline.
-	p := New(fakeEvaluator{delay: 200 * time.Millisecond}, Config{
+	// One slot, held by an evaluation that outlives its 5ms deadline: it
+	// runs until the test ends.
+	p := New(fakeEvaluator{block: hung(t)}, Config{
 		Mode: ModeBlock, FailureMode: FailOpen, Timeout: 5 * time.Millisecond, MaxConcurrent: 1,
 	})
 	if v := p.Check(context.Background(), &request.Request{}); v.Reason != ReasonTimeout {
@@ -105,12 +119,14 @@ func TestCheckShedsLoadWhenSlotsAreBusy(t *testing.T) {
 	if v.Reason != ReasonOverload || v.Action != ActionAllow {
 		t.Fatalf("second request: got action=%s reason=%s, want allow/overload", v.Action, v.Reason)
 	}
-	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+	// Waiting for the slot would wait for the hung evaluation, until the test
+	// ends; the bound is loose so a loaded machine doesn't trip it.
+	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("shed request took %s, want immediate", elapsed)
 	}
 
 	// Fail-closed policies reject shed requests.
-	closed := New(fakeEvaluator{delay: 200 * time.Millisecond}, Config{
+	closed := New(fakeEvaluator{block: hung(t)}, Config{
 		Mode: ModeBlock, FailureMode: FailClosed, Timeout: 5 * time.Millisecond, MaxConcurrent: 1,
 	})
 	closed.Check(context.Background(), &request.Request{})
@@ -131,7 +147,7 @@ func TestCheckReleasesSlots(t *testing.T) {
 func TestCheckCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	v := New(fakeEvaluator{delay: 50 * time.Millisecond}, Config{}).Check(ctx, &request.Request{})
+	v := New(fakeEvaluator{block: hung(t)}, Config{}).Check(ctx, &request.Request{})
 	if v.Reason != ReasonCanceled || v.Action != ActionAllow {
 		t.Fatalf("got action=%s reason=%s, want allow/canceled", v.Action, v.Reason)
 	}
@@ -254,7 +270,7 @@ func TestEvaluatorPanicBecomesError(t *testing.T) {
 }
 
 func TestDefaultFailureModeDependsOnEnforcementMode(t *testing.T) {
-	slow := fakeEvaluator{res: blocked, delay: 50 * time.Millisecond}
+	slow := fakeEvaluator{res: blocked, block: hung(t)}
 
 	// Block mode: a request that cannot be inspected in time is rejected,
 	// so padding a request past the deadline cannot get it through.

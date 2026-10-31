@@ -25,10 +25,12 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/resolver"
 )
 
-// eventually retries cond until it returns "" or 20s pass.
+// eventually retries cond until it returns "" or a minute passes: the
+// operator gets there in a second or two, but a loaded machine has taken
+// more than 20s.
 func eventually(t *testing.T, what string, cond func() string) {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(time.Minute)
 	for {
 		msg := cond()
 		if msg == "" {

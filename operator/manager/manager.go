@@ -73,6 +73,9 @@ type Options struct {
 	MetricsAddr string
 	ProbeAddr   string
 	LeaderElect bool
+	// LeaseDuration and RenewDeadline tune leader election; 0: the
+	// controller-runtime defaults (15s and 10s).
+	LeaseDuration, RenewDeadline time.Duration
 	// Namespace is the operator's, for its Lease and Secrets.
 	Namespace string
 	// Debounce batches changes before a bundle is built; 0: the default.
@@ -181,6 +184,8 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		LeaderElection:          o.LeaderElect,
 		LeaderElectionID:        leaderElectionID,
 		LeaderElectionNamespace: o.Namespace,
+		LeaseDuration:           unlessZero(o.LeaseDuration),
+		RenewDeadline:           unlessZero(o.RenewDeadline),
 		// The new leader starts at once instead of waiting out the lease,
 		// as the old one steps down cleanly on shutdown.
 		LeaderElectionReleaseOnCancel: true,
@@ -440,6 +445,14 @@ func (w *webhookStarter) check(req *http.Request) error {
 		return errors.New("webhook certificate not ready")
 	}
 	return w.mgr.GetWebhookServer().StartedChecker()(req)
+}
+
+// unlessZero returns &d, or nil (the default) for 0.
+func unlessZero(d time.Duration) *time.Duration {
+	if d == 0 {
+		return nil
+	}
+	return &d
 }
 
 // replicaName is this replica's name: its pod, else the host name.
