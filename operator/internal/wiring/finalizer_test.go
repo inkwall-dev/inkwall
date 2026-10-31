@@ -145,7 +145,7 @@ func TestFinalizer(t *testing.T) {
 	routeWired := func() bool {
 		t.Helper()
 		ir := &unstructured.Unstructured{}
-		ir.SetGroupVersionKind(IngressRouteGVK)
+		ir.SetGroupVersionKind(integrations.TraefikIngressRouteGVK)
 		if err := c.Get(ctx, client.ObjectKey{Namespace: "shop", Name: "app"}, ir); err != nil {
 			t.Fatal(err)
 		}
@@ -154,7 +154,7 @@ func TestFinalizer(t *testing.T) {
 	middlewareExists := func() bool {
 		t.Helper()
 		m := &unstructured.Unstructured{}
-		m.SetGroupVersionKind(MiddlewareGVK)
+		m.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
 		err := c.Get(ctx, client.ObjectKey{Namespace: "shop", Name: MiddlewareName}, m)
 		if err != nil && !apierrors.IsNotFound(err) {
 			t.Fatal(err)
@@ -232,7 +232,7 @@ func TestFinalizer(t *testing.T) {
 	}
 	del(route)
 	refuse := newClient(&interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-		if obj.GetObjectKind().GroupVersionKind().Kind == IngressRouteGVK.Kind {
+		if obj.GetObjectKind().GroupVersionKind().Kind == integrations.TraefikIngressRouteGVK.Kind {
 			return apierrors.NewForbidden(schema.GroupResource{Group: "traefik.io", Resource: "ingressroutes"}, obj.GetName(), nil)
 		}
 		return c.Patch(ctx, obj, patch, opts...)

@@ -210,7 +210,8 @@ func TestInkwallConfigValidation(t *testing.T) {
 		{name: "Managed", doc: inkwallConfig("default", "  mode: Managed\n"+controlPlane)},
 		{name: "unknown mode", doc: inkwallConfig("default", "  mode: Hybrid\n"), wantErr: `Unsupported value: "Hybrid"`},
 		{name: "plaintext control plane", doc: inkwallConfig("default", "  mode: GitOps\n  controlPlane:\n    endpoint: http://agents.example.com\n    enrollmentSecretRef: {name: e, namespace: inkwall-system}\n"), wantErr: "spec.controlPlane.endpoint"},
-		{name: "relative socket dir", doc: inkwallConfig("default", "  engine: {socketDir: run/inkwall}\n"), wantErr: "socketDir must be an absolute path"},
+		// Deprecated and ignored: any value stays accepted.
+		{name: "deprecated socket dir", doc: inkwallConfig("default", "  engine: {socketDir: run/inkwall}\n")},
 		{name: "unknown adapter", doc: inkwallConfig("default", "  integrations: [{controller: traefik, adapter: Plugin}]\n"), wantErr: `Unsupported value: "Plugin"`},
 		{name: "integration listed twice", doc: inkwallConfig("default", "  integrations: [{controller: traefik}, {controller: traefik}]\n"), wantErr: "Duplicate value"},
 		{name: "empty selector", doc: inkwallConfig("default", "  integrations: [{controller: traefik, selector: {}}]\n"), wantErr: "selector must not be empty"},

@@ -19,8 +19,10 @@ OPERATOR_NS=inkwall-system
 NS=eg-e2e
 EG_NS=envoy-gateway-e2e
 # Envoy Gateway v1.9.3 (Gateway API v1.6), on the Gateway API's standard
-# CRDs (v1.7.0, as operator/go.mod): the experimental ones its chart
-# bundles need Kubernetes 1.31's CEL, and the kind cluster runs 1.29.
+# CRDs (v1.7.0, as operator/go.mod). Their safe-upgrades policy refuses
+# the older ones Envoy Gateway's chart bundles, so Envoy Gateway is
+# installed as its docs say for Gateway API CRDs managed separately: its
+# own CRDs from gateway-crds-helm, then the chart with --skip-crds.
 EG_VERSION=v1.9.3
 GATEWAY_API_VERSION=v1.7.0
 TRAEFIK_NS=traefik-e2e
@@ -83,39 +85,17 @@ cleanup() {
   "${KUBECTL[@]}" delete namespace "$TRAEFIK_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   # The CRDs this run installed, and only those.
   if $eg_crds_installed; then "${KUBECTL[@]}" delete -f "$eg_crds" --ignore-not-found >/dev/null 2>&1 || true; fi
-  rm -rf "$work"
   if $gateway_api_installed; then "${KUBECTL[@]}" delete -f "$work/gateway-api.yaml" --ignore-not-found >/dev/null 2>&1 || true; fi
+  rm -rf "$work"
 }
 trap cleanup EXIT
 
 echo "== Envoy Gateway $EG_VERSION"
 # The Gateway API's CRDs, unless installed already (as by another test).
-# Kubernetes before 1.31 can't compile TLSRoute's isIP rule: it is
-# dropped there, as this test sends no TLSRoute.
 if ! "${KUBECTL[@]}" get crd gateways.gateway.networking.k8s.io >/dev/null 2>&1; then
   curl -fsSL "https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml" >"$work/gateway-api.yaml"
-  if ! "${KUBECTL[@]}" apply --server-side --force-conflicts -f "$work/gateway-api.yaml" >/dev/null 2>&1; then
-    python3 -c '
-import sys, yaml
-docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
-def strip(o):
-    if isinstance(o, dict):
-        rules = o.get("x-kubernetes-validations")
-        if rules:
-            o["x-kubernetes-validations"] = [r for r in rules if "isIP(" not in r.get("rule", "")]
-            if not o["x-kubernetes-validations"]:
-                del o["x-kubernetes-validations"]
-        for v in o.values():
-            strip(v)
-    elif isinstance(o, list):
-        for v in o:
-            strip(v)
-strip(docs)
-yaml.safe_dump_all(docs, open(sys.argv[1], "w"))
-' "$work/gateway-api.yaml"
-    "${KUBECTL[@]}" apply --server-side --force-conflicts -f "$work/gateway-api.yaml" >/dev/null
-  fi
   gateway_api_installed=true
+  "${KUBECTL[@]}" apply --server-side --force-conflicts -f "$work/gateway-api.yaml" >/dev/null
 fi
 helm template eg-crds oci://docker.io/envoyproxy/gateway-crds-helm --version "$EG_VERSION" \
   --set crds.gatewayAPI.enabled=false --set crds.envoyGateway.enabled=true >"$eg_crds" 2>/dev/null
@@ -278,6 +258,7 @@ condition() {
 }
 ready() { [[ $(condition Ready status) == True ]]; }
 programmed_both() { [[ $(condition Programmed message) == *"wired to the engine in Traefik"*"wired to the engine in Envoy Gateway"* ]]; }
+# policy [MODE]: the shared policy, in Block mode by default.
 policy() {
   "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
 apiVersion: waf.inkwall.dev/v1alpha1
@@ -287,7 +268,7 @@ spec:
   targetRefs:
     - {kind: Ingress, name: web}
     - {group: gateway.networking.k8s.io, kind: HTTPRoute, name: app}
-  mode: Block
+  mode: ${1:-Block}
   # CRS takes about 200 ms on the 48 KB form field below on a fast machine,
   # more on a CI runner: past the default 250 ms, the engine fails closed
   # (503). Envoy waits 500 ms longer than this.
@@ -303,8 +284,19 @@ has_sidecar() {
 }
 names_ours() { [[ $("${KUBECTL[@]}" -n "$NS" get gateway plain -o jsonpath='{.spec.infrastructure.parametersRef.name}') == inkwall-waf-plain ]]; }
 labelled() { "${KUBECTL[@]}" -n "$EG_NS" get pods -l e2e=custom -o name | grep . >/dev/null; }
-# whoami --verbose logs each request it gets, with its headers.
+# whoami --verbose logs the request line of each request it gets.
 never_reached_app() { ! "${KUBECTL[@]}" -n "$NS" logs deployment/app --since=10m | grep -i "$1" >/dev/null; }
+reached_app() { "${KUBECTL[@]}" -n "$NS" logs deployment/app --since=10m | grep -i "$1" >/dev/null; }
+# Detect mode: Envoy doesn't wait for the engine (shadowMode).
+shadow_accepted() {
+  [[ $("${KUBECTL[@]}" -n "$NS" get envoyextensionpolicy inkwall-waf-app -o jsonpath='{.spec.extProc[0].shadowMode}') == true ]] && eep_accepted
+}
+# logged PATH: an engine in the Envoy pods logged a detect-mode event for PATH.
+logged() {
+  "${KUBECTL[@]}" -n "$EG_NS" logs -l app.kubernetes.io/name=envoy -c inkwall-engine --tail=-1 |
+    grep '"security event"' | grep '"action":"log"' | grep "\"path\":\"$1\"" >/dev/null
+}
+no_limits() { ! "${KUBECTL[@]}" -n "$NS" get clienttrafficpolicy inkwall-waf-custom inkwall-waf-plain -o name 2>/dev/null | grep . >/dev/null; }
 # The operator's buffer limit, in force on both Gateways.
 limits_accepted() {
   for gw in custom plain; do
@@ -366,9 +358,22 @@ fi
 check "an attack in the body is blocked" envoy_are 403 / --data-urlencode "q=1' OR '1'='1"
 # BufferedPartial: Envoy holds the headers until the engine has seen the
 # body, so the app never sees the blocked request.
-mark=held-$RANDOM$RANDOM
-check "a body attack with a marked header is blocked" envoy_are 403 / -H "X-E2e-Mark: $mark" --data-urlencode "q=1' OR '1'='1"
+mark=/held-$RANDOM$RANDOM
+check "a body attack on a marked path is blocked" envoy_are 403 "$mark" --data-urlencode "q=1' OR '1'='1"
 check "and never reached the app" never_reached_app "$mark"
+
+echo "== detect mode"
+policy Detect
+eventually "Envoy Gateway accepts the EnvoyExtensionPolicy in shadow mode" shadow_accepted
+eventually "no buffer limit: Envoy doesn't hold the body" no_limits
+eventually "the attack passes through both Gateways and Traefik" all_are 200 "$SQLI"
+probe=/detect-$RANDOM$RANDOM
+check "an attack on a fresh path passes" envoy_are 200 "$probe?id=1%27%20OR%20%271%27%3D%271"
+eventually "and the engines log it" logged "$probe"
+body_path=/detect-body-$RANDOM$RANDOM
+check "a body attack passes" envoy_are 200 "$body_path" --data-urlencode "q=1' OR '1'='1"
+eventually "and reaches the app" reached_app "$body_path"
+eventually "the engines log the streamed body's attack" logged "$body_path"
 
 echo "== unprotected"
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy shared --timeout=60s >/dev/null

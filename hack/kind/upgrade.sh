@@ -16,8 +16,8 @@
 # a Traefik restart may leave one of at most MAX_RESTART_GAP seconds.
 #
 # Runs on a kind cluster without Inkwall installed, since it installs a
-# release of its own: UPGRADE_CLUSTER, created if needed and then deleted
-# afterwards (KEEP=1 keeps it and the test's objects). Needs network access
+# release of its own: UPGRADE_CLUSTER, created if needed (at
+# KIND_NODE_IMAGE, if set) and then deleted afterwards (KEEP=1 keeps it and the test's objects). Needs network access
 # to ghcr.io and Traefik's chart repository.
 set -euo pipefail
 
@@ -75,7 +75,7 @@ eventually() {
 
 created=false
 if ! kind get clusters | grep -x "$CLUSTER" >/dev/null; then
-  kind create cluster --name "$CLUSTER" --wait 120s
+  kind create cluster --name "$CLUSTER" ${KIND_NODE_IMAGE:+--image "$KIND_NODE_IMAGE"} --wait 120s
   created=true
 fi
 cleanup() {

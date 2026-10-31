@@ -86,6 +86,12 @@ Existing objects must be updated before upgrading.
    vulnerability scan and the docs checks. CI also lints the chart and runs the end-to-end tests
    on [kind](https://kind.sigs.k8s.io/).
 
+The kind targets (`make kind-up`, `make kind-e2e`, `make kind-upgrade`) install kind `KIND_VERSION`
+into `bin/` and run Kubernetes 1.34 (`KIND_NODE_IMAGE` in the Makefile; the operator tests' API
+server, `ENVTEST_K8S_VERSION`, runs it too), as CI's upgrade job does. CI's e2e job runs kind's
+newest Kubernetes (1.37). The chart still installs on 1.29 and later, untested. A cluster made at another version is recreated with
+`make kind-down kind-up`.
+
 ## Branches
 
 [Trunk-based](https://trunkbaseddevelopment.com/): one long-lived branch, `main`, short-lived work branches, and release branches only

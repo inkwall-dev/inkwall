@@ -146,6 +146,10 @@ Validation runs in three steps, cheapest first:
      is optional;
    - in Managed mode, rejects edits of the control plane's objects by anyone but the operator
      (`operator/webhook/source.go`, [§4.9](#49-upstream-sync-leader-only)).
+
+   The `InkwallConfig` goes to the webhook too, with `failurePolicy: Ignore`: it only warns, when
+   the deprecated `spec.engine.socketDir` is set or changed (each integration places the engine's
+   socket itself), and the `InkwallConfig` stays editable while the operator is down.
 3. **Resolver** (asynchronous, reported in status): dangling references, conflicts, and targets
    that can't be wired.
 
@@ -452,18 +456,20 @@ integration), for `HTTPRoute` targets whose parent Gateways have a GatewayClass 
   - an `EnvoyExtensionPolicy`, `inkwall-waf-<route>`, owned by the route, whose `targetRefs` name
     the route, or each protected rule (`sectionName`) when no policy takes the whole route. Its
     ext_proc filter ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing))
-    sends the request headers, and the body (`BufferedPartial`) when a policy on the route inspects
-    bodies; no response stage; `messageTimeout` the route's longest policy timeout (250 ms by
+    sends the request headers with the `request.protocol` attribute, and the body
+    (`BufferedPartial`) when a policy on the route inspects bodies; no response stage; `messageTimeout` the route's longest policy timeout (250 ms by
     default) plus 500 ms, so the engine decides, by its deadline and with the policy's failure
     mode (the deadline doesn't cover sending the body or a busy node); Envoy's timeout is for a
     hung engine;
     `failOpen` when every policy on the route fails open, so an unreachable engine fails the way
-    the policies would;
+    the policies would. When every policy on the route is in detect mode and fails open, the
+    engine never rejects its requests: `shadowMode: true` (ext_proc's `observability_mode`), so
+    Envoy doesn't wait for the engine, and the body `Streamed` (the only mode Envoy allows there);
   - the `Backend` `inkwall-engine` in its namespace: the Unix socket. Envoy Gateway's Backend API
     must be on (`config.envoyGateway.extensionApis.enableBackend: true` in its chart).
 - **Envoy's buffer limit.** Envoy hands ext_proc at most its per-connection buffer (32 KiB by
   default) of a body; a body cut there is handled as an oversized one (`body.onOversize`). Each
-  Gateway with a route whose body is inspected gets a `ClientTrafficPolicy`,
+  Gateway with a route whose body Envoy holds for the engine (not in shadow mode) gets a `ClientTrafficPolicy`,
   `inkwall-waf-<gateway>`, owned by it, with `connection.bufferLimit: 10Mi`, the largest
   `body.maxBytes`. Envoy Gateway applies one ClientTrafficPolicy per Gateway, so the operator makes
   none for a Gateway the user targets with their own; its `bufferLimit` then caps the bodies
@@ -471,7 +477,7 @@ integration), for `HTTPRoute` targets whose parent Gateways have a GatewayClass 
 - **Unprotected routes get nothing**, and cost 0. A route that is no longer protected loses its
   `EnvoyExtensionPolicy` first; the `Backend`, `ClientTrafficPolicy` and engine go after.
 - **`Programmed`** counts a route wired once Envoy Gateway has accepted (`Accepted=True` for every
-  Gateway, in their status) its `EnvoyExtensionPolicy` and, when its body is inspected, its
+  Gateway, in their status) its `EnvoyExtensionPolicy` and, when Envoy holds its body, its
   Gateways' `ClientTrafficPolicy`: until then the reason is `Pending`, so `Programmed=True` means
   Envoy has the buffer limit and a body isn't cut short. `Accepted=False` (a disabled Backend API,
   say) is `WiringFailed` with Envoy Gateway's message. The operator watches both kinds. An object of the operator's name it didn't create
@@ -483,7 +489,6 @@ integration), for `HTTPRoute` targets whose parent Gateways have a GatewayClass 
 - Objects of Envoy Gateway's are read and written unstructured: the operator doesn't depend on
   its Go module.
 - **Not yet:** `mergeGateways` (one Envoy fleet for a GatewayClass) and Envoy as a `DaemonSet`;
-  `observability_mode` (detect mode without waiting, [0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing));
   per-route Envoy pods in `Programmed` (the pods of every Gateway with a protected route count for
   every policy).
 
