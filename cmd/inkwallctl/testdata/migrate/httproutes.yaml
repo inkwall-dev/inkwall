@@ -1,0 +1,44 @@
+# The Gateway API HTTPRoutes that replace the Ingresses of ingresses.yaml.
+# The shop: one route with the Ingress's host and path.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: shop
+  namespace: shop
+spec:
+  parentRefs: [{name: web, namespace: gateway}]
+  hostnames: [shop.example.com]
+  rules:
+  - backendRefs: [{name: shop, port: 80}]
+---
+# The API and an admin path, merged into one route: only its rule "api"
+# replaces the api Ingress.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: api
+  namespace: shop
+spec:
+  parentRefs: [{name: web, namespace: gateway}]
+  hostnames: [api.example.com]
+  rules:
+  - name: api
+    matches: [{path: {type: PathPrefix, value: /}}]
+    backendRefs: [{name: api, port: 80}]
+  - name: admin
+    matches: [{path: {type: PathPrefix, value: /admin}}]
+    backendRefs: [{name: admin, port: 80}]
+---
+# The blog shares its route with another host: a policy on it would cover
+# www.example.com too, so it's left to a human.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: sites
+  namespace: blog
+spec:
+  parentRefs: [{name: web, namespace: gateway}]
+  hostnames: [blog.example.com, www.example.com]
+  rules:
+  - name: blog
+    backendRefs: [{name: blog, port: 80}]

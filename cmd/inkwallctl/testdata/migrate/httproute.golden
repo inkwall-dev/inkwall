@@ -1,0 +1,196 @@
+exit 1
+# The built-in OWASP CRS v4, for the policies that tune it or add rules.
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: ClusterWAFRuleSet
+metadata:
+  name: owasp-crs-v4
+spec:
+  source:
+    builtin: crs-v4
+---
+# From the ingress-nginx ModSecurity settings of Ingress blog/blog.
+# 1 setting(s) were not migrated: see the summary of inkwallctl migrate.
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: blog
+  namespace: blog
+spec:
+  mode: Detect
+  targetRefs:
+  - kind: Ingress
+    name: blog
+---
+# From the ingress-nginx ModSecurity settings of Ingress files/cloud.
+# 7 setting(s) were not migrated: see the summary of inkwallctl migrate.
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFRuleSet
+metadata:
+  name: cloud-modsecurity
+  namespace: files
+spec:
+  source:
+    seclang: |
+      # annotation modsecurity-snippet, line 9
+      SecRuleRemoveById 941000-942999
+---
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: cloud
+  namespace: files
+spec:
+  body:
+    maxBytes: 10485760
+    onOversize: Allow
+  mode: Detect
+  ruleSets:
+  - ref:
+      kind: ClusterWAFRuleSet
+      name: owasp-crs-v4
+  - ref:
+      kind: WAFRuleSet
+      name: cloud-modsecurity
+  targetRefs:
+  - kind: Ingress
+    name: cloud
+---
+# From the ingress-nginx ModSecurity settings of Ingress shop/api.
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFRuleSet
+metadata:
+  name: api-modsecurity
+  namespace: shop
+spec:
+  source:
+    seclang: |
+      # annotation modsecurity-snippet, line 2
+      SecRule ARGS:debug "@streq true" "id:1100,phase:1,deny,status:403,msg:'debug switch'"
+---
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: api
+  namespace: shop
+spec:
+  mode: Block
+  ruleSets:
+  - ref:
+      kind: WAFRuleSet
+      name: api-modsecurity
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: api
+    sectionName: api
+---
+# From the ingress-nginx ModSecurity settings of Ingress shop/shop.
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFRuleSet
+metadata:
+  name: shop-modsecurity
+  namespace: shop
+spec:
+  source:
+    seclang: |
+      # annotation modsecurity-snippet, line 20
+      SecRule REQUEST_HEADERS:User-Agent "@contains sqlmap" "id:1004,phase:1,deny,status:403,msg:'sqlmap'"
+---
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: shop
+  namespace: shop
+spec:
+  body:
+    inspect: true
+  exclusions:
+  - ruleIDs:
+    - 920350
+    - 942430
+  - ruleIDs:
+    - 942100
+    when:
+      argument: password
+  - ruleIDs:
+    - 942100
+    when:
+      path: /search*
+  - ruleIDs:
+    - 932100
+    when:
+      argument: q
+      path: /search*
+  - ruleIDs:
+    - 941100
+    - 941101
+    - 941110
+    - 941120
+    - 941130
+    when:
+      path: /cms/editor*
+  mode: Block
+  ruleSets:
+  - inboundAnomalyThreshold: 10
+    paranoiaLevel: 2
+    ref:
+      kind: ClusterWAFRuleSet
+      name: owasp-crs-v4
+  - ref:
+      kind: WAFRuleSet
+      name: shop-modsecurity
+  skip:
+    bodyPaths:
+    - /upload/*
+    paths:
+    - /healthz
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: shop
+--- stderr
+note: no ConfigMap ingress-nginx/ingress-nginx-controller in the files: ModSecurity is taken as off globally (only the annotations count)
+Ingress blog/blog: WAFPolicy blog/blog (Detect)
+  mapped  annotation enable-owasp-core-rules: the built-in OWASP CRS v4
+  mapped  annotation enable-modsecurity (ingress-nginx's modsecurity.conf): SecRuleEngine DetectionOnly: mode: Detect
+  TODO    targetRefs: no HTTPRoute (or named rule of one) in namespace blog matches only hosts and paths of the Ingress (blog.example.com/); the policy still targets the Ingress
+Ingress files/cloud: WAFPolicy files/cloud (Detect), WAFRuleSet files/cloud-modsecurity
+  mapped  annotation modsecurity-snippet, line 1: Include /etc/nginx/owasp-modsecurity-crs/nginx-modsecurity.conf: the built-in OWASP CRS v4
+  TODO    annotation modsecurity-snippet, line 2: not migrated: Include /etc/nginx/owasp-modsecurity-crs/plugins/nextcloud-rule-exclusions-before.conf: Inkwall can't read files from the ingress-nginx pod; put the rules in a WAFRuleSet
+  check   annotation modsecurity-snippet, line 4: SecRequestBodyLimit 13107200: body.maxBytes: 10485760, the most Inkwall inspects; bodies between the two limits are now over the limit (body.onOversize)
+  TODO    annotation modsecurity-snippet, line 5: not migrated: SecRequestBodyNoFilesLimit 131072: no equivalent in Inkwall
+  check   annotation modsecurity-snippet, line 6: SecRequestBodyLimitAction ProcessPartial: body.onOversize: Allow; ModSecurity inspected the first part of an oversize body, Inkwall forwards it uninspected
+  check   annotation modsecurity-snippet, line 7: not migrated: SecAuditEngine RelevantOnly: ModSecurity's own logs; the engine logs verdicts itself (protection is unchanged)
+  check   annotation modsecurity-snippet, line 8: not migrated: SecAuditLog /dev/stdout: ModSecurity's own logs; the engine logs verdicts itself (protection is unchanged)
+  mapped  annotation modsecurity-snippet, line 9: kept in the WAFRuleSet: SecRuleRemoveById 941000-942999
+  TODO    annotation modsecurity-snippet, line 10: not migrated: SecRule REQUEST_FILENAME "@contains /remote.php/webdav" "id:9508102,phase:1,pass,t:none,nolog,ctl:ruleRemoveById=920420,ctl:ruleRemoveById=941000-942999": only @beginsWith (on REQUEST_FILENAME or REQUEST_URI) or @streq (on REQUEST_FILENAME) maps to a path
+  TODO    annotation modsecurity-snippet, line 12: not migrated: SecRule REQUEST_FILENAME "@beginsWith /dav" "id:9508103,phase:1,pass,nolog,ctl:ruleRemoveByTag=attack-injection-php": ctl:ruleRemoveByTag=attack-injection-php has no equivalent
+  TODO    annotation modsecurity-snippet, line 13: not migrated: setvar:tx.allowed_methods=GET HEAD POST OPTIONS PROPFIND: no WAFPolicy field sets this CRS variable
+  TODO    annotation modsecurity-snippet, line 14: not migrated: SecRule ARGS "@rx [" "id:1005,phase:2,deny": the engine rejects it: failed to compile the directive "secrule": error parsing regexp: missing closing ]: `[`
+  mapped  annotation modsecurity-snippet, line 3: SecRuleEngine DetectionOnly: mode: Detect
+  TODO    targetRefs: no HTTPRoute (or named rule of one) in namespace files matches only hosts and paths of the Ingress (cloud.example.com/); the policy still targets the Ingress
+Ingress shop/api: WAFPolicy shop/api (Block), WAFRuleSet shop/api-modsecurity
+  mapped  annotation modsecurity-snippet, line 2: kept in the WAFRuleSet: SecRule ARGS:debug "@streq true" "id:1100,phase:1,deny,status:403,msg:'debug switch'"
+  mapped  annotation modsecurity-snippet, line 1: SecRuleEngine On: mode: Block
+  check   the Ingress has no class: assumed served by ingress-nginx
+  mapped  targetRefs: rule api of HTTPRoute api: the Ingress's hosts and paths
+Ingress shop/legacy: no WAFPolicy
+  check   annotation enable-modsecurity: ModSecurity is off for this Ingress (enable-modsecurity is not true, nor enable-modsecurity in the ConfigMap): its other ModSecurity annotations have no effect; nothing to migrate
+Ingress shop/shop: WAFPolicy shop/shop (Block), WAFRuleSet shop/shop-modsecurity
+  mapped  annotation modsecurity-snippet, line 2: SecRequestBodyAccess On: body.inspect: true
+  mapped  annotation modsecurity-snippet, line 3: setvar:tx.blocking_paranoia_level=2: paranoiaLevel: 2
+  mapped  annotation modsecurity-snippet, line 4: setvar:tx.inbound_anomaly_score_threshold=10: inboundAnomalyThreshold: 10
+  check   annotation modsecurity-snippet, line 4: not migrated: setvar:tx.outbound_anomaly_score_threshold=5: Inkwall doesn't inspect responses
+  mapped  annotation modsecurity-snippet, line 13: SecRuleRemoveById 920350 942430: exclusions
+  mapped  annotation modsecurity-snippet, line 14: SecRuleUpdateTargetById 942100 "!ARGS:password": exclusions
+  mapped  annotation modsecurity-snippet, line 15: SecRule REQUEST_FILENAME "@beginsWith /search" "id:1001,phase:1,pass,nolog,t:none,ctl:ruleRemoveById=942100,ctl:ruleRemoveTargetById=932100;ARGS:q": exclusions on /search*
+  mapped  annotation modsecurity-snippet, line 17: SecRule REQUEST_FILENAME "@streq /healthz" "id:1002,phase:1,pass,nolog,ctl:ruleEngine=Off": skip.paths on /healthz
+  mapped  annotation modsecurity-snippet, line 18: SecRule REQUEST_URI "@beginsWith /upload/" "id:1003,phase:1,pass,nolog,ctl:requestBodyAccess=Off": skip.bodyPaths on /upload/*
+  mapped  annotation modsecurity-snippet, line 19: SecRule REQUEST_FILENAME "@beginsWith /cms/editor" "id:1005,phase:1,pass,nolog,ctl:ruleRemoveById=941100-941130": exclusions on /cms/editor*
+  check   annotation modsecurity-snippet, line 19: the range(s) 941100-941130 (5 rules) expanded to the embedded CRS's rules in them: rules a later CRS adds to a range are not excluded
+  mapped  annotation modsecurity-snippet, line 20: kept in the WAFRuleSet: SecRule REQUEST_HEADERS:User-Agent "@contains sqlmap" "id:1004,phase:1,deny,status:403,msg:'sqlmap'"
+  check   annotation modsecurity-transaction-id: not migrated: Inkwall has no setting for the ModSecurity transaction ID (logging only; protection is unchanged)
+  mapped  annotation enable-owasp-core-rules: the built-in OWASP CRS v4
+  mapped  annotation modsecurity-snippet, line 1: SecRuleEngine On: mode: Block
+  mapped  targetRefs: HTTPRoute shop: the Ingress's hosts and paths
+7 Ingress(es) read (1 of another class than nginx left out): 4 WAFPolicy, 3 WAFRuleSet; 8 setting(s) not migrated need a human (TODO)

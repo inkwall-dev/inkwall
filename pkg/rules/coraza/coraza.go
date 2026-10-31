@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	coreruleset "github.com/corazawaf/coraza-coreruleset/v4"
 	"github.com/corazawaf/coraza/v3"
@@ -726,6 +727,25 @@ SecRule ARGUMENTS_LIMIT_REACHED "@eq 1" \
 func RuleGroupNames() []string {
 	return slices.Sorted(maps.Keys(RuleGroups))
 }
+
+// CRSRuleIDs returns the IDs of the embedded CRS's rules, sorted. Tools use
+// it to expand ID ranges into exclusions.
+var CRSRuleIDs = sync.OnceValues(func() ([]int, error) {
+	var ids []int
+	_, err := compile(Config{}, func(r types.RuleMetadata) {
+		if inRange(r.ID(), crsIDMin, crsIDMax) {
+			ids = append(ids, r.ID())
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, errors.New("this Coraza version doesn't list the rules it compiles")
+	}
+	slices.Sort(ids)
+	return slices.Compact(ids), nil
+})
 
 // reportable decides whether a matched rule is reported. CRS and Coraza
 // setup, initialization and flow-control rules "match" on every request, so

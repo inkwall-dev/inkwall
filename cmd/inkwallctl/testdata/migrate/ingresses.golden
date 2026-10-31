@@ -90,7 +90,7 @@ metadata:
 spec:
   source:
     seclang: |
-      # annotation modsecurity-snippet, line 19
+      # annotation modsecurity-snippet, line 20
       SecRule REQUEST_HEADERS:User-Agent "@contains sqlmap" "id:1004,phase:1,deny,status:403,msg:'sqlmap'"
 ---
 apiVersion: waf.inkwall.dev/v1alpha1
@@ -118,6 +118,14 @@ spec:
     when:
       argument: q
       path: /search*
+  - ruleIDs:
+    - 941100
+    - 941101
+    - 941110
+    - 941120
+    - 941130
+    when:
+      path: /cms/editor*
   mode: Block
   ruleSets:
   - inboundAnomalyThreshold: 10
@@ -171,7 +179,9 @@ Ingress shop/shop: WAFPolicy shop/shop (Block), WAFRuleSet shop/shop-modsecurity
   mapped  annotation modsecurity-snippet, line 15: SecRule REQUEST_FILENAME "@beginsWith /search" "id:1001,phase:1,pass,nolog,t:none,ctl:ruleRemoveById=942100,ctl:ruleRemoveTargetById=932100;ARGS:q": exclusions on /search*
   mapped  annotation modsecurity-snippet, line 17: SecRule REQUEST_FILENAME "@streq /healthz" "id:1002,phase:1,pass,nolog,ctl:ruleEngine=Off": skip.paths on /healthz
   mapped  annotation modsecurity-snippet, line 18: SecRule REQUEST_URI "@beginsWith /upload/" "id:1003,phase:1,pass,nolog,ctl:requestBodyAccess=Off": skip.bodyPaths on /upload/*
-  mapped  annotation modsecurity-snippet, line 19: kept in the WAFRuleSet: SecRule REQUEST_HEADERS:User-Agent "@contains sqlmap" "id:1004,phase:1,deny,status:403,msg:'sqlmap'"
+  mapped  annotation modsecurity-snippet, line 19: SecRule REQUEST_FILENAME "@beginsWith /cms/editor" "id:1005,phase:1,pass,nolog,ctl:ruleRemoveById=941100-941130": exclusions on /cms/editor*
+  check   annotation modsecurity-snippet, line 19: the range(s) 941100-941130 (5 rules) expanded to the embedded CRS's rules in them: rules a later CRS adds to a range are not excluded
+  mapped  annotation modsecurity-snippet, line 20: kept in the WAFRuleSet: SecRule REQUEST_HEADERS:User-Agent "@contains sqlmap" "id:1004,phase:1,deny,status:403,msg:'sqlmap'"
   check   annotation modsecurity-transaction-id: not migrated: Inkwall has no setting for the ModSecurity transaction ID (logging only; protection is unchanged)
   mapped  annotation enable-owasp-core-rules: the built-in OWASP CRS v4
   mapped  annotation modsecurity-snippet, line 1: SecRuleEngine On: mode: Block

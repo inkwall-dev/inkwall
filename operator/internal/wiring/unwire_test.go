@@ -52,12 +52,22 @@ func TestUnwire(t *testing.T) {
 
 	// Policies the operator holds: one is kept, one is being deleted; and
 	// another controller's finalizer, which stays.
-	kept := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "kept", Finalizers: []string{Finalizer, "example.com/other"}}}
+	// Both were Accepted, Programmed and Ready; one wasn't held yet.
+	wasProgrammed := wafv1alpha1.WAFPolicyStatus{Conditions: []metav1.Condition{{
+		Type: wafv1alpha1.ConditionAccepted, Status: metav1.ConditionTrue, Reason: "Accepted", LastTransitionTime: metav1.Now(),
+	}, {
+		Type: wafv1alpha1.ConditionProgrammed, Status: metav1.ConditionTrue, Reason: ReasonProgrammed, LastTransitionTime: metav1.Now(),
+	}, {
+		Type: wafv1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: "Ready", LastTransitionTime: metav1.Now(),
+	}}}
+	kept := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "kept", Finalizers: []string{Finalizer, "example.com/other"}},
+		Status: wasProgrammed}
+	unheld := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "unheld"}, Status: wasProgrammed}
 	deleting := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "deleting", Finalizers: []string{Finalizer},
 		DeletionTimestamp: ptr.To(metav1.Now())}}
 
-	c := fake.NewClientBuilder().WithScheme(scheme()).
-		WithObjects(wired, onlyOurs, untouched, ours, theirs, wiredRoute, userRoute, kept, deleting).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme()).WithStatusSubresource(&wafv1alpha1.WAFPolicy{}).
+		WithObjects(wired, onlyOurs, untouched, ours, theirs, wiredRoute, userRoute, kept, unheld, deleting).Build()
 
 	n, err := Unwire(ctx, c)
 	if err != nil {
@@ -69,6 +79,19 @@ func TestUnwire(t *testing.T) {
 	var p wafv1alpha1.WAFPolicy
 	if err := c.Get(ctx, client.ObjectKeyFromObject(kept), &p); err != nil || !slices.Equal(p.Finalizers, []string{"example.com/other"}) {
 		t.Errorf("kept policy: %v, finalizers %v; want only the other controller's", err, p.Finalizers)
+	}
+	for _, obj := range []*wafv1alpha1.WAFPolicy{kept, unheld} {
+		if err := c.Get(ctx, client.ObjectKeyFromObject(obj), &p); err != nil {
+			t.Fatal(err)
+		}
+		if cond := meta.FindStatusCondition(p.Status.Conditions, wafv1alpha1.ConditionProgrammed); cond == nil ||
+			cond.Status != metav1.ConditionFalse || cond.Reason != ReasonUnwired {
+			t.Errorf("policy %s: Programmed %+v, want False (Unwired)", obj.Name, cond)
+		}
+		if cond := meta.FindStatusCondition(p.Status.Conditions, wafv1alpha1.ConditionReady); cond == nil ||
+			cond.Status != metav1.ConditionFalse || cond.Reason != ReasonUnwired {
+			t.Errorf("policy %s: Ready %+v, want False (Unwired)", obj.Name, cond)
+		}
 	}
 	if err := c.Get(ctx, client.ObjectKeyFromObject(deleting), &p); !apierrors.IsNotFound(err) {
 		t.Errorf("a policy being deleted, released: %v, want it gone", err)
