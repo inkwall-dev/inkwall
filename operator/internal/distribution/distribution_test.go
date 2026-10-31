@@ -52,8 +52,8 @@ func TestEnforced(t *testing.T) {
 	}{
 		{"not in a bundle", 0, []Engine{{Applied: 3}}, 0, metav1.ConditionFalse, ReasonNotInBundle, "not in a bundle"},
 		{"no engines", 3, nil, 0, metav1.ConditionFalse, ReasonNoEngines, "no engine"},
-		{"all current", 3, []Engine{{Applied: 3}, {Applied: 4}}, 0, metav1.ConditionTrue, ReasonEnforced, "2/2 engines on bundle 3"},
-		{"one behind", 3, []Engine{{Applied: 3}, {Applied: 2}}, 0, metav1.ConditionFalse, ReasonEnginesBehind, "1/2 engines on bundle 3"},
+		{"all current", 3, []Engine{{Applied: 3}, {Applied: 4}}, 0, metav1.ConditionTrue, ReasonEnforced, "every engine runs bundle 3 or later"},
+		{"one behind", 3, []Engine{{Applied: 3}, {Applied: 2}}, 0, metav1.ConditionFalse, ReasonEnginesBehind, "some engines don't run bundle 3 yet"},
 		{
 			"one rejected", 3,
 			[]Engine{{Applied: 3}, {Applied: 2, Rejected: 3, RejectError: "line 1: bad rule", PodNamespace: "traefik", PodName: "traefik-1"}}, 0,
@@ -61,11 +61,11 @@ func TestEnforced(t *testing.T) {
 		},
 		// A rejection of an older bundle doesn't matter once the engine
 		// runs a newer one.
-		{"old rejection", 3, []Engine{{Applied: 3, Rejected: 2}}, 0, metav1.ConditionTrue, ReasonEnforced, "1/1"},
+		{"old rejection", 3, []Engine{{Applied: 3, Rejected: 2}}, 0, metav1.ConditionTrue, ReasonEnforced, "every engine runs bundle 3"},
 		// A report over its size limit: the engines left out may run
 		// anything.
-		{"engines left out", 3, []Engine{{Applied: 3}, {Applied: 3}}, 2, metav1.ConditionFalse, ReasonEnginesUnreported, "2/4 engines on bundle 3, 2 not in"},
-		{"only engines left out", 3, nil, 1, metav1.ConditionFalse, ReasonEnginesUnreported, "0/1 engines"},
+		{"engines left out", 3, []Engine{{Applied: 3}, {Applied: 3}}, 2, metav1.ConditionFalse, ReasonEnginesUnreported, "not in their replica's report"},
+		{"only engines left out", 3, nil, 1, metav1.ConditionFalse, ReasonEnginesUnreported, "bundle 3 is not known to run everywhere"},
 		{"rejected and left out", 3, []Engine{{Rejected: 3}}, 1, metav1.ConditionFalse, ReasonEngineNack, "1/2 engines rejected"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -157,7 +157,7 @@ Validation runs in three steps, cheapest first:
 |---|---|---|
 | `Accepted` | Spec valid, references resolve | `InvalidRef`, `Conflict`, `RuleCompileError`, `TargetUnsupported` |
 | `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `NoTargets`, `InjectionDisabled`, `Unwired` |
-| `Enforced` | Every serving engine ACKed a bundle with this generation | `EnginesBehind` (`3/6`), `EngineNack`, `NoEngines`, `NotInBundle` |
+| `Enforced` | Every serving engine ACKed a bundle with this generation | `EnginesBehind`, `EngineNack` (`1/6`), `EnginesUnreported`, `NoEngines`, `NotInBundle` |
 | `Ready` | The three above are True | first failing condition's reason |
 
 Status also has `bundleVersion` and `observedGeneration`. `bundleVersion` is the first bundle that
@@ -563,10 +563,17 @@ conditions of [§3.2](#32-status-contract). It writes only on change, at most on
 2 s.
 
 **Built (v0.1.0):** `Enforced=True` when every connected engine runs a bundle whose version is at
-least the policy's `status.bundleVersion`. Otherwise the reason is `NoEngines`, `EnginesBehind`
-(`1/3 engines on bundle 42`), `EngineNack` (with the first error), `EnginesUnreported` (a replica's
-report left engines out, [§4.7](#47-distribution-server-all-replicas)) or `NotInBundle`. It waits for
-the bundle builder to report the policy's current generation (`status.observedGeneration`).
+least the policy's `status.bundleVersion` (`every engine runs bundle 42 or later`). Otherwise the
+reason is `NoEngines`, `EnginesBehind` (`some engines don't run bundle 42 yet`), `EngineNack`
+(`1/3 engines rejected bundle 42`, with the first error), `EnginesUnreported` (a replica's report
+left engines out, [§4.7](#47-distribution-server-all-replicas)) or `NotInBundle`. It waits for the
+bundle builder to report the policy's current generation (`status.observedGeneration`).
+
+**Writes on change** (#197). The Reporter writes a policy's status only when its `Enforced` or
+`Ready` condition changes. Only the `EngineNack` message counts engines, so engines connecting or
+going away (a proxy rollout) don't rewrite every policy; `inkwall_operator_engines{state}` has the
+counts. It reads the policies from the cache without copying them, copies only those it writes,
+and writes up to 8 at once, like the bundle builder.
 
 **Writes per bundle** (#149). The builder writes a policy's `bundleVersion` only when the bundle
 changes what the policy enforces: its own entry, the rule sets it binds, or suspension
@@ -884,6 +891,27 @@ Against the targets:
 
   The table above predates #149. With 10 edits, p95 and max are the same edit. Peak RSS at
   5,000 × 500 was 404 MiB before and 509 MiB after, in one run each: under the target, but close.
+- **Peak RSS at 5,000 × 500, over several runs** (#197). It varies by up to 100 MiB from run to
+  run, so one run says little.
+  - Why it varies: RSS follows the Go heap goal, twice the live heap at the last GC. The live heap
+    is about 105 MiB at rest: the informer cache (about 45 MiB, mostly the IngressRoutes, kept
+    unstructured), 500 engine connections (about 20 MiB) and the bundle. A bundle reconcile adds
+    40–65 MiB while it runs: the current bundle decoded from its Secret, the next one, and the
+    listed objects. So the peak depends on when a GC lands.
+  - Before: every 2 s the Reporter copied all 5,000 policies out of the cache, and an engine
+    connecting or going away rewrote every policy's `Enforced`, its message counting engines.
+  - Now it writes only on change, copies only the policies it writes
+    ([§4.8](#48-status-aggregator)), and writes up to 8 at once.
+  - Same machine and harness, shared with other jobs, edits phase:
+
+| 5,000 × 500 | Runs | Peak RSS min / median / max | Over 512 MiB |
+|---|---|---|---|
+| Before (#187) | 6 | 421 / 474 / 523 MiB | 1 |
+| After (#197) | 7 | 413 / 429 / 472 MiB | 0 |
+
+  Change → all engines p95 was 4.0–8.3 s after. Listing the policies without copying in the bundle
+  reconciler and the Pod webhook reconciler too lowered the peak heap by about 4%, but not the
+  peak RSS measurably, so it isn't done.
 
 **Engine memory per policy.** A compiled Coraza WAF with the CRS keeps
 about 2.1 MiB of heap, and takes 10–15 ms to compile.
