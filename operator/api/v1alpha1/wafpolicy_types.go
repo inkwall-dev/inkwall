@@ -101,7 +101,7 @@ type TargetRef struct {
 	// Kind of the target: Ingress, HTTPRoute or IngressRoute. An
 	// IngressRoute's hosts and paths come from its routes' match rules,
 	// which may combine Host, Path and PathPrefix with &&; a rule with
-	// anything else (||, !, other matchers) is not accepted. An HTTPRoute's
+	// anything else (||, !, other matchers) is not accepted. An HTTPRoute's routes
 	// are each of its hostnames (none: any host) with each of its rules'
 	// matches, which may have an Exact or PathPrefix path and a method; a
 	// match with a RegularExpression path, headers or queryParams is not
