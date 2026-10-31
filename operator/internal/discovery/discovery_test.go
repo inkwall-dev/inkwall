@@ -40,8 +40,12 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// traefikKinds are what Traefik's wiring takes today.
-var traefikKinds = map[string][]schema.GroupKind{"traefik": {ingressKind, {Group: "traefik.io", Kind: "IngressRoute"}}}
+// traefikKinds are what Traefik's wiring takes; ingressOnly, an integration
+// that doesn't wire HTTPRoutes.
+var (
+	traefikKinds = map[string][]schema.GroupKind{"traefik": {ingressKind, {Group: "traefik.io", Kind: "IngressRoute"}, httpRouteKind}}
+	ingressOnly  = map[string][]schema.GroupKind{"traefik": {ingressKind}}
+)
 
 func TestProxies(t *testing.T) {
 	const (
@@ -64,18 +68,18 @@ func TestProxies(t *testing.T) {
 			want: []wafv1alpha1.ProxyStatus{
 				{ControllerName: nginx, IngressClasses: []string{"nginx"}, Support: wafv1alpha1.SupportUnsupported,
 					Message: "Inkwall has no integration for this controller: its routes can't be protected"},
-				{ControllerName: traefikGateway, Integration: "traefik", GatewayClasses: []string{"traefik"}, Support: wafv1alpha1.SupportUnsupported,
-					Message: "Inkwall doesn't wire traefik's HTTPRoutes (GatewayClasses) yet"},
+				{ControllerName: traefikGateway, Integration: "traefik", GatewayClasses: []string{"traefik"}, Support: wafv1alpha1.SupportFull},
 				{ControllerName: traefik, Integration: "traefik", IngressClasses: []string{"internal", "traefik"}, Support: wafv1alpha1.SupportFull},
 			},
 		},
 		{
-			// Once an integration wires HTTPRoutes (#125), its GatewayClasses are.
-			name:    "HTTPRoutes wired",
+			// An integration that doesn't wire HTTPRoutes: its GatewayClasses aren't.
+			name:    "HTTPRoutes not wired",
 			gateway: []Class{{"traefik", traefikGateway}},
-			kinds:   map[string][]schema.GroupKind{"traefik": {httpRouteKind}},
+			kinds:   ingressOnly,
 			want: []wafv1alpha1.ProxyStatus{
-				{ControllerName: traefikGateway, Integration: "traefik", GatewayClasses: []string{"traefik"}, Support: wafv1alpha1.SupportFull},
+				{ControllerName: traefikGateway, Integration: "traefik", GatewayClasses: []string{"traefik"}, Support: wafv1alpha1.SupportUnsupported,
+					Message: "Inkwall doesn't wire traefik's HTTPRoutes (GatewayClasses) yet"},
 			},
 		},
 		{
@@ -83,7 +87,7 @@ func TestProxies(t *testing.T) {
 			name:    "partial",
 			ingress: []Class{{"traefik", traefik}},
 			gateway: []Class{{"odd", traefik}},
-			kinds:   traefikKinds,
+			kinds:   ingressOnly,
 			want: []wafv1alpha1.ProxyStatus{
 				{ControllerName: traefik, Integration: "traefik", IngressClasses: []string{"traefik"}, GatewayClasses: []string{"odd"},
 					Support: wafv1alpha1.SupportPartial, Message: "Inkwall doesn't wire traefik's HTTPRoutes (GatewayClasses) yet"},
@@ -99,6 +103,9 @@ func TestProxies(t *testing.T) {
 // TestReconcile records the classes in the InkwallConfig, once it exists.
 func TestReconcile(t *testing.T) {
 	testenv.Skip(t, env)
+	if err := testenv.InstallGatewayAPI(env); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	s := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(s)

@@ -21,8 +21,9 @@ Argo CD and Flux so they neither report it as drift nor undo it.
 ## Prerequisites
 
 - Inkwall installed ([chart README](../deploy/helm/inkwall/README.md)), with `WAFPolicy`
-  objects that target your [`Ingress`](https://doc.traefik.io/traefik/routing/providers/kubernetes-ingress/)
-  or [`IngressRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) objects
+  objects that target your [`Ingress`](https://doc.traefik.io/traefik/routing/providers/kubernetes-ingress/),
+  [`IngressRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) or
+  [`HTTPRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/) objects
   served by [Traefik](https://doc.traefik.io/traefik/).
 - Those routes applied by [Argo CD](https://argo-cd.readthedocs.io/en/stable/) or by
   [Flux](https://fluxcd.io/flux/).
@@ -43,6 +44,8 @@ its own entries when the route is no longer protected. It writes with
 | `Ingress` | annotation `waf.inkwall.dev/wired` | `<namespace>-inkwall-waf@kubernetescrd`: marks what the operator added |
 | `IngressRoute` (`traefik.io`) | `spec.routes[*].middlewares` | `{name: inkwall-waf}` added first in every route; your entries kept after it |
 | `IngressRoute` | annotation `waf.inkwall.dev/wired` | `inkwall-waf` |
+| `HTTPRoute` (`gateway.networking.k8s.io`, a Traefik Gateway's) | `spec.rules[*].filters` | `{type: ExtensionRef, extensionRef: {group: traefik.io, kind: Middleware, name: inkwall-waf}}` added first in every protected rule (with `sectionName`, that rule only); your filters kept after it |
+| `HTTPRoute` | annotation `waf.inkwall.dev/wired` | `inkwall-waf` |
 | `WAFPolicy` | `metadata.finalizers` | `waf.inkwall.dev/unwire` ([finalizer](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/)): the operator unwires the policy's routes before it can be deleted |
 | `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet`, `InkwallConfig` | `status` | Conditions, bundle version |
 
@@ -69,12 +72,13 @@ when your manifest sets the same field:
 | An `Ingress` without the `router.middlewares` annotation | None |
 | An `Ingress` with its own `router.middlewares` annotation | The annotation |
 | Any `IngressRoute` | `spec.routes`. Traefik's CRD doesn't declare a [list type](https://kubernetes.io/docs/reference/using-api/server-side-apply/#merge-strategy) for `routes`, so the whole list is one value to the API server and to both tools |
+| A protected `HTTPRoute` | `spec.rules`. The Gateway API's CRD declares `rules` and `filters` `atomic` lists, so the whole list is one value too |
 | A `WAFPolicy` without `metadata.finalizers` | None |
 | `status` | None: both tools ignore it |
 
 Undoing the drift is worse than seeing it: the tool removes Inkwall's Middleware, and the route
 is not inspected until the operator puts it back. It puts it back as soon as it sees the change,
-because it watches Ingresses and IngressRoutes, but the tool undoes it again on its next sync.
+because it watches the routes, but the tool undoes it again on its next sync.
 
 ## Argo CD
 
@@ -103,6 +107,13 @@ spec:
         - '.spec.routes[]? | select(.middlewares == [{"name": "inkwall-waf"}]) | .middlewares'
         # A route with yours too: only Inkwall's entry.
         - '.spec.routes[]?.middlewares[]? | select(.name == "inkwall-waf")'
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      jqPathExpressions:
+        # A rule with only Inkwall's filter: its whole list.
+        - '.spec.rules[]? | select(.filters == [{"type": "ExtensionRef", "extensionRef": {"group": "traefik.io", "kind": "Middleware", "name": "inkwall-waf"}}]) | .filters'
+        # A rule with yours too: only Inkwall's filter.
+        - '.spec.rules[]?.filters[]? | select(.type == "ExtensionRef" and .extensionRef == {"group": "traefik.io", "kind": "Middleware", "name": "inkwall-waf"})'
   syncPolicy:
     syncOptions:
       - ApplyOutOfSyncOnly=true
@@ -113,7 +124,7 @@ spec:
   `traefik.ingress.kubernetes.io~1router.middlewares`.
 - Argo CD runs each [jq](https://jqlang.org/manual/) expression as a deletion, in order. The first
   expression removes a list that holds only Inkwall's entry. The second removes Inkwall's entry
-  from a list that also holds yours, so your own Middlewares still show up in the diff.
+  from a list that also holds yours, so your own Middlewares and filters still show up in the diff.
 - `waf.inkwall.dev/wired` and the finalizer need no rule: your manifests don't set them.
 
 `ignoreDifferences` only affects the diff. A sync still applies your manifest as it is, and that
@@ -132,9 +143,9 @@ Two trade-offs to know:
   Ingress, and the operator wires it again right after.
 - `RespectIgnoreDifferences=true` would keep the live value of ignored fields during a sync, so
   Inkwall's entry would stay. For the `Ingress` annotation it also keeps your old Middlewares
-  instead of applying your change. For `IngressRoute`, Argo CD merges custom resources' lists as a
-  whole, and we haven't verified how it treats an ignored entry inside `spec.routes`. Don't rely
-  on it there.
+  instead of applying your change. For `IngressRoute` and `HTTPRoute`, Argo CD merges custom
+  resources' lists as a whole, and we haven't verified how it treats an ignored entry inside
+  `spec.routes` or `spec.rules`. Don't rely on it there.
 
 ### Deleting policies with Argo CD
 
@@ -159,8 +170,8 @@ interval it does a dry run and applies again when the result differs from the cl
 manifest doesn't set belong to other managers and are left alone.
 
 So, as in the table above: an `Ingress` without its own `router.middlewares` annotation never
-drifts. An `Ingress` with one, and every `IngressRoute`, is reset at each interval: Flux removes
-Inkwall's entry, and the operator adds it back.
+drifts. An `Ingress` with one, every `IngressRoute` and every protected `HTTPRoute` are reset at
+each interval: Flux removes Inkwall's entry, and the operator adds it back.
 
 Flux 2.9 (kustomize-controller v1.9) and later have
 [`spec.ignore`](https://fluxcd.io/flux/components/kustomize/kustomizations/) on the
@@ -194,12 +205,19 @@ spec:
         group: traefik.io
         kind: IngressRoute
         name: web
+    # One path per protected rule of the HTTPRoute: /spec/rules/0, /spec/rules/1, ...
+    - paths:
+        - /spec/rules/0/filters
+      target:
+        group: gateway.networking.k8s.io
+        kind: HTTPRoute
+        name: web
 ```
 
 - Flux's paths are plain JSON pointers. A pointer can't pick one list entry by its content, so the
-  whole `middlewares` list of a route is ignored, yours included. After the first apply, Flux no
-  longer applies changes to an ignored field. To change your own Middlewares on a protected route,
-  remove the rule, change them, and add the rule back.
+  whole `middlewares` list of a route, or `filters` list of a rule, is ignored, yours included.
+  After the first apply, Flux no longer applies changes to an ignored field. To change your own
+  Middlewares or filters on a protected route, remove the rule, change them, and add the rule back.
 - A rule without `target` applies to every object of the Kustomization. Scope each one.
 
 With an older Flux, or to keep Flux off a protected route entirely, annotate the route in Git with
@@ -301,6 +319,7 @@ spec:
    kubectl -n shop get ingress web \
      -o jsonpath='{.metadata.annotations.traefik\.ingress\.kubernetes\.io/router\.middlewares}{"\n"}'
    kubectl -n shop get ingressroute web -o jsonpath='{.spec.routes[*].middlewares[*].name}{"\n"}'
+   kubectl -n shop get httproute web -o jsonpath='{.spec.rules[*].filters[*].extensionRef.name}{"\n"}'
    ```
 
    Each prints `shop-inkwall-waf@kubernetescrd` or `inkwall-waf` first.
