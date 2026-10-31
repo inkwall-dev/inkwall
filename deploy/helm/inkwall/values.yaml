@@ -11,6 +11,9 @@ operator:
   # operator is never on the request path, so traffic doesn't depend on it.
   replicas: 2
 
+  # The operator sets the Go runtime's soft memory limit (GOMEMLIMIT) to
+  # 90% of limits.memory, so its GC works harder near the limit instead of
+  # letting the heap double.
   resources:
     requests:
       cpu: 100m

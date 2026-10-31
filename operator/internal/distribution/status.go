@@ -81,9 +81,10 @@ func init() {
 //
 // leftOut engines are connected but missing from their replica's report.
 //
-// Only the EngineNack message counts engines. The others don't, so engines
-// connecting or going away don't rewrite every policy's status; the
-// inkwall_operator_engines metric has the counts.
+// The messages don't count engines, so engines connecting or going away
+// don't rewrite every policy's status; the inkwall_operator_engines metric
+// has the counts. EngineNack names the first engine (by ID) that rejected
+// the bundle, with its error.
 func Enforced(version int64, engines []Engine, leftOut int) (metav1.ConditionStatus, string, string) {
 	if version <= 0 {
 		return metav1.ConditionFalse, ReasonNotInBundle, "the policy's current spec is not in a bundle"
@@ -92,24 +93,21 @@ func Enforced(version int64, engines []Engine, leftOut int) (metav1.ConditionSta
 	if len(engines) == 0 && leftOut == 0 {
 		return metav1.ConditionFalse, ReasonNoEngines, "no engine is connected"
 	}
-	current, rejected := 0, 0
+	current := 0
 	var rejectErr string
 	for _, e := range engines {
 		switch {
 		case e.Applied >= v:
 			current++
-		case e.Rejected >= v:
-			rejected++
-			if rejectErr == "" {
-				rejectErr = fmt.Sprintf("%s: %s", engineName(e), e.RejectError)
-			}
+		case e.Rejected >= v && rejectErr == "":
+			rejectErr = fmt.Sprintf("%s: %s", engineName(e), e.RejectError)
 		}
 	}
 	total := len(engines) + leftOut
 	switch {
-	case rejected > 0:
+	case rejectErr != "":
 		return metav1.ConditionFalse, ReasonEngineNack,
-			fmt.Sprintf("%d/%d engines rejected bundle %d (%s)", rejected, total, v, rejectErr)
+			fmt.Sprintf("some engines rejected bundle %d (first: %s)", v, rejectErr)
 	case leftOut > 0:
 		return metav1.ConditionFalse, ReasonEnginesUnreported,
 			fmt.Sprintf("some engines are not in their replica's report (over its size limit), so bundle %d is not known to run everywhere", v)

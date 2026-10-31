@@ -490,7 +490,7 @@ func (t *Traefik) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 	// can't be written is reported, the others are still wired, and its
 	// namespace keeps the Middleware: a router referring to a missing one
 	// fails.
-	var errs error
+	var errs []error
 	for i := range ingresses.Items {
 		ing := &ingresses.Items[i]
 		k := types.NamespacedName{Namespace: ing.Namespace, Name: ing.Name}
@@ -498,7 +498,7 @@ func (t *Traefik) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 		want := protected && on && tg.controller == integrations.Traefik.Controller && st.middlewareErr[ing.Namespace] == ""
 		st.wanted[ingressKind][k] = want
 		if err := annotate(ctx, t.Client, ing, want); err != nil {
-			errs = errors.Join(errs, fmt.Errorf("wire Ingress %s: %w", k, err))
+			errs = append(errs, fmt.Errorf("wire Ingress %s: %w", k, err))
 			st.ingressErr[k] = fmt.Sprintf("Ingress %s: %v", k.Name, err)
 			needed[k.Namespace] = true
 		}
@@ -511,10 +511,10 @@ func (t *Traefik) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 		switch err := wireRoute(ctx, t.Client, ir, want); {
 		case apierrors.IsConflict(err):
 			// Changed since the cache saw it: again, once it has.
-			errs = errors.Join(errs, fmt.Errorf("wire IngressRoute %s: %w", k, err))
+			errs = append(errs, fmt.Errorf("wire IngressRoute %s: %w", k, err))
 			needed[k.Namespace] = true
 		case err != nil:
-			errs = errors.Join(errs, fmt.Errorf("wire IngressRoute %s: %w", k, err))
+			errs = append(errs, fmt.Errorf("wire IngressRoute %s: %w", k, err))
 			st.routeErr[k] = fmt.Sprintf("IngressRoute %s: %v", k.Name, err)
 			logger.Error(err, "IngressRoute not wired", "ingressroute", k)
 			needed[k.Namespace] = true
@@ -530,10 +530,10 @@ func (t *Traefik) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 		st.wanted[httpRouteKind][k] = sel != nil
 		switch err := t.wireHTTPRoute(ctx, hr, sel); {
 		case apierrors.IsConflict(err):
-			errs = errors.Join(errs, fmt.Errorf("wire HTTPRoute %s: %w", k, err))
+			errs = append(errs, fmt.Errorf("wire HTTPRoute %s: %w", k, err))
 			needed[k.Namespace] = true
 		case err != nil:
-			errs = errors.Join(errs, fmt.Errorf("wire HTTPRoute %s: %w", k, err))
+			errs = append(errs, fmt.Errorf("wire HTTPRoute %s: %w", k, err))
 			st.httpRouteErr[k] = fmt.Sprintf("HTTPRoute %s: %v", k.Name, err)
 			logger.Error(err, "HTTPRoute not wired", "httproute", k)
 			needed[k.Namespace] = true
@@ -543,10 +543,10 @@ func (t *Traefik) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 	// After the routes: a router referring to a missing Middleware fails.
 	if st.traefikCRDs {
 		if err := t.pruneMiddlewares(ctx, needed); err != nil {
-			errs = errors.Join(errs, err)
+			errs = append(errs, err)
 		}
 	}
-	return st.result(targets), errs
+	return st.result(targets), errors.Join(errs...)
 }
 
 // result reports on each target.
