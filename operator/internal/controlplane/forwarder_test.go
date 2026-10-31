@@ -6,9 +6,11 @@ package controlplane
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +20,10 @@ import (
 
 	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/pkg/events"
+	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/rules"
 )
 
 func batchOf(dropped uint64, ids ...string) *eventsv1.EventBatch {
@@ -271,6 +277,33 @@ func TestForwarderSendsEvents(t *testing.T) {
 	if !slices.Contains(roles, "STREAM_ROLE_EVENTS") {
 		t.Errorf("Hellos %v, want an events stream", roles)
 	}
+}
+
+// A batch over the contract's message limit is uploaded in parts.
+func TestForwarderLargeBatch(t *testing.T) {
+	e, f := forwarderEnv(t, true)
+	waitFor(t, "the events stream", func() bool { return f.accepts.Load() })
+	long := strings.Repeat("x", 4096)
+	src := events.Source{EngineID: strings.Repeat("e", 253), PodNamespace: strings.Repeat("n", 63), PodName: strings.Repeat("p", 253)}
+	v := pipeline.Verdict{Action: pipeline.ActionDeny, Status: 403, Reason: pipeline.ReasonRule, Policy: long}
+	for i := range 64 {
+		v.Matches = append(v.Matches, rules.Match{RuleID: 900000 + i, Variable: "ARGS:" + long, Value: long})
+	}
+	req := &request.Request{ID: long, Method: long, Host: long, Headers: http.Header{"User-Agent": {long}}}
+	const n = 2000
+	b := &eventsv1.EventBatch{Dropped: 1}
+	for range n {
+		b.Events = append(b.Events, events.New(src, req, "/"+long, v, time.Now()))
+	}
+	if size := proto.Size(b); size <= maxMessage {
+		t.Fatalf("the batch is %d bytes, want over %d", size, maxMessage)
+	}
+	f.Add(b)
+	waitFor(t, "every event", func() bool { return e.cp.Stats().Events == n })
+	if st := e.cp.Stats(); st.EventsDropped != 1 {
+		t.Errorf("dropped %d, want 1", st.EventsDropped)
+	}
+	waitFor(t, "the acks", func() bool { return f.q.Load().events() == 0 })
 }
 
 func TestForwarderResendsAfterReconnect(t *testing.T) {
