@@ -715,8 +715,8 @@ Removal must never leave a proxy failing closed on a missing engine.
     defaults, and keeps wiring the routes of the pods they still select.
 - **Uninstall** runs the hook with injection off too. The hook also sets the `WAFPolicy` webhook to
   `Ignore` (no replica answers it, and it would refuse the update), reports every policy
-  `Programmed=False` (`Unwired`, #195), and removes the finalizer from every policy. Deleting a
-  policy, or its namespace, then never waits for an operator that is gone.
+  `Programmed=False` and `Ready=False` (`Unwired`, #195), and removes the finalizer from every
+  policy. Deleting a policy, or its namespace, then never waits for an operator that is gone.
   Without the hook (`--no-hooks`, `uninstall.unwire=false`), the chart README says how to clean up.
 - Tested on kind:
   - a policy deleted while the operator is scaled to 0 stays, wired, until the operator is back;

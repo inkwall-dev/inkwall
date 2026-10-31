@@ -31,10 +31,11 @@ type Unwired struct {
 // Unwire undoes the wiring at uninstall: every integration removes its
 // wiring, keeping the user's own (for Traefik, the operator's Middleware
 // from every Ingress and IngressRoute it wired, then the Middlewares it
-// created), and then every WAFPolicy is reported Programmed=False
-// (Unwired) and released from the finalizer, which no operator will remove
-// any more. The proxies then stop sending those routes to the engine,
-// which a proxy pod started after the uninstall doesn't have. Run it with the operator stopped, or it wires them again.
+// created). Then every WAFPolicy is reported Programmed=False and
+// Ready=False (Unwired), and released from the finalizer, which no
+// operator will remove any more. The proxies then stop sending those
+// routes to the engine, which a proxy pod started after the uninstall
+// doesn't have. Run it with the operator stopped, or it wires them again.
 func Unwire(ctx context.Context, c client.Client) (Unwired, error) {
 	n := Unwired{Objects: map[string]int{}}
 	for _, in := range Integrations(c, c, nil, nil) {
@@ -54,9 +55,9 @@ func Unwire(ctx context.Context, c client.Client) (Unwired, error) {
 	}
 	for i := range policies.Items {
 		p := &policies.Items[i]
-		// No operator will report it any more.
+		// No operator will report it any more; Ready follows Programmed.
 		if p.DeletionTimestamp == nil {
-			err := setProgrammed(ctx, c, p, metav1.ConditionFalse, ReasonUnwired, unwiredMessage)
+			err := setProgrammed(ctx, c, p, metav1.ConditionFalse, ReasonUnwired, unwiredMessage, true)
 			if client.IgnoreNotFound(err) != nil {
 				return n, fmt.Errorf("set the status of WAFPolicy %s/%s: %w", p.Namespace, p.Name, err)
 			}

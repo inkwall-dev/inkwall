@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 )
 
@@ -402,15 +403,16 @@ func (r *Reconciler) report(ctx context.Context, policies []wafv1alpha1.WAFPolic
 			continue
 		}
 		st, reason, msg := programmed(p, rep)
-		if err := setProgrammed(ctx, r.Client, p, st, reason, msg); client.IgnoreNotFound(err) != nil {
+		if err := setProgrammed(ctx, r.Client, p, st, reason, msg, false); client.IgnoreNotFound(err) != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// setProgrammed sets a policy's Programmed condition, if it changed.
-func setProgrammed(ctx context.Context, c client.Client, p *wafv1alpha1.WAFPolicy, st metav1.ConditionStatus, reason, msg string) error {
+// setProgrammed sets a policy's Programmed condition, if it changed, and
+// with ready recomputes Ready too: at uninstall, no status aggregator will.
+func setProgrammed(ctx context.Context, c client.Client, p *wafv1alpha1.WAFPolicy, st metav1.ConditionStatus, reason, msg string, ready bool) error {
 	first := true
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if !first {
@@ -419,9 +421,13 @@ func setProgrammed(ctx context.Context, c client.Client, p *wafv1alpha1.WAFPolic
 			}
 		}
 		first = false
-		if !meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
+		changed := meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
 			Type: wafv1alpha1.ConditionProgrammed, Status: st, Reason: reason, Message: msg, ObservedGeneration: p.Generation,
-		}) {
+		})
+		if ready && meta.SetStatusCondition(&p.Status.Conditions, distribution.Ready(p.Status.Conditions, p.Generation)) {
+			changed = true
+		}
+		if !changed {
 			return nil
 		}
 		return c.Status().Update(ctx, p)

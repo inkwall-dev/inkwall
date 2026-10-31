@@ -52,9 +52,13 @@ func TestUnwire(t *testing.T) {
 
 	// Policies the operator holds: one is kept, one is being deleted; and
 	// another controller's finalizer, which stays.
-	// Both were Programmed; one wasn't held yet.
+	// Both were Accepted, Programmed and Ready; one wasn't held yet.
 	wasProgrammed := wafv1alpha1.WAFPolicyStatus{Conditions: []metav1.Condition{{
+		Type: wafv1alpha1.ConditionAccepted, Status: metav1.ConditionTrue, Reason: "Accepted", LastTransitionTime: metav1.Now(),
+	}, {
 		Type: wafv1alpha1.ConditionProgrammed, Status: metav1.ConditionTrue, Reason: ReasonProgrammed, LastTransitionTime: metav1.Now(),
+	}, {
+		Type: wafv1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: "Ready", LastTransitionTime: metav1.Now(),
 	}}}
 	kept := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "kept", Finalizers: []string{Finalizer, "example.com/other"}},
 		Status: wasProgrammed}
@@ -83,6 +87,10 @@ func TestUnwire(t *testing.T) {
 		if cond := meta.FindStatusCondition(p.Status.Conditions, wafv1alpha1.ConditionProgrammed); cond == nil ||
 			cond.Status != metav1.ConditionFalse || cond.Reason != ReasonUnwired {
 			t.Errorf("policy %s: Programmed %+v, want False (Unwired)", obj.Name, cond)
+		}
+		if cond := meta.FindStatusCondition(p.Status.Conditions, wafv1alpha1.ConditionReady); cond == nil ||
+			cond.Status != metav1.ConditionFalse || cond.Reason != ReasonUnwired {
+			t.Errorf("policy %s: Ready %+v, want False (Unwired)", obj.Name, cond)
 		}
 	}
 	if err := c.Get(ctx, client.ObjectKeyFromObject(deleting), &p); !apierrors.IsNotFound(err) {
