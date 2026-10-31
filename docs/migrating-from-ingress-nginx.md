@@ -81,9 +81,9 @@ the same prefix, but a prefix and an `Exact` path are not.
   only some methods, headers or query parameters would change what the policy covers, so it is
   never picked.
 
-[`inkwallctl test`](testing-policies.md) routes requests through IngressRoutes (`--ingress
-ingressroutes.yaml`), so policies retargeted to IngressRoutes can be checked offline as below.
-It doesn't route HTTPRoutes yet.
+[`inkwallctl test`](testing-policies.md) routes requests through HTTPRoutes and IngressRoutes
+(`--ingress httproutes.yaml`), so policies retargeted to them can be checked offline as below.
+Give it the Ingresses too when some policies still target them (`TODO`).
 
 ## What is converted
 
