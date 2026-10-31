@@ -51,6 +51,9 @@ allow      GET /?id=1%27%20OR%20%271%27%3D%271  reason=no_policy  0s
 - A file, or a directory of `.yaml`, `.yml` and `.json` files, may hold several YAML documents of
   any of these kinds, or `kubectl get -o yaml` output. Each object is read by its kind, whichever
   flag named the file.
+- Fields are checked as the API server's strict field validation does: a misspelled field is an
+  error, not a setting silently left out. In an IngressRoute's routes, `inkwallctl` checks `match`
+  and `kind`, and takes `services`, `middlewares` and the other fields Traefik reads as they are.
 - Without `--ingress`, a single policy applies to every request; several policies need the
   Ingresses or IngressRoutes they target.
 - An IngressRoute's match rules are read as the operator reads them: `Host`, `Path` and

@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
 )
@@ -104,7 +105,7 @@ func testWiring(ctx context.Context, t *testing.T, c client.Client) {
 
 	eventually(t, "the Middleware and the annotation", func() string {
 		m := &unstructured.Unstructured{}
-		m.SetGroupVersionKind(wiring.MiddlewareGVK)
+		m.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
 		if err := c.Get(ctx, types.NamespacedName{Namespace: "store", Name: wiring.MiddlewareName}, m); err != nil {
 			return err.Error()
 		}
@@ -145,7 +146,7 @@ func testWiring(ctx context.Context, t *testing.T, c client.Client) {
 
 	// A Middleware of the same name made by someone else is left alone.
 	theirs := &unstructured.Unstructured{}
-	theirs.SetGroupVersionKind(wiring.MiddlewareGVK)
+	theirs.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
 	theirs.SetNamespace("clash")
 	theirs.SetName(wiring.MiddlewareName)
 	theirs.Object["spec"] = map[string]any{"headers": map[string]any{}}
@@ -179,7 +180,7 @@ func testWiring(ctx context.Context, t *testing.T, c client.Client) {
 			return "annotations " + strings.Join([]string{ing.Annotations[wiring.MiddlewaresAnnotation], ing.Annotations[wiring.WiredAnnotation]}, " | ")
 		}
 		m := &unstructured.Unstructured{}
-		m.SetGroupVersionKind(wiring.MiddlewareGVK)
+		m.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
 		if err := c.Get(ctx, types.NamespacedName{Namespace: "store", Name: wiring.MiddlewareName}, m); !apierrors.IsNotFound(err) {
 			return "Middleware still there"
 		}
