@@ -195,7 +195,7 @@ func TestUnwireForbidden(t *testing.T) {
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 			if u, ok := list.(*unstructured.UnstructuredList); ok {
 				if u.GetKind() == "MiddlewareList" {
-					return apierrors.NewForbidden(MiddlewareGVK.GroupVersion().WithResource("middlewares").GroupResource(), "", nil)
+					return apierrors.NewForbidden(integrations.TraefikMiddlewareGVK.GroupVersion().WithResource("middlewares").GroupResource(), "", nil)
 				}
 				return &meta.NoKindMatchError{GroupKind: u.GroupVersionKind().GroupKind()}
 			}
