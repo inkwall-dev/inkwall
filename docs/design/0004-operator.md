@@ -564,6 +564,9 @@ Metrics: `inkwall_operator_bundle_version`, `inkwall_operator_engines{state}`,
 `inkwall_operator_bundle_compressed_bytes` ([§4.6](#46-bundle-builder-leader-only)), and, from the
 wiring, `inkwall_operator_wired_targets{integration}` and
 `inkwall_operator_wiring_failures{integration}` (targets that are `WiringFailed`).
+`inkwall_operator_request_stats_dropped_total{reason}` counts the policies' request counts a
+replica drops ([§4.9](#49-upstream-sync-leader-only)): `not_in_bundle`, `latency_buckets` (the
+latency only) and `evicted`.
 
 **Not yet:** an `integration` label on the engine counts (engines aren't matched to proxies yet),
 reconcile duration, policy condition counts.
@@ -622,6 +625,12 @@ leader only, and is idle in Standalone mode (the default).
   `inkwall_operator_events_buffered` follows the buffer, outages included.
 - Every replica also sums its engines' request counts per policy and sends them on that stream
   every 10 s, when the control plane accepts them, even if it doesn't accept events.
+- It takes counts only for the policies of the bundle it serves, and keeps the totals of at least
+  4096 policies. Past that, it forgets those no longer in the bundle, so the totals stay bounded
+  as policies come and go; a policy that comes back counts from zero again. Both are counted in
+  `inkwall_operator_request_stats_dropped_total{reason}`. A policy's total can therefore go down
+  under the same `since`; the contract (`RequestStatsUpload`) tells consumers to treat any
+  decrease as a reset, the rule the operator applies to its engines. The fake control plane does.
 - The events stream reconnects with jittered backoff bounded at 10 s (the leader's primary stream:
   1 min), so the backlog drains soon after an outage.
 

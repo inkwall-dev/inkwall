@@ -30,7 +30,8 @@ const (
 )
 
 // RequestStats counts requests per policy. The counts are cumulative; where
-// they start is up to the message carrying them.
+// they start is up to the message carrying them. A policy's count lower
+// than in the previous report is a reset: count the new value from zero.
 type RequestStats struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The upper bounds of the latency buckets, in seconds, increasing.

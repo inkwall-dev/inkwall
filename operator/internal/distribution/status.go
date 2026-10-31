@@ -50,10 +50,23 @@ var (
 		Name: "inkwall_operator_engine_events_dropped_total",
 		Help: "Security events the engines on this replica reported dropping (their buffer was full).",
 	})
+	// RequestStatsDropped counts, per policy and report, the request counts
+	// this replica drops: here, and in the controlplane package's totals.
+	RequestStatsDropped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "inkwall_operator_request_stats_dropped_total",
+		Help: "Policies' request counts this replica dropped, by reason: not_in_bundle (an engine reported a policy the bundle served here doesn't have), latency_buckets (its latency was counted in other buckets: the counts are kept, the latency dropped), evicted (the totals of a policy no longer in the bundle, forgotten so they stay bounded).",
+	}, []string{"reason"})
+)
+
+// Reasons of RequestStatsDropped.
+const (
+	DroppedNotInBundle    = "not_in_bundle"
+	DroppedLatencyBuckets = "latency_buckets"
+	DroppedEvicted        = "evicted"
 )
 
 func init() {
-	metrics.Registry.MustRegister(bundleVersion, bundleBytes, engineCount, eventsReceived, eventsDroppedByEngines)
+	metrics.Registry.MustRegister(bundleVersion, bundleBytes, engineCount, eventsReceived, eventsDroppedByEngines, RequestStatsDropped)
 }
 
 // Enforced computes a policy's Enforced condition: whether every connected

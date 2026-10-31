@@ -38,6 +38,7 @@ import (
 
 	controlplanev1 "github.com/inkwall-dev/inkwall/api/controlplane/v1"
 	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
+	"github.com/inkwall-dev/inkwall/pkg/events"
 )
 
 // Server is a fake control plane.
@@ -85,9 +86,10 @@ type Server struct {
 	eventsDropped uint64
 	eventUploads  int
 	// requestStats are the newest counts of each replica's run (its
-	// Hello.replica and the upload's since), by policy; statsUploads
-	// counts the uploads.
+	// Hello.replica and the upload's since), by policy; statsTotals, what
+	// they counted, resets included; statsUploads counts the uploads.
 	requestStats map[string]map[string]*eventsv1.PolicyStats
+	statsTotals  map[string]map[string]*eventsv1.PolicyStats
 	statsUploads int
 	// primary sends on the open primary stream, for Resync; primaryID
 	// tells which stream that is.
@@ -138,6 +140,7 @@ func StartWith(o Options) (*Server, error) {
 		events:            map[string]*eventsv1.SecurityEvent{},
 		uploads:           map[string]bool{},
 		requestStats:      map[string]map[string]*eventsv1.PolicyStats{},
+		statsTotals:       map[string]map[string]*eventsv1.PolicyStats{},
 	}
 	if err := s.newCA(); err != nil {
 		return nil, err
@@ -274,33 +277,44 @@ func (s *Server) Events() []*eventsv1.SecurityEvent {
 }
 
 // RequestStats returns the cluster's request counts per policy: the sum of
-// every replica run's newest counts.
+// what every replica run counted.
 func (s *Server) RequestStats() map[string]*eventsv1.PolicyStats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := map[string]*eventsv1.PolicyStats{}
-	for _, run := range s.requestStats {
+	for _, run := range s.statsTotals {
 		for id, p := range run {
 			t, ok := out[id]
 			if !ok {
 				t = &eventsv1.PolicyStats{Policy: id}
 				out[id] = t
 			}
-			t.Allowed += p.GetAllowed()
-			t.Denied += p.GetDenied()
-			t.Detected += p.GetDetected()
-			t.LatencySum += p.GetLatencySum()
-			if len(t.LatencyCounts) == 0 {
-				t.LatencyCounts = make([]uint64, len(p.GetLatencyCounts()))
-			}
-			for i, n := range p.GetLatencyCounts() {
-				if i < len(t.LatencyCounts) {
-					t.LatencyCounts[i] += n
-				}
-			}
+			events.AddStats(t, p)
 		}
 	}
 	return out
+}
+
+// addRequestStats takes an upload of a replica's run. Its counts are
+// cumulative, the newest replaces; a count lower than before is a reset
+// (the replica forgot the policy), counted from zero.
+func (s *Server) addRequestStats(run string, policies []*eventsv1.PolicyStats) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.statsUploads++
+	if s.requestStats[run] == nil {
+		s.requestStats[run], s.statsTotals[run] = map[string]*eventsv1.PolicyStats{}, map[string]*eventsv1.PolicyStats{}
+	}
+	for _, p := range policies {
+		id := p.GetPolicy()
+		t, ok := s.statsTotals[run][id]
+		if !ok {
+			t = &eventsv1.PolicyStats{Policy: id}
+			s.statsTotals[run][id] = t
+		}
+		events.AddStats(t, events.DiffStats(p, s.requestStats[run][id]))
+		s.requestStats[run][id] = p
+	}
 }
 
 // SetAcceptRequestStats changes what the next Welcome says.
@@ -460,17 +474,8 @@ func (s *Server) Connect(stream controlplanev1.ControlPlaneService_ConnectServer
 				return status.Error(codes.FailedPrecondition, "request counts are not accepted")
 			}
 			up := m.RequestStats
-			// Cumulative since the upload's since: the newest replaces.
 			run := fmt.Sprintf("%s/%d", hello.GetReplica(), up.GetSince().AsTime().UnixNano())
-			s.mu.Lock()
-			s.statsUploads++
-			if s.requestStats[run] == nil {
-				s.requestStats[run] = map[string]*eventsv1.PolicyStats{}
-			}
-			for _, p := range up.GetStats().GetPolicies() {
-				s.requestStats[run][p.GetPolicy()] = p
-			}
-			s.mu.Unlock()
+			s.addRequestStats(run, up.GetStats().GetPolicies())
 		case *controlplanev1.ConnectRequest_Heartbeat:
 			s.mu.Lock()
 			s.heartbeats++

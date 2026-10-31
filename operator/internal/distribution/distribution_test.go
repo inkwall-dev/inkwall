@@ -509,6 +509,9 @@ func TestWatchStats(t *testing.T) {
 		return stream
 	}
 
+	dropped := func(reason string) float64 { return testutil.ToFloat64(RequestStatsDropped.WithLabelValues(reason)) }
+	notInBundle, buckets := dropped(DroppedNotInBundle), dropped(DroppedLatencyBuckets)
+
 	stream := open()
 	report(stream, latencyBounds, site(3, 1), &eventsv1.PolicyStats{Policy: "gone/policy", Allowed: 100})
 	report(stream, latencyBounds, site(5, 2))
@@ -523,6 +526,12 @@ func TestWatchStats(t *testing.T) {
 	// Latency in other buckets is left out; the counts are taken.
 	report(stream, []float64{1, 2}, site(2, 0))
 	waitFor(t, "the counts without latency", func() bool { a, _, n := total(); return a == 7 && n == 8 })
+	if d := dropped(DroppedNotInBundle) - notInBundle; d != 1 {
+		t.Errorf("dropped as not in the bundle: %v, want 1", d)
+	}
+	if d := dropped(DroppedLatencyBuckets) - buckets; d != 1 {
+		t.Errorf("dropped for other latency buckets: %v, want 1", d)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	for _, p := range got {

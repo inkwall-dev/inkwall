@@ -1,0 +1,153 @@
+# Real-world ingress-nginx ModSecurity annotation sets, one per Ingress.
+# The shop: CRS in blocking mode, tuned, with exclusions and a rule of its own.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop
+  namespace: shop
+  annotations:
+    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
+    nginx.ingress.kubernetes.io/modsecurity-transaction-id: "$request_id"
+    nginx.ingress.kubernetes.io/modsecurity-snippet: |
+      SecRuleEngine On
+      SecRequestBodyAccess On
+      SecAction "id:900000,phase:1,nolog,pass,t:none,setvar:tx.blocking_paranoia_level=2"
+      SecAction \
+        "id:900110,\
+        phase:1,\
+        nolog,\
+        pass,\
+        t:none,\
+        setvar:tx.inbound_anomaly_score_threshold=10,\
+        setvar:tx.outbound_anomaly_score_threshold=5"
+      # False positives on the search page.
+      SecRuleRemoveById 920350 942430
+      SecRuleUpdateTargetById 942100 "!ARGS:password"
+      SecRule REQUEST_FILENAME "@beginsWith /search" \
+        "id:1001,phase:1,pass,nolog,t:none,ctl:ruleRemoveById=942100,ctl:ruleRemoveTargetById=932100;ARGS:q"
+      SecRule REQUEST_FILENAME "@streq /healthz" "id:1002,phase:1,pass,nolog,ctl:ruleEngine=Off"
+      SecRule REQUEST_URI "@beginsWith /upload/" "id:1003,phase:1,pass,nolog,ctl:requestBodyAccess=Off"
+      SecRule REQUEST_HEADERS:User-Agent "@contains sqlmap" "id:1004,phase:1,deny,status:403,msg:'sqlmap'"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: shop.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service: {name: shop, port: {number: 80}}
+---
+# The documented default: ModSecurity with the CRS, detection only.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: blog
+  namespace: blog
+  annotations:
+    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: blog.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service: {name: blog, port: {number: 80}}
+---
+# Settings without a faithful equivalent, as found in the wild.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cloud
+  namespace: files
+  annotations:
+    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    nginx.ingress.kubernetes.io/modsecurity-snippet: |
+      Include /etc/nginx/owasp-modsecurity-crs/nginx-modsecurity.conf
+      Include /etc/nginx/owasp-modsecurity-crs/plugins/nextcloud-rule-exclusions-before.conf
+      SecRuleEngine DetectionOnly
+      SecRequestBodyLimit 13107200
+      SecRequestBodyNoFilesLimit 131072
+      SecRequestBodyLimitAction ProcessPartial
+      SecAuditEngine RelevantOnly
+      SecAuditLog /dev/stdout
+      SecRuleRemoveById 941000-942999
+      SecRule REQUEST_FILENAME "@contains /remote.php/webdav" \
+        "id:9508102,phase:1,pass,t:none,nolog,ctl:ruleRemoveById=920420,ctl:ruleRemoveById=941000-942999"
+      SecRule REQUEST_FILENAME "@beginsWith /dav" "id:9508103,phase:1,pass,nolog,ctl:ruleRemoveByTag=attack-injection-php"
+      SecAction "id:900200,phase:1,nolog,pass,t:none,setvar:'tx.allowed_methods=GET HEAD POST OPTIONS PROPFIND'"
+      SecRule ARGS "@rx [" "id:1005,phase:2,deny"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: cloud.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service: {name: cloud, port: {number: 80}}
+---
+# Custom rules only, no CRS.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api
+  namespace: shop
+  annotations:
+    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    nginx.ingress.kubernetes.io/modsecurity-snippet: |
+      SecRuleEngine On
+      SecRule ARGS:debug "@streq true" "id:1100,phase:1,deny,status:403,msg:'debug switch'"
+spec:
+  rules:
+  - host: api.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service: {name: api, port: {number: 80}}
+---
+# The CRS annotation without enable-modsecurity: ingress-nginx ignores it.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: legacy
+  namespace: shop
+  annotations:
+    nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
+spec:
+  ingressClassName: nginx
+  defaultBackend:
+    service: {name: legacy, port: {number: 80}}
+---
+# Served by another controller: left out.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: other
+  namespace: shop
+  annotations:
+    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+spec:
+  ingressClassName: traefik
+  defaultBackend:
+    service: {name: other, port: {number: 80}}
+---
+# No ModSecurity at all.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: plain
+  namespace: shop
+spec:
+  ingressClassName: nginx
+  defaultBackend:
+    service: {name: plain, port: {number: 80}}
