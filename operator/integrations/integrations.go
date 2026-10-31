@@ -8,6 +8,7 @@ package integrations
 
 import (
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // Integration is one proxy.
@@ -36,6 +37,13 @@ var Traefik = Integration{
 	PodSelector:       labels.Set{"app.kubernetes.io/name": "traefik"},
 	Adapter:           []string{"forward-auth"},
 }
+
+// Traefik's kinds (traefik.io/v1alpha1) the operator reads and writes, and
+// inkwallctl reads.
+var (
+	TraefikMiddlewareGVK   = schema.GroupVersionKind{Group: "traefik.io", Version: "v1alpha1", Kind: "Middleware"}
+	TraefikIngressRouteGVK = schema.GroupVersionKind{Group: "traefik.io", Version: "v1alpha1", Kind: "IngressRoute"}
+)
 
 // All are the known integrations.
 var All = []Integration{Traefik}

@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 )
 
 // Unwired counts what Unwire changed.
@@ -92,7 +93,7 @@ func (*Traefik) Unwire(ctx context.Context, c client.Client) (map[string]int, er
 	}
 
 	routes := &unstructured.UnstructuredList{}
-	routes.SetGroupVersionKind(IngressRouteGVK.GroupVersion().WithKind("IngressRouteList"))
+	routes.SetGroupVersionKind(integrations.TraefikIngressRouteGVK.GroupVersion().WithKind("IngressRouteList"))
 	switch err := c.List(ctx, routes); {
 	case meta.IsNoMatchError(err): // Traefik's CRDs are gone
 	case err != nil:
@@ -121,7 +122,7 @@ func (*Traefik) Unwire(ctx context.Context, c client.Client) (map[string]int, er
 
 	// After the routes: a router referring to a missing Middleware fails.
 	mws := &unstructured.UnstructuredList{}
-	mws.SetGroupVersionKind(MiddlewareGVK.GroupVersion().WithKind("MiddlewareList"))
+	mws.SetGroupVersionKind(integrations.TraefikMiddlewareGVK.GroupVersion().WithKind("MiddlewareList"))
 	switch err := c.List(ctx, mws, client.MatchingLabels{"app.kubernetes.io/managed-by": "inkwall-operator"}); {
 	case meta.IsNoMatchError(err): // Traefik's CRDs are gone
 	case err != nil:

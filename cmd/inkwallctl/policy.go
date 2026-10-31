@@ -27,13 +27,13 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/yaml"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
@@ -82,7 +82,7 @@ func policyBundle(cfg config, notes io.Writer) (*bundlev1.Bundle, error) {
 					routes = append(routes, map[string]any{"match": "PathPrefix(`/`)"})
 				}
 				ir := unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"routes": routes}}}
-				ir.SetGroupVersionKind(ingressRouteGVK)
+				ir.SetGroupVersionKind(integrations.TraefikIngressRouteGVK)
 				ir.SetNamespace(p.Namespace)
 				ir.SetName(t.Name)
 				in.IngressRoutes = append(in.IngressRoutes, ir)
@@ -230,13 +230,8 @@ func loadObjects(files []string, namespace string, notes io.Writer) (resolver.In
 			o.Namespace = ns
 			in.Ingresses = append(in.Ingresses, o)
 		case "IngressRoute":
-			// Traefik's types aren't a dependency: the operator reads
-			// IngressRoutes as unstructured objects too.
 			var o unstructured.Unstructured
-			var j []byte
-			if j, err = yaml.YAMLToJSON(doc); err == nil {
-				err = o.UnmarshalJSON(j)
-			}
+			o, err = readIngressRoute(doc)
 			o.SetNamespace(ns)
 			in.IngressRoutes = append(in.IngressRoutes, o)
 		case "ConfigMap":
@@ -321,12 +316,9 @@ var apiVersions = map[string]string{
 	"ClusterWAFRuleSet": wafv1alpha1.GroupVersion.String(),
 	"InkwallConfig":     wafv1alpha1.GroupVersion.String(),
 	"Ingress":           networkingv1.SchemeGroupVersion.String(),
-	"IngressRoute":      ingressRouteGVK.GroupVersion().String(),
+	"IngressRoute":      integrations.TraefikIngressRouteGVK.GroupVersion().String(),
 	"ConfigMap":         corev1.SchemeGroupVersion.String(),
 }
-
-// ingressRouteGVK is Traefik's IngressRoute, as the operator reads it.
-var ingressRouteGVK = schema.GroupVersionKind{Group: "traefik.io", Version: "v1alpha1", Kind: "IngressRoute"}
 
 // isEmptyDocument reports whether a YAML document holds only comments or
 // whitespace, as between two "---".
