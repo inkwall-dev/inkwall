@@ -337,13 +337,6 @@ func TestConfigMapRules(t *testing.T) {
 	}
 }
 
-func TestHTTPRouteNotYet(t *testing.T) {
-	p := policy("shop", 0)
-	p.Spec.TargetRefs = []wafv1alpha1.TargetRef{{Group: "gateway.networking.k8s.io", Kind: "HTTPRoute", Name: "api"}}
-	res := Resolve(Input{Policies: []wafv1alpha1.WAFPolicy{p}})
-	wantStatus(t, res, "shop", false, ReasonTargetUnsupported, "only Ingress and IngressRoute targets are resolved so far")
-}
-
 func TestDeterministic(t *testing.T) {
 	var in Input
 	for i := range 20 {

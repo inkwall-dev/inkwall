@@ -8,7 +8,8 @@
 //
 // An admin listener serves the CA (/ca.crt), for the operator's trust
 // bundle, and what the stub saw (/stats, JSON: calls, Hellos, heartbeats,
-// policy acks and nacks, and a summary of the newest ClusterState), for the
+// policy acks and nacks, request counts per policy, and a summary of the
+// newest ClusterState), for the
 // test's checks. POST /snapshot sends a PolicySnapshot (Managed mode): the
 // body is a YAML or JSON list of WAFPolicy, WAFRuleSet and
 // ClusterWAFRuleSet objects ([] for none), and ?version=N its version
@@ -67,8 +68,18 @@ type stats struct {
 	// "version: error; Kind namespace/name: error...".
 	Acks  []uint64 `json:"acks"`
 	Nacks []string `json:"nacks"`
+	// Requests are the cluster's request counts, by policy.
+	Requests map[string]requests `json:"requests"`
 	// LastState summarizes the newest ClusterState.
 	LastState *state `json:"lastState,omitempty"`
+}
+
+type requests struct {
+	Allowed  uint64 `json:"allowed"`
+	Denied   uint64 `json:"denied"`
+	Detected uint64 `json:"detected"`
+	// Timed counts the requests in the latency histogram.
+	Timed uint64 `json:"timed"`
 }
 
 type state struct {
@@ -91,6 +102,7 @@ func run() error {
 	flag.Var(&tokens, "token", "a valid one-time enrollment token (repeatable)")
 	lifetime := flag.Duration("cert-lifetime", 24*time.Hour, "lifetime of the client certificates it issues")
 	acceptEvents := flag.Bool("accept-events", false, "accept security events from the replicas (Welcome.accept_events)")
+	acceptStats := flag.Bool("accept-request-stats", false, "accept request counts from the replicas (Welcome.accept_request_stats)")
 	flag.Parse()
 
 	srv, err := fakecontrolplane.StartWith(fakecontrolplane.Options{Addr: *listen, Hosts: hosts})
@@ -100,6 +112,7 @@ func run() error {
 	defer srv.Stop()
 	srv.CertLifetime = *lifetime
 	srv.SetAcceptEvents(*acceptEvents)
+	srv.SetAcceptRequestStats(*acceptStats)
 	for _, t := range tokens {
 		srv.AddToken(t)
 	}
@@ -125,6 +138,14 @@ func run() error {
 				msg += fmt.Sprintf("; %s %s/%s: %s", o.GetKind(), o.GetNamespace(), o.GetName(), o.GetError())
 			}
 			out.Nacks = append(out.Nacks, msg)
+		}
+		out.Requests = map[string]requests{}
+		for id, p := range srv.RequestStats() {
+			r := requests{Allowed: p.GetAllowed(), Denied: p.GetDenied(), Detected: p.GetDetected()}
+			for _, n := range p.GetLatencyCounts() {
+				r.Timed += n
+			}
+			out.Requests[id] = r
 		}
 		if n := len(st.States); n > 0 {
 			last := st.States[n-1]

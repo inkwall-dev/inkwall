@@ -88,6 +88,45 @@ func ContentHash(b *bundlev1.Bundle) ([]byte, error) {
 	return sum[:], nil
 }
 
+// PolicyHashes hashes what each policy of b enforces, by policy id: the
+// policy, the rule sets it binds and whether b is suspended. A policy's
+// hash changes only with a bundle that changes it, so its status needn't
+// be written for every bundle (#149).
+func PolicyHashes(b *bundlev1.Bundle) (map[string][sha256.Size]byte, error) {
+	ruleSets := make(map[string]*bundlev1.RuleSet, len(b.GetRuleSets()))
+	for _, rs := range b.GetRuleSets() {
+		ruleSets[rs.GetId()] = rs
+	}
+	enc := proto.MarshalOptions{Deterministic: true}
+	out := make(map[string][sha256.Size]byte, len(b.GetPolicies()))
+	for _, p := range b.GetPolicies() {
+		h := sha256.New()
+		if b.GetSuspended() {
+			h.Write([]byte{1})
+		} else {
+			h.Write([]byte{0})
+		}
+		msgs := []proto.Message{p}
+		for _, rb := range p.GetRuleSets() {
+			if rs := ruleSets[rb.GetRuleSetId()]; rs != nil {
+				msgs = append(msgs, rs)
+			}
+		}
+		for _, m := range msgs {
+			raw, err := enc.Marshal(m)
+			if err != nil {
+				return nil, err
+			}
+			// Length-prefixed, so messages can't run into each other.
+			h.Write(strconv.AppendInt(nil, int64(len(raw)), 10))
+			h.Write([]byte{':'})
+			h.Write(raw)
+		}
+		out[p.GetId()] = [sha256.Size]byte(h.Sum(nil))
+	}
+	return out, nil
+}
+
 // Next returns the bundle to publish for content, given the current one
 // (nil if none), and whether it differs: unchanged content keeps the current
 // version, unless resign asks for a new one (the signing key changed).

@@ -39,7 +39,8 @@ const (
 type BundleServiceClient interface {
 	// Watch is the engine's stream. The engine sends Hello first; the operator
 	// answers with the current bundle, then with every new one. The engine
-	// answers each bundle with Ack or Nack and sends heartbeats.
+	// answers each bundle with Ack or Nack and sends heartbeats, its
+	// security events and its request counts.
 	Watch(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[WatchRequest, WatchResponse], error)
 }
 
@@ -72,7 +73,8 @@ type BundleService_WatchClient = grpc.BidiStreamingClient[WatchRequest, WatchRes
 type BundleServiceServer interface {
 	// Watch is the engine's stream. The engine sends Hello first; the operator
 	// answers with the current bundle, then with every new one. The engine
-	// answers each bundle with Ack or Nack and sends heartbeats.
+	// answers each bundle with Ack or Nack and sends heartbeats, its
+	// security events and its request counts.
 	Watch(grpc.BidiStreamingServer[WatchRequest, WatchResponse]) error
 	mustEmbedUnimplementedBundleServiceServer()
 }

@@ -227,7 +227,7 @@ func parseTestFlags(args []string, stderr io.Writer) (config, error) {
 	fs.Var(&cfg.policies, "policy", "WAFPolicy YAML file: inspect with the policies, resolved as the operator does, instead of the flags that define a policy"+objects)
 	fs.Var(&cfg.ruleSets, "rule-set", "WAFRuleSet or ClusterWAFRuleSet YAML file the policies use"+objects)
 	fs.Var(&cfg.configMaps, "configmap", "ConfigMap YAML file rule sets read rules from (labeled "+resolver.RulesLabel+"=true)"+objects)
-	fs.Var(&cfg.ingresses, "ingress", "Ingress YAML file the policies target, to route requests by host and path; without one, a single policy applies to every request"+objects)
+	fs.Var(&cfg.ingresses, "ingress", "Ingress or Traefik IngressRoute (traefik.io/v1alpha1) YAML file the policies target, to route requests by host and path; without one, a single policy applies to every request"+objects)
 	fs.StringVar(&cfg.namespace, "namespace", "default", "namespace of the objects in the files that don't name one, as kubectl apply -n")
 	fs.StringVar(&cfg.bundle, "bundle", "", "bundle file: inspect with its policies instead of the flags that define a policy; the inkwall-bundle Secret's bundle.pb.gz (compressed or not), or the Secret as YAML or JSON (with its chunks, for a bundle split into several Secrets)")
 	fs.StringVar(&cfg.bundleKey, "bundle-key", "", "with --bundle: check the bundle's signature with this ed25519 public key (raw 32 bytes, as the Secret's ed25519.pub, or base64)")

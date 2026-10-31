@@ -42,6 +42,7 @@ type WatchRequest struct {
 	//	*WatchRequest_Nack
 	//	*WatchRequest_Heartbeat
 	//	*WatchRequest_Events
+	//	*WatchRequest_Stats
 	Msg           isWatchRequest_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -129,6 +130,15 @@ func (x *WatchRequest) GetEvents() *v1.EventBatch {
 	return nil
 }
 
+func (x *WatchRequest) GetStats() *v1.RequestStats {
+	if x != nil {
+		if x, ok := x.Msg.(*WatchRequest_Stats); ok {
+			return x.Stats
+		}
+	}
+	return nil
+}
+
 type isWatchRequest_Msg interface {
 	isWatchRequest_Msg()
 }
@@ -156,6 +166,17 @@ type WatchRequest_Events struct {
 	Events *v1.EventBatch `protobuf:"bytes,5,opt,name=events,proto3,oneof"`
 }
 
+type WatchRequest_Stats struct {
+	// Requests per policy (0002 §5.4), with the heartbeats. Cumulative over
+	// the stream: the first report on a stream counts from zero, and also
+	// has what the engine counted after its last report on the previous
+	// one. So the operator adds up the differences between reports, and an
+	// engine that moves to another replica, or restarts, is never counted
+	// twice. A report is split into messages of at most 32 KiB, each with
+	// different policies; only policies whose counts changed are sent.
+	Stats *v1.RequestStats `protobuf:"bytes,6,opt,name=stats,proto3,oneof"`
+}
+
 func (*WatchRequest_Hello) isWatchRequest_Msg() {}
 
 func (*WatchRequest_Ack) isWatchRequest_Msg() {}
@@ -165,6 +186,8 @@ func (*WatchRequest_Nack) isWatchRequest_Msg() {}
 func (*WatchRequest_Heartbeat) isWatchRequest_Msg() {}
 
 func (*WatchRequest_Events) isWatchRequest_Msg() {}
+
+func (*WatchRequest_Stats) isWatchRequest_Msg() {}
 
 // WatchResponse is a message from the operator (OperatorMessage in 0002
 // §5.2).
@@ -512,13 +535,14 @@ var File_agent_v1_agent_proto protoreflect.FileDescriptor
 
 const file_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
-	"\x14agent/v1/agent.proto\x12\x10inkwall.agent.v1\x1a\x16bundle/v1/bundle.proto\x1a\x16events/v1/events.proto\"\x95\x02\n" +
+	"\x14agent/v1/agent.proto\x12\x10inkwall.agent.v1\x1a\x16bundle/v1/bundle.proto\x1a\x16events/v1/events.proto\x1a\x15events/v1/stats.proto\"\xce\x02\n" +
 	"\fWatchRequest\x12/\n" +
 	"\x05hello\x18\x01 \x01(\v2\x17.inkwall.agent.v1.HelloH\x00R\x05hello\x12)\n" +
 	"\x03ack\x18\x02 \x01(\v2\x15.inkwall.agent.v1.AckH\x00R\x03ack\x12,\n" +
 	"\x04nack\x18\x03 \x01(\v2\x16.inkwall.agent.v1.NackH\x00R\x04nack\x12;\n" +
 	"\theartbeat\x18\x04 \x01(\v2\x1b.inkwall.agent.v1.HeartbeatH\x00R\theartbeat\x127\n" +
-	"\x06events\x18\x05 \x01(\v2\x1d.inkwall.events.v1.EventBatchH\x00R\x06eventsB\x05\n" +
+	"\x06events\x18\x05 \x01(\v2\x1d.inkwall.events.v1.EventBatchH\x00R\x06events\x127\n" +
+	"\x05stats\x18\x06 \x01(\v2\x1f.inkwall.events.v1.RequestStatsH\x00R\x05statsB\x05\n" +
 	"\x03msg\"W\n" +
 	"\rWatchResponse\x129\n" +
 	"\x06bundle\x18\x01 \x01(\v2\x1f.inkwall.bundle.v1.SignedBundleH\x00R\x06bundleB\x05\n" +
@@ -565,7 +589,8 @@ var file_agent_v1_agent_proto_goTypes = []any{
 	(*Nack)(nil),             // 4: inkwall.agent.v1.Nack
 	(*Heartbeat)(nil),        // 5: inkwall.agent.v1.Heartbeat
 	(*v1.EventBatch)(nil),    // 6: inkwall.events.v1.EventBatch
-	(*v11.SignedBundle)(nil), // 7: inkwall.bundle.v1.SignedBundle
+	(*v1.RequestStats)(nil),  // 7: inkwall.events.v1.RequestStats
+	(*v11.SignedBundle)(nil), // 8: inkwall.bundle.v1.SignedBundle
 }
 var file_agent_v1_agent_proto_depIdxs = []int32{
 	2, // 0: inkwall.agent.v1.WatchRequest.hello:type_name -> inkwall.agent.v1.Hello
@@ -573,14 +598,15 @@ var file_agent_v1_agent_proto_depIdxs = []int32{
 	4, // 2: inkwall.agent.v1.WatchRequest.nack:type_name -> inkwall.agent.v1.Nack
 	5, // 3: inkwall.agent.v1.WatchRequest.heartbeat:type_name -> inkwall.agent.v1.Heartbeat
 	6, // 4: inkwall.agent.v1.WatchRequest.events:type_name -> inkwall.events.v1.EventBatch
-	7, // 5: inkwall.agent.v1.WatchResponse.bundle:type_name -> inkwall.bundle.v1.SignedBundle
-	0, // 6: inkwall.agent.v1.BundleService.Watch:input_type -> inkwall.agent.v1.WatchRequest
-	1, // 7: inkwall.agent.v1.BundleService.Watch:output_type -> inkwall.agent.v1.WatchResponse
-	7, // [7:8] is the sub-list for method output_type
-	6, // [6:7] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+	7, // 5: inkwall.agent.v1.WatchRequest.stats:type_name -> inkwall.events.v1.RequestStats
+	8, // 6: inkwall.agent.v1.WatchResponse.bundle:type_name -> inkwall.bundle.v1.SignedBundle
+	0, // 7: inkwall.agent.v1.BundleService.Watch:input_type -> inkwall.agent.v1.WatchRequest
+	1, // 8: inkwall.agent.v1.BundleService.Watch:output_type -> inkwall.agent.v1.WatchResponse
+	8, // [8:9] is the sub-list for method output_type
+	7, // [7:8] is the sub-list for method input_type
+	7, // [7:7] is the sub-list for extension type_name
+	7, // [7:7] is the sub-list for extension extendee
+	0, // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_agent_v1_agent_proto_init() }
@@ -594,6 +620,7 @@ func file_agent_v1_agent_proto_init() {
 		(*WatchRequest_Nack)(nil),
 		(*WatchRequest_Heartbeat)(nil),
 		(*WatchRequest_Events)(nil),
+		(*WatchRequest_Stats)(nil),
 	}
 	file_agent_v1_agent_proto_msgTypes[1].OneofWrappers = []any{
 		(*WatchResponse_Bundle)(nil),

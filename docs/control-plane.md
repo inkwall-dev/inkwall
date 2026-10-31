@@ -179,14 +179,21 @@ The leader holds one **primary** connection. Over it the operator sends:
   5 minutes.
 - **Heartbeats**, and certificate renewal requests.
 
-Every replica holds its own **events** connection, which carries the security events of the
-engines connected to that replica. It opens only if the control plane accepts events, which it
-says when the connection opens. Otherwise events stay in the engines' logs, as in `Standalone`.
+Every replica holds its own **events** connection, which carries the security events and request
+counts of the engines connected to that replica. It opens only if the control plane accepts events
+or request counts, which it says when the connection opens. Otherwise events stay in the engines'
+logs, as in `Standalone`.
 The engine redacts each event before it leaves the pod
 ([`api/events/v1`](../api/events/v1/events.proto)): method, host, path without the query string,
 client IP, user agent, request ID, status, matched rule IDs with at most 64 bytes of each matched
 value, the policy and the action. It never includes bodies, query strings, `Authorization`
 headers or cookies.
+
+The **request counts** are, per policy, how many requests the engines allowed, denied and detected,
+and how long inspecting them took (a histogram from 50 µs to about 0.8 s). Each replica sums its
+engines' counts and sends them every 10 seconds, for the policies whose counts changed. They are
+per policy only: no routes, paths, hosts or client addresses. Requests that no policy covers aren't
+counted.
 
 The operator never sends Secrets, ConfigMaps (a rule set's `configMapRef` is sent as a reference,
 not its contents) or request bodies. Rules written inline in a rule set's spec are part of the spec,
@@ -201,6 +208,9 @@ the pod being deleted or rescheduled. When it is full, the oldest events are dro
 batch says how many. After reconnecting, the replica resends everything not acknowledged. The
 control plane removes duplicates by event ID. Switching to `Standalone`, or a control plane that
 stops accepting events, empties the buffer.
+
+Request counts need no buffer: each replica keeps its running totals in memory and sends them all
+again after reconnecting. A replica that restarts starts again from zero.
 
 The operator's [Prometheus metrics](https://prometheus.io/docs/concepts/metric_types/)
 (`:8080/metrics` on each replica) show the buffer:

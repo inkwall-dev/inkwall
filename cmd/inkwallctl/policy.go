@@ -26,6 +26,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/yaml"
@@ -56,25 +58,41 @@ func policyBundle(cfg config, notes io.Writer) (*bundlev1.Bundle, error) {
 	if len(in.Policies) == 0 {
 		return nil, errors.New("no WAFPolicy in the files")
 	}
-	if len(in.Ingresses) == 0 {
+	if len(in.Ingresses)+len(in.IngressRoutes) == 0 {
 		// Without the routes, a single policy is tested as if its first
-		// Ingress had only a default backend: it covers every host and
-		// path. Several policies would all claim that route.
+		// target matched every host and path. Several policies would all
+		// claim that route.
 		if len(in.Policies) > 1 {
-			return nil, errors.New("several WAFPolicies: give the Ingresses they target with --ingress, so requests can be routed")
+			return nil, errors.New("several WAFPolicies: give the Ingresses or IngressRoutes they target with --ingress, so requests can be routed")
 		}
 		p := &in.Policies[0]
+		covered := false
 		for _, t := range p.Spec.TargetRefs {
-			if t.Kind != "Ingress" {
+			// The other targets are there, with no route of their own.
+			switch t.Kind {
+			case "Ingress":
+				ing := networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Namespace: p.Namespace, Name: t.Name}}
+				if !covered {
+					ing.Spec.DefaultBackend = &networkingv1.IngressBackend{}
+				}
+				in.Ingresses = append(in.Ingresses, ing)
+			case "IngressRoute":
+				routes := []any{}
+				if !covered {
+					routes = append(routes, map[string]any{"match": "PathPrefix(`/`)"})
+				}
+				ir := unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"routes": routes}}}
+				ir.SetGroupVersionKind(ingressRouteGVK)
+				ir.SetNamespace(p.Namespace)
+				ir.SetName(t.Name)
+				in.IngressRoutes = append(in.IngressRoutes, ir)
+			default:
 				continue
 			}
-			ing := networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Namespace: p.Namespace, Name: t.Name}}
-			if len(in.Ingresses) == 0 {
-				ing.Spec.DefaultBackend = &networkingv1.IngressBackend{}
+			if !covered {
+				covered = true
 				fmt.Fprintf(notes, "note: no --ingress: WAFPolicy %s/%s applies to every host and path\n", p.Namespace, p.Name)
 			}
-			// The other targets are there, with no route of their own.
-			in.Ingresses = append(in.Ingresses, ing)
 		}
 	}
 
@@ -211,6 +229,16 @@ func loadObjects(files []string, namespace string, notes io.Writer) (resolver.In
 			err = yaml.UnmarshalStrict(doc, &o)
 			o.Namespace = ns
 			in.Ingresses = append(in.Ingresses, o)
+		case "IngressRoute":
+			// Traefik's types aren't a dependency: the operator reads
+			// IngressRoutes as unstructured objects too.
+			var o unstructured.Unstructured
+			var j []byte
+			if j, err = yaml.YAMLToJSON(doc); err == nil {
+				err = o.UnmarshalJSON(j)
+			}
+			o.SetNamespace(ns)
+			in.IngressRoutes = append(in.IngressRoutes, o)
 		case "ConfigMap":
 			var o corev1.ConfigMap
 			err = yaml.UnmarshalStrict(doc, &o)
@@ -293,8 +321,12 @@ var apiVersions = map[string]string{
 	"ClusterWAFRuleSet": wafv1alpha1.GroupVersion.String(),
 	"InkwallConfig":     wafv1alpha1.GroupVersion.String(),
 	"Ingress":           networkingv1.SchemeGroupVersion.String(),
+	"IngressRoute":      ingressRouteGVK.GroupVersion().String(),
 	"ConfigMap":         corev1.SchemeGroupVersion.String(),
 }
+
+// ingressRouteGVK is Traefik's IngressRoute, as the operator reads it.
+var ingressRouteGVK = schema.GroupVersionKind{Group: "traefik.io", Version: "v1alpha1", Kind: "IngressRoute"}
 
 // isEmptyDocument reports whether a YAML document holds only comments or
 // whitespace, as between two "---".

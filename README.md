@@ -130,7 +130,8 @@ modes, and [testing policies offline](docs/testing-policies.md) for `inkwallctl 
 - Proxies: **Traefik** only, plus the standalone proxy. [Envoy](https://www.envoyproxy.io/docs/envoy/latest/), [HAProxy](https://docs.haproxy.org/), [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) and [Caddy](https://caddyserver.com/docs/)
   are designed, not built.
 - Targets: **`Ingress`** and Traefik **`IngressRoute`** (match rules that join `Host`, `Path` and
-  `PathPrefix` with `&&`); not [Gateway API](https://gateway-api.sigs.k8s.io/) [`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) yet.
+  `PathPrefix` with `&&`). [Gateway API](https://gateway-api.sigs.k8s.io/) [`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) targets are resolved into the
+  bundle, but no proxy is wired for them yet.
 - One cluster per operator. The operator can connect to an optional control plane, which isn't in
   this repository: in `GitOps` mode it sends it a read-only copy of your policies, in `Managed`
   mode it writes the policies the control plane sends, and in both it forwards the engines'
