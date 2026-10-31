@@ -160,7 +160,7 @@ Validation runs in three steps, cheapest first:
 | Condition | True when | False reasons |
 |---|---|---|
 | `Accepted` | Spec valid, references resolve | `InvalidRef`, `Conflict`, `RuleCompileError`, `TargetUnsupported` |
-| `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `Pending`, `NoTargets`, `InjectionDisabled`, `Unwired` |
+| `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `IntegrationDisabled`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `Pending`, `NoTargets`, `InjectionDisabled`, `Unwired` |
 | `Enforced` | Every serving engine ACKed a bundle with this generation | `EnginesBehind`, `EngineNack` (`1/6`), `EnginesUnreported`, `NoEngines`, `NotInBundle` |
 | `Ready` | The three above are True | first failing condition's reason |
 
@@ -211,6 +211,8 @@ visible rather than silently unprotected.
   the operator doesn't create one.
 - Without the Gateway API's CRDs, GatewayClasses are left out; the leader looks for their CRD
   every 30 s (`operator/internal/crdwatch`).
+- A disabled integration's controller ([§7](#7-rbac)) is `Unsupported`, and the `message` says
+  which permissions the operator lacks.
 
 **Not yet:** finding each controller's data-plane workloads from its classes (the pods are found by
 label selectors, [§4.3](#43-injection-controller)); a registry tested per controller version.
@@ -238,7 +240,10 @@ one implementation per proxy (`Traefik`, `EnvoyGateway`):
 The wiring controller owns what every proxy shares: the finalizer, collecting the targets of the
 live policies, the `Programmed` condition (a target counts for the integration whose proxy serves
 it; if none does, it is `ControllerUnsupported` with the first integration's reason) and the
-sidecar checks on each integration's pods. Each integration's RBAC markers sit next to its code.
+sidecar checks on each integration's pods. Each integration's RBAC markers sit next to its code,
+in a `ClusterRole` of its own ([§7](#7-rbac)). An integration the operator may not wire is wrapped
+by `wiring.Disable`: it reads only routes and classes, and its proxy's targets are
+`IntegrationDisabled` (`Result.Disabled`).
 A target carries its `sectionName`, so an integration can wire one rule of an HTTPRoute. An
 integration whose proxy's controller replaces pods without the engine itself (Envoy Gateway)
 reports them as `PendingRestart` rather than as missed by the Pod webhook (`Result.Rolling`).
@@ -413,6 +418,8 @@ longer needed.
   wired and
   every running Traefik pod has the engine. Otherwise the reason is one of:
   - `ControllerUnsupported`: another controller or kind;
+  - `IntegrationDisabled`: the operator may not wire the target's proxy, and which permissions it
+    lacks ([§7](#7-rbac));
   - `WiringFailed`: no Traefik CRDs, a name clash, or a route that can't be written;
   - `PendingRestart`: pods older than the webhook, listed;
   - `SidecarMissing`: no Traefik pod selected, or pods without the engine (the operator was down
@@ -881,6 +888,7 @@ Removal must never leave a proxy failing closed on a missing engine.
 | Bundle over 7.2 MiB compressed | None: the current bundle stays; changes are not published | Builder error; warning past 75%; `inkwall_operator_bundle_compressed_bytes` | Shrink the policies (fewer, or smaller rule sets) |
 | Signing key rotated | None: the operator signs with the new key only once every connected engine trusts it | Secret's `rotation-phase`; operator logs the engines it waits for | Automatic ([§4.6](#46-bundle-builder-leader-only)); replace engines older than rotation |
 | Unknown controller version | Wiring may break | `Programmed=False` | Update or pin the integration |
+| An integration's `ClusterRole` not granted | Its proxy's routes aren't wired; the others are | `Programmed=False` (`IntegrationDisabled`), discovery `Unsupported` | Grant it (`rbac.integrations`); the operator restarts with it ([§7](#7-rbac)) |
 | API server down | None | — | Automatic |
 
 Runbook: [When the operator is down](../../deploy/helm/inkwall/README.md#when-the-operator-is-down).
@@ -888,7 +896,10 @@ Runbook: [When the operator is down](../../deploy/helm/inkwall/README.md#when-th
 ## 7. RBAC
 
 Least privilege. The built rules are in [`role.yaml`](../../operator/config/rbac/role.yaml): a
-`ClusterRole`, plus a `Role` in `inkwall-system`.
+`ClusterRole`, a `Role` in `inkwall-system`, and one `ClusterRole` per integration,
+`inkwall-operator-<integration>`, from the markers with `roleName` next to its wiring. The base
+`ClusterRole` reads every route kind and class the resolver and discovery need; an integration's
+holds what its wiring writes, and its proxy's own kinds.
 
 | Resources | Verbs | Why |
 |---|---|---|
@@ -897,13 +908,14 @@ Least privilege. The built rules are in [`role.yaml`](../../operator/config/rbac
 | `wafpolicies`, `wafrulesets`, `clusterwafrulesets` | create, update, delete | Managed mode ([§4.9](#49-upstream-sync-leader-only)); the webhook keeps others off them |
 | `ingressclasses`, `ingresses`, `pods` | read | Resolution, injection checks, discovery |
 | `gatewayclasses` (gateway.networking.k8s.io) | read | Discovery |
-| `ingresses` | patch | Traefik annotation |
-| `ingressroutes` (traefik.io) | read, patch | Traefik routes' `middlewares` |
+| `ingressroutes` (traefik.io) | read | IngressRoute targets ([§4.5](#45-resolver)) |
 | `httproutes`, `gateways`, `gatewayclasses` (gateway.networking.k8s.io) | read | HTTPRoute targets ([§4.5](#45-resolver)), the Gateways serving them |
-| `httproutes` (gateway.networking.k8s.io) | patch | Traefik rules' `filters` |
-| `gateways` (gateway.networking.k8s.io) | update, patch | Envoy Gateway: a Gateway's `parametersRef` ([§4.4](#44-wiring-controller)) |
-| `envoyproxies`, `envoyextensionpolicies`, `backends`, `clienttrafficpolicies` (gateway.envoyproxy.io) | full | Envoy Gateway wiring |
-| `middlewares` (traefik.io) | full | Traefik wiring |
+| Traefik's `ClusterRole`: `ingresses` | update, patch | Traefik annotation |
+| Traefik's: `ingressroutes` (traefik.io) | update, patch | Traefik routes' `middlewares` |
+| Traefik's: `httproutes` (gateway.networking.k8s.io) | update, patch | Traefik rules' `filters` |
+| Traefik's: `middlewares` (traefik.io) | full | Traefik wiring |
+| Envoy Gateway's: `gateways` (gateway.networking.k8s.io) | update, patch | A Gateway's `parametersRef` ([§4.4](#44-wiring-controller)) |
+| Envoy Gateway's: `envoyproxies`, `envoyextensionpolicies`, `backends`, `clienttrafficpolicies` (gateway.envoyproxy.io) | full | Envoy Gateway wiring |
 | `configmaps` | full, cluster-wide | `inkwall-trust` per namespace, engine reports |
 | `secrets` | in `inkwall-system` | Bundle, signing key, certificates |
 | `roles`, `rolebindings` | in `inkwall-system` | Bundle Secret grant ([§4.3](#43-injection-controller)) |
@@ -912,12 +924,31 @@ Least privilege. The built rules are in [`role.yaml`](../../operator/config/rbac
 | `namespaces/kube-system` | get | Cluster ID |
 | `leases`, `events` | write | Leader election, events |
 
+**Integration roles.** The chart binds each integration's `ClusterRole` unless
+`rbac.integrations.<integration>` is `false` (`traefik`, `envoyGateway`), e.g. for a proxy the
+cluster doesn't run. When it starts, the operator checks that it has every permission of each
+integration's role ([`role.yaml`](../../operator/config/rbac/role.yaml) is built into it,
+`operator/internal/access`), one `SelfSubjectAccessReview` per permission. An integration it lacks some of
+is disabled rather than stalling the cache on objects it may not read:
+
+- its wiring neither watches nor touches its proxy's objects; it reads only routes and classes,
+  to report the targets its proxy serves `Programmed=False` (`IntegrationDisabled`), with the
+  permissions missing. The other integrations wire as usual;
+- discovery reports its controller `Unsupported`, with the same message;
+- what it wired before stays wired, and a deleted policy isn't held for it; the uninstall hook
+  skips it ([§5](#5-uninstall-and-disable)), with a warning;
+- each replica checks the missing permissions every minute, and restarts once they are granted
+  (after a random delay, `--selector-restart-max-delay`).
+  The chart restarts the operator when the values change (a pod annotation lists the integrations
+  granted); to revoke a role outside the chart, restart the operator.
+
+Missing CRDs don't disable an integration: its wiring waits for them
+([§4.4](#44-wiring-controller)).
+
 **Not yet:**
 
-- one `ClusterRole` per controller, aggregated by the chart, with rules for absent proxies left out
-  (`.Capabilities.APIVersions`). The markers are already grouped by integration; controller-gen
-  merges them into one role;
-- Envoy Gateway's rules only where it is installed: the chart grants them always, like Traefik's;
+- the chart leaving out a role for a proxy that isn't installed (`.Capabilities.APIVersions`);
+- a disabled Traefik integration still has its pods injected (the Pod webhook);
 - rules for Istio and controller ConfigMaps;
 - a `deployments` restart patch, only with `rollout: Automatic`.
 
@@ -1072,6 +1103,10 @@ Applying exclusions per request changes three things from v0.1.0:
   ([§4.2](#42-integration-interface)).
 - **envtest** (`operator/test/testenv`): reconcilers, conditions, wiring that keeps the user's
   entries, and webhooks.
+- **Permissions**, in envtest (`operator/test/permissions`): the operator runs as a user granted
+  `role.yaml` without Envoy Gateway's `ClusterRole`, with Envoy Gateway's CRDs installed: it starts,
+  wires a Traefik Ingress, and reports the Envoy Gateway route `IntegrationDisabled`. `make
+  helm-lint` checks the chart's integration roles (`hack/helm-test.sh`).
 - **kind e2e test** (`make kind-e2e`): injection, then wiring, then an attack blocked, then
   `Ready`, and a clean uninstall. It installs the operator with shorter waits, so the same steps
   take less time: a 15 s `--signing-key-grace` (its kind cluster's kubelet updates ConfigMaps
@@ -1096,6 +1131,7 @@ operator/
 ├── bundle/             # builder, signer, signing key rotation
 ├── integrations/       # known proxies (Traefik, Envoy Gateway)
 ├── internal/
+│   ├── access/         # which integrations' ClusterRoles are granted (§7)
 │   ├── controller/     # reconcilers
 │   ├── controlplane/   # upstream sync (§4.9)
 │   ├── crdwatch/       # watches added once a CRD is installed
@@ -1106,8 +1142,8 @@ operator/
 ├── manager/
 ├── resolver/
 ├── webhook/            # validating + mutating handlers, Managed-mode guard
-├── config/             # kubebuilder kustomize bases
-└── test/               # testenv, fakeengine, fakecontrolplane, stubcontrolplane, scale
+├── config/             # kubebuilder kustomize bases; rbac/ built into the operator (§7)
+└── test/               # testenv, fakeengine, fakecontrolplane, stubcontrolplane, scale, permissions
 ```
 
 `main` is in `cmd/operator`. Planned: one package per proxy under `integrations/`. The Helm chart `deploy/helm/inkwall` is the supported install; [kustomize](https://kubectl.docs.kubernetes.io/references/kustomize/) is for

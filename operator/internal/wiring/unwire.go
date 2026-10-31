@@ -9,6 +9,7 @@ import (
 	"maps"
 
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -27,6 +28,10 @@ type Unwired struct {
 	// Objects counts the proxies' objects unwired or deleted, by kind.
 	Objects  map[string]int
 	Policies int
+	// Forbidden are the integrations the operator may not unwire (their
+	// ClusterRole isn't granted, as when it disabled them): what they
+	// wired, if anything, stays.
+	Forbidden []string
 }
 
 // Unwire undoes the wiring at uninstall: every integration removes its
@@ -43,6 +48,10 @@ func Unwire(ctx context.Context, c client.Client) (Unwired, error) {
 	for _, in := range Integrations(c, c, Config{}) {
 		counts, err := in.Unwire(ctx, c)
 		maps.Copy(n.Objects, counts)
+		if apierrors.IsForbidden(err) {
+			n.Forbidden = append(n.Forbidden, in.Name())
+			continue
+		}
 		if err != nil {
 			return n, fmt.Errorf("%s: %w", in.Name(), err)
 		}

@@ -91,6 +91,9 @@ func Unwire(ctx context.Context, c client.Client, namespace, deployment string, 
 		attrs = append(attrs, slog.Int(key, n.Objects[kind]))
 	}
 	logger.Info("routes unwired", attrs...)
+	for _, name := range n.Forbidden {
+		logger.Warn("integration not unwired: the operator may not change its objects (its ClusterRole isn't granted)", slog.String("integration", name))
+	}
 	return nil
 }
 

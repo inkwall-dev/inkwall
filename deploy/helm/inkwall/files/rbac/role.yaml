@@ -56,6 +56,82 @@ rules:
   verbs:
   - create
 - apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - gatewayclasses
+  - gateways
+  - httproutes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingressclasses
+  - ingresses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - traefik.io
+  resources:
+  - ingressroutes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - waf.inkwall.dev
+  resources:
+  - clusterwafrulesets
+  - wafrulesets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - waf.inkwall.dev
+  resources:
+  - clusterwafrulesets/status
+  - inkwallconfigs/status
+  - wafpolicies/status
+  - wafrulesets/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - waf.inkwall.dev
+  resources:
+  - inkwallconfigs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - waf.inkwall.dev
+  resources:
+  - wafpolicies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: inkwall-operator-envoy-gateway
+rules:
+- apiGroups:
   - gateway.envoyproxy.io
   resources:
   - backends
@@ -74,6 +150,7 @@ rules:
   - gateway.networking.k8s.io
   resources:
   - gatewayclasses
+  - httproutes
   verbs:
   - get
   - list
@@ -82,6 +159,38 @@ rules:
   - gateway.networking.k8s.io
   resources:
   - gateways
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - waf.inkwall.dev
+  resources:
+  - inkwallconfigs
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: inkwall-operator-traefik
+rules:
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - gatewayclasses
+  - gateways
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
   - httproutes
   verbs:
   - get
@@ -121,49 +230,6 @@ rules:
   - traefik.io
   resources:
   - middlewares
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - waf.inkwall.dev
-  resources:
-  - clusterwafrulesets
-  - wafrulesets
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - update
-  - watch
-- apiGroups:
-  - waf.inkwall.dev
-  resources:
-  - clusterwafrulesets/status
-  - inkwallconfigs/status
-  - wafpolicies/status
-  - wafrulesets/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - waf.inkwall.dev
-  resources:
-  - inkwallconfigs
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - waf.inkwall.dev
-  resources:
-  - wafpolicies
   verbs:
   - create
   - delete

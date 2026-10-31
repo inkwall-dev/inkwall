@@ -119,8 +119,9 @@ type Options struct {
 	EnginePullPolicy corev1.PullPolicy
 	// Integrations select the proxy pods; nil: read from the InkwallConfig
 	// when the manager is created. The operator restarts when they change
-	// (its cache of proxy pods is built from them), after a random delay
-	// up to SelectorRestartMaxDelay (0: DefaultSelectorRestartMaxDelay).
+	// (its cache of proxy pods is built from them), or when it is granted
+	// a disabled integration's permissions, after a random delay up to
+	// SelectorRestartMaxDelay (0: DefaultSelectorRestartMaxDelay).
 	Integrations            *integrations.Selectors
 	SelectorRestartMaxDelay time.Duration
 
@@ -203,6 +204,10 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	if err != nil {
 		return nil, err
 	}
+	denied, err := readAccess(cfg, s)
+	if err != nil {
+		return nil, err
+	}
 	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
 		return nil, err
 	}
@@ -275,10 +280,23 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	}
 	// Without injection, the wiring controller unwires what was wired: new
 	// proxy pods won't have the engine.
-	wirings := wiring.Integrations(mgr.GetClient(), mgr.GetAPIReader(), wiring.Config{
+	wiringCfg := wiring.Config{
 		Pods: selectors, IngressRoutes: ingressRoutes, HTTPRoutes: httpRoutes, Gateways: gateways, GatewayClasses: gatewayClasses,
 		EnvoyProxies: envoyProxies, ExtensionPolicies: extensionPolicies, TrafficPolicies: trafficPolicies, Sidecar: sidecar,
-	})
+	}
+	wirings := wiring.Integrations(mgr.GetClient(), mgr.GetAPIReader(), wiringCfg)
+	// An integration the operator may not wire neither watches nor reads
+	// its proxy's objects: it reports the targets its proxy serves.
+	for i, in := range wirings {
+		if why := denied[in.Name()]; why != "" {
+			wirings[i] = wiring.Disable(in, why, mgr.GetClient(), wiringCfg)
+		}
+	}
+	if len(denied) > 0 {
+		if err := mgr.Add(&accessWatch{client: mgr.GetClient(), denied: denied, maxDelay: o.SelectorRestartMaxDelay}); err != nil {
+			return nil, err
+		}
+	}
 	if err := (&wiring.Reconciler{
 		Client: mgr.GetClient(), PodWebhook: webhook.MutatingConfigName, Integrations: wirings, Disabled: !inject,
 	}).SetupWithManager(mgr); err != nil {
@@ -288,7 +306,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	for _, in := range wirings {
 		kinds[in.Name()] = in.Kinds()
 	}
-	if err := (&proxydiscovery.Reconciler{Client: mgr.GetClient(), GatewayClasses: gatewayClasses, Kinds: kinds}).SetupWithManager(mgr); err != nil {
+	if err := (&proxydiscovery.Reconciler{Client: mgr.GetClient(), GatewayClasses: gatewayClasses, Kinds: kinds, Disabled: denied}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
 	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gateways, gatewayClasses, envoyProxies, extensionPolicies, trafficPolicies} {
