@@ -960,13 +960,14 @@ is disabled rather than stalling the cache on objects it may not read:
   The chart restarts the operator when the values change too (a pod annotation lists the
   integrations granted).
 
-`rbac.integrations.<integration>` is `auto` by default: the chart binds the role when the
-cluster serves the proxy's API group (`traefik.io/v1alpha1`, `gateway.envoyproxy.io/v1alpha1`,
-`.Capabilities.APIVersions`), so a cluster without Envoy Gateway doesn't grant its kinds. A proxy
-installed after Inkwall needs a `helm upgrade` (or `true` from the start); the disabled
-integration's message says so. When Helm can't ask the cluster (`helm template`, a client dry
-run: `lookup` finds nothing), every role is rendered, as before. `true` and `false` bind it or
-not whatever the cluster serves.
+`rbac.integrations.<integration>` is `true` by default, as in 0.2 (also when the value is
+missing, from `--reuse-values`): the documented install order installs the proxies after Inkwall,
+and a role on kinds the cluster doesn't serve grants nothing usable. `false` never binds it.
+`auto`, an opt-in, binds it when the cluster serves the proxy's API group (`traefik.io/v1alpha1`,
+`gateway.envoyproxy.io/v1alpha1`, `.Capabilities.APIVersions`), so a cluster without Envoy
+Gateway doesn't grant its kinds; a proxy installed after Inkwall then needs a `helm upgrade`, as
+the disabled integration's message and the chart's notes say. When Helm can't ask the cluster
+(`helm template`, a client dry run: `lookup` finds nothing), `auto` renders every role.
 
 Missing CRDs don't disable an integration: its wiring waits for them
 ([§4.4](#44-wiring-controller)).

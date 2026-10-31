@@ -47,9 +47,18 @@ app.kubernetes.io/component: operator
 {{- printf "%s:%s" .Values.engine.image.repository (default .Chart.AppVersion .Values.engine.image.tag) -}}
 {{- end -}}
 
+{{/*
+The operator's name and a suffix, for its other objects: the name is cut
+before the suffix is added, so long release names keep the suffix and the
+names don't collide. Arguments: root, suffix.
+*/}}
+{{- define "inkwall.operator.suffixed" -}}
+{{- printf "%s-%s" (include "inkwall.operator.name" .root | trunc (int (sub 62 (len .suffix))) | trimSuffix "-") .suffix -}}
+{{- end -}}
+
 {{/* The webhook Service, named in the serving certificate. */}}
 {{- define "inkwall.webhook.service" -}}
-{{- printf "%s-webhook" (include "inkwall.operator.name" .) | trunc 63 | trimSuffix "-" -}}
+{{- include "inkwall.operator.suffixed" (dict "root" . "suffix" "webhook") -}}
 {{- end -}}
 
 {{/* The distribution Service engines connect to, named in the certificate. */}}
@@ -58,7 +67,7 @@ app.kubernetes.io/component: operator
 {{- end -}}
 
 {{- define "inkwall.webhook.secret" -}}
-{{- printf "%s-webhook-tls" (include "inkwall.operator.name" .) | trunc 63 | trimSuffix "-" -}}
+{{- include "inkwall.operator.suffixed" (dict "root" . "suffix" "webhook-tls") -}}
 {{- end -}}
 
 {{/*
@@ -78,17 +87,17 @@ of dicts. Argument: the file's path in the chart.
 
 {{/*
 Whether an integration's ClusterRole is granted: rbac.integrations, by the
-integration's name in camelCase (envoy-gateway: envoyGateway). true or
-false; auto (the default, also without rbac: helm upgrade --reuse-values
-from 0.2) grants it when the cluster serves its proxy's API group
+integration's name in camelCase (envoy-gateway: envoyGateway). true (the
+default, also without rbac: helm upgrade --reuse-values from 0.2) or
+false; auto grants it when the cluster serves its proxy's API group
 (inkwall.integration.apiGroups, or --api-versions), and also when Helm
-can't ask the cluster (helm template, --dry-run=client), as before.
+can't ask the cluster (helm template, --dry-run=client).
 Arguments: root, name.
 */}}
 {{- define "inkwall.integration.enabled" -}}
 {{- $integrations := (.root.Values.rbac | default dict).integrations | default dict -}}
 {{- $key := .name | camelcase | untitle -}}
-{{- $value := "auto" -}}
+{{- $value := "true" -}}
 {{- if hasKey $integrations $key -}}
 {{- $value = toString (index $integrations $key) -}}
 {{- end -}}
