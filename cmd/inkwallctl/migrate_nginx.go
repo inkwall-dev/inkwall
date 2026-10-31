@@ -428,6 +428,8 @@ func (s *modsec) secRule(m *migration, text string, args []string, src string) {
 		skip     bool
 		skipBody bool
 		phase2   bool
+		// expanded are the ranges expanded to CRS rule IDs.
+		expanded []string
 	)
 	for _, a := range acts {
 		if a.name == "phase" {
@@ -451,15 +453,18 @@ func (s *modsec) secRule(m *migration, text string, args []string, src string) {
 		option, value, _ := strings.Cut(a.value, "=")
 		switch strings.ToLower(option) {
 		case "ruleremovebyid":
-			id, err := ruleID(value)
+			list, err := ruleIDs(value)
 			if err != nil {
 				todo(fmt.Sprintf("ctl:%s: %v", a.value, err))
 				return
 			}
-			ids = append(ids, id)
+			ids = append(ids, list...)
+			if strings.Contains(value, "-") {
+				expanded = append(expanded, fmt.Sprintf("%s (%d rules)", value, len(list)))
+			}
 		case "ruleremovetargetbyid":
 			idText, t, _ := strings.Cut(value, ";")
-			id, err := ruleID(idText)
+			list, err := ruleIDs(idText)
 			if err != nil {
 				todo(fmt.Sprintf("ctl:%s: %v", a.value, err))
 				return
@@ -469,7 +474,12 @@ func (s *modsec) secRule(m *migration, text string, args []string, src string) {
 				todo(fmt.Sprintf("ctl:%s: only an ARGS:name target maps to an exclusion's argument", a.value))
 				return
 			}
-			targets = append(targets, target{id, arg})
+			for _, id := range list {
+				targets = append(targets, target{id, arg})
+			}
+			if strings.Contains(idText, "-") {
+				expanded = append(expanded, fmt.Sprintf("%s (%d rules)", idText, len(list)))
+			}
 		case "ruleengine":
 			if !strings.EqualFold(value, "off") {
 				todo(fmt.Sprintf("ctl:%s: only ruleEngine=Off maps (to skip.paths)", a.value))
@@ -508,6 +518,9 @@ func (s *modsec) secRule(m *migration, text string, args []string, src string) {
 		done = append(done, "skip.bodyPaths")
 	}
 	m.add(itemMapped, src, "%s: %s on %s", text, strings.Join(done, " and "), path)
+	if len(expanded) > 0 {
+		m.add(itemCheck, src, "the range(s) %s expanded to the embedded CRS's rules in them: rules a later CRS adds to a range are not excluded", strings.Join(expanded, ", "))
+	}
 	if phase2 {
 		m.add(itemCheck, src, "the rule ran in phase 2; Inkwall applies exclusions from phase 1, so the excluded rules' phase 1 checks are off on %s too", path)
 	}
@@ -555,13 +568,53 @@ func argsTarget(target string) (string, bool) {
 	return name, true
 }
 
-// ruleID parses one rule ID; a range has no exclusion equivalent.
+// ruleID parses one rule ID.
 func ruleID(s string) (int32, error) {
 	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 32)
 	if err != nil || n < 1 {
-		return 0, fmt.Errorf("%q is not a single rule ID (ranges don't map to an exclusion)", s)
+		return 0, fmt.Errorf("%q is not a single rule ID", s)
 	}
 	return int32(n), nil
+}
+
+// The IDs the OWASP CRS reserves: a range within them only removes CRS
+// rules, which the engine embeds.
+const (
+	crsIDMin = 900000
+	crsIDMax = 999999
+)
+
+// ruleIDs parses a ctl rule ID: one ID, or a range of CRS IDs expanded to
+// the embedded CRS's rules in it. A range reaching outside the CRS IDs
+// could remove the user's own rules too, which an exclusion can't express.
+func ruleIDs(s string) ([]int32, error) {
+	lo, hi, isRange := strings.Cut(strings.TrimSpace(s), "-")
+	if !isRange {
+		id, err := ruleID(s)
+		return []int32{id}, err
+	}
+	from, err1 := ruleID(lo)
+	to, err2 := ruleID(hi)
+	switch {
+	case err1 != nil || err2 != nil || from > to:
+		return nil, fmt.Errorf("%q is not a rule ID or range", s)
+	case from < crsIDMin || to > crsIDMax:
+		return nil, fmt.Errorf("the range %s reaches outside the CRS rule IDs (%d-%d): only a range of CRS rules maps to an exclusion", s, crsIDMin, crsIDMax)
+	}
+	crs, err := coraza.CRSRuleIDs()
+	if err != nil {
+		return nil, err
+	}
+	var ids []int32
+	for _, id := range crs {
+		if id >= int(from) && id <= int(to) {
+			ids = append(ids, int32(id)) // #nosec G115 -- a CRS ID, at most crsIDMax
+		}
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("the range %s has no CRS rule", s)
+	}
+	return ids, nil
 }
 
 // removeByID maps SecRuleRemoveById with single IDs to an exclusion

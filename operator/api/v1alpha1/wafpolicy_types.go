@@ -101,7 +101,12 @@ type TargetRef struct {
 	// Kind of the target: Ingress, HTTPRoute or IngressRoute. An
 	// IngressRoute's hosts and paths come from its routes' match rules,
 	// which may combine Host, Path and PathPrefix with &&; a rule with
-	// anything else (||, !, other matchers) is not accepted.
+	// anything else (||, !, other matchers) is not accepted. An HTTPRoute's routes
+	// are each of its hostnames (none: any host) with each of its rules'
+	// matches, which may have an Exact or PathPrefix path and a method; a
+	// match with a RegularExpression path, headers or queryParams is not
+	// accepted. Whether a proxy wires HTTPRoute targets depends on its
+	// integration.
 	// +kubebuilder:validation:Enum=Ingress;HTTPRoute;IngressRoute
 	Kind string `json:"kind"`
 
@@ -110,7 +115,9 @@ type TargetRef struct {
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 
-	// SectionName narrows an HTTPRoute target to one named rule.
+	// SectionName narrows an HTTPRoute target to the rule of that name:
+	// only its matches are protected, and it takes precedence over a policy
+	// on the whole HTTPRoute. A name no rule has is a missing target.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	// +optional

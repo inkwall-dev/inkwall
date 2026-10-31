@@ -127,10 +127,11 @@ Before anything is deleted, a pre-delete hook (`uninstall.unwire`, on by default
 `Ignore`. It removes Inkwall's Middleware from every route it wired, keeping your own
 Middlewares. For Envoy Gateway, it deletes its `EnvoyExtensionPolicy`, `Backend` and
 `ClientTrafficPolicy` objects, takes the engine out of your `EnvoyProxy` objects, and points the
-Gateways it pointed at its own `EnvoyProxy` back at none. It removes the `waf.inkwall.dev/unwire`
-finalizer from every `WAFPolicy`. The routes then keep working, uninspected; Traefik pods drop the
-engine when they restart, and Envoy Gateway rolls its Envoy pods without it; deleting a policy, or
-its namespace, no longer waits for the operator.
+Gateways it pointed at its own `EnvoyProxy` back at none. Every `WAFPolicy` then reports
+`Programmed=False` and `Ready=False` (reason `Unwired`), and loses the `waf.inkwall.dev/unwire`
+finalizer. The routes then keep working, uninspected; Traefik pods drop the engine when they
+restart, and Envoy Gateway rolls its Envoy pods without it; deleting a policy, or its namespace, no
+longer waits for the operator.
 
 `helm uninstall` keeps:
 

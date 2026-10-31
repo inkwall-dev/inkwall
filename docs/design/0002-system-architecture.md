@@ -214,8 +214,8 @@ Three commands are built:
   (`--bundle`, with its signature checked against `--bundle-key`).
 - `bench` benchmarks the engine on a fixed corpus.
 - `migrate ingress-nginx` converts ingress-nginx's ModSecurity annotations and ConfigMap settings
-  into `WAFPolicy` and `WAFRuleSet` objects targeting the Ingresses, and lists what it can't
-  convert ([migrating from ingress-nginx](../migrating-from-ingress-nginx.md)). It only reads.
+  into `WAFPolicy` and `WAFRuleSet` objects targeting the Ingresses, or the HTTPRoutes or
+  IngressRoutes that replace them (`--target`), and lists what it can't convert ([migrating from ingress-nginx](../migrating-from-ingress-nginx.md)). It only reads.
 
 Planned: `status` (engine versions, drift).
 
@@ -384,7 +384,8 @@ Rules of the contract:
   them. Each replica sums its engines' counts per policy and sends them every 10 s: the policies
   that changed, and all of them first on a new stream. They are cumulative since the replica
   started counting (`since`), so a lost upload loses nothing, and the cluster's counts are the sum
-  over its replicas. They are per policy, never per route or client.
+  over its replicas. A count lower than the previous one is a reset (a replica forgot a policy no
+  longer in its bundle): it counts from zero. They are per policy, never per route or client.
 - A policy snapshot is all or nothing: the operator first does a [server-side dry run](https://kubernetes.io/docs/reference/using-api/api-concepts/#dry-run) of every
   object. The cluster's `InkwallConfig` decides the mode, and a cluster not in Managed mode
   refuses policy snapshots. Only `WAFPolicy` and the rule set kinds are accepted.
@@ -609,7 +610,7 @@ inspects inline and always allows (`pkg/pipeline`).
 1. [Argo CD](https://argo-cd.readthedocs.io/en/stable/) applies a `WAFPolicy`.
 2. The operator builds and signs a bundle.
 3. Engines swap it in and ACK.
-4. The policy reports `Enforced=True "6/6 engines on bundle N"`.
+4. The policy reports `Enforced=True "every engine runs bundle N or later"`.
 
 ### 7.5 Cluster enrollment (Managed / GitOps mode)
 
