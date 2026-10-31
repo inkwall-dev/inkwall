@@ -17,7 +17,6 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -28,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/inkwall-dev/inkwall/operator/bundle"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 )
 
@@ -61,8 +61,18 @@ type Reconciler struct {
 	Namespace string
 	// CertSecret holds the operator's CA (ca.crt).
 	CertSecret string
-	// Pods selects the proxy pods (integrations.Selectors.PodSelector).
-	Pods labels.Selector
+	// Pods are the integrations' pod selectors.
+	Pods *integrations.Selectors
+}
+
+// proxyPods lists the proxy pods, in namespace if it isn't empty.
+func (r *Reconciler) proxyPods(ctx context.Context, namespace string) ([]corev1.Pod, error) {
+	var list corev1.PodList
+	if err := r.Client.List(ctx, &list, client.InNamespace(namespace), client.MatchingLabelsSelector{Selector: r.Pods.PodSelector()}); err != nil {
+		return nil, err
+	}
+	// The cache's selector may match other pods too.
+	return slices.DeleteFunc(list.Items, func(p corev1.Pod) bool { return !r.Pods.IsProxyPod(p.Labels) }), nil
 }
 
 // SetupWithManager registers the controller.
@@ -81,13 +91,13 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 func (r *Reconciler) allNamespaces(ctx context.Context, _ client.Object) []reconcile.Request {
-	var pods corev1.PodList
-	if err := r.Client.List(ctx, &pods, client.MatchingLabelsSelector{Selector: r.Pods}); err != nil {
+	pods, err := r.proxyPods(ctx, "")
+	if err != nil {
 		return nil
 	}
 	seen := map[string]bool{}
 	var out []reconcile.Request
-	for _, p := range pods.Items {
+	for _, p := range pods {
 		if !seen[p.Namespace] {
 			seen[p.Namespace] = true
 			out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{Name: p.Namespace}})
@@ -109,19 +119,19 @@ func managed() map[string]string {
 }
 
 func (r *Reconciler) reconcileTrust(ctx context.Context, namespace string) (reconcile.Result, error) {
-	var pods corev1.PodList
-	if err := r.Client.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabelsSelector{Selector: r.Pods}); err != nil {
+	pods, err := r.proxyPods(ctx, namespace)
+	if err != nil {
 		return reconcile.Result{}, err
 	}
 	key := types.NamespacedName{Namespace: namespace, Name: TrustConfigMap}
 	var cm corev1.ConfigMap
-	err := r.APIReader.Get(ctx, key, &cm)
+	err = r.APIReader.Get(ctx, key, &cm)
 	exists := err == nil
 	if err != nil && !apierrors.IsNotFound(err) {
 		return reconcile.Result{}, err
 	}
 
-	if len(pods.Items) == 0 {
+	if len(pods) == 0 {
 		// No proxy pods left: remove what the operator created.
 		if exists && cm.Labels["app.kubernetes.io/managed-by"] == "inkwall-operator" {
 			return reconcile.Result{}, client.IgnoreNotFound(r.Client.Delete(ctx, &cm))
@@ -177,12 +187,12 @@ func (r *Reconciler) reconcileTrust(ctx context.Context, namespace string) (reco
 // that let every proxy pod's ServiceAccount get the bundle Secret and its
 // chunks.
 func (r *Reconciler) reconcileGrant(ctx context.Context) error {
-	var pods corev1.PodList
-	if err := r.Client.List(ctx, &pods, client.MatchingLabelsSelector{Selector: r.Pods}); err != nil {
+	pods, err := r.proxyPods(ctx, "")
+	if err != nil {
 		return err
 	}
 	subjects := map[string]rbacv1.Subject{}
-	for _, p := range pods.Items {
+	for _, p := range pods {
 		sa := cmp.Or(p.Spec.ServiceAccountName, "default")
 		subjects[p.Namespace+"/"+sa] = rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Namespace: p.Namespace, Name: sa}
 	}

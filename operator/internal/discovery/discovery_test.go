@@ -107,7 +107,9 @@ func TestReconcile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &Reconciler{Client: c, Kinds: traefikKinds}
+	// Envoy Gateway's wiring takes HTTPRoutes (#127).
+	kinds := map[string][]schema.GroupKind{"traefik": traefikKinds["traefik"], "envoy-gateway": {httpRouteKind}}
+	r := &Reconciler{Client: c, Kinds: kinds}
 	reconcileOnce := func() {
 		t.Helper()
 		if _, err := r.Reconcile(ctx, reconcile.Request{}); err != nil {
@@ -147,7 +149,7 @@ func TestReconcile(t *testing.T) {
 	want := map[string]wafv1alpha1.Support{
 		"traefik.io/ingress-controller":                 wafv1alpha1.SupportFull,
 		"k8s.io/ingress-nginx":                          wafv1alpha1.SupportUnsupported,
-		"gateway.envoyproxy.io/gatewayclass-controller": wafv1alpha1.SupportUnsupported,
+		"gateway.envoyproxy.io/gatewayclass-controller": wafv1alpha1.SupportFull,
 	}
 	if !apiequality.Semantic.DeepEqual(support, want) {
 		t.Errorf("proxies %+v, want %v", cfg.Status.Proxies, want)

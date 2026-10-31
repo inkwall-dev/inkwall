@@ -51,6 +51,7 @@ const (
 	ReasonSidecarMissing        = "SidecarMissing"
 	ReasonNoTargets             = "NoTargets"
 	ReasonInjectionDisabled     = "InjectionDisabled"
+	ReasonPending               = "Pending"
 	// ReasonUnwired: `inkwall-operator unwire` (helm uninstall) unwired
 	// the routes and stopped the operator.
 	ReasonUnwired = "Unwired"
@@ -283,7 +284,7 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 	if rep.disabled {
 		return metav1.ConditionFalse, ReasonInjectionDisabled, "the engine is not injected into proxy pods (injection is off): the routes are not wired"
 	}
-	var unsupported, failed []string
+	var unsupported, failed, pending []string
 	// wired counts the wired targets by result, then kind.
 	wired := make([]map[schema.GroupKind]int, len(rep.results))
 	total := 0
@@ -310,9 +311,13 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 		}
 		switch {
 		case served >= 0:
-			if s := rep.results[served].Targets[t]; s.Failed != "" {
+			s := rep.results[served].Targets[t]
+			if s.Failed != "" {
 				failed = append(failed, s.Failed)
 				continue
+			}
+			if s.Pending != "" {
+				pending = append(pending, s.Pending)
 			}
 			if wired[served] == nil {
 				wired[served] = map[schema.GroupKind]int{}
@@ -340,7 +345,7 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 		if wired[i] == nil {
 			continue
 		}
-		if st, reason, msg := sidecars(res.Proxy, res.Pods, rep.injectingSince); st != metav1.ConditionTrue {
+		if st, reason, msg := sidecars(res, rep.injectingSince); st != metav1.ConditionTrue {
 			return st, reason, msg
 		}
 		var counts []string
@@ -352,17 +357,24 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 		}
 		msgs = append(msgs, strings.Join(counts, " and ")+" wired to the engine in "+res.Proxy)
 	}
+	if len(pending) > 0 {
+		slices.Sort(pending)
+		return metav1.ConditionFalse, ReasonPending, strings.Join(slices.Compact(pending), "; ")
+	}
 	return metav1.ConditionTrue, ReasonProgrammed, strings.Join(msgs, "; ")
 }
 
 // sidecars checks that a proxy's running pods have the engine.
-func sidecars(proxy string, all []corev1.Pod, injectingSince time.Time) (metav1.ConditionStatus, string, string) {
+func sidecars(res *Result, injectingSince time.Time) (metav1.ConditionStatus, string, string) {
 	var missed, optedOut, before []string
-	pods := running(all)
+	proxy := res.Proxy
+	pods := running(res.Pods)
 	for _, pod := range pods {
 		name := pod.Namespace + "/" + pod.Name
 		switch {
 		case injection.HasEngine(pod):
+		case res.Rolling:
+			before = append(before, name)
 		case injection.OptedOut(pod):
 			optedOut = append(optedOut, name)
 		case !injectingSince.IsZero() && pod.CreationTimestamp.After(injectingSince):
@@ -375,6 +387,8 @@ func sidecars(proxy string, all []corev1.Pod, injectingSince time.Time) (metav1.
 		slices.Sort(l)
 	}
 	switch {
+	case len(pods) == 0 && res.Rolling:
+		return metav1.ConditionFalse, ReasonSidecarMissing, fmt.Sprintf("no %s pod of the routes' Gateways is running, so the routes are not wired", proxy)
 	case len(pods) == 0:
 		// Nothing is wired then (Traefik.Wire).
 		return metav1.ConditionFalse, ReasonSidecarMissing, fmt.Sprintf("no %[1]s pod selected for the engine is running, so the routes are not wired "+
@@ -388,6 +402,9 @@ func sidecars(proxy string, all []corev1.Pod, injectingSince time.Time) (metav1.
 			why = append(why, "opted out with "+injection.InjectAnnotation+": \"false\": "+strings.Join(optedOut, ", "))
 		}
 		return metav1.ConditionFalse, ReasonSidecarMissing, proxy + " pods run without the engine, their traffic is not inspected; " + strings.Join(why, "; ")
+	case len(before) > 0 && res.Rolling:
+		return metav1.ConditionFalse, ReasonPendingRestart, fmt.Sprintf(
+			"%s is replacing its pods with ones that have the engine; the routes are wired once all have it: %s", proxy, strings.Join(before, ", "))
 	case len(before) > 0:
 		return metav1.ConditionFalse, ReasonPendingRestart, fmt.Sprintf(
 			"%s pods started before Inkwall run without the engine; restart them (kubectl rollout restart) to inject it: %s",

@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
+	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 )
 
@@ -34,6 +35,9 @@ const (
 	tmpVolume     = "inkwall-tmp"
 	secretsDir    = "/var/run/secrets/inkwall" // #nosec G101 -- a mount path, not a credential
 	cacheDir      = "/var/run/inkwall"
+	// SocketVolume shares the engine's Unix socket with the proxy
+	// (Sidecar.SocketDir).
+	SocketVolume = "inkwall-socket"
 
 	// InjectedAnnotation marks a pod the engine was injected into.
 	InjectedAnnotation = "waf.inkwall.dev/injected"
@@ -62,6 +66,9 @@ type Sidecar struct {
 	// Args are the adapter's command and its own flags, e.g.
 	// ["forward-auth"].
 	Args []string
+	// SocketDir, when set, is an emptyDir (SocketVolume) mounted in the
+	// engine, for a Unix socket the proxy mounts too.
+	SocketDir string
 }
 
 func defaultResources() corev1.ResourceRequirements {
@@ -75,6 +82,16 @@ func defaultResources() corev1.ResourceRequirements {
 		// (~4 MiB each).
 		Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
 	}
+}
+
+// Configured returns s with an InkwallConfig's engine settings.
+func (s Sidecar) Configured(e wafv1alpha1.EngineSpec) Sidecar {
+	if e.Image != "" {
+		s.Image = e.Image
+	}
+	s.Resources = e.Resources
+	s.DenyBeforeBundle = e.BootstrapMode == wafv1alpha1.BootstrapDenyAll
+	return s
 }
 
 // HasEngine reports whether pod has the engine container.
@@ -101,6 +118,23 @@ func Inject(pod *corev1.Pod, s Sidecar) bool {
 		}
 	}
 
+	engine, volumes := Engine(s)
+	// First, so the engine is up before the proxy and any other init
+	// container that needs traffic inspected.
+	pod.Spec.InitContainers = append([]corev1.Container{engine}, pod.Spec.InitContainers...)
+	pod.Spec.Volumes = append(pod.Spec.Volumes, volumes...)
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations[InjectedAnnotation] = "true"
+	return true
+}
+
+// Engine returns the engine container, a native sidecar (an init container
+// with restartPolicy Always), and the volumes it needs: what Inject adds to
+// a pod, and what a proxy with its own pod template takes (Envoy Gateway's
+// EnvoyProxy).
+func Engine(s Sidecar) (corev1.Container, []corev1.Volume) {
 	args := append(slices.Clone(s.Args),
 		"--operator="+s.OperatorAddr,
 		"--operator-ca="+secretsDir+"/ca.crt",
@@ -165,11 +199,8 @@ func Inject(pod *corev1.Pod, s Sidecar) bool {
 		},
 		RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
 	}
-	// First, so the engine is up before the proxy and any other init
-	// container that needs traffic inspected.
-	pod.Spec.InitContainers = append([]corev1.Container{engine}, pod.Spec.InitContainers...)
-	pod.Spec.Volumes = append(pod.Spec.Volumes,
-		corev1.Volume{Name: secretsVolume, VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+	volumes := []corev1.Volume{
+		{Name: secretsVolume, VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
 			Sources: []corev1.VolumeProjection{
 				{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
 					Audience: distribution.Audience, ExpirationSeconds: ptr.To(int64(3600)), Path: "token",
@@ -189,16 +220,16 @@ func Inject(pod *corev1.Pod, s Sidecar) bool {
 				}},
 			},
 		}}},
-		corev1.Volume{Name: cacheVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-		corev1.Volume{Name: tmpVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
+		{Name: cacheVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		{Name: tmpVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
 			SizeLimit: ptr.To(resource.MustParse("16Mi")),
 		}}},
-	)
-	if pod.Annotations == nil {
-		pod.Annotations = map[string]string{}
 	}
-	pod.Annotations[InjectedAnnotation] = "true"
-	return true
+	if s.SocketDir != "" {
+		engine.VolumeMounts = append(engine.VolumeMounts, corev1.VolumeMount{Name: SocketVolume, MountPath: s.SocketDir})
+		volumes = append(volumes, corev1.Volume{Name: SocketVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+	}
+	return engine, volumes
 }
 
 // OptedOut reports whether pod keeps the engine out, with the annotation
