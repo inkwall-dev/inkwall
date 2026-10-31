@@ -143,7 +143,7 @@ func TestExtensionPolicy(t *testing.T) {
 		t.Errorf("targetRefs %v", spec["targetRefs"])
 	}
 	ep := spec["extProc"].([]any)[0].(map[string]any)
-	if ep["messageTimeout"] != "350ms" || ep["failOpen"] != false ||
+	if ep["messageTimeout"] != "750ms" || ep["failOpen"] != false ||
 		ep["processingMode"].(map[string]any)["request"].(map[string]any)["body"] != "BufferedPartial" ||
 		ep["processingMode"].(map[string]any)["response"] != nil {
 		t.Errorf("extProc %v", ep)
@@ -161,7 +161,7 @@ func TestExtensionPolicy(t *testing.T) {
 		t.Errorf("targetRefs %v", refs)
 	}
 	ep = spec["extProc"].([]any)[0].(map[string]any)
-	if ep["messageTimeout"] != "1.1s" || ep["failOpen"] != true || len(ep["processingMode"].(map[string]any)["request"].(map[string]any)) != 0 {
+	if ep["messageTimeout"] != "1500ms" || ep["failOpen"] != true || len(ep["processingMode"].(map[string]any)["request"].(map[string]any)) != 0 {
 		t.Errorf("extProc %v", ep)
 	}
 

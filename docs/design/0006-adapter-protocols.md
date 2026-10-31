@@ -101,7 +101,7 @@ wins on what comes next:
 **Built: the operator's configuration** for Envoy Gateway ([0004 §4.4](0004-operator.md#44-wiring-controller)), one
 `EnvoyExtensionPolicy` per protected HTTPRoute: `request_body_mode: BUFFERED_PARTIAL` on routes
 whose policy inspects bodies (headers only otherwise), response stages `SKIP`, a message timeout
-100 ms above the engine's deadline, `failOpen` only when every policy on the route fails open, and
+500 ms above the engine's deadline (the engine decides, with the policy's failure mode; Envoy's timeout is for a hung engine), `failOpen` only when every policy on the route fails open, and
 an Envoy buffer limit (a `ClientTrafficPolicy` on the Gateway) of 10 MiB, the largest
 `body.maxBytes`. On kind, a body attack is blocked before the app sees the request: Envoy holds
 the headers until the engine answers the body. **Not yet:** `observability_mode` for detect mode.

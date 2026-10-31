@@ -288,6 +288,10 @@ spec:
     - {kind: Ingress, name: web}
     - {group: gateway.networking.k8s.io, kind: HTTPRoute, name: app}
   mode: Block
+  # CRS takes about 200 ms on the 48 KB form field below on a fast machine,
+  # more on a CI runner: past the default 250 ms, the engine fails closed
+  # (503). Envoy waits 500 ms longer than this.
+  timeout: 1s
 YAML
 }
 eep_accepted() {
@@ -349,7 +353,16 @@ big=$(for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
   code "$port" / -H 'Content-Type: application/x-www-form-urlencoded' --data-binary "@$work/big"
   echo -n " "
 done)
-if [[ $big == "200 200 " ]]; then ok "a 48 KB benign body passes"; else fail "a 48 KB benign body passes (got $big)"; fi
+if [[ $big == "200 200 " ]]; then
+  ok "a 48 KB benign body passes"
+else
+  fail "a 48 KB benign body passes (got $big)"
+  # Envoy's answer, and the engines' verdicts: a 503 with reason timeout
+  # is the engine's deadline; Envoy's own ext_proc errors are 500 or 504.
+  curl -s -i -H "Host: $HOST" -H 'Content-Type: application/x-www-form-urlencoded' --data-binary "@$work/big" \
+    "http://127.0.0.1:$CUSTOM_PORT/" | head -12
+  "${KUBECTL[@]}" -n "$EG_NS" logs -l app.kubernetes.io/name=envoy -c inkwall-engine --tail=5 --prefix || true
+fi
 check "an attack in the body is blocked" envoy_are 403 / --data-urlencode "q=1' OR '1'='1"
 # BufferedPartial: Envoy holds the headers until the engine has seen the
 # body, so the app never sees the blocked request.

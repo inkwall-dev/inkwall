@@ -427,7 +427,9 @@ integration), for `HTTPRoute` targets whose parent Gateways have a GatewayClass 
     ext_proc filter ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing))
     sends the request headers, and the body (`BufferedPartial`) when a policy on the route inspects
     bodies; no response stage; `messageTimeout` the route's longest policy timeout (250 ms by
-    default) plus 100 ms, as the engine answers by its deadline with the policy's failure mode;
+    default) plus 500 ms, so the engine decides, by its deadline and with the policy's failure
+    mode (the deadline doesn't cover sending the body or a busy node); Envoy's timeout is for a
+    hung engine;
     `failOpen` when every policy on the route fails open, so an unreachable engine fails the way
     the policies would;
   - the `Backend` `inkwall-engine` in its namespace: the Unix socket. Envoy Gateway's Backend API

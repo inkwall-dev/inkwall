@@ -253,4 +253,7 @@ logs `Error calling http://127.0.0.1:9001/v1/forward-auth` for each request it a
 Through Envoy Gateway, Envoy answers 500 when it can't reach the engine, unless every policy on
 the route fails open (`failureMode: Open`, or detect mode without one): the route's
 `EnvoyExtensionPolicy` then has `failOpen: true`, and Envoy lets the request through uninspected.
-Envoy waits for the engine 100 ms longer than the policy's `timeout`.
+Envoy waits for the engine 500 ms longer than the policy's `timeout`. A request the engine can't
+inspect within the policy's `timeout` gets the policy's failure mode from the engine: 503 in block
+mode. Large bodies take longer: CRS takes about 200 ms on a 48 KB form field on a fast machine, so
+raise `timeout` (up to 1s) for routes that take large bodies.

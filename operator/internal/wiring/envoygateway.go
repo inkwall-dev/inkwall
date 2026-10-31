@@ -74,9 +74,11 @@ const (
 	// inspects. A body cut at it is handled as an oversized one.
 	envoyBufferLimit = policy.MaxBodyBytes
 	// messageMargin is how much longer than the engine's deadline Envoy
-	// waits for its answer: the engine answers by its deadline, with the
-	// policy's failure mode.
-	messageMargin = 100 * time.Millisecond
+	// waits for its answer, so the engine decides, with the policy's
+	// failure mode: the deadline doesn't cover sending the body to the
+	// engine, its queue, or a busy node. Envoy's own timeout is only for an
+	// engine that hangs.
+	messageMargin = 500 * time.Millisecond
 	// sidecarMark on an EnvoyProxy or a Gateway records what the operator
 	// added: the engine ("sidecar", plus ",provider" when it made
 	// spec.provider), or the operator's EnvoyProxy in parametersRef (its
@@ -555,7 +557,8 @@ func extensionPolicy(r *envoyRoute) *unstructured.Unstructured {
 		"extProc": []any{map[string]any{
 			"backendRefs":    []any{map[string]any{"group": BackendGVK.Group, "kind": BackendGVK.Kind, "name": EnvoyBackend}},
 			"processingMode": map[string]any{"request": request},
-			"messageTimeout": (r.timeout + messageMargin).String(),
+			// A Gateway API duration: whole units, no "1.5s".
+			"messageTimeout": fmt.Sprintf("%dms", (r.timeout + messageMargin).Milliseconds()),
 			"failOpen":       r.failOpen,
 		}},
 	}
