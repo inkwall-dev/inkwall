@@ -45,7 +45,7 @@ func isFilter(f any) bool {
 	filter, _ := f.(map[string]any)
 	ref, _ := filter["extensionRef"].(map[string]any)
 	return filter["type"] == string(gatewayv1.HTTPRouteFilterExtensionRef) &&
-		ref["group"] == MiddlewareGVK.Group && ref["kind"] == MiddlewareGVK.Kind && ref["name"] == MiddlewareName
+		ref["group"] == integrations.TraefikMiddlewareGVK.Group && ref["kind"] == integrations.TraefikMiddlewareGVK.Kind && ref["name"] == MiddlewareName
 }
 
 // WithRuleFilter adds the operator's Middleware, as an ExtensionRef filter,
@@ -72,7 +72,7 @@ func WithRuleFilter(hr *unstructured.Unstructured, sel rules) (bool, error) {
 			ours := map[string]any{
 				"type": string(gatewayv1.HTTPRouteFilterExtensionRef),
 				"extensionRef": map[string]any{
-					"group": MiddlewareGVK.Group, "kind": MiddlewareGVK.Kind, "name": MiddlewareName,
+					"group": integrations.TraefikMiddlewareGVK.Group, "kind": integrations.TraefikMiddlewareGVK.Kind, "name": MiddlewareName,
 				},
 			}
 			rule["filters"] = append([]any{ours}, filters...)

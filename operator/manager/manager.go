@@ -207,7 +207,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		return nil, err
 	}
 	// Traefik's IngressRoute CRD may be installed after the operator.
-	ingressRoutes := &crdwatch.Kind{GVK: wiring.IngressRouteGVK, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
+	ingressRoutes := &crdwatch.Kind{GVK: integrations.TraefikIngressRouteGVK, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
 	// So may Gateway API's, and Envoy Gateway's.
 	crd := func(gvk schema.GroupVersionKind, obj client.Object) *crdwatch.Kind {
 		return &crdwatch.Kind{GVK: gvk, Object: obj, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}

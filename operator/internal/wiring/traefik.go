@@ -60,12 +60,6 @@ const (
 	maxAuthResponseBytes = 64 << 10
 )
 
-// Traefik's kinds the operator reads and writes.
-var (
-	MiddlewareGVK   = schema.GroupVersionKind{Group: "traefik.io", Version: "v1alpha1", Kind: "Middleware"}
-	IngressRouteGVK = schema.GroupVersionKind{Group: "traefik.io", Version: "v1alpha1", Kind: "IngressRoute"}
-)
-
 // MiddlewareRef is how an Ingress in namespace refers to the operator's
 // Middleware there.
 func MiddlewareRef(namespace string) string {
@@ -81,7 +75,7 @@ func Middleware(namespace string) *unstructured.Unstructured {
 // before v3.7 has no such field, and its API server drops it.
 func middleware(namespace string, responseLimit bool) *unstructured.Unstructured {
 	m := &unstructured.Unstructured{}
-	m.SetGroupVersionKind(MiddlewareGVK)
+	m.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
 	m.SetNamespace(namespace)
 	m.SetName(MiddlewareName)
 	m.SetLabels(map[string]string{"app.kubernetes.io/managed-by": "inkwall-operator"})
@@ -305,7 +299,7 @@ type Traefik struct {
 
 var (
 	ingressKind = schema.GroupKind{Group: networkingv1.GroupName, Kind: "Ingress"}
-	routeKind   = IngressRouteGVK.GroupKind()
+	routeKind   = integrations.TraefikIngressRouteGVK.GroupKind()
 )
 
 // Name implements Integration.
@@ -371,11 +365,11 @@ type state struct {
 // IngressRoutes lists Traefik's IngressRoutes; installed is false, with
 // none, when their CRD isn't.
 func IngressRoutes(ctx context.Context, c client.Client) (routes []unstructured.Unstructured, installed bool, err error) {
-	if installed, err = crdwatch.Installed(c.RESTMapper(), IngressRouteGVK); !installed || err != nil {
+	if installed, err = crdwatch.Installed(c.RESTMapper(), integrations.TraefikIngressRouteGVK); !installed || err != nil {
 		return nil, false, err
 	}
 	list := &unstructured.UnstructuredList{}
-	list.SetGroupVersionKind(IngressRouteGVK.GroupVersion().WithKind("IngressRouteList"))
+	list.SetGroupVersionKind(integrations.TraefikIngressRouteGVK.GroupVersion().WithKind("IngressRouteList"))
 	if err := c.List(ctx, list); err != nil {
 		return nil, true, err
 	}
@@ -625,7 +619,7 @@ func (t *Traefik) Wired(ctx context.Context, tg Target) (bool, error) {
 		obj = &networkingv1.Ingress{}
 	case routeKind:
 		u := &unstructured.Unstructured{}
-		u.SetGroupVersionKind(IngressRouteGVK)
+		u.SetGroupVersionKind(integrations.TraefikIngressRouteGVK)
 		obj = u
 	case httpRouteKind:
 		u := &unstructured.Unstructured{}
@@ -644,7 +638,7 @@ func (t *Traefik) Wired(ctx context.Context, tg Target) (bool, error) {
 }
 
 func (t *Traefik) middlewaresInstalled() bool {
-	_, err := t.Client.RESTMapper().RESTMapping(MiddlewareGVK.GroupKind(), MiddlewareGVK.Version)
+	_, err := t.Client.RESTMapper().RESTMapping(integrations.TraefikMiddlewareGVK.GroupKind(), integrations.TraefikMiddlewareGVK.Version)
 	return err == nil
 }
 
@@ -654,7 +648,7 @@ func (t *Traefik) ensureMiddleware(ctx context.Context, namespace string) error 
 	limit := !t.noResponseLimit.Load()
 	want := middleware(namespace, limit)
 	cur := &unstructured.Unstructured{}
-	cur.SetGroupVersionKind(MiddlewareGVK)
+	cur.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
 	err := t.APIReader.Get(ctx, client.ObjectKeyFromObject(want), cur)
 	switch {
 	case apierrors.IsNotFound(err):
@@ -692,7 +686,7 @@ func (t *Traefik) noteResponseLimit(ctx context.Context, m *unstructured.Unstruc
 // longer need one.
 func (t *Traefik) pruneMiddlewares(ctx context.Context, needed map[string]bool) error {
 	list := &unstructured.UnstructuredList{}
-	list.SetGroupVersionKind(MiddlewareGVK.GroupVersion().WithKind("MiddlewareList"))
+	list.SetGroupVersionKind(integrations.TraefikMiddlewareGVK.GroupVersion().WithKind("MiddlewareList"))
 	if err := t.APIReader.List(ctx, list, client.MatchingLabels{"app.kubernetes.io/managed-by": "inkwall-operator"}); err != nil {
 		return err
 	}

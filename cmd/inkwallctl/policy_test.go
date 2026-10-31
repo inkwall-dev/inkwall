@@ -336,6 +336,9 @@ func TestTestPolicyErrors(t *testing.T) {
 	ingressRoute := func(apiVersion, match string) string {
 		return writeFile(t, "ir.yaml", "apiVersion: "+apiVersion+"\nkind: IngressRoute\nmetadata: {name: web}\nspec:\n  routes:\n  - match: "+match+"\n")
 	}
+	routeSpec := func(spec string) string {
+		return writeFile(t, "ir.yaml", "apiVersion: traefik.io/v1alpha1\nkind: IngressRoute\nmetadata: {name: web}\nspec:\n"+spec)
+	}
 	withRuleSet := strings.Replace(singlePolicy, "mode: Block", "ruleSets: [{ref: {kind: WAFRuleSet, name: rs}}]", 1)
 	for _, tc := range []struct {
 		name   string
@@ -356,6 +359,18 @@ func TestTestPolicyErrors(t *testing.T) {
 			"TargetUnsupported: IngressRoute web: spec.routes[0] match \"Host(`a`) || Host(`b`)\": || is not supported: write one route per alternative"},
 		{"IngressRoute of the old API group", []string{"--policy", routePolicy, "--ingress", ingressRoute("traefik.containo.us/v1alpha1", "Host(`a`)")},
 			`IngressRoute web: apiVersion "traefik.containo.us/v1alpha1", want "traefik.io/v1alpha1"`},
+		{"IngressRoute with a misspelled route field", []string{"--policy", routePolicy, "--ingress", routeSpec("  routes:\n  - mach: Host(`a`)\n")},
+			`IngressRoute web: error unmarshaling JSON: while decoding JSON: json: unknown field "mach"`},
+		{"IngressRoute with a misspelled spec field", []string{"--policy", routePolicy, "--ingress", routeSpec("  route:\n  - match: Host(`a`)\n")},
+			`IngressRoute web: error unmarshaling JSON: while decoding JSON: json: unknown field "route"`},
+		{"IngressRoute without routes", []string{"--policy", routePolicy, "--ingress", routeSpec("  entryPoints: [web]\n")},
+			"IngressRoute web: spec.routes: required"},
+		{"IngressRoute route without a match", []string{"--policy", routePolicy, "--ingress", routeSpec("  routes:\n  - match: Host(`a`)\n  - kind: Rule\n")},
+			"IngressRoute web: spec.routes[1].match: required"},
+		{"IngressRoute route of another kind", []string{"--policy", routePolicy, "--ingress", routeSpec("  routes:\n  - match: Host(`a`)\n    kind: rule\n")},
+			`IngressRoute web: spec.routes[0].kind: "rule", want Rule`},
+		{"IngressRoute match not a string", []string{"--policy", routePolicy, "--ingress", routeSpec("  routes:\n  - match: [Host(`a`)]\n")},
+			"IngressRoute web: error unmarshaling JSON: while decoding JSON: json: cannot unmarshal array"},
 		{"missing rule set", []string{"--policy", writeFile(t, "p.yaml", withRuleSet)}, "WAFPolicy default/web: not enforced: InvalidRef: WAFRuleSet rs not found"},
 		{"inline rules the webhook rejects", []string{"--policy", writeFile(t, "p.yaml", withRuleSet), "--rule-set", ruleSet("    seclang: SecRuleEngine Off\n")}, "WAFRuleSet default/rs: rejected by the validating webhook"},
 		{"ConfigMap rules that don't compile", []string{"--policy", writeFile(t, "p.yaml", withRuleSet), "--rule-set", ruleSet("    configMapRef: {name: cm, key: r}\n"),

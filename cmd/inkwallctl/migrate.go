@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 )
 
 // migrateConfig is the configuration of migrate ingress-nginx.
@@ -230,7 +231,7 @@ func readMigrateFiles(cfg migrateConfig, notes io.Writer) (migrateInput, error) 
 			}
 			hr.Namespace = ns
 			in.httpRoutes = append(in.httpRoutes, hr)
-		case cfg.target == targetIngressRoute && head.Kind == "IngressRoute" && head.APIVersion == ingressRouteGVK.GroupVersion().String():
+		case cfg.target == targetIngressRoute && head.Kind == "IngressRoute" && head.APIVersion == integrations.TraefikIngressRouteGVK.GroupVersion().String():
 			var ir unstructured.Unstructured
 			j, err := yaml.YAMLToJSON(doc)
 			if err == nil {
@@ -376,7 +377,7 @@ func readCluster(cfg migrateConfig, notes io.Writer) (migrateInput, error) {
 	case targetHTTPRoute:
 		gvr = schema.GroupVersionResource{Group: gatewayv1.GroupName, Version: "v1", Resource: "httproutes"}
 	case targetIngressRoute:
-		gvr = ingressRouteGVK.GroupVersion().WithResource("ingressroutes")
+		gvr = integrations.TraefikIngressRouteGVK.GroupVersion().WithResource("ingressroutes")
 	default:
 		return in, nil
 	}

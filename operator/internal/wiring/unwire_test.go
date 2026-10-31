@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 )
 
 func TestUnwire(t *testing.T) {
@@ -120,7 +121,7 @@ func TestUnwire(t *testing.T) {
 
 	mw := func(namespace string) error {
 		m := &unstructured.Unstructured{}
-		m.SetGroupVersionKind(MiddlewareGVK)
+		m.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
 		return c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: MiddlewareName}, m)
 	}
 	if err := mw("shop"); !apierrors.IsNotFound(err) {
@@ -132,7 +133,7 @@ func TestUnwire(t *testing.T) {
 
 	route := func(name string) *unstructured.Unstructured {
 		u := &unstructured.Unstructured{}
-		u.SetGroupVersionKind(IngressRouteGVK)
+		u.SetGroupVersionKind(integrations.TraefikIngressRouteGVK)
 		if err := c.Get(ctx, client.ObjectKey{Namespace: "shop", Name: name}, u); err != nil {
 			t.Fatal(err)
 		}
