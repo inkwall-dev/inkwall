@@ -303,16 +303,18 @@ start_operator() {
 echo "== through Traefik"
 # The Gateway API's CRDs (standard channel), for Traefik's Gateway API
 # provider (traefik-e2e-values.yaml). Left installed, as Traefik's CRDs are.
-# Traefik waits for TLSRoutes, so it needs their CRD too, whose hostnames
-# rule uses CEL's isIP: before Kubernetes 1.31 (hack/kind/cluster.yaml's
-# default node) there is none, and the isIP rules are left out.
+# Its provider serves nothing until it watches every kind it knows,
+# BackendTLSPolicies and TLSRoutes included: on a cluster without their
+# CRDs (a fresh one, as in CI) it waits for ever. TLSRoute's hostnames
+# rule uses CEL's isIP: before Kubernetes 1.31 (the local kind node) there
+# is none, and the isIP rules are left out.
 gateway_crds=https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$GATEWAY_API_VERSION/config/crd/standard
 crd_filter=.
 if (($("${KUBECTL[@]}" version -o json | jq -r '.serverVersion.minor' | tr -dc 0-9) < 31)); then
   crd_filter='walk(if type == "object" and has("x-kubernetes-validations")
     then .["x-kubernetes-validations"] |= map(select(.rule | contains("isIP") | not)) else . end)'
 fi
-for kind in gatewayclasses gateways grpcroutes httproutes listenersets referencegrants tcproutes tlsroutes udproutes; do
+for kind in backendtlspolicies gatewayclasses gateways grpcroutes httproutes listenersets referencegrants tcproutes tlsroutes udproutes; do
   "${KUBECTL[@]}" create --dry-run=client -o json -f "$gateway_crds/gateway.networking.k8s.io_$kind.yaml" | jq "$crd_filter" |
     "${KUBECTL[@]}" apply --server-side --force-conflicts -f - >/dev/null
 done
@@ -730,6 +732,12 @@ spec:
       matches: [{path: {type: PathPrefix, value: /admin}}]
       backendRefs: [{name: web, port: 8080}]
 YAML
+# Traefik programs its Gateway, and accepts the route, once its provider runs.
+gateway_programmed() {
+  [[ $("${KUBECTL[@]}" -n "$TRAEFIK_NS" get gateways.gateway.networking.k8s.io traefik-e2e \
+    -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}') == True ]]
+}
+eventually "Traefik programs its Gateway" gateway_programmed
 eventually "Traefik serves the HTTPRoute" hstatus_is 200 /
 check "no policy yet: the attack passes through the HTTPRoute" hstatus_is 200 "$SQLI"
 hpolicy ""
