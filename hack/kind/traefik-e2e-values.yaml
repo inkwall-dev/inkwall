@@ -3,9 +3,10 @@
 
 # A second Traefik for the end-to-end test (e2e.sh), with nothing about
 # Inkwall in it: the operator injects the engine into its pod and wires the
-# Ingresses and IngressRoutes its policies protect. It serves only its own
-# class, so it leaves the demo's Traefik (traefik-values.yaml) alone, which
-# in turn ignores the test's IngressRoutes (ingressClassName traefik-e2e).
+# Ingresses, IngressRoutes and HTTPRoutes its policies protect. It serves
+# only its own class, so it leaves the demo's Traefik (traefik-values.yaml)
+# alone, which in turn ignores the test's IngressRoutes (ingressClassName
+# traefik-e2e) and has no Gateway API provider.
 ingressClass:
   enabled: true
   isDefaultClass: false
@@ -16,6 +17,21 @@ providers:
     ingressClass: traefik-e2e
   kubernetesCRD:
     ingressClass: traefik-e2e
+  # Its Gateway API provider, with a GatewayClass and a Gateway named
+  # traefik-e2e, taking HTTPRoutes from every namespace. Needs the Gateway
+  # API's CRDs (e2e.sh installs them).
+  kubernetesGateway:
+    enabled: true
+
+gatewayClass:
+  name: traefik-e2e
+
+gateway:
+  name: traefik-e2e
+  listeners:
+    web:
+      namespacePolicy:
+        from: All
 
 ports:
   # The PROXY protocol, taken only from the pod network (kind's default pod
