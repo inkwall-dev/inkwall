@@ -253,6 +253,8 @@ serves the routes whose parent Gateway has one of its GatewayClasses, wires each
 Middleware through an `ExtensionRef` filter, or Envoy Gateway's `EnvoyExtensionPolicy`), and is
 added to `wiring.Integrations`. Discovery then reports its GatewayClasses `Full`. Traefik's does
 this in its one implementation, which also wires its HTTPRoutes ([§4.4](#44-wiring-controller)).
+Its wiring must not break the route for the other controllers whose Gateways it is attached to:
+Traefik's `ExtensionRef` would, so Traefik doesn't wire such a route (`WiringFailed`).
 
 **Not yet:** injection behind the interface (Traefik's Pod webhook; Envoy Gateway's goes through its
 wiring, [§4.4](#44-wiring-controller)); `Render` and golden files; `Health`.
@@ -407,10 +409,13 @@ longer needed.
   - `spec.rules` is one list to a merge patch, so the patch carries the `resourceVersion`, and a
     conflict retries. The operator reads the route from the API server before writing it, so rule
     fields newer than its Gateway API types (v1.7) are kept.
-  - A route attached to Gateways of several controllers is wired for Traefik, and for Envoy
-    Gateway if its Gateways are among them; `Programmed` counts it in each and waits for both.
-    It is `True` with a message naming the controllers no integration wires, whose traffic isn't
-    inspected. A route of no Traefik Gateway is `ControllerUnsupported`, naming its controllers.
+  - A route also attached to a Gateway of another controller (Envoy Gateway, or one no integration
+    wires) gets no filter, and one wired before loses it: the other controller can't resolve
+    Traefik's Middleware, and Gateway API makes it fail the rules that refer to it (Envoy Gateway
+    answers 500). The route is `WiringFailed`, naming the other controllers: attach it to Traefik's
+    Gateways only, or give each proxy its own HTTPRoute. Envoy Gateway still wires it through its
+    Gateways, but the traffic through Traefik's isn't inspected, so the policy isn't `Programmed`.
+    A route of no Traefik Gateway is `ControllerUnsupported`, naming its controllers.
   - The leader looks for the HTTPRoute, Gateway and GatewayClass CRDs every 30 s, then the wiring
     watches them.
 - **Only with an injected Traefik.** Routes are wired only while a Traefik pod that the webhook
@@ -427,7 +432,8 @@ longer needed.
   - `ControllerUnsupported`: another controller or kind;
   - `IntegrationDisabled`: the operator may not wire the target's proxy, and which permissions it
     lacks ([§7](#7-rbac));
-  - `WiringFailed`: no Traefik CRDs, a name clash, or a route that can't be written;
+  - `WiringFailed`: no Traefik CRDs, a name clash, a route that can't be written, or an HTTPRoute
+    also attached to another controller's Gateway;
   - `PendingRestart`: pods older than the webhook, listed;
   - `SidecarMissing`: no Traefik pod selected, or pods without the engine (the operator was down
     in detect mode, or they opted out), listed;

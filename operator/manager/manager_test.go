@@ -191,6 +191,7 @@ func TestOperator(t *testing.T) {
 	t.Run("ingressroutes", func(t *testing.T) { testIngressRoutes(ctx, t, c) })
 	t.Run("httproutes", func(t *testing.T) { testHTTPRoutes(ctx, t, c) })
 	t.Run("envoy gateway", func(t *testing.T) { testEnvoyGateway(ctx, t, c) })
+	t.Run("mixed gateways", func(t *testing.T) { testMixedGateways(ctx, t, c) })
 	t.Run("failure policy", func(t *testing.T) { testFailurePolicy(ctx, t, c) })
 	t.Run("source guard", func(t *testing.T) { testSourceGuard(ctx, t, c) })
 	// Last: it stops the operator.

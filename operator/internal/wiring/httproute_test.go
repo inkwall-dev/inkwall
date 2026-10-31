@@ -177,7 +177,7 @@ func TestProgrammedHTTPRoute(t *testing.T) {
 		},
 		httpRouteErr: map[types.NamespacedName]string{k("bad"): "HTTPRoute bad: forbidden"},
 		traefikCRDs:  true,
-		wanted:       map[schema.GroupKind]map[types.NamespacedName]bool{httpRouteKind: {k("web"): true, k("mixed"): true, k("envoy"): true}},
+		wanted:       map[schema.GroupKind]map[types.NamespacedName]bool{httpRouteKind: {k("web"): true}},
 		pods:         []corev1.Pod{withEngine},
 	}
 	pol := func(name, section string) *wafv1alpha1.WAFPolicy {
@@ -193,24 +193,27 @@ func TestProgrammedHTTPRoute(t *testing.T) {
 		{"wired", "web", "", metav1.ConditionTrue, ReasonProgrammed, "1 HTTPRoute(s) wired to the engine in Traefik"},
 		{"one rule", "web", "api", metav1.ConditionTrue, ReasonProgrammed, "1 HTTPRoute(s) wired"},
 		{"no such rule", "web", "nope", metav1.ConditionFalse, ReasonNoTargets, "none"},
-		{"Gateways of two controllers", "mixed", "", metav1.ConditionTrue, ReasonProgrammed,
-			"1 HTTPRoute(s) wired to the engine in Traefik; HTTPRoute mixed is also attached to Gateways of example.com/eg, which Inkwall doesn't wire yet"},
-		// Envoy Gateway's Gateways are its integration's to report.
-		{"Gateways of Traefik and Envoy Gateway", "envoy", "", metav1.ConditionTrue, ReasonProgrammed, "1 HTTPRoute(s) wired to the engine in Traefik"},
+		// Another controller would fail the rules with Traefik's filter.
+		{"Gateways of two controllers", "mixed", "", metav1.ConditionFalse, ReasonWiringFailed,
+			"HTTPRoute mixed is also attached to Gateways of example.com/eg, which would fail its rules with Traefik's filter"},
+		{"Gateways of Traefik and Envoy Gateway", "envoy", "", metav1.ConditionFalse, ReasonWiringFailed,
+			"HTTPRoute envoy is also attached to Gateways of gateway.envoyproxy.io/gatewayclass-controller"},
 		{"another controller's", "eg", "", metav1.ConditionFalse, ReasonControllerUnsupported, "HTTPRoute eg is served by example.com/eg"},
 		{"no known Gateway", "lost", "", metav1.ConditionFalse, ReasonControllerUnsupported, "HTTPRoute lost is attached to no Gateway of a known GatewayClass"},
 		{"not written", "bad", "", metav1.ConditionFalse, ReasonWiringFailed, "HTTPRoute bad: forbidden"},
 		{"missing", "gone", "", metav1.ConditionFalse, ReasonNoTargets, "none"},
 	} {
 		got, reason, msg := traefikProgrammed(pol(tc.route, tc.section), st, metav1.Now().Time)
-		if got != tc.status || reason != tc.reason || !strings.Contains(msg, tc.msg) || tc.route == "envoy" && strings.Contains(msg, "also attached") {
+		if got != tc.status || reason != tc.reason || !strings.Contains(msg, tc.msg) {
 			t.Errorf("%s: %s %s %q", tc.name, got, reason, msg)
 		}
 	}
 }
 
-// An HTTPRoute attached to Gateways of Traefik and Envoy Gateway is wired
-// by both: Programmed counts it in each, and waits for both.
+// A target that the proxies of two integrations serve: Programmed counts
+// it in each, and waits for both. Traefik refuses an HTTPRoute that Envoy
+// Gateway also serves: its traffic through Traefik isn't inspected, so
+// Envoy Gateway's wiring doesn't make it True.
 func TestProgrammedHTTPRouteBoth(t *testing.T) {
 	tg := Target{Kind: httpRouteKind, Key: types.NamespacedName{Namespace: "shop", Name: "web"}}
 	withEngine := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "edge", Name: "e"},
@@ -219,18 +222,19 @@ func TestProgrammedHTTPRouteBoth(t *testing.T) {
 		TargetRefs: []wafv1alpha1.TargetRef{{Group: gatewayv1.GroupName, Kind: "HTTPRoute", Name: "web"}},
 	}}
 	for _, tc := range []struct {
-		name        string
-		envoy       TargetState
-		status      metav1.ConditionStatus
-		reason, msg string
+		name           string
+		traefik, envoy TargetState
+		status         metav1.ConditionStatus
+		reason, msg    string
 	}{
-		{"both wired", TargetState{Wired: true}, metav1.ConditionTrue, ReasonProgrammed,
+		{"both wired", TargetState{Wired: true}, TargetState{Wired: true}, metav1.ConditionTrue, ReasonProgrammed,
 			"1 HTTPRoute(s) wired to the engine in Traefik; 1 HTTPRoute(s) wired to the engine in Envoy Gateway"},
-		{"Envoy Gateway pending", TargetState{Wired: true, Pending: "not accepted yet"}, metav1.ConditionFalse, ReasonPending, "not accepted yet"},
-		{"Envoy Gateway failed", TargetState{Failed: "refused"}, metav1.ConditionFalse, ReasonWiringFailed, "refused"},
+		{"Envoy Gateway pending", TargetState{Wired: true}, TargetState{Wired: true, Pending: "not accepted yet"}, metav1.ConditionFalse, ReasonPending, "not accepted yet"},
+		{"Envoy Gateway failed", TargetState{Wired: true}, TargetState{Failed: "refused"}, metav1.ConditionFalse, ReasonWiringFailed, "refused"},
+		{"Traefik refuses it", TargetState{Failed: "also attached"}, TargetState{Wired: true}, metav1.ConditionFalse, ReasonWiringFailed, "also attached"},
 	} {
 		rep := &report{kinds: []schema.GroupKind{ingressKind, routeKind, httpRouteKind, httpRouteKind}, results: []*Result{
-			{Proxy: "Traefik", Pods: []corev1.Pod{withEngine}, Targets: map[Target]TargetState{tg: {Wired: true}}},
+			{Proxy: "Traefik", Pods: []corev1.Pod{withEngine}, Targets: map[Target]TargetState{tg: tc.traefik}},
 			{Proxy: "Envoy Gateway", Pods: []corev1.Pod{withEngine}, Targets: map[Target]TargetState{tg: tc.envoy}},
 		}}
 		if st, reason, msg := programmed(pol, rep); st != tc.status || reason != tc.reason || msg != tc.msg {
