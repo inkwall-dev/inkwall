@@ -34,8 +34,9 @@ func newPipeline(t *testing.T, mode pipeline.Mode) *pipeline.Pipeline {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A generous timeout keeps the race detector from tripping the deadline.
-	return pipeline.New(eval, pipeline.Config{Mode: mode, Timeout: 500 * time.Millisecond})
+	// The deadline isn't under test: a generous one keeps the race detector
+	// and a loaded machine from tripping it (a 503 in block mode).
+	return pipeline.New(eval, pipeline.Config{Mode: mode, Timeout: 10 * time.Second})
 }
 
 func newHandler(t *testing.T, p *pipeline.Pipeline, maxBody int64, logs *bytes.Buffer) *Handler {
@@ -331,7 +332,7 @@ func TestSameVerdictAsReverseProxy(t *testing.T) {
 	t.Cleanup(upstream.Close)
 	target, _ := url.Parse(upstream.URL)
 	rp, err := proxy.New(
-		pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 500 * time.Millisecond, Observer: &rpSeen}),
+		pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 10 * time.Second, Observer: &rpSeen}),
 		proxy.Config{Upstream: target, MaxBodyBytes: 64 << 10, Logger: slog.New(slog.DiscardHandler)},
 	)
 	if err != nil {

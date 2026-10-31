@@ -19,6 +19,9 @@
 // compiled the way the engine does; with --bundle, by a bundle the operator
 // built; with --engine they are sent to a running engine's check API
 // (inkwall-engine check).
+//
+// The migrate ingress-nginx subcommand converts ingress-nginx's ModSecurity
+// annotations and ConfigMap settings into WAFPolicy objects.
 package main
 
 import (
@@ -54,12 +57,16 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "migrate" {
+		return runMigrate(args[1:], stdout, stderr)
+	}
 	if len(args) == 0 || (args[0] != "test" && args[0] != "bench") {
 		fmt.Fprintln(stderr, "usage: inkwallctl test [flags] URL")
 		fmt.Fprintln(stderr, "       inkwallctl test [flags] --request FILE | --har FILE")
 		fmt.Fprintln(stderr, "       inkwallctl test --policy FILE [--rule-set FILE] [--ingress FILE] ... URL | --request FILE | --har FILE")
 		fmt.Fprintln(stderr, "       inkwallctl test --bundle FILE [--bundle-key FILE] URL | --request FILE | --har FILE")
 		fmt.Fprintln(stderr, "       inkwallctl bench [flags] [--request FILE | --har FILE]")
+		fmt.Fprintln(stderr, "       inkwallctl migrate ingress-nginx [flags] -f FILE ... | --cluster")
 		fmt.Fprintln(stderr, "run 'inkwallctl <command> -h' for flags")
 		return 2
 	}

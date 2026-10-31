@@ -1,0 +1,6 @@
+deny  403  GET /?id=1%27%20OR%20%271%27%3D%271  policy=shop/shop  reason=rule  rules=932240,942100,942130,942180,942330,942370,942390,942520,949110  interrupting=949110  <time>
+allow      GET /healthz?id=1%27%20OR%20%271%27%3D%271  policy=shop/shop  reason=skipped  <time>
+deny  403  GET /products/42  policy=shop/shop  reason=rule  rules=913100,1004  interrupting=1004  <time>
+log        GET /?id=1%27%20OR%20%271%27%3D%271  policy=blog/blog  reason=rule  rules=942100,949110  interrupting=949110  <time>
+deny  403  GET /?debug=true  policy=shop/api  reason=rule  rules=1100  interrupting=1100  <time>
+allow      GET /?id=1%27%20OR%20%271%27%3D%271  policy=shop/api  <time>

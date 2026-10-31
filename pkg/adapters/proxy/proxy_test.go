@@ -56,8 +56,9 @@ func newHandler(t *testing.T, mode pipeline.Mode, maxBody int64, up *upstream, l
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A generous timeout keeps the race detector from tripping the deadline.
-	h, err := New(pipeline.New(eval, pipeline.Config{Mode: mode, Timeout: 500 * time.Millisecond}), Config{
+	// The deadline isn't under test: a generous one keeps the race detector
+	// and a loaded machine from tripping it (a 503 in block mode).
+	h, err := New(pipeline.New(eval, pipeline.Config{Mode: mode, Timeout: 10 * time.Second}), Config{
 		Upstream:     target,
 		MaxBodyBytes: maxBody,
 		Logger:       slog.New(slog.NewJSONHandler(logs, nil)),
@@ -153,7 +154,7 @@ func newOversizeHandler(t *testing.T, oversize pipeline.OversizeAction, up *upst
 		t.Fatal(err)
 	}
 	target, _ := url.Parse(up.srv.URL)
-	h, err := New(pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Oversize: oversize, Timeout: 500 * time.Millisecond}), Config{
+	h, err := New(pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Oversize: oversize, Timeout: 10 * time.Second}), Config{
 		Upstream: target, MaxBodyBytes: 1 << 10, Logger: slog.New(slog.NewJSONHandler(logs, nil)),
 	})
 	if err != nil {
