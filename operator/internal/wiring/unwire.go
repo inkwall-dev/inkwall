@@ -10,6 +10,7 @@ import (
 
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -17,6 +18,8 @@ import (
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 )
+
+const unwiredMessage = "the routes were unwired at uninstall (inkwall-operator unwire), and no operator wires them"
 
 // Unwired counts what Unwire changed.
 type Unwired struct {
@@ -28,10 +31,11 @@ type Unwired struct {
 // Unwire undoes the wiring at uninstall: every integration removes its
 // wiring, keeping the user's own (for Traefik, the operator's Middleware
 // from every Ingress, IngressRoute and HTTPRoute it wired, then the
-// Middlewares it created), and then the finalizer is removed from every WAFPolicy, which
-// no operator will remove any more. The proxies then stop sending those
-// routes to the engine, which a proxy pod started after the uninstall
-// doesn't have. Run it with the operator stopped, or it wires them again.
+// Middlewares it created). Then every WAFPolicy is reported
+// Programmed=False and Ready=False (Unwired), and released from the
+// finalizer, which no operator will remove any more. The proxies then
+// stop sending those routes to the engine, which a proxy pod started after
+// the uninstall doesn't have. Run it with the operator stopped, or it wires them again.
 func Unwire(ctx context.Context, c client.Client) (Unwired, error) {
 	n := Unwired{Objects: map[string]int{}}
 	for _, in := range Integrations(c, c, nil, CRDs{}) {
@@ -51,6 +55,13 @@ func Unwire(ctx context.Context, c client.Client) (Unwired, error) {
 	}
 	for i := range policies.Items {
 		p := &policies.Items[i]
+		// No operator will report it any more; Ready follows Programmed.
+		if p.DeletionTimestamp == nil {
+			err := setProgrammed(ctx, c, p, metav1.ConditionFalse, ReasonUnwired, unwiredMessage, true)
+			if client.IgnoreNotFound(err) != nil {
+				return n, fmt.Errorf("set the status of WAFPolicy %s/%s: %w", p.Namespace, p.Name, err)
+			}
+		}
 		if !controllerutil.ContainsFinalizer(p, Finalizer) {
 			continue
 		}

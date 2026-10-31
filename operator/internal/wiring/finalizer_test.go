@@ -362,6 +362,9 @@ func TestFinalizer(t *testing.T) {
 	if has, gone := held(kept); has || gone {
 		t.Errorf("after the uninstall: held %v, gone %v; want released and kept", has, gone)
 	}
+	if r := programmedReason(kept); r != ReasonUnwired {
+		t.Errorf("after the uninstall: Programmed %s, want %s", r, ReasonUnwired)
+	}
 	wantGone("deleted before the uninstall", deleting)
 	if ingressWired() || routeWired() {
 		t.Error("still wired after the uninstall")

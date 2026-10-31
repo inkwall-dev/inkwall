@@ -8,10 +8,13 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -187,5 +190,27 @@ func TestClusterStateWithoutBundle(t *testing.T) {
 	st := e.waitStates(t, 1)[0]
 	if st.GetBundleVersion() != 0 || len(st.GetEngines()) != 0 || st.GetIntegrations()[0].GetPods() != 0 {
 		t.Errorf("state = %v, want no bundle, engines or pods", st)
+	}
+}
+
+// However many engines report, the state stays within the limit: the
+// engines that don't fit are left out, and counted.
+func TestAddEnginesWithinLimit(t *testing.T) {
+	st := &controlplanev1.ClusterState{BundleVersion: 7}
+	engines := make([]distribution.Engine, 100)
+	for i := range engines {
+		engines[i] = distribution.Engine{ID: fmt.Sprintf("engine-%03d", i), PodNamespace: "traefik", RejectError: strings.Repeat("r", 100)}
+	}
+	const limit = 4 << 10
+	left := addEngines(st, engines, limit)
+	if size := proto.Size(st); size > limit || left == 0 || len(st.GetEngines())+left != len(engines) {
+		t.Fatalf("%d bytes, %d engines, %d left out", size, len(st.GetEngines()), left)
+	}
+	if st.GetEngines()[0].GetEngineId() != "engine-000" {
+		t.Errorf("first engine %s, want engine-000", st.GetEngines()[0].GetEngineId())
+	}
+	st.Engines = nil
+	if left := addEngines(st, engines, maxState); left != 0 || len(st.GetEngines()) != len(engines) {
+		t.Fatalf("%d engines, %d left out, want all", len(st.GetEngines()), left)
 	}
 }

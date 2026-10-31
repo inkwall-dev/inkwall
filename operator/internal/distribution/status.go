@@ -6,9 +6,11 @@ package distribution
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/sync/errgroup"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,9 +26,12 @@ import (
 const (
 	ReasonEnforced      = "Enforced"
 	ReasonEnginesBehind = "EnginesBehind"
-	ReasonEngineNack    = "EngineNack"
-	ReasonNoEngines     = "NoEngines"
-	ReasonNotInBundle   = "NotInBundle"
+	// ReasonEnginesUnreported: a replica's engine report was over its
+	// size limit, so not every engine is known.
+	ReasonEnginesUnreported = "EnginesUnreported"
+	ReasonEngineNack        = "EngineNack"
+	ReasonNoEngines         = "NoEngines"
+	ReasonNotInBundle       = "NotInBundle"
 )
 
 var (
@@ -73,12 +78,18 @@ func init() {
 // engine runs a bundle that contains the policy's current generation: the
 // first such bundle is its status.bundleVersion, and later ones have it too. Every engine gets the same bundle, so every
 // engine counts until engines are matched to the routes they serve.
-func Enforced(version int64, engines []Engine) (metav1.ConditionStatus, string, string) {
+//
+// leftOut engines are connected but missing from their replica's report.
+//
+// Only the EngineNack message counts engines. The others don't, so engines
+// connecting or going away don't rewrite every policy's status; the
+// inkwall_operator_engines metric has the counts.
+func Enforced(version int64, engines []Engine, leftOut int) (metav1.ConditionStatus, string, string) {
 	if version <= 0 {
 		return metav1.ConditionFalse, ReasonNotInBundle, "the policy's current spec is not in a bundle"
 	}
 	v := uint64(version)
-	if len(engines) == 0 {
+	if len(engines) == 0 && leftOut == 0 {
 		return metav1.ConditionFalse, ReasonNoEngines, "no engine is connected"
 	}
 	current, rejected := 0, 0
@@ -94,15 +105,18 @@ func Enforced(version int64, engines []Engine) (metav1.ConditionStatus, string, 
 			}
 		}
 	}
-	total := len(engines)
+	total := len(engines) + leftOut
 	switch {
 	case rejected > 0:
 		return metav1.ConditionFalse, ReasonEngineNack,
 			fmt.Sprintf("%d/%d engines rejected bundle %d (%s)", rejected, total, v, rejectErr)
+	case leftOut > 0:
+		return metav1.ConditionFalse, ReasonEnginesUnreported,
+			fmt.Sprintf("some engines are not in their replica's report (over its size limit), so bundle %d is not known to run everywhere", v)
 	case current < total:
-		return metav1.ConditionFalse, ReasonEnginesBehind, fmt.Sprintf("%d/%d engines on bundle %d", current, total, v)
+		return metav1.ConditionFalse, ReasonEnginesBehind, fmt.Sprintf("some engines don't run bundle %d yet", v)
 	}
-	return metav1.ConditionTrue, ReasonEnforced, fmt.Sprintf("%d/%d engines on bundle %d", current, total, v)
+	return metav1.ConditionTrue, ReasonEnforced, fmt.Sprintf("every engine runs bundle %d or later", v)
 }
 
 func engineName(e Engine) string {
@@ -130,6 +144,9 @@ func Ready(conds []metav1.Condition, generation int64) metav1.Condition {
 	return metav1.Condition{Type: wafv1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: "Ready",
 		Message: "accepted, programmed into the proxy and enforced by every engine", ObservedGeneration: generation}
 }
+
+// statusWriters is how many policy statuses the Reporter writes at once.
+const statusWriters = 8
 
 // Reporter writes the Enforced condition of every policy. It runs on the
 // leader, from the replicas' engine reports.
@@ -166,12 +183,12 @@ func (r *Reporter) Start(ctx context.Context) error {
 func (*Reporter) NeedLeaderElection() bool { return true }
 
 func (r *Reporter) report(ctx context.Context) error {
-	engines, err := ReadEngines(ctx, r.Reader, r.Namespace, r.Stale, time.Now())
+	engines, leftOut, err := ReadEngines(ctx, r.Reader, r.Namespace, r.Stale, time.Now())
 	if err != nil {
 		return err
 	}
 	var policies wafv1alpha1.WAFPolicyList
-	if err := r.Client.List(ctx, &policies); err != nil {
+	if err := r.Client.List(ctx, &policies, client.UnsafeDisableDeepCopy); err != nil {
 		return err
 	}
 
@@ -191,6 +208,10 @@ func (r *Reporter) report(ctx context.Context) error {
 	engineCount.WithLabelValues("behind").Set(behind)
 	engineCount.WithLabelValues("rejected").Set(rejected)
 
+	// Most policies don't change; those that do are written 8 at a time,
+	// like the bundle builder's writes.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(statusWriters)
 	for i := range policies.Items {
 		p := &policies.Items[i]
 		// The bundle builder reports Accepted and the policy's bundle
@@ -199,14 +220,31 @@ func (r *Reporter) report(ctx context.Context) error {
 			p.Status.ObservedGeneration != p.Generation {
 			continue
 		}
-		if err := r.write(ctx, p, engines); err != nil {
-			return err
+		// The list is the cache's, not a copy: copy only what is written.
+		if _, changed := enforcedConditions(p, engines, leftOut); !changed {
+			continue
 		}
+		p = p.DeepCopy()
+		g.Go(func() error { return r.write(gctx, p, engines, leftOut) })
 	}
-	return nil
+	return g.Wait()
 }
 
-func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, engines []Engine) error {
+// enforcedConditions returns p's conditions with Enforced and Ready set
+// from the engines, and whether they changed. p is left as it is.
+func enforcedConditions(p *wafv1alpha1.WAFPolicy, engines []Engine, leftOut int) ([]metav1.Condition, bool) {
+	conds := slices.Clone(p.Status.Conditions)
+	st, reason, msg := Enforced(p.Status.BundleVersion, engines, leftOut)
+	changed := meta.SetStatusCondition(&conds, metav1.Condition{
+		Type: wafv1alpha1.ConditionEnforced, Status: st, Reason: reason, Message: msg, ObservedGeneration: p.Generation,
+	})
+	if meta.SetStatusCondition(&conds, Ready(conds, p.Generation)) {
+		changed = true
+	}
+	return conds, changed
+}
+
+func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, engines []Engine, leftOut int) error {
 	first := true
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if !first {
@@ -215,16 +253,11 @@ func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, engines 
 			}
 		}
 		first = false
-		st, reason, msg := Enforced(p.Status.BundleVersion, engines)
-		changed := meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
-			Type: wafv1alpha1.ConditionEnforced, Status: st, Reason: reason, Message: msg, ObservedGeneration: p.Generation,
-		})
-		if meta.SetStatusCondition(&p.Status.Conditions, Ready(p.Status.Conditions, p.Generation)) {
-			changed = true
-		}
+		conds, changed := enforcedConditions(p, engines, leftOut)
 		if !changed {
 			return nil
 		}
+		p.Status.Conditions = conds
 		return r.Client.Status().Update(ctx, p)
 	})
 	if apierrors.IsNotFound(err) {

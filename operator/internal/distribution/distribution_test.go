@@ -6,6 +6,7 @@ package distribution
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"slices"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -43,25 +45,31 @@ func TestEnforced(t *testing.T) {
 		name    string
 		version int64
 		engines []Engine
+		leftOut int
 		status  metav1.ConditionStatus
 		reason  string
 		message string
 	}{
-		{"not in a bundle", 0, []Engine{{Applied: 3}}, metav1.ConditionFalse, ReasonNotInBundle, "not in a bundle"},
-		{"no engines", 3, nil, metav1.ConditionFalse, ReasonNoEngines, "no engine"},
-		{"all current", 3, []Engine{{Applied: 3}, {Applied: 4}}, metav1.ConditionTrue, ReasonEnforced, "2/2 engines on bundle 3"},
-		{"one behind", 3, []Engine{{Applied: 3}, {Applied: 2}}, metav1.ConditionFalse, ReasonEnginesBehind, "1/2 engines on bundle 3"},
+		{"not in a bundle", 0, []Engine{{Applied: 3}}, 0, metav1.ConditionFalse, ReasonNotInBundle, "not in a bundle"},
+		{"no engines", 3, nil, 0, metav1.ConditionFalse, ReasonNoEngines, "no engine"},
+		{"all current", 3, []Engine{{Applied: 3}, {Applied: 4}}, 0, metav1.ConditionTrue, ReasonEnforced, "every engine runs bundle 3 or later"},
+		{"one behind", 3, []Engine{{Applied: 3}, {Applied: 2}}, 0, metav1.ConditionFalse, ReasonEnginesBehind, "some engines don't run bundle 3 yet"},
 		{
 			"one rejected", 3,
-			[]Engine{{Applied: 3}, {Applied: 2, Rejected: 3, RejectError: "line 1: bad rule", PodNamespace: "traefik", PodName: "traefik-1"}},
+			[]Engine{{Applied: 3}, {Applied: 2, Rejected: 3, RejectError: "line 1: bad rule", PodNamespace: "traefik", PodName: "traefik-1"}}, 0,
 			metav1.ConditionFalse, ReasonEngineNack, "1/2 engines rejected bundle 3 (traefik/traefik-1: line 1: bad rule)",
 		},
 		// A rejection of an older bundle doesn't matter once the engine
 		// runs a newer one.
-		{"old rejection", 3, []Engine{{Applied: 3, Rejected: 2}}, metav1.ConditionTrue, ReasonEnforced, "1/1"},
+		{"old rejection", 3, []Engine{{Applied: 3, Rejected: 2}}, 0, metav1.ConditionTrue, ReasonEnforced, "every engine runs bundle 3"},
+		// A report over its size limit: the engines left out may run
+		// anything.
+		{"engines left out", 3, []Engine{{Applied: 3}, {Applied: 3}}, 2, metav1.ConditionFalse, ReasonEnginesUnreported, "not in their replica's report"},
+		{"only engines left out", 3, nil, 1, metav1.ConditionFalse, ReasonEnginesUnreported, "bundle 3 is not known to run everywhere"},
+		{"rejected and left out", 3, []Engine{{Rejected: 3}}, 1, metav1.ConditionFalse, ReasonEngineNack, "1/2 engines rejected"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			st, reason, msg := Enforced(tc.version, tc.engines)
+			st, reason, msg := Enforced(tc.version, tc.engines, tc.leftOut)
 			if st != tc.status || reason != tc.reason || !strings.Contains(msg, tc.message) {
 				t.Fatalf("got %s %s %q, want %s %s %q", st, reason, msg, tc.status, tc.reason, tc.message)
 			}
@@ -104,22 +112,28 @@ func TestReadEngines(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(
 		report("a", now.Add(-time.Second),
 			Engine{ID: "e1", Applied: 1, ConnectedAt: now.Add(-time.Hour)},
-			Engine{ID: "e2", Applied: 2}),
+			Engine{ID: "e2", Applied: 2}, Engine{ID: "e5"}, Engine{ID: "e0"}),
 		// e1 moved to replica b more recently.
-		report("b", now.Add(-time.Second), Engine{ID: "e1", Applied: 3, ConnectedAt: now.Add(-time.Minute)}),
+		report("b", now.Add(-time.Second), Engine{ID: "e1", Applied: 3, ConnectedAt: now.Add(-time.Minute)}, Engine{ID: "e4"}),
 		// Replica c is gone: its report is stale.
 		report("c", now.Add(-time.Hour), Engine{ID: "e3", Applied: 3}),
 	).Build()
 
-	got, err := ReadEngines(context.Background(), c, "inkwall-system", 30*time.Second, now)
+	got, leftOut, err := ReadEngines(context.Background(), c, "inkwall-system", 30*time.Second, now)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if leftOut != 0 {
+		t.Errorf("%d engines left out, want 0", leftOut)
+	}
+	if !slices.IsSortedFunc(got, func(a, b Engine) int { return strings.Compare(a.ID, b.ID) }) {
+		t.Errorf("not sorted by ID: %+v", got)
 	}
 	byID := map[string]Engine{}
 	for _, e := range got {
 		byID[e.ID] = e
 	}
-	if len(byID) != 2 || byID["e1"].Applied != 3 || byID["e2"].Applied != 2 {
+	if len(byID) != 5 || byID["e1"].Applied != 3 || byID["e2"].Applied != 2 {
 		t.Fatalf("got %+v", got)
 	}
 }
@@ -253,6 +267,14 @@ func TestWatchErrors(t *testing.T) {
 		{"no hello first", fakeAuth{}, &agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Ack{Ack: &agentv1.Ack{}}}, codes.InvalidArgument},
 		{"hello without id", fakeAuth{}, &agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{}}}, codes.InvalidArgument},
 		{"id over 253 bytes", fakeAuth{}, &agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{EngineId: strings.Repeat("e", 254)}}}, codes.InvalidArgument},
+		{"node name not a DNS subdomain", fakeAuth{}, hello(&agentv1.Hello{EngineId: "e", NodeName: "node_1"}), codes.InvalidArgument},
+		{"node name over 253 bytes", fakeAuth{}, hello(&agentv1.Hello{EngineId: "e", NodeName: strings.Repeat("n", 254)}), codes.InvalidArgument},
+		{"version over 128 bytes", fakeAuth{}, hello(&agentv1.Hello{EngineId: "e", EngineVersion: strings.Repeat("v", 129)}), codes.InvalidArgument},
+		{"too many key IDs", fakeAuth{}, hello(&agentv1.Hello{EngineId: "e", TrustedKeyIds: slices.Repeat([]string{"k"}, 17)}), codes.InvalidArgument},
+		{"key ID over 64 bytes", fakeAuth{}, hello(&agentv1.Hello{EngineId: "e", TrustedKeyIds: []string{strings.Repeat("k", 65)}}), codes.InvalidArgument},
+		{"empty key ID", fakeAuth{}, hello(&agentv1.Hello{EngineId: "e", TrustedKeyIds: []string{""}}), codes.InvalidArgument},
+		{"pod namespace not a DNS label", fakeAuth{}, hello(&agentv1.Hello{EngineId: "e", PodNamespace: "Edge", PodName: "traefik-1"}), codes.InvalidArgument},
+		{"pod name not a DNS subdomain", fakeAuth{}, hello(&agentv1.Hello{EngineId: "e", PodNamespace: "edge", PodName: strings.Repeat("p", 254)}), codes.InvalidArgument},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := serve(t, NewServer(NewStore(), NewTable(), tc.auth, "r", logr.Discard()))
@@ -268,6 +290,144 @@ func TestWatchErrors(t *testing.T) {
 				t.Fatalf("got %v, want code %s", err, tc.code)
 			}
 		})
+	}
+}
+
+func hello(h *agentv1.Hello) *agentv1.WatchRequest {
+	return &agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: h}}
+}
+
+// connect opens a stream with h and waits for its record.
+func connect(t *testing.T, auth Authenticator, token string, h *agentv1.Hello) (*Table, agentv1.BundleService_WatchClient) {
+	t.Helper()
+	table := NewTable()
+	c := serve(t, NewServer(NewStore(), table, auth, "r", logr.Discard()))
+	stream, err := c.Watch(withToken(t.Context(), token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Send(hello(h)); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the engine", func() bool { got, _ := table.Snapshot(); return len(got) == 1 })
+	return table, stream
+}
+
+// A Hello as cmd/engine sends it, at the limits, is accepted.
+func TestWatchHelloAtLimits(t *testing.T) {
+	keys := make([]string, maxKeyIDs)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("%016x", i) // as bundlekey.ID
+	}
+	h := &agentv1.Hello{
+		EngineId: "traefik-7d9f8b6c5-x2x4z", PodNamespace: strings.Repeat("n", 63), PodName: strings.Repeat("p", 253),
+		NodeName: "ip-10-0-1-23.ec2.internal", EngineVersion: strings.Repeat("v", 128), TrustedKeyIds: keys,
+	}
+	table, _ := connect(t, fakeAuth{}, "e", h)
+	got, _ := table.Snapshot()
+	if got[0].PodNamespace != h.PodNamespace || got[0].PodName != h.PodName || len(got[0].TrustedKeys) != maxKeyIDs {
+		t.Fatalf("got %+v", got[0])
+	}
+}
+
+// A token bound to a pod names the pod: the Hello's isn't used, or checked.
+func TestWatchPodFromToken(t *testing.T) {
+	table, _ := connect(t, podAuth{}, "traefik-1", &agentv1.Hello{EngineId: "e", PodNamespace: "Not_A_Label", PodName: "Other_Pod"})
+	got, _ := table.Snapshot()
+	if got[0].PodNamespace != "edge" || got[0].PodName != "traefik-1" {
+		t.Fatalf("pod %s/%s, want the token's edge/traefik-1", got[0].PodNamespace, got[0].PodName)
+	}
+}
+
+func TestWatchHeartbeatOverLimits(t *testing.T) {
+	_, stream := connect(t, fakeAuth{}, "e", &agentv1.Hello{EngineId: "e"})
+	hb := &agentv1.Heartbeat{TrustedKeyIds: slices.Repeat([]string{"k"}, maxKeyIDs+1)}
+	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Heartbeat{Heartbeat: hb}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("got %v, want InvalidArgument", err)
+	}
+}
+
+// A Nack's error goes into policies' conditions: it is cut to 1 KiB,
+// without splitting a character.
+func TestWatchNackErrorTruncated(t *testing.T) {
+	table, stream := connect(t, fakeAuth{}, "e", &agentv1.Hello{EngineId: "e"})
+	reason := "x" + strings.Repeat("é", maxRejectError) // é is 2 bytes: 1024 falls inside one
+	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Nack{Nack: &agentv1.Nack{BundleVersion: 2, Error: reason}}}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the nack", func() bool { got, _ := table.Snapshot(); return got[0].Rejected == 2 })
+	got, _ := table.Snapshot()
+	if e := got[0].RejectError; len(e) != maxRejectError-1 || !utf8.ValidString(e) || !strings.HasPrefix(reason, e) {
+		t.Fatalf("reject error of %d bytes (valid UTF-8: %t), want %d", len(e), utf8.ValidString(e), maxRejectError-1)
+	}
+	if _, msg, _ := (Enforced(2, got, 0)); len(msg) > maxRejectError+200 {
+		t.Fatalf("Enforced message of %d bytes", len(msg))
+	}
+}
+
+// The largest record an engine can have fits a few hundred times in a
+// report; the engines beyond the report's limit are left out, and counted.
+// A report over its size limit says how many engines it left out, which
+// ReadEngines sums.
+func TestReadEnginesLeftOut(t *testing.T) {
+	s := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(s)
+	c := fake.NewClientBuilder().WithScheme(s).Build()
+	ctx := context.Background()
+	table := NewTable()
+	table.Connect(Engine{ID: "e1"})
+	p := &Publisher{Client: c, Reader: c, Namespace: "inkwall-system", Replica: "a", Engines: table}
+	engines, _ := table.Snapshot()
+	if err := p.write(ctx, engines); err != nil {
+		t.Fatal(err)
+	}
+	if got, left, err := ReadEngines(ctx, c, "inkwall-system", time.Minute, time.Now()); err != nil || len(got) != 1 || left != 0 {
+		t.Fatalf("complete report: %d engines, %d left out, %v", len(got), left, err)
+	}
+	full := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "inkwall-system", Name: reportNamePrefix + "b", Labels: map[string]string{EnginesLabel: "true"}},
+		Data:       reportData([]byte(`[{"id":"e2"}]`), 3),
+	}
+	if err := c.Create(ctx, full); err != nil {
+		t.Fatal(err)
+	}
+	if got, left, err := ReadEngines(ctx, c, "inkwall-system", time.Minute, time.Now()); err != nil || len(got) != 2 || left != 3 {
+		t.Fatalf("a full report: %d engines, %d left out, %v", len(got), left, err)
+	}
+}
+
+func TestEncodeEngines(t *testing.T) {
+	big := Engine{
+		ID: strings.Repeat("e", maxEngineID), ServiceAccount: strings.Repeat("s", 63) + "/" + strings.Repeat("a", 253),
+		PodNamespace: strings.Repeat("n", 63), PodName: strings.Repeat("p", 253), NodeName: strings.Repeat("o", 253),
+		EngineVersion: strings.Repeat("v", maxEngineVersion), Applied: 1 << 63, Rejected: 1 << 63,
+		RejectError: strings.Repeat("r", maxRejectError), TrustedKeys: slices.Repeat([]string{strings.Repeat("k", maxKeyID)}, maxKeyIDs),
+		Replica: strings.Repeat("r", 253), ConnectedAt: time.Now(),
+	}
+	one, _ := json.Marshal(big)
+	if len(one) > 4<<10 {
+		t.Fatalf("the largest engine record is %d bytes", len(one))
+	}
+	engines := slices.Repeat([]Engine{big}, 2*maxReport/len(one))
+	data, left, err := encodeEngines(engines, maxReport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back []Engine
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if len(data) > maxReport || left == 0 || len(back)+left != len(engines) || len(back) < 200 {
+		t.Fatalf("%d bytes, %d engines kept, %d left out", len(data), len(back), left)
+	}
+	if data, left, _ := encodeEngines(engines[:3], maxReport); left != 0 || !json.Valid(data) {
+		t.Fatalf("3 engines: %d left out", left)
+	}
+	if data, _, _ := encodeEngines(nil, maxReport); string(data) != "[]" {
+		t.Fatalf("no engines: %s", data)
 	}
 }
 

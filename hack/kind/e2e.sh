@@ -70,7 +70,7 @@ status_is() { [[ $(code "$2") == "$1" ]]; }
 condition() {
   "${KUBECTL[@]}" -n "$NS" get wafpolicy app -o jsonpath="{.status.conditions[?(@.type==\"$1\")].$2}" 2>/dev/null
 }
-enforced_by_all() { [[ $(condition Enforced reason) == Enforced && $(condition Enforced message) == 1/1\ engines* ]]; }
+enforced_by_all() { [[ $(condition Enforced reason) == Enforced && $(condition Enforced message) == every\ engine\ runs\ bundle\ * ]]; }
 
 engine_pod() { "${KUBECTL[@]}" -n "$NS" get pods -l app=e2e -o jsonpath='{.items[0].metadata.name}'; }
 restarts() { "${KUBECTL[@]}" -n "$NS" get pods -l app=e2e -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="inkwall-engine")].restartCount}'; }
@@ -168,7 +168,7 @@ policy Block
 pod=$(engine_pod)
 eventually "the engine blocks the attack" status_is 403 "$SQLI"
 check "a benign request passes" status_is 200 /products/42
-eventually "the policy is Enforced by the engine (1/1)" enforced_by_all
+eventually "the policy is Enforced by the engine" enforced_by_all
 
 echo "== a policy change, without restarting the engine"
 policy Detect
@@ -265,13 +265,31 @@ traefik_injected() {
   pods=$(traefik_pods) && ! grep -qv '^|inkwall-engine' <<<"$pods"
 }
 no_engine() { traefik_pods >/dev/null && ! traefik_pods | grep inkwall-engine >/dev/null; }
+# traefik_answers: something answers on the port-forward to Traefik.
+traefik_answers() { curl -s -o /dev/null -m 5 "http://127.0.0.1:$TRAEFIK_PORT/"; }
+# forward_traefik (re)starts the port-forward to Traefik, and waits for it.
+forward_traefik() {
+  if [[ -n ${tpf:-} ]]; then kill "$tpf" 2>/dev/null || true; fi
+  "${KUBECTL[@]}" -n "$TRAEFIK_NS" port-forward svc/traefik-e2e "$TRAEFIK_PORT:80" >/dev/null 2>&1 &
+  tpf=$!
+  for _ in $(seq 20); do
+    traefik_answers && return 0
+    sleep 0.5
+  done
+}
+# traefik_forwarded restarts the port-forward to Traefik if it's gone: it
+# can die while Traefik's engine restarts, and take the checks after it
+# with it (#211).
+traefik_forwarded() {
+  kill -0 "$tpf" 2>/dev/null && traefik_answers && return 0
+  echo "      the port-forward to Traefik was gone: restarted"
+  forward_traefik
+}
 # restart_traefik replaces Traefik's pods, and the port-forward to them.
 restart_traefik() {
   "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout restart deployment/traefik-e2e >/dev/null
   "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout status deployment/traefik-e2e --timeout=180s >/dev/null
-  if [[ -n ${tpf:-} ]]; then kill "$tpf" 2>/dev/null || true; fi
-  "${KUBECTL[@]}" -n "$TRAEFIK_NS" port-forward svc/traefik-e2e "$TRAEFIK_PORT:80" >/dev/null 2>&1 &
-  tpf=$!
+  forward_traefik
 }
 web_policy() {
   "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
@@ -368,8 +386,7 @@ spec:
             backend: {service: {name: web, port: {number: 8080}}}
 YAML
 "${KUBECTL[@]}" -n "$NS" rollout status deployment/web --timeout=120s >/dev/null
-"${KUBECTL[@]}" -n "$TRAEFIK_NS" port-forward svc/traefik-e2e "$TRAEFIK_PORT:80" >/dev/null 2>&1 &
-tpf=$!
+forward_traefik
 eventually "Traefik serves the app" tstatus_is 200 /
 check "no policy yet: the attack passes through Traefik" tstatus_is 200 "$SQLI"
 
@@ -392,8 +409,9 @@ eventually "the operator received the engine's security events" events_received
 
 # The engine unreachable (#168): Traefik's ForwardAuth has no failure
 # setting, and answers 500 itself, without forwarding the request, whatever
-# the policy's mode (0002 §7.3). The engine is stopped twice, so the kubelet
-# waits 10 s before restarting it: refused connections, not a hang (a hung
+# the policy's mode (0002 §7.3). The engine is stopped twice (or more, if
+# the kubelet restarted it already), so the kubelet waits 10 s or more
+# before restarting it: refused connections, not a hang (a hung
 # engine gets the same 500 after Traefik's fixed 30 s timeout, not tested
 # here, for time).
 echo "== Traefik with its engine down"
@@ -410,6 +428,12 @@ stop_traefik_engine() {
 }
 engine_back() { [[ -n $(traefik_engine_ctr) ]]; }
 engine_down() { [[ -z $(traefik_engine_ctr) ]]; }
+# engine_stopped: the engine is down, stopped once more if the kubelet has
+# restarted it already.
+engine_stopped() {
+  stop_traefik_engine >/dev/null 2>&1 || true
+  engine_down
+}
 # down_answer PATH: the body, status and time of Traefik's answer.
 down_answer() {
   curl -s -m 10 -w '|%{http_code}|%{time_total}' -H "Host: $TRAEFIK_HOST" "http://127.0.0.1:$TRAEFIK_PORT$1" || true
@@ -435,8 +459,8 @@ traefik_ready() {
 }
 stop_traefik_engine >/dev/null 2>&1 || true
 eventually "the engine restarted once" engine_back
-stop_traefik_engine >/dev/null 2>&1 || true
-check "the engine is down" engine_down
+traefik_forwarded
+eventually "the engine is down" engine_stopped
 down_id=engine-down-$RANDOM
 check "engine down: benign traffic fails closed (500) at once" fails_closed "/$down_id"
 check "engine down: the attack fails closed (500) at once" fails_closed "/$down_id$SQLI"
@@ -444,28 +468,59 @@ check "engine down: the requests never reach the app" never_reached_app "$down_i
 # The engine's readiness is the pod's: a Service stops sending Traefik's pod
 # new connections, but Traefik serves those it gets (here, a port-forward).
 eventually "engine down: Traefik's pod is not ready" traefik_unready
+traefik_forwarded
 eventually "the engine is back: it blocks the attack" tstatus_is 403 "$SQLI"
 check "the engine is back: benign traffic passes" tstatus_is 200 "/$down_id-back"
 check "the engine is back: requests reach the app" app_saw "$down_id-back"
 eventually "the engine is back: Traefik's pod is ready" traefik_ready
 # restart_never_allows: the engine stopped once more; attacks through
 # Traefik, back to back, until it blocks them again (a run of 403s). While
-# it restarts, each is refused (500) or blocked, never let through.
+# it restarts, each is refused (500) or blocked, never let through. On a
+# failure, $why says which way: an attack let through (200), or no run of
+# 403s (000: no answer), with the codes seen, in runs.
 restart_never_allows() {
-  local c down=false n=0 end=$((SECONDS + 90))
-  stop_traefik_engine >/dev/null 2>&1 || return 1
+  local c down=false n=0 end=$((SECONDS + 90)) t0=${EPOCHREALTIME/./} codes=() counts=() ats=()
+  why=
+  stop_traefik_engine >/dev/null 2>&1 || {
+    why="couldn't stop the engine"
+    return 1
+  }
   while ((SECONDS < end)); do
     c=$(tcode "$SQLI")
-    [[ $c == 200 ]] && return 1
+    if ((${#codes[@]} == 0)) || [[ $c != "${codes[-1]}" ]]; then
+      codes+=("$c") counts+=(0) ats+=("$(since "$t0")")
+    fi
+    ((++counts[-1]))
+    if [[ $c == 200 ]]; then
+      why="an attack got 200, $(since "$t0") s after the stop; codes: $(code_runs)"
+      return 1
+    fi
     if [[ $c == 403 ]]; then
       $down && ((++n >= 100)) && return 0
     else
       down=true n=0
+      if [[ $c == 000 ]]; then traefik_forwarded >/dev/null; fi
     fi
   done
+  why="no run of 100 403s within 90 s; codes: $(code_runs)"
   return 1
 }
+# since T0: the seconds since T0 (in microseconds), to a tenth.
+since() {
+  local us=$((${EPOCHREALTIME/./} - $1))
+  printf '%d.%d' $((us / 1000000)) $((us / 100000 % 10))
+}
+# code_runs: restart_never_allows's last runs of codes: CODE xCOUNT at SECONDS.
+code_runs() {
+  local i out=
+  for ((i = ${#codes[@]} > 10 ? ${#codes[@]} - 10 : 0; i < ${#codes[@]}; i++)); do
+    out+="${out:+, }${codes[i]} x${counts[i]} at ${ats[i]} s"
+  done
+  echo "$out"
+}
 check "the engine restarts: no attack passes before it blocks again" restart_never_allows
+if [[ -n $why ]]; then echo "      $why"; fi
+traefik_forwarded
 eventually "the engine restarted: Traefik's pod is ready" traefik_ready
 
 # The client IP behind a load balancer (#120): Traefik's web entry point
@@ -1099,6 +1154,12 @@ check "the Middleware is deleted" no_middleware
 kept() { "${KUBECTL[@]}" -n "$NS" get wafpolicy web >/dev/null 2>&1; }
 check "the WAFPolicy is kept" kept
 check "released from the finalizer: deleting it won't wait for an operator" not_held
+check "Programmed=False (Unwired)" programmed_is Unwired
+pready() {
+  "${KUBECTL[@]}" -n "$NS" get wafpolicy web -o jsonpath='{.status.conditions[?(@.type=="Ready")].status} {.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null
+}
+ready_unwired() { [[ $(pready) == "False Unwired" ]]; }
+check "Ready=False (Unwired)" ready_unwired
 restart_traefik
 eventually "a new Traefik pod has no engine" no_engine
 eventually "the route still answers after the uninstall (uninspected)" tstatus_is 200 "$SQLI"
