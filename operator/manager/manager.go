@@ -46,6 +46,7 @@ import (
 	proxydiscovery "github.com/inkwall-dev/inkwall/operator/internal/discovery"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
+	"github.com/inkwall-dev/inkwall/operator/internal/podcache"
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/operator/webhook"
@@ -119,8 +120,9 @@ type Options struct {
 	EnginePullPolicy corev1.PullPolicy
 	// Integrations select the proxy pods; nil: read from the InkwallConfig
 	// when the manager is created. The operator restarts when they change
-	// (its cache of proxy pods is built from them), after a random delay
-	// up to SelectorRestartMaxDelay (0: DefaultSelectorRestartMaxDelay).
+	// (its cache of proxy pods is built from them), or when an
+	// integration's permissions are granted or revoked, after a random
+	// delay up to SelectorRestartMaxDelay (0: DefaultSelectorRestartMaxDelay).
 	Integrations            *integrations.Selectors
 	SelectorRestartMaxDelay time.Duration
 
@@ -170,13 +172,14 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	}
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: s,
+		// Only proxy pods: an informer per integration's selector.
+		NewCache: podcache.New(selectors.PodSelectors()),
 		Cache: cache.Options{ByObject: map[client.Object]cache.ByObject{
 			// Only the operator's own Secrets, and only ConfigMaps that hold
 			// rules: neither is read cluster-wide.
 			&corev1.Secret{}:    {Namespaces: map[string]cache.Config{o.Namespace: {}}},
 			&corev1.ConfigMap{}: {Label: labels.SelectorFromSet(labels.Set{resolver.RulesLabel: "true"})},
-			// Only proxy pods, and RBAC in the operator's namespace.
-			&corev1.Pod{}:         {Label: selectors.PodSelector()},
+			// Only RBAC in the operator's namespace.
 			&rbacv1.Role{}:        {Namespaces: map[string]cache.Config{o.Namespace: {}}},
 			&rbacv1.RoleBinding{}: {Namespaces: map[string]cache.Config{o.Namespace: {}}},
 			// Only the Pod webhook's configuration.
@@ -203,11 +206,19 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	if err != nil {
 		return nil, err
 	}
+	checker, err := accessClient(cfg, s)
+	if err != nil {
+		return nil, err
+	}
+	denied, err := readAccess(checker)
+	if err != nil {
+		return nil, err
+	}
 	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
 		return nil, err
 	}
 	// Traefik's IngressRoute CRD may be installed after the operator.
-	ingressRoutes := &crdwatch.Kind{GVK: wiring.IngressRouteGVK, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
+	ingressRoutes := &crdwatch.Kind{GVK: integrations.TraefikIngressRouteGVK, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
 	// So may Gateway API's, and Envoy Gateway's.
 	crd := func(gvk schema.GroupVersionKind, obj client.Object) *crdwatch.Kind {
 		return &crdwatch.Kind{GVK: gvk, Object: obj, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
@@ -253,10 +264,16 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			OperatorAddr: sidecar.OperatorAddr,
 			BundleSecret: sidecar.BundleSecret,
 			Integrations: selectors,
+			Disabled:     denied,
+		}
+		// The Pod webhook serves Traefik's pods: none while Traefik is
+		// disabled, so they start without an engine nothing would wire.
+		pods := selectors.LabelSelector(integrations.Traefik.Name)
+		if denied[integrations.Traefik.Name] != "" {
+			pods = integrations.NoPods()
 		}
 		if err := (&injection.PodWebhookReconciler{
-			Client: mgr.GetClient(), ConfigName: webhook.MutatingConfigName, WebhookName: webhook.PodWebhookName,
-			Pods: selectors.LabelSelector(integrations.Traefik.Name),
+			Client: mgr.GetClient(), ConfigName: webhook.MutatingConfigName, WebhookName: webhook.PodWebhookName, Pods: pods,
 		}).SetupWithManager(mgr); err != nil {
 			return nil, err
 		}
@@ -268,17 +285,27 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			APIReader:  mgr.GetAPIReader(),
 			Namespace:  o.Namespace,
 			CertSecret: o.WebhookSecret,
-			Pods:       selectors,
 		}).SetupWithManager(mgr); err != nil {
 			return nil, err
 		}
 	}
 	// Without injection, the wiring controller unwires what was wired: new
 	// proxy pods won't have the engine.
-	wirings := wiring.Integrations(mgr.GetClient(), mgr.GetAPIReader(), wiring.Config{
+	wiringCfg := wiring.Config{
 		Pods: selectors, IngressRoutes: ingressRoutes, HTTPRoutes: httpRoutes, Gateways: gateways, GatewayClasses: gatewayClasses,
 		EnvoyProxies: envoyProxies, ExtensionPolicies: extensionPolicies, TrafficPolicies: trafficPolicies, Sidecar: sidecar,
-	})
+	}
+	wirings := wiring.Integrations(mgr.GetClient(), mgr.GetAPIReader(), wiringCfg)
+	// An integration the operator may not wire neither watches nor reads
+	// its proxy's objects: it reports the targets its proxy serves.
+	for i, in := range wirings {
+		if why := denied[in.Name()]; why != "" {
+			wirings[i] = wiring.Disable(in, why, mgr.GetClient(), wiringCfg)
+		}
+	}
+	if err := mgr.Add(&accessWatch{client: checker, denied: denied, maxDelay: o.SelectorRestartMaxDelay}); err != nil {
+		return nil, err
+	}
 	if err := (&wiring.Reconciler{
 		Client: mgr.GetClient(), PodWebhook: webhook.MutatingConfigName, Integrations: wirings, Disabled: !inject,
 	}).SetupWithManager(mgr); err != nil {
@@ -288,7 +315,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	for _, in := range wirings {
 		kinds[in.Name()] = in.Kinds()
 	}
-	if err := (&proxydiscovery.Reconciler{Client: mgr.GetClient(), GatewayClasses: gatewayClasses, Kinds: kinds}).SetupWithManager(mgr); err != nil {
+	if err := (&proxydiscovery.Reconciler{Client: mgr.GetClient(), GatewayClasses: gatewayClasses, Kinds: kinds, Disabled: denied}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
 	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gateways, gatewayClasses, envoyProxies, extensionPolicies, trafficPolicies} {

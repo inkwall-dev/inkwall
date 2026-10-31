@@ -19,6 +19,7 @@ import (
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/operator/test/testenv"
@@ -173,7 +174,7 @@ func testHTTPRoutes(ctx context.Context, t *testing.T, c client.Client) {
 	eventually(t, "Programmed", cond(wafv1alpha1.ConditionProgrammed, metav1.ConditionTrue, wiring.ReasonProgrammed, "1 HTTPRoute(s) wired"))
 	middleware := func() error {
 		m := &unstructured.Unstructured{}
-		m.SetGroupVersionKind(wiring.MiddlewareGVK)
+		m.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
 		return c.Get(ctx, client.ObjectKey{Namespace: ns, Name: wiring.MiddlewareName}, m)
 	}
 	if err := middleware(); err != nil {

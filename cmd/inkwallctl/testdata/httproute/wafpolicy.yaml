@@ -1,0 +1,55 @@
+# Four policies of the shop: the storefront's targets an Ingress, the
+# API's a Gateway API HTTPRoute, the admin's two rules of another (with
+# sectionName) and the admin's static files the third rule.
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: storefront
+  namespace: shop
+spec:
+  targetRefs:
+  - kind: Ingress
+    name: storefront
+  mode: Block
+---
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: api
+  namespace: shop
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: api
+  mode: Detect
+---
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: admin
+  namespace: shop
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: admin
+    sectionName: login
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: admin
+    sectionName: rest
+  mode: Block
+---
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: admin-static
+  namespace: shop
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: admin
+    sectionName: static
+  mode: Detect

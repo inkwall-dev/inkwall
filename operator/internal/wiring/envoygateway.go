@@ -52,11 +52,11 @@ import (
 // Envoy's buffer limit, so the body it holds for the engine isn't cut
 // short. Unprotected routes get nothing.
 //
-// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes;gatewayclasses,verbs=get;list;watch
-// +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=envoyproxies,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=envoyextensionpolicies;backends;clienttrafficpolicies,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=waf.inkwall.dev,resources=inkwallconfigs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;update;patch,roleName=inkwall-operator-envoy-gateway
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes;gatewayclasses,verbs=get;list;watch,roleName=inkwall-operator-envoy-gateway
+// +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=envoyproxies,verbs=get;list;watch;create;update;patch;delete,roleName=inkwall-operator-envoy-gateway
+// +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=envoyextensionpolicies;backends;clienttrafficpolicies,verbs=get;list;watch;create;update;patch;delete,roleName=inkwall-operator-envoy-gateway
+// +kubebuilder:rbac:groups=waf.inkwall.dev,resources=inkwallconfigs,verbs=get;list;watch,roleName=inkwall-operator-envoy-gateway
 
 // Names of the Envoy Gateway wiring.
 const (
@@ -326,6 +326,9 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 				errs = errors.Join(errs, fmt.Errorf("ensure the ClientTrafficPolicy of Gateway %s: %w", gw, err))
 			case name != "":
 				limits[gw] = name
+			default:
+				// The user's own: the operator's goes.
+				delete(buffered, gw)
 			}
 		}
 		// 4. The rest goes, in reverse: a route stops calling the engine
@@ -978,8 +981,8 @@ func pruneEmpty(obj map[string]any, path []string) {
 
 // prune deletes the operator's EnvoyExtensionPolicies and Backends no
 // longer wanted, its ClientTrafficPolicies on Gateways without such
-// routes, and the engine from the Envoy pods of Gateways that no longer
-// need it.
+// routes or with the user's, and the engine from the Envoy pods of
+// Gateways that no longer need it.
 func (e *EnvoyGateway) prune(ctx context.Context, routes, buffered, gateways map[types.NamespacedName]bool) error {
 	namespaces := map[string]bool{}
 	for k := range routes {

@@ -41,6 +41,16 @@ webhooks:
   {{- $_ := set .clientConfig.service "namespace" $.Release.Namespace }}
   {{- $_ := set .clientConfig.service "port" 443 }}
   {{- $_ := set . "timeoutSeconds" $.Values.webhook.timeoutSeconds }}
+  {{- if and (eq .name "pods.waf.inkwall.dev") (not (include "inkwall.integration.enabled" (dict "root" $ "name" "traefik"))) }}
+  {{- /* Traefik's role isn't granted: its pods start without an engine
+  nothing would wire. The operator keeps this selector of no pod
+  (integrations.NoPods). */}}
+  {{- $name := dict "key" "app.kubernetes.io/name" }}
+  {{- $_ := set . "objectSelector" (dict "matchExpressions" (list
+    (merge (dict "operator" "Exists") $name)
+    (merge (dict "operator" "DoesNotExist") $name)
+    (dict "key" "waf.inkwall.dev/inject" "operator" "NotIn" "values" (list "false")))) }}
+  {{- end }}
   - {{ toYaml . | indent 4 | trim }}
   {{- end }}
 {{- end }}

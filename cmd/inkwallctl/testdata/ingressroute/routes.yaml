@@ -23,9 +23,14 @@ spec:
   routes:
   - match: Host(`shop.example.com`) && PathPrefix(`/api`)
     kind: Rule
+    middlewares:
+    - name: rate-limit
     services:
     - name: api
       port: 80
+      weight: 1
+  tls:
+    secretName: shop-tls
 ---
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute

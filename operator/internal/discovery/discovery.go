@@ -64,6 +64,9 @@ type Reconciler struct {
 	GatewayClasses *crdwatch.Kind
 	// Kinds are the target kinds each integration wires, by name.
 	Kinds map[string][]schema.GroupKind
+	// Disabled are the integrations the operator may not wire, by name,
+	// and why: their proxies are Unsupported.
+	Disabled map[string]string
 }
 
 var request = reconcile.Request{NamespacedName: types.NamespacedName{Name: "default"}}
@@ -112,7 +115,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			gcs = append(gcs, Class{Name: gc.GetName(), Controller: controller})
 		}
 	}
-	proxies := Proxies(ics, gcs, r.Kinds)
+	proxies := Disable(Proxies(ics, gcs, r.Kinds), r.Disabled)
 
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var cfg wafv1alpha1.InkwallConfig
@@ -126,6 +129,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		return r.Client.Status().Update(ctx, &cfg)
 	})
 	return reconcile.Result{}, err
+}
+
+// Disable reports the proxies of the disabled integrations (name -> why)
+// Unsupported, with why.
+func Disable(proxies []wafv1alpha1.ProxyStatus, disabled map[string]string) []wafv1alpha1.ProxyStatus {
+	for i := range proxies {
+		if why := disabled[proxies[i].Integration]; why != "" {
+			proxies[i].Support, proxies[i].Message = wafv1alpha1.SupportUnsupported, why
+		}
+	}
+	return proxies
 }
 
 // Proxies groups the classes by controller, and says how far Inkwall wires

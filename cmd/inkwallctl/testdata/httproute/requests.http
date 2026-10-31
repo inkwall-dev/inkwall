@@ -1,0 +1,35 @@
+GET /products/42 HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0
+Accept: */*
+
+GET /?id=1%27%20OR%20%271%27%3D%271 HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0
+Accept: */*
+
+GET /api/orders?id=1%27%20OR%20%271%27%3D%271 HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0
+Accept: */*
+
+GET /login?id=1%27%20OR%20%271%27%3D%271 HTTP/1.1
+Host: admin.example.com
+User-Agent: Mozilla/5.0
+Accept: */*
+
+GET /static/app.css?id=1%27%20OR%20%271%27%3D%271 HTTP/1.1
+Host: admin.example.com
+User-Agent: Mozilla/5.0
+Accept: */*
+
+GET /settings?id=1%27%20OR%20%271%27%3D%271 HTTP/1.1
+Host: admin.example.com
+User-Agent: Mozilla/5.0
+Accept: */*
+
+GET /?id=1%27%20OR%20%271%27%3D%271 HTTP/1.1
+Host: blog.example.com
+User-Agent: Mozilla/5.0
+Accept: */*
+

@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 )
 
 func TestUnwire(t *testing.T) {
@@ -120,7 +121,7 @@ func TestUnwire(t *testing.T) {
 
 	mw := func(namespace string) error {
 		m := &unstructured.Unstructured{}
-		m.SetGroupVersionKind(MiddlewareGVK)
+		m.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
 		return c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: MiddlewareName}, m)
 	}
 	if err := mw("shop"); !apierrors.IsNotFound(err) {
@@ -132,7 +133,7 @@ func TestUnwire(t *testing.T) {
 
 	route := func(name string) *unstructured.Unstructured {
 		u := &unstructured.Unstructured{}
-		u.SetGroupVersionKind(IngressRouteGVK)
+		u.SetGroupVersionKind(integrations.TraefikIngressRouteGVK)
 		if err := c.Get(ctx, client.ObjectKey{Namespace: "shop", Name: name}, u); err != nil {
 			t.Fatal(err)
 		}
@@ -183,6 +184,27 @@ func TestUnwireWithoutTraefikCRDs(t *testing.T) {
 	n, err := Unwire(context.Background(), c)
 	if err != nil || n.Policies != 0 || !maps.Equal(n.Objects, map[string]int{"Ingress": 1}) {
 		t.Errorf("unwired %+v, %v; want 1 Ingress", n, err)
+	}
+}
+
+// An integration the operator may not unwire (its ClusterRole isn't
+// granted) is skipped, and said so; the policies are still released.
+func TestUnwireForbidden(t *testing.T) {
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p", Finalizers: []string{Finalizer}}}
+	c := fake.NewClientBuilder().WithScheme(scheme()).WithObjects(p).WithStatusSubresource(p).WithInterceptorFuncs(interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if u, ok := list.(*unstructured.UnstructuredList); ok {
+				if u.GetKind() == "MiddlewareList" {
+					return apierrors.NewForbidden(integrations.TraefikMiddlewareGVK.GroupVersion().WithResource("middlewares").GroupResource(), "", nil)
+				}
+				return &meta.NoKindMatchError{GroupKind: u.GroupVersionKind().GroupKind()}
+			}
+			return c.List(ctx, list, opts...)
+		},
+	}).Build()
+	n, err := Unwire(context.Background(), c)
+	if err != nil || n.Policies != 1 || !slices.Equal(n.Forbidden, []string{"traefik"}) {
+		t.Errorf("unwired %+v, %v; want traefik forbidden, 1 policy released", n, err)
 	}
 }
 

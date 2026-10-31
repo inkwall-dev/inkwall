@@ -5,7 +5,6 @@ package main
 
 import (
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -26,7 +25,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
-	"github.com/inkwall-dev/inkwall/operator/resolver"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 )
 
 var (
@@ -119,47 +118,36 @@ func TestMigrateIngressRouteRoundTrip(t *testing.T) {
 	golden(t, filepath.Join("migrate", "roundtrip.golden"), out)
 }
 
-// TestMigrateHTTPRouteResolves resolves the policies retargeted to
-// HTTPRoutes as the operator does (inkwallctl test doesn't route
-// HTTPRoutes): each applies to the requests its Ingress's policy did.
-func TestMigrateHTTPRouteResolves(t *testing.T) {
+// TestMigrateHTTPRouteRoundTrip retargets the policies to the HTTPRoutes
+// replacing the Ingresses: inkwallctl test routes the requests through
+// them, and through the Ingresses of the policies left on them, to the
+// same verdicts.
+func TestMigrateHTTPRouteRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	if code, _, errOut := runCLI(t, "migrate", "ingress-nginx", "-f", migrateIngresses, "-f", migrateHTTPRoutes,
 		"--target", "httproute", "--output", dir); code != 1 {
 		t.Fatalf("migrate: exit %d, stderr:\n%s", code, errOut)
 	}
-	raw, err := os.ReadFile(migrateHTTPRoutes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var routes []gatewayv1.HTTPRoute
-	for _, doc := range strings.Split(string(raw), "\n---\n") {
-		var hr gatewayv1.HTTPRoute
-		if err := yaml.Unmarshal([]byte(doc), &hr); err != nil {
-			t.Fatal(err)
-		}
-		routes = append(routes, hr)
-	}
 	for _, tc := range []struct {
-		file, host string
-		want       []wafv1alpha1.TargetRef
+		file string
+		want []wafv1alpha1.TargetRef
 	}{
-		{"shop-shop", "shop.example.com", []wafv1alpha1.TargetRef{{Group: httpRouteGroup, Kind: "HTTPRoute", Name: "shop"}}},
-		{"shop-api", "api.example.com", []wafv1alpha1.TargetRef{{Group: httpRouteGroup, Kind: "HTTPRoute", Name: "api", SectionName: "api"}}},
+		{"shop-shop", []wafv1alpha1.TargetRef{{Group: httpRouteGroup, Kind: "HTTPRoute", Name: "shop"}}},
+		{"shop-api", []wafv1alpha1.TargetRef{{Group: httpRouteGroup, Kind: "HTTPRoute", Name: "api", SectionName: "api"}}},
+		{"blog-blog", []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "blog"}}},
 	} {
 		var p wafv1alpha1.WAFPolicy
 		readPolicy(t, filepath.Join(dir, tc.file+".yaml"), &p)
 		if !slices.Equal(p.Spec.TargetRefs, tc.want) {
 			t.Errorf("%s: targetRefs %+v, want %+v", tc.file, p.Spec.TargetRefs, tc.want)
 		}
-		got, err := routeMatches(resolver.Input{HTTPRoutes: routes}, p.Namespace, p.Spec.TargetRefs[0])
-		if err != nil {
-			t.Fatalf("%s: %v", tc.file, err)
-		}
-		if want := map[string]bool{tc.host + "/": true}; !maps.Equal(got, want) {
-			t.Errorf("%s: applies to %v, want %v", tc.file, got, want)
-		}
 	}
+	code, out, errOut := runCLI(t, "test", "--policy", dir, "--ingress", migrateHTTPRoutes, "--ingress", migrateIngresses,
+		"--request", filepath.Join("testdata", "migrate", "requests.http"))
+	if code != 0 {
+		t.Fatalf("test: exit %d, stderr:\n%s", code, errOut)
+	}
+	golden(t, filepath.Join("migrate", "roundtrip.golden"), out)
 }
 
 // readPolicy reads the WAFPolicy, the last object of a migrated file.
@@ -520,7 +508,7 @@ func TestMigrateClusterRoutes(t *testing.T) {
 		"spec":       map[string]any{"hostnames": []any{"a.example.com"}, "rules": []any{map[string]any{}}},
 	}}
 	httpRoutes := schema.GroupVersionResource{Group: gatewayv1.GroupName, Version: "v1", Resource: "httproutes"}
-	ingressRoutes := ingressRouteGVK.GroupVersion().WithResource("ingressroutes")
+	ingressRoutes := integrations.TraefikIngressRouteGVK.GroupVersion().WithResource("ingressroutes")
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{httpRoutes: "HTTPRouteList", ingressRoutes: "IngressRouteList"}, route)
 	dyn.PrependReactor("list", "ingressroutes", func(k8stesting.Action) (bool, runtime.Object, error) {

@@ -84,6 +84,9 @@ type Result struct {
 	// engine (Envoy Gateway, once its EnvoyProxy has it), rather than the
 	// Pod webhook injecting new ones; they are PendingRestart.
 	Rolling bool
+	// Disabled: the integration is disabled, and why (Disable); the
+	// targets its proxy serves aren't wired.
+	Disabled string
 }
 
 // TargetState is a target as an integration sees it.

@@ -27,13 +27,15 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/utils/ptr"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/yaml"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
@@ -58,12 +60,12 @@ func policyBundle(cfg config, notes io.Writer) (*bundlev1.Bundle, error) {
 	if len(in.Policies) == 0 {
 		return nil, errors.New("no WAFPolicy in the files")
 	}
-	if len(in.Ingresses)+len(in.IngressRoutes) == 0 {
+	if len(in.Ingresses)+len(in.IngressRoutes)+len(in.HTTPRoutes) == 0 {
 		// Without the routes, a single policy is tested as if its first
 		// target matched every host and path. Several policies would all
 		// claim that route.
 		if len(in.Policies) > 1 {
-			return nil, errors.New("several WAFPolicies: give the Ingresses or IngressRoutes they target with --ingress, so requests can be routed")
+			return nil, errors.New("several WAFPolicies: give the Ingresses, IngressRoutes or HTTPRoutes they target with --ingress, so requests can be routed")
 		}
 		p := &in.Policies[0]
 		covered := false
@@ -82,10 +84,25 @@ func policyBundle(cfg config, notes io.Writer) (*bundlev1.Bundle, error) {
 					routes = append(routes, map[string]any{"match": "PathPrefix(`/`)"})
 				}
 				ir := unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"routes": routes}}}
-				ir.SetGroupVersionKind(ingressRouteGVK)
+				ir.SetGroupVersionKind(integrations.TraefikIngressRouteGVK)
 				ir.SetNamespace(p.Namespace)
 				ir.SetName(t.Name)
 				in.IngressRoutes = append(in.IngressRoutes, ir)
+			case "HTTPRoute":
+				// A rule without matches is PathPrefix / on every host. The
+				// targets of one route are rules of one HTTPRoute.
+				i := slices.IndexFunc(in.HTTPRoutes, func(hr gatewayv1.HTTPRoute) bool { return hr.Name == t.Name })
+				if i < 0 {
+					i = len(in.HTTPRoutes)
+					in.HTTPRoutes = append(in.HTTPRoutes, gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: p.Namespace, Name: t.Name}})
+				}
+				if !covered || t.SectionName != "" {
+					rule := gatewayv1.HTTPRouteRule{}
+					if t.SectionName != "" {
+						rule.Name = ptr.To(gatewayv1.SectionName(t.SectionName))
+					}
+					in.HTTPRoutes[i].Spec.Rules = append(in.HTTPRoutes[i].Spec.Rules, rule)
+				}
 			default:
 				continue
 			}
@@ -230,15 +247,15 @@ func loadObjects(files []string, namespace string, notes io.Writer) (resolver.In
 			o.Namespace = ns
 			in.Ingresses = append(in.Ingresses, o)
 		case "IngressRoute":
-			// Traefik's types aren't a dependency: the operator reads
-			// IngressRoutes as unstructured objects too.
 			var o unstructured.Unstructured
-			var j []byte
-			if j, err = yaml.YAMLToJSON(doc); err == nil {
-				err = o.UnmarshalJSON(j)
-			}
+			o, err = readIngressRoute(doc)
 			o.SetNamespace(ns)
 			in.IngressRoutes = append(in.IngressRoutes, o)
+		case "HTTPRoute":
+			var o gatewayv1.HTTPRoute
+			err = yaml.UnmarshalStrict(doc, &o)
+			o.Namespace = ns
+			in.HTTPRoutes = append(in.HTTPRoutes, o)
 		case "ConfigMap":
 			var o corev1.ConfigMap
 			err = yaml.UnmarshalStrict(doc, &o)
@@ -321,12 +338,10 @@ var apiVersions = map[string]string{
 	"ClusterWAFRuleSet": wafv1alpha1.GroupVersion.String(),
 	"InkwallConfig":     wafv1alpha1.GroupVersion.String(),
 	"Ingress":           networkingv1.SchemeGroupVersion.String(),
-	"IngressRoute":      ingressRouteGVK.GroupVersion().String(),
+	"IngressRoute":      integrations.TraefikIngressRouteGVK.GroupVersion().String(),
+	"HTTPRoute":         gatewayv1.GroupVersion.String(),
 	"ConfigMap":         corev1.SchemeGroupVersion.String(),
 }
-
-// ingressRouteGVK is Traefik's IngressRoute, as the operator reads it.
-var ingressRouteGVK = schema.GroupVersionKind{Group: "traefik.io", Version: "v1alpha1", Kind: "IngressRoute"}
 
 // isEmptyDocument reports whether a YAML document holds only comments or
 // whitespace, as between two "---".

@@ -362,6 +362,13 @@ crds_new() {
   done
 }
 check "the CRDs are the new chart's ($chart_label)" crds_new
+# rbac.integrations auto: the cluster serves Traefik's API group, not Envoy
+# Gateway's.
+integration_roles() {
+  "${KUBECTL[@]}" get clusterrole inkwall-operator-traefik &&
+    ! "${KUBECTL[@]}" get clusterrole inkwall-operator-envoy-gateway
+}
+check "only Traefik's integration role is granted (auto)" integration_roles
 same_wiring() { [[ $(wiring) == "$wiring_before" ]]; }
 check "the wiring is unchanged, not duplicated" same_wiring
 # The new operator may add settings to its Middleware (it rewrites it to its

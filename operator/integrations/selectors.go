@@ -12,8 +12,6 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/selection"
-	"k8s.io/apimachinery/pkg/util/sets"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 )
@@ -84,50 +82,24 @@ func (s *Selectors) Selector(name string) labels.Selector {
 	return sel
 }
 
-// PodSelector matches the pods of every integration, and maybe others, for
-// the operator's cache: a label selector can't express a union of
-// selectors. It requires the keys every integration's selector sets to one
-// of their values (app.kubernetes.io/name in (envoy,traefik) by default).
-// Selectors sharing no such key make it match every pod. IsProxyPod tells
-// the proxy pods among them.
-func (s *Selectors) PodSelector() labels.Selector {
-	values := map[string]sets.Set[string]{}
+// PodSelectors are every integration's selector, for the operator's cache
+// of proxy pods: an informer each (a label selector can't express their
+// union).
+func (s *Selectors) PodSelectors() []labels.Selector {
+	out := make([]labels.Selector, len(All))
 	for i, in := range All {
-		mine := map[string]sets.Set[string]{}
-		reqs, _ := s.Selector(in.Name).Requirements()
-		for _, r := range reqs {
-			switch r.Operator() {
-			case selection.Equals, selection.DoubleEquals, selection.In:
-				mine[r.Key()] = sets.New(r.ValuesUnsorted()...)
-			}
-		}
-		if i == 0 {
-			values = mine
-			continue
-		}
-		for k, v := range values {
-			if m, ok := mine[k]; ok {
-				values[k] = v.Union(m)
-			} else {
-				delete(values, k)
-			}
-		}
+		out[i] = s.Selector(in.Name)
 	}
-	sel := labels.NewSelector()
-	for _, k := range slices.Sorted(maps.Keys(values)) {
-		r, err := labels.NewRequirement(k, selection.In, sets.List(values[k]))
-		if err != nil {
-			return labels.Everything()
-		}
-		sel = sel.Add(*r)
-	}
-	return sel
+	return out
 }
 
-// IsProxyPod reports whether a pod's labels are those of an integration's
-// pods.
-func (s *Selectors) IsProxyPod(podLabels map[string]string) bool {
-	return s.ForPod(podLabels) != nil
+// NoPods is a label selector no pod matches: the Pod webhook's
+// objectSelector when no integration it serves is enabled.
+func NoPods() *metav1.LabelSelector {
+	return &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+		{Key: "app.kubernetes.io/name", Operator: metav1.LabelSelectorOpExists},
+		{Key: "app.kubernetes.io/name", Operator: metav1.LabelSelectorOpDoesNotExist},
+	}}
 }
 
 // ForPod returns the integration whose pods carry podLabels, or nil.

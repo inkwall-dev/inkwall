@@ -9,6 +9,7 @@ import (
 	"maps"
 
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -17,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 )
 
 const unwiredMessage = "the routes were unwired at uninstall (inkwall-operator unwire), and no operator wires them"
@@ -26,6 +28,10 @@ type Unwired struct {
 	// Objects counts the proxies' objects unwired or deleted, by kind.
 	Objects  map[string]int
 	Policies int
+	// Forbidden are the integrations the operator may not unwire (their
+	// ClusterRole isn't granted, as when it disabled them): what they
+	// wired, if anything, stays.
+	Forbidden []string
 }
 
 // Unwire undoes the wiring at uninstall: every integration removes its
@@ -42,6 +48,10 @@ func Unwire(ctx context.Context, c client.Client) (Unwired, error) {
 	for _, in := range Integrations(c, c, Config{}) {
 		counts, err := in.Unwire(ctx, c)
 		maps.Copy(n.Objects, counts)
+		if apierrors.IsForbidden(err) {
+			n.Forbidden = append(n.Forbidden, in.Name())
+			continue
+		}
 		if err != nil {
 			return n, fmt.Errorf("%s: %w", in.Name(), err)
 		}
@@ -105,7 +115,7 @@ func (*Traefik) Unwire(ctx context.Context, c client.Client) (map[string]int, er
 	}
 
 	routes := &unstructured.UnstructuredList{}
-	routes.SetGroupVersionKind(IngressRouteGVK.GroupVersion().WithKind("IngressRouteList"))
+	routes.SetGroupVersionKind(integrations.TraefikIngressRouteGVK.GroupVersion().WithKind("IngressRouteList"))
 	switch err := c.List(ctx, routes); {
 	case meta.IsNoMatchError(err): // Traefik's CRDs are gone
 	case err != nil:
@@ -162,7 +172,7 @@ func (*Traefik) Unwire(ctx context.Context, c client.Client) (map[string]int, er
 
 	// After the routes: a router referring to a missing Middleware fails.
 	mws := &unstructured.UnstructuredList{}
-	mws.SetGroupVersionKind(MiddlewareGVK.GroupVersion().WithKind("MiddlewareList"))
+	mws.SetGroupVersionKind(integrations.TraefikMiddlewareGVK.GroupVersion().WithKind("MiddlewareList"))
 	switch err := c.List(ctx, mws, client.MatchingLabels{"app.kubernetes.io/managed-by": "inkwall-operator"}); {
 	case meta.IsNoMatchError(err): // Traefik's CRDs are gone
 	case err != nil:

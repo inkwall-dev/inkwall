@@ -83,7 +83,7 @@ func ingressRoute(ns, name string, middlewares ...[]any) *unstructured.Unstructu
 		routes = append(routes, route)
 	}
 	u := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"routes": routes}}}
-	u.SetGroupVersionKind(IngressRouteGVK)
+	u.SetGroupVersionKind(integrations.TraefikIngressRouteGVK)
 	u.SetNamespace(ns)
 	u.SetName(name)
 	return u

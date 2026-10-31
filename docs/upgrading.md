@@ -242,7 +242,7 @@ and no chart values. The operator gets two flags, with the defaults it used befo
 | Flag | Default | |
 |---|---|---|
 | `--signing-key-grace` | `1m` | The least time each phase of a [signing key rotation](key-rotation.md) lasts |
-| `--selector-restart-max-delay` | `30s` | When the `InkwallConfig`'s integration selectors change, each replica restarts after a random delay up to this |
+| `--selector-restart-max-delay` | `30s` | When the `InkwallConfig`'s integration selectors change, or an integration's permissions are granted or revoked, each replica restarts after a random delay up to this |
 
 From 0.1.0, the upgrade also adds fields to the existing CRDs, and makes some existing fields take
 effect. It adds no new kinds.

@@ -1,15 +1,25 @@
 {{- /*
 The rules come from the operator's kubebuilder:rbac markers
 (files/rbac/role.yaml, generated): cluster-wide rules go into a ClusterRole,
-the namespaced ones into a Role in the release namespace.
+the namespaced ones into a Role in the release namespace. Each integration
+has a ClusterRole of its own (inkwall-operator-<integration> in role.yaml),
+left out when rbac.integrations says so (false, or auto on a cluster that
+doesn't serve the proxy's API group): the operator then disables that
+integration.
 */}}
 {{- $name := include "inkwall.operator.name" . }}
 {{- range (include "inkwall.generated" (dict "root" . "path" "files/rbac/role.yaml") | fromJsonArray) }}
+{{- $integration := trimPrefix "inkwall-operator-" .metadata.name }}
+{{- if or (eq .metadata.name "inkwall-operator") (include "inkwall.integration.enabled" (dict "root" $ "name" $integration)) }}
+{{- $roleName := $name }}
+{{- if ne .metadata.name "inkwall-operator" }}
+{{- $roleName = printf "%s-%s" $name $integration | trunc 63 | trimSuffix "-" }}
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: {{ .kind }}
 metadata:
-  name: {{ $name }}
+  name: {{ $roleName }}
   {{- if eq .kind "Role" }}
   namespace: {{ $.Release.Namespace }}
   {{- end }}
@@ -21,7 +31,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: {{ .kind }}Binding
 metadata:
-  name: {{ $name }}
+  name: {{ $roleName }}
   {{- if eq .kind "Role" }}
   namespace: {{ $.Release.Namespace }}
   {{- end }}
@@ -30,9 +40,10 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: {{ .kind }}
-  name: {{ $name }}
+  name: {{ $roleName }}
 subjects:
   - kind: ServiceAccount
     name: {{ include "inkwall.serviceAccountName" $ }}
     namespace: {{ $.Release.Namespace }}
+{{- end }}
 {{- end }}

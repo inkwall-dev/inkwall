@@ -18,6 +18,7 @@ import (
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/operator/test/testenv"
@@ -66,7 +67,7 @@ func testIngressRoutes(ctx context.Context, t *testing.T, c client.Client) {
 	}
 	getRoute := func() (*unstructured.Unstructured, error) {
 		ir := &unstructured.Unstructured{}
-		ir.SetGroupVersionKind(wiring.IngressRouteGVK)
+		ir.SetGroupVersionKind(integrations.TraefikIngressRouteGVK)
 		return ir, c.Get(ctx, key, ir)
 	}
 
@@ -105,7 +106,7 @@ func testIngressRoutes(ctx context.Context, t *testing.T, c client.Client) {
 				"services": []any{map[string]any{"name": "app", "port": int64(80)}}},
 		},
 	}}}
-	ir.SetGroupVersionKind(wiring.IngressRouteGVK)
+	ir.SetGroupVersionKind(integrations.TraefikIngressRouteGVK)
 	ir.SetNamespace(ns)
 	ir.SetName("app")
 	if err := c.Create(ctx, ir); err != nil {
@@ -124,7 +125,7 @@ func testIngressRoutes(ctx context.Context, t *testing.T, c client.Client) {
 			return "no marker"
 		}
 		m := &unstructured.Unstructured{}
-		m.SetGroupVersionKind(wiring.MiddlewareGVK)
+		m.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
 		if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: wiring.MiddlewareName}, m); err != nil {
 			return "Middleware: " + err.Error()
 		}
@@ -177,7 +178,7 @@ func testIngressRoutes(ctx context.Context, t *testing.T, c client.Client) {
 			return "marker still there"
 		}
 		m := &unstructured.Unstructured{}
-		m.SetGroupVersionKind(wiring.MiddlewareGVK)
+		m.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
 		if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: wiring.MiddlewareName}, m); !apierrors.IsNotFound(err) {
 			return "Middleware still there"
 		}

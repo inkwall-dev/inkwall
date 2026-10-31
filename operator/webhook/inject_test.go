@@ -92,6 +92,15 @@ func TestPodInjector(t *testing.T) {
 		t.Fatalf("not a proxy pod: allowed=%v, %d patches", resp.Allowed, len(resp.Patches))
 	}
 
+	// Traefik's integration disabled (its ClusterRole not granted): nothing
+	// would wire its routes to the engine.
+	inj = injector(t)
+	inj.Disabled = map[string]string{integrations.Traefik.Name: "the traefik integration is disabled: ..."}
+	resp = inj.Handle(ctx, podRequest(t, traefik))
+	if !resp.Allowed || len(resp.Patches) != 0 || !strings.Contains(resp.Result.Message, "disabled") {
+		t.Fatalf("disabled integration: allowed=%v, %d patches, %q", resp.Allowed, len(resp.Patches), resp.Result.Message)
+	}
+
 	// InkwallConfig sets the image and resources.
 	cfg := &wafv1alpha1.InkwallConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: "default"},

@@ -256,7 +256,7 @@ The operator also changes objects of the Inkwall [Helm](https://helm.sh/docs/) c
 | Field | Why |
 |---|---|
 | `webhooks[*].failurePolicy` | `Fail` while a policy is in block mode, else `Ignore` (the chart's value) |
-| `webhooks[*].objectSelector` | Follows an `InkwallConfig` integration selector, when you set one |
+| `webhooks[*].objectSelector` | Follows an `InkwallConfig` integration selector, when you set one; selects no pod while Traefik's integration is disabled |
 | `webhooks[*].clientConfig.caBundle` | The webhook CA, injected by the operator (or by [cert-manager](https://cert-manager.io/docs/)) |
 
 The same `caBundle` is injected into `ValidatingWebhookConfiguration` `inkwall-operator-validating`.
@@ -269,6 +269,12 @@ your policies, in Git apart from the chart: in another Argo CD Application, or i
 Kustomization whose `dependsOn` names the one that installs the chart. The validating webhook
 refuses `WAF*` objects while no operator replica answers, so let the tool retry until the operator
 is ready.
+
+Set `rbac.integrations.traefik` and `envoyGateway` to `true` or `false` in Git rather than
+leaving them `auto` ([integration permissions](../deploy/helm/inkwall/README.md#integration-permissions)).
+Argo CD renders the chart without asking the cluster, so `auto` grants every role. Flux asks the
+cluster, but only when it upgrades the release, so a proxy installed later stays disabled until
+the next change.
 
 Upgrade the chart with the tool, not with `helm upgrade`. The chart's values (such as
 `controlPlane.enrollmentToken`) then live in Git: create the token Secret yourself rather than

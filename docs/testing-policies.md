@@ -35,7 +35,7 @@ check took.
 ## Test `WAFPolicy` objects
 
 Give `--policy` the policies, with the rule sets (`--rule-set`), [ConfigMaps](https://kubernetes.io/docs/concepts/configuration/configmap/) (`--configmap`) and
-[Ingresses](https://kubernetes.io/docs/concepts/services-networking/ingress/) or Traefik [IngressRoutes](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) (`--ingress`) they use. `inkwallctl` resolves them as the operator does, sends each
+[Ingresses](https://kubernetes.io/docs/concepts/services-networking/ingress/), Traefik [IngressRoutes](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) or Gateway API [HTTPRoutes](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) (`--ingress`) they use. `inkwallctl` resolves them as the operator does, sends each
 request to the policy of its host and path (`policy=` names it), and compiles them as the engine
 does.
 
@@ -51,12 +51,18 @@ allow      GET /?id=1%27%20OR%20%271%27%3D%271  reason=no_policy  0s
 - A file, or a directory of `.yaml`, `.yml` and `.json` files, may hold several YAML documents of
   any of these kinds, or `kubectl get -o yaml` output. Each object is read by its kind, whichever
   flag named the file.
+- Fields are checked as the API server's strict field validation does: a misspelled field is an
+  error, not a setting silently left out. In an IngressRoute's routes, `inkwallctl` checks `match`
+  and `kind`, and takes `services`, `middlewares` and the other fields Traefik reads as they are.
 - Without `--ingress`, a single policy applies to every request; several policies need the
-  Ingresses or IngressRoutes they target.
+  Ingresses, IngressRoutes or HTTPRoutes they target.
 - An IngressRoute's match rules are read as the operator reads them: `Host`, `Path` and
   `PathPrefix`, joined by `&&`. A policy whose IngressRoute has any other rule isn't enforced, and
   `inkwallctl` says which rule.
-  <!-- TODO(v0.3.0): after #216, --ingress also reads HTTPRoutes (gateway.networking.k8s.io/v1): add them to the kinds above and say how their hostnames, matches and sectionName are read. -->
+- An HTTPRoute is read as the operator reads it: its hostnames × its rules' matches (only the rule
+  a policy's `sectionName` names), with `Exact` and `PathPrefix` paths and methods. A policy whose
+  HTTPRoute has a regular expression path, or headers or query parameter matches, isn't enforced,
+  and `inkwallctl` says which match.
 - Objects the operator would reject, such as a missing rule set or rules that don't compile, are
   errors.
 - Objects without a namespace go to `--namespace` (default `default`), as with `kubectl apply -n`.
