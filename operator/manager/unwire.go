@@ -7,6 +7,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
+	"strings"
 	"time"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -79,8 +82,15 @@ func Unwire(ctx context.Context, c client.Client, namespace, deployment string, 
 	if err != nil {
 		return err
 	}
-	logger.Info("routes unwired", slog.Int("ingresses", n.Ingresses), slog.Int("ingressroutes", n.IngressRoutes),
-		slog.Int("middlewares", n.Middlewares), slog.Int("policies", n.Policies))
+	attrs := []any{slog.Int("policies", n.Policies)}
+	for _, kind := range slices.Sorted(maps.Keys(n.Objects)) {
+		key := strings.ToLower(kind) + "s" // ingressroutes
+		if strings.HasSuffix(kind, "s") {
+			key = strings.ToLower(kind) + "es" // ingresses
+		}
+		attrs = append(attrs, slog.Int(key, n.Objects[kind]))
+	}
+	logger.Info("routes unwired", attrs...)
 	return nil
 }
 

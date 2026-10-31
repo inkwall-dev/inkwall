@@ -52,12 +52,14 @@ const (
 	// two, and the operator waits for every engine to report a new key
 	// before it signs with it.
 	DefaultKeyReload = 10 * time.Second
-	// eventBatch keeps a batch of events well under gRPC's default 4 MiB
-	// message limit at the contract's field limits.
+	// eventBatch is the most events taken from the buffer at once.
 	eventBatch = 256
 	// statsMessageBytes bounds a message of request counts: a report of
 	// many policies is split, so it never makes a large message.
 	statsMessageBytes = 32 << 10
+	// eventsMessage bounds a message of events, encoded: each fits in
+	// 64 KiB, which every operator version accepts from an engine.
+	eventsMessage = 60 << 10
 )
 
 // Config configures an Agent.
@@ -393,11 +395,16 @@ func (a *Agent) stream(ctx context.Context) error {
 				if batch == nil {
 					return
 				}
-				if send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Events{Events: batch}}) != nil {
-					// Kept for the next stream.
-					buf.Return(batch)
-					cancel()
-					return
+				parts := events.Split(batch, eventsMessage)
+				for i, part := range parts {
+					if send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Events{Events: part}}) != nil {
+						// Kept for the next stream, in order.
+						for _, p := range slices.Backward(parts[i:]) {
+							buf.Return(p)
+						}
+						cancel()
+						return
+					}
 				}
 			}
 		}()

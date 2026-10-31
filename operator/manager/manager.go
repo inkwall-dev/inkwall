@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -34,6 +35,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/bundle"
@@ -41,6 +43,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/internal/controller"
 	"github.com/inkwall-dev/inkwall/operator/internal/controlplane"
 	"github.com/inkwall-dev/inkwall/operator/internal/crdwatch"
+	proxydiscovery "github.com/inkwall-dev/inkwall/operator/internal/discovery"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
@@ -124,7 +127,8 @@ type Options struct {
 	// empty: the system roots.
 	ControlPlaneCAFile string
 	// CRDInterval is how often the leader looks for Traefik's IngressRoute
-	// CRD until it is installed; 0: 30s.
+	// CRD, and the Gateway API's GatewayClass and HTTPRoute CRDs, until they
+	// are installed; 0: 30s.
 	CRDInterval time.Duration
 
 	// EventsDir holds the replica's buffer of security events for the
@@ -140,6 +144,9 @@ func NewScheme() (*runtime.Scheme, error) {
 		return nil, err
 	}
 	if err := wafv1alpha1.AddToScheme(s); err != nil {
+		return nil, err
+	}
+	if err := gatewayv1.Install(s); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -196,6 +203,8 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	}
 	// Traefik's IngressRoute CRD may be installed after the operator.
 	ingressRoutes := &crdwatch.Kind{GVK: wiring.IngressRouteGVK, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
+	// So may Gateway API's.
+	httpRoutes := &crdwatch.Kind{GVK: controller.HTTPRouteGVK, Object: &gatewayv1.HTTPRoute{}, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
 	if err := (&controller.BundleReconciler{
 		Client:        mgr.GetClient(),
 		APIReader:     mgr.GetAPIReader(),
@@ -204,6 +213,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		EngineStale:   engineStale(o),
 		RotationGrace: o.SigningKeyGrace,
 		IngressRoutes: ingressRoutes,
+		HTTPRoutes:    httpRoutes,
 	}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
@@ -244,14 +254,25 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	}
 	// Without injection, the wiring controller unwires what was wired: new
 	// proxy pods won't have the engine.
+	wirings := wiring.Integrations(mgr.GetClient(), mgr.GetAPIReader(), selectors, ingressRoutes)
 	if err := (&wiring.Reconciler{
-		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), PodWebhook: webhook.MutatingConfigName,
-		TraefikPods: selectors.Selector(integrations.Traefik.Name), IngressRoutes: ingressRoutes, Disabled: !inject,
+		Client: mgr.GetClient(), PodWebhook: webhook.MutatingConfigName, Integrations: wirings, Disabled: !inject,
 	}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
-	if err := mgr.Add(ingressRoutes); err != nil {
+	// The Gateway API's CRDs may be installed after the operator, or never.
+	gatewayClasses := &crdwatch.Kind{GVK: proxydiscovery.GatewayClassGVK, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
+	kinds := map[string][]schema.GroupKind{}
+	for _, in := range wirings {
+		kinds[in.Name()] = in.Kinds()
+	}
+	if err := (&proxydiscovery.Reconciler{Client: mgr.GetClient(), GatewayClasses: gatewayClasses, Kinds: kinds}).SetupWithManager(mgr); err != nil {
 		return nil, err
+	}
+	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gatewayClasses} {
+		if err := mgr.Add(k); err != nil {
+			return nil, err
+		}
 	}
 	if o.Webhooks {
 		starter := &webhookStarter{mgr: mgr, ready: ready, inject: injector}

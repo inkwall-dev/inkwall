@@ -147,7 +147,8 @@ func StartWith(o Options) (*Server, error) {
 		return nil, err
 	}
 	s.addr = lis.Addr().String()
-	s.grpc = grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{
+	// The contract's message limit.
+	s.grpc = grpc.NewServer(grpc.MaxRecvMsgSize(16<<20), grpc.Creds(credentials.NewTLS(&tls.Config{
 		Certificates: []tls.Certificate{s.server},
 		// The certificate is checked in the RPC, not in the handshake, so a
 		// bad one gets UNAUTHENTICATED (the contract); Enroll has none.

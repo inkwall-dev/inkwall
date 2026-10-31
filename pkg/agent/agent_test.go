@@ -44,6 +44,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/rules"
 )
 
 // fakeOperator serves BundleService: it sends what the test puts in bundles
@@ -146,7 +147,7 @@ type env struct {
 	caFile string
 }
 
-func newEnv(t *testing.T) *env {
+func newEnv(t *testing.T, opts ...grpc.ServerOption) *env {
 	t.Helper()
 	dir := t.TempDir()
 	certPEM, keyPEM := selfSigned(t)
@@ -157,7 +158,7 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	op := newFakeOperator()
-	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})))
+	srv := grpc.NewServer(append(opts, grpc.Creds(credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})))...)
 	agentv1.RegisterBundleServiceServer(srv, op)
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -631,5 +632,36 @@ func TestRequestStats(t *testing.T) {
 	e.op.mu.Unlock()
 	if n := len(p.GetLatencyCounts()); n != len(events.LatencyBounds())+1 || p.GetLatencyCounts()[5] != 1 {
 		t.Errorf("latency counts %v", p.GetLatencyCounts())
+	}
+}
+
+// Events at the contract's field limits reach an operator that accepts at
+// most 64 KiB from an engine, as every operator version does: each message
+// fits, and nothing is lost.
+func TestEventsLargeBatches(t *testing.T) {
+	e := newEnv(t, grpc.MaxRecvMsgSize(64<<10))
+	buf := events.NewBuffer(0)
+	a, _, _ := e.agent(t, func(c *Config) { c.Events = buf })
+	long := strings.Repeat("x", 4096)
+	src := events.Source{EngineID: strings.Repeat("e", 253), PodNamespace: strings.Repeat("n", 63), PodName: strings.Repeat("p", 253)}
+	v := pipeline.Verdict{Action: pipeline.ActionDeny, Status: 403, Reason: pipeline.ReasonRule, InterruptingRuleID: 949110, Policy: long}
+	for i := range 64 {
+		v.Matches = append(v.Matches, rules.Match{RuleID: 900000 + i, Variable: "ARGS:" + long, Value: long})
+	}
+	req := &request.Request{ID: long, Method: long, Host: long, Headers: http.Header{"User-Agent": {long}}}
+	const n = 2*eventBatch + 10
+	var want []string
+	for range n {
+		ev := events.New(src, req, "/"+long, v, time.Now())
+		want = append(want, ev.GetEventId())
+		buf.Add(ev)
+	}
+	run(t, a)
+	waitFor(t, "every event", func() bool { return len(e.op.eventIDs()) >= n })
+	if got := e.op.eventIDs(); !slices.Equal(got, want) {
+		t.Errorf("got %d events, want %d in order", len(got), len(want))
+	}
+	if _, _, hellos, _, _ := e.op.snapshot(); len(hellos) != 1 {
+		t.Errorf("%d streams, want 1: a message over the operator's limit ends the stream", len(hellos))
 	}
 }

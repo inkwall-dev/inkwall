@@ -170,7 +170,7 @@ it to block mode.
 ### 5.1 Process model
 
 - One binary, `inkwall-engine`. All its listeners share one core. **Built:** the forward-auth
-  listener, `/v1/check` and the reverse proxy. **Not yet:** [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter), [ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter) and SPOE. (Each
+  listener, `/v1/check`, the reverse proxy and [ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter). **Not yet:** [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) and SPOE. (Each
   protocol is described in [0006](0006-adapter-protocols.md).)
 - Policies are compiled once into an immutable set and swapped through an `atomic.Pointer`, so
   reads take no lock. **Built** (`pkg/policy`).

@@ -39,6 +39,7 @@ jobs:
           - { package: ./pkg/adapters/forwardauth, target: FuzzForwardAuth }
           - { package: ./pkg/adapters/httpcheck, target: FuzzCheck }
           - { package: ./pkg/adapters/proxy, target: FuzzProxy }
+          - { package: ./pkg/adapters/extproc, target: FuzzExtProc }
           - { package: ./pkg/adapters/internal/httpadapter, target: FuzzURIPath }
           - { package: ./pkg/adapters/internal/httpadapter, target: FuzzRequestID }
           - { package: ./pkg/clientip, target: FuzzResolve }

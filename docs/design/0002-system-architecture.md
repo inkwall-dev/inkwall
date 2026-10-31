@@ -143,7 +143,7 @@ The compiled policy sits in an [`atomic.Pointer[Snapshot]`](https://pkg.go.dev/s
 | `pkg/clientip` | Client IP ([§8.2](#82-client-ip-correctness)) | built |
 | `pkg/agent`, `pkg/policy` | Bundle stream, verify, compile, swap ([§5.2](#52-engine--operator-bundle-distribution)) | built |
 | `pkg/telemetry` | Metrics, tracing, [`slog`](https://pkg.go.dev/log/slog) | built |
-| `pkg/adapters/*` | One per listener | `forwardauth`, `httpcheck`, `proxy` built; `extauthz`, `extproc`, `spoe` not yet |
+| `pkg/adapters/*` | One per listener | `forwardauth`, `httpcheck`, `proxy`, `extproc` built; `extauthz`, `spoe` not yet |
 | `pkg/events` | Redacted security events, bounded buffer ([§5.4](#54-event-schema)) | built |
 | `pkg/ratelimit`, `pkg/iplist` | [Token buckets](https://en.wikipedia.org/wiki/Token_bucket), [CIDR](https://www.rfc-editor.org/rfc/rfc4632) trie | not yet |
 
@@ -262,8 +262,9 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
   engine).
 
 **Built:** `InkwallConfig`, `WAFPolicy`, `WAFRuleSet` and `ClusterWAFRuleSet`; `Ingress` and
-Traefik `IngressRoute` targets.
-**Not yet:** IP lists, the policy fields `rateLimits` and `ipLists`, `HTTPRoute` targets,
+Traefik `IngressRoute` targets; `HTTPRoute` targets resolved, with the precedence above (no proxy
+wires them yet, [0004 §4.5](0004-operator.md#45-resolver)).
+**Not yet:** IP lists, the policy fields `rateLimits` and `ipLists`, wiring `HTTPRoute` targets,
 `BlockHighConfidence`, the `InspectPrefix` oversize action, and `InkwallConfig.events`.
 
 ### 4.3 Bundle format
@@ -438,7 +439,9 @@ is configured its own way:
 Detect mode uses `observability_mode`. Envoy's [Go filter](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/golang_filter) needs a contrib build, so it is
 experimental.
 
-**Not yet** built.
+**Built:** the engine's side, `inkwall-engine ext-proc` ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing)).
+Envoy Gateway will use `ext_proc`, not `ext_authz`. **Not yet:** the operator's Envoy Gateway
+configuration.
 
 ### 6.2 ingress-nginx
 
@@ -546,7 +549,8 @@ adapter must match.
 | Caddy | module | ✅ | ✅ | ✅ | ✅ | in-process |
 | Any | reverse proxy | ✅ | ✅ | ✅ | ✅ | TCP |
 
-Built: Traefik ForwardAuth and the reverse proxy.
+Built: Traefik ForwardAuth and the reverse proxy; the engine's ext_proc listener, without the
+operator's Envoy configuration yet.
 
 ---
 
