@@ -2,8 +2,8 @@
 # Copyright 2026 The Inkwall Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# Creates the kind cluster (if needed), builds the engine image, loads it into
-# the cluster and deploys the demo app twice: behind the engine's reverse
+# Builds the engine image, loads it into the kind cluster (make kind-cluster
+# creates it) and deploys the demo app twice: behind the engine's reverse
 # proxy, and through Traefik with the engine as a forward-auth sidecar.
 set -euo pipefail
 
@@ -14,7 +14,8 @@ IMAGE=${IMAGE:-inkwall-engine:dev}
 TRAEFIK_CHART_VERSION=41.6.1 # Traefik v3.7.13
 
 if ! kind get clusters | grep -x "$CLUSTER" >/dev/null; then
-  kind create cluster --name "$CLUSTER" --config hack/kind/cluster.yaml
+  echo "no kind cluster $CLUSTER: run make kind-up" >&2
+  exit 1
 fi
 # Port mappings are fixed when a kind cluster is created.
 if ! docker port "$CLUSTER-control-plane" | grep '^30080/tcp' >/dev/null; then

@@ -74,7 +74,6 @@ rules:
   - gateway.networking.k8s.io
   resources:
   - gatewayclasses
-  - httproutes
   verbs:
   - get
   - list
@@ -83,6 +82,7 @@ rules:
   - gateway.networking.k8s.io
   resources:
   - gateways
+  - httproutes
   verbs:
   - get
   - list

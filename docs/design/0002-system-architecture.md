@@ -241,7 +241,7 @@ ambiguous.
 Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
 
 - **`InkwallConfig`** (a cluster singleton): `mode`, `controlPlane`, `engine`, `integrations` and
-  `events`. `engine` holds the image, resources, `bootstrapMode` and `socketDir`. Its resources
+  `events`. `engine` holds the image, resources and `bootstrapMode`; its `socketDir` is deprecated and ignored. Its resources
   have no CPU limit, since throttling hurts p99 latency.
 - **`WAFPolicy`**:
 
@@ -266,9 +266,11 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
 
 **Built:** `InkwallConfig`, `WAFPolicy`, `WAFRuleSet` and `ClusterWAFRuleSet`; `Ingress` and
 Traefik `IngressRoute` targets; `HTTPRoute` targets resolved, with the precedence above
-([0004 §4.5](0004-operator.md#45-resolver)), and wired through Envoy Gateway.
-**Not yet:** IP lists, the policy fields `rateLimits` and `ipLists`, Traefik's `HTTPRoute` targets,
-`BlockHighConfidence`, the `InspectPrefix` oversize action, and `InkwallConfig.events`.
+([0004 §4.5](0004-operator.md#45-resolver)), and wired through Envoy Gateway or Traefik's Gateway
+API provider ([0004 §4.4](0004-operator.md#44-wiring-controller)).
+**Not yet:** IP lists, the policy fields `rateLimits` and `ipLists`, wiring other controllers'
+`HTTPRoute` targets, `BlockHighConfidence`, the `InspectPrefix` oversize action, and
+`InkwallConfig.events`.
 
 ### 4.3 Bundle format
 
@@ -426,8 +428,10 @@ same path (#119).
 
 Every integration follows the same rules. It sends only what the policy needs, over a persistent
 connection (a Unix socket where possible). Its timeout is just above the engine's deadline. On an
-error it applies the failure mode. It passes the client IP and the request ID. The socket
-directory is a shared [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir) at `/var/run/inkwall`. (Traefik, built, is the exception to the
+error it applies the failure mode. It passes the client IP and the request ID. A Unix socket
+lives in an [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir) the
+engine and the proxy share, at a path the integration fixes (Envoy Gateway:
+`/var/run/inkwall-socket`). (Traefik, built, is the exception to the
 timeout and failure-mode rules: the operator's ForwardAuth Middleware sets no timeout and has no
 failure-mode setting; [§7.3](#73-engine-unavailable).)
 
@@ -710,7 +714,8 @@ rate-limit metrics, bundle age, tracing, the dashboard and alerts.
 - Tested on the last 3 Kubernetes minor versions (`docs/compatibility.md`).
 
 **Not yet:** a version matrix and `docs/compatibility.md` (CI's kind e2e test runs kind's newest
-Kubernetes, and [envtest](https://book.kubebuilder.io/reference/envtest) runs 1.29), and conversion webhooks (only `v1alpha1` exists).
+Kubernetes; the local kind cluster, the upgrade test and [envtest](https://book.kubebuilder.io/reference/envtest) run 1.34; the chart
+allows 1.29 and later), and conversion webhooks (only `v1alpha1` exists).
 
 ---
 

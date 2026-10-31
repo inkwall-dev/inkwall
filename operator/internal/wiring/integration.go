@@ -98,6 +98,9 @@ type TargetState struct {
 	// Pending: wired, but not in force yet, and why (the proxy hasn't
 	// accepted its configuration yet).
 	Pending string
+	// Partly: it is wired, but some of its traffic goes through proxies
+	// Inkwall doesn't wire, and which.
+	Partly string
 }
 
 // Config is what the integrations need besides the clients.
@@ -116,7 +119,10 @@ type Config struct {
 // and Envoy Gateway.
 func Integrations(c client.Client, reader client.Reader, cfg Config) []Integration {
 	return []Integration{
-		&Traefik{Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.Traefik.Name), IngressRoutes: cfg.IngressRoutes},
+		&Traefik{
+			Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.Traefik.Name),
+			IngressRoutes: cfg.IngressRoutes, HTTPRoutes: cfg.HTTPRoutes, Gateways: cfg.Gateways, GatewayClasses: cfg.GatewayClasses,
+		},
 		&EnvoyGateway{
 			Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.EnvoyGateway.Name), Sidecar: cfg.Sidecar,
 			HTTPRoutes: cfg.HTTPRoutes, Gateways: cfg.Gateways, GatewayClasses: cfg.GatewayClasses,

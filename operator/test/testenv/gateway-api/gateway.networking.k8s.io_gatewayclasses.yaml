@@ -1,13 +1,13 @@
-# A stand-in for the Gateway API's GatewayClass CRD
-# (gateway.networking.k8s.io/v1), for operator tests: discovery reads only
-# spec.controllerName.
+# A stand-in for Gateway API's GatewayClass CRD
+# (gateway.networking.k8s.io/v1), for operator tests: discovery and the
+# wiring read only spec.controllerName.
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: gatewayclasses.gateway.networking.k8s.io
   annotations:
-    # The real CRDs carry it too: *.k8s.io groups need one.
-    api-approved.kubernetes.io: https://github.com/kubernetes-sigs/gateway-api/pull/2466
+    # Required for a *.k8s.io group, as upstream sets it.
+    api-approved.kubernetes.io: https://github.com/kubernetes-sigs/gateway-api/pull/5371
 spec:
   group: gateway.networking.k8s.io
   names:

@@ -135,6 +135,27 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /validate-waf-inkwall-dev-v1alpha1-inkwallconfig
+  failurePolicy: Ignore
+  name: inkwallconfigs.waf.inkwall.dev
+  rules:
+  - apiGroups:
+    - waf.inkwall.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - inkwallconfigs
+  sideEffects: None
+  timeoutSeconds: 2
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /validate-waf-inkwall-dev-v1alpha1-wafpolicy
   failurePolicy: Fail
   name: wafpolicies.waf.inkwall.dev
