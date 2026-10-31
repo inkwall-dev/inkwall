@@ -128,7 +128,8 @@ so padding a request past the deadline doesn't get an attack through; detect mod
 If Traefik can't reach the engine at all (crashed, restarting or hung), Traefik answers 500 in
 both modes: see [when the engine is down](deploy/helm/inkwall/README.md#when-the-engine-is-down).
 Envoy, through Envoy Gateway, answers 500 too, unless every policy on the route fails open: then
-it lets the request through.
+it lets the request through. On a route whose policies are all in detect mode (and fail open),
+Envoy doesn't wait for the engine at all: it sends it a copy of the request and forwards it.
 Every engine verifies the signature of each bundle. While a policy blocks, Traefik pods can't start
 without the engine: see
 [when the operator is down](deploy/helm/inkwall/README.md#when-the-operator-is-down).

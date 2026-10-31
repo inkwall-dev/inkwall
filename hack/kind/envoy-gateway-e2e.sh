@@ -258,6 +258,7 @@ condition() {
 }
 ready() { [[ $(condition Ready status) == True ]]; }
 programmed_both() { [[ $(condition Programmed message) == *"wired to the engine in Traefik"*"wired to the engine in Envoy Gateway"* ]]; }
+# policy [MODE]: the shared policy, in Block mode by default.
 policy() {
   "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
 apiVersion: waf.inkwall.dev/v1alpha1
@@ -267,7 +268,7 @@ spec:
   targetRefs:
     - {kind: Ingress, name: web}
     - {group: gateway.networking.k8s.io, kind: HTTPRoute, name: app}
-  mode: Block
+  mode: ${1:-Block}
   # CRS takes about 200 ms on the 48 KB form field below on a fast machine,
   # more on a CI runner: past the default 250 ms, the engine fails closed
   # (503). Envoy waits 500 ms longer than this.
@@ -283,8 +284,19 @@ has_sidecar() {
 }
 names_ours() { [[ $("${KUBECTL[@]}" -n "$NS" get gateway plain -o jsonpath='{.spec.infrastructure.parametersRef.name}') == inkwall-waf-plain ]]; }
 labelled() { "${KUBECTL[@]}" -n "$EG_NS" get pods -l e2e=custom -o name | grep . >/dev/null; }
-# whoami --verbose logs each request it gets, with its headers.
+# whoami --verbose logs the request line of each request it gets.
 never_reached_app() { ! "${KUBECTL[@]}" -n "$NS" logs deployment/app --since=10m | grep -i "$1" >/dev/null; }
+reached_app() { "${KUBECTL[@]}" -n "$NS" logs deployment/app --since=10m | grep -i "$1" >/dev/null; }
+# Detect mode: Envoy doesn't wait for the engine (shadowMode).
+shadow_accepted() {
+  [[ $("${KUBECTL[@]}" -n "$NS" get envoyextensionpolicy inkwall-waf-app -o jsonpath='{.spec.extProc[0].shadowMode}') == true ]] && eep_accepted
+}
+# logged PATH: an engine in the Envoy pods logged a detect-mode event for PATH.
+logged() {
+  "${KUBECTL[@]}" -n "$EG_NS" logs -l app.kubernetes.io/name=envoy -c inkwall-engine --tail=-1 |
+    grep '"security event"' | grep '"action":"log"' | grep "\"path\":\"$1\"" >/dev/null
+}
+no_limits() { ! "${KUBECTL[@]}" -n "$NS" get clienttrafficpolicy inkwall-waf-custom inkwall-waf-plain -o name 2>/dev/null | grep . >/dev/null; }
 # The operator's buffer limit, in force on both Gateways.
 limits_accepted() {
   for gw in custom plain; do
@@ -346,9 +358,22 @@ fi
 check "an attack in the body is blocked" envoy_are 403 / --data-urlencode "q=1' OR '1'='1"
 # BufferedPartial: Envoy holds the headers until the engine has seen the
 # body, so the app never sees the blocked request.
-mark=held-$RANDOM$RANDOM
-check "a body attack with a marked header is blocked" envoy_are 403 / -H "X-E2e-Mark: $mark" --data-urlencode "q=1' OR '1'='1"
+mark=/held-$RANDOM$RANDOM
+check "a body attack on a marked path is blocked" envoy_are 403 "$mark" --data-urlencode "q=1' OR '1'='1"
 check "and never reached the app" never_reached_app "$mark"
+
+echo "== detect mode"
+policy Detect
+eventually "Envoy Gateway accepts the EnvoyExtensionPolicy in shadow mode" shadow_accepted
+eventually "no buffer limit: Envoy doesn't hold the body" no_limits
+eventually "the attack passes through both Gateways and Traefik" all_are 200 "$SQLI"
+probe=/detect-$RANDOM$RANDOM
+check "an attack on a fresh path passes" envoy_are 200 "$probe?id=1%27%20OR%20%271%27%3D%271"
+eventually "and the engines log it" logged "$probe"
+body_path=/detect-body-$RANDOM$RANDOM
+check "a body attack passes" envoy_are 200 "$body_path" --data-urlencode "q=1' OR '1'='1"
+eventually "and reaches the app" reached_app "$body_path"
+eventually "the engines log the streamed body's attack" logged "$body_path"
 
 echo "== unprotected"
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy shared --timeout=60s >/dev/null

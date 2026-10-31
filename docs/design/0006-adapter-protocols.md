@@ -66,16 +66,23 @@ a Unix socket). It answers the stream of one request as follows:
   request is never let through, as with forward-auth.
 - **Body:** when the policy inspects bodies and Envoy sends the body in one message
   (`request_body_mode: BUFFERED` or `BUFFERED_PARTIAL`), the verdict waits for it. Envoy holds the
-  headers meanwhile. A body Envoy sends otherwise (`NONE`, `STREAMED`), or cuts at its buffer
-  limit (`BUFFERED_PARTIAL` without `end_of_stream`), goes uninspected and is handled like an
-  oversized one (`body.onOversize`). The engine reads the mode from `protocol_config`, which Envoy
-  sends from 1.33.
+  headers meanwhile. A body Envoy sends otherwise (`NONE`, `STREAMED` outside observability mode),
+  or cuts at its buffer limit (`BUFFERED_PARTIAL` without `end_of_stream`), goes uninspected and is
+  handled like an oversized one (`body.onOversize`). The engine reads the mode from
+  `protocol_config`, which Envoy sends from 1.33.
+- **Protocol:** the client's protocol (`HTTP/1.0`, `HTTP/1.1`, `HTTP/2`, `HTTP/3`) is Envoy's
+  `request.protocol` [attribute](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/advanced/attributes),
+  when the filter sends it (`request_attributes`); `HTTP/1.1` otherwise.
 - **Allow:** CONTINUE. If the engine generated the request ID, it sets `x-request-id` on the
   request Envoy forwards; Envoy usually sets one itself.
 - **Deny:** an immediate response with the verdict's status (403, 413, 503, ...), the same
   plain-text body as the other adapters, and `x-request-id`.
 - **Later stages** (response headers or body, trailers), if the filter sends them: CONTINUE.
-- **`observability_mode`:** the request is inspected and logged, and nothing is answered.
+- **`observability_mode`:** the request is inspected and logged, and nothing is answered. Envoy
+  sends the body in chunks there (`STREAMED`, the only body mode it allows, whatever
+  `protocol_config` says): the engine gathers them up to the policy's limit, decides at the end of the body or past the limit (`body.onOversize`), and then closes the
+  stream, so Envoy sends no more. A stream that ends before the body does is decided on what came,
+  as a cut body.
 - **Client IP:** from `X-Forwarded-For`, which Envoy's connection manager sets before the filter
   runs, walked through `--trusted-proxies` ([client IP](../client-ip.md)). A Unix-socket peer
   counts as loopback, `127.0.0.1`.
@@ -99,12 +106,16 @@ wins on what comes next:
   benchmark shows the difference to forward-auth on the same rules.
 
 **Built: the operator's configuration** for Envoy Gateway ([0004 §4.4](0004-operator.md#44-wiring-controller)), one
-`EnvoyExtensionPolicy` per protected HTTPRoute: `request_body_mode: BUFFERED_PARTIAL` on routes
-whose policy inspects bodies (headers only otherwise), response stages `SKIP`, a message timeout
+`EnvoyExtensionPolicy` per protected HTTPRoute: the `request.protocol` attribute,
+`request_body_mode: BUFFERED_PARTIAL` on routes whose policy inspects bodies (headers only
+otherwise), response stages `SKIP`, a message timeout
 500 ms above the engine's deadline (the engine decides, with the policy's failure mode; Envoy's timeout is for a hung engine), `failOpen` only when every policy on the route fails open, and
 an Envoy buffer limit (a `ClientTrafficPolicy` on the Gateway) of 10 MiB, the largest
 `body.maxBytes`. On kind, a body attack is blocked before the app sees the request: Envoy holds
-the headers until the engine answers the body. **Not yet:** `observability_mode` for detect mode.
+the headers until the engine answers the body. A route whose policies are all in detect mode and
+fail open (the engine never rejects its requests) gets `observability_mode` (Envoy Gateway's
+`shadowMode`) and a `STREAMED` body instead, and no buffer limit: Envoy forwards the request
+without waiting for the engine.
 
 ## 3. forward-auth (Traefik `ForwardAuth`, nginx `auth_request`)
 
@@ -187,7 +198,7 @@ the cluster's [Standalone mode](../glossary.md#standalone) (no control plane).
 | | Transport | Body | Response | Proxy waits? | For | Status |
 |---|---|---|---|---|---|---|
 | ext_authz | gRPC call | Buffered, optional | No | Yes | Envoy fallback | Not yet |
-| ext_proc | gRPC stream | Buffered (streaming possible) | Yes (not used yet) | Yes, or no (observability mode) | Envoy Gateway, Envoy, Istio, Contour | Built (Envoy Gateway) |
+| ext_proc | gRPC stream | Buffered (streamed in observability mode) | Yes (not used yet) | Yes, or no (observability mode) | Envoy Gateway, Envoy, Istio, Contour | Built (Envoy Gateway) |
 | forward-auth | HTTP subrequest | If forwarded | No | Yes | Traefik, ingress-nginx | Built |
 | SPOE | SPOP | Yes | Possible | Yes, or no (asynchronous) | HAProxy | Not yet |
 | `/v1/check` | HTTP (gRPC planned) | Yes | No | Yes | CLI, tests; Lua and Traefik plugins planned | Built |
