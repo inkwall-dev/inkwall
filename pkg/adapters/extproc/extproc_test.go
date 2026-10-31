@@ -40,8 +40,9 @@ func newPipeline(t testing.TB, mode pipeline.Mode) *pipeline.Pipeline {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A generous timeout keeps the race detector from tripping the deadline.
-	return pipeline.New(eval, pipeline.Config{Mode: mode, Timeout: 500 * time.Millisecond})
+	// A generous deadline: these tests are not about it, and CRS under the
+	// race detector on a loaded machine can take longer than a real one.
+	return pipeline.New(eval, pipeline.Config{Mode: mode, Timeout: 10 * time.Second})
 }
 
 // envoy is a fake Envoy: a client of the Server over an in-memory

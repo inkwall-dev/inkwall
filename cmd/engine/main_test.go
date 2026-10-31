@@ -152,7 +152,7 @@ func TestParseExtProcFlags(t *testing.T) {
 func TestServeExtProc(t *testing.T) {
 	dir := t.TempDir()
 	sock, adminSock := filepath.Join(dir, "extproc.sock"), filepath.Join(dir, "admin.sock")
-	cfg, err := parseFlags(cmdExtProc, []string{"--listen", "unix:" + sock, "--admin-listen", "unix:" + adminSock, "--mode", "block"}, io.Discard)
+	cfg, err := parseFlags(cmdExtProc, []string{"--listen", "unix:" + sock, "--admin-listen", "unix:" + adminSock, "--mode", "block", "--timeout", "10s"}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
