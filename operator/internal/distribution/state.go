@@ -107,6 +107,8 @@ type Store struct {
 	signed  *bundlev1.SignedBundle
 	version uint64
 	changed chan struct{}
+	// policies are the IDs of the bundle's policies.
+	policies map[string]bool
 }
 
 // NewStore returns an empty store.
@@ -122,6 +124,21 @@ func (s *Store) Set(signed *bundlev1.SignedBundle, version uint64) {
 	s.signed, s.version = signed, version
 	close(s.changed)
 	s.changed = make(chan struct{})
+}
+
+// SetPolicies records the IDs of the current bundle's policies, the only
+// ones whose request counts are taken from engines.
+func (s *Store) SetPolicies(ids map[string]bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.policies = ids
+}
+
+// HasPolicy reports whether the current bundle has the policy id.
+func (s *Store) HasPolicy(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.policies[id]
 }
 
 // Current returns the current bundle (nil before the first), its version,

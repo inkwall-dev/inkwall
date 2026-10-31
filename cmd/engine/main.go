@@ -566,17 +566,19 @@ func flagMode(cfg engineConfig, metrics *telemetry.Metrics) (pipeline.Inspector,
 
 // bundleMode inspects with the policies of the operator's bundles, per
 // route. Until the first bundle (or the cached one) is applied, requests
-// are allowed and reported with reason no-policy. Security events go to the
-// operator through the agent.
+// are allowed and reported with reason no-policy. Security events and each
+// policy's request counts go to the operator through the agent.
 func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logger) (*agent.Agent, pipeline.Inspector, *events.Recorder, error) {
 	adm := pipeline.NewAdmission(cfg.maxConcurrent)
 	metrics.WatchAdmission(adm)
+	stats := events.NewStats()
 	opts := policy.Options{
 		Admission:  adm,
 		Observer:   metrics,
 		MaxArgs:    cfg.maxArgs,
 		BodyLimit:  cfg.maxBodyBytes,
 		Evaluators: policy.NewEvaluators(),
+		Stats:      stats,
 	}
 	holder := &policy.Holder{DenyBeforeFirst: cfg.bootstrapDeny}
 	var secret *agent.SecretSource
@@ -605,6 +607,7 @@ func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logge
 		Holder:        holder,
 		Admission:     adm,
 		Events:        buf,
+		Stats:         stats,
 		Logger:        logger,
 	})
 	if err != nil {

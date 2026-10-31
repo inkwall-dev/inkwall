@@ -744,7 +744,7 @@ spec:
         - name: stub
           image: inkwall-cp-stub:dev
           imagePullPolicy: Never
-          args: ["--host=$CP_HOST", "--token=$CP_TOKEN", "--accept-events"]
+          args: ["--host=$CP_HOST", "--token=$CP_TOKEN", "--accept-events", "--accept-request-stats"]
           ports: [{containerPort: 8443}, {containerPort: 8080}]
 ---
 apiVersion: v1
@@ -834,6 +834,15 @@ events_stream() { stub_stats | grep '"STREAM_ROLE_EVENTS CLUSTER_MODE_GITOPS' >/
 eventually "the replicas opened events streams" events_stream
 stub_events() { [[ $(stub_stats | sed -n 's/.*"events":\([0-9]*\).*/\1/p') -ge 1 ]]; }
 eventually "the blocked attack reaches the control plane as a security event" stub_events
+# Request counts (#119): the engines count per policy, the replicas sum
+# them and send them on their events streams.
+# policy_requests NAME FIELD: the stub's count of FIELD for the policy.
+policy_requests() {
+  stub_stats | sed -n "s|.*\"$NS/$1\":{\([^}]*\)}.*|\1|p" | sed -n "s/.*\"$2\":\([0-9]*\).*/\1/p"
+}
+counted() { [[ $(policy_requests web denied) -ge 1 && $(policy_requests web timed) -ge 1 ]]; }
+eventually "the blocked attack is counted, with its latency, in the policy's request counts" counted ||
+  echo "      stub stats: $(stub_stats)"
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy web --wait >/dev/null
 
 # Managed mode (#93, #94): the stub's policies are written as CRDs labelled
