@@ -214,8 +214,8 @@ Three commands are built:
   (`--bundle`, with its signature checked against `--bundle-key`).
 - `bench` benchmarks the engine on a fixed corpus.
 - `migrate ingress-nginx` converts ingress-nginx's ModSecurity annotations and ConfigMap settings
-  into `WAFPolicy` and `WAFRuleSet` objects targeting the Ingresses, and lists what it can't
-  convert ([migrating from ingress-nginx](../migrating-from-ingress-nginx.md)). It only reads.
+  into `WAFPolicy` and `WAFRuleSet` objects targeting the Ingresses, or the HTTPRoutes or
+  IngressRoutes that replace them (`--target`), and lists what it can't convert ([migrating from ingress-nginx](../migrating-from-ingress-nginx.md)). It only reads.
 
 Planned: `status` (engine versions, drift).
 

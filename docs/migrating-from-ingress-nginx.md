@@ -8,6 +8,7 @@
 
 - [Prerequisites](#prerequisites)
 - [Convert the settings](#convert-the-settings)
+- [Target HTTPRoutes or IngressRoutes](#target-httproutes-or-ingressroutes)
 - [What is converted](#what-is-converted)
 - [Read the summary](#read-the-summary)
 - [Check the objects offline](#check-the-objects-offline)
@@ -51,10 +52,43 @@ the cluster.
 | `--ingress-class` | `nginx` | Ingresses of another class are left out; Ingresses without a class are converted, with a note |
 | `--annotation-prefix` | `nginx.ingress.kubernetes.io` | The controller's `--annotations-prefix` |
 | `--output` | stdout | Directory to write one file per Ingress into |
+| `--target` | `ingress` | What the policies target: `ingress`, or `httproute` / `ingressroute` for the routes replacing the Ingresses ([below](#target-httproutes-or-ingressroutes)) |
+
+## Target HTTPRoutes or IngressRoutes
+
+If the Ingresses move to Gateway API `HTTPRoute`s or Traefik `IngressRoute`s (for example with
+`ingress2gateway`), point the policies at those routes instead:
+
+```sh
+inkwallctl migrate ingress-nginx -f ingresses.yaml -f nginx-config.yaml -f httproutes.yaml \
+  --target httproute --output waf/
+inkwallctl migrate ingress-nginx --cluster --target ingressroute --output waf/
+```
+
+The routes are read from the `-f` files, or with `--cluster` listed from the cluster (`list` on
+`httproutes` or `ingressroutes`). Each Ingress is matched to its routes by what they match, not by
+name: a route replaces it when it matches only hosts and paths of the Ingress, in the same
+namespace. Hosts and paths are compared as the operator expands them, so `/api/` and `/api` are
+the same prefix, but a prefix and an `Exact` path are not.
+
+- A route matching exactly the Ingress's hosts and paths becomes the target. Several routes that
+  share them (one per path, say) all become targets.
+- When an `HTTPRoute` also carries other hosts or paths, a [named rule](glossary.md#httproute) of
+  it that matches only the Ingress's paths becomes the target, with `sectionName`.
+- Anything else is `TODO` and never guessed: no route matches only the Ingress's hosts and paths
+  (the policy then keeps targeting the Ingress), or a host or path of the Ingress isn't matched by
+  any target (it is unprotected until one is). A route that also matches other hosts, any host,
+  only some methods, headers or query parameters would change what the policy covers, so it is
+  never picked.
+
+[`inkwallctl test`](testing-policies.md) routes requests through IngressRoutes (`--ingress
+ingressroutes.yaml`), so policies retargeted to IngressRoutes can be checked offline as below.
+It doesn't route HTTPRoutes yet.
 
 ## What is converted
 
-Each Ingress on which ModSecurity runs gets a `WAFPolicy` of the same name that targets it. The
+Each Ingress on which ModSecurity runs gets a `WAFPolicy` of the same name that targets it (or,
+with `--target`, the routes replacing it). The
 settings are combined as ingress-nginx combines them: the ConfigMap's `enable-modsecurity`,
 `enable-owasp-modsecurity-crs` and `modsecurity-snippet` first, then the Ingress's annotations
 `enable-modsecurity`, `enable-owasp-core-rules`, `modsecurity-snippet` and
@@ -70,10 +104,11 @@ it, and the other annotations do nothing without ModSecurity on.
 | `SecRuleRemoveById 942100 ...` | `exclusions` |
 | `SecRuleUpdateTargetById 942100 "!ARGS:password"` | `exclusions` with `when.argument` |
 | `SecRule REQUEST_FILENAME "@beginsWith /api/" "...,ctl:ruleRemoveById=942100"`, or `@streq` | `exclusions` with `when.path: /api/*` (or the exact path) |
+| A range of CRS rules in such a rule, `ctl:ruleRemoveById=941100-941199` | `exclusions` with the IDs of the CRS rules in it |
 | `ctl:ruleRemoveTargetById=942100;ARGS:q` in such a rule | `exclusions` with `when.path` and `when.argument` |
 | `ctl:ruleEngine=Off` / `ctl:requestBodyAccess=Off` in such a rule | `skip.paths` / `skip.bodyPaths` |
 | `SecRequestBodyAccess`, `SecRequestBodyLimit`, `SecRequestBodyLimitAction` | `body.inspect`, `body.maxBytes`, `body.onOversize` |
-| Other `SecRule` and `SecAction` rules, and rule ranges, tags and messages to remove | Kept as they are in a `WAFRuleSet` named `<ingress>-modsecurity`, loaded after the CRS |
+| Other `SecRule` and `SecAction` rules, and `SecRuleRemoveById` ranges, tags and messages to remove | Kept as they are in a `WAFRuleSet` named `<ingress>-modsecurity`, loaded after the CRS |
 
 A policy that tunes the CRS or adds rules refers to a `ClusterWAFRuleSet` named `owasp-crs-v4` with
 the built-in CRS, which is written alongside. Policies that only use the CRS's defaults leave
@@ -96,7 +131,7 @@ Ingress files/cloud: WAFPolicy files/cloud (Detect), WAFRuleSet files/cloud-mods
 - `TODO`: not migrated; it needs a human. Nothing is dropped or weakened silently: a rule that
   can't be converted faithfully is listed here and left out of the objects. Typical ones are
   `Include` of other files, exclusions keyed on anything but the path (`@contains`, `@rx`, headers),
-  ranges in `ctl:ruleRemoveById`, `ctl:ruleRemoveByTag`, CRS variables without a `WAFPolicy` field
+  `ctl:ruleRemoveById` ranges reaching outside the CRS's IDs (900000-999999), `ctl:ruleRemoveByTag`, CRS variables without a `WAFPolicy` field
   (`tx.allowed_methods`), and rules the engine rejects.
 
 Each file with something not migrated says so in a comment at the top. `inkwallctl migrate` exits
@@ -121,9 +156,8 @@ kubectl get wafpolicy -A
 
 The policies target the Ingresses by name, so they follow them to their new controller: once the
 Ingress is served by Traefik, the operator wires it to the engine. A policy whose Ingress is still
-served by ingress-nginx is accepted but not programmed. If you rewrite an Ingress as a Traefik
-`IngressRoute`, change the policy's `targetRefs` to it (`group: traefik.io`, `kind: IngressRoute`).
-`HTTPRoute` targets, for Ingresses converted to Gateway API, are planned.
+served by ingress-nginx is accepted but not programmed. Policies converted with `--target` target
+the routes instead, and apply once those routes serve the traffic.
 
 ## Differences to know
 
@@ -136,6 +170,8 @@ served by ingress-nginx is accepted but not programmed. If you rewrite an Ingres
   in Block mode, rejects larger bodies with 413. ingress-nginx's `modsecurity.conf` allowed bodies of
   up to 12.5 MiB with files and 128 KiB without. Set `body.maxBytes` or `body.onOversize: Allow` on
   routes that take large uploads.
+- **Rule ranges.** A `ctl:ruleRemoveById` range becomes the IDs of the CRS rules in it today; rules
+  a later CRS adds to the range are not excluded (the summary marks these `check`).
 - **Order.** Kept rules load after the CRS, while snippet rules in ingress-nginx could load before
   it. Path exclusions apply from the start of the request, as `ctl` rules in phase 1 did.
 - **Failure mode.** In Block mode, a request that can't be inspected in time is rejected (503); see

@@ -5,6 +5,7 @@ package coraza
 
 import (
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -131,4 +132,19 @@ func TestCheckUserRulesLarge(t *testing.T) {
 		t.Fatalf("got %v, want a RuleError at line 501", err)
 	}
 	t.Logf("located in %v", time.Since(start))
+}
+
+func TestCRSRuleIDs(t *testing.T) {
+	ids, err := CRSRuleIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int{920350, 942100, 949110} {
+		if !slices.Contains(ids, id) {
+			t.Errorf("no rule %d in %d CRS rules", id, len(ids))
+		}
+	}
+	if !slices.IsSorted(ids) || ids[0] < crsIDMin || ids[len(ids)-1] > crsIDMax {
+		t.Errorf("ids not sorted or outside the CRS range: %d..%d", ids[0], ids[len(ids)-1])
+	}
 }

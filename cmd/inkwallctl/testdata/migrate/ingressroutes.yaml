@@ -1,0 +1,56 @@
+# The Traefik IngressRoutes that replace the Ingresses of ingresses.yaml.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: shop
+  namespace: shop
+spec:
+  entryPoints: [websecure]
+  routes:
+  - match: Host(`shop.example.com`) && PathPrefix(`/`)
+    kind: Rule
+    services:
+    - name: shop
+      port: 80
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: api
+  namespace: shop
+spec:
+  entryPoints: [websecure]
+  routes:
+  - match: Host(`api.example.com`) && PathPrefix(`/`)
+    kind: Rule
+    services:
+    - name: api
+      port: 80
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: blog
+  namespace: blog
+spec:
+  entryPoints: [websecure]
+  routes:
+  - match: Host(`blog.example.com`)
+    kind: Rule
+    services:
+    - name: blog
+      port: 80
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: cloud
+  namespace: files
+spec:
+  entryPoints: [websecure]
+  routes:
+  - match: Host(`cloud.example.com`) && PathPrefix(`/`)
+    kind: Rule
+    services:
+    - name: cloud
+      port: 80
