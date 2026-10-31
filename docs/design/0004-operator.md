@@ -536,11 +536,23 @@ leader-only. Losing a replica just moves its engines to another.
   engine's pod name). Engines that are already current aren't sent the bundle again. Streams
   silent for 30 s are closed. At most 50 sends run at once. A stream waiting for a send slot, or
   sending, still reads its engine's heartbeats (#148).
+- **What the operator accepts from engines** (#205). A `Hello` or `Heartbeat` over these limits is
+  refused with `InvalidArgument`, which ends the stream. Engines send far less.
+  - `node_name`: empty or a DNS subdomain (at most 253 bytes); `engine_version`: at most 128 bytes.
+  - `trusted_key_ids`: at most 16, each 1 to 64 bytes (engines send 16 hex digits per key).
+  - `pod_namespace` and `pod_name`: when the token is bound to a pod, its pod is used and the
+    `Hello`'s isn't. Otherwise they must be empty, a DNS label and a DNS subdomain.
+  - A `Nack`'s error is cut to 1 KiB, without splitting a character. It goes into the engine's
+    record and the `Enforced` message.
 - **Events.** Each event gets the stream's engine ID and pod, not its own. Events beyond 1,000 in
   one message are dropped and counted with the engine's own drops.
 - **Aggregation through ConfigMaps.** Each replica writes its engines to `inkwall-engines-<pod>`
   (owned by its Pod) on change and every 10 s. The leader merges them every 2 s, drops reports
   older than 30 s, and counts an engine that moved between replicas once.
+- **Report size.** An engine's record is at most about 3.5 KiB with the limits above, a few hundred
+  bytes in practice. A report holds at most 900 KiB of engines, by engine ID, so the ConfigMap
+  stays under 1 MiB. The engines left out are counted by `inkwall_operator_engines_left_out`.
+  They don't count in `Enforced` or in key rotation.
 
 ### 4.8 Status aggregator
 
@@ -614,6 +626,8 @@ leader only, and is idle in Standalone mode (the default).
 
 - The leader sends `ClusterState` after `Welcome`, on any change (checked every 5 s), on `Resync`,
   and every 5 min. It only reads the cluster to do so.
+- The engines go last in `ClusterState`, by engine ID, as many as fit in the contract's 16 MiB.
+  The engines left out are counted by `inkwall_operator_state_engines_left_out`.
 - Every replica forwards its engines' security events on its own events stream, while the control
   plane accepts them. They go through a bounded disk buffer (`--events-dir`, an `emptyDir`). When it
   is full, the oldest events are dropped and counted.

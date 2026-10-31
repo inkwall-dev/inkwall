@@ -12,9 +12,12 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
@@ -30,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -169,6 +173,19 @@ const (
 	reportNamePrefix = "inkwall-engines-"
 )
 
+// maxReport bounds a replica's engine list, so its ConfigMap stays under
+// the API server's 1 MiB with room for the rest. An engine's record is at
+// most about 3.5 KiB with the limits of server.go, a few hundred bytes in
+// practice.
+const maxReport = 900 << 10
+
+var enginesLeftOut = prometheus.NewGauge(prometheus.GaugeOpts{
+	Name: "inkwall_operator_engines_left_out",
+	Help: "Engines connected to this replica left out of its engine report, which would be over the ConfigMap limit: they don't count in Enforced or key rotation.",
+})
+
+func init() { metrics.Registry.MustRegister(enginesLeftOut) }
+
 // Publisher writes a replica's engines to its ConfigMap when they change,
 // and at least every Refresh, so the leader can tell a live replica from
 // a dead one.
@@ -223,9 +240,13 @@ func (*Publisher) NeedLeaderElection() bool { return false }
 func (p *Publisher) name() string { return reportNamePrefix + p.Replica }
 
 func (p *Publisher) write(ctx context.Context, engines []Engine) error {
-	data, err := json.Marshal(engines)
+	data, left, err := encodeEngines(engines, maxReport)
 	if err != nil {
 		return err
+	}
+	enginesLeftOut.Set(float64(left))
+	if left > 0 {
+		log.FromContext(ctx).Info("the engine report is full: engines left out", "engines", len(engines), "leftOut", left)
 	}
 	cm := &corev1.ConfigMap{}
 	key := types.NamespacedName{Namespace: p.Namespace, Name: p.name()}
@@ -249,9 +270,30 @@ func (p *Publisher) write(ctx context.Context, engines []Engine) error {
 	return p.Client.Update(ctx, cm)
 }
 
+// encodeEngines encodes engines as a JSON array of at most limit bytes: the
+// first ones that fit, in order. It returns how many were left out.
+func encodeEngines(engines []Engine, limit int) ([]byte, int, error) {
+	data := []byte{'['}
+	for i, e := range engines {
+		b, err := json.Marshal(e)
+		if err != nil {
+			return nil, 0, err
+		}
+		if len(data)+len(b)+1 > limit {
+			return append(data, ']'), len(engines) - i, nil
+		}
+		if i > 0 {
+			data = append(data, ',')
+		}
+		data = append(data, b...)
+	}
+	return append(data, ']'), 0, nil
+}
+
 // ReadEngines merges the replicas' reports, skipping those not refreshed
 // within stale (their replica is gone). An engine listed twice, while it
-// moves between replicas, counts once, with its newest connection.
+// moves between replicas, counts once, with its newest connection. They
+// are sorted by ID.
 func ReadEngines(ctx context.Context, c client.Reader, namespace string, stale time.Duration, now time.Time) ([]Engine, error) {
 	var list corev1.ConfigMapList
 	if err := c.List(ctx, &list, client.InNamespace(namespace), client.MatchingLabels{EnginesLabel: "true"}); err != nil {
@@ -277,5 +319,6 @@ func ReadEngines(ctx context.Context, c client.Reader, namespace string, stale t
 	for _, e := range byID {
 		out = append(out, e)
 	}
+	slices.SortFunc(out, func(a, b Engine) int { return strings.Compare(a.ID, b.ID) })
 	return out, nil
 }

@@ -6,14 +6,17 @@ package distribution
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	agentv1 "github.com/inkwall-dev/inkwall/api/agent/v1"
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
@@ -33,8 +36,21 @@ const (
 	DefaultMaxSends = 50
 )
 
-// maxEngineID bounds the engine's ID, its pod name: a DNS subdomain.
-const maxEngineID = 253
+// Limits on what an engine reports, so it can't make the operator store or
+// forward more than it should (#205). Engines send far less.
+const (
+	// maxEngineID bounds the engine's ID, its pod name: a DNS subdomain.
+	maxEngineID = 253
+	// maxEngineVersion bounds the engine's version string.
+	maxEngineVersion = 128
+	// maxKeyIDs and maxKeyID bound the trusted key IDs: engines trust a
+	// few keys, with 16 hex digits each.
+	maxKeyIDs = 16
+	maxKeyID  = 64
+	// maxRejectError bounds the error of a Nack, which goes into the
+	// policies' Enforced condition.
+	maxRejectError = 1 << 10
+)
 
 // Server implements BundleService.
 type Server struct {
@@ -136,8 +152,8 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 	if hello == nil || hello.GetEngineId() == "" {
 		return status.Error(codes.InvalidArgument, "the first message must be a Hello with an engine_id")
 	}
-	if len(hello.GetEngineId()) > maxEngineID {
-		return status.Errorf(codes.InvalidArgument, "the engine_id is over %d bytes", maxEngineID)
+	if err := checkHello(hello, id.PodName != ""); err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
 	}
 
 	engineID := hello.GetEngineId()
@@ -159,7 +175,7 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 	}
 	conn := s.Engines.Connect(e)
 	defer s.Engines.Disconnect(engineID, conn)
-	log := s.Log.WithValues("engine", engineID, "serviceAccount", id.ServiceAccount, "pod", hello.GetPodNamespace()+"/"+hello.GetPodName())
+	log := s.Log.WithValues("engine", engineID, "serviceAccount", id.ServiceAccount, "pod", e.PodNamespace+"/"+e.PodName)
 	log.Info("engine connected", "bundle", hello.GetBundleVersion())
 	defer log.Info("engine disconnected")
 
@@ -201,7 +217,9 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 				s.stats(counts, st)
 				continue
 			}
-			s.record(engineID, r.msg, log)
+			if err := s.record(engineID, r.msg, log); err != nil {
+				return status.Error(codes.InvalidArgument, err.Error())
+			}
 		case <-idle.C:
 			return status.Error(codes.DeadlineExceeded, "no message from the engine in "+s.IdleTimeout.String())
 		case <-ctx.Done():
@@ -292,14 +310,60 @@ func (s *Server) stats(counts map[string]*eventsv1.PolicyStats, st *eventsv1.Req
 
 var latencyBounds = events.LatencyBounds()
 
-func (s *Server) record(engineID string, msg *agentv1.WatchRequest, log logr.Logger) {
+// checkHello checks the fields of a Hello against the limits. The pod is
+// checked only when the token doesn't name it (podBound false).
+func checkHello(h *agentv1.Hello, podBound bool) error {
+	switch {
+	case len(h.GetEngineId()) > maxEngineID:
+		return fmt.Errorf("the engine_id is over %d bytes", maxEngineID)
+	case h.GetNodeName() != "" && len(validation.IsDNS1123Subdomain(h.GetNodeName())) > 0:
+		return errors.New("the node_name is not a DNS subdomain")
+	case len(h.GetEngineVersion()) > maxEngineVersion:
+		return fmt.Errorf("the engine_version is over %d bytes", maxEngineVersion)
+	}
+	if !podBound {
+		if ns := h.GetPodNamespace(); ns != "" && len(validation.IsDNS1123Label(ns)) > 0 {
+			return errors.New("the pod_namespace is not a DNS label")
+		}
+		if name := h.GetPodName(); name != "" && len(validation.IsDNS1123Subdomain(name)) > 0 {
+			return errors.New("the pod_name is not a DNS subdomain")
+		}
+	}
+	return checkKeyIDs(h.GetTrustedKeyIds())
+}
+
+func checkKeyIDs(ids []string) error {
+	if len(ids) > maxKeyIDs {
+		return fmt.Errorf("over %d trusted_key_ids", maxKeyIDs)
+	}
+	for _, id := range ids {
+		if id == "" || len(id) > maxKeyID {
+			return fmt.Errorf("a trusted_key_id is empty or over %d bytes", maxKeyID)
+		}
+	}
+	return nil
+}
+
+// truncate cuts s to at most n bytes without splitting a UTF-8 sequence.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// record takes an engine's Ack, Nack or Heartbeat; an error ends the stream.
+func (s *Server) record(engineID string, msg *agentv1.WatchRequest, log logr.Logger) error {
 	switch m := msg.GetMsg().(type) {
 	case *agentv1.WatchRequest_Ack:
 		v := m.Ack.GetBundleVersion()
 		s.Engines.Update(engineID, func(e *Engine) bool { return set(&e.Applied, v) })
 		log.V(1).Info("bundle applied", "version", v)
 	case *agentv1.WatchRequest_Nack:
-		v, reason := m.Nack.GetBundleVersion(), m.Nack.GetError()
+		v, reason := m.Nack.GetBundleVersion(), truncate(m.Nack.GetError(), maxRejectError)
 		s.Engines.Update(engineID, func(e *Engine) bool {
 			a, b := set(&e.Rejected, v), set(&e.RejectError, reason) // both, no short circuit
 			return a || b
@@ -308,6 +372,9 @@ func (s *Server) record(engineID string, msg *agentv1.WatchRequest, log logr.Log
 	case *agentv1.WatchRequest_Heartbeat:
 		// Mostly unchanged: it keeps the stream alive.
 		v, keys := m.Heartbeat.GetBundleVersion(), m.Heartbeat.GetTrustedKeyIds()
+		if err := checkKeyIDs(keys); err != nil {
+			return err
+		}
 		s.Engines.Update(engineID, func(e *Engine) bool {
 			changed := set(&e.Applied, v)
 			if !slices.Equal(e.TrustedKeys, keys) {
@@ -316,6 +383,7 @@ func (s *Server) record(engineID string, msg *agentv1.WatchRequest, log logr.Log
 			return changed
 		})
 	}
+	return nil
 }
 
 // set assigns v to *p and reports whether that changed it.

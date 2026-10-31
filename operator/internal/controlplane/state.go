@@ -12,6 +12,7 @@ import (
 	"slices"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	corev1 "k8s.io/api/core/v1"
@@ -35,6 +36,10 @@ import (
 //
 // +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies;wafrulesets;clusterwafrulesets;inkwallconfigs,verbs=get;list;watch
 
+// maxState bounds a ClusterState: the contract's message limit, less the
+// ConnectRequest around it (its tag and length).
+const maxState = maxMessage - 16
+
 // clusterState is a full snapshot of the cluster (0004 §4.9): every
 // Inkwall object with its conditions, the proxies, the engines and the
 // bundle being served.
@@ -47,24 +52,39 @@ func (c *Connector) clusterState(ctx context.Context) (*controlplanev1.ClusterSt
 	if st.Integrations, err = c.integrations(ctx); err != nil {
 		return nil, err
 	}
+	if st.BundleVersion, st.BundleContentHash, err = c.bundle(ctx); err != nil {
+		return nil, err
+	}
 	engines, err := distribution.ReadEngines(ctx, c.APIReader, c.Namespace, c.EngineStale, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("engines: %w", err)
 	}
-	for _, e := range engines {
-		st.Engines = append(st.Engines, &controlplanev1.Engine{
+	stateEnginesLeftOut.Set(float64(addEngines(st, engines, maxState)))
+	if size := proto.Size(st); size > maxState {
+		return nil, fmt.Errorf("the cluster state is %d bytes, over the contract's %d", size, maxState)
+	}
+	return st, nil
+}
+
+// addEngines adds the engines last, as many as keep st within limit bytes,
+// so the state can be sent however many engines report. It returns how
+// many were left out.
+func addEngines(st *controlplanev1.ClusterState, engines []distribution.Engine, limit int) int {
+	size := proto.Size(st)
+	for i, e := range engines {
+		pe := &controlplanev1.Engine{
 			EngineId: e.ID, PodNamespace: e.PodNamespace, PodName: e.PodName, NodeName: e.NodeName,
 			EngineVersion: e.EngineVersion, AppliedBundleVersion: e.Applied, RejectedBundleVersion: e.Rejected,
 			RejectError: e.RejectError, ConnectedAt: timestamppb.New(e.ConnectedAt),
-		})
+		}
+		// A repeated message field: its tag, its length and the message.
+		size += protowire.SizeTag(4) + protowire.SizeBytes(proto.Size(pe))
+		if size > limit {
+			return len(engines) - i
+		}
+		st.Engines = append(st.Engines, pe)
 	}
-	if st.BundleVersion, st.BundleContentHash, err = c.bundle(ctx); err != nil {
-		return nil, err
-	}
-	if size := proto.Size(st); size > maxMessage {
-		return nil, fmt.Errorf("the cluster state is %d bytes, over the contract's %d", size, maxMessage)
-	}
-	return st, nil
+	return 0
 }
 
 // objects lists the Inkwall objects, sorted, so equal clusters give equal
