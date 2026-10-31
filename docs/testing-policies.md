@@ -60,7 +60,8 @@ allow      GET /?id=1%27%20OR%20%271%27%3D%271  reason=no_policy  0s
   `PathPrefix`, joined by `&&`. A policy whose IngressRoute has any other rule isn't enforced, and
   `inkwallctl` says which rule.
 - An HTTPRoute is read as the operator reads it: its hostnames × its rules' matches (only the rule
-  a policy's `sectionName` names), with `Exact` and `PathPrefix` paths and methods. A policy whose
+  a policy's `sectionName` names), with `Exact` and `PathPrefix` paths and methods. Its wildcard
+  hostnames cover subdomains at any depth, an Ingress's one label. A policy whose
   HTTPRoute has a regular expression path, or headers or query parameter matches, isn't enforced,
   and `inkwallctl` says which match.
 - Objects the operator would reject, such as a missing rule set or rules that don't compile, are

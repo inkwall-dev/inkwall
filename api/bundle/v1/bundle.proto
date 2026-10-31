@@ -75,12 +75,17 @@ message Policy {
 
 // RouteMatch matches requests by host, path and method.
 message RouteMatch {
-  // Exact host ("shop.example.com") or a wildcard for one leading label
-  // ("*.example.com"), without a port, lower case. Empty: any host.
+  // Exact host ("shop.example.com") or a wildcard ("*.example.com"), without
+  // a port, lower case. Empty: any host. A wildcard matches one leading label,
+  // as in an Ingress, unless wildcard_any_depth is set.
   string host = 1;
   PathMatch path = 2;
   // Methods to match, upper case. Empty: any method.
   repeated string methods = 3;
+  // A wildcard host matches subdomains at any depth: "*.example.com" matches
+  // "a.b.example.com", as in a Gateway API HTTPRoute. Engines before 0.3.0
+  // ignore it and match one label.
+  bool wildcard_any_depth = 4;
 }
 
 // PathMatch matches the request path.

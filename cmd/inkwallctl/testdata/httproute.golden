@@ -5,3 +5,7 @@ deny  403  GET /login?id=1%27%20OR%20%271%27%3D%271  policy=shop/admin  reason=r
 log        GET /static/app.css?id=1%27%20OR%20%271%27%3D%271  policy=shop/admin-static  reason=rule  rules=942100,949110  interrupting=949110  <time>
 deny  403  GET /settings?id=1%27%20OR%20%271%27%3D%271  policy=shop/admin  reason=rule  rules=942100,949110  interrupting=949110  <time>
 allow      GET /?id=1%27%20OR%20%271%27%3D%271  reason=no_policy  <time>
+deny  403  GET /?id=1%27%20OR%20%271%27%3D%271  policy=shop/storefront  reason=rule  rules=942100,949110  interrupting=949110  <time>
+allow      GET /?id=1%27%20OR%20%271%27%3D%271  reason=no_policy  <time>
+deny  403  GET /?id=1%27%20OR%20%271%27%3D%271  policy=shop/tenants  reason=rule  rules=942100,949110  interrupting=949110  <time>
+deny  403  GET /?id=1%27%20OR%20%271%27%3D%271  policy=shop/tenants  reason=rule  rules=942100,949110  interrupting=949110  <time>

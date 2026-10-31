@@ -539,8 +539,12 @@ It runs again when a targeted route changes (routes are indexed by target).
     host get that host's most general policy in the engine, so none goes uninspected.
 - **HTTPRoute routes** are its `hostnames` × each rule's `matches`.
   - `Exact` and `PathPrefix` paths, cleaned; a `method` is kept. No `hostnames` means any host (the
-    listeners' hostnames aren't read); a rule without `matches`, or a match without a path, is
-    `PathPrefix /`.
+    listeners' hostnames aren't read: the route's hosts cover at least the requests the listeners
+    let through); a rule without `matches`, or a match without a path, is `PathPrefix /`.
+  - A wildcard hostname (`*.example.com`) covers subdomains at any depth (`a.b.example.com`), as in
+    the Gateway API, unlike an Ingress wildcard, which covers one label. The same wildcard on an
+    Ingress and an HTTPRoute is two routes. Engines before 0.3.0 match one label: restart the
+    proxies after the upgrade, so deeper subdomains are inspected.
   - `sectionName` narrows the target to the rule of that `name`. A name no rule has is a missing
     target.
   - `RegularExpression` paths, `headers` and `queryParams` are `Accepted=False`
