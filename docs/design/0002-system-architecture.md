@@ -709,7 +709,8 @@ rate-limit metrics, bundle age, tracing, the dashboard and alerts.
 - Tested on the last 3 Kubernetes minor versions (`docs/compatibility.md`).
 
 **Not yet:** a version matrix and `docs/compatibility.md` (CI's kind e2e test runs kind's newest
-Kubernetes, and [envtest](https://book.kubebuilder.io/reference/envtest) runs 1.29), and conversion webhooks (only `v1alpha1` exists).
+Kubernetes; the local kind cluster, the upgrade test and [envtest](https://book.kubebuilder.io/reference/envtest) run 1.34; the chart
+allows 1.29 and later), and conversion webhooks (only `v1alpha1` exists).
 
 ---
 

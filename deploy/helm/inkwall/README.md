@@ -20,7 +20,8 @@ builds them into a signed [bundle](../../../docs/glossary.md#bundle), serves the
 
 ## Install
 
-You need [Kubernetes](https://kubernetes.io/docs/concepts/overview/) 1.29 or later and [Helm](https://helm.sh/docs/) 3.
+You need [Kubernetes](https://kubernetes.io/docs/concepts/overview/) 1.29 or later and [Helm](https://helm.sh/docs/) 3. CI
+tests on Kubernetes 1.34 and on kind's newest (1.37).
 
 ```sh
 helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \
