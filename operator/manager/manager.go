@@ -37,7 +37,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/bundle"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
@@ -76,6 +75,9 @@ type Options struct {
 	MetricsAddr string
 	ProbeAddr   string
 	LeaderElect bool
+	// LeaseDuration and RenewDeadline tune leader election; 0: the
+	// controller-runtime defaults (15s and 10s).
+	LeaseDuration, RenewDeadline time.Duration
 	// Namespace is the operator's, for its Lease and Secrets.
 	Namespace string
 	// Debounce batches changes before a bundle is built; 0: the default.
@@ -187,6 +189,8 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		LeaderElection:          o.LeaderElect,
 		LeaderElectionID:        leaderElectionID,
 		LeaderElectionNamespace: o.Namespace,
+		LeaseDuration:           unlessZero(o.LeaseDuration),
+		RenewDeadline:           unlessZero(o.RenewDeadline),
 		// The new leader starts at once instead of waiting out the lease,
 		// as the old one steps down cleanly on shutdown.
 		LeaderElectionReleaseOnCancel: true,
@@ -285,8 +289,8 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			return nil, err
 		}
 	}
-	// Every replica forwards its engines' events, when the control plane
-	// accepts them.
+	// Every replica forwards its engines' events and request counts, when
+	// the control plane accepts them.
 	forwarder := &controlplane.Forwarder{
 		Client: mgr.GetClient(), Namespace: o.Namespace, Replica: replicaName(o), OperatorVersion: o.Version,
 		CAFile: o.ControlPlaneCAFile, Dir: o.EventsDir, MaxBytes: o.EventsBufferBytes,
@@ -295,7 +299,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		return nil, err
 	}
 	if o.DistributionPort != 0 {
-		if err := addDistribution(mgr, o, ready, forwarder.Add); err != nil {
+		if err := addDistribution(mgr, o, ready, forwarder); err != nil {
 			return nil, err
 		}
 	}
@@ -361,7 +365,7 @@ func addCerts(mgr manager.Manager, o Options) (<-chan struct{}, error) {
 
 // addDistribution serves bundles to the engines on every replica, and
 // reports Enforced from the leader.
-func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}, events func(*eventsv1.EventBatch)) error {
+func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}, forwarder *controlplane.Forwarder) error {
 	replica := o.Replica
 	if replica == "" {
 		h, err := os.Hostname()
@@ -377,7 +381,8 @@ func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}, even
 	}
 	auth := &distribution.KubeAuthenticator{Client: mgr.GetClient(), Namespace: o.Namespace, TTL: time.Minute}
 	service := distribution.NewServer(store, table, auth, replica, ctrl.Log.WithName("distribution"))
-	service.Events = events
+	service.Events, service.Stats = forwarder.Add, forwarder.AddStats
+	forwarder.HasPolicy = store.HasPolicy
 	srv := &distribution.GRPCServer{
 		Port:    o.DistributionPort,
 		CertDir: o.WebhookCertDir,
@@ -462,6 +467,14 @@ func (w *webhookStarter) check(req *http.Request) error {
 		return errors.New("webhook certificate not ready")
 	}
 	return w.mgr.GetWebhookServer().StartedChecker()(req)
+}
+
+// unlessZero returns &d, or nil (the default) for 0.
+func unlessZero(d time.Duration) *time.Duration {
+	if d == 0 {
+		return nil
+	}
+	return &d
 }
 
 // replicaName is this replica's name: its pod, else the host name.

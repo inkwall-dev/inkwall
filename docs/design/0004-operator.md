@@ -160,7 +160,10 @@ Validation runs in three steps, cheapest first:
 | `Enforced` | Every serving engine ACKed a bundle with this generation | `EnginesBehind` (`3/6`), `EngineNack`, `NoEngines`, `NotInBundle` |
 | `Ready` | The three above are True | first failing condition's reason |
 
-Status also has `bundleVersion` and `observedGeneration`.
+Status also has `bundleVersion` and `observedGeneration`. `bundleVersion` is the first bundle that
+enforces the policy as it is now; later bundles do too, until one changes the policy. A bundle that
+changes only other policies doesn't change it (#149): before v0.3.0 it was the newest bundle, so
+every bundle rewrote every policy's status.
 
 `InkwallConfig.status` has `observedGeneration`, `conditions` (`ControlPlaneConnected`,
 [§4.9](#49-upstream-sync-leader-only)) and `proxies`, the discovered proxy controllers
@@ -548,9 +551,12 @@ leader-only. Losing a replica just moves its engines to another.
 - **Authentication.** A [`TokenReview`](https://kubernetes.io/docs/reference/kubernetes-api/authentication-resources/token-review-v1/) (audience `inkwall-operator`), then a [`SubjectAccessReview`](https://kubernetes.io/docs/reference/access-authn-authz/authorization/#checking-api-access)
   that the engine's ServiceAccount may `get` the bundle Secret (the grant from
   [§4.3](#43-injection-controller)). Results are cached for 1 min.
-- **Streams.** The first message must be `Hello`. Engines that are already current aren't sent the
-  bundle again. Streams silent for 30 s are closed. At most 50 sends run at once. A stream waiting
-  for a send slot, or sending, still reads its engine's heartbeats (#148).
+- **Streams.** The first message must be `Hello`, with an `engine_id` of 1 to 253 bytes (the
+  engine's pod name). Engines that are already current aren't sent the bundle again. Streams
+  silent for 30 s are closed. At most 50 sends run at once. A stream waiting for a send slot, or
+  sending, still reads its engine's heartbeats (#148).
+- **Events.** Each event gets the stream's engine ID and pod, not its own. Events beyond 1,000 in
+  one message are dropped and counted with the engine's own drops.
 - **Aggregation through ConfigMaps.** Each replica writes its engines to `inkwall-engines-<pod>`
   (owned by its Pod) on change and every 10 s. The leader merges them every 2 s, drops reports
   older than 30 s, and counts an engine that moved between replicas once.
@@ -563,12 +569,22 @@ conditions of [§3.2](#32-status-contract). It writes only on change, at most on
 
 **Built (v0.1.0):** `Enforced=True` when every connected engine runs a bundle whose version is at
 least the policy's `status.bundleVersion`. Otherwise the reason is `NoEngines`, `EnginesBehind`
-(`1/3 engines on bundle 42`), `EngineNack` (with the first error) or `NotInBundle`.
+(`1/3 engines on bundle 42`), `EngineNack` (with the first error) or `NotInBundle`. It waits for
+the bundle builder to report the policy's current generation (`status.observedGeneration`).
+
+**Writes per bundle** (#149). The builder writes a policy's `bundleVersion` only when the bundle
+changes what the policy enforces: its own entry, the rule sets it binds, or suspension
+(`bundle.PolicyHashes`). It remembers the version per policy; a new leader keeps a policy's
+reported version when the bundle didn't change it. So a one-policy edit writes one policy's status,
+and the `Enforced` of the others, which name their own bundle, stays as it is.
 
 Metrics: `inkwall_operator_bundle_version`, `inkwall_operator_engines{state}`,
 `inkwall_operator_bundle_compressed_bytes` ([§4.6](#46-bundle-builder-leader-only)), and, from the
 wiring, `inkwall_operator_wired_targets{integration}` and
 `inkwall_operator_wiring_failures{integration}` (targets that are `WiringFailed`).
+`inkwall_operator_request_stats_dropped_total{reason}` counts the policies' request counts a
+replica drops ([§4.9](#49-upstream-sync-leader-only)): `not_in_bundle`, `latency_buckets` (the
+latency only) and `evicted`.
 
 **Not yet:** an `integration` label on the engine counts (engines aren't matched to proxies yet),
 reconcile duration, policy condition counts.
@@ -625,6 +641,14 @@ leader only, and is idle in Standalone mode (the default).
   is full, the oldest events are dropped and counted.
 - What wasn't acknowledged is sent again after a reconnect or a restart.
   `inkwall_operator_events_buffered` follows the buffer, outages included.
+- Every replica also sums its engines' request counts per policy and sends them on that stream
+  every 10 s, when the control plane accepts them, even if it doesn't accept events.
+- It takes counts only for the policies of the bundle it serves, and keeps the totals of at least
+  4096 policies. Past that, it forgets those no longer in the bundle, so the totals stay bounded
+  as policies come and go; a policy that comes back counts from zero again. Both are counted in
+  `inkwall_operator_request_stats_dropped_total{reason}`. A policy's total can therefore go down
+  under the same `since`; the contract (`RequestStatsUpload`) tells consumers to treat any
+  decrease as a reset, the rule the operator applies to its engines. The fake control plane does.
 - The events stream reconnects with jittered backoff bounded at 10 s (the leader's primary stream:
   1 min), so the backlog drains soon after an outage.
 
@@ -826,15 +850,16 @@ Against the targets:
 - **Bundle size: met.** It is 134 KiB compressed at 5,000 policies, far under 900 KiB.
   Uncompressed it is 1.9 MiB, nearly half of gRPC's default 4 MiB receive limit, which engines
   keep.
-- **Change → every engine: met up to 5,000 policies × 50 engines** (1.5 s), but not at
-  5,000 × 500. There it took 4 s typically, but one edit took 47 s.
+- **Change → every engine: met** since #149 (5.3 s at 5,000 × 500). Before, it was met up to
+  5,000 policies × 50 engines (1.5 s), but not at 5,000 × 500: there it took 4 s typically, but one
+  edit took 47 s.
   - Cause: waiting for one of the 50 send slots counted against a stream's 30 s idle timeout, and
     its heartbeats weren't read meanwhile. So engines were disconnected, and got the bundle again
     after reconnecting.
   - Fixed (#148): bundles are sent from a [goroutine](https://go.dev/tour/concurrency/1) of their own, so heartbeats are read meanwhile.
     Reruns at 5,000 × 500 since have no disconnects.
-  - Still open: one edit in ten can take 24–28 s, before as after the fix, so another cause
-    remains.
+  - One edit in ten still took 11–28 s after it: the reconcile below. Since #149, the slowest of
+    10 edits takes 5–6 s.
 - **Operator memory: just over the target at 5,000 × 500** (518 MiB); met everywhere else.
   - Before: each stream marshalled the bundle itself. A stream's send returns once the message is
     queued on its connection, not once it is written. So the operator held engines × bundle bytes
@@ -846,9 +871,21 @@ Against the targets:
   - The 1,000 × 500 and 5,000 × 500 rows are from after #147. Before it, on the same machine and
     harness: 988 MiB / 953 MiB heap at 1,000 × 500, and 2,007 MiB / 1,886 MiB at 5,000 × 500.
     Both runs shared the machine with a kind e2e test, so their times are noisier.
-- **Not a target yet, but slow: the reconcile.** Each new bundle writes the `status.bundleVersion`
-  of every policy (then `Enforced`). So a reconcile takes 9–19 s at 5,000 policies, changes during
-  it wait, and the initial sync takes 20–25 s.
+- **The reconcile and the initial sync** (#149). Each new bundle wrote the `status.bundleVersion`
+  of every policy, then the Reporter rewrote every `Enforced`. So a reconcile took 9–19 s at 5,000
+  policies, and changes during it waited.
+  - Now a bundle writes the status of the policies it changes only
+    ([§4.8](#48-status-aggregator)), and the first build after a sync writes up to 8 statuses at
+    once.
+  - Same machine and harness, before → after:
+
+| Policies / engines | Reconcile | Initial sync | Change → all engines, p50 / p95 / max |
+|---|---|---|---|
+| 5,000 × 50 | 15.9 → 0.42 s | 25.0 → 3.2 s | 1.4 / 3.1 / 3.1 → 1.8 / 2.5 / 2.5 s |
+| 5,000 × 500 | 12.1 → 0.37 s | 15.8 → 5.2 s | 3.8 / 10.8 / 10.8 → 3.9 / 5.3 / 5.3 s |
+
+  The table above predates #149. With 10 edits, p95 and max are the same edit. Peak RSS at
+  5,000 × 500 was 404 MiB before and 509 MiB after, in one run each: under the target, but close.
 
 **Engine memory per policy.** A compiled Coraza WAF with the CRS keeps
 about 2.1 MiB of heap, and takes 10–15 ms to compile.

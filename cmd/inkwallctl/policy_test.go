@@ -168,6 +168,25 @@ func TestTestPolicy(t *testing.T) {
 	}
 }
 
+// TestTestPolicyIngressRoute routes requests by Ingresses and Traefik
+// IngressRoutes together.
+func TestTestPolicyIngressRoute(t *testing.T) {
+	dir := filepath.Join("testdata", "ingressroute")
+	requests := filepath.Join(dir, "requests.http")
+	code, out, errOut := runCLI(t, "test", "--request", requests,
+		"--policy", filepath.Join(dir, "wafpolicy.yaml"), "--ingress", filepath.Join(dir, "routes.yaml"))
+	if code != 0 || errOut != "" {
+		t.Fatalf("exit %d, stderr %q", code, errOut)
+	}
+	golden(t, "ingressroute.golden", out)
+
+	code, out, errOut = runCLI(t, "test", "--request", requests, "--policy", dir)
+	if code != 0 || errOut != "" {
+		t.Fatalf("directory: exit %d, stderr %q", code, errOut)
+	}
+	golden(t, "ingressroute.golden", out)
+}
+
 // chunkedSecrets returns signed's bundle, made too large for one Secret, as
 // kubectl prints the bundle Secret and its chunks, and the bundle Secret
 // alone.
@@ -246,6 +265,12 @@ func TestTestPolicyOptions(t *testing.T) {
 			errOut: "note: no --ingress: WAFPolicy default/web applies to every host and path\n",
 		},
 		{
+			name:   "no --ingress: one policy of an IngressRoute applies to every request",
+			args:   []string{"--policy", writeFile(t, "p.yaml", strings.Replace(singlePolicy, "kind: Ingress,", "kind: IngressRoute,", 1)), "http://any.example.org" + sqli},
+			out:    "deny  403  GET " + sqli + "  policy=default/web  reason=rule",
+			errOut: "note: no --ingress: WAFPolicy default/web applies to every host and path\n",
+		},
+		{
 			name:   "--namespace",
 			args:   []string{"--namespace", "shop", "--policy", writeFile(t, "p.yaml", singlePolicy), "http://a/"},
 			out:    "allow      GET /  policy=shop/web  ",
@@ -285,6 +310,13 @@ func TestTestPolicyOptions(t *testing.T) {
 			out:    "allow      GET /  reason=no_policy",
 			errOut: "note: WAFPolicy default/web: InvalidRef: Ingress web, Ingress gone not found",
 		},
+		{
+			name: "a missing IngressRoute is a note",
+			args: []string{"--policy", writeFile(t, "p.yaml", strings.Replace(singlePolicy, "[{kind: Ingress, name: web}]", "[{kind: Ingress, name: storefront}, {kind: IngressRoute, name: gone}]", 1)),
+				"--namespace", "shop", "--ingress", sampleIngresses, "http://shop.example.com/"},
+			out:    "allow      GET /  policy=shop/web",
+			errOut: "note: WAFPolicy shop/web: InvalidRef: IngressRoute gone not found; the policy applies to its other targets",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			code, out, errOut := runCLI(t, append([]string{"test"}, tc.args...)...)
@@ -300,6 +332,10 @@ func TestTestPolicyErrors(t *testing.T) {
 	ruleSet := func(source string) string {
 		return writeFile(t, "rs.yaml", "apiVersion: waf.inkwall.dev/v1alpha1\nkind: WAFRuleSet\nmetadata: {name: rs}\nspec:\n  source:\n"+source)
 	}
+	routePolicy := writeFile(t, "p.yaml", strings.Replace(singlePolicy, "kind: Ingress,", "kind: IngressRoute,", 1))
+	ingressRoute := func(apiVersion, match string) string {
+		return writeFile(t, "ir.yaml", "apiVersion: "+apiVersion+"\nkind: IngressRoute\nmetadata: {name: web}\nspec:\n  routes:\n  - match: "+match+"\n")
+	}
 	withRuleSet := strings.Replace(singlePolicy, "mode: Block", "ruleSets: [{ref: {kind: WAFRuleSet, name: rs}}]", 1)
 	for _, tc := range []struct {
 		name   string
@@ -313,7 +349,13 @@ func TestTestPolicyErrors(t *testing.T) {
 		{"--bundle-key alone", []string{"--bundle-key", "k"}, "--bundle-key applies only to --bundle"},
 		{"--namespace alone", []string{"--namespace", "a"}, "--namespace applies only to --policy"},
 		{"no policy", []string{"--rule-set", sampleRuleSets}, "no WAFPolicy in the files"},
-		{"two policies, no routes", []string{"--policy", samplePolicies, "--rule-set", sampleRuleSets, "--configmap", sampleConfigMaps}, "give the Ingresses they target with --ingress"},
+		{"two policies, no routes", []string{"--policy", samplePolicies, "--rule-set", sampleRuleSets, "--configmap", sampleConfigMaps}, "give the Ingresses or IngressRoutes they target with --ingress"},
+		{"IngressRoute with an unsupported matcher", []string{"--policy", routePolicy, "--ingress", ingressRoute("traefik.io/v1alpha1", "Host(`a`) && Header(`X-A`, `1`)")},
+			"WAFPolicy default/web: not enforced: TargetUnsupported: IngressRoute web: spec.routes[0] match \"Host(`a`) && Header(`X-A`, `1`)\": Header is not supported: only Host, Path and PathPrefix, joined by &&, can be protected"},
+		{"IngressRoute with ||", []string{"--policy", routePolicy, "--ingress", ingressRoute("traefik.io/v1alpha1", "Host(`a`) || Host(`b`)")},
+			"TargetUnsupported: IngressRoute web: spec.routes[0] match \"Host(`a`) || Host(`b`)\": || is not supported: write one route per alternative"},
+		{"IngressRoute of the old API group", []string{"--policy", routePolicy, "--ingress", ingressRoute("traefik.containo.us/v1alpha1", "Host(`a`)")},
+			`IngressRoute web: apiVersion "traefik.containo.us/v1alpha1", want "traefik.io/v1alpha1"`},
 		{"missing rule set", []string{"--policy", writeFile(t, "p.yaml", withRuleSet)}, "WAFPolicy default/web: not enforced: InvalidRef: WAFRuleSet rs not found"},
 		{"inline rules the webhook rejects", []string{"--policy", writeFile(t, "p.yaml", withRuleSet), "--rule-set", ruleSet("    seclang: SecRuleEngine Off\n")}, "WAFRuleSet default/rs: rejected by the validating webhook"},
 		{"ConfigMap rules that don't compile", []string{"--policy", writeFile(t, "p.yaml", withRuleSet), "--rule-set", ruleSet("    configMapRef: {name: cm, key: r}\n"),

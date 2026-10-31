@@ -1,0 +1,43 @@
+// Copyright 2026 The Inkwall Authors
+// SPDX-License-Identifier: Apache-2.0
+
+// Request counts (0002 §5.4): how many requests each policy decided, and
+// how long they took. The engine sends them to the operator (agent.v1
+// Watch), and the operator sends their sums to the optional control plane
+// (controlplane.v1 Connect). Per policy only: never per route or client.
+syntax = "proto3";
+
+package inkwall.events.v1;
+
+option go_package = "github.com/inkwall-dev/inkwall/api/events/v1;eventsv1";
+
+// RequestStats counts requests per policy. The counts are cumulative; where
+// they start is up to the message carrying them. A policy's count lower
+// than in the previous report is a reset: count the new value from zero.
+message RequestStats {
+  // The upper bounds of the latency buckets, in seconds, increasing.
+  repeated double latency_bounds = 1;
+  // The policies that counted requests; a policy is in at most one message
+  // of a report.
+  repeated PolicyStats policies = 2;
+}
+
+// PolicyStats counts the requests one policy decided. Their total is
+// allowed + denied + detected. Requests no policy covers aren't counted.
+message PolicyStats {
+  // "namespace/name".
+  string policy = 1;
+  // Forwarded: clean, on a skipped path, or not inspected under a fail-open
+  // policy.
+  uint64 allowed = 2;
+  // Rejected (block mode).
+  uint64 denied = 3;
+  // Forwarded, but would have been rejected (detect mode).
+  uint64 detected = 4;
+  // Requests per latency bucket (time spent inspecting), one count per
+  // bound of RequestStats.latency_bounds and a last one for slower
+  // requests. Not cumulative across buckets.
+  repeated uint64 latency_counts = 5;
+  // The sum of their latencies, in seconds.
+  double latency_sum = 6;
+}

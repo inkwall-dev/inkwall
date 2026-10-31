@@ -17,6 +17,7 @@ syntax = "proto3";
 package inkwall.controlplane.v1;
 
 import "events/v1/events.proto";
+import "events/v1/stats.proto";
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 
@@ -41,8 +42,9 @@ service ControlPlaneService {
   // There is one per cluster: when the leader moves, the newer primary
   // stream wins and the control plane closes the older one.
   //
-  // An events stream carries only EventUpload and EventsAck, and
-  // heartbeats; every replica opens one for the events of its engines.
+  // An events stream carries only EventUpload and EventsAck, request
+  // counts (RequestStatsUpload) and heartbeats; every replica opens one for
+  // its engines.
   //
   // Errors (gRPC status codes) and what the operator does:
   // - UNAUTHENTICATED: the certificate isn't valid (e.g. expired or
@@ -100,6 +102,7 @@ message ConnectRequest {
     PolicyAck policy_ack = 5;
     PolicyNack policy_nack = 6;
     RenewCertificate renew_certificate = 7;
+    RequestStatsUpload request_stats = 8;
   }
 }
 
@@ -147,7 +150,7 @@ message Hello {
   // The last PolicySnapshot the operator applied (0: none): the control
   // plane skips resending it when it is current.
   uint64 policy_version = 7;
-  // Optional features the operator supports, e.g. "events", and the API
+  // Optional features the operator supports, e.g. "request-stats", and the API
   // versions it writes, e.g. "waf.inkwall.dev/v1alpha1", so a newer control
   // plane can tell what an older operator can do.
   repeated string capabilities = 8;
@@ -161,6 +164,10 @@ message Welcome {
   // When false (the default), replicas neither send nor buffer events: they
   // log them, as in Standalone mode.
   bool accept_events = 2;
+  // Whether the control plane takes request counts (RequestStatsUpload) on
+  // events streams. When false (the default), replicas don't send them.
+  // An events stream stays open while either is accepted.
+  bool accept_request_stats = 3;
 }
 
 // Object is a Kubernetes object in Inkwall's API (waf.inkwall.dev):
@@ -257,6 +264,24 @@ message EventUpload {
 message EventsAck {
   string buffer_id = 1;
   uint64 sequence = 2;
+}
+
+// RequestStatsUpload counts the requests of the engines connected to a
+// replica, per policy, on its events stream: every 10 s, the policies whose
+// counts changed, and every policy first on a new stream. The counts are
+// cumulative since `since` (when the replica started counting), so a lost
+// upload loses nothing; the sum over a cluster's replicas is the cluster's.
+// A replica that restarts counts from zero again, with a new `since`.
+// Within one `since`, a policy's counts can also go down: past a limit, a
+// replica forgets the policies no longer in its bundle, and one that comes
+// back counts from zero again. A consumer must treat any count lower than
+// the previous one (allowed, denied, detected or a latency bucket) as a
+// reset: the new value is all new, counted from zero. The operator applies
+// the same rule to its engines' reports.
+message RequestStatsUpload {
+  google.protobuf.Timestamp since = 1;
+  google.protobuf.Timestamp time = 2;
+  inkwall.events.v1.RequestStats stats = 3;
 }
 
 // Heartbeat shows the stream is alive between other messages.

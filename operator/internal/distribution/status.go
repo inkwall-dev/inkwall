@@ -50,15 +50,28 @@ var (
 		Name: "inkwall_operator_engine_events_dropped_total",
 		Help: "Security events the engines on this replica reported dropping (their buffer was full).",
 	})
+	// RequestStatsDropped counts, per policy and report, the request counts
+	// this replica drops: here, and in the controlplane package's totals.
+	RequestStatsDropped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "inkwall_operator_request_stats_dropped_total",
+		Help: "Policies' request counts this replica dropped, by reason: not_in_bundle (an engine reported a policy the bundle served here doesn't have), latency_buckets (its latency was counted in other buckets: the counts are kept, the latency dropped), evicted (the totals of a policy no longer in the bundle, forgotten so they stay bounded).",
+	}, []string{"reason"})
+)
+
+// Reasons of RequestStatsDropped.
+const (
+	DroppedNotInBundle    = "not_in_bundle"
+	DroppedLatencyBuckets = "latency_buckets"
+	DroppedEvicted        = "evicted"
 )
 
 func init() {
-	metrics.Registry.MustRegister(bundleVersion, bundleBytes, engineCount, eventsReceived, eventsDroppedByEngines)
+	metrics.Registry.MustRegister(bundleVersion, bundleBytes, engineCount, eventsReceived, eventsDroppedByEngines, RequestStatsDropped)
 }
 
 // Enforced computes a policy's Enforced condition: whether every connected
-// engine runs a bundle that contains the policy's current generation
-// (status.bundleVersion). Every engine gets the same bundle, so every
+// engine runs a bundle that contains the policy's current generation: the
+// first such bundle is its status.bundleVersion, and later ones have it too. Every engine gets the same bundle, so every
 // engine counts until engines are matched to the routes they serve.
 func Enforced(version int64, engines []Engine) (metav1.ConditionStatus, string, string) {
 	if version <= 0 {
@@ -180,8 +193,10 @@ func (r *Reporter) report(ctx context.Context) error {
 
 	for i := range policies.Items {
 		p := &policies.Items[i]
-		// The bundle builder reports Accepted first; wait for it.
-		if meta.FindStatusCondition(p.Status.Conditions, wafv1alpha1.ConditionAccepted) == nil {
+		// The bundle builder reports Accepted and the policy's bundle
+		// first, for this generation; wait for it.
+		if meta.FindStatusCondition(p.Status.Conditions, wafv1alpha1.ConditionAccepted) == nil ||
+			p.Status.ObservedGeneration != p.Generation {
 			continue
 		}
 		if err := r.write(ctx, p, engines); err != nil {

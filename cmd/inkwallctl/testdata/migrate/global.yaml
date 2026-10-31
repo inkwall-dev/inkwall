@@ -1,0 +1,49 @@
+# ModSecurity turned on for every Ingress in the controller's ConfigMap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ingress-nginx-controller
+  namespace: ingress-nginx
+data:
+  enable-modsecurity: "true"
+  enable-owasp-modsecurity-crs: "true"
+  modsecurity-snippet: |
+    SecRuleEngine On
+    SecAuditLog /dev/stdout
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+  namespace: web
+spec:
+  ingressClassName: nginx
+  defaultBackend:
+    service: {name: web, port: {number: 80}}
+---
+# Opted out.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: metrics
+  namespace: web
+  annotations:
+    nginx.ingress.kubernetes.io/enable-modsecurity: "false"
+spec:
+  ingressClassName: nginx
+  defaultBackend:
+    service: {name: metrics, port: {number: 80}}
+---
+# Global settings, then its own exclusions.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: admin
+  namespace: web
+  annotations:
+    nginx.ingress.kubernetes.io/modsecurity-snippet: |
+      SecRule REQUEST_FILENAME "@beginsWith /admin/editor" "id:1200,phase:1,pass,nolog,ctl:ruleRemoveTargetById=941100;ARGS:body"
+spec:
+  ingressClassName: nginx
+  defaultBackend:
+    service: {name: admin, port: {number: 80}}

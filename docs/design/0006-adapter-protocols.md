@@ -2,14 +2,14 @@
 
 - Status: Draft
 - Date: 2026-09-28
-- Updated: 2026-10-30
+- Updated: 2026-10-31
 - Owner: noureldin
 - Depends on: [0002 §3.2](0002-system-architecture.md#32-adapters) and
   [0002 §6](0002-system-architecture.md#6-proxy-integrations)
 
 Every proxy has its own way to ask an outside service "should I let this request through?". This
 primer describes each of those protocols and the [adapter](../glossary.md#adapter) that answers it. [Forward-auth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/),
-`/v1/check` and the reverse proxy are built; [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter), [ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter) and [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) are not yet.
+`/v1/check`, the reverse proxy and [ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter) are built; [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) and [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) are not yet.
 
 An **adapter** is a thin listener in the engine (`inkwall-engine`), in `pkg/adapters/<name>`. It
 converts the protocol's message into a `request.Request`, and the engine's `Verdict` back into the
@@ -19,9 +19,9 @@ its adapter is in [0002 §6](0002-system-architecture.md#6-proxy-integrations).
 
 **Built (v0.1.0):** forward-auth ([§3](#3-forward-auth-traefik-forwardauth-nginx-auth_request)),
 `/v1/check` over HTTP ([§5](#5-v1check-inkwalls-own-api)) and the reverse proxy
-([§6](#6-reverse-proxy-standalone-mode)). **Not yet:** ext_authz
-([§1](#1-ext_authz-envoy-external-authorization)), ext_proc
-([§2](#2-ext_proc-envoy-external-processing)) and SPOE
+([§6](#6-reverse-proxy-standalone-mode)). **Built since:** ext_proc
+([§2](#2-ext_proc-envoy-external-processing)), engine side only. **Not yet:** ext_authz
+([§1](#1-ext_authz-envoy-external-authorization)) and SPOE
 ([§4](#4-spoe-haproxy-stream-processing-offload-engine)).
 
 ## Contents
@@ -42,7 +42,7 @@ its adapter is in [0002 §6](0002-system-architecture.md#6-proxy-integrations).
   headers, plus the body if `with_request_body` is set.
 - The adapter replies **OK** or **Denied**, with our status code.
 - It gives no view of the response. Every Envoy-based product supports it, so it is the fallback
-  for Envoy.
+  for Envoy. Envoy Gateway uses ext_proc instead ([§2](#2-ext_proc-envoy-external-processing)).
 
 ## 2. ext_proc (Envoy external processing)
 
@@ -54,8 +54,54 @@ its adapter is in [0002 §6](0002-system-architecture.md#6-proxy-integrations).
   needs them.
 - `observability_mode: true` doesn't wait for the answers. That gives detect mode at about zero
   latency ([0001 §4](0001-performance-first-architecture.md#enforcement-modes-per-route)).
-- It is the most capable protocol, so it is the planned first choice for Envoy, [Envoy Gateway](https://gateway.envoyproxy.io/),
+- It is the most capable protocol, so it is the first choice for Envoy, [Envoy Gateway](https://gateway.envoyproxy.io/),
   [Istio](https://istio.io/latest/docs/) and [Contour](https://projectcontour.io/docs/).
+
+**Built:** `pkg/adapters/extproc`, run as `inkwall-engine ext-proc` (gRPC, on `127.0.0.1:9003` or
+a Unix socket). It answers the stream of one request as follows:
+
+- **Headers:** it rebuilds the request from `:method`, `:path`, `:authority` and `:scheme`, and
+  inspects the other headers. A `:path` not in origin form or with a fragment, an invalid
+  `:authority`, a bad `:method` or a repeated pseudo-header gets an immediate **400**: such a
+  request is never let through, as with forward-auth.
+- **Body:** when the policy inspects bodies and Envoy sends the body in one message
+  (`request_body_mode: BUFFERED` or `BUFFERED_PARTIAL`), the verdict waits for it. Envoy holds the
+  headers meanwhile. A body Envoy sends otherwise (`NONE`, `STREAMED`), or cuts at its buffer
+  limit (`BUFFERED_PARTIAL` without `end_of_stream`), goes uninspected and is handled like an
+  oversized one (`body.onOversize`). The engine reads the mode from `protocol_config`, which Envoy
+  sends from 1.33.
+- **Allow:** CONTINUE. If the engine generated the request ID, it sets `x-request-id` on the
+  request Envoy forwards; Envoy usually sets one itself.
+- **Deny:** an immediate response with the verdict's status (403, 413, 503, ...), the same
+  plain-text body as the other adapters, and `x-request-id`.
+- **Later stages** (response headers or body, trailers), if the filter sends them: CONTINUE.
+- **`observability_mode`:** the request is inspected and logged, and nothing is answered.
+- **Client IP:** from `X-Forwarded-For`, which Envoy's connection manager sets before the filter
+  runs, walked through `--trusted-proxies` ([client IP](../client-ip.md)). A Unix-socket peer
+  counts as loopback, `127.0.0.1`.
+
+Route lookup, `no-policy` pass-through, security events and metrics (`adapter="extproc"`) are those
+of every adapter. `BenchmarkAdapters` (`pkg/adapters/extproc`) times it against forward-auth on
+the same rules, each over a Unix socket.
+
+**Envoy Gateway uses ext_proc, not ext_authz** (decided for v0.3.0). Both can deny with our
+status and see a buffered body, and ext_authz is the simpler one: one call, no stream. ext_proc
+wins on what comes next:
+
+- It can see responses. Response inspection, a bot challenge and the block page rewritten by the
+  engine need it ([0002 §12](0002-system-architecture.md#12-open-questions)).
+- `observability_mode` gives detect mode without adding latency; ext_authz always waits.
+- Envoy Gateway attaches it per route with an `EnvoyExtensionPolicy`, which takes the processing
+  mode, so only routes whose policy inspects bodies buffer them ([0004 §4.4](0004-operator.md#44-wiring-controller)).
+  ext_authz goes in a `SecurityPolicy`, and a route takes one, which may already carry the user's
+  own authentication.
+- The cost: Envoy keeps a stream per request, and the body is buffered, not streamed. The
+  benchmark shows the difference to forward-auth on the same rules.
+
+The operator's configuration (not built yet) is to set: `request_body_mode: BUFFERED_PARTIAL` on routes
+whose policy inspects bodies (headers only otherwise), response stages `SKIP`, a message timeout
+just above the engine's deadline, and an Envoy buffer limit no lower than the largest
+`body.maxBytes`.
 
 ## 3. forward-auth (Traefik `ForwardAuth`, nginx `auth_request`)
 
@@ -138,7 +184,7 @@ the cluster's [Standalone mode](../glossary.md#standalone) (no control plane).
 | | Transport | Body | Response | Proxy waits? | For | Status |
 |---|---|---|---|---|---|---|
 | ext_authz | gRPC call | Buffered, optional | No | Yes | Envoy fallback | Not yet |
-| ext_proc | gRPC stream | Streamed | Yes | Yes, or no (observability mode) | Envoy, Istio, Contour | Not yet |
+| ext_proc | gRPC stream | Buffered (streaming possible) | Yes (not used yet) | Yes, or no (observability mode) | Envoy Gateway, Envoy, Istio, Contour | Built (engine) |
 | forward-auth | HTTP subrequest | If forwarded | No | Yes | Traefik, ingress-nginx | Built |
 | SPOE | SPOP | Yes | Possible | Yes, or no (asynchronous) | HAProxy | Not yet |
 | `/v1/check` | HTTP (gRPC planned) | Yes | No | Yes | CLI, tests; Lua and Traefik plugins planned | Built |

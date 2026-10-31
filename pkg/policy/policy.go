@@ -19,6 +19,7 @@ import (
 	"github.com/corazawaf/coraza/v3/types"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/router"
@@ -44,6 +45,9 @@ type Options struct {
 	// Evaluators reuses compiled rule sets across bundles; nil compiles
 	// every bundle from scratch.
 	Evaluators *Evaluators
+	// Stats counts each policy's requests, for the operator (nil: not
+	// counted).
+	Stats *events.Stats
 }
 
 // Policy is one compiled policy.
@@ -51,6 +55,7 @@ type Policy struct {
 	ID        string
 	pipeline  *pipeline.Pipeline
 	bodyLimit int64 // 0: bodies are not inspected
+	counter   *events.Counter
 }
 
 // Set is a compiled bundle. It is immutable and safe for concurrent use.
@@ -85,6 +90,7 @@ func (s *Set) Check(ctx context.Context, r *request.Request) pipeline.Verdict {
 	}
 	v := p.pipeline.Check(ctx, r)
 	v.Policy = p.ID
+	p.counter.Observe(v)
 	return v
 }
 
@@ -111,12 +117,17 @@ func Compile(b *bundlev1.Bundle, o Options) (*Set, error) {
 	set := &Set{version: b.GetVersion(), suspended: b.GetSuspended()}
 	var routes []route
 	used := map[[sha256.Size]byte]bool{}
+	ids := map[string]bool{}
 	for _, bp := range b.GetPolicies() {
 		p, key, err := compilePolicy(bp, ruleSets, o)
 		if err != nil {
 			return nil, fmt.Errorf("policy %s: %w", bp.GetId(), err)
 		}
 		used[key] = true
+		ids[p.ID] = true
+		if o.Stats != nil {
+			p.counter = o.Stats.Counter(p.ID)
+		}
 		set.policies = append(set.policies, p)
 		for _, m := range bp.GetRoutes() {
 			routes = append(routes, newRoute(m, p))
@@ -125,6 +136,9 @@ func Compile(b *bundlev1.Bundle, o Options) (*Set, error) {
 	set.match = newMatcher(routes)
 	if o.Evaluators != nil {
 		o.Evaluators.retain(used)
+	}
+	if o.Stats != nil {
+		o.Stats.Retain(ids)
 	}
 	return set, nil
 }
