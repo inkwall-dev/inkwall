@@ -35,7 +35,7 @@ check took.
 ## Test `WAFPolicy` objects
 
 Give `--policy` the policies, with the rule sets (`--rule-set`), [ConfigMaps](https://kubernetes.io/docs/concepts/configuration/configmap/) (`--configmap`) and
-[Ingresses](https://kubernetes.io/docs/concepts/services-networking/ingress/) (`--ingress`) they use. `inkwallctl` resolves them as the operator does, sends each
+[Ingresses](https://kubernetes.io/docs/concepts/services-networking/ingress/) or Traefik [IngressRoutes](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) (`--ingress`) they use. `inkwallctl` resolves them as the operator does, sends each
 request to the policy of its host and path (`policy=` names it), and compiles them as the engine
 does.
 
@@ -52,7 +52,10 @@ allow      GET /?id=1%27%20OR%20%271%27%3D%271  reason=no_policy  0s
   any of these kinds, or `kubectl get -o yaml` output. Each object is read by its kind, whichever
   flag named the file.
 - Without `--ingress`, a single policy applies to every request; several policies need the
-  Ingresses they target. `--ingress` reads `Ingress` objects only.
+  Ingresses or IngressRoutes they target.
+- An IngressRoute's match rules are read as the operator reads them: `Host`, `Path` and
+  `PathPrefix`, joined by `&&`. A policy whose IngressRoute has any other rule isn't enforced, and
+  `inkwallctl` says which rule.
 - Objects the operator would reject, such as a missing rule set or rules that don't compile, are
   errors.
 - Objects without a namespace go to `--namespace` (default `default`), as with `kubectl apply -n`.
