@@ -16,6 +16,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -140,7 +143,10 @@ func eventually(t *testing.T, what string, cond func() string) {
 	}
 }
 
-// Every integration has a ClusterRole of its own.
+// Every integration has a ClusterRole of its own, with every rule its
+// wiring's markers declare: each kubebuilder:rbac marker in
+// operator/internal/wiring, but the wiring controller's own, names its
+// integration's role.
 func TestRoles(t *testing.T) {
 	roles, err := access.Roles()
 	if err != nil {
@@ -154,6 +160,56 @@ func TestRoles(t *testing.T) {
 	if len(roles) != len(integrations.All) {
 		t.Errorf("roles for %d integrations, want %d", len(roles), len(integrations.All))
 	}
+
+	_, file, _, _ := runtime.Caller(0)
+	files, err := filepath.Glob(filepath.Join(filepath.Dir(file), "..", "..", "internal", "wiring", "*.go"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("wiring sources: %v", err)
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") || filepath.Base(f) == "controller.go" {
+			continue
+		}
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			marker, ok := strings.CutPrefix(line, "// +kubebuilder:rbac:")
+			if !ok {
+				continue
+			}
+			args := map[string][]string{}
+			for _, kv := range strings.Split(marker, ",") {
+				k, v, _ := strings.Cut(kv, "=")
+				args[k] = strings.Split(strings.Trim(v, `"`), ";")
+			}
+			name, ok := strings.CutPrefix(strings.Join(args["roleName"], ""), access.RolePrefix)
+			if !ok || roles[name] == nil {
+				t.Errorf("%s: %s: no roleName of an integration's ClusterRole", filepath.Base(f), line)
+				continue
+			}
+			for _, g := range args["groups"] {
+				for _, r := range args["resources"] {
+					for _, v := range args["verbs"] {
+						if !grants(roles[name], g, r, v) {
+							t.Errorf("%s: role %s doesn't grant %s %s.%s", filepath.Base(f), name, v, r, g)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// grants reports whether rules allow verb on group's resource.
+func grants(rules []rbacv1.PolicyRule, group, resource, verb string) bool {
+	for _, r := range rules {
+		if slices.Contains(r.APIGroups, group) && slices.Contains(r.Resources, resource) && slices.Contains(r.Verbs, verb) {
+			return true
+		}
+	}
+	return false
 }
 
 // The operator runs without Envoy Gateway's ClusterRole, with Envoy

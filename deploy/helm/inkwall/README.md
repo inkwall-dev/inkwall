@@ -3,7 +3,7 @@
 This [chart](https://helm.sh/docs/topics/charts/) installs the Inkwall [operator](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/), its [CRDs](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/) and its [webhooks](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/)
 ([design](../../../docs/design/0004-operator.md)). The operator validates policies and rule sets,
 builds them into a signed [bundle](../../../docs/glossary.md#bundle), serves the bundle to the engines, injects the engine into [Traefik](https://doc.traefik.io/traefik/)
-[pods](https://kubernetes.io/docs/concepts/workloads/pods/), and wires the [`Ingress`](https://kubernetes.io/docs/concepts/services-networking/ingress/) and [`IngressRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) objects your policies target.
+[pods](https://kubernetes.io/docs/concepts/workloads/pods/), and wires the [`Ingress`](https://kubernetes.io/docs/concepts/services-networking/ingress/), [`IngressRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) and [`HTTPRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/) objects your policies target.
 
 ## Contents
 
@@ -91,7 +91,7 @@ table above.
 ## Integration permissions
 
 Each integration's permissions are in a `ClusterRole` of its own: Traefik's writes its
-Middlewares, IngressRoutes and the Ingress annotation; Envoy Gateway's writes its `EnvoyProxy`,
+Middlewares, and the references to them in Ingresses, IngressRoutes and HTTPRoutes; Envoy Gateway's writes its `EnvoyProxy`,
 `EnvoyExtensionPolicy`, `Backend` and `ClientTrafficPolicy` objects and patches Gateways. Both are
 granted by default, whether the proxy is installed or not. For a proxy the cluster doesn't run,
 you can leave its role out:
@@ -184,8 +184,9 @@ Or skip the hook, with `helm uninstall --no-hooks` (or `uninstall.unwire=false`)
 wiring yourself:
 
 1. Remove the `inkwall-waf` entries from the Ingresses' `traefik.ingress.kubernetes.io/router.middlewares`
-   annotations and from the IngressRoutes' `spec.routes[*].middlewares`. The objects Inkwall wired
-   are annotated `waf.inkwall.dev/wired`.
+   annotations, from the IngressRoutes' `spec.routes[*].middlewares`, and the `ExtensionRef`
+   filters to `inkwall-waf` from the HTTPRoutes' `spec.rules[*].filters`. The objects Inkwall
+   wired are annotated `waf.inkwall.dev/wired`.
 2. For Envoy Gateway, delete the objects labelled `app.kubernetes.io/managed-by: inkwall-operator`
    of the kinds `envoyextensionpolicies`, `backends` and `clienttrafficpolicies`
    (`gateway.envoyproxy.io`). In each `EnvoyProxy` annotated `waf.inkwall.dev/wired`, remove the

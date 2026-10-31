@@ -92,7 +92,8 @@ rbac:
   # integration: policies on the routes of its proxy report
   # Programmed=False (IntegrationDisabled), and the others work.
   integrations:
-    # Traefik's Middlewares and IngressRoutes, the Ingress annotation.
+    # Traefik's Middlewares, and the references to them in Ingresses,
+    # IngressRoutes and HTTPRoutes.
     traefik: true
     # Envoy Gateway's EnvoyProxies, EnvoyExtensionPolicies, Backends and
     # ClientTrafficPolicies, a Gateway's parametersRef.

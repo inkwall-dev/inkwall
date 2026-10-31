@@ -47,10 +47,10 @@ unwiring with injection off ([§5](#5-uninstall-and-disable)); signing key rotat
 chunks ([§4.6](#46-bundle-builder-leader-only)); the operator side of the optional control plane:
 enrollment, GitOps and Managed modes, and security events ([§4.9](#49-upstream-sync-leader-only));
 the discovery controller ([§4.1](#41-discovery-controller)) and the wiring's `Integration` interface
-([§4.2](#42-integration-interface)); [Envoy Gateway](https://gateway.envoyproxy.io/) with [`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) targets ([§4.4](#44-wiring-controller)).
+([§4.2](#42-integration-interface)); [`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) targets served by Traefik's Gateway API provider
+or by [Envoy Gateway](https://gateway.envoyproxy.io/) ([§4.4](#44-wiring-controller)).
 
-**Not yet:** other proxies; Traefik's `HTTPRoute` targets (the resolver reads them,
-[§4.5](#45-resolver)).
+**Not yet:** other proxies.
 
 ## Contents
 
@@ -201,8 +201,8 @@ visible rather than silently unprotected.
   - `Full`: the integration's wiring takes the routes of all its classes: `Ingress` for an
     IngressClass, `HTTPRoute` for a GatewayClass;
   - `Partial`: of some of them; the `message` says which it doesn't;
-  - `Unsupported`: of none, or no integration. Today that includes Traefik's GatewayClasses;
-    Envoy Gateway's are `Full`.
+  - `Unsupported`: of none, or no integration. Traefik's IngressClasses and GatewayClasses, and
+    Envoy Gateway's GatewayClasses, are `Full`.
 - It writes the status only when it changes, and only into an existing `InkwallConfig` `default`:
   the operator doesn't create one.
 - Without the Gateway API's CRDs, GatewayClasses are left out; the leader looks for their CRD
@@ -247,7 +247,8 @@ reports them as `PendingRestart` rather than as missed by the Pod webhook (`Resu
 An `HTTPRoute` integration (Traefik's Gateway API, Envoy Gateway) adds its `HTTPRoute` kind,
 serves the routes whose parent Gateway has one of its GatewayClasses, wires each one (for example, Traefik's
 Middleware through an `ExtensionRef` filter, or Envoy Gateway's `EnvoyExtensionPolicy`), and is
-added to `wiring.Integrations`. Discovery then reports its GatewayClasses `Full`.
+added to `wiring.Integrations`. Discovery then reports its GatewayClasses `Full`. Traefik's does
+this in its one implementation, which also wires its HTTPRoutes ([§4.4](#44-wiring-controller)).
 
 **Not yet:** injection behind the interface (Traefik's Pod webhook; Envoy Gateway's goes through its
 wiring, [§4.4](#44-wiring-controller)); `Render` and golden files; `Health`.
@@ -330,7 +331,7 @@ check.
 | Envoy Gateway | `Backend` ([Unix socket](https://man7.org/linux/man-pages/man7/unix.7.html)) + [`EnvoyExtensionPolicy`](https://gateway.envoyproxy.io/docs/api/extension_types/#envoyextensionpolicy) per protected `HTTPRoute` | 0 |
 | Istio | gateway-scoped [`EnvoyFilter`](https://istio.io/latest/docs/reference/config/networking/envoy-filter/) | ~0 (per-route disable) |
 | ingress-nginx | [Lua](https://github.com/openresty/lua-nginx-module) plugin ConfigMap + `plugins` key | ~0 (in-memory route set) |
-| Traefik | `Middleware` per namespace, attached to protected routes | 0 |
+| Traefik | `Middleware` per namespace, attached to protected routes (`Ingress`, `IngressRoute`, `HTTPRoute`) | 0 |
 | HAProxy | [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) config + map of protected routes in an ACL | ~0 (map lookup) |
 | Caddy | nothing | 0 |
 
@@ -340,8 +341,8 @@ User-owned objects touched, with the fewest fields:
   `container.volumeMounts`; or, for a Gateway that names none, the Gateway's
   `spec.infrastructure.parametersRef` to an operator-made one.
 - ingress-nginx's `data.plugins`: merged, with the original saved for uninstall.
-- Traefik's `router.middlewares` [annotation](https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/) on an `Ingress`, and `spec.routes[*].middlewares` on
-  an `IngressRoute`.
+- Traefik's `router.middlewares` [annotation](https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/) on an `Ingress`, `spec.routes[*].middlewares` on
+  an `IngressRoute`, and `spec.rules[*].filters` on an `HTTPRoute` that a Traefik Gateway serves.
 - The `waf.inkwall.dev/unwire` finalizer on a `WAFPolicy` ([§5](#5-uninstall-and-disable)).
 
 Of the chart's own objects, the operator changes the Pod webhook's `failurePolicy` and
@@ -384,6 +385,23 @@ longer needed.
     Middleware is, so it works with [`allowCrossNamespace`](https://doc.traefik.io/traefik/providers/kubernetes-crd/#allowcrossnamespace) off (the default).
   - To a merge patch, `spec.routes` is one list. So the patch carries the `resourceVersion`, and a
     conflict retries.
+- **HTTPRoute** (`gateway.networking.k8s.io/v1`), served by [Traefik's Gateway API provider](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/). Traefik serves
+  an HTTPRoute when one of its `parentRefs` Gateways has a GatewayClass with controller
+  `traefik.io/gateway-controller`.
+  - An `ExtensionRef` filter to the Middleware (`group: traefik.io`, `kind: Middleware`, `name:
+    inkwall-waf`, no namespace: it is the route's) goes first in each protected rule's `filters`,
+    with the user's filters kept in order, and `waf.inkwall.dev/wired: inkwall-waf` is set. With
+    `sectionName`, only that rule gets it; a whole-route policy wires every rule. Unprotecting
+    removes only the operator's filter, and any list it leaves empty.
+  - `spec.rules` is one list to a merge patch, so the patch carries the `resourceVersion`, and a
+    conflict retries. The operator reads the route from the API server before writing it, so rule
+    fields newer than its Gateway API types (v1.7) are kept.
+  - A route attached to Gateways of several controllers is wired for Traefik, and for Envoy
+    Gateway if its Gateways are among them; `Programmed` counts it in each and waits for both.
+    It is `True` with a message naming the controllers no integration wires, whose traffic isn't
+    inspected. A route of no Traefik Gateway is `ControllerUnsupported`, naming its controllers.
+  - The leader looks for the HTTPRoute, Gateway and GatewayClass CRDs every 30 s, then the wiring
+    watches them.
 - **Only with an injected Traefik.** Routes are wired only while a Traefik pod that the webhook
   selects is running, with injection on. Otherwise new Traefik pods would get no engine to call, so
   everything is unwired (`SidecarMissing`, or `InjectionDisabled`, [§5](#5-uninstall-and-disable)).
@@ -392,21 +410,22 @@ longer needed.
   IngressRoute CRD every 30 s. Once it is installed, the bundle builder and the wiring watch
   IngressRoutes (`operator/internal/crdwatch`). The wiring's resync (1 min) notices a Middleware CRD
   installed later.
-- **`Programmed=True`** when all the policy's Traefik Ingresses and IngressRoutes are wired and
+- **`Programmed=True`** when all the policy's Traefik Ingresses, IngressRoutes and HTTPRoutes are
+  wired and
   every running Traefik pod has the engine. Otherwise the reason is one of:
   - `ControllerUnsupported`: another controller or kind;
   - `IntegrationDisabled`: the operator may not wire the target's proxy, and which permissions it
     lacks ([§7](#7-rbac));
-  - `WiringFailed`: no Traefik CRDs, a name clash, or an IngressRoute that can't be written;
+  - `WiringFailed`: no Traefik CRDs, a name clash, or a route that can't be written;
   - `PendingRestart`: pods older than the webhook, listed;
   - `SidecarMissing`: no Traefik pod selected, or pods without the engine (the operator was down
     in detect mode, or they opted out), listed;
   - `NoTargets`;
   - `InjectionDisabled`;
   - `Unwired`: set by the uninstall hook, with the operator stopped ([§5](#5-uninstall-and-disable)).
-- **Not yet:** Traefik's `HTTPRoute` targets; matching engines to the pods that serve a policy's
-  class (all engines count for `Enforced`); IngressRoutes nested with `parentRefs`. Whether Traefik
-  attachment should default to something else is open ([§12](#12-open-questions)).
+- **Not yet:** matching engines to the pods that serve a policy's class (all
+  engines count for `Enforced`); IngressRoutes nested with `parentRefs`. Whether Traefik attachment
+  should default to something else is open ([§12](#12-open-questions)).
 
 **Built since: Envoy Gateway** (`operator/internal/wiring/envoygateway.go`, the `EnvoyGateway`
 integration), for `HTTPRoute` targets whose parent Gateways have a GatewayClass of
@@ -518,8 +537,8 @@ It runs again when a targeted route changes (routes are indexed by target).
   - Read once the HTTPRoute CRD (`gateway.networking.k8s.io/v1`) is installed: the leader looks for
     it every 30 s, then the bundle builder watches HTTPRoutes (`operator/internal/crdwatch`).
     Without it nothing changes.
-  - Envoy Gateway wires them ([§4.4](#44-wiring-controller)); an HTTPRoute of another controller
-    is `Programmed=False` (`ControllerUnsupported`).
+  - Traefik and Envoy Gateway wire the HTTPRoutes their Gateways serve ([§4.4](#44-wiring-controller));
+    an HTTPRoute of another controller is `Programmed=False` (`ControllerUnsupported`).
 - **Cross-namespace `WAFRuleSet` references** are rejected until a grant mechanism exists. Use a
   `ClusterWAFRuleSet` instead.
 
@@ -885,9 +904,10 @@ holds what its wiring writes, and its proxy's own kinds.
 | `ingressclasses`, `ingresses`, `pods` | read | Resolution, injection checks, discovery |
 | `gatewayclasses` (gateway.networking.k8s.io) | read | Discovery |
 | `ingressroutes` (traefik.io) | read | IngressRoute targets ([§4.5](#45-resolver)) |
-| `httproutes`, `gateways`, `gatewayclasses` (gateway.networking.k8s.io) | read | HTTPRoute targets ([§4.5](#45-resolver)) |
+| `httproutes`, `gateways`, `gatewayclasses` (gateway.networking.k8s.io) | read | HTTPRoute targets ([§4.5](#45-resolver)), the Gateways serving them |
 | Traefik's `ClusterRole`: `ingresses` | update, patch | Traefik annotation |
 | Traefik's: `ingressroutes` (traefik.io) | update, patch | Traefik routes' `middlewares` |
+| Traefik's: `httproutes` (gateway.networking.k8s.io) | update, patch | Traefik rules' `filters` |
 | Traefik's: `middlewares` (traefik.io) | full | Traefik wiring |
 | Envoy Gateway's: `gateways` (gateway.networking.k8s.io) | update, patch | A Gateway's `parametersRef` ([§4.4](#44-wiring-controller)) |
 | Envoy Gateway's: `envoyproxies`, `envoyextensionpolicies`, `backends`, `clienttrafficpolicies` (gateway.envoyproxy.io) | full | Envoy Gateway wiring |

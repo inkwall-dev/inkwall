@@ -287,7 +287,7 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 	if rep.disabled {
 		return metav1.ConditionFalse, ReasonInjectionDisabled, "the engine is not injected into proxy pods (injection is off): the routes are not wired"
 	}
-	var unsupported, failed, disabled, pending []string
+	var unsupported, failed, disabled, pending, partly []string
 	// wired counts the wired targets by result, then kind.
 	wired := make([]map[schema.GroupKind]int, len(rep.results))
 	total := 0
@@ -297,25 +297,30 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 			unsupported = append(unsupported, fmt.Sprintf("%s %s (only %s targets are wired so far)", ref.Kind, ref.Name, kindList(rep.kinds)))
 			continue
 		}
-		// The integration whose proxy serves the target, else why none does.
-		served, why := -1, ""
+		// The integrations whose proxies serve the target (an HTTPRoute may
+		// be attached to Gateways of several), else why none does.
+		var served []int
+		why := ""
 		for i, res := range rep.results {
 			s, ok := res.Targets[t]
-			if !ok {
-				continue
-			}
-			if s.Unsupported == "" {
-				served = i
-				break
-			}
-			if why == "" {
+			switch {
+			case !ok:
+			case s.Unsupported == "":
+				served = append(served, i)
+			case why == "":
 				why = s.Unsupported
 			}
 		}
-		switch {
-		case served >= 0:
-			s := rep.results[served].Targets[t]
-			if why := rep.results[served].Disabled; why != "" {
+		if len(served) == 0 {
+			if why != "" {
+				unsupported = append(unsupported, why)
+			}
+			// Otherwise the target doesn't exist: reported by Accepted.
+			continue
+		}
+		for _, i := range served {
+			s := rep.results[i].Targets[t]
+			if why := rep.results[i].Disabled; why != "" {
 				disabled = append(disabled, why)
 				continue
 			}
@@ -326,15 +331,15 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 			if s.Pending != "" {
 				pending = append(pending, s.Pending)
 			}
-			if wired[served] == nil {
-				wired[served] = map[schema.GroupKind]int{}
+			if s.Partly != "" {
+				partly = append(partly, s.Partly)
 			}
-			wired[served][t.Kind]++
-			total++
-		case why != "":
-			unsupported = append(unsupported, why)
+			if wired[i] == nil {
+				wired[i] = map[schema.GroupKind]int{}
+			}
+			wired[i][t.Kind]++
 		}
-		// Otherwise the target doesn't exist: reported by Accepted.
+		total++
 	}
 	slices.Sort(failed)
 	switch {
@@ -371,6 +376,8 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 		slices.Sort(pending)
 		return metav1.ConditionFalse, ReasonPending, strings.Join(slices.Compact(pending), "; ")
 	}
+	slices.Sort(partly)
+	msgs = append(msgs, slices.Compact(partly)...)
 	return metav1.ConditionTrue, ReasonProgrammed, strings.Join(msgs, "; ")
 }
 

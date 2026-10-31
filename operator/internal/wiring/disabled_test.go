@@ -66,8 +66,9 @@ func TestDisabled(t *testing.T) {
 		class("traefik", integrations.Traefik.Controller), class("nginx", "k8s.io/ingress-nginx"),
 		ingress("web", "traefik"), ingress("other", "nginx"), ingressRoute("shop", "ir"),
 		gatewayClass("eg", integrations.EnvoyGateway.GatewayController), gatewayClass("other", "example.com/gateway"),
-		gateway("eg", "eg"), gateway("other", "other"),
-		route("envoy", "other", "eg"), route("elsewhere", "other"), route("orphan", "missing"),
+		gatewayClass("traefik", integrations.Traefik.GatewayController),
+		gateway("eg", "eg"), gateway("other", "other"), gateway("traefik", "traefik"),
+		route("envoy", "other", "eg"), route("elsewhere", "other"), route("orphan", "missing"), route("traefik", "traefik"),
 	).WithInterceptorFuncs(interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 			if gvk, _ := c.GroupVersionKindFor(obj); gvk.Group == "gateway.envoyproxy.io" || gvk.Kind == "Middleware" {
@@ -107,12 +108,14 @@ func TestDisabled(t *testing.T) {
 		targets: []Target{
 			target(ingressKind, "web"), target(ingressKind, "other"), target(ingressKind, "missing"),
 			target(routeKind, "ir"), target(routeKind, "missing"),
+			target(httpRouteKind, "traefik"), target(httpRouteKind, "envoy"),
 		},
-		served: []Target{target(ingressKind, "web"), target(routeKind, "ir")},
+		served: []Target{target(ingressKind, "web"), target(routeKind, "ir"), target(httpRouteKind, "traefik")},
 	}, {
 		in: &EnvoyGateway{Client: c, APIReader: c},
 		targets: []Target{
 			target(httpRouteKind, "envoy"), target(httpRouteKind, "elsewhere"), target(httpRouteKind, "orphan"), target(httpRouteKind, "missing"),
+			target(httpRouteKind, "traefik"),
 		},
 		served: []Target{target(httpRouteKind, "envoy")},
 	}} {
