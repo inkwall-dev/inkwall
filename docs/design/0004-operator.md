@@ -627,7 +627,9 @@ leader only, and is idle in Standalone mode (the default).
 - It takes counts only for the policies of the bundle it serves, and keeps the totals of at least
   4096 policies. Past that, it forgets those no longer in the bundle, so the totals stay bounded
   as policies come and go; a policy that comes back counts from zero again. Both are counted in
-  `inkwall_operator_request_stats_dropped_total{reason}`.
+  `inkwall_operator_request_stats_dropped_total{reason}`. A policy's total can therefore go down
+  under the same `since`; the contract (`RequestStatsUpload`) tells consumers to treat any
+  decrease as a reset, the rule the operator applies to its engines. The fake control plane does.
 - The events stream reconnects with jittered backoff bounded at 10 s (the leader's primary stream:
   1 min), so the backlog drains soon after an outage.
 

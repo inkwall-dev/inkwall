@@ -1372,6 +1372,12 @@ func (x *EventsAck) GetSequence() uint64 {
 // cumulative since `since` (when the replica started counting), so a lost
 // upload loses nothing; the sum over a cluster's replicas is the cluster's.
 // A replica that restarts counts from zero again, with a new `since`.
+// Within one `since`, a policy's counts can also go down: past a limit, a
+// replica forgets the policies no longer in its bundle, and one that comes
+// back counts from zero again. A consumer must treat any count lower than
+// the previous one (allowed, denied, detected or a latency bucket) as a
+// reset: the new value is all new, counted from zero. The operator applies
+// the same rule to its engines' reports.
 type RequestStatsUpload struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Since         *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=since,proto3" json:"since,omitempty"`

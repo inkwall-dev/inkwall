@@ -211,7 +211,9 @@ stops accepting events, empties the buffer.
 
 Request counts need no buffer: each replica keeps its running totals in memory and sends them all
 again after reconnecting. A replica that restarts starts again from zero. It keeps the totals of
-at least 4096 policies; past that, it forgets those no longer in a bundle.
+at least 4096 policies; past that, it forgets those no longer in a bundle, and one that comes back
+starts again from zero. So a policy's total can go down: the control plane treats any decrease as
+a reset and counts the new value from zero, the rule the operator applies to its engines.
 
 The operator's [Prometheus metrics](https://prometheus.io/docs/concepts/metric_types/)
 (`:8080/metrics` on each replica) show the buffer and what was dropped:
