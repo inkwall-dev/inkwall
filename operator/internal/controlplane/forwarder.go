@@ -20,6 +20,7 @@ import (
 	controlplanev1 "github.com/inkwall-dev/inkwall/api/controlplane/v1"
 	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/pkg/events"
 )
 
 const (
@@ -28,6 +29,9 @@ const (
 	// DefaultEventsMaxBackoff bounds the wait between events stream
 	// reconnects.
 	DefaultEventsMaxBackoff = 10 * time.Second
+	// maxEventUpload bounds the events of an upload, encoded: each fits
+	// the contract's maxMessage, with room.
+	maxEventUpload = 4 << 20
 )
 
 // Forwarder sends the security events of the engines connected to this
@@ -88,8 +92,10 @@ func (f *Forwarder) Add(b *eventsv1.EventBatch) {
 	if !f.accepts.Load() || q == nil {
 		return
 	}
-	if err := q.add(b); err != nil {
-		eventsForwardErrors.Inc()
+	for _, part := range events.Split(b, maxEventUpload) {
+		if err := q.add(part); err != nil {
+			eventsForwardErrors.Inc()
+		}
 	}
 }
 

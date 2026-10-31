@@ -15,6 +15,7 @@ package resolver
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"path"
 	"slices"
@@ -26,6 +27,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
@@ -54,7 +56,9 @@ type Input struct {
 	Ingresses []networkingv1.Ingress
 	// IngressRoutes are Traefik's (traefik.io/v1alpha1); none when its
 	// CRD isn't installed.
-	IngressRoutes   []unstructured.Unstructured
+	IngressRoutes []unstructured.Unstructured
+	// HTTPRoutes are Gateway API's; none when its CRDs aren't installed.
+	HTTPRoutes      []gatewayv1.HTTPRoute
 	RuleSets        []wafv1alpha1.WAFRuleSet
 	ClusterRuleSets []wafv1alpha1.ClusterWAFRuleSet
 	// ConfigMaps rule sets read rules from (labeled RulesLabel).
@@ -176,6 +180,14 @@ func (r *resolution) ruleSet(id string, src wafv1alpha1.RuleSetSource, configMap
 	return out, Status{Accepted: true, Reason: ReasonAccepted, Message: "the rule set is valid"}
 }
 
+// Target precedence (0002 §4.2): a route of several policies goes to the
+// one with the most specific target, then to the older one.
+const (
+	rankIngress       = iota // an Ingress or an IngressRoute
+	rankHTTPRoute            // a whole HTTPRoute
+	rankHTTPRouteRule        // one rule of an HTTPRoute (sectionName)
+)
+
 // candidate is a policy being resolved.
 type candidate struct {
 	obj    *wafv1alpha1.WAFPolicy
@@ -184,6 +196,18 @@ type candidate struct {
 	status Status
 	// failed means the policy falls back to its previous version.
 	failed bool
+	// rank is the precedence of each route (by routeKey), from its most
+	// specific target.
+	rank map[string]int
+}
+
+// addRoutes adds routes from a target of the given precedence.
+func (c *candidate) addRoutes(rank int, routes []*bundlev1.RouteMatch) {
+	c.policy.Routes = append(c.policy.Routes, routes...)
+	for _, m := range routes {
+		k := routeKey(m)
+		c.rank[k] = max(c.rank[k], rank)
+	}
 }
 
 func (r *resolution) resolvePolicies() {
@@ -196,6 +220,11 @@ func (r *resolution) resolvePolicies() {
 	for i := range r.in.IngressRoutes {
 		ir := &r.in.IngressRoutes[i]
 		ingressRoutes[types.NamespacedName{Namespace: ir.GetNamespace(), Name: ir.GetName()}] = ir
+	}
+	httpRoutes := map[types.NamespacedName]*gatewayv1.HTTPRoute{}
+	for i := range r.in.HTTPRoutes {
+		hr := &r.in.HTTPRoutes[i]
+		httpRoutes[types.NamespacedName{Namespace: hr.Namespace, Name: hr.Name}] = hr
 	}
 
 	// Oldest first: on a conflict the older policy wins, as in Gateway API,
@@ -211,12 +240,16 @@ func (r *resolution) resolvePolicies() {
 	var cands []*candidate
 	owner := map[string]*candidate{} // target -> the policy that has it
 	for i := range policies {
-		c := r.candidate(&policies[i], ingresses, ingressRoutes)
+		c := r.candidate(&policies[i], ingresses, ingressRoutes, httpRoutes)
 		for _, t := range c.obj.Spec.TargetRefs {
 			k := targetKey(c.key.Namespace, t)
 			if prev, ok := owner[k]; ok {
-				c.fail(ReasonConflict, fmt.Sprintf("%s %s is also targeted by the older WAFPolicy %s, which applies to it",
-					t.Kind, t.Name, prev.key.Name))
+				target := t.Kind + " " + t.Name
+				if t.SectionName != "" {
+					target = fmt.Sprintf("rule %s of %s", t.SectionName, target)
+				}
+				c.fail(ReasonConflict, fmt.Sprintf("%s is also targeted by the older WAFPolicy %s, which applies to it",
+					target, prev.key.Name))
 				continue
 			}
 			owner[k] = c
@@ -235,37 +268,70 @@ func (r *resolution) resolvePolicies() {
 		}
 	}
 
-	used := map[string]*bundlev1.RuleSet{}
-	routes := map[string]string{} // route -> policy id that has it
-	for _, c := range cands {
-		pol := c.policy
-		usedRuleSets := r.ruleSets
+	// The policy each candidate puts in the bundle: its spec, or its
+	// previous version; nil: left out.
+	pols := make([]*bundlev1.Policy, len(cands))
+	for i, c := range cands {
+		pols[i] = c.policy
 		if c.failed {
 			prev, ok := previous[c.policy.GetId()]
 			if !ok {
-				r.out.PolicyStatus[c.key] = c.status
+				pols[i] = nil
 				continue
 			}
 			c.status.Message += "; the previous version of the policy stays in force"
-			pol = proto.Clone(prev).(*bundlev1.Policy)
+			pols[i] = proto.Clone(prev).(*bundlev1.Policy)
+		}
+	}
+
+	// A route of several policies (from routes with the same host and path)
+	// goes to the most specific target, then to the older policy. A route
+	// of a previous version that the spec doesn't give ranks as an Ingress.
+	type claim struct {
+		c    *candidate
+		rank int
+	}
+	routeOwner := map[string]claim{}
+	for i, c := range cands {
+		for _, m := range pols[i].GetRoutes() {
+			k := routeKey(m)
+			if o, ok := routeOwner[k]; !ok || c.rank[k] > o.rank {
+				routeOwner[k] = claim{c, c.rank[k]}
+			}
+		}
+	}
+
+	used := map[string]*bundlev1.RuleSet{}
+	for i, c := range cands {
+		pol := pols[i]
+		if pol == nil {
+			r.out.PolicyStatus[c.key] = c.status
+			continue
+		}
+		usedRuleSets := r.ruleSets
+		if c.failed {
 			usedRuleSets = previousRuleSets
 		}
-		// A route of two policies (from two routes with the same host and
-		// path) goes to the older one.
 		var kept []*bundlev1.RouteMatch
 		var shadowed []string
+		seen := map[string]bool{}
 		for _, m := range pol.GetRoutes() {
 			k := routeKey(m)
-			if other, ok := routes[k]; ok {
-				shadowed = append(shadowed, fmt.Sprintf("%s (older policy %s)", describeRoute(m), other))
-				continue
+			switch o := routeOwner[k]; {
+			case o.c != c:
+				why := "older policy"
+				if o.rank > c.rank[k] {
+					why = "policy on a more specific target"
+				}
+				shadowed = append(shadowed, fmt.Sprintf("%s (%s %s)", describeRoute(m), why, o.c.policy.GetId()))
+			case !seen[k]:
+				seen[k] = true
+				kept = append(kept, m)
 			}
-			routes[k] = pol.GetId()
-			kept = append(kept, m)
 		}
 		pol.Routes = kept
 		if len(shadowed) > 0 && !c.failed {
-			c.status.Message = fmt.Sprintf("%s; routes covered by an older policy, which applies to them: %s",
+			c.status.Message = fmt.Sprintf("%s; routes covered by another policy, which applies to them: %s",
 				c.status.Message, strings.Join(shadowed, ", "))
 		}
 		for _, b := range pol.GetRuleSets() {
@@ -295,11 +361,12 @@ func (c *candidate) fail(reason, message string) {
 }
 
 func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.NamespacedName]*networkingv1.Ingress,
-	ingressRoutes map[types.NamespacedName]*unstructured.Unstructured) *candidate {
+	ingressRoutes map[types.NamespacedName]*unstructured.Unstructured, httpRoutes map[types.NamespacedName]*gatewayv1.HTTPRoute) *candidate {
 	c := &candidate{
 		obj:    p,
 		key:    types.NamespacedName{Namespace: p.Namespace, Name: p.Name},
 		status: Status{Accepted: true, Reason: ReasonAccepted, Message: PolicyValid},
+		rank:   map[string]int{},
 	}
 	c.policy = convertSpec(PolicyID(p.Namespace, p.Name), p.Spec)
 
@@ -331,7 +398,7 @@ func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.Nam
 				missing = append(missing, "Ingress "+t.Name)
 				continue
 			}
-			c.policy.Routes = append(c.policy.Routes, ingressMatches(ing)...)
+			c.addRoutes(rankIngress, ingressMatches(ing))
 		case "IngressRoute":
 			ir, ok := ingressRoutes[types.NamespacedName{Namespace: p.Namespace, Name: t.Name}]
 			if !ok {
@@ -343,9 +410,29 @@ func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.Nam
 				c.fail(ReasonTargetUnsupported, fmt.Sprintf("IngressRoute %s: %v", t.Name, err))
 				continue
 			}
-			c.policy.Routes = append(c.policy.Routes, routes...)
+			c.addRoutes(rankIngress, routes)
+		case "HTTPRoute":
+			hr, ok := httpRoutes[types.NamespacedName{Namespace: p.Namespace, Name: t.Name}]
+			if !ok {
+				missing = append(missing, "HTTPRoute "+t.Name)
+				continue
+			}
+			routes, err := httpRouteMatches(hr, t.SectionName)
+			switch {
+			case errors.Is(err, errNoRule):
+				missing = append(missing, fmt.Sprintf("rule %s of HTTPRoute %s", t.SectionName, t.Name))
+				continue
+			case err != nil:
+				c.fail(ReasonTargetUnsupported, fmt.Sprintf("HTTPRoute %s: %v", t.Name, err))
+				continue
+			}
+			rank := rankHTTPRoute
+			if t.SectionName != "" {
+				rank = rankHTTPRouteRule
+			}
+			c.addRoutes(rank, routes)
 		default:
-			c.fail(ReasonTargetUnsupported, fmt.Sprintf("%s %s: only Ingress and IngressRoute targets are resolved so far", t.Kind, t.Name))
+			c.fail(ReasonTargetUnsupported, fmt.Sprintf("%s %s: only Ingress, IngressRoute and HTTPRoute targets are resolved", t.Kind, t.Name))
 		}
 	}
 	if len(missing) > 0 {

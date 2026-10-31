@@ -5,6 +5,7 @@ package wiring
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"testing"
 
@@ -62,7 +63,7 @@ func TestUnwire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != (Unwired{Ingresses: 2, IngressRoutes: 1, Middlewares: 1, Policies: 2}) {
+	if n.Policies != 2 || !maps.Equal(n.Objects, map[string]int{"Ingress": 2, "IngressRoute": 1, "Middleware": 1}) {
 		t.Errorf("unwired %+v, want 2 Ingresses, 1 IngressRoute, 1 Middleware and 2 policies", n)
 	}
 	var p wafv1alpha1.WAFPolicy
@@ -119,7 +120,7 @@ func TestUnwire(t *testing.T) {
 	}
 
 	// Again: nothing left to do.
-	if n, err := Unwire(ctx, c); err != nil || n != (Unwired{}) {
+	if n, err := Unwire(ctx, c); err != nil || n.Policies != 0 || len(n.Objects) != 0 {
 		t.Errorf("second run: %+v, %v", n, err)
 	}
 }
@@ -138,7 +139,7 @@ func TestUnwireWithoutTraefikCRDs(t *testing.T) {
 		},
 	}).Build()
 	n, err := Unwire(context.Background(), c)
-	if err != nil || n != (Unwired{Ingresses: 1}) {
+	if err != nil || n.Policies != 0 || !maps.Equal(n.Objects, map[string]int{"Ingress": 1}) {
 		t.Errorf("unwired %+v, %v; want 1 Ingress", n, err)
 	}
 }

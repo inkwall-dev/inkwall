@@ -17,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
@@ -30,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
@@ -52,6 +54,7 @@ import (
 // +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies/status;wafrulesets/status;clusterwafrulesets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=traefik.io,resources=ingressroutes,verbs=get;list;watch
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes;gateways;gatewayclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=namespaces,resourceNames=kube-system,verbs=get
 
@@ -72,6 +75,9 @@ const (
 	// statusWriters is how many policy statuses are written at once.
 	statusWriters = 8
 )
+
+// HTTPRouteGVK is Gateway API's HTTPRoute, whose CRD may be missing.
+var HTTPRouteGVK = schema.GroupVersionKind{Group: gatewayv1.GroupName, Version: "v1", Kind: "HTTPRoute"}
 
 // warnBytes is the compressed size past which publishing a bundle warns.
 const warnBytes = bundle.MaxCompressedBytes * 3 / 4
@@ -101,6 +107,9 @@ type BundleReconciler struct {
 	// IngressRoutes watches Traefik's IngressRoutes once their CRD is
 	// installed; nil: they are only read at each build.
 	IngressRoutes *crdwatch.Kind
+	// HTTPRoutes watches Gateway API's HTTPRoutes once their CRD is
+	// installed; nil: they are only read at each build.
+	HTTPRoutes *crdwatch.Kind
 
 	// keys is the keyring last read or written, to recreate the signing
 	// key Secret if it is deleted: engines trust these keys.
@@ -186,6 +195,9 @@ func (r *BundleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.IngressRoutes != nil {
 		r.IngressRoutes.Add(c, enqueue, predicate.GenerationChangedPredicate{})
 	}
+	if r.HTTPRoutes != nil {
+		r.HTTPRoutes.Add(c, enqueue, predicate.GenerationChangedPredicate{})
+	}
 	return nil
 }
 
@@ -222,6 +234,9 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 		return reconcile.Result{}, fmt.Errorf("list IngressRoutes: %w", err)
 	}
 	in.IngressRoutes = routes
+	if in.HTTPRoutes, err = HTTPRoutes(ctx, r.Client); err != nil {
+		return reconcile.Result{}, fmt.Errorf("list HTTPRoutes: %w", err)
+	}
 
 	cfg, err := r.config(ctx)
 	if err != nil {
@@ -568,4 +583,17 @@ func (r *BundleReconciler) updateStatus(ctx context.Context, obj client.Object, 
 		return nil // deleted meanwhile
 	}
 	return err
+}
+
+// HTTPRoutes lists Gateway API's HTTPRoutes; none when their CRD isn't
+// installed.
+func HTTPRoutes(ctx context.Context, c client.Client) ([]gatewayv1.HTTPRoute, error) {
+	if installed, err := crdwatch.Installed(c.RESTMapper(), HTTPRouteGVK); !installed || err != nil {
+		return nil, err
+	}
+	var list gatewayv1.HTTPRouteList
+	if err := c.List(ctx, &list); err != nil {
+		return nil, err
+	}
+	return list.Items, nil
 }
