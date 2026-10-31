@@ -133,7 +133,7 @@ func TestWithSidecar(t *testing.T) {
 
 func TestExtensionPolicy(t *testing.T) {
 	hr := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "app", UID: "u1"}}
-	p := extensionPolicy(&envoyRoute{route: hr, sections: []string{""}, body: true, timeout: 250 * time.Millisecond})
+	p := extensionPolicy(&envoyRoute{route: hr, sections: []string{""}, routeSettings: routeSettings{body: true, timeout: 250 * time.Millisecond}})
 	if p.GetName() != "inkwall-waf-app" || p.GetNamespace() != "shop" || p.GetOwnerReferences()[0].UID != "u1" || !isManaged(p) {
 		t.Errorf("metadata %v", p.Object["metadata"])
 	}
@@ -143,9 +143,9 @@ func TestExtensionPolicy(t *testing.T) {
 		t.Errorf("targetRefs %v", spec["targetRefs"])
 	}
 	ep := spec["extProc"].([]any)[0].(map[string]any)
-	if ep["messageTimeout"] != "750ms" || ep["failOpen"] != false ||
-		ep["processingMode"].(map[string]any)["request"].(map[string]any)["body"] != "BufferedPartial" ||
-		ep["processingMode"].(map[string]any)["response"] != nil {
+	request := ep["processingMode"].(map[string]any)["request"].(map[string]any)
+	if ep["messageTimeout"] != "750ms" || ep["failOpen"] != false || ep["shadowMode"] != nil || request["body"] != "BufferedPartial" ||
+		jsonOf(request["attributes"]) != `["request.protocol"]` || ep["processingMode"].(map[string]any)["response"] != nil {
 		t.Errorf("extProc %v", ep)
 	}
 	be := ep["backendRefs"].([]any)[0].(map[string]any)
@@ -154,15 +154,22 @@ func TestExtensionPolicy(t *testing.T) {
 	}
 
 	// Two rules, no body, failing open.
-	p = extensionPolicy(&envoyRoute{route: hr, sections: []string{"admin", "login"}, timeout: time.Second, failOpen: true})
+	p = extensionPolicy(&envoyRoute{route: hr, sections: []string{"admin", "login"}, routeSettings: routeSettings{timeout: time.Second, failOpen: true}})
 	spec = p.Object["spec"].(map[string]any)
 	refs := spec["targetRefs"].([]any)
 	if len(refs) != 2 || refs[0].(map[string]any)["sectionName"] != "admin" || refs[1].(map[string]any)["sectionName"] != "login" {
 		t.Errorf("targetRefs %v", refs)
 	}
 	ep = spec["extProc"].([]any)[0].(map[string]any)
-	if ep["messageTimeout"] != "1500ms" || ep["failOpen"] != true || len(ep["processingMode"].(map[string]any)["request"].(map[string]any)) != 0 {
+	if ep["messageTimeout"] != "1500ms" || ep["failOpen"] != true || ep["processingMode"].(map[string]any)["request"].(map[string]any)["body"] != nil {
 		t.Errorf("extProc %v", ep)
+	}
+
+	// Detect mode: Envoy doesn't wait, and streams the body.
+	p = extensionPolicy(&envoyRoute{route: hr, sections: []string{""}, routeSettings: routeSettings{body: true, timeout: time.Second, failOpen: true, detect: true}})
+	ep = p.Object["spec"].(map[string]any)["extProc"].([]any)[0].(map[string]any)
+	if ep["shadowMode"] != true || ep["processingMode"].(map[string]any)["request"].(map[string]any)["body"] != "Streamed" {
+		t.Errorf("detect mode: extProc %v", ep)
 	}
 
 	b := backend("shop")
@@ -182,28 +189,33 @@ func TestRouteSettings(t *testing.T) {
 		return wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: name}, Spec: spec}
 	}
 	noBody := &wafv1alpha1.BodySpec{Inspect: ptr.To(false)}
+	const def = 250 * time.Millisecond
 	for _, tc := range []struct {
 		name     string
 		policies []wafv1alpha1.WAFPolicy
-		body     bool
-		timeout  time.Duration
-		failOpen bool
+		want     routeSettings
 	}{
-		{"detect", []wafv1alpha1.WAFPolicy{pol("a", wafv1alpha1.WAFPolicySpec{})}, true, 250 * time.Millisecond, true},
-		{"block", []wafv1alpha1.WAFPolicy{pol("a", wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock})}, true, 250 * time.Millisecond, false},
+		{"detect", []wafv1alpha1.WAFPolicy{pol("a", wafv1alpha1.WAFPolicySpec{})}, routeSettings{body: true, timeout: def, failOpen: true, detect: true}},
+		{"block", []wafv1alpha1.WAFPolicy{pol("a", wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock})}, routeSettings{body: true, timeout: def}},
 		{"block, failing open, no body", []wafv1alpha1.WAFPolicy{pol("a", wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock, FailureMode: wafv1alpha1.FailOpen, Body: noBody})},
-			false, 250 * time.Millisecond, true},
+			routeSettings{timeout: def, failOpen: true}},
+		// The engine rejects what it can't inspect: Envoy must wait.
+		{"detect, failing closed", []wafv1alpha1.WAFPolicy{pol("a", wafv1alpha1.WAFPolicySpec{FailureMode: wafv1alpha1.FailClosed})},
+			routeSettings{body: true, timeout: def}},
+		{"detect and block", []wafv1alpha1.WAFPolicy{
+			pol("a", wafv1alpha1.WAFPolicySpec{}),
+			pol("b", wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock, FailureMode: wafv1alpha1.FailOpen}),
+		}, routeSettings{body: true, timeout: def, failOpen: true}},
 		{"two rules' policies", []wafv1alpha1.WAFPolicy{
 			pol("a", wafv1alpha1.WAFPolicySpec{Body: noBody, Timeout: &metav1.Duration{Duration: 800 * time.Millisecond}}),
 			pol("b", wafv1alpha1.WAFPolicySpec{FailureMode: wafv1alpha1.FailClosed}),
-		}, true, 800 * time.Millisecond, false},
+		}, routeSettings{body: true, timeout: 800 * time.Millisecond}},
 		{"another route's", []wafv1alpha1.WAFPolicy{{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "x"},
 			Spec: wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock, TargetRefs: []wafv1alpha1.TargetRef{{Group: "gateway.networking.k8s.io", Kind: "HTTPRoute", Name: "other"}}}}},
-			false, 250 * time.Millisecond, true},
+			routeSettings{timeout: def, failOpen: true, detect: true}},
 	} {
-		body, timeout, failOpen := routeSettings(tc.policies, route)
-		if body != tc.body || timeout != tc.timeout || failOpen != tc.failOpen {
-			t.Errorf("%s: %v %v %v", tc.name, body, timeout, failOpen)
+		if got := settingsOf(tc.policies, route); got != tc.want {
+			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
 		}
 	}
 }
@@ -269,7 +281,7 @@ func TestEnvoyUnwire(t *testing.T) {
 			Labels: map[gatewayv1.LabelKey]gatewayv1.LabelValue{"team": "edge"}, ParametersRef: &refL}}}
 
 	hr := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "app"}}
-	eep := extensionPolicy(&envoyRoute{route: hr, sections: []string{""}, body: true})
+	eep := extensionPolicy(&envoyRoute{route: hr, sections: []string{""}, routeSettings: routeSettings{body: true}})
 	userEEP := newObject(EnvoyExtensionPolicyGVK, "shop", "lua")
 	userEEP.SetLabels(nil)
 	be := backend("shop")

@@ -71,8 +71,8 @@ jobs:
   e2e:
     # Operator milestone O2 end to end (#26): the operator installed with the
     # Helm chart, and a WAFPolicy enforced by an engine in bundle mode, on
-    # kind's newest Kubernetes (the local kind cluster runs the oldest
-    # supported one).
+    # kind's newest Kubernetes (the local kind cluster, and upgrade, run 1.34:
+    # KIND_NODE_IMAGE in the Makefile).
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -84,8 +84,7 @@ jobs:
       - uses: azure/setup-helm@v5
         with:
           version: v3.19.0
-      - run: go install sigs.k8s.io/kind@v0.33.0
-      - run: kind create cluster --config hack/kind/cluster.yaml --wait 120s
+      - run: make kind-cluster KIND_NODE_IMAGE=
       # The images' Go build cache (hack/kind/go-build-cache.sh), so they
       # compile little more than this repository's packages: about 1.2 GB,
       # saved from main once per go.sum and Dockerfile.
@@ -125,8 +124,6 @@ jobs:
         with:
           go-version: '1.27.x'
           check-latest: true
-      - run: go install sigs.k8s.io/kind@v0.33.0
-      - run: kind create cluster --name inkwall-upgrade --wait 120s
       # The images' Go build cache, as in e2e (which saves it).
       - uses: actions/cache/restore@v6
         with:
@@ -134,7 +131,9 @@ jobs:
           key: image-go-build-${{ hashFiles('go.sum', 'Dockerfile') }}
           restore-keys: image-go-build-
       - run: hack/kind/go-build-cache.sh inject "$RUNNER_TEMP/go-build"
-      - run: make kind-upgrade
+      # Creates its cluster at KIND_NODE_IMAGE; KEEP=1 keeps it for the
+      # step below.
+      - run: KEEP=1 make kind-upgrade
       - if: failure()
         run: |
           kubectl --context kind-inkwall-upgrade get pods -A

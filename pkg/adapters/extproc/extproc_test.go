@@ -25,6 +25,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
@@ -345,6 +346,23 @@ func TestRequest(t *testing.T) {
 	}
 }
 
+// TestProtocol: the protocol is Envoy's request.protocol attribute.
+func TestProtocol(t *testing.T) {
+	for attr, want := range map[string]string{"HTTP/2": "HTTP/2", "HTTP/1.0": "HTTP/1.0", "": "HTTP/1.1", "bogus": "HTTP/1.1"} {
+		insp := &inspector{}
+		e := newEnvoy(t, insp, 0, io.Discard)
+		m := headers("GET", "/", true)
+		if attr != "" {
+			m.Attributes = map[string]*structpb.Struct{"envoy.filters.http.ext_proc": {Fields: map[string]*structpb.Value{
+				"request.protocol": structpb.NewStringValue(attr)}}}
+		}
+		e.exchange(t, m)
+		if got := insp.got[0].Proto; got != want {
+			t.Errorf("attribute %q: protocol %q, want %q", attr, got, want)
+		}
+	}
+}
+
 // TestRequestID: a request without a usable ID gets one, set on the
 // request Envoy forwards.
 func TestRequestID(t *testing.T) {
@@ -414,28 +432,102 @@ func TestInvalid(t *testing.T) {
 	}
 }
 
-// TestObservabilityMode: Envoy doesn't wait, so nothing is answered, but
-// the request is inspected.
-func TestObservabilityMode(t *testing.T) {
-	var logs bytes.Buffer
-	e := newEnvoy(t, newPipeline(t, pipeline.ModeBlock), 0, &logs)
+// observe sends msgs in observability mode: Envoy doesn't wait for
+// answers.
+func (e *envoy) observe(t testing.TB, msgs ...*extprocv3.ProcessingRequest) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	stream, err := e.client.Process(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := headers("GET", "/?q=<script>alert(1)</script>", true)
-	m.ObservabilityMode = true
-	if err := stream.Send(m); err != nil {
-		t.Fatal(err)
+	msgs[0].ObservabilityMode = true
+	for _, m := range msgs {
+		if err := stream.Send(m); err != nil {
+			break // the engine closed the stream once it had decided
+		}
 	}
 	_ = stream.CloseSend()
 	if r, err := stream.Recv(); !errors.Is(err, io.EOF) {
 		t.Fatalf("answered %v, %v in observability mode", r, err)
 	}
-	if !strings.Contains(logs.String(), `"security event"`) {
-		t.Errorf("not inspected: %s", logs.String())
+}
+
+// TestObservabilityMode: Envoy doesn't wait, so nothing is answered, but
+// the request is inspected, its STREAMED body too.
+func TestObservabilityMode(t *testing.T) {
+	form := []string{"content-type", "application/x-www-form-urlencoded"}
+	streamed := func(m *extprocv3.ProcessingRequest) *extprocv3.ProcessingRequest {
+		return withMode(m, filterv3.ProcessingMode_STREAMED)
+	}
+	trailers := &extprocv3.ProcessingRequest{Request: &extprocv3.ProcessingRequest_RequestTrailers{
+		RequestTrailers: &extprocv3.HttpTrailers{}}}
+	tests := []struct {
+		name string
+		msgs []*extprocv3.ProcessingRequest
+		want string // the event's reason; "" for none
+	}{
+		{"headers", []*extprocv3.ProcessingRequest{headers("GET", "/?q=<script>alert(1)</script>", true)}, "rule"},
+		{"benign body", []*extprocv3.ProcessingRequest{
+			streamed(headers("POST", "/login", false, form...)), body("user=alice&", false), body("password=x", true)}, ""},
+		// The attack is split across chunks.
+		{"body attack", []*extprocv3.ProcessingRequest{
+			streamed(headers("POST", "/login", false, form...)), body("user=admin'%20OR", false), body("%201=1--", true)}, "rule"},
+		{"body attack, trailers", []*extprocv3.ProcessingRequest{
+			streamed(headers("POST", "/login", false, form...)), body("user=admin'%20OR", false), body("%201=1--", false), trailers}, "rule"},
+		// Envoy may not say STREAMED: in observability mode the body comes
+		// in chunks anyway.
+		{"body attack, no protocol_config", []*extprocv3.ProcessingRequest{
+			headers("POST", "/login", false, form...), body("user=admin'%20OR", false), body("%201=1--", true)}, "rule"},
+		// The stream ends before the body does: decided on what came.
+		{"cut short", []*extprocv3.ProcessingRequest{
+			streamed(headers("POST", "/login", false, form...)), body("user=alice", false)}, "oversize"},
+		// Over the limit (64 bytes): the rest goes uninspected.
+		{"oversized body", []*extprocv3.ProcessingRequest{
+			streamed(headers("POST", "/login", false, form...)), body(strings.Repeat("a=b&", 10), false), body(strings.Repeat("a=b&", 10), false),
+			body("<script>alert(1)</script>", true)}, "oversize"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			e := newEnvoy(t, newPipeline(t, pipeline.ModeBlock), 64, &logs)
+			e.observe(t, tt.msgs...)
+			got := ""
+			if strings.Contains(logs.String(), `"security event"`) {
+				var ev struct{ Reason string }
+				if err := json.Unmarshal(logs.Bytes(), &ev); err != nil {
+					t.Fatal(err)
+				}
+				got = ev.Reason
+			}
+			if got != tt.want {
+				t.Errorf("event reason %q, want %q: %s", got, tt.want, logs.String())
+			}
+		})
+	}
+}
+
+// TestObservabilityModeClose: once the request is decided, the engine
+// closes the stream: Envoy needs send nothing more.
+func TestObservabilityModeClose(t *testing.T) {
+	e := newEnvoy(t, newPipeline(t, pipeline.ModeBlock), 64, io.Discard)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	stream, err := e.client.Process(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := withMode(headers("POST", "/login", false, "content-type", "application/x-www-form-urlencoded"), filterv3.ProcessingMode_STREAMED)
+	m.ObservabilityMode = true
+	for _, m := range []*extprocv3.ProcessingRequest{m, body("a=b&", false), body("c=d", true)} {
+		if err := stream.Send(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// No CloseSend: the engine ends the stream itself.
+	if r, err := stream.Recv(); !errors.Is(err, io.EOF) {
+		t.Fatalf("got %v, %v; want the stream closed", r, err)
 	}
 }
 
