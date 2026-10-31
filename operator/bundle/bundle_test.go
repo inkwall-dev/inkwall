@@ -96,6 +96,47 @@ func TestContentHashIgnoresMetadata(t *testing.T) {
 	}
 }
 
+// A policy's hash changes with the policy, the rule sets it binds and
+// suspension, not with other policies or the bundle's version.
+func TestPolicyHashes(t *testing.T) {
+	a := content("shop/a", "shop/b")
+	a.RuleSets = []*bundlev1.RuleSet{{Id: "WAFRuleSet/shop/r", Source: &bundlev1.RuleSet_Seclang{Seclang: "SecAction id:1"}}}
+	a.Policies[0].RuleSets = []*bundlev1.RuleSetBinding{{RuleSetId: "WAFRuleSet/shop/r"}}
+	ha, err := PolicyHashes(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		edit    func(b *bundlev1.Bundle)
+		changed []string
+	}{
+		{"metadata", func(b *bundlev1.Bundle) { b.Version, b.ContentHash = 9, []byte("x") }, nil},
+		{"another policy", func(b *bundlev1.Bundle) { b.Policies[1].Mode = bundlev1.Mode_MODE_DETECT }, []string{"shop/b"}},
+		{"a policy added", func(b *bundlev1.Bundle) { b.Policies = append(b.Policies, &bundlev1.Policy{Id: "shop/c"}) }, []string{"shop/c"}},
+		{"a bound rule set", func(b *bundlev1.Bundle) {
+			b.RuleSets[0].Source = &bundlev1.RuleSet_Seclang{Seclang: "SecAction id:2"}
+		}, []string{"shop/a"}},
+		{"suspended", func(b *bundlev1.Bundle) { b.Suspended = true }, []string{"shop/a", "shop/b"}},
+	} {
+		b := proto.Clone(a).(*bundlev1.Bundle)
+		tc.edit(b)
+		hb, err := PolicyHashes(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var changed []string
+		for _, id := range slices.Sorted(maps.Keys(hb)) {
+			if h, ok := ha[id]; !ok || h != hb[id] {
+				changed = append(changed, id)
+			}
+		}
+		if !slices.Equal(changed, tc.changed) {
+			t.Errorf("%s: changed %v, want %v", tc.name, changed, tc.changed)
+		}
+	}
+}
+
 func newClient(t *testing.T) client.Client {
 	t.Helper()
 	s := runtime.NewScheme()
