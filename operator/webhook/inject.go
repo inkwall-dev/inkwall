@@ -54,6 +54,9 @@ type PodInjector struct {
 	OperatorAddr string
 	// Integrations recognise proxy pods; nil: the defaults.
 	Integrations *integrations.Selectors
+	// Disabled are the integrations the operator may not wire, by name
+	// (0004 §7): their pods don't get the engine.
+	Disabled map[string]string
 	// BundleSecret is the bundle Secret, namespace/name, engines read when
 	// the operator is unreachable.
 	BundleSecret string
@@ -70,6 +73,9 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 	integ := p.Integrations.ForPod(pod.Labels)
 	if integ == nil {
 		return admission.Allowed("not a proxy pod")
+	}
+	if p.Disabled[integ.Name] != "" {
+		return admission.Allowed("the " + integ.Name + " integration is disabled")
 	}
 	s := injection.Sidecar{Image: p.Image, PullPolicy: p.PullPolicy, OperatorAddr: p.OperatorAddr, BundleSecret: p.BundleSecret, Args: integ.Adapter}
 	var cfg wafv1alpha1.InkwallConfig

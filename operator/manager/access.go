@@ -8,9 +8,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
+	"slices"
+	"strings"
 	"time"
 
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -19,18 +23,19 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/internal/access"
 )
 
+// accessClient checks permissions, one review each: not rate limited, so
+// the checks don't hold up the operator's other requests.
+func accessClient(cfg *rest.Config, s *runtime.Scheme) (client.Client, error) {
+	cfg = rest.CopyConfig(cfg)
+	cfg.QPS = -1
+	return client.New(cfg, client.Options{Scheme: s})
+}
+
 // readAccess finds the integrations the operator may not wire (their
 // ClusterRole isn't granted), by name and why, before the manager exists:
 // they are disabled, so the cache never waits on objects the operator may
 // not read.
-func readAccess(cfg *rest.Config, s *runtime.Scheme) (map[string]string, error) {
-	// One review per permission: not rate limited, as they are done once.
-	cfg = rest.CopyConfig(cfg)
-	cfg.QPS = -1
-	c, err := client.New(cfg, client.Options{Scheme: s})
-	if err != nil {
-		return nil, err
-	}
+func readAccess(c client.Client) (map[string]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	denied, err := access.Denied(ctx, c)
@@ -43,11 +48,14 @@ func readAccess(cfg *rest.Config, s *runtime.Scheme) (map[string]string, error) 
 	return denied, nil
 }
 
-// accessWatch stops the operator once it is granted a disabled
-// integration's permissions, so it restarts with the integration enabled:
-// they may be granted later, or a moment after it started. Every replica
-// runs it, and waits a random while first, so they don't all restart at
-// once.
+// accessWatch stops the operator once an integration's permissions change:
+// granted to a disabled one, so it restarts with the integration enabled
+// (they may be granted later, or a moment after it started); or revoked
+// from an enabled one, so it restarts with the integration disabled instead
+// of failing to watch and write its proxy's objects. Every replica runs
+// it, and waits a random while first, so they don't all restart at once;
+// it checks again after the wait, so a binding replaced meanwhile (a Helm
+// upgrade) doesn't restart it.
 type accessWatch struct {
 	client client.Client
 	denied map[string]string
@@ -59,8 +67,8 @@ type accessWatch struct {
 // accessCheckInterval is a variable for the tests.
 var accessCheckInterval = time.Minute
 
-// errAccessGranted ends the manager; the container restarts.
-var errAccessGranted = errors.New("granted a disabled integration's permissions: restarting to enable it")
+// errAccessChanged ends the manager; the container restarts.
+var errAccessChanged = errors.New("an integration's permissions changed: restarting to enable or disable it")
 
 func (w *accessWatch) Start(ctx context.Context) error {
 	roles, err := access.Roles()
@@ -75,21 +83,41 @@ func (w *accessWatch) Start(ctx context.Context) error {
 			return nil
 		case <-tick.C:
 		}
-		for name := range w.denied {
-			missing, err := access.Missing(ctx, w.client, roles[name])
-			if err != nil || len(missing) > 0 {
-				continue
-			}
-			delay := rand.N(cmp.Or(w.maxDelay, DefaultSelectorRestartMaxDelay)) // #nosec G404 -- spreading restarts, not security
-			log.FromContext(ctx).Info("integration granted; restarting", "integration", name, "in", delay)
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(delay):
-			}
-			return errAccessGranted
+		name, change := w.changed(ctx, roles)
+		if name == "" {
+			continue
+		}
+		delay := rand.N(cmp.Or(w.maxDelay, DefaultSelectorRestartMaxDelay)) // #nosec G404 -- spreading restarts, not security
+		log.FromContext(ctx).Info("integration "+change+"; restarting", "integration", name, "in", delay)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(delay):
+		}
+		if again, _ := w.changed(ctx, roles); again == "" {
+			log.FromContext(ctx).Info("integration's permissions changed back; not restarting", "integration", name)
+			continue
+		}
+		return errAccessChanged
+	}
+}
+
+// changed returns an integration whose permissions no longer match how it
+// runs, and "granted" or "revoked"; "" if none (or it can't tell).
+func (w *accessWatch) changed(ctx context.Context, roles map[string][]rbacv1.PolicyRule) (name, change string) {
+	for _, name := range slices.Sorted(maps.Keys(roles)) {
+		missing, err := access.Missing(ctx, w.client, roles[name])
+		if err != nil {
+			continue
+		}
+		switch disabled := w.denied[name] != ""; {
+		case disabled && len(missing) == 0:
+			return name, "granted"
+		case !disabled && len(missing) > 0:
+			return name, "revoked (" + strings.Join(missing, ", ") + ")"
 		}
 	}
+	return "", ""
 }
 
 func (*accessWatch) NeedLeaderElection() bool { return false }

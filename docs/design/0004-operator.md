@@ -319,9 +319,16 @@ starts without the engine because a webhook was down. The engine is the same nat
 socket `/var/run/inkwall-socket/extproc.sock`, in an `emptyDir` the Envoy container mounts too.
 Its image, resources and bootstrap mode come from the `InkwallConfig` at each reconcile, so a new
 engine image rolls the Envoy pods. The trust ConfigMap and the bundle Secret grant follow the
-Envoy pods as they do Traefik's: the operator's pod cache selects both proxies' pods
-(`app.kubernetes.io/name in (envoy,traefik)` by default; any pod when custom selectors share no
-key), and the controllers keep only those an integration's selector matches.
+Envoy pods as they do Traefik's: the operator's pod cache holds both proxies' pods.
+
+**The pod cache** (`operator/internal/podcache`) has an informer per integration's selector,
+read as one cache: listing pods merges them (a pod both select is listed once), and a watch on
+pods gets each informer's events. A label selector can't express a union, so one informer
+would keep only the label keys every selector shares (`app.kubernetes.io/name in
+(envoy,traefik)` by default), and watch every pod in the cluster when custom selectors share
+none. With 5,000 pods, 50 of them Traefik's on a custom selector, the cache took about 48 MiB of
+heap with one informer on every pod, and under 1 MiB with an informer per selector (envtest).
+The Pod webhook doesn't inject a disabled integration's pods ([§7](#7-rbac)).
 
 ### 4.4 Wiring controller
 
@@ -888,7 +895,7 @@ Removal must never leave a proxy failing closed on a missing engine.
 | Bundle over 7.2 MiB compressed | None: the current bundle stays; changes are not published | Builder error; warning past 75%; `inkwall_operator_bundle_compressed_bytes` | Shrink the policies (fewer, or smaller rule sets) |
 | Signing key rotated | None: the operator signs with the new key only once every connected engine trusts it | Secret's `rotation-phase`; operator logs the engines it waits for | Automatic ([§4.6](#46-bundle-builder-leader-only)); replace engines older than rotation |
 | Unknown controller version | Wiring may break | `Programmed=False` | Update or pin the integration |
-| An integration's `ClusterRole` not granted | Its proxy's routes aren't wired; the others are | `Programmed=False` (`IntegrationDisabled`), discovery `Unsupported` | Grant it (`rbac.integrations`); the operator restarts with it ([§7](#7-rbac)) |
+| An integration's `ClusterRole` not granted, or revoked | Its proxy's routes aren't wired; the others are | `Programmed=False` (`IntegrationDisabled`), discovery `Unsupported` | Grant it (`rbac.integrations`); the operator restarts with it ([§7](#7-rbac)) |
 | API server down | None | — | Automatic |
 
 Runbook: [When the operator is down](../../deploy/helm/inkwall/README.md#when-the-operator-is-down).
@@ -925,8 +932,8 @@ holds what its wiring writes, and its proxy's own kinds.
 | `leases`, `events` | write | Leader election, events |
 
 **Integration roles.** The chart binds each integration's `ClusterRole` unless
-`rbac.integrations.<integration>` is `false` (`traefik`, `envoyGateway`), e.g. for a proxy the
-cluster doesn't run. When it starts, the operator checks that it has every permission of each
+`rbac.integrations.<integration>` (`traefik`, `envoyGateway`) leaves it out, e.g. for a proxy the
+cluster doesn't run (see below). When it starts, the operator checks that it has every permission of each
 integration's role ([`role.yaml`](../../operator/config/rbac/role.yaml) is built into it,
 `operator/internal/access`), one `SelfSubjectAccessReview` per permission. An integration it lacks some of
 is disabled rather than stalling the cache on objects it may not read:
@@ -937,18 +944,31 @@ is disabled rather than stalling the cache on objects it may not read:
 - discovery reports its controller `Unsupported`, with the same message;
 - what it wired before stays wired, and a deleted policy isn't held for it; the uninstall hook
   skips it ([§5](#5-uninstall-and-disable)), with a warning;
-- each replica checks the missing permissions every minute, and restarts once they are granted
-  (after a random delay, `--selector-restart-max-delay`).
-  The chart restarts the operator when the values change (a pod annotation lists the integrations
-  granted); to revoke a role outside the chart, restart the operator.
+- the Pod webhook selects no pod while Traefik's integration is disabled (`objectSelector`
+  `integrations.NoPods`, which the chart renders too), and skips the pods of a disabled
+  integration: they would run an engine nothing wires to, and a webhook failing closed would
+  keep them from starting;
+- each replica checks every integration's permissions every minute, and restarts when they
+  change: granted to a disabled integration, or revoked from an enabled one, which would
+  otherwise fail to watch and write its proxy's objects. It waits a random delay first
+  (`--selector-restart-max-delay`), and checks again, so a binding replaced meanwhile (a Helm
+  upgrade) restarts nothing. The checks use a client of their own, not rate limited.
+  The chart restarts the operator when the values change too (a pod annotation lists the
+  integrations granted).
+
+`rbac.integrations.<integration>` is `auto` by default: the chart binds the role when the
+cluster serves the proxy's API group (`traefik.io/v1alpha1`, `gateway.envoyproxy.io/v1alpha1`,
+`.Capabilities.APIVersions`), so a cluster without Envoy Gateway doesn't grant its kinds. A proxy
+installed after Inkwall needs a `helm upgrade` (or `true` from the start); the disabled
+integration's message says so. When Helm can't ask the cluster (`helm template`, a client dry
+run: `lookup` finds nothing), every role is rendered, as before. `true` and `false` bind it or
+not whatever the cluster serves.
 
 Missing CRDs don't disable an integration: its wiring waits for them
 ([§4.4](#44-wiring-controller)).
 
 **Not yet:**
 
-- the chart leaving out a role for a proxy that isn't installed (`.Capabilities.APIVersions`);
-- a disabled Traefik integration still has its pods injected (the Pod webhook);
 - rules for Istio and controller ConfigMaps;
 - a `deployments` restart patch, only with `rollout: Automatic`.
 
