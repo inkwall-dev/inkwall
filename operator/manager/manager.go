@@ -35,7 +35,6 @@ import (
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/bundle"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
@@ -263,8 +262,8 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			return nil, err
 		}
 	}
-	// Every replica forwards its engines' events, when the control plane
-	// accepts them.
+	// Every replica forwards its engines' events and request counts, when
+	// the control plane accepts them.
 	forwarder := &controlplane.Forwarder{
 		Client: mgr.GetClient(), Namespace: o.Namespace, Replica: replicaName(o), OperatorVersion: o.Version,
 		CAFile: o.ControlPlaneCAFile, Dir: o.EventsDir, MaxBytes: o.EventsBufferBytes,
@@ -273,7 +272,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		return nil, err
 	}
 	if o.DistributionPort != 0 {
-		if err := addDistribution(mgr, o, ready, forwarder.Add); err != nil {
+		if err := addDistribution(mgr, o, ready, forwarder); err != nil {
 			return nil, err
 		}
 	}
@@ -339,7 +338,7 @@ func addCerts(mgr manager.Manager, o Options) (<-chan struct{}, error) {
 
 // addDistribution serves bundles to the engines on every replica, and
 // reports Enforced from the leader.
-func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}, events func(*eventsv1.EventBatch)) error {
+func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}, forwarder *controlplane.Forwarder) error {
 	replica := o.Replica
 	if replica == "" {
 		h, err := os.Hostname()
@@ -355,7 +354,7 @@ func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}, even
 	}
 	auth := &distribution.KubeAuthenticator{Client: mgr.GetClient(), Namespace: o.Namespace, TTL: time.Minute}
 	service := distribution.NewServer(store, table, auth, replica, ctrl.Log.WithName("distribution"))
-	service.Events = events
+	service.Events, service.Stats = forwarder.Add, forwarder.AddStats
 	srv := &distribution.GRPCServer{
 		Port:    o.DistributionPort,
 		CertDir: o.WebhookCertDir,

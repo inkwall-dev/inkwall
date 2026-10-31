@@ -78,6 +78,11 @@ func (b *BundleSource) Reconcile(ctx context.Context, req reconcile.Request) (re
 		return reconcile.Result{}, fmt.Errorf("bundle Secret: %w", err)
 	}
 	b.Store.Set(signed, bun.GetVersion())
+	ids := map[string]bool{}
+	for _, p := range bun.GetPolicies() {
+		ids[p.GetId()] = true
+	}
+	b.Store.SetPolicies(ids)
 	bundleVersion.Set(float64(bun.GetVersion()))
 	bundleBytes.Set(float64(bundle.CompressedSize(&s)))
 	log.FromContext(ctx).V(1).Info("serving bundle", "version", bun.GetVersion())

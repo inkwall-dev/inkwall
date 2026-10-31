@@ -540,6 +540,8 @@ leader only, and is idle in Standalone mode (the default).
   is full, the oldest events are dropped and counted.
 - What wasn't acknowledged is sent again after a reconnect or a restart.
   `inkwall_operator_events_buffered` follows the buffer, outages included.
+- Every replica also sums its engines' request counts per policy and sends them on that stream
+  every 10 s, when the control plane accepts them, even if it doesn't accept events.
 - The events stream reconnects with jittered backoff bounded at 10 s (the leader's primary stream:
   1 min), so the backlog drains soon after an outage.
 

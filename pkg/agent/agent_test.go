@@ -62,6 +62,9 @@ type fakeOperator struct {
 	beats    int
 	beatKeys []string
 	events   []string
+	// stats are the request counts, by stream (one per Hello) and policy,
+	// as last reported.
+	stats    []map[string]*eventsv1.PolicyStats
 	sawHello chan struct{}
 }
 
@@ -81,6 +84,8 @@ func (f *fakeOperator) Watch(stream agentv1.BundleService_WatchServer) error {
 	}
 	f.mu.Lock()
 	f.hellos = append(f.hellos, first.GetHello())
+	n := len(f.stats)
+	f.stats = append(f.stats, map[string]*eventsv1.PolicyStats{})
 	f.tokens = append(f.tokens, strings.Join(md.Get("authorization"), ","))
 	f.mu.Unlock()
 	f.sawHello <- struct{}{}
@@ -102,6 +107,10 @@ func (f *fakeOperator) Watch(stream agentv1.BundleService_WatchServer) error {
 			case *agentv1.WatchRequest_Events:
 				for _, ev := range x.Events.GetEvents() {
 					f.events = append(f.events, ev.GetEventId())
+				}
+			case *agentv1.WatchRequest_Stats:
+				for _, p := range x.Stats.GetPolicies() {
+					f.stats[n][p.GetPolicy()] = p
 				}
 			}
 			f.mu.Unlock()
@@ -576,5 +585,51 @@ func TestEvents(t *testing.T) {
 	waitFor(t, "the third event", func() bool { ids := e.op.eventIDs(); return len(ids) == 3 && ids[2] == "3" })
 	if n := buf.Len(); n != 0 {
 		t.Errorf("%d events left in the buffer", n)
+	}
+}
+
+// allowed returns the allowed count of policy as last reported on the
+// stream, -1 if none.
+func (f *fakeOperator) allowed(stream int, policy string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if stream >= len(f.stats) || f.stats[stream][policy] == nil {
+		return -1
+	}
+	return int(f.stats[stream][policy].GetAllowed())
+}
+
+// Request counts are cumulative over a stream, and a new stream counts from
+// zero again: the operator adds up the differences.
+func TestRequestStats(t *testing.T) {
+	e := newEnv(t)
+	stats := events.NewStats()
+	a, _, _ := e.agent(t, func(c *Config) { c.Stats = stats })
+	site, api := stats.Counter("shop/site"), stats.Counter("shop/api")
+	allow := pipeline.Verdict{Action: pipeline.ActionAllow, Duration: time.Millisecond}
+	// Counted before the stream is up: reported once it is.
+	site.Observe(allow)
+	run(t, a)
+	<-e.op.sawHello
+	waitFor(t, "the first report", func() bool { return e.op.allowed(0, "shop/site") == 1 })
+	site.Observe(allow)
+	site.Observe(allow)
+	waitFor(t, "cumulative counts", func() bool { return e.op.allowed(0, "shop/site") == 3 })
+	if n := e.op.allowed(0, "shop/api"); n != -1 {
+		t.Errorf("shop/api counted nothing, but was reported (%d)", n)
+	}
+
+	e.op.closeStream <- struct{}{}
+	<-e.op.sawHello
+	site.Observe(allow)
+	api.Observe(allow)
+	waitFor(t, "the counts on the new stream", func() bool {
+		return e.op.allowed(1, "shop/site") == 1 && e.op.allowed(1, "shop/api") == 1
+	})
+	e.op.mu.Lock()
+	p := e.op.stats[1]["shop/site"]
+	e.op.mu.Unlock()
+	if n := len(p.GetLatencyCounts()); n != len(events.LatencyBounds())+1 || p.GetLatencyCounts()[5] != 1 {
+		t.Errorf("latency counts %v", p.GetLatencyCounts())
 	}
 }

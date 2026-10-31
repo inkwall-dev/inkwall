@@ -60,8 +60,9 @@ type ControlPlaneServiceClient interface {
 	// There is one per cluster: when the leader moves, the newer primary
 	// stream wins and the control plane closes the older one.
 	//
-	// An events stream carries only EventUpload and EventsAck, and
-	// heartbeats; every replica opens one for the events of its engines.
+	// An events stream carries only EventUpload and EventsAck, request
+	// counts (RequestStatsUpload) and heartbeats; every replica opens one for
+	// its engines.
 	//
 	// Errors (gRPC status codes) and what the operator does:
 	// - UNAUTHENTICATED: the certificate isn't valid (e.g. expired or
@@ -133,8 +134,9 @@ type ControlPlaneServiceServer interface {
 	// There is one per cluster: when the leader moves, the newer primary
 	// stream wins and the control plane closes the older one.
 	//
-	// An events stream carries only EventUpload and EventsAck, and
-	// heartbeats; every replica opens one for the events of its engines.
+	// An events stream carries only EventUpload and EventsAck, request
+	// counts (RequestStatsUpload) and heartbeats; every replica opens one for
+	// its engines.
 	//
 	// Errors (gRPC status codes) and what the operator does:
 	// - UNAUTHENTICATED: the certificate isn't valid (e.g. expired or

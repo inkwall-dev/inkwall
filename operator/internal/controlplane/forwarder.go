@@ -30,12 +30,13 @@ const (
 	DefaultEventsMaxBackoff = 10 * time.Second
 )
 
-// Forwarder sends the security events of the engines connected to this
-// replica to the control plane, on the replica's own events stream (0002
-// §5.3). It runs on every replica, with the cluster's certificate, which
-// the leader keeps in the identity Secret. It buffers only while the
-// control plane accepts events; otherwise, as in Standalone mode, the
-// engines' logs are the record.
+// Forwarder sends the security events and request counts of the engines
+// connected to this replica to the control plane, on the replica's own
+// events stream (0002 §5.3). It runs on every replica, with the cluster's
+// certificate, which the leader keeps in the identity Secret. It buffers
+// events only while the control plane accepts them; otherwise, as in
+// Standalone mode, the engines' logs are the record. Request counts are
+// sent only to a control plane that accepts them.
 type Forwarder struct {
 	Client          client.Client
 	Namespace       string
@@ -49,14 +50,17 @@ type Forwarder struct {
 
 	// Poll is how often an idle forwarder looks again (default 5 s);
 	// Refused, how long it waits after the control plane said it doesn't
-	// accept events (default 1 min); MinBackoff and MaxBackoff bound
+	// accept events, or keeps a stream that carries only request counts
+	// before asking again (default 1 min); MinBackoff and MaxBackoff bound
 	// reconnects (default 1 s and 10 s: lower than the leader's, so the
-	// buffer drains soon after an outage).
-	Poll, Refused, MinBackoff, MaxBackoff time.Duration
+	// buffer drains soon after an outage); StatsInterval, how often the
+	// request counts that changed are sent (default DefaultStatsInterval).
+	Poll, Refused, MinBackoff, MaxBackoff, StatsInterval time.Duration
 
 	// q is set by Start; Add may run before.
 	q       atomic.Pointer[queue]
 	accepts atomic.Bool
+	stats   requestStats
 }
 
 // NeedLeaderElection implements manager.LeaderElectionRunnable: every
@@ -79,6 +83,9 @@ func (f *Forwarder) defaults() {
 	if f.MaxBytes == 0 {
 		f.MaxBytes = DefaultEventsBufferBytes
 	}
+	if f.StatsInterval == 0 {
+		f.StatsInterval = DefaultStatsInterval
+	}
 }
 
 // Add takes a batch from an engine (distribution.Server.Events). It never
@@ -92,6 +99,10 @@ func (f *Forwarder) Add(b *eventsv1.EventBatch) {
 		eventsForwardErrors.Inc()
 	}
 }
+
+// AddStats takes what engines counted per policy since their previous
+// reports (distribution.Server.Stats).
+func (f *Forwarder) AddStats(deltas []*eventsv1.PolicyStats) { f.stats.add(deltas) }
 
 // Start implements manager.Runnable.
 func (f *Forwarder) Start(ctx context.Context) error {
@@ -135,11 +146,17 @@ func (f *Forwarder) Start(ctx context.Context) error {
 	}
 }
 
-// errRefused means the control plane doesn't accept events: ask again later.
-var errRefused = errors.New("the control plane doesn't accept events")
+// errRefused means the control plane accepts neither events nor request
+// counts: ask again later.
+var errRefused = errors.New("the control plane doesn't accept events or request counts")
+
+// statsCapability tells the control plane the replica can send request
+// counts (Hello.capabilities).
+const statsCapability = "request-stats"
 
 // run holds one events stream: Hello, Welcome, then the buffered batches
-// and every new one, freeing them as they are acknowledged.
+// and every new one, freeing them as they are acknowledged, and the
+// request counts.
 func (f *Forwarder) run(ctx context.Context) (bool, error) {
 	var cfg wafv1alpha1.InkwallConfig
 	err := f.Client.Get(ctx, types.NamespacedName{Name: "default"}, &cfg)
@@ -176,7 +193,7 @@ func (f *Forwarder) run(ctx context.Context) (bool, error) {
 	}
 	if err := stream.Send(&controlplanev1.ConnectRequest{Msg: &controlplanev1.ConnectRequest_Hello{Hello: &controlplanev1.Hello{
 		Role: controlplanev1.StreamRole_STREAM_ROLE_EVENTS, Replica: f.Replica, OperatorVersion: f.OperatorVersion, Mode: mode,
-		Capabilities: []string{wafv1alpha1.GroupVersion.String()},
+		Capabilities: []string{statsCapability, wafv1alpha1.GroupVersion.String()},
 	}}}); err != nil {
 		return false, err
 	}
@@ -188,11 +205,15 @@ func (f *Forwarder) run(ctx context.Context) (bool, error) {
 	if welcome == nil {
 		return false, errors.New("the control plane didn't answer Hello with Welcome")
 	}
+	acceptStats := welcome.GetAcceptRequestStats()
 	if !welcome.GetAcceptEvents() {
 		f.stop()
-		return true, errRefused
+		if !acceptStats {
+			return true, errRefused
+		}
+	} else {
+		f.accepts.Store(true)
 	}
-	f.accepts.Store(true)
 	q := f.q.Load()
 
 	acks := make(chan uint64, 16)
@@ -221,6 +242,23 @@ func (f *Forwarder) run(ctx context.Context) (bool, error) {
 	defer heartbeat.Stop()
 	reconfigure := time.NewTicker(f.Poll)
 	defer reconfigure.Stop()
+	var statsTick, askAgain <-chan time.Time
+	if !welcome.GetAcceptEvents() {
+		// Only request counts: Hello again in a while, to learn whether
+		// events are accepted by then.
+		t := time.NewTimer(f.Refused)
+		defer t.Stop()
+		askAgain = t.C
+	}
+	if acceptStats {
+		t := time.NewTicker(f.StatsInterval)
+		defer t.Stop()
+		statsTick = t.C
+		// Every policy first: the control plane may have lost the last.
+		if err := f.sendStats(stream, true); err != nil {
+			return true, err
+		}
+	}
 
 	// Unacknowledged batches are resent on every new stream; the control
 	// plane removes duplicates by event ID.
@@ -249,6 +287,12 @@ func (f *Forwarder) run(ctx context.Context) (bool, error) {
 			}}}); err != nil {
 				return true, err
 			}
+		case <-askAgain:
+			return true, errIdle
+		case <-statsTick:
+			if err := f.sendStats(stream, false); err != nil {
+				return true, err
+			}
 		case <-reconfigure.C:
 			var now wafv1alpha1.InkwallConfig
 			if err := f.Client.Get(ctx, types.NamespacedName{Name: "default"}, &now); err != nil || now.Generation != cfg.Generation {
@@ -256,6 +300,16 @@ func (f *Forwarder) run(ctx context.Context) (bool, error) {
 			}
 		}
 	}
+}
+
+// sendStats sends the request counts that changed since the last upload,
+// or all of them.
+func (f *Forwarder) sendStats(stream controlplanev1.ControlPlaneService_ConnectClient, all bool) error {
+	up := f.stats.upload(all)
+	if up == nil {
+		return nil
+	}
+	return stream.Send(&controlplanev1.ConnectRequest{Msg: &controlplanev1.ConnectRequest_RequestStats{RequestStats: up}})
 }
 
 // stop drops the buffer: the control plane doesn't take events (Standalone,
