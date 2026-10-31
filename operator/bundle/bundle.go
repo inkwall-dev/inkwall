@@ -78,9 +78,11 @@ var ErrTooLarge = errors.New("bundle too large for its Secrets")
 // creation time and the hash itself. Encoding is deterministic, so equal
 // content gives an equal hash within one operator version.
 func ContentHash(b *bundlev1.Bundle) ([]byte, error) {
-	c := proto.Clone(b).(*bundlev1.Bundle)
-	c.Version, c.CreatedAt, c.ContentHash = 0, nil, nil
-	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(c)
+	if b.GetVersion() != 0 || b.GetCreatedAt() != nil || b.GetContentHash() != nil {
+		b = proto.Clone(b).(*bundlev1.Bundle)
+		b.Version, b.CreatedAt, b.ContentHash = 0, nil, nil
+	}
+	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(b)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +134,11 @@ func PolicyHashes(b *bundlev1.Bundle) (map[string][sha256.Size]byte, error) {
 // version, unless resign asks for a new one (the signing key changed).
 // lastVersion is the highest version this process published, so a deleted
 // Secret doesn't restart the sequence while the leader runs.
+//
+// A new bundle is content itself, not a copy, with its version, creation
+// time and hash set: the caller gives content up.
 func Next(current, content *bundlev1.Bundle, lastVersion uint64, now time.Time, resign bool) (*bundlev1.Bundle, bool, error) {
+	content.Version, content.CreatedAt, content.ContentHash = 0, nil, nil
 	hash, err := ContentHash(content)
 	if err != nil {
 		return nil, false, err
@@ -140,11 +146,10 @@ func Next(current, content *bundlev1.Bundle, lastVersion uint64, now time.Time, 
 	if current != nil && !resign && bytes.Equal(current.GetContentHash(), hash) {
 		return current, false, nil
 	}
-	next := proto.Clone(content).(*bundlev1.Bundle)
-	next.Version = max(current.GetVersion(), lastVersion) + 1
-	next.CreatedAt = timestamppb.New(now)
-	next.ContentHash = hash
-	return next, true, nil
+	content.Version = max(current.GetVersion(), lastVersion) + 1
+	content.CreatedAt = timestamppb.New(now)
+	content.ContentHash = hash
+	return content, true, nil
 }
 
 // Signer signs bundles.
@@ -188,6 +193,22 @@ func (s *Signer) Sign(b *bundlev1.Bundle) (*bundlev1.SignedBundle, error) {
 // manifest (bundlesecret.ErrIncomplete), the bundle has only the version of
 // the Secret's annotation, to continue the sequence.
 func Load(ctx context.Context, c client.Reader, namespace string) (*bundlev1.Bundle, string, error) {
+	return new(Current).Load(ctx, c, namespace)
+}
+
+// Current keeps the bundle last loaded or stored, with its compressed
+// form, so Load decodes the bundle Secret only when it holds another
+// bundle: decoding a large bundle on every build costs megabytes (#213).
+// The bundle it returns is shared: don't modify it.
+type Current struct {
+	data  []byte
+	b     *bundlev1.Bundle
+	keyID string
+}
+
+// Load is the package's Load, without decoding the Secret if it holds the
+// bundle kept.
+func (cur *Current) Load(ctx context.Context, c client.Reader, namespace string) (*bundlev1.Bundle, string, error) {
 	var s corev1.Secret
 	err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: BundleSecret}, &s)
 	if apierrors.IsNotFound(err) {
@@ -196,7 +217,7 @@ func Load(ctx context.Context, c client.Reader, namespace string) (*bundlev1.Bun
 	if err != nil {
 		return nil, "", err
 	}
-	signed, err := Read(ctx, c, &s)
+	data, err := ReadCompressed(ctx, c, &s)
 	if errors.Is(err, bundlesecret.ErrIncomplete) {
 		v, _ := strconv.ParseUint(s.Annotations[VersionAnnotation], 10, 64)
 		return &bundlev1.Bundle{Version: v}, "", fmt.Errorf("bundle Secret: %w", err)
@@ -204,23 +225,52 @@ func Load(ctx context.Context, c client.Reader, namespace string) (*bundlev1.Bun
 	if err != nil {
 		return nil, "", fmt.Errorf("bundle Secret: %w", err)
 	}
+	if cur.b != nil && bytes.Equal(data, cur.data) {
+		return cur.b, cur.keyID, nil
+	}
+	signed, err := Decode(data)
+	if err != nil {
+		return nil, "", fmt.Errorf("bundle Secret: %w", err)
+	}
 	var b bundlev1.Bundle
 	if err := proto.Unmarshal(signed.GetBundle(), &b); err != nil {
 		return nil, "", fmt.Errorf("bundle Secret: %w", err)
 	}
+	cur.data, cur.b, cur.keyID = data, &b, signed.GetKeyId()
 	return &b, signed.GetKeyId(), nil
+}
+
+// Store is the package's Store, keeping b once it is stored.
+func (cur *Current) Store(ctx context.Context, c client.Client, r client.Reader, namespace string, b *bundlev1.Bundle,
+	signed *bundlev1.SignedBundle, pub ed25519.PublicKey) (int, error) {
+	encoded, err := store(ctx, c, r, namespace, b, signed, pub)
+	if err != nil {
+		return len(encoded), err
+	}
+	cur.data, cur.b, cur.keyID = encoded, b, signed.GetKeyId()
+	return len(encoded), nil
 }
 
 // Read returns the signed bundle of the bundle Secret s, reading its chunks
 // with c if it has a manifest.
 func Read(ctx context.Context, c client.Reader, s *corev1.Secret) (*bundlev1.SignedBundle, error) {
+	data, err := ReadCompressed(ctx, c, s)
+	if err != nil {
+		return nil, err
+	}
+	return Decode(data)
+}
+
+// ReadCompressed returns the compressed bundle of the bundle Secret s, as
+// Decode reads it: its BundleKey, or its chunks joined, read with c.
+func ReadCompressed(ctx context.Context, c client.Reader, s *corev1.Secret) ([]byte, error) {
 	data, ok := s.Data[BundleKey]
 	if !ok && s.Data[ManifestKey] != nil {
 		m, err := bundlesecret.ParseManifest(s.Name, s.Data[ManifestKey])
 		if err != nil {
 			return nil, err
 		}
-		data, err = bundlesecret.Join(m, func(name string) ([]byte, error) {
+		return bundlesecret.Join(m, func(name string) ([]byte, error) {
 			var chunk corev1.Secret
 			err := c.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: name}, &chunk)
 			if apierrors.IsNotFound(err) {
@@ -228,11 +278,8 @@ func Read(ctx context.Context, c client.Reader, s *corev1.Secret) (*bundlev1.Sig
 			}
 			return chunk.Data[bundlesecret.ChunkKey], err
 		})
-		if err != nil {
-			return nil, err
-		}
 	}
-	return Decode(data)
+	return data, nil
 }
 
 // CompressedSize returns the size of the bundle Secret s's compressed
@@ -296,9 +343,16 @@ func Encode(signed *bundlev1.SignedBundle) ([]byte, error) {
 // current manifest decides where the chunks go.
 func Store(ctx context.Context, c client.Client, r client.Reader, namespace string, b *bundlev1.Bundle,
 	signed *bundlev1.SignedBundle, pub ed25519.PublicKey) (int, error) {
+	encoded, err := store(ctx, c, r, namespace, b, signed, pub)
+	return len(encoded), err
+}
+
+// store is Store, returning the compressed bundle.
+func store(ctx context.Context, c client.Client, r client.Reader, namespace string, b *bundlev1.Bundle,
+	signed *bundlev1.SignedBundle, pub ed25519.PublicKey) ([]byte, error) {
 	encoded, err := Encode(signed)
 	if err != nil {
-		return len(encoded), err
+		return encoded, err
 	}
 	annotations := map[string]string{
 		VersionAnnotation: strconv.FormatUint(b.GetVersion(), 10),
@@ -309,7 +363,7 @@ func Store(ctx context.Context, c client.Client, r client.Reader, namespace stri
 	err = r.Get(ctx, client.ObjectKeyFromObject(s), s)
 	exists := err == nil
 	if err != nil && !apierrors.IsNotFound(err) {
-		return len(encoded), err
+		return encoded, err
 	}
 	data := map[string][]byte{BundleKey: encoded, PublicKeyKey: pub}
 	if len(encoded) > bundlesecret.ChunkBytes {
@@ -317,20 +371,20 @@ func Store(ctx context.Context, c client.Client, r client.Reader, namespace stri
 		current, _ := bundlesecret.ParseManifest(BundleSecret, s.Data[ManifestKey])
 		m, chunks, err := bundlesecret.Split(BundleSecret, bundlesecret.NextSlot(BundleSecret, current), encoded)
 		if err != nil {
-			return len(encoded), err
+			return encoded, err
 		}
 		for i, chunk := range chunks {
 			if err := writeChunk(ctx, c, r, namespace, m.Chunks[i], chunk, annotations); err != nil {
-				return len(encoded), fmt.Errorf("chunk %s: %w", m.Chunks[i], err)
+				return encoded, fmt.Errorf("chunk %s: %w", m.Chunks[i], err)
 			}
 		}
 		manifest, err := m.Marshal()
 		if err != nil {
-			return len(encoded), err
+			return encoded, err
 		}
 		data = map[string][]byte{ManifestKey: manifest, PublicKeyKey: pub}
 	}
-	return len(encoded), save(ctx, c, s, exists, managedLabels(), annotations, data)
+	return encoded, save(ctx, c, s, exists, managedLabels(), annotations, data)
 }
 
 func writeChunk(ctx context.Context, c client.Client, r client.Reader, namespace, name string, chunk []byte, annotations map[string]string) error {

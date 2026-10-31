@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"sync/atomic"
 	"time"
 
@@ -116,6 +117,10 @@ func run(args []string, stderr io.Writer) int {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctrl.SetLogger(logr.FromSlogHandler(logger.Handler()))
+	if limit := memoryLimit(os.Getenv); limit > 0 {
+		debug.SetMemoryLimit(limit)
+		logger.Info("Go memory limit set", slog.Int64("bytes", limit), slog.String("from", MemoryLimitEnv))
+	}
 
 	cfg, err := ctrl.GetConfig()
 	if err != nil {

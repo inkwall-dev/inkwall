@@ -78,6 +78,12 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
+            # The operator sets GOMEMLIMIT to 90% of it, unless GOMEMLIMIT
+            # is set.
+            - name: MEMORY_LIMIT
+              valueFrom:
+                resourceFieldRef:
+                  resource: limits.memory
           ports:
             - name: metrics
               containerPort: 8080

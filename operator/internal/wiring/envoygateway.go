@@ -258,7 +258,7 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 		}
 	}
 
-	var errs error
+	var errs []error
 	failed := map[types.NamespacedName]string{}
 	wanted := map[types.NamespacedName]bool{}
 	// limits are the operator's ClientTrafficPolicies, by Gateway.
@@ -274,9 +274,9 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 			switch err := e.inject(ctx, st, st.gateways[gw], sidecar); {
 			case apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err):
 				// Changed since the cache saw it: again, once it has.
-				errs = errors.Join(errs, fmt.Errorf("inject the engine into Gateway %s: %w", gw, err))
+				errs = append(errs, fmt.Errorf("inject the engine into Gateway %s: %w", gw, err))
 			case err != nil:
-				errs = errors.Join(errs, fmt.Errorf("inject the engine into Gateway %s: %w", gw, err))
+				errs = append(errs, fmt.Errorf("inject the engine into Gateway %s: %w", gw, err))
 				log.FromContext(ctx).Error(err, "engine not injected", "gateway", gw)
 				for k, r := range routes {
 					if slices.Contains(r.gateways, gw) {
@@ -296,7 +296,7 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 		noBackend := map[string]string{}
 		for ns := range backends {
 			if err := e.ensure(ctx, backend(ns)); err != nil {
-				errs = errors.Join(errs, fmt.Errorf("ensure Backend %s/%s: %w", ns, EnvoyBackend, err))
+				errs = append(errs, fmt.Errorf("ensure Backend %s/%s: %w", ns, EnvoyBackend, err))
 				noBackend[ns] = err.Error()
 			}
 		}
@@ -308,7 +308,7 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 				continue
 			}
 			if err := e.ensure(ctx, extensionPolicy(r)); err != nil {
-				errs = errors.Join(errs, fmt.Errorf("ensure the EnvoyExtensionPolicy of HTTPRoute %s: %w", k, err))
+				errs = append(errs, fmt.Errorf("ensure the EnvoyExtensionPolicy of HTTPRoute %s: %w", k, err))
 				failed[k] = err.Error()
 				continue
 			}
@@ -323,7 +323,7 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 		for gw := range buffered {
 			switch name, err := e.ensureBufferLimit(ctx, st.gateways[gw]); {
 			case err != nil:
-				errs = errors.Join(errs, fmt.Errorf("ensure the ClientTrafficPolicy of Gateway %s: %w", gw, err))
+				errs = append(errs, fmt.Errorf("ensure the ClientTrafficPolicy of Gateway %s: %w", gw, err))
 			case name != "":
 				limits[gw] = name
 			default:
@@ -334,7 +334,7 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 		// 4. The rest goes, in reverse: a route stops calling the engine
 		// before its Gateway's pods lose it.
 		if err := e.prune(ctx, wanted, buffered, inject); err != nil {
-			errs = errors.Join(errs, err)
+			errs = append(errs, err)
 		}
 	}
 
@@ -365,7 +365,7 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 				pending, why, err := e.accepted(ctx, kinds[i], key)
 				switch {
 				case err != nil:
-					errs = errors.Join(errs, err)
+					errs = append(errs, err)
 				case why != "":
 					s.Failed = why
 				case pending != "" && s.Pending == "":
@@ -375,7 +375,7 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 		}
 		res.Targets[tg] = s
 	}
-	return res, errs
+	return res, errors.Join(errs...)
 }
 
 // read lists what the wiring reads, from the cache.
@@ -988,7 +988,7 @@ func (e *EnvoyGateway) prune(ctx context.Context, routes, buffered, gateways map
 	for k := range routes {
 		namespaces[k.Namespace] = true
 	}
-	var errs error
+	var errs []error
 	for _, del := range []struct {
 		gvk  schema.GroupVersionKind
 		keep func(*unstructured.Unstructured) bool
@@ -1002,12 +1002,12 @@ func (e *EnvoyGateway) prune(ctx context.Context, routes, buffered, gateways map
 		}},
 	} {
 		if _, err := deleteManaged(ctx, e.Client, del.gvk, del.keep); err != nil {
-			errs = errors.Join(errs, err)
+			errs = append(errs, err)
 		}
 	}
-	if errs != nil {
+	if len(errs) > 0 {
 		// The engine stays while a route may still call it.
-		return errs
+		return errors.Join(errs...)
 	}
 	_, err := removeSidecars(ctx, e.Client, gateways)
 	return err
@@ -1036,19 +1036,19 @@ func deleteManaged(ctx context.Context, c client.Client, gvk schema.GroupVersion
 		return 0, err
 	}
 	n := 0
-	var errs error
+	var errs []error
 	for i := range list.Items {
 		u := &list.Items[i]
 		if keep != nil && keep(u) {
 			continue
 		}
 		if err := c.Delete(ctx, u); client.IgnoreNotFound(err) != nil {
-			errs = errors.Join(errs, fmt.Errorf("delete %s %s/%s: %w", gvk.Kind, u.GetNamespace(), u.GetName(), err))
+			errs = append(errs, fmt.Errorf("delete %s %s/%s: %w", gvk.Kind, u.GetNamespace(), u.GetName(), err))
 			continue
 		}
 		n++
 	}
-	return n, errs
+	return n, errors.Join(errs...)
 }
 
 // removeSidecars takes the engine out of the Envoy pods of the Gateways
@@ -1069,7 +1069,7 @@ func removeSidecars(ctx context.Context, c client.Client, keep map[types.Namespa
 			return n, err
 		}
 	}
-	var errs error
+	var errs []error
 	for i := range gateways.Items {
 		gw := &gateways.Items[i]
 		key := types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name}
@@ -1094,7 +1094,7 @@ func removeSidecars(ctx context.Context, c client.Client, keep map[types.Namespa
 		}
 		delete(gw.Annotations, sidecarMark)
 		if err := c.Patch(ctx, gw, patch); client.IgnoreNotFound(err) != nil {
-			errs = errors.Join(errs, fmt.Errorf("restore Gateway %s: %w", key, err))
+			errs = append(errs, fmt.Errorf("restore Gateway %s: %w", key, err))
 			// Its EnvoyProxy stays while it names it.
 			used[types.NamespacedName{Namespace: gw.Namespace, Name: mark}] = true
 			continue
@@ -1104,7 +1104,7 @@ func removeSidecars(ctx context.Context, c client.Client, keep map[types.Namespa
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(EnvoyProxyGVK.GroupVersion().WithKind("EnvoyProxyList"))
 	if err := c.List(ctx, list); err != nil {
-		return n, errors.Join(errs, err)
+		return n, errors.Join(append(errs, err)...)
 	}
 	for i := range list.Items {
 		ep := &list.Items[i]
@@ -1123,12 +1123,12 @@ func removeSidecars(ctx context.Context, c client.Client, keep map[types.Namespa
 			}
 		}
 		if client.IgnoreNotFound(err) != nil {
-			errs = errors.Join(errs, fmt.Errorf("restore EnvoyProxy %s: %w", key, err))
+			errs = append(errs, fmt.Errorf("restore EnvoyProxy %s: %w", key, err))
 			continue
 		}
 		n["EnvoyProxy"]++
 	}
-	return n, errs
+	return n, errors.Join(errs...)
 }
 
 // Wired implements Integration: the route has the operator's

@@ -57,7 +57,7 @@ func TestEnforced(t *testing.T) {
 		{
 			"one rejected", 3,
 			[]Engine{{Applied: 3}, {Applied: 2, Rejected: 3, RejectError: "line 1: bad rule", PodNamespace: "traefik", PodName: "traefik-1"}}, 0,
-			metav1.ConditionFalse, ReasonEngineNack, "1/2 engines rejected bundle 3 (traefik/traefik-1: line 1: bad rule)",
+			metav1.ConditionFalse, ReasonEngineNack, "some engines rejected bundle 3 (first: traefik/traefik-1: line 1: bad rule)",
 		},
 		// A rejection of an older bundle doesn't matter once the engine
 		// runs a newer one.
@@ -66,7 +66,7 @@ func TestEnforced(t *testing.T) {
 		// anything.
 		{"engines left out", 3, []Engine{{Applied: 3}, {Applied: 3}}, 2, metav1.ConditionFalse, ReasonEnginesUnreported, "not in their replica's report"},
 		{"only engines left out", 3, nil, 1, metav1.ConditionFalse, ReasonEnginesUnreported, "bundle 3 is not known to run everywhere"},
-		{"rejected and left out", 3, []Engine{{Rejected: 3}}, 1, metav1.ConditionFalse, ReasonEngineNack, "1/2 engines rejected"},
+		{"rejected and left out", 3, []Engine{{Rejected: 3}}, 1, metav1.ConditionFalse, ReasonEngineNack, "some engines rejected bundle 3"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st, reason, msg := Enforced(tc.version, tc.engines, tc.leftOut)

@@ -196,7 +196,7 @@ func testDistribution(ctx context.Context, t *testing.T, c client.Client) {
 	bad := engine("traefik-2", "traefik")
 	bad.Reject = func(*bundlev1.Bundle) error { return errors.New("line 1: rule does not compile") }
 	stopBad := run(bad)
-	wantEnforced("a rejecting engine", metav1.ConditionFalse, distribution.ReasonEngineNack, "1/2 engines rejected bundle")
+	wantEnforced("a rejecting engine", metav1.ConditionFalse, distribution.ReasonEngineNack, "some engines rejected bundle")
 	stopBad()
 	wantEnforced("the rejecting engine gone", metav1.ConditionTrue, distribution.ReasonEnforced, "every engine runs bundle")
 

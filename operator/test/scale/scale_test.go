@@ -35,6 +35,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -153,6 +154,8 @@ type Result struct {
 	Routes   int `json:"routes"`
 	Engines  int `json:"engines"`
 	Changes  int `json:"changes"`
+	// MemoryLimitBytes is the Go runtime's soft memory limit.
+	MemoryLimitBytes int64 `json:"memoryLimitBytes"`
 
 	// CreateSeconds: creating every policy and route.
 	CreateSeconds float64 `json:"createSeconds"`
@@ -225,7 +228,12 @@ func TestScale(t *testing.T) {
 			t.Fatalf("%s=%q: want a positive number", changesEnv, s)
 		}
 	}
-	res := Result{Policies: nPolicies, Engines: nEngines, Changes: nChanges}
+	// The chart's 512 MiB limit: cmd/operator sets GOMEMLIMIT to 90% of
+	// it. GOMEMLIMIT overrides it (off: no limit).
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(512 << 20 / 10 * 9)
+	}
+	res := Result{Policies: nPolicies, Engines: nEngines, Changes: nChanges, MemoryLimitBytes: debug.SetMemoryLimit(-1)}
 
 	// The operator's client is not rate limited, as ctrl.GetConfig sets it
 	// up in cmd/operator.

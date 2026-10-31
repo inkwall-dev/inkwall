@@ -68,7 +68,7 @@ from the operator's generated manifests. Don't edit `files/` by hand.
 |---|---|---|
 | `operator.image.repository`, `tag`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-operator`, the chart's `appVersion`, `IfNotPresent` | |
 | `operator.replicas` | `2` | One leads; all serve the webhooks |
-| `operator.resources` | 100m CPU and 128Mi requested; 512Mi limit | |
+| `operator.resources` | 100m CPU and 128Mi requested; 512Mi limit | The operator sets `GOMEMLIMIT` to 90% of the memory limit, unless `GOMEMLIMIT` is set |
 | `operator.extraArgs` | `[]` | Extra `inkwall-operator` flags |
 | `operator.podAnnotations`, `podLabels`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName` | | The default [affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/) spreads the replicas across nodes |
 | `operator.podDisruptionBudget.enabled`, `minAvailable` | `true`, `1` | |
