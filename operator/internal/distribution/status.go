@@ -24,9 +24,12 @@ import (
 const (
 	ReasonEnforced      = "Enforced"
 	ReasonEnginesBehind = "EnginesBehind"
-	ReasonEngineNack    = "EngineNack"
-	ReasonNoEngines     = "NoEngines"
-	ReasonNotInBundle   = "NotInBundle"
+	// ReasonEnginesUnreported: a replica's engine report was over its
+	// size limit, so not every engine is known.
+	ReasonEnginesUnreported = "EnginesUnreported"
+	ReasonEngineNack        = "EngineNack"
+	ReasonNoEngines         = "NoEngines"
+	ReasonNotInBundle       = "NotInBundle"
 )
 
 var (
@@ -73,12 +76,13 @@ func init() {
 // engine runs a bundle that contains the policy's current generation: the
 // first such bundle is its status.bundleVersion, and later ones have it too. Every engine gets the same bundle, so every
 // engine counts until engines are matched to the routes they serve.
-func Enforced(version int64, engines []Engine) (metav1.ConditionStatus, string, string) {
+// leftOut engines are connected but missing from their replica's report.
+func Enforced(version int64, engines []Engine, leftOut int) (metav1.ConditionStatus, string, string) {
 	if version <= 0 {
 		return metav1.ConditionFalse, ReasonNotInBundle, "the policy's current spec is not in a bundle"
 	}
 	v := uint64(version)
-	if len(engines) == 0 {
+	if len(engines) == 0 && leftOut == 0 {
 		return metav1.ConditionFalse, ReasonNoEngines, "no engine is connected"
 	}
 	current, rejected := 0, 0
@@ -94,11 +98,14 @@ func Enforced(version int64, engines []Engine) (metav1.ConditionStatus, string, 
 			}
 		}
 	}
-	total := len(engines)
+	total := len(engines) + leftOut
 	switch {
 	case rejected > 0:
 		return metav1.ConditionFalse, ReasonEngineNack,
 			fmt.Sprintf("%d/%d engines rejected bundle %d (%s)", rejected, total, v, rejectErr)
+	case leftOut > 0:
+		return metav1.ConditionFalse, ReasonEnginesUnreported,
+			fmt.Sprintf("%d/%d engines on bundle %d, %d not in their replica's report (over its size limit)", current, total, v, leftOut)
 	case current < total:
 		return metav1.ConditionFalse, ReasonEnginesBehind, fmt.Sprintf("%d/%d engines on bundle %d", current, total, v)
 	}
@@ -166,7 +173,7 @@ func (r *Reporter) Start(ctx context.Context) error {
 func (*Reporter) NeedLeaderElection() bool { return true }
 
 func (r *Reporter) report(ctx context.Context) error {
-	engines, err := ReadEngines(ctx, r.Reader, r.Namespace, r.Stale, time.Now())
+	engines, leftOut, err := ReadEngines(ctx, r.Reader, r.Namespace, r.Stale, time.Now())
 	if err != nil {
 		return err
 	}
@@ -199,14 +206,14 @@ func (r *Reporter) report(ctx context.Context) error {
 			p.Status.ObservedGeneration != p.Generation {
 			continue
 		}
-		if err := r.write(ctx, p, engines); err != nil {
+		if err := r.write(ctx, p, engines, leftOut); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, engines []Engine) error {
+func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, engines []Engine, leftOut int) error {
 	first := true
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if !first {
@@ -215,7 +222,7 @@ func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, engines 
 			}
 		}
 		first = false
-		st, reason, msg := Enforced(p.Status.BundleVersion, engines)
+		st, reason, msg := Enforced(p.Status.BundleVersion, engines, leftOut)
 		changed := meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
 			Type: wafv1alpha1.ConditionEnforced, Status: st, Reason: reason, Message: msg, ObservedGeneration: p.Generation,
 		})
