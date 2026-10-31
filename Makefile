@@ -122,13 +122,14 @@ generate: ## Lint the protobuf APIs (api/), regenerate their Go code, and regene
 	cp operator/config/webhook/manifests.yaml $(CHART)/files/webhook/
 
 .PHONY: helm-lint
-helm-lint: ## Lint the Helm chart and render it with each webhook certificate mode
+helm-lint: ## Lint the Helm chart, render it with each webhook certificate mode, and check its integration roles (hack/helm-test.sh)
 	helm lint --strict $(CHART)
 	helm template inkwall $(CHART) --namespace inkwall-system >/dev/null
 	helm template inkwall $(CHART) --namespace inkwall-system --set webhook.certs.mode=certManager >/dev/null
 	helm template inkwall $(CHART) --namespace inkwall-system --set controlPlane.caBundle=ca --set controlPlane.enrollmentToken=t >/dev/null
 	@# As helm upgrade --reuse-values from 0.1.0 renders it: values without controlPlane.
 	helm template inkwall $(CHART) --namespace inkwall-system --set controlPlane=null >/dev/null
+	CHART=$(CHART) hack/helm-test.sh
 
 .PHONY: tidy
 tidy: ## Tidy go.mod and go.sum, here and in test/crs (which builds against this module)

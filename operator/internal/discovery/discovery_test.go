@@ -165,3 +165,22 @@ func TestReconcile(t *testing.T) {
 		t.Error("an unchanged status was written again")
 	}
 }
+
+// A disabled integration's proxy is Unsupported, and says why; the others
+// are as they were.
+func TestDisable(t *testing.T) {
+	proxies := Proxies(
+		[]Class{{Name: "traefik", Controller: "traefik.io/ingress-controller"}},
+		[]Class{{Name: "eg", Controller: "gateway.envoyproxy.io/gatewayclass-controller"}},
+		map[string][]schema.GroupKind{"traefik": {ingressKind}, "envoy-gateway": {httpRouteKind}},
+	)
+	got := Disable(proxies, map[string]string{"envoy-gateway": "the envoy-gateway integration is disabled"})
+	want := []wafv1alpha1.ProxyStatus{
+		{ControllerName: "gateway.envoyproxy.io/gatewayclass-controller", Integration: "envoy-gateway", GatewayClasses: []string{"eg"},
+			Support: wafv1alpha1.SupportUnsupported, Message: "the envoy-gateway integration is disabled"},
+		{ControllerName: "traefik.io/ingress-controller", Integration: "traefik", IngressClasses: []string{"traefik"}, Support: wafv1alpha1.SupportFull},
+	}
+	if !apiequality.Semantic.DeepEqual(got, want) {
+		t.Errorf("got %+v\nwant %+v", got, want)
+	}
+}

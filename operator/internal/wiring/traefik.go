@@ -276,10 +276,10 @@ func IsDefaultClass(ic *networkingv1.IngressClass) bool {
 // Traefik's wiring reads routes, classes and Traefik's pods, and writes the
 // Middleware in protected namespaces and the references to it.
 //
-// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingressclasses,verbs=get;list;watch
-// +kubebuilder:rbac:groups=traefik.io,resources=middlewares,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=traefik.io,resources=ingressroutes,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;update;patch,roleName=inkwall-operator-traefik
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingressclasses,verbs=get;list;watch,roleName=inkwall-operator-traefik
+// +kubebuilder:rbac:groups=traefik.io,resources=middlewares,verbs=get;list;watch;create;update;patch;delete,roleName=inkwall-operator-traefik
+// +kubebuilder:rbac:groups=traefik.io,resources=ingressroutes,verbs=get;list;watch;update;patch,roleName=inkwall-operator-traefik
 
 // Traefik is the wiring of Traefik: its Ingresses and IngressRoutes.
 type Traefik struct {

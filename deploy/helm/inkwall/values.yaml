@@ -85,6 +85,19 @@ uninstall:
   # it), and the policies keep the finalizer: see the README.
   unwire: true
 
+rbac:
+  # Each integration's permissions are in a ClusterRole of its own; false
+  # leaves it out, e.g. for a proxy the cluster doesn't run, so the operator
+  # isn't granted its resources. The operator then disables that
+  # integration: policies on the routes of its proxy report
+  # Programmed=False (IntegrationDisabled), and the others work.
+  integrations:
+    # Traefik's Middlewares and IngressRoutes, the Ingress annotation.
+    traefik: true
+    # Envoy Gateway's EnvoyProxies, EnvoyExtensionPolicies, Backends and
+    # ClientTrafficPolicies, a Gateway's parametersRef.
+    envoyGateway: true
+
 serviceAccount:
   # Empty: the operator's name (inkwall-operator for a release named inkwall).
   name: ""

@@ -167,6 +167,27 @@ func TestUnwireWithoutTraefikCRDs(t *testing.T) {
 	}
 }
 
+// An integration the operator may not unwire (its ClusterRole isn't
+// granted) is skipped, and said so; the policies are still released.
+func TestUnwireForbidden(t *testing.T) {
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p", Finalizers: []string{Finalizer}}}
+	c := fake.NewClientBuilder().WithScheme(scheme()).WithObjects(p).WithStatusSubresource(p).WithInterceptorFuncs(interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if u, ok := list.(*unstructured.UnstructuredList); ok {
+				if u.GetKind() == "MiddlewareList" {
+					return apierrors.NewForbidden(MiddlewareGVK.GroupVersion().WithResource("middlewares").GroupResource(), "", nil)
+				}
+				return &meta.NoKindMatchError{GroupKind: u.GroupVersionKind().GroupKind()}
+			}
+			return c.List(ctx, list, opts...)
+		},
+	}).Build()
+	n, err := Unwire(context.Background(), c)
+	if err != nil || n.Policies != 1 || !slices.Equal(n.Forbidden, []string{"traefik"}) {
+		t.Errorf("unwired %+v, %v; want traefik forbidden, 1 policy released", n, err)
+	}
+}
+
 func scheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(s)
