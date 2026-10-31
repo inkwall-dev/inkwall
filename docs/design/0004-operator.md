@@ -156,7 +156,7 @@ Validation runs in three steps, cheapest first:
 | Condition | True when | False reasons |
 |---|---|---|
 | `Accepted` | Spec valid, references resolve | `InvalidRef`, `Conflict`, `RuleCompileError`, `TargetUnsupported` |
-| `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `NoTargets`, `InjectionDisabled` |
+| `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `NoTargets`, `InjectionDisabled`, `Unwired` |
 | `Enforced` | Every serving engine ACKed a bundle with this generation | `EnginesBehind` (`3/6`), `EngineNack`, `NoEngines`, `NotInBundle` |
 | `Ready` | The three above are True | first failing condition's reason |
 
@@ -373,7 +373,8 @@ longer needed.
   - `SidecarMissing`: no Traefik pod selected, or pods without the engine (the operator was down
     in detect mode, or they opted out), listed;
   - `NoTargets`;
-  - `InjectionDisabled`.
+  - `InjectionDisabled`;
+  - `Unwired`: set by the uninstall hook, with the operator stopped ([§5](#5-uninstall-and-disable)).
 - **Not yet:** `HTTPRoute` targets; matching engines to the pods that serve a policy's class (all
   engines count for `Enforced`); IngressRoutes nested with `parentRefs`. Whether Traefik attachment
   should default to something else is open ([§12](#12-open-questions)).
@@ -577,6 +578,9 @@ Metrics: `inkwall_operator_bundle_version`, `inkwall_operator_engines{state}`,
 `inkwall_operator_bundle_compressed_bytes` ([§4.6](#46-bundle-builder-leader-only)), and, from the
 wiring, `inkwall_operator_wired_targets{integration}` and
 `inkwall_operator_wiring_failures{integration}` (targets that are `WiringFailed`).
+`inkwall_operator_request_stats_dropped_total{reason}` counts the policies' request counts a
+replica drops ([§4.9](#49-upstream-sync-leader-only)): `not_in_bundle`, `latency_buckets` (the
+latency only) and `evicted`.
 
 **Not yet:** an `integration` label on the engine counts (engines aren't matched to proxies yet),
 reconcile duration, policy condition counts.
@@ -637,6 +641,12 @@ leader only, and is idle in Standalone mode (the default).
   `inkwall_operator_events_buffered` follows the buffer, outages included.
 - Every replica also sums its engines' request counts per policy and sends them on that stream
   every 10 s, when the control plane accepts them, even if it doesn't accept events.
+- It takes counts only for the policies of the bundle it serves, and keeps the totals of at least
+  4096 policies. Past that, it forgets those no longer in the bundle, so the totals stay bounded
+  as policies come and go; a policy that comes back counts from zero again. Both are counted in
+  `inkwall_operator_request_stats_dropped_total{reason}`. A policy's total can therefore go down
+  under the same `since`; the contract (`RequestStatsUpload`) tells consumers to treat any
+  decrease as a reset, the rule the operator applies to its engines. The fake control plane does.
 - The events stream reconnects with jittered backoff bounded at 10 s (the leader's primary stream:
   1 min), so the backlog drains soon after an outage.
 
@@ -729,8 +739,9 @@ Removal must never leave a proxy failing closed on a missing engine.
   - Deleting an `InkwallConfig` doesn't unwire by itself. Without one, the operator uses the
     defaults, and keeps wiring the routes of the pods they still select.
 - **Uninstall** runs the hook with injection off too. The hook also sets the `WAFPolicy` webhook to
-  `Ignore` (no replica answers it, and it would refuse the update), and removes the finalizer from
-  every policy. Deleting a policy, or its namespace, then never waits for an operator that is gone.
+  `Ignore` (no replica answers it, and it would refuse the update), reports every policy
+  `Programmed=False` and `Ready=False` (`Unwired`, #195), and removes the finalizer from every
+  policy. Deleting a policy, or its namespace, then never waits for an operator that is gone.
   Without the hook (`--no-hooks`, `uninstall.unwire=false`), the chart README says how to clean up.
 - Tested on kind:
   - a policy deleted while the operator is scaled to 0 stays, wired, until the operator is back;
