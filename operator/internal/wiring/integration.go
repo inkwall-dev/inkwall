@@ -22,6 +22,7 @@ import (
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/crdwatch"
+	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 )
 
 // Integration is the wiring of one proxy (0004 §4.2): the target kinds it
@@ -57,7 +58,7 @@ type Integration interface {
 type Target struct {
 	Kind schema.GroupKind
 	Key  types.NamespacedName
-	// Section narrows an HTTPRoute to its rule of that name; "": all.
+	// Section is an HTTPRoute's rule (sectionName), or "" for the route.
 	Section string
 }
 
@@ -79,6 +80,10 @@ type Result struct {
 	Targets map[Target]TargetState
 	// Pods are the proxy's pods, whose engine the wired routes go to.
 	Pods []corev1.Pod
+	// Rolling: the proxy's own controller replaces its pods without the
+	// engine (Envoy Gateway, once its EnvoyProxy has it), rather than the
+	// Pod webhook injecting new ones; they are PendingRestart.
+	Rolling bool
 }
 
 // TargetState is a target as an integration sees it.
@@ -90,22 +95,39 @@ type TargetState struct {
 	Failed string
 	// Wired: the integration keeps the target wired.
 	Wired bool
+	// Pending: wired, but not in force yet, and why (the proxy hasn't
+	// accepted its configuration yet).
+	Pending string
 	// Partly: it is wired, but some of its traffic goes through proxies
 	// Inkwall doesn't wire, and which.
 	Partly string
 }
 
-// CRDs watch the kinds whose CRD may be installed after the operator, or
-// never, once it is; a nil one is only read at each reconcile.
-type CRDs struct {
-	IngressRoutes, HTTPRoutes, Gateways, GatewayClasses *crdwatch.Kind
+// Config is what the integrations need besides the clients.
+type Config struct {
+	// Pods select the proxies' pods; nil: the defaults.
+	Pods *integrations.Selectors
+	// Watches of kinds whose CRD may be missing, once it is installed;
+	// nil: only read at each reconcile.
+	IngressRoutes, HTTPRoutes, Gateways, GatewayClasses, EnvoyProxies, ExtensionPolicies, TrafficPolicies *crdwatch.Kind
+	// Sidecar is the engine Envoy Gateway's pods get, before the
+	// InkwallConfig's settings.
+	Sidecar injection.Sidecar
 }
 
-// Integrations are the wiring of every proxy Inkwall integrates (Traefik so
-// far), selecting the proxy pods with pods.
-func Integrations(c client.Client, reader client.Reader, pods *integrations.Selectors, crds CRDs) []Integration {
+// Integrations are the wiring of every proxy Inkwall integrates: Traefik
+// and Envoy Gateway.
+func Integrations(c client.Client, reader client.Reader, cfg Config) []Integration {
 	return []Integration{
-		&Traefik{Client: c, APIReader: reader, Pods: pods.Selector(integrations.Traefik.Name), CRDs: crds},
+		&Traefik{
+			Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.Traefik.Name),
+			IngressRoutes: cfg.IngressRoutes, HTTPRoutes: cfg.HTTPRoutes, Gateways: cfg.Gateways, GatewayClasses: cfg.GatewayClasses,
+		},
+		&EnvoyGateway{
+			Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.EnvoyGateway.Name), Sidecar: cfg.Sidecar,
+			HTTPRoutes: cfg.HTTPRoutes, Gateways: cfg.Gateways, GatewayClasses: cfg.GatewayClasses,
+			EnvoyProxies: cfg.EnvoyProxies, ExtensionPolicies: cfg.ExtensionPolicies, TrafficPolicies: cfg.TrafficPolicies,
+		},
 	}
 }
 

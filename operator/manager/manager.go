@@ -130,7 +130,8 @@ type Options struct {
 	// empty: the system roots.
 	ControlPlaneCAFile string
 	// CRDInterval is how often the leader looks for Traefik's IngressRoute
-	// CRD, and the Gateway API's CRDs, until they are installed; 0: 30s.
+	// CRD, and Gateway API's and Envoy Gateway's, until they are installed;
+	// 0: 30s.
 	CRDInterval time.Duration
 
 	// EventsDir holds the replica's buffer of security events for the
@@ -207,10 +208,16 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	}
 	// Traefik's IngressRoute CRD may be installed after the operator.
 	ingressRoutes := &crdwatch.Kind{GVK: wiring.IngressRouteGVK, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
-	// So may Gateway API's, or never be.
-	httpRoutes := &crdwatch.Kind{GVK: controller.HTTPRouteGVK, Object: &gatewayv1.HTTPRoute{}, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
-	gateways := &crdwatch.Kind{GVK: wiring.GatewayGVK, Object: &gatewayv1.Gateway{}, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
-	gatewayClasses := &crdwatch.Kind{GVK: proxydiscovery.GatewayClassGVK, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
+	// So may Gateway API's, and Envoy Gateway's.
+	crd := func(gvk schema.GroupVersionKind, obj client.Object) *crdwatch.Kind {
+		return &crdwatch.Kind{GVK: gvk, Object: obj, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
+	}
+	httpRoutes := crd(controller.HTTPRouteGVK, &gatewayv1.HTTPRoute{})
+	gateways := crd(wiring.GatewayGVK, &gatewayv1.Gateway{})
+	gatewayClasses := crd(proxydiscovery.GatewayClassGVK, nil)
+	envoyProxies := crd(wiring.EnvoyProxyGVK, nil)
+	extensionPolicies := crd(wiring.EnvoyExtensionPolicyGVK, nil)
+	trafficPolicies := crd(wiring.ClientTrafficPolicyGVK, nil)
 	if err := (&controller.BundleReconciler{
 		Client:        mgr.GetClient(),
 		APIReader:     mgr.GetAPIReader(),
@@ -228,15 +235,23 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		return nil, err
 	}
 	inject := o.Inject && o.Webhooks && o.DistributionPort != 0
+	// The engine in proxy pods: injected by the Pod webhook, or put in the
+	// pod template of a proxy that has one (Envoy Gateway).
+	sidecar := injection.Sidecar{
+		Image:        o.EngineImage,
+		PullPolicy:   o.EnginePullPolicy,
+		OperatorAddr: fmt.Sprintf("%s.%s.svc:%d", o.DistributionService, o.Namespace, o.DistributionPort),
+		BundleSecret: o.Namespace + "/" + bundle.BundleSecret,
+	}
 	var injector *webhook.PodInjector
 	if inject {
 		injector = &webhook.PodInjector{
 			Client:       mgr.GetClient(),
 			Decoder:      admission.NewDecoder(mgr.GetScheme()),
-			Image:        o.EngineImage,
-			PullPolicy:   o.EnginePullPolicy,
-			OperatorAddr: fmt.Sprintf("%s.%s.svc:%d", o.DistributionService, o.Namespace, o.DistributionPort),
-			BundleSecret: o.Namespace + "/" + bundle.BundleSecret,
+			Image:        sidecar.Image,
+			PullPolicy:   sidecar.PullPolicy,
+			OperatorAddr: sidecar.OperatorAddr,
+			BundleSecret: sidecar.BundleSecret,
 			Integrations: selectors,
 		}
 		if err := (&injection.PodWebhookReconciler{
@@ -253,15 +268,16 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			APIReader:  mgr.GetAPIReader(),
 			Namespace:  o.Namespace,
 			CertSecret: o.WebhookSecret,
-			Pods:       selectors.PodSelector(),
+			Pods:       selectors,
 		}).SetupWithManager(mgr); err != nil {
 			return nil, err
 		}
 	}
 	// Without injection, the wiring controller unwires what was wired: new
 	// proxy pods won't have the engine.
-	wirings := wiring.Integrations(mgr.GetClient(), mgr.GetAPIReader(), selectors, wiring.CRDs{
-		IngressRoutes: ingressRoutes, HTTPRoutes: httpRoutes, Gateways: gateways, GatewayClasses: gatewayClasses,
+	wirings := wiring.Integrations(mgr.GetClient(), mgr.GetAPIReader(), wiring.Config{
+		Pods: selectors, IngressRoutes: ingressRoutes, HTTPRoutes: httpRoutes, Gateways: gateways, GatewayClasses: gatewayClasses,
+		EnvoyProxies: envoyProxies, ExtensionPolicies: extensionPolicies, TrafficPolicies: trafficPolicies, Sidecar: sidecar,
 	})
 	if err := (&wiring.Reconciler{
 		Client: mgr.GetClient(), PodWebhook: webhook.MutatingConfigName, Integrations: wirings, Disabled: !inject,
@@ -275,7 +291,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	if err := (&proxydiscovery.Reconciler{Client: mgr.GetClient(), GatewayClasses: gatewayClasses, Kinds: kinds}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
-	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gateways, gatewayClasses} {
+	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gateways, gatewayClasses, envoyProxies, extensionPolicies, trafficPolicies} {
 		if err := mgr.Add(k); err != nil {
 			return nil, err
 		}

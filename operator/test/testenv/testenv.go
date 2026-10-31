@@ -149,9 +149,14 @@ func Start(o Options) (*Env, func(), error) {
 func InstallLater(e *Env) error { return install(e, "later") }
 
 // InstallGatewayAPI installs stand-ins for Gateway API's GatewayClass,
-// Gateway and HTTPRoute CRDs (testenv/gateway-api), typically while the
-// operator runs, and waits until they are served.
+// Gateway and HTTPRoute CRDs (testenv/gateway-api) while the operator runs,
+// and waits until they are served.
 func InstallGatewayAPI(e *Env) error { return install(e, "gateway-api") }
+
+// InstallEnvoyGateway installs stand-ins for Envoy Gateway's CRDs
+// (testenv/envoy-gateway) while the operator runs, and waits until they are
+// served.
+func InstallEnvoyGateway(e *Env) error { return install(e, "envoy-gateway") }
 
 func install(e *Env, dir string) error {
 	_, err := envtest.InstallCRDs(e.Config, envtest.CRDInstallOptions{

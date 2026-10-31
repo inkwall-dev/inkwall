@@ -293,9 +293,9 @@ type Traefik struct {
 	APIReader client.Reader
 	// Pods selects Traefik's pods (integrations.Selectors).
 	Pods labels.Selector
-	// CRDs watch IngressRoutes, HTTPRoutes, Gateways and GatewayClasses
-	// once their CRDs are installed.
-	CRDs CRDs
+	// Watches of IngressRoutes, HTTPRoutes, Gateways and GatewayClasses,
+	// once their CRDs are installed; nil: only read at each reconcile.
+	IngressRoutes, HTTPRoutes, Gateways, GatewayClasses *crdwatch.Kind
 
 	// noResponseLimit: the API server dropped the Middleware's
 	// maxResponseBodySize (Traefik before v3.7), so it isn't asked for
@@ -327,7 +327,7 @@ func (t *Traefik) Watch(c controller.Controller, cache cache.Cache, h handler.Ev
 	}
 	// Their middlewares and filters matter (the operator's own included),
 	// and which Gateways, of which classes, serve an HTTPRoute.
-	for _, k := range []*crdwatch.Kind{t.CRDs.IngressRoutes, t.CRDs.HTTPRoutes, t.CRDs.Gateways, t.CRDs.GatewayClasses} {
+	for _, k := range []*crdwatch.Kind{t.IngressRoutes, t.HTTPRoutes, t.Gateways, t.GatewayClasses} {
 		if k != nil {
 			k.Add(c, h)
 		}
@@ -604,9 +604,9 @@ func (st *state) result(targets map[Target]bool) *Result {
 				s.Failed = st.middlewareErr[k.Namespace]
 			case st.httpRouteErr[k] != "":
 				s.Failed = st.httpRouteErr[k]
-			case len(others) > 0:
+			case len(unwired(others)) > 0:
 				s.Partly = fmt.Sprintf("HTTPRoute %s is also attached to Gateways of %s, which Inkwall doesn't wire yet: its traffic there is not inspected",
-					k.Name, strings.Join(others, ", "))
+					k.Name, strings.Join(unwired(others), ", "))
 			}
 		default:
 			continue

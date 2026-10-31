@@ -56,10 +56,24 @@ rules:
   verbs:
   - create
 - apiGroups:
+  - gateway.envoyproxy.io
+  resources:
+  - backends
+  - clienttrafficpolicies
+  - envoyextensionpolicies
+  - envoyproxies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - gateway.networking.k8s.io
   resources:
   - gatewayclasses
-  - gateways
   verbs:
   - get
   - list
@@ -67,6 +81,7 @@ rules:
 - apiGroups:
   - gateway.networking.k8s.io
   resources:
+  - gateways
   - httproutes
   verbs:
   - get

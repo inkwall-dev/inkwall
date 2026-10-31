@@ -265,8 +265,9 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
   engine).
 
 **Built:** `InkwallConfig`, `WAFPolicy`, `WAFRuleSet` and `ClusterWAFRuleSet`; `Ingress` and
-Traefik `IngressRoute` targets; `HTTPRoute` targets, with the precedence above, wired when
-Traefik's Gateway API provider serves them ([0004 §4.4](0004-operator.md#44-wiring-controller)).
+Traefik `IngressRoute` targets; `HTTPRoute` targets resolved, with the precedence above
+([0004 §4.5](0004-operator.md#45-resolver)), and wired through Envoy Gateway or Traefik's Gateway
+API provider ([0004 §4.4](0004-operator.md#44-wiring-controller)).
 **Not yet:** IP lists, the policy fields `rateLimits` and `ipLists`, wiring other controllers'
 `HTTPRoute` targets, `BlockHighConfidence`, the `InspectPrefix` oversize action, and
 `InkwallConfig.events`.
@@ -444,9 +445,11 @@ is configured its own way:
 Detect mode uses `observability_mode`. Envoy's [Go filter](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/golang_filter) needs a contrib build, so it is
 experimental.
 
-**Built:** the engine's side, `inkwall-engine ext-proc` ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing)).
-Envoy Gateway will use `ext_proc`, not `ext_authz`. **Not yet:** the operator's Envoy Gateway
-configuration.
+**Built:** the engine's side, `inkwall-engine ext-proc` ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing)), and
+Envoy Gateway, with `ext_proc`, not `ext_authz`: the engine joins the Envoy pods through the
+Gateway's `EnvoyProxy`, and each protected HTTPRoute gets an `EnvoyExtensionPolicy` calling it
+through a `Backend` on a Unix socket ([0004 §4.4](0004-operator.md#44-wiring-controller)).
+**Not yet:** Istio, Contour, raw Envoy.
 
 ### 6.2 ingress-nginx
 
@@ -554,8 +557,7 @@ adapter must match.
 | Caddy | module | ✅ | ✅ | ✅ | ✅ | in-process |
 | Any | reverse proxy | ✅ | ✅ | ✅ | ✅ | TCP |
 
-Built: Traefik ForwardAuth and the reverse proxy; the engine's ext_proc listener, without the
-operator's Envoy configuration yet.
+Built: Traefik ForwardAuth, the reverse proxy, and ext_proc through Envoy Gateway.
 
 ---
 

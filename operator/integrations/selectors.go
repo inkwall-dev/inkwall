@@ -12,6 +12,8 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 )
@@ -82,12 +84,50 @@ func (s *Selectors) Selector(name string) labels.Selector {
 	return sel
 }
 
-// PodSelector matches the pods of every integration, for the operator's
-// cache and the controllers' lists. A label selector can't express a union
-// of selectors with different keys; with Traefik the only integration, it
-// is Traefik's.
+// PodSelector matches the pods of every integration, and maybe others, for
+// the operator's cache: a label selector can't express a union of
+// selectors. It requires the keys every integration's selector sets to one
+// of their values (app.kubernetes.io/name in (envoy,traefik) by default).
+// Selectors sharing no such key make it match every pod. IsProxyPod tells
+// the proxy pods among them.
 func (s *Selectors) PodSelector() labels.Selector {
-	return s.Selector(Traefik.Name)
+	values := map[string]sets.Set[string]{}
+	for i, in := range All {
+		mine := map[string]sets.Set[string]{}
+		reqs, _ := s.Selector(in.Name).Requirements()
+		for _, r := range reqs {
+			switch r.Operator() {
+			case selection.Equals, selection.DoubleEquals, selection.In:
+				mine[r.Key()] = sets.New(r.ValuesUnsorted()...)
+			}
+		}
+		if i == 0 {
+			values = mine
+			continue
+		}
+		for k, v := range values {
+			if m, ok := mine[k]; ok {
+				values[k] = v.Union(m)
+			} else {
+				delete(values, k)
+			}
+		}
+	}
+	sel := labels.NewSelector()
+	for _, k := range slices.Sorted(maps.Keys(values)) {
+		r, err := labels.NewRequirement(k, selection.In, sets.List(values[k]))
+		if err != nil {
+			return labels.Everything()
+		}
+		sel = sel.Add(*r)
+	}
+	return sel
+}
+
+// IsProxyPod reports whether a pod's labels are those of an integration's
+// pods.
+func (s *Selectors) IsProxyPod(podLabels map[string]string) bool {
+	return s.ForPod(podLabels) != nil
 }
 
 // ForPod returns the integration whose pods carry podLabels, or nil.

@@ -28,7 +28,10 @@ The [docs index](docs/README.md) lists every guide, reference and design doc.
 
 1. The operator, **`inkwall-operator`**, injects the engine, **`inkwall-engine`**, into Traefik's
    [pods](https://kubernetes.io/docs/concepts/workloads/pods/) as a [sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/). It attaches a [ForwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/) [Middleware](https://doc.traefik.io/traefik/middlewares/overview/) to every `Ingress`, `IngressRoute`
-   or `HTTPRoute` a policy targets, and sends signed [policy bundles](docs/glossary.md#bundle) to every engine.
+   or Traefik-served `HTTPRoute` a policy targets. With [Envoy Gateway](https://gateway.envoyproxy.io/), it adds the engine to the Envoy pods through the
+   Gateway's [`EnvoyProxy`](docs/glossary.md#envoyproxy), and gives every `HTTPRoute` a policy targets an
+   [`EnvoyExtensionPolicy`](docs/glossary.md#envoyextensionpolicy) whose [ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter) filter calls the engine. It sends signed
+   [policy bundles](docs/glossary.md#bundle) to every engine.
 2. The engine inspects each request with the CRS and answers allow or deny. When the operator is
    down, it keeps enforcing its last bundle.
 3. Each policy's status shows how far it got: `Accepted`, then `Programmed` (its routes are wired),
@@ -48,6 +51,15 @@ Then install Traefik, or restart it: only pods created after the operator get th
 
 ```sh
 kubectl -n <traefik namespace> rollout restart deployment/<traefik>
+```
+
+Envoy Gateway needs no restart: Envoy Gateway rolls the Envoy pods of a Gateway when it gets its
+first protected route. Turn on its Backend API, which the engine's socket needs:
+
+```sh
+helm upgrade --install eg oci://docker.io/envoyproxy/gateway-helm --version v1.9.3 \
+  --namespace envoy-gateway-system --create-namespace \
+  --set config.envoyGateway.extensionApis.enableBackend=true
 ```
 
 The [chart README](deploy/helm/inkwall/README.md) lists the chart's values and shows how to
@@ -83,6 +95,10 @@ spec:
   mode: Block                                # the default, Detect, logs but never blocks
 ```
 
+For an `HTTPRoute` that Envoy Gateway serves, target it with its group, and optionally one rule:
+`{group: gateway.networking.k8s.io, kind: HTTPRoute, name: web, sectionName: api}`. One policy can
+target routes of both proxies.
+
 Once the policy is `Ready`, every engine enforces it. Send an attack to check:
 
 ```console
@@ -102,12 +118,16 @@ Coming from ingress-nginx with ModSecurity? `inkwallctl migrate ingress-nginx` c
 annotations into policies: see [migrating from ingress-nginx](docs/migrating-from-ingress-nginx.md).
 
 To stop protecting the route, delete the policy or remove the route from its `targetRefs`: the
-operator removes its Middleware from the route, and Traefik serves it uninspected.
+operator removes its Middleware from the route, and Traefik serves it uninspected. For an
+HTTPRoute, it deletes the route's `EnvoyExtensionPolicy`, and takes the engine out of a Gateway
+with no protected route left, leaving its `EnvoyProxy` as it was.
 
 **Safe by default.** In block mode, a request that can't be inspected in time is rejected (503),
 so padding a request past the deadline doesn't get an attack through; detect mode never blocks.
 If Traefik can't reach the engine at all (crashed, restarting or hung), Traefik answers 500 in
 both modes: see [when the engine is down](deploy/helm/inkwall/README.md#when-the-engine-is-down).
+Envoy, through Envoy Gateway, answers 500 too, unless every policy on the route fails open: then
+it lets the request through.
 Every engine verifies the signature of each bundle. While a policy blocks, Traefik pods can't start
 without the engine: see
 [when the operator is down](deploy/helm/inkwall/README.md#when-the-operator-is-down).
@@ -127,10 +147,11 @@ modes, and [testing policies offline](docs/testing-policies.md) for `inkwallctl 
 
 ## Limits
 
-- Proxies: **Traefik** only, plus the standalone proxy. [Envoy](https://www.envoyproxy.io/docs/envoy/latest/), [HAProxy](https://docs.haproxy.org/), [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) and [Caddy](https://caddyserver.com/docs/)
+- Proxies: **Traefik** and **Envoy Gateway** (v1.9; not with `mergeGateways` or Envoy as a
+  DaemonSet), plus the standalone proxy. Raw [Envoy](https://www.envoyproxy.io/docs/envoy/latest/), [HAProxy](https://docs.haproxy.org/), [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) and [Caddy](https://caddyserver.com/docs/)
   are designed, not built.
-- Targets: **`Ingress`**, Traefik **`IngressRoute`** (match rules that join `Host`, `Path` and
-  `PathPrefix` with `&&`), and [Gateway API](https://gateway-api.sigs.k8s.io/) **[`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/)** served by
+- Targets: **`Ingress`** and Traefik **`IngressRoute`** (match rules that join `Host`, `Path` and
+  `PathPrefix` with `&&`) through Traefik; [Gateway API](https://gateway-api.sigs.k8s.io/) **[`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/)** through Envoy Gateway or
   [Traefik's Gateway API provider](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/) (`Exact` and `PathPrefix` paths, methods; no header or
   query matches). Other Gateway API controllers' HTTPRoutes are resolved into the bundle, but not
   wired.

@@ -21,10 +21,10 @@ Argo CD and Flux so they neither report it as drift nor undo it.
 ## Prerequisites
 
 - Inkwall installed ([chart README](../deploy/helm/inkwall/README.md)), with `WAFPolicy`
-  objects that target your [`Ingress`](https://doc.traefik.io/traefik/routing/providers/kubernetes-ingress/),
-  [`IngressRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) or
-  [`HTTPRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/) objects
-  served by [Traefik](https://doc.traefik.io/traefik/).
+  objects that target your [`Ingress`](https://doc.traefik.io/traefik/routing/providers/kubernetes-ingress/)
+  or [`IngressRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) objects
+  served by [Traefik](https://doc.traefik.io/traefik/), or your [`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) objects served by
+  [Envoy Gateway](https://gateway.envoyproxy.io/) or [Traefik's Gateway API provider](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/).
 - Those routes applied by [Argo CD](https://argo-cd.readthedocs.io/en/stable/) or by
   [Flux](https://fluxcd.io/flux/).
 
@@ -46,17 +46,27 @@ its own entries when the route is no longer protected. It writes with
 | `IngressRoute` | annotation `waf.inkwall.dev/wired` | `inkwall-waf` |
 | `HTTPRoute` (`gateway.networking.k8s.io`, a Traefik Gateway's) | `spec.rules[*].filters` | `{type: ExtensionRef, extensionRef: {group: traefik.io, kind: Middleware, name: inkwall-waf}}` added first in every protected rule (with `sectionName`, that rule only); your filters kept after it |
 | `HTTPRoute` | annotation `waf.inkwall.dev/wired` | `inkwall-waf` |
+| `EnvoyProxy` (`gateway.envoyproxy.io`) that a Gateway with a protected route names | `spec.provider.kubernetes.envoyDeployment`: `initContainers`, `pod.volumes`, `container.volumeMounts` | The engine, `inkwall-engine`, first among the init containers; the volumes `inkwall-secrets`, `inkwall-cache`, `inkwall-tmp`, `inkwall-socket` and the mount `inkwall-socket` after yours; `spec.provider.type: Kubernetes` if you had no `provider` |
+| `EnvoyProxy` | annotations `waf.inkwall.dev/wired`, `waf.inkwall.dev/hash` | `sidecar`, and a hash of the operator's entries |
+| `Gateway` (Envoy Gateway's) that names no `EnvoyProxy` | `spec.infrastructure.parametersRef` | The operator's `EnvoyProxy`, `inkwall-waf-<gateway>` |
+| `Gateway` | annotation `waf.inkwall.dev/wired` | `inkwall-waf-<gateway>` |
 | `WAFPolicy` | `metadata.finalizers` | `waf.inkwall.dev/unwire` ([finalizer](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/)): the operator unwires the policy's routes before it can be deleted |
 | `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet`, `InkwallConfig` | `status` | Conditions, bundle version |
 
 Objects the operator creates and owns are not in your Git repository, and [GitOps](https://opengitops.dev/) tools don't
-track them: the Middleware `inkwall-waf` in each namespace with a protected route, the [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/)
-`inkwall-trust` in each Traefik namespace, and the [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/) and ConfigMaps in `inkwall-system`.
+track them: the Middleware `inkwall-waf` in each namespace with a protected route; for Envoy
+Gateway, the `Backend` `inkwall-engine` in each namespace with a protected HTTPRoute, an
+`EnvoyExtensionPolicy` `inkwall-waf-<route>` per protected HTTPRoute, and a `ClientTrafficPolicy`
+and an `EnvoyProxy` `inkwall-waf-<gateway>` per Gateway that needs one; the [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/)
+`inkwall-trust` in each proxy namespace; and the [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/) and ConfigMaps in `inkwall-system`.
 They carry the [label](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/) `app.kubernetes.io/managed-by: inkwall-operator`.
 
 The engine is injected into Traefik's pods when they are created, by a mutating
 [admission webhook](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/).
-Traefik's [`Deployment`](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) or [`DaemonSet`](https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/) isn't changed, so it doesn't drift.
+Traefik's [`Deployment`](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) or [`DaemonSet`](https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/) isn't changed, so it doesn't drift. Envoy Gateway's
+Envoy pods get the engine through the `EnvoyProxy` above: Envoy Gateway rolls its Envoy
+`Deployment` when the operator adds or removes it, which it does when a Gateway gets its first
+protected route or loses its last.
 
 The operator never writes your `InkwallConfig`'s spec or annotations. Bump
 `waf.inkwall.dev/rotate-signing-key` in Git to rotate the signing key
@@ -72,7 +82,9 @@ when your manifest sets the same field:
 | An `Ingress` without the `router.middlewares` annotation | None |
 | An `Ingress` with its own `router.middlewares` annotation | The annotation |
 | Any `IngressRoute` | `spec.routes`. Traefik's CRD doesn't declare a [list type](https://kubernetes.io/docs/reference/using-api/server-side-apply/#merge-strategy) for `routes`, so the whole list is one value to the API server and to both tools |
-| A protected `HTTPRoute` | `spec.rules`. The Gateway API's CRD declares `rules` and `filters` `atomic` lists, so the whole list is one value too |
+| A protected `HTTPRoute` of a Traefik Gateway | `spec.rules`. The Gateway API's CRD declares `rules` and `filters` `atomic` lists, so the whole list is one value too |
+| An `EnvoyProxy` that doesn't set those three lists, or a `Gateway` | None |
+| An `EnvoyProxy` that sets `initContainers`, `pod.volumes` or `container.volumeMounts` | Those lists. Undoing it takes the engine out of the Envoy pods (a rollout): the operator unwires the Gateway's routes, which go uninspected until it has added the engine back and the pods have it |
 | A `WAFPolicy` without `metadata.finalizers` | None |
 | `status` | None: both tools ignore it |
 
@@ -114,6 +126,13 @@ spec:
         - '.spec.rules[]? | select(.filters == [{"type": "ExtensionRef", "extensionRef": {"group": "traefik.io", "kind": "Middleware", "name": "inkwall-waf"}}]) | .filters'
         # A rule with yours too: only Inkwall's filter.
         - '.spec.rules[]?.filters[]? | select(.type == "ExtensionRef" and .extensionRef == {"group": "traefik.io", "kind": "Middleware", "name": "inkwall-waf"})'
+    # Only needed for EnvoyProxies whose manifest sets these lists.
+    - group: gateway.envoyproxy.io
+      kind: EnvoyProxy
+      jqPathExpressions:
+        - '.spec.provider.kubernetes.envoyDeployment.initContainers[]? | select(.name == "inkwall-engine")'
+        - '.spec.provider.kubernetes.envoyDeployment.pod.volumes[]? | select(.name | startswith("inkwall-"))'
+        - '.spec.provider.kubernetes.envoyDeployment.container.volumeMounts[]? | select(.name == "inkwall-socket")'
   syncPolicy:
     syncOptions:
       - ApplyOutOfSyncOnly=true
@@ -125,7 +144,8 @@ spec:
 - Argo CD runs each [jq](https://jqlang.org/manual/) expression as a deletion, in order. The first
   expression removes a list that holds only Inkwall's entry. The second removes Inkwall's entry
   from a list that also holds yours, so your own Middlewares and filters still show up in the diff.
-- `waf.inkwall.dev/wired` and the finalizer need no rule: your manifests don't set them.
+- `waf.inkwall.dev/wired`, `waf.inkwall.dev/hash`, a Gateway's `parametersRef` the operator set
+  and the finalizer need no rule: your manifests don't set them.
 
 `ignoreDifferences` only affects the diff. A sync still applies your manifest as it is, and that
 removes Inkwall's entry from the route until the operator adds it back. The
@@ -219,6 +239,10 @@ spec:
   After the first apply, Flux no longer applies changes to an ignored field. To change your own
   Middlewares or filters on a protected route, remove the rule, change them, and add the rule back.
 - A rule without `target` applies to every object of the Kustomization. Scope each one.
+- An `EnvoyProxy` whose manifest sets the lists the operator writes to needs the same kind of
+  rule, on `/spec/provider/kubernetes/envoyDeployment/initContainers`, `.../pod/volumes` and
+  `.../container/volumeMounts` (group `gateway.envoyproxy.io`, kind `EnvoyProxy`): the whole
+  lists, yours included.
 
 With an older Flux, or to keep Flux off a protected route entirely, annotate the route in Git with
 `kustomize.toolkit.fluxcd.io/ssa: IfNotPresent`: Flux creates it and never updates it afterwards.

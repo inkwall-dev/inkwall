@@ -35,10 +35,11 @@ type Unwired struct {
 // Programmed=False and Ready=False (Unwired), and released from the
 // finalizer, which no operator will remove any more. The proxies then
 // stop sending those routes to the engine, which a proxy pod started after
-// the uninstall doesn't have. Run it with the operator stopped, or it wires them again.
+// the uninstall doesn't have. Run it with the operator stopped, or it wires
+// them again.
 func Unwire(ctx context.Context, c client.Client) (Unwired, error) {
 	n := Unwired{Objects: map[string]int{}}
-	for _, in := range Integrations(c, c, nil, CRDs{}) {
+	for _, in := range Integrations(c, c, Config{}) {
 		counts, err := in.Unwire(ctx, c)
 		maps.Copy(n.Objects, counts)
 		if err != nil {

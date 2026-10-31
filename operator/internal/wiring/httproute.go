@@ -10,23 +10,12 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/crdwatch"
-)
-
-// The Gateway API's kinds Traefik's wiring reads and writes; their CRDs may
-// be missing.
-var (
-	HTTPRouteGVK    = schema.GroupVersionKind{Group: gatewayv1.GroupName, Version: "v1", Kind: "HTTPRoute"}
-	GatewayGVK      = schema.GroupVersionKind{Group: gatewayv1.GroupName, Version: "v1", Kind: "Gateway"}
-	GatewayClassGVK = schema.GroupVersionKind{Group: gatewayv1.GroupName, Version: "v1", Kind: "GatewayClass"}
-
-	httpRouteKind = HTTPRouteGVK.GroupKind()
 )
 
 // rules selects an HTTPRoute's rules by name; "" selects them all. nil
@@ -237,4 +226,10 @@ func (st *state) gatewayControllers(k types.NamespacedName) (traefik bool, other
 		}
 	}
 	return traefik, others
+}
+
+// unwired are the GatewayClass controllers of no integration: their
+// Gateways' traffic is not inspected.
+func unwired(controllers []string) []string {
+	return slices.DeleteFunc(slices.Clone(controllers), func(c string) bool { return integrations.ForController(c) != nil })
 }
