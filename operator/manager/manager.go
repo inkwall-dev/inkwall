@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -43,6 +44,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/internal/controller"
 	"github.com/inkwall-dev/inkwall/operator/internal/controlplane"
 	"github.com/inkwall-dev/inkwall/operator/internal/crdwatch"
+	proxydiscovery "github.com/inkwall-dev/inkwall/operator/internal/discovery"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
@@ -126,7 +128,8 @@ type Options struct {
 	// empty: the system roots.
 	ControlPlaneCAFile string
 	// CRDInterval is how often the leader looks for Traefik's IngressRoute
-	// and Gateway API's HTTPRoute CRDs until they are installed; 0: 30s.
+	// CRD, and the Gateway API's GatewayClass and HTTPRoute CRDs, until they
+	// are installed; 0: 30s.
 	CRDInterval time.Duration
 
 	// EventsDir holds the replica's buffer of security events for the
@@ -252,13 +255,22 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	}
 	// Without injection, the wiring controller unwires what was wired: new
 	// proxy pods won't have the engine.
+	wirings := wiring.Integrations(mgr.GetClient(), mgr.GetAPIReader(), selectors, ingressRoutes)
 	if err := (&wiring.Reconciler{
-		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), PodWebhook: webhook.MutatingConfigName,
-		TraefikPods: selectors.Selector(integrations.Traefik.Name), IngressRoutes: ingressRoutes, Disabled: !inject,
+		Client: mgr.GetClient(), PodWebhook: webhook.MutatingConfigName, Integrations: wirings, Disabled: !inject,
 	}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
-	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes} {
+	// The Gateway API's CRDs may be installed after the operator, or never.
+	gatewayClasses := &crdwatch.Kind{GVK: proxydiscovery.GatewayClassGVK, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
+	kinds := map[string][]schema.GroupKind{}
+	for _, in := range wirings {
+		kinds[in.Name()] = in.Kinds()
+	}
+	if err := (&proxydiscovery.Reconciler{Client: mgr.GetClient(), GatewayClasses: gatewayClasses, Kinds: kinds}).SetupWithManager(mgr); err != nil {
+		return nil, err
+	}
+	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gatewayClasses} {
 		if err := mgr.Add(k); err != nil {
 			return nil, err
 		}

@@ -183,6 +183,60 @@ type InkwallConfigStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Proxies are the proxy controllers the cluster's IngressClasses and
+	// GatewayClasses name, and how far Inkwall wires each.
+	// +listType=map
+	// +listMapKey=controllerName
+	// +optional
+	Proxies []ProxyStatus `json:"proxies,omitempty"`
+}
+
+// Support is how far Inkwall wires a proxy controller's routes (0004 §4.1).
+// +kubebuilder:validation:Enum=Full;Partial;Unsupported
+type Support string
+
+// The support levels.
+const (
+	// SupportFull: Inkwall wires the routes of every class of the
+	// controller.
+	SupportFull Support = "Full"
+	// SupportPartial: it wires those of some of its classes; the message
+	// says which aren't.
+	SupportPartial Support = "Partial"
+	// SupportUnsupported: it wires none; a policy on one of its routes is
+	// not Programmed (ControllerUnsupported).
+	SupportUnsupported Support = "Unsupported"
+)
+
+// ProxyStatus is a proxy controller found in the cluster.
+type ProxyStatus struct {
+	// ControllerName is the controller its classes name: an IngressClass's
+	// spec.controller, a GatewayClass's spec.controllerName.
+	// +kubebuilder:validation:MaxLength=253
+	ControllerName string `json:"controllerName"`
+
+	// Integration is Inkwall's integration for the controller, such as
+	// traefik; empty when Inkwall has none.
+	// +kubebuilder:validation:MaxLength=63
+	// +optional
+	Integration string `json:"integration,omitempty"`
+
+	// IngressClasses are the IngressClasses of the controller.
+	// +optional
+	IngressClasses []string `json:"ingressClasses,omitempty"`
+
+	// GatewayClasses are the GatewayClasses of the controller.
+	// +optional
+	GatewayClasses []string `json:"gatewayClasses,omitempty"`
+
+	// Support is Full, Partial or Unsupported.
+	Support Support `json:"support"`
+
+	// Message says what isn't wired.
+	// +kubebuilder:validation:MaxLength=1024
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 // InkwallConfig is the cluster-wide Inkwall configuration. There is one,
