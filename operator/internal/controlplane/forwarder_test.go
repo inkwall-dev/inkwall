@@ -20,6 +20,7 @@ import (
 
 	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
@@ -473,13 +474,13 @@ func TestRequestStatsUpload(t *testing.T) {
 	if r.upload(true) != nil {
 		t.Fatal("an upload with nothing counted")
 	}
-	r.add([]*eventsv1.PolicyStats{{Policy: "b", Allowed: 1}, {Policy: "a", Denied: 1}})
+	r.add([]*eventsv1.PolicyStats{{Policy: "b", Allowed: 1}, {Policy: "a", Denied: 1}}, nil)
 	up := r.upload(false)
 	if p := up.GetStats().GetPolicies(); len(p) != 2 || p[0].GetPolicy() != "a" || up.GetSince() == nil ||
 		len(up.GetStats().GetLatencyBounds()) == 0 {
 		t.Fatalf("first upload: %v", up)
 	}
-	r.add([]*eventsv1.PolicyStats{{Policy: "b", Allowed: 2}})
+	r.add([]*eventsv1.PolicyStats{{Policy: "b", Allowed: 2}}, nil)
 	if p := r.upload(false).GetStats().GetPolicies(); len(p) != 1 || p[0].GetAllowed() != 3 {
 		t.Errorf("changed only: %v", p)
 	}
@@ -488,5 +489,45 @@ func TestRequestStatsUpload(t *testing.T) {
 	}
 	if p := r.upload(true).GetStats().GetPolicies(); len(p) != 2 {
 		t.Errorf("all: %v", p)
+	}
+}
+
+// Past the limit, the totals of policies no longer in the bundle are
+// forgotten and counted; the bundle's are kept, however many.
+func TestRequestStatsEvict(t *testing.T) {
+	evicted := func() float64 {
+		return testutil.ToFloat64(distribution.RequestStatsDropped.WithLabelValues(distribution.DroppedEvicted))
+	}
+	before := evicted()
+	inBundle := func(id string) bool { return strings.HasPrefix(id, "kept/") }
+	var r requestStats
+	add := func(prefix string, n int) {
+		for i := range n {
+			r.add([]*eventsv1.PolicyStats{{Policy: fmt.Sprintf("%s%d", prefix, i), Allowed: 1}}, inBundle)
+		}
+	}
+	add("kept/", 10)
+	add("gone/", minStatsLimit-10)
+	if len(r.totals) != minStatsLimit || evicted() != before {
+		t.Fatalf("at the limit: %d totals, %v evicted, want %d and none", len(r.totals), evicted()-before, minStatsLimit)
+	}
+	add("gone/new", 1)
+	if len(r.totals) != 10 || evicted()-before != minStatsLimit-9 {
+		t.Fatalf("past the limit: %d totals, %v evicted, want 10 and %d", len(r.totals), evicted()-before, minStatsLimit-9)
+	}
+	if p := r.upload(false).GetStats().GetPolicies(); len(p) != 10 || !inBundle(p[0].GetPolicy()) {
+		t.Errorf("after evicting, the changed: %v", p)
+	}
+
+	// A bundle larger than the limit: its policies are all kept, and the
+	// next eviction waits until the totals reach twice those kept.
+	before = evicted()
+	add("kept/", 2*minStatsLimit)
+	if len(r.totals) != 2*minStatsLimit || evicted() != before || r.limit != 2*(minStatsLimit+1) {
+		t.Fatalf("a large bundle: %d totals, %v evicted, limit %d", len(r.totals), evicted()-before, r.limit)
+	}
+	add("gone/", 10) // the third goes past the limit
+	if len(r.totals) != 2*minStatsLimit+7 || evicted()-before != 3 {
+		t.Errorf("past the limit with a large bundle: %d totals, %v evicted", len(r.totals), evicted()-before)
 	}
 }

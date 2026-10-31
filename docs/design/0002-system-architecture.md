@@ -214,8 +214,8 @@ Three commands are built:
   (`--bundle`, with its signature checked against `--bundle-key`).
 - `bench` benchmarks the engine on a fixed corpus.
 - `migrate ingress-nginx` converts ingress-nginx's ModSecurity annotations and ConfigMap settings
-  into `WAFPolicy` and `WAFRuleSet` objects targeting the Ingresses, and lists what it can't
-  convert ([migrating from ingress-nginx](../migrating-from-ingress-nginx.md)). It only reads.
+  into `WAFPolicy` and `WAFRuleSet` objects targeting the Ingresses, or the HTTPRoutes or
+  IngressRoutes that replace them (`--target`), and lists what it can't convert ([migrating from ingress-nginx](../migrating-from-ingress-nginx.md)). It only reads.
 
 Planned: `status` (engine versions, drift).
 
@@ -265,10 +265,12 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
   engine).
 
 **Built:** `InkwallConfig`, `WAFPolicy`, `WAFRuleSet` and `ClusterWAFRuleSet`; `Ingress` and
-Traefik `IngressRoute` targets; `HTTPRoute` targets resolved, with the precedence above (no proxy
-wires them yet, [0004 §4.5](0004-operator.md#45-resolver)).
-**Not yet:** IP lists, the policy fields `rateLimits` and `ipLists`, wiring `HTTPRoute` targets,
-`BlockHighConfidence`, the `InspectPrefix` oversize action, and `InkwallConfig.events`.
+Traefik `IngressRoute` targets; `HTTPRoute` targets resolved, with the precedence above
+([0004 §4.5](0004-operator.md#45-resolver)), and wired through Envoy Gateway or Traefik's Gateway
+API provider ([0004 §4.4](0004-operator.md#44-wiring-controller)).
+**Not yet:** IP lists, the policy fields `rateLimits` and `ipLists`, wiring other controllers'
+`HTTPRoute` targets, `BlockHighConfidence`, the `InspectPrefix` oversize action, and
+`InkwallConfig.events`.
 
 ### 4.3 Bundle format
 
@@ -384,7 +386,8 @@ Rules of the contract:
   them. Each replica sums its engines' counts per policy and sends them every 10 s: the policies
   that changed, and all of them first on a new stream. They are cumulative since the replica
   started counting (`since`), so a lost upload loses nothing, and the cluster's counts are the sum
-  over its replicas. They are per policy, never per route or client.
+  over its replicas. A count lower than the previous one is a reset (a replica forgot a policy no
+  longer in its bundle): it counts from zero. They are per policy, never per route or client.
 - A policy snapshot is all or nothing: the operator first does a [server-side dry run](https://kubernetes.io/docs/reference/using-api/api-concepts/#dry-run) of every
   object. The cluster's `InkwallConfig` decides the mode, and a cluster not in Managed mode
   refuses policy snapshots. Only `WAFPolicy` and the rule set kinds are accepted.
@@ -442,9 +445,11 @@ is configured its own way:
 Detect mode uses `observability_mode`. Envoy's [Go filter](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/golang_filter) needs a contrib build, so it is
 experimental.
 
-**Built:** the engine's side, `inkwall-engine ext-proc` ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing)).
-Envoy Gateway will use `ext_proc`, not `ext_authz`. **Not yet:** the operator's Envoy Gateway
-configuration.
+**Built:** the engine's side, `inkwall-engine ext-proc` ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing)), and
+Envoy Gateway, with `ext_proc`, not `ext_authz`: the engine joins the Envoy pods through the
+Gateway's `EnvoyProxy`, and each protected HTTPRoute gets an `EnvoyExtensionPolicy` calling it
+through a `Backend` on a Unix socket ([0004 §4.4](0004-operator.md#44-wiring-controller)).
+**Not yet:** Istio, Contour, raw Envoy.
 
 ### 6.2 ingress-nginx
 
@@ -552,8 +557,7 @@ adapter must match.
 | Caddy | module | ✅ | ✅ | ✅ | ✅ | in-process |
 | Any | reverse proxy | ✅ | ✅ | ✅ | ✅ | TCP |
 
-Built: Traefik ForwardAuth and the reverse proxy; the engine's ext_proc listener, without the
-operator's Envoy configuration yet.
+Built: Traefik ForwardAuth, the reverse proxy, and ext_proc through Envoy Gateway.
 
 ---
 
@@ -608,7 +612,7 @@ inspects inline and always allows (`pkg/pipeline`).
 1. [Argo CD](https://argo-cd.readthedocs.io/en/stable/) applies a `WAFPolicy`.
 2. The operator builds and signs a bundle.
 3. Engines swap it in and ACK.
-4. The policy reports `Enforced=True "6/6 engines on bundle N"`.
+4. The policy reports `Enforced=True "every engine runs bundle N or later"`.
 
 ### 7.5 Cluster enrollment (Managed / GitOps mode)
 

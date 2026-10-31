@@ -155,7 +155,7 @@ mirrored to the control plane if one is connected.
    versioned bundle Secret.
 3. Every replica pushes the bundle to its engines. Each engine compiles it in the background, swaps
    it in atomically and acknowledges it (ACK).
-4. The leader sets `Enforced=True` with the engine count (for example, 6/6).
+4. The leader sets `Enforced=True` once every engine runs the policy's bundle.
 
 ## 6. Why Coraza
 

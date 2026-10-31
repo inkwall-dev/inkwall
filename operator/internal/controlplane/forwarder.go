@@ -61,6 +61,11 @@ type Forwarder struct {
 	// request counts that changed are sent (default DefaultStatsInterval).
 	Poll, Refused, MinBackoff, MaxBackoff, StatsInterval time.Duration
 
+	// HasPolicy reports whether the bundle this replica serves has a policy
+	// (distribution.Store.HasPolicy). Past a limit, the request counts of
+	// the others are forgotten; nil forgets them all. Set before AddStats.
+	HasPolicy func(id string) bool
+
 	// q is set by Start; Add may run before.
 	q       atomic.Pointer[queue]
 	accepts atomic.Bool
@@ -108,7 +113,7 @@ func (f *Forwarder) Add(b *eventsv1.EventBatch) {
 
 // AddStats takes what engines counted per policy since their previous
 // reports (distribution.Server.Stats).
-func (f *Forwarder) AddStats(deltas []*eventsv1.PolicyStats) { f.stats.add(deltas) }
+func (f *Forwarder) AddStats(deltas []*eventsv1.PolicyStats) { f.stats.add(deltas, f.HasPolicy) }
 
 // Start implements manager.Runnable.
 func (f *Forwarder) Start(ctx context.Context) error {

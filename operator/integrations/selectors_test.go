@@ -13,13 +13,22 @@ import (
 
 func TestSelectors(t *testing.T) {
 	traefik := map[string]string{"app.kubernetes.io/name": "traefik"}
+	envoy := map[string]string{"app.kubernetes.io/name": "envoy", "app.kubernetes.io/managed-by": "envoy-gateway", "app.kubernetes.io/component": "proxy"}
+	otherEnvoy := map[string]string{"app.kubernetes.io/name": "envoy"}
 	edge := map[string]string{"app": "edge-proxy"}
 
 	var defaults *Selectors
-	if defaults.ForPod(traefik) != &All[0] || defaults.ForPod(edge) != nil {
+	name := func(i *Integration) string {
+		if i == nil {
+			return ""
+		}
+		return i.Name
+	}
+	if name(defaults.ForPod(traefik)) != "traefik" || name(defaults.ForPod(envoy)) != "envoy-gateway" || defaults.ForPod(edge) != nil || defaults.IsProxyPod(otherEnvoy) {
 		t.Error("defaults")
 	}
-	if got := defaults.PodSelector().String(); got != "app.kubernetes.io/name=traefik" {
+	// The cache's selector: a superset of the integrations' pods.
+	if got := defaults.PodSelector().String(); got != "app.kubernetes.io/name in (envoy,traefik)" {
 		t.Errorf("default pod selector %q", got)
 	}
 
@@ -36,6 +45,17 @@ func TestSelectors(t *testing.T) {
 	}
 	if custom.ForPod(edge) == nil || custom.ForPod(edge).Name != "traefik" || custom.ForPod(traefik) != nil {
 		t.Error("the override is not used")
+	}
+	// No key in common with Envoy Gateway's selector: every pod.
+	if got := custom.PodSelector(); !got.Empty() {
+		t.Errorf("pod selector %q, want every pod", got)
+	}
+	sameKey, _, _ := FromConfig([]wafv1alpha1.IntegrationSpec{{Controller: "traefik", Selector: &metav1.LabelSelector{
+		MatchLabels:      map[string]string{"app.kubernetes.io/name": "edge"},
+		MatchExpressions: []metav1.LabelSelectorRequirement{{Key: "app.kubernetes.io/managed-by", Operator: metav1.LabelSelectorOpIn, Values: []string{"helm", "flux"}}},
+	}}})
+	if got := sameKey.PodSelector().String(); got != "app.kubernetes.io/managed-by in (envoy-gateway,flux,helm),app.kubernetes.io/name in (edge,envoy)" {
+		t.Errorf("pod selector %q", got)
 	}
 	again, _, _ := FromConfig([]wafv1alpha1.IntegrationSpec{{Controller: "traefik", Selector: &metav1.LabelSelector{MatchLabels: edge}}})
 	if custom.LabelSelector("traefik").MatchLabels["app"] != "edge-proxy" || custom.Equal(Defaults()) || !custom.Equal(again) {

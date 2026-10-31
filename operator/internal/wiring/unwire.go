@@ -10,6 +10,7 @@ import (
 
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -18,6 +19,8 @@ import (
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
 )
+
+const unwiredMessage = "the routes were unwired at uninstall (inkwall-operator unwire), and no operator wires them"
 
 // Unwired counts what Unwire changed.
 type Unwired struct {
@@ -28,14 +31,16 @@ type Unwired struct {
 
 // Unwire undoes the wiring at uninstall: every integration removes its
 // wiring, keeping the user's own (for Traefik, the operator's Middleware
-// from every Ingress and IngressRoute it wired, then the Middlewares it
-// created), and then the finalizer is removed from every WAFPolicy, which
-// no operator will remove any more. The proxies then stop sending those
-// routes to the engine, which a proxy pod started after the uninstall
-// doesn't have. Run it with the operator stopped, or it wires them again.
+// from every Ingress, IngressRoute and HTTPRoute it wired, then the
+// Middlewares it created). Then every WAFPolicy is reported
+// Programmed=False and Ready=False (Unwired), and released from the
+// finalizer, which no operator will remove any more. The proxies then
+// stop sending those routes to the engine, which a proxy pod started after
+// the uninstall doesn't have. Run it with the operator stopped, or it wires
+// them again.
 func Unwire(ctx context.Context, c client.Client) (Unwired, error) {
 	n := Unwired{Objects: map[string]int{}}
-	for _, in := range Integrations(c, c, nil, nil) {
+	for _, in := range Integrations(c, c, Config{}) {
 		counts, err := in.Unwire(ctx, c)
 		maps.Copy(n.Objects, counts)
 		if err != nil {
@@ -52,6 +57,13 @@ func Unwire(ctx context.Context, c client.Client) (Unwired, error) {
 	}
 	for i := range policies.Items {
 		p := &policies.Items[i]
+		// No operator will report it any more; Ready follows Programmed.
+		if p.DeletionTimestamp == nil {
+			err := setProgrammed(ctx, c, p, metav1.ConditionFalse, ReasonUnwired, unwiredMessage, true)
+			if client.IgnoreNotFound(err) != nil {
+				return n, fmt.Errorf("set the status of WAFPolicy %s/%s: %w", p.Namespace, p.Name, err)
+			}
+		}
 		if !controllerutil.ContainsFinalizer(p, Finalizer) {
 			continue
 		}
@@ -74,7 +86,8 @@ func Unwire(ctx context.Context, c client.Client) (Unwired, error) {
 }
 
 // Unwire implements Integration: it removes the operator's Middleware from
-// every Ingress and IngressRoute it wired, then deletes the Middlewares.
+// every Ingress, IngressRoute and HTTPRoute it wired, then deletes the
+// Middlewares.
 func (*Traefik) Unwire(ctx context.Context, c client.Client) (map[string]int, error) {
 	n := map[string]int{}
 	var list networkingv1.IngressList
@@ -118,6 +131,34 @@ func (*Traefik) Unwire(ctx context.Context, c client.Client) (map[string]int, er
 			return n, fmt.Errorf("unwire IngressRoute %s/%s: %w", ir.GetNamespace(), ir.GetName(), err)
 		}
 		n["IngressRoute"]++
+	}
+
+	hrs := &unstructured.UnstructuredList{}
+	hrs.SetGroupVersionKind(HTTPRouteGVK.GroupVersion().WithKind("HTTPRouteList"))
+	switch err := c.List(ctx, hrs); {
+	case meta.IsNoMatchError(err): // the Gateway API's CRDs are gone
+	case err != nil:
+		return n, fmt.Errorf("list HTTPRoutes: %w", err)
+	}
+	for i := range hrs.Items {
+		hr := &hrs.Items[i]
+		if hr.GetAnnotations()[WiredAnnotation] != MiddlewareName {
+			continue
+		}
+		first := true
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			if !first {
+				if err := c.Get(ctx, client.ObjectKeyFromObject(hr), hr); err != nil {
+					return err
+				}
+			}
+			first = false
+			return wireHTTPRoute(ctx, c, hr, nil)
+		})
+		if client.IgnoreNotFound(err) != nil {
+			return n, fmt.Errorf("unwire HTTPRoute %s/%s: %w", hr.GetNamespace(), hr.GetName(), err)
+		}
+		n["HTTPRoute"]++
 	}
 
 	// After the routes: a router referring to a missing Middleware fails.

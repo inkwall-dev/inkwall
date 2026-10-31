@@ -378,7 +378,7 @@ func (r *BundleReconciler) rotate(ctx context.Context, k *bundle.Keyring, s *cor
 		}
 	}
 	if k.Phase() != bundle.PhaseIdle {
-		engines, err := distribution.ReadEngines(ctx, r.APIReader, r.Namespace, r.EngineStale, now)
+		engines, leftOut, err := distribution.ReadEngines(ctx, r.APIReader, r.Namespace, r.EngineStale, now)
 		if err != nil {
 			return nil, fmt.Errorf("read the engine reports: %w", err)
 		}
@@ -389,7 +389,9 @@ func (r *BundleReconciler) rotate(ctx context.Context, k *bundle.Keyring, s *cor
 			}
 			in.Engines = append(in.Engines, bundle.EngineKeys{Name: name, TrustedKeys: e.TrustedKeys, Applied: e.Applied})
 		}
-		in.EnginesKnown = now.Sub(r.started) >= r.EngineStale
+		// A report over its size limit leaves engines out: wait, as for a
+		// replica that hasn't reported yet.
+		in.EnginesKnown = now.Sub(r.started) >= r.EngineStale && leftOut == 0
 	}
 	step, err := bundle.Rotate(k, in)
 	if err != nil {

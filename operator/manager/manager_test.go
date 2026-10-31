@@ -95,9 +95,14 @@ func startOperator(t *testing.T) (_ context.Context, _ client.Client, _ *warning
 	_, port, _ := net.SplitHostPort(distAddr)
 	distPort, _ := strconv.Atoi(port)
 	mgr, err := New(env.Config, Options{
-		MetricsAddr:     "0",
-		ProbeAddr:       probe,
-		LeaderElect:     true,
+		MetricsAddr: "0",
+		ProbeAddr:   probe,
+		LeaderElect: true,
+		// A loaded machine can stall the API server past the default 10s
+		// renew deadline: the replica would step down mid-test, taking the
+		// webhook with it.
+		LeaseDuration:   time.Minute,
+		RenewDeadline:   45 * time.Second,
 		Namespace:       "default",
 		Debounce:        50 * time.Millisecond,
 		Webhooks:        true,
@@ -185,6 +190,7 @@ func TestOperator(t *testing.T) {
 	t.Run("wiring", func(t *testing.T) { testWiring(ctx, t, c) })
 	t.Run("ingressroutes", func(t *testing.T) { testIngressRoutes(ctx, t, c) })
 	t.Run("httproutes", func(t *testing.T) { testHTTPRoutes(ctx, t, c) })
+	t.Run("envoy gateway", func(t *testing.T) { testEnvoyGateway(ctx, t, c) })
 	t.Run("failure policy", func(t *testing.T) { testFailurePolicy(ctx, t, c) })
 	t.Run("source guard", func(t *testing.T) { testSourceGuard(ctx, t, c) })
 	// Last: it stops the operator.

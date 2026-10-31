@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,16 +14,27 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/yaml"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
+	"github.com/inkwall-dev/inkwall/operator/resolver"
 )
 
 var (
-	migrateIngresses = filepath.Join("testdata", "migrate", "ingresses.yaml")
-	migrateGlobal    = filepath.Join("testdata", "migrate", "global.yaml")
+	migrateIngresses     = filepath.Join("testdata", "migrate", "ingresses.yaml")
+	migrateGlobal        = filepath.Join("testdata", "migrate", "global.yaml")
+	migrateHTTPRoutes    = filepath.Join("testdata", "migrate", "httproutes.yaml")
+	migrateIngressRoutes = filepath.Join("testdata", "migrate", "ingressroutes.yaml")
 )
 
 // TestMigrateGolden converts real-world annotation sets; the golden files
@@ -37,6 +49,8 @@ func TestMigrateGolden(t *testing.T) {
 		{"ingresses", []string{"-f", migrateIngresses}, 1},
 		{"global", []string{"-f", migrateGlobal}, 0},
 		{"ingress-class", []string{"-f", migrateIngresses, "--controller-configmap", "web/none", "--ingress-class", "traefik"}, 0},
+		{"httproute", []string{"-f", migrateIngresses, "-f", migrateHTTPRoutes, "--target", "httproute"}, 1},
+		{"ingressroute", []string{"-f", migrateIngresses, "-f", migrateIngressRoutes, "--target", "ingressroute"}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			code, out, errOut := runCLI(t, append([]string{"migrate", "ingress-nginx"}, tc.args...)...)
@@ -81,6 +95,200 @@ func TestMigrateRoundTrip(t *testing.T) {
 	}
 }
 
+// TestMigrateIngressRouteRoundTrip retargets the policies to the
+// IngressRoutes replacing the Ingresses: inkwallctl test routes the
+// requests through them to the same verdicts.
+func TestMigrateIngressRouteRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	if code, _, errOut := runCLI(t, "migrate", "ingress-nginx", "-f", migrateIngresses, "-f", migrateIngressRoutes,
+		"--target", "ingressroute", "--output", dir); code != 1 {
+		t.Fatalf("migrate: exit %d, stderr:\n%s", code, errOut)
+	}
+	for _, name := range []string{"shop-shop", "shop-api", "blog-blog", "files-cloud"} {
+		var p wafv1alpha1.WAFPolicy
+		readPolicy(t, filepath.Join(dir, name+".yaml"), &p)
+		if len(p.Spec.TargetRefs) != 1 || p.Spec.TargetRefs[0].Kind != "IngressRoute" || p.Spec.TargetRefs[0].Group != "traefik.io" {
+			t.Errorf("%s: targetRefs %+v, want its IngressRoute", name, p.Spec.TargetRefs)
+		}
+	}
+	code, out, errOut := runCLI(t, "test", "--policy", dir, "--ingress", migrateIngressRoutes,
+		"--request", filepath.Join("testdata", "migrate", "requests.http"))
+	if code != 0 {
+		t.Fatalf("test: exit %d, stderr:\n%s", code, errOut)
+	}
+	// The same verdicts as through the Ingresses.
+	golden(t, filepath.Join("migrate", "roundtrip.golden"), out)
+}
+
+// TestMigrateHTTPRouteResolves resolves the policies retargeted to
+// HTTPRoutes as the operator does (inkwallctl test doesn't route
+// HTTPRoutes): each applies to the requests its Ingress's policy did.
+func TestMigrateHTTPRouteResolves(t *testing.T) {
+	dir := t.TempDir()
+	if code, _, errOut := runCLI(t, "migrate", "ingress-nginx", "-f", migrateIngresses, "-f", migrateHTTPRoutes,
+		"--target", "httproute", "--output", dir); code != 1 {
+		t.Fatalf("migrate: exit %d, stderr:\n%s", code, errOut)
+	}
+	raw, err := os.ReadFile(migrateHTTPRoutes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var routes []gatewayv1.HTTPRoute
+	for _, doc := range strings.Split(string(raw), "\n---\n") {
+		var hr gatewayv1.HTTPRoute
+		if err := yaml.Unmarshal([]byte(doc), &hr); err != nil {
+			t.Fatal(err)
+		}
+		routes = append(routes, hr)
+	}
+	for _, tc := range []struct {
+		file, host string
+		want       []wafv1alpha1.TargetRef
+	}{
+		{"shop-shop", "shop.example.com", []wafv1alpha1.TargetRef{{Group: httpRouteGroup, Kind: "HTTPRoute", Name: "shop"}}},
+		{"shop-api", "api.example.com", []wafv1alpha1.TargetRef{{Group: httpRouteGroup, Kind: "HTTPRoute", Name: "api", SectionName: "api"}}},
+	} {
+		var p wafv1alpha1.WAFPolicy
+		readPolicy(t, filepath.Join(dir, tc.file+".yaml"), &p)
+		if !slices.Equal(p.Spec.TargetRefs, tc.want) {
+			t.Errorf("%s: targetRefs %+v, want %+v", tc.file, p.Spec.TargetRefs, tc.want)
+		}
+		got, err := routeMatches(resolver.Input{HTTPRoutes: routes}, p.Namespace, p.Spec.TargetRefs[0])
+		if err != nil {
+			t.Fatalf("%s: %v", tc.file, err)
+		}
+		if want := map[string]bool{tc.host + "/": true}; !maps.Equal(got, want) {
+			t.Errorf("%s: applies to %v, want %v", tc.file, got, want)
+		}
+	}
+}
+
+// readPolicy reads the WAFPolicy, the last object of a migrated file.
+func readPolicy(t *testing.T, file string, p *wafv1alpha1.WAFPolicy) {
+	t.Helper()
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	docs := strings.Split(string(raw), "---\n")
+	if err := yaml.UnmarshalStrict([]byte(docs[len(docs)-1]), p); err != nil {
+		t.Fatalf("%s: %v", file, err)
+	}
+}
+
+// TestRetarget covers how Ingresses are matched to their replacing routes.
+func TestRetarget(t *testing.T) {
+	prefix := gatewayv1.PathMatchPathPrefix
+	exact := gatewayv1.PathMatchExact
+	get := gatewayv1.HTTPMethodGet
+	route := func(name string, hosts []string, rules ...gatewayv1.HTTPRouteRule) gatewayv1.HTTPRoute {
+		hr := gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: name}}
+		for _, h := range hosts {
+			hr.Spec.Hostnames = append(hr.Spec.Hostnames, gatewayv1.Hostname(h))
+		}
+		hr.Spec.Rules = rules
+		return hr
+	}
+	rule := func(name string, typ *gatewayv1.PathMatchType, path string) gatewayv1.HTTPRouteRule {
+		r := gatewayv1.HTTPRouteRule{Matches: []gatewayv1.HTTPRouteMatch{{Path: &gatewayv1.HTTPPathMatch{Type: typ, Value: &path}}}}
+		if name != "" {
+			n := gatewayv1.SectionName(name)
+			r.Name = &n
+		}
+		return r
+	}
+	ingress := func(paths ...string) *networkingv1.Ingress {
+		ing := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "app"}}
+		pt := networkingv1.PathTypePrefix
+		var hp []networkingv1.HTTPIngressPath
+		for _, p := range paths {
+			hp = append(hp, networkingv1.HTTPIngressPath{Path: p, PathType: &pt})
+		}
+		ing.Spec.Rules = []networkingv1.IngressRule{{Host: "a.example.com",
+			IngressRuleValue: networkingv1.IngressRuleValue{HTTP: &networkingv1.HTTPIngressRuleValue{Paths: hp}}}}
+		return ing
+	}
+	withGet := rule("", &prefix, "/")
+	withGet.Matches[0].Method = &get
+	for _, tc := range []struct {
+		name   string
+		ing    *networkingv1.Ingress
+		routes []gatewayv1.HTTPRoute
+		want   string // the targets, "Kind/name/section ..."
+		todo   int
+	}{
+		{name: "same host and path", ing: ingress("/"),
+			routes: []gatewayv1.HTTPRoute{route("r", []string{"a.example.com"}, rule("", &prefix, "/"))},
+			want:   "HTTPRoute/r/"},
+		{name: "trailing slash", ing: ingress("/api/"),
+			routes: []gatewayv1.HTTPRoute{route("r", []string{"a.example.com"}, rule("", &prefix, "/api"))},
+			want:   "HTTPRoute/r/"},
+		{name: "one path per route", ing: ingress("/a", "/b"),
+			routes: []gatewayv1.HTTPRoute{
+				route("ra", []string{"a.example.com"}, rule("", &prefix, "/a")),
+				route("rb", []string{"a.example.com"}, rule("", &prefix, "/b")),
+			},
+			want: "HTTPRoute/ra/ HTTPRoute/rb/"},
+		{name: "named rule of a wider route", ing: ingress("/a"),
+			routes: []gatewayv1.HTTPRoute{route("r", []string{"a.example.com"}, rule("a", &prefix, "/a"), rule("b", &prefix, "/b"))},
+			want:   "HTTPRoute/r/a"},
+		{name: "unnamed rule of a wider route", ing: ingress("/a"),
+			routes: []gatewayv1.HTTPRoute{route("r", []string{"a.example.com"}, rule("", &prefix, "/a"), rule("b", &prefix, "/b"))},
+			want:   "Ingress/app/", todo: 1},
+		{name: "partly covered", ing: ingress("/a", "/b"),
+			routes: []gatewayv1.HTTPRoute{route("r", []string{"a.example.com"}, rule("", &prefix, "/a"))},
+			want:   "HTTPRoute/r/", todo: 1},
+		{name: "other host", ing: ingress("/"),
+			routes: []gatewayv1.HTTPRoute{route("r", []string{"b.example.com"}, rule("", &prefix, "/"))},
+			want:   "Ingress/app/", todo: 1},
+		{name: "any host", ing: ingress("/"),
+			routes: []gatewayv1.HTTPRoute{route("r", nil, rule("", &prefix, "/"))},
+			want:   "Ingress/app/", todo: 1},
+		{name: "exact instead of prefix", ing: ingress("/a"),
+			routes: []gatewayv1.HTTPRoute{route("r", []string{"a.example.com"}, rule("", &exact, "/a"))},
+			want:   "Ingress/app/", todo: 1},
+		{name: "method", ing: ingress("/"),
+			routes: []gatewayv1.HTTPRoute{route("r", []string{"a.example.com"}, withGet)},
+			want:   "Ingress/app/", todo: 1},
+		{name: "other namespace", ing: ingress("/"),
+			routes: []gatewayv1.HTTPRoute{func() gatewayv1.HTTPRoute {
+				hr := route("r", []string{"a.example.com"}, rule("", &prefix, "/"))
+				hr.Namespace = "other"
+				return hr
+			}()},
+			want: "Ingress/app/", todo: 1},
+		{name: "too many targets", ing: ingress("/0", "/1", "/2", "/3", "/4", "/5", "/6", "/7", "/8", "/9", "/a", "/b", "/c", "/d", "/e", "/f", "/g"),
+			routes: func() []gatewayv1.HTTPRoute {
+				var out []gatewayv1.HTTPRoute
+				for _, p := range "0123456789abcdefg" {
+					out = append(out, route("r"+string(p), []string{"a.example.com"}, rule("", &prefix, "/"+string(p))))
+				}
+				return out
+			}(),
+			want: "HTTPRoute/r0/ HTTPRoute/r1/ HTTPRoute/r2/ HTTPRoute/r3/ HTTPRoute/r4/ HTTPRoute/r5/ HTTPRoute/r6/ HTTPRoute/r7/ HTTPRoute/r8/ HTTPRoute/r9/ HTTPRoute/ra/ HTTPRoute/rb/ HTTPRoute/rc/ HTTPRoute/rd/ HTTPRoute/re/ HTTPRoute/rf/",
+			todo: 2},
+		{name: "ingress without paths", ing: &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "app"}},
+			want: "Ingress/app/", todo: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &migration{namespace: "ns", name: "app", policy: &wafv1alpha1.WAFPolicy{
+				Spec: wafv1alpha1.WAFPolicySpec{TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "app"}}}}}
+			newReplacements("HTTPRoute", tc.routes, nil).retarget(m, tc.ing)
+			var got []string
+			for _, r := range m.policy.Spec.TargetRefs {
+				got = append(got, r.Kind+"/"+r.Name+"/"+r.SectionName)
+			}
+			var lines []string
+			for _, it := range m.items {
+				lines = append(lines, fmt.Sprintf("%d %s", it.kind, it.text))
+			}
+			if strings.Join(got, " ") != tc.want || m.todos() != tc.todo {
+				t.Errorf("targets %v and %d TODO, want %s and %d:\n%s", got, m.todos(), tc.want, tc.todo, strings.Join(lines, "\n"))
+			}
+		})
+	}
+}
+
 func ingressWith(annotations map[string]string) *networkingv1.Ingress {
 	full := map[string]string{}
 	for k, v := range annotations {
@@ -100,10 +308,13 @@ func TestMigrateIngress(t *testing.T) {
 		annotations map[string]string
 		global      nginxGlobal
 		// want is the policy's spec as YAML; "" for no policy.
-		want     string
-		ruleSet  string // the WAFRuleSet's SecLang, without comments
-		todo     int
-		contains string // in an item's text
+		want    string
+		ruleSet string // the WAFRuleSet's SecLang, without comments
+		// wantExclusions, if set, is the number of exclusions, instead of
+		// comparing the spec with want.
+		wantExclusions int
+		todo           int
+		contains       string // in an item's text
 	}{
 		{name: "nothing", annotations: nil},
 		{name: "default detect", annotations: on,
@@ -151,8 +362,19 @@ func TestMigrateIngress(t *testing.T) {
 			contains: "phase 2"},
 		{name: "ctl streq on uri", annotations: snippet(`SecRule REQUEST_URI "@streq /login" "id:1,phase:1,pass,ctl:ruleRemoveById=942100"`),
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1},
-		{name: "ctl range", annotations: snippet(`SecRule REQUEST_FILENAME "@beginsWith /api" "id:1,phase:1,pass,ctl:ruleRemoveById=942000-942999"`),
+		{name: "ctl range", annotations: snippet(`SecRule REQUEST_FILENAME "@beginsWith /api" "id:1,phase:1,pass,ctl:ruleRemoveById=941100-941130"`),
+			want:     "exclusions:\n- ruleIDs:\n  - 941100\n  - 941101\n  - 941110\n  - 941120\n  - 941130\n  when:\n    path: /api*\nmode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n",
+			contains: "941100-941130 (5 rules) expanded"},
+		{name: "ctl target range", annotations: snippet(`SecRule REQUEST_FILENAME "@streq /login" "id:1,phase:1,pass,ctl:ruleRemoveTargetById=941100-941101;ARGS:q"`),
+			want: "exclusions:\n- ruleIDs:\n  - 941100\n  - 941101\n  when:\n    argument: q\n    path: /login\nmode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n"},
+		{name: "ctl range outside the crs", annotations: snippet(`SecRule REQUEST_FILENAME "@beginsWith /api" "id:1,phase:1,pass,ctl:ruleRemoveById=1-942999"`),
+			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1, contains: "outside the CRS"},
+		{name: "ctl range without rules", annotations: snippet(`SecRule REQUEST_FILENAME "@beginsWith /api" "id:1,phase:1,pass,ctl:ruleRemoveById=941102-941109"`),
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1},
+		{name: "ctl range reversed", annotations: snippet(`SecRule REQUEST_FILENAME "@beginsWith /api" "id:1,phase:1,pass,ctl:ruleRemoveById=942999-942000"`),
+			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1},
+		{name: "ctl large range", annotations: snippet(`SecRule REQUEST_FILENAME "@beginsWith /api" "id:1,phase:1,pass,ctl:ruleRemoveById=942000-942999"`),
+			wantExclusions: 2},
 		{name: "ctl with deny", annotations: snippet(`SecRule REQUEST_FILENAME "@beginsWith /api" "id:1,phase:1,deny,ctl:ruleRemoveById=942100"`),
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1},
 		{name: "ctl path with a query", annotations: snippet(`SecRule REQUEST_FILENAME "@beginsWith /a?b" "id:1,phase:1,pass,ctl:ruleRemoveById=942100"`),
@@ -202,7 +424,11 @@ SecRule ARGS:debug "@streq true" "id:1100,phase:1,deny,status:403"`},
 				lines = append(lines, fmt.Sprintf("%d %s: %s", it.kind, it.source, it.text))
 				found = found || strings.Contains(it.text, tc.contains)
 			}
-			if got != tc.want {
+			if tc.wantExclusions != 0 {
+				if n := len(m.policy.Spec.Exclusions); n != tc.wantExclusions {
+					t.Errorf("%d exclusions, want %d", n, tc.wantExclusions)
+				}
+			} else if got != tc.want {
 				t.Errorf("policy spec:\n%s\nwant:\n%s\nitems:\n%s", got, tc.want, strings.Join(lines, "\n"))
 			}
 			if n := m.todos(); n != tc.todo {
@@ -274,6 +500,56 @@ func TestMigrateCluster(t *testing.T) {
 	}
 }
 
+// TestMigrateClusterRoutes reads the HTTPRoutes from the cluster, with
+// the dynamic client; a cluster without the CRD has none.
+func TestMigrateClusterRoutes(t *testing.T) {
+	class := "nginx"
+	pt := networkingv1.PathTypePrefix
+	client := fake.NewClientset(&networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "a", Name: "web", Annotations: map[string]string{
+			"nginx.ingress.kubernetes.io/enable-modsecurity":      "true",
+			"nginx.ingress.kubernetes.io/enable-owasp-core-rules": "true",
+		}},
+		Spec: networkingv1.IngressSpec{IngressClassName: &class, Rules: []networkingv1.IngressRule{{Host: "a.example.com",
+			IngressRuleValue: networkingv1.IngressRuleValue{HTTP: &networkingv1.HTTPIngressRuleValue{
+				Paths: []networkingv1.HTTPIngressPath{{Path: "/", PathType: &pt}}}}}}},
+	})
+	route := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "gateway.networking.k8s.io/v1",
+		"kind":       "HTTPRoute",
+		"metadata":   map[string]any{"namespace": "a", "name": "web-route"},
+		"spec":       map[string]any{"hostnames": []any{"a.example.com"}, "rules": []any{map[string]any{}}},
+	}}
+	httpRoutes := schema.GroupVersionResource{Group: gatewayv1.GroupName, Version: "v1", Resource: "httproutes"}
+	ingressRoutes := integrations.TraefikIngressRouteGVK.GroupVersion().WithResource("ingressroutes")
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{httpRoutes: "HTTPRouteList", ingressRoutes: "IngressRouteList"}, route)
+	dyn.PrependReactor("list", "ingressroutes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewNotFound(ingressRoutes.GroupResource(), "")
+	})
+	orig := newKubeClient
+	t.Cleanup(func() { newKubeClient = orig })
+	newKubeClient = func(_, _ string) (kubeClient, error) {
+		return kubeClient{core: client.CoreV1(), networking: client.NetworkingV1(), dynamic: dyn}, nil
+	}
+
+	code, out, errOut := runCLI(t, "migrate", "ingress-nginx", "--cluster", "--target", "httproute")
+	if code != 0 || !strings.Contains(out, "kind: HTTPRoute\n    name: web-route\n") {
+		t.Errorf("exit %d, stdout:\n%s\nstderr:\n%s", code, out, errOut)
+	}
+	for _, a := range dyn.Actions() {
+		if a.GetVerb() != "list" {
+			t.Errorf("the cluster was changed: %v", a)
+		}
+	}
+
+	// Without the CRD: the policy keeps the Ingress.
+	code, out, errOut = runCLI(t, "migrate", "ingress-nginx", "--cluster", "--target", "ingressroute")
+	if code != 1 || !strings.Contains(errOut, "the cluster has no ingressroutes.traefik.io") || !strings.Contains(out, "kind: Ingress\n") {
+		t.Errorf("exit %d, stdout:\n%s\nstderr:\n%s", code, out, errOut)
+	}
+}
+
 func TestMigrateFlags(t *testing.T) {
 	for _, args := range [][]string{
 		{"migrate"},
@@ -284,6 +560,7 @@ func TestMigrateFlags(t *testing.T) {
 		{"migrate", "ingress-nginx", "-f", migrateIngresses, "--controller-configmap", "nginx"},
 		{"migrate", "ingress-nginx", "-f", migrateIngresses, "extra"},
 		{"migrate", "ingress-nginx", "-f", "testdata/migrate/missing.yaml"},
+		{"migrate", "ingress-nginx", "-f", migrateIngresses, "--target", "gateway"},
 	} {
 		if code, _, _ := runCLI(t, args...); code != 2 {
 			t.Errorf("%v: exit %d, want 2", args, code)

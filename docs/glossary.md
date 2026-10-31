@@ -191,8 +191,16 @@ first time they mention it.
   Its Go filter runs Go code in-process. ([Envoy
   docs](https://www.envoyproxy.io/docs/envoy/latest/))
 - <a id="envoy-gateway"></a>**Envoy Gateway**: An implementation of the Gateway API on Envoy,
-  extended with objects such as `EnvoyExtensionPolicy`. ([Envoy Gateway
-  docs](https://gateway.envoyproxy.io/))
+  extended with objects such as `EnvoyExtensionPolicy`. Inkwall protects the HTTPRoutes it
+  serves. ([Envoy Gateway docs](https://gateway.envoyproxy.io/))
+- <a id="envoyextensionpolicy"></a>**EnvoyExtensionPolicy (Envoy Gateway)**: Adds filters, such as
+  ext_proc, to the routes or Gateways it targets. The operator makes one per protected HTTPRoute,
+  whose ext_proc filter calls the engine through a `Backend`, an Envoy Gateway object for an
+  endpoint such as a Unix socket. ([Envoy Gateway
+  docs](https://gateway.envoyproxy.io/docs/api/extension_types/#envoyextensionpolicy))
+- <a id="envoyproxy"></a>**EnvoyProxy (Envoy Gateway)**: The settings of the Envoy pods of a
+  GatewayClass or Gateway, including their pod template. The operator adds the engine there.
+  ([Envoy Gateway docs](https://gateway.envoyproxy.io/docs/api/extension_types/#envoyproxy))
 - <a id="envtest"></a>**envtest**: A test helper that runs a real Kubernetes API server and etcd,
   without nodes, for controller tests. ([kubebuilder
   book](https://book.kubebuilder.io/reference/envtest))
@@ -204,6 +212,10 @@ first time they mention it.
 - <a id="ext-proc"></a>**ext_proc**: Envoy's external processing filter: a gRPC stream per request
   that can inspect and change headers and bodies, in both directions. ([Envoy
   docs](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter))
+- <a id="extensionref"></a>**ExtensionRef filter**: A Gateway API `HTTPRoute` filter that calls an
+  implementation's own object. Traefik's Gateway API provider runs a Traefik `Middleware` through
+  one; Inkwall adds one to each rule it protects. ([Gateway API
+  docs](https://gateway-api.sigs.k8s.io/reference/spec/#localobjectreference))
 - <a id="externaltrafficpolicy"></a>**externalTrafficPolicy**: A Service setting. `Local` delivers
   external traffic only to pods on the node that received it, which keeps the client's source
   address. ([Kubernetes

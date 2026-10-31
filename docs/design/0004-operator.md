@@ -47,10 +47,10 @@ unwiring with injection off ([§5](#5-uninstall-and-disable)); signing key rotat
 chunks ([§4.6](#46-bundle-builder-leader-only)); the operator side of the optional control plane:
 enrollment, GitOps and Managed modes, and security events ([§4.9](#49-upstream-sync-leader-only));
 the discovery controller ([§4.1](#41-discovery-controller)) and the wiring's `Integration` interface
-([§4.2](#42-integration-interface)).
+([§4.2](#42-integration-interface)); [`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) targets served by Traefik's Gateway API provider
+or by [Envoy Gateway](https://gateway.envoyproxy.io/) ([§4.4](#44-wiring-controller)).
 
-**Not yet:** other proxies, wiring [`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) targets (the resolver reads them,
-[§4.5](#45-resolver)).
+**Not yet:** other proxies.
 
 ## Contents
 
@@ -156,8 +156,8 @@ Validation runs in three steps, cheapest first:
 | Condition | True when | False reasons |
 |---|---|---|
 | `Accepted` | Spec valid, references resolve | `InvalidRef`, `Conflict`, `RuleCompileError`, `TargetUnsupported` |
-| `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `NoTargets`, `InjectionDisabled` |
-| `Enforced` | Every serving engine ACKed a bundle with this generation | `EnginesBehind` (`3/6`), `EngineNack`, `NoEngines`, `NotInBundle` |
+| `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `Pending`, `NoTargets`, `InjectionDisabled`, `Unwired` |
+| `Enforced` | Every serving engine ACKed a bundle with this generation | `EnginesBehind`, `EngineNack` (`1/6`), `EnginesUnreported`, `NoEngines`, `NotInBundle` |
 | `Ready` | The three above are True | first failing condition's reason |
 
 Status also has `bundleVersion` and `observedGeneration`. `bundleVersion` is the first bundle that
@@ -187,17 +187,22 @@ visible rather than silently unprotected.
 
 **Built** (`operator/internal/discovery`, leader only):
 
-- [`operator/integrations`](../../operator/integrations/integrations.go) lists Traefik only:
-  IngressClass controller `traefik.io/ingress-controller`, GatewayClass controller
-  `traefik.io/gateway-controller`, pods `app.kubernetes.io/name=traefik`, adapter `forward-auth`.
-  (An adapter is the engine listener that speaks one proxy's protocol; see
+- [`operator/integrations`](../../operator/integrations/integrations.go) lists two
+  integrations. (An adapter is the engine listener that speaks one proxy's protocol; see
   [0006](0006-adapter-protocols.md).)
+  - Traefik: IngressClass controller `traefik.io/ingress-controller`, GatewayClass controller
+    `traefik.io/gateway-controller`, pods `app.kubernetes.io/name=traefik`, adapter
+    `forward-auth`.
+  - Envoy Gateway: GatewayClass controller `gateway.envoyproxy.io/gatewayclass-controller`, pods
+    `app.kubernetes.io/name=envoy` and `app.kubernetes.io/managed-by=envoy-gateway`, adapter
+    `ext-proc` on a Unix socket.
 - One entry per controller: its `controllerName`, its `integration` (empty when Inkwall has none),
   its `ingressClasses` and `gatewayClasses`, and `support`:
   - `Full`: the integration's wiring takes the routes of all its classes: `Ingress` for an
     IngressClass, `HTTPRoute` for a GatewayClass;
   - `Partial`: of some of them; the `message` says which it doesn't;
-  - `Unsupported`: of none, or no integration. Today that includes Traefik's GatewayClasses.
+  - `Unsupported`: of none, or no integration. Traefik's IngressClasses and GatewayClasses, and
+    Envoy Gateway's GatewayClasses, are `Full`.
 - It writes the status only when it changes, and only into an existing `InkwallConfig` `default`:
   the operator doesn't create one.
 - Without the Gateway API's CRDs, GatewayClasses are left out; the leader looks for their CRD
@@ -215,7 +220,7 @@ proxy would then change no controller.
 **Built:** two halves. `integrations.Integration`, a plain struct, describes a proxy to discovery
 and injection: its class controllers, pod selector and adapter. The wiring goes through the
 `Integration` interface in [`operator/internal/wiring`](../../operator/internal/wiring/integration.go),
-one implementation per proxy (`Traefik`):
+one implementation per proxy (`Traefik`, `EnvoyGateway`):
 
 | Method | Does |
 |---|---|
@@ -230,14 +235,18 @@ The wiring controller owns what every proxy shares: the finalizer, collecting th
 live policies, the `Programmed` condition (a target counts for the integration whose proxy serves
 it; if none does, it is `ControllerUnsupported` with the first integration's reason) and the
 sidecar checks on each integration's pods. Each integration's RBAC markers sit next to its code.
+A target carries its `sectionName`, so an integration can wire one rule of an HTTPRoute. An
+integration whose proxy's controller replaces pods without the engine itself (Envoy Gateway)
+reports them as `PendingRestart` rather than as missed by the Pod webhook (`Result.Rolling`).
 
 An `HTTPRoute` integration (Traefik's Gateway API, Envoy Gateway) adds its `HTTPRoute` kind,
 serves the routes whose parent Gateway has one of its GatewayClasses, wires each one (for example, Traefik's
 Middleware through an `ExtensionRef` filter, or Envoy Gateway's `EnvoyExtensionPolicy`), and is
-added to `wiring.Integrations`. Discovery then reports its GatewayClasses `Full`.
+added to `wiring.Integrations`. Discovery then reports its GatewayClasses `Full`. Traefik's does
+this in its one implementation, which also wires its HTTPRoutes ([§4.4](#44-wiring-controller)).
 
-**Not yet:** injection behind the interface (it is Traefik's Pod webhook); `Render` and golden
-files; `Health`.
+**Not yet:** injection behind the interface (Traefik's Pod webhook; Envoy Gateway's goes through its
+wiring, [§4.4](#44-wiring-controller)); `Render` and golden files; `Health`.
 
 ### 4.3 Injection controller
 
@@ -293,6 +302,18 @@ proxy.
 - **Not yet:** `rollout: Automatic`. Pods that were running before the operator are injected when
   they restart.
 
+**Built since: Envoy Gateway** (`operator/internal/wiring/envoygateway.go`). Its Envoy pods are
+not injected by the Pod webhook: the engine goes into their pod template through the Gateway's
+`EnvoyProxy` ([§4.4](#44-wiring-controller)), so Envoy Gateway rolls them itself, and no pod
+starts without the engine because a webhook was down. The engine is the same native sidecar
+(`injection.Engine`), first among the init containers, with the `ext-proc` adapter on the Unix
+socket `/var/run/inkwall-socket/extproc.sock`, in an `emptyDir` the Envoy container mounts too.
+Its image, resources and bootstrap mode come from the `InkwallConfig` at each reconcile, so a new
+engine image rolls the Envoy pods. The trust ConfigMap and the bundle Secret grant follow the
+Envoy pods as they do Traefik's: the operator's pod cache selects both proxies' pods
+(`app.kubernetes.io/name in (envoy,traefik)` by default; any pod when custom selectors share no
+key), and the controllers keep only those an integration's selector matches.
+
 ### 4.4 Wiring controller
 
 **Hook in globally once, decide per route locally.** The engine's router knows which routes have a
@@ -305,16 +326,18 @@ check.
 | Envoy Gateway | `Backend` ([Unix socket](https://man7.org/linux/man-pages/man7/unix.7.html)) + [`EnvoyExtensionPolicy`](https://gateway.envoyproxy.io/docs/api/extension_types/#envoyextensionpolicy) per protected `HTTPRoute` | 0 |
 | Istio | gateway-scoped [`EnvoyFilter`](https://istio.io/latest/docs/reference/config/networking/envoy-filter/) | ~0 (per-route disable) |
 | ingress-nginx | [Lua](https://github.com/openresty/lua-nginx-module) plugin ConfigMap + `plugins` key | ~0 (in-memory route set) |
-| Traefik | `Middleware` per namespace, attached to protected routes | 0 |
+| Traefik | `Middleware` per namespace, attached to protected routes (`Ingress`, `IngressRoute`, `HTTPRoute`) | 0 |
 | HAProxy | [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) config + map of protected routes in an ACL | ~0 (map lookup) |
 | Caddy | nothing | 0 |
 
 User-owned objects touched, with the fewest fields:
 
-- Envoy Gateway's `EnvoyProxy`: a sidecar patch, or an operator-made one plus `parametersRef`.
+- Envoy Gateway's `EnvoyProxy`: the engine's entries in its `initContainers`, `pod.volumes` and
+  `container.volumeMounts`; or, for a Gateway that names none, the Gateway's
+  `spec.infrastructure.parametersRef` to an operator-made one.
 - ingress-nginx's `data.plugins`: merged, with the original saved for uninstall.
-- Traefik's `router.middlewares` [annotation](https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/) on an `Ingress`, and `spec.routes[*].middlewares` on
-  an `IngressRoute`.
+- Traefik's `router.middlewares` [annotation](https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/) on an `Ingress`, `spec.routes[*].middlewares` on
+  an `IngressRoute`, and `spec.rules[*].filters` on an `HTTPRoute` that a Traefik Gateway serves.
 - The `waf.inkwall.dev/unwire` finalizer on a `WAFPolicy` ([§5](#5-uninstall-and-disable)).
 
 Of the chart's own objects, the operator changes the Pod webhook's `failurePolicy` and
@@ -357,6 +380,23 @@ longer needed.
     Middleware is, so it works with [`allowCrossNamespace`](https://doc.traefik.io/traefik/providers/kubernetes-crd/#allowcrossnamespace) off (the default).
   - To a merge patch, `spec.routes` is one list. So the patch carries the `resourceVersion`, and a
     conflict retries.
+- **HTTPRoute** (`gateway.networking.k8s.io/v1`), served by [Traefik's Gateway API provider](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/). Traefik serves
+  an HTTPRoute when one of its `parentRefs` Gateways has a GatewayClass with controller
+  `traefik.io/gateway-controller`.
+  - An `ExtensionRef` filter to the Middleware (`group: traefik.io`, `kind: Middleware`, `name:
+    inkwall-waf`, no namespace: it is the route's) goes first in each protected rule's `filters`,
+    with the user's filters kept in order, and `waf.inkwall.dev/wired: inkwall-waf` is set. With
+    `sectionName`, only that rule gets it; a whole-route policy wires every rule. Unprotecting
+    removes only the operator's filter, and any list it leaves empty.
+  - `spec.rules` is one list to a merge patch, so the patch carries the `resourceVersion`, and a
+    conflict retries. The operator reads the route from the API server before writing it, so rule
+    fields newer than its Gateway API types (v1.7) are kept.
+  - A route attached to Gateways of several controllers is wired for Traefik, and for Envoy
+    Gateway if its Gateways are among them; `Programmed` counts it in each and waits for both.
+    It is `True` with a message naming the controllers no integration wires, whose traffic isn't
+    inspected. A route of no Traefik Gateway is `ControllerUnsupported`, naming its controllers.
+  - The leader looks for the HTTPRoute, Gateway and GatewayClass CRDs every 30 s, then the wiring
+    watches them.
 - **Only with an injected Traefik.** Routes are wired only while a Traefik pod that the webhook
   selects is running, with injection on. Otherwise new Traefik pods would get no engine to call, so
   everything is unwired (`SidecarMissing`, or `InjectionDisabled`, [§5](#5-uninstall-and-disable)).
@@ -365,18 +405,80 @@ longer needed.
   IngressRoute CRD every 30 s. Once it is installed, the bundle builder and the wiring watch
   IngressRoutes (`operator/internal/crdwatch`). The wiring's resync (1 min) notices a Middleware CRD
   installed later.
-- **`Programmed=True`** when all the policy's Traefik Ingresses and IngressRoutes are wired and
+- **`Programmed=True`** when all the policy's Traefik Ingresses, IngressRoutes and HTTPRoutes are
+  wired and
   every running Traefik pod has the engine. Otherwise the reason is one of:
   - `ControllerUnsupported`: another controller or kind;
-  - `WiringFailed`: no Traefik CRDs, a name clash, or an IngressRoute that can't be written;
+  - `WiringFailed`: no Traefik CRDs, a name clash, or a route that can't be written;
   - `PendingRestart`: pods older than the webhook, listed;
   - `SidecarMissing`: no Traefik pod selected, or pods without the engine (the operator was down
     in detect mode, or they opted out), listed;
   - `NoTargets`;
-  - `InjectionDisabled`.
-- **Not yet:** `HTTPRoute` targets; matching engines to the pods that serve a policy's class (all
+  - `InjectionDisabled`;
+  - `Unwired`: set by the uninstall hook, with the operator stopped ([§5](#5-uninstall-and-disable)).
+- **Not yet:** matching engines to the pods that serve a policy's class (all
   engines count for `Enforced`); IngressRoutes nested with `parentRefs`. Whether Traefik attachment
   should default to something else is open ([§12](#12-open-questions)).
+
+**Built since: Envoy Gateway** (`operator/internal/wiring/envoygateway.go`, the `EnvoyGateway`
+integration), for `HTTPRoute` targets whose parent Gateways have a GatewayClass of
+`gateway.envoyproxy.io/gatewayclass-controller`. Tested with Envoy Gateway v1.9.
+
+- **The engine in the Envoy pods**, for each Gateway that serves a protected route:
+  - The Gateway names an `EnvoyProxy` (`spec.infrastructure.parametersRef`): the engine's entries
+    go into it. The init container `inkwall-engine` comes first, the volumes `inkwall-*` and the
+    Envoy container's mount `inkwall-socket` after the user's; the user's entries and fields stay,
+    in order. `waf.inkwall.dev/wired: sidecar` records it (`sidecar,provider` when the operator
+    also made `spec.provider`), `waf.inkwall.dev/hash` a hash of the entries. The patch carries the
+    `resourceVersion`.
+  - It names none: the operator makes `EnvoyProxy` `inkwall-waf-<gateway>`, owned by the Gateway,
+    and sets the Gateway's `parametersRef` to it (`waf.inkwall.dev/wired` names it). When the
+    GatewayClass names an `EnvoyProxy`, the operator's has `mergeType: StrategicMerge`, so Envoy
+    Gateway merges it into the class's rather than replacing it.
+  - Unwiring removes exactly that: the entries, `spec.provider` if the operator made it, the
+    annotations; the Gateway's `parametersRef` (and `infrastructure`, if it holds nothing else);
+    the operator's `EnvoyProxy`. Once no Gateway with a protected route names an `EnvoyProxy`,
+    the engine leaves it.
+- **The routes**, once every running Envoy pod of each of the route's Gateways has the engine
+  (Envoy Gateway is rolling them meanwhile: `PendingRestart`; no pod: `SidecarMissing`). A route
+  whose ext_proc filter has no engine to call would fail its requests. Each protected route gets:
+  - an `EnvoyExtensionPolicy`, `inkwall-waf-<route>`, owned by the route, whose `targetRefs` name
+    the route, or each protected rule (`sectionName`) when no policy takes the whole route. Its
+    ext_proc filter ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing))
+    sends the request headers, and the body (`BufferedPartial`) when a policy on the route inspects
+    bodies; no response stage; `messageTimeout` the route's longest policy timeout (250 ms by
+    default) plus 500 ms, so the engine decides, by its deadline and with the policy's failure
+    mode (the deadline doesn't cover sending the body or a busy node); Envoy's timeout is for a
+    hung engine;
+    `failOpen` when every policy on the route fails open, so an unreachable engine fails the way
+    the policies would;
+  - the `Backend` `inkwall-engine` in its namespace: the Unix socket. Envoy Gateway's Backend API
+    must be on (`config.envoyGateway.extensionApis.enableBackend: true` in its chart).
+- **Envoy's buffer limit.** Envoy hands ext_proc at most its per-connection buffer (32 KiB by
+  default) of a body; a body cut there is handled as an oversized one (`body.onOversize`). Each
+  Gateway with a route whose body is inspected gets a `ClientTrafficPolicy`,
+  `inkwall-waf-<gateway>`, owned by it, with `connection.bufferLimit: 10Mi`, the largest
+  `body.maxBytes`. Envoy Gateway applies one ClientTrafficPolicy per Gateway, so the operator makes
+  none for a Gateway the user targets with their own; its `bufferLimit` then caps the bodies
+  inspected.
+- **Unprotected routes get nothing**, and cost 0. A route that is no longer protected loses its
+  `EnvoyExtensionPolicy` first; the `Backend`, `ClientTrafficPolicy` and engine go after.
+- **`Programmed`** counts a route wired once Envoy Gateway has accepted (`Accepted=True` for every
+  Gateway, in their status) its `EnvoyExtensionPolicy` and, when its body is inspected, its
+  Gateways' `ClientTrafficPolicy`: until then the reason is `Pending`, so `Programmed=True` means
+  Envoy has the buffer limit and a body isn't cut short. `Accepted=False` (a disabled Backend API,
+  say) is `WiringFailed` with Envoy Gateway's message. The operator watches both kinds. An object of the operator's name it didn't create
+  is left alone (`WiringFailed`).
+- **Without Envoy Gateway's CRDs** (`EnvoyProxy`, `EnvoyExtensionPolicy`, `Backend`,
+  `ClientTrafficPolicy`), or the Gateway API's, nothing is wired and nothing crashes: the routes
+  are `WiringFailed`. The leader looks for the CRDs every 30 s and watches Gateways,
+  EnvoyProxies, EnvoyExtensionPolicies and ClientTrafficPolicies once they are installed.
+- Objects of Envoy Gateway's are read and written unstructured: the operator doesn't depend on
+  its Go module.
+- **Not yet:** `mergeGateways` (one Envoy fleet for a GatewayClass) and Envoy as a `DaemonSet`;
+  `observability_mode` (detect mode without waiting, [0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing));
+  per-route Envoy pods in `Programmed` (the pods of every Gateway with a protected route count for
+  every policy).
 
 ### 4.5 Resolver
 
@@ -428,8 +530,8 @@ It runs again when a targeted route changes (routes are indexed by target).
   - Read once the HTTPRoute CRD (`gateway.networking.k8s.io/v1`) is installed: the leader looks for
     it every 30 s, then the bundle builder watches HTTPRoutes (`operator/internal/crdwatch`).
     Without it nothing changes.
-  - No proxy wires an HTTPRoute yet: such a policy is `Programmed=False`
-    (`ControllerUnsupported`).
+  - Traefik and Envoy Gateway wire the HTTPRoutes their Gateways serve ([§4.4](#44-wiring-controller));
+    an HTTPRoute of another controller is `Programmed=False` (`ControllerUnsupported`).
 - **Cross-namespace `WAFRuleSet` references** are rejected until a grant mechanism exists. Use a
   `ClusterWAFRuleSet` instead.
 
@@ -536,11 +638,24 @@ leader-only. Losing a replica just moves its engines to another.
   engine's pod name). Engines that are already current aren't sent the bundle again. Streams
   silent for 30 s are closed. At most 50 sends run at once. A stream waiting for a send slot, or
   sending, still reads its engine's heartbeats (#148).
+- **What the operator accepts from engines** (#205). A `Hello` or `Heartbeat` over these limits is
+  refused with `InvalidArgument`, which ends the stream. Engines send far less.
+  - `node_name`: empty or a DNS subdomain (at most 253 bytes); `engine_version`: at most 128 bytes.
+  - `trusted_key_ids`: at most 16, each 1 to 64 bytes (engines send 16 hex digits per key).
+  - `pod_namespace` and `pod_name`: when the token is bound to a pod, its pod is used and the
+    `Hello`'s isn't. Otherwise they must be empty, a DNS label and a DNS subdomain.
+  - A `Nack`'s error is cut to 1 KiB, without splitting a character. It goes into the engine's
+    record and the `Enforced` message.
 - **Events.** Each event gets the stream's engine ID and pod, not its own. Events beyond 1,000 in
   one message are dropped and counted with the engine's own drops.
 - **Aggregation through ConfigMaps.** Each replica writes its engines to `inkwall-engines-<pod>`
   (owned by its Pod) on change and every 10 s. The leader merges them every 2 s, drops reports
   older than 30 s, and counts an engine that moved between replicas once.
+- **Report size.** An engine's record is at most about 3.5 KiB with the limits above, a few hundred
+  bytes in practice. A report holds at most 900 KiB of engines, by engine ID, so the ConfigMap
+  stays under 1 MiB. The engines left out are counted by `inkwall_operator_engines_left_out`, and
+  in the report (`leftOut`). While a report has engines left out, `Enforced` is `False`
+  (`EnginesUnreported`), and a key rotation waits as it does for a replica that hasn't reported.
 
 ### 4.8 Status aggregator
 
@@ -549,9 +664,17 @@ conditions of [§3.2](#32-status-contract). It writes only on change, at most on
 2 s.
 
 **Built (v0.1.0):** `Enforced=True` when every connected engine runs a bundle whose version is at
-least the policy's `status.bundleVersion`. Otherwise the reason is `NoEngines`, `EnginesBehind`
-(`1/3 engines on bundle 42`), `EngineNack` (with the first error) or `NotInBundle`. It waits for
-the bundle builder to report the policy's current generation (`status.observedGeneration`).
+least the policy's `status.bundleVersion` (`every engine runs bundle 42 or later`). Otherwise the
+reason is `NoEngines`, `EnginesBehind` (`some engines don't run bundle 42 yet`), `EngineNack`
+(`1/3 engines rejected bundle 42`, with the first error), `EnginesUnreported` (a replica's report
+left engines out, [§4.7](#47-distribution-server-all-replicas)) or `NotInBundle`. It waits for the
+bundle builder to report the policy's current generation (`status.observedGeneration`).
+
+**Writes on change** (#197). The Reporter writes a policy's status only when its `Enforced` or
+`Ready` condition changes. Only the `EngineNack` message counts engines, so engines connecting or
+going away (a proxy rollout) don't rewrite every policy; `inkwall_operator_engines{state}` has the
+counts. It reads the policies from the cache without copying them, copies only those it writes,
+and writes up to 8 at once, like the bundle builder.
 
 **Writes per bundle** (#149). The builder writes a policy's `bundleVersion` only when the bundle
 changes what the policy enforces: its own entry, the rule sets it binds, or suspension
@@ -563,6 +686,9 @@ Metrics: `inkwall_operator_bundle_version`, `inkwall_operator_engines{state}`,
 `inkwall_operator_bundle_compressed_bytes` ([§4.6](#46-bundle-builder-leader-only)), and, from the
 wiring, `inkwall_operator_wired_targets{integration}` and
 `inkwall_operator_wiring_failures{integration}` (targets that are `WiringFailed`).
+`inkwall_operator_request_stats_dropped_total{reason}` counts the policies' request counts a
+replica drops ([§4.9](#49-upstream-sync-leader-only)): `not_in_bundle`, `latency_buckets` (the
+latency only) and `evicted`.
 
 **Not yet:** an `integration` label on the engine counts (engines aren't matched to proxies yet),
 reconcile duration, policy condition counts.
@@ -614,6 +740,8 @@ leader only, and is idle in Standalone mode (the default).
 
 - The leader sends `ClusterState` after `Welcome`, on any change (checked every 5 s), on `Resync`,
   and every 5 min. It only reads the cluster to do so.
+- The engines go last in `ClusterState`, by engine ID, as many as fit in the contract's 16 MiB.
+  The engines left out are counted by `inkwall_operator_state_engines_left_out`.
 - Every replica forwards its engines' security events on its own events stream, while the control
   plane accepts them. They go through a bounded disk buffer (`--events-dir`, an `emptyDir`). When it
   is full, the oldest events are dropped and counted.
@@ -621,6 +749,12 @@ leader only, and is idle in Standalone mode (the default).
   `inkwall_operator_events_buffered` follows the buffer, outages included.
 - Every replica also sums its engines' request counts per policy and sends them on that stream
   every 10 s, when the control plane accepts them, even if it doesn't accept events.
+- It takes counts only for the policies of the bundle it serves, and keeps the totals of at least
+  4096 policies. Past that, it forgets those no longer in the bundle, so the totals stay bounded
+  as policies come and go; a policy that comes back counts from zero again. Both are counted in
+  `inkwall_operator_request_stats_dropped_total{reason}`. A policy's total can therefore go down
+  under the same `since`; the contract (`RequestStatsUpload`) tells consumers to treat any
+  decrease as a reset, the rule the operator applies to its engines. The fake control plane does.
 - The events stream reconnects with jittered backoff bounded at 10 s (the leader's primary stream:
   1 min), so the backlog drains soon after an outage.
 
@@ -681,7 +815,11 @@ Removal must never leave a proxy failing closed on a missing engine.
   1. scales the operator to 0 and waits for its pods (a draining replica still wires);
   2. sets the Pod webhook to `Ignore`;
   3. removes Inkwall's Middleware from every wired Ingress and IngressRoute, keeping the user's;
-  4. deletes the Middlewares it created.
+  4. deletes the Middlewares it created;
+  5. for Envoy Gateway (built since): deletes its EnvoyExtensionPolicies, Backends and
+     ClientTrafficPolicies, then takes the engine out of the users' EnvoyProxies, points the
+     Gateways it changed back at no EnvoyProxy, and deletes its own. Envoy Gateway rolls the Envoy
+     pods without the engine.
 
   `WAFPolicy` objects stay. Sidecars leave as proxy pods restart.
 - Tested on kind: after the uninstall, a restarted Traefik serves the routes (an Ingress and an
@@ -713,8 +851,9 @@ Removal must never leave a proxy failing closed on a missing engine.
   - Deleting an `InkwallConfig` doesn't unwire by itself. Without one, the operator uses the
     defaults, and keeps wiring the routes of the pods they still select.
 - **Uninstall** runs the hook with injection off too. The hook also sets the `WAFPolicy` webhook to
-  `Ignore` (no replica answers it, and it would refuse the update), and removes the finalizer from
-  every policy. Deleting a policy, or its namespace, then never waits for an operator that is gone.
+  `Ignore` (no replica answers it, and it would refuse the update), reports every policy
+  `Programmed=False` and `Ready=False` (`Unwired`, #195), and removes the finalizer from every
+  policy. Deleting a policy, or its namespace, then never waits for an operator that is gone.
   Without the hook (`--no-hooks`, `uninstall.unwire=false`), the chart README says how to clean up.
 - Tested on kind:
   - a policy deleted while the operator is scaled to 0 stays, wired, until the operator is back;
@@ -755,7 +894,10 @@ Least privilege. The built rules are in [`role.yaml`](../../operator/config/rbac
 | `gatewayclasses` (gateway.networking.k8s.io) | read | Discovery |
 | `ingresses` | patch | Traefik annotation |
 | `ingressroutes` (traefik.io) | read, patch | Traefik routes' `middlewares` |
-| `httproutes`, `gateways`, `gatewayclasses` (gateway.networking.k8s.io) | read | HTTPRoute targets ([§4.5](#45-resolver)) |
+| `httproutes`, `gateways`, `gatewayclasses` (gateway.networking.k8s.io) | read | HTTPRoute targets ([§4.5](#45-resolver)), the Gateways serving them |
+| `httproutes` (gateway.networking.k8s.io) | patch | Traefik rules' `filters` |
+| `gateways` (gateway.networking.k8s.io) | update, patch | Envoy Gateway: a Gateway's `parametersRef` ([§4.4](#44-wiring-controller)) |
+| `envoyproxies`, `envoyextensionpolicies`, `backends`, `clienttrafficpolicies` (gateway.envoyproxy.io) | full | Envoy Gateway wiring |
 | `middlewares` (traefik.io) | full | Traefik wiring |
 | `configmaps` | full, cluster-wide | `inkwall-trust` per namespace, engine reports |
 | `secrets` | in `inkwall-system` | Bundle, signing key, certificates |
@@ -770,7 +912,8 @@ Least privilege. The built rules are in [`role.yaml`](../../operator/config/rbac
 - one `ClusterRole` per controller, aggregated by the chart, with rules for absent proxies left out
   (`.Capabilities.APIVersions`). The markers are already grouped by integration; controller-gen
   merges them into one role;
-- rules for writing Gateway API objects, Envoy Gateway, Istio and controller ConfigMaps;
+- Envoy Gateway's rules only where it is installed: the chart grants them always, like Traefik's;
+- rules for Istio and controller ConfigMaps;
 - a `deployments` restart patch, only with `rollout: Automatic`.
 
 ## 8. Scale targets (v1)
@@ -857,6 +1000,27 @@ Against the targets:
 
   The table above predates #149. With 10 edits, p95 and max are the same edit. Peak RSS at
   5,000 × 500 was 404 MiB before and 509 MiB after, in one run each: under the target, but close.
+- **Peak RSS at 5,000 × 500, over several runs** (#197). It varies by up to 100 MiB from run to
+  run, so one run says little.
+  - Why it varies: RSS follows the Go heap goal, twice the live heap at the last GC. The live heap
+    is about 105 MiB at rest: the informer cache (about 45 MiB, mostly the IngressRoutes, kept
+    unstructured), 500 engine connections (about 20 MiB) and the bundle. A bundle reconcile adds
+    40–65 MiB while it runs: the current bundle decoded from its Secret, the next one, and the
+    listed objects. So the peak depends on when a GC lands.
+  - Before: every 2 s the Reporter copied all 5,000 policies out of the cache, and an engine
+    connecting or going away rewrote every policy's `Enforced`, its message counting engines.
+  - Now it writes only on change, copies only the policies it writes
+    ([§4.8](#48-status-aggregator)), and writes up to 8 at once.
+  - Same machine and harness, shared with other jobs, edits phase:
+
+| 5,000 × 500 | Runs | Peak RSS min / median / max | Over 512 MiB |
+|---|---|---|---|
+| Before (#187) | 6 | 421 / 474 / 523 MiB | 1 |
+| After (#197) | 7 | 413 / 429 / 472 MiB | 0 |
+
+  Change → all engines p95 was 4.0–8.3 s after. Listing the policies without copying in the bundle
+  reconciler and the Pod webhook reconciler too lowered the peak heap by about 4%, but not the
+  peak RSS measurably, so it isn't done.
 
 **Engine memory per policy.** A compiled Coraza WAF with the CRS keeps
 about 2.1 MiB of heap, and takes 10–15 ms to compile.
@@ -909,6 +1073,12 @@ Applying exclusions per request changes three things from v0.1.0:
   within 10 s) and a 2 s `--selector-restart-max-delay`.
 - **Scale**, with fake engines in envtest (`make scale-test`, [§8](#8-scale-targets-v1)). CI runs
   100 policies × 50 engines.
+- **Envoy Gateway on kind** (`make kind-e2e-envoy-gateway`, run by `make kind-e2e`): Envoy Gateway
+  v1.9 installed with nothing about Inkwall, one `WAFPolicy` on a Traefik Ingress and an HTTPRoute
+  of two Gateways (one naming the user's `EnvoyProxy`, one naming none). The engine joins the Envoy
+  pods, attacks are blocked through both proxies, a body is inspected (a 48 KB benign one passes,
+  a body attack is blocked and never reaches the app: Envoy holds the headers), and unprotecting
+  or uninstalling leaves the user's `EnvoyProxy` and Gateways as they were.
 - **Upgrade** from the last release on kind (`make kind-upgrade`, every PR): routes stay protected
   through Traefik, wired once.
 - **Planned:** chaos tests (kill the leader, delete the Secret, take the webhook down).
@@ -919,7 +1089,7 @@ Applying exclusions per request changes three things from v0.1.0:
 operator/
 ├── api/v1alpha1/       # CRD types, CEL rules
 ├── bundle/             # builder, signer, signing key rotation
-├── integrations/       # known proxies (Traefik)
+├── integrations/       # known proxies (Traefik, Envoy Gateway)
 ├── internal/
 │   ├── controller/     # reconcilers
 │   ├── controlplane/   # upstream sync (§4.9)
@@ -927,7 +1097,7 @@ operator/
 │   ├── discovery/      # proxy controllers in InkwallConfig.status (§4.1)
 │   ├── distribution/   # BundleService server, auth, status
 │   ├── injection/
-│   └── wiring/         # the controller, Integration, Traefik
+│   └── wiring/         # the controller, Integration, Traefik, Envoy Gateway
 ├── manager/
 ├── resolver/
 ├── webhook/            # validating + mutating handlers, Managed-mode guard
@@ -944,13 +1114,13 @@ development.
 |---|---|---|---|
 | O1 | Scaffold + CRDs + validation | CRDs with CEL, webhook compiles SecLang, envtest green | Done (v0.1.0) |
 | O2 | Resolver + bundle + distribution | An engine on its own (not injected) gets signed bundles; `Enforced` works | Done (v0.1.0) |
-| O3 | Envoy Gateway | kind: one `WAFPolicy`, attack blocked, `Ready=True` | Not yet (v0.3.0) |
+| O3 | Envoy Gateway | kind: one `WAFPolicy`, attack blocked, `Ready=True` | Done (v0.3.0) |
 | O4 | Pod webhook + ingress-nginx, Traefik, HAProxy | Same attack blocked via all four in one cluster | Pod webhook and Traefik done (v0.1.0); ingress-nginx, HAProxy not yet |
 | O5 | Uninstall, suspend, chaos, scale | [§5](#5-uninstall-and-disable) and [§6](#6-failure-modes) verified in CI | Uninstall, suspend, scale done; chaos not yet ([§9](#9-testing)) |
 | O6 | Upstream sync | Enroll with a control plane stub; policy round-trip | Done, against the stub ([§4.9](#49-upstream-sync-leader-only)) |
 
 Shipped out of order: the Pod webhook and Traefik (part of O4) came first, in v0.1.0, before
-Envoy Gateway (O3).
+Envoy Gateway (O3), in v0.3.0.
 
 ## 12. Open questions
 

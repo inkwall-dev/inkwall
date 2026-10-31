@@ -21,7 +21,8 @@
 // (inkwall-engine check).
 //
 // The migrate ingress-nginx subcommand converts ingress-nginx's ModSecurity
-// annotations and ConfigMap settings into WAFPolicy objects.
+// annotations and ConfigMap settings into WAFPolicy objects, targeting the
+// Ingresses or (--target) the HTTPRoutes or IngressRoutes replacing them.
 package main
 
 import (

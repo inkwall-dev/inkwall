@@ -23,13 +23,19 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/client-go/dynamic"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	networkingv1client "k8s.io/client-go/kubernetes/typed/networking/v1"
 	"k8s.io/client-go/tools/clientcmd"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/yaml"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 )
 
 // migrateConfig is the configuration of migrate ingress-nginx.
@@ -43,6 +49,16 @@ type migrateConfig struct {
 	class      string
 	prefix     string
 	outDir     string
+	target     string
+}
+
+// migrateInput is what migrate reads: the Ingresses, the ConfigMap's
+// settings and, with --target, the routes replacing the Ingresses.
+type migrateInput struct {
+	ingresses     []networkingv1.Ingress
+	global        nginxGlobal
+	httpRoutes    []gatewayv1.HTTPRoute
+	ingressRoutes []unstructured.Unstructured
 }
 
 const migrateUsage = "usage: inkwallctl migrate ingress-nginx [flags] -f FILE ... | --cluster"
@@ -62,18 +78,23 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
 	}
-	var (
-		ingresses []networkingv1.Ingress
-		global    nginxGlobal
-	)
+	var in migrateInput
 	if cfg.cluster {
-		ingresses, global, err = readCluster(cfg, stderr)
+		in, err = readCluster(cfg, stderr)
 	} else {
-		ingresses, global, err = readMigrateFiles(cfg, stderr)
+		in, err = readMigrateFiles(cfg, stderr)
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
+	}
+	ingresses := in.ingresses
+	var repl *replacements
+	switch cfg.target {
+	case targetHTTPRoute:
+		repl = newReplacements("HTTPRoute", in.httpRoutes, nil)
+	case targetIngressRoute:
+		repl = newReplacements("IngressRoute", nil, in.ingressRoutes)
 	}
 
 	var results []*migration
@@ -85,12 +106,15 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 			skipped++
 			continue
 		}
-		m := migrateIngress(ing, global, cfg.prefix)
+		m := migrateIngress(ing, in.global, cfg.prefix)
 		if m == nil {
 			continue
 		}
 		if class == "" && m.policy != nil {
 			m.add(itemCheck, "", "the Ingress has no class: assumed served by ingress-nginx")
+		}
+		if repl != nil {
+			repl.retarget(m, ing)
 		}
 		results = append(results, m)
 	}
@@ -127,6 +151,7 @@ func parseMigrateFlags(args []string, stderr io.Writer) (migrateConfig, error) {
 	fs.StringVar(&cfg.class, "ingress-class", "nginx", "ingress class of ingress-nginx: Ingresses of other classes are left out")
 	fs.StringVar(&cfg.prefix, "annotation-prefix", "nginx.ingress.kubernetes.io", "ingress-nginx's annotation prefix (its --annotations-prefix)")
 	fs.StringVar(&cfg.outDir, "output", "", "directory to write one file per Ingress into, instead of printing to stdout")
+	fs.StringVar(&cfg.target, "target", targetIngress, "what the policies target: ingress (the Ingresses), httproute or ingressroute (the Gateway API HTTPRoutes or Traefik IngressRoutes replacing them, read from the -f files or the cluster, matched by hosts and paths)")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
@@ -141,6 +166,8 @@ func parseMigrateFlags(args []string, stderr io.Writer) (migrateConfig, error) {
 		return cfg, fmt.Errorf("--controller-configmap %q: want NAMESPACE/NAME", cfg.configMap)
 	case cfg.prefix == "":
 		return cfg, errors.New("--annotation-prefix must not be empty")
+	case cfg.target != targetIngress && cfg.target != targetHTTPRoute && cfg.target != targetIngressRoute:
+		return cfg, fmt.Errorf("--target %q: want ingress, httproute or ingressroute", cfg.target)
 	}
 	return cfg, nil
 }
@@ -165,11 +192,10 @@ func globalSettings(cm *corev1.ConfigMap, notes io.Writer) nginxGlobal {
 
 // readMigrateFiles reads the Ingresses and the ConfigMap in the -f files;
 // other kinds are skipped.
-func readMigrateFiles(cfg migrateConfig, notes io.Writer) ([]networkingv1.Ingress, nginxGlobal, error) {
+func readMigrateFiles(cfg migrateConfig, notes io.Writer) (migrateInput, error) {
 	var (
-		ingresses []networkingv1.Ingress
-		global    nginxGlobal
-		found     bool
+		in    migrateInput
+		found bool
 	)
 	namespace := cmp.Or(cfg.namespace, "default")
 	var add func(file string, doc []byte) error
@@ -197,14 +223,32 @@ func readMigrateFiles(cfg migrateConfig, notes io.Writer) ([]networkingv1.Ingres
 				return fmt.Errorf("the Ingress %s: %w", head.Metadata.Name, err)
 			}
 			ing.Namespace = ns
-			ingresses = append(ingresses, ing)
+			in.ingresses = append(in.ingresses, ing)
+		case cfg.target == targetHTTPRoute && head.Kind == "HTTPRoute" && head.APIVersion == gatewayv1.GroupVersion.String():
+			var hr gatewayv1.HTTPRoute
+			if err := yaml.Unmarshal(doc, &hr); err != nil {
+				return fmt.Errorf("the HTTPRoute %s: %w", head.Metadata.Name, err)
+			}
+			hr.Namespace = ns
+			in.httpRoutes = append(in.httpRoutes, hr)
+		case cfg.target == targetIngressRoute && head.Kind == "IngressRoute" && head.APIVersion == integrations.TraefikIngressRouteGVK.GroupVersion().String():
+			var ir unstructured.Unstructured
+			j, err := yaml.YAMLToJSON(doc)
+			if err == nil {
+				err = ir.UnmarshalJSON(j)
+			}
+			if err != nil {
+				return fmt.Errorf("the IngressRoute %s: %w", head.Metadata.Name, err)
+			}
+			ir.SetNamespace(ns)
+			in.ingressRoutes = append(in.ingressRoutes, ir)
 		case head.Kind == "ConfigMap" && ns+"/"+head.Metadata.Name == cfg.configMap:
 			var cm corev1.ConfigMap
 			if err := yaml.Unmarshal(doc, &cm); err != nil {
 				return fmt.Errorf("the ConfigMap %s: %w", head.Metadata.Name, err)
 			}
 			cm.Namespace = ns
-			global, found = globalSettings(&cm, notes), true
+			in.global, found = globalSettings(&cm, notes), true
 		case head.Kind == "":
 			return errors.New("an object without a kind")
 		default:
@@ -232,7 +276,7 @@ func readMigrateFiles(cfg migrateConfig, notes io.Writer) ([]networkingv1.Ingres
 	for _, f := range cfg.files {
 		if f == "-" {
 			if err := read("stdin", os.Stdin); err != nil {
-				return nil, global, err
+				return in, err
 			}
 			continue
 		}
@@ -240,31 +284,33 @@ func readMigrateFiles(cfg migrateConfig, notes io.Writer) ([]networkingv1.Ingres
 	}
 	files, err := expandDirs(paths)
 	if err != nil {
-		return nil, global, err
+		return in, err
 	}
 	for _, file := range files {
 		// The path comes from the user's own command line.
 		f, err := os.Open(filepath.Clean(file))
 		if err != nil {
-			return nil, global, err
+			return in, err
 		}
 		err = read(file, f)
 		_ = f.Close()
 		if err != nil {
-			return nil, global, err
+			return in, err
 		}
 	}
 	if !found {
 		fmt.Fprintf(notes, "note: no ConfigMap %s in the files: ModSecurity is taken as off globally (only the annotations count)\n", cfg.configMap)
 	}
-	return ingresses, global, nil
+	return in, nil
 }
 
-// kubeClient reads the two API groups migrate needs; the typed clients of
-// these groups only keep inkwallctl small.
+// kubeClient reads the API groups migrate needs; the typed clients of
+// these groups only keep inkwallctl small. Routes, whose CRDs may be
+// missing, are read with the dynamic client.
 type kubeClient struct {
 	core       corev1client.CoreV1Interface
 	networking networkingv1client.NetworkingV1Interface
+	dynamic    dynamic.Interface
 }
 
 // newKubeClient returns a client for the kubeconfig context; tests replace
@@ -285,15 +331,20 @@ var newKubeClient = func(kubeconfig, context string) (kubeClient, error) {
 	if err != nil {
 		return kubeClient{}, err
 	}
-	return kubeClient{core: core, networking: networking}, nil
+	dyn, err := dynamic.NewForConfig(rc)
+	if err != nil {
+		return kubeClient{}, err
+	}
+	return kubeClient{core: core, networking: networking, dynamic: dyn}, nil
 }
 
-// readCluster lists the Ingresses and gets the ConfigMap. It only reads.
-func readCluster(cfg migrateConfig, notes io.Writer) ([]networkingv1.Ingress, nginxGlobal, error) {
-	var global nginxGlobal
+// readCluster lists the Ingresses (and, with --target, the routes) and
+// gets the ConfigMap. It only reads.
+func readCluster(cfg migrateConfig, notes io.Writer) (migrateInput, error) {
+	var in migrateInput
 	c, err := newKubeClient(cfg.kubeconfig, cfg.context)
 	if err != nil {
-		return nil, global, err
+		return in, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -304,21 +355,55 @@ func readCluster(cfg migrateConfig, notes io.Writer) ([]networkingv1.Ingress, ng
 	case apierrors.IsNotFound(err):
 		fmt.Fprintf(notes, "note: no ConfigMap %s in the cluster: ModSecurity is taken as off globally (only the annotations count); set --controller-configmap if ingress-nginx uses another\n", cfg.configMap)
 	case err != nil:
-		return nil, global, fmt.Errorf("get ConfigMap %s: %w", cfg.configMap, err)
+		return in, fmt.Errorf("get ConfigMap %s: %w", cfg.configMap, err)
 	default:
-		global = globalSettings(cm, notes)
+		in.global = globalSettings(cm, notes)
 	}
 
-	var ingresses []networkingv1.Ingress
 	opts := metav1.ListOptions{Limit: 500}
 	for {
 		list, err := c.networking.Ingresses(cfg.namespace).List(ctx, opts)
 		if err != nil {
-			return nil, global, fmt.Errorf("list Ingresses: %w", err)
+			return in, fmt.Errorf("list Ingresses: %w", err)
 		}
-		ingresses = append(ingresses, list.Items...)
+		in.ingresses = append(in.ingresses, list.Items...)
 		if opts.Continue = list.Continue; opts.Continue == "" {
-			return ingresses, global, nil
+			break
+		}
+	}
+
+	var gvr schema.GroupVersionResource
+	switch cfg.target {
+	case targetHTTPRoute:
+		gvr = schema.GroupVersionResource{Group: gatewayv1.GroupName, Version: "v1", Resource: "httproutes"}
+	case targetIngressRoute:
+		gvr = integrations.TraefikIngressRouteGVK.GroupVersion().WithResource("ingressroutes")
+	default:
+		return in, nil
+	}
+	opts = metav1.ListOptions{Limit: 500}
+	for {
+		list, err := c.dynamic.Resource(gvr).Namespace(cfg.namespace).List(ctx, opts)
+		switch {
+		case apierrors.IsNotFound(err):
+			fmt.Fprintf(notes, "note: the cluster has no %s: their CRD isn't installed\n", gvr.GroupResource())
+			return in, nil
+		case err != nil:
+			return in, fmt.Errorf("list %s: %w", gvr.GroupResource(), err)
+		}
+		for _, o := range list.Items {
+			if cfg.target == targetIngressRoute {
+				in.ingressRoutes = append(in.ingressRoutes, o)
+				continue
+			}
+			var hr gatewayv1.HTTPRoute
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(o.Object, &hr); err != nil {
+				return in, fmt.Errorf("the HTTPRoute %s/%s: %w", o.GetNamespace(), o.GetName(), err)
+			}
+			in.httpRoutes = append(in.httpRoutes, hr)
+		}
+		if opts.Continue = list.GetContinue(); opts.Continue == "" {
+			return in, nil
 		}
 	}
 }

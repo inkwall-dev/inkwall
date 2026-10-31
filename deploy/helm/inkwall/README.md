@@ -3,7 +3,7 @@
 This [chart](https://helm.sh/docs/topics/charts/) installs the Inkwall [operator](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/), its [CRDs](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/) and its [webhooks](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/)
 ([design](../../../docs/design/0004-operator.md)). The operator validates policies and rule sets,
 builds them into a signed [bundle](../../../docs/glossary.md#bundle), serves the bundle to the engines, injects the engine into [Traefik](https://doc.traefik.io/traefik/)
-[pods](https://kubernetes.io/docs/concepts/workloads/pods/), and wires the [`Ingress`](https://kubernetes.io/docs/concepts/services-networking/ingress/) and [`IngressRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) objects your policies target.
+[pods](https://kubernetes.io/docs/concepts/workloads/pods/), and wires the [`Ingress`](https://kubernetes.io/docs/concepts/services-networking/ingress/), [`IngressRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) and [`HTTPRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/) objects your policies target.
 
 ## Contents
 
@@ -44,7 +44,7 @@ The names below are for a release named `inkwall`.
 | CRDs (`waf.inkwall.dev`) | Installed and upgraded with the chart, kept on uninstall (`crds.install`) |
 | [`Deployment`](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) `inkwall-operator` | 2 replicas with [leader election](https://kubernetes.io/docs/concepts/architecture/leases/#leader-election); non-root, read-only root filesystem, no capabilities |
 | [`PodDisruptionBudget`](https://kubernetes.io/docs/concepts/workloads/pods/disruptions/#pod-disruption-budgets) | When `operator.replicas` is more than 1 |
-| [`ServiceAccount`](https://kubernetes.io/docs/concepts/security/service-accounts/), [`ClusterRole`, `Role` and bindings](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) | Rules generated from the operator's code; the `Role` covers the release namespace only |
+| [`ServiceAccount`](https://kubernetes.io/docs/concepts/security/service-accounts/), [`ClusterRole`, `Role` and bindings](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) | Rules generated from the operator's code; the `Role` covers the release namespace only. They include writing Envoy Gateway's `EnvoyProxy`, `EnvoyExtensionPolicy`, `Backend` and `ClientTrafficPolicy` objects and patching Gateways, whether Envoy Gateway is installed or not |
 | `ValidatingWebhookConfiguration` `inkwall-operator-validating` | WAF kinds only; fails closed, 2 s timeout |
 | `MutatingWebhookConfiguration` `inkwall-operator-mutating` | Traefik pods only, at creation; fails open, or closed while a policy is in block mode (`injection.enabled`) |
 | [`Service`](https://kubernetes.io/docs/concepts/services-networking/service/) `inkwall-operator-webhook` | The webhooks |
@@ -125,9 +125,13 @@ helm -n inkwall-system uninstall inkwall
 Before anything is deleted, a pre-delete hook (`uninstall.unwire`, on by default) runs
 `inkwall-operator unwire`. It stops the operator and sets the Pod and `WAFPolicy` webhooks to
 `Ignore`. It removes Inkwall's Middleware from every route it wired, keeping your own
-Middlewares, and removes the `waf.inkwall.dev/unwire` finalizer from every `WAFPolicy`. The routes
-then keep working, uninspected; Traefik pods drop the engine when they restart; deleting a policy,
-or its namespace, no longer waits for the operator.
+Middlewares. For Envoy Gateway, it deletes its `EnvoyExtensionPolicy`, `Backend` and
+`ClientTrafficPolicy` objects, takes the engine out of your `EnvoyProxy` objects, and points the
+Gateways it pointed at its own `EnvoyProxy` back at none. Every `WAFPolicy` then reports
+`Programmed=False` and `Ready=False` (reason `Unwired`), and loses the `waf.inkwall.dev/unwire`
+finalizer. The routes then keep working, uninspected; Traefik pods drop the engine when they
+restart, and Envoy Gateway rolls its Envoy pods without it; deleting a policy, or its namespace, no
+longer waits for the operator.
 
 `helm uninstall` keeps:
 
@@ -150,9 +154,17 @@ Or skip the hook, with `helm uninstall --no-hooks` (or `uninstall.unwire=false`)
 wiring yourself:
 
 1. Remove the `inkwall-waf` entries from the Ingresses' `traefik.ingress.kubernetes.io/router.middlewares`
-   annotations and from the IngressRoutes' `spec.routes[*].middlewares`. The objects Inkwall wired
-   are annotated `waf.inkwall.dev/wired`.
-2. Remove the finalizer from the policies, or they can't be deleted:
+   annotations, from the IngressRoutes' `spec.routes[*].middlewares`, and the `ExtensionRef`
+   filters to `inkwall-waf` from the HTTPRoutes' `spec.rules[*].filters`. The objects Inkwall
+   wired are annotated `waf.inkwall.dev/wired`.
+2. For Envoy Gateway, delete the objects labelled `app.kubernetes.io/managed-by: inkwall-operator`
+   of the kinds `envoyextensionpolicies`, `backends` and `clienttrafficpolicies`
+   (`gateway.envoyproxy.io`). In each `EnvoyProxy` annotated `waf.inkwall.dev/wired`, remove the
+   init container `inkwall-engine`, the volumes `inkwall-*` and the mount `inkwall-socket`, and the
+   annotations `waf.inkwall.dev/wired` and `waf.inkwall.dev/hash`. In each Gateway annotated
+   `waf.inkwall.dev/wired`, remove `spec.infrastructure.parametersRef` (it names the operator's
+   `EnvoyProxy`) and the annotation, then delete the operator's `EnvoyProxy` objects.
+3. Remove the finalizer from the policies, or they can't be deleted:
 
    ```sh
    kubectl get wafpolicy -A -o jsonpath='{range .items[*]}{.metadata.namespace} {.metadata.name}{"\n"}{end}' |
@@ -166,7 +178,7 @@ wiring yourself:
 `--set injection.enabled=false` removes the Pod webhook: Traefik pods started from then on have no
 engine. The operator keeps running, unwires every route it wired, deletes its Middlewares and
 releases the policies (`Programmed=False`, reason `InjectionDisabled`). Traefik serves the routes
-uninspected.
+uninspected. It also undoes its Envoy Gateway wiring, as on uninstall.
 
 The same happens when no running pod matches the integration's selector any more, because new pods
 wouldn't get the engine (reason `SidecarMissing`). That is the case with an `InkwallConfig`
@@ -239,3 +251,11 @@ What keeps an outage short:
 
 To find an engine outage: `kubectl -n <traefik namespace> get pods` shows the restarts, and Traefik
 logs `Error calling http://127.0.0.1:9001/v1/forward-auth` for each request it answered 500.
+
+Through Envoy Gateway, Envoy answers 500 when it can't reach the engine, unless every policy on
+the route fails open (`failureMode: Open`, or detect mode without one): the route's
+`EnvoyExtensionPolicy` then has `failOpen: true`, and Envoy lets the request through uninspected.
+Envoy waits for the engine 500 ms longer than the policy's `timeout`. A request the engine can't
+inspect within the policy's `timeout` gets the policy's failure mode from the engine: 503 in block
+mode. Large bodies take longer: CRS takes about 200 ms on a 48 KB form field on a fast machine, so
+raise `timeout` (up to 1s) for routes that take large bodies.
