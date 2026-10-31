@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-09-27
-- Updated: 2026-10-30
+- Updated: 2026-10-31
 - Owner: noureldin
 - Depends on: [0002 — System Architecture](0002-system-architecture.md),
   [0004 — Kubernetes Operator](0004-operator.md)
@@ -108,9 +108,9 @@ which only adds management, analytics and threat intelligence.
 
 | Part | Does | Code | Status |
 |---|---|---|---|
-| Discovery and integration registry | Find the ingress controller's pods (by design, also from [IngressClass](https://kubernetes.io/docs/concepts/services-networking/ingress/#ingress-class) and [GatewayClass](https://gateway-api.sigs.k8s.io/reference/api-types/gatewayclass/)) | `operator/integrations` | Built: Traefik, by [label selectors](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors). Not yet: envoygateway, istio, ingressnginx, haproxy, caddy |
+| Discovery and integration registry | Find the ingress controller's pods; list the proxy controllers of the [IngressClasses](https://kubernetes.io/docs/concepts/services-networking/ingress/#ingress-class) and [GatewayClasses](https://gateway-api.sigs.k8s.io/reference/api-types/gatewayclass/) in `InkwallConfig.status.proxies` | `operator/integrations`, `operator/internal/discovery` | Built: Traefik, its pods by [label selectors](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors); discovery. Not yet: envoygateway, istio, ingressnginx, haproxy, caddy |
 | Injection | Add the engine as a [native sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/) through the Pod webhook | `operator/internal/injection` | Built |
-| Wiring | Render proxy configuration; [merge-patch](https://www.rfc-editor.org/rfc/rfc7386) user-owned routes | `operator/internal/wiring` | Built (Traefik) |
+| Wiring | Render proxy configuration; [merge-patch](https://www.rfc-editor.org/rfc/rfc7386) user-owned routes; one `Integration` per proxy | `operator/internal/wiring` | Built (Traefik) |
 | Resolver | Turn policy targets into host, path and method | `operator/resolver` | Built |
 | Bundle builder | Leader only: debounce changes (1 s), build, sign, version, write the Secret | `operator/bundle`, `operator/internal/controller` | Built |
 | Distribution server | Every replica, over gRPC; ACK, NACK, heartbeat | `operator/internal/distribution` | Built |

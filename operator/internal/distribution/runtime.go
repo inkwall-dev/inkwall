@@ -95,6 +95,10 @@ type GRPCServer struct {
 	started atomic.Bool
 }
 
+// maxEngineMessage bounds a message from an engine: a batch of events at
+// the contract's field limits (about 10 KiB each) fits, with room.
+const maxEngineMessage = 4 << 20
+
 // Start implements manager.Runnable.
 func (g *GRPCServer) Start(ctx context.Context) error {
 	select {
@@ -110,8 +114,8 @@ func (g *GRPCServer) Start(ctx context.Context) error {
 
 	srv := grpc.NewServer(
 		grpc.Creds(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: cw.GetCertificate})),
-		// Bundles flow out; engines only send small messages.
-		grpc.MaxRecvMsgSize(64<<10),
+		// Bundles flow out; engines send small messages, and events.
+		grpc.MaxRecvMsgSize(maxEngineMessage),
 		// Find dead connections, and refuse keepalive floods.
 		grpc.KeepaliveParams(keepalive.ServerParameters{Time: 30 * time.Second, Timeout: 10 * time.Second}),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}),

@@ -170,5 +170,5 @@ func TestIngressRouteSharedRoute(t *testing.T) {
 		Ingresses:     []networkingv1.Ingress{ingress("web", rule("web.example.com", ipath("/", networkingv1.PathTypePrefix)))},
 		IngressRoutes: []unstructured.Unstructured{ingressRoute("web", "Host(`web.example.com`)")},
 	})
-	wantStatus(t, res, "newer", true, ReasonAccepted, "routes covered by an older policy, which applies to them: web.example.com/ (older policy shop/older)")
+	wantStatus(t, res, "newer", true, ReasonAccepted, "routes covered by another policy, which applies to them: web.example.com/ (older policy shop/older)")
 }

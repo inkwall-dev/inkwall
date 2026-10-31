@@ -45,6 +45,17 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// traefikWiring is the wiring controller with Traefik's integration, whose
+// pods pods selects.
+func traefikWiring(c client.Client, reader client.Reader, pods labels.Selector) *Reconciler {
+	return &Reconciler{Client: c, Integrations: []Integration{&Traefik{Client: c, APIReader: reader, Pods: pods}}}
+}
+
+func disabled(r *Reconciler) *Reconciler {
+	r.Disabled = true
+	return r
+}
+
 // TestFinalizer runs the wiring controller against an API server, one
 // reconcile at a time: between two, the operator is down. Each reconciler
 // gets a new client, as a restarted operator would.
@@ -75,7 +86,7 @@ func TestFinalizer(t *testing.T) {
 	reconcileOnce := func() {
 		t.Helper()
 		cl := newClient(nil)
-		if err := reconcileWith(&Reconciler{Client: cl, APIReader: cl, TraefikPods: traefikPods}); err != nil {
+		if err := reconcileWith(traefikWiring(cl, cl, traefikPods)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -226,7 +237,7 @@ func TestFinalizer(t *testing.T) {
 		}
 		return c.Patch(ctx, obj, patch, opts...)
 	}})
-	if err := reconcileWith(&Reconciler{Client: refuse, APIReader: refuse, TraefikPods: traefikPods}); err == nil {
+	if err := reconcileWith(traefikWiring(refuse, refuse, traefikPods)); err == nil {
 		t.Error("an IngressRoute not unwired: no error")
 	}
 	wantHeld("an IngressRoute not unwired", route)
@@ -254,7 +265,7 @@ func TestFinalizer(t *testing.T) {
 		}
 		return nil
 	}})
-	if err := reconcileWith(&Reconciler{Client: cached, APIReader: api, TraefikPods: traefikPods}); err == nil {
+	if err := reconcileWith(traefikWiring(cached, api, traefikPods)); err == nil {
 		t.Error("released with the Ingress still wired: no error")
 	}
 	wantHeld("the Ingress still wired", stale)
@@ -271,7 +282,7 @@ func TestFinalizer(t *testing.T) {
 		}
 		return c.Patch(ctx, obj, patch, opts...)
 	}})
-	if err := reconcileWith(&Reconciler{Client: refusePolicies, APIReader: refusePolicies, TraefikPods: traefikPods}); err == nil {
+	if err := reconcileWith(traefikWiring(refusePolicies, refusePolicies, traefikPods)); err == nil {
 		t.Error("finalizer not added: no error")
 	}
 	if has, _ := held(unheld); has || !ingressWired() {
@@ -299,7 +310,7 @@ func TestFinalizer(t *testing.T) {
 	// routes are unwired. The policy is still held.
 	cl := newClient(nil)
 	edge := labels.SelectorFromSet(labels.Set{"app.kubernetes.io/component": "edge-proxy"})
-	if err := reconcileWith(&Reconciler{Client: cl, APIReader: cl, TraefikPods: edge}); err != nil {
+	if err := reconcileWith(traefikWiring(cl, cl, edge)); err != nil {
 		t.Fatal(err)
 	}
 	if ingressWired() || middlewareExists() {
@@ -318,7 +329,7 @@ func TestFinalizer(t *testing.T) {
 	off := func() {
 		t.Helper()
 		cl := newClient(nil)
-		if err := reconcileWith(&Reconciler{Client: cl, APIReader: cl, TraefikPods: traefikPods, Disabled: true}); err != nil {
+		if err := reconcileWith(disabled(traefikWiring(cl, cl, traefikPods))); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -345,7 +356,7 @@ func TestFinalizer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n.Policies != 2 || n.Ingresses != 1 || n.IngressRoutes != 1 {
+	if n.Policies != 2 || n.Objects["Ingress"] != 1 || n.Objects["IngressRoute"] != 1 {
 		t.Errorf("unwired %+v, want 2 policies, 1 Ingress, 1 IngressRoute", n)
 	}
 	if has, gone := held(kept); has || gone {
