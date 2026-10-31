@@ -4,9 +4,11 @@
 package integrations
 
 import (
+	"fmt"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 )
@@ -24,12 +26,12 @@ func TestSelectors(t *testing.T) {
 		}
 		return i.Name
 	}
-	if name(defaults.ForPod(traefik)) != "traefik" || name(defaults.ForPod(envoy)) != "envoy-gateway" || defaults.ForPod(edge) != nil || defaults.IsProxyPod(otherEnvoy) {
+	if name(defaults.ForPod(traefik)) != "traefik" || name(defaults.ForPod(envoy)) != "envoy-gateway" || defaults.ForPod(edge) != nil || defaults.ForPod(otherEnvoy) != nil {
 		t.Error("defaults")
 	}
-	// The cache's selector: a superset of the integrations' pods.
-	if got := defaults.PodSelector().String(); got != "app.kubernetes.io/name in (envoy,traefik)" {
-		t.Errorf("default pod selector %q", got)
+	// The cache's selectors: one per integration.
+	if got := fmt.Sprint(defaults.PodSelectors()); got != "[app.kubernetes.io/name=traefik app.kubernetes.io/managed-by=envoy-gateway,app.kubernetes.io/name=envoy]" {
+		t.Errorf("default pod selectors %s", got)
 	}
 
 	custom, ignored, err := FromConfig([]wafv1alpha1.IntegrationSpec{
@@ -46,16 +48,9 @@ func TestSelectors(t *testing.T) {
 	if custom.ForPod(edge) == nil || custom.ForPod(edge).Name != "traefik" || custom.ForPod(traefik) != nil {
 		t.Error("the override is not used")
 	}
-	// No key in common with Envoy Gateway's selector: every pod.
-	if got := custom.PodSelector(); !got.Empty() {
-		t.Errorf("pod selector %q, want every pod", got)
-	}
-	sameKey, _, _ := FromConfig([]wafv1alpha1.IntegrationSpec{{Controller: "traefik", Selector: &metav1.LabelSelector{
-		MatchLabels:      map[string]string{"app.kubernetes.io/name": "edge"},
-		MatchExpressions: []metav1.LabelSelectorRequirement{{Key: "app.kubernetes.io/managed-by", Operator: metav1.LabelSelectorOpIn, Values: []string{"helm", "flux"}}},
-	}}})
-	if got := sameKey.PodSelector().String(); got != "app.kubernetes.io/managed-by in (envoy-gateway,flux,helm),app.kubernetes.io/name in (edge,envoy)" {
-		t.Errorf("pod selector %q", got)
+	// No key in common with Envoy Gateway's selector: still only their pods.
+	if got := fmt.Sprint(custom.PodSelectors()); got != "[app=edge-proxy app.kubernetes.io/managed-by=envoy-gateway,app.kubernetes.io/name=envoy]" {
+		t.Errorf("pod selectors %s", got)
 	}
 	again, _, _ := FromConfig([]wafv1alpha1.IntegrationSpec{{Controller: "traefik", Selector: &metav1.LabelSelector{MatchLabels: edge}}})
 	if custom.LabelSelector("traefik").MatchLabels["app"] != "edge-proxy" || custom.Equal(Defaults()) || !custom.Equal(again) {
@@ -63,6 +58,9 @@ func TestSelectors(t *testing.T) {
 	}
 	if !Defaults().Equal(nil) {
 		t.Error("nil is the defaults")
+	}
+	if none, _ := metav1.LabelSelectorAsSelector(NoPods()); none.Matches(labels.Set(traefik)) || none.Matches(labels.Set{}) {
+		t.Error("NoPods matches")
 	}
 
 	for _, bad := range []*metav1.LabelSelector{

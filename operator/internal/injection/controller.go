@@ -27,7 +27,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/inkwall-dev/inkwall/operator/bundle"
-	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 )
 
@@ -61,18 +60,16 @@ type Reconciler struct {
 	Namespace string
 	// CertSecret holds the operator's CA (ca.crt).
 	CertSecret string
-	// Pods are the integrations' pod selectors.
-	Pods *integrations.Selectors
 }
 
-// proxyPods lists the proxy pods, in namespace if it isn't empty.
+// proxyPods lists the proxy pods, in namespace if it isn't empty: the
+// manager caches only them (podcache).
 func (r *Reconciler) proxyPods(ctx context.Context, namespace string) ([]corev1.Pod, error) {
 	var list corev1.PodList
-	if err := r.Client.List(ctx, &list, client.InNamespace(namespace), client.MatchingLabelsSelector{Selector: r.Pods.PodSelector()}); err != nil {
+	if err := r.Client.List(ctx, &list, client.InNamespace(namespace)); err != nil {
 		return nil, err
 	}
-	// The cache's selector may match other pods too.
-	return slices.DeleteFunc(list.Items, func(p corev1.Pod) bool { return !r.Pods.IsProxyPod(p.Labels) }), nil
+	return list.Items, nil
 }
 
 // SetupWithManager registers the controller.

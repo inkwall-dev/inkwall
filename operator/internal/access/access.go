@@ -85,7 +85,7 @@ func Denied(ctx context.Context, c client.Client) (map[string]string, error) {
 			missing = append(missing[:3], fmt.Sprintf("%d more", len(missing)-3))
 		}
 		denied[name] = fmt.Sprintf("the %s integration is disabled: the operator may not %s (its ClusterRole, %s%s, isn't granted: "+
-			"see the chart's rbac.integrations); grant it and restart the operator", name, strings.Join(missing, ", "), RolePrefix, name)
+			"see the chart's rbac.integrations, or helm upgrade once the proxy is installed); the operator restarts with it once granted", name, strings.Join(missing, ", "), RolePrefix, name)
 	}
 	return denied, nil
 }

@@ -46,6 +46,7 @@ import (
 	proxydiscovery "github.com/inkwall-dev/inkwall/operator/internal/discovery"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
+	"github.com/inkwall-dev/inkwall/operator/internal/podcache"
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/operator/webhook"
@@ -119,9 +120,9 @@ type Options struct {
 	EnginePullPolicy corev1.PullPolicy
 	// Integrations select the proxy pods; nil: read from the InkwallConfig
 	// when the manager is created. The operator restarts when they change
-	// (its cache of proxy pods is built from them), or when it is granted
-	// a disabled integration's permissions, after a random delay up to
-	// SelectorRestartMaxDelay (0: DefaultSelectorRestartMaxDelay).
+	// (its cache of proxy pods is built from them), or when an
+	// integration's permissions are granted or revoked, after a random
+	// delay up to SelectorRestartMaxDelay (0: DefaultSelectorRestartMaxDelay).
 	Integrations            *integrations.Selectors
 	SelectorRestartMaxDelay time.Duration
 
@@ -171,13 +172,14 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	}
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: s,
+		// Only proxy pods: an informer per integration's selector.
+		NewCache: podcache.New(selectors.PodSelectors()),
 		Cache: cache.Options{ByObject: map[client.Object]cache.ByObject{
 			// Only the operator's own Secrets, and only ConfigMaps that hold
 			// rules: neither is read cluster-wide.
 			&corev1.Secret{}:    {Namespaces: map[string]cache.Config{o.Namespace: {}}},
 			&corev1.ConfigMap{}: {Label: labels.SelectorFromSet(labels.Set{resolver.RulesLabel: "true"})},
-			// Only proxy pods, and RBAC in the operator's namespace.
-			&corev1.Pod{}:         {Label: selectors.PodSelector()},
+			// Only RBAC in the operator's namespace.
 			&rbacv1.Role{}:        {Namespaces: map[string]cache.Config{o.Namespace: {}}},
 			&rbacv1.RoleBinding{}: {Namespaces: map[string]cache.Config{o.Namespace: {}}},
 			// Only the Pod webhook's configuration.
@@ -204,7 +206,11 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	denied, err := readAccess(cfg, s)
+	checker, err := accessClient(cfg, s)
+	if err != nil {
+		return nil, err
+	}
+	denied, err := readAccess(checker)
 	if err != nil {
 		return nil, err
 	}
@@ -258,10 +264,16 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			OperatorAddr: sidecar.OperatorAddr,
 			BundleSecret: sidecar.BundleSecret,
 			Integrations: selectors,
+			Disabled:     denied,
+		}
+		// The Pod webhook serves Traefik's pods: none while Traefik is
+		// disabled, so they start without an engine nothing would wire.
+		pods := selectors.LabelSelector(integrations.Traefik.Name)
+		if denied[integrations.Traefik.Name] != "" {
+			pods = integrations.NoPods()
 		}
 		if err := (&injection.PodWebhookReconciler{
-			Client: mgr.GetClient(), ConfigName: webhook.MutatingConfigName, WebhookName: webhook.PodWebhookName,
-			Pods: selectors.LabelSelector(integrations.Traefik.Name),
+			Client: mgr.GetClient(), ConfigName: webhook.MutatingConfigName, WebhookName: webhook.PodWebhookName, Pods: pods,
 		}).SetupWithManager(mgr); err != nil {
 			return nil, err
 		}
@@ -273,7 +285,6 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			APIReader:  mgr.GetAPIReader(),
 			Namespace:  o.Namespace,
 			CertSecret: o.WebhookSecret,
-			Pods:       selectors,
 		}).SetupWithManager(mgr); err != nil {
 			return nil, err
 		}
@@ -292,10 +303,8 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			wirings[i] = wiring.Disable(in, why, mgr.GetClient(), wiringCfg)
 		}
 	}
-	if len(denied) > 0 {
-		if err := mgr.Add(&accessWatch{client: mgr.GetClient(), denied: denied, maxDelay: o.SelectorRestartMaxDelay}); err != nil {
-			return nil, err
-		}
+	if err := mgr.Add(&accessWatch{client: checker, denied: denied, maxDelay: o.SelectorRestartMaxDelay}); err != nil {
+		return nil, err
 	}
 	if err := (&wiring.Reconciler{
 		Client: mgr.GetClient(), PodWebhook: webhook.MutatingConfigName, Integrations: wirings, Disabled: !inject,
