@@ -255,6 +255,32 @@ func testEnvoyGateway(ctx context.Context, t *testing.T, c client.Client) {
 	accept(wiring.EnvoyExtensionPolicyGVK, ns, "inkwall-waf-app", "True", "")
 	eventually(t, "Programmed again", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
 
+	// The user's own ClientTrafficPolicy for a Gateway: the operator's
+	// goes, Envoy Gateway applying one per Gateway; back once theirs goes.
+	userCTP := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{
+		"targetRefs": []any{map[string]any{"group": "gateway.networking.k8s.io", "kind": "Gateway", "name": "plain"}},
+	}}}
+	userCTP.SetGroupVersionKind(wiring.ClientTrafficPolicyGVK)
+	userCTP.SetNamespace(edge)
+	userCTP.SetName("user-plain")
+	if err := c.Create(ctx, userCTP); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the operator's buffer limit gives way to the user's", gone(wiring.ClientTrafficPolicyGVK, edge, "inkwall-waf-plain"))
+	eventually(t, "Programmed with the user's buffer limit", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
+	if err := c.Delete(ctx, userCTP); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the operator's buffer limit back", func() string {
+		if _, err := get(wiring.ClientTrafficPolicyGVK, edge, "inkwall-waf-plain"); err != nil {
+			return err.Error()
+		}
+		return ""
+	})
+	eventually(t, "Pending on the new buffer limit", programmed("eg", metav1.ConditionFalse, wiring.ReasonPending, "ClientTrafficPolicy inkwall-waf-plain"))
+	accept(wiring.ClientTrafficPolicyGVK, edge, "inkwall-waf-plain", "True", "")
+	eventually(t, "Programmed with the operator's buffer limit", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
+
 	// Detect mode: Envoy doesn't wait for the engine, nor buffers the body.
 	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) { p.Spec.Mode = wafv1alpha1.PolicyDetect })
 	eventually(t, "detect mode: shadowMode, a streamed body", func() string {
