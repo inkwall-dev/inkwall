@@ -132,11 +132,14 @@ type EngineSpec struct {
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 
-	// SocketDir is the directory, shared with the proxy container, that
-	// holds the engine's Unix sockets.
-	// +kubebuilder:default="/var/run/inkwall"
+	// SocketDir is ignored: each integration places the engine's socket
+	// itself (Envoy Gateway's in /var/run/inkwall-socket; Traefik reaches
+	// the engine over loopback TCP). It stays so that InkwallConfigs that
+	// set it remain valid; setting it draws a warning.
+	//
+	// Deprecated: remove it from the InkwallConfig.
+	//
 	// +kubebuilder:validation:MaxLength=64
-	// +kubebuilder:validation:XValidation:rule="self.startsWith('/')",message="socketDir must be an absolute path"
 	// +optional
 	SocketDir string `json:"socketDir,omitempty"`
 

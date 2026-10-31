@@ -27,8 +27,8 @@ The [docs index](docs/README.md) lists every guide, reference and design doc.
 ![Inkwall architecture: the proxy asks the inkwall-engine sidecar for a verdict before forwarding; the operator watches WAFPolicy and route objects and pushes signed policy bundles to every engine](docs/diagrams/system-overview.svg)
 
 1. The operator, **`inkwall-operator`**, injects the engine, **`inkwall-engine`**, into Traefik's
-   [pods](https://kubernetes.io/docs/concepts/workloads/pods/) as a [sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/). It attaches a [ForwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/) [Middleware](https://doc.traefik.io/traefik/middlewares/overview/) to every `Ingress` or `IngressRoute` a
-   policy targets. With [Envoy Gateway](https://gateway.envoyproxy.io/), it adds the engine to the Envoy pods through the
+   [pods](https://kubernetes.io/docs/concepts/workloads/pods/) as a [sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/). It attaches a [ForwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/) [Middleware](https://doc.traefik.io/traefik/middlewares/overview/) to every `Ingress`, `IngressRoute`
+   or Traefik-served `HTTPRoute` a policy targets. With [Envoy Gateway](https://gateway.envoyproxy.io/), it adds the engine to the Envoy pods through the
    Gateway's [`EnvoyProxy`](docs/glossary.md#envoyproxy), and gives every `HTTPRoute` a policy targets an
    [`EnvoyExtensionPolicy`](docs/glossary.md#envoyextensionpolicy) whose [ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter) filter calls the engine. It sends signed
    [policy bundles](docs/glossary.md#bundle) to every engine.
@@ -152,8 +152,10 @@ modes, and [testing policies offline](docs/testing-policies.md) for `inkwallctl 
   DaemonSet), plus the standalone proxy. Raw [Envoy](https://www.envoyproxy.io/docs/envoy/latest/), [HAProxy](https://docs.haproxy.org/), [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) and [Caddy](https://caddyserver.com/docs/)
   are designed, not built.
 - Targets: **`Ingress`** and Traefik **`IngressRoute`** (match rules that join `Host`, `Path` and
-  `PathPrefix` with `&&`) through Traefik; [Gateway API](https://gateway-api.sigs.k8s.io/) **[`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/)** through Envoy Gateway
-  (`Exact` and `PathPrefix` paths, methods). Traefik doesn't wire HTTPRoutes yet.
+  `PathPrefix` with `&&`) through Traefik; [Gateway API](https://gateway-api.sigs.k8s.io/) **[`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/)** through Envoy Gateway or
+  [Traefik's Gateway API provider](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/) (`Exact` and `PathPrefix` paths, methods; no header or
+  query matches). Other Gateway API controllers' HTTPRoutes are resolved into the bundle, but not
+  wired.
 - One cluster per operator. The operator can connect to an optional control plane, which isn't in
   this repository: in `GitOps` mode it sends it a read-only copy of your policies, in `Managed`
   mode it writes the policies the control plane sends, and in both it forwards the engines'

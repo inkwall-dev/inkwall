@@ -110,9 +110,10 @@ ok "chart $FROM_VERSION installed"
 
 # Traefik, then the app behind it: an Ingress and an IngressRoute, each
 # with a Middleware of the user's, which must outlive Inkwall's wiring.
+# Without its Gateway API provider: this cluster has no Gateway API CRDs.
 "${HELM[@]}" upgrade --install traefik-e2e traefik --repo https://traefik.github.io/charts \
   --version "$TRAEFIK_CHART_VERSION" --namespace "$TRAEFIK_NS" --create-namespace \
-  --values hack/kind/traefik-e2e-values.yaml >/dev/null
+  --values hack/kind/traefik-e2e-values.yaml --set providers.kubernetesGateway.enabled=false >/dev/null
 "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout status deployment/traefik-e2e --timeout=180s >/dev/null
 "${KUBECTL[@]}" create namespace "$NS" --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f - >/dev/null
 "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
