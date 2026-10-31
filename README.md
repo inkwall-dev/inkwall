@@ -5,9 +5,10 @@ inspection engine next to your [ingress controller](https://kubernetes.io/docs/c
 to your routes. The engine runs OWASP [Coraza](https://coraza.io/) with the
 [Core Rule Set](https://coreruleset.org/) (CRS).
 
-> **Status: v0.2.0, early.** Inkwall works with [**Traefik**](https://doc.traefik.io/traefik/) and its [**`Ingress`**](https://kubernetes.io/docs/concepts/services-networking/ingress/)
-> and [**`IngressRoute`**](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) routes, and as a standalone reverse proxy in front of anything else. The
-> API is `v1alpha1` and will change. See [Limits](#limits) and the [roadmap](#roadmap).
+> **Status: v0.3.0, early.** Inkwall works with [**Traefik**](https://doc.traefik.io/traefik/) and its [`Ingress`](https://kubernetes.io/docs/concepts/services-networking/ingress/),
+> [`IngressRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) and [Gateway API](https://gateway-api.sigs.k8s.io/) `HTTPRoute` routes, with [**Envoy Gateway**](https://gateway.envoyproxy.io/) and its
+> `HTTPRoute` routes, and as a standalone reverse proxy in front of anything else. The API is
+> `v1alpha1` and will change. See [Limits](#limits) and the [roadmap](#roadmap).
 
 The [docs index](docs/README.md) lists every guide, reference and design doc.
 
@@ -35,7 +36,10 @@ The [docs index](docs/README.md) lists every guide, reference and design doc.
 2. The engine inspects each request with the CRS and answers allow or deny. When the operator is
    down, it keeps enforcing its last bundle.
 3. Each policy's status shows how far it got: `Accepted`, then `Programmed` (its routes are wired),
-   then `Enforced` (every engine runs it), then `Ready`.
+   then `Enforced` (every engine runs it), then `Ready`. The `InkwallConfig` named `default`, if
+   you create one, lists in `status.proxies` the proxy controllers of the cluster's IngressClasses
+   and GatewayClasses, and whether Inkwall wires their routes (`Full`, `Partial` or
+   `Unsupported`).
 
 ## Install
 
@@ -43,7 +47,7 @@ You need [Kubernetes](https://kubernetes.io/docs/concepts/overview/) 1.29 or lat
 tests on Kubernetes 1.34 and on kind's newest (1.37).
 
 ```sh
-helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.2.0 \
+helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.3.0 \
   --namespace inkwall-system --create-namespace
 kubectl -n inkwall-system rollout status deployment/inkwall-operator
 ```
@@ -53,6 +57,9 @@ Then install Traefik, or restart it: only pods created after the operator get th
 ```sh
 kubectl -n <traefik namespace> rollout restart deployment/<traefik>
 ```
+
+For `HTTPRoute` targets served by Traefik, install the [Gateway API CRDs](https://gateway-api.sigs.k8s.io/guides/getting-started/#installing-gateway-api) and turn on
+Traefik's [Gateway API provider](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/) (`providers.kubernetesGateway.enabled=true` in its chart).
 
 Envoy Gateway needs no restart: Envoy Gateway rolls the Envoy pods of a Gateway when it gets its
 first protected route. Turn on its Backend API, which the engine's socket needs:
@@ -73,7 +80,7 @@ The images, the chart and the checksums are signed keyless with [cosign](https:/
 with cosign v3, as cosign v2 reports "no signatures found". To verify an image:
 
 ```sh
-cosign verify ghcr.io/inkwall-dev/inkwall-engine:0.2.0 \
+cosign verify ghcr.io/inkwall-dev/inkwall-engine:0.3.0 \
   --certificate-identity-regexp '^https://github.com/inkwall-dev/inkwall/\.github/workflows/release\.yaml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
@@ -176,10 +183,11 @@ Tracked on the [project board](https://github.com/orgs/inkwall-dev/projects/1) a
   targets, unwiring with a finalizer and the operator side of the optional control plane, first
   shipped in 0.1.1; bundles split into chunk Secrets, operator memory that no longer grows with
   engines, the ForwardAuth answer capped, user guides, and fuzzing, scale and upgrade tests.
-- **v0.3.0** (next): Gateway API `HTTPRoute` targets with Traefik and [Envoy Gateway](https://gateway.envoyproxy.io/), proxy discovery,
-  engine request metrics sent to the control plane, and migration of ingress-nginx [ModSecurity](https://kubernetes.github.io/ingress-nginx/user-guide/third-party-addons/modsecurity/)
-  annotations.
-- **v1.0.0**: a stable API (out of `v1alpha1`) with an upgrade path.
+- **v0.3.0** (shipped): Gateway API `HTTPRoute` targets with Traefik and [Envoy Gateway](https://gateway.envoyproxy.io/) (through
+  [ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter)), proxy discovery, per-policy request counts sent to the control plane, policy
+  statuses written only when they change, and `inkwallctl migrate ingress-nginx`, which turns
+  ingress-nginx [ModSecurity](https://kubernetes.github.io/ingress-nginx/user-guide/third-party-addons/modsecurity/) annotations into policies.
+- **v1.0.0** (next): a stable API (out of `v1alpha1`) with an upgrade path.
 - Then more proxies: HAProxy, ingress-nginx, Caddy.
 
 ## Development

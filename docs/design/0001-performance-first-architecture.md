@@ -248,7 +248,8 @@ Unix socket.** There is no hop to another node, no [Service](https://kubernetes.
 - Its resources are sized from the policy: a CPU-throttled engine means a bad p99.
 - A standalone engine Deployment behind a Service is supported, but slower.
 - **Built (v0.1.0):** Traefik, with the engine injected by the Pod webhook; the standalone reverse
-  proxy. **Not yet:** the other proxies.
+  proxy. **Built since:** Envoy Gateway, with the engine in the Envoy pods through the Gateway's
+  `EnvoyProxy` (its extension point) and ext_proc on a Unix socket. **Not yet:** the other proxies.
 
 ## 7. Failure behaviour
 

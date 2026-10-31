@@ -3,7 +3,8 @@
 This [chart](https://helm.sh/docs/topics/charts/) installs the Inkwall [operator](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/), its [CRDs](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/) and its [webhooks](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/)
 ([design](../../../docs/design/0004-operator.md)). The operator validates policies and rule sets,
 builds them into a signed [bundle](../../../docs/glossary.md#bundle), serves the bundle to the engines, injects the engine into [Traefik](https://doc.traefik.io/traefik/)
-[pods](https://kubernetes.io/docs/concepts/workloads/pods/), and wires the [`Ingress`](https://kubernetes.io/docs/concepts/services-networking/ingress/), [`IngressRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) and [`HTTPRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/) objects your policies target.
+[pods](https://kubernetes.io/docs/concepts/workloads/pods/) and, through [Envoy Gateway](https://gateway.envoyproxy.io/)'s `EnvoyProxy`, into Envoy pods, and wires the [`Ingress`](https://kubernetes.io/docs/concepts/services-networking/ingress/),
+[`IngressRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) and [`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) objects your policies target.
 
 ## Contents
 
@@ -31,7 +32,8 @@ kubectl -n inkwall-system rollout status deployment/inkwall-operator
 ```
 
 The rollout finishing means the operator is running. Traefik pods created from then on get the
-engine; restart the ones already running. To upgrade, see [upgrading](../../../docs/upgrading.md).
+engine; restart the ones already running. Envoy Gateway rolls a Gateway's Envoy pods itself when
+it gets its first protected route. To upgrade, see [upgrading](../../../docs/upgrading.md).
 
 The chart is signed with [cosign](https://docs.sigstore.dev/cosign/signing/overview/) v3: see [CONTRIBUTING.md](../../../CONTRIBUTING.md#cutting-a-release)
 for how to verify it. From a checkout, `make kind-operator` builds the images and installs
@@ -70,7 +72,7 @@ from the operator's generated manifests. Don't edit `files/` by hand.
 | `operator.extraArgs` | `[]` | Extra `inkwall-operator` flags |
 | `operator.podAnnotations`, `podLabels`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName` | | The default [affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/) spreads the replicas across nodes |
 | `operator.podDisruptionBudget.enabled`, `minAvailable` | `true`, `1` | |
-| `engine.image.repository`, `tag`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-engine`, the chart's `appVersion`, `IfNotPresent` | The engine injected into Traefik pods; `InkwallConfig.spec.engine.image` overrides it |
+| `engine.image.repository`, `tag`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-engine`, the chart's `appVersion`, `IfNotPresent` | The engine injected into Traefik pods and put into Envoy Gateway's Envoy pods; `InkwallConfig.spec.engine.image` overrides it |
 | `injection.enabled` | `true` | Inject the engine into Traefik pods when they are created. `false`: see [turning injection off](#turning-injection-off) |
 | `controlPlane.caBundle` | `""` | The optional control plane's CA (PEM), when its certificate isn't from a public CA, e.g. `--set-file controlPlane.caBundle=ca.crt` |
 | `controlPlane.enrollmentToken` | `""` | The control plane's one-time enrollment token, stored in the Secret `inkwall-enrollment` (key `token`); or leave it empty and create that Secret yourself |
@@ -240,7 +242,8 @@ can't be deleted.
 ## When the operator is down
 
 Traffic is unaffected: every engine keeps enforcing its last bundle, and a new engine pod reads the
-bundle Secret. What depends on the operator is **creating Traefik pods**:
+bundle Secret. What depends on the operator is **creating Traefik pods** (Envoy Gateway's Envoy
+pods don't depend on it: their engine comes from the `EnvoyProxy`, not from the Pod webhook):
 
 - **No policy in block mode:** the Pod webhook fails open. New Traefik pods start without the
   engine, so their traffic is not inspected. The affected policies report `Programmed=False`

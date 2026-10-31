@@ -1,6 +1,7 @@
 # Client IP behind a load balancer
 
-This guide gets the real client address to the engine when [Traefik](https://doc.traefik.io/traefik/) runs behind a load balancer.
+This guide gets the real client address to the engine when [Traefik](https://doc.traefik.io/traefik/) runs behind a load balancer. With
+[Envoy Gateway](https://gateway.envoyproxy.io/), see [Envoy Gateway](#envoy-gateway).
 
 The engine gives the client's address to the rules ([SecLang](https://coraza.io/docs/seclang/)'s `REMOTE_ADDR`) and records it in
 security events; the planned IP lists and rate limits will key on it too. Behind a load balancer
@@ -21,6 +22,7 @@ on Traefik's [Service](https://kubernetes.io/docs/concepts/services-networking/s
   - [Traefik (Helm chart `traefik/traefik`)](#traefik-helm-chart-traefiktraefik)
   - [Load balancers](#load-balancers)
 - [`externalTrafficPolicy: Local` (without the PROXY protocol)](#externaltrafficpolicy-local-without-the-proxy-protocol)
+- [Envoy Gateway](#envoy-gateway)
 - [Checking it worked](#checking-it-worked)
 - [Undoing it](#undoing-it)
 
@@ -121,6 +123,26 @@ kube-proxy then delivers only to Traefik pods on the node that received the pack
   traffic (a [DaemonSet](https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/)), or spread it with [anti-affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#affinity-and-anti-affinity).
 - The LB weighs nodes, not pods: a node with two Traefik pods gets the same share as one with one.
 - With MetalLB in layer 2 mode, only the leader node's pods get traffic.
+
+## Envoy Gateway
+
+Through Envoy Gateway, the engine runs in each Envoy pod and gets the request from Envoy's
+[ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter) filter on a Unix socket, which it trusts as a loopback peer. Envoy sets
+`X-Forwarded-For` before the filter runs, ending with the address of its own TCP peer, and the
+engine walks it right to left as above. So, as with Traefik, Envoy must see the client as its
+peer: turn the PROXY protocol on in a `ClientTrafficPolicy` for the Gateway, or set
+`externalTrafficPolicy: Local` on the Envoy Service through your `EnvoyProxy`, as Envoy Gateway's
+[client traffic policy](https://gateway.envoyproxy.io/docs/tasks/traffic/client-traffic-policy/) docs show.
+
+Envoy Gateway applies one `ClientTrafficPolicy` per Gateway. The operator creates its own,
+`inkwall-waf-<gateway>`, which raises Envoy's buffer limit so the engine gets whole bodies, only
+for a Gateway that has none of yours, and deletes it once you add yours. Your
+`connection.bufferLimit` then caps the bodies inspected: set it to at least the largest
+`body.maxBytes` of your policies (Envoy's default buffer is 32 KiB). If you delete yours, the
+operator creates its own again.
+
+The kind end-to-end test doesn't check the client IP through Envoy Gateway yet. Check it as below,
+with the engine's logs in an Envoy pod (`-c inkwall-engine`).
 
 ## Checking it worked
 
