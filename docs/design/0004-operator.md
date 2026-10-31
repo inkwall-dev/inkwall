@@ -146,6 +146,10 @@ Validation runs in three steps, cheapest first:
      is optional;
    - in Managed mode, rejects edits of the control plane's objects by anyone but the operator
      (`operator/webhook/source.go`, [§4.9](#49-upstream-sync-leader-only)).
+
+   The `InkwallConfig` goes to the webhook too, with `failurePolicy: Ignore`: it only warns, when
+   the deprecated `spec.engine.socketDir` is set or changed (each integration places the engine's
+   socket itself), and the `InkwallConfig` stays editable while the operator is down.
 3. **Resolver** (asynchronous, reported in status): dangling references, conflicts, and targets
    that can't be wired.
 

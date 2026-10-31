@@ -102,3 +102,28 @@ func TestPolicyValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigValidation(t *testing.T) {
+	ctx := context.Background()
+	v := configValidator{}
+	cfg := func(socketDir string) *wafv1alpha1.InkwallConfig {
+		return &wafv1alpha1.InkwallConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "default"},
+			Spec:       wafv1alpha1.InkwallConfigSpec{Engine: wafv1alpha1.EngineSpec{SocketDir: socketDir}}, //nolint:staticcheck // the deprecated field
+		}
+	}
+
+	if warnings, err := v.ValidateCreate(ctx, cfg("")); err != nil || len(warnings) != 0 {
+		t.Errorf("no socketDir: warnings %q, error %v", warnings, err)
+	}
+	if warnings, err := v.ValidateCreate(ctx, cfg("/run/x")); err != nil || len(warnings) != 1 || !strings.Contains(warnings[0], "socketDir") {
+		t.Errorf("socketDir set: warnings %q, error %v", warnings, err)
+	}
+	if warnings, err := v.ValidateUpdate(ctx, cfg(""), cfg("/run/x")); err != nil || len(warnings) != 1 {
+		t.Errorf("socketDir added: warnings %q, error %v", warnings, err)
+	}
+	// The old default, kept by an update, doesn't warn on every apply.
+	if warnings, err := v.ValidateUpdate(ctx, cfg("/var/run/inkwall"), cfg("/var/run/inkwall")); err != nil || len(warnings) != 0 {
+		t.Errorf("socketDir kept: warnings %q, error %v", warnings, err)
+	}
+}
