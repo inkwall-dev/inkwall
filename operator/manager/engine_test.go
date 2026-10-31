@@ -11,7 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -69,6 +72,13 @@ func testEngine(ctx context.Context, t *testing.T, c client.Client) {
 		PodNamespace:  "edge",
 		PodName:       "traefik-engine",
 		Compile: func(b *bundlev1.Bundle) (*policy.Set, error) {
+			// The deadline isn't under test: a generous one (the CRD
+			// allows 1s at most) keeps a loaded machine from turning a
+			// verdict into deny/timeout.
+			b = proto.Clone(b).(*bundlev1.Bundle)
+			for _, p := range b.GetPolicies() {
+				p.Timeout = durationpb.New(10 * time.Second)
+			}
 			return policy.Compile(b, policy.Options{Admission: adm, BodyLimit: 65536})
 		},
 		Holder:    holder,
@@ -92,7 +102,7 @@ func testEngine(ctx context.Context, t *testing.T, c client.Client) {
 	const sqli = "/?id=1%27%20OR%20%271%27%3D%271"
 	eventually(t, "the engine blocks with the operator's policy", func() string {
 		v := check("web.example.com", sqli)
-		if v.Action != pipeline.ActionDeny {
+		if v.Action != pipeline.ActionDeny || v.Reason != pipeline.ReasonRule {
 			return "got " + v.Action.String() + "/" + v.Reason.String()
 		}
 		return ""

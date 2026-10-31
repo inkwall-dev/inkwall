@@ -1,0 +1,36 @@
+exit 0
+# From the ingress-nginx ModSecurity settings of Ingress shop/api.
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFRuleSet
+metadata:
+  name: api-modsecurity
+  namespace: shop
+spec:
+  source:
+    seclang: |
+      # annotation modsecurity-snippet, line 2
+      SecRule ARGS:debug "@streq true" "id:1100,phase:1,deny,status:403,msg:'debug switch'"
+---
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: api
+  namespace: shop
+spec:
+  mode: Block
+  ruleSets:
+  - ref:
+      kind: WAFRuleSet
+      name: api-modsecurity
+  targetRefs:
+  - kind: Ingress
+    name: api
+--- stderr
+note: no ConfigMap web/none in the files: ModSecurity is taken as off globally (only the annotations count)
+Ingress shop/api: WAFPolicy shop/api (Block), WAFRuleSet shop/api-modsecurity
+  mapped  annotation modsecurity-snippet, line 2: kept in the WAFRuleSet: SecRule ARGS:debug "@streq true" "id:1100,phase:1,deny,status:403,msg:'debug switch'"
+  mapped  annotation modsecurity-snippet, line 1: SecRuleEngine On: mode: Block
+  check   the Ingress has no class: assumed served by ingress-nginx
+Ingress shop/other: no WAFPolicy
+  check   ModSecurity is on but runs no rules besides its own configuration's: nothing to migrate
+7 Ingress(es) read (5 of another class than traefik left out): 1 WAFPolicy, 1 WAFRuleSet; 0 setting(s) not migrated need a human (TODO)
