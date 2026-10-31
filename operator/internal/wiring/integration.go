@@ -57,6 +57,8 @@ type Integration interface {
 type Target struct {
 	Kind schema.GroupKind
 	Key  types.NamespacedName
+	// Section narrows an HTTPRoute to its rule of that name; "": all.
+	Section string
 }
 
 // targetOf is the target of a policy's TargetRef.
@@ -65,7 +67,7 @@ func targetOf(namespace string, ref wafv1alpha1.TargetRef) Target {
 	if group == "" && ref.Kind == "Ingress" {
 		group = networkingv1.GroupName
 	}
-	return Target{Kind: schema.GroupKind{Group: group, Kind: ref.Kind}, Key: types.NamespacedName{Namespace: namespace, Name: ref.Name}}
+	return Target{Kind: schema.GroupKind{Group: group, Kind: ref.Kind}, Key: types.NamespacedName{Namespace: namespace, Name: ref.Name}, Section: ref.SectionName}
 }
 
 // Result is what an integration did, for Programmed.
@@ -88,14 +90,22 @@ type TargetState struct {
 	Failed string
 	// Wired: the integration keeps the target wired.
 	Wired bool
+	// Partly: it is wired, but some of its traffic goes through proxies
+	// Inkwall doesn't wire, and which.
+	Partly string
+}
+
+// CRDs watch the kinds whose CRD may be installed after the operator, or
+// never, once it is; a nil one is only read at each reconcile.
+type CRDs struct {
+	IngressRoutes, HTTPRoutes, Gateways, GatewayClasses *crdwatch.Kind
 }
 
 // Integrations are the wiring of every proxy Inkwall integrates (Traefik so
-// far), selecting the proxy pods with pods. ingressRoutes watches Traefik's
-// IngressRoutes once their CRD is installed; nil, they are only read.
-func Integrations(c client.Client, reader client.Reader, pods *integrations.Selectors, ingressRoutes *crdwatch.Kind) []Integration {
+// far), selecting the proxy pods with pods.
+func Integrations(c client.Client, reader client.Reader, pods *integrations.Selectors, crds CRDs) []Integration {
 	return []Integration{
-		&Traefik{Client: c, APIReader: reader, Pods: pods.Selector(integrations.Traefik.Name), IngressRoutes: ingressRoutes},
+		&Traefik{Client: c, APIReader: reader, Pods: pods.Selector(integrations.Traefik.Name), CRDs: crds},
 	}
 }
 

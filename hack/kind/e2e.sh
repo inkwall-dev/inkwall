@@ -23,7 +23,9 @@ TRAEFIK_PORT=${E2E_TRAEFIK_PORT:-18080}
 TRAEFIK_NS=traefik-e2e
 TRAEFIK_HOST=traefik.e2e.example.com
 ROUTE_HOST=route.e2e.example.com
+HTTPROUTE_HOST=httproute.e2e.example.com
 TRAEFIK_CHART_VERSION=41.6.1 # Traefik v3.7.13, as hack/kind/up.sh
+GATEWAY_API_VERSION=v1.7.0  # sigs.k8s.io/gateway-api in go.mod
 KUBECTL=(kubectl --context "kind-$CLUSTER")
 SQLI='/?id=1%27%20OR%20%271%27%3D%271'
 
@@ -299,6 +301,21 @@ start_operator() {
 }
 
 echo "== through Traefik"
+# The Gateway API's CRDs (standard channel), for Traefik's Gateway API
+# provider (traefik-e2e-values.yaml). Left installed, as Traefik's CRDs are.
+# Traefik waits for TLSRoutes, so it needs their CRD too, whose hostnames
+# rule uses CEL's isIP: before Kubernetes 1.31 (hack/kind/cluster.yaml's
+# default node) there is none, and the isIP rules are left out.
+gateway_crds=https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$GATEWAY_API_VERSION/config/crd/standard
+crd_filter=.
+if (($("${KUBECTL[@]}" version -o json | jq -r '.serverVersion.minor' | tr -dc 0-9) < 31)); then
+  crd_filter='walk(if type == "object" and has("x-kubernetes-validations")
+    then .["x-kubernetes-validations"] |= map(select(.rule | contains("isIP") | not)) else . end)'
+fi
+for kind in gatewayclasses gateways grpcroutes httproutes listenersets referencegrants tcproutes tlsroutes udproutes; do
+  "${KUBECTL[@]}" create --dry-run=client -o json -f "$gateway_crds/gateway.networking.k8s.io_$kind.yaml" | jq "$crd_filter" |
+    "${KUBECTL[@]}" apply --server-side --force-conflicts -f - >/dev/null
+done
 helm --kube-context "kind-$CLUSTER" upgrade --install traefik-e2e traefik --repo https://traefik.github.io/charts \
   --version "$TRAEFIK_CHART_VERSION" --namespace "$TRAEFIK_NS" --create-namespace --values hack/kind/traefik-e2e-values.yaml >/dev/null
 # Restarted: pods from an earlier run may predate this operator (or an
@@ -660,6 +677,75 @@ eventually "the IngressRoute's policy is Ready" rready
 eventually "the IngressRoute is unwired when the policy is deleted, the user's Middleware kept" route_unwired
 eventually "the attack passes the IngressRoute again" rstatus_is 200 "$SQLI"
 
+# An HTTPRoute served by Traefik's Gateway API provider (#125): its rules get
+# an ExtensionRef filter to the operator's Middleware first, the user's
+# filters kept; with a sectionName, only that rule; and lose it when the
+# policy goes.
+hcode() {
+  curl -s -o /dev/null -w '%{http_code}' -H "Host: $HTTPROUTE_HOST" "http://127.0.0.1:$TRAEFIK_PORT$1" || true
+}
+hstatus_is() { [[ $(hcode "$2") == "$1" ]]; }
+hroute_filters() {
+  "${KUBECTL[@]}" -n "$NS" get httproutes.gateway.networking.k8s.io web \
+    -o jsonpath='{range .spec.rules[*]}{.filters[*].type}/{.filters[*].extensionRef.name}{"|"}{end}{.metadata.annotations.waf\.inkwall\.dev/wired}'
+}
+# Each rule's filter types/ExtensionRef names, then the marker.
+hroute_wired() { [[ $(hroute_filters) == "ExtensionRef RequestHeaderModifier/inkwall-waf|ExtensionRef/inkwall-waf|inkwall-waf" ]]; }
+hroute_admin_wired() { [[ $(hroute_filters) == "RequestHeaderModifier/|ExtensionRef/inkwall-waf|inkwall-waf" ]]; }
+hroute_unwired() { [[ $(hroute_filters) == "RequestHeaderModifier/|/|" ]]; }
+user_filter() { curl -s -H "Host: $HTTPROUTE_HOST" "http://127.0.0.1:$TRAEFIK_PORT/products/42" | grep '^X-E2e: httproute' >/dev/null; }
+hpolicy() {
+  "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: web-httproute
+  namespace: $NS
+spec:
+  targetRefs: [{group: gateway.networking.k8s.io, kind: HTTPRoute, name: web$1}]
+  mode: Block
+YAML
+}
+hready() {
+  [[ $("${KUBECTL[@]}" -n "$NS" get wafpolicy web-httproute -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}') == True ]]
+}
+
+echo "== an HTTPRoute through Traefik's Gateway API provider"
+"${KUBECTL[@]}" apply -f - >/dev/null <<YAML
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: web
+  namespace: $NS
+spec:
+  parentRefs: [{name: traefik-e2e, namespace: $TRAEFIK_NS}]
+  hostnames: [$HTTPROUTE_HOST]
+  rules:
+    - name: app
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier: {set: [{name: X-E2E, value: httproute}]}
+      backendRefs: [{name: web, port: 8080}]
+    - name: admin
+      matches: [{path: {type: PathPrefix, value: /admin}}]
+      backendRefs: [{name: web, port: 8080}]
+YAML
+eventually "Traefik serves the HTTPRoute" hstatus_is 200 /
+check "no policy yet: the attack passes through the HTTPRoute" hstatus_is 200 "$SQLI"
+hpolicy ""
+eventually "the operator wired the HTTPRoute's rules, first, keeping the user's filter" hroute_wired
+eventually "the engine blocks the attack on the HTTPRoute" hstatus_is 403 "$SQLI"
+check "benign traffic passes the HTTPRoute" hstatus_is 200 /products/42
+check "the user's filter still applies" user_filter
+eventually "the HTTPRoute's policy is Ready" hready
+hpolicy ", sectionName: admin"
+eventually "narrowed to the admin rule: only it is wired" hroute_admin_wired
+eventually "the attack passes the other rule" hstatus_is 200 "$SQLI"
+check "the admin rule blocks it" hstatus_is 403 "/admin$SQLI"
+"${KUBECTL[@]}" -n "$NS" delete wafpolicy web-httproute >/dev/null
+eventually "the HTTPRoute is unwired when the policy is deleted, the user's filter kept" hroute_unwired
+eventually "the attack passes the HTTPRoute again" hstatus_is 200 "/admin$SQLI"
+
 # Traefik deployed with other labels (#50): InkwallConfig names them, the
 # operator restarts with them, and their pods get the engine.
 injected() {
@@ -937,20 +1023,23 @@ inject() {
   "${KUBECTL[@]}" -n "$OPERATOR_NS" rollout status deployment/inkwall-operator --timeout=180s >/dev/null
 }
 echo "== injection off"
-both="{kind: Ingress, name: web}, {group: traefik.io, kind: IngressRoute, name: web}"
+both="{kind: Ingress, name: web}, {group: traefik.io, kind: IngressRoute, name: web}, {group: gateway.networking.k8s.io, kind: HTTPRoute, name: web}"
 web_policy "$both"
 eventually "wired" wired
 eventually "the IngressRoute wired" route_wired
+eventually "the HTTPRoute wired" hroute_wired
 eventually "blocking" tstatus_is 403 "$SQLI"
 inject false
 check "the Pod webhook is removed" no_pod_webhook
 eventually "the Ingress is unwired" unwired
 eventually "the IngressRoute is unwired, the user's Middleware kept" route_unwired
+eventually "the HTTPRoute is unwired, the user's filter kept" hroute_unwired
 eventually "the Middleware is deleted" no_middleware
 eventually "the policy is released from the finalizer" not_held
 eventually "Programmed=False (InjectionDisabled)" programmed_is InjectionDisabled
 eventually "the route is served, uninspected" tstatus_is 200 "$SQLI"
 check "so is the IngressRoute" rstatus_is 200 "$SQLI"
+check "and the HTTPRoute" hstatus_is 200 "$SQLI"
 restart_traefik
 eventually "a new Traefik pod has no engine" no_engine
 eventually "and serves the route, uninspected" tstatus_is 200 "$SQLI"
@@ -968,6 +1057,7 @@ restart_traefik
 eventually "injection on again: Traefik's pod has the engine" traefik_injected
 eventually "wired again" wired
 eventually "the IngressRoute wired again" route_wired
+eventually "the HTTPRoute wired again" hroute_wired
 eventually "held again" held web
 eventually "blocking again" tstatus_is 403 "$SQLI"
 
@@ -979,6 +1069,7 @@ eventually "wired again before the uninstall" wired
 eventually "the IngressRoute wired again before the uninstall" route_wired
 eventually "blocking before the uninstall" tstatus_is 403 "$SQLI"
 eventually "blocking on the IngressRoute before the uninstall" rstatus_is 403 "$SQLI"
+eventually "blocking on the HTTPRoute before the uninstall" hstatus_is 403 "$SQLI"
 if helm --kube-context "kind-$CLUSTER" uninstall inkwall --namespace "$OPERATOR_NS" --wait --timeout 5m >/dev/null; then
   ok "helm uninstall (with the unwire hook)"
 else
@@ -986,6 +1077,7 @@ else
 fi
 check "the Ingress is unwired" unwired
 check "the IngressRoute is unwired, the user's Middleware kept" route_unwired
+check "the HTTPRoute is unwired, the user's filter kept" hroute_unwired
 check "the Middleware is deleted" no_middleware
 kept() { "${KUBECTL[@]}" -n "$NS" get wafpolicy web >/dev/null 2>&1; }
 check "the WAFPolicy is kept" kept
@@ -994,6 +1086,7 @@ restart_traefik
 eventually "a new Traefik pod has no engine" no_engine
 eventually "the route still answers after the uninstall (uninspected)" tstatus_is 200 "$SQLI"
 check "so does the IngressRoute" rstatus_is 200 "$SQLI"
+check "and the HTTPRoute" hstatus_is 200 "$SQLI"
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy web --ignore-not-found --timeout=30s >/dev/null || true
 check "and it is deleted without the operator" policy_gone web
 

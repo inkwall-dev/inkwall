@@ -49,6 +49,10 @@ func TestUnwire(t *testing.T) {
 	}, []any{map[string]any{"name": MiddlewareName, "namespace": "shop"}})
 	wiredRoute.SetAnnotations(map[string]string{WiredAnnotation: MiddlewareName})
 	userRoute := ingressRoute("shop", "mine", []any{map[string]any{"name": MiddlewareName}})
+	// The same for HTTPRoutes.
+	wiredHTTPRoute := httpRoute("shop", "app", []any{extRef(MiddlewareName), extRef("auth")}, []any{extRef(MiddlewareName)})
+	wiredHTTPRoute.SetAnnotations(map[string]string{WiredAnnotation: MiddlewareName})
+	userHTTPRoute := httpRoute("shop", "mine", []any{extRef(MiddlewareName)})
 
 	// Policies the operator holds: one is kept, one is being deleted; and
 	// another controller's finalizer, which stays.
@@ -57,14 +61,14 @@ func TestUnwire(t *testing.T) {
 		DeletionTimestamp: ptr.To(metav1.Now())}}
 
 	c := fake.NewClientBuilder().WithScheme(scheme()).
-		WithObjects(wired, onlyOurs, untouched, ours, theirs, wiredRoute, userRoute, kept, deleting).Build()
+		WithObjects(wired, onlyOurs, untouched, ours, theirs, wiredRoute, userRoute, wiredHTTPRoute, userHTTPRoute, kept, deleting).Build()
 
 	n, err := Unwire(ctx, c)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n.Policies != 2 || !maps.Equal(n.Objects, map[string]int{"Ingress": 2, "IngressRoute": 1, "Middleware": 1}) {
-		t.Errorf("unwired %+v, want 2 Ingresses, 1 IngressRoute, 1 Middleware and 2 policies", n)
+	if n.Policies != 2 || !maps.Equal(n.Objects, map[string]int{"Ingress": 2, "IngressRoute": 1, "HTTPRoute": 1, "Middleware": 1}) {
+		t.Errorf("unwired %+v, want 2 Ingresses, 1 IngressRoute, 1 HTTPRoute, 1 Middleware and 2 policies", n)
 	}
 	var p wafv1alpha1.WAFPolicy
 	if err := c.Get(ctx, client.ObjectKeyFromObject(kept), &p); err != nil || !slices.Equal(p.Finalizers, []string{"example.com/other"}) {
@@ -117,6 +121,21 @@ func TestUnwire(t *testing.T) {
 	}
 	if got := middlewares(route("mine")); got != MiddlewareName {
 		t.Errorf("an IngressRoute Inkwall didn't wire changed: %q", got)
+	}
+
+	hr := func(name string) *unstructured.Unstructured {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(HTTPRouteGVK)
+		if err := c.Get(ctx, client.ObjectKey{Namespace: "shop", Name: name}, u); err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	if app := hr("app"); ruleFilters(app) != "auth|" || app.GetAnnotations()[WiredAnnotation] != "" {
+		t.Errorf("the user's filters must stay, without Inkwall's or the marker: %q %v", ruleFilters(app), app.GetAnnotations())
+	}
+	if got := ruleFilters(hr("mine")); got != MiddlewareName {
+		t.Errorf("an HTTPRoute Inkwall didn't wire changed: %q", got)
 	}
 
 	// Again: nothing left to do.

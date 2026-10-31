@@ -146,9 +146,9 @@ func Start(o Options) (*Env, func(), error) {
 // (testenv/later: Traefik's IngressRoute), and waits until they are served.
 func InstallLater(e *Env) error { return install(e, "later") }
 
-// InstallGatewayAPI installs a stand-in for Gateway API's HTTPRoute CRD
-// (testenv/gateway-api) while the operator runs, and waits until it is
-// served.
+// InstallGatewayAPI installs stand-ins for Gateway API's GatewayClass,
+// Gateway and HTTPRoute CRDs (testenv/gateway-api), typically while the
+// operator runs, and waits until they are served.
 func InstallGatewayAPI(e *Env) error { return install(e, "gateway-api") }
 
 func install(e *Env, dir string) error {

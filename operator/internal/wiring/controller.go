@@ -279,7 +279,7 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 	if rep.disabled {
 		return metav1.ConditionFalse, ReasonInjectionDisabled, "the engine is not injected into proxy pods (injection is off): the routes are not wired"
 	}
-	var unsupported, failed []string
+	var unsupported, failed, partly []string
 	// wired counts the wired targets by result, then kind.
 	wired := make([]map[schema.GroupKind]int, len(rep.results))
 	total := 0
@@ -315,6 +315,9 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 			}
 			wired[served][t.Kind]++
 			total++
+			if s := rep.results[served].Targets[t].Partly; s != "" {
+				partly = append(partly, s)
+			}
 		case why != "":
 			unsupported = append(unsupported, why)
 		}
@@ -348,6 +351,8 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 		}
 		msgs = append(msgs, strings.Join(counts, " and ")+" wired to the engine in "+res.Proxy)
 	}
+	slices.Sort(partly)
+	msgs = append(msgs, slices.Compact(partly)...)
 	return metav1.ConditionTrue, ReasonProgrammed, strings.Join(msgs, "; ")
 }
 

@@ -27,8 +27,8 @@ The [docs index](docs/README.md) lists every guide, reference and design doc.
 ![Inkwall architecture: the proxy asks the inkwall-engine sidecar for a verdict before forwarding; the operator watches WAFPolicy and route objects and pushes signed policy bundles to every engine](docs/diagrams/system-overview.svg)
 
 1. The operator, **`inkwall-operator`**, injects the engine, **`inkwall-engine`**, into Traefik's
-   [pods](https://kubernetes.io/docs/concepts/workloads/pods/) as a [sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/). It attaches a [ForwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/) [Middleware](https://doc.traefik.io/traefik/middlewares/overview/) to every `Ingress` or `IngressRoute` a
-   policy targets, and sends signed [policy bundles](docs/glossary.md#bundle) to every engine.
+   [pods](https://kubernetes.io/docs/concepts/workloads/pods/) as a [sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/). It attaches a [ForwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/) [Middleware](https://doc.traefik.io/traefik/middlewares/overview/) to every `Ingress`, `IngressRoute`
+   or `HTTPRoute` a policy targets, and sends signed [policy bundles](docs/glossary.md#bundle) to every engine.
 2. The engine inspects each request with the CRS and answers allow or deny. When the operator is
    down, it keeps enforcing its last bundle.
 3. Each policy's status shows how far it got: `Accepted`, then `Programmed` (its routes are wired),
@@ -127,9 +127,11 @@ modes, and [testing policies offline](docs/testing-policies.md) for `inkwallctl 
 
 - Proxies: **Traefik** only, plus the standalone proxy. [Envoy](https://www.envoyproxy.io/docs/envoy/latest/), [HAProxy](https://docs.haproxy.org/), [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) and [Caddy](https://caddyserver.com/docs/)
   are designed, not built.
-- Targets: **`Ingress`** and Traefik **`IngressRoute`** (match rules that join `Host`, `Path` and
-  `PathPrefix` with `&&`). [Gateway API](https://gateway-api.sigs.k8s.io/) [`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) targets are resolved into the
-  bundle, but no proxy is wired for them yet.
+- Targets: **`Ingress`**, Traefik **`IngressRoute`** (match rules that join `Host`, `Path` and
+  `PathPrefix` with `&&`), and [Gateway API](https://gateway-api.sigs.k8s.io/) **[`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/)** served by
+  [Traefik's Gateway API provider](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/) (`Exact` and `PathPrefix` paths, methods; no header or
+  query matches). Other Gateway API controllers' HTTPRoutes are resolved into the bundle, but not
+  wired.
 - One cluster per operator. The operator can connect to an optional control plane, which isn't in
   this repository: in `GitOps` mode it sends it a read-only copy of your policies, in `Managed`
   mode it writes the policies the control plane sends, and in both it forwards the engines'
