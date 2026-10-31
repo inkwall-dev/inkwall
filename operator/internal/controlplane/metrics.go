@@ -21,8 +21,12 @@ var (
 		Name: "inkwall_operator_events_buffer_errors_total",
 		Help: "Batches of security events this replica couldn't write to its buffer (dropped, and counted in the next batch).",
 	})
+	stateEnginesLeftOut = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "inkwall_operator_state_engines_left_out",
+		Help: "Engines left out of the last ClusterState, which would be over the contract's message limit.",
+	})
 )
 
 func init() {
-	metrics.Registry.MustRegister(eventsForwarded, eventsBuffered, eventsForwardErrors)
+	metrics.Registry.MustRegister(eventsForwarded, eventsBuffered, eventsForwardErrors, stateEnginesLeftOut)
 }

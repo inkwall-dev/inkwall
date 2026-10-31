@@ -68,7 +68,7 @@ status_is() { [[ $(code "$2") == "$1" ]]; }
 condition() {
   "${KUBECTL[@]}" -n "$NS" get wafpolicy app -o jsonpath="{.status.conditions[?(@.type==\"$1\")].$2}" 2>/dev/null
 }
-enforced_by_all() { [[ $(condition Enforced reason) == Enforced && $(condition Enforced message) == 1/1\ engines* ]]; }
+enforced_by_all() { [[ $(condition Enforced reason) == Enforced && $(condition Enforced message) == every\ engine\ runs\ bundle\ * ]]; }
 
 engine_pod() { "${KUBECTL[@]}" -n "$NS" get pods -l app=e2e -o jsonpath='{.items[0].metadata.name}'; }
 restarts() { "${KUBECTL[@]}" -n "$NS" get pods -l app=e2e -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="inkwall-engine")].restartCount}'; }
@@ -166,7 +166,7 @@ policy Block
 pod=$(engine_pod)
 eventually "the engine blocks the attack" status_is 403 "$SQLI"
 check "a benign request passes" status_is 200 /products/42
-eventually "the policy is Enforced by the engine (1/1)" enforced_by_all
+eventually "the policy is Enforced by the engine" enforced_by_all
 
 echo "== a policy change, without restarting the engine"
 policy Detect
@@ -999,6 +999,12 @@ check "the Middleware is deleted" no_middleware
 kept() { "${KUBECTL[@]}" -n "$NS" get wafpolicy web >/dev/null 2>&1; }
 check "the WAFPolicy is kept" kept
 check "released from the finalizer: deleting it won't wait for an operator" not_held
+check "Programmed=False (Unwired)" programmed_is Unwired
+pready() {
+  "${KUBECTL[@]}" -n "$NS" get wafpolicy web -o jsonpath='{.status.conditions[?(@.type=="Ready")].status} {.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null
+}
+ready_unwired() { [[ $(pready) == "False Unwired" ]]; }
+check "Ready=False (Unwired)" ready_unwired
 restart_traefik
 eventually "a new Traefik pod has no engine" no_engine
 eventually "the route still answers after the uninstall (uninspected)" tstatus_is 200 "$SQLI"

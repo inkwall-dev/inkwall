@@ -95,9 +95,14 @@ func startOperator(t *testing.T) (_ context.Context, _ client.Client, _ *warning
 	_, port, _ := net.SplitHostPort(distAddr)
 	distPort, _ := strconv.Atoi(port)
 	mgr, err := New(env.Config, Options{
-		MetricsAddr:     "0",
-		ProbeAddr:       probe,
-		LeaderElect:     true,
+		MetricsAddr: "0",
+		ProbeAddr:   probe,
+		LeaderElect: true,
+		// A loaded machine can stall the API server past the default 10s
+		// renew deadline: the replica would step down mid-test, taking the
+		// webhook with it.
+		LeaseDuration:   time.Minute,
+		RenewDeadline:   45 * time.Second,
 		Namespace:       "default",
 		Debounce:        50 * time.Millisecond,
 		Webhooks:        true,

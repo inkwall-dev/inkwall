@@ -14,6 +14,7 @@ import (
 
 	controlplanev1 "github.com/inkwall-dev/inkwall/api/controlplane/v1"
 	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
+	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/pkg/events"
 )
 
@@ -21,20 +22,31 @@ import (
 // that changed.
 const DefaultStatsInterval = 10 * time.Second
 
+// minStatsLimit is how many policies' totals a replica keeps before it
+// forgets those no longer in the bundle.
+const minStatsLimit = 4096
+
 // requestStats sums the request counts of a replica's engines per policy,
 // since the replica started counting. Policies are those of the bundles it
-// served (the distribution server takes no others), so the totals stay
-// small. Safe for concurrent use; the zero value is ready.
+// served (the distribution server takes no others). Past a limit, the
+// totals of policies no longer in the bundle are forgotten, so they stay
+// bounded as policies come and go. Safe for concurrent use; the zero value
+// is ready.
 type requestStats struct {
 	mu     sync.Mutex
 	since  time.Time
 	totals map[string]*eventsv1.PolicyStats
 	// changed are the policies counted since the last upload.
 	changed map[string]bool
+	// limit is how many totals are kept before evicting: at least
+	// minStatsLimit, and twice those kept after the last eviction, so a
+	// large bundle doesn't evict on every add.
+	limit int
 }
 
-// add counts what engines counted since their previous reports.
-func (r *requestStats) add(deltas []*eventsv1.PolicyStats) {
+// add counts what engines counted since their previous reports. has
+// reports whether the current bundle has a policy (nil: none).
+func (r *requestStats) add(deltas []*eventsv1.PolicyStats, has func(id string) bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.totals == nil {
@@ -50,6 +62,24 @@ func (r *requestStats) add(deltas []*eventsv1.PolicyStats) {
 		events.AddStats(t, d)
 		r.changed[d.GetPolicy()] = true
 	}
+	if len(r.totals) > max(r.limit, minStatsLimit) {
+		r.evict(has)
+	}
+}
+
+// evict forgets the totals of the policies no longer in the bundle. A
+// policy that comes back counts from zero again.
+func (r *requestStats) evict(has func(id string) bool) {
+	n := 0
+	for id := range r.totals {
+		if has == nil || !has(id) {
+			delete(r.totals, id)
+			delete(r.changed, id)
+			n++
+		}
+	}
+	distribution.RequestStatsDropped.WithLabelValues(distribution.DroppedEvicted).Add(float64(n))
+	r.limit = 2 * len(r.totals)
 }
 
 // upload returns the totals of the policies counted since the last upload,
