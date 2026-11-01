@@ -71,11 +71,11 @@ build: ## Build inkwall-engine and inkwallctl into ./bin
 
 .PHONY: test
 test: ## Run unit tests with the race detector (operator tests run against a local API server, envtest)
-	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))" $(GO) test -race -count=1 ./...
+	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" $(GO) test -race -count=1 ./...
 
 .PHONY: scale-test
 scale-test: ## Operator scale test with fake engines, in envtest (SCALE=<policies>x<engines>, default 100x50; SCALE=full)
-	@export KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; fail=0; \
+	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; export KUBEBUILDER_ASSETS="$$a"; fail=0; \
 	for s in $(if $(filter full,$(SCALE)),$(SCALE_FULL),$(SCALE)); do \
 		echo "== scale $$s"; \
 		INKWALL_SCALE=$$s INKWALL_SCALE_CHANGES=$(SCALE_CHANGES) INKWALL_SCALE_OUT="$(SCALE_OUT)" $(GO) test -count=1 -timeout 60m -run '^TestScale$$' -v ./operator/test/scale || fail=1; \
@@ -137,7 +137,7 @@ helm-lint: ## Lint the Helm chart, render it with each webhook certificate mode,
 	helm template inkwall $(CHART) --namespace inkwall-system --set controlPlane=null >/dev/null
 	CHART=$(CHART) hack/helm-test.sh
 	@# What the chart looks up in a cluster, against envtest.
-	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))" CHART=$(abspath $(CHART)) $(GO) test -count=1 ./hack/helmcheck
+	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" CHART=$(abspath $(CHART)) $(GO) test -count=1 ./hack/helmcheck
 
 .PHONY: tidy
 tidy: ## Tidy go.mod and go.sum, here and in test/crs (which builds against this module)
