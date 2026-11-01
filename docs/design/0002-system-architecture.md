@@ -288,6 +288,8 @@ the engine needs no Kubernetes knowledge. A bundle is immutable and signed with 
 - Engines trust several keys while the operator rotates its key
   ([0004 §4.6](0004-operator.md#46-bundle-builder-leader-only)).
 - `Bundle` has a `content_hash` and `suspended` (an emergency switch).
+- `policy_versions` is the operator's bookkeeping: for each policy, the first bundle that enforces
+  it as it is ([0004 §4.8](0004-operator.md#48-status-aggregator)). It is not part of `content_hash`, and engines ignore it.
 
 **Not yet:** IP lists, rate limits.
 
