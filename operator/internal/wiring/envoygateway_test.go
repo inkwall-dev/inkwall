@@ -182,6 +182,52 @@ func TestExtensionPolicy(t *testing.T) {
 	}
 }
 
+// The user's EnvoyExtensionPolicies that may take a protected rule out of
+// inspection: Envoy Gateway applies one per route, and a rule's over it.
+func TestUserExtensionPolicies(t *testing.T) {
+	hr := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "app", Labels: map[string]string{"team": "shop"}},
+		Spec: gatewayv1.HTTPRouteSpec{Rules: []gatewayv1.HTTPRouteRule{{Name: ptr.To[gatewayv1.SectionName]("admin")}, {Name: ptr.To[gatewayv1.SectionName]("web")}}}}
+	eep := func(ns, name string, spec map[string]any) unstructured.Unstructured {
+		u := unstructured.Unstructured{Object: map[string]any{"spec": spec}}
+		u.SetGroupVersionKind(EnvoyExtensionPolicyGVK)
+		u.SetNamespace(ns)
+		u.SetName(name)
+		return u
+	}
+	ref := func(name, section string) map[string]any {
+		r := map[string]any{"group": gatewayv1.GroupName, "kind": "HTTPRoute", "name": name}
+		if section != "" {
+			r["sectionName"] = section
+		}
+		return r
+	}
+	refs := func(rs ...any) map[string]any { return map[string]any{"targetRefs": rs} }
+	ours := extensionPolicy(&envoyRoute{route: hr, sections: []string{""}})
+	policies := []unstructured.Unstructured{
+		*ours,
+		eep("shop", "route", refs(ref("app", ""))),
+		eep("shop", "admin", refs(ref("other", ""), ref("app", "admin"))),
+		eep("shop", "web", map[string]any{"targetRef": ref("app", "web")}),
+		eep("shop", "typo", refs(ref("app", "nope"))),
+		eep("shop", "selected", map[string]any{"targetSelectors": []any{map[string]any{"kind": "HTTPRoute", "matchLabels": map[string]any{"team": "shop"}}}}),
+		eep("shop", "unselected", map[string]any{"targetSelectors": []any{map[string]any{"kind": "HTTPRoute", "matchLabels": map[string]any{"team": "ops"}}}}),
+		eep("shop", "gateway", refs(map[string]any{"group": gatewayv1.GroupName, "kind": "Gateway", "name": "app"})),
+		eep("elsewhere", "route", refs(ref("app", ""))),
+	}
+	for _, tc := range []struct {
+		sections []string
+		want     string
+	}{
+		{[]string{""}, "admin, route, selected, web"},
+		{[]string{"admin"}, "admin"},
+		{[]string{"other"}, ""},
+	} {
+		if got := strings.Join(userExtensionPolicies(policies, &envoyRoute{route: hr, sections: tc.sections}), ", "); got != tc.want {
+			t.Errorf("%v: %q, want %q", tc.sections, got, tc.want)
+		}
+	}
+}
+
 func TestRouteSettings(t *testing.T) {
 	route := types.NamespacedName{Namespace: "shop", Name: "app"}
 	pol := func(name string, spec wafv1alpha1.WAFPolicySpec) wafv1alpha1.WAFPolicy {
@@ -379,6 +425,12 @@ func TestProgrammedRolling(t *testing.T) {
 	pending.results[0].Targets[route] = TargetState{Wired: true, Pending: "waiting for Envoy Gateway to accept ClientTrafficPolicy inkwall-waf-gw"}
 	if st, reason, msg := programmed(p, pending); st != metav1.ConditionFalse || reason != ReasonPending || !strings.Contains(msg, "inkwall-waf-gw") {
 		t.Errorf("pending: %s %s %q", st, reason, msg)
+	}
+	// Served, not wired, with no reason given: not Programmed.
+	unwired := rep(withEngine)
+	unwired.results[0].Targets[route] = TargetState{}
+	if st, reason, msg := programmed(p, unwired); st != metav1.ConditionFalse || reason != ReasonPending || msg != "HTTPRoute app is not wired to the engine in Envoy Gateway yet" {
+		t.Errorf("not wired: %s %s %q", st, reason, msg)
 	}
 	if _, reason, msg := programmed(p, rep()); reason != ReasonSidecarMissing || !strings.Contains(msg, "no Envoy Gateway pod of the routes' Gateways") {
 		t.Errorf("%s %q", reason, msg)

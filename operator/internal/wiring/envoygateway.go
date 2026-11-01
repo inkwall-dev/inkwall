@@ -163,6 +163,9 @@ type envoyRoute struct {
 	route *gatewayv1.HTTPRoute
 	// gateways are its Envoy Gateway parents.
 	gateways []types.NamespacedName
+	// others are the controllers of its other Gateways that no integration
+	// wires.
+	others []string
 	// sections are the rules protected, or [""] for the whole route.
 	sections []string
 	routeSettings
@@ -195,7 +198,9 @@ type envoyState struct {
 	// classes are the GatewayClasses of Envoy Gateway, with their
 	// EnvoyProxy (namespace/name), if any.
 	classes map[string]*types.NamespacedName
-	pods    []corev1.Pod
+	// controllers are every GatewayClass's controller.
+	controllers map[string]string
+	pods        []corev1.Pod
 	// egCRDs: Envoy Gateway's CRDs are installed.
 	egCRDs bool
 }
@@ -218,21 +223,24 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 	routes := map[types.NamespacedName]*envoyRoute{}
 	for tg := range targets {
 		hr := st.routes[tg.Key]
-		if tg.Kind != httpRouteKind || hr == nil {
+		// A rule the route doesn't have is left out (Accepted reports it):
+		// Envoy Gateway would refuse the whole policy, the route's other
+		// rules with it.
+		if tg.Kind != httpRouteKind || hr == nil || !rules(nil).with(tg.Section).any(hr) {
 			continue
 		}
 		gws, others := st.parents(hr)
 		if len(gws) == 0 {
 			why := "no Gateway"
 			if len(others) > 0 {
-				why = "Gateways of other controllers (" + strings.Join(others, ", ") + ")"
+				why = "Gateways of other controllers (GatewayClass " + strings.Join(others, ", GatewayClass ") + ")"
 			}
 			res.Targets[tg] = TargetState{Unsupported: fmt.Sprintf("HTTPRoute %s is served by %s, which Inkwall doesn't wire yet", tg.Key.Name, why)}
 			continue
 		}
 		r := routes[tg.Key]
 		if r == nil {
-			r = &envoyRoute{route: hr, gateways: gws}
+			r = &envoyRoute{route: hr, gateways: gws, others: st.unwired(others)}
 			routes[tg.Key] = r
 		}
 		// "" is the whole route.
@@ -363,16 +371,48 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 		}
 	}
 
+	// The user's EnvoyExtensionPolicies, which may take the routes' rules
+	// out of the operator's.
+	var extensions unstructured.UnstructuredList
+	if st.egCRDs {
+		extensions.SetGroupVersionKind(EnvoyExtensionPolicyGVK.GroupVersion().WithKind("EnvoyExtensionPolicyList"))
+		if err := e.Client.List(ctx, &extensions); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	for tg := range targets {
-		if _, ok := res.Targets[tg]; ok || tg.Kind != httpRouteKind || st.routes[tg.Key] == nil {
+		r := routes[tg.Key]
+		if _, ok := res.Targets[tg]; ok || tg.Kind != httpRouteKind || r == nil || !rules(nil).with(tg.Section).any(r.route) {
 			continue
 		}
 		s := TargetState{Wired: wanted[tg.Key]}
+		if len(r.others) > 0 {
+			s.Partly = fmt.Sprintf("HTTPRoute %s is also attached to Gateways of %s, which Inkwall doesn't wire yet: its traffic there is not inspected",
+				tg.Key.Name, strings.Join(r.others, ", "))
+		}
+		theirs := userExtensionPolicies(extensions.Items, r)
 		switch {
 		case !st.egCRDs:
 			s.Failed = "Envoy Gateway's CRDs (EnvoyProxy, EnvoyExtensionPolicy, Backend, ClientTrafficPolicy) are not installed"
 		case failed[tg.Key] != "":
 			s.Failed = failed[tg.Key]
+		case len(theirs) > 0:
+			s.Failed = fmt.Sprintf("EnvoyExtensionPolicy %s also targets HTTPRoute %s: Envoy Gateway applies one EnvoyExtensionPolicy to a route, "+
+				"and a rule's over the route's, so the engine may not see its requests; remove it, or target another rule",
+				strings.Join(theirs, ", "), tg.Key.Name)
+		case !s.Wired && on:
+			// Wired once every Envoy pod of its Gateways has the engine.
+			var why []string
+			for _, gw := range r.gateways {
+				switch {
+				case ready[gw]:
+				case len(st.podsOf(gw)) == 0:
+					why = append(why, fmt.Sprintf("Gateway %s has no running Envoy pod", gw))
+				default:
+					why = append(why, fmt.Sprintf("Gateway %s has Envoy pods without the engine", gw))
+				}
+			}
+			s.Pending = fmt.Sprintf("HTTPRoute %s is wired once every Envoy pod of its Gateways has the engine: %s", tg.Key.Name, strings.Join(why, "; "))
 		case s.Wired:
 			// In force once Envoy Gateway accepted the route's policy, and
 			// its Gateways' buffer limit when the body is inspected.
@@ -407,7 +447,7 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 func (e *EnvoyGateway) read(ctx context.Context) (*envoyState, error) {
 	st := &envoyState{
 		routes: map[types.NamespacedName]*gatewayv1.HTTPRoute{}, gateways: map[types.NamespacedName]*gatewayv1.Gateway{},
-		classes: map[string]*types.NamespacedName{},
+		classes: map[string]*types.NamespacedName{}, controllers: map[string]string{},
 	}
 	// Without the HTTPRoute CRD, there is no route to wire; without the
 	// Gateway or GatewayClass CRD, Envoy Gateway serves none.
@@ -449,7 +489,8 @@ func (e *EnvoyGateway) read(ctx context.Context) (*envoyState, error) {
 		st.gateways[types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name}] = gw
 	}
 	for _, gc := range classes.Items {
-		if c, _, _ := unstructured.NestedString(gc.Object, "spec", "controllerName"); c != integrations.EnvoyGateway.GatewayController {
+		c, _, _ := unstructured.NestedString(gc.Object, "spec", "controllerName")
+		if st.controllers[gc.GetName()] = c; c != integrations.EnvoyGateway.GatewayController {
 			continue
 		}
 		var proxy *types.NamespacedName
@@ -482,12 +523,25 @@ func (st *envoyState) parents(hr *gatewayv1.HTTPRoute) (ours []types.NamespacedN
 			if !slices.Contains(ours, key) {
 				ours = append(ours, key)
 			}
-		} else if c := "GatewayClass " + string(gw.Spec.GatewayClassName); !slices.Contains(others, c) {
+		} else if c := string(gw.Spec.GatewayClassName); !slices.Contains(others, c) {
 			others = append(others, c)
 		}
 	}
 	slices.SortFunc(ours, func(a, b types.NamespacedName) int { return cmp.Compare(a.String(), b.String()) })
 	return ours, others
+}
+
+// unwired are the controllers of classes that no integration wires: their
+// Gateways' traffic is not inspected.
+func (st *envoyState) unwired(classes []string) []string {
+	var cs []string
+	for _, c := range classes {
+		if c := st.controllers[c]; c != "" && integrations.ForController(c) == nil {
+			cs = append(cs, c)
+		}
+	}
+	slices.Sort(cs)
+	return slices.Compact(cs)
 }
 
 // podsOf returns the running Envoy pods of a Gateway.
@@ -789,6 +843,62 @@ func (e *EnvoyGateway) userTrafficPolicy(ctx context.Context, gw *gatewayv1.Gate
 	return nil, nil
 }
 
+// userExtensionPolicies names the user's EnvoyExtensionPolicies that may
+// take a protected route's rules out of the operator's: Envoy Gateway
+// applies one EnvoyExtensionPolicy to a route, the older, and one to a
+// rule, over the route's. One on the route counts when the operator's is
+// on the route too; one on a rule, when the operator's covers that rule.
+func userExtensionPolicies(policies []unstructured.Unstructured, r *envoyRoute) []string {
+	ours := rules{}
+	for _, s := range r.sections {
+		ours = ours.with(s)
+	}
+	var names []string
+	for i := range policies {
+		p := &policies[i]
+		if isManaged(p) && p.GetName() == envoyName(r.route.Name) || p.GetNamespace() != r.route.Namespace {
+			continue
+		}
+		refs, _, _ := unstructured.NestedSlice(p.Object, "spec", "targetRefs")
+		if one, ok, _ := unstructured.NestedMap(p.Object, "spec", "targetRef"); ok {
+			refs = append(refs, one)
+		}
+		// Selectors pick routes, not rules, in the policy's namespace unless
+		// they say otherwise (Envoy Gateway's status reports those).
+		selectors, _, _ := unstructured.NestedSlice(p.Object, "spec", "targetSelectors")
+		for _, x := range selectors {
+			sel, _ := x.(map[string]any)
+			if group, _ := sel["group"].(string); sel["kind"] != "HTTPRoute" || group != "" && group != gatewayv1.GroupName || sel["namespaces"] != nil {
+				continue
+			}
+			ls := &metav1.LabelSelector{}
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(sel, ls); err != nil {
+				continue
+			}
+			if m, err := metav1.LabelSelectorAsSelector(ls); err == nil && m.Matches(labels.Set(r.route.Labels)) {
+				refs = append(refs, map[string]any{"kind": "HTTPRoute", "name": r.route.Name})
+			}
+		}
+		if slices.ContainsFunc(refs, func(x any) bool {
+			ref, _ := x.(map[string]any)
+			group, _ := ref["group"].(string)
+			section, _ := ref["sectionName"].(string)
+			if ref["kind"] != "HTTPRoute" || ref["name"] != r.route.Name || group != "" && group != gatewayv1.GroupName {
+				return false
+			}
+			if section == "" {
+				return ours[""]
+			}
+			// A rule the route doesn't have is refused, and takes none.
+			return ours.has(section) && rules(nil).with(section).any(r.route)
+		}) {
+			names = append(names, p.GetName())
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
 // accepted reads whether Envoy Gateway accepted one of the operator's
 // policies, from its status: why it refused it, or, while it hasn't said
 // for every Gateway, that it is pending.
@@ -807,13 +917,16 @@ func (e *EnvoyGateway) accepted(ctx context.Context, gvk schema.GroupVersionKind
 		conds, _, _ := unstructured.NestedSlice(a.(map[string]any), "conditions")
 		for _, c := range conds {
 			c, _ := c.(map[string]any)
-			if c["type"] != "Accepted" {
-				continue
-			}
-			if c["status"] == "False" {
+			switch {
+			case c["type"] == "Overridden" && c["status"] == "True":
+				// Another policy applies to some of the routes or listeners
+				// instead.
+				return "", fmt.Sprintf("Envoy Gateway overrides %s %s: %v", gvk.Kind, key.Name, c["message"]), nil
+			case c["type"] != "Accepted":
+			case c["status"] == "False":
+				// Conflicted too: an older policy applies instead.
 				return "", fmt.Sprintf("Envoy Gateway didn't accept %s %s (%v): %v", gvk.Kind, key.Name, c["reason"], c["message"]), nil
-			}
-			if c["status"] == "True" {
+			case c["status"] == "True":
 				pending = ""
 			}
 		}

@@ -478,9 +478,13 @@ integration), for `HTTPRoute` targets whose parent Gateways have a GatewayClass 
     the engine leaves it.
 - **The routes**, once every running Envoy pod of each of the route's Gateways has the engine
   (Envoy Gateway is rolling them meanwhile: `PendingRestart`; no pod: `SidecarMissing`). A route
-  whose ext_proc filter has no engine to call would fail its requests. Each protected route gets:
+  whose ext_proc filter has no engine to call would fail its requests. A route also attached to a
+  Gateway without a running Envoy pod isn't wired: `Pending`, naming that Gateway. Each protected
+  route gets:
   - an `EnvoyExtensionPolicy`, `inkwall-waf-<route>`, owned by the route, whose `targetRefs` name
-    the route, or each protected rule (`sectionName`) when no policy takes the whole route. Its
+    the route, or each protected rule (`sectionName`) when no policy takes the whole route. A
+    `sectionName` the route has no rule of is left out (`Accepted` reports it): Envoy Gateway
+    would refuse the whole policy, the route's other rules with it. Its
     ext_proc filter ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing))
     sends the request headers with the `request.protocol` attribute, and the body
     (`BufferedPartial`) when a policy on the route inspects bodies; no response stage; `messageTimeout` the route's longest policy timeout (250 ms by
@@ -510,6 +514,18 @@ integration), for `HTTPRoute` targets whose parent Gateways have a GatewayClass 
   Envoy has the buffer limit and a body isn't cut short. `Accepted=False` (a disabled Backend API,
   say) is `WiringFailed` with Envoy Gateway's message. The operator watches both kinds. An object of the operator's name it didn't create
   is left alone (`WiringFailed`).
+  - Envoy Gateway applies one `EnvoyExtensionPolicy` to a route (the oldest; the others are
+    `Accepted=False`, reason `Conflicted`) and one to a rule, over the route's (which gets
+    `Overridden=True`). So a user's `EnvoyExtensionPolicy` on a protected route (`targetRefs`, or a
+    `targetSelectors` in its namespace), when the operator's takes the whole route, or on a
+    protected rule, may take requests out of inspection: `WiringFailed`, naming it. The operator's
+    `Overridden=True` or `Conflicted` is `WiringFailed` too, with Envoy Gateway's message (it
+    also covers selectors from other namespaces).
+  - A route also attached to Gateways of controllers no integration wires is wired (an
+    `EnvoyExtensionPolicy` doesn't change the route for them) and `True`, with a message naming
+    them: their traffic isn't inspected. One also on a Traefik Gateway is Traefik's `WiringFailed`.
+  - Whatever an integration reports, a target its proxy serves that it doesn't keep wired is
+    never `True` (`Pending`).
 - **Without Envoy Gateway's CRDs** (`EnvoyProxy`, `EnvoyExtensionPolicy`, `Backend`,
   `ClientTrafficPolicy`), or the Gateway API's, nothing is wired and nothing crashes: the routes
   are `WiringFailed`. The leader looks for the CRDs every 30 s and watches Gateways,
