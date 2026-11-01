@@ -435,14 +435,16 @@ func (t *Traefik) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 	on := !off && len(running(pods.Items)) > 0 && st.traefikCRDs
 
 	// The routes to wire: every Ingress target that Traefik serves, every
-	// IngressRoute target, and the rules of every HTTPRoute target that a
-	// Traefik Gateway serves.
+	// IngressRoute target, and the rules of every HTTPRoute target that
+	// only Traefik's Gateways serve. Another controller can't resolve the
+	// ExtensionRef to Traefik's Middleware, and must fail the rules that
+	// have it (Gateway API): such a route isn't wired.
 	wireRoutes := map[types.NamespacedName]bool{}
 	wireRules := map[types.NamespacedName]rules{}
 	for tg := range targets {
 		switch tg.Kind {
 		case httpRouteKind:
-			if hr, ok := st.httpRoutes[tg.Key]; ok && slices.Contains(st.controllers[tg.Key], integrations.Traefik.GatewayController) {
+			if hr, ok := st.httpRoutes[tg.Key]; ok && st.traefikOnly(tg.Key) {
 				if wireRules[tg.Key] = wireRules[tg.Key].with(tg.Section); !wireRules[tg.Key].any(hr) {
 					delete(wireRules, tg.Key)
 				}
@@ -592,15 +594,15 @@ func (st *state) result(targets map[Target]bool) *Result {
 				if len(others) > 0 {
 					s.Unsupported = fmt.Sprintf("HTTPRoute %s is served by %s, which Inkwall doesn't wire yet", k.Name, strings.Join(others, ", "))
 				}
+			case len(others) > 0:
+				s.Failed = fmt.Sprintf("HTTPRoute %s is also attached to Gateways of %s, which would fail its rules with Traefik's filter (an ExtensionRef to its Middleware): "+
+					"attach it to Traefik's Gateways only, or give each proxy its own HTTPRoute", k.Name, strings.Join(others, ", "))
 			case !st.traefikCRDs:
 				s.Failed = "Traefik's Middleware CRD is not installed"
 			case st.middlewareErr[k.Namespace] != "":
 				s.Failed = st.middlewareErr[k.Namespace]
 			case st.httpRouteErr[k] != "":
 				s.Failed = st.httpRouteErr[k]
-			case len(unwired(others)) > 0:
-				s.Partly = fmt.Sprintf("HTTPRoute %s is also attached to Gateways of %s, which Inkwall doesn't wire yet: its traffic there is not inspected",
-					k.Name, strings.Join(unwired(others), ", "))
 			}
 		default:
 			continue

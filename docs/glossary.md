@@ -217,7 +217,8 @@ first time they mention it.
   docs](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter))
 - <a id="extensionref"></a>**ExtensionRef filter**: A Gateway API `HTTPRoute` filter that calls an
   implementation's own object. Traefik's Gateway API provider runs a Traefik `Middleware` through
-  one; Inkwall adds one to each rule it protects. ([Gateway API
+  one; Inkwall adds one to each rule it protects. An implementation that can't resolve the object
+  fails the rule. ([Gateway API
   docs](https://gateway-api.sigs.k8s.io/reference/spec/#localobjectreference))
 - <a id="externaltrafficpolicy"></a>**externalTrafficPolicy**: A Service setting. `Local` delivers
   external traffic only to pods on the node that received it, which keeps the client's source
