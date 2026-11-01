@@ -1,8 +1,8 @@
 # Upgrading
 
-This guide upgrades an Inkwall installation from 0.2.x (0.2.0 or 0.2.1) to 0.3.0, and from 0.1.x
-(0.1.0 to 0.1.3) to 0.2.0, and lists what changes on the way. From 0.1.x, upgrade to 0.2.1 first,
-then to 0.3.0: the upgrade test (`make kind-upgrade`) starts from the last release.
+This guide upgrades an Inkwall installation from 0.2.x (0.2.0 to 0.2.2) to 0.3.0, and from 0.1.x
+(0.1.0 to 0.1.5) to 0.2.2, the latest 0.2 release, and lists what changes on the way. From 0.1.x,
+upgrade to 0.2.2 first, then to 0.3.0.
 
 ## Contents
 
@@ -14,7 +14,7 @@ then to 0.3.0: the upgrade test (`make kind-upgrade`) starts from the last relea
   - [Protecting HTTPRoutes](#protecting-httproutes)
   - [Checking 0.3.0 worked](#checking-030-worked)
   - [Rolling back to 0.2.x](#rolling-back-to-02x)
-- [From 0.1.x to 0.2.0](#from-01x-to-020)
+- [From 0.1.x to 0.2.2](#from-01x-to-022)
   - [Prerequisites](#prerequisites)
   - [What's new](#whats-new)
   - [What changes by itself](#what-changes-by-itself)
@@ -58,6 +58,13 @@ provider](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/) 
   stays disabled (`IntegrationDisabled`). If Argo CD or Flux installs the chart, keep both values
   `true` or `false` in Git: Argo CD renders without asking the cluster, so `auto` grants every
   role, and Flux asks only when it upgrades the release ([GitOps](gitops.md)).
+- **List your proxies' namespaces in `injection.proxyNamespaces`**, if a proxy runs outside
+  `traefik`, `kube-system` and `envoy-gateway-system`
+  ([proxy pods only in the proxy namespaces](#what-changes-by-itself-in-030)). Otherwise
+  `helm upgrade` stops and changes nothing, naming the namespaces to add. Helm checks this only
+  when it can reach the cluster: `helm template` and Argo CD can't, so check it yourself there.
+  If you set the value under 0.2.2, add Envoy Gateway's namespace to it before you protect an
+  `HTTPRoute` that Envoy Gateway serves.
 - Anything that parses the `Enforced` condition's message (alerts, scripts) needs the new text:
   see [below](#what-changes-by-itself-in-030).
 
@@ -95,7 +102,10 @@ with the new reason `IntegrationDisabled`, naming the permissions missing, and
 webhook selects no pod, so Traefik's pods start without an engine nothing would wire. When a role
 is granted or revoked, each replica restarts after a random delay (`--selector-restart-max-delay`).
 
-Besides `rbac.integrations`, no chart values change, and no operator flags are added.
+Besides `rbac.integrations`, the chart value `injection.proxyNamespaces` (with the operator flag
+`--proxy-namespaces`) is new from 0.2.0 or 0.2.1, and its default gains `envoy-gateway-system`
+from 0.2.2 ([below](#what-changes-by-itself-in-030)). No other chart values change, and no other
+operator flags are added.
 The operator now sets the Go runtime's soft memory limit
 ([`GOMEMLIMIT`](https://go.dev/doc/gc-guide#Memory_limit)) to 90% of its container's memory limit
 (`operator.resources.limits.memory`, 512Mi by default), so its garbage collector works harder near
@@ -125,6 +135,20 @@ operator reads them, and checks their fields strictly: a misspelled field is an 
 Without any configuration on your part, the upgrade changes the following:
 
 - **`HTTPRoute` targets are enforced**, as [above](#before-you-upgrade).
+- **Proxy pods only in the proxy namespaces**, the fix for
+  [GHSA-r5cq-6vq5-q8qg](https://github.com/inkwall-dev/inkwall/security/advisories/GHSA-r5cq-6vq5-q8qg).
+  The operator looks for Traefik's and Envoy Gateway's pods only in the namespaces of
+  `injection.proxyNamespaces`: `traefik`, `kube-system` and `envoy-gateway-system` by default.
+  Only pods there get the engine and read access to the bundle; a pod with a proxy's labels
+  elsewhere is an ordinary pod. Until a proxy's namespace is listed, its pods get no engine and
+  its routes are not wired (served uninspected, `Programmed=False`, `SidecarMissing`); so when
+  pods that run the engine are in a namespace the value doesn't list, `helm upgrade` stops with
+  `pods with the Inkwall engine run in namespace(s) <namespaces>, which injection.proxyNamespaces
+  doesn't list` and changes nothing. Add them ([step 1](#upgrading-the-chart-to-030)), or set
+  `{*}` to keep the old behaviour. See
+  [proxy namespaces](../deploy/helm/inkwall/README.md#proxy-namespaces). 0.2.2 already has
+  this, with `traefik` and `kube-system` by default: from 0.2.2, only the default's
+  `envoy-gateway-system` is new.
 - **The `Enforced` condition's messages no longer count engines.** `Enforced=True` says
   `every engine runs bundle 42 or later`, and `EnginesBehind` says `some engines don't run bundle
   42 yet`, instead of `5/6 engines on bundle 42`. So engines that come and go (a proxy rollout)
@@ -173,6 +197,11 @@ operator changes their `EnvoyProxy`, such as for a new engine image. An engine i
    helm upgrade inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.3.0 \
      --namespace inkwall-system --reset-then-reuse-values
    ```
+
+   If a proxy runs in a namespace other than `traefik`, `kube-system` or `envoy-gateway-system`,
+   add the [proxy namespaces](../deploy/helm/inkwall/README.md#proxy-namespaces), with the
+   defaults you still need, e.g. `--set 'injection.proxyNamespaces={traefik,ingress}'`. Otherwise
+   the upgrade stops, naming the namespaces to add ([above](#before-you-upgrade)).
 
    The chart upgrades the CRDs too (`crds.install`). If you install the CRDs yourself, apply the
    new ones first:
@@ -268,7 +297,7 @@ kubectl -n <traefik namespace> rollout restart deployment/<traefik>
 
 0.2.x's CRD has no `status.proxies`, so the API server drops it.
 
-## From 0.1.x to 0.2.0
+## From 0.1.x to 0.2.2
 
 ### Prerequisites
 
@@ -278,15 +307,15 @@ kubectl -n <traefik namespace> rollout restart deployment/<traefik>
 
 ### What's new
 
-From 0.1.1 or later, the upgrade changes no [CRDs](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/),
-and adds one chart value, `injection.proxyNamespaces` ([below](#what-changes-by-itself)), with
-the operator flag `--proxy-namespaces`. The operator gets two more flags, with the defaults it used before; set them with
+From 0.1.1 or later, the upgrade changes no [CRDs](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/).
+From before 0.1.5, it adds one chart value, `injection.proxyNamespaces` ([below](#what-changes-by-itself)),
+with the operator flag `--proxy-namespaces`. The operator gets two more flags, with the defaults it used before; set them with
 `operator.extraArgs` if you need others:
 
 | Flag | Default | |
 |---|---|---|
 | `--signing-key-grace` | `1m` | The least time each phase of a [signing key rotation](key-rotation.md) lasts |
-| `--selector-restart-max-delay` | `30s` | When the `InkwallConfig`'s integration selectors change, or an integration's permissions are granted or revoked, each replica restarts after a random delay up to this |
+| `--selector-restart-max-delay` | `30s` | When the `InkwallConfig`'s integration selectors change, each replica restarts after a random delay up to this |
 
 From 0.1.0, the upgrade also adds fields to the existing CRDs, and makes some existing fields take
 effect. It adds no new kinds.
@@ -316,19 +345,19 @@ starts connecting after the upgrade.
 
 Without any configuration on your part, the upgrade from any 0.1.x changes the following:
 
-- **Proxy pods only in the proxy namespaces.** The operator now looks for Traefik's and Envoy
-  Gateway's pods only in the namespaces of the new value `injection.proxyNamespaces`: `traefik`,
-  `kube-system` and `envoy-gateway-system` by default. Only pods there get the engine and read
-  access to the bundle; a pod with a proxy's labels elsewhere is an ordinary pod. If your proxy
-  runs in another namespace, list it when you upgrade ([step 1](#upgrading-the-chart)). Until then, its pods get no engine
+- **Proxy pods only in the proxy namespaces**, the fix for
+  [GHSA-r5cq-6vq5-q8qg](https://github.com/inkwall-dev/inkwall/security/advisories/GHSA-r5cq-6vq5-q8qg).
+  The operator now looks for Traefik's pods only in the namespaces of the new value
+  `injection.proxyNamespaces`: `traefik` and `kube-system` by default. Only pods there get the
+  engine and read access to the bundle; a pod with Traefik's labels elsewhere is an ordinary pod.
+  If Traefik runs in another namespace, list it when you upgrade ([step 1](#upgrading-the-chart)). Until then, its pods get no engine
   and its routes are not wired (served uninspected, `Programmed=False`, `SidecarMissing`); so
   when pods that run the engine are in a namespace the value doesn't list, `helm upgrade` stops
   with `pods with the Inkwall engine run in namespace(s) <namespaces>, which
   injection.proxyNamespaces doesn't list` and changes nothing. Add them, or set `{*}` to keep the
   old behaviour. Helm checks this only when it can reach the cluster: not with `helm template`,
   nor in Argo CD. See [proxy namespaces](../deploy/helm/inkwall/README.md#proxy-namespaces).
-  Also in 0.2.2 and 0.1.5: the fix for
-  [GHSA-r5cq-6vq5-q8qg](https://github.com/inkwall-dev/inkwall/security/advisories/GHSA-r5cq-6vq5-q8qg).
+  Already in 0.1.5.
 - **Bundles split into chunks past 900 KiB.** A [bundle](glossary.md#bundle) of up to 900 KiB
   compressed stays in the [Secret](https://kubernetes.io/docs/concepts/configuration/secret/) `inkwall-bundle`, as before. A larger one, which 0.1.x
   couldn't publish, is split into Secrets named `inkwall-bundle-a-0`… or `inkwall-bundle-b-0`…,
@@ -370,19 +399,19 @@ From 0.1.0, the upgrade also changes the following:
 Traefik pods keep their 0.1.x engine until they restart. That engine keeps working, but misses the
 engine fixes made since, doesn't read chunks, and, from 0.1.0, holds up any signing key
 rotation: restart Traefik after the upgrade. An engine image set in
-`InkwallConfig.spec.engine.image` stays as it is: change it to 0.2.0 yourself.
+`InkwallConfig.spec.engine.image` stays as it is: change it to 0.2.2 yourself.
 
 ### Upgrading the chart
 
 1. Upgrade the chart, with the values you installed it with:
 
    ```sh
-   helm upgrade inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.2.0 \
+   helm upgrade inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.2.2 \
      --namespace inkwall-system --reset-then-reuse-values
    ```
 
-   If Traefik runs in a namespace other than `traefik` or `kube-system`, or Envoy Gateway in one
-   other than `envoy-gateway-system`, add the [proxy namespaces](../deploy/helm/inkwall/README.md#proxy-namespaces), e.g.
+   If Traefik runs in a namespace other than `traefik` or `kube-system`, add the
+   [proxy namespaces](../deploy/helm/inkwall/README.md#proxy-namespaces), e.g.
    `--set 'injection.proxyNamespaces={ingress}'`. Otherwise the upgrade stops with the message
    above, naming the namespaces to add.
 
@@ -396,7 +425,7 @@ rotation: restart Traefik after the upgrade. An engine image set in
    yourself, apply the new ones first:
 
    ```sh
-   helm template inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.2.0 \
+   helm template inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.2.2 \
      --show-only templates/crds.yaml | kubectl apply --server-side -f -
    ```
 
@@ -428,8 +457,8 @@ kubectl get middlewares.traefik.io -A --field-selector metadata.name=inkwall-waf
   -o jsonpath='{range .items[*]}{.metadata.namespace} {.spec.forwardAuth.maxResponseBodySize}{"\n"}{end}'
 ```
 
-It worked if the release shows chart version 0.2.0, the policies are `Ready` and carry
-`waf.inkwall.dev/unwire`, Traefik's pods run the `inkwall-engine:0.2.0` image, and each
+It worked if the release shows chart version 0.2.2, the policies are `Ready` and carry
+`waf.inkwall.dev/unwire`, Traefik's pods run the `inkwall-engine:0.2.2` image, and each
 `inkwall-waf` Middleware has `maxResponseBodySize` 65536 (none on Traefik before v3.7). Send an
 attack through a protected route, as in the [README](../README.md#protect-a-route), to check it's
 blocked.
@@ -443,7 +472,7 @@ blocked.
 kubectl -n inkwall-system get secret -l waf.inkwall.dev/bundle-chunk
 ```
 
-If there are, shrink the policies until the bundle fits again: 0.2.0 then stores it in
+If there are, shrink the policies until the bundle fits again: 0.2.2 then stores it in
 `inkwall-bundle` alone, and deletes the chunks. Otherwise the rolled-back operator can't read the
 bundle and builds nothing. Then delete `inkwall-bundle` and its chunks, so it builds a new one, if
 the policies fit:
