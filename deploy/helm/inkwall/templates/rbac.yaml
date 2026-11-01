@@ -13,7 +13,7 @@ integration.
 {{- if or (eq .metadata.name "inkwall-operator") (include "inkwall.integration.enabled" (dict "root" $ "name" $integration)) }}
 {{- $roleName := $name }}
 {{- if ne .metadata.name "inkwall-operator" }}
-{{- $roleName = printf "%s-%s" $name $integration | trunc 63 | trimSuffix "-" }}
+{{- $roleName = include "inkwall.operator.suffixed" (dict "root" $ "suffix" $integration) }}
 {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

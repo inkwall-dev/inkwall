@@ -270,11 +270,11 @@ Kustomization whose `dependsOn` names the one that installs the chart. The valid
 refuses `WAF*` objects while no operator replica answers, so let the tool retry until the operator
 is ready.
 
-Set `rbac.integrations.traefik` and `envoyGateway` to `true` or `false` in Git rather than
-leaving them `auto` ([integration permissions](../deploy/helm/inkwall/README.md#integration-permissions)).
+Keep `rbac.integrations.traefik` and `envoyGateway` `true` (the default) or `false` in Git rather
+than `auto` ([integration permissions](../deploy/helm/inkwall/README.md#integration-permissions)).
 Argo CD renders the chart without asking the cluster, so `auto` grants every role. Flux asks the
-cluster, but only when it upgrades the release, so a proxy installed later stays disabled until
-the next change.
+cluster, but only when it upgrades the release, so with `auto` a proxy installed later stays
+disabled until the next change.
 
 Upgrade the chart with the tool, not with `helm upgrade`. The chart's values (such as
 `controlPlane.enrollmentToken`) then live in Git: create the token Secret yourself rather than

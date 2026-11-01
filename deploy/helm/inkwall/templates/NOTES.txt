@@ -10,12 +10,37 @@ the repository) and list the Inkwall objects:
   kubectl get inkwall -A
 
 The operator validates rule sets and policies when they are saved, builds
-them into a signed bundle, injects the engine into Traefik's pods when they
-start, and wires every Ingress and IngressRoute a WAFPolicy targets to it.
-Traefik pods that ran before the install are injected when restarted:
+them into a signed bundle, and wires every Ingress, IngressRoute and
+HTTPRoute a WAFPolicy targets to the engine:
 
-  kubectl -n <traefik namespace> rollout restart deployment/<traefik>
+- Traefik (Ingresses, IngressRoutes, HTTPRoutes): the engine is injected
+  into Traefik's pods when they start. Traefik pods that ran before the
+  install are injected when restarted:
+
+    kubectl -n <traefik namespace> rollout restart deployment/<traefik>
+
+- Envoy Gateway (HTTPRoutes): the engine is added to the Envoy pods of the
+  route's Gateway, which Envoy Gateway rolls itself.
 
 A policy is Ready once accepted, wired and enforced by every engine:
 
   kubectl get wafpolicy -A
+{{- $disabled := list }}
+{{- range (include "inkwall.generated" (dict "root" . "path" "files/rbac/role.yaml") | fromJsonArray) }}
+{{- $name := trimPrefix "inkwall-operator-" .metadata.name }}
+{{- if and (ne .metadata.name "inkwall-operator") (not (include "inkwall.integration.enabled" (dict "root" $ "name" $name))) }}
+{{- $key := $name | camelcase | untitle }}
+{{- $disabled = append $disabled (printf "%s (rbac.integrations.%s: %v)" $name $key (index $.Values.rbac.integrations $key)) }}
+{{- end }}
+{{- end }}
+{{- if $disabled }}
+
+These integrations are disabled, their ClusterRole not granted:
+{{- range $disabled }}
+  {{ . }}
+{{- end }}
+Policies on the routes of their proxies report Programmed=False
+(IntegrationDisabled). To protect them, set the value to true and run helm
+upgrade. With auto, the role is granted only when the cluster serves the
+proxy's API group: run helm upgrade once the proxy is installed.
+{{- end }}

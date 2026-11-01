@@ -89,23 +89,24 @@ uninstall:
   unwire: true
 
 rbac:
-  # Each integration's permissions are in a ClusterRole of its own. auto
-  # grants it when the cluster serves the proxy's API group (traefik.io,
-  # gateway.envoyproxy.io), so the operator isn't granted the resources of
-  # a proxy the cluster doesn't run; helm template, which can't ask the
-  # cluster, grants it. true grants it anyway, e.g. for a proxy installed
-  # after Inkwall (else run helm upgrade once it is); false never does.
-  # Without its role, the operator disables that integration: policies on
-  # the routes of its proxy report Programmed=False (IntegrationDisabled),
-  # and the others work.
+  # Each integration's permissions are in a ClusterRole of its own. true
+  # grants it, also for a proxy installed after Inkwall; a role on the
+  # resources of a proxy the cluster doesn't run grants nothing usable.
+  # auto grants it only when the cluster serves the proxy's API group
+  # (traefik.io, gateway.envoyproxy.io) at install or upgrade time, so a
+  # proxy installed later needs another helm upgrade; helm template, which
+  # can't ask the cluster, grants it. false never does. Without its role,
+  # the operator disables that integration: policies on the routes of its
+  # proxy report Programmed=False (IntegrationDisabled), and the others
+  # work.
   integrations:
     # Traefik's Middlewares, and the references to them in Ingresses,
     # IngressRoutes and HTTPRoutes. Without it, the Pod webhook selects no
     # pod: Traefik's pods don't get the engine.
-    traefik: auto
+    traefik: true
     # Envoy Gateway's EnvoyProxies, EnvoyExtensionPolicies, Backends and
     # ClientTrafficPolicies, a Gateway's parametersRef.
-    envoyGateway: auto
+    envoyGateway: true
 
 serviceAccount:
   # Empty: the operator's name (inkwall-operator for a release named inkwall).

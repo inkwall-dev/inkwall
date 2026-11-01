@@ -50,11 +50,12 @@ provider](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/) 
   be removed from a later API version. An `InkwallConfig` that has it keeps working. One created
   before 0.3.0 may hold its old default, `/var/run/inkwall`; it is ignored, and keeping it as it
   is draws no warning.
-- **Check how the chart grants the integrations' permissions.** With the default,
-  `rbac.integrations.*: auto`, the chart grants an integration's role only if its proxy's CRDs are
-  installed when you run `helm upgrade`. Set the value to `true` for a proxy you install after
-  Inkwall, or run `helm upgrade` again once it is installed: until then its integration is
-  disabled (`IntegrationDisabled`). If Argo CD or Flux installs the chart, set both values to
+- **Check how the chart grants the integrations' permissions.** The default,
+  `rbac.integrations.*: true` (also with `--reuse-values`, which has no such values), grants every
+  integration's role, as 0.2.x did, so a proxy installed after Inkwall is protected. If you opt
+  into `auto`, the chart grants an integration's role only if its proxy's CRDs are installed when
+  you run `helm upgrade`: run `helm upgrade` again once a proxy is installed, or its integration
+  stays disabled (`IntegrationDisabled`). If Argo CD or Flux installs the chart, keep both values
   `true` or `false` in Git: Argo CD renders without asking the cluster, so `auto` grants every
   role, and Flux asks only when it upgrades the release ([GitOps](gitops.md)).
 - Anything that parses the `Enforced` condition's message (alerts, scripts) needs the new text:
@@ -85,7 +86,7 @@ choose which are granted ([integration permissions](../deploy/helm/inkwall/READM
 
 | Value | Default | |
 |---|---|---|
-| `rbac.integrations.traefik`, `envoyGateway` | `auto` | `auto` grants the role when the cluster serves the proxy's API group (`traefik.io/v1alpha1`, `gateway.envoyproxy.io/v1alpha1`) at install or upgrade time; when Helm can't ask the cluster (`helm template`, `--dry-run=client`), every role. `true` always grants it, `false` never. A value missing from your release (`--reuse-values`) means `auto` |
+| `rbac.integrations.traefik`, `envoyGateway` | `true` | `true` always grants the role, `false` never. `auto` grants it when the cluster serves the proxy's API group (`traefik.io/v1alpha1`, `gateway.envoyproxy.io/v1alpha1`) at install or upgrade time; when Helm can't ask the cluster (`helm template`, `--dry-run=client`), every role. A value missing from your release (`--reuse-values`) means `true` |
 
 The operator checks its permissions when it starts, and every minute. An integration it lacks some
 of is disabled instead of stalling the others: a policy on its proxy's routes is `Programmed=False`
@@ -153,10 +154,14 @@ Without any configuration on your part, the upgrade changes the following:
   the operator's (`inkwall-waf-<gateway>`), the operator deletes its own, and your
   `connection.bufferLimit` then caps the bodies inspected ([client IP](client-ip.md#envoy-gateway)).
 
-Traefik's pods keep their 0.2.x engine until they restart. It keeps enforcing, but sends no
-request counts: restart Traefik after the upgrade. Envoy Gateway's
-pods get the 0.3.0 engine when they first get one, with a Gateway's first protected route. An
-engine image set in `InkwallConfig.spec.engine.image` stays as it is: change it to 0.3.0 yourself.
+Traefik's pods keep their 0.2.x engine until they restart, so restart Traefik after the upgrade.
+The 0.2.x engine keeps enforcing its rules, but misses what 0.3.0 changed in the engine: it sends
+no request counts, and it matches an `HTTPRoute`'s wildcard hostname against a single DNS label,
+not the several the Gateway API allows (`*.example.com` then doesn't cover `a.b.example.com`).
+Envoy Gateway's pods need no restart: 0.2.x never put an engine in them. They get the 0.3.0
+engine with a Gateway's first protected route, and Envoy Gateway rolls them itself whenever the
+operator changes their `EnvoyProxy`, such as for a new engine image. An engine image set in
+`InkwallConfig.spec.engine.image` stays as it is: change it to 0.3.0 yourself.
 
 ### Upgrading the chart to 0.3.0
 
@@ -181,7 +186,7 @@ engine image set in `InkwallConfig.spec.engine.image` stays as it is: change it 
    kubectl -n inkwall-system rollout status deployment/inkwall-operator
    ```
 
-3. Restart Traefik, so its pods get the new engine:
+3. Restart Traefik, so its pods run the 0.3.0 engine ([above](#what-changes-by-itself-in-030)):
 
    ```sh
    kubectl -n <traefik namespace> rollout restart deployment/<traefik>
@@ -239,13 +244,17 @@ protected route, as in the [README](../README.md#protect-a-route), to check it's
 
 0.2.x neither wires nor unwires HTTPRoutes. Before `helm rollback`, unprotect them: remove the
 `HTTPRoute` entries from every policy's `targetRefs`, or delete those policies. The operator then
-removes its filters from the HTTPRoutes, deletes its Envoy Gateway objects and takes the engine out
-of the `EnvoyProxy` objects. Wait until nothing of it is left:
+removes its filters from the HTTPRoutes, takes the engine out of the `EnvoyProxy` objects, points
+the Gateways it pointed at its own `EnvoyProxy` (`spec.infrastructure.parametersRef`) back at none,
+and deletes its Envoy Gateway objects. Wait until the first command prints nothing (no HTTPRoute,
+Gateway or `EnvoyProxy` still carries its mark) and the second finds no resources (none of its
+`EnvoyExtensionPolicy`, `Backend`, `ClientTrafficPolicy` or `EnvoyProxy` objects is left):
 
 ```sh
-kubectl get httproutes.gateway.networking.k8s.io,envoyproxies.gateway.envoyproxy.io -A \
+kubectl get httproutes.gateway.networking.k8s.io,gateways.gateway.networking.k8s.io,envoyproxies.gateway.envoyproxy.io -A \
   -o jsonpath='{range .items[?(@.metadata.annotations.waf\.inkwall\.dev/wired)]}{.kind} {.metadata.namespace}/{.metadata.name}{"\n"}{end}'
-kubectl get envoyextensionpolicies.gateway.envoyproxy.io -A -l app.kubernetes.io/managed-by=inkwall-operator
+kubectl get envoyextensionpolicies.gateway.envoyproxy.io,backends.gateway.envoyproxy.io,clienttrafficpolicies.gateway.envoyproxy.io,envoyproxies.gateway.envoyproxy.io \
+  -A -l app.kubernetes.io/managed-by=inkwall-operator
 ```
 
 Then roll back, and restart Traefik so its pods run the older engine again:

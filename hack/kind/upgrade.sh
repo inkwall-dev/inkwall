@@ -5,14 +5,17 @@
 # Upgrade test on kind (#129): the last released chart, from GHCR, protects
 # an Ingress and an IngressRoute through Traefik; `helm upgrade` to the chart
 # and images of this checkout keeps them protected, wired once, and their
-# policy Accepted and Programmed, with the CRDs at the new version; then
-# `helm uninstall` leaves the routes as they were before Inkwall wired them.
+# policy Accepted and Programmed, with the CRDs at the new version;
+# `helm rollback` to the last release, as docs/upgrading.md says, keeps them
+# protected too; then, upgraded again, `helm uninstall` leaves the routes as
+# they were before Inkwall wired them.
 #
 # A probe in the cluster sends attacks and benign requests through Traefik
 # all along. An attack that reaches the app fails the test at once. A
 # request that gets no verdict (Traefik or its engine restarting, the route
 # briefly gone) is a gap: the upgrade itself must leave none, since engines
-# swap bundles atomically and keep enforcing while the operator restarts;
+# swap bundles atomically and keep enforcing while the operator restarts
+# (also when it is rolled back);
 # a Traefik restart may leave one of at most MAX_RESTART_GAP seconds.
 #
 # Runs on a kind cluster without Inkwall installed, since it installs a
@@ -24,13 +27,13 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 CLUSTER=${UPGRADE_CLUSTER:-inkwall-upgrade}
-FROM_VERSION=${FROM_VERSION:-0.2.0} # the last release
+FROM_VERSION=${FROM_VERSION:-0.2.1} # the last release
 FROM_CHART=oci://ghcr.io/inkwall-dev/charts/inkwall
 CHART=${CHART:-deploy/helm/inkwall}
 OPERATOR_IMAGE=${OPERATOR_IMAGE:-inkwall-operator:dev}
 ENGINE_IMAGE=${IMAGE:-inkwall-engine:dev}
-# Seconds a request may go without a verdict, through the upgrade and
-# through the Traefik restart that follows it (see above).
+# Seconds a request may go without a verdict, through the upgrade (and the
+# rollback) and through the Traefik restart that follows it (see above).
 MAX_UPGRADE_GAP=${MAX_UPGRADE_GAP:-0}
 MAX_RESTART_GAP=${MAX_RESTART_GAP:-5}
 OPERATOR_NS=inkwall-system
@@ -324,27 +327,35 @@ probe_stop() {
   fi
 }
 
+# upgrade: helm upgrade to the chart and images of this checkout, with
+# rbac.integrations auto (true by default), which the checks below test.
+upgrade() {
+  "${HELM[@]}" upgrade inkwall "$CHART" --namespace "$OPERATOR_NS" \
+    --set operator.image.repository="${OPERATOR_IMAGE%:*}" \
+    --set operator.image.tag="${OPERATOR_IMAGE##*:}" \
+    --set operator.image.pullPolicy=Never \
+    --set engine.image.repository="${ENGINE_IMAGE%:*}" \
+    --set engine.image.tag="${ENGINE_IMAGE##*:}" \
+    --set engine.image.pullPolicy=Never \
+    --set rbac.integrations.traefik=auto --set rbac.integrations.envoyGateway=auto \
+    --wait --timeout 5m >/dev/null
+}
+
 echo "== helm upgrade to $CHART"
 probe_start
 sleep 5
-if "${HELM[@]}" upgrade inkwall "$CHART" --namespace "$OPERATOR_NS" \
-  --set operator.image.repository="${OPERATOR_IMAGE%:*}" \
-  --set operator.image.tag="${OPERATOR_IMAGE##*:}" \
-  --set operator.image.pullPolicy=Never \
-  --set engine.image.repository="${ENGINE_IMAGE%:*}" \
-  --set engine.image.tag="${ENGINE_IMAGE##*:}" \
-  --set engine.image.pullPolicy=Never \
-  --wait --timeout 5m >/dev/null; then
+if upgrade; then
   ok "helm upgrade"
 else
   fail "helm upgrade"
 fi
 "${KUBECTL[@]}" -n "$OPERATOR_NS" rollout status deployment/inkwall-operator --timeout=180s >/dev/null
+# operator_image_is IMAGE: every operator replica runs it.
 operator_image_is() {
   [[ $("${KUBECTL[@]}" -n "$OPERATOR_NS" get pods -l app.kubernetes.io/component=operator \
-    -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}|{.spec.containers[0].image}{"\n"}{end}' | sed -n 's/^|//p' | sort -u) == "$OPERATOR_IMAGE" ]]
+    -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}|{.spec.containers[0].image}{"\n"}{end}' | sed -n 's/^|//p' | sort -u) == "$1" ]]
 }
-eventually "every operator replica runs the new image" operator_image_is
+eventually "every operator replica runs the new image" operator_image_is "$OPERATOR_IMAGE"
 # The new leader reconciles everything at start; give it time to touch
 # what it would, with the probe still running.
 sleep 30
@@ -397,6 +408,53 @@ check "the wiring is unchanged, not duplicated" same_wiring
 eventually "Inkwall's Middleware calls the engine, with trustForwardHeader off and bodies forwarded" operator_middleware
 eventually "the policy is Accepted, Programmed and Ready" accepted_programmed
 eventually "the user's Middleware still applies" user_header "$HOST"
+
+# docs/upgrading.md, rolling back to 0.2.x: nothing to unprotect here (no
+# HTTPRoute), so roll back, then restart Traefik onto the older engine.
+echo "== helm rollback to $FROM_VERSION"
+probe_start
+sleep 5
+if "${HELM[@]}" rollback inkwall --namespace "$OPERATOR_NS" --wait --timeout 5m >/dev/null; then
+  ok "helm rollback"
+else
+  fail "helm rollback"
+fi
+"${KUBECTL[@]}" -n "$OPERATOR_NS" rollout status deployment/inkwall-operator --timeout=180s >/dev/null
+eventually "every operator replica runs the $FROM_VERSION image" operator_image_is "ghcr.io/inkwall-dev/inkwall-operator:$FROM_VERSION"
+sleep 30
+probe_stop "through the rollback" "$MAX_UPGRADE_GAP"
+release_chart_is() { "${HELM[@]}" -n "$OPERATOR_NS" list --filter '^inkwall$' -o json | grep -F "\"chart\":\"inkwall-$1\"" >/dev/null; }
+check "the release is back on chart $FROM_VERSION" release_chart_is "$FROM_VERSION"
+no_integration_roles() { ! "${KUBECTL[@]}" get clusterrole inkwall-operator-traefik; }
+check "the integration roles are gone" no_integration_roles
+check "the wiring is unchanged, not duplicated" same_wiring
+eventually "the policy is Accepted, Programmed and Ready" accepted_programmed
+check "the attack is blocked on the Ingress" status_is 403 "$HOST" "$SQLI"
+check "the attack is blocked on the IngressRoute" status_is 403 "$ROUTE_HOST" "$SQLI"
+check "benign traffic passes" status_is 200 "$HOST" /products/42
+probe_start
+sleep 5
+"${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout restart deployment/traefik-e2e >/dev/null
+"${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout status deployment/traefik-e2e --timeout=180s >/dev/null
+eventually "Traefik's pod has the $FROM_VERSION engine again" engine_image_is "ghcr.io/inkwall-dev/inkwall-engine:$FROM_VERSION"
+sleep 15
+probe_stop "through the Traefik restart after the rollback" "$MAX_RESTART_GAP"
+check "the wiring is unchanged, not duplicated" same_wiring
+eventually "the policy is Accepted, Programmed and Ready" accepted_programmed
+eventually "the user's Middleware still applies" user_header "$HOST"
+
+# Upgraded again, so the uninstall below runs this chart's hook.
+echo "== helm upgrade to $CHART again"
+if upgrade; then
+  ok "helm upgrade"
+else
+  fail "helm upgrade"
+fi
+"${KUBECTL[@]}" -n "$OPERATOR_NS" rollout status deployment/inkwall-operator --timeout=180s >/dev/null
+eventually "every operator replica runs the new image" operator_image_is "$OPERATOR_IMAGE"
+eventually "the policy is Accepted, Programmed and Ready" accepted_programmed
+check "the wiring is unchanged, not duplicated" same_wiring
+check "the attack is blocked on the Ingress" status_is 403 "$HOST" "$SQLI"
 
 echo "== helm uninstall"
 if "${HELM[@]}" uninstall inkwall --namespace "$OPERATOR_NS" --wait --timeout 5m >/dev/null; then
