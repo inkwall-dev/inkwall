@@ -27,7 +27,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 CLUSTER=${UPGRADE_CLUSTER:-inkwall-upgrade}
-FROM_VERSION=${FROM_VERSION:-0.2.1} # the last release
+FROM_VERSION=${FROM_VERSION:-0.3.0} # the last release
 FROM_CHART=oci://ghcr.io/inkwall-dev/charts/inkwall
 CHART=${CHART:-deploy/helm/inkwall}
 OPERATOR_IMAGE=${OPERATOR_IMAGE:-inkwall-operator:dev}
@@ -106,7 +106,13 @@ docker build --target engine -t "$ENGINE_IMAGE" .
 kind load docker-image "$OPERATOR_IMAGE" "$ENGINE_IMAGE" --name "$CLUSTER"
 
 echo "== install $FROM_VERSION"
-"${HELM[@]}" install inkwall "$FROM_CHART" --version "$FROM_VERSION" \
+# From 0.2.2 and 0.1.5, only pods in injection.proxyNamespaces get the
+# engine: list Traefik's namespace when the old chart has the value.
+from_values=()
+if helm show values "$FROM_CHART" --version "$FROM_VERSION" 2>/dev/null | grep -q '^  proxyNamespaces:'; then
+  from_values=(--set "injection.proxyNamespaces={$TRAEFIK_NS}")
+fi
+"${HELM[@]}" install inkwall "$FROM_CHART" --version "$FROM_VERSION" "${from_values[@]}" \
   --namespace "$OPERATOR_NS" --create-namespace --wait --timeout 5m >/dev/null
 "${KUBECTL[@]}" -n "$OPERATOR_NS" rollout status deployment/inkwall-operator --timeout=180s >/dev/null
 ok "chart $FROM_VERSION installed"
@@ -349,8 +355,9 @@ probe_start
 sleep 5
 # Traefik runs in a namespace of its own, not one of the default proxy
 # namespaces: without it listed, the upgrade stops (its pods run the
-# engine) instead of leaving its routes uninspected.
-if out=$("${HELM[@]}" upgrade inkwall "$CHART" --namespace "$OPERATOR_NS" --reset-then-reuse-values 2>&1) ||
+# engine) instead of leaving its routes uninspected. --reset-values drops
+# the value whether or not the old release set it.
+if out=$("${HELM[@]}" upgrade inkwall "$CHART" --namespace "$OPERATOR_NS" --reset-values 2>&1) ||
   ! grep "pods with the Inkwall engine run in namespace(s) $TRAEFIK_NS," <<<"$out" >/dev/null; then
   fail "helm upgrade without $TRAEFIK_NS in injection.proxyNamespaces: want it refused, got: $out"
 else
@@ -437,8 +444,15 @@ sleep 30
 probe_stop "through the rollback" "$MAX_UPGRADE_GAP"
 release_chart_is() { "${HELM[@]}" -n "$OPERATOR_NS" list --filter '^inkwall$' -o json | grep -F "\"chart\":\"inkwall-$1\"" >/dev/null; }
 check "the release is back on chart $FROM_VERSION" release_chart_is "$FROM_VERSION"
-no_integration_roles() { ! "${KUBECTL[@]}" get clusterrole inkwall-operator-traefik; }
-check "the integration roles are gone" no_integration_roles
+# 0.3.0 added a ClusterRole per integration: rolling back to an older
+# release removes it, to 0.3.0 or later keeps it.
+if helm show values "$FROM_CHART" --version "$FROM_VERSION" 2>/dev/null | grep -q '^  integrations:'; then
+  integration_roles() { "${KUBECTL[@]}" get clusterrole inkwall-operator-traefik; }
+  check "the integration roles are back to $FROM_VERSION's" integration_roles
+else
+  no_integration_roles() { ! "${KUBECTL[@]}" get clusterrole inkwall-operator-traefik; }
+  check "the integration roles are gone" no_integration_roles
+fi
 check "the wiring is unchanged, not duplicated" same_wiring
 eventually "the policy is Accepted, Programmed and Ready" accepted_programmed
 check "the attack is blocked on the Ingress" status_is 403 "$HOST" "$SQLI"
