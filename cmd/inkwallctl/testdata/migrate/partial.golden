@@ -1,0 +1,21 @@
+exit 0
+# From the ingress-nginx ModSecurity settings of Ingress shop/web.
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: web
+  namespace: shop
+spec:
+  body:
+    maxBytes: 10485760
+    onOversize: Allow
+  mode: Block
+  targetRefs:
+  - kind: Ingress
+    name: web
+--- stderr
+Ingress shop/web: WAFPolicy shop/web (Block)
+  mapped  ConfigMap ingress-nginx/ingress-nginx-controller enable-owasp-modsecurity-crs: the built-in OWASP CRS v4
+  check   annotation modsecurity-snippet, line 2: SecRequestBodyLimitAction ProcessPartial: body.onOversize: Allow and body.maxBytes: 10485760, modsecurity.conf's SecRequestBodyLimit (13107200) capped at the most Inkwall inspects; ModSecurity inspected the first part of an oversize body, Inkwall forwards it uninspected
+  mapped  annotation modsecurity-snippet, line 1: SecRuleEngine On: mode: Block
+1 Ingress(es) read: 1 WAFPolicy, 0 WAFRuleSet; 0 setting(s) not migrated need a human (TODO)

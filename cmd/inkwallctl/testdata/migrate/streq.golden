@@ -1,0 +1,28 @@
+exit 1
+# From the ingress-nginx ModSecurity settings of Ingress shop/web.
+# 2 setting(s) were not migrated: see the summary of inkwallctl migrate.
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: web
+  namespace: shop
+spec:
+  exclusions:
+  - ruleIDs:
+    - 920100
+    when:
+      path: /form*
+  mode: Block
+  targetRefs:
+  - kind: Ingress
+    name: web
+--- stderr
+note: no ConfigMap ingress-nginx/ingress-nginx-controller in the files: ModSecurity is taken as off globally (only the annotations count)
+Ingress shop/web: WAFPolicy shop/web (Block)
+  TODO    annotation modsecurity-snippet, line 2: not migrated: SecRule REQUEST_FILENAME "@streq /static*" "id:1001,phase:1,pass,nolog,ctl:ruleEngine=Off": @streq matches a path with * literally, which a WAFPolicy path can't
+  TODO    annotation modsecurity-snippet, line 3: not migrated: SecRule REQUEST_FILENAME "@streq /search*" "id:1002,phase:1,pass,nolog,ctl:ruleRemoveById=942100": @streq matches a path with * literally, which a WAFPolicy path can't
+  mapped  annotation modsecurity-snippet, line 4: SecRule REQUEST_FILENAME "@beginsWith /form" "id:1003,phase:request,pass,nolog,ctl:ruleRemoveById=920100": exclusions on /form*
+  check   annotation modsecurity-snippet, line 4: the rule ran in phase 2; Inkwall applies exclusions from phase 1, so the excluded rules' phase 1 checks are off on /form* too
+  mapped  annotation enable-owasp-core-rules: the built-in OWASP CRS v4
+  mapped  annotation modsecurity-snippet, line 1: SecRuleEngine On: mode: Block
+1 Ingress(es) read: 1 WAFPolicy, 0 WAFRuleSet; 2 setting(s) not migrated need a human (TODO)

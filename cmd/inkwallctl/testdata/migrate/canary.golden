@@ -1,0 +1,19 @@
+exit 0
+# From the ingress-nginx ModSecurity settings of Ingress shop/web.
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: web
+  namespace: shop
+spec:
+  mode: Block
+  targetRefs:
+  - kind: Ingress
+    name: web
+--- stderr
+Ingress shop/canary: no WAFPolicy
+  check   annotation canary: a canary Ingress: ingress-nginx applies the main Ingress's ModSecurity settings to it, not its own; no WAFPolicy: the main Ingress's policy covers its hosts and paths
+Ingress shop/web: WAFPolicy shop/web (Block)
+  mapped  ConfigMap ingress-nginx/ingress-nginx-controller enable-owasp-modsecurity-crs: the built-in OWASP CRS v4
+  mapped  annotation modsecurity-snippet, line 1: SecRuleEngine On: mode: Block
+2 Ingress(es) read: 1 WAFPolicy, 0 WAFRuleSet; 0 setting(s) not migrated need a human (TODO)
