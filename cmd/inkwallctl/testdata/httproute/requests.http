@@ -33,3 +33,24 @@ Host: blog.example.com
 User-Agent: Mozilla/5.0
 Accept: */*
 
+
+GET /?id=1%27%20OR%20%271%27%3D%271 HTTP/1.1
+Host: b.shops.example.com
+User-Agent: Mozilla/5.0
+Accept: */*
+
+GET /?id=1%27%20OR%20%271%27%3D%271 HTTP/1.1
+Host: a.b.shops.example.com
+User-Agent: Mozilla/5.0
+Accept: */*
+
+GET /?id=1%27%20OR%20%271%27%3D%271 HTTP/1.1
+Host: a.tenants.example.com
+User-Agent: Mozilla/5.0
+Accept: */*
+
+GET /?id=1%27%20OR%20%271%27%3D%271 HTTP/1.1
+Host: a.b.tenants.example.com
+User-Agent: Mozilla/5.0
+Accept: */*
+

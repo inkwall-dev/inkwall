@@ -14,12 +14,14 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
+	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/operator/test/testenv"
@@ -196,4 +198,146 @@ func testHTTPRoutes(ctx context.Context, t *testing.T, c client.Client) {
 		}
 		return ""
 	})
+}
+
+// testMixedGateways follows a policy on an HTTPRoute attached to a Traefik
+// Gateway and then also to another controller's: Traefik's filter, which
+// the other controller can't resolve and must fail the rules for, comes
+// off, and the policy says why, while Envoy Gateway still wires the route
+// through its own Gateway. Runs after testEnvoyGateway, which installs
+// Envoy Gateway's CRDs; testWiring's Traefik pod has the engine.
+func testMixedGateways(ctx context.Context, t *testing.T, c client.Client) {
+	const ns = "mixed"
+	programmed := func(st metav1.ConditionStatus, reason, msg string) func() string {
+		return func() string {
+			var got wafv1alpha1.WAFPolicy
+			if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: "app"}, &got); err != nil {
+				return err.Error()
+			}
+			cnd := meta.FindStatusCondition(got.Status.Conditions, wafv1alpha1.ConditionProgrammed)
+			if cnd == nil {
+				return "no Programmed"
+			}
+			if cnd.Status != st || cnd.Reason != reason || !strings.Contains(cnd.Message, msg) {
+				return string(cnd.Status) + " " + cnd.Reason + ": " + cnd.Message
+			}
+			return ""
+		}
+	}
+	exists := func(gvk schema.GroupVersionKind, name string) error {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(gvk)
+		return c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, u)
+	}
+
+	if err := c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}); err != nil {
+		t.Fatal(err)
+	}
+	// Gateways of Traefik, Envoy Gateway and a controller of no
+	// integration, and a route on the Traefik one.
+	var objs []client.Object
+	for name, controller := range map[string]string{
+		"mixed-traefik": "traefik.io/gateway-controller", "mixed-eg": "gateway.envoyproxy.io/gatewayclass-controller", "mixed-other": "example.com/gateway",
+	} {
+		objs = append(objs,
+			&gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: name}, Spec: gatewayv1.GatewayClassSpec{ControllerName: gatewayv1.GatewayController(controller)}},
+			&gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: strings.TrimPrefix(name, "mixed-")}, Spec: gatewayv1.GatewaySpec{
+				GatewayClassName: gatewayv1.ObjectName(name), Listeners: []gatewayv1.Listener{{Name: "http", Protocol: gatewayv1.HTTPProtocolType, Port: 80}},
+			}})
+	}
+	hr := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "app"}, Spec: gatewayv1.HTTPRouteSpec{
+		CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: []gatewayv1.ParentReference{{Name: "traefik"}}},
+		Hostnames:       []gatewayv1.Hostname{"mixed.example.com"},
+		Rules:           []gatewayv1.HTTPRouteRule{{}},
+	}}
+	pol := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "app"}, Spec: wafv1alpha1.WAFPolicySpec{
+		TargetRefs: []wafv1alpha1.TargetRef{{Group: "gateway.networking.k8s.io", Kind: "HTTPRoute", Name: "app"}},
+	}}
+	// An Envoy pod of the Envoy Gateway Gateway, with the engine.
+	envoy := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "eg-system", Name: "envoy-mixed", Labels: map[string]string{
+		"app.kubernetes.io/name": "envoy", "app.kubernetes.io/managed-by": "envoy-gateway", "app.kubernetes.io/component": "proxy",
+		"gateway.envoyproxy.io/owning-gateway-name": "eg", "gateway.envoyproxy.io/owning-gateway-namespace": ns,
+	}}, Spec: corev1.PodSpec{
+		InitContainers: []corev1.Container{{Name: injection.ContainerName, Image: "inkwall-engine:test"}},
+		Containers:     []corev1.Container{{Name: "envoy", Image: "envoy"}},
+	}}
+	for _, o := range append(objs, hr, pol, envoy) {
+		if err := c.Create(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wiredAs := func(want, marker string) func() string {
+		return func() string {
+			var got gatewayv1.HTTPRoute
+			if err := c.Get(ctx, client.ObjectKeyFromObject(hr), &got); err != nil {
+				return err.Error()
+			}
+			if f := filters(&got); f != want {
+				return "filters " + f
+			}
+			if m := got.Annotations[wiring.WiredAnnotation]; m != marker {
+				return "marker " + m
+			}
+			return ""
+		}
+	}
+	eventually(t, "wired for Traefik", wiredAs(wiring.MiddlewareName, wiring.MiddlewareName))
+	eventually(t, "Programmed", programmed(metav1.ConditionTrue, wiring.ReasonProgrammed, "1 HTTPRoute(s) wired to the engine in Traefik"))
+
+	// Also attached to the Envoy Gateway Gateway: the filter comes off, the
+	// Middleware goes, and Envoy Gateway wires the route.
+	parents := func(names ...string) {
+		t.Helper()
+		update(ctx, t, c, hr, func(r *gatewayv1.HTTPRoute) {
+			r.Spec.ParentRefs = nil
+			for _, n := range names {
+				r.Spec.ParentRefs = append(r.Spec.ParentRefs, gatewayv1.ParentReference{Name: gatewayv1.ObjectName(n)})
+			}
+		})
+	}
+	parents("traefik", "eg")
+	eventually(t, "Traefik's filter removed", wiredAs("", ""))
+	eventually(t, "WiringFailed naming Envoy Gateway", programmed(metav1.ConditionFalse, wiring.ReasonWiringFailed,
+		"HTTPRoute app is also attached to Gateways of gateway.envoyproxy.io/gatewayclass-controller, which would fail its rules with Traefik's filter"))
+	eventually(t, "the Middleware deleted", func() string {
+		if err := exists(integrations.TraefikMiddlewareGVK, wiring.MiddlewareName); !apierrors.IsNotFound(err) {
+			return fmt.Sprintf("Middleware: %v", err)
+		}
+		return ""
+	})
+	eventually(t, "wired by Envoy Gateway", func() string {
+		if err := exists(wiring.EnvoyExtensionPolicyGVK, "inkwall-waf-app"); err != nil {
+			return err.Error()
+		}
+		return ""
+	})
+
+	// On a Gateway of a controller of no integration: the same.
+	parents("traefik", "other")
+	eventually(t, "WiringFailed naming the other controller", programmed(metav1.ConditionFalse, wiring.ReasonWiringFailed,
+		"HTTPRoute app is also attached to Gateways of example.com/gateway"))
+	if err := wiredAs("", "")(); err != "" {
+		t.Errorf("wired with another controller's Gateway: %s", err)
+	}
+
+	// Traefik's Gateway only again: wired.
+	parents("traefik")
+	eventually(t, "wired again", wiredAs(wiring.MiddlewareName, wiring.MiddlewareName))
+	eventually(t, "Programmed again", programmed(metav1.ConditionTrue, wiring.ReasonProgrammed, "1 HTTPRoute(s) wired to the engine in Traefik"))
+
+	if err := c.Delete(ctx, pol); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "unwired", wiredAs("", ""))
+	eventually(t, "the policy released", func() string {
+		if err := c.Get(ctx, client.ObjectKeyFromObject(pol), &wafv1alpha1.WAFPolicy{}); !apierrors.IsNotFound(err) {
+			return fmt.Sprint(err)
+		}
+		return ""
+	})
+	for _, o := range append(objs, hr, envoy) {
+		if err := c.Delete(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
 }

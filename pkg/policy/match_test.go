@@ -85,6 +85,52 @@ func TestLookup(t *testing.T) {
 	}
 }
 
+// anyDepth marks a wildcard route as a Gateway API one.
+func anyDepth(m *bundlev1.RouteMatch) *bundlev1.RouteMatch {
+	m.WildcardAnyDepth = true
+	return m
+}
+
+// TestLookupAnyDepth: a Gateway API wildcard covers subdomains at any depth,
+// the most specific host first; an Ingress wildcard still covers one label.
+func TestLookupAnyDepth(t *testing.T) {
+	m := testMatcher(map[string][]*bundlev1.RouteMatch{
+		"gateway":  {anyDepth(rm("*.example.com", false, "/"))},
+		"api":      {anyDepth(rm("*.api.example.com", false, "/"))},
+		"ingress":  {rm("*.tenants.example.com", false, "/")},
+		"exact":    {rm("x.y.example.com", false, "/")},
+		"admin":    {anyDepth(rm("*.example.com", false, "/admin"))},
+		"internal": {rm("*.internal.test", false, "/")},
+	})
+	for _, tc := range []struct {
+		host, uri, want string
+	}{
+		{"test.example.com", "/", "gateway"},
+		{"foo.test.example.com", "/", "gateway"},
+		{"a.b.c.example.com", "/", "gateway"},
+		{"a.b.example.com", "/admin/users", "admin"},
+		// The longest wildcard, then an exact host, wins.
+		{"v1.api.example.com", "/", "api"},
+		{"a.v1.api.example.com", "/", "api"},
+		{"x.y.example.com", "/", "exact"},
+		{"z.x.y.example.com", "/", "gateway"},
+		// One label for an Ingress wildcard, then a wider Gateway API one.
+		{"blue.tenants.example.com", "/", "ingress"},
+		{"a.blue.tenants.example.com", "/", "gateway"},
+		// A wildcard never matches its own domain.
+		{"example.com", "/", ""},
+		{"a.b.internal.test", "/", ""},
+	} {
+		got, id := m.lookup(tc.host, tc.uri, "GET"), ""
+		if got != nil {
+			id = got.ID
+		}
+		if id != tc.want {
+			t.Errorf("%s%s: got %q, want %q", tc.host, tc.uri, id, tc.want)
+		}
+	}
+}
+
 func TestLookupFallback(t *testing.T) {
 	m := testMatcher(map[string][]*bundlev1.RouteMatch{
 		"api":    {rm("shop.example.com", false, "/api")},

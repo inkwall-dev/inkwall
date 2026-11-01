@@ -1,6 +1,7 @@
-# Four policies of the shop: the storefront's targets an Ingress, the
+# Five policies of the shop: the storefront's targets an Ingress, the
 # API's a Gateway API HTTPRoute, the admin's two rules of another (with
-# sectionName) and the admin's static files the third rule.
+# sectionName), the admin's static files the third rule, and the tenants'
+# an HTTPRoute with a wildcard hostname.
 apiVersion: waf.inkwall.dev/v1alpha1
 kind: WAFPolicy
 metadata:
@@ -53,3 +54,15 @@ spec:
     name: admin
     sectionName: static
   mode: Detect
+---
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: tenants
+  namespace: shop
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: tenants
+  mode: Block

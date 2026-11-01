@@ -9,7 +9,7 @@ ServiceAccount (Ingresses, Middlewares, WAFPolicies, the webhook
 configurations); the Role below adds scaling the operator to 0.
 */}}
 {{- if .Values.uninstall.unwire }}
-{{- $name := printf "%s-unwire" (include "inkwall.operator.name" .) | trunc 63 | trimSuffix "-" }}
+{{- $name := include "inkwall.operator.suffixed" (dict "root" . "suffix" "unwire") }}
 {{- $hook := dict "helm.sh/hook" "pre-delete" "helm.sh/hook-delete-policy" "before-hook-creation,hook-succeeded" }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

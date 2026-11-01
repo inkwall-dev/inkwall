@@ -167,7 +167,9 @@ Validation runs in three steps, cheapest first:
 Status also has `bundleVersion` and `observedGeneration`. `bundleVersion` is the first bundle that
 enforces the policy as it is now; later bundles do too, until one changes the policy. A bundle that
 changes only other policies doesn't change it (#149): before v0.3.0 it was the newest bundle, so
-every bundle rewrote every policy's status.
+every bundle rewrote every policy's status. Both are written together, for the generation the
+bundle was built from: a status write that conflicts with an edit is left to the edit's build
+(#239).
 
 `InkwallConfig.status` has `observedGeneration`, `conditions` (`ControlPlaneConnected`,
 [§4.9](#49-upstream-sync-leader-only)) and `proxies`, the discovered proxy controllers
@@ -253,6 +255,8 @@ serves the routes whose parent Gateway has one of its GatewayClasses, wires each
 Middleware through an `ExtensionRef` filter, or Envoy Gateway's `EnvoyExtensionPolicy`), and is
 added to `wiring.Integrations`. Discovery then reports its GatewayClasses `Full`. Traefik's does
 this in its one implementation, which also wires its HTTPRoutes ([§4.4](#44-wiring-controller)).
+Its wiring must not break the route for the other controllers whose Gateways it is attached to:
+Traefik's `ExtensionRef` would, so Traefik doesn't wire such a route (`WiringFailed`).
 
 **Not yet:** injection behind the interface (Traefik's Pod webhook; Envoy Gateway's goes through its
 wiring, [§4.4](#44-wiring-controller)); `Render` and golden files; `Health`.
@@ -407,10 +411,13 @@ longer needed.
   - `spec.rules` is one list to a merge patch, so the patch carries the `resourceVersion`, and a
     conflict retries. The operator reads the route from the API server before writing it, so rule
     fields newer than its Gateway API types (v1.7) are kept.
-  - A route attached to Gateways of several controllers is wired for Traefik, and for Envoy
-    Gateway if its Gateways are among them; `Programmed` counts it in each and waits for both.
-    It is `True` with a message naming the controllers no integration wires, whose traffic isn't
-    inspected. A route of no Traefik Gateway is `ControllerUnsupported`, naming its controllers.
+  - A route also attached to a Gateway of another controller (Envoy Gateway, or one no integration
+    wires) gets no filter, and one wired before loses it: the other controller can't resolve
+    Traefik's Middleware, and Gateway API makes it fail the rules that refer to it (Envoy Gateway
+    answers 500). The route is `WiringFailed`, naming the other controllers: attach it to Traefik's
+    Gateways only, or give each proxy its own HTTPRoute. Envoy Gateway still wires it through its
+    Gateways, but the traffic through Traefik's isn't inspected, so the policy isn't `Programmed`.
+    A route of no Traefik Gateway is `ControllerUnsupported`, naming its controllers.
   - The leader looks for the HTTPRoute, Gateway and GatewayClass CRDs every 30 s, then the wiring
     watches them.
 - **Only with an injected Traefik.** Routes are wired only while a Traefik pod that the webhook
@@ -427,7 +434,8 @@ longer needed.
   - `ControllerUnsupported`: another controller or kind;
   - `IntegrationDisabled`: the operator may not wire the target's proxy, and which permissions it
     lacks ([§7](#7-rbac));
-  - `WiringFailed`: no Traefik CRDs, a name clash, or a route that can't be written;
+  - `WiringFailed`: no Traefik CRDs, a name clash, a route that can't be written, or an HTTPRoute
+    also attached to another controller's Gateway;
   - `PendingRestart`: pods older than the webhook, listed;
   - `SidecarMissing`: no Traefik pod selected, or pods without the engine (the operator was down
     in detect mode, or they opted out), listed;
@@ -539,8 +547,12 @@ It runs again when a targeted route changes (routes are indexed by target).
     host get that host's most general policy in the engine, so none goes uninspected.
 - **HTTPRoute routes** are its `hostnames` × each rule's `matches`.
   - `Exact` and `PathPrefix` paths, cleaned; a `method` is kept. No `hostnames` means any host (the
-    listeners' hostnames aren't read); a rule without `matches`, or a match without a path, is
-    `PathPrefix /`.
+    listeners' hostnames aren't read: the route's hosts cover at least the requests the listeners
+    let through); a rule without `matches`, or a match without a path, is `PathPrefix /`.
+  - A wildcard hostname (`*.example.com`) covers subdomains at any depth (`a.b.example.com`), as in
+    the Gateway API, unlike an Ingress wildcard, which covers one label. The same wildcard on an
+    Ingress and an HTTPRoute is two routes. Engines before 0.3.0 match one label: restart the
+    proxies after the upgrade, so deeper subdomains are inspected.
   - `sectionName` narrows the target to the rule of that `name`. A name no rule has is a missing
     target.
   - `RegularExpression` paths, `headers` and `queryParams` are `Accepted=False`
@@ -569,8 +581,8 @@ It runs again when a targeted route changes (routes are indexed by target).
 
 - The Secret holds the `SignedBundle` and the public key. The key is generated on first use into
   `inkwall-bundle-signing-key`.
-- The hash skips the version and creation time. The version continues from the Secret, or from the
-  leader's memory if the Secret was deleted. The cluster ID is the [UID](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids) of the `kube-system`
+- The hash skips the version, the creation time and the policy versions. The version continues from
+  the Secret, or from the leader's memory if the Secret was deleted. The cluster ID is the [UID](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids) of the `kube-system`
   Namespace.
 - The leader keeps the bundle it last read or stored, with its compressed form (#213). Each build
   still reads the Secret and its chunks, uncached, but decodes them only if they hold another
@@ -701,9 +713,12 @@ and writes up to 8 at once, like the bundle builder.
 
 **Writes per bundle** (#149). The builder writes a policy's `bundleVersion` only when the bundle
 changes what the policy enforces: its own entry, the rule sets it binds, or suspension
-(`bundle.PolicyHashes`). It remembers the version per policy; a new leader keeps a policy's
-reported version when the bundle didn't change it. So a one-policy edit writes one policy's status,
-and the `Enforced` of the others, which name their own bundle, stays as it is.
+(`bundle.PolicyHashes`). The bundle records each policy's version (`policy_versions`), so a new
+leader continues them: before, it trusted the version in a policy's status, which the previous
+leader may not have written for the bundle it published (#239). A bundle from an operator before
+v0.3.0 has none: each of its policies counts from it, one status write per policy. So a one-policy
+edit writes one policy's status, and the `Enforced` of the others, which name their own bundle,
+stays as it is.
 
 Metrics: `inkwall_operator_bundle_version`, `inkwall_operator_engines{state}`,
 `inkwall_operator_bundle_compressed_bytes` ([§4.6](#46-bundle-builder-leader-only)), and, from the
@@ -961,13 +976,14 @@ is disabled rather than stalling the cache on objects it may not read:
   The chart restarts the operator when the values change too (a pod annotation lists the
   integrations granted).
 
-`rbac.integrations.<integration>` is `auto` by default: the chart binds the role when the
-cluster serves the proxy's API group (`traefik.io/v1alpha1`, `gateway.envoyproxy.io/v1alpha1`,
-`.Capabilities.APIVersions`), so a cluster without Envoy Gateway doesn't grant its kinds. A proxy
-installed after Inkwall needs a `helm upgrade` (or `true` from the start); the disabled
-integration's message says so. When Helm can't ask the cluster (`helm template`, a client dry
-run: `lookup` finds nothing), every role is rendered, as before. `true` and `false` bind it or
-not whatever the cluster serves.
+`rbac.integrations.<integration>` is `true` by default, as in 0.2 (also when the value is
+missing, from `--reuse-values`): the documented install order installs the proxies after Inkwall,
+and a role on kinds the cluster doesn't serve grants nothing usable. `false` never binds it.
+`auto`, an opt-in, binds it when the cluster serves the proxy's API group (`traefik.io/v1alpha1`,
+`gateway.envoyproxy.io/v1alpha1`, `.Capabilities.APIVersions`), so a cluster without Envoy
+Gateway doesn't grant its kinds; a proxy installed after Inkwall then needs a `helm upgrade`, as
+the disabled integration's message and the chart's notes say. When Helm can't ask the cluster
+(`helm template`, a client dry run: `lookup` finds nothing), `auto` renders every role.
 
 Missing CRDs don't disable an integration: its wiring waits for them
 ([§4.4](#44-wiring-controller)).

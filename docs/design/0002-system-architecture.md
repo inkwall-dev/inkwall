@@ -288,6 +288,8 @@ the engine needs no Kubernetes knowledge. A bundle is immutable and signed with 
 - Engines trust several keys while the operator rotates its key
   ([0004 §4.6](0004-operator.md#46-bundle-builder-leader-only)).
 - `Bundle` has a `content_hash` and `suspended` (an emergency switch).
+- `policy_versions` is the operator's bookkeeping: for each policy, the first bundle that enforces
+  it as it is ([0004 §4.8](0004-operator.md#48-status-aggregator)). It is not part of `content_hash`, and engines ignore it.
 
 **Not yet:** IP lists, rate limits.
 
@@ -327,8 +329,12 @@ ACK or a NACK.
   rejected for an unknown key is asked for again, on a new stream, once the keys change.
 - The engine reconnects with jittered backoff. With no cache, it reads the bundle Secret from the
   API server (`--bundle-secret`, over plain HTTPS, without [client-go](https://github.com/kubernetes/client-go)).
-- Matching uses host, cleaned path and method, most specific first. A request for a host no policy
-  covers is not inspected. A request for a covered host that matches no path gets that host's most
+- Matching uses host, cleaned path and method, most specific first. An exact host wins over a
+  wildcard, and a longer wildcard over a shorter one. A wildcard (`*.example.com`) matches one
+  label from an Ingress, as Ingress defines, and subdomains at any depth (`a.b.example.com`) from an
+  HTTPRoute, as the [Gateway API](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) defines
+  (the bundle's `wildcard_any_depth`; engines before 0.3.0 ignore it and match one label). Neither
+  matches `example.com` itself. A request for a host no policy covers is not inspected. A request for a covered host that matches no path gets that host's most
   general policy, so normalization differences can't skip inspection.
 - Engines send their security events on the same stream, in `EventBatch`es of up to 1,000
   (`pkg/events`, [§5.4](#54-event-schema)). The operator drops and counts the events beyond that.

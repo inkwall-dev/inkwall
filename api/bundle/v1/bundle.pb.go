@@ -377,9 +377,14 @@ type Bundle struct {
 	RuleSets []*RuleSet `protobuf:"bytes,6,rep,name=rule_sets,json=ruleSets,proto3" json:"rule_sets,omitempty"`
 	// The emergency switch (InkwallConfig.spec.suspend): every request is
 	// allowed uninspected.
-	Suspended     bool `protobuf:"varint,7,opt,name=suspended,proto3" json:"suspended,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Suspended bool `protobuf:"varint,7,opt,name=suspended,proto3" json:"suspended,omitempty"`
+	// The operator's bookkeeping, not part of content_hash; engines ignore it.
+	// policy_versions[i] is the first bundle that enforces policies[i] as it
+	// is in this one (its status.bundleVersion), so a new leader continues it.
+	// Empty in bundles of operators before v0.3.0.
+	PolicyVersions []uint64 `protobuf:"varint,8,rep,packed,name=policy_versions,json=policyVersions,proto3" json:"policy_versions,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Bundle) Reset() {
@@ -459,6 +464,13 @@ func (x *Bundle) GetSuspended() bool {
 		return x.Suspended
 	}
 	return false
+}
+
+func (x *Bundle) GetPolicyVersions() []uint64 {
+	if x != nil {
+		return x.PolicyVersions
+	}
+	return nil
 }
 
 // Policy is one WAFPolicy, applied to the requests its routes match. A
@@ -593,14 +605,19 @@ func (x *Policy) GetBody() *BodyConfig {
 // RouteMatch matches requests by host, path and method.
 type RouteMatch struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Exact host ("shop.example.com") or a wildcard for one leading label
-	// ("*.example.com"), without a port, lower case. Empty: any host.
+	// Exact host ("shop.example.com") or a wildcard ("*.example.com"), without
+	// a port, lower case. Empty: any host. A wildcard matches one leading label,
+	// as in an Ingress, unless wildcard_any_depth is set.
 	Host string     `protobuf:"bytes,1,opt,name=host,proto3" json:"host,omitempty"`
 	Path *PathMatch `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
 	// Methods to match, upper case. Empty: any method.
-	Methods       []string `protobuf:"bytes,3,rep,name=methods,proto3" json:"methods,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Methods []string `protobuf:"bytes,3,rep,name=methods,proto3" json:"methods,omitempty"`
+	// A wildcard host matches subdomains at any depth: "*.example.com" matches
+	// "a.b.example.com", as in a Gateway API HTTPRoute. Engines before 0.3.0
+	// ignore it and match one label.
+	WildcardAnyDepth bool `protobuf:"varint,4,opt,name=wildcard_any_depth,json=wildcardAnyDepth,proto3" json:"wildcard_any_depth,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *RouteMatch) Reset() {
@@ -652,6 +669,13 @@ func (x *RouteMatch) GetMethods() []string {
 		return x.Methods
 	}
 	return nil
+}
+
+func (x *RouteMatch) GetWildcardAnyDepth() bool {
+	if x != nil {
+		return x.WildcardAnyDepth
+	}
+	return false
 }
 
 // PathMatch matches the request path.
@@ -1003,7 +1027,7 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\fSignedBundle\x12\x16\n" +
 	"\x06bundle\x18\x01 \x01(\fR\x06bundle\x12\x1c\n" +
 	"\tsignature\x18\x02 \x01(\fR\tsignature\x12\x15\n" +
-	"\x06key_id\x18\x03 \x01(\tR\x05keyId\"\xad\x02\n" +
+	"\x06key_id\x18\x03 \x01(\tR\x05keyId\"\xd6\x02\n" +
 	"\x06Bundle\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x04R\aversion\x12\x1d\n" +
 	"\n" +
@@ -1013,7 +1037,8 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\fcontent_hash\x18\x04 \x01(\fR\vcontentHash\x125\n" +
 	"\bpolicies\x18\x05 \x03(\v2\x19.inkwall.bundle.v1.PolicyR\bpolicies\x127\n" +
 	"\trule_sets\x18\x06 \x03(\v2\x1a.inkwall.bundle.v1.RuleSetR\bruleSets\x12\x1c\n" +
-	"\tsuspended\x18\a \x01(\bR\tsuspended\"\xec\x03\n" +
+	"\tsuspended\x18\a \x01(\bR\tsuspended\x12'\n" +
+	"\x0fpolicy_versions\x18\b \x03(\x04R\x0epolicyVersions\"\xec\x03\n" +
 	"\x06Policy\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x125\n" +
 	"\x06routes\x18\x02 \x03(\v2\x1d.inkwall.bundle.v1.RouteMatchR\x06routes\x12+\n" +
@@ -1028,12 +1053,13 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"exclusions\x18\t \x03(\v2\x1c.inkwall.bundle.v1.ExclusionR\n" +
 	"exclusions\x121\n" +
 	"\x04body\x18\n" +
-	" \x01(\v2\x1d.inkwall.bundle.v1.BodyConfigR\x04body\"l\n" +
+	" \x01(\v2\x1d.inkwall.bundle.v1.BodyConfigR\x04body\"\x9a\x01\n" +
 	"\n" +
 	"RouteMatch\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x120\n" +
 	"\x04path\x18\x02 \x01(\v2\x1c.inkwall.bundle.v1.PathMatchR\x04path\x12\x18\n" +
-	"\amethods\x18\x03 \x03(\tR\amethods\"W\n" +
+	"\amethods\x18\x03 \x03(\tR\amethods\x12,\n" +
+	"\x12wildcard_any_depth\x18\x04 \x01(\bR\x10wildcardAnyDepth\"W\n" +
 	"\tPathMatch\x124\n" +
 	"\x04type\x18\x01 \x01(\x0e2 .inkwall.bundle.v1.PathMatchTypeR\x04type\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value\"\x93\x01\n" +

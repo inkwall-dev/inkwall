@@ -54,6 +54,12 @@ func wantRoutes(t *testing.T, got, want []*bundlev1.RouteMatch) {
 	}
 }
 
+// anyDepth marks a wildcard route as matching subdomains at any depth.
+func anyDepth(m *bundlev1.RouteMatch) *bundlev1.RouteMatch {
+	m.WildcardAnyDepth = true
+	return m
+}
+
 func withMethods(m *bundlev1.RouteMatch, methods ...string) *bundlev1.RouteMatch {
 	m.Methods = methods
 	return m
@@ -69,8 +75,8 @@ func TestHTTPRouteTarget(t *testing.T) {
 		route: httpRoute("api", []gatewayv1.Hostname{"API.example.com", "*.api.example.com"},
 			hrule("", hpath(gatewayv1.PathMatchPathPrefix, "/v1/"), hpath(gatewayv1.PathMatchExact, "/login"))),
 		want: []*bundlev1.RouteMatch{
-			prefix("api.example.com", "/v1"), prefix("*.api.example.com", "/v1"),
-			exact("api.example.com", "/login"), exact("*.api.example.com", "/login"),
+			prefix("api.example.com", "/v1"), anyDepth(prefix("*.api.example.com", "/v1")),
+			exact("api.example.com", "/login"), anyDepth(exact("*.api.example.com", "/login")),
 		},
 	}, {
 		name:  "no hostnames: any host",
@@ -182,6 +188,25 @@ func TestHTTPRoutePrecedence(t *testing.T) {
 	wantStatus(t, res, "on-ingress", true, ReasonAccepted,
 		"shop.example.com/ (policy on a more specific target shop/on-route), shop.example.com/admin (policy on a more specific target shop/on-rule)")
 	wantRoutes(t, findPolicy(res, "shop/on-ingress").GetRoutes(), nil)
+}
+
+// An HTTPRoute wildcard covers subdomains at any depth, an Ingress wildcard
+// one label: the same hostname on both is two routes, each its policy's.
+func TestHTTPRouteWildcard(t *testing.T) {
+	ing := ingress("web", rule("*.example.com", ipath("/", networkingv1.PathTypePrefix)))
+	route := httpRoute("web", []gatewayv1.Hostname{"*.example.com"}, hrule(""))
+	onIngress := policy("on-ingress", 0, "web")
+	onRoute := policy("on-route", 1)
+	targetingHTTPRoute(&onRoute, "web", "")
+	res := Resolve(Input{
+		Policies:   []wafv1alpha1.WAFPolicy{onIngress, onRoute},
+		Ingresses:  []networkingv1.Ingress{ing},
+		HTTPRoutes: []gatewayv1.HTTPRoute{route},
+	})
+	wantStatus(t, res, "on-ingress", true, ReasonAccepted, PolicyValid)
+	wantRoutes(t, findPolicy(res, "shop/on-ingress").GetRoutes(), []*bundlev1.RouteMatch{prefix("*.example.com", "/")})
+	wantStatus(t, res, "on-route", true, ReasonAccepted, PolicyValid)
+	wantRoutes(t, findPolicy(res, "shop/on-route").GetRoutes(), []*bundlev1.RouteMatch{anyDepth(prefix("*.example.com", "/"))})
 }
 
 // Two policies on the same HTTPRoute rule: the older applies, the newer is

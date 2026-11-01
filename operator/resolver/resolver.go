@@ -553,8 +553,10 @@ func targetKey(namespace string, t wafv1alpha1.TargetRef) string {
 	return t.Kind + "/" + namespace + "/" + t.Name + "/" + t.SectionName
 }
 
+// routeKey identifies a route. An Ingress and an HTTPRoute wildcard of the
+// same host are two routes: the HTTPRoute's also covers deeper subdomains.
 func routeKey(m *bundlev1.RouteMatch) string {
-	return fmt.Sprintf("%s|%d|%s|%s", m.GetHost(), m.GetPath().GetType(), m.GetPath().GetValue(), strings.Join(m.GetMethods(), ","))
+	return fmt.Sprintf("%s|%t|%d|%s|%s", m.GetHost(), m.GetWildcardAnyDepth(), m.GetPath().GetType(), m.GetPath().GetValue(), strings.Join(m.GetMethods(), ","))
 }
 
 func describeRoute(m *bundlev1.RouteMatch) string {

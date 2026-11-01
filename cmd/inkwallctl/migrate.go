@@ -13,8 +13,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +38,7 @@ import (
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
+	"github.com/inkwall-dev/inkwall/operator/resolver"
 )
 
 // migrateConfig is the configuration of migrate ingress-nginx.
@@ -98,6 +101,8 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 	}
 
 	var results []*migration
+	// shared lists the policies by the requests their Ingresses match.
+	shared := map[string][]*migration{}
 	skipped := 0
 	for i := range ingresses {
 		ing := &ingresses[i]
@@ -113,11 +118,19 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 		if class == "" && m.policy != nil {
 			m.add(itemCheck, "", "the Ingress has no class: assumed served by ingress-nginx")
 		}
+		if m.policy != nil {
+			matches, _ := routeMatches(resolver.Input{Ingresses: []networkingv1.Ingress{*ing}}, ing.Namespace,
+				wafv1alpha1.TargetRef{Kind: "Ingress", Name: ing.Name})
+			for k := range matches {
+				shared[k] = append(shared[k], m)
+			}
+		}
 		if repl != nil {
 			repl.retarget(m, ing)
 		}
 		results = append(results, m)
 	}
+	warnShared(shared)
 	sortMigrations(results)
 
 	if err := writeMigration(cfg, results, stdout); err != nil {
@@ -129,6 +142,26 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// warnShared adds a check item to the policies whose Ingresses match the
+// same host and path: only one policy applies to a request.
+func warnShared(shared map[string][]*migration) {
+	for _, k := range slices.Sorted(maps.Keys(shared)) {
+		ms := shared[k]
+		if len(ms) < 2 {
+			continue
+		}
+		for _, m := range ms {
+			var others []string
+			for _, o := range ms {
+				if o != m {
+					others = append(others, o.namespace+"/"+o.name)
+				}
+			}
+			m.add(itemCheck, "", "host and path %s are also matched by the Ingress(es) %s: only one policy applies to a request (the oldest); merge the settings into the policy that should apply", k, strings.Join(others, ", "))
+		}
+	}
 }
 
 func parseMigrateFlags(args []string, stderr io.Writer) (migrateConfig, error) {
@@ -186,6 +219,11 @@ func globalSettings(cm *corev1.ConfigMap, notes io.Writer) nginxGlobal {
 			fmt.Fprintf(notes, "note: %s %s: %q is not a boolean: ingress-nginx reads it as false\n", g.source, key, v)
 		}
 		*dst = b
+	}
+	for _, key := range cmNginxSnippets {
+		if nginxModSecurity.MatchString(cm.Data[key]) {
+			g.nginxSnippets = append(g.nginxSnippets, g.source+" "+key)
+		}
 	}
 	return g
 }

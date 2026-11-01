@@ -228,8 +228,9 @@ func (st *state) gatewayControllers(k types.NamespacedName) (traefik bool, other
 	return traefik, others
 }
 
-// unwired are the GatewayClass controllers of no integration: their
-// Gateways' traffic is not inspected.
-func unwired(controllers []string) []string {
-	return slices.DeleteFunc(slices.Clone(controllers), func(c string) bool { return integrations.ForController(c) != nil })
+// traefikOnly reports whether an HTTPRoute is served by Traefik's Gateways
+// and no other controller's.
+func (st *state) traefikOnly(k types.NamespacedName) bool {
+	traefik, others := st.gatewayControllers(k)
+	return traefik && len(others) == 0
 }

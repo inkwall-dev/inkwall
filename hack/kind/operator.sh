@@ -35,8 +35,6 @@ for i in "${!OPERATOR_ARGS[@]}"; do
 done
 existed=false
 "${KUBECTL[@]}" -n "$NAMESPACE" get deployment/inkwall-operator >/dev/null 2>&1 && existed=true
-# Every integration's role: the e2e tests install the proxies after the
-# operator (rbac.integrations auto would leave their roles out).
 helm --kube-context "kind-$CLUSTER" upgrade --install inkwall "$CHART" \
   --namespace "$NAMESPACE" --create-namespace \
   --set operator.image.repository="${IMAGE%:*}" \
@@ -45,7 +43,6 @@ helm --kube-context "kind-$CLUSTER" upgrade --install inkwall "$CHART" \
   --set engine.image.repository="${ENGINE_IMAGE%:*}" \
   --set engine.image.tag="${ENGINE_IMAGE##*:}" \
   --set engine.image.pullPolicy=Never \
-  --set rbac.integrations.traefik=true --set rbac.integrations.envoyGateway=true \
   ${extra_args[@]+"${extra_args[@]}"}
 # Pick up a rebuilt image with the same tag.
 if $existed; then
