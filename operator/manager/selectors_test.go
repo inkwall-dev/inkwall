@@ -27,9 +27,9 @@ func TestSelectorWatch(t *testing.T) {
 	_ = wafv1alpha1.AddToScheme(s)
 	cfg := &wafv1alpha1.InkwallConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(cfg).Build()
-	run := func() chan error {
+	run := func(timeout time.Duration) chan error {
 		done := make(chan error, 1)
-		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		go func() {
 			defer cancel()
 			done <- (&selectorWatch{client: c, current: integrations.Defaults(), maxDelay: time.Millisecond}).Start(ctx)
@@ -38,17 +38,18 @@ func TestSelectorWatch(t *testing.T) {
 	}
 
 	// The same selectors (an InkwallConfig without integrations): it keeps
-	// running.
-	if err := <-run(); err != nil {
+	// running, checking every 10 ms, until the context ends.
+	if err := <-run(300 * time.Millisecond); err != nil {
 		t.Fatalf("unchanged selectors: %v", err)
 	}
 
-	// Another selector: the operator stops, to restart with it.
+	// Another selector: the operator stops, to restart with it, as soon as
+	// it sees it; the deadline only bounds a slow machine.
 	cfg.Spec.Integrations = []wafv1alpha1.IntegrationSpec{{Controller: "traefik", Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "edge"}}}}
 	if err := c.Update(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-run(); !errors.Is(err, errSelectorsChanged) {
+	if err := <-run(30 * time.Second); !errors.Is(err, errSelectorsChanged) {
 		t.Fatalf("changed selectors: %v", err)
 	}
 }

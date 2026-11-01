@@ -155,8 +155,9 @@ helm upgrade --install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --versio
 The operator checks its permissions when it starts, and disables an integration it lacks some of
 instead of failing. The other integrations work. A policy on a route of the disabled
 integration's proxy reports `Programmed=False` with reason `IntegrationDisabled`, naming the
-permissions missing, and `InkwallConfig.status.proxies` lists that proxy as `Unsupported`, with
-the same message (when there is an `InkwallConfig`):
+permissions missing and the `rbac.integrations` value that grants them, and
+`InkwallConfig.status.proxies` lists that proxy as `Unsupported`, with the same message (when there
+is an `InkwallConfig`):
 
 ```sh
 kubectl get inkwallconfig default -o jsonpath='{.status.proxies}'

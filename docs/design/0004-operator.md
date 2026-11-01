@@ -973,7 +973,8 @@ is disabled rather than stalling the cache on objects it may not read:
 
 - its wiring neither watches nor touches its proxy's objects; it reads only routes and classes,
   to report the targets its proxy serves `Programmed=False` (`IntegrationDisabled`), with the
-  permissions missing. The other integrations wire as usual;
+  permissions missing and the chart value that grants them (`rbac.integrations.<integration>`:
+  the operator can't tell the role's name, which the chart derives from the release's). The other integrations wire as usual;
 - discovery reports its controller `Unsupported`, with the same message;
 - what it wired before stays wired, and a deleted policy isn't held for it; the uninstall hook
   skips it ([§5](#5-uninstall-and-disable)), with a warning;
