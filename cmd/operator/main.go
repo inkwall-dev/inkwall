@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/manager"
 )
 
@@ -74,6 +75,7 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fs.BoolVar(&o.Inject, "inject", true, "inject the engine into proxy pods (Traefik) as a sidecar; needs the webhooks and the distribution server. Off, the routes wired before are unwired")
 	fs.DurationVar(&o.SelectorRestartMaxDelay, "selector-restart-max-delay", manager.DefaultSelectorRestartMaxDelay, "when the InkwallConfig's integration selectors change, or an integration's permissions are granted or revoked, each replica restarts after a random delay up to this, so they don't all restart at once")
 	fs.StringVar(&o.EngineImage, "engine-image", "ghcr.io/inkwall-dev/inkwall-engine:latest", "engine image injected into proxy pods, unless InkwallConfig.spec.engine.image sets one")
+	proxyNamespaces := fs.String("proxy-namespaces", integrations.DefaultNamespaces.String(), "the namespaces the proxies' pods run in, comma-separated, or * for every namespace: only pods there that an integration selects get the engine and read access to the policy bundle (their labels can be set by whoever may create a pod)")
 	pullPolicy := fs.String("engine-image-pull-policy", "IfNotPresent", "pull policy of the injected engine: Always, IfNotPresent or Never")
 	fs.StringVar(&o.EventsDir, "events-dir", "", "directory of this replica's buffer of security events for the optional control plane, kept across restarts (empty: in memory)")
 	fs.Int64Var(&o.EventsBufferBytes, "events-buffer-bytes", manager.DefaultEventsBufferBytes, "bound of the events buffer; when full, the oldest events are dropped and counted")
@@ -93,6 +95,11 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	if fs.NArg() > 0 {
 		return o, fmt.Errorf("unexpected arguments: %v", fs.Args())
 	}
+	ns, err := integrations.ParseNamespaces(*proxyNamespaces)
+	if err != nil {
+		return o, fmt.Errorf("--proxy-namespaces: %w", err)
+	}
+	o.ProxyNamespaces = ns
 	if o.SigningKeyGrace <= 0 || o.SelectorRestartMaxDelay <= 0 {
 		return o, errors.New("--signing-key-grace and --selector-restart-max-delay must be positive")
 	}

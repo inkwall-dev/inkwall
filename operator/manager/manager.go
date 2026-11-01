@@ -125,6 +125,10 @@ type Options struct {
 	// delay up to SelectorRestartMaxDelay (0: DefaultSelectorRestartMaxDelay).
 	Integrations            *integrations.Selectors
 	SelectorRestartMaxDelay time.Duration
+	// ProxyNamespaces are the only namespaces where the integrations'
+	// selectors select pods (nil: every namespace): only their pods get
+	// the engine and read access to the bundle.
+	ProxyNamespaces integrations.Namespaces
 
 	// Version is the operator's, sent to the optional control plane.
 	Version string
@@ -170,10 +174,15 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			return nil, err
 		}
 	}
+	// Only proxy pods: an informer per integration's selector, in the
+	// proxy namespaces.
+	var podNamespaces []string
+	if !o.ProxyNamespaces.Any() {
+		podNamespaces = o.ProxyNamespaces
+	}
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme: s,
-		// Only proxy pods: an informer per integration's selector.
-		NewCache: podcache.New(selectors.PodSelectors()),
+		Scheme:   s,
+		NewCache: podcache.New(selectors.PodSelectors(), podNamespaces),
 		Cache: cache.Options{ByObject: map[client.Object]cache.ByObject{
 			// Only the operator's own Secrets, and only ConfigMaps that hold
 			// rules: neither is read cluster-wide.
@@ -264,6 +273,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			OperatorAddr: sidecar.OperatorAddr,
 			BundleSecret: sidecar.BundleSecret,
 			Integrations: selectors,
+			Namespaces:   o.ProxyNamespaces,
 			Disabled:     denied,
 		}
 		// The Pod webhook serves Traefik's pods: none while Traefik is
@@ -274,6 +284,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		}
 		if err := (&injection.PodWebhookReconciler{
 			Client: mgr.GetClient(), ConfigName: webhook.MutatingConfigName, WebhookName: webhook.PodWebhookName, Pods: pods,
+			Namespaces: o.ProxyNamespaces,
 		}).SetupWithManager(mgr); err != nil {
 			return nil, err
 		}
@@ -285,6 +296,8 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			APIReader:  mgr.GetAPIReader(),
 			Namespace:  o.Namespace,
 			CertSecret: o.WebhookSecret,
+			Pods:       selectors,
+			Disabled:   denied,
 		}).SetupWithManager(mgr); err != nil {
 			return nil, err
 		}

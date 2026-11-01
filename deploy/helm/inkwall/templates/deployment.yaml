@@ -47,6 +47,8 @@ spec:
             - --distribution-port={{ .Values.distribution.port }}
             - --distribution-service={{ include "inkwall.distribution.service" . }}
             - --inject={{ .Values.injection.enabled }}
+            {{- include "inkwall.checkProxyNamespaces" . }}
+            - --proxy-namespaces={{ include "inkwall.proxyNamespaces" . }}
             - --engine-image={{ include "inkwall.engine.image" . }}
             - --engine-image-pull-policy={{ .Values.engine.image.pullPolicy }}
             {{- if $certManager }}

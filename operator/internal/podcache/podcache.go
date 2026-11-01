@@ -30,10 +30,11 @@ import (
 )
 
 // New returns a cache constructor for the manager (ctrl.Options.NewCache).
-// Its cache holds, of the pods, only those matching one of selectors, with
-// an informer per distinct selector; other kinds are cached as the options
-// say. Options.ByObject must not configure pods.
-func New(selectors []labels.Selector) cache.NewCacheFunc {
+// Its cache holds, of the pods, only those matching one of selectors in
+// namespaces (none: every namespace), with an informer per distinct
+// selector; other kinds are cached as the options say. Options.ByObject
+// must not configure pods.
+func New(selectors []labels.Selector, namespaces []string) cache.NewCacheFunc {
 	return func(cfg *rest.Config, o cache.Options) (cache.Cache, error) {
 		if len(selectors) == 0 {
 			return nil, errors.New("podcache: no pod selector")
@@ -50,7 +51,14 @@ func New(selectors []labels.Selector) cache.NewCacheFunc {
 			}
 			seen[sel.String()] = true
 			po := o
-			po.ByObject = map[client.Object]cache.ByObject{&corev1.Pod{}: {Label: sel}}
+			byPod := cache.ByObject{Label: sel}
+			if len(namespaces) > 0 {
+				byPod.Namespaces = map[string]cache.Config{}
+				for _, ns := range namespaces {
+					byPod.Namespaces[ns] = cache.Config{}
+				}
+			}
+			po.ByObject = map[client.Object]cache.ByObject{&corev1.Pod{}: byPod}
 			pods, err := cache.New(cfg, po)
 			if err != nil {
 				return nil, fmt.Errorf("pods %s: %w", sel, err)

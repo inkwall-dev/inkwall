@@ -9,7 +9,8 @@
 # out when turned off; the operator's pod lists the integrations granted, so
 # it restarts when they change; and the Pod webhook selects no pod without
 # Traefik's. hack/kind/upgrade.sh checks auto against a cluster. Then checks
-# that long release names don't give two objects the same name.
+# that long release names don't give two objects the same name, and that the
+# proxy namespaces reach the operator's flag and the Pod webhook.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -55,7 +56,7 @@ fi
 # selector [helm flags...]: the Pod webhook's objectSelector, on one line.
 selector() {
   helm template inkwall "$CHART" --namespace inkwall-system "$@" |
-    awk '/name: pods.waf.inkwall.dev/ {on=1; next} on && /reinvocationPolicy/ {exit} on' | tr -s ' \n' ' '
+    awk '/name: pods.waf.inkwall.dev/ {on=1; next} on && /reinvocationPolicy/ {exit} on && /objectSelector/ {p=1} p' | tr -s ' \n' ' '
 }
 sel=$(selector)
 if ! grep -q 'app.kubernetes.io/name: traefik' <<<"$sel"; then
@@ -93,4 +94,40 @@ for release in abcdefghijabcdefghijabcdefghijabcdefghijabcdef abcdefghijabcdefgh
     fail=1
   fi
 done
+
+# The proxy namespaces: the operator's flag and the Pod webhook's
+# namespaceSelector, by default, from the value, and also without it (helm
+# upgrade --reuse-values from 0.2); none with "*"; an error when empty.
+# proxy [helm flags...]: the --proxy-namespaces flag, and the Pod webhook's
+# namespaceSelector on one line.
+proxy() {
+  local out
+  out=$(helm template inkwall "$CHART" --namespace inkwall-system "$@")
+  printf '%s|' "$(sed -n 's/^ *- --proxy-namespaces=//p' <<<"$out")"
+  awk '/name: pods.waf.inkwall.dev/ {on=1; next} on && /objectSelector/ {exit} on && /namespaceSelector/ {p=1} p' <<<"$out" |
+    tr -s ' \n' ' ' | sed 's/^ *//; s/ *$//'
+}
+want="traefik,kube-system,envoy-gateway-system|namespaceSelector: matchExpressions: - key: kubernetes.io/metadata.name operator: In values: - envoy-gateway-system - kube-system - traefik"
+for flags in "" "--set injection.proxyNamespaces=null"; do
+  # shellcheck disable=SC2086
+  if [[ $(proxy $flags) != "$want" ]]; then
+    echo "proxy namespaces ($flags): $(proxy $flags); want $want" >&2
+    fail=1
+  fi
+done
+got=$(proxy --set "injection.proxyNamespaces={ingress}")
+if [[ $got != "ingress|namespaceSelector: matchExpressions: - key: kubernetes.io/metadata.name operator: In values: - ingress" ]]; then
+  echo "proxy namespaces {ingress}: $got" >&2
+  fail=1
+fi
+got=$(proxy --set "injection.proxyNamespaces={*}")
+if [[ $got != "*|" ]]; then
+  echo "proxy namespaces {*}: $got; want every namespace, no namespaceSelector" >&2
+  fail=1
+fi
+if out=$(helm template inkwall "$CHART" --namespace inkwall-system --set "injection.proxyNamespaces={}" 2>&1) ||
+  ! grep -q 'injection.proxyNamespaces must list' <<<"$out"; then
+  echo "injection.proxyNamespaces={}: want an error, got: $out" >&2
+  fail=1
+fi
 exit $fail

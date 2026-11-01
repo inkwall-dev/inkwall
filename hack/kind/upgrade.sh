@@ -328,9 +328,12 @@ probe_stop() {
 }
 
 # upgrade: helm upgrade to the chart and images of this checkout, with
-# rbac.integrations auto (true by default), which the checks below test.
+# rbac.integrations auto (true by default), which the checks below test, and
+# Traefik's namespace listed in injection.proxyNamespaces, as the upgrade
+# guide says (not a default proxy namespace).
 upgrade() {
   "${HELM[@]}" upgrade inkwall "$CHART" --namespace "$OPERATOR_NS" \
+    --set "injection.proxyNamespaces={$TRAEFIK_NS}" \
     --set operator.image.repository="${OPERATOR_IMAGE%:*}" \
     --set operator.image.tag="${OPERATOR_IMAGE##*:}" \
     --set operator.image.pullPolicy=Never \
@@ -344,6 +347,15 @@ upgrade() {
 echo "== helm upgrade to $CHART"
 probe_start
 sleep 5
+# Traefik runs in a namespace of its own, not one of the default proxy
+# namespaces: without it listed, the upgrade stops (its pods run the
+# engine) instead of leaving its routes uninspected.
+if out=$("${HELM[@]}" upgrade inkwall "$CHART" --namespace "$OPERATOR_NS" --reset-then-reuse-values 2>&1) ||
+  ! grep "pods with the Inkwall engine run in namespace(s) $TRAEFIK_NS," <<<"$out" >/dev/null; then
+  fail "helm upgrade without $TRAEFIK_NS in injection.proxyNamespaces: want it refused, got: $out"
+else
+  ok "helm upgrade refused while Traefik's namespace isn't a proxy namespace"
+fi
 if upgrade; then
   ok "helm upgrade"
 else

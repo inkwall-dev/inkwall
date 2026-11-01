@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/test/testenv"
 )
 
@@ -114,6 +115,7 @@ func startOperator(t *testing.T) (_ context.Context, _ client.Client, _ *warning
 
 		DistributionPort:     distPort,
 		Inject:               true,
+		ProxyNamespaces:      integrations.Namespaces{"proxy", "eg-system"},
 		EngineImage:          "inkwall-engine:test",
 		EnginePullPolicy:     corev1.PullNever,
 		Replica:              "operator-0",

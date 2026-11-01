@@ -51,6 +51,15 @@ webhooks:
     (merge (dict "operator" "DoesNotExist") $name)
     (dict "key" "waf.inkwall.dev/inject" "operator" "NotIn" "values" (list "false")))) }}
   {{- end }}
+  {{- if eq .name "pods.waf.inkwall.dev" }}
+  {{- /* Only pods in the proxy namespaces are proxy pods. The operator
+  keeps this namespaceSelector (integrations.Namespaces). */}}
+  {{- $ns := splitList "," (include "inkwall.proxyNamespaces" $) }}
+  {{- if not (has "*" $ns) }}
+  {{- $_ := set . "namespaceSelector" (dict "matchExpressions" (list
+    (dict "key" "kubernetes.io/metadata.name" "operator" "In" "values" (sortAlpha $ns)))) }}
+  {{- end }}
+  {{- end }}
   - {{ toYaml . | indent 4 | trim }}
   {{- end }}
 {{- end }}

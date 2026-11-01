@@ -409,11 +409,12 @@ func sidecars(res *Result, injectingSince time.Time) (metav1.ConditionStatus, st
 	}
 	switch {
 	case len(pods) == 0 && res.Rolling:
-		return metav1.ConditionFalse, ReasonSidecarMissing, fmt.Sprintf("no %s pod of the routes' Gateways is running, so the routes are not wired", proxy)
+		return metav1.ConditionFalse, ReasonSidecarMissing, fmt.Sprintf("no %s pod of the routes' Gateways is running in the proxy namespaces (the chart's injection.proxyNamespaces), so the routes are not wired", proxy)
 	case len(pods) == 0:
 		// Nothing is wired then (Traefik.Wire).
 		return metav1.ConditionFalse, ReasonSidecarMissing, fmt.Sprintf("no %[1]s pod selected for the engine is running, so the routes are not wired "+
-			"(new %[1]s pods would have no engine to call); if %[1]s runs, the InkwallConfig's selector for it doesn't match its pods", proxy)
+			"(new %[1]s pods would have no engine to call); if %[1]s runs, its namespace isn't one of the proxy namespaces (the chart's injection.proxyNamespaces), "+
+			"or the InkwallConfig's selector for it doesn't match its pods", proxy)
 	case len(missed) > 0 || len(optedOut) > 0:
 		var why []string
 		if len(missed) > 0 {

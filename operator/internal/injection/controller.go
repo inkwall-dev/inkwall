@@ -17,6 +17,7 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -27,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/inkwall-dev/inkwall/operator/bundle"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 )
 
@@ -60,16 +62,33 @@ type Reconciler struct {
 	Namespace string
 	// CertSecret holds the operator's CA (ca.crt).
 	CertSecret string
+	// Pods select the proxy pods (nil: the defaults), and Disabled are the
+	// integrations the operator may not wire, by name: their pods are
+	// neither given the trust ConfigMap nor granted the bundle.
+	Pods     *integrations.Selectors
+	Disabled map[string]string
 }
 
-// proxyPods lists the proxy pods, in namespace if it isn't empty: the
-// manager caches only them (podcache).
+// proxyPods lists the pods of enabled integrations, in namespace if it
+// isn't empty. The manager caches only proxy pods, in the proxy namespaces
+// (podcache).
 func (r *Reconciler) proxyPods(ctx context.Context, namespace string) ([]corev1.Pod, error) {
 	var list corev1.PodList
 	if err := r.Client.List(ctx, &list, client.InNamespace(namespace)); err != nil {
 		return nil, err
 	}
-	return list.Items, nil
+	return slices.DeleteFunc(list.Items, func(p corev1.Pod) bool { return !r.enabled(p.Labels) }), nil
+}
+
+// enabled reports whether an enabled integration selects a pod with these
+// labels.
+func (r *Reconciler) enabled(podLabels map[string]string) bool {
+	for _, in := range integrations.All {
+		if r.Disabled[in.Name] == "" && r.Pods.Selector(in.Name).Matches(labels.Set(podLabels)) {
+			return true
+		}
+	}
+	return false
 }
 
 // SetupWithManager registers the controller.
@@ -182,7 +201,9 @@ func (r *Reconciler) reconcileTrust(ctx context.Context, namespace string) (reco
 
 // reconcileGrant keeps one Role and RoleBinding in the operator's namespace
 // that let every proxy pod's ServiceAccount get the bundle Secret and its
-// chunks.
+// chunks: the pods of enabled integrations in the proxy namespaces, as a
+// pod's labels alone prove nothing. The distribution server accepts an
+// engine on this grant.
 func (r *Reconciler) reconcileGrant(ctx context.Context) error {
 	pods, err := r.proxyPods(ctx, "")
 	if err != nil {

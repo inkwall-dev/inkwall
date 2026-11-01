@@ -56,6 +56,21 @@ injection:
   # false: no engine is injected, and the operator unwires every route it
   # wired (new proxy pods have no engine to call), serving them uninspected.
   enabled: true
+  # The namespaces the proxies' pods run in. Only pods there that an
+  # integration selects (by its labels) get the engine, the trust ConfigMap
+  # and read access to the policy bundle, with which their engine connects
+  # to the operator. Labels can be set by whoever may create a pod, so list
+  # only namespaces where the people who run the proxy create pods. A proxy
+  # running elsewhere gets no engine, and its routes are not wired
+  # (Programmed=False, SidecarMissing): so helm upgrade stops, naming them,
+  # when pods that already run the engine are in namespaces not listed
+  # (when it can reach the cluster). "*": every namespace, only for
+  # clusters where everyone who may create a pod may read every policy.
+  proxyNamespaces:
+    - traefik
+    # Where k3s and RKE2 run Traefik.
+    - kube-system
+    - envoy-gateway-system
 
 controlPlane:
   # The optional control plane (0002 §3.4), for GitOps and Managed mode.

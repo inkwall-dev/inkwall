@@ -278,8 +278,9 @@ kubectl -n <traefik namespace> rollout restart deployment/<traefik>
 
 ### What's new
 
-From 0.1.1 or later, the upgrade changes no [CRDs](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
-and no chart values. The operator gets two flags, with the defaults it used before; set them with
+From 0.1.1 or later, the upgrade changes no [CRDs](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/),
+and adds one chart value, `injection.proxyNamespaces` ([below](#what-changes-by-itself)), with
+the operator flag `--proxy-namespaces`. The operator gets two more flags, with the defaults it used before; set them with
 `operator.extraArgs` if you need others:
 
 | Flag | Default | |
@@ -315,6 +316,18 @@ starts connecting after the upgrade.
 
 Without any configuration on your part, the upgrade from any 0.1.x changes the following:
 
+- **Proxy pods only in the proxy namespaces.** The operator now looks for Traefik's and Envoy
+  Gateway's pods only in the namespaces of the new value `injection.proxyNamespaces`: `traefik`,
+  `kube-system` and `envoy-gateway-system` by default. Only pods there get the engine and read
+  access to the bundle; a pod with a proxy's labels elsewhere is an ordinary pod. If your proxy
+  runs in another namespace, list it when you upgrade ([step 1](#upgrading-the-chart)). Until then, its pods get no engine
+  and its routes are not wired (served uninspected, `Programmed=False`, `SidecarMissing`); so
+  when pods that run the engine are in a namespace the value doesn't list, `helm upgrade` stops
+  with `pods with the Inkwall engine run in namespace(s) <namespaces>, which
+  injection.proxyNamespaces doesn't list` and changes nothing. Add them, or set `{*}` to keep the
+  old behaviour. Helm checks this only when it can reach the cluster: not with `helm template`,
+  nor in Argo CD. See [proxy namespaces](../deploy/helm/inkwall/README.md#proxy-namespaces).
+  Also in 0.2.2 and 0.1.5.
 - **Bundles split into chunks past 900 KiB.** A [bundle](glossary.md#bundle) of up to 900 KiB
   compressed stays in the [Secret](https://kubernetes.io/docs/concepts/configuration/secret/) `inkwall-bundle`, as before. A larger one, which 0.1.x
   couldn't publish, is split into Secrets named `inkwall-bundle-a-0`… or `inkwall-bundle-b-0`…,
@@ -366,6 +379,11 @@ rotation: restart Traefik after the upgrade. An engine image set in
    helm upgrade inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.2.0 \
      --namespace inkwall-system --reset-then-reuse-values
    ```
+
+   If Traefik runs in a namespace other than `traefik` or `kube-system`, or Envoy Gateway in one
+   other than `envoy-gateway-system`, add the [proxy namespaces](../deploy/helm/inkwall/README.md#proxy-namespaces), e.g.
+   `--set 'injection.proxyNamespaces={ingress}'`. Otherwise the upgrade stops with the message
+   above, naming the namespaces to add.
 
    `--reset-then-reuse-values` takes the new chart's defaults, then your values. Passing your
    values file again (`-f values.yaml`) works too. Avoid `--reuse-values`, which keeps the old

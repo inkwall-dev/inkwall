@@ -44,7 +44,8 @@ func TestMain(m *testing.M) {
 }
 
 // Custom selectors sharing no label key with Envoy Gateway's: the cache
-// holds the proxy pods, and no other pod.
+// holds the proxy pods, and no other pod, nor pods with the proxies' labels
+// outside the proxy namespaces.
 func TestCache(t *testing.T) {
 	testenv.Skip(t, env)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -60,12 +61,13 @@ func TestCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	envoy := map[string]string{"app.kubernetes.io/name": "envoy", "app.kubernetes.io/managed-by": "envoy-gateway"}
-	pod := func(name string, labels map[string]string) *corev1.Pod {
+	podIn := func(namespace, name string, labels map[string]string) *corev1.Pod {
 		return &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "proxy", Name: name, Labels: labels},
+			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name, Labels: labels},
 			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "c"}}},
 		}
 	}
+	pod := func(name string, labels map[string]string) *corev1.Pod { return podIn("proxy", name, labels) }
 	for _, o := range []client.Object{
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "proxy"}},
 		pod("edge-1", map[string]string{"app": "edge"}),
@@ -73,6 +75,9 @@ func TestCache(t *testing.T) {
 		// Both integrations' labels: listed once.
 		pod("both-1", map[string]string{"app": "edge", "app.kubernetes.io/name": "envoy", "app.kubernetes.io/managed-by": "envoy-gateway"}),
 		pod("shop-1", map[string]string{"app": "shop"}),
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "tenant"}},
+		podIn("tenant", "edge-fake", map[string]string{"app": "edge"}),
+		podIn("tenant", "envoy-fake", envoy),
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "proxy", Name: "other"}},
 	} {
 		if err := c.Create(ctx, o); err != nil {
@@ -80,7 +85,7 @@ func TestCache(t *testing.T) {
 		}
 	}
 
-	pc, err := New(selectors.PodSelectors())(env.Config, cache.Options{Scheme: clientgoscheme.Scheme})
+	pc, err := New(selectors.PodSelectors(), []string{"proxy"})(env.Config, cache.Options{Scheme: clientgoscheme.Scheme})
 	if err != nil {
 		t.Fatal(err)
 	}

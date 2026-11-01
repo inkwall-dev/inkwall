@@ -285,7 +285,7 @@ proxy.
 **Built (v0.1.0)** (`operator/internal/injection`, `operator/webhook/inject.go`):
 
 - **The webhook.** `inkwall-operator-mutating` sees only Traefik pods
-  (`app.kubernetes.io/name=traefik`), at creation. It is installed with `Ignore`. The leader sets
+  (`app.kubernetes.io/name=traefik`) in the proxy namespaces, at creation. It is installed with `Ignore`. The leader sets
   `Fail` while any policy blocks, and sets it again after a Helm upgrade. It patches with the
   [`resourceVersion`](https://kubernetes.io/docs/reference/using-api/api-concepts/#resource-versions), so it never overwrites a fresh CA bundle. If `InkwallConfig` can't be read,
   the engine is injected with defaults rather than left out.
@@ -293,6 +293,16 @@ proxy.
   [`objectSelector`](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/#matching-requests-objectselector). They start even while the webhook fails closed and the operator is down: this
   is how to scale the proxy before the operator returns. The annotation of the same name works only
   while the webhook answers. Pods that already have an `inkwall-engine` container are left alone.
+- **Proxy namespaces.** A selector's labels prove nothing: anyone who may create a pod may set
+  them. The bundle a proxy pod's ServiceAccount may read holds every namespace's policies and
+  rules, and the distribution server accepts an engine on that grant. So the operator only looks
+  for proxy pods in the proxy namespaces (`--proxy-namespaces`, the chart's
+  `injection.proxyNamespaces`): `traefik`, `kube-system` and `envoy-gateway-system` by default,
+  or `*` for every namespace. The pod cache watches only those namespaces, the webhook's
+  `namespaceSelector` names them (the leader keeps it, and the webhook itself also checks), and only
+  their pods get the trust ConfigMap and the grant. A proxy running elsewhere gets no engine; its
+  routes are reported `SidecarMissing` and left unwired. Before 0.3.0, 0.2.2 and 0.1.5, every
+  namespace was a proxy namespace.
 - **Custom selectors.** A non-empty `InkwallConfig.spec.integrations[].selector` replaces Traefik's
   label everywhere: the pod cache, the webhook, the controllers and the `objectSelector`. It is read
   at startup. When it changes, each replica restarts after a random delay of up to 30 s
@@ -311,7 +321,7 @@ proxy.
   `trusted-keys.pub` (every bundle key engines must accept; the engine reads this) and
   `ed25519.pub` (the active key, for older engines). The leader also keeps a [`Role` and
   `RoleBinding`](https://kubernetes.io/docs/reference/access-authn-authz/rbac/), `inkwall-bundle-reader`, for each proxy ServiceAccount. It deletes only ConfigMaps
-  it labelled.
+  it labelled. Pods of a disabled integration ([§7](#7-rbac)) get neither.
 - **Not yet:** `rollout: Automatic`. Pods that were running before the operator are injected when
   they restart.
 
@@ -323,7 +333,8 @@ starts without the engine because a webhook was down. The engine is the same nat
 socket `/var/run/inkwall-socket/extproc.sock`, in an `emptyDir` the Envoy container mounts too.
 Its image, resources and bootstrap mode come from the `InkwallConfig` at each reconcile, so a new
 engine image rolls the Envoy pods. The trust ConfigMap and the bundle Secret grant follow the
-Envoy pods as they do Traefik's: the operator's pod cache holds both proxies' pods.
+Envoy pods as they do Traefik's: the operator's pod cache holds both proxies' pods, in the proxy
+namespaces (Envoy Gateway's own namespace, by default, where it runs them).
 
 **The pod cache** (`operator/internal/podcache`) has an informer per integration's selector,
 read as one cache: listing pods merges them (a pod both select is listed once), and a watch on
@@ -669,7 +680,8 @@ leader-only. Losing a replica just moves its engines to another.
   names the Service; engines verify it with the operator CA.
 - **Authentication.** A [`TokenReview`](https://kubernetes.io/docs/reference/kubernetes-api/authentication-resources/token-review-v1/) (audience `inkwall-operator`), then a [`SubjectAccessReview`](https://kubernetes.io/docs/reference/access-authn-authz/authorization/#checking-api-access)
   that the engine's ServiceAccount may `get` the bundle Secret (the grant from
-  [§4.3](#43-injection-controller)). Results are cached for 1 min.
+  [§4.3](#43-injection-controller), to proxy pods in the proxy namespaces only, or a Role of the
+  user's for an engine configured by hand). Results are cached for 1 min.
 - **Streams.** The first message must be `Hello`, with an `engine_id` of 1 to 253 bytes (the
   engine's pod name). Engines that are already current aren't sent the bundle again. Streams
   silent for 30 s are closed. At most 50 sends run at once. A stream waiting for a send slot, or

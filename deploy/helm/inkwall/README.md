@@ -11,6 +11,7 @@ builds them into a signed [bundle](../../../docs/glossary.md#bundle), serves the
 - [Install](#install)
 - [What it installs](#what-it-installs)
 - [Values](#values)
+- [Proxy namespaces](#proxy-namespaces)
 - [Integration permissions](#integration-permissions)
 - [Connecting to a control plane](#connecting-to-a-control-plane)
 - [Rotating the signing key](#rotating-the-signing-key)
@@ -50,7 +51,7 @@ The names below are for a release named `inkwall`.
 | [`PodDisruptionBudget`](https://kubernetes.io/docs/concepts/workloads/pods/disruptions/#pod-disruption-budgets) | When `operator.replicas` is more than 1 |
 | [`ServiceAccount`](https://kubernetes.io/docs/concepts/security/service-accounts/), [`ClusterRole`, `Role` and bindings](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) | Rules generated from the operator's code; the `Role` covers the release namespace only. Each integration has a `ClusterRole` of its own, `inkwall-operator-traefik` and `inkwall-operator-envoy-gateway`, granted unless `rbac.integrations` leaves it out: see [integration permissions](#integration-permissions) |
 | `ValidatingWebhookConfiguration` `inkwall-operator-validating` | WAF kinds only; fails closed, 2 s timeout |
-| `MutatingWebhookConfiguration` `inkwall-operator-mutating` | Traefik pods only, at creation; fails open, or closed while a policy is in block mode (`injection.enabled`) |
+| `MutatingWebhookConfiguration` `inkwall-operator-mutating` | Traefik pods in the [proxy namespaces](#proxy-namespaces) only, at creation; fails open, or closed while a policy is in block mode (`injection.enabled`) |
 | [`Service`](https://kubernetes.io/docs/concepts/services-networking/service/) `inkwall-operator-webhook` | The webhooks |
 | `Service` `inkwall-operator` | Bundle distribution to the engines: [gRPC](https://grpc.io/docs/) over [TLS](https://www.rfc-editor.org/rfc/rfc8446) on port 9445 |
 | Webhook certificate | A [`Secret`](https://kubernetes.io/docs/concepts/configuration/secret/) the operator fills, or a [cert-manager](https://cert-manager.io/docs/) [`Certificate`](https://cert-manager.io/docs/usage/certificate/) |
@@ -74,6 +75,7 @@ from the operator's generated manifests. Don't edit `files/` by hand.
 | `operator.podDisruptionBudget.enabled`, `minAvailable` | `true`, `1` | |
 | `engine.image.repository`, `tag`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-engine`, the chart's `appVersion`, `IfNotPresent` | The engine injected into Traefik pods and put into Envoy Gateway's Envoy pods; `InkwallConfig.spec.engine.image` overrides it |
 | `injection.enabled` | `true` | Inject the engine into Traefik pods when they are created. `false`: see [turning injection off](#turning-injection-off) |
+| `injection.proxyNamespaces` | `[traefik, kube-system, envoy-gateway-system]` | The namespaces the proxies' pods run in; only pods there get the engine and the policy bundle. See [proxy namespaces](#proxy-namespaces) |
 | `controlPlane.caBundle` | `""` | The optional control plane's CA (PEM), when its certificate isn't from a public CA, e.g. `--set-file controlPlane.caBundle=ca.crt` |
 | `controlPlane.enrollmentToken` | `""` | The control plane's one-time enrollment token, stored in the Secret `inkwall-enrollment` (key `token`); or leave it empty and create that Secret yourself |
 | `controlPlane.eventsBufferMiB` | `64` | Each replica's buffer of security events while the control plane is unreachable (an [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir)); when it is full, the oldest events are dropped and counted |
@@ -91,6 +93,42 @@ whose name contains `inkwall`, else `<release>-inkwall`. For a release named `wa
 the token Secret is `waf-inkwall-enrollment`. Names are cut to 63 characters: the operator's
 other objects keep their suffix (`-webhook`, `-traefik`, ...), cutting the name before it. The webhook configurations keep the names in the
 table above.
+
+## Proxy namespaces
+
+The operator recognises a proxy's pods by their labels: Traefik's `app.kubernetes.io/name: traefik`,
+Envoy Gateway's `app.kubernetes.io/name: envoy` and `app.kubernetes.io/managed-by: envoy-gateway`,
+or the `InkwallConfig`'s selectors. A proxy pod gets the engine, and its ServiceAccount gets
+read access to the policy bundle, which holds every namespace's policies and rules; with that
+access, its engine connects to the operator and reports which bundle it enforces.
+
+Anyone who may create a pod may give it those labels. So the operator only looks for proxy pods in
+the namespaces listed in `injection.proxyNamespaces`: `traefik`, `kube-system` (where k3s and RKE2
+run Traefik) and `envoy-gateway-system` (where Envoy Gateway runs the Envoy pods) by default. A pod
+with a proxy's labels anywhere else is an ordinary pod: no engine, no access to the bundle. List
+only namespaces whose pods you trust as much as the proxy itself: those where only the people who
+run the proxy create pods.
+
+If your proxy runs in another namespace, list it, with the defaults you still need:
+
+```sh
+helm upgrade --install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \
+  --namespace inkwall-system --create-namespace --reset-then-reuse-values \
+  --set 'injection.proxyNamespaces={ingress,envoy-gateway-system}'
+```
+
+Until it is listed, the proxy's pods don't get the engine, its routes are not wired (they are
+served uninspected), and policies on them report `Programmed=False` with reason `SidecarMissing`. `helm upgrade`
+refuses to leave a proxy so: when pods that already run the engine are in a namespace the value
+doesn't list, it stops with an error naming them (when Helm can reach the cluster; `helm template`
+and Argo CD can't check).
+Envoy Gateway runs the Envoy pods in its own namespace, unless its deployment mode puts them in each
+Gateway's namespace: then list those namespaces. `{*}` makes every namespace a proxy namespace, as
+before 0.3.0, 0.2.2 and 0.1.5: only for clusters where everyone who may create a pod may also read
+every policy. Changing the value restarts the operator.
+
+An engine configured by hand, with a Role of your own that grants `get` on the bundle Secret,
+is not affected: the operator accepts any engine whose ServiceAccount may read the bundle.
 
 ## Integration permissions
 

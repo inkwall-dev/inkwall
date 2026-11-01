@@ -54,6 +54,10 @@ type PodInjector struct {
 	OperatorAddr string
 	// Integrations recognise proxy pods; nil: the defaults.
 	Integrations *integrations.Selectors
+	// Namespaces are the proxy namespaces: a pod elsewhere isn't a proxy
+	// pod, whatever its labels (the webhook's namespaceSelector leaves it
+	// out already).
+	Namespaces integrations.Namespaces
 	// Disabled are the integrations the operator may not wire, by name
 	// (0004 §7): their pods don't get the engine.
 	Disabled map[string]string
@@ -71,7 +75,7 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 	integ := p.Integrations.ForPod(pod.Labels)
-	if integ == nil {
+	if integ == nil || !p.Namespaces.Has(req.Namespace) {
 		return admission.Allowed("not a proxy pod")
 	}
 	if p.Disabled[integ.Name] != "" {
