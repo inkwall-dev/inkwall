@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/manager"
 )
 
@@ -72,6 +73,7 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fs.DurationVar(&o.shutdownDelay, "shutdown-delay", 5*time.Second, "on SIGTERM, keep serving the webhook and the bundles this long, not ready, so Kubernetes stops routing to the pod before it stops; keep it below the pod's termination grace period")
 	fs.BoolVar(&o.Inject, "inject", true, "inject the engine into proxy pods (Traefik) as a sidecar; needs the webhooks and the distribution server. Off, the routes wired before are unwired")
 	fs.StringVar(&o.EngineImage, "engine-image", "ghcr.io/inkwall-dev/inkwall-engine:latest", "engine image injected into proxy pods, unless InkwallConfig.spec.engine.image sets one")
+	proxyNamespaces := fs.String("proxy-namespaces", integrations.DefaultNamespaces.String(), "the namespaces the proxies' pods run in, comma-separated, or * for every namespace: only pods there that an integration selects get the engine and read access to the policy bundle (their labels can be set by whoever may create a pod)")
 	pullPolicy := fs.String("engine-image-pull-policy", "IfNotPresent", "pull policy of the injected engine: Always, IfNotPresent or Never")
 	fs.StringVar(&o.EventsDir, "events-dir", "", "directory of this replica's buffer of security events for the optional control plane, kept across restarts (empty: in memory)")
 	fs.Int64Var(&o.EventsBufferBytes, "events-buffer-bytes", manager.DefaultEventsBufferBytes, "bound of the events buffer; when full, the oldest events are dropped and counted")
@@ -90,6 +92,11 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	if fs.NArg() > 0 {
 		return o, fmt.Errorf("unexpected arguments: %v", fs.Args())
 	}
+	ns, err := integrations.ParseNamespaces(*proxyNamespaces)
+	if err != nil {
+		return o, fmt.Errorf("--proxy-namespaces: %w", err)
+	}
+	o.ProxyNamespaces = ns
 	if o.WebhookCerts != manager.CertsRotate && o.WebhookCerts != manager.CertsExternal {
 		return o, fmt.Errorf("--webhook-certs must be %s or %s, not %q", manager.CertsRotate, manager.CertsExternal, o.WebhookCerts)
 	}

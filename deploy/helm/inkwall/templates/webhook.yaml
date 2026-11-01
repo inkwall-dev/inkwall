@@ -41,6 +41,15 @@ webhooks:
   {{- $_ := set .clientConfig.service "namespace" $.Release.Namespace }}
   {{- $_ := set .clientConfig.service "port" 443 }}
   {{- $_ := set . "timeoutSeconds" $.Values.webhook.timeoutSeconds }}
+  {{- if eq .name "pods.waf.inkwall.dev" }}
+  {{- /* Only pods in the proxy namespaces are proxy pods. The operator
+  keeps this namespaceSelector (integrations.Namespaces). */}}
+  {{- $ns := splitList "," (include "inkwall.proxyNamespaces" $) }}
+  {{- if not (has "*" $ns) }}
+  {{- $_ := set . "namespaceSelector" (dict "matchExpressions" (list
+    (dict "key" "kubernetes.io/metadata.name" "operator" "In" "values" (sortAlpha $ns)))) }}
+  {{- end }}
+  {{- end }}
   - {{ toYaml . | indent 4 | trim }}
   {{- end }}
 {{- end }}

@@ -54,6 +54,10 @@ type PodInjector struct {
 	OperatorAddr string
 	// Integrations recognise proxy pods; nil: the defaults.
 	Integrations *integrations.Selectors
+	// Namespaces are the proxy namespaces: a pod elsewhere isn't a proxy
+	// pod, whatever its labels (the webhook's namespaceSelector leaves it
+	// out already).
+	Namespaces integrations.Namespaces
 	// BundleSecret is the bundle Secret, namespace/name, engines read when
 	// the operator is unreachable.
 	BundleSecret string
@@ -68,7 +72,7 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 	integ := p.Integrations.ForPod(pod.Labels)
-	if integ == nil {
+	if integ == nil || !p.Namespaces.Has(req.Namespace) {
 		return admission.Allowed("not a proxy pod")
 	}
 	s := injection.Sidecar{Image: p.Image, PullPolicy: p.PullPolicy, OperatorAddr: p.OperatorAddr, BundleSecret: p.BundleSecret, Args: integ.Adapter}

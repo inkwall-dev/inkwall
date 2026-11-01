@@ -1,7 +1,8 @@
 # Upgrading
 
 This guide upgrades an Inkwall installation from 0.1.0 to 0.1.1 or later, and lists what changes
-on the way.
+on the way. Upgrading from 0.1.1 or later to 0.1.5 changes one thing:
+[proxy pods only in the proxy namespaces](#what-changes-by-itself).
 
 ## Contents
 
@@ -48,6 +49,18 @@ starts connecting after the upgrade.
 
 Without any configuration, the upgrade changes this:
 
+- **Proxy pods only in the proxy namespaces** (from 0.1.5). The operator now looks for Traefik's
+  pods only in the namespaces of the new chart value `injection.proxyNamespaces` (operator flag
+  `--proxy-namespaces`): `traefik` and `kube-system` by default. Only pods there get the engine
+  and read access to the bundle; a pod with Traefik's labels elsewhere is an ordinary pod. If
+  Traefik runs in another namespace, list it when you upgrade ([step 1](#upgrading-the-chart)). Until then, its pods get no engine
+  and its routes are not wired (served uninspected, `Programmed=False`, `SidecarMissing`); so
+  when pods that run the engine are in a namespace the value doesn't list, `helm upgrade` stops
+  with `pods with the Inkwall engine run in namespace(s) <namespaces>, which
+  injection.proxyNamespaces doesn't list` and changes nothing. Add them, or set `{*}` to keep the
+  old behaviour. Helm checks this only when it can reach the cluster: not with `helm template`,
+  nor in Argo CD. See [proxy namespaces](../deploy/helm/inkwall/README.md#proxy-namespaces).
+  Also in 0.2.2.
 - **A finalizer on every `WAFPolicy`.** The operator adds
   [finalizer](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/)
   `waf.inkwall.dev/unwire`. A deleted policy then waits until the operator has unwired its
@@ -82,6 +95,11 @@ key rotation: restart Traefik after the upgrade.
    Prefer it to `--reuse-values`, which keeps the 0.1.0 values without the new chart's defaults.
    Upgrading to 0.1.1 with `--reuse-values` fails with `nil pointer evaluating interface
    {}.caBundle`; charts after 0.1.1 default those values (#143).
+   If Traefik runs in a namespace other than `traefik` or `kube-system`, add the
+   [proxy namespaces](../deploy/helm/inkwall/README.md#proxy-namespaces), e.g.
+   `--set 'injection.proxyNamespaces={ingress}'`. Otherwise the upgrade stops with the message
+   above, naming the namespaces to add.
+
    `--reset-then-reuse-values` takes the new defaults and then your values. Passing your values
    file again (`-f values.yaml`) works too.
 

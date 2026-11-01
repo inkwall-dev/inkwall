@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 )
 
 // PodWebhookReconciler keeps the Pod webhook's objectSelector and
@@ -30,7 +31,8 @@ import (
 // corrected here.
 //
 // The objectSelector is the proxy pods' selector (InkwallConfig can
-// override it), minus pods labeled waf.inkwall.dev/inject: "false".
+// override it), minus pods labeled waf.inkwall.dev/inject: "false"; the
+// namespaceSelector, the proxy namespaces.
 //
 // The failurePolicy follows the policies' modes. Detect only: Ignore, so
 // proxy pods start even while the operator is down, without the engine
@@ -45,6 +47,8 @@ type PodWebhookReconciler struct {
 	WebhookName string
 	// Pods selects the proxy pods (integrations.Selectors.LabelSelector).
 	Pods *metav1.LabelSelector
+	// Namespaces are the proxy namespaces.
+	Namespaces integrations.Namespaces
 }
 
 var podWebhookRequest = reconcile.Request{NamespacedName: types.NamespacedName{Name: "pod-webhook"}}
@@ -95,6 +99,7 @@ func (r *PodWebhookReconciler) Reconcile(ctx context.Context, _ reconcile.Reques
 	}
 	want := WantFailurePolicy(policies.Items)
 	selector := ObjectSelector(r.Pods)
+	namespaces := r.Namespaces.LabelSelector()
 
 	var cfg admissionregistrationv1.MutatingWebhookConfiguration
 	if err := r.Client.Get(ctx, types.NamespacedName{Name: r.ConfigName}, &cfg); err != nil {
@@ -111,11 +116,13 @@ func (r *PodWebhookReconciler) Reconcile(ctx context.Context, _ reconcile.Reques
 			continue
 		}
 		found = true
-		if wh.FailurePolicy != nil && *wh.FailurePolicy == want && apiequality.Semantic.DeepEqual(wh.ObjectSelector, selector) {
+		if wh.FailurePolicy != nil && *wh.FailurePolicy == want && apiequality.Semantic.DeepEqual(wh.ObjectSelector, selector) &&
+			apiequality.Semantic.DeepEqual(wh.NamespaceSelector, namespaces) {
 			return reconcile.Result{}, nil
 		}
 		wh.FailurePolicy = &want
 		wh.ObjectSelector = selector
+		wh.NamespaceSelector = namespaces
 	}
 	if !found {
 		return reconcile.Result{}, fmt.Errorf("MutatingWebhookConfiguration %s has no webhook %s", r.ConfigName, r.WebhookName)
@@ -131,6 +138,6 @@ func (r *PodWebhookReconciler) Reconcile(ctx context.Context, _ reconcile.Reques
 		why = "a policy is in block mode: proxy pods can't start without the engine while the operator is down"
 	}
 	sel, _ := metav1.LabelSelectorAsSelector(selector)
-	log.FromContext(ctx).Info("Pod webhook updated", "failurePolicy", want, "reason", why, "objectSelector", sel.String())
+	log.FromContext(ctx).Info("Pod webhook updated", "failurePolicy", want, "reason", why, "objectSelector", sel.String(), "namespaces", r.Namespaces.String())
 	return reconcile.Result{}, nil
 }

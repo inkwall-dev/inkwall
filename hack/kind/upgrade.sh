@@ -326,7 +326,18 @@ probe_stop() {
 echo "== helm upgrade to $CHART"
 probe_start
 sleep 5
+# Traefik runs in a namespace of its own, not one of the default proxy
+# namespaces: without it listed, the upgrade stops (its pods run the
+# engine) instead of leaving its routes uninspected.
+if out=$("${HELM[@]}" upgrade inkwall "$CHART" --namespace "$OPERATOR_NS" --reset-then-reuse-values 2>&1) ||
+  ! grep "pods with the Inkwall engine run in namespace(s) $TRAEFIK_NS," <<<"$out" >/dev/null; then
+  fail "helm upgrade without $TRAEFIK_NS in injection.proxyNamespaces: want it refused, got: $out"
+else
+  ok "helm upgrade refused while Traefik's namespace isn't a proxy namespace"
+fi
+# Listed, as the upgrade guide says.
 if "${HELM[@]}" upgrade inkwall "$CHART" --namespace "$OPERATOR_NS" \
+  --set "injection.proxyNamespaces={$TRAEFIK_NS}" \
   --set operator.image.repository="${OPERATOR_IMAGE%:*}" \
   --set operator.image.tag="${OPERATOR_IMAGE##*:}" \
   --set operator.image.pullPolicy=Never \

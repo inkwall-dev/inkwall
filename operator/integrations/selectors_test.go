@@ -4,6 +4,7 @@
 package integrations
 
 import (
+	"slices"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -52,5 +53,38 @@ func TestSelectors(t *testing.T) {
 		if _, _, err := FromConfig([]wafv1alpha1.IntegrationSpec{{Controller: "traefik", Selector: bad}}); err == nil {
 			t.Errorf("selector %v accepted", bad)
 		}
+	}
+}
+
+func TestNamespaces(t *testing.T) {
+	for _, tc := range []struct {
+		in      string
+		want    Namespaces
+		any     bool
+		wantErr bool
+	}{
+		{in: "traefik", want: Namespaces{"traefik"}},
+		{in: " traefik, eg ,traefik,", want: Namespaces{"traefik", "eg"}},
+		{in: "*", want: Namespaces{"*"}, any: true},
+		{in: "", wantErr: true},
+		{in: " , ", wantErr: true},
+		{in: "Traefik", wantErr: true},
+		{in: "traefik,a/b", wantErr: true},
+	} {
+		got, err := ParseNamespaces(tc.in)
+		if (err != nil) != tc.wantErr || !slices.Equal(got, tc.want) || (err == nil && got.Any() != tc.any) {
+			t.Errorf("%q: got %v, %v", tc.in, got, err)
+		}
+	}
+	n := Namespaces{"traefik", "eg"}
+	if !n.Has("eg") || n.Has("tenant") || n.Any() {
+		t.Errorf("%v: Has(eg) %v, Has(tenant) %v, Any %v", n, n.Has("eg"), n.Has("tenant"), n.Any())
+	}
+	if sel := n.LabelSelector(); len(sel.MatchExpressions) != 1 || !slices.Equal(sel.MatchExpressions[0].Values, []string{"eg", "traefik"}) {
+		t.Errorf("namespaceSelector %v", sel)
+	}
+	var all Namespaces
+	if !all.Has("tenant") || len(all.LabelSelector().MatchExpressions) != 0 || all.String() != "*" {
+		t.Errorf("nil: every namespace, got %v", all.LabelSelector())
 	}
 }

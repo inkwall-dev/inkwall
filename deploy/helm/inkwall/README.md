@@ -26,7 +26,7 @@ kind cluster of `make kind-up`.
 | `ValidatingWebhookConfiguration` `inkwall-operator-validating` | WAF kinds only, fails closed, 2 s timeout |
 | Pre-delete hook (`Job`, `Role`, `RoleBinding` `<release>-inkwall-operator-unwire`) | Runs only on `helm uninstall`: unwires the routes and releases the `WAFPolicy` objects (`uninstall.unwire`) |
 | `ConfigMap` `inkwall-control-plane-ca`, `Secret` `inkwall-enrollment` | Only with `controlPlane.caBundle` / `controlPlane.enrollmentToken` (names for a release named `inkwall`) |
-| `MutatingWebhookConfiguration` `inkwall-operator-mutating` | Traefik pods only, at creation; fails open, or closed while a policy is in block mode (`injection.enabled`) |
+| `MutatingWebhookConfiguration` `inkwall-operator-mutating` | Traefik pods in the [proxy namespaces](#proxy-namespaces) only, at creation; fails open, or closed while a policy is in block mode (`injection.enabled`) |
 | `Service` `inkwall-operator-webhook` | |
 | `Service` `inkwall-operator` | Bundle distribution to the engines, gRPC over TLS on port 9445 |
 | Webhook certificate | `Secret` filled by the operator, or a cert-manager `Certificate` |
@@ -48,6 +48,7 @@ See [`values.yaml`](values.yaml) for all of them.
 | `operator.podDisruptionBudget.enabled`, `minAvailable` | `true`, `1` | |
 | `engine.image.repository`, `tag`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-engine`, the chart's `appVersion`, `IfNotPresent` | The engine injected into Traefik pods; `InkwallConfig.spec.engine.image` overrides it |
 | `injection.enabled` | `true` | Inject the engine into Traefik pods when they are created. `false`: the operator unwires every route it wired, so new Traefik pods, without the engine, serve them (uninspected) |
+| `injection.proxyNamespaces` | `[traefik, kube-system]` | The namespaces Traefik's pods run in; only pods there get the engine and the policy bundle. See [proxy namespaces](#proxy-namespaces) |
 | `controlPlane.caBundle` | `""` | The optional control plane's CA (PEM), when its certificate isn't from a public CA; e.g. `--set-file controlPlane.caBundle=ca.crt` |
 | `controlPlane.enrollmentToken` | `""` | Its one-time enrollment token, stored in the Secret `inkwall-enrollment` (key `token`; `<release>-inkwall-enrollment` for a release not named `inkwall`); or create that Secret yourself |
 | `controlPlane.eventsBufferMiB` | `64` | Each replica's buffer of security events while the control plane is unreachable (an `emptyDir`); when full, the oldest are dropped and counted |
@@ -58,6 +59,38 @@ See [`values.yaml`](values.yaml) for all of them.
 | `webhook.port`, `timeoutSeconds` | `9443`, `2` | |
 | `webhook.certs.mode` | `rotate` | `rotate`: the operator creates, renews and injects a self-signed certificate. `certManager`: cert-manager issues it |
 | `webhook.certs.certManager.issuerRef` | a self-signed `Issuer` | |
+
+## Proxy namespaces
+
+The operator recognises Traefik's pods by their labels: `app.kubernetes.io/name: traefik`, or the
+`InkwallConfig`'s selector. A Traefik pod gets the engine, and its ServiceAccount gets read access
+to the policy bundle, which holds every namespace's policies and rules; with that access, its
+engine connects to the operator and reports which bundle it enforces.
+
+Anyone who may create a pod may give it those labels. So the operator only looks for Traefik's pods
+in the namespaces listed in `injection.proxyNamespaces`: `traefik` and `kube-system` (where k3s
+and RKE2 run Traefik) by default. A pod with Traefik's labels anywhere else is an ordinary pod: no
+engine, no access to the bundle. List only namespaces whose pods you trust as much as Traefik
+itself: those where only the people who run Traefik create pods.
+
+If Traefik runs in another namespace, list it:
+
+```sh
+helm upgrade --install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \
+  --namespace inkwall-system --create-namespace --reset-then-reuse-values \
+  --set 'injection.proxyNamespaces={ingress}'
+```
+
+Until it is listed, Traefik's pods don't get the engine, its routes are not wired (they are served
+uninspected), and policies on them report `Programmed=False` with reason `SidecarMissing`. `helm upgrade`
+refuses to leave a proxy so: when pods that already run the engine are in a namespace the value
+doesn't list, it stops with an error naming them (when Helm can reach the cluster; `helm template`
+and Argo CD can't check). `{*}`
+makes every namespace a proxy namespace, as before 0.1.5: only for clusters where everyone who may
+create a pod may also read every policy. Changing the value restarts the operator.
+
+An engine configured by hand, with a Role of your own that grants `get` on the bundle Secret,
+is not affected: the operator accepts any engine whose ServiceAccount may read the bundle.
 
 ## Connecting to a control plane
 

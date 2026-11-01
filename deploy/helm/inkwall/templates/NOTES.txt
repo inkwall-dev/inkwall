@@ -12,6 +12,12 @@ the repository) and list the Inkwall objects:
 The operator validates rule sets and policies when they are saved, builds
 them into a signed bundle, injects the engine into Traefik's pods when they
 start, and wires every Ingress and IngressRoute a WAFPolicy targets to it.
+Only proxy pods in these namespaces get the engine (injection.proxyNamespaces):
+
+  {{ include "inkwall.proxyNamespaces" . }}
+
+If Traefik runs in another namespace, add it to injection.proxyNamespaces:
+its routes are not wired until then.
 Traefik pods that ran before the install are injected when restarted:
 
   kubectl -n <traefik namespace> rollout restart deployment/<traefik>

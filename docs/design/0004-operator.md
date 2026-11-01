@@ -128,14 +128,23 @@ Puts the engine into proxy pods as a sidecar sharing a socket directory.
 
 **Built (v0.1.0)** (`operator/internal/injection`, `operator/webhook/inject.go`):
 
-- Webhook `inkwall-operator-mutating` sees only Traefik pods (`app.kubernetes.io/name=traefik`) at
-  creation. Installed `Ignore`; the leader sets `Fail` while any policy blocks and re-applies it
+- Webhook `inkwall-operator-mutating` sees only Traefik pods (`app.kubernetes.io/name=traefik`) in
+  the proxy namespaces, at creation. Installed `Ignore`; the leader sets `Fail` while any policy blocks and re-applies it
   after a Helm upgrade, patching with the `resourceVersion` so it never overwrites a fresh CA bundle.
   If `InkwallConfig` can't be read, the engine is injected with defaults, not left out.
 - Opt-out: the label `waf.inkwall.dev/inject: "false"` is excluded by `objectSelector`, so those
   pods start even while the webhook fails closed and the operator is down (the way to scale the
   proxy before it returns). The same-named annotation works only while the webhook answers. Pods
   with an `inkwall-engine` container are left alone.
+- **Proxy namespaces.** A selector's labels prove nothing: anyone who may create a pod may set
+  them, and the bundle a proxy pod's ServiceAccount may read holds every namespace's policies and
+  rules; the distribution server accepts an engine on that grant. So the operator only looks for
+  proxy pods in the proxy namespaces (`--proxy-namespaces`, the chart's
+  `injection.proxyNamespaces`): `traefik` and `kube-system` by default, or `*` for every
+  namespace. The pod cache watches only those, the webhook's `namespaceSelector` names them (the
+  leader keeps it; the webhook also checks), and only their pods get the trust ConfigMap and the
+  grant. A Traefik running elsewhere gets no engine; its routes are reported `SidecarMissing` and
+  left unwired. Before 0.1.5 and 0.2.2, every namespace was a proxy namespace.
 - `InkwallConfig.spec.integrations[].selector` (non-empty) replaces Traefik's label everywhere
   (pod cache, webhook, controllers, `objectSelector`). Read at startup; on change each replica
   restarts after a random delay up to 30 s. Selectors for unknown controllers are logged and ignored.
@@ -294,7 +303,8 @@ from the Secret (only building is leader-only), so losing one just moves its eng
 - Port 9445 (`--distribution-port`), TLS with the webhook certificate (also names the Service),
   verified by engines with the operator CA.
 - **Auth:** `TokenReview` (audience `inkwall-operator`), then a `SubjectAccessReview` that the
-  engine's ServiceAccount may `get` the bundle Secret (§4.3 grant). Cached 1 min.
+  engine's ServiceAccount may `get` the bundle Secret (§4.3 grant, to proxy pods in the proxy
+  namespaces only, or a Role of the user's for an engine configured by hand). Cached 1 min.
 - First message must be `Hello`; engines already current aren't resent. Streams silent for 30 s
   close. At most 50 concurrent sends.
 - **Aggregation via ConfigMaps:** each replica writes its engines to `inkwall-engines-<pod>` (owned
