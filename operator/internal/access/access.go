@@ -84,8 +84,22 @@ func Denied(ctx context.Context, c client.Client) (map[string]string, error) {
 		if len(missing) > 3 {
 			missing = append(missing[:3], fmt.Sprintf("%d more", len(missing)-3))
 		}
-		denied[name] = fmt.Sprintf("the %s integration is disabled: the operator may not %s (its ClusterRole, %s%s, isn't granted: "+
-			"see the chart's rbac.integrations, or helm upgrade once the proxy is installed); the operator restarts with it once granted", name, strings.Join(missing, ", "), RolePrefix, name)
+		denied[name] = fmt.Sprintf("the %s integration is disabled: the operator may not %s (the chart's rbac.integrations.%s role isn't granted: "+
+			"set it to true, or helm upgrade once the proxy is installed); the operator restarts with it once granted", name, strings.Join(missing, ", "), chartValue(name))
 	}
 	return denied, nil
+}
+
+// chartValue returns the key of rbac.integrations that grants an
+// integration's ClusterRole: its name in camel case (envoy-gateway:
+// envoyGateway). The message names it rather than the role, whose name
+// the chart derives from the release's.
+func chartValue(name string) string {
+	parts := strings.Split(name, "-")
+	for i := 1; i < len(parts); i++ {
+		if parts[i] != "" {
+			parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
+		}
+	}
+	return strings.Join(parts, "")
 }

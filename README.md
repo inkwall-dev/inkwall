@@ -103,9 +103,9 @@ spec:
   mode: Block                                # the default, Detect, logs but never blocks
 ```
 
-For an `HTTPRoute` that Envoy Gateway serves, target it with its group, and optionally one rule:
-`{group: gateway.networking.k8s.io, kind: HTTPRoute, name: web, sectionName: api}`. One policy can
-target routes of both proxies.
+For an `HTTPRoute`, served by Envoy Gateway or Traefik, target it with its group, and optionally one
+rule: `{group: gateway.networking.k8s.io, kind: HTTPRoute, name: web, sectionName: api}`. One policy
+can target routes of both proxies.
 
 Once the policy is `Ready`, every engine enforces it. Send an attack to check:
 
