@@ -195,27 +195,56 @@ func TestRouteSettings(t *testing.T) {
 		policies []wafv1alpha1.WAFPolicy
 		want     routeSettings
 	}{
-		{"detect", []wafv1alpha1.WAFPolicy{pol("a", wafv1alpha1.WAFPolicySpec{})}, routeSettings{body: true, timeout: def, failOpen: true, detect: true}},
-		{"block", []wafv1alpha1.WAFPolicy{pol("a", wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock})}, routeSettings{body: true, timeout: def}},
+		{"detect", []wafv1alpha1.WAFPolicy{pol("a", wafv1alpha1.WAFPolicySpec{})}, routeSettings{body: true, maxBody: engineBodyBytes, timeout: def, failOpen: true, detect: true}},
+		{"block", []wafv1alpha1.WAFPolicy{pol("a", wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock})}, routeSettings{body: true, maxBody: engineBodyBytes, timeout: def}},
 		{"block, failing open, no body", []wafv1alpha1.WAFPolicy{pol("a", wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock, FailureMode: wafv1alpha1.FailOpen, Body: noBody})},
 			routeSettings{timeout: def, failOpen: true}},
 		// The engine rejects what it can't inspect: Envoy must wait.
 		{"detect, failing closed", []wafv1alpha1.WAFPolicy{pol("a", wafv1alpha1.WAFPolicySpec{FailureMode: wafv1alpha1.FailClosed})},
-			routeSettings{body: true, timeout: def}},
+			routeSettings{body: true, maxBody: engineBodyBytes, timeout: def}},
 		{"detect and block", []wafv1alpha1.WAFPolicy{
 			pol("a", wafv1alpha1.WAFPolicySpec{}),
 			pol("b", wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock, FailureMode: wafv1alpha1.FailOpen}),
-		}, routeSettings{body: true, timeout: def, failOpen: true}},
+		}, routeSettings{body: true, maxBody: engineBodyBytes, timeout: def, failOpen: true}},
+		// The largest body limit: unset is the engine's default.
+		{"body limits", []wafv1alpha1.WAFPolicy{
+			pol("a", wafv1alpha1.WAFPolicySpec{Body: &wafv1alpha1.BodySpec{MaxBytes: ptr.To[int64](1 << 20)}}),
+			pol("b", wafv1alpha1.WAFPolicySpec{Body: &wafv1alpha1.BodySpec{MaxBytes: ptr.To[int64](8 << 10)}}),
+			pol("c", wafv1alpha1.WAFPolicySpec{Body: &wafv1alpha1.BodySpec{Inspect: ptr.To(false), MaxBytes: ptr.To[int64](2 << 20)}}),
+		}, routeSettings{body: true, maxBody: 1 << 20, timeout: def, failOpen: true, detect: true}},
 		{"two rules' policies", []wafv1alpha1.WAFPolicy{
 			pol("a", wafv1alpha1.WAFPolicySpec{Body: noBody, Timeout: &metav1.Duration{Duration: 800 * time.Millisecond}}),
 			pol("b", wafv1alpha1.WAFPolicySpec{FailureMode: wafv1alpha1.FailClosed}),
-		}, routeSettings{body: true, timeout: 800 * time.Millisecond}},
+		}, routeSettings{body: true, maxBody: engineBodyBytes, timeout: 800 * time.Millisecond}},
 		{"another route's", []wafv1alpha1.WAFPolicy{{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "x"},
 			Spec: wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock, TargetRefs: []wafv1alpha1.TargetRef{{Group: "gateway.networking.k8s.io", Kind: "HTTPRoute", Name: "other"}}}}},
 			routeSettings{timeout: def, failOpen: true, detect: true}},
 	} {
 		if got := settingsOf(tc.policies, route); got != tc.want {
 			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestBufferLimitOf(t *testing.T) {
+	for _, tc := range []struct {
+		limit any
+		want  int64
+	}{
+		{nil, 32 << 10}, // Envoy Gateway's default
+		{"10Mi", 10 << 20},
+		{"256Ki", 256 << 10},
+		{"64k", 64000},
+		{"4096", 4096},
+		{int64(4096), 4096},
+		{"bad", 0},
+	} {
+		p := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{}}}
+		if tc.limit != nil {
+			p.Object["spec"] = map[string]any{"connection": map[string]any{"bufferLimit": tc.limit}}
+		}
+		if got := bufferLimitOf(p); got != tc.want {
+			t.Errorf("bufferLimit %v: %d, want %d", tc.limit, got, tc.want)
 		}
 	}
 }

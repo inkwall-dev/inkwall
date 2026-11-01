@@ -18,9 +18,10 @@
 // BUFFERED_PARTIAL, a body Envoy cut at its buffer limit is handled the
 // same way. Envoy sends a body without end_of_stream when it cut it, but
 // also when trailers follow (HTTP/2), and then sends no trailers message:
-// Envoy Gateway can't ask for them. So such a body counts as cut only when
-// it reaches the limit, as one cut at the operator's buffer (the largest
-// limit) does, or falls short of its Content-Length.
+// Envoy Gateway can't ask for them. Such a body counts as complete only
+// when it is under the limit and as long as its Content-Length says: one
+// without Content-Length may have been cut at a buffer the engine doesn't
+// know, so it is handled as oversized.
 //
 // In observability mode (detect mode) Envoy doesn't wait for the answers,
 // and the adapter sends none. The body comes in chunks there (STREAMED, the
@@ -272,12 +273,12 @@ func (x *exchange) fillBody(b *extprocv3.HttpBody) bool {
 }
 
 // setBody sets the request's body, up to the limit. A body without
-// end_of_stream (eos) was cut, or trailers follow: it is taken as cut when
-// it reaches the limit or falls short of its Content-Length.
+// end_of_stream (eos) was cut, or trailers follow: it is complete only when
+// it is under the limit and has its full Content-Length.
 func (x *exchange) setBody(body []byte, eos bool) {
 	x.waiting = false
 	n := int64(len(body))
-	complete := eos || n < x.limit && !x.shortOfLength(n)
+	complete := eos || n < x.limit && n == x.contentLength()
 	if complete && x.req.Headers.Get("Content-Length") == "" && x.req.Headers.Get("Transfer-Encoding") == "" {
 		// HTTP/2 clients may omit Content-Length; as in SnapshotHeaders,
 		// rules must not see a body without either header.
@@ -287,11 +288,14 @@ func (x *exchange) setBody(body []byte, eos bool) {
 	x.req.BodyTruncated = n > x.limit || !complete
 }
 
-// shortOfLength reports whether n body bytes are fewer than the request's
-// Content-Length says.
-func (x *exchange) shortOfLength(n int64) bool {
+// contentLength returns the request's Content-Length, or -1 without a
+// valid one.
+func (x *exchange) contentLength() int64 {
 	length, err := strconv.ParseInt(x.req.Headers.Get("Content-Length"), 10, 64)
-	return err == nil && n < length
+	if err != nil || length < 0 {
+		return -1
+	}
+	return length
 }
 
 // onResponse continues the response stages: the request was decided

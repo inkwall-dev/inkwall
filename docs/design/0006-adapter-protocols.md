@@ -71,12 +71,15 @@ a Unix socket). It answers the stream of one request as follows:
   (`body.onOversize`). The engine reads the mode from `protocol_config`, which Envoy sends from 1.33.
 - **Cut or trailers:** Envoy sends a body without `end_of_stream` when it cut it at its buffer
   limit, but also when trailers follow (HTTP/2), whatever the body's size. It then sends no
-  trailers message: Envoy Gateway can't ask for them (`request_trailer_mode` stays `SKIP`). So
-  the engine takes such a body as cut only when it reaches the policy's limit, as a body cut at
-  the operator's 10 MiB buffer does, or falls short of its `Content-Length`; otherwise it is
-  complete, and inspected. A buffer below the policy's limit (the user's own
-  `ClientTrafficPolicy`) cuts bodies the engine can tell only by their `Content-Length`: one
-  without it is inspected up to the buffer.
+  trailers message: Envoy Gateway can't ask for them (`request_trailer_mode` stays `SKIP`), and
+  even then it would come after the verdict. So the engine takes such a body as complete, and
+  inspects it, only when it is under the policy's limit and as long as its `Content-Length`. A
+  body without `Content-Length` (HTTP/2 or chunked) may have been cut at a buffer smaller than
+  the limit, which the engine doesn't know (the user's own `ClientTrafficPolicy`), so it is
+  handled as oversized: with trailers and no `Content-Length`, a request gets `body.onOversize`.
+  Bodies a client sends whole get no less inspection: under `Allow`, padding a body past the
+  limit skips it as well. The operator reports a user's buffer below a policy's limit
+  ([0004 §4.4](0004-operator.md#44-wiring-controller)).
 - **Protocol:** the client's protocol (`HTTP/1.0`, `HTTP/1.1`, `HTTP/2`, `HTTP/3`) is Envoy's
   `request.protocol` [attribute](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/advanced/attributes),
   when the filter sends it (`request_attributes`); `HTTP/1.1` otherwise.

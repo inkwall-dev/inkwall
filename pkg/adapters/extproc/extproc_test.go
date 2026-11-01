@@ -269,9 +269,12 @@ func TestBody(t *testing.T) {
 		{"buffered, trailers follow", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED, "", attack, false, 403},
 		{"partial attack", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED_PARTIAL, "", attack, true, 403},
 		{"partial attack, trailers", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED_PARTIAL, "", attack, false, 403},
-		{"partial attack, trailers, no content-length", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED_PARTIAL, "-", attack, false, 403},
-		{"partial attack, trailers, onOversize allow", pipeline.ModeBlock, pipeline.OversizeAllow, filterv3.ProcessingMode_BUFFERED_PARTIAL, "-", attack, false, 403},
-		{"partial benign, trailers", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED_PARTIAL, "-", benign, false, 0},
+		{"partial attack, trailers, onOversize allow", pipeline.ModeBlock, pipeline.OversizeAllow, filterv3.ProcessingMode_BUFFERED_PARTIAL, "", attack, false, 403},
+		{"partial benign, trailers", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED_PARTIAL, "", benign, false, 0},
+		// Without Content-Length, the body may have been cut at a buffer
+		// smaller than the limit: handled as oversized.
+		{"partial attack, trailers, no content-length", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED_PARTIAL, "-", attack, false, 413},
+		{"partial benign, trailers, no content-length", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED_PARTIAL, "-", benign, false, 413},
 		// Cut at Envoy's buffer limit: the rest goes uninspected.
 		{"partial, cut at the limit", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED_PARTIAL, "-", strings.Repeat("a=b&", 16), false, 413},
 		{"partial, cut over the limit", pipeline.ModeBlock, 0, filterv3.ProcessingMode_BUFFERED_PARTIAL, "-", strings.Repeat("a=b&", 20), false, 413},
@@ -508,9 +511,12 @@ func TestObservabilityMode(t *testing.T) {
 		// Trailers follow: Envoy sends no last chunk, and no trailers
 		// message unless asked for them.
 		{"body attack, trailers", []*extprocv3.ProcessingRequest{
-			streamed(headers("POST", "/login", false, form...)), body("user=admin'%20OR", false), body("%201=1--", false)}, "rule"},
+			streamed(headers("POST", "/login", false, append(form, "content-length", "24")...)), body("user=admin'%20OR", false), body("%201=1--", false)}, "rule"},
 		{"benign body, trailers", []*extprocv3.ProcessingRequest{
-			streamed(headers("POST", "/login", false, form...)), body("user=alice&", false), body("password=x", false)}, ""},
+			streamed(headers("POST", "/login", false, append(form, "content-length", "21")...)), body("user=alice&", false), body("password=x", false)}, ""},
+		// Without Content-Length, maybe cut short.
+		{"body attack, trailers, no content-length", []*extprocv3.ProcessingRequest{
+			streamed(headers("POST", "/login", false, form...)), body("user=admin'%20OR", false), body("%201=1--", false)}, "oversize"},
 		{"body attack, trailers message", []*extprocv3.ProcessingRequest{
 			streamed(headers("POST", "/login", false, form...)), body("user=admin'%20OR", false), body("%201=1--", false), trailers}, "rule"},
 		// Envoy may not say STREAMED: in observability mode the body comes
