@@ -327,7 +327,8 @@ Without any configuration on your part, the upgrade from any 0.1.x changes the f
   injection.proxyNamespaces doesn't list` and changes nothing. Add them, or set `{*}` to keep the
   old behaviour. Helm checks this only when it can reach the cluster: not with `helm template`,
   nor in Argo CD. See [proxy namespaces](../deploy/helm/inkwall/README.md#proxy-namespaces).
-  Also in 0.2.2 and 0.1.5.
+  Also in 0.2.2 and 0.1.5: the fix for
+  [GHSA-r5cq-6vq5-q8qg](https://github.com/inkwall-dev/inkwall/security/advisories/GHSA-r5cq-6vq5-q8qg).
 - **Bundles split into chunks past 900 KiB.** A [bundle](glossary.md#bundle) of up to 900 KiB
   compressed stays in the [Secret](https://kubernetes.io/docs/concepts/configuration/secret/) `inkwall-bundle`, as before. A larger one, which 0.1.x
   couldn't publish, is split into Secrets named `inkwall-bundle-a-0`… or `inkwall-bundle-b-0`…,
