@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -254,6 +255,130 @@ func testEnvoyGateway(ctx context.Context, t *testing.T, c client.Client) {
 	eventually(t, "WiringFailed when Envoy Gateway refuses it", programmed("eg", metav1.ConditionFalse, wiring.ReasonWiringFailed, "Backend is disabled"))
 	accept(wiring.EnvoyExtensionPolicyGVK, ns, "inkwall-waf-app", "True", "")
 	eventually(t, "Programmed again", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
+
+	// Envoy Gateway overrides the operator's policy for a rule (the user's
+	// policy on it): reported.
+	overridden := func(status string) {
+		t.Helper()
+		u, err := get(wiring.EnvoyExtensionPolicyGVK, ns, "inkwall-waf-app")
+		if err != nil {
+			t.Fatal(err)
+		}
+		update(ctx, t, c, u, func(u *unstructured.Unstructured) {
+			_ = unstructured.SetNestedSlice(u.Object, []any{map[string]any{"conditions": []any{
+				map[string]any{"type": "Accepted", "status": "True", "reason": "Accepted", "message": "Policy has been accepted."},
+				map[string]any{"type": "Overridden", "status": status, "reason": "Overridden",
+					"message": "This policy is being overridden by other envoyExtensionPolicies for HTTPRoute/eg-apps/app/rule/web"},
+			}}}, "status", "ancestors")
+		})
+	}
+	overridden("True")
+	eventually(t, "WiringFailed when Envoy Gateway overrides it", programmed("eg", metav1.ConditionFalse, wiring.ReasonWiringFailed, "app/rule/web"))
+	overridden("False")
+	eventually(t, "Programmed once no longer overridden", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
+
+	// The user's EnvoyExtensionPolicy on a protected rule takes it out of
+	// inspection: reported, naming it. One on another rule doesn't.
+	userEEP := func(name, section string) *unstructured.Unstructured {
+		u := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{
+			"targetRefs": []any{map[string]any{"group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": "api", "sectionName": section}},
+		}}}
+		u.SetGroupVersionKind(wiring.EnvoyExtensionPolicyGVK)
+		u.SetNamespace(ns)
+		u.SetName(name)
+		return u
+	}
+	elsewhere, overriding := userEEP("user-public", "public"), userEEP("user-admin", "admin")
+	for _, u := range []*unstructured.Unstructured{elsewhere, overriding} {
+		if err := c.Create(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eventually(t, "WiringFailed with the user's EnvoyExtensionPolicy on a protected rule",
+		programmed("eg", metav1.ConditionFalse, wiring.ReasonWiringFailed, "EnvoyExtensionPolicy user-admin"))
+	if err := c.Delete(ctx, overriding); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "Programmed with the user's EnvoyExtensionPolicy on another rule", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
+	if err := c.Delete(ctx, elsewhere); err != nil {
+		t.Fatal(err)
+	}
+
+	// A rule the route doesn't have isn't wired: Envoy Gateway would refuse
+	// the operator's policy, and the route's other rules with it.
+	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) {
+		p.Spec.TargetRefs = append(p.Spec.TargetRefs, wafv1alpha1.TargetRef{Group: "gateway.networking.k8s.io", Kind: "HTTPRoute", Name: "api", SectionName: "nope"})
+	})
+	public := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "eg-public"}, Spec: wafv1alpha1.WAFPolicySpec{
+		TargetRefs: []wafv1alpha1.TargetRef{{Group: "gateway.networking.k8s.io", Kind: "HTTPRoute", Name: "api", SectionName: "public"}},
+	}}
+	if err := c.Create(ctx, public); err != nil {
+		t.Fatal(err)
+	}
+	rulesWired := func(want string, not ...string) func() string {
+		return func() string {
+			p, err := get(wiring.EnvoyExtensionPolicyGVK, ns, "inkwall-waf-api")
+			if err != nil {
+				return err.Error()
+			}
+			s := specJSON(p)
+			if !strings.Contains(s, want) || slices.ContainsFunc(not, func(n string) bool { return strings.Contains(s, n) }) {
+				return s
+			}
+			return ""
+		}
+	}
+	eventually(t, "only the route's rules wired", rulesWired(`"sectionName":"public"`, "nope"))
+	if err := c.Delete(ctx, public); err != nil {
+		t.Fatal(err)
+	}
+	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) { p.Spec.TargetRefs = p.Spec.TargetRefs[:2] })
+	eventually(t, "back to one rule", rulesWired(`"sectionName":"admin"`, "public", "nope"))
+	eventually(t, "Programmed with one rule", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
+
+	// A route also on a Gateway of a controller Inkwall doesn't wire is
+	// wired, its traffic there said not to be inspected; one also on a
+	// Gateway without a running Envoy pod isn't, said so.
+	otherClass := &gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: "eg-other"}, Spec: gatewayv1.GatewayClassSpec{ControllerName: "example.com/other"}}
+	foreign := &gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Namespace: edge, Name: "foreign"}, Spec: gatewayv1.GatewaySpec{GatewayClassName: "eg-other", Listeners: listeners}}
+	idle := &gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Namespace: edge, Name: "idle"}, Spec: gatewayv1.GatewaySpec{GatewayClassName: "eg", Listeners: listeners}}
+	for _, o := range []client.Object{otherClass, foreign, idle} {
+		if err := c.Create(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	attach := func(hr *gatewayv1.HTTPRoute, gws ...string) {
+		t.Helper()
+		update(ctx, t, c, hr, func(hr *gatewayv1.HTTPRoute) {
+			hr.Spec.ParentRefs = hr.Spec.ParentRefs[:1]
+			for _, gw := range gws {
+				hr.Spec.ParentRefs = append(hr.Spec.ParentRefs, gatewayv1.ParentReference{Name: gatewayv1.ObjectName(gw), Namespace: new(gatewayv1.Namespace(edge))})
+			}
+		})
+	}
+	attach(app, "foreign")
+	eventually(t, "Programmed, partly", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed,
+		"HTTPRoute app is also attached to Gateways of example.com/other, which Inkwall doesn't wire yet"))
+	attach(app)
+	attach(api, "idle")
+	eventually(t, "Pending on the Gateway without pods", programmed("eg", metav1.ConditionFalse, wiring.ReasonPending, "Gateway eg-edge/idle"))
+	eventually(t, "not wired while a Gateway has no pod", gone(wiring.EnvoyExtensionPolicyGVK, ns, "inkwall-waf-api"))
+	attach(api)
+	for _, o := range []client.Object{foreign, idle, otherClass} {
+		if err := c.Delete(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eventually(t, "Pending until Envoy Gateway accepts the policy again", programmed("eg", metav1.ConditionFalse, wiring.ReasonPending, "EnvoyExtensionPolicy inkwall-waf-api"))
+	accept(wiring.EnvoyExtensionPolicyGVK, ns, "inkwall-waf-api", "True", "")
+	eventually(t, "the buffer limit back", func() string {
+		if _, err := get(wiring.ClientTrafficPolicyGVK, edge, "inkwall-waf-plain"); err != nil {
+			return err.Error()
+		}
+		return ""
+	})
+	accept(wiring.ClientTrafficPolicyGVK, edge, "inkwall-waf-plain", "True", "")
+	eventually(t, "Programmed on its Gateway again", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
 
 	// The user's own ClientTrafficPolicy for a Gateway: the operator's
 	// goes, Envoy Gateway applying one per Gateway; back once theirs goes.

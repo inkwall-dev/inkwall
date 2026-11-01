@@ -271,7 +271,8 @@ func TestProgrammed(t *testing.T) {
 		st, reason, msg := traefikProgrammed(tc.p, &state{ingresses: ings, wire: wire, routes: routes, routeCRD: tc.routeCRD,
 			routeErr:    map[types.NamespacedName]string{k("bad"): "IngressRoute bad: forbidden"},
 			ingressErr:  map[types.NamespacedName]string{k("bad"): "Ingress bad: forbidden"},
-			traefikCRDs: tc.crds, middlewareErr: tc.mwErr, pods: tc.pods}, since)
+			traefikCRDs: tc.crds, middlewareErr: tc.mwErr, pods: tc.pods,
+			wanted: map[schema.GroupKind]map[types.NamespacedName]bool{ingressKind: {k("web"): true}, routeKind: {k("app"): true}}}, since)
 		if st != tc.status || reason != tc.reason || !strings.Contains(msg, tc.msg) {
 			t.Errorf("%s: %s %s %q", tc.name, st, reason, msg)
 		}

@@ -332,8 +332,12 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 				failed = append(failed, s.Failed)
 				continue
 			}
-			if s.Pending != "" {
+			switch {
+			case s.Pending != "":
 				pending = append(pending, s.Pending)
+			case !s.Wired:
+				// Whatever the integration said, its traffic isn't inspected.
+				pending = append(pending, fmt.Sprintf("%s %s is not wired to the engine in %s yet", t.Kind.Kind, t.Key.Name, rep.results[i].Proxy))
 			}
 			if s.Partly != "" {
 				partly = append(partly, s.Partly)
