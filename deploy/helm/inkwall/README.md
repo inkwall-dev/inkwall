@@ -102,7 +102,7 @@ or the `InkwallConfig`'s selectors. A proxy pod gets the engine, and its Service
 read access to the policy bundle, which holds every namespace's policies and rules; with that
 access, its engine connects to the operator and reports which bundle it enforces.
 
-Anyone who may create a pod may give it those labels. So the operator only looks for proxy pods in
+Anyone who may create a pod may give it those labels ([GHSA-r5cq-6vq5-q8qg](https://github.com/inkwall-dev/inkwall/security/advisories/GHSA-r5cq-6vq5-q8qg)). So the operator only looks for proxy pods in
 the namespaces listed in `injection.proxyNamespaces`: `traefik`, `kube-system` (where k3s and RKE2
 run Traefik) and `envoy-gateway-system` (where Envoy Gateway runs the Envoy pods) by default. A pod
 with a proxy's labels anywhere else is an ordinary pod: no engine, no access to the bundle. List
