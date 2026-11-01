@@ -593,14 +593,19 @@ func (x *Policy) GetBody() *BodyConfig {
 // RouteMatch matches requests by host, path and method.
 type RouteMatch struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Exact host ("shop.example.com") or a wildcard for one leading label
-	// ("*.example.com"), without a port, lower case. Empty: any host.
+	// Exact host ("shop.example.com") or a wildcard ("*.example.com"), without
+	// a port, lower case. Empty: any host. A wildcard matches one leading label,
+	// as in an Ingress, unless wildcard_any_depth is set.
 	Host string     `protobuf:"bytes,1,opt,name=host,proto3" json:"host,omitempty"`
 	Path *PathMatch `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
 	// Methods to match, upper case. Empty: any method.
-	Methods       []string `protobuf:"bytes,3,rep,name=methods,proto3" json:"methods,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Methods []string `protobuf:"bytes,3,rep,name=methods,proto3" json:"methods,omitempty"`
+	// A wildcard host matches subdomains at any depth: "*.example.com" matches
+	// "a.b.example.com", as in a Gateway API HTTPRoute. Engines before 0.3.0
+	// ignore it and match one label.
+	WildcardAnyDepth bool `protobuf:"varint,4,opt,name=wildcard_any_depth,json=wildcardAnyDepth,proto3" json:"wildcard_any_depth,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *RouteMatch) Reset() {
@@ -652,6 +657,13 @@ func (x *RouteMatch) GetMethods() []string {
 		return x.Methods
 	}
 	return nil
+}
+
+func (x *RouteMatch) GetWildcardAnyDepth() bool {
+	if x != nil {
+		return x.WildcardAnyDepth
+	}
+	return false
 }
 
 // PathMatch matches the request path.
@@ -1028,12 +1040,13 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"exclusions\x18\t \x03(\v2\x1c.inkwall.bundle.v1.ExclusionR\n" +
 	"exclusions\x121\n" +
 	"\x04body\x18\n" +
-	" \x01(\v2\x1d.inkwall.bundle.v1.BodyConfigR\x04body\"l\n" +
+	" \x01(\v2\x1d.inkwall.bundle.v1.BodyConfigR\x04body\"\x9a\x01\n" +
 	"\n" +
 	"RouteMatch\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x120\n" +
 	"\x04path\x18\x02 \x01(\v2\x1c.inkwall.bundle.v1.PathMatchR\x04path\x12\x18\n" +
-	"\amethods\x18\x03 \x03(\tR\amethods\"W\n" +
+	"\amethods\x18\x03 \x03(\tR\amethods\x12,\n" +
+	"\x12wildcard_any_depth\x18\x04 \x01(\bR\x10wildcardAnyDepth\"W\n" +
 	"\tPathMatch\x124\n" +
 	"\x04type\x18\x01 \x01(\x0e2 .inkwall.bundle.v1.PathMatchTypeR\x04type\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value\"\x93\x01\n" +

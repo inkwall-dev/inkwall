@@ -327,8 +327,12 @@ ACK or a NACK.
   rejected for an unknown key is asked for again, on a new stream, once the keys change.
 - The engine reconnects with jittered backoff. With no cache, it reads the bundle Secret from the
   API server (`--bundle-secret`, over plain HTTPS, without [client-go](https://github.com/kubernetes/client-go)).
-- Matching uses host, cleaned path and method, most specific first. A request for a host no policy
-  covers is not inspected. A request for a covered host that matches no path gets that host's most
+- Matching uses host, cleaned path and method, most specific first. An exact host wins over a
+  wildcard, and a longer wildcard over a shorter one. A wildcard (`*.example.com`) matches one
+  label from an Ingress, as Ingress defines, and subdomains at any depth (`a.b.example.com`) from an
+  HTTPRoute, as the [Gateway API](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) defines
+  (the bundle's `wildcard_any_depth`; engines before 0.3.0 ignore it and match one label). Neither
+  matches `example.com` itself. A request for a host no policy covers is not inspected. A request for a covered host that matches no path gets that host's most
   general policy, so normalization differences can't skip inspection.
 - Engines send their security events on the same stream, in `EventBatch`es of up to 1,000
   (`pkg/events`, [§5.4](#54-event-schema)). The operator drops and counts the events beyond that.

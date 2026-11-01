@@ -19,9 +19,10 @@ var errNoRule = errors.New("no such rule")
 
 // httpRouteMatches expands an HTTPRoute into route matches: its hostnames ×
 // its rules' matches, or only the matches of the rule named section when it
-// isn't empty. No hostnames match any host, and a rule without matches is
-// PathPrefix /. A match the engine can't express (a regular expression
-// path, headers, query parameters) is an error naming the rule.
+// isn't empty. No hostnames match any host, a wildcard hostname matches
+// subdomains at any depth, and a rule without matches is PathPrefix /. A
+// match the engine can't express (a regular expression path, headers, query
+// parameters) is an error naming the rule.
 func httpRouteMatches(hr *gatewayv1.HTTPRoute, section string) ([]*bundlev1.RouteMatch, error) {
 	hosts := []string{""}
 	if len(hr.Spec.Hostnames) > 0 {
@@ -56,7 +57,8 @@ func httpRouteMatches(hr *gatewayv1.HTTPRoute, section string) ([]*bundlev1.Rout
 				return nil, fmt.Errorf("%s: %w", where, err)
 			}
 			for _, host := range hosts {
-				rm := &bundlev1.RouteMatch{Host: host, Path: pm, Methods: methods}
+				rm := &bundlev1.RouteMatch{Host: host, Path: pm, Methods: methods,
+					WildcardAnyDepth: strings.HasPrefix(host, "*.")}
 				// Matches that differ only in what the engine doesn't match
 				// on are one route to the engine.
 				if k := routeKey(rm); !seen[k] {
