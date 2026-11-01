@@ -267,6 +267,16 @@ func testEnvoyGateway(ctx context.Context, t *testing.T, c client.Client) {
 		t.Fatal(err)
 	}
 	eventually(t, "the operator's buffer limit gives way to the user's", gone(wiring.ClientTrafficPolicyGVK, edge, "inkwall-waf-plain"))
+	// Envoy Gateway's default buffer, 32 KiB, cuts bodies under the
+	// policy's 64 KiB: reported, the route still wired.
+	eventually(t, "WiringFailed with a buffer under the policy's limit", programmed("eg", metav1.ConditionFalse, wiring.ReasonWiringFailed,
+		"the ClientTrafficPolicy user-plain of Gateway plain buffers 32768 bytes of a body, less than the 65536 a policy on HTTPRoute api inspects: raise its connection.bufferLimit"))
+	if _, err := get(wiring.EnvoyExtensionPolicyGVK, ns, "inkwall-waf-api"); err != nil {
+		t.Fatalf("the route unwired: %v", err)
+	}
+	update(ctx, t, c, userCTP, func(u *unstructured.Unstructured) {
+		_ = unstructured.SetNestedField(u.Object, "64Ki", "spec", "connection", "bufferLimit")
+	})
 	eventually(t, "Programmed with the user's buffer limit", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
 	if err := c.Delete(ctx, userCTP); err != nil {
 		t.Fatal(err)

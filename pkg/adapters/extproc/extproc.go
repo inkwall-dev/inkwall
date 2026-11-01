@@ -16,7 +16,12 @@
 // doesn't send that way (NONE, STREAMED, ...) goes uninspected, and is
 // handled like a body over the policy's limit (body.onOversize). With
 // BUFFERED_PARTIAL, a body Envoy cut at its buffer limit is handled the
-// same way.
+// same way. Envoy sends a body without end_of_stream when it cut it, but
+// also when trailers follow (HTTP/2), and then sends no trailers message:
+// Envoy Gateway can't ask for them. Such a body counts as complete only
+// when it is under the limit and as long as its Content-Length says: one
+// without Content-Length may have been cut at a buffer the engine doesn't
+// know, so it is handled as oversized.
 //
 // In observability mode (detect mode) Envoy doesn't wait for the answers,
 // and the adapter sends none. The body comes in chunks there (STREAMED, the
@@ -148,7 +153,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 		if err != nil && x.observe && x.waiting {
 			// Envoy sent no more of the body: decide on what came, even
 			// though the stream is gone.
-			x.req.Body, x.req.BodyTruncated = x.streamed, true
+			x.setBody(x.streamed, false)
 			s.verdict(context.WithoutCancel(ctx), x, phaseRequestBody)
 		}
 		if errors.Is(err, io.EOF) {
@@ -262,23 +267,35 @@ func (x *exchange) fillBody(b *extprocv3.HttpBody) bool {
 			return false
 		}
 	}
+	// BUFFERED sends the whole body, trailers or not.
+	x.setBody(body, b.GetEndOfStream() || x.bodyMode == filterv3.ProcessingMode_BUFFERED)
+	return true
+}
+
+// setBody sets the request's body, up to the limit. A body without
+// end_of_stream (eos) was cut, or trailers follow: it is complete only when
+// it is under the limit and has its full Content-Length.
+func (x *exchange) setBody(body []byte, eos bool) {
 	x.waiting = false
-	// BUFFERED sends the whole body (trailers may follow); BUFFERED_PARTIAL
-	// sends it without end_of_stream when it was cut at the buffer limit.
-	complete := b.GetEndOfStream() || x.bodyMode == filterv3.ProcessingMode_BUFFERED
+	n := int64(len(body))
+	complete := eos || n < x.limit && n == x.contentLength()
 	if complete && x.req.Headers.Get("Content-Length") == "" && x.req.Headers.Get("Transfer-Encoding") == "" {
 		// HTTP/2 clients may omit Content-Length; as in SnapshotHeaders,
 		// rules must not see a body without either header.
 		x.req.Headers.Set("Content-Length", strconv.Itoa(len(body)))
 	}
-	if int64(len(body)) > x.limit {
-		x.req.Body = body[:x.limit]
-		x.req.BodyTruncated = true
-		return true
+	x.req.Body = body[:min(n, x.limit)]
+	x.req.BodyTruncated = n > x.limit || !complete
+}
+
+// contentLength returns the request's Content-Length, or -1 without a
+// valid one.
+func (x *exchange) contentLength() int64 {
+	length, err := strconv.ParseInt(x.req.Headers.Get("Content-Length"), 10, 64)
+	if err != nil || length < 0 {
+		return -1
 	}
-	x.req.Body = body
-	x.req.BodyTruncated = !complete
-	return true
+	return length
 }
 
 // onResponse continues the response stages: the request was decided

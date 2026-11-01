@@ -20,6 +20,7 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -73,6 +74,12 @@ const (
 	// body ext_proc holds for the engine: the largest body a policy
 	// inspects. A body cut at it is handled as an oversized one.
 	envoyBufferLimit = policy.MaxBodyBytes
+	// envoyDefaultBufferLimit is Envoy Gateway's, for a ClientTrafficPolicy
+	// that doesn't set connection.bufferLimit.
+	envoyDefaultBufferLimit = 32 << 10
+	// engineBodyBytes is how much of a body the engine inspects for a
+	// policy that doesn't set body.maxBytes (its --max-body-bytes).
+	engineBodyBytes = 64 << 10
 	// messageMargin is how much longer than the engine's deadline Envoy
 	// waits for its answer, so the engine decides, with the policy's
 	// failure mode: the deadline doesn't cover sending the body to the
@@ -166,6 +173,8 @@ type envoyRoute struct {
 type routeSettings struct {
 	// body: a policy inspects bodies.
 	body bool
+	// maxBody is the largest body.maxBytes of those policies.
+	maxBody int64
 	// timeout is the longest engine deadline.
 	timeout time.Duration
 	// failOpen: every policy lets requests through when the engine fails.
@@ -263,6 +272,8 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 	wanted := map[types.NamespacedName]bool{}
 	// limits are the operator's ClientTrafficPolicies, by Gateway.
 	limits := map[types.NamespacedName]string{}
+	// theirs are the user's, with their buffer limit.
+	theirs := map[types.NamespacedName]userLimit{}
 	if st.egCRDs {
 		sidecar, err := e.sidecar(ctx)
 		if err != nil {
@@ -321,7 +332,7 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 		// 3. Envoy's buffer limit on the Gateways with routes whose body
 		// is inspected.
 		for gw := range buffered {
-			switch name, err := e.ensureBufferLimit(ctx, st.gateways[gw]); {
+			switch name, user, err := e.ensureBufferLimit(ctx, st.gateways[gw]); {
 			case err != nil:
 				errs = append(errs, fmt.Errorf("ensure the ClientTrafficPolicy of Gateway %s: %w", gw, err))
 			case name != "":
@@ -329,6 +340,20 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 			default:
 				// The user's own: the operator's goes.
 				delete(buffered, gw)
+				theirs[gw] = user
+			}
+		}
+		// A user's buffer below a policy's limit cuts bodies the engine
+		// would inspect. The engine handles those it can tell as
+		// oversized, but legitimate ones may get it too: not in force as
+		// the policy says.
+		for k := range wanted {
+			r := routes[k]
+			for _, gw := range r.gateways {
+				if u, ok := theirs[gw]; ok && r.buffered() && u.bytes < r.maxBody && failed[k] == "" {
+					failed[k] = fmt.Sprintf("the ClientTrafficPolicy %s of Gateway %s buffers %d bytes of a body, less than the %d a policy on HTTPRoute %s inspects: raise its connection.bufferLimit",
+						u.name, gw.Name, u.bytes, r.maxBody, k.Name)
+				}
 			}
 		}
 		// 4. The rest goes, in reverse: a route stops calling the engine
@@ -490,6 +515,11 @@ func settingsOf(policies []wafv1alpha1.WAFPolicy, route types.NamespacedName) ro
 		}
 		if b := p.Spec.Body; b == nil || b.Inspect == nil || *b.Inspect {
 			s.body = true
+			limit := int64(engineBodyBytes)
+			if b != nil && b.MaxBytes != nil {
+				limit = *b.MaxBytes
+			}
+			s.maxBody = max(s.maxBody, limit)
 		}
 		if p.Spec.Timeout != nil {
 			s.timeout = max(s.timeout, p.Spec.Timeout.Duration)
@@ -684,32 +714,62 @@ func number(v any) (float64, bool) {
 	return 0, false
 }
 
+// userLimit is the user's ClientTrafficPolicy for a Gateway, and the
+// buffer limit it gives Envoy.
+type userLimit struct {
+	name  string
+	bytes int64
+}
+
 // ensureBufferLimit gives a Gateway the operator's ClientTrafficPolicy, and
-// returns its name, unless the user has one for it: Envoy Gateway applies
-// one per Gateway, so the operator's would take its place.
-func (e *EnvoyGateway) ensureBufferLimit(ctx context.Context, gw *gatewayv1.Gateway) (string, error) {
+// returns its name, unless the user has one for it, which it returns:
+// Envoy Gateway applies one per Gateway, so the operator's would take its
+// place.
+func (e *EnvoyGateway) ensureBufferLimit(ctx context.Context, gw *gatewayv1.Gateway) (string, userLimit, error) {
 	if gw == nil {
-		return "", nil
+		return "", userLimit{}, nil
 	}
 	theirs, err := e.userTrafficPolicy(ctx, gw)
 	switch {
 	case err != nil:
-		return "", err
-	case theirs != "":
-		log.FromContext(ctx).V(1).Info("the Gateway has a ClientTrafficPolicy: its connection.bufferLimit caps the bodies inspected", "gateway", gw.Namespace+"/"+gw.Name, "clienttrafficpolicy", theirs)
-		return "", nil
+		return "", userLimit{}, err
+	case theirs != nil:
+		return "", userLimit{name: theirs.GetName(), bytes: bufferLimitOf(theirs)}, nil
 	}
 	p := bufferLimit(gw)
-	return p.GetName(), e.ensure(ctx, p)
+	return p.GetName(), userLimit{}, e.ensure(ctx, p)
 }
 
-// userTrafficPolicy names a ClientTrafficPolicy, not the operator's, that
-// targets a Gateway.
-func (e *EnvoyGateway) userTrafficPolicy(ctx context.Context, gw *gatewayv1.Gateway) (string, error) {
+// bufferLimitOf returns the buffer limit a ClientTrafficPolicy gives Envoy,
+// in bytes: its connection.bufferLimit, or Envoy Gateway's default. One
+// that doesn't parse, which Envoy Gateway refuses, counts as 0.
+func bufferLimitOf(p *unstructured.Unstructured) int64 {
+	v, ok, _ := unstructured.NestedFieldNoCopy(p.Object, "spec", "connection", "bufferLimit")
+	if !ok {
+		return envoyDefaultBufferLimit
+	}
+	var q resource.Quantity
+	switch v := v.(type) {
+	case int64:
+		return v
+	case float64:
+		return int64(v)
+	case string:
+		var err error
+		if q, err = resource.ParseQuantity(v); err != nil {
+			return 0
+		}
+	}
+	return q.Value()
+}
+
+// userTrafficPolicy returns a ClientTrafficPolicy, not the operator's, that
+// targets a Gateway, or nil.
+func (e *EnvoyGateway) userTrafficPolicy(ctx context.Context, gw *gatewayv1.Gateway) (*unstructured.Unstructured, error) {
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(ClientTrafficPolicyGVK.GroupVersion().WithKind("ClientTrafficPolicyList"))
 	if err := e.Client.List(ctx, list, client.InNamespace(gw.Namespace)); err != nil {
-		return "", err
+		return nil, err
 	}
 	for i := range list.Items {
 		p := &list.Items[i]
@@ -722,11 +782,11 @@ func (e *EnvoyGateway) userTrafficPolicy(ctx context.Context, gw *gatewayv1.Gate
 		}
 		for _, r := range refs {
 			if ref, _ := r.(map[string]any); ref["kind"] == "Gateway" && ref["name"] == gw.Name {
-				return p.GetName(), nil
+				return p, nil
 			}
 		}
 	}
-	return "", nil
+	return nil, nil
 }
 
 // accepted reads whether Envoy Gateway accepted one of the operator's

@@ -67,9 +67,19 @@ a Unix socket). It answers the stream of one request as follows:
 - **Body:** when the policy inspects bodies and Envoy sends the body in one message
   (`request_body_mode: BUFFERED` or `BUFFERED_PARTIAL`), the verdict waits for it. Envoy holds the
   headers meanwhile. A body Envoy sends otherwise (`NONE`, `STREAMED` outside observability mode),
-  or cuts at its buffer limit (`BUFFERED_PARTIAL` without `end_of_stream`), goes uninspected and is
-  handled like an oversized one (`body.onOversize`). The engine reads the mode from
-  `protocol_config`, which Envoy sends from 1.33.
+  or cuts at its buffer limit, goes uninspected and is handled like an oversized one
+  (`body.onOversize`). The engine reads the mode from `protocol_config`, which Envoy sends from 1.33.
+- **Cut or trailers:** Envoy sends a body without `end_of_stream` when it cut it at its buffer
+  limit, but also when trailers follow (HTTP/2), whatever the body's size. It then sends no
+  trailers message: Envoy Gateway can't ask for them (`request_trailer_mode` stays `SKIP`), and
+  even then it would come after the verdict. So the engine takes such a body as complete, and
+  inspects it, only when it is under the policy's limit and as long as its `Content-Length`. A
+  body without `Content-Length` (HTTP/2 or chunked) may have been cut at a buffer smaller than
+  the limit, which the engine doesn't know (the user's own `ClientTrafficPolicy`), so it is
+  handled as oversized: with trailers and no `Content-Length`, a request gets `body.onOversize`.
+  Bodies a client sends whole get no less inspection: under `Allow`, padding a body past the
+  limit skips it as well. The operator reports a user's buffer below a policy's limit
+  ([0004 §4.4](0004-operator.md#44-wiring-controller)).
 - **Protocol:** the client's protocol (`HTTP/1.0`, `HTTP/1.1`, `HTTP/2`, `HTTP/3`) is Envoy's
   `request.protocol` [attribute](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/advanced/attributes),
   when the filter sends it (`request_attributes`); `HTTP/1.1` otherwise.
@@ -81,8 +91,8 @@ a Unix socket). It answers the stream of one request as follows:
 - **`observability_mode`:** the request is inspected and logged, and nothing is answered. Envoy
   sends the body in chunks there (`STREAMED`, the only body mode it allows, whatever
   `protocol_config` says): the engine gathers them up to the policy's limit, decides at the end of the body or past the limit (`body.onOversize`), and then closes the
-  stream, so Envoy sends no more. A stream that ends before the body does is decided on what came,
-  as a cut body.
+  stream, so Envoy sends no more. A stream that ends with no last chunk, as when trailers follow,
+  is decided on what came, as a body without `end_of_stream` above.
 - **Client IP:** from `X-Forwarded-For`, which Envoy's connection manager sets before the filter
   runs, walked through `--trusted-proxies` ([client IP](../client-ip.md)). A Unix-socket peer
   counts as loopback, `127.0.0.1`.

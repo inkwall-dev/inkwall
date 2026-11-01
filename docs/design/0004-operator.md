@@ -488,7 +488,9 @@ integration), for `HTTPRoute` targets whose parent Gateways have a GatewayClass 
   `inkwall-waf-<gateway>`, owned by it, with `connection.bufferLimit: 10Mi`, the largest
   `body.maxBytes`. Envoy Gateway applies one ClientTrafficPolicy per Gateway, so the operator makes
   none for a Gateway the user targets with their own, and deletes its own once they add one; their
-  `bufferLimit` then caps the bodies inspected.
+  `bufferLimit` then caps the bodies inspected. One below the largest `body.maxBytes` of a route's
+  policies (unset: the engine's 64 KiB) is `WiringFailed`, naming the ClientTrafficPolicy, with
+  the route still wired: bodies over it are handled as oversized, legitimate ones too.
 - **Unprotected routes get nothing**, and cost 0. A route that is no longer protected loses its
   `EnvoyExtensionPolicy` first; the `Backend`, `ClientTrafficPolicy` and engine go after.
 - **`Programmed`** counts a route wired once Envoy Gateway has accepted (`Accepted=True` for every

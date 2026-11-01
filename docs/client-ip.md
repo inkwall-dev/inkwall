@@ -138,8 +138,10 @@ Envoy Gateway applies one `ClientTrafficPolicy` per Gateway. The operator create
 `inkwall-waf-<gateway>`, which raises Envoy's buffer limit so the engine gets whole bodies, only
 for a Gateway that has none of yours, and deletes it once you add yours. Your
 `connection.bufferLimit` then caps the bodies inspected: set it to at least the largest
-`body.maxBytes` of your policies (Envoy's default buffer is 32 KiB). If you delete yours, the
-operator creates its own again.
+`body.maxBytes` of your policies (Envoy's default buffer is 32 KiB). Below it, bodies over your
+buffer are handled as oversized (`body.onOversize`), and the policy's `Programmed` condition is
+`WiringFailed`, naming your ClientTrafficPolicy. If you delete yours, the operator creates its own
+again.
 
 The kind end-to-end test doesn't check the client IP through Envoy Gateway yet. Check it as below,
 with the engine's logs in an Envoy pod (`-c inkwall-engine`).

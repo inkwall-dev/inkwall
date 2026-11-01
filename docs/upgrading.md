@@ -153,6 +153,8 @@ Without any configuration on your part, the upgrade changes the following:
 - **Your `ClientTrafficPolicy` wins.** When you add a `ClientTrafficPolicy` for a Gateway that has
   the operator's (`inkwall-waf-<gateway>`), the operator deletes its own, and your
   `connection.bufferLimit` then caps the bodies inspected ([client IP](client-ip.md#envoy-gateway)).
+  One below a policy's `body.maxBytes` (32 KiB when unset, under the engine's 64 KiB) makes the
+  policy's `Programmed` condition `WiringFailed`.
 
 Traefik's pods keep their 0.2.x engine until they restart, so restart Traefik after the upgrade.
 The 0.2.x engine keeps enforcing its rules, but misses what 0.3.0 changed in the engine: it sends
