@@ -129,6 +129,14 @@ helm-lint: ## Lint the Helm chart and render it with each webhook certificate mo
 	helm template inkwall $(CHART) --namespace inkwall-system --set controlPlane.caBundle=ca --set controlPlane.enrollmentToken=t >/dev/null
 	@# As helm upgrade --reuse-values from 0.1.0 renders it: values without controlPlane.
 	helm template inkwall $(CHART) --namespace inkwall-system --set controlPlane=null >/dev/null
+	@# The proxy namespaces reach the operator and the Pod webhook, also
+	@# without the value (--reuse-values from an older chart); none is an error.
+	helm template inkwall $(CHART) --namespace inkwall-system --set injection.proxyNamespaces=null | grep -- '--proxy-namespaces=traefik,kube-system$$' >/dev/null
+	helm template inkwall $(CHART) --namespace inkwall-system --set 'injection.proxyNamespaces={ingress}' | grep -A5 'namespaceSelector:' | grep -- '- ingress$$' >/dev/null
+	! helm template inkwall $(CHART) --namespace inkwall-system --set 'injection.proxyNamespaces={*}' | grep namespaceSelector
+	! helm template inkwall $(CHART) --namespace inkwall-system --set 'injection.proxyNamespaces={}' >/dev/null 2>&1
+	@# What the chart looks up in a cluster, against envtest.
+	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))" CHART=$(abspath $(CHART)) $(GO) test -count=1 ./hack/helmcheck
 
 .PHONY: tidy
 tidy: ## Tidy go.mod and go.sum, here and in test/crs (which builds against this module)

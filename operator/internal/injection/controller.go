@@ -175,7 +175,9 @@ func (r *Reconciler) reconcileTrust(ctx context.Context, namespace string) (reco
 
 // reconcileGrant keeps one Role and RoleBinding in the operator's namespace
 // that let every proxy pod's ServiceAccount get the bundle Secret and its
-// chunks.
+// chunks: the pods in the proxy namespaces, as a pod's labels alone prove
+// nothing (the manager caches only those). The distribution server accepts
+// an engine on this grant.
 func (r *Reconciler) reconcileGrant(ctx context.Context) error {
 	var pods corev1.PodList
 	if err := r.Client.List(ctx, &pods, client.MatchingLabelsSelector{Selector: r.Pods}); err != nil {

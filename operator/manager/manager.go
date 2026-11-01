@@ -118,6 +118,10 @@ type Options struct {
 	// up to SelectorRestartMaxDelay (0: DefaultSelectorRestartMaxDelay).
 	Integrations            *integrations.Selectors
 	SelectorRestartMaxDelay time.Duration
+	// ProxyNamespaces are the only namespaces where the proxy pods'
+	// selector selects pods (nil: every namespace): only their pods get the
+	// engine and read access to the bundle.
+	ProxyNamespaces integrations.Namespaces
 
 	// Version is the operator's, sent to the optional control plane.
 	Version string
@@ -159,6 +163,14 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			return nil, err
 		}
 	}
+	// Only proxy pods, in the proxy namespaces.
+	pods := cache.ByObject{Label: selectors.PodSelector()}
+	if !o.ProxyNamespaces.Any() {
+		pods.Namespaces = map[string]cache.Config{}
+		for _, ns := range o.ProxyNamespaces {
+			pods.Namespaces[ns] = cache.Config{}
+		}
+	}
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: s,
 		Cache: cache.Options{ByObject: map[client.Object]cache.ByObject{
@@ -167,7 +179,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			&corev1.Secret{}:    {Namespaces: map[string]cache.Config{o.Namespace: {}}},
 			&corev1.ConfigMap{}: {Label: labels.SelectorFromSet(labels.Set{resolver.RulesLabel: "true"})},
 			// Only proxy pods, and RBAC in the operator's namespace.
-			&corev1.Pod{}:         {Label: selectors.PodSelector()},
+			&corev1.Pod{}:         pods,
 			&rbacv1.Role{}:        {Namespaces: map[string]cache.Config{o.Namespace: {}}},
 			&rbacv1.RoleBinding{}: {Namespaces: map[string]cache.Config{o.Namespace: {}}},
 			// Only the Pod webhook's configuration.
@@ -223,10 +235,11 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			OperatorAddr: fmt.Sprintf("%s.%s.svc:%d", o.DistributionService, o.Namespace, o.DistributionPort),
 			BundleSecret: o.Namespace + "/" + bundle.BundleSecret,
 			Integrations: selectors,
+			Namespaces:   o.ProxyNamespaces,
 		}
 		if err := (&injection.PodWebhookReconciler{
 			Client: mgr.GetClient(), ConfigName: webhook.MutatingConfigName, WebhookName: webhook.PodWebhookName,
-			Pods: selectors.LabelSelector(integrations.Traefik.Name),
+			Pods: selectors.LabelSelector(integrations.Traefik.Name), Namespaces: o.ProxyNamespaces,
 		}).SetupWithManager(mgr); err != nil {
 			return nil, err
 		}

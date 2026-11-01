@@ -92,6 +92,19 @@ func TestPodInjector(t *testing.T) {
 		t.Fatalf("not a proxy pod: allowed=%v, %d patches", resp.Allowed, len(resp.Patches))
 	}
 
+	// Outside the proxy namespaces (the namespaceSelector would normally
+	// keep it away): labels prove nothing there.
+	inj = injector(t)
+	inj.Namespaces = integrations.Namespaces{"ingress"}
+	resp = inj.Handle(ctx, podRequest(t, traefik))
+	if !resp.Allowed || len(resp.Patches) != 0 {
+		t.Fatalf("outside the proxy namespaces: allowed=%v, %d patches", resp.Allowed, len(resp.Patches))
+	}
+	inj.Namespaces = integrations.Namespaces{"ingress", "traefik"}
+	if resp := inj.Handle(ctx, podRequest(t, traefik)); len(resp.Patches) == 0 {
+		t.Error("a Traefik pod in a proxy namespace was not injected")
+	}
+
 	// InkwallConfig sets the image and resources.
 	cfg := &wafv1alpha1.InkwallConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: "default"},

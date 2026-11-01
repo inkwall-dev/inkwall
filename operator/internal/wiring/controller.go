@@ -673,7 +673,8 @@ func programmed(p *wafv1alpha1.WAFPolicy, st *state) (metav1.ConditionStatus, st
 	case len(pods) == 0:
 		// Nothing is wired then (Reconcile).
 		return metav1.ConditionFalse, ReasonSidecarMissing, "no Traefik pod selected for the engine is running, so the routes are not wired " +
-			"(new Traefik pods would have no engine to call); if Traefik runs, the InkwallConfig's selector for it doesn't match its pods"
+			"(new Traefik pods would have no engine to call); if Traefik runs, its namespace isn't one of the proxy namespaces (the chart's injection.proxyNamespaces), " +
+			"or the InkwallConfig's selector for it doesn't match its pods"
 	case len(missed) > 0 || len(optedOut) > 0:
 		var why []string
 		if len(missed) > 0 {

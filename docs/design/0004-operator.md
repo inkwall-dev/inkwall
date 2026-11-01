@@ -214,7 +214,7 @@ proxy.
 **Built (v0.1.0)** (`operator/internal/injection`, `operator/webhook/inject.go`):
 
 - **The webhook.** `inkwall-operator-mutating` sees only Traefik pods
-  (`app.kubernetes.io/name=traefik`), at creation. It is installed with `Ignore`. The leader sets
+  (`app.kubernetes.io/name=traefik`) in the proxy namespaces, at creation. It is installed with `Ignore`. The leader sets
   `Fail` while any policy blocks, and sets it again after a Helm upgrade. It patches with the
   [`resourceVersion`](https://kubernetes.io/docs/reference/using-api/api-concepts/#resource-versions), so it never overwrites a fresh CA bundle. If `InkwallConfig` can't be read,
   the engine is injected with defaults rather than left out.
@@ -222,6 +222,15 @@ proxy.
   [`objectSelector`](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/#matching-requests-objectselector). They start even while the webhook fails closed and the operator is down: this
   is how to scale the proxy before the operator returns. The annotation of the same name works only
   while the webhook answers. Pods that already have an `inkwall-engine` container are left alone.
+- **Proxy namespaces.** A selector's labels prove nothing: anyone who may create a pod may set
+  them. The bundle a proxy pod's ServiceAccount may read holds every namespace's policies and
+  rules, and the distribution server accepts an engine on that grant. So the operator only looks
+  for proxy pods in the proxy namespaces (`--proxy-namespaces`, the chart's
+  `injection.proxyNamespaces`): `traefik` and `kube-system` by default, or `*` for every
+  namespace. The pod cache watches only those namespaces, the webhook's `namespaceSelector` names
+  them (the leader keeps it, and the webhook itself also checks), and only their pods get the
+  trust ConfigMap and the grant. A Traefik running elsewhere gets no engine; its routes are
+  reported `SidecarMissing` and left unwired. Before 0.2.2 and 0.1.5, every namespace was a proxy namespace.
 - **Custom selectors.** A non-empty `InkwallConfig.spec.integrations[].selector` replaces Traefik's
   label everywhere: the pod cache, the webhook, the controllers and the `objectSelector`. It is read
   at startup. When it changes, each replica restarts after a random delay of up to 30 s
@@ -465,7 +474,8 @@ leader-only. Losing a replica just moves its engines to another.
   names the Service; engines verify it with the operator CA.
 - **Authentication.** A [`TokenReview`](https://kubernetes.io/docs/reference/kubernetes-api/authentication-resources/token-review-v1/) (audience `inkwall-operator`), then a [`SubjectAccessReview`](https://kubernetes.io/docs/reference/access-authn-authz/authorization/#checking-api-access)
   that the engine's ServiceAccount may `get` the bundle Secret (the grant from
-  [§4.3](#43-injection-controller)). Results are cached for 1 min.
+  [§4.3](#43-injection-controller), to proxy pods in the proxy namespaces only, or a Role of the
+  user's for an engine configured by hand). Results are cached for 1 min.
 - **Streams.** The first message must be `Hello`. Engines that are already current aren't sent the
   bundle again. Streams silent for 30 s are closed. At most 50 sends run at once. A stream waiting
   for a send slot, or sending, still reads its engine's heartbeats (#148).

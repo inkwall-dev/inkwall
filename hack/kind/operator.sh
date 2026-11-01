@@ -18,6 +18,12 @@ CHART=${CHART:-deploy/helm/inkwall}
 read -r -a OPERATOR_ARGS <<<"${OPERATOR_ARGS:-}"
 NAMESPACE=inkwall-system
 KUBECTL=(kubectl --context "kind-$CLUSTER")
+# The injection checks below: a proxy namespace, and one that isn't.
+CHECK_NS=inkwall-inject-check
+OTHER_NS=inkwall-inject-other
+# The proxy namespaces: kind-up's Traefik, the e2e tests', and the
+# injection check's.
+PROXY_NAMESPACES=${PROXY_NAMESPACES:-traefik,traefik-e2e,$CHECK_NS}
 
 if ! kind get clusters | grep -x "$CLUSTER" >/dev/null; then
   echo "no kind cluster $CLUSTER: run make kind-up first" >&2
@@ -43,6 +49,7 @@ helm --kube-context "kind-$CLUSTER" upgrade --install inkwall "$CHART" \
   --set engine.image.repository="${ENGINE_IMAGE%:*}" \
   --set engine.image.tag="${ENGINE_IMAGE##*:}" \
   --set engine.image.pullPolicy=Never \
+  --set "injection.proxyNamespaces={$PROXY_NAMESPACES}" \
   ${extra_args[@]+"${extra_args[@]}"}
 # Pick up a rebuilt image with the same tag.
 if $existed; then
@@ -150,7 +157,6 @@ fi
 # Injection on a real kubelet: a pod labeled like Traefik's gets the engine
 # as a native sidecar, which starts with its token and trust ConfigMap and
 # connects to the operator.
-CHECK_NS=inkwall-inject-check
 "${KUBECTL[@]}" apply -f - >/dev/null <<YAML
 apiVersion: v1
 kind: Namespace
@@ -191,7 +197,42 @@ else
   fail "the injected engine isn't connected to the operator"
   "${KUBECTL[@]}" -n "$CHECK_NS" logs proxy -c inkwall-engine --tail=20 || true
 fi
-"${KUBECTL[@]}" delete namespace "$CHECK_NS" --wait=false >/dev/null
+
+# The same pod outside the proxy namespaces is no proxy pod: no engine, and
+# its ServiceAccount isn't granted the bundle.
+"${KUBECTL[@]}" apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $OTHER_NS
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: proxy
+  namespace: $OTHER_NS
+  labels:
+    app.kubernetes.io/name: traefik
+spec:
+  containers:
+    - name: proxy
+      image: traefik/whoami:v1.10.3
+YAML
+# The check pod's grant shows the operator has reconciled since.
+granted=""
+for _ in $(seq 30); do
+  granted=$("${KUBECTL[@]}" -n "$NAMESPACE" get rolebinding inkwall-bundle-reader -o jsonpath='{range .subjects[*]}{.namespace}{" "}{end}')
+  [[ " $granted " == *" $CHECK_NS "* ]] && break
+  sleep 1
+done
+if [[ -z $("${KUBECTL[@]}" -n "$OTHER_NS" get pod proxy -o jsonpath='{.spec.initContainers[*].name}') &&
+  " $granted " == *" $CHECK_NS "* && " $granted " != *" $OTHER_NS "* ]] &&
+  ! "${KUBECTL[@]}" auth can-i get secret/inkwall-bundle -n "$NAMESPACE" --as "system:serviceaccount:$OTHER_NS:default" >/dev/null 2>&1; then
+  ok "a pod labeled like Traefik's outside the proxy namespaces gets no engine and no access to the bundle"
+else
+  fail "a pod outside the proxy namespaces: engine [$("${KUBECTL[@]}" -n "$OTHER_NS" get pod proxy -o jsonpath='{.spec.initContainers[*].name}')], granted namespaces [$granted]"
+fi
+"${KUBECTL[@]}" delete namespace "$CHECK_NS" "$OTHER_NS" --wait=false >/dev/null
 
 if [[ $failures -gt 0 ]]; then
   echo "$failures check(s) failed"
