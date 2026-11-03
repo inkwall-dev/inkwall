@@ -146,7 +146,7 @@ inspected for data leaks: SQL errors, stack traces, directory listings, source c
 the user's own rules look for (a secret, a leaked system prompt).
 
 **Policy API.** `WAFPolicy.spec.responses`, off unless set, so nothing changes for existing
-policies:
+policies (`maxBytes` and `onOversize` without `inspect: true` are refused):
 
 ```yaml
 responses:
@@ -156,7 +156,8 @@ responses:
 ```
 
 The bundle carries it as `Policy.responses` (`ResponseConfig`). Engines before 0.4.0 ignore the
-field.
+field, so a policy that sets it isn't `Enforced` (`EnginesOutdated`) while one runs it, as for
+`webSocket`.
 
 **Rules.** The request's Coraza transaction is kept open for its response, and the response runs
 phases 3 (status and headers) and 4 (body): the response rules see what the request rules set
@@ -208,15 +209,24 @@ none: its 101 is continued, and the upgraded stream's data is never inspected.
 
 **Envoy Gateway (operator).** Only routes whose policies inspect responses get
 `processingMode.response` (`body: BufferedPartial`, `Streamed` in shadow mode) and
-`allowModeOverride: true` in their `EnvoyExtensionPolicy`; other routes keep the response stages
-`SKIP`. Envoy's buffer is the Gateway's `ClientTrafficPolicy` limit (10 MiB), above any
-`maxBytes`.
+`processingMode.allowModeOverride: true` in their `EnvoyExtensionPolicy`; other routes keep the
+response stages off. Envoy holds a response body in the same per-connection buffer as a request
+body, so a Gateway with a route whose responses Envoy holds (not in shadow mode) gets the
+operator's `ClientTrafficPolicy` (10 MiB) even when no policy inspects request bodies; a user's
+own `bufferLimit` below the route's largest `responses.maxBytes` is `WiringFailed`, as for
+`body.maxBytes`.
 
-**Traefik.** ForwardAuth never sees the response, so Traefik can't inspect responses yet (a
-Traefik middleware plugin or the engine's reverse proxy in front of the app are the options for
-later). A policy with `responses.inspect` on a Traefik route is not silently half-enforced: the
-operator reports it on the policy (`Programmed` stays true for the requests it inspects, with a
-`ResponsesNotInspected` condition naming the routes), and the docs say Envoy Gateway is required.
+**Traefik.** ForwardAuth never sees the response, so Traefik can't inspect responses (a Traefik
+middleware plugin or the engine's reverse proxy in front of the app are the options for later). A
+policy with `responses.inspect` on a route Traefik serves is not silently half-enforced: it is
+`Programmed=False`, reason `ResponsesNotInspected`, naming the routes (and so not `Ready`), though
+Traefik's routes are wired and their requests inspected. A separate condition was considered, with
+`Programmed` true for the requests: rejected, because `Ready` would then claim the whole policy is
+enforced. The admission webhook warns of `Ingress` and `IngressRoute` targets (only Traefik serves
+them) when such a policy is applied. The same holds for any integration whose `Result` doesn't
+set `Responses`: only Envoy Gateway's does. Istio's (v0.4.0) doesn't: its `EnvoyFilter` sends no
+response phase yet (#323), so a policy with `responses.inspect` on an Istio route is
+`ResponsesNotInspected` too, and the Gateway's buffer limit isn't raised for responses.
 
 **Latency and memory.** A route that inspects responses adds one evaluation per response
 (phases 3 and 4; the CRS response rules are a few dozen, mostly `@pmFromFile` and `@rx` on the
@@ -246,9 +256,12 @@ so none can be told to inspect one. With `--operator` they are refused, as the o
 (`CheckExchange`, `CheckResponse`), decoding, events and metrics, the ext_proc response stages
 (with `FuzzExtProcResponse`), and the flags, so raw Envoy can inspect responses with the policy
 from flags (`make raw-envoy-e2e` checks a leaked SQL error is replaced in block mode and logged in
-detect mode). **Not yet:** the CRD field and the operator's wiring and status (Envoy Gateway's
-response processing mode, the Traefik condition); until then no operator-made bundle sets
-`responses`.
+detect mode). **Built (operator):** the CRD field and its validation, the bundle field from it,
+Envoy Gateway's response processing mode and buffer limit, `ResponsesNotInspected` for the
+other proxies, the webhook's warning; envtest, and the kind e2e through Envoy Gateway (a leaked
+SQL error replaced in Block mode, logged in Detect mode, and the policy not `Programmed` for its
+Traefik Ingress). **Not yet:** streamed responses (Server-Sent Events, gRPC streams) inspected
+per chunk or message; responses through Traefik; the reverse proxy adapter's responses.
 
 ## 3. forward-auth (Traefik `ForwardAuth`, nginx `auth_request`)
 
@@ -334,6 +347,12 @@ Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/inkwall/issues/282)); 
   resolved with `X-Forwarded-For` through `--trusted-proxies`.
 - Detect mode answers `allow`; HAProxy still waits for the answer (SPOP 2.0 has no asynchronous
   mode any more).
+- **The operator's probe** (bundle mode, [0002 §6.4](0002-system-architecture.md#64-haproxy-haproxy-kubernetes-ingress-controller-haproxy-ingress)): a request whose
+  `X-Inkwall-Probe` header is `<nonce>.<MAC>`, the MAC an HMAC-SHA256 of the nonce, host and URI
+  under the bundle's `probe_key`, is answered without inspection: `action=deny` (403) and the
+  variable `probe`, another HMAC of them under the key, which the operator's per-route rules
+  return with status 299 (`pkg/haproxyprobe`). Without a key, or with a wrong MAC, the request is
+  inspected as any other.
 - Routes are left uninspected with a condition on the message's `event`; the fail-closed rule
   must leave them out too.
 

@@ -139,6 +139,16 @@ func testWiring(ctx context.Context, t *testing.T, c client.Client) {
 	}
 	want("Programmed after the restart", condition(web, wafv1alpha1.ConditionProgrammed), metav1.ConditionTrue, wiring.ReasonProgrammed, "")
 
+	// Responses: Traefik's ForwardAuth can't send them to the engine, so a
+	// policy that inspects them is not Programmed (nor Ready) on its
+	// routes, though their requests are inspected; off again, it is.
+	update(ctx, t, c, web, func(p *wafv1alpha1.WAFPolicy) { p.Spec.Responses = &wafv1alpha1.ResponsesSpec{Inspect: true} })
+	want("ResponsesNotInspected", condition(web, wafv1alpha1.ConditionProgrammed), metav1.ConditionFalse, wiring.ReasonResponsesNotInspected,
+		"Traefik can't send responses to the engine: Ingress web's requests are inspected, its responses are not")
+	want("not Ready", condition(web, wafv1alpha1.ConditionReady), metav1.ConditionFalse, wiring.ReasonResponsesNotInspected, "Programmed: responses.inspect is set")
+	update(ctx, t, c, web, func(p *wafv1alpha1.WAFPolicy) { p.Spec.Responses = nil })
+	want("Programmed without responses", condition(web, wafv1alpha1.ConditionProgrammed), metav1.ConditionTrue, wiring.ReasonProgrammed, "")
+
 	// An Ingress another controller serves.
 	legacy := targeting("store", "legacy", "legacy")
 	create(legacy)

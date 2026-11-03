@@ -178,6 +178,31 @@ func TestEnforcedOutdatedEngine(t *testing.T) {
 			t.Errorf("%s: message %q doesn't name the field, the engine and the version", tc.name, c.Message)
 		}
 	}
+	// Responses too (#274): an engine before 0.4.0 inspects requests only.
+	for _, tc := range []struct {
+		name     string
+		spec     *wafv1alpha1.ResponsesSpec
+		versions []string
+		reason   string
+	}{
+		{"responses, 0.3.1 engine", &wafv1alpha1.ResponsesSpec{Inspect: true}, []string{"0.4.0", "0.3.1"}, ReasonEnginesOutdated},
+		{"responses, new engines", &wafv1alpha1.ResponsesSpec{Inspect: true}, []string{"0.4.0"}, ReasonEnforced},
+		{"responses off", &wafv1alpha1.ResponsesSpec{}, []string{"0.3.1"}, ReasonEnforced},
+	} {
+		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
+		p.Spec.Responses = tc.spec
+		p.Status.BundleVersion = 3
+		var engines []Engine
+		for i, v := range tc.versions {
+			engines = append(engines, Engine{ID: fmt.Sprintf("e%d", i), PodNamespace: "edge", PodName: fmt.Sprintf("envoy-%d", i), EngineVersion: v, Applied: 3})
+		}
+		conds, _ := enforcedConditions(p, 3, false, engines, 0)
+		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
+		if c == nil || c.Reason != tc.reason || tc.reason == ReasonEnginesOutdated && !strings.Contains(c.Message, "spec.responses") {
+			t.Errorf("%s: Enforced %+v, want %s", tc.name, c, tc.reason)
+		}
+	}
+
 	// Behind comes first: the engine doesn't run the bundle at all.
 	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
 	p.Spec.WebSocket = ws

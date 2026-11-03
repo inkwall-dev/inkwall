@@ -87,6 +87,10 @@ type Result struct {
 	// Disabled: the integration is disabled, and why (Disable); the
 	// targets its proxy serves aren't wired.
 	Disabled string
+	// Responses: the proxy sends the engine the responses of the targets
+	// whose policies inspect them. Unset, such a policy is not Programmed
+	// on its targets (ResponsesNotInspected).
+	Responses bool
 }
 
 // TargetState is a target as an integration sees it.

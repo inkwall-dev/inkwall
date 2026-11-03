@@ -8,6 +8,7 @@
 package policy
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -69,11 +70,16 @@ type Policy struct {
 type Set struct {
 	version   uint64
 	suspended bool
+	probeKey  []byte
 	policies  []*Policy
 	match     *matcher
 }
 
 var _ pipeline.Inspector = (*Set)(nil)
+
+// ProbeKey is the key of the operator's HAProxy probe, nil if the bundle
+// has none.
+func (s *Set) ProbeKey() []byte { return s.probeKey }
 
 // Version is the bundle's version.
 func (s *Set) Version() uint64 { return s.version }
@@ -147,7 +153,7 @@ func Compile(b *bundlev1.Bundle, o Options) (*Set, error) {
 	for _, rs := range b.GetRuleSets() {
 		ruleSets[rs.GetId()] = rs
 	}
-	set := &Set{version: b.GetVersion(), suspended: b.GetSuspended()}
+	set := &Set{version: b.GetVersion(), suspended: b.GetSuspended(), probeKey: bytes.Clone(b.GetProbeKey())}
 	var routes []route
 	used := map[[sha256.Size]byte]bool{}
 	ids := map[string]bool{}
@@ -372,6 +378,14 @@ var _ pipeline.Inspector = (*Holder)(nil)
 
 // Store makes s the active set.
 func (h *Holder) Store(s *Set) { h.set.Store(s) }
+
+// ProbeKey is the active set's probe key, nil before the first set.
+func (h *Holder) ProbeKey() []byte {
+	if s := h.set.Load(); s != nil {
+		return s.probeKey
+	}
+	return nil
+}
 
 // Load returns the active set, nil before the first.
 func (h *Holder) Load() *Set { return h.set.Load() }

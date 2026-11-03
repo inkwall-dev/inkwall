@@ -50,6 +50,11 @@ message Bundle {
   // is in this one (its status.bundleVersion), so a new leader continues it.
   // Empty in bundles of operators before v0.3.0.
   repeated uint64 policy_versions = 8;
+  // The key of the operator's HAProxy probe (0002 §6.4): the SPOE adapter
+  // answers a request to /.well-known/inkwall-probe/ whose X-Inkwall-Probe
+  // header is a MAC under this key, so the operator can tell that HAProxy
+  // runs the filter on a route. 32 random bytes, or empty: no probes.
+  bytes probe_key = 9;
 }
 
 // Policy is one WAFPolicy, applied to the requests its routes match. A

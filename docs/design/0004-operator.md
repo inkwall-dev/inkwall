@@ -160,7 +160,7 @@ Validation runs in three steps, cheapest first:
 | Condition | True when | False reasons |
 |---|---|---|
 | `Accepted` | Spec valid, references resolve, and the bundle with it fits | `InvalidRef` (also a rule set that isn't usable), `Conflict`, `TargetUnsupported`, `BundleTooLarge` |
-| `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `IntegrationDisabled`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `Pending`, `NoTargets`, `InjectionDisabled`, `Unwired` |
+| `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `IntegrationDisabled`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `Pending`, `NoTargets`, `ResponsesNotInspected`, `InjectionDisabled`, `Unwired` |
 | `Enforced` | Every serving engine ACKed a bundle with this generation, and inspection isn't suspended | `EnginesBehind`, `EngineNack` (first error), `EnginesUnreported`, `EnginesOutdated`, `NoEngines`, `NotInBundle`, `Suspended` |
 | `Ready` | The three above are True | `Suspended` while inspection is suspended, else the first failing condition's reason; `NotAccepted`, `NotProgrammed` or `NotEnforced` while it isn't reported yet |
 
@@ -470,6 +470,9 @@ longer needed.
   wired and
   every running Traefik pod has the engine. Otherwise the reason is one of:
   - `ControllerUnsupported`: another controller or kind;
+  - `ResponsesNotInspected`: the policy inspects responses (`responses.inspect`), which
+    ForwardAuth can't send to the engine; the routes are wired, their requests inspected
+    ([0006 §2](0006-adapter-protocols.md#response-inspection-v040));
   - `IntegrationDisabled`: the operator may not wire the target's proxy, and which permissions it
     lacks ([§7](#7-rbac));
   - `WiringFailed`: no Traefik CRDs, a name clash, a route that can't be written, or an HTTPRoute
@@ -514,7 +517,9 @@ integration), for `HTTPRoute` targets whose parent Gateways have a GatewayClass 
     would refuse the whole policy, the route's other rules with it. Its
     ext_proc filter ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing))
     sends the request headers with the `request.protocol` attribute, and the body
-    (`BufferedPartial`) when a policy on the route inspects bodies; no response stage; `messageTimeout` the route's longest policy timeout (250 ms by
+    (`BufferedPartial`) when a policy on the route inspects bodies; the response headers and body
+    (`BufferedPartial`, `allowModeOverride: true`) only when a policy on it inspects responses
+    ([0006 §2](0006-adapter-protocols.md#response-inspection-v040)); `messageTimeout` the route's longest policy timeout (250 ms by
     default) plus 500 ms, so the engine decides, by its deadline and with the policy's failure
     mode (the deadline doesn't cover sending the body or a busy node); Envoy's timeout is for a
     hung engine;
@@ -526,12 +531,12 @@ integration), for `HTTPRoute` targets whose parent Gateways have a GatewayClass 
     must be on (`config.envoyGateway.extensionApis.enableBackend: true` in its chart).
 - **Envoy's buffer limit.** Envoy hands ext_proc at most its per-connection buffer (32 KiB by
   default) of a body; a body cut there is handled as an oversized one (`body.onOversize`). Each
-  Gateway with a route whose body Envoy holds for the engine (not in shadow mode) gets a `ClientTrafficPolicy`,
+  Gateway with a route whose request or response body Envoy holds for the engine (not in shadow mode) gets a `ClientTrafficPolicy`,
   `inkwall-waf-<gateway>`, owned by it, with `connection.bufferLimit: 10Mi`, the largest
   `body.maxBytes`. Envoy Gateway applies one ClientTrafficPolicy per Gateway, so the operator makes
   none for a Gateway the user targets with their own, and deletes its own once they add one; their
   `bufferLimit` then caps the bodies inspected. One below the largest `body.maxBytes` of a route's
-  policies (unset: the engine's 64 KiB) is `WiringFailed`, naming the ClientTrafficPolicy, with
+  policies (unset: the engine's 64 KiB), or its largest `responses.maxBytes` (unset: 64 KiB), is `WiringFailed`, naming the ClientTrafficPolicy, with
   the route still wired: bodies over it are handled as oversized, legitimate ones too. While the
   operator can't create or update its own (an admission policy refuses it, say), the routes whose
   body Envoy holds are `WiringFailed` with the error, still wired, until it's there and accepted.

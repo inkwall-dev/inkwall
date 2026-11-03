@@ -383,8 +383,13 @@ type Bundle struct {
 	// is in this one (its status.bundleVersion), so a new leader continues it.
 	// Empty in bundles of operators before v0.3.0.
 	PolicyVersions []uint64 `protobuf:"varint,8,rep,packed,name=policy_versions,json=policyVersions,proto3" json:"policy_versions,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// The key of the operator's HAProxy probe (0002 §6.4): the SPOE adapter
+	// answers a request to /.well-known/inkwall-probe/ whose X-Inkwall-Probe
+	// header is a MAC under this key, so the operator can tell that HAProxy
+	// runs the filter on a route. 32 random bytes, or empty: no probes.
+	ProbeKey      []byte `protobuf:"bytes,9,opt,name=probe_key,json=probeKey,proto3" json:"probe_key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Bundle) Reset() {
@@ -469,6 +474,13 @@ func (x *Bundle) GetSuspended() bool {
 func (x *Bundle) GetPolicyVersions() []uint64 {
 	if x != nil {
 		return x.PolicyVersions
+	}
+	return nil
+}
+
+func (x *Bundle) GetProbeKey() []byte {
+	if x != nil {
+		return x.ProbeKey
 	}
 	return nil
 }
@@ -1197,7 +1209,7 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\fSignedBundle\x12\x16\n" +
 	"\x06bundle\x18\x01 \x01(\fR\x06bundle\x12\x1c\n" +
 	"\tsignature\x18\x02 \x01(\fR\tsignature\x12\x15\n" +
-	"\x06key_id\x18\x03 \x01(\tR\x05keyId\"\xd6\x02\n" +
+	"\x06key_id\x18\x03 \x01(\tR\x05keyId\"\xf3\x02\n" +
 	"\x06Bundle\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x04R\aversion\x12\x1d\n" +
 	"\n" +
@@ -1208,7 +1220,8 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\bpolicies\x18\x05 \x03(\v2\x19.inkwall.bundle.v1.PolicyR\bpolicies\x127\n" +
 	"\trule_sets\x18\x06 \x03(\v2\x1a.inkwall.bundle.v1.RuleSetR\bruleSets\x12\x1c\n" +
 	"\tsuspended\x18\a \x01(\bR\tsuspended\x12'\n" +
-	"\x0fpolicy_versions\x18\b \x03(\x04R\x0epolicyVersions\"\xef\x04\n" +
+	"\x0fpolicy_versions\x18\b \x03(\x04R\x0epolicyVersions\x12\x1b\n" +
+	"\tprobe_key\x18\t \x01(\fR\bprobeKey\"\xef\x04\n" +
 	"\x06Policy\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x125\n" +
 	"\x06routes\x18\x02 \x03(\v2\x1d.inkwall.bundle.v1.RouteMatchR\x06routes\x12+\n" +
