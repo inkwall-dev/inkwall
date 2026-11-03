@@ -56,7 +56,7 @@ func TestHAProxySnippet(t *testing.T) {
 func TestHAProxyAnnotate(t *testing.T) {
 	ctx := context.Background()
 	ing := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "web", Annotations: map[string]string{
-		HAProxySnippetAnnotation: "http-request set-header X-Mine 1", HAProxyStandaloneAnnotation: "false",
+		HAProxySnippetAnnotation: "http-request set-header X-Mine 1\n", HAProxyStandaloneAnnotation: "false",
 	}}}
 	c := fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).WithObjects(ing).Build()
 	ours := HAProxySnippet(false, true)
@@ -65,7 +65,7 @@ func TestHAProxyAnnotate(t *testing.T) {
 	}
 	a := ing.Annotations
 	if a[HAProxyStandaloneAnnotation] != "true" || !strings.HasPrefix(a[HAProxySnippetAnnotation], ours+"\n") ||
-		!strings.HasSuffix(a[HAProxySnippetAnnotation], "http-request set-header X-Mine 1") || a[HAProxyWiredAnnotation] != "false" {
+		!strings.HasSuffix(a[HAProxySnippetAnnotation], "http-request set-header X-Mine 1\n") || a[HAProxyWiredAnnotation] != "false" {
 		t.Fatalf("annotations %v", a)
 	}
 	rv := ing.ResourceVersion
@@ -82,7 +82,8 @@ func TestHAProxyAnnotate(t *testing.T) {
 	if err := annotateHAProxy(ctx, c, ing, ""); err != nil {
 		t.Fatal(err)
 	}
-	if a := ing.Annotations; a[HAProxySnippetAnnotation] != "http-request set-header X-Mine 1" || a[HAProxyStandaloneAnnotation] != "false" {
+	// Exactly as it was, its final newline (a YAML block's) included.
+	if a := ing.Annotations; a[HAProxySnippetAnnotation] != "http-request set-header X-Mine 1\n" || a[HAProxyStandaloneAnnotation] != "false" {
 		t.Fatalf("unwired: %v", a)
 	}
 	if _, ok := ing.Annotations[HAProxyWiredAnnotation]; ok {

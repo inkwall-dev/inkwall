@@ -160,13 +160,14 @@ func HAProxySnippet(failOpen, body bool) string {
 // withSnippet returns a backend snippet with the operator's part (ours,
 // empty: none) first, and the user's lines after it, kept as they were.
 func withSnippet(current, ours string) string {
+	// The user's text stays byte for byte: only the operator's part, and
+	// the newline that joined it to theirs, go.
 	user := current
 	if i := strings.Index(current, haproxySnippetBegin); i >= 0 {
 		if j := strings.Index(current[i:], haproxySnippetEnd); j >= 0 {
-			user = current[:i] + current[i+j+len(haproxySnippetEnd):]
+			user = current[:i] + strings.TrimPrefix(current[i+j+len(haproxySnippetEnd):], "\n")
 		}
 	}
-	user = strings.Trim(user, "\n")
 	switch {
 	case ours == "":
 		return user
