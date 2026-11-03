@@ -118,7 +118,7 @@ func (d *disabledIntegration) serves(ctx context.Context, t Target) (bool, error
 			}
 		}
 		c := Controller(&ing, classes, defaultClass)
-		return c != "" && c == d.proxy.Controller, nil
+		return d.proxy.ServesIngresses(c), nil
 	case httpRouteKind:
 		var hr gatewayv1.HTTPRoute
 		if ok, err := d.get(ctx, t.Key, &hr); !ok {

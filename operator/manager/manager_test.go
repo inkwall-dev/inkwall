@@ -115,7 +115,7 @@ func startOperator(t *testing.T) (_ context.Context, _ client.Client, _ *warning
 
 		DistributionPort:     distPort,
 		Inject:               true,
-		ProxyNamespaces:      integrations.Namespaces{"proxy", "eg-system", "istio-edge", "istio-gw"},
+		ProxyNamespaces:      integrations.Namespaces{"proxy", "eg-system", "istio-edge", "istio-gw", "haproxy-edge"},
 		EngineImage:          "inkwall-engine:test",
 		EnginePullPolicy:     corev1.PullNever,
 		Replica:              "operator-0",
@@ -196,6 +196,7 @@ func TestOperator(t *testing.T) {
 	t.Run("envoy gateway", func(t *testing.T) { testEnvoyGateway(ctx, t, c) })
 	t.Run("mixed gateways", func(t *testing.T) { testMixedGateways(ctx, t, c) })
 	t.Run("istio", func(t *testing.T) { testIstio(ctx, t, c) })
+	t.Run("haproxy", func(t *testing.T) { testHAProxy(ctx, t, c) })
 	t.Run("istio ingress", func(t *testing.T) { testIstioIngress(ctx, t, c) })
 	t.Run("failure policy", func(t *testing.T) { testFailurePolicy(ctx, t, c) })
 	t.Run("source guard", func(t *testing.T) { testSourceGuard(ctx, t, c) })

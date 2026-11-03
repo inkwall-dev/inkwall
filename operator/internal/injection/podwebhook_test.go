@@ -26,7 +26,7 @@ func TestPodWebhookListsWithoutCopies(t *testing.T) {
 	_ = wafv1alpha1.AddToScheme(s)
 	cfg := &admissionregistrationv1.MutatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{Name: "inkwall"},
-		Webhooks:   []admissionregistrationv1.MutatingWebhook{{Name: "pods.inkwall.dev"}, {Name: "istio-pods.inkwall.dev"}},
+		Webhooks:   []admissionregistrationv1.MutatingWebhook{{Name: "pods.inkwall.dev"}},
 	}
 	policy := &wafv1alpha1.WAFPolicy{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "checkout"},
@@ -43,10 +43,8 @@ func TestPodWebhookListsWithoutCopies(t *testing.T) {
 		},
 	}).Build()
 
-	r := &PodWebhookReconciler{Client: c, ConfigName: "inkwall", Webhooks: map[string]*metav1.LabelSelector{
-		"pods.inkwall.dev":       {MatchLabels: map[string]string{"app.kubernetes.io/name": "traefik"}},
-		"istio-pods.inkwall.dev": {MatchLabels: map[string]string{"istio": "ingressgateway"}},
-	}}
+	r := &PodWebhookReconciler{Client: c, ConfigName: "inkwall", WebhookName: "pods.inkwall.dev",
+		Pods: &metav1.LabelSelector{MatchLabels: map[string]string{"app.kubernetes.io/name": "traefik"}}}
 	if _, err := r.Reconcile(context.Background(), podWebhookRequest); err != nil {
 		t.Fatal(err)
 	}
@@ -56,12 +54,7 @@ func TestPodWebhookListsWithoutCopies(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(cfg), cfg); err != nil {
 		t.Fatal(err)
 	}
-	for _, wh := range cfg.Webhooks {
-		if fp := wh.FailurePolicy; fp == nil || *fp != admissionregistrationv1.Fail {
-			t.Errorf("%s: failurePolicy %v, want Fail: a policy is in block mode", wh.Name, fp)
-		}
-	}
-	if sel := cfg.Webhooks[1].ObjectSelector; sel == nil || sel.MatchLabels["istio"] != "ingressgateway" {
-		t.Errorf("istio-pods.inkwall.dev: objectSelector %v", sel)
+	if fp := cfg.Webhooks[0].FailurePolicy; fp == nil || *fp != admissionregistrationv1.Fail {
+		t.Errorf("failurePolicy %v, want Fail: a policy is in block mode", fp)
 	}
 }

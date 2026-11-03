@@ -280,21 +280,20 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			Namespaces:   o.ProxyNamespaces,
 			Disabled:     denied,
 		}
-		// The Pod webhooks serve Traefik's pods and Istio's ingress
-		// gateway pods: none of a disabled integration's, so they start
-		// without an engine nothing would wire.
-		podWebhooks := map[string]*metav1.LabelSelector{}
-		for name, in := range map[string]string{webhook.PodWebhookName: integrations.Traefik.Name, webhook.IstioIngressPodWebhookName: integrations.IstioIngress.Name} {
-			podWebhooks[name] = selectors.LabelSelector(in)
-			if denied[in] != "" {
-				podWebhooks[name] = integrations.NoPods()
+		// The Pod webhooks serve Traefik's pods, HAProxy's and Istio's
+		// ingress gateways': none of an integration that is disabled, so
+		// they start without an engine nothing would wire.
+		for name, integration := range webhook.PodWebhooks {
+			pods := selectors.LabelSelector(integration)
+			if denied[integration] != "" {
+				pods = integrations.NoPods()
 			}
-		}
-		if err := (&injection.PodWebhookReconciler{
-			Client: mgr.GetClient(), ConfigName: webhook.MutatingConfigName, Webhooks: podWebhooks,
-			Namespaces: o.ProxyNamespaces,
-		}).SetupWithManager(mgr); err != nil {
-			return nil, err
+			if err := (&injection.PodWebhookReconciler{
+				Client: mgr.GetClient(), ConfigName: webhook.MutatingConfigName, WebhookName: name, Pods: pods,
+				Namespaces: o.ProxyNamespaces,
+			}).SetupWithManager(mgr); err != nil {
+				return nil, err
+			}
 		}
 		if err := mgr.Add(&selectorWatch{client: mgr.GetClient(), current: selectors, maxDelay: o.SelectorRestartMaxDelay}); err != nil {
 			return nil, err
@@ -312,10 +311,16 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	}
 	// Without injection, the wiring controller unwires what was wired: new
 	// proxy pods won't have the engine.
+	// HAProxy's routes are Programmed once probed (0002 §6.4).
+	prober := &wiring.HAProxyProber{Reader: mgr.GetAPIReader(), Namespace: o.Namespace}
+	if err := mgr.Add(prober); err != nil {
+		return nil, err
+	}
 	wiringCfg := wiring.Config{
 		Pods: selectors, IngressRoutes: ingressRoutes, HTTPRoutes: httpRoutes, Gateways: gateways, GatewayClasses: gatewayClasses,
 		EnvoyProxies: envoyProxies, ExtensionPolicies: extensionPolicies, TrafficPolicies: trafficPolicies, EnvoyFilters: envoyFilters,
 		VirtualServices: virtualServices, IstioGateways: istioGateways, Sidecar: sidecar,
+		HAProxyProber: prober,
 	}
 	wirings := wiring.Integrations(mgr.GetClient(), mgr.GetAPIReader(), wiringCfg)
 	// An integration the operator may not wire neither watches nor reads

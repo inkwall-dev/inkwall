@@ -174,7 +174,7 @@ func (c *Connector) integrations(ctx context.Context) ([]*controlplanev1.Integra
 			return nil, fmt.Errorf("%s pods: %w", ig.Name, err)
 		}
 		in := &controlplanev1.Integration{
-			Name: ig.Name, Controller: ig.Controller, GatewayController: ig.GatewayController, Disabled: c.Disabled[ig.Name],
+			Name: ig.Name, Controller: ingressController(ig), GatewayController: ig.GatewayController, Disabled: c.Disabled[ig.Name],
 		}
 		for i := range pods.Items {
 			p := &pods.Items[i]
@@ -231,4 +231,13 @@ func (s *stateSender) changed(st *controlplanev1.ClusterState, force bool) (bool
 	st.Time = t
 	sum := sha256.Sum256(raw)
 	return force || sum != s.last || time.Since(s.sentAt) >= s.resend, sum
+}
+
+// ingressController is an integration's IngressClass controller, with "*"
+// for the name of the user's that follows a prefix (HAProxy's).
+func ingressController(ig integrations.Integration) string {
+	if ig.ControllerPrefix != "" {
+		return ig.ControllerPrefix + "*"
+	}
+	return ig.Controller
 }

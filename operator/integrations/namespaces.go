@@ -19,9 +19,10 @@ const AnyNamespace = "*"
 
 // DefaultNamespaces are the proxy namespaces unless configured: Traefik's
 // (its own, or kube-system, where k3s and RKE2 run it), Envoy Gateway's,
-// and those Istio's docs put its Gateways in (Istio runs a Gateway's pods
-// in the Gateway's namespace).
-var DefaultNamespaces = Namespaces{"traefik", "kube-system", "envoy-gateway-system", "istio-ingress", "istio-system"}
+// those Istio's docs put its Gateways in (Istio runs a Gateway's pods in
+// the Gateway's namespace), and the HAProxy Kubernetes Ingress
+// Controller's.
+var DefaultNamespaces = Namespaces{"traefik", "kube-system", "envoy-gateway-system", "istio-ingress", "istio-system", "haproxy-controller"}
 
 // Namespaces are the proxy namespaces (0004 §4.3): the namespaces whose
 // pods an integration's selector may select. Only their pods get the

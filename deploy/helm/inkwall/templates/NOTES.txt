@@ -26,6 +26,11 @@ HTTPRoute and VirtualService a WAFPolicy targets to the engine:
   the route's Gateway through the ConfigMap its parametersRef names, and
   Istio rolls them itself.
 
+- The HAProxy Kubernetes Ingress Controller (Ingresses): the engine is
+  injected into the controller's pods when they start (restart those that
+  ran before the install), and a route is Programmed once the operator's
+  probe has proven the filter on every pod.
+
 - Istio's ingress gateways (VirtualServices bound to Istio's own Gateways):
   the engine is injected into the gateway's pods (label
   istio=ingressgateway) when they start; restart the ones already running:
@@ -36,7 +41,7 @@ Only proxy pods in these namespaces get the engine (injection.proxyNamespaces):
 
   {{ include "inkwall.proxyNamespaces" . }}
 
-If Traefik, Envoy Gateway or an Istio Gateway runs in another namespace
+If Traefik, Envoy Gateway, an Istio Gateway or the HAProxy controller runs in another namespace
 (Istio runs a Gateway's pods in the Gateway's namespace), add it to
 injection.proxyNamespaces: its routes are not wired until then.
 

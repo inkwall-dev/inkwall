@@ -71,15 +71,27 @@ What's new in 0.4.0:
   [protecting HAProxy](haproxy.md). Nothing changes in an existing installation.
 - **Bundles carry a probe key** (`probe_key`, derived from the signing key): the first bundle after
   the upgrade is a new version with the same policies. Engines before 0.4.0 ignore it.
+- **The HAProxy Kubernetes Ingress Controller** (3.1 or later) is wired by the operator: a
+  `WAFPolicy` on one of its Ingresses gives the controller's pods the engine (restart them after the
+  upgrade) and the Ingress a backend snippet of its own, and the policy is `Programmed` once the
+  operator's probe has proven the filter on every pod (`Unverified` until then). The new
+  `inkwall-operator-haproxy` ClusterRole is granted by `rbac.integrations.haproxy` (`true` by
+  default), and `haproxy-controller` joins the default `injection.proxyNamespaces`. See [with the
+  operator](haproxy.md#with-the-operator-haproxy-kubernetes-ingress-controller).
 
 What changes by itself in 0.4.0:
 
+- **A new ClusterRole, `inkwall-operator-haproxy`**, granted by default (`rbac.integrations.haproxy:
+  true`, also with `--reuse-values`): it writes the backend snippet annotations of the HAProxy
+  Kubernetes Ingress Controller's Ingresses. A second Pod webhook, `haproxy.pods.waf.inkwall.dev`,
+  injects the engine into that controller's pods, and `haproxy-controller` is a default proxy
+  namespace. A cluster without that controller is unaffected.
 - **A new ClusterRole, `inkwall-operator-istio`**, granted by default (`rbac.integrations.istio:
   true`, also with `--reuse-values`): it writes `EnvoyFilter` objects and ConfigMaps, and patches
   Gateways. Set it to `auto` to grant it only when the cluster serves Istio's API, or `false`
   never to; without it the operator disables the Istio integration ([integration
   permissions](../deploy/helm/inkwall/README.md#integration-permissions)).
-- **A second Pod webhook and ClusterRole for Istio's ingress gateways.** Pods labelled `istio:
+- **A Pod webhook and a ClusterRole for Istio's ingress gateways.** Pods labelled `istio:
   ingressgateway` (the label of Istio's `gateway` chart released as `istio-ingressgateway`) in the
   proxy namespaces get the engine when they are created, as Traefik's do, also before any policy
   targets a VirtualService; the ClusterRole `inkwall-operator-istio-ingress`

@@ -50,9 +50,9 @@ The names below are for a release named `inkwall`.
 | CRDs (`waf.inkwall.dev`) | Installed and upgraded with the chart, kept on uninstall (`crds.install`) |
 | [`Deployment`](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) `inkwall-operator` | 2 replicas with [leader election](https://kubernetes.io/docs/concepts/architecture/leases/#leader-election); non-root, read-only root filesystem, no capabilities |
 | [`PodDisruptionBudget`](https://kubernetes.io/docs/concepts/workloads/pods/disruptions/#pod-disruption-budgets) | When `operator.replicas` is more than 1 |
-| [`ServiceAccount`](https://kubernetes.io/docs/concepts/security/service-accounts/), [`ClusterRole`, `Role` and bindings](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) | Rules generated from the operator's code; the `Role` covers the release namespace only. Each integration has a `ClusterRole` of its own, `inkwall-operator-traefik`, `inkwall-operator-envoy-gateway`, `inkwall-operator-istio` and `inkwall-operator-istio-ingress`, granted unless `rbac.integrations` leaves it out: see [integration permissions](#integration-permissions) |
+| [`ServiceAccount`](https://kubernetes.io/docs/concepts/security/service-accounts/), [`ClusterRole`, `Role` and bindings](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) | Rules generated from the operator's code; the `Role` covers the release namespace only. Each integration has a `ClusterRole` of its own, `inkwall-operator-traefik`, `inkwall-operator-envoy-gateway`, `inkwall-operator-istio`, `inkwall-operator-istio-ingress` and `inkwall-operator-haproxy`, granted unless `rbac.integrations` leaves it out: see [integration permissions](#integration-permissions) |
 | `ValidatingWebhookConfiguration` `inkwall-operator-validating` | WAF kinds only; fails closed, 2 s timeout |
-| `MutatingWebhookConfiguration` `inkwall-operator-mutating` | Two Pod webhooks: Traefik pods and Istio ingress gateway pods (`istio: ingressgateway`) in the [proxy namespaces](#proxy-namespaces) only, at creation; fail open, or closed while a policy is in block mode (`injection.enabled`) |
+| `MutatingWebhookConfiguration` `inkwall-operator-mutating` | Three Pod webhooks: Traefik pods, the HAProxy Kubernetes Ingress Controller's and Istio ingress gateway pods (`istio: ingressgateway`) in the [proxy namespaces](#proxy-namespaces) only, at creation; fail open, or closed while a policy is in block mode (`injection.enabled`) |
 | [`Service`](https://kubernetes.io/docs/concepts/services-networking/service/) `inkwall-operator-webhook` | The webhooks |
 | `Service` `inkwall-operator` | Bundle distribution to the engines: [gRPC](https://grpc.io/docs/) over [TLS](https://www.rfc-editor.org/rfc/rfc8446) on port 9445 |
 | Webhook certificate | A [`Secret`](https://kubernetes.io/docs/concepts/configuration/secret/) the operator fills, or a [cert-manager](https://cert-manager.io/docs/) [`Certificate`](https://cert-manager.io/docs/usage/certificate/) |
@@ -76,11 +76,11 @@ from the operator's generated manifests. Don't edit `files/` by hand.
 | `operator.podDisruptionBudget.enabled`, `minAvailable` | `true`, `1` | |
 | `engine.image.repository`, `tag`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-engine`, the chart's `appVersion`, `IfNotPresent` | The engine injected into Traefik pods and put into Envoy Gateway's Envoy pods and Istio's Gateway pods; `InkwallConfig.spec.engine.image` overrides it |
 | `injection.enabled` | `true` | Inject the engine into Traefik pods when they are created. `false`: see [turning injection off](#turning-injection-off) |
-| `injection.proxyNamespaces` | `[traefik, kube-system, envoy-gateway-system, istio-ingress, istio-system]` | The namespaces the proxies' pods run in; only pods there get the engine and the policy bundle. See [proxy namespaces](#proxy-namespaces) |
+| `injection.proxyNamespaces` | `[traefik, kube-system, envoy-gateway-system, istio-ingress, istio-system, haproxy-controller]` | The namespaces the proxies' pods run in; only pods there get the engine and the policy bundle. See [proxy namespaces](#proxy-namespaces) |
 | `controlPlane.caBundle` | `""` | The optional control plane's CA (PEM), when its certificate isn't from a public CA, e.g. `--set-file controlPlane.caBundle=ca.crt` |
 | `controlPlane.enrollmentToken` | `""` | The control plane's one-time enrollment token, stored in the Secret `inkwall-enrollment` (key `token`); or leave it empty and create that Secret yourself |
 | `controlPlane.eventsBufferMiB` | `64` | Each replica's buffer of security events while the control plane is unreachable (an [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir)); when it is full, the oldest events are dropped and counted |
-| `rbac.integrations.traefik`, `envoyGateway`, `istio`, `istioIngress` | `true`, `true`, `true`, `true` | Grant each integration's `ClusterRole`: `true`, `auto` (when the cluster serves the proxy's API group) or `false`. See [integration permissions](#integration-permissions) |
+| `rbac.integrations.traefik`, `envoyGateway`, `istio`, `istioIngress`, `haproxy` | `true`, `true`, `true`, `true`, `true` | Grant each integration's `ClusterRole`: `true`, `auto` (when the cluster serves the proxy's API group) or `false`. See [integration permissions](#integration-permissions) |
 | `uninstall.unwire` | `true` | On `helm uninstall`, unwire the routes first (a pre-delete hook), so they keep working, and remove the operator's [finalizer](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/) from the `WAFPolicy` objects |
 | `serviceAccount.name`, `annotations` | the operator's name (`inkwall-operator`), `{}` | |
 | `crds.install` | `true` | |
@@ -100,7 +100,8 @@ table above.
 The operator recognises a proxy's pods by their labels: Traefik's `app.kubernetes.io/name: traefik`,
 Envoy Gateway's `app.kubernetes.io/name: envoy` and `app.kubernetes.io/managed-by: envoy-gateway`,
 Istio's `gateway.istio.io/managed: istio.io-gateway-controller` (Gateway API) and `istio: ingressgateway`
-(its ingress gateways), or the `InkwallConfig`'s selectors. A proxy pod gets the engine, and its ServiceAccount gets
+(its ingress gateways), the HAProxy Kubernetes Ingress Controller's
+`app.kubernetes.io/name: kubernetes-ingress`, or the `InkwallConfig`'s selectors. A proxy pod gets the engine, and its ServiceAccount gets
 read access to the policy bundle, which holds every namespace's policies and rules; with that
 access, its engine connects to the operator and reports which bundle it enforces.
 
@@ -108,7 +109,8 @@ Anyone who may create a pod may give it those labels ([GHSA-r5cq-6vq5-q8qg](http
 the namespaces listed in `injection.proxyNamespaces`: `traefik`, `kube-system` (where k3s and RKE2
 run Traefik), `envoy-gateway-system` (where Envoy Gateway runs the Envoy pods), and `istio-ingress`
 and `istio-system` (where Istio's docs put Gateways: Istio runs a Gateway's pods in the Gateway's
-namespace) by default. A pod
+namespace), and `haproxy-controller` (where the HAProxy Kubernetes Ingress Controller's docs install
+it) by default. A pod
 with a proxy's labels anywhere else is an ordinary pod: no engine, no access to the bundle. List
 only namespaces whose pods you trust as much as the proxy itself: those where only the people who
 run the proxy create pods.
@@ -140,16 +142,20 @@ Each integration's permissions are in a `ClusterRole` of its own: Traefik's writ
 Middlewares, and the references to them in Ingresses, IngressRoutes and HTTPRoutes; Envoy Gateway's writes its `EnvoyProxy`,
 `EnvoyExtensionPolicy`, `Backend` and `ClientTrafficPolicy` objects and patches Gateways; Istio's
 (`inkwall-operator-istio`) writes its `EnvoyFilter` objects and the ConfigMaps Gateways name in
-their `parametersRef`, and patches Gateways; Istio ingress's (`inkwall-operator-istio-ingress`)
+their `parametersRef`, and patches Gateways; the HAProxy Kubernetes Ingress Controller's
+(`inkwall-operator-haproxy`) writes the backend snippet annotations of its Ingresses (and reads its
+`Backend` kind, so that the role is its own: Traefik's grants the same Ingress access). Without
+it, the controller's pods don't get the engine. Istio ingress's (`inkwall-operator-istio-ingress`)
 reads VirtualServices and Istio's own Gateways and writes its `EnvoyFilter` objects.
-`rbac.integrations.<integration>` (`traefik`, `envoyGateway`, `istio`, `istioIngress`) is one of:
+`rbac.integrations.<integration>` (`traefik`, `envoyGateway`, `istio`, `istioIngress`, `haproxy`) is one of:
 
 - `true`, the default (also when the value is missing, as in `helm upgrade --reuse-values` from
   0.2): always granted, so a proxy installed after Inkwall is protected. On a cluster without the
   proxy, the role names kinds the cluster doesn't serve, which grants nothing usable;
 - `auto`: the role is granted when the cluster serves the proxy's API group
   (`traefik.io/v1alpha1`, `gateway.envoyproxy.io/v1alpha1`, `networking.istio.io/v1alpha3`,
-  `networking.istio.io/v1`) at install or upgrade time, so a
+  `networking.istio.io/v1`, `ingress.v3.haproxy.org/v3`) at
+  install or upgrade time, so a
   cluster without Envoy Gateway doesn't grant the operator its kinds. Install the proxy first, or
   run `helm upgrade` once it is installed. `helm template` and `--dry-run=client` can't ask the
   cluster, so they render every role;

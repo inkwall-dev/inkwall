@@ -107,6 +107,9 @@ func testUninstall(ctx context.Context, t *testing.T, c client.Client, stop func
 		t.Fatal(err)
 	}
 	for _, cm := range left.Items {
+		if cm.Name == injection.HAProxyConfigMap {
+			continue // kept: HAProxy's running pods mount it
+		}
 		t.Errorf("ConfigMap %s/%s left after the uninstall", cm.Namespace, cm.Name)
 	}
 	if err := c.Get(ctx, client.ObjectKeyFromObject(users), &corev1.ConfigMap{}); err != nil {

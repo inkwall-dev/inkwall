@@ -22,8 +22,8 @@ KUBECTL=(kubectl --context "kind-$CLUSTER")
 CHECK_NS=inkwall-inject-check
 OTHER_NS=inkwall-inject-other
 # The proxy namespaces: kind-up's Traefik, the e2e tests' Traefik, Envoy
-# Gateway and Istio Gateways, and the injection check's.
-PROXY_NAMESPACES=${PROXY_NAMESPACES:-traefik,inkwall-e2e,traefik-e2e,envoy-gateway-e2e,istio-e2e,$CHECK_NS}
+# Gateway, Istio Gateways and HAProxy controller, and the injection check's.
+PROXY_NAMESPACES=${PROXY_NAMESPACES:-traefik,inkwall-e2e,traefik-e2e,envoy-gateway-e2e,istio-e2e,haproxy-e2e,$CHECK_NS}
 
 if ! kind get clusters | grep -x "$CLUSTER" >/dev/null; then
   echo "no kind cluster $CLUSTER: run make kind-up first" >&2

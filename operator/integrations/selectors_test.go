@@ -31,7 +31,7 @@ func TestSelectors(t *testing.T) {
 		t.Error("defaults")
 	}
 	// The cache's selectors: one per integration.
-	if got := fmt.Sprint(defaults.PodSelectors()); got != "[app.kubernetes.io/name=traefik app.kubernetes.io/managed-by=envoy-gateway,app.kubernetes.io/name=envoy gateway.istio.io/managed=istio.io-gateway-controller istio=ingressgateway]" {
+	if got := fmt.Sprint(defaults.PodSelectors()); got != "[app.kubernetes.io/name=traefik app.kubernetes.io/managed-by=envoy-gateway,app.kubernetes.io/name=envoy gateway.istio.io/managed=istio.io-gateway-controller app.kubernetes.io/name=kubernetes-ingress istio=ingressgateway]" {
 		t.Errorf("default pod selectors %s", got)
 	}
 
@@ -49,8 +49,8 @@ func TestSelectors(t *testing.T) {
 	if custom.ForPod(edge) == nil || custom.ForPod(edge).Name != "traefik" || custom.ForPod(traefik) != nil {
 		t.Error("the override is not used")
 	}
-	// No key in common with Envoy Gateway's and Istio's selectors: still only their pods.
-	if got := fmt.Sprint(custom.PodSelectors()); got != "[app=edge-proxy app.kubernetes.io/managed-by=envoy-gateway,app.kubernetes.io/name=envoy gateway.istio.io/managed=istio.io-gateway-controller istio=ingressgateway]" {
+	// No key in common with Envoy Gateway's, Istio's or HAProxy's selectors: still only their pods.
+	if got := fmt.Sprint(custom.PodSelectors()); got != "[app=edge-proxy app.kubernetes.io/managed-by=envoy-gateway,app.kubernetes.io/name=envoy gateway.istio.io/managed=istio.io-gateway-controller app.kubernetes.io/name=kubernetes-ingress istio=ingressgateway]" {
 		t.Errorf("pod selectors %s", got)
 	}
 	again, _, _ := FromConfig([]wafv1alpha1.IntegrationSpec{{Controller: "traefik", Selector: &metav1.LabelSelector{MatchLabels: edge}}})
@@ -104,5 +104,20 @@ func TestNamespaces(t *testing.T) {
 	var all Namespaces
 	if !all.Has("tenant") || len(all.LabelSelector().MatchExpressions) != 0 || all.String() != "*" {
 		t.Errorf("nil: every namespace, got %v", all.LabelSelector())
+	}
+}
+
+// The HAProxy controller's IngressClass names its --ingress.class:
+// haproxy.org/ingress-controller/<class>.
+func TestForControllerHAProxy(t *testing.T) {
+	for _, c := range []string{"haproxy.org/ingress-controller/haproxy", "haproxy.org/ingress-controller/edge"} {
+		if in := ForController(c); in == nil || in.Name != HAProxy.Name {
+			t.Errorf("%s: %v", c, in)
+		}
+	}
+	for _, c := range []string{"haproxy.org/ingress-controller/", "haproxy.org/other", "traefik.io/ingress-controller/x"} {
+		if in := ForController(c); in != nil && in.Name == HAProxy.Name {
+			t.Errorf("%s taken for HAProxy's", c)
+		}
 	}
 }

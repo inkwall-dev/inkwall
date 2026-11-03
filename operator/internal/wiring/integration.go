@@ -106,6 +106,9 @@ type TargetState struct {
 	// Pending: wired, but not in force yet, and why (the proxy hasn't
 	// accepted its configuration yet).
 	Pending string
+	// Unverified: wired, but not proven in force yet, and why (HAProxy:
+	// the probe hasn't shown the filter on every pod).
+	Unverified string
 	// Partly: it is wired, but some of its traffic goes through proxies
 	// Inkwall doesn't wire, and which.
 	Partly string
@@ -123,10 +126,13 @@ type Config struct {
 	// Sidecar is the engine Envoy Gateway's and Istio's pods get, before
 	// the InkwallConfig's settings.
 	Sidecar injection.Sidecar
+	// HAProxyProber probes HAProxy's wired routes; nil: none is.
+	HAProxyProber *HAProxyProber
 }
 
 // Integrations are the wiring of every proxy Inkwall integrates: Traefik,
-// Envoy Gateway, Istio's Gateway API and Istio's ingress gateways.
+// Envoy Gateway, Istio (its Gateway API and its ingress gateways) and the HAProxy
+// Kubernetes Ingress Controller.
 func Integrations(c client.Client, reader client.Reader, cfg Config) []Integration {
 	return []Integration{
 		&Traefik{
@@ -142,6 +148,7 @@ func Integrations(c client.Client, reader client.Reader, cfg Config) []Integrati
 			Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.Istio.Name), Sidecar: cfg.Sidecar,
 			HTTPRoutes: cfg.HTTPRoutes, Gateways: cfg.Gateways, GatewayClasses: cfg.GatewayClasses, EnvoyFilters: cfg.EnvoyFilters,
 		},
+		&HAProxy{Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.HAProxy.Name), Prober: cfg.HAProxyProber},
 		&IstioIngress{
 			Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.IstioIngress.Name), PodLabels: plainLabels(cfg.Pods.LabelSelector(integrations.IstioIngress.Name)),
 			VirtualServices: cfg.VirtualServices, Gateways: cfg.IstioGateways, EnvoyFilters: cfg.EnvoyFilters,

@@ -3,10 +3,13 @@
 
 // Package integrations knows the proxies Inkwall wires into (0004 §4.2):
 // how to recognise each one's IngressClass or GatewayClass and pods, and
-// which engine adapter its pods use: Traefik, Envoy Gateway and Istio.
+// which engine adapter its pods use: Traefik, Envoy Gateway, Istio and
+// the HAProxy Kubernetes Ingress Controller.
 package integrations
 
 import (
+	"strings"
+
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -18,6 +21,9 @@ type Integration struct {
 	// Controller is the IngressClass spec.controller of the proxy, if it
 	// serves Ingresses.
 	Controller string
+	// ControllerPrefix, when set, starts the IngressClass spec.controller
+	// of the proxy instead, followed by a name of the user's.
+	ControllerPrefix string
 	// GatewayController is its GatewayClass spec.controllerName, if it
 	// implements the Gateway API.
 	GatewayController string
@@ -86,6 +92,24 @@ var Istio = Integration{
 	Adapter:           []string{"ext-proc", "--listen=unix:" + EnvoySocketDir + "/extproc.sock"},
 }
 
+// HAProxySocketDir holds the engine's Unix socket in the HAProxy
+// Kubernetes Ingress Controller's pods.
+const HAProxySocketDir = "/var/run/inkwall-socket"
+
+// HAProxy is the HAProxy Kubernetes Ingress Controller integration: the
+// engine, injected into the controller's pods with the SPOE agent's
+// configuration, answers the SPOE filter each protected Ingress's backend
+// loads (0002 §6.4), on a Unix socket.
+//
+// Its IngressClasses' controller is haproxy.org/ingress-controller/
+// followed by its --ingress.class (haproxy by default).
+var HAProxy = Integration{
+	Name:             "haproxy",
+	ControllerPrefix: "haproxy.org/ingress-controller/",
+	PodSelector:      labels.Set{"app.kubernetes.io/name": "kubernetes-ingress"},
+	Adapter:          []string{"spoe", "--listen=unix:" + HAProxySocketDir + "/spoe.sock"},
+}
+
 // IstioIngress is the integration of Istio's ingress gateways, the ones its
 // istio/gateway Helm chart deploys, which Istio's own Gateways select and
 // VirtualServices bind to: the engine, injected into their pods by the Pod
@@ -104,17 +128,27 @@ var IstioIngress = Integration{
 }
 
 // All are the known integrations.
-var All = []Integration{Traefik, EnvoyGateway, Istio, IstioIngress}
+var All = []Integration{Traefik, EnvoyGateway, Istio, HAProxy, IstioIngress}
 
 // ForController returns the integration of an IngressClass or GatewayClass
 // controller, or nil when Inkwall doesn't know it.
 func ForController(controller string) *Integration {
 	for i := range All {
-		if controller != "" && (All[i].Controller == controller || All[i].GatewayController == controller) {
+		if All[i].ServesIngresses(controller) || controller != "" && All[i].GatewayController == controller {
 			return &All[i]
 		}
 	}
 	return nil
+}
+
+// ServesIngresses reports whether an IngressClass spec.controller is the
+// integration's.
+func (i *Integration) ServesIngresses(controller string) bool {
+	if i.ControllerPrefix != "" {
+		name, ok := strings.CutPrefix(controller, i.ControllerPrefix)
+		return ok && name != ""
+	}
+	return controller != "" && controller == i.Controller
 }
 
 func byName(name string) *Integration {

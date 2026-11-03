@@ -584,7 +584,7 @@ controller `istio.io/gateway-controller`), with `ext_proc` through an `EnvoyFilt
 - **Engine placement: the Pod webhook, as for Traefik.** The ingress gateway is the user's
   Deployment (Istio's `gateway` Helm chart), and Istio has no API to add a container to it; patching
   the Deployment would drift from the user's Helm release and need write access to every
-  Deployment. A second Pod webhook entry, `istio-ingress-pods.waf.inkwall.dev`, selects pods
+  Deployment. A Pod webhook entry of its own, `istio-ingress.pods.waf.inkwall.dev`, selects pods
   labelled `istio: ingressgateway` (the chart's default, overridable in `InkwallConfig`) in the
   proxy namespaces: a webhook's `objectSelector` can't select either of two label sets, so each
   injected proxy has its own entry, both kept by the operator. It adds the engine and mounts its

@@ -237,7 +237,7 @@ VirtualService a `WAFPolicy` targets with `{group: networking.istio.io, kind: Vi
 ### Engine placement
 
 An ingress gateway from Istio's `gateway` Helm chart is your own Deployment: Istio has no API to
-add a container to it. So, as for Traefik, a Pod webhook (`istio-ingress-pods.waf.inkwall.dev`)
+add a container to it. So, as for Traefik, a Pod webhook (`istio-ingress.pods.waf.inkwall.dev`)
 adds the engine to its pods when they are created, and mounts the engine's socket directory in
 their `istio-proxy` container. It selects pods labelled `istio: ingressgateway` (the chart's label
 for a release named `istio-ingressgateway`; set another in the `InkwallConfig`'s

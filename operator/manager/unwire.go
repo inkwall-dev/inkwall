@@ -112,7 +112,9 @@ func Unwire(ctx context.Context, c client.Client, namespace, deployment string, 
 var managedBy = client.MatchingLabels{"app.kubernetes.io/managed-by": "inkwall-operator"}
 
 // cleanUp deletes the trust ConfigMaps (the operator's, labelled, in any
-// namespace: a user's own is kept), the engine reports, the bundle grant
+// namespace: a user's own is kept; HAProxy's agent ConfigMap stays, as the
+// controller's running pods mount it and couldn't restart a container
+// without it), the engine reports, the bundle grant
 // and the leader Lease.
 func cleanUp(ctx context.Context, c client.Client, namespace string, logger *slog.Logger) error {
 	var cms corev1.ConfigMapList
@@ -167,7 +169,7 @@ func ignorePodWebhook(ctx context.Context, c client.Client) error {
 	}
 	patch := client.MergeFrom(cfg.DeepCopy())
 	for i := range cfg.Webhooks {
-		if name := cfg.Webhooks[i].Name; name == webhook.PodWebhookName || name == webhook.IstioIngressPodWebhookName {
+		if _, pod := webhook.PodWebhooks[cfg.Webhooks[i].Name]; pod {
 			cfg.Webhooks[i].FailurePolicy = ptr.To(admissionregistrationv1.Ignore)
 		}
 	}
