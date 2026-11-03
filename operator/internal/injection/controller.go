@@ -33,7 +33,7 @@ import (
 )
 
 // The controller reads proxy pods, writes the trust ConfigMap in their
-// namespaces, and grants their ServiceAccounts read access to the bundle
+// namespaces (and, for HAProxy's, the agent's configuration), and grants their ServiceAccounts read access to the bundle
 // Secret with a Role and RoleBinding in its own namespace. To grant that,
 // it must itself be allowed to read the Secret (it is).
 //
@@ -127,7 +127,51 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	if req == grantRequest {
 		return reconcile.Result{RequeueAfter: resync}, r.reconcileGrant(ctx)
 	}
-	return r.reconcileTrust(ctx, req.Name)
+	res, err := r.reconcileTrust(ctx, req.Name)
+	if err != nil {
+		return res, err
+	}
+	return res, r.reconcileHAProxy(ctx, req.Name)
+}
+
+// reconcileHAProxy keeps HAProxyConfigMap in a namespace with HAProxy
+// controller pods, and removes the operator's once none is left.
+func (r *Reconciler) reconcileHAProxy(ctx context.Context, namespace string) error {
+	pods, err := r.proxyPods(ctx, namespace)
+	if err != nil {
+		return err
+	}
+	sel := r.Pods.Selector(integrations.HAProxy.Name)
+	want := r.Disabled[integrations.HAProxy.Name] == "" &&
+		slices.ContainsFunc(pods, func(p corev1.Pod) bool { return sel.Matches(labels.Set(p.Labels)) })
+	key := types.NamespacedName{Namespace: namespace, Name: HAProxyConfigMap}
+	var cm corev1.ConfigMap
+	err = r.APIReader.Get(ctx, key, &cm)
+	exists := err == nil
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	switch {
+	case !want && exists && cm.Labels["app.kubernetes.io/managed-by"] == "inkwall-operator":
+		return client.IgnoreNotFound(r.Client.Delete(ctx, &cm))
+	case !want:
+		return nil
+	case !exists:
+		cm = corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: HAProxyConfigMap, Labels: managed()}, Data: HAProxyFiles()}
+		if err := r.Client.Create(ctx, &cm); err != nil {
+			return err
+		}
+		log.FromContext(ctx).Info("HAProxy agent ConfigMap created", "namespace", namespace)
+		return nil
+	case maps.Equal(cm.Data, HAProxyFiles()):
+		return nil
+	}
+	cm.Data = HAProxyFiles()
+	if cm.Labels == nil {
+		cm.Labels = map[string]string{}
+	}
+	maps.Copy(cm.Labels, managed())
+	return r.Client.Update(ctx, &cm)
 }
 
 func managed() map[string]string {

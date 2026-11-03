@@ -27,8 +27,16 @@ const MutatingConfigName = "inkwall-operator-mutating"
 // InjectPath is the Pod webhook's path.
 const InjectPath = "/mutate-v1-pod"
 
-// PodWebhookName is the Pod webhook in MutatingConfigName.
-const PodWebhookName = "pods.waf.inkwall.dev"
+// PodWebhookName is the Pod webhook in MutatingConfigName, for Traefik's
+// pods; HAProxyPodWebhookName, the same handler for the HAProxy
+// Kubernetes Ingress Controller's (a webhook has one objectSelector).
+const (
+	PodWebhookName        = "pods.waf.inkwall.dev"
+	HAProxyPodWebhookName = "haproxy.pods.waf.inkwall.dev"
+)
+
+// PodWebhooks are the Pod webhooks, each with its integration.
+var PodWebhooks = map[string]string{PodWebhookName: integrations.Traefik.Name, HAProxyPodWebhookName: integrations.HAProxy.Name}
 
 // The Pod webhook only sees pods of known proxies (objectSelector), at
 // creation. It is installed failing open (Ignore): a proxy pod starts even
@@ -40,6 +48,7 @@ const PodWebhookName = "pods.waf.inkwall.dev"
 //
 // +kubebuilder:webhookconfiguration:mutating=true,name=inkwall-operator-mutating
 // +kubebuilder:webhook:path=/mutate-v1-pod,mutating=true,failurePolicy=ignore,sideEffects=None,groups="",resources=pods,verbs=create,versions=v1,name=pods.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,reinvocationPolicy=Never,patch=`{"objectSelector":{"matchLabels":{"app.kubernetes.io/name":"traefik"},"matchExpressions":[{"key":"waf.inkwall.dev/inject","operator":"NotIn","values":["false"]}]}}`
+// +kubebuilder:webhook:path=/mutate-v1-pod,mutating=true,failurePolicy=ignore,sideEffects=None,groups="",resources=pods,verbs=create,versions=v1,name=haproxy.pods.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,reinvocationPolicy=Never,patch=`{"objectSelector":{"matchLabels":{"app.kubernetes.io/name":"kubernetes-ingress"},"matchExpressions":[{"key":"waf.inkwall.dev/inject","operator":"NotIn","values":["false"]}]}}`
 
 // PodInjector adds the engine to proxy pods.
 type PodInjector struct {
@@ -82,6 +91,10 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 		return admission.Allowed("the " + integ.Name + " integration is disabled")
 	}
 	s := injection.Sidecar{Image: p.Image, PullPolicy: p.PullPolicy, OperatorAddr: p.OperatorAddr, BundleSecret: p.BundleSecret, Args: integ.Adapter}
+	haproxy := integ.Name == integrations.HAProxy.Name
+	if haproxy {
+		s.SocketDir = integrations.HAProxySocketDir
+	}
 	var cfg wafv1alpha1.InkwallConfig
 	switch err := p.Client.Get(ctx, types.NamespacedName{Name: "default"}, &cfg); {
 	case err == nil:
@@ -94,6 +107,9 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 	mutated := pod.DeepCopy()
 	if !injection.Inject(mutated, s) {
 		return admission.Allowed("already injected, or opted out")
+	}
+	if haproxy {
+		injection.InjectHAProxy(mutated)
 	}
 	raw, err := json.Marshal(mutated)
 	if err != nil {

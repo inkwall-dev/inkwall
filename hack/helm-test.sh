@@ -35,16 +35,17 @@ check() {
   fi
 }
 
-check envoy-gateway,istio,traefik
-check envoy-gateway,istio,traefik --set rbac=null
-check envoy-gateway,istio,traefik --set rbac.integrations=null
-check envoy-gateway,istio,traefik --set rbac.integrations.traefik=auto --set rbac.integrations.envoyGateway=auto --set rbac.integrations.istio=auto
-check envoy-gateway,istio,traefik --set rbac.integrations.traefik=auto --set rbac.integrations.envoyGateway=true
-check envoy-gateway,istio,traefik --set-string rbac.integrations.traefik=true
-check istio,traefik --set rbac.integrations.envoyGateway=false
-check envoy-gateway,traefik --set rbac.integrations.istio=false
-check envoy-gateway,istio --set rbac.integrations.traefik=false
-check "" --set rbac.integrations.traefik=false --set rbac.integrations.envoyGateway=false --set rbac.integrations.istio=false
+check envoy-gateway,haproxy,istio,traefik
+check envoy-gateway,haproxy,istio,traefik --set rbac=null
+check envoy-gateway,haproxy,istio,traefik --set rbac.integrations=null
+check envoy-gateway,haproxy,istio,traefik --set rbac.integrations.traefik=auto --set rbac.integrations.envoyGateway=auto --set rbac.integrations.istio=auto --set rbac.integrations.haproxy=auto
+check envoy-gateway,haproxy,istio,traefik --set rbac.integrations.traefik=auto --set rbac.integrations.envoyGateway=true
+check envoy-gateway,haproxy,istio,traefik --set-string rbac.integrations.traefik=true
+check haproxy,istio,traefik --set rbac.integrations.envoyGateway=false
+check envoy-gateway,haproxy,traefik --set rbac.integrations.istio=false
+check envoy-gateway,haproxy,istio --set rbac.integrations.traefik=false
+check envoy-gateway,istio,traefik --set rbac.integrations.haproxy=false
+check "" --set rbac.integrations.traefik=false --set rbac.integrations.envoyGateway=false --set rbac.integrations.istio=false --set rbac.integrations.haproxy=false
 
 if out=$(helm template inkwall "$CHART" --namespace inkwall-system --set rbac.integrations.traefik=yes 2>&1) ||
   ! grep -q 'rbac.integrations.traefik must be auto, true or false' <<<"$out"; then
@@ -72,8 +73,24 @@ if grep -q 'traefik' <<<"$sel" || ! grep -q 'operator: Exists' <<<"$sel" || ! gr
   fail=1
 fi
 
+# HAProxy's Pod webhook: the controller's pods, or none without its role.
+haproxy_selector() {
+  helm template inkwall "$CHART" --namespace inkwall-system "$@" |
+    awk 'done {next} /name: haproxy.pods.waf.inkwall.dev/ {on=1; next} on && /reinvocationPolicy/ {done=1; next} on && /objectSelector/ {p=1} p' | tr -s ' \n' ' '
+}
+sel=$(haproxy_selector)
+if ! grep -q 'app.kubernetes.io/name: kubernetes-ingress' <<<"$sel"; then
+  echo "HAProxy's Pod webhook objectSelector: $sel; want the controller's pods" >&2
+  fail=1
+fi
+sel=$(haproxy_selector --set rbac.integrations.haproxy=false)
+if grep -q 'kubernetes-ingress' <<<"$sel" || ! grep -q 'operator: DoesNotExist' <<<"$sel"; then
+  echo "HAProxy's Pod webhook objectSelector without its role: $sel; want none" >&2
+  fail=1
+fi
+
 # The base ClusterRole is always there, without the integrations' writes.
-out=$(helm template inkwall "$CHART" --namespace inkwall-system --set rbac.integrations.traefik=false --set rbac.integrations.envoyGateway=false --set rbac.integrations.istio=false)
+out=$(helm template inkwall "$CHART" --namespace inkwall-system --set rbac.integrations.traefik=false --set rbac.integrations.envoyGateway=false --set rbac.integrations.istio=false --set rbac.integrations.haproxy=false)
 base=$(awk '/^kind: ClusterRole$/ {getline; getline; if ($2 == "inkwall-operator") on=1; next} /^---/ {on=0} on' <<<"$out")
 if [[ -z "$base" ]] || grep -E 'middlewares|envoyproxies|envoyfilters' <<<"$base" >/dev/null; then
   echo "the base ClusterRole is missing, or has an integration's rules:" >&2
@@ -91,8 +108,8 @@ for release in abcdefghijabcdefghijabcdefghijabcdefghijabcdef abcdefghijabcdefgh
     echo "$dups" >&2
     fail=1
   fi
-  if [[ $(grep -c -e '^ClusterRole ' -e '^Service ' <<<"$names") != 6 ]]; then
-    echo "release $release: want 4 ClusterRoles and 2 Services, got:" >&2
+  if [[ $(grep -c -e '^ClusterRole ' -e '^Service ' <<<"$names") != 7 ]]; then
+    echo "release $release: want 5 ClusterRoles and 2 Services, got:" >&2
     echo "$names" >&2
     fail=1
   fi
@@ -110,7 +127,7 @@ proxy() {
   awk '/name: pods.waf.inkwall.dev/ {on=1; next} on && /objectSelector/ {exit} on && /namespaceSelector/ {p=1} p' <<<"$out" |
     tr -s ' \n' ' ' | sed 's/^ *//; s/ *$//'
 }
-want="traefik,kube-system,envoy-gateway-system,istio-ingress,istio-system|namespaceSelector: matchExpressions: - key: kubernetes.io/metadata.name operator: In values: - envoy-gateway-system - istio-ingress - istio-system - kube-system - traefik"
+want="traefik,kube-system,envoy-gateway-system,istio-ingress,istio-system,haproxy-controller|namespaceSelector: matchExpressions: - key: kubernetes.io/metadata.name operator: In values: - envoy-gateway-system - haproxy-controller - istio-ingress - istio-system - kube-system - traefik"
 for flags in "" "--set injection.proxyNamespaces=null"; do
   # shellcheck disable=SC2086
   if [[ $(proxy $flags) != "$want" ]]; then

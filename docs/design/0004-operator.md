@@ -217,7 +217,7 @@ visible rather than silently unprotected.
 
 **Built** (`operator/internal/discovery`, leader only):
 
-- [`operator/integrations`](../../operator/integrations/integrations.go) lists three
+- [`operator/integrations`](../../operator/integrations/integrations.go) lists four
   integrations. (An adapter is the engine listener that speaks one proxy's protocol; see
   [0006](0006-adapter-protocols.md).)
   - Traefik: IngressClass controller `traefik.io/ingress-controller`, GatewayClass controller
@@ -228,13 +228,16 @@ visible rather than silently unprotected.
     `ext-proc` on a Unix socket.
   - Istio: GatewayClass controller `istio.io/gateway-controller`, pods
     `gateway.istio.io/managed=istio.io-gateway-controller`, adapter `ext-proc` on a Unix socket.
+  - HAProxy (the HAProxy Kubernetes Ingress Controller): IngressClass controller
+    `haproxy.org/ingress-controller/<class>` (its `--ingress.class`), pods `app.kubernetes.io/name=kubernetes-ingress`,
+    adapter `spoe` on a Unix socket.
 - One entry per controller: its `controllerName`, its `integration` (empty when Inkwall has none),
   its `ingressClasses` and `gatewayClasses`, and `support`:
   - `Full`: the integration's wiring takes the routes of all its classes: `Ingress` for an
     IngressClass, `HTTPRoute` for a GatewayClass;
   - `Partial`: of some of them; the `message` says which it doesn't;
   - `Unsupported`: of none, or no integration. Traefik's IngressClasses and GatewayClasses, and
-    Envoy Gateway's and Istio's GatewayClasses, are `Full`.
+    Envoy Gateway's and Istio's GatewayClasses, and HAProxy's IngressClasses, are `Full`.
 - It writes the status only when it changes, and only into an existing `InkwallConfig` `default`:
   the operator doesn't create one.
 - Without the Gateway API's CRDs, GatewayClasses are left out; the leader looks for their CRD
@@ -383,7 +386,7 @@ check.
 | Envoy Gateway | `Backend` ([Unix socket](https://man7.org/linux/man-pages/man7/unix.7.html)) + [`EnvoyExtensionPolicy`](https://gateway.envoyproxy.io/docs/api/extension_types/#envoyextensionpolicy) per protected `HTTPRoute` | 0 |
 | Istio | [`EnvoyFilter`](https://istio.io/latest/docs/reference/config/networking/envoy-filter/) per Gateway with protected `HTTPRoute`s: a filter per route, off by default, on for its protected rules | 0 (off on unprotected routes) |
 | Traefik | `Middleware` per namespace, attached to protected routes (`Ingress`, `IngressRoute`, `HTTPRoute`) | 0 |
-| HAProxy | [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) config + map of protected routes in an ACL | ~0 (map lookup) |
+| HAProxy | [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) agent in the controller's auxiliary file; per protected `Ingress`, a backend of its own whose snippet loads the filter | 0 (no filter on unprotected backends) |
 | Caddy | nothing | 0 |
 
 User-owned objects touched, with the fewest fields:
@@ -620,6 +623,29 @@ decision), for `HTTPRoute` targets whose parent Gateways have a GatewayClass of
   `EnvoyFilter` (deleted with the Gateway's last route) before the engine leaves the pods.
 - **Not yet:** `VirtualService` targets; mesh sidecars; Gateways bound to a deployment Istio
   doesn't render.
+
+**Built since: HAProxy** (v0.4.0, `operator/internal/wiring/haproxy.go`, the `HAProxy` integration;
+[0002 §6.4](0002-system-architecture.md#64-haproxy-haproxy-kubernetes-ingress-controller-haproxy-ingress) has the decision), for `Ingress` targets of an IngressClass of
+`haproxy.org/ingress-controller/<class>` (the controller's `--ingress.class`). Tested with controller 3.2.19 (chart 1.54.4).
+
+- **The engine in the controller's pods**, from a second Pod webhook, `haproxy.pods.waf.inkwall.dev`
+  (a webhook has one `objectSelector`), with the same handler: the native sidecar `spoe` on a Unix
+  socket in `inkwall-socket`, run as the HAProxy container's `runAsUser` when it sets one, and the
+  ConfigMap `inkwall-haproxy` (kept by the injection controller in each namespace with the
+  controller's pods) mounted as `/usr/local/etc/haproxy/haproxy-aux.cfg` (the agent's `mode spop`
+  backend) and `/usr/local/etc/inkwall/spoe.conf`. `waf.inkwall.dev/haproxy-config` on the pod
+  says whether they are mounted (a pod with its own auxiliary file keeps it: `WiringFailed`).
+- **The routes**: each protected Ingress of the class, once a controller pod runs, gets
+  `haproxy.org/standalone-backend: "true"` and its operator part of
+  `haproxy.org/backend-config-snippet`, first, between `# inkwall:begin` and `# inkwall:end`; the
+  user's lines stay after it. `waf.inkwall.dev/haproxy-wired` marks it (`Wired`), with the previous
+  `standalone-backend`, restored when it is unwired.
+- **`Programmed`** only once the operator's probe (`HAProxyProber`, on the leader) has proven the
+  filter on every running pod; `Unverified` until then, and when a probe gets anything but the
+  engine's answer. Before that, `PendingRestart` or `SidecarMissing`; `WiringFailed` for a pod
+  without the agent's files or with `--disable-config-snippets` covering backends.
+- **Not yet:** HAProxy Ingress (`jcmoraisjr/haproxy-ingress`); the controller's own CRDs as
+  targets; `tune.bufsize`, which the user sets.
 
 ### 4.5 Resolver
 
@@ -1073,7 +1099,9 @@ holds what its wiring writes, and its proxy's own kinds.
 | Istio's: `gateways` (gateway.networking.k8s.io) | update, patch | A Gateway's `parametersRef` |
 | Istio's: `envoyfilters` (networking.istio.io) | full | Istio wiring |
 | Istio's: `configmaps` | create, update, patch, delete | The Gateways' deployment overlays (read uncached, not watched) |
-| `configmaps` | full, cluster-wide | `inkwall-trust` per namespace, engine reports |
+| HAProxy's `ClusterRole`: `ingresses` | update, patch | The backend snippet annotations |
+| HAProxy's: `backends` (ingress.v3.haproxy.org) | read | None: makes the role the integration's own |
+| `configmaps` | full, cluster-wide | `inkwall-trust` and `inkwall-haproxy` per namespace, engine reports |
 | `secrets` | in `inkwall-system` | Bundle, signing key, certificates |
 | `roles`, `rolebindings` | in `inkwall-system` | Bundle Secret grant ([§4.3](#43-injection-controller)) |
 | `tokenreviews`, `subjectaccessreviews` | create | Engine authentication ([§4.7](#47-distribution-server-all-replicas)) |

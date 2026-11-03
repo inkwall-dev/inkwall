@@ -6,6 +6,7 @@ package injection
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -59,8 +60,12 @@ func (r *PodWebhookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	one := handler.EnqueueRequestsFromMapFunc(func(context.Context, client.Object) []reconcile.Request {
 		return []reconcile.Request{podWebhookRequest}
 	})
+	name := "pod-webhook"
+	if first, _, _ := strings.Cut(r.WebhookName, "."); first != "pods" {
+		name += "-" + first // one controller per webhook
+	}
 	return ctrl.NewControllerManagedBy(mgr).
-		Named("pod-webhook").
+		Named(name).
 		Watches(&wafv1alpha1.WAFPolicy{}, one, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&admissionregistrationv1.MutatingWebhookConfiguration{}, one, builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
 			return o.GetName() == r.ConfigName

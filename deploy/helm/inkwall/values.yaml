@@ -75,6 +75,8 @@ injection:
     # where its docs put Gateways; list the others yours are in.
     - istio-ingress
     - istio-system
+    # The HAProxy Kubernetes Ingress Controller's, as its docs install it.
+    - haproxy-controller
 
 controlPlane:
   # The optional control plane (0002 §3.4), for GitOps and Managed mode.
@@ -112,7 +114,8 @@ rbac:
   # grants it, also for a proxy installed after Inkwall; a role on the
   # resources of a proxy the cluster doesn't run grants nothing usable.
   # auto grants it only when the cluster serves the proxy's API group
-  # (traefik.io, gateway.envoyproxy.io, networking.istio.io) at install or
+  # (traefik.io, gateway.envoyproxy.io, networking.istio.io,
+  # ingress.v3.haproxy.org) at install or
   # upgrade time, so a proxy installed later needs another helm upgrade;
   # helm template, which can't ask the cluster, grants it. false never
   # does. Without its role, the operator disables that integration:
@@ -129,6 +132,9 @@ rbac:
     # Istio's EnvoyFilters, and the ConfigMap a Gateway's parametersRef
     # names (its deployment overlay).
     istio: true
+    # The HAProxy Kubernetes Ingress Controller's Ingresses (their backend
+    # snippet annotations); auto looks for its ingress.v3.haproxy.org CRDs.
+    haproxy: true
 
 serviceAccount:
   # Empty: the operator's name (inkwall-operator for a release named inkwall).

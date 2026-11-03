@@ -183,8 +183,9 @@ an Envoy you configure yourself, in or out of Kubernetes, see [protecting raw En
 
 - Proxies: **Traefik**, **Envoy Gateway** (v1.9; not with `mergeGateways` or Envoy as a
   DaemonSet) and **Istio**'s Gateway API (1.28 or later; Gateways it deploys, not mesh sidecars or
-  `VirtualService` targets yet), wired by the operator; **raw [Envoy](https://www.envoyproxy.io/docs/envoy/latest/)** (1.33 or later) that you configure with
-  the engine's ext_proc adapter ([protecting raw Envoy](docs/raw-envoy.md)); **[HAProxy](https://docs.haproxy.org/)** (3.1 or later) that you
+  `VirtualService` targets yet) and the **HAProxy Kubernetes Ingress Controller** (3.1 or later;
+  [with the operator](docs/haproxy.md#with-the-operator-haproxy-kubernetes-ingress-controller)), wired by the operator; **raw [Envoy](https://www.envoyproxy.io/docs/envoy/latest/)** (1.33 or later) that you configure with
+  the engine's ext_proc adapter ([protecting raw Envoy](docs/raw-envoy.md)); any other **[HAProxy](https://docs.haproxy.org/)** (3.1 or later) that you
   configure with the engine's SPOE agent ([protecting HAProxy](docs/haproxy.md)); and the standalone
   proxy. [Caddy](https://caddyserver.com/docs/) is designed, not built. [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) is retired upstream, so it gets no integration:
   `inkwallctl migrate ingress-nginx` moves its ModSecurity settings to a supported proxy.
@@ -226,7 +227,7 @@ Tracked on the [project board](https://github.com/orgs/inkwall-dev/projects/1) a
   statuses written only when they change, and `inkwallctl migrate ingress-nginx`, which turns
   ingress-nginx [ModSecurity](https://kubernetes.github.io/ingress-nginx/user-guide/third-party-addons/modsecurity/) annotations into policies.
 - **v1.0.0** (next): a stable API (out of `v1alpha1`) with an upgrade path.
-- Then more proxies: HAProxy, Caddy. Not ingress-nginx, which is retired upstream: its users
+- Then more proxies: Caddy. Not ingress-nginx, which is retired upstream: its users
   migrate with `inkwallctl migrate ingress-nginx`.
 
 ## Development

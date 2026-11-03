@@ -3,14 +3,21 @@
 This guide puts Inkwall in front of an [HAProxy](https://docs.haproxy.org/) you configure yourself: on a host, in Docker, or
 as a Deployment in Kubernetes. HAProxy's [SPOE](https://docs.haproxy.org/3.2/configuration.html#9.3) filter (Stream Processing Offload Engine) sends
 each request to `inkwall-engine spoe`, an SPOE agent that runs next to HAProxy and answers with a
-verdict, which HAProxy's rules act on. The operator doesn't configure HAProxy for you: you add the
-filter and the rules to your `haproxy.cfg`.
+verdict, which HAProxy's rules act on. For the [HAProxy Kubernetes Ingress Controller](https://www.haproxy.com/documentation/kubernetes-ingress/), the operator
+does it all: see [with the operator](#with-the-operator-haproxy-kubernetes-ingress-controller). For any other HAProxy, you add the
+filter and the rules to your `haproxy.cfg`, as the rest of this guide shows.
 
 The samples in [`examples/haproxy`](../examples/haproxy) are the files this guide shows, and
 `make haproxy-e2e` runs them with HAProxy 3.2 in Docker.
 
 ## Contents
 
+- [With the operator (HAProxy Kubernetes Ingress Controller)](#with-the-operator-haproxy-kubernetes-ingress-controller)
+  - [Protecting an Ingress](#protecting-an-ingress)
+  - [What the operator does](#what-the-operator-does)
+  - [The probe, and Programmed](#the-probe-and-programmed)
+  - [Limits](#limits)
+  - [Uninstalling](#uninstalling)
 - [Prerequisites](#prerequisites)
 - [How it works](#how-it-works)
 - [Run the engine next to HAProxy](#run-the-engine-next-to-haproxy)
@@ -26,6 +33,104 @@ The samples in [`examples/haproxy`](../examples/haproxy) are the files this guid
 - [Client IP](#client-ip)
 - [Checking it worked](#checking-it-worked)
 - [Undoing it](#undoing-it)
+
+## With the operator (HAProxy Kubernetes Ingress Controller)
+
+The operator protects the Ingresses of the [HAProxy Kubernetes Ingress Controller](https://www.haproxy.com/documentation/kubernetes-ingress/) (`haproxytech/kubernetes-ingress`,
+3.1 or later: its HAProxy must be 3.1 or later; tested with 3.2.19, chart 1.54.4), installed with
+nothing about Inkwall. Not [HAProxy Ingress](https://haproxy-ingress.github.io/) (`jcmoraisjr/haproxy-ingress`), another controller.
+
+### Protecting an Ingress
+
+1. Install Inkwall with the controller's namespace among the proxy namespaces
+   (`injection.proxyNamespaces`, which includes `haproxy-controller`, where the controller's docs
+   install it, by default), and `rbac.integrations.haproxy` granted (the default).
+2. Restart the controller's pods once Inkwall is installed, so the Pod webhook gives them the
+   engine: `kubectl -n haproxy-controller rollout restart deployment/<release>-kubernetes-ingress`.
+   Until then the policy is `Programmed=False` (`PendingRestart`).
+3. Target the Ingress with a `WAFPolicy`, as for any proxy:
+
+   ```yaml
+   apiVersion: waf.inkwall.dev/v1alpha1
+   kind: WAFPolicy
+   metadata: {name: shop, namespace: shop}
+   spec:
+     targetRefs: [{kind: Ingress, name: shop}]
+     mode: Block
+   ```
+
+The operator recognises the controller by its IngressClass (`spec.controller:
+haproxy.org/ingress-controller/<class>`, the controller's `--ingress.class`, `haproxy` by
+default) and its pods by the chart's label
+`app.kubernetes.io/name: kubernetes-ingress` (an `InkwallConfig` can name others).
+`status.proxies` lists it.
+
+### What the operator does
+
+- **The controller's pods** get, from the Pod webhook, the engine as a native sidecar
+  (`inkwall-engine spoe`, on a Unix socket in an `emptyDir` both mount), running as HAProxy's user
+  when the container sets one, and, from the ConfigMap `inkwall-haproxy` the operator keeps in the
+  controller's namespace, two files: `/usr/local/etc/haproxy/haproxy-aux.cfg`, the controller's
+  [auxiliary configuration file](https://www.haproxy.com/documentation/kubernetes-ingress/ingress-tutorials/auxiliary-config-file/), with the agent's `mode spop` backend; and
+  `/usr/local/etc/inkwall/spoe.conf`. A pod that mounts its own `haproxy-aux.cfg` keeps it, and the
+  policy says the pod can't run the filter.
+- **Each protected Ingress** gets two annotations: `haproxy.org/standalone-backend: "true"`, so
+  that it has a backend of its own (Ingresses to one Service otherwise share one, and the
+  controller would apply only one Ingress's snippet), and `haproxy.org/backend-config-snippet`,
+  whose first lines, between `# inkwall:begin` and `# inkwall:end`, load the filter and deny on the
+  engine's verdict, as [`haproxy.cfg`](#the-complete-haproxycfg) does: `option
+  http-buffer-request` when a policy inspects bodies, the probe's rule, the fail-closed rule when
+  the policies fail closed (`Block` mode by default), the gRPC answer and a rule per status. A
+  snippet of your own on the Ingress stays, after the operator's lines; one on the Service comes
+  before them. The previous value of `standalone-backend` is kept in
+  `waf.inkwall.dev/haproxy-wired`, and restored when the Ingress is unprotected.
+- **The failure mode:** the fail-closed rule is in the snippet when every policy on the Ingress
+  fails closed, so HAProxy answers 503 while the engine is down; in `Detect` mode (failing open by
+  default) it isn't, and requests pass uninspected.
+
+### The probe, and Programmed
+
+The controller tells no one about the snippets it uses: one HAProxy refuses is dropped with a line
+in its log. So the operator **probes** each protected Ingress on each of the controller's pods,
+directly at the pod's address and HTTP port (or HTTPS, for a host the Ingress has TLS for), and
+the policy is `Programmed=True` only once every pod has answered:
+
+- The probe is a `GET`, without a body, to the Ingress's host, at
+  `<path>/.well-known/inkwall-probe/<nonce>` under a `Prefix` path (or the `Exact` path with
+  `?inkwall-probe=<nonce>`), with an `X-Inkwall-Probe` header carrying a MAC under a key only the
+  operator and the engines have. The engine answers it without inspecting it, and the Ingress's
+  snippet returns status 299 with the engine's own MAC: so you see these requests, from the
+  operator's pod, in HAProxy's access log, with status 299. They don't reach your app.
+- If the probe gets anything else, HAProxy doesn't run the filter for that Ingress on that pod: the
+  probe has reached your app (a 404 on that path, usually), and the policy is `Programmed=False`,
+  reason `Unverified`, naming the pod and what came back. Its traffic through that pod isn't
+  inspected.
+- Until a probe has answered, the policy is `Unverified` too. The operator probes once a route,
+  its policy or a pod changes, again every 20 seconds while it fails, and every 5 minutes once it
+  answers; a few at a time.
+- The operator must reach the controller pods' HTTP port: a NetworkPolicy that blocks it keeps
+  the policies `Unverified`.
+
+Other reasons the policy isn't `Programmed`: a running controller pod without the engine
+(`SidecarMissing` or `PendingRestart`), and, as `WiringFailed`, a pod without the agent's files, or
+a controller run with `--disable-config-snippets` covering backends.
+
+### Limits
+
+- **Bodies:** HAProxy sends the engine at most its buffer (about 15 KiB by default), and a body it
+  cut is handled as oversized (413 in `Block` mode by default): raise `tune.bufsize` with the
+  controller ConfigMap's `global-config-snippet` to inspect larger bodies (see [Bodies](#bodies)).
+  The operator doesn't change it.
+- `haproxy.org/standalone-backend` is forced to `true` on a protected Ingress.
+- HTTP probing needs the controller's `http` container port, as the chart names it; with plain
+  HTTP disabled (`--disable-http`) only hosts with TLS can be probed.
+
+### Uninstalling
+
+`helm uninstall` removes the operator's lines and restores `standalone-backend` on every Ingress it
+wired; the controller then serves them uninspected. Running controller pods keep the engine until
+they are restarted, and the ConfigMap `inkwall-haproxy` stays while they mount it: restart the
+controller, then delete it.
 
 ## Prerequisites
 
@@ -274,7 +379,8 @@ policy; `inkwall-engine spoe -h` lists the flags. To test rules before you deplo
 With HAProxy in a cluster where Inkwall is installed, the engine can instead take `WAFPolicy`
 objects from the operator (bundle mode: `--operator`), set up as for raw Envoy: see [the policy from
 the operator](raw-envoy.md#the-policy-from-the-operator), with `inkwall-engine spoe` in place of
-`inkwall-engine ext-proc`. The operator doesn't wire HAProxy, so the policy is `Programmed=False`
+`inkwall-engine ext-proc`. The operator doesn't wire an HAProxy it doesn't know (only the HAProxy
+Kubernetes Ingress Controller, [above](#with-the-operator-haproxy-kubernetes-ingress-controller)), so the policy is `Programmed=False`
 (`ControllerUnsupported`) and `Ready=False`; `Enforced` reports the engines.
 
 ## Client IP
