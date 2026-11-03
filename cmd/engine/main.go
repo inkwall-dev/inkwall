@@ -682,7 +682,10 @@ func withPprof(admin http.Handler) http.Handler {
 
 // listen opens a TCP address or, with a "unix:" prefix, a Unix socket. A
 // socket file left behind by a previous run is removed first; the listener
-// removes its socket when it is closed.
+// removes its socket when it is closed. The socket is open to every user:
+// the proxy may run as another one (Istio's Envoy runs as 1337), and the
+// directory it is in, an emptyDir shared with the proxy's container, is
+// what keeps it to the pod.
 func listen(addr string) (net.Listener, error) {
 	path, ok := strings.CutPrefix(addr, "unix:")
 	if !ok {
@@ -701,7 +704,17 @@ func listen(addr string) (net.Listener, error) {
 			return nil, err
 		}
 	}
-	return net.Listen("unix", path)
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	// Connecting takes write permission, which the umask leaves to the
+	// owner only.
+	if err := os.Chmod(path, 0o666); err != nil { // #nosec G302 -- a socket, in a directory only the pod mounts
+		_ = l.Close()
+		return nil, err
+	}
+	return l, nil
 }
 
 func failureModeName(f pipeline.FailureMode) string {

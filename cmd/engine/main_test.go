@@ -233,6 +233,10 @@ func TestListenUnixSocket(t *testing.T) {
 	if ln.Addr().Network() != "unix" {
 		t.Fatalf("network %s, want unix", ln.Addr().Network())
 	}
+	// A proxy running as another user connects (Istio's Envoy is 1337).
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o666 {
+		t.Fatalf("socket mode %v, %v: want rw for every user", fi.Mode().Perm(), err)
+	}
 
 	// A socket left by a crashed run is replaced.
 	stale, err := net.Listen("unix", filepath.Join(t.TempDir(), "stale.sock"))
