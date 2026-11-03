@@ -192,6 +192,8 @@ func Reason(r pipeline.Reason) enginev1.Reason {
 		return enginev1.Reason_REASON_NO_POLICY
 	case pipeline.ReasonSuspended:
 		return enginev1.Reason_REASON_SUSPENDED
+	case pipeline.ReasonWebSocket:
+		return enginev1.Reason_REASON_WEBSOCKET
 	default:
 		return enginev1.Reason_REASON_UNSPECIFIED
 	}

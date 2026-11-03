@@ -291,3 +291,28 @@ func TestResponseTrailersOnly(t *testing.T) {
 		}
 	}
 }
+
+// A WebSocket handshake on a route whose policy inspects responses: allowed
+// on its headers with CONTINUE_AND_REPLACE, as any upgrade, and without an
+// evaluation kept for a response: the 101's headers are continued, and the
+// upgraded stream's data passes untouched.
+func TestResponseUpgrade(t *testing.T) {
+	rec := &responseRecorder{}
+	p := pipeline.New(rec, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 10 * time.Second,
+		Responses: pipeline.ResponseConfig{Inspect: true, MaxBytes: 64}})
+	e := newEnvoy(t, p, 64, io.Discard)
+	first := wsHeaders("/chat")
+	first.ProtocolConfig.ResponseBodyMode = filterv3.ProcessingMode_BUFFERED_PARTIAL
+	resps := e.exchange(t, first, respHeaders(101, false, "upgrade", "websocket", "connection", "Upgrade"))
+	common := resps[0].GetRequestHeaders().GetResponse()
+	if common.GetStatus() != extprocv3.CommonResponse_CONTINUE_AND_REPLACE || common.GetBodyMutation() != nil ||
+		len(common.GetHeaderMutation().GetRemoveHeaders()) != 0 {
+		t.Fatalf("handshake answered %v, want CONTINUE_AND_REPLACE", resps[0])
+	}
+	if len(resps) != 2 || resps[1].GetResponseHeaders() == nil || denied(t, resps[1]) != 0 {
+		t.Fatalf("101 answered %v", resps)
+	}
+	if len(rec.got) != 0 {
+		t.Errorf("an upgraded stream's response inspected: %v", rec.got)
+	}
+}

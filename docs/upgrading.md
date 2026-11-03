@@ -31,6 +31,11 @@ What's new in 0.4.0:
 - **Raw Envoy.** An Envoy you configure yourself can call the engine's ext_proc adapter, with the
   policy from the engine's flags or from the operator: see [protecting raw Envoy](raw-envoy.md).
   Nothing changes in an existing installation.
+- **WebSocket handshake rules.** A `WAFPolicy`'s new `spec.webSocket` sets the origins a WebSocket
+  handshake may come from and the headers it must have; one that doesn't meet them is denied with
+  403 before the upgrade (`Block`), or logged with reason `websocket` (`Detect`). The engine's
+  `--websocket-origins`, `--websocket-allow-missing-origin` and `--websocket-required-headers`
+  flags do the same without the operator. See [WebSocket](websocket.md).
 - **Response inspection.** A `WAFPolicy` with `responses: {inspect: true}` (and optionally
   `maxBytes`, 64 KiB by default, and `onOversize`) inspects the app's responses too, for data
   leaks (the CRS's `RESPONSE-95x` rules: SQL errors, stack traces, directory listings), and in
@@ -38,7 +43,8 @@ What's new in 0.4.0:
   unchanged. Only through Envoy Gateway, whose Envoy pods get the 0.4.0 engine as the operator
   updates them; Traefik's ForwardAuth can't send responses to the engine, so such a policy on a
   Traefik route is `Programmed=False` (`ResponsesNotInspected`), and the webhook warns of its
-  Ingress and IngressRoute targets. For raw Envoy, `inkwall-engine ext-proc --inspect-responses`
+  Ingress and IngressRoute targets. Like `webSocket`, such a policy isn't `Enforced` (`EnginesOutdated`) while an
+  engine before 0.4.0 runs it. For raw Envoy, `inkwall-engine ext-proc --inspect-responses`
   (see [responses](raw-envoy.md#responses)). Security events get a `phase` field (`request` or
   `response`), and the engine two metrics, `inkwall_responses_total` and
   `inkwall_response_check_duration_seconds`. The `WAFPolicy` CRD gets the field: the chart
@@ -46,6 +52,14 @@ What's new in 0.4.0:
 
 What changes by itself in 0.4.0:
 
+- **WebSockets through Envoy Gateway.** The engine decides a handshake on its headers. In 0.3.x, a
+  policy in `Block` mode with body inspection held every handshake until one of Envoy's timeouts,
+  and one in `Detect` mode logged every handshake as an oversized body.
+- **`WAFPolicy` gains `spec.webSocket`** (`allowedOrigins`, `allowMissingOrigin`,
+  `requiredHeaders`), and a new reason, `EnginesOutdated`, on `Enforced`: a policy that sets
+  `webSocket` isn't `Enforced` while an engine before 0.4.0 runs it, since that engine ignores the
+  field. Restart Traefik and the Envoy Gateway proxies after the upgrade, so their engines are
+  0.4.0. Events and `inkwall_requests_total` have a new reason, `websocket`.
 - **A denied gRPC call gets a gRPC status.** A request with a gRPC `Content-Type` that the engine
   denies is answered with `grpc-status` 7 (`PERMISSION_DENIED`) and a `grpc-message` naming the
   request ID, not a plain-text 403. Through Envoy Gateway, raw Envoy and the engine's reverse

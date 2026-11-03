@@ -341,6 +341,63 @@ spec:
                 x-kubernetes-validations:
                 - message: timeout must be more than 0s and at most 1s
                   rule: duration(self) > duration('0s') && duration(self) <= duration('1s')
+              webSocket:
+                description: |-
+                  WebSocket is what a WebSocket handshake on the policy's routes must
+                  meet, on top of the rules: the origins it may come from, the headers
+                  it must have. A handshake that doesn't is denied with 403 in Block
+                  mode (logged in Detect mode), and isn't upgraded. Other requests
+                  aren't affected. The handshake's URL and headers are inspected by
+                  the rules whether this is set or not; the messages after it are not
+                  inspected (docs/websocket.md). Engines before 0.4.0 ignore it: the
+                  policy isn't Enforced while one is connected.
+                properties:
+                  allowMissingOrigin:
+                    description: |-
+                      AllowMissingOrigin lets a handshake without an Origin header pass
+                      the origin check. Browsers always send Origin; other clients (a
+                      mobile app, a service) may not, and aren't the target of cross-site
+                      hijacking.
+                    type: boolean
+                  allowedOrigins:
+                    description: |-
+                      AllowedOrigins are the origins a handshake may come from, against
+                      cross-site WebSocket hijacking: a page on another site can open a
+                      WebSocket to the application with the user's cookies, and only the
+                      Origin header tells. Each is "scheme://host" or "scheme://host:port",
+                      lower case, with scheme http or https; a host "*.example.com"
+                      matches any subdomain of example.com, not example.com itself. A
+                      handshake without Origin is denied unless allowMissingOrigin is set.
+                      Empty: any origin.
+                    items:
+                      description: |-
+                        WebSocketOrigin is an origin, "scheme://host[:port]", lower case; the
+                        host may start with "*." to match subdomains.
+                      maxLength: 270
+                      pattern: ^https?://(\*\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*(:[0-9]{1,5})?$
+                      type: string
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-type: set
+                  requiredHeaders:
+                    description: |-
+                      RequiredHeaders are headers a handshake must have, not empty: a
+                      token (Authorization), a subprotocol (Sec-WebSocket-Protocol). Their
+                      values aren't checked.
+                    items:
+                      description: HeaderName is an HTTP header name.
+                      maxLength: 256
+                      minLength: 1
+                      pattern: ^[A-Za-z0-9!#$%&'*+.^_|~-]+$
+                      type: string
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: set
+                type: object
+                x-kubernetes-validations:
+                - message: allowMissingOrigin needs allowedOrigins
+                  rule: '!has(self.allowMissingOrigin) || !self.allowMissingOrigin
+                    || (has(self.allowedOrigins) && size(self.allowedOrigins) > 0)'
             required:
             - targetRefs
             type: object

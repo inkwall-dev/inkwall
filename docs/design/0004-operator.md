@@ -161,7 +161,7 @@ Validation runs in three steps, cheapest first:
 |---|---|---|
 | `Accepted` | Spec valid, references resolve, and the bundle with it fits | `InvalidRef` (also a rule set that isn't usable), `Conflict`, `TargetUnsupported`, `BundleTooLarge` |
 | `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `IntegrationDisabled`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `Pending`, `NoTargets`, `ResponsesNotInspected`, `InjectionDisabled`, `Unwired` |
-| `Enforced` | Every serving engine ACKed a bundle with this generation, and inspection isn't suspended | `EnginesBehind`, `EngineNack` (first error), `EnginesUnreported`, `NoEngines`, `NotInBundle`, `Suspended` |
+| `Enforced` | Every serving engine ACKed a bundle with this generation, and inspection isn't suspended | `EnginesBehind`, `EngineNack` (first error), `EnginesUnreported`, `EnginesOutdated`, `NoEngines`, `NotInBundle`, `Suspended` |
 | `Ready` | The three above are True | `Suspended` while inspection is suspended, else the first failing condition's reason; `NotAccepted`, `NotProgrammed` or `NotEnforced` while it isn't reported yet |
 
 A `WAFRuleSet` or `ClusterWAFRuleSet` has only `Accepted`: False with `InvalidRef` (no source, an
@@ -762,7 +762,9 @@ least the policy's `status.bundleVersion` (`every engine runs bundle 42 or later
 reason is `NoEngines`, `EnginesBehind` (`some engines don't run bundle 42 yet`), `EngineNack`
 (`some engines rejected bundle 42 (first: traefik/traefik-1: …)`), `EnginesUnreported` (a replica's report
 left engines out, [§4.7](#47-distribution-server-all-replicas)), `NotInBundle` or `Suspended` (the
-bundle served suspends inspection, #263). It waits for the bundle builder to report the policy's
+bundle served suspends inspection, #263), or `EnginesOutdated` when an engine runs the bundle but
+is a release too old for a field the policy sets, which it would ignore (`spec.webSocket` needs
+0.4.0, #276; an engine whose version isn't a release, a development build, counts as new enough). It waits for the bundle builder to report the policy's
 current generation (`status.observedGeneration`). The version engines must run is the policy's
 `status.bundleVersion`, or its version in the bundle served when that is newer: the builder writes
 the status just after publishing, and engines still on a suspended bundle mustn't count once it

@@ -510,6 +510,16 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 		}
 		p.Responses = resp
 	}
+	if w := s.WebSocket; w != nil && (len(w.AllowedOrigins) > 0 || len(w.RequiredHeaders) > 0) {
+		ws := &bundlev1.WebSocketConfig{AllowMissingOrigin: w.AllowMissingOrigin}
+		for _, o := range w.AllowedOrigins {
+			ws.AllowedOrigins = append(ws.AllowedOrigins, string(o))
+		}
+		for _, h := range w.RequiredHeaders {
+			ws.RequiredHeaders = append(ws.RequiredHeaders, string(h))
+		}
+		p.Websocket = ws
+	}
 	return p
 }
 

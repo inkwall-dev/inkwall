@@ -101,6 +101,23 @@ func TestPolicyValidation(t *testing.T) {
 			wantInvalid(t, err, tc.field, "not clean")
 		})
 	}
+	// WebSocket rules the engine wouldn't compile: the CRD schema rejects
+	// these too, but an engine refusing one entry refuses the whole bundle.
+	ws := p.DeepCopy()
+	ws.Spec.WebSocket = &wafv1alpha1.WebSocketSpec{
+		AllowedOrigins:  []wafv1alpha1.WebSocketOrigin{"https://app.example.com", "https://*.example.net"},
+		RequiredHeaders: []wafv1alpha1.HeaderName{"Authorization"},
+	}
+	if _, err := v.ValidateCreate(ctx, ws); err != nil {
+		t.Fatalf("valid webSocket: %v", err)
+	}
+	ws.Spec.WebSocket.AllowedOrigins[1] = "wss://app.example.com"
+	_, err := v.ValidateCreate(ctx, ws)
+	wantInvalid(t, err, "spec.webSocket.allowedOrigins[1]", "not http or https")
+	ws.Spec.WebSocket.AllowedOrigins[1] = "https://a.example"
+	ws.Spec.WebSocket.RequiredHeaders[0] = "X Api"
+	_, err = v.ValidateCreate(ctx, ws)
+	wantInvalid(t, err, "spec.webSocket.requiredHeaders[0]", "not a header name")
 }
 
 // A policy that inspects responses gets a warning for its Ingress and

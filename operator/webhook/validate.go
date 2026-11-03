@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/router"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
@@ -208,6 +209,9 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 			errs = append(errs, checkPath(spec.Child("exclusions").Index(i).Child("when", "path"), e.When.Path)...)
 		}
 	}
+	if w := p.Spec.WebSocket; w != nil {
+		errs = append(errs, checkWebSocket(spec.Child("webSocket"), w)...)
+	}
 	return responseWarnings(p), invalid("WAFPolicy", p.Name, errs)
 }
 
@@ -239,6 +243,23 @@ func responseWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
 	}
 	return admission.Warnings{fmt.Sprintf("spec.responses: %s %s served by Traefik, which can't send responses to the engine: "+
 		"their requests are inspected, their responses are not (Programmed: ResponsesNotInspected); only Envoy Gateway's HTTPRoutes have their responses inspected", list, verb)}
+}
+
+// checkWebSocket accepts what the engine compiles: one entry the engine
+// refused would make it refuse the whole bundle.
+func checkWebSocket(path *field.Path, w *wafv1alpha1.WebSocketSpec) field.ErrorList {
+	var errs field.ErrorList
+	for i, o := range w.AllowedOrigins {
+		if _, err := pipeline.CompileWebSocket(pipeline.WebSocketConfig{AllowedOrigins: []string{string(o)}}); err != nil {
+			errs = append(errs, field.Invalid(path.Child("allowedOrigins").Index(i), string(o), err.Error()))
+		}
+	}
+	for i, h := range w.RequiredHeaders {
+		if _, err := pipeline.CompileWebSocket(pipeline.WebSocketConfig{RequiredHeaders: []string{string(h)}}); err != nil {
+			errs = append(errs, field.Invalid(path.Child("requiredHeaders").Index(i), string(h), err.Error()))
+		}
+	}
+	return errs
 }
 
 func checkPaths(path *field.Path, patterns []wafv1alpha1.PathPattern) field.ErrorList {

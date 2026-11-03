@@ -84,6 +84,15 @@ a Unix socket). It answers the stream of one request as follows:
 - **Protocol:** the client's protocol (`HTTP/1.0`, `HTTP/1.1`, `HTTP/2`, `HTTP/3`) is Envoy's
   `request.protocol` [attribute](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/advanced/attributes),
   when the filter sends it (`request_attributes`); `HTTP/1.1` otherwise.
+- **Upgrade (WebSocket handshake):** Envoy sends an upgrade's headers without `end_of_stream`,
+  whatever the body mode: what follows them is the upgraded connection's data, which the client
+  sends only after the `101`. So a `GET` with an `Upgrade` header that declares no body (no
+  `Transfer-Encoding`, no `Content-Length` but `0`) is decided on its headers, and an allow is
+  `CONTINUE_AND_REPLACE` without a body mutation: Envoy sends nothing more of the stream, and the
+  WebSocket's data goes to the upstream untouched. An upgrade that declares a body waits for it, as
+  any request: the upgrade isn't a way around body inspection. Before #276, the engine waited for a
+  body: Envoy held the handshake (`BUFFERED_PARTIAL`) or, in observability mode, streamed the
+  WebSocket's frames as one until the connection closed ([WebSocket](../websocket.md)).
 - **Allow:** CONTINUE. If the engine generated the request ID, it sets `x-request-id` on the
   request Envoy forwards; Envoy usually sets one itself.
 - **Deny:** an immediate response with the verdict's status (403, 413, 503, ...), the same
@@ -147,7 +156,8 @@ responses:
 ```
 
 The bundle carries it as `Policy.responses` (`ResponseConfig`). Engines before 0.4.0 ignore the
-field.
+field, so a policy that sets it isn't `Enforced` (`EnginesOutdated`) while one runs it, as for
+`webSocket`.
 
 **Rules.** The request's Coraza transaction is kept open for its response, and the response runs
 phases 3 (status and headers) and 4 (body): the response rules see what the request rules set
@@ -191,7 +201,8 @@ policy on the route inspects responses, or Envoy's configuration asks for them).
 handled as oversized; a body Envoy doesn't send in one piece (`NONE`, `STREAMED` outside
 observability mode) goes uninspected, as oversized. In observability mode the body comes in chunks,
 gathered up to the limit as for requests, and the stream is closed once the response is decided.
-The kept transaction is released when the response is decided or the stream ends.
+The kept transaction is released when the response is decided or the stream ends. A WebSocket handshake allowed on its headers (CONTINUE_AND_REPLACE) keeps
+none: its 101 is continued, and the upgraded stream's data is never inspected.
 
 **Envoy Gateway (operator).** Only routes whose policies inspect responses get
 `processingMode.response` (`body: BufferedPartial`, `Streamed` in shadow mode) and
@@ -274,6 +285,11 @@ The Traefik middleware must set:
 - `authResponseHeaders: X-Request-Id`, to pass the request ID on to the app.
 
 **Built:** `pkg/adapters/forwardauth`, run as `inkwall-engine forward-auth`.
+
+Traefik asks before it upgrades a WebSocket handshake, so a denial reaches the client instead of a
+`101`. It drops the hop-by-hop `Upgrade` and `Connection` headers from the subrequest: the engine
+tells a handshake by `Sec-WebSocket-Key` or `Sec-WebSocket-Version` too (#276). It never sees the
+messages after the upgrade.
 
 ## 4. SPOE (HAProxy Stream Processing Offload Engine)
 

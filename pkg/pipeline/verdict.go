@@ -62,6 +62,9 @@ const (
 	ReasonNoPolicy
 	// ReasonSuspended means inspection is suspended (the emergency switch).
 	ReasonSuspended
+	// ReasonWebSocket means a WebSocket handshake didn't meet the policy's
+	// WebSocket rules: an origin not allowed, a required header missing.
+	ReasonWebSocket
 )
 
 func (r Reason) String() string {
@@ -86,6 +89,8 @@ func (r Reason) String() string {
 		return "no-policy"
 	case ReasonSuspended:
 		return "suspended"
+	case ReasonWebSocket:
+		return "websocket"
 	default:
 		return "unknown"
 	}
