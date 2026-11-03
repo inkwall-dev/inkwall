@@ -7,6 +7,7 @@ import (
 	"context"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/inkwall-dev/inkwall/pkg/request"
@@ -165,6 +166,42 @@ SecRule RESPONSE_HEADERS:X-Debug "@streq on" "id:100101,phase:3,deny,status:403,
 			}
 			if res.RuleID != tt.rule || res.Interrupted != (tt.rule != 0) {
 				t.Errorf("interrupted %v by %d, want %d", res.Interrupted, res.RuleID, tt.rule)
+			}
+		})
+	}
+}
+
+// BenchmarkEvaluateExchange is the cost of a request and its response
+// (phases 1 to 4), against BenchmarkEvaluate's request alone: what a policy
+// that inspects responses adds per request.
+func BenchmarkEvaluateExchange(b *testing.B) {
+	e, err := New(Config{ResponseBodyLimit: 1 << 20})
+	if err != nil {
+		b.Fatal(err)
+	}
+	req := newRequest("GET", "/products?id=42&sort=price", nil, "")
+	page := "<html><body>" + strings.Repeat("<p>Product 42: a sturdy oak table, 120 x 80 cm.</p>", 300) + "</body></html>" // ~15 KB
+	cases := map[string]*request.Response{
+		"no_body":   {Status: 204, Proto: "HTTP/1.1", Headers: http.Header{}},
+		"html_15k":  response(200, "text/html", page),
+		"json_8k":   response(200, "application/json", largeJSON(8<<10)),
+		"sql_error": response(500, "text/html", sqlErrorPage),
+		"image_15k": response(200, "image/png", page),
+		"html_256k": response(200, "text/html", strings.Repeat(page, 17)),
+	}
+	for name, resp := range cases {
+		b.Run(name, func(b *testing.B) {
+			ctx := context.Background()
+			b.ReportAllocs()
+			for b.Loop() {
+				_, x, err := e.EvaluateExchange(ctx, req)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if _, err := x.EvaluateResponse(ctx, resp); err != nil {
+					b.Fatal(err)
+				}
+				x.Close()
 			}
 		})
 	}

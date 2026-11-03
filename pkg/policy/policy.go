@@ -31,9 +31,11 @@ import (
 const MaxBodyBytes = 10 << 20
 
 // DefaultResponseBytes is the response body a policy that inspects
-// responses inspects when it sets no limit: Coraza's recommended
-// SecResponseBodyLimit. A policy may inspect up to MaxBodyBytes.
-const DefaultResponseBytes = 512 << 10
+// responses inspects when it sets no limit, as for request bodies: the CRS
+// response rules cost about 0.3 ms per KiB of HTML (BenchmarkEvaluateExchange),
+// so Coraza's recommended 512 KiB would take most of the default deadline.
+// A policy may inspect up to MaxBodyBytes.
+const DefaultResponseBytes = 64 << 10
 
 // Options are the engine-wide settings every policy shares.
 type Options struct {
