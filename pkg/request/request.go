@@ -43,4 +43,11 @@ type Request struct {
 	Body []byte
 	// BodyTruncated reports that the body was longer than Body.
 	BodyTruncated bool
+
+	// GRPC reports that the pipeline found the request to be a gRPC call:
+	// a POST with a gRPC content type whose body is gRPC messages. Its
+	// body is binary protobuf, which text rules can't read: the pipeline
+	// passes it to the rules without its body, and the rules allow its
+	// content type.
+	GRPC bool
 }

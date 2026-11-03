@@ -20,6 +20,9 @@
 // built; with --engine they are sent to a running engine's check API
 // (inkwall-engine check).
 //
+// The version subcommand (or --version) prints the version, the commit and
+// the Go version inkwallctl was built with.
+//
 // The migrate ingress-nginx subcommand converts ingress-nginx's ModSecurity
 // annotations and ConfigMap settings into WAFPolicy objects, targeting the
 // Ingresses or (--target) the HTTPRoutes or IngressRoutes replacing them.
@@ -38,6 +41,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -46,6 +50,7 @@ import (
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	enginev1 "github.com/inkwall-dev/inkwall/api/engine/v1"
+	"github.com/inkwall-dev/inkwall/internal/buildinfo"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/httpcheck"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
@@ -57,7 +62,20 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
+// version and commit are set at release builds (-ldflags "-X
+// main.version=..."; -X main.commit=... where the build has no .git);
+// otherwise the build info has them.
+var version, commit string
+
 func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && slices.Contains([]string{"version", "--version", "-version"}, args[0]) {
+		if len(args) > 1 {
+			fmt.Fprintln(stderr, "usage: inkwallctl version")
+			return 2
+		}
+		fmt.Fprint(stdout, buildinfo.Get(version, commit).String("inkwallctl"))
+		return 0
+	}
 	if len(args) > 0 && args[0] == "migrate" {
 		return runMigrate(args[1:], stdout, stderr)
 	}
@@ -68,6 +86,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "       inkwallctl test --bundle FILE [--bundle-key FILE] URL | --request FILE | --har FILE")
 		fmt.Fprintln(stderr, "       inkwallctl bench [flags] [--request FILE | --har FILE]")
 		fmt.Fprintln(stderr, "       inkwallctl migrate ingress-nginx [flags] -f FILE ... | --cluster")
+		fmt.Fprintln(stderr, "       inkwallctl version")
 		fmt.Fprintln(stderr, "run 'inkwallctl <command> -h' for flags")
 		return 2
 	}

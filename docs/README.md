@@ -23,6 +23,7 @@ Every doc in this repository, by topic, with the question each one answers.
   the cluster's bundle with `inkwallctl`, locally or in CI?
 - [Migrating from ingress-nginx's ModSecurity](migrating-from-ingress-nginx.md): how do I turn
   ingress-nginx's ModSecurity annotations into `WAFPolicy` objects, and what needs a human?
+- [gRPC](grpc.md): what does the engine inspect in a gRPC call, and what doesn't it?
 - [Running the engine without Kubernetes](standalone-proxy.md): how do I put the engine in front
   of any HTTP service as a reverse proxy, and which flags does it take?
 

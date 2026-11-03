@@ -87,7 +87,7 @@ func TestParseProxyFlagsErrors(t *testing.T) {
 }
 
 func TestRunUsage(t *testing.T) {
-	if code := run(nil, io.Discard); code != 2 {
+	if code := run(nil, io.Discard, io.Discard); code != 2 {
 		t.Fatalf("run() = %d, want 2", code)
 	}
 }
@@ -109,7 +109,7 @@ func TestParseForwardAuthFlags(t *testing.T) {
 }
 
 func TestRunUnknownCommand(t *testing.T) {
-	if code := run([]string{"serve"}, io.Discard); code != 2 {
+	if code := run([]string{"serve"}, io.Discard, io.Discard); code != 2 {
 		t.Fatalf("run(serve) = %d, want 2", code)
 	}
 }

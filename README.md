@@ -86,7 +86,15 @@ cosign verify ghcr.io/inkwall-dev/inkwall-engine:0.3.0 \
 ```
 
 The binaries (`inkwall-engine`, `inkwall-operator`, `inkwallctl`) are on the
-[releases page](https://github.com/inkwall-dev/inkwall/releases).
+[releases page](https://github.com/inkwall-dev/inkwall/releases). Each one's `version` subcommand
+(or `--version`) prints the release, the commit and the Go version it was built with:
+
+```console
+$ inkwallctl version
+inkwallctl 0.3.1
+commit: 0123456789abcdef0123456789abcdef01234567
+go: go1.27.3 linux/amd64
+```
 
 ## Protect a route
 
@@ -174,6 +182,10 @@ modes, and [testing policies offline](docs/testing-policies.md) for `inkwallctl 
   [connecting to a control plane](docs/control-plane.md).
 - A cluster's policies must fit in a bundle of 7,200 KiB compressed. Past 900 KiB, the bundle is
   split over several [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/).
+- gRPC: a call's path and metadata (headers) are inspected, its protobuf messages are not; gRPC
+  with another codec and gRPC-Web text are inspected as other requests, and denied by the Core
+  Rule Set's content type rule. Bidirectional streaming calls stall while the proxy holds the
+  body. See [gRPC](docs/grpc.md).
 - Behind a load balancer, the engine sees the client's IP only with the [PROXY protocol](https://github.com/haproxy/haproxy/blob/master/doc/proxy-protocol.txt) on Traefik's
   [entry points](https://doc.traefik.io/traefik/routing/entrypoints/) or with [`externalTrafficPolicy: Local`](https://kubernetes.io/docs/tasks/access-application-cluster/create-external-load-balancer/#preserving-the-client-source-ip): see [client IP](docs/client-ip.md).
 
