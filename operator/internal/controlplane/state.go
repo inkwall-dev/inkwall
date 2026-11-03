@@ -18,7 +18,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -164,28 +163,32 @@ func object(kind string, o metav1.Object, spec any, conds []metav1.Condition) (*
 	return obj, nil
 }
 
-// integrations counts the proxy pods running, and those with the engine.
+// integrations counts each integration's running proxy pods, and those
+// with the engine: every integration the operator supports, the disabled
+// ones marked with why.
 func (c *Connector) integrations(ctx context.Context) ([]*controlplanev1.Integration, error) {
-	sel := c.ProxyPods
-	if sel == nil {
-		sel = labels.SelectorFromSet(integrations.Traefik.PodSelector)
-	}
-	var pods corev1.PodList
-	if err := c.Client.List(ctx, &pods, client.MatchingLabelsSelector{Selector: sel}); err != nil {
-		return nil, fmt.Errorf("proxy pods: %w", err)
-	}
-	in := &controlplanev1.Integration{Name: integrations.Traefik.Name, Controller: integrations.Traefik.Controller}
-	for i := range pods.Items {
-		p := &pods.Items[i]
-		if p.DeletionTimestamp != nil || p.Status.Phase != corev1.PodRunning {
-			continue
+	out := make([]*controlplanev1.Integration, 0, len(integrations.All))
+	for _, ig := range integrations.All {
+		var pods corev1.PodList
+		if err := c.Client.List(ctx, &pods, client.MatchingLabelsSelector{Selector: c.Pods.Selector(ig.Name)}); err != nil {
+			return nil, fmt.Errorf("%s pods: %w", ig.Name, err)
 		}
-		in.Pods++
-		if injection.HasEngine(p) {
-			in.PodsWithEngine++
+		in := &controlplanev1.Integration{
+			Name: ig.Name, Controller: ig.Controller, GatewayController: ig.GatewayController, Disabled: c.Disabled[ig.Name],
 		}
+		for i := range pods.Items {
+			p := &pods.Items[i]
+			if p.DeletionTimestamp != nil || p.Status.Phase != corev1.PodRunning {
+				continue
+			}
+			in.Pods++
+			if injection.HasEngine(p) {
+				in.PodsWithEngine++
+			}
+		}
+		out = append(out, in)
 	}
-	return []*controlplanev1.Integration{in}, nil
+	return out, nil
 }
 
 // bundle reads the version and content hash of the bundle being served

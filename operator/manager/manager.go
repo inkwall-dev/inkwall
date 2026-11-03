@@ -365,7 +365,8 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		Namespace: o.Namespace, Replica: replicaName(o), OperatorVersion: o.Version,
 		KubernetesVersion: kubernetesVersion(cfg),
 		CAFile:            o.ControlPlaneCAFile,
-		ProxyPods:         selectors.Selector(integrations.Traefik.Name),
+		Pods:              selectors,
+		Disabled:          denied,
 		EngineStale:       engineStale(o),
 	}); err != nil {
 		return nil, err
