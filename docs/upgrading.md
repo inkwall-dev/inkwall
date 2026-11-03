@@ -59,6 +59,8 @@ What's new in 0.4.0:
 - **HAProxy.** `inkwall-engine spoe` is an agent of [HAProxy](https://docs.haproxy.org/)'s [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) (HAProxy 3.1
   or later), on `127.0.0.1:9004` or a Unix socket. You configure HAProxy yourself: see
   [protecting HAProxy](haproxy.md). Nothing changes in an existing installation.
+- **Bundles carry a probe key** (`probe_key`, derived from the signing key): the first bundle after
+  the upgrade is a new version with the same policies. Engines before 0.4.0 ignore it.
 
 What changes by itself in 0.4.0:
 
