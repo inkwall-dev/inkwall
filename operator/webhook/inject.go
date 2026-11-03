@@ -27,11 +27,18 @@ const MutatingConfigName = "inkwall-operator-mutating"
 // InjectPath is the Pod webhook's path.
 const InjectPath = "/mutate-v1-pod"
 
-// PodWebhookName is the Pod webhook in MutatingConfigName.
-const PodWebhookName = "pods.waf.inkwall.dev"
+// PodWebhookName is the Pod webhook in MutatingConfigName for Traefik's
+// pods, IstioIngressPodWebhookName the one for Istio's ingress gateway
+// pods (integrations.IstioIngress), which Istio's own injector rewrites
+// too: it is called again (reinvocationPolicy IfNeeded) to mount the
+// engine's socket in istio-proxy if that mount was lost.
+const (
+	PodWebhookName             = "pods.waf.inkwall.dev"
+	IstioIngressPodWebhookName = "istio-ingress-pods.waf.inkwall.dev"
+)
 
-// The Pod webhook only sees pods of known proxies (objectSelector), at
-// creation. It is installed failing open (Ignore): a proxy pod starts even
+// The Pod webhooks only see pods of known proxies (objectSelector), at
+// creation. They are installed failing open (Ignore): a proxy pod starts even
 // when the operator is down, runs without the engine and is reported until
 // restarted. The operator switches it to Fail while a policy is in block
 // mode (injection.FailurePolicyReconciler). A pod labeled
@@ -40,6 +47,7 @@ const PodWebhookName = "pods.waf.inkwall.dev"
 //
 // +kubebuilder:webhookconfiguration:mutating=true,name=inkwall-operator-mutating
 // +kubebuilder:webhook:path=/mutate-v1-pod,mutating=true,failurePolicy=ignore,sideEffects=None,groups="",resources=pods,verbs=create,versions=v1,name=pods.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,reinvocationPolicy=Never,patch=`{"objectSelector":{"matchLabels":{"app.kubernetes.io/name":"traefik"},"matchExpressions":[{"key":"waf.inkwall.dev/inject","operator":"NotIn","values":["false"]}]}}`
+// +kubebuilder:webhook:path=/mutate-v1-pod,mutating=true,failurePolicy=ignore,sideEffects=None,groups="",resources=pods,verbs=create,versions=v1,name=istio-ingress-pods.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,reinvocationPolicy=IfNeeded,patch=`{"objectSelector":{"matchLabels":{"istio":"ingressgateway"},"matchExpressions":[{"key":"waf.inkwall.dev/inject","operator":"NotIn","values":["false"]}]}}`
 
 // PodInjector adds the engine to proxy pods.
 type PodInjector struct {
@@ -82,6 +90,10 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 		return admission.Allowed("the " + integ.Name + " integration is disabled")
 	}
 	s := injection.Sidecar{Image: p.Image, PullPolicy: p.PullPolicy, OperatorAddr: p.OperatorAddr, BundleSecret: p.BundleSecret, Args: integ.Adapter}
+	if integ.SocketContainer != "" {
+		s.SocketDir, s.SocketContainer = integrations.EnvoySocketDir, integ.SocketContainer
+	}
+	s.PodAnnotations = integ.PodAnnotations
 	var cfg wafv1alpha1.InkwallConfig
 	switch err := p.Client.Get(ctx, types.NamespacedName{Name: "default"}, &cfg); {
 	case err == nil:
@@ -92,7 +104,7 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 		log.FromContext(ctx).Error(err, "reading the InkwallConfig; injecting the engine with the defaults", "namespace", req.Namespace)
 	}
 	mutated := pod.DeepCopy()
-	if !injection.Inject(mutated, s) {
+	if !injection.Inject(mutated, s) && !injection.MountSocket(mutated, s) {
 		return admission.Allowed("already injected, or opted out")
 	}
 	raw, err := json.Marshal(mutated)

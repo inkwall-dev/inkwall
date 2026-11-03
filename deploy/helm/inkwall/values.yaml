@@ -129,6 +129,10 @@ rbac:
     # Istio's EnvoyFilters, and the ConfigMap a Gateway's parametersRef
     # names (its deployment overlay).
     istio: true
+    # Istio's ingress gateways (Istio's own Gateways and VirtualServices):
+    # its EnvoyFilters. Without it, the Pod webhook selects no ingress
+    # gateway pod.
+    istioIngress: true
 
 serviceAccount:
   # Empty: the operator's name (inkwall-operator for a release named inkwall).

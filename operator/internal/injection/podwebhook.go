@@ -6,6 +6,8 @@ package injection
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -25,8 +27,10 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/integrations"
 )
 
-// PodWebhookReconciler keeps the Pod webhook's objectSelector and
-// failurePolicy (0004 §4.3). It runs on the leader; the chart installs the
+// PodWebhookReconciler keeps the Pod webhooks' objectSelector and
+// failurePolicy (0004 §4.3): one webhook per injected proxy (Traefik's,
+// Istio's ingress gateways), since an objectSelector can't select pods of
+// either of two label sets. It runs on the leader; the chart installs the
 // webhook with the defaults, and a Helm upgrade that resets them is
 // corrected here.
 //
@@ -41,12 +45,11 @@ import (
 // pods already running keep serving.
 type PodWebhookReconciler struct {
 	Client client.Client
-	// ConfigName is the MutatingWebhookConfiguration, WebhookName its Pod
-	// webhook.
-	ConfigName  string
-	WebhookName string
-	// Pods selects the proxy pods (integrations.Selectors.LabelSelector).
-	Pods *metav1.LabelSelector
+	// ConfigName is the MutatingWebhookConfiguration.
+	ConfigName string
+	// Webhooks are its Pod webhooks, by name, and the proxy pods each
+	// selects (integrations.Selectors.LabelSelector, or NoPods).
+	Webhooks map[string]*metav1.LabelSelector
 	// Namespaces are the proxy namespaces.
 	Namespaces integrations.Namespaces
 }
@@ -100,7 +103,6 @@ func (r *PodWebhookReconciler) Reconcile(ctx context.Context, _ reconcile.Reques
 		return reconcile.Result{}, err
 	}
 	want := WantFailurePolicy(policies.Items)
-	selector := ObjectSelector(r.Pods)
 	namespaces := r.Namespaces.LabelSelector()
 
 	var cfg admissionregistrationv1.MutatingWebhookConfiguration
@@ -111,23 +113,37 @@ func (r *PodWebhookReconciler) Reconcile(ctx context.Context, _ reconcile.Reques
 		return reconcile.Result{}, err
 	}
 	base := cfg.DeepCopy()
-	found := false
+	found, changed := 0, false
+	var selectors []string
 	for i := range cfg.Webhooks {
 		wh := &cfg.Webhooks[i]
-		if wh.Name != r.WebhookName {
+		pods, ok := r.Webhooks[wh.Name]
+		if !ok {
 			continue
 		}
-		found = true
+		found++
+		selector := ObjectSelector(pods)
+		sel, _ := metav1.LabelSelectorAsSelector(selector)
+		selectors = append(selectors, wh.Name+": "+sel.String())
 		if wh.FailurePolicy != nil && *wh.FailurePolicy == want && apiequality.Semantic.DeepEqual(wh.ObjectSelector, selector) &&
 			apiequality.Semantic.DeepEqual(wh.NamespaceSelector, namespaces) {
-			return reconcile.Result{}, nil
+			continue
 		}
+		changed = true
 		wh.FailurePolicy = &want
 		wh.ObjectSelector = selector
 		wh.NamespaceSelector = namespaces
 	}
-	if !found {
-		return reconcile.Result{}, fmt.Errorf("MutatingWebhookConfiguration %s has no webhook %s", r.ConfigName, r.WebhookName)
+	if found < len(r.Webhooks) {
+		var names []string
+		for name := range r.Webhooks {
+			names = append(names, name)
+		}
+		slices.Sort(names)
+		return reconcile.Result{}, fmt.Errorf("MutatingWebhookConfiguration %s lacks one of the webhooks %s", r.ConfigName, strings.Join(names, ", "))
+	}
+	if !changed {
+		return reconcile.Result{}, nil
 	}
 	// The whole webhooks list is sent: the optimistic lock keeps it from
 	// undoing a CA bundle the certificate rotator wrote meanwhile (a
@@ -139,7 +155,7 @@ func (r *PodWebhookReconciler) Reconcile(ctx context.Context, _ reconcile.Reques
 	if want == admissionregistrationv1.Fail {
 		why = "a policy is in block mode: proxy pods can't start without the engine while the operator is down"
 	}
-	sel, _ := metav1.LabelSelectorAsSelector(selector)
-	log.FromContext(ctx).Info("Pod webhook updated", "failurePolicy", want, "reason", why, "objectSelector", sel.String(), "namespaces", r.Namespaces.String())
+	slices.Sort(selectors)
+	log.FromContext(ctx).Info("Pod webhooks updated", "failurePolicy", want, "reason", why, "objectSelectors", strings.Join(selectors, "; "), "namespaces", r.Namespaces.String())
 	return reconcile.Result{}, nil
 }

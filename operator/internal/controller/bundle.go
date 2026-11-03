@@ -56,6 +56,7 @@ import (
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=traefik.io,resources=ingressroutes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes;gateways;gatewayclasses,verbs=get;list;watch
+// +kubebuilder:rbac:groups=networking.istio.io,resources=virtualservices;gateways,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=namespaces,resourceNames=kube-system,verbs=get
 
@@ -122,6 +123,9 @@ type BundleReconciler struct {
 	// HTTPRoutes watches Gateway API's HTTPRoutes once their CRD is
 	// installed; nil: they are only read at each build.
 	HTTPRoutes *crdwatch.Kind
+	// VirtualServices watches Istio's VirtualServices once their CRD is
+	// installed; nil: they are only read at each build.
+	VirtualServices *crdwatch.Kind
 
 	// current is the bundle last read or stored, so a build decodes the
 	// bundle Secret only when someone else changed it.
@@ -205,6 +209,9 @@ func (r *BundleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.HTTPRoutes != nil {
 		r.HTTPRoutes.Add(c, enqueue, predicate.GenerationChangedPredicate{})
 	}
+	if r.VirtualServices != nil {
+		r.VirtualServices.Add(c, enqueue, predicate.GenerationChangedPredicate{})
+	}
 	return nil
 }
 
@@ -243,6 +250,9 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	in.IngressRoutes = routes
 	if in.HTTPRoutes, err = HTTPRoutes(ctx, r.Client); err != nil {
 		return reconcile.Result{}, fmt.Errorf("list HTTPRoutes: %w", err)
+	}
+	if in.VirtualServices, err = wiring.VirtualServices(ctx, r.Client); err != nil {
+		return reconcile.Result{}, fmt.Errorf("list VirtualServices: %w", err)
 	}
 
 	cfg, err := r.config(ctx)

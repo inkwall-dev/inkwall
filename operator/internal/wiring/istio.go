@@ -208,7 +208,7 @@ func (i *Istio) Wire(ctx context.Context, targets map[Target]bool, off bool) (*R
 		if r.sections[0] == "" {
 			r.sections = r.sections[:1]
 		}
-		r.routeSettings = settingsOf(policies.Items, k)
+		r.routeSettings = settingsOf(policies.Items, httpRouteKind, k)
 	}
 
 	on := !off && st.egCRDs
@@ -302,7 +302,7 @@ func (i *Istio) Wire(ctx context.Context, targets map[Target]bool, off bool) (*R
 		// 4. The rest goes, in reverse: a route stops calling the engine
 		// before its Gateway's pods lose it.
 		if _, err := deleteManaged(ctx, i.Client, EnvoyFilterGVK, func(u *unstructured.Unstructured) bool {
-			return filters[types.NamespacedName{Namespace: u.GetNamespace(), Name: targetGateway(u)}]
+			return isIstioIngress(u) || filters[types.NamespacedName{Namespace: u.GetNamespace(), Name: targetGateway(u)}]
 		}); err != nil {
 			errs = append(errs, err)
 		} else if _, err := removeIstioSidecars(ctx, i.Client, i.APIReader, inject); err != nil {
@@ -507,6 +507,35 @@ func istioAccepted(hr *gatewayv1.HTTPRoute, gateways []types.NamespacedName) str
 func envoyFilter(gw *gatewayv1.Gateway, routes []*istioRoute) *unstructured.Unstructured {
 	f := newObject(EnvoyFilterGVK, gw.Namespace, envoyName(gw.Name))
 	owned(f, gw, GatewayGVK)
+	var names []string
+	var fr []istioFilterRoute
+	for _, r := range routes {
+		names = append(names, key(r.route).String())
+		fr = append(fr, istioFilterRoute{filter: istioFilterName(key(r.route)), envoyRoutes: r.envoyRoutes(), routeSettings: r.routeSettings})
+	}
+	f.Object["spec"] = map[string]any{
+		"workloadSelector": map[string]any{"labels": map[string]any{istioGatewayLabel: gw.Name}},
+		"configPatches":    istioPatches(fr),
+	}
+	f.SetAnnotations(map[string]string{istioRoutes: strings.Join(names, ",")})
+	return f
+}
+
+// istioFilterRoute is a protected route in an EnvoyFilter: its ext_proc
+// filter's name, the names of its Envoy routes, its policies' settings.
+type istioFilterRoute struct {
+	filter      string
+	envoyRoutes []string
+	routeSettings
+}
+
+// istioPatches are an EnvoyFilter's patches for its routes (0006 §2), for
+// Gateway API's Gateways and Istio's ingress gateways alike: the engine's
+// socket as a cluster, and per route an ext_proc filter, disabled for the
+// gateway's other routes, with that route's settings (istioExtProc), and,
+// when a body is held, Envoy's buffer limit raised to the largest body a
+// policy inspects.
+func istioPatches(routes []istioFilterRoute) []any {
 	patches := []any{map[string]any{
 		"applyTo": "CLUSTER",
 		"match":   map[string]any{"context": "GATEWAY"},
@@ -524,10 +553,7 @@ func envoyFilter(gw *gatewayv1.Gateway, routes []*istioRoute) *unstructured.Unst
 		}},
 	}}
 	buffered := false
-	var names []string
 	for _, r := range routes {
-		name := istioFilterName(key(r.route))
-		names = append(names, key(r.route).String())
 		extProc, mode := istioExtProc(r.routeSettings)
 		patches = append(patches, map[string]any{
 			"applyTo": "HTTP_FILTER",
@@ -535,7 +561,7 @@ func envoyFilter(gw *gatewayv1.Gateway, routes []*istioRoute) *unstructured.Unst
 				"name": "envoy.filters.network.http_connection_manager", "subFilter": map[string]any{"name": "envoy.filters.http.router"},
 			}}}},
 			"patch": map[string]any{"operation": "INSERT_BEFORE", "value": map[string]any{
-				"name": name, "disabled": true, "typed_config": extProc,
+				"name": r.filter, "disabled": true, "typed_config": extProc,
 			}},
 		})
 		// Enabled on the protected rules' routes.
@@ -546,12 +572,12 @@ func envoyFilter(gw *gatewayv1.Gateway, routes []*istioRoute) *unstructured.Unst
 				"overrides": map[string]any{"processing_mode": mode},
 			},
 		}
-		for _, rn := range r.envoyRoutes() {
+		for _, rn := range r.envoyRoutes {
 			patches = append(patches, map[string]any{
 				"applyTo": "HTTP_ROUTE",
 				"match":   map[string]any{"context": "GATEWAY", "routeConfiguration": map[string]any{"vhost": map[string]any{"route": map[string]any{"name": rn}}}},
 				"patch": map[string]any{"operation": "MERGE", "value": map[string]any{
-					"typed_per_filter_config": map[string]any{name: perRoute},
+					"typed_per_filter_config": map[string]any{r.filter: perRoute},
 				}},
 			})
 		}
@@ -566,12 +592,7 @@ func envoyFilter(gw *gatewayv1.Gateway, routes []*istioRoute) *unstructured.Unst
 			"patch":   map[string]any{"operation": "MERGE", "value": map[string]any{"per_connection_buffer_limit_bytes": int64(envoyBufferLimit)}},
 		})
 	}
-	f.Object["spec"] = map[string]any{
-		"workloadSelector": map[string]any{"labels": map[string]any{istioGatewayLabel: gw.Name}},
-		"configPatches":    patches,
-	}
-	f.SetAnnotations(map[string]string{istioRoutes: strings.Join(names, ",")})
-	return f
+	return patches
 }
 
 // istioExtProc is a route's ext_proc filter config, from its policies'
@@ -601,6 +622,12 @@ func istioExtProc(r routeSettings) (config, mode map[string]any) {
 		config["observability_mode"] = true
 	}
 	return config, mode
+}
+
+// isIstioIngress tells an EnvoyFilter of the istio-ingress integration's,
+// which the Gateway API wiring leaves alone.
+func isIstioIngress(u *unstructured.Unstructured) bool {
+	return u.GetLabels()[istioIntegrationLabel] == integrations.IstioIngress.Name
 }
 
 // targetGateway is the Gateway an operator's EnvoyFilter is for.
@@ -993,7 +1020,7 @@ func (i *Istio) Wired(ctx context.Context, tg Target) (bool, error) {
 // Gateways and ConfigMaps are as they were.
 func (i *Istio) Unwire(ctx context.Context, c client.Client) (map[string]int, error) {
 	n := map[string]int{}
-	count, err := deleteManaged(ctx, c, EnvoyFilterGVK, nil)
+	count, err := deleteManaged(ctx, c, EnvoyFilterGVK, isIstioIngress)
 	if count > 0 {
 		n[EnvoyFilterGVK.Kind] = count
 	}

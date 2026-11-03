@@ -10,8 +10,8 @@ the repository) and list the Inkwall objects:
   kubectl get inkwall -A
 
 The operator validates rule sets and policies when they are saved, builds
-them into a signed bundle, and wires every Ingress, IngressRoute and
-HTTPRoute a WAFPolicy targets to the engine:
+them into a signed bundle, and wires every Ingress, IngressRoute,
+HTTPRoute and VirtualService a WAFPolicy targets to the engine:
 
 - Traefik (Ingresses, IngressRoutes, HTTPRoutes): the engine is injected
   into Traefik's pods when they start. Traefik pods that ran before the
@@ -25,6 +25,12 @@ HTTPRoute a WAFPolicy targets to the engine:
 - Istio (HTTPRoutes of its Gateways): the engine is added to the pods of
   the route's Gateway through the ConfigMap its parametersRef names, and
   Istio rolls them itself.
+
+- Istio's ingress gateways (VirtualServices bound to Istio's own Gateways):
+  the engine is injected into the gateway's pods (label
+  istio=ingressgateway) when they start; restart the ones already running:
+
+    kubectl -n <namespace> rollout restart deployment/istio-ingressgateway
 
 Only proxy pods in these namespaces get the engine (injection.proxyNamespaces):
 

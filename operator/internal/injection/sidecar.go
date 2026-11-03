@@ -69,6 +69,11 @@ type Sidecar struct {
 	// SocketDir, when set, is an emptyDir (SocketVolume) mounted in the
 	// engine, for a Unix socket the proxy mounts too.
 	SocketDir string
+	// SocketContainer, with SocketDir, is the proxy's container Inject
+	// mounts SocketDir in (istio-proxy).
+	SocketContainer string
+	// PodAnnotations are set on the pod Inject injects.
+	PodAnnotations map[string]string
 }
 
 func defaultResources() corev1.ResourceRequirements {
@@ -104,10 +109,40 @@ func HasEngine(pod *corev1.Pod) bool {
 	return false
 }
 
+// HasSocket reports whether pod's container mounts the engine's socket
+// directory, as Inject mounts it in a SocketContainer.
+func HasSocket(pod *corev1.Pod, container string) bool {
+	for _, c := range pod.Spec.Containers {
+		if c.Name == container {
+			return slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == SocketVolume })
+		}
+	}
+	return false
+}
+
+// MountSocket mounts the engine's socket directory in s.SocketContainer, if
+// pod has that container and it doesn't mount it yet. It reports whether it
+// changed pod: another webhook (Istio's injector) may rewrite the container
+// after Inject.
+func MountSocket(pod *corev1.Pod, s Sidecar) bool {
+	if s.SocketDir == "" || s.SocketContainer == "" || !HasEngine(pod) || HasSocket(pod, s.SocketContainer) {
+		return false
+	}
+	changed := false
+	for i := range pod.Spec.Containers {
+		if c := &pod.Spec.Containers[i]; c.Name == s.SocketContainer {
+			c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: SocketVolume, MountPath: s.SocketDir})
+			changed = true
+		}
+	}
+	return changed
+}
+
 // Inject adds the engine to pod as a native sidecar (an init container
 // with restartPolicy Always, so it starts before the proxy and stops after
-// it), and the volumes it needs. It reports false, changing nothing, for a
-// pod that already has the engine or opted out.
+// it), and the volumes it needs, and mounts the socket's directory in the
+// SocketContainer. It reports false, changing nothing, for a pod that
+// already has the engine or opted out.
 func Inject(pod *corev1.Pod, s Sidecar) bool {
 	if OptedOut(pod) || pod.Annotations[InjectedAnnotation] == "true" {
 		return false
@@ -123,10 +158,14 @@ func Inject(pod *corev1.Pod, s Sidecar) bool {
 	// container that needs traffic inspected.
 	pod.Spec.InitContainers = append([]corev1.Container{engine}, pod.Spec.InitContainers...)
 	pod.Spec.Volumes = append(pod.Spec.Volumes, volumes...)
+	MountSocket(pod, s)
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
 	}
 	pod.Annotations[InjectedAnnotation] = "true"
+	for k, v := range s.PodAnnotations {
+		pod.Annotations[k] = v
+	}
 	return true
 }
 

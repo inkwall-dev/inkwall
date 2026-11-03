@@ -30,6 +30,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
@@ -212,10 +213,11 @@ func grants(rules []rbacv1.PolicyRule, group, resource, verb string) bool {
 	return false
 }
 
-// The operator runs without Envoy Gateway's and Istio's ClusterRoles, with
-// their CRDs installed: Traefik's Ingresses are wired, a policy on an
-// HTTPRoute of Envoy Gateway or of Istio is IntegrationDisabled, and
-// discovery says both are Unsupported, and why.
+// The operator runs without Envoy Gateway's and the two Istio
+// integrations' ClusterRoles, with their CRDs installed: Traefik's Ingresses
+// are wired, a policy on an HTTPRoute of Envoy Gateway or of Istio, or on a
+// VirtualService, is IntegrationDisabled, and discovery says Envoy Gateway
+// and Istio are Unsupported, and why.
 func TestWithoutEnvoyGatewayAndIstio(t *testing.T) {
 	testenv.Skip(t, env)
 	ctx := context.Background()
@@ -238,7 +240,7 @@ func TestWithoutEnvoyGatewayAndIstio(t *testing.T) {
 		}
 	}
 	const user = "inkwall-operator"
-	grant(ctx, t, c, user, integrations.EnvoyGateway.Name, integrations.Istio.Name)
+	grant(ctx, t, c, user, integrations.EnvoyGateway.Name, integrations.Istio.Name, integrations.IstioIngress.Name)
 	cfg, err := env.User(user)
 	if err != nil {
 		t.Fatal(err)
@@ -255,9 +257,10 @@ func TestWithoutEnvoyGatewayAndIstio(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(denied) != 2 || !strings.Contains(denied[integrations.EnvoyGateway.Name], "create backends.gateway.envoyproxy.io") ||
-		!strings.Contains(denied[integrations.Istio.Name], "create envoyfilters.networking.istio.io") {
-		t.Fatalf("denied %v, want envoy-gateway's and istio's", denied)
+	if len(denied) != 3 || !strings.Contains(denied[integrations.EnvoyGateway.Name], "create backends.gateway.envoyproxy.io") ||
+		!strings.Contains(denied[integrations.Istio.Name], "create envoyfilters.networking.istio.io") ||
+		!strings.Contains(denied[integrations.IstioIngress.Name], "create envoyfilters.networking.istio.io") {
+		t.Fatalf("denied %v, want envoy-gateway's, istio's and istio-ingress's", denied)
 	}
 
 	// The operator, as that user.
@@ -296,6 +299,13 @@ func TestWithoutEnvoyGatewayAndIstio(t *testing.T) {
 		return ""
 	})
 
+	virtualService := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{
+		"hosts": []any{"shop.example.com"}, "gateways": []any{"edge/edge"}, "http": []any{map[string]any{"name": "web"}},
+	}}}
+	virtualService.SetGroupVersionKind(integrations.IstioVirtualServiceGVK)
+	virtualService.SetNamespace("shop")
+	virtualService.SetName("vs")
+
 	// Traefik: an Ingress, a pod, a policy.
 	gatewayClass := &gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: "eg"}, Spec: gatewayv1.GatewayClassSpec{ControllerName: gatewayv1.GatewayController(integrations.EnvoyGateway.GatewayController)}}
 	listeners := []gatewayv1.Listener{{Name: "http", Protocol: gatewayv1.HTTPProtocolType, Port: 80}}
@@ -331,6 +341,11 @@ func TestWithoutEnvoyGatewayAndIstio(t *testing.T) {
 		&wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "mesh"}, Spec: wafv1alpha1.WAFPolicySpec{
 			TargetRefs: []wafv1alpha1.TargetRef{{Group: gatewayv1.GroupName, Kind: "HTTPRoute", Name: "mesh"}},
 		}},
+		// Istio's ingress gateways: a VirtualService, a policy.
+		virtualService,
+		&wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "vs"}, Spec: wafv1alpha1.WAFPolicySpec{
+			TargetRefs: []wafv1alpha1.TargetRef{{Group: "networking.istio.io", Kind: "VirtualService", Name: "vs"}},
+		}},
 	} {
 		if err := c.Create(ctx, o); err != nil {
 			t.Fatal(err)
@@ -358,6 +373,8 @@ func TestWithoutEnvoyGatewayAndIstio(t *testing.T) {
 		"the envoy-gateway integration is disabled: the operator may not"))
 	eventually(t, "the Istio route isn't", programmed("mesh", metav1.ConditionFalse, wiring.ReasonIntegrationDisabled,
 		"the istio integration is disabled: the operator may not"))
+	eventually(t, "the VirtualService isn't", programmed("vs", metav1.ConditionFalse, wiring.ReasonIntegrationDisabled,
+		"the istio-ingress integration is disabled: the operator may not"))
 	for _, name := range []string{integrations.EnvoyGateway.Name, integrations.Istio.Name} {
 		eventually(t, "discovery of "+name, func() string {
 			var ic wafv1alpha1.InkwallConfig

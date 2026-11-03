@@ -239,15 +239,18 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	extensionPolicies := crd(wiring.EnvoyExtensionPolicyGVK, nil)
 	trafficPolicies := crd(wiring.ClientTrafficPolicyGVK, nil)
 	envoyFilters := crd(wiring.EnvoyFilterGVK, nil)
+	virtualServices := crd(wiring.IstioVirtualServiceGVK, nil)
+	istioGateways := crd(wiring.IstioGatewayGVK, nil)
 	if err := (&controller.BundleReconciler{
-		Client:        mgr.GetClient(),
-		APIReader:     mgr.GetAPIReader(),
-		Namespace:     o.Namespace,
-		Debounce:      o.Debounce,
-		EngineStale:   engineStale(o),
-		RotationGrace: o.SigningKeyGrace,
-		IngressRoutes: ingressRoutes,
-		HTTPRoutes:    httpRoutes,
+		Client:          mgr.GetClient(),
+		APIReader:       mgr.GetAPIReader(),
+		Namespace:       o.Namespace,
+		Debounce:        o.Debounce,
+		EngineStale:     engineStale(o),
+		RotationGrace:   o.SigningKeyGrace,
+		IngressRoutes:   ingressRoutes,
+		HTTPRoutes:      httpRoutes,
+		VirtualServices: virtualServices,
 	}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
@@ -277,14 +280,18 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			Namespaces:   o.ProxyNamespaces,
 			Disabled:     denied,
 		}
-		// The Pod webhook serves Traefik's pods: none while Traefik is
-		// disabled, so they start without an engine nothing would wire.
-		pods := selectors.LabelSelector(integrations.Traefik.Name)
-		if denied[integrations.Traefik.Name] != "" {
-			pods = integrations.NoPods()
+		// The Pod webhooks serve Traefik's pods and Istio's ingress
+		// gateway pods: none of a disabled integration's, so they start
+		// without an engine nothing would wire.
+		podWebhooks := map[string]*metav1.LabelSelector{}
+		for name, in := range map[string]string{webhook.PodWebhookName: integrations.Traefik.Name, webhook.IstioIngressPodWebhookName: integrations.IstioIngress.Name} {
+			podWebhooks[name] = selectors.LabelSelector(in)
+			if denied[in] != "" {
+				podWebhooks[name] = integrations.NoPods()
+			}
 		}
 		if err := (&injection.PodWebhookReconciler{
-			Client: mgr.GetClient(), ConfigName: webhook.MutatingConfigName, WebhookName: webhook.PodWebhookName, Pods: pods,
+			Client: mgr.GetClient(), ConfigName: webhook.MutatingConfigName, Webhooks: podWebhooks,
 			Namespaces: o.ProxyNamespaces,
 		}).SetupWithManager(mgr); err != nil {
 			return nil, err
@@ -307,7 +314,8 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	// proxy pods won't have the engine.
 	wiringCfg := wiring.Config{
 		Pods: selectors, IngressRoutes: ingressRoutes, HTTPRoutes: httpRoutes, Gateways: gateways, GatewayClasses: gatewayClasses,
-		EnvoyProxies: envoyProxies, ExtensionPolicies: extensionPolicies, TrafficPolicies: trafficPolicies, EnvoyFilters: envoyFilters, Sidecar: sidecar,
+		EnvoyProxies: envoyProxies, ExtensionPolicies: extensionPolicies, TrafficPolicies: trafficPolicies, EnvoyFilters: envoyFilters,
+		VirtualServices: virtualServices, IstioGateways: istioGateways, Sidecar: sidecar,
 	}
 	wirings := wiring.Integrations(mgr.GetClient(), mgr.GetAPIReader(), wiringCfg)
 	// An integration the operator may not wire neither watches nor reads
@@ -332,7 +340,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	if err := (&proxydiscovery.Reconciler{Client: mgr.GetClient(), GatewayClasses: gatewayClasses, Kinds: kinds, Disabled: denied}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
-	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gateways, gatewayClasses, envoyProxies, extensionPolicies, trafficPolicies, envoyFilters} {
+	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gateways, gatewayClasses, envoyProxies, extensionPolicies, trafficPolicies, envoyFilters, virtualServices, istioGateways} {
 		if err := mgr.Add(k); err != nil {
 			return nil, err
 		}

@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-09-27
-- Updated: 2026-11-03
+- Updated: 2026-11-04
 - Owner: noureldin
 - Depends on: [0001 — Performance-First Architecture](0001-performance-first-architecture.md)
 
@@ -574,9 +574,43 @@ controller `istio.io/gateway-controller`), with `ext_proc` through an `EnvoyFilt
   (`IntegrationDisabled`).
 - **Tested** with Istio 1.31.3 (its `base` and `istiod` charts, the Gateway API's standard CRDs
   v1.7.0, no mesh): envtest with a stand-in `EnvoyFilter` CRD, and `make kind-e2e-istio`.
-- **Later:** `VirtualService` targets (Istio's own `Gateway` API), in a later PR; mesh sidecars
-  (ext_proc in every workload's Envoy) are out of scope: the `EnvoyFilter` targets Gateway pods
-  only.
+- **Mesh sidecars** (ext_proc in every workload's Envoy) are out of scope: the `EnvoyFilter`
+  targets gateway pods only.
+
+**Built (v0.4.0, #281): Istio's own API**, `VirtualService` targets bound to Istio `Gateway` objects
+(`networking.istio.io`), a second integration, `istio-ingress`, with its own ClusterRole
+(`inkwall-operator-istio-ingress`, `rbac.integrations.istioIngress`). Decided:
+
+- **Engine placement: the Pod webhook, as for Traefik.** The ingress gateway is the user's
+  Deployment (Istio's `gateway` Helm chart), and Istio has no API to add a container to it; patching
+  the Deployment would drift from the user's Helm release and need write access to every
+  Deployment. A second Pod webhook entry, `istio-ingress-pods.waf.inkwall.dev`, selects pods
+  labelled `istio: ingressgateway` (the chart's default, overridable in `InkwallConfig`) in the
+  proxy namespaces: a webhook's `objectSelector` can't select either of two label sets, so each
+  injected proxy has its own entry, both kept by the operator. It adds the engine and mounts its
+  socket directory in `istio-proxy`, and is called again (`reinvocationPolicy: IfNeeded`) to
+  restore that mount if Istio's own injector rewrites the container. Pods that ran before get the
+  engine when restarted (`PendingRestart`), and keep it after unwiring until restarted.
+- **Wiring.** An Istio Gateway selects pods in any namespace, and several Gateways may select the
+  same pods; Envoy rejects two HTTP filters of one name. So the `EnvoyFilter` is per namespace of
+  gateway pods, `inkwall-istio-ingress`, with the integration's labels as `workloadSelector`, and
+  one ext_proc filter per protected VirtualService (`inkwall.ext_proc.vs.<namespace>.<name>`),
+  turned on by `typed_per_filter_config` on its Envoy routes, with the same settings as for
+  HTTPRoutes. Istio names those routes after the http route's `name` (then `.` and a named match's
+  `name`; checked in Istio 1.31.3's `route.go` and on kind): an unnamed http route can't be selected
+  (`WiringFailed`), and a name another VirtualService on the same pods uses is refused.
+- **Routes.** The resolver turns hosts × http matches into the engine's routes: `exact` and
+  `prefix` uris (a prefix by whole segments; longer paths of its last segment get the host's most
+  general policy, as any path of a protected host the routes miss) and an `exact` method. Regex
+  uris, `ignoreUriCase`, header, query and the other match conditions, delegates, short host names
+  and VirtualServices without http routes are refused (`TargetUnsupported`), never ignored.
+- **Status.** A VirtualService is `Programmed` once every running pod its Gateways select has the
+  engine and the socket mount, and the `EnvoyFilter` has it. The operator lists the pods a
+  Gateway selects uncached: one the webhook can't inject (outside the proxy namespaces, other
+  labels) would serve the route uninspected, so it is `WiringFailed`. Istio reports nothing on
+  an `EnvoyFilter`, nor by default on a VirtualService: with its status on, a `Reconciled`
+  condition that isn't `True` is `Pending`. Bound only to the mesh: `ControllerUnsupported`;
+  also to the mesh: `Programmed`, with a message that the mesh traffic isn't inspected.
 
 Response inspection (v0.4.0, [0006 §2](0006-adapter-protocols.md#response-inspection-v040)):
 the engine's ext_proc adapter inspects the response headers and body for policies that ask, and

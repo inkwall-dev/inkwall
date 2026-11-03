@@ -115,6 +115,7 @@ Arguments: root, name.
 traefik: traefik.io/v1alpha1
 envoyGateway: gateway.envoyproxy.io/v1alpha1
 istio: networking.istio.io/v1alpha3
+istioIngress: networking.istio.io/v1
 {{- end -}}
 
 {{/*

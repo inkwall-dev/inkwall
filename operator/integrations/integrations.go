@@ -27,6 +27,13 @@ type Integration struct {
 	PodSelector labels.Set
 	// Adapter is the engine command and its flags for this proxy.
 	Adapter []string
+	// SocketContainer, for a proxy the Pod webhook injects that calls the
+	// engine on a Unix socket, is the proxy's container: it mounts the
+	// socket's directory (EnvoySocketDir).
+	SocketContainer string
+	// PodAnnotations are set on the pods the Pod webhook injects, for the
+	// proxy's own injector.
+	PodAnnotations map[string]string
 }
 
 // Traefik is the Traefik integration: the engine answers its ForwardAuth
@@ -44,6 +51,14 @@ var Traefik = Integration{
 var (
 	TraefikMiddlewareGVK   = schema.GroupVersionKind{Group: "traefik.io", Version: "v1alpha1", Kind: "Middleware"}
 	TraefikIngressRouteGVK = schema.GroupVersionKind{Group: "traefik.io", Version: "v1alpha1", Kind: "IngressRoute"}
+)
+
+// Istio's own API (networking.istio.io/v1) the operator reads, and
+// inkwallctl reads: VirtualServices are targets of the istio-ingress
+// integration, bound to Istio's Gateways (not the Gateway API's).
+var (
+	IstioVirtualServiceGVK = schema.GroupVersionKind{Group: "networking.istio.io", Version: "v1", Kind: "VirtualService"}
+	IstioGatewayGVK        = schema.GroupVersionKind{Group: "networking.istio.io", Version: "v1", Kind: "Gateway"}
 )
 
 // EnvoySocketDir holds the engine's Unix socket in Envoy Gateway's and
@@ -71,8 +86,25 @@ var Istio = Integration{
 	Adapter:           []string{"ext-proc", "--listen=unix:" + EnvoySocketDir + "/extproc.sock"},
 }
 
+// IstioIngress is the integration of Istio's ingress gateways, the ones its
+// istio/gateway Helm chart deploys, which Istio's own Gateways select and
+// VirtualServices bind to: the engine, injected into their pods by the Pod
+// webhook, answers the ext_proc filter an EnvoyFilter adds for each
+// protected VirtualService, on a Unix socket the istio-proxy container
+// mounts. It has no class: Istio's Gateways select pods by label.
+var IstioIngress = Integration{
+	Name:            "istio-ingress",
+	PodSelector:     labels.Set{"istio": "ingressgateway"},
+	Adapter:         []string{"ext-proc", "--listen=unix:" + EnvoySocketDir + "/extproc.sock"},
+	SocketContainer: "istio-proxy",
+	// Istio's injector would point the engine's probes at its agent in
+	// istio-proxy, which starts after the engine (a native sidecar): the
+	// engine's startup probe could never pass.
+	PodAnnotations: map[string]string{"sidecar.istio.io/rewriteAppHTTPProbers": "false"},
+}
+
 // All are the known integrations.
-var All = []Integration{Traefik, EnvoyGateway, Istio}
+var All = []Integration{Traefik, EnvoyGateway, Istio, IstioIngress}
 
 // ForController returns the integration of an IngressClass or GatewayClass
 // controller, or nil when Inkwall doesn't know it.

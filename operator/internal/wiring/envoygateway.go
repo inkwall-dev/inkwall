@@ -261,7 +261,7 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 		if r.sections[0] == "" {
 			r.sections = r.sections[:1]
 		}
-		r.routeSettings = settingsOf(policies.Items, k)
+		r.routeSettings = settingsOf(policies.Items, httpRouteKind, k)
 	}
 
 	// The Gateways whose pods get the engine.
@@ -580,13 +580,13 @@ func (st *envoyState) podsOf(gw types.NamespacedName) []*corev1.Pod {
 
 // settingsOf returns the settings of a route from the policies that
 // protect it.
-func settingsOf(policies []wafv1alpha1.WAFPolicy, route types.NamespacedName) routeSettings {
+func settingsOf(policies []wafv1alpha1.WAFPolicy, kind schema.GroupKind, route types.NamespacedName) routeSettings {
 	s := routeSettings{timeout: pipeline.DefaultTimeout, failOpen: true, detect: true}
 	for i := range policies {
 		p := &policies[i]
 		if p.Namespace != route.Namespace || p.DeletionTimestamp != nil ||
 			!slices.ContainsFunc(p.Spec.TargetRefs, func(r wafv1alpha1.TargetRef) bool {
-				return targetOf(p.Namespace, r).Kind == httpRouteKind && r.Name == route.Name
+				return targetOf(p.Namespace, r).Kind == kind && r.Name == route.Name
 			}) {
 			continue
 		}

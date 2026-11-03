@@ -289,7 +289,7 @@ func TestRouteSettings(t *testing.T) {
 			Spec: wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock, TargetRefs: []wafv1alpha1.TargetRef{{Group: "gateway.networking.k8s.io", Kind: "HTTPRoute", Name: "other"}}}}},
 			routeSettings{timeout: def, failOpen: true, detect: true}},
 	} {
-		if got := settingsOf(tc.policies, route); got != tc.want {
+		if got := settingsOf(tc.policies, httpRouteKind, route); got != tc.want {
 			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
 		}
 	}

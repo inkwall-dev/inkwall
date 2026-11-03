@@ -167,7 +167,7 @@ func ignorePodWebhook(ctx context.Context, c client.Client) error {
 	}
 	patch := client.MergeFrom(cfg.DeepCopy())
 	for i := range cfg.Webhooks {
-		if cfg.Webhooks[i].Name == webhook.PodWebhookName {
+		if name := cfg.Webhooks[i].Name; name == webhook.PodWebhookName || name == webhook.IstioIngressPodWebhookName {
 			cfg.Webhooks[i].FailurePolicy = ptr.To(admissionregistrationv1.Ignore)
 		}
 	}

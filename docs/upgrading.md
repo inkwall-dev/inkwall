@@ -38,8 +38,10 @@ What's new in 0.4.0:
   flags do the same without the operator. See [WebSocket](websocket.md).
 - **Istio.** The operator protects the HTTPRoutes of Istio's Gateways (Istio 1.28 or later): it
   adds the engine to a Gateway's pods through the ConfigMap the Gateway names, and an
-  `EnvoyFilter` sends the protected routes to it. See [Istio](istio.md). Nothing changes for
-  Istio Gateways until a policy targets one of their routes.
+  `EnvoyFilter` sends the protected routes to it. `WAFPolicy` targets may also be Istio
+  `VirtualService` objects (`group: networking.istio.io`), served by Istio's ingress gateways,
+  whose pods get the engine from the Pod webhook. See [Istio](istio.md). The chart upgrades the
+  CRDs with the new target kind; if you install them yourself, apply 0.4.0's.
 - **WebSocket messages, through the standalone proxy.** `inkwall-engine proxy --websocket-messages
   inspect` (or `text-only`) inspects each text message a client sends, up to `--max-body-bytes`; in
   `block` mode a denied one closes the WebSocket with 1008 before the application gets it. Through
@@ -77,6 +79,14 @@ What changes by itself in 0.4.0:
   Gateways. Set it to `auto` to grant it only when the cluster serves Istio's API, or `false`
   never to; without it the operator disables the Istio integration ([integration
   permissions](../deploy/helm/inkwall/README.md#integration-permissions)).
+- **A second Pod webhook and ClusterRole for Istio's ingress gateways.** Pods labelled `istio:
+  ingressgateway` (the label of Istio's `gateway` chart released as `istio-ingressgateway`) in the
+  proxy namespaces get the engine when they are created, as Traefik's do, also before any policy
+  targets a VirtualService; the ClusterRole `inkwall-operator-istio-ingress`
+  (`rbac.integrations.istioIngress`, `true` by default) reads VirtualServices and Istio's Gateways
+  and writes `EnvoyFilter` objects. While a policy is in `Block` mode, such pods can't start while
+  the operator is down, as Traefik's ([when the operator is down](../deploy/helm/inkwall/README.md#when-the-operator-is-down)).
+  Set `rbac.integrations.istioIngress=false` to leave them alone.
 - **Two more default proxy namespaces, `istio-ingress` and `istio-system`**, where Istio's docs put
   Gateways. If you set `injection.proxyNamespaces`, the value is kept: add your Istio Gateways'
   namespaces to it. Changing the value restarts the operator.
