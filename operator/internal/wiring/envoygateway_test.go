@@ -25,6 +25,7 @@ import (
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
+	"github.com/inkwall-dev/inkwall/pkg/policy"
 )
 
 // userEnvoyProxy is an EnvoyProxy with the user's own init container,
@@ -277,13 +278,13 @@ func TestRouteSettings(t *testing.T) {
 			pol("a", wafv1alpha1.WAFPolicySpec{Body: noBody, Timeout: &metav1.Duration{Duration: 800 * time.Millisecond}}),
 			pol("b", wafv1alpha1.WAFPolicySpec{FailureMode: wafv1alpha1.FailClosed}),
 		}, routeSettings{body: true, maxBody: engineBodyBytes, timeout: 800 * time.Millisecond}},
-		// Responses: the largest limit, unset the engine's default (512
+		// Responses: the largest limit, unset the engine's default (64
 		// KiB); a policy that doesn't inspect them adds none.
 		{"responses", []wafv1alpha1.WAFPolicy{
 			pol("a", wafv1alpha1.WAFPolicySpec{Body: noBody, Mode: wafv1alpha1.PolicyBlock, Responses: &wafv1alpha1.ResponsesSpec{Inspect: true}}),
-			pol("b", wafv1alpha1.WAFPolicySpec{Body: noBody, Responses: &wafv1alpha1.ResponsesSpec{Inspect: true, MaxBytes: ptr.To[int64](64 << 10)}}),
+			pol("b", wafv1alpha1.WAFPolicySpec{Body: noBody, Responses: &wafv1alpha1.ResponsesSpec{Inspect: true, MaxBytes: ptr.To[int64](32 << 10)}}),
 			pol("c", wafv1alpha1.WAFPolicySpec{Body: noBody, Responses: &wafv1alpha1.ResponsesSpec{}}),
-		}, routeSettings{timeout: def, responses: true, maxResponse: 512 << 10}},
+		}, routeSettings{timeout: def, responses: true, maxResponse: policy.DefaultResponseBytes}},
 		{"another route's", []wafv1alpha1.WAFPolicy{{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "x"},
 			Spec: wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock, TargetRefs: []wafv1alpha1.TargetRef{{Group: "gateway.networking.k8s.io", Kind: "HTTPRoute", Name: "other"}}}}},
 			routeSettings{timeout: def, failOpen: true, detect: true}},

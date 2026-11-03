@@ -192,7 +192,7 @@ an Envoy you configure yourself, in or out of Kubernetes, see [protecting raw En
 - A cluster's policies must fit in a bundle of 7,200 KiB compressed. Past 900 KiB, the bundle is
   split over several [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/).
 - Responses are inspected only through Envoy Gateway and raw Envoy (`responses`), never through
-  Traefik's ForwardAuth; a body over `responses.maxBytes` (512 KiB by default) has its prefix
+  Traefik's ForwardAuth; a body over `responses.maxBytes` (64 KiB by default) has its prefix
   inspected, and streamed responses (Server-Sent Events, gRPC) pass with their headers inspected
   only.
 - gRPC: a call's path and metadata (headers) are inspected, its protobuf messages are not; gRPC

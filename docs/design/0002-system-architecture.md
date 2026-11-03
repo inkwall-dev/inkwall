@@ -256,7 +256,7 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
     ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}, paranoiaLevel: 1}]
     exclusions: [{ruleIDs: [942100], when: {path: /api/search, argument: q}}]
     body: {inspect: true, maxBytes: 65536, onOversize: InspectPrefix}   # | Allow | Deny
-    responses: {inspect: true, maxBytes: 524288, onOversize: Deny}      # | Allow
+    responses: {inspect: true, maxBytes: 65536, onOversize: Deny}       # | Allow
   ```
 
   The most specific target wins: an [HTTPRoute](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) rule, then an HTTPRoute, then an Ingress, then the

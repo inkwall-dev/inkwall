@@ -531,7 +531,7 @@ integration), for `HTTPRoute` targets whose parent Gateways have a GatewayClass 
   `body.maxBytes`. Envoy Gateway applies one ClientTrafficPolicy per Gateway, so the operator makes
   none for a Gateway the user targets with their own, and deletes its own once they add one; their
   `bufferLimit` then caps the bodies inspected. One below the largest `body.maxBytes` of a route's
-  policies (unset: the engine's 64 KiB), or its largest `responses.maxBytes` (unset: 512 KiB), is `WiringFailed`, naming the ClientTrafficPolicy, with
+  policies (unset: the engine's 64 KiB), or its largest `responses.maxBytes` (unset: 64 KiB), is `WiringFailed`, naming the ClientTrafficPolicy, with
   the route still wired: bodies over it are handled as oversized, legitimate ones too. While the
   operator can't create or update its own (an admission policy refuses it, say), the routes whose
   body Envoy holds are `WiringFailed` with the error, still wired, until it's there and accepted.

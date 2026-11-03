@@ -257,7 +257,8 @@ type ResponsesSpec struct {
 	Inspect bool `json:"inspect,omitempty"`
 
 	// MaxBytes is how much of a response body is inspected, at most 10
-	// MiB. Unset: 512 KiB. A longer body has this much inspected, and then
+	// MiB. Unset: 64 KiB (each KiB costs about 0.3 ms of inspection: raise
+	// timeout with it). A longer body has this much inspected, and then
 	// gets onOversize.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10485760

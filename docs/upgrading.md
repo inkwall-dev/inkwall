@@ -32,7 +32,7 @@ What's new in 0.4.0:
   policy from the engine's flags or from the operator: see [protecting raw Envoy](raw-envoy.md).
   Nothing changes in an existing installation.
 - **Response inspection.** A `WAFPolicy` with `responses: {inspect: true}` (and optionally
-  `maxBytes`, 512 KiB by default, and `onOversize`) inspects the app's responses too, for data
+  `maxBytes`, 64 KiB by default, and `onOversize`) inspects the app's responses too, for data
   leaks (the CRS's `RESPONSE-95x` rules: SQL errors, stack traces, directory listings), and in
   Block mode replaces a response that leaks with 403. Off unless you set it: existing policies are
   unchanged. Only through Envoy Gateway, whose Envoy pods get the 0.4.0 engine as the operator
