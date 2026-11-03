@@ -57,6 +57,8 @@ The main flags; `inkwall-engine proxy -h` lists them all:
 - `inkwall-engine ext-proc` serves [Envoy](https://www.envoyproxy.io/docs/envoy/latest/)'s [external processing](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter) API over [gRPC](https://grpc.io/docs/),
   on `127.0.0.1:9003` (or a Unix socket, `--listen unix:/path`): see
   [protecting raw Envoy](raw-envoy.md).
+- `inkwall-engine spoe` is an agent of [HAProxy](https://docs.haproxy.org/)'s [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt), on `127.0.0.1:9004` (or a Unix
+  socket): see [protecting HAProxy](haproxy.md).
 
 To test rules without running the engine, see [testing policies offline](testing-policies.md).
 

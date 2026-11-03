@@ -177,8 +177,9 @@ an Envoy you configure yourself, in or out of Kubernetes, see [protecting raw En
 - Proxies: **Traefik**, **Envoy Gateway** (v1.9; not with `mergeGateways` or Envoy as a
   DaemonSet) and **Istio**'s Gateway API (1.28 or later; Gateways it deploys, not mesh sidecars or
   `VirtualService` targets yet), wired by the operator; **raw [Envoy](https://www.envoyproxy.io/docs/envoy/latest/)** (1.33 or later) that you configure with
-  the engine's ext_proc adapter ([protecting raw Envoy](docs/raw-envoy.md)); and the standalone
-  proxy. [HAProxy](https://docs.haproxy.org/) and [Caddy](https://caddyserver.com/docs/) are designed, not built. [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) is retired upstream, so it gets no integration:
+  the engine's ext_proc adapter ([protecting raw Envoy](docs/raw-envoy.md)); **[HAProxy](https://docs.haproxy.org/)** (3.1 or later) that you
+  configure with the engine's SPOE agent ([protecting HAProxy](docs/haproxy.md)); and the standalone
+  proxy. [Caddy](https://caddyserver.com/docs/) is designed, not built. [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) is retired upstream, so it gets no integration:
   `inkwallctl migrate ingress-nginx` moves its ModSecurity settings to a supported proxy.
 - Targets: **`Ingress`** and Traefik **`IngressRoute`** (match rules that join `Host`, `Path` and
   `PathPrefix` with `&&`) through Traefik; [Gateway API](https://gateway-api.sigs.k8s.io/) **[`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/)** through Envoy Gateway, Istio or

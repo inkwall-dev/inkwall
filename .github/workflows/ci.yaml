@@ -202,6 +202,20 @@ jobs:
           cache-dependency-path: test/crs/go.sum
       - run: make crs-test
 
+  haproxy:
+    # HAProxy with the engine's SPOE agent, in Docker (#282): the samples of
+    # examples/haproxy validated by HAProxy and run, block and detect mode,
+    # and HAProxy's behaviour with the engine down (fail closed, fail open).
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+      - run: make haproxy-e2e
+
   bench:
     # Performance regression gate (0001 §8): benchmarks of the PR against its
     # base, interleaved, compared with benchstat. Packages whose test binary
