@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -284,55 +285,99 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	if err != nil {
 		return reconcile.Result{}, err
 	}
+	// published is the bundle engines get: next, unless it is too large.
+	published := next
+	var tooLarge error
 	if changed {
-		signed, err := signer.Sign(next)
-		if err != nil {
-			return reconcile.Result{}, err
-		}
-		size, err := r.current.Store(ctx, r.Client, r.APIReader, r.Namespace, next, signed, signer.Public())
-		if err != nil {
-			if errors.Is(err, bundle.ErrTooLarge) {
-				// Retrying won't help until the policy shrinks; keep the
-				// current bundle, and say so on the policies it doesn't
-				// enforce as they are now.
-				logger.Error(err, "bundle not published")
-				if err := r.writeTooLarge(ctx, res, current, next, err, policies.Items, ruleSets.Items, clusterRuleSets.Items); err != nil {
+		switch err := r.publish(ctx, signer, next); {
+		case errors.Is(err, bundle.ErrTooLarge):
+			// Retrying won't help until the policy shrinks; keep the
+			// current bundle, and say so on the policies it doesn't
+			// enforce as they are now.
+			logger.Error(err, "bundle not published")
+			tooLarge, published = err, current
+			if current.GetSuspended() != suspended {
+				// The switch must work exactly when something is wrong:
+				// the bundle in force, flipped, fits as it does (#291).
+				if published, err = r.publishSwitched(ctx, signer, current, suspended); err != nil {
 					return reconcile.Result{}, err
 				}
-				if err := r.writeConfigStatus(ctx, cfg, current); err != nil {
-					return reconcile.Result{}, err
-				}
-				return reconcile.Result{RequeueAfter: resync}, nil
 			}
-			return reconcile.Result{}, fmt.Errorf("store bundle %d: %w", next.GetVersion(), err)
-		}
-		r.lastVersion = next.GetVersion()
-		chunks := 0
-		if size > bundlesecret.ChunkBytes {
-			chunks = (size + bundlesecret.ChunkBytes - 1) / bundlesecret.ChunkBytes
-		}
-		logger.Info("bundle published", "version", next.GetVersion(), "policies", len(next.GetPolicies()),
-			"rule_sets", len(next.GetRuleSets()), "suspended", suspended, "key", signer.KeyID(), "bytes", size, "chunks", chunks)
-		if size > warnBytes {
-			// Warn well before builds fail.
-			logger.Info("bundle nears its size limit: past it, policy changes are not published",
-				"bytes", size, "limit", bundle.MaxCompressedBytes)
+		case err != nil:
+			return reconcile.Result{}, err
 		}
 	}
 	if err := bundle.Prune(ctx, r.Client, r.APIReader, r.Namespace); err != nil {
 		return reconcile.Result{}, fmt.Errorf("delete stale bundle chunks: %w", err)
 	}
 
-	if err := r.writeStatus(ctx, res, next, policies.Items, ruleSets.Items, clusterRuleSets.Items); err != nil {
+	if tooLarge != nil {
+		err = r.writeTooLarge(ctx, res, published, next, tooLarge, policies.Items, ruleSets.Items, clusterRuleSets.Items)
+	} else {
+		err = r.writeStatus(ctx, res, next, policies.Items, ruleSets.Items, clusterRuleSets.Items)
+	}
+	if err != nil {
 		return reconcile.Result{}, err
 	}
-	if err := r.writeConfigStatus(ctx, cfg, next); err != nil {
+	if err := r.writeConfigStatus(ctx, cfg, published); err != nil {
 		return reconcile.Result{}, err
 	}
 	if keys.Phase() != bundle.PhaseIdle {
 		return reconcile.Result{RequeueAfter: min(rotationPoll, r.RotationGrace)}, nil
 	}
 	return reconcile.Result{RequeueAfter: resync}, nil
+}
+
+// publish signs and stores next.
+func (r *BundleReconciler) publish(ctx context.Context, signer *bundle.Signer, next *bundlev1.Bundle) error {
+	signed, err := signer.Sign(next)
+	if err != nil {
+		return err
+	}
+	size, err := r.current.Store(ctx, r.Client, r.APIReader, r.Namespace, next, signed, signer.Public())
+	if errors.Is(err, bundle.ErrTooLarge) {
+		return err
+	}
+	if err != nil {
+		return fmt.Errorf("store bundle %d: %w", next.GetVersion(), err)
+	}
+	r.lastVersion = next.GetVersion()
+	chunks := 0
+	if size > bundlesecret.ChunkBytes {
+		chunks = (size + bundlesecret.ChunkBytes - 1) / bundlesecret.ChunkBytes
+	}
+	logger := log.FromContext(ctx)
+	logger.Info("bundle published", "version", next.GetVersion(), "policies", len(next.GetPolicies()),
+		"rule_sets", len(next.GetRuleSets()), "suspended", next.GetSuspended(), "key", signer.KeyID(), "bytes", size, "chunks", chunks)
+	if size > warnBytes {
+		// Warn well before builds fail.
+		logger.Info("bundle nears its size limit: past it, policy changes are not published",
+			"bytes", size, "limit", bundle.MaxCompressedBytes)
+	}
+	return nil
+}
+
+// publishSwitched publishes the bundle in force, current, with inspection
+// suspended or resumed as spec.suspend says, when the bundle built from the
+// cluster is too large: suspending must work exactly when something is
+// wrong. It enforces what current does, so it fits as current does; with
+// no current bundle, it has no policies.
+func (r *BundleReconciler) publishSwitched(ctx context.Context, signer *bundle.Signer, current *bundlev1.Bundle,
+	suspended bool) (*bundlev1.Bundle, error) {
+	content := &bundlev1.Bundle{ClusterId: r.clusterID}
+	if current != nil {
+		content = proto.Clone(current).(*bundlev1.Bundle)
+	}
+	content.Suspended = suspended
+	next, _, err := bundle.Next(current, content, r.lastVersion, r.Now(), false)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.publish(ctx, signer, next); err != nil {
+		return nil, fmt.Errorf("publish bundle %d, the bundle in force with suspend %t: %w", next.GetVersion(), suspended, err)
+	}
+	log.FromContext(ctx).Info("bundle in force published again, as spec.suspend says", "version", next.GetVersion(), "suspended", suspended)
+	return next, nil
 }
 
 // config reads the InkwallConfig; nil if there is none.

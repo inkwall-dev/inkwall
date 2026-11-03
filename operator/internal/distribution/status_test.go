@@ -129,8 +129,14 @@ func TestEnforcedSuspended(t *testing.T) {
 		if tc.suspended && !strings.Contains(c.Message, "InkwallConfig default") {
 			t.Errorf("%s: message %q doesn't name the InkwallConfig", tc.name, c.Message)
 		}
-		if r := meta.FindStatusCondition(conds, wafv1alpha1.ConditionReady); r == nil || r.Status != metav1.ConditionFalse {
-			t.Errorf("%s: Ready %+v, want False (not Programmed)", tc.name, r)
+		// Nothing else reported: that is Ready's reason, unless inspection is
+		// suspended (#291).
+		want := "NotAccepted"
+		if tc.suspended {
+			want = ReasonSuspended
+		}
+		if r := meta.FindStatusCondition(conds, wafv1alpha1.ConditionReady); r == nil || r.Status != metav1.ConditionFalse || r.Reason != want {
+			t.Errorf("%s: Ready %+v, want False %s", tc.name, r, want)
 		}
 	}
 }

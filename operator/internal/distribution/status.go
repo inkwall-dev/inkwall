@@ -132,8 +132,15 @@ func engineName(e Engine) string {
 
 // Ready combines a policy's conditions (0004 §3.2): True when Accepted,
 // Programmed and Enforced all are; otherwise the first that isn't, by its
-// reason, so kubectl shows what is missing.
+// reason, so kubectl shows what is missing. Suspended inspection (Enforced's
+// reason Suspended) comes first: whatever else holds, every engine allows
+// every request (#291).
 func Ready(conds []metav1.Condition, generation int64) metav1.Condition {
+	if c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced); c != nil &&
+		c.Status != metav1.ConditionTrue && c.Reason == ReasonSuspended {
+		return metav1.Condition{Type: wafv1alpha1.ConditionReady, Status: metav1.ConditionFalse, Reason: c.Reason,
+			Message: wafv1alpha1.ConditionEnforced + ": " + c.Message, ObservedGeneration: generation}
+	}
 	for _, t := range []string{wafv1alpha1.ConditionAccepted, wafv1alpha1.ConditionProgrammed, wafv1alpha1.ConditionEnforced} {
 		c := meta.FindStatusCondition(conds, t)
 		if c == nil {
