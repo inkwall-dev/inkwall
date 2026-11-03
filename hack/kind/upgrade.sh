@@ -329,13 +329,14 @@ probe_stop() {
       exit fail
     }' <<<"$log") && rc=0 || rc=$?
   sed 's/^/      /' <<<"$summary"
+  # The wrong rounds, even within the gap allowed, with each request's
+  # connect/total time: a connect that took 1 s or more is a SYN the
+  # network dropped.
+  grep -v '^[0-9.]* 403 200 403 ' <<<"$log" | head -20 | sed 's/^/        /' || true
   if [[ $rc == 0 ]]; then
     ok "$name: no attack got through, no gap over ${max}s"
   else
     fail "$name: an attack got through, a gap over ${max}s, or no probe traffic"
-    # The wrong rounds, with each request's connect/total time: a
-    # connect that took 1 s or more is a SYN the network dropped.
-    grep -v '^[0-9.]* 403 200 403 ' <<<"$log" | head -40 | sed 's/^/      /' || true
     # The engine's and Traefik's logs of the last 2 minutes; Traefik's
     # access log has the requests that took 1 s or more.
     echo "      engine (in Traefik's pod) and Traefik, last 2 minutes:"
