@@ -29,7 +29,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
@@ -46,6 +45,7 @@ import (
 
 	controlplanev1 "github.com/inkwall-dev/inkwall/api/controlplane/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 )
 
 // The connector writes the InkwallConfig's status and replaces the identity
@@ -96,9 +96,11 @@ type Connector struct {
 	// system roots.
 	CAFile string
 
-	// ProxyPods selects the proxies' pods, for ClusterState (default:
-	// Traefik's default labels).
-	ProxyPods labels.Selector
+	// Pods select each integration's proxy pods, for ClusterState (nil:
+	// the defaults), and Disabled are the integrations the operator may
+	// not wire, by name, with why.
+	Pods     *integrations.Selectors
+	Disabled map[string]string
 	// EngineStale is how old a replica's engine report may be before
 	// ClusterState leaves it out (default 30 s).
 	EngineStale time.Duration

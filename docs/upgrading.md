@@ -32,7 +32,7 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
   they could stay `Ready=True` while nothing was inspected. The `InkwallConfig` has a new
   `Suspended` condition. See [suspending inspection](../deploy/helm/inkwall/README.md#suspending-inspection).
 - **A policy left out of a bundle too large to publish says so.** When the bundle doesn't fit its
-  Secrets (over 7.2 MiB compressed), the policies it would add or change are `Accepted=False` and
+  Secrets (over 7,200 KiB compressed), the policies it would add or change are `Accepted=False` and
   `Ready=False`, reason `BundleTooLarge`, until it fits. In 0.3.0 they kept the conditions of their
   previous spec, `Accepted=True` included, while engines ran that previous spec.
 - **Suspending works when the bundle is too large.** In 0.3.0, `spec.suspend` did nothing while
@@ -58,7 +58,7 @@ provider](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/) 
 
   ```sh
   kubectl get wafpolicy -A -o json |
-    jq -r '.items[] | select(any(.spec.targetRefs[]; .kind == "HTTPRoute")) | "\(.metadata.namespace)/\(.metadata.name) \(.spec.mode // "Block")"'
+    jq -r '.items[] | select(any(.spec.targetRefs[]; .kind == "HTTPRoute")) | "\(.metadata.namespace)/\(.metadata.name) \(.spec.mode // "Detect")"'
   ```
 
 - **Remove `spec.engine.socketDir` from your `InkwallConfig`**, if you set it. It never had an
@@ -378,7 +378,7 @@ Without any configuration on your part, the upgrade from any 0.1.x changes the f
 - **Bundles split into chunks past 900 KiB.** A [bundle](glossary.md#bundle) of up to 900 KiB
   compressed stays in the [Secret](https://kubernetes.io/docs/concepts/configuration/secret/) `inkwall-bundle`, as before. A larger one, which 0.1.x
   couldn't publish, is split into Secrets named `inkwall-bundle-a-0`… or `inkwall-bundle-b-0`…,
-  labelled `waf.inkwall.dev/bundle-chunk`, up to 7.2 MiB. The `inkwall-bundle-reader` Role, which
+  labelled `waf.inkwall.dev/bundle-chunk`, up to 7,200 KiB. The `inkwall-bundle-reader` Role, which
   lets Traefik's engines read the bundle, now also grants `get` on every chunk name. If you run an
   engine with `--bundle-secret` and a Role of your own, add the chunk names to it. Engines from
   0.1.x can't read a chunked Secret when they start, and refuse a streamed bundle over 4 MiB

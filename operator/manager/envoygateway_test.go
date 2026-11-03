@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -403,8 +404,61 @@ func testEnvoyGateway(ctx context.Context, t *testing.T, c client.Client) {
 		_ = unstructured.SetNestedField(u.Object, "64Ki", "spec", "connection", "bufferLimit")
 	})
 	eventually(t, "Programmed with the user's buffer limit", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
+
+	// The operator's buffer limit can't be created (here an admission
+	// policy refuses it): Envoy still buffers at its default, so the
+	// route isn't Programmed, said why; it is once the limit is created
+	// and accepted.
+	denyCTP := &admissionregistrationv1.ValidatingAdmissionPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "deny-inkwall-buffer-limit"},
+		Spec: admissionregistrationv1.ValidatingAdmissionPolicySpec{
+			FailurePolicy: new(admissionregistrationv1.Fail),
+			MatchConstraints: &admissionregistrationv1.MatchResources{ResourceRules: []admissionregistrationv1.NamedRuleWithOperations{{
+				RuleWithOperations: admissionregistrationv1.RuleWithOperations{
+					Operations: []admissionregistrationv1.OperationType{admissionregistrationv1.Create},
+					Rule: admissionregistrationv1.Rule{
+						APIGroups: []string{wiring.ClientTrafficPolicyGVK.Group}, APIVersions: []string{"*"}, Resources: []string{"clienttrafficpolicies"},
+					},
+				},
+			}}},
+			Validations: []admissionregistrationv1.Validation{{Expression: "object.metadata.name != 'inkwall-waf-plain'", Message: "no buffer limit here"}},
+		},
+	}
+	denyBinding := &admissionregistrationv1.ValidatingAdmissionPolicyBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "deny-inkwall-buffer-limit"},
+		Spec: admissionregistrationv1.ValidatingAdmissionPolicyBindingSpec{
+			PolicyName:        denyCTP.Name,
+			ValidationActions: []admissionregistrationv1.ValidationAction{admissionregistrationv1.Deny},
+		},
+	}
+	for _, o := range []client.Object{denyCTP, denyBinding} {
+		if err := c.Create(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The API server enforces a new admission policy within a second or
+	// so: until it does, a ClientTrafficPolicy created by hand is let in.
+	eventually(t, "the admission policy enforced", func() string {
+		probe := bufferLimitProbe(edge)
+		err := c.Create(ctx, probe)
+		if err == nil {
+			_ = c.Delete(ctx, probe)
+			return "a ClientTrafficPolicy inkwall-waf-plain was created"
+		}
+		if !strings.Contains(err.Error(), "no buffer limit here") {
+			return err.Error()
+		}
+		return ""
+	})
 	if err := c.Delete(ctx, userCTP); err != nil {
 		t.Fatal(err)
+	}
+	eventually(t, "WiringFailed while the operator's buffer limit can't be created", programmed("eg", metav1.ConditionFalse, wiring.ReasonWiringFailed,
+		"no buffer limit here"))
+	for _, o := range []client.Object{denyBinding, denyCTP} {
+		if err := c.Delete(ctx, o); err != nil {
+			t.Fatal(err)
+		}
 	}
 	eventually(t, "the operator's buffer limit back", func() string {
 		if _, err := get(wiring.ClientTrafficPolicyGVK, edge, "inkwall-waf-plain"); err != nil {
@@ -481,4 +535,16 @@ func testEnvoyGateway(ctx context.Context, t *testing.T, c client.Client) {
 	if err := c.DeleteAllOf(ctx, &corev1.Pod{}, client.InNamespace("eg-system")); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// bufferLimitProbe is a ClientTrafficPolicy named as the operator's for
+// the Gateway plain, to see whether the API server lets it in.
+func bufferLimitProbe(namespace string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{
+		"targetRefs": []any{map[string]any{"group": "gateway.networking.k8s.io", "kind": "Gateway", "name": "plain"}},
+	}}}
+	u.SetGroupVersionKind(wiring.ClientTrafficPolicyGVK)
+	u.SetNamespace(namespace)
+	u.SetName("inkwall-waf-plain")
+	return u
 }

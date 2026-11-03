@@ -66,7 +66,7 @@ which only adds management, analytics and threat intelligence.
 |---|---|---|---|
 | **inkwall-engine** | Sidecar in ingress controller pods, or standalone | `cmd/engine`, `pkg/` | Built |
 | **Engine adapters** | Engine process | `pkg/adapters/*` | Built: `forwardauth`, `httpcheck` (`/v1/check`), `proxy`, `extproc` ([ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter)). Not yet: [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter), [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) |
-| **Proxy-side glue** | Proxy configuration | `operator/integrations`, `operator/internal/wiring` | Built: Traefik [Middleware](https://doc.traefik.io/traefik/middlewares/overview/); Envoy Gateway's `EnvoyProxy`, `EnvoyExtensionPolicy`, `Backend` and `ClientTrafficPolicy`. Not yet: nginx [Lua](https://github.com/openresty/lua-nginx-module), SPOE, other Envoy products |
+| **Proxy-side glue** | Proxy configuration | `operator/integrations`, `operator/internal/wiring` | Built: Traefik [Middleware](https://doc.traefik.io/traefik/middlewares/overview/); Envoy Gateway's `EnvoyProxy`, `EnvoyExtensionPolicy`, `Backend` and `ClientTrafficPolicy`. Not yet: SPOE, other Envoy products |
 | **Caddy module** | Compiled into Caddy | `adapters/caddy` (own [`go.mod`](https://go.dev/ref/mod#go-mod-file)) | Not yet |
 | **Traefik plugin** (thin client) | Traefik ([Yaegi](https://github.com/traefik/yaegi)) | `adapters/traefik-plugin` (own `go.mod`) | Not yet |
 | **inkwall-operator** | `inkwall-system`, 2 replicas | `cmd/operator`, `operator/` | Built |
@@ -108,7 +108,7 @@ which only adds management, analytics and threat intelligence.
 
 | Part | Does | Code | Status |
 |---|---|---|---|
-| Discovery and integration registry | Find the ingress controller's pods; list the proxy controllers of the [IngressClasses](https://kubernetes.io/docs/concepts/services-networking/ingress/#ingress-class) and [GatewayClasses](https://gateway-api.sigs.k8s.io/reference/api-types/gatewayclass/) in `InkwallConfig.status.proxies` | `operator/integrations`, `operator/internal/discovery` | Built: Traefik and Envoy Gateway, their pods by [label selectors](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors); discovery. Not yet: istio, ingressnginx, haproxy, caddy |
+| Discovery and integration registry | Find the ingress controller's pods; list the proxy controllers of the [IngressClasses](https://kubernetes.io/docs/concepts/services-networking/ingress/#ingress-class) and [GatewayClasses](https://gateway-api.sigs.k8s.io/reference/api-types/gatewayclass/) in `InkwallConfig.status.proxies` | `operator/integrations`, `operator/internal/discovery` | Built: Traefik and Envoy Gateway, their pods by [label selectors](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors); discovery. Not yet: istio, haproxy, caddy |
 | Injection | Add the engine as a [native sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/) through the Pod webhook | `operator/internal/injection` | Built |
 | Wiring | Render proxy configuration; [merge-patch](https://www.rfc-editor.org/rfc/rfc7386) user-owned routes; one `Integration` per proxy | `operator/internal/wiring` | Built (Traefik, Envoy Gateway) |
 | Resolver | Turn policy targets into host, path and method | `operator/resolver` | Built |
@@ -216,5 +216,5 @@ bypass.
 | inkwallctl (`test`, with flags, `--policy` or `--bundle`) | Yes | Local and CI validation |
 | Caddy module (not yet) | Yes (embeds the engine) | In-process evaluation |
 | Adapters, router, IP lists, rate limiter | No | Inkwall's own code; runs before the rules |
-| Traefik Yaegi plugin, nginx Lua plugin (not yet) | No | Thin clients that call the engine |
+| Traefik Yaegi plugin (not yet) | No | Thin clients that call the engine |
 | Control plane (not yet) | For validation | Rejecting bad rules before they reach clusters |

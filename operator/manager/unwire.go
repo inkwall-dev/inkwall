@@ -14,13 +14,17 @@ import (
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
+	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
 	"github.com/inkwall-dev/inkwall/operator/webhook"
 )
@@ -29,7 +33,10 @@ import (
 // operator, lets proxy pods start without the Pod webhook, and undoes the
 // wiring, so the routes keep working, uninspected, once Inkwall is gone.
 // WAFPolicy objects are kept, without the operator's finalizer, so deleting
-// them (or their namespace) doesn't wait for an operator that is gone.
+// them (or their namespace) doesn't wait for an operator that is gone. Last,
+// it deletes what the operator created for itself and the engines outside
+// the chart: the trust ConfigMaps in the proxy namespaces, the bundle grant,
+// the engine reports and the leader Lease. The bundle Secrets are kept.
 func Unwire(ctx context.Context, c client.Client, namespace, deployment string, logger *slog.Logger) error {
 	// 1. Stop the operator: running, it would wire the routes again. A
 	// draining replica still runs its controllers, so wait for its pods.
@@ -94,6 +101,59 @@ func Unwire(ctx context.Context, c client.Client, namespace, deployment string, 
 	for _, name := range n.Forbidden {
 		logger.Warn("integration not unwired: the operator may not change its objects (its ClusterRole isn't granted)", slog.String("integration", name))
 	}
+
+	// 4. What the operator created besides: running engines keep their
+	// files and their last bundle, and proxy pods started now don't get the
+	// engine, so nothing reads these any more.
+	return cleanUp(ctx, c, namespace, logger)
+}
+
+// managedBy labels what the operator creates.
+var managedBy = client.MatchingLabels{"app.kubernetes.io/managed-by": "inkwall-operator"}
+
+// cleanUp deletes the trust ConfigMaps (the operator's, labelled, in any
+// namespace: a user's own is kept), the engine reports, the bundle grant
+// and the leader Lease.
+func cleanUp(ctx context.Context, c client.Client, namespace string, logger *slog.Logger) error {
+	var cms corev1.ConfigMapList
+	if err := c.List(ctx, &cms, managedBy); err != nil {
+		return fmt.Errorf("list the operator's ConfigMaps: %w", err)
+	}
+	trust := 0
+	for i := range cms.Items {
+		cm := &cms.Items[i]
+		_, report := cm.Labels[distribution.EnginesLabel]
+		switch {
+		case cm.Name == injection.TrustConfigMap:
+			trust++
+		case report && cm.Namespace == namespace:
+		default:
+			continue
+		}
+		if err := c.Delete(ctx, cm); client.IgnoreNotFound(err) != nil {
+			return fmt.Errorf("delete ConfigMap %s/%s: %w", cm.Namespace, cm.Name, err)
+		}
+	}
+	for _, o := range []struct {
+		kind string
+		obj  client.Object
+	}{
+		{"RoleBinding", &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: injection.GrantName}}},
+		{"Role", &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: injection.GrantName}}},
+		{"Lease", &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: leaderElectionID}}},
+	} {
+		// The chart's hook Role grants deleting the grant; without it (a
+		// chart of its own), a leftover mustn't stop the uninstall.
+		switch err := c.Delete(ctx, o.obj); {
+		case apierrors.IsForbidden(err):
+			logger.Warn("not deleted: the operator may not delete it", slog.String("kind", o.kind),
+				slog.String("name", namespace+"/"+o.obj.GetName()))
+		case client.IgnoreNotFound(err) != nil:
+			return fmt.Errorf("delete %s %s/%s: %w", o.kind, namespace, o.obj.GetName(), err)
+		}
+	}
+	logger.Info("the operator's objects deleted", slog.Int("trustConfigMaps", trust),
+		slog.String("grant", namespace+"/"+injection.GrantName), slog.String("lease", namespace+"/"+leaderElectionID))
 	return nil
 }
 

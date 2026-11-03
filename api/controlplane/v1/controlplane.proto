@@ -218,15 +218,23 @@ message ClusterState {
   bytes bundle_content_hash = 6;
 }
 
-// Integration is a proxy controller the operator wires.
+// Integration is a proxy controller the operator wires: one for each the
+// operator supports, enabled or not.
 message Integration {
   // The integration, e.g. "traefik".
   string name = 1;
-  // Its IngressClass controller, e.g. "traefik.io/ingress-controller".
+  // Its IngressClass controller, e.g. "traefik.io/ingress-controller"
+  // (none for a proxy that serves no Ingress).
   string controller = 2;
   // Its running pods, and how many of them have the engine.
   uint32 pods = 3;
   uint32 pods_with_engine = 4;
+  // Its GatewayClass controllerName, e.g.
+  // "gateway.envoyproxy.io/gatewayclass-controller".
+  string gateway_controller = 5;
+  // Why the operator may not wire it, e.g. missing RBAC; empty while it's
+  // enabled.
+  string disabled = 6;
 }
 
 // Engine is one engine connected to the operator.

@@ -57,7 +57,7 @@ The names below are for a release named `inkwall`.
 | `Service` `inkwall-operator` | Bundle distribution to the engines: [gRPC](https://grpc.io/docs/) over [TLS](https://www.rfc-editor.org/rfc/rfc8446) on port 9445 |
 | Webhook certificate | A [`Secret`](https://kubernetes.io/docs/concepts/configuration/secret/) the operator fills, or a [cert-manager](https://cert-manager.io/docs/) [`Certificate`](https://cert-manager.io/docs/usage/certificate/) |
 | [`ConfigMap`](https://kubernetes.io/docs/concepts/configuration/configmap/) `inkwall-control-plane-ca`, `Secret` `inkwall-enrollment` | Only with `controlPlane.caBundle` or `controlPlane.enrollmentToken` |
-| [Pre-delete hook](https://helm.sh/docs/topics/charts_hooks/): [`Job`](https://kubernetes.io/docs/concepts/workloads/controllers/job/), `Role` and `RoleBinding` `inkwall-operator-unwire` | Runs only on `helm uninstall`: unwires the routes and releases the `WAFPolicy` objects (`uninstall.unwire`) |
+| [Pre-delete hook](https://helm.sh/docs/topics/charts_hooks/): [`Job`](https://kubernetes.io/docs/concepts/workloads/controllers/job/), `Role` and `RoleBinding` `inkwall-operator-unwire` | Runs only on `helm uninstall`: unwires the routes, releases the `WAFPolicy` objects and deletes the operator's trust ConfigMaps, bundle grant and leader Lease (`uninstall.unwire`) |
 
 The chart renders the CRDs, [RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) rules and webhooks from `files/`, which `make generate` copies
 from the operator's generated manifests. Don't edit `files/` by hand.
@@ -241,14 +241,19 @@ Gateways it pointed at its own `EnvoyProxy` back at none. Every `WAFPolicy` then
 `Programmed=False` and `Ready=False` (reason `Unwired`), and loses the `waf.inkwall.dev/unwire`
 finalizer. The routes then keep working, uninspected; Traefik pods drop the engine when they
 restart, and Envoy Gateway rolls its Envoy pods without it; deleting a policy, or its namespace, no
-longer waits for the operator.
+longer waits for the operator. Last, the hook deletes what the operator created outside the chart
+for itself and the engines: the `inkwall-trust` ConfigMaps in the proxy namespaces (labelled
+`app.kubernetes.io/managed-by: inkwall-operator`; an unlabelled one of your own is kept), the
+`inkwall-bundle-reader` Role and RoleBinding and the engine reports (`inkwall-engines-*`
+ConfigMaps) in its namespace, and its leader Lease `inkwall-operator.waf.inkwall.dev`. Engines
+still running keep their last bundle until their pod restarts.
 
 `helm uninstall` keeps:
 
 - the CRDs, and so every WAF object;
 - the Secrets the operator creates in its namespace: `inkwall-bundle`,
-  `inkwall-bundle-signing-key` and, for a bundle too large for one Secret, its chunks (labelled
-  `waf.inkwall.dev/bundle-chunk`).
+  `inkwall-bundle-signing-key`, for a bundle too large for one Secret, its chunks (labelled
+  `waf.inkwall.dev/bundle-chunk`), and, with a control plane, `inkwall-control-plane-identity`.
 
 A reinstall continues with the same signing keys, and any rotation in progress, so engines keep
 trusting them. To remove the Secrets, delete the namespace.
@@ -281,6 +286,14 @@ wiring yourself:
      while read -r ns name; do
        kubectl -n "$ns" patch wafpolicy "$name" --type merge -p '{"metadata":{"finalizers":null}}'
      done
+   ```
+4. Delete what the operator created besides: the trust ConfigMaps and engine reports, the bundle
+   grant and the leader Lease.
+
+   ```sh
+   kubectl delete configmap -A -l app.kubernetes.io/managed-by=inkwall-operator
+   kubectl -n inkwall-system delete role,rolebinding inkwall-bundle-reader --ignore-not-found
+   kubectl -n inkwall-system delete lease inkwall-operator.waf.inkwall.dev --ignore-not-found
    ```
 
 ### Turning injection off

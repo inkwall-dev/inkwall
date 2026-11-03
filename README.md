@@ -86,7 +86,15 @@ cosign verify ghcr.io/inkwall-dev/inkwall-engine:0.3.0 \
 ```
 
 The binaries (`inkwall-engine`, `inkwall-operator`, `inkwallctl`) are on the
-[releases page](https://github.com/inkwall-dev/inkwall/releases).
+[releases page](https://github.com/inkwall-dev/inkwall/releases). Each one's `version` subcommand
+(or `--version`) prints the release, the commit and the Go version it was built with:
+
+```console
+$ inkwallctl version
+inkwallctl 0.3.1
+commit: 0123456789abcdef0123456789abcdef01234567
+go: go1.27.3 linux/amd64
+```
 
 ## Protect a route
 
@@ -159,8 +167,9 @@ modes, and [testing policies offline](docs/testing-policies.md) for `inkwallctl 
 ## Limits
 
 - Proxies: **Traefik** and **Envoy Gateway** (v1.9; not with `mergeGateways` or Envoy as a
-  DaemonSet), plus the standalone proxy. Raw [Envoy](https://www.envoyproxy.io/docs/envoy/latest/), [HAProxy](https://docs.haproxy.org/), [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) and [Caddy](https://caddyserver.com/docs/)
-  are designed, not built.
+  DaemonSet), plus the standalone proxy. Raw [Envoy](https://www.envoyproxy.io/docs/envoy/latest/), [HAProxy](https://docs.haproxy.org/) and [Caddy](https://caddyserver.com/docs/)
+  are designed, not built. [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) is retired upstream, so it gets no integration:
+  `inkwallctl migrate ingress-nginx` moves its ModSecurity settings to a supported proxy.
 - Targets: **`Ingress`** and Traefik **`IngressRoute`** (match rules that join `Host`, `Path` and
   `PathPrefix` with `&&`) through Traefik; [Gateway API](https://gateway-api.sigs.k8s.io/) **[`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/)** through Envoy Gateway or
   [Traefik's Gateway API provider](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/) (`Exact` and `PathPrefix` paths, methods; no header or
@@ -171,8 +180,12 @@ modes, and [testing policies offline](docs/testing-policies.md) for `inkwallctl 
   mode it writes the policies the control plane sends, and in both it forwards the engines'
   security events. `Standalone`, the default, connects to nothing. See
   [connecting to a control plane](docs/control-plane.md).
-- A cluster's policies must fit in a bundle of 7.2 MiB compressed. Past 900 KiB, the bundle is
+- A cluster's policies must fit in a bundle of 7,200 KiB compressed. Past 900 KiB, the bundle is
   split over several [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/).
+- gRPC: a call's path and metadata (headers) are inspected, its protobuf messages are not; gRPC
+  with another codec and gRPC-Web text are inspected as other requests, and denied by the Core
+  Rule Set's content type rule. Bidirectional streaming calls stall while the proxy holds the
+  body. See [gRPC](docs/grpc.md).
 - Behind a load balancer, the engine sees the client's IP only with the [PROXY protocol](https://github.com/haproxy/haproxy/blob/master/doc/proxy-protocol.txt) on Traefik's
   [entry points](https://doc.traefik.io/traefik/routing/entrypoints/) or with [`externalTrafficPolicy: Local`](https://kubernetes.io/docs/tasks/access-application-cluster/create-external-load-balancer/#preserving-the-client-source-ip): see [client IP](docs/client-ip.md).
 
@@ -190,7 +203,8 @@ Tracked on the [project board](https://github.com/orgs/inkwall-dev/projects/1) a
   statuses written only when they change, and `inkwallctl migrate ingress-nginx`, which turns
   ingress-nginx [ModSecurity](https://kubernetes.github.io/ingress-nginx/user-guide/third-party-addons/modsecurity/) annotations into policies.
 - **v1.0.0** (next): a stable API (out of `v1alpha1`) with an upgrade path.
-- Then more proxies: HAProxy, ingress-nginx, Caddy.
+- Then more proxies: HAProxy, Caddy. Not ingress-nginx, which is retired upstream: its users
+  migrate with `inkwallctl migrate ingress-nginx`.
 
 ## Development
 

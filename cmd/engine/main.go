@@ -53,6 +53,7 @@ import (
 	"google.golang.org/grpc"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	"github.com/inkwall-dev/inkwall/internal/buildinfo"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/extproc"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/forwardauth"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/httpcheck"
@@ -68,15 +69,24 @@ import (
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stderr))
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-func run(args []string, stderr io.Writer) int {
+func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && slices.Contains([]string{"version", "--version", "-version"}, args[0]) {
+		if len(args) > 1 {
+			fmt.Fprintln(stderr, "usage: inkwall-engine version")
+			return 2
+		}
+		fmt.Fprint(stdout, buildinfo.Get(version, commit).String("inkwall-engine"))
+		return 0
+	}
 	if len(args) == 0 || !slices.Contains([]string{cmdProxy, cmdForwardAuth, cmdCheck, cmdExtProc}, args[0]) {
 		fmt.Fprintln(stderr, "usage: inkwall-engine proxy --upstream URL [flags]")
 		fmt.Fprintln(stderr, "       inkwall-engine forward-auth [flags]")
 		fmt.Fprintln(stderr, "       inkwall-engine check [flags]")
 		fmt.Fprintln(stderr, "       inkwall-engine ext-proc [flags]")
+		fmt.Fprintln(stderr, "       inkwall-engine version")
 		fmt.Fprintln(stderr, "run 'inkwall-engine <command> -h' for flags")
 		return 2
 	}
@@ -641,8 +651,10 @@ func waitForBundle(ctx context.Context, ag *agent.Agent, cfg engineConfig, ready
 	ready.Store(true)
 }
 
-// version is set at release builds (-ldflags "-X main.version=...").
-var version string
+// version and commit are set at release builds (-ldflags "-X
+// main.version=... -X main.commit=..."); otherwise the build info has the
+// commit.
+var version, commit string
 
 // engineVersion is the release version, else the module version the binary
 // was built from.
