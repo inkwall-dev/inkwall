@@ -9,10 +9,12 @@
 # --mode validate:
 #
 #   - envoy.yaml, block mode over a Unix socket: an attack in the query or
-#     the body gets 403, a benign request 200, the route the filter is off
-#     for passes an attack, a client-sent X-Forwarded-For doesn't become the
-#     client IP, and with the engine down Envoy answers 503
-#     (failure_mode_allow: false, status_on_error), until it is back.
+#     the body gets 403, a benign request 200, a body over the engine's
+#     limit 413, the route the filter is off for passes an attack, a
+#     client-sent X-Forwarded-For doesn't become the client IP, a hung
+#     engine's requests are rejected after message_timeout, and with the
+#     engine down Envoy answers 503 (failure_mode_allow: false,
+#     status_on_error), until it is back.
 #   - envoy-detect.yaml, detect mode over loopback TCP (observability_mode):
 #     an attack passes and is logged, and with the engine down requests pass
 #     (failure_mode_allow: true).
@@ -134,6 +136,10 @@ eventually "a benign request: 200" get_is 200 /
 check "an attack in the query: 403" get_is 403 "/?$SQLI"
 check "an attack in the body: 403" post_is 403 /form "q=1%27%20OR%20%271%27%3D%271"
 check "a benign body: 200" post_is 200 /form "q=hello"
+# Over the engine's --max-body-bytes (64 KiB), under Envoy's buffer: in block
+# mode the engine denies it uninspected (--oversize-body auto).
+big="q=$(head -c 100000 /dev/zero | tr '\0' a)"
+check "a body over the engine's limit: 413" post_is 413 /form "$big"
 check "an attack on the route the filter is off for: 200" get_is 200 "/healthz?$SQLI"
 spoofed=$(code -H 'X-Forwarded-For: 203.0.113.7' "http://127.0.0.1:$PORT/client-ip?$SQLI")
 check "an attack with a client-sent X-Forwarded-For: 403" test "$spoofed" = 403
@@ -141,6 +147,14 @@ eventually "the attack's event is a deny" event_has /client-ip '"action":"deny"'
 ip=$(event /client-ip | sed -n 's/.*"client_ip":"\([^"]*\)".*/\1/p')
 check "its client IP is Envoy's peer ($ip), not the header's or loopback" \
   test -n "$ip" -a "$ip" != 203.0.113.7 -a "$ip" != 127.0.0.1
+
+# A hung engine: Envoy gives up after message_timeout and rejects the
+# request (failure_mode_allow: false), whatever its status.
+docker pause "$NAME-engine" >/dev/null
+hung=$(code --max-time 10 "http://127.0.0.1:$PORT/?$SQLI")
+check "engine hung: an attack is rejected with a 5xx ($hung)" test "${hung:0:1}" = 5
+docker unpause "$NAME-engine" >/dev/null
+eventually "engine unpaused: a benign request gets 200" get_is 200 /
 
 docker stop -t 5 "$NAME-engine" >/dev/null
 check "engine down: a benign request gets 503 (failure_mode_allow: false)" get_is 503 /
