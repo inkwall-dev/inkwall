@@ -4,6 +4,7 @@
 package httpadapter
 
 import (
+	"net/http"
 	"net/url"
 	"strings"
 	"testing"
@@ -45,6 +46,33 @@ func FuzzRequestID(f *testing.F) {
 		}
 		if got != id || len(got) > maxRequestIDLen || strings.Trim(got, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-") != "" {
 			t.Errorf("RequestID(%q) = %q", id, got)
+		}
+	})
+}
+
+// FuzzGRPCDenial checks the parts of a gRPC denial that come from the
+// client: its Content-Type chooses a gRPC answer only for a gRPC media
+// type, and its request ID reaches the grpc-message as printable ASCII
+// that decodes back to it, so a proxy accepts the header.
+func FuzzGRPCDenial(f *testing.F) {
+	f.Add("application/grpc-web-text+proto; charset=utf-8", "0123abcd", 403)
+	f.Fuzz(func(t *testing.T, contentType, id string, code int) {
+		h := http.Header{"Content-Type": {contentType}}
+		if g := GRPCOf(h); g != NotGRPC {
+			mediaType, _, _ := strings.Cut(contentType, ";")
+			if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(mediaType)), g.ContentType()) {
+				t.Errorf("GRPCOf(%q) = %v", contentType, g)
+			}
+		}
+		msg := GRPCMessage(code, id)
+		for i := 0; i < len(msg); i++ {
+			if msg[i] < 0x20 || msg[i] > 0x7e {
+				t.Fatalf("GRPCMessage(%d, %q) = %q", code, id, msg)
+			}
+		}
+		decoded, err := url.PathUnescape(msg)
+		if err != nil || !strings.HasSuffix(decoded, " (request ID "+id+")") {
+			t.Errorf("GRPCMessage(%d, %q) = %q, decodes to %q (%v)", code, id, msg, decoded, err)
 		}
 	})
 }

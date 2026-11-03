@@ -1,0 +1,11 @@
+go test fuzz v1
+string("POST")
+string("/helloworld.Greeter/SayHello")
+string("grpc.example.com")
+string("http")
+string("content-type")
+string("application/grpc-web-text+proto; charset=x")
+[]byte("AAAAAAA=")
+bool(false)
+bool(true)
+byte('\t')

