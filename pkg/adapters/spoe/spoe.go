@@ -64,6 +64,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/http/httpguts"
@@ -172,8 +173,11 @@ type Server struct {
 	mu        sync.Mutex
 	listeners map[net.Listener]struct{}
 	conns     map[*conn]struct{}
-	closing   bool
-	wg        sync.WaitGroup
+	// closing is set, under mu, by Shutdown; read without mu by the
+	// connections (closingNow), which hold their own lock then: taking mu
+	// there would invert Shutdown's order (#338).
+	closing atomic.Bool
+	wg      sync.WaitGroup
 }
 
 // New returns a Server that inspects requests with p.
@@ -215,7 +219,7 @@ var ErrServerClosed = errors.New("spoe: server closed")
 // Serve accepts HAProxy's connections on ln until Shutdown.
 func (s *Server) Serve(ln net.Listener) error {
 	s.mu.Lock()
-	if s.closing {
+	if s.closing.Load() {
 		s.mu.Unlock()
 		return ErrServerClosed
 	}
@@ -230,7 +234,7 @@ func (s *Server) Serve(ln net.Listener) error {
 		nc, err := ln.Accept()
 		if err != nil {
 			s.mu.Lock()
-			closing := s.closing
+			closing := s.closing.Load()
 			s.mu.Unlock()
 			if closing {
 				return ErrServerClosed
@@ -244,7 +248,7 @@ func (s *Server) Serve(ln net.Listener) error {
 		}
 		c := &conn{srv: s, nc: nc, idle: true}
 		s.mu.Lock()
-		if s.closing {
+		if s.closing.Load() {
 			s.mu.Unlock()
 			_ = nc.Close()
 			return ErrServerClosed
@@ -266,15 +270,24 @@ func (s *Server) Serve(ln net.Listener) error {
 // answered finish, says goodbye to HAProxy with AGENT-DISCONNECT and closes
 // the connections. When ctx ends first, the connections are closed at once.
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Each connection's lock is taken without the server's (wake), which
+	// a connection going idle holds its own while it reads closing: the
+	// other order deadlocked (#338). A connection added before closing is
+	// set is woken here; one after sees it in Serve; one going idle after
+	// the wake sees it in setIdle.
 	s.mu.Lock()
-	s.closing = true
+	s.closing.Store(true)
 	for ln := range s.listeners {
 		_ = ln.Close()
 	}
+	conns := make([]*conn, 0, len(s.conns))
 	for c := range s.conns {
-		c.wake()
+		conns = append(conns, c)
 	}
 	s.mu.Unlock()
+	for _, c := range conns {
+		c.wake()
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -297,11 +310,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 }
 
-func (s *Server) closingNow() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.closing
-}
+// closingNow reports whether Shutdown has begun. It takes no lock: a
+// connection calls it holding its own.
+func (s *Server) closingNow() bool { return s.closing.Load() }
 
 // conn is one connection from HAProxy.
 type conn struct {
