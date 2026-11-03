@@ -54,9 +54,11 @@ fi
 # The Pod webhook's objectSelector: Traefik's pods, or none without
 # Traefik's role.
 # selector [helm flags...]: the Pod webhook's objectSelector, on one line.
+# awk reads all of helm's output (no exit): stopping early would fail helm
+# with SIGPIPE under pipefail.
 selector() {
   helm template inkwall "$CHART" --namespace inkwall-system "$@" |
-    awk '/name: pods.waf.inkwall.dev/ {on=1; next} on && /reinvocationPolicy/ {exit} on && /objectSelector/ {p=1} p' | tr -s ' \n' ' '
+    awk 'done {next} /name: pods.waf.inkwall.dev/ {on=1; next} on && /reinvocationPolicy/ {done=1; next} on && /objectSelector/ {p=1} p' | tr -s ' \n' ' '
 }
 sel=$(selector)
 if ! grep -q 'app.kubernetes.io/name: traefik' <<<"$sel"; then

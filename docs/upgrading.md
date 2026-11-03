@@ -59,6 +59,9 @@ What's new in 0.4.0:
   `response`), and the engine two metrics, `inkwall_responses_total` and
   `inkwall_response_check_duration_seconds`. The `WAFPolicy` CRD gets the field: the chart
   upgrades the CRDs (`crds.install`); if you install them yourself, apply the new ones first.
+- **HAProxy.** `inkwall-engine spoe` is an agent of [HAProxy](https://docs.haproxy.org/)'s [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) (HAProxy 3.1
+  or later), on `127.0.0.1:9004` or a Unix socket. You configure HAProxy yourself: see
+  [protecting HAProxy](haproxy.md). Nothing changes in an existing installation.
 
 What changes by itself in 0.4.0:
 

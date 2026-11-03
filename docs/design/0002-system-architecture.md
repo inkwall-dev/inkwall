@@ -144,7 +144,7 @@ The compiled policy sits in an [`atomic.Pointer[Snapshot]`](https://pkg.go.dev/s
 | `pkg/clientip` | Client IP ([§8.2](#82-client-ip-correctness)) | built |
 | `pkg/agent`, `pkg/policy` | Bundle stream, verify, compile, swap ([§5.2](#52-engine--operator-bundle-distribution)) | built |
 | `pkg/telemetry` | Metrics, tracing, [`slog`](https://pkg.go.dev/log/slog) | built |
-| `pkg/adapters/*` | One per listener | `forwardauth`, `httpcheck`, `proxy`, `extproc` built; `extauthz`, `spoe` not yet |
+| `pkg/adapters/*` | One per listener | `forwardauth`, `httpcheck`, `proxy`, `extproc`, `spoe` built; `extauthz` not yet |
 | `pkg/events` | Redacted security events, bounded buffer ([§5.4](#54-event-schema)) | built |
 | `pkg/ratelimit`, `pkg/iplist` | [Token buckets](https://en.wikipedia.org/wiki/Token_bucket), [CIDR](https://www.rfc-editor.org/rfc/rfc4632) trie | not yet |
 
@@ -604,12 +604,19 @@ targets (an `ExtensionRef` filter to the Middleware). **Not yet:** B.
 
 ### 6.4 HAProxy (HAProxy Kubernetes Ingress Controller, HAProxy Ingress)
 
-HAProxy uses [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt): the engine is the agent (SPOA), over a Unix socket. An `http-request deny` rule
-acts on the variable `txn.inkwall.action`. To fail closed, an extra rule denies with 503 when the
-variable is unset. Body inspection needs `http-buffer-request`, enabled only when a policy needs
-it.
+HAProxy uses [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt): the engine is the agent (SPOA), over a Unix socket. `http-request deny` rules
+act on the variables `txn.inkwall.action` and `txn.inkwall.status`. HAProxy sets no variable when
+the agent doesn't answer, so the policy's failure mode maps onto one rule: failing closed (the
+default in block mode) denies with 503 when `txn.inkwall.action` is unset, failing open leaves
+that rule out. `option spop-check` marks a stopped engine down, and `timeout processing` is the
+engine's deadline plus 500 ms. Body inspection needs `http-buffer-request`, and a `tune.bufsize`
+above the body limit. Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/inkwall/issues/282)); the protocol is in
+[0006 §4](0006-adapter-protocols.md#4-spoe-haproxy-stream-processing-offload-engine).
 
-**Not yet** built.
+**Built:** the agent, `inkwall-engine spoe`, with a configuration written by hand
+([protecting HAProxy](../haproxy.md)). **Not yet:** the operator's wiring of the HAProxy
+Kubernetes Ingress Controller: discovery by IngressClass, the engine as a sidecar, the SPOE
+filter and rules per protected route, and status.
 
 ### 6.5 Caddy
 
