@@ -1076,7 +1076,9 @@ How the test runs:
 - **Objects.** Each policy targets its own route object: half Ingresses, half IngressRoutes. Each
   has 10 routes (2 hosts × 5 path prefixes).
 - **Engines.** Fake engines (`operator/test/fakeengine`, 5 s heartbeats, one token each) run in a
-  child process, also not counted. They verify and decode every bundle.
+  child process, also not counted. Each receives every bundle on its own stream and checks it. The
+  engines verify and decode a bundle once between them: real engines decode at once, each on its
+  own CPU, and the test measures the operator (#296).
 - **Timing.** First all objects are synced at once. Then 10 edits, of one policy each, with the
   operator idle between them, are timed until every engine ACKs the new bundle.
 - **Memory** is the test process's: the Go heap ([`runtime.MemStats`](https://pkg.go.dev/runtime#MemStats), the peak sampled every 250 ms,
@@ -1191,6 +1193,35 @@ Against the targets:
   goal is reached less often. The limit changes little in these runs, which stay under it; it
   matters when a run would pass it, as one in six did before #197. The 63 s edit before is an
   outlier of a loaded machine (an earlier edit of that run took 11.7 s too).
+- **Engine streams cut on a busy machine** (#296). In the v0.3.1 release run, one
+  `SCALE=full` run in four had 7 engine streams cut at 5,000 × 500 (`error reading from server:
+  unexpected EOF`, `connection reset by peer`), and its first edit took 19.4 s. In another, the
+  first edit took 50.7 s. The same commit and v0.3.0, alone on the machine: 3.6–4.9 s, no cuts.
+  - Cause: the harness, not the operator. Each fake engine verified and decoded every bundle
+    itself: 500 decodes of a 1.9 MiB bundle at once, in one process. That process peaked at
+    3.6–5.9 GiB, many times the operator, so on a machine shared with other jobs it swapped and
+    stalled.
+  - A stalled engine reads nothing. The operator's gRPC server then cuts its connection: after 10 s
+    with data unacknowledged (the keepalive timeout, which gRPC also sets as `TCP_USER_TIMEOUT`),
+    or after an unanswered keepalive ping (30 s + 10 s). Stopping the engines' process during an
+    edit reproduces it: for 15 s, 71 streams reset and the edit takes 15.2 s; for 45 s, every
+    stream is cut. That is the operator doing its job: an engine that stops reading reconnects.
+  - Fixed: the engines of the process share one result per bundle. An engine whose bundle has the
+    very bytes and signature that another one verified, with the same key, takes that one's
+    decoded bundle. Anything else is verified and decoded. Each engine still receives, decompresses
+    and compares the whole bundle.
+  - The 500 decodes, on 12 threads, also added about 1.7 s to every edit: the times above include
+    it. One decode is still on the path, as with real engines.
+  - The test now fails if an engine stream is cut, and reports the engines' process peak RSS.
+  - Same machine, 5,000 × 500, runs interleaved, each started with at least 8 GB free while other
+    jobs shared the machine:
+
+| 5,000 × 500 | Runs | Engines' process peak RSS | Initial sync | Change → all engines p95 | Streams cut |
+|---|---|---|---|---|---|
+| Before | 4 | 3,651–5,872 MiB | 4.2–6.1 s | 3.8–4.5 s, one run 13.2 s | 0 |
+| After | 4 | 1,546–2,046 MiB | 1.8–5.3 s | 1.8–2.0 s | 0 |
+
+  The 13.2 s run had one slow edit in ten; its engines' process peaked at 5.5 GiB.
 
 **Engine memory per policy.** A compiled Coraza WAF with the CRS keeps
 about 2.1 MiB of heap, and takes 10–15 ms to compile.
