@@ -140,7 +140,7 @@ policies:
 ```yaml
 responses:
   inspect: true        # default false
-  maxBytes: 524288     # body bytes inspected; default 512 KiB (Coraza's), at most 10 MiB
+  maxBytes: 65536      # body bytes inspected; default 64 KiB, at most 10 MiB
   onOversize: Allow    # Allow | Deny; unset: Deny in Block mode, Allow in Detect mode
 ```
 
@@ -206,7 +206,16 @@ operator reports it on the policy (`Programmed` stays true for the requests it i
 **Latency and memory.** A route that inspects responses adds one evaluation per response
 (phases 3 and 4; the CRS response rules are a few dozen, mostly `@pmFromFile` and `@rx` on the
 body) and, in Block mode, Envoy holds the response until the engine answers: time to first byte
-grows by the body's buffering and its evaluation. Memory per in-flight request on such a route is
+grows by the body's buffering and its evaluation. `BenchmarkEvaluateExchange` (a request and its
+response) against `BenchmarkEvaluate/benign_get` (the request alone), on one loaded 12-thread
+machine (2026-11-03): headers only (204) about 1× (noise), an 8 KB JSON body 5.5×, a 15 KB HTML page 8.5×, a
+256 KB one 160× (220 ms there; the request alone took 1.4 ms). The cost grows with the body:
+0.85 ms per KiB of HTML there, roughly 0.3 ms on an unloaded machine (scaled by
+[0001](0001-performance-first-architecture.md#31-measured-baseline-2026-10-03)'s 0.5 ms request
+baseline). So the default limit is 64 KiB, as for
+request bodies, not Coraza's 512 KiB, which would take most of the default 250 ms deadline: a
+policy that raises `maxBytes` should raise `timeout` with it, or large responses get the failure
+mode (503 in Block mode). A body the rules don't read (an image) costs what headers do. Memory per in-flight request on such a route is
 the kept Coraza transaction (with its request body buffer, up to `body.maxBytes`) plus the
 response prefix (up to `responses.maxBytes`), in the engine, and Envoy's buffered response. The
 evaluation holds an admission slot only while it runs, not while the upstream answers. Response
@@ -214,7 +223,7 @@ verdicts are counted apart: `inkwall_responses_total{action,reason}` and
 `inkwall_response_check_duration_seconds`.
 
 **Flags.** Without the operator, `inkwall-engine ext-proc` takes `--inspect-responses`,
-`--max-response-bytes` (512 KiB by default) and `--oversize-response` (`auto`, `allow`, `deny`), the
+`--max-response-bytes` (64 KiB by default) and `--oversize-response` (`auto`, `allow`, `deny`), the
 policy's `responses` fields. Only `ext-proc` defines them: the other adapters never see a response,
 so none can be told to inspect one. With `--operator` they are refused, as the other policy flags.
 

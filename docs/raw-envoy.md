@@ -268,7 +268,7 @@ allow_mode_override: true
 
 - **What is read:** the status and headers always; the body when its `Content-Type` is `text/plain`,
   `text/html`, `text/xml`, `application/json`, `application/xml` or `application/problem+json`, up
-  to `--max-response-bytes` (512 KiB by default, 10 MiB at most). A `gzip` or `deflate` body is
+  to `--max-response-bytes` (64 KiB by default, 10 MiB at most). A `gzip` or `deflate` body is
   decoded first; the engine also removes `Accept-Encoding` from the requests it forwards, so most apps
   answer uncompressed.
 - **Larger bodies:** their first `--max-response-bytes` are inspected, and then
