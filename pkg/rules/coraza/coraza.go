@@ -621,6 +621,15 @@ func (e *Evaluator) Evaluate(_ context.Context, r *request.Request) (rules.Resul
 			return rules.Result{}, err
 		}
 	}
+	if r.GRPC {
+		// The pipeline found a gRPC call: its content type is allowed, and
+		// its body isn't inspected (below).
+		rm, ok := tx.(ruleRemover)
+		if !ok {
+			return rules.Result{}, errNoRuleRemoval
+		}
+		rm.RemoveRuleByID(idCRSContentType)
+	}
 	if r.Host != "" {
 		tx.AddRequestHeader("Host", r.Host)
 		tx.SetServerName(hostname(r.Host))
@@ -637,7 +646,9 @@ func (e *Evaluator) Evaluate(_ context.Context, r *request.Request) (rules.Resul
 	// A truncated body is never inspected: a prefix of JSON, XML or
 	// multipart fails to parse (and rules 200002/200003 would deny it), and
 	// the pipeline decides what happens to oversized bodies.
-	if len(r.Body) > 0 && !r.BodyTruncated {
+	// Nor is a gRPC call's: binary protobuf, which CRS would parse as a
+	// form.
+	if len(r.Body) > 0 && !r.BodyTruncated && !r.GRPC {
 		it, _, err := tx.WriteRequestBody(r.Body)
 		if err != nil {
 			return rules.Result{}, fmt.Errorf("write request body: %w", err)
@@ -707,6 +718,10 @@ const (
 
 	internalIDMin = 7700000
 	internalIDMax = 7709999
+	// idCRSContentType is CRS's rule for content types the policy
+	// doesn't allow (tx.allowed_request_content_type).
+	idCRSContentType = 920420
+
 	// crsIDMin and crsIDMax bound the IDs reserved for OWASP CRS.
 	crsIDMin = 900000
 	crsIDMax = 999999

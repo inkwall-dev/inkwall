@@ -232,6 +232,11 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request) Verdict {
 	case router.InspectAll:
 	}
 
+	// A gRPC call is inspected without its body, which is binary
+	// protobuf: so it isn't oversized either.
+	if call := asGRPC(r); call != nil {
+		return p.evaluate(ctx, call)
+	}
 	if !r.BodyTruncated {
 		return p.evaluate(ctx, r)
 	}
