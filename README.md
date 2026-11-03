@@ -162,13 +162,15 @@ $ curl -s -o /dev/null -w '%{http_code}\n' 'localhost:8480/?id=1%27%20OR%20%271%
 ```
 
 See [running the engine without Kubernetes](docs/standalone-proxy.md) for its flags and other
-modes, and [testing policies offline](docs/testing-policies.md) for `inkwallctl test`.
+modes, and [testing policies offline](docs/testing-policies.md) for `inkwallctl test`. To protect
+an Envoy you configure yourself, in or out of Kubernetes, see [protecting raw Envoy](docs/raw-envoy.md).
 
 ## Limits
 
 - Proxies: **Traefik** and **Envoy Gateway** (v1.9; not with `mergeGateways` or Envoy as a
-  DaemonSet), plus the standalone proxy. Raw [Envoy](https://www.envoyproxy.io/docs/envoy/latest/), [HAProxy](https://docs.haproxy.org/) and [Caddy](https://caddyserver.com/docs/)
-  are designed, not built. [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) is retired upstream, so it gets no integration:
+  DaemonSet), wired by the operator; **raw [Envoy](https://www.envoyproxy.io/docs/envoy/latest/)** (1.33 or later) that you configure with
+  the engine's ext_proc adapter ([protecting raw Envoy](docs/raw-envoy.md)); and the standalone
+  proxy. [HAProxy](https://docs.haproxy.org/) and [Caddy](https://caddyserver.com/docs/) are designed, not built. [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) is retired upstream, so it gets no integration:
   `inkwallctl migrate ingress-nginx` moves its ModSecurity settings to a supported proxy.
 - Targets: **`Ingress`** and Traefik **`IngressRoute`** (match rules that join `Host`, `Path` and
   `PathPrefix` with `&&`) through Traefik; [Gateway API](https://gateway-api.sigs.k8s.io/) **[`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/)** through Envoy Gateway or
