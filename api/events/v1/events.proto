@@ -59,6 +59,19 @@ message SecurityEvent {
   int32 status = 19;
   // Time spent inspecting.
   google.protobuf.Duration latency = 20;
+  // What was inspected: the request, or the upstream's response to it
+  // (for a policy that inspects responses). Unset in events of engines
+  // before 0.4.0: the request.
+  Phase phase = 21;
+}
+
+// Phase is the part of the exchange an event is about.
+enum Phase {
+  PHASE_UNSPECIFIED = 0;
+  // The client's request.
+  PHASE_REQUEST = 1;
+  // The upstream's response: a deny replaced it.
+  PHASE_RESPONSE = 2;
 }
 
 // Match is one rule that matched.
@@ -67,7 +80,8 @@ message Match {
   // Where it matched, e.g. ARGS:id or REQUEST_HEADERS:User-Agent; at most
   // 128.
   string variable = 2;
-  // At most 64 bytes of the matched value, redacted.
+  // At most 64 bytes of the matched value, redacted: none from a
+  // response body, which is the leaked data itself.
   string snippet = 3;
 }
 

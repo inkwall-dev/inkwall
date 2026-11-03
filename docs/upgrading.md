@@ -41,6 +41,12 @@ What's new in 0.4.0:
   default: try it in `Detect` mode first. See [inspecting the messages](grpc.md#inspecting-the-messages).
   The chart upgrades the CRDs with it; if you install them yourself, apply 0.4.0's. A policy
   that sets it isn't `Enforced` (`EnginesOutdated`) while an engine before 0.4.0 runs it.
+- **Response inspection (engine).** `inkwall-engine ext-proc --inspect-responses` inspects the
+  app's responses too, for data leaks (the CRS's `RESPONSE-95x` rules): see
+  [responses](raw-envoy.md#responses) for raw Envoy. It is off unless you set it. Security events get
+  a `phase` field (`request` or `response`), and the engine two metrics,
+  `inkwall_responses_total` and `inkwall_response_check_duration_seconds`. Not yet in `WAFPolicy`
+  or through Envoy Gateway; Traefik's ForwardAuth can't see responses.
 
 What changes by itself in 0.4.0:
 

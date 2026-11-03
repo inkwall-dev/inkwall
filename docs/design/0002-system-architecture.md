@@ -463,11 +463,46 @@ the proxy upgrades the connection, and none sees the messages after it. So:
 - **An upgrade has no body to wait for.** ext_proc decides a bodiless upgrade on its headers and
   tells Envoy to stop sending the stream ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing)).
 - **Messages are not inspected, and nothing claims they are.** Only a hook on the stream after the
-  upgrade could: the engine's reverse proxy, which copies the connection itself, or ext_proc in
-  `STREAMED` mode, where Envoy passes the upgraded data as body chunks and waits for an answer to
-  each. Traefik's ForwardAuth can't: it asks once, before the upgrade. Message inspection (frame
-  parsing, size limits, text frames as arguments, a close code on a denial) is the second part of
-  #276, and must state per proxy where it happens.
+  upgrade could, and Traefik's ForwardAuth has none: it asks once, before the upgrade. Message
+  inspection (frame parsing, size limits, text frames as arguments, a close code on a denial) is the
+  second part of #276, and must state per proxy where it happens.
+
+**WebSocket messages through Envoy (#276, open: what was tried).** The plan was ext_proc in
+`STREAMED` mode for upgrades only: the engine answers an upgrade's headers with a `mode_override`
+(`request_body_mode: STREAMED`), which Envoy Gateway allows per `EnvoyExtensionPolicy`
+(`processingMode.allowModeOverride`, in its API at v1.9.3), and parses the frames Envoy sends as
+body chunks. Tried on Envoy v1.39.6 (the raw Envoy sample's version) with an ext_proc probe and
+`hack/wsecho`:
+
+| ext_proc request body mode for the upgrade | Handshake | Frames seen by the engine |
+|---|---|---|
+| `BUFFERED_PARTIAL`, answered `CONTINUE` (0.3.1) | Held until a timeout | No |
+| `CONTINUE_AND_REPLACE` (0.4.0, 0.3.2) | Upgrades | No |
+| `mode_override` to `NONE` | Upgrades | No |
+| `STREAMED` (configured, or `mode_override`), `FULL_DUPLEX_STREAMED` | Held until a timeout | Only from a client that sends a frame before the `101` |
+| `mode_override` to `STREAMED` on the `101`'s response headers | Upgrades | No (a request mode can't change once its headers are past) |
+
+Envoy passes the upgraded data to ext_proc as body chunks, but in a streamed mode it holds the
+request headers until the first chunk, and a client sends its first frame only after the `101`: the
+handshake deadlocks. So ext_proc can't inspect WebSocket messages for a compliant client, on any
+route, whatever Envoy Gateway allows.
+
+**Decided for v0.4.0:** WebSocket messages are inspected only by the engine's reverse proxy
+(`inkwall-engine proxy`), which copies the upgraded connection itself: it parses the client's
+frames, holds a message until it is inspected, and in `Block` mode closes the connection with 1008
+([0006 §6](0006-adapter-protocols.md#6-reverse-proxy-standalone-mode)). Routes wired through
+ext_proc (Envoy Gateway, raw Envoy) and Traefik inspect the handshake only, and no `WAFPolicy`
+field asks for message inspection, so nothing claims it there. The options weighed:
+
+1. **The engine's reverse proxy:** chosen. It works for the standalone proxy, with its own flags,
+   and is the reference for the others. On Envoy Gateway it would have to be in the request path,
+   a hop the operator can't add without changing the user's routes or their backends.
+2. **Envoy's Lua filter:** not pursued. It sees the frames (`bodyChunks()`) without holding the
+   handshake, but doesn't hold a chunk while the script runs, so a frame is forwarded before it is
+   inspected: detect only at best, and unproven.
+3. **A change in Envoy's ext_proc,** continuing an upgrade's headers in a streamed mode as for any
+   request whose body comes later: then the planned design works unchanged, with a `WAFPolicy`
+   field and status that says where it isn't done (Traefik). Tracked for v1.0.0 in #313.
 
 ### 6.1 Envoy (raw Envoy, Envoy Gateway, Istio, Contour)
 
@@ -492,7 +527,10 @@ access and keeps the trust ConfigMap that injection sets up for the integrations
 ([raw Envoy](../raw-envoy.md)). Its policies target an `Ingress` of a class no controller serves,
 so they report `Programmed=False` (`ControllerUnsupported`), as the operator wires nothing.
 `make raw-envoy-e2e` (Docker) and `make kind-e2e-raw-envoy` run the samples.
-**Not yet:** Istio, Contour.
+Response inspection (v0.4.0, [0006 §2](0006-adapter-protocols.md#response-inspection-v040)):
+the engine's ext_proc adapter inspects the response headers and body for policies that ask, and
+replaces a response that leaks in block mode; built for raw Envoy with the policy from flags.
+**Not yet:** Istio, Contour; response inspection through Envoy Gateway and `WAFPolicy`.
 
 ### 6.2 ingress-nginx
 
@@ -532,6 +570,10 @@ on an `Ingress`, or in each route's `middlewares` on an `IngressRoute`
   the request, so it can't allow it.
 - Limitation: Traefik itself rejects bodies over `maxBodySize`, whatever `body.onOversize` says.
   The operator sets it to 10 MiB, the largest inspectable body.
+- Limitation: ForwardAuth never sees the response, so Traefik can't inspect responses
+  ([0006 §2](0006-adapter-protocols.md#response-inspection-v040)): the engine's forward-auth
+  adapter has no response flags, and a policy that asks for it will be reported as not enforced
+  on Traefik routes.
 - Limitation: ForwardAuth has no timeout or failure setting. An unreachable engine gets a 500
   from Traefik in both modes ([§7.3](#73-engine-unavailable)).
 
@@ -597,6 +639,8 @@ adapter must match.
 | Any | reverse proxy | ✅ | ✅ | ✅ | ✅ | TCP |
 
 Built: Traefik ForwardAuth, the reverse proxy, and ext_proc through Envoy Gateway and raw Envoy.
+Responses: inspected by ext_proc (v0.4.0, raw Envoy with the policy from flags so far); the reverse
+proxy's ✅ is a target, it doesn't inspect them yet.
 
 ---
 
@@ -728,7 +772,8 @@ Target:
 
 **Built:**
 
-- Engine: `inkwall_requests_total`, `_check_duration_seconds`, `_bundle_version`,
+- Engine: `inkwall_requests_total`, `_check_duration_seconds`, `inkwall_responses_total`,
+  `_response_check_duration_seconds` (policies that inspect responses), `_bundle_version`,
   `_bundle_updates_total`, `_operator_connected`, `_evaluations_in_flight`, `_evaluation_slots`,
   `_engine_events_total`, `_engine_events_dropped_total`.
 - Operator: `inkwall_operator_bundle_version`, `_operator_bundle_compressed_bytes`,

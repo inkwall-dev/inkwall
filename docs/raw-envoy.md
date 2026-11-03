@@ -20,6 +20,7 @@ the tests run them: `make raw-envoy-e2e` in Docker, `make kind-e2e-raw-envoy` on
   - [Block mode and detect mode](#block-mode-and-detect-mode)
   - [Timeout and failure mode](#timeout-and-failure-mode)
   - [Bodies](#bodies)
+  - [Responses](#responses)
   - [Routes left uninspected](#routes-left-uninspected)
 - [The policy from flags](#the-policy-from-flags)
 - [The policy from the operator](#the-policy-from-the-operator)
@@ -54,7 +55,7 @@ the tests run them: `make raw-envoy-e2e` in Docker, `make kind-e2e-raw-envoy` on
    (ext_proc's `observability_mode`) and forwards the request without waiting; the engine logs
    what it would have blocked.
 
-The responses aren't sent to the engine. [ext_proc](design/0006-adapter-protocols.md#2-ext_proc-envoy-external-processing) has the details of the protocol.
+The responses aren't sent to the engine, unless you [turn response inspection on](#responses). [ext_proc](design/0006-adapter-protocols.md#2-ext_proc-envoy-external-processing) has the details of the protocol.
 
 ## Run the engine next to Envoy
 
@@ -242,6 +243,50 @@ default, or the largest `body.maxBytes` of your policies): a body Envoy cuts at 
 handled as oversized (`--oversize-body`, or the policy's `body.onOversize`). With
 `request_body_mode: NONE`, bodies go uninspected, and are handled as oversized too.
 
+### Responses
+
+New in 0.4.0, off by default. With `--inspect-responses`, the engine also inspects what the app
+answers, for data leaks: the CRS's `RESPONSE-95x` rules find SQL errors, stack traces, directory
+listings and source code, and your own `--rules` on `RESPONSE_*` variables run too. In block mode a
+response that leaks is replaced with 403 and the same plain-text error as a denied request; in detect
+mode it is logged (`"phase":"response"` in the security event, which never carries a snippet of the
+response body). Envoy must send the responses: in `processing_mode`, and with `allow_mode_override`
+next to it:
+
+```yaml
+processing_mode:
+  request_header_mode: SEND
+  request_body_mode: BUFFERED_PARTIAL   # STREAMED with observability_mode
+  request_trailer_mode: SKIP
+  response_header_mode: SEND
+  response_body_mode: BUFFERED_PARTIAL  # STREAMED with observability_mode
+  response_trailer_mode: SKIP
+# A response whose body the rules don't read (an image, a download, Server-Sent
+# Events) is decided on its headers, and Envoy neither buffers nor sends its body.
+allow_mode_override: true
+```
+
+- **What is read:** the status and headers always; the body when its `Content-Type` is `text/plain`,
+  `text/html`, `text/xml`, `application/json`, `application/xml` or `application/problem+json`, up
+  to `--max-response-bytes` (64 KiB by default, 10 MiB at most). A `gzip` or `deflate` body is
+  decoded first; the engine also removes `Accept-Encoding` from the requests it forwards, so most apps
+  answer uncompressed.
+- **Larger bodies:** their first `--max-response-bytes` are inspected, and then
+  `--oversize-response` decides: `deny` replaces the response with 502 in block mode, `allow` lets it
+  through; `auto` (the default) denies in block mode and allows in detect mode. A body in another
+  encoding (`br`, `zstd`) or one Envoy cut short is handled the same way.
+- **Envoy's buffer:** in block mode Envoy holds the response until the engine answers. Keep the app
+  cluster's `per_connection_buffer_limit_bytes` (1 MiB by default) at least `--max-response-bytes`,
+  or longer bodies arrive cut and are handled as oversized.
+- **Cost:** one more evaluation per response, under the same `--timeout`, `--max-concurrent` and
+  failure mode as the request (an overloaded engine replaces the response with 503 when it fails
+  closed). Time to first byte grows by the body's buffering and its inspection. Responses are counted
+  in `inkwall_responses_total` and timed in `inkwall_response_check_duration_seconds`.
+
+[ext_proc](design/0006-adapter-protocols.md#response-inspection-v040) has the details. With the
+policy [from the operator](#the-policy-from-the-operator), response inspection isn't available yet:
+the flags are refused with `--operator`.
+
 ### Routes left uninspected
 
 Turn the filter off on a route, a virtual host or a whole route configuration with
@@ -262,8 +307,9 @@ still calls the engine.
 Without Kubernetes, or without the operator, the engine's flags are the policy, as for the
 [standalone proxy](standalone-proxy.md#flags): `--mode`, `--failure-mode`, `--timeout`,
 `--paranoia-level`, `--rules` and `--rules-before-crs` ([SecLang](https://coraza.io/docs/seclang/) rules and exclusions),
-`--skip-paths`, `--disable-rule-groups`, `--max-body-bytes`, and `--websocket-origins` with
-`--websocket-required-headers` ([WebSocket](websocket.md)). Every request Envoy sends gets that
+`--skip-paths`, `--disable-rule-groups`, `--max-body-bytes`, `--websocket-origins` with
+`--websocket-required-headers` ([WebSocket](websocket.md)), and for [responses](#responses)
+`--inspect-responses`, `--max-response-bytes` and `--oversize-response`. Every request Envoy sends gets that
 one policy; `inkwall-engine ext-proc -h` lists the flags. To test rules before you deploy them, see
 [testing policies offline](testing-policies.md).
 
