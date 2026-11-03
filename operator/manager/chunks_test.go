@@ -365,4 +365,20 @@ func testBundleTooLarge(ctx context.Context, t *testing.T, c client.Client) {
 			t.Fatal(err)
 		}
 	}
+	// Small again before the next test: an engine that connects meanwhile
+	// would get a bundle over gRPC's default message size (the fake
+	// engine's).
+	eventually(t, "the bundle small again", func() string {
+		var s corev1.Secret
+		if err := c.Get(ctx, types.NamespacedName{Namespace: "default", Name: bundle.BundleSecret}, &s); err != nil {
+			return err.Error()
+		}
+		if s.Data[bundle.BundleKey] == nil {
+			return "not in one Secret"
+		}
+		if n := len(chunkSecrets(ctx, t, c)); n != 0 {
+			return fmt.Sprintf("%d chunk Secrets left", n)
+		}
+		return ""
+	})
 }
