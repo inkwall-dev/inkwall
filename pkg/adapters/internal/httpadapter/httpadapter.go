@@ -114,6 +114,7 @@ func LogEvent(ctx context.Context, logger *slog.Logger, rec *events.Recorder, re
 	rec.Record(req, path, v)
 	logger.LogAttrs(ctx, slog.LevelWarn, "security event",
 		slog.String("policy", v.Policy),
+		slog.String("phase", phase(v)),
 		slog.String("action", v.Action.String()),
 		slog.String("reason", v.Reason.String()),
 		slog.Int("status", v.Status),
@@ -127,6 +128,14 @@ func LogEvent(ctx context.Context, logger *slog.Logger, rec *events.Recorder, re
 		slog.String("request_id", req.ID),
 		slog.Duration("inspection_time", v.Duration),
 	)
+}
+
+// phase names what a verdict is about: the request or its response.
+func phase(v pipeline.Verdict) string {
+	if v.Response {
+		return "response"
+	}
+	return "request"
 }
 
 func addrString(a netip.Addr) string {

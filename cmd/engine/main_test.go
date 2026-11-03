@@ -28,6 +28,7 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
 
@@ -207,6 +208,50 @@ func TestParseExtProcFlags(t *testing.T) {
 	}
 	if _, err := parseFlags(cmdExtProc, []string{"--upstream", "http://app"}, io.Discard); err == nil {
 		t.Fatal("ext-proc accepted --upstream")
+	}
+}
+
+// Response inspection is ext-proc's alone: the other adapters never see
+// the response, so they don't accept the flags.
+func TestParseResponseFlags(t *testing.T) {
+	cfg, err := parseFlags(cmdExtProc, nil, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.responses.Inspect {
+		t.Error("responses inspected by default")
+	}
+	cfg, err = parseFlags(cmdExtProc, []string{"--inspect-responses", "--max-response-bytes", "4096", "--oversize-response", "allow"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (pipeline.ResponseConfig{Inspect: true, MaxBytes: 4096, Oversize: pipeline.OversizeAllow}); cfg.responses != want {
+		t.Errorf("responses %+v, want %+v", cfg.responses, want)
+	}
+	cfg, _ = parseFlags(cmdExtProc, []string{"--inspect-responses"}, io.Discard)
+	if cfg.responses.MaxBytes != policy.DefaultResponseBytes || cfg.responses.Oversize != pipeline.OversizeAuto {
+		t.Errorf("default response limits %+v", cfg.responses)
+	}
+	for _, args := range [][]string{
+		{"--oversize-response", "truncate"},
+		{"--max-response-bytes", "-1"},
+		{"--max-response-bytes", "20971520"}, // over policy.MaxBodyBytes
+	} {
+		if _, err := parseFlags(cmdExtProc, append([]string{"--inspect-responses"}, args...), io.Discard); err == nil {
+			t.Errorf("ext-proc accepted %v", args)
+		}
+	}
+	if _, err := parseFlags(cmdExtProc, []string{"--max-response-bytes", "4096"}, io.Discard); err == nil {
+		t.Error("ext-proc accepted --max-response-bytes without --inspect-responses")
+	}
+	for _, cmd := range []string{cmdProxy, cmdForwardAuth, cmdCheck} {
+		if _, err := parseFlags(cmd, []string{"--upstream", "http://app", "--inspect-responses"}, io.Discard); err == nil {
+			t.Errorf("%s accepted --inspect-responses", cmd)
+		}
+	}
+	// A policy's responses come from the bundle in bundle mode.
+	if _, err := parseFlags(cmdExtProc, []string{"--operator", "op:9445", "--inspect-responses"}, io.Discard); err == nil || !strings.Contains(err.Error(), "bundle") {
+		t.Errorf("--inspect-responses with --operator: %v", err)
 	}
 }
 

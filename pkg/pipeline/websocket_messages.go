@@ -51,10 +51,11 @@ func (p *Pipeline) CheckWebSocketMessage(ctx context.Context, handshake *request
 		msg := *handshake
 		msg.Body, msg.BodyTruncated = nil, false
 		msg.WebSocketText = messageArgs(text)
+		// No exchange is kept: a message has no response to inspect.
 		if truncated {
-			v = p.partly(ctx, &msg)
+			v, _ = p.partly(ctx, &msg, false)
 		} else {
-			v = p.evaluate(ctx, &msg)
+			v, _ = p.evaluate(ctx, p.request(&msg, false))
 		}
 	}
 	v.Duration = time.Since(start)
