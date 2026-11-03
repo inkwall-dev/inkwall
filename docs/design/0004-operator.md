@@ -159,9 +159,9 @@ Validation runs in three steps, cheapest first:
 
 | Condition | True when | False reasons |
 |---|---|---|
-| `Accepted` | Spec valid, references resolve | `InvalidRef`, `Conflict`, `RuleCompileError`, `TargetUnsupported` |
+| `Accepted` | Spec valid, references resolve, and the bundle with it fits | `InvalidRef`, `Conflict`, `RuleCompileError`, `TargetUnsupported`, `BundleTooLarge` |
 | `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `IntegrationDisabled`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `Pending`, `NoTargets`, `InjectionDisabled`, `Unwired` |
-| `Enforced` | Every serving engine ACKed a bundle with this generation | `EnginesBehind`, `EngineNack` (first error), `EnginesUnreported`, `NoEngines`, `NotInBundle` |
+| `Enforced` | Every serving engine ACKed a bundle with this generation, and inspection isn't suspended | `EnginesBehind`, `EngineNack` (first error), `EnginesUnreported`, `NoEngines`, `NotInBundle`, `Suspended` |
 | `Ready` | The three above are True | first failing condition's reason |
 
 Status also has `bundleVersion` and `observedGeneration`. `bundleVersion` is the first bundle that
@@ -171,8 +171,24 @@ every bundle rewrote every policy's status. Both are written together, for the g
 bundle was built from: a status write that conflicts with an edit is left to the edit's build
 (#239).
 
+Status never claims protection that isn't there:
+
+- **Suspended** (#263). While the published bundle suspends inspection (`InkwallConfig.spec.suspend`),
+  every policy is `Enforced=False`, reason `Suspended`, and so `Ready=False`, with the message
+  `InkwallConfig default suspends inspection (spec.suspend): every engine allows every request`.
+  Resumed, `Enforced` waits for every engine to run the bundle that resumes inspection: suspending
+  and resuming change what every policy enforces, so its `bundleVersion` moves to that bundle.
+- **Bundle too large** (#264). A build whose bundle doesn't fit its Secrets
+  (8 chunks of 900 KiB compressed, [§4.6](#46-bundle-builder-leader-only)) isn't published: engines keep the
+  current bundle. Every policy the new bundle would add or change is `Accepted=False` and
+  `Ready=False`, reason `BundleTooLarge`, for its current generation, with the size and the bundle
+  engines run. Before, the build wrote no status, so such a policy kept the conditions of its
+  previous generation, `Accepted=True` included. The other policies keep theirs: engines run them as
+  they are. Once the bundle fits, it is published and they are `Accepted` again.
+
 `InkwallConfig.status` has `observedGeneration`, `conditions` (`ControlPlaneConnected`,
-[§4.9](#49-upstream-sync-leader-only)) and `proxies`, the discovered proxy controllers
+[§4.9](#49-upstream-sync-leader-only); `Suspended`, True while the published bundle suspends
+inspection, reason `Suspended`, else False, reason `NotSuspended`) and `proxies`, the discovered proxy controllers
 ([§4.1](#41-discovery-controller)).
 
 **Not yet:** per-target status (`targets[]` with controller, gateway, programmed and engine
@@ -632,8 +648,9 @@ It runs again when a targeted route changes (routes are indexed by target).
   A reader therefore never sees a manifest before its chunks. It also checks the hash: a reader that
   read the manifest just before the next bundle replaced its chunks fails and retries.
 - **Limits.** At most 8 chunks (7.2 MiB) and 64 MiB decompressed. A bundle over that is not
-  published, and the current one stays. The builder warns when it publishes a bundle over 75% of
-  the limit. `inkwall_operator_bundle_compressed_bytes` is the size each replica serves.
+  published, and the current one stays; the policies it would add or change report it
+  (`Accepted=False`, `BundleTooLarge`, [§3.2](#32-status-contract)). The builder warns when it
+  publishes a bundle over 75% of the limit. `inkwall_operator_bundle_compressed_bytes` is the size each replica serves.
 - **Repair.** A chunk deleted or edited makes the builder publish the bundle again, as a new
   version. That new version has no previous version for an unresolvable policy to fall back on.
 - **Access.** `inkwall-bundle-reader` grants `get` on every chunk name. So must the Role of an
@@ -731,8 +748,12 @@ conditions of [§3.2](#32-status-contract). It writes only on change, at most on
 least the policy's `status.bundleVersion` (`every engine runs bundle 42 or later`). Otherwise the
 reason is `NoEngines`, `EnginesBehind` (`some engines don't run bundle 42 yet`), `EngineNack`
 (`some engines rejected bundle 42 (first: traefik/traefik-1: …)`), `EnginesUnreported` (a replica's report
-left engines out, [§4.7](#47-distribution-server-all-replicas)) or `NotInBundle`. It waits for the
-bundle builder to report the policy's current generation (`status.observedGeneration`).
+left engines out, [§4.7](#47-distribution-server-all-replicas)), `NotInBundle` or `Suspended` (the
+bundle served suspends inspection, #263). It waits for the bundle builder to report the policy's
+current generation (`status.observedGeneration`). The version engines must run is the policy's
+`status.bundleVersion`, or its version in the bundle served when that is newer: the builder writes
+the status just after publishing, and engines still on a suspended bundle mustn't count once it
+resumes.
 
 **Writes on change** (#197). The Reporter writes a policy's status only when its `Enforced` or
 `Ready` condition changes. No message counts engines, so engines connecting or going away (a proxy
@@ -875,7 +896,8 @@ Removal must never leave a proxy failing closed on a missing engine.
 **Built (v0.1.0):**
 
 - **Suspend.** `InkwallConfig.spec.suspend: true` puts every engine in allow-all within seconds,
-  and removes nothing.
+  and removes nothing. Since v0.3.1 every policy reports it (`Enforced=False`, reason `Suspended`),
+  as does the `InkwallConfig`'s `Suspended` condition ([§3.2](#32-status-contract)).
 - **Unprotected routes.** Ingresses and IngressRoutes that are no longer protected are unwired,
   level-based ([§4.4](#44-wiring-controller)).
 - **`helm uninstall`** runs a [pre-delete hook](https://helm.sh/docs/topics/charts_hooks/), `inkwall-operator unwire`
@@ -941,7 +963,7 @@ Removal must never leave a proxy failing closed on a missing engine.
 | Engine can't compile (version skew) | Engine keeps its previous bundle | `EngineNack` | Upgrade the engines or fix the rule |
 | Bundle Secret deleted | None | Builder recreates it | Automatic |
 | Bundle chunk deleted or edited | None; meanwhile new engines can't cold start from the Secret | Builder logs it | Automatic: published again |
-| Bundle over 7.2 MiB compressed | None: the current bundle stays; changes are not published | Builder error; warning past 75%; `inkwall_operator_bundle_compressed_bytes` | Shrink the policies (fewer, or smaller rule sets) |
+| Bundle over 7.2 MiB compressed | None: the current bundle stays; changes are not published | Builder error; warning past 75%; `inkwall_operator_bundle_compressed_bytes`; `Accepted=False` (`BundleTooLarge`) on the policies not published | Shrink the policies (fewer, or smaller rule sets) |
 | Signing key rotated | None: the operator signs with the new key only once every connected engine trusts it | Secret's `rotation-phase`; operator logs the engines it waits for | Automatic ([§4.6](#46-bundle-builder-leader-only)); replace engines older than rotation |
 | Unknown controller version | Wiring may break | `Programmed=False` | Update or pin the integration |
 | An integration's `ClusterRole` not granted, or revoked | Its proxy's routes aren't wired; the others are | `Programmed=False` (`IntegrationDisabled`), discovery `Unsupported` | Grant it (`rbac.integrations`); the operator restarts with it ([§7](#7-rbac)) |

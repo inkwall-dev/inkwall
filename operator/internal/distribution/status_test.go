@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -98,5 +99,38 @@ func TestReporterWrites(t *testing.T) {
 	}
 	if cond := meta.FindStatusCondition(p.Status.Conditions, wafv1alpha1.ConditionReady); cond == nil || cond.Status != metav1.ConditionTrue {
 		t.Errorf("Ready: %+v", cond)
+	}
+}
+
+// A suspended bundle enforces nothing; and when inspection resumes, the
+// policy's version in the bundle served counts before the builder writes
+// it into the status (#263).
+func TestEnforcedSuspended(t *testing.T) {
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
+	p.Status.BundleVersion = 3
+	engines := []Engine{{ID: "e1", Applied: 3}}
+	for _, tc := range []struct {
+		name      string
+		served    uint64
+		suspended bool
+		status    metav1.ConditionStatus
+		reason    string
+	}{
+		{"enforced", 3, false, metav1.ConditionTrue, ReasonEnforced},
+		{"suspended", 3, true, metav1.ConditionFalse, ReasonSuspended},
+		{"resumed, status not written yet", 4, false, metav1.ConditionFalse, ReasonEnginesBehind},
+		{"served bundle older than the status", 2, false, metav1.ConditionTrue, ReasonEnforced},
+	} {
+		conds, _ := enforcedConditions(p, tc.served, tc.suspended, engines, 0)
+		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
+		if c == nil || c.Status != tc.status || c.Reason != tc.reason {
+			t.Errorf("%s: Enforced %+v, want %s %s", tc.name, c, tc.status, tc.reason)
+		}
+		if tc.suspended && !strings.Contains(c.Message, "InkwallConfig default") {
+			t.Errorf("%s: message %q doesn't name the InkwallConfig", tc.name, c.Message)
+		}
+		if r := meta.FindStatusCondition(conds, wafv1alpha1.ConditionReady); r == nil || r.Status != metav1.ConditionFalse {
+			t.Errorf("%s: Ready %+v, want False (not Programmed)", tc.name, r)
+		}
 	}
 }

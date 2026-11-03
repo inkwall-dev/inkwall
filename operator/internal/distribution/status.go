@@ -32,7 +32,13 @@ const (
 	ReasonEngineNack        = "EngineNack"
 	ReasonNoEngines         = "NoEngines"
 	ReasonNotInBundle       = "NotInBundle"
+	// ReasonSuspended: the bundle suspends inspection (the InkwallConfig's
+	// spec.suspend), so engines allow every request.
+	ReasonSuspended = "Suspended"
 )
+
+// suspendedMessage is the Enforced message of a suspended policy.
+const suspendedMessage = "InkwallConfig default suspends inspection (spec.suspend): every engine allows every request"
 
 var (
 	bundleVersion = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -191,6 +197,7 @@ func (r *Reporter) report(ctx context.Context) error {
 	}
 
 	_, latest, _ := r.Store.Current()
+	suspended := r.Store.Suspended()
 	var current, behind, rejected float64
 	for _, e := range engines {
 		switch {
@@ -218,21 +225,32 @@ func (r *Reporter) report(ctx context.Context) error {
 			p.Status.ObservedGeneration != p.Generation {
 			continue
 		}
+		served := r.Store.PolicyVersion(p.Namespace + "/" + p.Name)
 		// The list is the cache's, not a copy: copy only what is written.
-		if _, changed := enforcedConditions(p, engines, leftOut); !changed {
+		if _, changed := enforcedConditions(p, served, suspended, engines, leftOut); !changed {
 			continue
 		}
 		p = p.DeepCopy()
-		g.Go(func() error { return r.write(gctx, p, engines, leftOut) })
+		g.Go(func() error { return r.write(gctx, p, served, suspended, engines, leftOut) })
 	}
 	return g.Wait()
 }
 
 // enforcedConditions returns p's conditions with Enforced and Ready set
 // from the engines, and whether they changed. p is left as it is.
-func enforcedConditions(p *wafv1alpha1.WAFPolicy, engines []Engine, leftOut int) ([]metav1.Condition, bool) {
+//
+// served is the policy's version in the bundle served (Store.PolicyVersion),
+// which may be newer than its status: the builder writes the status after
+// publishing. Engines must run it too, so that when inspection resumes,
+// engines still on the suspended bundle don't count. A suspended bundle
+// enforces nothing.
+func enforcedConditions(p *wafv1alpha1.WAFPolicy, served uint64, suspended bool, engines []Engine, leftOut int) ([]metav1.Condition, bool) {
 	conds := slices.Clone(p.Status.Conditions)
-	st, reason, msg := Enforced(p.Status.BundleVersion, engines, leftOut)
+	version := max(p.Status.BundleVersion, int64(served)) // #nosec G115 -- versions count builds
+	st, reason, msg := Enforced(version, engines, leftOut)
+	if suspended {
+		st, reason, msg = metav1.ConditionFalse, ReasonSuspended, suspendedMessage
+	}
 	changed := meta.SetStatusCondition(&conds, metav1.Condition{
 		Type: wafv1alpha1.ConditionEnforced, Status: st, Reason: reason, Message: msg, ObservedGeneration: p.Generation,
 	})
@@ -242,7 +260,7 @@ func enforcedConditions(p *wafv1alpha1.WAFPolicy, engines []Engine, leftOut int)
 	return conds, changed
 }
 
-func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, engines []Engine, leftOut int) error {
+func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, served uint64, suspended bool, engines []Engine, leftOut int) error {
 	first := true
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if !first {
@@ -251,7 +269,7 @@ func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, engines 
 			}
 		}
 		first = false
-		conds, changed := enforcedConditions(p, engines, leftOut)
+		conds, changed := enforcedConditions(p, served, suspended, engines, leftOut)
 		if !changed {
 			return nil
 		}

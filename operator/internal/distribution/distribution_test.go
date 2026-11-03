@@ -620,7 +620,7 @@ func TestWatchWaitingForASendSlot(t *testing.T) {
 func TestWatchStats(t *testing.T) {
 	store, table := NewStore(), NewTable()
 	store.Set(signed(1), 1)
-	store.SetPolicies(map[string]bool{"shop/site": true})
+	store.SetPolicies(map[string]uint64{"shop/site": 1}, false)
 	var mu sync.Mutex
 	var got []*eventsv1.PolicyStats
 	s := NewServer(store, table, fakeAuth{}, "replica-0", logr.Discard())

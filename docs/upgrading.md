@@ -1,11 +1,12 @@
 # Upgrading
 
-This guide upgrades an Inkwall installation from 0.2.x (0.2.0 to 0.2.2) to 0.3.0, and from 0.1.x
-(0.1.0 to 0.1.5) to 0.2.2, the latest 0.2 release, and lists what changes on the way. From 0.1.x,
-upgrade to 0.2.2 first, then to 0.3.0.
+This guide upgrades an Inkwall installation from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
+0.3.0, and from 0.1.x (0.1.0 to 0.1.5) to 0.2.2, the latest 0.2 release, and lists what changes on
+the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 ## Contents
 
+- [From 0.3.0 to 0.3.1](#from-030-to-031)
 - [From 0.2.x to 0.3.0](#from-02x-to-030)
   - [Before you upgrade](#before-you-upgrade)
   - [What's new in 0.3.0](#whats-new-in-030)
@@ -21,6 +22,19 @@ upgrade to 0.2.2 first, then to 0.3.0.
   - [Upgrading the chart](#upgrading-the-chart)
   - [Checking it worked](#checking-it-worked)
   - [Rolling back](#rolling-back)
+
+## From 0.3.0 to 0.3.1
+
+0.3.1 is a patch release: upgrade the chart as for 0.3.0. What changes by itself:
+
+- **A suspended cluster is reported on every policy.** While `InkwallConfig.spec.suspend` is
+  `true`, every `WAFPolicy` is `Enforced=False`, reason `Suspended`, and so `Ready=False`; in 0.3.0
+  they could stay `Ready=True` while nothing was inspected. The `InkwallConfig` has a new
+  `Suspended` condition. See [suspending inspection](../deploy/helm/inkwall/README.md#suspending-inspection).
+- **A policy left out of a bundle too large to publish says so.** When the bundle doesn't fit its
+  Secrets (over 7.2 MiB compressed), the policies it would add or change are `Accepted=False` and
+  `Ready=False`, reason `BundleTooLarge`, until it fits. In 0.3.0 they kept the conditions of their
+  previous spec, `Accepted=True` included, while engines ran that previous spec.
 
 ## From 0.2.x to 0.3.0
 
