@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-09-27
-- Updated: 2026-10-30
+- Updated: 2026-11-03
 - Owner: noureldin
 - Depends on: [0001 — Performance-First Architecture](0001-performance-first-architecture.md)
 
@@ -611,10 +611,57 @@ engine's deadline plus 500 ms. Body inspection needs `http-buffer-request`, and 
 above the body limit. Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/inkwall/issues/282)); the protocol is in
 [0006 §4](0006-adapter-protocols.md#4-spoe-haproxy-stream-processing-offload-engine).
 
+**The operator's wiring of the HAProxy Kubernetes Ingress Controller** (proposed for v0.4.0,
+[#282](https://github.com/inkwall-dev/inkwall/issues/282); verified on kind with controller v3.2.19, chart 1.54.4, HAProxy 3.2.26):
+
+- **Version.** `mode spop` needs HAProxy 3.1, which ships with controller 3.1 and later
+  (`haproxytech/kubernetes-ingress:3.1` is HAProxy 3.1.14, `3.2` is 3.2.26). Older controllers
+  aren't supported.
+- **Discovery.** IngressClasses whose controller is `haproxy.org/ingress-controller/haproxy`. The
+  controller's pods are found as Traefik's are, by a proxy pod selector, and the integration is
+  turned on by `rbac.integrations.haproxy` (`auto`, `true` or `false`).
+- **Agent backend: the auxiliary configuration file.** The controller runs HAProxy with
+  `-f haproxy.cfg -f haproxy-aux.cfg` when a file is mounted at
+  `/usr/local/etc/haproxy/haproxy-aux.cfg` (verified). The Pod webhook mounts, from an
+  operator-owned ConfigMap in the proxy's namespace, that file (the `mode spop` backend
+  `inkwall-engine`, `option spop-check`, the server on the engine's Unix socket) and `spoe.conf`
+  (under `/usr/local/etc/inkwall`), and adds the engine as a native sidecar on a Unix socket in an
+  `emptyDir`. The chart runs HAProxy as uid 1000 (`haproxy`), so the engine runs with the HAProxy
+  container's `runAsUser`/`runAsGroup`, to share the socket (verified). HAProxy warns that the backend
+  implicitly uses the controller's `haproxytech` defaults; a `defaults` section of our own in the
+  file should silence it (not verified yet).
+- **Per route: the Ingress annotations.** The operator sets, on each protected Ingress,
+  `haproxy.org/standalone-backend: "true"` and `haproxy.org/backend-config-snippet` with
+  `option http-buffer-request`, `filter spoe engine inkwall config /usr/local/etc/inkwall/spoe.conf`
+  and the deny rules (the fail-closed rule in `Block`, and in `Detect` when the failure mode is
+  closed). `spoe.conf`'s message uses `event on-backend-http-request` (verified: an attack in
+  the query or a body gets 403 on the protected Ingress's host, and passes on another Ingress to
+  the same Service; with the engine unreachable, the protected host gets 503 at once).
+  - `standalone-backend` is required: without it, Ingresses to the same Service share one
+    backend, and the controller applies the backend annotations of only one of them, with a
+    warning in its log (verified).
+  - A `backend-config-snippet` on the Service is kept: the controller puts it before the
+    Ingress's (verified). A user's own snippet on the Ingress would be kept too, after
+    ours, between markers the operator owns (not verified yet).
+- **Engine missing means uninspected.** On a controller pod without the mounted files, HAProxy's
+  configuration check fails on `filter spoe`, and the controller logs `unable to Sync HAProxy
+  configuration`, drops the snippet and serves the route uninspected; other changes still sync
+  (verified). So the annotations are written only once every running pod of the controller has
+  the engine and the files; pods that predate the integration are `PendingRestart`, as for
+  Traefik. A controller run with `--disable-config-snippets` covering backends can't be wired
+  (`Programmed=False`).
+- **Status: open.** The controller reports nothing per Ingress about its snippets: it drops a
+  snippet that fails HAProxy's check with a log line only. The checks above (annotations intact,
+  every pod with the engine and the files, snippets not disabled) rule out the failures we know
+  of, but not one we can't see, so they don't prove that HAProxy runs the filter. Options: (a)
+  `Programmed=True` on those checks, with that limit documented; (b) a probe: the engine sends a
+  marked request through HAProxy to each protected route and sees its own NOTIFY come back, which
+  proves the filter is in force but sends the request to the app when it isn't; (c)
+  `Programmed=False` (`Unverified`) until one of those is decided. Until it is decided, the wiring
+  isn't built.
+
 **Built:** the agent, `inkwall-engine spoe`, with a configuration written by hand
-([protecting HAProxy](../haproxy.md)). **Not yet:** the operator's wiring of the HAProxy
-Kubernetes Ingress Controller: discovery by IngressClass, the engine as a sidecar, the SPOE
-filter and rules per protected route, and status.
+([protecting HAProxy](../haproxy.md)). **Not yet:** the operator's wiring above.
 
 ### 6.5 Caddy
 
