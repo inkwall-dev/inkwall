@@ -577,7 +577,11 @@ controller `istio.io/gateway-controller`), with `ext_proc` through an `EnvoyFilt
   (ext_proc in every workload's Envoy) are out of scope: the `EnvoyFilter` targets Gateway pods
   only.
 
-**Not yet:** Contour.
+Response inspection (v0.4.0, [0006 §2](0006-adapter-protocols.md#response-inspection-v040)):
+the engine's ext_proc adapter inspects the response headers and body for policies that ask, and
+replaces a response that leaks in block mode; built for raw Envoy with the policy from flags.
+**Not yet:** Contour; response inspection through Envoy Gateway, Istio and `WAFPolicy` (the
+Istio filter sends no response phase yet).
 
 ### 6.2 ingress-nginx
 
@@ -617,6 +621,10 @@ on an `Ingress`, or in each route's `middlewares` on an `IngressRoute`
   the request, so it can't allow it.
 - Limitation: Traefik itself rejects bodies over `maxBodySize`, whatever `body.onOversize` says.
   The operator sets it to 10 MiB, the largest inspectable body.
+- Limitation: ForwardAuth never sees the response, so Traefik can't inspect responses
+  ([0006 §2](0006-adapter-protocols.md#response-inspection-v040)): the engine's forward-auth
+  adapter has no response flags, and a policy that asks for it will be reported as not enforced
+  on Traefik routes.
 - Limitation: ForwardAuth has no timeout or failure setting. An unreachable engine gets a 500
   from Traefik in both modes ([§7.3](#73-engine-unavailable)).
 
@@ -682,7 +690,8 @@ adapter must match.
 | Any | reverse proxy | ✅ | ✅ | ✅ | ✅ | TCP |
 
 Built: Traefik ForwardAuth, the reverse proxy, and ext_proc through Envoy Gateway, Istio and raw
-Envoy.
+Envoy. Responses: inspected by ext_proc (v0.4.0, raw Envoy with the policy from flags so far); the
+reverse proxy's ✅ is a target, it doesn't inspect them yet.
 
 ---
 
@@ -814,7 +823,8 @@ Target:
 
 **Built:**
 
-- Engine: `inkwall_requests_total`, `_check_duration_seconds`, `_bundle_version`,
+- Engine: `inkwall_requests_total`, `_check_duration_seconds`, `inkwall_responses_total`,
+  `_response_check_duration_seconds` (policies that inspect responses), `_bundle_version`,
   `_bundle_updates_total`, `_operator_connected`, `_evaluations_in_flight`, `_evaluation_slots`,
   `_engine_events_total`, `_engine_events_dropped_total`.
 - Operator: `inkwall_operator_bundle_version`, `_operator_bundle_compressed_bytes`,

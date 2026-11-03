@@ -528,27 +528,7 @@ func envoyFilter(gw *gatewayv1.Gateway, routes []*istioRoute) *unstructured.Unst
 	for _, r := range routes {
 		name := istioFilterName(key(r.route))
 		names = append(names, key(r.route).String())
-		mode := map[string]any{"request_header_mode": "SEND", "response_header_mode": "SKIP"}
-		switch {
-		case r.body && r.detect:
-			mode["request_body_mode"] = "STREAMED"
-		case r.body:
-			mode["request_body_mode"] = "BUFFERED_PARTIAL"
-		}
-		extProc := map[string]any{
-			"@type":              "type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor",
-			"grpc_service":       map[string]any{"envoy_grpc": map[string]any{"cluster_name": istioCluster}},
-			"processing_mode":    mode,
-			"request_attributes": []any{"request.protocol"},
-			"message_timeout":    fmt.Sprintf("%.3fs", (r.timeout + messageMargin).Seconds()),
-			"failure_mode_allow": r.failOpen,
-			// 503, as the engine answers a request it can't inspect;
-			// Envoy's default is 500.
-			"status_on_error": map[string]any{"code": "ServiceUnavailable"},
-		}
-		if r.detect {
-			extProc["observability_mode"] = true
-		}
+		extProc, mode := istioExtProc(r.routeSettings)
 		patches = append(patches, map[string]any{
 			"applyTo": "HTTP_FILTER",
 			"match": map[string]any{"context": "GATEWAY", "listener": map[string]any{"filterChain": map[string]any{"filter": map[string]any{
@@ -590,6 +570,35 @@ func envoyFilter(gw *gatewayv1.Gateway, routes []*istioRoute) *unstructured.Unst
 	}
 	f.SetAnnotations(map[string]string{istioRoutes: strings.Join(names, ",")})
 	return f
+}
+
+// istioExtProc is a route's ext_proc filter config, from its policies'
+// settings, and the processing mode its routes enable it with: every
+// per-policy setting of the Istio wiring is here (Envoy Gateway's are in
+// extensionPolicy). Responses are not sent yet.
+func istioExtProc(r routeSettings) (config, mode map[string]any) {
+	mode = map[string]any{"request_header_mode": "SEND", "response_header_mode": "SKIP"}
+	switch {
+	case r.body && r.detect:
+		mode["request_body_mode"] = "STREAMED"
+	case r.body:
+		mode["request_body_mode"] = "BUFFERED_PARTIAL"
+	}
+	config = map[string]any{
+		"@type":              "type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor",
+		"grpc_service":       map[string]any{"envoy_grpc": map[string]any{"cluster_name": istioCluster}},
+		"processing_mode":    mode,
+		"request_attributes": []any{"request.protocol"},
+		"message_timeout":    fmt.Sprintf("%.3fs", (r.timeout + messageMargin).Seconds()),
+		"failure_mode_allow": r.failOpen,
+		// 503, as the engine answers a request it can't inspect; Envoy's
+		// default is 500.
+		"status_on_error": map[string]any{"code": "ServiceUnavailable"},
+	}
+	if r.detect {
+		config["observability_mode"] = true
+	}
+	return config, mode
 }
 
 // targetGateway is the Gateway an operator's EnvoyFilter is for.

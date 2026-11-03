@@ -219,6 +219,8 @@ Istio rolls the pods.
 - **Gateways Istio deploys.** A Gateway bound to an existing deployment
   (`networking.istio.io/gateway-name`, or a manual `spec.addresses`) isn't: the operator can't put
   the engine into pods Istio doesn't render.
+- **Responses aren't inspected** through Istio yet: the filter sends Envoy's request phases only
+  (response inspection runs through raw Envoy today).
 - **gRPC and WebSocket** are as through Envoy Gateway: see [gRPC](grpc.md) and
   [WebSocket](websocket.md).
 

@@ -80,6 +80,10 @@ message Policy {
   // request. Engines before 0.4.0 ignore it: the operator doesn't count
   // them as enforcing a policy that sets it.
   WebSocketConfig websocket = 11;
+  // Unset: responses are not inspected. Engines before 0.4.0 ignore it
+  // and inspect requests only; the operator reports routes whose engine
+  // doesn't inspect responses.
+  ResponseConfig responses = 12;
 }
 
 // RouteMatch matches requests by host, path and method.
@@ -200,6 +204,22 @@ message WebSocketConfig {
   bool allow_missing_origin = 2;
   // Headers a handshake must have, not empty.
   repeated string required_headers = 3;
+}
+
+// ResponseConfig configures response inspection (CRS RESPONSE-95x data
+// leakage rules, and the user's phase 3 and 4 rules). Only adapters that see
+// responses (ext_proc) inspect them.
+message ResponseConfig {
+  // Inspect responses: their status and headers, and their body when its
+  // media type is one the rules read and max_bytes is set.
+  bool inspect = 1;
+  // Bytes of a response body that are inspected; 0: the engine's default.
+  // A longer body has this prefix inspected, and gets on_oversize.
+  int64 max_bytes = 2;
+  // What happens to a response whose body is longer than max_bytes, or
+  // can't be inspected (an encoding the engine can't decode): DENY
+  // replaces it with 502 in block mode.
+  OversizeAction on_oversize = 3;
 }
 
 // OversizeAction is what happens to a body larger than max_bytes.
