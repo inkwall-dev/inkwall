@@ -79,7 +79,19 @@ pfs=()
 work=$(mktemp -d)
 gateway_api_installed=false
 istio_installed=false
+# The engines the engine-down step stopped, "node pid": resumed on exit too,
+# so a failed run never leaves one stopped.
+stopped=()
+resume_engines() {
+  local e
+  for e in ${stopped[@]+"${stopped[@]}"}; do
+    # shellcheck disable=SC2086 # "node pid"
+    docker exec ${e% *} kill -CONT ${e#* } >/dev/null 2>&1 || true
+  done
+  stopped=()
+}
 cleanup() {
+  resume_engines
   for pf in "${pfs[@]}"; do kill "$pf" 2>/dev/null || true; done
   if [[ ${KEEP:-} == 1 ]]; then
     rm -rf "$work"
@@ -334,18 +346,38 @@ echo "== engine down"
 # answer and, the policy failing closed, rejects the request (504 once
 # message_timeout passes) instead of letting it through. The open route
 # doesn't call the engine.
-# signal_engines SIGNAL: sends it to the engine of each Gateway pod that
-# has one.
-signal_engines() {
-  local pod node cid pid
-  for pod in $("${KUBECTL[@]}" -n "$NS" get pods -l gateway.istio.io/managed=istio.io-gateway-controller \
-    --field-selector=status.phase=Running -o name); do
-    node=$("${KUBECTL[@]}" -n "$NS" get "$pod" -o jsonpath='{.spec.nodeName}')
-    cid=$("${KUBECTL[@]}" -n "$NS" get "$pod" -o jsonpath='{.status.initContainerStatuses[?(@.name=="inkwall-engine")].containerID}')
-    # A pod from before the engine, still terminating.
-    [[ -n $cid ]] || continue
-    pid=$(docker exec "$node" crictl inspect --output go-template --template '{{.info.pid}}' "${cid#*://}")
-    docker exec "$node" kill "-$1" "$pid"
+# settled: Istio has finished rolling both Gateways' Deployments (it can
+# render one twice as the operator sets it up), and none of their pods is
+# terminating: the pods the step stops are the ones serving.
+settled() {
+  local gw
+  for gw in custom plain; do
+    "${KUBECTL[@]}" -n "$NS" rollout status "deployment/$gw-istio" --timeout=10s >/dev/null || return 1
+  done
+  ! "${KUBECTL[@]}" -n "$NS" get pods -l gateway.istio.io/managed=istio.io-gateway-controller \
+    -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}{"\n"}{end}' | grep . >/dev/null
+}
+# stop_engines: stops the engine of every Gateway pod, read in one list at
+# the moment of use (no pod looked up by a name read earlier), and records
+# them in stopped. Fails, stopping none, unless every running pod of both
+# Gateways has a running engine.
+stop_engines() {
+  local line gw node cid pid seen="" targets=()
+  while IFS='|' read -r gw node cid; do
+    [[ -n $gw ]] || continue
+    [[ -n $cid ]] || return 1
+    pid=$(docker exec "$node" crictl inspect --output go-template --template '{{.info.pid}}' "${cid#*://}") || return 1
+    [[ $pid =~ ^[0-9]+$ && $pid != 0 ]] || return 1
+    targets+=("$node $pid")
+    seen+=" $gw"
+  done < <("${KUBECTL[@]}" -n "$NS" get pods -l gateway.istio.io/managed=istio.io-gateway-controller \
+    --field-selector=status.phase=Running \
+    -o jsonpath='{range .items[*]}{.metadata.labels.gateway\.networking\.k8s\.io/gateway-name}|{.spec.nodeName}|{.status.initContainerStatuses[?(@.name=="inkwall-engine")].containerID}{"\n"}{end}')
+  [[ $seen == *" custom"* && $seen == *" plain"* ]] || return 1
+  for line in "${targets[@]}"; do
+    # shellcheck disable=SC2086 # "node pid"
+    docker exec ${line% *} kill -STOP ${line#* } || return 1
+    stopped+=("$line")
   done
 }
 # fails_closed PATH: through both Gateways, a 5xx, not the app's answer.
@@ -356,11 +388,13 @@ fails_closed() {
     [[ $c == 5?? ]] || return 1
   done
 }
-signal_engines STOP
+eventually "Istio's Gateway rollouts are done" settled
+forward_all
+eventually "the engines of both Gateways are stopped" stop_engines
 eventually "engine down: a benign request is refused (fails closed)" fails_closed /
 check "engine down: an attack is refused" fails_closed "$SQLI"
 check "engine down: the unprotected route still answers" open_are 200 /
-signal_engines CONT
+resume_engines
 eventually "engine back: benign traffic passes" both_are 200 /
 eventually "engine back: the attack is blocked" both_are 403 "$SQLI"
 
