@@ -121,6 +121,35 @@ func TestParseWebSocketFlags(t *testing.T) {
 	}
 }
 
+// TestParseWebSocketMessagesFlag: only the proxy sees a WebSocket's
+// messages, so only it takes --websocket-messages (#276).
+func TestParseWebSocketMessagesFlag(t *testing.T) {
+	for arg, want := range map[string]pipeline.WebSocketMessages{
+		"off": pipeline.MessagesOff, "inspect": pipeline.MessagesInspect, "text-only": pipeline.MessagesTextOnly,
+	} {
+		cfg, err := parseFlags(cmdProxy, []string{"--upstream", "http://app", "--websocket-messages", arg}, io.Discard)
+		if err != nil || cfg.webSocketMessages != want {
+			t.Errorf("%s: %v, %v", arg, cfg.webSocketMessages, err)
+		}
+	}
+	if cfg, _ := parseFlags(cmdProxy, []string{"--upstream", "http://app"}, io.Discard); cfg.webSocketMessages != pipeline.MessagesOff {
+		t.Errorf("default %v, want off", cfg.webSocketMessages)
+	}
+	for _, args := range [][]string{
+		{cmdProxy, "--upstream", "http://app", "--websocket-messages", "all"},
+		{cmdProxy, "--upstream", "http://app", "--websocket-messages", "inspect", "--max-body-bytes", "0"},
+		{cmdForwardAuth, "--websocket-messages", "inspect"},
+		{cmdExtProc, "--websocket-messages", "inspect"},
+	} {
+		if _, err := parseFlags(args[0], args[1:], io.Discard); err == nil {
+			t.Errorf("%v: no error", args)
+		}
+	}
+	if _, err := parseFlags(cmdProxy, []string{"--upstream", "http://app", "--operator", "op:9445", "--websocket-messages", "inspect"}, io.Discard); err == nil || !strings.Contains(err.Error(), "bundle") {
+		t.Errorf("with --operator: %v", err)
+	}
+}
+
 func TestRunUsage(t *testing.T) {
 	if code := run(nil, io.Discard, io.Discard); code != 2 {
 		t.Fatalf("run() = %d, want 2", code)

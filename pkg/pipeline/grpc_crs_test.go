@@ -170,10 +170,10 @@ func TestNotGRPCUnchanged(t *testing.T) {
 			r.Method = http.MethodPut
 			return r
 		}(), 920420},
-		// gRPC with another codec, gRPC-Web text, and other binary types:
-		// not handled at v0.3.1.
+		// gRPC with another codec, and other binary types: not handled.
 		{"grpc+json", grpcCall("/x.Y/Z", "application/grpc+json", grpcFrame([]byte(`{"name":"world"}`))), 920420},
-		{"grpc-web-text", grpcCall("/x.Y/Z", "application/grpc-web-text", []byte("AAAAAAcKBXdvcmxk")), 920420},
+		// gRPC-Web text that isn't base64 of gRPC messages (TestGRPCWebText).
+		{"grpc-web-text, not base64", grpcCall("/api/search", "application/grpc-web-text", []byte(sqli)), 920420},
 		{"octet stream", grpcCall("/upload", "application/octet-stream", helloRequest("world")), 920420},
 		{"protobuf", grpcCall("/upload", "application/x-protobuf", helloRequest("world")), 920420},
 		// Two content types: ambiguous, not gRPC (and 920620 denies it).

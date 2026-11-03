@@ -337,11 +337,11 @@ func (p *Pipeline) inspect(ctx context.Context, r *request.Request, keep bool) (
 	// protobuf: so it isn't oversized either. With GRPCMessages, the text
 	// in its messages is, and a part that can't be read is handled as an
 	// oversized body. Its response, binary too, isn't inspected.
-	if call := asGRPC(r); call != nil {
+	if call, messages := asGRPC(r); call != nil {
 		if !p.grpcMessages {
 			return p.evaluate(ctx, p.request(call, false))
 		}
-		text, complete := grpcText(r)
+		text, complete := grpcText(r, messages)
 		call.GRPCText = text
 		if complete {
 			return p.evaluate(ctx, p.request(call, false))

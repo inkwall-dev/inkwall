@@ -40,6 +40,11 @@ What's new in 0.4.0:
   adds the engine to a Gateway's pods through the ConfigMap the Gateway names, and an
   `EnvoyFilter` sends the protected routes to it. See [Istio](istio.md). Nothing changes for
   Istio Gateways until a policy targets one of their routes.
+- **WebSocket messages, through the standalone proxy.** `inkwall-engine proxy --websocket-messages
+  inspect` (or `text-only`) inspects each text message a client sends, up to `--max-body-bytes`; in
+  `block` mode a denied one closes the WebSocket with 1008 before the application gets it. Through
+  Envoy Gateway, Istio, raw Envoy and Traefik, only the handshake is inspected, as in 0.3.x: see
+  [WebSocket](websocket.md#through-each-proxy).
 - **gRPC messages.** `body.grpcMessages: Inspect` on a `WAFPolicy` (`--grpc-messages inspect`
   without the operator) has the rules read the text in gRPC calls' messages. It is off by
   default: try it in `Detect` mode first. See [inspecting the messages](grpc.md#inspecting-the-messages).
@@ -50,7 +55,7 @@ What's new in 0.4.0:
   [responses](raw-envoy.md#responses) for raw Envoy. It is off unless you set it. Security events get
   a `phase` field (`request` or `response`), and the engine two metrics,
   `inkwall_responses_total` and `inkwall_response_check_duration_seconds`. Not yet in `WAFPolicy`
-  or through Envoy Gateway; Traefik's ForwardAuth can't see responses.
+  or through Envoy Gateway and Istio; Traefik's ForwardAuth can't see responses.
 
 What changes by itself in 0.4.0:
 
@@ -76,6 +81,11 @@ What changes by itself in 0.4.0:
   proxy the HTTP status is 200, as for any gRPC error (so Envoy's access log shows 200 for these
   denials); through Traefik it stays 403. Clients reported `PERMISSION_DENIED` before as well, but
   gRPC-Web clients got the 403 as it was. See [denied calls](grpc.md#denied-calls).
+- **gRPC-Web text calls pass.** A `POST` with `Content-Type: application/grpc-web-text` whose body
+  is base64 of gRPC messages is a gRPC call, as a binary gRPC-Web one is: its path and metadata
+  are inspected, and its messages with `body.grpcMessages: Inspect`. In 0.3.x the Core Rule Set
+  denied every one in `Block` mode (rule 920420) and logged it in `Detect` mode. A body that isn't
+  such base64 is still inspected as any request, and denied. See [gRPC](grpc.md).
 
 ## From 0.3.0 to 0.3.1
 
