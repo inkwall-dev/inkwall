@@ -54,6 +54,7 @@ and the [Traefik](https://doc.traefik.io/traefik/) integration are built; the ot
   - [8.4 Multi-tenancy](#84-multi-tenancy)
   - [8.5 Observability](#85-observability)
   - [8.6 Versioning and compatibility](#86-versioning-and-compatibility)
+  - [8.7 gRPC messages](#87-grpc-messages)
 - [9. Repository layout](#9-repository-layout)
 - [10. Testing architecture](#10-testing-architecture)
 - [11. Decisions (ADR log)](#11-decisions-adr-log)
@@ -462,11 +463,46 @@ the proxy upgrades the connection, and none sees the messages after it. So:
 - **An upgrade has no body to wait for.** ext_proc decides a bodiless upgrade on its headers and
   tells Envoy to stop sending the stream ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing)).
 - **Messages are not inspected, and nothing claims they are.** Only a hook on the stream after the
-  upgrade could: the engine's reverse proxy, which copies the connection itself, or ext_proc in
-  `STREAMED` mode, where Envoy passes the upgraded data as body chunks and waits for an answer to
-  each. Traefik's ForwardAuth can't: it asks once, before the upgrade. Message inspection (frame
-  parsing, size limits, text frames as arguments, a close code on a denial) is the second part of
-  #276, and must state per proxy where it happens.
+  upgrade could, and Traefik's ForwardAuth has none: it asks once, before the upgrade. Message
+  inspection (frame parsing, size limits, text frames as arguments, a close code on a denial) is the
+  second part of #276, and must state per proxy where it happens.
+
+**WebSocket messages through Envoy (#276, open: what was tried).** The plan was ext_proc in
+`STREAMED` mode for upgrades only: the engine answers an upgrade's headers with a `mode_override`
+(`request_body_mode: STREAMED`), which Envoy Gateway allows per `EnvoyExtensionPolicy`
+(`processingMode.allowModeOverride`, in its API at v1.9.3), and parses the frames Envoy sends as
+body chunks. Tried on Envoy v1.39.6 (the raw Envoy sample's version) with an ext_proc probe and
+`hack/wsecho`:
+
+| ext_proc request body mode for the upgrade | Handshake | Frames seen by the engine |
+|---|---|---|
+| `BUFFERED_PARTIAL`, answered `CONTINUE` (0.3.1) | Held until a timeout | No |
+| `CONTINUE_AND_REPLACE` (0.4.0, 0.3.2) | Upgrades | No |
+| `mode_override` to `NONE` | Upgrades | No |
+| `STREAMED` (configured, or `mode_override`), `FULL_DUPLEX_STREAMED` | Held until a timeout | Only from a client that sends a frame before the `101` |
+| `mode_override` to `STREAMED` on the `101`'s response headers | Upgrades | No (a request mode can't change once its headers are past) |
+
+Envoy passes the upgraded data to ext_proc as body chunks, but in a streamed mode it holds the
+request headers until the first chunk, and a client sends its first frame only after the `101`: the
+handshake deadlocks. So ext_proc can't inspect WebSocket messages for a compliant client, on any
+route, whatever Envoy Gateway allows.
+
+**Decided for v0.4.0:** WebSocket messages are inspected only by the engine's reverse proxy
+(`inkwall-engine proxy`), which copies the upgraded connection itself: it parses the client's
+frames, holds a message until it is inspected, and in `Block` mode closes the connection with 1008
+([0006 §6](0006-adapter-protocols.md#6-reverse-proxy-standalone-mode)). Routes wired through
+ext_proc (Envoy Gateway, raw Envoy) and Traefik inspect the handshake only, and no `WAFPolicy`
+field asks for message inspection, so nothing claims it there. The options weighed:
+
+1. **The engine's reverse proxy:** chosen. It works for the standalone proxy, with its own flags,
+   and is the reference for the others. On Envoy Gateway it would have to be in the request path,
+   a hop the operator can't add without changing the user's routes or their backends.
+2. **Envoy's Lua filter:** not pursued. It sees the frames (`bodyChunks()`) without holding the
+   handshake, but doesn't hold a chunk while the script runs, so a frame is forwarded before it is
+   inspected: detect only at best, and unproven.
+3. **A change in Envoy's ext_proc,** continuing an upgrade's headers in a streamed mode as for any
+   request whose body comes later: then the planned design works unchanged, with a `WAFPolicy`
+   field and status that says where it isn't done (Traefik). Tracked for v1.0.0 in #313.
 
 ### 6.1 Envoy (raw Envoy, Envoy Gateway, Istio, Contour)
 
@@ -805,6 +841,61 @@ rate-limit metrics, bundle age, tracing, the dashboard and alerts.
 **Not yet:** a version matrix and `docs/compatibility.md` (CI's kind e2e test runs kind's newest
 Kubernetes; the local kind cluster, the upgrade test and [envtest](https://book.kubebuilder.io/reference/envtest) run 1.34; the chart
 allows 1.29 and later), and conversion webhooks (only `v1alpha1` exists).
+
+### 8.7 gRPC messages
+
+A gRPC call's messages are binary [protobuf](https://protobuf.dev/programming-guides/encoding/),
+which text rules can't read: since v0.3.1 a call is inspected on its path and metadata only
+([gRPC](../grpc.md)). Reading the messages is decided here (v0.4.0, [#275](https://github.com/inkwall-dev/inkwall/issues/275)).
+
+**What is read.** The body, up to the policy's `body.maxBytes`, split into gRPC messages (5-byte
+prefix). Each message is read as protobuf without its schema (`pkg/grpcwire`): a
+length-delimited field whose bytes are a whole protobuf message is read as one, to a depth of 16;
+one whose bytes are printable UTF-8 (no control characters but tab, CR, LF) is text. Some bytes
+are both, and give both: an attacker could otherwise write an attack that also parses as a
+message, to have it read only as one. Numbers, fixed-width fields and binary bytes give nothing.
+Each text field becomes a form argument (`ARGS_POST`) named by its path of field numbers (`2.1`:
+field 1 of the message in field 2), so CRS's argument rules and custom rules on `ARGS` see it.
+The raw body stays out of the rules (`REQUEST_BODY` is empty), and rule 920420 stays removed for
+the call. Schemas (a `FileDescriptorSet` in the policy, or server reflection) would name the
+fields and tell strings from bytes; they are left for later, since the schema-less reading
+already sees every string a client sends.
+
+**Limits.** At most 4,096 text fields (more: handled as unread, below); the policy's argument
+limit (1,000 by default, rule 200005) applies to them as to a form or JSON body, and denies
+more (400). Gzip messages decompress to at most 1 MiB per call.
+
+**Compression** (the compressed flag, with the call's `grpc-encoding`): `gzip`, the one encoding
+every gRPC library has, is decompressed. Another encoding (`deflate`, `snappy`, `zstd`) or none
+can't be read.
+
+**What can't be read** — a message cut at `body.maxBytes` (every long client stream), compressed
+other than with gzip, not protobuf, or past the limits — is handled as an oversized body, by the
+policy's `body.onOversize`: denied (413, gRPC `RESOURCE_EXHAUSTED`) in `Block` mode by default,
+logged in `Detect` mode. Failing safe here means a client can't hide an attack behind an encoding
+the engine doesn't read; a policy with long client streams sets `onOversize: Allow`, and the
+messages read before the cut are still inspected.
+
+**False positives**, measured with CRS at paranoia level 1 (`TestGRPCMessagesFalsePositives`):
+
+- 82 real protobuf messages (every `FileDescriptorProto` linked into the engine: Envoy's,
+  gRPC's, protobuf's own; nested, with names, paths, options): none denied by CRS; one has more
+  than 1,000 strings and hits the argument limit.
+- Everyday text (names with apostrophes, non-Latin scripts, addresses, URLs with queries,
+  sentences, JSON, ids, tokens, timestamps): no rule matches.
+- Binary: fields of random bytes are sometimes printable UTF-8, and a short run like `|W` or
+  `` `W `` matches a command or SQL injection rule (932250, 932340, 942190). About 1 message in
+  10,000, with four random fields of 1–24 bytes each; a random 16-byte id or hash is printable
+  less than once in a million.
+
+So the text the messages carry gives the false positives a form with the same values would, and
+binary fields add a small rate of their own, too high to turn on for every gRPC route in `Block`
+mode without the user's say. **Decision:** reading the messages is off by default and opt-in per
+policy (`WAFPolicy` `spec.body.grpcMessages: Inspect`, bundle `BodyConfig.grpc_messages`, the
+engine's `--grpc-messages`). With it off, nothing changes from v0.3.1. Detect mode needs nothing
+of its own: a policy turns it on in `Detect` first, reads the events, and excludes the binary
+fields that match (`when: {argument: "3"}`) before `Block`. Short binary fields could be skipped later (text under 4 bytes
+that isn't all letters and digits), at the cost of short attack strings like `'--`.
 
 ---
 

@@ -499,6 +499,7 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 		if b.MaxBytes != nil {
 			body.MaxBytes = *b.MaxBytes
 		}
+		body.GrpcMessages = b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect
 		switch b.OnOversize {
 		case wafv1alpha1.OversizeAllow:
 			body.OnOversize = bundlev1.OversizeAction_OVERSIZE_ACTION_ALLOW

@@ -40,6 +40,11 @@ What's new in 0.4.0:
   adds the engine to a Gateway's pods through the ConfigMap the Gateway names, and an
   `EnvoyFilter` sends the protected routes to it. See [Istio](istio.md). Nothing changes for
   Istio Gateways until a policy targets one of their routes.
+- **gRPC messages.** `body.grpcMessages: Inspect` on a `WAFPolicy` (`--grpc-messages inspect`
+  without the operator) has the rules read the text in gRPC calls' messages. It is off by
+  default: try it in `Detect` mode first. See [inspecting the messages](grpc.md#inspecting-the-messages).
+  The chart upgrades the CRDs with it; if you install them yourself, apply 0.4.0's. A policy
+  that sets it isn't `Enforced` (`EnginesOutdated`) while an engine before 0.4.0 runs it.
 
 What changes by itself in 0.4.0:
 
@@ -51,7 +56,6 @@ What changes by itself in 0.4.0:
 - **Two more default proxy namespaces, `istio-ingress` and `istio-system`**, where Istio's docs put
   Gateways. If you set `injection.proxyNamespaces`, the value is kept: add your Istio Gateways'
   namespaces to it. Changing the value restarts the operator.
-
 - **WebSockets through Envoy Gateway.** The engine decides a handshake on its headers. In 0.3.x, a
   policy in `Block` mode with body inspection held every handshake until one of Envoy's timeouts,
   and one in `Detect` mode logged every handshake as an oversized body.

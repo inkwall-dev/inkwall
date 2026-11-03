@@ -44,6 +44,8 @@ jobs:
           - { package: ./pkg/pipeline, target: FuzzWebSocketOrigin }
           - { package: ./pkg/adapters/internal/httpadapter, target: FuzzRequestID }
           - { package: ./pkg/adapters/internal/httpadapter, target: FuzzGRPCDenial }
+          - { package: ./pkg/grpcwire, target: FuzzMessages }
+          - { package: ./pkg/pipeline, target: FuzzGRPCText }
           - { package: ./pkg/clientip, target: FuzzResolve }
           - { package: ./pkg/bundlekey, target: FuzzParse }
           - { package: ./pkg/agent, target: FuzzApply }
