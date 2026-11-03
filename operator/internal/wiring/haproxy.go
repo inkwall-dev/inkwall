@@ -284,7 +284,7 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 		ing := &ingresses.Items[i]
 		k := types.NamespacedName{Namespace: ing.Namespace, Name: ing.Name}
 		tg := Target{Kind: ingressKind, Key: k}
-		mine := Controller(ing, classes, defaultClass) == integrations.HAProxy.Controller
+		mine := integrations.HAProxy.ServesIngresses(Controller(ing, classes, defaultClass))
 		want := targets[tg] && mine && on
 		snippet := ""
 		if want {

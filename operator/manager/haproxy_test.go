@@ -53,7 +53,7 @@ func testHAProxy(ctx context.Context, t *testing.T, c client.Client) {
 			return ""
 		}
 	}
-	class := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "haproxy"}, Spec: networkingv1.IngressClassSpec{Controller: integrations.HAProxy.Controller}}
+	class := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "haproxy"}, Spec: networkingv1.IngressClassSpec{Controller: "haproxy.org/ingress-controller/haproxy-edge"}}
 	prefix := networkingv1.PathTypePrefix
 	const userSnippet = "http-request set-header X-Mine 1"
 	ing := &networkingv1.Ingress{

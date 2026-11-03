@@ -60,7 +60,8 @@ nothing about Inkwall. Not [HAProxy Ingress](https://haproxy-ingress.github.io/)
    ```
 
 The operator recognises the controller by its IngressClass (`spec.controller:
-haproxy.org/ingress-controller/haproxy`) and its pods by the chart's label
+haproxy.org/ingress-controller/<class>`, the controller's `--ingress.class`, `haproxy` by
+default) and its pods by the chart's label
 `app.kubernetes.io/name: kubernetes-ingress` (an `InkwallConfig` can name others).
 `status.proxies` lists it.
 

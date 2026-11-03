@@ -106,3 +106,18 @@ func TestNamespaces(t *testing.T) {
 		t.Errorf("nil: every namespace, got %v", all.LabelSelector())
 	}
 }
+
+// The HAProxy controller's IngressClass names its --ingress.class:
+// haproxy.org/ingress-controller/<class>.
+func TestForControllerHAProxy(t *testing.T) {
+	for _, c := range []string{"haproxy.org/ingress-controller/haproxy", "haproxy.org/ingress-controller/edge"} {
+		if in := ForController(c); in == nil || in.Name != HAProxy.Name {
+			t.Errorf("%s: %v", c, in)
+		}
+	}
+	for _, c := range []string{"haproxy.org/ingress-controller/", "haproxy.org/other", "traefik.io/ingress-controller/x"} {
+		if in := ForController(c); in != nil && in.Name == HAProxy.Name {
+			t.Errorf("%s taken for HAProxy's", c)
+		}
+	}
+}

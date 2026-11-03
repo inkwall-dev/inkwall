@@ -30,8 +30,9 @@ Every doc in this repository, by topic, with the question each one answers.
   Istio's Gateways, and what does a policy's status say there?
 - [Protecting raw Envoy](raw-envoy.md): how do I protect an Envoy I configure myself with the
   engine's ext_proc adapter, with policies from flags or from the operator?
-- [Protecting HAProxy](haproxy.md): how do I protect an HAProxy I configure myself with the
-  engine's SPOE agent, and what does HAProxy do when the engine is down?
+- [Protecting HAProxy](haproxy.md): how does the operator protect the Ingresses of the HAProxy
+  Kubernetes Ingress Controller, how do I protect an HAProxy I configure myself with the engine's
+  SPOE agent, and what does HAProxy do when the engine is down?
 - [Running the engine without Kubernetes](standalone-proxy.md): how do I put the engine in front
   of any HTTP service as a reverse proxy, and which flags does it take?
 

@@ -8,6 +8,8 @@
 package integrations
 
 import (
+	"strings"
+
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -19,6 +21,9 @@ type Integration struct {
 	// Controller is the IngressClass spec.controller of the proxy, if it
 	// serves Ingresses.
 	Controller string
+	// ControllerPrefix, when set, starts the IngressClass spec.controller
+	// of the proxy instead, followed by a name of the user's.
+	ControllerPrefix string
 	// GatewayController is its GatewayClass spec.controllerName, if it
 	// implements the Gateway API.
 	GatewayController string
@@ -80,11 +85,14 @@ const HAProxySocketDir = "/var/run/inkwall-socket"
 // engine, injected into the controller's pods with the SPOE agent's
 // configuration, answers the SPOE filter each protected Ingress's backend
 // loads (0002 §6.4), on a Unix socket.
+//
+// Its IngressClasses' controller is haproxy.org/ingress-controller/
+// followed by its --ingress.class (haproxy by default).
 var HAProxy = Integration{
-	Name:        "haproxy",
-	Controller:  "haproxy.org/ingress-controller/haproxy",
-	PodSelector: labels.Set{"app.kubernetes.io/name": "kubernetes-ingress"},
-	Adapter:     []string{"spoe", "--listen=unix:" + HAProxySocketDir + "/spoe.sock"},
+	Name:             "haproxy",
+	ControllerPrefix: "haproxy.org/ingress-controller/",
+	PodSelector:      labels.Set{"app.kubernetes.io/name": "kubernetes-ingress"},
+	Adapter:          []string{"spoe", "--listen=unix:" + HAProxySocketDir + "/spoe.sock"},
 }
 
 // All are the known integrations.
@@ -94,11 +102,21 @@ var All = []Integration{Traefik, EnvoyGateway, Istio, HAProxy}
 // controller, or nil when Inkwall doesn't know it.
 func ForController(controller string) *Integration {
 	for i := range All {
-		if controller != "" && (All[i].Controller == controller || All[i].GatewayController == controller) {
+		if All[i].ServesIngresses(controller) || controller != "" && All[i].GatewayController == controller {
 			return &All[i]
 		}
 	}
 	return nil
+}
+
+// ServesIngresses reports whether an IngressClass spec.controller is the
+// integration's.
+func (i *Integration) ServesIngresses(controller string) bool {
+	if i.ControllerPrefix != "" {
+		name, ok := strings.CutPrefix(controller, i.ControllerPrefix)
+		return ok && name != ""
+	}
+	return controller != "" && controller == i.Controller
 }
 
 func byName(name string) *Integration {
