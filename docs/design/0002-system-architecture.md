@@ -713,8 +713,8 @@ above the body limit. Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/
   - **The request:** `GET /.well-known/inkwall-probe/<nonce>`, no body, with the route's host,
     a random nonce per probe and the header `X-Inkwall-Probe: <MAC>`, an HMAC-SHA256 of the
     nonce and host under a probe key. The key is a random 32 bytes the operator keeps in a Secret
-    of its own and sends to the engines in the bundle (`probe_key`, outside `content_hash`, like
-    `policy_versions`).
+    of its own and sends to the engines in the bundle (`probe_key`, part of `content_hash`: a new key is a new
+    bundle).
   - **The answer:** the SPOE adapter recognises the path and a valid MAC before inspection, and
     answers `action=deny` with the variable `probe` set to an HMAC of the nonce under the key.
     The route's snippet answers that, first among its rules, with
