@@ -459,6 +459,60 @@ func TestStats(t *testing.T) {
 	}
 }
 
+// A policy's responses settings: inspected by its pipeline, the verdict
+// naming the policy and counted; other policies keep no exchange.
+func TestResponses(t *testing.T) {
+	b := testBundle()
+	b.Policies[0].Responses = &bundlev1.ResponseConfig{Inspect: true, MaxBytes: 1 << 30, OnOversize: bundlev1.OversizeAction_OVERSIZE_ACTION_ALLOW}
+	stats := events.NewStats()
+	set, err := Compile(b, Options{Stats: stats})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, x := set.CheckExchange(ctx, req("admin.example.com", "/")); x != nil {
+		t.Error("a policy without responses kept an exchange")
+		x.Close()
+	}
+	if _, x := set.CheckExchange(ctx, req("shop.example.com", "/"+sqli)); x != nil {
+		t.Error("a denied request kept an exchange")
+		x.Close()
+	}
+	v, x := set.CheckExchange(ctx, req("shop.example.com", "/products/42"))
+	if v.Action != pipeline.ActionAllow || x == nil {
+		t.Fatalf("benign request: %v, exchange %v", v.Action, x)
+	}
+	defer x.Close()
+	// The limit is capped at MaxBodyBytes.
+	if x.BodyLimit() != MaxBodyBytes {
+		t.Errorf("response body limit %d, want %d", x.BodyLimit(), MaxBodyBytes)
+	}
+	rv := x.CheckResponse(ctx, &request.Response{Status: 500, Headers: http.Header{"Content-Type": {"text/html"}},
+		Body: []byte("<p>You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version</p>")})
+	if rv.Action != pipeline.ActionDeny || !rv.Response || rv.Policy != "shop/site" {
+		t.Errorf("response verdict %v (response %v, policy %q)", rv.Action, rv.Response, rv.Policy)
+	}
+	// One allowed request and one denied (checked above), and the denied
+	// response.
+	for _, p := range stats.Take() {
+		if p.GetPolicy() == "shop/site" && (p.GetAllowed() != 1 || p.GetDenied() != 2) {
+			t.Errorf("shop/site: %d allowed, %d denied; want 1, 2", p.GetAllowed(), p.GetDenied())
+		}
+	}
+
+	// The default limit.
+	b.Policies[0].Responses = &bundlev1.ResponseConfig{Inspect: true}
+	set, err = Compile(b, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, x2 := set.CheckExchange(ctx, req("shop.example.com", "/products/42"))
+	defer x2.Close()
+	if x2.BodyLimit() != DefaultResponseBytes {
+		t.Errorf("default response body limit %d", x2.BodyLimit())
+	}
+}
+
 // TestGRPCMessages: body.grpc_messages turns on the inspection of the
 // text in a gRPC call's messages, for that policy only.
 func TestGRPCMessages(t *testing.T) {

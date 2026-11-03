@@ -79,6 +79,36 @@ func TestNewRedacts(t *testing.T) {
 	}
 }
 
+// A response's event says so, and a match in the response body, the
+// leaked data itself, has no snippet.
+func TestNewResponse(t *testing.T) {
+	req := &request.Request{ID: "req-1", Method: "GET", Host: "shop.example", Headers: http.Header{}}
+	v := pipeline.Verdict{
+		Action: pipeline.ActionDeny, Status: 403, Reason: pipeline.ReasonRule, InterruptingRuleID: 959100, Response: true,
+		Matches: []rules.Match{
+			{RuleID: 951230, Variable: "RESPONSE_BODY", Value: "SQL syntax ... password=hunter2"},
+			{RuleID: 100101, Variable: "RESPONSE_HEADERS:Set-Cookie", Value: "session=s3cr3t"},
+			{RuleID: 100102, Variable: "RESPONSE_HEADERS:X-Powered-By", Value: "PHP/5.6"},
+		},
+	}
+	ev := New(Source{}, req, "/", v, time.Now())
+	if ev.GetPhase() != eventsv1.Phase_PHASE_RESPONSE || ev.GetStatus() != 403 {
+		t.Errorf("phase %v, status %d", ev.GetPhase(), ev.GetStatus())
+	}
+	for _, m := range ev.GetMatches()[:2] {
+		if m.GetSnippet() != "" {
+			t.Errorf("%s: snippet %q, want none", m.GetVariable(), m.GetSnippet())
+		}
+	}
+	if ev.GetMatches()[2].GetSnippet() != "PHP/5.6" {
+		t.Errorf("X-Powered-By snippet %q", ev.GetMatches()[2].GetSnippet())
+	}
+	v.Response = false
+	if ev := New(Source{}, req, "/", v, time.Now()); ev.GetPhase() != eventsv1.Phase_PHASE_REQUEST {
+		t.Errorf("request event phase %v", ev.GetPhase())
+	}
+}
+
 func TestNewLimits(t *testing.T) {
 	long := strings.Repeat("é", 2000) // 2 bytes each
 	req := &request.Request{Host: long, ID: long, Headers: http.Header{"User-Agent": {long}}}
