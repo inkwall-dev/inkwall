@@ -10,7 +10,11 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A new push to a pull request cancels its running checks; a push to main
+  # or a release branch waits instead, so every commit there gets a result
+  # and e2e can save the build cache (#298). A newer push still replaces a
+  # run that is only queued.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   lint:
@@ -88,7 +92,9 @@ jobs:
     # kind's newest Kubernetes (the local kind cluster, and upgrade, run 1.34:
     # KIND_NODE_IMAGE in the Makefile).
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # The e2e takes 15 to 20 minutes; the rest is for saving the build cache
+    # on a push, whose steps have limits of their own (#298).
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -101,7 +107,10 @@ jobs:
       - run: make kind-cluster KIND_NODE_IMAGE=
       # The images' Go build cache (hack/kind/go-build-cache.sh), so they
       # compile little more than this repository's packages: about 1.2 GB,
-      # saved from main once per go.sum and Dockerfile.
+      # saved from main once per go.sum and Dockerfile. Saving it must never
+      # fail or cancel the job (#298): its steps have their own time limits
+      # and continue on error, and a cache is saved only if it was extracted
+      # completely.
       - id: go-build
         uses: actions/cache/restore@v6
         with:
@@ -110,9 +119,14 @@ jobs:
           restore-keys: image-go-build-
       - run: hack/kind/go-build-cache.sh inject "$RUNNER_TEMP/go-build"
       - run: make kind-e2e
-      - if: github.event_name == 'push' && steps.go-build.outputs.cache-hit != 'true'
+      - id: extract
+        if: github.event_name == 'push' && steps.go-build.outputs.cache-hit != 'true'
+        timeout-minutes: 10
+        continue-on-error: true
         run: hack/kind/go-build-cache.sh extract "$RUNNER_TEMP/go-build"
-      - if: github.event_name == 'push' && steps.go-build.outputs.cache-hit != 'true'
+      - if: github.event_name == 'push' && steps.extract.outcome == 'success'
+        timeout-minutes: 10
+        continue-on-error: true
         uses: actions/cache/save@v6
         with:
           path: ${{ runner.temp }}/go-build
@@ -138,7 +152,8 @@ jobs:
         with:
           go-version: '1.27.x'
           check-latest: true
-      # The images' Go build cache, as in e2e (which saves it).
+      # The images' Go build cache, as in e2e (which saves it; this job only
+      # restores it, so it has nothing to save after its test).
       - uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}/go-build
