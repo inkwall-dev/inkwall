@@ -110,6 +110,9 @@ const (
 	Reason_REASON_NO_POLICY Reason = 9
 	// Inspection is suspended (the emergency switch).
 	Reason_REASON_SUSPENDED Reason = 10
+	// A WebSocket handshake didn't meet the policy's WebSocket rules (an
+	// origin not allowed, a required header missing).
+	Reason_REASON_WEBSOCKET Reason = 11
 )
 
 // Enum value maps for Reason.
@@ -126,6 +129,7 @@ var (
 		8:  "REASON_SKIPPED",
 		9:  "REASON_NO_POLICY",
 		10: "REASON_SUSPENDED",
+		11: "REASON_WEBSOCKET",
 	}
 	Reason_value = map[string]int32{
 		"REASON_UNSPECIFIED": 0,
@@ -139,6 +143,7 @@ var (
 		"REASON_SKIPPED":     8,
 		"REASON_NO_POLICY":   9,
 		"REASON_SUSPENDED":   10,
+		"REASON_WEBSOCKET":   11,
 	}
 )
 
@@ -545,7 +550,7 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\fACTION_ALLOW\x10\x01\x12\x0f\n" +
 	"\vACTION_DENY\x10\x02\x12\x0e\n" +
 	"\n" +
-	"ACTION_LOG\x10\x03*\xe7\x01\n" +
+	"ACTION_LOG\x10\x03*\xfd\x01\n" +
 	"\x06Reason\x12\x16\n" +
 	"\x12REASON_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vREASON_NONE\x10\x01\x12\x0f\n" +
@@ -558,7 +563,8 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\x0eREASON_SKIPPED\x10\b\x12\x14\n" +
 	"\x10REASON_NO_POLICY\x10\t\x12\x14\n" +
 	"\x10REASON_SUSPENDED\x10\n" +
-	"2Z\n" +
+	"\x12\x14\n" +
+	"\x10REASON_WEBSOCKET\x10\v2Z\n" +
 	"\fCheckService\x12J\n" +
 	"\x05Check\x12\x1f.inkwall.engine.v1.CheckRequest\x1a .inkwall.engine.v1.CheckResponseB7Z5github.com/inkwall-dev/inkwall/api/engine/v1;enginev1b\x06proto3"
 

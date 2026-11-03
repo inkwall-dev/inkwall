@@ -148,6 +148,9 @@ type engineConfig struct {
 	skipBodyPaths  []string
 	pprof          bool
 	ruleGroupsOff  []string
+	// webSocket is what a WebSocket handshake must meet; nil: nothing more
+	// than any request.
+	webSocket *pipeline.WebSocketRules
 
 	// Bundle mode: policies come from the operator.
 	operator           string
@@ -170,6 +173,7 @@ type engineConfig struct {
 var policyFlags = []string{
 	"mode", "failure-mode", "timeout", "oversize-body", "paranoia-level", "anomaly-threshold",
 	"rules", "rules-before-crs", "skip-paths", "skip-body-paths", "disable-rule-groups",
+	"websocket-origins", "websocket-allow-missing-origin", "websocket-required-headers",
 }
 
 func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, error) {
@@ -215,6 +219,9 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	disableGroups := fs.String("disable-rule-groups", "", "comma-separated CRS attack families to remove when the application cannot be vulnerable to them: "+strings.Join(coraza.RuleGroupNames(), ", "))
 	pprof := fs.Bool("pprof", false, "serve /debug/pprof on the admin listener (exposes internals: keep that listener private)")
 	skipBodyPaths := fs.String("skip-body-paths", "", "comma-separated paths whose body is not inspected (headers and URI still are), same syntax as --skip-paths")
+	wsOrigins := fs.String("websocket-origins", "", "comma-separated origins a WebSocket handshake may come from, scheme://host[:port] (http or https; the host may start with *. for subdomains); others are denied with 403 (empty: any origin)")
+	wsMissingOrigin := fs.Bool("websocket-allow-missing-origin", false, "let a WebSocket handshake without an Origin header pass --websocket-origins")
+	wsHeaders := fs.String("websocket-required-headers", "", "comma-separated headers a WebSocket handshake must have, not empty; one without them is denied with 403")
 	operator := fs.String("operator", "", "bundle mode: the operator's distribution server, host:port; policies come from its bundles, per route, instead of the flags that define a policy")
 	operatorCA := fs.String("operator-ca", "/var/run/secrets/inkwall/ca.crt", "bundle mode: CA certificate (PEM) of the operator's server")
 	operatorServerName := fs.String("operator-server-name", "", "bundle mode: name the operator's certificate must have (default: the host of --operator)")
@@ -332,6 +339,18 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 		return cfg, err
 	}
 	cfg.routes = routes
+	origins := splitList(*wsOrigins)
+	if *wsMissingOrigin && len(origins) == 0 {
+		return cfg, errors.New("--websocket-allow-missing-origin needs --websocket-origins")
+	}
+	cfg.webSocket, err = pipeline.CompileWebSocket(pipeline.WebSocketConfig{
+		AllowedOrigins:     origins,
+		AllowMissingOrigin: *wsMissingOrigin,
+		RequiredHeaders:    splitList(*wsHeaders),
+	})
+	if err != nil {
+		return cfg, fmt.Errorf("--websocket-origins, --websocket-required-headers: %w", err)
+	}
 	return cfg, nil
 }
 
@@ -587,6 +606,7 @@ func flagMode(cfg engineConfig, metrics *telemetry.Metrics) (pipeline.Inspector,
 		Oversize:      cfg.oversize,
 		Observer:      metrics,
 		Routes:        cfg.routes,
+		WebSocket:     cfg.webSocket,
 	})
 	metrics.WatchAdmission(p.Admission())
 	return p, nil

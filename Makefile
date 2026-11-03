@@ -165,7 +165,7 @@ release-check: ## Check the goreleaser configuration
 	$(GORELEASER) check
 
 # The kind targets, and the scripts they run, use the kind of KIND_VERSION.
-KIND_TARGETS := kind-cluster kind-up kind-operator kind-e2e kind-e2e-envoy-gateway kind-upgrade kind-down
+KIND_TARGETS := kind-cluster kind-up kind-operator kind-e2e kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-upgrade kind-down
 $(KIND_TARGETS): export PATH := $(KIND_DIR):$(PATH)
 $(KIND_TARGETS): $(KIND_DIR)/kind
 
@@ -188,11 +188,17 @@ kind-operator: ## Build the operator image, install the Helm chart on the kind c
 
 .PHONY: kind-e2e
 kind-e2e: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
-kind-e2e: kind-operator ## End-to-end test on kind: a WAFPolicy is enforced by an engine in bundle mode, through Traefik and Envoy Gateway (installs the operator first)
+kind-e2e: kind-operator ## End-to-end test on kind: a WAFPolicy is enforced by an engine in bundle mode, through Traefik, raw Envoy and Envoy Gateway (installs the operator first)
 	@# kind-operator built and loaded the engine image.
 	KIND_CLUSTER=$(KIND_CLUSTER) IMAGE=$(IMAGE) SKIP_BUILD=1 hack/kind/e2e.sh
 	@# e2e.sh ends with an uninstall.
+	$(MAKE) kind-e2e-raw-envoy
 	$(MAKE) kind-e2e-envoy-gateway
+
+.PHONY: kind-e2e-raw-envoy
+kind-e2e-raw-envoy: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
+kind-e2e-raw-envoy: kind-operator ## End-to-end test on kind of raw Envoy with the engine in bundle mode, the examples/raw-envoy sample (installs the operator first)
+	KIND_CLUSTER=$(KIND_CLUSTER) IMAGE=$(IMAGE) hack/kind/raw-envoy-e2e.sh
 
 .PHONY: kind-e2e-envoy-gateway
 kind-e2e-envoy-gateway: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
@@ -207,6 +213,10 @@ kind-upgrade: ## Upgrade test on kind: helm upgrade from the last release to thi
 kind-test: ## Send benign and attack requests to the kind demo and check verdicts
 	hack/kind/smoke.sh
 	NAME=traefik PROXY=http://127.0.0.1:30080 ADMIN=http://127.0.0.1:30482 hack/kind/smoke.sh
+
+.PHONY: raw-envoy-e2e
+raw-envoy-e2e: ## End-to-end test of raw Envoy with the engine's ext_proc adapter and the examples/raw-envoy samples, in Docker (no cluster)
+	IMAGE=$(IMAGE) hack/raw-envoy/e2e.sh
 
 .PHONY: kind-down
 kind-down: ## Delete the kind cluster

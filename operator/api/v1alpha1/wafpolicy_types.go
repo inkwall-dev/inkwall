@@ -85,6 +85,17 @@ type WAFPolicySpec struct {
 	// Body configures request body inspection.
 	// +optional
 	Body *BodySpec `json:"body,omitempty"`
+
+	// WebSocket is what a WebSocket handshake on the policy's routes must
+	// meet, on top of the rules: the origins it may come from, the headers
+	// it must have. A handshake that doesn't is denied with 403 in Block
+	// mode (logged in Detect mode), and isn't upgraded. Other requests
+	// aren't affected. The handshake's URL and headers are inspected by
+	// the rules whether this is set or not; the messages after it are not
+	// inspected (docs/websocket.md). Engines before 0.4.0 ignore it: the
+	// policy isn't Enforced while one is connected.
+	// +optional
+	WebSocket *WebSocketSpec `json:"webSocket,omitempty"`
 }
 
 // TargetRef names a route in the policy's namespace.
@@ -236,6 +247,50 @@ type BodySpec struct {
 	// +optional
 	OnOversize OversizeAction `json:"onOversize,omitempty"`
 }
+
+// WebSocketSpec is what a WebSocket handshake must meet.
+// +kubebuilder:validation:XValidation:rule="!has(self.allowMissingOrigin) || !self.allowMissingOrigin || (has(self.allowedOrigins) && size(self.allowedOrigins) > 0)",message="allowMissingOrigin needs allowedOrigins"
+type WebSocketSpec struct {
+	// AllowedOrigins are the origins a handshake may come from, against
+	// cross-site WebSocket hijacking: a page on another site can open a
+	// WebSocket to the application with the user's cookies, and only the
+	// Origin header tells. Each is "scheme://host" or "scheme://host:port",
+	// lower case, with scheme http or https; a host "*.example.com"
+	// matches any subdomain of example.com, not example.com itself. A
+	// handshake without Origin is denied unless allowMissingOrigin is set.
+	// Empty: any origin.
+	// +kubebuilder:validation:MaxItems=64
+	// +listType=set
+	// +optional
+	AllowedOrigins []WebSocketOrigin `json:"allowedOrigins,omitempty"`
+
+	// AllowMissingOrigin lets a handshake without an Origin header pass
+	// the origin check. Browsers always send Origin; other clients (a
+	// mobile app, a service) may not, and aren't the target of cross-site
+	// hijacking.
+	// +optional
+	AllowMissingOrigin bool `json:"allowMissingOrigin,omitempty"`
+
+	// RequiredHeaders are headers a handshake must have, not empty: a
+	// token (Authorization), a subprotocol (Sec-WebSocket-Protocol). Their
+	// values aren't checked.
+	// +kubebuilder:validation:MaxItems=16
+	// +listType=set
+	// +optional
+	RequiredHeaders []HeaderName `json:"requiredHeaders,omitempty"`
+}
+
+// WebSocketOrigin is an origin, "scheme://host[:port]", lower case; the
+// host may start with "*." to match subdomains.
+// +kubebuilder:validation:MaxLength=270
+// +kubebuilder:validation:Pattern=`^https?://(\*\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*(:[0-9]{1,5})?$`
+type WebSocketOrigin string
+
+// HeaderName is an HTTP header name.
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:MaxLength=256
+// +kubebuilder:validation:Pattern=`^[A-Za-z0-9!#$%&'*+.^_|~-]+$`
+type HeaderName string
 
 // WAFPolicyStatus reports how far the policy got: accepted, programmed into
 // the proxy, enforced by every engine (0004 §3.2).

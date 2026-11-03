@@ -1,0 +1,260 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Envoy as a Deployment in Kubernetes, with the Inkwall engine as a sidecar
+# that takes its policies from the Inkwall operator of the same cluster
+# (bundle mode). Envoy's configuration is envoy.yaml, the ConfigMap
+# kustomization.yaml generates. Apply with `kubectl apply -k`, after
+# creating the inkwall-trust ConfigMap (docs/raw-envoy.md). The operator
+# doesn't manage any of this: it isn't one of its integrations.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: raw-envoy
+---
+# Envoy's pods run as this ServiceAccount, and so does the engine in them.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: envoy
+  namespace: raw-envoy
+---
+# Read access to the policy bundle: the operator's distribution server
+# accepts an engine whose ServiceAccount may get the bundle Secret, and the
+# engine reads the Secret (and its chunks, for a bundle over 900 KiB) when it
+# starts while the operator is down. The bundle holds every namespace's
+# policies and rules: grant it only to a ServiceAccount of a namespace where
+# only the people who run Envoy create pods (GHSA-r5cq-6vq5-q8qg).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: raw-envoy-bundle-reader
+  namespace: inkwall-system
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames:
+      - inkwall-bundle
+      - inkwall-bundle-a-0
+      - inkwall-bundle-a-1
+      - inkwall-bundle-a-2
+      - inkwall-bundle-a-3
+      - inkwall-bundle-a-4
+      - inkwall-bundle-a-5
+      - inkwall-bundle-a-6
+      - inkwall-bundle-a-7
+      - inkwall-bundle-b-0
+      - inkwall-bundle-b-1
+      - inkwall-bundle-b-2
+      - inkwall-bundle-b-3
+      - inkwall-bundle-b-4
+      - inkwall-bundle-b-5
+      - inkwall-bundle-b-6
+      - inkwall-bundle-b-7
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: raw-envoy-bundle-reader
+  namespace: inkwall-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: raw-envoy-bundle-reader
+subjects:
+  - kind: ServiceAccount
+    name: envoy
+    namespace: raw-envoy
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy
+  namespace: raw-envoy
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app.kubernetes.io/name: raw-envoy}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: raw-envoy}
+    spec:
+      serviceAccountName: envoy
+      # The engine reads its tokens from the projected volume below.
+      automountServiceAccountToken: false
+      initContainers:
+        # A native sidecar (Kubernetes 1.29 or later): it starts, and passes
+        # its startup probe, before Envoy starts, and stops after it.
+        - name: inkwall-engine
+          image: inkwall-engine # set in kustomization.yaml
+          restartPolicy: Always
+          args:
+            - ext-proc
+            - --listen=unix:/var/run/inkwall/extproc.sock
+            # Envoy is the engine's peer; its X-Forwarded-For carries the
+            # client.
+            - --trusted-proxies=127.0.0.1/32,::1/128
+            # Bundle mode: the policies come from the operator.
+            - --operator=inkwall-operator.inkwall-system.svc:9445
+            - --operator-ca=/var/run/secrets/inkwall/ca.crt
+            - --operator-token=/var/run/secrets/inkwall/token
+            - --bundle-key=/var/run/secrets/inkwall/trusted-keys.pub
+            - --bundle-cache=/var/lib/inkwall/bundle.pb
+            # Read when the engine starts with no bundle and the operator is
+            # down.
+            - --bundle-secret=inkwall-system/inkwall-bundle
+            - --kube-token=/var/run/secrets/inkwall/kube-token
+            - --kube-ca=/var/run/secrets/inkwall/kube-ca.crt
+          env:
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+          ports:
+            - {name: inkwall-admin, containerPort: 9480}
+          startupProbe:
+            httpGet: {path: /readyz, port: inkwall-admin}
+            periodSeconds: 1
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: inkwall-admin}
+          livenessProbe:
+            httpGet: {path: /healthz, port: inkwall-admin}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 512Mi}
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            seccompProfile: {type: RuntimeDefault}
+          volumeMounts:
+            - {name: socket, mountPath: /var/run/inkwall}
+            - {name: inkwall-secrets, mountPath: /var/run/secrets/inkwall, readOnly: true}
+            - {name: bundle-cache, mountPath: /var/lib/inkwall}
+            # Coraza checks at startup that it can create files in /tmp.
+            - {name: tmp, mountPath: /tmp}
+      containers:
+        - name: envoy
+          image: envoyproxy/envoy:v1.39.6
+          args: [-c, /etc/envoy/envoy.yaml]
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            tcpSocket: {port: http}
+          securityContext:
+            # The engine's user, so Envoy may connect to its socket.
+            runAsUser: 65532
+            runAsGroup: 65532
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            seccompProfile: {type: RuntimeDefault}
+          volumeMounts:
+            - {name: socket, mountPath: /var/run/inkwall}
+            - {name: envoy-config, mountPath: /etc/envoy, readOnly: true}
+      volumes:
+        - name: socket
+          emptyDir: {}
+        - name: envoy-config
+          configMap:
+            name: envoy-config
+        - name: inkwall-secrets
+          projected:
+            sources:
+              # For the operator: a token for its audience.
+              - serviceAccountToken:
+                  audience: inkwall-operator
+                  expirationSeconds: 3600
+                  path: token
+              # The operator's CA (ca.crt) and the bundle keys
+              # (trusted-keys.pub): you keep this ConfigMap.
+              - configMap:
+                  name: inkwall-trust
+              # For the bundle Secret: a token for the API server, its CA.
+              - serviceAccountToken:
+                  expirationSeconds: 3600
+                  path: kube-token
+              - configMap:
+                  name: kube-root-ca.crt
+                  items: [{key: ca.crt, path: kube-ca.crt}]
+        - name: bundle-cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {sizeLimit: 16Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: envoy
+  namespace: raw-envoy
+spec:
+  selector: {app.kubernetes.io/name: raw-envoy}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+---
+# The app behind Envoy: envoy.yaml's cluster "app".
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: raw-envoy
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: app}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: app}
+    spec:
+      containers:
+        - name: whoami
+          image: traefik/whoami:v1.10.3
+          args: ["--port", "8080"]
+          ports:
+            - {name: http, containerPort: 8080}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: app
+  namespace: raw-envoy
+spec:
+  selector: {app.kubernetes.io/name: app}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+---
+# The routes the policy protects: Envoy's hosts and paths, written as an
+# Ingress for the operator to put into the bundle. No ingress controller
+# serves it (its class has none), so the policy reports
+# Programmed=False (ControllerUnsupported): the operator wires nothing for
+# Envoy, envoy.yaml does. Enforced reports the engines.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: app
+  namespace: raw-envoy
+spec:
+  ingressClassName: raw-envoy
+  rules:
+    - host: app.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: {name: app, port: {number: 80}}
+---
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: app
+  namespace: raw-envoy
+spec:
+  targetRefs: [{kind: Ingress, name: app}]
+  mode: Block

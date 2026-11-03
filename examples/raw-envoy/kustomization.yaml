@@ -1,0 +1,22 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Envoy with the Inkwall engine in bundle mode, in Kubernetes:
+#   kubectl apply -k examples/raw-envoy
+# after creating the inkwall-trust ConfigMap (docs/raw-envoy.md).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - kubernetes.yaml
+# Envoy's configuration: the same envoy.yaml as outside Kubernetes. A change
+# gives the ConfigMap a new name, which rolls Envoy's pods.
+configMapGenerator:
+  - name: envoy-config
+    namespace: raw-envoy
+    files:
+      - envoy.yaml
+images:
+  # The engine of your operator's release.
+  - name: inkwall-engine
+    newName: ghcr.io/inkwall-dev/inkwall-engine
+    newTag: 0.3.1

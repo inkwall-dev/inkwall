@@ -260,6 +260,34 @@ func testBundleTooLarge(ctx context.Context, t *testing.T, c client.Client) {
 	if err := c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "huge"}}); err != nil {
 		t.Fatal(err)
 	}
+	// Small again before the next test, even if this one fails half way
+	// (#304): its engines would get this bundle, megabytes of rules, tests
+	// that count chunks would see these, and a bundle left too large would
+	// keep every later policy change from being published.
+	t.Cleanup(func() {
+		cfg := &wafv1alpha1.InkwallConfig{}
+		if err := c.Get(ctx, client.ObjectKey{Name: "default"}, cfg); err == nil && cfg.Spec.Suspend {
+			update(ctx, t, c, cfg, func(cfg *wafv1alpha1.InkwallConfig) { cfg.Spec.Suspend = false })
+		}
+		for _, o := range []client.Object{&wafv1alpha1.WAFPolicy{}, &wafv1alpha1.WAFRuleSet{}, &networkingv1.Ingress{}} {
+			if err := c.DeleteAllOf(ctx, o, client.InNamespace("huge")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		eventually(t, "the bundle small again", func() string {
+			var s corev1.Secret
+			if err := c.Get(ctx, types.NamespacedName{Namespace: "default", Name: bundle.BundleSecret}, &s); err != nil {
+				return err.Error()
+			}
+			if s.Data[bundle.BundleKey] == nil {
+				return "not in one Secret"
+			}
+			if n := len(chunkSecrets(ctx, t, c)); n != 0 {
+				return fmt.Sprintf("%d chunk Secrets left", n)
+			}
+			return ""
+		})
+	})
 	prefix := networkingv1.PathTypePrefix
 	ruleSets := func(p *wafv1alpha1.WAFPolicy, from int) {
 		p.Spec.RuleSets = nil
@@ -416,24 +444,4 @@ func testBundleTooLarge(ctx context.Context, t *testing.T, c client.Client) {
 		return ""
 	})
 
-	for _, o := range []client.Object{&wafv1alpha1.WAFPolicy{}, &wafv1alpha1.WAFRuleSet{}, &networkingv1.Ingress{}} {
-		if err := c.DeleteAllOf(ctx, o, client.InNamespace("huge")); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// Small again before the next test: its engines would get this bundle,
-	// megabytes of rules, and tests that count chunks would see these.
-	eventually(t, "the bundle small again", func() string {
-		var s corev1.Secret
-		if err := c.Get(ctx, types.NamespacedName{Namespace: "default", Name: bundle.BundleSecret}, &s); err != nil {
-			return err.Error()
-		}
-		if s.Data[bundle.BundleKey] == nil {
-			return "not in one Secret"
-		}
-		if n := len(chunkSecrets(ctx, t, c)); n != 0 {
-			return fmt.Sprintf("%d chunk Secrets left", n)
-		}
-		return ""
-	})
 }

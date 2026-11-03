@@ -7,6 +7,7 @@
 package fakeengine
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
@@ -50,6 +51,15 @@ type Engine struct {
 	// its policies: hundreds of engines with a large bundle each would
 	// take gigabytes (the scale test, operator/test/scale).
 	KeepVersionOnly bool
+	// Shared, if set, is shared by the engines of one process: an engine
+	// given the very bundle another one verified, byte for byte with the
+	// same key, takes that one's result instead of decoding it again. The
+	// bundle passed to Reject and OnApply, and kept, is then shared: read
+	// only. Real engines each decode on their own CPU, at once; hundreds
+	// of fake engines in one process decoding a 2 MB bundle at once took
+	// gigabytes, and on a busy machine stalled long enough for the
+	// operator to close their connections (the scale test, #296).
+	Shared *Shared
 
 	mu      sync.Mutex
 	applied *bundlev1.Bundle
@@ -227,7 +237,59 @@ func (e *Engine) verify(signed *bundlev1.SignedBundle) (*bundlev1.Bundle, error)
 	if i < 0 {
 		return nil, fmt.Errorf("unknown key %q", signed.GetKeyId())
 	}
-	if !ed25519.Verify(keys[i], signed.GetBundle(), signed.GetSignature()) {
+	if e.Shared != nil {
+		return e.Shared.verify(keys[i], signed)
+	}
+	return verify(keys[i], signed)
+}
+
+// Shared is the bundle the engines of a process verified last; the zero
+// value is ready.
+type Shared struct {
+	mu   sync.Mutex
+	last *verified
+}
+
+// verified is a signed bundle and the result of verifying it, once done
+// is closed.
+type verified struct {
+	key       ed25519.PublicKey
+	bundle    []byte
+	signature []byte
+
+	done chan struct{}
+	b    *bundlev1.Bundle
+	err  error
+}
+
+func (v *verified) is(key ed25519.PublicKey, signed *bundlev1.SignedBundle) bool {
+	return v != nil && v.key.Equal(key) && bytes.Equal(v.signature, signed.GetSignature()) && bytes.Equal(v.bundle, signed.GetBundle())
+}
+
+// verify verifies signed with key, or takes the result for the same bytes
+// and key.
+func (s *Shared) verify(key ed25519.PublicKey, signed *bundlev1.SignedBundle) (*bundlev1.Bundle, error) {
+	s.mu.Lock()
+	v := s.last
+	s.mu.Unlock()
+	if !v.is(key, signed) { // compared unlocked: 2 MB take a while
+		s.mu.Lock()
+		if v = s.last; !v.is(key, signed) {
+			v = &verified{key: key, bundle: signed.GetBundle(), signature: signed.GetSignature(), done: make(chan struct{})}
+			s.last = v
+			s.mu.Unlock()
+			v.b, v.err = verify(key, signed)
+			close(v.done)
+			return v.b, v.err
+		}
+		s.mu.Unlock()
+	}
+	<-v.done
+	return v.b, v.err
+}
+
+func verify(key ed25519.PublicKey, signed *bundlev1.SignedBundle) (*bundlev1.Bundle, error) {
+	if !ed25519.Verify(key, signed.GetBundle(), signed.GetSignature()) {
 		return nil, errors.New("bad signature")
 	}
 	var b bundlev1.Bundle
