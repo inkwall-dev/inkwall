@@ -8,6 +8,13 @@
 # across runs (actions/cache), so the images compile only what changed:
 # Docker's layer cache can't help there, since COPY . . changes with every
 # commit, and a cache mount lives only as long as the builder.
+#
+# extract keeps only the entries the builds since inject used (#298): Go
+# refreshes an entry's mtime when it uses one older than an hour, and inject
+# and actions/cache keep mtimes, so an entry not modified for KEEP_MINUTES
+# (default 120, longer than an hour plus the builds) wasn't used. Without
+# this the cache grows with every go.sum, since each run restores the last
+# one (restore-keys), and the copy out gets slower.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -33,12 +40,17 @@ EOF
   ;;
 extract)
   rm -rf "$dir"
-  # The date, so the copy isn't taken from the layer cache.
-  docker build -q --build-arg "NOW=$(date +%s%N)" --output "type=local,dest=$dir" - <<EOF
+  keep=${KEEP_MINUTES:-120}
+  # The date, so the copy isn't taken from the layer cache. Plain progress,
+  # so CI's log shows how long each part takes.
+  docker build --progress=plain --build-arg "NOW=$(date +%s%N)" --build-arg "KEEP=$keep" \
+    --output "type=local,dest=$dir" - <<EOF
 # syntax=docker/dockerfile:1
 FROM $BASE AS copy
 ARG NOW
-RUN --mount=$MOUNT mkdir /out && cp -a /root/.cache/go-build/. /out/
+ARG KEEP
+RUN --mount=$MOUNT mkdir /out && cp -a /root/.cache/go-build/. /out/ && \
+  du -sh /out && find /out -mindepth 2 -type f -mmin +\$KEEP -delete && du -sh /out
 FROM scratch
 COPY --from=copy /out /
 EOF
