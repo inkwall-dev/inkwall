@@ -20,7 +20,7 @@ import (
 
 func TestFlags(t *testing.T) {
 	var stderr strings.Builder
-	if code := run([]string{"--help"}, &stderr); code != 0 {
+	if code := run([]string{"--help"}, io.Discard, &stderr); code != 0 {
 		t.Errorf("--help: exit %d", code)
 	}
 	if !strings.Contains(stderr.String(), "-webhook-certs") {
@@ -29,7 +29,7 @@ func TestFlags(t *testing.T) {
 	for _, args := range [][]string{{"--no-such-flag"}, {"extra"}, {"--webhook-certs", "cert-manager"},
 		{"--signing-key-grace", "0s"}, {"--selector-restart-max-delay", "-1s"},
 		{"--proxy-namespaces", ""}, {"--proxy-namespaces", "traefik,Not_A_Namespace"}} {
-		if code := run(args, io.Discard); code != 2 {
+		if code := run(args, io.Discard, io.Discard); code != 2 {
 			t.Errorf("%v: exit %d, want 2", args, code)
 		}
 	}

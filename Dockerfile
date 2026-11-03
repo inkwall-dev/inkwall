@@ -8,8 +8,10 @@
 
 FROM --platform=$BUILDPLATFORM golang:1.27 AS build
 ARG TARGETOS TARGETARCH
-# The release version (without "v"), stamped into the binaries.
+# The release version (without "v") and commit, stamped into the binaries:
+# the build context has no .git for Go to read the commit from.
 ARG VERSION=
+ARG COMMIT=
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
@@ -18,12 +20,12 @@ COPY . .
 FROM build AS build-engine
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/inkwall-engine ./cmd/engine
+    go build -trimpath -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /out/inkwall-engine ./cmd/engine
 
 FROM build AS build-operator
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/inkwall-operator ./cmd/operator
+    go build -trimpath -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /out/inkwall-operator ./cmd/operator
 
 # Distroless, non-root, no shell (docs/design/0002). The operator writes its
 # webhook certificate under /tmp: with a read-only root filesystem, mount a

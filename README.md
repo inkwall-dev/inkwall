@@ -86,7 +86,15 @@ cosign verify ghcr.io/inkwall-dev/inkwall-engine:0.3.0 \
 ```
 
 The binaries (`inkwall-engine`, `inkwall-operator`, `inkwallctl`) are on the
-[releases page](https://github.com/inkwall-dev/inkwall/releases).
+[releases page](https://github.com/inkwall-dev/inkwall/releases). Each one's `version` subcommand
+(or `--version`) prints the release, the commit and the Go version it was built with:
+
+```console
+$ inkwallctl version
+inkwallctl 0.3.1
+commit: 0123456789abcdef0123456789abcdef01234567
+go: go1.27.3 linux/amd64
+```
 
 ## Protect a route
 

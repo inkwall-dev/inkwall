@@ -106,7 +106,9 @@ jobs:
           context: .
           target: ${{ matrix.component }}
           platforms: linux/amd64,linux/arm64
-          build-args: VERSION=${{ needs.verify.outputs.version }}
+          build-args: |
+            VERSION=${{ needs.verify.outputs.version }}
+            COMMIT=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}

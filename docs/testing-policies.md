@@ -14,7 +14,8 @@ on your machine or in CI, before they block real traffic.
 
 ## Prerequisites
 
-- `inkwallctl`, from the [releases page](https://github.com/inkwall-dev/inkwall/releases).
+- `inkwallctl`, from the [releases page](https://github.com/inkwall-dev/inkwall/releases). `inkwallctl version`
+  prints which release it is.
 - The requests to test: a URL, a file of raw [HTTP/1.1](https://www.rfc-editor.org/rfc/rfc9112) requests (`--request`), or a browser [HAR](https://w3c.github.io/web-performance/specs/HAR/Overview.html)
   file (`--har`).
 
