@@ -122,7 +122,8 @@ ok "chart $FROM_VERSION installed"
 # Without its Gateway API provider: this cluster has no Gateway API CRDs.
 "${HELM[@]}" upgrade --install traefik-e2e traefik --repo https://traefik.github.io/charts \
   --version "$TRAEFIK_CHART_VERSION" --namespace "$TRAEFIK_NS" --create-namespace \
-  --values hack/kind/traefik-e2e-values.yaml --set providers.kubernetesGateway.enabled=false >/dev/null
+  --values hack/kind/traefik-e2e-values.yaml --set providers.kubernetesGateway.enabled=false \
+  --set accessLog.enabled=true --set accessLog.filters.minDuration=1s >/dev/null # slow requests, for a gap (#320)
 "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout status deployment/traefik-e2e --timeout=180s >/dev/null
 "${KUBECTL[@]}" create namespace "$NS" --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f - >/dev/null
 "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
@@ -185,16 +186,19 @@ YAML
 # The probe: while /tmp/run exists, it sends an attack and a benign request
 # to the Ingress and an attack to the IngressRoute, through Traefik's
 # Service (no port-forward, which a Traefik restart would break), and logs
-# "uptime ingress-attack ingress-benign route-attack" (HTTP codes, 000
-# without an answer). It runs as the pod's process: one started by
+# "uptime ingress-attack ingress-benign route-attack | connect/total ..."
+# (HTTP codes, 000 without an answer; each request's curl times, in
+# seconds). It runs as the pod's process: one started by
 # kubectl exec may die with the exec session.
 "${KUBECTL[@]}" -n "$NS" create configmap probe --from-file=probe.sh=/dev/stdin --dry-run=client -o yaml <<'SH' |
 trap 'exit 0' TERM
-c() { curl -s -o /dev/null -m 2 -w '%{http_code}' -H "Host: $1" "http://$SVC$2"; }
+# c HOST PATH: "CODE CONNECT TOTAL" (curl's times, in seconds).
+c() { curl -s -o /dev/null -m 2 -w '%{http_code} %{time_connect} %{time_total}' -H "Host: $1" "http://$SVC$2"; }
 while true; do
   if [ -e /tmp/run ]; then
     read -r up _ </proc/uptime
-    echo "$up $(c "$HOST" "$SQLI") $(c "$HOST" /products/42) $(c "$ROUTE_HOST" "$SQLI")" >>/tmp/probe.log
+    set -- $(c "$HOST" "$SQLI") $(c "$HOST" /products/42) $(c "$ROUTE_HOST" "$SQLI")
+    echo "$up $1 $4 $7 | $2/$3 $5/$6 $8/$9" >>/tmp/probe.log
   fi
   sleep 0.2
 done
@@ -309,7 +313,7 @@ probe_stop() {
       if (i != 2 && code ~ /^2/) through[i]++
       if (start[i] == "") start[i] = t
     }
-    NF == 4 {
+    NF >= 4 {
       verdict(1, $2, 403, $1); verdict(2, $3, 200, $1); verdict(3, $4, 403, $1); last = $1
     }
     END {
@@ -325,11 +329,19 @@ probe_stop() {
       exit fail
     }' <<<"$log") && rc=0 || rc=$?
   sed 's/^/      /' <<<"$summary"
+  # The wrong rounds, even within the gap allowed, with each request's
+  # connect/total time: a connect that took 1 s or more is a SYN the
+  # network dropped.
+  grep -v '^[0-9.]* 403 200 403 ' <<<"$log" | head -20 | sed 's/^/        /' || true
   if [[ $rc == 0 ]]; then
     ok "$name: no attack got through, no gap over ${max}s"
   else
     fail "$name: an attack got through, a gap over ${max}s, or no probe traffic"
-    grep -v ' 403 200 403$' <<<"$log" | head -40 | sed 's/^/      /' || true
+    # The engine's and Traefik's logs of the last 2 minutes; Traefik's
+    # access log has the requests that took 1 s or more.
+    echo "      engine (in Traefik's pod) and Traefik, last 2 minutes:"
+    "${KUBECTL[@]}" -n "$TRAEFIK_NS" logs deployment/traefik-e2e --all-containers --prefix --since=2m 2>&1 |
+      tail -80 | sed 's/^/      /' || true
   fi
 }
 
