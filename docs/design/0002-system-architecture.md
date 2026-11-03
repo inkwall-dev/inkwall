@@ -485,24 +485,24 @@ body chunks. Tried on Envoy v1.39.6 (the raw Envoy sample's version) with an ext
 Envoy passes the upgraded data to ext_proc as body chunks, but in a streamed mode it holds the
 request headers until the first chunk, and a client sends its first frame only after the `101`: the
 handshake deadlocks. So ext_proc can't inspect WebSocket messages for a compliant client, on any
-route, whatever Envoy Gateway allows. The options, to decide before building:
+route, whatever Envoy Gateway allows.
 
-1. **The engine's reverse proxy** (`inkwall-engine proxy`): it copies the upgraded connection
-   itself, so it can parse frames, hold a message until it is inspected, and close with 1008. Built
-   first, with its own flags: it works for the standalone proxy today, and is the reference for
-   the others. On Envoy Gateway it would have to be in the request path, a hop the operator can't
-   add without changing the user's routes or their backends.
-2. **Envoy's Lua filter**, which Envoy Gateway attaches through an `EnvoyExtensionPolicy`: tried,
-   it sees the frames (`bodyChunks()`) without holding the handshake. But it doesn't hold a chunk
-   while the script runs, so a frame is forwarded before it is inspected: detect only, unless a
-   call out per chunk can be shown to hold it. It would also need the frame parsing in Lua.
-3. **A fix in Envoy's ext_proc**: continue the headers of an upgrade in a streamed mode, as for any
-   request whose body comes later. Then the planned design works unchanged. Upstream work, and the
-   Envoy Gateway release that carries it.
+**Decided for v0.4.0:** WebSocket messages are inspected only by the engine's reverse proxy
+(`inkwall-engine proxy`), which copies the upgraded connection itself: it parses the client's
+frames, holds a message until it is inspected, and in `Block` mode closes the connection with 1008
+([0006 §6](0006-adapter-protocols.md#6-reverse-proxy-standalone-mode)). Routes wired through
+ext_proc (Envoy Gateway, raw Envoy) and Traefik inspect the handshake only, and no `WAFPolicy`
+field asks for message inspection, so nothing claims it there. The options weighed:
 
-Until one of them is built, no `WAFPolicy` field asks for message inspection, so nothing can claim
-it, and the docs say messages aren't inspected ([WebSocket](../websocket.md)). A field that asks for
-it will come with the hook that does it, and with status that says where it isn't done.
+1. **The engine's reverse proxy:** chosen. It works for the standalone proxy, with its own flags,
+   and is the reference for the others. On Envoy Gateway it would have to be in the request path,
+   a hop the operator can't add without changing the user's routes or their backends.
+2. **Envoy's Lua filter:** not pursued. It sees the frames (`bodyChunks()`) without holding the
+   handshake, but doesn't hold a chunk while the script runs, so a frame is forwarded before it is
+   inspected: detect only at best, and unproven.
+3. **A change in Envoy's ext_proc,** continuing an upgrade's headers in a streamed mode as for any
+   request whose body comes later: then the planned design works unchanged, with a `WAFPolicy`
+   field and status that says where it isn't done (Traefik). Tracked for v1.0.0 in #313.
 
 ### 6.1 Envoy (raw Envoy, Envoy Gateway, Istio, Contour)
 
