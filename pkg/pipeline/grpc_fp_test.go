@@ -7,6 +7,7 @@ import (
 	"context"
 	"math/rand/v2"
 	"testing"
+	"time"
 
 	_ "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	_ "google.golang.org/grpc/health/grpc_health_v1"
@@ -38,15 +39,18 @@ const idArgumentsLimit = 200005
 // command-injection or SQL injection rule (932250, 932340, 942190): about
 // 1 message in 10,000 with four 1-24 byte fields, which is why
 // GRPCMessages is off by default.
+//
+// Only a rule's match counts as a false positive. A message the rules
+// didn't finish with (the deadline, no free evaluation slot: a loaded
+// machine, #325) is tried again, and fails the test as not inspected,
+// never as denied.
 func TestGRPCMessagesFalsePositives(t *testing.T) {
 	p := messagesPipeline(t, pipeline.ModeBlock, true)
 	check := func(kind string, msg []byte) pipeline.Verdict {
 		t.Helper()
-		v := p.Check(context.Background(), grpcCall("/pkg.Service/Method", "application/grpc", grpcFrame(msg)))
-		if v.Reason == pipeline.ReasonOversize {
-			t.Fatalf("%s: not read whole: %+v", kind, v)
-		}
-		return v
+		return inspected(t, kind, func() pipeline.Verdict {
+			return p.Check(context.Background(), grpcCall("/pkg.Service/Method", "application/grpc", grpcFrame(msg)))
+		})
 	}
 
 	var files, tooMany int
@@ -62,7 +66,7 @@ func TestGRPCMessagesFalsePositives(t *testing.T) {
 		case v.InterruptingRuleID == idArgumentsLimit:
 			tooMany++
 		default:
-			t.Errorf("%s: denied (%s), rules %v, matches %+v", fd.Path(), v.Reason, v.RuleIDs, v.Matches)
+			t.Errorf("%s: a false positive: denied by rules %v, matches %+v", fd.Path(), v.RuleIDs, v.Matches)
 		}
 		return true
 	})
@@ -95,13 +99,15 @@ func TestGRPCMessagesFalsePositives(t *testing.T) {
 			msg = protowire.AppendTag(msg, f+10, protowire.VarintType)
 			msg = protowire.AppendVarint(msg, rng.Uint64())
 		}
-		v := p.Check(context.Background(), grpcCall("/pkg.Service/Method", "application/grpc", grpcFrame(msg)))
-		if v.Action == pipeline.ActionDeny {
+		if v := check("random bytes", msg); v.Action == pipeline.ActionDeny {
 			denied++
 			t.Logf("random bytes denied: %+v", v.Matches)
 		}
 	}
 	t.Logf("%d of %d messages of random bytes denied", denied, n)
+	// A rate, not zero: with this seed, 1 message (942190 on `u1j"!N`).
+	// Only the rules' matches count, so the result is the same on any
+	// machine.
 	if denied > n/1000 {
 		t.Errorf("%d of %d messages of random bytes denied, want at most 1 in 1000", denied, n)
 	}
@@ -118,4 +124,31 @@ var everyday = []string{
 	"SKU-12345", "true", "42", "-3.14", "projects/demo/locations/eu/instances/main",
 	"Customer asked: can we ship before Friday? Also, add a note: \"leave at door\".",
 	"Line one\nLine two\n\tindented", "café crème", "#hashtag @mention", "50% off - today only!",
+}
+
+// inspected returns the verdict check gives once the rules finished with
+// the message: a verdict on a message they didn't finish with (reason
+// timeout, overload, error, canceled) says nothing about false positives,
+// and is tried again, after a pause that lets the evaluations past their
+// deadline end and free their slots. It fails the test, as not inspected,
+// when the rules never finish; it returns only a verdict of the rules (a
+// match is reason rule), or of the policy (an oversized message fails).
+func inspected(t *testing.T, kind string, check func() pipeline.Verdict) pipeline.Verdict {
+	t.Helper()
+	const attempts = 3
+	for attempt := 1; ; attempt++ {
+		v := check()
+		switch v.Reason {
+		case pipeline.ReasonNone, pipeline.ReasonRule:
+			return v
+		case pipeline.ReasonTimeout, pipeline.ReasonOverload, pipeline.ReasonError, pipeline.ReasonCanceled:
+			if attempt == attempts {
+				t.Fatalf("%s: not inspected after %d attempts (reason %s): the machine is too loaded for the rules to finish; not a false positive",
+					kind, attempts, v.Reason)
+			}
+			time.Sleep(time.Duration(attempt) * time.Second)
+		default:
+			t.Fatalf("%s: unexpected verdict %+v", kind, v)
+		}
+	}
 }
