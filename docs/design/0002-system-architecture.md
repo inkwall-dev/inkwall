@@ -670,7 +670,9 @@ above the body limit. Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/
 - **Version.** `mode spop` needs HAProxy 3.1, which ships with controller 3.1 and later
   (`haproxytech/kubernetes-ingress:3.1` is HAProxy 3.1.14, `3.2` is 3.2.26). Older controllers
   aren't supported.
-- **Discovery.** IngressClasses whose controller is `haproxy.org/ingress-controller/haproxy`. The
+- **Discovery.** IngressClasses whose controller is `haproxy.org/ingress-controller/<class>`, the
+  controller's `--ingress.class` (`haproxy` by default; verified: the chart's IngressClass for
+  another class names it). The
   controller's pods are found as Traefik's are, by a proxy pod selector, and the integration is
   turned on by `rbac.integrations.haproxy` (`auto`, `true` or `false`).
 - **Agent backend: the auxiliary configuration file.** The controller runs HAProxy with
