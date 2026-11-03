@@ -79,7 +79,7 @@ first time they mention it.
 
 ## Outside concepts
 
-[A](#a) · [B](#b) · [C](#c) · [D](#d) · [E](#e) · [F](#f) · [G](#g) · [H](#h) · [I](#i) · [J](#j) · [K](#k) · [L](#l) · [M](#m) · [N](#n) · [O](#o) · [P](#p) · [R](#r) · [S](#s) · [T](#t) · [U](#u) · [W](#w) · [X](#x) · [Y](#y)
+[A](#a) · [B](#b) · [C](#c) · [D](#d) · [E](#e) · [F](#f) · [G](#g) · [H](#h) · [I](#i) · [J](#j) · [K](#k) · [L](#l) · [M](#m) · [N](#n) · [O](#o) · [P](#p) · [R](#r) · [S](#s) · [T](#t) · [U](#u) · [V](#v) · [W](#w) · [X](#x) · [Y](#y)
 
 ### A
 
@@ -544,6 +544,13 @@ first time they mention it.
 - <a id="unix-socket"></a>**Unix domain socket**: A socket for communication between processes on
   the same machine, addressed by a file path. ([Linux man
   page](https://man7.org/linux/man-pages/man7/unix.7.html))
+
+### V
+
+- <a id="virtualservice"></a>**VirtualService (Istio)**: Istio's own route object: hosts, and http
+  routes with matches and destinations, bound to Istio `Gateway` objects (which select ingress
+  gateway pods by label) or to the mesh. Inkwall protects those bound to Istio's gateways. ([Istio
+  docs](https://istio.io/latest/docs/reference/config/networking/virtual-service/))
 
 ### W
 

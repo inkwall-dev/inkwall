@@ -158,8 +158,9 @@ func InstallGatewayAPI(e *Env) error { return install(e, "gateway-api") }
 // served.
 func InstallEnvoyGateway(e *Env) error { return install(e, "envoy-gateway") }
 
-// InstallIstio installs a stand-in for Istio's EnvoyFilter CRD
-// (testenv/istio) while the operator runs, and waits until it is served.
+// InstallIstio installs stand-ins for Istio's EnvoyFilter, VirtualService and
+// Gateway CRDs (testenv/istio) while the operator runs, and waits until they
+// are served.
 func InstallIstio(e *Env) error { return install(e, "istio") }
 
 func install(e *Env, dir string) error {

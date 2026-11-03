@@ -61,13 +61,16 @@ track them: the Middleware `inkwall-waf` in each namespace with a protected rout
 Gateway, the `Backend` `inkwall-engine` in each namespace with a protected HTTPRoute, an
 `EnvoyExtensionPolicy` `inkwall-waf-<route>` per protected HTTPRoute, and a `ClientTrafficPolicy`
 and an `EnvoyProxy` `inkwall-waf-<gateway>` per Gateway that needs one; for Istio, an `EnvoyFilter`
-and a ConfigMap `inkwall-waf-<gateway>` per Gateway that needs them; the [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/)
+and a ConfigMap `inkwall-waf-<gateway>` per Gateway that needs them, and an `EnvoyFilter`
+`inkwall-istio-ingress` per namespace of Istio ingress gateway pods serving protected
+VirtualServices (the operator doesn't write VirtualServices); the [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/)
 `inkwall-trust` in each proxy namespace; and the [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/) and ConfigMaps in `inkwall-system`.
 They carry the [label](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/) `app.kubernetes.io/managed-by: inkwall-operator`.
 
-The engine is injected into Traefik's pods when they are created, by a mutating
+The engine is injected into Traefik's pods, and Istio's ingress gateway pods, when they are
+created, by a mutating
 [admission webhook](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/).
-Traefik's [`Deployment`](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) or [`DaemonSet`](https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/) isn't changed, so it doesn't drift. Envoy Gateway's
+Their [`Deployment`](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) or [`DaemonSet`](https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/) isn't changed, so it doesn't drift. Envoy Gateway's
 Envoy pods get the engine through the `EnvoyProxy` above: Envoy Gateway rolls its Envoy
 `Deployment` when the operator adds or removes it, which it does when a Gateway gets its first
 protected route or loses its last. Istio's Gateway pods get it through the Gateway's ConfigMap,

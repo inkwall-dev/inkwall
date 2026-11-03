@@ -41,6 +41,35 @@ webhooks:
       namespace: system
       path: /mutate-v1-pod
   failurePolicy: Ignore
+  name: istio-ingress.pods.waf.inkwall.dev
+  objectSelector:
+    matchExpressions:
+    - key: waf.inkwall.dev/inject
+      operator: NotIn
+      values:
+      - "false"
+    matchLabels:
+      istio: ingressgateway
+  reinvocationPolicy: IfNeeded
+  rules:
+  - apiGroups:
+    - ""
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    resources:
+    - pods
+  sideEffects: None
+  timeoutSeconds: 2
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-v1-pod
+  failurePolicy: Ignore
   name: pods.waf.inkwall.dev
   objectSelector:
     matchExpressions:

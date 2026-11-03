@@ -134,3 +134,29 @@ func TestPodInjector(t *testing.T) {
 		t.Error("InkwallConfig's bootstrap mode not used")
 	}
 }
+
+// An Istio ingress gateway pod gets the engine on a Unix socket, and its
+// istio-proxy container mounts the socket's directory.
+func TestPodInjectorIstioIngress(t *testing.T) {
+	raw, err := json.Marshal(&corev1.Pod{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "istio-ingressgateway-", Namespace: "istio-ingress", Labels: map[string]string{"istio": "ingressgateway"}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "istio-proxy", Image: "auto"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := injector(t).Handle(context.Background(), admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+		Operation: admissionv1.Create, Namespace: "istio-ingress", Object: runtime.RawExtension{Raw: raw},
+	}})
+	if !resp.Allowed || len(resp.Patches) == 0 {
+		t.Fatalf("an Istio ingress gateway pod: allowed=%v, %d patches", resp.Allowed, len(resp.Patches))
+	}
+	p := patched(resp)
+	for _, want := range []string{"ext-proc", "--listen=unix:/var/run/inkwall-socket/extproc.sock", `"sidecar.istio.io/rewriteAppHTTPProbers":"false"`,
+		`"path":"/spec/containers/0/volumeMounts","value":[{"mountPath":"/var/run/inkwall-socket","name":"inkwall-socket"}]`} {
+		if !strings.Contains(p, want) {
+			t.Errorf("patch lacks %s: %s", want, p)
+		}
+	}
+}

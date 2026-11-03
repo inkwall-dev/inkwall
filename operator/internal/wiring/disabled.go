@@ -60,6 +60,8 @@ func (d *disabledIntegration) Watch(c controller.Controller, cache cache.Cache, 
 			}
 		case routeKind:
 			addWatches(c, h, d.cfg.IngressRoutes)
+		case virtualServiceKind:
+			addWatches(c, h, d.cfg.VirtualServices)
 		case httpRouteKind:
 			addWatches(c, h, d.cfg.HTTPRoutes, d.cfg.Gateways, d.cfg.GatewayClasses)
 		}

@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-09-27
-- Updated: 2026-11-03
+- Updated: 2026-11-04
 - Owner: noureldin
 - Depends on: [0001 — Performance-First Architecture](0001-performance-first-architecture.md),
   [0002 — System Architecture](0002-system-architecture.md)
@@ -217,7 +217,7 @@ visible rather than silently unprotected.
 
 **Built** (`operator/internal/discovery`, leader only):
 
-- [`operator/integrations`](../../operator/integrations/integrations.go) lists four
+- [`operator/integrations`](../../operator/integrations/integrations.go) lists five
   integrations. (An adapter is the engine listener that speaks one proxy's protocol; see
   [0006](0006-adapter-protocols.md).)
   - Traefik: IngressClass controller `traefik.io/ingress-controller`, GatewayClass controller
@@ -228,6 +228,9 @@ visible rather than silently unprotected.
     `ext-proc` on a Unix socket.
   - Istio: GatewayClass controller `istio.io/gateway-controller`, pods
     `gateway.istio.io/managed=istio.io-gateway-controller`, adapter `ext-proc` on a Unix socket.
+  - Istio's ingress gateways (`istio-ingress`): no class (Istio's own `Gateway` objects select
+    pods by label), pods `istio=ingressgateway`, adapter `ext-proc` on a Unix socket mounted in
+    `istio-proxy`. Having no class, they aren't listed here.
   - HAProxy (the HAProxy Kubernetes Ingress Controller): IngressClass controller
     `haproxy.org/ingress-controller/<class>` (its `--ingress.class`), pods `app.kubernetes.io/name=kubernetes-ingress`,
     adapter `spoe` on a Unix socket.
@@ -296,8 +299,11 @@ Injection puts the engine into proxy pods as a sidecar that shares a socket dire
 proxy.
 
 - **Native extension point first, Pod webhook otherwise.** [Envoy Gateway](https://gateway.envoyproxy.io/) has an extension point
-  (`EnvoyProxy`), and [Caddy](https://caddyserver.com/docs/) compiles the engine in. [Istio](https://istio.io/latest/docs/), Traefik and [HAProxy](https://docs.haproxy.org/) get
-  a Pod webhook. With `injection: Manual`, the operator prints [Helm](https://helm.sh/docs/) values and only verifies.
+  (`EnvoyProxy`), Istio's Gateway API deployments have one (the `parametersRef` ConfigMap), and
+  [Caddy](https://caddyserver.com/docs/) compiles the engine in. Istio's ingress gateways (its own `Gateway` API), Traefik and
+  [HAProxy](https://docs.haproxy.org/) get a Pod webhook: one webhook entry per proxy
+  (`pods.waf.inkwall.dev`, `haproxy.pods.waf.inkwall.dev`, `istio-ingress.pods.waf.inkwall.dev`), since an `objectSelector`
+  can't select either of two label sets. With `injection: Manual`, the operator prints [Helm](https://helm.sh/docs/) values and only verifies.
   It never patches the controller's Deployment: Helm or [Argo CD](https://argo-cd.readthedocs.io/en/stable/) would revert it.
 - **Native sidecar** (an [init container](https://kubernetes.io/docs/concepts/workloads/pods/init-containers/) with `restartPolicy: Always`, Kubernetes ≥ 1.29). It
   starts before the proxy and stops after it, so the proxy never runs without it.
@@ -621,8 +627,35 @@ decision), for `HTTPRoute` targets whose parent Gateways have a GatewayClass of
   leader watches EnvoyFilters once the CRD is installed.
 - **Unprotected routes get nothing**, and a route that is no longer protected leaves the
   `EnvoyFilter` (deleted with the Gateway's last route) before the engine leaves the pods.
-- **Not yet:** `VirtualService` targets; mesh sidecars; Gateways bound to a deployment Istio
-  doesn't render.
+- **Not yet:** mesh sidecars; Gateways bound to a deployment Istio doesn't render.
+
+**Built since: Istio's ingress gateways** (v0.4.0, `operator/internal/wiring/istioingress.go`, the
+`IstioIngress` integration; [0002 §6.1](0002-system-architecture.md#61-envoy-raw-envoy-envoy-gateway-istio-contour)
+has the decision), for `VirtualService` targets bound to Istio `Gateway` objects
+(`networking.istio.io/v1`).
+
+- **The engine**, injected by the Pod webhook into pods labelled `istio=ingressgateway` in the
+  proxy namespaces, with its socket directory mounted in `istio-proxy` (again if Istio's injector
+  rewrites the container: `reinvocationPolicy: IfNeeded`) and
+  `sidecar.istio.io/rewriteAppHTTPProbers: "false"` on the pod: Istio would otherwise point the
+  engine's probes at its agent in `istio-proxy`, which starts after the engine.
+- **The pods of a VirtualService** are the running pods its Gateways' `selector` matches, listed
+  uncached in every namespace. One outside the cache (outside the proxy namespaces, or without
+  the integration's labels) gets no engine and would serve the route uninspected: `WiringFailed`.
+- **One `EnvoyFilter` per namespace of gateway pods**, `inkwall-istio-ingress`, labelled
+  `waf.inkwall.dev/integration: istio-ingress`, `workloadSelector` the integration's labels (the
+  `InkwallConfig` selector must be plain labels), with the patches of the Gateway API wiring
+  (`istioPatches`): a filter per protected VirtualService, `inkwall.ext_proc.vs.<ns>.<name>`, on
+  for its Envoy routes, named after its http routes (`name`, `name.match`). A VirtualService is
+  wired in a namespace once every pod there has the engine and the mount. An http route without a
+  name, or a name another VirtualService on the same pods uses, is `WiringFailed`.
+- **`Programmed`** once wired on every namespace of its pods; Istio reports nothing on the
+  objects by default (with `PILOT_ENABLE_STATUS`, a `Reconciled` condition that isn't `True` is
+  `Pending`). Pods without the engine: `PendingRestart` (restart them) or `SidecarMissing`. Only
+  the mesh: `ControllerUnsupported`; the mesh too: `Programmed`, saying its traffic there isn't
+  inspected.
+- **Unwiring** deletes the `EnvoyFilter` (or the VirtualService's filter in it); the pods keep the
+  engine until they restart. The two Istio integrations delete only their own `EnvoyFilter`s.
 
 **Built since: HAProxy** (v0.4.0, `operator/internal/wiring/haproxy.go`, the `HAProxy` integration;
 [0002 §6.4](0002-system-architecture.md#64-haproxy-haproxy-kubernetes-ingress-controller-haproxy-ingress) has the decision), for `Ingress` targets of an IngressClass of
@@ -1011,7 +1044,9 @@ Removal must never leave a proxy failing closed on a missing engine.
      pods without the engine;
   6. for Istio (built since, v0.4.0): deletes its EnvoyFilters, then takes the engine out of the
      users' Gateway ConfigMaps (their `deployment` overlay put back as it was), points the Gateways
-     it changed back at no ConfigMap, and deletes its own. Istio rolls the pods without the engine.
+     it changed back at no ConfigMap, and deletes its own. Istio rolls the pods without the engine;
+  7. for Istio's ingress gateways (built since, v0.4.0): deletes its EnvoyFilters; the gateway
+     pods keep the engine until they restart.
 
   `WAFPolicy` objects stay. Sidecars leave as proxy pods restart.
 - Tested on kind: after the uninstall, a restarted Traefik serves the routes (an Ingress and an
@@ -1099,6 +1134,9 @@ holds what its wiring writes, and its proxy's own kinds.
 | Istio's: `gateways` (gateway.networking.k8s.io) | update, patch | A Gateway's `parametersRef` |
 | Istio's: `envoyfilters` (networking.istio.io) | full | Istio wiring |
 | Istio's: `configmaps` | create, update, patch, delete | The Gateways' deployment overlays (read uncached, not watched) |
+| Istio ingress's: `envoyfilters` (networking.istio.io) | full | Istio ingress gateway wiring |
+| Istio ingress's: `virtualservices`, `gateways` (networking.istio.io) | read | VirtualService targets and the Gateways they bind to |
+| `virtualservices`, `gateways` (networking.istio.io) | read | VirtualService targets ([§4.5](#45-resolver)) |
 | HAProxy's `ClusterRole`: `ingresses` | update, patch | The backend snippet annotations |
 | HAProxy's: `backends` (ingress.v3.haproxy.org) | read | None: makes the role the integration's own |
 | `configmaps` | full, cluster-wide | `inkwall-trust` and `inkwall-haproxy` per namespace, engine reports |
@@ -1366,10 +1404,10 @@ Applying exclusions per request changes three things from v0.1.0:
 - **envtest** (`operator/test/testenv`): reconcilers, conditions, wiring that keeps the user's
   entries, and webhooks.
 - **Permissions**, in envtest (`operator/test/permissions`): the operator runs as a user granted
-  `role.yaml` without Envoy Gateway's and Istio's `ClusterRole`s, with their CRDs installed: it
-  starts, wires a Traefik Ingress, and reports the Envoy Gateway and Istio routes
-  `IntegrationDisabled`. `make
-  helm-lint` checks the chart's integration roles (`hack/helm-test.sh`).
+  `role.yaml` without Envoy Gateway's and the two Istio integrations' `ClusterRole`s, with their
+  CRDs installed: it starts, wires a Traefik Ingress, and reports the Envoy Gateway and Istio
+  HTTPRoutes and the VirtualService `IntegrationDisabled`. `make helm-lint` checks the chart's
+  integration roles and both Pod webhooks' selectors (`hack/helm-test.sh`).
 - **kind e2e test** (`make kind-e2e`): injection, then wiring, then an attack blocked, then
   `Ready`, and a clean uninstall. It installs the operator with shorter waits, so the same steps
   take less time: a 15 s `--signing-key-grace` (its kind cluster's kubelet updates ConfigMaps
@@ -1387,7 +1425,10 @@ Applying exclusions per request changes three things from v0.1.0:
   ConfigMap, one naming none) and an unprotected route on both. The engine joins the Gateways'
   pods, attacks are blocked on the protected route and pass on the other, a body attack never
   reaches the app, a stopped engine fails closed (503 or 504), detect mode logs without blocking,
-  and unprotecting or uninstalling leaves the user's ConfigMap and Gateways as they were.
+  and unprotecting or uninstalling leaves the user's ConfigMap and Gateways as they were. Then
+  Istio's ingress gateway (its `gateway` chart), an Istio `Gateway` and two VirtualServices: the
+  Pod webhook injects the gateway's pods, attacks on both http routes of the protected one are
+  blocked, the other passes, and unprotecting and uninstalling unwire it.
 - **Upgrade** from the last release on kind (`make kind-upgrade`, every PR): routes stay protected
   through Traefik, wired once.
 - **Planned:** chaos tests (kill the leader, delete the Secret, take the webhook down).
@@ -1398,7 +1439,7 @@ Applying exclusions per request changes three things from v0.1.0:
 operator/
 ├── api/v1alpha1/       # CRD types, CEL rules
 ├── bundle/             # builder, signer, signing key rotation
-├── integrations/       # known proxies (Traefik, Envoy Gateway, Istio)
+├── integrations/       # known proxies (Traefik, Envoy Gateway, Istio, Istio's ingress gateways)
 ├── internal/
 │   ├── access/         # which integrations' ClusterRoles are granted (§7)
 │   ├── controller/     # reconcilers
@@ -1407,7 +1448,7 @@ operator/
 │   ├── discovery/      # proxy controllers in InkwallConfig.status (§4.1)
 │   ├── distribution/   # BundleService server, auth, status
 │   ├── injection/
-│   └── wiring/         # the controller, Integration, Traefik, Envoy Gateway, Istio
+│   └── wiring/         # the controller, Integration, Traefik, Envoy Gateway, Istio (both APIs)
 ├── manager/
 ├── resolver/
 ├── webhook/            # validating + mutating handlers, Managed-mode guard

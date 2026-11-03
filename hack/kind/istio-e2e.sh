@@ -11,7 +11,11 @@
 # the protected route and pass on the other, a body attack is held back
 # with its headers, a stopped engine fails closed, detect mode logs
 # without blocking, and unprotecting or uninstalling leaves the user's
-# objects as they were. Needs the operator
+# objects as they were. Then Istio's own API (#281): an ingress gateway
+# from Istio's gateway chart, an Istio Gateway and a protected
+# VirtualService: the Pod webhook injects the engine into the gateway's
+# pods, attacks on the VirtualService are blocked, another passes, and
+# unprotecting and uninstalling unwire it. Needs the operator
 # installed (make kind-operator) with istio-e2e among the proxy
 # namespaces; ends with helm uninstall. KEEP=1 leaves the test's objects.
 set -euo pipefail
@@ -31,8 +35,11 @@ ISTIO_REPO=https://blob.istio.io/istio-release/charts
 GATEWAY_API_VERSION=v1.7.0
 HOST=istio.e2e.example.com
 OPEN_HOST=open.istio.e2e.example.com
+VS_HOST=vs.istio.e2e.example.com
+VS_OPEN_HOST=open-vs.istio.e2e.example.com
 CUSTOM_PORT=${E2E_ISTIO_PORT:-18093}
 PLAIN_PORT=$((CUSTOM_PORT + 1))
+VS_PORT=$((CUSTOM_PORT + 2))
 KUBECTL=(kubectl --context "kind-$CLUSTER")
 HELM=(helm --kube-context "kind-$CLUSTER")
 SQLI='/?id=1%27%20OR%20%271%27%3D%271'
@@ -413,6 +420,103 @@ done
 forward_all
 eventually "the attack passes again" both_are 200 "$SQLI"
 
+echo "== Istio's ingress gateway (VirtualService)"
+# Istio's own API: an ingress gateway from its gateway chart (release
+# istio-ingressgateway: pods labelled istio=ingressgateway, which the Pod
+# webhook injects when they start, here after the operator), an Istio
+# Gateway selecting it, a protected VirtualService and an unprotected one.
+"${HELM[@]}" upgrade --install istio-ingressgateway gateway --repo "$ISTIO_REPO" --version "$ISTIO_VERSION" \
+  --namespace "$NS" --set service.type=ClusterIP --wait --timeout 5m >/dev/null
+"${KUBECTL[@]}" apply -f - >/dev/null <<YAML
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata: {name: ingress, namespace: $NS}
+spec:
+  selector: {istio: ingressgateway}
+  servers: [{port: {number: 80, name: http, protocol: HTTP}, hosts: ["*"]}]
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata: {name: shop-vs, namespace: $NS}
+spec:
+  hosts: [$VS_HOST]
+  gateways: [ingress]
+  http:
+    - name: e2e-vs-api
+      match: [{uri: {prefix: /api/}}]
+      route: [{destination: {host: app, port: {number: 8080}}}]
+    - name: e2e-vs-web
+      route: [{destination: {host: app, port: {number: 8080}}}]
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata: {name: open-vs, namespace: $NS}
+spec:
+  hosts: [$VS_OPEN_HOST]
+  gateways: [ingress]
+  http:
+    - name: e2e-vs-open
+      route: [{destination: {host: app, port: {number: 8080}}}]
+YAML
+# ingress_pods: the ingress gateway's running pods, their init containers
+# and istio-proxy's mounts, one per line.
+ingress_pods() {
+  "${KUBECTL[@]}" -n "$NS" get pods -l istio=ingressgateway \
+    -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}|{.status.phase}|{.spec.initContainers[*].name}|{.spec.containers[?(@.name=="istio-proxy")].volumeMounts[*].name}{"\n"}{end}' | grep '^|Running|'
+}
+ingress_injected() { local p; p=$(ingress_pods) && ! grep -v '^|Running|inkwall-engine|.*inkwall-socket' <<<"$p" >/dev/null; }
+forward_vs() {
+  # The previous one may be gone already: forward_all stops it too. A
+  # failed kill must not end the script (set -e).
+  if [[ -n ${vs_pf:-} ]]; then kill "$vs_pf" 2>/dev/null || true; fi
+  "${KUBECTL[@]}" -n "$NS" port-forward svc/istio-ingressgateway "$VS_PORT:80" >/dev/null 2>&1 &
+  vs_pf=$!
+  pfs+=("$vs_pf")
+  sleep 1
+}
+vs_is() { [[ $(code "$VS_PORT" "$VS_HOST" "${@:2}") == "$1" ]]; }
+vs_open_is() { [[ $(code "$VS_PORT" "$VS_OPEN_HOST" "${@:2}") == "$1" ]]; }
+vs_condition() {
+  "${KUBECTL[@]}" -n "$NS" get wafpolicy vs -o jsonpath="{.status.conditions[?(@.type==\"$1\")].$2}" 2>/dev/null
+}
+vs_programmed() { [[ $(vs_condition Programmed status) == True && $(vs_condition Programmed message) == *"VirtualService(s) wired to the engine in Istio ingress gateway"* ]]; }
+vs_ready() { [[ $(vs_condition Ready status) == True ]]; }
+vs_policy() {
+  "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata: {name: vs, namespace: $NS}
+spec:
+  targetRefs:
+    - {group: networking.istio.io, kind: VirtualService, name: shop-vs}
+  mode: Block
+  timeout: 1s
+YAML
+}
+vs_filter() { "${KUBECTL[@]}" -n "$NS" get envoyfilter inkwall-istio-ingress -o name >/dev/null 2>&1; }
+no_vs_filter() { ! vs_filter; }
+
+eventually "the ingress gateway's pods start with the engine, its socket mounted in istio-proxy" ingress_injected
+forward_vs
+eventually "the ingress gateway serves the VirtualServices" vs_is 200 /api/
+check "no policy yet: the attack passes" vs_is 200 "/api$SQLI"
+vs_policy
+eventually "an EnvoyFilter for the ingress gateway's pods" vs_filter
+eventually "Programmed through Istio's ingress gateway" vs_programmed
+eventually "the policy on the VirtualService is Ready" vs_ready
+eventually "an attack on its first http route is blocked" vs_is 403 "/api$SQLI"
+check "and on its second (Istio's route names hold)" vs_is 403 "/web$SQLI"
+check "benign traffic passes" vs_is 200 /api/products/42
+check "the unprotected VirtualService lets the attack through" vs_open_is 200 "$SQLI"
+check "an attack in the body is blocked" vs_is 403 /api/ --data-urlencode "q=1' OR '1'='1"
+"${KUBECTL[@]}" -n "$NS" delete wafpolicy vs --timeout=60s >/dev/null
+eventually "unprotected: the EnvoyFilter is gone" no_vs_filter
+eventually "and the attack passes again" vs_is 200 "/api$SQLI"
+# Protected again: the uninstall below unwires it too.
+vs_policy
+eventually "Programmed again" vs_programmed
+eventually "blocking again" vs_is 403 "/api$SQLI"
+
 echo "== uninstall"
 policy
 for gw in custom plain; do
@@ -433,6 +537,10 @@ for gw in custom plain; do
 done
 forward_all
 eventually "the routes still answer after the uninstall (uninspected)" both_are 200 "$SQLI"
+# forward_all stopped this one too.
+forward_vs
+eventually "the VirtualService still answers after the uninstall (uninspected)" vs_is 200 "/api$SQLI"
+"${KUBECTL[@]}" -n "$NS" delete wafpolicy vs --ignore-not-found --timeout=30s >/dev/null || true
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy shared --ignore-not-found --timeout=30s >/dev/null || true
 
 if [[ $failures -gt 0 ]]; then

@@ -11,6 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -120,8 +121,8 @@ type Config struct {
 	// Watches of kinds whose CRD may be missing, once it is installed;
 	// nil: only read at each reconcile.
 	IngressRoutes, HTTPRoutes, Gateways, GatewayClasses, EnvoyProxies, ExtensionPolicies, TrafficPolicies *crdwatch.Kind
-	// EnvoyFilters are Istio's.
-	EnvoyFilters *crdwatch.Kind
+	// EnvoyFilters, VirtualServices and IstioGateways are Istio's.
+	EnvoyFilters, VirtualServices, IstioGateways *crdwatch.Kind
 	// Sidecar is the engine Envoy Gateway's and Istio's pods get, before
 	// the InkwallConfig's settings.
 	Sidecar injection.Sidecar
@@ -130,7 +131,8 @@ type Config struct {
 }
 
 // Integrations are the wiring of every proxy Inkwall integrates: Traefik,
-// Envoy Gateway, Istio and the HAProxy Kubernetes Ingress Controller.
+// Envoy Gateway, Istio (its Gateway API and its ingress gateways) and the HAProxy
+// Kubernetes Ingress Controller.
 func Integrations(c client.Client, reader client.Reader, cfg Config) []Integration {
 	return []Integration{
 		&Traefik{
@@ -147,6 +149,10 @@ func Integrations(c client.Client, reader client.Reader, cfg Config) []Integrati
 			HTTPRoutes: cfg.HTTPRoutes, Gateways: cfg.Gateways, GatewayClasses: cfg.GatewayClasses, EnvoyFilters: cfg.EnvoyFilters,
 		},
 		&HAProxy{Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.HAProxy.Name), Prober: cfg.HAProxyProber},
+		&IstioIngress{
+			Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.IstioIngress.Name), PodLabels: plainLabels(cfg.Pods.LabelSelector(integrations.IstioIngress.Name)),
+			VirtualServices: cfg.VirtualServices, Gateways: cfg.IstioGateways, EnvoyFilters: cfg.EnvoyFilters,
+		},
 	}
 }
 
@@ -198,4 +204,12 @@ func count(n int, kind string) string {
 		return fmt.Sprintf("%d %s(es)", n, kind)
 	}
 	return fmt.Sprintf("%d %s(s)", n, kind)
+}
+
+// plainLabels are a selector's labels, or nil when it has expressions.
+func plainLabels(sel *metav1.LabelSelector) map[string]string {
+	if sel == nil || len(sel.MatchExpressions) > 0 || len(sel.MatchLabels) == 0 {
+		return nil
+	}
+	return sel.MatchLabels
 }

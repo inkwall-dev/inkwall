@@ -200,6 +200,32 @@ func TestTestPolicyHTTPRoute(t *testing.T) {
 	golden(t, "httproute.golden", out)
 }
 
+// TestTestPolicyVirtualService routes requests by an Istio VirtualService:
+// its hosts and http routes' uris; other hosts aren't protected.
+func TestTestPolicyVirtualService(t *testing.T) {
+	policy := writeFile(t, "p.yaml", strings.Replace(singlePolicy, "kind: Ingress,", "group: networking.istio.io, kind: VirtualService,", 1))
+	vs := writeFile(t, "vs.yaml", `apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata: {name: web}
+spec:
+  hosts: [shop.example.com]
+  gateways: [istio-ingress/edge]
+  http:
+  - name: api
+    match: [{uri: {prefix: /api/}}]
+    route: [{destination: {host: api}}]
+`)
+	for url, want := range map[string]string{
+		"http://shop.example.com/api/x" + sqli:  "deny  403",
+		"http://other.example.com/api/x" + sqli: "allow ",
+	} {
+		code, out, errOut := runCLI(t, "test", "--policy", policy, "--ingress", vs, url)
+		if errOut != "" || !strings.HasPrefix(out, want) {
+			t.Errorf("%s: exit %d, %q %q, want %s", url, code, out, errOut, want)
+		}
+	}
+}
+
 // chunkedSecrets returns signed's bundle, made too large for one Secret, as
 // kubectl prints the bundle Secret and its chunks, and the bundle Secret
 // alone.
@@ -286,6 +312,12 @@ func TestTestPolicyOptions(t *testing.T) {
 		{
 			name:   "no --ingress: one policy of an HTTPRoute applies to every request",
 			args:   []string{"--policy", writeFile(t, "p.yaml", strings.Replace(singlePolicy, "kind: Ingress,", "kind: HTTPRoute,", 1)), "http://any.example.org" + sqli},
+			out:    "deny  403  GET " + sqli + "  policy=default/web  reason=rule",
+			errOut: "note: no --ingress: WAFPolicy default/web applies to every host and path\n",
+		},
+		{
+			name:   "no --ingress: one policy of a VirtualService applies to every request",
+			args:   []string{"--policy", writeFile(t, "p.yaml", strings.Replace(singlePolicy, "kind: Ingress,", "group: networking.istio.io, kind: VirtualService,", 1)), "http://any.example.org" + sqli},
 			out:    "deny  403  GET " + sqli + "  policy=default/web  reason=rule",
 			errOut: "note: no --ingress: WAFPolicy default/web applies to every host and path\n",
 		},
@@ -390,7 +422,7 @@ func TestTestPolicyErrors(t *testing.T) {
 		{"--bundle-key alone", []string{"--bundle-key", "k"}, "--bundle-key applies only to --bundle"},
 		{"--namespace alone", []string{"--namespace", "a"}, "--namespace applies only to --policy"},
 		{"no policy", []string{"--rule-set", sampleRuleSets}, "no WAFPolicy in the files"},
-		{"two policies, no routes", []string{"--policy", samplePolicies, "--rule-set", sampleRuleSets, "--configmap", sampleConfigMaps}, "give the Ingresses, IngressRoutes or HTTPRoutes they target with --ingress"},
+		{"two policies, no routes", []string{"--policy", samplePolicies, "--rule-set", sampleRuleSets, "--configmap", sampleConfigMaps}, "give the Ingresses, IngressRoutes, HTTPRoutes or VirtualServices they target with --ingress"},
 		{"IngressRoute with an unsupported matcher", []string{"--policy", routePolicy, "--ingress", ingressRoute("traefik.io/v1alpha1", "Host(`a`) && Header(`X-A`, `1`)")},
 			"WAFPolicy default/web: not enforced: TargetUnsupported: IngressRoute web: spec.routes[0] match \"Host(`a`) && Header(`X-A`, `1`)\": Header is not supported: only Host, Path and PathPrefix, joined by &&, can be protected"},
 		{"IngressRoute with ||", []string{"--policy", routePolicy, "--ingress", ingressRoute("traefik.io/v1alpha1", "Host(`a`) || Host(`b`)")},

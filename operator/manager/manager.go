@@ -239,15 +239,18 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	extensionPolicies := crd(wiring.EnvoyExtensionPolicyGVK, nil)
 	trafficPolicies := crd(wiring.ClientTrafficPolicyGVK, nil)
 	envoyFilters := crd(wiring.EnvoyFilterGVK, nil)
+	virtualServices := crd(wiring.IstioVirtualServiceGVK, nil)
+	istioGateways := crd(wiring.IstioGatewayGVK, nil)
 	if err := (&controller.BundleReconciler{
-		Client:        mgr.GetClient(),
-		APIReader:     mgr.GetAPIReader(),
-		Namespace:     o.Namespace,
-		Debounce:      o.Debounce,
-		EngineStale:   engineStale(o),
-		RotationGrace: o.SigningKeyGrace,
-		IngressRoutes: ingressRoutes,
-		HTTPRoutes:    httpRoutes,
+		Client:          mgr.GetClient(),
+		APIReader:       mgr.GetAPIReader(),
+		Namespace:       o.Namespace,
+		Debounce:        o.Debounce,
+		EngineStale:     engineStale(o),
+		RotationGrace:   o.SigningKeyGrace,
+		IngressRoutes:   ingressRoutes,
+		HTTPRoutes:      httpRoutes,
+		VirtualServices: virtualServices,
 	}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
@@ -277,9 +280,9 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			Namespaces:   o.ProxyNamespaces,
 			Disabled:     denied,
 		}
-		// The Pod webhooks serve Traefik's pods and HAProxy's: none of an
-		// integration that is disabled, so they start without an engine
-		// nothing would wire.
+		// The Pod webhooks serve Traefik's pods, HAProxy's and Istio's
+		// ingress gateways': none of an integration that is disabled, so
+		// they start without an engine nothing would wire.
 		for name, integration := range webhook.PodWebhooks {
 			pods := selectors.LabelSelector(integration)
 			if denied[integration] != "" {
@@ -315,7 +318,8 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	}
 	wiringCfg := wiring.Config{
 		Pods: selectors, IngressRoutes: ingressRoutes, HTTPRoutes: httpRoutes, Gateways: gateways, GatewayClasses: gatewayClasses,
-		EnvoyProxies: envoyProxies, ExtensionPolicies: extensionPolicies, TrafficPolicies: trafficPolicies, EnvoyFilters: envoyFilters, Sidecar: sidecar,
+		EnvoyProxies: envoyProxies, ExtensionPolicies: extensionPolicies, TrafficPolicies: trafficPolicies, EnvoyFilters: envoyFilters,
+		VirtualServices: virtualServices, IstioGateways: istioGateways, Sidecar: sidecar,
 		HAProxyProber: prober,
 	}
 	wirings := wiring.Integrations(mgr.GetClient(), mgr.GetAPIReader(), wiringCfg)
@@ -341,7 +345,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	if err := (&proxydiscovery.Reconciler{Client: mgr.GetClient(), GatewayClasses: gatewayClasses, Kinds: kinds, Disabled: denied}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
-	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gateways, gatewayClasses, envoyProxies, extensionPolicies, trafficPolicies, envoyFilters} {
+	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gateways, gatewayClasses, envoyProxies, extensionPolicies, trafficPolicies, envoyFilters, virtualServices, istioGateways} {
 		if err := mgr.Add(k); err != nil {
 			return nil, err
 		}

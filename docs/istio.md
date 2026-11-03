@@ -1,10 +1,17 @@
 # Protecting routes served by Istio
 
-This guide protects the `HTTPRoute` routes that [Istio](https://istio.io/latest/docs/)'s Gateways serve: Istio's
-implementation of the [Gateway API](https://gateway-api.sigs.k8s.io/), whose GatewayClass controller is
-`istio.io/gateway-controller`. The operator adds the engine to the pods Istio runs for each Gateway,
-and an [`EnvoyFilter`](glossary.md#envoyfilter) that sends the protected routes' requests to it through
-Envoy's [ext_proc filter](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter). You write the same `WAFPolicy` as for any other proxy.
+This guide protects the routes [Istio](https://istio.io/latest/docs/)'s gateways serve, through either of its APIs:
+
+- the `HTTPRoute` routes of Istio's implementation of the [Gateway API](https://gateway-api.sigs.k8s.io/), whose GatewayClass
+  controller is `istio.io/gateway-controller`: the operator adds the engine to the pods Istio runs
+  for each Gateway (the `istio` integration);
+- the [`VirtualService`](glossary.md#virtualservice) routes bound to Istio's own `Gateway` objects
+  (`networking.istio.io`), served by an ingress gateway deployed with Istio's `gateway` Helm chart:
+  the Pod webhook adds the engine to its pods when they start (the `istio-ingress` integration).
+  See [VirtualServices](#virtualservices).
+
+Either way, an [`EnvoyFilter`](glossary.md#envoyfilter) sends the protected routes' requests to the engine through Envoy's
+[ext_proc filter](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter). You write the same `WAFPolicy` as for any other proxy.
 
 ## Contents
 
@@ -18,17 +25,25 @@ Envoy's [ext_proc filter](https://www.envoyproxy.io/docs/envoy/latest/configurat
   - [Rule names](#rule-names)
 - [When the engine is down](#when-the-engine-is-down)
 - [Your Gateway's ConfigMap](#your-gateways-configmap)
+- [VirtualServices](#virtualservices)
+  - [Engine placement](#engine-placement)
+  - [Protect a VirtualService](#protect-a-virtualservice)
+  - [What a VirtualService may match](#what-a-virtualservice-may-match)
+  - [Route names](#route-names)
+  - [Status](#status)
 - [Limits](#limits)
 - [Undoing it](#undoing-it)
 
 ## Prerequisites
 
-- Istio 1.28 or later, with its Gateway API implementation (on by default) and the
-  [Gateway API CRDs](https://gateway-api.sigs.k8s.io/guides/getting-started/#installing-gateway-api). Tested with Istio 1.31.3 (its `base` and `istiod` Helm
+- Istio 1.28 or later; for HTTPRoutes, its Gateway API implementation (on by default) and the
+  [Gateway API CRDs](https://gateway-api.sigs.k8s.io/guides/getting-started/#installing-gateway-api); for VirtualServices, an ingress gateway from its
+  `gateway` Helm chart. Tested with Istio 1.31.3 (its `base` and `istiod` Helm
   charts, no mesh) and the Gateway API's standard CRDs v1.7.0. Istio's Envoy must be 1.36 or later:
   older ones reject the filter's settings, so the operator refuses to wire an older Istio (it reads
   the version from the `istio-proxy` image tag).
-- Inkwall installed with `rbac.integrations.istio` not `false` (the default is `true`), and the
+- Inkwall installed with `rbac.integrations.istio` (HTTPRoutes) or `rbac.integrations.istioIngress`
+  (VirtualServices) not `false` (the default is `true`), and the
   namespace of each Gateway listed in `injection.proxyNamespaces`. Istio runs a Gateway's pods in
   the Gateway's namespace: `istio-ingress` and `istio-system` are listed by default; list your
   other Gateways' namespaces ([proxy namespaces](../deploy/helm/inkwall/README.md#proxy-namespaces)).
@@ -211,16 +226,127 @@ reported (`WiringFailed`), not overwritten. A ConfigMap the Gateway names that d
 The operator doesn't watch ConfigMaps: if you remove the engine from yours, it is added back when
 Istio rolls the pods.
 
+## VirtualServices
+
+Istio's own API routes with a `Gateway` (`networking.istio.io`), which selects ingress gateway pods
+by label, and `VirtualService` objects bound to it (`spec.gateways`). The operator protects a
+VirtualService a `WAFPolicy` targets with `{group: networking.istio.io, kind: VirtualService, name:
+…}`, through the `istio-ingress` integration and its ClusterRole, `inkwall-operator-istio-ingress`
+(`rbac.integrations.istioIngress`).
+
+### Engine placement
+
+An ingress gateway from Istio's `gateway` Helm chart is your own Deployment: Istio has no API to
+add a container to it. So, as for Traefik, a Pod webhook (`istio-ingress.pods.waf.inkwall.dev`)
+adds the engine to its pods when they are created, and mounts the engine's socket directory in
+their `istio-proxy` container. It selects pods labelled `istio: ingressgateway` (the chart's label
+for a release named `istio-ingressgateway`; set another in the `InkwallConfig`'s
+`spec.integrations`, `controller: istio-ingress`) in the proxy namespaces. Pods that ran before
+Inkwall get the engine when restarted:
+
+```sh
+kubectl -n istio-ingress rollout restart deployment/istio-ingressgateway
+```
+
+The `InkwallConfig`'s selector for `istio-ingress` must be plain labels (`matchLabels`): it is also
+the `EnvoyFilter`'s `workloadSelector`.
+
+### Protect a VirtualService
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata: {name: edge, namespace: istio-ingress}
+spec:
+  selector: {istio: ingressgateway}
+  servers: [{port: {number: 80, name: http, protocol: HTTP}, hosts: ["*"]}]
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata: {name: web, namespace: shop}
+spec:
+  hosts: [shop.example.com]
+  gateways: [istio-ingress/edge]
+  http:
+    - name: api                      # every http route needs a name
+      match: [{uri: {prefix: /api/}}]
+      route: [{destination: {host: api}}]
+    - name: web
+      route: [{destination: {host: web}}]
+---
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata: {name: web, namespace: shop}
+spec:
+  targetRefs:
+    - {group: networking.istio.io, kind: VirtualService, name: web}
+  mode: Block
+```
+
+Once every running pod the VirtualService's Gateways select has the engine, the namespace of those
+pods gets an `EnvoyFilter`, `inkwall-istio-ingress`, for its gateway pods (`workloadSelector`
+`istio: ingressgateway`): the engine's cluster, and per protected VirtualService an ext_proc filter,
+off by default and on for the Envoy routes of its http routes, with the [settings](#settings) of its
+policies. The `EnvoyFilter` lists the VirtualServices it wires in the annotation
+`waf.inkwall.dev/virtualservices`.
+
+### What a VirtualService may match
+
+The engine routes requests by host, path and method, so a VirtualService's routes are each of its
+`hosts` (`*`: any host; `*.example.com`: subdomains at any depth) with each of its http routes'
+matches:
+
+| Match | Protected as |
+|---|---|
+| no `match`, or a match without `uri` | every path |
+| `uri: {exact: /login}` | that path |
+| `uri: {prefix: /api/}` or `{prefix: /api}` | `/api` and the paths under it. Istio's prefix is a string prefix, so `/api` also routes `/apiv2`; the engine's routes are whole path segments, and gives such a path the host's most general policy, as any path of a protected host its routes miss |
+| `method: {exact: GET}` | that method |
+
+A `uri` `regex`, `ignoreUriCase`, `headers`, `queryParams`, `withoutHeaders`, `authority`,
+`scheme`, `port`, `sourceLabels`, `sourceNamespace` or `gateways` match, a `method` other than
+`exact`, a `delegate` route, a short host name (a mesh service, such as `reviews`) or a
+VirtualService without http routes is refused: the policy is `Accepted=False`
+(`TargetUnsupported`), naming the field, and keeps the version in force, if any. `inkwallctl
+test --ingress` reads VirtualServices too.
+
+### Route names
+
+Istio names a VirtualService's Envoy routes after its http routes (`name`, then `.` and the match's
+`name` for a named match), and the filter is turned on by those names. So:
+
+- every http route of a protected VirtualService needs a `name`, or the policy reports
+  `WiringFailed` naming it;
+- a name that another VirtualService on the same gateway pods also uses would turn the filter on for
+  that VirtualService too: refused (`WiringFailed`, naming both); rename one.
+
+### Status
+
+| `Programmed` reason | Meaning |
+|---|---|
+| `Programmed` | Every running pod the VirtualService's Gateways select has the engine and the socket mount, and the `EnvoyFilter` has the VirtualService |
+| `PendingRestart` | Some of those pods started before Inkwall: restart them |
+| `SidecarMissing` | No such pod is running, or one opted out (`waf.inkwall.dev/inject: "false"`) |
+| `Pending` | Its Gateway doesn't exist yet; or, with Istio's status on (`PILOT_ENABLE_STATUS`), Istio hasn't reconciled the VirtualService |
+| `WiringFailed` | Its Gateways select pods the Pod webhook doesn't inject (outside the proxy namespaces, or without the `istio-ingress` labels), which would serve it uninspected; an http route without a name, or a shared name; Istio older than 1.28; Istio's `VirtualService`, `Gateway` or `EnvoyFilter` CRD missing |
+| `IntegrationDisabled` | The operator lacks the `inkwall-operator-istio-ingress` ClusterRole |
+| `ControllerUnsupported` | It is bound to no Gateway (only the `mesh`) |
+
+Istio reports nothing on an `EnvoyFilter` or, by default, a VirtualService, so `Programmed` rests on
+the pods and the objects. Istio's ingress gateways have no class, so they aren't listed in the
+`InkwallConfig`'s `status.proxies`.
+
 ## Limits
 
-- **HTTPRoute targets only.** `VirtualService` targets, for Istio's own `Gateway` API, are planned
-  ([#281](https://github.com/inkwall-dev/inkwall/issues/281)). Mesh sidecars aren't wired: the
-  `EnvoyFilter` selects Gateway pods only.
-- **Gateways Istio deploys.** A Gateway bound to an existing deployment
+- **Gateways only.** Mesh sidecars aren't wired: the `EnvoyFilter` selects gateway pods only, and
+  a VirtualService also bound to the `mesh` is `Programmed` with a message saying its mesh traffic
+  isn't inspected.
+- **Gateway API Gateways Istio deploys.** A Gateway API Gateway bound to an existing deployment
   (`networking.istio.io/gateway-name`, or a manual `spec.addresses`) isn't: the operator can't put
   the engine into pods Istio doesn't render.
-- **Responses aren't inspected** through Istio yet: the filter sends Envoy's request phases only
-  (response inspection runs through raw Envoy today).
+- **Responses aren't inspected** through Istio yet: the filter sends Envoy's request phases only, and
+  a policy that inspects responses reports `ResponsesNotInspected` on Istio's routes (they are
+  inspected through Envoy Gateway and raw Envoy).
 - **gRPC and WebSocket** are as through Envoy Gateway: see [gRPC](grpc.md) and
   [WebSocket](websocket.md).
 
@@ -229,5 +355,7 @@ Istio rolls the pods.
 Delete the policy, or remove the route from its `targetRefs`: the operator removes the route from
 the `EnvoyFilter` first (deleting it with the Gateway's last protected route), then takes the
 engine out of the Gateway's ConfigMap, points the Gateway back at no ConfigMap if it set one, and
-deletes its own. Istio rolls the pods without the engine. `helm uninstall` does the same for every
-Gateway: see [uninstalling](../deploy/helm/inkwall/README.md#uninstalling).
+deletes its own. Istio rolls the pods without the engine. For a VirtualService, the operator
+removes it from its namespace's `EnvoyFilter`; the ingress gateway's pods keep the engine until
+they restart, as Traefik's do. `helm uninstall` does the same for every Gateway and
+VirtualService: see [uninstalling](../deploy/helm/inkwall/README.md#uninstalling).

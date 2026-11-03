@@ -135,6 +135,10 @@ rbac:
     # The HAProxy Kubernetes Ingress Controller's Ingresses (their backend
     # snippet annotations); auto looks for its ingress.v3.haproxy.org CRDs.
     haproxy: true
+    # Istio's ingress gateways (Istio's own Gateways and VirtualServices):
+    # its EnvoyFilters. Without it, the Pod webhook selects no ingress
+    # gateway pod.
+    istioIngress: true
 
 serviceAccount:
   # Empty: the operator's name (inkwall-operator for a release named inkwall).

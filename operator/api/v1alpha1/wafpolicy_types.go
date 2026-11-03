@@ -119,26 +119,32 @@ type WAFPolicySpec struct {
 }
 
 // TargetRef names a route in the policy's namespace.
-// +kubebuilder:validation:XValidation:rule="(self.kind == 'Ingress' && (!has(self.group) || self.group == 'networking.k8s.io')) || (self.kind == 'HTTPRoute' && has(self.group) && self.group == 'gateway.networking.k8s.io') || (self.kind == 'IngressRoute' && has(self.group) && self.group == 'traefik.io')",message="target must be a networking.k8s.io Ingress, a gateway.networking.k8s.io HTTPRoute or a traefik.io IngressRoute"
+// +kubebuilder:validation:XValidation:rule="(self.kind == 'Ingress' && (!has(self.group) || self.group == 'networking.k8s.io')) || (self.kind == 'HTTPRoute' && has(self.group) && self.group == 'gateway.networking.k8s.io') || (self.kind == 'IngressRoute' && has(self.group) && self.group == 'traefik.io') || (self.kind == 'VirtualService' && has(self.group) && self.group == 'networking.istio.io')",message="target must be a networking.k8s.io Ingress, a gateway.networking.k8s.io HTTPRoute, a traefik.io IngressRoute or a networking.istio.io VirtualService"
 // +kubebuilder:validation:XValidation:rule="!has(self.sectionName) || self.kind == 'HTTPRoute'",message="sectionName is only allowed for an HTTPRoute"
 type TargetRef struct {
 	// Group of the target: networking.k8s.io (the default, for Ingress),
-	// gateway.networking.k8s.io (for HTTPRoute) or traefik.io (for
-	// Traefik's IngressRoute).
+	// gateway.networking.k8s.io (for HTTPRoute), traefik.io (for Traefik's
+	// IngressRoute) or networking.istio.io (for Istio's VirtualService).
 	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	Group string `json:"group,omitempty"`
 
-	// Kind of the target: Ingress, HTTPRoute or IngressRoute. An
+	// Kind of the target: Ingress, HTTPRoute, IngressRoute or
+	// VirtualService. An
 	// IngressRoute's hosts and paths come from its routes' match rules,
 	// which may combine Host, Path and PathPrefix with &&; a rule with
 	// anything else (||, !, other matchers) is not accepted. An HTTPRoute's routes
 	// are each of its hostnames (none: any host) with each of its rules'
 	// matches, which may have an Exact or PathPrefix path and a method; a
 	// match with a RegularExpression path, headers or queryParams is not
-	// accepted. Whether a proxy wires HTTPRoute targets depends on its
-	// integration.
-	// +kubebuilder:validation:Enum=Ingress;HTTPRoute;IngressRoute
+	// accepted. A VirtualService's routes are each of its hosts ("*": any
+	// host) with each of its http routes' matches, which may have an exact
+	// or prefix uri and an exact method; a match with anything else (a regex
+	// uri, headers, query parameters, ...), a delegate, or a short host name
+	// is not accepted. Whether a proxy wires HTTPRoute targets depends
+	// on its integration; VirtualService targets are wired through Istio's
+	// ingress gateways.
+	// +kubebuilder:validation:Enum=Ingress;HTTPRoute;IngressRoute;VirtualService
 	Kind string `json:"kind"`
 
 	// Name of the target.

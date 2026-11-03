@@ -58,7 +58,10 @@ type Input struct {
 	// CRD isn't installed.
 	IngressRoutes []unstructured.Unstructured
 	// HTTPRoutes are Gateway API's; none when its CRDs aren't installed.
-	HTTPRoutes      []gatewayv1.HTTPRoute
+	HTTPRoutes []gatewayv1.HTTPRoute
+	// VirtualServices are Istio's (networking.istio.io); none when its
+	// CRD isn't installed.
+	VirtualServices []unstructured.Unstructured
 	RuleSets        []wafv1alpha1.WAFRuleSet
 	ClusterRuleSets []wafv1alpha1.ClusterWAFRuleSet
 	// ConfigMaps rule sets read rules from (labeled RulesLabel).
@@ -183,7 +186,7 @@ func (r *resolution) ruleSet(id string, src wafv1alpha1.RuleSetSource, configMap
 // Target precedence (0002 §4.2): a route of several policies goes to the
 // one with the most specific target, then to the older one.
 const (
-	rankIngress       = iota // an Ingress or an IngressRoute
+	rankIngress       = iota // an Ingress, an IngressRoute or a VirtualService
 	rankHTTPRoute            // a whole HTTPRoute
 	rankHTTPRouteRule        // one rule of an HTTPRoute (sectionName)
 )
@@ -227,6 +230,12 @@ func (r *resolution) resolvePolicies() {
 		httpRoutes[types.NamespacedName{Namespace: hr.Namespace, Name: hr.Name}] = hr
 	}
 
+	virtualServices := map[types.NamespacedName]*unstructured.Unstructured{}
+	for i := range r.in.VirtualServices {
+		vs := &r.in.VirtualServices[i]
+		virtualServices[types.NamespacedName{Namespace: vs.GetNamespace(), Name: vs.GetName()}] = vs
+	}
+
 	// Oldest first: on a conflict the older policy wins, as in Gateway API,
 	// so a new policy can't take protection away from a route.
 	policies := slices.Clone(r.in.Policies)
@@ -240,7 +249,7 @@ func (r *resolution) resolvePolicies() {
 	var cands []*candidate
 	owner := map[string]*candidate{} // target -> the policy that has it
 	for i := range policies {
-		c := r.candidate(&policies[i], ingresses, ingressRoutes, httpRoutes)
+		c := r.candidate(&policies[i], ingresses, ingressRoutes, httpRoutes, virtualServices)
 		for _, t := range c.obj.Spec.TargetRefs {
 			k := targetKey(c.key.Namespace, t)
 			if prev, ok := owner[k]; ok {
@@ -361,7 +370,8 @@ func (c *candidate) fail(reason, message string) {
 }
 
 func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.NamespacedName]*networkingv1.Ingress,
-	ingressRoutes map[types.NamespacedName]*unstructured.Unstructured, httpRoutes map[types.NamespacedName]*gatewayv1.HTTPRoute) *candidate {
+	ingressRoutes map[types.NamespacedName]*unstructured.Unstructured, httpRoutes map[types.NamespacedName]*gatewayv1.HTTPRoute,
+	virtualServices map[types.NamespacedName]*unstructured.Unstructured) *candidate {
 	c := &candidate{
 		obj:    p,
 		key:    types.NamespacedName{Namespace: p.Namespace, Name: p.Name},
@@ -431,8 +441,20 @@ func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.Nam
 				rank = rankHTTPRouteRule
 			}
 			c.addRoutes(rank, routes)
+		case "VirtualService":
+			vs, ok := virtualServices[types.NamespacedName{Namespace: p.Namespace, Name: t.Name}]
+			if !ok {
+				missing = append(missing, "VirtualService "+t.Name)
+				continue
+			}
+			routes, err := virtualServiceMatches(vs)
+			if err != nil {
+				c.fail(ReasonTargetUnsupported, fmt.Sprintf("VirtualService %s: %v", t.Name, err))
+				continue
+			}
+			c.addRoutes(rankIngress, routes)
 		default:
-			c.fail(ReasonTargetUnsupported, fmt.Sprintf("%s %s: only Ingress, IngressRoute and HTTPRoute targets are resolved", t.Kind, t.Name))
+			c.fail(ReasonTargetUnsupported, fmt.Sprintf("%s %s: only Ingress, IngressRoute, HTTPRoute and VirtualService targets are resolved", t.Kind, t.Name))
 		}
 	}
 	if len(missing) > 0 {

@@ -35,17 +35,18 @@ check() {
   fi
 }
 
-check envoy-gateway,haproxy,istio,traefik
-check envoy-gateway,haproxy,istio,traefik --set rbac=null
-check envoy-gateway,haproxy,istio,traefik --set rbac.integrations=null
-check envoy-gateway,haproxy,istio,traefik --set rbac.integrations.traefik=auto --set rbac.integrations.envoyGateway=auto --set rbac.integrations.istio=auto --set rbac.integrations.haproxy=auto
-check envoy-gateway,haproxy,istio,traefik --set rbac.integrations.traefik=auto --set rbac.integrations.envoyGateway=true
-check envoy-gateway,haproxy,istio,traefik --set-string rbac.integrations.traefik=true
-check haproxy,istio,traefik --set rbac.integrations.envoyGateway=false
-check envoy-gateway,haproxy,traefik --set rbac.integrations.istio=false
-check envoy-gateway,haproxy,istio --set rbac.integrations.traefik=false
-check envoy-gateway,istio,traefik --set rbac.integrations.haproxy=false
-check "" --set rbac.integrations.traefik=false --set rbac.integrations.envoyGateway=false --set rbac.integrations.istio=false --set rbac.integrations.haproxy=false
+check envoy-gateway,haproxy,istio,istio-ingress,traefik
+check envoy-gateway,haproxy,istio,istio-ingress,traefik --set rbac=null
+check envoy-gateway,haproxy,istio,istio-ingress,traefik --set rbac.integrations=null
+check envoy-gateway,haproxy,istio,istio-ingress,traefik --set rbac.integrations.traefik=auto --set rbac.integrations.envoyGateway=auto --set rbac.integrations.istio=auto --set rbac.integrations.haproxy=auto --set rbac.integrations.istioIngress=auto
+check envoy-gateway,haproxy,istio,istio-ingress,traefik --set rbac.integrations.traefik=auto --set rbac.integrations.envoyGateway=true
+check envoy-gateway,haproxy,istio,istio-ingress,traefik --set-string rbac.integrations.traefik=true
+check haproxy,istio,istio-ingress,traefik --set rbac.integrations.envoyGateway=false
+check envoy-gateway,haproxy,istio-ingress,traefik --set rbac.integrations.istio=false
+check envoy-gateway,haproxy,istio,traefik --set rbac.integrations.istioIngress=false
+check envoy-gateway,haproxy,istio,istio-ingress --set rbac.integrations.traefik=false
+check envoy-gateway,istio,istio-ingress,traefik --set rbac.integrations.haproxy=false
+check "" --set rbac.integrations.traefik=false --set rbac.integrations.envoyGateway=false --set rbac.integrations.istio=false --set rbac.integrations.haproxy=false --set rbac.integrations.istioIngress=false
 
 if out=$(helm template inkwall "$CHART" --namespace inkwall-system --set rbac.integrations.traefik=yes 2>&1) ||
   ! grep -q 'rbac.integrations.traefik must be auto, true or false' <<<"$out"; then
@@ -53,44 +54,37 @@ if out=$(helm template inkwall "$CHART" --namespace inkwall-system --set rbac.in
   fail=1
 fi
 
-# The Pod webhook's objectSelector: Traefik's pods, or none without
-# Traefik's role.
-# selector [helm flags...]: the Pod webhook's objectSelector, on one line.
-# awk reads all of helm's output (no exit): stopping early would fail helm
-# with SIGPIPE under pipefail.
+# The Pod webhooks' objectSelectors: Traefik's, HAProxy's and Istio's
+# ingress gateway pods, or none without the integration's role.
+# selector WEBHOOK [helm flags...]: a Pod webhook's objectSelector, on one
+# line. awk reads all of helm's output (no exit): stopping early would fail
+# helm with SIGPIPE under pipefail.
 selector() {
+  local name=$1
+  shift
   helm template inkwall "$CHART" --namespace inkwall-system "$@" |
-    awk 'done {next} /name: pods.waf.inkwall.dev/ {on=1; next} on && /reinvocationPolicy/ {done=1; next} on && /objectSelector/ {p=1} p' | tr -s ' \n' ' '
+    awk -v name="name: $name" 'done {next} $0 ~ "^ *" name "$" {on=1; next} on && /reinvocationPolicy/ {done=1; next} on && /objectSelector/ {p=1} p' | tr -s ' \n' ' '
 }
-sel=$(selector)
-if ! grep -q 'app.kubernetes.io/name: traefik' <<<"$sel"; then
-  echo "Pod webhook objectSelector: $sel; want Traefik's pods" >&2
-  fail=1
-fi
-sel=$(selector --set rbac.integrations.traefik=false)
-if grep -q 'traefik' <<<"$sel" || ! grep -q 'operator: Exists' <<<"$sel" || ! grep -q 'operator: DoesNotExist' <<<"$sel"; then
-  echo "Pod webhook objectSelector without Traefik's role: $sel; want none" >&2
-  fail=1
-fi
-
-# HAProxy's Pod webhook: the controller's pods, or none without its role.
-haproxy_selector() {
-  helm template inkwall "$CHART" --namespace inkwall-system "$@" |
-    awk 'done {next} /name: haproxy.pods.waf.inkwall.dev/ {on=1; next} on && /reinvocationPolicy/ {done=1; next} on && /objectSelector/ {p=1} p' | tr -s ' \n' ' '
+# selects WEBHOOK LABEL VALUE: its default selector, and none without the role.
+selects() {
+  local webhook=$1 label=$2 key=$3 sel
+  sel=$(selector "$webhook")
+  if ! grep -q "$label" <<<"$sel"; then
+    echo "$webhook objectSelector: $sel; want pods labelled $label" >&2
+    fail=1
+  fi
+  sel=$(selector "$webhook" --set "rbac.integrations.$key=false")
+  if grep -q "$label" <<<"$sel" || ! grep -q 'operator: Exists' <<<"$sel" || ! grep -q 'operator: DoesNotExist' <<<"$sel"; then
+    echo "$webhook objectSelector without its role: $sel; want none" >&2
+    fail=1
+  fi
 }
-sel=$(haproxy_selector)
-if ! grep -q 'app.kubernetes.io/name: kubernetes-ingress' <<<"$sel"; then
-  echo "HAProxy's Pod webhook objectSelector: $sel; want the controller's pods" >&2
-  fail=1
-fi
-sel=$(haproxy_selector --set rbac.integrations.haproxy=false)
-if grep -q 'kubernetes-ingress' <<<"$sel" || ! grep -q 'operator: DoesNotExist' <<<"$sel"; then
-  echo "HAProxy's Pod webhook objectSelector without its role: $sel; want none" >&2
-  fail=1
-fi
+selects pods.waf.inkwall.dev 'app.kubernetes.io/name: traefik' traefik
+selects haproxy.pods.waf.inkwall.dev 'app.kubernetes.io/name: kubernetes-ingress' haproxy
+selects istio-ingress.pods.waf.inkwall.dev 'istio: ingressgateway' istioIngress
 
 # The base ClusterRole is always there, without the integrations' writes.
-out=$(helm template inkwall "$CHART" --namespace inkwall-system --set rbac.integrations.traefik=false --set rbac.integrations.envoyGateway=false --set rbac.integrations.istio=false --set rbac.integrations.haproxy=false)
+out=$(helm template inkwall "$CHART" --namespace inkwall-system --set rbac.integrations.traefik=false --set rbac.integrations.envoyGateway=false --set rbac.integrations.istio=false --set rbac.integrations.haproxy=false --set rbac.integrations.istioIngress=false)
 base=$(awk '/^kind: ClusterRole$/ {getline; getline; if ($2 == "inkwall-operator") on=1; next} /^---/ {on=0} on' <<<"$out")
 if [[ -z "$base" ]] || grep -E 'middlewares|envoyproxies|envoyfilters' <<<"$base" >/dev/null; then
   echo "the base ClusterRole is missing, or has an integration's rules:" >&2
@@ -108,8 +102,8 @@ for release in abcdefghijabcdefghijabcdefghijabcdefghijabcdef abcdefghijabcdefgh
     echo "$dups" >&2
     fail=1
   fi
-  if [[ $(grep -c -e '^ClusterRole ' -e '^Service ' <<<"$names") != 7 ]]; then
-    echo "release $release: want 5 ClusterRoles and 2 Services, got:" >&2
+  if [[ $(grep -c -e '^ClusterRole ' -e '^Service ' <<<"$names") != 8 ]]; then
+    echo "release $release: want 6 ClusterRoles and 2 Services, got:" >&2
     echo "$names" >&2
     fail=1
   fi

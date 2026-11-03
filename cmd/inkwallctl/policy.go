@@ -60,12 +60,12 @@ func policyBundle(cfg config, notes io.Writer) (*bundlev1.Bundle, error) {
 	if len(in.Policies) == 0 {
 		return nil, errors.New("no WAFPolicy in the files")
 	}
-	if len(in.Ingresses)+len(in.IngressRoutes)+len(in.HTTPRoutes) == 0 {
+	if len(in.Ingresses)+len(in.IngressRoutes)+len(in.HTTPRoutes)+len(in.VirtualServices) == 0 {
 		// Without the routes, a single policy is tested as if its first
 		// target matched every host and path. Several policies would all
 		// claim that route.
 		if len(in.Policies) > 1 {
-			return nil, errors.New("several WAFPolicies: give the Ingresses, IngressRoutes or HTTPRoutes they target with --ingress, so requests can be routed")
+			return nil, errors.New("several WAFPolicies: give the Ingresses, IngressRoutes, HTTPRoutes or VirtualServices they target with --ingress, so requests can be routed")
 		}
 		p := &in.Policies[0]
 		covered := false
@@ -103,6 +103,19 @@ func policyBundle(cfg config, notes io.Writer) (*bundlev1.Bundle, error) {
 					}
 					in.HTTPRoutes[i].Spec.Rules = append(in.HTTPRoutes[i].Spec.Rules, rule)
 				}
+			case "VirtualService":
+				// Only the first target routes: a VirtualService has at
+				// least one http route.
+				if covered {
+					continue
+				}
+				vs := unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{
+					"hosts": []any{"*"}, "http": []any{map[string]any{"name": "all"}},
+				}}}
+				vs.SetGroupVersionKind(integrations.IstioVirtualServiceGVK)
+				vs.SetNamespace(p.Namespace)
+				vs.SetName(t.Name)
+				in.VirtualServices = append(in.VirtualServices, vs)
 			default:
 				continue
 			}
@@ -201,7 +214,7 @@ func loadObjects(files []string, namespace string, notes io.Writer) (resolver.In
 		case !known:
 			fmt.Fprintf(notes, "note: %s: %s %s skipped\n", file, head.Kind, head.Metadata.Name)
 			return nil
-		case head.APIVersion != want:
+		case head.APIVersion != want && (head.Kind != "VirtualService" || !strings.HasPrefix(head.APIVersion, "networking.istio.io/")):
 			return fmt.Errorf("%s %s: apiVersion %q, want %q", head.Kind, head.Metadata.Name, head.APIVersion, want)
 		case head.Metadata.Name == "":
 			return fmt.Errorf("a %s without a name", head.Kind)
@@ -256,6 +269,13 @@ func loadObjects(files []string, namespace string, notes io.Writer) (resolver.In
 			err = yaml.UnmarshalStrict(doc, &o)
 			o.Namespace = ns
 			in.HTTPRoutes = append(in.HTTPRoutes, o)
+		case "VirtualService":
+			// Istio's own schema isn't vendored: the resolver refuses what
+			// it can't express, and names it.
+			var o unstructured.Unstructured
+			err = yaml.Unmarshal(doc, &o.Object)
+			o.SetNamespace(ns)
+			in.VirtualServices = append(in.VirtualServices, o)
 		case "ConfigMap":
 			var o corev1.ConfigMap
 			err = yaml.UnmarshalStrict(doc, &o)
@@ -340,6 +360,7 @@ var apiVersions = map[string]string{
 	"Ingress":           networkingv1.SchemeGroupVersion.String(),
 	"IngressRoute":      integrations.TraefikIngressRouteGVK.GroupVersion().String(),
 	"HTTPRoute":         gatewayv1.GroupVersion.String(),
+	"VirtualService":    integrations.IstioVirtualServiceGVK.GroupVersion().String(),
 	"ConfigMap":         corev1.SchemeGroupVersion.String(),
 }
 
