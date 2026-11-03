@@ -1,8 +1,11 @@
 # WebSocket
 
 What the engine inspects in a [WebSocket](https://www.rfc-editor.org/rfc/rfc6455) at v0.4.0, and
-what it doesn't. In short: the handshake is inspected, the messages after it are not. Message
-inspection is tracked in [#276](https://github.com/inkwall-dev/inkwall/issues/276).
+what it doesn't. In short: the handshake is inspected through every proxy; the messages after it
+only when the engine is the proxy itself ([standalone proxy](standalone-proxy.md)), with
+`--websocket-messages`. Through Envoy Gateway, raw Envoy and Traefik the messages are not
+inspected: that needs a change in Envoy, tracked in
+[#313](https://github.com/inkwall-dev/inkwall/issues/313).
 
 ## Contents
 
@@ -10,6 +13,7 @@ inspection is tracked in [#276](https://github.com/inkwall-dev/inkwall/issues/27
 - [What is inspected](#what-is-inspected)
 - [Allowed origins and required headers](#allowed-origins-and-required-headers)
 - [Through each proxy](#through-each-proxy)
+- [Messages, through the standalone proxy](#messages-through-the-standalone-proxy)
 - [Checking it worked](#checking-it-worked)
 
 ## Which requests are handshakes
@@ -35,9 +39,13 @@ from this check; a request that only looks like one gets the WebSocket rules too
   the upgrade**: the connection is never upgraded, and the application never sees the handshake.
 - **Checked**, when the policy sets `webSocket`: the handshake's origin and required headers
   ([below](#allowed-origins-and-required-headers)).
-- **Not inspected**: the messages after the upgrade, text or binary, through any proxy. Rules on
-  `REQUEST_BODY` or `ARGS` don't see them, and `body.maxBytes` doesn't limit them. Keep the
-  application's own validation of what clients send it.
+- **Not inspected through Envoy Gateway, raw Envoy and Traefik**: the messages after the upgrade,
+  text or binary. Rules on `REQUEST_BODY` or `ARGS` don't see them, and `body.maxBytes` doesn't
+  limit them. No `WAFPolicy` field asks for them. Keep the application's own validation of what
+  clients send it.
+- **Inspected through the standalone proxy**, with `--websocket-messages inspect` or `text-only`:
+  each text message the client sends, by the same rules
+  ([below](#messages-through-the-standalone-proxy)).
 
 The [Core Rule Set](https://coreruleset.org/) doesn't deny legitimate handshakes: a browser's
 handshake (Chrome's headers, with cookies, subprotocols and `permessage-deflate`) raises no rule at
@@ -93,7 +101,7 @@ the same rules ([standalone proxy](standalone-proxy.md#flags)).
 |---|---|---|---|
 | Envoy Gateway, [raw Envoy](raw-envoy.md) (ext_proc) | Inspected on its headers | 403 before the upgrade | Not inspected |
 | Traefik (ForwardAuth) | Inspected, without `Upgrade` and `Connection` | 403 before the upgrade | Not inspected |
-| [Standalone proxy](standalone-proxy.md) | Inspected | 403 before the upgrade | Not inspected |
+| [Standalone proxy](standalone-proxy.md) | Inspected | 403 before the upgrade | Inspected with `--websocket-messages`; a denial closes with 1008 |
 
 - **Envoy Gateway and raw Envoy**: Envoy sends a handshake's headers without ending the request,
   since the upgraded connection's data follows. The engine decides on the headers, and tells Envoy
@@ -107,7 +115,46 @@ the same rules ([standalone proxy](standalone-proxy.md#flags)).
   engine's answer and no upgrade. Traefik doesn't pass the hop-by-hop headers `Upgrade` and
   `Connection` to the engine; `Sec-WebSocket-Key` and `Sec-WebSocket-Version` tell it's a handshake.
 - **Standalone proxy**: the engine forwards an allowed upgrade to `--upstream` and copies the
-  connection both ways.
+  connection both ways, reading the client's frames when `--websocket-messages` asks it to.
+
+Envoy's ext_proc could see the messages (it passes them as body chunks), but only in a streamed
+body mode, where Envoy holds the handshake until the client's first frame, which a client sends
+only after the upgrade: the handshake never completes. Envoy's Lua filter sees them too, but
+forwards each before the script decides. Neither is used; see
+[0002 §6](design/0002-system-architecture.md#6-proxy-integrations).
+
+## Messages, through the standalone proxy
+
+`inkwall-engine proxy --websocket-messages inspect` reads what each client sends on a WebSocket it
+forwards, and inspects every text message with the policy's rules, before the application gets it:
+
+- **A text message** is inspected as a request with the handshake's URL and headers whose form
+  arguments (`ARGS_POST`) are the message: a JSON object's or array's values by path
+  (`json.user.name`, `json.items.0`), any other text as one argument, `message`. A message must be
+  valid UTF-8 (close 1007).
+- **A binary message** passes uninspected with `inspect`; `text-only` refuses it (close 1003).
+- **Size**: a message is inspected up to `--max-body-bytes` (64 KiB by default). A longer one is
+  handled as an oversized body (`--oversize-body`): in `block` mode, closed with 1009 by default;
+  with `--oversize-body allow`, inspected up to the limit and the rest passes.
+- **Fragments** of a message are put together before it is inspected; control frames (ping, pong,
+  close) pass at once. The proxy removes `Sec-WebSocket-Extensions` from the handshake, so
+  `permessage-deflate` is never negotiated and messages arrive uncompressed.
+- **In `block` mode** each message is held until it is inspected. A denied one never reaches the
+  application: the proxy closes the WebSocket with 1008 (policy violation), toward the client and
+  the application, and nothing more of the client's passes. A frame that breaks the protocol
+  (unmasked, a reserved bit set, a control frame over 125 bytes) closes it with 1002 in either
+  mode, as the application would.
+- **In `detect` mode** messages pass at once, and a copy is inspected.
+- **Events**: each denied or logged message is a `security event` with the handshake's path and
+  request ID, reason `rule` (or `oversize`); a message the proxy can't inspect or refuses (binary
+  with `text-only`, not UTF-8, a protocol error), reason `websocket`.
+- **Paranoia**: at levels 1 to 3 typical chat and JSON messages raise nothing; at 4, rule 920273
+  (the strict character range) denies a space in any argument, a message's as a form's.
+- **Not applied**: `--skip-paths` and `--skip-body-paths` routes aren't inspected; the policy's
+  `webSocket` rules (origins, required headers) are the handshake's. A rule the handshake matched
+  in `detect` mode is logged with every message, which carries the handshake's headers.
+
+It needs a policy from flags: with `--operator`, the flag is refused.
 
 ## Checking it worked
 
@@ -123,3 +170,11 @@ $ curl -s -o /dev/null -w '%{http_code}\n' -H 'Connection: Upgrade' -H 'Upgrade:
 The engine logs one `security event` with `"reason":"websocket"`, and counts it in
 `inkwall_requests_total{action="deny",reason="websocket"}`. From an allowed origin the same command
 prints `101` (and waits on the open connection: add `--max-time 2`).
+
+Through the standalone proxy with `--websocket-messages inspect` in `block` mode, a message with an
+attack closes the WebSocket with 1008. `hack/wsecho` is a client that prints how a WebSocket ended:
+
+```console
+$ go run ./hack/wsecho -message '{"q":"1'"'"' OR '"'"'1'"'"'='"'"'1'"'"' -- "}' 127.0.0.1:8480/ws
+closed 1008
+```

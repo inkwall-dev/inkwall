@@ -327,6 +327,17 @@ Traefik plugin.
 inspected: an origin-form request target (`/path?query`) and a valid Host header. Anything else,
 such as `GET http://host/path`, gets 400, because Go's HTTP client would forward a different Host.
 
+**WebSocket messages** (#276): with `--websocket-messages`, the proxy wraps the connection Go's
+reverse proxy hijacks for an upgrade, so what it copies to the upstream is only what was inspected
+(`pkg/websocket` reads the frames; fuzzed). It removes `Sec-WebSocket-Extensions` from the handshake,
+so no `permessage-deflate`. In block mode a text message is held until whole (fragments put
+together, control frames passed at once) and inspected (`ARGS_POST`: JSON values by path, other
+text as `message`); a denied one closes with 1008, a masked close frame to the upstream and, at the
+next boundary between the upstream's frames, an unmasked one to the client. Past `--max-body-bytes`
+a message is an oversized body (1009 under `deny`). Detect mode forwards at once and inspects a
+copy. Only this adapter sees messages: ext_proc can't, for a compliant client
+([0002 §6](0002-system-architecture.md#6-proxy-integrations), #313).
+
 A denied gRPC call is answered as a gRPC server does ([§7](#7-denying-grpc-calls)).
 
 "Standalone" in this heading means the engine runs on its own, without an ingress proxy. It is not

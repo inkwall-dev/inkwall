@@ -45,6 +45,10 @@ type Config struct {
 	// Events records each security event for the operator (nil: logged
 	// only).
 	Events *events.Recorder
+	// WebSocketMessages inspects the messages of the WebSockets it
+	// forwards (websocket.go), each up to MaxBodyBytes. It needs a policy
+	// from flags (a *pipeline.Pipeline).
+	WebSocketMessages pipeline.WebSocketMessages
 }
 
 // Handler is an inspecting reverse proxy.
@@ -55,6 +59,7 @@ type Handler struct {
 	clientIP *clientip.Resolver
 	logger   *slog.Logger
 	events   *events.Recorder
+	messages pipeline.WebSocketMessages
 }
 
 // New returns a Handler that inspects requests with p.
@@ -86,7 +91,16 @@ func New(p pipeline.Inspector, cfg Config) (*Handler, error) {
 		},
 		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
-	return &Handler{pipeline: p, proxy: rp, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events}, nil
+	if cfg.WebSocketMessages != pipeline.MessagesOff {
+		if _, ok := p.(messageInspector); !ok {
+			return nil, errors.New("WebSocket message inspection needs a policy from flags")
+		}
+		if cfg.MaxBodyBytes <= 0 {
+			return nil, errors.New("WebSocket message inspection needs a body limit")
+		}
+	}
+	return &Handler{pipeline: p, proxy: rp, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events,
+		messages: cfg.WebSocketMessages}, nil
 }
 
 // ServeHTTP inspects r, then denies it or forwards it to the upstream.
@@ -131,6 +145,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, http.StatusText(v.Status), v.Status)
 		return
+	}
+	if h.messages != pipeline.MessagesOff && v.Reason != pipeline.ReasonSkipped &&
+		httpguts.HeaderValuesContainsToken(r.Header.Values("Upgrade"), "websocket") {
+		// No extension, so no compressed messages (permessage-deflate):
+		// a frame with an RSV bit is then an error.
+		r.Header.Del("Sec-Websocket-Extensions")
+		w = &inspectingWriter{ResponseWriter: w, h: h, ctx: r.Context(), req: req, path: r.URL.Path, mi: h.pipeline.(messageInspector)}
 	}
 	h.proxy.ServeHTTP(w, r)
 }
