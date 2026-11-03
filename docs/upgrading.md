@@ -1,11 +1,12 @@
 # Upgrading
 
-This guide upgrades an Inkwall installation from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
+This guide upgrades an Inkwall installation from 0.3.1 to 0.3.2, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
 0.3.0, and from 0.1.x (0.1.0 to 0.1.5) to 0.2.2, the latest 0.2 release, and lists what changes on
 the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 ## Contents
 
+- [From 0.3.1 to 0.3.2](#from-031-to-032)
 - [From 0.3.0 to 0.3.1](#from-030-to-031)
 - [From 0.2.x to 0.3.0](#from-02x-to-030)
   - [Before you upgrade](#before-you-upgrade)
@@ -22,6 +23,19 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
   - [Upgrading the chart](#upgrading-the-chart)
   - [Checking it worked](#checking-it-worked)
   - [Rolling back](#rolling-back)
+
+## From 0.3.1 to 0.3.2
+
+0.3.2 is a patch release: upgrade the chart as for 0.3.0, then restart the Envoy Gateway proxies
+so their engines are 0.3.2. What changes by itself:
+
+- **WebSockets work through Envoy Gateway.** The engine decides a WebSocket handshake on its
+  headers, and lets Envoy pass the upgraded connection without sending it to the engine. In
+  0.3.1, a policy in `Block` mode with body inspection held every handshake until one of Envoy's
+  timeouts, and one in `Detect` mode logged every handshake as an oversized body when the
+  connection closed. The handshake's URL and headers are inspected as any request's, and a denied
+  one gets 403 and no upgrade; the messages after the upgrade are not inspected. Traefik was not
+  affected.
 
 ## From 0.3.0 to 0.3.1
 
