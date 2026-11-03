@@ -234,7 +234,9 @@ curl -s localhost:8080/metrics | grep -E '^inkwall_operator_(events|request_stat
 
 ## Managed mode
 
-With `mode: Managed`, policies come from the control plane:
+With `mode: Managed`, policies come from the control plane. Set it on the `InkwallConfig` from
+[Enrolling a cluster](#enrolling-a-cluster), which Managed mode needs: without
+`spec.controlPlane`, the API server refuses it.
 
 ```sh
 kubectl patch inkwallconfig default --type merge -p '{"spec":{"mode":"Managed"}}'

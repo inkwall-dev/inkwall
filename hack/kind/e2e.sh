@@ -178,6 +178,42 @@ check "same engine pod, no restart" same_pod
 policy Block
 eventually "block mode again" status_is 403 "$SQLI"
 
+# The chart README's suspend switch (#299), as documented: doc_block runs
+# the sh block after the README's "<!-- e2e: NAME" comment, kubectl pointed
+# at this cluster. On a fresh install there is no InkwallConfig, which the
+# commands must not need.
+README=deploy/helm/inkwall/README.md
+doc_block() {
+  local block
+  block=$(awk -v m="<!-- e2e: $1 " 'index($0, m) == 1 { f = 1; next } f && /^```sh$/ { p = 1; next } p && /^```$/ { exit } p' "$README")
+  if [[ -z $block ]]; then
+    echo "no block \"e2e: $1\" in $README" >&2
+    return 1
+  fi
+  (
+    # shellcheck disable=SC2329 # the block calls it
+    kubectl() { command kubectl --context "kind-$CLUSTER" "$@"; }
+    eval "$block"
+  )
+}
+suspended_is() { [[ $(doc_block suspended) == *'"status":"'$1'"'* ]]; }
+policy_suspended() { [[ $(condition Enforced reason) == Suspended && $(condition Ready reason) == Suspended ]]; }
+echo "== suspending inspection, without an InkwallConfig to start with"
+if "${KUBECTL[@]}" get inkwallconfig default >/dev/null 2>&1; then
+  echo "skip  an InkwallConfig exists: the documented commands are tested on a fresh install"
+else
+  check "the README's suspend command works without an InkwallConfig" doc_block suspend
+  eventually "every request passes while suspended" status_is 200 "$SQLI"
+  eventually "the policy reports it: Enforced and Ready False, reason Suspended" policy_suspended
+  eventually "the README's check shows Suspended True" suspended_is True
+  check "the README's resume command works" doc_block resume
+  eventually "blocking again once resumed" status_is 403 "$SQLI"
+  eventually "the policy is Enforced again" enforced_by_all
+  eventually "the README's check shows Suspended False" suspended_is False
+  "${KUBECTL[@]}" delete inkwallconfig default >/dev/null
+  eventually "still blocking without the InkwallConfig" status_is 403 "$SQLI"
+fi
+
 echo "== operator down"
 # A policy blocks: proxy pods must not start without the engine (#51).
 pod_webhook_policy() {
