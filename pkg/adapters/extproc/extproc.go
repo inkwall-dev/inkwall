@@ -9,7 +9,20 @@
 // answers an allowed request with CONTINUE and a denied one with an
 // immediate response carrying the verdict's status. Later messages (the
 // response headers and body, if the filter sends them) are answered with
-// CONTINUE.
+// CONTINUE, unless the request's policy inspects responses.
+//
+// A policy that inspects responses keeps the request's evaluation for the
+// response (pipeline.Exchange). Its status and headers are inspected, and
+// its body when the rules read its media type and Envoy sends it in one
+// message (response_body_mode BUFFERED or BUFFERED_PARTIAL): Envoy holds
+// the response headers meanwhile, so a denied response is replaced by an
+// immediate response. A response body the engine doesn't read (an image, a
+// stream) is let through at the headers, and the answer asks Envoy, through
+// mode_override, not to send or buffer it. A body Envoy cut, or doesn't send
+// in one piece, has its prefix inspected and is handled as oversized
+// (responses.onOversize). On a route whose response bodies are inspected,
+// the request's Accept-Encoding is removed, so the upstream sends bodies
+// the rules can read; gzip and deflate bodies are decoded all the same.
 //
 // The body is inspected when the policy asks for it and Envoy sends it in
 // one message: request_body_mode BUFFERED or BUFFERED_PARTIAL. A body Envoy
@@ -26,8 +39,9 @@
 // In observability mode (detect mode) Envoy doesn't wait for the answers,
 // and the adapter sends none. The body comes in chunks there (STREAMED, the
 // only mode Envoy allows, whatever protocol_config says): they are gathered
-// up to the limit, and the stream is closed once the request is decided. A
-// stream that ends first is decided on what came.
+// up to the limit, and the stream is closed once the request is decided, or
+// its response when that is inspected. A stream that ends first is decided
+// on what came.
 //
 // The protocol the client spoke is Envoy's request.protocol attribute, if
 // the filter sends it; HTTP/1.1 otherwise.
@@ -142,12 +156,36 @@ type exchange struct {
 	// setID: the request ID was generated here, and is set on the request
 	// Envoy forwards.
 	setID bool
+
+	// The response, when the request's policy inspects it.
+	respMode filterv3.ProcessingMode_BodySendMode
+	// ex is the request's evaluation, kept for the response; nil when the
+	// response isn't inspected.
+	ex   *pipeline.Exchange
+	resp *request.Response
+	// respWaiting: the verdict waits for the response body, gathered in
+	// respStreamed up to one byte over respLimit if respGather.
+	respWaiting  bool
+	respGather   bool
+	respStreamed []byte
+	respLimit    int64
+	// respDone: the response was decided.
+	respDone bool
+}
+
+// done reports whether nothing more is needed in observability mode: the
+// request was refused uninspected, or it was decided and so was its
+// response, if inspected.
+func (x *exchange) done() bool {
+	return x.req == nil || !x.waiting && (x.ex == nil || x.respDone)
 }
 
 // Process handles the stream of one HTTP request.
 func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error {
 	ctx := stream.Context()
 	x := &exchange{peer: peerAddr(ctx)}
+	// The response's evaluation, if kept, ends with the stream.
+	defer func() { x.ex.Close() }()
 	for first := true; ; first = false {
 		msg, err := stream.Recv()
 		if err != nil && x.observe && x.waiting {
@@ -155,6 +193,10 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			// though the stream is gone.
 			x.setBody(x.streamed, false)
 			s.verdict(context.WithoutCancel(ctx), x, phaseRequestBody)
+		}
+		if err != nil && x.observe && x.respWaiting {
+			x.setResponseBody(x.respStreamed, false)
+			s.responseVerdict(context.WithoutCancel(ctx), x, phaseResponseBody)
 		}
 		if errors.Is(err, io.EOF) {
 			return nil
@@ -165,6 +207,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 		// Envoy describes its processing mode in the first message only.
 		if first {
 			x.bodyMode = msg.GetProtocolConfig().GetRequestBodyMode()
+			x.respMode = msg.GetProtocolConfig().GetResponseBodyMode()
 			x.observe = msg.GetObservabilityMode()
 		}
 		resp, err := s.handle(ctx, x, msg)
@@ -173,9 +216,10 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			return status.Error(codes.InvalidArgument, err.Error())
 		}
 		// In observability mode Envoy doesn't wait, and ignores answers;
-		// once the request is decided, nothing more is needed.
+		// once the request is decided, and its response if inspected,
+		// nothing more is needed.
 		if x.observe {
-			if x.req == nil || !x.waiting {
+			if x.done() {
 				return nil
 			}
 			continue
@@ -201,7 +245,7 @@ func (s *Server) handle(ctx context.Context, x *exchange, msg *extprocv3.Process
 		if x.waiting && x.fillBody(m.RequestBody) {
 			return s.verdict(ctx, x, phaseRequestBody), nil
 		}
-		return allow(phaseRequestBody, ""), nil
+		return allow(phaseRequestBody, nil), nil
 	case *extprocv3.ProcessingRequest_RequestTrailers:
 		if x.req == nil {
 			return s.uninspectable(ctx, errors.New("request trailers before the request headers")), nil
@@ -211,13 +255,31 @@ func (s *Server) handle(ctx context.Context, x *exchange, msg *extprocv3.Process
 			x.fillBody(&extprocv3.HttpBody{EndOfStream: true})
 			return s.verdict(ctx, x, phaseRequestTrailers), nil
 		}
-		return allow(phaseRequestTrailers, ""), nil
+		return allow(phaseRequestTrailers, nil), nil
 	case *extprocv3.ProcessingRequest_ResponseHeaders:
-		return s.onResponse(ctx, x, phaseResponseHeaders)
+		if r, err := s.onResponse(ctx, x, phaseResponseHeaders); r != nil || err != nil {
+			return r, err
+		}
+		return s.onResponseHeaders(ctx, x, m.ResponseHeaders), nil
 	case *extprocv3.ProcessingRequest_ResponseBody:
-		return s.onResponse(ctx, x, phaseResponseBody)
+		if r, err := s.onResponse(ctx, x, phaseResponseBody); r != nil || err != nil {
+			return r, err
+		}
+		if x.respWaiting && x.fillResponse(m.ResponseBody) {
+			return s.responseVerdict(ctx, x, phaseResponseBody), nil
+		}
+		return allow(phaseResponseBody, nil), nil
 	case *extprocv3.ProcessingRequest_ResponseTrailers:
-		return s.onResponse(ctx, x, phaseResponseTrailers)
+		// The response was decided on its headers and body, unless no body
+		// came: it ends here.
+		if r, err := s.onResponse(ctx, x, phaseResponseTrailers); r != nil || err != nil {
+			return r, err
+		}
+		if x.respWaiting {
+			x.fillResponse(&extprocv3.HttpBody{EndOfStream: true})
+			return s.responseVerdict(ctx, x, phaseResponseTrailers), nil
+		}
+		return allow(phaseResponseTrailers, nil), nil
 	default:
 		return nil, fmt.Errorf("unsupported message %T", m)
 	}
@@ -239,11 +301,11 @@ func (s *Server) onHeaders(ctx context.Context, x *exchange, h *extprocv3.HttpHe
 		case x.bodyMode == filterv3.ProcessingMode_BUFFERED, x.bodyMode == filterv3.ProcessingMode_BUFFERED_PARTIAL:
 			// Envoy holds the headers until the body is answered.
 			x.waiting = true
-			return allow(phaseRequestHeaders, "")
+			return allow(phaseRequestHeaders, nil)
 		case x.observe:
 			// Envoy forwards the request meanwhile: nothing is held.
 			x.waiting, x.gather = true, true
-			return allow(phaseRequestHeaders, "")
+			return allow(phaseRequestHeaders, nil)
 		default:
 			// Envoy won't send the body in one piece, so it goes
 			// uninspected, as an oversized body does.
@@ -298,8 +360,9 @@ func (x *exchange) contentLength() int64 {
 	return length
 }
 
-// onResponse continues the response stages: the request was decided
-// already.
+// onResponse checks that a response message comes after the request was
+// decided. It returns nil, nil when the message is to be handled; a
+// response stage the request's policy doesn't inspect is continued.
 func (s *Server) onResponse(ctx context.Context, x *exchange, p phase) (*extprocv3.ProcessingResponse, error) {
 	if x.waiting {
 		return nil, errors.New("response before the request body")
@@ -307,22 +370,152 @@ func (s *Server) onResponse(ctx context.Context, x *exchange, p phase) (*extproc
 	if x.req == nil {
 		return s.uninspectable(ctx, errors.New("response before the request headers")), nil
 	}
-	return allow(p, ""), nil
+	if x.ex == nil {
+		return allow(p, nil), nil
+	}
+	return nil, nil
 }
 
-// verdict inspects the request and answers it in phase p.
-func (s *Server) verdict(ctx context.Context, x *exchange, p phase) *extprocv3.ProcessingResponse {
-	v := s.pipeline.Check(ctx, x.req)
+// onResponseHeaders inspects the response now, or waits for its body.
+func (s *Server) onResponseHeaders(ctx context.Context, x *exchange, h *extprocv3.HttpHeaders) *extprocv3.ProcessingResponse {
+	if x.resp != nil {
+		// Response headers sent twice: the response was decided on the
+		// first.
+		return allow(phaseResponseHeaders, nil)
+	}
+	x.resp = toResponse(h, x.req.Proto)
+	eos := h.GetEndOfStream()
+	buffered := x.respMode == filterv3.ProcessingMode_BUFFERED || x.respMode == filterv3.ProcessingMode_BUFFERED_PARTIAL
+	if !eos && x.ex.WantsBody(x.resp.Headers.Get("Content-Type")) {
+		x.respLimit = x.ex.BodyLimit()
+		switch {
+		case x.observe:
+			// Envoy streams the body, whatever protocol_config says.
+			x.respWaiting, x.respGather = true, true
+			return allow(phaseResponseHeaders, nil)
+		case buffered:
+			// Envoy holds the response headers until the body is
+			// answered.
+			x.respWaiting = true
+			return allow(phaseResponseHeaders, nil)
+		default:
+			// Envoy won't send the body in one piece: it goes
+			// uninspected.
+			x.resp.BodyUninspected = true
+		}
+	}
+	r := s.responseVerdict(ctx, x, phaseResponseHeaders)
+	if !eos && buffered && r.GetImmediateResponse() == nil {
+		// A body the rules don't read: Envoy needn't buffer it, nor send
+		// it (when the filter allows mode_override).
+		r.ModeOverride = &filterv3.ProcessingMode{ResponseBodyMode: filterv3.ProcessingMode_NONE}
+	}
+	return r
+}
+
+// fillResponse adds a response body message, as fillBody does for the
+// request.
+func (x *exchange) fillResponse(b *extprocv3.HttpBody) bool {
+	body := b.GetBody()
+	if x.respGather {
+		room := max(x.respLimit+1-int64(len(x.respStreamed)), 0)
+		x.respStreamed = append(x.respStreamed, body[:min(int64(len(body)), room)]...)
+		body = x.respStreamed
+		if !b.GetEndOfStream() && int64(len(body)) <= x.respLimit {
+			return false
+		}
+	}
+	x.setResponseBody(body, b.GetEndOfStream() || x.respMode == filterv3.ProcessingMode_BUFFERED)
+	return true
+}
+
+// setResponseBody sets the response's body, up to the limit. A body
+// without end_of_stream (eos) was cut, or trailers follow: it is complete
+// only when it is under the limit and has its full Content-Length. Unlike a
+// request's, the prefix of a longer one is inspected.
+func (x *exchange) setResponseBody(body []byte, eos bool) {
+	x.respWaiting = false
+	n := int64(len(body))
+	length, err := strconv.ParseInt(x.resp.Headers.Get("Content-Length"), 10, 64)
+	complete := eos || n < x.respLimit && err == nil && n == length
+	x.resp.Body = body[:min(n, x.respLimit)]
+	x.resp.BodyTruncated = n > x.respLimit || !complete
+}
+
+// responseVerdict inspects the response and answers it in phase p: a
+// denied response is replaced.
+func (s *Server) responseVerdict(ctx context.Context, x *exchange, p phase) *extprocv3.ProcessingResponse {
+	x.respDone = true
+	v := x.ex.CheckResponse(ctx, x.resp)
+	x.ex.Close()
+	x.resp.Body, x.respStreamed = nil, nil
 	if httpadapter.IsEvent(v) {
 		httpadapter.LogEvent(ctx, s.logger, s.events, x.req, x.path, v)
 	}
 	if v.Action == pipeline.ActionDeny {
 		return deny(v.Status, x.req.ID)
 	}
-	if x.setID {
-		return allow(p, x.req.ID)
+	return allow(p, nil)
+}
+
+// toResponse reads the response's status and headers. Envoy validated
+// them: a missing or odd :status is inspected as 0, and a header name that
+// isn't a token is left out.
+func toResponse(h *extprocv3.HttpHeaders, proto string) *request.Response {
+	fields := h.GetHeaders().GetHeaders()
+	resp := &request.Response{Proto: proto, Headers: make(http.Header, len(fields))}
+	for _, f := range fields {
+		name := f.GetKey()
+		value := f.GetValue()
+		if raw := f.GetRawValue(); len(raw) > 0 {
+			value = string(raw)
+		}
+		if name == ":status" {
+			if code, err := strconv.Atoi(value); err == nil && code >= 100 && code <= 999 {
+				resp.Status = code
+			}
+			continue
+		}
+		if !httpadapter.IsToken(name) {
+			continue
+		}
+		resp.Headers.Add(name, value)
 	}
-	return allow(p, "")
+	return resp
+}
+
+// verdict inspects the request and answers it in phase p. When the
+// request's policy inspects responses, its evaluation is kept for the
+// response, and, if response bodies are inspected, the request's
+// Accept-Encoding is removed.
+func (s *Server) verdict(ctx context.Context, x *exchange, p phase) *extprocv3.ProcessingResponse {
+	var v pipeline.Verdict
+	if ei, ok := s.pipeline.(pipeline.ExchangeInspector); ok {
+		v, x.ex = ei.CheckExchange(ctx, x.req)
+	} else {
+		v = s.pipeline.Check(ctx, x.req)
+	}
+	if httpadapter.IsEvent(v) {
+		httpadapter.LogEvent(ctx, s.logger, s.events, x.req, x.path, v)
+	}
+	if v.Action == pipeline.ActionDeny {
+		return deny(v.Status, x.req.ID)
+	}
+	m := &extprocv3.HeaderMutation{}
+	if x.setID {
+		m.SetHeaders = []*corev3.HeaderValueOption{header("x-request-id", x.req.ID)}
+	}
+	if x.ex != nil {
+		// The request body is no longer needed.
+		x.req.Body, x.streamed = nil, nil
+		if x.ex.BodyLimit() > 0 {
+			m.RemoveHeaders = []string{"accept-encoding"}
+		}
+	}
+	if len(m.SetHeaders) == 0 && len(m.RemoveHeaders) == 0 {
+		m = nil
+	}
+	return allow(p, m)
 }
 
 // uninspectable refuses a request the engine can't inspect: only a
@@ -459,13 +652,10 @@ const (
 	phaseResponseTrailers
 )
 
-// allow continues phase p. A non-empty id is set as X-Request-Id on the
-// request Envoy forwards.
-func allow(p phase, id string) *extprocv3.ProcessingResponse {
-	common := &extprocv3.CommonResponse{}
-	if id != "" {
-		common.HeaderMutation = &extprocv3.HeaderMutation{SetHeaders: []*corev3.HeaderValueOption{header("x-request-id", id)}}
-	}
+// allow continues phase p, with m, if set, applied to the request Envoy
+// forwards (request phases only).
+func allow(p phase, m *extprocv3.HeaderMutation) *extprocv3.ProcessingResponse {
+	common := &extprocv3.CommonResponse{HeaderMutation: m}
 	switch p {
 	case phaseRequestHeaders:
 		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestHeaders{

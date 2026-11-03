@@ -113,6 +113,24 @@ type Config struct {
 	// Routes decides which paths skip inspection entirely or skip only body
 	// inspection (tier T0). Nil inspects everything.
 	Routes *router.Table
+	// Responses configures response inspection; the zero value inspects
+	// none.
+	Responses ResponseConfig
+}
+
+// ResponseConfig configures response inspection.
+type ResponseConfig struct {
+	// Inspect turns response inspection on: CheckExchange keeps each
+	// request's evaluation for its response.
+	Inspect bool
+	// MaxBytes is how much of a response body is inspected; 0 inspects
+	// the status and headers only.
+	MaxBytes int64
+	// Oversize decides what happens to a response whose body is longer
+	// than MaxBytes (its prefix is inspected) or couldn't be inspected
+	// (request.Response.BodyUninspected). OversizeDeny replaces it in
+	// block mode with 502.
+	Oversize OversizeAction
 }
 
 // Observer receives every verdict. Implementations must be fast and safe for
@@ -131,6 +149,18 @@ type Inspector interface {
 	// is the adapter's own limit, used when nothing more specific applies.
 	BodyLimit(r *request.Request, max int64) int64
 }
+
+// ExchangeInspector is an Inspector that also inspects responses, for the
+// adapters that see them (ext_proc).
+type ExchangeInspector interface {
+	Inspector
+	// CheckExchange is Check, and returns the Exchange to inspect r's
+	// response with when it is inspected and r was let through (nil
+	// otherwise). The caller must Close it.
+	CheckExchange(ctx context.Context, r *request.Request) (Verdict, *Exchange)
+}
+
+var _ ExchangeInspector = (*Pipeline)(nil)
 
 // Admission bounds how many evaluations run at once.
 type Admission struct {
@@ -164,6 +194,8 @@ type Pipeline struct {
 	oversize OversizeAction
 	observer Observer
 	routes   *router.Table
+	// responses: Inspect, MaxBytes, and Oversize resolved for the mode.
+	responses ResponseConfig
 }
 
 // New returns a pipeline that evaluates requests with eval.
@@ -186,6 +218,11 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 		oversize: cfg.Oversize.Resolve(cfg.Mode),
 		observer: cfg.Observer,
 		routes:   cfg.Routes,
+		responses: ResponseConfig{
+			Inspect:  cfg.Responses.Inspect,
+			MaxBytes: max(cfg.Responses.MaxBytes, 0),
+			Oversize: cfg.Responses.Oversize.Resolve(cfg.Mode),
+		},
 	}
 }
 
@@ -205,25 +242,54 @@ func (p *Pipeline) Admission() *Admission { return p.adm }
 
 type outcome struct {
 	res rules.Result
+	x   rules.Exchange // the evaluation kept for the response, if any
 	err error
 }
 
 // Check inspects r and returns the verdict. It returns within the configured
 // timeout even if the evaluator does not.
 func (p *Pipeline) Check(ctx context.Context, r *request.Request) Verdict {
+	v, _ := p.checkRequest(ctx, r, false)
+	return v
+}
+
+// inspectsResponses reports whether CheckExchange keeps evaluations for
+// the response: the pipeline inspects responses and r's route isn't
+// skipped.
+func (p *Pipeline) inspectsResponses(r *request.Request) bool {
+	_, ok := p.eval.(rules.ExchangeEvaluator)
+	return ok && p.responses.Inspect && p.routes.Decide(r.RawURI) != router.SkipAll
+}
+
+// CheckExchange is Check, and also returns the Exchange to inspect r's
+// response with when the pipeline inspects responses and the request was
+// let through (nil otherwise). The caller must Close it.
+func (p *Pipeline) CheckExchange(ctx context.Context, r *request.Request) (Verdict, *Exchange) {
+	v, x := p.checkRequest(ctx, r, p.inspectsResponses(r))
+	if x == nil {
+		return v, nil
+	}
+	return v, &Exchange{p: p, x: x}
+}
+
+func (p *Pipeline) checkRequest(ctx context.Context, r *request.Request, keep bool) (Verdict, rules.Exchange) {
 	start := time.Now()
-	v := p.check(ctx, r)
+	v, x := p.check(ctx, r, keep)
 	v.Duration = time.Since(start)
 	if p.observer != nil {
 		p.observer.ObserveVerdict(v)
 	}
-	return v
+	if v.Action == ActionDeny && x != nil {
+		x.Close()
+		x = nil
+	}
+	return v, x
 }
 
-func (p *Pipeline) check(ctx context.Context, r *request.Request) Verdict {
+func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool) (Verdict, rules.Exchange) {
 	switch p.routes.Decide(r.RawURI) {
 	case router.SkipAll:
-		return Verdict{Action: ActionAllow, Reason: ReasonSkipped}
+		return Verdict{Action: ActionAllow, Reason: ReasonSkipped}, nil
 	case router.SkipBody:
 		withoutBody := *r
 		withoutBody.Body = nil
@@ -233,33 +299,48 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request) Verdict {
 	}
 
 	// A gRPC call is inspected without its body, which is binary
-	// protobuf: so it isn't oversized either.
+	// protobuf: so it isn't oversized either. Its response, binary too,
+	// isn't inspected.
 	if call := asGRPC(r); call != nil {
-		return p.evaluate(ctx, call)
+		return p.evaluate(ctx, p.request(call, false))
 	}
 	if !r.BodyTruncated {
-		return p.evaluate(ctx, r)
+		return p.evaluate(ctx, p.request(r, keep))
 	}
 	if p.oversize == OversizeDeny && p.mode == ModeBlock {
-		return p.enforce(Verdict{Reason: ReasonOversize}, http.StatusRequestEntityTooLarge)
+		return p.enforce(Verdict{Reason: ReasonOversize}, http.StatusRequestEntityTooLarge), nil
 	}
 	withoutBody := *r
 	withoutBody.Body = nil
 	withoutBody.BodyTruncated = false
-	v := p.evaluate(ctx, &withoutBody)
+	v, x := p.evaluate(ctx, p.request(&withoutBody, keep))
 	if v.Reason != ReasonNone {
-		return v
+		return v, x
 	}
 	// Headers and URI were clean, but the body went uninspected.
 	v.Reason = ReasonOversize
 	if p.oversize == OversizeDeny { // detect mode: report what block mode would do
-		return p.enforce(v, http.StatusRequestEntityTooLarge)
+		return p.enforce(v, http.StatusRequestEntityTooLarge), x
 	}
-	return v
+	return v, x
 }
 
-// evaluate runs the rule evaluator under admission control and the deadline.
-func (p *Pipeline) evaluate(ctx context.Context, r *request.Request) Verdict {
+// request returns the evaluation of r, kept for the response if keep.
+func (p *Pipeline) request(r *request.Request, keep bool) func(context.Context) outcome {
+	return func(ctx context.Context) outcome {
+		if ee, ok := p.eval.(rules.ExchangeEvaluator); ok && keep {
+			res, x, err := ee.EvaluateExchange(ctx, r)
+			return outcome{res: res, x: x, err: err}
+		}
+		res, err := p.eval.Evaluate(ctx, r)
+		return outcome{res: res, err: err}
+	}
+}
+
+// evaluate runs an evaluation under admission control and the deadline,
+// and returns the verdict and the evaluation kept for the response, if
+// any.
+func (p *Pipeline) evaluate(ctx context.Context, eval func(context.Context) outcome) (Verdict, rules.Exchange) {
 	// Admission control. Evaluations cannot be interrupted, so a timed-out
 	// evaluation keeps using CPU until it finishes. Without a bound, a flood
 	// of expensive requests saturates every core and makes all requests time
@@ -267,7 +348,7 @@ func (p *Pipeline) evaluate(ctx context.Context, r *request.Request) Verdict {
 	select {
 	case p.slots <- struct{}{}:
 	default:
-		return p.failed(ReasonOverload)
+		return p.failed(ReasonOverload), nil
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
@@ -280,7 +361,7 @@ func (p *Pipeline) evaluate(ctx context.Context, r *request.Request) Verdict {
 	// its verdict never sees its own evaluation still holding a slot.
 	done := make(chan outcome, 1)
 	go func() {
-		o := p.run(ctx, r)
+		o := run(ctx, eval)
 		<-p.slots
 		done <- o
 	}()
@@ -288,28 +369,37 @@ func (p *Pipeline) evaluate(ctx context.Context, r *request.Request) Verdict {
 	select {
 	case o := <-done:
 		if o.err != nil {
-			return p.failed(ReasonError)
+			closeExchange(o.x)
+			return p.failed(ReasonError), nil
 		}
-		return p.decide(o.res)
+		return p.decide(o.res), o.x
 	case <-ctx.Done():
+		// The late evaluation's transaction, if it keeps one, is released
+		// when it finishes.
+		go func() { closeExchange((<-done).x) }()
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return p.failed(ReasonTimeout)
+			return p.failed(ReasonTimeout), nil
 		}
-		return p.failed(ReasonCanceled)
+		return p.failed(ReasonCanceled), nil
+	}
+}
+
+func closeExchange(x rules.Exchange) {
+	if x != nil {
+		x.Close()
 	}
 }
 
 // run calls the evaluator. net/http recovers panics only on the handler
 // goroutine; a panic here (in the rule engine or a callback it runs) would
 // kill the process, so it becomes an evaluation error instead.
-func (p *Pipeline) run(ctx context.Context, r *request.Request) (o outcome) {
+func run(ctx context.Context, eval func(context.Context) outcome) (o outcome) {
 	defer func() {
 		if v := recover(); v != nil {
 			o = outcome{err: fmt.Errorf("evaluator panic: %v", v)}
 		}
 	}()
-	res, err := p.eval.Evaluate(ctx, r)
-	return outcome{res: res, err: err}
+	return eval(ctx)
 }
 
 func (p *Pipeline) decide(res rules.Result) Verdict {

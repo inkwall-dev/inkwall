@@ -33,6 +33,58 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// Phase is the part of the exchange an event is about.
+type Phase int32
+
+const (
+	Phase_PHASE_UNSPECIFIED Phase = 0
+	// The client's request.
+	Phase_PHASE_REQUEST Phase = 1
+	// The upstream's response: a deny replaced it.
+	Phase_PHASE_RESPONSE Phase = 2
+)
+
+// Enum value maps for Phase.
+var (
+	Phase_name = map[int32]string{
+		0: "PHASE_UNSPECIFIED",
+		1: "PHASE_REQUEST",
+		2: "PHASE_RESPONSE",
+	}
+	Phase_value = map[string]int32{
+		"PHASE_UNSPECIFIED": 0,
+		"PHASE_REQUEST":     1,
+		"PHASE_RESPONSE":    2,
+	}
+)
+
+func (x Phase) Enum() *Phase {
+	p := new(Phase)
+	*p = x
+	return p
+}
+
+func (x Phase) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Phase) Descriptor() protoreflect.EnumDescriptor {
+	return file_events_v1_events_proto_enumTypes[0].Descriptor()
+}
+
+func (Phase) Type() protoreflect.EnumType {
+	return &file_events_v1_events_proto_enumTypes[0]
+}
+
+func (x Phase) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Phase.Descriptor instead.
+func (Phase) EnumDescriptor() ([]byte, []int) {
+	return file_events_v1_events_proto_rawDescGZIP(), []int{0}
+}
+
 // SecurityEvent is one blocked or detected request. The request's fields
 // are attacker-controlled: they are truncated to their limits (in bytes)
 // in the engine, and must be escaped wherever they are shown.
@@ -74,7 +126,11 @@ type SecurityEvent struct {
 	// response isn't known).
 	Status int32 `protobuf:"varint,19,opt,name=status,proto3" json:"status,omitempty"`
 	// Time spent inspecting.
-	Latency       *durationpb.Duration `protobuf:"bytes,20,opt,name=latency,proto3" json:"latency,omitempty"`
+	Latency *durationpb.Duration `protobuf:"bytes,20,opt,name=latency,proto3" json:"latency,omitempty"`
+	// What was inspected: the request, or the upstream's response to it
+	// (for a policy that inspects responses). Unset in events of engines
+	// before 0.4.0: the request.
+	Phase         Phase `protobuf:"varint,21,opt,name=phase,proto3,enum=inkwall.events.v1.Phase" json:"phase,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -249,6 +305,13 @@ func (x *SecurityEvent) GetLatency() *durationpb.Duration {
 	return nil
 }
 
+func (x *SecurityEvent) GetPhase() Phase {
+	if x != nil {
+		return x.Phase
+	}
+	return Phase_PHASE_UNSPECIFIED
+}
+
 // Match is one rule that matched.
 type Match struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
@@ -256,7 +319,8 @@ type Match struct {
 	// Where it matched, e.g. ARGS:id or REQUEST_HEADERS:User-Agent; at most
 	// 128.
 	Variable string `protobuf:"bytes,2,opt,name=variable,proto3" json:"variable,omitempty"`
-	// At most 64 bytes of the matched value, redacted.
+	// At most 64 bytes of the matched value, redacted: none from a
+	// response body, which is the leaked data itself.
 	Snippet       string `protobuf:"bytes,3,opt,name=snippet,proto3" json:"snippet,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -372,7 +436,7 @@ var File_events_v1_events_proto protoreflect.FileDescriptor
 
 const file_events_v1_events_proto_rawDesc = "" +
 	"\n" +
-	"\x16events/v1/events.proto\x12\x11inkwall.events.v1\x1a\x16engine/v1/engine.proto\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xcf\x05\n" +
+	"\x16events/v1/events.proto\x12\x11inkwall.events.v1\x1a\x16engine/v1/engine.proto\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xff\x05\n" +
 	"\rSecurityEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12.\n" +
 	"\x04time\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x04time\x12\x1b\n" +
@@ -396,7 +460,8 @@ const file_events_v1_events_proto_rawDesc = "" +
 	"\n" +
 	"request_id\x18\x12 \x01(\tR\trequestId\x12\x16\n" +
 	"\x06status\x18\x13 \x01(\x05R\x06status\x123\n" +
-	"\alatency\x18\x14 \x01(\v2\x19.google.protobuf.DurationR\alatency\"V\n" +
+	"\alatency\x18\x14 \x01(\v2\x19.google.protobuf.DurationR\alatency\x12.\n" +
+	"\x05phase\x18\x15 \x01(\x0e2\x18.inkwall.events.v1.PhaseR\x05phase\"V\n" +
 	"\x05Match\x12\x17\n" +
 	"\arule_id\x18\x01 \x01(\x05R\x06ruleId\x12\x1a\n" +
 	"\bvariable\x18\x02 \x01(\tR\bvariable\x12\x18\n" +
@@ -404,7 +469,11 @@ const file_events_v1_events_proto_rawDesc = "" +
 	"\n" +
 	"EventBatch\x128\n" +
 	"\x06events\x18\x01 \x03(\v2 .inkwall.events.v1.SecurityEventR\x06events\x12\x18\n" +
-	"\adropped\x18\x02 \x01(\x04R\adroppedB7Z5github.com/inkwall-dev/inkwall/api/events/v1;eventsv1b\x06proto3"
+	"\adropped\x18\x02 \x01(\x04R\adropped*E\n" +
+	"\x05Phase\x12\x15\n" +
+	"\x11PHASE_UNSPECIFIED\x10\x00\x12\x11\n" +
+	"\rPHASE_REQUEST\x10\x01\x12\x12\n" +
+	"\x0ePHASE_RESPONSE\x10\x02B7Z5github.com/inkwall-dev/inkwall/api/events/v1;eventsv1b\x06proto3"
 
 var (
 	file_events_v1_events_proto_rawDescOnce sync.Once
@@ -418,28 +487,31 @@ func file_events_v1_events_proto_rawDescGZIP() []byte {
 	return file_events_v1_events_proto_rawDescData
 }
 
+var file_events_v1_events_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_events_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
 var file_events_v1_events_proto_goTypes = []any{
-	(*SecurityEvent)(nil),         // 0: inkwall.events.v1.SecurityEvent
-	(*Match)(nil),                 // 1: inkwall.events.v1.Match
-	(*EventBatch)(nil),            // 2: inkwall.events.v1.EventBatch
-	(*timestamppb.Timestamp)(nil), // 3: google.protobuf.Timestamp
-	(v1.Action)(0),                // 4: inkwall.engine.v1.Action
-	(v1.Reason)(0),                // 5: inkwall.engine.v1.Reason
-	(*durationpb.Duration)(nil),   // 6: google.protobuf.Duration
+	(Phase)(0),                    // 0: inkwall.events.v1.Phase
+	(*SecurityEvent)(nil),         // 1: inkwall.events.v1.SecurityEvent
+	(*Match)(nil),                 // 2: inkwall.events.v1.Match
+	(*EventBatch)(nil),            // 3: inkwall.events.v1.EventBatch
+	(*timestamppb.Timestamp)(nil), // 4: google.protobuf.Timestamp
+	(v1.Action)(0),                // 5: inkwall.engine.v1.Action
+	(v1.Reason)(0),                // 6: inkwall.engine.v1.Reason
+	(*durationpb.Duration)(nil),   // 7: google.protobuf.Duration
 }
 var file_events_v1_events_proto_depIdxs = []int32{
-	3, // 0: inkwall.events.v1.SecurityEvent.time:type_name -> google.protobuf.Timestamp
-	4, // 1: inkwall.events.v1.SecurityEvent.action:type_name -> inkwall.engine.v1.Action
-	5, // 2: inkwall.events.v1.SecurityEvent.reason:type_name -> inkwall.engine.v1.Reason
-	1, // 3: inkwall.events.v1.SecurityEvent.matches:type_name -> inkwall.events.v1.Match
-	6, // 4: inkwall.events.v1.SecurityEvent.latency:type_name -> google.protobuf.Duration
-	0, // 5: inkwall.events.v1.EventBatch.events:type_name -> inkwall.events.v1.SecurityEvent
-	6, // [6:6] is the sub-list for method output_type
-	6, // [6:6] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+	4, // 0: inkwall.events.v1.SecurityEvent.time:type_name -> google.protobuf.Timestamp
+	5, // 1: inkwall.events.v1.SecurityEvent.action:type_name -> inkwall.engine.v1.Action
+	6, // 2: inkwall.events.v1.SecurityEvent.reason:type_name -> inkwall.engine.v1.Reason
+	2, // 3: inkwall.events.v1.SecurityEvent.matches:type_name -> inkwall.events.v1.Match
+	7, // 4: inkwall.events.v1.SecurityEvent.latency:type_name -> google.protobuf.Duration
+	0, // 5: inkwall.events.v1.SecurityEvent.phase:type_name -> inkwall.events.v1.Phase
+	1, // 6: inkwall.events.v1.EventBatch.events:type_name -> inkwall.events.v1.SecurityEvent
+	7, // [7:7] is the sub-list for method output_type
+	7, // [7:7] is the sub-list for method input_type
+	7, // [7:7] is the sub-list for extension type_name
+	7, // [7:7] is the sub-list for extension extendee
+	0, // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_events_v1_events_proto_init() }
@@ -452,13 +524,14 @@ func file_events_v1_events_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_events_v1_events_proto_rawDesc), len(file_events_v1_events_proto_rawDesc)),
-			NumEnums:      0,
+			NumEnums:      1,
 			NumMessages:   3,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
 		GoTypes:           file_events_v1_events_proto_goTypes,
 		DependencyIndexes: file_events_v1_events_proto_depIdxs,
+		EnumInfos:         file_events_v1_events_proto_enumTypes,
 		MessageInfos:      file_events_v1_events_proto_msgTypes,
 	}.Build()
 	File_events_v1_events_proto = out.File

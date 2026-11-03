@@ -497,7 +497,11 @@ type Policy struct {
 	RuleSets   []*RuleSetBinding `protobuf:"bytes,8,rep,name=rule_sets,json=ruleSets,proto3" json:"rule_sets,omitempty"`
 	Exclusions []*Exclusion      `protobuf:"bytes,9,rep,name=exclusions,proto3" json:"exclusions,omitempty"`
 	// Unset: the engine's body defaults.
-	Body          *BodyConfig `protobuf:"bytes,10,opt,name=body,proto3" json:"body,omitempty"`
+	Body *BodyConfig `protobuf:"bytes,10,opt,name=body,proto3" json:"body,omitempty"`
+	// Unset: responses are not inspected. Engines before 0.4.0 ignore it
+	// and inspect requests only; the operator reports routes whose engine
+	// doesn't inspect responses.
+	Responses     *ResponseConfig `protobuf:"bytes,11,opt,name=responses,proto3" json:"responses,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -598,6 +602,13 @@ func (x *Policy) GetExclusions() []*Exclusion {
 func (x *Policy) GetBody() *BodyConfig {
 	if x != nil {
 		return x.Body
+	}
+	return nil
+}
+
+func (x *Policy) GetResponses() *ResponseConfig {
+	if x != nil {
+		return x.Responses
 	}
 	return nil
 }
@@ -1019,6 +1030,76 @@ func (x *BodyConfig) GetOnOversize() OversizeAction {
 	return OversizeAction_OVERSIZE_ACTION_UNSPECIFIED
 }
 
+// ResponseConfig configures response inspection (CRS RESPONSE-95x data
+// leakage rules, and the user's phase 3 and 4 rules). Only adapters that see
+// responses (ext_proc) inspect them.
+type ResponseConfig struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Inspect responses: their status and headers, and their body when its
+	// media type is one the rules read and max_bytes is set.
+	Inspect bool `protobuf:"varint,1,opt,name=inspect,proto3" json:"inspect,omitempty"`
+	// Bytes of a response body that are inspected; 0: the engine's default.
+	// A longer body has this prefix inspected, and gets on_oversize.
+	MaxBytes int64 `protobuf:"varint,2,opt,name=max_bytes,json=maxBytes,proto3" json:"max_bytes,omitempty"`
+	// What happens to a response whose body is longer than max_bytes, or
+	// can't be inspected (an encoding the engine can't decode): DENY
+	// replaces it with 502 in block mode.
+	OnOversize    OversizeAction `protobuf:"varint,3,opt,name=on_oversize,json=onOversize,proto3,enum=inkwall.bundle.v1.OversizeAction" json:"on_oversize,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResponseConfig) Reset() {
+	*x = ResponseConfig{}
+	mi := &file_bundle_v1_bundle_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResponseConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResponseConfig) ProtoMessage() {}
+
+func (x *ResponseConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_bundle_v1_bundle_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResponseConfig.ProtoReflect.Descriptor instead.
+func (*ResponseConfig) Descriptor() ([]byte, []int) {
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ResponseConfig) GetInspect() bool {
+	if x != nil {
+		return x.Inspect
+	}
+	return false
+}
+
+func (x *ResponseConfig) GetMaxBytes() int64 {
+	if x != nil {
+		return x.MaxBytes
+	}
+	return 0
+}
+
+func (x *ResponseConfig) GetOnOversize() OversizeAction {
+	if x != nil {
+		return x.OnOversize
+	}
+	return OversizeAction_OVERSIZE_ACTION_UNSPECIFIED
+}
+
 var File_bundle_v1_bundle_proto protoreflect.FileDescriptor
 
 const file_bundle_v1_bundle_proto_rawDesc = "" +
@@ -1038,7 +1119,7 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\bpolicies\x18\x05 \x03(\v2\x19.inkwall.bundle.v1.PolicyR\bpolicies\x127\n" +
 	"\trule_sets\x18\x06 \x03(\v2\x1a.inkwall.bundle.v1.RuleSetR\bruleSets\x12\x1c\n" +
 	"\tsuspended\x18\a \x01(\bR\tsuspended\x12'\n" +
-	"\x0fpolicy_versions\x18\b \x03(\x04R\x0epolicyVersions\"\xec\x03\n" +
+	"\x0fpolicy_versions\x18\b \x03(\x04R\x0epolicyVersions\"\xad\x04\n" +
 	"\x06Policy\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x125\n" +
 	"\x06routes\x18\x02 \x03(\v2\x1d.inkwall.bundle.v1.RouteMatchR\x06routes\x12+\n" +
@@ -1053,7 +1134,8 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"exclusions\x18\t \x03(\v2\x1c.inkwall.bundle.v1.ExclusionR\n" +
 	"exclusions\x121\n" +
 	"\x04body\x18\n" +
-	" \x01(\v2\x1d.inkwall.bundle.v1.BodyConfigR\x04body\"\x9a\x01\n" +
+	" \x01(\v2\x1d.inkwall.bundle.v1.BodyConfigR\x04body\x12?\n" +
+	"\tresponses\x18\v \x01(\v2!.inkwall.bundle.v1.ResponseConfigR\tresponses\"\x9a\x01\n" +
 	"\n" +
 	"RouteMatch\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x120\n" +
@@ -1078,6 +1160,11 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\bargument\x18\x03 \x01(\tR\bargument\"\x87\x01\n" +
 	"\n" +
 	"BodyConfig\x12\x18\n" +
+	"\ainspect\x18\x01 \x01(\bR\ainspect\x12\x1b\n" +
+	"\tmax_bytes\x18\x02 \x01(\x03R\bmaxBytes\x12B\n" +
+	"\von_oversize\x18\x03 \x01(\x0e2!.inkwall.bundle.v1.OversizeActionR\n" +
+	"onOversize\"\x8b\x01\n" +
+	"\x0eResponseConfig\x12\x18\n" +
 	"\ainspect\x18\x01 \x01(\bR\ainspect\x12\x1b\n" +
 	"\tmax_bytes\x18\x02 \x01(\x03R\bmaxBytes\x12B\n" +
 	"\von_oversize\x18\x03 \x01(\x0e2!.inkwall.bundle.v1.OversizeActionR\n" +
@@ -1116,7 +1203,7 @@ func file_bundle_v1_bundle_proto_rawDescGZIP() []byte {
 }
 
 var file_bundle_v1_bundle_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_bundle_v1_bundle_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_bundle_v1_bundle_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_bundle_v1_bundle_proto_goTypes = []any{
 	(PathMatchType)(0),            // 0: inkwall.bundle.v1.PathMatchType
 	(Mode)(0),                     // 1: inkwall.bundle.v1.Mode
@@ -1132,29 +1219,32 @@ var file_bundle_v1_bundle_proto_goTypes = []any{
 	(*RuleSet)(nil),               // 11: inkwall.bundle.v1.RuleSet
 	(*Exclusion)(nil),             // 12: inkwall.bundle.v1.Exclusion
 	(*BodyConfig)(nil),            // 13: inkwall.bundle.v1.BodyConfig
-	(*timestamppb.Timestamp)(nil), // 14: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),   // 15: google.protobuf.Duration
+	(*ResponseConfig)(nil),        // 14: inkwall.bundle.v1.ResponseConfig
+	(*timestamppb.Timestamp)(nil), // 15: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),   // 16: google.protobuf.Duration
 }
 var file_bundle_v1_bundle_proto_depIdxs = []int32{
-	14, // 0: inkwall.bundle.v1.Bundle.created_at:type_name -> google.protobuf.Timestamp
+	15, // 0: inkwall.bundle.v1.Bundle.created_at:type_name -> google.protobuf.Timestamp
 	7,  // 1: inkwall.bundle.v1.Bundle.policies:type_name -> inkwall.bundle.v1.Policy
 	11, // 2: inkwall.bundle.v1.Bundle.rule_sets:type_name -> inkwall.bundle.v1.RuleSet
 	8,  // 3: inkwall.bundle.v1.Policy.routes:type_name -> inkwall.bundle.v1.RouteMatch
 	1,  // 4: inkwall.bundle.v1.Policy.mode:type_name -> inkwall.bundle.v1.Mode
 	2,  // 5: inkwall.bundle.v1.Policy.failure_mode:type_name -> inkwall.bundle.v1.FailureMode
-	15, // 6: inkwall.bundle.v1.Policy.timeout:type_name -> google.protobuf.Duration
+	16, // 6: inkwall.bundle.v1.Policy.timeout:type_name -> google.protobuf.Duration
 	10, // 7: inkwall.bundle.v1.Policy.rule_sets:type_name -> inkwall.bundle.v1.RuleSetBinding
 	12, // 8: inkwall.bundle.v1.Policy.exclusions:type_name -> inkwall.bundle.v1.Exclusion
 	13, // 9: inkwall.bundle.v1.Policy.body:type_name -> inkwall.bundle.v1.BodyConfig
-	9,  // 10: inkwall.bundle.v1.RouteMatch.path:type_name -> inkwall.bundle.v1.PathMatch
-	0,  // 11: inkwall.bundle.v1.PathMatch.type:type_name -> inkwall.bundle.v1.PathMatchType
-	3,  // 12: inkwall.bundle.v1.RuleSet.builtin:type_name -> inkwall.bundle.v1.BuiltinRuleSet
-	4,  // 13: inkwall.bundle.v1.BodyConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
-	14, // [14:14] is the sub-list for method output_type
-	14, // [14:14] is the sub-list for method input_type
-	14, // [14:14] is the sub-list for extension type_name
-	14, // [14:14] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	14, // 10: inkwall.bundle.v1.Policy.responses:type_name -> inkwall.bundle.v1.ResponseConfig
+	9,  // 11: inkwall.bundle.v1.RouteMatch.path:type_name -> inkwall.bundle.v1.PathMatch
+	0,  // 12: inkwall.bundle.v1.PathMatch.type:type_name -> inkwall.bundle.v1.PathMatchType
+	3,  // 13: inkwall.bundle.v1.RuleSet.builtin:type_name -> inkwall.bundle.v1.BuiltinRuleSet
+	4,  // 14: inkwall.bundle.v1.BodyConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
+	4,  // 15: inkwall.bundle.v1.ResponseConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
+	16, // [16:16] is the sub-list for method output_type
+	16, // [16:16] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_bundle_v1_bundle_proto_init() }
@@ -1172,7 +1262,7 @@ func file_bundle_v1_bundle_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bundle_v1_bundle_proto_rawDesc), len(file_bundle_v1_bundle_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   9,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

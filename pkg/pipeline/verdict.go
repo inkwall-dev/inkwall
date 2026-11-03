@@ -109,4 +109,8 @@ type Verdict struct {
 	Duration time.Duration
 	// Policy is the policy that decided, in bundle mode ("namespace/name").
 	Policy string
+	// Response reports a verdict on the upstream's response, not on the
+	// request: a deny replaces the response, and AnomalyScore is the CRS
+	// outbound score.
+	Response bool
 }

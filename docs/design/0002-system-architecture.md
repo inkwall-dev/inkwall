@@ -694,7 +694,8 @@ Target:
 
 **Built:**
 
-- Engine: `inkwall_requests_total`, `_check_duration_seconds`, `_bundle_version`,
+- Engine: `inkwall_requests_total`, `_check_duration_seconds`, `inkwall_responses_total`,
+  `_response_check_duration_seconds` (policies that inspect responses), `_bundle_version`,
   `_bundle_updates_total`, `_operator_connected`, `_evaluations_in_flight`, `_evaluation_slots`,
   `_engine_events_total`, `_engine_events_dropped_total`.
 - Operator: `inkwall_operator_bundle_version`, `_operator_bundle_compressed_bytes`,

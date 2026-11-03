@@ -70,6 +70,10 @@ func New(src Source, req *request.Request, path string, v pipeline.Verdict, now 
 		UserAgent:          truncate(req.Headers.Get("User-Agent"), maxUserAgent),
 		RequestId:          truncate(req.ID, maxRequestID),
 		Latency:            durationpb.New(v.Duration),
+		Phase:              eventsv1.Phase_PHASE_REQUEST,
+	}
+	if v.Response {
+		ev.Phase = eventsv1.Phase_PHASE_RESPONSE
 	}
 	if src.BundleVersion != nil {
 		ev.BundleVersion = src.BundleVersion()
@@ -96,6 +100,9 @@ func snippet(variable, value string) string {
 	name, key, _ := strings.Cut(variable, ":")
 	switch strings.ToUpper(name) {
 	case "REQUEST_COOKIES", "REQUEST_COOKIES_NAMES", "RESPONSE_COOKIES":
+		return ""
+	case "RESPONSE_BODY":
+		// What a data leakage rule matched there is the leaked data.
 		return ""
 	case "REQUEST_HEADERS", "RESPONSE_HEADERS":
 		for _, h := range Redacted {

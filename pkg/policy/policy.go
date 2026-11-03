@@ -30,6 +30,11 @@ import (
 // body.maxBytes allows; adapters in bundle mode accept bodies up to it.
 const MaxBodyBytes = 10 << 20
 
+// DefaultResponseBytes is the response body a policy that inspects
+// responses inspects when it sets no limit: Coraza's recommended
+// SecResponseBodyLimit. A policy may inspect up to MaxBodyBytes.
+const DefaultResponseBytes = 512 << 10
+
 // Options are the engine-wide settings every policy shares.
 type Options struct {
 	// Admission bounds concurrent evaluations across all policies.
@@ -92,6 +97,32 @@ func (s *Set) Check(ctx context.Context, r *request.Request) pipeline.Verdict {
 	v.Policy = p.ID
 	p.counter.Observe(v)
 	return v
+}
+
+var _ pipeline.ExchangeInspector = (*Set)(nil)
+
+// CheckExchange implements pipeline.ExchangeInspector. The response's
+// verdict names the policy and is counted as its own denied or detected
+// request, not as another allowed one.
+func (s *Set) CheckExchange(ctx context.Context, r *request.Request) (pipeline.Verdict, *pipeline.Exchange) {
+	if s.suspended {
+		return pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonSuspended}, nil
+	}
+	p := s.Lookup(r)
+	if p == nil {
+		return pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy}, nil
+	}
+	v, x := p.pipeline.CheckExchange(ctx, r)
+	v.Policy = p.ID
+	p.counter.Observe(v)
+	if x != nil {
+		x.OnVerdict(p.ID, func(v pipeline.Verdict) {
+			if v.Action != pipeline.ActionAllow {
+				p.counter.Observe(v)
+			}
+		})
+	}
+	return v, x
 }
 
 // BodyLimit implements pipeline.Inspector: the policy's body limit, or 0
@@ -191,14 +222,20 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 		} else if body.GetMaxBytes() > 0 {
 			bodyLimit = body.GetMaxBytes()
 		}
-		switch body.GetOnOversize() {
-		case bundlev1.OversizeAction_OVERSIZE_ACTION_ALLOW:
-			oversize = pipeline.OversizeAllow
-		case bundlev1.OversizeAction_OVERSIZE_ACTION_DENY:
-			oversize = pipeline.OversizeDeny
-		}
+		oversize = oversizeAction(body.GetOnOversize())
 	}
 	cfg.BodyLimit = int(bodyLimit)
+
+	var responses pipeline.ResponseConfig
+	if rc := bp.GetResponses(); rc.GetInspect() {
+		responses.Inspect = true
+		responses.MaxBytes = DefaultResponseBytes
+		if n := rc.GetMaxBytes(); n > 0 {
+			responses.MaxBytes = min(n, MaxBodyBytes)
+		}
+		responses.Oversize = oversizeAction(rc.GetOnOversize())
+		cfg.ResponseBodyLimit = int(responses.MaxBytes)
+	}
 
 	// The compiled rules, shared by every policy with the same key whatever
 	// its exclusions, then this policy's exclusions on top.
@@ -228,6 +265,7 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 		Oversize:  oversize,
 		Observer:  o.Observer,
 		Routes:    routes,
+		Responses: responses,
 	}
 	if bp.GetMode() == bundlev1.Mode_MODE_BLOCK {
 		pc.Mode = pipeline.ModeBlock
@@ -242,6 +280,16 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 		pc.Timeout = t.AsDuration()
 	}
 	return &Policy{ID: bp.GetId(), pipeline: pipeline.New(eval, pc), bodyLimit: bodyLimit}, key, nil
+}
+
+func oversizeAction(a bundlev1.OversizeAction) pipeline.OversizeAction {
+	switch a {
+	case bundlev1.OversizeAction_OVERSIZE_ACTION_ALLOW:
+		return pipeline.OversizeAllow
+	case bundlev1.OversizeAction_OVERSIZE_ACTION_DENY:
+		return pipeline.OversizeDeny
+	}
+	return pipeline.OversizeAuto
 }
 
 // Evaluators caches compiled rule sets by configuration (coraza.Config.Key,
@@ -323,6 +371,17 @@ func (h *Holder) Check(ctx context.Context, r *request.Request) pipeline.Verdict
 		return pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy}
 	}
 	return s.Check(ctx, r)
+}
+
+var _ pipeline.ExchangeInspector = (*Holder)(nil)
+
+// CheckExchange implements pipeline.ExchangeInspector.
+func (h *Holder) CheckExchange(ctx context.Context, r *request.Request) (pipeline.Verdict, *pipeline.Exchange) {
+	s := h.set.Load()
+	if s == nil {
+		return h.Check(ctx, r), nil
+	}
+	return s.CheckExchange(ctx, r)
 }
 
 // BodyLimit implements pipeline.Inspector.
