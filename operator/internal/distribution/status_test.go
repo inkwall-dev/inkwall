@@ -187,3 +187,37 @@ func TestEnforcedOutdatedEngine(t *testing.T) {
 		t.Errorf("behind and outdated: Enforced %+v, want EnginesBehind", c)
 	}
 }
+
+// An engine before 0.4.0 ignores spec.body.grpcMessages, and leaves gRPC
+// messages uninspected: a policy that sets Inspect isn't Enforced while one
+// is connected (#275).
+func TestEnforcedOutdatedEngineGRPCMessages(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     *wafv1alpha1.BodySpec
+		versions []string
+		reason   string
+	}{
+		{"0.3.1 engine", &wafv1alpha1.BodySpec{GRPCMessages: wafv1alpha1.GRPCMessagesInspect}, []string{"0.4.0", "0.3.1"}, ReasonEnginesOutdated},
+		{"new engines", &wafv1alpha1.BodySpec{GRPCMessages: wafv1alpha1.GRPCMessagesInspect}, []string{"0.4.0", "v0.4.1"}, ReasonEnforced},
+		{"Skip", &wafv1alpha1.BodySpec{GRPCMessages: wafv1alpha1.GRPCMessagesSkip}, []string{"0.3.1"}, ReasonEnforced},
+		{"no body", nil, []string{"0.3.1"}, ReasonEnforced},
+	} {
+		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
+		p.Spec.Body = tc.body
+		p.Status.BundleVersion = 3
+		var engines []Engine
+		for i, v := range tc.versions {
+			engines = append(engines, Engine{ID: fmt.Sprintf("e%d", i), PodNamespace: "edge", PodName: fmt.Sprintf("traefik-%d", i), EngineVersion: v, Applied: 3})
+		}
+		conds, _ := enforcedConditions(p, 3, false, engines, 0)
+		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
+		if c == nil || c.Reason != tc.reason {
+			t.Errorf("%s: Enforced %+v, want %s", tc.name, c, tc.reason)
+			continue
+		}
+		if tc.reason == ReasonEnginesOutdated && !strings.Contains(c.Message, "spec.body.grpcMessages") {
+			t.Errorf("%s: message %q doesn't name the field", tc.name, c.Message)
+		}
+	}
+}

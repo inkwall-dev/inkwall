@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -455,5 +456,47 @@ func TestStats(t *testing.T) {
 	}
 	if set.policies[0].counter != next.policies[0].counter {
 		t.Error("shop/site has a new counter in the new bundle")
+	}
+}
+
+// TestGRPCMessages: body.grpc_messages turns on the inspection of the
+// text in a gRPC call's messages, for that policy only.
+func TestGRPCMessages(t *testing.T) {
+	// helloworld.HelloRequest{name: "1' OR '1'='1' -- "}, framed.
+	const name = "1' OR '1'='1' -- "
+	msg := append([]byte{0x0a, byte(len(name))}, name...)
+	body := append([]byte{0, 0, 0, 0, byte(len(msg))}, msg...)
+	call := func() *request.Request {
+		r := req("shop.example.com", "/helloworld.Greeter/SayHello")
+		r.Method = "POST"
+		r.Proto = "HTTP/2.0"
+		r.Headers.Set("Content-Type", "application/grpc")
+		r.Headers.Set("Te", "trailers")
+		r.Body = body
+		return r
+	}
+	for _, on := range []bool{false, true} {
+		b := testBundle()
+		b.Policies[0].Body = &bundlev1.BodyConfig{Inspect: true, GrpcMessages: on}
+		set, err := Compile(b, Options{BodyLimit: 65536})
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := set.Check(context.Background(), call())
+		if denied := v.Action == pipeline.ActionDeny; denied != on {
+			t.Errorf("grpc_messages %v: %s/%s, rules %v", on, v.Action, v.Reason, v.RuleIDs)
+		}
+	}
+
+	// An exclusion names a field by its number, as an argument.
+	b := testBundle()
+	b.Policies[0].Body = &bundlev1.BodyConfig{Inspect: true, GrpcMessages: true}
+	b.Policies[0].Exclusions = []*bundlev1.Exclusion{{RuleIds: []uint32{942100}, Argument: "1"}}
+	set, err := Compile(b, Options{BodyLimit: 65536})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := set.Check(context.Background(), call()); v.Action == pipeline.ActionDeny || slices.Contains(v.RuleIDs, 942100) {
+		t.Errorf("field 1 excluded from 942100: %s/%s, rules %v", v.Action, v.Reason, v.RuleIDs)
 	}
 }

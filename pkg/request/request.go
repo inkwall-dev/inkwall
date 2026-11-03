@@ -50,4 +50,14 @@ type Request struct {
 	// passes it to the rules without its body, and the rules allow its
 	// content type.
 	GRPC bool
+	// GRPCText is the text the pipeline found in a gRPC call's messages,
+	// which the rules see as form arguments (ARGS_POST), named by the
+	// path of field numbers ("2.1").
+	GRPCText []Arg
+}
+
+// Arg is a named value.
+type Arg struct {
+	Name  string
+	Value string
 }
