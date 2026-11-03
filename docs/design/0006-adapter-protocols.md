@@ -98,7 +98,8 @@ a Unix socket). It answers the stream of one request as follows:
 - **Deny:** an immediate response with the verdict's status (403, 413, 503, ...), the same
   plain-text body as the other adapters, and `x-request-id`. A gRPC call gets a gRPC status
   instead ([§7](#7-denying-grpc-calls)).
-- **Later stages** (response headers or body, trailers), if the filter sends them: CONTINUE.
+- **Later stages** (response headers or body, trailers), if the filter sends them: CONTINUE, unless
+  the request's policy inspects responses ([response inspection](#response-inspection-v040)).
 - **`observability_mode`:** the request is inspected and logged, and nothing is answered. Envoy
   sends the body in chunks there (`STREAMED`, the only body mode it allows, whatever
   `protocol_config` says): the engine gathers them up to the policy's limit, decides at the end of the body or past the limit (`body.onOversize`), and then closes the
@@ -137,6 +138,117 @@ the headers until the engine answers the body. A route whose policies are all in
 fail open (the engine never rejects its requests) gets `observability_mode` (Envoy Gateway's
 `shadowMode`) and a `STREAMED` body instead, and no buffer limit: Envoy forwards the request
 without waiting for the engine.
+
+### Response inspection (v0.4.0)
+
+Decided for v0.4.0 ([#274](https://github.com/inkwall-dev/inkwall/issues/274)). Responses are
+inspected for data leaks: SQL errors, stack traces, directory listings, source code, and whatever
+the user's own rules look for (a secret, a leaked system prompt).
+
+**Policy API.** `WAFPolicy.spec.responses`, off unless set, so nothing changes for existing
+policies:
+
+```yaml
+responses:
+  inspect: true        # default false
+  maxBytes: 65536      # body bytes inspected; default 64 KiB, at most 10 MiB
+  onOversize: Allow    # Allow | Deny; unset: Deny in Block mode, Allow in Detect mode
+```
+
+The bundle carries it as `Policy.responses` (`ResponseConfig`). Engines before 0.4.0 ignore the
+field.
+
+**Rules.** The request's Coraza transaction is kept open for its response, and the response runs
+phases 3 (status and headers) and 4 (body): the response rules see what the request rules set
+(paranoia level, anomaly scores, the user's variables). With the CRS that is `RESPONSE-950` to
+`956` (data leakage: generic, SQL, Java, PHP, IIS, web shells, Ruby), scored into the outbound
+anomaly score and blocked by `RESPONSE-959` at `tx.outbound_anomaly_score_threshold` (4 by
+default: one critical match). The user's `WAFRuleSet` rules on `RESPONSE_*` variables run too. The
+response's verdict lists only what matched the response. A request the rules interrupted keeps no
+transaction: in Block mode it was denied, and in Detect mode its event stands and its response
+isn't inspected.
+
+**What is read.** The status and headers always. The body only when its media type is one the
+rules read (`text/plain`, `text/html`, `text/xml`, `application/json`, `application/xml`,
+`application/problem+json`; Coraza's `SecResponseBodyMimeType` is set to the same list): an
+image, a download, Server-Sent Events or a gRPC stream passes without its body inspected, and
+isn't oversized. A body over `maxBytes` has its prefix inspected (unlike a request body, a prefix
+is meaningful to data leakage rules: no parser needs the whole), and then gets `onOversize`. A
+`gzip` or `deflate` body is decoded, up to `maxBytes`, before the rules see it (the CRS skips
+encoded bodies); another encoding (`br`, `zstd`) goes uninspected and gets `onOversize`. To keep
+upstream bodies readable, the engine removes `Accept-Encoding` from requests on routes whose
+response bodies it inspects (when Envoy waits for it; not in observability mode).
+
+**Detect and block.** Detect mode logs the event (`phase: response`) and changes nothing. Block
+mode replaces the response with the fixed plain-text error the request denials use and the
+rule's status (403 for the CRS), with `x-request-id`; an oversized or undecodable body under
+`onOversize: Deny` is replaced with **502**. Events carry `phase` (`PHASE_RESPONSE`), and never a
+snippet of the response body: what a leak rule matched there is the leaked data.
+
+**Failure mode and limits.** The response is evaluated under the policy's timeout, the engine's
+admission limit and its failure mode, as a request is: a timeout or overload replaces the response
+with 503 when the policy fails closed (Block mode's default), and lets it through when it fails
+open. Each response is evaluated once.
+
+**ext_proc.** Envoy sends the response headers, and the body with `response_body_mode:
+BUFFERED_PARTIAL`; it holds the response headers until the body is answered, so the engine can
+still replace the response with an immediate response. A body the rules don't read is decided at
+the headers, whose answer sets `mode_override` (`response_body_mode: NONE`) so Envoy neither
+buffers nor sends it; this needs the filter's `allow_mode_override`, and without it the body is
+sent and continued. So is a response that isn't inspected at all, though Envoy sends it (another
+policy on the route inspects responses, or Envoy's configuration asks for them). A body Envoy cut (no `end_of_stream`, and not its full `Content-Length`) is
+handled as oversized; a body Envoy doesn't send in one piece (`NONE`, `STREAMED` outside
+observability mode) goes uninspected, as oversized. In observability mode the body comes in chunks,
+gathered up to the limit as for requests, and the stream is closed once the response is decided. There
+Envoy doesn't hold the request, so the upstream may answer before the client has sent all of its
+body: the response's messages are queued (up to 10 MiB of body) until the request is decided on
+its whole body, then handled.
+The kept transaction is released when the response is decided or the stream ends. A WebSocket handshake allowed on its headers (CONTINUE_AND_REPLACE) keeps
+none: its 101 is continued, and the upgraded stream's data is never inspected.
+
+**Envoy Gateway (operator).** Only routes whose policies inspect responses get
+`processingMode.response` (`body: BufferedPartial`, `Streamed` in shadow mode) and
+`allowModeOverride: true` in their `EnvoyExtensionPolicy`; other routes keep the response stages
+`SKIP`. Envoy's buffer is the Gateway's `ClientTrafficPolicy` limit (10 MiB), above any
+`maxBytes`.
+
+**Traefik.** ForwardAuth never sees the response, so Traefik can't inspect responses yet (a
+Traefik middleware plugin or the engine's reverse proxy in front of the app are the options for
+later). A policy with `responses.inspect` on a Traefik route is not silently half-enforced: the
+operator reports it on the policy (`Programmed` stays true for the requests it inspects, with a
+`ResponsesNotInspected` condition naming the routes), and the docs say Envoy Gateway is required.
+
+**Latency and memory.** A route that inspects responses adds one evaluation per response
+(phases 3 and 4; the CRS response rules are a few dozen, mostly `@pmFromFile` and `@rx` on the
+body) and, in Block mode, Envoy holds the response until the engine answers: time to first byte
+grows by the body's buffering and its evaluation. `BenchmarkEvaluateExchange` (a request and its
+response) against `BenchmarkEvaluate/benign_get` (the request alone), on one loaded 12-thread
+machine (2026-11-03): headers only (204) about 1× (noise), an 8 KB JSON body 5.5×, a 15 KB HTML page 8.5×, a
+256 KB one 160× (220 ms there; the request alone took 1.4 ms). The cost grows with the body:
+0.85 ms per KiB of HTML there, roughly 0.3 ms on an unloaded machine (scaled by
+[0001](0001-performance-first-architecture.md#31-measured-baseline-2026-10-03)'s 0.5 ms request
+baseline). So the default limit is 64 KiB, as for
+request bodies, not Coraza's 512 KiB, which would take most of the default 250 ms deadline: a
+policy that raises `maxBytes` should raise `timeout` with it, or large responses get the failure
+mode (503 in Block mode). A body the rules don't read (an image) costs what headers do. Memory per in-flight request on such a route is
+the kept Coraza transaction (with its request body buffer, up to `body.maxBytes`) plus the
+response prefix (up to `responses.maxBytes`), in the engine, and Envoy's buffered response. The
+evaluation holds an admission slot only while it runs, not while the upstream answers. Response
+verdicts are counted apart: `inkwall_responses_total{action,reason}` and
+`inkwall_response_check_duration_seconds`.
+
+**Flags.** Without the operator, `inkwall-engine ext-proc` takes `--inspect-responses`,
+`--max-response-bytes` (64 KiB by default) and `--oversize-response` (`auto`, `allow`, `deny`), the
+policy's `responses` fields. Only `ext-proc` defines them: the other adapters never see a response,
+so none can be told to inspect one. With `--operator` they are refused, as the other policy flags.
+
+**Built (engine):** the bundle field, the Coraza response phases, the pipeline's `Exchange`
+(`CheckExchange`, `CheckResponse`), decoding, events and metrics, the ext_proc response stages
+(with `FuzzExtProcResponse`), and the flags, so raw Envoy can inspect responses with the policy
+from flags (`make raw-envoy-e2e` checks a leaked SQL error is replaced in block mode and logged in
+detect mode). **Not yet:** the CRD field and the operator's wiring and status (Envoy Gateway's
+response processing mode, the Traefik condition); until then no operator-made bundle sets
+`responses`.
 
 ## 3. forward-auth (Traefik `ForwardAuth`, nginx `auth_request`)
 
@@ -268,7 +380,7 @@ The messages themselves aren't read yet ([gRPC](../grpc.md)).
 | | Transport | Body | Response | Proxy waits? | For | Status |
 |---|---|---|---|---|---|---|
 | ext_authz | gRPC call | Buffered, optional | No | Yes | Envoy fallback | Not yet |
-| ext_proc | gRPC stream | Buffered (streamed in observability mode) | Yes (not used yet) | Yes, or no (observability mode) | Envoy Gateway, Envoy, Istio, Contour | Built (Envoy Gateway) |
+| ext_proc | gRPC stream | Buffered (streamed in observability mode) | Yes (policies with `responses`) | Yes, or no (observability mode) | Envoy Gateway, Envoy, Istio, Contour | Built (Envoy Gateway) |
 | forward-auth | HTTP subrequest | If forwarded | No | Yes | Traefik (nginx `auth_request` speaks it too) | Built |
 | SPOE | SPOP | Yes | Possible | Yes, or no (asynchronous) | HAProxy | Not yet |
 | `/v1/check` | HTTP (gRPC planned) | Yes | No | Yes | CLI, tests; a Traefik plugin planned | Built |

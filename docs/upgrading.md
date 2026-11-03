@@ -41,6 +41,12 @@ What's new in 0.4.0:
   default: try it in `Detect` mode first. See [inspecting the messages](grpc.md#inspecting-the-messages).
   The chart upgrades the CRDs with it; if you install them yourself, apply 0.4.0's. A policy
   that sets it isn't `Enforced` (`EnginesOutdated`) while an engine before 0.4.0 runs it.
+- **Response inspection (engine).** `inkwall-engine ext-proc --inspect-responses` inspects the
+  app's responses too, for data leaks (the CRS's `RESPONSE-95x` rules): see
+  [responses](raw-envoy.md#responses) for raw Envoy. It is off unless you set it. Security events get
+  a `phase` field (`request` or `response`), and the engine two metrics,
+  `inkwall_responses_total` and `inkwall_response_check_duration_seconds`. Not yet in `WAFPolicy`
+  or through Envoy Gateway; Traefik's ForwardAuth can't see responses.
 
 What changes by itself in 0.4.0:
 
@@ -52,9 +58,6 @@ What changes by itself in 0.4.0:
   `webSocket` isn't `Enforced` while an engine before 0.4.0 runs it, since that engine ignores the
   field. Restart Traefik and the Envoy Gateway proxies after the upgrade, so their engines are
   0.4.0. Events and `inkwall_requests_total` have a new reason, `websocket`.
-
-What changes by itself in 0.4.0:
-
 - **A denied gRPC call gets a gRPC status.** A request with a gRPC `Content-Type` that the engine
   denies is answered with `grpc-status` 7 (`PERMISSION_DENIED`) and a `grpc-message` naming the
   request ID, not a plain-text 403. Through Envoy Gateway, raw Envoy and the engine's reverse

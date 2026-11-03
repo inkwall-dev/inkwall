@@ -18,9 +18,11 @@ import (
 
 // Metrics records verdicts. It implements pipeline.Observer.
 type Metrics struct {
-	registry *prometheus.Registry
-	requests *prometheus.CounterVec
-	duration prometheus.Histogram
+	registry  *prometheus.Registry
+	requests  *prometheus.CounterVec
+	duration  prometheus.Histogram
+	responses *prometheus.CounterVec
+	respTime  prometheus.Histogram
 }
 
 var _ pipeline.Observer = (*Metrics)(nil)
@@ -48,13 +50,29 @@ func NewMetrics(adapter string) *Metrics {
 			// 50µs to ~0.8s.
 			Buckets: prometheus.ExponentialBuckets(50e-6, 2, 15),
 		}),
+		responses: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name:        "inkwall_responses_total",
+			Help:        "Responses checked, for policies that inspect responses, by action (allow, deny, log) and reason, as inkwall_requests_total. Reason oversize means part or all of the body was not inspected.",
+			ConstLabels: labels,
+		}, []string{"action", "reason"}),
+		respTime: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:        "inkwall_response_check_duration_seconds",
+			Help:        "Time spent checking a response, including queueing for an evaluation slot.",
+			ConstLabels: labels,
+			Buckets:     prometheus.ExponentialBuckets(50e-6, 2, 15),
+		}),
 	}
-	reg.MustRegister(m.requests, m.duration)
+	reg.MustRegister(m.requests, m.duration, m.responses, m.respTime)
 	return m
 }
 
 // ObserveVerdict records one verdict.
 func (m *Metrics) ObserveVerdict(v pipeline.Verdict) {
+	if v.Response {
+		m.responses.WithLabelValues(v.Action.String(), v.Reason.String()).Inc()
+		m.respTime.Observe(v.Duration.Seconds())
+		return
+	}
 	m.requests.WithLabelValues(v.Action.String(), v.Reason.String()).Inc()
 	m.duration.Observe(v.Duration.Seconds())
 }

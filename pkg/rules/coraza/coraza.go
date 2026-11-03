@@ -79,6 +79,10 @@ type Config struct {
 	// body the caller will pass, so bodies within the caller's limit are
 	// neither rejected by Coraza nor buffered to temporary files.
 	BodyLimit int
+	// ResponseBodyLimit, if positive, sets Coraza's response body limit
+	// (SecResponseBodyLimit) above the largest response body the caller
+	// will pass, so the whole of it is inspected.
+	ResponseBodyLimit int
 	// DisabledRuleGroups lists CRS attack families (keys of RuleGroups) to
 	// remove. Only disable families the protected application cannot be
 	// vulnerable to.
@@ -99,8 +103,8 @@ type Config struct {
 // OnMatch and Exclusions are not part of it.
 func (cfg Config) Key() [sha256.Size]byte {
 	h := sha256.New()
-	fmt.Fprintf(h, "pl=%d\nthreshold=%d\nargs=%d\nbody=%d\ncrs=%v\ngroups=%q\n",
-		cfg.ParanoiaLevel, cfg.InboundAnomalyThreshold, cfg.MaxArgs, cfg.BodyLimit, !cfg.DisableCRS, cfg.DisabledRuleGroups)
+	fmt.Fprintf(h, "pl=%d\nthreshold=%d\nargs=%d\nbody=%d\nresponse=%d\ncrs=%v\ngroups=%q\n",
+		cfg.ParanoiaLevel, cfg.InboundAnomalyThreshold, cfg.MaxArgs, cfg.BodyLimit, cfg.ResponseBodyLimit, !cfg.DisableCRS, cfg.DisabledRuleGroups)
 	// Lengths first, so no text can pass for a boundary.
 	fmt.Fprintf(h, "before=%d\n%s\nafter=%d\n%s", len(cfg.DirectivesBeforeCRS), cfg.DirectivesBeforeCRS, len(cfg.Directives), cfg.Directives)
 	var k [sha256.Size]byte
@@ -554,6 +558,14 @@ func buildDirectives(cfg Config) (string, error) {
 	if cfg.BodyLimit > 0 {
 		fmt.Fprintf(&b, "SecRequestBodyLimit %d\nSecRequestBodyInMemoryLimit %d\n", cfg.BodyLimit, cfg.BodyLimit)
 	}
+	// The response bodies the rules read are those the adapters buffer
+	// (rules.ResponseBodyTypes): JSON and XML APIs too, not only
+	// coraza.conf-recommended's text/plain, text/html and text/xml. One
+	// byte over the limit, as Coraza flags a body that reaches it.
+	fmt.Fprintf(&b, "SecResponseBodyMimeType %s\n", strings.Join(rules.ResponseBodyTypes, " "))
+	if cfg.ResponseBodyLimit > 0 {
+		fmt.Fprintf(&b, "SecResponseBodyLimit %d\n", cfg.ResponseBodyLimit+1)
+	}
 	b.WriteString(argumentLimitRules)
 	// Enforce, and leave audit logging to Inkwall's own event pipeline.
 	b.WriteString("SecRuleEngine On\n")
@@ -591,9 +603,39 @@ func buildDirectives(cfg Config) (string, error) {
 
 // Evaluate runs the request through phases 1 and 2 (headers and body).
 func (e *Evaluator) Evaluate(_ context.Context, r *request.Request) (rules.Result, error) {
+	res, tx, err := e.evaluate(r)
+	if tx != nil {
+		closeTx(tx)
+	}
+	return res, err
+}
+
+var _ rules.ExchangeEvaluator = (*Evaluator)(nil)
+
+// EvaluateExchange implements rules.ExchangeEvaluator: the transaction
+// stays open for the response, unless the request was interrupted.
+func (e *Evaluator) EvaluateExchange(_ context.Context, r *request.Request) (rules.Result, rules.Exchange, error) {
+	res, tx, err := e.evaluate(r)
+	if err != nil || res.Interrupted || tx == nil {
+		if tx != nil {
+			closeTx(tx)
+		}
+		return res, nil, err
+	}
+	return res, &exchange{tx: tx, seen: len(tx.MatchedRules())}, nil
+}
+
+func closeTx(tx types.Transaction) {
+	tx.ProcessLogging()
+	_ = tx.Close()
+}
+
+// evaluate runs phases 1 and 2, and returns the transaction (nil if none
+// was made), which the caller closes.
+func (e *Evaluator) evaluate(r *request.Request) (rules.Result, types.Transaction, error) {
 	waf, err := e.wafFor(r)
 	if err != nil {
-		return rules.Result{}, err
+		return rules.Result{}, nil, err
 	}
 	var tx types.Transaction
 	if r.ID != "" {
@@ -601,13 +643,9 @@ func (e *Evaluator) Evaluate(_ context.Context, r *request.Request) (rules.Resul
 	} else {
 		tx = waf.NewTransaction()
 	}
-	defer func() {
-		tx.ProcessLogging()
-		_ = tx.Close()
-	}()
 
 	if tx.IsRuleEngineOff() {
-		return rules.Result{}, nil
+		return rules.Result{}, tx, nil
 	}
 
 	client := ""
@@ -618,7 +656,7 @@ func (e *Evaluator) Evaluate(_ context.Context, r *request.Request) (rules.Resul
 	tx.ProcessURI(r.RawURI, r.Method, r.Proto)
 	if e.exclusions != nil {
 		if err := e.exclusions.apply(tx); err != nil {
-			return rules.Result{}, err
+			return rules.Result{}, tx, err
 		}
 	}
 	if r.GRPC {
@@ -626,7 +664,7 @@ func (e *Evaluator) Evaluate(_ context.Context, r *request.Request) (rules.Resul
 		// its body isn't inspected (below).
 		rm, ok := tx.(ruleRemover)
 		if !ok {
-			return rules.Result{}, errNoRuleRemoval
+			return rules.Result{}, tx, errNoRuleRemoval
 		}
 		rm.RemoveRuleByID(idCRSContentType)
 	}
@@ -641,7 +679,7 @@ func (e *Evaluator) Evaluate(_ context.Context, r *request.Request) (rules.Resul
 	}
 
 	if it := tx.ProcessRequestHeaders(); it != nil {
-		return result(tx, it), nil
+		return result(tx, it, 0, inboundScore), tx, nil
 	}
 	// A truncated body is never inspected: a prefix of JSON, XML or
 	// multipart fails to parse (and rules 200002/200003 would deny it), and
@@ -654,28 +692,93 @@ func (e *Evaluator) Evaluate(_ context.Context, r *request.Request) (rules.Resul
 	if len(r.Body) > 0 && !r.BodyTruncated && !r.GRPC {
 		it, _, err := tx.WriteRequestBody(r.Body)
 		if err != nil {
-			return rules.Result{}, fmt.Errorf("write request body: %w", err)
+			return rules.Result{}, tx, fmt.Errorf("write request body: %w", err)
 		}
 		if it != nil {
-			return result(tx, it), nil
+			return result(tx, it, 0, inboundScore), tx, nil
 		}
 	}
 	// Phase 2 runs even without a body: CRS evaluates the anomaly score there.
 	it, err := tx.ProcessRequestBody()
 	if err != nil {
-		return rules.Result{}, fmt.Errorf("process request body: %w", err)
+		return rules.Result{}, tx, fmt.Errorf("process request body: %w", err)
 	}
-	return result(tx, it), nil
+	return result(tx, it, 0, inboundScore), tx, nil
 }
 
-func result(tx types.Transaction, it *types.Interruption) rules.Result {
+// exchange is a transaction kept open for the response.
+type exchange struct {
+	tx types.Transaction
+	// seen is how many rules matched the request: the response's result
+	// lists the others.
+	seen int
+	done bool
+}
+
+var errResponseTwice = errors.New("response evaluated twice")
+
+// EvaluateResponse runs phases 3 and 4 (response headers and body). Phase 4
+// runs even without a body: CRS evaluates the outbound anomaly score there.
+// A truncated body is inspected, unlike a request's: data leakage rules
+// read a prefix as well as the whole.
+func (x *exchange) EvaluateResponse(_ context.Context, resp *request.Response) (rules.Result, error) {
+	if x.done {
+		return rules.Result{}, errResponseTwice
+	}
+	x.done = true
+	tx := x.tx
+	if tx.IsRuleEngineOff() {
+		return rules.Result{}, nil
+	}
+	for name, values := range resp.Headers {
+		for _, v := range values {
+			tx.AddResponseHeader(name, v)
+		}
+	}
+	if it := tx.ProcessResponseHeaders(resp.Status, resp.Proto); it != nil {
+		return result(tx, it, x.seen, outboundScore), nil
+	}
+	if len(resp.Body) > 0 && tx.IsResponseBodyAccessible() && tx.IsResponseBodyProcessable() {
+		it, _, err := tx.WriteResponseBody(resp.Body)
+		if err != nil {
+			return rules.Result{}, fmt.Errorf("write response body: %w", err)
+		}
+		if it != nil {
+			return result(tx, it, x.seen, outboundScore), nil
+		}
+	}
+	it, err := tx.ProcessResponseBody()
+	if err != nil {
+		return rules.Result{}, fmt.Errorf("process response body: %w", err)
+	}
+	return result(tx, it, x.seen, outboundScore), nil
+}
+
+// Close implements rules.Exchange.
+func (x *exchange) Close() {
+	if x.tx != nil {
+		closeTx(x.tx)
+		x.tx = nil
+	}
+}
+
+// The CRS anomaly scores, summed in these TX variables (0 without CRS).
+const (
+	inboundScore  = "blocking_inbound_anomaly_score"
+	outboundScore = "blocking_outbound_anomaly_score"
+)
+
+// result is the outcome of tx, with the rules that matched after the first
+// skip and the anomaly score in TX:score.
+func result(tx types.Transaction, it *types.Interruption, skip int, score string) rules.Result {
 	var res rules.Result
 	if it != nil {
 		res.Interrupted = true
 		res.Status = it.Status
 		res.RuleID = it.RuleID
 	}
-	for _, mr := range tx.MatchedRules() {
+	matched := tx.MatchedRules()
+	for _, mr := range matched[min(skip, len(matched)):] {
 		if !reportable(mr, it) {
 			continue
 		}
@@ -694,18 +797,17 @@ func result(tx types.Transaction, it *types.Interruption) rules.Result {
 			break
 		}
 	}
-	res.AnomalyScore = anomalyScore(tx)
+	res.AnomalyScore = anomalyScore(tx, score)
 	return res
 }
 
-// anomalyScore reads the CRS inbound anomaly score, which CRS sums in
-// TX:blocking_inbound_anomaly_score (0 without CRS).
-func anomalyScore(tx types.Transaction) int {
+// anomalyScore reads a CRS anomaly score from TX:score.
+func anomalyScore(tx types.Transaction, score string) int {
 	st, ok := tx.(plugintypes.TransactionState)
 	if !ok {
 		return 0
 	}
-	vals := st.Variables().TX().Get("blocking_inbound_anomaly_score")
+	vals := st.Variables().TX().Get(score)
 	if len(vals) == 0 {
 		return 0
 	}

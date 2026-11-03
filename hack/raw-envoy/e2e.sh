@@ -18,6 +18,10 @@
 #   - envoy-detect.yaml, detect mode over loopback TCP (observability_mode):
 #     an attack passes and is logged, and with the engine down requests pass
 #     (failure_mode_allow: true).
+#   - Response inspection (#274), both samples with Envoy sending the
+#     responses as docs/raw-envoy.md shows: an app response that leaks a SQL
+#     error is replaced with 403 in block mode (--inspect-responses), and
+#     logged as a response event in detect mode; a clean one passes.
 #
 # The Kubernetes sample (kustomization.yaml) is rendered with kubectl, when
 # kubectl is installed. SKIP_BUILD=1 uses the engine image already built
@@ -34,7 +38,7 @@ APP_IMAGE=traefik/whoami:v1.10.3
 PORT=${RAW_ENVOY_PORT:-18190}
 ADMIN_PORT=$((PORT + 1))
 EXAMPLES=$PWD/examples/raw-envoy
-NAME=inkwall-raw-envoy-e2e
+NAME=${RAW_ENVOY_NAME:-inkwall-raw-envoy-e2e}
 HOST=app.example.com
 SQLI='id=1%27%20OR%20%271%27%3D%271'
 
@@ -78,6 +82,7 @@ cleanup() {
   docker rm -f "$NAME-engine" "$NAME-envoy" "$NAME-app" >/dev/null 2>&1 || true
   docker volume rm "$NAME-socket" >/dev/null 2>&1 || true
   docker network rm "$NAME" >/dev/null 2>&1 || true
+  [[ -z ${RESPONSES:-} ]] || rm -rf "$RESPONSES"
 }
 trap cleanup EXIT
 cleanup
@@ -174,6 +179,52 @@ eventually "the body attack is logged" event_has /detect-body '"action":"log"'
 docker stop -t 5 "$NAME-engine" >/dev/null
 check "engine down: a benign request gets 200 (failure_mode_allow: true)" get_is 200 /
 check "engine down: an attack gets 200" get_is 200 "/?$SQLI"
+
+# responses_config SAMPLE: SAMPLE with Envoy sending the responses, as
+# "Response inspection" in docs/raw-envoy.md shows: the headers, and the
+# body (BUFFERED_PARTIAL, or STREAMED, the only mode observability_mode
+# allows), with mode_override allowed.
+RESPONSES=$(mktemp -d)
+chmod 755 "$RESPONSES"
+responses_config() {
+  local body=BUFFERED_PARTIAL
+  grep -q 'observability_mode: true' "$EXAMPLES/$1" && body=STREAMED
+  sed -e 's/response_header_mode: SKIP/response_header_mode: SEND/' \
+    -e "s/response_body_mode: NONE/response_body_mode: $body/" \
+    -e 's/^\( *\)request_attributes:/\1allow_mode_override: true\n&/' \
+    "$EXAMPLES/$1" >"$RESPONSES/$1"
+  chmod 644 "$RESPONSES/$1"
+  grep -q "response_body_mode: $body" "$RESPONSES/$1" && grep -q allow_mode_override "$RESPONSES/$1"
+}
+# The app (whoami) echoes the request's headers in a text/plain body: this
+# one makes it leak a MySQL error, which the request rules don't mind.
+LEAK='X-Debug: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version'
+leak_is() { [[ $(code -H "$LEAK" "http://127.0.0.1:$PORT$2") == "$1" ]]; }
+body_lacks() { ! curl -s -H "Host: $HOST" -H "$LEAK" "http://127.0.0.1:$PORT$1" | grep -qF 'SQL syntax'; }
+
+echo "== responses, block mode (envoy.yaml, --inspect-responses)"
+for f in envoy.yaml envoy-detect.yaml; do
+  check "$f sending responses: written" responses_config "$f"
+  check "Envoy accepts $f sending responses" \
+    docker run --rm -v "$RESPONSES:/cfg:ro" "$ENVOY_IMAGE" --mode validate -c "/cfg/$f"
+done
+EXAMPLES=$RESPONSES start_envoy envoy.yaml
+start_engine --listen=unix:/var/run/inkwall/extproc.sock --mode=block --inspect-responses
+eventually "a clean response: 200" get_is 200 /
+check "a response leaking a SQL error: 403" leak_is 403 /leak
+check "its body is replaced" body_lacks /leak
+eventually "the leak's event is a response deny" event_has /leak '"phase":"response"'
+check "the event is a deny" event_has /leak '"action":"deny"'
+check "a leak on the route the filter is off for: 200" leak_is 200 /healthz
+check "an attack in the query is still 403" get_is 403 "/?$SQLI"
+
+echo "== responses, detect mode (envoy-detect.yaml, --inspect-responses)"
+EXAMPLES=$RESPONSES start_envoy envoy-detect.yaml
+start_engine --listen=127.0.0.1:9003 --mode=detect --inspect-responses
+eventually "a clean response: 200" get_is 200 /
+check "a response leaking a SQL error: 200" leak_is 200 /detect-leak
+eventually "the leak is logged as a response event" event_has /detect-leak '"phase":"response"'
+check "the event is a log" event_has /detect-leak '"action":"log"'
 
 if ((failures > 0)); then
   echo "$failures check(s) failed"
