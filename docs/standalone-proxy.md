@@ -41,6 +41,7 @@ The main flags; `inkwall-engine proxy -h` lists them all:
 | `--rules`, `--rules-before-crs` | | [SecLang](https://coraza.io/docs/seclang/) rules and exclusions, loaded after or before the CRS |
 | `--skip-paths`, `--skip-body-paths` | | Paths not inspected at all, or without their body |
 | `--disable-rule-groups` | | CRS attack families the app can't be vulnerable to, e.g. `php,java` |
+| `--websocket-origins`, `--websocket-required-headers` | | Origins a [WebSocket](websocket.md) handshake may come from, headers it must have |
 | `--max-body-bytes` | `65536` | Body bytes inspected; `--oversize-body` decides what happens to larger bodies |
 | `--failure-mode` | `auto` | Requests that can't be inspected: rejected (503) in block mode, let through in detect mode |
 | `--trusted-proxies` | | [CIDRs](https://www.rfc-editor.org/rfc/rfc4632) whose [`X-Forwarded-For`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For) is trusted |
@@ -53,7 +54,8 @@ The main flags; `inkwall-engine proxy -h` lists them all:
 - `inkwall-engine check` serves the `POST /v1/check` API
   ([`api/engine/v1`](../api/engine/v1/engine.proto)), on `127.0.0.1:9002`.
 - `inkwall-engine ext-proc` serves [Envoy](https://www.envoyproxy.io/docs/envoy/latest/)'s [external processing](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter) API over [gRPC](https://grpc.io/docs/),
-  on `127.0.0.1:9003` (or a Unix socket, `--listen unix:/path`).
+  on `127.0.0.1:9003` (or a Unix socket, `--listen unix:/path`): see
+  [protecting raw Envoy](raw-envoy.md).
 
 To test rules without running the engine, see [testing policies offline](testing-policies.md).
 

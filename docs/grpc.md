@@ -1,13 +1,14 @@
 # gRPC
 
-What the engine inspects in a [gRPC](https://grpc.io/docs/what-is-grpc/core-concepts/) call at
-v0.3.1, and what it doesn't. Fuller gRPC support (reading the messages, streaming, a gRPC status on
-a denial) is tracked in [#275](https://github.com/inkwall-dev/inkwall/issues/275).
+What the engine inspects in a [gRPC](https://grpc.io/docs/what-is-grpc/core-concepts/) call, what
+it doesn't, and how it denies one. Fuller gRPC support (reading the messages, streaming) is
+tracked in [#275](https://github.com/inkwall-dev/inkwall/issues/275).
 
 ## Contents
 
 - [Which requests are gRPC calls](#which-requests-are-grpc-calls)
 - [What is inspected](#what-is-inspected)
+- [Denied calls](#denied-calls)
 - [Streaming calls](#streaming-calls)
 - [If you serve no gRPC](#if-you-serve-no-grpc)
 
@@ -42,8 +43,38 @@ the byte `0x0a` that starts most protobuf messages).
   rules on `REQUEST_BODY` or `ARGS` don't see the messages.
 - **Allowed**: the call's content type, which the Core Rule Set doesn't list (rule 920420).
 
-A denied call gets HTTP 403, which gRPC clients report as status 7 (`PERMISSION_DENIED`), through
-Envoy Gateway and Traefik alike.
+## Denied calls
+
+From v0.4.0, a denied call is answered as gRPC: its client gets status 7 (`PERMISSION_DENIED`)
+and a message with the request ID, which finds the request's security event in the engine's log:
+
+```
+rpc error: code = PermissionDenied desc = Forbidden (request ID 0123abcd)
+```
+
+That holds for any request whose one `Content-Type` is gRPC (`application/grpc`,
+`application/grpc-web`, `application/grpc-web-text`, with any `+codec`), whatever its body. The
+answer is gRPC's trailers-only form: `grpc-status`, `grpc-message` and `x-request-id` in the
+headers, no body. A call the engine can't inspect in time and denies (failure mode `Closed`) gets
+14 (`UNAVAILABLE`), and an oversized body (only a request that claims to be gRPC can have one)
+gets 8 (`RESOURCE_EXHAUSTED`).
+
+| Proxy | gRPC | gRPC-Web |
+|---|---|---|
+| Envoy Gateway, raw Envoy | HTTP 200, gRPC status | HTTP 200, gRPC status |
+| Traefik | HTTP 403, gRPC status | HTTP 403, gRPC status |
+| Engine as reverse proxy | HTTP 200, gRPC status | HTTP 200, gRPC status |
+
+Traefik's ForwardAuth denies only on an answer other than 2xx, so the HTTP status stays 403
+there. Clients that read a gRPC answer by its content type, such as grpc-go, still report our
+status and message; others report `PERMISSION_DENIED` from the 403 itself, as gRPC maps HTTP
+statuses. Before v0.4.0, a denial was a plain-text HTTP 403: clients reported
+`PERMISSION_DENIED`, with a message like `unexpected HTTP status code received from server: 403
+(Forbidden)` (through Traefik) or `Forbidden` (through Envoy, which turned the 403 into a gRPC
+status itself), and gRPC-Web clients got the 403 as it was.
+
+Envoy counts a denied gRPC call as HTTP 200 in its access log and metrics, as any gRPC error. The
+engine's security events and `inkwall_requests_total{action="deny"}` count it as a denial.
 
 ## Streaming calls
 

@@ -7,7 +7,8 @@
 // Envoy opens one gRPC stream per HTTP request and sends the request
 // headers, then the body if its processing mode asks for it. The adapter
 // answers an allowed request with CONTINUE and a denied one with an
-// immediate response carrying the verdict's status. Later messages (the
+// immediate response carrying the verdict's status, or, for a gRPC call,
+// its gRPC status (trailers-only). Later messages (the
 // response headers and body, if the filter sends them) are answered with
 // CONTINUE.
 //
@@ -22,6 +23,11 @@
 // when it is under the limit and as long as its Content-Length says: one
 // without Content-Length may have been cut at a buffer the engine doesn't
 // know, so it is handled as oversized.
+//
+// An upgrade (a WebSocket handshake: a GET with an Upgrade header) that
+// declares no body is decided on its headers, and answered with
+// CONTINUE_AND_REPLACE, so Envoy stops sending the stream: what follows
+// its headers is the upgraded connection's data, not a body (#276).
 //
 // In observability mode (detect mode) Envoy doesn't wait for the answers,
 // and the adapter sends none. The body comes in chunks there (STREAMED, the
@@ -142,6 +148,9 @@ type exchange struct {
 	// setID: the request ID was generated here, and is set on the request
 	// Envoy forwards.
 	setID bool
+	// upgrade: the request is an upgrade (a WebSocket handshake) without
+	// a body, answered on its headers.
+	upgrade bool
 }
 
 // Process handles the stream of one HTTP request.
@@ -234,6 +243,16 @@ func (s *Server) onHeaders(ctx context.Context, x *exchange, h *extprocv3.HttpHe
 	if h.GetEndOfStream() {
 		return s.verdict(ctx, x, phaseRequestHeaders)
 	}
+	if bodilessUpgrade(req) {
+		// Envoy sends an upgrade's headers without end_of_stream: what
+		// follows them is the upgraded connection's data (WebSocket
+		// frames), which the client sends only once the upgrade is
+		// answered. Waiting for it as a body would hold the handshake
+		// until Envoy's idle timeout (#276). The request is decided on its
+		// headers, and Envoy is told to stop sending its stream.
+		x.upgrade = true
+		return s.verdict(ctx, x, phaseRequestHeaders)
+	}
 	if x.limit = s.pipeline.BodyLimit(req, s.maxBody); x.limit > 0 {
 		switch {
 		case x.bodyMode == filterv3.ProcessingMode_BUFFERED, x.bodyMode == filterv3.ProcessingMode_BUFFERED_PARTIAL:
@@ -317,12 +336,41 @@ func (s *Server) verdict(ctx context.Context, x *exchange, p phase) *extprocv3.P
 		httpadapter.LogEvent(ctx, s.logger, s.events, x.req, x.path, v)
 	}
 	if v.Action == pipeline.ActionDeny {
+		if g := httpadapter.GRPCOf(x.req.Headers); g != httpadapter.NotGRPC {
+			return denyGRPC(g, v.Status, x.req.ID)
+		}
 		return deny(v.Status, x.req.ID)
 	}
+	id := ""
 	if x.setID {
-		return allow(p, x.req.ID)
+		id = x.req.ID
 	}
-	return allow(p, "")
+	resp := allow(p, id)
+	if x.upgrade {
+		// CONTINUE_AND_REPLACE without a body mutation: Envoy continues the
+		// request now and sends nothing more of it, whatever its body
+		// mode; the upgraded connection's data passes untouched.
+		resp.GetRequestHeaders().GetResponse().Status = extprocv3.CommonResponse_CONTINUE_AND_REPLACE
+	}
+	return resp
+}
+
+// bodilessUpgrade reports whether r is a GET asking to upgrade the
+// connection (a WebSocket handshake) that declares no body: no
+// Transfer-Encoding and no Content-Length but 0. One that declares a body
+// waits for it, as any request does.
+func bodilessUpgrade(r *request.Request) bool {
+	if r.Method != http.MethodGet || len(r.Headers.Values("Upgrade")) == 0 || len(r.Headers.Values("Transfer-Encoding")) > 0 {
+		return false
+	}
+	switch cl := r.Headers.Values("Content-Length"); len(cl) {
+	case 0:
+		return true
+	case 1:
+		return strings.TrimSpace(cl[0]) == "0"
+	default:
+		return false
+	}
 }
 
 // uninspectable refuses a request the engine can't inspect: only a
@@ -503,6 +551,39 @@ func deny(code int, id string) *extprocv3.ProcessingResponse {
 			}},
 			Body:    []byte(http.StatusText(code) + "\n"),
 			Details: "inkwall_denied",
+		},
+	}}
+}
+
+// denyGRPC answers a denied gRPC call in the trailers-only form: the gRPC
+// status in the headers, and no body.
+//
+// For gRPC, Envoy answers a local reply as a gRPC call itself: HTTP 200,
+// content-type application/grpc, grpc_status (or a status from the HTTP
+// one) as grpc-status, and the body, if any, as grpc-message. So there is
+// no body, which would replace the grpc-message, and the HTTP status stays
+// the verdict's, for a client Envoy doesn't take for gRPC (one over
+// HTTP/1.1). Envoy takes no gRPC-Web request for gRPC, so a gRPC-Web
+// denial is answered with HTTP 200 here, as the gRPC-Web spec says.
+func denyGRPC(g httpadapter.GRPCProtocol, code int, id string) *extprocv3.ProcessingResponse {
+	httpStatus := code
+	if g != httpadapter.GRPC {
+		httpStatus = http.StatusOK
+	}
+	grpcStatus := httpadapter.GRPCCode(code)
+	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ImmediateResponse{
+		ImmediateResponse: &extprocv3.ImmediateResponse{
+			// #nosec G115 -- an HTTP status
+			Status: &typev3.HttpStatus{Code: typev3.StatusCode(httpStatus)},
+			Headers: &extprocv3.HeaderMutation{SetHeaders: []*corev3.HeaderValueOption{
+				header("content-type", g.ContentType()),
+				header("grpc-status", strconv.Itoa(int(grpcStatus))),
+				header("grpc-message", httpadapter.GRPCMessage(code, id)),
+				header("x-content-type-options", "nosniff"),
+				header("x-request-id", id),
+			}},
+			GrpcStatus: &extprocv3.GrpcStatus{Status: uint32(grpcStatus)},
+			Details:    "inkwall_denied",
 		},
 	}}
 }

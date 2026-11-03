@@ -1,11 +1,12 @@
 # Upgrading
 
-This guide upgrades an Inkwall installation from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
+This guide upgrades an Inkwall installation from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
 0.3.0, and from 0.1.x (0.1.0 to 0.1.5) to 0.2.2, the latest 0.2 release, and lists what changes on
 the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 ## Contents
 
+- [From 0.3.x to 0.4.0](#from-03x-to-040)
 - [From 0.3.0 to 0.3.1](#from-030-to-031)
 - [From 0.2.x to 0.3.0](#from-02x-to-030)
   - [Before you upgrade](#before-you-upgrade)
@@ -22,6 +23,39 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
   - [Upgrading the chart](#upgrading-the-chart)
   - [Checking it worked](#checking-it-worked)
   - [Rolling back](#rolling-back)
+
+## From 0.3.x to 0.4.0
+
+What's new in 0.4.0:
+
+- **Raw Envoy.** An Envoy you configure yourself can call the engine's ext_proc adapter, with the
+  policy from the engine's flags or from the operator: see [protecting raw Envoy](raw-envoy.md).
+  Nothing changes in an existing installation.
+- **WebSocket handshake rules.** A `WAFPolicy`'s new `spec.webSocket` sets the origins a WebSocket
+  handshake may come from and the headers it must have; one that doesn't meet them is denied with
+  403 before the upgrade (`Block`), or logged with reason `websocket` (`Detect`). The engine's
+  `--websocket-origins`, `--websocket-allow-missing-origin` and `--websocket-required-headers`
+  flags do the same without the operator. See [WebSocket](websocket.md).
+
+What changes by itself in 0.4.0:
+
+- **WebSockets through Envoy Gateway.** The engine decides a handshake on its headers. In 0.3.x, a
+  policy in `Block` mode with body inspection held every handshake until one of Envoy's timeouts,
+  and one in `Detect` mode logged every handshake as an oversized body.
+- **`WAFPolicy` gains `spec.webSocket`** (`allowedOrigins`, `allowMissingOrigin`,
+  `requiredHeaders`), and a new reason, `EnginesOutdated`, on `Enforced`: a policy that sets
+  `webSocket` isn't `Enforced` while an engine before 0.4.0 runs it, since that engine ignores the
+  field. Restart Traefik and the Envoy Gateway proxies after the upgrade, so their engines are
+  0.4.0. Events and `inkwall_requests_total` have a new reason, `websocket`.
+
+What changes by itself in 0.4.0:
+
+- **A denied gRPC call gets a gRPC status.** A request with a gRPC `Content-Type` that the engine
+  denies is answered with `grpc-status` 7 (`PERMISSION_DENIED`) and a `grpc-message` naming the
+  request ID, not a plain-text 403. Through Envoy Gateway, raw Envoy and the engine's reverse
+  proxy the HTTP status is 200, as for any gRPC error (so Envoy's access log shows 200 for these
+  denials); through Traefik it stays 403. Clients reported `PERMISSION_DENIED` before as well, but
+  gRPC-Web clients got the 403 as it was. See [denied calls](grpc.md#denied-calls).
 
 ## From 0.3.0 to 0.3.1
 

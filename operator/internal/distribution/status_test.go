@@ -6,6 +6,7 @@ package distribution
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -138,5 +139,51 @@ func TestEnforcedSuspended(t *testing.T) {
 		if r := meta.FindStatusCondition(conds, wafv1alpha1.ConditionReady); r == nil || r.Status != metav1.ConditionFalse || r.Reason != want {
 			t.Errorf("%s: Ready %+v, want False %s", tc.name, r, want)
 		}
+	}
+}
+
+// An engine before 0.4.0 ignores spec.webSocket: a policy that sets it
+// isn't Enforced while one is connected (#276).
+func TestEnforcedOutdatedEngine(t *testing.T) {
+	ws := &wafv1alpha1.WebSocketSpec{AllowedOrigins: []wafv1alpha1.WebSocketOrigin{"https://app.example.com"}}
+	for _, tc := range []struct {
+		name     string
+		spec     *wafv1alpha1.WebSocketSpec
+		versions []string
+		status   metav1.ConditionStatus
+		reason   string
+	}{
+		{"0.3.1 engine", ws, []string{"0.4.0", "0.3.1"}, metav1.ConditionFalse, ReasonEnginesOutdated},
+		{"v-prefixed pre-release", ws, []string{"v0.4.0-rc.1", "v0.3.2-0.20261103000000-abcdef+dirty"}, metav1.ConditionFalse, ReasonEnginesOutdated},
+		{"new engines", ws, []string{"0.4.0", "v0.4.1", "1.0.0", "0.4.0-rc.1"}, metav1.ConditionTrue, ReasonEnforced},
+		{"development builds", ws, []string{"unknown", "(devel)", ""}, metav1.ConditionTrue, ReasonEnforced},
+		{"policy without webSocket", nil, []string{"0.3.1"}, metav1.ConditionTrue, ReasonEnforced},
+		{"empty webSocket", &wafv1alpha1.WebSocketSpec{}, []string{"0.3.1"}, metav1.ConditionTrue, ReasonEnforced},
+		{"required headers only", &wafv1alpha1.WebSocketSpec{RequiredHeaders: []wafv1alpha1.HeaderName{"Authorization"}}, []string{"0.2.0"}, metav1.ConditionFalse, ReasonEnginesOutdated},
+	} {
+		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
+		p.Spec.WebSocket = tc.spec
+		p.Status.BundleVersion = 3
+		var engines []Engine
+		for i, v := range tc.versions {
+			engines = append(engines, Engine{ID: fmt.Sprintf("e%d", i), PodNamespace: "edge", PodName: fmt.Sprintf("traefik-%d", i), EngineVersion: v, Applied: 3})
+		}
+		conds, _ := enforcedConditions(p, 3, false, engines, 0)
+		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
+		if c == nil || c.Status != tc.status || c.Reason != tc.reason {
+			t.Errorf("%s: Enforced %+v, want %s %s", tc.name, c, tc.status, tc.reason)
+			continue
+		}
+		if tc.reason == ReasonEnginesOutdated && (!strings.Contains(c.Message, "spec.webSocket") || !strings.Contains(c.Message, "edge/traefik-") || !strings.Contains(c.Message, "0.4.0 or later")) {
+			t.Errorf("%s: message %q doesn't name the field, the engine and the version", tc.name, c.Message)
+		}
+	}
+	// Behind comes first: the engine doesn't run the bundle at all.
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
+	p.Spec.WebSocket = ws
+	p.Status.BundleVersion = 3
+	conds, _ := enforcedConditions(p, 3, false, []Engine{{ID: "e", EngineVersion: "0.3.1", Applied: 2}}, 0)
+	if c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced); c == nil || c.Reason != ReasonEnginesBehind {
+		t.Errorf("behind and outdated: Enforced %+v, want EnginesBehind", c)
 	}
 }

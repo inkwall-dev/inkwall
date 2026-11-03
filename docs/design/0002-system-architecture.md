@@ -442,6 +442,32 @@ engine and the proxy share, at a path the integration fixes (Envoy Gateway:
 timeout and failure-mode rules: the operator's ForwardAuth Middleware sets no timeout and has no
 failure-mode setting; [§7.3](#73-engine-unavailable).)
 
+**WebSocket (#276, decided for v0.4.0).** Every integration sees the handshake as a request, before
+the proxy upgrades the connection, and none sees the messages after it. So:
+
+- **The handshake is a request.** The engine inspects it with the policy's rules at every adapter,
+  and a denial is the adapter's usual answer (403), sent before the upgrade. The engine tells a
+  handshake by any one of `Upgrade: websocket`, `Sec-WebSocket-Key` or `Sec-WebSocket-Version`,
+  since Traefik's ForwardAuth drops the first and HTTP/2 has no key. The Core Rule Set raises
+  nothing on a browser's handshake at any paranoia level (tested on the pipeline and each adapter),
+  so there is no WebSocket exclusion.
+- **Origin and required headers are the engine's, not the proxy's.** A `WAFPolicy`'s
+  `spec.webSocket` (allowed origins, against cross-site WebSocket hijacking; required headers) is
+  compiled into the bundle and checked by the engine before the rules: one implementation for
+  every proxy, with `Detect` mode and events like any rule. Proxy features (Envoy Gateway's CORS,
+  Traefik middlewares) differ per proxy and don't apply to WebSocket handshakes alike. The
+  webhook compiles the field with the engine's code. An engine before 0.4.0 ignores the field, so
+  the operator doesn't report a policy that sets it `Enforced` while one runs it
+  ([0004 §4.8](0004-operator.md#48-status-aggregator)).
+- **An upgrade has no body to wait for.** ext_proc decides a bodiless upgrade on its headers and
+  tells Envoy to stop sending the stream ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing)).
+- **Messages are not inspected, and nothing claims they are.** Only a hook on the stream after the
+  upgrade could: the engine's reverse proxy, which copies the connection itself, or ext_proc in
+  `STREAMED` mode, where Envoy passes the upgraded data as body chunks and waits for an answer to
+  each. Traefik's ForwardAuth can't: it asks once, before the upgrade. Message inspection (frame
+  parsing, size limits, text frames as arguments, a close code on a denial) is the second part of
+  #276, and must state per proxy where it happens.
+
 ### 6.1 Envoy (raw Envoy, Envoy Gateway, Istio, Contour)
 
 The engine serves `ext_proc` (preferred) or `ext_authz`, over gRPC on a [Unix socket](https://man7.org/linux/man-pages/man7/unix.7.html). Each product
@@ -458,7 +484,14 @@ experimental.
 Envoy Gateway, with `ext_proc`, not `ext_authz`: the engine joins the Envoy pods through the
 Gateway's `EnvoyProxy`, and each protected HTTPRoute gets an `EnvoyExtensionPolicy` calling it
 through a `Backend` on a Unix socket ([0004 §4.4](0004-operator.md#44-wiring-controller)).
-**Not yet:** Istio, Contour, raw Envoy.
+Raw Envoy, configured by its user: no operator integration, since there is no API object to wire.
+The user adds the `ext_proc` filter to `envoy.yaml` and runs the engine next to Envoy, with the
+policy from flags or, in a cluster with the operator, from its bundles: the user grants the read
+access and keeps the trust ConfigMap that injection sets up for the integrations
+([raw Envoy](../raw-envoy.md)). Its policies target an `Ingress` of a class no controller serves,
+so they report `Programmed=False` (`ControllerUnsupported`), as the operator wires nothing.
+`make raw-envoy-e2e` (Docker) and `make kind-e2e-raw-envoy` run the samples.
+**Not yet:** Istio, Contour.
 
 ### 6.2 ingress-nginx
 
@@ -562,7 +595,7 @@ adapter must match.
 | Caddy | module | ✅ | ✅ | ✅ | ✅ | in-process |
 | Any | reverse proxy | ✅ | ✅ | ✅ | ✅ | TCP |
 
-Built: Traefik ForwardAuth, the reverse proxy, and ext_proc through Envoy Gateway.
+Built: Traefik ForwardAuth, the reverse proxy, and ext_proc through Envoy Gateway and raw Envoy.
 
 ---
 
