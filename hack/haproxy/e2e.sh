@@ -2,43 +2,104 @@
 # Copyright 2026 The Inkwall Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# End to end test of the SPOE agent (inkwall-engine spoe) with a real
-# HAProxy in Docker (host network, so Linux only), configured with
-# hack/haproxy/haproxy.cfg and spoe.conf: benign requests pass with an
-# X-Request-Id, attacks in the URI and in the body (Content-Length, chunked,
-# HTTP/2) are denied with 403, a stopped engine fails closed with 503, and
-# in detect mode an attack passes.
+# End-to-end test of the engine's SPOE agent (inkwall-engine spoe, #282)
+# with a real HAProxy in Docker (host network, so Linux only), configured
+# with the samples of examples/haproxy, after checking them with
+# `haproxy -c` and that docs/haproxy.md shows them as they are. The engine
+# runs on the host, on a Unix socket in a directory HAProxy mounts, as a
+# sidecar shares an emptyDir with HAProxy in a pod.
+#
+#   - Block mode: benign requests pass with an X-Request-Id (HTTP/1.1 and
+#     HTTP/2), attacks in the query and in the body (Content-Length,
+#     chunked, HTTP/2) get 403 but on the route left uninspected, a
+#     client-sent X-Forwarded-For isn't taken for the client, a body over HAProxy's buffer 413, a denied
+#     gRPC call HTTP 200 with grpc-status 7, a WebSocket handshake from a
+#     forbidden origin 403.
+#   - The engine down: 503 with the fail-closed rule (fail closed); without
+#     it, requests pass (fail open).
+#   - Detect mode: an attack passes, and is logged.
+#
+# HAPROXY_IMAGE picks HAProxy (3.1 or later); KEEP=1 leaves the container.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
 IMAGE=${HAPROXY_IMAGE:-haproxy:3.2}
-export HAPROXY_PORT=${HAPROXY_PORT:-47480} HAPROXY_H2C_PORT=${HAPROXY_H2C_PORT:-47481}
-export APP_PORT=${APP_PORT:-47081} ENGINE_PORT=${ENGINE_PORT:-47004}
-ADMIN_PORT=${ADMIN_PORT:-47482}
-NAME=inkwall-haproxy-test-$$
+PORT=${HAPROXY_PORT:-47480}
+APP_PORT=$((PORT + 1))
+ADMIN_PORT=$((PORT + 2))
+EXAMPLES=$PWD/examples/haproxy
+NAME=inkwall-haproxy-e2e
+SQLI='id=1%27%20OR%20%271%27%3D%271'
 WORK=$(mktemp -d)
+mkdir -p "$WORK/run" "$WORK/cfg"
 pids=()
+engine_pid=
+
+failures=0
+ok() { printf 'ok    %s\n' "$1"; }
+fail() {
+  printf 'FAIL  %s\n' "$1"
+  failures=$((failures + 1))
+}
+check() {
+  local what=$1
+  shift
+  if "$@" >/dev/null 2>&1; then ok "$what"; else fail "$what"; fi
+}
+# eventually DESCRIPTION COMMAND...: retries for up to 30s.
+eventually() {
+  local what=$1
+  shift
+  for _ in $(seq 60); do
+    if "$@" >/dev/null 2>&1; then
+      ok "$what"
+      return 0
+    fi
+    sleep 0.5
+  done
+  fail "$what"
+}
+U=http://127.0.0.1:$PORT
+code() { curl -s -o /dev/null -w '%{http_code}' "$@" || true; }
+is() {
+  local want=$1
+  shift
+  [[ $(code "$@") == "$want" ]]
+}
 
 cleanup() {
+  if [[ ${KEEP:-} == 1 ]]; then return; fi
   docker rm -f "$NAME" >/dev/null 2>&1 || true
   for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
-  if [ "${fail:-0}" != 0 ]; then
-    echo "--- engine log"; cat "$WORK/engine.log" || true
+  if [[ $failures != 0 ]]; then
+    echo "--- engine log"
+    tail -50 "$WORK/engine.log" || true
   fi
   rm -rf "$WORK"
 }
 trap cleanup EXIT
 
+# The samples: valid for HAProxy, and shown whole in docs/haproxy.md, each
+# after a marker comment.
+docker pull -q "$IMAGE" >/dev/null
+check "haproxy.cfg is valid" docker run --rm --add-host app:127.0.0.1 -v "$EXAMPLES:/usr/local/etc/haproxy:ro" "$IMAGE" haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+guide_copy() {
+  awk -v f="$1" '$0 == "<!-- examples/haproxy/" f ": hack/haproxy/e2e.sh checks that this copy is the file. -->" {m = 1; next}
+    m == 1 && /^```haproxy$/ {m = 2; next} m == 2 && /^```$/ {exit} m == 2' docs/haproxy.md
+}
+for f in haproxy.cfg spoe.conf; do
+  check "docs/haproxy.md shows $f as it is" diff <(guide_copy "$f") "$EXAMPLES/$f"
+done
+
 go build -o "$WORK/inkwall-engine" ./cmd/engine
 
-# The app echoes the request line, X-Request-Id and the body length.
+# The app echoes the request line and X-Request-Id.
 cat >"$WORK/app.py" <<'PY'
 import http.server, sys
 class H(http.server.BaseHTTPRequestHandler):
     def handle_one(self):
-        n = int(self.headers.get('Content-Length') or 0)
-        self.rfile.read(n)
+        self.rfile.read(int(self.headers.get('Content-Length') or 0))
         out = ('%s %s id=%s\n' % (self.command, self.path, self.headers.get('X-Request-Id'))).encode()
         self.send_response(200); self.send_header('Content-Length', str(len(out))); self.end_headers(); self.wfile.write(out)
     do_GET = do_POST = handle_one
@@ -48,77 +109,83 @@ PY
 python3 "$WORK/app.py" "$APP_PORT" &
 pids+=($!)
 
-engine() {
-  "$WORK/inkwall-engine" spoe --listen "127.0.0.1:$ENGINE_PORT" --admin-listen "127.0.0.1:$ADMIN_PORT" "$@" >>"$WORK/engine.log" 2>&1 &
+# start_engine ARGS...: the agent on the socket haproxy.cfg names.
+start_engine() {
+  "$WORK/inkwall-engine" spoe --listen "unix:$WORK/run/spoe.sock" --admin-listen "127.0.0.1:$ADMIN_PORT" "$@" >>"$WORK/engine.log" 2>&1 &
   engine_pid=$!
   pids+=("$engine_pid")
-  for _ in $(seq 50); do
+  for _ in $(seq 100); do
     curl -fs "127.0.0.1:$ADMIN_PORT/readyz" >/dev/null 2>&1 && return
     sleep 0.1
   done
   echo "the engine never got ready" >&2
   exit 1
 }
-engine --mode block
-
-docker run -d --name "$NAME" --network host \
-  -e HAPROXY_PORT -e HAPROXY_H2C_PORT -e APP_PORT -e ENGINE_PORT \
-  -v "$PWD/hack/haproxy:/usr/local/etc/haproxy:ro" "$IMAGE" >/dev/null
-
-U=http://127.0.0.1:$HAPROXY_PORT
-H2=http://127.0.0.1:$HAPROXY_H2C_PORT
-# Wait for HAProxy and its health check of the agent.
-for _ in $(seq 100); do
-  [ "$(curl -s -o /dev/null -w '%{http_code}' "$U/" || true)" = 200 ] && break
-  sleep 0.2
-done
-
-fail=0
-# expect <name> <status> [curl args...]
-expect() {
-  local name=$1 want=$2 got
-  shift 2
-  got=$(curl -s -o /dev/null -w '%{http_code}' "$@" || true)
-  if [ "$got" = "$want" ]; then
-    echo "ok   $name: $got"
-  else
-    echo "FAIL $name: $got, want $want"
-    fail=1
-  fi
+stop_engine() {
+  kill "$engine_pid"
+  wait "$engine_pid" 2>/dev/null || true
+}
+# start_haproxy SED: HAProxy with haproxy.cfg on the test's ports, edited by
+# SED, as the user that owns the socket.
+start_haproxy() {
+  sed -e "s|^    bind :8080|    bind 127.0.0.1:$PORT|" -e "s|server app app:80|server app 127.0.0.1:$APP_PORT|" \
+    -e "$1" "$EXAMPLES/haproxy.cfg" >"$WORK/cfg/haproxy.cfg"
+  cp "$EXAMPLES/spoe.conf" "$WORK/cfg/spoe.conf"
+  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  docker run -d --name "$NAME" --network host --user "$(id -u):$(id -g)" \
+    -v "$WORK/cfg:/usr/local/etc/haproxy:ro" -v "$WORK/run:/var/run/inkwall" "$IMAGE" >/dev/null
 }
 
-expect "benign GET" 200 "$U/products?id=42"
-expect "benign POST" 200 -X POST -d 'name=joe' "$U/form"
-expect "benign GET over HTTP/2" 200 --http2-prior-knowledge "$H2/products?id=42"
-expect "SQL injection in the query" 403 "$U/products?id=1%27%20OR%20%271%27%3D%271"
-expect "XSS in a body" 403 -X POST -d 'q=<script>alert(1)</script>' "$U/form"
-expect "XSS in a chunked body" 403 -X POST -H 'Transfer-Encoding: chunked' -d 'q=<script>alert(1)</script>' "$U/form"
-expect "XSS in an HTTP/2 body" 403 --http2-prior-knowledge -X POST -d 'q=<script>alert(1)</script>' "$H2/form"
-# The engine's request ID reaches the app; the client's own is kept.
-id=$(curl -s -H 'X-Request-Id: client-id-1' "$U/")
-if [[ "$id" == *"id=client-id-1"* ]]; then echo "ok   client request ID kept"; else echo "FAIL client request ID: $id"; fail=1; fi
-id=$(curl -s "$U/")
-if [[ "$id" =~ id=[0-9a-f]{16} ]]; then echo "ok   request ID set"; else echo "FAIL request ID: $id"; fail=1; fi
-if curl -s "127.0.0.1:$ADMIN_PORT/metrics" | grep -q 'inkwall_requests_total{action="deny",adapter="spoe",reason="rule"} 4'; then
-  echo "ok   metrics"
-else
-  echo "FAIL metrics"; fail=1
-fi
+start_engine --mode block --websocket-origins https://app.example.com
+start_haproxy 's|^$||'
+eventually "HAProxy and the engine serve" is 200 "$U/"
 
-# A stopped engine: no verdict, and the fail-closed rule denies.
-kill "$engine_pid"; wait "$engine_pid" 2>/dev/null || true
-expect "engine stopped (fail closed)" 503 "$U/products?id=42"
+check "a benign GET passes" is 200 "$U/products?id=42"
+check "a benign POST passes" is 200 -X POST -d 'name=joe' "$U/form"
+check "a benign GET over HTTP/2 passes" is 200 --http2-prior-knowledge "$U/products?id=42"
+check "SQL injection in the query: 403" is 403 "$U/products?$SQLI"
+check "the route left uninspected passes an attack" is 200 "$U/healthz?$SQLI"
+check "a client-sent X-Forwarded-For isn't the client IP" bash -c "curl -s -o /dev/null -H 'X-Forwarded-For: 203.0.113.9' '$U/xff?$SQLI'; grep '\"path\":\"/xff\"' '$WORK/engine.log' | grep -q '\"client_ip\":\"127.0.0.1\"'"
+check "XSS in a body: 403" is 403 -X POST -d 'q=<script>alert(1)</script>' "$U/form"
+check "XSS in a chunked body: 403" is 403 -X POST -H 'Transfer-Encoding: chunked' -d 'q=<script>alert(1)</script>' "$U/form"
+check "XSS in an HTTP/2 body: 403" is 403 --http2-prior-knowledge -X POST -d 'q=<script>alert(1)</script>' "$U/form"
+check "a body over HAProxy's buffer: 413" is 413 -X POST --data-binary "name=$(head -c 20000 /dev/zero | tr '\0' a)" "$U/form"
+check "a denial carries the request ID" bash -c "curl -s -D - -o /dev/null '$U/products?$SQLI' | grep -qiE '^x-request-id: [0-9a-f]{16}'"
+grpc() { curl -s -D - -o /dev/null --http2-prior-knowledge -X POST -H 'Content-Type: application/grpc' -H 'TE: trailers' --data-binary @/dev/null "$U/pkg.Svc/Call?$SQLI"; }
+check "a denied gRPC call: HTTP 200" bash -c "$(declare -f grpc); U=$U SQLI='$SQLI' grpc | grep -q '^HTTP/2 200'"
+check "a denied gRPC call: grpc-status 7" bash -c "$(declare -f grpc); U=$U SQLI='$SQLI' grpc | grep -qi '^grpc-status: 7'"
+check "a denied gRPC call: content-type application/grpc" bash -c "$(declare -f grpc); U=$U SQLI='$SQLI' grpc | grep -qi '^content-type: application/grpc'"
+ws=(-H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==')
+check "a WebSocket handshake from a forbidden origin: 403" is 403 "${ws[@]}" -H 'Origin: https://evil.example' "$U/chat"
+check "a WebSocket handshake from an allowed origin passes" is 200 "${ws[@]}" -H 'Origin: https://app.example.com' "$U/chat"
+check "the client's request ID reaches the app" bash -c "curl -s -H 'X-Request-Id: client-id-1' '$U/' | grep -q 'id=client-id-1'"
+check "a request ID reaches the app" bash -c "curl -s '$U/' | grep -qE 'id=[0-9a-f]{16}'"
+check "metrics count the denials" bash -c "curl -s 127.0.0.1:$ADMIN_PORT/metrics | grep -q 'inkwall_requests_total{action=\"deny\",adapter=\"spoe\",reason=\"rule\"}'"
+
+# The engine down: the fail-closed rule denies, until the engine is back.
+stop_engine
+check "the engine down, fail closed: 503" is 503 "$U/products?id=42"
+check "the engine down: the route left uninspected passes" is 200 "$U/healthz"
+start_engine --mode block
+eventually "the engine back: 200" is 200 "$U/products?id=42"
+
+# Fail open: haproxy.cfg without the fail-closed rule.
+start_haproxy '/deny_status 503 if !{ var(txn.inkwall.action) -m found }/d'
+eventually "fail open: HAProxy serves" is 200 "$U/"
+check "fail open: an attack still gets 403" is 403 "$U/products?$SQLI"
+stop_engine
+check "the engine down, fail open: 200" is 200 "$U/products?$SQLI"
 
 # Detect mode: the attack passes, and is logged.
-engine --mode detect
-for _ in $(seq 50); do
-  [ "$(curl -s -o /dev/null -w '%{http_code}' "$U/" || true)" = 200 ] && break
-  sleep 0.2
-done
-expect "detect mode" 200 "$U/products?id=1%27%20OR%20%271%27%3D%271"
+start_haproxy 's|^$||'
+start_engine --mode detect
+eventually "detect mode: an attack passes" is 200 "$U/products?$SQLI"
+check "detect mode: the attack is logged" grep -q '"action":"log"' "$WORK/engine.log"
 
-if [ "$fail" != 0 ]; then
-  echo "--- haproxy log"; docker logs "$NAME" 2>&1 | tail -30
+if [[ $failures != 0 ]]; then
+  echo "--- haproxy log"
+  docker logs "$NAME" 2>&1 | tail -30
+  echo "$failures check(s) failed"
   exit 1
 fi
 echo "PASS"

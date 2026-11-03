@@ -21,7 +21,7 @@ its adapter is in [0002 §6](0002-system-architecture.md#6-proxy-integrations).
 `/v1/check` over HTTP ([§5](#5-v1check-inkwalls-own-api)) and the reverse proxy
 ([§6](#6-reverse-proxy-standalone-mode)). **Built since:** ext_proc
 ([§2](#2-ext_proc-envoy-external-processing)), with the operator's Envoy Gateway configuration, and the SPOE agent
-([§4](#4-spoe-haproxy-stream-processing-offload-engine)), configured by hand for now. **Not yet:** ext_authz
+([§4](#4-spoe-haproxy-stream-processing-offload-engine)), configured by hand ([protecting HAProxy](../haproxy.md)). **Not yet:** ext_authz
 ([§1](#1-ext_authz-envoy-external-authorization)).
 
 ## Contents
@@ -173,26 +173,36 @@ messages after the upgrade.
 
 ## 4. SPOE (HAProxy Stream Processing Offload Engine)
 
-- [HAProxy](https://docs.haproxy.org/) speaks its binary protocol, SPOP 2.0, pipelined over a few connections, TCP or a
-  Unix socket. The engine is the agent (an SPOA): `inkwall-engine spoe`, on `127.0.0.1:9004` by
-  default.
-- Each connection starts with a HELLO handshake (version, maximum frame size, pipelining). A HELLO
-  marked `healthcheck` (`option spop-check`) is answered, and the connection closed. HAProxy then
-  sends a **NOTIFY** frame per event with messages; the engine answers each with an **ACK** of
-  `set-var` actions, in any order (pipelining). **DISCONNECT** frames end a connection, with a
-  status code; on shutdown the engine answers the NOTIFY frames in flight, then sends one.
-- The message is `inkwall-request`, with the arguments `method` (`method`), `path` (`pathq`:
+Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/inkwall/issues/282)); the configuration is in [protecting HAProxy](../haproxy.md).
+
+- [HAProxy](https://docs.haproxy.org/) speaks its binary protocol, SPOP 2.0 (HAProxy 3.1 or later, through a `mode spop`
+  backend), over a few connections, TCP or a Unix socket. The engine is the agent (an SPOA):
+  `inkwall-engine spoe`, on `127.0.0.1:9004` by default. Our own implementation, from HAProxy's
+  `doc/SPOE.txt`; no agent library is vendored.
+- **Frames.** Each connection starts with a HELLO handshake: the version (2.0), the maximum frame
+  size (HAProxy's, at most the engine's body limit plus 1 MiB for the rest), and `pipelining`
+  when HAProxy offers it. A HELLO marked `healthcheck` (`option spop-check`) is answered, and the
+  connection closed. HAProxy then sends a **NOTIFY** frame per request; the engine answers each
+  with an **ACK** of `set-var` actions, in any order with pipelining (at most 256 in flight per
+  connection). Fragmented frames are refused (SPOP 2.0 has none), aborted ones skipped.
+  **DISCONNECT** frames end a connection, with a status code; on shutdown the engine answers the
+  NOTIFY frames in flight, then sends one.
+- **The message** is `inkwall-request`, with the arguments `method` (`method`), `path` (`pathq`:
   path and query, the origin form even for HTTP/2), `version` (`req.ver`), `headers`
   (`req.hdrs_bin`), `body` (`req.body`), `ip` (`src`) and `https` (`ssl_fc`).
 - **The verdict:** `txn.inkwall.action` is `allow` or `deny`, `txn.inkwall.status` the status
-  to deny with (403, 413, 503, ...), `txn.inkwall.request_id` the request ID, which HAProxy sets
-  as `X-Request-Id`. The engine sets `action` on every answer, so an unset `action` means HAProxy
-  got none.
+  to deny with (400, 403, 413, 503), `txn.inkwall.request_id` the request ID, which HAProxy sets
+  as `X-Request-Id`. A denied gRPC call also gets `grpc_status`, `grpc_message` and
+  `grpc_content_type` ([§7](#7-denying-grpc-calls)). The engine sets `action` on every answer, so an
+  unset `action` means HAProxy got none. `deny_status` takes a fixed status, hence a rule per
+  status the engine denies with.
 - **Failure mode:** on a timeout (`timeout processing`), an agent that is down or an error,
   HAProxy sets no variable and goes on. Failing closed therefore needs a rule that denies with 503
-  when `action` is unset; failing open leaves it out. `option set-on-error error` says why, in
-  `txn.inkwall.error`. The engine's own failures (its `--timeout`, overload) are decided by its
-  failure mode, so `timeout processing` must be above `--timeout`.
+  when `action` is unset, first among the rules; failing open leaves it out. The documented
+  configuration fails closed, as the engine does in block mode by default. `option spop-check`
+  marks a stopped engine down within a second, so requests aren't held for `timeout processing`.
+  The engine's own failures (its `--timeout`, overload) are decided by its failure mode, so
+  `timeout processing` is the engine's deadline plus 500 ms, as Envoy's `message_timeout`.
 - A NOTIFY without `inkwall-request`, or with arguments the engine can't read (a method that
   isn't a token, a path not in origin form, an invalid Host, headers that don't parse, both
   `Transfer-Encoding` and `Content-Length`) gets `deny` with 400: only a misconfigured HAProxy
@@ -204,60 +214,20 @@ messages after the upgrade.
   inspect larger bodies. A body without `Content-Length` (chunked, or HTTP/2) can't say whether
   it was cut, so it counts as complete only when its frame is well under half the maximum frame
   size: `tune.maxrewrite` is at most half the buffer, so HAProxy's buffer holds at least that much
-  before it is full. Under the defaults that is about 7 KB, headers included; larger chunked bodies count as
-  oversized.
+  before it is full. Under the defaults that is about 7 KB, headers included; larger chunked
+  bodies count as oversized.
+- **WebSocket:** HAProxy asks before it upgrades, with the `Upgrade` header, so the policy's
+  WebSocket rules apply to the handshake as they are.
 - The client address is `src`, HAProxy's client (from the [PROXY protocol](https://github.com/haproxy/haproxy/blob/master/doc/proxy-protocol.txt) when HAProxy accepts it),
   resolved with `X-Forwarded-For` through `--trusted-proxies`.
 - Detect mode answers `allow`; HAProxy still waits for the answer (SPOP 2.0 has no asynchronous
   mode any more).
+- Routes are left uninspected with a condition on the message's `event`; the fail-closed rule
+  must leave them out too.
 
-A working configuration, which `make haproxy-test` runs with HAProxy 3.2 in Docker
-([`hack/haproxy`](../../hack/haproxy)):
-
-```haproxy
-# spoe.conf
-[inkwall]
-spoe-agent inkwall
-    messages inkwall-request
-    option var-prefix inkwall
-    option set-on-error error
-    timeout processing 500ms
-    use-backend inkwall-engine
-    register-var-names action status request_id error
-
-spoe-message inkwall-request
-    args method=method path=pathq version=req.ver headers=req.hdrs_bin body=req.body ip=src https=ssl_fc
-    event on-frontend-http-request
-```
-
-```haproxy
-# haproxy.cfg
-frontend web
-    bind :80
-    option http-buffer-request
-    filter spoe engine inkwall config /usr/local/etc/haproxy/spoe.conf
-    # Fail closed (leave out to fail open).
-    http-request deny deny_status 503 if !{ var(txn.inkwall.action) -m found }
-    http-request deny deny_status 400 if { var(txn.inkwall.status) -m int 400 }
-    http-request deny deny_status 413 if { var(txn.inkwall.status) -m int 413 }
-    http-request deny deny_status 503 if { var(txn.inkwall.status) -m int 503 }
-    http-request deny deny_status 403 if { var(txn.inkwall.action) -m str deny }
-    http-request set-header X-Request-Id %[var(txn.inkwall.request_id)] if { var(txn.inkwall.request_id) -m found }
-    default_backend app
-
-backend inkwall-engine
-    mode spop
-    timeout connect 5s
-    timeout server 3m
-    option spop-check
-    server engine 127.0.0.1:9004 check
-```
-
-`deny_status` takes a fixed status, hence a rule per status the engine denies with. `mode spop`
-needs HAProxy 3.1 or later.
-
-**Built:** `pkg/adapters/spoe`, run as `inkwall-engine spoe`. **Not yet:** the operator's wiring
-of the HAProxy Kubernetes Ingress Controller ([0002 §6.4](0002-system-architecture.md#64-haproxy-haproxy-kubernetes-ingress-controller-haproxy-ingress)).
+`make haproxy-e2e` runs the configuration of [protecting HAProxy](../haproxy.md) with HAProxy 3.2 in
+Docker. **Built:** `pkg/adapters/spoe`, run as `inkwall-engine spoe`. **Not yet:** the operator's
+wiring of the HAProxy Kubernetes Ingress Controller ([0002 §6.4](0002-system-architecture.md#64-haproxy-haproxy-kubernetes-ingress-controller-haproxy-ingress)).
 
 ## 5. `/v1/check` (Inkwall's own API)
 
@@ -330,6 +300,9 @@ form (decided for v0.4.0, [#275](https://github.com/inkwall-dev/inkwall/issues/2
   - **ext_proc, gRPC-Web:** 200. Envoy doesn't take gRPC-Web for gRPC, and passes the answer as
     it is; the [gRPC-Web spec](https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-WEB.md)
     keeps trailers-only responses.
+  - **SPOE:** 200. The engine answers with variables, and HAProxy's `http-request return`
+    answers the call with them ([protecting HAProxy](../haproxy.md#grpc)); HAProxy can't set a
+    `content-type` on a reply without a body, so an `http-after-response` rule sets it.
   - **forward-auth:** the verdict's (403): Traefik denies only on a non-2xx answer, and copies
     its headers to the client. gRPC clients that take a gRPC `content-type` for a gRPC answer
     (grpc-go does) read our status and message; others make up the same code from the 403.
@@ -349,7 +322,7 @@ The messages themselves aren't read yet ([gRPC](../grpc.md)).
 | ext_authz | gRPC call | Buffered, optional | No | Yes | Envoy fallback | Not yet |
 | ext_proc | gRPC stream | Buffered (streamed in observability mode) | Yes (not used yet) | Yes, or no (observability mode) | Envoy Gateway, Envoy, Istio, Contour | Built (Envoy Gateway) |
 | forward-auth | HTTP subrequest | If forwarded | No | Yes | Traefik (nginx `auth_request` speaks it too) | Built |
-| SPOE | SPOP | Buffered, up to HAProxy's buffer | Possible | Yes | HAProxy | Built (configured by hand) |
+| SPOE | SPOP | Buffered, up to HAProxy's buffer | Possible | Yes | HAProxy | Built ([configured by hand](../haproxy.md)) |
 | `/v1/check` | HTTP (gRPC planned) | Yes | No | Yes | CLI, tests; a Traefik plugin planned | Built |
 | Reverse proxy | HTTP proxying | Yes | Yes | It is the path | VMs, test reference | Built |
 

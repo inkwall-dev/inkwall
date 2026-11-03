@@ -25,6 +25,10 @@
 // rules decide (the failure mode): a rule that denies when action is unset
 // fails closed.
 //
+// A denied gRPC call (by its Content-Type) also gets grpc_status,
+// grpc_message and grpc_content_type, for HAProxy to answer it as a gRPC
+// server would: HTTP 200 with the gRPC status in the headers.
+//
 // A NOTIFY without the message, or with arguments the agent can't read,
 // gets action deny with status 400: only a misconfigured HAProxy sends one,
 // and the request is not let through.
@@ -85,6 +89,13 @@ const (
 	VarAction    = "action"
 	VarStatus    = "status"
 	VarRequestID = "request_id"
+	// VarGRPCStatus, VarGRPCMessage and VarGRPCContentType are set only
+	// to deny a gRPC call (by its Content-Type): its gRPC status, the
+	// grpc-message and the Content-Type to answer it with, trailers-only,
+	// as the other adapters answer one.
+	VarGRPCStatus      = "grpc_status"
+	VarGRPCMessage     = "grpc_message"
+	VarGRPCContentType = "grpc_content_type"
 )
 
 // Values of VarAction.
@@ -539,6 +550,9 @@ func (s *Server) answer(ctx context.Context, ack *encoder, payload []byte, maxFr
 	}
 	if v.Action == pipeline.ActionDeny {
 		setVerdict(ack, ActionDeny, v.Status, req.ID)
+		if g := httpadapter.GRPCOf(req.Headers); g != httpadapter.NotGRPC {
+			setGRPCDenial(ack, g, v.Status, req.ID)
+		}
 		return
 	}
 	setVerdict(ack, ActionAllow, 0, req.ID)
@@ -551,6 +565,15 @@ func setVerdict(ack *encoder, action string, status int, id string) {
 		ack.setVar(VarStatus, func(e *encoder) { e.int32(int32(status)) }) // #nosec G115 -- an HTTP status
 	}
 	ack.setVar(VarRequestID, func(e *encoder) { e.str(id) })
+}
+
+// setGRPCDenial adds the variables HAProxy answers a denied gRPC call
+// with: HTTP 200 and the gRPC status in the headers (trailers-only), which
+// gRPC and gRPC-Web clients read.
+func setGRPCDenial(ack *encoder, g httpadapter.GRPCProtocol, status int, id string) {
+	ack.setVar(VarGRPCStatus, func(e *encoder) { e.int32(int32(httpadapter.GRPCCode(status))) }) // #nosec G115 -- a gRPC code
+	ack.setVar(VarGRPCMessage, func(e *encoder) { e.str(httpadapter.GRPCMessage(status, id)) })
+	ack.setVar(VarGRPCContentType, func(e *encoder) { e.str(g.ContentType()) })
 }
 
 // args are the arguments of the agent's message.

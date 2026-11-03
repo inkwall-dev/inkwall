@@ -93,9 +93,6 @@ bench-compare: ## Compare benchmarks of changed packages with BASE (origin/main)
 crs-test: ## Run the OWASP CRS regression suite through the proxy (test/crs)
 	cd test/crs && $(GO) test -count=1 -timeout 30m -v ./...
 
-.PHONY: haproxy-test
-haproxy-test: ## SPOE agent end to end with a real HAProxy in Docker (HAPROXY_IMAGE, default haproxy:3.2; Linux)
-	hack/haproxy/test.sh
 
 .PHONY: lint
 lint: ## Run golangci-lint
@@ -213,6 +210,10 @@ kind-upgrade: ## Upgrade test on kind: helm upgrade from the last release to thi
 kind-test: ## Send benign and attack requests to the kind demo and check verdicts
 	hack/kind/smoke.sh
 	NAME=traefik PROXY=http://127.0.0.1:30080 ADMIN=http://127.0.0.1:30482 hack/kind/smoke.sh
+
+.PHONY: haproxy-e2e
+haproxy-e2e: ## End-to-end test of HAProxy with the engine's SPOE agent and the examples/haproxy samples, in Docker (no cluster; Linux)
+	hack/haproxy/e2e.sh
 
 .PHONY: raw-envoy-e2e
 raw-envoy-e2e: ## End-to-end test of raw Envoy with the engine's ext_proc adapter and the examples/raw-envoy samples, in Docker (no cluster)
