@@ -136,7 +136,7 @@ type Options struct {
 	// empty: the system roots.
 	ControlPlaneCAFile string
 	// CRDInterval is how often the leader looks for Traefik's IngressRoute
-	// CRD, and Gateway API's and Envoy Gateway's, until they are installed;
+	// CRD, and Gateway API's, Envoy Gateway's and Istio's, until they are installed;
 	// 0: 30s.
 	CRDInterval time.Duration
 
@@ -228,7 +228,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	}
 	// Traefik's IngressRoute CRD may be installed after the operator.
 	ingressRoutes := &crdwatch.Kind{GVK: integrations.TraefikIngressRouteGVK, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
-	// So may Gateway API's, and Envoy Gateway's.
+	// So may Gateway API's, Envoy Gateway's and Istio's.
 	crd := func(gvk schema.GroupVersionKind, obj client.Object) *crdwatch.Kind {
 		return &crdwatch.Kind{GVK: gvk, Object: obj, Mapper: mgr.GetRESTMapper(), Cache: mgr.GetCache(), Interval: o.CRDInterval}
 	}
@@ -238,6 +238,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	envoyProxies := crd(wiring.EnvoyProxyGVK, nil)
 	extensionPolicies := crd(wiring.EnvoyExtensionPolicyGVK, nil)
 	trafficPolicies := crd(wiring.ClientTrafficPolicyGVK, nil)
+	envoyFilters := crd(wiring.EnvoyFilterGVK, nil)
 	if err := (&controller.BundleReconciler{
 		Client:        mgr.GetClient(),
 		APIReader:     mgr.GetAPIReader(),
@@ -256,7 +257,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	}
 	inject := o.Inject && o.Webhooks && o.DistributionPort != 0
 	// The engine in proxy pods: injected by the Pod webhook, or put in the
-	// pod template of a proxy that has one (Envoy Gateway).
+	// pod template of a proxy that has one (Envoy Gateway, Istio).
 	sidecar := injection.Sidecar{
 		Image:        o.EngineImage,
 		PullPolicy:   o.EnginePullPolicy,
@@ -306,7 +307,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	// proxy pods won't have the engine.
 	wiringCfg := wiring.Config{
 		Pods: selectors, IngressRoutes: ingressRoutes, HTTPRoutes: httpRoutes, Gateways: gateways, GatewayClasses: gatewayClasses,
-		EnvoyProxies: envoyProxies, ExtensionPolicies: extensionPolicies, TrafficPolicies: trafficPolicies, Sidecar: sidecar,
+		EnvoyProxies: envoyProxies, ExtensionPolicies: extensionPolicies, TrafficPolicies: trafficPolicies, EnvoyFilters: envoyFilters, Sidecar: sidecar,
 	}
 	wirings := wiring.Integrations(mgr.GetClient(), mgr.GetAPIReader(), wiringCfg)
 	// An integration the operator may not wire neither watches nor reads
@@ -331,7 +332,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	if err := (&proxydiscovery.Reconciler{Client: mgr.GetClient(), GatewayClasses: gatewayClasses, Kinds: kinds, Disabled: denied}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
-	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gateways, gatewayClasses, envoyProxies, extensionPolicies, trafficPolicies} {
+	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gateways, gatewayClasses, envoyProxies, extensionPolicies, trafficPolicies, envoyFilters} {
 		if err := mgr.Add(k); err != nil {
 			return nil, err
 		}

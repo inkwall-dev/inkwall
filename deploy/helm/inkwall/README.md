@@ -34,8 +34,8 @@ kubectl -n inkwall-system rollout status deployment/inkwall-operator
 ```
 
 The rollout finishing means the operator is running. Traefik pods created from then on get the
-engine; restart the ones already running. Envoy Gateway rolls a Gateway's Envoy pods itself when
-it gets its first protected route. To upgrade, see [upgrading](../../../docs/upgrading.md).
+engine; restart the ones already running. Envoy Gateway and Istio roll a Gateway's pods themselves
+when it gets its first protected route ([Istio](../../../docs/istio.md)). To upgrade, see [upgrading](../../../docs/upgrading.md).
 
 The chart is signed with [cosign](https://docs.sigstore.dev/cosign/signing/overview/) v3: see [CONTRIBUTING.md](../../../CONTRIBUTING.md#cutting-a-release)
 for how to verify it. From a checkout, `make kind-operator` builds the images and installs
@@ -50,7 +50,7 @@ The names below are for a release named `inkwall`.
 | CRDs (`waf.inkwall.dev`) | Installed and upgraded with the chart, kept on uninstall (`crds.install`) |
 | [`Deployment`](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) `inkwall-operator` | 2 replicas with [leader election](https://kubernetes.io/docs/concepts/architecture/leases/#leader-election); non-root, read-only root filesystem, no capabilities |
 | [`PodDisruptionBudget`](https://kubernetes.io/docs/concepts/workloads/pods/disruptions/#pod-disruption-budgets) | When `operator.replicas` is more than 1 |
-| [`ServiceAccount`](https://kubernetes.io/docs/concepts/security/service-accounts/), [`ClusterRole`, `Role` and bindings](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) | Rules generated from the operator's code; the `Role` covers the release namespace only. Each integration has a `ClusterRole` of its own, `inkwall-operator-traefik` and `inkwall-operator-envoy-gateway`, granted unless `rbac.integrations` leaves it out: see [integration permissions](#integration-permissions) |
+| [`ServiceAccount`](https://kubernetes.io/docs/concepts/security/service-accounts/), [`ClusterRole`, `Role` and bindings](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) | Rules generated from the operator's code; the `Role` covers the release namespace only. Each integration has a `ClusterRole` of its own, `inkwall-operator-traefik`, `inkwall-operator-envoy-gateway` and `inkwall-operator-istio`, granted unless `rbac.integrations` leaves it out: see [integration permissions](#integration-permissions) |
 | `ValidatingWebhookConfiguration` `inkwall-operator-validating` | WAF kinds only; fails closed, 2 s timeout |
 | `MutatingWebhookConfiguration` `inkwall-operator-mutating` | Traefik pods in the [proxy namespaces](#proxy-namespaces) only, at creation; fails open, or closed while a policy is in block mode (`injection.enabled`) |
 | [`Service`](https://kubernetes.io/docs/concepts/services-networking/service/) `inkwall-operator-webhook` | The webhooks |
@@ -74,13 +74,13 @@ from the operator's generated manifests. Don't edit `files/` by hand.
 | `operator.extraArgs` | `[]` | Extra `inkwall-operator` flags |
 | `operator.podAnnotations`, `podLabels`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName` | | The default [affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/) spreads the replicas across nodes |
 | `operator.podDisruptionBudget.enabled`, `minAvailable` | `true`, `1` | |
-| `engine.image.repository`, `tag`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-engine`, the chart's `appVersion`, `IfNotPresent` | The engine injected into Traefik pods and put into Envoy Gateway's Envoy pods; `InkwallConfig.spec.engine.image` overrides it |
+| `engine.image.repository`, `tag`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-engine`, the chart's `appVersion`, `IfNotPresent` | The engine injected into Traefik pods and put into Envoy Gateway's Envoy pods and Istio's Gateway pods; `InkwallConfig.spec.engine.image` overrides it |
 | `injection.enabled` | `true` | Inject the engine into Traefik pods when they are created. `false`: see [turning injection off](#turning-injection-off) |
-| `injection.proxyNamespaces` | `[traefik, kube-system, envoy-gateway-system]` | The namespaces the proxies' pods run in; only pods there get the engine and the policy bundle. See [proxy namespaces](#proxy-namespaces) |
+| `injection.proxyNamespaces` | `[traefik, kube-system, envoy-gateway-system, istio-ingress, istio-system]` | The namespaces the proxies' pods run in; only pods there get the engine and the policy bundle. See [proxy namespaces](#proxy-namespaces) |
 | `controlPlane.caBundle` | `""` | The optional control plane's CA (PEM), when its certificate isn't from a public CA, e.g. `--set-file controlPlane.caBundle=ca.crt` |
 | `controlPlane.enrollmentToken` | `""` | The control plane's one-time enrollment token, stored in the Secret `inkwall-enrollment` (key `token`); or leave it empty and create that Secret yourself |
 | `controlPlane.eventsBufferMiB` | `64` | Each replica's buffer of security events while the control plane is unreachable (an [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir)); when it is full, the oldest events are dropped and counted |
-| `rbac.integrations.traefik`, `envoyGateway` | `true`, `true` | Grant each integration's `ClusterRole`: `true`, `auto` (when the cluster serves the proxy's API group) or `false`. See [integration permissions](#integration-permissions) |
+| `rbac.integrations.traefik`, `envoyGateway`, `istio` | `true`, `true`, `true` | Grant each integration's `ClusterRole`: `true`, `auto` (when the cluster serves the proxy's API group) or `false`. See [integration permissions](#integration-permissions) |
 | `uninstall.unwire` | `true` | On `helm uninstall`, unwire the routes first (a pre-delete hook), so they keep working, and remove the operator's [finalizer](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/) from the `WAFPolicy` objects |
 | `serviceAccount.name`, `annotations` | the operator's name (`inkwall-operator`), `{}` | |
 | `crds.install` | `true` | |
@@ -99,13 +99,15 @@ table above.
 
 The operator recognises a proxy's pods by their labels: Traefik's `app.kubernetes.io/name: traefik`,
 Envoy Gateway's `app.kubernetes.io/name: envoy` and `app.kubernetes.io/managed-by: envoy-gateway`,
-or the `InkwallConfig`'s selectors. A proxy pod gets the engine, and its ServiceAccount gets
+Istio's `gateway.istio.io/managed: istio.io-gateway-controller`, or the `InkwallConfig`'s selectors. A proxy pod gets the engine, and its ServiceAccount gets
 read access to the policy bundle, which holds every namespace's policies and rules; with that
 access, its engine connects to the operator and reports which bundle it enforces.
 
 Anyone who may create a pod may give it those labels ([GHSA-r5cq-6vq5-q8qg](https://github.com/inkwall-dev/inkwall/security/advisories/GHSA-r5cq-6vq5-q8qg)). So the operator only looks for proxy pods in
 the namespaces listed in `injection.proxyNamespaces`: `traefik`, `kube-system` (where k3s and RKE2
-run Traefik) and `envoy-gateway-system` (where Envoy Gateway runs the Envoy pods) by default. A pod
+run Traefik), `envoy-gateway-system` (where Envoy Gateway runs the Envoy pods), and `istio-ingress`
+and `istio-system` (where Istio's docs put Gateways: Istio runs a Gateway's pods in the Gateway's
+namespace) by default. A pod
 with a proxy's labels anywhere else is an ordinary pod: no engine, no access to the bundle. List
 only namespaces whose pods you trust as much as the proxy itself: those where only the people who
 run the proxy create pods.
@@ -124,7 +126,7 @@ refuses to leave a proxy so: when pods that already run the engine are in a name
 doesn't list, it stops with an error naming them (when Helm can reach the cluster; `helm template`
 and Argo CD can't check).
 Envoy Gateway runs the Envoy pods in its own namespace, unless its deployment mode puts them in each
-Gateway's namespace: then list those namespaces. `{*}` makes every namespace a proxy namespace, as
+Gateway's namespace: then list those namespaces, as for Istio Gateways in other namespaces. `{*}` makes every namespace a proxy namespace, as
 before 0.3.0, 0.2.2 and 0.1.5: only for clusters where everyone who may create a pod may also read
 every policy. Changing the value restarts the operator.
 
@@ -135,14 +137,17 @@ is not affected: the operator accepts any engine whose ServiceAccount may read t
 
 Each integration's permissions are in a `ClusterRole` of its own: Traefik's writes its
 Middlewares, and the references to them in Ingresses, IngressRoutes and HTTPRoutes; Envoy Gateway's writes its `EnvoyProxy`,
-`EnvoyExtensionPolicy`, `Backend` and `ClientTrafficPolicy` objects and patches Gateways.
-`rbac.integrations.<integration>` (`traefik`, `envoyGateway`) is one of:
+`EnvoyExtensionPolicy`, `Backend` and `ClientTrafficPolicy` objects and patches Gateways; Istio's
+(`inkwall-operator-istio`) writes its `EnvoyFilter` objects and the ConfigMaps Gateways name in
+their `parametersRef`, and patches Gateways.
+`rbac.integrations.<integration>` (`traefik`, `envoyGateway`, `istio`) is one of:
 
 - `true`, the default (also when the value is missing, as in `helm upgrade --reuse-values` from
   0.2): always granted, so a proxy installed after Inkwall is protected. On a cluster without the
   proxy, the role names kinds the cluster doesn't serve, which grants nothing usable;
 - `auto`: the role is granted when the cluster serves the proxy's API group
-  (`traefik.io/v1alpha1`, `gateway.envoyproxy.io/v1alpha1`) at install or upgrade time, so a
+  (`traefik.io/v1alpha1`, `gateway.envoyproxy.io/v1alpha1`, `networking.istio.io/v1alpha3`) at
+  install or upgrade time, so a
   cluster without Envoy Gateway doesn't grant the operator its kinds. Install the proxy first, or
   run `helm upgrade` once it is installed. `helm template` and `--dry-run=client` can't ask the
   cluster, so they render every role;
@@ -263,10 +268,12 @@ Before anything is deleted, a pre-delete hook (`uninstall.unwire`, on by default
 `Ignore`. It removes Inkwall's Middleware from every route it wired, keeping your own
 Middlewares. For Envoy Gateway, it deletes its `EnvoyExtensionPolicy`, `Backend` and
 `ClientTrafficPolicy` objects, takes the engine out of your `EnvoyProxy` objects, and points the
-Gateways it pointed at its own `EnvoyProxy` back at none. Every `WAFPolicy` then reports
+Gateways it pointed at its own `EnvoyProxy` back at none. For Istio, it deletes its `EnvoyFilter`
+objects, takes the engine out of your Gateways' ConfigMaps (putting back the `deployment` overlay
+as it was), and points the Gateways it pointed at its own ConfigMap back at none. Every `WAFPolicy` then reports
 `Programmed=False` and `Ready=False` (reason `Unwired`), and loses the `waf.inkwall.dev/unwire`
 finalizer. The routes then keep working, uninspected; Traefik pods drop the engine when they
-restart, and Envoy Gateway rolls its Envoy pods without it; deleting a policy, or its namespace, no
+restart, and Envoy Gateway and Istio roll their pods without it; deleting a policy, or its namespace, no
 longer waits for the operator. Last, the hook deletes what the operator created outside the chart
 for itself and the engines: the `inkwall-trust` ConfigMaps in the proxy namespaces (labelled
 `app.kubernetes.io/managed-by: inkwall-operator`; an unlabelled one of your own is kept), the
@@ -305,6 +312,12 @@ wiring yourself:
    annotations `waf.inkwall.dev/wired` and `waf.inkwall.dev/hash`. In each Gateway annotated
    `waf.inkwall.dev/wired`, remove `spec.infrastructure.parametersRef` (it names the operator's
    `EnvoyProxy`) and the annotation, then delete the operator's `EnvoyProxy` objects.
+   For Istio, delete the `envoyfilters` (`networking.istio.io`) labelled
+   `app.kubernetes.io/managed-by: inkwall-operator`. In each ConfigMap labelled
+   `waf.inkwall.dev/sidecar: "true"`, put the annotation `waf.inkwall.dev/original-deployment` back
+   as the `deployment` key (or remove the engine's entries) and remove that label and annotation;
+   in each Gateway annotated `waf.inkwall.dev/configmap`, remove `spec.infrastructure.parametersRef`
+   and the annotation, then delete the operator's ConfigMaps (`inkwall-waf-<gateway>`).
 3. Remove the finalizer from the policies, or they can't be deleted:
 
    ```sh
@@ -411,3 +424,8 @@ Envoy waits for the engine 500 ms longer than the policy's `timeout`. A request 
 inspect within the policy's `timeout` gets the policy's failure mode from the engine: 503 in block
 mode. Large bodies take longer: CRS takes about 200 ms on a 48 KB form field on a fast machine, so
 raise `timeout` (up to 1s) for routes that take large bodies.
+
+Through Istio, the route's ext_proc filter has the same settings (`failure_mode_allow` for
+`failOpen`, `observability_mode` for `shadowMode`), and Envoy answers 503 when it can't reach the
+engine (`status_on_error`) and 504 when the engine doesn't answer in time, unless every policy on
+the route fails open. See [Istio](../../../docs/istio.md#when-the-engine-is-down).

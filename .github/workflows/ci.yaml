@@ -99,9 +99,10 @@ jobs:
     # kind's newest Kubernetes (the local kind cluster, and upgrade, run 1.34:
     # KIND_NODE_IMAGE in the Makefile).
     runs-on: ubuntu-latest
-    # The e2e takes 15 to 20 minutes; the rest is for saving the build cache
-    # on a push, whose steps have limits of their own (#298).
-    timeout-minutes: 40
+    # The e2e takes 25 to 30 minutes, Istio's (#281) about 10 of them; the
+    # rest is for saving the build cache on a push, whose steps have limits
+    # of their own (#298).
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7

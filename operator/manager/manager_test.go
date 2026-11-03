@@ -115,7 +115,7 @@ func startOperator(t *testing.T) (_ context.Context, _ client.Client, _ *warning
 
 		DistributionPort:     distPort,
 		Inject:               true,
-		ProxyNamespaces:      integrations.Namespaces{"proxy", "eg-system"},
+		ProxyNamespaces:      integrations.Namespaces{"proxy", "eg-system", "istio-edge"},
 		EngineImage:          "inkwall-engine:test",
 		EnginePullPolicy:     corev1.PullNever,
 		Replica:              "operator-0",
@@ -195,6 +195,7 @@ func TestOperator(t *testing.T) {
 	t.Run("httproutes", func(t *testing.T) { testHTTPRoutes(ctx, t, c) })
 	t.Run("envoy gateway", func(t *testing.T) { testEnvoyGateway(ctx, t, c) })
 	t.Run("mixed gateways", func(t *testing.T) { testMixedGateways(ctx, t, c) })
+	t.Run("istio", func(t *testing.T) { testIstio(ctx, t, c) })
 	t.Run("failure policy", func(t *testing.T) { testFailurePolicy(ctx, t, c) })
 	t.Run("source guard", func(t *testing.T) { testSourceGuard(ctx, t, c) })
 	// Last: it stops the operator.
