@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/inkwall-dev/inkwall/pkg/grpcwire"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 )
 
@@ -72,4 +73,50 @@ func grpcFramed(body []byte, truncated bool) bool {
 		body = body[n:]
 	}
 	return true
+}
+
+// grpcTextLimits bound the reading of one call's messages: nesting, text
+// fields, and the bytes gzip messages decompress to, in all.
+var grpcTextLimits = grpcwire.Limits{Depth: 16, Fields: 4096}
+
+const grpcMaxDecompressed = 1 << 20
+
+// grpcText returns the text fields of r's messages, r being a gRPC call
+// (asGRPC), and reports whether every message was read whole: not cut,
+// not compressed other than with gzip (grpc-encoding), protobuf, and
+// within the limits.
+func grpcText(r *request.Request) ([]request.Arg, bool) {
+	msgs, ok := grpcwire.Messages(r.Body, r.BodyTruncated)
+	complete := ok && !r.BodyTruncated
+	encoding := strings.ToLower(strings.TrimSpace(r.Headers.Get("Grpc-Encoding")))
+	budget := int64(grpcMaxDecompressed)
+	var fields []grpcwire.Field
+	for _, m := range msgs {
+		data := m.Data
+		if m.Compressed {
+			if encoding != "gzip" || m.Cut {
+				complete = false
+				continue
+			}
+			out, whole := grpcwire.Gunzip(data, budget)
+			budget -= int64(len(out))
+			if !whole {
+				complete = false
+			}
+			data = out
+		}
+		var whole bool
+		fields, whole = grpcwire.Strings(data, grpcTextLimits, fields)
+		if !whole {
+			complete = false
+		}
+	}
+	if len(fields) == 0 {
+		return nil, complete
+	}
+	args := make([]request.Arg, len(fields))
+	for i, f := range fields {
+		args[i] = request.Arg{Name: f.Name, Value: f.Value}
+	}
+	return args, complete
 }

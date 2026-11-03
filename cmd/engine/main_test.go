@@ -36,7 +36,7 @@ import (
 func TestParseProxyFlags(t *testing.T) {
 	cfg, err := parseFlags(cmdProxy, []string{
 		"--upstream", "http://app:8080", "--mode", "block", "--failure-mode", "closed",
-		"--trusted-proxies", "10.0.0.0/8,192.0.2.1", "--oversize-body", "deny", "--max-args", "255",
+		"--trusted-proxies", "10.0.0.0/8,192.0.2.1", "--oversize-body", "deny", "--max-args", "255", "--grpc-messages", "inspect",
 		"--skip-paths", "/healthz,/static/*", "--skip-body-paths", "/upload/*",
 		"--disable-rule-groups", "php, java",
 	}, io.Discard)
@@ -46,7 +46,7 @@ func TestParseProxyFlags(t *testing.T) {
 	if cfg.upstream.Host != "app:8080" || cfg.mode != pipeline.ModeBlock || cfg.failureMode != pipeline.FailClosed {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
-	if cfg.oversize != pipeline.OversizeDeny || cfg.maxArgs != 255 {
+	if cfg.oversize != pipeline.OversizeDeny || cfg.maxArgs != 255 || !cfg.grpcMessages {
 		t.Fatalf("oversize/max-args not parsed: %+v", cfg)
 	}
 	if len(cfg.skipPaths) != 2 || len(cfg.skipBodyPaths) != 1 {
@@ -65,7 +65,7 @@ func TestParseProxyFlagsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.mode != pipeline.ModeDetect || cfg.failureMode != pipeline.FailAuto {
+	if cfg.mode != pipeline.ModeDetect || cfg.failureMode != pipeline.FailAuto || cfg.grpcMessages {
 		t.Fatalf("defaults must be detect mode and the auto failure mode, got %+v", cfg)
 	}
 	if cfg.listen != ":8480" || cfg.adminListen != ":9480" {
@@ -79,6 +79,7 @@ func TestParseProxyFlagsErrors(t *testing.T) {
 		{"--upstream", "http://app", "--mode", "enforce"},
 		{"--upstream", "http://app", "--failure-mode", "maybe"},
 		{"--upstream", "http://app", "--oversize-body", "truncate"},
+		{"--upstream", "http://app", "--grpc-messages", "yes"},
 		{"--upstream", "http://app", "--skip-paths", "static/*"},
 		{"--upstream", "http://app", "--disable-rule-groups", "php,cobol"},
 	} {

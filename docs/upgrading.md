@@ -36,6 +36,11 @@ What's new in 0.4.0:
   403 before the upgrade (`Block`), or logged with reason `websocket` (`Detect`). The engine's
   `--websocket-origins`, `--websocket-allow-missing-origin` and `--websocket-required-headers`
   flags do the same without the operator. See [WebSocket](websocket.md).
+- **gRPC messages.** `body.grpcMessages: Inspect` on a `WAFPolicy` (`--grpc-messages inspect`
+  without the operator) has the rules read the text in gRPC calls' messages. It is off by
+  default: try it in `Detect` mode first. See [inspecting the messages](grpc.md#inspecting-the-messages).
+  The chart upgrades the CRDs with it; if you install them yourself, apply 0.4.0's. A policy
+  that sets it isn't `Enforced` (`EnginesOutdated`) while an engine before 0.4.0 runs it.
 - **HAProxy.** `inkwall-engine spoe` is an agent of [HAProxy](https://docs.haproxy.org/)'s [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) (HAProxy 3.1
   or later), on `127.0.0.1:9004` or a Unix socket. You configure HAProxy yourself: see
   [protecting HAProxy](haproxy.md). Nothing changes in an existing installation.
