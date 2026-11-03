@@ -48,6 +48,15 @@ What changes by itself in 0.4.0:
   field. Restart Traefik and the Envoy Gateway proxies after the upgrade, so their engines are
   0.4.0. Events and `inkwall_requests_total` have a new reason, `websocket`.
 
+What changes by itself in 0.4.0:
+
+- **A denied gRPC call gets a gRPC status.** A request with a gRPC `Content-Type` that the engine
+  denies is answered with `grpc-status` 7 (`PERMISSION_DENIED`) and a `grpc-message` naming the
+  request ID, not a plain-text 403. Through Envoy Gateway, raw Envoy and the engine's reverse
+  proxy the HTTP status is 200, as for any gRPC error (so Envoy's access log shows 200 for these
+  denials); through Traefik it stays 403. Clients reported `PERMISSION_DENIED` before as well, but
+  gRPC-Web clients got the 403 as it was. See [denied calls](grpc.md#denied-calls).
+
 ## From 0.3.0 to 0.3.1
 
 0.3.1 is a patch release: upgrade the chart as for 0.3.0. What changes by itself:

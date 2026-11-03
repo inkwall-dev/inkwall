@@ -124,6 +124,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpadapter.LogEvent(r.Context(), h.logger, h.events, req, r.URL.Path, v)
 	}
 	if v.Action == pipeline.ActionDeny {
+		// As a gRPC server answers a failed call: HTTP 200, trailers-only.
+		if g := httpadapter.GRPCOf(req.Headers); g != httpadapter.NotGRPC {
+			httpadapter.WriteGRPCDenial(w, g, http.StatusOK, v.Status, req.ID)
+			return
+		}
 		http.Error(w, http.StatusText(v.Status), v.Status)
 		return
 	}

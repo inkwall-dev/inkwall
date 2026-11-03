@@ -43,6 +43,7 @@ jobs:
           - { package: ./pkg/adapters/internal/httpadapter, target: FuzzURIPath }
           - { package: ./pkg/pipeline, target: FuzzWebSocketOrigin }
           - { package: ./pkg/adapters/internal/httpadapter, target: FuzzRequestID }
+          - { package: ./pkg/adapters/internal/httpadapter, target: FuzzGRPCDenial }
           - { package: ./pkg/clientip, target: FuzzResolve }
           - { package: ./pkg/bundlekey, target: FuzzParse }
           - { package: ./pkg/agent, target: FuzzApply }
