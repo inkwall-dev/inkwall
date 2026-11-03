@@ -6,6 +6,7 @@ package manager
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -23,6 +24,7 @@ import (
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/bundle"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
+	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 )
 
 // eventually retries cond until it returns "" or a minute passes: the
@@ -51,6 +53,16 @@ func current(ctx context.Context, t *testing.T, c client.Client) *bundlev1.Bundl
 		return nil
 	}
 	signed, err := bundle.Read(ctx, c, &s)
+	// A bundle being published is written to the other slot's chunks while
+	// the manifest read may still name the old ones: ErrIncomplete, which
+	// the operator and the engines retry. Read again (#304).
+	for deadline := time.Now().Add(10 * time.Second); errors.Is(err, bundlesecret.ErrIncomplete) && time.Now().Before(deadline); {
+		time.Sleep(100 * time.Millisecond)
+		if err = c.Get(ctx, types.NamespacedName{Namespace: "default", Name: bundle.BundleSecret}, &s); err != nil {
+			return nil
+		}
+		signed, err = bundle.Read(ctx, c, &s)
+	}
 	if err != nil {
 		t.Fatalf("bundle Secret: %v", err)
 	}
