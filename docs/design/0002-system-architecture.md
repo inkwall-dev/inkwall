@@ -143,7 +143,7 @@ The compiled policy sits in an [`atomic.Pointer[Snapshot]`](https://pkg.go.dev/s
 | `pkg/clientip` | Client IP ([§8.2](#82-client-ip-correctness)) | built |
 | `pkg/agent`, `pkg/policy` | Bundle stream, verify, compile, swap ([§5.2](#52-engine--operator-bundle-distribution)) | built |
 | `pkg/telemetry` | Metrics, tracing, [`slog`](https://pkg.go.dev/log/slog) | built |
-| `pkg/adapters/*` | One per listener | `forwardauth`, `httpcheck`, `proxy`, `extproc` built; `extauthz`, `spoe` not yet |
+| `pkg/adapters/*` | One per listener | `forwardauth`, `httpcheck`, `proxy`, `extproc`, `spoe` built; `extauthz` not yet |
 | `pkg/events` | Redacted security events, bounded buffer ([§5.4](#54-event-schema)) | built |
 | `pkg/ratelimit`, `pkg/iplist` | [Token buckets](https://en.wikipedia.org/wiki/Token_bucket), [CIDR](https://www.rfc-editor.org/rfc/rfc4632) trie | not yet |
 
@@ -531,7 +531,8 @@ acts on the variable `txn.inkwall.action`. To fail closed, an extra rule denies 
 variable is unset. Body inspection needs `http-buffer-request`, enabled only when a policy needs
 it.
 
-**Not yet** built.
+**Built:** the agent, `inkwall-engine spoe`, with a configuration written by hand
+([0006 §4](0006-adapter-protocols.md#4-spoe-haproxy-stream-processing-offload-engine)). **Not yet:** the operator's wiring.
 
 ### 6.5 Caddy
 

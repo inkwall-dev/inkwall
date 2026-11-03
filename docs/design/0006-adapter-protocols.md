@@ -2,14 +2,14 @@
 
 - Status: Draft
 - Date: 2026-09-28
-- Updated: 2026-10-31
+- Updated: 2026-11-03
 - Owner: noureldin
 - Depends on: [0002 §3.2](0002-system-architecture.md#32-adapters) and
   [0002 §6](0002-system-architecture.md#6-proxy-integrations)
 
 Every proxy has its own way to ask an outside service "should I let this request through?". This
 primer describes each of those protocols and the [adapter](../glossary.md#adapter) that answers it. [Forward-auth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/),
-`/v1/check`, the reverse proxy and [ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter) are built; [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) and [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) are not yet.
+`/v1/check`, the reverse proxy, [ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter) and [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) are built; [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) is not yet.
 
 An **adapter** is a thin listener in the engine (`inkwall-engine`), in `pkg/adapters/<name>`. It
 converts the protocol's message into a `request.Request`, and the engine's `Verdict` back into the
@@ -20,9 +20,9 @@ its adapter is in [0002 §6](0002-system-architecture.md#6-proxy-integrations).
 **Built (v0.1.0):** forward-auth ([§3](#3-forward-auth-traefik-forwardauth-nginx-auth_request)),
 `/v1/check` over HTTP ([§5](#5-v1check-inkwalls-own-api)) and the reverse proxy
 ([§6](#6-reverse-proxy-standalone-mode)). **Built since:** ext_proc
-([§2](#2-ext_proc-envoy-external-processing)), with the operator's Envoy Gateway configuration. **Not yet:** ext_authz
-([§1](#1-ext_authz-envoy-external-authorization)) and SPOE
-([§4](#4-spoe-haproxy-stream-processing-offload-engine)).
+([§2](#2-ext_proc-envoy-external-processing)), with the operator's Envoy Gateway configuration, and the SPOE agent
+([§4](#4-spoe-haproxy-stream-processing-offload-engine)), configured by hand for now. **Not yet:** ext_authz
+([§1](#1-ext_authz-envoy-external-authorization)).
 
 ## Contents
 
@@ -156,12 +156,91 @@ The Traefik middleware must set:
 
 ## 4. SPOE (HAProxy Stream Processing Offload Engine)
 
-- [HAProxy](https://docs.haproxy.org/) speaks its binary protocol, SPOP, pipelined over a few connections. The engine is the
-  agent (an SPOA).
-- The engine sets variables, such as `txn.inkwall.action=deny`, and HAProxy's rules act on them.
-- On a timeout or an error, no variable is set. Failing closed therefore needs an extra rule that
-  denies the request when the variable is missing.
-- Asynchronous groups allow detect mode without waiting.
+- [HAProxy](https://docs.haproxy.org/) speaks its binary protocol, SPOP 2.0, pipelined over a few connections, TCP or a
+  Unix socket. The engine is the agent (an SPOA): `inkwall-engine spoe`, on `127.0.0.1:9004` by
+  default.
+- Each connection starts with a HELLO handshake (version, maximum frame size, pipelining). A HELLO
+  marked `healthcheck` (`option spop-check`) is answered, and the connection closed. HAProxy then
+  sends a **NOTIFY** frame per event with messages; the engine answers each with an **ACK** of
+  `set-var` actions, in any order (pipelining). **DISCONNECT** frames end a connection, with a
+  status code; on shutdown the engine answers the NOTIFY frames in flight, then sends one.
+- The message is `inkwall-request`, with the arguments `method` (`method`), `path` (`pathq`:
+  path and query, the origin form even for HTTP/2), `version` (`req.ver`), `headers`
+  (`req.hdrs_bin`), `body` (`req.body`), `ip` (`src`) and `https` (`ssl_fc`).
+- **The verdict:** `txn.inkwall.action` is `allow` or `deny`, `txn.inkwall.status` the status
+  to deny with (403, 413, 503, ...), `txn.inkwall.request_id` the request ID, which HAProxy sets
+  as `X-Request-Id`. The engine sets `action` on every answer, so an unset `action` means HAProxy
+  got none.
+- **Failure mode:** on a timeout (`timeout processing`), an agent that is down or an error,
+  HAProxy sets no variable and goes on. Failing closed therefore needs a rule that denies with 503
+  when `action` is unset; failing open leaves it out. `option set-on-error error` says why, in
+  `txn.inkwall.error`. The engine's own failures (its `--timeout`, overload) are decided by its
+  failure mode, so `timeout processing` must be above `--timeout`.
+- A NOTIFY without `inkwall-request`, or with arguments the engine can't read (a method that
+  isn't a token, a path not in origin form, an invalid Host, headers that don't parse, both
+  `Transfer-Encoding` and `Content-Length`) gets `deny` with 400: only a misconfigured HAProxy
+  sends one.
+- **The body:** HAProxy sends it only with `option http-buffer-request`, and buffers at most
+  `tune.bufsize` less `tune.maxrewrite` (16384 − 1024 bytes by default): a larger body is cut. A
+  body shorter than its `Content-Length` counts as oversized, so the policy's `body.onOversize`
+  decides (413 in block mode by default): raise `tune.bufsize` above the policy's body limit to
+  inspect larger bodies. A body without `Content-Length` (chunked, or HTTP/2) can't say whether
+  it was cut, so it counts as complete only when its frame is well under half the maximum frame
+  size: `tune.maxrewrite` is at most half the buffer, so HAProxy's buffer holds at least that much
+  before it is full. Under the defaults that is about 7 KB, headers included; larger chunked bodies count as
+  oversized.
+- The client address is `src`, HAProxy's client (from the [PROXY protocol](https://github.com/haproxy/haproxy/blob/master/doc/proxy-protocol.txt) when HAProxy accepts it),
+  resolved with `X-Forwarded-For` through `--trusted-proxies`.
+- Detect mode answers `allow`; HAProxy still waits for the answer (SPOP 2.0 has no asynchronous
+  mode any more).
+
+A working configuration, which `make haproxy-test` runs with HAProxy 3.2 in Docker
+([`hack/haproxy`](../../hack/haproxy)):
+
+```haproxy
+# spoe.conf
+[inkwall]
+spoe-agent inkwall
+    messages inkwall-request
+    option var-prefix inkwall
+    option set-on-error error
+    timeout processing 500ms
+    use-backend inkwall-engine
+    register-var-names action status request_id error
+
+spoe-message inkwall-request
+    args method=method path=pathq version=req.ver headers=req.hdrs_bin body=req.body ip=src https=ssl_fc
+    event on-frontend-http-request
+```
+
+```haproxy
+# haproxy.cfg
+frontend web
+    bind :80
+    option http-buffer-request
+    filter spoe engine inkwall config /usr/local/etc/haproxy/spoe.conf
+    # Fail closed (leave out to fail open).
+    http-request deny deny_status 503 if !{ var(txn.inkwall.action) -m found }
+    http-request deny deny_status 400 if { var(txn.inkwall.status) -m int 400 }
+    http-request deny deny_status 413 if { var(txn.inkwall.status) -m int 413 }
+    http-request deny deny_status 503 if { var(txn.inkwall.status) -m int 503 }
+    http-request deny deny_status 403 if { var(txn.inkwall.action) -m str deny }
+    http-request set-header X-Request-Id %[var(txn.inkwall.request_id)] if { var(txn.inkwall.request_id) -m found }
+    default_backend app
+
+backend inkwall-engine
+    mode spop
+    timeout connect 5s
+    timeout server 3m
+    option spop-check
+    server engine 127.0.0.1:9004 check
+```
+
+`deny_status` takes a fixed status, hence a rule per status the engine denies with. `mode spop`
+needs HAProxy 3.1 or later.
+
+**Built:** `pkg/adapters/spoe`, run as `inkwall-engine spoe`. **Not yet:** the operator's wiring
+of the HAProxy Kubernetes Ingress Controller ([0002 §6.4](0002-system-architecture.md#64-haproxy-haproxy-kubernetes-ingress-controller-haproxy-ingress)).
 
 ## 5. `/v1/check` (Inkwall's own API)
 
@@ -210,7 +289,7 @@ the cluster's [Standalone mode](../glossary.md#standalone) (no control plane).
 | ext_authz | gRPC call | Buffered, optional | No | Yes | Envoy fallback | Not yet |
 | ext_proc | gRPC stream | Buffered (streamed in observability mode) | Yes (not used yet) | Yes, or no (observability mode) | Envoy Gateway, Envoy, Istio, Contour | Built (Envoy Gateway) |
 | forward-auth | HTTP subrequest | If forwarded | No | Yes | Traefik (nginx `auth_request` speaks it too) | Built |
-| SPOE | SPOP | Yes | Possible | Yes, or no (asynchronous) | HAProxy | Not yet |
+| SPOE | SPOP | Buffered, up to HAProxy's buffer | Possible | Yes | HAProxy | Built (configured by hand) |
 | `/v1/check` | HTTP (gRPC planned) | Yes | No | Yes | CLI, tests; a Traefik plugin planned | Built |
 | Reverse proxy | HTTP proxying | Yes | Yes | It is the path | VMs, test reference | Built |
 

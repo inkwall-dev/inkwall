@@ -1,11 +1,12 @@
 # Upgrading
 
-This guide upgrades an Inkwall installation from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
+This guide upgrades an Inkwall installation from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
 0.3.0, and from 0.1.x (0.1.0 to 0.1.5) to 0.2.2, the latest 0.2 release, and lists what changes on
 the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 ## Contents
 
+- [From 0.3.x to 0.4.0](#from-03x-to-040)
 - [From 0.3.0 to 0.3.1](#from-030-to-031)
 - [From 0.2.x to 0.3.0](#from-02x-to-030)
   - [Before you upgrade](#before-you-upgrade)
@@ -22,6 +23,14 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
   - [Upgrading the chart](#upgrading-the-chart)
   - [Checking it worked](#checking-it-worked)
   - [Rolling back](#rolling-back)
+
+## From 0.3.x to 0.4.0
+
+What's new:
+
+- **`inkwall-engine spoe`**, an agent of [HAProxy](https://docs.haproxy.org/)'s [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) (HAProxy 3.1 or later), on
+  `127.0.0.1:9004`. You configure HAProxy by hand for now: see
+  [SPOE](design/0006-adapter-protocols.md#4-spoe-haproxy-stream-processing-offload-engine).
 
 ## From 0.3.0 to 0.3.1
 

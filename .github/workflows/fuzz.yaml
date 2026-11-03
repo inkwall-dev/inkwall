@@ -40,6 +40,8 @@ jobs:
           - { package: ./pkg/adapters/httpcheck, target: FuzzCheck }
           - { package: ./pkg/adapters/proxy, target: FuzzProxy }
           - { package: ./pkg/adapters/extproc, target: FuzzExtProc }
+          - { package: ./pkg/adapters/spoe, target: FuzzSPOE }
+          - { package: ./pkg/adapters/spoe, target: FuzzVarint }
           - { package: ./pkg/adapters/internal/httpadapter, target: FuzzURIPath }
           - { package: ./pkg/adapters/internal/httpadapter, target: FuzzRequestID }
           - { package: ./pkg/clientip, target: FuzzResolve }

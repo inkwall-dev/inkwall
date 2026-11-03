@@ -169,6 +169,17 @@ jobs:
           cache-dependency-path: test/crs/go.sum
       - run: make crs-test
 
+  haproxy:
+    # The SPOE agent with a real HAProxy (hack/haproxy/test.sh).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+      - run: make haproxy-test
+
   bench:
     # Performance regression gate (0001 §8): benchmarks of the PR against its
     # base, interleaved, compared with benchstat. Packages whose test binary

@@ -93,6 +93,10 @@ bench-compare: ## Compare benchmarks of changed packages with BASE (origin/main)
 crs-test: ## Run the OWASP CRS regression suite through the proxy (test/crs)
 	cd test/crs && $(GO) test -count=1 -timeout 30m -v ./...
 
+.PHONY: haproxy-test
+haproxy-test: ## SPOE agent end to end with a real HAProxy in Docker (HAPROXY_IMAGE, default haproxy:3.2; Linux)
+	hack/haproxy/test.sh
+
 .PHONY: lint
 lint: ## Run golangci-lint
 	$(GOLANGCI_LINT) run ./...
