@@ -123,7 +123,7 @@ ok "chart $FROM_VERSION installed"
 "${HELM[@]}" upgrade --install traefik-e2e traefik --repo https://traefik.github.io/charts \
   --version "$TRAEFIK_CHART_VERSION" --namespace "$TRAEFIK_NS" --create-namespace \
   --values hack/kind/traefik-e2e-values.yaml --set providers.kubernetesGateway.enabled=false \
-  --set logs.access.enabled=true >/dev/null # each request's duration, for a gap (#320)
+  --set accessLog.enabled=true --set accessLog.filters.minDuration=1s >/dev/null # slow requests, for a gap (#320)
 "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout status deployment/traefik-e2e --timeout=180s >/dev/null
 "${KUBECTL[@]}" create namespace "$NS" --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f - >/dev/null
 "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
@@ -336,11 +336,11 @@ probe_stop() {
     # The wrong rounds, with each request's connect/total time: a
     # connect that took 1 s or more is a SYN the network dropped.
     grep -v '^[0-9.]* 403 200 403 ' <<<"$log" | head -40 | sed 's/^/      /' || true
-    # The engine's and Traefik's logs of the last 2 minutes, but Traefik's
-    # access log lines of requests answered in under a second.
+    # The engine's and Traefik's logs of the last 2 minutes; Traefik's
+    # access log has the requests that took 1 s or more.
     echo "      engine (in Traefik's pod) and Traefik, last 2 minutes:"
     "${KUBECTL[@]}" -n "$TRAEFIK_NS" logs deployment/traefik-e2e --all-containers --prefix --since=2m 2>&1 |
-      awk '!($NF ~ /^[0-9]+ms$/ && $NF + 0 < 1000)' | tail -80 | sed 's/^/      /' || true
+      tail -80 | sed 's/^/      /' || true
   fi
 }
 
