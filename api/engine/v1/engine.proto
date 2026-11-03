@@ -97,6 +97,9 @@ enum Reason {
   REASON_NO_POLICY = 9;
   // Inspection is suspended (the emergency switch).
   REASON_SUSPENDED = 10;
+  // A WebSocket handshake didn't meet the policy's WebSocket rules (an
+  // origin not allowed, a required header missing).
+  REASON_WEBSOCKET = 11;
 }
 
 // CheckResponse is the verdict for one CheckRequest.

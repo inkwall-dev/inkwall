@@ -123,6 +123,10 @@ func TestWAFPolicyValidation(t *testing.T) {
     inspect: true
     maxBytes: 131072
     onOversize: Deny
+  webSocket:
+    allowedOrigins: ["https://app.example.com", "http://localhost:3000", "https://*.example.net"]
+    allowMissingOrigin: true
+    requiredHeaders: [Authorization, Sec-WebSocket-Protocol]
 `)},
 
 		{name: "no targets", doc: policy("  targetRefs: []\n"), wantErr: "should have at least 1 items"},
@@ -161,6 +165,17 @@ func TestWAFPolicyValidation(t *testing.T) {
 
 		{name: "body over 10 MiB", doc: policy(target + "  body: {maxBytes: 10485761}\n"), wantErr: "should be less than or equal to 10485760"},
 		{name: "unknown oversize action", doc: policy(target + "  body: {onOversize: InspectPrefix}\n"), wantErr: `Unsupported value: "InspectPrefix"`},
+
+		{name: "websocket required headers only", doc: policy(target + "  webSocket: {requiredHeaders: [X-Api-Key]}\n")},
+		{name: "websocket origin with a path", doc: policy(target + "  webSocket: {allowedOrigins: [\"https://app.example.com/\"]}\n"), wantErr: "spec.webSocket.allowedOrigins[0]"},
+		{name: "websocket origin without a scheme", doc: policy(target + "  webSocket: {allowedOrigins: [app.example.com]}\n"), wantErr: "spec.webSocket.allowedOrigins[0]"},
+		{name: "websocket origin ws scheme", doc: policy(target + "  webSocket: {allowedOrigins: [\"wss://app.example.com\"]}\n"), wantErr: "spec.webSocket.allowedOrigins[0]"},
+		{name: "websocket origin upper case", doc: policy(target + "  webSocket: {allowedOrigins: [\"https://App.example.com\"]}\n"), wantErr: "spec.webSocket.allowedOrigins[0]"},
+		{name: "websocket wildcard inside an origin", doc: policy(target + "  webSocket: {allowedOrigins: [\"https://a.*.example.com\"]}\n"), wantErr: "spec.webSocket.allowedOrigins[0]"},
+		{name: "websocket any origin", doc: policy(target + "  webSocket: {allowedOrigins: [\"*\"]}\n"), wantErr: "spec.webSocket.allowedOrigins[0]"},
+		{name: "websocket repeated origin", doc: policy(target + "  webSocket: {allowedOrigins: [\"https://a.example\", \"https://a.example\"]}\n"), wantErr: "Duplicate value"},
+		{name: "websocket header with a colon", doc: policy(target + "  webSocket: {requiredHeaders: [\"X-Api:\"]}\n"), wantErr: "spec.webSocket.requiredHeaders[0]"},
+		{name: "websocket missing origin without origins", doc: policy(target + "  webSocket: {allowMissingOrigin: true}\n"), wantErr: "allowMissingOrigin needs allowedOrigins"},
 	})
 }
 

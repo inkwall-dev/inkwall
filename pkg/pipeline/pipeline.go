@@ -113,6 +113,10 @@ type Config struct {
 	// Routes decides which paths skip inspection entirely or skip only body
 	// inspection (tier T0). Nil inspects everything.
 	Routes *router.Table
+	// WebSocket is what a WebSocket handshake must meet (allowed origins,
+	// required headers), checked before the rules. Nil: nothing more than
+	// any request.
+	WebSocket *WebSocketRules
 }
 
 // Observer receives every verdict. Implementations must be fast and safe for
@@ -164,6 +168,7 @@ type Pipeline struct {
 	oversize OversizeAction
 	observer Observer
 	routes   *router.Table
+	ws       *WebSocketRules
 }
 
 // New returns a pipeline that evaluates requests with eval.
@@ -186,6 +191,7 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 		oversize: cfg.Oversize.Resolve(cfg.Mode),
 		observer: cfg.Observer,
 		routes:   cfg.Routes,
+		ws:       cfg.WebSocket,
 	}
 }
 
@@ -232,6 +238,24 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request) Verdict {
 	case router.InspectAll:
 	}
 
+	// A WebSocket handshake that breaks the policy's WebSocket rules is
+	// denied without running the rules; in detect mode the rules still
+	// run, so their matches are logged too.
+	ws := p.ws != nil && WebSocketHandshake(r) && p.ws.violation(r) != ""
+	if ws && p.mode == ModeBlock {
+		return p.enforce(Verdict{Reason: ReasonWebSocket}, http.StatusForbidden)
+	}
+	v := p.inspect(ctx, r)
+	if ws && v.Reason == ReasonNone {
+		v.Reason = ReasonWebSocket
+		v = p.enforce(v, http.StatusForbidden)
+	}
+	return v
+}
+
+// inspect runs the rules on r, which is on a route inspected (with its
+// body or without).
+func (p *Pipeline) inspect(ctx context.Context, r *request.Request) Verdict {
 	// A gRPC call is inspected without its body, which is binary
 	// protobuf: so it isn't oversized either.
 	if call := asGRPC(r); call != nil {
