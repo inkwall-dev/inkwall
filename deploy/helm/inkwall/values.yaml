@@ -71,6 +71,10 @@ injection:
     # Where k3s and RKE2 run Traefik.
     - kube-system
     - envoy-gateway-system
+    # Istio runs a Gateway's pods in the Gateway's namespace: these are
+    # where its docs put Gateways; list the others yours are in.
+    - istio-ingress
+    - istio-system
 
 controlPlane:
   # The optional control plane (0002 §3.4), for GitOps and Managed mode.
@@ -108,12 +112,12 @@ rbac:
   # grants it, also for a proxy installed after Inkwall; a role on the
   # resources of a proxy the cluster doesn't run grants nothing usable.
   # auto grants it only when the cluster serves the proxy's API group
-  # (traefik.io, gateway.envoyproxy.io) at install or upgrade time, so a
-  # proxy installed later needs another helm upgrade; helm template, which
-  # can't ask the cluster, grants it. false never does. Without its role,
-  # the operator disables that integration: policies on the routes of its
-  # proxy report Programmed=False (IntegrationDisabled), and the others
-  # work.
+  # (traefik.io, gateway.envoyproxy.io, networking.istio.io) at install or
+  # upgrade time, so a proxy installed later needs another helm upgrade;
+  # helm template, which can't ask the cluster, grants it. false never
+  # does. Without its role, the operator disables that integration:
+  # policies on the routes of its proxy report Programmed=False
+  # (IntegrationDisabled), and the others work.
   integrations:
     # Traefik's Middlewares, and the references to them in Ingresses,
     # IngressRoutes and HTTPRoutes. Without it, the Pod webhook selects no
@@ -122,6 +126,9 @@ rbac:
     # Envoy Gateway's EnvoyProxies, EnvoyExtensionPolicies, Backends and
     # ClientTrafficPolicies, a Gateway's parametersRef.
     envoyGateway: true
+    # Istio's EnvoyFilters, and the ConfigMap a Gateway's parametersRef
+    # names (its deployment overlay).
+    istio: true
 
 serviceAccount:
   # Empty: the operator's name (inkwall-operator for a release named inkwall).

@@ -48,7 +48,7 @@ func TestFlags(t *testing.T) {
 	// Proxy pods are recognised only in the proxy namespaces: by default,
 	// Traefik's and Envoy Gateway's usual ones, not every namespace.
 	if o, err := parseFlags(nil, io.Discard); err != nil || o.ProxyNamespaces.Any() ||
-		!slices.Equal(o.ProxyNamespaces, integrations.Namespaces{"traefik", "kube-system", "envoy-gateway-system"}) {
+		!slices.Equal(o.ProxyNamespaces, integrations.Namespaces{"traefik", "kube-system", "envoy-gateway-system", "istio-ingress", "istio-system"}) {
 		t.Errorf("default proxy namespaces %v, %v", o.ProxyNamespaces, err)
 	}
 	if o, err := parseFlags([]string{"--proxy-namespaces= ingress, ingress,eg"}, io.Discard); err != nil ||

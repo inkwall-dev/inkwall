@@ -224,7 +224,9 @@ Traefik's routes are wired and their requests inspected. A separate condition wa
 `Programmed` true for the requests: rejected, because `Ready` would then claim the whole policy is
 enforced. The admission webhook warns of `Ingress` and `IngressRoute` targets (only Traefik serves
 them) when such a policy is applied. The same holds for any integration whose `Result` doesn't
-set `Responses`: only Envoy Gateway's does.
+set `Responses`: only Envoy Gateway's does. Istio's (v0.4.0) doesn't: its `EnvoyFilter` sends no
+response phase yet (#323), so a policy with `responses.inspect` on an Istio route is
+`ResponsesNotInspected` too, and the Gateway's buffer limit isn't raised for responses.
 
 **Latency and memory.** A route that inspects responses adds one evaluation per response
 (phases 3 and 4; the CRS response rules are a few dozen, mostly `@pmFromFile` and `@rx` on the

@@ -114,8 +114,8 @@ func TestReconcile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Envoy Gateway's wiring takes HTTPRoutes (#127).
-	kinds := map[string][]schema.GroupKind{"traefik": traefikKinds["traefik"], "envoy-gateway": {httpRouteKind}}
+	// Envoy Gateway's and Istio's wirings take HTTPRoutes (#127, #281).
+	kinds := map[string][]schema.GroupKind{"traefik": traefikKinds["traefik"], "envoy-gateway": {httpRouteKind}, "istio": {httpRouteKind}}
 	r := &Reconciler{Client: c, Kinds: kinds}
 	reconcileOnce := func() {
 		t.Helper()
@@ -131,11 +131,13 @@ func TestReconcile(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	gc := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"controllerName": "gateway.envoyproxy.io/gatewayclass-controller"}}}
-	gc.SetGroupVersionKind(GatewayClassGVK)
-	gc.SetName("eg")
-	if err := c.Create(ctx, gc); err != nil {
-		t.Fatal(err)
+	for name, controller := range map[string]string{"eg": "gateway.envoyproxy.io/gatewayclass-controller", "istio": "istio.io/gateway-controller"} {
+		gc := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"controllerName": controller}}}
+		gc.SetGroupVersionKind(GatewayClassGVK)
+		gc.SetName(name)
+		if err := c.Create(ctx, gc); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// No InkwallConfig: nothing to write to.
@@ -157,6 +159,7 @@ func TestReconcile(t *testing.T) {
 		"traefik.io/ingress-controller":                 wafv1alpha1.SupportFull,
 		"k8s.io/ingress-nginx":                          wafv1alpha1.SupportUnsupported,
 		"gateway.envoyproxy.io/gatewayclass-controller": wafv1alpha1.SupportFull,
+		"istio.io/gateway-controller":                   wafv1alpha1.SupportFull,
 	}
 	if !apiequality.Semantic.DeepEqual(support, want) {
 		t.Errorf("proxies %+v, want %v", cfg.Status.Proxies, want)
