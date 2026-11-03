@@ -334,6 +334,12 @@ Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/inkwall/issues/282)); 
   resolved with `X-Forwarded-For` through `--trusted-proxies`.
 - Detect mode answers `allow`; HAProxy still waits for the answer (SPOP 2.0 has no asynchronous
   mode any more).
+- **The operator's probe** (bundle mode, [0002 §6.4](0002-system-architecture.md#64-haproxy-haproxy-kubernetes-ingress-controller-haproxy-ingress)): a request whose
+  `X-Inkwall-Probe` header is `<nonce>.<MAC>`, the MAC an HMAC-SHA256 of the nonce, host and URI
+  under the bundle's `probe_key`, is answered without inspection: `action=deny` (403) and the
+  variable `probe`, another HMAC of them under the key, which the operator's per-route rules
+  return with status 299 (`pkg/haproxyprobe`). Without a key, or with a wrong MAC, the request is
+  inspected as any other.
 - Routes are left uninspected with a condition on the message's `event`; the fail-closed rule
   must leave them out too.
 

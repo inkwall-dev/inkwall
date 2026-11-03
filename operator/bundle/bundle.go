@@ -12,6 +12,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -219,6 +220,15 @@ func GenerateSigner() (*Signer, error) {
 
 // Public returns the public key.
 func (s *Signer) Public() ed25519.PublicKey { return s.key.Public().(ed25519.PublicKey) }
+
+// ProbeKey is the key of the HAProxy probe (0002 §6.4), which the bundle
+// carries to the engines: an HMAC of a fixed label under the signing key's
+// seed, so it needs no Secret of its own and changes with the signing key.
+func (s *Signer) ProbeKey() []byte {
+	h := hmac.New(sha256.New, s.key.Seed())
+	h.Write([]byte("inkwall-haproxy-probe-key"))
+	return h.Sum(nil)
+}
 
 // KeyID identifies the key.
 func (s *Signer) KeyID() string { return s.keyID }
