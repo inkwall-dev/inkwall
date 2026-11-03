@@ -369,6 +369,9 @@ responses_held() {
   [[ $("${KUBECTL[@]}" -n "$NS" get envoyextensionpolicy inkwall-waf-app \
     -o jsonpath='{.spec.extProc[0].processingMode.response.body}/{.spec.extProc[0].processingMode.allowModeOverride}') == "$1/true" ]] && eep_accepted
 }
+responses_off() {
+  [[ -z $("${KUBECTL[@]}" -n "$NS" get envoyextensionpolicy inkwall-waf-app -o jsonpath='{.spec.extProc[0].processingMode.response}') ]] && eep_accepted
+}
 not_programmed_traefik() {
   [[ $(condition Programmed reason) == ResponsesNotInspected && $(condition Programmed message) == *"Traefik can't send responses to the engine: Ingress web"* &&
     $(condition Ready status) == False ]]
@@ -589,11 +592,19 @@ leak_path=/detect-leak-$RANDOM$RANDOM
 policy Detect "$RESPONSES"
 eventually "in detect mode, Envoy streams the responses" responses_held Streamed
 check "a response leaking a SQL error passes in detect mode" leak_is 200 "$CUSTOM_PORT" "$PLAIN_PORT"
-check "on a fresh path too" envoy_are 200 "$leak_path" -H "$LEAK"
-eventually "and the engines log it as a response event" logged_response "$leak_path" log
+# Envoy takes the new EnvoyExtensionPolicy a moment after Envoy Gateway
+# accepts it: each try is a new request (on its own path, so the event found
+# is that request's), passing, and then logged.
+leak_tries=0
+leak_logged() {
+  leak_tries=$((leak_tries + 1))
+  envoy_are 200 "$leak_path-$leak_tries" -H "$LEAK" && sleep 1 && logged_response "$leak_path-$leak_tries" log
+}
+eventually "a leak on a fresh path passes, and the engines log it as a response event" leak_logged
 
 echo "== detect mode"
 policy Detect
+eventually "Envoy Gateway accepts the EnvoyExtensionPolicy without responses" responses_off
 eventually "Envoy Gateway accepts the EnvoyExtensionPolicy in shadow mode" shadow_accepted
 eventually "no buffer limit: Envoy doesn't hold the body" no_limits
 eventually "the attack passes through both Gateways and Traefik" all_are 200 "$SQLI"
