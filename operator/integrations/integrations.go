@@ -3,7 +3,8 @@
 
 // Package integrations knows the proxies Inkwall wires into (0004 §4.2):
 // how to recognise each one's IngressClass or GatewayClass and pods, and
-// which engine adapter its pods use: Traefik, Envoy Gateway and Istio.
+// which engine adapter its pods use: Traefik, Envoy Gateway, Istio and
+// the HAProxy Kubernetes Ingress Controller.
 package integrations
 
 import (
@@ -71,8 +72,23 @@ var Istio = Integration{
 	Adapter:           []string{"ext-proc", "--listen=unix:" + EnvoySocketDir + "/extproc.sock"},
 }
 
+// HAProxySocketDir holds the engine's Unix socket in the HAProxy
+// Kubernetes Ingress Controller's pods.
+const HAProxySocketDir = "/var/run/inkwall-socket"
+
+// HAProxy is the HAProxy Kubernetes Ingress Controller integration: the
+// engine, injected into the controller's pods with the SPOE agent's
+// configuration, answers the SPOE filter each protected Ingress's backend
+// loads (0002 §6.4), on a Unix socket.
+var HAProxy = Integration{
+	Name:        "haproxy",
+	Controller:  "haproxy.org/ingress-controller/haproxy",
+	PodSelector: labels.Set{"app.kubernetes.io/name": "kubernetes-ingress"},
+	Adapter:     []string{"spoe", "--listen=unix:" + HAProxySocketDir + "/spoe.sock"},
+}
+
 // All are the known integrations.
-var All = []Integration{Traefik, EnvoyGateway, Istio}
+var All = []Integration{Traefik, EnvoyGateway, Istio, HAProxy}
 
 // ForController returns the integration of an IngressClass or GatewayClass
 // controller, or nil when Inkwall doesn't know it.

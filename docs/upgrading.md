@@ -59,6 +59,13 @@ What's new in 0.4.0:
 - **HAProxy.** `inkwall-engine spoe` is an agent of [HAProxy](https://docs.haproxy.org/)'s [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) (HAProxy 3.1
   or later), on `127.0.0.1:9004` or a Unix socket. You configure HAProxy yourself: see
   [protecting HAProxy](haproxy.md). Nothing changes in an existing installation.
+- **The HAProxy Kubernetes Ingress Controller** (3.1 or later) is wired by the operator: a
+  `WAFPolicy` on one of its Ingresses gives the controller's pods the engine (restart them after the
+  upgrade) and the Ingress a backend snippet of its own, and the policy is `Programmed` once the
+  operator's probe has proven the filter on every pod (`Unverified` until then). The new
+  `inkwall-operator-haproxy` ClusterRole is granted by `rbac.integrations.haproxy` (`true` by
+  default), and `haproxy-controller` joins the default `injection.proxyNamespaces`. See [with the
+  operator](haproxy.md#with-the-operator-haproxy-kubernetes-ingress-controller).
 
 What changes by itself in 0.4.0:
 

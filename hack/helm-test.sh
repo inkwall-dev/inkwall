@@ -110,7 +110,7 @@ proxy() {
   awk '/name: pods.waf.inkwall.dev/ {on=1; next} on && /objectSelector/ {exit} on && /namespaceSelector/ {p=1} p' <<<"$out" |
     tr -s ' \n' ' ' | sed 's/^ *//; s/ *$//'
 }
-want="traefik,kube-system,envoy-gateway-system,istio-ingress,istio-system|namespaceSelector: matchExpressions: - key: kubernetes.io/metadata.name operator: In values: - envoy-gateway-system - istio-ingress - istio-system - kube-system - traefik"
+want="traefik,kube-system,envoy-gateway-system,istio-ingress,istio-system,haproxy-controller|namespaceSelector: matchExpressions: - key: kubernetes.io/metadata.name operator: In values: - envoy-gateway-system - haproxy-controller - istio-ingress - istio-system - kube-system - traefik"
 for flags in "" "--set injection.proxyNamespaces=null"; do
   # shellcheck disable=SC2086
   if [[ $(proxy $flags) != "$want" ]]; then

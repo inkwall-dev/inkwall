@@ -52,6 +52,8 @@ const (
 	ReasonNoTargets             = "NoTargets"
 	ReasonInjectionDisabled     = "InjectionDisabled"
 	ReasonPending               = "Pending"
+	// ReasonUnverified: wired, but not proven in force (HAProxy's probe).
+	ReasonUnverified = "Unverified"
 	// ReasonIntegrationDisabled: the operator may not wire the proxy that
 	// serves a target (Disable).
 	ReasonIntegrationDisabled = "IntegrationDisabled"
@@ -291,7 +293,7 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 	if rep.disabled {
 		return metav1.ConditionFalse, ReasonInjectionDisabled, "the engine is not injected into proxy pods (injection is off): the routes are not wired"
 	}
-	var unsupported, failed, disabled, pending, partly []string
+	var unsupported, failed, disabled, pending, unverified, partly []string
 	// wired counts the wired targets by result, then kind.
 	wired := make([]map[schema.GroupKind]int, len(rep.results))
 	total := 0
@@ -338,6 +340,8 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 			case !s.Wired:
 				// Whatever the integration said, its traffic isn't inspected.
 				pending = append(pending, fmt.Sprintf("%s %s is not wired to the engine in %s yet", t.Kind.Kind, t.Key.Name, rep.results[i].Proxy))
+			case s.Unverified != "":
+				unverified = append(unverified, s.Unverified)
 			}
 			if s.Partly != "" {
 				partly = append(partly, s.Partly)
@@ -383,6 +387,10 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 	if len(pending) > 0 {
 		slices.Sort(pending)
 		return metav1.ConditionFalse, ReasonPending, strings.Join(slices.Compact(pending), "; ")
+	}
+	if len(unverified) > 0 {
+		slices.Sort(unverified)
+		return metav1.ConditionFalse, ReasonUnverified, strings.Join(slices.Compact(unverified), "; ")
 	}
 	slices.Sort(partly)
 	msgs = append(msgs, slices.Compact(partly)...)

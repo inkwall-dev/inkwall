@@ -41,9 +41,11 @@ webhooks:
   {{- $_ := set .clientConfig.service "namespace" $.Release.Namespace }}
   {{- $_ := set .clientConfig.service "port" 443 }}
   {{- $_ := set . "timeoutSeconds" $.Values.webhook.timeoutSeconds }}
-  {{- if and (eq .name "pods.waf.inkwall.dev") (not (include "inkwall.integration.enabled" (dict "root" $ "name" "traefik"))) }}
-  {{- /* Traefik's role isn't granted: its pods start without an engine
-  nothing would wire. The operator keeps this selector of no pod
+  {{- $podWebhooks := dict "pods.waf.inkwall.dev" "traefik" "haproxy.pods.waf.inkwall.dev" "haproxy" }}
+  {{- $integration := get $podWebhooks .name }}
+  {{- if and $integration (not (include "inkwall.integration.enabled" (dict "root" $ "name" $integration))) }}
+  {{- /* The integration's role isn't granted: its pods start without an
+  engine nothing would wire. The operator keeps this selector of no pod
   (integrations.NoPods). */}}
   {{- $name := dict "key" "app.kubernetes.io/name" }}
   {{- $_ := set . "objectSelector" (dict "matchExpressions" (list
@@ -51,7 +53,7 @@ webhooks:
     (merge (dict "operator" "DoesNotExist") $name)
     (dict "key" "waf.inkwall.dev/inject" "operator" "NotIn" "values" (list "false")))) }}
   {{- end }}
-  {{- if eq .name "pods.waf.inkwall.dev" }}
+  {{- if $integration }}
   {{- /* Only pods in the proxy namespaces are proxy pods. The operator
   keeps this namespaceSelector (integrations.Namespaces). */}}
   {{- $ns := splitList "," (include "inkwall.proxyNamespaces" $) }}

@@ -55,3 +55,52 @@ func TestGrantSkipsDisabledIntegrations(t *testing.T) {
 		t.Errorf("granted %v, want Envoy's and Traefik's ServiceAccounts", rb.Subjects)
 	}
 }
+
+// A namespace with HAProxy controller pods gets the agent's ConfigMap,
+// which goes once they are gone; other proxies' namespaces get none.
+func TestHAProxyConfigMap(t *testing.T) {
+	ctx := context.Background()
+	hap := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "haproxy-controller", Name: "hap-1",
+		Labels: map[string]string{"app.kubernetes.io/name": "kubernetes-ingress"}}}
+	traefik := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "traefik", Name: "traefik-1",
+		Labels: map[string]string{"app.kubernetes.io/name": "traefik"}}}
+	c := fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).WithObjects(hap, traefik).Build()
+	r := &Reconciler{Client: c, APIReader: c, Namespace: "inkwall-system"}
+	for _, ns := range []string{"haproxy-controller", "traefik"} {
+		if err := r.reconcileHAProxy(ctx, ns); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var cm corev1.ConfigMap
+	if err := c.Get(ctx, types.NamespacedName{Namespace: "haproxy-controller", Name: HAProxyConfigMap}, &cm); err != nil {
+		t.Fatal(err)
+	}
+	if cm.Data[HAProxyAuxKey] == "" || cm.Data[HAProxySPOEKey] == "" {
+		t.Errorf("data %v", cm.Data)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: "traefik", Name: HAProxyConfigMap}, &cm); err == nil {
+		t.Error("Traefik's namespace got the HAProxy agent's ConfigMap")
+	}
+	// Edited: restored.
+	cm = corev1.ConfigMap{}
+	_ = c.Get(ctx, types.NamespacedName{Namespace: "haproxy-controller", Name: HAProxyConfigMap}, &cm)
+	cm.Data[HAProxyAuxKey] = "edited"
+	if err := c.Update(ctx, &cm); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.reconcileHAProxy(ctx, "haproxy-controller"); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Get(ctx, types.NamespacedName{Namespace: "haproxy-controller", Name: HAProxyConfigMap}, &cm)
+	if cm.Data[HAProxyAuxKey] != HAProxyFiles()[HAProxyAuxKey] {
+		t.Error("an edited ConfigMap was not restored")
+	}
+	// The pods are gone, or the integration is disabled: removed.
+	r.Disabled = map[string]string{"haproxy": "not allowed"}
+	if err := r.reconcileHAProxy(ctx, "haproxy-controller"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: "haproxy-controller", Name: HAProxyConfigMap}, &cm); err == nil {
+		t.Error("the ConfigMap outlived the integration")
+	}
+}

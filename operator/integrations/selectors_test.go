@@ -31,7 +31,7 @@ func TestSelectors(t *testing.T) {
 		t.Error("defaults")
 	}
 	// The cache's selectors: one per integration.
-	if got := fmt.Sprint(defaults.PodSelectors()); got != "[app.kubernetes.io/name=traefik app.kubernetes.io/managed-by=envoy-gateway,app.kubernetes.io/name=envoy gateway.istio.io/managed=istio.io-gateway-controller]" {
+	if got := fmt.Sprint(defaults.PodSelectors()); got != "[app.kubernetes.io/name=traefik app.kubernetes.io/managed-by=envoy-gateway,app.kubernetes.io/name=envoy gateway.istio.io/managed=istio.io-gateway-controller app.kubernetes.io/name=kubernetes-ingress]" {
 		t.Errorf("default pod selectors %s", got)
 	}
 
@@ -49,8 +49,8 @@ func TestSelectors(t *testing.T) {
 	if custom.ForPod(edge) == nil || custom.ForPod(edge).Name != "traefik" || custom.ForPod(traefik) != nil {
 		t.Error("the override is not used")
 	}
-	// No key in common with Envoy Gateway's or Istio's selectors: still only their pods.
-	if got := fmt.Sprint(custom.PodSelectors()); got != "[app=edge-proxy app.kubernetes.io/managed-by=envoy-gateway,app.kubernetes.io/name=envoy gateway.istio.io/managed=istio.io-gateway-controller]" {
+	// No key in common with Envoy Gateway's, Istio's or HAProxy's selectors: still only their pods.
+	if got := fmt.Sprint(custom.PodSelectors()); got != "[app=edge-proxy app.kubernetes.io/managed-by=envoy-gateway,app.kubernetes.io/name=envoy gateway.istio.io/managed=istio.io-gateway-controller app.kubernetes.io/name=kubernetes-ingress]" {
 		t.Errorf("pod selectors %s", got)
 	}
 	again, _, _ := FromConfig([]wafv1alpha1.IntegrationSpec{{Controller: "traefik", Selector: &metav1.LabelSelector{MatchLabels: edge}}})

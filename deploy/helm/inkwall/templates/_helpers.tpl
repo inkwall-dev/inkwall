@@ -115,6 +115,7 @@ Arguments: root, name.
 traefik: traefik.io/v1alpha1
 envoyGateway: gateway.envoyproxy.io/v1alpha1
 istio: networking.istio.io/v1alpha3
+haproxy: ingress.v3.haproxy.org/v3
 {{- end -}}
 
 {{/*
@@ -163,7 +164,7 @@ default list when the value is missing, as after helm upgrade
 {{- define "inkwall.proxyNamespaces" -}}
 {{- $ns := (.Values.injection | default dict).proxyNamespaces -}}
 {{- if kindIs "invalid" $ns -}}
-{{- $ns = list "traefik" "kube-system" "envoy-gateway-system" "istio-ingress" "istio-system" -}}
+{{- $ns = list "traefik" "kube-system" "envoy-gateway-system" "istio-ingress" "istio-system" "haproxy-controller" -}}
 {{- end -}}
 {{- if kindIs "slice" $ns -}}
 {{- $ns = compact $ns -}}
