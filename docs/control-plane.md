@@ -171,9 +171,11 @@ The leader holds one **primary** connection. Over it the operator sends:
 - **Hello:** the replica's pod name, the operator and Kubernetes versions, the mode, the
   `kube-system` namespace [UID](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids), and the last [policy snapshot](glossary.md#policy-snapshot) applied.
 - **Cluster state:** every `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet` and `InkwallConfig`,
-  each with its name, namespace, labels, generation, spec (JSON) and status conditions. Also the
-  number of running [Traefik](https://doc.traefik.io/traefik/) pods and how many have the engine,
-  each connected engine (pod, node, version, the bundle version it runs or rejected), and the
+  each with its name, namespace, labels, generation, spec (JSON) and status conditions. Also, for
+  each integration ([Traefik](https://doc.traefik.io/traefik/) and
+  [Envoy Gateway](https://gateway.envoyproxy.io/)), its controller names, the number of its
+  running proxy pods and how many have the engine, and why it's disabled if the operator may not
+  wire it; each connected engine (pod, node, version, the bundle version it runs or rejected), and the
   bundle version and content hash.
   The leader sends it after connecting, within 5 seconds of a change, when asked, and every
   5 minutes.

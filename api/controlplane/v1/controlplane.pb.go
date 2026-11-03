@@ -1060,18 +1060,26 @@ func (x *ClusterState) GetBundleContentHash() []byte {
 	return nil
 }
 
-// Integration is a proxy controller the operator wires.
+// Integration is a proxy controller the operator wires: one for each the
+// operator supports, enabled or not.
 type Integration struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The integration, e.g. "traefik".
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// Its IngressClass controller, e.g. "traefik.io/ingress-controller".
+	// Its IngressClass controller, e.g. "traefik.io/ingress-controller"
+	// (none for a proxy that serves no Ingress).
 	Controller string `protobuf:"bytes,2,opt,name=controller,proto3" json:"controller,omitempty"`
 	// Its running pods, and how many of them have the engine.
 	Pods           uint32 `protobuf:"varint,3,opt,name=pods,proto3" json:"pods,omitempty"`
 	PodsWithEngine uint32 `protobuf:"varint,4,opt,name=pods_with_engine,json=podsWithEngine,proto3" json:"pods_with_engine,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Its GatewayClass controllerName, e.g.
+	// "gateway.envoyproxy.io/gatewayclass-controller".
+	GatewayController string `protobuf:"bytes,5,opt,name=gateway_controller,json=gatewayController,proto3" json:"gateway_controller,omitempty"`
+	// Why the operator may not wire it, e.g. missing RBAC; empty while it's
+	// enabled.
+	Disabled      string `protobuf:"bytes,6,opt,name=disabled,proto3" json:"disabled,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Integration) Reset() {
@@ -1130,6 +1138,20 @@ func (x *Integration) GetPodsWithEngine() uint32 {
 		return x.PodsWithEngine
 	}
 	return 0
+}
+
+func (x *Integration) GetGatewayController() string {
+	if x != nil {
+		return x.GatewayController
+	}
+	return ""
+}
+
+func (x *Integration) GetDisabled() string {
+	if x != nil {
+		return x.Disabled
+	}
+	return ""
 }
 
 // Engine is one engine connected to the operator.
@@ -2035,14 +2057,16 @@ const file_controlplane_v1_controlplane_proto_rawDesc = "" +
 	"\fintegrations\x18\x03 \x03(\v2$.inkwall.controlplane.v1.IntegrationR\fintegrations\x129\n" +
 	"\aengines\x18\x04 \x03(\v2\x1f.inkwall.controlplane.v1.EngineR\aengines\x12%\n" +
 	"\x0ebundle_version\x18\x05 \x01(\x04R\rbundleVersion\x12.\n" +
-	"\x13bundle_content_hash\x18\x06 \x01(\fR\x11bundleContentHash\"\x7f\n" +
+	"\x13bundle_content_hash\x18\x06 \x01(\fR\x11bundleContentHash\"\xca\x01\n" +
 	"\vIntegration\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1e\n" +
 	"\n" +
 	"controller\x18\x02 \x01(\tR\n" +
 	"controller\x12\x12\n" +
 	"\x04pods\x18\x03 \x01(\rR\x04pods\x12(\n" +
-	"\x10pods_with_engine\x18\x04 \x01(\rR\x0epodsWithEngine\"\xf9\x02\n" +
+	"\x10pods_with_engine\x18\x04 \x01(\rR\x0epodsWithEngine\x12-\n" +
+	"\x12gateway_controller\x18\x05 \x01(\tR\x11gatewayController\x12\x1a\n" +
+	"\bdisabled\x18\x06 \x01(\tR\bdisabled\"\xf9\x02\n" +
 	"\x06Engine\x12\x1b\n" +
 	"\tengine_id\x18\x01 \x01(\tR\bengineId\x12#\n" +
 	"\rpod_namespace\x18\x02 \x01(\tR\fpodNamespace\x12\x19\n" +

@@ -55,7 +55,7 @@ provider](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/) 
 
   ```sh
   kubectl get wafpolicy -A -o json |
-    jq -r '.items[] | select(any(.spec.targetRefs[]; .kind == "HTTPRoute")) | "\(.metadata.namespace)/\(.metadata.name) \(.spec.mode // "Block")"'
+    jq -r '.items[] | select(any(.spec.targetRefs[]; .kind == "HTTPRoute")) | "\(.metadata.namespace)/\(.metadata.name) \(.spec.mode // "Detect")"'
   ```
 
 - **Remove `spec.engine.socketDir` from your `InkwallConfig`**, if you set it. It never had an
@@ -375,7 +375,7 @@ Without any configuration on your part, the upgrade from any 0.1.x changes the f
 - **Bundles split into chunks past 900 KiB.** A [bundle](glossary.md#bundle) of up to 900 KiB
   compressed stays in the [Secret](https://kubernetes.io/docs/concepts/configuration/secret/) `inkwall-bundle`, as before. A larger one, which 0.1.x
   couldn't publish, is split into Secrets named `inkwall-bundle-a-0`… or `inkwall-bundle-b-0`…,
-  labelled `waf.inkwall.dev/bundle-chunk`, up to 7.2 MiB. The `inkwall-bundle-reader` Role, which
+  labelled `waf.inkwall.dev/bundle-chunk`, up to 7,200 KiB. The `inkwall-bundle-reader` Role, which
   lets Traefik's engines read the bundle, now also grants `get` on every chunk name. If you run an
   engine with `--bundle-secret` and a Role of your own, add the chunk names to it. Engines from
   0.1.x can't read a chunked Secret when they start, and refuse a streamed bundle over 4 MiB

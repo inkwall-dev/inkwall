@@ -5,9 +5,11 @@
 // rule engine. Coraza is the first implementation (package rules/coraza); the
 // interface keeps a different engine possible without touching adapters.
 //
-// Evaluation currently takes a whole request with its buffered body prefix.
-// Streaming evaluation (headers, then body chunks, then response) arrives with
-// the Envoy ext_proc adapter.
+// Evaluation takes a whole request with its buffered body prefix. Every
+// adapter gathers the body before deciding, the ext_proc adapter too (Envoy's
+// BUFFERED_PARTIAL body, or the chunks it streams in observability mode).
+// Streaming evaluation (headers, then body chunks, then response) is not
+// built.
 package rules
 
 import (

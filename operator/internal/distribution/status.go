@@ -47,7 +47,7 @@ var (
 	})
 	bundleBytes = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "inkwall_operator_bundle_compressed_bytes",
-		Help: "Size of the bundle this replica serves, gzip-compressed, as stored in its Secrets: over 900 KiB it is split into chunks, over 7.2 MiB it can't be published.",
+		Help: "Size of the bundle this replica serves, gzip-compressed, as stored in its Secrets: over 900 KiB it is split into chunks, over 7,200 KiB it can't be published.",
 	})
 	engineCount = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "inkwall_operator_engines",

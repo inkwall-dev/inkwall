@@ -159,10 +159,14 @@ Validation runs in three steps, cheapest first:
 
 | Condition | True when | False reasons |
 |---|---|---|
-| `Accepted` | Spec valid, references resolve, and the bundle with it fits | `InvalidRef`, `Conflict`, `RuleCompileError`, `TargetUnsupported`, `BundleTooLarge` |
+| `Accepted` | Spec valid, references resolve, and the bundle with it fits | `InvalidRef` (also a rule set that isn't usable), `Conflict`, `TargetUnsupported`, `BundleTooLarge` |
 | `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `IntegrationDisabled`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `Pending`, `NoTargets`, `InjectionDisabled`, `Unwired` |
 | `Enforced` | Every serving engine ACKed a bundle with this generation, and inspection isn't suspended | `EnginesBehind`, `EngineNack` (first error), `EnginesUnreported`, `NoEngines`, `NotInBundle`, `Suspended` |
-| `Ready` | The three above are True | first failing condition's reason |
+| `Ready` | The three above are True | first failing condition's reason; `NotAccepted`, `NotProgrammed` or `NotEnforced` while it isn't reported yet |
+
+A `WAFRuleSet` or `ClusterWAFRuleSet` has only `Accepted`: False with `InvalidRef` (no source, an
+unknown built-in, a missing ConfigMap or key) or `RuleCompileError` (its rules don't compile). A
+policy that uses such a rule set gets `InvalidRef`, with the rule set's message.
 
 Status also has `bundleVersion` and `observedGeneration`. `bundleVersion` is the first bundle that
 enforces the policy as it is now; later bundles do too, until one changes the policy. A bundle that
@@ -283,7 +287,7 @@ Injection puts the engine into proxy pods as a sidecar that shares a socket dire
 proxy.
 
 - **Native extension point first, Pod webhook otherwise.** [Envoy Gateway](https://gateway.envoyproxy.io/) has an extension point
-  (`EnvoyProxy`), and [Caddy](https://caddyserver.com/docs/) compiles the engine in. [Istio](https://istio.io/latest/docs/), [ingress-nginx](https://kubernetes.github.io/ingress-nginx/), Traefik and [HAProxy](https://docs.haproxy.org/) get
+  (`EnvoyProxy`), and [Caddy](https://caddyserver.com/docs/) compiles the engine in. [Istio](https://istio.io/latest/docs/), Traefik and [HAProxy](https://docs.haproxy.org/) get
   a Pod webhook. With `injection: Manual`, the operator prints [Helm](https://helm.sh/docs/) values and only verifies.
   It never patches the controller's Deployment: Helm or [Argo CD](https://argo-cd.readthedocs.io/en/stable/) would revert it.
 - **Native sidecar** (an [init container](https://kubernetes.io/docs/concepts/workloads/pods/init-containers/) with `restartPolicy: Always`, Kubernetes ≥ 1.29). It
@@ -372,7 +376,6 @@ check.
 |---|---|---|
 | Envoy Gateway | `Backend` ([Unix socket](https://man7.org/linux/man-pages/man7/unix.7.html)) + [`EnvoyExtensionPolicy`](https://gateway.envoyproxy.io/docs/api/extension_types/#envoyextensionpolicy) per protected `HTTPRoute` | 0 |
 | Istio | gateway-scoped [`EnvoyFilter`](https://istio.io/latest/docs/reference/config/networking/envoy-filter/) | ~0 (per-route disable) |
-| ingress-nginx | [Lua](https://github.com/openresty/lua-nginx-module) plugin ConfigMap + `plugins` key | ~0 (in-memory route set) |
 | Traefik | `Middleware` per namespace, attached to protected routes (`Ingress`, `IngressRoute`, `HTTPRoute`) | 0 |
 | HAProxy | [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) config + map of protected routes in an ACL | ~0 (map lookup) |
 | Caddy | nothing | 0 |
@@ -382,7 +385,6 @@ User-owned objects touched, with the fewest fields:
 - Envoy Gateway's `EnvoyProxy`: the engine's entries in its `initContainers`, `pod.volumes` and
   `container.volumeMounts`; or, for a Gateway that names none, the Gateway's
   `spec.infrastructure.parametersRef` to an operator-made one.
-- ingress-nginx's `data.plugins`: merged, with the original saved for uninstall.
 - Traefik's `router.middlewares` [annotation](https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/) on an `Ingress`, `spec.routes[*].middlewares` on
   an `IngressRoute`, and `spec.rules[*].filters` on an `HTTPRoute` that a Traefik Gateway serves.
 - The `waf.inkwall.dev/unwire` finalizer on a `WAFPolicy` ([§5](#5-uninstall-and-disable)).
@@ -521,14 +523,16 @@ integration), for `HTTPRoute` targets whose parent Gateways have a GatewayClass 
   none for a Gateway the user targets with their own, and deletes its own once they add one; their
   `bufferLimit` then caps the bodies inspected. One below the largest `body.maxBytes` of a route's
   policies (unset: the engine's 64 KiB) is `WiringFailed`, naming the ClientTrafficPolicy, with
-  the route still wired: bodies over it are handled as oversized, legitimate ones too.
+  the route still wired: bodies over it are handled as oversized, legitimate ones too. While the
+  operator can't create or update its own (an admission policy refuses it, say), the routes whose
+  body Envoy holds are `WiringFailed` with the error, still wired, until it's there and accepted.
 - **Unprotected routes get nothing**, and cost 0. A route that is no longer protected loses its
   `EnvoyExtensionPolicy` first; the `Backend`, `ClientTrafficPolicy` and engine go after.
-- **`Programmed`** counts a route wired once Envoy Gateway has accepted (`Accepted=True` for every
-  Gateway, in their status) its `EnvoyExtensionPolicy` and, when Envoy holds its body, its
+- **`Programmed`** counts a route wired once Envoy Gateway has accepted (in its status, `Accepted=True` for
+  an ancestor, and none `Accepted=False` or `Overridden=True`) its `EnvoyExtensionPolicy` and, when Envoy holds its body, its
   Gateways' `ClientTrafficPolicy`: until then the reason is `Pending`, so `Programmed=True` means
   Envoy has the buffer limit and a body isn't cut short. `Accepted=False` (a disabled Backend API,
-  say) is `WiringFailed` with Envoy Gateway's message. The operator watches both kinds. An object of the operator's name it didn't create
+  say) or `Overridden=True` is `WiringFailed` with Envoy Gateway's message. The operator watches both kinds. An object of the operator's name it didn't create
   is left alone (`WiringFailed`).
   - Envoy Gateway applies one `EnvoyExtensionPolicy` to a route (the oldest; the others are
     `Accepted=False`, reason `Conflicted`) and one to a rule, over the route's (which gets
@@ -647,7 +651,7 @@ It runs again when a targeted route changes (routes are indexed by target).
   manifest doesn't use, then the manifest. Chunks the manifest doesn't list are deleted after.
   A reader therefore never sees a manifest before its chunks. It also checks the hash: a reader that
   read the manifest just before the next bundle replaced its chunks fails and retries.
-- **Limits.** At most 8 chunks (7.2 MiB) and 64 MiB decompressed. A bundle over that is not
+- **Limits.** At most 8 chunks (7,200 KiB) and 64 MiB decompressed. A bundle over that is not
   published, and the current one stays; the policies it would add or change report it
   (`Accepted=False`, `BundleTooLarge`, [§3.2](#32-status-contract)). The builder warns when it
   publishes a bundle over 75% of the limit. `inkwall_operator_bundle_compressed_bytes` is the size each replica serves.
@@ -963,7 +967,7 @@ Removal must never leave a proxy failing closed on a missing engine.
 | Engine can't compile (version skew) | Engine keeps its previous bundle | `EngineNack` | Upgrade the engines or fix the rule |
 | Bundle Secret deleted | None | Builder recreates it | Automatic |
 | Bundle chunk deleted or edited | None; meanwhile new engines can't cold start from the Secret | Builder logs it | Automatic: published again |
-| Bundle over 7.2 MiB compressed | None: the current bundle stays; changes are not published | Builder error; warning past 75%; `inkwall_operator_bundle_compressed_bytes`; `Accepted=False` (`BundleTooLarge`) on the policies not published | Shrink the policies (fewer, or smaller rule sets) |
+| Bundle over 7,200 KiB compressed | None: the current bundle stays; changes are not published | Builder error; warning past 75%; `inkwall_operator_bundle_compressed_bytes`; `Accepted=False` (`BundleTooLarge`) on the policies not published | Shrink the policies (fewer, or smaller rule sets) |
 | Signing key rotated | None: the operator signs with the new key only once every connected engine trusts it | Secret's `rotation-phase`; operator logs the engines it waits for | Automatic ([§4.6](#46-bundle-builder-leader-only)); replace engines older than rotation |
 | Unknown controller version | Wiring may break | `Programmed=False` | Update or pin the integration |
 | An integration's `ClusterRole` not granted, or revoked | Its proxy's routes aren't wired; the others are | `Programmed=False` (`IntegrationDisabled`), discovery `Unsupported` | Grant it (`rbac.integrations`); the operator restarts with it ([§7](#7-rbac)) |
@@ -1054,7 +1058,7 @@ Missing CRDs don't disable an integration: its wiring waits for them
 | Engines per cluster | 500 |
 | Change → enforced everywhere (p95) | < 10 s |
 | Operator memory | < 512 MiB |
-| Bundle (compressed) | < 900 KiB in one Secret; up to 7.2 MiB in chunks |
+| Bundle (compressed) | < 900 KiB in one Secret; up to 7,200 KiB in chunks |
 
 **Measured** (#115) by `make scale-test SCALE=full` (`operator/test/scale`).
 
@@ -1091,8 +1095,8 @@ edits, the p95 is the slowest edit.
 Against the targets:
 
 - **Bundle size: met.** It is 134 KiB compressed at 5,000 policies, far under 900 KiB.
-  Uncompressed it is 1.9 MiB, nearly half of gRPC's default 4 MiB receive limit, which engines
-  keep.
+  Uncompressed it is 1.9 MiB, nearly half of gRPC's default 4 MiB receive limit, which v0.1.x
+  engines keep; engines from v0.2.0 accept the largest bundle plus 1 MiB (#145).
 - **Change → every engine: met** since #149 (5.3 s at 5,000 × 500). Before, it was met up to
   5,000 policies × 50 engines (1.5 s), but not at 5,000 × 500: there it took 4 s typically, but one
   edit took 47 s.
@@ -1280,7 +1284,7 @@ development.
 | O1 | Scaffold + CRDs + validation | CRDs with CEL, webhook compiles SecLang, envtest green | Done (v0.1.0) |
 | O2 | Resolver + bundle + distribution | An engine on its own (not injected) gets signed bundles; `Enforced` works | Done (v0.1.0) |
 | O3 | Envoy Gateway | kind: one `WAFPolicy`, attack blocked, `Ready=True` | Done (v0.3.0) |
-| O4 | Pod webhook + ingress-nginx, Traefik, HAProxy | Same attack blocked via all four in one cluster | Pod webhook and Traefik done (v0.1.0); ingress-nginx, HAProxy not yet |
+| O4 | Pod webhook + Traefik, HAProxy | Same attack blocked via all three in one cluster | Pod webhook and Traefik done (v0.1.0); HAProxy not yet. ingress-nginx, retired upstream, was dropped: its users migrate (`inkwallctl migrate ingress-nginx`) |
 | O5 | Uninstall, suspend, chaos, scale | [§5](#5-uninstall-and-disable) and [§6](#6-failure-modes) verified in CI | Uninstall, suspend, scale done; chaos not yet ([§9](#9-testing)) |
 | O6 | Upstream sync | Enroll with a control plane stub; policy round-trip | Done, against the stub ([§4.9](#49-upstream-sync-leader-only)) |
 
