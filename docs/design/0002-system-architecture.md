@@ -458,7 +458,14 @@ experimental.
 Envoy Gateway, with `ext_proc`, not `ext_authz`: the engine joins the Envoy pods through the
 Gateway's `EnvoyProxy`, and each protected HTTPRoute gets an `EnvoyExtensionPolicy` calling it
 through a `Backend` on a Unix socket ([0004 §4.4](0004-operator.md#44-wiring-controller)).
-**Not yet:** Istio, Contour, raw Envoy.
+Raw Envoy, configured by its user: no operator integration, since there is no API object to wire.
+The user adds the `ext_proc` filter to `envoy.yaml` and runs the engine next to Envoy, with the
+policy from flags or, in a cluster with the operator, from its bundles: the user grants the read
+access and keeps the trust ConfigMap that injection sets up for the integrations
+([raw Envoy](../raw-envoy.md)). Its policies target an `Ingress` of a class no controller serves,
+so they report `Programmed=False` (`ControllerUnsupported`), as the operator wires nothing.
+`make raw-envoy-e2e` (Docker) and `make kind-e2e-raw-envoy` run the samples.
+**Not yet:** Istio, Contour.
 
 ### 6.2 ingress-nginx
 
@@ -562,7 +569,7 @@ adapter must match.
 | Caddy | module | ✅ | ✅ | ✅ | ✅ | in-process |
 | Any | reverse proxy | ✅ | ✅ | ✅ | ✅ | TCP |
 
-Built: Traefik ForwardAuth, the reverse proxy, and ext_proc through Envoy Gateway.
+Built: Traefik ForwardAuth, the reverse proxy, and ext_proc through Envoy Gateway and raw Envoy.
 
 ---
 

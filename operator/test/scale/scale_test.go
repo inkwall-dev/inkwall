@@ -194,6 +194,13 @@ type Result struct {
 	RSSPeakSyncBytes     uint64 `json:"rssPeakSyncBytes"`
 	HeapPeakChangesBytes uint64 `json:"heapPeakChangesBytes"`
 	RSSPeakChangesBytes  uint64 `json:"rssPeakChangesBytes"`
+	// EnginesRSSPeakBytes: the fake engines' process's peak resident set,
+	// not the operator's; past the machine's free memory, the engines
+	// stall and the latencies measure the machine, not the operator.
+	EnginesRSSPeakBytes uint64 `json:"enginesRssPeakBytes"`
+	// StreamsCut counts the engine streams that ended once every engine
+	// had connected: none should (#296); the engines' errors say why.
+	StreamsCut int `json:"streamsCut"`
 }
 
 func parseScale(s string) (policies, engines int, err error) {
@@ -260,6 +267,7 @@ func TestScale(t *testing.T) {
 		t.Fatalf("not every engine connected after 2m: %d/%d", engines.count(func(s engineState) bool { return s.version > 0 }), nEngines)
 	}
 	res.ConnectSeconds = time.Since(start).Seconds()
+	endedBefore := engines.endedStreams()
 	t.Logf("%d engines connected in %.1fs", nEngines, res.ConnectSeconds)
 
 	// A GitOps sync of every policy and route.
@@ -297,9 +305,14 @@ func TestScale(t *testing.T) {
 	res.RSSBytes, res.RSSPeakBytes = rss()
 	res.RSSPeakBytes = max(res.RSSPeakBytes, res.RSSPeakSyncBytes, res.RSSPeakChangesBytes)
 
+	_, res.EnginesRSSPeakBytes = engines.rss()
+	res.StreamsCut = engines.endedStreams() - endedBefore
 	measureBundle(ctx, t, c, &res)
 	report(t, res)
 
+	if res.StreamsCut > 0 {
+		t.Errorf("%d engine streams ended, want none", res.StreamsCut)
+	}
 	if !synced {
 		return
 	}
@@ -447,9 +460,9 @@ func report(t *testing.T, r Result) {
 		r.Policies, r.Routes, r.Engines, mib(r.RSSPeakBytes), mib(r.HeapPeakBytes), mib(r.HeapLiveBytes),
 		r.ReconcileSeconds, r.ResolveSeconds, kib(r.BundleCompressedBytes), kib(r.BundleBytes), r.SyncSeconds,
 		r.AllEnginesP50, r.AllEnginesP95, r.AllEnginesMax, r.PerEngineP95)
-	t.Logf("peak RSS / heap: initial sync %s / %s, edits %s / %s; connect %.1f s, create %.1f s",
+	t.Logf("peak RSS / heap: initial sync %s / %s, edits %s / %s; connect %.1f s, create %.1f s; fake engines' process: peak RSS %s, streams cut %d",
 		mib(r.RSSPeakSyncBytes), mib(r.HeapPeakSyncBytes), mib(r.RSSPeakChangesBytes), mib(r.HeapPeakChangesBytes),
-		r.ConnectSeconds, r.CreateSeconds)
+		r.ConnectSeconds, r.CreateSeconds, mib(r.EnginesRSSPeakBytes), r.StreamsCut)
 	path := os.Getenv(outEnv)
 	if path == "" {
 		return
@@ -837,8 +850,11 @@ func (s *sampler) stop() uint64 {
 }
 
 // rss returns this process's resident set size and its peak (Linux).
-func rss() (current, peak uint64) {
-	raw, err := os.ReadFile("/proc/self/status")
+func rss() (current, peak uint64) { return rssOf("self") }
+
+// rssOf returns the resident set size of process pid, and its peak.
+func rssOf(pid string) (current, peak uint64) {
+	raw, err := os.ReadFile("/proc/" + pid + "/status") // #nosec G304 -- a process of this test
 	if err != nil {
 		return 0, 0
 	}
@@ -879,8 +895,10 @@ type engineHost struct {
 	states  []engineState
 	// applied[i] lists engine i's versions and when they arrived.
 	applied [][]versionAt
-	exited  error
-	done    chan struct{}
+	// ended counts the streams that ended, the engine reconnecting.
+	ended  int
+	exited error
+	done   chan struct{}
 }
 
 type versionAt struct {
@@ -890,7 +908,8 @@ type versionAt struct {
 
 // startEngines starts the fake engines in a child process: this test
 // binary, which reads the configuration on stdin and prints a line per
-// bundle applied, "applied <engine> <version> <policies> <routes>".
+// bundle applied, "applied <engine> <version> <policies> <routes>", and
+// per stream ended, "ended <engine>".
 func startEngines(t *testing.T, ec enginesConfig) *engineHost {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^$") // #nosec G204 -- this test binary
@@ -914,6 +933,12 @@ func startEngines(t *testing.T, ec enginesConfig) *engineHost {
 		sc := bufio.NewScanner(stdout)
 		for sc.Scan() {
 			at := time.Now()
+			if strings.HasPrefix(sc.Text(), "ended ") {
+				h.mu.Lock()
+				h.ended++
+				h.mu.Unlock()
+				continue
+			}
 			var (
 				i    int
 				s    engineState
@@ -949,6 +974,16 @@ func (h *engineHost) stop() {
 		_ = h.cmd.Process.Kill()
 		<-h.done
 	}
+}
+
+// rss returns the engines' process's resident set size and its peak.
+func (h *engineHost) rss() (current, peak uint64) { return rssOf(strconv.Itoa(h.cmd.Process.Pid)) }
+
+// endedStreams returns how many engine streams ended so far.
+func (h *engineHost) endedStreams() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.ended
 }
 
 func (h *engineHost) count(ok func(engineState) bool) int {
@@ -1031,6 +1066,9 @@ func hostEngines() int {
 		outMu sync.Mutex
 		out   = bufio.NewWriter(os.Stdout)
 		wg    sync.WaitGroup
+		// The engines get the same bundle: decoded once, not by each
+		// (#296).
+		shared = &fakeengine.Shared{}
 	)
 	for i, token := range ec.Tokens {
 		e := &fakeengine.Engine{
@@ -1041,6 +1079,7 @@ func hostEngines() int {
 			PublicKeys:      []ed25519.PublicKey{ec.PublicKey},
 			Heartbeat:       ec.Heartbeat,
 			KeepVersionOnly: true,
+			Shared:          shared,
 			OnApply: func(b *bundlev1.Bundle) {
 				routes := 0
 				for _, p := range b.GetPolicies() {
@@ -1056,8 +1095,12 @@ func hostEngines() int {
 		go func() {
 			defer wg.Done()
 			for ctx.Err() == nil {
-				if err := e.Run(ctx); err != nil && ctx.Err() == nil {
+				if err := e.Run(ctx); ctx.Err() == nil {
 					fmt.Fprintf(os.Stderr, "engines: %s: %v\n", e.ID, err)
+					outMu.Lock()
+					_, _ = fmt.Fprintf(out, "ended %d\n", i)
+					_ = out.Flush()
+					outMu.Unlock()
 				}
 				select {
 				case <-ctx.Done():

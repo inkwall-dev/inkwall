@@ -24,6 +24,8 @@ Every doc in this repository, by topic, with the question each one answers.
 - [Migrating from ingress-nginx's ModSecurity](migrating-from-ingress-nginx.md): how do I turn
   ingress-nginx's ModSecurity annotations into `WAFPolicy` objects, and what needs a human?
 - [gRPC](grpc.md): what does the engine inspect in a gRPC call, and what doesn't it?
+- [Protecting raw Envoy](raw-envoy.md): how do I protect an Envoy I configure myself with the
+  engine's ext_proc adapter, with policies from flags or from the operator?
 - [Running the engine without Kubernetes](standalone-proxy.md): how do I put the engine in front
   of any HTTP service as a reverse proxy, and which flags does it take?
 
