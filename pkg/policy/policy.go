@@ -228,6 +228,8 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 		Oversize:  oversize,
 		Observer:  o.Observer,
 		Routes:    routes,
+
+		GRPCMessages: bp.GetBody().GetGrpcMessages(),
 	}
 	if bp.GetMode() == bundlev1.Mode_MODE_BLOCK {
 		pc.Mode = pipeline.ModeBlock

@@ -42,6 +42,17 @@ const (
 	OversizeDeny OversizeAction = "Deny"
 )
 
+// GRPCMessagesAction is whether gRPC messages are inspected.
+// +kubebuilder:validation:Enum=Inspect;Skip
+type GRPCMessagesAction string
+
+const (
+	// GRPCMessagesInspect inspects the text in gRPC calls' messages.
+	GRPCMessagesInspect GRPCMessagesAction = "Inspect"
+	// GRPCMessagesSkip inspects a gRPC call's path and metadata only.
+	GRPCMessagesSkip GRPCMessagesAction = "Skip"
+)
+
 // WAFPolicySpec is what to enforce on which routes.
 type WAFPolicySpec struct {
 	// TargetRefs are the routes this policy protects, in the policy's
@@ -235,6 +246,15 @@ type BodySpec struct {
 	// in Block mode, Allow in Detect mode.
 	// +optional
 	OnOversize OversizeAction `json:"onOversize,omitempty"`
+
+	// GRPCMessages decides whether the text in gRPC calls' messages is
+	// inspected: Inspect reads each protobuf message without its schema
+	// and gives its text fields to the rules as form arguments; a message
+	// that can't be read (cut at maxBytes, compressed other than with
+	// gzip, not protobuf) is handled by onOversize. Unset: Skip, only the
+	// call's path and metadata are inspected. See docs/grpc.md.
+	// +optional
+	GRPCMessages GRPCMessagesAction `json:"grpcMessages,omitempty"`
 }
 
 // WAFPolicyStatus reports how far the policy got: accepted, programmed into

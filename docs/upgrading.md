@@ -31,6 +31,10 @@ What's new in 0.4.0:
 - **Raw Envoy.** An Envoy you configure yourself can call the engine's ext_proc adapter, with the
   policy from the engine's flags or from the operator: see [protecting raw Envoy](raw-envoy.md).
   Nothing changes in an existing installation.
+- **gRPC messages.** `body.grpcMessages: Inspect` on a `WAFPolicy` (`--grpc-messages inspect`
+  without the operator) has the rules read the text in gRPC calls' messages. It is off by
+  default: try it in `Detect` mode first. See [inspecting the messages](grpc.md#inspecting-the-messages).
+  The chart upgrades the CRDs with it; if you install them yourself, apply 0.4.0's.
 
 What changes by itself in 0.4.0:
 

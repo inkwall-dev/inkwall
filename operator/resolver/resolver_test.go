@@ -121,7 +121,8 @@ func TestResolvePolicy(t *testing.T) {
 		{RuleIDs: []int32{942100}, When: &wafv1alpha1.ExclusionMatch{Path: "/search", Argument: "q"}},
 		{RuleIDs: []int32{920350}},
 	}
-	p.Spec.Body = &wafv1alpha1.BodySpec{MaxBytes: ptr(int64(1024)), OnOversize: wafv1alpha1.OversizeDeny}
+	p.Spec.Body = &wafv1alpha1.BodySpec{MaxBytes: ptr(int64(1024)), OnOversize: wafv1alpha1.OversizeDeny,
+		GRPCMessages: wafv1alpha1.GRPCMessagesInspect}
 
 	res := Resolve(Input{
 		Policies: []wafv1alpha1.WAFPolicy{p},
@@ -167,7 +168,8 @@ func TestResolvePolicy(t *testing.T) {
 			{RuleIds: []uint32{942100}, Path: "/search", Argument: "q"},
 			{RuleIds: []uint32{920350}},
 		},
-		Body: &bundlev1.BodyConfig{Inspect: true, MaxBytes: 1024, OnOversize: bundlev1.OversizeAction_OVERSIZE_ACTION_DENY},
+		Body: &bundlev1.BodyConfig{Inspect: true, MaxBytes: 1024, OnOversize: bundlev1.OversizeAction_OVERSIZE_ACTION_DENY,
+			GrpcMessages: true},
 	})
 	// Only the rule sets in use are in the bundle; all of them get a status.
 	var ids []string
