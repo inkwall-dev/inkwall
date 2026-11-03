@@ -337,11 +337,18 @@ func TestBodySkipped(t *testing.T) {
 	continued(t, resps[1])
 }
 
-// inspector records the requests it is asked to check, and allows them.
-type inspector struct{ got []*request.Request }
+// inspector records the requests it is asked to check, and allows them,
+// or denies them with status deny.
+type inspector struct {
+	got  []*request.Request
+	deny int
+}
 
 func (i *inspector) Check(_ context.Context, r *request.Request) pipeline.Verdict {
 	i.got = append(i.got, r)
+	if i.deny != 0 {
+		return pipeline.Verdict{Action: pipeline.ActionDeny, Status: i.deny, Reason: pipeline.ReasonRule}
+	}
 	return pipeline.Verdict{}
 }
 

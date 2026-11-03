@@ -32,7 +32,8 @@ its adapter is in [0002 §6](0002-system-architecture.md#6-proxy-integrations).
 - [4. SPOE (HAProxy Stream Processing Offload Engine)](#4-spoe-haproxy-stream-processing-offload-engine)
 - [5. `/v1/check` (Inkwall's own API)](#5-v1check-inkwalls-own-api)
 - [6. Reverse proxy (standalone mode)](#6-reverse-proxy-standalone-mode)
-- [7. Comparison](#7-comparison)
+- [7. Denying gRPC calls](#7-denying-grpc-calls)
+- [8. Comparison](#8-comparison)
 
 ---
 
@@ -86,7 +87,8 @@ a Unix socket). It answers the stream of one request as follows:
 - **Allow:** CONTINUE. If the engine generated the request ID, it sets `x-request-id` on the
   request Envoy forwards; Envoy usually sets one itself.
 - **Deny:** an immediate response with the verdict's status (403, 413, 503, ...), the same
-  plain-text body as the other adapters, and `x-request-id`.
+  plain-text body as the other adapters, and `x-request-id`. A gRPC call gets a gRPC status
+  instead ([§7](#7-denying-grpc-calls)).
 - **Later stages** (response headers or body, trailers), if the filter sends them: CONTINUE.
 - **`observability_mode`:** the request is inspected and logged, and nothing is answered. Envoy
   sends the body in chunks there (`STREAMED`, the only body mode it allows, whatever
@@ -135,7 +137,8 @@ without waiting for the engine.
   inspection.
 - **Allow:** the adapter answers **200** with `X-Request-Id`.
 - **Deny:** it answers with the verdict's status (403, 413, 503, ...), which the proxy returns to
-  the client.
+  the client. A gRPC call gets its gRPC status in the headers too
+  ([§7](#7-denying-grpc-calls)).
 - A missing or malformed `X-Forwarded-Method` or `X-Forwarded-Uri` gets **400**: such a request is
   never let through.
 - It gives no view of the response, and sees the body only if the proxy forwards it.
@@ -198,12 +201,55 @@ Traefik plugin.
 inspected: an origin-form request target (`/path?query`) and a valid Host header. Anything else,
 such as `GET http://host/path`, gets 400, because Go's HTTP client would forward a different Host.
 
+A denied gRPC call is answered as a gRPC server does ([§7](#7-denying-grpc-calls)).
+
 "Standalone" in this heading means the engine runs on its own, without an ingress proxy. It is not
 the cluster's [Standalone mode](../glossary.md#standalone) (no control plane).
 
 ---
 
-## 7. Comparison
+## 7. Denying gRPC calls
+
+A gRPC client reads the outcome of a call from its `grpc-status`, not from the HTTP status. Given
+an HTTP error, it makes a status up from the HTTP one ([gRPC's mapping](https://github.com/grpc/grpc/blob/master/doc/http-grpc-status-mapping.md):
+403 is `PERMISSION_DENIED`) and a message such as `unexpected HTTP status code received from
+server: 403 (Forbidden)`. So a denial of a request whose one `Content-Type` is gRPC
+(`application/grpc`, `application/grpc-web` or `application/grpc-web-text`, with any `+codec`
+suffix, whatever the body) is answered in the gRPC [trailers-only](https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#responses)
+form (decided for v0.4.0, [#275](https://github.com/inkwall-dev/inkwall/issues/275)):
+
+- **Headers, no body:** `content-type` of the request's variant, without codec
+  (`application/grpc`, `application/grpc-web`, `application/grpc-web-text`); `grpc-status`;
+  `grpc-message`; `x-request-id`.
+- **`grpc-status`** from the verdict's HTTP status by gRPC's mapping, so a client sees the same
+  code whether it reads our status or makes one up from the HTTP one: 403 `PERMISSION_DENIED` (7),
+  503 `UNAVAILABLE` (14), 400 `INTERNAL` (13), and 413 `RESOURCE_EXHAUSTED` (8), which the mapping
+  leaves `UNKNOWN`.
+- **`grpc-message`:** the status text and the request ID, percent-encoded as the spec says:
+  `Forbidden (request ID 0123abcd)`. gRPC clients usually log the message, and the request ID
+  finds the security event.
+- **HTTP status**, by adapter:
+  - **Reverse proxy:** 200, as a gRPC server.
+  - **ext_proc, gRPC:** the verdict's (403). Envoy answers a local reply to a gRPC request
+    itself as gRPC: HTTP 200, `grpc-status` (ours, or the `grpc_status` field), and the body, if
+    any, as `grpc-message`, which is why there is no body. A client Envoy doesn't take for gRPC
+    (over HTTP/1.1) gets the 403 with the gRPC headers.
+  - **ext_proc, gRPC-Web:** 200. Envoy doesn't take gRPC-Web for gRPC, and passes the answer as
+    it is; the [gRPC-Web spec](https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-WEB.md)
+    keeps trailers-only responses.
+  - **forward-auth:** the verdict's (403): Traefik denies only on a non-2xx answer, and copies
+    its headers to the client. gRPC clients that take a gRPC `content-type` for a gRPC answer
+    (grpc-go does) read our status and message; others make up the same code from the 403.
+- Envoy's access log and metrics count a denied gRPC call as HTTP 200, as for any gRPC error;
+  the engine's security event and `inkwall_requests_total` count it as a denial.
+- The `x-content-type-options: nosniff` header is kept; anything else, including detect mode,
+  is unchanged.
+
+The messages themselves aren't read yet ([gRPC](../grpc.md)).
+
+---
+
+## 8. Comparison
 
 | | Transport | Body | Response | Proxy waits? | For | Status |
 |---|---|---|---|---|---|---|
