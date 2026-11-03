@@ -181,8 +181,8 @@ The Traefik middleware must set:
 
 **Built:** `pkg/adapters/httpcheck`, run as `inkwall-engine check`. `inkwallctl test`,
 `inkwallctl bench --engine` and the tests use it.
-**Not yet:** the gRPC `CheckService/Check` (defined in `api/engine/v1`, not served), the
-ingress-nginx Lua plugin and the Traefik plugin.
+**Not yet:** the gRPC `CheckService/Check` (defined in `api/engine/v1`, not served) and the
+Traefik plugin.
 
 ## 6. Reverse proxy (standalone mode)
 
@@ -209,9 +209,9 @@ the cluster's [Standalone mode](../glossary.md#standalone) (no control plane).
 |---|---|---|---|---|---|---|
 | ext_authz | gRPC call | Buffered, optional | No | Yes | Envoy fallback | Not yet |
 | ext_proc | gRPC stream | Buffered (streamed in observability mode) | Yes (not used yet) | Yes, or no (observability mode) | Envoy Gateway, Envoy, Istio, Contour | Built (Envoy Gateway) |
-| forward-auth | HTTP subrequest | If forwarded | No | Yes | Traefik, ingress-nginx | Built |
+| forward-auth | HTTP subrequest | If forwarded | No | Yes | Traefik (nginx `auth_request` speaks it too) | Built |
 | SPOE | SPOP | Yes | Possible | Yes, or no (asynchronous) | HAProxy | Not yet |
-| `/v1/check` | HTTP (gRPC planned) | Yes | No | Yes | CLI, tests; Lua and Traefik plugins planned | Built |
+| `/v1/check` | HTTP (gRPC planned) | Yes | No | Yes | CLI, tests; a Traefik plugin planned | Built |
 | Reverse proxy | HTTP proxying | Yes | Yes | It is the path | VMs, test reference | Built |
 
 [Caddy](https://caddyserver.com/docs/) needs no protocol: the planned module compiles the engine into Caddy

@@ -155,9 +155,11 @@ The engine checks a request in tiers. Each tier runs only if the previous ones r
 ### Enforcement modes (per route)
 
 - **Detect mode** (the default): by design, the proxy forwards the request at once, and the
-  engine inspects a copy asynchronously, adding no latency. **Built today:** every built adapter
-  still waits for the verdict; in detect mode the engine inspects inline, logs what it would have
-  denied, and always allows (`pkg/pipeline`).
+  engine inspects a copy asynchronously, adding no latency. **Built today:** Envoy Gateway does
+  this: its `ext_proc` filter runs in observability mode, so Envoy doesn't wait, and the engine
+  sends no answer (#221). The forward-auth adapter (Traefik) and the reverse proxy still wait for
+  the verdict; in detect mode the engine inspects inline, logs what it would have denied, and
+  always allows (`pkg/pipeline`).
 - **Block mode:** the proxy waits for an inline verdict, within the budget.
 - **Block-high-confidence mode** (not built yet): inline verdicts for tiers T0–T2; bodies are
   inspected asynchronously and feed IP reputation.
@@ -240,7 +242,6 @@ Unix socket.** There is no hop to another node, no [Service](https://kubernetes.
 | Caddy | Native module (in-process) | Function call |
 | Envoy / [Envoy Gateway](https://gateway.envoyproxy.io/) / [Istio](https://istio.io/latest/docs/) | ext_proc; optional Envoy Go filter | gRPC over a Unix socket |
 | HAProxy | SPOE agent | Unix socket |
-| [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) | [Lua](https://github.com/openresty/lua-nginx-module) plugin ([auth-url](https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/annotations/#external-authentication) as a fallback) | Unix socket |
 | Traefik | ForwardAuth; a plugin later | HTTP keepalive over localhost |
 
 - The engine is injected through the ingress controller's extension point or a Pod [webhook](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/), never
@@ -250,6 +251,9 @@ Unix socket.** There is no hop to another node, no [Service](https://kubernetes.
 - **Built (v0.1.0):** Traefik, with the engine injected by the Pod webhook; the standalone reverse
   proxy. **Built since:** Envoy Gateway, with the engine in the Envoy pods through the Gateway's
   `EnvoyProxy` (its extension point) and ext_proc on a Unix socket. **Not yet:** the other proxies.
+- No ingress-nginx integration is planned: ingress-nginx is retired upstream (2026). Its users
+  migrate to a supported proxy with `inkwallctl migrate ingress-nginx`
+  ([migrating from ingress-nginx](../migrating-from-ingress-nginx.md)).
 
 ## 7. Failure behaviour
 

@@ -65,7 +65,7 @@ and the [Traefik](https://doc.traefik.io/traefik/) integration are built; the ot
 
 ### 1.1 Goals
 
-1. One WAF engine, written in [Go](https://go.dev/), behind any ingress proxy ([Envoy](https://www.envoyproxy.io/docs/envoy/latest/), Traefik, [ingress-nginx](https://kubernetes.github.io/ingress-nginx/),
+1. One WAF engine, written in [Go](https://go.dev/), behind any ingress proxy ([Envoy](https://www.envoyproxy.io/docs/envoy/latest/), Traefik,
    [HAProxy](https://docs.haproxy.org/), [Caddy](https://caddyserver.com/docs/)), or as a standalone [reverse proxy](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Proxy_servers_and_tunneling#forward_and_reverse_proxies).
 2. Kubernetes-native: installed with [Helm](https://helm.sh/docs/), configured with [CRDs](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/), managed with [GitOps](https://opengitops.dev/).
 3. An optional hosted control plane. The open-source data plane never depends on it.
@@ -462,13 +462,10 @@ through a `Backend` on a Unix socket ([0004 §4.4](0004-operator.md#44-wiring-co
 
 ### 6.2 ingress-nginx
 
-Two options, neither of which needs snippets:
-
-- A. A [Lua](https://github.com/openresty/lua-nginx-module) plugin (the default, with body support) calls `/v1/check` over a Unix socket and skips
-  unprotected routes.
-- B. [`global-auth-url`](https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/configmap/#global-auth-url): no code, but a subrequest per request and no bodies.
-
-ingress-nginx is retired upstream (2026), so this is for existing users only. **Not yet** built.
+No integration is planned: [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) is retired upstream (2026). Inkwall's answer
+for its users is migration: `inkwallctl migrate ingress-nginx` turns its ModSecurity annotations
+and ConfigMap settings into `WAFPolicy` objects for Traefik or Envoy Gateway
+([migrating from ingress-nginx](../migrating-from-ingress-nginx.md), [§3.5](#35-inkwallctl-cli)).
 
 ### 6.3 Traefik
 
@@ -560,8 +557,6 @@ adapter must match.
 |---|---|---|---|---|---|---|
 | Envoy / Envoy Gateway / Istio | ext_proc | ✅ | ✅ streamed | ✅ | ✅ | gRPC over Unix socket |
 | Envoy | ext_authz | ✅ | ✅ buffered | ❌ | ❌ | gRPC over Unix socket |
-| ingress-nginx | Lua plugin | ✅ | ✅ | ❌ | ✅ (mirror) | HTTP over Unix socket |
-| ingress-nginx | global-auth-url | ✅ | ❌ | ❌ | ❌ | localhost HTTP |
 | Traefik | ForwardAuth | ✅ | ⚠️ v3 `forwardBody` | ❌ | ❌ | localhost HTTP |
 | HAProxy | SPOE | ✅ | ✅ | ❌ | ✅ (async group) | SPOP over Unix socket |
 | Caddy | module | ✅ | ✅ | ✅ | ✅ | in-process |
@@ -743,7 +738,7 @@ allows 1.29 and later), and conversion webhooks (only `v1alpha1` exists).
 | `docs/design/` | These design documents |
 
 Planned: `adapters/caddy` and `adapters/traefik-plugin` as separate [Go modules](https://go.dev/ref/mod) (keeping their
-dependencies out of the engine), `adapters/nginx-lua`, and `rules/crs/`.
+dependencies out of the engine), and `rules/crs/`.
 
 ---
 
@@ -804,7 +799,7 @@ Other docs cite these decisions by ID (D1–D9).
 |---|---|---|---|
 | D1 | One engine + thin adapters | A WAF per proxy | One core, consistent verdicts |
 | D2 | Coraza + CRS behind an interface | Own engine; [libmodsecurity](https://github.com/owasp-modsecurity/ModSecurity) | Mature and Go-native; a custom engine stays possible |
-| D3 | Sidecar over a Unix socket | Central Deployment; [DaemonSet](https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/) | No network hop ([0001](0001-performance-first-architecture.md)) |
+| D3 | Sidecar over a Unix socket, or loopback TCP where the proxy needs it (Traefik: `127.0.0.1:9001`) | Central Deployment; [DaemonSet](https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/) | No network hop ([0001](0001-performance-first-architecture.md)) |
 | D4 | The control plane talks to operators only | Control plane → every engine | Fewer connections, no engine egress |
 | D5 | Full-snapshot signed bundles | Deltas; unsigned ConfigMaps | Simple, idempotent, tamper-resistant |
 | D6 | The operator resolves routes | The engine watches Kubernetes | The engine stays usable outside Kubernetes |
