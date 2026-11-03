@@ -194,8 +194,22 @@ func TestResponseNotInspected(t *testing.T) {
 	if m := resps[0].GetRequestHeaders().GetResponse().GetHeaderMutation(); m != nil {
 		t.Errorf("request headers mutated: %v", m)
 	}
-	if resps[1].GetModeOverride() != nil || denied(t, resps[2]) != 0 {
+	// Envoy sends the response because the route asks for it (another
+	// policy on it inspects responses, or Envoy's config does): it is told
+	// not to buffer or send the body of one that isn't inspected.
+	if resps[1].GetModeOverride().GetResponseBodyMode() != filterv3.ProcessingMode_NONE || resps[1].GetModeOverride() == nil || denied(t, resps[2]) != 0 {
 		t.Errorf("response answered %v, %v", resps[1], resps[2])
+	}
+	// Without a body, or not buffered, there is nothing to override.
+	resps = e.exchange(t,
+		withModes(headers("GET", "/", true), 0, filterv3.ProcessingMode_BUFFERED_PARTIAL), respHeaders(204, true))
+	if resps[1].GetModeOverride() != nil {
+		t.Errorf("no body: mode override %v", resps[1].GetModeOverride())
+	}
+	resps = e.exchange(t,
+		withModes(headers("GET", "/", true), 0, filterv3.ProcessingMode_NONE), respHeaders(200, false))
+	if resps[1].GetModeOverride() != nil {
+		t.Errorf("body mode NONE: mode override %v", resps[1].GetModeOverride())
 	}
 	if logs.Len() != 0 {
 		t.Errorf("logged %s", logs.String())

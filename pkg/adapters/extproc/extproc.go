@@ -258,6 +258,12 @@ func (s *Server) handle(ctx context.Context, x *exchange, msg *extprocv3.Process
 		return allow(phaseRequestTrailers, nil), nil
 	case *extprocv3.ProcessingRequest_ResponseHeaders:
 		if r, err := s.onResponse(ctx, x, phaseResponseHeaders); r != nil || err != nil {
+			if r.GetResponseHeaders() != nil && !m.ResponseHeaders.GetEndOfStream() && x.buffersResponses() {
+				// A response that isn't inspected (its request's policy
+				// doesn't, though the route sends responses): Envoy needn't
+				// buffer its body, nor send it.
+				r.ModeOverride = &filterv3.ProcessingMode{ResponseBodyMode: filterv3.ProcessingMode_NONE}
+			}
 			return r, err
 		}
 		return s.onResponseHeaders(ctx, x, m.ResponseHeaders), nil
@@ -385,7 +391,7 @@ func (s *Server) onResponseHeaders(ctx context.Context, x *exchange, h *extprocv
 	}
 	x.resp = toResponse(h, x.req.Proto)
 	eos := h.GetEndOfStream()
-	buffered := x.respMode == filterv3.ProcessingMode_BUFFERED || x.respMode == filterv3.ProcessingMode_BUFFERED_PARTIAL
+	buffered := x.buffersResponses()
 	if !eos && x.ex.WantsBody(x.resp.Headers.Get("Content-Type")) {
 		x.respLimit = x.ex.BodyLimit()
 		switch {
@@ -411,6 +417,12 @@ func (s *Server) onResponseHeaders(ctx context.Context, x *exchange, h *extprocv
 		r.ModeOverride = &filterv3.ProcessingMode{ResponseBodyMode: filterv3.ProcessingMode_NONE}
 	}
 	return r
+}
+
+// buffersResponses reports whether Envoy holds response bodies for the
+// engine (BUFFERED or BUFFERED_PARTIAL).
+func (x *exchange) buffersResponses() bool {
+	return x.respMode == filterv3.ProcessingMode_BUFFERED || x.respMode == filterv3.ProcessingMode_BUFFERED_PARTIAL
 }
 
 // fillResponse adds a response body message, as fillBody does for the

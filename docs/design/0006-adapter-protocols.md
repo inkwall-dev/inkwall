@@ -184,7 +184,8 @@ BUFFERED_PARTIAL`; it holds the response headers until the body is answered, so 
 still replace the response with an immediate response. A body the rules don't read is decided at
 the headers, whose answer sets `mode_override` (`response_body_mode: NONE`) so Envoy neither
 buffers nor sends it; this needs the filter's `allow_mode_override`, and without it the body is
-sent and continued. A body Envoy cut (no `end_of_stream`, and not its full `Content-Length`) is
+sent and continued. So is a response that isn't inspected at all, though Envoy sends it (another
+policy on the route inspects responses, or Envoy's configuration asks for them). A body Envoy cut (no `end_of_stream`, and not its full `Content-Length`) is
 handled as oversized; a body Envoy doesn't send in one piece (`NONE`, `STREAMED` outside
 observability mode) goes uninspected, as oversized. In observability mode the body comes in chunks,
 gathered up to the limit as for requests, and the stream is closed once the response is decided.
