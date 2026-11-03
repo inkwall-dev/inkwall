@@ -76,6 +76,10 @@ message Policy {
   repeated Exclusion exclusions = 9;
   // Unset: the engine's body defaults.
   BodyConfig body = 10;
+  // What a WebSocket handshake must meet. Unset: nothing more than any
+  // request. Engines before 0.4.0 ignore it: the operator doesn't count
+  // them as enforcing a policy that sets it.
+  WebSocketConfig websocket = 11;
 }
 
 // RouteMatch matches requests by host, path and method.
@@ -181,6 +185,21 @@ message BodyConfig {
   OversizeAction on_oversize = 3;
   // Inspect the text in gRPC calls' messages (docs/grpc.md).
   bool grpc_messages = 4;
+}
+
+// WebSocketConfig is what a WebSocket handshake (a request with an
+// Upgrade: websocket, Sec-WebSocket-Key or Sec-WebSocket-Version header)
+// must meet. One that doesn't is denied with 403 in block mode, logged in
+// detect mode. Other requests aren't affected.
+message WebSocketConfig {
+  // The origins a handshake may come from: "scheme://host" or
+  // "scheme://host:port", lower case, http or https; the host may start
+  // with "*." to match any subdomain. Empty: any origin.
+  repeated string allowed_origins = 1;
+  // Let a handshake without an Origin header pass the origin check.
+  bool allow_missing_origin = 2;
+  // Headers a handshake must have, not empty.
+  repeated string required_headers = 3;
 }
 
 // OversizeAction is what happens to a body larger than max_bytes.

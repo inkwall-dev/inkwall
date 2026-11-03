@@ -497,7 +497,11 @@ type Policy struct {
 	RuleSets   []*RuleSetBinding `protobuf:"bytes,8,rep,name=rule_sets,json=ruleSets,proto3" json:"rule_sets,omitempty"`
 	Exclusions []*Exclusion      `protobuf:"bytes,9,rep,name=exclusions,proto3" json:"exclusions,omitempty"`
 	// Unset: the engine's body defaults.
-	Body          *BodyConfig `protobuf:"bytes,10,opt,name=body,proto3" json:"body,omitempty"`
+	Body *BodyConfig `protobuf:"bytes,10,opt,name=body,proto3" json:"body,omitempty"`
+	// What a WebSocket handshake must meet. Unset: nothing more than any
+	// request. Engines before 0.4.0 ignore it: the operator doesn't count
+	// them as enforcing a policy that sets it.
+	Websocket     *WebSocketConfig `protobuf:"bytes,11,opt,name=websocket,proto3" json:"websocket,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -598,6 +602,13 @@ func (x *Policy) GetExclusions() []*Exclusion {
 func (x *Policy) GetBody() *BodyConfig {
 	if x != nil {
 		return x.Body
+	}
+	return nil
+}
+
+func (x *Policy) GetWebsocket() *WebSocketConfig {
+	if x != nil {
+		return x.Websocket
 	}
 	return nil
 }
@@ -1028,6 +1039,75 @@ func (x *BodyConfig) GetGrpcMessages() bool {
 	return false
 }
 
+// WebSocketConfig is what a WebSocket handshake (a request with an
+// Upgrade: websocket, Sec-WebSocket-Key or Sec-WebSocket-Version header)
+// must meet. One that doesn't is denied with 403 in block mode, logged in
+// detect mode. Other requests aren't affected.
+type WebSocketConfig struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The origins a handshake may come from: "scheme://host" or
+	// "scheme://host:port", lower case, http or https; the host may start
+	// with "*." to match any subdomain. Empty: any origin.
+	AllowedOrigins []string `protobuf:"bytes,1,rep,name=allowed_origins,json=allowedOrigins,proto3" json:"allowed_origins,omitempty"`
+	// Let a handshake without an Origin header pass the origin check.
+	AllowMissingOrigin bool `protobuf:"varint,2,opt,name=allow_missing_origin,json=allowMissingOrigin,proto3" json:"allow_missing_origin,omitempty"`
+	// Headers a handshake must have, not empty.
+	RequiredHeaders []string `protobuf:"bytes,3,rep,name=required_headers,json=requiredHeaders,proto3" json:"required_headers,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *WebSocketConfig) Reset() {
+	*x = WebSocketConfig{}
+	mi := &file_bundle_v1_bundle_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WebSocketConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WebSocketConfig) ProtoMessage() {}
+
+func (x *WebSocketConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_bundle_v1_bundle_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WebSocketConfig.ProtoReflect.Descriptor instead.
+func (*WebSocketConfig) Descriptor() ([]byte, []int) {
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *WebSocketConfig) GetAllowedOrigins() []string {
+	if x != nil {
+		return x.AllowedOrigins
+	}
+	return nil
+}
+
+func (x *WebSocketConfig) GetAllowMissingOrigin() bool {
+	if x != nil {
+		return x.AllowMissingOrigin
+	}
+	return false
+}
+
+func (x *WebSocketConfig) GetRequiredHeaders() []string {
+	if x != nil {
+		return x.RequiredHeaders
+	}
+	return nil
+}
+
 var File_bundle_v1_bundle_proto protoreflect.FileDescriptor
 
 const file_bundle_v1_bundle_proto_rawDesc = "" +
@@ -1047,7 +1127,7 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\bpolicies\x18\x05 \x03(\v2\x19.inkwall.bundle.v1.PolicyR\bpolicies\x127\n" +
 	"\trule_sets\x18\x06 \x03(\v2\x1a.inkwall.bundle.v1.RuleSetR\bruleSets\x12\x1c\n" +
 	"\tsuspended\x18\a \x01(\bR\tsuspended\x12'\n" +
-	"\x0fpolicy_versions\x18\b \x03(\x04R\x0epolicyVersions\"\xec\x03\n" +
+	"\x0fpolicy_versions\x18\b \x03(\x04R\x0epolicyVersions\"\xae\x04\n" +
 	"\x06Policy\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x125\n" +
 	"\x06routes\x18\x02 \x03(\v2\x1d.inkwall.bundle.v1.RouteMatchR\x06routes\x12+\n" +
@@ -1062,7 +1142,8 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"exclusions\x18\t \x03(\v2\x1c.inkwall.bundle.v1.ExclusionR\n" +
 	"exclusions\x121\n" +
 	"\x04body\x18\n" +
-	" \x01(\v2\x1d.inkwall.bundle.v1.BodyConfigR\x04body\"\x9a\x01\n" +
+	" \x01(\v2\x1d.inkwall.bundle.v1.BodyConfigR\x04body\x12@\n" +
+	"\twebsocket\x18\v \x01(\v2\".inkwall.bundle.v1.WebSocketConfigR\twebsocket\"\x9a\x01\n" +
 	"\n" +
 	"RouteMatch\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x120\n" +
@@ -1091,7 +1172,11 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\tmax_bytes\x18\x02 \x01(\x03R\bmaxBytes\x12B\n" +
 	"\von_oversize\x18\x03 \x01(\x0e2!.inkwall.bundle.v1.OversizeActionR\n" +
 	"onOversize\x12#\n" +
-	"\rgrpc_messages\x18\x04 \x01(\bR\fgrpcMessages*g\n" +
+	"\rgrpc_messages\x18\x04 \x01(\bR\fgrpcMessages\"\x97\x01\n" +
+	"\x0fWebSocketConfig\x12'\n" +
+	"\x0fallowed_origins\x18\x01 \x03(\tR\x0eallowedOrigins\x120\n" +
+	"\x14allow_missing_origin\x18\x02 \x01(\bR\x12allowMissingOrigin\x12)\n" +
+	"\x10required_headers\x18\x03 \x03(\tR\x0frequiredHeaders*g\n" +
 	"\rPathMatchType\x12\x1f\n" +
 	"\x1bPATH_MATCH_TYPE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15PATH_MATCH_TYPE_EXACT\x10\x01\x12\x1a\n" +
@@ -1126,7 +1211,7 @@ func file_bundle_v1_bundle_proto_rawDescGZIP() []byte {
 }
 
 var file_bundle_v1_bundle_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_bundle_v1_bundle_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_bundle_v1_bundle_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_bundle_v1_bundle_proto_goTypes = []any{
 	(PathMatchType)(0),            // 0: inkwall.bundle.v1.PathMatchType
 	(Mode)(0),                     // 1: inkwall.bundle.v1.Mode
@@ -1142,29 +1227,31 @@ var file_bundle_v1_bundle_proto_goTypes = []any{
 	(*RuleSet)(nil),               // 11: inkwall.bundle.v1.RuleSet
 	(*Exclusion)(nil),             // 12: inkwall.bundle.v1.Exclusion
 	(*BodyConfig)(nil),            // 13: inkwall.bundle.v1.BodyConfig
-	(*timestamppb.Timestamp)(nil), // 14: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),   // 15: google.protobuf.Duration
+	(*WebSocketConfig)(nil),       // 14: inkwall.bundle.v1.WebSocketConfig
+	(*timestamppb.Timestamp)(nil), // 15: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),   // 16: google.protobuf.Duration
 }
 var file_bundle_v1_bundle_proto_depIdxs = []int32{
-	14, // 0: inkwall.bundle.v1.Bundle.created_at:type_name -> google.protobuf.Timestamp
+	15, // 0: inkwall.bundle.v1.Bundle.created_at:type_name -> google.protobuf.Timestamp
 	7,  // 1: inkwall.bundle.v1.Bundle.policies:type_name -> inkwall.bundle.v1.Policy
 	11, // 2: inkwall.bundle.v1.Bundle.rule_sets:type_name -> inkwall.bundle.v1.RuleSet
 	8,  // 3: inkwall.bundle.v1.Policy.routes:type_name -> inkwall.bundle.v1.RouteMatch
 	1,  // 4: inkwall.bundle.v1.Policy.mode:type_name -> inkwall.bundle.v1.Mode
 	2,  // 5: inkwall.bundle.v1.Policy.failure_mode:type_name -> inkwall.bundle.v1.FailureMode
-	15, // 6: inkwall.bundle.v1.Policy.timeout:type_name -> google.protobuf.Duration
+	16, // 6: inkwall.bundle.v1.Policy.timeout:type_name -> google.protobuf.Duration
 	10, // 7: inkwall.bundle.v1.Policy.rule_sets:type_name -> inkwall.bundle.v1.RuleSetBinding
 	12, // 8: inkwall.bundle.v1.Policy.exclusions:type_name -> inkwall.bundle.v1.Exclusion
 	13, // 9: inkwall.bundle.v1.Policy.body:type_name -> inkwall.bundle.v1.BodyConfig
-	9,  // 10: inkwall.bundle.v1.RouteMatch.path:type_name -> inkwall.bundle.v1.PathMatch
-	0,  // 11: inkwall.bundle.v1.PathMatch.type:type_name -> inkwall.bundle.v1.PathMatchType
-	3,  // 12: inkwall.bundle.v1.RuleSet.builtin:type_name -> inkwall.bundle.v1.BuiltinRuleSet
-	4,  // 13: inkwall.bundle.v1.BodyConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
-	14, // [14:14] is the sub-list for method output_type
-	14, // [14:14] is the sub-list for method input_type
-	14, // [14:14] is the sub-list for extension type_name
-	14, // [14:14] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	14, // 10: inkwall.bundle.v1.Policy.websocket:type_name -> inkwall.bundle.v1.WebSocketConfig
+	9,  // 11: inkwall.bundle.v1.RouteMatch.path:type_name -> inkwall.bundle.v1.PathMatch
+	0,  // 12: inkwall.bundle.v1.PathMatch.type:type_name -> inkwall.bundle.v1.PathMatchType
+	3,  // 13: inkwall.bundle.v1.RuleSet.builtin:type_name -> inkwall.bundle.v1.BuiltinRuleSet
+	4,  // 14: inkwall.bundle.v1.BodyConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
+	15, // [15:15] is the sub-list for method output_type
+	15, // [15:15] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_bundle_v1_bundle_proto_init() }
@@ -1182,7 +1269,7 @@ func file_bundle_v1_bundle_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bundle_v1_bundle_proto_rawDesc), len(file_bundle_v1_bundle_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   9,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

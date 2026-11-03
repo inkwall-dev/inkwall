@@ -222,12 +222,24 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 	if err != nil {
 		return nil, key, err
 	}
+	var ws *pipeline.WebSocketRules
+	if w := bp.GetWebsocket(); w != nil {
+		ws, err = pipeline.CompileWebSocket(pipeline.WebSocketConfig{
+			AllowedOrigins:     w.GetAllowedOrigins(),
+			AllowMissingOrigin: w.GetAllowMissingOrigin(),
+			RequiredHeaders:    w.GetRequiredHeaders(),
+		})
+		if err != nil {
+			return nil, key, fmt.Errorf("websocket: %w", err)
+		}
+	}
 	pc := pipeline.Config{
 		Mode:      pipeline.ModeDetect,
 		Admission: o.Admission,
 		Oversize:  oversize,
 		Observer:  o.Observer,
 		Routes:    routes,
+		WebSocket: ws,
 
 		GRPCMessages: bp.GetBody().GetGrpcMessages(),
 	}

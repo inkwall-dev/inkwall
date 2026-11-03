@@ -272,6 +272,37 @@ func TestEvaluatorsSharedAcrossExclusions(t *testing.T) {
 	wg.Wait()
 }
 
+// TestWebSocket: a policy's WebSocket rules apply to the handshakes on its
+// routes, and to no other policy's.
+func TestWebSocket(t *testing.T) {
+	b := testBundle()
+	b.Policies[0].Websocket = &bundlev1.WebSocketConfig{AllowedOrigins: []string{"https://shop.example.com"}}
+	set, err := Compile(b, Options{BodyLimit: 65536})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handshake := func(host, origin string) *request.Request {
+		r := req(host, "/chat")
+		r.Headers.Set("Sec-WebSocket-Version", "13")
+		r.Headers.Set("Origin", origin)
+		return r
+	}
+	for _, tc := range []struct {
+		name   string
+		r      *request.Request
+		action pipeline.Action
+		reason pipeline.Reason
+	}{
+		{"allowed origin", handshake("shop.example.com", "https://shop.example.com"), pipeline.ActionAllow, pipeline.ReasonNone},
+		{"forbidden origin", handshake("shop.example.com", "https://evil.example"), pipeline.ActionDeny, pipeline.ReasonWebSocket},
+		{"another policy", handshake("admin.example.com", "https://evil.example"), pipeline.ActionAllow, pipeline.ReasonNone},
+	} {
+		if v := set.Check(context.Background(), tc.r); v.Action != tc.action || v.Reason != tc.reason {
+			t.Errorf("%s: got %s/%s, want %s/%s", tc.name, v.Action, v.Reason, tc.action, tc.reason)
+		}
+	}
+}
+
 func TestCompileErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -283,6 +314,9 @@ func TestCompileErrors(t *testing.T) {
 			b.RuleSets[1].Source = &bundlev1.RuleSet_Seclang{Seclang: `SecRule ARGS "@nosuchop a" "id:100002,phase:1,deny"`}
 		}, "policy shop/api"},
 		{"bad skip path", func(b *bundlev1.Bundle) { b.Policies[1].SkipPaths = []string{"relative"} }, "policy shop/api"},
+		{"bad websocket origin", func(b *bundlev1.Bundle) {
+			b.Policies[0].Websocket = &bundlev1.WebSocketConfig{AllowedOrigins: []string{"ws://app.example.com"}}
+		}, "policy shop/site: websocket"},
 		{"unsafe exclusion", func(b *bundlev1.Bundle) {
 			b.Policies[0].Exclusions = []*bundlev1.Exclusion{{RuleIds: []uint32{942100}, Argument: `q" "id:1`}}
 		}, "policy shop/site"},

@@ -120,6 +120,10 @@ type Config struct {
 	// protobuf) is handled as an oversized body. Off by default: see
 	// docs/design/0002 §8.7.
 	GRPCMessages bool
+	// WebSocket is what a WebSocket handshake must meet (allowed origins,
+	// required headers), checked before the rules. Nil: nothing more than
+	// any request.
+	WebSocket *WebSocketRules
 }
 
 // Observer receives every verdict. Implementations must be fast and safe for
@@ -169,10 +173,11 @@ type Pipeline struct {
 	slots    chan struct{}
 	adm      *Admission
 	oversize OversizeAction
+	observer Observer
+	routes   *router.Table
+	ws       *WebSocketRules
 	// grpcMessages: the text in gRPC calls' messages is inspected.
 	grpcMessages bool
-	observer     Observer
-	routes       *router.Table
 }
 
 // New returns a pipeline that evaluates requests with eval.
@@ -195,6 +200,7 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 		oversize: cfg.Oversize.Resolve(cfg.Mode),
 		observer: cfg.Observer,
 		routes:   cfg.Routes,
+		ws:       cfg.WebSocket,
 
 		grpcMessages: cfg.GRPCMessages,
 	}
@@ -243,6 +249,24 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request) Verdict {
 	case router.InspectAll:
 	}
 
+	// A WebSocket handshake that breaks the policy's WebSocket rules is
+	// denied without running the rules; in detect mode the rules still
+	// run, so their matches are logged too.
+	ws := p.ws != nil && WebSocketHandshake(r) && p.ws.violation(r) != ""
+	if ws && p.mode == ModeBlock {
+		return p.enforce(Verdict{Reason: ReasonWebSocket}, http.StatusForbidden)
+	}
+	v := p.inspect(ctx, r)
+	if ws && v.Reason == ReasonNone {
+		v.Reason = ReasonWebSocket
+		v = p.enforce(v, http.StatusForbidden)
+	}
+	return v
+}
+
+// inspect runs the rules on r, which is on a route inspected (with its
+// body or without).
+func (p *Pipeline) inspect(ctx context.Context, r *request.Request) Verdict {
 	// A gRPC call is inspected without its body, which is binary
 	// protobuf: so it isn't oversized either. With GRPCMessages, the text
 	// in its messages is, and a part that can't be read is handled as an

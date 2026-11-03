@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -32,6 +34,9 @@ const (
 	ReasonEngineNack        = "EngineNack"
 	ReasonNoEngines         = "NoEngines"
 	ReasonNotInBundle       = "NotInBundle"
+	// ReasonEnginesOutdated: an engine runs the bundle but is too old to
+	// enforce a field the policy sets, which it ignores.
+	ReasonEnginesOutdated = "EnginesOutdated"
 	// ReasonSuspended: the bundle suspends inspection (the InkwallConfig's
 	// spec.suspend), so engines allow every request.
 	ReasonSuspended = "Suspended"
@@ -121,6 +126,52 @@ func Enforced(version int64, engines []Engine, leftOut int) (metav1.ConditionSta
 		return metav1.ConditionFalse, ReasonEnginesBehind, fmt.Sprintf("some engines don't run bundle %d yet", v)
 	}
 	return metav1.ConditionTrue, ReasonEnforced, fmt.Sprintf("every engine runs bundle %d or later", v)
+}
+
+// outdatedEngine returns the first engine too old for a field p sets
+// (an engine ignores fields it doesn't know), the field and the version it
+// needs; nil when there is none. An engine whose version isn't a release
+// (a development build) counts as new enough.
+func outdatedEngine(p *wafv1alpha1.WAFPolicy, engines []Engine) (*Engine, string, string) {
+	var field string
+	var need [3]int
+	if w := p.Spec.WebSocket; w != nil && (len(w.AllowedOrigins) > 0 || len(w.RequiredHeaders) > 0) {
+		field, need = "spec.webSocket", [3]int{0, 4, 0}
+	}
+	if b := p.Spec.Body; field == "" && b != nil && b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect {
+		field, need = "spec.body.grpcMessages", [3]int{0, 4, 0}
+	}
+	if field == "" {
+		return nil, "", ""
+	}
+	for i := range engines {
+		if v, ok := releaseVersion(engines[i].EngineVersion); ok && slices.Compare(v[:], need[:]) < 0 {
+			return &engines[i], field, fmt.Sprintf("%d.%d.%d", need[0], need[1], need[2])
+		}
+	}
+	return nil, "", ""
+}
+
+// releaseVersion parses "MAJOR.MINOR.PATCH", with or without a leading
+// "v", ignoring a pre-release or build suffix.
+func releaseVersion(s string) ([3]int, bool) {
+	var v [3]int
+	s = strings.TrimPrefix(s, "v")
+	if i := strings.IndexAny(s, "-+"); i >= 0 {
+		s = s[:i]
+	}
+	parts := strings.Split(s, ".")
+	if len(parts) != 3 {
+		return v, false
+	}
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return v, false
+		}
+		v[i] = n
+	}
+	return v, true
 }
 
 func engineName(e Engine) string {
@@ -255,6 +306,13 @@ func enforcedConditions(p *wafv1alpha1.WAFPolicy, served uint64, suspended bool,
 	conds := slices.Clone(p.Status.Conditions)
 	version := max(p.Status.BundleVersion, int64(served)) // #nosec G115 -- versions count builds
 	st, reason, msg := Enforced(version, engines, leftOut)
+	if st == metav1.ConditionTrue {
+		if e, field, need := outdatedEngine(p, engines); e != nil {
+			st, reason = metav1.ConditionFalse, ReasonEnginesOutdated
+			msg = fmt.Sprintf("some engines are too old to enforce %s, which they ignore (first: %s runs %s; it needs %s or later)",
+				field, engineName(*e), e.EngineVersion, need)
+		}
+	}
 	if suspended {
 		st, reason, msg = metav1.ConditionFalse, ReasonSuspended, suspendedMessage
 	}

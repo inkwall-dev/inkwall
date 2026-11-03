@@ -123,6 +123,11 @@ func TestResolvePolicy(t *testing.T) {
 	}
 	p.Spec.Body = &wafv1alpha1.BodySpec{MaxBytes: ptr(int64(1024)), OnOversize: wafv1alpha1.OversizeDeny,
 		GRPCMessages: wafv1alpha1.GRPCMessagesInspect}
+	p.Spec.WebSocket = &wafv1alpha1.WebSocketSpec{
+		AllowedOrigins:     []wafv1alpha1.WebSocketOrigin{"https://shop.example.com", "https://*.shop.example.com"},
+		AllowMissingOrigin: true,
+		RequiredHeaders:    []wafv1alpha1.HeaderName{"Authorization"},
+	}
 
 	res := Resolve(Input{
 		Policies: []wafv1alpha1.WAFPolicy{p},
@@ -170,6 +175,11 @@ func TestResolvePolicy(t *testing.T) {
 		},
 		Body: &bundlev1.BodyConfig{Inspect: true, MaxBytes: 1024, OnOversize: bundlev1.OversizeAction_OVERSIZE_ACTION_DENY,
 			GrpcMessages: true},
+		Websocket: &bundlev1.WebSocketConfig{
+			AllowedOrigins:     []string{"https://shop.example.com", "https://*.shop.example.com"},
+			AllowMissingOrigin: true,
+			RequiredHeaders:    []string{"Authorization"},
+		},
 	})
 	// Only the rule sets in use are in the bundle; all of them get a status.
 	var ids []string

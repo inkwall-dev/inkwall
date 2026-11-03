@@ -24,6 +24,11 @@
 // without Content-Length may have been cut at a buffer the engine doesn't
 // know, so it is handled as oversized.
 //
+// An upgrade (a WebSocket handshake: a GET with an Upgrade header) that
+// declares no body is decided on its headers, and answered with
+// CONTINUE_AND_REPLACE, so Envoy stops sending the stream: what follows
+// its headers is the upgraded connection's data, not a body (#276).
+//
 // In observability mode (detect mode) Envoy doesn't wait for the answers,
 // and the adapter sends none. The body comes in chunks there (STREAMED, the
 // only mode Envoy allows, whatever protocol_config says): they are gathered
@@ -143,6 +148,9 @@ type exchange struct {
 	// setID: the request ID was generated here, and is set on the request
 	// Envoy forwards.
 	setID bool
+	// upgrade: the request is an upgrade (a WebSocket handshake) without
+	// a body, answered on its headers.
+	upgrade bool
 }
 
 // Process handles the stream of one HTTP request.
@@ -235,6 +243,16 @@ func (s *Server) onHeaders(ctx context.Context, x *exchange, h *extprocv3.HttpHe
 	if h.GetEndOfStream() {
 		return s.verdict(ctx, x, phaseRequestHeaders)
 	}
+	if bodilessUpgrade(req) {
+		// Envoy sends an upgrade's headers without end_of_stream: what
+		// follows them is the upgraded connection's data (WebSocket
+		// frames), which the client sends only once the upgrade is
+		// answered. Waiting for it as a body would hold the handshake
+		// until Envoy's idle timeout (#276). The request is decided on its
+		// headers, and Envoy is told to stop sending its stream.
+		x.upgrade = true
+		return s.verdict(ctx, x, phaseRequestHeaders)
+	}
 	if x.limit = s.pipeline.BodyLimit(req, s.maxBody); x.limit > 0 {
 		switch {
 		case x.bodyMode == filterv3.ProcessingMode_BUFFERED, x.bodyMode == filterv3.ProcessingMode_BUFFERED_PARTIAL:
@@ -323,10 +341,36 @@ func (s *Server) verdict(ctx context.Context, x *exchange, p phase) *extprocv3.P
 		}
 		return deny(v.Status, x.req.ID)
 	}
+	id := ""
 	if x.setID {
-		return allow(p, x.req.ID)
+		id = x.req.ID
 	}
-	return allow(p, "")
+	resp := allow(p, id)
+	if x.upgrade {
+		// CONTINUE_AND_REPLACE without a body mutation: Envoy continues the
+		// request now and sends nothing more of it, whatever its body
+		// mode; the upgraded connection's data passes untouched.
+		resp.GetRequestHeaders().GetResponse().Status = extprocv3.CommonResponse_CONTINUE_AND_REPLACE
+	}
+	return resp
+}
+
+// bodilessUpgrade reports whether r is a GET asking to upgrade the
+// connection (a WebSocket handshake) that declares no body: no
+// Transfer-Encoding and no Content-Length but 0. One that declares a body
+// waits for it, as any request does.
+func bodilessUpgrade(r *request.Request) bool {
+	if r.Method != http.MethodGet || len(r.Headers.Values("Upgrade")) == 0 || len(r.Headers.Values("Transfer-Encoding")) > 0 {
+		return false
+	}
+	switch cl := r.Headers.Values("Content-Length"); len(cl) {
+	case 0:
+		return true
+	case 1:
+		return strings.TrimSpace(cl[0]) == "0"
+	default:
+		return false
+	}
 }
 
 // uninspectable refuses a request the engine can't inspect: only a
