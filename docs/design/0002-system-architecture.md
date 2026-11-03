@@ -462,11 +462,46 @@ the proxy upgrades the connection, and none sees the messages after it. So:
 - **An upgrade has no body to wait for.** ext_proc decides a bodiless upgrade on its headers and
   tells Envoy to stop sending the stream ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing)).
 - **Messages are not inspected, and nothing claims they are.** Only a hook on the stream after the
-  upgrade could: the engine's reverse proxy, which copies the connection itself, or ext_proc in
-  `STREAMED` mode, where Envoy passes the upgraded data as body chunks and waits for an answer to
-  each. Traefik's ForwardAuth can't: it asks once, before the upgrade. Message inspection (frame
-  parsing, size limits, text frames as arguments, a close code on a denial) is the second part of
-  #276, and must state per proxy where it happens.
+  upgrade could, and Traefik's ForwardAuth has none: it asks once, before the upgrade. Message
+  inspection (frame parsing, size limits, text frames as arguments, a close code on a denial) is the
+  second part of #276, and must state per proxy where it happens.
+
+**WebSocket messages through Envoy (#276, open: what was tried).** The plan was ext_proc in
+`STREAMED` mode for upgrades only: the engine answers an upgrade's headers with a `mode_override`
+(`request_body_mode: STREAMED`), which Envoy Gateway allows per `EnvoyExtensionPolicy`
+(`processingMode.allowModeOverride`, in its API at v1.9.3), and parses the frames Envoy sends as
+body chunks. Tried on Envoy v1.39.6 (the raw Envoy sample's version) with an ext_proc probe and
+`hack/wsecho`:
+
+| ext_proc request body mode for the upgrade | Handshake | Frames seen by the engine |
+|---|---|---|
+| `BUFFERED_PARTIAL`, answered `CONTINUE` (0.3.1) | Held until a timeout | No |
+| `CONTINUE_AND_REPLACE` (0.4.0, 0.3.2) | Upgrades | No |
+| `mode_override` to `NONE` | Upgrades | No |
+| `STREAMED` (configured, or `mode_override`), `FULL_DUPLEX_STREAMED` | Held until a timeout | Only from a client that sends a frame before the `101` |
+| `mode_override` to `STREAMED` on the `101`'s response headers | Upgrades | No (a request mode can't change once its headers are past) |
+
+Envoy passes the upgraded data to ext_proc as body chunks, but in a streamed mode it holds the
+request headers until the first chunk, and a client sends its first frame only after the `101`: the
+handshake deadlocks. So ext_proc can't inspect WebSocket messages for a compliant client, on any
+route, whatever Envoy Gateway allows. The options, to decide before building:
+
+1. **The engine's reverse proxy** (`inkwall-engine proxy`): it copies the upgraded connection
+   itself, so it can parse frames, hold a message until it is inspected, and close with 1008. Built
+   first, with its own flags: it works for the standalone proxy today, and is the reference for
+   the others. On Envoy Gateway it would have to be in the request path, a hop the operator can't
+   add without changing the user's routes or their backends.
+2. **Envoy's Lua filter**, which Envoy Gateway attaches through an `EnvoyExtensionPolicy`: tried,
+   it sees the frames (`bodyChunks()`) without holding the handshake. But it doesn't hold a chunk
+   while the script runs, so a frame is forwarded before it is inspected: detect only, unless a
+   call out per chunk can be shown to hold it. It would also need the frame parsing in Lua.
+3. **A fix in Envoy's ext_proc**: continue the headers of an upgrade in a streamed mode, as for any
+   request whose body comes later. Then the planned design works unchanged. Upstream work, and the
+   Envoy Gateway release that carries it.
+
+Until one of them is built, no `WAFPolicy` field asks for message inspection, so nothing can claim
+it, and the docs say messages aren't inspected ([WebSocket](../websocket.md)). A field that asks for
+it will come with the hook that does it, and with status that says where it isn't done.
 
 ### 6.1 Envoy (raw Envoy, Envoy Gateway, Istio, Contour)
 
