@@ -142,8 +142,8 @@ func parseKeys(data []byte) (*keySet, error) {
 }
 
 // verify checks a bundle's signature with the key its key_id names. A
-// bundle without a key ID (none is sent today) is checked against every
-// trusted key: any of them is as good.
+// bundle without a key ID (operators before v0.1.1 sent none) is checked
+// against every trusted key: any of them is as good.
 func (ks *keySet) verify(signed *bundlev1.SignedBundle) error {
 	if id := signed.GetKeyId(); id != "" {
 		key, ok := ks.byID[id]

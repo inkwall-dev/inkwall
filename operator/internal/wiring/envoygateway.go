@@ -900,8 +900,9 @@ func userExtensionPolicies(policies []unstructured.Unstructured, r *envoyRoute) 
 }
 
 // accepted reads whether Envoy Gateway accepted one of the operator's
-// policies, from its status: why it refused it, or, while it hasn't said
-// for every Gateway, that it is pending.
+// policies, from its status: why it refused it (an ancestor with
+// Accepted=False or Overridden=True), or, while no ancestor has
+// Accepted=True, that it is pending.
 func (e *EnvoyGateway) accepted(ctx context.Context, gvk schema.GroupVersionKind, key types.NamespacedName) (pending, refused string, err error) {
 	p := &unstructured.Unstructured{}
 	p.SetGroupVersionKind(gvk)
