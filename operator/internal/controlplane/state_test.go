@@ -28,8 +28,9 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 )
 
-// stateEnv is a connected cluster with a policy, two Traefik pods (one
-// with the engine), an engine report and a bundle.
+// stateEnv is a connected cluster with a policy, two running Traefik pods
+// (one with the engine), a running Envoy pod of Envoy Gateway with the
+// engine, an engine report and a bundle.
 func stateEnv(t *testing.T) *env {
 	t.Helper()
 	e := newEnv(t, wafv1alpha1.ModeGitOps, "tok-1")
@@ -57,6 +58,13 @@ func stateEnv(t *testing.T) *env {
 		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "traefik"}}},
 		Status:     corev1.PodStatus{Phase: corev1.PodPending},
 	}
+	envoy := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "envoy-gateway-system", Name: "envoy-a", Labels: map[string]string{
+			"app.kubernetes.io/name": "envoy", "app.kubernetes.io/managed-by": "envoy-gateway",
+		}},
+		Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "envoy"}, {Name: injection.ContainerName}}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
 	engines, _ := json.Marshal([]distribution.Engine{{
 		ID: "engine-a", PodNamespace: "traefik", PodName: "traefik-a", NodeName: "node-1", EngineVersion: "0.2.0", Applied: 7, Replica: "op-0",
 	}})
@@ -64,7 +72,7 @@ func stateEnv(t *testing.T) *env {
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "inkwall-engines-op-0", Labels: map[string]string{distribution.EnginesLabel: "true"}},
 		Data:       map[string]string{"engines.json": string(engines), "updatedAt": time.Now().UTC().Format(time.RFC3339Nano)},
 	}
-	for _, o := range []client.Object{policy, withEngine, without, pending, report} {
+	for _, o := range []client.Object{policy, withEngine, without, pending, envoy, report} {
 		if err := e.client.Create(ctx, o); err != nil {
 			t.Fatal(err)
 		}
@@ -119,9 +127,12 @@ func TestClusterStateAfterWelcome(t *testing.T) {
 	}
 
 	in := st.GetIntegrations()
-	if len(in) != 1 || in[0].GetName() != "traefik" || in[0].GetController() != "traefik.io/ingress-controller" ||
-		in[0].GetPods() != 2 || in[0].GetPodsWithEngine() != 1 {
-		t.Errorf("integrations = %v, want traefik with 2 running pods, 1 with the engine", in)
+	if len(in) != 2 || in[0].GetName() != "traefik" || in[0].GetController() != "traefik.io/ingress-controller" ||
+		in[0].GetPods() != 2 || in[0].GetPodsWithEngine() != 1 ||
+		in[0].GetGatewayController() != "traefik.io/gateway-controller" || in[0].GetDisabled() != "" ||
+		in[1].GetName() != "envoy-gateway" || in[1].GetGatewayController() != "gateway.envoyproxy.io/gatewayclass-controller" ||
+		in[1].GetPods() != 1 || in[1].GetPodsWithEngine() != 1 || in[1].GetDisabled() != "" {
+		t.Errorf("integrations = %v, want traefik with 2 running pods, 1 with the engine, and envoy-gateway with 1, with the engine", in)
 	}
 	en := st.GetEngines()
 	if len(en) != 1 || en[0].GetEngineId() != "engine-a" || en[0].GetPodName() != "traefik-a" || en[0].GetAppliedBundleVersion() != 7 {
@@ -129,6 +140,19 @@ func TestClusterStateAfterWelcome(t *testing.T) {
 	}
 	if st.GetBundleVersion() != 7 || string(st.GetBundleContentHash()) != "hash-7" {
 		t.Errorf("bundle = %d %q", st.GetBundleVersion(), st.GetBundleContentHash())
+	}
+}
+
+// An integration the operator may not wire is still listed, with why.
+func TestClusterStateMarksDisabledIntegrations(t *testing.T) {
+	e := stateEnv(t)
+	why := "the operator may not list EnvoyProxies"
+	e.conn.Disabled = map[string]string{"envoy-gateway": why}
+	e.run(t)
+	in := e.waitStates(t, 1)[0].GetIntegrations()
+	if len(in) != 2 || in[0].GetName() != "traefik" || in[0].GetDisabled() != "" ||
+		in[1].GetName() != "envoy-gateway" || in[1].GetDisabled() != why || in[1].GetPods() != 1 {
+		t.Errorf("integrations = %v, want traefik enabled and envoy-gateway disabled (%s)", in, why)
 	}
 }
 
@@ -188,7 +212,8 @@ func TestClusterStateWithoutBundle(t *testing.T) {
 	e.cp.AddToken("tok-1")
 	e.run(t)
 	st := e.waitStates(t, 1)[0]
-	if st.GetBundleVersion() != 0 || len(st.GetEngines()) != 0 || st.GetIntegrations()[0].GetPods() != 0 {
+	if st.GetBundleVersion() != 0 || len(st.GetEngines()) != 0 || len(st.GetIntegrations()) != 2 ||
+		st.GetIntegrations()[0].GetPods() != 0 || st.GetIntegrations()[1].GetPods() != 0 {
 		t.Errorf("state = %v, want no bundle, engines or pods", st)
 	}
 }
