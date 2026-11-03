@@ -764,7 +764,7 @@ reason is `NoEngines`, `EnginesBehind` (`some engines don't run bundle 42 yet`),
 left engines out, [§4.7](#47-distribution-server-all-replicas)), `NotInBundle` or `Suspended` (the
 bundle served suspends inspection, #263), or `EnginesOutdated` when an engine runs the bundle but
 is a release too old for a field the policy sets, which it would ignore (`spec.webSocket` needs
-0.4.0, #276; an engine whose version isn't a release, a development build, counts as new enough). It waits for the bundle builder to report the policy's
+0.4.0, #276, as does `spec.body.grpcMessages: Inspect`, #275; an engine whose version isn't a release, a development build, counts as new enough). It waits for the bundle builder to report the policy's
 current generation (`status.observedGeneration`). The version engines must run is the policy's
 `status.bundleVersion`, or its version in the bundle served when that is newer: the builder writes
 the status just after publishing, and engines still on a suspended bundle mustn't count once it

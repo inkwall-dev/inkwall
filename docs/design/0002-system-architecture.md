@@ -54,6 +54,7 @@ and the [Traefik](https://doc.traefik.io/traefik/) integration are built; the ot
   - [8.4 Multi-tenancy](#84-multi-tenancy)
   - [8.5 Observability](#85-observability)
   - [8.6 Versioning and compatibility](#86-versioning-and-compatibility)
+  - [8.7 gRPC messages](#87-grpc-messages)
 - [9. Repository layout](#9-repository-layout)
 - [10. Testing architecture](#10-testing-architecture)
 - [11. Decisions (ADR log)](#11-decisions-adr-log)
@@ -766,6 +767,61 @@ rate-limit metrics, bundle age, tracing, the dashboard and alerts.
 **Not yet:** a version matrix and `docs/compatibility.md` (CI's kind e2e test runs kind's newest
 Kubernetes; the local kind cluster, the upgrade test and [envtest](https://book.kubebuilder.io/reference/envtest) run 1.34; the chart
 allows 1.29 and later), and conversion webhooks (only `v1alpha1` exists).
+
+### 8.7 gRPC messages
+
+A gRPC call's messages are binary [protobuf](https://protobuf.dev/programming-guides/encoding/),
+which text rules can't read: since v0.3.1 a call is inspected on its path and metadata only
+([gRPC](../grpc.md)). Reading the messages is decided here (v0.4.0, [#275](https://github.com/inkwall-dev/inkwall/issues/275)).
+
+**What is read.** The body, up to the policy's `body.maxBytes`, split into gRPC messages (5-byte
+prefix). Each message is read as protobuf without its schema (`pkg/grpcwire`): a
+length-delimited field whose bytes are a whole protobuf message is read as one, to a depth of 16;
+one whose bytes are printable UTF-8 (no control characters but tab, CR, LF) is text. Some bytes
+are both, and give both: an attacker could otherwise write an attack that also parses as a
+message, to have it read only as one. Numbers, fixed-width fields and binary bytes give nothing.
+Each text field becomes a form argument (`ARGS_POST`) named by its path of field numbers (`2.1`:
+field 1 of the message in field 2), so CRS's argument rules and custom rules on `ARGS` see it.
+The raw body stays out of the rules (`REQUEST_BODY` is empty), and rule 920420 stays removed for
+the call. Schemas (a `FileDescriptorSet` in the policy, or server reflection) would name the
+fields and tell strings from bytes; they are left for later, since the schema-less reading
+already sees every string a client sends.
+
+**Limits.** At most 4,096 text fields (more: handled as unread, below); the policy's argument
+limit (1,000 by default, rule 200005) applies to them as to a form or JSON body, and denies
+more (400). Gzip messages decompress to at most 1 MiB per call.
+
+**Compression** (the compressed flag, with the call's `grpc-encoding`): `gzip`, the one encoding
+every gRPC library has, is decompressed. Another encoding (`deflate`, `snappy`, `zstd`) or none
+can't be read.
+
+**What can't be read** — a message cut at `body.maxBytes` (every long client stream), compressed
+other than with gzip, not protobuf, or past the limits — is handled as an oversized body, by the
+policy's `body.onOversize`: denied (413, gRPC `RESOURCE_EXHAUSTED`) in `Block` mode by default,
+logged in `Detect` mode. Failing safe here means a client can't hide an attack behind an encoding
+the engine doesn't read; a policy with long client streams sets `onOversize: Allow`, and the
+messages read before the cut are still inspected.
+
+**False positives**, measured with CRS at paranoia level 1 (`TestGRPCMessagesFalsePositives`):
+
+- 82 real protobuf messages (every `FileDescriptorProto` linked into the engine: Envoy's,
+  gRPC's, protobuf's own; nested, with names, paths, options): none denied by CRS; one has more
+  than 1,000 strings and hits the argument limit.
+- Everyday text (names with apostrophes, non-Latin scripts, addresses, URLs with queries,
+  sentences, JSON, ids, tokens, timestamps): no rule matches.
+- Binary: fields of random bytes are sometimes printable UTF-8, and a short run like `|W` or
+  `` `W `` matches a command or SQL injection rule (932250, 932340, 942190). About 1 message in
+  10,000, with four random fields of 1–24 bytes each; a random 16-byte id or hash is printable
+  less than once in a million.
+
+So the text the messages carry gives the false positives a form with the same values would, and
+binary fields add a small rate of their own, too high to turn on for every gRPC route in `Block`
+mode without the user's say. **Decision:** reading the messages is off by default and opt-in per
+policy (`WAFPolicy` `spec.body.grpcMessages: Inspect`, bundle `BodyConfig.grpc_messages`, the
+engine's `--grpc-messages`). With it off, nothing changes from v0.3.1. Detect mode needs nothing
+of its own: a policy turns it on in `Detect` first, reads the events, and excludes the binary
+fields that match (`when: {argument: "3"}`) before `Block`. Short binary fields could be skipped later (text under 4 bytes
+that isn't all letters and digits), at the cost of short attack strings like `'--`.
 
 ---
 

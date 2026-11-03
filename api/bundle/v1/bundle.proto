@@ -187,6 +187,8 @@ message BodyConfig {
   // Bytes of a body that are inspected; 0: the engine's default.
   int64 max_bytes = 2;
   OversizeAction on_oversize = 3;
+  // Inspect the text in gRPC calls' messages (docs/grpc.md).
+  bool grpc_messages = 4;
 }
 
 // WebSocketConfig is what a WebSocket handshake (a request with an
