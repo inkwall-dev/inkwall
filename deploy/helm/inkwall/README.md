@@ -198,6 +198,9 @@ The operator signs policy bundles with an [Ed25519](https://www.rfc-editor.org/r
 kubectl annotate inkwallconfig default --overwrite waf.inkwall.dev/rotate-signing-key="$(date +%s)"
 ```
 
+If there is no `InkwallConfig` yet, create an empty one first, as
+[the prerequisites](../../../docs/key-rotation.md#prerequisites) show.
+
 To rotate it on a schedule, set `spec.signingKey.rotationInterval`. Traffic is unaffected.
 [Rotating the bundle signing key](../../../docs/key-rotation.md) explains the phases, how to check
 them and what a rotation waits for.
@@ -205,22 +208,45 @@ them and what a rotation waits for.
 ## Suspending inspection
 
 The emergency switch: every engine allows every request, within seconds, and nothing is removed.
+It sets `spec.suspend` on the `InkwallConfig` named `default`. That object is optional: a fresh
+install has none and runs with the defaults, so the first command creates an empty one if it's
+missing (an empty spec keeps every default), and the second sets `spec.suspend` and changes
+nothing else.
 
+<!-- e2e: suspend (hack/kind/e2e.sh runs this block) -->
 ```sh
+kubectl get inkwallconfig default -o name 2>/dev/null || kubectl create -f - <<'YAML'
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: InkwallConfig
+metadata:
+  name: default
+YAML
 kubectl patch inkwallconfig default --type merge -p '{"spec":{"suspend":true}}'
 ```
+
+Don't set it with `kubectl apply --server-side` and a manifest of only `spec.suspend`: on an
+`InkwallConfig` created with a plain `kubectl apply`, kubectl's move to server-side apply then
+removes every field the manifest leaves out. If the `InkwallConfig` lives in Git, change it there
+instead, or your [GitOps](https://opengitops.dev/) tool may undo the switch.
 
 While inspection is suspended, every `WAFPolicy` reports it: `Enforced=False` and `Ready=False`,
 reason `Suspended`, with the message `InkwallConfig default suspends inspection (spec.suspend): every engine
 allows every request`. The `InkwallConfig` has a `Suspended` condition, `True` while the bundle the
 engines get suspends inspection:
 
+<!-- e2e: suspended (hack/kind/e2e.sh runs this block) -->
 ```sh
 kubectl get inkwallconfig default -o jsonpath='{.status.conditions[?(@.type=="Suspended")]}'
 ```
 
-Resume with `{"spec":{"suspend":false}}`. Each policy is `Enforced` again once every engine runs
-the bundle that resumes inspection.
+Resume:
+
+<!-- e2e: resume (hack/kind/e2e.sh runs this block) -->
+```sh
+kubectl patch inkwallconfig default --type merge -p '{"spec":{"suspend":false}}'
+```
+
+Each policy is `Enforced` again once every engine runs the bundle that resumes inspection.
 
 The switch works even when policy changes don't fit the bundle (policies `Accepted=False`, reason
 `BundleTooLarge`): the bundle the engines run is published again, suspended, and once resumed, they
