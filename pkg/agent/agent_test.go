@@ -67,6 +67,8 @@ type fakeOperator struct {
 	// as last reported.
 	stats    []map[string]*eventsv1.PolicyStats
 	sawHello chan struct{}
+	// replies gets each ack and nack as it comes, for a test to wait on.
+	replies chan *agentv1.WatchRequest
 }
 
 func newFakeOperator() *fakeOperator {
@@ -74,6 +76,7 @@ func newFakeOperator() *fakeOperator {
 		bundles:     make(chan *bundlev1.SignedBundle, 10),
 		closeStream: make(chan struct{}, 1),
 		sawHello:    make(chan struct{}, 10),
+		replies:     make(chan *agentv1.WatchRequest, 100),
 	}
 }
 
@@ -100,8 +103,10 @@ func (f *fakeOperator) Watch(stream agentv1.BundleService_WatchServer) error {
 			switch x := m.GetMsg().(type) {
 			case *agentv1.WatchRequest_Ack:
 				f.acks = append(f.acks, x.Ack.GetBundleVersion())
+				f.reply(m)
 			case *agentv1.WatchRequest_Nack:
 				f.nacks = append(f.nacks, x.Nack)
+				f.reply(m)
 			case *agentv1.WatchRequest_Heartbeat:
 				f.beats++
 				f.beatKeys = x.Heartbeat.GetTrustedKeyIds()
@@ -128,6 +133,15 @@ func (f *fakeOperator) Watch(stream agentv1.BundleService_WatchServer) error {
 		case <-stream.Context().Done():
 			return nil
 		}
+	}
+}
+
+// reply hands an ack or nack to a test waiting on replies, if one is
+// (tests that don't wait leave them).
+func (f *fakeOperator) reply(m *agentv1.WatchRequest) {
+	select {
+	case f.replies <- m:
+	default:
 	}
 }
 
@@ -322,7 +336,23 @@ func TestApplyLargeBundle(t *testing.T) {
 	raw, _ := proto.Marshal(&b)
 	signed.Bundle, signed.Signature = raw, ed25519.Sign(e.priv, raw)
 	e.op.bundles <- signed
-	waitFor(t, "the ack", func() bool { acks, _, _, _, _ := e.op.snapshot(); return len(acks) == 1 && acks[0] == 1 })
+	// Waits for the agent's answer, however long a loaded machine takes to
+	// carry, verify and apply 6 MiB (#331): go test's -timeout is the
+	// bound, not a guess.
+	select {
+	case r := <-e.op.replies:
+		if nack := r.GetNack(); nack != nil {
+			t.Fatalf("the large bundle was nacked: %s", nack.GetError())
+		}
+		if v := r.GetAck().GetBundleVersion(); v != 1 {
+			t.Fatalf("ack of version %d, want 1", v)
+		}
+	case <-e.op.sawHello:
+		t.Fatal("the agent reconnected before it answered: the fake operator sends a bundle once, so it was lost")
+	}
+	if acks, _, _, _, _ := e.op.snapshot(); len(acks) != 1 || acks[0] != 1 {
+		t.Fatalf("acks %v, want [1]", acks)
+	}
 	if !blocks(holder) {
 		t.Fatal("the large bundle is not enforced")
 	}
