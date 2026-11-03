@@ -554,3 +554,20 @@ func TestGRPCMessages(t *testing.T) {
 		t.Errorf("field 1 excluded from 942100: %s/%s, rules %v", v.Action, v.Reason, v.RuleIDs)
 	}
 }
+
+// The bundle's probe key reaches the SPOE adapter through the holder.
+func TestProbeKey(t *testing.T) {
+	var h Holder
+	if h.ProbeKey() != nil {
+		t.Fatal("a probe key before the first bundle")
+	}
+	key := []byte("0123456789abcdef0123456789abcdef")
+	s, err := Compile(&bundlev1.Bundle{Version: 1, ProbeKey: key}, Options{Evaluators: NewEvaluators()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Store(s)
+	if string(h.ProbeKey()) != string(key) {
+		t.Fatalf("probe key %q", h.ProbeKey())
+	}
+}

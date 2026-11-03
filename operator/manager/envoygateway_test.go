@@ -485,6 +485,36 @@ func testEnvoyGateway(ctx context.Context, t *testing.T, c client.Client) {
 	eventually(t, "no buffer limit in detect mode", gone(wiring.ClientTrafficPolicyGVK, edge, "inkwall-waf-plain"))
 	eventually(t, "Programmed in detect mode", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
 
+	// Responses, in Block mode with request bodies uninspected: Envoy sends
+	// them, holds their body (mode override allowed), and the Gateways'
+	// buffer limit comes back for them.
+	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) {
+		p.Spec.Mode = wafv1alpha1.PolicyBlock
+		p.Spec.Body = &wafv1alpha1.BodySpec{Inspect: new(false)}
+		p.Spec.Responses = &wafv1alpha1.ResponsesSpec{Inspect: true, MaxBytes: new(int64(1 << 20))}
+	})
+	eventually(t, "responses: held for the engine", func() string {
+		p, err := get(wiring.EnvoyExtensionPolicyGVK, ns, "inkwall-waf-app")
+		if err != nil {
+			return err.Error()
+		}
+		if s := specJSON(p); !strings.Contains(s, `"response":{"body":"BufferedPartial"}`) || !strings.Contains(s, `"allowModeOverride":true`) ||
+			strings.Contains(s, "shadowMode") || strings.Contains(s, `"request":{"attributes":["request.protocol"],"body"`) {
+			return s
+		}
+		return ""
+	})
+	for _, gw := range []string{"inkwall-waf-custom", "inkwall-waf-plain"} {
+		eventually(t, "the buffer limit for the responses: "+gw, func() string {
+			if _, err := get(wiring.ClientTrafficPolicyGVK, edge, gw); err != nil {
+				return err.Error()
+			}
+			return ""
+		})
+		accept(wiring.ClientTrafficPolicyGVK, edge, gw, "True", "")
+	}
+	eventually(t, "Programmed with responses", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
+
 	// Unprotected: everything goes, the user's objects as they were.
 	if err := c.Delete(ctx, pol); err != nil {
 		t.Fatal(err)

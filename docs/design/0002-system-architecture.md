@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-09-27
-- Updated: 2026-10-30
+- Updated: 2026-11-03
 - Owner: noureldin
 - Depends on: [0001 — Performance-First Architecture](0001-performance-first-architecture.md)
 
@@ -144,7 +144,7 @@ The compiled policy sits in an [`atomic.Pointer[Snapshot]`](https://pkg.go.dev/s
 | `pkg/clientip` | Client IP ([§8.2](#82-client-ip-correctness)) | built |
 | `pkg/agent`, `pkg/policy` | Bundle stream, verify, compile, swap ([§5.2](#52-engine--operator-bundle-distribution)) | built |
 | `pkg/telemetry` | Metrics, tracing, [`slog`](https://pkg.go.dev/log/slog) | built |
-| `pkg/adapters/*` | One per listener | `forwardauth`, `httpcheck`, `proxy`, `extproc` built; `extauthz`, `spoe` not yet |
+| `pkg/adapters/*` | One per listener | `forwardauth`, `httpcheck`, `proxy`, `extproc`, `spoe` built; `extauthz` not yet |
 | `pkg/events` | Redacted security events, bounded buffer ([§5.4](#54-event-schema)) | built |
 | `pkg/ratelimit`, `pkg/iplist` | [Token buckets](https://en.wikipedia.org/wiki/Token_bucket), [CIDR](https://www.rfc-editor.org/rfc/rfc4632) trie | not yet |
 
@@ -257,6 +257,7 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
     ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}, paranoiaLevel: 1}]
     exclusions: [{ruleIDs: [942100], when: {path: /api/search, argument: q}}]
     body: {inspect: true, maxBytes: 65536, onOversize: InspectPrefix}   # | Allow | Deny
+    responses: {inspect: true, maxBytes: 65536, onOversize: Deny}       # | Allow
   ```
 
   The most specific target wins: an [HTTPRoute](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) rule, then an HTTPRoute, then an Ingress, then the
@@ -527,10 +528,62 @@ access and keeps the trust ConfigMap that injection sets up for the integrations
 ([raw Envoy](../raw-envoy.md)). Its policies target an `Ingress` of a class no controller serves,
 so they report `Programmed=False` (`ControllerUnsupported`), as the operator wires nothing.
 `make raw-envoy-e2e` (Docker) and `make kind-e2e-raw-envoy` run the samples.
+
+**Built (v0.4.0, #281): Istio**, for the HTTPRoutes of its Gateway API implementation (GatewayClass
+controller `istio.io/gateway-controller`), with `ext_proc` through an `EnvoyFilter`. Decided:
+
+- **No native ext_proc in Istio.** Its `MeshConfig.extensionProviders` have
+  `envoyExtAuthzHttp` and `envoyExtAuthzGrpc` (ext_authz, used by `AuthorizationPolicy`
+  `CUSTOM`), tracing and access-log providers, and no ext_proc one (checked in `istio/api` for
+  1.31 and master); a `WasmPlugin` runs Wasm, not ext_proc. So the operator writes the filter
+  itself, in an `EnvoyFilter`, as raw Envoy's users do in `envoy.yaml`.
+- **Discovery.** Istio's GatewayClasses (`istio` by default) are `Full` in `status.proxies`;
+  its Gateway pods carry `gateway.istio.io/managed=istio.io-gateway-controller` and
+  `gateway.networking.k8s.io/gateway-name=<gateway>`. Istio runs a Gateway's pods in the Gateway's
+  namespace, so that namespace must be a proxy namespace (`istio-ingress` and `istio-system` are
+  defaults).
+- **Engine placement: Istio's own customization, not the Pod webhook.** Istio renders each
+  Gateway's Deployment and overlays it with the `deployment` key of the ConfigMap the Gateway's
+  `spec.infrastructure.parametersRef` names, and rolls the pods when it changes. The engine goes there as a native sidecar, with the `emptyDir` holding its Unix socket
+  (`/var/run/inkwall-socket/extproc.sock`) also mounted in `istio-proxy`: into the user's
+  ConfigMap, keeping their entries, or into one the operator makes and names in the Gateway, as for
+  Envoy Gateway's `EnvoyProxy`. Istio's Envoy runs as UID 1337, so the engine makes the socket
+  writable by every user; the `emptyDir` keeps it to the pod.
+- **Wiring.** One `EnvoyFilter` per Gateway with protected routes (`workloadSelector` on its
+  pods): a `STATIC` cluster on the socket (HTTP/2), and per protected HTTPRoute an
+  `envoy.filters.http.ext_proc` filter inserted before the router, `disabled: true`, enabled by
+  `typed_per_filter_config` on the Envoy routes of its protected rules only. Istio names an Envoy
+  route after its HTTPRoute rule (`name`, or `<namespace>.<route>.<index>` for an unnamed rule), so
+  a protected rule whose name another HTTPRoute of the Gateway also gives a rule would select that
+  route's traffic too: refused (`WiringFailed`, rename one). Unprotected routes cost nothing (the
+  filter is off there). The settings are Envoy Gateway's: the request headers with
+  `request.protocol`, the body `BUFFERED_PARTIAL` when a policy inspects it (`STREAMED` in detect
+  mode), no response; `message_timeout` the longest policy timeout plus 500 ms;
+  `failure_mode_allow` when every policy fails open; `observability_mode` when every policy is in
+  detect mode and fails open; `status_on_error` 503, as the engine answers a request it can't
+  inspect; and, when Envoy holds a body, the listener's `per_connection_buffer_limit_bytes` raised to
+  10 MiB, the largest `body.maxBytes`.
+- **Status.** A route is wired on a Gateway once every running pod of it has the engine; it is
+  `Programmed` once that holds on all its Gateways and Istio has accepted it (its parent status,
+  `Accepted=True` from `istio.io/gateway-controller`) on each: Istio reports nothing on an
+  `EnvoyFilter`. Until then it is `Pending` (or `PendingRestart`, `SidecarMissing`), never `Ready`.
+  An Istio older than 1.28 (from the `istio-proxy` image tag) is `WiringFailed`: its Envoy (before
+  1.36) would reject `status_on_error` and keep serving without the filter. Without the
+  `EnvoyFilter` CRD nothing is wired (`WiringFailed`). Without its ClusterRole,
+  `inkwall-operator-istio` (`rbac.integrations.istio`), the integration is disabled
+  (`IntegrationDisabled`).
+- **Tested** with Istio 1.31.3 (its `base` and `istiod` charts, the Gateway API's standard CRDs
+  v1.7.0, no mesh): envtest with a stand-in `EnvoyFilter` CRD, and `make kind-e2e-istio`.
+- **Later:** `VirtualService` targets (Istio's own `Gateway` API), in a later PR; mesh sidecars
+  (ext_proc in every workload's Envoy) are out of scope: the `EnvoyFilter` targets Gateway pods
+  only.
+
 Response inspection (v0.4.0, [0006 §2](0006-adapter-protocols.md#response-inspection-v040)):
 the engine's ext_proc adapter inspects the response headers and body for policies that ask, and
-replaces a response that leaks in block mode; built for raw Envoy with the policy from flags.
-**Not yet:** Istio, Contour; response inspection through Envoy Gateway and `WAFPolicy`.
+replaces a response that leaks in block mode; built for raw Envoy (flags or bundle) and Envoy
+Gateway (`WAFPolicy.spec.responses`). Istio's filter sends no response phase yet, so a policy with
+`responses.inspect` on an Istio route is `Programmed=False` (`ResponsesNotInspected`).
+**Not yet:** Contour; responses through Istio.
 
 ### 6.2 ingress-nginx
 
@@ -572,8 +625,8 @@ on an `Ingress`, or in each route's `middlewares` on an `IngressRoute`
   The operator sets it to 10 MiB, the largest inspectable body.
 - Limitation: ForwardAuth never sees the response, so Traefik can't inspect responses
   ([0006 §2](0006-adapter-protocols.md#response-inspection-v040)): the engine's forward-auth
-  adapter has no response flags, and a policy that asks for it will be reported as not enforced
-  on Traefik routes.
+  adapter has no response flags, and a policy with `responses.inspect` on a Traefik route is
+  `Programmed=False` (`ResponsesNotInspected`).
 - Limitation: ForwardAuth has no timeout or failure setting. An unreachable engine gets a 500
   from Traefik in both modes ([§7.3](#73-engine-unavailable)).
 
@@ -602,12 +655,19 @@ targets (an `ExtensionRef` filter to the Middleware). **Not yet:** B.
 
 ### 6.4 HAProxy (HAProxy Kubernetes Ingress Controller, HAProxy Ingress)
 
-HAProxy uses [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt): the engine is the agent (SPOA), over a Unix socket. An `http-request deny` rule
-acts on the variable `txn.inkwall.action`. To fail closed, an extra rule denies with 503 when the
-variable is unset. Body inspection needs `http-buffer-request`, enabled only when a policy needs
-it.
+HAProxy uses [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt): the engine is the agent (SPOA), over a Unix socket. `http-request deny` rules
+act on the variables `txn.inkwall.action` and `txn.inkwall.status`. HAProxy sets no variable when
+the agent doesn't answer, so the policy's failure mode maps onto one rule: failing closed (the
+default in block mode) denies with 503 when `txn.inkwall.action` is unset, failing open leaves
+that rule out. `option spop-check` marks a stopped engine down, and `timeout processing` is the
+engine's deadline plus 500 ms. Body inspection needs `http-buffer-request`, and a `tune.bufsize`
+above the body limit. Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/inkwall/issues/282)); the protocol is in
+[0006 §4](0006-adapter-protocols.md#4-spoe-haproxy-stream-processing-offload-engine).
 
-**Not yet** built.
+**Built:** the agent, `inkwall-engine spoe`, with a configuration written by hand
+([protecting HAProxy](../haproxy.md)). **Not yet:** the operator's wiring of the HAProxy
+Kubernetes Ingress Controller: discovery by IngressClass, the engine as a sidecar, the SPOE
+filter and rules per protected route, and status.
 
 ### 6.5 Caddy
 
@@ -638,9 +698,9 @@ adapter must match.
 | Caddy | module | ✅ | ✅ | ✅ | ✅ | in-process |
 | Any | reverse proxy | ✅ | ✅ | ✅ | ✅ | TCP |
 
-Built: Traefik ForwardAuth, the reverse proxy, and ext_proc through Envoy Gateway and raw Envoy.
-Responses: inspected by ext_proc (v0.4.0, raw Envoy with the policy from flags so far); the reverse
-proxy's ✅ is a target, it doesn't inspect them yet.
+Built: Traefik ForwardAuth, the reverse proxy, and ext_proc through Envoy Gateway, Istio and raw
+Envoy. Responses: inspected by ext_proc (v0.4.0: raw Envoy and Envoy Gateway, not Istio yet); the
+reverse proxy's ✅ is a target, it doesn't inspect them yet.
 
 ---
 

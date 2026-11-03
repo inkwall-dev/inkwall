@@ -93,6 +93,7 @@ bench-compare: ## Compare benchmarks of changed packages with BASE (origin/main)
 crs-test: ## Run the OWASP CRS regression suite through the proxy (test/crs)
 	cd test/crs && $(GO) test -count=1 -timeout 30m -v ./...
 
+
 .PHONY: lint
 lint: ## Run golangci-lint
 	$(GOLANGCI_LINT) run ./...
@@ -161,7 +162,7 @@ release-check: ## Check the goreleaser configuration
 	$(GORELEASER) check
 
 # The kind targets, and the scripts they run, use the kind of KIND_VERSION.
-KIND_TARGETS := kind-cluster kind-up kind-operator kind-e2e kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-upgrade kind-down
+KIND_TARGETS := kind-cluster kind-up kind-operator kind-e2e kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-upgrade kind-down
 $(KIND_TARGETS): export PATH := $(KIND_DIR):$(PATH)
 $(KIND_TARGETS): $(KIND_DIR)/kind
 
@@ -184,12 +185,13 @@ kind-operator: ## Build the operator image, install the Helm chart on the kind c
 
 .PHONY: kind-e2e
 kind-e2e: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
-kind-e2e: kind-operator ## End-to-end test on kind: a WAFPolicy is enforced by an engine in bundle mode, through Traefik, raw Envoy and Envoy Gateway (installs the operator first)
+kind-e2e: kind-operator ## End-to-end test on kind: a WAFPolicy is enforced by an engine in bundle mode, through Traefik, raw Envoy, Envoy Gateway and Istio (installs the operator first)
 	@# kind-operator built and loaded the engine image.
 	KIND_CLUSTER=$(KIND_CLUSTER) IMAGE=$(IMAGE) SKIP_BUILD=1 hack/kind/e2e.sh
-	@# e2e.sh ends with an uninstall.
+	@# e2e.sh ends with an uninstall, as does each of these.
 	$(MAKE) kind-e2e-raw-envoy
 	$(MAKE) kind-e2e-envoy-gateway
+	$(MAKE) kind-e2e-istio
 
 .PHONY: kind-e2e-raw-envoy
 kind-e2e-raw-envoy: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
@@ -201,6 +203,11 @@ kind-e2e-envoy-gateway: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
 kind-e2e-envoy-gateway: kind-operator ## End-to-end test on kind through Envoy Gateway and Traefik with one WAFPolicy, ending with an uninstall (installs the operator first)
 	KIND_CLUSTER=$(KIND_CLUSTER) hack/kind/envoy-gateway-e2e.sh
 
+.PHONY: kind-e2e-istio
+kind-e2e-istio: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
+kind-e2e-istio: kind-operator ## End-to-end test on kind through Istio's Gateways with one WAFPolicy, ending with an uninstall (installs the operator first)
+	KIND_CLUSTER=$(KIND_CLUSTER) hack/kind/istio-e2e.sh
+
 .PHONY: kind-upgrade
 kind-upgrade: ## Upgrade test on kind: helm upgrade from the last release to this checkout keeps routes protected, uninstall restores them (own cluster, UPGRADE_CLUSTER)
 	UPGRADE_CLUSTER=$(UPGRADE_CLUSTER) KIND_NODE_IMAGE=$(KIND_NODE_IMAGE) OPERATOR_IMAGE=$(OPERATOR_IMAGE) IMAGE=$(IMAGE) CHART=$(CHART) hack/kind/upgrade.sh
@@ -209,6 +216,10 @@ kind-upgrade: ## Upgrade test on kind: helm upgrade from the last release to thi
 kind-test: ## Send benign and attack requests to the kind demo and check verdicts
 	hack/kind/smoke.sh
 	NAME=traefik PROXY=http://127.0.0.1:30080 ADMIN=http://127.0.0.1:30482 hack/kind/smoke.sh
+
+.PHONY: haproxy-e2e
+haproxy-e2e: ## End-to-end test of HAProxy with the engine's SPOE agent and the examples/haproxy samples, in Docker (no cluster; Linux)
+	hack/haproxy/e2e.sh
 
 .PHONY: raw-envoy-e2e
 raw-envoy-e2e: ## End-to-end test of raw Envoy with the engine's ext_proc adapter and the examples/raw-envoy samples, in Docker (no cluster)

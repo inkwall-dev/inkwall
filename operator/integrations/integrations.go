@@ -3,7 +3,7 @@
 
 // Package integrations knows the proxies Inkwall wires into (0004 §4.2):
 // how to recognise each one's IngressClass or GatewayClass and pods, and
-// which engine adapter its pods use: Traefik and Envoy Gateway.
+// which engine adapter its pods use: Traefik, Envoy Gateway and Istio.
 package integrations
 
 import (
@@ -46,7 +46,8 @@ var (
 	TraefikIngressRouteGVK = schema.GroupVersionKind{Group: "traefik.io", Version: "v1alpha1", Kind: "IngressRoute"}
 )
 
-// EnvoySocketDir holds the engine's Unix socket in Envoy Gateway's pods.
+// EnvoySocketDir holds the engine's Unix socket in Envoy Gateway's and
+// Istio's pods.
 const EnvoySocketDir = "/var/run/inkwall-socket"
 
 // EnvoyGateway is the Envoy Gateway integration: the engine, in the Envoy
@@ -59,8 +60,19 @@ var EnvoyGateway = Integration{
 	Adapter:           []string{"ext-proc", "--listen=unix:" + EnvoySocketDir + "/extproc.sock"},
 }
 
+// Istio is the Istio integration (its Gateway API implementation): the
+// engine, in the Gateway's pods through the ConfigMap its parametersRef
+// names, answers the ext_proc filter an EnvoyFilter adds for each protected
+// HTTPRoute, on a Unix socket.
+var Istio = Integration{
+	Name:              "istio",
+	GatewayController: "istio.io/gateway-controller",
+	PodSelector:       labels.Set{"gateway.istio.io/managed": "istio.io-gateway-controller"},
+	Adapter:           []string{"ext-proc", "--listen=unix:" + EnvoySocketDir + "/extproc.sock"},
+}
+
 // All are the known integrations.
-var All = []Integration{Traefik, EnvoyGateway}
+var All = []Integration{Traefik, EnvoyGateway, Istio}
 
 // ForController returns the integration of an IngressClass or GatewayClass
 // controller, or nil when Inkwall doesn't know it.

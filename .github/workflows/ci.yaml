@@ -99,9 +99,10 @@ jobs:
     # kind's newest Kubernetes (the local kind cluster, and upgrade, run 1.34:
     # KIND_NODE_IMAGE in the Makefile).
     runs-on: ubuntu-latest
-    # The e2e takes 15 to 20 minutes; the rest is for saving the build cache
-    # on a push, whose steps have limits of their own (#298).
-    timeout-minutes: 40
+    # The e2e takes 25 to 30 minutes, Istio's (#281) about 10 of them; the
+    # rest is for saving the build cache on a push, whose steps have limits
+    # of their own (#298).
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -200,6 +201,20 @@ jobs:
           check-latest: true
           cache-dependency-path: test/crs/go.sum
       - run: make crs-test
+
+  haproxy:
+    # HAProxy with the engine's SPOE agent, in Docker (#282): the samples of
+    # examples/haproxy validated by HAProxy and run, block and detect mode,
+    # and HAProxy's behaviour with the engine down (fail closed, fail open).
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+      - run: make haproxy-e2e
 
   bench:
     # Performance regression gate (0001 §8): benchmarks of the PR against its

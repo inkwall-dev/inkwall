@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-09-27
-- Updated: 2026-10-31
+- Updated: 2026-11-03
 - Owner: noureldin
 - Depends on: [0001 — Performance-First Architecture](0001-performance-first-architecture.md),
   [0002 — System Architecture](0002-system-architecture.md)
@@ -160,7 +160,7 @@ Validation runs in three steps, cheapest first:
 | Condition | True when | False reasons |
 |---|---|---|
 | `Accepted` | Spec valid, references resolve, and the bundle with it fits | `InvalidRef` (also a rule set that isn't usable), `Conflict`, `TargetUnsupported`, `BundleTooLarge` |
-| `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `IntegrationDisabled`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `Pending`, `NoTargets`, `InjectionDisabled`, `Unwired` |
+| `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `IntegrationDisabled`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `Pending`, `NoTargets`, `ResponsesNotInspected`, `InjectionDisabled`, `Unwired` |
 | `Enforced` | Every serving engine ACKed a bundle with this generation, and inspection isn't suspended | `EnginesBehind`, `EngineNack` (first error), `EnginesUnreported`, `EnginesOutdated`, `NoEngines`, `NotInBundle`, `Suspended` |
 | `Ready` | The three above are True | `Suspended` while inspection is suspended, else the first failing condition's reason; `NotAccepted`, `NotProgrammed` or `NotEnforced` while it isn't reported yet |
 
@@ -217,7 +217,7 @@ visible rather than silently unprotected.
 
 **Built** (`operator/internal/discovery`, leader only):
 
-- [`operator/integrations`](../../operator/integrations/integrations.go) lists two
+- [`operator/integrations`](../../operator/integrations/integrations.go) lists three
   integrations. (An adapter is the engine listener that speaks one proxy's protocol; see
   [0006](0006-adapter-protocols.md).)
   - Traefik: IngressClass controller `traefik.io/ingress-controller`, GatewayClass controller
@@ -226,13 +226,15 @@ visible rather than silently unprotected.
   - Envoy Gateway: GatewayClass controller `gateway.envoyproxy.io/gatewayclass-controller`, pods
     `app.kubernetes.io/name=envoy` and `app.kubernetes.io/managed-by=envoy-gateway`, adapter
     `ext-proc` on a Unix socket.
+  - Istio: GatewayClass controller `istio.io/gateway-controller`, pods
+    `gateway.istio.io/managed=istio.io-gateway-controller`, adapter `ext-proc` on a Unix socket.
 - One entry per controller: its `controllerName`, its `integration` (empty when Inkwall has none),
   its `ingressClasses` and `gatewayClasses`, and `support`:
   - `Full`: the integration's wiring takes the routes of all its classes: `Ingress` for an
     IngressClass, `HTTPRoute` for a GatewayClass;
   - `Partial`: of some of them; the `message` says which it doesn't;
   - `Unsupported`: of none, or no integration. Traefik's IngressClasses and GatewayClasses, and
-    Envoy Gateway's GatewayClasses, are `Full`.
+    Envoy Gateway's and Istio's GatewayClasses, are `Full`.
 - It writes the status only when it changes, and only into an existing `InkwallConfig` `default`:
   the operator doesn't create one.
 - Without the Gateway API's CRDs, GatewayClasses are left out; the leader looks for their CRD
@@ -379,7 +381,7 @@ check.
 | Proxy | Operator writes | Unprotected-route cost |
 |---|---|---|
 | Envoy Gateway | `Backend` ([Unix socket](https://man7.org/linux/man-pages/man7/unix.7.html)) + [`EnvoyExtensionPolicy`](https://gateway.envoyproxy.io/docs/api/extension_types/#envoyextensionpolicy) per protected `HTTPRoute` | 0 |
-| Istio | gateway-scoped [`EnvoyFilter`](https://istio.io/latest/docs/reference/config/networking/envoy-filter/) | ~0 (per-route disable) |
+| Istio | [`EnvoyFilter`](https://istio.io/latest/docs/reference/config/networking/envoy-filter/) per Gateway with protected `HTTPRoute`s: a filter per route, off by default, on for its protected rules | 0 (off on unprotected routes) |
 | Traefik | `Middleware` per namespace, attached to protected routes (`Ingress`, `IngressRoute`, `HTTPRoute`) | 0 |
 | HAProxy | [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) config + map of protected routes in an ACL | ~0 (map lookup) |
 | Caddy | nothing | 0 |
@@ -389,6 +391,9 @@ User-owned objects touched, with the fewest fields:
 - Envoy Gateway's `EnvoyProxy`: the engine's entries in its `initContainers`, `pod.volumes` and
   `container.volumeMounts`; or, for a Gateway that names none, the Gateway's
   `spec.infrastructure.parametersRef` to an operator-made one.
+- Istio's Gateway ConfigMap (the one `spec.infrastructure.parametersRef` names): the engine's
+  entries in its `deployment` overlay; or, for a Gateway that names none, the Gateway's
+  `parametersRef` to an operator-made one.
 - Traefik's `router.middlewares` [annotation](https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/) on an `Ingress`, `spec.routes[*].middlewares` on
   an `IngressRoute`, and `spec.rules[*].filters` on an `HTTPRoute` that a Traefik Gateway serves.
 - The `waf.inkwall.dev/unwire` finalizer on a `WAFPolicy` ([§5](#5-uninstall-and-disable)).
@@ -465,6 +470,9 @@ longer needed.
   wired and
   every running Traefik pod has the engine. Otherwise the reason is one of:
   - `ControllerUnsupported`: another controller or kind;
+  - `ResponsesNotInspected`: the policy inspects responses (`responses.inspect`), which
+    ForwardAuth can't send to the engine; the routes are wired, their requests inspected
+    ([0006 §2](0006-adapter-protocols.md#response-inspection-v040));
   - `IntegrationDisabled`: the operator may not wire the target's proxy, and which permissions it
     lacks ([§7](#7-rbac));
   - `WiringFailed`: no Traefik CRDs, a name clash, a route that can't be written, or an HTTPRoute
@@ -509,7 +517,9 @@ integration), for `HTTPRoute` targets whose parent Gateways have a GatewayClass 
     would refuse the whole policy, the route's other rules with it. Its
     ext_proc filter ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing))
     sends the request headers with the `request.protocol` attribute, and the body
-    (`BufferedPartial`) when a policy on the route inspects bodies; no response stage; `messageTimeout` the route's longest policy timeout (250 ms by
+    (`BufferedPartial`) when a policy on the route inspects bodies; the response headers and body
+    (`BufferedPartial`, `allowModeOverride: true`) only when a policy on it inspects responses
+    ([0006 §2](0006-adapter-protocols.md#response-inspection-v040)); `messageTimeout` the route's longest policy timeout (250 ms by
     default) plus 500 ms, so the engine decides, by its deadline and with the policy's failure
     mode (the deadline doesn't cover sending the body or a busy node); Envoy's timeout is for a
     hung engine;
@@ -521,12 +531,12 @@ integration), for `HTTPRoute` targets whose parent Gateways have a GatewayClass 
     must be on (`config.envoyGateway.extensionApis.enableBackend: true` in its chart).
 - **Envoy's buffer limit.** Envoy hands ext_proc at most its per-connection buffer (32 KiB by
   default) of a body; a body cut there is handled as an oversized one (`body.onOversize`). Each
-  Gateway with a route whose body Envoy holds for the engine (not in shadow mode) gets a `ClientTrafficPolicy`,
+  Gateway with a route whose request or response body Envoy holds for the engine (not in shadow mode) gets a `ClientTrafficPolicy`,
   `inkwall-waf-<gateway>`, owned by it, with `connection.bufferLimit: 10Mi`, the largest
   `body.maxBytes`. Envoy Gateway applies one ClientTrafficPolicy per Gateway, so the operator makes
   none for a Gateway the user targets with their own, and deletes its own once they add one; their
   `bufferLimit` then caps the bodies inspected. One below the largest `body.maxBytes` of a route's
-  policies (unset: the engine's 64 KiB) is `WiringFailed`, naming the ClientTrafficPolicy, with
+  policies (unset: the engine's 64 KiB), or its largest `responses.maxBytes` (unset: 64 KiB), is `WiringFailed`, naming the ClientTrafficPolicy, with
   the route still wired: bodies over it are handled as oversized, legitimate ones too. While the
   operator can't create or update its own (an admission policy refuses it, say), the routes whose
   body Envoy holds are `WiringFailed` with the error, still wired, until it's there and accepted.
@@ -559,6 +569,57 @@ integration), for `HTTPRoute` targets whose parent Gateways have a GatewayClass 
 - **Not yet:** `mergeGateways` (one Envoy fleet for a GatewayClass) and Envoy as a `DaemonSet`;
   per-route Envoy pods in `Programmed` (the pods of every Gateway with a protected route count for
   every policy).
+
+**Built since: Istio** (v0.4.0, `operator/internal/wiring/istio.go`, the `Istio` integration;
+[0002 §6.1](0002-system-architecture.md#61-envoy-raw-envoy-envoy-gateway-istio-contour) has the
+decision), for `HTTPRoute` targets whose parent Gateways have a GatewayClass of
+`istio.io/gateway-controller`. Tested with Istio 1.31.3; wires Istio 1.28 or later.
+
+- **The engine in the Gateway's pods**, through the ConfigMap the Gateway's
+  `spec.infrastructure.parametersRef` names, whose `deployment` key Istio overlays on the
+  Deployment it renders (a strategic merge patch), rolling the pods when it changes:
+  - The Gateway names one: the engine's entries go into its `deployment` overlay: the init
+    container `inkwall-engine` first, the volumes `inkwall-*` and the `istio-proxy` container's
+    `inkwall-socket` mount after the user's. The ConfigMap is labelled `waf.inkwall.dev/sidecar`,
+    and the user's overlay kept, as written, in `waf.inkwall.dev/original-deployment`, to put back
+    when the engine leaves (if the user changed it meanwhile, only the operator's entries go). An
+    overlay that isn't YAML, or a ConfigMap that doesn't exist, is `WiringFailed`.
+  - It names none: the operator makes ConfigMap `inkwall-waf-<gateway>`, owned by the Gateway, and
+    sets the Gateway's `parametersRef` to it (`waf.inkwall.dev/configmap` names it).
+  - ConfigMaps are read uncached and not watched (the role has no `watch` on them): a pod event
+    reconciles, so an engine removed by hand is added back when Istio rolls the pods.
+- **The routes**, per Gateway, once every running pod of it has the engine: one `EnvoyFilter`
+  `inkwall-waf-<gateway>` in the Gateway's namespace, owned by it, `workloadSelector` on
+  `gateway.networking.k8s.io/gateway-name`, `context: GATEWAY`, with
+  - a `STATIC` HTTP/2 cluster `inkwall-engine` on the socket;
+  - per protected HTTPRoute, an `envoy.filters.http.ext_proc` filter
+    `inkwall.ext_proc.<namespace>.<route>`, inserted before the router, `disabled: true`, with the
+    route's settings, as Envoy Gateway's (headers with `request.protocol`; `BUFFERED_PARTIAL`
+    body when inspected, `STREAMED` in detect mode; no response; `message_timeout` the longest
+    policy timeout plus 500 ms; `failure_mode_allow` when every policy fails open;
+    `observability_mode` when every policy is in detect mode and fails open), and
+    `status_on_error` 503;
+  - an `HTTP_ROUTE` merge of `typed_per_filter_config` enabling that filter (an
+    `ExtProcPerRoute` with the same processing mode) on each Envoy route of the protected rules;
+    Istio names them after the rule (`name`, or `<namespace>.<route>.<index>`), not the route, so
+    a protected rule whose Envoy route name another HTTPRoute of the Gateway shares is
+    `WiringFailed` (rename one) and not wired on that Gateway;
+  - when a body is held, the listeners' `per_connection_buffer_limit_bytes` at 10 MiB.
+
+  The annotation `waf.inkwall.dev/routes` lists the routes it wires (`Wired`). A route is wired
+  on each of its Gateways that is ready, but counts as wired only once on all of them.
+- **`Programmed`** once the route is wired on all its Gateways and Istio accepted it on each
+  (the route's parent status, `Accepted=True` from `istio.io/gateway-controller`): Istio reports
+  nothing on an `EnvoyFilter`. Before that, `PendingRestart`, `SidecarMissing` or `Pending`. An
+  Istio before 1.28 (the `istio-proxy` image tag) is `WiringFailed`: its Envoy (before 1.36) would
+  reject `status_on_error`, and an Envoy that rejects a listener update keeps serving without the
+  filter. A custom image tag isn't checked.
+- **Without the `EnvoyFilter` CRD**, or the Gateway API's, nothing is wired: `WiringFailed`. The
+  leader watches EnvoyFilters once the CRD is installed.
+- **Unprotected routes get nothing**, and a route that is no longer protected leaves the
+  `EnvoyFilter` (deleted with the Gateway's last route) before the engine leaves the pods.
+- **Not yet:** `VirtualService` targets; mesh sidecars; Gateways bound to a deployment Istio
+  doesn't render.
 
 ### 4.5 Resolver
 
@@ -921,7 +982,10 @@ Removal must never leave a proxy failing closed on a missing engine.
   5. for Envoy Gateway (built since): deletes its EnvoyExtensionPolicies, Backends and
      ClientTrafficPolicies, then takes the engine out of the users' EnvoyProxies, points the
      Gateways it changed back at no EnvoyProxy, and deletes its own. Envoy Gateway rolls the Envoy
-     pods without the engine.
+     pods without the engine;
+  6. for Istio (built since, v0.4.0): deletes its EnvoyFilters, then takes the engine out of the
+     users' Gateway ConfigMaps (their `deployment` overlay put back as it was), points the Gateways
+     it changed back at no ConfigMap, and deletes its own. Istio rolls the pods without the engine.
 
   `WAFPolicy` objects stay. Sidecars leave as proxy pods restart.
 - Tested on kind: after the uninstall, a restarted Traefik serves the routes (an Ingress and an
@@ -1006,6 +1070,9 @@ holds what its wiring writes, and its proxy's own kinds.
 | Traefik's: `middlewares` (traefik.io) | full | Traefik wiring |
 | Envoy Gateway's: `gateways` (gateway.networking.k8s.io) | update, patch | A Gateway's `parametersRef` ([§4.4](#44-wiring-controller)) |
 | Envoy Gateway's: `envoyproxies`, `envoyextensionpolicies`, `backends`, `clienttrafficpolicies` (gateway.envoyproxy.io) | full | Envoy Gateway wiring |
+| Istio's: `gateways` (gateway.networking.k8s.io) | update, patch | A Gateway's `parametersRef` |
+| Istio's: `envoyfilters` (networking.istio.io) | full | Istio wiring |
+| Istio's: `configmaps` | create, update, patch, delete | The Gateways' deployment overlays (read uncached, not watched) |
 | `configmaps` | full, cluster-wide | `inkwall-trust` per namespace, engine reports |
 | `secrets` | in `inkwall-system` | Bundle, signing key, certificates |
 | `roles`, `rolebindings` | in `inkwall-system` | Bundle Secret grant ([§4.3](#43-injection-controller)) |
@@ -1271,8 +1338,9 @@ Applying exclusions per request changes three things from v0.1.0:
 - **envtest** (`operator/test/testenv`): reconcilers, conditions, wiring that keeps the user's
   entries, and webhooks.
 - **Permissions**, in envtest (`operator/test/permissions`): the operator runs as a user granted
-  `role.yaml` without Envoy Gateway's `ClusterRole`, with Envoy Gateway's CRDs installed: it starts,
-  wires a Traefik Ingress, and reports the Envoy Gateway route `IntegrationDisabled`. `make
+  `role.yaml` without Envoy Gateway's and Istio's `ClusterRole`s, with their CRDs installed: it
+  starts, wires a Traefik Ingress, and reports the Envoy Gateway and Istio routes
+  `IntegrationDisabled`. `make
   helm-lint` checks the chart's integration roles (`hack/helm-test.sh`).
 - **kind e2e test** (`make kind-e2e`): injection, then wiring, then an attack blocked, then
   `Ready`, and a clean uninstall. It installs the operator with shorter waits, so the same steps
@@ -1286,6 +1354,12 @@ Applying exclusions per request changes three things from v0.1.0:
   pods, attacks are blocked through both proxies, a body is inspected (a 48 KB benign one passes,
   a body attack is blocked and never reaches the app: Envoy holds the headers), and unprotecting
   or uninstalling leaves the user's `EnvoyProxy` and Gateways as they were.
+- **Istio on kind** (`make kind-e2e-istio`, run by `make kind-e2e`): Istio 1.31.3 (its `base` and
+  `istiod` charts, no mesh), one `WAFPolicy` on an HTTPRoute of two Gateways (one naming the user's
+  ConfigMap, one naming none) and an unprotected route on both. The engine joins the Gateways'
+  pods, attacks are blocked on the protected route and pass on the other, a body attack never
+  reaches the app, a stopped engine fails closed (503 or 504), detect mode logs without blocking,
+  and unprotecting or uninstalling leaves the user's ConfigMap and Gateways as they were.
 - **Upgrade** from the last release on kind (`make kind-upgrade`, every PR): routes stay protected
   through Traefik, wired once.
 - **Planned:** chaos tests (kill the leader, delete the Secret, take the webhook down).
@@ -1296,7 +1370,7 @@ Applying exclusions per request changes three things from v0.1.0:
 operator/
 ├── api/v1alpha1/       # CRD types, CEL rules
 ├── bundle/             # builder, signer, signing key rotation
-├── integrations/       # known proxies (Traefik, Envoy Gateway)
+├── integrations/       # known proxies (Traefik, Envoy Gateway, Istio)
 ├── internal/
 │   ├── access/         # which integrations' ClusterRoles are granted (§7)
 │   ├── controller/     # reconcilers
@@ -1305,7 +1379,7 @@ operator/
 │   ├── discovery/      # proxy controllers in InkwallConfig.status (§4.1)
 │   ├── distribution/   # BundleService server, auth, status
 │   ├── injection/
-│   └── wiring/         # the controller, Integration, Traefik, Envoy Gateway
+│   └── wiring/         # the controller, Integration, Traefik, Envoy Gateway, Istio
 ├── manager/
 ├── resolver/
 ├── webhook/            # validating + mutating handlers, Managed-mode guard

@@ -141,6 +141,10 @@ func outdatedEngine(p *wafv1alpha1.WAFPolicy, engines []Engine) (*Engine, string
 	if b := p.Spec.Body; field == "" && b != nil && b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect {
 		field, need = "spec.body.grpcMessages", [3]int{0, 4, 0}
 	}
+	if r := p.Spec.Responses; field == "" && r != nil && r.Inspect {
+		// An older engine inspects requests only (#274).
+		field, need = "spec.responses", [3]int{0, 4, 0}
+	}
 	if field == "" {
 		return nil, "", ""
 	}

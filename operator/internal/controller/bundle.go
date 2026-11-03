@@ -281,6 +281,7 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 		Policies:  res.Policies,
 		RuleSets:  res.RuleSets,
 		Suspended: suspended,
+		ProbeKey:  signer.ProbeKey(),
 	}, r.lastVersion, r.Now(), resign)
 	if err != nil {
 		return reconcile.Result{}, err

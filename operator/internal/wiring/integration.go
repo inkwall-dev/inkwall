@@ -87,6 +87,10 @@ type Result struct {
 	// Disabled: the integration is disabled, and why (Disable); the
 	// targets its proxy serves aren't wired.
 	Disabled string
+	// Responses: the proxy sends the engine the responses of the targets
+	// whose policies inspect them. Unset, such a policy is not Programmed
+	// on its targets (ResponsesNotInspected).
+	Responses bool
 }
 
 // TargetState is a target as an integration sees it.
@@ -113,13 +117,15 @@ type Config struct {
 	// Watches of kinds whose CRD may be missing, once it is installed;
 	// nil: only read at each reconcile.
 	IngressRoutes, HTTPRoutes, Gateways, GatewayClasses, EnvoyProxies, ExtensionPolicies, TrafficPolicies *crdwatch.Kind
-	// Sidecar is the engine Envoy Gateway's pods get, before the
-	// InkwallConfig's settings.
+	// EnvoyFilters are Istio's.
+	EnvoyFilters *crdwatch.Kind
+	// Sidecar is the engine Envoy Gateway's and Istio's pods get, before
+	// the InkwallConfig's settings.
 	Sidecar injection.Sidecar
 }
 
-// Integrations are the wiring of every proxy Inkwall integrates: Traefik
-// and Envoy Gateway.
+// Integrations are the wiring of every proxy Inkwall integrates: Traefik,
+// Envoy Gateway and Istio.
 func Integrations(c client.Client, reader client.Reader, cfg Config) []Integration {
 	return []Integration{
 		&Traefik{
@@ -130,6 +136,10 @@ func Integrations(c client.Client, reader client.Reader, cfg Config) []Integrati
 			Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.EnvoyGateway.Name), Sidecar: cfg.Sidecar,
 			HTTPRoutes: cfg.HTTPRoutes, Gateways: cfg.Gateways, GatewayClasses: cfg.GatewayClasses,
 			EnvoyProxies: cfg.EnvoyProxies, ExtensionPolicies: cfg.ExtensionPolicies, TrafficPolicies: cfg.TrafficPolicies,
+		},
+		&Istio{
+			Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.Istio.Name), Sidecar: cfg.Sidecar,
+			HTTPRoutes: cfg.HTTPRoutes, Gateways: cfg.Gateways, GatewayClasses: cfg.GatewayClasses, EnvoyFilters: cfg.EnvoyFilters,
 		},
 	}
 }
