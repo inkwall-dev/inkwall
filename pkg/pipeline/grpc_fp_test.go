@@ -62,7 +62,7 @@ func TestGRPCMessagesFalsePositives(t *testing.T) {
 		case v.InterruptingRuleID == idArgumentsLimit:
 			tooMany++
 		default:
-			t.Errorf("%s: denied, rules %v, matches %+v", fd.Path(), v.RuleIDs, v.Matches)
+			t.Errorf("%s: denied (%s), rules %v, matches %+v", fd.Path(), v.Reason, v.RuleIDs, v.Matches)
 		}
 		return true
 	})

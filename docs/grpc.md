@@ -1,8 +1,10 @@
 # gRPC
 
 What the engine inspects in a [gRPC](https://grpc.io/docs/what-is-grpc/core-concepts/) call, what
-it doesn't, and how it denies one. Fuller gRPC support (per-message streaming, schemas) is
-tracked in [#275](https://github.com/inkwall-dev/inkwall/issues/275).
+it doesn't, and how it denies one. Planned: streams inspected message by message
+([#315](https://github.com/inkwall-dev/inkwall/issues/315)), messages read with their schema
+([#316](https://github.com/inkwall-dev/inkwall/issues/316)), and server messages
+([#317](https://github.com/inkwall-dev/inkwall/issues/317)).
 
 ## Contents
 
@@ -19,15 +21,19 @@ A request is a gRPC call when all of these hold:
 
 - it is a `POST`;
 - it has one `Content-Type`, and that is `application/grpc`, `application/grpc+proto`,
-  `application/grpc-web` or `application/grpc-web+proto` (in any case, with or without
-  parameters);
+  `application/grpc-web`, `application/grpc-web+proto`, `application/grpc-web-text` or
+  `application/grpc-web-text+proto` (in any case, with or without parameters);
 - its body is a sequence of gRPC messages, each a 5-byte prefix (a compressed flag of 0 or 1 and a
   4-byte length) and that many bytes. A body cut at the policy's `body.maxBytes` is checked as far
   as it goes, and must show at least one prefix.
+- for gRPC-Web text, its body is those messages in base64, as gRPC-Web clients send them: groups
+  of four characters, each piece the client encoded on its own ending with its `=` padding, no
+  line breaks. It is decoded first (from v0.4.0); a body cut at `body.maxBytes` is decoded up to
+  its last whole group.
 
-Any other request is inspected as before, whatever its `Content-Type` says. That includes gRPC with
-another codec (`application/grpc+json`) and gRPC-Web text (`application/grpc-web-text`), which the
-Core Rule Set denies in `Block` mode, as any content type it doesn't know (rule 920420).
+Any other request is inspected as before, whatever its `Content-Type` says: gRPC with another
+codec (`application/grpc+json`), or a gRPC-Web text body that isn't base64 of gRPC messages. The
+Core Rule Set denies those in `Block` mode, as any content type it doesn't know (rule 920420).
 
 Before v0.3.1 every gRPC call was denied in `Block` mode, and logged in `Detect` mode: by rule
 920420, and by rules that read the binary body as a form (920270 for its NUL bytes, 921150 for
@@ -57,8 +63,8 @@ spec:
 
 (The engine's flag, without the operator: `--grpc-messages inspect`.)
 
-- **What is read:** the body, up to `body.maxBytes`, as gRPC messages, each read as protobuf
-  without its schema. A field whose bytes are printable UTF-8 is text, and a field whose bytes
+- **What is read:** the body, up to `body.maxBytes` (gRPC-Web text decoded from base64 first), as
+  gRPC messages, each read as protobuf without its schema. A field whose bytes are printable UTF-8 is text, and a field whose bytes
   are a protobuf message is read as one, down to 16 levels. Numbers and binary bytes give nothing.
 - **What the rules see:** each text field as a form argument (`ARGS`, `ARGS_POST`) named by its
   field numbers: `1` is field 1 of the message, `2.1` field 1 of the message in field 2. An

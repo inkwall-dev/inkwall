@@ -763,7 +763,9 @@ which text rules can't read: since v0.3.1 a call is inspected on its path and me
 ([gRPC](../grpc.md)). Reading the messages is decided here (v0.4.0, [#275](https://github.com/inkwall-dev/inkwall/issues/275)).
 
 **What is read.** The body, up to the policy's `body.maxBytes`, split into gRPC messages (5-byte
-prefix). Each message is read as protobuf without its schema (`pkg/grpcwire`): a
+prefix); a gRPC-Web text body is decoded from base64 first (groups of four characters, padding
+allowed at the end of each piece the client encoded, no line breaks; a cut body up to its last
+whole group), and one that isn't base64 of messages isn't a gRPC call. Each message is read as protobuf without its schema (`pkg/grpcwire`): a
 length-delimited field whose bytes are a whole protobuf message is read as one, to a depth of 16;
 one whose bytes are printable UTF-8 (no control characters but tab, CR, LF) is text. Some bytes
 are both, and give both: an attacker could otherwise write an attack that also parses as a
