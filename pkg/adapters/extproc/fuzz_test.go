@@ -135,7 +135,7 @@ func FuzzExtProc(f *testing.F) {
 			// BUFFERED_PARTIAL without end of stream: complete only under
 			// the limit and with its whole Content-Length.
 			length, err := strconv.ParseInt(req.Headers.Get("Content-Length"), 10, 64)
-			truncated = !(len(body) < fuzzMaxBody && err == nil && length == int64(len(body)))
+			truncated = len(body) >= fuzzMaxBody || err != nil || length != int64(len(body))
 		}
 		if req.BodyTruncated != truncated {
 			t.Errorf("body %q truncated %v, want %v (mode %v, end of stream %v)", req.Body, req.BodyTruncated, truncated, bodyMode, bodyEOS)
