@@ -219,7 +219,7 @@ first time they mention it.
   implementation's own object. Traefik's Gateway API provider runs a Traefik `Middleware` through
   one; Inkwall adds one to each rule it protects. An implementation that can't resolve the object
   fails the rule. ([Gateway API
-  docs](https://gateway-api.sigs.k8s.io/reference/spec/#localobjectreference))
+  docs](https://pkg.go.dev/sigs.k8s.io/gateway-api/apis/v1#LocalObjectReference))
 - <a id="externaltrafficpolicy"></a>**externalTrafficPolicy**: A Service setting. `Local` delivers
   external traffic only to pods on the node that received it, which keeps the client's source
   address. ([Kubernetes
