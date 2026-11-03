@@ -29,6 +29,11 @@
 // grpc_message and grpc_content_type, for HAProxy to answer it as a gRPC
 // server would: HTTP 200 with the gRPC status in the headers.
 //
+// The operator's probe (package haproxyprobe), a request whose
+// X-Inkwall-Probe header has a valid MAC under the bundle's probe key, is answered uninspected with the
+// variable probe, which the route's rules return: it tells the operator
+// that HAProxy runs the filter on that route.
+//
 // A NOTIFY without the message, or with arguments the agent can't read,
 // gets action deny with status 400: only a misconfigured HAProxy sends one,
 // and the request is not let through.
@@ -66,6 +71,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/adapters/internal/httpadapter"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/events"
+	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 )
@@ -96,6 +102,10 @@ const (
 	VarGRPCStatus      = "grpc_status"
 	VarGRPCMessage     = "grpc_message"
 	VarGRPCContentType = "grpc_content_type"
+	// VarProbe is set only to answer the operator's probe
+	// (haproxyprobe): the answer, which the route's rules return with
+	// status 299. The probe is denied as well.
+	VarProbe = "probe"
 )
 
 // Values of VarAction.
@@ -140,6 +150,9 @@ type Config struct {
 	// Events records each security event for the operator (nil: logged
 	// only).
 	Events *events.Recorder
+	// ProbeKey returns the key of the operator's probe (the bundle's), or
+	// nil: no probes are answered. Nil: none.
+	ProbeKey func() []byte
 }
 
 // Server is an SPOE agent.
@@ -151,6 +164,7 @@ type Server struct {
 	readTimeout time.Duration
 	logger      *slog.Logger
 	events      *events.Recorder
+	probeKey    func() []byte
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -187,6 +201,7 @@ func New(p pipeline.Inspector, cfg Config) (*Server, error) {
 		readTimeout: cfg.ReadTimeout,
 		logger:      logger,
 		events:      cfg.Events,
+		probeKey:    cfg.ProbeKey,
 		ctx:         ctx,
 		cancel:      cancel,
 		listeners:   map[net.Listener]struct{}{},
@@ -544,6 +559,9 @@ func (s *Server) answer(ctx context.Context, ack *encoder, payload []byte, maxFr
 		setVerdict(ack, ActionDeny, http.StatusBadRequest, httpadapter.NewRequestID())
 		return
 	}
+	if s.answerProbe(ack, req) {
+		return
+	}
 	v := s.pipeline.Check(ctx, req)
 	if httpadapter.IsEvent(v) {
 		httpadapter.LogEvent(ctx, s.logger, s.events, req, path, v)
@@ -556,6 +574,24 @@ func (s *Server) answer(ctx context.Context, ack *encoder, payload []byte, maxFr
 		return
 	}
 	setVerdict(ack, ActionAllow, 0, req.ID)
+}
+
+// answerProbe answers the operator's probe, uninspected, and reports
+// whether req is one: its X-Inkwall-Probe header has a valid MAC of its
+// host and URI under the probe key. It is denied too, so that rules without the
+// probe's return rule don't pass it on to the app.
+func (s *Server) answerProbe(ack *encoder, req *request.Request) bool {
+	header := req.Headers.Get(haproxyprobe.Header)
+	if s.probeKey == nil || header == "" {
+		return false
+	}
+	answer, ok := haproxyprobe.Check(s.probeKey(), req.RawURI, req.Host, header)
+	if !ok {
+		return false
+	}
+	setVerdict(ack, ActionDeny, http.StatusForbidden, req.ID)
+	ack.setVar(VarProbe, func(e *encoder) { e.str(answer) })
+	return true
 }
 
 // setVerdict adds the verdict's variables. Status is set only to deny.

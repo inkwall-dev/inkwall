@@ -4,6 +4,7 @@
 package bundle
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -25,6 +26,7 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	"github.com/inkwall-dev/inkwall/pkg/agent"
 	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
+	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
 )
 
 func content(ids ...string) *bundlev1.Bundle {
@@ -469,5 +471,20 @@ func TestStoreTooLarge(t *testing.T) {
 	var chunks corev1.SecretList
 	if err := c.List(context.Background(), &chunks); err != nil || len(chunks.Items) != 0 {
 		t.Fatalf("a too-large bundle's chunks were stored: %d, %v", len(chunks.Items), err)
+	}
+}
+
+// The probe key is derived from the signing key: stable for a key, 32
+// bytes, different for another key, and not the key itself.
+func TestProbeKey(t *testing.T) {
+	_, k1, _ := ed25519.GenerateKey(nil)
+	_, k2, _ := ed25519.GenerateKey(nil)
+	s1, s2 := NewSigner(k1), NewSigner(k2)
+	a, b := s1.ProbeKey(), NewSigner(k1).ProbeKey()
+	if len(a) != haproxyprobe.KeySize || !bytes.Equal(a, b) {
+		t.Fatalf("probe key %x, then %x", a, b)
+	}
+	if bytes.Equal(a, s2.ProbeKey()) || bytes.Contains(k1, a) {
+		t.Fatal("the probe key doesn't depend on the signing key, or reveals it")
 	}
 }

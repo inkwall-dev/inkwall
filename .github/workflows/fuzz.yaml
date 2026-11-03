@@ -43,6 +43,7 @@ jobs:
           - { package: ./pkg/adapters/extproc, target: FuzzExtProcResponse }
           - { package: ./pkg/adapters/spoe, target: FuzzSPOE }
           - { package: ./pkg/adapters/spoe, target: FuzzVarint }
+          - { package: ./pkg/haproxyprobe, target: FuzzCheck }
           - { package: ./pkg/adapters/internal/httpadapter, target: FuzzURIPath }
           - { package: ./pkg/pipeline, target: FuzzWebSocketOrigin }
           - { package: ./pkg/websocket, target: FuzzReader }

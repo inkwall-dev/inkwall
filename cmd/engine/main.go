@@ -486,7 +486,13 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 	case cmdExtProc:
 		ep, err = extproc.New(p, extproc.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec})
 	case cmdSPOE:
-		agentSrv, err = spoe.New(p, spoe.Config{MaxBodyBytes: maxBody, ClientIP: resolver, ReadTimeout: cfg.readTimeout, Logger: logger, Events: rec})
+		sc := spoe.Config{MaxBodyBytes: maxBody, ClientIP: resolver, ReadTimeout: cfg.readTimeout, Logger: logger, Events: rec}
+		if h, ok := p.(*policy.Holder); ok {
+			// Bundle mode: the operator's HAProxy probe is answered with
+			// the bundle's key.
+			sc.ProbeKey = h.ProbeKey
+		}
+		agentSrv, err = spoe.New(p, sc)
 	case cmdForwardAuth:
 		handler, err = forwardauth.New(p,
 			forwardauth.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec},
