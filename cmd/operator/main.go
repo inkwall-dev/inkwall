@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"runtime/debug"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -30,15 +31,18 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/inkwall-dev/inkwall/internal/buildinfo"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/manager"
 )
 
-// version is set at release builds (-ldflags "-X main.version=...").
-var version string
+// version and commit are set at release builds (-ldflags "-X
+// main.version=... -X main.commit=..."); otherwise the build info has the
+// commit.
+var version, commit string
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stderr))
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
 // options are the operator's: the manager's, and how it shuts down.
@@ -109,7 +113,15 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	return o, nil
 }
 
-func run(args []string, stderr io.Writer) int {
+func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && slices.Contains([]string{"version", "--version", "-version"}, args[0]) {
+		if len(args) > 1 {
+			fmt.Fprintln(stderr, "usage: inkwall-operator version")
+			return 2
+		}
+		fmt.Fprint(stdout, buildinfo.Get(version, commit).String("inkwall-operator"))
+		return 0
+	}
 	if len(args) > 0 && args[0] == "unwire" {
 		return unwire(args[1:], stderr, slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	}
