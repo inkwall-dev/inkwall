@@ -61,6 +61,18 @@ spec:
               body:
                 description: Body configures request body inspection.
                 properties:
+                  grpcMessages:
+                    description: |-
+                      GRPCMessages decides whether the text in gRPC calls' messages is
+                      inspected: Inspect reads each protobuf message without its schema
+                      and gives its text fields to the rules as form arguments; a message
+                      that can't be read (cut at maxBytes, compressed other than with
+                      gzip, not protobuf) is handled by onOversize. Unset: Skip, only the
+                      call's path and metadata are inspected. See docs/grpc.md.
+                    enum:
+                    - Inspect
+                    - Skip
+                    type: string
                   inspect:
                     default: true
                     description: Inspect turns body inspection on or off.

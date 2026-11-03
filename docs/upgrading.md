@@ -36,6 +36,11 @@ What's new in 0.4.0:
   403 before the upgrade (`Block`), or logged with reason `websocket` (`Detect`). The engine's
   `--websocket-origins`, `--websocket-allow-missing-origin` and `--websocket-required-headers`
   flags do the same without the operator. See [WebSocket](websocket.md).
+- **gRPC messages.** `body.grpcMessages: Inspect` on a `WAFPolicy` (`--grpc-messages inspect`
+  without the operator) has the rules read the text in gRPC calls' messages. It is off by
+  default: try it in `Detect` mode first. See [inspecting the messages](grpc.md#inspecting-the-messages).
+  The chart upgrades the CRDs with it; if you install them yourself, apply 0.4.0's. A policy
+  that sets it isn't `Enforced` (`EnginesOutdated`) while an engine before 0.4.0 runs it.
 
 What changes by itself in 0.4.0:
 

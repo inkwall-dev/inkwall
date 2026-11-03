@@ -138,6 +138,9 @@ func outdatedEngine(p *wafv1alpha1.WAFPolicy, engines []Engine) (*Engine, string
 	if w := p.Spec.WebSocket; w != nil && (len(w.AllowedOrigins) > 0 || len(w.RequiredHeaders) > 0) {
 		field, need = "spec.webSocket", [3]int{0, 4, 0}
 	}
+	if b := p.Spec.Body; field == "" && b != nil && b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect {
+		field, need = "spec.body.grpcMessages", [3]int{0, 4, 0}
+	}
 	if field == "" {
 		return nil, "", ""
 	}
