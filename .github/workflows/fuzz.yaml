@@ -42,6 +42,8 @@ jobs:
           - { package: ./pkg/adapters/extproc, target: FuzzExtProc }
           - { package: ./pkg/adapters/internal/httpadapter, target: FuzzURIPath }
           - { package: ./pkg/pipeline, target: FuzzWebSocketOrigin }
+          - { package: ./pkg/websocket, target: FuzzReader }
+          - { package: ./pkg/websocket, target: FuzzTracker }
           - { package: ./pkg/adapters/internal/httpadapter, target: FuzzRequestID }
           - { package: ./pkg/adapters/internal/httpadapter, target: FuzzGRPCDenial }
           - { package: ./pkg/grpcwire, target: FuzzMessages }

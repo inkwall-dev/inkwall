@@ -651,6 +651,9 @@ func (e *Evaluator) Evaluate(_ context.Context, r *request.Request) (rules.Resul
 	for _, a := range r.GRPCText {
 		tx.AddPostRequestArgument(a.Name, a.Value)
 	}
+	for _, a := range r.WebSocketText {
+		tx.AddPostRequestArgument(a.Name, a.Value)
+	}
 	if len(r.Body) > 0 && !r.BodyTruncated && !r.GRPC {
 		it, _, err := tx.WriteRequestBody(r.Body)
 		if err != nil {

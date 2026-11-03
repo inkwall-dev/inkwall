@@ -54,12 +54,19 @@ jobs:
   raw-envoy:
     # Raw Envoy with the engine's ext_proc adapter, in Docker (#283): the
     # samples of examples/raw-envoy validated by Envoy and run, block and
-    # detect mode, and Envoy's behaviour with the engine down.
+    # detect mode, and Envoy's behaviour with the engine down. Then, with
+    # the same engine image, WebSocket message inspection by the engine's
+    # proxy (#276).
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          check-latest: true
       - run: make raw-envoy-e2e
+      - run: SKIP_BUILD=1 make websocket-e2e
 
   release:
     # The release configuration must stay valid: a broken one only shows

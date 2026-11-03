@@ -145,6 +145,8 @@ type engineConfig struct {
 	// webSocket is what a WebSocket handshake must meet; nil: nothing more
 	// than any request.
 	webSocket *pipeline.WebSocketRules
+	// webSocketMessages: what the proxy does with a WebSocket's messages.
+	webSocketMessages pipeline.WebSocketMessages
 
 	// Bundle mode: policies come from the operator.
 	operator           string
@@ -167,7 +169,7 @@ type engineConfig struct {
 var policyFlags = []string{
 	"mode", "failure-mode", "timeout", "oversize-body", "grpc-messages", "paranoia-level", "anomaly-threshold",
 	"rules", "rules-before-crs", "skip-paths", "skip-body-paths", "disable-rule-groups",
-	"websocket-origins", "websocket-allow-missing-origin", "websocket-required-headers",
+	"websocket-origins", "websocket-allow-missing-origin", "websocket-required-headers", "websocket-messages",
 }
 
 func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, error) {
@@ -188,8 +190,12 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	adminListen := fs.String("admin-listen", ":9480", "address for /metrics, /healthz and /readyz (empty disables)")
 	readTimeout := fs.Duration("read-timeout", 60*time.Second, "maximum time to read a whole request, including the body (0 = no limit; HTTP listeners only, not ext-proc)")
 	var upstream *string
+	wsMessages := new(string)
 	if command == cmdProxy {
 		upstream = fs.String("upstream", "", "upstream URL that allowed requests are forwarded to (required)")
+		// Only the proxy sees a WebSocket's messages: the other adapters
+		// see its handshake alone.
+		wsMessages = fs.String("websocket-messages", "off", "WebSocket messages: off (forwarded uninspected), inspect (text messages inspected, each up to --max-body-bytes; binary ones pass), or text-only (text inspected, binary refused); a denied message closes the connection with 1008")
 	}
 	mode := fs.String("mode", "detect", "enforcement mode: detect or block")
 	failure := fs.String("failure-mode", "auto", "when a request cannot be inspected (timeout, error, overload): open (allow), closed (deny with 503), or auto (closed in block mode, open in detect mode)")
@@ -287,6 +293,18 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 			return cfg, fmt.Errorf("--upstream: %w", err)
 		}
 		cfg.upstream = u
+		switch *wsMessages {
+		case "off":
+		case "inspect":
+			cfg.webSocketMessages = pipeline.MessagesInspect
+		case "text-only":
+			cfg.webSocketMessages = pipeline.MessagesTextOnly
+		default:
+			return cfg, fmt.Errorf("--websocket-messages must be off, inspect or text-only, got %q", *wsMessages)
+		}
+		if cfg.webSocketMessages != pipeline.MessagesOff && cfg.maxBodyBytes <= 0 {
+			return cfg, errors.New("--websocket-messages needs --max-body-bytes, the limit of a message")
+		}
 	}
 
 	switch *mode {
@@ -425,7 +443,8 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 		handler, err = httpcheck.New(p, httpcheck.Config{MaxBodyBytes: maxBody, Logger: logger, Events: rec})
 	default:
 		handler, err = proxy.New(p,
-			proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec},
+			proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec,
+				WebSocketMessages: cfg.webSocketMessages},
 		)
 	}
 	if err != nil {

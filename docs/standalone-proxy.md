@@ -42,6 +42,7 @@ The main flags; `inkwall-engine proxy -h` lists them all:
 | `--skip-paths`, `--skip-body-paths` | | Paths not inspected at all, or without their body |
 | `--disable-rule-groups` | | CRS attack families the app can't be vulnerable to, e.g. `php,java` |
 | `--websocket-origins`, `--websocket-required-headers` | | Origins a [WebSocket](websocket.md) handshake may come from, headers it must have |
+| `--websocket-messages` | `off` | `inspect` or `text-only`: inspect each text message a client sends on a [WebSocket](websocket.md#messages-through-the-standalone-proxy); a denied one closes it with 1008 |
 | `--max-body-bytes` | `65536` | Body bytes inspected; `--oversize-body` decides what happens to larger bodies |
 | `--failure-mode` | `auto` | Requests that can't be inspected: rejected (503) in block mode, let through in detect mode |
 | `--trusted-proxies` | | [CIDRs](https://www.rfc-editor.org/rfc/rfc4632) whose [`X-Forwarded-For`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For) is trusted |

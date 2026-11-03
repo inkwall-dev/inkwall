@@ -36,6 +36,11 @@ What's new in 0.4.0:
   403 before the upgrade (`Block`), or logged with reason `websocket` (`Detect`). The engine's
   `--websocket-origins`, `--websocket-allow-missing-origin` and `--websocket-required-headers`
   flags do the same without the operator. See [WebSocket](websocket.md).
+- **WebSocket messages, through the standalone proxy.** `inkwall-engine proxy --websocket-messages
+  inspect` (or `text-only`) inspects each text message a client sends, up to `--max-body-bytes`; in
+  `block` mode a denied one closes the WebSocket with 1008 before the application gets it. Through
+  Envoy Gateway, raw Envoy and Traefik, only the handshake is inspected, as in 0.3.x: see
+  [WebSocket](websocket.md#through-each-proxy).
 - **gRPC messages.** `body.grpcMessages: Inspect` on a `WAFPolicy` (`--grpc-messages inspect`
   without the operator) has the rules read the text in gRPC calls' messages. It is off by
   default: try it in `Detect` mode first. See [inspecting the messages](grpc.md#inspecting-the-messages).
