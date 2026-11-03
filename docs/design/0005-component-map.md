@@ -65,7 +65,7 @@ which only adds management, analytics and threat intelligence.
 | Component | Runs in | Code | Status |
 |---|---|---|---|
 | **inkwall-engine** | Sidecar in ingress controller pods, or standalone | `cmd/engine`, `pkg/` | Built |
-| **Engine adapters** | Engine process | `pkg/adapters/*` | Built: `forwardauth`, `httpcheck` (`/v1/check`), `proxy`, `extproc` ([ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter)). Not yet: [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter), [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) |
+| **Engine adapters** | Engine process | `pkg/adapters/*` | Built: `forwardauth`, `httpcheck` (`/v1/check`), `proxy`, `extproc` ([ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter)), `spoe` ([SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt)). Not yet: [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) |
 | **Proxy-side glue** | Proxy configuration | `operator/integrations`, `operator/internal/wiring` | Built: Traefik [Middleware](https://doc.traefik.io/traefik/middlewares/overview/); Envoy Gateway's `EnvoyProxy`, `EnvoyExtensionPolicy`, `Backend` and `ClientTrafficPolicy`. Not yet: SPOE, other Envoy products |
 | **Caddy module** | Compiled into Caddy | `adapters/caddy` (own [`go.mod`](https://go.dev/ref/mod#go-mod-file)) | Not yet |
 | **Traefik plugin** (thin client) | Traefik ([Yaegi](https://github.com/traefik/yaegi)) | `adapters/traefik-plugin` (own `go.mod`) | Not yet |

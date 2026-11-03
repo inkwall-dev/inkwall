@@ -4,9 +4,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/binary"
 	"io"
 	"log/slog"
 	"net"
@@ -308,6 +310,97 @@ func TestServeExtProc(t *testing.T) {
 	if want := `inkwall_requests_total{action="deny",adapter="extproc",reason="rule"} 1`; !strings.Contains(string(metrics), want) {
 		t.Errorf("metrics lack %s", want)
 	}
+}
+
+func TestParseSPOEFlags(t *testing.T) {
+	cfg, err := parseFlags(cmdSPOE, []string{"--read-timeout", "5s"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.listen != "127.0.0.1:9004" || cfg.readTimeout != 5*time.Second {
+		t.Fatalf("unexpected config: %+v", cfg)
+	}
+	if _, err := parseFlags(cmdSPOE, []string{"--upstream", "http://app"}, io.Discard); err == nil {
+		t.Fatal("spoe accepted --upstream")
+	}
+}
+
+// TestServeSPOE runs the SPOE agent on a Unix socket, as HAProxy calls it:
+// after the HELLO handshake, an attack is answered with the variables
+// action=deny and status=403, counted with the adapter label spoe.
+func TestServeSPOE(t *testing.T) {
+	dir := t.TempDir()
+	sock, adminSock := filepath.Join(dir, "spoe.sock"), filepath.Join(dir, "admin.sock")
+	cfg, err := parseFlags(cmdSPOE, []string{"--listen", "unix:" + sock, "--admin-listen", "unix:" + adminSock, "--mode", "block", "--timeout", "10s"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, cfg, slog.New(slog.DiscardHandler)) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("serve: %v", err)
+		}
+	}()
+	var conn net.Conn
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		if conn, err = net.Dial("unix", sock); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the engine never listened: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	for _, name := range []string{"hello.bin", "notify-sqli.bin"} {
+		b, err := os.ReadFile(filepath.Join("..", "..", "pkg", "adapters", "spoe", "testdata", "frames", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.Write(b); err != nil {
+			t.Fatal(err)
+		}
+		// The ACK sets action, status and request_id; the prefix of each
+		// set-var: type 1, 3 arguments, the transaction scope (2).
+		frame := readSPOEFrame(t, conn)
+		if name == "notify-sqli.bin" {
+			if frame[0] != 103 || !bytes.Contains(frame, []byte("\x01\x03\x02\x06action\x08\x04deny")) ||
+				!bytes.Contains(frame, []byte("\x01\x03\x02\x06status\x02\xf3\x0a")) {
+				t.Fatalf("ACK % x", frame)
+			}
+		}
+	}
+
+	admin := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", adminSock)
+	}}}
+	r, err := admin.Get("http://engine/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Body.Close() }()
+	metrics, _ := io.ReadAll(r.Body)
+	if want := `inkwall_requests_total{action="deny",adapter="spoe",reason="rule"} 1`; !strings.Contains(string(metrics), want) {
+		t.Errorf("metrics lack %s", want)
+	}
+}
+
+// readSPOEFrame reads one SPOP frame without its length prefix.
+func readSPOEFrame(t *testing.T, conn net.Conn) []byte {
+	t.Helper()
+	var prefix [4]byte
+	if _, err := io.ReadFull(conn, prefix[:]); err != nil {
+		t.Fatal(err)
+	}
+	frame := make([]byte, binary.BigEndian.Uint32(prefix[:]))
+	if _, err := io.ReadFull(conn, frame); err != nil {
+		t.Fatal(err)
+	}
+	return frame
 }
 
 // processOnce sends Envoy's request headers for an attack and returns the

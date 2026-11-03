@@ -9,6 +9,7 @@
 //	inkwall-engine forward-auth [flags]
 //	inkwall-engine check [flags]
 //	inkwall-engine ext-proc [flags]
+//	inkwall-engine spoe [flags]
 //
 // The proxy subcommand runs the standalone reverse proxy: it inspects each
 // request with the OWASP Core Rule Set and forwards allowed requests to the
@@ -23,6 +24,9 @@
 //
 // The ext-proc subcommand serves Envoy's external processing API
 // (envoy.service.ext_proc.v3) over gRPC: Envoy and Envoy Gateway call it.
+//
+// The spoe subcommand is an SPOE agent: HAProxy's Stream Processing Offload
+// Engine calls it over SPOP, and acts on the variables it sets.
 //
 // --listen and --admin-listen take a TCP address (127.0.0.1:9001) or a Unix
 // socket (unix:/run/inkwall/engine.sock).
@@ -58,6 +62,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/adapters/forwardauth"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/httpcheck"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/proxy"
+	"github.com/inkwall-dev/inkwall/pkg/adapters/spoe"
 	"github.com/inkwall-dev/inkwall/pkg/agent"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/events"
@@ -81,11 +86,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, buildinfo.Get(version, commit).String("inkwall-engine"))
 		return 0
 	}
-	if len(args) == 0 || !slices.Contains([]string{cmdProxy, cmdForwardAuth, cmdCheck, cmdExtProc}, args[0]) {
+	if len(args) == 0 || !slices.Contains([]string{cmdProxy, cmdForwardAuth, cmdCheck, cmdExtProc, cmdSPOE}, args[0]) {
 		fmt.Fprintln(stderr, "usage: inkwall-engine proxy --upstream URL [flags]")
 		fmt.Fprintln(stderr, "       inkwall-engine forward-auth [flags]")
 		fmt.Fprintln(stderr, "       inkwall-engine check [flags]")
 		fmt.Fprintln(stderr, "       inkwall-engine ext-proc [flags]")
+		fmt.Fprintln(stderr, "       inkwall-engine spoe [flags]")
 		fmt.Fprintln(stderr, "       inkwall-engine version")
 		fmt.Fprintln(stderr, "run 'inkwall-engine <command> -h' for flags")
 		return 2
@@ -116,6 +122,7 @@ const (
 	cmdForwardAuth = "forward-auth"
 	cmdCheck       = "check"
 	cmdExtProc     = "ext-proc"
+	cmdSPOE        = "spoe"
 )
 
 type engineConfig struct {
@@ -178,7 +185,7 @@ var policyFlags = []string{
 func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, error) {
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	// forward-auth, check and ext-proc run next to the proxy that calls them, so by
+	// forward-auth, check, ext-proc and spoe run next to the proxy that calls them, so by
 	// default they are reachable only from inside the pod.
 	defaultListen := ":8480"
 	switch command {
@@ -188,10 +195,12 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 		defaultListen = "127.0.0.1:9002"
 	case cmdExtProc:
 		defaultListen = "127.0.0.1:9003"
+	case cmdSPOE:
+		defaultListen = "127.0.0.1:9004"
 	}
 	listen := fs.String("listen", defaultListen, "address to listen on: host:port or unix:/path/to/socket")
 	adminListen := fs.String("admin-listen", ":9480", "address for /metrics, /healthz and /readyz (empty disables)")
-	readTimeout := fs.Duration("read-timeout", 60*time.Second, "maximum time to read a whole request, including the body (0 = no limit; HTTP listeners only, not ext-proc)")
+	readTimeout := fs.Duration("read-timeout", 60*time.Second, "maximum time to read a whole request, including the body (0 = no limit; not ext-proc; spoe: time to read one frame once it has begun)")
 	var upstream *string
 	wsMessages := new(string)
 	if command == cmdProxy {
@@ -444,6 +453,8 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 		adapter = "httpcheck"
 	case cmdExtProc:
 		adapter = "extproc"
+	case cmdSPOE:
+		adapter = "spoe"
 	}
 	metrics := telemetry.NewMetrics(adapter)
 
@@ -467,12 +478,15 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 		maxBody = max(maxBody, policy.MaxBodyBytes)
 	}
 	var (
-		handler http.Handler
-		ep      *extproc.Server
+		handler  http.Handler
+		ep       *extproc.Server
+		agentSrv *spoe.Server
 	)
 	switch cfg.command {
 	case cmdExtProc:
 		ep, err = extproc.New(p, extproc.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec})
+	case cmdSPOE:
+		agentSrv, err = spoe.New(p, spoe.Config{MaxBodyBytes: maxBody, ClientIP: resolver, ReadTimeout: cfg.readTimeout, Logger: logger, Events: rec})
 	case cmdForwardAuth:
 		handler, err = forwardauth.New(p,
 			forwardauth.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec},
@@ -499,6 +513,9 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 	}
 	if ep != nil {
 		srv = grpcServer{ep.NewGRPCServer()}
+	}
+	if agentSrv != nil {
+		srv = agentSrv
 	}
 
 	// Bind before announcing, so "started" means the ports are really open.
@@ -598,7 +615,8 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 	return err
 }
 
-// server is the request listener: an http.Server, or a gRPC one.
+// server is the request listener: an http.Server, a gRPC one, or the SPOE
+// agent.
 type server interface {
 	Serve(net.Listener) error
 	Shutdown(context.Context) error
