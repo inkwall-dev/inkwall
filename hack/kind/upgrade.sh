@@ -186,19 +186,19 @@ YAML
 # The probe: while /tmp/run exists, it sends an attack and a benign request
 # to the Ingress and an attack to the IngressRoute, through Traefik's
 # Service (no port-forward, which a Traefik restart would break), and logs
-# "uptime ingress-attack ingress-benign route-attack | connect/total ..."
+# "uptime ingress-attack ingress-benign route-attack | dns/connect/total ..."
 # (HTTP codes, 000 without an answer; each request's curl times, in
-# seconds). It runs as the pod's process: one started by
+# seconds, 0 for a step it didn't finish). It runs as the pod's process: one started by
 # kubectl exec may die with the exec session.
 "${KUBECTL[@]}" -n "$NS" create configmap probe --from-file=probe.sh=/dev/stdin --dry-run=client -o yaml <<'SH' |
 trap 'exit 0' TERM
-# c HOST PATH: "CODE CONNECT TOTAL" (curl's times, in seconds).
-c() { curl -s -o /dev/null -m 2 -w '%{http_code} %{time_connect} %{time_total}' -H "Host: $1" "http://$SVC$2"; }
+# c HOST PATH: "CODE DNS/CONNECT/TOTAL" (curl's times, in seconds).
+c() { curl -s -o /dev/null -m 2 -w '%{http_code} %{time_namelookup}/%{time_connect}/%{time_total}' -H "Host: $1" "http://$SVC$2"; }
 while true; do
   if [ -e /tmp/run ]; then
     read -r up _ </proc/uptime
     set -- $(c "$HOST" "$SQLI") $(c "$HOST" /products/42) $(c "$ROUTE_HOST" "$SQLI")
-    echo "$up $1 $4 $7 | $2/$3 $5/$6 $8/$9" >>/tmp/probe.log
+    echo "$up $1 $3 $5 | $2 $4 $6" >>/tmp/probe.log
   fi
   sleep 0.2
 done
@@ -330,8 +330,7 @@ probe_stop() {
     }' <<<"$log") && rc=0 || rc=$?
   sed 's/^/      /' <<<"$summary"
   # The wrong rounds, even within the gap allowed, with each request's
-  # connect/total time: a connect that took 1 s or more is a SYN the
-  # network dropped.
+  # dns/connect/total times.
   grep -v '^[0-9.]* 403 200 403 ' <<<"$log" | head -20 | sed 's/^/        /' || true
   if [[ $rc == 0 ]]; then
     ok "$name: no attack got through, no gap over ${max}s"
