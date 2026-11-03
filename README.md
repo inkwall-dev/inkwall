@@ -6,8 +6,8 @@ to your routes. The engine runs OWASP [Coraza](https://coraza.io/) with the
 [Core Rule Set](https://coreruleset.org/) (CRS).
 
 > **Status: v0.3.0, early.** Inkwall works with [**Traefik**](https://doc.traefik.io/traefik/) and its [`Ingress`](https://kubernetes.io/docs/concepts/services-networking/ingress/),
-> [`IngressRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) and [Gateway API](https://gateway-api.sigs.k8s.io/) `HTTPRoute` routes, with [**Envoy Gateway**](https://gateway.envoyproxy.io/) and its
-> `HTTPRoute` routes, and as a standalone reverse proxy in front of anything else. The API is
+> [`IngressRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) and [Gateway API](https://gateway-api.sigs.k8s.io/) `HTTPRoute` routes, with [**Envoy Gateway**](https://gateway.envoyproxy.io/) and
+> [**Istio**](https://istio.io/latest/docs/) and their `HTTPRoute` routes, and as a standalone reverse proxy in front of anything else. The API is
 > `v1alpha1` and will change. See [Limits](#limits) and the [roadmap](#roadmap).
 
 The [docs index](docs/README.md) lists every guide, reference and design doc.
@@ -32,7 +32,9 @@ The [docs index](docs/README.md) lists every guide, reference and design doc.
    or Traefik-served `HTTPRoute` a policy targets. With [Envoy Gateway](https://gateway.envoyproxy.io/), it adds the engine to the Envoy pods through the
    Gateway's [`EnvoyProxy`](docs/glossary.md#envoyproxy), and gives every `HTTPRoute` a policy targets an
    [`EnvoyExtensionPolicy`](docs/glossary.md#envoyextensionpolicy) whose [ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter) filter calls the engine. It sends signed
-   [policy bundles](docs/glossary.md#bundle) to every engine.
+   [policy bundles](docs/glossary.md#bundle) to every engine. With [Istio](https://istio.io/latest/docs/), it adds the engine to a Gateway's pods
+   through the ConfigMap the Gateway names, and an [`EnvoyFilter`](docs/glossary.md#envoyfilter) turns ext_proc on for the
+   protected routes ([Istio](docs/istio.md)).
 2. The engine inspects each request with the CRS and answers allow or deny. When the operator is
    down, it keeps enforcing its last bundle.
 3. Each policy's status shows how far it got: `Accepted`, then `Programmed` (its routes are wired),
@@ -69,6 +71,10 @@ helm upgrade --install eg oci://docker.io/envoyproxy/gateway-helm --version v1.9
   --namespace envoy-gateway-system --create-namespace \
   --set config.envoyGateway.extensionApis.enableBackend=true
 ```
+
+Istio (1.28 or later) needs no restart either: Istio rolls a Gateway's pods when it gets its first
+protected route. Its Gateways' namespaces must be proxy namespaces (`istio-ingress` and
+`istio-system` by default): see [Istio](docs/istio.md).
 
 The [chart README](deploy/helm/inkwall/README.md) lists the chart's values and shows how to
 uninstall. The guides cover [upgrading](docs/upgrading.md),
@@ -111,7 +117,7 @@ spec:
   mode: Block                                # the default, Detect, logs but never blocks
 ```
 
-For an `HTTPRoute`, served by Envoy Gateway or Traefik, target it with its group, and optionally one
+For an `HTTPRoute`, served by Envoy Gateway, Istio or Traefik, target it with its group, and optionally one
 rule: `{group: gateway.networking.k8s.io, kind: HTTPRoute, name: web, sectionName: api}`. One policy
 can target routes of both proxies. Traefik wires an HTTPRoute only when every Gateway it is attached
 to is Traefik's: another proxy fails the rules that refer to Traefik's Middleware, so a route also
@@ -137,15 +143,16 @@ annotations into policies: see [migrating from ingress-nginx](docs/migrating-fro
 
 To stop protecting the route, delete the policy or remove the route from its `targetRefs`: the
 operator removes its Middleware from the route, and Traefik serves it uninspected. For an
-HTTPRoute, it deletes the route's `EnvoyExtensionPolicy`, and takes the engine out of a Gateway
-with no protected route left, leaving its `EnvoyProxy` as it was.
+HTTPRoute, it deletes the route's `EnvoyExtensionPolicy` (Envoy Gateway) or removes it from the
+Gateway's `EnvoyFilter` (Istio), and takes the engine out of a Gateway with no protected route
+left, leaving its `EnvoyProxy` or ConfigMap as it was.
 
 **Safe by default.** In block mode, a request that can't be inspected in time is rejected (503),
 so padding a request past the deadline doesn't get an attack through; detect mode never blocks.
 If Traefik can't reach the engine at all (crashed, restarting or hung), Traefik answers 500 in
 both modes: see [when the engine is down](deploy/helm/inkwall/README.md#when-the-engine-is-down).
-Envoy, through Envoy Gateway, answers 500 too, unless every policy on the route fails open: then
-it lets the request through. On a route whose policies are all in detect mode (and fail open),
+Envoy, through Envoy Gateway, answers 500 too (through Istio, 503, or 504 for a hung engine),
+unless every policy on the route fails open: then it lets the request through. On a route whose policies are all in detect mode (and fail open),
 Envoy doesn't wait for the engine at all: it sends it a copy of the request and forwards it.
 Every engine verifies the signature of each bundle. While a policy blocks, Traefik pods can't start
 without the engine: see
@@ -167,14 +174,15 @@ an Envoy you configure yourself, in or out of Kubernetes, see [protecting raw En
 
 ## Limits
 
-- Proxies: **Traefik** and **Envoy Gateway** (v1.9; not with `mergeGateways` or Envoy as a
-  DaemonSet), wired by the operator; **raw [Envoy](https://www.envoyproxy.io/docs/envoy/latest/)** (1.33 or later) that you configure with
+- Proxies: **Traefik**, **Envoy Gateway** (v1.9; not with `mergeGateways` or Envoy as a
+  DaemonSet) and **Istio**'s Gateway API (1.28 or later; Gateways it deploys, not mesh sidecars or
+  `VirtualService` targets yet), wired by the operator; **raw [Envoy](https://www.envoyproxy.io/docs/envoy/latest/)** (1.33 or later) that you configure with
   the engine's ext_proc adapter ([protecting raw Envoy](docs/raw-envoy.md)); **[HAProxy](https://docs.haproxy.org/)** (3.1 or later) that you
   configure with the engine's SPOE agent ([protecting HAProxy](docs/haproxy.md)); and the standalone
   proxy. [Caddy](https://caddyserver.com/docs/) is designed, not built. [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) is retired upstream, so it gets no integration:
   `inkwallctl migrate ingress-nginx` moves its ModSecurity settings to a supported proxy.
 - Targets: **`Ingress`** and Traefik **`IngressRoute`** (match rules that join `Host`, `Path` and
-  `PathPrefix` with `&&`) through Traefik; [Gateway API](https://gateway-api.sigs.k8s.io/) **[`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/)** through Envoy Gateway or
+  `PathPrefix` with `&&`) through Traefik; [Gateway API](https://gateway-api.sigs.k8s.io/) **[`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/)** through Envoy Gateway, Istio or
   [Traefik's Gateway API provider](https://doc.traefik.io/traefik/routing/providers/kubernetes-gateway/) (`Exact` and `PathPrefix` paths, methods; no header or
   query matches). Other Gateway API controllers' HTTPRoutes are resolved into the bundle, but not
   wired.

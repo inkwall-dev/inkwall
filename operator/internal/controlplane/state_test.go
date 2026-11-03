@@ -127,12 +127,13 @@ func TestClusterStateAfterWelcome(t *testing.T) {
 	}
 
 	in := st.GetIntegrations()
-	if len(in) != 2 || in[0].GetName() != "traefik" || in[0].GetController() != "traefik.io/ingress-controller" ||
+	if len(in) != 3 || in[0].GetName() != "traefik" || in[0].GetController() != "traefik.io/ingress-controller" ||
 		in[0].GetPods() != 2 || in[0].GetPodsWithEngine() != 1 ||
 		in[0].GetGatewayController() != "traefik.io/gateway-controller" || in[0].GetDisabled() != "" ||
 		in[1].GetName() != "envoy-gateway" || in[1].GetGatewayController() != "gateway.envoyproxy.io/gatewayclass-controller" ||
-		in[1].GetPods() != 1 || in[1].GetPodsWithEngine() != 1 || in[1].GetDisabled() != "" {
-		t.Errorf("integrations = %v, want traefik with 2 running pods, 1 with the engine, and envoy-gateway with 1, with the engine", in)
+		in[1].GetPods() != 1 || in[1].GetPodsWithEngine() != 1 || in[1].GetDisabled() != "" ||
+		in[2].GetName() != "istio" || in[2].GetGatewayController() != "istio.io/gateway-controller" || in[2].GetPods() != 0 {
+		t.Errorf("integrations = %v, want traefik with 2 running pods, 1 with the engine, envoy-gateway with 1, with the engine, and istio with none", in)
 	}
 	en := st.GetEngines()
 	if len(en) != 1 || en[0].GetEngineId() != "engine-a" || en[0].GetPodName() != "traefik-a" || en[0].GetAppliedBundleVersion() != 7 {
@@ -150,8 +151,9 @@ func TestClusterStateMarksDisabledIntegrations(t *testing.T) {
 	e.conn.Disabled = map[string]string{"envoy-gateway": why}
 	e.run(t)
 	in := e.waitStates(t, 1)[0].GetIntegrations()
-	if len(in) != 2 || in[0].GetName() != "traefik" || in[0].GetDisabled() != "" ||
-		in[1].GetName() != "envoy-gateway" || in[1].GetDisabled() != why || in[1].GetPods() != 1 {
+	if len(in) != 3 || in[0].GetName() != "traefik" || in[0].GetDisabled() != "" ||
+		in[1].GetName() != "envoy-gateway" || in[1].GetDisabled() != why || in[1].GetPods() != 1 ||
+		in[2].GetName() != "istio" || in[2].GetDisabled() != "" {
 		t.Errorf("integrations = %v, want traefik enabled and envoy-gateway disabled (%s)", in, why)
 	}
 }
@@ -212,8 +214,8 @@ func TestClusterStateWithoutBundle(t *testing.T) {
 	e.cp.AddToken("tok-1")
 	e.run(t)
 	st := e.waitStates(t, 1)[0]
-	if st.GetBundleVersion() != 0 || len(st.GetEngines()) != 0 || len(st.GetIntegrations()) != 2 ||
-		st.GetIntegrations()[0].GetPods() != 0 || st.GetIntegrations()[1].GetPods() != 0 {
+	if st.GetBundleVersion() != 0 || len(st.GetEngines()) != 0 || len(st.GetIntegrations()) != 3 ||
+		st.GetIntegrations()[0].GetPods() != 0 || st.GetIntegrations()[1].GetPods() != 0 || st.GetIntegrations()[2].GetPods() != 0 {
 		t.Errorf("state = %v, want no bundle, engines or pods", st)
 	}
 }

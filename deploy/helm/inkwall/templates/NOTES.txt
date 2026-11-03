@@ -22,11 +22,16 @@ HTTPRoute a WAFPolicy targets to the engine:
 - Envoy Gateway (HTTPRoutes): the engine is added to the Envoy pods of the
   route's Gateway, which Envoy Gateway rolls itself.
 
+- Istio (HTTPRoutes of its Gateways): the engine is added to the pods of
+  the route's Gateway through the ConfigMap its parametersRef names, and
+  Istio rolls them itself.
+
 Only proxy pods in these namespaces get the engine (injection.proxyNamespaces):
 
   {{ include "inkwall.proxyNamespaces" . }}
 
-If Traefik or Envoy Gateway runs in another namespace, add it to
+If Traefik, Envoy Gateway or an Istio Gateway runs in another namespace
+(Istio runs a Gateway's pods in the Gateway's namespace), add it to
 injection.proxyNamespaces: its routes are not wired until then.
 
 A policy is Ready once accepted, wired and enforced by every engine:

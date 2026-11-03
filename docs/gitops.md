@@ -50,6 +50,9 @@ its own entries when the route is no longer protected. It writes with
 | `EnvoyProxy` | annotations `waf.inkwall.dev/wired`, `waf.inkwall.dev/hash` | `sidecar`, and a hash of the operator's entries |
 | `Gateway` (Envoy Gateway's) that names no `EnvoyProxy` | `spec.infrastructure.parametersRef` | The operator's `EnvoyProxy`, `inkwall-waf-<gateway>` |
 | `Gateway` | annotation `waf.inkwall.dev/wired` | `inkwall-waf-<gateway>` |
+| `ConfigMap` that an Istio Gateway with a protected route names | `data.deployment` | Your overlay with the engine, `inkwall-engine`, first among `spec.template.spec.initContainers`, its volumes after yours, and the `inkwall-socket` mount in the `istio-proxy` container |
+| That `ConfigMap` | label `waf.inkwall.dev/sidecar`, annotation `waf.inkwall.dev/original-deployment` | `"true"`, and your `deployment` overlay as you wrote it, to put back |
+| `Gateway` (Istio's) that names no ConfigMap | `spec.infrastructure.parametersRef`, annotation `waf.inkwall.dev/configmap` | The operator's ConfigMap, `inkwall-waf-<gateway>` |
 | `WAFPolicy` | `metadata.finalizers` | `waf.inkwall.dev/unwire` ([finalizer](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/)): the operator unwires the policy's routes before it can be deleted |
 | `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet`, `InkwallConfig` | `status` | Conditions, bundle version |
 
@@ -57,7 +60,8 @@ Objects the operator creates and owns are not in your Git repository, and [GitOp
 track them: the Middleware `inkwall-waf` in each namespace with a protected route; for Envoy
 Gateway, the `Backend` `inkwall-engine` in each namespace with a protected HTTPRoute, an
 `EnvoyExtensionPolicy` `inkwall-waf-<route>` per protected HTTPRoute, and a `ClientTrafficPolicy`
-and an `EnvoyProxy` `inkwall-waf-<gateway>` per Gateway that needs one; the [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/)
+and an `EnvoyProxy` `inkwall-waf-<gateway>` per Gateway that needs one; for Istio, an `EnvoyFilter`
+and a ConfigMap `inkwall-waf-<gateway>` per Gateway that needs them; the [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/)
 `inkwall-trust` in each proxy namespace; and the [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/) and ConfigMaps in `inkwall-system`.
 They carry the [label](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/) `app.kubernetes.io/managed-by: inkwall-operator`.
 
@@ -66,7 +70,8 @@ The engine is injected into Traefik's pods when they are created, by a mutating
 Traefik's [`Deployment`](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) or [`DaemonSet`](https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/) isn't changed, so it doesn't drift. Envoy Gateway's
 Envoy pods get the engine through the `EnvoyProxy` above: Envoy Gateway rolls its Envoy
 `Deployment` when the operator adds or removes it, which it does when a Gateway gets its first
-protected route or loses its last.
+protected route or loses its last. Istio's Gateway pods get it through the Gateway's ConfigMap,
+and Istio rolls them the same way.
 
 The operator never writes your `InkwallConfig`'s spec or annotations. Bump
 `waf.inkwall.dev/rotate-signing-key` in Git to rotate the signing key
@@ -85,6 +90,8 @@ when your manifest sets the same field:
 | A protected `HTTPRoute` of a Traefik Gateway | `spec.rules`. The Gateway API's CRD declares `rules` and `filters` `atomic` lists, so the whole list is one value too |
 | An `EnvoyProxy` that doesn't set those three lists, or a `Gateway` | None |
 | An `EnvoyProxy` that sets `initContainers`, `pod.volumes` or `container.volumeMounts` | Those lists. Undoing it takes the engine out of the Envoy pods (a rollout): the operator unwires the Gateway's routes, which go uninspected until it has added the engine back and the pods have it |
+| An Istio Gateway's `ConfigMap` without `data.deployment` | None |
+| An Istio Gateway's `ConfigMap` with `data.deployment` | That key, a single string. Undoing it takes the engine out of the Gateway's pods, as for an `EnvoyProxy` |
 | A `WAFPolicy` without `metadata.finalizers` | None |
 | `status` | None: both tools ignore it |
 

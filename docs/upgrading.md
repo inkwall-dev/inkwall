@@ -36,10 +36,14 @@ What's new in 0.4.0:
   403 before the upgrade (`Block`), or logged with reason `websocket` (`Detect`). The engine's
   `--websocket-origins`, `--websocket-allow-missing-origin` and `--websocket-required-headers`
   flags do the same without the operator. See [WebSocket](websocket.md).
+- **Istio.** The operator protects the HTTPRoutes of Istio's Gateways (Istio 1.28 or later): it
+  adds the engine to a Gateway's pods through the ConfigMap the Gateway names, and an
+  `EnvoyFilter` sends the protected routes to it. See [Istio](istio.md). Nothing changes for
+  Istio Gateways until a policy targets one of their routes.
 - **WebSocket messages, through the standalone proxy.** `inkwall-engine proxy --websocket-messages
   inspect` (or `text-only`) inspects each text message a client sends, up to `--max-body-bytes`; in
   `block` mode a denied one closes the WebSocket with 1008 before the application gets it. Through
-  Envoy Gateway, raw Envoy and Traefik, only the handshake is inspected, as in 0.3.x: see
+  Envoy Gateway, Istio, raw Envoy and Traefik, only the handshake is inspected, as in 0.3.x: see
   [WebSocket](websocket.md#through-each-proxy).
 - **gRPC messages.** `body.grpcMessages: Inspect` on a `WAFPolicy` (`--grpc-messages inspect`
   without the operator) has the rules read the text in gRPC calls' messages. It is off by
@@ -51,13 +55,21 @@ What's new in 0.4.0:
   [responses](raw-envoy.md#responses) for raw Envoy. It is off unless you set it. Security events get
   a `phase` field (`request` or `response`), and the engine two metrics,
   `inkwall_responses_total` and `inkwall_response_check_duration_seconds`. Not yet in `WAFPolicy`
-  or through Envoy Gateway; Traefik's ForwardAuth can't see responses.
+  or through Envoy Gateway and Istio; Traefik's ForwardAuth can't see responses.
 - **HAProxy.** `inkwall-engine spoe` is an agent of [HAProxy](https://docs.haproxy.org/)'s [SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt) (HAProxy 3.1
   or later), on `127.0.0.1:9004` or a Unix socket. You configure HAProxy yourself: see
   [protecting HAProxy](haproxy.md). Nothing changes in an existing installation.
 
 What changes by itself in 0.4.0:
 
+- **A new ClusterRole, `inkwall-operator-istio`**, granted by default (`rbac.integrations.istio:
+  true`, also with `--reuse-values`): it writes `EnvoyFilter` objects and ConfigMaps, and patches
+  Gateways. Set it to `auto` to grant it only when the cluster serves Istio's API, or `false`
+  never to; without it the operator disables the Istio integration ([integration
+  permissions](../deploy/helm/inkwall/README.md#integration-permissions)).
+- **Two more default proxy namespaces, `istio-ingress` and `istio-system`**, where Istio's docs put
+  Gateways. If you set `injection.proxyNamespaces`, the value is kept: add your Istio Gateways'
+  namespaces to it. Changing the value restarts the operator.
 - **WebSockets through Envoy Gateway.** The engine decides a handshake on its headers. In 0.3.x, a
   policy in `Block` mode with body inspection held every handshake until one of Envoy's timeouts,
   and one in `Detect` mode logged every handshake as an oversized body.
