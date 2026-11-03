@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -185,11 +186,20 @@ type routeSettings struct {
 	// detect: every policy is in detect mode and fails open, so the engine
 	// never rejects a request: Envoy needn't wait for it.
 	detect bool
+	// responses: a policy inspects responses; maxResponse is the largest
+	// responses.maxBytes of those policies.
+	responses   bool
+	maxResponse int64
 }
 
-// buffered reports whether Envoy holds the route's request body for the
-// engine.
-func (s routeSettings) buffered() bool { return s.body && !s.detect }
+// buffered reports whether Envoy holds the route's request body, or its
+// responses' bodies, for the engine: then the Gateway's buffer must hold
+// the largest the policies inspect (maxBuffered).
+func (s routeSettings) buffered() bool { return (s.body || s.responses) && !s.detect }
+
+// maxBuffered is the largest body Envoy holds for the engine, request or
+// response.
+func (s routeSettings) maxBuffered() int64 { return max(s.maxBody, s.maxResponse) }
 
 // envoyState is what Wire read.
 type envoyState struct {
@@ -213,7 +223,7 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 	if err != nil {
 		return nil, err
 	}
-	res := &Result{Proxy: "Envoy Gateway", Targets: map[Target]TargetState{}, Rolling: true}
+	res := &Result{Proxy: "Envoy Gateway", Targets: map[Target]TargetState{}, Rolling: true, Responses: true}
 
 	// The protected routes Envoy Gateway serves, and the others' reasons.
 	var policies wafv1alpha1.WAFPolicyList
@@ -371,9 +381,9 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 		for k := range wanted {
 			r := routes[k]
 			for _, gw := range r.gateways {
-				if u, ok := theirs[gw]; ok && r.buffered() && u.bytes < r.maxBody && failed[k] == "" {
+				if u, ok := theirs[gw]; ok && r.buffered() && u.bytes < r.maxBuffered() && failed[k] == "" {
 					failed[k] = fmt.Sprintf("the ClientTrafficPolicy %s of Gateway %s buffers %d bytes of a body, less than the %d a policy on HTTPRoute %s inspects: raise its connection.bufferLimit",
-						u.name, gw.Name, u.bytes, r.maxBody, k.Name)
+						u.name, gw.Name, u.bytes, r.maxBuffered(), k.Name)
 				}
 			}
 		}
@@ -588,6 +598,10 @@ func settingsOf(policies []wafv1alpha1.WAFPolicy, route types.NamespacedName) ro
 			}
 			s.maxBody = max(s.maxBody, limit)
 		}
+		if r := p.Spec.Responses; r != nil && r.Inspect {
+			s.responses = true
+			s.maxResponse = max(s.maxResponse, cmp.Or(ptr.Deref(r.MaxBytes, 0), policy.DefaultResponseBytes))
+		}
 		if p.Spec.Timeout != nil {
 			s.timeout = max(s.timeout, p.Spec.Timeout.Duration)
 		}
@@ -650,7 +664,10 @@ func backend(namespace string) *unstructured.Unstructured {
 // extensionPolicy is the operator's EnvoyExtensionPolicy for a route
 // (0006 §2): the request headers, with the client's protocol, and the body
 // when a policy inspects it, held by Envoy (BufferedPartial: up to its
-// buffer limit) for the engine's verdict; the response is not sent. Envoy
+// buffer limit) for the engine's verdict. The response's headers and body
+// only when a policy inspects responses (0006 §2), held likewise, and the
+// engine may tell Envoy not to send a body it doesn't read
+// (allowModeOverride). Envoy
 // waits for the engine a little longer than its deadline, as the engine
 // applies the policy's failure mode; failOpen covers an engine that can't
 // be reached, as the policies would. In detect mode Envoy doesn't wait
@@ -673,9 +690,18 @@ func extensionPolicy(r *envoyRoute) *unstructured.Unstructured {
 	case r.body:
 		request["body"] = "BufferedPartial"
 	}
+	mode := map[string]any{"request": request}
+	if r.responses {
+		body := "BufferedPartial"
+		if r.detect {
+			body = "Streamed"
+		}
+		mode["response"] = map[string]any{"body": body}
+		mode["allowModeOverride"] = true
+	}
 	extProc := map[string]any{
 		"backendRefs":    []any{map[string]any{"group": BackendGVK.Group, "kind": BackendGVK.Kind, "name": EnvoyBackend}},
-		"processingMode": map[string]any{"request": request},
+		"processingMode": mode,
 		// A Gateway API duration: whole units, no "1.5s".
 		"messageTimeout": fmt.Sprintf("%dms", (r.timeout + messageMargin).Milliseconds()),
 		"failOpen":       r.failOpen,

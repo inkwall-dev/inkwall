@@ -555,7 +555,9 @@ func envoyFilter(gw *gatewayv1.Gateway, routes []*istioRoute) *unstructured.Unst
 				}},
 			})
 		}
-		buffered = buffered || r.buffered()
+		// The request body only: Istio's filter sends no response phase
+		// yet (ResponsesNotInspected), so no response is held.
+		buffered = buffered || r.body && !r.detect
 	}
 	if buffered {
 		patches = append(patches, map[string]any{

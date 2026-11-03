@@ -284,8 +284,9 @@ allow_mode_override: true
   in `inkwall_responses_total` and timed in `inkwall_response_check_duration_seconds`.
 
 [ext_proc](design/0006-adapter-protocols.md#response-inspection-v040) has the details. With the
-policy [from the operator](#the-policy-from-the-operator), response inspection isn't available yet:
-the flags are refused with `--operator`.
+policy [from the operator](#the-policy-from-the-operator), the policy's `responses` field
+(`inspect`, `maxBytes`, `onOversize`) takes the place of the flags, which are refused with
+`--operator`; Envoy must still send the responses, as above.
 
 ### Routes left uninspected
 

@@ -120,6 +120,42 @@ func TestPolicyValidation(t *testing.T) {
 	wantInvalid(t, err, "spec.webSocket.requiredHeaders[0]", "not a header name")
 }
 
+// A policy that inspects responses gets a warning for its Ingress and
+// IngressRoute targets: Traefik serves them, and can't send responses to the
+// engine. It is accepted: its requests are inspected, and its status says
+// the responses are not.
+func TestPolicyResponsesWarning(t *testing.T) {
+	ctx := context.Background()
+	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy}
+	p := &wafv1alpha1.WAFPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "shop"},
+		Spec: wafv1alpha1.WAFPolicySpec{
+			TargetRefs: []wafv1alpha1.TargetRef{
+				{Kind: "Ingress", Name: "web"},
+				{Group: "gateway.networking.k8s.io", Kind: "HTTPRoute", Name: "api"},
+				{Group: "traefik.io", Kind: "IngressRoute", Name: "admin"},
+			},
+			Responses: &wafv1alpha1.ResponsesSpec{Inspect: true},
+		},
+	}
+	warnings, err := v.ValidateCreate(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "spec.responses: Ingress web and IngressRoute admin are served by Traefik") {
+		t.Errorf("warnings %q", warnings)
+	}
+	p.Spec.TargetRefs = p.Spec.TargetRefs[1:2]
+	if warnings, _ := v.ValidateCreate(ctx, p); len(warnings) != 0 {
+		t.Errorf("HTTPRoute only: warnings %q", warnings)
+	}
+	p.Spec.TargetRefs = []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}}
+	p.Spec.Responses.Inspect = false
+	if warnings, _ := v.ValidateCreate(ctx, p); len(warnings) != 0 {
+		t.Errorf("responses off: warnings %q", warnings)
+	}
+}
+
 func TestConfigValidation(t *testing.T) {
 	ctx := context.Background()
 	v := configValidator{}

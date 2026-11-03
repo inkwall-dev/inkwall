@@ -127,6 +127,10 @@ func TestWAFPolicyValidation(t *testing.T) {
     allowedOrigins: ["https://app.example.com", "http://localhost:3000", "https://*.example.net"]
     allowMissingOrigin: true
     requiredHeaders: [Authorization, Sec-WebSocket-Protocol]
+  responses:
+    inspect: true
+    maxBytes: 524288
+    onOversize: Allow
 `)},
 
 		{name: "no targets", doc: policy("  targetRefs: []\n"), wantErr: "should have at least 1 items"},
@@ -176,6 +180,14 @@ func TestWAFPolicyValidation(t *testing.T) {
 		{name: "websocket repeated origin", doc: policy(target + "  webSocket: {allowedOrigins: [\"https://a.example\", \"https://a.example\"]}\n"), wantErr: "Duplicate value"},
 		{name: "websocket header with a colon", doc: policy(target + "  webSocket: {requiredHeaders: [\"X-Api:\"]}\n"), wantErr: "spec.webSocket.requiredHeaders[0]"},
 		{name: "websocket missing origin without origins", doc: policy(target + "  webSocket: {allowMissingOrigin: true}\n"), wantErr: "allowMissingOrigin needs allowedOrigins"},
+		{name: "responses inspected", doc: policy(target + "  responses: {inspect: true}\n")},
+		{name: "responses not inspected", doc: policy(target + "  responses: {inspect: false}\n")},
+		{name: "response body over 10 MiB", doc: policy(target + "  responses: {inspect: true, maxBytes: 10485761}\n"), wantErr: "should be less than or equal to 10485760"},
+		{name: "zero response body", doc: policy(target + "  responses: {inspect: true, maxBytes: 0}\n"), wantErr: "should be greater than or equal to 1"},
+		{name: "unknown response oversize action", doc: policy(target + "  responses: {inspect: true, onOversize: Truncate}\n"), wantErr: `Unsupported value: "Truncate"`},
+		// Limits without inspection would read as if responses were inspected.
+		{name: "response limits without inspect", doc: policy(target + "  responses: {maxBytes: 1024}\n"), wantErr: "maxBytes and onOversize need inspect: true"},
+		{name: "response oversize without inspect", doc: policy(target + "  responses: {inspect: false, onOversize: Deny}\n"), wantErr: "maxBytes and onOversize need inspect: true"},
 	})
 }
 

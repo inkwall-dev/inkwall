@@ -133,6 +133,13 @@ $ curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: shop.example.com' "http://$
 403
 ```
 
+**Responses.** Add `responses: {inspect: true}` to a policy to inspect what the app answers too,
+for data leaks (SQL errors, stack traces, directory listings: the Core Rule Set's `RESPONSE-95x`
+rules). In `Block` mode a response that leaks is replaced with 403. Only through Envoy Gateway:
+Traefik's ForwardAuth never sees responses, so on a Traefik route such a policy is
+`Programmed=False` (`ResponsesNotInspected`) while its requests are still inspected
+([design](docs/design/0006-adapter-protocols.md#response-inspection-v040)).
+
 Start in `Detect` mode, tune [false positives](https://coreruleset.org/docs/concepts/false_positives_tuning/) on the policy (`exclusions`, `skip` paths,
 [`ruleSets[].paranoiaLevel`](https://coreruleset.org/docs/concepts/paranoia_levels/)), then switch to `Block`. Extra rules come from `WAFRuleSet` and
 `ClusterWAFRuleSet` objects: built-in, [SecLang](https://coraza.io/docs/seclang/) or a [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/).
@@ -194,6 +201,10 @@ an Envoy you configure yourself, in or out of Kubernetes, see [protecting raw En
   [connecting to a control plane](docs/control-plane.md).
 - A cluster's policies must fit in a bundle of 7,200 KiB compressed. Past 900 KiB, the bundle is
   split over several [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/).
+- Responses are inspected only through Envoy Gateway and raw Envoy (`responses`), never through
+  Traefik's ForwardAuth; a body over `responses.maxBytes` (64 KiB by default) has its prefix
+  inspected, and streamed responses (Server-Sent Events, gRPC) pass with their headers inspected
+  only.
 - gRPC: a call's path and metadata (headers) are inspected; the text in its protobuf messages
   only with `body.grpcMessages: Inspect`, read without a schema. gRPC with another codec is
   inspected as other requests, and denied by the Core Rule Set's content type rule. Client
