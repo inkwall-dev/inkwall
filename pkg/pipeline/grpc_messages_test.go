@@ -25,7 +25,10 @@ func messagesPipeline(t *testing.T, mode pipeline.Mode, on bool) *pipeline.Pipel
 	if err != nil {
 		t.Fatal(err)
 	}
-	return pipeline.New(eval, pipeline.Config{Mode: mode, Timeout: 10 * time.Second, GRPCMessages: on})
+	// The deadline isn't under test: the race detector on a loaded machine
+	// takes over 10 s on the largest descriptor of the false-positive
+	// corpus (a 503, reason timeout).
+	return pipeline.New(eval, pipeline.Config{Mode: mode, Timeout: 2 * time.Minute, GRPCMessages: on})
 }
 
 // gzipFrame is msg compressed with gzip, framed with the compressed flag.

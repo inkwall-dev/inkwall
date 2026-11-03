@@ -5,8 +5,11 @@ package extproc
 
 import (
 	"bytes"
+	"encoding/base64"
 	"testing"
 	"time"
+
+	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
@@ -52,5 +55,44 @@ func TestGRPCMessages(t *testing.T) {
 				t.Fatalf("denial %v (%v), want %d, grpc-status %d; events %s", ir, set, tt.want, tt.code, logs.String())
 			}
 		})
+	}
+}
+
+// TestGRPCWebText: a gRPC-Web text call (base64) through Envoy passes
+// when clean, and an attack in its message is denied with a gRPC-Web
+// answer. Before v0.4.0 every one was denied (920420).
+func TestGRPCWebText(t *testing.T) {
+	eval, err := coraza.New(coraza.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 10 * time.Second, GRPCMessages: true})
+	webText := func() *extprocv3.ProcessingRequest {
+		m := grpcHeaders("/helloworld.Greeter/SayHello")
+		for _, h := range m.GetRequestHeaders().GetHeaders().GetHeaders() {
+			if h.GetKey() == "content-type" {
+				h.RawValue = []byte("application/grpc-web-text")
+			}
+		}
+		return m
+	}
+	for _, tt := range []struct {
+		name, message string
+		denied        bool
+	}{
+		{"clean", "world", false},
+		{"sqli in the message", "1' OR '1'='1' -- ", true},
+	} {
+		var logs bytes.Buffer
+		e := newEnvoy(t, p, 1<<10, &logs)
+		resps := e.exchange(t, webText(), body(base64.StdEncoding.EncodeToString([]byte(grpcMessages(tt.message))), true))
+		if !tt.denied {
+			continued(t, resps[len(resps)-1])
+			continue
+		}
+		ir, set := immediate(t, resps[len(resps)-1])
+		if ir.GetStatus().GetCode() != 200 || set["grpc-status"] != "7" || set["content-type"] != "application/grpc-web-text" {
+			t.Errorf("%s: denial %v (%v), want HTTP 200, grpc-status 7", tt.name, ir, set)
+		}
 	}
 }

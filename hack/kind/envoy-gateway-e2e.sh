@@ -445,6 +445,28 @@ grpc_web_denied() {
   [[ $(grpc_web_status "$CUSTOM_PORT") == "200 7" && $(grpc_web_status "$PLAIN_PORT") == "200 7" &&
     $(grpc_web_status "$TRAEFIK_PORT") == "403 7" ]]
 }
+# grpc_web_text_status PORT FILE: the HTTP status and grpc-status of a
+# gRPC-Web text call (base64) with FILE as its body, as "HTTP GRPC".
+grpc_web_text_status() {
+  curl -s -o /dev/null -D - -H "Host: $HOST" -H 'Content-Type: application/grpc-web-text' -H 'X-Grpc-Web: 1' \
+    --data-binary "@$2" "http://127.0.0.1:$1/grpc.health.v1.Health/Check" |
+    tr -d '\r' | awk 'NR == 1 { code = $2 } tolower($1) == "grpc-status:" { grpc = $2 } END { print code, grpc }' || true
+}
+# An attack in a gRPC-Web text message is denied (#275), as a gRPC-Web
+# one is; a clean call isn't, by the engine: the app's own answer (agnhost
+# speaks no gRPC-Web) has no grpc-status 7.
+grpc_web_text_denied() {
+  [[ $(grpc_web_text_status "$CUSTOM_PORT" "$work/grpc-text-attack") == "200 7" &&
+    $(grpc_web_text_status "$PLAIN_PORT" "$work/grpc-text-attack") == "200 7" &&
+    $(grpc_web_text_status "$TRAEFIK_PORT" "$work/grpc-text-attack") == "403 7" ]]
+}
+grpc_web_text_not_denied() {
+  local port out
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT" "$TRAEFIK_PORT"; do
+    out=$(grpc_web_text_status "$port" "$work/grpc-text-clean")
+    [[ $out != "403"* && $out != *" 7" ]] || return 1
+  done
+}
 # grpc_message_is CODE TEXT: a gRPC call with TEXT in its message (the
 # HealthCheckRequest's service) ends with CODE, through both Gateways and
 # Traefik; grpc_message_isnt: with any other code.
@@ -483,6 +505,9 @@ go build -o "$work/h2trailers" ./hack/h2trailers
 go build -o "$work/grpchealth" ./hack/grpchealth
 go build -o "$work/wsecho" ./hack/wsecho
 printf '\0\0\0\0\0' >"$work/grpc-empty" # one empty gRPC message
+base64 -w0 "$work/grpc-empty" >"$work/grpc-text-clean"
+# HealthCheckRequest{service: "1' OR '1'='1' -- "}, framed, in base64.
+printf "\0\0\0\0\x13\x0a\x111' OR '1'='1' -- " | base64 -w0 >"$work/grpc-text-attack"
 for gw in custom plain; do
   eventually "Envoy Gateway runs Gateway $gw" envoy_pods "$gw"
 done
@@ -560,6 +585,8 @@ policy Block Inspect
 eventually "with grpcMessages: Inspect, an attack in a gRPC message is denied" \
   grpc_message_is PermissionDenied "$GRPC_MESSAGE_ATTACK"
 check "and a clean gRPC call passes" grpc_are OK
+check "an attack in a gRPC-Web text (base64) message is denied" grpc_web_text_denied
+check "and a clean gRPC-Web text call isn't" grpc_web_text_not_denied
 
 echo "== detect mode"
 policy Detect
