@@ -710,21 +710,23 @@ above the body limit. Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/
     the answer itself without a new engine-to-operator message. The operator must be able to reach
     the controller pods' HTTP port: a NetworkPolicy that blocks it leaves the routes
     `Unverified`, and the docs say so.
-  - **The request:** `GET /.well-known/inkwall-probe/<nonce>`, no body, with the route's host,
-    a random nonce per probe and the header `X-Inkwall-Probe: <MAC>`, an HMAC-SHA256 of the
-    nonce and host under a probe key. The key is a random 32 bytes the operator keeps in a Secret
-    of its own and sends to the engines in the bundle (`probe_key`, part of `content_hash`: a new key is a new
-    bundle).
-  - **The answer:** the SPOE adapter recognises the path and a valid MAC before inspection, and
-    answers `action=deny` with the variable `probe` set to an HMAC of the nonce under the key.
-    The route's snippet answers that, first among its rules, with
-    `http-request return status 299` and the header `X-Inkwall-Probe` carrying it. The probe never
-    reaches the app when the filter is active. Without a valid MAC, the path is a request like any
-    other.
+  - **The request:** a `GET` without a body to the route's host, with the header
+    `X-Inkwall-Probe: <nonce>.<MAC>`: a random nonce per probe, and an HMAC-SHA256 of the nonce,
+    host and URI under a probe key. The path is the reserved
+    `<prefix>/.well-known/inkwall-probe/<nonce>` under each `Prefix` (and `ImplementationSpecific`)
+    path of the Ingress, so the probe reaches no real page when the filter isn't there; an `Exact`
+    path is probed as itself, with the query `?inkwall-probe=<nonce>`, as nothing else reaches that
+    backend. The key is derived from the bundle signing key (an HMAC of a fixed label under it), so
+    it needs no Secret of its own, and reaches the engines in the bundle (`probe_key`, part of
+    `content_hash`: a new key is a new bundle).
+  - **The answer:** the SPOE adapter checks the MAC before inspection, and answers
+    `action=deny` (403) with the variable `probe` set to another HMAC of them under the key. The
+    route's snippet answers that, first among its rules, with `http-request return status 299` and
+    the header `X-Inkwall-Probe` carrying it. The probe never reaches the app when the filter is
+    active. A wrong MAC is inspected as any request.
   - **Proof:** status 299 with the expected MAC proves that this pod runs the snippet, the
     filter and the engine. Anything else is evidence that the route is not protected on that
-    pod, and the status names the pod and what came back (e.g. a 404 from the app). The probe
-    reaches the app only then, on an unused path.
+    pod, and the status names the pod and what came back (e.g. a 404 from the app).
   - **Rate:** once per route and pod when the route, the policy or the pod changes, and every
     5 minutes after; at most a few probes at a time. Only `GET` without a body. The probe path is
     in the docs, so it can be recognised in access logs.
