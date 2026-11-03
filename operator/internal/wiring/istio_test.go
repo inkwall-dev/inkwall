@@ -14,12 +14,14 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/yaml"
 
+	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 )
 
@@ -329,5 +331,35 @@ func TestIstioUnwire(t *testing.T) {
 	}
 	if err := c.Get(ctx, client.ObjectKeyFromObject(eg), &gw); err != nil || gw.Annotations[sidecarMark] == "" || gw.Spec.Infrastructure.ParametersRef == nil {
 		t.Errorf("Envoy Gateway's Gateway: %v %+v %v", err, gw.Spec.Infrastructure, gw.Annotations)
+	}
+}
+
+// Istio's filter sends no response phase yet: a route whose policy asks
+// for responses keeps them off, and gets no buffer limit for them. Its
+// Result doesn't claim responses, so such a policy is not Programmed
+// (ResponsesNotInspected).
+func TestIstioResponsesNotWired(t *testing.T) {
+	gw := &gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Namespace: "edge", Name: "gw", UID: "uid-gw"}}
+	r := &istioRoute{route: istioTestRoute("shop", "app", "web", ""), sections: []string{""},
+		routeSettings: routeSettings{timeout: time.Second, responses: true, maxResponse: 64 << 10}}
+	spec := jsonOf(envoyFilter(gw, []*istioRoute{r}).Object["spec"])
+	if !strings.Contains(spec, `"response_header_mode":"SKIP"`) || strings.Contains(spec, "response_body_mode") ||
+		strings.Contains(spec, "per_connection_buffer_limit_bytes") {
+		t.Errorf("responses wired, or buffered, through Istio: %s", spec)
+	}
+
+	tg := Target{Kind: httpRouteKind, Key: types.NamespacedName{Namespace: "shop", Name: "app"}}
+	withEngine := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "edge", Name: "gw-1"},
+		Spec: corev1.PodSpec{InitContainers: []corev1.Container{{Name: injection.ContainerName}}}}
+	rep := &report{kinds: []schema.GroupKind{httpRouteKind}, results: []*Result{
+		{Proxy: "Istio", Rolling: true, Pods: []corev1.Pod{withEngine}, Targets: map[Target]TargetState{tg: {Wired: true}}},
+	}}
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
+		TargetRefs: []wafv1alpha1.TargetRef{{Group: gatewayv1.GroupName, Kind: "HTTPRoute", Name: "app"}},
+		Responses:  &wafv1alpha1.ResponsesSpec{Inspect: true},
+	}}
+	if st, reason, msg := programmed(p, rep); st != metav1.ConditionFalse || reason != ReasonResponsesNotInspected ||
+		!strings.Contains(msg, "Istio can't send responses to the engine: HTTPRoute app's requests are inspected") {
+		t.Errorf("Istio with responses: %s %s %q", st, reason, msg)
 	}
 }
