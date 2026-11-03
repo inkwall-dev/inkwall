@@ -346,7 +346,7 @@ upgrade() {
     --set engine.image.repository="${ENGINE_IMAGE%:*}" \
     --set engine.image.tag="${ENGINE_IMAGE##*:}" \
     --set engine.image.pullPolicy=Never \
-    --set rbac.integrations.traefik=auto --set rbac.integrations.envoyGateway=auto \
+    --set rbac.integrations.traefik=auto --set rbac.integrations.envoyGateway=auto --set rbac.integrations.istio=auto \
     --wait --timeout 5m >/dev/null
 }
 
@@ -393,10 +393,11 @@ crds_new() {
 }
 check "the CRDs are the new chart's ($chart_label)" crds_new
 # rbac.integrations auto: the cluster serves Traefik's API group, not Envoy
-# Gateway's.
+# Gateway's or Istio's.
 integration_roles() {
   "${KUBECTL[@]}" get clusterrole inkwall-operator-traefik &&
-    ! "${KUBECTL[@]}" get clusterrole inkwall-operator-envoy-gateway
+    ! "${KUBECTL[@]}" get clusterrole inkwall-operator-envoy-gateway &&
+    ! "${KUBECTL[@]}" get clusterrole inkwall-operator-istio
 }
 check "only Traefik's integration role is granted (auto)" integration_roles
 same_wiring() { [[ $(wiring) == "$wiring_before" ]]; }

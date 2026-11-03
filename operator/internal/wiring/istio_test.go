@@ -106,7 +106,7 @@ func TestWithIstioSidecar(t *testing.T) {
 		if changed, err := withIstioSidecar(cm, injection.Sidecar{}, false); err != nil || !changed {
 			t.Fatalf("%s: remove: %v %v", tc.name, changed, err)
 		}
-		if a, b := jsonOf(cm.Data), jsonOf(orig.Data); a != b && !(len(cm.Data) == 0 && len(orig.Data) == 0) {
+		if a, b := jsonOf(cm.Data), jsonOf(orig.Data); a != b && (len(cm.Data) != 0 || len(orig.Data) != 0) {
 			t.Errorf("%s: removed:\n%s\nwant\n%s", tc.name, a, b)
 		}
 		if len(cm.Labels) > 0 || len(cm.Annotations) > 0 {
@@ -192,6 +192,13 @@ func TestEnvoyRoutes(t *testing.T) {
 	if why := st.sharedRuleName(whole, gw); why != "" {
 		t.Errorf("no shared name: %q", why)
 	}
+	// A protected rule named as Istio names another route's unnamed rule.
+	st.routes[types.NamespacedName{Namespace: "shop", Name: "other"}] = istioTestRoute("shop", "other", "")
+	named := &istioRoute{route: istioTestRoute("shop", "app", "shop.other.0"), sections: []string{""}}
+	st.routes[types.NamespacedName{Namespace: "shop", Name: "app"}] = named.route
+	if why := st.sharedRuleName(named, gw); !strings.Contains(why, "rule shop.other.0 of HTTPRoute app") {
+		t.Errorf("a rule named as another's unnamed one: %q", why)
+	}
 }
 
 // The EnvoyFilter: the engine's cluster, a disabled filter per route,
@@ -224,6 +231,8 @@ func TestEnvoyFilter(t *testing.T) {
 		`"route":{"name":"web"}`, `"route":{"name":"shop.app.1"}`, `"route":{"name":"read"}`,
 		`"name":"inkwall.ext_proc.blog.posts"`, `"request_body_mode":"STREAMED"`, `"observability_mode":true`, `"message_timeout":"0.750s"`,
 		`"response_header_mode":"SKIP"`, `"request_attributes":["request.protocol"]`,
+		// 503, as the engine answers a request it can't inspect.
+		`"status_on_error":{"code":"ServiceUnavailable"}`,
 		`"per_connection_buffer_limit_bytes":10485760`, `"workloadSelector":{"labels":{"gateway.networking.k8s.io/gateway-name":"gw"}}`,
 	} {
 		if !strings.Contains(spec, want) {
@@ -242,8 +251,10 @@ func TestTooOld(t *testing.T) {
 	}
 	for image, want := range map[string]string{
 		"docker.io/istio/proxyv2:1.24.3":                 "1.24",
+		"docker.io/istio/proxyv2:1.27.1":                 "1.27",
+		"docker.io/istio/proxyv2:1.28.0":                 "",
 		"docker.io/istio/proxyv2:1.31.3":                 "",
-		"gcr.io/istio-release/proxyv2:1.25.0-distroless": "",
+		"gcr.io/istio-release/proxyv2:1.29.0-distroless": "",
 		"registry.example/proxy:custom":                  "",
 	} {
 		if got := tooOld(pod(image)); got != want {

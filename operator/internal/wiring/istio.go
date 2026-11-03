@@ -88,9 +88,10 @@ const (
 	// namespace/name, comma-separated.
 	istioRoutes = "waf.inkwall.dev/routes"
 	// istioMinMinor is the oldest Istio (1.x) the operator wires: its Envoy
-	// sends ext_proc's protocol_config (Envoy 1.33), which the engine reads
-	// the body mode from.
-	istioMinMinor = 25
+	// (1.36) sends ext_proc's protocol_config (1.33), which the engine
+	// reads the body mode from, and knows status_on_error (1.36). An older
+	// Envoy would reject the filter, and keep serving without it.
+	istioMinMinor = 28
 )
 
 // Istio is the wiring of Istio: the HTTPRoutes of its Gateways.
@@ -256,29 +257,30 @@ func (i *Istio) Wire(ctx context.Context, targets map[Target]bool, off bool) (*R
 				}
 			}
 		}
-		// 2. The routes whose Gateways are ready, unless Istio is too old
-		// or their Envoy routes' names aren't theirs alone.
+		// 2. Each route on each of its Gateways that is ready, unless Istio
+		// is too old there or the route's Envoy routes' names aren't its
+		// alone: a Gateway's filter doesn't wait for the route's other
+		// Gateways, though the route is wired only once it is on all.
 		byGateway := map[types.NamespacedName][]*istioRoute{}
 		for k, r := range routes {
-			if slices.ContainsFunc(r.gateways, func(gw types.NamespacedName) bool { return !ready[gw] }) {
-				continue
-			}
 			wanted[k] = true
 			for _, gw := range r.gateways {
-				switch {
-				case failed[k] != "":
-				case old[gw] != "":
-					failed[k] = fmt.Sprintf("Gateway %s runs Istio %s: Inkwall wires Istio 1.%d or later", gw.Name, old[gw], istioMinMinor)
-				default:
-					if why := st.sharedRuleName(r, gw); why != "" {
+				if !ready[gw] {
+					wanted[k] = false
+					continue
+				}
+				why := ""
+				if old[gw] != "" {
+					why = fmt.Sprintf("Gateway %s runs Istio %s: Inkwall wires Istio 1.%d or later", gw.Name, old[gw], istioMinMinor)
+				} else {
+					why = st.sharedRuleName(r, gw)
+				}
+				if why != "" {
+					if failed[k] == "" {
 						failed[k] = why
 					}
+					continue
 				}
-			}
-			if failed[k] != "" {
-				continue
-			}
-			for _, gw := range r.gateways {
 				byGateway[gw] = append(byGateway[gw], r)
 			}
 		}
@@ -436,8 +438,9 @@ func tooOld(p *corev1.Pod) string {
 }
 
 // sharedRuleName says why a route can't be wired on a Gateway: Istio names
-// an Envoy route after its HTTPRoute rule's name alone, so a protected
-// rule's name another HTTPRoute of the Gateway also gives a rule would
+// an Envoy route after its HTTPRoute rule's name alone (or
+// namespace.route.index for an unnamed rule), so a protected rule's name
+// that another HTTPRoute of the Gateway also gives an Envoy route would
 // select that route's traffic too.
 func (st *envoyState) sharedRuleName(r *istioRoute, gw types.NamespacedName) string {
 	ours := map[string]bool{}
@@ -452,10 +455,13 @@ func (st *envoyState) sharedRuleName(r *istioRoute, gw types.NamespacedName) str
 		if gws, _ := st.parents(hr); !slices.Contains(gws, gw) {
 			continue
 		}
-		for _, rule := range hr.Spec.Rules {
-			if rule.Name != nil && ours[string(*rule.Name)] {
+		// Its Envoy routes' names: its rules' names, or those Istio gives
+		// the unnamed ones.
+		theirs := &istioRoute{route: hr, sections: []string{""}}
+		for _, n := range theirs.envoyRoutes() {
+			if ours[n] {
 				return fmt.Sprintf("rule %s of HTTPRoute %s has the name of a rule of HTTPRoute %s on Gateway %s, and Istio names Envoy's routes after their rule: rename one of them",
-					*rule.Name, r.route.Name, k, gw.Name)
+					n, r.route.Name, k, gw.Name)
 			}
 		}
 	}
@@ -536,6 +542,9 @@ func envoyFilter(gw *gatewayv1.Gateway, routes []*istioRoute) *unstructured.Unst
 			"request_attributes": []any{"request.protocol"},
 			"message_timeout":    fmt.Sprintf("%.3fs", (r.timeout + messageMargin).Seconds()),
 			"failure_mode_allow": r.failOpen,
+			// 503, as the engine answers a request it can't inspect;
+			// Envoy's default is 500.
+			"status_on_error": map[string]any{"code": "ServiceUnavailable"},
 		}
 		if r.detect {
 			extProc["observability_mode"] = true
@@ -672,9 +681,6 @@ func (i *Istio) inject(ctx context.Context, gw *gatewayv1.Gateway, s injection.S
 	case err != nil:
 		return err
 	default:
-		if theirs && isManaged(cm) {
-			theirs = false
-		}
 		changed, err := withIstioSidecar(cm, s, true)
 		if err != nil || !changed {
 			return err

@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-09-27
-- Updated: 2026-10-30
+- Updated: 2026-11-03
 - Owner: noureldin
 - Depends on: [0001 — Performance-First Architecture](0001-performance-first-architecture.md)
 
@@ -491,7 +491,57 @@ access and keeps the trust ConfigMap that injection sets up for the integrations
 ([raw Envoy](../raw-envoy.md)). Its policies target an `Ingress` of a class no controller serves,
 so they report `Programmed=False` (`ControllerUnsupported`), as the operator wires nothing.
 `make raw-envoy-e2e` (Docker) and `make kind-e2e-raw-envoy` run the samples.
-**Not yet:** Istio, Contour.
+
+**Built (v0.4.0, #281): Istio**, for the HTTPRoutes of its Gateway API implementation (GatewayClass
+controller `istio.io/gateway-controller`), with `ext_proc` through an `EnvoyFilter`. Decided:
+
+- **No native ext_proc in Istio.** Its `MeshConfig.extensionProviders` have
+  `envoyExtAuthzHttp` and `envoyExtAuthzGrpc` (ext_authz, used by `AuthorizationPolicy`
+  `CUSTOM`), tracing and access-log providers, and no ext_proc one (checked in `istio/api` for
+  1.31 and master); a `WasmPlugin` runs Wasm, not ext_proc. So the operator writes the filter
+  itself, in an `EnvoyFilter`, as raw Envoy's users do in `envoy.yaml`.
+- **Discovery.** Istio's GatewayClasses (`istio` by default) are `Full` in `status.proxies`;
+  its Gateway pods carry `gateway.istio.io/managed=istio.io-gateway-controller` and
+  `gateway.networking.k8s.io/gateway-name=<gateway>`. Istio runs a Gateway's pods in the Gateway's
+  namespace, so that namespace must be a proxy namespace (`istio-ingress` and `istio-system` are
+  defaults).
+- **Engine placement: Istio's own customization, not the Pod webhook.** Istio renders each
+  Gateway's Deployment and overlays it with the `deployment` key of the ConfigMap the Gateway's
+  `spec.infrastructure.parametersRef` names, and rolls the pods when it changes. The engine goes there as a native sidecar, with the `emptyDir` holding its Unix socket
+  (`/var/run/inkwall-socket/extproc.sock`) also mounted in `istio-proxy`: into the user's
+  ConfigMap, keeping their entries, or into one the operator makes and names in the Gateway, as for
+  Envoy Gateway's `EnvoyProxy`. Istio's Envoy runs as UID 1337, so the engine makes the socket
+  writable by every user; the `emptyDir` keeps it to the pod.
+- **Wiring.** One `EnvoyFilter` per Gateway with protected routes (`workloadSelector` on its
+  pods): a `STATIC` cluster on the socket (HTTP/2), and per protected HTTPRoute an
+  `envoy.filters.http.ext_proc` filter inserted before the router, `disabled: true`, enabled by
+  `typed_per_filter_config` on the Envoy routes of its protected rules only. Istio names an Envoy
+  route after its HTTPRoute rule (`name`, or `<namespace>.<route>.<index>` for an unnamed rule), so
+  a protected rule whose name another HTTPRoute of the Gateway also gives a rule would select that
+  route's traffic too: refused (`WiringFailed`, rename one). Unprotected routes cost nothing (the
+  filter is off there). The settings are Envoy Gateway's: the request headers with
+  `request.protocol`, the body `BUFFERED_PARTIAL` when a policy inspects it (`STREAMED` in detect
+  mode), no response; `message_timeout` the longest policy timeout plus 500 ms;
+  `failure_mode_allow` when every policy fails open; `observability_mode` when every policy is in
+  detect mode and fails open; `status_on_error` 503, as the engine answers a request it can't
+  inspect; and, when Envoy holds a body, the listener's `per_connection_buffer_limit_bytes` raised to
+  10 MiB, the largest `body.maxBytes`.
+- **Status.** A route is wired on a Gateway once every running pod of it has the engine; it is
+  `Programmed` once that holds on all its Gateways and Istio has accepted it (its parent status,
+  `Accepted=True` from `istio.io/gateway-controller`) on each: Istio reports nothing on an
+  `EnvoyFilter`. Until then it is `Pending` (or `PendingRestart`, `SidecarMissing`), never `Ready`.
+  An Istio older than 1.28 (from the `istio-proxy` image tag) is `WiringFailed`: its Envoy (before
+  1.36) would reject `status_on_error` and keep serving without the filter. Without the
+  `EnvoyFilter` CRD nothing is wired (`WiringFailed`). Without its ClusterRole,
+  `inkwall-operator-istio` (`rbac.integrations.istio`), the integration is disabled
+  (`IntegrationDisabled`).
+- **Tested** with Istio 1.31.3 (its `base` and `istiod` charts, the Gateway API's standard CRDs
+  v1.7.0, no mesh): envtest with a stand-in `EnvoyFilter` CRD, and `make kind-e2e-istio`.
+- **Later:** `VirtualService` targets (Istio's own `Gateway` API), in a later PR; mesh sidecars
+  (ext_proc in every workload's Envoy) are out of scope: the `EnvoyFilter` targets Gateway pods
+  only.
+
+**Not yet:** Contour.
 
 ### 6.2 ingress-nginx
 
@@ -595,7 +645,8 @@ adapter must match.
 | Caddy | module | ✅ | ✅ | ✅ | ✅ | in-process |
 | Any | reverse proxy | ✅ | ✅ | ✅ | ✅ | TCP |
 
-Built: Traefik ForwardAuth, the reverse proxy, and ext_proc through Envoy Gateway and raw Envoy.
+Built: Traefik ForwardAuth, the reverse proxy, and ext_proc through Envoy Gateway, Istio and raw
+Envoy.
 
 ---
 

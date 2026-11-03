@@ -26,6 +26,8 @@ Every doc in this repository, by topic, with the question each one answers.
 - [gRPC](grpc.md): what does the engine inspect in a gRPC call, and what doesn't it?
 - [WebSocket](websocket.md): what does the engine inspect in a WebSocket, and how do I allow only
   my own origins?
+- [Protecting routes served by Istio](istio.md): how does the operator protect the HTTPRoutes of
+  Istio's Gateways, and what does a policy's status say there?
 - [Protecting raw Envoy](raw-envoy.md): how do I protect an Envoy I configure myself with the
   engine's ext_proc adapter, with policies from flags or from the operator?
 - [Running the engine without Kubernetes](standalone-proxy.md): how do I put the engine in front

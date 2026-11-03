@@ -36,8 +36,21 @@ What's new in 0.4.0:
   403 before the upgrade (`Block`), or logged with reason `websocket` (`Detect`). The engine's
   `--websocket-origins`, `--websocket-allow-missing-origin` and `--websocket-required-headers`
   flags do the same without the operator. See [WebSocket](websocket.md).
+- **Istio.** The operator protects the HTTPRoutes of Istio's Gateways (Istio 1.28 or later): it
+  adds the engine to a Gateway's pods through the ConfigMap the Gateway names, and an
+  `EnvoyFilter` sends the protected routes to it. See [Istio](istio.md). Nothing changes for
+  Istio Gateways until a policy targets one of their routes.
 
 What changes by itself in 0.4.0:
+
+- **A new ClusterRole, `inkwall-operator-istio`**, granted by default (`rbac.integrations.istio:
+  true`, also with `--reuse-values`): it writes `EnvoyFilter` objects and ConfigMaps, and patches
+  Gateways. Set it to `auto` to grant it only when the cluster serves Istio's API, or `false`
+  never to; without it the operator disables the Istio integration ([integration
+  permissions](../deploy/helm/inkwall/README.md#integration-permissions)).
+- **Two more default proxy namespaces, `istio-ingress` and `istio-system`**, where Istio's docs put
+  Gateways. If you set `injection.proxyNamespaces`, the value is kept: add your Istio Gateways'
+  namespaces to it. Changing the value restarts the operator.
 
 - **WebSockets through Envoy Gateway.** The engine decides a handshake on its headers. In 0.3.x, a
   policy in `Block` mode with body inspection held every handshake until one of Envoy's timeouts,

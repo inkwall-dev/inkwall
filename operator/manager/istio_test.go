@@ -250,7 +250,8 @@ func testIstio(ctx context.Context, t *testing.T, c client.Client) {
 	eventually(t, "Programmed once renamed", programmed(metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
 
 	// A Gateway outside the proxy namespaces: its pods get no engine, the
-	// route isn't wired.
+	// route isn't wired there, nor Programmed, but stays wired on its
+	// other Gateway.
 	if err := c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "istio-elsewhere"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +268,10 @@ func testIstio(ctx context.Context, t *testing.T, c client.Client) {
 		hr.Spec.ParentRefs = append(hr.Spec.ParentRefs, gatewayv1.ParentReference{Name: "far", Namespace: new(gatewayv1.Namespace("istio-elsewhere"))})
 	})
 	eventually(t, "Pending on a Gateway outside the proxy namespaces", programmed(metav1.ConditionFalse, wiring.ReasonPending, "Gateway istio-elsewhere/far has no running Istio pod"))
-	eventually(t, "its route unwired", filterHas("custom", nil, "inkwall.ext_proc.istio-apps.app"))
+	// Still inspected on the Gateway that has the engine.
+	if s, err := filter("custom"); err != nil || !strings.Contains(s, "inkwall.ext_proc.istio-apps.app") {
+		t.Fatalf("the route left its ready Gateway: %v %s", err, s)
+	}
 	update(ctx, t, c, app, func(hr *gatewayv1.HTTPRoute) { hr.Spec.ParentRefs = hr.Spec.ParentRefs[:1] })
 	for _, o := range []client.Object{farPod, elsewhere} {
 		if err := c.Delete(ctx, o); err != nil {

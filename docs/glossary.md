@@ -202,6 +202,11 @@ first time they mention it.
   whose ext_proc filter calls the engine through a `Backend`, an Envoy Gateway object for an
   endpoint such as a Unix socket. ([Envoy Gateway
   docs](https://gateway.envoyproxy.io/docs/api/extension_types/#envoyextensionpolicy))
+- <a id="envoyfilter"></a>**EnvoyFilter (Istio)**: Patches the Envoy configuration Istio generates
+  for the workloads it selects: adds a cluster, inserts an HTTP filter, merges settings into a
+  route. The operator makes one per Istio Gateway with protected routes, whose ext_proc filters
+  call the engine. ([Istio
+  docs](https://istio.io/latest/docs/reference/config/networking/envoy-filter/))
 - <a id="envoyproxy"></a>**EnvoyProxy (Envoy Gateway)**: The settings of the Envoy pods of a
   GatewayClass or Gateway, including their pod template. The operator adds the engine there.
   ([Envoy Gateway docs](https://gateway.envoyproxy.io/docs/api/extension_types/#envoyproxy))
@@ -318,8 +323,10 @@ first time they mention it.
 - <a id="intermediate-representation"></a>**Intermediate representation (IR)**: The form a compiler
   turns source code into before it runs or translates it.
   ([Wikipedia](https://en.wikipedia.org/wiki/Intermediate_representation))
-- <a id="istio"></a>**Istio**: A service mesh built on Envoy; an `EnvoyFilter` adds Envoy
-  configuration to it. ([Istio docs](https://istio.io/latest/docs/))
+- <a id="istio"></a>**Istio**: A service mesh built on Envoy, which also implements the Gateway API
+  (GatewayClass controller `istio.io/gateway-controller`); an `EnvoyFilter` adds Envoy
+  configuration to it. Inkwall protects the HTTPRoutes its Gateways serve. ([Istio
+  docs](https://istio.io/latest/docs/))
 
 ### J
 

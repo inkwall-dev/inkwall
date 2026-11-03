@@ -9,8 +9,9 @@
 # ConfigMap, one naming none), and another route on the same Gateways left
 # unprotected. The engine joins the Gateways' pods, attacks are blocked on
 # the protected route and pass on the other, a body attack is held back
-# with its headers, detect mode logs without blocking, and unprotecting or
-# uninstalling leaves the user's objects as they were. Needs the operator
+# with its headers, a stopped engine fails closed, detect mode logs
+# without blocking, and unprotecting or uninstalling leaves the user's
+# objects as they were. Needs the operator
 # installed (make kind-operator) with istio-e2e among the proxy
 # namespaces; ends with helm uninstall. KEEP=1 leaves the test's objects.
 set -euo pipefail
@@ -26,7 +27,7 @@ ISTIO_NS=istio-system
 # Istio 1.31.3, from its Helm charts, on the Gateway API's standard CRDs
 # (v1.7.0, as operator/go.mod).
 ISTIO_VERSION=1.31.3
-ISTIO_REPO=https://istio-release.storage.googleapis.com/charts
+ISTIO_REPO=https://blob.istio.io/istio-release/charts
 GATEWAY_API_VERSION=v1.7.0
 HOST=istio.e2e.example.com
 OPEN_HOST=open.istio.e2e.example.com
@@ -318,6 +319,43 @@ check "an attack in the body is blocked" both_are 403 / --data-urlencode "q=1' O
 mark=/held-$RANDOM$RANDOM
 check "a body attack on a marked path is blocked" both_are 403 "$mark" --data-urlencode "q=1' OR '1'='1"
 check "and never reached the app" never_reached_app "$mark"
+
+echo "== engine down"
+# The engine of every pod of both Gateways stopped (SIGSTOP, sent on the
+# kind node: the engine's image has no shell, and an ephemeral container
+# can't share the process namespace of an init container): Envoy gets no
+# answer and, the policy failing closed, rejects the request (504 once
+# message_timeout passes) instead of letting it through. The open route
+# doesn't call the engine.
+# signal_engines SIGNAL: sends it to the engine of each Gateway pod that
+# has one.
+signal_engines() {
+  local pod node cid pid
+  for pod in $("${KUBECTL[@]}" -n "$NS" get pods -l gateway.istio.io/managed=istio.io-gateway-controller \
+    --field-selector=status.phase=Running -o name); do
+    node=$("${KUBECTL[@]}" -n "$NS" get "$pod" -o jsonpath='{.spec.nodeName}')
+    cid=$("${KUBECTL[@]}" -n "$NS" get "$pod" -o jsonpath='{.status.initContainerStatuses[?(@.name=="inkwall-engine")].containerID}')
+    # A pod from before the engine, still terminating.
+    [[ -n $cid ]] || continue
+    pid=$(docker exec "$node" crictl inspect --output go-template --template '{{.info.pid}}' "${cid#*://}")
+    docker exec "$node" kill "-$1" "$pid"
+  done
+}
+# fails_closed PATH: through both Gateways, a 5xx, not the app's answer.
+fails_closed() {
+  local port c
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
+    c=$(code "$port" "$HOST" "$1" --max-time 10)
+    [[ $c == 5?? ]] || return 1
+  done
+}
+signal_engines STOP
+eventually "engine down: a benign request is refused (fails closed)" fails_closed /
+check "engine down: an attack is refused" fails_closed "$SQLI"
+check "engine down: the unprotected route still answers" open_are 200 /
+signal_engines CONT
+eventually "engine back: benign traffic passes" both_are 200 /
+eventually "engine back: the attack is blocked" both_are 403 "$SQLI"
 
 echo "== detect mode"
 policy Detect
