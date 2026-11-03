@@ -343,6 +343,19 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 			switch name, user, err := e.ensureBufferLimit(ctx, st.gateways[gw]); {
 			case err != nil:
 				errs = append(errs, fmt.Errorf("ensure the ClientTrafficPolicy of Gateway %s: %w", gw, err))
+				if name != "" && (apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err)) {
+					// Changed since the cache saw it: again, once it has;
+					// Pending meanwhile, until it's there and accepted.
+					limits[gw] = name
+					break
+				}
+				// Envoy still buffers at its default, below what the
+				// routes' policies inspect: not in force as they say.
+				for k, r := range routes {
+					if wanted[k] && r.buffered() && slices.Contains(r.gateways, gw) && failed[k] == "" {
+						failed[k] = fmt.Sprintf("Gateway %s: the ClientTrafficPolicy that raises Envoy's buffer limit: %v", gw.Name, err)
+					}
+				}
 			case name != "":
 				limits[gw] = name
 			default:
@@ -618,7 +631,8 @@ func newObject(gvk schema.GroupVersionKind, namespace, name string) *unstructure
 	return u
 }
 
-// owned makes owner the controller of u, so it goes with it.
+// owned makes owner the owner of u (not its controller: no Controller:
+// true), so the garbage collector deletes u with it.
 func owned(u *unstructured.Unstructured, owner client.Object, gvk schema.GroupVersionKind) {
 	u.SetOwnerReferences([]metav1.OwnerReference{{
 		APIVersion: gvk.GroupVersion().String(), Kind: gvk.Kind, Name: owner.GetName(), UID: owner.GetUID(),

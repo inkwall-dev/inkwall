@@ -505,7 +505,9 @@ integration), for `HTTPRoute` targets whose parent Gateways have a GatewayClass 
   none for a Gateway the user targets with their own, and deletes its own once they add one; their
   `bufferLimit` then caps the bodies inspected. One below the largest `body.maxBytes` of a route's
   policies (unset: the engine's 64 KiB) is `WiringFailed`, naming the ClientTrafficPolicy, with
-  the route still wired: bodies over it are handled as oversized, legitimate ones too.
+  the route still wired: bodies over it are handled as oversized, legitimate ones too. While the
+  operator can't create or update its own (an admission policy refuses it, say), the routes whose
+  body Envoy holds are `WiringFailed` with the error, still wired, until it's there and accepted.
 - **Unprotected routes get nothing**, and cost 0. A route that is no longer protected loses its
   `EnvoyExtensionPolicy` first; the `Backend`, `ClientTrafficPolicy` and engine go after.
 - **`Programmed`** counts a route wired once Envoy Gateway has accepted (`Accepted=True` for every
