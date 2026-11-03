@@ -162,7 +162,7 @@ Validation runs in three steps, cheapest first:
 | `Accepted` | Spec valid, references resolve, and the bundle with it fits | `InvalidRef`, `Conflict`, `RuleCompileError`, `TargetUnsupported`, `BundleTooLarge` |
 | `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `IntegrationDisabled`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `Pending`, `NoTargets`, `InjectionDisabled`, `Unwired` |
 | `Enforced` | Every serving engine ACKed a bundle with this generation, and inspection isn't suspended | `EnginesBehind`, `EngineNack` (first error), `EnginesUnreported`, `NoEngines`, `NotInBundle`, `Suspended` |
-| `Ready` | The three above are True | first failing condition's reason |
+| `Ready` | The three above are True | `Suspended` while inspection is suspended, else the first failing condition's reason |
 
 Status also has `bundleVersion` and `observedGeneration`. `bundleVersion` is the first bundle that
 enforces the policy as it is now; later bundles do too, until one changes the policy. A bundle that
@@ -174,8 +174,9 @@ bundle was built from: a status write that conflicts with an edit is left to the
 Status never claims protection that isn't there:
 
 - **Suspended** (#263). While the published bundle suspends inspection (`InkwallConfig.spec.suspend`),
-  every policy is `Enforced=False`, reason `Suspended`, and so `Ready=False`, with the message
+  every policy is `Enforced=False` and `Ready=False`, reason `Suspended`, with the message
   `InkwallConfig default suspends inspection (spec.suspend): every engine allows every request`.
+  `Suspended` is `Ready`'s reason whatever the other conditions say (#291): nothing is inspected.
   Resumed, `Enforced` waits for every engine to run the bundle that resumes inspection: suspending
   and resuming change what every policy enforces, so its `bundleVersion` moves to that bundle.
 - **Bundle too large** (#264). A build whose bundle doesn't fit its Secrets
@@ -184,7 +185,10 @@ Status never claims protection that isn't there:
   `Ready=False`, reason `BundleTooLarge`, for its current generation, with the size and the bundle
   engines run. Before, the build wrote no status, so such a policy kept the conditions of its
   previous generation, `Accepted=True` included. The other policies keep theirs: engines run them as
-  they are. Once the bundle fits, it is published and they are `Accepted` again.
+  they are. Once the bundle fits, it is published and they are `Accepted` again. Suspending still
+  works (#291): when the bundle with `spec.suspend` flipped is too large, the builder publishes the
+  bundle in force with it flipped instead, which fits as it does. Resumed, engines run that bundle
+  again, and the policies it doesn't have as they are now are still `BundleTooLarge`.
 
 `InkwallConfig.status` has `observedGeneration`, `conditions` (`ControlPlaneConnected`,
 [§4.9](#49-upstream-sync-leader-only); `Suspended`, True while the published bundle suspends
@@ -896,8 +900,10 @@ Removal must never leave a proxy failing closed on a missing engine.
 **Built (v0.1.0):**
 
 - **Suspend.** `InkwallConfig.spec.suspend: true` puts every engine in allow-all within seconds,
-  and removes nothing. Since v0.3.1 every policy reports it (`Enforced=False`, reason `Suspended`),
-  as does the `InkwallConfig`'s `Suspended` condition ([§3.2](#32-status-contract)).
+  and removes nothing. Since v0.3.1 every policy reports it (`Enforced=False` and `Ready=False`,
+  reason `Suspended`), as does the `InkwallConfig`'s `Suspended` condition
+  ([§3.2](#32-status-contract)), and it works even when the bundle is too large to publish: the
+  bundle in force is published again, suspended.
 - **Unprotected routes.** Ingresses and IngressRoutes that are no longer protected are unwired,
   level-based ([§4.4](#44-wiring-controller)).
 - **`helm uninstall`** runs a [pre-delete hook](https://helm.sh/docs/topics/charts_hooks/), `inkwall-operator unwire`
@@ -963,7 +969,7 @@ Removal must never leave a proxy failing closed on a missing engine.
 | Engine can't compile (version skew) | Engine keeps its previous bundle | `EngineNack` | Upgrade the engines or fix the rule |
 | Bundle Secret deleted | None | Builder recreates it | Automatic |
 | Bundle chunk deleted or edited | None; meanwhile new engines can't cold start from the Secret | Builder logs it | Automatic: published again |
-| Bundle over 7.2 MiB compressed | None: the current bundle stays; changes are not published | Builder error; warning past 75%; `inkwall_operator_bundle_compressed_bytes`; `Accepted=False` (`BundleTooLarge`) on the policies not published | Shrink the policies (fewer, or smaller rule sets) |
+| Bundle over 7.2 MiB compressed | None: the current bundle stays; changes are not published; `spec.suspend` still suspends and resumes it | Builder error; warning past 75%; `inkwall_operator_bundle_compressed_bytes`; `Accepted=False` (`BundleTooLarge`) on the policies not published | Shrink the policies (fewer, or smaller rule sets) |
 | Signing key rotated | None: the operator signs with the new key only once every connected engine trusts it | Secret's `rotation-phase`; operator logs the engines it waits for | Automatic ([§4.6](#46-bundle-builder-leader-only)); replace engines older than rotation |
 | Unknown controller version | Wiring may break | `Programmed=False` | Update or pin the integration |
 | An integration's `ClusterRole` not granted, or revoked | Its proxy's routes aren't wired; the others are | `Programmed=False` (`IntegrationDisabled`), discovery `Unsupported` | Grant it (`rbac.integrations`); the operator restarts with it ([§7](#7-rbac)) |

@@ -24,6 +24,7 @@ import (
 	agentv1 "github.com/inkwall-dev/inkwall/api/agent/v1"
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
+	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 )
 
 // Engine is a fake engine.
@@ -119,7 +120,10 @@ func (e *Engine) Run(ctx context.Context) error {
 func (e *Engine) run(ctx context.Context) error {
 	conn, err := grpc.NewClient(e.Addr,
 		grpc.WithTransportCredentials(credentials.NewTLS(e.TLS)),
-		grpc.WithPerRPCCredentials(bearer(e.Token)))
+		grpc.WithPerRPCCredentials(bearer(e.Token)),
+		// As the real engine: a bundle up to its limit, decompressed, so a
+		// large bundle doesn't break the engines of later tests.
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(bundlesecret.MaxBundleBytes+(1<<20))))
 	if err != nil {
 		return err
 	}

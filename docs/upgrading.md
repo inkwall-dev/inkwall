@@ -28,13 +28,16 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 0.3.1 is a patch release: upgrade the chart as for 0.3.0. What changes by itself:
 
 - **A suspended cluster is reported on every policy.** While `InkwallConfig.spec.suspend` is
-  `true`, every `WAFPolicy` is `Enforced=False`, reason `Suspended`, and so `Ready=False`; in 0.3.0
+  `true`, every `WAFPolicy` is `Enforced=False` and `Ready=False`, reason `Suspended`; in 0.3.0
   they could stay `Ready=True` while nothing was inspected. The `InkwallConfig` has a new
   `Suspended` condition. See [suspending inspection](../deploy/helm/inkwall/README.md#suspending-inspection).
 - **A policy left out of a bundle too large to publish says so.** When the bundle doesn't fit its
   Secrets (over 7.2 MiB compressed), the policies it would add or change are `Accepted=False` and
   `Ready=False`, reason `BundleTooLarge`, until it fits. In 0.3.0 they kept the conditions of their
   previous spec, `Accepted=True` included, while engines ran that previous spec.
+- **Suspending works when the bundle is too large.** In 0.3.0, `spec.suspend` did nothing while
+  the bundle was too large to publish; now the bundle the engines run is published again,
+  suspended.
 
 ## From 0.2.x to 0.3.0
 

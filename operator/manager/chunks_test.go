@@ -19,6 +19,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -309,7 +310,8 @@ func testBundleTooLarge(ctx context.Context, t *testing.T, c client.Client) {
 	if err := c.Create(ctx, grown); err != nil {
 		t.Fatal(err)
 	}
-	wantAccepted := func(what, name string, st metav1.ConditionStatus, reason string) {
+	// Ready has Accepted's reason, unless inspection is suspended.
+	wantConditions := func(what, name string, st metav1.ConditionStatus, reason, ready string) {
 		t.Helper()
 		eventually(t, what, func() string {
 			var got wafv1alpha1.WAFPolicy
@@ -318,15 +320,27 @@ func testBundleTooLarge(ctx context.Context, t *testing.T, c client.Client) {
 			}
 			for _, typ := range []string{wafv1alpha1.ConditionAccepted, wafv1alpha1.ConditionReady} {
 				cond := meta.FindStatusCondition(got.Status.Conditions, typ)
-				if typ == wafv1alpha1.ConditionReady && st == metav1.ConditionTrue {
-					continue // no engine: never Ready
+				want, wantReason := st, reason
+				if typ == wafv1alpha1.ConditionReady {
+					if ready == "" {
+						continue // no engine: never Ready
+					}
+					want, wantReason = metav1.ConditionFalse, ready
 				}
-				if cond == nil || cond.Status != st || cond.Reason != reason || cond.ObservedGeneration != got.Generation {
-					return fmt.Sprintf("generation %d: %s %+v, want %s %s", got.Generation, typ, cond, st, reason)
+				if cond == nil || cond.Status != want || cond.Reason != wantReason || cond.ObservedGeneration != got.Generation {
+					return fmt.Sprintf("generation %d: %s %+v, want %s %s", got.Generation, typ, cond, want, wantReason)
 				}
 			}
 			return ""
 		})
+	}
+	wantAccepted := func(what, name string, st metav1.ConditionStatus, reason string) {
+		t.Helper()
+		ready := ""
+		if st != metav1.ConditionTrue {
+			ready = reason
+		}
+		wantConditions(what, name, st, reason, ready)
 	}
 	wantAccepted("the policy published", "grown", metav1.ConditionTrue, "Accepted")
 	var before uint64
@@ -349,6 +363,48 @@ func testBundleTooLarge(ctx context.Context, t *testing.T, c client.Client) {
 	}
 	// The other policies run as they are: their status stays.
 	wantAccepted("a filler, unchanged", "filler-0", metav1.ConditionTrue, "Accepted")
+
+	// Suspended, the switch works all the same (#291): the bundle in force
+	// is published again with inspection suspended, and fits as it did;
+	// suspension is Ready's reason. Resumed, the bundle in force runs
+	// again, without the grown policy's change, which is still not
+	// Accepted.
+	cfg := &wafv1alpha1.InkwallConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(cfg), cfg); apierrors.IsNotFound(err) {
+		if err := c.Create(ctx, cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wantSuspended := func(what string, st metav1.ConditionStatus) {
+		t.Helper()
+		eventually(t, what, func() string {
+			b := current(ctx, t, c)
+			if b.GetSuspended() != (st == metav1.ConditionTrue) || b.GetVersion() <= before {
+				return fmt.Sprintf("bundle %d: suspended %t", b.GetVersion(), b.GetSuspended())
+			}
+			if len(findPolicy(b, "huge/grown").GetRuleSets()) != 0 || len(findPolicy(b, "huge/filler-0").GetRuleSets()) != perPolicy {
+				return fmt.Sprintf("bundle %d isn't the one in force", b.GetVersion())
+			}
+			var got wafv1alpha1.InkwallConfig
+			if err := c.Get(ctx, client.ObjectKeyFromObject(cfg), &got); err != nil {
+				return err.Error()
+			}
+			cond := meta.FindStatusCondition(got.Status.Conditions, wafv1alpha1.ConditionSuspended)
+			if cond == nil || cond.Status != st || cond.ObservedGeneration != got.Generation || strings.Contains(cond.Message, "couldn't be published") {
+				return fmt.Sprintf("InkwallConfig Suspended condition %+v, want %s", cond, st)
+			}
+			before = b.GetVersion()
+			return ""
+		})
+	}
+	update(ctx, t, c, cfg, func(cfg *wafv1alpha1.InkwallConfig) { cfg.Spec.Suspend = true })
+	wantSuspended("suspended", metav1.ConditionTrue)
+	wantConditions("the grown policy, suspended", "grown", metav1.ConditionFalse, "BundleTooLarge", "Suspended")
+	wantConditions("a filler, suspended", "filler-0", metav1.ConditionTrue, "Accepted", "Suspended")
+	update(ctx, t, c, cfg, func(cfg *wafv1alpha1.InkwallConfig) { cfg.Spec.Suspend = false })
+	wantSuspended("resumed", metav1.ConditionFalse)
+	wantAccepted("the grown policy, resumed", "grown", metav1.ConditionFalse, "BundleTooLarge")
+	wantAccepted("a filler, resumed", "filler-0", metav1.ConditionTrue, "Accepted")
 
 	// Shrunk: published again.
 	update(ctx, t, c, grown, func(p *wafv1alpha1.WAFPolicy) { p.Spec.RuleSets = p.Spec.RuleSets[:1] })

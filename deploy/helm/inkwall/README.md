@@ -210,8 +210,8 @@ The emergency switch: every engine allows every request, within seconds, and not
 kubectl patch inkwallconfig default --type merge -p '{"spec":{"suspend":true}}'
 ```
 
-While inspection is suspended, every `WAFPolicy` reports it: `Enforced=False`, reason
-`Suspended`, and so `Ready=False`, with the message `InkwallConfig default suspends inspection (spec.suspend): every engine
+While inspection is suspended, every `WAFPolicy` reports it: `Enforced=False` and `Ready=False`,
+reason `Suspended`, with the message `InkwallConfig default suspends inspection (spec.suspend): every engine
 allows every request`. The `InkwallConfig` has a `Suspended` condition, `True` while the bundle the
 engines get suspends inspection:
 
@@ -221,6 +221,10 @@ kubectl get inkwallconfig default -o jsonpath='{.status.conditions[?(@.type=="Su
 
 Resume with `{"spec":{"suspend":false}}`. Each policy is `Enforced` again once every engine runs
 the bundle that resumes inspection.
+
+The switch works even when policy changes don't fit the bundle (policies `Accepted=False`, reason
+`BundleTooLarge`): the bundle the engines run is published again, suspended, and once resumed, they
+run it as before.
 
 ## Uninstalling
 
