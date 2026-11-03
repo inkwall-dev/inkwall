@@ -212,10 +212,18 @@ evaluation holds an admission slot only while it runs, not while the upstream an
 verdicts are counted apart: `inkwall_responses_total{action,reason}` and
 `inkwall_response_check_duration_seconds`.
 
+**Flags.** Without the operator, `inkwall-engine ext-proc` takes `--inspect-responses`,
+`--max-response-bytes` (512 KiB by default) and `--oversize-response` (`auto`, `allow`, `deny`), the
+policy's `responses` fields. Only `ext-proc` defines them: the other adapters never see a response,
+so none can be told to inspect one. With `--operator` they are refused, as the other policy flags.
+
 **Built (engine):** the bundle field, the Coraza response phases, the pipeline's `Exchange`
-(`CheckExchange`, `CheckResponse`), decoding, events and metrics, and the ext_proc response
-stages, with `FuzzExtProcResponse`. **Not yet:** the CRD field and the operator's wiring and
-status (Envoy Gateway's response processing mode, the Traefik condition).
+(`CheckExchange`, `CheckResponse`), decoding, events and metrics, the ext_proc response stages
+(with `FuzzExtProcResponse`), and the flags, so raw Envoy can inspect responses with the policy
+from flags (`make raw-envoy-e2e` checks a leaked SQL error is replaced in block mode and logged in
+detect mode). **Not yet:** the CRD field and the operator's wiring and status (Envoy Gateway's
+response processing mode, the Traefik condition); until then no operator-made bundle sets
+`responses`.
 
 ## 3. forward-auth (Traefik `ForwardAuth`, nginx `auth_request`)
 

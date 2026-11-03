@@ -119,17 +119,19 @@ const (
 )
 
 type engineConfig struct {
-	command        string
-	listen         string
-	adminListen    string
-	readTimeout    time.Duration
-	upstream       *url.URL
-	mode           pipeline.Mode
-	failureMode    pipeline.FailureMode
-	timeout        time.Duration
-	maxConcurrent  int
-	maxBodyBytes   int64
-	oversize       pipeline.OversizeAction
+	command       string
+	listen        string
+	adminListen   string
+	readTimeout   time.Duration
+	upstream      *url.URL
+	mode          pipeline.Mode
+	failureMode   pipeline.FailureMode
+	timeout       time.Duration
+	maxConcurrent int
+	maxBodyBytes  int64
+	oversize      pipeline.OversizeAction
+	// responses: ext-proc only, the one adapter that sees responses.
+	responses      pipeline.ResponseConfig
 	maxArgs        int
 	paranoiaLevel  int
 	threshold      int
@@ -163,6 +165,7 @@ type engineConfig struct {
 var policyFlags = []string{
 	"mode", "failure-mode", "timeout", "oversize-body", "paranoia-level", "anomaly-threshold",
 	"rules", "rules-before-crs", "skip-paths", "skip-body-paths", "disable-rule-groups",
+	"inspect-responses", "max-response-bytes", "oversize-response",
 }
 
 func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, error) {
@@ -192,6 +195,14 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	maxConcurrent := fs.Int("max-concurrent", 0, "maximum concurrent evaluations; extra requests get the failure mode (0 = 2 * CPUs)")
 	maxBody := fs.Int64("max-body-bytes", 64<<10, "request body bytes to inspect (0 disables body inspection); in bundle mode, for policies that don't set body.maxBytes")
 	oversize := fs.String("oversize-body", "auto", "bodies over --max-body-bytes: deny (413 in block mode), allow (forward with the body uninspected, logged), or auto (deny in block mode, allow in detect mode)")
+	// Only ext-proc sees responses: the other adapters don't take the
+	// flags, so none claims to inspect them.
+	inspectResponses, maxResponse, oversizeResponse := new(bool), new(int64), new(string)
+	if command == cmdExtProc {
+		inspectResponses = fs.Bool("inspect-responses", false, "inspect the upstream's responses too (CRS RESPONSE-95x data leakage rules and your phase 3 and 4 rules); Envoy must send them (processing_mode)")
+		maxResponse = fs.Int64("max-response-bytes", policy.DefaultResponseBytes, "with --inspect-responses: response body bytes inspected (0: status and headers only); a longer body has its prefix inspected and gets --oversize-response")
+		oversizeResponse = fs.String("oversize-response", "auto", "with --inspect-responses: responses over --max-response-bytes, or with a body that can't be inspected: deny (502 in block mode), allow, or auto (deny in block mode, allow in detect mode)")
+	}
 	maxArgs := fs.Int("max-args", 0, "maximum arguments per source (query, body); more is rejected with 400 before CRS runs (0 = 1000)")
 	paranoia := fs.Int("paranoia-level", coraza.DefaultParanoiaLevel, "OWASP CRS paranoia level (1-4)")
 	threshold := fs.Int("anomaly-threshold", coraza.DefaultInboundAnomalyThreshold, "OWASP CRS inbound anomaly score threshold")
@@ -307,6 +318,33 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 		cfg.oversize = pipeline.OversizeDeny
 	default:
 		return cfg, fmt.Errorf("--oversize-body must be auto, allow or deny, got %q", *oversize)
+	}
+	if !*inspectResponses {
+		var stray []string
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "max-response-bytes" || f.Name == "oversize-response" {
+				stray = append(stray, "--"+f.Name)
+			}
+		})
+		if len(stray) > 0 {
+			return cfg, fmt.Errorf("%s: only with --inspect-responses", strings.Join(stray, ", "))
+		}
+	}
+	if *inspectResponses {
+		if *maxResponse < 0 || *maxResponse > policy.MaxBodyBytes {
+			return cfg, fmt.Errorf("--max-response-bytes must be 0 to %d, got %d", policy.MaxBodyBytes, *maxResponse)
+		}
+		cfg.responses = pipeline.ResponseConfig{Inspect: true, MaxBytes: *maxResponse}
+		switch *oversizeResponse {
+		case "auto":
+			cfg.responses.Oversize = pipeline.OversizeAuto
+		case "allow":
+			cfg.responses.Oversize = pipeline.OversizeAllow
+		case "deny":
+			cfg.responses.Oversize = pipeline.OversizeDeny
+		default:
+			return cfg, fmt.Errorf("--oversize-response must be auto, allow or deny, got %q", *oversizeResponse)
+		}
 	}
 	cfg.trustedProxies = splitList(*trusted)
 	cfg.skipPaths = splitList(*skipPaths)
@@ -554,6 +592,7 @@ func flagMode(cfg engineConfig, metrics *telemetry.Metrics) (pipeline.Inspector,
 		InboundAnomalyThreshold: cfg.threshold,
 		MaxArgs:                 cfg.maxArgs,
 		BodyLimit:               int(cfg.maxBodyBytes),
+		ResponseBodyLimit:       int(cfg.responses.MaxBytes),
 		DisabledRuleGroups:      cfg.ruleGroupsOff,
 		DirectivesBeforeCRS:     directivesBeforeCRS,
 		Directives:              directives,
@@ -569,6 +608,7 @@ func flagMode(cfg engineConfig, metrics *telemetry.Metrics) (pipeline.Inspector,
 		Oversize:      cfg.oversize,
 		Observer:      metrics,
 		Routes:        cfg.routes,
+		Responses:     cfg.responses,
 	})
 	metrics.WatchAdmission(p.Admission())
 	return p, nil
