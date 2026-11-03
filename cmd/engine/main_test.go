@@ -86,6 +86,39 @@ func TestParseProxyFlagsErrors(t *testing.T) {
 	}
 }
 
+// TestParseWebSocketFlags: a policy from flags sets WebSocket rules too,
+// checked as the operator's are (#276).
+func TestParseWebSocketFlags(t *testing.T) {
+	cfg, err := parseFlags(cmdProxy, []string{
+		"--upstream", "http://app",
+		"--websocket-origins", "https://app.example.com, https://*.example.net",
+		"--websocket-allow-missing-origin",
+		"--websocket-required-headers", "Authorization",
+	}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.webSocket == nil {
+		t.Fatal("no WebSocket rules")
+	}
+	cfg, err = parseFlags(cmdProxy, []string{"--upstream", "http://app"}, io.Discard)
+	if err != nil || cfg.webSocket != nil {
+		t.Fatalf("no flags: %v, %v, want no rules", cfg.webSocket, err)
+	}
+	for _, args := range [][]string{
+		{"--websocket-origins", "wss://app.example.com"},
+		{"--websocket-required-headers", "X Api"},
+		{"--websocket-allow-missing-origin"},
+	} {
+		if _, err := parseFlags(cmdProxy, append([]string{"--upstream", "http://app"}, args...), io.Discard); err == nil || !strings.Contains(err.Error(), "--websocket") {
+			t.Errorf("%v: got %v, want an error naming the flag", args, err)
+		}
+		if _, err := parseFlags(cmdForwardAuth, append([]string{"--operator", "op:9445"}, args...), io.Discard); err == nil || !strings.Contains(err.Error(), "bundle") {
+			t.Errorf("%v with --operator: got %v", args, err)
+		}
+	}
+}
+
 func TestRunUsage(t *testing.T) {
 	if code := run(nil, io.Discard, io.Discard); code != 2 {
 		t.Fatalf("run() = %d, want 2", code)

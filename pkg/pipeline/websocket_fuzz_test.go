@@ -32,7 +32,7 @@ func FuzzWebSocketOrigin(f *testing.F) {
 		}
 		host := strings.ToLower(u.Hostname())
 		if !strings.EqualFold(u.Scheme, "https") || (u.Port() != "" && u.Port() != "443") ||
-			host != "app.example.com" && !(strings.HasSuffix(host, ".example.net") && len(host) > len(".example.net")) {
+			host != "app.example.com" && (!strings.HasSuffix(host, ".example.net") || len(host) == len(".example.net")) {
 			t.Fatalf("%q passed: scheme %q host %q port %q", origin, u.Scheme, host, u.Port())
 		}
 	})

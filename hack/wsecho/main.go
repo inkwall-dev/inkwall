@@ -162,7 +162,7 @@ func writeText(w io.Writer, msg string) error {
 	if len(msg) > 125 {
 		return errors.New("message too long")
 	}
-	frame := []byte{0x81, 0x80 | byte(len(msg)), 0, 0, 0, 0}
+	frame := []byte{0x81, 0x80 | byte(len(msg)), 0, 0, 0, 0} // #nosec G115 -- at most 125, checked above
 	_, _ = rand.Read(frame[2:6])
 	for i := 0; i < len(msg); i++ {
 		frame = append(frame, msg[i]^frame[2+i%4])

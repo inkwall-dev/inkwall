@@ -262,7 +262,8 @@ still calls the engine.
 Without Kubernetes, or without the operator, the engine's flags are the policy, as for the
 [standalone proxy](standalone-proxy.md#flags): `--mode`, `--failure-mode`, `--timeout`,
 `--paranoia-level`, `--rules` and `--rules-before-crs` ([SecLang](https://coraza.io/docs/seclang/) rules and exclusions),
-`--skip-paths`, `--disable-rule-groups`, `--max-body-bytes`. Every request Envoy sends gets that
+`--skip-paths`, `--disable-rule-groups`, `--max-body-bytes`, and `--websocket-origins` with
+`--websocket-required-headers` ([WebSocket](websocket.md)). Every request Envoy sends gets that
 one policy; `inkwall-engine ext-proc -h` lists the flags. To test rules before you deploy them, see
 [testing policies offline](testing-policies.md).
 
