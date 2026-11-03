@@ -8,6 +8,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -51,7 +52,8 @@ const fuzzMaxBody = 16
 // request uninspected with 400, or inspects exactly the method, path and
 // authority Envoy sent, without pseudo-headers, and at most the body limit
 // of the body; a body Envoy doesn't send whole is marked truncated, never
-// taken as complete.
+// taken as complete — unless, sent without end of stream (trailers follow),
+// it is under the limit and exactly its Content-Length long.
 func FuzzExtProc(f *testing.F) {
 	f.Fuzz(func(t *testing.T, method, path, authority, scheme, name, value string, body []byte, eos, bodyEOS bool, mode uint8) {
 		bodyMode := filterv3.ProcessingMode_BodySendMode(mode % 6)
@@ -127,8 +129,13 @@ func FuzzExtProc(f *testing.F) {
 		case eos:
 		case !buffered:
 			truncated = true
+		case bodyEOS || bodyMode == filterv3.ProcessingMode_BUFFERED:
+			truncated = len(body) > fuzzMaxBody
 		default:
-			truncated = len(body) > fuzzMaxBody || (!bodyEOS && bodyMode == filterv3.ProcessingMode_BUFFERED_PARTIAL)
+			// BUFFERED_PARTIAL without end of stream: complete only under
+			// the limit and with its whole Content-Length.
+			length, err := strconv.ParseInt(req.Headers.Get("Content-Length"), 10, 64)
+			truncated = !(len(body) < fuzzMaxBody && err == nil && length == int64(len(body)))
 		}
 		if req.BodyTruncated != truncated {
 			t.Errorf("body %q truncated %v, want %v (mode %v, end of stream %v)", req.Body, req.BodyTruncated, truncated, bodyMode, bodyEOS)
