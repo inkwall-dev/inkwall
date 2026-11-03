@@ -195,10 +195,11 @@ an Envoy you configure yourself, in or out of Kubernetes, see [protecting raw En
   Traefik's ForwardAuth; a body over `responses.maxBytes` (64 KiB by default) has its prefix
   inspected, and streamed responses (Server-Sent Events, gRPC) pass with their headers inspected
   only.
-- gRPC: a call's path and metadata (headers) are inspected, its protobuf messages are not; gRPC
-  with another codec and gRPC-Web text are inspected as other requests, and denied by the Core
-  Rule Set's content type rule. Bidirectional streaming calls stall while the proxy holds the
-  body. See [gRPC](docs/grpc.md).
+- gRPC: a call's path and metadata (headers) are inspected; the text in its protobuf messages
+  only with `body.grpcMessages: Inspect`, read without a schema. gRPC with another codec is
+  inspected as other requests, and denied by the Core Rule Set's content type rule. Client
+  streams longer than the body limit are cut there, and bidirectional streaming calls stall while
+  the proxy holds the body. See [gRPC](docs/grpc.md).
 - Behind a load balancer, the engine sees the client's IP only with the [PROXY protocol](https://github.com/haproxy/haproxy/blob/master/doc/proxy-protocol.txt) on Traefik's
   [entry points](https://doc.traefik.io/traefik/routing/entrypoints/) or with [`externalTrafficPolicy: Local`](https://kubernetes.io/docs/tasks/access-application-cluster/create-external-load-balancer/#preserving-the-client-source-ip): see [client IP](docs/client-ip.md).
 

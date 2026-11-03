@@ -214,6 +214,10 @@ kind-test: ## Send benign and attack requests to the kind demo and check verdict
 raw-envoy-e2e: ## End-to-end test of raw Envoy with the engine's ext_proc adapter and the examples/raw-envoy samples, in Docker (no cluster)
 	IMAGE=$(IMAGE) hack/raw-envoy/e2e.sh
 
+.PHONY: websocket-e2e
+websocket-e2e: ## End-to-end test of WebSocket message inspection by the engine's proxy, with hack/wsecho, in Docker (no cluster)
+	IMAGE=$(IMAGE) hack/websocket/e2e.sh
+
 .PHONY: kind-down
 kind-down: ## Delete the kind cluster
 	kind delete cluster --name $(KIND_CLUSTER)

@@ -13,7 +13,9 @@
 //
 // The client sends one handshake, with the headers given, and prints
 // "upgraded" when the server answered 101 Switching Protocols and echoed a
-// message, or the status code it answered instead (403, ...).
+// message (-message, or a greeting), the status code it answered instead
+// (403, ...), or "closed CODE" when it closed the WebSocket with that code
+// instead of echoing (1008, ...).
 //
 //	go run ./hack/wsecho -host ws.example.com -origin https://app.example.com 127.0.0.1:18091/chat
 package main
@@ -41,6 +43,7 @@ func main() {
 	listen := flag.String("listen", "", "serve on this `address` instead of running the client")
 	host := flag.String("host", "", "the Host to send")
 	origin := flag.String("origin", "", "the Origin to send (none: no Origin header)")
+	message := flag.String("message", "", "the text message to send once upgraded (default: a greeting), at most 125 bytes")
 	var headers []string
 	flag.Func("header", "a `Name: value` header to send (repeatable)", func(s string) error {
 		if _, _, ok := strings.Cut(s, ":"); !ok {
@@ -65,7 +68,7 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-	out, err := dial(flag.Arg(0), *host, *origin, headers)
+	out, err := dial(flag.Arg(0), *host, *origin, *message, headers)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "wsecho:", err)
 		os.Exit(1)
@@ -95,7 +98,7 @@ func serve(addr string) error {
 
 // dial sends a handshake to target (HOST:PORT/PATH) and, once upgraded,
 // one text message that must come back.
-func dial(target, host, origin string, headers []string) (string, error) {
+func dial(target, host, origin, message string, headers []string) (string, error) {
 	addr, path, _ := strings.Cut(target, "/")
 	path = "/" + path
 	if host == "" {
@@ -138,13 +141,19 @@ func dial(target, host, origin string, headers []string) (string, error) {
 		return "", fmt.Errorf("Sec-WebSocket-Accept %q, want %q", got, want)
 	}
 
-	msg := "hello " + base64.RawURLEncoding.EncodeToString(nonce[:6])
+	msg := message
+	if msg == "" {
+		msg = "hello " + base64.RawURLEncoding.EncodeToString(nonce[:6])
+	}
 	if err := writeText(conn, msg); err != nil {
 		return "", err
 	}
-	echoed, err := readText(br)
+	echoed, closeCode, err := readText(br)
 	if err != nil {
 		return "", err
+	}
+	if closeCode != 0 {
+		return fmt.Sprintf("closed %d", closeCode), nil
 	}
 	if echoed != msg {
 		return "", fmt.Errorf("echoed %q, want %q", echoed, msg)
@@ -171,29 +180,37 @@ func writeText(w io.Writer, msg string) error {
 	return err
 }
 
-// readText reads one unmasked text frame from the server.
-func readText(r io.Reader) (string, error) {
+// readText reads one unmasked text frame from the server, or a close
+// frame, whose code it returns.
+func readText(r io.Reader) (string, int, error) {
 	var head [2]byte
 	if _, err := io.ReadFull(r, head[:]); err != nil {
-		return "", err
+		return "", 0, err
 	}
-	if head[0]&0x0f != 1 || head[1]&0x80 != 0 {
-		return "", fmt.Errorf("unexpected frame %#x %#x", head[0], head[1])
+	op := head[0] & 0x0f
+	if (op != 1 && op != 8) || head[1]&0x80 != 0 {
+		return "", 0, fmt.Errorf("unexpected frame %#x %#x", head[0], head[1])
 	}
 	n := uint64(head[1] & 0x7f)
 	switch n {
 	case 126:
 		var ext [2]byte
 		if _, err := io.ReadFull(r, ext[:]); err != nil {
-			return "", err
+			return "", 0, err
 		}
 		n = uint64(binary.BigEndian.Uint16(ext[:]))
 	case 127:
-		return "", errors.New("frame too long")
+		return "", 0, errors.New("frame too long")
 	}
 	payload := make([]byte, n)
 	if _, err := io.ReadFull(r, payload); err != nil {
-		return "", err
+		return "", 0, err
 	}
-	return string(payload), nil
+	if op == 8 {
+		if len(payload) < 2 {
+			return "", 1005, nil // no status code
+		}
+		return "", int(binary.BigEndian.Uint16(payload)), nil
+	}
+	return string(payload), 0, nil
 }

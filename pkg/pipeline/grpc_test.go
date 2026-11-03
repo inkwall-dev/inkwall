@@ -47,7 +47,7 @@ func TestGRPCFramed(t *testing.T) {
 func TestAsGRPC(t *testing.T) {
 	body := []byte{0, 0, 0, 0, 0}
 	r := &request.Request{Method: http.MethodPost, Headers: http.Header{"Content-Type": {"application/grpc"}}, Body: body, BodyTruncated: false}
-	call := asGRPC(r)
+	call, _ := asGRPC(r)
 	if call == nil || !call.GRPC || call.Body != nil || call.BodyTruncated {
 		t.Fatalf("asGRPC = %+v, want the call without its body", call)
 	}
@@ -55,19 +55,25 @@ func TestAsGRPC(t *testing.T) {
 		t.Fatal("asGRPC changed its argument")
 	}
 	for _, ct := range []string{"application/grpc", "application/grpc+proto", "APPLICATION/GRPC; charset=x", " application/grpc-web ", "application/grpc-web+proto"} {
-		if asGRPC(&request.Request{Method: http.MethodPost, Headers: http.Header{"Content-Type": {ct}}, Body: body}) == nil {
+		if callOf(&request.Request{Method: http.MethodPost, Headers: http.Header{"Content-Type": {ct}}, Body: body}) == nil {
 			t.Errorf("%q: not a gRPC call", ct)
 		}
 	}
 	for _, ct := range []string{"application/grpc+json", "application/grpc-web-text", "application/grpcx", "application/json", ""} {
-		if asGRPC(&request.Request{Method: http.MethodPost, Headers: http.Header{"Content-Type": {ct}}, Body: body}) != nil {
+		if callOf(&request.Request{Method: http.MethodPost, Headers: http.Header{"Content-Type": {ct}}, Body: body}) != nil {
 			t.Errorf("%q: a gRPC call", ct)
 		}
 	}
-	if asGRPC(&request.Request{Method: http.MethodGet, Headers: http.Header{"Content-Type": {"application/grpc"}}}) != nil {
+	if callOf(&request.Request{Method: http.MethodGet, Headers: http.Header{"Content-Type": {"application/grpc"}}}) != nil {
 		t.Error("GET: a gRPC call")
 	}
-	if asGRPC(&request.Request{Method: http.MethodPost, Headers: http.Header{}}) != nil {
+	if callOf(&request.Request{Method: http.MethodPost, Headers: http.Header{}}) != nil {
 		t.Error("no content type: a gRPC call")
 	}
+}
+
+// callOf is asGRPC's call.
+func callOf(r *request.Request) *request.Request {
+	call, _ := asGRPC(r)
+	return call
 }

@@ -4,6 +4,8 @@
 package pipeline
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"net/http"
 	"strings"
@@ -12,14 +14,17 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/request"
 )
 
-// grpcContentTypes are the gRPC media types whose messages are binary
-// protobuf: gRPC and gRPC-Web. gRPC with another codec (application/grpc+json)
-// and gRPC-Web text (base64) are inspected like any other request.
+// grpcContentTypes are the gRPC media types whose messages are protobuf:
+// gRPC, gRPC-Web, and gRPC-Web text, whose body is base64 (true). gRPC
+// with another codec (application/grpc+json) is inspected like any other
+// request.
 var grpcContentTypes = map[string]bool{
-	"application/grpc":           true,
-	"application/grpc+proto":     true,
-	"application/grpc-web":       true,
-	"application/grpc-web+proto": true,
+	"application/grpc":                false,
+	"application/grpc+proto":          false,
+	"application/grpc-web":            false,
+	"application/grpc-web+proto":      false,
+	"application/grpc-web-text":       true,
+	"application/grpc-web-text+proto": true,
 }
 
 // grpcFrameHeader is a gRPC message's prefix: a compressed flag (0 or 1)
@@ -27,29 +32,65 @@ var grpcContentTypes = map[string]bool{
 const grpcFrameHeader = 5
 
 // asGRPC returns r as a gRPC call (request.Request.GRPC) without its body,
-// or nil when r isn't one: not a POST, not exactly one gRPC content type,
-// or a body that isn't gRPC messages. The body check keeps a request that
-// only claims to be gRPC, to slip a JSON or form body past the rules, from
-// being treated as one: such a body doesn't start with a message prefix.
-// A truncated body is checked as far as it goes, but must show at least
-// one message prefix.
-func asGRPC(r *request.Request) *request.Request {
+// and the body's gRPC messages (gRPC-Web text decoded), or nil when r
+// isn't one: not a POST, not exactly one gRPC content type, or a body that
+// isn't gRPC messages. The body check keeps a request that only claims to
+// be gRPC, to slip a JSON or form body past the rules, from being treated
+// as one: such a body doesn't start with a message prefix, or, for
+// gRPC-Web text, isn't base64. A truncated body is checked as far as it
+// goes, but must show at least one message prefix.
+func asGRPC(r *request.Request) (*request.Request, []byte) {
 	if r.Method != http.MethodPost {
-		return nil
+		return nil, nil
 	}
 	ct := r.Headers.Values("Content-Type")
 	if len(ct) != 1 {
-		return nil
+		return nil, nil
 	}
 	mediaType, _, _ := strings.Cut(ct[0], ";")
-	if !grpcContentTypes[strings.ToLower(strings.TrimSpace(mediaType))] || !grpcFramed(r.Body, r.BodyTruncated) {
-		return nil
+	text, ok := grpcContentTypes[strings.ToLower(strings.TrimSpace(mediaType))]
+	if !ok {
+		return nil, nil
+	}
+	messages := r.Body
+	if text {
+		if messages, ok = grpcWebText(r.Body, r.BodyTruncated); !ok {
+			return nil, nil
+		}
+	}
+	if !grpcFramed(messages, r.BodyTruncated) {
+		return nil, nil
 	}
 	call := *r
 	call.Body = nil
 	call.BodyTruncated = false
 	call.GRPC = true
-	return &call
+	return &call, messages
+}
+
+// grpcWebText decodes a gRPC-Web text body: base64 in groups of four
+// characters, each piece the client encoded on its own ending with its
+// padding. A truncated body is decoded up to its last whole group.
+func grpcWebText(body []byte, truncated bool) ([]byte, bool) {
+	if truncated {
+		body = body[:len(body)/4*4]
+	} else if len(body)%4 != 0 {
+		return nil, false
+	}
+	// The decoder skips line breaks, which would shift the groups.
+	if bytes.ContainsAny(body, "\r\n") {
+		return nil, false
+	}
+	out := make([]byte, 0, len(body)/4*3)
+	var group [3]byte
+	for i := 0; i < len(body); i += 4 {
+		n, err := base64.StdEncoding.Decode(group[:], body[i:i+4])
+		if err != nil {
+			return nil, false
+		}
+		out = append(out, group[:n]...)
+	}
+	return out, true
 }
 
 // grpcFramed reports whether body is a sequence of gRPC messages. The last
@@ -81,12 +122,12 @@ var grpcTextLimits = grpcwire.Limits{Depth: 16, Fields: 4096}
 
 const grpcMaxDecompressed = 1 << 20
 
-// grpcText returns the text fields of r's messages, r being a gRPC call
+// grpcText returns the text fields of messages, the gRPC messages of r
 // (asGRPC), and reports whether every message was read whole: not cut,
 // not compressed other than with gzip (grpc-encoding), protobuf, and
 // within the limits.
-func grpcText(r *request.Request) ([]request.Arg, bool) {
-	msgs, ok := grpcwire.Messages(r.Body, r.BodyTruncated)
+func grpcText(r *request.Request, messages []byte) ([]request.Arg, bool) {
+	msgs, ok := grpcwire.Messages(messages, r.BodyTruncated)
 	complete := ok && !r.BodyTruncated
 	encoding := strings.ToLower(strings.TrimSpace(r.Headers.Get("Grpc-Encoding")))
 	budget := int64(grpcMaxDecompressed)

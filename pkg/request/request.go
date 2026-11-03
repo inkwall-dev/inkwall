@@ -54,6 +54,11 @@ type Request struct {
 	// which the rules see as form arguments (ARGS_POST), named by the
 	// path of field numbers ("2.1").
 	GRPCText []Arg
+	// WebSocketText is the text of a WebSocket message the engine's proxy
+	// inspects, which the rules see as form arguments (ARGS_POST): a JSON
+	// message's values by path ("json.user.name"), any other text as
+	// "message".
+	WebSocketText []Arg
 }
 
 // Arg is a named value.

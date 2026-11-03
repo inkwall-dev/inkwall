@@ -6,7 +6,10 @@ package forwardauth
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -57,5 +60,32 @@ func TestGRPCMessages(t *testing.T) {
 			t.Errorf("grpcMessages %v: attack in the message %v, want %v; events %s", on, got, want, logs.String())
 		}
 		_ = conn.Close()
+	}
+}
+
+// TestGRPCWebText: a gRPC-Web text call (base64) through Traefik passes
+// when clean; an attack in its message is denied with grpc-status 7.
+// Before v0.4.0 every one was denied (920420).
+func TestGRPCWebText(t *testing.T) {
+	eval, err := coraza.New(coraza.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	h, err := New(pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 10 * time.Second, GRPCMessages: true}),
+		Config{MaxBodyBytes: 1 << 10, Logger: slog.New(slog.NewJSONHandler(&logs, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(message string) *httptest.ResponseRecorder {
+		r := grpcSubrequest("/helloworld.Greeter/SayHello", base64.StdEncoding.EncodeToString([]byte(grpcMessages(message))))
+		r.Header.Set("Content-Type", "application/grpc-web-text")
+		return serve(h, r)
+	}
+	if w := call("world"); w.Code != http.StatusOK {
+		t.Fatalf("clean: %d; events %s", w.Code, logs.String())
+	}
+	if w := call("1' OR '1'='1' -- "); w.Code != http.StatusForbidden || w.Header().Get("Grpc-Status") != "7" {
+		t.Fatalf("attack: %d %v", w.Code, w.Header())
 	}
 }
