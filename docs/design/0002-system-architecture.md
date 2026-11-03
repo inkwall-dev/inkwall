@@ -662,7 +662,7 @@ engine's deadline plus 500 ms. Body inspection needs `http-buffer-request`, and 
 above the body limit. Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/inkwall/issues/282)); the protocol is in
 [0006 §4](0006-adapter-protocols.md#4-spoe-haproxy-stream-processing-offload-engine).
 
-**The operator's wiring of the HAProxy Kubernetes Ingress Controller** (proposed for v0.4.0,
+**The operator's wiring of the HAProxy Kubernetes Ingress Controller** (decided for v0.4.0,
 [#282](https://github.com/inkwall-dev/inkwall/issues/282); verified on kind with controller v3.2.19, chart 1.54.4, HAProxy 3.2.26):
 
 - **Version.** `mode spop` needs HAProxy 3.1, which ships with controller 3.1 and later
@@ -701,15 +701,39 @@ above the body limit. Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/
   the engine and the files; pods that predate the integration are `PendingRestart`, as for
   Traefik. A controller run with `--disable-config-snippets` covering backends can't be wired
   (`Programmed=False`).
-- **Status: open.** The controller reports nothing per Ingress about its snippets: it drops a
-  snippet that fails HAProxy's check with a log line only. The checks above (annotations intact,
-  every pod with the engine and the files, snippets not disabled) rule out the failures we know
-  of, but not one we can't see, so they don't prove that HAProxy runs the filter. Options: (a)
-  `Programmed=True` on those checks, with that limit documented; (b) a probe: the engine sends a
-  marked request through HAProxy to each protected route and sees its own NOTIFY come back, which
-  proves the filter is in force but sends the request to the app when it isn't; (c)
-  `Programmed=False` (`Unverified`) until one of those is decided. Until it is decided, the wiring
-  isn't built.
+- **Status: a probe proves each pod** (decided). The controller reports nothing per Ingress
+  about its snippets: it drops a snippet that fails HAProxy's check with a log line only. So a
+  protected HAProxy route is `Programmed=False`, reason `Unverified`, until a probe proves that
+  the filter is in force on **every** pod of the controller; `Programmed=True` only then.
+  - **Who probes:** the operator, to each controller pod directly (its pod IP and the HTTP
+    container port, not the Service), so each pod is proven on its own, and the operator reads
+    the answer itself without a new engine-to-operator message. The operator must be able to reach
+    the controller pods' HTTP port: a NetworkPolicy that blocks it leaves the routes
+    `Unverified`, and the docs say so.
+  - **The request:** `GET /.well-known/inkwall-probe/<nonce>`, no body, with the route's host,
+    a random nonce per probe and the header `X-Inkwall-Probe: <MAC>`, an HMAC-SHA256 of the
+    nonce and host under a probe key. The key is a random 32 bytes the operator keeps in a Secret
+    of its own and sends to the engines in the bundle (`probe_key`, outside `content_hash`, like
+    `policy_versions`).
+  - **The answer:** the SPOE adapter recognises the path and a valid MAC before inspection, and
+    answers `action=deny` with the variable `probe` set to an HMAC of the nonce under the key.
+    The route's snippet answers that, first among its rules, with
+    `http-request return status 299` and the header `X-Inkwall-Probe` carrying it. The probe never
+    reaches the app when the filter is active. Without a valid MAC, the path is a request like any
+    other.
+  - **Proof:** status 299 with the expected MAC proves that this pod runs the snippet, the
+    filter and the engine. Anything else is evidence that the route is not protected on that
+    pod, and the status names the pod and what came back (e.g. a 404 from the app). The probe
+    reaches the app only then, on an unused path.
+  - **Rate:** once per route and pod when the route, the policy or the pod changes, and every
+    5 minutes after; at most a few probes at a time. Only `GET` without a body. The probe path is
+    in the docs, so it can be recognised in access logs.
+  - **Static checks** stay, each failure with its own reason, before any probe: the annotations
+    as written (`standalone-backend` included), every running controller pod with the engine and
+    the mounted files (otherwise `PendingRestart`), and no `--disable-config-snippets` covering
+    backends.
+  - `Detect` mode is reported as wired, not as blocking: `Ready` follows `Programmed` and
+    `Enforced` as for the other proxies.
 
 **Built:** the agent, `inkwall-engine spoe`, with a configuration written by hand
 ([protecting HAProxy](../haproxy.md)). **Not yet:** the operator's wiring above.
