@@ -39,7 +39,6 @@ MAX_RESTART_GAP=${MAX_RESTART_GAP:-5}
 OPERATOR_NS=inkwall-system
 NS=inkwall-upgrade
 TRAEFIK_NS=traefik-e2e
-TRAEFIK_SVC=traefik-e2e.$TRAEFIK_NS.svc
 HOST=ingress.upgrade.example.com
 ROUTE_HOST=route.upgrade.example.com
 TRAEFIK_CHART_VERSION=41.6.1 # Traefik v3.7.13, as hack/kind/up.sh
@@ -190,12 +189,20 @@ YAML
 # (HTTP codes, 000 without an answer; each request's curl times, in
 # seconds, 0 for a step it didn't finish). It runs as the pod's process: one started by
 # kubectl exec may die with the exec session.
+#
+# It sends to the Service's ClusterIP, which probe_start writes to
+# /tmp/svc, not to its DNS name (#320): every request that stalled in CI
+# had never connected (connect 0, total 2 s, the curl timeout), and a
+# lookup in the pod (musl, five search domains) that loses a UDP query
+# retries it only after 2.5 s. The probe measures Traefik and the engine,
+# not the cluster's DNS.
 "${KUBECTL[@]}" -n "$NS" create configmap probe --from-file=probe.sh=/dev/stdin --dry-run=client -o yaml <<'SH' |
 trap 'exit 0' TERM
 # c HOST PATH: "CODE DNS/CONNECT/TOTAL" (curl's times, in seconds).
-c() { curl -s -o /dev/null -m 2 -w '%{http_code} %{time_namelookup}/%{time_connect}/%{time_total}' -H "Host: $1" "http://$SVC$2"; }
+c() { curl -s -o /dev/null -m 2 -w '%{http_code} %{time_namelookup}/%{time_connect}/%{time_total}' -H "Host: $1" "http://$svc$2"; }
 while true; do
   if [ -e /tmp/run ]; then
+    read -r svc </tmp/svc
     read -r up _ </proc/uptime
     set -- $(c "$HOST" "$SQLI") $(c "$HOST" /products/42) $(c "$ROUTE_HOST" "$SQLI")
     echo "$up $1 $3 $5 | $2 $4 $6" >>/tmp/probe.log
@@ -215,7 +222,6 @@ spec:
       image: curlimages/curl:8.11.1
       command: ["sh", "/probe/probe.sh"]
       env:
-        - {name: SVC, value: "$TRAEFIK_SVC"}
         - {name: HOST, value: "$HOST"}
         - {name: ROUTE_HOST, value: "$ROUTE_HOST"}
         - {name: SQLI, value: "$SQLI"}
@@ -225,13 +231,17 @@ YAML
 "${KUBECTL[@]}" -n "$NS" rollout status deployment/web --timeout=120s >/dev/null
 "${KUBECTL[@]}" -n "$NS" wait --for=condition=Ready pod/probe --timeout=120s >/dev/null
 
+# traefik_ip: Traefik's Service's ClusterIP, looked up through the API
+# server rather than the cluster's DNS (#320), each time: a Service
+# created again gets another.
+traefik_ip() { "${KUBECTL[@]}" -n "$TRAEFIK_NS" get service traefik-e2e -o jsonpath='{.spec.clusterIP}'; }
 # One request, from the probe pod to Traefik's Service.
 code() {
-  "${KUBECTL[@]}" -n "$NS" exec probe -- curl -s -o /dev/null -m 5 -w '%{http_code}' -H "Host: $1" "http://$TRAEFIK_SVC$2" || true
+  "${KUBECTL[@]}" -n "$NS" exec probe -- curl -s -o /dev/null -m 5 -w '%{http_code}' -H "Host: $1" "http://$(traefik_ip)$2" || true
 }
 status_is() { [[ $(code "$2" "$3") == "$1" ]]; }
 user_header() {
-  "${KUBECTL[@]}" -n "$NS" exec probe -- curl -s -m 5 -H "Host: $1" "http://$TRAEFIK_SVC/" | grep '^X-User: kept' >/dev/null
+  "${KUBECTL[@]}" -n "$NS" exec probe -- curl -s -m 5 -H "Host: $1" "http://$(traefik_ip)/" | grep '^X-User: kept' >/dev/null
 }
 
 # What the user wrote: the routes are back to it after the uninstall.
@@ -292,7 +302,12 @@ wiring_before=$(wiring)
 
 # probe_start / probe_stop NAME MAX_GAP: start and stop the probe;
 # probe_stop checks what it saw.
-probe_start() { "${KUBECTL[@]}" -n "$NS" exec probe -- sh -c 'rm -f /tmp/probe.log; touch /tmp/run'; }
+probe_start() {
+  local ip
+  ip=$(traefik_ip)
+  [[ -n $ip ]] || { fail "probe: no ClusterIP for Service $TRAEFIK_NS/traefik-e2e"; return; }
+  "${KUBECTL[@]}" -n "$NS" exec probe -- sh -c "echo $ip >/tmp/svc; rm -f /tmp/probe.log; touch /tmp/run"
+}
 probe_stop() {
   local name=$1 max=$2 log summary
   "${KUBECTL[@]}" -n "$NS" exec probe -- rm -f /tmp/run
