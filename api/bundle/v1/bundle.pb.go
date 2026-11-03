@@ -984,8 +984,10 @@ type BodyConfig struct {
 	// Inspect request bodies.
 	Inspect bool `protobuf:"varint,1,opt,name=inspect,proto3" json:"inspect,omitempty"`
 	// Bytes of a body that are inspected; 0: the engine's default.
-	MaxBytes      int64          `protobuf:"varint,2,opt,name=max_bytes,json=maxBytes,proto3" json:"max_bytes,omitempty"`
-	OnOversize    OversizeAction `protobuf:"varint,3,opt,name=on_oversize,json=onOversize,proto3,enum=inkwall.bundle.v1.OversizeAction" json:"on_oversize,omitempty"`
+	MaxBytes   int64          `protobuf:"varint,2,opt,name=max_bytes,json=maxBytes,proto3" json:"max_bytes,omitempty"`
+	OnOversize OversizeAction `protobuf:"varint,3,opt,name=on_oversize,json=onOversize,proto3,enum=inkwall.bundle.v1.OversizeAction" json:"on_oversize,omitempty"`
+	// Inspect the text in gRPC calls' messages (docs/grpc.md).
+	GrpcMessages  bool `protobuf:"varint,4,opt,name=grpc_messages,json=grpcMessages,proto3" json:"grpc_messages,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1039,6 +1041,13 @@ func (x *BodyConfig) GetOnOversize() OversizeAction {
 		return x.OnOversize
 	}
 	return OversizeAction_OVERSIZE_ACTION_UNSPECIFIED
+}
+
+func (x *BodyConfig) GetGrpcMessages() bool {
+	if x != nil {
+		return x.GrpcMessages
+	}
+	return false
 }
 
 // WebSocketConfig is what a WebSocket handshake (a request with an
@@ -1238,13 +1247,14 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\tExclusion\x12\x19\n" +
 	"\brule_ids\x18\x01 \x03(\rR\aruleIds\x12\x12\n" +
 	"\x04path\x18\x02 \x01(\tR\x04path\x12\x1a\n" +
-	"\bargument\x18\x03 \x01(\tR\bargument\"\x87\x01\n" +
+	"\bargument\x18\x03 \x01(\tR\bargument\"\xac\x01\n" +
 	"\n" +
 	"BodyConfig\x12\x18\n" +
 	"\ainspect\x18\x01 \x01(\bR\ainspect\x12\x1b\n" +
 	"\tmax_bytes\x18\x02 \x01(\x03R\bmaxBytes\x12B\n" +
 	"\von_oversize\x18\x03 \x01(\x0e2!.inkwall.bundle.v1.OversizeActionR\n" +
-	"onOversize\"\x97\x01\n" +
+	"onOversize\x12#\n" +
+	"\rgrpc_messages\x18\x04 \x01(\bR\fgrpcMessages\"\x97\x01\n" +
 	"\x0fWebSocketConfig\x12'\n" +
 	"\x0fallowed_origins\x18\x01 \x03(\tR\x0eallowedOrigins\x120\n" +
 	"\x14allow_missing_origin\x18\x02 \x01(\bR\x12allowMissingOrigin\x12)\n" +

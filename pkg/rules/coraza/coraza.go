@@ -686,6 +686,9 @@ func (e *Evaluator) evaluate(r *request.Request) (rules.Result, types.Transactio
 	// the pipeline decides what happens to oversized bodies.
 	// Nor is a gRPC call's: binary protobuf, which CRS would parse as a
 	// form.
+	for _, a := range r.GRPCText {
+		tx.AddPostRequestArgument(a.Name, a.Value)
+	}
 	if len(r.Body) > 0 && !r.BodyTruncated && !r.GRPC {
 		it, _, err := tx.WriteRequestBody(r.Body)
 		if err != nil {

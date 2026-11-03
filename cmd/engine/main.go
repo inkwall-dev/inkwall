@@ -130,6 +130,7 @@ type engineConfig struct {
 	maxConcurrent int
 	maxBodyBytes  int64
 	oversize      pipeline.OversizeAction
+	grpcMessages  bool
 	// responses: ext-proc only, the one adapter that sees responses.
 	responses      pipeline.ResponseConfig
 	maxArgs        int
@@ -166,7 +167,7 @@ type engineConfig struct {
 // policyFlags define a policy: in bundle mode the operator's bundle does, so
 // they can't be set.
 var policyFlags = []string{
-	"mode", "failure-mode", "timeout", "oversize-body", "paranoia-level", "anomaly-threshold",
+	"mode", "failure-mode", "timeout", "oversize-body", "grpc-messages", "paranoia-level", "anomaly-threshold",
 	"rules", "rules-before-crs", "skip-paths", "skip-body-paths", "disable-rule-groups",
 	"websocket-origins", "websocket-allow-missing-origin", "websocket-required-headers",
 	"inspect-responses", "max-response-bytes", "oversize-response",
@@ -199,6 +200,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	maxConcurrent := fs.Int("max-concurrent", 0, "maximum concurrent evaluations; extra requests get the failure mode (0 = 2 * CPUs)")
 	maxBody := fs.Int64("max-body-bytes", 64<<10, "request body bytes to inspect (0 disables body inspection); in bundle mode, for policies that don't set body.maxBytes")
 	oversize := fs.String("oversize-body", "auto", "bodies over --max-body-bytes: deny (413 in block mode), allow (forward with the body uninspected, logged), or auto (deny in block mode, allow in detect mode)")
+	grpcMessages := fs.String("grpc-messages", "skip", "gRPC calls' messages: inspect (the text in them, read without a schema; a message that can't be read is handled as an oversized body) or skip (path and metadata only)")
 	// Only ext-proc sees responses: the other adapters don't take the
 	// flags, so none claims to inspect them.
 	inspectResponses, maxResponse, oversizeResponse := new(bool), new(int64), new(string)
@@ -325,6 +327,13 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 		cfg.oversize = pipeline.OversizeDeny
 	default:
 		return cfg, fmt.Errorf("--oversize-body must be auto, allow or deny, got %q", *oversize)
+	}
+	switch *grpcMessages {
+	case "inspect":
+		cfg.grpcMessages = true
+	case "skip":
+	default:
+		return cfg, fmt.Errorf("--grpc-messages must be inspect or skip, got %q", *grpcMessages)
 	}
 	if !*inspectResponses {
 		var stray []string
@@ -627,6 +636,7 @@ func flagMode(cfg engineConfig, metrics *telemetry.Metrics) (pipeline.Inspector,
 		Oversize:      cfg.oversize,
 		Observer:      metrics,
 		Routes:        cfg.routes,
+		GRPCMessages:  cfg.grpcMessages,
 		WebSocket:     cfg.webSocket,
 		Responses:     cfg.responses,
 	})

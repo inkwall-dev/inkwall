@@ -113,6 +113,13 @@ type Config struct {
 	// Routes decides which paths skip inspection entirely or skip only body
 	// inspection (tier T0). Nil inspects everything.
 	Routes *router.Table
+	// GRPCMessages inspects the text in gRPC calls' messages: protobuf
+	// read without its schema (pkg/grpcwire), the text fields given to the
+	// rules as form arguments. A call whose messages can't all be read (a
+	// message cut at the body limit, compressed other than with gzip, not
+	// protobuf) is handled as an oversized body. Off by default: see
+	// docs/design/0002 §8.7.
+	GRPCMessages bool
 	// WebSocket is what a WebSocket handshake must meet (allowed origins,
 	// required headers), checked before the rules. Nil: nothing more than
 	// any request.
@@ -201,6 +208,8 @@ type Pipeline struct {
 	ws       *WebSocketRules
 	// responses: Inspect, MaxBytes, and Oversize resolved for the mode.
 	responses ResponseConfig
+	// grpcMessages: the text in gRPC calls' messages is inspected.
+	grpcMessages bool
 }
 
 // New returns a pipeline that evaluates requests with eval.
@@ -229,6 +238,7 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 			MaxBytes: max(cfg.Responses.MaxBytes, 0),
 			Oversize: cfg.Responses.Oversize.Resolve(cfg.Mode),
 		},
+		grpcMessages: cfg.GRPCMessages,
 	}
 }
 
@@ -324,21 +334,36 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool) (Ve
 // keep.
 func (p *Pipeline) inspect(ctx context.Context, r *request.Request, keep bool) (Verdict, rules.Exchange) {
 	// A gRPC call is inspected without its body, which is binary
-	// protobuf: so it isn't oversized either. Its response, binary too,
-	// isn't inspected.
+	// protobuf: so it isn't oversized either. With GRPCMessages, the text
+	// in its messages is, and a part that can't be read is handled as an
+	// oversized body. Its response, binary too, isn't inspected.
 	if call := asGRPC(r); call != nil {
-		return p.evaluate(ctx, p.request(call, false))
+		if !p.grpcMessages {
+			return p.evaluate(ctx, p.request(call, false))
+		}
+		text, complete := grpcText(r)
+		call.GRPCText = text
+		if complete {
+			return p.evaluate(ctx, p.request(call, false))
+		}
+		return p.partly(ctx, call, false)
 	}
 	if !r.BodyTruncated {
 		return p.evaluate(ctx, p.request(r, keep))
 	}
-	if p.oversize == OversizeDeny && p.mode == ModeBlock {
-		return p.enforce(Verdict{Reason: ReasonOversize}, http.StatusRequestEntityTooLarge), nil
-	}
 	withoutBody := *r
 	withoutBody.Body = nil
 	withoutBody.BodyTruncated = false
-	v, x := p.evaluate(ctx, p.request(&withoutBody, keep))
+	return p.partly(ctx, &withoutBody, keep)
+}
+
+// partly decides r, a request whose body was only partly inspected (r
+// holds what was), by the policy's oversize action.
+func (p *Pipeline) partly(ctx context.Context, r *request.Request, keep bool) (Verdict, rules.Exchange) {
+	if p.oversize == OversizeDeny && p.mode == ModeBlock {
+		return p.enforce(Verdict{Reason: ReasonOversize}, http.StatusRequestEntityTooLarge), nil
+	}
+	v, x := p.evaluate(ctx, p.request(r, keep))
 	if v.Reason != ReasonNone {
 		return v, x
 	}

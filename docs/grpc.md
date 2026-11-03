@@ -1,13 +1,14 @@
 # gRPC
 
 What the engine inspects in a [gRPC](https://grpc.io/docs/what-is-grpc/core-concepts/) call, what
-it doesn't, and how it denies one. Fuller gRPC support (reading the messages, streaming) is
+it doesn't, and how it denies one. Fuller gRPC support (per-message streaming, schemas) is
 tracked in [#275](https://github.com/inkwall-dev/inkwall/issues/275).
 
 ## Contents
 
 - [Which requests are gRPC calls](#which-requests-are-grpc-calls)
 - [What is inspected](#what-is-inspected)
+- [Inspecting the messages](#inspecting-the-messages)
 - [Denied calls](#denied-calls)
 - [Streaming calls](#streaming-calls)
 - [If you serve no gRPC](#if-you-serve-no-grpc)
@@ -38,10 +39,49 @@ the byte `0x0a` that starts most protobuf messages).
   (`/package.Service/Method`), the query, and the headers, which carry the call's metadata. An
   attack there (say, `x-api-key: ${jndi:ldap://...}`) is denied as anywhere else. Metadata whose
   key ends in `-bin` is base64, which rules don't decode.
-- **Not inspected**: the messages. They are binary [protobuf](https://protobuf.dev/), which text
-  rules can't read. So `body.maxBytes` and `body.onOversize` don't apply to gRPC calls, and custom
-  rules on `REQUEST_BODY` or `ARGS` don't see the messages.
+- **Not inspected by default**: the messages. They are binary [protobuf](https://protobuf.dev/),
+  which text rules can't read. So `body.maxBytes` and `body.onOversize` don't apply to gRPC calls,
+  and custom rules on `REQUEST_BODY` or `ARGS` don't see the messages, unless the policy sets
+  `body.grpcMessages: Inspect` ([below](#inspecting-the-messages)).
 - **Allowed**: the call's content type, which the Core Rule Set doesn't list (rule 920420).
+
+## Inspecting the messages
+
+From v0.4.0, a policy can have the text in the messages inspected:
+
+```yaml
+spec:
+  body:
+    grpcMessages: Inspect # default: Skip
+```
+
+(The engine's flag, without the operator: `--grpc-messages inspect`.)
+
+- **What is read:** the body, up to `body.maxBytes`, as gRPC messages, each read as protobuf
+  without its schema. A field whose bytes are printable UTF-8 is text, and a field whose bytes
+  are a protobuf message is read as one, down to 16 levels. Numbers and binary bytes give nothing.
+- **What the rules see:** each text field as a form argument (`ARGS`, `ARGS_POST`) named by its
+  field numbers: `1` is field 1 of the message, `2.1` field 1 of the message in field 2. An
+  attack in a field (`name: "1' OR '1'='1' -- "`) is denied as in a form. `REQUEST_BODY` stays
+  empty. An exclusion names one as any argument (`when: {argument: "2.1"}`).
+- **Compressed messages:** `grpc-encoding: gzip` is decompressed, up to 1 MiB per call. Another
+  encoding can't be read.
+- **What can't be read** is handled as an oversized body, by `body.onOversize`: denied in `Block`
+  mode by default (`RESOURCE_EXHAUSTED`, HTTP 413), logged in `Detect` mode. That is a message
+  cut at `body.maxBytes` (a client stream longer than the limit), compressed other than with
+  gzip, not protobuf, or with more than 4,096 text fields. With long client streams, set
+  `body.onOversize: Allow`: what fits under the limit is still inspected.
+- **Argument limit:** the text fields count against the engine's argument limit (1,000 by
+  default), as a form's or JSON body's do: more is denied (400, rule 200005).
+
+**False positives.** Text in messages matches the rules as the same text in a form would. Binary
+fields add their own: random bytes are sometimes printable, and a short run of them like `|W`
+can match a command or SQL injection rule. Measured with the Core Rule Set at paranoia level 1,
+that is about 1 message in 10,000 with four short random `bytes` fields, and none in real
+protobuf messages carrying names, paths and text. That is why it is off by default: turn it on in
+`Detect` mode first, read the events for a while, and add exclusions (`when: {argument: "3"}`) for binary
+fields that match before `Block`. The measurement and the decision are in
+[0002 §8.7](design/0002-system-architecture.md#87-grpc-messages).
 
 ## Denied calls
 
