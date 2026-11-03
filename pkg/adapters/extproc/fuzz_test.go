@@ -16,7 +16,9 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	filterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"golang.org/x/net/http/httpguts"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 
 	"github.com/inkwall-dev/inkwall/pkg/adapters/internal/httpadapter"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
@@ -58,6 +60,11 @@ const fuzzMaxBody = 16
 // of the body; a body Envoy doesn't send whole is marked truncated, never
 // taken as complete — unless, sent without end of stream (trailers follow),
 // it is under the limit and exactly its Content-Length long.
+//
+// mode also chooses the verdict: allow, or deny with 403 or 503. A denial
+// is an immediate response with that status, or, for a request with a
+// gRPC content type, its gRPC status: then with header values Envoy
+// accepts, and no body, which Envoy would make the grpc-message.
 func FuzzExtProc(f *testing.F) {
 	f.Fuzz(func(t *testing.T, method, path, authority, scheme, name, value string, body []byte, eos, bodyEOS bool, mode uint8) {
 		bodyMode := filterv3.ProcessingMode_BodySendMode(mode % 6)
@@ -79,7 +86,7 @@ func FuzzExtProc(f *testing.F) {
 				RequestBody: &extprocv3.HttpBody{Body: body, EndOfStream: bodyEOS},
 			}})
 		}
-		insp := &inspector{}
+		insp := &inspector{deny: []int{0, 403, 503}[(mode/6)%3]}
 		s, err := New(insp, Config{MaxBodyBytes: fuzzMaxBody, Logger: slog.New(slog.DiscardHandler)})
 		if err != nil {
 			t.Fatal(err)
@@ -98,12 +105,16 @@ func FuzzExtProc(f *testing.F) {
 		if len(insp.got) > 1 {
 			t.Fatalf("inspected %d times", len(insp.got))
 		}
-		for _, r := range stream.out {
-			if r.GetImmediateResponse() != nil {
-				t.Fatalf("allowed request answered %v", r)
+		req := insp.got[0]
+		if insp.deny != 0 {
+			checkDenial(t, stream.out, req, insp.deny)
+		} else {
+			for _, r := range stream.out {
+				if r.GetImmediateResponse() != nil {
+					t.Fatalf("allowed request answered %v", r)
+				}
 			}
 		}
-		req := insp.got[0]
 		if req.Method != method || req.RawURI != path || req.Host != authority {
 			t.Errorf("inspected %s %q (host %q), Envoy sent %s %q (host %q)", req.Method, req.RawURI, req.Host, method, path, authority)
 		}
@@ -281,4 +292,28 @@ func FuzzExtProcResponse(f *testing.F) {
 			}
 		}
 	})
+}
+
+// checkDenial checks that out ends with the denial of req with status.
+func checkDenial(t *testing.T, out []*extprocv3.ProcessingResponse, req *request.Request, status int) {
+	t.Helper()
+	ir := out[len(out)-1].GetImmediateResponse()
+	if ir == nil {
+		t.Fatalf("denied request answered %v", out)
+	}
+	for _, h := range ir.GetHeaders().GetSetHeaders() {
+		if v := h.GetHeader().GetRawValue(); !httpguts.ValidHeaderFieldValue(string(v)) {
+			t.Errorf("header %s: invalid value %q", h.GetHeader().GetKey(), v)
+		}
+	}
+	g := httpadapter.GRPCOf(req.Headers)
+	if g == httpadapter.NotGRPC {
+		if int(ir.GetStatus().GetCode()) != status || ir.GetGrpcStatus() != nil {
+			t.Errorf("HTTP denial %v, want status %d", ir, status)
+		}
+		return
+	}
+	if ir.GetGrpcStatus() == nil || codes.Code(ir.GetGrpcStatus().GetStatus()) != httpadapter.GRPCCode(status) || len(ir.GetBody()) != 0 {
+		t.Errorf("%v denial %v, want grpc_status %v and no body", g, ir, httpadapter.GRPCCode(status))
+	}
 }
