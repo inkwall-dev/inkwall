@@ -199,7 +199,10 @@ sent and continued. So is a response that isn't inspected at all, though Envoy s
 policy on the route inspects responses, or Envoy's configuration asks for them). A body Envoy cut (no `end_of_stream`, and not its full `Content-Length`) is
 handled as oversized; a body Envoy doesn't send in one piece (`NONE`, `STREAMED` outside
 observability mode) goes uninspected, as oversized. In observability mode the body comes in chunks,
-gathered up to the limit as for requests, and the stream is closed once the response is decided.
+gathered up to the limit as for requests, and the stream is closed once the response is decided. There
+Envoy doesn't hold the request, so the upstream may answer before the client has sent all of its
+body: the response's messages are queued (up to 10 MiB of body) until the request is decided on
+its whole body, then handled.
 The kept transaction is released when the response is decided or the stream ends. A WebSocket handshake allowed on its headers (CONTINUE_AND_REPLACE) keeps
 none: its 101 is continued, and the upgraded stream's data is never inspected.
 

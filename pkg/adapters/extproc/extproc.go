@@ -180,6 +180,14 @@ type exchange struct {
 	respLimit    int64
 	// respDone: the response was decided.
 	respDone bool
+	// pending are response messages that came, in observability mode,
+	// before the request was decided (Envoy doesn't hold the request: the
+	// upstream may answer before the client sent all of its body), handled
+	// once it is; queued holds their body bytes, at most maxQueued, and
+	// queueCut says some were dropped.
+	pending  []*extprocv3.ProcessingRequest
+	queued   int64
+	queueCut bool
 }
 
 // done reports whether nothing more is needed in observability mode: the
@@ -202,6 +210,9 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			// though the stream is gone.
 			x.setBody(x.streamed, false)
 			s.verdict(context.WithoutCancel(ctx), x, phaseRequestBody)
+			if s.replay(context.WithoutCancel(ctx), x) != nil {
+				return err
+			}
 		}
 		if err != nil && x.observe && x.respWaiting {
 			x.setResponseBody(x.respStreamed, false)
@@ -219,7 +230,14 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			x.respMode = msg.GetProtocolConfig().GetResponseBodyMode()
 			x.observe = msg.GetObservabilityMode()
 		}
+		if x.observe && x.waiting && isResponse(msg) {
+			x.queue(msg)
+			continue
+		}
 		resp, err := s.handle(ctx, x, msg)
+		if err == nil && x.observe && !x.waiting {
+			err = s.replay(ctx, x)
+		}
 		if err != nil {
 			s.logger.LogAttrs(ctx, slog.LevelError, "invalid ext_proc stream", slog.Any("error", err))
 			return status.Error(codes.InvalidArgument, err.Error())
@@ -399,6 +417,45 @@ func (s *Server) onResponse(ctx context.Context, x *exchange, p phase) (*extproc
 		return allow(p, nil), nil
 	}
 	return nil, nil
+}
+
+// maxQueued is the most of a response body queued before its request is
+// decided: the largest responses.maxBytes (policy.MaxBodyBytes).
+const maxQueued = 10 << 20
+
+func isResponse(m *extprocv3.ProcessingRequest) bool {
+	return m.GetResponseHeaders() != nil || m.GetResponseBody() != nil || m.GetResponseTrailers() != nil
+}
+
+// queue keeps a response message until the request is decided. Past
+// maxQueued body bytes the rest is dropped, end of stream with it, so the
+// response is decided at the stream's end on the prefix, as truncated.
+func (x *exchange) queue(m *extprocv3.ProcessingRequest) {
+	if x.queueCut {
+		return
+	}
+	if b := m.GetResponseBody(); b != nil {
+		if room := maxQueued - x.queued; int64(len(b.GetBody())) > room {
+			x.queueCut = true
+			m = &extprocv3.ProcessingRequest{Request: &extprocv3.ProcessingRequest_ResponseBody{
+				ResponseBody: &extprocv3.HttpBody{Body: b.GetBody()[:room]}}}
+		}
+		x.queued += int64(len(m.GetResponseBody().GetBody()))
+	}
+	x.pending = append(x.pending, m)
+}
+
+// replay handles the response messages queued while the request was
+// undecided; in observability mode, so their answers go nowhere.
+func (s *Server) replay(ctx context.Context, x *exchange) error {
+	pending := x.pending
+	x.pending, x.queued = nil, 0
+	for _, m := range pending {
+		if _, err := s.handle(ctx, x, m); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // onResponseHeaders inspects the response now, or waits for its body.

@@ -8,6 +8,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"io"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -314,5 +315,44 @@ func TestResponseUpgrade(t *testing.T) {
 	}
 	if len(rec.got) != 0 {
 		t.Errorf("an upgraded stream's response inspected: %v", rec.got)
+	}
+}
+
+// In observability mode Envoy doesn't hold the request: the upstream may
+// answer before the client has sent all of its body (an HTTP/2 body with
+// trailers, an app that answers before reading). The request is still
+// decided on its whole body, not as oversized, and then its response. (A
+// request the rules flag keeps no evaluation for its response: its event
+// stands.)
+func TestResponseBeforeRequestBodyObserved(t *testing.T) {
+	trailers := &extprocv3.ProcessingRequest{Request: &extprocv3.ProcessingRequest_RequestTrailers{
+		RequestTrailers: &extprocv3.HttpTrailers{}}}
+	const attack = "%27%20OR%20%271%27%3D%271"
+	for _, tc := range []struct {
+		name string
+		last []*extprocv3.ProcessingRequest // what ends the request
+		want map[string]string              // event reasons by phase
+	}{
+		{"attack, body end", []*extprocv3.ProcessingRequest{body(attack, true)}, map[string]string{"request": "rule"}},
+		{"attack, trailers", []*extprocv3.ProcessingRequest{body(attack, false), trailers}, map[string]string{"request": "rule"}},
+		{"benign, body end", []*extprocv3.ProcessingRequest{body("23", true)}, map[string]string{"response": "rule"}},
+		{"benign, trailers", []*extprocv3.ProcessingRequest{body("23", false), trailers}, map[string]string{"response": "rule"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			e := newEnvoy(t, newResponsePipeline(t, pipeline.ModeDetect, 256, pipeline.OversizeAuto), 64, &logs)
+			first := withModes(headers("POST", "/form", false, "content-type", "application/x-www-form-urlencoded"),
+				filterv3.ProcessingMode_STREAMED, filterv3.ProcessingMode_STREAMED)
+			msgs := []*extprocv3.ProcessingRequest{first, body("q=1", false),
+				respHeaders(500, false, "content-type", "text/html"), respBody(sqlError, true)}
+			e.observe(t, append(msgs, tc.last...)...)
+			got := map[string]string{}
+			for _, ev := range securityEvents(t, &logs) {
+				got[ev["phase"].(string)], _ = ev["reason"].(string)
+			}
+			if !maps.Equal(got, tc.want) {
+				t.Errorf("events by phase %v, want %v: %s", got, tc.want, logs.String())
+			}
+		})
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -193,11 +194,13 @@ const fuzzMaxResponse = 16
 // prefix of what Envoy sent, marked truncated unless it is complete; and
 // only an answer to the last message replaces it.
 func FuzzExtProcResponse(f *testing.F) {
-	f.Add("200", "content-type", "text/html", []byte("<p>hi</p>"), false, true, uint8(2), false, 3, false)
-	f.Add("500", "content-type", "application/json", []byte(`{"e":"DENY"}`), false, false, uint8(5), true, 0, true)
-	f.Add("204", "x", "y", []byte{}, true, true, uint8(0), false, 0, false)
-	f.Add("200", "content-encoding", "gzip", []byte("\x1f\x8b\x08"), false, false, uint8(2), false, -1, true)
-	f.Fuzz(func(t *testing.T, status, name, value string, body []byte, eos, bodyEOS bool, mode uint8, observe bool, split int, trailers bool) {
+	f.Add("200", "content-type", "text/html", []byte("<p>hi</p>"), false, true, uint8(2), false, 3, false, uint8(0))
+	// Observed: the response comes before the request's body ends.
+	f.Add("500", "content-type", "text/html", []byte("<p>DENY</p>"), false, true, uint8(1), true, 2, false, uint8(2))
+	f.Add("500", "content-type", "application/json", []byte(`{"e":"DENY"}`), false, false, uint8(5), true, 0, true, uint8(0))
+	f.Add("204", "x", "y", []byte{}, true, true, uint8(0), false, 0, false, uint8(0))
+	f.Add("200", "content-encoding", "gzip", []byte("\x1f\x8b\x08"), false, false, uint8(2), false, -1, true, uint8(0))
+	f.Fuzz(func(t *testing.T, status, name, value string, body []byte, eos, bodyEOS bool, mode uint8, observe bool, split int, trailers bool, early uint8) {
 		respMode := filterv3.ProcessingMode_BodySendMode(mode % 6)
 		first := &extprocv3.ProcessingRequest{
 			Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{
@@ -238,6 +241,16 @@ func FuzzExtProcResponse(f *testing.F) {
 					ResponseTrailers: &extprocv3.HttpTrailers{},
 				}})
 			}
+		}
+		if observe && early > 0 {
+			// Observed, a POST whose body ends after the response's early
+			// messages: Envoy doesn't hold the request.
+			first.Request.(*extprocv3.ProcessingRequest_RequestHeaders).RequestHeaders.EndOfStream = false
+			first.GetRequestHeaders().GetHeaders().Headers[0].RawValue = []byte("POST")
+			at := 1 + int(early)%len(in)
+			end := &extprocv3.ProcessingRequest{Request: &extprocv3.ProcessingRequest_RequestBody{
+				RequestBody: &extprocv3.HttpBody{Body: []byte("q=1"), EndOfStream: true}}}
+			in = slices.Insert(in, at, end)
 		}
 		rec := &responseRecorder{}
 		p := pipeline.New(rec, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 10 * time.Second,
