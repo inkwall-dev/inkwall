@@ -7,7 +7,8 @@
 // Envoy opens one gRPC stream per HTTP request and sends the request
 // headers, then the body if its processing mode asks for it. The adapter
 // answers an allowed request with CONTINUE and a denied one with an
-// immediate response carrying the verdict's status. Later messages (the
+// immediate response carrying the verdict's status, or, for a gRPC call,
+// its gRPC status (trailers-only). Later messages (the
 // response headers and body, if the filter sends them) are answered with
 // CONTINUE, unless the request's policy inspects responses.
 //
@@ -465,9 +466,17 @@ func (s *Server) responseVerdict(ctx context.Context, x *exchange, p phase) *ext
 		httpadapter.LogEvent(ctx, s.logger, s.events, x.req, x.path, v)
 	}
 	if v.Action == pipeline.ActionDeny {
-		return deny(v.Status, x.req.ID)
+		return denial(x.req, v.Status)
 	}
 	return allow(p, nil)
+}
+
+// denial denies req's stream with status: a gRPC call with a gRPC status.
+func denial(req *request.Request, status int) *extprocv3.ProcessingResponse {
+	if g := httpadapter.GRPCOf(req.Headers); g != httpadapter.NotGRPC {
+		return denyGRPC(g, status, req.ID)
+	}
+	return deny(status, req.ID)
 }
 
 // toResponse reads the response's status and headers. Envoy validated
@@ -511,7 +520,7 @@ func (s *Server) verdict(ctx context.Context, x *exchange, p phase) *extprocv3.P
 		httpadapter.LogEvent(ctx, s.logger, s.events, x.req, x.path, v)
 	}
 	if v.Action == pipeline.ActionDeny {
-		return deny(v.Status, x.req.ID)
+		return denial(x.req, v.Status)
 	}
 	m := &extprocv3.HeaderMutation{}
 	if x.setID {
@@ -705,6 +714,39 @@ func deny(code int, id string) *extprocv3.ProcessingResponse {
 			}},
 			Body:    []byte(http.StatusText(code) + "\n"),
 			Details: "inkwall_denied",
+		},
+	}}
+}
+
+// denyGRPC answers a denied gRPC call in the trailers-only form: the gRPC
+// status in the headers, and no body.
+//
+// For gRPC, Envoy answers a local reply as a gRPC call itself: HTTP 200,
+// content-type application/grpc, grpc_status (or a status from the HTTP
+// one) as grpc-status, and the body, if any, as grpc-message. So there is
+// no body, which would replace the grpc-message, and the HTTP status stays
+// the verdict's, for a client Envoy doesn't take for gRPC (one over
+// HTTP/1.1). Envoy takes no gRPC-Web request for gRPC, so a gRPC-Web
+// denial is answered with HTTP 200 here, as the gRPC-Web spec says.
+func denyGRPC(g httpadapter.GRPCProtocol, code int, id string) *extprocv3.ProcessingResponse {
+	httpStatus := code
+	if g != httpadapter.GRPC {
+		httpStatus = http.StatusOK
+	}
+	grpcStatus := httpadapter.GRPCCode(code)
+	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ImmediateResponse{
+		ImmediateResponse: &extprocv3.ImmediateResponse{
+			// #nosec G115 -- an HTTP status
+			Status: &typev3.HttpStatus{Code: typev3.StatusCode(httpStatus)},
+			Headers: &extprocv3.HeaderMutation{SetHeaders: []*corev3.HeaderValueOption{
+				header("content-type", g.ContentType()),
+				header("grpc-status", strconv.Itoa(int(grpcStatus))),
+				header("grpc-message", httpadapter.GRPCMessage(code, id)),
+				header("x-content-type-options", "nosniff"),
+				header("x-request-id", id),
+			}},
+			GrpcStatus: &extprocv3.GrpcStatus{Status: uint32(grpcStatus)},
+			Details:    "inkwall_denied",
 		},
 	}}
 }
