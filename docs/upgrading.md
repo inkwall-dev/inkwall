@@ -32,7 +32,7 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
   they could stay `Ready=True` while nothing was inspected. The `InkwallConfig` has a new
   `Suspended` condition. See [suspending inspection](../deploy/helm/inkwall/README.md#suspending-inspection).
 - **A policy left out of a bundle too large to publish says so.** When the bundle doesn't fit its
-  Secrets (over 7.2 MiB compressed), the policies it would add or change are `Accepted=False` and
+  Secrets (over 7,200 KiB compressed), the policies it would add or change are `Accepted=False` and
   `Ready=False`, reason `BundleTooLarge`, until it fits. In 0.3.0 they kept the conditions of their
   previous spec, `Accepted=True` included, while engines ran that previous spec.
 
