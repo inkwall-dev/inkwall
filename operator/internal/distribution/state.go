@@ -107,8 +107,11 @@ type Store struct {
 	signed  *bundlev1.SignedBundle
 	version uint64
 	changed chan struct{}
-	// policies are the IDs of the bundle's policies.
-	policies map[string]bool
+	// policies are the bundle's policies: by ID, the first bundle that
+	// enforces each as it is in this one (bundle.PolicyVersions).
+	policies map[string]uint64
+	// suspended: the bundle suspends inspection.
+	suspended bool
 }
 
 // NewStore returns an empty store.
@@ -126,19 +129,36 @@ func (s *Store) Set(signed *bundlev1.SignedBundle, version uint64) {
 	s.changed = make(chan struct{})
 }
 
-// SetPolicies records the IDs of the current bundle's policies, the only
-// ones whose request counts are taken from engines.
-func (s *Store) SetPolicies(ids map[string]bool) {
+// SetPolicies records the current bundle's policies, the only ones whose
+// request counts are taken from engines, with the first bundle that
+// enforces each as it is now; and whether the bundle suspends inspection.
+func (s *Store) SetPolicies(versions map[string]uint64, suspended bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.policies = ids
+	s.policies, s.suspended = versions, suspended
 }
 
 // HasPolicy reports whether the current bundle has the policy id.
 func (s *Store) HasPolicy(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	_, ok := s.policies[id]
+	return ok
+}
+
+// PolicyVersion returns the first bundle that enforces the policy id as
+// the current bundle does; 0 if it doesn't have it.
+func (s *Store) PolicyVersion(id string) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.policies[id]
+}
+
+// Suspended reports whether the current bundle suspends inspection.
+func (s *Store) Suspended() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.suspended
 }
 
 // Current returns the current bundle (nil before the first), its version,

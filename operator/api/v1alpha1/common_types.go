@@ -21,6 +21,10 @@ const (
 	// cluster is enrolled and connected to the optional control plane
 	// (GitOps and Managed mode only).
 	ConditionControlPlaneConnected = "ControlPlaneConnected"
+	// ConditionSuspended, on the InkwallConfig, is True while the published
+	// bundle suspends inspection (spec.suspend): every engine allows every
+	// request.
+	ConditionSuspended = "Suspended"
 )
 
 // SecretReference names a Secret in a given namespace.

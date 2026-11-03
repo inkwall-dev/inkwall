@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -55,6 +56,10 @@ func token(ctx context.Context, t *testing.T, namespace, sa string) string {
 // allowed to read the bundle Secret, get the bundle over TLS, and their
 // acks and nacks become each policy's Enforced condition.
 func testDistribution(ctx context.Context, t *testing.T, c client.Client) {
+	// testBundles left the cluster suspended.
+	cfg := &wafv1alpha1.InkwallConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+	update(ctx, t, c, cfg, func(cfg *wafv1alpha1.InkwallConfig) { cfg.Spec.Suspend = false })
+
 	for _, o := range []client.Object{
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "edge"}},
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "edge", Name: "traefik"}},
@@ -191,6 +196,41 @@ func testDistribution(ctx context.Context, t *testing.T, c client.Client) {
 		return "still in detect mode"
 	})
 	wantEnforced("edit enforced", metav1.ConditionTrue, distribution.ReasonEnforced, "every engine runs bundle")
+
+	// Suspended, nothing is inspected: the policy is neither Enforced nor
+	// Ready, and says why; the InkwallConfig too (#263). Resumed, the
+	// policy is Enforced again once the engine runs the bundle that
+	// resumes it.
+	wantSuspended := func(what string, st metav1.ConditionStatus) {
+		t.Helper()
+		eventually(t, what, func() string {
+			var got wafv1alpha1.InkwallConfig
+			if err := c.Get(ctx, client.ObjectKeyFromObject(cfg), &got); err != nil {
+				return err.Error()
+			}
+			cond := meta.FindStatusCondition(got.Status.Conditions, wafv1alpha1.ConditionSuspended)
+			if cond == nil || cond.Status != st || cond.ObservedGeneration != got.Generation {
+				return fmt.Sprintf("InkwallConfig Suspended condition %+v, want %s", cond, st)
+			}
+			return ""
+		})
+	}
+	update(ctx, t, c, cfg, func(cfg *wafv1alpha1.InkwallConfig) { cfg.Spec.Suspend = true })
+	wantEnforced("suspended", metav1.ConditionFalse, "Suspended", "InkwallConfig default")
+	eventually(t, "suspended: not Ready", func() string {
+		var got wafv1alpha1.WAFPolicy
+		if err := c.Get(ctx, client.ObjectKeyFromObject(pol), &got); err != nil {
+			return err.Error()
+		}
+		if cond := meta.FindStatusCondition(got.Status.Conditions, wafv1alpha1.ConditionReady); cond == nil || cond.Status != metav1.ConditionFalse {
+			return fmt.Sprintf("Ready %+v", cond)
+		}
+		return ""
+	})
+	wantSuspended("the InkwallConfig suspended", metav1.ConditionTrue)
+	update(ctx, t, c, cfg, func(cfg *wafv1alpha1.InkwallConfig) { cfg.Spec.Suspend = false })
+	wantEnforced("resumed", metav1.ConditionTrue, distribution.ReasonEnforced, "every engine runs bundle")
+	wantSuspended("the InkwallConfig resumed", metav1.ConditionFalse)
 
 	// An engine that rejects the bundle shows up, until it goes away.
 	bad := engine("traefik-2", "traefik")

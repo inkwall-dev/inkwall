@@ -36,10 +36,6 @@ import (
 // cluster's public key in files. The web/web policy (block mode, from
 // testDistribution) then blocks an attack in the engine.
 func testEngine(ctx context.Context, t *testing.T, c client.Client) {
-	// testBundles left the cluster suspended.
-	cfg := &wafv1alpha1.InkwallConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
-	update(ctx, t, c, cfg, func(cfg *wafv1alpha1.InkwallConfig) { cfg.Spec.Suspend = false })
-
 	var certs, keys corev1.Secret
 	if err := c.Get(ctx, types.NamespacedName{Namespace: "default", Name: "inkwall-operator-webhook-tls"}, &certs); err != nil {
 		t.Fatal(err)

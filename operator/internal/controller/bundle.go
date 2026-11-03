@@ -51,7 +51,7 @@ import (
 // cluster.
 //
 // +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies;wafrulesets;clusterwafrulesets;inkwallconfigs,verbs=get;list;watch
-// +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies/status;wafrulesets/status;clusterwafrulesets/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies/status;wafrulesets/status;clusterwafrulesets/status;inkwallconfigs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=traefik.io,resources=ingressroutes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes;gateways;gatewayclasses,verbs=get;list;watch
@@ -81,6 +81,17 @@ var HTTPRouteGVK = schema.GroupVersionKind{Group: gatewayv1.GroupName, Version: 
 
 // warnBytes is the compressed size past which publishing a bundle warns.
 const warnBytes = bundle.MaxCompressedBytes * 3 / 4
+
+// Reasons the builder reports.
+const (
+	// ReasonBundleTooLarge: Accepted is False because the bundle with the
+	// policy as it is now doesn't fit its Secrets, so it isn't published.
+	ReasonBundleTooLarge = "BundleTooLarge"
+	// ReasonSuspended and ReasonNotSuspended: the InkwallConfig's
+	// Suspended condition.
+	ReasonSuspended    = "Suspended"
+	ReasonNotSuspended = "NotSuspended"
+)
 
 // clusterRequest is the single work item: every change rebuilds the whole
 // bundle.
@@ -282,8 +293,15 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 		if err != nil {
 			if errors.Is(err, bundle.ErrTooLarge) {
 				// Retrying won't help until the policy shrinks; keep the
-				// current bundle.
+				// current bundle, and say so on the policies it doesn't
+				// enforce as they are now.
 				logger.Error(err, "bundle not published")
+				if err := r.writeTooLarge(ctx, res, current, next, err, policies.Items, ruleSets.Items, clusterRuleSets.Items); err != nil {
+					return reconcile.Result{}, err
+				}
+				if err := r.writeConfigStatus(ctx, cfg, current); err != nil {
+					return reconcile.Result{}, err
+				}
 				return reconcile.Result{RequeueAfter: resync}, nil
 			}
 			return reconcile.Result{}, fmt.Errorf("store bundle %d: %w", next.GetVersion(), err)
@@ -306,6 +324,9 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	}
 
 	if err := r.writeStatus(ctx, res, next, policies.Items, ruleSets.Items, clusterRuleSets.Items); err != nil {
+		return reconcile.Result{}, err
+	}
+	if err := r.writeConfigStatus(ctx, cfg, next); err != nil {
 		return reconcile.Result{}, err
 	}
 	if keys.Phase() != bundle.PhaseIdle {
@@ -506,6 +527,63 @@ func (r *BundleReconciler) writeStatus(ctx context.Context, res resolver.Result,
 		}
 	}
 	return nil
+}
+
+// writeTooLarge writes the statuses of a build whose bundle, next, is too
+// large to publish (tooLarge says by how much): the engines keep running
+// current. A policy next would change (bundle.PolicyHashes), or add, is
+// not Accepted: its spec isn't running, and a status for the generation
+// before would claim it is. The others run as they are: their status is
+// current's.
+func (r *BundleReconciler) writeTooLarge(ctx context.Context, res resolver.Result, current, next *bundlev1.Bundle, tooLarge error,
+	policies []wafv1alpha1.WAFPolicy, ruleSets []wafv1alpha1.WAFRuleSet, clusterRuleSets []wafv1alpha1.ClusterWAFRuleSet) error {
+	was, err := bundle.PolicyHashes(current)
+	if err != nil {
+		return err
+	}
+	now, err := bundle.PolicyHashes(next)
+	if err != nil {
+		return err
+	}
+	running := "no bundle is published yet"
+	if current != nil {
+		running = fmt.Sprintf("engines run bundle %d, without this spec", current.GetVersion())
+	}
+	statuses := make(map[types.NamespacedName]resolver.Status, len(res.PolicyStatus))
+	for key, st := range res.PolicyStatus {
+		id := resolver.PolicyID(key.Namespace, key.Name)
+		if h, ok := now[id]; ok && st.Applied {
+			if w, ok := was[id]; !ok || w != h {
+				st = resolver.Status{Reason: ReasonBundleTooLarge, Message: fmt.Sprintf(
+					"not published: %v; %s. Shrink this policy, its rule sets or others until the bundle fits", tooLarge, running)}
+			}
+		}
+		statuses[key] = st
+	}
+	res.PolicyStatus = statuses
+	return r.writeStatus(ctx, res, current, policies, ruleSets, clusterRuleSets)
+}
+
+// writeConfigStatus reports on the InkwallConfig whether the published
+// bundle suspends inspection.
+func (r *BundleReconciler) writeConfigStatus(ctx context.Context, cfg *wafv1alpha1.InkwallConfig, published *bundlev1.Bundle) error {
+	if cfg == nil {
+		return nil
+	}
+	cond := metav1.Condition{Type: wafv1alpha1.ConditionSuspended, Status: metav1.ConditionFalse, Reason: ReasonNotSuspended,
+		Message: "engines inspect requests as the policies say", ObservedGeneration: cfg.Generation}
+	if published.GetSuspended() {
+		cond.Status, cond.Reason = metav1.ConditionTrue, ReasonSuspended
+		cond.Message = fmt.Sprintf("bundle %d suspends inspection: every engine allows every request", published.GetVersion())
+	}
+	if published.GetSuspended() != cfg.Spec.Suspend {
+		// The bundle with the switch flipped isn't published: too large.
+		cond.Message += fmt.Sprintf("; spec.suspend is %t, but its bundle couldn't be published (see the operator's log)", cfg.Spec.Suspend)
+	}
+	return r.updateStatus(ctx, cfg, func(o client.Object) bool {
+		c := o.(*wafv1alpha1.InkwallConfig)
+		return meta.SetStatusCondition(&c.Status.Conditions, cond)
+	})
 }
 
 func (r *BundleReconciler) updateRuleSetStatus(ctx context.Context, obj client.Object, st resolver.Status) error {

@@ -15,6 +15,7 @@ builds them into a signed [bundle](../../../docs/glossary.md#bundle), serves the
 - [Integration permissions](#integration-permissions)
 - [Connecting to a control plane](#connecting-to-a-control-plane)
 - [Rotating the signing key](#rotating-the-signing-key)
+- [Suspending inspection](#suspending-inspection)
 - [Uninstalling](#uninstalling)
   - [Turning injection off](#turning-injection-off)
   - [Deleting a policy](#deleting-a-policy)
@@ -200,6 +201,26 @@ kubectl annotate inkwallconfig default --overwrite waf.inkwall.dev/rotate-signin
 To rotate it on a schedule, set `spec.signingKey.rotationInterval`. Traffic is unaffected.
 [Rotating the bundle signing key](../../../docs/key-rotation.md) explains the phases, how to check
 them and what a rotation waits for.
+
+## Suspending inspection
+
+The emergency switch: every engine allows every request, within seconds, and nothing is removed.
+
+```sh
+kubectl patch inkwallconfig default --type merge -p '{"spec":{"suspend":true}}'
+```
+
+While inspection is suspended, every `WAFPolicy` reports it: `Enforced=False`, reason
+`Suspended`, and so `Ready=False`, with the message `InkwallConfig default suspends inspection (spec.suspend): every engine
+allows every request`. The `InkwallConfig` has a `Suspended` condition, `True` while the bundle the
+engines get suspends inspection:
+
+```sh
+kubectl get inkwallconfig default -o jsonpath='{.status.conditions[?(@.type=="Suspended")]}'
+```
+
+Resume with `{"spec":{"suspend":false}}`. Each policy is `Enforced` again once every engine runs
+the bundle that resumes inspection.
 
 ## Uninstalling
 
