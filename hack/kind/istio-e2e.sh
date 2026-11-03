@@ -466,7 +466,9 @@ ingress_pods() {
 }
 ingress_injected() { local p; p=$(ingress_pods) && ! grep -v '^|Running|inkwall-engine|.*inkwall-socket' <<<"$p" >/dev/null; }
 forward_vs() {
-  [[ -n ${vs_pf:-} ]] && kill "$vs_pf" 2>/dev/null
+  # The previous one may be gone already: forward_all stops it too. A
+  # failed kill must not end the script (set -e).
+  if [[ -n ${vs_pf:-} ]]; then kill "$vs_pf" 2>/dev/null || true; fi
   "${KUBECTL[@]}" -n "$NS" port-forward svc/istio-ingressgateway "$VS_PORT:80" >/dev/null 2>&1 &
   vs_pf=$!
   pfs+=("$vs_pf")
