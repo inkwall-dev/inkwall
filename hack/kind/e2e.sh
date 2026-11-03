@@ -1160,6 +1160,21 @@ pready() {
 }
 ready_unwired() { [[ $(pready) == "False Unwired" ]]; }
 check "Ready=False (Unwired)" ready_unwired
+# #260: nothing the operator created is left but the kept Secrets. The engine
+# reports go with their replica's pod (garbage collection), hence eventually.
+no_managed_configmaps() {
+  local left
+  left=$("${KUBECTL[@]}" get configmap -A -l app.kubernetes.io/managed-by=inkwall-operator -o name) && [[ -z $left ]]
+}
+eventually "no ConfigMap managed by the operator is left (trust, engine reports)" no_managed_configmaps
+no_grant() {
+  [[ -z $("${KUBECTL[@]}" -n "$OPERATOR_NS" get role,rolebinding inkwall-bundle-reader --ignore-not-found -o name) ]]
+}
+check "the bundle grant is deleted" no_grant
+no_lease() {
+  [[ -z $("${KUBECTL[@]}" -n "$OPERATOR_NS" get lease inkwall-operator.waf.inkwall.dev --ignore-not-found -o name) ]]
+}
+check "the leader Lease is deleted" no_lease
 restart_traefik
 eventually "a new Traefik pod has no engine" no_engine
 eventually "the route still answers after the uninstall (uninspected)" tstatus_is 200 "$SQLI"

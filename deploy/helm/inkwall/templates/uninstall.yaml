@@ -6,7 +6,10 @@ operator's finalizer from the WAFPolicies, so deleting them or their
 namespace doesn't wait for an operator that is gone. It runs with injection
 off too: policies may still hold the finalizer. It runs with the operator's
 ServiceAccount (Ingresses, Middlewares, WAFPolicies, the webhook
-configurations); the Role below adds scaling the operator to 0.
+configurations, the trust ConfigMaps, the leader Lease); the Role below adds
+scaling the operator to 0 and deleting the bundle grant (the Role and
+RoleBinding inkwall-bundle-reader, which the operator itself may only
+create and update).
 */}}
 {{- if .Values.uninstall.unwire }}
 {{- $name := include "inkwall.operator.suffixed" (dict "root" . "suffix" "unwire") }}
@@ -27,6 +30,10 @@ rules:
     resources: [deployments]
     resourceNames: [{{ include "inkwall.operator.name" . }}]
     verbs: [get, patch]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [roles, rolebindings]
+    resourceNames: [inkwall-bundle-reader]
+    verbs: [delete]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
