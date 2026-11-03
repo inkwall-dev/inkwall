@@ -256,6 +256,7 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
     ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}, paranoiaLevel: 1}]
     exclusions: [{ruleIDs: [942100], when: {path: /api/search, argument: q}}]
     body: {inspect: true, maxBytes: 65536, onOversize: InspectPrefix}   # | Allow | Deny
+    responses: {inspect: true, maxBytes: 524288, onOversize: Deny}      # | Allow
   ```
 
   The most specific target wins: an [HTTPRoute](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) rule, then an HTTPRoute, then an Ingress, then the
@@ -467,8 +468,9 @@ so they report `Programmed=False` (`ControllerUnsupported`), as the operator wir
 `make raw-envoy-e2e` (Docker) and `make kind-e2e-raw-envoy` run the samples.
 Response inspection (v0.4.0, [0006 §2](0006-adapter-protocols.md#response-inspection-v040)):
 the engine's ext_proc adapter inspects the response headers and body for policies that ask, and
-replaces a response that leaks in block mode; built for raw Envoy with the policy from flags.
-**Not yet:** Istio, Contour; response inspection through Envoy Gateway and `WAFPolicy`.
+replaces a response that leaks in block mode; built for raw Envoy (flags or bundle) and Envoy
+Gateway (`WAFPolicy.spec.responses`).
+**Not yet:** Istio, Contour.
 
 ### 6.2 ingress-nginx
 
@@ -510,8 +512,8 @@ on an `Ingress`, or in each route's `middlewares` on an `IngressRoute`
   The operator sets it to 10 MiB, the largest inspectable body.
 - Limitation: ForwardAuth never sees the response, so Traefik can't inspect responses
   ([0006 §2](0006-adapter-protocols.md#response-inspection-v040)): the engine's forward-auth
-  adapter has no response flags, and a policy that asks for it will be reported as not enforced
-  on Traefik routes.
+  adapter has no response flags, and a policy with `responses.inspect` on a Traefik route is
+  `Programmed=False` (`ResponsesNotInspected`).
 - Limitation: ForwardAuth has no timeout or failure setting. An unreachable engine gets a 500
   from Traefik in both modes ([§7.3](#73-engine-unavailable)).
 
@@ -577,8 +579,8 @@ adapter must match.
 | Any | reverse proxy | ✅ | ✅ | ✅ | ✅ | TCP |
 
 Built: Traefik ForwardAuth, the reverse proxy, and ext_proc through Envoy Gateway and raw Envoy.
-Responses: inspected by ext_proc (v0.4.0, raw Envoy with the policy from flags so far); the reverse
-proxy's ✅ is a target, it doesn't inspect them yet.
+Responses: inspected by ext_proc (v0.4.0: raw Envoy and Envoy Gateway); the reverse proxy's ✅ is
+a target, it doesn't inspect them yet.
 
 ---
 

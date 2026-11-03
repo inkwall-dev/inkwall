@@ -495,19 +495,32 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 		p.Exclusions = append(p.Exclusions, ex)
 	}
 	if b := s.Body; b != nil {
-		body := &bundlev1.BodyConfig{Inspect: b.Inspect == nil || *b.Inspect}
+		body := &bundlev1.BodyConfig{Inspect: b.Inspect == nil || *b.Inspect, OnOversize: oversizeAction(b.OnOversize)}
 		if b.MaxBytes != nil {
 			body.MaxBytes = *b.MaxBytes
 		}
-		switch b.OnOversize {
-		case wafv1alpha1.OversizeAllow:
-			body.OnOversize = bundlev1.OversizeAction_OVERSIZE_ACTION_ALLOW
-		case wafv1alpha1.OversizeDeny:
-			body.OnOversize = bundlev1.OversizeAction_OVERSIZE_ACTION_DENY
-		}
 		p.Body = body
 	}
+	// Unset when not inspected: the bundles of policies without responses
+	// stay as before 0.4.0.
+	if r := s.Responses; r != nil && r.Inspect {
+		resp := &bundlev1.ResponseConfig{Inspect: true, OnOversize: oversizeAction(r.OnOversize)}
+		if r.MaxBytes != nil {
+			resp.MaxBytes = *r.MaxBytes
+		}
+		p.Responses = resp
+	}
 	return p
+}
+
+func oversizeAction(a wafv1alpha1.OversizeAction) bundlev1.OversizeAction {
+	switch a {
+	case wafv1alpha1.OversizeAllow:
+		return bundlev1.OversizeAction_OVERSIZE_ACTION_ALLOW
+	case wafv1alpha1.OversizeDeny:
+		return bundlev1.OversizeAction_OVERSIZE_ACTION_DENY
+	}
+	return bundlev1.OversizeAction_OVERSIZE_ACTION_UNSPECIFIED
 }
 
 func namespaceOf(policyID string) string {

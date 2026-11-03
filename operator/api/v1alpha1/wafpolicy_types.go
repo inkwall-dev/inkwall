@@ -85,6 +85,15 @@ type WAFPolicySpec struct {
 	// Body configures request body inspection.
 	// +optional
 	Body *BodySpec `json:"body,omitempty"`
+
+	// Responses configures response inspection, for data leaks (the CRS's
+	// RESPONSE-95x rules, and the rule sets' rules on RESPONSE_*
+	// variables). Unset: responses are not inspected. Only Envoy Gateway
+	// sends responses to the engine: on a route of another proxy
+	// (Traefik's ForwardAuth can't), the policy is not Programmed
+	// (ResponsesNotInspected).
+	// +optional
+	Responses *ResponsesSpec `json:"responses,omitempty"`
 }
 
 // TargetRef names a route in the policy's namespace.
@@ -233,6 +242,32 @@ type BodySpec struct {
 	// OnOversize is what happens to a body over maxBytes: Deny (413 in
 	// Block mode) or Allow (forwarded uninspected, and logged). Unset: Deny
 	// in Block mode, Allow in Detect mode.
+	// +optional
+	OnOversize OversizeAction `json:"onOversize,omitempty"`
+}
+
+// ResponsesSpec configures response inspection.
+// +kubebuilder:validation:XValidation:rule="(has(self.inspect) && self.inspect) || (!has(self.maxBytes) && !has(self.onOversize))",message="maxBytes and onOversize need inspect: true"
+type ResponsesSpec struct {
+	// Inspect turns response inspection on: the status and headers, and
+	// the body when its media type is text (plain, HTML, XML), JSON or XML.
+	// In Block mode a response the rules flag is replaced with the
+	// rule's status (403) and a plain-text error.
+	// +optional
+	Inspect bool `json:"inspect,omitempty"`
+
+	// MaxBytes is how much of a response body is inspected, at most 10
+	// MiB. Unset: 512 KiB. A longer body has this much inspected, and then
+	// gets onOversize.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10485760
+	// +optional
+	MaxBytes *int64 `json:"maxBytes,omitempty"`
+
+	// OnOversize is what happens to a response whose body is over maxBytes
+	// or can't be inspected (an encoding other than gzip or deflate): Deny
+	// (replaced with 502 in Block mode) or Allow (forwarded, and logged).
+	// Unset: Deny in Block mode, Allow in Detect mode.
 	// +optional
 	OnOversize OversizeAction `json:"onOversize,omitempty"`
 }

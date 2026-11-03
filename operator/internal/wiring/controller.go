@@ -58,6 +58,10 @@ const (
 	// ReasonUnwired: `inkwall-operator unwire` (helm uninstall) unwired
 	// the routes and stopped the operator.
 	ReasonUnwired = "Unwired"
+	// ReasonResponsesNotInspected: the policy inspects responses, but the
+	// proxy serving a target can't send them to the engine (Traefik): its
+	// requests are inspected, its responses are not.
+	ReasonResponsesNotInspected = "ResponsesNotInspected"
 )
 
 // Finalizer holds a WAFPolicy until the operator has unwired its routes, so
@@ -291,7 +295,8 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 	if rep.disabled {
 		return metav1.ConditionFalse, ReasonInjectionDisabled, "the engine is not injected into proxy pods (injection is off): the routes are not wired"
 	}
-	var unsupported, failed, disabled, pending, partly []string
+	var unsupported, failed, disabled, pending, partly, noResponses []string
+	responses := p.Spec.Responses != nil && p.Spec.Responses.Inspect
 	// wired counts the wired targets by result, then kind.
 	wired := make([]map[schema.GroupKind]int, len(rep.results))
 	total := 0
@@ -342,6 +347,10 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 			if s.Partly != "" {
 				partly = append(partly, s.Partly)
 			}
+			if responses && !rep.results[i].Responses {
+				noResponses = append(noResponses, fmt.Sprintf("%s can't send responses to the engine: %s %s's requests are inspected, its responses are not",
+					rep.results[i].Proxy, t.Kind.Kind, t.Key.Name))
+			}
 			if wired[i] == nil {
 				wired[i] = map[schema.GroupKind]int{}
 			}
@@ -360,6 +369,11 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 		return metav1.ConditionFalse, ReasonControllerUnsupported, strings.Join(unsupported, "; ")
 	case total == 0:
 		return metav1.ConditionFalse, ReasonNoTargets, "none of the policy's targets exists"
+	case len(noResponses) > 0:
+		// Not Programmed: Ready would claim the responses are inspected.
+		slices.Sort(noResponses)
+		return metav1.ConditionFalse, ReasonResponsesNotInspected, "responses.inspect is set, but " +
+			strings.Join(slices.Compact(noResponses), "; ") + "; target routes Envoy Gateway serves, or remove responses"
 	}
 
 	// The routes go to the proxies' pods, whose sidecar must be there.

@@ -31,12 +31,18 @@ What's new in 0.4.0:
 - **Raw Envoy.** An Envoy you configure yourself can call the engine's ext_proc adapter, with the
   policy from the engine's flags or from the operator: see [protecting raw Envoy](raw-envoy.md).
   Nothing changes in an existing installation.
-- **Response inspection (engine).** `inkwall-engine ext-proc --inspect-responses` inspects the
-  app's responses too, for data leaks (the CRS's `RESPONSE-95x` rules): see
-  [responses](raw-envoy.md#responses) for raw Envoy. It is off unless you set it. Security events get
-  a `phase` field (`request` or `response`), and the engine two metrics,
-  `inkwall_responses_total` and `inkwall_response_check_duration_seconds`. Not yet in `WAFPolicy`
-  or through Envoy Gateway; Traefik's ForwardAuth can't see responses.
+- **Response inspection.** A `WAFPolicy` with `responses: {inspect: true}` (and optionally
+  `maxBytes`, 512 KiB by default, and `onOversize`) inspects the app's responses too, for data
+  leaks (the CRS's `RESPONSE-95x` rules: SQL errors, stack traces, directory listings), and in
+  Block mode replaces a response that leaks with 403. Off unless you set it: existing policies are
+  unchanged. Only through Envoy Gateway, whose Envoy pods get the 0.4.0 engine as the operator
+  updates them; Traefik's ForwardAuth can't send responses to the engine, so such a policy on a
+  Traefik route is `Programmed=False` (`ResponsesNotInspected`), and the webhook warns of its
+  Ingress and IngressRoute targets. For raw Envoy, `inkwall-engine ext-proc --inspect-responses`
+  (see [responses](raw-envoy.md#responses)). Security events get a `phase` field (`request` or
+  `response`), and the engine two metrics, `inkwall_responses_total` and
+  `inkwall_response_check_duration_seconds`. The `WAFPolicy` CRD gets the field: the chart
+  upgrades the CRDs (`crds.install`); if you install them yourself, apply the new ones first.
 
 ## From 0.3.0 to 0.3.1
 

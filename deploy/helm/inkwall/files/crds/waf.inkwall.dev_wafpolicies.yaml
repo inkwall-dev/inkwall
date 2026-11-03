@@ -143,6 +143,46 @@ spec:
                 - Detect
                 - Block
                 type: string
+              responses:
+                description: |-
+                  Responses configures response inspection, for data leaks (the CRS's
+                  RESPONSE-95x rules, and the rule sets' rules on RESPONSE_*
+                  variables). Unset: responses are not inspected. Only Envoy Gateway
+                  sends responses to the engine: on a route of another proxy
+                  (Traefik's ForwardAuth can't), the policy is not Programmed
+                  (ResponsesNotInspected).
+                properties:
+                  inspect:
+                    description: |-
+                      Inspect turns response inspection on: the status and headers, and
+                      the body when its media type is text (plain, HTML, XML), JSON or XML.
+                      In Block mode a response the rules flag is replaced with the
+                      rule's status (403) and a plain-text error.
+                    type: boolean
+                  maxBytes:
+                    description: |-
+                      MaxBytes is how much of a response body is inspected, at most 10
+                      MiB. Unset: 512 KiB. A longer body has this much inspected, and then
+                      gets onOversize.
+                    format: int64
+                    maximum: 10485760
+                    minimum: 1
+                    type: integer
+                  onOversize:
+                    description: |-
+                      OnOversize is what happens to a response whose body is over maxBytes
+                      or can't be inspected (an encoding other than gzip or deflate): Deny
+                      (replaced with 502 in Block mode) or Allow (forwarded, and logged).
+                      Unset: Deny in Block mode, Allow in Detect mode.
+                    enum:
+                    - Allow
+                    - Deny
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: 'maxBytes and onOversize need inspect: true'
+                  rule: (has(self.inspect) && self.inspect) || (!has(self.maxBytes)
+                    && !has(self.onOversize))
               ruleSets:
                 description: |-
                   RuleSets are the rules to run, in order. Empty: the built-in OWASP CRS

@@ -175,8 +175,10 @@ the routes instead, and apply once those routes serve the traffic.
 - **CRS version.** Inkwall runs CRS v4; older ingress-nginx releases shipped CRS v3. Rule IDs
   mostly carry over, but check exclusions of v3 rules. v3's `tx.paranoia_level` is mapped to v4's
   blocking paranoia level.
-- **Responses.** Inkwall inspects requests only: the CRS's response rules (`RESPONSE-95x`) and
-  `tx.outbound_anomaly_score_threshold` have no equivalent.
+- **Responses.** `inkwallctl migrate` doesn't convert `SecResponseBodyAccess`: set
+  `responses: {inspect: true}` on a policy to run the CRS's response rules (`RESPONSE-95x`), on
+  routes Envoy Gateway serves only; Traefik's ForwardAuth can't send responses to the engine.
+  `tx.outbound_anomaly_score_threshold` has no field: set it with a `SecAction` in a rule set.
 - **Body limits.** Inkwall inspects up to `body.maxBytes` (64 KiB by default, 10 MiB at most) and,
   in Block mode, rejects larger bodies with 413. ingress-nginx's `modsecurity.conf` allowed bodies of
   up to 12.5 MiB with files and 128 KiB without. Set `body.maxBytes` or `body.onOversize: Allow` on

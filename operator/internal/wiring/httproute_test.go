@@ -242,3 +242,44 @@ func TestProgrammedHTTPRouteBoth(t *testing.T) {
 		}
 	}
 }
+
+// A policy that inspects responses is Programmed only where its proxy sends
+// them to the engine: Envoy Gateway does, Traefik's ForwardAuth can't. Its
+// requests are inspected all the same, but the status says the responses
+// are not.
+func TestProgrammedResponses(t *testing.T) {
+	route := func(n string) Target {
+		return Target{Kind: httpRouteKind, Key: types.NamespacedName{Namespace: "shop", Name: n}}
+	}
+	withEngine := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "edge", Name: "e"},
+		Spec: corev1.PodSpec{InitContainers: []corev1.Container{{Name: injection.ContainerName}}}}
+	rep := &report{kinds: []schema.GroupKind{ingressKind, routeKind, httpRouteKind, httpRouteKind}, results: []*Result{
+		{Proxy: "Traefik", Pods: []corev1.Pod{withEngine}, Targets: map[Target]TargetState{route("web"): {Wired: true}}},
+		{Proxy: "Envoy Gateway", Responses: true, Pods: []corev1.Pod{withEngine}, Targets: map[Target]TargetState{route("api"): {Wired: true}}},
+	}}
+	pol := func(responses *wafv1alpha1.ResponsesSpec, names ...string) *wafv1alpha1.WAFPolicy {
+		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{Responses: responses}}
+		for _, n := range names {
+			p.Spec.TargetRefs = append(p.Spec.TargetRefs, wafv1alpha1.TargetRef{Group: gatewayv1.GroupName, Kind: "HTTPRoute", Name: n})
+		}
+		return p
+	}
+	inspect := &wafv1alpha1.ResponsesSpec{Inspect: true}
+	for _, tc := range []struct {
+		name        string
+		p           *wafv1alpha1.WAFPolicy
+		status      metav1.ConditionStatus
+		reason, msg string
+	}{
+		{"Envoy Gateway", pol(inspect, "api"), metav1.ConditionTrue, ReasonProgrammed, "1 HTTPRoute(s) wired to the engine in Envoy Gateway"},
+		{"Traefik", pol(inspect, "web"), metav1.ConditionFalse, ReasonResponsesNotInspected,
+			"responses.inspect is set, but Traefik can't send responses to the engine: HTTPRoute web's requests are inspected, its responses are not; target routes Envoy Gateway serves, or remove responses"},
+		{"both", pol(inspect, "api", "web"), metav1.ConditionFalse, ReasonResponsesNotInspected, "HTTPRoute web's requests are inspected"},
+		{"Traefik, responses off", pol(&wafv1alpha1.ResponsesSpec{}, "web"), metav1.ConditionTrue, ReasonProgrammed, "1 HTTPRoute(s) wired to the engine in Traefik"},
+		{"Traefik, no responses", pol(nil, "web"), metav1.ConditionTrue, ReasonProgrammed, "1 HTTPRoute(s) wired to the engine in Traefik"},
+	} {
+		if st, reason, msg := programmed(tc.p, rep); st != tc.status || reason != tc.reason || !strings.Contains(msg, tc.msg) {
+			t.Errorf("%s: %s %s %q", tc.name, st, reason, msg)
+		}
+	}
+}

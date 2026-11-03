@@ -9,7 +9,10 @@
 # Envoy pods, attacks are blocked through both proxies, a body attack is
 # held back with its headers, one followed by HTTP/2 trailers is inspected
 # too, gRPC calls pass in block mode but not one with an attack in its
-# metadata (#284), and unprotecting or uninstalling leaves the
+# metadata (#284), a response that leaks a SQL error is replaced through
+# Envoy Gateway in block mode and logged in detect mode while the policy
+# reports that Traefik can't inspect responses (#274), and unprotecting or
+# uninstalling leaves the
 # user's objects as they were. Needs the operator installed (make
 # kind-operator); ends with helm uninstall. KEEP=1 leaves the test's objects.
 set -euo pipefail
@@ -292,7 +295,8 @@ condition() {
 }
 ready() { [[ $(condition Ready status) == True ]]; }
 programmed_both() { [[ $(condition Programmed message) == *"wired to the engine in Traefik"*"wired to the engine in Envoy Gateway"* ]]; }
-# policy [MODE]: the shared policy, in Block mode by default.
+# policy [MODE [SPEC]]: the shared policy, in Block mode by default, with
+# SPEC (YAML lines) added.
 policy() {
   "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
 apiVersion: waf.inkwall.dev/v1alpha1
@@ -307,7 +311,42 @@ spec:
   # more on a CI runner: past the default 250 ms, the engine fails closed
   # (503). Envoy waits 500 ms longer than this.
   timeout: 1s
+${2:-}
 YAML
+}
+RESPONSES='  responses: {inspect: true}'
+# whoami echoes the request's headers in its text/plain body: this one makes
+# it leak a MySQL error, which the request rules don't mind.
+LEAK='X-Debug: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version'
+# responses_held: the operator's EnvoyExtensionPolicy has Envoy send the
+# responses, held for the engine (or streamed in detect mode), and Envoy
+# Gateway accepted it.
+responses_held() {
+  [[ $("${KUBECTL[@]}" -n "$NS" get envoyextensionpolicy inkwall-waf-app \
+    -o jsonpath='{.spec.extProc[0].processingMode.response.body}/{.spec.extProc[0].processingMode.allowModeOverride}') == "$1/true" ]] && eep_accepted
+}
+not_programmed_traefik() {
+  [[ $(condition Programmed reason) == ResponsesNotInspected && $(condition Programmed message) == *"Traefik can't send responses to the engine: Ingress web"* &&
+    $(condition Ready status) == False ]]
+}
+leak_is() {
+  local want=$1 port
+  shift
+  for port in "$@"; do
+    [[ $(code "$port" "/leak" -H "$LEAK") == "$want" ]] || return 1
+  done
+}
+leak_replaced() {
+  local port
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
+    ! curl -s -H "Host: $HOST" -H "$LEAK" "http://127.0.0.1:$port/leak" | grep -qF 'SQL syntax' || return 1
+  done
+}
+# logged_response PATH ACTION: an engine in the Envoy pods logged a
+# response event for PATH.
+logged_response() {
+  "${KUBECTL[@]}" -n "$EG_NS" logs -l app.kubernetes.io/name=envoy -c inkwall-engine --tail=-1 |
+    grep '"security event"' | grep '"phase":"response"' | grep "\"action\":\"$2\"" | grep "\"path\":\"$1\"" >/dev/null
 }
 eep_accepted() {
   [[ $("${KUBECTL[@]}" -n "$NS" get envoyextensionpolicy inkwall-waf-app \
@@ -433,6 +472,24 @@ check "a benign body with trailers (HTTP/2) passes" h2_are 200 / "q=hello"
 # on the binary body).
 check "a gRPC call passes" grpc_are OK
 check "a gRPC call with an attack in its metadata is denied" grpc_are PermissionDenied "$GRPC_ATTACK"
+
+echo "== responses"
+policy Block "$RESPONSES"
+eventually "Envoy Gateway accepts the EnvoyExtensionPolicy sending responses" responses_held BufferedPartial
+eventually "not Programmed: Traefik can't send responses to the engine" not_programmed_traefik
+check "a clean response passes through both Gateways" envoy_are 200 /products/42
+check "a response leaking a SQL error is replaced through both Gateways: 403" leak_is 403 "$CUSTOM_PORT" "$PLAIN_PORT"
+check "its body is gone" leak_replaced
+eventually "the engines log it as a response deny" logged_response /leak deny
+check "through Traefik it passes, as the status says" leak_is 200 "$TRAEFIK_PORT"
+check "an attack in the request is still blocked" all_are 403 "$SQLI"
+check "a gRPC call passes (its response isn't read)" grpc_are OK
+leak_path=/detect-leak-$RANDOM$RANDOM
+policy Detect "$RESPONSES"
+eventually "in detect mode, Envoy streams the responses" responses_held Streamed
+check "a response leaking a SQL error passes in detect mode" leak_is 200 "$CUSTOM_PORT" "$PLAIN_PORT"
+check "on a fresh path too" envoy_are 200 "$leak_path" -H "$LEAK"
+eventually "and the engines log it as a response event" logged_response "$leak_path" log
 
 echo "== detect mode"
 policy Detect
