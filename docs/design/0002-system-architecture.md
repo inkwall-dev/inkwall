@@ -774,9 +774,21 @@ above the body limit. Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/
     backends.
   - `Detect` mode is reported as wired, not as blocking: `Ready` follows `Programmed` and
     `Enforced` as for the other proxies.
+- **HAProxy's buffer below `body.maxBytes`** (decided for v0.4.0, [#345](https://github.com/inkwall-dev/inkwall/issues/345)): HAProxy sends the
+  engine at most `tune.bufsize` less `tune.maxrewrite` of a request (about 15 KiB by default), so
+  a larger body is handled as oversized (`body.onOversize`) whatever `body.maxBytes` says. The
+  operator reads `tune.bufsize` and `tune.maxrewrite` from the `global-config-snippet` of the
+  ConfigMap each controller pod names (`--configmap`), or takes HAProxy's defaults, and when a
+  policy on a wired Ingress inspects more than the smallest pod's buffer allows (`body.maxBytes`,
+  64 KiB when unset), says so in `Programmed`'s message, naming the effective limit and the docs.
+  It is a note, not a reason: `Programmed` and `Ready` don't change, as the body still fails safe
+  (it isn't missing protection), and the probe still decides `Programmed` (`Unverified`). A
+  separate condition type was rejected: another type for one proxy's limit, which `Ready` would
+  have to ignore. The operator doesn't change `tune.bufsize` (#336: memory per connection).
 
 **Built:** the agent, `inkwall-engine spoe`, with a configuration written by hand
-([protecting HAProxy](../haproxy.md)). **Not yet:** the operator's wiring above.
+([protecting HAProxy](../haproxy.md)), and the operator's wiring above (v0.4.0, [#333](https://github.com/inkwall-dev/inkwall/pull/333),
+[0004 §4.4](0004-operator.md#44-wiring-controller)).
 
 ### 6.5 Caddy
 

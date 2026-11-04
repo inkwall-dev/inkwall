@@ -109,6 +109,10 @@ type TargetState struct {
 	// Unverified: wired, but not proven in force yet, and why (HAProxy:
 	// the probe hasn't shown the filter on every pod).
 	Unverified string
+	// Note is said on Programmed, whatever its status: a limit the proxy
+	// puts on inspection that fails safe, not missing protection
+	// (HAProxy's buffer below body.maxBytes).
+	Note string
 	// Partly: it is wired, but some of its traffic goes through proxies
 	// Inkwall doesn't wire, and which.
 	Partly string

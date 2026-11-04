@@ -120,8 +120,21 @@ a controller run with `--disable-config-snippets` covering backends.
 
 - **Bodies:** HAProxy sends the engine at most its buffer (about 15 KiB by default), and a body it
   cut is handled as oversized (413 in `Block` mode by default): raise `tune.bufsize` with the
-  controller ConfigMap's `global-config-snippet` to inspect larger bodies (see [Bodies](#bodies)).
-  The operator doesn't change it.
+  controller ConfigMap's `global-config-snippet` to inspect larger bodies (see [Bodies](#bodies)):
+
+  ```yaml
+  # The controller's ConfigMap (the chart's controller.config)
+  data:
+    global-config-snippet: |
+      tune.bufsize 81920
+  ```
+
+  The operator doesn't change it, but says on the policy when its `body.maxBytes` (64 KiB when
+  unset) is more than the buffer lets the engine see: `Programmed`'s message names the effective
+  limit (`HAProxy's buffer (tune.bufsize 16384, HAProxy's default) lets the engine see at most
+  about 15360 bytes of a request ...`). It reads `tune.bufsize` and `tune.maxrewrite` from the
+  ConfigMap the controller's `--configmap` names, within a minute of a change. That is a note: the
+  status stays as it is, since larger bodies still fail safe.
 - `haproxy.org/standalone-backend` is forced to `true` on a protected Ingress.
 - HTTP probing needs the controller's `http` container port, as the chart names it; with plain
   HTTP disabled (`--disable-http`) only hosts with TLS can be probed.

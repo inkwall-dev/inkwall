@@ -8,7 +8,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -101,6 +103,9 @@ func (h *HAProxy) Watch(c controller.Controller, cache cache.Cache, eh handler.E
 type haproxySettings struct {
 	failOpen bool
 	body     bool
+	// maxBody is the largest body.maxBytes of the policies that inspect
+	// bodies (the engine's 64 KiB for one that sets none).
+	maxBody int64
 }
 
 func haproxySettingsOf(policies []wafv1alpha1.WAFPolicy, ing types.NamespacedName) haproxySettings {
@@ -115,6 +120,11 @@ func haproxySettingsOf(policies []wafv1alpha1.WAFPolicy, ing types.NamespacedNam
 		}
 		if b := p.Spec.Body; b == nil || b.Inspect == nil || *b.Inspect {
 			s.body = true
+			limit := int64(engineBodyBytes)
+			if b != nil && b.MaxBytes != nil {
+				limit = *b.MaxBytes
+			}
+			s.maxBody = max(s.maxBody, limit)
 		}
 		mode := cmp.Or(p.Spec.FailureMode, wafv1alpha1.FailOpen)
 		if p.Spec.Mode == wafv1alpha1.PolicyBlock && p.Spec.FailureMode == "" {
@@ -275,6 +285,7 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 	runningPods := running(pods.Items)
 	on := !off && len(runningPods) > 0
 	problems := haproxyPodProblems(runningPods)
+	buffer := h.buffer(ctx, runningPods)
 
 	res := &Result{Proxy: "HAProxy", Targets: map[Target]TargetState{}, Pods: pods.Items}
 	var (
@@ -288,9 +299,9 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 		mine := integrations.HAProxy.ServesIngresses(Controller(ing, classes, defaultClass))
 		want := targets[tg] && mine && on
 		snippet := ""
+		settings := haproxySettingsOf(policies.Items, k)
 		if want {
-			s := haproxySettingsOf(policies.Items, k)
-			snippet = HAProxySnippet(s.failOpen, s.body)
+			snippet = HAProxySnippet(settings.failOpen, settings.body)
 		}
 		err := annotateHAProxy(ctx, h.Client, ing, snippet)
 		if err != nil && !apierrors.IsNotFound(err) {
@@ -322,6 +333,12 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 			}
 			jobs = append(jobs, job)
 			s.Unverified = h.unverified(job)
+			if settings.body && settings.maxBody > buffer.visible() {
+				s.Note = fmt.Sprintf("Ingress %s: HAProxy's buffer (tune.bufsize %d, %s) lets the engine see at most about %d bytes of a request, "+
+					"headers included, less than its body.maxBytes (%d): a larger body is handled as oversized (body.onOversize); "+
+					"raise tune.bufsize in the controller ConfigMap's global-config-snippet (docs/haproxy.md, Bodies)",
+					k.Name, buffer.bufsize, buffer.source, buffer.visible(), settings.maxBody)
+			}
 		}
 		res.Targets[tg] = s
 	}
@@ -377,4 +394,129 @@ func (*HAProxy) Unwire(ctx context.Context, c client.Client) (map[string]int, er
 		n["Ingress (HAProxy)"]++
 	}
 	return n, nil
+}
+
+// haproxyBuffer is HAProxy's request buffer: tune.bufsize, less
+// tune.maxrewrite, is the most of a request (headers included) that HAProxy
+// sends the engine (0006 §4).
+type haproxyBuffer struct {
+	bufsize, maxrewrite int64
+	// source says where bufsize comes from, for the status.
+	source string
+}
+
+// visible is the most of a request the engine sees.
+func (b haproxyBuffer) visible() int64 { return b.bufsize - b.maxrewrite }
+
+// HAProxy's defaults.
+const (
+	haproxyDefaultBufsize    = 16384
+	haproxyDefaultMaxrewrite = 1024
+)
+
+// parseHAProxyBuffer reads tune.bufsize and tune.maxrewrite from a global
+// configuration snippet, with HAProxy's size suffixes (k, m, g); the last
+// of each wins, as in HAProxy. maxrewrite is at most half the buffer.
+func parseHAProxyBuffer(snippet string) haproxyBuffer {
+	b := haproxyBuffer{bufsize: haproxyDefaultBufsize, source: "HAProxy's default"}
+	maxrewrite := int64(-1)
+	for line := range strings.SplitSeq(snippet, "\n") {
+		line, _, _ = strings.Cut(line, "#")
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		n, ok := haproxySize(f[1])
+		if !ok {
+			continue
+		}
+		switch f[0] {
+		case "tune.bufsize":
+			b.bufsize, b.source = n, "from the controller's global-config-snippet"
+		case "tune.maxrewrite":
+			maxrewrite = n
+		}
+	}
+	if maxrewrite < 0 {
+		maxrewrite = haproxyDefaultMaxrewrite
+	}
+	b.maxrewrite = min(maxrewrite, b.bufsize/2)
+	return b
+}
+
+// haproxySize parses a size as HAProxy does: a number with an optional k,
+// m or g (powers of 1024).
+func haproxySize(s string) (int64, bool) {
+	mult := int64(1)
+	switch strings.ToLower(s[len(s)-1:]) {
+	case "k":
+		mult = 1 << 10
+	case "m":
+		mult = 1 << 20
+	case "g":
+		mult = 1 << 30
+	}
+	if mult != 1 {
+		s = s[:len(s)-1]
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n <= 0 || n > (1<<40)/mult {
+		return 0, false
+	}
+	return n * mult, true
+}
+
+// buffer is the smallest buffer of the controller's running pods with the
+// engine: from tune.bufsize in the global-config-snippet of the ConfigMap
+// each names (--configmap), or HAProxy's default. A ConfigMap it can't
+// read counts as the default.
+func (h *HAProxy) buffer(ctx context.Context, pods []*corev1.Pod) haproxyBuffer {
+	out := haproxyBuffer{bufsize: math.MaxInt64}
+	seen := map[types.NamespacedName]bool{}
+	for _, pod := range pods {
+		if !injection.HasEngine(pod) {
+			continue
+		}
+		b := parseHAProxyBuffer("")
+		if key, ok := haproxyConfigMap(pod); ok {
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			var cm corev1.ConfigMap
+			if err := h.APIReader.Get(ctx, key, &cm); err == nil {
+				b = parseHAProxyBuffer(cm.Data["global-config-snippet"])
+			}
+		}
+		if b.visible() < out.visible() || out.bufsize == math.MaxInt64 {
+			out = b
+		}
+	}
+	if out.bufsize == math.MaxInt64 {
+		return parseHAProxyBuffer("")
+	}
+	return out
+}
+
+// haproxyConfigMap is the ConfigMap the controller's container names with
+// --configmap (namespace/name).
+func haproxyConfigMap(pod *corev1.Pod) (types.NamespacedName, bool) {
+	for _, c := range pod.Spec.Containers {
+		args := append(slices.Clone(c.Command), c.Args...)
+		for i, arg := range args {
+			v, ok := strings.CutPrefix(arg, "--configmap=")
+			if !ok && arg == "--configmap" && i+1 < len(args) {
+				v, ok = args[i+1], true
+			}
+			if !ok {
+				continue
+			}
+			ns, name, found := strings.Cut(v, "/")
+			if !found {
+				ns, name = pod.Namespace, v
+			}
+			return types.NamespacedName{Namespace: ns, Name: name}, name != ""
+		}
+	}
+	return types.NamespacedName{}, false
 }
