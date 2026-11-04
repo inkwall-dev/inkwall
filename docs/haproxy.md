@@ -28,6 +28,7 @@ The samples in [`examples/haproxy`](../examples/haproxy) are the files this guid
   - [Timeout and failure mode](#timeout-and-failure-mode)
   - [Bodies](#bodies)
   - [gRPC](#grpc)
+  - [WebSocket](#websocket)
   - [Routes left uninspected](#routes-left-uninspected)
 - [The policy](#the-policy)
 - [Client IP](#client-ip)
@@ -355,6 +356,15 @@ The engine tells a gRPC call (gRPC and gRPC-Web) by its `Content-Type`. A denied
 would: HTTP 200, with `grpc-status` 7 (`PERMISSION_DENIED`) and a `grpc-message` naming the request
 ID in the headers. Without those two rules, a denied call gets the plain 403, which gRPC clients
 also report as `PERMISSION_DENIED`. See [gRPC](grpc.md).
+
+### WebSocket
+
+HAProxy asks the agent about a WebSocket handshake as about any request, before it forwards it: the
+handshake's URL and headers are inspected, a policy's `webSocket` rules apply (or
+`--websocket-origins` and `--websocket-required-headers`), and a denied handshake gets 403 and no
+upgrade. The messages after the upgrade aren't requests, and aren't sent to the agent: they are not
+inspected. `hack/haproxy/e2e.sh` checks a handshake from a forbidden origin (403) and from an
+allowed one (let through), without completing an upgrade. See [WebSocket](websocket.md).
 
 ### Routes left uninspected
 
