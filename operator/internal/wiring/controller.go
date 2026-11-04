@@ -297,7 +297,7 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 	if rep.disabled {
 		return metav1.ConditionFalse, ReasonInjectionDisabled, "the engine is not injected into proxy pods (injection is off): the routes are not wired"
 	}
-	var unsupported, failed, disabled, pending, unverified, partly, noResponses []string
+	var unsupported, failed, disabled, pending, unverified, partly, noResponses, notes []string
 	responses := p.Spec.Responses != nil && p.Spec.Responses.Inspect
 	// wired counts the wired targets by result, then kind.
 	wired := make([]map[schema.GroupKind]int, len(rep.results))
@@ -351,6 +351,9 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 			if s.Partly != "" {
 				partly = append(partly, s.Partly)
 			}
+			if s.Note != "" {
+				notes = append(notes, s.Note)
+			}
 			if responses && !rep.results[i].Responses {
 				noResponses = append(noResponses, fmt.Sprintf("%s can't send responses to the engine: %s %s's requests are inspected, its responses are not",
 					rep.results[i].Proxy, t.Kind.Kind, t.Key.Name))
@@ -402,12 +405,16 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 		slices.Sort(pending)
 		return metav1.ConditionFalse, ReasonPending, strings.Join(slices.Compact(pending), "; ")
 	}
+	// Notes don't change the status: they are limits that fail safe.
+	slices.Sort(notes)
+	notes = slices.Compact(notes)
 	if len(unverified) > 0 {
 		slices.Sort(unverified)
-		return metav1.ConditionFalse, ReasonUnverified, strings.Join(slices.Compact(unverified), "; ")
+		return metav1.ConditionFalse, ReasonUnverified, strings.Join(append(slices.Compact(unverified), notes...), "; ")
 	}
 	slices.Sort(partly)
 	msgs = append(msgs, slices.Compact(partly)...)
+	msgs = append(msgs, notes...)
 	return metav1.ConditionTrue, ReasonProgrammed, strings.Join(msgs, "; ")
 }
 
