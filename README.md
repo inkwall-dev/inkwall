@@ -230,6 +230,13 @@ Tracked on the [project board](https://github.com/orgs/inkwall-dev/projects/1) a
   [ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter)), proxy discovery, per-policy request counts sent to the control plane, policy
   statuses written only when they change, and `inkwallctl migrate ingress-nginx`, which turns
   ingress-nginx [ModSecurity](https://kubernetes.github.io/ingress-nginx/user-guide/third-party-addons/modsecurity/) annotations into policies.
+- **v0.4.0** (shipped): [Istio](docs/istio.md) (the `HTTPRoute` routes of its Gateways and its
+  `VirtualService` routes), [HAProxy](docs/haproxy.md) (an SPOE agent, and the HAProxy Kubernetes
+  Ingress Controller wired by the operator) and [raw Envoy](docs/raw-envoy.md); response
+  inspection through Envoy Gateway; the text in [gRPC](docs/grpc.md) messages and gRPC-shaped
+  denials; [WebSocket](docs/websocket.md) handshake rules, and messages inspected by the engine's
+  own proxy; and status that says when an engine is too old for a policy's fields
+  (`EnginesOutdated`).
 - **v1.0.0** (next): a stable API (out of `v1alpha1`) with an upgrade path.
 - Then more proxies: Caddy. Not ingress-nginx, which is retired upstream: its users
   migrate with `inkwallctl migrate ingress-nginx`.
