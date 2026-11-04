@@ -8,6 +8,12 @@
 // measures the operator's memory, the bundle's size and the time from a
 // change to every engine having the bundle with it.
 //
+// With INKWALL_SCALE_RESPONSES=1, every other policy also inspects
+// responses (responses.inspect): the engines must receive those policies
+// with their response settings, and the bundle is compiled once at the end,
+// as an engine would, and a leaked SQL error run through a policy's
+// response rules (#344).
+//
 // It runs only with INKWALL_SCALE set to "<policies>x<engines>", e.g.
 // 100x50 (`make scale-test`). The operator runs in this process, with its
 // production defaults, so the memory measured is the operator's (and this
@@ -73,6 +79,9 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/test/fakeengine"
 	"github.com/inkwall-dev/inkwall/operator/test/testenv"
 	"github.com/inkwall-dev/inkwall/pkg/agent"
+	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/policy"
+	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
@@ -89,6 +98,8 @@ const (
 	logEnv = "INKWALL_SCALE_LOG"
 	// engineHostEnv makes the test binary the fake engines' process.
 	engineHostEnv = "INKWALL_SCALE_ENGINE_HOST"
+	// responsesEnv, "1", makes every other policy inspect responses.
+	responsesEnv = "INKWALL_SCALE_RESPONSES"
 
 	// routesPerPolicy: 0004 §8 has 50,000 routes for 5,000 policies.
 	routesPerPolicy = 10
@@ -201,6 +212,15 @@ type Result struct {
 	// StreamsCut counts the engine streams that ended once every engine
 	// had connected: none should (#296); the engines' errors say why.
 	StreamsCut int `json:"streamsCut"`
+
+	// With INKWALL_SCALE_RESPONSES: the policies that inspect responses,
+	// and compiling the final bundle once as an engine does (in this
+	// process, after the operator's memory was measured): its time and the
+	// heap it keeps live.
+	ResponsePolicies    int     `json:"responsePolicies,omitempty"`
+	CompileSeconds      float64 `json:"compileSeconds,omitempty"`
+	CompileHeapBytes    uint64  `json:"compileHeapBytes,omitempty"`
+	ResponseCheckMicros float64 `json:"responseCheckMicros,omitempty"`
 }
 
 func parseScale(s string) (policies, engines int, err error) {
@@ -241,6 +261,15 @@ func TestScale(t *testing.T) {
 		debug.SetMemoryLimit(512 << 20 / 10 * 9)
 	}
 	res := Result{Policies: nPolicies, Engines: nEngines, Changes: nChanges, MemoryLimitBytes: debug.SetMemoryLimit(-1)}
+	responses := false
+	switch v := os.Getenv(responsesEnv); v {
+	case "", "0":
+	case "1":
+		responses = true
+		res.ResponsePolicies = responsePolicies(nPolicies)
+	default:
+		t.Fatalf("%s=%q: want 1 or 0", responsesEnv, v)
+	}
 
 	// The operator's client is not rate limited, as ctrl.GetConfig sets it
 	// up in cmd/operator.
@@ -272,19 +301,20 @@ func TestScale(t *testing.T) {
 
 	// A GitOps sync of every policy and route.
 	start = time.Now()
-	createObjects(ctx, t, c, nPolicies)
+	createObjects(ctx, t, c, nPolicies, responses)
 	created := time.Now()
 	res.CreateSeconds = created.Sub(start).Seconds()
 	t.Logf("%d policies and their routes created in %.1fs", nPolicies, res.CreateSeconds)
 	full := func(s engineState) bool {
-		return s.policies == nPolicies && s.routes == nPolicies*routesPerPolicy
+		return s.policies == nPolicies && s.routes == nPolicies*routesPerPolicy && s.responses == res.ResponsePolicies
 	}
 	synced := engines.wait(full, 10*time.Minute)
 	if synced {
 		res.SyncSeconds = time.Since(created).Seconds()
 		t.Logf("every engine has the %d policies %.1fs later", nPolicies, res.SyncSeconds)
 	} else {
-		t.Errorf("not every engine has the bundle with every policy and route after 10m: %d/%d", engines.count(full), nEngines)
+		t.Errorf("not every engine has the bundle with every policy, route and response setting (%d policies inspecting responses) after 10m: %d/%d",
+			res.ResponsePolicies, engines.count(full), nEngines)
 	}
 
 	if synced {
@@ -307,7 +337,10 @@ func TestScale(t *testing.T) {
 
 	_, res.EnginesRSSPeakBytes = engines.rss()
 	res.StreamsCut = engines.endedStreams() - endedBefore
-	measureBundle(ctx, t, c, &res)
+	b := measureBundle(ctx, t, c, &res)
+	if responses {
+		measureResponses(t, b, nPolicies, &res)
+	}
 	report(t, res)
 
 	if res.StreamsCut > 0 {
@@ -386,7 +419,7 @@ func percentile(d []time.Duration, p float64) time.Duration {
 
 // measureBundle resolves the objects as the bundle reconciler does, timing
 // it, and sizes the bundle.
-func measureBundle(ctx context.Context, t *testing.T, c client.Client, res *Result) {
+func measureBundle(ctx context.Context, t *testing.T, c client.Client, res *Result) *bundlev1.Bundle {
 	in := resolver.Input{CheckRules: coraza.CheckUserRules}
 	var (
 		policies        wafv1alpha1.WAFPolicyList
@@ -445,6 +478,61 @@ func measureBundle(ctx context.Context, t *testing.T, c client.Client, res *Resu
 	if n > bundle.MaxCompressedBytes {
 		t.Errorf("bundle %s compressed, over the %s a Secret takes (bundle.MaxCompressedBytes)", kib(int(n)), kib(bundle.MaxCompressedBytes))
 	}
+	return b
+}
+
+// responsePolicies is how many of n policies inspect responses: every
+// other one (even i, those targeting an Ingress).
+func responsePolicies(n int) int { return (n + 1) / 2 }
+
+// measureResponses compiles the bundle as an engine does, timing it and
+// measuring the heap it keeps, and runs a request and a leaked SQL error
+// through a policy that inspects responses: its response rules must flag
+// it. Every policy is in Detect mode or Block (the edits toggle some), so
+// the verdict is a log or a deny, never an allow.
+func measureResponses(t *testing.T, b *bundlev1.Bundle, n int, res *Result) {
+	var inspecting int
+	for _, p := range b.GetPolicies() {
+		if p.GetResponses().GetInspect() {
+			inspecting++
+		}
+	}
+	if inspecting != res.ResponsePolicies {
+		t.Errorf("%d policies in the bundle inspect responses, want %d", inspecting, res.ResponsePolicies)
+	}
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	start := time.Now()
+	// As bundle mode does: compiled rule sets shared by configuration.
+	set, err := policy.Compile(b, policy.Options{Evaluators: policy.NewEvaluators()})
+	if err != nil {
+		t.Fatalf("compile the bundle as an engine: %v", err)
+	}
+	res.CompileSeconds = time.Since(start).Seconds()
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	if after.HeapAlloc > before.HeapAlloc {
+		res.CompileHeapBytes = after.HeapAlloc - before.HeapAlloc
+	}
+
+	// Policy n-2 or 0 (even: it inspects responses), on its first route.
+	i := max(0, (n-1)&^1)
+	r := &request.Request{Method: "GET", Host: host(i, 0), RawURI: routePath(0) + "/orders", Proto: "HTTP/1.1",
+		Headers: http.Header{"User-Agent": {"scale"}, "Accept": {"text/html"}}, ID: "scale-1"}
+	ctx := context.Background()
+	v, x := set.CheckExchange(ctx, r)
+	if x == nil {
+		t.Fatalf("policy %s/%s inspects responses, but its request (%s, %s) kept no exchange", namespace(i, n), name(i), v.Action, v.Reason)
+	}
+	defer x.Close()
+	start = time.Now()
+	rv := x.CheckResponse(ctx, &request.Response{Status: 500, Proto: "HTTP/1.1", Headers: http.Header{"Content-Type": {"text/html"}},
+		Body: []byte("<html><body>You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version</body></html>")})
+	res.ResponseCheckMicros = float64(time.Since(start).Microseconds())
+	if rv.Action == pipeline.ActionAllow || rv.Reason != pipeline.ReasonRule || !rv.Response {
+		t.Errorf("a leaked SQL error through policy %s: %s/%s, want the response rules to flag it", rv.Policy, rv.Action, rv.Reason)
+	}
 }
 
 type countingWriter int
@@ -460,6 +548,10 @@ func report(t *testing.T, r Result) {
 		r.Policies, r.Routes, r.Engines, mib(r.RSSPeakBytes), mib(r.HeapPeakBytes), mib(r.HeapLiveBytes),
 		r.ReconcileSeconds, r.ResolveSeconds, kib(r.BundleCompressedBytes), kib(r.BundleBytes), r.SyncSeconds,
 		r.AllEnginesP50, r.AllEnginesP95, r.AllEnginesMax, r.PerEngineP95)
+	if r.ResponsePolicies > 0 {
+		t.Logf("responses: %d policies inspect them; the bundle compiled as an engine in %.2f s, %s live heap; a leaked SQL error checked in %.0f µs",
+			r.ResponsePolicies, r.CompileSeconds, mib(r.CompileHeapBytes), r.ResponseCheckMicros)
+	}
 	t.Logf("peak RSS / heap: initial sync %s / %s, edits %s / %s; connect %.1f s, create %.1f s; fake engines' process: peak RSS %s, streams cut %d",
 		mib(r.RSSPeakSyncBytes), mib(r.HeapPeakSyncBytes), mib(r.RSSPeakChangesBytes), mib(r.HeapPeakChangesBytes),
 		r.ConnectSeconds, r.CreateSeconds, mib(r.EnginesRSSPeakBytes), r.StreamsCut)
@@ -691,7 +783,7 @@ func routeObject(i, n int) (client.Object, wafv1alpha1.TargetRef) {
 
 // createObjects creates the namespaces, then each route and its policy,
 // concurrently, as a GitOps tool applying a large change would.
-func createObjects(ctx context.Context, t *testing.T, c client.Client, n int) {
+func createObjects(ctx context.Context, t *testing.T, c client.Client, n int, responses bool) {
 	t.Helper()
 	for i := range max(1, n/100) {
 		if err := c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace(i, n)}}); err != nil {
@@ -706,6 +798,9 @@ func createObjects(ctx context.Context, t *testing.T, c client.Client, n int) {
 		pol := &wafv1alpha1.WAFPolicy{
 			ObjectMeta: metav1.ObjectMeta{Namespace: route.GetNamespace(), Name: name(i)},
 			Spec:       wafv1alpha1.WAFPolicySpec{TargetRefs: []wafv1alpha1.TargetRef{target}},
+		}
+		if responses && i%2 == 0 {
+			pol.Spec.Responses = &wafv1alpha1.ResponsesSpec{Inspect: true}
 		}
 		if err := c.Create(ctx, pol); err != nil {
 			return fmt.Errorf("create policy %d: %w", i, err)
@@ -882,6 +977,8 @@ type engineState struct {
 	version  uint64
 	policies int
 	routes   int
+	// responses counts the policies that inspect responses.
+	responses int
 }
 
 // engineHost is the fake engines' process, and when each reached each
@@ -908,7 +1005,8 @@ type versionAt struct {
 
 // startEngines starts the fake engines in a child process: this test
 // binary, which reads the configuration on stdin and prints a line per
-// bundle applied, "applied <engine> <version> <policies> <routes>", and
+// bundle applied, "applied <engine> <version> <policies> <routes>
+// <policies inspecting responses>", and
 // per stream ended, "ended <engine>".
 func startEngines(t *testing.T, ec enginesConfig) *engineHost {
 	t.Helper()
@@ -944,7 +1042,7 @@ func startEngines(t *testing.T, ec enginesConfig) *engineHost {
 				s    engineState
 				verb string
 			)
-			if _, err := fmt.Sscanf(sc.Text(), "%s %d %d %d %d", &verb, &i, &s.version, &s.policies, &s.routes); err != nil || verb != "applied" || i < 0 || i >= len(h.states) {
+			if _, err := fmt.Sscanf(sc.Text(), "%s %d %d %d %d %d", &verb, &i, &s.version, &s.policies, &s.routes, &s.responses); err != nil || verb != "applied" || i < 0 || i >= len(h.states) {
 				continue
 			}
 			h.mu.Lock()
@@ -1081,13 +1179,16 @@ func hostEngines() int {
 			KeepVersionOnly: true,
 			Shared:          shared,
 			OnApply: func(b *bundlev1.Bundle) {
-				routes := 0
+				routes, responses := 0, 0
 				for _, p := range b.GetPolicies() {
 					routes += len(p.GetRoutes())
+					if p.GetResponses().GetInspect() {
+						responses++
+					}
 				}
 				outMu.Lock()
 				defer outMu.Unlock()
-				_, _ = fmt.Fprintf(out, "applied %d %d %d %d\n", i, b.GetVersion(), len(b.GetPolicies()), routes)
+				_, _ = fmt.Fprintf(out, "applied %d %d %d %d %d\n", i, b.GetVersion(), len(b.GetPolicies()), routes, responses)
 				_ = out.Flush()
 			},
 		}
