@@ -3,8 +3,8 @@
 What the engine inspects in a [WebSocket](https://www.rfc-editor.org/rfc/rfc6455) at v0.4.0, and
 what it doesn't. In short: the handshake is inspected through every proxy; the messages after it
 only when the engine is the proxy itself ([standalone proxy](standalone-proxy.md)), with
-`--websocket-messages`. Through Envoy Gateway, raw Envoy and Traefik the messages are not
-inspected: that needs a change in Envoy, tracked in
+`--websocket-messages`. Through Envoy Gateway, Istio, raw Envoy, HAProxy and Traefik the messages
+are not inspected: through the proxies built on Envoy, that needs a change in Envoy, tracked in
 [#313](https://github.com/inkwall-dev/inkwall/issues/313).
 
 ## Contents
@@ -39,7 +39,7 @@ from this check; a request that only looks like one gets the WebSocket rules too
   the upgrade**: the connection is never upgraded, and the application never sees the handshake.
 - **Checked**, when the policy sets `webSocket`: the handshake's origin and required headers
   ([below](#allowed-origins-and-required-headers)).
-- **Not inspected through Envoy Gateway, raw Envoy and Traefik**: the messages after the upgrade,
+- **Not inspected through Envoy Gateway, Istio, raw Envoy, HAProxy and Traefik**: the messages after the upgrade,
   text or binary. Rules on `REQUEST_BODY` or `ARGS` don't see them, and `body.maxBytes` doesn't
   limit them. No `WAFPolicy` field asks for them. Keep the application's own validation of what
   clients send it.
@@ -100,6 +100,8 @@ the same rules ([standalone proxy](standalone-proxy.md#flags)).
 | Proxy | Handshake | Denial | Messages |
 |---|---|---|---|
 | Envoy Gateway, [raw Envoy](raw-envoy.md) (ext_proc) | Inspected on its headers | 403 before the upgrade | Not inspected |
+| [Istio](istio.md): HTTPRoutes of its Gateways, VirtualServices of its ingress gateways (ext_proc) | Inspected on its headers, as through Envoy Gateway (not covered by an e2e yet) | 403 before the upgrade | Not inspected |
+| [HAProxy](haproxy.md), and the HAProxy Kubernetes Ingress Controller (SPOE) | Inspected | 403 before the upgrade | Not inspected |
 | Traefik (ForwardAuth) | Inspected, without `Upgrade` and `Connection` | 403 before the upgrade | Not inspected |
 | [Standalone proxy](standalone-proxy.md) | Inspected | 403 before the upgrade | Inspected with `--websocket-messages`; a denial closes with 1008 |
 
@@ -111,6 +113,14 @@ the same rules ([standalone proxy](standalone-proxy.md#flags)).
   engine logged every handshake as an oversized body when the connection closed. Raw Envoy proxies
   WebSockets only with `upgrade_configs: [{upgrade_type: websocket}]` on its
   `http_connection_manager` (Envoy Gateway sets it): the sample `envoy.yaml` doesn't.
+- **Istio**: its Gateways and ingress gateways call the same ext_proc adapter as Envoy Gateway, so
+  a handshake is decided on its headers in the same way. No e2e covers WebSocket through Istio yet.
+- **HAProxy**: HAProxy asks the engine's SPOE agent about each request
+  (`on-frontend-http-request`), the handshake included, before it forwards it, so a denied
+  handshake gets 403 and no upgrade. What follows the upgrade isn't a request, and the agent isn't
+  asked again: messages aren't inspected. `hack/haproxy/e2e.sh` checks that a handshake from an
+  origin `--websocket-origins` doesn't allow gets 403 and one from an allowed origin is let
+  through; it doesn't complete an upgrade. See [HAProxy](haproxy.md#websocket).
 - **Traefik**: ForwardAuth asks the engine before Traefik upgrades, so a denied handshake gets the
   engine's answer and no upgrade. Traefik doesn't pass the hop-by-hop headers `Upgrade` and
   `Connection` to the engine; `Sec-WebSocket-Key` and `Sec-WebSocket-Version` tell it's a handshake.

@@ -108,6 +108,8 @@ gets 8 (`RESOURCE_EXHAUSTED`).
 | Proxy | gRPC | gRPC-Web |
 |---|---|---|
 | Envoy Gateway, raw Envoy | HTTP 200, gRPC status | HTTP 200, gRPC status |
+| Istio | HTTP 200, gRPC status, as through Envoy Gateway (not covered by an e2e yet) | The same |
+| HAProxy, with `haproxy.cfg`'s gRPC rules ([HAProxy](haproxy.md#grpc)) | HTTP 200, gRPC status | HTTP 200, gRPC status |
 | Traefik | HTTP 403, gRPC status | HTTP 403, gRPC status |
 | Engine as reverse proxy | HTTP 200, gRPC status | HTTP 200, gRPC status |
 
@@ -131,6 +133,12 @@ its whole request, or as much as the proxy buffers:
   fills Envoy's buffer (`BufferedPartial`). A bidirectional call whose client waits for the server
   before ending its side stalls. Set `body.inspect: false` on the policy for such routes: Envoy
   then doesn't hold the body, and the headers are still inspected.
+- **Istio** holds a call as Envoy Gateway does: its filter asks for the body
+  (`BUFFERED_PARTIAL`) when a policy inspects bodies.
+- **HAProxy** sends the agent a body only with `option http-buffer-request`, which waits for the
+  whole body or until HAProxy's buffer is full (about 15 KiB by default): a call is held as through
+  Envoy Gateway, and a message past the buffer is handled as an oversized body
+  ([bodies](haproxy.md#bodies)).
 - **Traefik**'s ForwardAuth reads the whole body before asking the engine, whatever the policy
   says, and refuses bodies over 10 MiB (401). Bidirectional calls stall there too.
 
