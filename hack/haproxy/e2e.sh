@@ -25,7 +25,10 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 IMAGE=${HAPROXY_IMAGE:-haproxy:3.2}
-PORT=${HAPROXY_PORT:-47480}
+# Below the kernel's ephemeral range (32768-60999 by default): a port in it
+# can be any process's for a while, and HAProxy, unable to bind, exits
+# (#340).
+PORT=${HAPROXY_PORT:-18390}
 APP_PORT=$((PORT + 1))
 ADMIN_PORT=$((PORT + 2))
 EXAMPLES=$PWD/examples/haproxy
@@ -61,6 +64,8 @@ eventually() {
   fail "$what"
 }
 U=http://127.0.0.1:$PORT
+# listening PORT: something accepts connections on 127.0.0.1:PORT.
+listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 code() { curl -s -o /dev/null -w '%{http_code}' "$@" || true; }
 is() {
   local want=$1
@@ -70,15 +75,35 @@ is() {
 
 cleanup() {
   if [[ ${KEEP:-} == 1 ]]; then return; fi
+  save_haproxy_log
   docker rm -f "$NAME" >/dev/null 2>&1 || true
   for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
   if [[ $failures != 0 ]]; then
+    echo "--- haproxy logs, each container's"
+    tail -80 "$WORK/haproxy.log" || true
     echo "--- engine log"
     tail -50 "$WORK/engine.log" || true
   fi
   rm -rf "$WORK"
 }
+# save_haproxy_log keeps the log of the HAProxy container about to go: a
+# failure shows every container's, not only the last one's.
+save_haproxy_log() {
+  if docker inspect "$NAME" >/dev/null 2>&1; then
+    echo "--- container started $(docker inspect -f '{{.State.StartedAt}}' "$NAME")" >>"$WORK/haproxy.log"
+    docker logs "$NAME" >>"$WORK/haproxy.log" 2>&1 || true
+  fi
+}
 trap cleanup EXIT
+
+# The test's ports must be free: a process already there would take
+# HAProxy's, the app's or the engine's place (#340).
+for p in "$PORT" "$APP_PORT" "$ADMIN_PORT"; do
+  if listening "$p"; then
+    echo "port $p is in use: free it, or set HAPROXY_PORT (HAProxy's; the app and the engine's admin take the next two)" >&2
+    exit 1
+  fi
+done
 
 # The samples: valid for HAProxy, and shown whole in docs/haproxy.md, each
 # after a marker comment.
@@ -131,9 +156,28 @@ start_haproxy() {
   sed -e "s|^    bind :8080|    bind 127.0.0.1:$PORT|" -e "s|server app app:80|server app 127.0.0.1:$APP_PORT|" \
     -e "$1" "$EXAMPLES/haproxy.cfg" >"$WORK/cfg/haproxy.cfg"
   cp "$EXAMPLES/spoe.conf" "$WORK/cfg/spoe.conf"
+  save_haproxy_log
   docker rm -f "$NAME" >/dev/null 2>&1 || true
   docker run -d --name "$NAME" --network host --user "$(id -u):$(id -g)" \
     -v "$WORK/cfg:/usr/local/etc/haproxy:ro" -v "$WORK/run:/var/run/inkwall" "$IMAGE" >/dev/null
+  # HAProxy listens, or the test stops here, with its log: one that can't
+  # bind exits, and every check after would fail for that reason (#340).
+  local running
+  for _ in $(seq 100); do
+    running=$(docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null || true)
+    [[ $running == true ]] || break
+    if listening "$PORT"; then
+      # Someone listens: HAProxy, if it is still running a moment later
+      # (one that can't bind exits at once).
+      sleep 0.3
+      [[ $(docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null || true) == true ]] && return
+      break
+    fi
+    sleep 0.1
+  done
+  echo "HAProxy isn't listening on 127.0.0.1:$PORT:" >&2
+  docker logs "$NAME" >&2 || true
+  exit 1
 }
 
 start_engine --mode block --websocket-origins https://app.example.com
@@ -183,8 +227,6 @@ eventually "detect mode: an attack passes" is 200 "$U/products?$SQLI"
 check "detect mode: the attack is logged" grep -q '"action":"log"' "$WORK/engine.log"
 
 if [[ $failures != 0 ]]; then
-  echo "--- haproxy log"
-  docker logs "$NAME" 2>&1 | tail -30
   echo "$failures check(s) failed"
   exit 1
 fi
