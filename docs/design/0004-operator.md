@@ -677,6 +677,10 @@ has the decision), for `VirtualService` targets bound to Istio `Gateway` objects
   filter on every running pod; `Unverified` until then, and when a probe gets anything but the
   engine's answer. Before that, `PendingRestart` or `SidecarMissing`; `WiringFailed` for a pod
   without the agent's files or with `--disable-config-snippets` covering backends.
+- **HAProxy's buffer:** when a policy's `body.maxBytes` is more than HAProxy's buffer lets the
+  engine see (`tune.bufsize` less `tune.maxrewrite`, from the `global-config-snippet` of the
+  ConfigMap the controller's `--configmap` names, or HAProxy's defaults), `Programmed`'s message
+  says so, without changing its status ([0002 §6.4](0002-system-architecture.md#64-haproxy-haproxy-kubernetes-ingress-controller-haproxy-ingress)).
 - **Not yet:** HAProxy Ingress (`jcmoraisjr/haproxy-ingress`); the controller's own CRDs as
   targets; `tune.bufsize`, which the user sets.
 

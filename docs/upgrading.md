@@ -77,7 +77,9 @@ What's new in 0.4.0:
   operator's probe has proven the filter on every pod (`Unverified` until then). The new
   `inkwall-operator-haproxy` ClusterRole is granted by `rbac.integrations.haproxy` (`true` by
   default), and `haproxy-controller` joins the default `injection.proxyNamespaces`. See [with the
-  operator](haproxy.md#with-the-operator-haproxy-kubernetes-ingress-controller).
+  operator](haproxy.md#with-the-operator-haproxy-kubernetes-ingress-controller). When a policy's
+  `body.maxBytes` (64 KiB by default) is more than HAProxy's buffer lets the engine see (about
+  15 KiB unless you raise `tune.bufsize`), `Programmed`'s message says so.
 
 What changes by itself in 0.4.0:
 

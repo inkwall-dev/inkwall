@@ -10,7 +10,8 @@
 # configuration, the protected Ingress gets its own backend with the
 # filter, the policy is Programmed only once the operator's probe has
 # proven the filter on every pod, attacks are blocked on the protected
-# Ingress and pass on the other, a client can't pass for the probe, a
+# Ingress and pass on the other, Programmed notes HAProxy's buffer below
+# body.maxBytes (a 48 KB body is oversized) until tune.bufsize is raised, a client can't pass for the probe, a
 # controller pod without the engine leaves the policy not Programmed (its
 # traffic is uninspected), a stopped engine fails closed in block mode and
 # open in detect mode, and unprotecting or uninstalling puts the user's
@@ -70,9 +71,11 @@ if ! "${KUBECTL[@]}" -n "$OPERATOR_NS" get deployment/inkwall-operator >/dev/nul
 fi
 
 pfs=()
+work_big=$(mktemp)
 haproxy_installed=false
 cleanup() {
   for pf in "${pfs[@]}"; do kill "$pf" 2>/dev/null || true; done
+  rm -f "$work_big"
   if [[ ${KEEP:-} == 1 ]]; then return; fi
   if $haproxy_installed; then
     "${HELM[@]}" -n "$NS" uninstall haproxy --wait >/dev/null 2>&1 || true
@@ -232,6 +235,28 @@ check "the user's snippet still applies" bash -c "curl -s -H 'Host: $HOST' http:
 # A client can't pass for the probe: without the key's MAC it is inspected.
 fake='/.well-known/inkwall-probe/AAAAAAAAAAAAAAAAAAAAAAAA'
 check "a forged probe gets no 299" bash -c "[[ \$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: $HOST' -H 'X-Inkwall-Probe: AAAAAAAAAAAAAAAAAAAAAAAA.00' http://127.0.0.1:$PORT$fake) != 299 ]]"
+
+echo "== HAProxy's buffer (#345)"
+# The policy inspects bodies up to 64 KiB (body.maxBytes unset); HAProxy's
+# default buffer lets the engine see about 15 KiB: Programmed says so, and
+# stays True. A 48 KB benign body is cut, so handled as oversized (413).
+buffer_noted() { [[ $(condition Programmed message) == *"tune.bufsize 16384"* ]]; }
+check "Programmed names HAProxy's buffer below body.maxBytes" buffer_noted
+check "and stays True" programmed
+{
+  printf x=
+  head -c 48000 /dev/zero | tr '\0' a
+} >"$work_big"
+check "a 48 KB benign body is oversized for the default buffer: 413" all_are 413 "$HOST" / -H 'Content-Type: application/x-www-form-urlencoded' --data-binary "@$work_big"
+# tune.bufsize raised in the controller's ConfigMap: the note goes, and the
+# body is inspected whole.
+"${HELM[@]}" upgrade haproxy kubernetes-ingress --repo "$HAPROXY_REPO" --version "$HAPROXY_CHART_VERSION" \
+  --namespace "$NS" --reuse-values --set-string 'controller.config.global-config-snippet=tune.bufsize 81920' --wait --timeout 5m >/dev/null
+not_noted() { programmed && ! buffer_noted; }
+eventually "Programmed no longer names the buffer once tune.bufsize is raised" not_noted
+forward
+eventually "the 48 KB benign body passes" all_are 200 "$HOST" / -H 'Content-Type: application/x-www-form-urlencoded' --data-binary "@$work_big"
+check "an attack in a body is still blocked" all_are 403 "$HOST" / --data-urlencode "q=1' OR '1'='1"
 
 echo "== a controller pod without the engine"
 # A pod of the controller that opted out: its HAProxy can't load the filter

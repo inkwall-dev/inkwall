@@ -248,3 +248,78 @@ func TestHAProxyProgrammed(t *testing.T) {
 		t.Errorf("a pod without the engine: %s", reason)
 	}
 }
+
+// tune.bufsize and tune.maxrewrite from the controller ConfigMap's
+// global-config-snippet, with HAProxy's size units; HAProxy's defaults
+// when unset.
+func TestHAProxyBuffer(t *testing.T) {
+	for _, c := range []struct {
+		snippet             string
+		bufsize, maxrewrite int64
+	}{
+		{"", 16384, 1024},
+		{"maxconn 1000\n", 16384, 1024},
+		{"tune.bufsize 65536\n", 65536, 1024},
+		{"  tune.bufsize   128k  # bodies\n", 128 << 10, 1024},
+		{"tune.bufsize 1m\ntune.maxrewrite 4096\n", 1 << 20, 4096},
+		{"tune.bufsize 1G", 1 << 30, 1024},
+		// maxrewrite is at most half the buffer, as HAProxy caps it.
+		{"tune.bufsize 1024", 1024, 512},
+		// The last one wins, as in HAProxy; an unreadable one is ignored.
+		{"tune.bufsize 32768\ntune.bufsize 49152", 49152, 1024},
+		{"tune.bufsize lots", 16384, 1024},
+		{"# tune.bufsize 99999", 16384, 1024},
+	} {
+		b := parseHAProxyBuffer(c.snippet)
+		if b.bufsize != c.bufsize || b.maxrewrite != c.maxrewrite {
+			t.Errorf("%q: bufsize %d maxrewrite %d, want %d %d", c.snippet, b.bufsize, b.maxrewrite, c.bufsize, c.maxrewrite)
+		}
+	}
+	if got := parseHAProxyBuffer("").visible(); got != 16384-1024 {
+		t.Errorf("visible %d", got)
+	}
+}
+
+// A policy inspecting more of a body than HAProxy's buffer lets the engine
+// see gets a note, from the ConfigMap the controller names, which says on
+// Programmed without changing it.
+func TestHAProxyBufferNote(t *testing.T) {
+	ctx := context.Background()
+	class := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "haproxy"}, Spec: networkingv1.IngressClassSpec{Controller: "haproxy.org/ingress-controller/haproxy"}}
+	policy := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
+		TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}}, Body: &wafv1alpha1.BodySpec{MaxBytes: new(int64(100000))},
+	}}
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "haproxy-controller", Name: "hap"}, Data: map[string]string{}}
+	c := fake.NewClientBuilder().WithScheme(haproxyScheme()).
+		WithObjects(class, policy, cm, haproxyControllerPod("hap-1", "--configmap=haproxy-controller/hap"), haproxyIngress("web", "haproxy")).Build()
+	h := &HAProxy{Client: c, APIReader: c, Pods: integrationsSelector()}
+	web := Target{Kind: ingressKind, Key: types.NamespacedName{Namespace: "shop", Name: "web"}}
+	note := func() string {
+		res, err := h.Wire(ctx, map[Target]bool{web: true}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Targets[web].Note
+	}
+	if n := note(); !strings.Contains(n, "tune.bufsize 16384") || !strings.Contains(n, "about 15360 bytes") || !strings.Contains(n, "body.maxBytes (100000)") {
+		t.Errorf("note %q", n)
+	}
+	cm.Data["global-config-snippet"] = "tune.bufsize 128k\n"
+	if err := c.Update(ctx, cm); err != nil {
+		t.Fatal(err)
+	}
+	if n := note(); n != "" {
+		t.Errorf("with a 128k buffer: %q", n)
+	}
+
+	// On Programmed, True stays True with the note.
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"},
+		Spec: wafv1alpha1.WAFPolicySpec{TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}}}}
+	pod := *haproxyControllerPod("hap-1")
+	rep := &report{kinds: []schema.GroupKind{ingressKind}, results: []*Result{
+		{Proxy: "HAProxy", Targets: map[Target]TargetState{web: {Wired: true, Note: "the buffer note"}}, Pods: []corev1.Pod{pod}},
+	}}
+	if st, reason, msg := programmed(p, rep); st != metav1.ConditionTrue || reason != ReasonProgrammed || !strings.HasSuffix(msg, "; the buffer note") {
+		t.Errorf("%s %s %s", st, reason, msg)
+	}
+}

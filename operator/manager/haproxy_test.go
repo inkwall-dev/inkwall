@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -67,6 +68,8 @@ func testHAProxy(ctx context.Context, t *testing.T, c client.Client) {
 	}
 	pol := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "haproxy"}, Spec: wafv1alpha1.WAFPolicySpec{
 		Mode: wafv1alpha1.PolicyBlock, TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "shop"}},
+		// More than HAProxy's default buffer lets the engine see (#345).
+		Body: &wafv1alpha1.BodySpec{MaxBytes: new(int64(1 << 20))},
 	}}
 	for _, o := range []client.Object{class, ing, pol} {
 		if err := c.Create(ctx, o); err != nil {
@@ -83,6 +86,7 @@ func testHAProxy(ctx context.Context, t *testing.T, c client.Client) {
 			ServiceAccountName: "haproxy",
 			SecurityContext:    &corev1.PodSecurityContext{RunAsUser: new(int64(1000))},
 			Containers: []corev1.Container{{Name: injection.HAProxyContainer, Image: "haproxytech/kubernetes-ingress:3.2.19",
+				Args:  []string{"--configmap=" + edge + "/hap-config", "--http-bind-port=8080"},
 				Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 8080}}}},
 		},
 	}
@@ -123,6 +127,38 @@ func testHAProxy(ctx context.Context, t *testing.T, c client.Client) {
 		return ""
 	})
 	eventually(t, "Unverified until the probe answers", programmed(metav1.ConditionFalse, wiring.ReasonUnverified, "Ingress shop is wired"))
+
+	// body.maxBytes over what HAProxy's buffer lets the engine see: said,
+	// without changing the status (bigger bodies fail safe, #345). The
+	// controller's ConfigMap has no tune.bufsize: HAProxy's 16384.
+	hapConfig := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: edge, Name: "hap-config"}, Data: map[string]string{"timeout-connect": "5s"}}
+	if err := c.Create(ctx, hapConfig); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the buffer's limit is said", programmed(metav1.ConditionFalse, wiring.ReasonUnverified, "tune.bufsize 16384"))
+	// Raised in the global snippet: no longer said.
+	hapConfig.Data["global-config-snippet"] = "tune.bufsize 2m\n"
+	if err := c.Update(ctx, hapConfig); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "not said once the buffer is large enough", func() string {
+		// The wiring rereads the ConfigMap at each reconcile (every minute
+		// at least): an Ingress event brings it sooner.
+		var got networkingv1.Ingress
+		if err := c.Get(ctx, client.ObjectKeyFromObject(ing), &got); err == nil {
+			got.Labels = map[string]string{"touched": strings.ReplaceAll(time.Now().Format("150405.000"), ".", "")}
+			_ = c.Update(ctx, &got)
+		}
+		if msg := programmed(metav1.ConditionFalse, wiring.ReasonUnverified, "Ingress shop is wired")(); msg != "" {
+			return msg
+		}
+		var p wafv1alpha1.WAFPolicy
+		_ = c.Get(ctx, client.ObjectKeyFromObject(pol), &p)
+		if cnd := meta.FindStatusCondition(p.Status.Conditions, wafv1alpha1.ConditionProgrammed); cnd != nil && strings.Contains(cnd.Message, "tune.bufsize") {
+			return cnd.Message
+		}
+		return ""
+	})
 
 	// Unprotected: the Ingress is as it was.
 	if err := c.Delete(ctx, pol); err != nil {
