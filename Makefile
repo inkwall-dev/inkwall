@@ -52,10 +52,12 @@ DOCS_CHECK        ?= $(GO) run ./hack/docscheck $(DOCS_CHECK_STRICT)
 
 # scale-test: sizes as <policies>x<engines>, one operator each; "full" is 0004 §8's matrix.
 # SCALE_CHANGES single-policy edits are timed; SCALE_OUT, if set, collects the results as JSON lines.
+# SCALE_RESPONSES=1: every other policy inspects responses, checked on the engines and compiled once (#344).
 SCALE           ?= 100x50
 SCALE_CHANGES   ?= 10
 SCALE_FULL      := 100x50 100x500 1000x50 1000x500 5000x50 5000x500
 SCALE_OUT       ?=
+SCALE_RESPONSES ?=
 
 .DEFAULT_GOAL := help
 
@@ -78,7 +80,7 @@ scale-test: ## Operator scale test with fake engines, in envtest (SCALE=<policie
 	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; export KUBEBUILDER_ASSETS="$$a"; fail=0; \
 	for s in $(if $(filter full,$(SCALE)),$(SCALE_FULL),$(SCALE)); do \
 		echo "== scale $$s"; \
-		INKWALL_SCALE=$$s INKWALL_SCALE_CHANGES=$(SCALE_CHANGES) INKWALL_SCALE_OUT="$(SCALE_OUT)" $(GO) test -count=1 -timeout 60m -run '^TestScale$$' -v ./operator/test/scale || fail=1; \
+		INKWALL_SCALE=$$s INKWALL_SCALE_CHANGES=$(SCALE_CHANGES) INKWALL_SCALE_OUT="$(SCALE_OUT)" INKWALL_SCALE_RESPONSES="$(SCALE_RESPONSES)" $(GO) test -count=1 -timeout 60m -run '^TestScale$$' -v ./operator/test/scale || fail=1; \
 	done; exit $$fail
 
 .PHONY: bench
@@ -162,7 +164,7 @@ release-check: ## Check the goreleaser configuration
 	$(GORELEASER) check
 
 # The kind targets, and the scripts they run, use the kind of KIND_VERSION.
-KIND_TARGETS := kind-cluster kind-up kind-operator kind-e2e kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-upgrade kind-down
+KIND_TARGETS := kind-cluster kind-up kind-operator kind-e2e kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-response-load kind-upgrade kind-down
 $(KIND_TARGETS): export PATH := $(KIND_DIR):$(PATH)
 $(KIND_TARGETS): $(KIND_DIR)/kind
 
@@ -203,6 +205,10 @@ kind-e2e-raw-envoy: kind-operator ## End-to-end test on kind of raw Envoy with t
 kind-e2e-envoy-gateway: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
 kind-e2e-envoy-gateway: kind-operator ## End-to-end test on kind through Envoy Gateway and Traefik with one WAFPolicy, ending with an uninstall (installs the operator first)
 	KIND_CLUSTER=$(KIND_CLUSTER) hack/kind/envoy-gateway-e2e.sh
+
+.PHONY: kind-response-load
+kind-response-load: kind-operator ## Load test on kind through Envoy Gateway, response inspection off vs. on: p50/p99 latency and engine RSS (installs the operator first; CONCURRENCY, DURATION, OUT)
+	KIND_CLUSTER=$(KIND_CLUSTER) hack/kind/response-load.sh
 
 .PHONY: kind-e2e-istio
 kind-e2e-istio: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)

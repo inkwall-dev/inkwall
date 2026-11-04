@@ -1361,6 +1361,22 @@ Against the targets:
 | After | 4 | 1,546–2,046 MiB | 1.8–5.3 s | 1.8–2.0 s | 0 |
 
   The 13.2 s run had one slow edit in ten; its engines' process peaked at 5.5 GiB.
+- **Response inspection at scale** (#344). `SCALE_RESPONSES=1` makes every other policy inspect
+  responses (`responses.inspect`). The fake engines must receive each of those policies with its
+  response settings, or the run fails; at the end, the bundle is compiled once as an engine does
+  and a leaked SQL error is run through a policy's response rules. Same machine, shared with other
+  jobs, 2026-11-04, 5,000 × 500, three runs each, interleaved with the rest of `SCALE=full`:
+
+| 5,000 × 500 | Peak RSS | Initial sync | Change → all engines p50 / p95 | Engines' process peak RSS | Streams cut |
+|---|---|---|---|---|---|
+| Without | 441 / 449 / 457 MiB | 1.5–2.4 s | 1.8 / 1.9–2.3 s | 1,557–1,754 MiB | 0 |
+| 2,500 policies inspecting responses | 431 / 441 / 442 MiB | 1.3–5.6 s | 1.8 / 1.8–2.1 s | 1,659–1,755 MiB | 0 |
+
+  No difference beyond run-to-run noise; the other sizes of `SCALE=full` too (change → all engines
+  p95 1.0–1.5 s), but for one edit of 9.2 s at 1,000 × 500 in one run, while the machine was busy
+  (the bundle's compile took 1.5 s in that run, 0.08 s in the others). The bundle grows from 134 to
+  136 KiB compressed. Compiling it as an engine: 0.08–0.09 s and 10–26 MiB of live heap; the
+  response check, 0.3–0.6 ms ([0006 §2](0006-adapter-protocols.md#response-inspection-v040)).
 
 **Engine memory per policy.** A compiled Coraza WAF with the CRS keeps
 about 2.1 MiB of heap, and takes 10–15 ms to compile.

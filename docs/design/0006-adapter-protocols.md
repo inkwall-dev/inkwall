@@ -247,6 +247,34 @@ evaluation holds an admission slot only while it runs, not while the upstream an
 verdicts are counted apart: `inkwall_responses_total{action,reason}` and
 `inkwall_response_check_duration_seconds`.
 
+**Measured under load (#344).** Same 12-thread i7-1255U, 2026-11-04, shared with other jobs:
+
+- **Through Envoy Gateway** (`make kind-response-load`): one Envoy pod with the engine, one
+  `WAFPolicy` in Block mode on an HTTPRoute to nginx, 8 closed-loop clients for 20 s per run
+  (`hack/loadgen`, from the host to the Envoy Service's NodePort), every response a 200. Envoy,
+  the engine, nginx and the clients share the machine, so the throughput is the machine's, not a
+  claim; the comparison is the point.
+
+| Page (text/html) | `responses.inspect` | Requests/s | p50 | p99 | Engine response check (mean) | Engine peak RSS |
+|---|---|---|---|---|---|---|
+| 0.85 KB | off | 5,249 | 1.4 ms | 3.1 ms | none | 99 MiB |
+| 0.85 KB | on | 2,591 | 3.0 ms | 5.7 ms | 0.86 ms | 104 MiB |
+| 15.3 KB | off | 4,218 | 1.8 ms | 3.8 ms | none | 101 MiB |
+| 15.3 KB | on | 527 | 16.5 ms | 21.3 ms | 13.0 ms | 107 MiB |
+
+  The response check of the 15.3 KB page, 13 ms (from `inkwall_response_check_duration_seconds`),
+  is 0.85 ms per KiB, as `BenchmarkEvaluateExchange` measured on this machine; p50 grows by about
+  as much, and p99 stays within 5 ms of p50. Each check holds an admission slot, so a route of
+  large HTML pages with responses inspected is CPU-bound in the engine: throughput fell 8× here
+  with 8 clients. The engine's memory grows by about 6 MiB. Every budget holds: at the default
+  64 KiB, a check is about 55 ms on this machine, within the default 250 ms deadline.
+- **At scale** (`make scale-test SCALE=full SCALE_RESPONSES=1`, [0004 §8](0004-operator.md#8-scale-targets-v1)):
+  every other policy inspecting responses (2,500 of 5,000) changes neither the time from a change
+  to every engine nor the operator's peak RSS, at any size; the bundle grows by 2 KiB compressed.
+  Compiled once as an engine does, the 5,000-policy bundle takes 0.08–0.09 s and 10–26 MiB of live
+  heap (policies with the same settings share one compiled rule set, so response inspection adds
+  one), and a leaked SQL error through one of its policies is flagged in 0.3–0.6 ms.
+
 **Flags.** Without the operator, `inkwall-engine ext-proc` takes `--inspect-responses`,
 `--max-response-bytes` (64 KiB by default) and `--oversize-response` (`auto`, `allow`, `deny`), the
 policy's `responses` fields. Only `ext-proc` defines them: the other adapters never see a response,
