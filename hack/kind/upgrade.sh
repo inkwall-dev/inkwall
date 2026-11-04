@@ -13,7 +13,9 @@
 # A probe in the cluster sends attacks and benign requests through Traefik
 # all along. An attack that reaches the app fails the test at once. A
 # request that gets no verdict (Traefik or its engine restarting, the route
-# briefly gone) is a gap: the upgrade itself must leave none, since engines
+# briefly gone) is a gap, unless it never reached Traefik while a request
+# sent straight to Traefik's pod got its verdict (#348: the cluster's
+# networking, after Traefik's pod was replaced; see the probe): the upgrade itself must leave none, since engines
 # swap bundles atomically and keep enforcing while the operator restarts
 # (also when it is rolled back);
 # a Traefik restart may leave one of at most MAX_RESTART_GAP seconds.
@@ -191,21 +193,31 @@ YAML
 # kubectl exec may die with the exec session.
 #
 # It sends to the Service's ClusterIP, which probe_start writes to
-# /tmp/svc, not to its DNS name (#320): every request that stalled in CI
-# had never connected (connect 0, total 2 s, the curl timeout), and a
-# lookup in the pod (musl, five search domains) that loses a UDP query
-# retries it only after 2.5 s. The probe measures Traefik and the engine,
-# not the cluster's DNS.
+# /tmp/svc, not to its DNS name (#320): a lookup in the pod (musl, five
+# search domains) that loses a UDP query retries it only after 2.5 s. The
+# probe measures Traefik and the engine, not the cluster's DNS.
+#
+# Each round also sends the attack straight to Traefik's pod (/tmp/pod,
+# its IP:port, also from probe_start), for #348: a request to the
+# ClusterIP whose TCP connect never finished (connect 0, total 2 s) while
+# the direct one got its verdict in the same round never reached Traefik.
+# The cause, reproduced on kind: a SYN sent to a Traefik pod while it was
+# being replaced leaves a conntrack entry (SYN_SENT, 120 s, renewed by
+# every SYN on it) DNATed to that pod, which kube-proxy doesn't remove for
+# TCP; a later connection that reuses the source port is sent to the dead
+# pod. probe_stop counts those as the cluster's misses, not gaps.
 "${KUBECTL[@]}" -n "$NS" create configmap probe --from-file=probe.sh=/dev/stdin --dry-run=client -o yaml <<'SH' |
 trap 'exit 0' TERM
-# c HOST PATH: "CODE DNS/CONNECT/TOTAL" (curl's times, in seconds).
-c() { curl -s -o /dev/null -m 2 -w '%{http_code} %{time_namelookup}/%{time_connect}/%{time_total}' -H "Host: $1" "http://$svc$2"; }
+# c HOST PATH [ADDR]: "CODE DNS/CONNECT/TOTAL" (curl's times, in seconds),
+# through the Service, or to ADDR.
+c() { curl -s -o /dev/null -m 2 -w '%{http_code} %{time_namelookup}/%{time_connect}/%{time_total}' -H "Host: $1" "http://${3:-$svc}$2"; }
 while true; do
   if [ -e /tmp/run ]; then
     read -r svc </tmp/svc
+    read -r pod </tmp/pod
     read -r up _ </proc/uptime
-    set -- $(c "$HOST" "$SQLI") $(c "$HOST" /products/42) $(c "$ROUTE_HOST" "$SQLI")
-    echo "$up $1 $3 $5 | $2 $4 $6" >>/tmp/probe.log
+    set -- $(c "$HOST" "$SQLI") $(c "$HOST" /products/42) $(c "$ROUTE_HOST" "$SQLI") $(c "$HOST" "$SQLI" "$pod")
+    echo "$up $1 $3 $5 $7 | $2 $4 $6 $8" >>/tmp/probe.log
   fi
   sleep 0.2
 done
@@ -235,6 +247,16 @@ YAML
 # server rather than the cluster's DNS (#320), each time: a Service
 # created again gets another.
 traefik_ip() { "${KUBECTL[@]}" -n "$TRAEFIK_NS" get service traefik-e2e -o jsonpath='{.spec.clusterIP}'; }
+# traefik_pod: the IP:port of Traefik's ready pod behind that Service, its
+# web entry point. After a restart it is the new pod's; requests to it
+# fail while that pod is replaced, so it never excuses a gap there.
+traefik_pod() {
+  local slices=("${KUBECTL[@]}" -n "$TRAEFIK_NS" get endpointslices -l kubernetes.io/service-name=traefik-e2e)
+  local ip port
+  ip=$("${slices[@]}" -o jsonpath='{range .items[*].endpoints[?(@.conditions.ready==true)]}{.addresses[0]}{"\n"}{end}' | head -1)
+  port=$("${slices[@]}" -o jsonpath='{range .items[*].ports[?(@.name=="web")]}{.port}{"\n"}{end}' | head -1)
+  if [[ -n $ip && -n $port ]]; then echo "$ip:$port"; fi
+}
 # One request, from the probe pod to Traefik's Service.
 code() {
   "${KUBECTL[@]}" -n "$NS" exec probe -- curl -s -o /dev/null -m 5 -w '%{http_code}' -H "Host: $1" "http://$(traefik_ip)$2" || true
@@ -303,10 +325,12 @@ wiring_before=$(wiring)
 # probe_start / probe_stop NAME MAX_GAP: start and stop the probe;
 # probe_stop checks what it saw.
 probe_start() {
-  local ip
+  local ip pod
   ip=$(traefik_ip)
   [[ -n $ip ]] || { fail "probe: no ClusterIP for Service $TRAEFIK_NS/traefik-e2e"; return; }
-  "${KUBECTL[@]}" -n "$NS" exec probe -- sh -c "echo $ip >/tmp/svc; rm -f /tmp/probe.log; touch /tmp/run"
+  pod=$(traefik_pod)
+  [[ -n $pod ]] || { fail "probe: no ready endpoint of Service $TRAEFIK_NS/traefik-e2e"; return; }
+  "${KUBECTL[@]}" -n "$NS" exec probe -- sh -c "echo $ip >/tmp/svc; echo $pod >/tmp/pod; rm -f /tmp/probe.log; touch /tmp/run"
 }
 probe_stop() {
   local name=$1 max=$2 log summary
@@ -316,9 +340,19 @@ probe_stop() {
   log=$("${KUBECTL[@]}" -n "$NS" exec probe -- cat /tmp/probe.log 2>/dev/null || true)
   # For each request kind: requests, wrong answers, attacks that got
   # through (2xx), and the longest gap (s), from the first wrong answer to
-  # the next right one (or the end).
+  # the next right one (or the end). A request to the ClusterIP that never
+  # connected while the one sent straight to Traefik's pod got its verdict
+  # (403) is the cluster's miss (#348, see the probe): counted apart, not a
+  # wrong answer; more than 3 of a kind fail the check all the same.
   summary=$(awk -v max="$max" '
-    function verdict(i, code, want, t) {
+    # missed(times, direct): no TCP connection to the Service within the
+    # 2 s timeout, while Traefik answered directly.
+    function missed(times, direct,   a) {
+      split(times, a, "/")
+      return direct == 403 && a[2] + 0 == 0 && a[3] + 0 >= 1.9
+    }
+    function verdict(i, code, want, t, times, direct) {
+      if (code == "000" && missed(times, direct)) { miss[i]++; return }
       n[i]++
       if (code == want) {
         if (start[i] != "") { g = t - start[i]; if (g > gap[i]) gap[i] = g; start[i] = "" }
@@ -328,16 +362,17 @@ probe_stop() {
       if (i != 2 && code ~ /^2/) through[i]++
       if (start[i] == "") start[i] = t
     }
-    NF >= 4 {
-      verdict(1, $2, 403, $1); verdict(2, $3, 200, $1); verdict(3, $4, 403, $1); last = $1
+    NF >= 10 {
+      verdict(1, $2, 403, $1, $7, $5); verdict(2, $3, 200, $1, $8, $5); verdict(3, $4, 403, $1, $9, $5); last = $1
     }
     END {
       split("ingress-attack ingress-benign route-attack", names, " ")
       for (i = 1; i <= 3; i++) {
         if (start[i] != "") { g = last - start[i] + 0.2; if (g > gap[i]) gap[i] = g }
-        printf "%s: %d requests, %d without the right verdict, %d attacks through, longest gap %.1fs\n",
-          names[i], n[i], bad[i], through[i], gap[i]
+        printf "%s: %d requests, %d without the right verdict, %d attacks through, longest gap %.1fs, %d never connected to the Service (Traefik answered directly)\n",
+          names[i], n[i], bad[i], through[i], gap[i], miss[i]
         if (through[i] > 0) fail = 1
+        if (miss[i] > 3) fail = 1
         if (bad[i] > 0 && gap[i] > max + 0.0001) fail = 1
         if (n[i] < 10) { print "too few requests: is the probe running?"; fail = 1 }
       }
