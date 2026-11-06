@@ -2,7 +2,8 @@
 # Copyright 2026 The Inkwall Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# Builds the operator image, loads it into the kind cluster (make kind-up
+# Builds the operator and engine images (unless SKIP_IMAGE_BUILD=1), loads
+# them into the kind cluster (make kind-up
 # creates it), installs the Helm chart, and checks the operator: the
 # webhook accepts a valid rule set and rejects an invalid one, and the
 # sample policy is built into a bundle served to engines.
@@ -33,9 +34,13 @@ if ! kind get clusters | grep -x "$CLUSTER" >/dev/null; then
   exit 1
 fi
 
-docker build --target operator -t "$IMAGE" .
-# The engine image, injected into proxy pods.
-docker build --target engine -t "$ENGINE_IMAGE" .
+# SKIP_IMAGE_BUILD=1: the images are already in Docker (CI's e2e jobs load
+# the ones its image job built once).
+if [[ ${SKIP_IMAGE_BUILD:-} != 1 ]]; then
+  docker build --target operator -t "$IMAGE" .
+  # The engine image, injected into proxy pods.
+  docker build --target engine -t "$ENGINE_IMAGE" .
+fi
 kind load docker-image "$IMAGE" "$ENGINE_IMAGE" --name "$CLUSTER"
 
 extra_args=()

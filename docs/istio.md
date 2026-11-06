@@ -126,8 +126,8 @@ Then wait for the policy to be `Ready`, and send an attack through the Gateway:
 
 ```console
 $ kubectl -n shop get wafpolicy web
-NAME   MODE    READY   BUNDLE   AGE
-web    Block   True    3        40s
+NAME   MODE    READY   REASON   BUNDLE   AGE
+web    Block   True    Ready    3        40s
 $ curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: shop.example.com' "http://$GATEWAY/?id=1%27%20OR%20%271%27%3D%271"
 403
 ```
