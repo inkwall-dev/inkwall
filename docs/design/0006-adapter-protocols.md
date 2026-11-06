@@ -223,8 +223,11 @@ policy with `responses.inspect` on a route Traefik serves is not silently half-e
 `Programmed=False`, reason `ResponsesNotInspected`, naming the routes (and so not `Ready`), though
 Traefik's routes are wired and their requests inspected. A separate condition was considered, with
 `Programmed` true for the requests: rejected, because `Ready` would then claim the whole policy is
-enforced. The admission webhook warns of `Ingress` and `IngressRoute` targets (only Traefik serves
-them) when such a policy is applied. The same holds for any integration whose `Result` doesn't
+enforced. When such a policy is applied, the admission webhook warns that the responses of its
+`Ingress`, `IngressRoute`, `HTTPRoute` and `VirtualService` targets may not be inspected,
+depending on the proxy that serves them: it doesn't resolve the proxy (an `Ingress` may be
+Traefik's or HAProxy's, an `HTTPRoute` Envoy Gateway's, Traefik's or Istio's), so it names none as
+the target's and leaves that to `Programmed` (#380). The same holds for any integration whose `Result` doesn't
 set `Responses`: only Envoy Gateway's does. Istio's (v0.4.0) doesn't: its `EnvoyFilter` sends no
 response phase yet (#323), so a policy with `responses.inspect` on an Istio route is
 `ResponsesNotInspected` too, and the Gateway's buffer limit isn't raised for responses.
