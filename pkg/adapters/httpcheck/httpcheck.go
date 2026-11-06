@@ -34,6 +34,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
 
 // Path is where check requests are sent.
@@ -57,6 +58,8 @@ type Config struct {
 	// Logger receives one security event per denied or logged request.
 	// Nil uses slog.Default().
 	Logger *slog.Logger
+	// Metrics counts the requests the adapter can't read (nil: none).
+	Metrics *telemetry.Metrics
 	// Events records each security event for the operator (nil: logged
 	// only).
 	Events *events.Recorder
@@ -66,6 +69,7 @@ type Config struct {
 type Handler struct {
 	pipeline pipeline.Inspector
 	maxBody  int64
+	metrics  *telemetry.Metrics
 	logger   *slog.Logger
 	events   *events.Recorder
 }
@@ -79,7 +83,7 @@ func New(p pipeline.Inspector, cfg Config) (*Handler, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Handler{pipeline: p, maxBody: cfg.MaxBodyBytes, logger: logger, events: cfg.Events}, nil
+	return &Handler{pipeline: p, maxBody: cfg.MaxBodyBytes, logger: logger, events: cfg.Events, metrics: cfg.Metrics}, nil
 }
 
 var jsonOut = protojson.MarshalOptions{UseProtoNames: true}
@@ -107,6 +111,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, http.StatusText(http.StatusRequestEntityTooLarge), http.StatusRequestEntityTooLarge)
 			return
 		}
+		h.metrics.AdapterError(telemetry.ErrInvalidRequest)
 		http.Error(w, "read check request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -117,11 +122,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		err = proto.Unmarshal(raw, &in)
 	}
 	if err != nil {
+		h.metrics.AdapterError(telemetry.ErrInvalidRequest)
 		http.Error(w, "decode check request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	req, path, err := h.toRequest(&in)
 	if err != nil {
+		h.metrics.AdapterError(telemetry.ErrInvalidRequest)
 		http.Error(w, "invalid check request: "+err.Error(), http.StatusBadRequest)
 		return
 	}

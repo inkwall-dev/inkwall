@@ -28,6 +28,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
 
 // Config configures a Handler.
@@ -43,6 +44,9 @@ type Config struct {
 	// Logger receives one security event per denied or logged request.
 	// Nil uses slog.Default().
 	Logger *slog.Logger
+	// Metrics counts the requests the proxy can't read, and its
+	// WebSockets (nil: none).
+	Metrics *telemetry.Metrics
 	// Events records each security event for the operator (nil: logged
 	// only).
 	Events *events.Recorder
@@ -61,6 +65,7 @@ type Handler struct {
 	logger   *slog.Logger
 	events   *events.Recorder
 	messages pipeline.WebSocketMessages
+	metrics  *telemetry.Metrics
 }
 
 // New returns a Handler that inspects requests with p.
@@ -101,7 +106,7 @@ func New(p pipeline.Inspector, cfg Config) (*Handler, error) {
 		}
 	}
 	return &Handler{pipeline: p, proxy: rp, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events,
-		messages: cfg.WebSocketMessages}, nil
+		messages: cfg.WebSocketMessages, metrics: cfg.Metrics}, nil
 }
 
 // ServeHTTP inspects r, then denies it or forwards it to the upstream.
@@ -111,6 +116,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// upstream still parses what follows, so parameters after it would
 	// reach the application uninspected.
 	if strings.ContainsRune(r.RequestURI, '#') {
+		h.metrics.AdapterError(telemetry.ErrInvalidRequest)
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
@@ -120,16 +126,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// or none if it is invalid): the engine would choose the policy by a Host
 	// the upstream never sees. The asterisk form would be forwarded as "/*".
 	if r.RequestURI != "" && !strings.HasPrefix(r.RequestURI, "/") {
+		h.metrics.AdapterError(telemetry.ErrInvalidRequest)
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 	// Forward only a Host the client sends as it is: what was inspected.
 	if !httpguts.ValidHostHeader(r.Host) {
+		h.metrics.AdapterError(telemetry.ErrInvalidRequest)
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 	req, err := h.toRequest(r)
 	if err != nil {
+		h.metrics.AdapterError(telemetry.ErrInvalidRequest)
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
@@ -153,6 +162,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// a frame with an RSV bit is then an error.
 		r.Header.Del("Sec-Websocket-Extensions")
 		w = &inspectingWriter{ResponseWriter: w, h: h, ctx: r.Context(), req: req, path: r.URL.Path, mi: h.pipeline.(messageInspector)}
+	} else if httpguts.HeaderValuesContainsToken(r.Header.Values("Upgrade"), "websocket") {
+		w = &countingWriter{ResponseWriter: w, metrics: h.metrics}
 	}
 	h.proxy.ServeHTTP(w, r)
 }

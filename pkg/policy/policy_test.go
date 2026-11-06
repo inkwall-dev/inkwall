@@ -318,6 +318,46 @@ func TestCRSSettings(t *testing.T) {
 	}
 }
 
+// TestTargetExclusions: exclusions narrowed to a cookie, a header or an
+// argument name (target_exclusions) apply with the others.
+func TestTargetExclusions(t *testing.T) {
+	b := testBundle()
+	b.Policies[0].Exclusions = []*bundlev1.Exclusion{{RuleIds: []uint32{942100}, Path: "/off"}}
+	b.Policies[0].TargetExclusions = []*bundlev1.Exclusion{
+		{RuleIds: []uint32{913100}, Header: "User-Agent"},
+		{RuleIds: []uint32{942100}, Cookie: "session"},
+	}
+	set, err := Compile(b, Options{Evaluators: NewEvaluators()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	scanner := req("shop.example.com", "/")
+	scanner.Headers.Set("User-Agent", "sqlmap/1.7.2#stable (https://sqlmap.org)")
+	cookie := req("shop.example.com", "/")
+	cookie.Headers.Set("Cookie", "session=1' OR '1'='1")
+	other := req("shop.example.com", "/")
+	other.Headers.Set("Cookie", "pref=1' OR '1'='1")
+	for _, c := range []struct {
+		name   string
+		r      *request.Request
+		action pipeline.Action
+	}{
+		{"excluded header", scanner, pipeline.ActionAllow},
+		{"excluded cookie", cookie, pipeline.ActionAllow},
+		{"other cookie", other, pipeline.ActionDeny},
+		{"path exclusion", req("shop.example.com", "/off"+sqli), pipeline.ActionAllow},
+	} {
+		if v := set.Check(ctx, c.r); v.Action != c.action {
+			t.Errorf("%s: %s/%s %v, want %s", c.name, v.Action, v.Reason, v.RuleIDs, c.action)
+		}
+	}
+	b.Policies[0].TargetExclusions[0].Cookie = "a"
+	if _, err := Compile(b, Options{}); err == nil {
+		t.Error("an exclusion naming a header and a cookie compiled")
+	}
+}
+
 func TestEvaluatorsSharedAcrossExclusions(t *testing.T) {
 	custom := []*bundlev1.RuleSetBinding{{RuleSetId: "WAFRuleSet/shop/custom"}}
 	b := &bundlev1.Bundle{

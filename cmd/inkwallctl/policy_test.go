@@ -201,6 +201,34 @@ spec:
 	}
 }
 
+// TestTestPolicyTargetExclusions: header and cookie exclusions apply
+// offline as in the cluster (#357).
+func TestTestPolicyTargetExclusions(t *testing.T) {
+	policy := writeFile(t, "wafpolicy.yaml", `apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata: {name: api, namespace: shop}
+spec:
+  targetRefs: [{kind: Ingress, name: api}]
+  mode: Block
+  exclusions:
+  - ruleIDs: [913100]
+    when: {header: User-Agent}
+  - ruleIDs: [942100]
+    when: {path: /api/*, cookie: session}
+`)
+	requests := writeFile(t, "requests.http", "GET /api/a HTTP/1.1\r\nHost: shop.example.com\r\nUser-Agent: sqlmap/1.8\r\nAccept: */*\r\n\r\n"+
+		"GET /api/a HTTP/1.1\r\nHost: shop.example.com\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\nCookie: session=1' OR '1'='1\r\n\r\n"+
+		"GET /api/a HTTP/1.1\r\nHost: shop.example.com\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\nCookie: pref=1' OR '1'='1\r\n\r\n")
+	code, out, errOut := runCLI(t, "test", "--request", requests, "--policy", policy, "--ingress", sampleIngresses)
+	if code != 0 || errOut != "" {
+		t.Fatalf("exit %d, stderr %q", code, errOut)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 3 || !strings.HasPrefix(lines[0], "allow ") || !strings.HasPrefix(lines[1], "allow ") || !strings.HasPrefix(lines[2], "deny ") {
+		t.Errorf("want allow, allow, deny:\n%s", out)
+	}
+}
+
 // TestTestPolicyIngressRoute routes requests by Ingresses and Traefik
 // IngressRoutes together.
 func TestTestPolicyIngressRoute(t *testing.T) {

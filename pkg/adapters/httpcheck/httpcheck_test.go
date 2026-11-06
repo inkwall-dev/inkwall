@@ -26,6 +26,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/rules"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
+	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
 
 func newPipeline(t *testing.T, mode pipeline.Mode) *pipeline.Pipeline {
@@ -266,6 +267,8 @@ func TestBodyInspectionDisabled(t *testing.T) {
 func TestInvalidChecksAreRejected(t *testing.T) {
 	var logs bytes.Buffer
 	h := newHandler(t, newPipeline(t, pipeline.ModeBlock), 16, &logs)
+	m := telemetry.NewMetrics("httpcheck")
+	h.metrics = m
 
 	encode := func(mut func(*enginev1.CheckRequest)) []byte {
 		in := checkRequest("GET", "/", "", "")
@@ -314,6 +317,12 @@ func TestInvalidChecksAreRejected(t *testing.T) {
 				t.Fatalf("got %d (%s), want %d", w.Code, strings.TrimSpace(w.Body.String()), tc.want)
 			}
 		})
+	}
+	// Each 400 is a check request the adapter can't read (#356).
+	w := httptest.NewRecorder()
+	m.AdminHandler(nil).ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
+	if !strings.Contains(w.Body.String(), `inkwall_adapter_errors_total{adapter="httpcheck",kind="invalid_request"} 9`) {
+		t.Errorf("adapter errors:\n%s", w.Body.String())
 	}
 }
 

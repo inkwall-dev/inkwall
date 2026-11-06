@@ -23,6 +23,7 @@ import (
 
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
+	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 	"github.com/inkwall-dev/inkwall/pkg/websocket"
 )
 
@@ -41,6 +42,12 @@ func (u *wsUpstream) received() []string {
 }
 
 func newWSProxy(t *testing.T, mode pipeline.Mode, messages pipeline.WebSocketMessages, oversize pipeline.OversizeAction, maxBody int64) (*wsUpstream, string, *bytes.Buffer) {
+	t.Helper()
+	return newWSProxyMetrics(t, mode, messages, oversize, maxBody, nil)
+}
+
+func newWSProxyMetrics(t *testing.T, mode pipeline.Mode, messages pipeline.WebSocketMessages, oversize pipeline.OversizeAction, maxBody int64,
+	m *telemetry.Metrics) (*wsUpstream, string, *bytes.Buffer) {
 	t.Helper()
 	u := &wsUpstream{}
 	echo := xws.Server{
@@ -75,8 +82,12 @@ func newWSProxy(t *testing.T, mode pipeline.Mode, messages pipeline.WebSocketMes
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
-	h, err := New(pipeline.New(eval, pipeline.Config{Mode: mode, Oversize: oversize, Timeout: 10 * time.Second}),
-		Config{Upstream: upURL, MaxBodyBytes: maxBody, WebSocketMessages: messages, Logger: slog.New(slog.NewJSONHandler(&syncWriter{w: &logs}, nil))})
+	pcfg := pipeline.Config{Mode: mode, Oversize: oversize, Timeout: 10 * time.Second}
+	if m != nil {
+		pcfg.Observer = m
+	}
+	h, err := New(pipeline.New(eval, pcfg),
+		Config{Upstream: upURL, MaxBodyBytes: maxBody, WebSocketMessages: messages, Logger: slog.New(slog.NewJSONHandler(&syncWriter{w: &logs}, nil)), Metrics: m})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,4 +329,63 @@ func TestWebSocketMessages(t *testing.T) {
 			t.Fatalf("events: %s", logs.String())
 		}
 	})
+}
+
+// The proxy counts its open WebSockets, inspected or not, their messages
+// apart from requests, and the violations that close them (#356).
+func TestWebSocketMetrics(t *testing.T) {
+	waitGauge := func(t *testing.T, m *telemetry.Metrics, want string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			body := scrapeMetrics(t, m)
+			if strings.Contains(body, want) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("metrics never had %q:\n%s", want, body)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	t.Run("inspected", func(t *testing.T) {
+		m := telemetry.NewMetrics("proxy")
+		_, addr, logs := newWSProxyMetrics(t, pipeline.ModeBlock, pipeline.MessagesInspect, pipeline.OversizeAuto, 4096, m)
+		c := dialWS(t, addr)
+		waitGauge(t, m, `inkwall_websocket_connections{adapter="proxy"} 1`)
+		c.send(t, clientFrame(true, websocket.OpText, []byte("hello")))
+		c.echoes(t, "hello")
+		c.send(t, clientFrame(true, websocket.OpText, []byte{0xff, 0xfe}))
+		c.closed(t, websocket.CloseInvalidPayload)
+		waitGauge(t, m, `inkwall_websocket_connections{adapter="proxy"} 0`)
+		if !strings.Contains(logs.String(), `"phase":"websocket_message"`) {
+			t.Errorf("the violation's event: %s", logs.String())
+		}
+		body := scrapeMetrics(t, m)
+		for _, want := range []string{
+			`inkwall_websocket_messages_total{action="allow",adapter="proxy"} 1`,
+			`inkwall_websocket_violations_total{adapter="proxy",code="1007"} 1`,
+			// The handshake only.
+			`inkwall_requests_total{action="allow",adapter="proxy",reason="none"} 1`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("metrics missing %q", want)
+			}
+		}
+	})
+	t.Run("uninspected", func(t *testing.T) {
+		m := telemetry.NewMetrics("proxy")
+		_, addr, _ := newWSProxyMetrics(t, pipeline.ModeBlock, pipeline.MessagesOff, pipeline.OversizeAuto, 4096, m)
+		c := dialWS(t, addr)
+		waitGauge(t, m, `inkwall_websocket_connections{adapter="proxy"} 1`)
+		_ = c.conn.Close()
+		waitGauge(t, m, `inkwall_websocket_connections{adapter="proxy"} 0`)
+	})
+}
+
+func scrapeMetrics(t *testing.T, m *telemetry.Metrics) string {
+	t.Helper()
+	w := httptest.NewRecorder()
+	m.AdminHandler(nil).ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
+	return w.Body.String()
 }

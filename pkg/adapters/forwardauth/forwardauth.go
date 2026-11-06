@@ -32,6 +32,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
 
 // Path is where the proxy sends its subrequests.
@@ -59,6 +60,8 @@ type Config struct {
 	// Logger receives one security event per denied or logged request.
 	// Nil uses slog.Default().
 	Logger *slog.Logger
+	// Metrics counts the requests the adapter can't read (nil: none).
+	Metrics *telemetry.Metrics
 	// Events records each security event for the operator (nil: logged
 	// only).
 	Events *events.Recorder
@@ -69,6 +72,7 @@ type Handler struct {
 	pipeline pipeline.Inspector
 	maxBody  int64
 	clientIP *clientip.Resolver
+	metrics  *telemetry.Metrics
 	logger   *slog.Logger
 	events   *events.Recorder
 }
@@ -86,7 +90,7 @@ func New(p pipeline.Inspector, cfg Config) (*Handler, error) {
 	if resolver == nil {
 		resolver = &clientip.Resolver{}
 	}
-	return &Handler{pipeline: p, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events}, nil
+	return &Handler{pipeline: p, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events, metrics: cfg.Metrics}, nil
 }
 
 // ServeHTTP inspects the request described by r and answers 200 to allow it,
@@ -100,6 +104,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Only a misconfigured proxy sends this; the request can't be
 		// inspected, so it is not let through.
+		h.metrics.AdapterError(telemetry.ErrInvalidRequest)
 		h.logger.LogAttrs(r.Context(), slog.LevelError, "invalid forward-auth request", slog.Any("error", err))
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
