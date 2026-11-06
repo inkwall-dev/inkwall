@@ -47,6 +47,14 @@ What's new:
 
 What changes by itself:
 
+- **`Enforced` counts the engines that serve the policy.** A policy's `Enforced` condition (and
+  its `EnginesBehind`, `EngineNack` and `EnginesOutdated` reasons) now counts only the engines on
+  the proxy pods that serve its routes, once the operator has wired them all. An engine of one
+  proxy that is behind, rejects a bundle or is too old no longer makes the policies of another
+  proxy `Enforced=False`. A policy whose routes aren't all wired, and an engine whose pod the
+  operator doesn't know, still count everywhere. `inkwall_operator_engines` gets an
+  `integration` label (`unknown` for engines not matched to a proxy): sum over it for the old
+  totals.
 - **Security event log lines say where rules matched, and are rate-limited.** Each line has
   `matches`, the rule and the variable it matched (`{"rule_id":942100,"variable":"ARGS:q"}`),
   never the value. An engine logs at most 10 lines per second for each policy and rule (the

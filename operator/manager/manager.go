@@ -333,8 +333,11 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	if err := mgr.Add(&accessWatch{client: checker, denied: denied, maxDelay: o.SelectorRestartMaxDelay}); err != nil {
 		return nil, err
 	}
+	// The pods that serve each policy, from the wiring, so that only their
+	// engines count for its Enforced (#371). Both run on the leader.
+	served := &distribution.ServedPods{}
 	if err := (&wiring.Reconciler{
-		Client: mgr.GetClient(), PodWebhook: webhook.MutatingConfigName, Integrations: wirings, Disabled: !inject,
+		Client: mgr.GetClient(), PodWebhook: webhook.MutatingConfigName, Integrations: wirings, Disabled: !inject, Served: served,
 	}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
@@ -369,7 +372,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		return nil, err
 	}
 	if o.DistributionPort != 0 {
-		if err := addDistribution(mgr, o, ready, forwarder); err != nil {
+		if err := addDistribution(mgr, o, ready, forwarder, served); err != nil {
 			return nil, err
 		}
 	}
@@ -436,7 +439,7 @@ func addCerts(mgr manager.Manager, o Options) (<-chan struct{}, error) {
 
 // addDistribution serves bundles to the engines on every replica, and
 // reports Enforced from the leader.
-func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}, forwarder *controlplane.Forwarder) error {
+func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}, forwarder *controlplane.Forwarder, served *distribution.ServedPods) error {
 	replica := o.Replica
 	if replica == "" {
 		h, err := os.Hostname()
@@ -489,6 +492,7 @@ func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}, forw
 		Interval:  interval,
 		Stale:     engineStale(o),
 		Store:     store,
+		Served:    served,
 	})
 }
 
