@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"runtime/debug"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -32,6 +31,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/inkwall-dev/inkwall/internal/buildinfo"
+	"github.com/inkwall-dev/inkwall/internal/memlimit"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/manager"
 )
@@ -136,9 +136,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctrl.SetLogger(logr.FromSlogHandler(logger.Handler()))
-	if limit := memoryLimit(os.Getenv); limit > 0 {
-		debug.SetMemoryLimit(limit)
-		logger.Info("Go memory limit set", slog.Int64("bytes", limit), slog.String("from", MemoryLimitEnv))
+	if limit := memlimit.Set(os.Getenv); limit > 0 {
+		logger.Info("Go memory limit set", slog.Int64("bytes", limit), slog.String("from", memlimit.Env))
 	}
 
 	cfg, err := ctrl.GetConfig()

@@ -19,4 +19,4 @@ images:
   # The engine of your operator's release.
   - name: inkwall-engine
     newName: ghcr.io/inkwall-dev/inkwall-engine
-    newTag: 0.3.1
+    newTag: 0.4.1

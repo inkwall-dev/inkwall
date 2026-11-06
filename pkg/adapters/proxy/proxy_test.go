@@ -560,3 +560,38 @@ func TestInvalidHostIsRejected(t *testing.T) {
 		t.Fatalf("%d requests reached the upstream", n)
 	}
 }
+
+// A header the Connection header names is dropped by ReverseProxy on the
+// way to the upstream: the engine inspects the request without it, as it is
+// forwarded. Otherwise "Connection: Content-Type" shows the engine a gRPC
+// call, whose messages it skips, and the upstream a body without a media
+// type, which Rack, for one, reads as a form.
+func TestConnectionNominatedHeadersAreNotInspected(t *testing.T) {
+	up := newUpstream(t)
+	var logs bytes.Buffer
+	h := newHandler(t, pipeline.ModeBlock, 1<<16, up, &logs)
+	// One gRPC message of 0x126 bytes: its prefix ends in '&' (0x26), so
+	// read as a form, the body is a junk pair, then the message's pairs.
+	form := "id=1%27%20UNION%20SELECT%20password%20FROM%20users--&pad="
+	body := "\x00\x00\x00\x01&" + form + strings.Repeat("x", 0x126-len(form))
+	if q, err := url.ParseQuery(body); err != nil || !strings.Contains(q.Get("id"), "UNION SELECT") {
+		t.Fatalf("the body doesn't read as a form: %v %v", q, err)
+	}
+	for _, connection := range []string{"", "Content-Type", "keep-alive, content-type"} {
+		r := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body))
+		r.Host = "shop.example.com"
+		r.Header.Set("User-Agent", "Mozilla/5.0 inkwall-test")
+		r.Header.Set("Content-Type", "application/grpc")
+		if connection != "" {
+			r.Header.Set("Connection", connection)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		switch {
+		case connection == "" && w.Code != http.StatusOK:
+			t.Errorf("a gRPC call: got %d, want 200 (its messages aren't inspected)", w.Code)
+		case connection != "" && w.Code != http.StatusForbidden:
+			t.Errorf("Connection: %s: got %d, want 403: the upstream gets the form without a media type", connection, w.Code)
+		}
+	}
+}
