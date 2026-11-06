@@ -479,8 +479,8 @@ func (s *modsec) secRule(m *migration, text string, args []string, src string) {
 	}
 
 	type target struct {
-		id  int32
-		arg string
+		id    int32
+		match wafv1alpha1.ExclusionMatch
 	}
 	var (
 		ids      []int32
@@ -531,13 +531,13 @@ func (s *modsec) secRule(m *migration, text string, args []string, src string) {
 				todo(fmt.Sprintf("ctl:%s: %v", a.value, err))
 				return
 			}
-			arg, ok := argsTarget(t)
+			match, ok := requestTarget(t)
 			if !ok {
-				todo(fmt.Sprintf("ctl:%s: only an ARGS:name target maps to an exclusion's argument", a.value))
+				todo(fmt.Sprintf("ctl:%s: only an ARGS, ARGS_NAMES, REQUEST_COOKIES or REQUEST_HEADERS target with a plain name maps to an exclusion", a.value))
 				return
 			}
 			for _, id := range list {
-				targets = append(targets, target{id, arg})
+				targets = append(targets, target{id, match})
 			}
 			if strings.Contains(idText, "-") {
 				expanded = append(expanded, fmt.Sprintf("%s (%d rules)", idText, len(list)))
@@ -563,10 +563,10 @@ func (s *modsec) secRule(m *migration, text string, args []string, src string) {
 	// The whole rule maps: apply it.
 	var done []string
 	for _, id := range ids {
-		s.exclude(id, path, "")
+		s.exclude(id, path, wafv1alpha1.ExclusionMatch{})
 	}
 	for _, t := range targets {
-		s.exclude(t.id, path, t.arg)
+		s.exclude(t.id, path, t.match)
 	}
 	if len(ids)+len(targets) > 0 {
 		done = append(done, "exclusions")
@@ -624,13 +624,24 @@ var pathPattern = regexp.MustCompile(`^/[A-Za-z0-9._~/:@!$&'()+,=-]*\*?$`)
 // argumentPattern is the CRD's pattern for an exclusion's argument.
 var argumentPattern = regexp.MustCompile(`^[A-Za-z0-9_.\-\[\]]+$`)
 
-// argsTarget returns the argument of an ARGS:name target.
-func argsTarget(target string) (string, bool) {
-	name, ok := strings.CutPrefix(target, "ARGS:")
+// requestTarget maps an ARGS:name, ARGS_NAMES:name, REQUEST_COOKIES:name or
+// REQUEST_HEADERS:name target to what an exclusion stops looking at.
+func requestTarget(target string) (wafv1alpha1.ExclusionMatch, bool) {
+	collection, name, ok := strings.Cut(target, ":")
 	if !ok || !argumentPattern.MatchString(name) {
-		return "", false
+		return wafv1alpha1.ExclusionMatch{}, false
 	}
-	return name, true
+	switch strings.ToUpper(collection) {
+	case "ARGS":
+		return wafv1alpha1.ExclusionMatch{Argument: name}, true
+	case "ARGS_NAMES":
+		return wafv1alpha1.ExclusionMatch{ArgumentName: name}, true
+	case "REQUEST_COOKIES":
+		return wafv1alpha1.ExclusionMatch{Cookie: name}, true
+	case "REQUEST_HEADERS":
+		return wafv1alpha1.ExclusionMatch{Header: name}, true
+	}
+	return wafv1alpha1.ExclusionMatch{}, false
 }
 
 // ruleID parses one rule ID.
@@ -699,13 +710,14 @@ func (s *modsec) removeByID(m *migration, text string, args []string, src string
 		return
 	}
 	for _, id := range ids {
-		s.exclude(id, "", "")
+		s.exclude(id, "", wafv1alpha1.ExclusionMatch{})
 	}
 	m.add(itemMapped, src, "%s: exclusions", text)
 }
 
-// updateTarget maps SecRuleUpdateTargetById ID "!ARGS:a|!ARGS:b" to
-// exclusions of those arguments; any other form is kept.
+// updateTarget maps SecRuleUpdateTargetById ID "!ARGS:a|!REQUEST_COOKIES:b"
+// to exclusions of those arguments, argument names, cookies and headers; any
+// other form is kept.
 func (s *modsec) updateTarget(m *migration, text string, args []string, src string) {
 	if len(args) != 3 {
 		s.keep(m, text, src)
@@ -716,31 +728,32 @@ func (s *modsec) updateTarget(m *migration, text string, args []string, src stri
 		s.keep(m, text, src)
 		return
 	}
-	var names []string
+	var matches []wafv1alpha1.ExclusionMatch
 	for _, t := range strings.Split(args[2], "|") {
-		name, ok := argsTarget(strings.TrimPrefix(t, "!"))
+		match, ok := requestTarget(strings.TrimPrefix(t, "!"))
 		if !ok || !strings.HasPrefix(t, "!") {
 			s.keep(m, text, src)
 			return
 		}
-		names = append(names, name)
+		matches = append(matches, match)
 	}
-	for _, n := range names {
-		s.exclude(id, "", n)
+	for _, match := range matches {
+		s.exclude(id, "", match)
 	}
 	m.add(itemMapped, src, "%s: exclusions", text)
 }
 
-// exclude adds a rule ID to the exclusion for path and argument.
-func (s *modsec) exclude(id int32, path wafv1alpha1.PathPattern, argument string) {
+// exclude adds a rule ID to the exclusion for path and match (what in the
+// request it stops looking at; its Path is unset).
+func (s *modsec) exclude(id int32, path wafv1alpha1.PathPattern, match wafv1alpha1.ExclusionMatch) {
+	match.Path = path
 	for i := range s.exclusions {
 		e := &s.exclusions[i]
-		var p wafv1alpha1.PathPattern
-		var a string
+		var w wafv1alpha1.ExclusionMatch
 		if e.When != nil {
-			p, a = e.When.Path, e.When.Argument
+			w = *e.When
 		}
-		if p == path && a == argument && len(e.RuleIDs) < maxExclusionIDs {
+		if w == match && len(e.RuleIDs) < maxExclusionIDs {
 			if !slices.Contains(e.RuleIDs, id) {
 				e.RuleIDs = append(e.RuleIDs, id)
 			}
@@ -748,8 +761,8 @@ func (s *modsec) exclude(id int32, path wafv1alpha1.PathPattern, argument string
 		}
 	}
 	e := wafv1alpha1.Exclusion{RuleIDs: []int32{id}}
-	if path != "" || argument != "" {
-		e.When = &wafv1alpha1.ExclusionMatch{Path: path, Argument: argument}
+	if match != (wafv1alpha1.ExclusionMatch{}) {
+		e.When = &match
 	}
 	s.exclusions = append(s.exclusions, e)
 }

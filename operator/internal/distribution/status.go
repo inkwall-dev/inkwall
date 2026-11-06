@@ -145,6 +145,12 @@ func outdatedEngine(p *wafv1alpha1.WAFPolicy, engines []Engine) (*Engine, string
 		// An older engine inspects requests only (#274).
 		field, need = "spec.responses", [3]int{0, 4, 0}
 	}
+	for i, e := range p.Spec.Exclusions {
+		if field == "" && e.When.Target() {
+			// An older engine ignores the exclusion (#357).
+			field, need = fmt.Sprintf("spec.exclusions[%d].when", i), [3]int{0, 5, 0}
+		}
+	}
 	if field == "" {
 		return nil, "", ""
 	}

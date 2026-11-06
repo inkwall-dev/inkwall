@@ -146,7 +146,8 @@ Traefik's ForwardAuth never sees responses, so on a Traefik route such a policy 
 `Programmed=False` (`ResponsesNotInspected`) while its requests are still inspected
 ([design](docs/design/0006-adapter-protocols.md#response-inspection-v040)).
 
-Start in `Detect` mode, tune [false positives](https://coreruleset.org/docs/concepts/false_positives_tuning/) on the policy (`exclusions`, `skip` paths,
+Start in `Detect` mode, tune [false positives](https://coreruleset.org/docs/concepts/false_positives_tuning/) on the policy (`exclusions`, narrowed with `when` to a path and an
+argument, argument name, cookie or header, `skip` paths,
 [`ruleSets[].paranoiaLevel`](https://coreruleset.org/docs/concepts/paranoia_levels/)), then switch to `Block`. Extra rules come from `WAFRuleSet` and
 `ClusterWAFRuleSet` objects: built-in, [SecLang](https://coraza.io/docs/seclang/) or a [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/).
 [`operator/config/samples`](operator/config/samples) has one object of each kind. To test

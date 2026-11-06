@@ -235,8 +235,11 @@ type Exclusion struct {
 	When *ExclusionMatch `json:"when,omitempty"`
 }
 
-// ExclusionMatch narrows an exclusion to a path, an argument, or both.
-// +kubebuilder:validation:XValidation:rule="has(self.path) || has(self.argument)",message="when needs a path, an argument, or both"
+// ExclusionMatch narrows an exclusion to a path, to what in the request the
+// rules stop looking at (an argument, an argument name, a cookie or a
+// header), or both.
+// +kubebuilder:validation:XValidation:rule="has(self.path) || has(self.argument) || has(self.argumentName) || has(self.cookie) || has(self.header)",message="when needs a path, or what in the request to stop looking at"
+// +kubebuilder:validation:XValidation:rule="[has(self.argument), has(self.argumentName), has(self.cookie), has(self.header)].filter(x, x).size() <= 1",message="at most one of argument, argumentName, cookie and header"
 type ExclusionMatch struct {
 	// Path the exclusion applies to.
 	// +optional
@@ -251,6 +254,38 @@ type ExclusionMatch struct {
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.\-\[\]]+$`
 	// +optional
 	Argument string `json:"argument,omitempty"`
+
+	// ArgumentName is a query or body argument whose name (ARGS_NAMES) the
+	// rules stop looking at. Requires engines 0.5.0 or later: older ones
+	// ignore the exclusion.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.\-\[\]]+$`
+	// +optional
+	ArgumentName string `json:"argumentName,omitempty"`
+
+	// Cookie is a request cookie (REQUEST_COOKIES) the rules stop looking
+	// at, such as a session token. Requires engines 0.5.0 or later.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.\-\[\]]+$`
+	// +optional
+	Cookie string `json:"cookie,omitempty"`
+
+	// Header is a request header (REQUEST_HEADERS) the rules stop looking
+	// at, such as Referer, compared case-insensitively. Requires engines
+	// 0.5.0 or later.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.\-\[\]]+$`
+	// +optional
+	Header string `json:"header,omitempty"`
+}
+
+// Target reports whether m narrows its exclusion to an argument name, a
+// cookie or a header (m may be nil).
+func (m *ExclusionMatch) Target() bool {
+	return m != nil && (m.ArgumentName != "" || m.Cookie != "" || m.Header != "")
 }
 
 // BodySpec configures request body inspection.

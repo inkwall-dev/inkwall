@@ -111,10 +111,10 @@ it, and the other annotations do nothing without ModSecurity on.
 | `SecRuleEngine Off` | No policy |
 | `setvar:tx.paranoia_level` or `tx.blocking_paranoia_level`, `tx.inbound_anomaly_score_threshold` (in a `SecAction`) | `ruleSets[].paranoiaLevel`, `inboundAnomalyThreshold` |
 | `SecRuleRemoveById 942100 ...` | `exclusions` |
-| `SecRuleUpdateTargetById 942100 "!ARGS:password"` | `exclusions` with `when.argument` |
+| `SecRuleUpdateTargetById 942100 "!ARGS:password"` | `exclusions` with `when.argument` (`!ARGS_NAMES:`, `!REQUEST_COOKIES:`, `!REQUEST_HEADERS:` with a plain name: `when.argumentName`, `when.cookie`, `when.header`) |
 | `SecRule REQUEST_FILENAME "@beginsWith /api/" "...,ctl:ruleRemoveById=942100"`, or `@streq` | `exclusions` with `when.path: /api/*` (or the exact path; an `@streq` path with `*` is `TODO`) |
 | A range of CRS rules in such a rule, `ctl:ruleRemoveById=941100-941199` | `exclusions` with the IDs of the CRS rules in it |
-| `ctl:ruleRemoveTargetById=942100;ARGS:q` in such a rule | `exclusions` with `when.path` and `when.argument` |
+| `ctl:ruleRemoveTargetById=942100;ARGS:q` in such a rule (or `ARGS_NAMES:`, `REQUEST_COOKIES:`, `REQUEST_HEADERS:`) | `exclusions` with `when.path` and `when.argument` (`argumentName`, `cookie`, `header`) |
 | `ctl:ruleEngine=Off` / `ctl:requestBodyAccess=Off` in such a rule | `skip.paths` / `skip.bodyPaths` |
 | `SecRequestBodyAccess`, `SecRequestBodyLimit`, `SecRequestBodyLimitAction` | `body.inspect`, `body.maxBytes`, `body.onOversize` |
 | `SecRequestBodyLimitAction ProcessPartial` without `SecRequestBodyLimit` | `body.onOversize: Allow` and `body.maxBytes` of `modsecurity.conf`'s limit (12.5 MiB) capped at 10 MiB; `TODO` when `modsecurity.conf` isn't loaded |
@@ -141,7 +141,7 @@ Ingress files/cloud: WAFPolicy files/cloud (Detect), WAFRuleSet files/cloud-mods
   `SecRuleEngine` was set, or audit log settings (the engine logs verdicts itself).
 - `TODO`: not migrated; it needs a human. Nothing is dropped or weakened silently: a rule that
   can't be converted faithfully is listed here and left out of the objects. Typical ones are
-  `Include` of other files, exclusions keyed on anything but the path (`@contains`, `@rx`, headers),
+  `Include` of other files, exclusions keyed on anything but the path (`@contains`, `@rx`, a header's value), targets named by a pattern (`!REQUEST_COOKIES:/^_ga/`),
   `ctl:ruleRemoveById` ranges reaching outside the CRS's IDs (900000-999999), `ctl:ruleRemoveByTag`, CRS variables without a `WAFPolicy` field
   (`tx.allowed_methods`), and rules the engine rejects.
 

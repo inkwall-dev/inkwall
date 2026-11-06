@@ -89,6 +89,11 @@ message Policy {
   // and inspect requests only; the operator reports routes whose engine
   // doesn't inspect responses.
   ResponseConfig responses = 12;
+  // Exclusions narrowed to an argument name, a cookie or a header. Apart
+  // from exclusions so that engines before 0.5.0, which don't know those
+  // fields, ignore them (more rules apply) instead of reading them as
+  // turning the rules off entirely.
+  repeated Exclusion target_exclusions = 13;
 }
 
 // RouteMatch matches requests by host, path and method.
@@ -181,8 +186,18 @@ message Exclusion {
   // Exact or prefix path in the router's syntax. Empty: every path.
   string path = 2;
   // A query or body argument the rules (and the rules chained to them) stop
-  // looking at. Empty: the rules are off entirely (on path, when set).
+  // looking at. Empty, as the three below: the rules are off entirely (on
+  // path, when set). At most one of the four is set.
   string argument = 3;
+  // An argument name (ARGS_NAMES) the rules stop looking at. Only in
+  // Policy.target_exclusions.
+  string argument_name = 4;
+  // A request cookie (REQUEST_COOKIES) the rules stop looking at. Only in
+  // Policy.target_exclusions.
+  string cookie = 5;
+  // A request header (REQUEST_HEADERS) the rules stop looking at. Only in
+  // Policy.target_exclusions.
+  string header = 6;
 }
 
 // BodyConfig configures request body inspection.

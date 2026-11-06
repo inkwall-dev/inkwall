@@ -513,6 +513,13 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 		if e.When != nil {
 			ex.Path = string(e.When.Path)
 			ex.Argument = e.When.Argument
+			ex.ArgumentName = e.When.ArgumentName
+			ex.Cookie = e.When.Cookie
+			ex.Header = e.When.Header
+		}
+		if e.When.Target() {
+			p.TargetExclusions = append(p.TargetExclusions, ex)
+			continue
 		}
 		p.Exclusions = append(p.Exclusions, ex)
 	}

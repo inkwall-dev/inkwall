@@ -517,9 +517,14 @@ type Policy struct {
 	// Unset: responses are not inspected. Engines before 0.4.0 ignore it
 	// and inspect requests only; the operator reports routes whose engine
 	// doesn't inspect responses.
-	Responses     *ResponseConfig `protobuf:"bytes,12,opt,name=responses,proto3" json:"responses,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Responses *ResponseConfig `protobuf:"bytes,12,opt,name=responses,proto3" json:"responses,omitempty"`
+	// Exclusions narrowed to an argument name, a cookie or a header. Apart
+	// from exclusions so that engines before 0.5.0, which don't know those
+	// fields, ignore them (more rules apply) instead of reading them as
+	// turning the rules off entirely.
+	TargetExclusions []*Exclusion `protobuf:"bytes,13,rep,name=target_exclusions,json=targetExclusions,proto3" json:"target_exclusions,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *Policy) Reset() {
@@ -632,6 +637,13 @@ func (x *Policy) GetWebsocket() *WebSocketConfig {
 func (x *Policy) GetResponses() *ResponseConfig {
 	if x != nil {
 		return x.Responses
+	}
+	return nil
+}
+
+func (x *Policy) GetTargetExclusions() []*Exclusion {
+	if x != nil {
+		return x.TargetExclusions
 	}
 	return nil
 }
@@ -933,8 +945,18 @@ type Exclusion struct {
 	// Exact or prefix path in the router's syntax. Empty: every path.
 	Path string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
 	// A query or body argument the rules (and the rules chained to them) stop
-	// looking at. Empty: the rules are off entirely (on path, when set).
-	Argument      string `protobuf:"bytes,3,opt,name=argument,proto3" json:"argument,omitempty"`
+	// looking at. Empty, as the three below: the rules are off entirely (on
+	// path, when set). At most one of the four is set.
+	Argument string `protobuf:"bytes,3,opt,name=argument,proto3" json:"argument,omitempty"`
+	// An argument name (ARGS_NAMES) the rules stop looking at. Only in
+	// Policy.target_exclusions.
+	ArgumentName string `protobuf:"bytes,4,opt,name=argument_name,json=argumentName,proto3" json:"argument_name,omitempty"`
+	// A request cookie (REQUEST_COOKIES) the rules stop looking at. Only in
+	// Policy.target_exclusions.
+	Cookie string `protobuf:"bytes,5,opt,name=cookie,proto3" json:"cookie,omitempty"`
+	// A request header (REQUEST_HEADERS) the rules stop looking at. Only in
+	// Policy.target_exclusions.
+	Header        string `protobuf:"bytes,6,opt,name=header,proto3" json:"header,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -986,6 +1008,27 @@ func (x *Exclusion) GetPath() string {
 func (x *Exclusion) GetArgument() string {
 	if x != nil {
 		return x.Argument
+	}
+	return ""
+}
+
+func (x *Exclusion) GetArgumentName() string {
+	if x != nil {
+		return x.ArgumentName
+	}
+	return ""
+}
+
+func (x *Exclusion) GetCookie() string {
+	if x != nil {
+		return x.Cookie
+	}
+	return ""
+}
+
+func (x *Exclusion) GetHeader() string {
+	if x != nil {
+		return x.Header
 	}
 	return ""
 }
@@ -1221,7 +1264,7 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\trule_sets\x18\x06 \x03(\v2\x1a.inkwall.bundle.v1.RuleSetR\bruleSets\x12\x1c\n" +
 	"\tsuspended\x18\a \x01(\bR\tsuspended\x12'\n" +
 	"\x0fpolicy_versions\x18\b \x03(\x04R\x0epolicyVersions\x12\x1b\n" +
-	"\tprobe_key\x18\t \x01(\fR\bprobeKey\"\xef\x04\n" +
+	"\tprobe_key\x18\t \x01(\fR\bprobeKey\"\xba\x05\n" +
 	"\x06Policy\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x125\n" +
 	"\x06routes\x18\x02 \x03(\v2\x1d.inkwall.bundle.v1.RouteMatchR\x06routes\x12+\n" +
@@ -1238,7 +1281,8 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\x04body\x18\n" +
 	" \x01(\v2\x1d.inkwall.bundle.v1.BodyConfigR\x04body\x12@\n" +
 	"\twebsocket\x18\v \x01(\v2\".inkwall.bundle.v1.WebSocketConfigR\twebsocket\x12?\n" +
-	"\tresponses\x18\f \x01(\v2!.inkwall.bundle.v1.ResponseConfigR\tresponses\"\x9a\x01\n" +
+	"\tresponses\x18\f \x01(\v2!.inkwall.bundle.v1.ResponseConfigR\tresponses\x12I\n" +
+	"\x11target_exclusions\x18\r \x03(\v2\x1c.inkwall.bundle.v1.ExclusionR\x10targetExclusions\"\x9a\x01\n" +
 	"\n" +
 	"RouteMatch\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x120\n" +
@@ -1256,11 +1300,14 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12=\n" +
 	"\abuiltin\x18\x02 \x01(\x0e2!.inkwall.bundle.v1.BuiltinRuleSetH\x00R\abuiltin\x12\x1a\n" +
 	"\aseclang\x18\x03 \x01(\tH\x00R\aseclangB\b\n" +
-	"\x06source\"V\n" +
+	"\x06source\"\xab\x01\n" +
 	"\tExclusion\x12\x19\n" +
 	"\brule_ids\x18\x01 \x03(\rR\aruleIds\x12\x12\n" +
 	"\x04path\x18\x02 \x01(\tR\x04path\x12\x1a\n" +
-	"\bargument\x18\x03 \x01(\tR\bargument\"\xac\x01\n" +
+	"\bargument\x18\x03 \x01(\tR\bargument\x12#\n" +
+	"\rargument_name\x18\x04 \x01(\tR\fargumentName\x12\x16\n" +
+	"\x06cookie\x18\x05 \x01(\tR\x06cookie\x12\x16\n" +
+	"\x06header\x18\x06 \x01(\tR\x06header\"\xac\x01\n" +
 	"\n" +
 	"BodyConfig\x12\x18\n" +
 	"\ainspect\x18\x01 \x01(\bR\ainspect\x12\x1b\n" +
@@ -1345,16 +1392,17 @@ var file_bundle_v1_bundle_proto_depIdxs = []int32{
 	13, // 9: inkwall.bundle.v1.Policy.body:type_name -> inkwall.bundle.v1.BodyConfig
 	14, // 10: inkwall.bundle.v1.Policy.websocket:type_name -> inkwall.bundle.v1.WebSocketConfig
 	15, // 11: inkwall.bundle.v1.Policy.responses:type_name -> inkwall.bundle.v1.ResponseConfig
-	9,  // 12: inkwall.bundle.v1.RouteMatch.path:type_name -> inkwall.bundle.v1.PathMatch
-	0,  // 13: inkwall.bundle.v1.PathMatch.type:type_name -> inkwall.bundle.v1.PathMatchType
-	3,  // 14: inkwall.bundle.v1.RuleSet.builtin:type_name -> inkwall.bundle.v1.BuiltinRuleSet
-	4,  // 15: inkwall.bundle.v1.BodyConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
-	4,  // 16: inkwall.bundle.v1.ResponseConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
-	17, // [17:17] is the sub-list for method output_type
-	17, // [17:17] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	12, // 12: inkwall.bundle.v1.Policy.target_exclusions:type_name -> inkwall.bundle.v1.Exclusion
+	9,  // 13: inkwall.bundle.v1.RouteMatch.path:type_name -> inkwall.bundle.v1.PathMatch
+	0,  // 14: inkwall.bundle.v1.PathMatch.type:type_name -> inkwall.bundle.v1.PathMatchType
+	3,  // 15: inkwall.bundle.v1.RuleSet.builtin:type_name -> inkwall.bundle.v1.BuiltinRuleSet
+	4,  // 16: inkwall.bundle.v1.BodyConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
+	4,  // 17: inkwall.bundle.v1.ResponseConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
+	18, // [18:18] is the sub-list for method output_type
+	18, // [18:18] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_bundle_v1_bundle_proto_init() }
