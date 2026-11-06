@@ -21,6 +21,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
+	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
 
 func newPipeline(t *testing.T, mode pipeline.Mode) *pipeline.Pipeline {
@@ -159,6 +160,8 @@ func TestReconstructsTheClientRequest(t *testing.T) {
 func TestInvalidSubrequestsAreRejected(t *testing.T) {
 	var logs bytes.Buffer
 	h := newHandler(t, pipeline.ModeDetect, 64<<10, &logs)
+	m := telemetry.NewMetrics("forwardauth")
+	h.metrics = m
 	for name, mutate := range map[string]func(r *http.Request){
 		"missing method":   func(r *http.Request) { r.Header.Del("X-Forwarded-Method") },
 		"missing uri":      func(r *http.Request) { r.Header.Del("X-Forwarded-Uri") },
@@ -179,6 +182,17 @@ func TestInvalidSubrequestsAreRejected(t *testing.T) {
 			t.Errorf("%s: got %d, want an error status", name, w.Code)
 		}
 	}
+	// Each counts as a request the adapter can't read, but the wrong path
+	// (a 404, not a request to inspect).
+	if !strings.Contains(adminMetrics(m), `inkwall_adapter_errors_total{adapter="forwardauth",kind="invalid_request"} 9`) {
+		t.Errorf("adapter errors:\n%s", adminMetrics(m))
+	}
+}
+
+func adminMetrics(m *telemetry.Metrics) string {
+	w := httptest.NewRecorder()
+	m.AdminHandler(nil).ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
+	return w.Body.String()
 }
 
 func TestNewValidatesConfig(t *testing.T) {

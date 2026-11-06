@@ -42,6 +42,9 @@ const (
 	Phase_PHASE_REQUEST Phase = 1
 	// The upstream's response: a deny replaced it.
 	Phase_PHASE_RESPONSE Phase = 2
+	// A message the client sent on a WebSocket (the engine's proxy with
+	// --websocket-messages); the request fields are its handshake's.
+	Phase_PHASE_WEBSOCKET_MESSAGE Phase = 3
 )
 
 // Enum value maps for Phase.
@@ -50,11 +53,13 @@ var (
 		0: "PHASE_UNSPECIFIED",
 		1: "PHASE_REQUEST",
 		2: "PHASE_RESPONSE",
+		3: "PHASE_WEBSOCKET_MESSAGE",
 	}
 	Phase_value = map[string]int32{
-		"PHASE_UNSPECIFIED": 0,
-		"PHASE_REQUEST":     1,
-		"PHASE_RESPONSE":    2,
+		"PHASE_UNSPECIFIED":       0,
+		"PHASE_REQUEST":           1,
+		"PHASE_RESPONSE":          2,
+		"PHASE_WEBSOCKET_MESSAGE": 3,
 	}
 )
 
@@ -83,6 +88,61 @@ func (x Phase) Number() protoreflect.EnumNumber {
 // Deprecated: Use Phase.Descriptor instead.
 func (Phase) EnumDescriptor() ([]byte, []int) {
 	return file_events_v1_events_proto_rawDescGZIP(), []int{0}
+}
+
+// Protocol is what the request speaks.
+type Protocol int32
+
+const (
+	Protocol_PROTOCOL_UNSPECIFIED Protocol = 0
+	Protocol_PROTOCOL_HTTP        Protocol = 1
+	// gRPC (Content-Type application/grpc).
+	Protocol_PROTOCOL_GRPC Protocol = 2
+	// A WebSocket: its handshake, or one of its messages.
+	Protocol_PROTOCOL_WEBSOCKET Protocol = 3
+)
+
+// Enum value maps for Protocol.
+var (
+	Protocol_name = map[int32]string{
+		0: "PROTOCOL_UNSPECIFIED",
+		1: "PROTOCOL_HTTP",
+		2: "PROTOCOL_GRPC",
+		3: "PROTOCOL_WEBSOCKET",
+	}
+	Protocol_value = map[string]int32{
+		"PROTOCOL_UNSPECIFIED": 0,
+		"PROTOCOL_HTTP":        1,
+		"PROTOCOL_GRPC":        2,
+		"PROTOCOL_WEBSOCKET":   3,
+	}
+)
+
+func (x Protocol) Enum() *Protocol {
+	p := new(Protocol)
+	*p = x
+	return p
+}
+
+func (x Protocol) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Protocol) Descriptor() protoreflect.EnumDescriptor {
+	return file_events_v1_events_proto_enumTypes[1].Descriptor()
+}
+
+func (Protocol) Type() protoreflect.EnumType {
+	return &file_events_v1_events_proto_enumTypes[1]
+}
+
+func (x Protocol) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Protocol.Descriptor instead.
+func (Protocol) EnumDescriptor() ([]byte, []int) {
+	return file_events_v1_events_proto_rawDescGZIP(), []int{1}
 }
 
 // SecurityEvent is one blocked or detected request. The request's fields
@@ -130,7 +190,10 @@ type SecurityEvent struct {
 	// What was inspected: the request, or the upstream's response to it
 	// (for a policy that inspects responses). Unset in events of engines
 	// before 0.4.0: the request.
-	Phase         Phase `protobuf:"varint,21,opt,name=phase,proto3,enum=inkwall.events.v1.Phase" json:"phase,omitempty"`
+	Phase Phase `protobuf:"varint,21,opt,name=phase,proto3,enum=inkwall.events.v1.Phase" json:"phase,omitempty"`
+	// The protocol the request speaks: a WebSocket's handshake and messages
+	// are PROTOCOL_WEBSOCKET. Unspecified from engines before v0.5.0.
+	Protocol      Protocol `protobuf:"varint,22,opt,name=protocol,proto3,enum=inkwall.events.v1.Protocol" json:"protocol,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -312,6 +375,13 @@ func (x *SecurityEvent) GetPhase() Phase {
 	return Phase_PHASE_UNSPECIFIED
 }
 
+func (x *SecurityEvent) GetProtocol() Protocol {
+	if x != nil {
+		return x.Protocol
+	}
+	return Protocol_PROTOCOL_UNSPECIFIED
+}
+
 // Match is one rule that matched.
 type Match struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
@@ -436,7 +506,7 @@ var File_events_v1_events_proto protoreflect.FileDescriptor
 
 const file_events_v1_events_proto_rawDesc = "" +
 	"\n" +
-	"\x16events/v1/events.proto\x12\x11inkwall.events.v1\x1a\x16engine/v1/engine.proto\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xff\x05\n" +
+	"\x16events/v1/events.proto\x12\x11inkwall.events.v1\x1a\x16engine/v1/engine.proto\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xb8\x06\n" +
 	"\rSecurityEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12.\n" +
 	"\x04time\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x04time\x12\x1b\n" +
@@ -461,7 +531,8 @@ const file_events_v1_events_proto_rawDesc = "" +
 	"request_id\x18\x12 \x01(\tR\trequestId\x12\x16\n" +
 	"\x06status\x18\x13 \x01(\x05R\x06status\x123\n" +
 	"\alatency\x18\x14 \x01(\v2\x19.google.protobuf.DurationR\alatency\x12.\n" +
-	"\x05phase\x18\x15 \x01(\x0e2\x18.inkwall.events.v1.PhaseR\x05phase\"V\n" +
+	"\x05phase\x18\x15 \x01(\x0e2\x18.inkwall.events.v1.PhaseR\x05phase\x127\n" +
+	"\bprotocol\x18\x16 \x01(\x0e2\x1b.inkwall.events.v1.ProtocolR\bprotocol\"V\n" +
 	"\x05Match\x12\x17\n" +
 	"\arule_id\x18\x01 \x01(\x05R\x06ruleId\x12\x1a\n" +
 	"\bvariable\x18\x02 \x01(\tR\bvariable\x12\x18\n" +
@@ -469,11 +540,17 @@ const file_events_v1_events_proto_rawDesc = "" +
 	"\n" +
 	"EventBatch\x128\n" +
 	"\x06events\x18\x01 \x03(\v2 .inkwall.events.v1.SecurityEventR\x06events\x12\x18\n" +
-	"\adropped\x18\x02 \x01(\x04R\adropped*E\n" +
+	"\adropped\x18\x02 \x01(\x04R\adropped*b\n" +
 	"\x05Phase\x12\x15\n" +
 	"\x11PHASE_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rPHASE_REQUEST\x10\x01\x12\x12\n" +
-	"\x0ePHASE_RESPONSE\x10\x02B7Z5github.com/inkwall-dev/inkwall/api/events/v1;eventsv1b\x06proto3"
+	"\x0ePHASE_RESPONSE\x10\x02\x12\x1b\n" +
+	"\x17PHASE_WEBSOCKET_MESSAGE\x10\x03*b\n" +
+	"\bProtocol\x12\x18\n" +
+	"\x14PROTOCOL_UNSPECIFIED\x10\x00\x12\x11\n" +
+	"\rPROTOCOL_HTTP\x10\x01\x12\x11\n" +
+	"\rPROTOCOL_GRPC\x10\x02\x12\x16\n" +
+	"\x12PROTOCOL_WEBSOCKET\x10\x03B7Z5github.com/inkwall-dev/inkwall/api/events/v1;eventsv1b\x06proto3"
 
 var (
 	file_events_v1_events_proto_rawDescOnce sync.Once
@@ -487,31 +564,33 @@ func file_events_v1_events_proto_rawDescGZIP() []byte {
 	return file_events_v1_events_proto_rawDescData
 }
 
-var file_events_v1_events_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_events_v1_events_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
 var file_events_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
 var file_events_v1_events_proto_goTypes = []any{
 	(Phase)(0),                    // 0: inkwall.events.v1.Phase
-	(*SecurityEvent)(nil),         // 1: inkwall.events.v1.SecurityEvent
-	(*Match)(nil),                 // 2: inkwall.events.v1.Match
-	(*EventBatch)(nil),            // 3: inkwall.events.v1.EventBatch
-	(*timestamppb.Timestamp)(nil), // 4: google.protobuf.Timestamp
-	(v1.Action)(0),                // 5: inkwall.engine.v1.Action
-	(v1.Reason)(0),                // 6: inkwall.engine.v1.Reason
-	(*durationpb.Duration)(nil),   // 7: google.protobuf.Duration
+	(Protocol)(0),                 // 1: inkwall.events.v1.Protocol
+	(*SecurityEvent)(nil),         // 2: inkwall.events.v1.SecurityEvent
+	(*Match)(nil),                 // 3: inkwall.events.v1.Match
+	(*EventBatch)(nil),            // 4: inkwall.events.v1.EventBatch
+	(*timestamppb.Timestamp)(nil), // 5: google.protobuf.Timestamp
+	(v1.Action)(0),                // 6: inkwall.engine.v1.Action
+	(v1.Reason)(0),                // 7: inkwall.engine.v1.Reason
+	(*durationpb.Duration)(nil),   // 8: google.protobuf.Duration
 }
 var file_events_v1_events_proto_depIdxs = []int32{
-	4, // 0: inkwall.events.v1.SecurityEvent.time:type_name -> google.protobuf.Timestamp
-	5, // 1: inkwall.events.v1.SecurityEvent.action:type_name -> inkwall.engine.v1.Action
-	6, // 2: inkwall.events.v1.SecurityEvent.reason:type_name -> inkwall.engine.v1.Reason
-	2, // 3: inkwall.events.v1.SecurityEvent.matches:type_name -> inkwall.events.v1.Match
-	7, // 4: inkwall.events.v1.SecurityEvent.latency:type_name -> google.protobuf.Duration
+	5, // 0: inkwall.events.v1.SecurityEvent.time:type_name -> google.protobuf.Timestamp
+	6, // 1: inkwall.events.v1.SecurityEvent.action:type_name -> inkwall.engine.v1.Action
+	7, // 2: inkwall.events.v1.SecurityEvent.reason:type_name -> inkwall.engine.v1.Reason
+	3, // 3: inkwall.events.v1.SecurityEvent.matches:type_name -> inkwall.events.v1.Match
+	8, // 4: inkwall.events.v1.SecurityEvent.latency:type_name -> google.protobuf.Duration
 	0, // 5: inkwall.events.v1.SecurityEvent.phase:type_name -> inkwall.events.v1.Phase
-	1, // 6: inkwall.events.v1.EventBatch.events:type_name -> inkwall.events.v1.SecurityEvent
-	7, // [7:7] is the sub-list for method output_type
-	7, // [7:7] is the sub-list for method input_type
-	7, // [7:7] is the sub-list for extension type_name
-	7, // [7:7] is the sub-list for extension extendee
-	0, // [0:7] is the sub-list for field type_name
+	1, // 6: inkwall.events.v1.SecurityEvent.protocol:type_name -> inkwall.events.v1.Protocol
+	2, // 7: inkwall.events.v1.EventBatch.events:type_name -> inkwall.events.v1.SecurityEvent
+	8, // [8:8] is the sub-list for method output_type
+	8, // [8:8] is the sub-list for method input_type
+	8, // [8:8] is the sub-list for extension type_name
+	8, // [8:8] is the sub-list for extension extendee
+	0, // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_events_v1_events_proto_init() }
@@ -524,7 +603,7 @@ func file_events_v1_events_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_events_v1_events_proto_rawDesc), len(file_events_v1_events_proto_rawDesc)),
-			NumEnums:      1,
+			NumEnums:      2,
 			NumMessages:   3,
 			NumExtensions: 0,
 			NumServices:   0,

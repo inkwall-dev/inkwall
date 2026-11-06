@@ -293,3 +293,27 @@ func TestNewRedactsConfigured(t *testing.T) {
 	check(nil, "ARGS:q", true)
 	check(nil, "ARGS:password", false)
 }
+
+// An event says which protocol it is about, and a WebSocket message's has
+// its own phase (#356).
+func TestNewProtocol(t *testing.T) {
+	v := pipeline.Verdict{Action: pipeline.ActionDeny, Reason: pipeline.ReasonRule}
+	for _, c := range []struct {
+		name    string
+		headers http.Header
+		message bool
+		proto   eventsv1.Protocol
+		phase   eventsv1.Phase
+	}{
+		{"http", http.Header{}, false, eventsv1.Protocol_PROTOCOL_HTTP, eventsv1.Phase_PHASE_REQUEST},
+		{"grpc", http.Header{"Content-Type": {"application/grpc+proto"}}, false, eventsv1.Protocol_PROTOCOL_GRPC, eventsv1.Phase_PHASE_REQUEST},
+		{"handshake", http.Header{"Upgrade": {"websocket"}}, false, eventsv1.Protocol_PROTOCOL_WEBSOCKET, eventsv1.Phase_PHASE_REQUEST},
+		{"message", http.Header{"Upgrade": {"websocket"}}, true, eventsv1.Protocol_PROTOCOL_WEBSOCKET, eventsv1.Phase_PHASE_WEBSOCKET_MESSAGE},
+	} {
+		v.WebSocketMessage = c.message
+		ev := New(Source{}, &request.Request{Method: "GET", Headers: c.headers}, "/", v, time.Now())
+		if ev.GetProtocol() != c.proto || ev.GetPhase() != c.phase {
+			t.Errorf("%s: protocol %v, phase %v; want %v, %v", c.name, ev.GetProtocol(), ev.GetPhase(), c.proto, c.phase)
+		}
+	}
+}
