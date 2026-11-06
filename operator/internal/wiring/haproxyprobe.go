@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -227,14 +226,14 @@ func (p *HAProxyProber) Unverified(job HAProxyProbe) string {
 			}
 		}
 	}
-	slices.Sort(pending)
-	pending = slices.Compact(pending)
 	switch {
 	case len(failed) > 0:
 		return fmt.Sprintf("Ingress %s is wired, but the probe shows that HAProxy doesn't run the filter for it, so its traffic isn't inspected there: %s",
 			job.Ingress.Name, strings.Join(failed, "; "))
 	case len(pending) > 0:
-		return fmt.Sprintf("Ingress %s is wired; the filter is unverified until the operator's probe has reached it on %s", job.Ingress.Name, strings.Join(pending, ", "))
+		// Not the pods' names: each pod of a rollout would rewrite the
+		// status (#373).
+		return fmt.Sprintf("Ingress %s is wired; the filter is unverified until the operator's probe has reached it on every HAProxy pod with the engine", job.Ingress.Name)
 	}
 	return ""
 }
