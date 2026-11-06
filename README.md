@@ -273,7 +273,8 @@ Tracked on the [project board](https://github.com/orgs/inkwall-dev/projects/1) a
 make check        # lint, tests, vulnerability scan, docs checks
 make crs-test     # OWASP CRS regression suite through the proxy
 make kind-up      # kind cluster with a demo behind the engine and Traefik
-make kind-e2e     # operator end to end on kind (what CI runs)
+make kind-e2e     # operator end to end on kind, every proxy in turn (CI: one job per proxy)
+make kind-e2e-traefik  # one proxy: also -raw-envoy, -envoy-gateway, -istio, -haproxy
 ```
 
 `make help` lists every target. The design docs are in [`docs/design`](docs/design/README.md);

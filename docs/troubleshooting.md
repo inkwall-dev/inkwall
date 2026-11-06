@@ -14,6 +14,7 @@ says what happens when a component is down.
   - [WAFRuleSet and ClusterWAFRuleSet](#wafruleset-and-clusterwafruleset)
   - [InkwallConfig](#inkwallconfig)
 - [Finding a denial](#finding-a-denial)
+  - [What a denied client sees](#what-a-denied-client-sees)
 - [From Detect to Block](#from-detect-to-block)
 - [When something is down](#when-something-is-down)
 
@@ -187,7 +188,7 @@ otherwise one the engine makes. A denial carries it back in `X-Request-Id` (a gR
 | Envoy Gateway | 403 with `x-request-id` | the `inkwall-engine` container of the Gateway's Envoy pods, in `envoy-gateway-system` |
 | Istio | 403 with `x-request-id` | the `inkwall-engine` container of the Gateway's (or ingress gateway's) pods |
 | HAProxy Kubernetes Ingress Controller | 403 with `x-request-id` | the `inkwall-engine` container of the controller's pods |
-| Standalone proxy | 403, without the ID (a gRPC call has it in `grpc-message`) | the engine's standard output |
+| Standalone proxy | 403 with `X-Request-Id` | the engine's standard output |
 
 Find the request's security event in that log (each engine logs its own requests, so look at
 every pod of the proxy, or at your log store):
@@ -196,7 +197,7 @@ every pod of the proxy, or at your log store):
 kubectl -n <namespace> logs <pod> -c inkwall-engine | grep '"request_id":"<id>"'
 ```
 
-Without an ID, look for the time and path: `jq 'select(.msg == "security event" and .path == "/login")'`.
+A client that only kept the time can be found by time and path: `jq 'select(.msg == "security event" and .path == "/login")'`.
 The line has:
 
 - `policy` (`namespace/name`), `action` (`deny`, or `log` in Detect mode), `reason` (`rule`,
@@ -210,6 +211,25 @@ A rule that matched a legitimate value is a false positive: exclude it for that 
 [From a log line to an exclusion](testing-policies.md#from-a-log-line-to-an-exclusion) shows.
 Lines are rate-limited per policy and rule (`suppressed` counts what was left out), so a
 repeated denial may not have its own line; the events sent to the operator are complete.
+
+### What a denied client sees
+
+Every proxy answers a denial the same way: the status, `X-Request-Id` (the request ID of the
+security event, also on the 400 for a request an adapter can't read), and a short text body,
+`Forbidden`. A denied gRPC call gets a gRPC status instead, with the request ID in its
+`grpc-message` ([gRPC](grpc.md)).
+
+| Status | Why |
+|---|---|
+| 403 | The rules found an attack (or a rule of your own denies with another status: HAProxy turns any other into 403) |
+| 413 | A body over the inspected limit, with `body.onOversize: Deny` |
+| 503 | The request couldn't be inspected in time (timeout, overload) and the policy fails closed |
+| 400 | The proxy sent the engine a request it can't read |
+
+With `InkwallConfig.spec.engine.jsonDenials: true` (the engine's `--json-denials`), a client that
+accepts `application/json` gets `{"error":"forbidden","status":403,"request_id":"..."}` instead of
+the text body, through Traefik, Envoy Gateway, Istio and the standalone proxy. HAProxy writes its
+own denials, so it keeps its error page there.
 
 ## From Detect to Block
 

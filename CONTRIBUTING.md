@@ -88,8 +88,11 @@ Existing objects must be updated before upgrading.
 
 The kind targets (`make kind-up`, `make kind-e2e`, `make kind-upgrade`) install kind `KIND_VERSION`
 into `bin/` and run Kubernetes 1.34 (`KIND_NODE_IMAGE` in the Makefile; the operator tests' API
-server, `ENVTEST_K8S_VERSION`, runs it too), as CI's upgrade job does. CI's e2e job runs kind's
-newest Kubernetes (1.37). The chart still installs on 1.29 and later, untested. A cluster made at another version is recreated with
+server, `ENVTEST_K8S_VERSION`, runs it too), as CI's upgrade job does. CI's e2e jobs run kind's
+newest Kubernetes (1.37): one job per proxy (`e2e (traefik)`, `e2e (raw-envoy)`,
+`e2e (envoy-gateway)`, `e2e (istio)`, `e2e (haproxy)`), each on its own cluster with the images
+the `e2e-images` job built, and the cluster's logs as an artifact when one fails. Locally,
+`make kind-e2e` runs them all in turn, and `make kind-e2e-<proxy>` one. The chart still installs on 1.29 and later, untested. A cluster made at another version is recreated with
 `make kind-down kind-up`.
 
 ## Branches
