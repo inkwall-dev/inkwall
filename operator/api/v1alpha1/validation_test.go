@@ -248,6 +248,9 @@ func TestInkwallConfigValidation(t *testing.T) {
 		{name: "empty selector", doc: inkwallConfig("default", "  integrations: [{controller: traefik, selector: {}}]\n"), wantErr: "selector must not be empty"},
 		{name: "selector with empty labels", doc: inkwallConfig("default", "  integrations: [{controller: traefik, selector: {matchLabels: {}}}]\n"), wantErr: "selector must not be empty"},
 		{name: "selector by expression", doc: inkwallConfig("default", "  integrations: [{controller: traefik, selector: {matchExpressions: [{key: app, operator: In, values: [edge]}]}}]\n")},
+		{name: "client IP", doc: inkwallConfig("default", "  engine: {clientIP: {trustedProxies: [10.0.0.0/8, \"2001:db8::/32\", 192.0.2.1], trustedHops: 1}}\n")},
+		{name: "client IP hops over 10", doc: inkwallConfig("default", "  engine: {clientIP: {trustedHops: 11}}\n"), wantErr: "should be less than or equal to 10"},
+		{name: "client IP not a CIDR", doc: inkwallConfig("default", "  engine: {clientIP: {trustedProxies: [lb.example.com]}}\n"), wantErr: "spec.engine.clientIP.trustedProxies[0]"},
 	})
 }
 

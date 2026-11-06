@@ -152,7 +152,41 @@ type EngineSpec struct {
 	// +kubebuilder:default=AllowAll
 	// +optional
 	BootstrapMode BootstrapMode `json:"bootstrapMode,omitempty"`
+
+	// ClientIP configures which forwarding headers the engines trust for
+	// the client's address, behind an HTTP load balancer that appends it to
+	// X-Forwarded-For. Unset: only the proxy beside the engine is trusted.
+	// A wrong setting lets clients choose their address: see
+	// docs/client-ip.md. Applies to pods injected from then on (Envoy
+	// Gateway rolls its pods itself).
+	// +optional
+	ClientIP *ClientIPSpec `json:"clientIP,omitempty"`
 }
+
+// ClientIPSpec configures how engines find the client's address.
+type ClientIPSpec struct {
+	// TrustedProxies are the addresses or CIDR prefixes of proxies in front
+	// of the proxy the engine runs beside (load balancers) whose
+	// X-Forwarded-For entries are trusted. The loopback is always trusted.
+	// +kubebuilder:validation:MaxItems=32
+	// +listType=set
+	// +optional
+	TrustedProxies []CIDR `json:"trustedProxies,omitempty"`
+
+	// TrustedHops is how many X-Forwarded-For entries, from the right and
+	// after those the proxy beside the engine added, are proxies whatever
+	// their address: for load balancers without fixed addresses. 0: none.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=10
+	// +optional
+	TrustedHops *int32 `json:"trustedHops,omitempty"`
+}
+
+// CIDR is an IPv4 or IPv6 prefix (10.0.0.0/8) or address.
+// +kubebuilder:validation:MinLength=2
+// +kubebuilder:validation:MaxLength=49
+// +kubebuilder:validation:Pattern=`^[0-9A-Fa-f.:]+(/[0-9]{1,3})?$`
+type CIDR string
 
 // IntegrationSpec overrides discovery for one proxy controller.
 type IntegrationSpec struct {

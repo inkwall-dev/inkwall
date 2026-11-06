@@ -33,6 +33,15 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 ## From 0.4.x to 0.5.0
 
+What's new:
+
+- **The client IP behind an HTTP load balancer.** `InkwallConfig.spec.engine.clientIP` takes
+  `trustedProxies` (the load balancer's CIDRs) and `trustedHops`, for Envoy Gateway, Istio and
+  HAProxy behind an AWS ALB or another load balancer that appends to `X-Forwarded-For`
+  ([client IP](client-ip.md#behind-an-http-load-balancer)). Upgrade the chart first, for the new
+  CRD field; engines injected before the change keep their settings until their pods are
+  re-created (Envoy Gateway re-creates its own). A wrong setting lets clients choose their address.
+
 What changes by itself:
 
 - **Less engine memory for the CRS.** Policies that differ only in their paranoia level, inbound
@@ -41,6 +50,8 @@ What changes by itself:
   the paranoia level and threshold on each request. Detection is unchanged, and SecLang that sets
   `tx.blocking_paranoia_level` or `tx.inbound_anomaly_score_threshold` still wins over the policy's
   fields.
+- **`X-Forwarded-For` entries with a port** (`198.51.100.7:4711`, `[2001:db8::1]:4711`) are read
+  as addresses. Before, such an entry ended the walk, and the address right of it was the client.
 - **A request body exactly `body.maxBytes` long is inspected.** Before, Coraza's own limit denied
   it (status 413 and no rule ID, in Block mode). Bodies over the limit are handled by
   `body.onOversize`, as before.

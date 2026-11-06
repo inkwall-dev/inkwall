@@ -152,7 +152,7 @@ type engineConfig struct {
 	threshold      int
 	rulesFile      string
 	rulesBeforeCRS string
-	trustedProxies []string
+	clientIP       clientip.Options
 	skipPaths      []string
 	routes         *router.Table
 	skipBodyPaths  []string
@@ -238,8 +238,12 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	rulesBeforeCRS := fs.String("rules-before-crs", "", "file with SecLang runtime exclusions (rules using ctl:ruleRemoveById and similar) and settings, loaded before CRS")
 	// The check API carries the client address resolved by the proxy.
 	trusted := new(string)
+	trustedHops := new(int)
+	clientIPHeader := new(string)
 	if command != cmdCheck {
-		trusted = fs.String("trusted-proxies", "", "comma-separated CIDRs whose X-Forwarded-For is trusted")
+		trusted = fs.String("trusted-proxies", "", "comma-separated CIDRs whose X-Forwarded-For (or Forwarded) is trusted")
+		trustedHops = fs.Int("trusted-hops", 0, fmt.Sprintf("forwarding header entries, from the right, that are proxies whatever their address (0-%d), for load balancers without fixed addresses; only behind a trusted peer", clientip.MaxTrustedHops))
+		clientIPHeader = fs.String("client-ip-header", "x-forwarded-for", "forwarding header the client IP is read from: x-forwarded-for or forwarded (RFC 7239); only for a peer that sets or replaces it, as clients can send either")
 	}
 	skipPaths := fs.String("skip-paths", "", "comma-separated paths never inspected, exact (/healthz) or prefix (/static/*); ambiguous paths are always inspected")
 	disableGroups := fs.String("disable-rule-groups", "", "comma-separated CRS attack families to remove when the application cannot be vulnerable to them: "+strings.Join(coraza.RuleGroupNames(), ", "))
@@ -396,7 +400,10 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 			return cfg, fmt.Errorf("--oversize-response must be auto, allow or deny, got %q", *oversizeResponse)
 		}
 	}
-	cfg.trustedProxies = splitList(*trusted)
+	cfg.clientIP = clientip.Options{TrustedProxies: splitList(*trusted), TrustedHops: *trustedHops, Header: *clientIPHeader}
+	if _, err := clientip.New(cfg.clientIP); err != nil {
+		return cfg, err
+	}
 	cfg.skipPaths = splitList(*skipPaths)
 	cfg.skipBodyPaths = splitList(*skipBodyPaths)
 	cfg.pprof = *pprof
@@ -448,7 +455,7 @@ func splitList(s string) []string {
 }
 
 func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
-	resolver, err := clientip.NewResolver(cfg.trustedProxies)
+	resolver, err := clientip.New(cfg.clientIP)
 	if err != nil {
 		return err
 	}
