@@ -152,7 +152,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      # The tags: the test starts from the latest release (hack/releases).
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: azure/setup-helm@v5
         with:
           version: v3.19.0
@@ -171,6 +174,10 @@ jobs:
       # Creates its cluster at KIND_NODE_IMAGE; KEEP=1 keeps it for the
       # step below.
       - run: KEEP=1 make kind-upgrade
+        env:
+          # On a release-X.Y branch, or a PR to one, it starts from X.Y's
+          # latest release, never a newer one.
+          UPGRADE_BRANCH: ${{ github.base_ref || github.ref_name }}
       - if: failure()
         run: |
           kubectl --context kind-inkwall-upgrade get pods -A
