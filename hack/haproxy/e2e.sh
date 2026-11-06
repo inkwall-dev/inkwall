@@ -23,8 +23,11 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# The versions under test (#393).
+# shellcheck source=hack/versions.env
+. hack/versions.env
 
-IMAGE=${HAPROXY_IMAGE:-haproxy:3.2}
+IMAGE=${HAPROXY_IMAGE:-haproxy:$HAPROXY_VERSION}
 # Below the kernel's ephemeral range (32768-60999 by default): a port in it
 # can be any process's for a while, and HAProxy, unable to bind, exits
 # (#340).

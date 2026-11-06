@@ -27,6 +27,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# The versions under test (#393).
+# shellcheck source=hack/versions.env
+. hack/versions.env
 
 CLUSTER=${UPGRADE_CLUSTER:-inkwall-upgrade}
 # The release it upgrades from: the latest, worked out from the tags (on a
@@ -48,7 +51,6 @@ NS=inkwall-upgrade
 TRAEFIK_NS=traefik-e2e
 HOST=ingress.upgrade.example.com
 ROUTE_HOST=route.upgrade.example.com
-TRAEFIK_CHART_VERSION=41.6.1 # Traefik v3.7.13, as hack/kind/up.sh
 KUBECTL=(kubectl --context "kind-$CLUSTER")
 HELM=(helm --kube-context "kind-$CLUSTER")
 SQLI='/?id=1%27%20OR%20%271%27%3D%271'
@@ -143,7 +145,7 @@ spec:
     spec:
       containers:
         - name: web
-          image: traefik/whoami:v1.10.3
+          image: traefik/whoami:$WHOAMI_VERSION
           args: ["--port", "8080"]
 ---
 apiVersion: v1
