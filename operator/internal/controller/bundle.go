@@ -292,6 +292,7 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 		RuleSets:  res.RuleSets,
 		Suspended: suspended,
 		ProbeKey:  signer.ProbeKey(),
+		Events:    eventsConfig(cfg),
 	}, r.lastVersion, r.Now(), resign)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -698,4 +699,24 @@ func HTTPRoutes(ctx context.Context, c client.Client) ([]gatewayv1.HTTPRoute, er
 		return nil, err
 	}
 	return list.Items, nil
+}
+
+// eventsConfig is the InkwallConfig's events.redact for the engines, nil
+// for the defaults: a bundle that doesn't change them keeps its hash.
+func eventsConfig(cfg *wafv1alpha1.InkwallConfig) *bundlev1.EventsConfig {
+	if cfg == nil {
+		return nil
+	}
+	redact := cfg.Spec.Events.Redact
+	out := &bundlev1.EventsConfig{NoSnippets: redact.Snippets != nil && !*redact.Snippets}
+	for _, h := range redact.Headers {
+		out.RedactHeaders = append(out.RedactHeaders, string(h))
+	}
+	for _, a := range redact.Arguments {
+		out.RedactArguments = append(out.RedactArguments, string(a))
+	}
+	if !out.NoSnippets && len(out.RedactHeaders) == 0 && len(out.RedactArguments) == 0 {
+		return nil
+	}
+	return out
 }

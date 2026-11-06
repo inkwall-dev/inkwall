@@ -6,6 +6,7 @@ package events
 import (
 	"net/http"
 	"net/netip"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/rules"
@@ -21,9 +23,11 @@ import (
 // FuzzNew checks the redaction of client-controlled fields: whatever the
 // request, every string of the event is valid UTF-8 (or it couldn't be sent)
 // and within its limit, a cut-down prefix of what the client sent, the path
-// carries no query string, and credentials leave no snippet.
+// carries no query string, and credentials, sensitive arguments and what
+// events.redact names leave no snippet (none at all with snippets: false).
 func FuzzNew(f *testing.F) {
-	f.Fuzz(func(t *testing.T, method, host, path, userAgent, id, policy, variable, value string, matches int) {
+	f.Fuzz(func(t *testing.T, method, host, path, userAgent, id, policy, variable, value string, matches int,
+		redactHeader, redactArgument string, noSnippets bool) {
 		req := &request.Request{
 			ID: id, Method: method, Host: host, ClientIP: netip.MustParseAddr("203.0.113.7"),
 			Headers: http.Header{"User-Agent": {userAgent}},
@@ -32,7 +36,15 @@ func FuzzNew(f *testing.F) {
 		for i := range min(max(matches, 0), 2*maxMatches) {
 			v.Matches = append(v.Matches, rules.Match{RuleID: i, Variable: variable, Value: value})
 		}
-		ev := New(Source{EngineID: "e-1"}, req, path, v, time.Unix(0, 0))
+		cfg := &bundlev1.EventsConfig{NoSnippets: noSnippets}
+		if redactHeader != "" {
+			cfg.RedactHeaders = []string{redactHeader}
+		}
+		if redactArgument != "" {
+			cfg.RedactArguments = []string{redactArgument}
+		}
+		redaction := NewRedaction(cfg)
+		ev := New(Source{EngineID: "e-1", Redaction: func() *Redaction { return redaction }}, req, path, v, time.Unix(0, 0))
 
 		for _, c := range []struct {
 			name, got, in string
@@ -55,7 +67,7 @@ func FuzzNew(f *testing.F) {
 		}
 		for _, m := range ev.GetMatches() {
 			checkField(t, "variable", m.GetVariable(), variable, maxVariable)
-			if redacted(variable) {
+			if noSnippets || redacted(variable, value, redactHeader, redactArgument) {
 				if m.GetSnippet() != "" {
 					t.Errorf("%q: snippet %q, want none", variable, m.GetSnippet())
 				}
@@ -88,18 +100,33 @@ func checkField(t *testing.T, name, got, in string, limit int) {
 }
 
 // redacted reports whether a match on variable must leave no snippet: a
-// cookie or a credential header.
-func redacted(variable string) bool {
+// cookie, a credential header, a header or argument whose name looks
+// sensitive or is configured, or a raw query string or body naming one.
+func redacted(variable, value, header, argument string) bool {
 	name, key, _ := strings.Cut(variable, ":")
+	configured := func(s string) bool {
+		return argument != "" && strings.Contains(strings.ToLower(s), strings.ToLower(argument))
+	}
 	switch strings.ToUpper(name) {
-	case "REQUEST_COOKIES", "REQUEST_COOKIES_NAMES", "RESPONSE_COOKIES":
+	case "REQUEST_COOKIES", "REQUEST_COOKIES_NAMES", "RESPONSE_COOKIES", "RESPONSE_BODY":
 		return true
 	case "REQUEST_HEADERS", "RESPONSE_HEADERS":
-		for _, h := range []string{"authorization", "cookie", "set-cookie", "proxy-authorization"} {
-			if strings.EqualFold(key, h) {
+		for _, h := range []string{"authorization", "cookie", "set-cookie", "proxy-authorization", header} {
+			if h != "" && strings.EqualFold(key, h) {
 				return true
 			}
 		}
+		return sensitiveName.MatchString(key)
+	case "ARGS", "ARGS_GET", "ARGS_POST", "FILES", "MULTIPART_PART_HEADERS":
+		return sensitiveName.MatchString(key) || configured(key)
+	case "QUERY_STRING", "REQUEST_URI", "REQUEST_URI_RAW", "REQUEST_LINE", "REQUEST_BODY", "FULL_REQUEST":
+		// What the snippet would show.
+		snip := truncate(value, maxSnippet)
+		return sensitiveName.MatchString(snip) || configured(snip)
 	}
 	return false
 }
+
+// sensitiveName is what Sensitive must catch at least: the documented
+// names (0002 §8.3), as a regular expression independent of its code.
+var sensitiveName = regexp.MustCompile(`(?i)pass|pwd|secret|token|api[-_.]?key|auth|session|sess_?id|jwt|bearer|credential|private[-_.]?key|card|ccnum|cvv|cvc|(^|[^a-z])ssn($|[^a-z])`)

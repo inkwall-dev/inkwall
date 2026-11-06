@@ -114,7 +114,7 @@ the webhook certificates.
 
 | Kind | Scope | Purpose |
 |---|---|---|
-| `InkwallConfig` | Cluster, singleton `default` | Mode, engine, integrations, control plane, `suspend`, signing key rotation |
+| `InkwallConfig` | Cluster, singleton `default` | Mode, engine, integrations, control plane, `suspend`, signing key rotation, event redaction |
 | `WAFPolicy` | Namespace | What to enforce on which routes |
 | `WAFRuleSet` / `ClusterWAFRuleSet` | Namespace / Cluster | Rules: builtin CRS, [SecLang](https://coraza.io/docs/seclang/), [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/) |
 | `WAFIPList` / `ClusterWAFIPList` | Namespace / Cluster | [CIDR](https://www.rfc-editor.org/rfc/rfc4632) lists (planned) |
@@ -125,7 +125,7 @@ compatible; removing one is not.
 
 **Not yet:** IP lists and `spec.ipLists`, `spec.rateLimits`, `spec.response`,
 `BlockHighConfidence`, `body.contentTypes`, the `InspectPrefix` oversize action,
-`InkwallConfig.spec.events`, `WAFPolicyDefault`.
+`WAFPolicyDefault`.
 
 ### 3.1 Validation
 

@@ -930,9 +930,33 @@ Bodies never leave the engine. Events carry only a redacted snippet of at most 6
 listed in `events.redact` (default `Authorization`, `Cookie`, `Set-Cookie`) and query strings are
 dropped. This is enforced before anything leaves the cluster.
 
-**Built** in the engine (`pkg/events`), with a fixed list: `Authorization`, `Cookie`,
-`Set-Cookie`, `Proxy-Authorization`, and the cookie variables. A configurable `events.redact` is
-not built yet.
+**Built** in the engine (`pkg/events`, #355). A match leaves no snippet when it is on:
+
+- a cookie (`REQUEST_COOKIES`, `REQUEST_COOKIES_NAMES`, `RESPONSE_COOKIES`), the response body,
+  or the `Authorization`, `Cookie`, `Set-Cookie` or `Proxy-Authorization` header;
+- an argument (`ARGS`, `ARGS_GET`, `ARGS_POST`, `FILES`, `MULTIPART_PART_HEADERS`) or a header
+  whose name looks like a credential (`events.Sensitive`): lower-cased and without `-`, `_` and
+  `.`, it contains `pass`, `pwd`, `secret`, `token`, `apikey`, `auth`, `session`, `sessid`,
+  `jwt`, `bearer`, `credential`, `privatekey`, `card`, `ccnum`, `cvv` or `cvc`, or it has `ssn`
+  between non-letters. It errs on the side of redacting (`author` matches): a missing snippet
+  costs a little tuning context, a leaked password can't be taken back. It is substring search,
+  not a regular expression: an alternation with case folding cost about 1 ms per 4 KiB name in
+  Go's `regexp`, on every match of every event; this is linear and about 40 times cheaper;
+- a raw query string, URI, request line or body (`QUERY_STRING`, `REQUEST_URI`,
+  `REQUEST_URI_RAW`, `REQUEST_LINE`, `REQUEST_BODY`, `FULL_REQUEST`) whose snippet contains such
+  a name. A value comes after its name, so a snippet that shows part of a value holds its whole
+  name: checking the 64-byte snippet is enough, and bounded however large the body;
+- what `InkwallConfig.spec.events.redact` adds: `headers` (exact names, any case), `arguments`
+  (parts of argument names, any case, also checked against raw query strings and bodies) and
+  `snippets: false` (no snippets at all).
+
+`events.redact` travels in the bundle (`Bundle.events`, an `EventsConfig`), so every engine
+applies the same settings with the policy it enforces, and a change reaches them within seconds.
+The defaults leave `Bundle.events` unset, so bundles keep their content hash. Argument patterns
+are substrings, not regular expressions: they can't fail to compile on an engine or cost
+backtracking per match, and the CRD validates them like exclusion arguments. Redaction is only
+in the engine: the operator passes events on as they come. An engine without an operator records
+no events, so it has no redaction settings; its log lines never carry snippets.
 
 ### 8.4 Multi-tenancy
 

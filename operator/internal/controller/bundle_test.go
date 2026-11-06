@@ -7,6 +7,7 @@ import (
 	"context"
 	"testing"
 
+	"google.golang.org/protobuf/proto"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -124,5 +125,31 @@ func TestStatusConflictNewGeneration(t *testing.T) {
 	if got.Generation != 2 || got.Status.ObservedGeneration == 2 {
 		t.Fatalf("generation %d reported observed (%d) with bundleVersion %d, which holds generation 1's spec",
 			got.Generation, got.Status.ObservedGeneration, got.Status.BundleVersion)
+	}
+}
+
+// The InkwallConfig's events.redact goes to the engines in the bundle; the
+// defaults send nothing, so bundles from before it keep their hash.
+func TestEventsConfig(t *testing.T) {
+	if got := eventsConfig(nil); got != nil {
+		t.Errorf("no InkwallConfig: %v, want nil", got)
+	}
+	cfg := &wafv1alpha1.InkwallConfig{}
+	if got := eventsConfig(cfg); got != nil {
+		t.Errorf("defaults: %v, want nil", got)
+	}
+	on := true
+	cfg.Spec.Events.Redact.Snippets = &on
+	if got := eventsConfig(cfg); got != nil {
+		t.Errorf("snippets: true: %v, want nil", got)
+	}
+	off := false
+	cfg.Spec.Events.Redact = wafv1alpha1.RedactSpec{
+		Headers: []wafv1alpha1.HeaderName{"X-Tenant"}, Arguments: []wafv1alpha1.ArgumentPattern{"email"}, Snippets: &off,
+	}
+	got := eventsConfig(cfg)
+	want := &bundlev1.EventsConfig{RedactHeaders: []string{"X-Tenant"}, RedactArguments: []string{"email"}, NoSnippets: true}
+	if !proto.Equal(got, want) {
+		t.Errorf("events config %v, want %v", got, want)
 	}
 }

@@ -1,6 +1,6 @@
 # Upgrading
 
-This guide upgrades an Inkwall installation from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
+This guide upgrades an Inkwall installation from 0.4.x to 0.5.0, from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
 0.3.0, and from 0.1.x (0.1.0 to 0.1.5) to 0.2.2, the latest 0.2 release, and lists what changes on
 the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
@@ -46,6 +46,13 @@ What's new:
 
 What changes by itself:
 
+- **Security events carry fewer snippets.** An engine no longer sends what a rule matched in an
+  argument or header whose name looks like a credential (`password`, `token`, `api_key`,
+  `session`, `card`, ...), or in a raw query string or body that names one: the event keeps the
+  rule and the variable, with an empty snippet. `InkwallConfig.spec.events.redact` redacts more
+  headers and arguments, or every snippet: see
+  [Redacting security events](../deploy/helm/inkwall/README.md#redacting-security-events). Engines
+  still on 0.4.x ignore `spec.events.redact` until their pods restart with 0.5.0.
 - **Less engine memory for the CRS.** Policies that differ only in their paranoia level, inbound
   anomaly threshold, `body.maxBytes` or `responses.maxBytes` now share one compiled CRS (about
   2.1 MiB and 10–30 ms less for each combination that used to compile its own). The engine sets
