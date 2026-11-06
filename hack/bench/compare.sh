@@ -18,11 +18,12 @@
 # drift on the machine (thermal throttling, a noisy CI neighbour) hits both
 # sides alike instead of looking like a regression. benchstat compares the
 # runs; hack/benchgate flags a difference that is both significant and above
-# THRESHOLD percent. Flagged benchmarks are run again, interleaved COUNT
+# THRESHOLD percent (FAST_THRESHOLD for the time of a benchmark under 1 µs/op:
+# layout shifts move those; docs/design/0001 §8). Flagged benchmarks are run again, interleaved COUNT
 # times, and the gate fails only on a regression that shows on both runs.
 #
 # Environment: COUNT (8), BENCH (regexp, .), BENCHTIME (go's default),
-# THRESHOLD (5), OUT (directory for the results: base.txt, head.txt,
+# THRESHOLD (5), FAST_THRESHOLD (25), OUT (directory for the results: base.txt, head.txt,
 # benchstat.txt, recheck/, summary.md).
 set -euo pipefail
 
@@ -34,6 +35,7 @@ COUNT=${COUNT:-8}
 BENCH=${BENCH:-.}
 BENCHTIME=${BENCHTIME:-}
 THRESHOLD=${THRESHOLD:-5}
+FAST_THRESHOLD=${FAST_THRESHOLD:-25}
 BENCHSTAT=(go run golang.org/x/perf/cmd/benchstat@v0.0.0-20260908200009-22c9c6c9d4da)
 
 work=$(mktemp -d)
@@ -160,7 +162,7 @@ gate() {
   # benchstat labels columns with the file names given; keep them short.
   (cd "$dir" && "${BENCHSTAT[@]}" base.txt head.txt) | tee "$dir/benchstat.txt"
   (cd "$dir" && "${BENCHSTAT[@]}" -format csv base.txt head.txt 2>/dev/null) >"$dir/benchstat.csv"
-  "$work/bin/benchgate" -threshold "$THRESHOLD" "$@" <"$dir/benchstat.csv" >"$dir/gate.txt" || rc=$?
+  "$work/bin/benchgate" -threshold "$THRESHOLD" -fast-threshold "$FAST_THRESHOLD" "$@" <"$dir/benchstat.csv" >"$dir/gate.txt" || rc=$?
   cat "$dir/gate.txt"
   {
     echo

@@ -898,6 +898,16 @@ rollout) don't rewrite every policy, even while one rejects the bundle (#213);
 ID, with its error. It reads the policies from the cache without copying them, copies only those it writes,
 and writes up to 8 at once, like the bundle builder.
 
+**Programmed** (#373). The wiring controller writes `Programmed` on change too, up to 16 at once,
+and a write that fails doesn't stop the others: the errors are returned together and the
+reconcile retried. Its messages name workloads (`Deployment traefik/traefik`), never pods, so a
+rollout of N pods changes a policy's `Programmed` a bounded number of times (to `PendingRestart`
+and back), not N; HAProxy's `Unverified` doesn't name the pods its probe hasn't reached yet
+either. An integration whose `Wire` fails doesn't stop the reconcile: its targets are
+`WiringFailed` with its error, the other integrations report as usual, and deleted policies are
+still released. The Istio ingress integration lists the pods each Gateway selector selects
+uncached once per reconcile, however many VirtualServices its Gateways serve.
+
 **Writes per bundle** (#149). The builder writes a policy's `bundleVersion` only when the bundle
 changes what the policy enforces: its own entry, the rule sets it binds, or suspension
 (`bundle.PolicyHashes`). The bundle records each policy's version (`policy_versions`), so a new

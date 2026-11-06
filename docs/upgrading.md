@@ -33,6 +33,18 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 ## From 0.4.x to 0.5.0
 
+What's new:
+
+- **The CRS's own settings on a policy.** The CRS rule set binding of a `WAFPolicy` takes an
+  optional `crs` block: `allowedMethods` (for REST APIs that send `PUT`, `PATCH` or `DELETE`),
+  `allowedRequestContentTypes`, `detectionParanoiaLevel` (log the rules of a higher paranoia level
+  without blocking on them) and `outboundAnomalyThreshold` (see the [README](../README.md#protect-a-route)).
+  Upgrade the chart first, for the new CRD fields. An engine before 0.5.0 ignores the block, and a
+  policy that sets it is `Enforced=False` (`EnginesOutdated`) until every engine runs 0.5.0.
+  `inkwallctl migrate ingress-nginx` now maps `tx.allowed_methods`,
+  `tx.allowed_request_content_type`, `tx.detection_paranoia_level` and
+  `tx.outbound_anomaly_score_threshold` to these fields instead of marking them `TODO`.
+
 What changes by itself:
 
 - **Security event log lines say where rules matched, and are rate-limited.** Each line has

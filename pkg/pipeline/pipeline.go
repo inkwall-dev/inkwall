@@ -456,6 +456,13 @@ func (p *Pipeline) decide(res rules.Result) Verdict {
 	v := Verdict{Action: ActionAllow, RuleIDs: res.MatchedRuleIDs, InterruptingRuleID: res.RuleID,
 		Matches: res.Matches, AnomalyScore: res.AnomalyScore}
 	if !res.Interrupted {
+		// Rules at the CRS's detection paranoia level would have blocked:
+		// logged, in either mode. The reason stays None (no rule
+		// interrupted), so what decides on clean requests (oversize bodies,
+		// WebSocket rules) still does.
+		if res.Detected {
+			v.Action = ActionLog
+		}
 		return v
 	}
 	v.Reason = ReasonRule

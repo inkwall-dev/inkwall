@@ -119,7 +119,8 @@ func (cfg Config) Key() [sha256.Size]byte {
 	return k
 }
 
-// CRS returns cfg's CRS settings.
+// CRS returns cfg's CRS settings, with the CRS's defaults for those Config
+// doesn't have (Evaluator.WithCRS sets them).
 func (cfg Config) CRS() CRSSettings {
 	return CRSSettings{ParanoiaLevel: cfg.ParanoiaLevel, InboundAnomalyThreshold: cfg.InboundAnomalyThreshold}
 }
@@ -136,6 +137,40 @@ type CRSSettings struct {
 	// InboundAnomalyThreshold is tx.inbound_anomaly_score_threshold,
 	// DefaultInboundAnomalyThreshold by default.
 	InboundAnomalyThreshold int
+	// AllowedMethods is tx.allowed_methods: the request methods rule 911100
+	// allows, instead of the CRS's GET, HEAD, POST and OPTIONS. Empty: the
+	// CRS's.
+	AllowedMethods []string
+	// AllowedRequestContentTypes is tx.allowed_request_content_type: the
+	// media types (without parameters) rule 920420 allows, instead of the
+	// CRS's. Empty: the CRS's. Compared case-insensitively.
+	AllowedRequestContentTypes []string
+	// DetectionParanoiaLevel is tx.detection_paranoia_level: the rules above
+	// ParanoiaLevel and up to it run and score, but never block; a request
+	// they would have blocked is Result.Detected. 0: ParanoiaLevel.
+	DetectionParanoiaLevel int
+	// OutboundAnomalyThreshold is tx.outbound_anomaly_score_threshold, the
+	// response anomaly score at which a response is blocked. 0: the CRS's
+	// (4).
+	OutboundAnomalyThreshold int
+}
+
+// MaxCRSListItems bounds AllowedMethods and AllowedRequestContentTypes.
+const MaxCRSListItems = 64
+
+var (
+	// methodToken is an HTTP method (RFC 9110 token) of up to 32
+	// characters, without "|", which the CRS's lists use as a delimiter.
+	methodToken = regexp.MustCompile("^[!#$%&'*+.^_`~0-9A-Za-z-]{1,32}$")
+	// mediaType is a type/subtype (RFC 9110), without parameters or "|".
+	mediaType = regexp.MustCompile("^[!#$%&'*+.^_`~0-9A-Za-z-]{1,64}/[!#$%&'*+.^_`~0-9A-Za-z-]{1,64}$")
+)
+
+// Validate checks s as the engine does: the webhook refuses what an engine
+// would.
+func (s CRSSettings) Validate() error {
+	_, err := s.vars()
+	return err
 }
 
 // txVar is a TX variable set on each transaction.
@@ -151,10 +186,49 @@ func (s CRSSettings) vars() ([]txVar, error) {
 	if threshold < 1 {
 		return nil, fmt.Errorf("inbound anomaly threshold %d must be positive", threshold)
 	}
-	return []txVar{
+	vars := []txVar{
 		{"blocking_paranoia_level", strconv.Itoa(pl)},
 		{"inbound_anomaly_score_threshold", strconv.Itoa(threshold)},
-	}, nil
+	}
+	if d := s.DetectionParanoiaLevel; d != 0 {
+		if d < pl || d > 4 {
+			return nil, fmt.Errorf("detection paranoia level %d out of range %d (the paranoia level) to 4", d, pl)
+		}
+		vars = append(vars, txVar{"detection_paranoia_level", strconv.Itoa(d)})
+	}
+	if t := s.OutboundAnomalyThreshold; t != 0 {
+		if t < 1 {
+			return nil, fmt.Errorf("outbound anomaly threshold %d must be positive", t)
+		}
+		vars = append(vars, txVar{"outbound_anomaly_score_threshold", strconv.Itoa(t)})
+	}
+	if len(s.AllowedMethods) > MaxCRSListItems || len(s.AllowedRequestContentTypes) > MaxCRSListItems {
+		return nil, fmt.Errorf("more than %d allowed methods or content types", MaxCRSListItems)
+	}
+	if len(s.AllowedMethods) > 0 {
+		for _, m := range s.AllowedMethods {
+			if !methodToken.MatchString(m) {
+				return nil, fmt.Errorf("allowed method %q is not an HTTP method", m)
+			}
+		}
+		// Rule 911100: REQUEST_METHOD "!@within %{tx.allowed_methods}".
+		vars = append(vars, txVar{"allowed_methods", strings.Join(s.AllowedMethods, " ")})
+	}
+	if len(s.AllowedRequestContentTypes) > 0 {
+		var b strings.Builder
+		for i, t := range s.AllowedRequestContentTypes {
+			if !mediaType.MatchString(t) {
+				return nil, fmt.Errorf("allowed request content type %q is not a media type (type/subtype, without parameters)", t)
+			}
+			if i > 0 {
+				b.WriteByte(' ')
+			}
+			// Rule 920420: "|type|", lower case, "@within" the list.
+			b.WriteString("|" + strings.ToLower(t) + "|")
+		}
+		vars = append(vars, txVar{"allowed_request_content_type", b.String()})
+	}
+	return vars, nil
 }
 
 // Exclusion turns rules off where they cause false positives.
@@ -748,7 +822,7 @@ func (e *Evaluator) evaluate(r *request.Request) (rules.Result, types.Transactio
 	}
 
 	if it := tx.ProcessRequestHeaders(); it != nil {
-		return result(tx, it, 0, inboundScore), tx, nil
+		return result(tx, it, 0, inbound), tx, nil
 	}
 	// A truncated body is never inspected: a prefix of JSON, XML or
 	// multipart fails to parse (and rules 200002/200003 would deny it), and
@@ -767,7 +841,7 @@ func (e *Evaluator) evaluate(r *request.Request) (rules.Result, types.Transactio
 			return rules.Result{}, tx, fmt.Errorf("write request body: %w", err)
 		}
 		if it != nil {
-			return result(tx, it, 0, inboundScore), tx, nil
+			return result(tx, it, 0, inbound), tx, nil
 		}
 	}
 	// Phase 2 runs even without a body: CRS evaluates the anomaly score there.
@@ -775,7 +849,7 @@ func (e *Evaluator) evaluate(r *request.Request) (rules.Result, types.Transactio
 	if err != nil {
 		return rules.Result{}, tx, fmt.Errorf("process request body: %w", err)
 	}
-	return result(tx, it, 0, inboundScore), tx, nil
+	return result(tx, it, 0, inbound), tx, nil
 }
 
 // exchange is a transaction kept open for the response.
@@ -808,7 +882,7 @@ func (x *exchange) EvaluateResponse(_ context.Context, resp *request.Response) (
 		}
 	}
 	if it := tx.ProcessResponseHeaders(resp.Status, resp.Proto); it != nil {
-		return result(tx, it, x.seen, outboundScore), nil
+		return result(tx, it, x.seen, outbound), nil
 	}
 	if len(resp.Body) > 0 && tx.IsResponseBodyAccessible() && tx.IsResponseBodyProcessable() {
 		it, _, err := tx.WriteResponseBody(resp.Body)
@@ -816,14 +890,14 @@ func (x *exchange) EvaluateResponse(_ context.Context, resp *request.Response) (
 			return rules.Result{}, fmt.Errorf("write response body: %w", err)
 		}
 		if it != nil {
-			return result(tx, it, x.seen, outboundScore), nil
+			return result(tx, it, x.seen, outbound), nil
 		}
 	}
 	it, err := tx.ProcessResponseBody()
 	if err != nil {
 		return rules.Result{}, fmt.Errorf("process response body: %w", err)
 	}
-	return result(tx, it, x.seen, outboundScore), nil
+	return result(tx, it, x.seen, outbound), nil
 }
 
 // Close implements rules.Exchange.
@@ -834,15 +908,19 @@ func (x *exchange) Close() {
 	}
 }
 
-// The CRS anomaly scores, summed in these TX variables (0 without CRS).
-const (
-	inboundScore  = "blocking_inbound_anomaly_score"
-	outboundScore = "blocking_outbound_anomaly_score"
+// scores names the TX variables of a CRS anomaly score (0 without CRS):
+// the one that blocks, the one at the detection paranoia level, and their
+// threshold.
+type scores struct{ blocking, detection, threshold string }
+
+var (
+	inbound  = scores{"blocking_inbound_anomaly_score", "detection_inbound_anomaly_score", "inbound_anomaly_score_threshold"}
+	outbound = scores{"blocking_outbound_anomaly_score", "detection_outbound_anomaly_score", "outbound_anomaly_score_threshold"}
 )
 
 // result is the outcome of tx, with the rules that matched after the first
 // skip and the anomaly score in TX:score.
-func result(tx types.Transaction, it *types.Interruption, skip int, score string) rules.Result {
+func result(tx types.Transaction, it *types.Interruption, skip int, score scores) rules.Result {
 	var res rules.Result
 	if it != nil {
 		res.Interrupted = true
@@ -869,17 +947,22 @@ func result(tx types.Transaction, it *types.Interruption, skip int, score string
 			break
 		}
 	}
-	res.AnomalyScore = anomalyScore(tx, score)
+	res.AnomalyScore = txInt(tx, score.blocking)
+	// Rules above the blocking paranoia level, up to the detection level,
+	// would have blocked: detected. Only when the levels differ, so a rule
+	// set that turned the blocking evaluation (949110) off isn't reported.
+	res.Detected = it == nil && txInt(tx, "detection_paranoia_level") > txInt(tx, "blocking_paranoia_level") &&
+		txInt(tx, score.threshold) > 0 && txInt(tx, score.detection) >= txInt(tx, score.threshold)
 	return res
 }
 
-// anomalyScore reads a CRS anomaly score from TX:score.
-func anomalyScore(tx types.Transaction, score string) int {
+// txInt reads TX:name as an integer, 0 if unset.
+func txInt(tx types.Transaction, name string) int {
 	st, ok := tx.(plugintypes.TransactionState)
 	if !ok {
 		return 0
 	}
-	vals := st.Variables().TX().Get(score)
+	vals := st.Variables().TX().Get(name)
 	if len(vals) == 0 {
 		return 0
 	}
