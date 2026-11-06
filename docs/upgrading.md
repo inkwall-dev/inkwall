@@ -114,6 +114,11 @@ What changes by itself:
   rejected bundles. WebSocket messages the engine's proxy inspects are counted in
   `inkwall_websocket_messages_total`, no longer in `inkwall_requests_total`, so a dashboard of
   requests drops on routes with busy WebSockets.
+- **Every denial carries `X-Request-Id`** (#366), the request ID of its security event: the
+  engine's reverse proxy and Traefik's ForwardAuth answered without it before, and so did the 400
+  for a request an adapter can't read. `InkwallConfig.spec.engine.jsonDenials` (the engine's
+  `--json-denials`) answers clients that accept `application/json` with a JSON body; off by
+  default.
 - **A monitoring kit, off by default** (#381): `metrics.serviceMonitor`, `metrics.podMonitor`,
   `metrics.prometheusRule` and `metrics.dashboard` in the chart. See [Monitoring](monitoring.md).
 

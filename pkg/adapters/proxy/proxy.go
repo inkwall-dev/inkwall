@@ -44,6 +44,9 @@ type Config struct {
 	// Logger receives one security event per denied or logged request.
 	// Nil uses slog.Default().
 	Logger *slog.Logger
+	// JSONDenials answers a denied client that accepts application/json
+	// with a JSON body (httpadapter.DenialBody); off: text.
+	JSONDenials bool
 	// Metrics counts the requests the proxy can't read, and its
 	// WebSockets (nil: none).
 	Metrics *telemetry.Metrics
@@ -66,6 +69,8 @@ type Handler struct {
 	events   *events.Recorder
 	messages pipeline.WebSocketMessages
 	metrics  *telemetry.Metrics
+	// jsonDenials: Config.JSONDenials.
+	jsonDenials bool
 }
 
 // New returns a Handler that inspects requests with p.
@@ -106,7 +111,7 @@ func New(p pipeline.Inspector, cfg Config) (*Handler, error) {
 		}
 	}
 	return &Handler{pipeline: p, proxy: rp, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events,
-		messages: cfg.WebSocketMessages, metrics: cfg.Metrics}, nil
+		messages: cfg.WebSocketMessages, metrics: cfg.Metrics, jsonDenials: cfg.JSONDenials}, nil
 }
 
 // ServeHTTP inspects r, then denies it or forwards it to the upstream.
@@ -117,7 +122,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// reach the application uninspected.
 	if strings.ContainsRune(r.RequestURI, '#') {
 		h.metrics.AdapterError(telemetry.ErrInvalidRequest)
-		http.Error(w, "Bad Request", http.StatusBadRequest)
+		httpadapter.WriteDenial(w, http.StatusBadRequest, httpadapter.NewRequestID(), r.Header, h.jsonDenials)
 		return
 	}
 	// Only the origin form ("/path?query"). For an absolute-form target
@@ -127,19 +132,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// the upstream never sees. The asterisk form would be forwarded as "/*".
 	if r.RequestURI != "" && !strings.HasPrefix(r.RequestURI, "/") {
 		h.metrics.AdapterError(telemetry.ErrInvalidRequest)
-		http.Error(w, "Bad Request", http.StatusBadRequest)
+		httpadapter.WriteDenial(w, http.StatusBadRequest, httpadapter.NewRequestID(), r.Header, h.jsonDenials)
 		return
 	}
 	// Forward only a Host the client sends as it is: what was inspected.
 	if !httpguts.ValidHostHeader(r.Host) {
 		h.metrics.AdapterError(telemetry.ErrInvalidRequest)
-		http.Error(w, "Bad Request", http.StatusBadRequest)
+		httpadapter.WriteDenial(w, http.StatusBadRequest, httpadapter.NewRequestID(), r.Header, h.jsonDenials)
 		return
 	}
 	req, err := h.toRequest(r)
 	if err != nil {
 		h.metrics.AdapterError(telemetry.ErrInvalidRequest)
-		http.Error(w, "Bad Request", http.StatusBadRequest)
+		httpadapter.WriteDenial(w, http.StatusBadRequest, httpadapter.NewRequestID(), r.Header, h.jsonDenials)
 		return
 	}
 
@@ -153,7 +158,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			httpadapter.WriteGRPCDenial(w, g, http.StatusOK, v.Status, req.ID)
 			return
 		}
-		http.Error(w, http.StatusText(v.Status), v.Status)
+		httpadapter.WriteDenial(w, v.Status, req.ID, req.Headers, h.jsonDenials)
 		return
 	}
 	if h.messages != pipeline.MessagesOff && v.Reason != pipeline.ReasonSkipped &&
