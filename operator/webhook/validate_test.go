@@ -120,37 +120,66 @@ func TestPolicyValidation(t *testing.T) {
 	wantInvalid(t, err, "spec.webSocket.requiredHeaders[0]", "not a header name")
 }
 
-// A policy that inspects responses gets a warning for its Ingress and
-// IngressRoute targets: Traefik serves them, and can't send responses to the
-// engine. It is accepted: its requests are inspected, and its status says
-// the responses are not.
+// A policy that inspects responses gets a warning for its targets whose
+// responses may not be inspected, whichever proxy serves them (#380): the
+// webhook doesn't resolve the proxy, so it names none as the one. It is
+// accepted: its requests are inspected, and each target's Programmed
+// condition says whether its responses are.
 func TestPolicyResponsesWarning(t *testing.T) {
 	ctx := context.Background()
 	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy}
+	ingress := wafv1alpha1.TargetRef{Kind: "Ingress", Name: "web"}
+	route := wafv1alpha1.TargetRef{Group: "gateway.networking.k8s.io", Kind: "HTTPRoute", Name: "api"}
+	ingressRoute := wafv1alpha1.TargetRef{Group: "traefik.io", Kind: "IngressRoute", Name: "admin"}
+	vs := wafv1alpha1.TargetRef{Group: "networking.istio.io", Kind: "VirtualService", Name: "shop"}
+	for _, tc := range []struct {
+		name    string
+		targets []wafv1alpha1.TargetRef
+		want    string
+	}{
+		{"Ingress", []wafv1alpha1.TargetRef{ingress}, "the responses of Ingress web may not be inspected"},
+		{"IngressRoute", []wafv1alpha1.TargetRef{ingressRoute}, "the responses of IngressRoute admin may not be inspected"},
+		{"HTTPRoute", []wafv1alpha1.TargetRef{route}, "the responses of HTTPRoute api may not be inspected"},
+		{"VirtualService", []wafv1alpha1.TargetRef{vs}, "the responses of VirtualService shop may not be inspected"},
+		{"all", []wafv1alpha1.TargetRef{ingress, route, ingressRoute, vs},
+			"the responses of Ingress web, HTTPRoute api, IngressRoute admin and VirtualService shop may not be inspected"},
+	} {
+		p := &wafv1alpha1.WAFPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "shop"},
+			Spec: wafv1alpha1.WAFPolicySpec{
+				TargetRefs: tc.targets,
+				Responses:  &wafv1alpha1.ResponsesSpec{Inspect: true},
+			},
+		}
+		warnings, err := v.ValidateCreate(ctx, p)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if len(warnings) != 1 {
+			t.Fatalf("%s: warnings %q", tc.name, warnings)
+		}
+		w := warnings[0]
+		if !strings.HasPrefix(w, "spec.responses: "+tc.want) {
+			t.Errorf("%s: warning %q, want it to start with %q", tc.name, w, tc.want)
+		}
+		// It names the proxies that can't send responses, and the
+		// condition that says which applies, never one proxy as the
+		// target's.
+		for _, s := range []string{"Traefik", "HAProxy", "Istio", "Programmed", "ResponsesNotInspected"} {
+			if !strings.Contains(w, s) {
+				t.Errorf("%s: warning %q doesn't mention %s", tc.name, w, s)
+			}
+		}
+		for _, s := range []string{"served by Traefik", "only Envoy Gateway"} {
+			if strings.Contains(w, s) {
+				t.Errorf("%s: warning %q says %q", tc.name, w, s)
+			}
+		}
+	}
 	p := &wafv1alpha1.WAFPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "shop"},
-		Spec: wafv1alpha1.WAFPolicySpec{
-			TargetRefs: []wafv1alpha1.TargetRef{
-				{Kind: "Ingress", Name: "web"},
-				{Group: "gateway.networking.k8s.io", Kind: "HTTPRoute", Name: "api"},
-				{Group: "traefik.io", Kind: "IngressRoute", Name: "admin"},
-			},
-			Responses: &wafv1alpha1.ResponsesSpec{Inspect: true},
-		},
+		Spec:       wafv1alpha1.WAFPolicySpec{TargetRefs: []wafv1alpha1.TargetRef{ingress}, Responses: &wafv1alpha1.ResponsesSpec{Inspect: false}},
 	}
-	warnings, err := v.ValidateCreate(ctx, p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "spec.responses: Ingress web and IngressRoute admin are served by Traefik") {
-		t.Errorf("warnings %q", warnings)
-	}
-	p.Spec.TargetRefs = p.Spec.TargetRefs[1:2]
-	if warnings, _ := v.ValidateCreate(ctx, p); len(warnings) != 0 {
-		t.Errorf("HTTPRoute only: warnings %q", warnings)
-	}
-	p.Spec.TargetRefs = []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}}
-	p.Spec.Responses.Inspect = false
 	if warnings, _ := v.ValidateCreate(ctx, p); len(warnings) != 0 {
 		t.Errorf("responses off: warnings %q", warnings)
 	}

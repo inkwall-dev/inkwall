@@ -11,7 +11,6 @@ package webhook
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -215,34 +214,37 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 	return responseWarnings(p), invalid("WAFPolicy", p.Name, errs)
 }
 
-// responseWarnings warns of a policy that inspects responses on Ingress and
-// IngressRoute targets: only Traefik serves them, and its ForwardAuth can't
-// send responses to the engine. The policy is accepted, as its requests are
-// inspected; its Programmed condition says the responses are not
-// (ResponsesNotInspected).
+// responseWarnings warns of a policy that inspects responses on targets
+// whose responses may not be inspected (#380). Whether they are depends on
+// the proxy that serves each one, which the webhook doesn't resolve: an
+// Ingress may be Traefik's or the HAProxy Kubernetes Ingress Controller's,
+// an HTTPRoute Envoy Gateway's, Traefik's or Istio's; IngressRoutes are
+// Traefik's, VirtualServices Istio's ingress gateways'. Of these, only
+// Envoy Gateway sends responses to the engine. So it names the target
+// kinds, not a proxy, and leaves each target's verdict to its Programmed
+// condition (ResponsesNotInspected). The policy is accepted, as its
+// requests are inspected.
 func responseWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
 	if r := p.Spec.Responses; r == nil || !r.Inspect {
 		return nil
 	}
-	var traefik []string
+	var targets []string
 	for _, ref := range p.Spec.TargetRefs {
-		if ref.Kind == "Ingress" || ref.Kind == "IngressRoute" {
-			traefik = append(traefik, ref.Kind+" "+ref.Name)
+		switch ref.Kind {
+		case "Ingress", "IngressRoute", "HTTPRoute", "VirtualService":
+			targets = append(targets, ref.Kind+" "+ref.Name)
 		}
 	}
-	if len(traefik) == 0 {
+	if len(targets) == 0 {
 		return nil
 	}
-	verb := "is"
-	if len(traefik) > 1 {
-		verb = "are"
+	list := strings.Join(targets, ", ")
+	if n := len(targets); n > 1 {
+		list = strings.Join(targets[:n-1], ", ") + " and " + targets[n-1]
 	}
-	list := strings.Join(traefik, ", ")
-	if n := len(traefik); n > 1 {
-		list = strings.Join(traefik[:n-1], ", ") + " and " + traefik[n-1]
-	}
-	return admission.Warnings{fmt.Sprintf("spec.responses: %s %s served by Traefik, which can't send responses to the engine: "+
-		"their requests are inspected, their responses are not (Programmed: ResponsesNotInspected); only Envoy Gateway's HTTPRoutes have their responses inspected", list, verb)}
+	return admission.Warnings{"spec.responses: the responses of " + list + " may not be inspected, depending on the proxy that serves them: " +
+		"Traefik, the HAProxy Kubernetes Ingress Controller and Istio can't send responses to the engine, Envoy Gateway can. " +
+		"The requests are inspected either way; the policy's Programmed condition says which responses are not (ResponsesNotInspected)"}
 }
 
 // checkWebSocket accepts what the engine compiles: one entry the engine

@@ -337,8 +337,11 @@ func TestForwarderOutage(t *testing.T) {
 	}
 	_ = q.add(batchOf(0, "a"))
 	f := startForwarder(t, e, dir)
-	// The gauge is set before the queue is published.
-	waitFor(t, "the queue", func() bool { return f.q.Load() != nil })
+	// The gauge is set before the queue is published. Add takes batches
+	// only once Start has also decided to resend the one on disk, just
+	// after publishing the queue: wait for both, or b and c may be dropped
+	// (#406).
+	waitFor(t, "the queue", func() bool { return f.q.Load() != nil && f.accepts.Load() })
 	if v := testutil.ToFloat64(eventsBuffered); v != 1 {
 		t.Errorf("buffered %v from disk, want 1", v)
 	}

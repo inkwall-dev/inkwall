@@ -222,3 +222,25 @@ func (r *repo) checkIndex(index string, docs []string, exempt map[string]bool) [
 	}
 	return probs
 }
+
+// pinRE finds a release pinned in Inkwall's chart or image references: the
+// chart's --version, or an engine or operator image tag.
+var pinRE = regexp.MustCompile(`oci://ghcr\.io/inkwall-dev/charts/inkwall\b.*--version[ =](v?[0-9][^\s\\]*)|ghcr\.io/inkwall-dev/inkwall-(?:engine|operator):(v?[0-9][^\s\\]*)`)
+
+// checkUnpinned reports the releases a doc pins in its install and verify
+// commands. The latest release changes with every release, and such a doc
+// would go stale: it writes <version> instead.
+func (r *repo) checkUnpinned(p string) []problem {
+	src, err := fs.ReadFile(r.fsys, p)
+	if err != nil {
+		return []problem{{p, 0, "cannot read it"}}
+	}
+	var probs []problem
+	for i, line := range strings.Split(string(src), "\n") {
+		for _, m := range pinRE.FindAllStringSubmatch(line, -1) {
+			v := m[1] + m[2]
+			probs = append(probs, problem{p, i + 1, "pins release " + v + ": write <version>, as the latest release changes"})
+		}
+	}
+	return probs
+}

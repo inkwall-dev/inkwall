@@ -21,6 +21,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/rules"
 )
 
 const sqli = "?id=1%27%20OR%20%271%27%3D%271"
@@ -182,19 +183,92 @@ func TestEvaluatorsShared(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ev.Len() != 3 {
-		t.Fatalf("%d rule sets compiled for 3 distinct rule configurations", ev.Len())
+	// The CRS (at any paranoia level and body limit) and the custom rules.
+	if ev.Len() != 2 {
+		t.Fatalf("%d rule sets compiled for 2 distinct rule configurations", ev.Len())
 	}
 	if set.policies[0].pipeline == set.policies[3].pipeline {
 		t.Fatal("policies with different modes share a pipeline")
 	}
-	// The next bundle drops two policies: their rule sets are released.
+	// The next bundle keeps only the first policy: the custom rules' rule
+	// set is released.
 	b.Policies = b.Policies[:1]
 	if _, err := Compile(b, Options{Evaluators: ev, BodyLimit: 65536}); err != nil {
 		t.Fatal(err)
 	}
 	if ev.Len() != 1 {
 		t.Fatalf("%d rule sets kept, want 1", ev.Len())
+	}
+}
+
+// crsSpread is a bundle of n CRS policies over the 4 paranoia levels, 3
+// thresholds, 10 body limits and 10 response limits, policy i on host
+// p<i>.example.com.
+func crsSpread(n int) *bundlev1.Bundle {
+	b := &bundlev1.Bundle{Version: 1, RuleSets: testBundle().RuleSets}
+	for i := range n {
+		b.Policies = append(b.Policies, &bundlev1.Policy{
+			Id:      fmt.Sprintf("ns/p%d", i),
+			Mode:    bundlev1.Mode_MODE_BLOCK,
+			Routes:  []*bundlev1.RouteMatch{rm(fmt.Sprintf("p%d.example.com", i), false, "/")},
+			Timeout: testTimeout,
+			RuleSets: []*bundlev1.RuleSetBinding{{
+				RuleSetId:               "ClusterWAFRuleSet/crs",
+				ParanoiaLevel:           int32(i%4 + 1),
+				InboundAnomalyThreshold: int32(5 + i%3*5),
+			}},
+			Body:      &bundlev1.BodyConfig{Inspect: true, MaxBytes: int64(i%10+1) << 10},
+			Responses: &bundlev1.ResponseConfig{Inspect: true, MaxBytes: int64(i/10%10+1) << 12},
+		})
+	}
+	return b
+}
+
+// TestOneRuleSetForEveryCRSSetting: the paranoia level, the threshold and
+// the body limits are applied per transaction, so policies spread over them
+// share one compiled CRS, and each still gets its own settings.
+func TestOneRuleSetForEveryCRSSetting(t *testing.T) {
+	ev := NewEvaluators()
+	set, err := Compile(crsSpread(1000), Options{Evaluators: ev, BodyLimit: 65536})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Len() != 1 {
+		t.Fatalf("%d rule sets compiled for 1,000 CRS policies, want 1", ev.Len())
+	}
+	ctx := context.Background()
+	// Policy i: paranoia level i%4+1, threshold 5+i%3*5. "@@version" scores
+	// 5 from paranoia level 2 on (942480); "1;2" scores 5 at level 4 (920273).
+	for _, tc := range []struct {
+		policy  int
+		uri     string
+		blocked bool
+	}{
+		{0, "/?q=@@version", false}, // PL1
+		{4, "/?q=@@version", false}, // PL1
+		{9, "/?q=@@version", true},  // PL2, threshold 5
+		{1, "/?q=@@version", false}, // PL2, threshold 10
+		{5, "/?q=@@version", false}, // PL2, threshold 15
+		{2, "/?q=1;2", false},       // PL3
+		{3, "/?q=1;2", true},        // PL4, threshold 5
+	} {
+		v := set.Check(ctx, req(fmt.Sprintf("p%d.example.com", tc.policy), tc.uri))
+		if blocked := v.Action == pipeline.ActionDeny; blocked != tc.blocked {
+			t.Errorf("policy %d, %s: %s/%s, want blocked=%v", tc.policy, tc.uri, v.Action, v.Reason, tc.blocked)
+		}
+	}
+
+	// A body exactly the policy's limit is inspected, not rejected.
+	r := req("p0.example.com", "/login")
+	r.Method = "POST"
+	r.Headers.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Body = []byte(strings.Repeat("a", 1<<10-2) + "=b")
+	if v := set.Check(ctx, r); v.Action != pipeline.ActionAllow {
+		t.Errorf("body of the policy's limit: %s/%s (rule %d), want allow", v.Action, v.Reason, v.InterruptingRuleID)
+	}
+	r.Body = []byte("q=1%27%20OR%20%271%27%3D%271")
+	if v := set.Check(ctx, r); v.Action != pipeline.ActionDeny {
+		t.Errorf("SQLi in the body: %s/%s, want deny", v.Action, v.Reason)
 	}
 }
 
@@ -382,8 +456,9 @@ func exclusionBundle(n int) *bundlev1.Bundle {
 }
 
 // BenchmarkCompile compiles bundles of policies that differ only in their
-// exclusions, from an empty cache (as an engine starts), and reports the
-// heap the compiled set keeps alive (live-B).
+// exclusions, and 1,000 CRS policies over every paranoia level and many
+// thresholds and body limits (crsSpread), from an empty cache (as an engine
+// starts), and reports the heap the compiled set keeps alive (live-B).
 func BenchmarkCompile(b *testing.B) {
 	live := func() uint64 {
 		runtime.GC()
@@ -391,9 +466,18 @@ func BenchmarkCompile(b *testing.B) {
 		runtime.ReadMemStats(&ms)
 		return ms.HeapAlloc
 	}
-	for _, n := range []int{1, 100, 1000} {
-		bundle := exclusionBundle(n)
-		b.Run(fmt.Sprintf("policies=%d", n), func(b *testing.B) {
+	bundles := []struct {
+		name   string
+		bundle *bundlev1.Bundle
+	}{
+		{"policies=1", exclusionBundle(1)},
+		{"policies=100", exclusionBundle(100)},
+		{"policies=1000", exclusionBundle(1000)},
+		{"crs-spread=1000", crsSpread(1000)},
+	}
+	for _, bc := range bundles {
+		bundle := bc.bundle
+		b.Run(bc.name, func(b *testing.B) {
 			b.ReportAllocs()
 			var heap int64
 			for b.Loop() {
@@ -569,5 +653,60 @@ func TestProbeKey(t *testing.T) {
 	h.Store(s)
 	if string(h.ProbeKey()) != string(key) {
 		t.Fatalf("probe key %q", h.ProbeKey())
+	}
+}
+
+// The bundle's events.redact reaches the events through the holder.
+func TestRedaction(t *testing.T) {
+	var h Holder
+	src := events.Source{Redaction: h.Redaction}
+	snippet := func() string {
+		v := pipeline.Verdict{Matches: []rules.Match{{RuleID: 942100, Variable: "ARGS:user_email", Value: "<script>"}}}
+		return events.New(src, &request.Request{}, "/", v, time.Now()).GetMatches()[0].GetSnippet()
+	}
+	if snippet() != "<script>" {
+		t.Fatal("redacted before the first bundle")
+	}
+	s, err := Compile(&bundlev1.Bundle{Version: 1, Events: &bundlev1.EventsConfig{RedactArguments: []string{"email"}}},
+		Options{Evaluators: NewEvaluators()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Store(s)
+	if got := snippet(); got != "" {
+		t.Fatalf("snippet %q with the bundle's redaction", got)
+	}
+}
+
+// A policy's request body limit is at most MaxBodyBytes, whatever the
+// bundle says (#361), and BodyLimit never returns more than the adapter's
+// own limit.
+func TestBodyLimitClamped(t *testing.T) {
+	b := testBundle()
+	b.Policies[0].Body = &bundlev1.BodyConfig{Inspect: true, MaxBytes: 1 << 30}
+	set, err := Compile(b, Options{BodyLimit: 65536})
+	if err != nil {
+		t.Fatal(err)
+	}
+	shop := req("shop.example.com", "/form")
+	if p := set.Lookup(shop); p.bodyLimit != MaxBodyBytes {
+		t.Errorf("compiled body limit %d, want %d", p.bodyLimit, MaxBodyBytes)
+	}
+	for _, tc := range []struct {
+		max, want int64
+	}{
+		{0, MaxBodyBytes},  // no adapter limit given
+		{-1, MaxBodyBytes}, // nor here
+		{1 << 40, MaxBodyBytes},
+		{MaxBodyBytes, MaxBodyBytes},
+		{1000, 1000},
+	} {
+		if got := set.BodyLimit(shop, tc.max); got != tc.want {
+			t.Errorf("BodyLimit(max %d) = %d, want %d", tc.max, got, tc.want)
+		}
+	}
+	// The /api policy's own 10 bytes, under any adapter limit.
+	if got := set.BodyLimit(req("shop.example.com", "/api/orders"), 5); got != 5 {
+		t.Errorf("BodyLimit(/api, max 5) = %d, want 5", got)
 	}
 }

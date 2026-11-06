@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -302,6 +303,26 @@ func testBundles(ctx context.Context, t *testing.T, c client.Client) {
 	eventually(t, "the other policy on the suspended bundle", func() string {
 		if v, want := otherVersion(), int64(current(ctx, t, c).GetVersion()); v != want { // #nosec G115
 			return fmt.Sprintf("bundleVersion %d, want %d", v, want)
+		}
+		return ""
+	})
+
+	// events.redact goes to the engines in the bundle (#355).
+	off := false
+	if err := c.Get(ctx, client.ObjectKeyFromObject(cfg), cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Spec.Events.Redact = wafv1alpha1.RedactSpec{
+		Headers: []wafv1alpha1.HeaderName{"X-Tenant"}, Arguments: []wafv1alpha1.ArgumentPattern{"email"}, Snippets: &off,
+	}
+	if err := c.Update(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "events.redact in the bundle", func() string {
+		ev := current(ctx, t, c).GetEvents()
+		if !ev.GetNoSnippets() || !slices.Equal(ev.GetRedactHeaders(), []string{"X-Tenant"}) ||
+			!slices.Equal(ev.GetRedactArguments(), []string{"email"}) {
+			return fmt.Sprintf("events %v", ev)
 		}
 		return ""
 	})

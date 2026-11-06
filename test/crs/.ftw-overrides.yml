@@ -30,16 +30,37 @@ test_overrides:
         expect_ids: [920274]
   - rule_id: 920290
     test_ids: [1]
-    reason: "TODO"
+    reason: "An empty Host header reaches the rules as no Host header: the engine passes the request's authority as Host only when it isn't empty, so 920280 (missing Host) matches rather than 920290 (empty Host); both deny"
     output:
       log:
-        expect_ids: [920280] # TODO: understand why 920280 (Missing Host Header) is triggered and not 920290 (Empty Host header). See what go-ftw sends.
+        expect_ids: [920280]
   - rule_id: 920290
     test_ids: [4]
-    reason: "TODO"
+    reason: "An empty Host header reaches the rules as no Host header: the engine passes the request's authority as Host only when it isn't empty, so 920280 (missing Host) matches rather than 920290 (empty Host); both deny"
     output:
       log:
-        expect_ids: [920280] # TODO: understand why 920280 (Missing Host Header) is triggered and not 920290 (Empty Host header). See what go-ftw sends.
+        expect_ids: [920280]
+  - rule_id: 920280
+    test_ids: [3]
+    reason: "Go/http does not allow HTTP/0.9 - 505 HTTP Version Not Supported before inspection"
+    output:
+      status: 505
+      log:
+        no_expect_ids: [920280]
+  - rule_id: 920430
+    test_ids: [3, 9]
+    reason: "Go/http does not allow HTTP/0.9 or HTTP/0.8 - 505 HTTP Version Not Supported before inspection"
+    output:
+      status: 505
+      log:
+        no_expect_ids: [920430]
+  - rule_id: 920430
+    test_ids: [5]
+    reason: "A request line without a version is malformed for Go/http - 400 Bad Request before inspection"
+    output:
+      status: 400
+      log:
+        no_expect_ids: [920430]
   - rule_id: 920430
     test_ids: [8]
     reason: "Go/http does not allow HTTP/3.0 - 505 HTTP Version Not Supported"

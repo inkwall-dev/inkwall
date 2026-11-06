@@ -189,7 +189,9 @@ The engine redacts each event before it leaves the pod
 ([`api/events/v1`](../api/events/v1/events.proto)): method, host, path without the query string,
 client IP, user agent, request ID, status, matched rule IDs with at most 64 bytes of each matched
 value, the policy and the action. It never includes bodies, query strings, `Authorization`
-headers or cookies.
+headers or cookies, nor what a rule matched in an argument or header whose name looks like a
+credential (`password`, `token`, `api_key`, ...). `InkwallConfig.spec.events.redact` redacts more,
+or every snippet: see [Redacting security events](../deploy/helm/inkwall/README.md#redacting-security-events).
 
 The **request counts** are, per policy, how many requests the engines allowed, denied and detected,
 and how long inspecting them took (a histogram from 50 µs to about 0.8 s). Each replica sums its

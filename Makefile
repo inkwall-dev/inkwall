@@ -49,8 +49,11 @@ BASE            ?= origin/main
 # docs-check (hack/docscheck). Strict: every doc over 80 lines needs a
 # ## Contents section, and docs/README.md must exist and list every doc
 # (CLAUDE.md is exempt by default). CODE_OF_CONDUCT.md needs no Contents:
-# it is the Contributor Covenant 2.1, kept verbatim.
-DOCS_CHECK_STRICT ?= -contents-min-lines=80 -require-index -contents-exempt=CODE_OF_CONDUCT.md
+# it is the Contributor Covenant 2.1, kept verbatim. The install and verify
+# commands of the READMEs and CONTRIBUTING.md write <version>, never a
+# release, so they don't go stale when the next one ships.
+DOCS_CHECK_STRICT ?= -contents-min-lines=80 -require-index -contents-exempt=CODE_OF_CONDUCT.md \
+	-unpinned=README.md,deploy/helm/inkwall/README.md,CONTRIBUTING.md
 DOCS_CHECK        ?= $(GO) run ./hack/docscheck $(DOCS_CHECK_STRICT)
 
 # scale-test: sizes as <policies>x<engines>, one operator each; "full" is 0004 §8's matrix.
@@ -100,8 +103,18 @@ crs-test: ## Run the OWASP CRS regression suite through the proxy (test/crs)
 
 
 .PHONY: lint
-lint: ## Run golangci-lint
+lint: workflow-check ## Run golangci-lint, and check the workflows' runners
 	$(GOLANGCI_LINT) run ./...
+
+# The runner every CI job runs on: a fixed Ubuntu release, never
+# ubuntu-latest, which GitHub moves to the next LTS unannounced (#400). Move
+# to the next one in a PR of its own, which runs the whole suite.
+CI_RUNNER ?= ubuntu-24.04
+
+.PHONY: workflow-check
+workflow-check: ## Check that every workflow job runs on CI_RUNNER
+	@bad=$$(grep -rn 'runs-on:' .github/workflows | grep -v 'runs-on: $(CI_RUNNER)$$'); \
+	if [ -n "$$bad" ]; then echo "$$bad"; echo "workflow-check: jobs must run on $(CI_RUNNER) (CI_RUNNER in the Makefile)"; exit 1; fi
 
 .PHONY: fmt
 fmt: ## Format code

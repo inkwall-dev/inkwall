@@ -16,6 +16,7 @@ builds them into a signed [bundle](../../../docs/glossary.md#bundle), serves the
 - [Connecting to a control plane](#connecting-to-a-control-plane)
 - [Rotating the signing key](#rotating-the-signing-key)
 - [Suspending inspection](#suspending-inspection)
+- [Redacting security events](#redacting-security-events)
 - [Uninstalling](#uninstalling)
   - [Turning injection off](#turning-injection-off)
   - [Deleting a policy](#deleting-a-policy)
@@ -75,7 +76,7 @@ from the operator's generated manifests. Don't edit `files/` by hand.
 | `operator.podAnnotations`, `podLabels`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName` | | The default [affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/) spreads the replicas across nodes |
 | `operator.podDisruptionBudget.enabled`, `minAvailable` | `true`, `1` | |
 | `engine.image.repository`, `tag`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-engine`, the chart's `appVersion`, `IfNotPresent` | The engine injected into Traefik pods and put into Envoy Gateway's Envoy pods and Istio's Gateway pods; `InkwallConfig.spec.engine.image` overrides it |
-| `injection.enabled` | `true` | Inject the engine into Traefik pods when they are created. `false`: see [turning injection off](#turning-injection-off) |
+| `injection.enabled` | `true` | Inject the engine into proxy pods: Traefik's, the HAProxy Kubernetes Ingress Controller's and Istio ingress gateways' when they are created, Envoy Gateway's and Istio Gateways' through their configuration. `false`: see [turning injection off](#turning-injection-off) |
 | `injection.proxyNamespaces` | `[traefik, kube-system, envoy-gateway-system, istio-ingress, istio-system, haproxy-controller]` | The namespaces the proxies' pods run in; only pods there get the engine and the policy bundle. See [proxy namespaces](#proxy-namespaces) |
 | `controlPlane.caBundle` | `""` | The optional control plane's CA (PEM), when its certificate isn't from a public CA, e.g. `--set-file controlPlane.caBundle=ca.crt` |
 | `controlPlane.enrollmentToken` | `""` | The control plane's one-time enrollment token, stored in the Secret `inkwall-enrollment` (key `token`); or leave it empty and create that Secret yourself |
@@ -265,6 +266,42 @@ Each policy is `Enforced` again once every engine runs the bundle that resumes i
 The switch works even when policy changes don't fit the bundle (policies `Accepted=False`, reason
 `BundleTooLarge`): the bundle the engines run is published again, suspended, and once resumed, they
 run it as before.
+
+## Redacting security events
+
+Each security event an engine sends to the operator (and on to the control plane, when one is
+connected) names the rules that matched, the variable each matched (`ARGS:q`) and a snippet: at
+most 64 bytes of what it matched. The engine never sends a snippet of:
+
+- cookies, response bodies, and the `Authorization`, `Cookie`, `Set-Cookie` and
+  `Proxy-Authorization` headers;
+- an argument or a header whose name looks like a credential: it contains, in any case and
+  ignoring `-`, `_` and `.`, `pass`, `pwd`, `secret`, `token`, `apikey`, `auth`, `session`,
+  `sessid`, `jwt`, `bearer`, `credential`, `privatekey`, `card`, `ccnum`, `cvv`, `cvc`, or `ssn`
+  as a word.
+  `ARGS:password`, `ARGS_POST:token`, `ARGS_POST:json.user.Password` and `X-Api-Key` leave none,
+  `ARGS:q` keeps its snippet. Some harmless names match (`author`): a missing snippet is the safe
+  mistake;
+- a whole query string or body (`QUERY_STRING`, `REQUEST_URI`, `REQUEST_BODY`) whose snippet
+  contains one of those names.
+
+`spec.events.redact` on the `InkwallConfig` adds to that:
+
+```yaml
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: InkwallConfig
+metadata:
+  name: default
+spec:
+  events:
+    redact:
+      headers: [X-Tenant-Secret]   # header names, any case
+      arguments: [email, phone]    # argument-name parts, any case: user_email too
+      snippets: false              # or send no snippets at all
+```
+
+The engines get it with the next bundle, within seconds; events already sent keep their snippets.
+Engine logs never carry snippets, whatever this says.
 
 ## Uninstalling
 

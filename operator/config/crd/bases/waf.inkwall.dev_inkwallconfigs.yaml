@@ -192,6 +192,52 @@ spec:
                     maxLength: 64
                     type: string
                 type: object
+              events:
+                description: |-
+                  Events configures what the engines' security events carry to the
+                  operator (and on to the control plane, when one is connected).
+                properties:
+                  redact:
+                    description: Redact keeps more of what rules matched out of the
+                      events.
+                    properties:
+                      arguments:
+                        description: |-
+                          Arguments are more argument-name patterns: a match on a query or
+                          body argument whose name contains one, without regard to case, leaves
+                          no snippet ("email" covers email, user_email and json.user.Email).
+                        items:
+                          description: |-
+                            ArgumentPattern is part of an argument name, as WAFPolicy exclusions
+                            name arguments.
+                          maxLength: 256
+                          minLength: 1
+                          pattern: ^[A-Za-z0-9_.\-\[\]]+$
+                          type: string
+                        maxItems: 64
+                        type: array
+                        x-kubernetes-list-type: set
+                      headers:
+                        description: |-
+                          Headers are more header names whose values leave no snippet, matched
+                          without regard to case.
+                        items:
+                          description: HeaderName is an HTTP header name.
+                          maxLength: 256
+                          minLength: 1
+                          pattern: ^[A-Za-z0-9!#$%&'*+.^_|~-]+$
+                          type: string
+                        maxItems: 64
+                        type: array
+                        x-kubernetes-list-type: set
+                      snippets:
+                        default: true
+                        description: |-
+                          Snippets set to false sends no snippets at all: events keep the rule
+                          and the variable it matched, never what it matched.
+                        type: boolean
+                    type: object
+                type: object
               integrations:
                 description: |-
                   Integrations pins how a proxy controller is wired. Controllers are

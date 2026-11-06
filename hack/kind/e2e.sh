@@ -457,10 +457,34 @@ traefik_node() { "${KUBECTL[@]}" -n "$TRAEFIK_NS" get pods -l app.kubernetes.io/
 traefik_engine_ctr() {
   docker exec "$(traefik_node)" crictl ps --no-trunc -q --name inkwall-engine --label "io.kubernetes.pod.namespace=$TRAEFIK_NS"
 }
+# crictl's requests time out after 2 s by default, and a busy node can take
+# longer to stop a container (#418): give them 30 s.
 stop_traefik_engine() {
   local id
   id=$(traefik_engine_ctr)
-  [[ -n $id ]] && docker exec "$(traefik_node)" crictl stop -t 0 "$id"
+  # shellcheck disable=SC2086 # one ID per line, each its own argument
+  [[ -n $id ]] && docker exec "$(traefik_node)" crictl --timeout=30s stop -t 0 $id
+}
+# stop_running_engine: stops the engine, waiting up to 60 s for one to stop
+# if it is restarting (no running container yet), and retrying a stop that
+# failed; succeeds once a container it stopped has exited. On a failure,
+# $stop_err says why.
+stop_running_engine() {
+  local id node out end=$((SECONDS + 60))
+  stop_err="no running engine container within 60 s"
+  while ((SECONDS < end)); do
+    node=$(traefik_node) && id=$(traefik_engine_ctr) || id=
+    if [[ -n $id ]]; then
+      # shellcheck disable=SC2086 # one ID per line, each its own argument
+      if out=$(docker exec "$node" crictl --timeout=30s stop -t 0 $id 2>&1) &&
+        ! grep -qxF "${id%%$'\n'*}" <<<"$(traefik_engine_ctr)"; then
+        return 0
+      fi
+      stop_err="crictl stop: ${out:-the container still runs}"
+    fi
+    sleep 0.5
+  done
+  return 1
 }
 engine_back() { [[ -n $(traefik_engine_ctr) ]]; }
 engine_down() { [[ -z $(traefik_engine_ctr) ]]; }
@@ -517,8 +541,8 @@ eventually "the engine is back: Traefik's pod is ready" traefik_ready
 restart_never_allows() {
   local c down=false n=0 end=$((SECONDS + 90)) t0=${EPOCHREALTIME/./} codes=() counts=() ats=()
   why=
-  stop_traefik_engine >/dev/null 2>&1 || {
-    why="couldn't stop the engine"
+  stop_running_engine || {
+    why="couldn't stop the engine: $stop_err"
     return 1
   }
   while ((SECONDS < end)); do

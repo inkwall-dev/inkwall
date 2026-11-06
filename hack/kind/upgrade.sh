@@ -29,7 +29,12 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 CLUSTER=${UPGRADE_CLUSTER:-inkwall-upgrade}
-FROM_VERSION=${FROM_VERSION:-0.3.0} # the last release
+# The release it upgrades from: the latest, worked out from the tags (on a
+# release-X.Y branch, the latest up to X.Y). UPGRADE_BRANCH is the branch
+# under test (CI's checkout is detached); FROM_VERSION overrides it all.
+if [[ -z ${FROM_VERSION:-} ]]; then
+  FROM_VERSION=$(go run ./hack/releases -branch "${UPGRADE_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}")
+fi
 FROM_CHART=oci://ghcr.io/inkwall-dev/charts/inkwall
 CHART=${CHART:-deploy/helm/inkwall}
 OPERATOR_IMAGE=${OPERATOR_IMAGE:-inkwall-operator:dev}

@@ -931,14 +931,40 @@ Bodies never leave the engine. Events carry only a redacted snippet of at most 6
 listed in `events.redact` (default `Authorization`, `Cookie`, `Set-Cookie`) and query strings are
 dropped. This is enforced before anything leaves the cluster.
 
-**Built** in the engine (`pkg/events`), with a fixed list: `Authorization`, `Cookie`,
-`Set-Cookie`, `Proxy-Authorization`, and the cookie variables. A configurable `events.redact` is
-not built yet.
+**Built** in the engine (`pkg/events`, #355). A match leaves no snippet when it is on:
+
+- a cookie (`REQUEST_COOKIES`, `REQUEST_COOKIES_NAMES`, `RESPONSE_COOKIES`), the response body,
+  or the `Authorization`, `Cookie`, `Set-Cookie` or `Proxy-Authorization` header;
+- an argument (`ARGS`, `ARGS_GET`, `ARGS_POST`, `FILES`, `MULTIPART_PART_HEADERS`) or a header
+  whose name looks like a credential (`events.Sensitive`): lower-cased and without `-`, `_` and
+  `.`, it contains `pass`, `pwd`, `secret`, `token`, `apikey`, `auth`, `session`, `sessid`,
+  `jwt`, `bearer`, `credential`, `privatekey`, `card`, `ccnum`, `cvv` or `cvc`, or it has `ssn`
+  between non-letters. It errs on the side of redacting (`author` matches): a missing snippet
+  costs a little tuning context, a leaked password can't be taken back. It is substring search,
+  not a regular expression: an alternation with case folding cost about 1 ms per 4 KiB name in
+  Go's `regexp`, on every match of every event; this is linear and about 40 times cheaper;
+- a raw query string, URI, request line or body (`QUERY_STRING`, `REQUEST_URI`,
+  `REQUEST_URI_RAW`, `REQUEST_LINE`, `REQUEST_BODY`, `FULL_REQUEST`) whose snippet contains such
+  a name. A value comes after its name, so a snippet that shows part of a value holds its whole
+  name: checking the 64-byte snippet is enough, and bounded however large the body;
+- what `InkwallConfig.spec.events.redact` adds: `headers` (exact names, any case), `arguments`
+  (parts of argument names, any case, also checked against raw query strings and bodies) and
+  `snippets: false` (no snippets at all).
+
+`events.redact` travels in the bundle (`Bundle.events`, an `EventsConfig`), so every engine
+applies the same settings with the policy it enforces, and a change reaches them within seconds.
+The defaults leave `Bundle.events` unset, so bundles keep their content hash. Argument patterns
+are substrings, not regular expressions: they can't fail to compile on an engine or cost
+backtracking per match, and the CRD validates them like exclusion arguments. Redaction is only
+in the engine: the operator passes events on as they come. An engine without an operator records
+no events, so it has no redaction settings; its log lines never carry snippets.
 
 ### 8.4 Multi-tenancy
 
 One engine per ingress pod serves all of that pod's policies. Rule sets shared between policies
-compile once. The enrollment certificate ([§7.5](#75-cluster-enrollment-managed--gitops-mode))
+compile once. A policy's CRS paranoia level, anomaly threshold, body limits and exclusions don't
+make a rule set of their own: the engine applies them to each transaction
+([0004 §8](0004-operator.md#8-scale-targets-v1)). The enrollment certificate ([§7.5](#75-cluster-enrollment-managed--gitops-mode))
 binds a cluster to its tenant in the control plane.
 
 ### 8.5 Observability
@@ -1084,23 +1110,37 @@ One shared request corpus drives every level.
 | Upgrade | kind | N-1 → N with no dropped requests | release |
 | Soak / chaos | kind + k6 | 24 h stability; engine kill → the proxy fails open | weekly |
 
-**Built (fuzz):** a Go fuzz target for every parser of untrusted input. Each checks a property, not
-only that nothing panics:
+**Built (fuzz):** a Go fuzz target for every parser of untrusted input, 24 in all, each listed in
+`.github/workflows/fuzz.yaml`. Each checks a property, not only that nothing panics:
 
 - the adapters:
-  - `FuzzForwardAuth`: only the method and URI the proxy forwarded are inspected, without its
-    `X-Forwarded-*` headers;
-  - `FuzzCheck`;
-  - `FuzzProxy`: a request is refused with 400, or inspected in origin form with a valid Host, and
-    what reaches the upstream was inspected, with the same path, query, Host and body;
-- the request target and request ID checks the adapters share;
-- client IP resolution from `X-Forwarded-For`;
-- bundle key files;
+  - forward-auth (`FuzzForwardAuth`): only the method and URI the proxy forwarded are inspected,
+    without its `X-Forwarded-*` headers;
+  - the check API (`FuzzCheck` in `httpcheck`): exactly the request a `CheckRequest` describes is
+    inspected, and answered in the same encoding;
+  - the reverse proxy (`FuzzProxy`): a request is refused with 400, or inspected in origin form
+    with a valid Host, and what reaches the upstream was inspected, with the same path, query,
+    Host and body;
+  - ext_proc (`FuzzExtProc`, `FuzzExtProcResponse`): a request, and a response, are inspected
+    exactly once, at most the body limit of the body, whatever Envoy sends or leaves out, and a
+    denial carries header values Envoy accepts;
+  - SPOE (`FuzzSPOE`, `FuzzVarint`): a request the agent accepts is one it can inspect, its body
+    counted complete only when it is all there;
+- the request target, request ID and gRPC denial checks the adapters share (`FuzzURIPath`,
+  `FuzzRequestID`, `FuzzGRPCDenial`);
+- the HAProxy probe (`FuzzCheck` in `haproxyprobe`): only a probe made with the key is answered;
+- gRPC messages (`FuzzMessages`, `FuzzGRPCText`): the rules get valid UTF-8 text from the body,
+  within the limits, and a cut body is never taken as read whole;
+- WebSocket (`FuzzReader`, `FuzzTracker`, `FuzzWebSocketOrigin`): frames keep the protocol's
+  rules and no message keeps more than the limit; an origin that passes is an allowed one;
+- client IP resolution from `X-Forwarded-For` (`FuzzResolve`);
+- bundle key files (`FuzzParse`);
 - bundle signatures (`FuzzApply`, `FuzzSecretBundle`): nothing but the trusted key's own signature
   of the exact bytes reaches compilation;
 - event redaction (`FuzzNew`): valid UTF-8, within the field limits, with no query strings or
   credential snippets;
-- `inkwallctl test`'s URL, raw HTTP and HAR input.
+- `inkwallctl test`'s URL, raw HTTP and HAR input (`FuzzSplitURL`, `FuzzFromRawHTTP`,
+  `FuzzFromHAR`).
 
 Their seed corpora (`testdata/fuzz/`) run in every `make test`. `.github/workflows/fuzz.yaml` runs
 each target for 5 minutes nightly and uploads the failing inputs.

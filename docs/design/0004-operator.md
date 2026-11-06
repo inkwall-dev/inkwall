@@ -114,7 +114,7 @@ the webhook certificates.
 
 | Kind | Scope | Purpose |
 |---|---|---|
-| `InkwallConfig` | Cluster, singleton `default` | Mode, engine, integrations, control plane, `suspend`, signing key rotation |
+| `InkwallConfig` | Cluster, singleton `default` | Mode, engine, integrations, control plane, `suspend`, signing key rotation, event redaction |
 | `WAFPolicy` | Namespace | What to enforce on which routes |
 | `WAFRuleSet` / `ClusterWAFRuleSet` | Namespace / Cluster | Rules: builtin CRS, [SecLang](https://coraza.io/docs/seclang/), [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/) |
 | `WAFIPList` / `ClusterWAFIPList` | Namespace / Cluster | [CIDR](https://www.rfc-editor.org/rfc/rfc4632) lists (planned) |
@@ -125,7 +125,7 @@ compatible; removing one is not.
 
 **Not yet:** IP lists and `spec.ipLists`, `spec.rateLimits`, `spec.response`,
 `BlockHighConfidence`, `body.contentTypes`, the `InspectPrefix` oversize action,
-`InkwallConfig.spec.events`, `WAFPolicyDefault`.
+`WAFPolicyDefault`.
 
 ### 3.1 Validation
 
@@ -913,10 +913,11 @@ wiring, `inkwall_operator_wired_targets{integration}` and
 `inkwall_operator_wiring_failures{integration}` (targets that are `WiringFailed`).
 `inkwall_operator_request_stats_dropped_total{reason}` counts the policies' request counts a
 replica drops ([§4.9](#49-upstream-sync-leader-only)): `not_in_bundle`, `latency_buckets` (the
-latency only) and `evicted`.
+latency only) and `evicted`. Reconcile duration is controller-runtime's own
+`controller_runtime_reconcile_time_seconds{controller}`, on the same endpoint.
 
 **Not yet:** an `integration` label on the engine counts (engines aren't matched to proxies yet),
-reconcile duration, policy condition counts.
+policy condition counts.
 
 ### 4.9 Upstream sync (leader only)
 
@@ -1383,8 +1384,15 @@ Against the targets:
 **Engine memory per policy.** A compiled Coraza WAF with the CRS keeps
 about 2.1 MiB of heap, and takes 10–15 ms to compile.
 
-- Policies with the same rule sets and CRS settings share one compiled WAF, whatever their
-  exclusions (#42).
+- Policies with the same rule sets share one compiled WAF, whatever their exclusions (#42), CRS
+  paranoia level, anomaly threshold and body limits (#353).
+- The paranoia level and threshold are set on each transaction as `tx` variables, before phase 1.
+  The CRS's initialization (`REQUEST-901`) sets only the ones still unset, and SecLang that sets
+  them runs later, so a user's `tx.blocking_paranoia_level` still wins. `make crs-test` runs the
+  CRS suite at each level set this way.
+- Coraza's body limits are compiled in, so every policy gets the engine's largest
+  (`policy.MaxBodyBytes`, 10 MiB, or `--max-body-bytes` if larger). The pipeline gives the rules no
+  more of a body than the policy's own limit, so this changes nothing a policy inspects.
 - Exclusions are applied to each request, not compiled into the rule set. They use the
   transaction-level `ctl:ruleRemoveById` / `ruleRemoveTargetById`, with paths decided on
   `REQUEST_FILENAME` as before.
@@ -1396,6 +1404,12 @@ about 2.1 MiB of heap, and takes 10–15 ms to compile.
 | 1 | 10 ms | 2.1 MiB | 10 ms | 2.1 MiB |
 | 100 | 0.89 s | 205 MiB | 11 ms | 2.2 MiB |
 | 1,000 | 9.3 s | 2.0 GiB | 15 ms | 2.9 MiB |
+
+The same benchmark's `crs-spread=1000` case is 1,000 CRS policies over 4 paranoia levels, 3
+thresholds, 10 body limits and 10 response limits. Before #353 it compiled 300 rule sets: 2.9 s and
+619 MiB. After, it compiles one: 31 ms and 2.7 MiB. In a fresh process, which also pays for
+Coraza's shared caches, 1,000 policies over 4 levels and 10 `body.maxBytes` went from 40 rule sets,
+0.50 s and 100 MiB to one, 0.08 s and 20 MiB.
 
 **One exception: rule sets that negate `ARGS` targets.** If a rule set's own SecLang negates an
 `ARGS` target (`!ARGS:q`), it takes no argument exclusion per request. Coraza 3.8.1 adds a

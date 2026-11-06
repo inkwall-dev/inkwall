@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	enginev1 "github.com/inkwall-dev/inkwall/api/engine/v1"
 	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
@@ -231,4 +232,64 @@ func TestNilRecorder(t *testing.T) {
 	if r.Buffer.Len() != 1 {
 		t.Errorf("recorded %d, want 1", r.Buffer.Len())
 	}
+}
+
+// TestNewRedactsSensitiveArguments: by default, a match on an argument or
+// header whose name looks like a credential leaves no snippet (#355).
+func TestNewRedactsSensitiveArguments(t *testing.T) {
+	req := &request.Request{Method: "POST", Host: "shop.example"}
+	v := pipeline.Verdict{Action: pipeline.ActionLog, Reason: pipeline.ReasonRule}
+	for _, variable := range []string{
+		"ARGS:password", "ARGS_POST:token", "ARGS_GET:api_key", "ARGS:apiKey", "ARGS:new_passwd",
+		"ARGS:client_secret", "ARGS:auth", "ARGS:sessionid", "ARGS:jwt", "ARGS:credit_card",
+		"ARGS:card_number", "ARGS:SSN", "ARGS:user_ssn", "ARGS_POST:json.user.Password",
+		"REQUEST_HEADERS:X-Api-Key", "REQUEST_HEADERS:x-auth-token",
+	} {
+		v.Matches = []rules.Match{{RuleID: 942100, Variable: variable, Value: "1' OR '1'='1"}}
+		if got := New(Source{}, req, "/", v, time.Now()).GetMatches()[0].GetSnippet(); got != "" {
+			t.Errorf("%s: snippet %q, want none", variable, got)
+		}
+	}
+	for _, variable := range []string{"ARGS:q", "ARGS_POST:comment", "ARGS:classname", "REQUEST_HEADERS:User-Agent", "ARGS_NAMES:password"} {
+		v.Matches = []rules.Match{{RuleID: 942100, Variable: variable, Value: "1' OR '1'='1"}}
+		if got := New(Source{}, req, "/", v, time.Now()).GetMatches()[0].GetSnippet(); got != "1' OR '1'='1" {
+			t.Errorf("%s: snippet %q, want it kept", variable, got)
+		}
+	}
+	// A whole query string or body names the argument in the value.
+	v.Matches = []rules.Match{{RuleID: 942100, Variable: "QUERY_STRING", Value: "user=a&password=1' OR '1'='1"}}
+	if got := New(Source{}, req, "/", v, time.Now()).GetMatches()[0].GetSnippet(); got != "" {
+		t.Errorf("QUERY_STRING with a password: snippet %q, want none", got)
+	}
+}
+
+// TestNewRedactsConfigured: events.redact adds headers and argument
+// patterns, and snippets: false sends none.
+func TestNewRedactsConfigured(t *testing.T) {
+	req := &request.Request{Method: "GET", Host: "shop.example"}
+	v := pipeline.Verdict{Action: pipeline.ActionLog, Reason: pipeline.ReasonRule}
+	check := func(r *Redaction, variable string, want bool) {
+		t.Helper()
+		v.Matches = []rules.Match{{RuleID: 942100, Variable: variable, Value: "<script>"}}
+		got := New(Source{Redaction: func() *Redaction { return r }}, req, "/", v, time.Now()).GetMatches()[0].GetSnippet()
+		if want && got != "<script>" || !want && got != "" {
+			t.Errorf("%s: snippet %q, kept: want %t", variable, got, want)
+		}
+	}
+	r := NewRedaction(&bundlev1.EventsConfig{RedactHeaders: []string{"X-Tenant"}, RedactArguments: []string{"Email"}})
+	check(r, "REQUEST_HEADERS:x-tenant", false)
+	check(r, "RESPONSE_HEADERS:X-Tenant", false)
+	check(r, "ARGS:user_email", false)
+	check(r, "ARGS_POST:EMAIL", false)
+	check(r, "ARGS:password", false) // the defaults still apply
+	check(r, "ARGS:q", true)
+	check(r, "REQUEST_HEADERS:X-Tenant-Name", true)
+
+	r = NewRedaction(&bundlev1.EventsConfig{NoSnippets: true})
+	check(r, "ARGS:q", false)
+	check(r, "REQUEST_HEADERS:User-Agent", false)
+
+	check(NewRedaction(nil), "ARGS:q", true)
+	check(nil, "ARGS:q", true)
+	check(nil, "ARGS:password", false)
 }
