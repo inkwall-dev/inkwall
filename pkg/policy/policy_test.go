@@ -271,6 +271,52 @@ func TestOneRuleSetForEveryCRSSetting(t *testing.T) {
 	}
 }
 
+// TestCRSSettings: a binding's CRS settings apply to its policy only, and
+// share the rule set.
+func TestCRSSettings(t *testing.T) {
+	crs := func(s *bundlev1.CRSSettings) []*bundlev1.RuleSetBinding {
+		return []*bundlev1.RuleSetBinding{{RuleSetId: "ClusterWAFRuleSet/crs", ParanoiaLevel: 1, Crs: s}}
+	}
+	b := &bundlev1.Bundle{Version: 1, RuleSets: testBundle().RuleSets, Policies: []*bundlev1.Policy{
+		{Id: "api/rest", Mode: bundlev1.Mode_MODE_BLOCK, Timeout: testTimeout,
+			Routes:   []*bundlev1.RouteMatch{rm("api.example.com", false, "/")},
+			RuleSets: crs(&bundlev1.CRSSettings{AllowedMethods: []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}, DetectionParanoiaLevel: 2})},
+		{Id: "web/site", Mode: bundlev1.Mode_MODE_BLOCK, Timeout: testTimeout,
+			Routes:   []*bundlev1.RouteMatch{rm("web.example.com", false, "/")},
+			RuleSets: crs(nil)},
+	}}
+	ev := NewEvaluators()
+	set, err := Compile(b, Options{Evaluators: ev})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Len() != 1 {
+		t.Errorf("%d rule sets, want 1", ev.Len())
+	}
+	for _, tc := range []struct {
+		host, method, uri string
+		action            pipeline.Action
+	}{
+		{"api.example.com", "PUT", "/items/1", pipeline.ActionAllow},
+		{"api.example.com", "DELETE", "/items/1", pipeline.ActionAllow},
+		{"api.example.com", "TRACE", "/items/1", pipeline.ActionDeny},
+		{"web.example.com", "PUT", "/items/1", pipeline.ActionDeny},
+		// 942480 is a paranoia level 2 rule: logged on api, unseen on web.
+		{"api.example.com", "GET", "/?q=@@version", pipeline.ActionLog},
+		{"web.example.com", "GET", "/?q=@@version", pipeline.ActionAllow},
+	} {
+		r := req(tc.host, tc.uri)
+		r.Method = tc.method
+		if v := set.Check(context.Background(), r); v.Action != tc.action {
+			t.Errorf("%s %s%s: %s/%s, want %s", tc.method, tc.host, tc.uri, v.Action, v.Reason, tc.action)
+		}
+	}
+	b.Policies[0].RuleSets[0].Crs.AllowedMethods = []string{"GET POST"}
+	if _, err := Compile(b, Options{}); err == nil || !strings.Contains(err.Error(), "api/rest") {
+		t.Errorf("invalid allowed method: %v, want an error naming the policy", err)
+	}
+}
+
 func TestEvaluatorsSharedAcrossExclusions(t *testing.T) {
 	custom := []*bundlev1.RuleSetBinding{{RuleSetId: "WAFRuleSet/shop/custom"}}
 	b := &bundlev1.Bundle{

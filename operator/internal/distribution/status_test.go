@@ -18,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -199,6 +200,34 @@ func TestEnforcedOutdatedEngine(t *testing.T) {
 		conds, _ := enforcedConditions(p, 3, false, engines, 0)
 		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
 		if c == nil || c.Reason != tc.reason || tc.reason == ReasonEnginesOutdated && !strings.Contains(c.Message, "spec.responses") {
+			t.Errorf("%s: Enforced %+v, want %s", tc.name, c, tc.reason)
+		}
+	}
+
+	// CRS settings (#352): an engine before 0.5.0 ignores them.
+	crs := []wafv1alpha1.RuleSetBinding{{Ref: wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: "crs"},
+		CRS: &wafv1alpha1.CRSSettings{AllowedMethods: []wafv1alpha1.HTTPMethodToken{"GET", "PUT"}}}}
+	for _, tc := range []struct {
+		name     string
+		ruleSets []wafv1alpha1.RuleSetBinding
+		versions []string
+		reason   string
+	}{
+		{"crs, 0.4.1 engine", crs, []string{"0.5.0", "0.4.1"}, ReasonEnginesOutdated},
+		{"crs, new engines", crs, []string{"0.5.0", "v0.5.0-rc.1"}, ReasonEnforced},
+		{"empty crs", []wafv1alpha1.RuleSetBinding{{CRS: &wafv1alpha1.CRSSettings{}}}, []string{"0.4.1"}, ReasonEnforced},
+		{"no crs", []wafv1alpha1.RuleSetBinding{{ParanoiaLevel: ptr.To(int32(2))}}, []string{"0.4.1"}, ReasonEnforced},
+	} {
+		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
+		p.Spec.RuleSets = tc.ruleSets
+		p.Status.BundleVersion = 3
+		var engines []Engine
+		for i, v := range tc.versions {
+			engines = append(engines, Engine{ID: fmt.Sprintf("e%d", i), PodNamespace: "edge", PodName: fmt.Sprintf("envoy-%d", i), EngineVersion: v, Applied: 3})
+		}
+		conds, _ := enforcedConditions(p, 3, false, engines, 0)
+		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
+		if c == nil || c.Reason != tc.reason || tc.reason == ReasonEnginesOutdated && (!strings.Contains(c.Message, "spec.ruleSets[0].crs") || !strings.Contains(c.Message, "0.5.0 or later")) {
 			t.Errorf("%s: Enforced %+v, want %s", tc.name, c, tc.reason)
 		}
 	}

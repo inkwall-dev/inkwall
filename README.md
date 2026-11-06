@@ -146,7 +146,25 @@ Traefik's ForwardAuth never sees responses, so on a Traefik route such a policy 
 Start in `Detect` mode, tune [false positives](https://coreruleset.org/docs/concepts/false_positives_tuning/) on the policy (`exclusions`, `skip` paths,
 [`ruleSets[].paranoiaLevel`](https://coreruleset.org/docs/concepts/paranoia_levels/)), then switch to `Block`. Extra rules come from `WAFRuleSet` and
 `ClusterWAFRuleSet` objects: built-in, [SecLang](https://coraza.io/docs/seclang/) or a [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/).
-[`operator/config/samples`](operator/config/samples) has one object of each kind. To test
+[`operator/config/samples`](operator/config/samples) has one object of each kind.
+
+**CRS settings.** At paranoia level 1 the CRS denies `PUT`, `PATCH` and `DELETE`, and request
+content types outside its list. Set the CRS's own settings on the CRS rule set's binding (engines
+0.5.0 or later):
+
+```yaml
+  ruleSets:
+  - ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}
+    paranoiaLevel: 1
+    crs:
+      allowedMethods: [GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS]   # replaces the CRS's list
+      allowedRequestContentTypes: [application/json, application/x-www-form-urlencoded, multipart/form-data]
+      detectionParanoiaLevel: 2      # level 2 rules log (action log) but never block
+      outboundAnomalyThreshold: 4    # with responses.inspect: the score that blocks a response
+```
+
+Both lists replace the CRS's defaults: list every method and media type (`type/subtype`, without
+parameters) the application takes. To test
 policies before they reach the cluster, see [testing policies offline](docs/testing-policies.md).
 Coming from ingress-nginx with ModSecurity? `inkwallctl migrate ingress-nginx` converts its
 annotations into policies: see [migrating from ingress-nginx](docs/migrating-from-ingress-nginx.md).
