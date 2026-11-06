@@ -109,10 +109,19 @@ func IsEvent(v pipeline.Verdict) bool {
 }
 
 // LogEvent writes one security event for req, and records it for the
-// operator when rec is set.
+// operator when rec is set. Lines are rate-limited per policy and rule by
+// rec's limiter; the events for the operator are not. The line says where
+// each rule matched (the variable's name), never what it matched.
 func LogEvent(ctx context.Context, logger *slog.Logger, rec *events.Recorder, req *request.Request, path string, v pipeline.Verdict) {
 	rec.Record(req, path, v)
-	logger.LogAttrs(ctx, slog.LevelWarn, "security event",
+	if !logger.Enabled(ctx, slog.LevelWarn) {
+		return
+	}
+	ok, suppressed := rec.AllowLog(v)
+	if !ok {
+		return
+	}
+	attrs := []slog.Attr{
 		slog.String("policy", v.Policy),
 		slog.String("phase", phase(v)),
 		slog.String("action", v.Action.String()),
@@ -120,6 +129,7 @@ func LogEvent(ctx context.Context, logger *slog.Logger, rec *events.Recorder, re
 		slog.Int("status", v.Status),
 		slog.Int("interrupting_rule_id", v.InterruptingRuleID),
 		slog.Any("rule_ids", v.RuleIDs),
+		slog.Any("matches", events.LogMatches(v)),
 		slog.Int("anomaly_score", v.AnomalyScore),
 		slog.String("client_ip", addrString(req.ClientIP)),
 		slog.String("method", req.Method),
@@ -127,7 +137,12 @@ func LogEvent(ctx context.Context, logger *slog.Logger, rec *events.Recorder, re
 		slog.String("path", path),
 		slog.String("request_id", req.ID),
 		slog.Duration("inspection_time", v.Duration),
-	)
+	}
+	if suppressed > 0 {
+		// Lines of this policy and rule left out since the last one.
+		attrs = append(attrs, slog.Uint64("suppressed", suppressed))
+	}
+	logger.LogAttrs(ctx, slog.LevelWarn, "security event", attrs...)
 }
 
 // phase names what a verdict is about: the request or its response.

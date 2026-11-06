@@ -98,7 +98,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg, err := parseFlags(args[0], args[1:], stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -107,6 +106,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
 	}
+	logger := newLogger(os.Stdout, cfg.logLevel)
 	// The engine buffers request bodies: without a soft limit the heap
 	// goal is twice the live heap, and a burst of large bodies reaches the
 	// container's memory limit before the GC runs.
@@ -132,8 +132,16 @@ const (
 	cmdSPOE        = "spoe"
 )
 
+// newLogger returns the engine's JSON logger, writing lines of level and
+// above to w.
+func newLogger(w io.Writer, level slog.Level) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level}))
+}
+
 type engineConfig struct {
 	command       string
+	logLevel      slog.Level
+	eventLogRate  int
 	listen        string
 	adminListen   string
 	readTimeout   time.Duration
@@ -243,6 +251,8 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	}
 	skipPaths := fs.String("skip-paths", "", "comma-separated paths never inspected, exact (/healthz) or prefix (/static/*); ambiguous paths are always inspected")
 	disableGroups := fs.String("disable-rule-groups", "", "comma-separated CRS attack families to remove when the application cannot be vulnerable to them: "+strings.Join(coraza.RuleGroupNames(), ", "))
+	logLevel := fs.String("log-level", "info", "log level: debug, info, warn or error (security events are logged at warn)")
+	eventLogRate := fs.Int("event-log-rate", 10, "security event log lines per second for each policy and rule, in bursts of as many; the rest are counted in inkwall_security_event_logs_suppressed_total, and still go to the operator (0 = no limit)")
 	pprof := fs.Bool("pprof", false, "serve /debug/pprof on the admin listener (exposes internals: keep that listener private)")
 	skipBodyPaths := fs.String("skip-body-paths", "", "comma-separated paths whose body is not inspected (headers and URI still are), same syntax as --skip-paths")
 	wsOrigins := fs.String("websocket-origins", "", "comma-separated origins a WebSocket handshake may come from, scheme://host[:port] (http or https; the host may start with *. for subdomains); others are denied with 403 (empty: any origin)")
@@ -261,6 +271,13 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	bootstrapTimeout := fs.Duration("bootstrap-timeout", 10*time.Second, "bundle mode: how long the engine stays unready waiting for its first bundle, so the proxy doesn't take traffic before it (0: ready at once)")
 	if err := fs.Parse(args); err != nil {
 		return engineConfig{}, err
+	}
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(*logLevel)); err != nil || !slices.Contains([]string{"debug", "info", "warn", "error"}, strings.ToLower(*logLevel)) {
+		return engineConfig{}, fmt.Errorf("--log-level: %q, want debug, info, warn or error", *logLevel)
+	}
+	if *eventLogRate < 0 {
+		return engineConfig{}, fmt.Errorf("--event-log-rate: %d, want 0 or more", *eventLogRate)
 	}
 	if *bootstrap != "allow" && *bootstrap != "deny" {
 		return engineConfig{}, fmt.Errorf("--bootstrap: %q, want allow or deny", *bootstrap)
@@ -287,6 +304,8 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 
 	cfg := engineConfig{
 		command:        command,
+		logLevel:       level,
+		eventLogRate:   *eventLogRate,
 		listen:         *listen,
 		adminListen:    *adminListen,
 		readTimeout:    *readTimeout,
@@ -466,9 +485,11 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 	metrics := telemetry.NewMetrics(adapter)
 
 	var (
-		p   pipeline.Inspector
-		ag  *agent.Agent
-		rec *events.Recorder // nil without an operator: events are only logged
+		p  pipeline.Inspector
+		ag *agent.Agent
+		// Without an operator, events are only logged: the recorder only
+		// rate-limits their lines.
+		rec = &events.Recorder{}
 	)
 	if cfg.operator != "" {
 		ag, p, rec, err = bundleMode(cfg, metrics, logger)
@@ -478,6 +499,8 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	rec.Log = events.NewLogLimiter(cfg.eventLogRate)
+	metrics.Register(rec.Log.Collectors()...)
 	// In bundle mode each policy sets its body limit, up to the CRD's
 	// maximum; the adapters must accept bodies that large.
 	maxBody := cfg.maxBodyBytes

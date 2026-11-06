@@ -5,11 +5,14 @@ package injection
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 )
 
 func traefikPod() *corev1.Pod {
@@ -131,6 +134,16 @@ func TestInject(t *testing.T) {
 	Inject(deny, s)
 	if !slices.Contains(deny.Spec.InitContainers[0].Args, "--bootstrap=deny") {
 		t.Error("bootstrap deny not passed")
+	}
+
+	// The log level, only when set: pods injected before keep their spec.
+	if slices.ContainsFunc(pod.Spec.InitContainers[0].Args, func(a string) bool { return strings.HasPrefix(a, "--log-level") }) {
+		t.Error("--log-level passed without a log level")
+	}
+	quiet := traefikPod()
+	Inject(quiet, sidecar.Configured(wafv1alpha1.EngineSpec{LogLevel: wafv1alpha1.LogLevelWarn}))
+	if !slices.Contains(quiet.Spec.InitContainers[0].Args, "--log-level=warn") {
+		t.Errorf("log level Warn: args %v", quiet.Spec.InitContainers[0].Args)
 	}
 
 	// Injecting again changes nothing.
