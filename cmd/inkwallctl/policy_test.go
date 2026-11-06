@@ -168,6 +168,39 @@ func TestTestPolicy(t *testing.T) {
 	}
 }
 
+// TestTestPolicyCRSSettings: the CRS settings of a policy's CRS binding
+// apply offline as in the cluster (#352).
+func TestTestPolicyCRSSettings(t *testing.T) {
+	policy := writeFile(t, "wafpolicy.yaml", `apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata: {name: api, namespace: shop}
+spec:
+  targetRefs: [{kind: Ingress, name: api}]
+  mode: Block
+  ruleSets:
+  - ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}
+    crs:
+      allowedMethods: [GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS]
+      detectionParanoiaLevel: 2
+`)
+	requests := writeFile(t, "requests.http", "PUT /api/items/1 HTTP/1.1\r\nHost: shop.example.com\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\n\r\n"+
+		"TRACE /api/items/1 HTTP/1.1\r\nHost: shop.example.com\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\n\r\n"+
+		"GET /api/items?q=@@version HTTP/1.1\r\nHost: shop.example.com\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\n\r\n")
+	code, out, errOut := runCLI(t, "test", "--request", requests, "--policy", policy, "--rule-set", sampleRuleSets, "--configmap", sampleConfigMaps, "--ingress", sampleIngresses)
+	if code != 0 || errOut != "" {
+		t.Fatalf("exit %d, stderr %q", code, errOut)
+	}
+	for _, want := range []string{
+		"allow      PUT /api/items/1  policy=shop/api",
+		"deny  403  TRACE /api/items/1  policy=shop/api  reason=rule  rules=911100",
+		"log        GET /api/items?q=@@version  policy=shop/api  rules=942480",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+}
+
 // TestTestPolicyIngressRoute routes requests by Ingresses and Traefik
 // IngressRoutes together.
 func TestTestPolicyIngressRoute(t *testing.T) {

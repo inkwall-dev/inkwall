@@ -282,11 +282,37 @@ Unix socket.** There is no hop to another node, no [Service](https://kubernetes.
 
 | Layer | What | State |
 |---|---|---|
-| Micro | `make bench-compare` and the CI job `bench`. Packages whose test binary is unchanged are skipped; the rest run base and head interleaved, 8 times. `hack/benchgate` flags a significant change (p < 0.05) of more than 5% in `sec/op`, `B/op` or `allocs/op`. The gate fails only if a re-run of the flagged benchmarks shows the change again | Built |
+| Micro | `make bench-compare` and the CI job `bench`. Packages whose test binary is unchanged are skipped; the rest run base and head interleaved, 8 times. `hack/benchgate` flags a significant change (p < 0.05) of more than 5% in `sec/op`, `B/op` or `allocs/op`, or 25% in the `sec/op` of a benchmark under 1 µs/op ([below](#layout-shifts)). The gate fails only if a re-run of the flagged benchmarks shows the change again | Built |
 | Engine | `inkwallctl bench`: a fixed corpus (`cmd/inkwallctl/corpus.go`), closed-loop or at a fixed `--rate`, latency measured from the scheduled time. Any wrong verdict, timeout or overload fails the run | Built |
 | End-to-end on [kind](https://kind.sigs.k8s.io/) | [k6](https://grafana.com/docs/k6/latest/) against each proxy, with and without Inkwall; the difference is what [§3](#3-latency-budgets) budgets | Not yet |
 | Profiling | `--pprof` on the admin listener; [flame graphs](https://www.brendangregg.com/flamegraphs.html) in CI; [Pyroscope](https://grafana.com/docs/pyroscope/latest/) | Endpoints built |
 | Soak and chaos | A 24 h soak; kill the engine under load and check the failure mode | Not yet |
+
+### Layout shifts
+
+A benchmark of a few hundred nanoseconds moves by up to ~15% when the same machine code sits
+elsewhere in the binary: code added anywhere in a package (or a package it imports) shifts the
+functions after it, which changes their alignment and how they alias in the CPU's branch
+predictor and caches. The gate failed this way on `pkg/policy`'s `Lookup` (~440 ns) twice (#413:
++8%, #428: +14%) for pull requests that changed nothing it runs. So time under 1 µs/op is gated at
+25% (`-fast-threshold`, `-fast-below`, `FAST_THRESHOLD` in `hack/bench/compare.sh`); a real
+regression there usually shows in `B/op` or `allocs/op` too, which keep 5%, or is far larger. A
+benchmark of 1 µs or more keeps 5%.
+
+To tell a layout shift from a real regression, compare the machine code of the benchmark's
+functions in the two test binaries, addresses masked:
+
+```sh
+go test -c -o head.test ./pkg/policy                  # and base.test from the base checkout
+for b in base head; do
+  go tool objdump -s 'policy\.\(\*matcher\)\.lookup$' $b.test |
+    awk 'NR > 1 {$1 = $2 = ""; print}' | sed -E 's/0x[0-9a-f]{4,}/ADDR/g; s/[0-9a-f]{8,}/HEX/g' >$b.asm
+done
+diff base.asm head.asm                                # nothing: the same code, moved
+```
+
+Do the same for the functions it calls. No difference means the change is layout; any
+difference is worth reading.
 
 ## 9. Open questions
 

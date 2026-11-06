@@ -192,6 +192,7 @@ func Compile(b *bundlev1.Bundle, o Options) (*Set, error) {
 func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o Options) (*Policy, [sha256.Size]byte, error) {
 	var key [sha256.Size]byte
 	cfg := coraza.Config{MaxArgs: o.MaxArgs, OnMatch: o.OnMatch}
+	var crs coraza.CRSSettings
 
 	// Rule sets: the built-in CRS (with its paranoia level and threshold)
 	// and SecLang loaded after it, in order. No rule sets: the CRS with its
@@ -210,8 +211,14 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 					return nil, key, fmt.Errorf("rule set %s: unknown built-in rule set %s", rs.GetId(), src.Builtin)
 				}
 				cfg.DisableCRS = false
-				cfg.ParanoiaLevel = int(binding.GetParanoiaLevel())
-				cfg.InboundAnomalyThreshold = int(binding.GetInboundAnomalyThreshold())
+				crs = coraza.CRSSettings{
+					ParanoiaLevel:              int(binding.GetParanoiaLevel()),
+					InboundAnomalyThreshold:    int(binding.GetInboundAnomalyThreshold()),
+					AllowedMethods:             binding.GetCrs().GetAllowedMethods(),
+					AllowedRequestContentTypes: binding.GetCrs().GetAllowedRequestContentTypes(),
+					DetectionParanoiaLevel:     int(binding.GetCrs().GetDetectionParanoiaLevel()),
+					OutboundAnomalyThreshold:   int(binding.GetCrs().GetOutboundAnomalyThreshold()),
+				}
 			case *bundlev1.RuleSet_Seclang:
 				directives = append(directives, src.Seclang)
 			default:
@@ -253,10 +260,9 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 	// Coraza's body limits are compiled in, so every policy gets the largest
 	// any may have, for one rule set: the pipeline gives the rules no more
 	// of a body than the policy's own limit (and none of a truncated
-	// request body). Same for the paranoia level and the threshold, which
-	// are set on each transaction.
-	// bodyLimit is MaxBodyBytes at most, or the engine's default
-	// (o.BodyLimit), so the largest is the same for every policy.
+	// request body). Same for the CRS settings, which are set on each
+	// transaction. bodyLimit is MaxBodyBytes at most, or the engine's
+	// default (o.BodyLimit), so the largest is the same for every policy.
 	engineLimit := int(max(MaxBodyBytes, o.BodyLimit))
 	cfg.BodyLimit = engineLimit
 	cfg.ResponseBodyLimit = engineLimit
@@ -274,7 +280,7 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 	if err != nil {
 		return nil, key, err
 	}
-	eval, err := shared.WithCRS(cfg.CRS())
+	eval, err := shared.WithCRS(crs)
 	if err != nil {
 		return nil, key, err
 	}
