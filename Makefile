@@ -51,9 +51,10 @@ BASE            ?= origin/main
 # (CLAUDE.md is exempt by default). CODE_OF_CONDUCT.md needs no Contents:
 # it is the Contributor Covenant 2.1, kept verbatim. The install and verify
 # commands of the READMEs and CONTRIBUTING.md write <version>, never a
-# release, so they don't go stale when the next one ships.
+# release, so they don't go stale when the next one ships. docs/monitoring.md
+# names every metric the code registers.
 DOCS_CHECK_STRICT ?= -contents-min-lines=80 -require-index -contents-exempt=CODE_OF_CONDUCT.md \
-	-unpinned=README.md,deploy/helm/inkwall/README.md,CONTRIBUTING.md
+	-unpinned=README.md,deploy/helm/inkwall/README.md,CONTRIBUTING.md -metrics-doc=docs/monitoring.md
 DOCS_CHECK        ?= $(GO) run ./hack/docscheck $(DOCS_CHECK_STRICT)
 
 # scale-test: sizes as <policies>x<engines>, one operator each; "full" is 0004 §8's matrix.
@@ -146,6 +147,15 @@ generate: ## Lint the protobuf APIs (api/), regenerate their Go code, and regene
 	cp operator/config/rbac/role.yaml $(CHART)/files/rbac/
 	cp operator/config/webhook/manifests.yaml $(CHART)/files/webhook/
 
+# promtool, for the alerts' unit tests: the Prometheus image's, unless
+# PROMTOOL names one installed.
+PROMTOOL ?= docker run --rm -v $(CURDIR):/work -w /work --entrypoint promtool quay.io/prometheus/prometheus:v3.5.0
+
+.PHONY: monitoring-test
+monitoring-test: ## Check the chart's alerts and run their unit tests (hack/monitoring/alerts_test.yaml) with promtool
+	$(PROMTOOL) check rules deploy/helm/inkwall/monitoring/alerts.yaml
+	$(PROMTOOL) test rules hack/monitoring/alerts_test.yaml
+
 .PHONY: helm-lint
 helm-lint: ## Lint the Helm chart, render it with each webhook certificate mode, and check its integration roles (hack/helm-test.sh)
 	helm lint --strict $(CHART)
@@ -154,6 +164,9 @@ helm-lint: ## Lint the Helm chart, render it with each webhook certificate mode,
 	helm template inkwall $(CHART) --namespace inkwall-system --set controlPlane.caBundle=ca --set controlPlane.enrollmentToken=t >/dev/null
 	@# As helm upgrade --reuse-values from 0.1.0 renders it: values without controlPlane.
 	helm template inkwall $(CHART) --namespace inkwall-system --set controlPlane=null >/dev/null
+	@# The monitoring kit, every object of it.
+	helm lint --strict $(CHART) --set metrics.forceMonitoringObjects=true --set metrics.serviceMonitor.enabled=true \
+		--set metrics.podMonitor.enabled=true --set metrics.prometheusRule.enabled=true --set metrics.dashboard.enabled=true
 	CHART=$(CHART) hack/helm-test.sh
 	@# What the chart looks up in a cluster, against envtest.
 	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" CHART=$(abspath $(CHART)) $(GO) test -count=1 ./hack/helmcheck

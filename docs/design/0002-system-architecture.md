@@ -1022,8 +1022,16 @@ Target:
   `_operator_events_buffer_errors_total`, `_operator_request_stats_dropped_total{reason}`,
   `_operator_state_engines_left_out`.
 
+- The monitoring kit (#381, [Monitoring](../monitoring.md)): the chart's ServiceMonitor (operator),
+  PodMonitor (engines, by their `inkwall-admin` port in the proxy namespaces), PrometheusRule
+  (alerts with runbooks, unit-tested with `promtool`) and Grafana dashboard, all opt-in. The
+  Prometheus Operator's objects render only when the cluster serves `monitoring.coreos.com/v1`,
+  so enabling them on a cluster without its CRDs doesn't fail the install. Docs check that
+  `docs/monitoring.md` lists every registered metric, and a test that the dashboard and alerts
+  use only registered ones.
+
 **Not yet:** a proxy-side adapter failure metric (see [§7.3](#73-engine-unavailable)),
-rate-limit metrics, tracing, the dashboard and alerts.
+rate-limit metrics, tracing.
 
 ### 8.6 Versioning and compatibility
 

@@ -144,4 +144,42 @@ if out=$(helm template inkwall "$CHART" --namespace inkwall-system --set "inject
   echo "injection.proxyNamespaces={}: want an error, got: $out" >&2
   fail=1
 fi
+
+# The monitoring kit (#381): nothing by default; the Prometheus Operator's
+# objects only when the cluster serves monitoring.coreos.com/v1 (here, as
+# --api-versions tells helm template) or when forced; the dashboard
+# ConfigMap needs no CRD.
+# monitoring <want: kinds, sorted, space-separated> [helm flags...]
+monitoring() {
+  local want=$1 got
+  shift
+  got=$(helm template inkwall "$CHART" --namespace inkwall-system "$@" |
+    awk '/^kind: (ServiceMonitor|PodMonitor|PrometheusRule)$/ {print $2} /^  name: inkwall-operator-(dashboard|metrics)$/ {print $2}' |
+    LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
+  if [[ "$got" != "$want" ]]; then
+    echo "monitoring ($*): [$got], want [$want]" >&2
+    fail=1
+  fi
+}
+all=(--set metrics.serviceMonitor.enabled=true --set metrics.podMonitor.enabled=true --set metrics.prometheusRule.enabled=true --set metrics.dashboard.enabled=true)
+monitoring ""
+monitoring "" --api-versions monitoring.coreos.com/v1
+monitoring "" --set metrics=null
+monitoring "inkwall-operator-dashboard" "${all[@]}"
+monitoring "PodMonitor PrometheusRule ServiceMonitor inkwall-operator-dashboard inkwall-operator-metrics" "${all[@]}" --api-versions monitoring.coreos.com/v1
+monitoring "PodMonitor PrometheusRule ServiceMonitor inkwall-operator-dashboard inkwall-operator-metrics" "${all[@]}" --set metrics.forceMonitoringObjects=true
+monitoring "PodMonitor" --set metrics.podMonitor.enabled=true --api-versions monitoring.coreos.com/v1
+# The engines' PodMonitor covers the proxy namespaces, or every one.
+out=$(helm template inkwall "$CHART" --namespace inkwall-system --set metrics.podMonitor.enabled=true --api-versions monitoring.coreos.com/v1 --set "injection.proxyNamespaces={*}")
+if ! awk '/^kind: PodMonitor$/,0' <<<"$out" | grep -q '^    any: true$'; then
+  echo "PodMonitor with proxyNamespaces {*}: want namespaceSelector any: true" >&2
+  fail=1
+fi
+# The alerts' runbooks are this release's docs.
+out=$(helm template inkwall "$CHART" --namespace inkwall-system --set metrics.prometheusRule.enabled=true --api-versions monitoring.coreos.com/v1)
+version=$(sed -n 's/^appVersion: "\(.*\)"$/\1/p' "$CHART/Chart.yaml")
+if grep -q 'blob/main/' <<<"$out" || ! grep -q "blob/v$version/docs/monitoring.md#inkwallenginedisconnected" <<<"$out"; then
+  echo "PrometheusRule: runbook_url must point at v$version's docs" >&2
+  fail=1
+fi
 exit $fail
