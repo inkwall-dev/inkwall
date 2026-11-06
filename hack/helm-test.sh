@@ -171,7 +171,9 @@ monitoring "PodMonitor PrometheusRule ServiceMonitor inkwall-operator-dashboard 
 monitoring "PodMonitor" --set metrics.podMonitor.enabled=true --api-versions monitoring.coreos.com/v1
 # The engines' PodMonitor covers the proxy namespaces, or every one.
 out=$(helm template inkwall "$CHART" --namespace inkwall-system --set metrics.podMonitor.enabled=true --api-versions monitoring.coreos.com/v1 --set "injection.proxyNamespaces={*}")
-if ! awk '/^kind: PodMonitor$/,0' <<<"$out" | grep -q '^    any: true$'; then
+# Not awk | grep -q: grep stopping early fails awk's write (pipefail).
+podmonitor=$(awk '/^kind: PodMonitor$/,0' <<<"$out")
+if ! grep -q '^    any: true$' <<<"$podmonitor"; then
   echo "PodMonitor with proxyNamespaces {*}: want namespaceSelector any: true" >&2
   fail=1
 fi
