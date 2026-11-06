@@ -155,6 +155,17 @@ func TestInject(t *testing.T) {
 		t.Errorf("policyMetrics: args %v", counted.Spec.InitContainers[0].Args)
 	}
 
+	// The InkwallConfig's client IP settings (#364): loopback stays trusted.
+	lb := traefikPod()
+	one := int32(1)
+	s = sidecar.Configured(wafv1alpha1.EngineSpec{ClientIP: &wafv1alpha1.ClientIPSpec{
+		TrustedProxies: []wafv1alpha1.CIDR{"10.0.0.0/8", "2001:db8::/32"}, TrustedHops: &one}})
+	Inject(lb, s)
+	if args := lb.Spec.InitContainers[0].Args; !slices.Contains(args, "--trusted-proxies=127.0.0.1/32,::1/128,10.0.0.0/8,2001:db8::/32") ||
+		!slices.Contains(args, "--trusted-hops=1") || slices.Contains(args, "--trusted-proxies=127.0.0.1/32,::1/128") {
+		t.Errorf("client IP settings not passed: %v", args)
+	}
+
 	// Injecting again changes nothing.
 	before := pod.DeepCopy()
 	if Inject(pod, sidecar) || len(pod.Spec.InitContainers) != len(before.Spec.InitContainers) {

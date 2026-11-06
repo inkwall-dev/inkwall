@@ -141,6 +141,41 @@ rbac:
     # gateway pod.
     istioIngress: true
 
+metrics:
+  # The monitoring kit (docs/monitoring.md), all off by default. The
+  # ServiceMonitor, PodMonitor and PrometheusRule need the Prometheus
+  # Operator's CRDs: they are rendered only when the cluster serves
+  # monitoring.coreos.com/v1, or with forceMonitoringObjects (for helm
+  # template, which can't ask the cluster, or CRDs applied in the same run).
+  forceMonitoringObjects: false
+  serviceMonitor:
+    # A ServiceMonitor (and a Service) for the operator's /metrics.
+    enabled: false
+    # Extra labels, e.g. the one your Prometheus selects ServiceMonitors by.
+    labels: {}
+    # Empty: Prometheus' scrape interval.
+    interval: ""
+  podMonitor:
+    # A PodMonitor for the engines injected into the proxy pods, in
+    # injection.proxyNamespaces, by their inkwall-admin port.
+    enabled: false
+    labels: {}
+    interval: ""
+  prometheusRule:
+    # The alerts, each with a runbook in docs/monitoring.md.
+    enabled: false
+    labels: {}
+  dashboard:
+    # A Grafana dashboard in a ConfigMap, for Grafana's sidecar to load
+    # (deploy/helm/inkwall/monitoring/dashboard.json, to import by hand).
+    enabled: false
+    # Empty: the release namespace; set it to the sidecar's.
+    namespace: ""
+    # The labels Grafana's sidecar looks for.
+    labels:
+      grafana_dashboard: "1"
+    annotations: {}
+
 serviceAccount:
   # Empty: the operator's name (inkwall-operator for a release named inkwall).
   name: ""
