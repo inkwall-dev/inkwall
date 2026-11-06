@@ -40,7 +40,10 @@
 // An upgrade (a WebSocket handshake: a GET with an Upgrade header) that
 // declares no body is decided on its headers, and answered with
 // CONTINUE_AND_REPLACE, so Envoy stops sending the stream: what follows
-// its headers is the upgraded connection's data, not a body (#276).
+// its headers is the upgraded connection's data, not a body (#276). Its
+// response is inspected as any other, unless it is a 101: an upstream that
+// ignores the Upgrade header answers with an ordinary response, which must
+// not pass uninspected because the client asked for an upgrade.
 //
 // In observability mode (detect mode) Envoy doesn't wait for the answers,
 // and the adapter sends none. The body comes in chunks there (STREAMED, the
@@ -58,6 +61,7 @@
 package extproc
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -163,7 +167,8 @@ type exchange struct {
 	// Envoy forwards.
 	setID bool
 	// upgrade: the request is an upgrade (a WebSocket handshake) without
-	// a body, answered on its headers.
+	// a body, answered on its headers. Its response is inspected unless it
+	// is a 101 (Switching Protocols).
 	upgrade bool
 
 	// The response, when the request's policy inspects it.
@@ -389,7 +394,13 @@ func (x *exchange) setBody(body []byte, eos bool) {
 		// rules must not see a body without either header.
 		x.req.Headers.Set("Content-Length", strconv.Itoa(len(body)))
 	}
-	x.req.Body = body[:min(n, x.limit)]
+	if n > x.limit {
+		// Keep only the inspected prefix: a sub-slice would keep Envoy's
+		// whole message (up to its buffer limit, 10 MiB with Istio) for as
+		// long as the stream lasts.
+		body = bytes.Clone(body[:x.limit])
+	}
+	x.req.Body = body
 	x.req.BodyTruncated = n > x.limit || !complete
 }
 
@@ -468,6 +479,17 @@ func (s *Server) onResponseHeaders(ctx context.Context, x *exchange, h *extprocv
 	x.resp = toResponse(h, x.req.Proto)
 	eos := h.GetEndOfStream()
 	buffered := x.buffersResponses()
+	if x.upgrade && x.resp.Status == http.StatusSwitchingProtocols {
+		// The upgrade was accepted: what follows is the upgraded
+		// connection's data, which passes untouched, and isn't buffered.
+		x.respDone = true
+		x.ex.Close()
+		r := allow(phaseResponseHeaders, nil)
+		if !eos && buffered {
+			r.ModeOverride = &filterv3.ProcessingMode{ResponseBodyMode: filterv3.ProcessingMode_NONE}
+		}
+		return r
+	}
 	if !eos && x.ex.WantsBody(x.resp.Headers.Get("Content-Type")) {
 		x.respLimit = x.ex.BodyLimit()
 		switch {
@@ -586,9 +608,9 @@ func toResponse(h *extprocv3.HttpHeaders, proto string) *request.Response {
 // Accept-Encoding is removed.
 func (s *Server) verdict(ctx context.Context, x *exchange, p phase) *extprocv3.ProcessingResponse {
 	var v pipeline.Verdict
-	// An upgraded stream has no response to inspect: its data passes
-	// untouched once the handshake is allowed.
-	if ei, ok := s.pipeline.(pipeline.ExchangeInspector); ok && !x.upgrade {
+	// An upgrade's evaluation is kept too: the upstream may answer it with
+	// an ordinary response rather than a 101 (onResponseHeaders).
+	if ei, ok := s.pipeline.(pipeline.ExchangeInspector); ok {
 		v, x.ex = ei.CheckExchange(ctx, x.req)
 	} else {
 		v = s.pipeline.Check(ctx, x.req)

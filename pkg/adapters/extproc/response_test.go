@@ -294,9 +294,9 @@ func TestResponseTrailersOnly(t *testing.T) {
 }
 
 // A WebSocket handshake on a route whose policy inspects responses: allowed
-// on its headers with CONTINUE_AND_REPLACE, as any upgrade, and without an
-// evaluation kept for a response: the 101's headers are continued, and the
-// upgraded stream's data passes untouched.
+// on its headers with CONTINUE_AND_REPLACE, as any upgrade. A 101 is
+// continued without being inspected, and Envoy is told not to buffer the
+// upgraded stream's data, which passes untouched.
 func TestResponseUpgrade(t *testing.T) {
 	rec := &responseRecorder{}
 	p := pipeline.New(rec, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 10 * time.Second,
@@ -306,15 +306,39 @@ func TestResponseUpgrade(t *testing.T) {
 	first.ProtocolConfig.ResponseBodyMode = filterv3.ProcessingMode_BUFFERED_PARTIAL
 	resps := e.exchange(t, first, respHeaders(101, false, "upgrade", "websocket", "connection", "Upgrade"))
 	common := resps[0].GetRequestHeaders().GetResponse()
-	if common.GetStatus() != extprocv3.CommonResponse_CONTINUE_AND_REPLACE || common.GetBodyMutation() != nil ||
-		len(common.GetHeaderMutation().GetRemoveHeaders()) != 0 {
+	if common.GetStatus() != extprocv3.CommonResponse_CONTINUE_AND_REPLACE || common.GetBodyMutation() != nil {
 		t.Fatalf("handshake answered %v, want CONTINUE_AND_REPLACE", resps[0])
 	}
-	if len(resps) != 2 || resps[1].GetResponseHeaders() == nil || denied(t, resps[1]) != 0 {
-		t.Fatalf("101 answered %v", resps)
+	if len(resps) != 2 || resps[1].GetResponseHeaders() == nil || denied(t, resps[1]) != 0 ||
+		resps[1].GetModeOverride().GetResponseBodyMode() != filterv3.ProcessingMode_NONE {
+		t.Fatalf("101 answered %v, want continued with response_body_mode NONE", resps)
 	}
 	if len(rec.got) != 0 {
 		t.Errorf("an upgraded stream's response inspected: %v", rec.got)
+	}
+}
+
+// An upstream that ignores the Upgrade header answers the handshake with an
+// ordinary response: it is inspected, as it would be without the header, so
+// a client can't get a response past the rules by asking for an upgrade.
+func TestResponseUpgradeRefused(t *testing.T) {
+	for _, status := range []int{200, 400, 500} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			var logs bytes.Buffer
+			e := newEnvoy(t, newResponsePipeline(t, pipeline.ModeBlock, 256, pipeline.OversizeAuto), 64, &logs)
+			first := wsHeaders("/report")
+			first.ProtocolConfig.ResponseBodyMode = filterv3.ProcessingMode_BUFFERED_PARTIAL
+			resps := e.exchange(t, first, respHeaders(status, false, "content-type", "text/html"), respBody(sqlError, true))
+			if got := resps[0].GetRequestHeaders().GetResponse().GetStatus(); got != extprocv3.CommonResponse_CONTINUE_AND_REPLACE {
+				t.Fatalf("handshake answered %v, want CONTINUE_AND_REPLACE", resps[0])
+			}
+			if len(resps) != 3 || denied(t, resps[1]) != 0 || denied(t, resps[2]) != 403 {
+				t.Fatalf("a %d with a SQL error answered %v, want its body denied with 403", status, resps)
+			}
+			if evs := securityEvents(t, &logs); len(evs) != 1 || evs[0]["phase"] != "response" {
+				t.Errorf("events %v, want one response event", evs)
+			}
+		})
 	}
 }
 

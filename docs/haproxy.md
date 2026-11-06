@@ -181,8 +181,9 @@ HAProxy runs:
 
   and in `haproxy.cfg`, `server engine 127.0.0.1:9004 check inter 1s`. Or on a Unix socket,
   `--listen unix:/var/run/inkwall/spoe.sock` (`server engine unix@/var/run/inkwall/spoe.sock`, as
-  in the samples): HAProxy needs write permission on the socket file, which the engine creates as
-  `0755` under the usual umask (`022`), so run HAProxy as the engine's user.
+  in the samples): the engine creates the socket file as `0666`, so any user who can reach its
+  directory can connect: keep the directory to HAProxy's and the engine's users (for example
+  `0750`, owned by the engine's user and a group HAProxy is in).
 - **In a pod**, as a sidecar in HAProxy's pod, on a Unix socket in an [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir) both containers
   mount. The engine's image runs as user 65532: run HAProxy as 65532 too. Make the engine a
   [native sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/) (an init container with `restartPolicy: Always`), so HAProxy starts only once
