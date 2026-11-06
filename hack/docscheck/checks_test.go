@@ -251,3 +251,29 @@ func TestUnpinned(t *testing.T) {
 		t.Errorf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
+
+// Every condition reason the operator sets is documented (#384).
+func TestReasonsDocumented(t *testing.T) {
+	fsys := fstest.MapFS{
+		"docs/README.md":          file("# Docs\n[Troubleshooting](troubleshooting.md)\n"),
+		"docs/troubleshooting.md": file("# Troubleshooting\n| `WiringFailed` | ... |\n"),
+		"operator/internal/wiring/controller.go": file(`package wiring
+const (
+	ReasonWiringFailed = "WiringFailed"
+	// ReasonUnverified: wired, not proven.
+	ReasonUnverified   = "Unverified"
+)
+`),
+		"operator/resolver/resolver.go":      file(`const ReasonConflict          = "Conflict"`),
+		"operator/resolver/resolver_test.go": file(`const ReasonTestOnly = "TestOnly"`),
+		"pkg/other/other.go":                 file(`const ReasonNotOperator = "NotOperator"`),
+	}
+	got := check(t, fsys, config{reasonsDoc: "docs/troubleshooting.md"})
+	want := []string{
+		"docs/troubleshooting.md: condition reason Conflict (operator/resolver/resolver.go) is not documented",
+		"docs/troubleshooting.md: condition reason Unverified (operator/internal/wiring/controller.go) is not documented",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+}

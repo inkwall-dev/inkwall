@@ -48,6 +48,7 @@ type config struct {
 	contentsMinLines int
 	contentsExempt   map[string]bool
 	unpinned         map[string]bool // docs whose install commands must not pin a release
+	reasonsDoc       string          // the doc that must document every condition reason the operator sets
 	external         bool
 	ext              externalConfig
 }
@@ -64,6 +65,7 @@ func main() {
 	flag.StringVar(&cfg.index, "index", "docs/README.md", "the docs index, which must link to every doc")
 	flag.BoolVar(&cfg.requireIndex, "require-index", false, "fail if the docs index does not exist")
 	flag.IntVar(&cfg.contentsMinLines, "contents-min-lines", 0, "require a ## Contents section in docs longer than this many lines (0: only check the ones that have it)")
+	flag.StringVar(&cfg.reasonsDoc, "reasons-doc", "", "doc that must name, in backticks, every condition reason (Reason* constant) in operator/")
 	flag.BoolVar(&cfg.external, "external", false, "also check http(s) links")
 	flag.DurationVar(&cfg.ext.timeout, "timeout", 20*time.Second, "external check: timeout of one request")
 	flag.IntVar(&cfg.ext.retries, "retries", 2, "external check: retries of a URL that fails with a network error, 429 or 5xx")
@@ -157,6 +159,9 @@ func run(fsys fs.FS, files []string, cfg config, out, log io.Writer) int {
 		if cfg.unpinned[p] {
 			probs = append(probs, r.checkUnpinned(p)...)
 		}
+	}
+	if cfg.reasonsDoc != "" {
+		probs = append(probs, r.checkReasons(cfg.reasonsDoc)...)
 	}
 	if _, err := fs.Stat(fsys, cfg.index); err == nil || cfg.requireIndex {
 		probs = append(probs, r.checkIndex(cfg.index, files, cfg.indexExempt)...)

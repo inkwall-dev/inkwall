@@ -52,8 +52,9 @@ BASE            ?= origin/main
 # it is the Contributor Covenant 2.1, kept verbatim. The install and verify
 # commands of the READMEs and CONTRIBUTING.md write <version>, never a
 # release, so they don't go stale when the next one ships.
+# docs/troubleshooting.md documents every condition reason the operator sets.
 DOCS_CHECK_STRICT ?= -contents-min-lines=80 -require-index -contents-exempt=CODE_OF_CONDUCT.md \
-	-unpinned=README.md,deploy/helm/inkwall/README.md,CONTRIBUTING.md
+	-unpinned=README.md,deploy/helm/inkwall/README.md,CONTRIBUTING.md -reasons-doc=docs/troubleshooting.md
 DOCS_CHECK        ?= $(GO) run ./hack/docscheck $(DOCS_CHECK_STRICT)
 
 # scale-test: sizes as <policies>x<engines>, one operator each; "full" is 0004 §8's matrix.
