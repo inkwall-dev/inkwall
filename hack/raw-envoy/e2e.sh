@@ -87,7 +87,9 @@ cleanup() {
 trap cleanup EXIT
 cleanup
 
-if [[ ${SKIP_BUILD:-} != 1 ]]; then
+if [[ ${PULL_IMAGES:-} == 1 ]]; then
+  docker pull -q "$IMAGE" >/dev/null
+elif [[ ${SKIP_BUILD:-} != 1 ]]; then
   docker build --target engine -t "$IMAGE" .
 fi
 docker pull -q "$ENVOY_IMAGE" >/dev/null

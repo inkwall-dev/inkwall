@@ -22,6 +22,10 @@ on:
         description: Versions to upgrade from, space-separated (overrides minors).
         type: string
         default: ''
+      images:
+        description: ghcr:<version> upgrades to those published images instead of building the ref's.
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
       minors:
@@ -54,7 +58,7 @@ jobs:
         env:
           FROM: ${{ inputs.from }}
           MINORS: ${{ inputs.minors }}
-          BRANCH: ${{ github.base_ref || github.ref_name }}
+          BRANCH: ${{ inputs.ref || github.base_ref || github.ref_name }}
         run: |
           if [ -n "$FROM" ]; then
             list=$(tr ' ' '\n' <<<"$FROM" | sed '/^$/d')
@@ -91,9 +95,10 @@ jobs:
           key: image-go-build-${{ hashFiles('go.sum', 'Dockerfile') }}
           restore-keys: image-go-build-
       - run: hack/kind/go-build-cache.sh inject "$RUNNER_TEMP/go-build"
-      - run: KEEP=1 make kind-upgrade
+      - run: KEEP=1 make kind-upgrade IMAGES="$IMAGES"
         env:
           FROM_VERSION: ${{ matrix.from }}
+          IMAGES: ${{ inputs.images }}
       - if: failure()
         run: |
           kubectl --context kind-inkwall-upgrade get pods -A

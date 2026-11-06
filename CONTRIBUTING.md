@@ -120,7 +120,14 @@ for patching released versions.
 ### Cutting a release
 
 1. Check that CI is green on the commit, and try the build with `make release-snapshot` (binaries
-   and archives in `dist/`, nothing signed or published). The examples that pin the engine image,
+   and archives in `dist/`, nothing signed or published). Then qualify it: tag a release
+   candidate (`v0.5.0-rc.1`, as in step 2; the release workflow publishes its images), and run the
+   [qualify workflow](.github/workflows/qualify.yaml) on the tag with `images: ghcr:0.5.0-rc.1`
+   (Actions, "qualify", "Run workflow"). It runs every proxy's e2e, the upgrade from each
+   supported release, the full scale test with and without responses, the Docker e2e tests and the
+   CRS suite against those images. **Cut the release only after a green run**, and link it in the
+   release's PR or notes. The same workflow runs nightly on `main` and weekly on the supported
+   release branches. The examples that pin the engine image,
    `examples/raw-envoy/kustomization.yaml` (`newTag`), name the release being cut: bump them in
    a PR before tagging. The READMEs write `<version>` (`make docs-check` fails on a pinned
    release there), so they need no bump.

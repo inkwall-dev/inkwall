@@ -33,7 +33,11 @@ fi
 
 # SKIP_IMAGE_BUILD=1: the images are already in Docker (CI's e2e jobs load
 # the ones its image job built once).
-if [[ ${SKIP_IMAGE_BUILD:-} != 1 ]]; then
+# PULL_IMAGES=1: they are published ones (make IMAGES=ghcr:<version>).
+if [[ ${PULL_IMAGES:-} == 1 ]]; then
+  docker pull -q "$IMAGE" >/dev/null
+  docker pull -q "$ENGINE_IMAGE" >/dev/null
+elif [[ ${SKIP_IMAGE_BUILD:-} != 1 ]]; then
   docker build --target operator -t "$IMAGE" .
   # The engine image, injected into proxy pods.
   docker build --target engine -t "$ENGINE_IMAGE" .

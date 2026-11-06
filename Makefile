@@ -23,6 +23,19 @@ ENVTEST_K8S_VERSION ?= 1.34.1
 # Container images and local kind cluster (hack/kind).
 IMAGE           ?= inkwall-engine:dev
 OPERATOR_IMAGE  ?= inkwall-operator:dev
+# IMAGES=ghcr:<version> tests the published images of a release or a release
+# candidate (#389): the kind and Docker tests pull them instead of building
+# this checkout's.
+IMAGES          ?=
+ifneq ($(filter ghcr:%,$(IMAGES)),)
+IMAGE           := ghcr.io/inkwall-dev/inkwall-engine:$(patsubst ghcr:%,%,$(IMAGES))
+OPERATOR_IMAGE  := ghcr.io/inkwall-dev/inkwall-operator:$(patsubst ghcr:%,%,$(IMAGES))
+export PULL_IMAGES := 1
+export SKIP_IMAGE_BUILD := 1
+export SKIP_BUILD := 1
+else ifneq ($(IMAGES),)
+$(error IMAGES must be ghcr:<version>, got $(IMAGES))
+endif
 CHART           ?= deploy/helm/inkwall
 KIND_CLUSTER    ?= inkwall
 # kind, installed into bin/, and the node image of its clusters: the oldest Kubernetes this kind
@@ -266,7 +279,7 @@ kind-test: ## Send benign and attack requests to the kind demo and check verdict
 
 .PHONY: haproxy-e2e
 haproxy-e2e: ## End-to-end test of HAProxy with the engine's SPOE agent and the examples/haproxy samples, in Docker (no cluster; Linux)
-	hack/haproxy/e2e.sh
+	ENGINE_IMAGE=$(IMAGE) hack/haproxy/e2e.sh
 
 .PHONY: raw-envoy-e2e
 raw-envoy-e2e: ## End-to-end test of raw Envoy with the engine's ext_proc adapter and the examples/raw-envoy samples, in Docker (no cluster)

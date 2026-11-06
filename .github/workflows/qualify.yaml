@@ -1,0 +1,279 @@
+name: qualify
+
+# Release qualification (#389): the heavy tests together, against one
+# commit: every proxy's e2e on kind (#391), the upgrade from each supported
+# release (#390), the full operator scale test with and without responses,
+# the Docker e2e tests and the CRS suite. Nightly on main, weekly on the
+# supported release branches, and on demand: with images=ghcr:<version>,
+# against a release candidate's published images instead of the ref's own.
+# A release is cut only after a green run (CONTRIBUTING.md, "Cutting a
+# release").
+
+on:
+  schedule:
+    - cron: '41 2 * * *'   # nightly: main
+    - cron: '7 4 * * 6'    # weekly: the supported release branches
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit to qualify.
+        type: string
+        default: main
+      images:
+        description: ghcr:<version> tests those published images (a release candidate's) instead of building the ref's.
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qualify-${{ github.event.schedule || inputs.ref }}-${{ inputs.images }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    # The refs to qualify: main nightly, the release branches of the two
+    # newest minor versions weekly, the ref given on demand.
+    runs-on: ubuntu-24.04
+    outputs:
+      refs: ${{ steps.plan.outputs.refs }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+      - id: plan
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          REF: ${{ inputs.ref }}
+          IMAGES: ${{ inputs.images }}
+        run: |
+          case "$SCHEDULE" in
+            '41 2 * * *') refs=main ;;
+            '7 4 * * 6')
+              # release-X.Y for each of the newest two minor versions with a
+              # branch.
+              refs=$(go run ./hack/releases -minors 2 | sed -E 's/^([0-9]+\.[0-9]+)\..*/release-\1/' |
+                while read -r b; do git rev-parse -q --verify "origin/$b" >/dev/null && echo "$b"; done) ;;
+            *) refs=$REF ;;
+          esac
+          if [ -n "$IMAGES" ] && ! [[ $IMAGES =~ ^ghcr:[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "images must be ghcr:<version>, got $IMAGES" >&2
+            exit 1
+          fi
+          echo "refs=$(jq -Rnc '[inputs | select(length > 0)]' <<<"$refs")" >>"$GITHUB_OUTPUT"
+          {
+            echo "## Qualifying"
+            echo
+            echo "Refs: $(tr '\n' ' ' <<<"$refs")"
+            echo
+            echo "Images: ${IMAGES:-built from each ref}"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  images:
+    # The ref's images, built once for its e2e jobs; skipped for published
+    # images.
+    needs: plan
+    if: inputs.images == ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        ref: ${{ fromJSON(needs.plan.outputs.refs) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/go-build
+          key: image-go-build-${{ hashFiles('go.sum', 'Dockerfile') }}
+          restore-keys: image-go-build-
+      - run: hack/kind/go-build-cache.sh inject "$RUNNER_TEMP/go-build"
+      - run: make image
+      - run: docker save inkwall-engine:dev inkwall-operator:dev | gzip -1 > "$RUNNER_TEMP/images.tar.gz"
+      - id: name
+        env:
+          REF: ${{ matrix.ref }}
+        run: echo "name=qualify-images-${REF//\//-}" >>"$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.name.outputs.name }}
+          path: ${{ runner.temp }}/images.tar.gz
+          retention-days: 2
+          compression-level: 0
+
+  e2e:
+    needs: [plan, images]
+    # Runs with published images, when images was skipped.
+    if: always() && needs.plan.result == 'success' && (needs.images.result == 'success' || needs.images.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: ${{ fromJSON(needs.plan.outputs.refs) }}
+        proxy: [traefik, raw-envoy, envoy-gateway, istio, haproxy]
+    name: e2e ${{ matrix.proxy }} (${{ matrix.ref }})
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.19.0
+      - id: name
+        env:
+          REF: ${{ matrix.ref }}
+        run: echo "name=qualify-images-${REF//\//-}" >>"$GITHUB_OUTPUT"
+      - if: inputs.images == ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ steps.name.outputs.name }}
+          path: ${{ runner.temp }}
+      - if: inputs.images == ''
+        run: gunzip -c "$RUNNER_TEMP/images.tar.gz" | docker load
+      - run: make kind-cluster KIND_NODE_IMAGE=
+      # A release branch from before #391 has no per-proxy targets: say so
+      # rather than fail.
+      - id: target
+        env:
+          PROXY: ${{ matrix.proxy }}
+        run: |
+          if make -n "kind-e2e-$PROXY" >/dev/null 2>&1; then echo "ok=true" >>"$GITHUB_OUTPUT"; else
+            echo "ok=false" >>"$GITHUB_OUTPUT"
+            echo "::warning::make kind-e2e-$PROXY doesn't exist on this ref: not run"
+          fi
+      - if: steps.target.outputs.ok == 'true'
+        run: make "kind-e2e-$PROXY" SKIP_IMAGE_BUILD=1 IMAGES="$IMAGES"
+        env:
+          PROXY: ${{ matrix.proxy }}
+          IMAGES: ${{ inputs.images }}
+      - if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          mkdir -p "$RUNNER_TEMP/kind-logs"
+          bin/kind-*/kind export logs "$RUNNER_TEMP/kind-logs" --name inkwall || true
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.name.outputs.name }}-kind-logs-${{ matrix.proxy }}
+          path: ${{ runner.temp }}/kind-logs
+          retention-days: 7
+
+  upgrade:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: ${{ fromJSON(needs.plan.outputs.refs) }}
+    uses: ./.github/workflows/upgrade.yaml
+    with:
+      ref: ${{ matrix.ref }}
+      minors: 2
+      images: ${{ inputs.images }}
+
+  scale:
+    # The operator at full scale with fake engines (envtest), without and
+    # with response inspection (#344).
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: ${{ fromJSON(needs.plan.outputs.refs) }}
+        responses: ['', '1']
+    name: scale full${{ matrix.responses && ', responses' || '' }} (${{ matrix.ref }})
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+      - run: make scale-test SCALE=full SCALE_RESPONSES="$RESPONSES" SCALE_OUT="$RUNNER_TEMP/scale.jsonl"
+        env:
+          RESPONSES: ${{ matrix.responses }}
+      # The measurements (JSON lines), in the summary.
+      - if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/scale.jsonl" ]; then
+            { echo '```json'; cat "$RUNNER_TEMP/scale.jsonl"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          fi
+
+  docker-e2e:
+    # Raw Envoy, the engine's proxy with WebSocket messages, and HAProxy, in
+    # Docker with the ref's or the published engine.
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: ${{ fromJSON(needs.plan.outputs.refs) }}
+    name: docker e2e (${{ matrix.ref }})
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+      - run: make raw-envoy-e2e IMAGES="$IMAGES"
+        env:
+          IMAGES: ${{ inputs.images }}
+      - run: make websocket-e2e SKIP_BUILD=1 IMAGES="$IMAGES"
+        env:
+          IMAGES: ${{ inputs.images }}
+      - run: make haproxy-e2e IMAGES="$IMAGES"
+        env:
+          IMAGES: ${{ inputs.images }}
+
+  crs:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: ${{ fromJSON(needs.plan.outputs.refs) }}
+    name: crs (${{ matrix.ref }})
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+      - run: make crs-test
+
+  summary:
+    # One table of results in the run's summary: a release needs every row
+    # green.
+    needs: [plan, images, e2e, upgrade, scale, docker-e2e, crs]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          {
+            echo "## Qualification"
+            echo
+            echo "| Job | Result |"
+            echo "|---|---|"
+            jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"' <<<"$RESULTS"
+          } >>"$GITHUB_STEP_SUMMARY"
+          ! jq -e 'to_entries[] | select(.value.result != "success" and .value.result != "skipped")' <<<"$RESULTS" >/dev/null

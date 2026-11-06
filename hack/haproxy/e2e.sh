@@ -117,7 +117,16 @@ for f in haproxy.cfg spoe.conf; do
   check "docs/haproxy.md shows $f as it is" diff <(guide_copy "$f") "$EXAMPLES/$f"
 done
 
-go build -o "$WORK/inkwall-engine" ./cmd/engine
+# The engine: built from this checkout, or, with PULL_IMAGES=1, the binary
+# of the published image (make IMAGES=ghcr:<version>).
+if [[ ${PULL_IMAGES:-} == 1 ]]; then
+  docker pull -q "${ENGINE_IMAGE:?}" >/dev/null
+  cid=$(docker create "$ENGINE_IMAGE")
+  docker cp "$cid:/inkwall-engine" "$WORK/inkwall-engine"
+  docker rm "$cid" >/dev/null
+else
+  go build -o "$WORK/inkwall-engine" ./cmd/engine
+fi
 
 # The app echoes the request line and X-Request-Id.
 cat >"$WORK/app.py" <<'PY'
