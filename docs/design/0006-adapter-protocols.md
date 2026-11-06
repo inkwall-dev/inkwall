@@ -276,8 +276,8 @@ verdicts are counted apart: `inkwall_responses_total{action,reason}` and
   every other policy inspecting responses (2,500 of 5,000) changes neither the time from a change
   to every engine nor the operator's peak RSS, at any size; the bundle grows by 2 KiB compressed.
   Compiled once as an engine does, the 5,000-policy bundle takes 0.08–0.09 s and 10–26 MiB of live
-  heap (policies with the same settings share one compiled rule set, so response inspection adds
-  one), and a leaked SQL error through one of its policies is flagged in 0.3–0.6 ms.
+  heap (measured when response inspection compiled a rule set of its own; since #353, policies
+  share one whatever their response settings), and a leaked SQL error through one of its policies is flagged in 0.3–0.6 ms.
 
 **Flags.** Without the operator, `inkwall-engine ext-proc` takes `--inspect-responses`,
 `--max-response-bytes` (64 KiB by default) and `--oversize-response` (`auto`, `allow`, `deny`), the
