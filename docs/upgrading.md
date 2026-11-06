@@ -97,6 +97,8 @@ What changes by itself:
   rejected bundles. WebSocket messages the engine's proxy inspects are counted in
   `inkwall_websocket_messages_total`, no longer in `inkwall_requests_total`, so a dashboard of
   requests drops on routes with busy WebSockets.
+- **A monitoring kit, off by default** (#381): `metrics.serviceMonitor`, `metrics.podMonitor`,
+  `metrics.prometheusRule` and `metrics.dashboard` in the chart. See [Monitoring](monitoring.md).
 
 ## From 0.4.0 to 0.4.1
 
