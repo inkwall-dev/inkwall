@@ -215,6 +215,14 @@ type EngineSpec struct {
 	// +optional
 	PolicyMetrics bool `json:"policyMetrics,omitempty"`
 
+	// JSONDenials answers a denied client that accepts application/json
+	// with a JSON body, {"error":"forbidden","status":403,"request_id":...},
+	// instead of text. Every denial carries X-Request-Id either way.
+	// Through Traefik, Envoy Gateway and Istio; HAProxy writes its own
+	// denials. Applies to pods injected from then on.
+	// +optional
+	JSONDenials bool `json:"jsonDenials,omitempty"`
+
 	// ClientIP configures which forwarding headers the engines trust for
 	// the client's address, behind an HTTP load balancer that appends it to
 	// X-Forwarded-For. Unset: only the proxy beside the engine is trusted.
