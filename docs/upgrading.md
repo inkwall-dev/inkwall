@@ -9,6 +9,11 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 - [From 0.4.x to 0.5.0](#from-04x-to-050)
 - [From 0.4.0 to 0.4.1](#from-040-to-041)
 - [From 0.3.x to 0.4.0](#from-03x-to-040)
+  - [What's new in 0.4.0](#whats-new-in-040)
+  - [What changes by itself in 0.4.0](#what-changes-by-itself-in-040)
+  - [Upgrading the chart to 0.4.0](#upgrading-the-chart-to-040)
+  - [Checking 0.4.0 worked](#checking-040-worked)
+  - [Rolling back to 0.3.x](#rolling-back-to-03x)
 - [From 0.3.0 to 0.3.1](#from-030-to-031)
 - [From 0.2.x to 0.3.0](#from-02x-to-030)
   - [Before you upgrade](#before-you-upgrade)
@@ -66,7 +71,7 @@ their engines are 0.4.1. What changes by itself:
 
 ## From 0.3.x to 0.4.0
 
-What's new in 0.4.0:
+### What's new in 0.4.0
 
 - **Raw Envoy.** An Envoy you configure yourself can call the engine's ext_proc adapter, with the
   policy from the engine's flags or from the operator: see [protecting raw Envoy](raw-envoy.md).
@@ -121,7 +126,7 @@ What's new in 0.4.0:
   `body.maxBytes` (64 KiB by default) is more than HAProxy's buffer lets the engine see (about
   15 KiB unless you raise `tune.bufsize`), `Programmed`'s message says so.
 
-What changes by itself in 0.4.0:
+### What changes by itself in 0.4.0
 
 - **A new ClusterRole, `inkwall-operator-haproxy`**, granted by default (`rbac.integrations.haproxy:
   true`, also with `--reuse-values`): it writes the backend snippet annotations of the HAProxy
@@ -163,6 +168,86 @@ What changes by itself in 0.4.0:
   are inspected, and its messages with `body.grpcMessages: Inspect`. In 0.3.x the Core Rule Set
   denied every one in `Block` mode (rule 920420) and logged it in `Detect` mode. A body that isn't
   such base64 is still inspected as any request, and denied. See [gRPC](grpc.md).
+
+### Upgrading the chart to 0.4.0
+
+1. Upgrade the chart, with the values you installed it with:
+
+   ```sh
+   helm upgrade inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.4.0 \
+     --namespace inkwall-system --reset-then-reuse-values
+   ```
+
+   The chart upgrades the CRDs too (`crds.install`). If you install the CRDs yourself, apply the
+   new ones first:
+
+   ```sh
+   helm template inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.4.0 \
+     --show-only templates/crds.yaml | kubectl apply --server-side -f -
+   ```
+
+2. Wait for the operator:
+
+   ```sh
+   kubectl -n inkwall-system rollout status deployment/inkwall-operator
+   ```
+
+3. Restart the proxies whose pods the Pod webhook injects, so they run the 0.4.0 engine: Traefik,
+   and the HAProxy Kubernetes Ingress Controller and Istio's ingress gateways if you run them.
+   The operator updates Envoy Gateway's and Istio Gateways' pods itself.
+
+   ```sh
+   kubectl -n <traefik namespace> rollout restart deployment/<traefik>
+   ```
+
+If Argo CD or Flux installs the chart, change the chart version in Git instead: see
+[GitOps](gitops.md#installing-the-chart-with-a-gitops-tool).
+
+### Checking 0.4.0 worked
+
+```sh
+helm -n inkwall-system list
+kubectl get wafpolicy -A
+kubectl -n <traefik namespace> get pods -l app.kubernetes.io/name=traefik \
+  -o jsonpath='{range .items[*]}{.metadata.name} {.spec.initContainers[?(@.name=="inkwall-engine")].image}{"\n"}{end}'
+```
+
+It worked if the release shows chart version 0.4.0, the policies are `Ready`, and Traefik's pods
+run the `inkwall-engine:0.4.0` image. A policy that sets `webSocket`, `responses` or
+`body.grpcMessages` stays `Enforced=False` (`EnginesOutdated`) until every engine that runs it is
+0.4.0. Send an attack through a protected route, as in the
+[README](../README.md#protect-a-route), to check it's blocked.
+
+### Rolling back to 0.3.x
+
+0.3.x doesn't wire Istio or the HAProxy Kubernetes Ingress Controller, nor unwire them. Before
+`helm rollback`, unprotect them: remove the HTTPRoutes of Istio Gateways, the `VirtualService`
+targets and the Ingresses the HAProxy controller serves from every policy's `targetRefs`, or
+delete those policies. The operator then removes its `EnvoyFilter` objects, takes the engine out
+of the Istio Gateways' ConfigMaps ([undoing it](istio.md#undoing-it)), and restores the HAProxy
+Ingresses' annotations ([what the operator does](haproxy.md#what-the-operator-does)). Wait until
+the first command finds no resources and the second prints nothing:
+
+```sh
+kubectl get envoyfilters.networking.istio.io -A -l app.kubernetes.io/managed-by=inkwall-operator
+kubectl get ingresses -A \
+  -o jsonpath='{range .items[?(@.metadata.annotations.waf\.inkwall\.dev/haproxy-wired)]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'
+```
+
+The fields 0.4.0 added to `WAFPolicy`, `spec.webSocket`, `spec.responses` and
+`spec.body.grpcMessages`, aren't in 0.3.x's CRD: the API server drops them when it reads the
+policies, and may drop them from storage at the next write. So a policy that relies on them
+loses those checks after the rollback (handshake rules, response inspection, gRPC message
+inspection), with nothing in its status to say so. Note them before rolling back, and set them
+again after upgrading to 0.4.0 again.
+
+Then roll back, and restart Traefik (and any HAProxy controller or Istio ingress gateway that ran
+the engine) so its pods run the older engine again:
+
+```sh
+helm -n inkwall-system rollback inkwall
+kubectl -n <traefik namespace> rollout restart deployment/<traefik>
+```
 
 ## From 0.3.0 to 0.3.1
 
