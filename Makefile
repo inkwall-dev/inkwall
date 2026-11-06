@@ -99,7 +99,7 @@ bench-compare: ## Compare benchmarks of changed packages with BASE (origin/main)
 	BENCH='$(BENCH)' hack/bench/compare.sh $(BASE)
 
 .PHONY: crs-test
-crs-test: ## Run the OWASP CRS regression suite through the proxy (test/crs)
+crs-test: ## Run the OWASP CRS regression suite through each adapter, and the response rules through ext_proc (test/crs)
 	cd test/crs && $(GO) test -count=1 -timeout 30m -v ./...
 
 
