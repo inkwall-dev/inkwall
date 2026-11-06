@@ -43,6 +43,7 @@
 package extproc
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -302,7 +303,13 @@ func (x *exchange) setBody(body []byte, eos bool) {
 		// rules must not see a body without either header.
 		x.req.Headers.Set("Content-Length", strconv.Itoa(len(body)))
 	}
-	x.req.Body = body[:min(n, x.limit)]
+	if n > x.limit {
+		// Keep only the inspected prefix: a sub-slice would keep Envoy's
+		// whole message (up to its buffer limit, 10 MiB with Istio) for as
+		// long as the stream lasts.
+		body = bytes.Clone(body[:x.limit])
+	}
+	x.req.Body = body
 	x.req.BodyTruncated = n > x.limit || !complete
 }
 
