@@ -4,14 +4,23 @@
 package coraza
 
 import (
+	"context"
 	"errors"
 	"io/fs"
+	"net/http"
+	"net/netip"
+	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	coreruleset "github.com/corazawaf/coraza-coreruleset/v4"
+
+	"github.com/inkwall-dev/inkwall/pkg/request"
 )
 
 func TestSplitDirectives(t *testing.T) {
@@ -149,19 +158,31 @@ func TestCheckUserRulesLarge(t *testing.T) {
 	t.Logf("located in %v", time.Since(start))
 }
 
-// inspectFile and rbl are not registered in the engine, so rules that
-// reach it without CheckUserRules (hand-made bundles, a webhook that was
-// down) don't compile: inspectFile would run a program for every value.
+// inspectFile and rbl never run in the engine, whatever reaches it without
+// CheckUserRules (rule sets accepted before it rejected them, hand-made
+// bundles): they compile, so such a bundle still loads, but never match,
+// and inspectFile runs no program.
 func TestDisabledOperators(t *testing.T) {
-	for _, rule := range []string{
-		`SecRule ARGS:f "@inspectFile /usr/bin/touch" "id:100020,phase:1,pass,nolog"`,
-		`SecRule REMOTE_ADDR "@rbl attacker.example" "id:100021,phase:1,pass,nolog"`,
+	marker := filepath.Join(t.TempDir(), "ran")
+	for id, rule := range map[int]string{
+		100020: `SecRule ARGS:f "@inspectFile /usr/bin/touch" "id:100020,phase:1,deny,status:403"`,
+		100021: `SecRule REMOTE_ADDR "@rbl attacker.example" "id:100021,phase:1,deny,status:403"`,
 	} {
 		for _, cfg := range []Config{{Directives: rule}, {DirectivesBeforeCRS: rule}, {Directives: rule, DisableCRS: true}} {
-			if _, err := New(cfg); err == nil || !strings.Contains(err.Error(), "disabled") {
-				t.Errorf("%s: compiled (%v), want the operator disabled", rule, err)
+			e, err := New(cfg)
+			if err != nil {
+				t.Fatalf("%s: %v", rule, err)
+			}
+			req := &request.Request{Method: "GET", RawURI: "/?f=" + url.QueryEscape(marker), Proto: "HTTP/1.1", Host: "a.example",
+				Headers: http.Header{"User-Agent": {"curl/8"}, "Accept": {"*/*"}}, PeerIP: netip.MustParseAddr("127.0.0.1")}
+			res, err := e.Evaluate(context.Background(), req)
+			if err != nil || slices.Contains(res.MatchedRuleIDs, id) {
+				t.Errorf("%s: matched %v (%v), want no match", rule, res.MatchedRuleIDs, err)
 			}
 		}
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("inspectFile ran a program")
 	}
 }
 
