@@ -223,6 +223,9 @@ func (i *IstioIngress) Wire(ctx context.Context, targets map[Target]bool, off bo
 		cached[st.pods[j].UID] = &st.pods[j]
 	}
 
+	// The pods each Gateway selector selects, listed once per reconcile
+	// however many VirtualServices its Gateways serve (#373).
+	selected := map[string][]corev1.Pod{}
 	routes := map[types.NamespacedName]*istioVSRoute{}
 	failed := map[types.NamespacedName]string{}
 	pending := map[types.NamespacedName]string{}
@@ -256,17 +259,22 @@ func (i *IstioIngress) Wire(ctx context.Context, targets map[Target]bool, off bo
 			// Every pod the Gateway selects, also those the cache leaves
 			// out: one the Pod webhook doesn't inject would serve the
 			// route uninspected.
-			var pods corev1.PodList
-			if err := i.APIReader.List(ctx, &pods, client.MatchingLabelsSelector{Selector: sel}); err != nil {
-				return nil, err
+			pods, ok := selected[sel.String()]
+			if !ok {
+				var list corev1.PodList
+				if err := i.APIReader.List(ctx, &list, client.MatchingLabelsSelector{Selector: sel}); err != nil {
+					return nil, err
+				}
+				pods = list.Items
+				selected[sel.String()] = pods
 			}
-			for _, p := range running(pods.Items) {
+			for _, p := range running(pods) {
 				if c := cached[p.UID]; c != nil {
 					if !slices.Contains(r.pods[p.Namespace], c) {
 						r.pods[p.Namespace] = append(r.pods[p.Namespace], c)
 					}
 				} else {
-					outside = append(outside, p.Namespace+"/"+p.Name)
+					outside = append(outside, workloadOf(p))
 				}
 			}
 		}

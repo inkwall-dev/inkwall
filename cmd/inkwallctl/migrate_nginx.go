@@ -136,6 +136,7 @@ type modsec struct {
 	crs          bool
 	paranoia     int32
 	threshold    int32
+	crsSettings  wafv1alpha1.CRSSettings
 	body         wafv1alpha1.BodySpec
 	exclusions   []wafv1alpha1.Exclusion
 	skip         []wafv1alpha1.PathPattern
@@ -431,8 +432,22 @@ func (s *modsec) secAction(m *migration, text string, args []string, src string)
 		switch {
 		case name == "tx.crs_setup_version":
 			m.add(itemCheck, src, "setvar:%s: not needed by the built-in CRS", a.value)
+		case name == "tx.allowed_methods":
+			s.allowedMethods(m, src, a.value, value)
+		case name == "tx.allowed_request_content_type":
+			s.allowedContentTypes(m, src, a.value, value)
+		case name == "tx.detection_paranoia_level" && (err != nil || n < 1 || n > 4):
+			m.add(itemTodo, src, "not migrated: setvar:%s: the detection paranoia level is 1 to 4", a.value)
+		case name == "tx.detection_paranoia_level":
+			d := int32(n)
+			s.crsSettings.DetectionParanoiaLevel = &d
+			m.add(itemMapped, src, "setvar:%s: crs.detectionParanoiaLevel: %d", a.value, n)
+		case name == "tx.outbound_anomaly_score_threshold" && (err != nil || n < 1 || n > 10000):
+			m.add(itemTodo, src, "not migrated: setvar:%s: the threshold is 1 to 10000", a.value)
 		case name == "tx.outbound_anomaly_score_threshold":
-			m.add(itemCheck, src, "not migrated: setvar:%s: Inkwall doesn't inspect responses", a.value)
+			t := int32(n)
+			s.crsSettings.OutboundAnomalyThreshold = &t
+			m.add(itemCheck, src, "setvar:%s: crs.outboundAnomalyThreshold: %d; it applies only when the policy inspects responses (responses.inspect: true)", a.value, n)
 		case field == "":
 			m.add(itemTodo, src, "not migrated: setvar:%s: no WAFPolicy field sets this CRS variable", a.value)
 		case err != nil:
@@ -449,6 +464,35 @@ func (s *modsec) secAction(m *migration, text string, args []string, src string)
 			m.add(itemMapped, src, "setvar:%s: inboundAnomalyThreshold: %d", a.value, n)
 		}
 	}
+}
+
+// allowedMethods maps tx.allowed_methods, space-separated methods.
+func (s *modsec) allowedMethods(m *migration, src, setvar, value string) {
+	methods := strings.Fields(value)
+	if err := (coraza.CRSSettings{AllowedMethods: methods}).Validate(); err != nil || len(methods) == 0 {
+		m.add(itemTodo, src, "not migrated: setvar:%s: not a list of HTTP methods", setvar)
+		return
+	}
+	s.crsSettings.AllowedMethods = nil
+	for _, v := range methods {
+		s.crsSettings.AllowedMethods = append(s.crsSettings.AllowedMethods, wafv1alpha1.HTTPMethodToken(v))
+	}
+	m.add(itemMapped, src, "setvar:%s: crs.allowedMethods", setvar)
+}
+
+// allowedContentTypes maps tx.allowed_request_content_type: "|type| |type|"
+// in CRS v4, "type|type" in CRS v3.
+func (s *modsec) allowedContentTypes(m *migration, src, setvar, value string) {
+	types := strings.FieldsFunc(value, func(r rune) bool { return r == '|' || r == ' ' })
+	if err := (coraza.CRSSettings{AllowedRequestContentTypes: types}).Validate(); err != nil || len(types) == 0 {
+		m.add(itemTodo, src, "not migrated: setvar:%s: not a list of media types", setvar)
+		return
+	}
+	s.crsSettings.AllowedRequestContentTypes = nil
+	for _, v := range types {
+		s.crsSettings.AllowedRequestContentTypes = append(s.crsSettings.AllowedRequestContentTypes, wafv1alpha1.MediaType(v))
+	}
+	m.add(itemMapped, src, "setvar:%s: crs.allowedRequestContentTypes", setvar)
 }
 
 // secRule maps a rule exclusion keyed on the path:
@@ -825,9 +869,9 @@ func (s *modsec) build(m *migration) {
 	}
 
 	if !s.crs {
-		if s.paranoia != 0 || s.threshold != 0 {
-			m.add(itemCheck, "", "a CRS paranoia level or threshold is set but the CRS is not loaded: left out")
-			s.paranoia, s.threshold = 0, 0
+		if s.paranoia != 0 || s.threshold != 0 || !s.crsSettings.IsZero() {
+			m.add(itemCheck, "", "a CRS paranoia level, threshold or other CRS setting is set but the CRS is not loaded: left out")
+			s.paranoia, s.threshold, s.crsSettings = 0, 0, wafv1alpha1.CRSSettings{}
 		}
 		if len(s.rules) == 0 {
 			m.add(itemCheck, "", "ModSecurity is on but runs no rules besides its own configuration's: nothing to migrate")
@@ -855,13 +899,21 @@ func (s *modsec) build(m *migration) {
 			Mode:       mode,
 		},
 	}
-	if s.crs && (s.paranoia != 0 || s.threshold != 0 || len(s.rules) > 0) {
+	if d := s.crsSettings.DetectionParanoiaLevel; d != nil && *d < max(s.paranoia, 1) {
+		m.add(itemTodo, "", "not migrated: tx.detection_paranoia_level=%d is below the paranoia level, %d", *d, max(s.paranoia, 1))
+		s.crsSettings.DetectionParanoiaLevel = nil
+	}
+	if s.crs && (s.paranoia != 0 || s.threshold != 0 || !s.crsSettings.IsZero() || len(s.rules) > 0) {
 		b := wafv1alpha1.RuleSetBinding{Ref: wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: crsRuleSetName}}
 		if s.paranoia != 0 {
 			b.ParanoiaLevel = &s.paranoia
 		}
 		if s.threshold != 0 {
 			b.InboundAnomalyThreshold = &s.threshold
+		}
+		if !s.crsSettings.IsZero() {
+			c := s.crsSettings
+			b.CRS = &c
 		}
 		p.Spec.RuleSets = append(p.Spec.RuleSets, b)
 		m.usesCRSRuleSet = true

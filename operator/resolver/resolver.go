@@ -503,6 +503,7 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 		if b.InboundAnomalyThreshold != nil {
 			binding.InboundAnomalyThreshold = *b.InboundAnomalyThreshold
 		}
+		binding.Crs = crsSettings(b.CRS)
 		p.RuleSets = append(p.RuleSets, binding)
 	}
 	for _, e := range s.Exclusions {
@@ -618,4 +619,26 @@ func describeRoute(m *bundlev1.RouteMatch) string {
 		host = "*"
 	}
 	return host + m.GetPath().GetValue()
+}
+
+// crsSettings is a binding's CRS settings in the bundle, nil when it sets
+// none.
+func crsSettings(c *wafv1alpha1.CRSSettings) *bundlev1.CRSSettings {
+	if c.IsZero() {
+		return nil
+	}
+	s := &bundlev1.CRSSettings{}
+	for _, m := range c.AllowedMethods {
+		s.AllowedMethods = append(s.AllowedMethods, string(m))
+	}
+	for _, t := range c.AllowedRequestContentTypes {
+		s.AllowedRequestContentTypes = append(s.AllowedRequestContentTypes, string(t))
+	}
+	if c.DetectionParanoiaLevel != nil {
+		s.DetectionParanoiaLevel = *c.DetectionParanoiaLevel
+	}
+	if c.OutboundAnomalyThreshold != nil {
+		s.OutboundAnomalyThreshold = *c.OutboundAnomalyThreshold
+	}
+	return s
 }

@@ -39,6 +39,10 @@ type Result struct {
 	// AnomalyScore is the CRS inbound anomaly score (0 without CRS), or
 	// the outbound one for a response.
 	AnomalyScore int
+	// Detected reports that rules above the CRS's blocking paranoia level,
+	// up to its detection level, reached the anomaly threshold: the request
+	// (or response) is logged, never blocked, for them.
+	Detected bool
 }
 
 // Match is where a rule matched.

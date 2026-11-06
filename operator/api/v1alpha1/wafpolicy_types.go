@@ -200,7 +200,68 @@ type RuleSetBinding struct {
 	// +kubebuilder:validation:Maximum=10000
 	// +optional
 	InboundAnomalyThreshold *int32 `json:"inboundAnomalyThreshold,omitempty"`
+
+	// CRS sets the OWASP CRS's own settings. Only used by the built-in CRS.
+	// Requires engines 0.5.0 or later: older ones ignore it.
+	// +optional
+	CRS *CRSSettings `json:"crs,omitempty"`
 }
+
+// CRSSettings are OWASP CRS settings (its tx variables), applied to each
+// request before the CRS's defaults. Unset fields keep the CRS's defaults.
+type CRSSettings struct {
+	// AllowedMethods replaces the request methods the CRS allows (GET, HEAD,
+	// POST and OPTIONS by default; rule 911100). List every method the
+	// application serves, for example PUT, PATCH and DELETE for a REST API.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +listType=set
+	// +optional
+	AllowedMethods []HTTPMethodToken `json:"allowedMethods,omitempty"`
+
+	// AllowedRequestContentTypes replaces the request media types the CRS
+	// allows (rule 920420), as type/subtype without parameters, for example
+	// application/json. Compared case-insensitively.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +listType=set
+	// +optional
+	AllowedRequestContentTypes []MediaType `json:"allowedRequestContentTypes,omitempty"`
+
+	// DetectionParanoiaLevel runs the rules above paranoiaLevel, up to this
+	// level, without blocking: a request they would have blocked is
+	// logged. From paranoiaLevel to 4.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4
+	// +optional
+	DetectionParanoiaLevel *int32 `json:"detectionParanoiaLevel,omitempty"`
+
+	// OutboundAnomalyThreshold is the response anomaly score at which a
+	// response is blocked (the CRS's default is 4). Only used when the
+	// policy inspects responses.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10000
+	// +optional
+	OutboundAnomalyThreshold *int32 `json:"outboundAnomalyThreshold,omitempty"`
+}
+
+// IsZero reports whether s sets nothing (s may be nil).
+func (s *CRSSettings) IsZero() bool {
+	return s == nil || len(s.AllowedMethods) == 0 && len(s.AllowedRequestContentTypes) == 0 &&
+		s.DetectionParanoiaLevel == nil && s.OutboundAnomalyThreshold == nil
+}
+
+// HTTPMethodToken is an HTTP request method, such as PUT.
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:MaxLength=32
+// +kubebuilder:validation:Pattern=`^[!#$%&'*+.^_~0-9A-Za-z-]+$`
+type HTTPMethodToken string
+
+// MediaType is a media type without parameters, such as application/json.
+// +kubebuilder:validation:MinLength=3
+// +kubebuilder:validation:MaxLength=129
+// +kubebuilder:validation:Pattern=`^[!#$%&'*+.^_~0-9A-Za-z-]+/[!#$%&'*+.^_~0-9A-Za-z-]+$`
+type MediaType string
 
 // RuleSetRef names a WAFRuleSet or a ClusterWAFRuleSet.
 // +kubebuilder:validation:XValidation:rule="self.kind == 'WAFRuleSet' || !has(self.__namespace__)",message="namespace is only allowed for a WAFRuleSet"
