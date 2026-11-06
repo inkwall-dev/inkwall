@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"net"
 	"regexp"
@@ -240,15 +241,80 @@ type Exclusion struct {
 	Path string
 	// Argument limits it to one query or body argument (ARGS:<argument>),
 	// in the rule and the rules chained to it. Empty: the whole rule.
+	// At most one of Argument, ArgumentName, Cookie and Header is set.
 	Argument string
+	// ArgumentName limits it to one argument's name (ARGS_NAMES:<name>).
+	ArgumentName string
+	// Cookie limits it to one request cookie (REQUEST_COOKIES:<name>).
+	Cookie string
+	// Header limits it to one request header (REQUEST_HEADERS:<name>).
+	Header string
 }
 
-// Paths and argument names end up inside SecLang directives: only plain
-// characters, as the WAFPolicy CRD allows, so they can't change a directive.
+// target returns the collection and key e limits its rules to, "" for
+// none.
+func (e Exclusion) target() (variableName, string, error) {
+	var v variableName
+	var key string
+	n := 0
+	for _, c := range []struct {
+		v     variableName
+		value string
+	}{{varArgs, e.Argument}, {varArgsNames, e.ArgumentName}, {varCookies, e.Cookie}, {varHeaders, e.Header}} {
+		if c.value != "" {
+			v, key = c.v, c.value
+			n++
+		}
+	}
+	switch {
+	case n > 1:
+		return "", "", errors.New("more than one of argument, argument name, cookie and header")
+	case n == 1 && !exclusionName.MatchString(key):
+		return "", "", fmt.Errorf("%s %q has characters other than letters, digits and _.-[]", v.what(), key)
+	}
+	return v, key, nil
+}
+
+// Paths and names end up inside SecLang directives: only plain characters,
+// as the WAFPolicy CRD allows, so they can't change a directive.
 var (
-	exclusionPath     = regexp.MustCompile(`^/[A-Za-z0-9._~/:@!$&'()+,=-]*\*?$`)
-	exclusionArgument = regexp.MustCompile(`^[A-Za-z0-9_.\-\[\]]+$`)
+	exclusionPath = regexp.MustCompile(`^/[A-Za-z0-9._~/:@!$&'()+,=-]*\*?$`)
+	exclusionName = regexp.MustCompile(`^[A-Za-z0-9_.\-\[\]]+$`)
 )
+
+// variableName is a collection an exclusion can name, as SecLang spells it.
+type variableName string
+
+const (
+	varArgs      variableName = "ARGS"
+	varArgsNames variableName = "ARGS_NAMES"
+	varCookies   variableName = "REQUEST_COOKIES"
+	varHeaders   variableName = "REQUEST_HEADERS"
+)
+
+func (v variableName) variable() variables.RuleVariable {
+	switch v {
+	case varArgsNames:
+		return variables.ArgsNames
+	case varCookies:
+		return variables.RequestCookies
+	case varHeaders:
+		return variables.RequestHeaders
+	}
+	return variables.Args
+}
+
+func (v variableName) what() string {
+	switch v {
+	case varArgsNames:
+		return "argument name"
+	case varCookies:
+		return "cookie"
+	case varHeaders:
+		return "header"
+	}
+	return "argument"
+}
 
 // exclusions are compiled Exclusions. Coraza's ctl actions
 // (ctl:ruleRemoveById, ctl:ruleRemoveTargetById) apply them to one
@@ -262,8 +328,9 @@ type exclusions struct {
 }
 
 type target struct {
-	rule int
-	arg  string // lower case, as ctl:ruleRemoveTargetById stores it
+	rule     int
+	variable variableName
+	key      string // lower case, as Coraza compares keys
 }
 
 // pathExclusion applies on a path: a request path equal to path, or, for a
@@ -321,8 +388,9 @@ func compileExclusions(list []Exclusion) (*exclusions, error) {
 		if e.Path != "" && !exclusionPath.MatchString(e.Path) {
 			return nil, fmt.Errorf("exclusion %d: path %q is not a plain path pattern", i, e.Path)
 		}
-		if e.Argument != "" && !exclusionArgument.MatchString(e.Argument) {
-			return nil, fmt.Errorf("exclusion %d: argument %q has characters other than letters, digits and _.-[]", i, e.Argument)
+		variable, key, err := e.target()
+		if err != nil {
+			return nil, fmt.Errorf("exclusion %d: %w", i, err)
 		}
 		ids, targets := &x.rules, &x.targets
 		if e.Path != "" {
@@ -334,10 +402,10 @@ func compileExclusions(list []Exclusion) (*exclusions, error) {
 		for _, r := range e.RuleIDs {
 			switch {
 			case e.Path != "" && setupRules[r]:
-			case e.Argument == "":
+			case key == "":
 				*ids = append(*ids, r)
 			default:
-				*targets = append(*targets, target{rule: r, arg: strings.ToLower(e.Argument)})
+				*targets = append(*targets, target{rule: r, variable: variable, key: strings.ToLower(key)})
 			}
 		}
 	}
@@ -347,19 +415,9 @@ func compileExclusions(list []Exclusion) (*exclusions, error) {
 	return x, nil
 }
 
-func (x *exclusions) hasTargets() bool {
-	if x == nil {
-		return false
-	}
-	if len(x.targets) > 0 {
-		return true
-	}
-	for i := range x.paths {
-		if len(x.paths[i].targets) > 0 {
-			return true
-		}
-	}
-	return false
+// empty reports whether x turns nothing off.
+func (x *exclusions) empty() bool {
+	return len(x.rules) == 0 && len(x.targets) == 0 && len(x.paths) == 0
 }
 
 // ruleRemover is what Coraza's ctl actions call on a transaction. Coraza
@@ -387,7 +445,7 @@ func (x *exclusions) apply(tx types.Transaction, rawURI string) error {
 			rm.RemoveRuleByID(r)
 		}
 		for _, t := range targets {
-			rm.RemoveRuleTargetByID(t.rule, variables.Args, t.arg, nil)
+			rm.RemoveRuleTargetByID(t.rule, t.variable.variable(), t.key, nil)
 		}
 	}
 	remove(x.rules, x.targets)
@@ -403,16 +461,137 @@ func (x *exclusions) apply(tx types.Transaction, rawURI string) error {
 	return nil
 }
 
-// argsNegation finds SecLang that negates ARGS targets itself
-// ("ARGS|!ARGS:q", SecRuleUpdateTargetById 942100 "!ARGS:q"), conservatively.
+// negationPatterns find SecLang that negates targets of a collection itself
+// ("REQUEST_HEADERS|!REQUEST_HEADERS:Referer", SecRuleUpdateTargetById 942100
+// "!ARGS:q"), conservatively (ARGS covers ARGS_NAMES and ARGS_GET...).
 // Coraza 3.8.1 adds a transaction's target exclusions
-// (ctl:ruleRemoveTargetById) to the rule's own negations in place: when that
-// slice has spare capacity, concurrent transactions overwrite each other's
-// exclusions, and a request can get another request's. Rules from Inkwall and
-// the CRS negate no ARGS targets, so their rules take target exclusions per
-// transaction. Rules that do never do: a policy with argument exclusions gets
-// rule sets of its own with them compiled in (argsVariants).
-var argsNegation = regexp.MustCompile(`(?i)!\s*args`)
+// (ctl:ruleRemoveTargetById) to the rule's own negations of that collection
+// in place: when that slice has spare capacity, concurrent transactions
+// overwrite each other's exclusions, and a request can get another request's.
+// So a target exclusion is applied per transaction only on a rule that
+// negates nothing of its collection; on one that does, a policy gets rule
+// sets of its own with it compiled in (targetVariants). Which CRS rules
+// negate what is parsed from its files (crsNegations); any negation of a
+// collection in the user's SecLang counts for every rule.
+var negationPatterns = map[variableName]*regexp.Regexp{
+	varArgs:      regexp.MustCompile(`(?i)!\s*args`),
+	varArgsNames: regexp.MustCompile(`(?i)!\s*args`),
+	varCookies:   regexp.MustCompile(`(?i)!\s*request_cookies`),
+	varHeaders:   regexp.MustCompile(`(?i)!\s*request_headers`),
+}
+
+// ruleMetadata is what Coraza tells of each rule it compiles.
+type ruleMetadata = types.RuleMetadata
+
+// negations are the rules that negate targets of each collection
+// themselves.
+type negations struct {
+	// all: every rule may (the user's SecLang negates the collection).
+	all   map[variableName]bool
+	rules map[variableName]map[int]bool
+}
+
+// has reports whether t's rule negates targets of t's collection.
+func (n *negations) has(t target) bool {
+	return n.all[t.variable] || n.rules[t.variable][t.rule]
+}
+
+// userNegations are the collections the user's SecLang negates anywhere. An
+// Include may load anything: every collection.
+func userNegations(cfg Config) map[variableName]bool {
+	all := map[variableName]bool{}
+	text := cfg.DirectivesBeforeCRS + "\n" + cfg.Directives
+	include := regexp.MustCompile(`(?im)^\s*Include\b`).MatchString(text)
+	for v, rx := range negationPatterns {
+		all[v] = include || rx.MatchString(text)
+	}
+	return all
+}
+
+// crsNegations parses the CRS and coraza.conf-recommended for the rules
+// that negate each collection. A chained rule's negations count for the
+// rule that starts the chain, as Coraza applies its target exclusions to the
+// whole chain.
+var crsNegations = sync.OnceValues(func() (*negations, error) {
+	n := &negations{rules: map[variableName]map[int]bool{}}
+	for v := range negationPatterns {
+		n.rules[v] = map[int]bool{}
+	}
+	id := regexp.MustCompile(`\bid:'?(\d+)`)
+	err := fs.WalkDir(coreruleset.FS, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".conf") && !strings.HasSuffix(path, ".example") && !strings.HasSuffix(path, "-recommended") {
+			return err
+		}
+		data, err := fs.ReadFile(coreruleset.FS, path)
+		if err != nil {
+			return err
+		}
+		parent := 0
+		for _, directive := range seclangDirectives(string(data)) {
+			name, rest, _ := strings.Cut(directive, " ")
+			var ids []int
+			switch strings.ToLower(name) {
+			case "secrule", "secaction":
+				if m := id.FindStringSubmatch(directive); m != nil {
+					parent, _ = strconv.Atoi(m[1])
+				}
+				ids = []int{parent}
+			case "secruleupdatetargetbyid":
+				// SecRuleUpdateTargetById 932240 "!REQUEST_COOKIES:..."
+				// (or a range, 932240-932249).
+				lo, hi, _ := strings.Cut(strings.Fields(rest)[0], "-")
+				first, err1 := strconv.Atoi(lo)
+				last, err2 := strconv.Atoi(cmp.Or(hi, lo))
+				if err1 != nil || err2 != nil || last < first || last-first > 10000 {
+					return fmt.Errorf("%s: can't read the rule IDs of %s", path, directive)
+				}
+				for r := first; r <= last; r++ {
+					ids = append(ids, r)
+				}
+			}
+			for v, rx := range negationPatterns {
+				if !rx.MatchString(directive) {
+					continue
+				}
+				if len(ids) == 0 || ids[0] == 0 {
+					return fmt.Errorf("%s: a negation outside a rule Inkwall can name: %s", path, directive)
+				}
+				for _, r := range ids {
+					n.rules[v][r] = true
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("parse the CRS: %w", err)
+	}
+	return n, nil
+})
+
+// seclangDirectives splits SecLang into directives, joining continued
+// lines and leaving out comments.
+func seclangDirectives(text string) []string {
+	var out []string
+	var cur strings.Builder
+	for _, line := range strings.Split(text, "\n") {
+		t := strings.TrimSpace(line)
+		if cur.Len() == 0 && (t == "" || strings.HasPrefix(t, "#")) {
+			continue
+		}
+		if c, ok := strings.CutSuffix(t, "\\"); ok {
+			cur.WriteString(c + " ")
+			continue
+		}
+		cur.WriteString(t)
+		out = append(out, cur.String())
+		cur.Reset()
+	}
+	if cur.Len() > 0 {
+		out = append(out, cur.String())
+	}
+	return out
+}
 
 // Evaluator evaluates requests with a compiled Coraza WAF and its
 // exclusions. It is safe for concurrent use.
@@ -422,22 +601,23 @@ type Evaluator struct {
 	// base is the compiled rules without exclusions: waf, unless the
 	// argument exclusions are compiled in (variants).
 	base coraza.WAF
-	// private is set when the rules negate ARGS targets themselves
-	// (argsNegation).
+	// private is what compiling target exclusions in needs (nil only for
+	// an Evaluator not made by New).
 	private *privateRules
-	// variants, if set, replace waf: the rules with the argument
-	// exclusions compiled in.
-	variants *argsVariants
+	// variants, if set, replace waf: the rules with the target exclusions
+	// on rules that negate their collection compiled in.
+	variants *targetVariants
 	// crs is set when the rules include the CRS; tx are then the CRS
 	// settings set on each transaction.
 	crs bool
 	tx  []txVar
 }
 
-// privateRules are rules that negate ARGS targets themselves.
+// privateRules are what an Evaluator needs to compile target exclusions in.
 type privateRules struct {
-	cfg Config
-	ids map[int]bool // the rules cfg compiles to
+	cfg       Config
+	ids       map[int]bool // the rules cfg compiles to
+	negations *negations
 }
 
 var _ rules.Evaluator = (*Evaluator)(nil)
@@ -449,19 +629,20 @@ func New(cfg Config) (*Evaluator, error) {
 	if _, err := compileExclusions(list); err != nil {
 		return nil, err
 	}
-	var private *privateRules
-	if argsNegation.MatchString(cfg.DirectivesBeforeCRS) || argsNegation.MatchString(cfg.Directives) {
-		private = &privateRules{cfg: cfg, ids: map[int]bool{}}
+	neg := &negations{all: userNegations(cfg)}
+	if !cfg.DisableCRS {
+		crs, err := crsNegations()
+		if err != nil {
+			return nil, err
+		}
+		neg.rules = crs.rules
 	}
-	var observe func(types.RuleMetadata)
-	if private != nil {
-		observe = func(r types.RuleMetadata) { private.ids[r.ID()] = true }
-	}
-	waf, err := compile(cfg, observe)
+	private := &privateRules{cfg: cfg, ids: map[int]bool{}, negations: neg}
+	waf, err := compile(cfg, func(r types.RuleMetadata) { private.ids[r.ID()] = true })
 	if err != nil {
 		return nil, err
 	}
-	if private != nil && len(private.ids) == 0 {
+	if len(private.ids) == 0 && (cfg.Directives != "" || cfg.DirectivesBeforeCRS != "" || !cfg.DisableCRS) {
 		return nil, errors.New("this Coraza version doesn't list the rules it compiles")
 	}
 	e := &Evaluator{waf: waf, base: waf, private: private, crs: !cfg.DisableCRS}
@@ -502,19 +683,19 @@ func compile(cfg Config, observe func(types.RuleMetadata)) (coraza.WAF, error) {
 
 // WithExclusions returns an evaluator with e's compiled rules and the
 // exclusions list instead of e's. It compiles no rules, so policies that
-// differ only in exclusions share one rule set; except when e's rules negate
-// ARGS targets themselves and list excludes arguments (see argsNegation).
+// differ only in exclusions share one rule set; except for target exclusions
+// on rules that negate their collection themselves (see negationPatterns).
 func (e *Evaluator) WithExclusions(list []Exclusion) (*Evaluator, error) {
 	x, err := compileExclusions(list)
 	if err != nil {
 		return nil, err
 	}
 	ev := &Evaluator{waf: e.base, base: e.base, private: e.private, crs: e.crs, tx: e.tx}
-	if e.private != nil && x.hasTargets() {
+	if e.private != nil && x != nil {
 		if ev.variants, err = e.private.variants(x); err != nil {
 			return nil, err
 		}
-		if len(x.rules) == 0 && len(x.paths) == 0 {
+		if x.empty() {
 			x = nil
 		}
 	}
@@ -564,31 +745,54 @@ func (e *Evaluator) setCRS(tx types.Transaction) error {
 	return nil
 }
 
-// argsVariants are the rule sets of a policy whose rules negate ARGS targets
-// themselves (argsNegation) and that has argument exclusions. No argument
-// exclusion is applied per transaction: each rule set has the ones
-// everywhere and those of one set of path exclusions compiled in, as
+// targetVariants are the rule sets of a policy with target exclusions on
+// rules that negate their collection themselves (see negationPatterns).
+// Those exclusions are not applied per transaction: each rule set has the
+// ones everywhere and those of one set of path exclusions compiled in, as
 // SecRuleUpdateTargetById after the user's rules (which, unlike
 // ctl:ruleRemoveTargetById, leaves chained rules alone). A request gets the
-// rule set for the path exclusions it is on.
-type argsVariants struct {
+// rule set for the path exclusions it is on. The other target exclusions
+// are still applied per transaction.
+type targetVariants struct {
 	everywhere []target
-	paths      []pathExclusion // those with argument exclusions
+	paths      []pathExclusion // those with such target exclusions
 	wafs       map[string]coraza.WAF
 }
 
-// variants compiles the rule sets for x's argument exclusions, and takes
-// them out of x.
-func (p *privateRules) variants(x *exclusions) (*argsVariants, error) {
-	v := &argsVariants{everywhere: x.targets, wafs: map[string]coraza.WAF{}}
-	x.targets = nil
+// variants compiles the rule sets for x's target exclusions on rules that
+// negate their collection, and takes those out of x; nil if it has none.
+func (p *privateRules) variants(x *exclusions) (*targetVariants, error) {
+	// Most policies have no such exclusion: find out without allocating.
+	needed := slices.ContainsFunc(x.targets, p.negations.has)
+	for i := 0; !needed && i < len(x.paths); i++ {
+		needed = slices.ContainsFunc(x.paths[i].targets, p.negations.has)
+	}
+	if !needed {
+		return nil, nil
+	}
+	split := func(ts []target) (keep, out []target) {
+		for _, t := range ts {
+			if p.negations.has(t) {
+				out = append(out, t)
+			} else {
+				keep = append(keep, t)
+			}
+		}
+		return keep, out
+	}
+	v := &targetVariants{wafs: map[string]coraza.WAF{}}
+	x.targets, v.everywhere = split(x.targets)
 	for i := range x.paths {
-		if px := &x.paths[i]; len(px.targets) > 0 {
-			v.paths = append(v.paths, pathExclusion{path: px.path, prefix: px.prefix, targets: px.targets})
-			px.targets = nil
+		px := &x.paths[i]
+		var out []target
+		if px.targets, out = split(px.targets); len(out) > 0 {
+			v.paths = append(v.paths, pathExclusion{path: px.path, prefix: px.prefix, targets: out})
 		}
 	}
-	x.paths = slices.DeleteFunc(x.paths, func(px pathExclusion) bool { return len(px.rules) == 0 })
+	if len(v.everywhere) == 0 && len(v.paths) == 0 {
+		return nil, nil
+	}
+	x.paths = slices.DeleteFunc(x.paths, func(px pathExclusion) bool { return len(px.rules) == 0 && len(px.targets) == 0 })
 	// The sets of path exclusions a request can be on: none; those a path
 	// equal to an exact one is on; and, for a clean path whose longest
 	// matching prefix is a given one, that prefix and the shorter ones it
@@ -616,7 +820,7 @@ func (p *privateRules) variants(x *exclusions) (*argsVariants, error) {
 			// A rule that isn't there is ignored, as by
 			// ctl:ruleRemoveTargetById.
 			if p.ids[t.rule] {
-				fmt.Fprintf(&b, "\nSecRuleUpdateTargetById %d \"!ARGS:%s\"", t.rule, t.arg)
+				fmt.Fprintf(&b, "\nSecRuleUpdateTargetById %d \"!%s:%s\"", t.rule, t.variable, t.key)
 			}
 		}
 		cfg.Directives = b.String()
@@ -631,13 +835,16 @@ func (p *privateRules) variants(x *exclusions) (*argsVariants, error) {
 
 // targets returns the exclusions everywhere and set, sorted and without
 // duplicates.
-func (v *argsVariants) targets(set []target) []target {
+func (v *targetVariants) targets(set []target) []target {
 	all := append(slices.Clone(v.everywhere), set...)
 	slices.SortFunc(all, func(a, b target) int {
 		if a.rule != b.rule {
 			return a.rule - b.rule
 		}
-		return strings.Compare(a.arg, b.arg)
+		if a.variable != b.variable {
+			return strings.Compare(string(a.variable), string(b.variable))
+		}
+		return strings.Compare(a.key, b.key)
 	})
 	return slices.Compact(all)
 }
@@ -645,14 +852,14 @@ func (v *argsVariants) targets(set []target) []target {
 func targetsKey(targets []target) string {
 	var b strings.Builder
 	for _, t := range targets {
-		fmt.Fprintf(&b, "%d|%s\n", t.rule, t.arg)
+		fmt.Fprintf(&b, "%d|%s|%s\n", t.rule, t.variable, t.key)
 	}
 	return b.String()
 }
 
 // waf returns the rule set for a request with path, from
 // exclusionRequestPath ("" matches no path exclusion).
-func (v *argsVariants) waf(path string) (coraza.WAF, error) {
+func (v *targetVariants) waf(path string) (coraza.WAF, error) {
 	var set []target
 	for i := range v.paths {
 		if path != "" && v.paths[i].matches(path) {

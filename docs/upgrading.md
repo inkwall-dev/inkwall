@@ -44,6 +44,14 @@ What's new:
   `inkwallctl migrate ingress-nginx` now maps `tx.allowed_methods`,
   `tx.allowed_request_content_type`, `tx.detection_paranoia_level` and
   `tx.outbound_anomaly_score_threshold` to these fields instead of marking them `TODO`.
+- **Exclusions for a cookie, a header or an argument name.** An exclusion's `when` takes
+  `cookie`, `header` or `argumentName` besides `argument` (at most one of the four), for false
+  positives on a session cookie, a `Referer` or a JSON header: `{ruleIDs: [942100], when: {cookie:
+  session}}`. Upgrade the chart first, for the new CRD fields. An engine before 0.5.0 ignores these
+  exclusions (the rules still look at the cookie or header), and a policy that has one is
+  `Enforced=False` (`EnginesOutdated`) until every engine runs 0.5.0. `inkwallctl migrate
+  ingress-nginx` now converts `!REQUEST_COOKIES:name`, `!REQUEST_HEADERS:name` and
+  `!ARGS_NAMES:name` targets instead of keeping them as SecLang.
 - **The client IP behind an HTTP load balancer.** `InkwallConfig.spec.engine.clientIP` takes
   `trustedProxies` (the load balancer's CIDRs) and `trustedHops`, for Envoy Gateway, Istio and
   HAProxy behind an AWS ALB or another load balancer that appends to `X-Forwarded-For`
@@ -53,6 +61,14 @@ What's new:
 
 What changes by itself:
 
+- **`Enforced` counts the engines that serve the policy.** A policy's `Enforced` condition (and
+  its `EnginesBehind`, `EngineNack` and `EnginesOutdated` reasons) now counts only the engines on
+  the proxy pods that serve its routes, once the operator has wired them all. An engine of one
+  proxy that is behind, rejects a bundle or is too old no longer makes the policies of another
+  proxy `Enforced=False`. A policy whose routes aren't all wired, and an engine whose pod the
+  operator doesn't know, still count everywhere. `inkwall_operator_engines` gets an
+  `integration` label (`unknown` for engines not matched to a proxy): sum over it for the old
+  totals.
 - **Security event log lines say where rules matched, and are rate-limited.** Each line has
   `matches`, the rule and the variable it matched (`{"rule_id":942100,"variable":"ARGS:q"}`),
   never the value. An engine logs at most 10 lines per second for each policy and rule (the

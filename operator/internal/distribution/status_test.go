@@ -232,6 +232,32 @@ func TestEnforcedOutdatedEngine(t *testing.T) {
 		}
 	}
 
+	// Cookie, header and argument name exclusions (#357): an engine before
+	// 0.5.0 ignores them.
+	for _, tc := range []struct {
+		name       string
+		exclusions []wafv1alpha1.Exclusion
+		versions   []string
+		reason     string
+	}{
+		{"cookie, 0.4.1 engine", []wafv1alpha1.Exclusion{{RuleIDs: []int32{1}, When: &wafv1alpha1.ExclusionMatch{Path: "/a"}}, {RuleIDs: []int32{1}, When: &wafv1alpha1.ExclusionMatch{Cookie: "s"}}}, []string{"0.5.0", "0.4.1"}, ReasonEnginesOutdated},
+		{"header, new engines", []wafv1alpha1.Exclusion{{RuleIDs: []int32{1}, When: &wafv1alpha1.ExclusionMatch{Header: "X"}}}, []string{"0.5.0"}, ReasonEnforced},
+		{"argument, 0.4.1 engine", []wafv1alpha1.Exclusion{{RuleIDs: []int32{1}, When: &wafv1alpha1.ExclusionMatch{Argument: "q"}}}, []string{"0.4.1"}, ReasonEnforced},
+	} {
+		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
+		p.Spec.Exclusions = tc.exclusions
+		p.Status.BundleVersion = 3
+		var engines []Engine
+		for i, v := range tc.versions {
+			engines = append(engines, Engine{ID: fmt.Sprintf("e%d", i), PodNamespace: "edge", PodName: fmt.Sprintf("envoy-%d", i), EngineVersion: v, Applied: 3})
+		}
+		conds, _ := enforcedConditions(p, 3, false, engines, 0)
+		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
+		if c == nil || c.Reason != tc.reason || tc.reason == ReasonEnginesOutdated && !strings.Contains(c.Message, "spec.exclusions[1].when") {
+			t.Errorf("%s: Enforced %+v, want %s", tc.name, c, tc.reason)
+		}
+	}
+
 	// Behind comes first: the engine doesn't run the bundle at all.
 	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
 	p.Spec.WebSocket = ws
