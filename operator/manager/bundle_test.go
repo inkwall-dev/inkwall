@@ -308,16 +308,14 @@ func testBundles(ctx context.Context, t *testing.T, c client.Client) {
 	})
 
 	// events.redact goes to the engines in the bundle (#355).
+	// The operator writes the InkwallConfig's status meanwhile: update on
+	// the latest version, retrying on a conflict.
 	off := false
-	if err := c.Get(ctx, client.ObjectKeyFromObject(cfg), cfg); err != nil {
-		t.Fatal(err)
-	}
-	cfg.Spec.Events.Redact = wafv1alpha1.RedactSpec{
-		Headers: []wafv1alpha1.HeaderName{"X-Tenant"}, Arguments: []wafv1alpha1.ArgumentPattern{"email"}, Snippets: &off,
-	}
-	if err := c.Update(ctx, cfg); err != nil {
-		t.Fatal(err)
-	}
+	update(ctx, t, c, cfg, func(cfg *wafv1alpha1.InkwallConfig) {
+		cfg.Spec.Events.Redact = wafv1alpha1.RedactSpec{
+			Headers: []wafv1alpha1.HeaderName{"X-Tenant"}, Arguments: []wafv1alpha1.ArgumentPattern{"email"}, Snippets: &off,
+		}
+	})
 	eventually(t, "events.redact in the bundle", func() string {
 		ev := current(ctx, t, c).GetEvents()
 		if !ev.GetNoSnippets() || !slices.Equal(ev.GetRedactHeaders(), []string{"X-Tenant"}) ||

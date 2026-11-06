@@ -937,6 +937,20 @@ A wrong client IP makes rate limits and IP lists worse than none. The engine tak
 Behind a load balancer, the proxy must learn the client address first: through the PROXY protocol
 or `externalTrafficPolicy: Local` ([§6.3](#63-traefik)).
 
+**Built (#364):** behind an HTTP load balancer, the InkwallConfig's `spec.engine.clientIP` lists
+`trustedProxies` (CIDRs) and `trustedHops` for the injected engines, which always trust the loopback
+as well. The walk skips the proxy's own entries, then `trustedHops` entries whatever their address,
+then trusted CIDRs. Entries may carry a port. `trustedHops` applies only behind a trusted peer, so
+an untrusted peer stays the client, and the webhook rejects a prefix the engine would refuse and
+warns of one that trusts every address.
+
+The engine can also read RFC 7239 `Forwarded` (`--client-ip-header=forwarded`), but the
+InkwallConfig doesn't offer it. Envoy and Istio's Envoy append their TCP peer to `X-Forwarded-For`,
+never to `Forwarded`. In `Forwarded` the rightmost entry would be one the client may have written
+itself, with nothing appended by the proxy beside the engine to anchor the walk, so trusting it
+would let clients choose their address. It is for a standalone engine behind a proxy that sets or
+replaces the header.
+
 ### 8.3 Data privacy
 
 Bodies never leave the engine. Events carry only a redacted snippet of at most 64 bytes. Headers
