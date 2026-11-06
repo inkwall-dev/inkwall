@@ -117,7 +117,10 @@ for patching released versions.
 ### Cutting a release
 
 1. Check that CI is green on the commit, and try the build with `make release-snapshot` (binaries
-   and archives in `dist/`, nothing signed or published).
+   and archives in `dist/`, nothing signed or published). The examples that pin the engine image,
+   `examples/raw-envoy/kustomization.yaml` (`newTag`), name the release being cut: bump them in
+   a PR before tagging. The READMEs write `<version>` (`make docs-check` fails on a pinned
+   release there), so they need no bump.
 2. Tag it with a [signed, annotated tag](https://git-scm.com/book/en/v2/Git-Tools-Signing-Your-Work) and push the tag:
 
    ```sh
@@ -139,7 +142,7 @@ for patching released versions.
    verify an image:
 
    ```sh
-   cosign verify ghcr.io/inkwall-dev/inkwall-engine:0.3.0 \
+   cosign verify ghcr.io/inkwall-dev/inkwall-engine:<version> \
      --certificate-identity-regexp '^https://github.com/inkwall-dev/inkwall/\.github/workflows/release\.yaml@refs/tags/v' \
      --certificate-oidc-issuer https://token.actions.githubusercontent.com
    ```
