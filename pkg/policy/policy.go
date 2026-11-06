@@ -133,9 +133,10 @@ func (s *Set) CheckExchange(ctx context.Context, r *request.Request) (pipeline.V
 	return v, x
 }
 
-// BodyLimit implements pipeline.Inspector: the policy's body limit, or 0
-// when its bodies, or the route's, are not inspected.
-func (s *Set) BodyLimit(r *request.Request, _ int64) int64 {
+// BodyLimit implements pipeline.Inspector: the policy's body limit, at
+// most max (the adapter's own) when max is positive, or 0 when its bodies,
+// or the route's, are not inspected.
+func (s *Set) BodyLimit(r *request.Request, max int64) int64 {
 	if s.suspended {
 		return 0
 	}
@@ -143,7 +144,11 @@ func (s *Set) BodyLimit(r *request.Request, _ int64) int64 {
 	if p == nil {
 		return 0
 	}
-	return p.pipeline.BodyLimit(r, p.bodyLimit)
+	limit := p.bodyLimit
+	if max > 0 {
+		limit = min(limit, max)
+	}
+	return p.pipeline.BodyLimit(r, limit)
 }
 
 // Compile compiles a bundle. An error names the policy that failed: the
@@ -227,8 +232,9 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 	if body := bp.GetBody(); body != nil {
 		if !body.GetInspect() {
 			bodyLimit = 0
-		} else if body.GetMaxBytes() > 0 {
-			bodyLimit = body.GetMaxBytes()
+		} else if n := body.GetMaxBytes(); n > 0 {
+			// The CRD bounds it, but a bundle from elsewhere may not.
+			bodyLimit = min(n, MaxBodyBytes)
 		}
 		oversize = oversizeAction(body.GetOnOversize())
 	}
