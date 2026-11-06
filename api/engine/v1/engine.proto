@@ -123,4 +123,18 @@ message CheckResponse {
   // none did (no policy covers the request, or inspection is suspended),
   // or outside bundle mode.
   string policy = 9;
+  // Where the rules matched: each rule and the variable it matched (e.g.
+  // ARGS:q), never the matched value. At most 32, variable names cut to
+  // 128 bytes, as in security events.
+  repeated RuleMatch matches = 10;
+  // The request's inbound anomaly score (the Core Rule Set's), 0 when no
+  // rule added to it.
+  int32 anomaly_score = 11;
+}
+
+// RuleMatch is where a rule matched.
+message RuleMatch {
+  uint32 rule_id = 1;
+  // The variable: collection and key, e.g. ARGS:q or REQUEST_HEADERS:User-Agent.
+  string variable = 2;
 }

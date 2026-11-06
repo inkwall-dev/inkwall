@@ -165,6 +165,17 @@ func (b *Buffer) Return(batch *eventsv1.EventBatch) {
 type Recorder struct {
 	Source Source
 	Buffer *Buffer
+	// Log rate-limits the events' log lines (nil: every one is logged).
+	Log *LogLimiter
+}
+
+// AllowLog reports whether v's log line is written, and how many lines of
+// its policy and rule were left out since the last one.
+func (r *Recorder) AllowLog(v pipeline.Verdict) (bool, uint64) {
+	if r == nil {
+		return true, 0
+	}
+	return r.Log.Allow(v)
 }
 
 // Record adds the event for req and v.

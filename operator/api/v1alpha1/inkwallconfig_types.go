@@ -87,7 +87,55 @@ type InkwallConfigSpec struct {
 	// SigningKey configures the key the operator signs policy bundles with.
 	// +optional
 	SigningKey SigningKeySpec `json:"signingKey,omitempty"`
+
+	// Events configures what the engines' security events carry to the
+	// operator (and on to the control plane, when one is connected).
+	// +optional
+	Events EventsSpec `json:"events,omitempty"`
 }
+
+// EventsSpec configures the engines' security events.
+type EventsSpec struct {
+	// Redact keeps more of what rules matched out of the events.
+	// +optional
+	Redact RedactSpec `json:"redact,omitempty"`
+}
+
+// RedactSpec adds to the redaction every engine applies to the snippets of
+// its security events: the up to 64 bytes of what each rule matched. Always
+// redacted: cookies, response bodies, the Authorization, Cookie, Set-Cookie
+// and Proxy-Authorization headers, and arguments and headers whose names
+// look like credentials (password, secret, token, api key, auth, session,
+// JWT, card, SSN; see docs/design/0002 §8.3).
+type RedactSpec struct {
+	// Headers are more header names whose values leave no snippet, matched
+	// without regard to case.
+	// +kubebuilder:validation:MaxItems=64
+	// +listType=set
+	// +optional
+	Headers []HeaderName `json:"headers,omitempty"`
+
+	// Arguments are more argument-name patterns: a match on a query or
+	// body argument whose name contains one, without regard to case, leaves
+	// no snippet ("email" covers email, user_email and json.user.Email).
+	// +kubebuilder:validation:MaxItems=64
+	// +listType=set
+	// +optional
+	Arguments []ArgumentPattern `json:"arguments,omitempty"`
+
+	// Snippets set to false sends no snippets at all: events keep the rule
+	// and the variable it matched, never what it matched.
+	// +kubebuilder:default=true
+	// +optional
+	Snippets *bool `json:"snippets,omitempty"`
+}
+
+// ArgumentPattern is part of an argument name, as WAFPolicy exclusions
+// name arguments.
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:MaxLength=256
+// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.\-\[\]]+$`
+type ArgumentPattern string
 
 // RotateSigningKeyAnnotation on the InkwallConfig requests a rotation of the
 // bundle signing key: each new value starts one (a timestamp, say). The
@@ -152,7 +200,26 @@ type EngineSpec struct {
 	// +kubebuilder:default=AllowAll
 	// +optional
 	BootstrapMode BootstrapMode `json:"bootstrapMode,omitempty"`
+
+	// LogLevel is the engines' log level: Debug, Info, Warn or Error.
+	// Security events are logged at Warn, so Error hides them (they still
+	// go to the operator). Unset: the engine's default, Info. Applies to
+	// pods injected from then on.
+	// +optional
+	LogLevel LogLevel `json:"logLevel,omitempty"`
 }
+
+// LogLevel is an engine's log level.
+// +kubebuilder:validation:Enum=Debug;Info;Warn;Error
+type LogLevel string
+
+// Engine log levels.
+const (
+	LogLevelDebug LogLevel = "Debug"
+	LogLevelInfo  LogLevel = "Info"
+	LogLevelWarn  LogLevel = "Warn"
+	LogLevelError LogLevel = "Error"
+)
 
 // IntegrationSpec overrides discovery for one proxy controller.
 type IntegrationSpec struct {

@@ -260,7 +260,13 @@ func toResponse(id string, v pipeline.Verdict) *enginev1.CheckResponse {
 	for _, rid := range v.RuleIDs {
 		ids = append(ids, uint32(rid)) // #nosec G115 -- rule IDs are positive and below 2^32
 	}
+	var matches []*enginev1.RuleMatch
+	for _, m := range events.LogMatches(v) {
+		matches = append(matches, &enginev1.RuleMatch{RuleId: uint32(m.RuleID), Variable: m.Variable}) // #nosec G115 -- a rule ID
+	}
 	return &enginev1.CheckResponse{
+		Matches:            matches,
+		AnomalyScore:       int32(v.AnomalyScore), // #nosec G115 -- scores are small
 		Action:             events.Action(v.Action),
 		Status:             uint32(v.Status), // #nosec G115 -- an HTTP status
 		ResponseHeaders:    []*enginev1.Header{{Name: "X-Request-Id", Value: id}},

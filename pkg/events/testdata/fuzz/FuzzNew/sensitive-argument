@@ -1,0 +1,13 @@
+go test fuzz v1
+string("POST")
+string("shop.example")
+string("/login")
+string("curl/8")
+string("")
+string("")
+string("ARGS_POST:user_password")
+string("hunter2' OR 1=1")
+int(2)
+string("")
+string("")
+bool(false)
