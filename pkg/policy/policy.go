@@ -71,6 +71,7 @@ type Set struct {
 	version   uint64
 	suspended bool
 	probeKey  []byte
+	redaction *events.Redaction
 	policies  []*Policy
 	match     *matcher
 }
@@ -153,7 +154,8 @@ func Compile(b *bundlev1.Bundle, o Options) (*Set, error) {
 	for _, rs := range b.GetRuleSets() {
 		ruleSets[rs.GetId()] = rs
 	}
-	set := &Set{version: b.GetVersion(), suspended: b.GetSuspended(), probeKey: bytes.Clone(b.GetProbeKey())}
+	set := &Set{version: b.GetVersion(), suspended: b.GetSuspended(), probeKey: bytes.Clone(b.GetProbeKey()),
+		redaction: events.NewRedaction(b.GetEvents())}
 	var routes []route
 	used := map[[sha256.Size]byte]bool{}
 	ids := map[string]bool{}
@@ -383,6 +385,15 @@ func (h *Holder) Store(s *Set) { h.set.Store(s) }
 func (h *Holder) ProbeKey() []byte {
 	if s := h.set.Load(); s != nil {
 		return s.probeKey
+	}
+	return nil
+}
+
+// Redaction is the active set's events redaction, nil before the first
+// set or without one.
+func (h *Holder) Redaction() *events.Redaction {
+	if s := h.set.Load(); s != nil {
+		return s.redaction
 	}
 	return nil
 }

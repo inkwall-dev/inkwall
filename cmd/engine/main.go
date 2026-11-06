@@ -747,6 +747,7 @@ func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logge
 	metrics.Register(buf.Collectors()...)
 	rec := &events.Recorder{Buffer: buf, Source: events.Source{
 		EngineID: podName, PodNamespace: os.Getenv("POD_NAMESPACE"), PodName: podName, BundleVersion: ag.Version,
+		Redaction: holder.Redaction,
 	}}
 	return ag, holder, rec, nil
 }
