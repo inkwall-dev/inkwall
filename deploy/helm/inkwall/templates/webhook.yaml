@@ -35,8 +35,19 @@ metadata:
   annotations:
     cert-manager.io/inject-ca-from: {{ $.Release.Namespace }}/{{ include "inkwall.webhook.secret" $ }}
   {{- end }}
+{{- /* The operator sets the Pod webhooks' failurePolicy (Fail while a policy
+blocks, 0004 §4.3). An upgrade renders the live value, not the chart's
+Ignore: it doesn't reopen the webhook, and Helm 4's server-side apply, which
+refuses to take a field another manager owns, doesn't conflict (#394). */}}
+{{- $live := dict }}
+{{- if eq .kind "MutatingWebhookConfiguration" }}
+{{- range (dig "webhooks" list (lookup "admissionregistration.k8s.io/v1" .kind "" .metadata.name)) }}
+{{- if .failurePolicy }}{{- $_ := set $live .name .failurePolicy }}{{- end }}
+{{- end }}
+{{- end }}
 webhooks:
   {{- range .webhooks }}
+  {{- if hasKey $live .name }}{{- $_ := set . "failurePolicy" (get $live .name) }}{{- end }}
   {{- $_ := set .clientConfig.service "name" (include "inkwall.webhook.service" $) }}
   {{- $_ := set .clientConfig.service "namespace" $.Release.Namespace }}
   {{- $_ := set .clientConfig.service "port" 443 }}
