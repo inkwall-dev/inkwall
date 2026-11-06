@@ -176,6 +176,10 @@ it to block mode.
   protocol is described in [0006](0006-adapter-protocols.md).)
 - Policies are compiled once into an immutable set and swapped through an `atomic.Pointer`, so
   reads take no lock. **Built** (`pkg/policy`).
+- Policies share one compiled rule set unless their rules differ. The CRS paranoia level, anomaly
+  threshold, body limits and exclusions are applied to each transaction, not compiled in, so they
+  cost no extra copy of the CRS (about 2.1 MiB and 10–30 ms each,
+  [0004 §8](0004-operator.md#8-scale-targets-v1)). **Built** (#42, #353).
 - **Not yet:** [`sync.Pool`](https://pkg.go.dev/sync#Pool) buffers, [automaxprocs](https://github.com/uber-go/automaxprocs), `GOMEMLIMIT` at 90% of the memory limit, a tuned
   `GOGC`.
 

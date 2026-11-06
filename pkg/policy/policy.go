@@ -240,7 +240,6 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 		}
 		oversize = oversizeAction(body.GetOnOversize())
 	}
-	cfg.BodyLimit = int(bodyLimit)
 
 	var responses pipeline.ResponseConfig
 	if rc := bp.GetResponses(); rc.GetInspect() {
@@ -250,11 +249,20 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 			responses.MaxBytes = min(n, MaxBodyBytes)
 		}
 		responses.Oversize = oversizeAction(rc.GetOnOversize())
-		cfg.ResponseBodyLimit = int(responses.MaxBytes)
 	}
+	// Coraza's body limits are compiled in, so every policy gets the largest
+	// any may have, for one rule set: the pipeline gives the rules no more
+	// of a body than the policy's own limit (and none of a truncated
+	// request body). Same for the paranoia level and the threshold, which
+	// are set on each transaction.
+	// bodyLimit is MaxBodyBytes at most, or the engine's default
+	// (o.BodyLimit), so the largest is the same for every policy.
+	engineLimit := int(max(MaxBodyBytes, o.BodyLimit))
+	cfg.BodyLimit = engineLimit
+	cfg.ResponseBodyLimit = engineLimit
 
 	// The compiled rules, shared by every policy with the same key whatever
-	// its exclusions, then this policy's exclusions on top.
+	// its CRS settings and exclusions, then this policy's on top.
 	var shared *coraza.Evaluator
 	var err error
 	key = cfg.Key()
@@ -266,8 +274,11 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 	if err != nil {
 		return nil, key, err
 	}
-	eval, err := shared.WithExclusions(exclusions)
+	eval, err := shared.WithCRS(cfg.CRS())
 	if err != nil {
+		return nil, key, err
+	}
+	if eval, err = eval.WithExclusions(exclusions); err != nil {
 		return nil, key, err
 	}
 
@@ -322,10 +333,11 @@ func oversizeAction(a bundlev1.OversizeAction) pipeline.OversizeAction {
 }
 
 // Evaluators caches compiled rule sets by configuration (coraza.Config.Key,
-// without exclusions): policies with the same rules share one (a Coraza WAF
-// with the CRS holds megabytes) whatever their exclusions, and an unchanged
-// policy isn't recompiled when a new bundle arrives. Cached evaluators have
-// no exclusions.
+// without exclusions and CRS settings): policies with the same rules share
+// one (a Coraza WAF with the CRS holds megabytes) whatever their exclusions,
+// paranoia level, threshold and body limits, and an unchanged policy isn't
+// recompiled when a new bundle arrives. Cached evaluators have no
+// exclusions, and the CRS settings of the policy that compiled them.
 type Evaluators struct {
 	mu    sync.Mutex
 	cache map[[sha256.Size]byte]*coraza.Evaluator
