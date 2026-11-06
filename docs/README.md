@@ -62,6 +62,9 @@ Every doc in this repository, by topic, with the question each one answers.
   engine for a verdict?
 - [0007 — Inkwall Rule Engine](design/0007-inkwall-engine.md): how will Inkwall's own Core Rule
   Set evaluator reach the latency budgets Coraza cannot?
+- [0008 — Assistants](design/0008-assistants.md): how can users get answers faster: `inkwallctl explain`,
+  an MCP server for the AI assistants they already use, a docs assistant and a GitHub bot, and the
+  security rules every one of them follows.
 
 ## Contributing
 
