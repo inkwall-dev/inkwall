@@ -145,6 +145,15 @@ func TestInject(t *testing.T) {
 	if !slices.Contains(quiet.Spec.InitContainers[0].Args, "--log-level=warn") {
 		t.Errorf("log level Warn: args %v", quiet.Spec.InitContainers[0].Args)
 	}
+	// Requests by policy, only when asked for (#356).
+	if slices.Contains(pod.Spec.InitContainers[0].Args, "--policy-metrics") {
+		t.Error("--policy-metrics passed without policyMetrics")
+	}
+	counted := traefikPod()
+	Inject(counted, sidecar.Configured(wafv1alpha1.EngineSpec{PolicyMetrics: true}))
+	if !slices.Contains(counted.Spec.InitContainers[0].Args, "--policy-metrics") {
+		t.Errorf("policyMetrics: args %v", counted.Spec.InitContainers[0].Args)
+	}
 
 	// The InkwallConfig's client IP settings (#364): loopback stays trusted.
 	lb := traefikPod()

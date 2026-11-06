@@ -154,6 +154,13 @@ spec:
                     - Warn
                     - Error
                     type: string
+                  policyMetrics:
+                    description: |-
+                      PolicyMetrics adds inkwall_policy_requests_total, the engines'
+                      requests by policy, for up to 500 policies per engine (the rest count
+                      as policy="other"). Off by default: one series per policy, action and
+                      reason. Applies to pods injected from then on.
+                    type: boolean
                   resources:
                     description: |-
                       Resources of the engine container. Setting no CPU limit is

@@ -75,6 +75,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
 
 // MessageName is the spoe-message the agent inspects.
@@ -148,6 +149,9 @@ type Config struct {
 	// Logger receives one security event per denied or logged request.
 	// Nil uses slog.Default().
 	Logger *slog.Logger
+	// Metrics counts the messages and connections the agent can't read
+	// (nil: none).
+	Metrics *telemetry.Metrics
 	// Events records each security event for the operator (nil: logged
 	// only).
 	Events *events.Recorder
@@ -164,6 +168,7 @@ type Server struct {
 	clientIP    *clientip.Resolver
 	readTimeout time.Duration
 	logger      *slog.Logger
+	metrics     *telemetry.Metrics
 	events      *events.Recorder
 	probeKey    func() []byte
 
@@ -204,6 +209,7 @@ func New(p pipeline.Inspector, cfg Config) (*Server, error) {
 		clientIP:    resolver,
 		readTimeout: cfg.ReadTimeout,
 		logger:      logger,
+		metrics:     cfg.Metrics,
 		events:      cfg.Events,
 		probeKey:    cfg.ProbeKey,
 		ctx:         ctx,
@@ -538,6 +544,9 @@ func supportsVersion(list string) bool {
 
 // disconnect sends AGENT-DISCONNECT; the caller closes the connection.
 func (c *conn) disconnect(status uint32, msg string) {
+	if status != statusNormal && status != statusTimeout {
+		c.srv.metrics.AdapterError(telemetry.ErrProtocol)
+	}
 	e := newFrame(frameAgentDisconnect, 0, 0)
 	e.kvUint32("status-code", status)
 	e.kvString("message", msg)
@@ -566,6 +575,7 @@ func (c *conn) notify(f frame) {
 func (s *Server) answer(ctx context.Context, ack *encoder, payload []byte, maxFrame uint32, peer netip.Addr) {
 	req, path, err := s.toRequest(payload, maxFrame)
 	if err != nil {
+		s.metrics.AdapterError(telemetry.ErrInvalidRequest)
 		s.logger.LogAttrs(ctx, slog.LevelError, "invalid spoe message", slog.Any("error", err), slog.String("peer", addrString(peer)))
 		setVerdict(ack, ActionDeny, http.StatusBadRequest, httpadapter.NewRequestID())
 		return

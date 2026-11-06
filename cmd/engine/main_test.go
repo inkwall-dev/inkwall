@@ -710,3 +710,25 @@ func TestParseLogFlags(t *testing.T) {
 		t.Errorf("warn level wrote %q", out.String())
 	}
 }
+
+// --policy-metrics turns on requests by policy, at most
+// --policy-metrics-max policies (#356).
+func TestParsePolicyMetricsFlags(t *testing.T) {
+	cfg, err := parseFlags(cmdForwardAuth, nil, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.policyMetrics || cfg.policyMetricsMax != telemetry.DefaultMaxPolicies {
+		t.Errorf("defaults: %t, %d", cfg.policyMetrics, cfg.policyMetricsMax)
+	}
+	cfg, err = parseFlags(cmdForwardAuth, []string{"--policy-metrics", "--policy-metrics-max=50"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.policyMetrics || cfg.policyMetricsMax != 50 {
+		t.Errorf("got %t, %d", cfg.policyMetrics, cfg.policyMetricsMax)
+	}
+	if _, err := parseFlags(cmdForwardAuth, []string{"--policy-metrics-max=0"}, io.Discard); err == nil {
+		t.Error("--policy-metrics-max=0: no error")
+	}
+}
