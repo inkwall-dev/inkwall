@@ -20,8 +20,8 @@ its adapter is in [0002 §6](0002-system-architecture.md#6-proxy-integrations).
 **Built (v0.1.0):** forward-auth ([§3](#3-forward-auth-traefik-forwardauth-nginx-auth_request)),
 `/v1/check` over HTTP ([§5](#5-v1check-inkwalls-own-api)) and the reverse proxy
 ([§6](#6-reverse-proxy-standalone-mode)). **Built since:** ext_proc
-([§2](#2-ext_proc-envoy-external-processing)), with the operator's Envoy Gateway configuration, and the SPOE agent
-([§4](#4-spoe-haproxy-stream-processing-offload-engine)), configured by hand ([protecting HAProxy](../haproxy.md)). **Not yet:** ext_authz
+([§2](#2-ext_proc-envoy-external-processing)), with the operator's Envoy Gateway and Istio configuration and for raw Envoy, and the SPOE agent
+([§4](#4-spoe-haproxy-stream-processing-offload-engine)), configured by hand ([protecting HAProxy](../haproxy.md)) or by the operator for the HAProxy Kubernetes Ingress Controller. **Not yet:** ext_authz
 ([§1](#1-ext_authz-envoy-external-authorization)).
 
 ## Contents
@@ -223,8 +223,11 @@ policy with `responses.inspect` on a route Traefik serves is not silently half-e
 `Programmed=False`, reason `ResponsesNotInspected`, naming the routes (and so not `Ready`), though
 Traefik's routes are wired and their requests inspected. A separate condition was considered, with
 `Programmed` true for the requests: rejected, because `Ready` would then claim the whole policy is
-enforced. The admission webhook warns of `Ingress` and `IngressRoute` targets (only Traefik serves
-them) when such a policy is applied. The same holds for any integration whose `Result` doesn't
+enforced. When such a policy is applied, the admission webhook warns that the responses of its
+`Ingress`, `IngressRoute`, `HTTPRoute` and `VirtualService` targets may not be inspected,
+depending on the proxy that serves them: it doesn't resolve the proxy (an `Ingress` may be
+Traefik's or HAProxy's, an `HTTPRoute` Envoy Gateway's, Traefik's or Istio's), so it names none as
+the target's and leaves that to `Programmed` (#380). The same holds for any integration whose `Result` doesn't
 set `Responses`: only Envoy Gateway's does. Istio's (v0.4.0) doesn't: its `EnvoyFilter` sends no
 response phase yet (#323), so a policy with `responses.inspect` on an Istio route is
 `ResponsesNotInspected` too, and the Gateway's buffer limit isn't raised for responses.
@@ -386,7 +389,7 @@ Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/inkwall/issues/282)); 
   must leave them out too.
 
 `make haproxy-e2e` runs the configuration of [protecting HAProxy](../haproxy.md) with HAProxy 3.2 in
-Docker. **Built:** `pkg/adapters/spoe`, run as `inkwall-engine spoe`. **Not yet:** the operator's
+Docker. **Built:** `pkg/adapters/spoe`, run as `inkwall-engine spoe`, and since 0.4.0 the operator's
 wiring of the HAProxy Kubernetes Ingress Controller ([0002 §6.4](0002-system-architecture.md#64-haproxy-haproxy-kubernetes-ingress-controller-haproxy-ingress)).
 
 ## 5. `/v1/check` (Inkwall's own API)
@@ -491,9 +494,9 @@ The messages themselves aren't read yet ([gRPC](../grpc.md)).
 | | Transport | Body | Response | Proxy waits? | For | Status |
 |---|---|---|---|---|---|---|
 | ext_authz | gRPC call | Buffered, optional | No | Yes | Envoy fallback | Not yet |
-| ext_proc | gRPC stream | Buffered (streamed in observability mode) | Yes (policies with `responses`) | Yes, or no (observability mode) | Envoy Gateway, Envoy, Istio, Contour | Built (Envoy Gateway) |
+| ext_proc | gRPC stream | Buffered (streamed in observability mode) | Yes (policies with `responses`) | Yes, or no (observability mode) | Envoy Gateway, Envoy, Istio, Contour | Built (Envoy Gateway, Istio, raw Envoy) |
 | forward-auth | HTTP subrequest | If forwarded | No | Yes | Traefik (nginx `auth_request` speaks it too) | Built |
-| SPOE | SPOP | Buffered, up to HAProxy's buffer | Possible | Yes | HAProxy | Built ([configured by hand](../haproxy.md)) |
+| SPOE | SPOP | Buffered, up to HAProxy's buffer | Possible | Yes | HAProxy | Built (by hand or by the operator: [protecting HAProxy](../haproxy.md)) |
 | `/v1/check` | HTTP (gRPC planned) | Yes | No | Yes | CLI, tests; a Traefik plugin planned | Built |
 | Reverse proxy | HTTP proxying | Yes | Yes | It is the path | VMs, test reference | Built |
 

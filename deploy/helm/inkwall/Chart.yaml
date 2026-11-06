@@ -1,6 +1,6 @@
 apiVersion: v2
 name: inkwall
-description: Inkwall, a Kubernetes-native web application firewall. Installs the operator, its CRDs and webhooks; the operator injects the engine into Traefik and wires its routes.
+description: Inkwall, a Kubernetes-native web application firewall. Installs the operator, its CRDs and webhooks; the operator injects the engine into the proxies (Traefik, Envoy Gateway, Istio, the HAProxy Kubernetes Ingress Controller) and wires their routes.
 type: application
 # The chart and the operator are released together, from the same tag.
 version: 0.1.0

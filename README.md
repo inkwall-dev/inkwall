@@ -5,7 +5,7 @@ inspection engine next to your [ingress controller](https://kubernetes.io/docs/c
 to your routes. The engine runs OWASP [Coraza](https://coraza.io/) with the
 [Core Rule Set](https://coreruleset.org/) (CRS).
 
-> **Status: v0.3.0, early.** Inkwall works with [**Traefik**](https://doc.traefik.io/traefik/) and its [`Ingress`](https://kubernetes.io/docs/concepts/services-networking/ingress/),
+> **Status: early** ([latest release](https://github.com/inkwall-dev/inkwall/releases/latest)). Inkwall works with [**Traefik**](https://doc.traefik.io/traefik/) and its [`Ingress`](https://kubernetes.io/docs/concepts/services-networking/ingress/),
 > [`IngressRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) and [Gateway API](https://gateway-api.sigs.k8s.io/) `HTTPRoute` routes, with [**Envoy Gateway**](https://gateway.envoyproxy.io/) and
 > [**Istio**](https://istio.io/latest/docs/) and their `HTTPRoute` routes, with Istio's `VirtualService` routes, and as a standalone reverse proxy in front of anything else. The API is
 > `v1alpha1` and will change. See [Limits](#limits) and the [roadmap](#roadmap).
@@ -49,8 +49,11 @@ The [docs index](docs/README.md) lists every guide, reference and design doc.
 You need [Kubernetes](https://kubernetes.io/docs/concepts/overview/) 1.29 or later and [Helm](https://helm.sh/docs/) 3. CI
 tests on Kubernetes 1.34 and on kind's newest (1.37).
 
+`<version>` is a [release](https://github.com/inkwall-dev/inkwall/releases) without its `v`, the latest
+one unless you have a reason to pick another:
+
 ```sh
-helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.3.0 \
+helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \
   --namespace inkwall-system --create-namespace
 kubectl -n inkwall-system rollout status deployment/inkwall-operator
 ```
@@ -89,7 +92,7 @@ The images, the chart and the checksums are signed keyless with [cosign](https:/
 with cosign v3, as cosign v2 reports "no signatures found". To verify an image:
 
 ```sh
-cosign verify ghcr.io/inkwall-dev/inkwall-engine:0.3.0 \
+cosign verify ghcr.io/inkwall-dev/inkwall-engine:<version> \
   --certificate-identity-regexp '^https://github.com/inkwall-dev/inkwall/\.github/workflows/release\.yaml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
@@ -100,7 +103,7 @@ The binaries (`inkwall-engine`, `inkwall-operator`, `inkwallctl`) are on the
 
 ```console
 $ inkwallctl version
-inkwallctl 0.3.1
+inkwallctl 0.4.1
 commit: 0123456789abcdef0123456789abcdef01234567
 go: go1.27.3 linux/amd64
 ```

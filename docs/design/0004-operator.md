@@ -913,10 +913,11 @@ wiring, `inkwall_operator_wired_targets{integration}` and
 `inkwall_operator_wiring_failures{integration}` (targets that are `WiringFailed`).
 `inkwall_operator_request_stats_dropped_total{reason}` counts the policies' request counts a
 replica drops ([§4.9](#49-upstream-sync-leader-only)): `not_in_bundle`, `latency_buckets` (the
-latency only) and `evicted`.
+latency only) and `evicted`. Reconcile duration is controller-runtime's own
+`controller_runtime_reconcile_time_seconds{controller}`, on the same endpoint.
 
 **Not yet:** an `integration` label on the engine counts (engines aren't matched to proxies yet),
-reconcile duration, policy condition counts.
+policy condition counts.
 
 ### 4.9 Upstream sync (leader only)
 
