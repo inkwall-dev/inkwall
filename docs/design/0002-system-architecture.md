@@ -306,7 +306,8 @@ the engine needs no Kubernetes knowledge. A bundle is immutable and signed with 
 
 - `CheckRequest`: method, authority, raw URI, headers, `client_ip` and `peer_ip`, and an optional
   body. The IPs are text, so JSON clients can write them.
-- `CheckResponse`: action, status, headers, rule IDs and reason.
+- `CheckResponse`: action, status, headers, rule IDs and reason, and where the rules matched
+  (`matches`: rule and variable name, never the value) and the anomaly score.
 
 Envoy will use its native [`ext_authz`](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) and [`ext_proc`](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter) services instead.
 
@@ -996,7 +997,16 @@ Target:
 - Engine: `inkwall_requests_total`, `_check_duration_seconds`, `inkwall_responses_total`,
   `_response_check_duration_seconds` (policies that inspect responses), `_bundle_version`,
   `_bundle_updates_total`, `_operator_connected`, `_evaluations_in_flight`, `_evaluation_slots`,
-  `_engine_events_total`, `_engine_events_dropped_total`.
+  `_engine_events_total`, `_engine_events_dropped_total`,
+  `inkwall_security_event_logs_suppressed_total{policy}`.
+- Engine logs (#354): JSON, at `--log-level` (default `info`; `InkwallConfig.spec.engine.logLevel`
+  for injected engines). A security event line has the verdict, `rule_ids`, `anomaly_score` and
+  `matches`: each rule with the variable it matched (`ARGS:q`), bounded as in events (32 matches,
+  128-byte names). Never the matched value: logs end up in places events' redaction
+  ([§8.3](#83-data-privacy)) doesn't reach. Lines are rate-limited by a token bucket per (policy,
+  rule, reason), `--event-log-rate` lines per second in bursts of as many (default 10); the
+  next line through says how many were `suppressed`. Events to the operator aren't limited. The
+  check API's `CheckResponse` carries the same `matches` and `anomaly_score`.
 - Operator: `inkwall_operator_bundle_version`, `_operator_bundle_compressed_bytes`,
   `_operator_engines{state}`, `_operator_engines_left_out`, `_operator_events_received_total`,
   `_operator_engine_events_dropped_total`, `_operator_wired_targets{integration}`,

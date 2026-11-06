@@ -9,6 +9,7 @@ on your machine or in CI, before they block real traffic.
 - [Test a request](#test-a-request)
 - [Test `WAFPolicy` objects](#test-wafpolicy-objects)
 - [Test the cluster's bundle](#test-the-clusters-bundle)
+- [From a log line to an exclusion](#from-a-log-line-to-an-exclusion)
 - [Run the tests in CI](#run-the-tests-in-ci)
 - [Checking it worked](#checking-it-worked)
 
@@ -27,11 +28,13 @@ its `--mode` defaults to `block`. `inkwallctl test -h` lists every flag.
 
 ```console
 $ inkwallctl test 'http://shop.example.com/?id=1%27%20OR%20%271%27%3D%271'
-deny  403  GET /?id=1%27%20OR%20%271%27%3D%271  reason=rule  rules=942100,949110  interrupting=949110  847µs
+deny  403  GET /?id=1%27%20OR%20%271%27%3D%271  reason=rule  rules=942100,949110  interrupting=949110  matches=942100@ARGS:id,949110@TX:blocking_inbound_anomaly_score  score=5  847µs
 ```
 
-Each line shows the verdict, the status, the request, why, the matched rule IDs and the time the
-check took.
+Each line shows the verdict, the status, the request, why, the matched rule IDs, where each rule
+matched (`rule@variable`: rule 942100 matched the query argument `id`), the request's
+[anomaly score](https://coreruleset.org/docs/concepts/anomaly_scoring/) and the time the check
+took. `--json` prints the same as `matches` (`rule_id`, `variable`) and `anomaly_score`.
 
 ## Test `WAFPolicy` objects
 
@@ -44,8 +47,8 @@ does.
 $ inkwallctl test --policy wafpolicy.yaml --rule-set wafruleset.yaml --configmap configmap.yaml \
     --ingress ingress.yaml --request requests.http
 allow      GET /products/42  policy=shop/storefront  580µs
-deny  403  GET /?id=1%27%20OR%20%271%27%3D%271  policy=shop/storefront  reason=rule  rules=942100,949110  interrupting=949110  623µs
-log        GET /api/orders?debug=true  policy=shop/api  reason=rule  rules=100100  interrupting=100100  20µs
+deny  403  GET /?id=1%27%20OR%20%271%27%3D%271  policy=shop/storefront  reason=rule  rules=942100,949110  interrupting=949110  matches=942100@ARGS:id,949110@TX:blocking_inbound_anomaly_score  score=5  623µs
+log        GET /api/orders?debug=true  policy=shop/api  reason=rule  rules=100100  interrupting=100100  matches=100100@ARGS:debug  20µs
 allow      GET /?id=1%27%20OR%20%271%27%3D%271  reason=no_policy  0s
 ```
 
@@ -84,6 +87,45 @@ inkwallctl test --bundle bundle.yaml --bundle-key bundle.pub --har traffic.har
 
 A bundle too large for one Secret is split into chunk Secrets. `inkwallctl` then prints the
 `kubectl get secret` command that saves the bundle Secret with its chunks.
+
+## From a log line to an exclusion
+
+Before you move a policy from `Detect` to `Block`, look for false positives in the engines'
+security event lines. Each says which rules matched and where, by the variable's name only: the
+engine never logs what a rule matched.
+
+```sh
+kubectl -n <proxy namespace> logs <proxy pod> -c inkwall-engine | grep '"security event"' | tail -1
+```
+
+```json
+{"level":"WARN","msg":"security event","policy":"shop/storefront","action":"log","reason":"rule","rule_ids":[942100,949110],"matches":[{"rule_id":942100,"variable":"ARGS:q"},{"rule_id":949110,"variable":"TX:blocking_inbound_anomaly_score"}],"anomaly_score":5,"method":"GET","host":"shop.example.com","path":"/search", ...}
+```
+
+Here rule 942100 matched the query argument `q` of `/search` (949110 only adds up the score). If
+`q` is a free-text search field that legitimately holds SQL-like text, turn that rule off for that
+argument on that path, not everywhere:
+
+```yaml
+spec:
+  exclusions:
+  - ruleIDs: [942100]
+    when:
+      path: /search
+      argument: q
+```
+
+`ARGS:q`, `ARGS_GET:q` and `ARGS_POST:q` all name the argument `q`. A match on a header
+(`REQUEST_HEADERS:User-Agent`) or a cookie can't be excluded by argument: exclude the rule on the
+path instead, or fix the client. Then check the exclusion with `inkwallctl test --policy` before
+it reaches the cluster: the request that matched no longer shows `942100@ARGS:q`, and an attack in
+another argument still gets `deny`.
+
+Each engine logs at most 10 security event lines per second for each policy and rule (the
+engine's `--event-log-rate`), so a scanner or one false positive on a busy route doesn't flood the
+logs. The lines left out are counted in `inkwall_security_event_logs_suppressed_total{policy}`,
+and the next line that gets through says how many in `suppressed`. The events sent to the operator
+aren't limited.
 
 ## Run the tests in CI
 

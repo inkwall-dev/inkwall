@@ -677,3 +677,36 @@ func TestServeAppliesTheCacheBeforeListening(t *testing.T) {
 		t.Errorf("first answer with a corrupt cache %d, want 200 (no policy, bootstrap allow)", code)
 	}
 }
+
+// --log-level sets the engine's log level (default info), and
+// --event-log-rate the security event lines per policy and rule (#354).
+func TestParseLogFlags(t *testing.T) {
+	cfg, err := parseFlags(cmdForwardAuth, nil, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.logLevel != slog.LevelInfo || cfg.eventLogRate != 10 {
+		t.Errorf("defaults: level %v, event log rate %d; want info and 10", cfg.logLevel, cfg.eventLogRate)
+	}
+	cfg, err = parseFlags(cmdForwardAuth, []string{"--log-level=warn", "--event-log-rate=0"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.logLevel != slog.LevelWarn || cfg.eventLogRate != 0 {
+		t.Errorf("level %v, event log rate %d; want warn and 0", cfg.logLevel, cfg.eventLogRate)
+	}
+	for _, args := range [][]string{{"--log-level=verbose"}, {"--event-log-rate=-1"}} {
+		if _, err := parseFlags(cmdForwardAuth, args, io.Discard); err == nil {
+			t.Errorf("%v: no error", args)
+		}
+	}
+
+	// warn hides info lines; security events (warn) stay.
+	var out bytes.Buffer
+	logger := newLogger(&out, slog.LevelWarn)
+	logger.Info("bundle applied")
+	logger.Warn("security event")
+	if strings.Contains(out.String(), "bundle applied") || !strings.Contains(out.String(), "security event") {
+		t.Errorf("warn level wrote %q", out.String())
+	}
+}

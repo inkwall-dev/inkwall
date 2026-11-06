@@ -201,6 +201,13 @@ type EngineSpec struct {
 	// +optional
 	BootstrapMode BootstrapMode `json:"bootstrapMode,omitempty"`
 
+	// LogLevel is the engines' log level: Debug, Info, Warn or Error.
+	// Security events are logged at Warn, so Error hides them (they still
+	// go to the operator). Unset: the engine's default, Info. Applies to
+	// pods injected from then on.
+	// +optional
+	LogLevel LogLevel `json:"logLevel,omitempty"`
+
 	// ClientIP configures which forwarding headers the engines trust for
 	// the client's address, behind an HTTP load balancer that appends it to
 	// X-Forwarded-For. Unset: only the proxy beside the engine is trusted.
@@ -210,6 +217,18 @@ type EngineSpec struct {
 	// +optional
 	ClientIP *ClientIPSpec `json:"clientIP,omitempty"`
 }
+
+// LogLevel is an engine's log level.
+// +kubebuilder:validation:Enum=Debug;Info;Warn;Error
+type LogLevel string
+
+// Engine log levels.
+const (
+	LogLevelDebug LogLevel = "Debug"
+	LogLevelInfo  LogLevel = "Info"
+	LogLevelWarn  LogLevel = "Warn"
+	LogLevelError LogLevel = "Error"
+)
 
 // ClientIPSpec configures how engines find the client's address.
 type ClientIPSpec struct {
