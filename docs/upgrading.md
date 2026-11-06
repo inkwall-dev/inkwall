@@ -1,11 +1,12 @@
 # Upgrading
 
-This guide upgrades an Inkwall installation from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
+This guide upgrades an Inkwall installation from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
 0.3.0, and from 0.1.x (0.1.0 to 0.1.5) to 0.2.2, the latest 0.2 release, and lists what changes on
 the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 ## Contents
 
+- [From 0.4.0 to 0.4.1](#from-040-to-041)
 - [From 0.3.x to 0.4.0](#from-03x-to-040)
 - [From 0.3.0 to 0.3.1](#from-030-to-031)
 - [From 0.2.x to 0.3.0](#from-02x-to-030)
@@ -23,6 +24,30 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
   - [Upgrading the chart](#upgrading-the-chart)
   - [Checking it worked](#checking-it-worked)
   - [Rolling back](#rolling-back)
+
+## From 0.4.0 to 0.4.1
+
+0.4.1 is a patch release with security fixes: upgrade the chart as for 0.4.0, then restart the
+pods that run the engine (Traefik, Istio's Gateways, HAProxy and the Envoy Gateway proxies) so
+their engines are 0.4.1. What changes by itself:
+
+- **Rule sets can't use `@inspectFile` or `@rbl`.** These operators reach outside the engine (a
+  program, a DNS query). The webhook and the operator reject rule sets that use them, and the
+  engine never runs them. A rule set that already uses them keeps loading, but those rules never
+  match, and editing it is rejected until they are removed. Look for them in your rule sets.
+- **Path exclusions apply only to plain paths.** An exclusion with a `path` now applies only to a
+  request path that is plain ASCII, without `%`, `;`, `\`, `//` or `.` and `..` segments, as
+  skip paths already did. A request with any other path gets the policy's rules without that
+  exclusion.
+- **The response to an upgrade request is inspected unless it is a 101.** On a route whose
+  policy inspects responses (Envoy Gateway, raw Envoy), an upstream that ignores `Upgrade` and
+  answers with an ordinary response has that response inspected. WebSockets work as before.
+- **The standalone proxy inspects the headers it forwards.** Headers that the `Connection` header
+  names, which the proxy drops, are no longer inspected either.
+- **The engine sets a Go memory limit.** It sets `GOMEMLIMIT` to 90% of its container's memory
+  limit, as the operator does, unless `GOMEMLIMIT` is set. The injected engine gets that limit as
+  `MEMORY_LIMIT` from the downward API. A request body over the inspected limit keeps only the
+  inspected part in the engine's memory.
 
 ## From 0.3.x to 0.4.0
 
