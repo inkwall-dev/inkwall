@@ -121,7 +121,7 @@ yet; they last seconds, unless the operator isn't running.
 | `RuleCompileError` | Rules in the policy's rule set don't compile, or use a directive Inkwall doesn't allow. | Fix the rules; `inkwallctl test --rule-set` shows the error before you apply. |
 | `Conflict` | An older policy targets the same route and applies to it: a route has one policy. | Merge the policies, or target other routes. |
 | `TargetUnsupported` | A target's match rules (an IngressRoute's, HTTPRoute's or VirtualService's) aren't ones the router can match, so its requests can't be told apart. | Use the forms the message lists (`Host`, `Path`, `PathPrefix`; exact and prefix paths). |
-| `BundleTooLarge` | The bundle with this version of the policy is over 7,200 KiB compressed, so it isn't published; engines keep the previous one. | Move shared inline rules into one rule set that the policies reference. |
+| `BundleTooLarge` | The bundle with this version of the policy is over 7,200 KiB compressed, so it isn't published; engines keep the previous one. | Move shared inline rules into one rule set that the policies reference; see [InkwallBundleNearSizeLimit](monitoring.md#inkwallbundlenearsizelimit). |
 
 **Programmed**: the policy's targets are wired to the engine in their proxy.
 
@@ -146,9 +146,9 @@ yet; they last seconds, unless the operator isn't running.
 |---|---|---|
 | `Enforced` | Every engine runs the bundle, or a later one. | |
 | `NotInBundle` | The policy's current spec isn't in a published bundle yet. | Wait; if it lasts, see `Accepted`. |
-| `NoEngines` | No engine is connected to the operator. | Check the proxy pods run the engine (`Programmed`), and that engines reach the operator (the engine's log names the connection error). |
+| `NoEngines` | No engine is connected to the operator. | Check the proxy pods run the engine (`Programmed`), and that engines reach the operator ([InkwallEngineDisconnected](monitoring.md#inkwallenginedisconnected)). |
 | `EnginesBehind` | Some engines don't run the bundle yet. | Usually seconds; if it lasts, `inkwallctl status` names them. |
-| `EngineNack` | An engine rejected the bundle; the message names it and why (often an engine older than the operator, or a key it doesn't trust). | Restart the engine's pod so it runs the operator's version; during a key rotation, see [Rotating the bundle signing key](key-rotation.md). |
+| `EngineNack` | An engine rejected the bundle; the message names it and why (often an engine older than the operator, or a key it doesn't trust). | Restart the engine's pod so it runs the operator's version; see [InkwallBundleRejected](monitoring.md#inkwallbundlerejected). |
 | `EnginesOutdated` | An engine runs the bundle, but is too old to enforce a field the policy sets, which it ignores. | Restart the pod the message names. |
 | `EnginesUnreported` | An operator replica's engine report is full, so not every engine is known. | Run more operator replicas, or fewer proxy pods per replica. |
 | `Suspended` | The InkwallConfig suspends inspection: every engine allows every request. | `kubectl patch inkwallconfig default --type merge -p '{"spec":{"suspend":false}}'`. |

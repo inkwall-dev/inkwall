@@ -36,6 +36,8 @@ Every doc in this repository, by topic, with the question each one answers.
   SPOE agent, and what does HAProxy do when the engine is down?
 - [Troubleshooting](troubleshooting.md): is Inkwall working in this cluster, and what do I do when
   it isn't?
+- [Monitoring](monitoring.md): how do I scrape Inkwall's metrics, install its alerts and dashboard,
+  and what do I do when an alert fires?
 - [Running the engine without Kubernetes](standalone-proxy.md): how do I put the engine in front
   of any HTTP service as a reverse proxy, and which flags does it take?
 

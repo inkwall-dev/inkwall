@@ -236,6 +236,23 @@ func TestConfigValidation(t *testing.T) {
 	if warnings, err := v.ValidateUpdate(ctx, cfg(""), cfg("/run/x")); err != nil || len(warnings) != 1 {
 		t.Errorf("socketDir added: warnings %q, error %v", warnings, err)
 	}
+	// Client IP settings the engine would refuse are rejected; trusting
+	// every address draws a warning.
+	two := int32(2)
+	clientIP := func(c wafv1alpha1.ClientIPSpec) *wafv1alpha1.InkwallConfig {
+		x := cfg("")
+		x.Spec.Engine.ClientIP = &c
+		return x
+	}
+	if warnings, err := v.ValidateCreate(ctx, clientIP(wafv1alpha1.ClientIPSpec{TrustedProxies: []wafv1alpha1.CIDR{"10.0.0.0/8", "192.0.2.1"}, TrustedHops: &two})); err != nil || len(warnings) != 0 {
+		t.Errorf("valid clientIP: warnings %q, error %v", warnings, err)
+	}
+	_, err := v.ValidateCreate(ctx, clientIP(wafv1alpha1.ClientIPSpec{TrustedProxies: []wafv1alpha1.CIDR{"10.0.0.0/8", "10.0.0.0/33"}}))
+	wantInvalid(t, err, "spec.engine.clientIP.trustedProxies[1]", "10.0.0.0/33")
+	if warnings, err := v.ValidateUpdate(ctx, cfg(""), clientIP(wafv1alpha1.ClientIPSpec{TrustedProxies: []wafv1alpha1.CIDR{"0.0.0.0/0"}})); err != nil || len(warnings) != 1 || !strings.Contains(warnings[0], "0.0.0.0/0") {
+		t.Errorf("trusting every address: warnings %q, error %v", warnings, err)
+	}
+
 	// The old default, kept by an update, doesn't warn on every apply.
 	if warnings, err := v.ValidateUpdate(ctx, cfg("/var/run/inkwall"), cfg("/var/run/inkwall")); err != nil || len(warnings) != 0 {
 		t.Errorf("socketDir kept: warnings %q, error %v", warnings, err)

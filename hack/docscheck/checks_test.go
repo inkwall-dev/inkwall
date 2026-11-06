@@ -277,3 +277,31 @@ const (
 		t.Errorf("got  %q\nwant %q", got, want)
 	}
 }
+
+// Every metric the code registers is listed in the metrics doc (#381).
+func TestMetricsListed(t *testing.T) {
+	fsys := fstest.MapFS{
+		"docs/README.md":     file("# Docs\n[Monitoring](monitoring.md)\n"),
+		"docs/monitoring.md": file("# Monitoring\n| `inkwall_requests_total` | counter |\n"),
+		"pkg/telemetry/m.go": file(`package telemetry
+var a = prometheus.CounterOpts{Name: "inkwall_requests_total"}
+var b = prometheus.GaugeOpts{
+	Name:        "inkwall_rule_sets",
+}
+`),
+		"pkg/telemetry/m_test.go": file(`var c = prometheus.CounterOpts{Name: "inkwall_test_only_total"}`),
+		"hack/loadgen/main.go":    file(`var d = prometheus.CounterOpts{Name: "inkwall_loadgen_total"}`),
+		"operator/test/fake/x.go": file(`var e = prometheus.CounterOpts{Name: "inkwall_fake_total"}`),
+		"operator/internal/m.go":  file(`var f = prometheus.CounterOpts{Name: "inkwall_operator_engines"}`),
+		"operator/internal/m.txt": file(`Name: "inkwall_not_go"`),
+		"pkg/other/unrelated.go":  file(`var g = struct{ Name string }{Name: "not_a_metric"}`),
+	}
+	got := check(t, fsys, config{metricsDoc: "docs/monitoring.md"})
+	want := []string{
+		"docs/monitoring.md: metric inkwall_operator_engines (operator/internal/m.go) is not listed",
+		"docs/monitoring.md: metric inkwall_rule_sets (pkg/telemetry/m.go) is not listed",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+}
