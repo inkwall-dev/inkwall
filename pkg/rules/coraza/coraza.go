@@ -688,6 +688,14 @@ type targetVariants struct {
 // variants compiles the rule sets for x's target exclusions on rules that
 // negate their collection, and takes those out of x; nil if it has none.
 func (p *privateRules) variants(x *exclusions) (*targetVariants, error) {
+	// Most policies have no such exclusion: find out without allocating.
+	needed := slices.ContainsFunc(x.targets, p.negations.has)
+	for i := 0; !needed && i < len(x.paths); i++ {
+		needed = slices.ContainsFunc(x.paths[i].targets, p.negations.has)
+	}
+	if !needed {
+		return nil, nil
+	}
 	split := func(ts []target) (keep, out []target) {
 		for _, t := range ts {
 			if p.negations.has(t) {
