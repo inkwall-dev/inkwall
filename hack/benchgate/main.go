@@ -11,6 +11,14 @@
 // significance keeps noise on shared CI runners from failing pull requests;
 // the threshold keeps tiny but real changes from doing so (0001 §8: 5%).
 //
+// Below -fast-below per op (1 µs), time is gated at -fast-threshold (25%)
+// instead: where the compiler and linker place a benchmark's code moves such
+// a benchmark by up to ~15% with no change in what it runs (#413, #428,
+// #422), because alignment and branch-predictor aliasing weigh on a few
+// hundred nanoseconds. Their bytes and allocations per op keep -threshold:
+// layout doesn't change those. docs/design/0001 §8 says how to tell a layout
+// shift from a real regression.
+//
 // Regressions are keyed by package, benchmark and unit. -flagged writes the
 // keys found, one "pkg<TAB>benchmark<TAB>unit" line each. -confirm reads such
 // a file from an earlier run and fails only on regressions that are in it as
@@ -30,14 +38,18 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func main() {
-	threshold := flag.Float64("threshold", 5, "maximum allowed regression in percent")
+	lim := defaultLimits
+	flag.Float64Var(&lim.threshold, "threshold", lim.threshold, "maximum allowed regression in percent")
+	flag.Float64Var(&lim.fastThreshold, "fast-threshold", lim.fastThreshold, "maximum allowed time regression in percent of a benchmark faster than -fast-below")
+	flag.DurationVar(&lim.fastBelow, "fast-below", lim.fastBelow, "benchmarks faster than this per op (on the base) are gated on time at -fast-threshold")
 	flagged := flag.String("flagged", "", "write the regressions found to this file, one key per line")
 	confirm := flag.String("confirm", "", "fail only on regressions also listed in this file (from -flagged)")
 	flag.Parse()
-	if err := run(os.Stdin, os.Stdout, *threshold, *flagged, *confirm); err != nil {
+	if err := run(os.Stdin, os.Stdout, lim, *flagged, *confirm); err != nil {
 		if errors.Is(err, errRegressed) {
 			os.Exit(1)
 		}
@@ -48,7 +60,18 @@ func main() {
 
 var errRegressed = errors.New("regressed")
 
-func run(in io.Reader, out io.Writer, threshold float64, flaggedFile, confirmFile string) error {
+// limits are the allowed regressions.
+type limits struct {
+	threshold float64 // percent
+	// fastThreshold is the percent allowed on the time of a benchmark
+	// faster than fastBelow per op; 0: threshold.
+	fastThreshold float64
+	fastBelow     time.Duration
+}
+
+var defaultLimits = limits{threshold: 5, fastThreshold: 25, fastBelow: time.Microsecond}
+
+func run(in io.Reader, out io.Writer, lim limits, flaggedFile, confirmFile string) error {
 	var earlier map[string]bool
 	if confirmFile != "" {
 		var err error
@@ -56,7 +79,7 @@ func run(in io.Reader, out io.Writer, threshold float64, flaggedFile, confirmFil
 			return err
 		}
 	}
-	regressions, err := check(in, threshold)
+	regressions, err := check(in, lim)
 	if err != nil {
 		return err
 	}
@@ -98,7 +121,11 @@ func run(in io.Reader, out io.Writer, threshold float64, flaggedFile, confirmFil
 	if failed > 0 {
 		return errRegressed
 	}
-	fmt.Fprintf(out, "no significant regression over %.0f%%\n", threshold)
+	fmt.Fprintf(out, "no significant regression over %.0f%%", lim.threshold)
+	if lim.fastThreshold > 0 {
+		fmt.Fprintf(out, " (time under %v/op: %.0f%%)", lim.fastBelow, lim.fastThreshold)
+	}
+	fmt.Fprintln(out)
 	return nil
 }
 
@@ -131,7 +158,7 @@ func readKeys(path string) (map[string]bool, error) {
 }
 
 // check returns the regressions found in benchstat's CSV.
-func check(r io.Reader, threshold float64) ([]regression, error) {
+func check(r io.Reader, lim limits) ([]regression, error) {
 	cr := csv.NewReader(r)
 	// Header lines (goos:, pkg:, ...) have one field, data rows seven.
 	cr.FieldsPerRecord = -1
@@ -186,6 +213,10 @@ func check(r io.Reader, threshold float64) ([]regression, error) {
 			pct = 100
 		default:
 			pct = (head - base) / base * 100
+		}
+		threshold := lim.threshold
+		if unit == "sec/op" && lim.fastThreshold > 0 && base < lim.fastBelow.Seconds() {
+			threshold = lim.fastThreshold
 		}
 		if pct > threshold {
 			regressions = append(regressions, regression{
