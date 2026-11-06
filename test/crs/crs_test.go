@@ -70,8 +70,9 @@ SecRule REQUEST_HEADERS:X-CRS-Test "@rx ^.*$" \
   ctl:ruleRemoveById=1-999999"
 `
 
-// Inkwall inspects requests only (phases 1 and 2). Response rules (95x) are
-// not exercised until response inspection exists.
+// The suite runs through the reverse proxy, which inspects requests only
+// (phases 1 and 2): response rules (95x) are inspected through ext_proc,
+// not exercised here.
 func isResponseTest(path string) bool {
 	return strings.HasPrefix(path, "RESPONSE-")
 }
@@ -150,7 +151,7 @@ func TestCRSRegression(t *testing.T) {
 	if len(tests) == 0 {
 		t.Fatal("no tests found")
 	}
-	t.Logf("running %d test files, skipping %d response-rule files (response inspection not implemented)", len(tests), skipped)
+	t.Logf("running %d test files, skipping %d response-rule files (the reverse proxy inspects requests only)", len(tests), skipped)
 
 	u, _ := url.Parse(engine.URL)
 	host := u.Hostname()

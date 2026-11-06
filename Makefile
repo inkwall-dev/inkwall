@@ -49,8 +49,11 @@ BASE            ?= origin/main
 # docs-check (hack/docscheck). Strict: every doc over 80 lines needs a
 # ## Contents section, and docs/README.md must exist and list every doc
 # (CLAUDE.md is exempt by default). CODE_OF_CONDUCT.md needs no Contents:
-# it is the Contributor Covenant 2.1, kept verbatim.
-DOCS_CHECK_STRICT ?= -contents-min-lines=80 -require-index -contents-exempt=CODE_OF_CONDUCT.md
+# it is the Contributor Covenant 2.1, kept verbatim. The install and verify
+# commands of the READMEs and CONTRIBUTING.md write <version>, never a
+# release, so they don't go stale when the next one ships.
+DOCS_CHECK_STRICT ?= -contents-min-lines=80 -require-index -contents-exempt=CODE_OF_CONDUCT.md \
+	-unpinned=README.md,deploy/helm/inkwall/README.md,CONTRIBUTING.md
 DOCS_CHECK        ?= $(GO) run ./hack/docscheck $(DOCS_CHECK_STRICT)
 
 # scale-test: sizes as <policies>x<engines>, one operator each; "full" is 0004 §8's matrix.

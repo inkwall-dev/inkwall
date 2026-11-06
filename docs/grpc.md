@@ -111,7 +111,7 @@ gets 8 (`RESOURCE_EXHAUSTED`).
 | Istio | HTTP 200, gRPC status, as through Envoy Gateway (not covered by an e2e yet) | The same |
 | HAProxy, with `haproxy.cfg`'s gRPC rules ([HAProxy](haproxy.md#grpc)) | HTTP 200, gRPC status | HTTP 200, gRPC status |
 | Traefik | HTTP 403, gRPC status | HTTP 403, gRPC status |
-| Engine as reverse proxy | HTTP 200, gRPC status | HTTP 200, gRPC status |
+| Engine as reverse proxy | Not yet: its listener and upstream speak HTTP/1.1, and gRPC needs HTTP/2 ([#362](https://github.com/inkwall-dev/inkwall/issues/362)) | HTTP 200, gRPC status |
 
 Traefik's ForwardAuth denies only on an answer other than 2xx, so the HTTP status stays 403
 there. Clients that read a gRPC answer by its content type, such as grpc-go, still report our

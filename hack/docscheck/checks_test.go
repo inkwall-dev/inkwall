@@ -228,3 +228,26 @@ func TestExternal(t *testing.T) {
 		t.Errorf("rate limited: log %q after %d requests, want a warning after 3 HEAD+GET tries", log.String(), limited.Load())
 	}
 }
+
+func TestUnpinned(t *testing.T) {
+	fsys := fstest.MapFS{
+		"README.md": file("# Inkwall\n" +
+			"helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.3.0 \\\n" +
+			"helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \\\n" +
+			"cosign verify ghcr.io/inkwall-dev/inkwall-engine:0.3.0 \\\n" +
+			"cosign verify ghcr.io/inkwall-dev/inkwall-operator:v0.4.1 \\\n" +
+			"cosign verify ghcr.io/inkwall-dev/inkwall-engine:<version> \\\n" +
+			"helm install eg oci://docker.io/envoyproxy/gateway-helm --version v1.9.3\n"),
+		// Not listed: a guide for one upgrade names its versions.
+		"docs/upgrading.md": file("# Upgrading\nhelm upgrade inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version 0.4.0\n"),
+	}
+	got := check(t, fsys, config{unpinned: map[string]bool{"README.md": true}})
+	want := []string{
+		"README.md:2: pins release 0.3.0: write <version>, as the latest release changes",
+		"README.md:4: pins release 0.3.0: write <version>, as the latest release changes",
+		"README.md:5: pins release v0.4.1: write <version>, as the latest release changes",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
