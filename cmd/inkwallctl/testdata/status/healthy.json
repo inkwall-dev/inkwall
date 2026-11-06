@@ -1,0 +1,76 @@
+{
+  "healthy": true,
+  "problems": [],
+  "warnings": [],
+  "config": {
+    "exists": true,
+    "mode": "Standalone",
+    "suspended": false,
+    "conditions": []
+  },
+  "operator": {
+    "namespace": "inkwall-system",
+    "versions": [
+      "0.5.0"
+    ],
+    "pods": 2,
+    "ready": 2
+  },
+  "bundle": {
+    "version": 7,
+    "compressedBytes": 4096,
+    "chunks": 0
+  },
+  "proxies": [
+    {
+      "controller": "traefik.io/ingress-controller",
+      "integration": "traefik",
+      "support": "Full",
+      "message": "",
+      "ingressClasses": [
+        "traefik"
+      ],
+      "gatewayClasses": [],
+      "inspects": {
+        "requests": true,
+        "responses": false,
+        "webSocketMessages": false,
+        "grpcMessages": true
+      }
+    },
+    {
+      "controller": "k8s.io/ingress-nginx",
+      "integration": "",
+      "support": "Unsupported",
+      "message": "Inkwall has no integration for this controller",
+      "ingressClasses": [
+        "nginx"
+      ],
+      "gatewayClasses": [],
+      "inspects": {
+        "requests": false,
+        "responses": false,
+        "webSocketMessages": false,
+        "grpcMessages": false
+      }
+    }
+  ],
+  "policies": {
+    "total": 2,
+    "ready": 2,
+    "notReady": []
+  },
+  "engines": {
+    "total": 2,
+    "leftOut": 0,
+    "byVersion": [
+      {
+        "version": "v0.5.0",
+        "current": 2,
+        "behind": 0,
+        "rejected": 0
+      }
+    ],
+    "attention": []
+  }
+}

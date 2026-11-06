@@ -114,3 +114,49 @@ func TestWebSocketMessageVerdicts(t *testing.T) {
 		})
 	}
 }
+
+// TestWebSocketMessageNotScoredOnTheHandshake (#363): a handshake that
+// scores 3 (920230, multiple URL encoding, at paranoia level 2) passed; a
+// message scoring 3 on its own passes too, instead of adding up to the
+// threshold of 5. Its attacks are still denied.
+func TestWebSocketMessageNotScoredOnTheHandshake(t *testing.T) {
+	eval, err := coraza.New(coraza.Config{ParanoiaLevel: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 10 * time.Second})
+	hs := browserHandshake("HTTP/1.1", "/chat?q=%2541", true)
+	if v := p.Check(context.Background(), hs); v.Action != pipeline.ActionAllow || v.AnomalyScore != 3 {
+		t.Fatalf("handshake: %s, score %d, want allowed with 3", v.Action, v.AnomalyScore)
+	}
+	for _, m := range []string{"hello", "%2541"} {
+		v := p.CheckWebSocketMessage(context.Background(), hs, []byte(m), false)
+		if v.Action != pipeline.ActionAllow || v.AnomalyScore > 3 {
+			t.Errorf("message %q: %s, score %d, rules %v: the handshake's score counts", m, v.Action, v.AnomalyScore, v.RuleIDs)
+		}
+	}
+	v := p.CheckWebSocketMessage(context.Background(), hs, []byte(`{"q":"1' OR '1'='1' -- "}`), false)
+	if v.Action != pipeline.ActionDeny {
+		t.Errorf("SQLi message: %s, rules %v", v.Action, v.RuleIDs)
+	}
+}
+
+// BenchmarkWebSocketMessage is the cost of inspecting one chat message
+// with the CRS (#363): its own arguments, not the handshake's headers and
+// query again.
+func BenchmarkWebSocketMessage(b *testing.B) {
+	eval, err := coraza.New(coraza.Config{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	p := pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 10 * time.Second})
+	hs := browserHandshake("HTTP/1.1", "/chat?room=lobby&user=alice", true)
+	msg := []byte(benignMessages[0])
+	ctx := context.Background()
+	b.ReportAllocs()
+	for b.Loop() {
+		if v := p.CheckWebSocketMessage(ctx, hs, msg, false); v.Action != pipeline.ActionAllow {
+			b.Fatal(v.Action)
+		}
+	}
+}
