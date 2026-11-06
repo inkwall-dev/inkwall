@@ -25,6 +25,9 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
+      type: string
     - jsonPath: .status.bundleVersion
       name: Bundle
       type: integer

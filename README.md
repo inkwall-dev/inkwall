@@ -133,11 +133,15 @@ Once the policy is `Ready`, every engine enforces it. Send an attack to check:
 
 ```console
 $ kubectl get wafpolicy -n shop
-NAME   MODE    READY   BUNDLE   AGE
-web    Block   True    2        3s
+NAME   MODE    READY   REASON   BUNDLE   AGE
+web    Block   True    Ready    2        3s
 $ curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: shop.example.com' "http://$TRAEFIK/?id=1%27%20OR%20%271%27%3D%271"
 403
 ```
+
+`REASON` says why a policy isn't `Ready`. `inkwallctl status` checks the whole cluster: the
+proxies, the policies that aren't `Ready`, and the engines, with what to do
+([Troubleshooting](docs/troubleshooting.md#cluster-status)).
 
 **Responses.** Add `responses: {inspect: true}` to a policy to inspect what the app answers too,
 for data leaks (SQL errors, stack traces, directory listings: the Core Rule Set's `RESPONSE-95x`

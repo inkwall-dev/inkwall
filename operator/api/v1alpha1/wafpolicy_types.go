@@ -444,6 +444,7 @@ type WAFPolicyStatus struct {
 // +kubebuilder:resource:categories=inkwall,shortName=wafp
 // +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.spec.mode`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
 // +kubebuilder:printcolumn:name="Bundle",type=integer,JSONPath=`.status.bundleVersion`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type WAFPolicy struct {
