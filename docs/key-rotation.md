@@ -104,7 +104,7 @@ Without `rotationInterval`, the key rotates only when you ask.
 An engine accepts a bundle signed by any key in its `trusted-keys.pub`. It looks the key up by the
 key ID in the signed bundle (the first 8 bytes of the key's [SHA-256](https://csrc.nist.gov/pubs/fips/180-4/upd1/final), in hex). A bundle signed
 with a key it doesn't trust is rejected: the engine logs `bundle rejected`, counts it in
-`inkwall_bundle_updates_total{result="rejected"}`, and keeps enforcing the bundle it has. Once
+`inkwall_bundle_updates_total{result="rejected",reason="signature"}`, and keeps enforcing the bundle it has. Once
 its key file changes, it reconnects and gets the bundle again.
 
 Traffic is unaffected in every phase. A bundle signed again with the new key and the same

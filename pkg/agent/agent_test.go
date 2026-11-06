@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -394,6 +395,21 @@ func TestRejections(t *testing.T) {
 	}
 	if a.Version() != 5 || !blocks(holder) {
 		t.Fatalf("a rejected bundle replaced v5 (now %d)", a.Version())
+	}
+	// Each rejection counts with its reason (#356).
+	for reason, want := range map[string]float64{"signature": 3, "older": 1, "compile": 1} {
+		if got := testutil.ToFloat64(a.applies.WithLabelValues("rejected", reason)); got != want {
+			t.Errorf("rejected %s: %v, want %v", reason, got, want)
+		}
+	}
+	if got := testutil.ToFloat64(a.applies.WithLabelValues("applied", "")); got != 1 {
+		t.Errorf("applied: %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(a.appliedAt); got < float64(now.Unix()) {
+		t.Errorf("applied timestamp %v, want at least %d", got, now.Unix())
+	}
+	if n := testutil.CollectAndCount(a.compileTime); n != 1 {
+		t.Errorf("compile time: %d series", n)
 	}
 
 	// The same content again, with a new version: adopted without

@@ -227,6 +227,7 @@ func TestInkwallConfigValidation(t *testing.T) {
       limits: {memory: 512Mi}
     socketDir: /var/run/inkwall
     logLevel: Warn
+    policyMetrics: true
   integrations:
   - controller: traefik
     selector: {matchLabels: {app.kubernetes.io/name: traefik}}
