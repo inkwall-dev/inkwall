@@ -6,6 +6,7 @@
 package coraza
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -57,10 +58,12 @@ var RuleGroups = map[string]int{
 // Config configures the evaluator.
 type Config struct {
 	// ParanoiaLevel is the CRS blocking paranoia level, 1 (default) to 4.
-	// Higher levels detect more and produce more false positives.
+	// Higher levels detect more and produce more false positives. It is set
+	// on each transaction (CRSSettings), so it is not part of Key.
 	ParanoiaLevel int
 	// InboundAnomalyThreshold is the CRS inbound anomaly score at which a
-	// request is blocked. Defaults to 5 (one critical match).
+	// request is blocked. Defaults to 5 (one critical match). Set on each
+	// transaction, as ParanoiaLevel.
 	InboundAnomalyThreshold int
 	// MaxArgs is the maximum number of arguments per source (query, body,
 	// path). Requests with more are rejected with 400 by rules 200004
@@ -76,13 +79,15 @@ type Config struct {
 	// and configure-time exclusions (SecRuleRemoveById, SecRuleUpdateTargetById).
 	Directives string
 	// BodyLimit, if positive, sets Coraza's request body limits
-	// (SecRequestBodyLimit and SecRequestBodyInMemoryLimit) to the largest
-	// body the caller will pass, so bodies within the caller's limit are
-	// neither rejected by Coraza nor buffered to temporary files.
+	// (SecRequestBodyLimit and SecRequestBodyInMemoryLimit) above the
+	// largest body the caller will pass, so bodies within the caller's limit
+	// are neither rejected by Coraza nor buffered to temporary files. It is
+	// compiled in, so callers that enforce their own limits (as policies do)
+	// should pass the largest of them all, for one rule set.
 	BodyLimit int
 	// ResponseBodyLimit, if positive, sets Coraza's response body limit
 	// (SecResponseBodyLimit) above the largest response body the caller
-	// will pass, so the whole of it is inspected.
+	// will pass, so the whole of it is inspected. Compiled in, as BodyLimit.
 	ResponseBodyLimit int
 	// DisabledRuleGroups lists CRS attack families (keys of RuleGroups) to
 	// remove. Only disable families the protected application cannot be
@@ -101,16 +106,55 @@ type Config struct {
 }
 
 // Key identifies the rules cfg compiles to: equal keys, equal rule sets.
-// OnMatch and Exclusions are not part of it.
+// OnMatch, Exclusions and the CRS settings (CRS) are not part of it: they
+// are applied to each transaction.
 func (cfg Config) Key() [sha256.Size]byte {
 	h := sha256.New()
-	fmt.Fprintf(h, "pl=%d\nthreshold=%d\nargs=%d\nbody=%d\nresponse=%d\ncrs=%v\ngroups=%q\n",
-		cfg.ParanoiaLevel, cfg.InboundAnomalyThreshold, cfg.MaxArgs, cfg.BodyLimit, cfg.ResponseBodyLimit, !cfg.DisableCRS, cfg.DisabledRuleGroups)
+	fmt.Fprintf(h, "args=%d\nbody=%d\nresponse=%d\ncrs=%v\ngroups=%q\n",
+		cfg.MaxArgs, cfg.BodyLimit, cfg.ResponseBodyLimit, !cfg.DisableCRS, cfg.DisabledRuleGroups)
 	// Lengths first, so no text can pass for a boundary.
 	fmt.Fprintf(h, "before=%d\n%s\nafter=%d\n%s", len(cfg.DirectivesBeforeCRS), cfg.DirectivesBeforeCRS, len(cfg.Directives), cfg.Directives)
 	var k [sha256.Size]byte
 	h.Sum(k[:0])
 	return k
+}
+
+// CRS returns cfg's CRS settings.
+func (cfg Config) CRS() CRSSettings {
+	return CRSSettings{ParanoiaLevel: cfg.ParanoiaLevel, InboundAnomalyThreshold: cfg.InboundAnomalyThreshold}
+}
+
+// CRSSettings are the CRS's own settings, as TX variables. They are set on
+// each transaction before phase 1, not compiled into the rules: the CRS's
+// initialization (REQUEST-901) only sets the variables still unset, so one
+// compiled rule set serves every value, and SecLang that sets them (before
+// or after the CRS, globally or per path) still wins, as it runs later.
+// Zero values are the defaults.
+type CRSSettings struct {
+	// ParanoiaLevel is tx.blocking_paranoia_level, 1 (default) to 4.
+	ParanoiaLevel int
+	// InboundAnomalyThreshold is tx.inbound_anomaly_score_threshold,
+	// DefaultInboundAnomalyThreshold by default.
+	InboundAnomalyThreshold int
+}
+
+// txVar is a TX variable set on each transaction.
+type txVar struct{ name, value string }
+
+// vars checks s and returns its TX variables.
+func (s CRSSettings) vars() ([]txVar, error) {
+	pl := cmp.Or(s.ParanoiaLevel, DefaultParanoiaLevel)
+	if pl < 1 || pl > 4 {
+		return nil, fmt.Errorf("paranoia level %d out of range 1-4", pl)
+	}
+	threshold := cmp.Or(s.InboundAnomalyThreshold, DefaultInboundAnomalyThreshold)
+	if threshold < 1 {
+		return nil, fmt.Errorf("inbound anomaly threshold %d must be positive", threshold)
+	}
+	return []txVar{
+		{"blocking_paranoia_level", strconv.Itoa(pl)},
+		{"inbound_anomaly_score_threshold", strconv.Itoa(threshold)},
+	}, nil
 }
 
 // Exclusion turns rules off where they cause false positives.
@@ -186,7 +230,6 @@ func exclusionRequestPath(rawURI string) string {
 // the inspection of JSON arguments.
 var setupRules = map[int]bool{
 	200000: true, 200001: true, 200006: true, 200004: true,
-	idParanoiaLevel: true, idAnomalyThreshold: true,
 }
 
 // compileExclusions checks and compiles exclusions.
@@ -253,7 +296,10 @@ type ruleRemover interface {
 	RemoveRuleTargetByID(id int, variable variables.RuleVariable, key string, keyRx *regexp.Regexp)
 }
 
-var errNoRuleRemoval = errors.New("this Coraza version's transactions can't turn rules off (RemoveRuleByID, RemoveRuleTargetByID)")
+var (
+	errNoRuleRemoval = errors.New("this Coraza version's transactions can't turn rules off (RemoveRuleByID, RemoveRuleTargetByID)")
+	errNoTxState     = errors.New("this Coraza version's transactions don't expose their variables")
+)
 
 // apply turns the exclusions on for tx, a request for rawURI, before
 // ProcessRequestHeaders (phase 1).
@@ -308,6 +354,10 @@ type Evaluator struct {
 	// variants, if set, replace waf: the rules with the argument
 	// exclusions compiled in.
 	variants *argsVariants
+	// crs is set when the rules include the CRS; tx are then the CRS
+	// settings set on each transaction.
+	crs bool
+	tx  []txVar
 }
 
 // privateRules are rules that negate ARGS targets themselves.
@@ -340,7 +390,18 @@ func New(cfg Config) (*Evaluator, error) {
 	if private != nil && len(private.ids) == 0 {
 		return nil, errors.New("this Coraza version doesn't list the rules it compiles")
 	}
-	e := &Evaluator{waf: waf, base: waf, private: private}
+	e := &Evaluator{waf: waf, base: waf, private: private, crs: !cfg.DisableCRS}
+	if e.crs {
+		tx := waf.NewTransaction()
+		_, ok := tx.(plugintypes.TransactionState)
+		_ = tx.Close()
+		if !ok {
+			return nil, errNoTxState
+		}
+	}
+	if e, err = e.WithCRS(cfg.CRS()); err != nil {
+		return nil, err
+	}
 	return e.WithExclusions(list)
 }
 
@@ -374,7 +435,7 @@ func (e *Evaluator) WithExclusions(list []Exclusion) (*Evaluator, error) {
 	if err != nil {
 		return nil, err
 	}
-	ev := &Evaluator{waf: e.base, base: e.base, private: e.private}
+	ev := &Evaluator{waf: e.base, base: e.base, private: e.private, crs: e.crs, tx: e.tx}
 	if e.private != nil && x.hasTargets() {
 		if ev.variants, err = e.private.variants(x); err != nil {
 			return nil, err
@@ -394,6 +455,39 @@ func (e *Evaluator) WithExclusions(list []Exclusion) (*Evaluator, error) {
 	}
 	ev.exclusions = x
 	return ev, nil
+}
+
+// WithCRS returns an evaluator with e's rules and exclusions and the CRS
+// settings s instead of e's. It compiles nothing: policies that differ only in
+// their CRS settings share one rule set. Without the CRS, s is checked and
+// has no effect.
+func (e *Evaluator) WithCRS(s CRSSettings) (*Evaluator, error) {
+	vars, err := s.vars()
+	if err != nil {
+		return nil, err
+	}
+	ev := *e
+	ev.tx = nil
+	if e.crs {
+		ev.tx = vars
+	}
+	return &ev, nil
+}
+
+// setCRS sets the CRS settings on tx, before phase 1.
+func (e *Evaluator) setCRS(tx types.Transaction) error {
+	if len(e.tx) == 0 {
+		return nil
+	}
+	st, ok := tx.(plugintypes.TransactionState)
+	if !ok {
+		return errNoTxState
+	}
+	m := st.Variables().TX()
+	for _, v := range e.tx {
+		m.Set(v.name, []string{v.value})
+	}
+	return nil
 }
 
 // argsVariants are the rule sets of a policy whose rules negate ARGS targets
@@ -507,19 +601,8 @@ func (e *Evaluator) wafFor(r *request.Request) (coraza.WAF, error) {
 }
 
 func buildDirectives(cfg Config) (string, error) {
-	pl := cfg.ParanoiaLevel
-	if pl == 0 {
-		pl = DefaultParanoiaLevel
-	}
-	if pl < 1 || pl > 4 {
-		return "", fmt.Errorf("paranoia level %d out of range 1-4", pl)
-	}
-	threshold := cfg.InboundAnomalyThreshold
-	if threshold == 0 {
-		threshold = DefaultInboundAnomalyThreshold
-	}
-	if threshold < 1 {
-		return "", fmt.Errorf("inbound anomaly threshold %d must be positive", threshold)
+	if _, err := cfg.CRS().vars(); err != nil {
+		return "", err
 	}
 	maxArgs := cfg.MaxArgs
 	if maxArgs == 0 {
@@ -545,8 +628,9 @@ func buildDirectives(cfg Config) (string, error) {
 	// arguments past the limit were silently not inspected. The rules are
 	// copied from Coraza 3.8.1's coraza.conf-recommended (Apache-2.0).
 	fmt.Fprintf(&b, "SecArgumentsLimit %d\n", maxArgs)
+	// One byte over the limit, as Coraza rejects a body that reaches it.
 	if cfg.BodyLimit > 0 {
-		fmt.Fprintf(&b, "SecRequestBodyLimit %d\nSecRequestBodyInMemoryLimit %d\n", cfg.BodyLimit, cfg.BodyLimit)
+		fmt.Fprintf(&b, "SecRequestBodyLimit %d\nSecRequestBodyInMemoryLimit %d\n", cfg.BodyLimit+1, cfg.BodyLimit+1)
 	}
 	// The response bodies the rules read are those the adapters buffer
 	// (rules.ResponseBodyTypes): JSON and XML APIs too, not only
@@ -563,16 +647,8 @@ func buildDirectives(cfg Config) (string, error) {
 	// Coraza's regex prefilter (SecRxPreFilter) is deliberately left off: with
 	// Coraza 3.8.1 it misses CRS regression tests 942220-2 and 932311-7. Only
 	// re-enable it once the CRS suite (test/crs) passes with it on.
-	if !cfg.DisableCRS {
-		// Inkwall's CRS settings come before the user's pre-CRS directives so
-		// that a user rule setting the same variables (globally or per path)
-		// wins. They use Inkwall's own ID range, so users can keep CRS's
-		// documented setup IDs (900000, 900110, ...).
-		fmt.Fprintf(&b,
-			"SecAction \"id:%d,phase:1,pass,t:none,nolog,setvar:tx.blocking_paranoia_level=%d\"\n", idParanoiaLevel, pl)
-		fmt.Fprintf(&b,
-			"SecAction \"id:%d,phase:1,pass,t:none,nolog,setvar:tx.inbound_anomaly_score_threshold=%d\"\n", idAnomalyThreshold, threshold)
-	}
+	// Inkwall's CRS settings aren't directives: they are set on each
+	// transaction (CRSSettings), before any rule runs.
 	if cfg.DirectivesBeforeCRS != "" {
 		b.WriteString(cfg.DirectivesBeforeCRS)
 		b.WriteString("\n")
@@ -644,6 +720,9 @@ func (e *Evaluator) evaluate(r *request.Request) (rules.Result, types.Transactio
 	}
 	tx.ProcessConnection(client, 0, "", 0)
 	tx.ProcessURI(r.RawURI, r.Method, r.Proto)
+	if err := e.setCRS(tx); err != nil {
+		return rules.Result{}, tx, err
+	}
 	if e.exclusions != nil {
 		if err := e.exclusions.apply(tx, r.RawURI); err != nil {
 			return rules.Result{}, tx, err
@@ -811,9 +890,6 @@ func anomalyScore(tx types.Transaction, score string) int {
 // Inkwall's internal rules use IDs 7700000-7709999, outside the ranges CRS
 // and Coraza use, so they never collide with user or CRS rules.
 const (
-	idParanoiaLevel    = 7700001
-	idAnomalyThreshold = 7700002
-
 	internalIDMin = 7700000
 	internalIDMax = 7709999
 	// idCRSContentType is CRS's rule for content types the policy

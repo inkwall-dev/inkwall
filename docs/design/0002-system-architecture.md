@@ -937,7 +937,9 @@ not built yet.
 ### 8.4 Multi-tenancy
 
 One engine per ingress pod serves all of that pod's policies. Rule sets shared between policies
-compile once. The enrollment certificate ([§7.5](#75-cluster-enrollment-managed--gitops-mode))
+compile once. A policy's CRS paranoia level, anomaly threshold, body limits and exclusions don't
+make a rule set of their own: the engine applies them to each transaction
+([0004 §8](0004-operator.md#8-scale-targets-v1)). The enrollment certificate ([§7.5](#75-cluster-enrollment-managed--gitops-mode))
 binds a cluster to its tenant in the control plane.
 
 ### 8.5 Observability

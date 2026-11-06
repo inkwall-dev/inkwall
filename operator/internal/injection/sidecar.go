@@ -84,8 +84,11 @@ func defaultResources() corev1.ResourceRequirements {
 			corev1.ResourceMemory: resource.MustParse("128Mi"),
 		},
 		// No CPU limit: throttling shows up as tail latency on every
-		// request. Memory grows with the number of distinct rule sets
-		// (~4 MiB each).
+		// request. Memory grows with the number of distinct rule sets:
+		// about 20 MiB for the first CRS and 2.1 MiB for each further one.
+		// Paranoia levels, thresholds, body limits and exclusions don't
+		// make one of their own (1,000 policies over 4 levels and 10 body
+		// limits: one rule set, 20 MiB of heap).
 		Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
 	}
 }
