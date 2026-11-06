@@ -1,0 +1,10 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# zizmor (make lint-scripts): findings triaged, each with its reason.
+rules:
+  cache-poisoning:
+    ignore:
+      # ci.yaml publishes nothing: its Go and image build caches speed up
+      # tests. The release workflow, which publishes, uses no cache.
+      - ci.yaml

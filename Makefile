@@ -104,8 +104,20 @@ crs-test: ## Run the OWASP CRS regression suite through the proxy (test/crs)
 
 
 .PHONY: lint
-lint: workflow-check ## Run golangci-lint, and check the workflows' runners
+lint: workflow-check lint-scripts ## Run golangci-lint, and check the workflows and the shell scripts
 	$(GOLANGCI_LINT) run ./...
+
+# The workflows' and scripts' linters (#398). shellcheck and zizmor run from
+# their images when they aren't installed.
+ACTIONLINT ?= $(GO) run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+SHELLCHECK ?= $(if $(shell command -v shellcheck),shellcheck,docker run --rm -v $(CURDIR):/mnt -w /mnt koalaman/shellcheck:v0.10.0)
+ZIZMOR     ?= $(if $(shell command -v zizmor),zizmor,docker run --rm -v $(CURDIR):/repo -w /repo ghcr.io/zizmorcore/zizmor:1.16.3)
+
+.PHONY: lint-scripts
+lint-scripts: ## Lint the workflows (actionlint, zizmor; findings triaged in .github/zizmor.yml) and the shell scripts (shellcheck)
+	$(ACTIONLINT)
+	$(ZIZMOR) --offline --config .github/zizmor.yml .github/workflows
+	$(SHELLCHECK) $$(git ls-files '*.sh')
 
 # The runner every CI job runs on: a fixed Ubuntu release, never
 # ubuntu-latest, which GitHub moves to the next LTS unannounced (#400). Move
