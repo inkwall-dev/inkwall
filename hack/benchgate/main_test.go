@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -38,7 +39,7 @@ const (
 )
 
 func TestCheck(t *testing.T) {
-	got, err := check(strings.NewReader(csvOut), 5)
+	got, err := check(strings.NewReader(csvOut), limits{threshold: 5})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,14 +58,14 @@ func TestCheck(t *testing.T) {
 		}
 	}
 
-	if got, _ := check(strings.NewReader(csvOut), 20); len(got) != 1 {
+	if got, _ := check(strings.NewReader(csvOut), limits{threshold: 20}); len(got) != 1 {
 		t.Fatalf("threshold 20: %v", got)
 	}
 }
 
 func TestCheckRejectsOtherInput(t *testing.T) {
 	for _, in := range []string{"", "goos: linux\n", "name old time/op new time/op delta\n"} {
-		if _, err := check(strings.NewReader(in), 5); err == nil {
+		if _, err := check(strings.NewReader(in), limits{threshold: 5}); err == nil {
 			t.Errorf("accepted %q", in)
 		}
 	}
@@ -76,7 +77,7 @@ func TestRunConfirm(t *testing.T) {
 
 	// First run: both regressions fail the gate and are written down.
 	var out strings.Builder
-	if err := run(strings.NewReader(csvOut), &out, 5, flagged, ""); !errors.Is(err, errRegressed) {
+	if err := run(strings.NewReader(csvOut), &out, limits{threshold: 5}, flagged, ""); !errors.Is(err, errRegressed) {
 		t.Fatalf("first run: %v\n%s", err, &out)
 	}
 	keys, err := os.ReadFile(flagged)
@@ -91,7 +92,7 @@ func TestRunConfirm(t *testing.T) {
 	// confirmed, the other is reported as not repeated.
 	recheck := strings.Replace(csvOut, "+15.81%", "~", 1)
 	out.Reset()
-	err = run(strings.NewReader(recheck), &out, 5, "", flagged)
+	err = run(strings.NewReader(recheck), &out, limits{threshold: 5}, "", flagged)
 	if !errors.Is(err, errRegressed) {
 		t.Fatalf("re-check: %v\n%s", err, &out)
 	}
@@ -103,7 +104,7 @@ func TestRunConfirm(t *testing.T) {
 	// Nothing repeats: the gate passes.
 	clean := strings.Replace(recheck, "+Inf%", "~", 1)
 	out.Reset()
-	if err := run(strings.NewReader(clean), &out, 5, "", flagged); err != nil {
+	if err := run(strings.NewReader(clean), &out, limits{threshold: 5}, "", flagged); err != nil {
 		t.Fatalf("clean re-check: %v\n%s", err, &out)
 	}
 
@@ -112,10 +113,74 @@ func TestRunConfirm(t *testing.T) {
 		t.Fatal(err)
 	}
 	out.Reset()
-	if err := run(strings.NewReader(csvOut), &out, 5, "", flagged); !errors.Is(err, errRegressed) {
+	if err := run(strings.NewReader(csvOut), &out, limits{threshold: 5}, "", flagged); !errors.Is(err, errRegressed) {
 		t.Fatalf("partial re-check: %v\n%s", err, &out)
 	}
 	if !strings.Contains(out.String(), "NOT CONFIRMED "+coraza+" Evaluate/benign_get-12 sec/op") {
 		t.Fatalf("partial re-check output:\n%s", &out)
+	}
+}
+
+// The #413 and #428 bench failures, as benchstat printed them on CI: the
+// same machine code for pkg/policy Lookup, moved in the binary; 8-14% on a
+// ~440 ns benchmark, allocations unchanged. Plus a 1.5 µs benchmark that
+// really got 8% slower, and sub-microsecond ones that really regressed.
+const layoutCSV = `goos: linux
+goarch: amd64
+pkg: github.com/inkwall-dev/inkwall/pkg/policy
+cpu: AMD EPYC 7763 64-Core Processor
+,base.txt,,head.txt,,,
+,sec/op,CI,sec/op,CI,vs base,P
+Lookup-4,4.334e-07,1%,4.956e-07,0%,+14.36%,p=0.000 n=8
+Slow-4,1.5e-06,1%,1.62e-06,1%,+8.00%,p=0.000 n=8
+Doubled-4,2e-07,1%,4.2e-07,1%,+110.00%,p=0.000 n=8
+Allocates-4,3e-07,1%,3.3e-07,1%,+10.00%,p=0.000 n=8
+geomean,4e-07,,4.5e-07,,+12.00%,
+,base.txt,,head.txt,,,
+,B/op,CI,B/op,CI,vs base,P
+Lookup-4,56,0%,56,0%,~,p=1.000 n=8
+Allocates-4,56,0%,80,0%,+42.86%,p=0.000 n=8
+geomean,,,,,+0.00%,
+,base.txt,,head.txt,,,
+,allocs/op,CI,allocs/op,CI,vs base,P
+Lookup-4,2,0%,2,0%,~,p=1.000 n=8
+Allocates-4,2,0%,3,0%,+50.00%,p=0.000 n=8
+geomean,,,,,+0.00%,
+`
+
+// Below 1 µs/op, time is gated at a higher threshold: a code-layout shift
+// moves such a benchmark by up to ~15% without any change in what it runs
+// (#422). Memory and allocations keep the threshold, and so does time
+// above 1 µs.
+func TestCheckFastBenchmarks(t *testing.T) {
+	const policy = "github.com/inkwall-dev/inkwall/pkg/policy"
+	got, err := check(strings.NewReader(layoutCSV), defaultLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for _, r := range got {
+		keys = append(keys, r.key())
+	}
+	want := []string{
+		policy + "\tSlow-4\tsec/op",         // 8% on 1.5 µs: a real regression
+		policy + "\tDoubled-4\tsec/op",      // +110% under 1 µs: past the fast threshold
+		policy + "\tAllocates-4\tB/op",      // more memory
+		policy + "\tAllocates-4\tallocs/op", // and an allocation more
+	}
+	if strings.Join(keys, "\n") != strings.Join(want, "\n") {
+		t.Errorf("regressions:\n%s\nwant:\n%s", strings.Join(keys, "\n"), strings.Join(want, "\n"))
+	}
+	// Lookup, the layout shift, is not among them; its own CSV passes.
+	lookupOnly := strings.Join(slices.DeleteFunc(strings.Split(layoutCSV, "\n"), func(l string) bool {
+		return strings.HasPrefix(l, "Slow-") || strings.HasPrefix(l, "Doubled-") || strings.HasPrefix(l, "Allocates-")
+	}), "\n")
+	var out strings.Builder
+	if err := run(strings.NewReader(lookupOnly), &out, defaultLimits, "", ""); err != nil {
+		t.Errorf("the layout shift fails the gate: %v\n%s", err, &out)
+	}
+	// With one threshold for all, as before #422, it would fail.
+	if got, _ := check(strings.NewReader(lookupOnly), limits{threshold: 5}); len(got) != 1 {
+		t.Errorf("one threshold: %v", got)
 	}
 }
