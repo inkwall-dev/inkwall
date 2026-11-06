@@ -6,6 +6,7 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 ## Contents
 
+- [From 0.4.x to 0.5.0](#from-04x-to-050)
 - [From 0.4.0 to 0.4.1](#from-040-to-041)
 - [From 0.3.x to 0.4.0](#from-03x-to-040)
   - [What's new in 0.4.0](#whats-new-in-040)
@@ -29,6 +30,20 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
   - [Upgrading the chart](#upgrading-the-chart)
   - [Checking it worked](#checking-it-worked)
   - [Rolling back](#rolling-back)
+
+## From 0.4.x to 0.5.0
+
+What changes by itself:
+
+- **Less engine memory for the CRS.** Policies that differ only in their paranoia level, inbound
+  anomaly threshold, `body.maxBytes` or `responses.maxBytes` now share one compiled CRS (about
+  2.1 MiB and 10–30 ms less for each combination that used to compile its own). The engine sets
+  the paranoia level and threshold on each request. Detection is unchanged, and SecLang that sets
+  `tx.blocking_paranoia_level` or `tx.inbound_anomaly_score_threshold` still wins over the policy's
+  fields.
+- **A request body exactly `body.maxBytes` long is inspected.** Before, Coraza's own limit denied
+  it (status 413 and no rule ID, in Block mode). Bodies over the limit are handled by
+  `body.onOversize`, as before.
 
 ## From 0.4.0 to 0.4.1
 
