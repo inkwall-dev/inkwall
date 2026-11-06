@@ -51,9 +51,10 @@ BASE            ?= origin/main
 # (CLAUDE.md is exempt by default). CODE_OF_CONDUCT.md needs no Contents:
 # it is the Contributor Covenant 2.1, kept verbatim. The install and verify
 # commands of the READMEs and CONTRIBUTING.md write <version>, never a
-# release, so they don't go stale when the next one ships.
+# release, so they don't go stale when the next one ships. docs/monitoring.md
+# names every metric the code registers.
 DOCS_CHECK_STRICT ?= -contents-min-lines=80 -require-index -contents-exempt=CODE_OF_CONDUCT.md \
-	-unpinned=README.md,deploy/helm/inkwall/README.md,CONTRIBUTING.md
+	-unpinned=README.md,deploy/helm/inkwall/README.md,CONTRIBUTING.md -metrics-doc=docs/monitoring.md
 DOCS_CHECK        ?= $(GO) run ./hack/docscheck $(DOCS_CHECK_STRICT)
 
 # scale-test: sizes as <policies>x<engines>, one operator each; "full" is 0004 §8's matrix.
@@ -146,6 +147,15 @@ generate: ## Lint the protobuf APIs (api/), regenerate their Go code, and regene
 	cp operator/config/rbac/role.yaml $(CHART)/files/rbac/
 	cp operator/config/webhook/manifests.yaml $(CHART)/files/webhook/
 
+# promtool, for the alerts' unit tests: the Prometheus image's, unless
+# PROMTOOL names one installed.
+PROMTOOL ?= docker run --rm -v $(CURDIR):/work -w /work --entrypoint promtool quay.io/prometheus/prometheus:v3.5.0
+
+.PHONY: monitoring-test
+monitoring-test: ## Check the chart's alerts and run their unit tests (hack/monitoring/alerts_test.yaml) with promtool
+	$(PROMTOOL) check rules deploy/helm/inkwall/monitoring/alerts.yaml
+	$(PROMTOOL) test rules hack/monitoring/alerts_test.yaml
+
 .PHONY: helm-lint
 helm-lint: ## Lint the Helm chart, render it with each webhook certificate mode, and check its integration roles (hack/helm-test.sh)
 	helm lint --strict $(CHART)
@@ -154,6 +164,9 @@ helm-lint: ## Lint the Helm chart, render it with each webhook certificate mode,
 	helm template inkwall $(CHART) --namespace inkwall-system --set controlPlane.caBundle=ca --set controlPlane.enrollmentToken=t >/dev/null
 	@# As helm upgrade --reuse-values from 0.1.0 renders it: values without controlPlane.
 	helm template inkwall $(CHART) --namespace inkwall-system --set controlPlane=null >/dev/null
+	@# The monitoring kit, every object of it.
+	helm lint --strict $(CHART) --set metrics.forceMonitoringObjects=true --set metrics.serviceMonitor.enabled=true \
+		--set metrics.podMonitor.enabled=true --set metrics.prometheusRule.enabled=true --set metrics.dashboard.enabled=true
 	CHART=$(CHART) hack/helm-test.sh
 	@# What the chart looks up in a cluster, against envtest.
 	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" CHART=$(abspath $(CHART)) $(GO) test -count=1 ./hack/helmcheck
@@ -180,7 +193,7 @@ release-check: ## Check the goreleaser configuration
 	$(GORELEASER) check
 
 # The kind targets, and the scripts they run, use the kind of KIND_VERSION.
-KIND_TARGETS := kind-cluster kind-up kind-operator kind-e2e kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-response-load kind-upgrade kind-down
+KIND_TARGETS := kind-cluster kind-up kind-operator kind-e2e kind-e2e-traefik kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-response-load kind-upgrade kind-down
 $(KIND_TARGETS): export PATH := $(KIND_DIR):$(PATH)
 $(KIND_TARGETS): $(KIND_DIR)/kind
 
@@ -203,14 +216,20 @@ kind-operator: ## Build the operator image, install the Helm chart on the kind c
 
 .PHONY: kind-e2e
 kind-e2e: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
-kind-e2e: kind-operator ## End-to-end test on kind: a WAFPolicy is enforced by an engine in bundle mode, through Traefik, raw Envoy, Envoy Gateway, Istio and HAProxy (installs the operator first)
-	@# kind-operator built and loaded the engine image.
+kind-e2e: ## End-to-end test on kind: a WAFPolicy is enforced by an engine in bundle mode, through Traefik, raw Envoy, Envoy Gateway, Istio and HAProxy, one after another (CI runs them as separate jobs)
+	@# Each installs the operator first and ends with an uninstall. The
+	@# images are built once: SKIP_IMAGE_BUILD for the others.
+	$(MAKE) kind-e2e-traefik
+	SKIP_IMAGE_BUILD=1 $(MAKE) kind-e2e-raw-envoy
+	SKIP_IMAGE_BUILD=1 $(MAKE) kind-e2e-envoy-gateway
+	SKIP_IMAGE_BUILD=1 $(MAKE) kind-e2e-istio
+	SKIP_IMAGE_BUILD=1 $(MAKE) kind-e2e-haproxy
+
+.PHONY: kind-e2e-traefik
+kind-e2e-traefik: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
+kind-e2e-traefik: kind-operator ## End-to-end test on kind through Traefik: a WAFPolicy enforced by an engine in bundle mode, the control plane, signing key rotation, suspension (installs the operator first)
+	@# kind-operator built (or, with SKIP_IMAGE_BUILD, found) and loaded the engine image.
 	KIND_CLUSTER=$(KIND_CLUSTER) IMAGE=$(IMAGE) SKIP_BUILD=1 hack/kind/e2e.sh
-	@# e2e.sh ends with an uninstall, as does each of these.
-	$(MAKE) kind-e2e-raw-envoy
-	$(MAKE) kind-e2e-envoy-gateway
-	$(MAKE) kind-e2e-istio
-	$(MAKE) kind-e2e-haproxy
 
 .PHONY: kind-e2e-raw-envoy
 kind-e2e-raw-envoy: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)

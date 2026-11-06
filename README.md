@@ -133,11 +133,15 @@ Once the policy is `Ready`, every engine enforces it. Send an attack to check:
 
 ```console
 $ kubectl get wafpolicy -n shop
-NAME   MODE    READY   BUNDLE   AGE
-web    Block   True    2        3s
+NAME   MODE    READY   REASON   BUNDLE   AGE
+web    Block   True    Ready    2        3s
 $ curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: shop.example.com' "http://$TRAEFIK/?id=1%27%20OR%20%271%27%3D%271"
 403
 ```
+
+`REASON` says why a policy isn't `Ready`. `inkwallctl status` checks the whole cluster: the
+proxies, the policies that aren't `Ready`, and the engines, with what to do
+([Troubleshooting](docs/troubleshooting.md#cluster-status)).
 
 **Responses.** Add `responses: {inspect: true}` to a policy to inspect what the app answers too,
 for data leaks (SQL errors, stack traces, directory listings: the Core Rule Set's `RESPONSE-95x`
@@ -146,7 +150,8 @@ Istio: Traefik's ForwardAuth and HAProxy never send responses, so on their route
 `Programmed=False` (`ResponsesNotInspected`) while its requests are still inspected
 ([design](docs/design/0006-adapter-protocols.md#response-inspection-v040)).
 
-Start in `Detect` mode, tune [false positives](https://coreruleset.org/docs/concepts/false_positives_tuning/) on the policy (`exclusions`, `skip` paths,
+Start in `Detect` mode, tune [false positives](https://coreruleset.org/docs/concepts/false_positives_tuning/) on the policy (`exclusions`, narrowed with `when` to a path and an
+argument, argument name, cookie or header, `skip` paths,
 [`ruleSets[].paranoiaLevel`](https://coreruleset.org/docs/concepts/paranoia_levels/)), then switch to `Block`. Extra rules come from `WAFRuleSet` and
 `ClusterWAFRuleSet` objects: built-in, [SecLang](https://coraza.io/docs/seclang/) or a [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/).
 [`operator/config/samples`](operator/config/samples) has one object of each kind.
@@ -268,7 +273,8 @@ Tracked on the [project board](https://github.com/orgs/inkwall-dev/projects/1) a
 make check        # lint, tests, vulnerability scan, docs checks
 make crs-test     # OWASP CRS regression suite through the proxy
 make kind-up      # kind cluster with a demo behind the engine and Traefik
-make kind-e2e     # operator end to end on kind (what CI runs)
+make kind-e2e     # operator end to end on kind, every proxy in turn (CI: one job per proxy)
+make kind-e2e-traefik  # one proxy: also -raw-envoy, -envoy-gateway, -istio, -haproxy
 ```
 
 `make help` lists every target. The design docs are in [`docs/design`](docs/design/README.md);

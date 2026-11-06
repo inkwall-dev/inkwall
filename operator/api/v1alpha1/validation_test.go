@@ -166,7 +166,13 @@ func TestWAFPolicyValidation(t *testing.T) {
 
 		{name: "exclusion without rules", doc: policy(target + "  exclusions: [{ruleIDs: []}]\n"), wantErr: "should have at least 1 items"},
 		{name: "exclusion of rule 0", doc: policy(target + "  exclusions: [{ruleIDs: [0]}]\n"), wantErr: "should be greater than or equal to 1"},
-		{name: "empty exclusion match", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {}}]\n"), wantErr: "when needs a path, an argument, or both"},
+		{name: "empty exclusion match", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {}}]\n"), wantErr: "when needs a path, or what in the request to stop looking at"},
+		{name: "exclusion for a cookie", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {cookie: session}}]\n")},
+		{name: "exclusion for a header on a path", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {path: /api/*, header: X-Token}}]\n")},
+		{name: "exclusion for an argument name", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {argumentName: q}}]\n")},
+		{name: "exclusion for an argument and a cookie", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {argument: q, cookie: session}}]\n"), wantErr: "at most one of argument, argumentName, cookie and header"},
+		{name: "colon in an exclusion header", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {header: 'X-A:b'}}]\n"), wantErr: "spec.exclusions[0].when.header"},
+		{name: "quote in an exclusion cookie", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {cookie: 'a\"b'}}]\n"), wantErr: "spec.exclusions[0].when.cookie"},
 		// The argument name ends up in a SecLang directive: quotes and
 		// spaces could change the directive, so they are rejected.
 		{name: "quote in an exclusion argument", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {argument: 'q\" \"id:1'}}]\n"), wantErr: "spec.exclusions[0].when.argument"},
@@ -227,6 +233,7 @@ func TestInkwallConfigValidation(t *testing.T) {
       limits: {memory: 512Mi}
     socketDir: /var/run/inkwall
     logLevel: Warn
+    policyMetrics: true
   integrations:
   - controller: traefik
     selector: {matchLabels: {app.kubernetes.io/name: traefik}}
@@ -258,6 +265,9 @@ func TestInkwallConfigValidation(t *testing.T) {
 		{name: "empty redacted argument", doc: inkwallConfig("default", "  events: {redact: {arguments: [\"\"]}}\n"), wantErr: "spec.events.redact.arguments[0]"},
 		{name: "redacted argument pattern listed twice", doc: inkwallConfig("default", "  events: {redact: {arguments: [email, email]}}\n"), wantErr: "Duplicate value"},
 		{name: "selector by expression", doc: inkwallConfig("default", "  integrations: [{controller: traefik, selector: {matchExpressions: [{key: app, operator: In, values: [edge]}]}}]\n")},
+		{name: "client IP", doc: inkwallConfig("default", "  engine: {clientIP: {trustedProxies: [10.0.0.0/8, \"2001:db8::/32\", 192.0.2.1], trustedHops: 1}}\n")},
+		{name: "client IP hops over 10", doc: inkwallConfig("default", "  engine: {clientIP: {trustedHops: 11}}\n"), wantErr: "should be less than or equal to 10"},
+		{name: "client IP not a CIDR", doc: inkwallConfig("default", "  engine: {clientIP: {trustedProxies: [lb.example.com]}}\n"), wantErr: "spec.engine.clientIP.trustedProxies[0]"},
 	})
 }
 

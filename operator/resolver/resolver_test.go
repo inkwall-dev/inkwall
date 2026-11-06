@@ -125,6 +125,9 @@ func TestResolvePolicy(t *testing.T) {
 	}
 	p.Spec.Exclusions = []wafv1alpha1.Exclusion{
 		{RuleIDs: []int32{942100}, When: &wafv1alpha1.ExclusionMatch{Path: "/search", Argument: "q"}},
+		{RuleIDs: []int32{942100}, When: &wafv1alpha1.ExclusionMatch{Cookie: "session"}},
+		{RuleIDs: []int32{913100}, When: &wafv1alpha1.ExclusionMatch{Path: "/api/*", Header: "User-Agent"}},
+		{RuleIDs: []int32{942100}, When: &wafv1alpha1.ExclusionMatch{ArgumentName: "q"}},
 		{RuleIDs: []int32{920350}},
 	}
 	p.Spec.Body = &wafv1alpha1.BodySpec{MaxBytes: ptr(int64(1024)), OnOversize: wafv1alpha1.OversizeDeny,
@@ -184,6 +187,13 @@ func TestResolvePolicy(t *testing.T) {
 		Exclusions: []*bundlev1.Exclusion{
 			{RuleIds: []uint32{942100}, Path: "/search", Argument: "q"},
 			{RuleIds: []uint32{920350}},
+		},
+		// Apart, so that an older engine ignores them instead of turning
+		// the rules off entirely.
+		TargetExclusions: []*bundlev1.Exclusion{
+			{RuleIds: []uint32{942100}, Cookie: "session"},
+			{RuleIds: []uint32{913100}, Path: "/api/*", Header: "User-Agent"},
+			{RuleIds: []uint32{942100}, ArgumentName: "q"},
 		},
 		Body: &bundlev1.BodyConfig{Inspect: true, MaxBytes: 1024, OnOversize: bundlev1.OversizeAction_OVERSIZE_ACTION_DENY,
 			GrpcMessages: true},

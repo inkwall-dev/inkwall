@@ -32,6 +32,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
 
 // Path is where the proxy sends its subrequests.
@@ -59,6 +60,11 @@ type Config struct {
 	// Logger receives one security event per denied or logged request.
 	// Nil uses slog.Default().
 	Logger *slog.Logger
+	// JSONDenials answers a denied client that accepts application/json
+	// with a JSON body (httpadapter.DenialBody); off: text.
+	JSONDenials bool
+	// Metrics counts the requests the adapter can't read (nil: none).
+	Metrics *telemetry.Metrics
 	// Events records each security event for the operator (nil: logged
 	// only).
 	Events *events.Recorder
@@ -69,8 +75,11 @@ type Handler struct {
 	pipeline pipeline.Inspector
 	maxBody  int64
 	clientIP *clientip.Resolver
+	metrics  *telemetry.Metrics
 	logger   *slog.Logger
 	events   *events.Recorder
+	// jsonDenials: Config.JSONDenials.
+	jsonDenials bool
 }
 
 // New returns a Handler that inspects requests with p.
@@ -86,7 +95,7 @@ func New(p pipeline.Inspector, cfg Config) (*Handler, error) {
 	if resolver == nil {
 		resolver = &clientip.Resolver{}
 	}
-	return &Handler{pipeline: p, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events}, nil
+	return &Handler{pipeline: p, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events, metrics: cfg.Metrics, jsonDenials: cfg.JSONDenials}, nil
 }
 
 // ServeHTTP inspects the request described by r and answers 200 to allow it,
@@ -100,8 +109,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Only a misconfigured proxy sends this; the request can't be
 		// inspected, so it is not let through.
-		h.logger.LogAttrs(r.Context(), slog.LevelError, "invalid forward-auth request", slog.Any("error", err))
-		http.Error(w, "Bad Request", http.StatusBadRequest)
+		h.metrics.AdapterError(telemetry.ErrInvalidRequest)
+		id := httpadapter.NewRequestID()
+		h.logger.LogAttrs(r.Context(), slog.LevelError, "invalid forward-auth request", slog.Any("error", err), slog.String("request_id", id))
+		httpadapter.WriteDenial(w, http.StatusBadRequest, id, r.Header, h.jsonDenials)
 		return
 	}
 
@@ -116,7 +127,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			httpadapter.WriteGRPCDenial(w, g, v.Status, v.Status, req.ID)
 			return
 		}
-		http.Error(w, http.StatusText(v.Status), v.Status)
+		httpadapter.WriteDenial(w, v.Status, req.ID, req.Headers, h.jsonDenials)
 		return
 	}
 	// The proxy copies headers listed in its authResponseHeaders onto the

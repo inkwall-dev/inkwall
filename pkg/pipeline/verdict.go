@@ -118,4 +118,7 @@ type Verdict struct {
 	// request: a deny replaces the response, and AnomalyScore is the CRS
 	// outbound score.
 	Response bool
+	// WebSocketMessage reports a verdict on a message a client sent on a
+	// WebSocket, not on a request.
+	WebSocketMessage bool
 }

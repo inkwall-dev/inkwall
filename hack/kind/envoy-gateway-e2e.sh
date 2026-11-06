@@ -14,8 +14,9 @@
 # attack in its handshake gets no upgrade (#276), a response that leaks a
 # SQL error is replaced through Envoy Gateway in block mode and logged in
 # detect mode while the policy reports that Traefik can't inspect responses
-# (#274), and unprotecting or uninstalling leaves the user's objects as they
-# were. Needs the operator installed (make
+# (#274), the engines take the client from an X-Forwarded-For entry only once
+# the InkwallConfig trusts the proxy that sent it (#364), and unprotecting or
+# uninstalling leaves the user's objects as they were. Needs the operator installed (make
 # kind-operator); ends with helm uninstall. KEEP=1 leaves the test's objects.
 set -euo pipefail
 
@@ -45,31 +46,9 @@ KUBECTL=(kubectl --context "kind-$CLUSTER")
 HELM=(helm --kube-context "kind-$CLUSTER")
 SQLI='/?id=1%27%20OR%20%271%27%3D%271'
 
-failures=0
-ok() { printf 'ok    %s\n' "$1"; }
-fail() {
-  printf 'FAIL  %s\n' "$1"
-  failures=$((failures + 1))
-}
-check() {
-  local what=$1
-  shift
-  if "$@" >/dev/null 2>&1; then ok "$what"; else fail "$what"; fi
-}
-# eventually DESCRIPTION COMMAND...: retries for up to 3 minutes: Envoy
-# Gateway rolls its Envoy pods when their EnvoyProxy changes.
-eventually() {
-  local what=$1
-  shift
-  for _ in $(seq 360); do
-    if "$@" >/dev/null 2>&1; then
-      ok "$what"
-      return 0
-    fi
-    sleep 0.5
-  done
-  fail "$what"
-}
+# eventually retries for up to 3 minutes.
+EVENTUALLY_TRIES=360
+. hack/kind/lib.sh
 
 if ! "${KUBECTL[@]}" -n "$OPERATOR_NS" get deployment/inkwall-operator >/dev/null 2>&1; then
   echo "the operator is not installed: run make kind-operator first" >&2
@@ -81,8 +60,15 @@ work=$(mktemp -d)
 eg_crds=$work/eg-crds.yaml
 gateway_api_installed=false
 eg_crds_installed=false
+# The InkwallConfig the client IP section changed: "patched" (clientIP
+# removed again on exit) or "created" (deleted on exit).
+config_changed=
 cleanup() {
   for pf in "${pfs[@]}"; do kill "$pf" 2>/dev/null || true; done
+  case $config_changed in
+  patched) "${KUBECTL[@]}" patch inkwallconfig default --type merge -p '{"spec":{"engine":{"clientIP":null}}}' >/dev/null 2>&1 || true ;;
+  created) "${KUBECTL[@]}" delete inkwallconfig default --ignore-not-found >/dev/null 2>&1 || true ;;
+  esac
   if [[ ${KEEP:-} == 1 ]]; then
     rm -rf "$work"
     return
@@ -629,6 +615,89 @@ eventually "with grpcMessages: Inspect, an attack in a gRPC message is denied" \
 check "and a clean gRPC call passes" grpc_are OK
 check "an attack in a gRPC-Web text (base64) message is denied" grpc_web_text_denied
 check "and a clean gRPC-Web text call isn't" grpc_web_text_not_denied
+
+echo "== client IP (#364)"
+# A client pod stands in for an HTTP load balancer: it sends its request
+# with an X-Forwarded-For of its own, which Envoy keeps, appending the pod's
+# address. Untrusted, the pod is the client; once the InkwallConfig trusts
+# its address, the header's entry is.
+"${KUBECTL[@]}" apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lb
+  namespace: $NS
+spec:
+  containers:
+    - name: curl
+      image: curlimages/curl:8.11.1
+      command: ["sleep", "3600"]
+YAML
+"${KUBECTL[@]}" -n "$NS" wait --for=condition=Ready pod/lb --timeout=120s >/dev/null
+lb_ip=$("${KUBECTL[@]}" -n "$NS" get pod lb -o jsonpath='{.status.podIP}')
+XFF_CLIENT=203.0.113.7
+# lb_attack GATEWAY PATH: the attack on PATH through the Gateway's Envoy
+# Service, from the pod, with a client-sent X-Forwarded-For.
+lb_attack() {
+  local svc
+  svc=$("${KUBECTL[@]}" -n "$EG_NS" get svc -l "gateway.envoyproxy.io/owning-gateway-name=$1,gateway.envoyproxy.io/owning-gateway-namespace=$NS" \
+    -o jsonpath='{.items[0].metadata.name}')
+  "${KUBECTL[@]}" -n "$NS" exec lb -- curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" \
+    -H "X-Forwarded-For: $XFF_CLIENT" "http://$svc.$EG_NS.svc$2?id=1%27%20OR%20%271%27%3D%271" || true
+}
+# event_ip GATEWAY PATH: the client_ip of the engines' event for PATH.
+event_ip() {
+  "${KUBECTL[@]}" -n "$EG_NS" logs -l "gateway.envoyproxy.io/owning-gateway-name=$1" -c inkwall-engine --tail=-1 |
+    grep -F '"msg":"security event"' | grep -F "\"path\":\"$2\"" |
+    sed -n 's/.*"client_ip":"\([^"]*\)".*/\1/p' | tail -1
+}
+# blocked_from GATEWAY WANT: an attack on a fresh path is blocked, and its
+# event's client IP is WANT (each try a new path, as the Envoy pods may be
+# rolling).
+cip_try=0
+blocked_from() {
+  cip_try=$((cip_try + 1))
+  local path=/cip-$RANDOM-$cip_try
+  [[ $(lb_attack "$1" "$path") == 403 ]] && sleep 1 && [[ $(event_ip "$1" "$path") == "$2" ]]
+}
+# trusts_lb GATEWAY: its Envoy pods' engines trust the pod's address.
+trusts_lb() {
+  "${KUBECTL[@]}" -n "$EG_NS" get pods -l "gateway.envoyproxy.io/owning-gateway-name=$1,gateway.envoyproxy.io/owning-gateway-namespace=$NS" \
+    -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}|{.spec.initContainers[0].args}{"\n"}{end}' |
+    grep '^|' | grep -qF "::1/128,$lb_ip/32" && ! envoy_pods "$1" | grep -qv inkwall-engine
+}
+for gw in custom plain; do
+  eventually "Gateway $gw: untrusted, the client-sent X-Forwarded-For is ignored: the client is the pod" blocked_from "$gw" "$lb_ip"
+done
+if "${KUBECTL[@]}" get inkwallconfig default >/dev/null 2>&1; then
+  "${KUBECTL[@]}" patch inkwallconfig default --type merge -p "{\"spec\":{\"engine\":{\"clientIP\":{\"trustedProxies\":[\"$lb_ip/32\"]}}}}" >/dev/null
+  config_changed=patched
+else
+  "${KUBECTL[@]}" apply -f - >/dev/null <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: InkwallConfig
+metadata: {name: default}
+spec:
+  engine:
+    clientIP: {trustedProxies: ["$lb_ip/32"]}
+YAML
+  config_changed=created
+fi
+for gw in custom plain; do
+  eventually "Gateway $gw's engines trust the InkwallConfig's proxy" trusts_lb "$gw"
+  eventually "Gateway $gw: trusted, the client is the X-Forwarded-For entry" blocked_from "$gw" "$XFF_CLIENT"
+done
+if [[ $config_changed == created ]]; then
+  "${KUBECTL[@]}" delete inkwallconfig default >/dev/null
+else
+  "${KUBECTL[@]}" patch inkwallconfig default --type merge -p '{"spec":{"engine":{"clientIP":null}}}' >/dev/null
+fi
+config_changed=
+for gw in custom plain; do
+  eventually "Gateway $gw: untrusted again, the client is the pod" blocked_from "$gw" "$lb_ip"
+done
+"${KUBECTL[@]}" -n "$NS" delete pod lb --wait=false >/dev/null
+forward_all
 
 echo "== responses"
 policy Block "" "$RESPONSES"

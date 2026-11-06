@@ -63,6 +63,9 @@ message SecurityEvent {
   // (for a policy that inspects responses). Unset in events of engines
   // before 0.4.0: the request.
   Phase phase = 21;
+  // The protocol the request speaks: a WebSocket's handshake and messages
+  // are PROTOCOL_WEBSOCKET. Unspecified from engines before v0.5.0.
+  Protocol protocol = 22;
 }
 
 // Phase is the part of the exchange an event is about.
@@ -72,6 +75,19 @@ enum Phase {
   PHASE_REQUEST = 1;
   // The upstream's response: a deny replaced it.
   PHASE_RESPONSE = 2;
+  // A message the client sent on a WebSocket (the engine's proxy with
+  // --websocket-messages); the request fields are its handshake's.
+  PHASE_WEBSOCKET_MESSAGE = 3;
+}
+
+// Protocol is what the request speaks.
+enum Protocol {
+  PROTOCOL_UNSPECIFIED = 0;
+  PROTOCOL_HTTP = 1;
+  // gRPC (Content-Type application/grpc).
+  PROTOCOL_GRPC = 2;
+  // A WebSocket: its handshake, or one of its messages.
+  PROTOCOL_WEBSOCKET = 3;
 }
 
 // Match is one rule that matched.
