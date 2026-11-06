@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -199,13 +200,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 			}
 		}
 		res, err := in.Wire(ctx, mine, r.Disabled)
-		if res == nil {
-			// Which pods serve what isn't known: every engine counts.
-			r.Served.Set(nil)
-			return reconcile.Result{}, errors.Join(append(errs, err)...)
-		}
 		if err != nil {
-			errs = append(errs, err)
+			errs = append(errs, fmt.Errorf("%s: %w", in.Name(), err))
+		}
+		if res == nil {
+			// It did nothing: its targets aren't wired as far as it can
+			// tell, which Programmed says, while the other integrations
+			// go on and the finalizers are still released (#373).
+			res = failedResult(in.Name(), mine, err)
 		}
 		record(in.Name(), res)
 		rep.kinds = append(rep.kinds, kinds...)
@@ -213,9 +215,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		rep.names = append(rep.names, in.Name())
 	}
 	r.Served.Set(servedPods(policies.Items, rep))
-	if err := r.report(ctx, policies.Items, rep); err != nil {
-		errs = append(errs, err)
-	}
+	errs = append(errs, r.report(ctx, policies.Items, rep)...)
 
 	// Release the policies being deleted once none of their targets is
 	// still wired for them alone. With the engine not injected, the
@@ -282,6 +282,20 @@ next:
 		}
 	}
 	return out
+}
+
+// failedResult is the Result of an integration that did nothing: each of
+// its targets failed with err.
+func failedResult(name string, targets map[Target]bool, err error) *Result {
+	why := "unknown error"
+	if err != nil {
+		why = err.Error()
+	}
+	res := &Result{Proxy: name, Targets: map[Target]TargetState{}}
+	for t := range targets {
+		res.Targets[t] = TargetState{Failed: fmt.Sprintf("%s %s: the %s wiring failed: %s", t.Kind.Kind, t.Key.Name, name, why)}
+	}
+	return res
 }
 
 // unwiredFor returns an error while one of a deleted policy's targets is
@@ -475,7 +489,7 @@ func sidecars(res *Result, injectingSince time.Time) (metav1.ConditionStatus, st
 	proxy := res.Proxy
 	pods := running(res.Pods)
 	for _, pod := range pods {
-		name := pod.Namespace + "/" + pod.Name
+		name := workloadOf(pod)
 		switch {
 		case injection.HasEngine(pod):
 		case res.Rolling:
@@ -488,9 +502,7 @@ func sidecars(res *Result, injectingSince time.Time) (metav1.ConditionStatus, st
 			before = append(before, name)
 		}
 	}
-	for _, l := range [][]string{missed, optedOut, before} {
-		slices.Sort(l)
-	}
+	missed, optedOut, before = sortedSet(missed), sortedSet(optedOut), sortedSet(before)
 	switch {
 	case len(pods) == 0 && res.Rolling:
 		return metav1.ConditionFalse, ReasonSidecarMissing, fmt.Sprintf("no %s pod of the routes' Gateways is running in the proxy namespaces (the chart's injection.proxyNamespaces), so the routes are not wired", proxy)
@@ -519,18 +531,59 @@ func sidecars(res *Result, injectingSince time.Time) (metav1.ConditionStatus, st
 	return metav1.ConditionTrue, "", ""
 }
 
-func (r *Reconciler) report(ctx context.Context, policies []wafv1alpha1.WAFPolicy, rep *report) error {
+// workloadOf names what runs a pod, for Programmed's messages: its
+// Deployment (through its ReplicaSet), or its controller, as "Kind
+// namespace/name"; a pod without one by its own name. Naming the pods would
+// rewrite every policy's status at each pod of a rollout (#373).
+func workloadOf(pod *corev1.Pod) string {
+	ref := metav1.GetControllerOf(pod)
+	if ref == nil {
+		return pod.Namespace + "/" + pod.Name
+	}
+	kind, name := ref.Kind, ref.Name
+	if h := pod.Labels["pod-template-hash"]; kind == "ReplicaSet" && h != "" && strings.HasSuffix(name, "-"+h) {
+		kind, name = "Deployment", strings.TrimSuffix(name, "-"+h)
+	}
+	return kind + " " + pod.Namespace + "/" + name
+}
+
+// sortedSet sorts l and drops its duplicates.
+func sortedSet(l []string) []string {
+	slices.Sort(l)
+	return slices.Compact(l)
+}
+
+// statusWriters bounds the Programmed writes report makes at once.
+const statusWriters = 16
+
+// report writes each live policy's Programmed condition, statusWriters at a
+// time, and returns the errors of those it couldn't write: one failing
+// doesn't leave the others stale until the next reconcile (#373).
+func (r *Reconciler) report(ctx context.Context, policies []wafv1alpha1.WAFPolicy, rep *report) []error {
+	var (
+		mu   sync.Mutex
+		errs []error
+		wg   sync.WaitGroup
+	)
+	sem := make(chan struct{}, statusWriters)
 	for i := range policies {
 		p := &policies[i]
 		if p.DeletionTimestamp != nil {
 			continue
 		}
 		st, reason, msg := programmed(p, rep)
-		if err := setProgrammed(ctx, r.Client, p, st, reason, msg, false); client.IgnoreNotFound(err) != nil {
-			return err
-		}
+		sem <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-sem }()
+			if err := setProgrammed(ctx, r.Client, p, st, reason, msg, false); client.IgnoreNotFound(err) != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("set Programmed on WAFPolicy %s/%s: %w", p.Namespace, p.Name, err))
+				mu.Unlock()
+			}
+		})
 	}
-	return nil
+	wg.Wait()
+	return errs
 }
 
 // setProgrammed sets a policy's Programmed condition, if it changed, and

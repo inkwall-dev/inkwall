@@ -114,7 +114,7 @@ the webhook certificates.
 
 | Kind | Scope | Purpose |
 |---|---|---|
-| `InkwallConfig` | Cluster, singleton `default` | Mode, engine, integrations, control plane, `suspend`, signing key rotation |
+| `InkwallConfig` | Cluster, singleton `default` | Mode, engine, integrations, control plane, `suspend`, signing key rotation, event redaction |
 | `WAFPolicy` | Namespace | What to enforce on which routes |
 | `WAFRuleSet` / `ClusterWAFRuleSet` | Namespace / Cluster | Rules: builtin CRS, [SecLang](https://coraza.io/docs/seclang/), [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/) |
 | `WAFIPList` / `ClusterWAFIPList` | Namespace / Cluster | [CIDR](https://www.rfc-editor.org/rfc/rfc4632) lists (planned) |
@@ -125,7 +125,7 @@ compatible; removing one is not.
 
 **Not yet:** IP lists and `spec.ipLists`, `spec.rateLimits`, `spec.response`,
 `BlockHighConfidence`, `body.contentTypes`, the `InspectPrefix` oversize action,
-`InkwallConfig.spec.events`, `WAFPolicyDefault`.
+`WAFPolicyDefault`.
 
 ### 3.1 Validation
 
@@ -907,6 +907,16 @@ rollout) don't rewrite every policy, even while one rejects the bundle (#213);
 `inkwall_operator_engines{state}` has the counts. `EngineNack` names the first rejecting engine by
 ID, with its error. It reads the policies from the cache without copying them, copies only those it writes,
 and writes up to 8 at once, like the bundle builder.
+
+**Programmed** (#373). The wiring controller writes `Programmed` on change too, up to 16 at once,
+and a write that fails doesn't stop the others: the errors are returned together and the
+reconcile retried. Its messages name workloads (`Deployment traefik/traefik`), never pods, so a
+rollout of N pods changes a policy's `Programmed` a bounded number of times (to `PendingRestart`
+and back), not N; HAProxy's `Unverified` doesn't name the pods its probe hasn't reached yet
+either. An integration whose `Wire` fails doesn't stop the reconcile: its targets are
+`WiringFailed` with its error, the other integrations report as usual, and deleted policies are
+still released. The Istio ingress integration lists the pods each Gateway selector selects
+uncached once per reconcile, however many VirtualServices its Gateways serve.
 
 **Writes per bundle** (#149). The builder writes a policy's `bundleVersion` only when the bundle
 changes what the policy enforces: its own entry, the rule sets it binds, or suspension

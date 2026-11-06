@@ -43,6 +43,24 @@ What changes by itself:
   operator doesn't know, still count everywhere. `inkwall_operator_engines` gets an
   `integration` label (`unknown` for engines not matched to a proxy): sum over it for the old
   totals.
+- **Security event log lines say where rules matched, and are rate-limited.** Each line has
+  `matches`, the rule and the variable it matched (`{"rule_id":942100,"variable":"ARGS:q"}`),
+  never the value. An engine logs at most 10 lines per second for each policy and rule (the
+  engine's `--event-log-rate`); the rest are counted in
+  `inkwall_security_event_logs_suppressed_total`, and still go to the operator. A log pipeline
+  that counts attacks from the lines should count from the metrics or the events instead.
+- **`inkwallctl test` prints `rule@variable` and the score** (`matches=942100@ARGS:q  score=5`),
+  after `interrupting=`; `--json` has `matches` and `anomaly_score`. A script that parses the
+  text output by position should take the time from the end of the line.
+- **The engine has `--log-level`**, and `InkwallConfig.spec.engine.logLevel` sets it on engines
+  injected from then on. Unset, nothing changes.
+- **Security events carry fewer snippets.** An engine no longer sends what a rule matched in an
+  argument or header whose name looks like a credential (`password`, `token`, `api_key`,
+  `session`, `card`, ...), or in a raw query string or body that names one: the event keeps the
+  rule and the variable, with an empty snippet. `InkwallConfig.spec.events.redact` redacts more
+  headers and arguments, or every snippet: see
+  [Redacting security events](../deploy/helm/inkwall/README.md#redacting-security-events). Engines
+  still on 0.4.x ignore `spec.events.redact` until their pods restart with 0.5.0.
 - **Less engine memory for the CRS.** Policies that differ only in their paranoia level, inbound
   anomaly threshold, `body.maxBytes` or `responses.maxBytes` now share one compiled CRS (about
   2.1 MiB and 10–30 ms less for each combination that used to compile its own). The engine sets

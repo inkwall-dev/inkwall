@@ -306,7 +306,8 @@ the engine needs no Kubernetes knowledge. A bundle is immutable and signed with 
 
 - `CheckRequest`: method, authority, raw URI, headers, `client_ip` and `peer_ip`, and an optional
   body. The IPs are text, so JSON clients can write them.
-- `CheckResponse`: action, status, headers, rule IDs and reason.
+- `CheckResponse`: action, status, headers, rule IDs and reason, and where the rules matched
+  (`matches`: rule and variable name, never the value) and the anomaly score.
 
 Envoy will use its native [`ext_authz`](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) and [`ext_proc`](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter) services instead.
 
@@ -930,9 +931,33 @@ Bodies never leave the engine. Events carry only a redacted snippet of at most 6
 listed in `events.redact` (default `Authorization`, `Cookie`, `Set-Cookie`) and query strings are
 dropped. This is enforced before anything leaves the cluster.
 
-**Built** in the engine (`pkg/events`), with a fixed list: `Authorization`, `Cookie`,
-`Set-Cookie`, `Proxy-Authorization`, and the cookie variables. A configurable `events.redact` is
-not built yet.
+**Built** in the engine (`pkg/events`, #355). A match leaves no snippet when it is on:
+
+- a cookie (`REQUEST_COOKIES`, `REQUEST_COOKIES_NAMES`, `RESPONSE_COOKIES`), the response body,
+  or the `Authorization`, `Cookie`, `Set-Cookie` or `Proxy-Authorization` header;
+- an argument (`ARGS`, `ARGS_GET`, `ARGS_POST`, `FILES`, `MULTIPART_PART_HEADERS`) or a header
+  whose name looks like a credential (`events.Sensitive`): lower-cased and without `-`, `_` and
+  `.`, it contains `pass`, `pwd`, `secret`, `token`, `apikey`, `auth`, `session`, `sessid`,
+  `jwt`, `bearer`, `credential`, `privatekey`, `card`, `ccnum`, `cvv` or `cvc`, or it has `ssn`
+  between non-letters. It errs on the side of redacting (`author` matches): a missing snippet
+  costs a little tuning context, a leaked password can't be taken back. It is substring search,
+  not a regular expression: an alternation with case folding cost about 1 ms per 4 KiB name in
+  Go's `regexp`, on every match of every event; this is linear and about 40 times cheaper;
+- a raw query string, URI, request line or body (`QUERY_STRING`, `REQUEST_URI`,
+  `REQUEST_URI_RAW`, `REQUEST_LINE`, `REQUEST_BODY`, `FULL_REQUEST`) whose snippet contains such
+  a name. A value comes after its name, so a snippet that shows part of a value holds its whole
+  name: checking the 64-byte snippet is enough, and bounded however large the body;
+- what `InkwallConfig.spec.events.redact` adds: `headers` (exact names, any case), `arguments`
+  (parts of argument names, any case, also checked against raw query strings and bodies) and
+  `snippets: false` (no snippets at all).
+
+`events.redact` travels in the bundle (`Bundle.events`, an `EventsConfig`), so every engine
+applies the same settings with the policy it enforces, and a change reaches them within seconds.
+The defaults leave `Bundle.events` unset, so bundles keep their content hash. Argument patterns
+are substrings, not regular expressions: they can't fail to compile on an engine or cost
+backtracking per match, and the CRD validates them like exclusion arguments. Redaction is only
+in the engine: the operator passes events on as they come. An engine without an operator records
+no events, so it has no redaction settings; its log lines never carry snippets.
 
 ### 8.4 Multi-tenancy
 
@@ -958,7 +983,16 @@ Target:
 - Engine: `inkwall_requests_total`, `_check_duration_seconds`, `inkwall_responses_total`,
   `_response_check_duration_seconds` (policies that inspect responses), `_bundle_version`,
   `_bundle_updates_total`, `_operator_connected`, `_evaluations_in_flight`, `_evaluation_slots`,
-  `_engine_events_total`, `_engine_events_dropped_total`.
+  `_engine_events_total`, `_engine_events_dropped_total`,
+  `inkwall_security_event_logs_suppressed_total{policy}`.
+- Engine logs (#354): JSON, at `--log-level` (default `info`; `InkwallConfig.spec.engine.logLevel`
+  for injected engines). A security event line has the verdict, `rule_ids`, `anomaly_score` and
+  `matches`: each rule with the variable it matched (`ARGS:q`), bounded as in events (32 matches,
+  128-byte names). Never the matched value: logs end up in places events' redaction
+  ([§8.3](#83-data-privacy)) doesn't reach. Lines are rate-limited by a token bucket per (policy,
+  rule, reason), `--event-log-rate` lines per second in bursts of as many (default 10); the
+  next line through says how many were `suppressed`. Events to the operator aren't limited. The
+  check API's `CheckResponse` carries the same `matches` and `anomaly_score`.
 - Operator: `inkwall_operator_bundle_version`, `_operator_bundle_compressed_bytes`,
   `_operator_engines{state}`, `_operator_engines_left_out`, `_operator_events_received_total`,
   `_operator_engine_events_dropped_total`, `_operator_wired_targets{integration}`,
