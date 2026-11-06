@@ -145,6 +145,15 @@ func TestInject(t *testing.T) {
 	if !slices.Contains(quiet.Spec.InitContainers[0].Args, "--log-level=warn") {
 		t.Errorf("log level Warn: args %v", quiet.Spec.InitContainers[0].Args)
 	}
+	// JSON denials, only when asked for (#366).
+	if slices.Contains(pod.Spec.InitContainers[0].Args, "--json-denials") {
+		t.Error("--json-denials passed without jsonDenials")
+	}
+	jsonPod := traefikPod()
+	Inject(jsonPod, sidecar.Configured(wafv1alpha1.EngineSpec{JSONDenials: true}))
+	if !slices.Contains(jsonPod.Spec.InitContainers[0].Args, "--json-denials") {
+		t.Errorf("jsonDenials: args %v", jsonPod.Spec.InitContainers[0].Args)
+	}
 	// Requests by policy, only when asked for (#356).
 	if slices.Contains(pod.Spec.InitContainers[0].Args, "--policy-metrics") {
 		t.Error("--policy-metrics passed without policyMetrics")
@@ -153,6 +162,17 @@ func TestInject(t *testing.T) {
 	Inject(counted, sidecar.Configured(wafv1alpha1.EngineSpec{PolicyMetrics: true}))
 	if !slices.Contains(counted.Spec.InitContainers[0].Args, "--policy-metrics") {
 		t.Errorf("policyMetrics: args %v", counted.Spec.InitContainers[0].Args)
+	}
+
+	// The InkwallConfig's client IP settings (#364): loopback stays trusted.
+	lb := traefikPod()
+	one := int32(1)
+	s = sidecar.Configured(wafv1alpha1.EngineSpec{ClientIP: &wafv1alpha1.ClientIPSpec{
+		TrustedProxies: []wafv1alpha1.CIDR{"10.0.0.0/8", "2001:db8::/32"}, TrustedHops: &one}})
+	Inject(lb, s)
+	if args := lb.Spec.InitContainers[0].Args; !slices.Contains(args, "--trusted-proxies=127.0.0.1/32,::1/128,10.0.0.0/8,2001:db8::/32") ||
+		!slices.Contains(args, "--trusted-hops=1") || slices.Contains(args, "--trusted-proxies=127.0.0.1/32,::1/128") {
+		t.Errorf("client IP settings not passed: %v", args)
 	}
 
 	// Injecting again changes nothing.

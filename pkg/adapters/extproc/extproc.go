@@ -107,6 +107,9 @@ type Config struct {
 	// Logger receives one security event per denied or logged request.
 	// Nil uses slog.Default().
 	Logger *slog.Logger
+	// JSONDenials answers a denied client that accepts application/json
+	// with a JSON body (httpadapter.DenialBody); off: text.
+	JSONDenials bool
 	// Metrics counts the requests the adapter can't read (nil: none).
 	Metrics *telemetry.Metrics
 	// Events records each security event for the operator (nil: logged
@@ -124,6 +127,8 @@ type Server struct {
 	metrics  *telemetry.Metrics
 	logger   *slog.Logger
 	events   *events.Recorder
+	// jsonDenials: Config.JSONDenials.
+	jsonDenials bool
 }
 
 // New returns a Server that inspects requests with p.
@@ -139,7 +144,7 @@ func New(p pipeline.Inspector, cfg Config) (*Server, error) {
 	if resolver == nil {
 		resolver = &clientip.Resolver{}
 	}
-	return &Server{pipeline: p, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events, metrics: cfg.Metrics}, nil
+	return &Server{pipeline: p, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events, metrics: cfg.Metrics, jsonDenials: cfg.JSONDenials}, nil
 }
 
 // NewGRPCServer returns a gRPC server that serves s. It accepts messages
@@ -568,17 +573,17 @@ func (s *Server) responseVerdict(ctx context.Context, x *exchange, p phase) *ext
 		httpadapter.LogEvent(ctx, s.logger, s.events, x.req, x.path, v)
 	}
 	if v.Action == pipeline.ActionDeny {
-		return denial(x.req, v.Status)
+		return s.denial(x.req, v.Status)
 	}
 	return allow(p, nil)
 }
 
 // denial denies req's stream with status: a gRPC call with a gRPC status.
-func denial(req *request.Request, status int) *extprocv3.ProcessingResponse {
+func (s *Server) denial(req *request.Request, status int) *extprocv3.ProcessingResponse {
 	if g := httpadapter.GRPCOf(req.Headers); g != httpadapter.NotGRPC {
 		return denyGRPC(g, status, req.ID)
 	}
-	return deny(status, req.ID)
+	return deny(status, req.ID, httpadapter.DenialBody(status, req.ID, req.Headers, s.jsonDenials))
 }
 
 // toResponse reads the response's status and headers. Envoy validated
@@ -624,7 +629,7 @@ func (s *Server) verdict(ctx context.Context, x *exchange, p phase) *extprocv3.P
 		httpadapter.LogEvent(ctx, s.logger, s.events, x.req, x.path, v)
 	}
 	if v.Action == pipeline.ActionDeny {
-		return denial(x.req, v.Status)
+		return s.denial(x.req, v.Status)
 	}
 	m := &extprocv3.HeaderMutation{}
 	if x.setID {
@@ -672,8 +677,9 @@ func bodilessUpgrade(r *request.Request) bool {
 // misconfigured proxy sends one, and it is not let through.
 func (s *Server) uninspectable(ctx context.Context, err error) *extprocv3.ProcessingResponse {
 	s.metrics.AdapterError(telemetry.ErrInvalidRequest)
-	s.logger.LogAttrs(ctx, slog.LevelError, "invalid ext_proc request", slog.Any("error", err))
-	return deny(http.StatusBadRequest, httpadapter.NewRequestID())
+	id := httpadapter.NewRequestID()
+	s.logger.LogAttrs(ctx, slog.LevelError, "invalid ext_proc request", slog.Any("error", err), slog.String("request_id", id))
+	return deny(http.StatusBadRequest, id, httpadapter.DenialBody(http.StatusBadRequest, id, nil, false))
 }
 
 // toRequest reconstructs the client's request from its headers and
@@ -832,17 +838,17 @@ func allow(p phase, m *extprocv3.HeaderMutation) *extprocv3.ProcessingResponse {
 
 // deny answers with status and the same plain-text body as the other
 // adapters.
-func deny(code int, id string) *extprocv3.ProcessingResponse {
+func deny(code int, id string, d httpadapter.Denial) *extprocv3.ProcessingResponse {
 	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ImmediateResponse{
 		ImmediateResponse: &extprocv3.ImmediateResponse{
 			// #nosec G115 -- an HTTP status
 			Status: &typev3.HttpStatus{Code: typev3.StatusCode(code)},
 			Headers: &extprocv3.HeaderMutation{SetHeaders: []*corev3.HeaderValueOption{
-				header("content-type", "text/plain; charset=utf-8"),
+				header("content-type", d.ContentType),
 				header("x-content-type-options", "nosniff"),
 				header("x-request-id", id),
 			}},
-			Body:    []byte(http.StatusText(code) + "\n"),
+			Body:    d.Body,
 			Details: "inkwall_denied",
 		},
 	}}

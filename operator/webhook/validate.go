@@ -11,6 +11,8 @@ package webhook
 
 import (
 	"context"
+	"fmt"
+	"net/netip"
 	"strings"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -23,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/router"
@@ -88,18 +91,44 @@ func Setup(mgr manager.Manager, inject *PodInjector, guard *SourceGuard) error {
 
 const socketDirWarning = "spec.engine.socketDir is deprecated and ignored: each integration places the engine's socket itself; remove it"
 
-// configValidator warns about the InkwallConfig's deprecated fields; it
-// rejects nothing. It warns when socketDir is set or changed, not when an
-// update keeps it: InkwallConfigs created before v0.3.0 hold its old
-// default, which a client-side apply never removes.
+// configValidator warns about the InkwallConfig's deprecated fields, and
+// checks its client IP settings as the engine does. It warns when socketDir
+// is set or changed, not when an update keeps it: InkwallConfigs created
+// before v0.3.0 hold its old default, which a client-side apply never
+// removes.
 type configValidator struct{}
 
 func (configValidator) ValidateCreate(_ context.Context, cfg *wafv1alpha1.InkwallConfig) (admission.Warnings, error) {
-	return socketDirWarnings("", cfg), nil
+	warnings, err := checkClientIP(cfg)
+	return append(socketDirWarnings("", cfg), warnings...), err
 }
 
 func (configValidator) ValidateUpdate(_ context.Context, oldCfg, newCfg *wafv1alpha1.InkwallConfig) (admission.Warnings, error) {
-	return socketDirWarnings(oldCfg.Spec.Engine.SocketDir, newCfg), nil //nolint:staticcheck // warns about the deprecated field
+	warnings, err := checkClientIP(newCfg)
+	return append(socketDirWarnings(oldCfg.Spec.Engine.SocketDir, newCfg), warnings...), err //nolint:staticcheck // warns about the deprecated field
+}
+
+// checkClientIP rejects trusted proxies the engine would refuse (it would
+// not start), and warns of a prefix that trusts every address: any client
+// could then choose its address.
+func checkClientIP(cfg *wafv1alpha1.InkwallConfig) (admission.Warnings, error) {
+	c := cfg.Spec.Engine.ClientIP
+	if c == nil {
+		return nil, nil
+	}
+	var errs field.ErrorList
+	var warnings admission.Warnings
+	path := field.NewPath("spec", "engine", "clientIP", "trustedProxies")
+	for i, p := range c.TrustedProxies {
+		if _, err := clientip.New(clientip.Options{TrustedProxies: []string{string(p)}}); err != nil {
+			errs = append(errs, field.Invalid(path.Index(i), string(p), err.Error()))
+			continue
+		}
+		if pfx, err := netip.ParsePrefix(string(p)); err == nil && pfx.Bits() == 0 {
+			warnings = append(warnings, fmt.Sprintf("spec.engine.clientIP.trustedProxies[%d]: %s trusts every address: any client can then choose its own by sending X-Forwarded-For", i, p))
+		}
+	}
+	return warnings, invalid("InkwallConfig", cfg.Name, errs)
 }
 
 func (configValidator) ValidateDelete(context.Context, *wafv1alpha1.InkwallConfig) (admission.Warnings, error) {
