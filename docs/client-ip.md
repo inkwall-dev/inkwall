@@ -1,7 +1,8 @@
 # Client IP behind a load balancer
 
 This guide gets the real client address to the engine when [Traefik](https://doc.traefik.io/traefik/) runs behind a load balancer. With
-[Envoy Gateway](https://gateway.envoyproxy.io/), see [Envoy Gateway](#envoy-gateway).
+[Envoy Gateway](https://gateway.envoyproxy.io/), see [Envoy Gateway](#envoy-gateway); behind an HTTP load balancer (an AWS ALB,
+a cloud L7 LB) that adds `X-Forwarded-For`, see [Behind an HTTP load balancer](#behind-an-http-load-balancer).
 
 The engine gives the client's address to the rules ([SecLang](https://coraza.io/docs/seclang/)'s `REMOTE_ADDR`) and records it in
 security events; the planned IP lists and rate limits will key on it too. Behind a load balancer
@@ -23,6 +24,10 @@ on Traefik's [Service](https://kubernetes.io/docs/concepts/services-networking/s
   - [Load balancers](#load-balancers)
 - [`externalTrafficPolicy: Local` (without the PROXY protocol)](#externaltrafficpolicy-local-without-the-proxy-protocol)
 - [Envoy Gateway](#envoy-gateway)
+- [Behind an HTTP load balancer](#behind-an-http-load-balancer)
+  - [Trusted proxies](#trusted-proxies)
+  - [Trusted hops](#trusted-hops)
+  - [What each proxy sends](#what-each-proxy-sends)
 - [Checking it worked](#checking-it-worked)
 - [Undoing it](#undoing-it)
 
@@ -143,8 +148,80 @@ buffer are handled as oversized (`body.onOversize`), and the policy's `Programme
 `WiringFailed`, naming your ClientTrafficPolicy. If you delete yours, the operator creates its own
 again.
 
-The kind end-to-end test doesn't check the client IP through Envoy Gateway yet. Check it as below,
-with the engine's logs in an Envoy pod (`-c inkwall-engine`).
+Behind an HTTP load balancer, Envoy keeps its `X-Forwarded-For` and appends the LB's address: see
+[Behind an HTTP load balancer](#behind-an-http-load-balancer). Check it as below, with the engine's
+logs in an Envoy pod (`-c inkwall-engine`). The kind end-to-end test checks it through Envoy
+Gateway, with and without a trusted proxy.
+
+## Behind an HTTP load balancer
+
+An HTTP (layer 7) LB, such as an AWS Application Load Balancer, a GCP external Application Load
+Balancer or Azure Application Gateway, ends the client's connection and opens its own to the
+proxy, adding the client's address to `X-Forwarded-For`. The proxy's peer is then the LB, and so is
+every event's `client_ip`, until the engines trust the LB's entry. The InkwallConfig says which
+(`spec.engine.clientIP`, engines 0.5.0 or later):
+
+```yaml
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: InkwallConfig
+metadata:
+  name: default
+spec:
+  engine:
+    clientIP:
+      trustedProxies: [10.0.0.0/16]   # the LB's addresses: here, the VPC's subnets
+      # trustedHops: 1                # or: one LB, whatever its address
+```
+
+The engine walks `X-Forwarded-For` from the right. It skips the entries of the proxy beside it
+(always trusted, on the loopback), then `trustedHops` entries, then entries from `trustedProxies`.
+The first other entry is the client. Entries may carry a port (`198.51.100.7:4711`,
+`[2001:db8::1]:4711`). The settings apply to pods injected after the change: Envoy Gateway rolls its
+Envoy pods itself, and other proxies' pods need a restart (`kubectl rollout restart`).
+
+**A wrong setting lets clients choose their address.** `X-Forwarded-For` is a request header: any
+client can send one, and the LB keeps it, adding the address it saw to the right. Trust only what
+is in front of the proxy, and only if every request goes through it:
+
+- If the proxy can also be reached directly, not only through the LB (a public `LoadBalancer`
+  Service next to the ALB, a NodePort), a client that does so can send any `X-Forwarded-For`. With
+  `trustedHops: 1`, its own forged entry is taken as the LB's, and the one left of it as the client.
+  Prefer `trustedProxies` with the LB's own addresses, and close other paths to the proxy.
+- `trustedProxies: [0.0.0.0/0]` trusts every address: the webhook warns, and any client chooses
+  its address.
+- Count the hops: an ALB behind a CDN that appends too (CloudFront) is two hops.
+
+### Trusted proxies
+
+List the addresses the LB connects from:
+
+| Load balancer | Its addresses |
+|---|---|
+| AWS ALB | Addresses in the subnets it was created in: the VPC CIDR, or those subnets' CIDRs. The ALB appends the client to `X-Forwarded-For` by default ([`routing.http.xff_header_processing.mode: append`](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/x-forwarded-headers.html)). |
+| GCP external Application LB | `35.191.0.0/16` and `130.211.0.0/22`; it appends `<client>, <LB>` ([docs](https://cloud.google.com/load-balancing/docs/https#x-forwarded-for_header)): with `trustedProxies` only, also list the LB's own address, or use `trustedHops: 2`. |
+| Azure Application Gateway | Its subnet's CIDR; it appends `<client>:<port>` ([docs](https://learn.microsoft.com/en-us/azure/application-gateway/how-application-gateway-works#modifications-to-the-request)). |
+
+Check these against your provider's current docs.
+
+### Trusted hops
+
+When the LB's addresses aren't known in advance, `trustedHops: N` takes the N entries right of
+the proxy's own as proxies, whatever their address. It is only as safe as the guarantee that every
+request passes those N proxies.
+
+### What each proxy sends
+
+| Proxy | What the engine gets | Trusting the LB works |
+|---|---|---|
+| Envoy Gateway | Envoy's `X-Forwarded-For`: the LB's header, with the LB's address appended (Envoy Gateway's default, `useRemoteAddress`). | Yes. |
+| Istio (Gateway API or ingress gateway) | The same, from the gateway's Envoy. Istio's own `numTrustedProxies` changes what Istio decides on, not the engine's `X-Forwarded-For`. | Yes. |
+| HAProxy | HAProxy's peer (the LB) as the engine's peer, and the request's `X-Forwarded-For` as received. | Yes, with `trustedProxies`. `trustedHops` needs a trusted peer: list the LB. |
+| Traefik | Traefik's own view of the client only: its ForwardAuth replaces the header (see [Why not `X-Forwarded-For` from the LB](#why-not-x-forwarded-for-from-the-lb)). | No: use the [PROXY protocol](#the-proxy-protocol-recommended). |
+
+The engine can also read `Forwarded` (RFC 7239) instead, with `--client-ip-header=forwarded`, when
+it runs on its own ([standalone proxy](standalone-proxy.md)) behind a proxy that sets or replaces
+that header. The InkwallConfig doesn't offer it: the proxies the operator wires append their peer to
+`X-Forwarded-For` only, so in `Forwarded` nothing would tell the client's own entries from the LB's.
 
 ## Checking it worked
 
