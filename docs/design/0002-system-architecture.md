@@ -1203,7 +1203,13 @@ each target for 5 minutes nightly and uploads the failing inputs, encrypted. Its
 is fuzzed without editing the workflow, and each target keeps the corpus it grows in Go's fuzz
 cache from night to night (`actions/cache`).
 
-A scheduled workflow (fuzz, docs-links) that fails opens one issue for it, labeled
+A nightly stress run (`.github/workflows/stress.yaml`, `make stress-test`, #395) looks for timing
+flakes: the adapters', agent's, pipeline's and operator's tests with the race detector, shuffled
+(the seed printed first), 10 times, on `GOMAXPROCS=2` with CPU hogs alongside. The SPOE, ext_proc
+and agent packages check every `make test` for goroutines a test leaves running
+([goleak](https://github.com/uber-go/goleak)).
+
+A scheduled workflow (fuzz, docs-links, stress) that fails opens one issue for it, labeled
 `ci-scheduled-failure` and pinned, or comments on the open one; the next passing run closes it
 (`hack/ci/report-scheduled.sh`, in a `report` job that alone may write issues). The fuzz issue
 names the failing targets only: a crash may be a vulnerability, reported privately.
