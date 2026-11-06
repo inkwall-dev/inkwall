@@ -93,7 +93,7 @@ YAML
 )
 if out=$("${KUBECTL[@]}" apply --dry-run=server -f - <<<"$bad" 2>&1); then
   fail "invalid rule set accepted"
-elif grep -q "line 2: .*operator nosuchop not found" <<<"$out"; then
+elif grep -qE "line 2: .*(operator nosuchop not found|operator \"nosuchop\" is not allowed)" <<<"$out"; then
   ok "invalid rule set rejected with its line"
 else
   fail "invalid rule set rejected for another reason: $out"
