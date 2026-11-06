@@ -17,6 +17,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/adapters/internal/httpadapter"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 	"github.com/inkwall-dev/inkwall/pkg/websocket"
 )
 
@@ -50,12 +51,42 @@ func (w *inspectingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	}
 	// Bytes the server read ahead are in brw.Reader: read through it.
 	c := &inspectedConn{
-		Conn:   conn,
+		Conn:   &countedConn{Conn: conn, closed: w.h.metrics.WebSocketOpened()},
 		w:      w,
 		frames: websocket.NewReader(brw.Reader, w.h.maxBody),
 		block:  w.mi.Mode() == pipeline.ModeBlock,
 	}
 	return c, brw, nil
+}
+
+// countingWriter counts the WebSocket the proxy forwards uninspected,
+// while its connection is open.
+type countingWriter struct {
+	http.ResponseWriter
+	metrics *telemetry.Metrics
+}
+
+func (w *countingWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// Hijack hijacks the client's connection, counted until it is closed.
+func (w *countingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, brw, err := http.NewResponseController(w.ResponseWriter).Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	return &countedConn{Conn: conn, closed: w.metrics.WebSocketOpened()}, brw, nil
+}
+
+// countedConn is a WebSocket's connection, counted in
+// inkwall_websocket_connections until it is closed.
+type countedConn struct {
+	net.Conn
+	closed func()
+}
+
+func (c *countedConn) Close() error {
+	c.closed()
+	return c.Conn.Close()
 }
 
 // inspectedConn is the client's side of an upgraded WebSocket. Read
@@ -206,7 +237,8 @@ func (c *inspectedConn) inspect(truncated bool) bool {
 // passes.
 func (c *inspectedConn) violation(code int, reason string, closing bool) bool {
 	w := c.w
-	v := pipeline.Verdict{Action: pipeline.ActionLog, Reason: pipeline.ReasonWebSocket}
+	w.h.metrics.WebSocketViolation(code)
+	v := pipeline.Verdict{Action: pipeline.ActionLog, Reason: pipeline.ReasonWebSocket, WebSocketMessage: true}
 	if closing {
 		v.Action = pipeline.ActionDeny
 	}

@@ -192,6 +192,10 @@ type Agent struct {
 	connected prometheus.Gauge
 	version   prometheus.Gauge
 	applies   *prometheus.CounterVec
+	// compileTime and appliedAt: how long bundles take to compile, and
+	// when the one enforced was applied.
+	compileTime prometheus.Histogram
+	appliedAt   prometheus.Gauge
 }
 
 // New checks cfg and reads the public keys.
@@ -242,8 +246,18 @@ func New(cfg Config) (*Agent, error) {
 		}),
 		applies: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "inkwall_bundle_updates_total",
-			Help: "Bundles received, by result: applied, or rejected (bad signature, older, doesn't compile).",
-		}, []string{"result"}),
+			Help: "Bundles received, by result (applied, rejected) and, for rejected ones, reason: signature (bad signature or a key the engine doesn't trust), older (older than the applied one), compile (the policies don't compile), other (can't be decoded).",
+		}, []string{"result", "reason"}),
+		compileTime: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: "inkwall_bundle_compile_seconds",
+			Help: "Time spent compiling a bundle's policies, rejected bundles included.",
+			// 1ms to ~65s.
+			Buckets: prometheus.ExponentialBuckets(0.001, 2, 17),
+		}),
+		appliedAt: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "inkwall_bundle_applied_timestamp_seconds",
+			Help: "When the bundle the engine enforces was applied (Unix time); 0 before the first.",
+		}),
 	}
 	a.keys.Store(keys)
 	return a, nil
@@ -254,7 +268,7 @@ func (a *Agent) TrustedKeys() []string { return slices.Clone(a.keys.Load().ids) 
 
 // Collectors returns the agent's metrics, to register with the engine's.
 func (a *Agent) Collectors() []prometheus.Collector {
-	return []prometheus.Collector{a.connected, a.version, a.applies}
+	return []prometheus.Collector{a.connected, a.version, a.applies, a.compileTime, a.appliedAt}
 }
 
 // Version returns the applied bundle's version, 0 before the first.
@@ -516,7 +530,7 @@ func (a *Agent) apply(signed *bundlev1.SignedBundle, cache bool) (uint64, error)
 	// included, can be trusted.
 	keys := a.keys.Load()
 	if err := keys.verify(signed); err != nil {
-		a.applies.WithLabelValues("rejected").Inc()
+		a.applies.WithLabelValues("rejected", "signature").Inc()
 		if errors.Is(err, errUnknownKey) {
 			a.unknownKey.Store(true)
 			if a.keys.Load() != keys {
@@ -528,7 +542,7 @@ func (a *Agent) apply(signed *bundlev1.SignedBundle, cache bool) (uint64, error)
 	}
 	var b bundlev1.Bundle
 	if err := proto.Unmarshal(signed.GetBundle(), &b); err != nil {
-		a.applies.WithLabelValues("rejected").Inc()
+		a.applies.WithLabelValues("rejected", "other").Inc()
 		return 0, fmt.Errorf("decode: %w", err)
 	}
 
@@ -549,12 +563,14 @@ func (a *Agent) apply(signed *bundlev1.SignedBundle, cache bool) (uint64, error)
 		// Never go back, unless the bundle is newer than ours: the operator
 		// then lost its version sequence (bundle Secret deleted and leader
 		// restarted) and starts again.
-		a.applies.WithLabelValues("rejected").Inc()
+		a.applies.WithLabelValues("rejected", "older").Inc()
 		return b.GetVersion(), fmt.Errorf("version %d is older than the applied %d", b.GetVersion(), cur.GetVersion())
 	}
+	start := time.Now()
 	set, err := a.cfg.Compile(&b)
+	a.compileTime.Observe(time.Since(start).Seconds())
 	if err != nil {
-		a.applies.WithLabelValues("rejected").Inc()
+		a.applies.WithLabelValues("rejected", "compile").Inc()
 		return b.GetVersion(), err
 	}
 	a.cfg.Holder.Store(set)
@@ -564,7 +580,8 @@ func (a *Agent) apply(signed *bundlev1.SignedBundle, cache bool) (uint64, error)
 	a.current = &b
 	a.version.Set(float64(b.GetVersion()))
 	a.unknownKey.Store(false)
-	a.applies.WithLabelValues("applied").Inc()
+	a.applies.WithLabelValues("applied", "").Inc()
+	a.appliedAt.SetToCurrentTime()
 	a.log.Info("bundle applied", slog.Uint64("version", b.GetVersion()), slog.Int("policies", set.Policies()), slog.Bool("suspended", b.GetSuspended()))
 	a.cacheBundle(cache, signed)
 	return b.GetVersion(), nil

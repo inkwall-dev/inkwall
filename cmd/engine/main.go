@@ -139,20 +139,24 @@ func newLogger(w io.Writer, level slog.Level) *slog.Logger {
 }
 
 type engineConfig struct {
-	command       string
-	logLevel      slog.Level
-	eventLogRate  int
-	listen        string
-	adminListen   string
-	readTimeout   time.Duration
-	upstream      *url.URL
-	mode          pipeline.Mode
-	failureMode   pipeline.FailureMode
-	timeout       time.Duration
-	maxConcurrent int
-	maxBodyBytes  int64
-	oversize      pipeline.OversizeAction
-	grpcMessages  bool
+	command      string
+	logLevel     slog.Level
+	eventLogRate int
+	// policyMetrics adds requests by policy, for at most policyMetricsMax
+	// policies.
+	policyMetrics    bool
+	policyMetricsMax int
+	listen           string
+	adminListen      string
+	readTimeout      time.Duration
+	upstream         *url.URL
+	mode             pipeline.Mode
+	failureMode      pipeline.FailureMode
+	timeout          time.Duration
+	maxConcurrent    int
+	maxBodyBytes     int64
+	oversize         pipeline.OversizeAction
+	grpcMessages     bool
 	// responses: ext-proc only, the one adapter that sees responses.
 	responses      pipeline.ResponseConfig
 	maxArgs        int
@@ -253,6 +257,8 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	disableGroups := fs.String("disable-rule-groups", "", "comma-separated CRS attack families to remove when the application cannot be vulnerable to them: "+strings.Join(coraza.RuleGroupNames(), ", "))
 	logLevel := fs.String("log-level", "info", "log level: debug, info, warn or error (security events are logged at warn)")
 	eventLogRate := fs.Int("event-log-rate", 10, "security event log lines per second for each policy and rule, in bursts of as many; the rest are counted in inkwall_security_event_logs_suppressed_total, and still go to the operator (0 = no limit)")
+	policyMetrics := fs.Bool("policy-metrics", false, "add inkwall_policy_requests_total, requests by policy (bundle mode); off by default for its cardinality")
+	policyMetricsMax := fs.Int("policy-metrics-max", telemetry.DefaultMaxPolicies, "with --policy-metrics: distinct policies counted; past them, requests count under policy=\"other\"")
 	pprof := fs.Bool("pprof", false, "serve /debug/pprof on the admin listener (exposes internals: keep that listener private)")
 	skipBodyPaths := fs.String("skip-body-paths", "", "comma-separated paths whose body is not inspected (headers and URI still are), same syntax as --skip-paths")
 	wsOrigins := fs.String("websocket-origins", "", "comma-separated origins a WebSocket handshake may come from, scheme://host[:port] (http or https; the host may start with *. for subdomains); others are denied with 403 (empty: any origin)")
@@ -275,6 +281,9 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	var level slog.Level
 	if err := level.UnmarshalText([]byte(*logLevel)); err != nil || !slices.Contains([]string{"debug", "info", "warn", "error"}, strings.ToLower(*logLevel)) {
 		return engineConfig{}, fmt.Errorf("--log-level: %q, want debug, info, warn or error", *logLevel)
+	}
+	if *policyMetricsMax < 1 {
+		return engineConfig{}, fmt.Errorf("--policy-metrics-max: %d, want 1 or more", *policyMetricsMax)
 	}
 	if *eventLogRate < 0 {
 		return engineConfig{}, fmt.Errorf("--event-log-rate: %d, want 0 or more", *eventLogRate)
@@ -303,20 +312,22 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	}
 
 	cfg := engineConfig{
-		command:        command,
-		logLevel:       level,
-		eventLogRate:   *eventLogRate,
-		listen:         *listen,
-		adminListen:    *adminListen,
-		readTimeout:    *readTimeout,
-		timeout:        *timeout,
-		maxConcurrent:  *maxConcurrent,
-		maxBodyBytes:   *maxBody,
-		maxArgs:        *maxArgs,
-		paranoiaLevel:  *paranoia,
-		threshold:      *threshold,
-		rulesFile:      *rulesFile,
-		rulesBeforeCRS: *rulesBeforeCRS,
+		command:          command,
+		logLevel:         level,
+		eventLogRate:     *eventLogRate,
+		policyMetrics:    *policyMetrics,
+		policyMetricsMax: *policyMetricsMax,
+		listen:           *listen,
+		adminListen:      *adminListen,
+		readTimeout:      *readTimeout,
+		timeout:          *timeout,
+		maxConcurrent:    *maxConcurrent,
+		maxBodyBytes:     *maxBody,
+		maxArgs:          *maxArgs,
+		paranoiaLevel:    *paranoia,
+		threshold:        *threshold,
+		rulesFile:        *rulesFile,
+		rulesBeforeCRS:   *rulesBeforeCRS,
 
 		operator:           *operator,
 		operatorCA:         *operatorCA,
@@ -483,6 +494,9 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 		adapter = "spoe"
 	}
 	metrics := telemetry.NewMetrics(adapter)
+	if cfg.policyMetrics {
+		metrics.EnablePolicyMetrics(cfg.policyMetricsMax)
+	}
 
 	var (
 		p  pipeline.Inspector
@@ -514,9 +528,9 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 	)
 	switch cfg.command {
 	case cmdExtProc:
-		ep, err = extproc.New(p, extproc.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec})
+		ep, err = extproc.New(p, extproc.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics})
 	case cmdSPOE:
-		sc := spoe.Config{MaxBodyBytes: maxBody, ClientIP: resolver, ReadTimeout: cfg.readTimeout, Logger: logger, Events: rec}
+		sc := spoe.Config{MaxBodyBytes: maxBody, ClientIP: resolver, ReadTimeout: cfg.readTimeout, Logger: logger, Events: rec, Metrics: metrics}
 		if h, ok := p.(*policy.Holder); ok {
 			// Bundle mode: the operator's HAProxy probe is answered with
 			// the bundle's key.
@@ -525,13 +539,13 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 		agentSrv, err = spoe.New(p, sc)
 	case cmdForwardAuth:
 		handler, err = forwardauth.New(p,
-			forwardauth.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec},
+			forwardauth.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics},
 		)
 	case cmdCheck:
-		handler, err = httpcheck.New(p, httpcheck.Config{MaxBodyBytes: maxBody, Logger: logger, Events: rec})
+		handler, err = httpcheck.New(p, httpcheck.Config{MaxBodyBytes: maxBody, Logger: logger, Events: rec, Metrics: metrics})
 	default:
 		handler, err = proxy.New(p,
-			proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec,
+			proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics,
 				WebSocketMessages: cfg.webSocketMessages},
 		)
 	}
@@ -714,6 +728,7 @@ func flagMode(cfg engineConfig, metrics *telemetry.Metrics) (pipeline.Inspector,
 		Responses:     cfg.responses,
 	})
 	metrics.WatchAdmission(p.Admission())
+	metrics.WatchRuleSets(func() int { return 1 })
 	return p, nil
 }
 
@@ -724,13 +739,15 @@ func flagMode(cfg engineConfig, metrics *telemetry.Metrics) (pipeline.Inspector,
 func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logger) (*agent.Agent, pipeline.Inspector, *events.Recorder, error) {
 	adm := pipeline.NewAdmission(cfg.maxConcurrent)
 	metrics.WatchAdmission(adm)
+	evaluators := policy.NewEvaluators()
+	metrics.WatchRuleSets(evaluators.Len)
 	stats := events.NewStats()
 	opts := policy.Options{
 		Admission:  adm,
 		Observer:   metrics,
 		MaxArgs:    cfg.maxArgs,
 		BodyLimit:  cfg.maxBodyBytes,
-		Evaluators: policy.NewEvaluators(),
+		Evaluators: evaluators,
 		Stats:      stats,
 	}
 	holder := &policy.Holder{DenyBeforeFirst: cfg.bootstrapDeny}

@@ -88,6 +88,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
 
 // envelope bounds a ProcessingRequest beyond the body it carries: headers
@@ -106,6 +107,8 @@ type Config struct {
 	// Logger receives one security event per denied or logged request.
 	// Nil uses slog.Default().
 	Logger *slog.Logger
+	// Metrics counts the requests the adapter can't read (nil: none).
+	Metrics *telemetry.Metrics
 	// Events records each security event for the operator (nil: logged
 	// only).
 	Events *events.Recorder
@@ -118,6 +121,7 @@ type Server struct {
 	pipeline pipeline.Inspector
 	maxBody  int64
 	clientIP *clientip.Resolver
+	metrics  *telemetry.Metrics
 	logger   *slog.Logger
 	events   *events.Recorder
 }
@@ -135,7 +139,7 @@ func New(p pipeline.Inspector, cfg Config) (*Server, error) {
 	if resolver == nil {
 		resolver = &clientip.Resolver{}
 	}
-	return &Server{pipeline: p, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events}, nil
+	return &Server{pipeline: p, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events, metrics: cfg.Metrics}, nil
 }
 
 // NewGRPCServer returns a gRPC server that serves s. It accepts messages
@@ -244,6 +248,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			err = s.replay(ctx, x)
 		}
 		if err != nil {
+			s.metrics.AdapterError(telemetry.ErrProtocol)
 			s.logger.LogAttrs(ctx, slog.LevelError, "invalid ext_proc stream", slog.Any("error", err))
 			return status.Error(codes.InvalidArgument, err.Error())
 		}
@@ -666,6 +671,7 @@ func bodilessUpgrade(r *request.Request) bool {
 // uninspectable refuses a request the engine can't inspect: only a
 // misconfigured proxy sends one, and it is not let through.
 func (s *Server) uninspectable(ctx context.Context, err error) *extprocv3.ProcessingResponse {
+	s.metrics.AdapterError(telemetry.ErrInvalidRequest)
 	s.logger.LogAttrs(ctx, slog.LevelError, "invalid ext_proc request", slog.Any("error", err))
 	return deny(http.StatusBadRequest, httpadapter.NewRequestID())
 }

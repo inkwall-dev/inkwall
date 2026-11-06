@@ -67,6 +67,8 @@ type Sidecar struct {
 	DenyBeforeBundle bool
 	// LogLevel is the engine's --log-level, empty for its default.
 	LogLevel string
+	// PolicyMetrics passes --policy-metrics.
+	PolicyMetrics bool
 	// Args are the adapter's command and its own flags, e.g.
 	// ["forward-auth"].
 	Args []string
@@ -104,6 +106,7 @@ func (s Sidecar) Configured(e wafv1alpha1.EngineSpec) Sidecar {
 	s.Resources = e.Resources
 	s.DenyBeforeBundle = e.BootstrapMode == wafv1alpha1.BootstrapDenyAll
 	s.LogLevel = strings.ToLower(string(e.LogLevel))
+	s.PolicyMetrics = e.PolicyMetrics
 	return s
 }
 
@@ -205,6 +208,9 @@ func Engine(s Sidecar) (corev1.Container, []corev1.Volume) {
 	}
 	if s.LogLevel != "" {
 		args = append(args, "--log-level="+s.LogLevel)
+	}
+	if s.PolicyMetrics {
+		args = append(args, "--policy-metrics")
 	}
 
 	resources := defaultResources()

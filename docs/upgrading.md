@@ -95,6 +95,13 @@ What changes by itself:
 - **A request body exactly `body.maxBytes` long is inspected.** Before, Coraza's own limit denied
   it (status 413 and no rule ID, in Block mode). Bodies over the limit are handled by
   `body.onOversize`, as before.
+- **New engine metrics, and two that change** (#356). `inkwall_rule_matches_total`,
+  `inkwall_adapter_errors_total`, `inkwall_bundle_compile_seconds`, `inkwall_rule_sets`,
+  `inkwall_bundle_applied_timestamp_seconds` and the `inkwall_websocket_*` metrics are new;
+  `inkwall_policy_requests_total` is opt-in. `inkwall_bundle_updates_total` has a `reason` label on
+  rejected bundles. WebSocket messages the engine's proxy inspects are counted in
+  `inkwall_websocket_messages_total`, no longer in `inkwall_requests_total`, so a dashboard of
+  requests drops on routes with busy WebSockets.
 
 ## From 0.4.0 to 0.4.1
 

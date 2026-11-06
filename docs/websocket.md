@@ -160,7 +160,12 @@ forwards, and inspects every text message with the policy's rules, before the ap
 - **In `detect` mode** messages pass at once, and a copy is inspected.
 - **Events**: each denied or logged message is a `security event` with the handshake's path and
   request ID, reason `rule` (or `oversize`); a message the proxy can't inspect or refuses (binary
-  with `text-only`, not UTF-8, a protocol error), reason `websocket`.
+  with `text-only`, not UTF-8, a protocol error), reason `websocket`. Their `phase` is
+  `websocket_message`, and events sent to the operator have `protocol: websocket`.
+- **Metrics**: `inkwall_websocket_messages_total{action}` counts inspected messages (they are not
+  in `inkwall_requests_total`, which counts the handshake), `inkwall_websocket_violations_total{code}`
+  the ones that close the connection or are refused, and `inkwall_websocket_connections` the
+  WebSockets the proxy holds open, inspected or not.
 - **Paranoia**: at levels 1 to 3 typical chat and JSON messages raise nothing; at 4, rule 920273
   (the strict character range) denies a space in any argument, a message's as a form's.
 - **Not applied**: `--skip-paths` and `--skip-body-paths` routes aren't inspected; the policy's

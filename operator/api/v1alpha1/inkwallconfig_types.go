@@ -207,6 +207,13 @@ type EngineSpec struct {
 	// pods injected from then on.
 	// +optional
 	LogLevel LogLevel `json:"logLevel,omitempty"`
+
+	// PolicyMetrics adds inkwall_policy_requests_total, the engines'
+	// requests by policy, for up to 500 policies per engine (the rest count
+	// as policy="other"). Off by default: one series per policy, action and
+	// reason. Applies to pods injected from then on.
+	// +optional
+	PolicyMetrics bool `json:"policyMetrics,omitempty"`
 }
 
 // LogLevel is an engine's log level.

@@ -145,9 +145,13 @@ func LogEvent(ctx context.Context, logger *slog.Logger, rec *events.Recorder, re
 	logger.LogAttrs(ctx, slog.LevelWarn, "security event", attrs...)
 }
 
-// phase names what a verdict is about: the request or its response.
+// phase names what a verdict is about: the request, its response, or a
+// WebSocket message.
 func phase(v pipeline.Verdict) string {
-	if v.Response {
+	switch {
+	case v.WebSocketMessage:
+		return "websocket_message"
+	case v.Response:
 		return "response"
 	}
 	return "request"
