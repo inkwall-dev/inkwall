@@ -1,0 +1,17 @@
+InkwallConfig: mode Standalone, suspended no
+Operator: 2/2 replicas ready in inkwall-system, version 0.5.0
+Bundle: version 7, 4096 bytes compressed
+
+Proxies:
+  CONTROLLER                     INTEGRATION  SUPPORT      REQUESTS  RESPONSES  WS MESSAGES  GRPC MESSAGES
+  traefik.io/ingress-controller  traefik      Full         yes       no         no           yes
+  k8s.io/ingress-nginx           -            Unsupported  no        no         no           no
+  k8s.io/ingress-nginx: Inkwall has no integration for this controller
+
+Policies: 2 of 2 Ready
+
+Engines: 2 connected
+  VERSION  CURRENT  BEHIND  REJECTED
+  v0.5.0   2        0       0
+
+OK: nothing needs attention.

@@ -576,8 +576,9 @@ func (s *Server) answer(ctx context.Context, ack *encoder, payload []byte, maxFr
 	req, path, err := s.toRequest(payload, maxFrame)
 	if err != nil {
 		s.metrics.AdapterError(telemetry.ErrInvalidRequest)
-		s.logger.LogAttrs(ctx, slog.LevelError, "invalid spoe message", slog.Any("error", err), slog.String("peer", addrString(peer)))
-		setVerdict(ack, ActionDeny, http.StatusBadRequest, httpadapter.NewRequestID())
+		id := httpadapter.NewRequestID()
+		s.logger.LogAttrs(ctx, slog.LevelError, "invalid spoe message", slog.Any("error", err), slog.String("peer", addrString(peer)), slog.String("request_id", id))
+		setVerdict(ack, ActionDeny, http.StatusBadRequest, id)
 		return
 	}
 	if s.answerProbe(ack, req) {

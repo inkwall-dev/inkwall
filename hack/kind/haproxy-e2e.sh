@@ -40,30 +40,9 @@ KUBECTL=(kubectl --context "kind-$CLUSTER")
 HELM=(helm --kube-context "kind-$CLUSTER")
 SQLI='/?id=1%27%20OR%20%271%27%3D%271'
 
-failures=0
-ok() { printf 'ok    %s\n' "$1"; }
-fail() {
-  printf 'FAIL  %s\n' "$1"
-  failures=$((failures + 1))
-}
-check() {
-  local what=$1
-  shift
-  if "$@" >/dev/null 2>&1; then ok "$what"; else fail "$what"; fi
-}
-# eventually DESCRIPTION COMMAND...: retries for up to 3 minutes.
-eventually() {
-  local what=$1
-  shift
-  for _ in $(seq 360); do
-    if "$@" >/dev/null 2>&1; then
-      ok "$what"
-      return 0
-    fi
-    sleep 0.5
-  done
-  fail "$what"
-}
+# eventually retries for up to 3 minutes.
+EVENTUALLY_TRIES=360
+. hack/kind/lib.sh
 
 if ! "${KUBECTL[@]}" -n "$OPERATOR_NS" get deployment/inkwall-operator >/dev/null 2>&1; then
   echo "the operator is not installed: run make kind-operator first" >&2
