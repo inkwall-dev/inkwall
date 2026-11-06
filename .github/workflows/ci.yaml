@@ -39,6 +39,10 @@ jobs:
       # Operator scale with fake engines (0004 §8), at a small size; the
       # full matrix runs on demand: make scale-test SCALE=full.
       - run: make scale-test SCALE_CHANGES=5
+      # The wiring controller at a small size, with its budgets: uncached
+      # pod lists per reconcile, status writes per policy through a
+      # rollout, memory (#373). SCALE=wiring is 5,000 policies.
+      - run: make scale-test SCALE=wiring:500
       - run: make build
 
   image:

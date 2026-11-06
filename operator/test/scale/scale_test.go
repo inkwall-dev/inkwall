@@ -244,6 +244,9 @@ func TestScale(t *testing.T) {
 	if spec == "" {
 		t.Skip(scaleEnv + " is not set (make scale-test sets it)")
 	}
+	if _, wiring, _ := parseWiring(spec); wiring {
+		t.Skip("SCALE=wiring runs TestScaleWiring")
+	}
 	testenv.Skip(t, env)
 	nPolicies, nEngines, err := parseScale(spec)
 	if err != nil {
@@ -851,7 +854,10 @@ type reconcileTotals struct {
 	queueLength float64
 }
 
-func reconcileStats(t *testing.T) reconcileTotals {
+func reconcileStats(t *testing.T) reconcileTotals { t.Helper(); return reconcileStatsOf(t, "bundle") }
+
+// reconcileStatsOf are a controller's reconcile metrics.
+func reconcileStatsOf(t *testing.T, controller string) reconcileTotals {
 	t.Helper()
 	families, err := ctrlmetrics.Registry.Gather()
 	if err != nil {
@@ -869,13 +875,13 @@ func reconcileStats(t *testing.T) reconcileTotals {
 				return false
 			}
 			switch {
-			case f.GetName() == "controller_runtime_reconcile_time_seconds" && is("controller", "bundle"):
+			case f.GetName() == "controller_runtime_reconcile_time_seconds" && is("controller", controller):
 				r.count, r.sum = m.GetHistogram().GetSampleCount(), m.GetHistogram().GetSampleSum()
-			case f.GetName() == "controller_runtime_reconcile_total" && is("controller", "bundle"):
+			case f.GetName() == "controller_runtime_reconcile_total" && is("controller", controller):
 				r.total += m.GetCounter().GetValue()
-			case f.GetName() == "controller_runtime_active_workers" && is("controller", "bundle"):
+			case f.GetName() == "controller_runtime_active_workers" && is("controller", controller):
 				r.active = m.GetGauge().GetValue()
-			case f.GetName() == "workqueue_depth" && is("name", "bundle"):
+			case f.GetName() == "workqueue_depth" && is("name", controller):
 				r.queueLength = m.GetGauge().GetValue()
 			}
 		}
@@ -886,14 +892,17 @@ func reconcileStats(t *testing.T) reconcileTotals {
 // settle waits until the bundle reconciler is idle: nothing running or
 // queued, and no reconcile for twice the debounce (a change is queued after
 // the debounce).
-func settle(t *testing.T) {
+func settle(t *testing.T) { t.Helper(); settleController(t, "bundle") }
+
+// settleController waits until a controller is idle, as settle.
+func settleController(t *testing.T, controller string) {
 	t.Helper()
 	const quiet = 1500 * time.Millisecond
 	deadline := time.Now().Add(5 * time.Minute)
-	last, since := reconcileStats(t), time.Now()
+	last, since := reconcileStatsOf(t, controller), time.Now()
 	for time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
-		s := reconcileStats(t)
+		s := reconcileStatsOf(t, controller)
 		if s.total != last.total || s.active > 0 || s.queueLength > 0 {
 			last, since = s, time.Now()
 			continue
@@ -902,7 +911,7 @@ func settle(t *testing.T) {
 			return
 		}
 	}
-	t.Fatal("the bundle reconciler did not settle in 5m")
+	t.Fatalf("the %s reconciler did not settle in 5m", controller)
 }
 
 // sampler records the largest heap in use.
@@ -1215,3 +1224,5 @@ func hostEngines() int {
 	wg.Wait()
 	return 0
 }
+
+var jsonMarshal = json.Marshal
