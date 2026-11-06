@@ -122,9 +122,12 @@ immutable and shared, and swapped in atomically
   ([§7](#7-integration)).
 - **Resolver:** turns `SecDefaultAction`, configure-time exclusions, rule-group pruning and
   `skipAfter` into indexes.
-- **Paranoia gating is constant-folded.** In the pinned CRS, only setup rules write the paranoia
-  `tx` variables, so the rules above the configured level are removed at compile time. If any
-  other rule writes those variables, folding is off.
+- **Paranoia gating is indexed, not folded.** The Coraza engine sets the paranoia level and
+  thresholds on each transaction, so one compiled CRS serves every level
+  ([0004 §8](0004-operator.md#8-scale-targets-v1)). Folding the level in at compile time would bring
+  back a program per level. Instead, each phase indexes its rules by level, and a transaction runs
+  the rules up to its level. In the pinned CRS, only setup rules write the paranoia `tx`
+  variables. If any other rule writes them, the index is off and the gating rules run as written.
 - **[Intermediate representation](https://en.wikipedia.org/wiki/Intermediate_representation) (IR):** flat rules per phase. Each rule has compiled selectors, a
   chain ID into a transformation [trie](https://en.wikipedia.org/wiki/Trie) (shared prefixes share work), a compiled operator and
   actions, chain links, and its required literals.
@@ -269,7 +272,7 @@ test/diff/         # differential harness (separate module, imports Coraza)
 
 | # | Milestone | Exit criteria |
 |---|---|---|
-| N0 | Parser and IR for the pinned CRS, no execution | 100% of the pinned CRS compiles; paranoia folding verified |
+| N0 | Parser and IR for the pinned CRS, no execution | 100% of the pinned CRS compiles; paranoia index verified |
 | N1 | Transformations and operators | Byte-for-byte conformance fuzzing against Coraza |
 | N2 | Runtime for phases 1–2, no prefilter, URL-encoded bodies | CRS test suite at PL1 on GET and form requests; differential tests clean |
 | N3 | Prefilter, views, lazy transformations | 0 soundness violations; the GET and form targets of [§6](#6-performance-targets) met |

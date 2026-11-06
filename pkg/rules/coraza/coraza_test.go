@@ -526,6 +526,138 @@ func TestUserSettingsBeforeCRSWinOverInkwallDefaults(t *testing.T) {
 	}
 }
 
+// paranoiaLadder are requests the CRS blocks from a paranoia level on (at
+// the default threshold): a request at index i is blocked at level i+2 and
+// above, and allowed below.
+var paranoiaLadder = []string{
+	"/?q=@@version", // 942480, paranoia level 2
+	"/?q=;id",       // 932350, paranoia level 3
+	"/?q=1;2",       // 920273, paranoia level 4
+}
+
+// checkParanoiaLevel fails unless e blocks exactly the ladder's requests at
+// paranoia level pl or below.
+func checkParanoiaLevel(t *testing.T, e *Evaluator, pl int) {
+	t.Helper()
+	for i, uri := range paranoiaLadder {
+		res, err := e.Evaluate(context.Background(), newRequest("GET", uri, nil, ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := i+2 <= pl; res.Interrupted != want {
+			t.Errorf("paranoia level %d: %s blocked = %v, want %v (matched %v)", pl, uri, res.Interrupted, want, res.MatchedRuleIDs)
+		}
+	}
+}
+
+// TestCRSSettingsPerTransaction: one compiled rule set serves every paranoia
+// level and threshold, set on each transaction.
+func TestCRSSettingsPerTransaction(t *testing.T) {
+	base, err := New(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for pl := 1; pl <= 4; pl++ {
+		cfg := Config{ParanoiaLevel: pl}
+		if cfg.Key() != (Config{}).Key() {
+			t.Errorf("paranoia level %d changes the rule set's key", pl)
+		}
+		e, err := base.WithCRS(cfg.CRS())
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkParanoiaLevel(t, e, pl)
+		// The same as compiling the level in.
+		compiled, err := New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkParanoiaLevel(t, compiled, pl)
+	}
+
+	// Rule 920230 scores 3 at paranoia level 2: blocked at threshold 3.
+	cfg := Config{ParanoiaLevel: 2, InboundAnomalyThreshold: 3}
+	if cfg.Key() != (Config{}).Key() {
+		t.Error("the threshold changes the rule set's key")
+	}
+	e, err := base.WithCRS(cfg.CRS())
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := newRequest("GET", "/?q=%2541", nil, "")
+	if res, err := e.Evaluate(context.Background(), encoded); err != nil || !res.Interrupted {
+		t.Errorf("threshold 3: %+v, %v, want blocked", res, err)
+	}
+	if res, err := base.Evaluate(context.Background(), encoded); err != nil || res.Interrupted {
+		t.Errorf("default threshold: %+v, %v, want allowed", res, err)
+	}
+	// Exclusions keep the settings, and settings the exclusions.
+	ex, err := e.WithExclusions([]Exclusion{{RuleIDs: []int{942480}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err := ex.Evaluate(context.Background(), encoded); err != nil || !res.Interrupted {
+		t.Errorf("threshold 3 with exclusions: %+v, %v, want blocked", res, err)
+	}
+	ex, err = ex.WithCRS(CRSSettings{ParanoiaLevel: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err := ex.Evaluate(context.Background(), newRequest("GET", paranoiaLadder[0], nil, "")); err != nil || res.Interrupted {
+		t.Errorf("excluded rule 942480 after WithCRS: %+v, %v, want allowed", res, err)
+	}
+
+	for _, s := range []CRSSettings{{ParanoiaLevel: 5}, {ParanoiaLevel: -1}, {InboundAnomalyThreshold: -1}} {
+		if _, err := base.WithCRS(s); err == nil {
+			t.Errorf("WithCRS(%+v) succeeded, want error", s)
+		}
+	}
+}
+
+// TestUserParanoiaLevelWins: SecLang that sets the paranoia level, before or
+// after the CRS, wins over the configured one.
+func TestUserParanoiaLevelWins(t *testing.T) {
+	setPL := func(id, pl int) string {
+		return fmt.Sprintf(`SecAction "id:%d,phase:1,pass,t:none,nolog,setvar:tx.blocking_paranoia_level=%d"`, id, pl)
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		want int
+	}{
+		{"before the CRS, lower", Config{ParanoiaLevel: 4, DirectivesBeforeCRS: setPL(900000, 1)}, 1},
+		{"before the CRS, higher", Config{ParanoiaLevel: 1, DirectivesBeforeCRS: setPL(900000, 4)}, 4},
+		// After the CRS, as a WAFRuleSet is: the CRS has already set the
+		// detection level, so it decides which rules score, not which run.
+		{"after the CRS, lower", Config{ParanoiaLevel: 4, Directives: setPL(100000, 1)}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, err := New(tc.cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkParanoiaLevel(t, e, tc.want)
+		})
+	}
+}
+
+// TestBodyAtTheLimitIsInspected: a body exactly BodyLimit long is inspected,
+// not rejected by Coraza's own limit.
+func TestBodyAtTheLimitIsInspected(t *testing.T) {
+	body := "user=alice&password=correct-horse"
+	e, err := New(Config{BodyLimit: len(body)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.Evaluate(context.Background(), newRequest("POST", "/login", formHeaders, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Interrupted {
+		t.Fatalf("body of BodyLimit bytes: %+v, want allowed", res)
+	}
+}
+
 func TestScoreOnlyCustomRulesAreReported(t *testing.T) {
 	e, err := New(Config{
 		DirectivesBeforeCRS: `SecAction "id:10000,phase:1,pass,nolog,setvar:tx.custom_flag=1"`,
@@ -1003,7 +1135,7 @@ func TestPathExclusionsKeepSetupRules(t *testing.T) {
 	if len(ids) == 0 {
 		t.Fatal("no phase 1 rules found")
 	}
-	for _, id := range append(ids, idParanoiaLevel, idAnomalyThreshold) {
+	for _, id := range ids {
 		if !setupRules[id] {
 			t.Errorf("phase 1 setup rule %d missing from setupRules", id)
 		}
