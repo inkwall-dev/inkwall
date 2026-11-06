@@ -1198,7 +1198,15 @@ One shared request corpus drives every level.
   `FuzzFromHAR`).
 
 Their seed corpora (`testdata/fuzz/`) run in every `make test`. `.github/workflows/fuzz.yaml` runs
-each target for 5 minutes nightly and uploads the failing inputs.
+each target for 5 minutes nightly and uploads the failing inputs, encrypted. Its matrix is every
+`func Fuzz` of the tests (`hack/ci/fuzz-targets.sh`, checked by `hack/ci`'s test), so a new target
+is fuzzed without editing the workflow, and each target keeps the corpus it grows in Go's fuzz
+cache from night to night (`actions/cache`).
+
+A scheduled workflow (fuzz, docs-links) that fails opens one issue for it, labeled
+`ci-scheduled-failure` and pinned, or comments on the open one; the next passing run closes it
+(`hack/ci/report-scheduled.sh`, in a `report` job that alone may write issues). The fuzz issue
+names the failing targets only: a crash may be a vulnerability, reported privately.
 
 **Built (other levels):**
 

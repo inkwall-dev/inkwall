@@ -5,3 +5,7 @@
 
 # Release assets and package registries that need auth or answer bots with 403.
 ^https://ghcr\.io/
+
+# CISA's site answers automated checkers with 403 (bot protection), while the
+# page is there for a browser: run 42016627865.
+^https://www\.cisa\.gov/
