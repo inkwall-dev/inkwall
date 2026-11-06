@@ -69,9 +69,10 @@ Envoy runs:
     --trusted-proxies 127.0.0.1/32,::1/128
   ```
 
-  or on a Unix socket, `--listen unix:/var/run/inkwall/extproc.sock`. Envoy needs write
-  permission on the socket file, which the engine creates as `0755` under the usual umask
-  (`022`): run Envoy as the engine's user.
+  or on a Unix socket, `--listen unix:/var/run/inkwall/extproc.sock`. The engine creates the
+  socket file as `0666`, so any user who can reach its directory can connect: keep the directory
+  to Envoy's and the engine's users (for example `0750`, owned by the engine's user and a group
+  Envoy is in).
 - **In a pod**, as a sidecar in Envoy's pod, on a Unix socket in an [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir) both containers
   mount. The engine's image runs as user 65532: run Envoy as 65532 too. The engine is a
   [native sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/) (an init container with `restartPolicy: Always`), so Envoy starts only once the
