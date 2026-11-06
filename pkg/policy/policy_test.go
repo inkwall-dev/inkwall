@@ -571,3 +571,36 @@ func TestProbeKey(t *testing.T) {
 		t.Fatalf("probe key %q", h.ProbeKey())
 	}
 }
+
+// A policy's request body limit is at most MaxBodyBytes, whatever the
+// bundle says (#361), and BodyLimit never returns more than the adapter's
+// own limit.
+func TestBodyLimitClamped(t *testing.T) {
+	b := testBundle()
+	b.Policies[0].Body = &bundlev1.BodyConfig{Inspect: true, MaxBytes: 1 << 30}
+	set, err := Compile(b, Options{BodyLimit: 65536})
+	if err != nil {
+		t.Fatal(err)
+	}
+	shop := req("shop.example.com", "/form")
+	if p := set.Lookup(shop); p.bodyLimit != MaxBodyBytes {
+		t.Errorf("compiled body limit %d, want %d", p.bodyLimit, MaxBodyBytes)
+	}
+	for _, tc := range []struct {
+		max, want int64
+	}{
+		{0, MaxBodyBytes},  // no adapter limit given
+		{-1, MaxBodyBytes}, // nor here
+		{1 << 40, MaxBodyBytes},
+		{MaxBodyBytes, MaxBodyBytes},
+		{1000, 1000},
+	} {
+		if got := set.BodyLimit(shop, tc.max); got != tc.want {
+			t.Errorf("BodyLimit(max %d) = %d, want %d", tc.max, got, tc.want)
+		}
+	}
+	// The /api policy's own 10 bytes, under any adapter limit.
+	if got := set.BodyLimit(req("shop.example.com", "/api/orders"), 5); got != 5 {
+		t.Errorf("BodyLimit(/api, max 5) = %d, want 5", got)
+	}
+}
