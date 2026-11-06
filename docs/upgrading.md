@@ -61,6 +61,14 @@ What's new:
 
 What changes by itself:
 
+- **The chart keeps the operator's settings of the Pod webhooks** (`failurePolicy`,
+  `objectSelector`, `namespaceSelector`). The operator sets `failurePolicy` to `Fail` while a
+  policy blocks; an upgrade used to render `Ignore` until the operator set it again, and Helm 4,
+  which applies server-side, refused the upgrade (a conflict with the operator's fields). An
+  upgrade now renders the live values; the operator applies a new proxy namespace list or
+  integration permissions once it restarts. With Helm 4, roll back to 0.4.x with `helm rollback
+  --force-conflicts`. The chart also passes Helm 4's `helm lint --strict` (its `license` moved to an
+  `artifacthub.io/license` annotation). Helm 3 and 4 are both tested.
 - **WebSocket messages are scored on their own** (the standalone proxy's
   `--websocket-messages`): a message is inspected without the handshake's query arguments and
   headers, so a handshake that scored below the threshold no longer adds its score to every
