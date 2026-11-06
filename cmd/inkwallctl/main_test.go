@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -164,6 +165,18 @@ func TestRunInProcess(t *testing.T) {
 	code, out, _ := runCLI(t, "test", "http://shop.example.com"+sqli)
 	if code != 0 || !strings.HasPrefix(out, "deny  403  GET "+sqli) || !strings.Contains(out, "942100") {
 		t.Fatalf("sqli: exit %d, output %q", code, out)
+	}
+
+	// Where each rule matched, and the anomaly score (#354).
+	if !strings.Contains(out, "942100@ARGS:id") || !regexp.MustCompile(`  score=[1-9][0-9]*`).MatchString(out) {
+		t.Fatalf("sqli: no rule@variable or score: %q", out)
+	}
+
+	code, out, _ = runCLI(t, "test", "--json", "http://shop.example.com"+sqli)
+	// protojson varies its spacing on purpose.
+	if code != 0 || !regexp.MustCompile(`\{"rule_id":\s*942100,\s*"variable":\s*"ARGS:id"\}`).MatchString(out) ||
+		!strings.Contains(out, `"anomaly_score":`) {
+		t.Fatalf("--json sqli: exit %d, output %q", code, out)
 	}
 
 	code, out, _ = runCLI(t, "test", "--mode", "detect", "http://shop.example.com"+sqli)

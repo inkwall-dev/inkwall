@@ -374,6 +374,16 @@ func describe(in *enginev1.CheckRequest, out *enginev1.CheckResponse) string {
 	if id := out.GetInterruptingRuleId(); id != 0 {
 		fmt.Fprintf(&b, "  interrupting=%d", id)
 	}
+	if ms := out.GetMatches(); len(ms) > 0 {
+		s := make([]string, len(ms))
+		for i, m := range ms {
+			s[i] = fmt.Sprintf("%d@%s", m.GetRuleId(), m.GetVariable())
+		}
+		fmt.Fprintf(&b, "  matches=%s", strings.Join(s, ","))
+	}
+	if score := out.GetAnomalyScore(); score != 0 {
+		fmt.Fprintf(&b, "  score=%d", score)
+	}
 	fmt.Fprintf(&b, "  %s", out.GetInspectionTime().AsDuration().Round(time.Microsecond))
 	return b.String()
 }

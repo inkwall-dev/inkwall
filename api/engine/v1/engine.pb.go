@@ -411,7 +411,14 @@ type CheckResponse struct {
 	// The policy that decided, in bundle mode ("namespace/name"); empty when
 	// none did (no policy covers the request, or inspection is suspended),
 	// or outside bundle mode.
-	Policy        string `protobuf:"bytes,9,opt,name=policy,proto3" json:"policy,omitempty"`
+	Policy string `protobuf:"bytes,9,opt,name=policy,proto3" json:"policy,omitempty"`
+	// Where the rules matched: each rule and the variable it matched (e.g.
+	// ARGS:q), never the matched value. At most 32, variable names cut to
+	// 128 bytes, as in security events.
+	Matches []*RuleMatch `protobuf:"bytes,10,rep,name=matches,proto3" json:"matches,omitempty"`
+	// The request's inbound anomaly score (the Core Rule Set's), 0 when no
+	// rule added to it.
+	AnomalyScore  int32 `protobuf:"varint,11,opt,name=anomaly_score,json=anomalyScore,proto3" json:"anomaly_score,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -509,6 +516,74 @@ func (x *CheckResponse) GetPolicy() string {
 	return ""
 }
 
+func (x *CheckResponse) GetMatches() []*RuleMatch {
+	if x != nil {
+		return x.Matches
+	}
+	return nil
+}
+
+func (x *CheckResponse) GetAnomalyScore() int32 {
+	if x != nil {
+		return x.AnomalyScore
+	}
+	return 0
+}
+
+// RuleMatch is where a rule matched.
+type RuleMatch struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	RuleId uint32                 `protobuf:"varint,1,opt,name=rule_id,json=ruleId,proto3" json:"rule_id,omitempty"`
+	// The variable: collection and key, e.g. ARGS:q or REQUEST_HEADERS:User-Agent.
+	Variable      string `protobuf:"bytes,2,opt,name=variable,proto3" json:"variable,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RuleMatch) Reset() {
+	*x = RuleMatch{}
+	mi := &file_engine_v1_engine_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RuleMatch) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RuleMatch) ProtoMessage() {}
+
+func (x *RuleMatch) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_v1_engine_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RuleMatch.ProtoReflect.Descriptor instead.
+func (*RuleMatch) Descriptor() ([]byte, []int) {
+	return file_engine_v1_engine_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *RuleMatch) GetRuleId() uint32 {
+	if x != nil {
+		return x.RuleId
+	}
+	return 0
+}
+
+func (x *RuleMatch) GetVariable() string {
+	if x != nil {
+		return x.Variable
+	}
+	return ""
+}
+
 var File_engine_v1_engine_proto protoreflect.FileDescriptor
 
 const file_engine_v1_engine_proto_rawDesc = "" +
@@ -533,7 +608,7 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\x06Header\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value\x12\x1b\n" +
-	"\traw_value\x18\x03 \x01(\fR\brawValue\"\x9b\x03\n" +
+	"\traw_value\x18\x03 \x01(\fR\brawValue\"\xf8\x03\n" +
 	"\rCheckResponse\x121\n" +
 	"\x06action\x18\x01 \x01(\x0e2\x19.inkwall.engine.v1.ActionR\x06action\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\rR\x06status\x12D\n" +
@@ -544,7 +619,13 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\n" +
 	"request_id\x18\a \x01(\tR\trequestId\x12B\n" +
 	"\x0finspection_time\x18\b \x01(\v2\x19.google.protobuf.DurationR\x0einspectionTime\x12\x16\n" +
-	"\x06policy\x18\t \x01(\tR\x06policy*S\n" +
+	"\x06policy\x18\t \x01(\tR\x06policy\x126\n" +
+	"\amatches\x18\n" +
+	" \x03(\v2\x1c.inkwall.engine.v1.RuleMatchR\amatches\x12#\n" +
+	"\ranomaly_score\x18\v \x01(\x05R\fanomalyScore\"@\n" +
+	"\tRuleMatch\x12\x17\n" +
+	"\arule_id\x18\x01 \x01(\rR\x06ruleId\x12\x1a\n" +
+	"\bvariable\x18\x02 \x01(\tR\bvariable*S\n" +
 	"\x06Action\x12\x16\n" +
 	"\x12ACTION_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fACTION_ALLOW\x10\x01\x12\x0f\n" +
@@ -581,28 +662,30 @@ func file_engine_v1_engine_proto_rawDescGZIP() []byte {
 }
 
 var file_engine_v1_engine_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_engine_v1_engine_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_engine_v1_engine_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_engine_v1_engine_proto_goTypes = []any{
 	(Action)(0),                 // 0: inkwall.engine.v1.Action
 	(Reason)(0),                 // 1: inkwall.engine.v1.Reason
 	(*CheckRequest)(nil),        // 2: inkwall.engine.v1.CheckRequest
 	(*Header)(nil),              // 3: inkwall.engine.v1.Header
 	(*CheckResponse)(nil),       // 4: inkwall.engine.v1.CheckResponse
-	(*durationpb.Duration)(nil), // 5: google.protobuf.Duration
+	(*RuleMatch)(nil),           // 5: inkwall.engine.v1.RuleMatch
+	(*durationpb.Duration)(nil), // 6: google.protobuf.Duration
 }
 var file_engine_v1_engine_proto_depIdxs = []int32{
 	3, // 0: inkwall.engine.v1.CheckRequest.headers:type_name -> inkwall.engine.v1.Header
 	0, // 1: inkwall.engine.v1.CheckResponse.action:type_name -> inkwall.engine.v1.Action
 	3, // 2: inkwall.engine.v1.CheckResponse.response_headers:type_name -> inkwall.engine.v1.Header
 	1, // 3: inkwall.engine.v1.CheckResponse.reason:type_name -> inkwall.engine.v1.Reason
-	5, // 4: inkwall.engine.v1.CheckResponse.inspection_time:type_name -> google.protobuf.Duration
-	2, // 5: inkwall.engine.v1.CheckService.Check:input_type -> inkwall.engine.v1.CheckRequest
-	4, // 6: inkwall.engine.v1.CheckService.Check:output_type -> inkwall.engine.v1.CheckResponse
-	6, // [6:7] is the sub-list for method output_type
-	5, // [5:6] is the sub-list for method input_type
-	5, // [5:5] is the sub-list for extension type_name
-	5, // [5:5] is the sub-list for extension extendee
-	0, // [0:5] is the sub-list for field type_name
+	6, // 4: inkwall.engine.v1.CheckResponse.inspection_time:type_name -> google.protobuf.Duration
+	5, // 5: inkwall.engine.v1.CheckResponse.matches:type_name -> inkwall.engine.v1.RuleMatch
+	2, // 6: inkwall.engine.v1.CheckService.Check:input_type -> inkwall.engine.v1.CheckRequest
+	4, // 7: inkwall.engine.v1.CheckService.Check:output_type -> inkwall.engine.v1.CheckResponse
+	7, // [7:8] is the sub-list for method output_type
+	6, // [6:7] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_engine_v1_engine_proto_init() }
@@ -616,7 +699,7 @@ func file_engine_v1_engine_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_engine_v1_engine_proto_rawDesc), len(file_engine_v1_engine_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   3,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
