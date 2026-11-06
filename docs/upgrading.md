@@ -68,6 +68,10 @@ What changes by itself:
   `WiringFailed`. While the operator rewrites them, Envoy may reject a configuration with a filter
   in both and keep the one before, still inspected. GitOps tools that ignore the operator's
   objects by label need no change.
+- **WebSocket messages are scored on their own** (the standalone proxy's
+  `--websocket-messages`): a message is inspected without the handshake's query arguments and
+  headers, so a handshake that scored below the threshold no longer adds its score to every
+  message, and each message costs about a third less. Attacks in messages are still denied.
 - **`Enforced` counts the engines that serve the policy.** A policy's `Enforced` condition (and
   its `EnginesBehind`, `EngineNack` and `EnginesOutdated` reasons) now counts only the engines on
   the proxy pods that serve its routes, once the operator has wired them all. An engine of one
@@ -105,6 +109,10 @@ What changes by itself:
 - **A request body exactly `body.maxBytes` long is inspected.** Before, Coraza's own limit denied
   it (status 413 and no rule ID, in Block mode). Bodies over the limit are handled by
   `body.onOversize`, as before.
+- **`kubectl get wafpolicies` has a `REASON` column**, the `Ready` condition's reason, before
+  `BUNDLE`. A script that reads the columns by position should use `-o jsonpath` or
+  `-o custom-columns`. `inkwallctl status` is new: see
+  [Troubleshooting](troubleshooting.md#cluster-status).
 - **New engine metrics, and two that change** (#356). `inkwall_rule_matches_total`,
   `inkwall_adapter_errors_total`, `inkwall_bundle_compile_seconds`, `inkwall_rule_sets`,
   `inkwall_bundle_applied_timestamp_seconds` and the `inkwall_websocket_*` metrics are new;
@@ -112,6 +120,11 @@ What changes by itself:
   rejected bundles. WebSocket messages the engine's proxy inspects are counted in
   `inkwall_websocket_messages_total`, no longer in `inkwall_requests_total`, so a dashboard of
   requests drops on routes with busy WebSockets.
+- **Every denial carries `X-Request-Id`** (#366), the request ID of its security event: the
+  engine's reverse proxy and Traefik's ForwardAuth answered without it before, and so did the 400
+  for a request an adapter can't read. `InkwallConfig.spec.engine.jsonDenials` (the engine's
+  `--json-denials`) answers clients that accept `application/json` with a JSON body; off by
+  default.
 - **A monitoring kit, off by default** (#381): `metrics.serviceMonitor`, `metrics.podMonitor`,
   `metrics.prometheusRule` and `metrics.dashboard` in the chart. See [Monitoring](monitoring.md).
 

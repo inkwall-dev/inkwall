@@ -233,7 +233,7 @@ kubectl -n <traefik namespace> logs deploy/<traefik> -c inkwall-engine | grep '"
 ```
 
 Its `client_ip` should be your address, not the LB's, a node's or a pod's. The [kind](https://kind.sigs.k8s.io/) end-to-end test
-(`make kind-e2e`) checks this with a PROXY header for a public address, a client-sent
+(`make kind-e2e-traefik`) checks this with a PROXY header for a public address, a client-sent
 `X-Forwarded-For` that must not change it, and a PROXY header from an untrusted source that must be
 ignored.
 

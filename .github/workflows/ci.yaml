@@ -99,32 +99,18 @@ jobs:
       # The alerts' unit tests, with the Prometheus image's promtool.
       - run: make monitoring-test
 
-  e2e:
-    # Operator milestone O2 end to end (#26): the operator installed with the
-    # Helm chart, and a WAFPolicy enforced by an engine in bundle mode, on
-    # kind's newest Kubernetes (the local kind cluster, and upgrade, run 1.34:
-    # KIND_NODE_IMAGE in the Makefile).
+  e2e-images:
+    # The engine and operator images, built once for every e2e job (#391),
+    # and the images' Go build cache (hack/kind/go-build-cache.sh), so they
+    # compile little more than this repository's packages: about 1.2 GB,
+    # saved from main once per go.sum and Dockerfile. Saving it must never
+    # fail or cancel the job (#298): its steps have their own time limits
+    # and continue on error, and a cache is saved only if it was extracted
+    # completely.
     runs-on: ubuntu-24.04
-    # The e2e takes 25 to 30 minutes, Istio's (#281) about 10 of them; the
-    # rest is for saving the build cache on a push, whose steps have limits
-    # of their own (#298).
-    timeout-minutes: 50
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version: '1.27.x'
-          check-latest: true
-      - uses: azure/setup-helm@v5
-        with:
-          version: v3.19.0
-      - run: make kind-cluster KIND_NODE_IMAGE=
-      # The images' Go build cache (hack/kind/go-build-cache.sh), so they
-      # compile little more than this repository's packages: about 1.2 GB,
-      # saved from main once per go.sum and Dockerfile. Saving it must never
-      # fail or cancel the job (#298): its steps have their own time limits
-      # and continue on error, and a cache is saved only if it was extracted
-      # completely.
       - id: go-build
         uses: actions/cache/restore@v6
         with:
@@ -132,7 +118,14 @@ jobs:
           key: image-go-build-${{ hashFiles('go.sum', 'Dockerfile') }}
           restore-keys: image-go-build-
       - run: hack/kind/go-build-cache.sh inject "$RUNNER_TEMP/go-build"
-      - run: make kind-e2e
+      - run: make image
+      - run: docker save inkwall-engine:dev inkwall-operator:dev | gzip -1 > "$RUNNER_TEMP/e2e-images.tar.gz"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: e2e-images
+          path: ${{ runner.temp }}/e2e-images.tar.gz
+          retention-days: 1
+          compression-level: 0
       - id: extract
         if: github.event_name == 'push' && steps.go-build.outputs.cache-hit != 'true'
         timeout-minutes: 10
@@ -145,10 +138,51 @@ jobs:
         with:
           path: ${{ runner.temp }}/go-build
           key: image-go-build-${{ hashFiles('go.sum', 'Dockerfile') }}
+
+  e2e:
+    # Operator milestone O2 end to end (#26): the operator installed with the
+    # Helm chart, and a WAFPolicy enforced by an engine in bundle mode, on
+    # kind's newest Kubernetes (the local kind cluster, and upgrade, run 1.34:
+    # KIND_NODE_IMAGE in the Makefile). One job per proxy, each on its own
+    # kind cluster with the images built once (#391): a failure in one
+    # doesn't hide the others' results, and a flaky one reruns alone.
+    needs: e2e-images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        proxy: [traefik, raw-envoy, envoy-gateway, istio, haproxy]
+    name: e2e (${{ matrix.proxy }})
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.19.0
+      - uses: actions/download-artifact@v8
+        with:
+          name: e2e-images
+          path: ${{ runner.temp }}
+      - run: gunzip -c "$RUNNER_TEMP/e2e-images.tar.gz" | docker load
+      - run: make kind-cluster KIND_NODE_IMAGE=
+      - run: make kind-e2e-${{ matrix.proxy }} SKIP_IMAGE_BUILD=1
+      # The cluster's logs (every pod's, the nodes', kind's), kept a week.
       - if: failure()
         run: |
-          kubectl get pods -A
+          kubectl get pods -A -o wide || true
           kubectl -n inkwall-system logs deployment/inkwall-operator --tail=100 || true
+          mkdir -p "$RUNNER_TEMP/kind-logs"
+          bin/kind-*/kind export logs "$RUNNER_TEMP/kind-logs" --name inkwall || true
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kind-logs-${{ matrix.proxy }}
+          path: ${{ runner.temp }}/kind-logs
+          retention-days: 7
 
   upgrade:
     # helm upgrade from the last release to the chart and images of this
@@ -169,7 +203,7 @@ jobs:
         with:
           go-version: '1.27.x'
           check-latest: true
-      # The images' Go build cache, as in e2e (which saves it; this job only
+      # The images' Go build cache, as in e2e-images (which saves it; this job only
       # restores it, so it has nothing to save after its test).
       - uses: actions/cache/restore@v6
         with:
