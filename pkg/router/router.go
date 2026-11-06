@@ -84,7 +84,7 @@ func (t *Table) Decide(rawURI string) Decision {
 	if t == nil || (len(t.skipAll) == 0 && len(t.skipBody) == 0) {
 		return InspectAll
 	}
-	p, ok := unambiguousPath(rawURI)
+	p, ok := UnambiguousPath(rawURI)
 	if !ok {
 		return InspectAll
 	}
@@ -97,14 +97,15 @@ func (t *Table) Decide(rawURI string) Decision {
 	return InspectAll
 }
 
-// unambiguousPath returns the request path if every component that sees it
+// UnambiguousPath returns the request path if every component that sees it
 // (Inkwall, the proxy, the application) would read it the same way. Only
 // plain ASCII path characters are accepted (see plainPath); percent-encoding,
 // non-ASCII or invalid UTF-8 bytes (fullwidth or overlong dots), backslashes,
 // semicolons, repeated slashes and dot segments are rejected, because
 // applications differ in how they interpret them, and that difference is how
-// a skip rule becomes a bypass.
-func unambiguousPath(rawURI string) (string, bool) {
+// a skip rule becomes a bypass. Path exclusions (pkg/rules/coraza) use it
+// for the same reason.
+func UnambiguousPath(rawURI string) (string, bool) {
 	rawPath, _, _ := strings.Cut(rawURI, "?")
 	if rawPath == "" || rawPath[0] != '/' {
 		return "", false
