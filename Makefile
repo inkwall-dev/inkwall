@@ -7,6 +7,9 @@ GO              ?= go
 # than it was built with, and gofmt's output (in generated code) changes between versions.
 export GOTOOLCHAIN := $(shell GOTOOLCHAIN=auto $(GO) env GOVERSION)
 BIN_DIR         ?= bin
+# Coraza operators the binaries leave out: inspectFile runs programs, rbl queries DNS. Rule sets
+# are written by namespace users (pkg/rules/coraza/operators.go also unregisters them).
+GO_TAGS         := coraza.disabled_operators.inspectFile,coraza.disabled_operators.rbl
 GOLANGCI_LINT   ?= $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
 GORELEASER      ?= $(GO) run github.com/goreleaser/goreleaser/v2@v2.18.3
 GOVULNCHECK     ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@v1.8.0
@@ -59,9 +62,9 @@ help: ## Show available targets
 
 .PHONY: build
 build: ## Build inkwall-engine and inkwallctl into ./bin
-	$(GO) build -trimpath -o $(BIN_DIR)/inkwall-engine ./cmd/engine
-	$(GO) build -trimpath -o $(BIN_DIR)/inkwallctl ./cmd/inkwallctl
-	$(GO) build -trimpath -o $(BIN_DIR)/inkwall-operator ./cmd/operator
+	$(GO) build -trimpath -tags $(GO_TAGS) -o $(BIN_DIR)/inkwall-engine ./cmd/engine
+	$(GO) build -trimpath -tags $(GO_TAGS) -o $(BIN_DIR)/inkwallctl ./cmd/inkwallctl
+	$(GO) build -trimpath -tags $(GO_TAGS) -o $(BIN_DIR)/inkwall-operator ./cmd/operator
 
 .PHONY: test
 test: ## Run unit tests with the race detector (operator tests run against a local API server, envtest)

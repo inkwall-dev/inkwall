@@ -25,6 +25,7 @@ builds:
     goos: [linux, darwin]
     goarch: [amd64, arm64]
     flags: [-trimpath]
+    tags: [coraza.disabled_operators.inspectFile, coraza.disabled_operators.rbl]
     ldflags: ["-s -w -X main.version={{ .Version }}"]
   - id: inkwall-operator
     main: ./cmd/operator
@@ -33,6 +34,7 @@ builds:
     goos: [linux, darwin]
     goarch: [amd64, arm64]
     flags: [-trimpath]
+    tags: [coraza.disabled_operators.inspectFile, coraza.disabled_operators.rbl]
     ldflags: ["-s -w -X main.version={{ .Version }}"]
   - id: inkwallctl
     main: ./cmd/inkwallctl
@@ -41,6 +43,7 @@ builds:
     goos: [linux, darwin]
     goarch: [amd64, arm64]
     flags: [-trimpath]
+    tags: [coraza.disabled_operators.inspectFile, coraza.disabled_operators.rbl]
     ldflags: ["-s -w"]
 
 archives:
