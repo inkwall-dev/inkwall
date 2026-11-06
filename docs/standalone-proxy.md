@@ -46,6 +46,8 @@ The main flags; `inkwall-engine proxy -h` lists them all:
 | `--max-body-bytes` | `65536` | Body bytes inspected; `--oversize-body` decides what happens to larger bodies |
 | `--failure-mode` | `auto` | Requests that can't be inspected: rejected (503) in block mode, let through in detect mode |
 | `--trusted-proxies` | | [CIDRs](https://www.rfc-editor.org/rfc/rfc4632) whose [`X-Forwarded-For`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For) is trusted |
+| `--trusted-hops` | `0` | [`X-Forwarded-For`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For) entries, from the right, taken as proxies whatever their address (0 to 10), behind a trusted peer: see [client IP](client-ip.md#trusted-hops) |
+| `--client-ip-header` | `x-forwarded-for` | `x-forwarded-for`, or `forwarded` ([RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)) behind a proxy that sets or replaces it: a client can send either |
 | `--listen`, `--admin-listen` | `:8480`, `:9480` | Proxy address; address of `/metrics`, `/healthz` and `/readyz` |
 | `--json-denials` | off | Answer a denied client that sends `Accept: application/json` with `{"error":"forbidden","status":403,"request_id":"..."}` instead of text. Every denial carries `X-Request-Id`, the request ID of its security event |
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error`; security events are logged at `warn` |

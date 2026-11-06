@@ -96,6 +96,8 @@ jobs:
         with:
           version: v3.19.0
       - run: make helm-lint
+      # The alerts' unit tests, with the Prometheus image's promtool.
+      - run: make monitoring-test
 
   e2e:
     # Operator milestone O2 end to end (#26): the operator installed with the
