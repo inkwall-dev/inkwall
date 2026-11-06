@@ -671,7 +671,7 @@ func (r *resolution) ipList(ns string, names []wafv1alpha1.IPListName) ([]string
 			entries = append(entries, string(e.CIDR))
 		}
 		if _, err := iplist.Parse(entries); err != nil {
-			return nil, fmt.Errorf("WAFIPList %s: %v", name, err)
+			return nil, fmt.Errorf("WAFIPList %s: %w", name, err)
 		}
 		for _, e := range entries {
 			if !seen[e] {
