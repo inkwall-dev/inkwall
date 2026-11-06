@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -28,7 +28,7 @@ jobs:
       - run: make lint
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -44,7 +44,7 @@ jobs:
   image:
     # The engine and operator images must build; they are what the Helm
     # chart deploys.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
@@ -57,7 +57,7 @@ jobs:
     # detect mode, and Envoy's behaviour with the engine down. Then, with
     # the same engine image, WebSocket message inspection by the engine's
     # proxy (#276).
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -71,7 +71,7 @@ jobs:
   release:
     # The release configuration must stay valid: a broken one only shows
     # when a tag is pushed (.github/workflows/release.yaml).
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: goreleaser/goreleaser-action@v7
@@ -81,7 +81,7 @@ jobs:
           args: check
 
   helm:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -98,7 +98,7 @@ jobs:
     # Helm chart, and a WAFPolicy enforced by an engine in bundle mode, on
     # kind's newest Kubernetes (the local kind cluster, and upgrade, run 1.34:
     # KIND_NODE_IMAGE in the Makefile).
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The e2e takes 25 to 30 minutes, Istio's (#281) about 10 of them; the
     # rest is for saving the build cache on a push, whose steps have limits
     # of their own (#298).
@@ -149,7 +149,7 @@ jobs:
     # commit keeps routes protected through Traefik, wired once, and their
     # policies Accepted and Programmed; uninstall restores the routes
     # (#129). Every run: it is as cheap as e2e, next to which it runs.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -180,7 +180,7 @@ jobs:
     # Generated code is committed: the protobuf code must match api/*.proto,
     # and the operator's CRDs, RBAC and webhooks (also in the Helm chart)
     # must match its markers.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -192,7 +192,7 @@ jobs:
 
   crs:
     # Detection regression gate: the OWASP CRS test suite through the proxy.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -206,7 +206,7 @@ jobs:
     # HAProxy with the engine's SPOE agent, in Docker (#282): the samples of
     # examples/haproxy validated by HAProxy and run, block and detect mode,
     # and HAProxy's behaviour with the engine down (fail closed, fail open).
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -222,7 +222,7 @@ jobs:
     # the PR does not change are skipped, and a regression must repeat on a
     # re-check of the flagged benchmarks to fail (hack/bench/compare.sh).
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:
@@ -248,7 +248,7 @@ jobs:
           if-no-files-found: ignore
 
   vuln:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -261,7 +261,7 @@ jobs:
     # The Markdown docs must not rot (#135): internal links and anchors,
     # Contents lists and the docs index (hack/docscheck). External links are
     # too slow and flaky for every PR; docs-links.yaml checks them nightly.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -272,7 +272,7 @@ jobs:
 
   pr-title:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pull-requests: read
     steps:

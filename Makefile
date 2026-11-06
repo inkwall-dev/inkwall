@@ -103,8 +103,18 @@ crs-test: ## Run the OWASP CRS regression suite through the proxy (test/crs)
 
 
 .PHONY: lint
-lint: ## Run golangci-lint
+lint: workflow-check ## Run golangci-lint, and check the workflows' runners
 	$(GOLANGCI_LINT) run ./...
+
+# The runner every CI job runs on: a fixed Ubuntu release, never
+# ubuntu-latest, which GitHub moves to the next LTS unannounced (#400). Move
+# to the next one in a PR of its own, which runs the whole suite.
+CI_RUNNER ?= ubuntu-24.04
+
+.PHONY: workflow-check
+workflow-check: ## Check that every workflow job runs on CI_RUNNER
+	@bad=$$(grep -rn 'runs-on:' .github/workflows | grep -v 'runs-on: $(CI_RUNNER)$$'); \
+	if [ -n "$$bad" ]; then echo "$$bad"; echo "workflow-check: jobs must run on $(CI_RUNNER) (CI_RUNNER in the Makefile)"; exit 1; fi
 
 .PHONY: fmt
 fmt: ## Format code
