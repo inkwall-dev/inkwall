@@ -58,6 +58,7 @@ import (
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	"github.com/inkwall-dev/inkwall/internal/buildinfo"
+	"github.com/inkwall-dev/inkwall/internal/memlimit"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/extproc"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/forwardauth"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/httpcheck"
@@ -105,6 +106,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintln(stderr, "error:", err)
 		return 2
+	}
+	// The engine buffers request bodies: without a soft limit the heap
+	// goal is twice the live heap, and a burst of large bodies reaches the
+	// container's memory limit before the GC runs.
+	if limit := memlimit.Set(os.Getenv); limit > 0 {
+		logger.Info("Go memory limit set", slog.Int64("bytes", limit), slog.String("from", memlimit.Env))
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

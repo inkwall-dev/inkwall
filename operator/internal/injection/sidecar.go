@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
+	"github.com/inkwall-dev/inkwall/internal/memlimit"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 )
@@ -216,6 +217,10 @@ func Engine(s Sidecar) (corev1.Container, []corev1.Volume) {
 			fieldEnv("POD_NAME", "metadata.name"),
 			fieldEnv("POD_NAMESPACE", "metadata.namespace"),
 			fieldEnv("NODE_NAME", "spec.nodeName"),
+			// The engine sets GOMEMLIMIT to 90% of it, unless GOMEMLIMIT
+			// is set.
+			{Name: memlimit.Env, ValueFrom: &corev1.EnvVarSource{ResourceFieldRef: &corev1.ResourceFieldSelector{
+				ContainerName: ContainerName, Resource: "limits.memory"}}},
 		},
 		Ports: []corev1.ContainerPort{{Name: "inkwall-admin", ContainerPort: adminPort}},
 		// The proxy starts once the engine is up.
