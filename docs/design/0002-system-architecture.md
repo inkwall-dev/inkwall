@@ -506,7 +506,17 @@ route, whatever Envoy Gateway allows.
 frames, holds a message until it is inspected, and in `Block` mode closes the connection with 1008
 ([0006 §6](0006-adapter-protocols.md#6-reverse-proxy-standalone-mode)). Routes wired through
 ext_proc (Envoy Gateway, raw Envoy) and Traefik inspect the handshake only, and no `WAFPolicy`
-field asks for message inspection, so nothing claims it there. The options weighed:
+field asks for message inspection, so nothing claims it there.
+
+**Built (#363):** a message is evaluated in its own scope: a `GET` of the handshake's path (for
+exclusions and path rules) with the handshake's request ID and client IP, fixed clean `Accept`
+and `User-Agent` headers, and the message as arguments. The handshake's query arguments and
+headers were inspected with it and aren't evaluated again, so its score doesn't add to every
+message's, and each message skips the header rules' work (`BenchmarkWebSocketMessage`: about 40%
+less time and 35% fewer allocations). A SecLang rule on headers or query arguments sees none with
+a message. Messages are counted apart from requests (`inkwall_websocket_messages_total`, #356).
+
+The options weighed:
 
 1. **The engine's reverse proxy:** chosen. It works for the standalone proxy, with its own flags,
    and is the reference for the others. On Envoy Gateway it would have to be in the request path,

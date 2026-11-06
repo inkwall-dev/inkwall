@@ -199,7 +199,7 @@ release-check: ## Check the goreleaser configuration
 	$(GORELEASER) check
 
 # The kind targets, and the scripts they run, use the kind of KIND_VERSION.
-KIND_TARGETS := kind-cluster kind-up kind-operator kind-e2e kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-response-load kind-upgrade kind-down
+KIND_TARGETS := kind-cluster kind-up kind-operator kind-e2e kind-e2e-traefik kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-response-load kind-upgrade kind-down
 $(KIND_TARGETS): export PATH := $(KIND_DIR):$(PATH)
 $(KIND_TARGETS): $(KIND_DIR)/kind
 
@@ -222,14 +222,20 @@ kind-operator: ## Build the operator image, install the Helm chart on the kind c
 
 .PHONY: kind-e2e
 kind-e2e: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
-kind-e2e: kind-operator ## End-to-end test on kind: a WAFPolicy is enforced by an engine in bundle mode, through Traefik, raw Envoy, Envoy Gateway, Istio and HAProxy (installs the operator first)
-	@# kind-operator built and loaded the engine image.
+kind-e2e: ## End-to-end test on kind: a WAFPolicy is enforced by an engine in bundle mode, through Traefik, raw Envoy, Envoy Gateway, Istio and HAProxy, one after another (CI runs them as separate jobs)
+	@# Each installs the operator first and ends with an uninstall. The
+	@# images are built once: SKIP_IMAGE_BUILD for the others.
+	$(MAKE) kind-e2e-traefik
+	SKIP_IMAGE_BUILD=1 $(MAKE) kind-e2e-raw-envoy
+	SKIP_IMAGE_BUILD=1 $(MAKE) kind-e2e-envoy-gateway
+	SKIP_IMAGE_BUILD=1 $(MAKE) kind-e2e-istio
+	SKIP_IMAGE_BUILD=1 $(MAKE) kind-e2e-haproxy
+
+.PHONY: kind-e2e-traefik
+kind-e2e-traefik: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
+kind-e2e-traefik: kind-operator ## End-to-end test on kind through Traefik: a WAFPolicy enforced by an engine in bundle mode, the control plane, signing key rotation, suspension (installs the operator first)
+	@# kind-operator built (or, with SKIP_IMAGE_BUILD, found) and loaded the engine image.
 	KIND_CLUSTER=$(KIND_CLUSTER) IMAGE=$(IMAGE) SKIP_BUILD=1 hack/kind/e2e.sh
-	@# e2e.sh ends with an uninstall, as does each of these.
-	$(MAKE) kind-e2e-raw-envoy
-	$(MAKE) kind-e2e-envoy-gateway
-	$(MAKE) kind-e2e-istio
-	$(MAKE) kind-e2e-haproxy
 
 .PHONY: kind-e2e-raw-envoy
 kind-e2e-raw-envoy: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
