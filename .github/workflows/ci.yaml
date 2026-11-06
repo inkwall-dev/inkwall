@@ -186,11 +186,12 @@ jobs:
 
   upgrade:
     # helm upgrade from the last release to the chart and images of this
-    # commit keeps routes protected through Traefik, wired once, and their
-    # policies Accepted and Programmed; uninstall restores the routes
-    # (#129). Every run: it is as cheap as e2e, next to which it runs.
+    # commit keeps routes protected through Traefik and Envoy Gateway, wired
+    # once, and their policies Accepted and Programmed; uninstall restores
+    # the routes (#129, #390). Every run, from the latest release; the
+    # release qualification runs upgrade.yaml, from each supported minor.
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       # The tags: the test starts from the latest release (hack/releases).
       - uses: actions/checkout@v7
