@@ -55,6 +55,25 @@ message Bundle {
   // header is a MAC under this key, so the operator can tell that HAProxy
   // runs the filter on a route. 32 random bytes, or empty: no probes.
   bytes probe_key = 9;
+  // What the engines' security events may carry
+  // (InkwallConfig.spec.events). Unset: the defaults.
+  EventsConfig events = 10;
+}
+
+// EventsConfig redacts the security events engines send to the operator
+// (0002 §8.3). The engine always redacts cookies, response bodies, the
+// Authorization, Cookie, Set-Cookie and Proxy-Authorization headers, and
+// arguments and headers whose names look like credentials; these add to
+// that.
+message EventsConfig {
+  // More header names whose values leave no snippet, matched without
+  // regard to case.
+  repeated string redact_headers = 1;
+  // More argument-name patterns: a match on an argument whose name
+  // contains one, without regard to case, leaves no snippet.
+  repeated string redact_arguments = 2;
+  // Send no snippets at all.
+  bool no_snippets = 3;
 }
 
 // Policy is one WAFPolicy, applied to the requests its routes match. A
