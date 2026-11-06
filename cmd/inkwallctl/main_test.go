@@ -173,7 +173,9 @@ func TestRunInProcess(t *testing.T) {
 	}
 
 	code, out, _ = runCLI(t, "test", "--json", "http://shop.example.com"+sqli)
-	if code != 0 || !strings.Contains(out, `{"rule_id":942100,"variable":"ARGS:id"}`) || !strings.Contains(out, `"anomaly_score":`) {
+	// protojson varies its spacing on purpose.
+	if code != 0 || !regexp.MustCompile(`\{"rule_id":\s*942100,\s*"variable":\s*"ARGS:id"\}`).MatchString(out) ||
+		!strings.Contains(out, `"anomaly_score":`) {
 		t.Fatalf("--json sqli: exit %d, output %q", code, out)
 	}
 
