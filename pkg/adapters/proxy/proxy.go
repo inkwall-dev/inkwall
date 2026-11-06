@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
+	"net/textproto"
 	"net/url"
 	"strings"
 
@@ -154,7 +155,7 @@ func (h *Handler) toRequest(r *http.Request) (*request.Request, error) {
 		Scheme:   scheme,
 		Host:     r.Host,
 		RawURI:   rawURI,
-		Headers:  httpadapter.SnapshotHeaders(r),
+		Headers:  forwardedHeaders(r),
 		PeerIP:   peer,
 		ClientIP: h.clientIP.Resolve(peer, r.Header),
 	}
@@ -178,6 +179,28 @@ func (h *Handler) toRequest(r *http.Request) (*request.Request, error) {
 		}
 	}
 	return req, nil
+}
+
+// forwardedHeaders returns the request's headers as ReverseProxy forwards
+// them, to inspect what the upstream gets: without the headers the
+// Connection header names (hop-by-hop, RFC 9110 7.6.1), which it drops.
+// Otherwise "Connection: Content-Type" would show the engine a media type
+// the upstream never sees, such as a gRPC one whose messages aren't
+// inspected, for a body the upstream then reads as it reads one without a
+// media type (Rack: as a form). Connection and Upgrade (kept for an
+// upgrade) and the framing headers, which Go sets itself, stay.
+func forwardedHeaders(r *http.Request) http.Header {
+	h := httpadapter.SnapshotHeaders(r)
+	for _, v := range r.Header.Values("Connection") {
+		for name := range strings.SplitSeq(v, ",") {
+			switch name = http.CanonicalHeaderKey(textproto.TrimString(name)); name {
+			case "", "Connection", "Upgrade", "Content-Length", "Transfer-Encoding":
+			default:
+				h.Del(name)
+			}
+		}
+	}
+	return h
 }
 
 // setForwarded sets X-Forwarded-For, -Proto and -Host on the outbound

@@ -12,6 +12,9 @@ ARG TARGETOS TARGETARCH
 # the build context has no .git for Go to read the commit from.
 ARG VERSION=
 ARG COMMIT=
+# Coraza operators left out of the binaries: inspectFile runs programs, rbl
+# queries DNS, and rule sets are written by namespace users.
+ARG GO_TAGS=coraza.disabled_operators.inspectFile,coraza.disabled_operators.rbl
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
@@ -20,12 +23,12 @@ COPY . .
 FROM build AS build-engine
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /out/inkwall-engine ./cmd/engine
+    go build -trimpath -tags "${GO_TAGS}" -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /out/inkwall-engine ./cmd/engine
 
 FROM build AS build-operator
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /out/inkwall-operator ./cmd/operator
+    go build -trimpath -tags "${GO_TAGS}" -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /out/inkwall-operator ./cmd/operator
 
 # Distroless, non-root, no shell (docs/design/0002). The operator writes its
 # webhook certificate under /tmp: with a read-only root filesystem, mount a

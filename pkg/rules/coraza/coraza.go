@@ -26,6 +26,7 @@ import (
 	"github.com/corazawaf/coraza/v3/types/variables"
 
 	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/router"
 	"github.com/inkwall-dev/inkwall/pkg/rules"
 )
 
@@ -143,12 +144,13 @@ type target struct {
 	arg  string // lower case, as ctl:ruleRemoveTargetById stores it
 }
 
-// pathExclusion applies on a path. It is decided on REQUEST_FILENAME, as the
-// SecRule it replaces was:
-//
-//	SecRule REQUEST_FILENAME "@streq <path>" "phase:1,t:none,ctl:..."
-//	SecRule REQUEST_FILENAME "@beginsWith <prefix>" "phase:1,t:none,chain"
-//	  SecRule REQUEST_FILENAME "!@rx (?:^|/)\.\.?(?:/|$)|//" "t:none,ctl:..."
+// pathExclusion applies on a path: a request path equal to path, or, for a
+// prefix, starting with it. It is decided on the path as received, and only
+// when that path is unambiguous (router.UnambiguousPath, as for skip paths):
+// "/api/../admin", "/api/..;/admin", "/api/%2e%2e/admin" and
+// "/api/%252e%252e/admin" start with "/api/" but a proxy or an application
+// may route them to "/admin", so they get no exclusions of "/api/*". A path
+// that isn't plain gets no path exclusion at all: more rules, never fewer.
 type pathExclusion struct {
 	path    string
 	prefix  bool
@@ -156,18 +158,20 @@ type pathExclusion struct {
 	targets []target
 }
 
-// dotSegments is the @rx above, with the (?sm) flags Coraza's @rx adds. A
-// prefix exclusion only applies to a path without dot segments or empty
-// segments: "/api/../admin" starts with "/api/" but a proxy routes it to
-// "/admin", so it must not get /api's exclusions. An exact path can't
-// contain them and still equal a clean path.
-var dotSegments = regexp.MustCompile(`(?sm)(?:^|/)\.\.?(?:/|$)|//`)
-
-func (p *pathExclusion) matches(filename string) bool {
+// matches reports whether p applies on a plain path from
+// router.UnambiguousPath.
+func (p *pathExclusion) matches(path string) bool {
 	if p.prefix {
-		return strings.HasPrefix(filename, p.path) && !dotSegments.MatchString(filename)
+		return strings.HasPrefix(path, p.path)
 	}
-	return filename == p.path
+	return path == p.path
+}
+
+// exclusionRequestPath returns the path path exclusions are decided on, or "" when
+// rawURI's path is ambiguous, which no path exclusion matches.
+func exclusionRequestPath(rawURI string) string {
+	p, _ := router.UnambiguousPath(rawURI)
+	return p
 }
 
 // setupRules are the phase 1 rules that ran before the path exclusion
@@ -247,9 +251,9 @@ type ruleRemover interface {
 
 var errNoRuleRemoval = errors.New("this Coraza version's transactions can't turn rules off (RemoveRuleByID, RemoveRuleTargetByID)")
 
-// apply turns the exclusions on for tx, after ProcessURI (which sets
-// REQUEST_FILENAME) and before ProcessRequestHeaders (phase 1).
-func (x *exclusions) apply(tx types.Transaction) error {
+// apply turns the exclusions on for tx, a request for rawURI, before
+// ProcessRequestHeaders (phase 1).
+func (x *exclusions) apply(tx types.Transaction, rawURI string) error {
 	rm, ok := tx.(ruleRemover)
 	if !ok {
 		return errNoRuleRemoval
@@ -263,16 +267,12 @@ func (x *exclusions) apply(tx types.Transaction) error {
 		}
 	}
 	remove(x.rules, x.targets)
-	if len(x.paths) == 0 {
+	path := exclusionRequestPath(rawURI)
+	if path == "" {
 		return nil
 	}
-	st, ok := tx.(plugintypes.TransactionState)
-	if !ok {
-		return errNoRuleRemoval
-	}
-	filename := st.Variables().RequestFilename().Get()
 	for i := range x.paths {
-		if p := &x.paths[i]; p.matches(filename) {
+		if p := &x.paths[i]; p.matches(path) {
 			remove(p.rules, p.targets)
 		}
 	}
@@ -478,17 +478,18 @@ func targetsKey(targets []target) string {
 	return b.String()
 }
 
-// waf returns the rule set for a request with REQUEST_FILENAME filename.
-func (v *argsVariants) waf(filename string) (coraza.WAF, error) {
+// waf returns the rule set for a request with path, from
+// exclusionRequestPath ("" matches no path exclusion).
+func (v *argsVariants) waf(path string) (coraza.WAF, error) {
 	var set []target
 	for i := range v.paths {
-		if v.paths[i].matches(filename) {
+		if path != "" && v.paths[i].matches(path) {
 			set = append(set, v.paths[i].targets...)
 		}
 	}
 	waf, ok := v.wafs[targetsKey(v.targets(set))]
 	if !ok {
-		return nil, fmt.Errorf("no rule set for the argument exclusions on %q", filename)
+		return nil, fmt.Errorf("no rule set for the argument exclusions on %q", path)
 	}
 	return waf, nil
 }
@@ -498,18 +499,7 @@ func (e *Evaluator) wafFor(r *request.Request) (coraza.WAF, error) {
 	if e.variants == nil {
 		return e.waf, nil
 	}
-	// REQUEST_FILENAME as Coraza decodes it, from a transaction that runs
-	// no rules.
-	tx := e.base.NewTransaction()
-	tx.ProcessURI(r.RawURI, r.Method, r.Proto)
-	st, ok := tx.(plugintypes.TransactionState)
-	if !ok {
-		_ = tx.Close()
-		return nil, errNoRuleRemoval
-	}
-	filename := st.Variables().RequestFilename().Get()
-	_ = tx.Close()
-	return e.variants.waf(filename)
+	return e.variants.waf(exclusionRequestPath(r.RawURI))
 }
 
 func buildDirectives(cfg Config) (string, error) {
@@ -617,7 +607,7 @@ func (e *Evaluator) Evaluate(_ context.Context, r *request.Request) (rules.Resul
 	tx.ProcessConnection(client, 0, "", 0)
 	tx.ProcessURI(r.RawURI, r.Method, r.Proto)
 	if e.exclusions != nil {
-		if err := e.exclusions.apply(tx); err != nil {
+		if err := e.exclusions.apply(tx, r.RawURI); err != nil {
 			return rules.Result{}, err
 		}
 	}

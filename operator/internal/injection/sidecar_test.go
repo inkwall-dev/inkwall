@@ -167,3 +167,20 @@ func TestInjectOptOutAndResources(t *testing.T) {
 		t.Error("resources not applied")
 	}
 }
+
+// The engine gets its memory limit from the downward API, to set GOMEMLIMIT
+// from it (internal/memlimit).
+func TestEngineMemoryLimitEnv(t *testing.T) {
+	c, _ := Engine(sidecar)
+	i := slices.IndexFunc(c.Env, func(e corev1.EnvVar) bool { return e.Name == "MEMORY_LIMIT" })
+	if i < 0 {
+		t.Fatalf("no MEMORY_LIMIT in %v", c.Env)
+	}
+	var ref *corev1.ResourceFieldSelector
+	if c.Env[i].ValueFrom != nil {
+		ref = c.Env[i].ValueFrom.ResourceFieldRef
+	}
+	if ref == nil || ref.Resource != "limits.memory" || ref.ContainerName != ContainerName {
+		t.Errorf("MEMORY_LIMIT from %v, want the engine container's limits.memory", c.Env[i].ValueFrom)
+	}
+}

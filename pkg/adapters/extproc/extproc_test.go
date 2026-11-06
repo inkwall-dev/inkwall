@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"path/filepath"
 	"strconv"
@@ -624,5 +625,15 @@ func TestClientIP(t *testing.T) {
 func TestNew(t *testing.T) {
 	if _, err := New(&inspector{}, Config{MaxBodyBytes: -1}); err == nil {
 		t.Fatal("negative body limit accepted")
+	}
+}
+
+// A body over the limit keeps only the inspected prefix, not Envoy's whole
+// message, for as long as the stream lasts.
+func TestSetBodyKeepsOnlyThePrefix(t *testing.T) {
+	x := &exchange{req: &request.Request{Headers: http.Header{"Content-Length": {"1048576"}}}, limit: 16}
+	x.setBody(make([]byte, 1<<20), true)
+	if len(x.req.Body) != 16 || cap(x.req.Body) > 64 || !x.req.BodyTruncated {
+		t.Errorf("body len %d cap %d truncated %v, want the 16-byte prefix alone, truncated", len(x.req.Body), cap(x.req.Body), x.req.BodyTruncated)
 	}
 }
