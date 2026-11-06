@@ -44,6 +44,14 @@ What's new:
   `inkwallctl migrate ingress-nginx` now maps `tx.allowed_methods`,
   `tx.allowed_request_content_type`, `tx.detection_paranoia_level` and
   `tx.outbound_anomaly_score_threshold` to these fields instead of marking them `TODO`.
+- **Exclusions for a cookie, a header or an argument name.** An exclusion's `when` takes
+  `cookie`, `header` or `argumentName` besides `argument` (at most one of the four), for false
+  positives on a session cookie, a `Referer` or a JSON header: `{ruleIDs: [942100], when: {cookie:
+  session}}`. Upgrade the chart first, for the new CRD fields. An engine before 0.5.0 ignores these
+  exclusions (the rules still look at the cookie or header), and a policy that has one is
+  `Enforced=False` (`EnginesOutdated`) until every engine runs 0.5.0. `inkwallctl migrate
+  ingress-nginx` now converts `!REQUEST_COOKIES:name`, `!REQUEST_HEADERS:name` and
+  `!ARGS_NAMES:name` targets instead of keeping them as SecLang.
 
 What changes by itself:
 
@@ -86,6 +94,13 @@ What changes by itself:
   `BUNDLE`. A script that reads the columns by position should use `-o jsonpath` or
   `-o custom-columns`. `inkwallctl status` is new: see
   [Troubleshooting](troubleshooting.md#cluster-status).
+- **New engine metrics, and two that change** (#356). `inkwall_rule_matches_total`,
+  `inkwall_adapter_errors_total`, `inkwall_bundle_compile_seconds`, `inkwall_rule_sets`,
+  `inkwall_bundle_applied_timestamp_seconds` and the `inkwall_websocket_*` metrics are new;
+  `inkwall_policy_requests_total` is opt-in. `inkwall_bundle_updates_total` has a `reason` label on
+  rejected bundles. WebSocket messages the engine's proxy inspects are counted in
+  `inkwall_websocket_messages_total`, no longer in `inkwall_requests_total`, so a dashboard of
+  requests drops on routes with busy WebSockets.
 
 ## From 0.4.0 to 0.4.1
 

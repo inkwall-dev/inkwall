@@ -59,6 +59,7 @@ func (p *Pipeline) CheckWebSocketMessage(ctx context.Context, handshake *request
 		}
 	}
 	v.Duration = time.Since(start)
+	v.WebSocketMessage = true
 	if p.observer != nil {
 		p.observer.ObserveVerdict(v)
 	}

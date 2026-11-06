@@ -166,7 +166,13 @@ func TestWAFPolicyValidation(t *testing.T) {
 
 		{name: "exclusion without rules", doc: policy(target + "  exclusions: [{ruleIDs: []}]\n"), wantErr: "should have at least 1 items"},
 		{name: "exclusion of rule 0", doc: policy(target + "  exclusions: [{ruleIDs: [0]}]\n"), wantErr: "should be greater than or equal to 1"},
-		{name: "empty exclusion match", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {}}]\n"), wantErr: "when needs a path, an argument, or both"},
+		{name: "empty exclusion match", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {}}]\n"), wantErr: "when needs a path, or what in the request to stop looking at"},
+		{name: "exclusion for a cookie", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {cookie: session}}]\n")},
+		{name: "exclusion for a header on a path", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {path: /api/*, header: X-Token}}]\n")},
+		{name: "exclusion for an argument name", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {argumentName: q}}]\n")},
+		{name: "exclusion for an argument and a cookie", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {argument: q, cookie: session}}]\n"), wantErr: "at most one of argument, argumentName, cookie and header"},
+		{name: "colon in an exclusion header", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {header: 'X-A:b'}}]\n"), wantErr: "spec.exclusions[0].when.header"},
+		{name: "quote in an exclusion cookie", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {cookie: 'a\"b'}}]\n"), wantErr: "spec.exclusions[0].when.cookie"},
 		// The argument name ends up in a SecLang directive: quotes and
 		// spaces could change the directive, so they are rejected.
 		{name: "quote in an exclusion argument", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {argument: 'q\" \"id:1'}}]\n"), wantErr: "spec.exclusions[0].when.argument"},
@@ -227,6 +233,7 @@ func TestInkwallConfigValidation(t *testing.T) {
       limits: {memory: 512Mi}
     socketDir: /var/run/inkwall
     logLevel: Warn
+    policyMetrics: true
   integrations:
   - controller: traefik
     selector: {matchLabels: {app.kubernetes.io/name: traefik}}

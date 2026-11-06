@@ -997,6 +997,27 @@ Target:
   `_bundle_updates_total`, `_operator_connected`, `_evaluations_in_flight`, `_evaluation_slots`,
   `_engine_events_total`, `_engine_events_dropped_total`,
   `inkwall_security_event_logs_suppressed_total{policy}`.
+- Engine, since #356:
+  - `inkwall_rule_matches_total{rule_id,action}`: every rule that matched, by the verdict's
+    action. Rule IDs come from the loaded rules, and at most 2,000 get their own series; the rest
+    count as `rule_id="other"`.
+  - `inkwall_policy_requests_total{policy,action,reason}`, opt-in (`--policy-metrics`,
+    `InkwallConfig.spec.engine.policyMetrics`): at most `--policy-metrics-max` policies (default
+    500) per engine, the rest under `policy="other"`, `none` for requests no policy covers. Off by
+    default because it multiplies `inkwall_requests_total`'s series by the policies.
+  - `inkwall_bundle_updates_total{result,reason}`: rejected bundles by `reason` (`signature`,
+    `older`, `compile`, `other`); `inkwall_bundle_compile_seconds`; `inkwall_rule_sets` (compiled
+    rule sets in memory); `inkwall_bundle_applied_timestamp_seconds` (bundle age is `time()` minus
+    it).
+  - `inkwall_adapter_errors_total{adapter,kind}`: requests an adapter refused without inspecting
+    them, `invalid_request` (one it can't read) or `protocol` (an ext_proc stream or SPOE
+    connection that breaks the protocol).
+  - `inkwall_websocket_connections`, `inkwall_websocket_messages_total{action}` and
+    `inkwall_websocket_violations_total{code}` (the engine's proxy). WebSocket messages are counted
+    there, not in `inkwall_requests_total`: a request count that grows with chat traffic would
+    hide what the requests do.
+  - Events say what they are about: `protocol` (`http`, `grpc`, `websocket`) and the phase
+    `PHASE_WEBSOCKET_MESSAGE`; operators before v0.5.0 ignore both.
 - Engine logs (#354): JSON, at `--log-level` (default `info`; `InkwallConfig.spec.engine.logLevel`
   for injected engines). A security event line has the verdict, `rule_ids`, `anomaly_score` and
   `matches`: each rule with the variable it matched (`ARGS:q`), bounded as in events (32 matches,
@@ -1013,8 +1034,8 @@ Target:
   `_operator_events_buffer_errors_total`, `_operator_request_stats_dropped_total{reason}`,
   `_operator_state_engines_left_out`.
 
-**Not yet:** an adapter failure metric (see [§7.3](#73-engine-unavailable)), rule-match and
-rate-limit metrics, bundle age, tracing, the dashboard and alerts.
+**Not yet:** a proxy-side adapter failure metric (see [§7.3](#73-engine-unavailable)),
+rate-limit metrics, tracing, the dashboard and alerts.
 
 ### 8.6 Versioning and compatibility
 
