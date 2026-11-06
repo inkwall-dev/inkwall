@@ -61,6 +61,11 @@ What's new:
 
 What changes by itself:
 
+- **WebSocket messages are scored on their own** (the standalone proxy's
+  `--websocket-messages`): a message is inspected without the handshake's query arguments and
+  headers, so a handshake that scored below the threshold no longer adds its score to every
+  message, and each message costs about a third less. Attacks in messages are still denied.
+
 - **`Enforced` counts the engines that serve the policy.** A policy's `Enforced` condition (and
   its `EnginesBehind`, `EngineNack` and `EnginesOutdated` reasons) now counts only the engines on
   the proxy pods that serve its routes, once the operator has wired them all. An engine of one
