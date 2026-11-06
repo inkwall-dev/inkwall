@@ -44,6 +44,14 @@ What's new:
   `inkwallctl migrate ingress-nginx` now maps `tx.allowed_methods`,
   `tx.allowed_request_content_type`, `tx.detection_paranoia_level` and
   `tx.outbound_anomaly_score_threshold` to these fields instead of marking them `TODO`.
+- **Exclusions for a cookie, a header or an argument name.** An exclusion's `when` takes
+  `cookie`, `header` or `argumentName` besides `argument` (at most one of the four), for false
+  positives on a session cookie, a `Referer` or a JSON header: `{ruleIDs: [942100], when: {cookie:
+  session}}`. Upgrade the chart first, for the new CRD fields. An engine before 0.5.0 ignores these
+  exclusions (the rules still look at the cookie or header), and a policy that has one is
+  `Enforced=False` (`EnginesOutdated`) until every engine runs 0.5.0. `inkwallctl migrate
+  ingress-nginx` now converts `!REQUEST_COOKIES:name`, `!REQUEST_HEADERS:name` and
+  `!ARGS_NAMES:name` targets instead of keeping them as SecLang.
 
 What changes by itself:
 

@@ -126,6 +126,32 @@ spec:
                           minLength: 1
                           pattern: ^[A-Za-z0-9_.\-\[\]]+$
                           type: string
+                        argumentName:
+                          description: |-
+                            ArgumentName is a query or body argument whose name (ARGS_NAMES) the
+                            rules stop looking at. Requires engines 0.5.0 or later: older ones
+                            ignore the exclusion.
+                          maxLength: 256
+                          minLength: 1
+                          pattern: ^[A-Za-z0-9_.\-\[\]]+$
+                          type: string
+                        cookie:
+                          description: |-
+                            Cookie is a request cookie (REQUEST_COOKIES) the rules stop looking
+                            at, such as a session token. Requires engines 0.5.0 or later.
+                          maxLength: 256
+                          minLength: 1
+                          pattern: ^[A-Za-z0-9_.\-\[\]]+$
+                          type: string
+                        header:
+                          description: |-
+                            Header is a request header (REQUEST_HEADERS) the rules stop looking
+                            at, such as Referer, compared case-insensitively. Requires engines
+                            0.5.0 or later.
+                          maxLength: 256
+                          minLength: 1
+                          pattern: ^[A-Za-z0-9_.\-\[\]]+$
+                          type: string
                         path:
                           description: Path the exclusion applies to.
                           maxLength: 1024
@@ -133,8 +159,14 @@ spec:
                           type: string
                       type: object
                       x-kubernetes-validations:
-                      - message: when needs a path, an argument, or both
-                        rule: has(self.path) || has(self.argument)
+                      - message: when needs a path, or what in the request to stop
+                          looking at
+                        rule: has(self.path) || has(self.argument) || has(self.argumentName)
+                          || has(self.cookie) || has(self.header)
+                      - message: at most one of argument, argumentName, cookie and
+                          header
+                        rule: '[has(self.argument), has(self.argumentName), has(self.cookie),
+                          has(self.header)].filter(x, x).size() <= 1'
                   required:
                   - ruleIDs
                   type: object
