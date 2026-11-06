@@ -260,6 +260,18 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
     responses: {inspect: true, maxBytes: 65536, onOversize: Deny}       # | Allow
   ```
 
+  **CRS settings (#352).** A CRS binding's `crs` block sets `tx.allowed_methods`,
+  `tx.allowed_request_content_type`, `tx.detection_paranoia_level` and
+  `tx.outbound_anomaly_score_threshold`. The engine sets them on each transaction before phase 1,
+  as it does the paranoia level ([0004 §8](0004-operator.md#8-scale-targets-v1)), so they add no
+  compiled rule set, and SecLang that sets the same variables still wins. A request that the rules
+  between the blocking and the detection paranoia level would have blocked (the CRS's detection
+  score reaches the threshold, the blocking score doesn't) gets the verdict `log` with reason
+  `none`, in either mode. It is a security event, and it is never denied. The reason stays `none`
+  so that the decisions taken on clean requests (an oversize body with `onOversize: Deny`, a
+  WebSocket handshake that breaks the policy) still apply. Without a detection level above the
+  blocking one, nothing changes: a request scored below the threshold stays `allow`.
+
   The most specific target wins: an [HTTPRoute](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) rule, then an HTTPRoute, then an Ingress, then the
   namespace default. Ties are rejected (`Accepted=False, reason=Conflict`).
 - **`WAFRuleSet` / `ClusterWAFRuleSet`:** `builtin: crs-v4` (pinned), inline `seclang`, or

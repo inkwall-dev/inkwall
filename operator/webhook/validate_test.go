@@ -118,6 +118,38 @@ func TestPolicyValidation(t *testing.T) {
 	ws.Spec.WebSocket.RequiredHeaders[0] = "X Api"
 	_, err = v.ValidateCreate(ctx, ws)
 	wantInvalid(t, err, "spec.webSocket.requiredHeaders[0]", "not a header name")
+
+	// CRS settings the engine wouldn't apply.
+	crs := p.DeepCopy()
+	crs.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{{
+		Ref:           wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: "crs"},
+		ParanoiaLevel: ptr(int32(2)),
+		CRS: &wafv1alpha1.CRSSettings{
+			AllowedMethods:             []wafv1alpha1.HTTPMethodToken{"GET", "PUT", "PROPFIND"},
+			AllowedRequestContentTypes: []wafv1alpha1.MediaType{"application/json", "application/vnd.api+json"},
+			DetectionParanoiaLevel:     ptr(int32(3)),
+			OutboundAnomalyThreshold:   ptr(int32(5)),
+		},
+	}}
+	if _, err := v.ValidateCreate(ctx, crs); err != nil {
+		t.Fatalf("valid crs: %v", err)
+	}
+	for _, tc := range []struct {
+		name, field, detail string
+		edit                func(*wafv1alpha1.CRSSettings)
+	}{
+		{"method", "spec.ruleSets[0].crs.allowedMethods[1]", "not an HTTP method", func(s *wafv1alpha1.CRSSettings) { s.AllowedMethods[1] = "P UT" }},
+		{"media type", "spec.ruleSets[0].crs.allowedRequestContentTypes[0]", "not a media type", func(s *wafv1alpha1.CRSSettings) { s.AllowedRequestContentTypes[0] = "json" }},
+		{"detection below blocking", "spec.ruleSets[0].crs.detectionParanoiaLevel", "paranoia level", func(s *wafv1alpha1.CRSSettings) { s.DetectionParanoiaLevel = ptr(int32(1)) }},
+		{"outbound threshold", "spec.ruleSets[0].crs.outboundAnomalyThreshold", "positive", func(s *wafv1alpha1.CRSSettings) { s.OutboundAnomalyThreshold = ptr(int32(0)) }},
+	} {
+		t.Run("crs "+tc.name, func(t *testing.T) {
+			q := crs.DeepCopy()
+			tc.edit(q.Spec.RuleSets[0].CRS)
+			_, err := v.ValidateCreate(ctx, q)
+			wantInvalid(t, err, tc.field, tc.detail)
+		})
+	}
 }
 
 // A policy that inspects responses gets a warning for its targets whose
@@ -226,3 +258,5 @@ func TestConfigValidation(t *testing.T) {
 		t.Errorf("socketDir kept: warnings %q, error %v", warnings, err)
 	}
 }
+
+func ptr[T any](v T) *T { return &v }

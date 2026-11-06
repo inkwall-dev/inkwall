@@ -203,6 +203,62 @@ spec:
                 items:
                   description: RuleSetBinding uses a rule set in a policy.
                   properties:
+                    crs:
+                      description: |-
+                        CRS sets the OWASP CRS's own settings. Only used by the built-in CRS.
+                        Requires engines 0.5.0 or later: older ones ignore it.
+                      properties:
+                        allowedMethods:
+                          description: |-
+                            AllowedMethods replaces the request methods the CRS allows (GET, HEAD,
+                            POST and OPTIONS by default; rule 911100). List every method the
+                            application serves, for example PUT, PATCH and DELETE for a REST API.
+                          items:
+                            description: HTTPMethodToken is an HTTP request method,
+                              such as PUT.
+                            maxLength: 32
+                            minLength: 1
+                            pattern: ^[!#$%&'*+.^_~0-9A-Za-z-]+$
+                            type: string
+                          maxItems: 64
+                          minItems: 1
+                          type: array
+                          x-kubernetes-list-type: set
+                        allowedRequestContentTypes:
+                          description: |-
+                            AllowedRequestContentTypes replaces the request media types the CRS
+                            allows (rule 920420), as type/subtype without parameters, for example
+                            application/json. Compared case-insensitively.
+                          items:
+                            description: MediaType is a media type without parameters,
+                              such as application/json.
+                            maxLength: 129
+                            minLength: 3
+                            pattern: ^[!#$%&'*+.^_~0-9A-Za-z-]+/[!#$%&'*+.^_~0-9A-Za-z-]+$
+                            type: string
+                          maxItems: 64
+                          minItems: 1
+                          type: array
+                          x-kubernetes-list-type: set
+                        detectionParanoiaLevel:
+                          description: |-
+                            DetectionParanoiaLevel runs the rules above paranoiaLevel, up to this
+                            level, without blocking: a request they would have blocked is
+                            logged. From paranoiaLevel to 4.
+                          format: int32
+                          maximum: 4
+                          minimum: 1
+                          type: integer
+                        outboundAnomalyThreshold:
+                          description: |-
+                            OutboundAnomalyThreshold is the response anomaly score at which a
+                            response is blocked (the CRS's default is 4). Only used when the
+                            policy inspects responses.
+                          format: int32
+                          maximum: 10000
+                          minimum: 1
+                          type: integer
+                      type: object
                     inboundAnomalyThreshold:
                       description: |-
                         InboundAnomalyThreshold is the OWASP CRS anomaly score at which a
