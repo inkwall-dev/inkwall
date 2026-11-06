@@ -175,7 +175,7 @@ several policies target the same route, the strictest wins.
 | `timeout` (250 ms by default) | `message_timeout`: the longest timeout plus 500 ms, so the engine decides first |
 | `failureMode: Open` on every policy (or detect mode without one) | `failure_mode_allow: true` |
 | Otherwise | `failure_mode_allow: false`, `status_on_error: 503` |
-| Responses | Not sent |
+| A policy inspects responses (`responses.inspect`) | `response_header_mode: SEND`, `response_body_mode: BUFFERED_PARTIAL` (`STREAMED` in detect mode), `allow_mode_override: true`, and the listeners' buffer raised; otherwise `response_header_mode: SKIP`, which adds nothing to a response |
 
 ### Block mode and detect mode
 
@@ -344,9 +344,10 @@ the pods and the objects. Istio's ingress gateways have no class, so they aren't
 - **Gateway API Gateways Istio deploys.** A Gateway API Gateway bound to an existing deployment
   (`networking.istio.io/gateway-name`, or a manual `spec.addresses`) isn't: the operator can't put
   the engine into pods Istio doesn't render.
-- **Responses aren't inspected** through Istio yet: the filter sends Envoy's request phases only, and
-  a policy that inspects responses reports `ResponsesNotInspected` on Istio's routes (they are
-  inspected through Envoy Gateway and raw Envoy).
+- **Responses** are inspected for policies that set `responses.inspect` (since 0.5.0), on HTTPRoutes
+  and VirtualServices, as through Envoy Gateway: a response that leaks is replaced with 403 in
+  `Block` mode and logged in `Detect` mode. Before 0.5.0 such a policy was `ResponsesNotInspected`
+  on Istio's routes.
 - **gRPC and WebSocket** are as through Envoy Gateway: see [gRPC](grpc.md) and
   [WebSocket](websocket.md).
 

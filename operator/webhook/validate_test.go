@@ -156,7 +156,8 @@ func TestPolicyValidation(t *testing.T) {
 // responses may not be inspected, whichever proxy serves them (#380): the
 // webhook doesn't resolve the proxy, so it names none as the one. It is
 // accepted: its requests are inspected, and each target's Programmed
-// condition says whether its responses are.
+// condition says whether its responses are. VirtualServices are Istio's,
+// which sends responses since #374: no warning.
 func TestPolicyResponsesWarning(t *testing.T) {
 	ctx := context.Background()
 	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy}
@@ -172,9 +173,8 @@ func TestPolicyResponsesWarning(t *testing.T) {
 		{"Ingress", []wafv1alpha1.TargetRef{ingress}, "the responses of Ingress web may not be inspected"},
 		{"IngressRoute", []wafv1alpha1.TargetRef{ingressRoute}, "the responses of IngressRoute admin may not be inspected"},
 		{"HTTPRoute", []wafv1alpha1.TargetRef{route}, "the responses of HTTPRoute api may not be inspected"},
-		{"VirtualService", []wafv1alpha1.TargetRef{vs}, "the responses of VirtualService shop may not be inspected"},
 		{"all", []wafv1alpha1.TargetRef{ingress, route, ingressRoute, vs},
-			"the responses of Ingress web, HTTPRoute api, IngressRoute admin and VirtualService shop may not be inspected"},
+			"the responses of Ingress web, HTTPRoute api and IngressRoute admin may not be inspected"},
 	} {
 		p := &wafv1alpha1.WAFPolicy{
 			ObjectMeta: metav1.ObjectMeta{Name: "shop"},
@@ -197,7 +197,7 @@ func TestPolicyResponsesWarning(t *testing.T) {
 		// It names the proxies that can't send responses, and the
 		// condition that says which applies, never one proxy as the
 		// target's.
-		for _, s := range []string{"Traefik", "HAProxy", "Istio", "Programmed", "ResponsesNotInspected"} {
+		for _, s := range []string{"Traefik", "HAProxy", "Envoy Gateway and Istio can", "Programmed", "ResponsesNotInspected"} {
 			if !strings.Contains(w, s) {
 				t.Errorf("%s: warning %q doesn't mention %s", tc.name, w, s)
 			}
@@ -214,6 +214,10 @@ func TestPolicyResponsesWarning(t *testing.T) {
 	}
 	if warnings, _ := v.ValidateCreate(ctx, p); len(warnings) != 0 {
 		t.Errorf("responses off: warnings %q", warnings)
+	}
+	p.Spec = wafv1alpha1.WAFPolicySpec{TargetRefs: []wafv1alpha1.TargetRef{vs}, Responses: &wafv1alpha1.ResponsesSpec{Inspect: true}}
+	if warnings, _ := v.ValidateCreate(ctx, p); len(warnings) != 0 {
+		t.Errorf("VirtualService only: warnings %q", warnings)
 	}
 }
 

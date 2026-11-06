@@ -628,9 +628,8 @@ controller `istio.io/gateway-controller`), with `ext_proc` through an `EnvoyFilt
 Response inspection (v0.4.0, [0006 §2](0006-adapter-protocols.md#response-inspection-v040)):
 the engine's ext_proc adapter inspects the response headers and body for policies that ask, and
 replaces a response that leaks in block mode; built for raw Envoy (flags or bundle) and Envoy
-Gateway (`WAFPolicy.spec.responses`). Istio's filter sends no response phase yet, so a policy with
-`responses.inspect` on an Istio route is `Programmed=False` (`ResponsesNotInspected`).
-**Not yet:** Contour; responses through Istio.
+Gateway and Istio (`WAFPolicy.spec.responses`; Istio's HTTPRoutes and VirtualServices since 0.5.0,
+#374). **Not yet:** Contour.
 
 ### 6.2 ingress-nginx
 

@@ -224,13 +224,16 @@ policy with `responses.inspect` on a route Traefik serves is not silently half-e
 Traefik's routes are wired and their requests inspected. A separate condition was considered, with
 `Programmed` true for the requests: rejected, because `Ready` would then claim the whole policy is
 enforced. When such a policy is applied, the admission webhook warns that the responses of its
-`Ingress`, `IngressRoute`, `HTTPRoute` and `VirtualService` targets may not be inspected,
-depending on the proxy that serves them: it doesn't resolve the proxy (an `Ingress` may be
-Traefik's or HAProxy's, an `HTTPRoute` Envoy Gateway's, Traefik's or Istio's), so it names none as
-the target's and leaves that to `Programmed` (#380). The same holds for any integration whose `Result` doesn't
-set `Responses`: only Envoy Gateway's does. Istio's (v0.4.0) doesn't: its `EnvoyFilter` sends no
-response phase yet (#323), so a policy with `responses.inspect` on an Istio route is
-`ResponsesNotInspected` too, and the Gateway's buffer limit isn't raised for responses.
+`Ingress`, `IngressRoute` and `HTTPRoute` targets may not be inspected, depending on the proxy that
+serves them: it doesn't resolve the proxy (an `Ingress` may be Traefik's or HAProxy's, an
+`HTTPRoute` Envoy Gateway's, Traefik's or Istio's), so it names none as the target's and leaves
+that to `Programmed` (#380). The same holds for any integration whose `Result` doesn't set
+`Responses`: Traefik's and HAProxy's. Envoy Gateway's and, since 0.5.0, both Istio integrations'
+do (#374): Istio's `EnvoyFilter` gives a route whose policies inspect responses
+`response_header_mode: SEND` and `response_body_mode: BUFFERED_PARTIAL` (`STREAMED` in detect
+mode), with `allow_mode_override`, as Envoy Gateway's `EnvoyExtensionPolicy`, and raises the
+listeners' buffer limit for them; other routes keep `SKIP`. VirtualServices, always Istio's, get
+no warning.
 
 **Latency and memory.** A route that inspects responses adds one evaluation per response
 (phases 3 and 4; the CRS response rules are a few dozen, mostly `@pmFromFile` and `@rx` on the
