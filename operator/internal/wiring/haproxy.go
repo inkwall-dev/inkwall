@@ -235,16 +235,16 @@ func haproxyPodProblems(pods []*corev1.Pod) []string {
 		if !injection.HasEngine(pod) {
 			continue
 		}
-		name := pod.Namespace + "/" + pod.Name
+		name := workloadOf(pod)
 		if ok, why := injection.HAProxyConfigured(pod); !ok {
-			out = append(out, fmt.Sprintf("HAProxy pod %s: %s", name, why))
+			out = append(out, fmt.Sprintf("HAProxy %s: %s", name, why))
 		}
 		for _, c := range pod.Spec.Containers {
 			for _, arg := range append(slices.Clone(c.Command), c.Args...) {
 				if v, ok := strings.CutPrefix(arg, "--disable-config-snippets="); ok && v != "" && v != "false" {
 					for kind := range strings.SplitSeq(v, ",") {
 						if kind = strings.TrimSpace(kind); kind == "backend" || kind == "all" {
-							out = append(out, fmt.Sprintf("HAProxy pod %s runs with %s: backend snippets, which load the filter, are ignored", name, arg))
+							out = append(out, fmt.Sprintf("HAProxy %s runs with %s: backend snippets, which load the filter, are ignored", name, arg))
 						}
 					}
 				}
