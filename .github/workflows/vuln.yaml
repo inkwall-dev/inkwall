@@ -20,21 +20,42 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        ref: [main, release-0.4, release-0.3, release-0.2]
     steps:
+      # The branches by name, each in its directory: protected branches,
+      # whose code is reviewed.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ matrix.ref }}
+          path: main
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: release-0.4
+          path: release-0.4
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: release-0.3
+          path: release-0.3
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: release-0.2
+          path: release-0.2
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version-file: main/go.mod
           check-latest: true
           cache: false
-      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      # Every branch, even after one fails.
+      - run: |
+          status=0
+          for b in main release-0.4 release-0.3 release-0.2; do
+            echo "::group::$b"
+            (cd "$b" && go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...) || { echo "::error::govulncheck found vulnerabilities on $b"; status=1; }
+            echo "::endgroup::"
+          done
+          exit "$status"
 
   images:
     runs-on: ubuntu-24.04
