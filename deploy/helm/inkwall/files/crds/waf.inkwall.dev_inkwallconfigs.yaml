@@ -108,6 +108,14 @@ spec:
                       operator version.
                     maxLength: 512
                     type: string
+                  jsonDenials:
+                    description: |-
+                      JSONDenials answers a denied client that accepts application/json
+                      with a JSON body, {"error":"forbidden","status":403,"request_id":...},
+                      instead of text. Every denial carries X-Request-Id either way.
+                      Through Traefik, Envoy Gateway and Istio; HAProxy writes its own
+                      denials. Applies to pods injected from then on.
+                    type: boolean
                   logLevel:
                     description: |-
                       LogLevel is the engines' log level: Debug, Info, Warn or Error.

@@ -145,6 +145,15 @@ func TestInject(t *testing.T) {
 	if !slices.Contains(quiet.Spec.InitContainers[0].Args, "--log-level=warn") {
 		t.Errorf("log level Warn: args %v", quiet.Spec.InitContainers[0].Args)
 	}
+	// JSON denials, only when asked for (#366).
+	if slices.Contains(pod.Spec.InitContainers[0].Args, "--json-denials") {
+		t.Error("--json-denials passed without jsonDenials")
+	}
+	jsonPod := traefikPod()
+	Inject(jsonPod, sidecar.Configured(wafv1alpha1.EngineSpec{JSONDenials: true}))
+	if !slices.Contains(jsonPod.Spec.InitContainers[0].Args, "--json-denials") {
+		t.Errorf("jsonDenials: args %v", jsonPod.Spec.InitContainers[0].Args)
+	}
 	// Requests by policy, only when asked for (#356).
 	if slices.Contains(pod.Spec.InitContainers[0].Args, "--policy-metrics") {
 		t.Error("--policy-metrics passed without policyMetrics")

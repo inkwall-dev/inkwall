@@ -709,3 +709,15 @@ func TestParsePolicyMetricsFlags(t *testing.T) {
 		t.Error("--policy-metrics-max=0: no error")
 	}
 }
+
+// --json-denials turns on JSON denial bodies for JSON clients (#366).
+func TestParseJSONDenialsFlag(t *testing.T) {
+	cfg, err := parseFlags(cmdForwardAuth, nil, io.Discard)
+	if err != nil || cfg.jsonDenials {
+		t.Fatalf("default: %t, %v", cfg.jsonDenials, err)
+	}
+	cfg, err = parseFlags(cmdProxy, []string{"--upstream", "http://app", "--json-denials"}, io.Discard)
+	if err != nil || !cfg.jsonDenials {
+		t.Fatalf("--json-denials: %t, %v", cfg.jsonDenials, err)
+	}
+}

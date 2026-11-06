@@ -146,17 +146,19 @@ type engineConfig struct {
 	// policies.
 	policyMetrics    bool
 	policyMetricsMax int
-	listen           string
-	adminListen      string
-	readTimeout      time.Duration
-	upstream         *url.URL
-	mode             pipeline.Mode
-	failureMode      pipeline.FailureMode
-	timeout          time.Duration
-	maxConcurrent    int
-	maxBodyBytes     int64
-	oversize         pipeline.OversizeAction
-	grpcMessages     bool
+	// jsonDenials: JSON denial bodies for clients that accept JSON.
+	jsonDenials   bool
+	listen        string
+	adminListen   string
+	readTimeout   time.Duration
+	upstream      *url.URL
+	mode          pipeline.Mode
+	failureMode   pipeline.FailureMode
+	timeout       time.Duration
+	maxConcurrent int
+	maxBodyBytes  int64
+	oversize      pipeline.OversizeAction
+	grpcMessages  bool
 	// responses: ext-proc only, the one adapter that sees responses.
 	responses      pipeline.ResponseConfig
 	maxArgs        int
@@ -257,6 +259,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	disableGroups := fs.String("disable-rule-groups", "", "comma-separated CRS attack families to remove when the application cannot be vulnerable to them: "+strings.Join(coraza.RuleGroupNames(), ", "))
 	logLevel := fs.String("log-level", "info", "log level: debug, info, warn or error (security events are logged at warn)")
 	eventLogRate := fs.Int("event-log-rate", 10, "security event log lines per second for each policy and rule, in bursts of as many; the rest are counted in inkwall_security_event_logs_suppressed_total, and still go to the operator (0 = no limit)")
+	jsonDenials := fs.Bool("json-denials", false, "answer a denied client that accepts application/json with a JSON body ({\"error\",\"status\",\"request_id\"}) instead of text (not spoe: HAProxy writes its denials)")
 	policyMetrics := fs.Bool("policy-metrics", false, "add inkwall_policy_requests_total, requests by policy (bundle mode); off by default for its cardinality")
 	policyMetricsMax := fs.Int("policy-metrics-max", telemetry.DefaultMaxPolicies, "with --policy-metrics: distinct policies counted; past them, requests count under policy=\"other\"")
 	pprof := fs.Bool("pprof", false, "serve /debug/pprof on the admin listener (exposes internals: keep that listener private)")
@@ -316,6 +319,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 		logLevel:         level,
 		eventLogRate:     *eventLogRate,
 		policyMetrics:    *policyMetrics,
+		jsonDenials:      *jsonDenials,
 		policyMetricsMax: *policyMetricsMax,
 		listen:           *listen,
 		adminListen:      *adminListen,
@@ -528,7 +532,7 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 	)
 	switch cfg.command {
 	case cmdExtProc:
-		ep, err = extproc.New(p, extproc.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics})
+		ep, err = extproc.New(p, extproc.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics, JSONDenials: cfg.jsonDenials})
 	case cmdSPOE:
 		sc := spoe.Config{MaxBodyBytes: maxBody, ClientIP: resolver, ReadTimeout: cfg.readTimeout, Logger: logger, Events: rec, Metrics: metrics}
 		if h, ok := p.(*policy.Holder); ok {
@@ -539,13 +543,13 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 		agentSrv, err = spoe.New(p, sc)
 	case cmdForwardAuth:
 		handler, err = forwardauth.New(p,
-			forwardauth.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics},
+			forwardauth.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics, JSONDenials: cfg.jsonDenials},
 		)
 	case cmdCheck:
 		handler, err = httpcheck.New(p, httpcheck.Config{MaxBodyBytes: maxBody, Logger: logger, Events: rec, Metrics: metrics})
 	default:
 		handler, err = proxy.New(p,
-			proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics,
+			proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics, JSONDenials: cfg.jsonDenials,
 				WebSocketMessages: cfg.webSocketMessages},
 		)
 	}

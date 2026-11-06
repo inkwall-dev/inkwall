@@ -69,6 +69,8 @@ type Sidecar struct {
 	LogLevel string
 	// PolicyMetrics passes --policy-metrics.
 	PolicyMetrics bool
+	// JSONDenials passes --json-denials.
+	JSONDenials bool
 	// Args are the adapter's command and its own flags, e.g.
 	// ["forward-auth"].
 	Args []string
@@ -107,6 +109,7 @@ func (s Sidecar) Configured(e wafv1alpha1.EngineSpec) Sidecar {
 	s.DenyBeforeBundle = e.BootstrapMode == wafv1alpha1.BootstrapDenyAll
 	s.LogLevel = strings.ToLower(string(e.LogLevel))
 	s.PolicyMetrics = e.PolicyMetrics
+	s.JSONDenials = e.JSONDenials
 	return s
 }
 
@@ -211,6 +214,9 @@ func Engine(s Sidecar) (corev1.Container, []corev1.Volume) {
 	}
 	if s.PolicyMetrics {
 		args = append(args, "--policy-metrics")
+	}
+	if s.JSONDenials {
+		args = append(args, "--json-denials")
 	}
 
 	resources := defaultResources()

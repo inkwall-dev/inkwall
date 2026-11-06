@@ -214,6 +214,14 @@ type EngineSpec struct {
 	// reason. Applies to pods injected from then on.
 	// +optional
 	PolicyMetrics bool `json:"policyMetrics,omitempty"`
+
+	// JSONDenials answers a denied client that accepts application/json
+	// with a JSON body, {"error":"forbidden","status":403,"request_id":...},
+	// instead of text. Every denial carries X-Request-Id either way.
+	// Through Traefik, Envoy Gateway and Istio; HAProxy writes its own
+	// denials. Applies to pods injected from then on.
+	// +optional
+	JSONDenials bool `json:"jsonDenials,omitempty"`
 }
 
 // LogLevel is an engine's log level.
