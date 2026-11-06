@@ -1470,16 +1470,30 @@ thresholds, 10 body limits and 10 response limits. Before #353 it compiled 300 r
 Coraza's shared caches, 1,000 policies over 4 levels and 10 `body.maxBytes` went from 40 rule sets,
 0.50 s and 100 MiB to one, 0.08 s and 20 MiB.
 
-**One exception: rule sets that negate `ARGS` targets.** If a rule set's own SecLang negates an
-`ARGS` target (`!ARGS:q`), it takes no argument exclusion per request. Coraza 3.8.1 adds a
+**One exception: rules that negate targets of the excluded collection.** An exclusion can stop
+rules looking at an argument (`when.argument`, `ARGS`), an argument name (`when.argumentName`,
+`ARGS_NAMES`), a cookie (`when.cookie`, `REQUEST_COOKIES`) or a header (`when.header`,
+`REQUEST_HEADERS`) (#357). If the excluded rule's own SecLang negates targets of that collection
+(`!REQUEST_HEADERS:Referer`), the exclusion isn't applied per request. Coraza 3.8.1 adds a
 transaction's target exclusions to the rule's own negations in place, so concurrent requests could
-get each other's.
+get each other's (`TestExclusionTargetsWithNegatingRules` counts them when it isn't avoided).
 
-- A policy with argument exclusions on such rules gets compiled rule sets of its own, with the
-  exclusions compiled in (`SecRuleUpdateTargetById` after the user's rules).
+- A policy with target exclusions on such rules gets compiled rule sets of its own, with those
+  exclusions compiled in (`SecRuleUpdateTargetById` after the user's rules). Its other target
+  exclusions are still applied per request.
 - That is one rule set for requests on no path exclusion, plus at most one per path exclusion with
-  an argument. A request's rule set is chosen by its path (`argsNegation` in `pkg/rules/coraza`).
-- The CRS and Inkwall's own rules negate no `ARGS` targets (`TestCRSNegatesNoArgs`).
+  such a target. A request's rule set is chosen by its path (`targetVariants` in
+  `pkg/rules/coraza`).
+- Which rules negate what: for the CRS, parsed from its files once, rule by rule, a chained rule's
+  negations counting for its chain (`crsNegations`, checked against what Coraza compiles by
+  `TestCRSNegationsSeeEveryRule`). The CRS negates no `ARGS` (`TestCRSNegatesNoArgs`), one rule's
+  cookies and about 20 rules' headers, so a header exclusion on one of those compiles a rule set.
+  For the user's SecLang, conservatively: any negation of the collection (or an `Include`) counts
+  for every rule.
+- In the bundle, exclusions with an argument name, a cookie or a header go in
+  `Policy.target_exclusions`, not `exclusions`. An engine before 0.5.0 doesn't know those fields,
+  and would read such an exclusion as turning the rules off entirely; it ignores the new list
+  instead (more rules apply), and the policy is `Enforced=False` (`EnginesOutdated`) meanwhile.
 
 Applying exclusions per request changes three things from v0.1.0:
 

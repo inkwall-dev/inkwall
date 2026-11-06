@@ -1,0 +1,128 @@
+{{/*
+Copyright 2026 The Inkwall Authors
+SPDX-License-Identifier: Apache-2.0
+
+The monitoring kit, all off by default (docs/monitoring.md): a
+ServiceMonitor for the operator, a PodMonitor for the engines in the proxy
+pods, a PrometheusRule with the alerts, and a Grafana dashboard ConfigMap.
+The Prometheus Operator's objects are rendered only when the cluster serves
+monitoring.coreos.com/v1, or with metrics.forceMonitoringObjects (helm
+template, or a cluster whose CRDs come with the same apply).
+*/}}
+{{- $m := .Values.metrics | default dict }}
+{{- $api := or ($m.forceMonitoringObjects) (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+{{- $sm := $m.serviceMonitor | default dict }}
+{{- $pm := $m.podMonitor | default dict }}
+{{- $pr := $m.prometheusRule | default dict }}
+{{- $db := $m.dashboard | default dict }}
+{{- if and $sm.enabled $api }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "inkwall.operator.suffixed" (dict "root" . "suffix" "metrics") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inkwall.operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator-metrics
+spec:
+  selector:
+    {{- include "inkwall.operator.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "inkwall.operator.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inkwall.operator.labels" . | nindent 4 }}
+    {{- with $sm.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "inkwall.operator.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: operator-metrics
+  namespaceSelector:
+    matchNames: [{{ .Release.Namespace }}]
+  endpoints:
+    - port: metrics
+      path: /metrics
+      {{- with $sm.interval }}
+      interval: {{ . }}
+      {{- end }}
+{{- end }}
+{{- if and $pm.enabled $api }}
+{{- $ns := splitList "," (include "inkwall.proxyNamespaces" .) }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "inkwall.operator.suffixed" (dict "root" . "suffix" "engines") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inkwall.labels" . | nindent 4 }}
+    app.kubernetes.io/component: engine
+    {{- with $pm.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  # Every pod of the proxy namespaces; only those with the injected
+  # engine's inkwall-admin port are scraped.
+  selector: {}
+  namespaceSelector:
+    {{- if has "*" $ns }}
+    any: true
+    {{- else }}
+    matchNames:
+      {{- range $ns }}
+      - {{ . }}
+      {{- end }}
+    {{- end }}
+  podMetricsEndpoints:
+    - port: inkwall-admin
+      path: /metrics
+      {{- with $pm.interval }}
+      interval: {{ . }}
+      {{- end }}
+{{- end }}
+{{- if and $pr.enabled $api }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "inkwall.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inkwall.labels" . | nindent 4 }}
+    {{- with $pr.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- /* The runbooks of this release's docs. */}}
+  {{- $rules := .Files.Get "monitoring/alerts.yaml" | replace "/blob/main/" (printf "/blob/v%s/" .Chart.AppVersion) | fromYaml }}
+  {{- toYaml $rules | nindent 2 }}
+{{- end }}
+{{- if $db.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "inkwall.operator.suffixed" (dict "root" . "suffix" "dashboard") }}
+  namespace: {{ $db.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "inkwall.labels" . | nindent 4 }}
+    {{- toYaml ($db.labels | default (dict "grafana_dashboard" "1")) | nindent 4 }}
+  {{- with $db.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  inkwall.json: |-
+    {{- .Files.Get "monitoring/dashboard.json" | nindent 4 }}
+{{- end }}

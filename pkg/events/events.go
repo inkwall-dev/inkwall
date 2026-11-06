@@ -191,7 +191,11 @@ func New(src Source, req *request.Request, path string, v pipeline.Verdict, now 
 		Latency:            durationpb.New(v.Duration),
 		Phase:              eventsv1.Phase_PHASE_REQUEST,
 	}
-	if v.Response {
+	ev.Protocol = protocol(req)
+	switch {
+	case v.WebSocketMessage:
+		ev.Phase, ev.Protocol = eventsv1.Phase_PHASE_WEBSOCKET_MESSAGE, eventsv1.Protocol_PROTOCOL_WEBSOCKET
+	case v.Response:
 		ev.Phase = eventsv1.Phase_PHASE_RESPONSE
 	}
 	if src.BundleVersion != nil {
@@ -255,6 +259,23 @@ func snippet(r *Redaction, variable, value string) string {
 		}
 	}
 	return truncate(value, maxSnippet)
+}
+
+// protocol is what req speaks: a WebSocket handshake asks to upgrade to
+// one, a gRPC call has a gRPC media type.
+func protocol(req *request.Request) eventsv1.Protocol {
+	for _, u := range req.Headers.Values("Upgrade") {
+		for t := range strings.SplitSeq(u, ",") {
+			if strings.EqualFold(strings.TrimSpace(t), "websocket") {
+				return eventsv1.Protocol_PROTOCOL_WEBSOCKET
+			}
+		}
+	}
+	mediaType, _, _ := strings.Cut(req.Headers.Get("Content-Type"), ";")
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(mediaType)), "application/grpc") {
+		return eventsv1.Protocol_PROTOCOL_GRPC
+	}
+	return eventsv1.Protocol_PROTOCOL_HTTP
 }
 
 func stripQuery(path string) string {

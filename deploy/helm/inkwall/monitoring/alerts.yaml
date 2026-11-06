@@ -1,0 +1,89 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Inkwall's alerts, as a Prometheus rule file: the chart's PrometheusRule
+# (metrics.prometheusRule.enabled) takes these groups as they are. Each
+# alert's runbook is a section of docs/monitoring.md. hack/monitoring has
+# their unit tests (promtool test rules).
+groups:
+  - name: inkwall-engine
+    rules:
+      - alert: InkwallEngineDisconnected
+        # An engine without its stream to the operator keeps enforcing the
+        # bundle it has, but gets no new one.
+        expr: inkwall_operator_connected == 0 and inkwall_bundle_version > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: An Inkwall engine has been disconnected from the operator for 10 minutes.
+          description: The engine in {{ $labels.namespace }}/{{ $labels.pod }} has no stream to the operator. It keeps enforcing the bundle it has, but gets no policy changes.
+          runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallenginedisconnected
+      - alert: InkwallBundleRejected
+        expr: increase(inkwall_bundle_updates_total{result="rejected"}[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: An Inkwall engine rejected a policy bundle.
+          description: The engine in {{ $labels.namespace }}/{{ $labels.pod }} rejected a bundle (reason {{ $labels.reason }}) and keeps enforcing the one it has.
+          runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallbundlerejected
+      - alert: InkwallRequestsUninspected
+        # Timeouts, errors and overload: requests that got the failure mode
+        # instead of the rules (allowed in detect mode, 503 in block mode).
+        expr: sum by (namespace, pod) (rate(inkwall_requests_total{reason=~"timeout|error|overload"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: An Inkwall engine is passing requests without inspecting them.
+          description: The engine in {{ $labels.namespace }}/{{ $labels.pod }} answers {{ $value | humanize }} requests per second with its failure mode (timeout, error or overload) instead of the rules.
+          runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallrequestsuninspected
+      - alert: InkwallEvaluationSlotsSaturated
+        expr: max_over_time(inkwall_evaluations_in_flight[5m]) / inkwall_evaluation_slots >= 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: An Inkwall engine's evaluation slots are nearly all in use.
+          description: The engine in {{ $labels.namespace }}/{{ $labels.pod }} uses {{ $value | humanizePercentage }} of its evaluation slots; past them, requests are shed with reason overload.
+          runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallevaluationslotssaturated
+      - alert: InkwallAdapterErrors
+        expr: sum by (namespace, pod, adapter, kind) (rate(inkwall_adapter_errors_total[5m])) > 0
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: An Inkwall engine refuses requests it can't read.
+          description: The {{ $labels.adapter }} adapter of the engine in {{ $labels.namespace }}/{{ $labels.pod }} refuses {{ $value | humanize }} requests per second ({{ $labels.kind }}).
+          runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwalladaptererrors
+  - name: inkwall-operator
+    rules:
+      - alert: InkwallEnginesBehind
+        # Reported by the leader: engines that don't run the current bundle.
+        expr: max(inkwall_operator_engines{state=~"behind|rejected"}) by (state) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Inkwall engines don't run the current policy bundle.
+          description: '{{ $value }} engines are {{ $labels.state }}: they enforce an older bundle than the operator serves.'
+          runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallenginesbehind
+      - alert: InkwallWiringFailures
+        expr: max(inkwall_operator_wiring_failures) by (integration) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Inkwall can't wire some policy targets.
+          description: '{{ $value }} {{ $labels.integration }} targets couldn''t be wired to the engine (Programmed: WiringFailed): their routes are not protected.'
+          runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallwiringfailures
+      - alert: InkwallBundleNearSizeLimit
+        # Bundles over 7,200 KiB compressed can't be published.
+        expr: max(inkwall_operator_bundle_compressed_bytes) > 0.8 * 7200 * 1024
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Inkwall's policy bundle is near its size limit.
+          description: The bundle is {{ $value | humanize1024 }}B compressed; past 7,200 KiB, policy changes can't be published.
+          runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallbundlenearsizelimit

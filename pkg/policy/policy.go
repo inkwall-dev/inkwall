@@ -228,8 +228,9 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 		cfg.Directives = strings.Join(directives, "\n")
 	}
 	var exclusions []coraza.Exclusion
-	for _, e := range bp.GetExclusions() {
-		ex := coraza.Exclusion{Path: e.GetPath(), Argument: e.GetArgument()}
+	for _, e := range append(bp.GetExclusions(), bp.GetTargetExclusions()...) {
+		ex := coraza.Exclusion{Path: e.GetPath(), Argument: e.GetArgument(),
+			ArgumentName: e.GetArgumentName(), Cookie: e.GetCookie(), Header: e.GetHeader()}
 		for _, id := range e.GetRuleIds() {
 			ex.RuleIDs = append(ex.RuleIDs, int(id))
 		}

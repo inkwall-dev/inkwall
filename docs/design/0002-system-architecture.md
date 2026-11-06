@@ -937,6 +937,20 @@ A wrong client IP makes rate limits and IP lists worse than none. The engine tak
 Behind a load balancer, the proxy must learn the client address first: through the PROXY protocol
 or `externalTrafficPolicy: Local` ([§6.3](#63-traefik)).
 
+**Built (#364):** behind an HTTP load balancer, the InkwallConfig's `spec.engine.clientIP` lists
+`trustedProxies` (CIDRs) and `trustedHops` for the injected engines, which always trust the loopback
+as well. The walk skips the proxy's own entries, then `trustedHops` entries whatever their address,
+then trusted CIDRs. Entries may carry a port. `trustedHops` applies only behind a trusted peer, so
+an untrusted peer stays the client, and the webhook rejects a prefix the engine would refuse and
+warns of one that trusts every address.
+
+The engine can also read RFC 7239 `Forwarded` (`--client-ip-header=forwarded`), but the
+InkwallConfig doesn't offer it. Envoy and Istio's Envoy append their TCP peer to `X-Forwarded-For`,
+never to `Forwarded`. In `Forwarded` the rightmost entry would be one the client may have written
+itself, with nothing appended by the proxy beside the engine to anchor the walk, so trusting it
+would let clients choose their address. It is for a standalone engine behind a proxy that sets or
+replaces the header.
+
 ### 8.3 Data privacy
 
 Bodies never leave the engine. Events carry only a redacted snippet of at most 64 bytes. Headers
@@ -997,6 +1011,27 @@ Target:
   `_bundle_updates_total`, `_operator_connected`, `_evaluations_in_flight`, `_evaluation_slots`,
   `_engine_events_total`, `_engine_events_dropped_total`,
   `inkwall_security_event_logs_suppressed_total{policy}`.
+- Engine, since #356:
+  - `inkwall_rule_matches_total{rule_id,action}`: every rule that matched, by the verdict's
+    action. Rule IDs come from the loaded rules, and at most 2,000 get their own series; the rest
+    count as `rule_id="other"`.
+  - `inkwall_policy_requests_total{policy,action,reason}`, opt-in (`--policy-metrics`,
+    `InkwallConfig.spec.engine.policyMetrics`): at most `--policy-metrics-max` policies (default
+    500) per engine, the rest under `policy="other"`, `none` for requests no policy covers. Off by
+    default because it multiplies `inkwall_requests_total`'s series by the policies.
+  - `inkwall_bundle_updates_total{result,reason}`: rejected bundles by `reason` (`signature`,
+    `older`, `compile`, `other`); `inkwall_bundle_compile_seconds`; `inkwall_rule_sets` (compiled
+    rule sets in memory); `inkwall_bundle_applied_timestamp_seconds` (bundle age is `time()` minus
+    it).
+  - `inkwall_adapter_errors_total{adapter,kind}`: requests an adapter refused without inspecting
+    them, `invalid_request` (one it can't read) or `protocol` (an ext_proc stream or SPOE
+    connection that breaks the protocol).
+  - `inkwall_websocket_connections`, `inkwall_websocket_messages_total{action}` and
+    `inkwall_websocket_violations_total{code}` (the engine's proxy). WebSocket messages are counted
+    there, not in `inkwall_requests_total`: a request count that grows with chat traffic would
+    hide what the requests do.
+  - Events say what they are about: `protocol` (`http`, `grpc`, `websocket`) and the phase
+    `PHASE_WEBSOCKET_MESSAGE`; operators before v0.5.0 ignore both.
 - Engine logs (#354): JSON, at `--log-level` (default `info`; `InkwallConfig.spec.engine.logLevel`
   for injected engines). A security event line has the verdict, `rule_ids`, `anomaly_score` and
   `matches`: each rule with the variable it matched (`ARGS:q`), bounded as in events (32 matches,
@@ -1013,8 +1048,16 @@ Target:
   `_operator_events_buffer_errors_total`, `_operator_request_stats_dropped_total{reason}`,
   `_operator_state_engines_left_out`.
 
-**Not yet:** an adapter failure metric (see [§7.3](#73-engine-unavailable)), rule-match and
-rate-limit metrics, bundle age, tracing, the dashboard and alerts.
+- The monitoring kit (#381, [Monitoring](../monitoring.md)): the chart's ServiceMonitor (operator),
+  PodMonitor (engines, by their `inkwall-admin` port in the proxy namespaces), PrometheusRule
+  (alerts with runbooks, unit-tested with `promtool`) and Grafana dashboard, all opt-in. The
+  Prometheus Operator's objects render only when the cluster serves `monitoring.coreos.com/v1`,
+  so enabling them on a cluster without its CRDs doesn't fail the install. Docs check that
+  `docs/monitoring.md` lists every registered metric, and a test that the dashboard and alerts
+  use only registered ones.
+
+**Not yet:** a proxy-side adapter failure metric (see [§7.3](#73-engine-unavailable)),
+rate-limit metrics, tracing.
 
 ### 8.6 Versioning and compatibility
 

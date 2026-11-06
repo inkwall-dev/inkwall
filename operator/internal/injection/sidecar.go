@@ -63,10 +63,16 @@ type Sidecar struct {
 	// BundleSecret is the bundle Secret, namespace/name, that a new engine
 	// reads when the operator is unreachable.
 	BundleSecret string
+	// TrustedProxies and TrustedHops are the InkwallConfig's
+	// spec.engine.clientIP, besides the loopback.
+	TrustedProxies []string
+	TrustedHops    int
 	// DenyBeforeBundle rejects requests until the engine has a bundle.
 	DenyBeforeBundle bool
 	// LogLevel is the engine's --log-level, empty for its default.
 	LogLevel string
+	// PolicyMetrics passes --policy-metrics.
+	PolicyMetrics bool
 	// Args are the adapter's command and its own flags, e.g.
 	// ["forward-auth"].
 	Args []string
@@ -104,6 +110,16 @@ func (s Sidecar) Configured(e wafv1alpha1.EngineSpec) Sidecar {
 	s.Resources = e.Resources
 	s.DenyBeforeBundle = e.BootstrapMode == wafv1alpha1.BootstrapDenyAll
 	s.LogLevel = strings.ToLower(string(e.LogLevel))
+	s.PolicyMetrics = e.PolicyMetrics
+	s.TrustedProxies, s.TrustedHops = nil, 0
+	if c := e.ClientIP; c != nil {
+		for _, p := range c.TrustedProxies {
+			s.TrustedProxies = append(s.TrustedProxies, string(p))
+		}
+		if c.TrustedHops != nil {
+			s.TrustedHops = int(*c.TrustedHops)
+		}
+	}
 	return s
 }
 
@@ -190,9 +206,13 @@ func Engine(s Sidecar) (corev1.Container, []corev1.Volume) {
 		"--bundle-cache="+cacheDir+"/bundle.pb",
 		fmt.Sprintf("--admin-listen=:%d", adminPort),
 		// The proxy is the engine's peer, on the loopback; its
-		// X-Forwarded-For carries the client.
-		"--trusted-proxies=127.0.0.1/32,::1/128",
+		// X-Forwarded-For carries the client, after the load balancers'
+		// entries the InkwallConfig trusts.
+		"--trusted-proxies="+strings.Join(append([]string{"127.0.0.1/32", "::1/128"}, s.TrustedProxies...), ","),
 	)
+	if s.TrustedHops > 0 {
+		args = append(args, fmt.Sprintf("--trusted-hops=%d", s.TrustedHops))
+	}
 	if s.BundleSecret != "" {
 		args = append(args,
 			"--bundle-secret="+s.BundleSecret,
@@ -205,6 +225,9 @@ func Engine(s Sidecar) (corev1.Container, []corev1.Volume) {
 	}
 	if s.LogLevel != "" {
 		args = append(args, "--log-level="+s.LogLevel)
+	}
+	if s.PolicyMetrics {
+		args = append(args, "--policy-metrics")
 	}
 
 	resources := defaultResources()

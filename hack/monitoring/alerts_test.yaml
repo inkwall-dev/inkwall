@@ -1,0 +1,197 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Unit tests of the chart's alerts: promtool test rules hack/monitoring/alerts_test.yaml
+# (make monitoring-test).
+rule_files:
+  - ../../deploy/helm/inkwall/monitoring/alerts.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: engine disconnected
+    interval: 1m
+    input_series:
+      - series: 'inkwall_operator_connected{namespace="traefik",pod="traefik-1"}'
+        values: '1 0x15'
+      - series: 'inkwall_bundle_version{namespace="traefik",pod="traefik-1"}'
+        values: '7x15'
+      # Never had a bundle (no operator at all): not this alert.
+      - series: 'inkwall_operator_connected{namespace="traefik",pod="traefik-2"}'
+        values: '0x15'
+      - series: 'inkwall_bundle_version{namespace="traefik",pod="traefik-2"}'
+        values: '0x15'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: InkwallEngineDisconnected
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: InkwallEngineDisconnected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: traefik
+              pod: traefik-1
+            exp_annotations:
+              summary: An Inkwall engine has been disconnected from the operator for 10 minutes.
+              description: The engine in traefik/traefik-1 has no stream to the operator. It keeps enforcing the bundle it has, but gets no policy changes.
+              runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallenginedisconnected
+
+  - name: bundle rejected
+    interval: 1m
+    input_series:
+      - series: 'inkwall_bundle_updates_total{namespace="traefik",pod="traefik-1",result="rejected",reason="compile"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+      - series: 'inkwall_bundle_updates_total{namespace="traefik",pod="traefik-1",result="applied",reason=""}'
+        values: '1+1x30'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: InkwallBundleRejected
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: InkwallBundleRejected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: traefik
+              pod: traefik-1
+              result: rejected
+              reason: compile
+            exp_annotations:
+              summary: An Inkwall engine rejected a policy bundle.
+              description: The engine in traefik/traefik-1 rejected a bundle (reason compile) and keeps enforcing the one it has.
+              runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallbundlerejected
+      # 15 minutes later it has resolved.
+      - eval_time: 25m
+        alertname: InkwallBundleRejected
+        exp_alerts: []
+
+  - name: requests uninspected
+    interval: 1m
+    input_series:
+      - series: 'inkwall_requests_total{namespace="traefik",pod="traefik-1",action="allow",reason="timeout"}'
+        values: '0+60x20'
+      - series: 'inkwall_requests_total{namespace="traefik",pod="traefik-1",action="deny",reason="rule"}'
+        values: '0+600x20'
+      - series: 'inkwall_requests_total{namespace="traefik",pod="traefik-2",action="allow",reason="none"}'
+        values: '0+600x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: InkwallRequestsUninspected
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: InkwallRequestsUninspected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: traefik
+              pod: traefik-1
+            exp_annotations:
+              summary: An Inkwall engine is passing requests without inspecting them.
+              description: The engine in traefik/traefik-1 answers 1 requests per second with its failure mode (timeout, error or overload) instead of the rules.
+              runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallrequestsuninspected
+
+  - name: evaluation slots saturated
+    interval: 1m
+    input_series:
+      - series: 'inkwall_evaluations_in_flight{namespace="traefik",pod="traefik-1"}'
+        values: '19x30'
+      - series: 'inkwall_evaluation_slots{namespace="traefik",pod="traefik-1"}'
+        values: '20x30'
+      - series: 'inkwall_evaluations_in_flight{namespace="traefik",pod="traefik-2"}'
+        values: '2x30'
+      - series: 'inkwall_evaluation_slots{namespace="traefik",pod="traefik-2"}'
+        values: '20x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: InkwallEvaluationSlotsSaturated
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: traefik
+              pod: traefik-1
+            exp_annotations:
+              summary: An Inkwall engine's evaluation slots are nearly all in use.
+              description: The engine in traefik/traefik-1 uses 95% of its evaluation slots; past them, requests are shed with reason overload.
+              runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallevaluationslotssaturated
+
+  - name: adapter errors
+    interval: 1m
+    input_series:
+      - series: 'inkwall_adapter_errors_total{namespace="traefik",pod="traefik-1",adapter="forwardauth",kind="invalid_request"}'
+        values: '0+60x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: InkwallAdapterErrors
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: InkwallAdapterErrors
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              namespace: traefik
+              pod: traefik-1
+              adapter: forwardauth
+              kind: invalid_request
+            exp_annotations:
+              summary: An Inkwall engine refuses requests it can't read.
+              description: The forwardauth adapter of the engine in traefik/traefik-1 refuses 1 requests per second (invalid_request).
+              runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwalladaptererrors
+
+  - name: engines behind
+    interval: 1m
+    input_series:
+      - series: 'inkwall_operator_engines{namespace="inkwall-system",pod="inkwall-operator-a",state="current"}'
+        values: '3x30'
+      - series: 'inkwall_operator_engines{namespace="inkwall-system",pod="inkwall-operator-a",state="behind"}'
+        values: '1x30'
+      - series: 'inkwall_operator_engines{namespace="inkwall-system",pod="inkwall-operator-a",state="rejected"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: InkwallEnginesBehind
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              state: behind
+            exp_annotations:
+              summary: Inkwall engines don't run the current policy bundle.
+              description: '1 engines are behind: they enforce an older bundle than the operator serves.'
+              runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallenginesbehind
+
+  - name: wiring failures
+    interval: 1m
+    input_series:
+      - series: 'inkwall_operator_wiring_failures{namespace="inkwall-system",pod="inkwall-operator-a",integration="traefik"}'
+        values: '0 0 2x30'
+      - series: 'inkwall_operator_wiring_failures{namespace="inkwall-system",pod="inkwall-operator-a",integration="istio"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: InkwallWiringFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              integration: traefik
+            exp_annotations:
+              summary: Inkwall can't wire some policy targets.
+              description: "2 traefik targets couldn't be wired to the engine (Programmed: WiringFailed): their routes are not protected."
+              runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallwiringfailures
+
+  - name: bundle near its size limit
+    interval: 1m
+    input_series:
+      - series: 'inkwall_operator_bundle_compressed_bytes{namespace="inkwall-system",pod="inkwall-operator-a"}'
+        values: '6500000x40'
+      - series: 'inkwall_operator_bundle_compressed_bytes{namespace="inkwall-system",pod="inkwall-operator-b"}'
+        values: '6500000x40'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: InkwallBundleNearSizeLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Inkwall's policy bundle is near its size limit.
+              description: The bundle is 6.199MiB compressed; past 7,200 KiB, policy changes can't be published.
+              runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallbundlenearsizelimit
