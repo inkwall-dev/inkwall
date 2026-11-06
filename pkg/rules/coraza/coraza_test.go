@@ -535,6 +535,23 @@ func TestExclusions(t *testing.T) {
 			{"/api//../admin?q=attack", true},
 			{"/api/./v1?q=attack", true},
 			{"/api/v1/..?q=attack", true},
+			// Servlet containers drop ";params" and some applications
+			// decode twice or read backslashes as slashes: only plain
+			// paths get path exclusions, as only they get skip paths.
+			{"/api/..;/admin?q=attack", true},
+			{"/api/..;x=1/admin?q=attack", true},
+			{"/api/%252e%252e/admin?q=attack", true},
+			{"/api/%252e%252e%252fadmin?q=attack", true},
+			{"/api/..%5cadmin?q=attack", true},
+			{"/api/..\\admin?q=attack", true},
+			{"/api/%2e%2e;/admin?q=attack", true},
+			{"/api/v1/..%00/admin?q=attack", true},
+			{"//api/v1?q=attack", true},
+			{"/api%2fv1?q=attack", true},
+		}},
+		{"exact path, ambiguous spellings", Exclusion{RuleIDs: []int{100001}, Path: "/search"}, []check{
+			{"/search?q=attack", false},
+			{"/search;x=1?q=attack", true}, {"/searc%68?q=attack", true},
 		}},
 		{"path and argument", Exclusion{RuleIDs: []int{100001}, Path: "/search", Argument: "q"}, []check{
 			{"/search?q=attack", false}, {"/search?p=attack", true}, {"/other?q=attack", true},
@@ -874,15 +891,18 @@ func TestCRSNegatesNoArgs(t *testing.T) {
 	}
 }
 
-// TestPathExclusionMatchesSecLang checks that path exclusions are decided
-// as the SecLang rules they replace decided them, on tricky paths.
+// TestPathExclusionMatchesSecLang checks that a path exclusion never applies
+// where the SecLang rules it replaced didn't, on tricky paths. It applies on
+// fewer: those rules matched the decoded REQUEST_FILENAME, which let
+// "/api/..;/admin" and "/api/%252e%252e/admin" through.
 func TestPathExclusionMatchesSecLang(t *testing.T) {
 	uris := []string{
 		"/", "/api", "/api/", "/api/v1", "/apix", "/api/v1/", "/API/v1", "/api/./v1", "/api/../admin",
 		"/api/..%2fadmin", "/api/%2e%2e/admin", "/api//v1", "/api/v1/..", "/api/v1/.", "/api/.hidden",
 		"/api/..x", "/api/x..", "/api/x%0a../admin", "/api/x%0a/../admin", "/api/x%0d%0a..", "/api/%00/..",
 		"/api/v1%3fq", "/api/v1?q=1", "/api%2fv1", "/search", "/search/", "/search%2f", "/searc%68",
-		"//api/v1", "/api/v1#frag", "http://host/api/v1", "/api/v1;x=1",
+		"//api/v1", "/api/v1#frag", "http://host/api/v1", "/api/v1;x=1", "/api/..;/admin", "/api/%252e%252e/admin",
+		"/api/..%5cadmin", "/api/..\\admin",
 	}
 	for _, pattern := range []string{"/api/*", "/search", "/"} {
 		x, err := compileExclusions([]Exclusion{{RuleIDs: []int{1}, Path: pattern}})
@@ -908,10 +928,12 @@ func TestPathExclusionMatchesSecLang(t *testing.T) {
 			filename := tx.(plugintypes.TransactionState).Variables().RequestFilename().Get()
 			want := tx.ProcessRequestHeaders() != nil
 			_ = tx.Close()
-			if got := p.matches(filename); got != want {
-				t.Errorf("%s on %q (REQUEST_FILENAME %q): matches=%v, SecLang %v", pattern, uri, filename, got, want)
+			path := exclusionRequestPath(uri)
+			got := path != "" && p.matches(path)
+			if got && !want {
+				t.Errorf("%s on %q (REQUEST_FILENAME %q): matches, SecLang doesn't", pattern, uri, filename)
 			}
-			seen[want] = true
+			seen[got] = true
 		}
 		if !seen[true] || !seen[false] {
 			t.Errorf("%s: the paths don't test both outcomes: %v", pattern, seen)

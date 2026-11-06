@@ -137,6 +137,8 @@ Validation runs in three steps, cheapest first:
    - allows only rule directives (`SecRule`, `SecAction`, `SecMarker`, `SecRuleRemoveBy*`,
      `SecRuleUpdate*`). Engine-wide settings and file writes (`SecRuleEngine`, body limits,
      `SecAuditLog`, `SecDebugLog`, `Include`) stay Inkwall's, since app teams write rule sets;
+   - allows only operators that stay inside the engine: not `@inspectFile`, which runs a program,
+     or `@rbl`, which queries DNS. The binaries don't register either;
    - accepts updates that leave the spec unchanged, so objects a newer engine rejects can still be
      deleted;
    - uses a self-signed certificate that the operator rotates, with the CA injected; cert-manager

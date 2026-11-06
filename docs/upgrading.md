@@ -2,16 +2,33 @@
 
 This guide upgrades an Inkwall installation from 0.1.x (0.1.0 to 0.1.3) to 0.2.0, and lists what
 changes on the way. Upgrading from 0.2.0 or 0.2.1 to 0.2.2 changes one thing:
-[proxy pods only in the proxy namespaces](#what-changes-by-itself).
+[proxy pods only in the proxy namespaces](#what-changes-by-itself). Upgrading from 0.2.2 to 0.2.3
+brings security fixes: [from 0.2.2 to 0.2.3](#from-022-to-023).
 
 ## Contents
 
+- [From 0.2.2 to 0.2.3](#from-022-to-023)
 - [Prerequisites](#prerequisites)
 - [What's new](#whats-new)
 - [What changes by itself](#what-changes-by-itself)
 - [Upgrading the chart](#upgrading-the-chart)
 - [Checking it worked](#checking-it-worked)
 - [Rolling back](#rolling-back)
+
+## From 0.2.2 to 0.2.3
+
+0.2.3 is a patch release with security fixes: upgrade the chart as in
+[upgrading the chart](#upgrading-the-chart), then restart Traefik so its engine is 0.2.3. What
+changes by itself:
+
+- **Rule sets can't use `@inspectFile` or `@rbl`.** These operators reach outside the engine (a
+  program, a DNS query). The webhook and the operator reject rule sets that use them, and the
+  engine never runs them. A rule set that already uses them keeps loading, but those rules never
+  match, and editing it is rejected until they are removed. Look for them in your rule sets.
+- **Path exclusions apply only to plain paths.** An exclusion with a `path` now applies only to a
+  request path that is plain ASCII, without `%`, `;`, `\`, `//` or `.` and `..` segments, as
+  skip paths already did. A request with any other path gets the policy's rules without that
+  exclusion.
 
 ## Prerequisites
 
