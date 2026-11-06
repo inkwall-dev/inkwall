@@ -101,6 +101,103 @@ func UserDirectiveNames() []string {
 	return names
 }
 
+// userOperators are the operators policy authors may use. It leaves out
+// operators that reach outside the engine: inspectFile runs a program and
+// rbl makes DNS queries to a domain the rule names. The engine doesn't
+// register them either (disabledOperators), but rejecting them here names
+// the line. The *FromFile operators read only the embedded CRS files, and
+// the *FromDataset ones need SecDataset, which rule sets can't use.
+var userOperators = map[string]bool{
+	"beginsWith":           true,
+	"contains":             true,
+	"containsWord":         true,
+	"detectSQLi":           true,
+	"detectXSS":            true,
+	"endsWith":             true,
+	"eq":                   true,
+	"ge":                   true,
+	"geoLookup":            true,
+	"gt":                   true,
+	"ipMatch":              true,
+	"ipMatchF":             true,
+	"ipMatchFromDataset":   true,
+	"ipMatchFromFile":      true,
+	"le":                   true,
+	"lt":                   true,
+	"noMatch":              true,
+	"pm":                   true,
+	"pmf":                  true,
+	"pmFromDataset":        true,
+	"pmFromFile":           true,
+	"restpath":             true,
+	"rx":                   true,
+	"streq":                true,
+	"strmatch":             true,
+	"unconditionalMatch":   true,
+	"validateByteRange":    true,
+	"validateNid":          true,
+	"validateSchema":       true,
+	"validateUrlEncoding":  true,
+	"validateUtf8Encoding": true,
+	"within":               true,
+}
+
+// UserOperatorNames returns the operators CheckUserRules allows, sorted.
+func UserOperatorNames() []string {
+	names := make([]string, 0, len(userOperators))
+	for n := range userOperators {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ruleOperator returns the operator name of a SecRule directive, read the
+// way Coraza's rule parser reads it (parseActionOperator, ParseOperator):
+// the second field is a quoted operator, "@name args" or "!@name args", and
+// anything else is rx. ok is false when the rule doesn't parse; compiling
+// it then fails.
+func ruleOperator(text string) (op string, ok bool) {
+	_, data, _ := strings.Cut(text, " ")
+	data = strings.Trim(data, " ")
+	_, rest, found := strings.Cut(data, " ")
+	if !found {
+		return "", false
+	}
+	rest = strings.TrimLeft(rest, " ")
+	if rest == "" || rest[0] != '"' {
+		return "", false
+	}
+	end, escapes := -1, 0
+	for i := 1; i < len(rest); i++ {
+		switch {
+		case rest[i] == '\\':
+			escapes++
+			continue
+		case rest[i] == '"' && escapes%2 == 0:
+			end = i
+		}
+		escapes = 0
+		if end >= 0 {
+			break
+		}
+	}
+	if end < 0 {
+		return "", false
+	}
+	operator := strings.ReplaceAll(rest[1:end], `\"`, `"`)
+	switch {
+	case strings.HasPrefix(operator, "!@"):
+		operator = operator[2:]
+	case strings.HasPrefix(operator, "@"):
+		operator = operator[1:]
+	default:
+		return "rx", true
+	}
+	name, _, _ := strings.Cut(operator, " ")
+	return strings.TrimSpace(name), true
+}
+
 // RuleError is a problem in user rules, at a line.
 type RuleError struct {
 	// Line is the 1-based line of the directive, or 0 when unknown.
@@ -130,6 +227,12 @@ func CheckUserRules(rules string) error {
 		if !userDirectives[d.Name] {
 			return &RuleError{Line: d.Line, Err: fmt.Errorf("directive %q is not allowed in rule sets (allowed: %s)",
 				d.Name, strings.Join(UserDirectiveNames(), ", "))}
+		}
+		if d.Name == "secrule" {
+			if op, ok := ruleOperator(d.Text); ok && !userOperators[op] {
+				return &RuleError{Line: d.Line, Err: fmt.Errorf("operator %q is not allowed in rule sets (allowed: %s)",
+					op, strings.Join(UserOperatorNames(), ", "))}
+			}
 		}
 	}
 	compile := func(n int) error {
