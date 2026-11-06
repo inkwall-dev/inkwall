@@ -186,7 +186,7 @@ image: ## Build the engine and operator container images (IMAGE=name:tag, OPERAT
 
 .PHONY: release-snapshot
 release-snapshot: ## Build the release binaries and archives into ./dist, as a tag would, without signing or publishing
-	$(GORELEASER) release --snapshot --clean --skip=sign,publish
+	$(GORELEASER) release --snapshot --clean --skip=sign,publish,sbom
 
 .PHONY: release-check
 release-check: ## Check the goreleaser configuration
