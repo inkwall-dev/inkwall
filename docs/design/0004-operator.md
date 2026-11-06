@@ -1403,6 +1403,31 @@ Against the targets:
   136 KiB compressed. Compiling it as an engine: 0.08–0.09 s and 10–26 MiB of live heap; the
   response check, 0.3–0.6 ms ([0006 §2](0006-adapter-protocols.md#response-inspection-v040)).
 
+**The wiring controller** (#373) is measured by `make scale-test SCALE=wiring[:<policies>]`
+(`TestScaleWiring`; CI runs `SCALE=wiring:500`). Each policy targets its own VirtualService, bound
+to one Istio Gateway whose selector picks 3 ingress gateway pods, which the Pod webhook injects. No
+engines connect. Once every policy is `Programmed`, five policy edits measure the wiring reconcile:
+its mean time, the operator's API requests per reconcile, and the uncached pod lists among them.
+Then a rollout: 5 pods of a new ReplicaSet start without the engine, one at a time, and go again,
+and the test counts the policies' status writes (both `Programmed` and the status aggregator's
+`Ready`). The budgets are at most 1 pod list per reconcile (one per Gateway selector), at most 5
+status writes per policy through the rollout (each condition down and back up, and now and then a
+retry on a conflict between the two writers; CI measured 4.1 at 500), and peak RSS
+under 512 MiB. Same machine, 2026-11-06, one run each:
+
+| Code | Policies | Wired after | Reconcile | API requests / reconcile | Pod lists / reconcile | Status writes / policy, 5-pod rollout | Peak RSS |
+|---|---|---|---|---|---|---|---|
+| Before #373's fixes | 200 | 6.1 s | 0.33 s | 227 | 200 | 20 | 97 MiB |
+| After | 200 | 3.0 s | 0.13 s | 26.8 | 1 | 4 | 96 MiB |
+| After | 1,000 | 8.8 s | 2.6 s | 44.6 | 1 | 4 | 178 MiB |
+
+Before the fixes, each VirtualService listed its Gateway's pods from the API server, and every pod
+of the rollout rewrote every policy's status, since the messages named the pods. 5,000 policies
+don't fit yet: the Istio ingress integration's one `EnvoyFilter` per gateway namespace passes
+etcd's 1.5 MiB limit at about 1,200 VirtualServices (1,245 KiB at 1,000; 6.2 MiB at 5,000), and
+every policy is then `WiringFailed` (fail safe, #424). So `SCALE=wiring` is 1,000 until that is
+fixed. Envoy Gateway's and Istio's HTTPRoutes aren't in this test yet.
+
 **Engine memory per policy.** A compiled Coraza WAF with the CRS keeps
 about 2.1 MiB of heap, and takes 10–15 ms to compile.
 

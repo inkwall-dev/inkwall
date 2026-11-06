@@ -82,11 +82,11 @@ test: ## Run unit tests with the race detector (operator tests run against a loc
 	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" $(GO) test -race -count=1 ./...
 
 .PHONY: scale-test
-scale-test: ## Operator scale test with fake engines, in envtest (SCALE=<policies>x<engines>, default 100x50; SCALE=full)
+scale-test: ## Operator scale test with fake engines, in envtest (SCALE=<policies>x<engines>, default 100x50; SCALE=full; SCALE=wiring[:<policies>] for the wiring controller)
 	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; export KUBEBUILDER_ASSETS="$$a"; fail=0; \
 	for s in $(if $(filter full,$(SCALE)),$(SCALE_FULL),$(SCALE)); do \
 		echo "== scale $$s"; \
-		INKWALL_SCALE=$$s INKWALL_SCALE_CHANGES=$(SCALE_CHANGES) INKWALL_SCALE_OUT="$(SCALE_OUT)" INKWALL_SCALE_RESPONSES="$(SCALE_RESPONSES)" $(GO) test -count=1 -timeout 60m -run '^TestScale$$' -v ./operator/test/scale || fail=1; \
+		INKWALL_SCALE=$$s INKWALL_SCALE_CHANGES=$(SCALE_CHANGES) INKWALL_SCALE_OUT="$(SCALE_OUT)" INKWALL_SCALE_RESPONSES="$(SCALE_RESPONSES)" $(GO) test -count=1 -timeout 60m -run '^TestScale(Wiring)?$$' -v ./operator/test/scale || fail=1; \
 	done; exit $$fail
 
 .PHONY: bench
