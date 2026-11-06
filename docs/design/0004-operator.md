@@ -1527,7 +1527,12 @@ Applying exclusions per request changes three things from v0.1.0:
   Pod webhook injects the gateway's pods, attacks on both http routes of the protected one are
   blocked, the other passes, and unprotecting and uninstalling unwire it.
 - **Upgrade** from the last release on kind (`make kind-upgrade`, every PR): routes stay protected
-  through Traefik, wired once.
+  through Traefik and Envoy Gateway (an Ingress, an IngressRoute and an HTTPRoute), wired once, with
+  a probe through the upgrade, the rollback and the proxies' restarts (#390). The release
+  qualification runs it from the latest patch of each supported minor
+  (`.github/workflows/upgrade.yaml`, versions from `hack/releases`). Envoy Gateway rolls its pods
+  when the engine image changes, so its route may go `MAX_ENVOY_GAP` (5 s) without a verdict then;
+  Traefik's routes may not, except through its restart (`MAX_RESTART_GAP`).
 - **Planned:** chaos tests (kill the leader, delete the Secret, take the webhook down).
 
 ## 10. Code layout
