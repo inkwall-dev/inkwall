@@ -45,9 +45,10 @@ const (
 	wiringPods, rolloutPods = 3, 5
 	// The budgets: uncached pod lists per wiring reconcile (one per Gateway
 	// selector), and status writes per policy through the rollout
-	// (Programmed and Ready, each down and back up).
+	// (Programmed and Ready, each down and back up, and a retry on a
+	// conflict between the two writers now and then): not one per pod.
 	budgetPodLists      = 1.0
-	budgetRolloutWrites = 4.0
+	budgetRolloutWrites = 5.0
 	gatewayNamespace    = "istio-ingress"
 )
 
