@@ -232,6 +232,7 @@ func TestInkwallConfigValidation(t *testing.T) {
       requests: {cpu: 500m, memory: 256Mi}
       limits: {memory: 512Mi}
     socketDir: /var/run/inkwall
+    logLevel: Warn
   integrations:
   - controller: traefik
     selector: {matchLabels: {app.kubernetes.io/name: traefik}}
@@ -258,6 +259,7 @@ func TestInkwallConfigValidation(t *testing.T) {
 		{name: "integration listed twice", doc: inkwallConfig("default", "  integrations: [{controller: traefik}, {controller: traefik}]\n"), wantErr: "Duplicate value"},
 		{name: "empty selector", doc: inkwallConfig("default", "  integrations: [{controller: traefik, selector: {}}]\n"), wantErr: "selector must not be empty"},
 		{name: "selector with empty labels", doc: inkwallConfig("default", "  integrations: [{controller: traefik, selector: {matchLabels: {}}}]\n"), wantErr: "selector must not be empty"},
+		{name: "unknown log level", doc: inkwallConfig("default", "  engine: {logLevel: verbose}\n"), wantErr: `Unsupported value: "verbose"`},
 		{name: "redacted header with a space", doc: inkwallConfig("default", "  events: {redact: {headers: [\"X Tenant\"]}}\n"), wantErr: "spec.events.redact.headers[0]"},
 		{name: "empty redacted argument", doc: inkwallConfig("default", "  events: {redact: {arguments: [\"\"]}}\n"), wantErr: "spec.events.redact.arguments[0]"},
 		{name: "redacted argument pattern listed twice", doc: inkwallConfig("default", "  events: {redact: {arguments: [email, email]}}\n"), wantErr: "Duplicate value"},
