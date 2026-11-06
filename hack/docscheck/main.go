@@ -47,6 +47,7 @@ type config struct {
 	indexExempt      map[string]bool
 	contentsMinLines int
 	contentsExempt   map[string]bool
+	unpinned         map[string]bool // docs whose install commands must not pin a release
 	external         bool
 	ext              externalConfig
 }
@@ -57,6 +58,7 @@ func main() {
 		exclude        = flag.String("exclude", "testdata,vendor,node_modules", "comma-separated directory names whose Markdown files are not checked")
 		indexExempt    = flag.String("index-exempt", "CLAUDE.md", "comma-separated docs the index need not list")
 		contentsExempt = flag.String("contents-exempt", "", "comma-separated docs that need no Contents section, whatever their length")
+		unpinned       = flag.String("unpinned", "", "comma-separated docs whose chart and image references must write <version>, not a release")
 		ignoreFile     = flag.String("external-ignore", "hack/docscheck/external-ignore.txt", "file of regular expressions, one per line, for URLs the external check skips")
 	)
 	flag.StringVar(&cfg.index, "index", "docs/README.md", "the docs index, which must link to every doc")
@@ -70,6 +72,7 @@ func main() {
 	cfg.exclude = set(*exclude)
 	cfg.indexExempt = set(*indexExempt)
 	cfg.contentsExempt = set(*contentsExempt)
+	cfg.unpinned = set(*unpinned)
 	if cfg.external {
 		var err error
 		if cfg.ext.ignore, err = readIgnore(*ignoreFile); err != nil {
@@ -151,6 +154,9 @@ func run(fsys fs.FS, files []string, cfg config, out, log io.Writer) int {
 			minLines = 0
 		}
 		probs = append(probs, checkContents(d, minLines)...)
+		if cfg.unpinned[p] {
+			probs = append(probs, r.checkUnpinned(p)...)
+		}
 	}
 	if _, err := fs.Stat(fsys, cfg.index); err == nil || cfg.requireIndex {
 		probs = append(probs, r.checkIndex(cfg.index, files, cfg.indexExempt)...)

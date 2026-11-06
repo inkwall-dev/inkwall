@@ -1088,23 +1088,37 @@ One shared request corpus drives every level.
 | Upgrade | kind | N-1 → N with no dropped requests | release |
 | Soak / chaos | kind + k6 | 24 h stability; engine kill → the proxy fails open | weekly |
 
-**Built (fuzz):** a Go fuzz target for every parser of untrusted input. Each checks a property, not
-only that nothing panics:
+**Built (fuzz):** a Go fuzz target for every parser of untrusted input, 24 in all, each listed in
+`.github/workflows/fuzz.yaml`. Each checks a property, not only that nothing panics:
 
 - the adapters:
-  - `FuzzForwardAuth`: only the method and URI the proxy forwarded are inspected, without its
-    `X-Forwarded-*` headers;
-  - `FuzzCheck`;
-  - `FuzzProxy`: a request is refused with 400, or inspected in origin form with a valid Host, and
-    what reaches the upstream was inspected, with the same path, query, Host and body;
-- the request target and request ID checks the adapters share;
-- client IP resolution from `X-Forwarded-For`;
-- bundle key files;
+  - forward-auth (`FuzzForwardAuth`): only the method and URI the proxy forwarded are inspected,
+    without its `X-Forwarded-*` headers;
+  - the check API (`FuzzCheck` in `httpcheck`): exactly the request a `CheckRequest` describes is
+    inspected, and answered in the same encoding;
+  - the reverse proxy (`FuzzProxy`): a request is refused with 400, or inspected in origin form
+    with a valid Host, and what reaches the upstream was inspected, with the same path, query,
+    Host and body;
+  - ext_proc (`FuzzExtProc`, `FuzzExtProcResponse`): a request, and a response, are inspected
+    exactly once, at most the body limit of the body, whatever Envoy sends or leaves out, and a
+    denial carries header values Envoy accepts;
+  - SPOE (`FuzzSPOE`, `FuzzVarint`): a request the agent accepts is one it can inspect, its body
+    counted complete only when it is all there;
+- the request target, request ID and gRPC denial checks the adapters share (`FuzzURIPath`,
+  `FuzzRequestID`, `FuzzGRPCDenial`);
+- the HAProxy probe (`FuzzCheck` in `haproxyprobe`): only a probe made with the key is answered;
+- gRPC messages (`FuzzMessages`, `FuzzGRPCText`): the rules get valid UTF-8 text from the body,
+  within the limits, and a cut body is never taken as read whole;
+- WebSocket (`FuzzReader`, `FuzzTracker`, `FuzzWebSocketOrigin`): frames keep the protocol's
+  rules and no message keeps more than the limit; an origin that passes is an allowed one;
+- client IP resolution from `X-Forwarded-For` (`FuzzResolve`);
+- bundle key files (`FuzzParse`);
 - bundle signatures (`FuzzApply`, `FuzzSecretBundle`): nothing but the trusted key's own signature
   of the exact bytes reaches compilation;
 - event redaction (`FuzzNew`): valid UTF-8, within the field limits, with no query strings or
   credential snippets;
-- `inkwallctl test`'s URL, raw HTTP and HAR input.
+- `inkwallctl test`'s URL, raw HTTP and HAR input (`FuzzSplitURL`, `FuzzFromRawHTTP`,
+  `FuzzFromHAR`).
 
 Their seed corpora (`testdata/fuzz/`) run in every `make test`. `.github/workflows/fuzz.yaml` runs
 each target for 5 minutes nightly and uploads the failing inputs.
