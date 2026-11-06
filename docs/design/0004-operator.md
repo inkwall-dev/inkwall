@@ -494,8 +494,16 @@ longer needed.
   - `NoTargets`;
   - `InjectionDisabled`;
   - `Unwired`: set by the uninstall hook, with the operator stopped ([§5](#5-uninstall-and-disable)).
-- **Not yet:** matching engines to the pods that serve a policy's class (all
-  engines count for `Enforced`); IngressRoutes nested with `parentRefs`. Whether Traefik attachment
+- **Engines matched to the pods that serve a policy** (#371). At each reconcile the wiring
+  controller maps each policy whose targets are all wired to the running pods of the proxies that
+  serve them (each integration's `Result.Pods`; a target several proxies serve takes all their
+  pods), and hands the map to the status aggregator ([§4.8](#48-status-aggregator)). It fails safe:
+  a policy with a target that isn't wired (failed, disabled, not served, missing) or no running pod
+  isn't mapped, and every engine counts for it; an engine without a pod, or on a pod no policy is
+  mapped to (one the wiring hasn't seen yet), counts for every policy. A reconcile that stops early
+  clears the map. The granularity is the integration's pods, not a route's own: two Envoy Gateway
+  Gateways' pods count for each other's policies.
+- **Not yet:** IngressRoutes nested with `parentRefs`. Whether Traefik attachment
   should default to something else is open ([§12](#12-open-questions)).
 
 **Built since: Envoy Gateway** (`operator/internal/wiring/envoygateway.go`, the `EnvoyGateway`
@@ -878,7 +886,9 @@ The status aggregator turns the results of the resolver, the wiring and the engi
 conditions of [§3.2](#32-status-contract). It writes only on change, at most once per object every
 2 s.
 
-**Built (v0.1.0):** `Enforced=True` when every connected engine runs a bundle whose version is at
+**Built (v0.1.0):** `Enforced=True` when every engine that counts for the policy (since 0.5.0
+those on the pods that serve it, [§4.4](#44-wiring-controller); all of them when that isn't known)
+runs a bundle whose version is at
 least the policy's `status.bundleVersion` (`every engine runs bundle 42 or later`). Otherwise the
 reason is `NoEngines`, `EnginesBehind` (`some engines don't run bundle 42 yet`), `EngineNack`
 (`some engines rejected bundle 42 (first: traefik/traefik-1: …)`), `EnginesUnreported` (a replica's report
@@ -926,8 +936,10 @@ replica drops ([§4.9](#49-upstream-sync-leader-only)): `not_in_bundle`, `latenc
 latency only) and `evicted`. Reconcile duration is controller-runtime's own
 `controller_runtime_reconcile_time_seconds{controller}`, on the same endpoint.
 
-**Not yet:** an `integration` label on the engine counts (engines aren't matched to proxies yet),
-policy condition counts.
+`inkwall_operator_engines{state,integration}` counts the engines by the integration whose pod runs
+them (`unknown` while an engine isn't matched to one, #371).
+
+**Not yet:** policy condition counts.
 
 ### 4.9 Upstream sync (leader only)
 

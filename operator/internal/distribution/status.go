@@ -56,8 +56,8 @@ var (
 	})
 	engineCount = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "inkwall_operator_engines",
-		Help: "Connected engines, by whether they run the current bundle (current, behind, rejected). Reported by the leader.",
-	}, []string{"state"})
+		Help: "Connected engines, by whether they run the current bundle (current, behind, rejected), and by the integration whose proxy pod runs them (unknown: not matched to one yet). Reported by the leader.",
+	}, []string{"state", "integration"})
 	eventsReceived = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "inkwall_operator_events_received_total",
 		Help: "Security events received from the engines on this replica.",
@@ -85,10 +85,11 @@ func init() {
 	metrics.Registry.MustRegister(bundleVersion, bundleBytes, engineCount, eventsReceived, eventsDroppedByEngines, RequestStatsDropped)
 }
 
-// Enforced computes a policy's Enforced condition: whether every connected
-// engine runs a bundle that contains the policy's current generation: the
-// first such bundle is its status.bundleVersion, and later ones have it too. Every engine gets the same bundle, so every
-// engine counts until engines are matched to the routes they serve.
+// Enforced computes a policy's Enforced condition: whether every engine
+// given runs a bundle that contains the policy's current generation: the
+// first such bundle is its status.bundleVersion, and later ones have it
+// too. The engines given are those that serve the policy's routes, or all
+// of them when that isn't known (ServedPods).
 //
 // leftOut engines are connected but missing from their replica's report.
 //
@@ -232,6 +233,9 @@ type Reporter struct {
 	Stale time.Duration
 	// Store has the bundle being served, for the engine metrics.
 	Store *Store
+	// Served maps policies to the pods that serve them; nil: every engine
+	// counts for every policy.
+	Served *ServedPods
 }
 
 // Start implements manager.Runnable.
@@ -266,20 +270,25 @@ func (r *Reporter) report(ctx context.Context) error {
 
 	_, latest, _ := r.Store.Current()
 	suspended := r.Store.Suspended()
-	var current, behind, rejected float64
+	served := r.Served.view()
+	counts := map[[2]string]float64{}
 	for _, e := range engines {
+		state := "behind"
 		switch {
 		case e.Applied >= latest:
-			current++
+			state = "current"
 		case e.Rejected >= latest:
-			rejected++
-		default:
-			behind++
+			state = "rejected"
 		}
+		counts[[2]string{state, served.integrationOf(e)}]++
 	}
-	engineCount.WithLabelValues("current").Set(current)
-	engineCount.WithLabelValues("behind").Set(behind)
-	engineCount.WithLabelValues("rejected").Set(rejected)
+	engineCount.Reset()
+	for _, state := range []string{"current", "behind", "rejected"} {
+		engineCount.WithLabelValues(state, "unknown").Set(0)
+	}
+	for k, n := range counts {
+		engineCount.WithLabelValues(k[0], k[1]).Set(n)
+	}
 
 	// Most policies don't change; those that do are written 8 at a time,
 	// like the bundle builder's writes.
@@ -293,13 +302,15 @@ func (r *Reporter) report(ctx context.Context) error {
 			p.Status.ObservedGeneration != p.Generation {
 			continue
 		}
-		served := r.Store.PolicyVersion(p.Namespace + "/" + p.Name)
+		key := p.Namespace + "/" + p.Name
+		version := r.Store.PolicyVersion(key)
+		mine := served.enginesFor(key, engines)
 		// The list is the cache's, not a copy: copy only what is written.
-		if _, changed := enforcedConditions(p, served, suspended, engines, leftOut); !changed {
+		if _, changed := enforcedConditions(p, version, suspended, mine, leftOut); !changed {
 			continue
 		}
 		p = p.DeepCopy()
-		g.Go(func() error { return r.write(gctx, p, served, suspended, engines, leftOut) })
+		g.Go(func() error { return r.write(gctx, p, version, suspended, mine, leftOut) })
 	}
 	return g.Wait()
 }
