@@ -170,6 +170,26 @@ message RuleSetBinding {
   int32 paranoia_level = 2;
   // OWASP CRS inbound anomaly threshold; 0: the default. Built-in CRS only.
   int32 inbound_anomaly_threshold = 3;
+  // The CRS's other settings. Built-in CRS only. Engines before 0.5.0
+  // ignore it.
+  CRSSettings crs = 4;
+}
+
+// CRSSettings are OWASP CRS variables the engine sets on each transaction,
+// before the CRS's own defaults. Unset fields keep the CRS's defaults.
+message CRSSettings {
+  // tx.allowed_methods: the request methods allowed (rule 911100).
+  repeated string allowed_methods = 1;
+  // tx.allowed_request_content_type: the request media types allowed, as
+  // type/subtype without parameters (rule 920420).
+  repeated string allowed_request_content_types = 2;
+  // tx.detection_paranoia_level, from the binding's paranoia level to 4;
+  // 0: the paranoia level. Rules above the paranoia level and up to this one
+  // log and never block.
+  int32 detection_paranoia_level = 3;
+  // tx.outbound_anomaly_score_threshold: the response anomaly score at
+  // which a response is blocked; 0: the CRS's default (4).
+  int32 outbound_anomaly_threshold = 4;
 }
 
 // RuleSet is a WAFRuleSet or ClusterWAFRuleSet, with its rules resolved.

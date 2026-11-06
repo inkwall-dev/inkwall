@@ -114,7 +114,13 @@ func TestResolvePolicy(t *testing.T) {
 	p.Spec.Timeout = &metav1.Duration{Duration: 100 * time.Millisecond}
 	p.Spec.Skip = &wafv1alpha1.SkipSpec{Paths: []wafv1alpha1.PathPattern{"/healthz"}, BodyPaths: []wafv1alpha1.PathPattern{"/upload"}}
 	p.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{
-		{Ref: wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: "crs"}, ParanoiaLevel: ptr(int32(2)), InboundAnomalyThreshold: ptr(int32(7))},
+		{Ref: wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: "crs"}, ParanoiaLevel: ptr(int32(2)), InboundAnomalyThreshold: ptr(int32(7)),
+			CRS: &wafv1alpha1.CRSSettings{
+				AllowedMethods:             []wafv1alpha1.HTTPMethodToken{"GET", "PUT"},
+				AllowedRequestContentTypes: []wafv1alpha1.MediaType{"application/json"},
+				DetectionParanoiaLevel:     ptr(int32(3)),
+				OutboundAnomalyThreshold:   ptr(int32(8)),
+			}},
 		{Ref: wafv1alpha1.RuleSetRef{Kind: "WAFRuleSet", Name: "custom"}},
 	}
 	p.Spec.Exclusions = []wafv1alpha1.Exclusion{
@@ -167,7 +173,12 @@ func TestResolvePolicy(t *testing.T) {
 		SkipPaths:     []string{"/healthz"},
 		SkipBodyPaths: []string{"/upload"},
 		RuleSets: []*bundlev1.RuleSetBinding{
-			{RuleSetId: "ClusterWAFRuleSet/crs", ParanoiaLevel: 2, InboundAnomalyThreshold: 7},
+			{RuleSetId: "ClusterWAFRuleSet/crs", ParanoiaLevel: 2, InboundAnomalyThreshold: 7, Crs: &bundlev1.CRSSettings{
+				AllowedMethods:             []string{"GET", "PUT"},
+				AllowedRequestContentTypes: []string{"application/json"},
+				DetectionParanoiaLevel:     3,
+				OutboundAnomalyThreshold:   8,
+			}},
 			{RuleSetId: "WAFRuleSet/shop/custom"},
 		},
 		Exclusions: []*bundlev1.Exclusion{

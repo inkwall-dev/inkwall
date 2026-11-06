@@ -110,6 +110,8 @@ it, and the other annotations do nothing without ModSecurity on.
 | `SecRuleEngine On` / `DetectionOnly` | `mode: Block` / `mode: Detect`; ingress-nginx's own `modsecurity.conf` sets `DetectionOnly` |
 | `SecRuleEngine Off` | No policy |
 | `setvar:tx.paranoia_level` or `tx.blocking_paranoia_level`, `tx.inbound_anomaly_score_threshold` (in a `SecAction`) | `ruleSets[].paranoiaLevel`, `inboundAnomalyThreshold` |
+| `setvar:tx.allowed_methods`, `tx.allowed_request_content_type` (CRS v4's `\|type\|` list or v3's `type\|type`), `tx.detection_paranoia_level` | `ruleSets[].crs.allowedMethods`, `allowedRequestContentTypes`, `detectionParanoiaLevel` |
+| `setvar:tx.outbound_anomaly_score_threshold` | `ruleSets[].crs.outboundAnomalyThreshold`, marked `check`: it only applies with `responses.inspect: true` |
 | `SecRuleRemoveById 942100 ...` | `exclusions` |
 | `SecRuleUpdateTargetById 942100 "!ARGS:password"` | `exclusions` with `when.argument` |
 | `SecRule REQUEST_FILENAME "@beginsWith /api/" "...,ctl:ruleRemoveById=942100"`, or `@streq` | `exclusions` with `when.path: /api/*` (or the exact path; an `@streq` path with `*` is `TODO`) |
@@ -143,7 +145,7 @@ Ingress files/cloud: WAFPolicy files/cloud (Detect), WAFRuleSet files/cloud-mods
   can't be converted faithfully is listed here and left out of the objects. Typical ones are
   `Include` of other files, exclusions keyed on anything but the path (`@contains`, `@rx`, headers),
   `ctl:ruleRemoveById` ranges reaching outside the CRS's IDs (900000-999999), `ctl:ruleRemoveByTag`, CRS variables without a `WAFPolicy` field
-  (`tx.allowed_methods`), and rules the engine rejects.
+  (`tx.restricted_extensions`, `tx.allowed_http_versions`...), and rules the engine rejects.
 
 Each file with something not migrated says so in a comment at the top. `inkwallctl migrate` exits
 0 when everything was converted, 1 when something is marked `TODO`, and 2 on an error.
@@ -178,7 +180,8 @@ the routes instead, and apply once those routes serve the traffic.
 - **Responses.** `inkwallctl migrate` doesn't convert `SecResponseBodyAccess`: set
   `responses: {inspect: true}` on a policy to run the CRS's response rules (`RESPONSE-95x`), on
   routes Envoy Gateway serves only; Traefik's ForwardAuth can't send responses to the engine.
-  `tx.outbound_anomaly_score_threshold` has no field: set it with a `SecAction` in a rule set.
+  `tx.outbound_anomaly_score_threshold` becomes `ruleSets[].crs.outboundAnomalyThreshold`, which
+  applies once the policy inspects responses.
 - **Body limits.** Inkwall inspects up to `body.maxBytes` (64 KiB by default, 10 MiB at most) and,
   in Block mode, rejects larger bodies with 413. ingress-nginx's `modsecurity.conf` allowed bodies of
   up to 12.5 MiB with files and 128 KiB without. Set `body.maxBytes` or `body.onOversize: Allow` on

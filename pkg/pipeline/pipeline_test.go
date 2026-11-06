@@ -39,6 +39,18 @@ func hung(t *testing.T) <-chan struct{} {
 
 var blocked = rules.Result{Interrupted: true, Status: 403, RuleID: 949110, MatchedRuleIDs: []int{942100, 949110}}
 
+var detected = rules.Result{Detected: true, MatchedRuleIDs: []int{942480}, AnomalyScore: 0}
+
+// TestDetectedDoesNotWeakenOversize: a request the rules only detected is
+// still denied when its body is oversize and the policy denies that.
+func TestDetectedDoesNotWeakenOversize(t *testing.T) {
+	p := New(fakeEvaluator{res: detected}, Config{Mode: ModeBlock, Oversize: OversizeDeny})
+	v := p.Check(context.Background(), &request.Request{Method: "POST", Body: []byte("x"), BodyTruncated: true})
+	if v.Action != ActionDeny || v.Reason != ReasonOversize {
+		t.Fatalf("got %s/%s, want deny/oversize", v.Action, v.Reason)
+	}
+}
+
 func TestCheck(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -54,6 +66,11 @@ func TestCheck(t *testing.T) {
 			wantAction: ActionDeny, wantStatus: 403, wantReason: ReasonRule},
 		{name: "detect mode only logs", eval: fakeEvaluator{res: blocked}, cfg: Config{Mode: ModeDetect},
 			wantAction: ActionLog, wantReason: ReasonRule},
+		// Rules at the CRS's detection paranoia level log, in either mode.
+		{name: "detected is logged in block mode", eval: fakeEvaluator{res: detected}, cfg: Config{Mode: ModeBlock},
+			wantAction: ActionLog, wantReason: ReasonNone},
+		{name: "detected is logged in detect mode", eval: fakeEvaluator{res: detected}, cfg: Config{Mode: ModeDetect},
+			wantAction: ActionLog, wantReason: ReasonNone},
 		{name: "missing status defaults to 403", eval: fakeEvaluator{res: rules.Result{Interrupted: true}}, cfg: Config{Mode: ModeBlock},
 			wantAction: ActionDeny, wantStatus: http.StatusForbidden, wantReason: ReasonRule},
 		{name: "custom status is kept", eval: fakeEvaluator{res: rules.Result{Interrupted: true, Status: 429}}, cfg: Config{Mode: ModeBlock},

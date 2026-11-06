@@ -211,7 +211,43 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 	if w := p.Spec.WebSocket; w != nil {
 		errs = append(errs, checkWebSocket(spec.Child("webSocket"), w)...)
 	}
+	for i, b := range p.Spec.RuleSets {
+		if b.CRS != nil {
+			errs = append(errs, checkCRS(spec.Child("ruleSets").Index(i), b)...)
+		}
+	}
 	return responseWarnings(p), invalid("WAFPolicy", p.Name, errs)
+}
+
+// checkCRS accepts the CRS settings the engine applies: one it refused
+// would make it refuse the whole bundle. Each field is checked on its own,
+// to name it; the detection paranoia level with the binding's level.
+func checkCRS(path *field.Path, b wafv1alpha1.RuleSetBinding) field.ErrorList {
+	var errs field.ErrorList
+	path = path.Child("crs")
+	check := func(p *field.Path, value any, s coraza.CRSSettings) {
+		if err := s.Validate(); err != nil {
+			errs = append(errs, field.Invalid(p, value, err.Error()))
+		}
+	}
+	for i, m := range b.CRS.AllowedMethods {
+		check(path.Child("allowedMethods").Index(i), string(m), coraza.CRSSettings{AllowedMethods: []string{string(m)}})
+	}
+	for i, t := range b.CRS.AllowedRequestContentTypes {
+		check(path.Child("allowedRequestContentTypes").Index(i), string(t), coraza.CRSSettings{AllowedRequestContentTypes: []string{string(t)}})
+	}
+	if d := b.CRS.DetectionParanoiaLevel; d != nil {
+		s := coraza.CRSSettings{DetectionParanoiaLevel: int(*d)}
+		if b.ParanoiaLevel != nil {
+			s.ParanoiaLevel = int(*b.ParanoiaLevel)
+		}
+		check(path.Child("detectionParanoiaLevel"), *d, s)
+	}
+	if t := b.CRS.OutboundAnomalyThreshold; t != nil && *t < 1 {
+		// 0 would be the CRS's default to the engine.
+		errs = append(errs, field.Invalid(path.Child("outboundAnomalyThreshold"), *t, "the outbound anomaly threshold must be positive"))
+	}
+	return errs
 }
 
 // responseWarnings warns of a policy that inspects responses on targets
