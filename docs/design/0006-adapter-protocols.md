@@ -205,7 +205,8 @@ Envoy doesn't hold the request, so the upstream may answer before the client has
 body: the response's messages are queued (up to 10 MiB of body) until the request is decided on
 its whole body, then handled.
 The kept transaction is released when the response is decided or the stream ends. A WebSocket handshake allowed on its headers (CONTINUE_AND_REPLACE) keeps
-none: its 101 is continued, and the upgraded stream's data is never inspected.
+it too: a 101 releases it and is continued, and the upgraded stream's data is never inspected; any
+other answer (an upstream that ignores `Upgrade`) is inspected as a response.
 
 **Envoy Gateway (operator).** Only routes whose policies inspect responses get
 `processingMode.response` (`body: BufferedPartial`, `Streamed` in shadow mode) and
