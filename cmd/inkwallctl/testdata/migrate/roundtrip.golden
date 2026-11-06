@@ -1,6 +1,6 @@
-deny  403  GET /?id=1%27%20OR%20%271%27%3D%271  policy=shop/shop  reason=rule  rules=932240,942100,942130,942180,942330,942370,942390,942520,949110  interrupting=949110  <time>
+deny  403  GET /?id=1%27%20OR%20%271%27%3D%271  policy=shop/shop  reason=rule  rules=932240,942100,942130,942180,942330,942370,942390,942520,949110  interrupting=949110  matches=932240@ARGS:id,942100@ARGS:id,942130@ARGS:id,942180@ARGS:id,942330@ARGS:id,942370@ARGS:id,942390@ARGS:id,942520@ARGS:id,949110@TX:blocking_inbound_anomaly_score  score=40  <time>
 allow      GET /healthz?id=1%27%20OR%20%271%27%3D%271  policy=shop/shop  reason=skipped  <time>
-deny  403  GET /products/42  policy=shop/shop  reason=rule  rules=913100,1004  interrupting=1004  <time>
-log        GET /?id=1%27%20OR%20%271%27%3D%271  policy=blog/blog  reason=rule  rules=942100,949110  interrupting=949110  <time>
-deny  403  GET /?debug=true  policy=shop/api  reason=rule  rules=1100  interrupting=1100  <time>
+deny  403  GET /products/42  policy=shop/shop  reason=rule  rules=913100,1004  interrupting=1004  matches=913100@REQUEST_HEADERS:User-Agent,1004@REQUEST_HEADERS:User-Agent  score=5  <time>
+log        GET /?id=1%27%20OR%20%271%27%3D%271  policy=blog/blog  reason=rule  rules=942100,949110  interrupting=949110  matches=942100@ARGS:id,949110@TX:blocking_inbound_anomaly_score  score=5  <time>
+deny  403  GET /?debug=true  policy=shop/api  reason=rule  rules=1100  interrupting=1100  matches=1100@ARGS:debug  <time>
 allow      GET /?id=1%27%20OR%20%271%27%3D%271  policy=shop/api  <time>

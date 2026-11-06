@@ -226,6 +226,7 @@ func TestInkwallConfigValidation(t *testing.T) {
       requests: {cpu: 500m, memory: 256Mi}
       limits: {memory: 512Mi}
     socketDir: /var/run/inkwall
+    logLevel: Warn
   integrations:
   - controller: traefik
     selector: {matchLabels: {app.kubernetes.io/name: traefik}}
@@ -247,6 +248,7 @@ func TestInkwallConfigValidation(t *testing.T) {
 		{name: "integration listed twice", doc: inkwallConfig("default", "  integrations: [{controller: traefik}, {controller: traefik}]\n"), wantErr: "Duplicate value"},
 		{name: "empty selector", doc: inkwallConfig("default", "  integrations: [{controller: traefik, selector: {}}]\n"), wantErr: "selector must not be empty"},
 		{name: "selector with empty labels", doc: inkwallConfig("default", "  integrations: [{controller: traefik, selector: {matchLabels: {}}}]\n"), wantErr: "selector must not be empty"},
+		{name: "unknown log level", doc: inkwallConfig("default", "  engine: {logLevel: verbose}\n"), wantErr: `Unsupported value: "verbose"`},
 		{name: "selector by expression", doc: inkwallConfig("default", "  integrations: [{controller: traefik, selector: {matchExpressions: [{key: app, operator: In, values: [edge]}]}}]\n")},
 	})
 }

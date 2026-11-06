@@ -10,6 +10,7 @@ package injection
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -64,6 +65,8 @@ type Sidecar struct {
 	BundleSecret string
 	// DenyBeforeBundle rejects requests until the engine has a bundle.
 	DenyBeforeBundle bool
+	// LogLevel is the engine's --log-level, empty for its default.
+	LogLevel string
 	// Args are the adapter's command and its own flags, e.g.
 	// ["forward-auth"].
 	Args []string
@@ -97,6 +100,7 @@ func (s Sidecar) Configured(e wafv1alpha1.EngineSpec) Sidecar {
 	}
 	s.Resources = e.Resources
 	s.DenyBeforeBundle = e.BootstrapMode == wafv1alpha1.BootstrapDenyAll
+	s.LogLevel = strings.ToLower(string(e.LogLevel))
 	return s
 }
 
@@ -195,6 +199,9 @@ func Engine(s Sidecar) (corev1.Container, []corev1.Volume) {
 	}
 	if s.DenyBeforeBundle {
 		args = append(args, "--bootstrap=deny")
+	}
+	if s.LogLevel != "" {
+		args = append(args, "--log-level="+s.LogLevel)
 	}
 
 	resources := defaultResources()

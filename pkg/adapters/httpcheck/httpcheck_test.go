@@ -116,6 +116,12 @@ func TestBlockMode(t *testing.T) {
 	if out.GetInterruptingRuleId() == 0 || !slices.Contains(out.GetRuleIds(), 942100) {
 		t.Fatalf("sqli: rule IDs %v (interrupting %d), want 942100 among them", out.GetRuleIds(), out.GetInterruptingRuleId())
 	}
+	// Where the rules matched, by variable name, and the score (#354).
+	if !slices.ContainsFunc(out.GetMatches(), func(m *enginev1.RuleMatch) bool {
+		return m.GetRuleId() == 942100 && m.GetVariable() == "ARGS:id"
+	}) || out.GetAnomalyScore() <= 0 {
+		t.Fatalf("sqli: matches %v, score %d; want 942100 on ARGS:id and a score", out.GetMatches(), out.GetAnomalyScore())
+	}
 
 	out = send(t, h, checkRequest("POST", "/comments", "application/x-www-form-urlencoded", "comment=%3Cscript%3Ealert(1)%3C%2Fscript%3E"))
 	if out.GetAction() != enginev1.Action_ACTION_DENY {

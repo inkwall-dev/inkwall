@@ -152,7 +152,26 @@ type EngineSpec struct {
 	// +kubebuilder:default=AllowAll
 	// +optional
 	BootstrapMode BootstrapMode `json:"bootstrapMode,omitempty"`
+
+	// LogLevel is the engines' log level: Debug, Info, Warn or Error.
+	// Security events are logged at Warn, so Error hides them (they still
+	// go to the operator). Unset: the engine's default, Info. Applies to
+	// pods injected from then on.
+	// +optional
+	LogLevel LogLevel `json:"logLevel,omitempty"`
 }
+
+// LogLevel is an engine's log level.
+// +kubebuilder:validation:Enum=Debug;Info;Warn;Error
+type LogLevel string
+
+// Engine log levels.
+const (
+	LogLevelDebug LogLevel = "Debug"
+	LogLevelInfo  LogLevel = "Info"
+	LogLevelWarn  LogLevel = "Warn"
+	LogLevelError LogLevel = "Error"
+)
 
 // IntegrationSpec overrides discovery for one proxy controller.
 type IntegrationSpec struct {

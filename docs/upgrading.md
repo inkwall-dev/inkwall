@@ -1,11 +1,12 @@
 # Upgrading
 
-This guide upgrades an Inkwall installation from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
+This guide upgrades an Inkwall installation from 0.4.x to 0.5.0, from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
 0.3.0, and from 0.1.x (0.1.0 to 0.1.5) to 0.2.2, the latest 0.2 release, and lists what changes on
 the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 ## Contents
 
+- [From 0.4.x to 0.5.0](#from-04x-to-050)
 - [From 0.4.0 to 0.4.1](#from-040-to-041)
 - [From 0.3.x to 0.4.0](#from-03x-to-040)
 - [From 0.3.0 to 0.3.1](#from-030-to-031)
@@ -24,6 +25,22 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
   - [Upgrading the chart](#upgrading-the-chart)
   - [Checking it worked](#checking-it-worked)
   - [Rolling back](#rolling-back)
+
+## From 0.4.x to 0.5.0
+
+What changes by itself:
+
+- **Security event log lines say where rules matched, and are rate-limited.** Each line has
+  `matches`, the rule and the variable it matched (`{"rule_id":942100,"variable":"ARGS:q"}`),
+  never the value. An engine logs at most 10 lines per second for each policy and rule (the
+  engine's `--event-log-rate`); the rest are counted in
+  `inkwall_security_event_logs_suppressed_total`, and still go to the operator. A log pipeline
+  that counts attacks from the lines should count from the metrics or the events instead.
+- **`inkwallctl test` prints `rule@variable` and the score** (`matches=942100@ARGS:q  score=5`),
+  after `interrupting=`; `--json` has `matches` and `anomaly_score`. A script that parses the
+  text output by position should take the time from the end of the line.
+- **The engine has `--log-level`**, and `InkwallConfig.spec.engine.logLevel` sets it on engines
+  injected from then on. Unset, nothing changes.
 
 ## From 0.4.0 to 0.4.1
 
