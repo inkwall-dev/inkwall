@@ -387,7 +387,10 @@ type Bundle struct {
 	// answers a request to /.well-known/inkwall-probe/ whose X-Inkwall-Probe
 	// header is a MAC under this key, so the operator can tell that HAProxy
 	// runs the filter on a route. 32 random bytes, or empty: no probes.
-	ProbeKey      []byte `protobuf:"bytes,9,opt,name=probe_key,json=probeKey,proto3" json:"probe_key,omitempty"`
+	ProbeKey []byte `protobuf:"bytes,9,opt,name=probe_key,json=probeKey,proto3" json:"probe_key,omitempty"`
+	// What the engines' security events may carry
+	// (InkwallConfig.spec.events). Unset: the defaults.
+	Events        *EventsConfig `protobuf:"bytes,10,opt,name=events,proto3" json:"events,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -485,6 +488,83 @@ func (x *Bundle) GetProbeKey() []byte {
 	return nil
 }
 
+func (x *Bundle) GetEvents() *EventsConfig {
+	if x != nil {
+		return x.Events
+	}
+	return nil
+}
+
+// EventsConfig redacts the security events engines send to the operator
+// (0002 §8.3). The engine always redacts cookies, response bodies, the
+// Authorization, Cookie, Set-Cookie and Proxy-Authorization headers, and
+// arguments and headers whose names look like credentials; these add to
+// that.
+type EventsConfig struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// More header names whose values leave no snippet, matched without
+	// regard to case.
+	RedactHeaders []string `protobuf:"bytes,1,rep,name=redact_headers,json=redactHeaders,proto3" json:"redact_headers,omitempty"`
+	// More argument-name patterns: a match on an argument whose name
+	// contains one, without regard to case, leaves no snippet.
+	RedactArguments []string `protobuf:"bytes,2,rep,name=redact_arguments,json=redactArguments,proto3" json:"redact_arguments,omitempty"`
+	// Send no snippets at all.
+	NoSnippets    bool `protobuf:"varint,3,opt,name=no_snippets,json=noSnippets,proto3" json:"no_snippets,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EventsConfig) Reset() {
+	*x = EventsConfig{}
+	mi := &file_bundle_v1_bundle_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EventsConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EventsConfig) ProtoMessage() {}
+
+func (x *EventsConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_bundle_v1_bundle_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EventsConfig.ProtoReflect.Descriptor instead.
+func (*EventsConfig) Descriptor() ([]byte, []int) {
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *EventsConfig) GetRedactHeaders() []string {
+	if x != nil {
+		return x.RedactHeaders
+	}
+	return nil
+}
+
+func (x *EventsConfig) GetRedactArguments() []string {
+	if x != nil {
+		return x.RedactArguments
+	}
+	return nil
+}
+
+func (x *EventsConfig) GetNoSnippets() bool {
+	if x != nil {
+		return x.NoSnippets
+	}
+	return false
+}
+
 // Policy is one WAFPolicy, applied to the requests its routes match. A
 // request matching no route of any policy is not inspected.
 type Policy struct {
@@ -524,7 +604,7 @@ type Policy struct {
 
 func (x *Policy) Reset() {
 	*x = Policy{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[2]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -536,7 +616,7 @@ func (x *Policy) String() string {
 func (*Policy) ProtoMessage() {}
 
 func (x *Policy) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[2]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -549,7 +629,7 @@ func (x *Policy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Policy.ProtoReflect.Descriptor instead.
 func (*Policy) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{2}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Policy) GetId() string {
@@ -656,7 +736,7 @@ type RouteMatch struct {
 
 func (x *RouteMatch) Reset() {
 	*x = RouteMatch{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[3]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -668,7 +748,7 @@ func (x *RouteMatch) String() string {
 func (*RouteMatch) ProtoMessage() {}
 
 func (x *RouteMatch) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[3]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -681,7 +761,7 @@ func (x *RouteMatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteMatch.ProtoReflect.Descriptor instead.
 func (*RouteMatch) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{3}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *RouteMatch) GetHost() string {
@@ -724,7 +804,7 @@ type PathMatch struct {
 
 func (x *PathMatch) Reset() {
 	*x = PathMatch{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[4]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -736,7 +816,7 @@ func (x *PathMatch) String() string {
 func (*PathMatch) ProtoMessage() {}
 
 func (x *PathMatch) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[4]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -749,7 +829,7 @@ func (x *PathMatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PathMatch.ProtoReflect.Descriptor instead.
 func (*PathMatch) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{4}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *PathMatch) GetType() PathMatchType {
@@ -784,7 +864,7 @@ type RuleSetBinding struct {
 
 func (x *RuleSetBinding) Reset() {
 	*x = RuleSetBinding{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[5]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -796,7 +876,7 @@ func (x *RuleSetBinding) String() string {
 func (*RuleSetBinding) ProtoMessage() {}
 
 func (x *RuleSetBinding) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[5]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -809,7 +889,7 @@ func (x *RuleSetBinding) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RuleSetBinding.ProtoReflect.Descriptor instead.
 func (*RuleSetBinding) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{5}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *RuleSetBinding) GetRuleSetId() string {
@@ -862,7 +942,7 @@ type CRSSettings struct {
 
 func (x *CRSSettings) Reset() {
 	*x = CRSSettings{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[6]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -874,7 +954,7 @@ func (x *CRSSettings) String() string {
 func (*CRSSettings) ProtoMessage() {}
 
 func (x *CRSSettings) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[6]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -887,7 +967,7 @@ func (x *CRSSettings) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CRSSettings.ProtoReflect.Descriptor instead.
 func (*CRSSettings) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{6}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *CRSSettings) GetAllowedMethods() []string {
@@ -934,7 +1014,7 @@ type RuleSet struct {
 
 func (x *RuleSet) Reset() {
 	*x = RuleSet{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[7]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -946,7 +1026,7 @@ func (x *RuleSet) String() string {
 func (*RuleSet) ProtoMessage() {}
 
 func (x *RuleSet) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[7]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -959,7 +1039,7 @@ func (x *RuleSet) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RuleSet.ProtoReflect.Descriptor instead.
 func (*RuleSet) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{7}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *RuleSet) GetId() string {
@@ -1029,7 +1109,7 @@ type Exclusion struct {
 
 func (x *Exclusion) Reset() {
 	*x = Exclusion{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[8]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1041,7 +1121,7 @@ func (x *Exclusion) String() string {
 func (*Exclusion) ProtoMessage() {}
 
 func (x *Exclusion) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[8]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1054,7 +1134,7 @@ func (x *Exclusion) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Exclusion.ProtoReflect.Descriptor instead.
 func (*Exclusion) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{8}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Exclusion) GetRuleIds() []uint32 {
@@ -1094,7 +1174,7 @@ type BodyConfig struct {
 
 func (x *BodyConfig) Reset() {
 	*x = BodyConfig{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[9]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1106,7 +1186,7 @@ func (x *BodyConfig) String() string {
 func (*BodyConfig) ProtoMessage() {}
 
 func (x *BodyConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[9]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1119,7 +1199,7 @@ func (x *BodyConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BodyConfig.ProtoReflect.Descriptor instead.
 func (*BodyConfig) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{9}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *BodyConfig) GetInspect() bool {
@@ -1170,7 +1250,7 @@ type WebSocketConfig struct {
 
 func (x *WebSocketConfig) Reset() {
 	*x = WebSocketConfig{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[10]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1182,7 +1262,7 @@ func (x *WebSocketConfig) String() string {
 func (*WebSocketConfig) ProtoMessage() {}
 
 func (x *WebSocketConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[10]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1195,7 +1275,7 @@ func (x *WebSocketConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WebSocketConfig.ProtoReflect.Descriptor instead.
 func (*WebSocketConfig) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{10}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *WebSocketConfig) GetAllowedOrigins() []string {
@@ -1240,7 +1320,7 @@ type ResponseConfig struct {
 
 func (x *ResponseConfig) Reset() {
 	*x = ResponseConfig{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[11]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1252,7 +1332,7 @@ func (x *ResponseConfig) String() string {
 func (*ResponseConfig) ProtoMessage() {}
 
 func (x *ResponseConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[11]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1265,7 +1345,7 @@ func (x *ResponseConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResponseConfig.ProtoReflect.Descriptor instead.
 func (*ResponseConfig) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{11}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ResponseConfig) GetInspect() bool {
@@ -1297,7 +1377,7 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\fSignedBundle\x12\x16\n" +
 	"\x06bundle\x18\x01 \x01(\fR\x06bundle\x12\x1c\n" +
 	"\tsignature\x18\x02 \x01(\fR\tsignature\x12\x15\n" +
-	"\x06key_id\x18\x03 \x01(\tR\x05keyId\"\xf3\x02\n" +
+	"\x06key_id\x18\x03 \x01(\tR\x05keyId\"\xac\x03\n" +
 	"\x06Bundle\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x04R\aversion\x12\x1d\n" +
 	"\n" +
@@ -1309,7 +1389,14 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\trule_sets\x18\x06 \x03(\v2\x1a.inkwall.bundle.v1.RuleSetR\bruleSets\x12\x1c\n" +
 	"\tsuspended\x18\a \x01(\bR\tsuspended\x12'\n" +
 	"\x0fpolicy_versions\x18\b \x03(\x04R\x0epolicyVersions\x12\x1b\n" +
-	"\tprobe_key\x18\t \x01(\fR\bprobeKey\"\xef\x04\n" +
+	"\tprobe_key\x18\t \x01(\fR\bprobeKey\x127\n" +
+	"\x06events\x18\n" +
+	" \x01(\v2\x1f.inkwall.bundle.v1.EventsConfigR\x06events\"\x81\x01\n" +
+	"\fEventsConfig\x12%\n" +
+	"\x0eredact_headers\x18\x01 \x03(\tR\rredactHeaders\x12)\n" +
+	"\x10redact_arguments\x18\x02 \x03(\tR\x0fredactArguments\x12\x1f\n" +
+	"\vno_snippets\x18\x03 \x01(\bR\n" +
+	"noSnippets\"\xef\x04\n" +
 	"\x06Policy\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x125\n" +
 	"\x06routes\x18\x02 \x03(\v2\x1d.inkwall.bundle.v1.RouteMatchR\x06routes\x12+\n" +
@@ -1405,7 +1492,7 @@ func file_bundle_v1_bundle_proto_rawDescGZIP() []byte {
 }
 
 var file_bundle_v1_bundle_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_bundle_v1_bundle_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_bundle_v1_bundle_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_bundle_v1_bundle_proto_goTypes = []any{
 	(PathMatchType)(0),            // 0: inkwall.bundle.v1.PathMatchType
 	(Mode)(0),                     // 1: inkwall.bundle.v1.Mode
@@ -1414,43 +1501,45 @@ var file_bundle_v1_bundle_proto_goTypes = []any{
 	(OversizeAction)(0),           // 4: inkwall.bundle.v1.OversizeAction
 	(*SignedBundle)(nil),          // 5: inkwall.bundle.v1.SignedBundle
 	(*Bundle)(nil),                // 6: inkwall.bundle.v1.Bundle
-	(*Policy)(nil),                // 7: inkwall.bundle.v1.Policy
-	(*RouteMatch)(nil),            // 8: inkwall.bundle.v1.RouteMatch
-	(*PathMatch)(nil),             // 9: inkwall.bundle.v1.PathMatch
-	(*RuleSetBinding)(nil),        // 10: inkwall.bundle.v1.RuleSetBinding
-	(*CRSSettings)(nil),           // 11: inkwall.bundle.v1.CRSSettings
-	(*RuleSet)(nil),               // 12: inkwall.bundle.v1.RuleSet
-	(*Exclusion)(nil),             // 13: inkwall.bundle.v1.Exclusion
-	(*BodyConfig)(nil),            // 14: inkwall.bundle.v1.BodyConfig
-	(*WebSocketConfig)(nil),       // 15: inkwall.bundle.v1.WebSocketConfig
-	(*ResponseConfig)(nil),        // 16: inkwall.bundle.v1.ResponseConfig
-	(*timestamppb.Timestamp)(nil), // 17: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),   // 18: google.protobuf.Duration
+	(*EventsConfig)(nil),          // 7: inkwall.bundle.v1.EventsConfig
+	(*Policy)(nil),                // 8: inkwall.bundle.v1.Policy
+	(*RouteMatch)(nil),            // 9: inkwall.bundle.v1.RouteMatch
+	(*PathMatch)(nil),             // 10: inkwall.bundle.v1.PathMatch
+	(*RuleSetBinding)(nil),        // 11: inkwall.bundle.v1.RuleSetBinding
+	(*CRSSettings)(nil),           // 12: inkwall.bundle.v1.CRSSettings
+	(*RuleSet)(nil),               // 13: inkwall.bundle.v1.RuleSet
+	(*Exclusion)(nil),             // 14: inkwall.bundle.v1.Exclusion
+	(*BodyConfig)(nil),            // 15: inkwall.bundle.v1.BodyConfig
+	(*WebSocketConfig)(nil),       // 16: inkwall.bundle.v1.WebSocketConfig
+	(*ResponseConfig)(nil),        // 17: inkwall.bundle.v1.ResponseConfig
+	(*timestamppb.Timestamp)(nil), // 18: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),   // 19: google.protobuf.Duration
 }
 var file_bundle_v1_bundle_proto_depIdxs = []int32{
-	17, // 0: inkwall.bundle.v1.Bundle.created_at:type_name -> google.protobuf.Timestamp
-	7,  // 1: inkwall.bundle.v1.Bundle.policies:type_name -> inkwall.bundle.v1.Policy
-	12, // 2: inkwall.bundle.v1.Bundle.rule_sets:type_name -> inkwall.bundle.v1.RuleSet
-	8,  // 3: inkwall.bundle.v1.Policy.routes:type_name -> inkwall.bundle.v1.RouteMatch
-	1,  // 4: inkwall.bundle.v1.Policy.mode:type_name -> inkwall.bundle.v1.Mode
-	2,  // 5: inkwall.bundle.v1.Policy.failure_mode:type_name -> inkwall.bundle.v1.FailureMode
-	18, // 6: inkwall.bundle.v1.Policy.timeout:type_name -> google.protobuf.Duration
-	10, // 7: inkwall.bundle.v1.Policy.rule_sets:type_name -> inkwall.bundle.v1.RuleSetBinding
-	13, // 8: inkwall.bundle.v1.Policy.exclusions:type_name -> inkwall.bundle.v1.Exclusion
-	14, // 9: inkwall.bundle.v1.Policy.body:type_name -> inkwall.bundle.v1.BodyConfig
-	15, // 10: inkwall.bundle.v1.Policy.websocket:type_name -> inkwall.bundle.v1.WebSocketConfig
-	16, // 11: inkwall.bundle.v1.Policy.responses:type_name -> inkwall.bundle.v1.ResponseConfig
-	9,  // 12: inkwall.bundle.v1.RouteMatch.path:type_name -> inkwall.bundle.v1.PathMatch
-	0,  // 13: inkwall.bundle.v1.PathMatch.type:type_name -> inkwall.bundle.v1.PathMatchType
-	11, // 14: inkwall.bundle.v1.RuleSetBinding.crs:type_name -> inkwall.bundle.v1.CRSSettings
-	3,  // 15: inkwall.bundle.v1.RuleSet.builtin:type_name -> inkwall.bundle.v1.BuiltinRuleSet
-	4,  // 16: inkwall.bundle.v1.BodyConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
-	4,  // 17: inkwall.bundle.v1.ResponseConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
-	18, // [18:18] is the sub-list for method output_type
-	18, // [18:18] is the sub-list for method input_type
-	18, // [18:18] is the sub-list for extension type_name
-	18, // [18:18] is the sub-list for extension extendee
-	0,  // [0:18] is the sub-list for field type_name
+	18, // 0: inkwall.bundle.v1.Bundle.created_at:type_name -> google.protobuf.Timestamp
+	8,  // 1: inkwall.bundle.v1.Bundle.policies:type_name -> inkwall.bundle.v1.Policy
+	13, // 2: inkwall.bundle.v1.Bundle.rule_sets:type_name -> inkwall.bundle.v1.RuleSet
+	7,  // 3: inkwall.bundle.v1.Bundle.events:type_name -> inkwall.bundle.v1.EventsConfig
+	9,  // 4: inkwall.bundle.v1.Policy.routes:type_name -> inkwall.bundle.v1.RouteMatch
+	1,  // 5: inkwall.bundle.v1.Policy.mode:type_name -> inkwall.bundle.v1.Mode
+	2,  // 6: inkwall.bundle.v1.Policy.failure_mode:type_name -> inkwall.bundle.v1.FailureMode
+	19, // 7: inkwall.bundle.v1.Policy.timeout:type_name -> google.protobuf.Duration
+	11, // 8: inkwall.bundle.v1.Policy.rule_sets:type_name -> inkwall.bundle.v1.RuleSetBinding
+	14, // 9: inkwall.bundle.v1.Policy.exclusions:type_name -> inkwall.bundle.v1.Exclusion
+	15, // 10: inkwall.bundle.v1.Policy.body:type_name -> inkwall.bundle.v1.BodyConfig
+	16, // 11: inkwall.bundle.v1.Policy.websocket:type_name -> inkwall.bundle.v1.WebSocketConfig
+	17, // 12: inkwall.bundle.v1.Policy.responses:type_name -> inkwall.bundle.v1.ResponseConfig
+	10, // 13: inkwall.bundle.v1.RouteMatch.path:type_name -> inkwall.bundle.v1.PathMatch
+	0,  // 14: inkwall.bundle.v1.PathMatch.type:type_name -> inkwall.bundle.v1.PathMatchType
+	12, // 15: inkwall.bundle.v1.RuleSetBinding.crs:type_name -> inkwall.bundle.v1.CRSSettings
+	3,  // 16: inkwall.bundle.v1.RuleSet.builtin:type_name -> inkwall.bundle.v1.BuiltinRuleSet
+	4,  // 17: inkwall.bundle.v1.BodyConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
+	4,  // 18: inkwall.bundle.v1.ResponseConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
+	19, // [19:19] is the sub-list for method output_type
+	19, // [19:19] is the sub-list for method input_type
+	19, // [19:19] is the sub-list for extension type_name
+	19, // [19:19] is the sub-list for extension extendee
+	0,  // [0:19] is the sub-list for field type_name
 }
 
 func init() { file_bundle_v1_bundle_proto_init() }
@@ -1458,7 +1547,7 @@ func file_bundle_v1_bundle_proto_init() {
 	if File_bundle_v1_bundle_proto != nil {
 		return
 	}
-	file_bundle_v1_bundle_proto_msgTypes[7].OneofWrappers = []any{
+	file_bundle_v1_bundle_proto_msgTypes[8].OneofWrappers = []any{
 		(*RuleSet_Builtin)(nil),
 		(*RuleSet_Seclang)(nil),
 	}
@@ -1468,7 +1557,7 @@ func file_bundle_v1_bundle_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bundle_v1_bundle_proto_rawDesc), len(file_bundle_v1_bundle_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   12,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

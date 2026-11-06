@@ -13,11 +13,13 @@ import (
 	"encoding/binary"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	enginev1 "github.com/inkwall-dev/inkwall/api/engine/v1"
 	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
@@ -41,6 +43,120 @@ const (
 // a snippet (0002 §8.3).
 var Redacted = []string{"Authorization", "Cookie", "Set-Cookie", "Proxy-Authorization"}
 
+// sensitiveParts are what an argument or header name that looks like a
+// credential contains, once lower-cased and without "-", "_" and ".":
+// a password, a secret, a token, an API or private key, authentication, a
+// session, a JWT, a bearer token or a payment card (0002 §8.3). Plain
+// substring search keeps the check linear and cheap on long names.
+var sensitiveParts = []string{
+	"pass", "pwd", "secret", "token", "apikey", "auth", "session", "sessid", "jwt", "bearer",
+	"credential", "privatekey", "card", "ccnum", "cvv", "cvc",
+}
+
+// Sensitive reports whether a name looks like a credential's, so that its
+// value never leaves the engine, not even as a snippet: it contains one of
+// sensitiveParts, or "ssn" between non-letters, without regard to case. It
+// errs on the side of redacting ("author" is sensitive).
+func Sensitive(name string) bool {
+	lower := strings.Map(foldASCII, name)
+	for i := 0; ; {
+		j := strings.Index(lower[i:], "ssn")
+		if j < 0 {
+			break
+		}
+		j += i
+		if (j == 0 || !isLetter(lower[j-1])) && (j+3 == len(lower) || !isLetter(lower[j+3])) {
+			return true
+		}
+		i = j + 1
+	}
+	compact := strings.Map(func(r rune) rune {
+		if r == '-' || r == '_' || r == '.' {
+			return -1
+		}
+		return r
+	}, lower)
+	for _, p := range sensitiveParts {
+		if strings.Contains(compact, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// foldASCII lower-cases r, and maps a rune that folds to an ASCII letter
+// (the Kelvin sign, the long s) to that letter.
+func foldASCII(r rune) rune {
+	if r < utf8.RuneSelf {
+		return unicode.ToLower(r)
+	}
+	for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+		if f < utf8.RuneSelf {
+			return unicode.ToLower(f)
+		}
+	}
+	return unicode.ToLower(r)
+}
+
+func isLetter(b byte) bool { return 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' }
+
+// Redaction is what a match leaves no snippet for, on top of the fixed
+// redaction: InkwallConfig.spec.events.redact, from the bundle. A nil
+// Redaction adds nothing.
+type Redaction struct {
+	headers    []string // lower case
+	arguments  []string // lower case
+	noSnippets bool
+}
+
+// NewRedaction returns the redaction a bundle's events config asks for
+// (nil: none beyond the fixed one).
+func NewRedaction(cfg *bundlev1.EventsConfig) *Redaction {
+	if cfg == nil {
+		return nil
+	}
+	r := &Redaction{noSnippets: cfg.GetNoSnippets()}
+	for _, h := range cfg.GetRedactHeaders() {
+		if h != "" {
+			r.headers = append(r.headers, strings.ToLower(h))
+		}
+	}
+	for _, a := range cfg.GetRedactArguments() {
+		if a != "" {
+			r.arguments = append(r.arguments, strings.ToLower(a))
+		}
+	}
+	return r
+}
+
+// header reports whether the configuration redacts header name.
+func (r *Redaction) header(name string) bool {
+	if r == nil {
+		return false
+	}
+	for _, h := range r.headers {
+		if strings.EqualFold(name, h) {
+			return true
+		}
+	}
+	return false
+}
+
+// argument reports whether the configuration redacts the arguments named
+// in s (an argument's name, or a raw query string or body).
+func (r *Redaction) argument(s string) bool {
+	if r == nil || len(r.arguments) == 0 {
+		return false
+	}
+	s = strings.ToLower(s)
+	for _, a := range r.arguments {
+		if strings.Contains(s, a) {
+			return true
+		}
+	}
+	return false
+}
+
 // Source is the engine and pod the events come from.
 type Source struct {
 	EngineID     string
@@ -48,6 +164,9 @@ type Source struct {
 	PodName      string
 	// BundleVersion returns the bundle being enforced (nil: 0).
 	BundleVersion func() uint64
+	// Redaction returns the bundle's redaction (nil, or nil returned: the
+	// fixed one only).
+	Redaction func() *Redaction
 }
 
 // New builds the event for a request and its verdict. path is the request's
@@ -84,19 +203,28 @@ func New(src Source, req *request.Request, path string, v pipeline.Verdict, now 
 	if v.Action == pipeline.ActionDeny {
 		ev.Status = int32(v.Status) // #nosec G115 -- an HTTP status
 	}
+	var redact *Redaction
+	if src.Redaction != nil {
+		redact = src.Redaction()
+	}
 	for _, m := range v.Matches[:min(len(v.Matches), maxMatches)] {
 		ev.Matches = append(ev.Matches, &eventsv1.Match{
 			RuleId:   int32(m.RuleID), // #nosec G115 -- rule IDs fit
 			Variable: truncate(m.Variable, maxVariable),
-			Snippet:  snippet(m.Variable, m.Value),
+			Snippet:  snippet(redact, m.Variable, m.Value),
 		})
 	}
 	return ev
 }
 
-// snippet is at most maxSnippet bytes of a matched value, none for a
-// redacted header or a cookie.
-func snippet(variable, value string) string {
+// snippet is at most maxSnippet bytes of a matched value: none for a
+// cookie, a response body, a credential header, an argument or header whose
+// name looks sensitive, a raw query string or body that names one, or
+// anything r redacts.
+func snippet(r *Redaction, variable, value string) string {
+	if r != nil && r.noSnippets {
+		return ""
+	}
 	name, key, _ := strings.Cut(variable, ":")
 	switch strings.ToUpper(name) {
 	case "REQUEST_COOKIES", "REQUEST_COOKIES_NAMES", "RESPONSE_COOKIES":
@@ -109,6 +237,21 @@ func snippet(variable, value string) string {
 			if strings.EqualFold(key, h) {
 				return ""
 			}
+		}
+		if Sensitive(key) || r.header(key) {
+			return ""
+		}
+	case "ARGS", "ARGS_GET", "ARGS_POST", "FILES", "MULTIPART_PART_HEADERS":
+		if Sensitive(key) || r.argument(key) {
+			return ""
+		}
+	case "QUERY_STRING", "REQUEST_URI", "REQUEST_URI_RAW", "REQUEST_LINE", "REQUEST_BODY", "FULL_REQUEST":
+		// The whole query string or body: its argument names are in the
+		// value. A value in the snippet comes after its name, so the
+		// snippet holds the whole name of any value it shows: checking it
+		// is enough, and bounded.
+		if snip := truncate(value, maxSnippet); Sensitive(snip) || r.argument(snip) {
+			return ""
 		}
 	}
 	return truncate(value, maxSnippet)

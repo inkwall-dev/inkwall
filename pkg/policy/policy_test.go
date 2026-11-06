@@ -21,6 +21,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/rules"
 )
 
 const sqli = "?id=1%27%20OR%20%271%27%3D%271"
@@ -698,6 +699,28 @@ func TestProbeKey(t *testing.T) {
 	h.Store(s)
 	if string(h.ProbeKey()) != string(key) {
 		t.Fatalf("probe key %q", h.ProbeKey())
+	}
+}
+
+// The bundle's events.redact reaches the events through the holder.
+func TestRedaction(t *testing.T) {
+	var h Holder
+	src := events.Source{Redaction: h.Redaction}
+	snippet := func() string {
+		v := pipeline.Verdict{Matches: []rules.Match{{RuleID: 942100, Variable: "ARGS:user_email", Value: "<script>"}}}
+		return events.New(src, &request.Request{}, "/", v, time.Now()).GetMatches()[0].GetSnippet()
+	}
+	if snippet() != "<script>" {
+		t.Fatal("redacted before the first bundle")
+	}
+	s, err := Compile(&bundlev1.Bundle{Version: 1, Events: &bundlev1.EventsConfig{RedactArguments: []string{"email"}}},
+		Options{Evaluators: NewEvaluators()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Store(s)
+	if got := snippet(); got != "" {
+		t.Fatalf("snippet %q with the bundle's redaction", got)
 	}
 }
 

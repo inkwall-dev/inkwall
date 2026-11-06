@@ -16,6 +16,7 @@ builds them into a signed [bundle](../../../docs/glossary.md#bundle), serves the
 - [Connecting to a control plane](#connecting-to-a-control-plane)
 - [Rotating the signing key](#rotating-the-signing-key)
 - [Suspending inspection](#suspending-inspection)
+- [Redacting security events](#redacting-security-events)
 - [Uninstalling](#uninstalling)
   - [Turning injection off](#turning-injection-off)
   - [Deleting a policy](#deleting-a-policy)
@@ -265,6 +266,42 @@ Each policy is `Enforced` again once every engine runs the bundle that resumes i
 The switch works even when policy changes don't fit the bundle (policies `Accepted=False`, reason
 `BundleTooLarge`): the bundle the engines run is published again, suspended, and once resumed, they
 run it as before.
+
+## Redacting security events
+
+Each security event an engine sends to the operator (and on to the control plane, when one is
+connected) names the rules that matched, the variable each matched (`ARGS:q`) and a snippet: at
+most 64 bytes of what it matched. The engine never sends a snippet of:
+
+- cookies, response bodies, and the `Authorization`, `Cookie`, `Set-Cookie` and
+  `Proxy-Authorization` headers;
+- an argument or a header whose name looks like a credential: it contains, in any case and
+  ignoring `-`, `_` and `.`, `pass`, `pwd`, `secret`, `token`, `apikey`, `auth`, `session`,
+  `sessid`, `jwt`, `bearer`, `credential`, `privatekey`, `card`, `ccnum`, `cvv`, `cvc`, or `ssn`
+  as a word.
+  `ARGS:password`, `ARGS_POST:token`, `ARGS_POST:json.user.Password` and `X-Api-Key` leave none,
+  `ARGS:q` keeps its snippet. Some harmless names match (`author`): a missing snippet is the safe
+  mistake;
+- a whole query string or body (`QUERY_STRING`, `REQUEST_URI`, `REQUEST_BODY`) whose snippet
+  contains one of those names.
+
+`spec.events.redact` on the `InkwallConfig` adds to that:
+
+```yaml
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: InkwallConfig
+metadata:
+  name: default
+spec:
+  events:
+    redact:
+      headers: [X-Tenant-Secret]   # header names, any case
+      arguments: [email, phone]    # argument-name parts, any case: user_email too
+      snippets: false              # or send no snippets at all
+```
+
+The engines get it with the next bundle, within seconds; events already sent keep their snippets.
+Engine logs never carry snippets, whatever this says.
 
 ## Uninstalling
 
