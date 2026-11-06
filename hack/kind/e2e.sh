@@ -29,38 +29,7 @@ GATEWAY_API_VERSION=v1.7.0  # sigs.k8s.io/gateway-api in go.mod
 KUBECTL=(kubectl --context "kind-$CLUSTER")
 SQLI='/?id=1%27%20OR%20%271%27%3D%271'
 
-failures=0
-ok() { printf 'ok    %s\n' "$1"; }
-fail() {
-  printf 'FAIL  %s\n' "$1"
-  failures=$((failures + 1))
-}
-
-# check DESCRIPTION COMMAND...: one try.
-check() {
-  local what=$1
-  shift
-  if "$@" >/dev/null 2>&1; then
-    ok "$what"
-  else
-    fail "$what"
-  fi
-}
-
-# eventually DESCRIPTION COMMAND...: retries for up to 60s; a failure is
-# counted, and the test goes on.
-eventually() {
-  local what=$1
-  shift
-  for _ in $(seq 120); do
-    if "$@" >/dev/null 2>&1; then
-      ok "$what"
-      return 0
-    fi
-    sleep 0.5
-  done
-  fail "$what"
-}
+. hack/kind/lib.sh
 
 code() {
   curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" "http://127.0.0.1:$PORT$1" || true

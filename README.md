@@ -135,11 +135,15 @@ Once the policy is `Ready`, every engine enforces it. Send an attack to check:
 
 ```console
 $ kubectl get wafpolicy -n shop
-NAME   MODE    READY   BUNDLE   AGE
-web    Block   True    2        3s
+NAME   MODE    READY   REASON   BUNDLE   AGE
+web    Block   True    Ready    2        3s
 $ curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: shop.example.com' "http://$TRAEFIK/?id=1%27%20OR%20%271%27%3D%271"
 403
 ```
+
+`REASON` says why a policy isn't `Ready`. `inkwallctl status` checks the whole cluster: the
+proxies, the policies that aren't `Ready`, and the engines, with what to do
+([Troubleshooting](docs/troubleshooting.md#cluster-status)).
 
 **Responses.** Add `responses: {inspect: true}` to a policy to inspect what the app answers too,
 for data leaks (SQL errors, stack traces, directory listings: the Core Rule Set's `RESPONSE-95x`
@@ -271,7 +275,8 @@ Tracked on the [project board](https://github.com/orgs/inkwall-dev/projects/1) a
 make check        # lint, tests, vulnerability scan, docs checks
 make crs-test     # OWASP CRS regression suite through the proxy
 make kind-up      # kind cluster with a demo behind the engine and Traefik
-make kind-e2e     # operator end to end on kind (what CI runs)
+make kind-e2e     # operator end to end on kind, every proxy in turn (CI: one job per proxy)
+make kind-e2e-traefik  # one proxy: also -raw-envoy, -envoy-gateway, -istio, -haproxy
 ```
 
 `make help` lists every target. The design docs are in [`docs/design`](docs/design/README.md);
