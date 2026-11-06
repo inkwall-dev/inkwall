@@ -48,3 +48,9 @@ const (
 	SourceLabel = "inkwall.dev/source"
 	SourceSaaS  = "saas"
 )
+
+// CIDR is an IPv4 or IPv6 prefix (10.0.0.0/8) or address.
+// +kubebuilder:validation:MinLength=2
+// +kubebuilder:validation:MaxLength=49
+// +kubebuilder:validation:Pattern=`^[0-9A-Fa-f.:]+(/[0-9]{1,3})?$`
+type CIDR string

@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/pkg/iplist"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/router"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
@@ -43,6 +44,7 @@ const PolicyWebhookName = "wafpolicies.waf.inkwall.dev"
 // +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafruleset,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=wafrulesets,verbs=create;update,versions=v1alpha1,name=wafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
 // +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-clusterwafruleset,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=clusterwafrulesets,verbs=create;update,versions=v1alpha1,name=clusterwafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
 // +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafpolicy,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=wafpolicies,verbs=create;update,versions=v1alpha1,name=wafpolicies.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
+// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafiplist,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=wafiplists,verbs=create;update,versions=v1alpha1,name=wafiplists.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
 //
 // Deletes go to the same webhooks only for the control plane's objects (the
 // objectSelector), so deleting any other object never needs the operator.
@@ -70,6 +72,10 @@ func Setup(mgr manager.Manager, inject *PodInjector, guard *SourceGuard) error {
 	}
 	if err := builder.WebhookManagedBy(mgr, &wafv1alpha1.ClusterWAFRuleSet{}).
 		WithValidator(specValidator[*wafv1alpha1.ClusterWAFRuleSet]{validateClusterWAFRuleSet, guard}).Complete(); err != nil {
+		return err
+	}
+	if err := builder.WebhookManagedBy(mgr, &wafv1alpha1.WAFIPList{}).
+		WithValidator(specValidator[*wafv1alpha1.WAFIPList]{validateWAFIPList, guard}).Complete(); err != nil {
 		return err
 	}
 	if err := builder.WebhookManagedBy(mgr, &wafv1alpha1.WAFPolicy{}).
@@ -109,7 +115,7 @@ func socketDirWarnings(old string, cfg *wafv1alpha1.InkwallConfig) admission.War
 
 // object is a WAF kind with a spec.
 type object interface {
-	*wafv1alpha1.WAFRuleSet | *wafv1alpha1.ClusterWAFRuleSet | *wafv1alpha1.WAFPolicy
+	*wafv1alpha1.WAFRuleSet | *wafv1alpha1.ClusterWAFRuleSet | *wafv1alpha1.WAFPolicy | *wafv1alpha1.WAFIPList
 	GetName() string
 	GetLabels() map[string]string
 }
@@ -152,8 +158,23 @@ func spec(obj any) any {
 		return o.Spec
 	case *wafv1alpha1.WAFPolicy:
 		return o.Spec
+	case *wafv1alpha1.WAFIPList:
+		return o.Spec
 	}
 	return obj
+}
+
+// validateWAFIPList accepts the entries the engine parses: one it refused
+// would leave the policies that use the list out of the bundle.
+func validateWAFIPList(l *wafv1alpha1.WAFIPList) (admission.Warnings, error) {
+	var errs field.ErrorList
+	path := field.NewPath("spec", "entries")
+	for i, e := range l.Spec.Entries {
+		if _, err := iplist.Parse([]string{string(e.CIDR)}); err != nil {
+			errs = append(errs, field.Invalid(path.Index(i).Child("cidr"), string(e.CIDR), err.Error()))
+		}
+	}
+	return nil, invalid("WAFIPList", l.Name, errs)
 }
 
 func invalid(kind, name string, errs field.ErrorList) error {
