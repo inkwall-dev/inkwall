@@ -1,11 +1,13 @@
 # Upgrading
 
-This guide upgrades an Inkwall installation from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
+This guide upgrades an Inkwall installation from 0.4.x to 0.5.0, from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
 0.3.0, and from 0.1.x (0.1.0 to 0.1.5) to 0.2.2, the latest 0.2 release, and lists what changes on
 the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 ## Contents
 
+- [From 0.4.x to 0.5.0](#from-04x-to-050)
+  - [What changes by itself in 0.5.0](#what-changes-by-itself-in-050)
 - [From 0.4.0 to 0.4.1](#from-040-to-041)
 - [From 0.3.x to 0.4.0](#from-03x-to-040)
   - [What's new in 0.4.0](#whats-new-in-040)
@@ -29,6 +31,19 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
   - [Upgrading the chart](#upgrading-the-chart)
   - [Checking it worked](#checking-it-worked)
   - [Rolling back](#rolling-back)
+
+## From 0.4.x to 0.5.0
+
+### What changes by itself in 0.5.0
+
+- **`Enforced` counts the engines that serve the policy.** A policy's `Enforced` condition (and
+  its `EnginesBehind`, `EngineNack` and `EnginesOutdated` reasons) now counts only the engines on
+  the proxy pods that serve its routes, once the operator has wired them all. An engine of one
+  proxy that is behind, rejects a bundle or is too old no longer makes the policies of another
+  proxy `Enforced=False`. A policy whose routes aren't all wired, and an engine whose pod the
+  operator doesn't know, still count everywhere. `inkwall_operator_engines` gets an
+  `integration` label (`unknown` for engines not matched to a proxy): sum over it for the old
+  totals.
 
 ## From 0.4.0 to 0.4.1
 

@@ -94,6 +94,9 @@ type Reconciler struct {
 	// pods won't have it. Every route the operator wired is unwired, and
 	// the policies are released from the finalizer.
 	Disabled bool
+	// Served gets the pods that serve each policy, for its Enforced
+	// condition; nil: not kept.
+	Served *distribution.ServedPods
 }
 
 // policyChanged: a WAFPolicy's spec, its deletion or its finalizers.
@@ -145,8 +148,9 @@ type report struct {
 	disabled bool
 	// kinds are the target kinds the integrations wire.
 	kinds []schema.GroupKind
-	// results are the integrations', in order.
+	// results are the integrations', in order, and names their names.
 	results        []*Result
+	names          []string
 	injectingSince time.Time
 }
 
@@ -196,6 +200,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		}
 		res, err := in.Wire(ctx, mine, r.Disabled)
 		if res == nil {
+			// Which pods serve what isn't known: every engine counts.
+			r.Served.Set(nil)
 			return reconcile.Result{}, errors.Join(append(errs, err)...)
 		}
 		if err != nil {
@@ -204,7 +210,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		record(in.Name(), res)
 		rep.kinds = append(rep.kinds, kinds...)
 		rep.results = append(rep.results, res)
+		rep.names = append(rep.names, in.Name())
 	}
+	r.Served.Set(servedPods(policies.Items, rep))
 	if err := r.report(ctx, policies.Items, rep); err != nil {
 		errs = append(errs, err)
 	}
@@ -231,6 +239,49 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		return reconcile.Result{}, errors.Join(errs...)
 	}
 	return reconcile.Result{RequeueAfter: resync}, nil
+}
+
+// servedPods maps each live policy whose targets are all wired to the
+// running pods of the proxies that serve them, by integration (#371). A
+// policy with a target that isn't wired (not served, failed, disabled,
+// missing) or no running pod is left out: every engine counts for it.
+func servedPods(policies []wafv1alpha1.WAFPolicy, rep *report) map[string]map[string]string {
+	if rep.disabled {
+		return nil
+	}
+	out := map[string]map[string]string{}
+next:
+	for i := range policies {
+		p := &policies[i]
+		if p.DeletionTimestamp != nil || len(p.Spec.TargetRefs) == 0 {
+			continue
+		}
+		pods := map[string]string{}
+		for _, ref := range p.Spec.TargetRefs {
+			t := targetOf(p.Namespace, ref)
+			served := false
+			for j, res := range rep.results {
+				s, ok := res.Targets[t]
+				if !ok || s.Unsupported != "" {
+					continue
+				}
+				if res.Disabled != "" || s.Failed != "" || !s.Wired {
+					continue next
+				}
+				served = true
+				for _, pod := range running(res.Pods) {
+					pods[pod.Namespace+"/"+pod.Name] = rep.names[j]
+				}
+			}
+			if !served {
+				continue next
+			}
+		}
+		if len(pods) > 0 {
+			out[p.Namespace+"/"+p.Name] = pods
+		}
+	}
+	return out
 }
 
 // unwiredFor returns an error while one of a deleted policy's targets is
