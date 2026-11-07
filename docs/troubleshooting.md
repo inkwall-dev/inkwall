@@ -174,6 +174,11 @@ an unknown built-in rule set) and `RuleCompileError` (rules that don't compile),
 |---|---|---|---|
 | `Suspended` | `Suspended` | The bundle the engines get suspends inspection (`spec.suspend`). | Resume when ready. |
 | `Suspended` | `NotSuspended` | Inspection runs. | |
+| `SigningKeyRotation` | `Idle` | No signing key rotation is in progress. | |
+| `SigningKeyRotation` | `Publishing` | A rotation published the next key; the active one signs until every engine trusts it. The message, and `status.signingKey.waitingFor`, say what it waits for. | If it lasts, restart the engines the message names ([key rotation](key-rotation.md#when-a-rotation-waits)). |
+| `SigningKeyRotation` | `Retiring` | The new key signs; the previous one stays trusted until every engine runs a bundle the new one signed. | As for `Publishing`. |
+| `IntegrationsConfigured` | `Configured` | The integrations' proxy pod selectors apply. | |
+| `IntegrationsConfigured` | `InvalidSelector` | A `spec.integrations` selector can't be applied (an unknown operator); the operator keeps the selectors it runs with. | Fix the selector the message names. |
 | `ControlPlaneConnected` | `Connected` | Connected to the control plane. | |
 | `ControlPlaneConnected` | `InvalidEndpoint` | `spec.controlPlane.endpoint` isn't a valid address. | Fix it. |
 | `ControlPlaneConnected` | `EnrollmentTokenMissing` | The enrollment token Secret, or its `token` key, is missing. | Create it ([control plane](control-plane.md)). |
