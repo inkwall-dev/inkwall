@@ -148,6 +148,7 @@ fi
 # (terminating) for a while: a request to one times out like one a policy
 # drops (#513).
 live_operator_ip() {
+  # shellcheck disable=SC2016 # a Go template, not a shell expression
   "${KUBECTL[@]}" -n "$NAMESPACE" get pods -l app.kubernetes.io/component=operator -o go-template='{{range .items}}{{$ip := .status.podIP}}{{if not .metadata.deletionTimestamp}}{{range .status.conditions}}{{if and (eq .type "Ready") (eq .status "True")}}{{$ip}}{{"\n"}}{{end}}{{end}}{{end}}{{end}}' |
     head -1
 }
