@@ -85,7 +85,7 @@ func TestIstioRouteProbe(t *testing.T) {
 
 	// Header and query matches: their values go in the probe over plain
 	// HTTP only. On an HTTPS listener the probe doesn't verify the
-	// certificate, so it doesn't send them there: not probeable (#19).
+	// certificate, so it doesn't send them there: not probeable (#507).
 	route.Spec.Rules[0].Matches[1].Headers = []gatewayv1.HTTPHeaderMatch{{Type: &headerExact, Name: "X-Api-Key", Value: "k"}}
 	route.Spec.Rules[0].Matches[1].QueryParams = []gatewayv1.HTTPQueryParamMatch{{Name: "v", Value: "2"}}
 	if _, why := st.istioRouteProbes(&istioRoute{route: route, gateways: []types.NamespacedName{{Namespace: "edge", Name: "gw"}}, sections: []string{"api"}}); !strings.Contains(why, "rule api") || !strings.Contains(why, "TLS") {
@@ -139,7 +139,7 @@ http:
 			t.Errorf("api target %+v", tg)
 		}
 	}
-	// A header match on a TLS server: not probeable (#19).
+	// A header match on a TLS server: not probeable (#507).
 	http0, _, _ := unstructured.NestedSlice(vs.Object, "spec", "http")
 	http0[0].(map[string]any)["match"] = []any{map[string]any{"uri": map[string]any{"prefix": "/api/"}, "headers": map[string]any{"x-api-key": map[string]any{"exact": "k"}}}}
 	_ = unstructured.SetNestedSlice(vs.Object, http0, "spec", "http")

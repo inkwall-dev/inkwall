@@ -464,7 +464,7 @@ func sendProbe(ctx context.Context, pod ProbePod, t ProbeTarget, req *http.Reque
 		//     route's rule matches (or the reserved probe path), and the
 		//     nonce and MAC of X-Inkwall-Probe, which proves only this one
 		//     request; a route's header and query match values, which may
-		//     be secrets, are never sent over TLS (sendsValues, overTLS);
+		//     be secrets, are never sent over TLS (sendsValues, overTLS, #507);
 		//   - the probe path is answered by the engine, never by the app.
 		// #nosec G402 -- see above
 		TLSClientConfig:   &tls.Config{ServerName: t.Host, InsecureSkipVerify: true, MinVersion: tls.VersionTLS12},
