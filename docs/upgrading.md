@@ -35,6 +35,8 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 What's new:
 
+- **Standalone mode reloads its rules without a restart**: on `SIGHUP`, or with `--watch-rules`
+  when the files change ([reloading the rules](standalone-proxy.md#reloading-the-rules)).
 - **Responses through Istio.** A policy with `responses.inspect` now has the responses of its
   Istio HTTPRoutes and VirtualServices inspected, as through Envoy Gateway: a response that leaks
   is replaced with 403 in `Block` mode and logged in `Detect` mode. Such a policy was
