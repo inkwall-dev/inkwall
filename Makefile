@@ -228,7 +228,7 @@ check-all: ## Run every job CI runs on a pull request, one after another: hours,
 	$(MAKE) check
 	$(MAKE) scale-test SCALE_CHANGES=5
 	$(MAKE) scale-test SCALE=wiring:500
-	$(MAKE) build generate-check helm-lint monitoring-test release-check crs-test
+	$(MAKE) build test-examples generate-check helm-lint monitoring-test release-check crs-test
 	$(MAKE) bench-compare
 	$(MAKE) image
 	$(MAKE) raw-envoy-e2e
