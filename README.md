@@ -151,8 +151,8 @@ proxies, the policies that aren't `Ready`, and the engines, with what to do
 
 **Responses.** Add `responses: {inspect: true}` to a policy to inspect what the app answers too,
 for data leaks (SQL errors, stack traces, directory listings: the Core Rule Set's `RESPONSE-95x`
-rules). In `Block` mode a response that leaks is replaced with 403. Only through Envoy Gateway:
-Traefik's ForwardAuth never sees responses, so on a Traefik route such a policy is
+rules). In `Block` mode a response that leaks is replaced with 403. Through Envoy Gateway and
+Istio: Traefik's ForwardAuth and HAProxy never send responses, so on their routes such a policy is
 `Programmed=False` (`ResponsesNotInspected`) while its requests are still inspected
 ([design](docs/design/0006-adapter-protocols.md#response-inspection-v040)).
 
@@ -256,8 +256,8 @@ an Envoy you configure yourself, in or out of Kubernetes, see [protecting raw En
   [connecting to a control plane](docs/control-plane.md).
 - A cluster's policies must fit in a bundle of 7,200 KiB compressed. Past 900 KiB, the bundle is
   split over several [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/).
-- Responses are inspected only through Envoy Gateway and raw Envoy (`responses`), never through
-  Traefik's ForwardAuth; a body over `responses.maxBytes` (64 KiB by default) has its prefix
+- Responses are inspected only through Envoy Gateway, Istio and raw Envoy (`responses`), never
+  through Traefik's ForwardAuth or HAProxy; a body over `responses.maxBytes` (64 KiB by default) has its prefix
   inspected, and streamed responses (Server-Sent Events, gRPC) pass with their headers inspected
   only.
 - gRPC: a call's path and metadata (headers) are inspected; the text in its protobuf messages
