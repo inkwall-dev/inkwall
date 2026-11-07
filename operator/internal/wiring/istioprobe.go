@@ -120,6 +120,7 @@ func (st *envoyState) istioRouteProbes(r *istioRoute) ([]ProbeJob, string) {
 	}
 	// A target per protected rule, from its first match the probe can make.
 	var ruleTargets []ProbeTarget
+	var ruleLabels []string
 	for i, rule := range hr.Spec.Rules {
 		ruleName := ""
 		if rule.Name != nil {
@@ -147,6 +148,7 @@ func (st *envoyState) istioRouteProbes(r *istioRoute) ([]ProbeJob, string) {
 			return nil, fmt.Sprintf("%s can't be probed: rule %s has only matches the probe can't make (%s)", name, label, why)
 		}
 		ruleTargets = append(ruleTargets, t)
+		ruleLabels = append(ruleLabels, label)
 	}
 	var hosts []string
 	for _, h := range hr.Spec.Hostnames {
@@ -172,8 +174,11 @@ func (st *envoyState) istioRouteProbes(r *istioRoute) ([]ProbeJob, string) {
 			if !ok {
 				continue
 			}
-			for _, t := range ruleTargets {
+			for k, t := range ruleTargets {
 				t.Host, t.Port, t.TLS = host, l.Port, l.Protocol == gatewayv1.HTTPSProtocolType
+				if t.TLS && sendsValues(t) {
+					return nil, fmt.Sprintf("%s can't be probed: rule %s %s, and Gateway %s serves it over HTTPS on port %d", name, ruleLabels[k], overTLS, gwKey, l.Port)
+				}
 				job.Targets = append(job.Targets, t)
 			}
 		}
@@ -277,6 +282,7 @@ func setHeader(h map[string]string, k, v string) map[string]string {
 func (st *istioIngressState) vsProbes(r *istioVSRoute) ([]ProbeJob, string) {
 	name := "VirtualService " + r.vs.GetName()
 	var targets []ProbeTarget
+	var labels []string
 	routes, _, _ := unstructured.NestedSlice(r.vs.Object, "spec", "http")
 	for i, rt := range routes {
 		route, _ := rt.(map[string]any)
@@ -300,6 +306,7 @@ func (st *istioIngressState) vsProbes(r *istioVSRoute) ([]ProbeJob, string) {
 			return nil, fmt.Sprintf("%s can't be probed: http route %s has only matches the probe can't make (%s)", name, label, why)
 		}
 		targets = append(targets, t)
+		labels = append(labels, label)
 	}
 	hosts, _, _ := unstructured.NestedStringSlice(r.vs.Object, "spec", "hosts")
 	var jobs []ProbeJob
@@ -340,8 +347,11 @@ func (st *istioIngressState) vsProbes(r *istioVSRoute) ([]ProbeJob, string) {
 			default:
 				continue
 			}
-			for _, t := range targets {
+			for k, t := range targets {
 				t.Host, t.Port, t.TLS = host, int32(port), tls // #nosec G115 -- a port
+				if t.TLS && sendsValues(t) {
+					return nil, fmt.Sprintf("%s can't be probed: http route %s %s, and Gateway %s serves it over TLS on port %d", name, labels[k], overTLS, gwKey, port)
+				}
 				job.Targets = append(job.Targets, t)
 			}
 		}
@@ -420,4 +430,14 @@ func withFilters(jobs []ProbeJob, filters string) []ProbeJob {
 		jobs[i].Fingerprint += "/" + filters
 	}
 	return jobs
+}
+
+// overTLS says why a target with header or query match values isn't
+// probed over TLS.
+const overTLS = "matches on header or query values, which the probe sends only over plain HTTP: over TLS it doesn't verify the gateway's certificate, so it doesn't send values that may be secrets"
+
+// sendsValues reports whether a target carries match values from the
+// route (headers, query parameters), which may be secrets.
+func sendsValues(t ProbeTarget) bool {
+	return len(t.Headers) > 0 || t.Query != ""
 }

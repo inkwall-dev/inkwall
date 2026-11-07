@@ -171,7 +171,7 @@ func TestTestingTable(t *testing.T) {
 		t.Fatal(err)
 	}
 	runRE := regexp.MustCompile(`\bmake ([a-z0-9-]+)(\$\{\{ matrix\.proxy \}\})?`)
-	proxies := []string{"traefik", "raw-envoy", "envoy-gateway", "istio", "haproxy"}
+	proxies := []string{"traefik", "raw-envoy", "envoy-gateway", "istio", "haproxy", "networkpolicy"}
 	for _, wf := range workflows {
 		b, err := os.ReadFile(wf)
 		if err != nil {

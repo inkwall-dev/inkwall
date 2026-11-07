@@ -35,6 +35,8 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 What's new:
 
+- **Standalone mode reloads its rules without a restart**: on `SIGHUP`, or with `--watch-rules`
+  when the files change ([reloading the rules](standalone-proxy.md#reloading-the-rules)).
 - **Responses through Istio.** A policy with `responses.inspect` now has the responses of its
   Istio HTTPRoutes and VirtualServices inspected, as through Envoy Gateway: a response that leaks
   is replaced with 403 in `Block` mode and logged in `Detect` mode. Such a policy was
@@ -86,6 +88,11 @@ What changes by itself:
   applied: until now only logged). `kubectl get inkwallconfig` shows the bundle version, the
   engines and the key's phase. Upgrade the chart first, for the new CRD fields: an older CRD drops
   them. See [key rotation](key-rotation.md#checking-it-worked).
+- **Policy condition metrics and Events.** The operator reports `inkwall_operator_policies`
+  (policies by condition, status and reason), the signing key's age and rotation phase, and failed
+  bundle publishes, and records a Kubernetes Event on a policy when its `Ready`, `Programmed` or
+  `Enforced` condition changes. Its ClusterRole gains `events` `create` and `patch` in every
+  namespace. See [monitoring](monitoring.md#operator).
 - **Istio routes are proven before they are `Programmed`.** The operator now sends its signed probe
   through every Istio gateway pod, on every listener a protected HTTPRoute or VirtualService is
   served on, and the engine answers it ([the operator's probe](istio.md#the-operators-probe)).
@@ -94,7 +101,8 @@ What changes by itself:
   pods itself). Some stay out of `Programmed`, and so out of `Ready`: routes whose policies are
   all in `Detect` mode stay `Unverified` (Envoy discards the engine's answer in observability
   mode), and routes the probe can't reach are `NotProbeable` (a rule whose every match is a
-  regular expression, a server with mutual TLS or passthrough). Before, they were `Programmed`
+  regular expression, a server with mutual TLS or passthrough, or a match on header or query
+  values over TLS, which the probe doesn't send there: they may be secrets). Before, they were `Programmed`
   without proof that the filter was on the route. Alerts on `Ready` should expect it.
 - **Enforced checks the newest field a policy needs.** A policy with fields of 0.4.0 and 0.5.0
   (`webSocket` and `ipLists`, say) was `Enforced` while a 0.4.x engine ran it; it is now
@@ -171,6 +179,9 @@ What changes by itself:
   for a request an adapter can't read. `InkwallConfig.spec.engine.jsonDenials` (the engine's
   `--json-denials`) answers clients that accept `application/json` with a JSON body; off by
   default.
+- **NetworkPolicies, off by default** (#387): `networkPolicy.enabled` in the chart, for clusters
+  that deny traffic by default. See
+  [Network flows](../deploy/helm/inkwall/README.md#network-flows) for what connects to what.
 - **The chart checks its values** (#386). A `values.schema.json` makes `helm install`, `upgrade`
   and `template` fail on a key the chart doesn't have, a wrong type, or a value outside its set,
   naming it, where 0.4.x ignored them. A typo such as `rbac.integration.traefik` was silently

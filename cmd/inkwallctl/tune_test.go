@@ -121,3 +121,16 @@ func TestTuneEventsFile(t *testing.T) {
 		t.Error("a log read as events: want exit 2")
 	}
 }
+
+// A rule ID out of int32's range (the bundle's type) is no rule: it isn't
+// wrapped into another rule's ID.
+func TestTuneRuleIDRange(t *testing.T) {
+	in := `{"policy":"shop/web","path":"/search","action":"ACTION_LOG","reason":"REASON_RULE","matches":[{"ruleId":"4294968238","variable":"ARGS:q"},{"ruleId":"942100","variable":"ARGS:q"}]}` + "\n"
+	evs, err := readTuneEvents(strings.NewReader(in), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 1 || len(evs[0].Matches) != 2 || evs[0].Matches[0].RuleID != 0 || evs[0].Matches[1].RuleID != 942100 {
+		t.Fatalf("matches %+v, want the out-of-range ID read as 0 (no rule)", evs[0].Matches)
+	}
+}
