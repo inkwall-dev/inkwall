@@ -168,7 +168,7 @@ func (st *envoyState) istioRouteProbes(r *istioRoute) ([]ProbeJob, string) {
 				continue
 			}
 			for _, t := range ruleTargets {
-				t.Host, t.Port, t.TLS = host, int32(l.Port), l.Protocol == gatewayv1.HTTPSProtocolType
+				t.Host, t.Port, t.TLS = host, l.Port, l.Protocol == gatewayv1.HTTPSProtocolType
 				job.Targets = append(job.Targets, t)
 			}
 		}
