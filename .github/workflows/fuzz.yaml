@@ -9,6 +9,11 @@
 # repository's logs and artifacts are public: the run's output and inputs are
 # encrypted to the maintainer's key (.github/fuzz-crash-key.asc), never
 # printed. Report a crash privately (SECURITY.md), not in an issue.
+#
+# The targets are every Fuzz function (hack/ci/fuzz-targets.sh), and each
+# keeps the corpus it grew (Go's fuzz cache) from night to night. A failing
+# scheduled run opens an issue that names the failing targets, nothing more
+# (hack/ci/report-scheduled.sh).
 name: fuzz
 
 on:
@@ -28,44 +33,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  targets:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: list
+        run: echo "matrix=$(hack/ci/fuzz-targets.sh)" >>"$GITHUB_OUTPUT"
+
   fuzz:
-    name: ${{ matrix.target }}
+    name: ${{ matrix.name }}
+    needs: targets
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { package: ./pkg/adapters/forwardauth, target: FuzzForwardAuth }
-          - { package: ./pkg/adapters/httpcheck, target: FuzzCheck }
-          - { package: ./pkg/adapters/proxy, target: FuzzProxy }
-          - { package: ./pkg/adapters/extproc, target: FuzzExtProc }
-          - { package: ./pkg/adapters/extproc, target: FuzzExtProcResponse }
-          - { package: ./pkg/adapters/spoe, target: FuzzSPOE }
-          - { package: ./pkg/adapters/spoe, target: FuzzVarint }
-          - { package: ./pkg/haproxyprobe, target: FuzzCheck }
-          - { package: ./pkg/adapters/internal/httpadapter, target: FuzzURIPath }
-          - { package: ./pkg/pipeline, target: FuzzWebSocketOrigin }
-          - { package: ./pkg/websocket, target: FuzzReader }
-          - { package: ./pkg/websocket, target: FuzzTracker }
-          - { package: ./pkg/adapters/internal/httpadapter, target: FuzzRequestID }
-          - { package: ./pkg/adapters/internal/httpadapter, target: FuzzGRPCDenial }
-          - { package: ./pkg/grpcwire, target: FuzzMessages }
-          - { package: ./pkg/pipeline, target: FuzzGRPCText }
-          - { package: ./pkg/clientip, target: FuzzResolve }
-          - { package: ./pkg/bundlekey, target: FuzzParse }
-          - { package: ./pkg/agent, target: FuzzApply }
-          - { package: ./pkg/agent, target: FuzzSecretBundle }
-          - { package: ./pkg/events, target: FuzzNew }
-          - { package: ./cmd/inkwallctl, target: FuzzSplitURL }
-          - { package: ./cmd/inkwallctl, target: FuzzFromRawHTTP }
-          - { package: ./cmd/inkwallctl, target: FuzzFromHAR }
+        include: ${{ fromJSON(needs.targets.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.x'
           check-latest: true
+      - id: cache
+        run: echo "fuzz=$(go env GOCACHE)/fuzz" >>"$GITHUB_OUTPUT"
+      # The corpus the target grew on earlier nights: a new key each run,
+      # restored from the latest. Interesting inputs only; a failing input
+      # goes to testdata/fuzz, never the cache.
+      - uses: actions/cache@v6
+        with:
+          path: ${{ steps.cache.outputs.fuzz }}
+          key: fuzz-${{ matrix.package }}-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-${{ matrix.package }}-${{ matrix.target }}-
       # The output names the failing input, so it goes to a file, not the log.
       - run: |
           if go test -run='^$' -fuzz="^${TARGET}\$" -fuzztime="${FUZZTIME}" "${PACKAGE}" >fuzz.log 2>&1; then
@@ -96,7 +97,37 @@ jobs:
       - if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: crashers-${{ matrix.target }}
+          name: crashers-${{ strategy.job-index }}-${{ matrix.target }}
           path: crashers.tar.gz.gpg
           if-no-files-found: ignore
           retention-days: 14
+
+  report:
+    needs: [targets, fuzz]
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          result=success
+          if [[ $TARGETS != success || $FUZZ == failure ]]; then
+            result=failure
+          elif [[ $FUZZ != success ]]; then
+            result=$FUZZ
+          fi
+          # The failing targets' names only: their output and inputs are
+          # encrypted (above).
+          failed=$(gh run view "$GITHUB_RUN_ID" --json jobs --jq '.jobs[] | select(.conclusion == "failure") | .name' | paste -sd, - | sed 's/,/, /g')
+          detail=
+          [[ -n $failed ]] && detail="Failing: $failed. Their inputs are in the run's encrypted artifacts; report a crash privately (SECURITY.md)."
+          hack/ci/report-scheduled.sh "$GITHUB_WORKFLOW" "$result" "$RUN_URL" "$detail"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TARGETS: ${{ needs.targets.result }}
+          FUZZ: ${{ needs.fuzz.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

@@ -21,6 +21,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# The versions under test (#393).
+# shellcheck source=hack/versions.env
+. hack/versions.env
 
 CLUSTER=${KIND_CLUSTER:-inkwall}
 OPERATOR_NS=inkwall-system
@@ -28,11 +31,9 @@ OPERATOR_NS=inkwall-system
 # namespace): a proxy namespace (hack/kind/operator.sh).
 NS=istio-e2e
 ISTIO_NS=istio-system
-# Istio 1.31.3, from its Helm charts, on the Gateway API's standard CRDs
-# (v1.7.0, as operator/go.mod).
-ISTIO_VERSION=1.31.3
+# Istio (ISTIO_VERSION), from its Helm charts, on the Gateway API's standard CRDs
+# (GATEWAY_API_VERSION, as operator/go.mod).
 ISTIO_REPO=https://blob.istio.io/istio-release/charts
-GATEWAY_API_VERSION=v1.7.0
 HOST=istio.e2e.example.com
 OPEN_HOST=open.istio.e2e.example.com
 VS_HOST=vs.istio.e2e.example.com
@@ -118,7 +119,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: traefik/whoami:v1.10.3
+          image: traefik/whoami:$WHOAMI_VERSION
           # --verbose logs each request: the held-body check looks for one.
           args: ["--port", "8080", "--verbose"]
 ---

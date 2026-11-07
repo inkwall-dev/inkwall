@@ -536,6 +536,17 @@ type istioFilterRoute struct {
 // when a body is held, Envoy's buffer limit raised to the largest body a
 // policy inspects.
 func istioPatches(routes []istioFilterRoute) []any {
+	patches, buffered := istioRoutePatches(routes)
+	base := istioBasePatches(buffered)
+	// The cluster, the routes' patches, then the listener's: the order the
+	// Gateway API wiring has always written.
+	return slices.Concat(base[:1], patches, base[1:])
+}
+
+// istioBasePatches are the patches a workload needs once, whatever its
+// routes: the engine's cluster and, when a route buffers request bodies,
+// the listeners' buffer limit.
+func istioBasePatches(buffered bool) []any {
 	patches := []any{map[string]any{
 		"applyTo": "CLUSTER",
 		"match":   map[string]any{"context": "GATEWAY"},
@@ -552,7 +563,20 @@ func istioPatches(routes []istioFilterRoute) []any {
 			}}}}},
 		}},
 	}}
-	buffered := false
+	if buffered {
+		patches = append(patches, map[string]any{
+			"applyTo": "LISTENER",
+			"match":   map[string]any{"context": "GATEWAY"},
+			"patch":   map[string]any{"operation": "MERGE", "value": map[string]any{"per_connection_buffer_limit_bytes": int64(envoyBufferLimit)}},
+		})
+	}
+	return patches
+}
+
+// istioRoutePatches are the routes' own patches: a disabled ext_proc filter
+// per route, enabled on its Envoy routes; buffered tells whether one
+// buffers request bodies.
+func istioRoutePatches(routes []istioFilterRoute) (patches []any, buffered bool) {
 	for _, r := range routes {
 		extProc, mode := istioExtProc(r.routeSettings)
 		patches = append(patches, map[string]any{
@@ -583,14 +607,7 @@ func istioPatches(routes []istioFilterRoute) []any {
 		}
 		buffered = buffered || r.buffered()
 	}
-	if buffered {
-		patches = append(patches, map[string]any{
-			"applyTo": "LISTENER",
-			"match":   map[string]any{"context": "GATEWAY"},
-			"patch":   map[string]any{"operation": "MERGE", "value": map[string]any{"per_connection_buffer_limit_bytes": int64(envoyBufferLimit)}},
-		})
-	}
-	return patches
+	return patches, buffered
 }
 
 // istioExtProc is a route's ext_proc filter config, from its policies'
