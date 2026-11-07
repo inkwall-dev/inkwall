@@ -969,7 +969,23 @@ latency only) and `evicted`. Reconcile duration is controller-runtime's own
 `inkwall_operator_engines{state,integration}` counts the engines by the integration whose pod runs
 them (`unknown` while an engine isn't matched to one, #371).
 
-**Not yet:** policy condition counts.
+**Policy conditions** (#378). `inkwall_operator_policies{condition,status,reason}` counts the
+policies by each of their four conditions (counts, not a label per policy, so 5,000 policies are a
+few dozen series). The signing key has `inkwall_operator_signing_key_age_seconds` and
+`inkwall_operator_signing_key_rotation_phase{phase}` (1 for the current phase), and
+`inkwall_operator_bundle_publish_failures_total{reason}` counts the bundles not published
+(`too_large`, `error`). All are the leader's.
+
+**Events** (#378). A change of a policy's `Ready`, `Programmed` or `Enforced` condition records
+one Kubernetes Event (`events.k8s.io/v1`) on the policy: `Warning` while it isn't `Ready`, the
+reason of the first condition that changed (`Ready` first), and each changed condition's status,
+reason and message as the note. So `kubectl describe wafpolicy` and event-based tooling see a
+policy go from `Ready` to `EngineNack`. A policy's Events are at least 30 s apart: changes within
+that are recorded together once it has passed, compared with the last Event, so a flapping
+condition records at most one Event per policy every 30 s, and at most one when it settles where
+it was. The first sight of a policy (a new leader starting) records none, so a restart doesn't
+replay every policy's state. The watcher keeps each policy's last state in memory: a few hundred
+bytes per policy. RBAC: `events` `create` and `patch` in every namespace.
 
 ### 4.9 Upstream sync (leader only)
 
@@ -1243,6 +1259,18 @@ the disabled integration's message and the chart's notes say. When Helm can't as
 
 Missing CRDs don't disable an integration: its wiring waits for them
 ([§4.4](#44-wiring-controller)).
+
+**NetworkPolicies (v0.5.0, #387).** The chart's `networkPolicy.enabled` (off by default) lets into
+the operator's pods what it needs: the webhook port and the probes from anywhere, the
+distribution port from the proxy namespaces, and the metrics port from anywhere. The webhook is
+open by default because the API server's address, as a network plugin sees it, varies by
+cluster (host network, a managed control plane, a konnectivity proxy): a narrower default would
+break injection and admission on clusters it doesn't fit, and a Pod webhook failing closed would
+keep proxy pods from starting. `webhookFrom` and `metricsFrom` narrow them. Egress is a separate
+opt-in (`networkPolicy.egress.enabled`), to any address on the API server's ports unless
+`apiServerCIDRs` names them, for the same reason. The chart never creates a default-deny policy:
+whether the namespace denies by default is the cluster's choice, and the engines' namespaces
+aren't the chart's. The Network flows table in the chart README lists every connection.
 
 **Not yet:**
 
