@@ -50,9 +50,7 @@ func TestIstioRouteProbe(t *testing.T) {
 		Rules: []gatewayv1.HTTPRouteRule{
 			{Name: ptr.To(gatewayv1.SectionName("api")), Matches: []gatewayv1.HTTPRouteMatch{
 				{Path: &gatewayv1.HTTPPathMatch{Type: &regex, Value: ptr.To("/v[0-9]+")}},
-				{Path: &gatewayv1.HTTPPathMatch{Type: &prefix, Value: ptr.To("/api")}, Method: ptr.To(gatewayv1.HTTPMethodPost),
-					Headers:     []gatewayv1.HTTPHeaderMatch{{Type: &headerExact, Name: "X-Tenant", Value: "a"}},
-					QueryParams: []gatewayv1.HTTPQueryParamMatch{{Name: "v", Value: "2"}}},
+				{Path: &gatewayv1.HTTPPathMatch{Type: &prefix, Value: ptr.To("/api")}, Method: ptr.To(gatewayv1.HTTPMethodPost)},
 			}},
 			{Name: ptr.To(gatewayv1.SectionName("health")), Matches: []gatewayv1.HTTPRouteMatch{
 				{Path: &gatewayv1.HTTPPathMatch{Type: &exact, Value: ptr.To("/healthz")}}}},
@@ -78,12 +76,29 @@ func TestIstioRouteProbe(t *testing.T) {
 			t.Errorf("target %+v: want the concrete host, port 80 or 443 over TLS", tg)
 		}
 	}
-	if api := got["/api"]; !api.Prefix || api.Method != "POST" || api.Headers["X-Tenant"] != "a" || api.Query != "v=2" {
+	if api := got["/api"]; !api.Prefix || api.Method != "POST" {
 		t.Errorf("api rule's target %+v", api)
 	}
 	if h := got["/healthz"]; h.Prefix {
 		t.Errorf("health rule's target %+v", h)
 	}
+
+	// Header and query matches: their values go in the probe over plain
+	// HTTP only. On an HTTPS listener the probe doesn't verify the
+	// certificate, so it doesn't send them there: not probeable (#19).
+	route.Spec.Rules[0].Matches[1].Headers = []gatewayv1.HTTPHeaderMatch{{Type: &headerExact, Name: "X-Api-Key", Value: "k"}}
+	route.Spec.Rules[0].Matches[1].QueryParams = []gatewayv1.HTTPQueryParamMatch{{Name: "v", Value: "2"}}
+	if _, why := st.istioRouteProbes(&istioRoute{route: route, gateways: []types.NamespacedName{{Namespace: "edge", Name: "gw"}}, sections: []string{"api"}}); !strings.Contains(why, "rule api") || !strings.Contains(why, "TLS") {
+		t.Errorf("header match over TLS: why %q", why)
+	}
+	plain := gw.DeepCopy()
+	plain.Spec.Listeners = plain.Spec.Listeners[:1]
+	st.gateways[types.NamespacedName{Namespace: "edge", Name: "gw"}] = plain
+	jobs, why = st.istioRouteProbes(&istioRoute{route: route, gateways: []types.NamespacedName{{Namespace: "edge", Name: "gw"}}, sections: []string{"api"}})
+	if why != "" || len(jobs) != 1 || len(jobs[0].Targets) != 1 || jobs[0].Targets[0].Headers["X-Api-Key"] != "k" || jobs[0].Targets[0].Query != "v=2" || jobs[0].Targets[0].TLS {
+		t.Errorf("header match over HTTP: jobs %+v, why %q", jobs, why)
+	}
+	st.gateways[types.NamespacedName{Namespace: "edge", Name: "gw"}] = gw
 
 	// Only regular expressions: not probeable.
 	route.Spec.Rules[1].Matches = []gatewayv1.HTTPRouteMatch{{Headers: []gatewayv1.HTTPHeaderMatch{{Type: &headerRegex, Name: "X-A", Value: ".*"}}}}
@@ -106,7 +121,7 @@ hosts: [shop.example.com]
 gateways: [istio-ingress/edge]
 http:
 - name: api
-  match: [{uri: {regex: "/v[0-9]+"}}, {uri: {prefix: /api/}, headers: {x-tenant: {exact: a}}}]
+  match: [{uri: {regex: "/v[0-9]+"}}, {uri: {prefix: /api/}}]
 - name: web
 `)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "istio-ingress", Name: "igw-1", UID: "u1"}, Status: corev1.PodStatus{PodIP: "10.0.0.9"}}
@@ -120,9 +135,16 @@ http:
 		if tg.Host != "shop.example.com" || (tg.Port == 443) != tg.TLS {
 			t.Errorf("target %+v", tg)
 		}
-		if tg.Path == "/api/" && (!tg.Prefix || tg.Headers["x-tenant"] != "a") {
+		if tg.Path == "/api/" && !tg.Prefix {
 			t.Errorf("api target %+v", tg)
 		}
+	}
+	// A header match on a TLS server: not probeable (#19).
+	http0, _, _ := unstructured.NestedSlice(vs.Object, "spec", "http")
+	http0[0].(map[string]any)["match"] = []any{map[string]any{"uri": map[string]any{"prefix": "/api/"}, "headers": map[string]any{"x-api-key": map[string]any{"exact": "k"}}}}
+	_ = unstructured.SetNestedSlice(vs.Object, http0, "spec", "http")
+	if _, why := st.vsProbes(r); !strings.Contains(why, "TLS") || !strings.Contains(why, "api") {
+		t.Errorf("header match over TLS: why %q", why)
 	}
 	// A mutual TLS server can't be probed.
 	servers, _, _ := unstructured.NestedSlice(gwObj.Object, "spec", "servers")

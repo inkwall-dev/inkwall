@@ -362,8 +362,10 @@ probes every route again at once.
   parameters and the method. A wildcard host is made concrete (`*.example.com`:
   `inkwall-probe.example.com`). Over TLS for an HTTPS listener or a `SIMPLE` TLS server, without
   checking the certificate (the MAC is the proof).
-- **Not probeable:** a rule (http route) whose every match is a regular expression, and a server
-  with mutual TLS or passthrough: `NotProbeable`, with the reason.
+- **Not probeable:** a rule (http route) whose every match is a regular expression, a server
+  with mutual TLS or passthrough, and a rule whose match has header or query values on an HTTPS
+  listener or TLS server: the probe doesn't verify the gateway's certificate, so it never sends
+  those values (they may be secrets, an API key) over TLS. `NotProbeable`, with the reason.
 - **Detect mode:** Envoy's observability mode discards the engine's answer, so a route whose
   policies are all in `Detect` mode stays `Unverified`.
 - The probe reaches the pods on their listener's port (the pod address and the Gateway listener's

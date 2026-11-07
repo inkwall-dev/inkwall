@@ -453,7 +453,20 @@ func sendProbe(ctx context.Context, pod ProbePod, t ProbeTarget, req *http.Reque
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, network, addr)
 		},
-		// #nosec G402 -- the probe's answer is authenticated by its MAC, not by the certificate
+		// The gateway's certificate isn't checked (CodeQL
+		// go/disabled-certificate-check): gateways serve certificates for
+		// their hosts, not for a pod address, often from a CA the operator
+		// doesn't know. Nothing here relies on it:
+		//   - the answer is authenticated by its MAC (an HMAC under the
+		//     bundle's probe key), not by the certificate: a party in the
+		//     middle can't make a route look proven;
+		//   - the request carries nothing secret: the host, a path the
+		//     route's rule matches (or the reserved probe path), and the
+		//     nonce and MAC of X-Inkwall-Probe, which proves only this one
+		//     request; a route's header and query match values, which may
+		//     be secrets, are never sent over TLS (sendsValues, overTLS);
+		//   - the probe path is answered by the engine, never by the app.
+		// #nosec G402 -- see above
 		TLSClientConfig:   &tls.Config{ServerName: t.Host, InsecureSkipVerify: true, MinVersion: tls.VersionTLS12},
 		DisableKeepAlives: true,
 	}
