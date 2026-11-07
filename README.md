@@ -12,7 +12,10 @@ to your routes. The engine runs OWASP [Coraza](https://coraza.io/) with the
 > [**Istio**](https://istio.io/latest/docs/) and their `HTTPRoute` routes, with Istio's `VirtualService` routes, and as a standalone reverse proxy in front of anything else. The API is
 > `v1alpha1` and will change. See [Limits](#limits) and the [roadmap](#roadmap).
 
-The [docs index](docs/README.md) lists every guide, reference and design doc.
+**New to Inkwall? Start with the [quickstart](docs/quickstart.md)**: a local kind cluster, the
+released chart, Traefik and a demo app, from nothing to a blocked attack in five minutes.
+[`examples/`](examples) has the same app behind Traefik, Envoy Gateway and Istio. The
+[docs index](docs/README.md) lists every guide, reference and design doc.
 
 ## Contents
 
@@ -48,7 +51,7 @@ The [docs index](docs/README.md) lists every guide, reference and design doc.
 
 ## Install
 
-You need [Kubernetes](https://kubernetes.io/docs/concepts/overview/) 1.29 or later and [Helm](https://helm.sh/docs/) 3. CI
+You need [Kubernetes](https://kubernetes.io/docs/concepts/overview/) 1.29 or later and [Helm](https://helm.sh/docs/) 3 or 4. CI
 tests on Kubernetes 1.34 and on kind's newest (1.37).
 
 `<version>` is a [release](https://github.com/inkwall-dev/inkwall/releases) without its `v`, the latest
@@ -292,14 +295,16 @@ Tracked on the [project board](https://github.com/orgs/inkwall-dev/projects/1) a
 ## Development
 
 ```sh
-make check        # lint, tests, vulnerability scan, docs checks
-make crs-test     # OWASP CRS regression suite through the proxy
+make check        # lint, unit tests, vulnerability scan, docs checks (minutes)
+make check-all    # every job CI runs on a pull request (hours; Docker and kind)
+make crs-test     # OWASP CRS regression suite through each adapter
 make kind-up      # kind cluster with a demo behind the engine and Traefik
 make kind-e2e     # operator end to end on kind, every proxy in turn (CI: one job per proxy)
 make kind-e2e-traefik  # one proxy: also -raw-envoy, -envoy-gateway, -istio, -haproxy
 ```
 
-`make help` lists every target. The design docs are in [`docs/design`](docs/design/README.md);
+`make help` lists every target; [CONTRIBUTING.md](CONTRIBUTING.md#development-and-testing) has
+the test tiers, what each needs, and when CI runs it. The design docs are in [`docs/design`](docs/design/README.md);
 start with the [component map](docs/design/0005-component-map.md).
 
 ## Contributing, security, license

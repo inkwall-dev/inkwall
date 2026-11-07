@@ -76,6 +76,14 @@ What changes by itself:
   applied: until now only logged). `kubectl get inkwallconfig` shows the bundle version, the
   engines and the key's phase. Upgrade the chart first, for the new CRD fields: an older CRD drops
   them. See [key rotation](key-rotation.md#checking-it-worked).
+- **The chart keeps the operator's settings of the Pod webhooks** (`failurePolicy`,
+  `objectSelector`, `namespaceSelector`). The operator sets `failurePolicy` to `Fail` while a
+  policy blocks; an upgrade used to render `Ignore` until the operator set it again, and Helm 4,
+  which applies server-side, refused the upgrade (a conflict with the operator's fields). An
+  upgrade now renders the live values; the operator applies a new proxy namespace list or
+  integration permissions once it restarts. With Helm 4, roll back to 0.4.x with `helm rollback
+  --force-conflicts`. The chart also passes Helm 4's `helm lint --strict` (its `license` moved to an
+  `artifacthub.io/license` annotation). Helm 3 and 4 are both tested.
 - **Istio ingress gateways' `EnvoyFilter` is split.** The VirtualServices' filters move from
   `inkwall-istio-ingress` into shards `inkwall-istio-ingress-00` to `-31` in the same namespace;
   `inkwall-istio-ingress` keeps the engine's cluster. One object passed etcd's size limit at about
@@ -142,6 +150,8 @@ What changes by itself:
   default.
 - **A monitoring kit, off by default** (#381): `metrics.serviceMonitor`, `metrics.podMonitor`,
   `metrics.prometheusRule` and `metrics.dashboard` in the chart. See [Monitoring](monitoring.md).
+- **`inkwallctl tune` is new** (#383): it suggests the narrowest exclusions from Detect mode's
+  security events. See [Suggest exclusions from the events](testing-policies.md#suggest-exclusions-from-the-events).
 
 ## From 0.4.0 to 0.4.1
 
