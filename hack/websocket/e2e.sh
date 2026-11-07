@@ -64,7 +64,9 @@ trap cleanup EXIT
 docker rm -f "$NAME-engine" "$NAME-app" >/dev/null 2>&1 || true
 docker network rm "$NAME" >/dev/null 2>&1 || true
 
-if [[ ${SKIP_BUILD:-} != 1 ]]; then
+if [[ ${PULL_IMAGES:-} == 1 ]]; then
+  docker pull -q "$IMAGE" >/dev/null
+elif [[ ${SKIP_BUILD:-} != 1 ]]; then
   docker build --target engine -t "$IMAGE" .
 fi
 # The echo server, built here: test only, never released.
