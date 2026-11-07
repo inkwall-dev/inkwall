@@ -1,0 +1,111 @@
+name: upgrade
+
+# The upgrade test (hack/kind/upgrade.sh) from several releases (#390): the
+# latest patch of each of the newest `minors` minor versions (hack/releases;
+# on a release-X.Y branch, X.Y and older), or the versions given. Each runs
+# the whole test, Traefik and Envoy Gateway probed through the upgrade and
+# the rollback. The release qualification (#389) calls it with minors: 2;
+# CI's upgrade job runs the latest release only, on every change.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: The commit, branch or tag to test (default the caller's).
+        type: string
+        default: ''
+      minors:
+        description: How many minor versions to upgrade from, newest first.
+        type: number
+        default: 2
+      from:
+        description: Versions to upgrade from, space-separated (overrides minors).
+        type: string
+        default: ''
+  workflow_dispatch:
+    inputs:
+      minors:
+        description: How many minor versions to upgrade from, newest first.
+        type: number
+        default: 2
+      from:
+        description: Versions to upgrade from, space-separated (overrides minors).
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  versions:
+    runs-on: ubuntu-24.04
+    outputs:
+      from: ${{ steps.versions.outputs.from }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+      - id: versions
+        env:
+          FROM: ${{ inputs.from }}
+          MINORS: ${{ inputs.minors }}
+          BRANCH: ${{ github.base_ref || github.ref_name }}
+        run: |
+          if [ -n "$FROM" ]; then
+            list=$(tr ' ' '\n' <<<"$FROM" | sed '/^$/d')
+          else
+            list=$(go run ./hack/releases -minors "$MINORS" -branch "$BRANCH")
+          fi
+          echo "from=$(jq -Rnc '[inputs]' <<<"$list")" >>"$GITHUB_OUTPUT"
+          echo "Upgrading from: $(tr '\n' ' ' <<<"$list")" >>"$GITHUB_STEP_SUMMARY"
+
+  upgrade:
+    needs: versions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        from: ${{ fromJSON(needs.versions.outputs.from) }}
+    name: upgrade from ${{ matrix.from }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      # The versions under test, hack/versions.env (#393).
+      - id: versions
+        run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_OUTPUT"
+      - uses: azure/setup-helm@v5
+        with:
+          version: ${{ steps.versions.outputs.HELM_VERSION }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+      - uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/go-build
+          key: image-go-build-${{ hashFiles('go.sum', 'Dockerfile') }}
+          restore-keys: image-go-build-
+      - run: hack/kind/go-build-cache.sh inject "$RUNNER_TEMP/go-build"
+      - run: KEEP=1 make kind-upgrade
+        env:
+          FROM_VERSION: ${{ matrix.from }}
+      - if: failure()
+        run: |
+          kubectl --context kind-inkwall-upgrade get pods -A
+          kubectl --context kind-inkwall-upgrade -n inkwall-system logs deployment/inkwall-operator --tail=100 || true
+          mkdir -p "$RUNNER_TEMP/kind-logs"
+          bin/kind-*/kind export logs "$RUNNER_TEMP/kind-logs" --name inkwall-upgrade || true
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kind-logs-upgrade-${{ matrix.from }}
+          path: ${{ runner.temp }}/kind-logs
+          retention-days: 7

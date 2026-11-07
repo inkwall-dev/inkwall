@@ -628,9 +628,9 @@ controller `istio.io/gateway-controller`), with `ext_proc` through an `EnvoyFilt
   restore that mount if Istio's own injector rewrites the container. Pods that ran before get the
   engine when restarted (`PendingRestart`), and keep it after unwiring until restarted.
 - **Wiring.** An Istio Gateway selects pods in any namespace, and several Gateways may select the
-  same pods; Envoy rejects two HTTP filters of one name. So the `EnvoyFilter` is per namespace of
-  gateway pods, `inkwall-istio-ingress`, with the integration's labels as `workloadSelector`, and
-  one ext_proc filter per protected VirtualService (`inkwall.ext_proc.vs.<namespace>.<name>`),
+  same pods; Envoy rejects two HTTP filters of one name. So the `EnvoyFilter` objects are per
+  namespace of gateway pods, `inkwall-istio-ingress` (the cluster) and 32 shards (#424), with the
+  integration's labels as `workloadSelector`, and one ext_proc filter per protected VirtualService (`inkwall.ext_proc.vs.<namespace>.<name>`),
   turned on by `typed_per_filter_config` on its Envoy routes, with the same settings as for
   HTTPRoutes. Istio names those routes after the http route's `name` (then `.` and a named match's
   `name`; checked in Istio 1.31.3's `route.go` and on kind): an unnamed http route can't be selected
@@ -1221,7 +1221,21 @@ One shared request corpus drives every level.
   `FuzzFromHAR`).
 
 Their seed corpora (`testdata/fuzz/`) run in every `make test`. `.github/workflows/fuzz.yaml` runs
-each target for 5 minutes nightly and uploads the failing inputs.
+each target for 5 minutes nightly and uploads the failing inputs, encrypted. Its matrix is every
+`func Fuzz` of the tests (`hack/ci/fuzz-targets.sh`, checked by `hack/ci`'s test), so a new target
+is fuzzed without editing the workflow, and each target keeps the corpus it grows in Go's fuzz
+cache from night to night (`actions/cache`).
+
+A nightly stress run (`.github/workflows/stress.yaml`, `make stress-test`, #395) looks for timing
+flakes: the adapters', agent's, pipeline's and operator's tests with the race detector, shuffled
+(the seed printed first), 10 times, on `GOMAXPROCS=2` with CPU hogs alongside. The SPOE, ext_proc
+and agent packages check every `make test` for goroutines a test leaves running
+([goleak](https://github.com/uber-go/goleak)).
+
+A scheduled workflow (fuzz, docs-links, stress) that fails opens one issue for it, labeled
+`ci-scheduled-failure` and pinned, or comments on the open one; the next passing run closes it
+(`hack/ci/report-scheduled.sh`, in a `report` job that alone may write issues). The fuzz issue
+names the failing targets only: a crash may be a vulnerability, reported privately.
 
 **Built (other levels):**
 
