@@ -7,7 +7,9 @@
 package helmcheck
 
 import (
+	"cmp"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +19,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
@@ -24,31 +27,7 @@ import (
 // An upgrade stops, instead of leaving routes uninspected, when pods that
 // run the engine are in a namespace injection.proxyNamespaces doesn't list.
 func TestProxyNamespacesCheck(t *testing.T) {
-	chart := os.Getenv("CHART")
-	if chart == "" || os.Getenv("KUBEBUILDER_ASSETS") == "" {
-		t.Skip("CHART or KUBEBUILDER_ASSETS not set: run make helm-lint")
-	}
-	if _, err := exec.LookPath("helm"); err != nil {
-		t.Skip("no helm")
-	}
-	env := &envtest.Environment{}
-	cfg, err := env.Start()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = env.Stop() }()
-	admin, err := env.AddUser(envtest.User{Name: "admin", Groups: []string{"system:masters"}}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	kc, err := admin.KubeConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
-	if err := os.WriteFile(kubeconfig, kc, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	chart, cfg, kubeconfig := apiServer(t)
 	c, err := client.New(cfg, client.Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -100,5 +79,91 @@ func TestProxyNamespacesCheck(t *testing.T) {
 		if out, err := render("--set", set); err != nil {
 			t.Errorf("%s: %v: %s", set, err, out)
 		}
+	}
+}
+
+// apiServer starts envtest and returns the chart, the API server's config
+// and a kubeconfig for helm, or skips the test without them.
+func apiServer(t *testing.T) (string, *rest.Config, string) {
+	t.Helper()
+	chart := os.Getenv("CHART")
+	if chart == "" || os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		t.Skip("CHART or KUBEBUILDER_ASSETS not set: run make helm-lint")
+	}
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("no helm")
+	}
+	env := &envtest.Environment{}
+	cfg, err := env.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = env.Stop() })
+	admin, err := env.AddUser(envtest.User{Name: "admin", Groups: []string{"system:masters"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kc, err := admin.KubeConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := os.WriteFile(kubeconfig, kc, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return chart, cfg, kubeconfig
+}
+
+// helm upgrade --reuse-values from the 0.4 releases passes the strict
+// values.schema.json (#386): it renders with the old release's values,
+// without the keys added since, which the schema must not require. #143
+// broke such an upgrade. The releases come from the chart registry
+// (REUSE_FROM overrides them, space-separated).
+func TestReuseValuesUpgrade(t *testing.T) {
+	if os.Getenv("CHART") == "" {
+		t.Skip("CHART not set: run make helm-lint")
+	}
+	dir := t.TempDir()
+	for _, v := range strings.Fields(cmp.Or(os.Getenv("REUSE_FROM"), "0.4.0 0.4.1")) {
+		t.Run(v, func(t *testing.T) {
+			// An API server each: the releases' webhook configurations
+			// have the same names.
+			chart, _, kubeconfig := apiServer(t)
+			helm := func(args ...string) error {
+				out, err := exec.Command("helm", append(args, "--kubeconfig", kubeconfig)...).CombinedOutput()
+				if err != nil {
+					return fmt.Errorf("helm %s: %w: %s", strings.Join(args, " "), err, out)
+				}
+				return nil
+			}
+			if out, err := exec.Command("helm", "pull", "oci://ghcr.io/inkwall-dev/charts/inkwall", "--version", v, "-d", dir).CombinedOutput(); err != nil {
+				t.Fatalf("helm pull %s: %v: %s", v, err, out)
+			}
+			// The release with values users set: a string where a bool
+			// is expected (--set-string), auto, proxy namespaces.
+			if err := helm("install", "inkwall", filepath.Join(dir, "inkwall-"+v+".tgz"), "--namespace", "inkwall-system", "--create-namespace",
+				"--set-string", "rbac.integrations.traefik=true", "--set", "rbac.integrations.istio=auto",
+				"--set", "injection.proxyNamespaces={traefik,ingress}", "--set", "operator.replicas=1"); err != nil {
+				t.Fatal(err)
+			}
+			upgrade := func(set ...string) error {
+				args := []string{"upgrade", "inkwall", chart, "--namespace", "inkwall-system", "--reuse-values"}
+				for _, s := range set {
+					args = append(args, "--set", s)
+				}
+				return helm(args...)
+			}
+			if err := upgrade(); err != nil {
+				t.Error(err)
+			}
+			// A value added since, on top.
+			if err := upgrade("global.imageRegistry=registry.example.com", "operator.extraEnv[0].name=A", "operator.extraEnv[0].value=b"); err != nil {
+				t.Error(err)
+			}
+			// A typo still fails.
+			if err := upgrade("operator.replica=2"); err == nil || !strings.Contains(err.Error(), "additional properties 'replica' not allowed") {
+				t.Errorf("with a typo: want the schema's error, got %v", err)
+			}
+		})
 	}
 }

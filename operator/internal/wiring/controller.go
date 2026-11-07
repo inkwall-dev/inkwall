@@ -53,8 +53,13 @@ const (
 	ReasonNoTargets             = "NoTargets"
 	ReasonInjectionDisabled     = "InjectionDisabled"
 	ReasonPending               = "Pending"
-	// ReasonUnverified: wired, but not proven in force (HAProxy's probe).
+	// ReasonUnverified: wired, but not proven in force (the operator's
+	// probe, through HAProxy and Istio).
 	ReasonUnverified = "Unverified"
+	// ReasonNotProbeable: wired, but the probe can't reach the route (a
+	// regular expression match, a mutual TLS listener), so it can't be
+	// proven in force (#372).
+	ReasonNotProbeable = "NotProbeable"
 	// ReasonIntegrationDisabled: the operator may not wire the proxy that
 	// serves a target (Disable).
 	ReasonIntegrationDisabled = "IntegrationDisabled"
@@ -362,7 +367,7 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 	if rep.disabled {
 		return metav1.ConditionFalse, ReasonInjectionDisabled, "the engine is not injected into proxy pods (injection is off): the routes are not wired"
 	}
-	var unsupported, failed, disabled, pending, unverified, partly, noResponses, notes []string
+	var unsupported, failed, disabled, pending, unverified, notProbeable, partly, noResponses, notes []string
 	responses := p.Spec.Responses != nil && p.Spec.Responses.Inspect
 	// wired counts the wired targets by result, then kind.
 	wired := make([]map[schema.GroupKind]int, len(rep.results))
@@ -410,6 +415,8 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 			case !s.Wired:
 				// Whatever the integration said, its traffic isn't inspected.
 				pending = append(pending, fmt.Sprintf("%s %s is not wired to the engine in %s yet", t.Kind.Kind, t.Key.Name, rep.results[i].Proxy))
+			case s.NotProbeable != "":
+				notProbeable = append(notProbeable, s.NotProbeable)
 			case s.Unverified != "":
 				unverified = append(unverified, s.Unverified)
 			}
@@ -476,6 +483,10 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 	if len(unverified) > 0 {
 		slices.Sort(unverified)
 		return metav1.ConditionFalse, ReasonUnverified, strings.Join(append(slices.Compact(unverified), notes...), "; ")
+	}
+	if len(notProbeable) > 0 {
+		slices.Sort(notProbeable)
+		return metav1.ConditionFalse, ReasonNotProbeable, strings.Join(append(slices.Compact(notProbeable), notes...), "; ")
 	}
 	slices.Sort(partly)
 	msgs = append(msgs, slices.Compact(partly)...)

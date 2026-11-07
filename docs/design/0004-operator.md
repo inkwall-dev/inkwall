@@ -352,7 +352,14 @@ proxy.
     directory;
   - an [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir) bundle cache;
   - non-root, with a read-only root filesystem;
-  - image and resources from `InkwallConfig.spec.engine`, else from `--engine-image`.
+  - image and resources from `InkwallConfig.spec.engine`, else from `--engine-image`;
+  - the image pull Secrets of `--engine-image-pull-secrets` (the chart's
+    `global.imagePullSecrets`, since v0.5.0), added to the pod's `imagePullSecrets`, keeping its
+    own. Envoy Gateway's and Istio Gateways' pods, which get the engine through their own
+    configuration, get none: there the operator owns only the containers, volumes and mounts it
+    adds, and a pod-level list it shared with the user's would have to be merged and pruned
+    without knowing which entries were its own. Their pull Secret goes in that configuration,
+    or on the ServiceAccount (the chart README).
 - **Trust and access per namespace.** The leader keeps an `inkwall-trust` ConfigMap in each
   namespace with proxy pods, and removes it with the last one. It holds `ca.crt`,
   `trusted-keys.pub` (every bundle key engines must accept; the engine reads this) and
@@ -692,7 +699,7 @@ has the decision), for `VirtualService` targets bound to Istio `Gateway` objects
   `haproxy.org/backend-config-snippet`, first, between `# inkwall:begin` and `# inkwall:end`; the
   user's lines stay after it. `waf.inkwall.dev/haproxy-wired` marks it (`Wired`), with the previous
   `standalone-backend`, restored when it is unwired.
-- **`Programmed`** only once the operator's probe (`HAProxyProber`, on the leader) has proven the
+- **`Programmed`** only once the operator's probe (`Prober`, on the leader) has proven the
   filter on every running pod; `Unverified` until then, and when a probe gets anything but the
   engine's answer. Before that, `PendingRestart` or `SidecarMissing`; `WiringFailed` for a pod
   without the agent's files or with `--disable-config-snippets` covering backends.
