@@ -121,6 +121,9 @@ type Options struct {
 	Inject           bool
 	EngineImage      string
 	EnginePullPolicy corev1.PullPolicy
+	// EnginePullSecrets are the Secrets the Pod webhook's injected pods
+	// pull the engine image with.
+	EnginePullSecrets []string
 	// Integrations select the proxy pods; nil: read from the InkwallConfig
 	// when the manager is created. The operator restarts when they change
 	// (its cache of proxy pods is built from them), or when an
@@ -267,6 +270,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	sidecar := injection.Sidecar{
 		Image:        o.EngineImage,
 		PullPolicy:   o.EnginePullPolicy,
+		PullSecrets:  o.EnginePullSecrets,
 		OperatorAddr: fmt.Sprintf("%s.%s.svc:%d", o.DistributionService, o.Namespace, o.DistributionPort),
 		BundleSecret: o.Namespace + "/" + bundle.BundleSecret,
 	}
@@ -277,6 +281,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			Decoder:      admission.NewDecoder(mgr.GetScheme()),
 			Image:        sidecar.Image,
 			PullPolicy:   sidecar.PullPolicy,
+			PullSecrets:  sidecar.PullSecrets,
 			OperatorAddr: sidecar.OperatorAddr,
 			BundleSecret: sidecar.BundleSecret,
 			Integrations: selectors,

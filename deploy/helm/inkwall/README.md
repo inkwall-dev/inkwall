@@ -11,6 +11,7 @@ builds them into a signed [bundle](../../../docs/glossary.md#bundle), serves the
 - [Install](#install)
 - [What it installs](#what-it-installs)
 - [Values](#values)
+- [Private registries](#private-registries)
 - [Proxy namespaces](#proxy-namespaces)
 - [Integration permissions](#integration-permissions)
 - [Connecting to a control plane](#connecting-to-a-control-plane)
@@ -72,17 +73,25 @@ from the operator's generated manifests. Don't edit `files/` by hand.
 
 ## Values
 
-[`values.yaml`](values.yaml) has every value, with comments.
+[`values.yaml`](values.yaml) has every value, with comments. [`values.schema.json`](values.schema.json)
+checks them: `helm install`, `upgrade`, `template` and `lint` fail on a key the chart doesn't have
+(`rbac.integration.traefik`), a wrong type, or a value outside its set (`webhook.certs.mode`,
+`rbac.integrations.*`, `pullPolicy`), naming it. Only `global` takes keys of its own, which a
+parent chart may share.
 
 | Value | Default | |
 |---|---|---|
-| `operator.image.repository`, `tag`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-operator`, the chart's `appVersion`, `IfNotPresent` | |
+| `global.imageRegistry` | `""` | A registry or mirror that replaces `ghcr.io` in both images, which keep their path under it. See [private registries](#private-registries) |
+| `global.imagePullSecrets` | `[]` | Secrets the images are pulled with, `[{name: regcred}]` or `[regcred]`: for the operator's pods, and added to the proxy pods the Pod webhook injects. See [private registries](#private-registries) |
+| `operator.image.repository`, `tag`, `digest`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-operator`, the chart's `appVersion`, `""`, `IfNotPresent` | A `digest` (`sha256:...`) replaces the tag |
 | `operator.replicas` | `2` | One leads; all serve the webhooks |
 | `operator.resources` | 100m CPU and 128Mi requested; 512Mi limit | The operator sets `GOMEMLIMIT` to 90% of the memory limit, unless `GOMEMLIMIT` is set |
 | `operator.extraArgs` | `[]` | Extra `inkwall-operator` flags |
+| `operator.extraEnv`, `extraVolumes`, `extraVolumeMounts` | `[]` | Extra environment variables, volumes and mounts of the operator, e.g. `HTTPS_PROXY` for the control plane, or a CA bundle |
+| `operator.topologySpreadConstraints` | `[]` | [Topology spread](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/), e.g. across zones; rendered as a template, so a `labelSelector` can say `app.kubernetes.io/instance: '{{ .Release.Name }}'` |
 | `operator.podAnnotations`, `podLabels`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName` | | The default [affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/) spreads the replicas across nodes |
 | `operator.podDisruptionBudget.enabled`, `minAvailable` | `true`, `1` | |
-| `engine.image.repository`, `tag`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-engine`, the chart's `appVersion`, `IfNotPresent` | The engine injected into Traefik pods and put into Envoy Gateway's Envoy pods and Istio's Gateway pods; `InkwallConfig.spec.engine.image` overrides it |
+| `engine.image.repository`, `tag`, `digest`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-engine`, the chart's `appVersion`, `""`, `IfNotPresent` | The engine injected into Traefik pods and put into Envoy Gateway's Envoy pods and Istio's Gateway pods; `InkwallConfig.spec.engine.image` overrides it |
 | `injection.enabled` | `true` | Inject the engine into proxy pods: Traefik's, the HAProxy Kubernetes Ingress Controller's and Istio ingress gateways' when they are created, Envoy Gateway's and Istio Gateways' through their configuration. `false`: see [turning injection off](#turning-injection-off) |
 | `injection.proxyNamespaces` | `[traefik, kube-system, envoy-gateway-system, istio-ingress, istio-system, haproxy-controller]` | The namespaces the proxies' pods run in; only pods there get the engine and the policy bundle. See [proxy namespaces](#proxy-namespaces) |
 | `controlPlane.caBundle` | `""` | The optional control plane's CA (PEM), when its certificate isn't from a public CA, e.g. `--set-file controlPlane.caBundle=ca.crt` |
@@ -104,6 +113,36 @@ whose name contains `inkwall`, else `<release>-inkwall`. For a release named `wa
 the token Secret is `waf-inkwall-enrollment`. Names are cut to 63 characters: the operator's
 other objects keep their suffix (`-webhook`, `-traefik`, ...), cutting the name before it. The webhook configurations keep the names in the
 table above.
+
+## Private registries
+
+To install from a private registry or a mirror, copy both images there under the same path
+(`inkwall-dev/inkwall-operator` and `inkwall-dev/inkwall-engine`, at the chart's `appVersion`), and
+create a pull Secret in the release namespace and in each [proxy namespace](#proxy-namespaces)
+whose pods the Pod webhook injects (Traefik's, the HAProxy Kubernetes Ingress Controller's, Istio
+ingress gateways'):
+
+```sh
+helm install inkwall oci://registry.example.com/charts/inkwall --namespace inkwall-system --create-namespace \
+  --set global.imageRegistry=registry.example.com \
+  --set 'global.imagePullSecrets[0].name=regcred'
+```
+
+The operator's pods pull `registry.example.com/inkwall-dev/inkwall-operator:<version>` with
+`regcred`. The operator injects `registry.example.com/inkwall-dev/inkwall-engine:<version>` and adds
+`regcred` to the `imagePullSecrets` of the pods it injects, keeping theirs. A Secret missing from a
+proxy namespace leaves that proxy's new pods in `ImagePullBackOff`: the engine starts before the
+proxy.
+
+Envoy Gateway's Envoy pods and Istio Gateways' pods get the engine through their own
+configuration, not the Pod webhook, so the operator adds no pull Secret to them. Set it there:
+`spec.provider.kubernetes.envoyDeployment.pod.imagePullSecrets` on the Gateway's `EnvoyProxy`, or
+`spec.template.spec.imagePullSecrets` in the `deployment` overlay of the Istio Gateway's `parametersRef` ConfigMap (or the
+ServiceAccount's `imagePullSecrets`, for either).
+
+`operator.image.digest` and `engine.image.digest` pin an image by digest instead of its tag.
+`InkwallConfig.spec.engine.image`, when set, is used as is: `global.imageRegistry` doesn't change
+it.
 
 ## Proxy namespaces
 
