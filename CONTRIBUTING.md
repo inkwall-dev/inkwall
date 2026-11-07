@@ -108,7 +108,7 @@ Durations are on a laptop or a CI runner, roughly.
 | Benchmarks | `make bench-compare` (base: `origin/main`) | 10 min | Go | every PR (`bench`) |
 | Images | `make image` | 5 min | Docker | every PR (`image`, both platforms) |
 | Proxies in Docker | `make raw-envoy-e2e`, `make websocket-e2e`, `make haproxy-e2e` | 5 min each | Docker | every PR (`raw-envoy`, `haproxy`) |
-| End to end on kind | `make kind-e2e` (all), `make kind-e2e-traefik`, `-raw-envoy`, `-envoy-gateway`, `-istio`, `-haproxy` | 25 min (all) | Docker, kind (installed by the target) | every PR (`e2e (<proxy>)`, one job each) |
+| End to end on kind | `make kind-e2e` (all), `make kind-e2e-traefik`, `-raw-envoy`, `-envoy-gateway`, `-istio`, `-haproxy`, `-networkpolicy` (the chart's NetworkPolicies under a default deny) | 25 min (all) | Docker, kind (installed by the target) | every PR (`e2e (<proxy>)`, one job each) |
 | Upgrade on kind | `make kind-upgrade` | 15 min | Docker, kind | every PR (`upgrade`, from the latest release); release qualification (`upgrade.yaml`, from each supported minor) |
 | Examples | `make test-examples` (each `examples/<proxy>` policy through `inkwallctl test --policy`, and the `examples/tests` suite) | 1 min | Go | every PR (`test`) |
 | Quickstart | `make kind-quickstart` (`docs/quickstart.md` as written, released chart and images) | 10 min | Docker, kind, network | nightly (`quickstart`) |
@@ -123,7 +123,7 @@ The kind targets (`make kind-up`, `make kind-e2e`, `make kind-upgrade`) install 
 into `bin/` and run Kubernetes 1.34 (`KIND_NODE_IMAGE` in the Makefile; the operator tests' API
 server, `ENVTEST_K8S_VERSION`, runs it too), as CI's upgrade job does. CI's e2e jobs run kind's
 newest Kubernetes: one job per proxy (`e2e (traefik)`, `e2e (raw-envoy)`, `e2e (envoy-gateway)`,
-`e2e (istio)`, `e2e (haproxy)`), each on its own cluster with the images the `e2e-images` job
+`e2e (istio)`, `e2e (haproxy)`, and `e2e (networkpolicy)` for the chart's NetworkPolicies), each on its own cluster with the images the `e2e-images` job
 built, and the cluster's logs as an artifact when one fails. The chart still installs on 1.29 and
 later, untested. A cluster made at another version is recreated with `make kind-down kind-up`.
 
@@ -181,7 +181,8 @@ for patching released versions.
    - the [Helm](https://helm.sh/docs/) chart [`oci://ghcr.io/inkwall-dev/charts/inkwall`](https://helm.sh/docs/topics/registries/), versioned from the tag (the
      version in `Chart.yaml` is only for development);
    - the binaries, `checksums.txt`, an SPDX SBOM per archive (`<archive>.sbom.json`), build
-     provenance attestations of the archives, and the GitHub release with the changelog.
+     provenance attestations of the archives (also attached to the release as
+     `inkwall_<version>.intoto.jsonl`), and the GitHub release with the changelog.
 
    Then it checks what it published, as a user would, release candidates too: the images' and
    the chart's signatures, both platforms and their attestations, `helm pull`, the checksums'
@@ -206,6 +207,16 @@ for patching released versions.
      --certificate-oidc-issuer https://token.actions.githubusercontent.com
    sha256sum --check --ignore-missing checksums.txt
    gh attestation verify inkwall_<version>_linux_amd64.tar.gz -R inkwall-dev/inkwall
+   ```
+
+   The provenance is also a release asset, `inkwall_<version>.intoto.jsonl` (the attestation's
+   [Sigstore bundle](https://docs.sigstore.dev/about/bundle/), one JSON line, covering every
+   archive): to verify against it instead of the attestation stored on GitHub, download it next
+   to the archive and add `--bundle`:
+
+   ```sh
+   gh attestation verify inkwall_<version>_linux_amd64.tar.gz -R inkwall-dev/inkwall \
+     --bundle inkwall_<version>.intoto.jsonl
    ```
 
 4. The first time, make the three new [GHCR](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry) packages (`inkwall-engine`, `inkwall-operator`,

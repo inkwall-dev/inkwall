@@ -39,7 +39,7 @@ import (
 // the engine, and denies on its verdict. The agent's backend and spoe.conf
 // are in the controller's pods (injection.InjectHAProxy). The controller
 // says nothing about a snippet it drops, so a route is Programmed only once
-// the operator's probe (HAProxyProber) has proven the filter on every pod.
+// the operator's probe (Prober) has proven the filter on every pod.
 //
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;update;patch,roleName=inkwall-operator-haproxy
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingressclasses,verbs=get;list;watch,roleName=inkwall-operator-haproxy
@@ -75,7 +75,7 @@ type HAProxy struct {
 	Pods labels.Selector
 	// Prober probes the wired routes; nil: none is, and every route stays
 	// Unverified.
-	Prober *HAProxyProber
+	Prober *Prober
 }
 
 // Name implements Integration.
@@ -138,7 +138,7 @@ func haproxySettingsOf(policies []wafv1alpha1.WAFPolicy, ing types.NamespacedNam
 // HAProxySnippet is the operator's part of a protected Ingress's backend
 // snippet: the body buffered for the engine when a policy inspects it, the
 // SPOE filter, and the rules on its variables: the probe's answer first
-// (HAProxyProber), then, failing closed, 503 without a verdict, a denied
+// (Prober), then, failing closed, 503 without a verdict, a denied
 // gRPC call's answer, and a rule per status the engine denies with; the
 // request ID for the app.
 func HAProxySnippet(failOpen, body bool) string {
@@ -290,7 +290,7 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 	res := &Result{Proxy: "HAProxy", Targets: map[Target]TargetState{}, Pods: pods.Items}
 	var (
 		errs []error
-		jobs []HAProxyProbe
+		jobs []ProbeJob
 	)
 	for i := range ingresses.Items {
 		ing := &ingresses.Items[i]
@@ -325,7 +325,7 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 		}
 		s.Wired = want && err == nil
 		if s.Wired && s.Failed == "" {
-			job := HAProxyProbe{Ingress: k, Fingerprint: ing.Annotations[HAProxySnippetAnnotation], Targets: probeTargets(ing)}
+			job := ProbeJob{Route: ProbeRoute{Kind: "Ingress", Key: k}, Proxy: "HAProxy", Fingerprint: ing.Annotations[HAProxySnippetAnnotation], Targets: probeTargets(ing)}
 			for _, pod := range runningPods {
 				if injection.HasEngine(pod) {
 					job.Pods = append(job.Pods, probePod(pod))
@@ -343,7 +343,7 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 		res.Targets[tg] = s
 	}
 	if h.Prober != nil {
-		h.Prober.Set(jobs)
+		h.Prober.Set(integrations.HAProxy.Name, jobs)
 	}
 	if len(errs) > 0 {
 		log.FromContext(ctx).Error(errors.Join(errs...), "HAProxy Ingresses not wired")
@@ -352,9 +352,9 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 }
 
 // unverified is why a wired route isn't proven on every pod yet, or "".
-func (h *HAProxy) unverified(job HAProxyProbe) string {
+func (h *HAProxy) unverified(job ProbeJob) string {
 	if h.Prober == nil {
-		return fmt.Sprintf("Ingress %s is wired, but the operator doesn't probe HAProxy: the filter is unverified", job.Ingress.Name)
+		return fmt.Sprintf("Ingress %s is wired, but the operator doesn't probe HAProxy: the filter is unverified", job.Route.Key.Name)
 	}
 	return h.Prober.Unverified(job)
 }
