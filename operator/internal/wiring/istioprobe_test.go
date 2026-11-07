@@ -15,8 +15,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
@@ -221,5 +223,63 @@ func TestProbeResultsOutliveAJobBriefly(t *testing.T) {
 	p.Set("istio-ingress", []ProbeJob{job})
 	if why := p.Unverified(job); why == "" {
 		t.Error("back after the reprobe interval: proven by an old result")
+	}
+}
+
+// The users' EnvoyFilters are in the probe's fingerprint: one added,
+// changed or removed (say, removing Inkwall's filter from a listener)
+// re-probes the Istio routes at once, rather than at the reprobe interval.
+// The operator's own don't count: they change with the wiring, which is in
+// the fingerprint already.
+func TestUserFiltersKey(t *testing.T) {
+	ctx := context.Background()
+	s := runtime.NewScheme()
+	filter := func(ns, name string, managed bool) *unstructured.Unstructured {
+		u := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{}}}
+		u.SetGroupVersionKind(EnvoyFilterGVK)
+		u.SetNamespace(ns)
+		u.SetName(name)
+		if managed {
+			u.SetLabels(map[string]string{"app.kubernetes.io/managed-by": "inkwall-operator"})
+		}
+		return u
+	}
+	ours := filter("edge", "inkwall-istio-ingress-00", true)
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ours).Build()
+	key := func() string {
+		t.Helper()
+		k, err := userFiltersKey(ctx, c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k
+	}
+	none := key()
+	if err := c.Update(ctx, ours); err != nil {
+		t.Fatal(err)
+	}
+	if key() != none {
+		t.Error("the operator's own EnvoyFilter changed the key")
+	}
+	user := filter("istio-system", "remove-inkwall", false)
+	if err := c.Create(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	added := key()
+	if added == none {
+		t.Error("a user's EnvoyFilter didn't change the key")
+	}
+	user.SetAnnotations(map[string]string{"edited": "yes"})
+	if err := c.Update(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	if key() == added {
+		t.Error("an edit of a user's EnvoyFilter didn't change the key")
+	}
+	if err := c.Delete(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	if key() != none {
+		t.Error("the user's EnvoyFilter deleted: the key isn't back")
 	}
 }

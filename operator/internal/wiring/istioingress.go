@@ -384,6 +384,11 @@ func (i *IstioIngress) Wire(ctx context.Context, targets map[Target]bool, off bo
 	}
 
 	var probes []ProbeJob
+	// The users' EnvoyFilters, in the probes' fingerprints.
+	userFilters, err := userFiltersKey(ctx, i.Client)
+	if err != nil {
+		return nil, err
+	}
 	for tg := range targets {
 		r := routes[tg.Key]
 		if _, ok := res.Targets[tg]; ok || tg.Kind != virtualServiceKind || r == nil {
@@ -404,7 +409,7 @@ func (i *IstioIngress) Wire(ctx context.Context, targets map[Target]bool, off bo
 			// gateway pod, on each server (#372).
 			if s.Pending = istioVSReconciled(r.vs); s.Pending == "" {
 				var jobs []ProbeJob
-				jobs, s.NotProbeable, s.Unverified = proveRoute(i.Prober, "VirtualService "+tg.Key.Name, r.detect, func() ([]ProbeJob, string) { return st.vsProbes(r) })
+				jobs, s.NotProbeable, s.Unverified = proveRoute(i.Prober, "VirtualService "+tg.Key.Name, r.detect, func() ([]ProbeJob, string) { jobs, why := st.vsProbes(r); return withFilters(jobs, userFilters), why })
 				probes = append(probes, jobs...)
 			}
 		}

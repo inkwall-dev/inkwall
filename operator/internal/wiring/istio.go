@@ -315,6 +315,11 @@ func (i *Istio) Wire(ctx context.Context, targets map[Target]bool, off bool) (*R
 	}
 
 	var probes []ProbeJob
+	// The users' EnvoyFilters, in the probes' fingerprints.
+	userFilters, err := userFiltersKey(ctx, i.Client)
+	if err != nil {
+		return nil, err
+	}
 	for tg := range targets {
 		r := routes[tg.Key]
 		if _, ok := res.Targets[tg]; ok || tg.Kind != httpRouteKind || r == nil || !rules(nil).with(tg.Section).any(r.route) {
@@ -348,7 +353,10 @@ func (i *Istio) Wire(ctx context.Context, targets map[Target]bool, off bool) (*R
 			// reached the engine through each of their pods (#372).
 			if s.Pending = istioAccepted(r.route, r.gateways); s.Pending == "" {
 				var jobs []ProbeJob
-				jobs, s.NotProbeable, s.Unverified = proveRoute(i.Prober, "HTTPRoute "+tg.Key.Name, r.detect, func() ([]ProbeJob, string) { return st.istioRouteProbes(r) })
+				jobs, s.NotProbeable, s.Unverified = proveRoute(i.Prober, "HTTPRoute "+tg.Key.Name, r.detect, func() ([]ProbeJob, string) {
+					jobs, why := st.istioRouteProbes(r)
+					return withFilters(jobs, userFilters), why
+				})
 				probes = append(probes, jobs...)
 			}
 		}

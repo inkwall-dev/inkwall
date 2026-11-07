@@ -354,6 +354,8 @@ with the route's host and a path its rule matches, and a header `X-Inkwall-Probe
 under the bundle's probe key. The engine behind the route's filter answers it itself (200 and its
 own MAC): the request never reaches your app. A route is `Programmed` only once every pod answered
 on every listener; it is probed again every 5 minutes, and every 20 seconds until it answers.
+Any change to an `EnvoyFilter` of yours (one that removes or replaces Inkwall's filter, say)
+probes every route again at once.
 
 - **The request** follows the route's first match the probe can make: an exact or prefix path
   (under a prefix, the reserved path `.well-known/inkwall-probe/<nonce>`), exact headers, query

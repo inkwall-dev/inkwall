@@ -4,14 +4,19 @@
 package wiring
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
@@ -380,4 +385,39 @@ func proveRoute(p *Prober, name string, detect bool, jobsOf func() ([]ProbeJob, 
 		}
 	}
 	return jobs, "", ""
+}
+
+// userFiltersKey identifies the users' EnvoyFilters as they are now (each
+// one's namespace, name and resourceVersion), for the Istio routes' probe
+// fingerprints: a user's EnvoyFilter can take Inkwall's filter off a
+// listener (or put it back), which the routes' own generations don't show,
+// so any change re-probes them at once. The operator's own are left out:
+// they change with the wiring. "" without the CRD.
+func userFiltersKey(ctx context.Context, c client.Reader) (string, error) {
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(EnvoyFilterGVK.GroupVersion().WithKind("EnvoyFilterList"))
+	switch err := c.List(ctx, list); {
+	case meta.IsNoMatchError(err):
+		return "", nil
+	case err != nil:
+		return "", err
+	}
+	var ids []string
+	for i := range list.Items {
+		f := &list.Items[i]
+		if !isManaged(f) {
+			ids = append(ids, f.GetNamespace()+"/"+f.GetName()+"@"+f.GetResourceVersion())
+		}
+	}
+	slices.Sort(ids)
+	sum := sha256.Sum256([]byte(strings.Join(ids, "\n")))
+	return hex.EncodeToString(sum[:8]), nil
+}
+
+// withFilters adds the users' EnvoyFilters key to the jobs' fingerprints.
+func withFilters(jobs []ProbeJob, filters string) []ProbeJob {
+	for i := range jobs {
+		jobs[i].Fingerprint += "/" + filters
+	}
+	return jobs
 }
