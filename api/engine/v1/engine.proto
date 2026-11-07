@@ -104,6 +104,8 @@ enum Reason {
   REASON_IP_DENY = 12;
   // The client IP is in the policy's IP allow list: not inspected.
   REASON_IP_ALLOW = 13;
+  // A gRPC call on a policy that refuses gRPC (body.grpc: Deny).
+  REASON_GRPC = 14;
 }
 
 // CheckResponse is the verdict for one CheckRequest.
