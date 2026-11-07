@@ -95,3 +95,33 @@ func FuzzFromHAR(f *testing.F) {
 		}
 	})
 }
+
+// FuzzParseSuite reads arbitrary suite files, as from --suite: an accepted
+// suite has cases with distinct names, and its inline requests are ones
+// inkwallctl test can send.
+func FuzzParseSuite(f *testing.F) {
+	f.Add([]byte("cases:\n  - name: a\n    request: {uri: /, host: a.example, headers: {X-A: b}}\n    expect: {action: allow}\n"))
+	f.Add([]byte("policy: [p.yaml]\ncases:\n  - name: a\n    request: {url: \"http://a/?q=1' OR '1'='1\", method: POST, body: x=1}\n    response: {status: 500, headers: {Content-Type: text/html}, body: err}\n    expect: {action: deny, status: 403, rules: [942100], notRules: [1], phase: response}\n"))
+	f.Add([]byte("cases:\n  - name: a\n    request: {file: r.http, clientIP: 192.0.2.1}\n    expect: {exactRules: [1, 2], policy: a/b}\n"))
+	f.Fuzz(func(t *testing.T, raw []byte) {
+		s, err := parseSuite(raw, ".")
+		if err != nil {
+			return
+		}
+		names := map[string]bool{}
+		for _, c := range s.Cases {
+			if c.Name == "" || names[c.Name] {
+				t.Errorf("case name %q empty or repeated", c.Name)
+			}
+			names[c.Name] = true
+			if c.Request.File != "" {
+				continue
+			}
+			in, err := inlineRequest(c.Request)
+			if err != nil {
+				continue
+			}
+			checkRequests(t, []*enginev1.CheckRequest{in}, true)
+		}
+	})
+}
