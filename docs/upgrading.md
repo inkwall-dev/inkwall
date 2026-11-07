@@ -35,6 +35,17 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 What's new:
 
+- **Automatic engine rollout (opt-in).** Proxy pods started before Inkwall, or running another
+  engine image than the one configured, are `PendingRestart` until you restart them: that is still
+  the default (`spec.engine.rollout: Manual`). With
+  `kubectl patch inkwallconfig default --type=merge -p '{"spec":{"engine":{"rollout":"Automatic"}}}'`
+  the operator evicts them one at a time through the Eviction API, respecting
+  PodDisruptionBudgets, and waits for each replacement to be ready with the new engine before the
+  next, for the Traefik, HAProxy and Istio ingress gateway pods it injects. A refused eviction or a
+  replacement not ready within 5 minutes pauses it: `kubectl get inkwallconfig default -o
+  jsonpath='{.status.conditions[?(@.type=="EngineRollout")].message}'` says why. Upgrade the chart
+  first, for the new CRD field and the `pods/eviction` permission. With it, an engine upgrade
+  after a chart upgrade needs no restart by hand.
 - **Standalone mode reloads its rules without a restart**: on `SIGHUP`, or with `--watch-rules`
   when the files change ([reloading the rules](standalone-proxy.md#reloading-the-rules)).
 - **gRPC and HTTP/2 through the standalone proxy**: `--h2c`, `--tls-cert`/`--tls-key`,
