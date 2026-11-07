@@ -419,3 +419,55 @@ func TestResponseNamesThePolicy(t *testing.T) {
 		t.Fatalf("policy %q, want shop/storefront", out.GetPolicy())
 	}
 }
+
+// CheckExchange inspects a response as the ext_proc adapter does: only
+// after a request that was let through, by a pipeline that inspects
+// responses, with the body when the rules read its media type, up to the
+// limit (#385).
+func TestCheckExchange(t *testing.T) {
+	eval, err := coraza.New(coraza.Config{ResponseBodyLimit: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responses := pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 10 * time.Second,
+		Responses: pipeline.ResponseConfig{Inspect: true, MaxBytes: 1024}})
+	leak := "<html><body>You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version</body></html>"
+	response := func(contentType, body string) *request.Response {
+		return &request.Response{Status: 500, Headers: http.Header{"Content-Type": {contentType}}, Body: []byte(body)}
+	}
+	benign := checkRequest(http.MethodGet, "/item", "", "")
+	attack := checkRequest(http.MethodGet, "/?id=1%27%20OR%20%271%27%3D%271", "", "")
+
+	for _, tc := range []struct {
+		name     string
+		p        *pipeline.Pipeline
+		in       *enginev1.CheckRequest
+		resp     *request.Response
+		req, res enginev1.Action // res unset: no response verdict
+		inspect  bool
+	}{
+		{"a leak in an HTML body is denied", responses, benign, response("text/html", leak), enginev1.Action_ACTION_ALLOW, enginev1.Action_ACTION_DENY, true},
+		{"a clean response passes", responses, benign, response("text/html", "<html>ok</html>"), enginev1.Action_ACTION_ALLOW, enginev1.Action_ACTION_ALLOW, true},
+		{"a body the rules don't read isn't inspected", responses, benign, response("application/octet-stream", leak), enginev1.Action_ACTION_ALLOW, enginev1.Action_ACTION_ALLOW, true},
+		{"a leak past the limit is cut, and oversized", responses, benign, response("text/html", strings.Repeat(" ", 2048)+leak), enginev1.Action_ACTION_ALLOW, enginev1.Action_ACTION_DENY, true},
+		{"a denied request's response isn't inspected", responses, attack, response("text/html", leak), enginev1.Action_ACTION_DENY, 0, false},
+		{"a pipeline without response inspection", newPipeline(t, pipeline.ModeBlock), benign, response("text/html", leak), enginev1.Action_ACTION_ALLOW, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHandler(t, tc.p, 1<<10, &bytes.Buffer{})
+			req, res, err := h.CheckExchange(context.Background(), tc.in, tc.resp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if req.GetAction() != tc.req {
+				t.Errorf("request %v, want %v", req.GetAction(), tc.req)
+			}
+			if (res != nil) != tc.inspect {
+				t.Fatalf("response verdict %v, want one: %v", res, tc.inspect)
+			}
+			if res != nil && res.GetAction() != tc.res {
+				t.Errorf("response %v (%v, %v), want %v", res.GetAction(), res.GetReason(), res.GetRuleIds(), tc.res)
+			}
+		})
+	}
+}

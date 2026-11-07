@@ -1,0 +1,43 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# A test suite for inkwallctl test --suite (experimental format; see
+# docs/testing-policies.md): each case a request, and optionally the
+# upstream's response, with the verdict it must get.
+#   inkwallctl test --suite examples/tests/suite.yaml --junit results.xml
+# make test-examples runs it.
+policy: suite-wafpolicy.yaml
+ingress: ../envoy-gateway/route.yaml
+cases:
+  - name: a product page passes
+    request: {uri: /products/42, host: shop.example.com}
+    expect: {action: allow, policy: shop/web}
+  - name: a login form passes
+    request:
+      method: POST
+      uri: /login
+      host: shop.example.com
+      body: user=alice&password=correct-horse-battery-staple
+    expect: {action: allow}
+  - name: SQL injection in the query is denied
+    request: {url: "http://shop.example.com/search?q=1' OR '1'='1"}
+    expect: {action: deny, status: 403, rules: [942100], phase: request}
+  - name: every request of benign.http passes
+    request: {file: benign.http}
+    expect: {action: allow, notRules: [942100, 941100]}
+  - name: every request of attacks.http is denied
+    request: {file: attacks.http}
+    expect: {action: deny, status: 403}
+  - name: an SQL error page is not leaked
+    request: {uri: "/item?id=7", host: shop.example.com}
+    response:
+      status: 500
+      headers: {Content-Type: text/html}
+      body: "<html><body>You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version</body></html>"
+    expect: {action: deny, status: 403, phase: response}
+  - name: a clean page passes
+    request: {uri: /products/42, host: shop.example.com}
+    response:
+      headers: {Content-Type: text/html}
+      body: "<html><body>Product 42</body></html>"
+    expect: {action: allow, phase: response}

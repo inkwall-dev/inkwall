@@ -35,6 +35,12 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 What's new:
 
+- **Responses through Istio.** A policy with `responses.inspect` now has the responses of its
+  Istio HTTPRoutes and VirtualServices inspected, as through Envoy Gateway: a response that leaks
+  is replaced with 403 in `Block` mode and logged in `Detect` mode. Such a policy was
+  `Programmed=False` (`ResponsesNotInspected`) on Istio's routes; it is `Programmed` once the
+  operator has rewritten their `EnvoyFilter` objects. Routes whose policies don't inspect
+  responses keep sending none to the engine. See [Istio](istio.md#settings).
 - **IP allow and deny lists.** A `WAFIPList` lists client addresses (CIDRs), and
   `WAFPolicy.spec.ipLists: {allow: [...], deny: [...]}` names lists in the policy's namespace: a
   denied client gets 403 (logged in `Detect` mode) before any rule, an allowed one isn't inspected.
@@ -42,6 +48,10 @@ What's new:
   ([client IP](client-ip.md)). Upgrade the chart first, for the new CRD; a policy with lists is
   `Enforced=False` (`EnginesOutdated`) until every engine runs 0.5.0. `inkwallctl test` reads
   `WAFIPList` files and takes `--client-ip`.
+- **Refuse gRPC where none is served.** `body.grpc: Deny` on a `WAFPolicy` denies requests with a
+  gRPC or gRPC-Web content type, instead of the SecLang rule `docs/grpc.md` suggested. Upgrade the
+  chart first, for the CRD field; a policy that sets it is `Enforced=False` (`EnginesOutdated`)
+  until every engine runs 0.5.0.
 
 - **The CRS's own settings on a policy.** The CRS rule set binding of a `WAFPolicy` takes an
   optional `crs` block: `allowedMethods` (for REST APIs that send `PUT`, `PATCH` or `DELETE`),
@@ -73,6 +83,9 @@ What changes by itself:
   a request the rules flag is let through, and an SQL error or a leak in its response is now its
   own event, as for any request. The request's event may list a few more rules than before: the
   rules run to the end instead of stopping where Block mode would.
+- **Enforced checks the newest field a policy needs.** A policy with fields of 0.4.0 and 0.5.0
+  (`webSocket` and `ipLists`, say) was `Enforced` while a 0.4.x engine ran it; it is now
+  `EnginesOutdated` until every engine runs 0.5.0.
 - **The chart keeps the operator's settings of the Pod webhooks** (`failurePolicy`,
   `objectSelector`, `namespaceSelector`). The operator sets `failurePolicy` to `Fail` while a
   policy blocks; an upgrade used to render `Ignore` until the operator set it again, and Helm 4,
@@ -149,6 +162,10 @@ What changes by itself:
   `metrics.prometheusRule` and `metrics.dashboard` in the chart. See [Monitoring](monitoring.md).
 - **`inkwallctl tune` is new** (#383): it suggests the narrowest exclusions from Detect mode's
   security events. See [Suggest exclusions from the events](testing-policies.md#suggest-exclusions-from-the-events).
+- **`inkwallctl test --suite` is new** (#385, experimental format): a file of cases, each a
+  request and optionally its response, with the verdict expected; `--junit` writes the results for
+  CI. See [Test suites](testing-policies.md#test-suites). The other `inkwallctl test` flags are
+  unchanged.
 
 ## From 0.4.0 to 0.4.1
 

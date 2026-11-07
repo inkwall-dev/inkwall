@@ -202,7 +202,7 @@ check "a benign POST passes" is 200 -X POST -d 'name=joe' "$U/form"
 check "a benign GET over HTTP/2 passes" is 200 --http2-prior-knowledge "$U/products?id=42"
 check "SQL injection in the query: 403" is 403 "$U/products?$SQLI"
 check "the route left uninspected passes an attack" is 200 "$U/healthz?$SQLI"
-check "a client-sent X-Forwarded-For isn't the client IP" bash -c "curl -s -o /dev/null -H 'X-Forwarded-For: 203.0.113.9' '$U/xff?$SQLI'; grep '\"path\":\"/xff\"' '$WORK/engine.log' | grep -q '\"client_ip\":\"127.0.0.1\"'"
+check "a client-sent X-Forwarded-For is not the client IP" bash -c "curl -s -o /dev/null -H 'X-Forwarded-For: 203.0.113.9' '$U/xff?$SQLI'; grep '\"path\":\"/xff\"' '$WORK/engine.log' | grep -q '\"client_ip\":\"127.0.0.1\"'"
 check "XSS in a body: 403" is 403 -X POST -d 'q=<script>alert(1)</script>' "$U/form"
 check "XSS in a chunked body: 403" is 403 -X POST -H 'Transfer-Encoding: chunked' -d 'q=<script>alert(1)</script>' "$U/form"
 check "XSS in an HTTP/2 body: 403" is 403 --http2-prior-knowledge -X POST -d 'q=<script>alert(1)</script>' "$U/form"
@@ -220,7 +220,7 @@ check "a denied gRPC call: content-type application/grpc" bash -c "$(declare -f 
 ws=(-H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==')
 check "a WebSocket handshake from a forbidden origin: 403" is 403 "${ws[@]}" -H 'Origin: https://evil.example' "$U/chat"
 check "a WebSocket handshake from an allowed origin passes" is 200 "${ws[@]}" -H 'Origin: https://app.example.com' "$U/chat"
-check "the client's request ID reaches the app" bash -c "curl -s -H 'X-Request-Id: client-id-1' '$U/' | grep -q 'id=client-id-1'"
+check "the request ID the client sends reaches the app" bash -c "curl -s -H 'X-Request-Id: client-id-1' '$U/' | grep -q 'id=client-id-1'"
 check "a request ID reaches the app" bash -c "curl -s '$U/' | grep -qE 'id=[0-9a-f]{16}'"
 check "metrics count the denials" bash -c "curl -s 127.0.0.1:$ADMIN_PORT/metrics | grep -q 'inkwall_requests_total{action=\"deny\",adapter=\"spoe\",reason=\"rule\"}'"
 

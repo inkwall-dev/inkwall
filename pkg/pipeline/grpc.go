@@ -27,6 +27,22 @@ var grpcContentTypes = map[string]bool{
 	"application/grpc-web-text+proto": true,
 }
 
+// GRPCContentType reports whether r's content type is a gRPC or gRPC-Web
+// one (application/grpc, application/grpc+json, application/grpc-web...),
+// whatever its body: what DenyGRPC refuses.
+func GRPCContentType(r *request.Request) bool {
+	for _, ct := range r.Headers.Values("Content-Type") {
+		mediaType, _, _ := strings.Cut(ct, ";")
+		mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+		if mediaType == "application/grpc" || mediaType == "application/grpc-web" ||
+			strings.HasPrefix(mediaType, "application/grpc+") || strings.HasPrefix(mediaType, "application/grpc-web+") ||
+			strings.HasPrefix(mediaType, "application/grpc-web-text") {
+			return true
+		}
+	}
+	return false
+}
+
 // grpcFrameHeader is a gRPC message's prefix: a compressed flag (0 or 1)
 // and the message length, 4 bytes big-endian.
 const grpcFrameHeader = 5
