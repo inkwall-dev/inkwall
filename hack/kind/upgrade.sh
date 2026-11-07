@@ -104,8 +104,15 @@ fi
 
 # The images of this checkout, loaded now so the upgrade doesn't wait on
 # them.
-docker build --target operator -t "$OPERATOR_IMAGE" .
-docker build --target engine -t "$ENGINE_IMAGE" .
+# PULL_IMAGES=1: the published images of a release candidate (make
+# IMAGES=ghcr:<version>).
+if [[ ${PULL_IMAGES:-} == 1 ]]; then
+  docker pull -q "$OPERATOR_IMAGE" >/dev/null
+  docker pull -q "$ENGINE_IMAGE" >/dev/null
+else
+  docker build --target operator -t "$OPERATOR_IMAGE" .
+  docker build --target engine -t "$ENGINE_IMAGE" .
+fi
 kind load docker-image "$OPERATOR_IMAGE" "$ENGINE_IMAGE" --name "$CLUSTER"
 
 # Envoy Gateway before Inkwall, so the release's rbac.integrations (auto)
@@ -469,6 +476,7 @@ probe_stop() {
       }
       exit fail
     }' <<<"$log") && rc=0 || rc=$?
+  # shellcheck disable=SC2001 # a prefix on every line
   sed 's/^/      /' <<<"$summary"
   # The wrong rounds, even within the gap allowed, with each request's
   # dns/connect/total times.

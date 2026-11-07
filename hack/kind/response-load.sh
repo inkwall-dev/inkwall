@@ -180,8 +180,8 @@ go build -o "$work/loadgen" ./hack/loadgen
 # The engine's admin port, for its metrics.
 metrics_port=$((20000 + RANDOM % 10000))
 start_metrics() {
-  local try
-  for try in 1 2 3; do
+  local _
+  for _ in 1 2 3; do
     [[ -z $pf ]] || kill "$pf" 2>/dev/null || true
     # The Running pod with the engine, not one being replaced.
     pod=$("${KUBECTL[@]}" -n "$EG_NS" get pods -l "$gw_selector" \

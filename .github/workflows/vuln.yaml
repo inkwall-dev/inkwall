@@ -1,0 +1,75 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Nightly vulnerability scans (#398): PRs run govulncheck on what they
+# change, but a new advisory also concerns code that doesn't change. So
+# every night: govulncheck on main and the supported release branches (the
+# latest three minor versions, CONTRIBUTING.md), and Trivy on the published
+# images of each of those minor versions.
+name: vuln
+
+on:
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      # The branches by name, each in its directory: protected branches,
+      # whose code is reviewed.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: main
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: release-0.4
+          path: release-0.4
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: release-0.3
+          path: release-0.3
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: release-0.2
+          path: release-0.2
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: main/go.mod
+          check-latest: true
+          cache: false
+      # Every branch, even after one fails.
+      - run: |
+          status=0
+          for b in main release-0.4 release-0.3 release-0.2; do
+            echo "::group::$b"
+            (cd "$b" && go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...) || { echo "::error::govulncheck found vulnerabilities on $b"; status=1; }
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+  images:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [inkwall-engine, inkwall-operator]
+        version: ["0.4", "0.3", "0.2"]
+    steps:
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/inkwall-dev/${{ matrix.image }}:${{ matrix.version }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
