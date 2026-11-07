@@ -127,3 +127,77 @@ func TestReportScheduled(t *testing.T) {
 		t.Errorf("cancelled:\n%s", calls)
 	}
 }
+
+// CONTRIBUTING.md's testing table names a target for every make target
+// the workflows run, and only targets the Makefile has (#399).
+func TestTestingTable(t *testing.T) {
+	contributing, err := os.ReadFile("../../CONTRIBUTING.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(contributing), "## Development and testing")
+	if start < 0 {
+		t.Fatal("CONTRIBUTING.md has no Development and testing section")
+	}
+	section := string(contributing)[start:]
+	if end := strings.Index(section[3:], "\n## "); end >= 0 {
+		section = section[:end+3]
+	}
+	makeRE := regexp.MustCompile("`make ([a-z0-9-]+)")
+	listed := map[string]bool{}
+	for _, m := range makeRE.FindAllStringSubmatch(section, -1) {
+		listed[m[1]] = true
+	}
+	// make kind-e2e-traefik, -raw-envoy, ...: the table writes the rest
+	// as suffixes.
+	for _, m := range regexp.MustCompile("`-([a-z-]+)`").FindAllStringSubmatch(section, -1) {
+		listed["kind-e2e-"+m[1]] = true
+	}
+
+	makefile, err := os.ReadFile("../../Makefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for target := range listed {
+		if !regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(target) + `:`).Match(makefile) {
+			t.Errorf("CONTRIBUTING.md lists make %s, which the Makefile has no target for", target)
+		}
+	}
+
+	// Setup steps, not tests.
+	setup := map[string]bool{"kind-cluster": true}
+	workflows, err := filepath.Glob("../../.github/workflows/*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runRE := regexp.MustCompile(`\bmake ([a-z0-9-]+)(\$\{\{ matrix\.proxy \}\})?`)
+	proxies := []string{"traefik", "raw-envoy", "envoy-gateway", "istio", "haproxy"}
+	for _, wf := range workflows {
+		b, err := os.ReadFile(wf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			if !strings.Contains(line, "run:") && !strings.HasPrefix(strings.TrimSpace(line), "make ") {
+				continue
+			}
+			for _, m := range runRE.FindAllStringSubmatch(line, -1) {
+				targets := []string{m[1]}
+				if m[2] != "" {
+					targets = nil
+					for _, p := range proxies {
+						targets = append(targets, m[1]+p)
+					}
+				}
+				for _, target := range targets {
+					if !listed[target] && !setup[target] {
+						t.Errorf("%s runs make %s, which CONTRIBUTING.md's testing table doesn't list", filepath.Base(wf), target)
+					}
+				}
+			}
+		}
+	}
+	if len(listed) < 15 {
+		t.Errorf("%d targets listed: the table didn't parse", len(listed))
+	}
+}

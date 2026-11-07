@@ -4,6 +4,8 @@ Every doc in this repository, by topic, with the question each one answers.
 
 ## Get started
 
+- [Quickstart](quickstart.md): how do I see Inkwall block an attack in five minutes, on a local
+  cluster?
 - [README](../README.md): what is Inkwall, and how do I install it and protect my first route?
 - [Helm chart](../deploy/helm/inkwall/README.md): what does the chart install, which values can I
   set, how do I uninstall it, and what happens when the operator or the engine is down?
