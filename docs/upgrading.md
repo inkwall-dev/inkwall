@@ -91,6 +91,10 @@ What changes by itself:
   mode), and routes the probe can't reach are `NotProbeable` (a rule whose every match is a
   regular expression, a server with mutual TLS or passthrough). Before, they were `Programmed`
   without proof that the filter was on the route. Alerts on `Ready` should expect it.
+- **ForwardAuth refuses an invalid `X-Forwarded-Host`** (one with a path, a space or other
+  characters a Host can't have) with 400, as the reverse proxy refuses such a Host: the rules
+  would read one host and the application another. Traefik sends the client's Host, which it
+  validates already, so its requests aren't affected.
 - **Enforced checks the newest field a policy needs.** A policy with fields of 0.4.0 and 0.5.0
   (`webSocket` and `ipLists`, say) was `Enforced` while a 0.4.x engine ran it; it is now
   `EnginesOutdated` until every engine runs 0.5.0.
