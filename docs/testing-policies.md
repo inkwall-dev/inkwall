@@ -10,6 +10,7 @@ on your machine or in CI, before they block real traffic.
 - [Test `WAFPolicy` objects](#test-wafpolicy-objects)
 - [Test the cluster's bundle](#test-the-clusters-bundle)
 - [From a log line to an exclusion](#from-a-log-line-to-an-exclusion)
+- [Suggest exclusions from the events](#suggest-exclusions-from-the-events)
 - [Run the tests in CI](#run-the-tests-in-ci)
 - [Checking it worked](#checking-it-worked)
 
@@ -115,9 +116,10 @@ spec:
       argument: q
 ```
 
-`ARGS:q`, `ARGS_GET:q` and `ARGS_POST:q` all name the argument `q`. A match on a header
-(`REQUEST_HEADERS:User-Agent`) or a cookie can't be excluded by argument: exclude the rule on the
-path instead, or fix the client. Then check the exclusion with `inkwallctl test --policy` before
+`ARGS:q`, `ARGS_GET:q` and `ARGS_POST:q` all name the argument `q`. A match on an argument's name
+(`ARGS_NAMES:q`), a cookie (`REQUEST_COOKIES:session`) or a header (`REQUEST_HEADERS:Referer`) is
+excluded with `when.argumentName`, `when.cookie` or `when.header`. What no field names (the
+request body, the URI) can only be excluded for the whole path. Then check the exclusion with `inkwallctl test --policy` before
 it reaches the cluster: the request that matched no longer shows `942100@ARGS:q`, and an attack in
 another argument still gets `deny`.
 
@@ -126,6 +128,48 @@ engine's `--event-log-rate`), so a scanner or one false positive on a busy route
 logs. The lines left out are counted in `inkwall_security_event_logs_suppressed_total{policy}`,
 and the next line that gets through says how many in `suppressed`. The events sent to the operator
 aren't limited.
+
+## Suggest exclusions from the events
+
+`inkwallctl tune` does the same for many events at once: it groups them by policy, path, rule and
+variable, and suggests the narrowest exclusion for each group, a rule on one exact path for one
+argument, argument name, cookie or header. Give it the engines' logs (`--from-logs`), or events
+from the events API, one JSON object per line:
+
+```sh
+kubectl -n traefik logs -l app.kubernetes.io/name=traefik -c inkwall-engine --since=168h >engine.log
+inkwallctl tune --from-logs engine.log
+```
+
+```console
+15 security events
+
+WAFPolicy shop/storefront: 13 logged requests would be denied in Block mode
+  942100@ARGS:q on /search: 6 times, 4 client IPs (request IDs req-q0, req-q1, req-q2)
+  942440@REQUEST_COOKIES:session_hint on /account: 1 time, 1 client IP (request IDs req-c1)
+  932100@REQUEST_BODY on /upload: 1 time, 1 client IP (request IDs req-b1)
+    not suggested: no exclusion field names REQUEST_BODY: --broad would turn the rule off for every variable on the path
+  Suggested exclusions:
+    rules 942440, on /account, for cookie session_hint
+    rules 942100, on /search, for argument q
+```
+
+- The anomaly score rules (949110 and the other 949, 959 and 980 rules) are never suggested:
+  the rules that added to the score are what to tune.
+- It never suggests a rule off for every path. A rule off for every variable on a path, for what
+  no exclusion field names, only with `--broad`. A path a policy can't hold (`;`, `%`) and a name
+  outside the exclusion syntax get no suggestion.
+- `--min-count` leaves out what was seen fewer times. Many client IPs for one group point to a
+  false positive; one client IP, to a scanner or an attack: check each group before you add it.
+- `-o yaml` writes the exclusions to add, by policy. With `--policy` (and `--rule-set`,
+  `--configmap`, `--ingress`, as `inkwallctl test` takes them), it checks the policies with the
+  exclusions added as `inkwallctl test --policy` does, and writes the policies with the exclusions
+  appended, ready to apply:
+
+```sh
+inkwallctl tune --from-logs -o yaml --policy wafpolicy.yaml --rule-set wafruleset.yaml engine.log >tuned.yaml
+inkwallctl test --policy tuned.yaml --rule-set wafruleset.yaml --expect deny --request attacks.http
+```
 
 ## Run the tests in CI
 

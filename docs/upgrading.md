@@ -145,6 +145,8 @@ What changes by itself:
   default.
 - **A monitoring kit, off by default** (#381): `metrics.serviceMonitor`, `metrics.podMonitor`,
   `metrics.prometheusRule` and `metrics.dashboard` in the chart. See [Monitoring](monitoring.md).
+- **`inkwallctl tune` is new** (#383): it suggests the narrowest exclusions from Detect mode's
+  security events. See [Suggest exclusions from the events](testing-policies.md#suggest-exclusions-from-the-events).
 
 ## From 0.4.0 to 0.4.1
 
