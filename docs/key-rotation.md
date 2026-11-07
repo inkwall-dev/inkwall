@@ -112,29 +112,33 @@ policies is not compiled again.
 
 ## Checking it worked
 
-Watch the phase on the signing key Secret. It reads `Publishing`, then `Retiring`, then nothing:
+Watch the phase on the InkwallConfig. The `KEY` column reads `Publishing`, then `Retiring`, then
+`Idle`:
 
 ```sh
-kubectl -n inkwall-system get secret inkwall-bundle-signing-key \
-  -o jsonpath='{.metadata.annotations.waf\.inkwall\.dev/rotation-phase}{"\n"}'
+kubectl get inkwallconfig default -w
 ```
 
-Compare the key that signs with the key that signs the bundle being served. When the rotation
-is done, both are the new key, and `trusted-keys.pub` holds one key (32 bytes):
+`status.signingKey` has the key that signs (`activeKeyID`), the phase, when it began (`since`),
+and what the rotation waits for (`waitingFor`). The `SigningKeyRotation` condition is `True` while
+a rotation is in progress, and its message says the same:
 
 ```sh
-kubectl -n inkwall-system get secret inkwall-bundle-signing-key -o jsonpath='{.data.key-id}' | base64 -d; echo
+kubectl get inkwallconfig default -o jsonpath='{.status.signingKey}{"\n"}'
+kubectl get inkwallconfig default -o jsonpath='{.status.conditions[?(@.type=="SigningKeyRotation")].message}{"\n"}'
+```
+
+When the rotation is done, the phase is `Idle`, `activeKeyID` is the new key, and the bundle being
+served is signed with it:
+
+```sh
 kubectl -n inkwall-system get secret inkwall-bundle -o jsonpath='{.metadata.annotations.waf\.inkwall\.dev/key-id}{"\n"}'
-kubectl -n inkwall-system get secret inkwall-bundle-signing-key -o jsonpath='{.data.trusted-keys\.pub}' | base64 -d | wc -c
 ```
 
-The [leader](https://kubernetes.io/docs/concepts/architecture/leases/#leader-election) logs each step: `signing key rotation started: new key published`,
-`signing key rotation: switched to the new key` and
-`signing key rotation done: previous key retired`, and, while it waits, what it waits for.
-
-```sh
-kubectl -n inkwall-system logs deploy/inkwall-operator | grep 'signing key rotation'
-```
+The [leader](https://kubernetes.io/docs/concepts/architecture/leases/#leader-election) also logs each step (`signing key rotation started: new key published`,
+`signing key rotation: switched to the new key`, `signing key rotation done: previous key
+retired`), and the signing key Secret's `waf.inkwall.dev/rotation-phase` annotation has the phase,
+for tools that read it.
 
 Your policies stay `Ready` throughout:
 
@@ -144,10 +148,15 @@ kubectl get wafpolicy -A
 
 ## When a rotation waits
 
-The leader logs what it waits for, and names up to three engines. For example:
+`status.signingKey.waitingFor` says what the rotation waits for, and names up to three engines
+(the leader logs it too). For example:
 `key <id> published; 1/3 engines don't trust it yet: traefik/traefik-6d9f-abcde`.
 
-- **An engine from before 0.1.1.** It reports no keys, and the log says
+```sh
+kubectl get inkwallconfig default -o jsonpath='{.status.signingKey.waitingFor}{"\n"}'
+```
+
+- **An engine from before 0.1.1.** It reports no keys, and `waitingFor` says
   `reports no keys: an engine older than key rotation`. Restart its pod so it gets the current
   engine.
 - **An engine you configured yourself**, outside a pod the operator injected. It reads its keys

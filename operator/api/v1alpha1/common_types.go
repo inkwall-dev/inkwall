@@ -25,6 +25,13 @@ const (
 	// bundle suspends inspection (spec.suspend): every engine allows every
 	// request.
 	ConditionSuspended = "Suspended"
+	// ConditionSigningKeyRotation, on the InkwallConfig, is True while a
+	// bundle signing key rotation is in progress; its message says what the
+	// rotation waits for.
+	ConditionSigningKeyRotation = "SigningKeyRotation"
+	// ConditionIntegrationsConfigured, on the InkwallConfig, is False when
+	// spec.integrations can't be applied (an invalid selector), with why.
+	ConditionIntegrationsConfigured = "IntegrationsConfigured"
 )
 
 // SecretReference names a Secret in a given namespace.

@@ -294,6 +294,10 @@ func (cur *Current) Load(ctx context.Context, c client.Reader, namespace string)
 	return &b, signed.GetKeyId(), nil
 }
 
+// Size returns the compressed size of the bundle last read or stored; 0
+// before either.
+func (cur *Current) Size() int { return len(cur.data) }
+
 // Store is the package's Store, keeping b once it is stored.
 func (cur *Current) Store(ctx context.Context, c client.Client, r client.Reader, namespace string, b *bundlev1.Bundle,
 	signed *bundlev1.SignedBundle, pub ed25519.PublicKey) (int, error) {

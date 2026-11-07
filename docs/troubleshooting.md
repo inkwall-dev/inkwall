@@ -47,6 +47,15 @@ It reports:
   version. Engines behind, rejecting the bundle, or of another version than the operator are
   named by pod, with what to do: an engine of another version runs until its pod restarts.
 
+Without `inkwallctl`, the InkwallConfig's status has the cluster view too: the bundle version and
+size against its limit, the engines by state, the signing key and its rotation, and whether the
+integrations' selectors apply:
+
+```sh
+kubectl get inkwallconfig default
+kubectl get inkwallconfig default -o jsonpath='{.status.bundle}{"\n"}{.status.engines}{"\n"}{.status.signingKey}{"\n"}'
+```
+
 It exits 0 when nothing needs attention, 1 when something does (the report ends with what), and 2
 on an error. Flags: `--kubeconfig`, `--context`, `--namespace` (the operator's, default
 `inkwall-system`), `-o json`.
