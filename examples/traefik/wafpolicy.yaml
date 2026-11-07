@@ -1,0 +1,15 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# The Ingress's WAFPolicy: the Core Rule Set (a policy without ruleSets
+# uses it), in Detect mode first: review its security events, then set
+# mode: Block (docs/quickstart.md).
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: web
+  namespace: shop
+spec:
+  targetRefs:
+    - {kind: Ingress, name: web}
+  mode: Detect

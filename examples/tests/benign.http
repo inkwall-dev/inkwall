@@ -1,0 +1,20 @@
+GET /products?id=42 HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64)
+Accept: text/html,application/xhtml+xml
+
+
+GET /search?q=blue+shoes HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64)
+Accept: text/html,application/xhtml+xml
+
+
+POST /login HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64)
+Accept: text/html,application/xhtml+xml
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 29
+
+user=alice&password=hunter2xx

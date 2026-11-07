@@ -12,7 +12,10 @@ to your routes. The engine runs OWASP [Coraza](https://coraza.io/) with the
 > [**Istio**](https://istio.io/latest/docs/) and their `HTTPRoute` routes, with Istio's `VirtualService` routes, and as a standalone reverse proxy in front of anything else. The API is
 > `v1alpha1` and will change. See [Limits](#limits) and the [roadmap](#roadmap).
 
-The [docs index](docs/README.md) lists every guide, reference and design doc.
+**New to Inkwall? Start with the [quickstart](docs/quickstart.md)**: a local kind cluster, the
+released chart, Traefik and a demo app, from nothing to a blocked attack in five minutes.
+[`examples/`](examples) has the same app behind Traefik, Envoy Gateway and Istio. The
+[docs index](docs/README.md) lists every guide, reference and design doc.
 
 ## Contents
 

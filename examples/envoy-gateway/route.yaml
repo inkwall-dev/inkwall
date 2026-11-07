@@ -1,0 +1,35 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# The demo app's HTTPRoute, on a Gateway of Envoy Gateway's GatewayClass.
+# Envoy Gateway runs the Gateway's Envoy pods in envoy-gateway-system, a
+# proxy namespace: the operator adds the engine to them.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: eg
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: shop
+  namespace: shop
+spec:
+  gatewayClassName: eg
+  listeners:
+    - {name: http, protocol: HTTP, port: 80}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: web
+  namespace: shop
+spec:
+  parentRefs:
+    - name: shop
+  hostnames: [shop.example.com]
+  rules:
+    - backendRefs:
+        - {name: web, port: 80}
