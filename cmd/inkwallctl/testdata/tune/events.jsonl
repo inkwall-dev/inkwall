@@ -1,0 +1,1 @@
+{"eventId": "01J", "policy": "shop/storefront", "action": "ACTION_LOG", "reason": "REASON_RULE", "path": "/search", "clientIp": "203.0.113.1", "requestId": "e-1", "matches": [{"ruleId": 942100, "variable": "ARGS:q", "snippet": "select best"}]}
