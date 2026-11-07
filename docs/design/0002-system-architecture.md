@@ -1238,7 +1238,12 @@ names the failing targets only: a crash may be a vulnerability, reported private
 
 **Built (other levels):**
 
-- rule conformance (`make crs-test`, go-ftw);
+- rule conformance (`make crs-test`, go-ftw): the CRS's regression tests through the reverse
+  proxy at each paranoia level, and through ForwardAuth, ext_proc and SPOE (each behind an
+  in-process stand-in for its proxy) at level 4, with the response rules' tests through ext_proc.
+  A test one adapter fails while the reverse proxy passes it fails the suite, unless it is listed
+  as a difference with its reason (`test/crs/crs_test.go`): today, the `Content-Length: 0` the
+  adapters add to an empty POST, and requests without a Host, which Envoy answers itself;
 - E2E and upgrade tests on kind (`make kind-e2e`, `make kind-upgrade`; shell scripts in
   `hack/kind`, on every PR). The upgrade test runs `helm upgrade` from the last release and checks
   that routes stay protected;
