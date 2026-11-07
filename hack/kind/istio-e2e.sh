@@ -281,11 +281,33 @@ leak_replaced() {
     ! curl -s -H "Host: $HOST" -H "$LEAK" "http://127.0.0.1:$port/leak" | grep -qF 'SQL syntax' || return 1
   done
 }
+# engine_logs SELECTOR: the engine log of every pod SELECTOR selects, each
+# read on its own: `kubectl logs -l` reads at most five pods (#508).
+engine_logs() {
+  local pod
+  for pod in $("${KUBECTL[@]}" -n "$NS" get pods -l "$1" -o name); do
+    "${KUBECTL[@]}" -n "$NS" logs "$pod" -c inkwall-engine --tail=-1 2>/dev/null || true
+  done
+}
 # logged_response SELECTOR ACTION PATH: an engine of the pods SELECTOR
 # selects logged a response event for PATH.
 logged_response() {
-  "${KUBECTL[@]}" -n "$NS" logs -l "$1" -c inkwall-engine --tail=-1 |
+  engine_logs "$1" |
     grep '"security event"' | grep '"phase":"response"' | grep "\"action\":\"$2\"" | grep "\"path\":\"$3\"" >/dev/null
+}
+# leak_logged SELECTOR PORT HOST: a leaking response on a fresh path passes
+# (200), and an engine of the pods SELECTOR selects logs it as a Detect-mode
+# response event within 10 s. Each try sends a new request (#508): Envoy can
+# stream responses (observability mode) before the engines apply the Detect
+# bundle, and an engine still in Block mode logs that request as a deny.
+leak_logged() {
+  local path=/leak-$RANDOM$RANDOM
+  [[ $(code "$2" "$3" "$path" -H "$LEAK") == 200 ]] || return 1
+  for _ in $(seq 20); do
+    logged_response "$1" log "$path" && return 0
+    sleep 0.5
+  done
+  return 1
 }
 has_sidecar() {
   "${KUBECTL[@]}" -n "$NS" get configmap custom-params -o jsonpath='{.data.deployment}' | grep 'name: inkwall-engine' >/dev/null
@@ -308,7 +330,7 @@ reached_app() { "${KUBECTL[@]}" -n "$NS" logs deployment/app --since=10m | grep 
 # logged PATH: an engine in the Gateways' pods logged a detect-mode event
 # for PATH.
 logged() {
-  "${KUBECTL[@]}" -n "$NS" logs -l gateway.istio.io/managed=istio.io-gateway-controller -c inkwall-engine --tail=-1 |
+  engine_logs gateway.istio.io/managed=istio.io-gateway-controller |
     grep '"security event"' | grep '"action":"log"' | grep "\"path\":\"$1\"" >/dev/null
 }
 no_wiring() {
@@ -438,7 +460,7 @@ policy Detect "$RESPONSES"
 eventually "the EnvoyFilters stream the responses in detect mode" responses_sent STREAMED
 forward_all
 eventually "detect mode: the leak passes" leak_is 200 "$CUSTOM_PORT" "$HOST"
-eventually "and the engines log it" logged_response gateway.istio.io/managed=istio.io-gateway-controller log /leak
+eventually "and the engines log it" leak_logged gateway.istio.io/managed=istio.io-gateway-controller "$CUSTOM_PORT" "$HOST"
 
 echo "== unprotected"
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy shared --timeout=60s >/dev/null
@@ -572,7 +594,7 @@ check "the unprotected VirtualService lets the leak through" leak_is 200 "$VS_PO
 eventually "the ingress gateway's engine logs it as a response deny" logged_response istio=ingressgateway deny /leak
 vs_policy Detect "$RESPONSES"
 eventually "VirtualService, detect mode: the leak passes" leak_is 200 "$VS_PORT" "$VS_HOST"
-eventually "and the engine logs it" logged_response istio=ingressgateway log /leak
+eventually "and the engine logs it" leak_logged istio=ingressgateway "$VS_PORT" "$VS_HOST"
 vs_policy
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy vs --timeout=60s >/dev/null
 eventually "unprotected: the EnvoyFilter is gone" no_vs_filter
