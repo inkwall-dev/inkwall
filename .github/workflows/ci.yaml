@@ -403,6 +403,8 @@ jobs:
           go-version: '1.27.x'
           check-latest: true
       - run: make docs-check
+      # The examples' Argo CD health checks and Flux healthCheckExprs (#377).
+      - run: make gitops-health-test
 
   pr-title:
     if: github.event_name == 'pull_request'

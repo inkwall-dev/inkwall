@@ -69,6 +69,8 @@ type PodInjector struct {
 	// Image and PullPolicy are the engine's, unless InkwallConfig sets one.
 	Image      string
 	PullPolicy corev1.PullPolicy
+	// PullSecrets are added to the pod's imagePullSecrets.
+	PullSecrets []string
 	// OperatorAddr is the distribution server engines connect to.
 	OperatorAddr string
 	// Integrations recognise proxy pods; nil: the defaults.
@@ -100,7 +102,7 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 	if p.Disabled[integ.Name] != "" {
 		return admission.Allowed("the " + integ.Name + " integration is disabled")
 	}
-	s := injection.Sidecar{Image: p.Image, PullPolicy: p.PullPolicy, OperatorAddr: p.OperatorAddr, BundleSecret: p.BundleSecret, Args: integ.Adapter}
+	s := injection.Sidecar{Image: p.Image, PullPolicy: p.PullPolicy, PullSecrets: p.PullSecrets, OperatorAddr: p.OperatorAddr, BundleSecret: p.BundleSecret, Args: integ.Adapter}
 	haproxy := integ.Name == integrations.HAProxy.Name
 	if haproxy {
 		s.SocketDir = integrations.HAProxySocketDir
