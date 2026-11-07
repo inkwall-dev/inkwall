@@ -33,20 +33,23 @@ on:
         type: string
         default: ''
 
-permissions:
-  contents: read
+# Each job asks for what it needs (least privilege).
+permissions: {}
 
 jobs:
   versions:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     outputs:
       from: ${{ steps.versions.outputs.from }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ inputs.ref }}
           fetch-depth: 0
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           check-latest: true
@@ -67,6 +70,8 @@ jobs:
   upgrade:
     needs: versions
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -74,21 +79,22 @@ jobs:
         from: ${{ fromJSON(needs.versions.outputs.from) }}
     name: upgrade from ${{ matrix.from }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ inputs.ref }}
           fetch-depth: 0
       # The versions under test, hack/versions.env (#393).
       - id: versions
         run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_OUTPUT"
-      - uses: azure/setup-helm@v5
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: ${{ steps.versions.outputs.HELM_VERSION }}
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           check-latest: true
-      - uses: actions/cache/restore@v6
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/go-build
           key: image-go-build-${{ hashFiles('go.sum', 'Dockerfile') }}
@@ -102,9 +108,10 @@ jobs:
           kubectl --context kind-inkwall-upgrade get pods -A
           kubectl --context kind-inkwall-upgrade -n inkwall-system logs deployment/inkwall-operator --tail=100 || true
           mkdir -p "$RUNNER_TEMP/kind-logs"
-          bin/kind-*/kind export logs "$RUNNER_TEMP/kind-logs" --name inkwall-upgrade || true
+          kind=(bin/kind-*/kind)
+          "${kind[0]}" export logs "$RUNNER_TEMP/kind-logs" --name inkwall-upgrade || true
       - if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: kind-logs-upgrade-${{ matrix.from }}
           path: ${{ runner.temp }}/kind-logs
