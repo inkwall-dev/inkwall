@@ -24,6 +24,7 @@ package scale
 
 import (
 	"bufio"
+	"bytes"
 	"cmp"
 	"compress/gzip"
 	"context"
@@ -80,6 +81,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/test/fakeengine"
 	"github.com/inkwall-dev/inkwall/operator/test/testenv"
 	"github.com/inkwall-dev/inkwall/pkg/agent"
+	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/request"
@@ -645,6 +647,9 @@ func setupEngineAccess(ctx context.Context, t *testing.T, c client.Client) {
 // freeAddr: testenv.FreeAddr (#452).
 func freeAddr(t *testing.T) string { return testenv.FreeAddr(t) }
 
+// scaleProbeKey is the fake prober's key.
+var scaleProbeKey = bytes.Repeat([]byte{7}, haproxyprobe.KeySize)
+
 // startOperator runs the operator with its production defaults (debounce,
 // report intervals), until the test ends, and returns its distribution
 // server's address once it is ready and leads.
@@ -670,6 +675,17 @@ func startOperator(ctx context.Context, t *testing.T, cfg *rest.Config) string {
 		EngineImage:      "inkwall-engine:test",
 		EnginePullPolicy: corev1.PullNever,
 		Replica:          "operator-0",
+		// The wiring's probe (#372), answered as the engine would, on the
+		// gateway pods that have an address (wiring_test.go gives them one).
+		Prober: &wiring.Prober{
+			Key: func(context.Context) ([]byte, error) { return scaleProbeKey, nil },
+			Do: func(_ context.Context, _ wiring.ProbePod, _ wiring.ProbeTarget, req *http.Request) (*http.Response, error) {
+				answer, _ := haproxyprobe.Check(scaleProbeKey, req.URL.RequestURI(), req.Host, req.Header.Get(haproxyprobe.Header))
+				h := http.Header{}
+				h.Set(haproxyprobe.Header, answer)
+				return &http.Response{StatusCode: http.StatusOK, Header: h, Body: io.NopCloser(strings.NewReader(""))}, nil
+			},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

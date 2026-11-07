@@ -28,6 +28,12 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "inkwall.serviceAccountName" . }}
+      {{- with include "inkwall.pullSecretNames" . }}
+      imagePullSecrets:
+        {{- range splitList "," . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
       {{- with .Values.operator.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
@@ -51,6 +57,9 @@ spec:
             - --proxy-namespaces={{ include "inkwall.proxyNamespaces" . }}
             - --engine-image={{ include "inkwall.engine.image" . }}
             - --engine-image-pull-policy={{ .Values.engine.image.pullPolicy }}
+            {{- with include "inkwall.pullSecretNames" . }}
+            - --engine-image-pull-secrets={{ . }}
+            {{- end }}
             {{- if $certManager }}
             - --webhook-certs=external
             - --webhook-cert-dir=/certs
@@ -67,6 +76,9 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           env:
+            {{- with .Values.operator.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -128,6 +140,9 @@ spec:
               mountPath: /etc/inkwall/control-plane
               readOnly: true
             {{- end }}
+            {{- with .Values.operator.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
@@ -146,6 +161,13 @@ spec:
           configMap:
             name: {{ include "inkwall.controlPlane.ca" . }}
         {{- end }}
+        {{- with .Values.operator.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.operator.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- tpl (toYaml .) $ | nindent 8 }}
+      {{- end }}
       {{- with .Values.operator.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

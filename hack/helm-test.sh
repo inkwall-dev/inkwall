@@ -49,7 +49,7 @@ check envoy-gateway,istio,istio-ingress,traefik --set rbac.integrations.haproxy=
 check "" --set rbac.integrations.traefik=false --set rbac.integrations.envoyGateway=false --set rbac.integrations.istio=false --set rbac.integrations.haproxy=false --set rbac.integrations.istioIngress=false
 
 if out=$(helm template inkwall "$CHART" --namespace inkwall-system --set rbac.integrations.traefik=yes 2>&1) ||
-  ! grep -q 'rbac.integrations.traefik must be auto, true or false' <<<"$out"; then
+  ! grep -q "/rbac/integrations/traefik': value must be one of 'auto', 'true', 'false'" <<<"$out"; then
   echo "rbac.integrations.traefik=yes: want an error, got: $out" >&2
   fail=1
 fi
@@ -184,4 +184,84 @@ if grep -q 'blob/main/' <<<"$out" || ! grep -q "blob/v$version/docs/monitoring.m
   echo "PrometheusRule: runbook_url must point at v$version's docs" >&2
   fail=1
 fi
+# values.schema.json (#386): a typo'd key, a wrong type and a value outside
+# an enum fail the render, naming the value.
+# rejects WANT [helm flags...]: helm template fails with WANT in its error.
+rejects() {
+  local want=$1 out
+  shift
+  if out=$(helm template inkwall "$CHART" --namespace inkwall-system "$@" 2>&1) || ! grep -qF -- "$want" <<<"$out"; then
+    echo "helm template $*: want an error with \"$want\", got: $(head -5 <<<"$out")" >&2
+    fail=1
+  fi
+}
+rejects "additional properties 'integration' not allowed" --set rbac.integration.traefik=true
+rejects "additional properties 'replica' not allowed" --set operator.replica=2
+rejects "additional properties 'imageRegistry' not allowed" --set imageRegistry=registry.example.com
+rejects "/rbac/integrations/traefik" --set rbac.integrations.traefik=yes
+rejects "value must be one of 'rotate', 'certManager'" --set webhook.certs.mode=certmanager
+rejects "value must be one of 'Always', 'IfNotPresent', 'Never'" --set engine.image.pullPolicy=always
+rejects "/operator/replicas': got string, want integer" --set operator.replicas=two
+rejects "/engine/image/digest" --set engine.image.digest=latest
+# Values a parent chart shares under global are its own.
+if ! helm template inkwall "$CHART" --namespace inkwall-system --set global.storageClass=fast >/dev/null; then
+  echo "global.storageClass: want it allowed (global is shared with parent charts)" >&2
+  fail=1
+fi
+
+# Images (#386): global.imageRegistry replaces the registry, a digest the tag;
+# global.imagePullSecrets go on the operator's pods and the unwire Job's,
+# and to the operator for the pods it injects the engine into.
+# images [helm flags...]: the operator's images, --engine-image, the pull
+# secrets flag and the pods' imagePullSecrets, one line.
+images() {
+  local out
+  out=$(helm template inkwall "$CHART" --namespace inkwall-system "$@")
+  { grep -E '^ *image: |--engine-image|^ *imagePullSecrets:|^ *- name: (mirror|regcred)$' <<<"$out" || true; } | tr -s ' \n' ' ' | sed 's/^ //; s/ $//'
+}
+version=$(sed -n 's/^appVersion: "\(.*\)"$/\1/p' "$CHART/Chart.yaml")
+digest=sha256:$(printf '%064d' 0)
+want="image: ghcr.io/inkwall-dev/inkwall-operator:$version - --engine-image=ghcr.io/inkwall-dev/inkwall-engine:$version - --engine-image-pull-policy=IfNotPresent image: ghcr.io/inkwall-dev/inkwall-operator:$version"
+if [[ $(images) != "$want" ]]; then
+  echo "images: $(images); want $want" >&2
+  fail=1
+fi
+want="imagePullSecrets: - name: mirror - name: regcred image: registry.example.com/mirror/inkwall-dev/inkwall-operator:$version - --engine-image=registry.example.com/mirror/inkwall-dev/inkwall-engine@$digest - --engine-image-pull-policy=IfNotPresent - --engine-image-pull-secrets=mirror,regcred imagePullSecrets: - name: mirror - name: regcred image: registry.example.com/mirror/inkwall-dev/inkwall-operator:$version"
+got=$(images --set global.imageRegistry=registry.example.com/mirror/ --set engine.image.digest="$digest" --set 'global.imagePullSecrets[0]=mirror' --set 'global.imagePullSecrets[1].name=regcred')
+if [[ $got != "$want" ]]; then
+  echo "images with a registry, a digest and pull secrets: $got; want $want" >&2
+  fail=1
+fi
+# A repository without a registry gets it prepended.
+got=$(images --set global.imageRegistry=mirror.example.com --set operator.image.repository=inkwall/operator --set operator.image.tag=dev)
+if ! grep -q 'image: mirror.example.com/inkwall/operator:dev' <<<"$got"; then
+  echo "images with a registry and a repository without one: $got" >&2
+  fail=1
+fi
+
+# The operator's extra env, volumes, mounts and topology spread (#386).
+out=$(helm template inkwall "$CHART" --namespace inkwall-system \
+  --set 'operator.extraEnv[0].name=HTTPS_PROXY' --set 'operator.extraEnv[0].value=http://proxy:3128' \
+  --set 'operator.extraVolumes[0].name=ca' --set 'operator.extraVolumes[0].configMap.name=corporate-ca' \
+  --set 'operator.extraVolumeMounts[0].name=ca' --set 'operator.extraVolumeMounts[0].mountPath=/etc/ssl/corporate' \
+  -f - <<'EOF'
+operator:
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/instance: '{{ .Release.Name }}'
+EOF
+)
+deployment=$(awk '/^kind: Deployment$/,/^---$/' <<<"$out")
+for want in 'name: HTTPS_PROXY' 'value: http://proxy:3128' 'name: corporate-ca' 'mountPath: /etc/ssl/corporate' \
+  'topologyKey: topology.kubernetes.io/zone' 'app.kubernetes.io/instance: inkwall$'; do
+  if ! grep -q -- "$want" <<<"$deployment"; then
+    echo "operator extras: no \"$want\" in the Deployment" >&2
+    fail=1
+  fi
+done
+
 exit $fail
