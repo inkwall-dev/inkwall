@@ -280,6 +280,28 @@ spec:
 	}
 }
 
+// TestTestPolicyDenyGRPC: body.grpc: Deny applies offline (#367).
+func TestTestPolicyDenyGRPC(t *testing.T) {
+	policy := writeFile(t, "wafpolicy.yaml", `apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata: {name: api, namespace: shop}
+spec:
+  targetRefs: [{kind: Ingress, name: api}]
+  mode: Block
+  body: {grpc: Deny}
+`)
+	requests := writeFile(t, "requests.http", "POST /api/svc.Echo/Say HTTP/1.1\r\nHost: shop.example.com\r\nContent-Type: application/grpc\r\nContent-Length: 6\r\n\r\n\x00\x00\x00\x00\x01x"+
+		"GET /api/a HTTP/1.1\r\nHost: shop.example.com\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\n\r\n")
+	code, out, errOut := runCLI(t, "test", "--request", requests, "--policy", policy, "--ingress", sampleIngresses)
+	if code != 0 || errOut != "" {
+		t.Fatalf("exit %d, stderr %q", code, errOut)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "reason=grpc") || !strings.HasPrefix(lines[0], "deny ") || !strings.HasPrefix(lines[1], "allow ") {
+		t.Errorf("want the gRPC call denied (reason grpc), the GET allowed:\n%s", out)
+	}
+}
+
 // TestTestPolicyIngressRoute routes requests by Ingresses and Traefik
 // IngressRoutes together.
 func TestTestPolicyIngressRoute(t *testing.T) {
