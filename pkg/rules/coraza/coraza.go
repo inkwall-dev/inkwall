@@ -1259,7 +1259,7 @@ const (
 	internalIDMin = 7700000
 	// idDetect switches a transaction to DetectionOnly when TX:txDetect is
 	// 1 (EvaluateExchangeDetecting).
-	idDetect = 7700010
+	idDetect      = 7700010
 	internalIDMax = 7709999
 	// idCRSContentType is CRS's rule for content types the policy
 	// doesn't allow (tx.allowed_request_content_type).

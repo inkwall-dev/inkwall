@@ -394,7 +394,7 @@ func TestResponseOfFlaggedRequestDetectMode(t *testing.T) {
 		t.Fatalf("%d events, want the request's and the response's: %s", len(evs), logs.String())
 	}
 	for i, phase := range []string{"request", "response"} {
-		if got, _ := evs[i]["phase"].(string); got != phase && !(phase == "request" && got == "") {
+		if got, _ := evs[i]["phase"].(string); got != phase && (phase != "request" || got != "") {
 			t.Errorf("event %d: phase %q, want %s: %v", i, got, phase, evs[i])
 		}
 	}
