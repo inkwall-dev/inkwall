@@ -1230,6 +1230,18 @@ the disabled integration's message and the chart's notes say. When Helm can't as
 Missing CRDs don't disable an integration: its wiring waits for them
 ([§4.4](#44-wiring-controller)).
 
+**NetworkPolicies (v0.5.0, #387).** The chart's `networkPolicy.enabled` (off by default) lets into
+the operator's pods what it needs: the webhook port and the probes from anywhere, the
+distribution port from the proxy namespaces, and the metrics port from anywhere. The webhook is
+open by default because the API server's address, as a network plugin sees it, varies by
+cluster (host network, a managed control plane, a konnectivity proxy): a narrower default would
+break injection and admission on clusters it doesn't fit, and a Pod webhook failing closed would
+keep proxy pods from starting. `webhookFrom` and `metricsFrom` narrow them. Egress is a separate
+opt-in (`networkPolicy.egress.enabled`), to any address on the API server's ports unless
+`apiServerCIDRs` names them, for the same reason. The chart never creates a default-deny policy:
+whether the namespace denies by default is the cluster's choice, and the engines' namespaces
+aren't the chart's. The Network flows table in the chart README lists every connection.
+
 **Not yet:**
 
 - rules for Istio and controller ConfigMaps;

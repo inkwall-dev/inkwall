@@ -35,6 +35,8 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 What's new:
 
+- **Standalone mode reloads its rules without a restart**: on `SIGHUP`, or with `--watch-rules`
+  when the files change ([reloading the rules](standalone-proxy.md#reloading-the-rules)).
 - **Responses through Istio.** A policy with `responses.inspect` now has the responses of its
   Istio HTTPRoutes and VirtualServices inspected, as through Envoy Gateway: a response that leaks
   is replaced with 403 in `Block` mode and logged in `Detect` mode. Such a policy was
@@ -164,6 +166,9 @@ What changes by itself:
   for a request an adapter can't read. `InkwallConfig.spec.engine.jsonDenials` (the engine's
   `--json-denials`) answers clients that accept `application/json` with a JSON body; off by
   default.
+- **NetworkPolicies, off by default** (#387): `networkPolicy.enabled` in the chart, for clusters
+  that deny traffic by default. See
+  [Network flows](../deploy/helm/inkwall/README.md#network-flows) for what connects to what.
 - **The chart checks its values** (#386). A `values.schema.json` makes `helm install`, `upgrade`
   and `template` fail on a key the chart doesn't have, a wrong type, or a value outside its set,
   naming it, where 0.4.x ignored them. A typo such as `rbac.integration.traefik` was silently
