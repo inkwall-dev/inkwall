@@ -174,6 +174,15 @@ forwards, and inspects every text message with the policy's rules, before the ap
 
 It needs a policy from flags: with `--operator`, the flag is refused.
 
+### Idle WebSockets and shutdown
+
+Once upgraded, a WebSocket is outside the proxy's request timeouts. With
+`--websocket-idle-timeout 10m`, one with nothing passing either way for 10 minutes is closed with a
+close frame `1001` (going away) to both the client and the upstream; unset, it stays open as long as
+both ends keep it. On `SIGTERM` the proxy sends `1001` to every open WebSocket and waits for them
+to close, within the 15-second shutdown grace period. This applies with or without
+`--websocket-messages`. `--max-connections` counts a WebSocket's connection until it closes.
+
 ## Checking it worked
 
 Send a handshake from an origin the policy doesn't allow. In `Block` mode it gets 403, not 101:

@@ -35,11 +35,26 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 What's new:
 
+- **Automatic engine rollout (opt-in).** Proxy pods started before Inkwall, or running another
+  engine image than the one configured, are `PendingRestart` until you restart them: that is still
+  the default (`spec.engine.rollout: Manual`). With
+  `kubectl patch inkwallconfig default --type=merge -p '{"spec":{"engine":{"rollout":"Automatic"}}}'`
+  the operator evicts them one at a time through the Eviction API, respecting
+  PodDisruptionBudgets, and waits for each replacement to be ready with the new engine before the
+  next, for the Traefik, HAProxy and Istio ingress gateway pods it injects. A refused eviction or a
+  replacement not ready within 5 minutes pauses it: `kubectl get inkwallconfig default -o
+  jsonpath='{.status.conditions[?(@.type=="EngineRollout")].message}'` says why. Upgrade the chart
+  first, for the new CRD field and the `pods/eviction` permission. With it, an engine upgrade
+  after a chart upgrade needs no restart by hand.
 - **Standalone mode reloads its rules without a restart**: on `SIGHUP`, or with `--watch-rules`
   when the files change ([reloading the rules](standalone-proxy.md#reloading-the-rules)).
 - **gRPC and HTTP/2 through the standalone proxy**: `--h2c`, `--tls-cert`/`--tls-key`,
   `--upstream-h2c` and `--upstream-ca` ([gRPC](grpc.md#through-the-standalone-proxy)). Its
   upstream connections are now kept for reuse (128 idle per host instead of Go's default 2).
+- **Limits for the standalone proxy's long-lived connections**: `--websocket-idle-timeout`,
+  `--max-connections` and `--body-read-timeout`, all off by default. On shutdown the proxy now
+  closes open WebSockets with `1001` (going away) instead of dropping them, and a client whose body
+  read times out gets `408` instead of `400`.
 - **Responses through Istio.** A policy with `responses.inspect` now has the responses of its
   Istio HTTPRoutes and VirtualServices inspected, as through Envoy Gateway: a response that leaks
   is replaced with 403 in `Block` mode and logged in `Detect` mode. Such a policy was
@@ -107,6 +122,10 @@ What changes by itself:
   regular expression, a server with mutual TLS or passthrough, or a match on header or query
   values over TLS, which the probe doesn't send there: they may be secrets). Before, they were `Programmed`
   without proof that the filter was on the route. Alerts on `Ready` should expect it.
+- **In Detect mode, the responses of flagged requests are inspected** (with `responses.inspect`):
+  a request the rules flag is let through, and an SQL error or a leak in its response is now its
+  own event, as for any request. The request's event may list a few more rules than before: the
+  rules run to the end instead of stopping where Block mode would.
 - **Enforced checks the newest field a policy needs.** A policy with fields of 0.4.0 and 0.5.0
   (`webSocket` and `ipLists`, say) was `Enforced` while a 0.4.x engine ran it; it is now
   `EnginesOutdated` until every engine runs 0.5.0.

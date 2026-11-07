@@ -180,6 +180,9 @@ an unknown built-in rule set) and `RuleCompileError` (rules that don't compile),
 | `SigningKeyRotation` | `Retiring` | The new key signs; the previous one stays trusted until every engine runs a bundle the new one signed. | As for `Publishing`. |
 | `IntegrationsConfigured` | `Configured` | The integrations' proxy pod selectors apply. | |
 | `IntegrationsConfigured` | `InvalidSelector` | A `spec.integrations` selector can't be applied (an unknown operator); the operator keeps the selectors it runs with. | Fix the selector the message names. |
+| `EngineRollout` | `RollingOut` | `spec.engine.rollout: Automatic`: the operator evicted a proxy pod for a new engine and waits for its replacement. | |
+| `EngineRollout` | `Done` | No proxy pod the operator injects needs a new engine. | |
+| `EngineRollout` | `Paused` | An eviction was refused (a PodDisruptionBudget) or a replacement isn't ready in time; nothing else is evicted. The message says which. | Relax the budget, or fix the replacement pod the message names (is the Pod webhook answering?). |
 | `ControlPlaneConnected` | `Connected` | Connected to the control plane. | |
 | `ControlPlaneConnected` | `InvalidEndpoint` | `spec.controlPlane.endpoint` isn't a valid address. | Fix it. |
 | `ControlPlaneConnected` | `EnrollmentTokenMissing` | The enrollment token Secret, or its `token` key, is missing. | Create it ([control plane](control-plane.md)). |
