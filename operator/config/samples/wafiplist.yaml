@@ -1,0 +1,14 @@
+# Clients the demo's policy denies (or, in an allow list, doesn't inspect).
+# They are matched on the client IP the engine resolves: see
+# docs/client-ip.md.
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFIPList
+metadata:
+  name: abusers
+  namespace: inkwall-demo
+spec:
+  entries:
+  - cidr: 203.0.113.0/24
+    description: documentation range (RFC 5737), as an example
+  - cidr: 2001:db8::/32
+    description: documentation range (RFC 3849)
