@@ -499,7 +499,7 @@ func (rep *tuneReport) yaml() (string, error) {
 	var b strings.Builder
 	if rep.Patched != nil {
 		for _, p := range rep.Patched {
-			p.TypeMeta.APIVersion, p.TypeMeta.Kind = wafv1alpha1.GroupVersion.String(), "WAFPolicy"
+			p.APIVersion, p.Kind = wafv1alpha1.GroupVersion.String(), "WAFPolicy"
 			p.ManagedFields, p.ResourceVersion, p.UID, p.Generation, p.CreationTimestamp = nil, "", "", 0, metav1.Time{}
 			raw, err := json.Marshal(p)
 			if err != nil {
