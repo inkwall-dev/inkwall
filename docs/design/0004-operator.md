@@ -955,7 +955,23 @@ latency only) and `evicted`. Reconcile duration is controller-runtime's own
 `inkwall_operator_engines{state,integration}` counts the engines by the integration whose pod runs
 them (`unknown` while an engine isn't matched to one, #371).
 
-**Not yet:** policy condition counts.
+**Policy conditions** (#378). `inkwall_operator_policies{condition,status,reason}` counts the
+policies by each of their four conditions (counts, not a label per policy, so 5,000 policies are a
+few dozen series). The signing key has `inkwall_operator_signing_key_age_seconds` and
+`inkwall_operator_signing_key_rotation_phase{phase}` (1 for the current phase), and
+`inkwall_operator_bundle_publish_failures_total{reason}` counts the bundles not published
+(`too_large`, `error`). All are the leader's.
+
+**Events** (#378). A change of a policy's `Ready`, `Programmed` or `Enforced` condition records
+one Kubernetes Event (`events.k8s.io/v1`) on the policy: `Warning` while it isn't `Ready`, the
+reason of the first condition that changed (`Ready` first), and each changed condition's status,
+reason and message as the note. So `kubectl describe wafpolicy` and event-based tooling see a
+policy go from `Ready` to `EngineNack`. A policy's Events are at least 30 s apart: changes within
+that are recorded together once it has passed, compared with the last Event, so a flapping
+condition records at most one Event per policy every 30 s, and at most one when it settles where
+it was. The first sight of a policy (a new leader starting) records none, so a restart doesn't
+replay every policy's state. The watcher keeps each policy's last state in memory: a few hundred
+bytes per policy. RBAC: `events` `create` and `patch` in every namespace.
 
 ### 4.9 Upstream sync (leader only)
 
