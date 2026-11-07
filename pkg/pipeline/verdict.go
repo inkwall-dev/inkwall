@@ -70,6 +70,9 @@ const (
 	// ReasonIPAllow means the client IP is in the policy's allow list, so
 	// the request was not inspected.
 	ReasonIPAllow
+	// ReasonGRPC means a gRPC call on a policy that refuses gRPC
+	// (DenyGRPC).
+	ReasonGRPC
 )
 
 func (r Reason) String() string {
@@ -100,6 +103,8 @@ func (r Reason) String() string {
 		return "ip-deny"
 	case ReasonIPAllow:
 		return "ip-allow"
+	case ReasonGRPC:
+		return "grpc"
 	default:
 		return "unknown"
 	}

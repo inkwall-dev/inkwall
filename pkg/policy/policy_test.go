@@ -395,6 +395,30 @@ func TestIPLists(t *testing.T) {
 	}
 }
 
+// TestDenyGRPC: body.deny_grpc refuses gRPC on its policy's routes only
+// (#367).
+func TestDenyGRPC(t *testing.T) {
+	b := testBundle()
+	b.Policies[0].Body = &bundlev1.BodyConfig{Inspect: true, DenyGrpc: true}
+	set, err := Compile(b, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(host string) *request.Request {
+		r := req(host, "/svc.Echo/Say")
+		r.Method = "POST"
+		r.Headers.Set("Content-Type", "application/grpc")
+		r.Body = []byte{0, 0, 0, 0, 1, 'x'}
+		return r
+	}
+	if v := set.Check(context.Background(), call("shop.example.com")); v.Action != pipeline.ActionDeny || v.Reason != pipeline.ReasonGRPC {
+		t.Errorf("gRPC on the denying policy: %s/%s", v.Action, v.Reason)
+	}
+	if v := set.Check(context.Background(), call("admin.example.com")); v.Reason == pipeline.ReasonGRPC {
+		t.Errorf("gRPC on another policy: %s/%s", v.Action, v.Reason)
+	}
+}
+
 func TestEvaluatorsSharedAcrossExclusions(t *testing.T) {
 	custom := []*bundlev1.RuleSetBinding{{RuleSetId: "WAFRuleSet/shop/custom"}}
 	b := &bundlev1.Bundle{
