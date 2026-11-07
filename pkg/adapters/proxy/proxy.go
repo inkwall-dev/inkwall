@@ -139,8 +139,6 @@ func New(p pipeline.Inspector, cfg Config) (*Handler, error) {
 		},
 		ErrorLog:  slog.NewLogLogger(logger.Handler(), slog.LevelError),
 		Transport: Transport(cfg.UpstreamH2C, cfg.UpstreamCAs),
-		// Streamed responses (gRPC, server-sent events) pass as they come.
-		FlushInterval: -1,
 	}
 	if cfg.WebSocketMessages != pipeline.MessagesOff {
 		if _, ok := p.(messageInspector); !ok {
