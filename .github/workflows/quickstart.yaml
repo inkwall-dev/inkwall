@@ -1,0 +1,57 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# docs/quickstart.md, run as written (make kind-quickstart, #388): a kind
+# cluster, the released chart and images, Traefik, the examples/traefik demo,
+# an attack logged in Detect mode and denied in Block mode. Nightly, as the
+# release it installs changes outside this repository. A failing scheduled
+# run opens an issue (hack/ci/report-scheduled.sh).
+name: quickstart
+
+on:
+  schedule:
+    - cron: '53 4 * * *'
+  workflow_dispatch:
+
+# Each job asks for what it needs (least privilege).
+permissions: {}
+
+jobs:
+  quickstart:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+      # The versions under test, hack/versions.env (#393).
+      - id: versions
+        run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_OUTPUT"
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ steps.versions.outputs.HELM_VERSION }}
+      - run: make kind-quickstart
+
+  report:
+    needs: quickstart
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: hack/ci/report-scheduled.sh "$GITHUB_WORKFLOW" "$RESULT" "$RUN_URL" "docs/quickstart.md failed as written - the log shows the step."
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RESULT: ${{ needs.quickstart.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
