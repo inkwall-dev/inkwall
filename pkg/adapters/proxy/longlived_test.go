@@ -107,7 +107,7 @@ func TestBodyReadTimeout(t *testing.T) {
 	front := httptest.NewServer(h)
 	t.Cleanup(front.Close)
 
-	post := func(t *testing.T, size int, chunks []string, pause time.Duration) *http.Response {
+	post := func(t *testing.T, size int, chunks []string, pause time.Duration) int {
 		t.Helper()
 		conn, err := net.Dial("tcp", strings.TrimPrefix(front.URL, "http://"))
 		if err != nil {
@@ -128,13 +128,12 @@ func TestBodyReadTimeout(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = resp.Body.Close()
-		return resp
+		return resp.StatusCode
 	}
 
 	t.Run("stalled prefix", func(t *testing.T) {
-		resp := post(t, 100, []string{"0123456789", "0123456789"}, time.Second)
-		if resp.StatusCode != http.StatusRequestTimeout {
-			t.Fatalf("status %d, want 408", resp.StatusCode)
+		if code := post(t, 100, []string{"0123456789", "0123456789"}, time.Second); code != http.StatusRequestTimeout {
+			t.Fatalf("status %d, want 408", code)
 		}
 		select {
 		case n := <-got:
@@ -149,9 +148,8 @@ func TestBodyReadTimeout(t *testing.T) {
 		for range 6 {
 			chunks = append(chunks, strings.Repeat("b", 10))
 		}
-		resp := post(t, 130, chunks, 150*time.Millisecond)
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("status %d, want 200", resp.StatusCode)
+		if code := post(t, 130, chunks, 150*time.Millisecond); code != http.StatusOK {
+			t.Fatalf("status %d, want 200", code)
 		}
 		if n := <-got; n != 130 {
 			t.Fatalf("the upstream got %d bytes, want 130", n)
