@@ -48,7 +48,7 @@ The [docs index](docs/README.md) lists every guide, reference and design doc.
 
 ## Install
 
-You need [Kubernetes](https://kubernetes.io/docs/concepts/overview/) 1.29 or later and [Helm](https://helm.sh/docs/) 3. CI
+You need [Kubernetes](https://kubernetes.io/docs/concepts/overview/) 1.29 or later and [Helm](https://helm.sh/docs/) 3 or 4. CI
 tests on Kubernetes 1.34 and on kind's newest (1.37).
 
 `<version>` is a [release](https://github.com/inkwall-dev/inkwall/releases) without its `v`, the latest
@@ -158,6 +158,25 @@ argument, argument name, cookie or header, `skip` paths,
 [`ruleSets[].paranoiaLevel`](https://coreruleset.org/docs/concepts/paranoia_levels/)), then switch to `Block`. Extra rules come from `WAFRuleSet` and
 `ClusterWAFRuleSet` objects: built-in, [SecLang](https://coraza.io/docs/seclang/) or a [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/).
 [`operator/config/samples`](operator/config/samples) has one object of each kind.
+
+**IP lists.** A `WAFIPList` lists client addresses, and a policy denies or allows them:
+
+```yaml
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFIPList
+metadata: {name: abusers, namespace: shop}
+spec:
+  entries:
+  - {cidr: 203.0.113.0/24, description: scraper}
+---
+# in the WAFPolicy's spec:
+  ipLists: {deny: [abusers], allow: [monitors]}
+```
+
+A denied client gets 403 before any rule (logged in `Detect` mode); an allowed one isn't inspected,
+and a deny list wins over an allow list. Lists match the client IP the engine resolves: behind a
+load balancer, set that up first ([client IP](docs/client-ip.md)), or every client is the load
+balancer. `inkwallctl test --client-ip 203.0.113.9` checks them offline (engines 0.5.0 or later).
 
 **CRS settings.** At paranoia level 1 the CRS denies `PUT`, `PATCH` and `DELETE`, and request
 content types outside its list. Set the CRS's own settings on the CRS rule set's binding (engines

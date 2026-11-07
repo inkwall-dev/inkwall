@@ -232,6 +232,32 @@ func TestEnforcedOutdatedEngine(t *testing.T) {
 		}
 	}
 
+	// IP lists (#358): an engine before 0.5.0 ignores them, so it wouldn't
+	// deny what the deny list names.
+	for _, tc := range []struct {
+		name     string
+		lists    *wafv1alpha1.IPListsSpec
+		versions []string
+		reason   string
+	}{
+		{"deny list, 0.4.1 engine", &wafv1alpha1.IPListsSpec{Deny: []wafv1alpha1.IPListName{"bad"}}, []string{"0.5.0", "0.4.1"}, ReasonEnginesOutdated},
+		{"deny list, new engines", &wafv1alpha1.IPListsSpec{Deny: []wafv1alpha1.IPListName{"bad"}}, []string{"0.5.0"}, ReasonEnforced},
+		{"empty", &wafv1alpha1.IPListsSpec{}, []string{"0.4.1"}, ReasonEnforced},
+	} {
+		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
+		p.Spec.IPLists = tc.lists
+		p.Status.BundleVersion = 3
+		var engines []Engine
+		for i, v := range tc.versions {
+			engines = append(engines, Engine{ID: fmt.Sprintf("e%d", i), PodNamespace: "edge", PodName: fmt.Sprintf("envoy-%d", i), EngineVersion: v, Applied: 3})
+		}
+		conds, _ := enforcedConditions(p, 3, false, engines, 0)
+		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
+		if c == nil || c.Reason != tc.reason || tc.reason == ReasonEnginesOutdated && !strings.Contains(c.Message, "spec.ipLists") {
+			t.Errorf("%s: Enforced %+v, want %s", tc.name, c, tc.reason)
+		}
+	}
+
 	// Cookie, header and argument name exclusions (#357): an engine before
 	// 0.5.0 ignores them.
 	for _, tc := range []struct {

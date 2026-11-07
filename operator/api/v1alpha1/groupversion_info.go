@@ -33,6 +33,7 @@ func addKnownTypes(s *runtime.Scheme) error {
 		&WAFPolicy{}, &WAFPolicyList{},
 		&WAFRuleSet{}, &WAFRuleSetList{},
 		&ClusterWAFRuleSet{}, &ClusterWAFRuleSetList{},
+		&WAFIPList{}, &WAFIPListList{},
 	)
 	metav1.AddToGroupVersion(s, GroupVersion)
 	return nil
