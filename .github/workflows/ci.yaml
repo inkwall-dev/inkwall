@@ -52,8 +52,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
-      - run: docker buildx build --target engine .
-      - run: docker buildx build --target operator .
+      # Both platforms the release publishes, so an arm64-only failure
+      # shows on the PR, not at release time (#392). No QEMU: Go
+      # cross-compiles.
+      - run: docker buildx build --platform linux/amd64,linux/arm64 --target engine .
+      - run: docker buildx build --platform linux/amd64,linux/arm64 --target operator .
 
   raw-envoy:
     # Raw Envoy with the engine's ext_proc adapter, in Docker (#283): the
