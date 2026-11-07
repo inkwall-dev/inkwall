@@ -2,7 +2,7 @@
 # Copyright 2026 The Inkwall Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# shellcheck, installed or from its image (SHELLCHECK_VERSION in
+# Runs shellcheck, installed or from its image (SHELLCHECK_VERSION in
 # hack/versions.env), for make lint-scripts and actionlint (#398).
 set -euo pipefail
 if command -v shellcheck >/dev/null; then
