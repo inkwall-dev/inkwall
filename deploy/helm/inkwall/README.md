@@ -26,8 +26,15 @@ builds them into a signed [bundle](../../../docs/glossary.md#bundle), serves the
 
 ## Install
 
-You need [Kubernetes](https://kubernetes.io/docs/concepts/overview/) 1.29 or later and [Helm](https://helm.sh/docs/) 3. CI
-tests on Kubernetes 1.34 and on kind's newest (1.37).
+You need [Kubernetes](https://kubernetes.io/docs/concepts/overview/) 1.29 or later and [Helm](https://helm.sh/docs/) 3 or 4. CI
+tests on Kubernetes 1.34 and on kind's newest (1.37), and lints, installs, upgrades (also with
+`--reuse-values`), rolls back and uninstalls the chart with Helm 3.19 and Helm 4.3.
+
+With Helm 4, which applies server-side, rolling back to a chart before 0.5.0 needs
+`--force-conflicts`: those charts set the Pod webhooks' `failurePolicy` (and their selectors) to
+their own values, fields the operator keeps (`Fail` while a policy blocks); the operator sets
+them again at once. From 0.5.0 an upgrade renders the live values of these fields, so upgrades
+need nothing more.
 
 ```sh
 helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \
