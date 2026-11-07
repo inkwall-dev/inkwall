@@ -1,10 +1,25 @@
-# Default values for the inkwall chart.
+# Default values for the inkwall chart. values.schema.json checks them:
+# an unknown key or a wrong type fails the install.
+
+global:
+  # A registry (or mirror) that replaces ghcr.io in the operator's and the
+  # engine's images, e.g. registry.example.com/inkwall: the images keep their
+  # path (inkwall-dev/inkwall-operator) under it.
+  imageRegistry: ""
+  # Secrets the images are pulled with, by name ([{name: x}] or [x]). The
+  # operator's pods use them, and the Pod webhook adds them to the proxy
+  # pods it injects (Traefik, HAProxy, Istio's ingress gateways): create
+  # them in the proxy namespaces too. Envoy Gateway's and Istio Gateways'
+  # pods take theirs from their own configuration (the chart README).
+  imagePullSecrets: []
 
 operator:
   image:
     repository: ghcr.io/inkwall-dev/inkwall-operator
     # Empty: the chart's appVersion.
     tag: ""
+    # sha256:...: pull by digest instead of the tag.
+    digest: ""
     pullPolicy: IfNotPresent
 
   # Two replicas: one leads (builds bundles), all serve the webhook. The
@@ -23,6 +38,11 @@ operator:
 
   # Extra inkwall-operator flags.
   extraArgs: []
+  # Extra environment variables, volumes and volume mounts of the operator
+  # (e.g. a proxy's HTTPS_PROXY, a CA bundle).
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
 
   podAnnotations: {}
   podLabels: {}
@@ -30,6 +50,9 @@ operator:
   tolerations: []
   # Empty: spread the replicas across nodes when possible.
   affinity: {}
+  # E.g. across zones. Rendered as a template: a labelSelector can say
+  # app.kubernetes.io/instance: '{{ .Release.Name }}'.
+  topologySpreadConstraints: []
   priorityClassName: ""
 
   podDisruptionBudget:
@@ -45,6 +68,7 @@ engine:
     # Empty: the chart's appVersion. InkwallConfig.spec.engine.image
     # overrides both.
     tag: ""
+    digest: ""
     pullPolicy: IfNotPresent
 
 injection:

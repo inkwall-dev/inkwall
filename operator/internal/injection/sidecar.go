@@ -56,6 +56,11 @@ const (
 type Sidecar struct {
 	Image      string
 	PullPolicy corev1.PullPolicy
+	// PullSecrets are Secrets in the pod's namespace the engine image is
+	// pulled with: Inject adds them to the pod's imagePullSecrets. Proxies
+	// whose pod template the operator patches (Envoy Gateway, Istio) take
+	// them from their own configuration.
+	PullSecrets []string
 	// Resources of the engine; empty: the defaults below.
 	Resources *corev1.ResourceRequirements
 	// OperatorAddr is the distribution server, host:port.
@@ -185,6 +190,11 @@ func Inject(pod *corev1.Pod, s Sidecar) bool {
 	// container that needs traffic inspected.
 	pod.Spec.InitContainers = append([]corev1.Container{engine}, pod.Spec.InitContainers...)
 	pod.Spec.Volumes = append(pod.Spec.Volumes, volumes...)
+	for _, name := range s.PullSecrets {
+		if !slices.ContainsFunc(pod.Spec.ImagePullSecrets, func(r corev1.LocalObjectReference) bool { return r.Name == name }) {
+			pod.Spec.ImagePullSecrets = append(pod.Spec.ImagePullSecrets, corev1.LocalObjectReference{Name: name})
+		}
+	}
 	MountSocket(pod, s)
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}

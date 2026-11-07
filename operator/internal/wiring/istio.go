@@ -107,6 +107,10 @@ type Istio struct {
 	// Watches of kinds whose CRD may be missing; nil: only read at each
 	// reconcile.
 	HTTPRoutes, Gateways, GatewayClasses, EnvoyFilters *crdwatch.Kind
+	// Prober proves the wired routes through every gateway pod before they
+	// are Programmed (#372); nil: none is, and they stay Unverified. Its
+	// results reach the wiring controller through HAProxy's watch of it.
+	Prober *Prober
 }
 
 // Name implements Integration.
@@ -173,7 +177,7 @@ func (i *Istio) Wire(ctx context.Context, targets map[Target]bool, off bool) (*R
 	if err != nil {
 		return nil, err
 	}
-	res := &Result{Proxy: "Istio", Targets: map[Target]TargetState{}, Rolling: true}
+	res := i.result()
 
 	var policies wafv1alpha1.WAFPolicyList
 	if err := i.Client.List(ctx, &policies); err != nil {
@@ -310,6 +314,12 @@ func (i *Istio) Wire(ctx context.Context, targets map[Target]bool, off bool) (*R
 		}
 	}
 
+	var probes []ProbeJob
+	// The users' EnvoyFilters, in the probes' fingerprints.
+	userFilters, err := userFiltersKey(ctx, i.Client)
+	if err != nil {
+		return nil, err
+	}
 	for tg := range targets {
 		r := routes[tg.Key]
 		if _, ok := res.Targets[tg]; ok || tg.Kind != httpRouteKind || r == nil || !rules(nil).with(tg.Section).any(r.route) {
@@ -339,10 +349,21 @@ func (i *Istio) Wire(ctx context.Context, targets map[Target]bool, off bool) (*R
 			s.Pending = fmt.Sprintf("HTTPRoute %s is wired once every Istio pod of its Gateways has the engine: %s", tg.Key.Name, strings.Join(why, "; "))
 		case s.Wired:
 			// Istio reports nothing on an EnvoyFilter: in force once Istio
-			// serves the route on each of its Gateways.
-			s.Pending = istioAccepted(r.route, r.gateways)
+			// serves the route on each of its Gateways, and the probe has
+			// reached the engine through each of their pods (#372).
+			if s.Pending = istioAccepted(r.route, r.gateways); s.Pending == "" {
+				var jobs []ProbeJob
+				jobs, s.NotProbeable, s.Unverified = proveRoute(i.Prober, "HTTPRoute "+tg.Key.Name, r.detect, func() ([]ProbeJob, string) {
+					jobs, why := st.istioRouteProbes(r)
+					return withFilters(jobs, userFilters), why
+				})
+				probes = append(probes, jobs...)
+			}
 		}
 		res.Targets[tg] = s
+	}
+	if i.Prober != nil {
+		i.Prober.Set(integrations.Istio.Name, probes)
 	}
 	return res, errors.Join(errs...)
 }
@@ -605,9 +626,7 @@ func istioRoutePatches(routes []istioFilterRoute) (patches []any, buffered bool)
 				}},
 			})
 		}
-		// The request body only: Istio's filter sends no response phase
-		// yet (ResponsesNotInspected), so no response is held.
-		buffered = buffered || r.body && !r.detect
+		buffered = buffered || r.buffered()
 	}
 	return patches, buffered
 }
@@ -615,7 +634,10 @@ func istioRoutePatches(routes []istioFilterRoute) (patches []any, buffered bool)
 // istioExtProc is a route's ext_proc filter config, from its policies'
 // settings, and the processing mode its routes enable it with: every
 // per-policy setting of the Istio wiring is here (Envoy Gateway's are in
-// extensionPolicy). Responses are not sent yet.
+// extensionPolicy). The response's headers and body only when a policy
+// inspects responses (#374), held likewise (streamed in detect mode), and
+// the engine may tell Envoy not to send a body it doesn't read
+// (allow_mode_override); otherwise SKIP, which adds nothing to a response.
 func istioExtProc(r routeSettings) (config, mode map[string]any) {
 	mode = map[string]any{"request_header_mode": "SEND", "response_header_mode": "SKIP"}
 	switch {
@@ -623,6 +645,13 @@ func istioExtProc(r routeSettings) (config, mode map[string]any) {
 		mode["request_body_mode"] = "STREAMED"
 	case r.body:
 		mode["request_body_mode"] = "BUFFERED_PARTIAL"
+	}
+	if r.responses {
+		mode["response_header_mode"] = "SEND"
+		mode["response_body_mode"] = "BUFFERED_PARTIAL"
+		if r.detect {
+			mode["response_body_mode"] = "STREAMED"
+		}
 	}
 	config = map[string]any{
 		"@type":              "type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor",
@@ -637,6 +666,9 @@ func istioExtProc(r routeSettings) (config, mode map[string]any) {
 	}
 	if r.detect {
 		config["observability_mode"] = true
+	}
+	if r.responses {
+		config["allow_mode_override"] = true
 	}
 	return config, mode
 }
@@ -1051,4 +1083,10 @@ func (i *Istio) Unwire(ctx context.Context, c client.Client) (map[string]int, er
 	counts, err := removeIstioSidecars(ctx, c, reader, nil)
 	maps.Copy(n, counts)
 	return n, err
+}
+
+// result is an empty Result of the Istio Gateway API wiring: its pods are
+// rolled by Istio, and its filter sends responses to the engine (#374).
+func (*Istio) result() *Result {
+	return &Result{Proxy: "Istio", Targets: map[Target]TargetState{}, Rolling: true, Responses: true}
 }

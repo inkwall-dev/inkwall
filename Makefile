@@ -122,6 +122,10 @@ bench: ## Run benchmarks (BENCH=regexp COUNT=n)
 bench-compare: ## Compare benchmarks of changed packages with BASE (origin/main); fail on a repeated significant regression over 5%
 	BENCH='$(BENCH)' hack/bench/compare.sh $(BASE)
 
+.PHONY: gitops-health-test
+gitops-health-test: ## Test the Argo CD health checks and Flux healthCheckExprs of examples/ (hack/gitopshealth)
+	cd hack/gitopshealth && $(GO) test -count=1 ./...
+
 .PHONY: crs-test
 crs-test: ## Run the OWASP CRS regression suite through each adapter, and the response rules through ext_proc (test/crs)
 	cd test/crs && $(GO) test -count=1 -timeout 30m -v ./...
@@ -208,7 +212,7 @@ helm-lint: ## Lint the Helm chart, render it with each webhook certificate mode,
 	helm lint --strict $(CHART) --set metrics.forceMonitoringObjects=true --set metrics.serviceMonitor.enabled=true \
 		--set metrics.podMonitor.enabled=true --set metrics.prometheusRule.enabled=true --set metrics.dashboard.enabled=true
 	CHART=$(CHART) hack/helm-test.sh
-	@# What the chart looks up in a cluster, against envtest.
+	@# What the chart looks up in a cluster, and helm upgrade --reuse-values from 0.4.x (pulled from ghcr.io), against envtest.
 	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" CHART=$(abspath $(CHART)) $(GO) test -count=1 ./hack/helmcheck
 
 .PHONY: tidy
@@ -228,7 +232,7 @@ check-all: ## Run every job CI runs on a pull request, one after another: hours,
 	$(MAKE) check
 	$(MAKE) scale-test SCALE_CHANGES=5
 	$(MAKE) scale-test SCALE=wiring:500
-	$(MAKE) build generate-check helm-lint monitoring-test release-check crs-test
+	$(MAKE) build test-examples generate-check helm-lint monitoring-test release-check crs-test
 	$(MAKE) bench-compare
 	$(MAKE) image
 	$(MAKE) raw-envoy-e2e
@@ -339,7 +343,7 @@ kind-quickstart: ## Run docs/quickstart.md on a kind cluster of its own, with th
 	hack/kind/quickstart.sh
 
 .PHONY: test-examples
-test-examples: ## Check each examples/<proxy> WAFPolicy with inkwallctl test --policy: benign requests allowed, attacks denied (examples/tests)
+test-examples: ## Check each examples/<proxy> WAFPolicy with inkwallctl test --policy: benign requests allowed, attacks denied (examples/tests); run the example suite (inkwallctl test --suite)
 	hack/examples-test.sh
 
 .PHONY: kind-down

@@ -31,6 +31,7 @@ Either way, an [`EnvoyFilter`](glossary.md#envoyfilter) sends the protected rout
   - [What a VirtualService may match](#what-a-virtualservice-may-match)
   - [Route names](#route-names)
   - [Status](#status)
+- [The operator's probe](#the-operators-probe)
 - [Limits](#limits)
 - [Undoing it](#undoing-it)
 
@@ -148,15 +149,17 @@ kubectl -n istio-ingress get pods -l gateway.networking.k8s.io/gateway-name=edge
 
 | `Programmed` reason | Meaning |
 |---|---|
-| `Programmed` | Every running pod of each of the route's Gateways has the engine, the `EnvoyFilter` has the route, and Istio has accepted the route on each Gateway (its parent status, `Accepted=True`) |
+| `Programmed` | Every running pod of each of the route's Gateways has the engine, the `EnvoyFilter` has the route, Istio has accepted the route on each Gateway (its parent status, `Accepted=True`), and [the operator's probe](#the-operators-probe) has reached the engine through every pod, on every listener the route is attached to |
+| `Unverified` | Wired, but the probe hasn't reached the engine yet, or got another answer (the filter isn't on the route: its traffic isn't inspected there); also every route in `Detect` mode, whose answer Envoy discards |
+| `NotProbeable` | Wired, but the probe can't make a request the route serves: each match of one of its protected rules is a regular expression (path, header or query parameter) |
 | `PendingRestart` | Istio is rolling a Gateway's pods; some don't have the engine yet |
 | `SidecarMissing` | A Gateway has no running pod, or its namespace isn't a proxy namespace |
 | `Pending` | Waiting for Istio to accept the route, or for another of its Gateways |
 | `WiringFailed` | Istio's `EnvoyFilter` CRD isn't installed; Istio is older than 1.28; a rule name is shared ([rule names](#rule-names)); the Gateway's ConfigMap doesn't exist or its `deployment` key isn't YAML; or an `EnvoyFilter` named `inkwall-waf-<gateway>` isn't the operator's |
 | `IntegrationDisabled` | The operator lacks the `inkwall-operator-istio` ClusterRole (`rbac.integrations.istio`) |
 
-Istio reports nothing on an `EnvoyFilter`, so `Programmed` rests on the pods and the route's
-status. While a route waits for one of its Gateways, it stays wired on its other Gateways whose
+Istio reports nothing on an `EnvoyFilter`, and accepts one whose patches match no Envoy route, so
+`Programmed` rests on the pods, the route's status and the probe. While a route waits for one of its Gateways, it stays wired on its other Gateways whose
 pods have the engine. `Ready` follows `Programmed`, so a policy is never `Ready` while its traffic
 goes uninspected. A route also attached to a Gateway of a proxy Inkwall doesn't wire is
 `Programmed`, with a message naming it: its traffic there isn't inspected.
@@ -176,7 +179,7 @@ several policies target the same route, the strictest wins.
 | `timeout` (250 ms by default) | `message_timeout`: the longest timeout plus 500 ms, so the engine decides first |
 | `failureMode: Open` on every policy (or detect mode without one) | `failure_mode_allow: true` |
 | Otherwise | `failure_mode_allow: false`, `status_on_error: 503` |
-| Responses | Not sent |
+| A policy inspects responses (`responses.inspect`) | `response_header_mode: SEND`, `response_body_mode: BUFFERED_PARTIAL` (`STREAMED` in detect mode), `allow_mode_override: true`, and the listeners' buffer raised; otherwise `response_header_mode: SKIP`, which adds nothing to a response |
 
 ### Block mode and detect mode
 
@@ -327,7 +330,9 @@ Istio names a VirtualService's Envoy routes after its http routes (`name`, then 
 
 | `Programmed` reason | Meaning |
 |---|---|
-| `Programmed` | Every running pod the VirtualService's Gateways select has the engine and the socket mount, and the `EnvoyFilter` has the VirtualService |
+| `Programmed` | Every running pod the VirtualService's Gateways select has the engine and the socket mount, the `EnvoyFilter` has the VirtualService, and [the operator's probe](#the-operators-probe) has reached the engine through every pod, on every Gateway server that serves its hosts |
+| `Unverified` | Wired, but not proven by the probe yet, or the probe got another answer; also every VirtualService in `Detect` mode |
+| `NotProbeable` | Wired, but the probe can't make a request it serves: one of its http routes has only regular expression matches, or a server serving it uses mutual TLS or passthrough |
 | `PendingRestart` | Some of those pods started before Inkwall: restart them |
 | `SidecarMissing` | No such pod is running, or one opted out (`waf.inkwall.dev/inject: "false"`) |
 | `Pending` | Its Gateway doesn't exist yet; or, with Istio's status on (`PILOT_ENABLE_STATUS`), Istio hasn't reconciled the VirtualService |
@@ -339,6 +344,32 @@ Istio reports nothing on an `EnvoyFilter` or, by default, a VirtualService, so `
 the pods and the objects. Istio's ingress gateways have no class, so they aren't listed in the
 `InkwallConfig`'s `status.proxies`.
 
+## The operator's probe
+
+The `EnvoyFilter`'s patches select Envoy's routes by the names Istio gives them, and Istio accepts a
+patch that matches nothing: the route would then be served uninspected. So the operator proves
+each wired route (0002 §6.1, as for [HAProxy](haproxy.md#the-probe-and-programmed)): a request to
+each gateway pod, on each listener (HTTPRoute) or server (VirtualService) the route is served on,
+with the route's host and a path its rule matches, and a header `X-Inkwall-Probe` carrying a MAC
+under the bundle's probe key. The engine behind the route's filter answers it itself (200 and its
+own MAC): the request never reaches your app. A route is `Programmed` only once every pod answered
+on every listener; it is probed again every 5 minutes, and every 20 seconds until it answers.
+Any change to an `EnvoyFilter` of yours (one that removes or replaces Inkwall's filter, say)
+probes every route again at once.
+
+- **The request** follows the route's first match the probe can make: an exact or prefix path
+  (under a prefix, the reserved path `.well-known/inkwall-probe/<nonce>`), exact headers, query
+  parameters and the method. A wildcard host is made concrete (`*.example.com`:
+  `inkwall-probe.example.com`). Over TLS for an HTTPS listener or a `SIMPLE` TLS server, without
+  checking the certificate (the MAC is the proof).
+- **Not probeable:** a rule (http route) whose every match is a regular expression, and a server
+  with mutual TLS or passthrough: `NotProbeable`, with the reason.
+- **Detect mode:** Envoy's observability mode discards the engine's answer, so a route whose
+  policies are all in `Detect` mode stays `Unverified`.
+- The probe reaches the pods on their listener's port (the pod address and the Gateway listener's
+  or server's port number): a Gateway whose pods listen on another port than the server's (a
+  `targetPort` mapping) stays `Unverified`.
+
 ## Limits
 
 - **Gateways only.** Mesh sidecars aren't wired: the `EnvoyFilter` selects gateway pods only, and
@@ -347,9 +378,10 @@ the pods and the objects. Istio's ingress gateways have no class, so they aren't
 - **Gateway API Gateways Istio deploys.** A Gateway API Gateway bound to an existing deployment
   (`networking.istio.io/gateway-name`, or a manual `spec.addresses`) isn't: the operator can't put
   the engine into pods Istio doesn't render.
-- **Responses aren't inspected** through Istio yet: the filter sends Envoy's request phases only, and
-  a policy that inspects responses reports `ResponsesNotInspected` on Istio's routes (they are
-  inspected through Envoy Gateway and raw Envoy).
+- **Responses** are inspected for policies that set `responses.inspect` (since 0.5.0), on HTTPRoutes
+  and VirtualServices, as through Envoy Gateway: a response that leaks is replaced with 403 in
+  `Block` mode and logged in `Detect` mode. Before 0.5.0 such a policy was `ResponsesNotInspected`
+  on Istio's routes.
 - **gRPC and WebSocket** are as through Envoy Gateway: see [gRPC](grpc.md) and
   [WebSocket](websocket.md).
 

@@ -82,3 +82,15 @@ func TestDrain(t *testing.T) {
 		t.Errorf("default shutdown delay %v, %v", o.shutdownDelay, err)
 	}
 }
+
+// --engine-image-pull-secrets: the Secrets injected engines pull with
+// (#386).
+func TestParseEnginePullSecrets(t *testing.T) {
+	o, err := parseFlags([]string{"--engine-image-pull-secrets= mirror, ,inkwall-registry"}, io.Discard)
+	if err != nil || len(o.EnginePullSecrets) != 2 || o.EnginePullSecrets[0] != "mirror" || o.EnginePullSecrets[1] != "inkwall-registry" {
+		t.Fatalf("pull secrets %q, %v", o.EnginePullSecrets, err)
+	}
+	if o, _ := parseFlags(nil, io.Discard); o.EnginePullSecrets != nil {
+		t.Errorf("default: %q", o.EnginePullSecrets)
+	}
+}

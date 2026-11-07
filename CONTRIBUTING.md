@@ -102,6 +102,7 @@ Durations are on a laptop or a CI runner, roughly.
 | Build | `make build` | 1 min | Go | every PR (`test`) |
 | Generated code | `make generate-check` | 2 min | Go | every PR (`generate`) |
 | Chart | `make helm-lint`, `make monitoring-test` | 2 min | Go, Helm, Docker (promtool) | every PR (`helm`) |
+| GitOps health checks | `make gitops-health-test` (the Argo CD and Flux examples, `hack/gitopshealth`) | 1 min | Go | every PR (`docs`) |
 | Release configuration | `make release-check` | 1 min | goreleaser | every PR (`release`) |
 | CRS conformance | `make crs-test` | 2 min | Go | every PR (`crs`) |
 | Benchmarks | `make bench-compare` (base: `origin/main`) | 10 min | Go | every PR (`bench`) |
@@ -109,7 +110,7 @@ Durations are on a laptop or a CI runner, roughly.
 | Proxies in Docker | `make raw-envoy-e2e`, `make websocket-e2e`, `make haproxy-e2e` | 5 min each | Docker | every PR (`raw-envoy`, `haproxy`) |
 | End to end on kind | `make kind-e2e` (all), `make kind-e2e-traefik`, `-raw-envoy`, `-envoy-gateway`, `-istio`, `-haproxy` | 25 min (all) | Docker, kind (installed by the target) | every PR (`e2e (<proxy>)`, one job each) |
 | Upgrade on kind | `make kind-upgrade` | 15 min | Docker, kind | every PR (`upgrade`, from the latest release); release qualification (`upgrade.yaml`, from each supported minor) |
-| Examples | `make test-examples` (each `examples/<proxy>` policy through `inkwallctl test --policy`) | 1 min | Go | every PR (`test`) |
+| Examples | `make test-examples` (each `examples/<proxy>` policy through `inkwallctl test --policy`, and the `examples/tests` suite) | 1 min | Go | every PR (`test`) |
 | Quickstart | `make kind-quickstart` (`docs/quickstart.md` as written, released chart and images) | 10 min | Docker, kind, network | nightly (`quickstart`) |
 | External links | `make docs-check-external` | 1 min | network | nightly (`docs-links`) |
 | Everything a PR runs | `make check-all` | hours | all of the above | |
@@ -180,7 +181,8 @@ for patching released versions.
    - the [Helm](https://helm.sh/docs/) chart [`oci://ghcr.io/inkwall-dev/charts/inkwall`](https://helm.sh/docs/topics/registries/), versioned from the tag (the
      version in `Chart.yaml` is only for development);
    - the binaries, `checksums.txt`, an SPDX SBOM per archive (`<archive>.sbom.json`), build
-     provenance attestations of the archives, and the GitHub release with the changelog.
+     provenance attestations of the archives (also attached to the release as
+     `inkwall_<version>.intoto.jsonl`), and the GitHub release with the changelog.
 
    Then it checks what it published, as a user would, release candidates too: the images' and
    the chart's signatures, both platforms and their attestations, `helm pull`, the checksums'
@@ -205,6 +207,16 @@ for patching released versions.
      --certificate-oidc-issuer https://token.actions.githubusercontent.com
    sha256sum --check --ignore-missing checksums.txt
    gh attestation verify inkwall_<version>_linux_amd64.tar.gz -R inkwall-dev/inkwall
+   ```
+
+   The provenance is also a release asset, `inkwall_<version>.intoto.jsonl` (the attestation's
+   [Sigstore bundle](https://docs.sigstore.dev/about/bundle/), one JSON line, covering every
+   archive): to verify against it instead of the attestation stored on GitHub, download it next
+   to the archive and add `--bundle`:
+
+   ```sh
+   gh attestation verify inkwall_<version>_linux_amd64.tar.gz -R inkwall-dev/inkwall \
+     --bundle inkwall_<version>.intoto.jsonl
    ```
 
 4. The first time, make the three new [GHCR](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry) packages (`inkwall-engine`, `inkwall-operator`,

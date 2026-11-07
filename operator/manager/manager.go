@@ -77,6 +77,9 @@ const (
 type Options struct {
 	MetricsAddr string
 	ProbeAddr   string
+	// Prober, if set, is the wiring's probe with its Key or Do set (tests);
+	// nil: one that probes the pods with the bundle's key.
+	Prober      *wiring.Prober
 	LeaderElect bool
 	// LeaseDuration and RenewDeadline tune leader election; 0: the
 	// controller-runtime defaults (15s and 10s).
@@ -120,6 +123,9 @@ type Options struct {
 	Inject           bool
 	EngineImage      string
 	EnginePullPolicy corev1.PullPolicy
+	// EnginePullSecrets are the Secrets the Pod webhook's injected pods
+	// pull the engine image with.
+	EnginePullSecrets []string
 	// Integrations select the proxy pods; nil: read from the InkwallConfig
 	// when the manager is created. The operator restarts when they change
 	// (its cache of proxy pods is built from them), or when an
@@ -266,6 +272,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	sidecar := injection.Sidecar{
 		Image:        o.EngineImage,
 		PullPolicy:   o.EnginePullPolicy,
+		PullSecrets:  o.EnginePullSecrets,
 		OperatorAddr: fmt.Sprintf("%s.%s.svc:%d", o.DistributionService, o.Namespace, o.DistributionPort),
 		BundleSecret: o.Namespace + "/" + bundle.BundleSecret,
 	}
@@ -276,6 +283,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			Decoder:      admission.NewDecoder(mgr.GetScheme()),
 			Image:        sidecar.Image,
 			PullPolicy:   sidecar.PullPolicy,
+			PullSecrets:  sidecar.PullSecrets,
 			OperatorAddr: sidecar.OperatorAddr,
 			BundleSecret: sidecar.BundleSecret,
 			Integrations: selectors,
@@ -326,8 +334,13 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	}
 	// Without injection, the wiring controller unwires what was wired: new
 	// proxy pods won't have the engine.
-	// HAProxy's routes are Programmed once probed (0002 §6.4).
-	prober := &wiring.HAProxyProber{Reader: mgr.GetAPIReader(), Namespace: o.Namespace}
+	// HAProxy's and Istio's routes are Programmed once probed (0002 §6.4,
+	// #372).
+	prober := o.Prober
+	if prober == nil {
+		prober = &wiring.Prober{}
+	}
+	prober.Reader, prober.Namespace = mgr.GetAPIReader(), o.Namespace
 	if err := mgr.Add(prober); err != nil {
 		return nil, err
 	}
@@ -335,7 +348,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		Pods: selectors, IngressRoutes: ingressRoutes, HTTPRoutes: httpRoutes, Gateways: gateways, GatewayClasses: gatewayClasses,
 		EnvoyProxies: envoyProxies, ExtensionPolicies: extensionPolicies, TrafficPolicies: trafficPolicies, EnvoyFilters: envoyFilters,
 		VirtualServices: virtualServices, IstioGateways: istioGateways, Sidecar: sidecar,
-		HAProxyProber: prober,
+		Prober: prober,
 	}
 	wirings := wiring.Integrations(mgr.GetClient(), mgr.GetAPIReader(), wiringCfg)
 	// An integration the operator may not wire neither watches nor reads
