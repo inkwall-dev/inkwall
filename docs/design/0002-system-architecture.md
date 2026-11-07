@@ -1228,8 +1228,8 @@ One shared request corpus drives every level.
   of the exact bytes reaches compilation;
 - event redaction (`FuzzNew`): valid UTF-8, within the field limits, with no query strings or
   credential snippets;
-- `inkwallctl test`'s URL, raw HTTP and HAR input (`FuzzSplitURL`, `FuzzFromRawHTTP`,
-  `FuzzFromHAR`).
+- `inkwallctl test`'s URL, raw HTTP, HAR and suite input (`FuzzSplitURL`, `FuzzFromRawHTTP`,
+  `FuzzFromHAR`, `FuzzParseSuite`).
 
 Their seed corpora (`testdata/fuzz/`) run in every `make test`. `.github/workflows/fuzz.yaml` runs
 each target for 5 minutes nightly and uploads the failing inputs, encrypted. Its matrix is every
