@@ -100,6 +100,10 @@ enum Reason {
   // A WebSocket handshake didn't meet the policy's WebSocket rules (an
   // origin not allowed, a required header missing).
   REASON_WEBSOCKET = 11;
+  // The client IP is in the policy's IP deny list.
+  REASON_IP_DENY = 12;
+  // The client IP is in the policy's IP allow list: not inspected.
+  REASON_IP_ALLOW = 13;
 }
 
 // CheckResponse is the verdict for one CheckRequest.
