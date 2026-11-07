@@ -48,6 +48,9 @@ What's new:
   after a chart upgrade needs no restart by hand.
 - **Standalone mode reloads its rules without a restart**: on `SIGHUP`, or with `--watch-rules`
   when the files change ([reloading the rules](standalone-proxy.md#reloading-the-rules)).
+- **gRPC and HTTP/2 through the standalone proxy**: `--h2c`, `--tls-cert`/`--tls-key`,
+  `--upstream-h2c` and `--upstream-ca` ([gRPC](grpc.md#through-the-standalone-proxy)). Its
+  upstream connections are now kept for reuse (128 idle per host instead of Go's default 2).
 - **Responses through Istio.** A policy with `responses.inspect` now has the responses of its
   Istio HTTPRoutes and VirtualServices inspected, as through Envoy Gateway: a response that leaks
   is replaced with 403 in `Block` mode and logged in `Detect` mode. Such a policy was
