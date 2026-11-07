@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 	"unicode/utf8"
 
@@ -646,7 +647,7 @@ func (r *BundleReconciler) writeConfigStatus(ctx context.Context, cfg *wafv1alph
 	var bs *wafv1alpha1.BundleStatus
 	if published != nil {
 		bs = &wafv1alpha1.BundleStatus{
-			Version:         int64(published.GetVersion()), // #nosec G115 -- versions count builds
+			Version:         int64(min(published.GetVersion(), math.MaxInt64)), // #nosec G115 -- bounded
 			CompressedBytes: int64(r.current.Size()),
 			LimitBytes:      bundle.MaxCompressedBytes,
 		}
