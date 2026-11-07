@@ -251,7 +251,7 @@ release-check: ## Check the goreleaser configuration
 	$(GORELEASER) check
 
 # The kind targets, and the scripts they run, use the kind of KIND_VERSION.
-KIND_TARGETS := kind-cluster kind-up kind-operator kind-e2e kind-e2e-traefik kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-response-load kind-upgrade kind-down
+KIND_TARGETS := kind-quickstart kind-cluster kind-up kind-operator kind-e2e kind-e2e-traefik kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-response-load kind-upgrade kind-down
 $(KIND_TARGETS): export PATH := $(KIND_DIR):$(PATH)
 $(KIND_TARGETS): $(KIND_DIR)/kind
 
@@ -333,6 +333,14 @@ raw-envoy-e2e: ## End-to-end test of raw Envoy with the engine's ext_proc adapte
 .PHONY: websocket-e2e
 websocket-e2e: ## End-to-end test of WebSocket message inspection by the engine's proxy, with hack/wsecho, in Docker (no cluster)
 	IMAGE=$(IMAGE) hack/websocket/e2e.sh
+
+.PHONY: kind-quickstart
+kind-quickstart: ## Run docs/quickstart.md on a kind cluster of its own, with the released chart and images (needs network; CI runs it nightly)
+	hack/kind/quickstart.sh
+
+.PHONY: test-examples
+test-examples: ## Check each examples/<proxy> WAFPolicy with inkwallctl test --policy: benign requests allowed, attacks denied (examples/tests)
+	hack/examples-test.sh
 
 .PHONY: kind-down
 kind-down: ## Delete the kind cluster
