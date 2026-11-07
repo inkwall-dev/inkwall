@@ -86,6 +86,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/adapters/internal/httpadapter"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/events"
+	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/telemetry"
@@ -110,6 +111,10 @@ type Config struct {
 	// JSONDenials answers a denied client that accepts application/json
 	// with a JSON body (httpadapter.DenialBody); off: text.
 	JSONDenials bool
+	// ProbeKey returns the key of the operator's probe (the bundle's), or
+	// nil: a request with a valid probe header is then answered by the
+	// engine, uninspected (#372). Nil: no probe is answered.
+	ProbeKey func() []byte
 	// Metrics counts the requests the adapter can't read (nil: none).
 	Metrics *telemetry.Metrics
 	// Events records each security event for the operator (nil: logged
@@ -129,6 +134,7 @@ type Server struct {
 	events   *events.Recorder
 	// jsonDenials: Config.JSONDenials.
 	jsonDenials bool
+	probeKey    func() []byte
 }
 
 // New returns a Server that inspects requests with p.
@@ -144,7 +150,7 @@ func New(p pipeline.Inspector, cfg Config) (*Server, error) {
 	if resolver == nil {
 		resolver = &clientip.Resolver{}
 	}
-	return &Server{pipeline: p, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events, metrics: cfg.Metrics, jsonDenials: cfg.JSONDenials}, nil
+	return &Server{pipeline: p, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events, metrics: cfg.Metrics, jsonDenials: cfg.JSONDenials, probeKey: cfg.ProbeKey}, nil
 }
 
 // NewGRPCServer returns a gRPC server that serves s. It accepts messages
@@ -340,6 +346,9 @@ func (s *Server) onHeaders(ctx context.Context, x *exchange, h *extprocv3.HttpHe
 		return s.uninspectable(ctx, err)
 	}
 	x.req, x.path = req, path
+	if r := s.answerProbe(req); r != nil {
+		return r
+	}
 	x.setID = !strings.EqualFold(req.ID, req.Headers.Get("X-Request-Id"))
 	if h.GetEndOfStream() {
 		return s.verdict(ctx, x, phaseRequestHeaders)
@@ -834,6 +843,36 @@ func allow(p phase, m *extprocv3.HeaderMutation) *extprocv3.ProcessingResponse {
 		return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseTrailers{
 			ResponseTrailers: &extprocv3.TrailersResponse{}}}
 	}
+}
+
+// answerProbe answers the operator's probe, uninspected, if req is one:
+// its X-Inkwall-Probe header has a valid MAC of its host and URI under the
+// probe key (haproxyprobe, as the SPOE agent checks it). The answer is
+// Envoy's local reply, 200 with the answer's MAC in the header: the request
+// never reaches the upstream, and only an engine with the key, behind a
+// route whose filter is on, can make it. Envoy's local replies take a
+// defined HTTP status only, so not HAProxy's 299; the MAC proves the answer.
+// In observability mode Envoy ignores the reply: a detect-mode route can't
+// be proven this way.
+func (s *Server) answerProbe(req *request.Request) *extprocv3.ProcessingResponse {
+	value := req.Headers.Get(haproxyprobe.Header)
+	if s.probeKey == nil || value == "" {
+		return nil
+	}
+	answer, ok := haproxyprobe.Check(s.probeKey(), req.RawURI, req.Host, value)
+	if !ok {
+		return nil
+	}
+	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ImmediateResponse{
+		ImmediateResponse: &extprocv3.ImmediateResponse{
+			Status: &typev3.HttpStatus{Code: typev3.StatusCode_OK},
+			Headers: &extprocv3.HeaderMutation{SetHeaders: []*corev3.HeaderValueOption{
+				header(strings.ToLower(haproxyprobe.Header), answer),
+				header("cache-control", "no-store"),
+			}},
+			Details: "inkwall_probe",
+		},
+	}}
 }
 
 // deny answers with status and the same plain-text body as the other
