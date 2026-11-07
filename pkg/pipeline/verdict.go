@@ -65,6 +65,9 @@ const (
 	// ReasonWebSocket means a WebSocket handshake didn't meet the policy's
 	// WebSocket rules: an origin not allowed, a required header missing.
 	ReasonWebSocket
+	// ReasonGRPC means a gRPC call on a policy that refuses gRPC
+	// (DenyGRPC).
+	ReasonGRPC
 )
 
 func (r Reason) String() string {
@@ -91,6 +94,8 @@ func (r Reason) String() string {
 		return "suspended"
 	case ReasonWebSocket:
 		return "websocket"
+	case ReasonGRPC:
+		return "grpc"
 	default:
 		return "unknown"
 	}

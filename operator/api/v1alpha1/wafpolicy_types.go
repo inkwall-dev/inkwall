@@ -42,6 +42,17 @@ const (
 	OversizeDeny OversizeAction = "Deny"
 )
 
+// GRPCAction is whether a policy lets gRPC calls through.
+// +kubebuilder:validation:Enum=Allow;Deny
+type GRPCAction string
+
+const (
+	// GRPCAllow inspects gRPC calls as gRPC (the default).
+	GRPCAllow GRPCAction = "Allow"
+	// GRPCDeny denies them: for routes that serve no gRPC.
+	GRPCDeny GRPCAction = "Deny"
+)
+
 // GRPCMessagesAction is whether gRPC messages are inspected.
 // +kubebuilder:validation:Enum=Inspect;Skip
 type GRPCMessagesAction string
@@ -377,6 +388,13 @@ type BodySpec struct {
 	// call's path and metadata are inspected. See docs/grpc.md.
 	// +optional
 	GRPCMessages GRPCMessagesAction `json:"grpcMessages,omitempty"`
+
+	// GRPC: Deny refuses requests with a gRPC or gRPC-Web content type
+	// (403, or the gRPC status PermissionDenied to a gRPC client; logged in
+	// Detect mode), for routes that serve no gRPC. Unset: Allow. Requires
+	// engines 0.5.0 or later. See docs/grpc.md.
+	// +optional
+	GRPC GRPCAction `json:"grpc,omitempty"`
 }
 
 // WebSocketSpec is what a WebSocket handshake must meet.

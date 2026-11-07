@@ -35,6 +35,11 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 What's new:
 
+- **Refuse gRPC where none is served.** `body.grpc: Deny` on a `WAFPolicy` denies requests with a
+  gRPC or gRPC-Web content type, instead of the SecLang rule `docs/grpc.md` suggested. Upgrade the
+  chart first, for the CRD field; a policy that sets it is `Enforced=False` (`EnginesOutdated`)
+  until every engine runs 0.5.0.
+
 - **The CRS's own settings on a policy.** The CRS rule set binding of a `WAFPolicy` takes an
   optional `crs` block: `allowedMethods` (for REST APIs that send `PUT`, `PATCH` or `DELETE`),
   `allowedRequestContentTypes`, `detectionParanoiaLevel` (log the rules of a higher paranoia level

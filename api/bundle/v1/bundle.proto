@@ -248,6 +248,10 @@ message BodyConfig {
   OversizeAction on_oversize = 3;
   // Inspect the text in gRPC calls' messages (docs/grpc.md).
   bool grpc_messages = 4;
+  // Deny a request with a gRPC or gRPC-Web content type, on routes that
+  // serve no gRPC (#367). Engines before 0.5.0 ignore it: the operator
+  // doesn't count them as enforcing a policy that sets it.
+  bool deny_grpc = 5;
 }
 
 // WebSocketConfig is what a WebSocket handshake (a request with an

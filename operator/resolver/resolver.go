@@ -530,6 +530,7 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 			body.MaxBytes = *b.MaxBytes
 		}
 		body.GrpcMessages = b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect
+		body.DenyGrpc = b.GRPC == wafv1alpha1.GRPCDeny
 		p.Body = body
 	}
 	// Unset when not inspected: the bundles of policies without responses

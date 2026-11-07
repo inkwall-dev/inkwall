@@ -313,6 +313,7 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 		WebSocket:    ws,
 		Responses:    responses,
 		GRPCMessages: bp.GetBody().GetGrpcMessages(),
+		DenyGRPC:     bp.GetBody().GetDenyGrpc(),
 	}
 	if bp.GetMode() == bundlev1.Mode_MODE_BLOCK {
 		pc.Mode = pipeline.ModeBlock
