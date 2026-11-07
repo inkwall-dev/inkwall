@@ -5,7 +5,8 @@
 # Checks each example's WAFPolicy (examples/<proxy>/) with inkwallctl test
 # --policy, as the operator would resolve and the engine compile it, set to
 # Block mode: the requests of examples/tests/benign.http must be allowed,
-# those of attacks.http denied (#388).
+# those of attacks.http denied (#388). Then runs the example test suite,
+# examples/tests/suite.yaml, with inkwallctl test --suite (#385).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -29,4 +30,11 @@ for dir in examples/traefik examples/envoy-gateway examples/istio; do
     fi
   done
 done
+if "$work/inkwallctl" test --suite examples/tests/suite.yaml --junit "$work/junit.xml" >"$work/out" 2>&1; then
+  echo "ok    examples/tests/suite.yaml: $(tail -n 1 "$work/out")"
+else
+  echo "FAIL  examples/tests/suite.yaml:"
+  sed 's/^/      /' "$work/out"
+  fail=1
+fi
 exit $fail

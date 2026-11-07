@@ -1,0 +1,16 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# The WAFPolicy suite.yaml tests: examples/envoy-gateway's, in Block mode,
+# inspecting responses too (only Envoy Gateway sends them to the engine).
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: web
+  namespace: shop
+spec:
+  targetRefs:
+    - {group: gateway.networking.k8s.io, kind: HTTPRoute, name: web}
+  mode: Block
+  responses:
+    inspect: true

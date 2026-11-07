@@ -145,6 +145,10 @@ What changes by itself:
   `metrics.prometheusRule` and `metrics.dashboard` in the chart. See [Monitoring](monitoring.md).
 - **`inkwallctl tune` is new** (#383): it suggests the narrowest exclusions from Detect mode's
   security events. See [Suggest exclusions from the events](testing-policies.md#suggest-exclusions-from-the-events).
+- **`inkwallctl test --suite` is new** (#385, experimental format): a file of cases, each a
+  request and optionally its response, with the verdict expected; `--junit` writes the results for
+  CI. See [Test suites](testing-policies.md#test-suites). The other `inkwallctl test` flags are
+  unchanged.
 
 ## From 0.4.0 to 0.4.1
 
