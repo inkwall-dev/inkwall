@@ -117,16 +117,8 @@ func grant(ctx context.Context, t *testing.T, c client.Client, user string, left
 	}
 }
 
-func freeAddr(t *testing.T) string {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := l.Addr().String()
-	_ = l.Close()
-	return addr
-}
+// freeAddr: testenv.FreeAddr (#452).
+func freeAddr(t *testing.T) string { return testenv.FreeAddr(t) }
 
 // eventually retries cond until it returns "" or a minute passes.
 func eventually(t *testing.T, what string, cond func() string) {
