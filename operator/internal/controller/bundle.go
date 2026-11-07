@@ -282,6 +282,7 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	if keys, err = r.rotate(ctx, keys, keySecret, cfg, current.GetVersion(), currentKey); err != nil {
 		return reconcile.Result{}, err
 	}
+	observeKeys(keys)
 	signer := keys.Active
 
 	res := resolver.Resolve(in)
@@ -304,7 +305,11 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	published := next
 	var tooLarge error
 	if changed {
-		switch err := r.publish(ctx, signer, next); {
+		err := r.publish(ctx, signer, next)
+		if err != nil {
+			publishFailed(err)
+		}
+		switch {
 		case errors.Is(err, bundle.ErrTooLarge):
 			// Retrying won't help until the policy shrinks; keep the
 			// current bundle, and say so on the policies it doesn't
