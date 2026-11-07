@@ -35,6 +35,14 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 What's new:
 
+- **IP allow and deny lists.** A `WAFIPList` lists client addresses (CIDRs), and
+  `WAFPolicy.spec.ipLists: {allow: [...], deny: [...]}` names lists in the policy's namespace: a
+  denied client gets 403 (logged in `Detect` mode) before any rule, an allowed one isn't inspected.
+  They match the client IP the engine resolves, so get that right first
+  ([client IP](client-ip.md)). Upgrade the chart first, for the new CRD; a policy with lists is
+  `Enforced=False` (`EnginesOutdated`) until every engine runs 0.5.0. `inkwallctl test` reads
+  `WAFIPList` files and takes `--client-ip`.
+
 - **The CRS's own settings on a policy.** The CRS rule set binding of a `WAFPolicy` takes an
   optional `crs` block: `allowedMethods` (for REST APIs that send `PUT`, `PATCH` or `DELETE`),
   `allowedRequestContentTypes`, `detectionParanoiaLevel` (log the rules of a higher paranoia level
