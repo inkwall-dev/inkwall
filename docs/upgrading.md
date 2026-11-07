@@ -35,6 +35,11 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 What's new:
 
+- **Limits for the standalone proxy's long-lived connections**: `--websocket-idle-timeout`,
+  `--max-connections` and `--body-read-timeout`, all off by default. On shutdown the proxy now
+  closes open WebSockets with `1001` (going away) instead of dropping them, and a client whose body
+  read times out gets `408` instead of `400`.
+
 - **The CRS's own settings on a policy.** The CRS rule set binding of a `WAFPolicy` takes an
   optional `crs` block: `allowedMethods` (for REST APIs that send `PUT`, `PATCH` or `DELETE`),
   `allowedRequestContentTypes`, `detectionParanoiaLevel` (log the rules of a higher paranoia level

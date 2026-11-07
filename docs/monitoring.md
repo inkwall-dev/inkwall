@@ -89,6 +89,8 @@ Engine metrics carry `adapter` where it says so (`proxy`, `forwardauth`, `httpch
 | `inkwall_evaluations_in_flight` | gauge | | Evaluations running now. |
 | `inkwall_evaluation_slots` | gauge | | Maximum concurrent evaluations; past them, requests are shed with reason `overload`. |
 | `inkwall_rule_sets` | gauge | | Compiled rule sets in memory. |
+| `inkwall_connections` | gauge | `adapter` | Client connections the standalone proxy holds open, with `--max-connections`. |
+| `inkwall_connection_limit_waits_total` | counter | `adapter` | Times the standalone proxy reached `--max-connections`: the next connection waited until one closed. |
 | `inkwall_operator_connected` | gauge | | 1 while the engine has its stream to the operator. |
 | `inkwall_bundle_version` | gauge | | The bundle the engine enforces; 0 before the first. |
 | `inkwall_bundle_updates_total` | counter | `result`, `reason` | Bundles received: `applied`, or `rejected` with a reason (`signature`, `older`, `compile`, `other`). |

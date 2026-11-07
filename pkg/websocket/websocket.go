@@ -34,6 +34,7 @@ const (
 
 // Close codes (RFC 6455 §7.4.1).
 const (
+	CloseGoingAway        = 1001
 	CloseProtocolError    = 1002
 	CloseUnsupportedData  = 1003
 	CloseInvalidPayload   = 1007
