@@ -79,6 +79,16 @@ What's new:
 
 What changes by itself:
 
+- **Istio routes are proven before they are `Programmed`.** The operator now sends its signed probe
+  through every Istio gateway pod, on every listener a protected HTTPRoute or VirtualService is
+  served on, and the engine answers it ([the operator's probe](istio.md#the-operators-probe)).
+  After the upgrade, Istio policies are `Unverified` until the probes have answered (seconds, once
+  the gateways' engines are 0.5.0: restart Istio's ingress gateways; Istio rolls the Gateway API
+  pods itself). Some stay out of `Programmed`, and so out of `Ready`: routes whose policies are
+  all in `Detect` mode stay `Unverified` (Envoy discards the engine's answer in observability
+  mode), and routes the probe can't reach are `NotProbeable` (a rule whose every match is a
+  regular expression, a server with mutual TLS or passthrough). Before, they were `Programmed`
+  without proof that the filter was on the route. Alerts on `Ready` should expect it.
 - **Enforced checks the newest field a policy needs.** A policy with fields of 0.4.0 and 0.5.0
   (`webSocket` and `ipLists`, say) was `Enforced` while a 0.4.x engine ran it; it is now
   `EnginesOutdated` until every engine runs 0.5.0.
@@ -154,6 +164,14 @@ What changes by itself:
   for a request an adapter can't read. `InkwallConfig.spec.engine.jsonDenials` (the engine's
   `--json-denials`) answers clients that accept `application/json` with a JSON body; off by
   default.
+- **The chart checks its values** (#386). A `values.schema.json` makes `helm install`, `upgrade`
+  and `template` fail on a key the chart doesn't have, a wrong type, or a value outside its set,
+  naming it, where 0.4.x ignored them. A typo such as `rbac.integration.traefik` was silently
+  ignored before. Run `helm upgrade ... --dry-run` first, and fix or remove what it names. `helm
+  upgrade --reuse-values` from 0.4.x passes (CI checks it). New values: `global.imageRegistry`,
+  `global.imagePullSecrets`, `operator.image.digest`, `engine.image.digest`, `operator.extraEnv`,
+  `extraVolumes`, `extraVolumeMounts` and `topologySpreadConstraints` (see
+  [Private registries](../deploy/helm/inkwall/README.md#private-registries)).
 - **A monitoring kit, off by default** (#381): `metrics.serviceMonitor`, `metrics.podMonitor`,
   `metrics.prometheusRule` and `metrics.dashboard` in the chart. See [Monitoring](monitoring.md).
 - **`inkwallctl tune` is new** (#383): it suggests the narrowest exclusions from Detect mode's
