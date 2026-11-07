@@ -1,0 +1,37 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# The demo app's HTTPRoute, on an Istio Gateway. Istio runs a Gateway's pods
+# in the Gateway's namespace: istio-ingress, a proxy namespace, so the
+# operator adds the engine to them.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: istio-ingress
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: shop
+  namespace: istio-ingress
+spec:
+  gatewayClassName: istio
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces: {from: All}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: web
+  namespace: shop
+spec:
+  parentRefs:
+    - {name: shop, namespace: istio-ingress}
+  hostnames: [shop.example.com]
+  rules:
+    - backendRefs:
+        - {name: web, port: 80}
