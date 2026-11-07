@@ -70,6 +70,17 @@ type ExchangeEvaluator interface {
 	EvaluateExchange(ctx context.Context, r *request.Request) (Result, Exchange, error)
 }
 
+// DetectingEvaluator evaluates for a policy in Detect mode, whose requests
+// are never denied (#360).
+type DetectingEvaluator interface {
+	ExchangeEvaluator
+	// EvaluateExchangeDetecting evaluates r without interrupting it: Result
+	// reports what would have interrupted it (Interrupted, RuleID), and the
+	// evaluation is kept for the response even then, since the response
+	// reaches the client. The caller must Close the Exchange.
+	EvaluateExchangeDetecting(ctx context.Context, r *request.Request) (Result, Exchange, error)
+}
+
 // Exchange is a request's evaluation, kept for its response. It is not
 // safe for concurrent use.
 type Exchange interface {

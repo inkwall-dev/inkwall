@@ -49,6 +49,15 @@ func newWSProxy(t *testing.T, mode pipeline.Mode, messages pipeline.WebSocketMes
 func newWSProxyMetrics(t *testing.T, mode pipeline.Mode, messages pipeline.WebSocketMessages, oversize pipeline.OversizeAction, maxBody int64,
 	m *telemetry.Metrics) (*wsUpstream, string, *bytes.Buffer) {
 	t.Helper()
+	u, addr, logs, _ := newWSProxyWith(t, mode, messages, oversize, maxBody, m, nil)
+	return u, addr, logs
+}
+
+// newWSProxyWith is newWSProxyMetrics with the proxy's Config changed by
+// with, and the Handler.
+func newWSProxyWith(t *testing.T, mode pipeline.Mode, messages pipeline.WebSocketMessages, oversize pipeline.OversizeAction, maxBody int64,
+	m *telemetry.Metrics, with func(*Config)) (*wsUpstream, string, *bytes.Buffer, *Handler) {
+	t.Helper()
 	u := &wsUpstream{}
 	echo := xws.Server{
 		Handshake: func(_ *xws.Config, r *http.Request) error {
@@ -86,14 +95,17 @@ func newWSProxyMetrics(t *testing.T, mode pipeline.Mode, messages pipeline.WebSo
 	if m != nil {
 		pcfg.Observer = m
 	}
-	h, err := New(pipeline.New(eval, pcfg),
-		Config{Upstream: upURL, MaxBodyBytes: maxBody, WebSocketMessages: messages, Logger: slog.New(slog.NewJSONHandler(&syncWriter{w: &logs}, nil)), Metrics: m})
+	cfg := Config{Upstream: upURL, MaxBodyBytes: maxBody, WebSocketMessages: messages, Logger: slog.New(slog.NewJSONHandler(&syncWriter{w: &logs}, nil)), Metrics: m}
+	if with != nil {
+		with(&cfg)
+	}
+	h, err := New(pipeline.New(eval, pcfg), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	front := httptest.NewServer(h)
 	t.Cleanup(front.Close)
-	return u, strings.TrimPrefix(front.URL, "http://"), &logs
+	return u, strings.TrimPrefix(front.URL, "http://"), &logs, h
 }
 
 type syncWriter struct {

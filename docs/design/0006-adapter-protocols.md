@@ -175,9 +175,16 @@ phases 3 (status and headers) and 4 (body): the response rules see what the requ
 `956` (data leakage: generic, SQL, Java, PHP, IIS, web shells, Ruby), scored into the outbound
 anomaly score and blocked by `RESPONSE-959` at `tx.outbound_anomaly_score_threshold` (4 by
 default: one critical match). The user's `WAFRuleSet` rules on `RESPONSE_*` variables run too. The
-response's verdict lists only what matched the response. A request the rules interrupted keeps no
-transaction: in Block mode it was denied, and in Detect mode its event stands and its response
-isn't inspected.
+response's verdict lists only what matched the response. In Block mode a request the rules
+interrupt keeps no transaction: it was denied, and there is no response. In Detect mode (#360) the
+request is let through, so its response reaches the client, and it is the one most worth
+inspecting (an SQL injection's SQL error): the transaction runs DetectionOnly (a first phase 1
+rule, 7700010, sets `ctl:ruleEngine=DetectionOnly` when the engine sets `TX:inkwall_detect`), the
+request's event reports the interruption the rules would have made, and the response is inspected
+as any other, with its own event. In DetectionOnly the rules go on after that interruption, so the
+request's event may list more matches than in Block mode. The response's would-be interruption is
+its first matched rule with a disruptive action (`deny`, `drop`, `redirect`: the CRS's 959100),
+since Coraza records only the transaction's first.
 
 **What is read.** The status and headers always. The body only when its media type is one the
 rules read (`text/plain`, `text/html`, `text/xml`, `application/json`, `application/xml`,
