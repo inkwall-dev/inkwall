@@ -139,6 +139,16 @@ fail open (the engine never rejects its requests) gets `observability_mode` (Env
 `shadowMode`) and a `STREAMED` body instead, and no buffer limit: Envoy forwards the request
 without waiting for the engine.
 
+**The operator's probe** (#372, bundle mode): as the SPOE agent does ([§4](#4-spoe-haproxy-stream-processing-offload-engine)), the ext_proc adapter
+answers a request whose `X-Inkwall-Probe` header carries a valid MAC of its host and URI under
+the bundle's probe key (`pkg/haproxyprobe`) itself, uninspected, before anything else: an
+immediate response, 200 with the answer's MAC in `X-Inkwall-Probe`, so the request never reaches
+the upstream. Envoy's local replies take a defined HTTP status only, so not HAProxy's 299; the
+MAC is the proof. A request with a wrong MAC, or before the engine has a key, is an ordinary
+request. In observability mode Envoy ignores the reply, so a detect-mode route can't be proven
+this way. The operator's side (probing each gateway pod for Istio's routes before `Programmed`)
+is not built yet.
+
 ### Response inspection (v0.4.0)
 
 Decided for v0.4.0 ([#274](https://github.com/inkwall-dev/inkwall/issues/274)). Responses are
