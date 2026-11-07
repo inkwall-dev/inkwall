@@ -35,8 +35,22 @@ metadata:
   annotations:
     cert-manager.io/inject-ca-from: {{ $.Release.Namespace }}/{{ include "inkwall.webhook.secret" $ }}
   {{- end }}
+{{- /* The operator keeps the Pod webhooks' failurePolicy (Fail while a policy
+blocks, 0004 §4.3), objectSelector and namespaceSelector. An upgrade renders
+their live values, not the chart's: it doesn't reopen the webhook, and Helm
+4's server-side apply, which refuses to take a field another manager owns,
+doesn't conflict (#394). The operator updates them from its new flags once
+it restarts. A new install renders the chart's. */}}
+{{- $live := dict }}
+{{- if eq .kind "MutatingWebhookConfiguration" }}
+{{- range (dig "webhooks" list (lookup "admissionregistration.k8s.io/v1" .kind "" .metadata.name)) }}
+{{- $_ := set $live .name . }}
+{{- end }}
+{{- end }}
 webhooks:
   {{- range .webhooks }}
+  {{- $was := get $live .name | default dict }}
+  {{- if $was.failurePolicy }}{{- $_ := set . "failurePolicy" $was.failurePolicy }}{{- end }}
   {{- $_ := set .clientConfig.service "name" (include "inkwall.webhook.service" $) }}
   {{- $_ := set .clientConfig.service "namespace" $.Release.Namespace }}
   {{- $_ := set .clientConfig.service "port" 443 }}
@@ -60,6 +74,12 @@ webhooks:
   {{- if not (has "*" $ns) }}
   {{- $_ := set . "namespaceSelector" (dict "matchExpressions" (list
     (dict "key" "kubernetes.io/metadata.name" "operator" "In" "values" (sortAlpha $ns)))) }}
+  {{- end }}
+  {{- end }}
+  {{- if $integration }}
+  {{- $webhook := . }}
+  {{- range $field := list "objectSelector" "namespaceSelector" }}
+  {{- if hasKey $was $field }}{{- $_ := set $webhook $field (get $was $field) }}{{- end }}
   {{- end }}
   {{- end }}
   - {{ toYaml . | indent 4 | trim }}
