@@ -47,7 +47,16 @@ condition() {
   "${KUBECTL[@]}" -n "$NS" get wafpolicy web -o jsonpath="{.status.conditions[?(@.type==\"$1\")].$2}" 2>/dev/null
 }
 ready() { [[ $(condition Ready status) == True ]]; }
+# policy MODE: applies the policy, retrying while the webhook doesn't answer
+# (just after the operator restarts).
 policy() {
+  for _ in $(seq 60); do
+    apply_policy "$1" 2>/dev/null && return 0
+    sleep 1
+  done
+  apply_policy "$1"
+}
+apply_policy() {
   "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
 apiVersion: waf.inkwall.dev/v1alpha1
 kind: WAFPolicy
@@ -260,7 +269,8 @@ eventually "every replica down, the operator creates a new signing key" new_key
 policy_edit() {
   "${KUBECTL[@]}" -n "$NS" patch wafpolicy web --type=merge -p "{\"spec\":{\"body\":{\"maxBytes\":$1}}}" >/dev/null
 }
-policy_edit 65536
+# Retried: the webhooks answer a moment after the operator is ready.
+eventually "a policy edit is accepted" policy_edit 65536
 # The engine trusts the old key until the kubelet updates its trust
 # ConfigMap: it rejects bundles the new key signed, and keeps its own.
 eventually_within 180 "the engine trusts the new key and runs the new bundle: Ready" ready
@@ -271,7 +281,7 @@ echo "== 4. the API server stopped just after a policy change"
 node=$CLUSTER-control-plane
 api_up() { "${KUBECTL[@]}" get --raw /readyz >/dev/null 2>&1; }
 mark
-policy_edit 131072
+eventually "a policy edit is accepted" policy_edit 131072
 docker exec "$node" mv /etc/kubernetes/manifests/kube-apiserver.yaml /etc/kubernetes/kube-apiserver.yaml.chaos
 api_down() { ! api_up; }
 eventually "the API server is down" api_down

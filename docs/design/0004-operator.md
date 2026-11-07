@@ -1137,6 +1137,7 @@ Removal must never leave a proxy failing closed on a missing engine.
 | Invalid rule | Rejected at admission | Error to `kubectl` / Argo CD | Fix the rule |
 | Engine can't compile (version skew) | Engine keeps its previous bundle | `EngineNack` | Upgrade the engines or fix the rule |
 | Bundle Secret deleted | None | Builder recreates it | Automatic |
+| Signing key Secret deleted while every replica is down | None: engines keep their bundle, and reject the new key's bundles (`EngineNack`) until the kubelet updates their trust ConfigMap with it | The replicas' memory is gone, so the operator creates a new key (with a replica up, it restores the keys it holds) | Automatic, within the kubelet's ConfigMap sync (`make kind-chaos`) |
 | Bundle chunk deleted or edited | None; meanwhile new engines can't cold start from the Secret | Builder logs it | Automatic: published again |
 | Bundle over 7,200 KiB compressed | None: the current bundle stays; changes are not published; `spec.suspend` still suspends and resumes it | Builder error; warning past 75%; `inkwall_operator_bundle_compressed_bytes`; `Accepted=False` (`BundleTooLarge`) on the policies not published | Shrink the policies (fewer, or smaller rule sets) |
 | Signing key rotated | None: the operator signs with the new key only once every connected engine trusts it | Secret's `rotation-phase`; operator logs the engines it waits for | Automatic ([§4.6](#46-bundle-builder-leader-only)); replace engines older than rotation |

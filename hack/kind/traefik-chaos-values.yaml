@@ -12,8 +12,10 @@ ingressClass:
 providers:
   kubernetesIngress:
     ingressClass: traefik-chaos
+  # The operator's Middleware is a Traefik CRD: without this provider, the
+  # wired Ingress's router can't find it and answers 404.
   kubernetesCRD:
-    enabled: false
+    ingressClass: traefik-chaos
   kubernetesGateway:
     enabled: false
 
