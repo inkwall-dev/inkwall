@@ -147,9 +147,16 @@ its whole request, or as much as the proxy buffers:
 A request that only claims to be gRPC, to get a JSON or form body past the rules, is inspected in
 full: such a body doesn't start with a message prefix. An application that isn't gRPC but reads any
 body however it is labelled could still get a body made to look like gRPC messages. If your routes
-serve no gRPC, deny gRPC content types with a SecLang rule in a `WAFRuleSet`:
+serve no gRPC, deny gRPC on the policy (engines 0.5.0 or later):
 
+```yaml
+spec:
+  body:
+    grpc: Deny
 ```
-SecRule REQUEST_HEADERS:Content-Type "@rx (?i)^application/grpc" \
-    "id:1000100,phase:1,deny,status:403,log,msg:'gRPC is not served here'"
-```
+
+A request with a gRPC or gRPC-Web content type (`application/grpc`, `application/grpc+json`,
+`application/grpc-web`, `application/grpc-web-text`...) is then denied before any rule, whatever its
+body, with reason `grpc`: 403, or the gRPC status `PermissionDenied` to a gRPC client, as other
+denials. In `Detect` mode it is logged. Other content types, and the paths in `skip.paths`, are
+unaffected. `inkwallctl test --policy` applies it too.
