@@ -12,9 +12,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
-	"slices"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -41,6 +39,7 @@ import (
 	agentv1 "github.com/inkwall-dev/inkwall/api/agent/v1"
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	"github.com/inkwall-dev/inkwall/operator/bundle"
+	"github.com/inkwall-dev/inkwall/operator/enginereport"
 )
 
 // Each replica publishes its engines in a ConfigMap in its namespace.
@@ -162,14 +161,14 @@ func (g *GRPCServer) Check(*http.Request) error {
 	return nil
 }
 
-// Report labels and keys of the replicas' engine ConfigMaps.
+// Report labels and keys of the replicas' engine ConfigMaps
+// (operator/enginereport, which reads them).
 const (
-	EnginesLabel = "waf.inkwall.dev/engines"
-	enginesKey   = "engines.json"
-	updatedAtKey = "updatedAt"
-	// leftOutKey counts the engines left out of a full report.
-	leftOutKey       = "leftOut"
-	reportNamePrefix = "inkwall-engines-"
+	EnginesLabel     = enginereport.Label
+	enginesKey       = enginereport.EnginesKey
+	updatedAtKey     = enginereport.UpdatedAtKey
+	leftOutKey       = enginereport.LeftOutKey
+	reportNamePrefix = enginereport.NamePrefix
 )
 
 // maxReport bounds a replica's engine list, so its ConfigMap stays under
@@ -297,39 +296,19 @@ func encodeEngines(engines []Engine, limit int) ([]byte, int, error) {
 	return append(data, ']'), 0, nil
 }
 
-// ReadEngines merges the replicas' reports, skipping those not refreshed
-// within stale (their replica is gone). An engine listed twice, while it
-// moves between replicas, counts once, with its newest connection. They
-// are sorted by ID. leftOut counts the engines left out of full reports:
-// while it isn't 0, the list is incomplete.
+// ReadEngines merges the replicas' reports (enginereport.Read).
 func ReadEngines(ctx context.Context, c client.Reader, namespace string, stale time.Duration, now time.Time) (engines []Engine, leftOut int, err error) {
-	var list corev1.ConfigMapList
-	if err := c.List(ctx, &list, client.InNamespace(namespace), client.MatchingLabels{EnginesLabel: "true"}); err != nil {
+	reported, leftOut, err := enginereport.Read(ctx, c, namespace, stale, now)
+	if err != nil {
 		return nil, 0, err
 	}
-	byID := map[string]Engine{}
-	for _, cm := range list.Items {
-		updated, err := time.Parse(time.RFC3339Nano, cm.Data[updatedAtKey])
-		if err != nil || now.Sub(updated) > stale {
-			continue
-		}
-		var listed []Engine
-		if err := json.Unmarshal([]byte(cm.Data[enginesKey]), &listed); err != nil {
-			continue
-		}
-		// Missing from an older replica's report: 0.
-		n, _ := strconv.Atoi(cm.Data[leftOutKey])
-		leftOut += max(n, 0)
-		for _, e := range listed {
-			if old, ok := byID[e.ID]; !ok || e.ConnectedAt.After(old.ConnectedAt) {
-				byID[e.ID] = e
-			}
+	engines = make([]Engine, len(reported))
+	for i, e := range reported {
+		engines[i] = Engine{
+			ID: e.ID, ServiceAccount: e.ServiceAccount, PodNamespace: e.PodNamespace, PodName: e.PodName,
+			NodeName: e.NodeName, EngineVersion: e.EngineVersion, Applied: e.Applied, Rejected: e.Rejected,
+			RejectError: e.RejectError, TrustedKeys: e.TrustedKeys, Replica: e.Replica, ConnectedAt: e.ConnectedAt,
 		}
 	}
-	engines = make([]Engine, 0, len(byID))
-	for _, e := range byID {
-		engines = append(engines, e)
-	}
-	slices.SortFunc(engines, func(a, b Engine) int { return strings.Compare(a.ID, b.ID) })
 	return engines, leftOut, nil
 }

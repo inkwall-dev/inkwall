@@ -2,13 +2,17 @@
 # Copyright 2026 The Inkwall Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# Builds the operator image, loads it into the kind cluster (make kind-up
+# Builds the operator and engine images (unless SKIP_IMAGE_BUILD=1), loads
+# them into the kind cluster (make kind-up
 # creates it), installs the Helm chart, and checks the operator: the
 # webhook accepts a valid rule set and rejects an invalid one, and the
 # sample policy is built into a bundle served to engines.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# The versions under test (#393).
+# shellcheck source=hack/versions.env
+. hack/versions.env
 
 CLUSTER=${KIND_CLUSTER:-inkwall}
 IMAGE=${OPERATOR_IMAGE:-inkwall-operator:dev}
@@ -30,9 +34,13 @@ if ! kind get clusters | grep -x "$CLUSTER" >/dev/null; then
   exit 1
 fi
 
-docker build --target operator -t "$IMAGE" .
-# The engine image, injected into proxy pods.
-docker build --target engine -t "$ENGINE_IMAGE" .
+# SKIP_IMAGE_BUILD=1: the images are already in Docker (CI's e2e jobs load
+# the ones its image job built once).
+if [[ ${SKIP_IMAGE_BUILD:-} != 1 ]]; then
+  docker build --target operator -t "$IMAGE" .
+  # The engine image, injected into proxy pods.
+  docker build --target engine -t "$ENGINE_IMAGE" .
+fi
 kind load docker-image "$IMAGE" "$ENGINE_IMAGE" --name "$CLUSTER"
 
 extra_args=()
@@ -173,7 +181,7 @@ metadata:
 spec:
   containers:
     - name: proxy
-      image: traefik/whoami:v1.10.3
+      image: traefik/whoami:$WHOAMI_VERSION
 YAML
 if "${KUBECTL[@]}" -n "$CHECK_NS" wait pod/proxy --for=condition=Ready --timeout=120s >/dev/null 2>&1 &&
   [[ $("${KUBECTL[@]}" -n "$CHECK_NS" get pod proxy -o jsonpath='{.spec.initContainers[0].name}') == inkwall-engine ]]; then
@@ -216,7 +224,7 @@ metadata:
 spec:
   containers:
     - name: proxy
-      image: traefik/whoami:v1.10.3
+      image: traefik/whoami:$WHOAMI_VERSION
 YAML
 # The check pod's grant shows the operator has reconciled since.
 granted=""

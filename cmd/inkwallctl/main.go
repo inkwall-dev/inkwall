@@ -79,6 +79,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "migrate" {
 		return runMigrate(args[1:], stdout, stderr)
 	}
+	if len(args) > 0 && args[0] == "status" {
+		return runStatus(args[1:], stdout, stderr)
+	}
 	if len(args) > 0 && args[0] == "tune" {
 		return runTune(args[1:], os.Stdin, stdout, stderr)
 	}
@@ -89,6 +92,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "       inkwallctl test --bundle FILE [--bundle-key FILE] URL | --request FILE | --har FILE")
 		fmt.Fprintln(stderr, "       inkwallctl bench [flags] [--request FILE | --har FILE]")
 		fmt.Fprintln(stderr, "       inkwallctl migrate ingress-nginx [flags] -f FILE ... | --cluster")
+		fmt.Fprintln(stderr, "       inkwallctl status [flags]")
 		fmt.Fprintln(stderr, "       inkwallctl tune [flags] [--policy FILE ...] FILE ...")
 		fmt.Fprintln(stderr, "       inkwallctl version")
 		fmt.Fprintln(stderr, "run 'inkwallctl <command> -h' for flags")

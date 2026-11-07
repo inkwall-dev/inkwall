@@ -56,8 +56,31 @@ func TestParseProxyFlags(t *testing.T) {
 	if len(cfg.ruleGroupsOff) != 2 {
 		t.Fatalf("rule groups not parsed: %v", cfg.ruleGroupsOff)
 	}
-	if len(cfg.trustedProxies) != 2 {
-		t.Fatalf("trusted proxies = %v", cfg.trustedProxies)
+	if len(cfg.clientIP.TrustedProxies) != 2 {
+		t.Fatalf("trusted proxies = %v", cfg.clientIP.TrustedProxies)
+	}
+}
+
+// --trusted-hops and --client-ip-header configure the client IP resolver
+// (#364); bad values are refused at startup.
+func TestParseClientIPFlags(t *testing.T) {
+	cfg, err := parseFlags(cmdProxy, []string{"--upstream", "http://app", "--trusted-proxies", "10.0.0.0/8",
+		"--trusted-hops", "2", "--client-ip-header", "forwarded"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.clientIP.TrustedHops != 2 || cfg.clientIP.Header != "forwarded" || len(cfg.clientIP.TrustedProxies) != 1 {
+		t.Fatalf("client IP options: %+v", cfg.clientIP)
+	}
+	for _, bad := range [][]string{
+		{"--trusted-hops", "11"},
+		{"--trusted-hops", "-1"},
+		{"--client-ip-header", "x-real-ip"},
+		{"--trusted-proxies", "10.0.0.0/33"},
+	} {
+		if _, err := parseFlags(cmdProxy, append([]string{"--upstream", "http://app"}, bad...), io.Discard); err == nil {
+			t.Errorf("%v accepted", bad)
+		}
 	}
 }
 
@@ -205,7 +228,7 @@ func TestParseExtProcFlags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.listen != "127.0.0.1:9003" || len(cfg.trustedProxies) != 1 {
+	if cfg.listen != "127.0.0.1:9003" || len(cfg.clientIP.TrustedProxies) != 1 {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 	if _, err := parseFlags(cmdExtProc, []string{"--upstream", "http://app"}, io.Discard); err == nil {
@@ -707,5 +730,17 @@ func TestParsePolicyMetricsFlags(t *testing.T) {
 	}
 	if _, err := parseFlags(cmdForwardAuth, []string{"--policy-metrics-max=0"}, io.Discard); err == nil {
 		t.Error("--policy-metrics-max=0: no error")
+	}
+}
+
+// --json-denials turns on JSON denial bodies for JSON clients (#366).
+func TestParseJSONDenialsFlag(t *testing.T) {
+	cfg, err := parseFlags(cmdForwardAuth, nil, io.Discard)
+	if err != nil || cfg.jsonDenials {
+		t.Fatalf("default: %t, %v", cfg.jsonDenials, err)
+	}
+	cfg, err = parseFlags(cmdProxy, []string{"--upstream", "http://app", "--json-denials"}, io.Discard)
+	if err != nil || !cfg.jsonDenials {
+		t.Fatalf("--json-denials: %t, %v", cfg.jsonDenials, err)
 	}
 }

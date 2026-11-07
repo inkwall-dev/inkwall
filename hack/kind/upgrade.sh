@@ -2,8 +2,9 @@
 # Copyright 2026 The Inkwall Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# Upgrade test on kind (#129): the last released chart, from GHCR, protects
-# an Ingress and an IngressRoute through Traefik; `helm upgrade` to the chart
+# Upgrade test on kind (#129, #390): the last released chart, from GHCR,
+# protects an Ingress and an IngressRoute through Traefik, and an HTTPRoute
+# through Envoy Gateway (from 0.3.0, which wires it); `helm upgrade` to the chart
 # and images of this checkout keeps them protected, wired once, and their
 # policy Accepted and Programmed, with the CRDs at the new version;
 # `helm rollback` to the last release, as docs/upgrading.md says, keeps them
@@ -11,14 +12,17 @@
 # they were before Inkwall wired them.
 #
 # A probe in the cluster sends attacks and benign requests through Traefik
-# all along. An attack that reaches the app fails the test at once. A
+# and Envoy Gateway all along. An attack that reaches the app fails the test at once. A
 # request that gets no verdict (Traefik or its engine restarting, the route
 # briefly gone) is a gap, unless it never reached Traefik while a request
 # sent straight to Traefik's pod got its verdict (#348: the cluster's
 # networking, after Traefik's pod was replaced; see the probe): the upgrade itself must leave none, since engines
 # swap bundles atomically and keep enforcing while the operator restarts
 # (also when it is rolled back);
-# a Traefik restart may leave one of at most MAX_RESTART_GAP seconds.
+# a Traefik restart may leave one of at most MAX_RESTART_GAP seconds. Envoy
+# Gateway rolls its Envoy pods whenever the engine image changes (the
+# upgrade and the rollback): its route may have a gap of at most
+# MAX_ENVOY_GAP seconds then.
 #
 # Runs on a kind cluster without Inkwall installed, since it installs a
 # release of its own: UPGRADE_CLUSTER, created if needed (at
@@ -27,6 +31,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# The versions under test (#393).
+# shellcheck source=hack/versions.env
+. hack/versions.env
 
 CLUSTER=${UPGRADE_CLUSTER:-inkwall-upgrade}
 # The release it upgrades from: the latest, worked out from the tags (on a
@@ -43,44 +50,29 @@ ENGINE_IMAGE=${IMAGE:-inkwall-engine:dev}
 # rollback) and through the Traefik restart that follows it (see above).
 MAX_UPGRADE_GAP=${MAX_UPGRADE_GAP:-0}
 MAX_RESTART_GAP=${MAX_RESTART_GAP:-5}
+MAX_ENVOY_GAP=${MAX_ENVOY_GAP:-5}
+# Envoy Gateway, as in envoy-gateway-e2e.sh. UPGRADE_ENVOY_GATEWAY=0 leaves
+# it out; so does a FROM_VERSION before 0.3.0, which doesn't wire it.
+EG_VERSION=v1.9.3
+GATEWAY_API_VERSION=v1.7.0
+EG_NS=envoy-gateway-upgrade
+EG_HOST=gateway.upgrade.example.com
+eg=true
+if [[ ${UPGRADE_ENVOY_GATEWAY:-1} == 0 ]] || [[ $(printf '%s\n' 0.3.0 "$FROM_VERSION" | sort -V | head -1) != 0.3.0 ]]; then
+  eg=false
+fi
 OPERATOR_NS=inkwall-system
 NS=inkwall-upgrade
 TRAEFIK_NS=traefik-e2e
 HOST=ingress.upgrade.example.com
 ROUTE_HOST=route.upgrade.example.com
-TRAEFIK_CHART_VERSION=41.6.1 # Traefik v3.7.13, as hack/kind/up.sh
 KUBECTL=(kubectl --context "kind-$CLUSTER")
 HELM=(helm --kube-context "kind-$CLUSTER")
 SQLI='/?id=1%27%20OR%20%271%27%3D%271'
 
-failures=0
-ok() { printf 'ok    %s\n' "$1"; }
-fail() {
-  printf 'FAIL  %s\n' "$1"
-  failures=$((failures + 1))
-}
-check() {
-  local what=$1
-  shift
-  if "$@" >/dev/null 2>&1; then
-    ok "$what"
-  else
-    fail "$what"
-  fi
-}
-# eventually DESCRIPTION COMMAND...: retries for up to 2 minutes.
-eventually() {
-  local what=$1
-  shift
-  for _ in $(seq 240); do
-    if "$@" >/dev/null 2>&1; then
-      ok "$what"
-      return 0
-    fi
-    sleep 0.5
-  done
-  fail "$what"
-}
+# eventually retries for up to 2 minutes.
+EVENTUALLY_TRIES=240
+. hack/kind/lib.sh
 
 created=false
 if ! kind get clusters | grep -x "$CLUSTER" >/dev/null; then
@@ -97,6 +89,11 @@ cleanup() {
       "${HELM[@]}" -n "$OPERATOR_NS" uninstall inkwall --no-hooks >/dev/null 2>&1 || true
     "${HELM[@]}" -n "$TRAEFIK_NS" uninstall traefik-e2e >/dev/null 2>&1 || true
     "${KUBECTL[@]}" delete namespace "$NS" "$TRAEFIK_NS" --wait=false >/dev/null 2>&1 || true
+    if $eg; then
+      "${KUBECTL[@]}" delete gatewayclass inkwall-upgrade --ignore-not-found >/dev/null 2>&1 || true
+      "${HELM[@]}" -n "$EG_NS" uninstall eg --wait >/dev/null 2>&1 || true
+      "${KUBECTL[@]}" delete namespace "$EG_NS" --wait=false >/dev/null 2>&1 || true
+    fi
   fi
 }
 trap cleanup EXIT
@@ -111,12 +108,32 @@ docker build --target operator -t "$OPERATOR_IMAGE" .
 docker build --target engine -t "$ENGINE_IMAGE" .
 kind load docker-image "$OPERATOR_IMAGE" "$ENGINE_IMAGE" --name "$CLUSTER"
 
+# Envoy Gateway before Inkwall, so the release's rbac.integrations (auto)
+# grants it.
+PROXY_NAMESPACES=$TRAEFIK_NS
+if $eg; then
+  echo "== Envoy Gateway $EG_VERSION"
+  PROXY_NAMESPACES=$TRAEFIK_NS,$EG_NS
+  if ! "${KUBECTL[@]}" get crd gateways.gateway.networking.k8s.io >/dev/null 2>&1; then
+    curl -fsSL "https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml" |
+      "${KUBECTL[@]}" apply --server-side --force-conflicts -f - >/dev/null
+  fi
+  helm template eg-crds oci://docker.io/envoyproxy/gateway-crds-helm --version "$EG_VERSION" \
+    --set crds.gatewayAPI.enabled=false --set crds.envoyGateway.enabled=true 2>/dev/null |
+    "${KUBECTL[@]}" apply --server-side --force-conflicts -f - >/dev/null
+  # The Backend API is off by default; the engine's socket is a Backend.
+  "${HELM[@]}" upgrade --install eg oci://docker.io/envoyproxy/gateway-helm --version "$EG_VERSION" --skip-crds \
+    --set crds.enabled=false --namespace "$EG_NS" --create-namespace --set config.envoyGateway.extensionApis.enableBackend=true \
+    --wait --timeout 5m >/dev/null
+  ok "Envoy Gateway installed"
+fi
+
 echo "== install $FROM_VERSION"
 # From 0.2.2 and 0.1.5, only pods in injection.proxyNamespaces get the
-# engine: list Traefik's namespace when the old chart has the value.
+# engine: list the proxies' namespaces when the old chart has the value.
 from_values=()
 if helm show values "$FROM_CHART" --version "$FROM_VERSION" 2>/dev/null | grep -q '^  proxyNamespaces:'; then
-  from_values=(--set "injection.proxyNamespaces={$TRAEFIK_NS}")
+  from_values=(--set "injection.proxyNamespaces={$PROXY_NAMESPACES}")
 fi
 "${HELM[@]}" install inkwall "$FROM_CHART" --version "$FROM_VERSION" "${from_values[@]}" \
   --namespace "$OPERATOR_NS" --create-namespace --wait --timeout 5m >/dev/null
@@ -143,7 +160,7 @@ spec:
     spec:
       containers:
         - name: web
-          image: traefik/whoami:v1.10.3
+          image: traefik/whoami:$WHOAMI_VERSION
           args: ["--port", "8080"]
 ---
 apiVersion: v1
@@ -189,10 +206,36 @@ spec:
       middlewares: [{name: user-header}]
       services: [{name: web, port: 8080}]
 YAML
+if $eg; then
+  "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata: {name: inkwall-upgrade}
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: {name: web, namespace: $NS}
+spec:
+  gatewayClassName: inkwall-upgrade
+  listeners: [{name: http, protocol: HTTP, port: 80}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: web, namespace: $NS}
+spec:
+  parentRefs: [{name: web}]
+  hostnames: [$EG_HOST]
+  rules: [{backendRefs: [{name: web, port: 8080}]}]
+YAML
+fi
 # The probe: while /tmp/run exists, it sends an attack and a benign request
 # to the Ingress and an attack to the IngressRoute, through Traefik's
-# Service (no port-forward, which a Traefik restart would break), and logs
-# "uptime ingress-attack ingress-benign route-attack | dns/connect/total ..."
+# Service (no port-forward, which a Traefik restart would break), and an
+# attack and a benign request to the HTTPRoute through Envoy's Service
+# (/tmp/eg; none without Envoy Gateway), and logs
+# "uptime ingress-attack ingress-benign route-attack direct eg-attack eg-benign | dns/connect/total ..."
 # (HTTP codes, 000 without an answer; each request's curl times, in
 # seconds, 0 for a step it didn't finish). It runs as the pod's process: one started by
 # kubectl exec may die with the exec session.
@@ -220,9 +263,16 @@ while true; do
   if [ -e /tmp/run ]; then
     read -r svc </tmp/svc
     read -r pod </tmp/pod
+    eg=$(cat /tmp/eg 2>/dev/null)
     read -r up _ </proc/uptime
-    set -- $(c "$HOST" "$SQLI") $(c "$HOST" /products/42) $(c "$ROUTE_HOST" "$SQLI") $(c "$HOST" "$SQLI" "$pod")
-    echo "$up $1 $3 $5 $7 | $2 $4 $6 $8" >>/tmp/probe.log
+    if [ -n "$eg" ]; then
+      set -- $(c "$HOST" "$SQLI") $(c "$HOST" /products/42) $(c "$ROUTE_HOST" "$SQLI") $(c "$HOST" "$SQLI" "$pod") \
+        $(c "$EG_HOST" "$SQLI" "$eg") $(c "$EG_HOST" /products/42 "$eg")
+    else
+      set -- $(c "$HOST" "$SQLI") $(c "$HOST" /products/42) $(c "$ROUTE_HOST" "$SQLI") $(c "$HOST" "$SQLI" "$pod") \
+        "403 0/0/0" "200 0/0/0"
+    fi
+    echo "$up $1 $3 $5 $7 $9 ${11} | $2 $4 $6 $8 ${10} ${12}" >>/tmp/probe.log
   fi
   sleep 0.2
 done
@@ -241,6 +291,7 @@ spec:
       env:
         - {name: HOST, value: "$HOST"}
         - {name: ROUTE_HOST, value: "$ROUTE_HOST"}
+        - {name: EG_HOST, value: "$EG_HOST"}
         - {name: SQLI, value: "$SQLI"}
       volumeMounts: [{name: probe, mountPath: /probe}]
   volumes: [{name: probe, configMap: {name: probe}}]
@@ -262,9 +313,20 @@ traefik_pod() {
   port=$("${slices[@]}" -o jsonpath='{range .items[*].ports[?(@.name=="web")]}{.port}{"\n"}{end}' | head -1)
   if [[ -n $ip && -n $port ]]; then echo "$ip:$port"; fi
 }
-# One request, from the probe pod to Traefik's Service.
+# eg_ip: Envoy's Service's ClusterIP, for the Gateway (empty without
+# Envoy Gateway).
+eg_ip() {
+  if ! $eg; then return; fi
+  "${KUBECTL[@]}" -n "$EG_NS" get svc -l "gateway.envoyproxy.io/owning-gateway-name=web,gateway.envoyproxy.io/owning-gateway-namespace=$NS" \
+    -o jsonpath='{.items[0].spec.clusterIP}' 2>/dev/null || true
+}
+# One request, from the probe pod to Traefik's Service (or, for the
+# HTTPRoute's host, Envoy's).
 code() {
-  "${KUBECTL[@]}" -n "$NS" exec probe -- curl -s -o /dev/null -m 5 -w '%{http_code}' -H "Host: $1" "http://$(traefik_ip)$2" || true
+  local ip
+  ip=$(traefik_ip)
+  if [[ $1 == "$EG_HOST" ]]; then ip=$(eg_ip); fi
+  "${KUBECTL[@]}" -n "$NS" exec probe -- curl -s -o /dev/null -m 5 -w '%{http_code}' -H "Host: $1" "http://$ip$2" || true
 }
 status_is() { [[ $(code "$2" "$3") == "$1" ]]; }
 user_header() {
@@ -279,6 +341,7 @@ route_state() {
 }
 eventually "Traefik serves the Ingress" status_is 200 "$HOST" /
 eventually "Traefik serves the IngressRoute" status_is 200 "$ROUTE_HOST" /
+if $eg; then eventually "Envoy Gateway serves the HTTPRoute" status_is 200 "$EG_HOST" /; fi
 check "no policy yet: the attack passes" status_is 200 "$HOST" "$SQLI"
 users_routes=$(route_state)
 
@@ -289,13 +352,25 @@ traefik_engine_image() {
     sed -n 's/^|//p'
 }
 engine_image_is() { [[ $(traefik_engine_image | sort -u) == "$1" ]]; }
+# Envoy's pods' engine image, as engine_image_is: Envoy Gateway's pods get
+# the engine through the operator's EnvoyProxy, once a policy targets a
+# route of their Gateway.
+envoy_engine_image() {
+  "${KUBECTL[@]}" -n "$EG_NS" get pods -l "gateway.envoyproxy.io/owning-gateway-name=web,gateway.envoyproxy.io/owning-gateway-namespace=$NS" \
+    -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}|{.spec.initContainers[?(@.name=="inkwall-engine")].image}{"\n"}{end}' |
+    sed -n 's/^|//p'
+}
+envoy_engine_is() { ! $eg || [[ $(envoy_engine_image | sort -u) == "$1" ]]; }
 eventually "Traefik's pod has the $FROM_VERSION engine" engine_image_is "ghcr.io/inkwall-dev/inkwall-engine:$FROM_VERSION"
 "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
 apiVersion: waf.inkwall.dev/v1alpha1
 kind: WAFPolicy
 metadata: {name: web, namespace: $NS}
 spec:
-  targetRefs: [{kind: Ingress, name: web}, {group: traefik.io, kind: IngressRoute, name: web}]
+  targetRefs:
+    - {kind: Ingress, name: web}
+    - {group: traefik.io, kind: IngressRoute, name: web}
+$(if $eg; then echo "    - {group: gateway.networking.k8s.io, kind: HTTPRoute, name: web}"; fi)
   mode: Block
 YAML
 condition() {
@@ -323,22 +398,28 @@ eventually "the policy is Accepted, Programmed and Ready" accepted_programmed
 eventually "the Ingress and the IngressRoute are wired once, first, keeping the user's Middleware" wired_once
 eventually "the attack is blocked on the Ingress" status_is 403 "$HOST" "$SQLI"
 eventually "the attack is blocked on the IngressRoute" status_is 403 "$ROUTE_HOST" "$SQLI"
+if $eg; then
+  eventually "Envoy's pods have the $FROM_VERSION engine" envoy_engine_is "ghcr.io/inkwall-dev/inkwall-engine:$FROM_VERSION"
+  eventually "the attack is blocked on the HTTPRoute" status_is 403 "$EG_HOST" "$SQLI"
+  check "benign traffic passes on the HTTPRoute" status_is 200 "$EG_HOST" /products/42
+fi
 check "benign traffic passes" status_is 200 "$HOST" /products/42
 check "the user's Middleware applies" user_header "$HOST"
 wiring_before=$(wiring)
 
-# probe_start / probe_stop NAME MAX_GAP: start and stop the probe;
-# probe_stop checks what it saw.
+# probe_start / probe_stop NAME MAX_GAP [MAX_ENVOY_GAP]: start and stop
+# the probe; probe_stop checks what it saw, with MAX_ENVOY_GAP (MAX_GAP by
+# default) for the HTTPRoute.
 probe_start() {
   local ip pod
   ip=$(traefik_ip)
   [[ -n $ip ]] || { fail "probe: no ClusterIP for Service $TRAEFIK_NS/traefik-e2e"; return; }
   pod=$(traefik_pod)
   [[ -n $pod ]] || { fail "probe: no ready endpoint of Service $TRAEFIK_NS/traefik-e2e"; return; }
-  "${KUBECTL[@]}" -n "$NS" exec probe -- sh -c "echo $ip >/tmp/svc; echo $pod >/tmp/pod; rm -f /tmp/probe.log; touch /tmp/run"
+  "${KUBECTL[@]}" -n "$NS" exec probe -- sh -c "echo $ip >/tmp/svc; echo $pod >/tmp/pod; echo $(eg_ip) >/tmp/eg; rm -f /tmp/probe.log; touch /tmp/run"
 }
 probe_stop() {
-  local name=$1 max=$2 log summary
+  local name=$1 max=$2 max_eg=${3:-$2} log summary
   "${KUBECTL[@]}" -n "$NS" exec probe -- rm -f /tmp/run
   # A round in flight ends within its three 2s timeouts.
   sleep 7
@@ -349,7 +430,7 @@ probe_stop() {
   # connected while the one sent straight to Traefik's pod got its verdict
   # (403) is the cluster's miss (#348, see the probe): counted apart, not a
   # wrong answer; more than 3 of a kind fail the check all the same.
-  summary=$(awk -v max="$max" '
+  summary=$(awk -v max="$max" -v max_eg="$max_eg" '
     # missed(times, direct): no TCP connection to the Service within the
     # 2 s timeout, while Traefik answered directly.
     function missed(times, direct,   a) {
@@ -367,18 +448,23 @@ probe_stop() {
       if (i != 2 && code ~ /^2/) through[i]++
       if (start[i] == "") start[i] = t
     }
-    NF >= 10 {
-      verdict(1, $2, 403, $1, $7, $5); verdict(2, $3, 200, $1, $8, $5); verdict(3, $4, 403, $1, $9, $5); last = $1
+    # uptime, six codes (ingress-attack ingress-benign route-attack direct
+    # eg-attack eg-benign), "|", their times. Envoy has no direct request:
+    # its misses are gaps.
+    NF >= 14 {
+      verdict(1, $2, 403, $1, $9, $5); verdict(2, $3, 200, $1, $10, $5); verdict(3, $4, 403, $1, $11, $5)
+      verdict(4, $6, 403, $1, $13, 0); verdict(5, $7, 200, $1, $14, 0); last = $1
     }
     END {
-      split("ingress-attack ingress-benign route-attack", names, " ")
-      for (i = 1; i <= 3; i++) {
+      split("ingress-attack ingress-benign route-attack httproute-attack httproute-benign", names, " ")
+      for (i = 1; i <= 5; i++) {
+        limit = i >= 4 ? max_eg : max
         if (start[i] != "") { g = last - start[i] + 0.2; if (g > gap[i]) gap[i] = g }
         printf "%s: %d requests, %d without the right verdict, %d attacks through, longest gap %.1fs, %d never connected to the Service (Traefik answered directly)\n",
           names[i], n[i], bad[i], through[i], gap[i], miss[i]
         if (through[i] > 0) fail = 1
         if (miss[i] > 3) fail = 1
-        if (bad[i] > 0 && gap[i] > max + 0.0001) fail = 1
+        if (bad[i] > 0 && gap[i] > limit + 0.0001) fail = 1
         if (n[i] < 10) { print "too few requests: is the probe running?"; fail = 1 }
       }
       exit fail
@@ -386,16 +472,21 @@ probe_stop() {
   sed 's/^/      /' <<<"$summary"
   # The wrong rounds, even within the gap allowed, with each request's
   # dns/connect/total times.
-  grep -v '^[0-9.]* 403 200 403 ' <<<"$log" | head -20 | sed 's/^/        /' || true
+  grep -Ev '^[0-9.]* 403 200 403 [0-9]+ 403 200 ' <<<"$log" | head -20 | sed 's/^/        /' || true
   if [[ $rc == 0 ]]; then
-    ok "$name: no attack got through, no gap over ${max}s"
+    ok "$name: no attack got through, no gap over ${max}s (Envoy Gateway: ${max_eg}s)"
   else
-    fail "$name: an attack got through, a gap over ${max}s, or no probe traffic"
+    fail "$name: an attack got through, a gap over ${max}s (Envoy Gateway: ${max_eg}s), or no probe traffic"
     # The engine's and Traefik's logs of the last 2 minutes; Traefik's
     # access log has the requests that took 1 s or more.
     echo "      engine (in Traefik's pod) and Traefik, last 2 minutes:"
     "${KUBECTL[@]}" -n "$TRAEFIK_NS" logs deployment/traefik-e2e --all-containers --prefix --since=2m 2>&1 |
       tail -80 | sed 's/^/      /' || true
+    if $eg; then
+      echo "      engine and Envoy (in Envoy's pods), last 2 minutes:"
+      "${KUBECTL[@]}" -n "$EG_NS" logs -l "gateway.envoyproxy.io/owning-gateway-name=web" --all-containers --prefix --since=2m 2>&1 |
+        tail -80 | sed 's/^/      /' || true
+    fi
   fi
 }
 
@@ -405,7 +496,7 @@ probe_stop() {
 # guide says (not a default proxy namespace).
 upgrade() {
   "${HELM[@]}" upgrade inkwall "$CHART" --namespace "$OPERATOR_NS" \
-    --set "injection.proxyNamespaces={$TRAEFIK_NS}" \
+    --set "injection.proxyNamespaces={$PROXY_NAMESPACES}" \
     --set operator.image.repository="${OPERATOR_IMAGE%:*}" \
     --set operator.image.tag="${OPERATOR_IMAGE##*:}" \
     --set operator.image.pullPolicy=Never \
@@ -424,7 +515,7 @@ sleep 5
 # engine) instead of leaving its routes uninspected. --reset-values drops
 # the value whether or not the old release set it.
 if out=$("${HELM[@]}" upgrade inkwall "$CHART" --namespace "$OPERATOR_NS" --reset-values 2>&1) ||
-  ! grep "pods with the Inkwall engine run in namespace(s) $TRAEFIK_NS," <<<"$out" >/dev/null; then
+  ! grep "pods with the Inkwall engine run in namespace(s) .*$TRAEFIK_NS" <<<"$out" >/dev/null; then
   fail "helm upgrade without $TRAEFIK_NS in injection.proxyNamespaces: want it refused, got: $out"
 else
   ok "helm upgrade refused while Traefik's namespace isn't a proxy namespace"
@@ -441,10 +532,13 @@ operator_image_is() {
     -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}|{.spec.containers[0].image}{"\n"}{end}' | sed -n 's/^|//p' | sort -u) == "$1" ]]
 }
 eventually "every operator replica runs the new image" operator_image_is "$OPERATOR_IMAGE"
+# The new operator puts the new engine in Envoy's pods: Envoy Gateway
+# rolls them.
+if $eg; then eventually "Envoy's pods have the new engine" envoy_engine_is "$ENGINE_IMAGE"; fi
 # The new leader reconciles everything at start; give it time to touch
 # what it would, with the probe still running.
 sleep 30
-probe_stop "through the upgrade" "$MAX_UPGRADE_GAP"
+probe_stop "through the upgrade" "$MAX_UPGRADE_GAP" "$MAX_ENVOY_GAP"
 
 # Each CRD is the chart's: the same spec as files/crds (a server-side diff,
 # empty), labelled with the new chart.
@@ -458,15 +552,15 @@ crds_new() {
   done
 }
 check "the CRDs are the new chart's ($chart_label)" crds_new
-# rbac.integrations auto: the cluster serves Traefik's API group, not Envoy
-# Gateway's or Istio's (either API).
+# rbac.integrations auto: the cluster serves Traefik's API group, and
+# Envoy Gateway's when it is installed, not Istio's (either API).
 integration_roles() {
   "${KUBECTL[@]}" get clusterrole inkwall-operator-traefik &&
-    ! "${KUBECTL[@]}" get clusterrole inkwall-operator-envoy-gateway &&
+    if $eg; then "${KUBECTL[@]}" get clusterrole inkwall-operator-envoy-gateway; else ! "${KUBECTL[@]}" get clusterrole inkwall-operator-envoy-gateway; fi &&
     ! "${KUBECTL[@]}" get clusterrole inkwall-operator-istio &&
     ! "${KUBECTL[@]}" get clusterrole inkwall-operator-istio-ingress
 }
-check "only Traefik's integration role is granted (auto)" integration_roles
+check "only the installed proxies' integration roles are granted (auto)" integration_roles
 same_wiring() { [[ $(wiring) == "$wiring_before" ]]; }
 check "the wiring is unchanged, not duplicated" same_wiring
 # The new operator may add settings to its Middleware (it rewrites it to its
@@ -480,6 +574,7 @@ eventually "Inkwall's Middleware calls the engine, with trustForwardHeader off a
 eventually "the policy is still Accepted, Programmed and Ready" accepted_programmed
 check "the attack is blocked on the Ingress" status_is 403 "$HOST" "$SQLI"
 check "the attack is blocked on the IngressRoute" status_is 403 "$ROUTE_HOST" "$SQLI"
+if $eg; then check "the attack is blocked on the HTTPRoute" status_is 403 "$EG_HOST" "$SQLI"; fi
 check "benign traffic passes" status_is 200 "$HOST" /products/42
 
 # Traefik restarted: its new pod gets the new engine from the new operator.
@@ -508,8 +603,9 @@ else
 fi
 "${KUBECTL[@]}" -n "$OPERATOR_NS" rollout status deployment/inkwall-operator --timeout=180s >/dev/null
 eventually "every operator replica runs the $FROM_VERSION image" operator_image_is "ghcr.io/inkwall-dev/inkwall-operator:$FROM_VERSION"
+if $eg; then eventually "Envoy's pods have the $FROM_VERSION engine again" envoy_engine_is "ghcr.io/inkwall-dev/inkwall-engine:$FROM_VERSION"; fi
 sleep 30
-probe_stop "through the rollback" "$MAX_UPGRADE_GAP"
+probe_stop "through the rollback" "$MAX_UPGRADE_GAP" "$MAX_ENVOY_GAP"
 release_chart_is() { "${HELM[@]}" -n "$OPERATOR_NS" list --filter '^inkwall$' -o json | grep -F "\"chart\":\"inkwall-$1\"" >/dev/null; }
 check "the release is back on chart $FROM_VERSION" release_chart_is "$FROM_VERSION"
 # 0.3.0 added a ClusterRole per integration: rolling back to an older
@@ -525,6 +621,7 @@ check "the wiring is unchanged, not duplicated" same_wiring
 eventually "the policy is Accepted, Programmed and Ready" accepted_programmed
 check "the attack is blocked on the Ingress" status_is 403 "$HOST" "$SQLI"
 check "the attack is blocked on the IngressRoute" status_is 403 "$ROUTE_HOST" "$SQLI"
+if $eg; then check "the attack is blocked on the HTTPRoute" status_is 403 "$EG_HOST" "$SQLI"; fi
 check "benign traffic passes" status_is 200 "$HOST" /products/42
 probe_start
 sleep 5
@@ -549,6 +646,10 @@ eventually "every operator replica runs the new image" operator_image_is "$OPERA
 eventually "the policy is Accepted, Programmed and Ready" accepted_programmed
 check "the wiring is unchanged, not duplicated" same_wiring
 check "the attack is blocked on the Ingress" status_is 403 "$HOST" "$SQLI"
+if $eg; then
+  eventually "Envoy's pods have the new engine" envoy_engine_is "$ENGINE_IMAGE"
+  eventually "the attack is blocked on the HTTPRoute" status_is 403 "$EG_HOST" "$SQLI"
+fi
 
 echo "== helm uninstall"
 if "${HELM[@]}" uninstall inkwall --namespace "$OPERATOR_NS" --wait --timeout 5m >/dev/null; then
@@ -566,6 +667,10 @@ check "Inkwall's Middleware is deleted" no_middleware
 eventually "a new Traefik pod has no engine" engine_image_is ""
 eventually "the Ingress is served (uninspected)" status_is 200 "$HOST" "$SQLI"
 eventually "so is the IngressRoute" status_is 200 "$ROUTE_HOST" "$SQLI"
+if $eg; then
+  eventually "Envoy's pods no longer have the engine" envoy_engine_is ""
+  eventually "the HTTPRoute is served (uninspected)" status_is 200 "$EG_HOST" "$SQLI"
+fi
 eventually "the user's Middleware still applies" user_header "$HOST"
 
 if [[ $failures -gt 0 ]]; then

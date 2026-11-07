@@ -83,6 +83,8 @@ from the operator's generated manifests. Don't edit `files/` by hand.
 | `controlPlane.eventsBufferMiB` | `64` | Each replica's buffer of security events while the control plane is unreachable (an [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir)); when it is full, the oldest events are dropped and counted |
 | `rbac.integrations.traefik`, `envoyGateway`, `istio`, `istioIngress`, `haproxy` | `true`, `true`, `true`, `true`, `true` | Grant each integration's `ClusterRole`: `true`, `auto` (when the cluster serves the proxy's API group) or `false`. See [integration permissions](#integration-permissions) |
 | `uninstall.unwire` | `true` | On `helm uninstall`, unwire the routes first (a pre-delete hook), so they keep working, and remove the operator's [finalizer](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/) from the `WAFPolicy` objects |
+| `metrics.serviceMonitor.enabled`, `podMonitor.enabled`, `prometheusRule.enabled`, `dashboard.enabled` | `false` | The monitoring kit: a ServiceMonitor for the operator, a PodMonitor for the engines, the alerts and a Grafana dashboard ConfigMap. See [Monitoring](../../../docs/monitoring.md) |
+| `metrics.forceMonitoringObjects` | `false` | Render the ServiceMonitor, PodMonitor and PrometheusRule even when the cluster doesn't serve `monitoring.coreos.com/v1` (for `helm template`) |
 | `serviceAccount.name`, `annotations` | the operator's name (`inkwall-operator`), `{}` | |
 | `crds.install` | `true` | |
 | `distribution.port` | `9445` | The port engines connect to |
@@ -366,7 +368,8 @@ wiring yourself:
    as the `deployment` key (or remove the engine's entries) and remove that label and annotation;
    in each Gateway annotated `waf.inkwall.dev/configmap`, remove `spec.infrastructure.parametersRef`
    and the annotation, then delete the operator's ConfigMaps (`inkwall-waf-<gateway>`). That
-   label also covers the `inkwall-istio-ingress` `EnvoyFilter` objects of Istio's ingress gateways.
+   label also covers the `inkwall-istio-ingress` and `inkwall-istio-ingress-<00 to 31>`
+   `EnvoyFilter` objects of Istio's ingress gateways.
 3. Remove the finalizer from the policies, or they can't be deleted:
 
    ```sh

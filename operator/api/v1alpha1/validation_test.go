@@ -265,6 +265,9 @@ func TestInkwallConfigValidation(t *testing.T) {
 		{name: "empty redacted argument", doc: inkwallConfig("default", "  events: {redact: {arguments: [\"\"]}}\n"), wantErr: "spec.events.redact.arguments[0]"},
 		{name: "redacted argument pattern listed twice", doc: inkwallConfig("default", "  events: {redact: {arguments: [email, email]}}\n"), wantErr: "Duplicate value"},
 		{name: "selector by expression", doc: inkwallConfig("default", "  integrations: [{controller: traefik, selector: {matchExpressions: [{key: app, operator: In, values: [edge]}]}}]\n")},
+		{name: "client IP", doc: inkwallConfig("default", "  engine: {clientIP: {trustedProxies: [10.0.0.0/8, \"2001:db8::/32\", 192.0.2.1], trustedHops: 1}}\n")},
+		{name: "client IP hops over 10", doc: inkwallConfig("default", "  engine: {clientIP: {trustedHops: 11}}\n"), wantErr: "should be less than or equal to 10"},
+		{name: "client IP not a CIDR", doc: inkwallConfig("default", "  engine: {clientIP: {trustedProxies: [lb.example.com]}}\n"), wantErr: "spec.engine.clientIP.trustedProxies[0]"},
 	})
 }
 

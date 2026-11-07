@@ -37,6 +37,7 @@ The samples in [`examples/haproxy`](../examples/haproxy) are the files this guid
 
 ## With the operator (HAProxy Kubernetes Ingress Controller)
 
+<!-- versions: HAPROXY_CHART_VERSION -->
 The operator protects the Ingresses of the [HAProxy Kubernetes Ingress Controller](https://www.haproxy.com/documentation/kubernetes-ingress/) (`haproxytech/kubernetes-ingress`,
 3.1 or later: its HAProxy must be 3.1 or later; tested with 3.2.19, chart 1.54.4), installed with
 nothing about Inkwall. Not [HAProxy Ingress](https://haproxy-ingress.github.io/) (`jcmoraisjr/haproxy-ingress`), another controller.
@@ -148,8 +149,9 @@ controller, then delete it.
 
 ## Prerequisites
 
+<!-- versions: HAPROXY_VERSION -->
 - HAProxy 3.1 or later, whose SPOE speaks SPOP 2.0 through a `mode spop` backend. The samples are
-  tested with HAProxy 3.2 (`haproxy:3.2`).
+  tested with HAProxy 3.2.26 (`haproxy:3.2.26`).
 - `inkwall-engine`, from the [releases page](https://github.com/inkwall-dev/inkwall/releases), or the image
   `ghcr.io/inkwall-dev/inkwall-engine`.
 
@@ -313,6 +315,21 @@ backend inkwall-engine
 Check a changed configuration with `haproxy -c -f haproxy.cfg`. The order of the `http-request`
 rules matters: the fail-closed rule first, then the gRPC answer, then a rule per status. Put your
 own `http-request` rules after them, so a denied request goes no further.
+
+`deny_status` takes a fixed status, so the configuration has a rule for each status the engine
+denies with, and each carries the request ID in `x-request-id`:
+
+| `txn.inkwall.status` | Why | HAProxy answers |
+|---|---|---|
+| 400 | A request the engine can't read (a malformed path, an invalid header) | 400 |
+| 403 | An attack | 403 |
+| 413 | A body over the inspected limit (`--oversize-body deny`) | 413 |
+| 503 | The engine couldn't inspect the request (timeout, overload, error) and fails closed | 503 |
+| any other (a rule of your own with `deny,status:418`, say) | | 403 |
+
+The fail-closed rule's 503 has no request ID: the engine never saw the request. The engine doesn't
+write the body of HAProxy's denials, so `--json-denials` doesn't apply here: HAProxy answers with
+its own error page.
 
 ### Block mode and detect mode
 

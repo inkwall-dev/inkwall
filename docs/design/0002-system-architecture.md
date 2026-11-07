@@ -506,7 +506,17 @@ route, whatever Envoy Gateway allows.
 frames, holds a message until it is inspected, and in `Block` mode closes the connection with 1008
 ([0006 §6](0006-adapter-protocols.md#6-reverse-proxy-standalone-mode)). Routes wired through
 ext_proc (Envoy Gateway, raw Envoy) and Traefik inspect the handshake only, and no `WAFPolicy`
-field asks for message inspection, so nothing claims it there. The options weighed:
+field asks for message inspection, so nothing claims it there.
+
+**Built (#363):** a message is evaluated in its own scope: a `GET` of the handshake's path (for
+exclusions and path rules) with the handshake's request ID and client IP, fixed clean `Accept`
+and `User-Agent` headers, and the message as arguments. The handshake's query arguments and
+headers were inspected with it and aren't evaluated again, so its score doesn't add to every
+message's, and each message skips the header rules' work (`BenchmarkWebSocketMessage`: about 40%
+less time and 35% fewer allocations). A SecLang rule on headers or query arguments sees none with
+a message. Messages are counted apart from requests (`inkwall_websocket_messages_total`, #356).
+
+The options weighed:
 
 1. **The engine's reverse proxy:** chosen. It works for the standalone proxy, with its own flags,
    and is the reference for the others. On Envoy Gateway it would have to be in the request path,
@@ -605,9 +615,9 @@ controller `istio.io/gateway-controller`), with `ext_proc` through an `EnvoyFilt
   restore that mount if Istio's own injector rewrites the container. Pods that ran before get the
   engine when restarted (`PendingRestart`), and keep it after unwiring until restarted.
 - **Wiring.** An Istio Gateway selects pods in any namespace, and several Gateways may select the
-  same pods; Envoy rejects two HTTP filters of one name. So the `EnvoyFilter` is per namespace of
-  gateway pods, `inkwall-istio-ingress`, with the integration's labels as `workloadSelector`, and
-  one ext_proc filter per protected VirtualService (`inkwall.ext_proc.vs.<namespace>.<name>`),
+  same pods; Envoy rejects two HTTP filters of one name. So the `EnvoyFilter` objects are per
+  namespace of gateway pods, `inkwall-istio-ingress` (the cluster) and 32 shards (#424), with the
+  integration's labels as `workloadSelector`, and one ext_proc filter per protected VirtualService (`inkwall.ext_proc.vs.<namespace>.<name>`),
   turned on by `typed_per_filter_config` on its Envoy routes, with the same settings as for
   HTTPRoutes. Istio names those routes after the http route's `name` (then `.` and a named match's
   `name`; checked in Istio 1.31.3's `route.go` and on kind): an unnamed http route can't be selected
@@ -937,6 +947,20 @@ A wrong client IP makes rate limits and IP lists worse than none. The engine tak
 Behind a load balancer, the proxy must learn the client address first: through the PROXY protocol
 or `externalTrafficPolicy: Local` ([§6.3](#63-traefik)).
 
+**Built (#364):** behind an HTTP load balancer, the InkwallConfig's `spec.engine.clientIP` lists
+`trustedProxies` (CIDRs) and `trustedHops` for the injected engines, which always trust the loopback
+as well. The walk skips the proxy's own entries, then `trustedHops` entries whatever their address,
+then trusted CIDRs. Entries may carry a port. `trustedHops` applies only behind a trusted peer, so
+an untrusted peer stays the client, and the webhook rejects a prefix the engine would refuse and
+warns of one that trusts every address.
+
+The engine can also read RFC 7239 `Forwarded` (`--client-ip-header=forwarded`), but the
+InkwallConfig doesn't offer it. Envoy and Istio's Envoy append their TCP peer to `X-Forwarded-For`,
+never to `Forwarded`. In `Forwarded` the rightmost entry would be one the client may have written
+itself, with nothing appended by the proxy beside the engine to anchor the walk, so trusting it
+would let clients choose their address. It is for a standalone engine behind a proxy that sets or
+replaces the header.
+
 ### 8.3 Data privacy
 
 Bodies never leave the engine. Events carry only a redacted snippet of at most 64 bytes. Headers
@@ -1034,8 +1058,16 @@ Target:
   `_operator_events_buffer_errors_total`, `_operator_request_stats_dropped_total{reason}`,
   `_operator_state_engines_left_out`.
 
+- The monitoring kit (#381, [Monitoring](../monitoring.md)): the chart's ServiceMonitor (operator),
+  PodMonitor (engines, by their `inkwall-admin` port in the proxy namespaces), PrometheusRule
+  (alerts with runbooks, unit-tested with `promtool`) and Grafana dashboard, all opt-in. The
+  Prometheus Operator's objects render only when the cluster serves `monitoring.coreos.com/v1`,
+  so enabling them on a cluster without its CRDs doesn't fail the install. Docs check that
+  `docs/monitoring.md` lists every registered metric, and a test that the dashboard and alerts
+  use only registered ones.
+
 **Not yet:** a proxy-side adapter failure metric (see [§7.3](#73-engine-unavailable)),
-rate-limit metrics, tracing, the dashboard and alerts.
+rate-limit metrics, tracing.
 
 ### 8.6 Versioning and compatibility
 
@@ -1176,7 +1208,21 @@ One shared request corpus drives every level.
   `FuzzFromHAR`).
 
 Their seed corpora (`testdata/fuzz/`) run in every `make test`. `.github/workflows/fuzz.yaml` runs
-each target for 5 minutes nightly and uploads the failing inputs.
+each target for 5 minutes nightly and uploads the failing inputs, encrypted. Its matrix is every
+`func Fuzz` of the tests (`hack/ci/fuzz-targets.sh`, checked by `hack/ci`'s test), so a new target
+is fuzzed without editing the workflow, and each target keeps the corpus it grows in Go's fuzz
+cache from night to night (`actions/cache`).
+
+A nightly stress run (`.github/workflows/stress.yaml`, `make stress-test`, #395) looks for timing
+flakes: the adapters', agent's, pipeline's and operator's tests with the race detector, shuffled
+(the seed printed first), 10 times, on `GOMAXPROCS=2` with CPU hogs alongside. The SPOE, ext_proc
+and agent packages check every `make test` for goroutines a test leaves running
+([goleak](https://github.com/uber-go/goleak)).
+
+A scheduled workflow (fuzz, docs-links, stress) that fails opens one issue for it, labeled
+`ci-scheduled-failure` and pinned, or comments on the open one; the next passing run closes it
+(`hack/ci/report-scheduled.sh`, in a `report` job that alone may write issues). The fuzz issue
+names the failing targets only: a crash may be a vulnerability, reported privately.
 
 **Built (other levels):**
 

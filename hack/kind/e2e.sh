@@ -11,6 +11,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# The versions under test (#393).
+# shellcheck source=hack/versions.env
+. hack/versions.env
 
 CLUSTER=${KIND_CLUSTER:-inkwall}
 IMAGE=${IMAGE:-inkwall-engine:dev}
@@ -24,43 +27,10 @@ TRAEFIK_NS=traefik-e2e
 TRAEFIK_HOST=traefik.e2e.example.com
 ROUTE_HOST=route.e2e.example.com
 HTTPROUTE_HOST=httproute.e2e.example.com
-TRAEFIK_CHART_VERSION=41.6.1 # Traefik v3.7.13, as hack/kind/up.sh
-GATEWAY_API_VERSION=v1.7.0  # sigs.k8s.io/gateway-api in go.mod
 KUBECTL=(kubectl --context "kind-$CLUSTER")
 SQLI='/?id=1%27%20OR%20%271%27%3D%271'
 
-failures=0
-ok() { printf 'ok    %s\n' "$1"; }
-fail() {
-  printf 'FAIL  %s\n' "$1"
-  failures=$((failures + 1))
-}
-
-# check DESCRIPTION COMMAND...: one try.
-check() {
-  local what=$1
-  shift
-  if "$@" >/dev/null 2>&1; then
-    ok "$what"
-  else
-    fail "$what"
-  fi
-}
-
-# eventually DESCRIPTION COMMAND...: retries for up to 60s; a failure is
-# counted, and the test goes on.
-eventually() {
-  local what=$1
-  shift
-  for _ in $(seq 120); do
-    if "$@" >/dev/null 2>&1; then
-      ok "$what"
-      return 0
-    fi
-    sleep 0.5
-  done
-  fail "$what"
-}
+. hack/kind/lib.sh
 
 code() {
   curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" "http://127.0.0.1:$PORT$1" || true
@@ -233,7 +203,7 @@ metadata:
   namespace: $NS
   labels: {app.kubernetes.io/name: traefik${extra:+, $extra}}
 spec:
-  containers: [{name: traefik, image: traefik:v3.7.13}]
+  containers: [{name: traefik, image: traefik:$TRAEFIK_VERSION}]
 YAML
 }
 "${KUBECTL[@]}" -n "$OPERATOR_NS" scale deployment/inkwall-operator --replicas=0 >/dev/null
@@ -393,7 +363,7 @@ spec:
     spec:
       containers:
         - name: web
-          image: traefik/whoami:v1.10.3
+          image: traefik/whoami:$WHOAMI_VERSION
           # --verbose logs each request: the engine-down check looks for one.
           args: ["--port", "8080", "--verbose"]
 ---
@@ -1192,6 +1162,52 @@ eventually "the IngressRoute wired again" route_wired
 eventually "the HTTPRoute wired again" hroute_wired
 eventually "held again" held web
 eventually "blocking again" tstatus_is 403 "$SQLI"
+
+# The monitoring kit (#381): with the Prometheus Operator's CRDs (as
+# kube-prometheus-stack installs them; left installed), the chart creates
+# the ServiceMonitor, PodMonitor, PrometheusRule and dashboard, the API
+# server accepts them, and the endpoints they point at serve Inkwall's
+# metrics. No Prometheus runs here: the API server's proxy reads them.
+echo "== the monitoring kit"
+PROM_OPERATOR=v0.85.0
+for crd in servicemonitors podmonitors prometheusrules; do
+  "${KUBECTL[@]}" apply --server-side -f "https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/$PROM_OPERATOR/example/prometheus-operator-crd/monitoring.coreos.com_$crd.yaml" >/dev/null
+done
+"${KUBECTL[@]}" wait --for condition=Established --timeout=60s crd/servicemonitors.monitoring.coreos.com crd/podmonitors.monitoring.coreos.com crd/prometheusrules.monitoring.coreos.com >/dev/null
+monitoring_values() {
+  helm --kube-context "kind-$CLUSTER" upgrade inkwall "$CHART" --namespace "$OPERATOR_NS" --reuse-values --wait --timeout 5m \
+    --set "metrics.serviceMonitor.enabled=$1" --set "metrics.podMonitor.enabled=$1" \
+    --set "metrics.prometheusRule.enabled=$1" --set "metrics.dashboard.enabled=$1" >/dev/null
+}
+if monitoring_values true; then
+  ok "helm upgrade with the monitoring kit"
+else
+  fail "helm upgrade with the monitoring kit"
+fi
+monitors() {
+  "${KUBECTL[@]}" -n "$OPERATOR_NS" get servicemonitor/inkwall-operator podmonitor/inkwall-operator-engines \
+    prometheusrule/inkwall configmap/inkwall-operator-dashboard >/dev/null
+}
+check "the ServiceMonitor, PodMonitor, PrometheusRule and dashboard exist" monitors
+raw_metrics() { "${KUBECTL[@]}" get --raw "$1" 2>/dev/null; }
+operator_metrics() {
+  raw_metrics "/api/v1/namespaces/$OPERATOR_NS/services/inkwall-operator-metrics:8080/proxy/metrics" | grep -q '^inkwall_operator_bundle_version '
+}
+eventually "the operator's metrics Service serves its metrics" operator_metrics
+engine_metrics() {
+  local pod
+  pod=$("${KUBECTL[@]}" -n "$TRAEFIK_NS" get pods -l app.kubernetes.io/name=traefik --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+  raw_metrics "/api/v1/namespaces/$TRAEFIK_NS/pods/$pod:9480/proxy/metrics" | grep -q '^inkwall_bundle_applied_timestamp_seconds '
+}
+eventually "an engine's inkwall-admin port, the PodMonitor's, serves its metrics" engine_metrics
+no_monitors() {
+  [[ -z $("${KUBECTL[@]}" -n "$OPERATOR_NS" get servicemonitor,podmonitor,prometheusrule -o name) ]]
+}
+if monitoring_values false; then
+  check "turned off, the chart deletes them" no_monitors
+else
+  fail "helm upgrade without the monitoring kit"
+fi
 
 # Uninstall (#68): the operator unwires the routes before it goes, so a
 # Traefik pod started afterwards, without the engine, still serves them.

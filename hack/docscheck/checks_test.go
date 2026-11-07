@@ -251,3 +251,57 @@ func TestUnpinned(t *testing.T) {
 		t.Errorf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
+
+// Every metric the code registers is listed in the metrics doc (#381).
+func TestMetricsListed(t *testing.T) {
+	fsys := fstest.MapFS{
+		"docs/README.md":     file("# Docs\n[Monitoring](monitoring.md)\n"),
+		"docs/monitoring.md": file("# Monitoring\n| `inkwall_requests_total` | counter |\n"),
+		"pkg/telemetry/m.go": file(`package telemetry
+var a = prometheus.CounterOpts{Name: "inkwall_requests_total"}
+var b = prometheus.GaugeOpts{
+	Name:        "inkwall_rule_sets",
+}
+`),
+		"pkg/telemetry/m_test.go": file(`var c = prometheus.CounterOpts{Name: "inkwall_test_only_total"}`),
+		"hack/loadgen/main.go":    file(`var d = prometheus.CounterOpts{Name: "inkwall_loadgen_total"}`),
+		"operator/test/fake/x.go": file(`var e = prometheus.CounterOpts{Name: "inkwall_fake_total"}`),
+		"operator/internal/m.go":  file(`var f = prometheus.CounterOpts{Name: "inkwall_operator_engines"}`),
+		"operator/internal/m.txt": file(`Name: "inkwall_not_go"`),
+		"pkg/other/unrelated.go":  file(`var g = struct{ Name string }{Name: "not_a_metric"}`),
+	}
+	got := check(t, fsys, config{metricsDoc: "docs/monitoring.md"})
+	want := []string{
+		"docs/monitoring.md: metric inkwall_operator_engines (operator/internal/m.go) is not listed",
+		"docs/monitoring.md: metric inkwall_rule_sets (pkg/telemetry/m.go) is not listed",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+}
+
+// A paragraph after <!-- versions: KEY ... --> names each version (#393),
+// with or without its "v", so the docs' "tested with" lines follow
+// hack/versions.env.
+func TestVersions(t *testing.T) {
+	fsys := fstest.MapFS{
+		"hack/versions.env": file("# comment\nISTIO_VERSION=1.31.3\nENVOY_VERSION=v1.39.6\nGATEWAY_API_VERSION=v1.7.0\n"),
+		"README.md": file("# Inkwall\n" +
+			"<!-- versions: ISTIO_VERSION GATEWAY_API_VERSION -->\n" +
+			"Tested with Istio 1.31.3 and the\nGateway API v1.7.0.\n\n" +
+			"<!-- versions: ENVOY_VERSION -->\n" +
+			"Tested with Envoy 1.39.6.\n\n" +
+			"<!-- versions: ISTIO_VERSION -->\n" +
+			"Tested with Istio 1.30.0.\n\n" +
+			"<!-- versions: NOPE -->\n" +
+			"Anything.\n"),
+	}
+	got := check(t, fsys, config{versions: "hack/versions.env"})
+	want := []string{
+		"README.md:9: ISTIO_VERSION is 1.31.3 in hack/versions.env, but the paragraph doesn't say so",
+		"README.md:12: NOPE is not in hack/versions.env",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}

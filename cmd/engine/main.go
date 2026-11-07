@@ -146,17 +146,19 @@ type engineConfig struct {
 	// policies.
 	policyMetrics    bool
 	policyMetricsMax int
-	listen           string
-	adminListen      string
-	readTimeout      time.Duration
-	upstream         *url.URL
-	mode             pipeline.Mode
-	failureMode      pipeline.FailureMode
-	timeout          time.Duration
-	maxConcurrent    int
-	maxBodyBytes     int64
-	oversize         pipeline.OversizeAction
-	grpcMessages     bool
+	// jsonDenials: JSON denial bodies for clients that accept JSON.
+	jsonDenials   bool
+	listen        string
+	adminListen   string
+	readTimeout   time.Duration
+	upstream      *url.URL
+	mode          pipeline.Mode
+	failureMode   pipeline.FailureMode
+	timeout       time.Duration
+	maxConcurrent int
+	maxBodyBytes  int64
+	oversize      pipeline.OversizeAction
+	grpcMessages  bool
 	// responses: ext-proc only, the one adapter that sees responses.
 	responses      pipeline.ResponseConfig
 	maxArgs        int
@@ -164,7 +166,7 @@ type engineConfig struct {
 	threshold      int
 	rulesFile      string
 	rulesBeforeCRS string
-	trustedProxies []string
+	clientIP       clientip.Options
 	skipPaths      []string
 	routes         *router.Table
 	skipBodyPaths  []string
@@ -250,13 +252,18 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	rulesBeforeCRS := fs.String("rules-before-crs", "", "file with SecLang runtime exclusions (rules using ctl:ruleRemoveById and similar) and settings, loaded before CRS")
 	// The check API carries the client address resolved by the proxy.
 	trusted := new(string)
+	trustedHops := new(int)
+	clientIPHeader := new(string)
 	if command != cmdCheck {
-		trusted = fs.String("trusted-proxies", "", "comma-separated CIDRs whose X-Forwarded-For is trusted")
+		trusted = fs.String("trusted-proxies", "", "comma-separated CIDRs whose X-Forwarded-For (or Forwarded) is trusted")
+		trustedHops = fs.Int("trusted-hops", 0, fmt.Sprintf("forwarding header entries, from the right, that are proxies whatever their address (0-%d), for load balancers without fixed addresses; only behind a trusted peer", clientip.MaxTrustedHops))
+		clientIPHeader = fs.String("client-ip-header", "x-forwarded-for", "forwarding header the client IP is read from: x-forwarded-for or forwarded (RFC 7239); only for a peer that sets or replaces it, as clients can send either")
 	}
 	skipPaths := fs.String("skip-paths", "", "comma-separated paths never inspected, exact (/healthz) or prefix (/static/*); ambiguous paths are always inspected")
 	disableGroups := fs.String("disable-rule-groups", "", "comma-separated CRS attack families to remove when the application cannot be vulnerable to them: "+strings.Join(coraza.RuleGroupNames(), ", "))
 	logLevel := fs.String("log-level", "info", "log level: debug, info, warn or error (security events are logged at warn)")
 	eventLogRate := fs.Int("event-log-rate", 10, "security event log lines per second for each policy and rule, in bursts of as many; the rest are counted in inkwall_security_event_logs_suppressed_total, and still go to the operator (0 = no limit)")
+	jsonDenials := fs.Bool("json-denials", false, "answer a denied client that accepts application/json with a JSON body ({\"error\",\"status\",\"request_id\"}) instead of text (not spoe: HAProxy writes its denials)")
 	policyMetrics := fs.Bool("policy-metrics", false, "add inkwall_policy_requests_total, requests by policy (bundle mode); off by default for its cardinality")
 	policyMetricsMax := fs.Int("policy-metrics-max", telemetry.DefaultMaxPolicies, "with --policy-metrics: distinct policies counted; past them, requests count under policy=\"other\"")
 	pprof := fs.Bool("pprof", false, "serve /debug/pprof on the admin listener (exposes internals: keep that listener private)")
@@ -316,6 +323,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 		logLevel:         level,
 		eventLogRate:     *eventLogRate,
 		policyMetrics:    *policyMetrics,
+		jsonDenials:      *jsonDenials,
 		policyMetricsMax: *policyMetricsMax,
 		listen:           *listen,
 		adminListen:      *adminListen,
@@ -426,7 +434,10 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 			return cfg, fmt.Errorf("--oversize-response must be auto, allow or deny, got %q", *oversizeResponse)
 		}
 	}
-	cfg.trustedProxies = splitList(*trusted)
+	cfg.clientIP = clientip.Options{TrustedProxies: splitList(*trusted), TrustedHops: *trustedHops, Header: *clientIPHeader}
+	if _, err := clientip.New(cfg.clientIP); err != nil {
+		return cfg, err
+	}
 	cfg.skipPaths = splitList(*skipPaths)
 	cfg.skipBodyPaths = splitList(*skipBodyPaths)
 	cfg.pprof = *pprof
@@ -478,7 +489,7 @@ func splitList(s string) []string {
 }
 
 func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
-	resolver, err := clientip.NewResolver(cfg.trustedProxies)
+	resolver, err := clientip.New(cfg.clientIP)
 	if err != nil {
 		return err
 	}
@@ -528,7 +539,7 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 	)
 	switch cfg.command {
 	case cmdExtProc:
-		ep, err = extproc.New(p, extproc.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics})
+		ep, err = extproc.New(p, extproc.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics, JSONDenials: cfg.jsonDenials})
 	case cmdSPOE:
 		sc := spoe.Config{MaxBodyBytes: maxBody, ClientIP: resolver, ReadTimeout: cfg.readTimeout, Logger: logger, Events: rec, Metrics: metrics}
 		if h, ok := p.(*policy.Holder); ok {
@@ -539,13 +550,13 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 		agentSrv, err = spoe.New(p, sc)
 	case cmdForwardAuth:
 		handler, err = forwardauth.New(p,
-			forwardauth.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics},
+			forwardauth.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics, JSONDenials: cfg.jsonDenials},
 		)
 	case cmdCheck:
 		handler, err = httpcheck.New(p, httpcheck.Config{MaxBodyBytes: maxBody, Logger: logger, Events: rec, Metrics: metrics})
 	default:
 		handler, err = proxy.New(p,
-			proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics,
+			proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics, JSONDenials: cfg.jsonDenials,
 				WebSocketMessages: cfg.webSocketMessages},
 		)
 	}
