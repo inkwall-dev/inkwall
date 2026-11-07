@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 )
 
@@ -348,5 +349,82 @@ func TestEnforcedOutdatedNewestField(t *testing.T) {
 	c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
 	if c == nil || c.Reason != ReasonEnginesOutdated || !strings.Contains(c.Message, "spec.ipLists") || !strings.Contains(c.Message, "0.5.0 or later") {
 		t.Errorf("a 0.4.1 engine and a policy with webSocket and ipLists: Enforced %+v, want EnginesOutdated naming spec.ipLists", c)
+	}
+}
+
+// The InkwallConfig's status counts the engines (#375), and 1,000 engines
+// connecting one per report don't rewrite it more than once per
+// ConfigEvery; the last count is written once the engines settle.
+func TestReporterConfigStatus(t *testing.T) {
+	ctx := context.Background()
+	s := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(s)
+	_ = wafv1alpha1.AddToScheme(s)
+	cfg := &wafv1alpha1.InkwallConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "lists"}}
+	p.Spec.IPLists = &wafv1alpha1.IPListsSpec{Deny: []wafv1alpha1.IPListName{"blocked"}}
+	report := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "inkwall-system", Name: reportNamePrefix + "a", Labels: map[string]string{EnginesLabel: "true"}}}
+	var writes int
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(cfg, p, report).
+		WithStatusSubresource(&wafv1alpha1.WAFPolicy{}, &wafv1alpha1.InkwallConfig{}).
+		WithInterceptorFuncs(interceptor.Funcs{SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if _, ok := obj.(*wafv1alpha1.InkwallConfig); ok {
+				writes++
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		}}).Build()
+	now := time.Unix(1_800_000_000, 0)
+	store := NewStore()
+	store.Set(&bundlev1.SignedBundle{}, 2)
+	r := &Reporter{Client: c, Reader: c, Namespace: "inkwall-system", Stale: time.Minute, Store: store, Now: func() time.Time { return now }}
+
+	var engines []Engine
+	report.Data = map[string]string{}
+	set := func() {
+		t.Helper()
+		data, _ := json.Marshal(engines)
+		report.Data = map[string]string{enginesKey: string(data), updatedAtKey: time.Now().UTC().Format(time.RFC3339Nano)}
+		if err := c.Update(ctx, report); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.report(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 1,000 engines, one more every 100 ms: 100 s.
+	for i := range 1000 {
+		// A quarter each: current, rejecting bundle 2, behind, and current
+		// but a release too old for the policy's IP lists.
+		e := Engine{ID: fmt.Sprintf("e%d", i), EngineVersion: "0.5.0", Applied: 2}
+		switch i % 4 {
+		case 1:
+			e.Applied, e.Rejected = 1, 2
+		case 2:
+			e.Applied = 1
+		case 3:
+			e.EngineVersion = "0.4.1"
+		}
+		engines = append(engines, e)
+		set()
+		now = now.Add(100 * time.Millisecond)
+	}
+	if most := int(100*time.Second/DefaultConfigEvery) + 1; writes > most {
+		t.Errorf("%d InkwallConfig status writes for 1,000 engines connecting over 100 s, want at most %d", writes, most)
+	}
+	now = now.Add(DefaultConfigEvery)
+	set()
+	if err := c.Get(ctx, client.ObjectKeyFromObject(cfg), cfg); err != nil {
+		t.Fatal(err)
+	}
+	want := wafv1alpha1.EngineCounts{Connected: 1000, Current: 500, Behind: 250, Rejected: 250, Outdated: 250}
+	if got := cfg.Status.Engines; got == nil || *got != want {
+		t.Errorf("engines %+v, want %+v", got, want)
+	}
+	// Unchanged: not written again.
+	before := writes
+	now = now.Add(DefaultConfigEvery)
+	set()
+	if writes != before {
+		t.Error("unchanged engine counts written again")
 	}
 }

@@ -9,12 +9,15 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -333,7 +336,7 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	if err != nil {
 		return reconcile.Result{}, err
 	}
-	if err := r.writeConfigStatus(ctx, cfg, published); err != nil {
+	if err := r.writeConfigStatus(ctx, cfg, published, keys); err != nil {
 		return reconcile.Result{}, err
 	}
 	if keys.Phase() != bundle.PhaseIdle {
@@ -624,8 +627,10 @@ func (r *BundleReconciler) writeTooLarge(ctx context.Context, res resolver.Resul
 }
 
 // writeConfigStatus reports on the InkwallConfig whether the published
-// bundle suspends inspection.
-func (r *BundleReconciler) writeConfigStatus(ctx context.Context, cfg *wafv1alpha1.InkwallConfig, published *bundlev1.Bundle) error {
+// bundle suspends inspection, the published bundle, and the signing key
+// and its rotation (#375).
+func (r *BundleReconciler) writeConfigStatus(ctx context.Context, cfg *wafv1alpha1.InkwallConfig, published *bundlev1.Bundle,
+	keys *bundle.Keyring) error {
 	if cfg == nil {
 		return nil
 	}
@@ -639,10 +644,76 @@ func (r *BundleReconciler) writeConfigStatus(ctx context.Context, cfg *wafv1alph
 		// The bundle with the switch flipped isn't published: too large.
 		cond.Message += fmt.Sprintf("; spec.suspend is %t, but its bundle couldn't be published (see the operator's log)", cfg.Spec.Suspend)
 	}
+	var bs *wafv1alpha1.BundleStatus
+	if v := published.GetVersion(); published != nil && v <= math.MaxInt64 {
+		bs = &wafv1alpha1.BundleStatus{
+			Version:         int64(v),
+			CompressedBytes: int64(r.current.Size()),
+			LimitBytes:      bundle.MaxCompressedBytes,
+		}
+	}
+	key, rotation := signingKeyStatus(keys, r.lastWait, cfg.Generation)
 	return r.updateStatus(ctx, cfg, func(o client.Object) bool {
 		c := o.(*wafv1alpha1.InkwallConfig)
-		return meta.SetStatusCondition(&c.Status.Conditions, cond)
+		changed := meta.SetStatusCondition(&c.Status.Conditions, cond)
+		if meta.SetStatusCondition(&c.Status.Conditions, rotation) {
+			changed = true
+		}
+		if !apiequality.Semantic.DeepEqual(c.Status.Bundle, bs) {
+			c.Status.Bundle, changed = bs, true
+		}
+		if !apiequality.Semantic.DeepEqual(c.Status.SigningKey, key) {
+			c.Status.SigningKey, changed = key, true
+		}
+		return changed
 	})
+}
+
+// Reasons of the InkwallConfig's SigningKeyRotation condition: the phase.
+const (
+	ReasonRotationIdle       = "Idle"
+	ReasonRotationPublishing = "Publishing"
+	ReasonRotationRetiring   = "Retiring"
+)
+
+// signingKeyStatus describes the keyring and what its rotation waits for.
+func signingKeyStatus(k *bundle.Keyring, waiting string, generation int64) (*wafv1alpha1.SigningKeyStatus, metav1.Condition) {
+	st := &wafv1alpha1.SigningKeyStatus{ActiveKeyID: k.Active.KeyID(), Phase: wafv1alpha1.SigningKeyIdle}
+	cond := metav1.Condition{Type: wafv1alpha1.ConditionSigningKeyRotation, Status: metav1.ConditionFalse,
+		Reason: ReasonRotationIdle, ObservedGeneration: generation}
+	since := k.PhaseSince
+	switch k.Phase() {
+	case bundle.PhasePublishing:
+		st.Phase, cond.Status, cond.Reason = wafv1alpha1.SigningKeyPublishing, metav1.ConditionTrue, ReasonRotationPublishing
+		cond.Message = fmt.Sprintf("key %s is published to the engines; key %s still signs", k.Next.KeyID(), k.Active.KeyID())
+	case bundle.PhaseRetiring:
+		st.Phase, cond.Status, cond.Reason = wafv1alpha1.SigningKeyRetiring, metav1.ConditionTrue, ReasonRotationRetiring
+		cond.Message = fmt.Sprintf("key %s signs; the previous key %s stays trusted until every engine runs a bundle it signed",
+			k.Active.KeyID(), bundlekey.ID(k.Previous))
+	default:
+		since, waiting = k.ActiveSince, ""
+		cond.Message = fmt.Sprintf("no rotation in progress: key %s signs", k.Active.KeyID())
+	}
+	if !since.IsZero() {
+		t := metav1.NewTime(since.UTC().Truncate(time.Second))
+		st.Since = &t
+	}
+	if waiting != "" {
+		st.WaitingFor = truncate(waiting, 1024)
+		cond.Message += "; waiting: " + waiting
+	}
+	return st, cond
+}
+
+// truncate cuts s to at most n bytes, on a rune boundary.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 func (r *BundleReconciler) updateRuleSetStatus(ctx context.Context, obj client.Object, st resolver.Status) error {
