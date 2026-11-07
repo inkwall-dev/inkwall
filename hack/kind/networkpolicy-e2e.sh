@@ -143,27 +143,52 @@ else
   "${KUBECTL[@]}" -n "$PROXY_NS" logs proxy -c inkwall-engine --tail=20 || true
 fi
 
-# reach NAMESPACE PORT [PATH]: curl's exit status from a pod in NAMESPACE
-# to the operator's pod: 28 (timed out) when a policy drops it.
-operator_ip=$("${KUBECTL[@]}" -n "$NAMESPACE" get pods -l app.kubernetes.io/component=operator -o jsonpath='{.items[0].status.podIP}')
+# live_operator_ip: the address of a ready operator pod that isn't being
+# deleted. After the restart above, the old replicas can still be listed
+# (terminating) for a while: a request to one times out like one a policy
+# drops (#513).
+live_operator_ip() {
+  local ips
+  # Not | head -1: head exiting early would fail kubectl with SIGPIPE, and
+  # the script with it (pipefail).
+  # shellcheck disable=SC2016 # a Go template, not a shell expression
+  ips=$("${KUBECTL[@]}" -n "$NAMESPACE" get pods -l app.kubernetes.io/component=operator -o go-template='{{range .items}}{{$ip := .status.podIP}}{{if not .metadata.deletionTimestamp}}{{range .status.conditions}}{{if and (eq .type "Ready") (eq .status "True")}}{{$ip}}{{"\n"}}{{end}}{{end}}{{end}}{{end}}') || true
+  echo "${ips%%$'\n'*}"
+}
+# reach NAMESPACE IP PORT [PATH]: curl's exit status from a pod in NAMESPACE
+# to IP: 28 (timed out) when a policy drops it.
 reach() {
   local status=0
   "${KUBECTL[@]}" -n "$1" run "curl-$RANDOM" --rm -i --quiet --restart=Never --image "$CURL_IMAGE" --command -- \
-    curl -sk -o /dev/null --connect-timeout 5 "http://$operator_ip:$2${3:-/}" >/dev/null 2>&1 || status=$?
+    curl -sk -o /dev/null --connect-timeout 5 "http://$2:$3${4:-/}" >/dev/null 2>&1 || status=$?
   # kubectl run passes the container's exit status on.
   echo "$status"
 }
-if [[ $(reach "$MONITORING_NS" 8080 /metrics) == 0 ]]; then
+# The allowed scrape, retried for a while: kindnet programs the policies
+# and the new pods' addresses asynchronously. The address that answers is
+# the one the denials below are checked against, so a timeout there is the
+# policy, not a pod that went away.
+operator_ip="" status=""
+for _ in $(seq 12); do
+  operator_ip=$(live_operator_ip)
+  if [[ -n $operator_ip ]]; then
+    status=$(reach "$MONITORING_NS" "$operator_ip" 8080 /metrics)
+    [[ $status == 0 ]] && break
+  fi
+  sleep 5
+done
+if [[ $status == 0 ]]; then
   ok "Prometheus' namespace scrapes the metrics"
 else
-  fail "Prometheus' namespace can't scrape the metrics"
+  fail "Prometheus' namespace can't scrape the metrics (operator pod ${operator_ip:-none ready}, curl exit status ${status:-none})"
 fi
-if [[ $(reach "$OTHER_NS" 8080 /metrics) == 28 ]]; then
+# The denials, once each: a request that gets through fails the check.
+if [[ $(reach "$OTHER_NS" "$operator_ip" 8080 /metrics) == 28 ]]; then
   ok "another namespace can't reach the metrics"
 else
   fail "another namespace reaches the metrics"
 fi
-if [[ $(reach "$OTHER_NS" 9445) == 28 ]]; then
+if [[ $(reach "$OTHER_NS" "$operator_ip" 9445) == 28 ]]; then
   ok "a namespace that isn't a proxy namespace can't reach the distribution server"
 else
   fail "a namespace that isn't a proxy namespace reaches the distribution server"
