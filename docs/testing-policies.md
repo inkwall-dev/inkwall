@@ -11,6 +11,7 @@ on your machine or in CI, before they block real traffic.
 - [Test the cluster's bundle](#test-the-clusters-bundle)
 - [From a log line to an exclusion](#from-a-log-line-to-an-exclusion)
 - [Suggest exclusions from the events](#suggest-exclusions-from-the-events)
+- [Test suites](#test-suites)
 - [Run the tests in CI](#run-the-tests-in-ci)
 - [Checking it worked](#checking-it-worked)
 
@@ -171,6 +172,74 @@ inkwallctl tune --from-logs -o yaml --policy wafpolicy.yaml --rule-set wafrulese
 inkwallctl test --policy tuned.yaml --rule-set wafruleset.yaml --expect deny --request attacks.http
 ```
 
+## Test suites
+
+A suite keeps the requests and the verdicts they must get in one file: `inkwallctl test --suite`
+checks each case and exits 1 when one fails. Cases can also hold the upstream's response, to test
+the [response rules](design/0006-adapter-protocols.md#response-inspection-v040) (data leaks)
+offline. The format is **experimental**: it may change in a minor release.
+
+```yaml
+# Paths are relative to the suite file. policy, ruleSet, configMap and ingress take a path or a
+# list, as the flags of the same name; or bundle and bundleKey. Without any, the flags apply.
+policy: wafpolicy.yaml
+ingress: route.yaml
+cases:
+  - name: a login form passes
+    request: {method: POST, uri: /login, host: shop.example.com, body: "user=alice&password=b"}
+    expect: {action: allow}
+  - name: SQL injection is denied
+    request: {url: "http://shop.example.com/search?q=1' OR '1'='1"}
+    expect: {action: deny, status: 403, rules: [942100], policy: shop/web}
+  - name: every recorded attack is denied
+    request: {file: attacks.http}
+    expect: {action: deny}
+  - name: an SQL error page is not leaked
+    request: {uri: "/item?id=7", host: shop.example.com}
+    response:
+      status: 500
+      headers: {Content-Type: text/html}
+      body: "You have an error in your SQL syntax; check the manual"
+    expect: {action: deny, phase: response}
+```
+
+```console
+$ inkwallctl test --suite suite.yaml --junit results.xml
+ok    a login form passes
+      request   allow      POST /login  policy=shop/web  904µs
+...
+ok    an SQL error page is not leaked
+      request   allow      GET /item?id=7  policy=shop/web  287µs
+      response  deny  403  GET /item?id=7  policy=shop/web  reason=rule  rules=951230,959100  interrupting=959100  matches=951230@RESPONSE_BODY,959100@TX:blocking_outbound_anomaly_score  score=5  290µs
+4 of 4 case(s) passed
+```
+
+- **`request`**: inline, a `url`, or a `uri` with a `host` (default `localhost`), with `method`
+  (default `GET`, or `POST` with a `body`), `headers` and `body` (a form by default, as
+  `curl -d`); or a `file` of raw HTTP requests (a `.har` file is read as HAR), whose every request
+  must meet the expectation. `clientIP` sets the client IP (default `--client-ip`, or 127.0.0.1).
+- **`response`**: `status` (default 200), `headers` and `body`. The response is inspected
+  in-process, as the engine does after a request it let through: its body only when the
+  `Content-Type` is one the rules read (text, HTML, XML, JSON), up to the policy's
+  `responses.maxBytes`. With a policy, only if it sets `spec.responses.inspect`; with the flags,
+  as the engine with `--inspect-responses`. A denied request's response isn't inspected.
+  `--engine` can't check responses: the check API has no response.
+- **`expect`**: any of `action` (`allow`, `deny` or `log`), `status`, `rules` (each must match),
+  `exactRules` (exactly these match), `notRules` (none of these matches), `policy`
+  (`namespace/name`) and `phase` (`request` or `response`). The rules are the request's and the
+  response's. The verdict is the response's when it was inspected and isn't `allow` while the
+  request's is not, else the request's.
+
+A failing case says what was expected and what the verdict was:
+
+```console
+FAIL  an SQL error page is not leaked: action allow, want deny; phase request, want response (the response wasn't inspected: with --policy or --bundle, the policy must set spec.responses.inspect)
+```
+
+`--junit FILE` writes the results as [JUnit XML](https://github.com/windyroad/JUnit-Schema), which
+CI systems show as test reports: a test case per case, a failure with the expectation and the
+actual verdicts. [`examples/tests/suite.yaml`](../examples/tests/suite.yaml) is a complete suite.
+
 ## Run the tests in CI
 
 Keep sample attacks and legitimate traffic next to your policies, and fail the build on a wrong
@@ -182,7 +251,14 @@ verdict with `--expect allow` or `--expect deny`:
     inkwallctl test --policy k8s/waf/ --expect allow --har test/waf/legitimate.har
 ```
 
+Or keep the cases and their expectations in a [suite](#test-suites), and hand the JUnit report to
+your CI's test reporter:
+
+```yaml
+- run: inkwallctl test --suite test/waf/suite.yaml --junit waf-results.xml
+```
+
 ## Checking it worked
 
-`inkwallctl test` exits 0 when every request gets the `--expect` verdict, 1 on a wrong verdict and
-2 on an error. It changes nothing in the cluster, so there is nothing to undo.
+`inkwallctl test` exits 0 when every request gets the `--expect` verdict (or every case of the
+`--suite` passes), 1 on a wrong verdict and 2 on an error. It changes nothing in the cluster, so there is nothing to undo.

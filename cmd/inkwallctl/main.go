@@ -8,6 +8,7 @@
 //	inkwallctl test [flags] URL
 //	inkwallctl test [flags] --request FILE
 //	inkwallctl test [flags] --har FILE
+//	inkwallctl test [flags] --suite FILE [--junit FILE]
 //
 // The test subcommand shows the verdict and the matching rules for one or
 // more requests, without sending them anywhere. A request is given like a
@@ -18,7 +19,9 @@
 // inspected by WAFPolicy objects, resolved the way the operator does and
 // compiled the way the engine does; with --bundle, by a bundle the operator
 // built; with --engine they are sent to a running engine's check API
-// (inkwall-engine check).
+// (inkwall-engine check). With --suite, a file of cases, each a request
+// and optionally its response, is checked against the verdicts it expects,
+// and --junit writes the results as JUnit XML.
 //
 // The version subcommand (or --version) prints the version, the commit and
 // the Go version inkwallctl was built with.
@@ -91,6 +94,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "       inkwallctl test [flags] --request FILE | --har FILE")
 		fmt.Fprintln(stderr, "       inkwallctl test --policy FILE [--rule-set FILE] [--ingress FILE] ... URL | --request FILE | --har FILE")
 		fmt.Fprintln(stderr, "       inkwallctl test --bundle FILE [--bundle-key FILE] URL | --request FILE | --har FILE")
+		fmt.Fprintln(stderr, "       inkwallctl test --suite FILE [--junit FILE]")
 		fmt.Fprintln(stderr, "       inkwallctl bench [flags] [--request FILE | --har FILE]")
 		fmt.Fprintln(stderr, "       inkwallctl migrate ingress-nginx [flags] -f FILE ... | --cluster")
 		fmt.Fprintln(stderr, "       inkwallctl status [flags]")
@@ -162,6 +166,13 @@ type config struct {
 
 	// test
 	expect string
+	// test --suite: the suite file, its contents, and the JUnit report
+	// to write. inspectResponses: the flags' pipeline inspects responses
+	// (a suite with response cases).
+	suite            string
+	suiteData        *suite
+	junit            string
+	inspectResponses bool
 	// test: one CheckResponse per line; bench: the report.
 	json bool
 
@@ -221,7 +232,13 @@ func (fs flagSet) finish(args []string, inputRequired bool) error {
 	if cfg.harFile != "" {
 		inputs++
 	}
+	if cfg.suite != "" {
+		inputs++
+	}
 	if inputs > 1 || (inputRequired && inputs == 0) {
+		if fs.Lookup("suite") != nil {
+			return errors.New("give exactly one of URL, --request, --har and --suite")
+		}
 		return errors.New("give exactly one of URL, --request or --har")
 	}
 	if cfg.url == "" && (cfg.method != "" || len(cfg.headers) > 0 || cfg.data != "") {
@@ -254,6 +271,8 @@ func parseTestFlags(args []string, stderr io.Writer) (config, error) {
 	fs := newFlagSet("test", &cfg, stderr, "; every request in it is checked")
 	fs.StringVar(&cfg.expect, "expect", "", "exit 1 unless every request gets this verdict: allow or deny")
 	fs.BoolVar(&cfg.json, "json", false, "print each CheckResponse as a JSON line")
+	fs.StringVar(&cfg.suite, "suite", "", "test suite file (experimental format): cases, each a request (and optionally its response) with the verdict expected; exit 1 unless every case passes (docs/testing-policies.md)")
+	fs.StringVar(&cfg.junit, "junit", "", "with --suite: write the results to this file as JUnit XML")
 	fs.StringVar(&cfg.clientIP, "client-ip", "", "client IP of every request, as the engine would resolve it (default 127.0.0.1): for the policies' IP lists and rules on REMOTE_ADDR")
 	const objects = "; a file (or a directory of .yaml, .yml and .json files) may hold several YAML documents or a kubectl List, of any of the kinds --policy, --rule-set, --configmap and --ingress read, and WAFIPLists (repeatable)"
 	fs.Var(&cfg.policies, "policy", "WAFPolicy YAML file: inspect with the policies, resolved as the operator does, instead of the flags that define a policy"+objects)
@@ -271,12 +290,28 @@ func parseTestFlags(args []string, stderr io.Writer) (config, error) {
 	default:
 		return cfg, fmt.Errorf("--expect must be allow or deny, got %q", cfg.expect)
 	}
+	switch {
+	case cfg.junit != "" && cfg.suite == "":
+		return cfg, errors.New("--junit applies only to --suite")
+	case cfg.suite != "" && (cfg.expect != "" || cfg.json):
+		return cfg, errors.New("--expect and --json don't apply to --suite: its cases have their expectations, --junit writes the results")
+	}
 	if cfg.clientIP != "" {
 		a, err := netip.ParseAddr(cfg.clientIP)
 		if err != nil {
 			return cfg, fmt.Errorf("--client-ip: %w", err)
 		}
 		cfg.clientIP = a.String()
+	}
+	if cfg.suite != "" {
+		s, err := loadSuite(cfg.suite)
+		if err != nil {
+			return cfg, err
+		}
+		if err := mergeSuiteSource(&cfg, s); err != nil {
+			return cfg, fmt.Errorf("%s: %w", cfg.suite, err)
+		}
+		cfg.suiteData = s
 	}
 	if err := fs.checkPolicySource(); err != nil {
 		return cfg, err
@@ -326,6 +361,9 @@ func (fs flagSet) checkPolicySource() error {
 }
 
 func runTest(cfg config, stdout, stderr io.Writer) int {
+	if cfg.suiteData != nil {
+		return runSuite(cfg, stdout, stderr)
+	}
 	reqs, err := loadRequests(cfg)
 	if err != nil {
 		fmt.Fprintln(stderr, "error:", err)
@@ -416,17 +454,28 @@ type checker func(*enginev1.CheckRequest) (*enginev1.CheckResponse, error)
 // newChecker returns the checker cfg selects. Notes about the policies
 // go to notes.
 func newChecker(cfg config, notes io.Writer) (checker, error) {
+	if cfg.engine != "" {
+		return remoteChecker(cfg.engine)
+	}
+	h, err := newLocalHandler(cfg, notes)
+	if err != nil {
+		return nil, err
+	}
+	return localChecker(h), nil
+}
+
+// newLocalHandler returns the engine's check API, in-process, inspecting
+// with the policies or the flags cfg selects (not --engine).
+func newLocalHandler(cfg config, notes io.Writer) (*httpcheck.Handler, error) {
 	var b *bundlev1.Bundle
 	var err error
 	switch {
-	case cfg.engine != "":
-		return remoteChecker(cfg.engine)
 	case cfg.policyFiles():
 		b, err = policyBundle(cfg, notes)
 	case cfg.bundle != "":
 		b, err = fileBundle(cfg.bundle, cfg.bundleKey, notes)
 	default:
-		return flagChecker(cfg)
+		return flagHandler(cfg)
 	}
 	if err != nil {
 		return nil, err
@@ -437,12 +486,13 @@ func newChecker(cfg config, notes io.Writer) (checker, error) {
 	}
 	// As the engine in bundle mode: each policy sets its body limit, up to
 	// the CRD's maximum.
-	return localChecker(set, max(cfg.maxBodyBytes, policy.MaxBodyBytes))
+	return newHTTPCheck(set, max(cfg.maxBodyBytes, policy.MaxBodyBytes))
 }
 
-// flagChecker inspects with the pipeline the flags define, as the engine
-// does without a bundle.
-func flagChecker(cfg config) (checker, error) {
+// flagHandler inspects with the pipeline the flags define, as the engine
+// does without a bundle. With cfg.inspectResponses, it inspects responses
+// as the engine with --inspect-responses and its default limits.
+func flagHandler(cfg config) (*httpcheck.Handler, error) {
 	rules, err := readOptional(cfg.rules)
 	if err != nil {
 		return nil, fmt.Errorf("read --rules: %w", err)
@@ -451,10 +501,15 @@ func flagChecker(cfg config) (checker, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read --rules-before-crs: %w", err)
 	}
+	var responses pipeline.ResponseConfig
+	if cfg.inspectResponses {
+		responses = pipeline.ResponseConfig{Inspect: true, MaxBytes: policy.DefaultResponseBytes}
+	}
 	eval, err := coraza.New(coraza.Config{
 		ParanoiaLevel:           cfg.paranoiaLevel,
 		InboundAnomalyThreshold: cfg.threshold,
 		BodyLimit:               int(cfg.maxBodyBytes),
+		ResponseBodyLimit:       int(responses.MaxBytes),
 		DisabledRuleGroups:      cfg.disabled,
 		DirectivesBeforeCRS:     before,
 		Directives:              rules,
@@ -462,17 +517,18 @@ func flagChecker(cfg config) (checker, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := pipeline.New(eval, pipeline.Config{Mode: cfg.mode, Timeout: cfg.timeout})
-	return localChecker(p, cfg.maxBodyBytes)
+	p := pipeline.New(eval, pipeline.Config{Mode: cfg.mode, Timeout: cfg.timeout, Responses: responses})
+	return newHTTPCheck(p, cfg.maxBodyBytes)
 }
 
-// localChecker runs the engine's check API in-process with insp, so
+// newHTTPCheck returns the engine's check API inspecting with insp, so
 // verdicts are the engine's own.
-func localChecker(insp pipeline.Inspector, maxBodyBytes int64) (checker, error) {
-	h, err := httpcheck.New(insp, httpcheck.Config{MaxBodyBytes: maxBodyBytes, Logger: slog.New(slog.DiscardHandler)})
-	if err != nil {
-		return nil, err
-	}
+func newHTTPCheck(insp pipeline.Inspector, maxBodyBytes int64) (*httpcheck.Handler, error) {
+	return httpcheck.New(insp, httpcheck.Config{MaxBodyBytes: maxBodyBytes, Logger: slog.New(slog.DiscardHandler)})
+}
+
+// localChecker sends checks to h in-process.
+func localChecker(h *httpcheck.Handler) checker {
 	return func(in *enginev1.CheckRequest) (*enginev1.CheckResponse, error) {
 		raw, err := proto.Marshal(in)
 		if err != nil {
@@ -483,7 +539,7 @@ func localChecker(insp pipeline.Inspector, maxBodyBytes int64) (checker, error) 
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
 		return decode(w.Result())
-	}, nil
+	}
 }
 
 // remoteChecker sends checks to a running engine.
