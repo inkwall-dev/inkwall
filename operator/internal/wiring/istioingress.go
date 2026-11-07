@@ -216,7 +216,7 @@ func (i *IstioIngress) Wire(ctx context.Context, targets map[Target]bool, off bo
 	if err != nil {
 		return nil, err
 	}
-	res := &Result{Proxy: "Istio ingress gateway", Targets: map[Target]TargetState{}}
+	res := i.result()
 	var policies wafv1alpha1.WAFPolicyList
 	if err := i.Client.List(ctx, &policies); err != nil {
 		return nil, err
@@ -657,4 +657,10 @@ func (i *IstioIngress) Unwire(ctx context.Context, c client.Client) (map[string]
 		n[EnvoyFilterGVK.Kind] = count
 	}
 	return n, err
+}
+
+// result is an empty Result of the Istio ingress wiring: its filter sends
+// responses to the engine (#374).
+func (*IstioIngress) result() *Result {
+	return &Result{Proxy: "Istio ingress gateway", Targets: map[Target]TargetState{}, Responses: true}
 }

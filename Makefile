@@ -341,7 +341,7 @@ kind-quickstart: ## Run docs/quickstart.md on a kind cluster of its own, with th
 	hack/kind/quickstart.sh
 
 .PHONY: test-examples
-test-examples: ## Check each examples/<proxy> WAFPolicy with inkwallctl test --policy: benign requests allowed, attacks denied (examples/tests)
+test-examples: ## Check each examples/<proxy> WAFPolicy with inkwallctl test --policy: benign requests allowed, attacks denied (examples/tests); run the example suite (inkwallctl test --suite)
 	hack/examples-test.sh
 
 .PHONY: kind-down
