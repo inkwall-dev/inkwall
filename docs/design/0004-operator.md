@@ -1144,6 +1144,7 @@ Removal must never leave a proxy failing closed on a missing engine.
 | Invalid rule | Rejected at admission | Error to `kubectl` / Argo CD | Fix the rule |
 | Engine can't compile (version skew) | Engine keeps its previous bundle | `EngineNack` | Upgrade the engines or fix the rule |
 | Bundle Secret deleted | None | Builder recreates it | Automatic |
+| Signing key Secret deleted while every replica is down | None: engines keep their bundle, and reject the new key's bundles (`EngineNack`) until the kubelet updates their trust ConfigMap with it | The replicas' memory is gone, so the operator creates a new key (with a replica up, it restores the keys it holds) | Automatic, within the kubelet's ConfigMap sync (`make kind-chaos`) |
 | Bundle chunk deleted or edited | None; meanwhile new engines can't cold start from the Secret | Builder logs it | Automatic: published again |
 | Bundle over 7,200 KiB compressed | None: the current bundle stays; changes are not published; `spec.suspend` still suspends and resumes it | Builder error; warning past 75%; `inkwall_operator_bundle_compressed_bytes`; `Accepted=False` (`BundleTooLarge`) on the policies not published | Shrink the policies (fewer, or smaller rule sets) |
 | Signing key rotated | None: the operator signs with the new key only once every connected engine trusts it | Secret's `rotation-phase`; operator logs the engines it waits for | Automatic ([§4.6](#46-bundle-builder-leader-only)); replace engines older than rotation |
@@ -1552,7 +1553,18 @@ Applying exclusions per request changes three things from v0.1.0:
   (`.github/workflows/upgrade.yaml`, versions from `hack/releases`). Envoy Gateway rolls its pods
   when the engine image changes, so its route may go `MAX_ENVOY_GAP` (5 s) without a verdict then;
   Traefik's routes may not, except through its restart (`MAX_RESTART_GAP`).
-- **Planned:** chaos tests (kill the leader, delete the Secret, take the webhook down).
+- **Failure modes on kind** (`make kind-chaos`, `hack/kind/chaos.sh`, #379; nightly in the release
+  qualification, which opens an issue when a scheduled run fails): a client in the cluster sends
+  an attack through a Traefik whose Ingress a `Block` policy protects, five times a second, and
+  each scenario checks that the engine kept blocking it and no request reached the app
+  uninspected, then the policy's conditions after recovery. The scenarios: the leader's pod
+  killed in each phase of a signing key rotation (the next leader finishes it, no engine rejects
+  a bundle); the operator down while Traefik scales up (refused while a policy blocks, the Pod
+  webhook failing closed; started without the engine and reported `SidecarMissing` while every
+  policy is in `Detect` mode, as it fails open); the bundle Secret, then the signing key Secret,
+  deleted while the operator is down; the API server stopped just after a policy change; and the
+  webhook certificate replaced with an expired one (`hack/expiredcert`), which the operator
+  renews and injects.
 
 ## 10. Code layout
 
@@ -1588,7 +1600,7 @@ development.
 | O2 | Resolver + bundle + distribution | An engine on its own (not injected) gets signed bundles; `Enforced` works | Done (v0.1.0) |
 | O3 | Envoy Gateway | kind: one `WAFPolicy`, attack blocked, `Ready=True` | Done (v0.3.0) |
 | O4 | Pod webhook + Traefik, HAProxy | Same attack blocked via all three in one cluster | Pod webhook and Traefik done (v0.1.0); HAProxy not yet. ingress-nginx, retired upstream, was dropped: its users migrate (`inkwallctl migrate ingress-nginx`) |
-| O5 | Uninstall, suspend, chaos, scale | [§5](#5-uninstall-and-disable) and [§6](#6-failure-modes) verified in CI | Uninstall, suspend, scale done; chaos not yet ([§9](#9-testing)) |
+| O5 | Uninstall, suspend, chaos, scale | [§5](#5-uninstall-and-disable) and [§6](#6-failure-modes) verified in CI | Done; chaos nightly ([§9](#9-testing)) |
 | O6 | Upstream sync | Enroll with a control plane stub; policy round-trip | Done, against the stub ([§4.9](#49-upstream-sync-leader-only)) |
 
 Shipped out of order: the Pod webhook and Traefik (part of O4) came first, in v0.1.0, before
