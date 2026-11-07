@@ -52,8 +52,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
-      - run: docker buildx build --target engine .
-      - run: docker buildx build --target operator .
+      # Both platforms the release publishes, so an arm64-only failure
+      # shows on the PR, not at release time (#392). No QEMU: Go
+      # cross-compiles.
+      - run: docker buildx build --platform linux/amd64,linux/arm64 --target engine .
+      - run: docker buildx build --platform linux/amd64,linux/arm64 --target operator .
 
   raw-envoy:
     # Raw Envoy with the engine's ext_proc adapter, in Docker (#283): the
@@ -90,17 +93,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        helm: [v3.19.0, v4.3.1]
-    name: helm (${{ matrix.helm }})
+        helm: [3, 4]
+    name: helm (Helm ${{ matrix.helm }})
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.x'
           check-latest: true
+      # The versions under test, hack/versions.env (#393).
+      - id: versions
+        run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_OUTPUT"
       - uses: azure/setup-helm@v5
         with:
-          version: ${{ matrix.helm }}
+          version: ${{ matrix.helm == 4 && steps.versions.outputs.HELM4_VERSION || steps.versions.outputs.HELM_VERSION }}
       - run: make helm-lint
       # The alerts' unit tests, with the Prometheus image's promtool.
       - run: make monitoring-test
@@ -166,9 +172,12 @@ jobs:
         with:
           go-version: '1.27.x'
           check-latest: true
+      # The versions under test, hack/versions.env (#393).
+      - id: versions
+        run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_OUTPUT"
       - uses: azure/setup-helm@v5
         with:
-          version: v3.19.0
+          version: ${{ steps.versions.outputs.HELM_VERSION }}
       - uses: actions/download-artifact@v8
         with:
           name: e2e-images
@@ -192,26 +201,30 @@ jobs:
 
   upgrade:
     # helm upgrade from the last release to the chart and images of this
-    # commit keeps routes protected through Traefik, wired once, and their
-    # policies Accepted and Programmed; uninstall restores the routes
-    # (#129). Every run: it is as cheap as e2e, next to which it runs.
+    # commit keeps routes protected through Traefik and Envoy Gateway, wired
+    # once, and their policies Accepted and Programmed; uninstall restores
+    # the routes (#129, #390). Every run, from the latest release; the
+    # release qualification runs upgrade.yaml, from each supported minor.
     # With Helm 3 and Helm 4: install, upgrade (also --reuse-values),
     # rollback and the uninstall hook (#394).
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        helm: [v3.19.0, v4.3.1]
-    name: upgrade (${{ matrix.helm }})
+        helm: [3, 4]
+    name: upgrade (Helm ${{ matrix.helm }})
     steps:
       # The tags: the test starts from the latest release (hack/releases).
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      # The versions under test, hack/versions.env (#393).
+      - id: versions
+        run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_OUTPUT"
       - uses: azure/setup-helm@v5
         with:
-          version: ${{ matrix.helm }}
+          version: ${{ matrix.helm == 4 && steps.versions.outputs.HELM4_VERSION || steps.versions.outputs.HELM_VERSION }}
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.x'

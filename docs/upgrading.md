@@ -69,11 +69,17 @@ What changes by itself:
   integration permissions once it restarts. With Helm 4, roll back to 0.4.x with `helm rollback
   --force-conflicts`. The chart also passes Helm 4's `helm lint --strict` (its `license` moved to an
   `artifacthub.io/license` annotation). Helm 3 and 4 are both tested.
+- **Istio ingress gateways' `EnvoyFilter` is split.** The VirtualServices' filters move from
+  `inkwall-istio-ingress` into shards `inkwall-istio-ingress-00` to `-31` in the same namespace;
+  `inkwall-istio-ingress` keeps the engine's cluster. One object passed etcd's size limit at about
+  1,200 protected VirtualServices per namespace of gateway pods, and they were all
+  `WiringFailed`. While the operator rewrites them, Envoy may reject a configuration with a filter
+  in both and keep the one before, still inspected. GitOps tools that ignore the operator's
+  objects by label need no change.
 - **WebSocket messages are scored on their own** (the standalone proxy's
   `--websocket-messages`): a message is inspected without the handshake's query arguments and
   headers, so a handshake that scored below the threshold no longer adds its score to every
   message, and each message costs about a third less. Attacks in messages are still denied.
-
 - **`Enforced` counts the engines that serve the policy.** A policy's `Enforced` condition (and
   its `EnginesBehind`, `EngineNack` and `EnginesOutdated` reasons) now counts only the engines on
   the proxy pods that serve its routes, once the operator has wired them all. An engine of one

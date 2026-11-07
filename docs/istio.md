@@ -36,6 +36,7 @@ Either way, an [`EnvoyFilter`](glossary.md#envoyfilter) sends the protected rout
 
 ## Prerequisites
 
+<!-- versions: ISTIO_VERSION GATEWAY_API_VERSION -->
 - Istio 1.28 or later; for HTTPRoutes, its Gateway API implementation (on by default) and the
   [Gateway API CRDs](https://gateway-api.sigs.k8s.io/guides/getting-started/#installing-gateway-api); for VirtualServices, an ingress gateway from its
   `gateway` Helm chart. Tested with Istio 1.31.3 (its `base` and `istiod` Helm
@@ -284,10 +285,12 @@ spec:
 ```
 
 Once every running pod the VirtualService's Gateways select has the engine, the namespace of those
-pods gets an `EnvoyFilter`, `inkwall-istio-ingress`, for its gateway pods (`workloadSelector`
-`istio: ingressgateway`): the engine's cluster, and per protected VirtualService an ext_proc filter,
-off by default and on for the Envoy routes of its http routes, with the [settings](#settings) of its
-policies. The `EnvoyFilter` lists the VirtualServices it wires in the annotation
+pods gets `EnvoyFilter` objects for its gateway pods (`workloadSelector` `istio: ingressgateway`):
+`inkwall-istio-ingress`, with the engine's cluster, and shards `inkwall-istio-ingress-00` to `-31`
+with, per protected VirtualService, an ext_proc filter, off by default and on for the Envoy routes
+of its http routes, with the [settings](#settings) of its policies. A VirtualService always lands in
+the same shard (a hash of its namespace and name), so thousands of them stay under etcd's size
+limit for one object. Each shard lists the VirtualServices it wires in the annotation
 `waf.inkwall.dev/virtualservices`.
 
 ### What a VirtualService may match

@@ -375,7 +375,8 @@ wiring yourself:
    as the `deployment` key (or remove the engine's entries) and remove that label and annotation;
    in each Gateway annotated `waf.inkwall.dev/configmap`, remove `spec.infrastructure.parametersRef`
    and the annotation, then delete the operator's ConfigMaps (`inkwall-waf-<gateway>`). That
-   label also covers the `inkwall-istio-ingress` `EnvoyFilter` objects of Istio's ingress gateways.
+   label also covers the `inkwall-istio-ingress` and `inkwall-istio-ingress-<00 to 31>`
+   `EnvoyFilter` objects of Istio's ingress gateways.
 3. Remove the finalizer from the policies, or they can't be deleted:
 
    ```sh
