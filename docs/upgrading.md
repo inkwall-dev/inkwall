@@ -35,6 +35,11 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 What's new:
 
+- **gRPC and HTTP/2 through the standalone proxy**: `--h2c`, `--tls-cert`/`--tls-key`,
+  `--upstream-h2c` and `--upstream-ca` ([gRPC](grpc.md#through-the-standalone-proxy)). Its
+  upstream connections are now kept for reuse (128 idle per host instead of Go's default 2), and
+  responses are flushed as they come instead of in buffered chunks.
+
 - **The CRS's own settings on a policy.** The CRS rule set binding of a `WAFPolicy` takes an
   optional `crs` block: `allowedMethods` (for REST APIs that send `PUT`, `PATCH` or `DELETE`),
   `allowedRequestContentTypes`, `detectionParanoiaLevel` (log the rules of a higher paranoia level
