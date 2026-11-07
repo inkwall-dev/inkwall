@@ -24,8 +24,8 @@ on:
         type: string
         default: ''
 
-permissions:
-  contents: read
+# Each job asks for what it needs (least privilege).
+permissions: {}
 
 concurrency:
   group: qualify-${{ github.event.schedule || inputs.ref }}-${{ inputs.images }}
@@ -36,6 +36,8 @@ jobs:
     # The refs to qualify: main nightly, the release branches of the two
     # newest minor versions weekly, the ref given on demand.
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     outputs:
       refs: ${{ steps.plan.outputs.refs }}
     steps:
@@ -81,6 +83,8 @@ jobs:
     needs: plan
     if: inputs.images == ''
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     timeout-minutes: 30
     strategy:
       matrix:
@@ -114,6 +118,8 @@ jobs:
     # Runs with published images, when images was skipped.
     if: always() && needs.plan.result == 'success' && (needs.images.result == 'success' || needs.images.result == 'skipped')
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -242,6 +248,8 @@ jobs:
 
   upgrade:
     needs: plan
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -257,6 +265,8 @@ jobs:
     # with response inspection (#344).
     needs: plan
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -288,6 +298,8 @@ jobs:
     # Docker with the ref's or the published engine.
     needs: plan
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -316,6 +328,8 @@ jobs:
   crs:
     needs: plan
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -339,6 +353,8 @@ jobs:
     needs: [plan, images, e2e, chaos, upgrade, scale, docker-e2e, crs]
     if: always()
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
       - env:
           RESULTS: ${{ toJSON(needs) }}
