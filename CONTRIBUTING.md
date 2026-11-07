@@ -109,6 +109,7 @@ Durations are on a laptop or a CI runner, roughly.
 | Proxies in Docker | `make raw-envoy-e2e`, `make websocket-e2e`, `make haproxy-e2e` | 5 min each | Docker | every PR (`raw-envoy`, `haproxy`) |
 | End to end on kind | `make kind-e2e` (all), `make kind-e2e-traefik`, `-raw-envoy`, `-envoy-gateway`, `-istio`, `-haproxy` | 25 min (all) | Docker, kind (installed by the target) | every PR (`e2e (<proxy>)`, one job each) |
 | Upgrade on kind | `make kind-upgrade` | 15 min | Docker, kind | every PR (`upgrade`, from the latest release); release qualification (`upgrade.yaml`, from each supported minor) |
+| Operator failure modes on kind | `make kind-chaos` | 20 min | Docker, kind | release qualification (`qualify.yaml`, `chaos`, nightly) |
 | External links | `make docs-check-external` | 1 min | network | nightly (`docs-links`) |
 | Everything a PR runs | `make check-all` | hours | all of the above | |
 
