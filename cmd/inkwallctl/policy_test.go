@@ -229,6 +229,57 @@ spec:
 	}
 }
 
+// TestTestPolicyIPLists: a policy's WAFIPLists apply offline, on the client
+// IP --client-ip sets (#358).
+func TestTestPolicyIPLists(t *testing.T) {
+	objects := writeFile(t, "objects.yaml", `apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata: {name: api, namespace: shop}
+spec:
+  targetRefs: [{kind: Ingress, name: api}]
+  mode: Block
+  ipLists: {allow: [monitors], deny: [abusers]}
+---
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFIPList
+metadata: {name: monitors, namespace: shop}
+spec:
+  entries: [{cidr: 10.0.0.0/8, description: uptime checks}]
+---
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFIPList
+metadata: {name: abusers, namespace: shop}
+spec:
+  entries: [{cidr: 203.0.113.0/24}, {cidr: "2001:db8::/32"}]
+`)
+	run := func(clientIP, path string) string {
+		t.Helper()
+		requests := writeFile(t, "requests.http", "GET "+path+" HTTP/1.1\r\nHost: shop.example.com\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\n\r\n")
+		args := []string{"test", "--request", requests, "--policy", objects, "--ingress", sampleIngresses}
+		if clientIP != "" {
+			args = append(args, "--client-ip", clientIP)
+		}
+		code, out, errOut := runCLI(t, args...)
+		if code != 0 || errOut != "" {
+			t.Fatalf("exit %d, stderr %q", code, errOut)
+		}
+		return out
+	}
+	for _, tc := range []struct{ ip, path, want string }{
+		{"203.0.113.9", "/api/a", "deny  403  GET /api/a  policy=shop/api  reason=ip_deny"},
+		{"2001:db8::1", "/api/a", "reason=ip_deny"},
+		{"10.1.2.3", "/api/a?id=1%27%20OR%20%271%27%3D%271", "reason=ip_allow"},
+		{"", "/api/a?id=1%27%20OR%20%271%27%3D%271", "reason=rule"},
+	} {
+		if out := run(tc.ip, tc.path); !strings.Contains(out, tc.want) {
+			t.Errorf("from %q, %s: %q, want %q", tc.ip, tc.path, out, tc.want)
+		}
+	}
+	if code, _, errOut := runCLI(t, "test", "--request", sampleRequests, "--policy", objects, "--client-ip", "lb.example.com"); code != 2 || !strings.Contains(errOut, "--client-ip") {
+		t.Errorf("a bad --client-ip: exit %d, stderr %q", code, errOut)
+	}
+}
+
 // TestTestPolicyIngressRoute routes requests by Ingresses and Traefik
 // IngressRoutes together.
 func TestTestPolicyIngressRoute(t *testing.T) {

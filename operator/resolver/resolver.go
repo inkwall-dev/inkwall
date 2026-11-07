@@ -31,6 +31,7 @@ import (
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/pkg/iplist"
 )
 
 // RulesLabel must be set to "true" on a ConfigMap a rule set reads rules
@@ -64,6 +65,8 @@ type Input struct {
 	VirtualServices []unstructured.Unstructured
 	RuleSets        []wafv1alpha1.WAFRuleSet
 	ClusterRuleSets []wafv1alpha1.ClusterWAFRuleSet
+	// IPLists are the WAFIPLists policies name in spec.ipLists.
+	IPLists []wafv1alpha1.WAFIPList
 	// ConfigMaps rule sets read rules from (labeled RulesLabel).
 	ConfigMaps []corev1.ConfigMap
 	// Previous is the bundle in force; nil when there is none.
@@ -399,6 +402,16 @@ func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.Nam
 		}
 	}
 
+	if l := p.Spec.IPLists; l != nil && (len(l.Allow) > 0 || len(l.Deny) > 0) {
+		allow, errA := r.ipList(p.Namespace, l.Allow)
+		deny, errD := r.ipList(p.Namespace, l.Deny)
+		if err := cmp.Or(errA, errD); err != nil {
+			c.fail(ReasonInvalidRef, err.Error())
+		} else {
+			c.policy.IpLists = &bundlev1.IPLists{Allow: allow, Deny: deny}
+		}
+	}
+
 	var missing []string
 	for _, t := range p.Spec.TargetRefs {
 		switch t.Kind {
@@ -641,4 +654,31 @@ func crsSettings(c *wafv1alpha1.CRSSettings) *bundlev1.CRSSettings {
 		s.OutboundAnomalyThreshold = *c.OutboundAnomalyThreshold
 	}
 	return s
+}
+
+// ipList returns the entries of the WAFIPLists names, in namespace ns,
+// without repeats; an error names a list that is missing or invalid.
+func (r *resolution) ipList(ns string, names []wafv1alpha1.IPListName) ([]string, error) {
+	var out []string
+	seen := map[string]bool{}
+	for _, name := range names {
+		i := slices.IndexFunc(r.in.IPLists, func(l wafv1alpha1.WAFIPList) bool { return l.Namespace == ns && l.Name == string(name) })
+		if i < 0 {
+			return nil, fmt.Errorf("WAFIPList %s not found", name)
+		}
+		var entries []string
+		for _, e := range r.in.IPLists[i].Spec.Entries {
+			entries = append(entries, string(e.CIDR))
+		}
+		if _, err := iplist.Parse(entries); err != nil {
+			return nil, fmt.Errorf("WAFIPList %s: %w", name, err)
+		}
+		for _, e := range entries {
+			if !seen[e] {
+				seen[e] = true
+				out = append(out, e)
+			}
+		}
+	}
+	return out, nil
 }
