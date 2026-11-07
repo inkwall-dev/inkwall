@@ -238,7 +238,7 @@ jobs:
           # tags on the commit, and git sorts v0.1.0-rc.2 after v0.1.0: tagging
           # a release on its last rc's commit built the rc instead.
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
-      - uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*.tar.gz
 

@@ -5,7 +5,9 @@ name: qualify
 # release (#390), the full operator scale test with and without responses,
 # the Docker e2e tests and the CRS suite. Nightly on main, weekly on the
 # supported release branches, and on demand: with images=ghcr:<version>,
-# against a release candidate's published images instead of the ref's own.
+# against a release candidate's published images instead of the ref's own,
+# by default with that version's own tests (ref v<version>), so a check of
+# a later feature doesn't run against images that predate it (#472).
 # A release is cut only after a green run (CONTRIBUTING.md, "Cutting a
 # release").
 
@@ -16,9 +18,9 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: Branch, tag or commit to qualify.
+        description: Branch, tag or commit to qualify. Default main, or v<version> with images=ghcr:<version>.
         type: string
-        default: main
+        default: ''
       images:
         description: ghcr:<version> tests those published images (a release candidate's) instead of building the ref's.
         type: string
@@ -28,7 +30,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: qualify-${{ github.event.schedule || inputs.ref }}-${{ inputs.images }}
+  group: qualify-${{ github.event.schedule || inputs.ref || 'default' }}-${{ inputs.images }}
   cancel-in-progress: false
 
 jobs:
@@ -67,6 +69,25 @@ jobs:
           if [ -n "$IMAGES" ] && ! [[ $IMAGES =~ ^ghcr:[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
             echo "images must be ghcr:<version>, got $IMAGES" >&2
             exit 1
+          fi
+          # Published images, on demand: their own version's tests unless a
+          # ref is given; main's tests check features later images have.
+          if [ -z "$SCHEDULE" ] && [ -z "$refs" ]; then
+            if [ -n "$IMAGES" ]; then refs=v${IMAGES#ghcr:}; else refs=main; fi
+          fi
+          # Testing published images needs the ref's Makefile to know
+          # IMAGES (0.5.0 and later).
+          if [ -n "$IMAGES" ]; then
+            for r in $refs; do
+              c=$(git rev-parse -q --verify "origin/$r^{commit}" || git rev-parse -q --verify "$r^{commit}") || {
+                echo "no such ref: $r" >&2
+                exit 1
+              }
+              if ! git show "$c:Makefile" | grep -q '^IMAGES'; then
+                echo "$r predates qualifying published images (its Makefile has no IMAGES): give a later ref" >&2
+                exit 1
+              fi
+            done
           fi
           echo "refs=$(jq -Rnc '[inputs | select(length > 0)]' <<<"$refs")" >>"$GITHUB_OUTPUT"
           {

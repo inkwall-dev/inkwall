@@ -110,7 +110,7 @@ Durations are on a laptop or a CI runner, roughly.
 | End to end on kind | `make kind-e2e` (all), `make kind-e2e-traefik`, `-raw-envoy`, `-envoy-gateway`, `-istio`, `-haproxy` | 25 min (all) | Docker, kind (installed by the target) | every PR (`e2e (<proxy>)`, one job each) |
 | Upgrade on kind | `make kind-upgrade` | 15 min | Docker, kind | every PR (`upgrade`, from the latest release); release qualification (`upgrade.yaml`, from each supported minor) |
 | Operator failure modes on kind | `make kind-chaos` | 20 min | Docker, kind | release qualification (`qualify.yaml`, `chaos`, nightly) |
-| Examples | `make test-examples` (each `examples/<proxy>` policy through `inkwallctl test --policy`) | 1 min | Go | every PR (`test`) |
+| Examples | `make test-examples` (each `examples/<proxy>` policy through `inkwallctl test --policy`, and the `examples/tests` suite) | 1 min | Go | every PR (`test`) |
 | Quickstart | `make kind-quickstart` (`docs/quickstart.md` as written, released chart and images) | 10 min | Docker, kind, network | nightly (`quickstart`) |
 | External links | `make docs-check-external` | 1 min | network | nightly (`docs-links`) |
 | Everything a PR runs | `make check-all` | hours | all of the above | |
@@ -154,8 +154,10 @@ for patching released versions.
 1. Check that CI is green on the commit, and try the build with `make release-snapshot` (binaries
    and archives in `dist/`, nothing signed or published). Then qualify it: tag a release
    candidate (`v0.5.0-rc.1`, as in step 2; the release workflow publishes its images), and run the
-   [qualify workflow](.github/workflows/qualify.yaml) on the tag with `images: ghcr:0.5.0-rc.1`
-   (Actions, "qualify", "Run workflow"). It runs every proxy's e2e, the upgrade from each
+   [qualify workflow](.github/workflows/qualify.yaml) with `images: ghcr:0.5.0-rc.1` (Actions,
+   "qualify", "Run workflow"). Without a `ref`, it runs that version's own tests (the tag
+   `v0.5.0-rc.1`), so a check of a later feature doesn't fail images that predate it; a ref older
+   than 0.5.0 can't test published images. It runs every proxy's e2e, the upgrade from each
    supported release, the full scale test with and without responses, the Docker e2e tests and the
    CRS suite against those images. **Cut the release only after a green run**, and link it in the
    release's PR or notes. The same workflow runs nightly on `main` and weekly on the supported

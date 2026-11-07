@@ -179,6 +179,8 @@ func TestWAFPolicyValidation(t *testing.T) {
 
 		{name: "body over 10 MiB", doc: policy(target + "  body: {maxBytes: 10485761}\n"), wantErr: "should be less than or equal to 10485760"},
 		{name: "unknown oversize action", doc: policy(target + "  body: {onOversize: InspectPrefix}\n"), wantErr: `Unsupported value: "InspectPrefix"`},
+		{name: "grpc Deny", doc: policy(target + "  body: {grpc: Deny}\n")},
+		{name: "unknown grpc action", doc: policy(target + "  body: {grpc: Block}\n"), wantErr: `Unsupported value: "Block"`},
 
 		{name: "websocket required headers only", doc: policy(target + "  webSocket: {requiredHeaders: [X-Api-Key]}\n")},
 		{name: "websocket origin with a path", doc: policy(target + "  webSocket: {allowedOrigins: [\"https://app.example.com/\"]}\n"), wantErr: "spec.webSocket.allowedOrigins[0]"},

@@ -314,6 +314,7 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 		WebSocket:    ws,
 		Responses:    responses,
 		GRPCMessages: bp.GetBody().GetGrpcMessages(),
+		DenyGRPC:     bp.GetBody().GetDenyGrpc(),
 	}
 	if l := bp.GetIpLists(); l != nil {
 		if pc.IPAllow, err = iplist.Parse(l.GetAllow()); err != nil {
