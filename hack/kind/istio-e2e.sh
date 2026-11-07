@@ -488,6 +488,30 @@ check "and on its second (Istio's route names hold)" vs_is 403 "/web$SQLI"
 check "benign traffic passes" vs_is 200 /api/products/42
 check "the unprotected VirtualService lets the attack through" vs_open_is 200 "$SQLI"
 check "an attack in the body is blocked" vs_is 403 /api/ --data-urlencode "q=1' OR '1'='1"
+# The filter not on the route (#372): a user's EnvoyFilter, applied after
+# the operator's, removes it from the gateway's listeners, as a patch that
+# matches nothing would leave it off. Istio accepts it all; the operator's
+# probe gets the app's answer: Unverified, not Programmed.
+vs_unverified() { [[ $(vs_condition Programmed status) == False && $(vs_condition Programmed reason) == Unverified && $(vs_condition Programmed message) == *"doesn't run the filter"* ]]; }
+"${KUBECTL[@]}" apply -f - >/dev/null <<YAML
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata: {name: e2e-remove-inkwall, namespace: $NS}
+spec:
+  workloadSelector: {labels: {istio: ingressgateway}}
+  priority: 100
+  configPatches:
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener: {filterChain: {filter: {name: envoy.filters.network.http_connection_manager, subFilter: {name: inkwall.ext_proc.vs.$NS.shop-vs}}}}
+      patch: {operation: REMOVE}
+YAML
+eventually "the filter removed by a later patch: the attack passes" vs_is 200 "/api$SQLI"
+eventually "and the policy is Unverified, not Programmed (the probe got the app's answer)" vs_unverified
+"${KUBECTL[@]}" -n "$NS" delete envoyfilter e2e-remove-inkwall >/dev/null
+eventually "the patch gone: blocking again" vs_is 403 "/api$SQLI"
+eventually "and Programmed once the probe answers" vs_programmed
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy vs --timeout=60s >/dev/null
 eventually "unprotected: the EnvoyFilter is gone" no_vs_filter
 eventually "and the attack passes again" vs_is 200 "/api$SQLI"

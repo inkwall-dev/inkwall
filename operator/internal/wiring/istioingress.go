@@ -87,6 +87,10 @@ type IstioIngress struct {
 	// Watches of kinds whose CRD may be missing; nil: only read at each
 	// reconcile.
 	VirtualServices, Gateways, EnvoyFilters *crdwatch.Kind
+	// Prober proves the wired routes through every gateway pod before they
+	// are Programmed (#372); nil: none is, and they stay Unverified. Its
+	// results reach the wiring controller through HAProxy's watch of it.
+	Prober *Prober
 }
 
 // Name implements Integration.
@@ -379,6 +383,7 @@ func (i *IstioIngress) Wire(ctx context.Context, targets map[Target]bool, off bo
 		}
 	}
 
+	var probes []ProbeJob
 	for tg := range targets {
 		r := routes[tg.Key]
 		if _, ok := res.Targets[tg]; ok || tg.Kind != virtualServiceKind || r == nil {
@@ -395,9 +400,18 @@ func (i *IstioIngress) Wire(ctx context.Context, targets map[Target]bool, off bo
 		case on && !ready[tg.Key]:
 			s.Pending = fmt.Sprintf("VirtualService %s is wired once every gateway pod its Gateways select has the engine", tg.Key.Name)
 		case s.Wired:
-			s.Pending = istioVSReconciled(r.vs)
+			// In force once the probe has reached the engine through each
+			// gateway pod, on each server (#372).
+			if s.Pending = istioVSReconciled(r.vs); s.Pending == "" {
+				var jobs []ProbeJob
+				jobs, s.NotProbeable, s.Unverified = proveRoute(i.Prober, "VirtualService "+tg.Key.Name, r.detect, func() ([]ProbeJob, string) { return st.vsProbes(r) })
+				probes = append(probes, jobs...)
+			}
 		}
 		res.Targets[tg] = s
+	}
+	if i.Prober != nil {
+		i.Prober.Set(integrations.IstioIngress.Name, probes)
 	}
 	return res, errors.Join(errs...)
 }

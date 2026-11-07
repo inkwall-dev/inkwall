@@ -588,8 +588,19 @@ controller `istio.io/gateway-controller`), with `ext_proc` through an `EnvoyFilt
   10 MiB, the largest `body.maxBytes`.
 - **Status.** A route is wired on a Gateway once every running pod of it has the engine; it is
   `Programmed` once that holds on all its Gateways and Istio has accepted it (its parent status,
-  `Accepted=True` from `istio.io/gateway-controller`) on each: Istio reports nothing on an
-  `EnvoyFilter`. Until then it is `Pending` (or `PendingRestart`, `SidecarMissing`), never `Ready`.
+  `Accepted=True` from `istio.io/gateway-controller`) on each, and the operator's probe has
+  reached the engine through every pod on every listener the route is attached to (#372): Istio
+  reports nothing on an `EnvoyFilter` and accepts patches that match no Envoy route. Until then it
+  is `Pending` (or `PendingRestart`, `SidecarMissing`, `Unverified`), never `Ready`.
+- **The probe** (#372, the same `Prober` as HAProxy's, §6.4, with a target builder per
+  integration): per Gateway, a target per protected rule (VirtualService http route) and per
+  listener (server) the route is on, from the rule's first match the probe can make (exact or
+  prefix path, exact headers and query parameters, the method), with the route's host (a wildcard
+  made concrete, `inkwall-probe.<suffix>`) on the listener's port, over TLS for HTTPS (`SIMPLE`).
+  The ext_proc adapter answers it with Envoy's local reply, 200 and the answer's MAC (0006 §2). A
+  rule whose matches are all regular expressions, or a mutual-TLS or passthrough server, can't be
+  probed: `NotProbeable`. In detect mode Envoy discards the answer: `Unverified`; proving those
+  by the engine's own record of the probe (a receipt in its report) is a follow-up.
   An Istio older than 1.28 (from the `istio-proxy` image tag) is `WiringFailed`: its Envoy (before
   1.36) would reject `status_on_error` and keep serving without the filter. Without the
   `EnvoyFilter` CRD nothing is wired (`WiringFailed`). Without its ClusterRole,

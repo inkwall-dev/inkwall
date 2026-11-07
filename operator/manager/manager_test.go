@@ -4,6 +4,7 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -28,7 +29,9 @@ import (
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
+	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
 	"github.com/inkwall-dev/inkwall/operator/test/testenv"
+	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
 )
 
 var env *testenv.Env
@@ -63,6 +66,9 @@ func freeAddr(t *testing.T) string {
 	_ = l.Close()
 	return addr
 }
+
+// testProbeKey is the key of the operator's probe in these tests.
+var testProbeKey = bytes.Repeat([]byte{9}, haproxyprobe.KeySize)
 
 // warnings records the warnings the API server returns.
 type warnings struct {
@@ -122,6 +128,18 @@ func startOperator(t *testing.T) (_ context.Context, _ client.Client, _ *warning
 		EngineReportInterval: 200 * time.Millisecond,
 		SigningKeyGrace:      time.Second,
 		CRDInterval:          200 * time.Millisecond,
+		// The wiring's probe answered as the engine would, with a key of
+		// its own, on pods with an address (the Istio tests give theirs
+		// one; HAProxy's pods have none and stay Unverified).
+		Prober: &wiring.Prober{
+			Key: func(context.Context) ([]byte, error) { return testProbeKey, nil },
+			Do: func(_ context.Context, _ wiring.ProbePod, _ wiring.ProbeTarget, req *http.Request) (*http.Response, error) {
+				answer, _ := haproxyprobe.Check(testProbeKey, req.URL.RequestURI(), req.Host, req.Header.Get(haproxyprobe.Header))
+				h := http.Header{}
+				h.Set(haproxyprobe.Header, answer)
+				return &http.Response{StatusCode: http.StatusOK, Header: h, Body: io.NopCloser(strings.NewReader(""))}, nil
+			},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

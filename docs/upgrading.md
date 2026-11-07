@@ -61,6 +61,16 @@ What's new:
 
 What changes by itself:
 
+- **Istio routes are proven before they are `Programmed`.** The operator now sends its signed probe
+  through every Istio gateway pod, on every listener a protected HTTPRoute or VirtualService is
+  served on, and the engine answers it ([the operator's probe](istio.md#the-operators-probe)).
+  After the upgrade, Istio policies are `Unverified` until the probes have answered (seconds, once
+  the gateways' engines are 0.5.0: restart Istio's ingress gateways; Istio rolls the Gateway API
+  pods itself). Some stay out of `Programmed`, and so out of `Ready`: routes whose policies are
+  all in `Detect` mode stay `Unverified` (Envoy discards the engine's answer in observability
+  mode), and routes the probe can't reach are `NotProbeable` (a rule whose every match is a
+  regular expression, a server with mutual TLS or passthrough). Before, they were `Programmed`
+  without proof that the filter was on the route. Alerts on `Ready` should expect it.
 - **Istio ingress gateways' `EnvoyFilter` is split.** The VirtualServices' filters move from
   `inkwall-istio-ingress` into shards `inkwall-istio-ingress-00` to `-31` in the same namespace;
   `inkwall-istio-ingress` keeps the engine's cluster. One object passed etcd's size limit at about

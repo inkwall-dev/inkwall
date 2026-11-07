@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -158,6 +159,12 @@ http:
 	if err := c.Create(ctx, pod); err != nil {
 		t.Fatal(err)
 	}
+	// An address, for the operator's probe (#372; the test's prober
+	// answers as the engine would).
+	pod.Status.PodIP = "10.0.0.31"
+	if err := c.Status().Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
 	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), pod); err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +200,17 @@ http:
 	if err := c.Create(ctx, farPod); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "WiringFailed with a pod outside the proxy namespaces", programmed(metav1.ConditionFalse, wiring.ReasonWiringFailed, "istio-far/gw-far"))
+	// That pod is outside the operator's cache, so its creation brings no
+	// reconcile: a VirtualService event does.
+	eventually(t, "WiringFailed with a pod outside the proxy namespaces", func() string {
+		vs := &unstructured.Unstructured{}
+		vs.SetGroupVersionKind(wiring.IstioVirtualServiceGVK)
+		if err := c.Get(ctx, client.ObjectKeyFromObject(web), vs); err == nil {
+			vs.SetLabels(map[string]string{"touched": strings.ReplaceAll(time.Now().Format("150405.000"), ".", "")})
+			_ = c.Update(ctx, vs)
+		}
+		return programmed(metav1.ConditionFalse, wiring.ReasonWiringFailed, "istio-far/gw-far")()
+	})
 	if err := c.Delete(ctx, farPod); err != nil {
 		t.Fatal(err)
 	}
