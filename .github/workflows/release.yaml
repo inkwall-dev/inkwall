@@ -8,7 +8,8 @@
 #   3. the binaries, signed checksums, an SBOM per archive and the GitHub
 #      release with the changelog (goreleaser, .goreleaser.yaml), last, so
 #      the release notes never point at images or a chart that aren't
-#      published yet; and build provenance attestations of the archives.
+#      published yet; and build provenance attestations of the archives,
+#      also attached to the release as inkwall_<version>.intoto.jsonl.
 # Signatures are keyless, with this workflow's identity. Nothing is
 # published unless CI passed on the tagged commit (verify), and what was
 # published is checked as a user would (check).
@@ -238,9 +239,22 @@ jobs:
           # tags on the commit, and git sorts v0.1.0-rc.2 after v0.1.0: tagging
           # a release on its last rc's commit built the rc instead.
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
-      - uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+      - id: provenance
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
         with:
           subject-path: dist/*.tar.gz
+      # The provenance as a release asset too (#474), for verifying offline
+      # and for tools that look for it among the assets (the OpenSSF
+      # Scorecard's Signed-Releases): the attestation's Sigstore bundle, one
+      # JSON line; gh attestation verify --bundle reads it.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cp "$BUNDLE" "dist/inkwall_$VERSION.intoto.jsonl"
+          gh release upload "$TAG" "dist/inkwall_$VERSION.intoto.jsonl" -R "$GITHUB_REPOSITORY"
 
   # What was published, checked as a user would (#392): the signatures with
   # the documented identity, both platforms and the attestations of each
@@ -298,13 +312,15 @@ jobs:
         run: |
           mkdir rel && cd rel
           archive="inkwall_${VERSION}_linux_amd64.tar.gz"
-          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p checksums.txt -p checksums.txt.sigstore.json -p "$archive" -p "$archive.sbom.json"
+          provenance="inkwall_$VERSION.intoto.jsonl"
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p checksums.txt -p checksums.txt.sigstore.json -p "$archive" -p "$archive.sbom.json" -p "$provenance"
           cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
             --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER"
           sha256sum --check --ignore-missing checksums.txt
           gh attestation verify "$archive" -R "$GITHUB_REPOSITORY"
+          gh attestation verify "$archive" -R "$GITHUB_REPOSITORY" --bundle "$provenance"
           jq -e '.spdxVersion' "$archive.sbom.json" >/dev/null
           tar -xzf "$archive" inkwallctl
           ./inkwallctl version | tee version.txt
           grep -qx "inkwallctl $VERSION" version.txt
-          echo "binaries: checksums signed and matching, provenance verified, SBOM, inkwallctl $VERSION" >> "$GITHUB_STEP_SUMMARY"
+          echo "binaries: checksums signed and matching, provenance verified (attestation and release asset), SBOM, inkwallctl $VERSION" >> "$GITHUB_STEP_SUMMARY"
