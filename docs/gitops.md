@@ -16,6 +16,7 @@ Argo CD and Flux so they neither report it as drift nor undo it.
   - [Argo CD](#argo-cd-1)
   - [Flux](#flux-1)
 - [Checking it worked](#checking-it-worked)
+- [Health in Argo CD and Flux](#health-in-argo-cd-and-flux)
 - [Undoing it](#undoing-it)
 
 ## Prerequisites
@@ -368,6 +369,31 @@ spec:
    ```sh
    kubectl get wafpolicy -A
    ```
+
+   With the health checks below, Argo CD shows them `Healthy` and Flux's `wait: true` waits for it.
+
+## Health in Argo CD and Flux
+
+Neither tool knows how to read the Inkwall kinds' conditions by itself: Argo CD shows them
+`Healthy` as soon as they are applied, and Flux's kstatus counts a policy the operator hasn't
+reported on yet as current. Tell them (both tested by `make gitops-health-test`):
+
+- **Argo CD:** merge [`examples/argocd/argocd-cm-patch.yaml`](../examples/argocd/argocd-cm-patch.yaml)
+  into the `argocd-cm` ConfigMap (or the `configs.cm` values of Argo CD's chart). It adds health
+  checks for `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet` and `InkwallConfig`.
+- **Flux** (2.5 or later): give the Kustomization that applies the policies `wait: true` and the
+  `healthCheckExprs` of [`examples/flux/kustomization.yaml`](../examples/flux/kustomization.yaml).
+
+| Object | Healthy (Argo CD) / current (Flux) | Progressing / in progress | Degraded / failed |
+|---|---|---|---|
+| `WAFPolicy` | `Ready=True` for its generation | The operator hasn't reported its generation; `Ready=False` for a reason that resolves itself: `Pending`, `PendingRestart`, `EnginesBehind`, `EnginesUnreported`, `NoEngines`, `NotInBundle`, `Unverified` | `Ready=False` for any other reason: `WiringFailed`, `EngineNack`, `EnginesOutdated`, `SidecarMissing`, ... |
+| `WAFRuleSet`, `ClusterWAFRuleSet` | `Accepted=True` | Not checked for its generation yet | `Accepted=False` (`RuleCompileError`) |
+| `InkwallConfig` (Argo CD) | Otherwise | | `ControlPlaneConnected=False` |
+
+While inspection is suspended (`InkwallConfig` `spec.suspend`), Argo CD shows the policies and the
+`InkwallConfig` as `Suspended`, and Flux keeps them in progress. A policy that is `Degraded` stays so
+until you fix what its `Ready` message says: a Flux Kustomization with `wait: true` then fails at
+its `timeout`.
 
 ## Undoing it
 

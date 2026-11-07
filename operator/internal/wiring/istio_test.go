@@ -334,32 +334,47 @@ func TestIstioUnwire(t *testing.T) {
 	}
 }
 
-// Istio's filter sends no response phase yet: a route whose policy asks
-// for responses keeps them off, and gets no buffer limit for them. Its
-// Result doesn't claim responses, so such a policy is not Programmed
-// (ResponsesNotInspected).
-func TestIstioResponsesNotWired(t *testing.T) {
+// A route whose policies inspect responses has its ext_proc filter send
+// the response headers and body, buffered (streamed in detect mode), with
+// the engine allowed to skip a body it doesn't read, and the listeners'
+// buffer raised; one whose policies don't keeps SKIP: no added latency
+// (#374). The Istio integrations report Responses, so such a policy is
+// Programmed.
+func TestIstioResponses(t *testing.T) {
 	gw := &gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Namespace: "edge", Name: "gw", UID: "uid-gw"}}
-	r := &istioRoute{route: istioTestRoute("shop", "app", "web", ""), sections: []string{""},
-		routeSettings: routeSettings{timeout: time.Second, responses: true, maxResponse: 64 << 10}}
-	spec := jsonOf(envoyFilter(gw, []*istioRoute{r}).Object["spec"])
-	if !strings.Contains(spec, `"response_header_mode":"SKIP"`) || strings.Contains(spec, "response_body_mode") ||
-		strings.Contains(spec, "per_connection_buffer_limit_bytes") {
-		t.Errorf("responses wired, or buffered, through Istio: %s", spec)
+	route := func(s routeSettings) string {
+		r := &istioRoute{route: istioTestRoute("shop", "app", "web", ""), sections: []string{""}, routeSettings: s}
+		return jsonOf(envoyFilter(gw, []*istioRoute{r}).Object["spec"])
+	}
+	spec := route(routeSettings{timeout: time.Second, responses: true, maxResponse: 64 << 10})
+	for _, want := range []string{`"response_header_mode":"SEND"`, `"response_body_mode":"BUFFERED_PARTIAL"`,
+		`"allow_mode_override":true`, `"per_connection_buffer_limit_bytes":10485760`} {
+		if !strings.Contains(spec, want) {
+			t.Errorf("responses: no %s in %s", want, spec)
+		}
+	}
+	if spec := route(routeSettings{timeout: time.Second, responses: true, detect: true, failOpen: true}); !strings.Contains(spec, `"response_body_mode":"STREAMED"`) {
+		t.Errorf("responses in detect mode: %s", spec)
+	}
+	if spec := route(routeSettings{timeout: time.Second}); !strings.Contains(spec, `"response_header_mode":"SKIP"`) ||
+		strings.Contains(spec, "response_body_mode") || strings.Contains(spec, "per_connection_buffer_limit_bytes") {
+		t.Errorf("no responses: %s", spec)
 	}
 
+	if !(&Istio{}).result().Responses || !(&IstioIngress{}).result().Responses {
+		t.Error("an Istio integration doesn't report Responses")
+	}
 	tg := Target{Kind: httpRouteKind, Key: types.NamespacedName{Namespace: "shop", Name: "app"}}
 	withEngine := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "edge", Name: "gw-1"},
 		Spec: corev1.PodSpec{InitContainers: []corev1.Container{{Name: injection.ContainerName}}}}
-	rep := &report{kinds: []schema.GroupKind{httpRouteKind}, results: []*Result{
-		{Proxy: "Istio", Rolling: true, Pods: []corev1.Pod{withEngine}, Targets: map[Target]TargetState{tg: {Wired: true}}},
-	}}
+	res := (&Istio{}).result()
+	res.Pods, res.Targets = []corev1.Pod{withEngine}, map[Target]TargetState{tg: {Wired: true}}
+	rep := &report{kinds: []schema.GroupKind{httpRouteKind}, results: []*Result{res}}
 	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
 		TargetRefs: []wafv1alpha1.TargetRef{{Group: gatewayv1.GroupName, Kind: "HTTPRoute", Name: "app"}},
 		Responses:  &wafv1alpha1.ResponsesSpec{Inspect: true},
 	}}
-	if st, reason, msg := programmed(p, rep); st != metav1.ConditionFalse || reason != ReasonResponsesNotInspected ||
-		!strings.Contains(msg, "Istio can't send responses to the engine: HTTPRoute app's requests are inspected") {
+	if st, reason, msg := programmed(p, rep); st != metav1.ConditionTrue {
 		t.Errorf("Istio with responses: %s %s %q", st, reason, msg)
 	}
 }
