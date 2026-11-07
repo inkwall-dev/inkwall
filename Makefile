@@ -217,7 +217,25 @@ tidy: ## Tidy go.mod and go.sum, here and in test/crs (which builds against this
 	cd test/crs && $(GO) mod tidy
 
 .PHONY: check
-check: lint test vuln docs-check ## Run everything CI runs
+check: lint test vuln docs-check ## Fast checks before a push: lint, unit tests, vulnerability scan, docs (make check-all: every PR job of CI)
+
+.PHONY: generate-check
+generate-check: generate ## Regenerate the code, CRDs and chart files, and fail if they differ from the committed ones (as CI's generate job)
+	git diff --exit-code
+
+.PHONY: check-all
+check-all: ## Run every job CI runs on a pull request, one after another: hours, and needs Docker and kind (CONTRIBUTING.md#development-and-testing)
+	$(MAKE) check
+	$(MAKE) scale-test SCALE_CHANGES=5
+	$(MAKE) scale-test SCALE=wiring:500
+	$(MAKE) build generate-check helm-lint monitoring-test release-check crs-test
+	$(MAKE) bench-compare
+	$(MAKE) image
+	$(MAKE) raw-envoy-e2e
+	SKIP_BUILD=1 $(MAKE) websocket-e2e
+	$(MAKE) haproxy-e2e
+	$(MAKE) kind-e2e
+	$(MAKE) kind-upgrade
 
 .PHONY: image
 image: ## Build the engine and operator container images (IMAGE=name:tag, OPERATOR_IMAGE=name:tag)
@@ -233,7 +251,7 @@ release-check: ## Check the goreleaser configuration
 	$(GORELEASER) check
 
 # The kind targets, and the scripts they run, use the kind of KIND_VERSION.
-KIND_TARGETS := kind-cluster kind-up kind-operator kind-e2e kind-e2e-traefik kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-response-load kind-upgrade kind-down
+KIND_TARGETS := kind-quickstart kind-cluster kind-up kind-operator kind-e2e kind-e2e-traefik kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-response-load kind-upgrade kind-down
 $(KIND_TARGETS): export PATH := $(KIND_DIR):$(PATH)
 $(KIND_TARGETS): $(KIND_DIR)/kind
 
@@ -315,6 +333,14 @@ raw-envoy-e2e: ## End-to-end test of raw Envoy with the engine's ext_proc adapte
 .PHONY: websocket-e2e
 websocket-e2e: ## End-to-end test of WebSocket message inspection by the engine's proxy, with hack/wsecho, in Docker (no cluster)
 	IMAGE=$(IMAGE) hack/websocket/e2e.sh
+
+.PHONY: kind-quickstart
+kind-quickstart: ## Run docs/quickstart.md on a kind cluster of its own, with the released chart and images (needs network; CI runs it nightly)
+	hack/kind/quickstart.sh
+
+.PHONY: test-examples
+test-examples: ## Check each examples/<proxy> WAFPolicy with inkwallctl test --policy: benign requests allowed, attacks denied (examples/tests)
+	hack/examples-test.sh
 
 .PHONY: kind-down
 kind-down: ## Delete the kind cluster
