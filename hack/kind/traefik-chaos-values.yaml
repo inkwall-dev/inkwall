@@ -1,0 +1,23 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# The Traefik of the failure-mode suite (chaos.sh, #379): Ingresses of its
+# own class only, nothing about Inkwall in it. Its namespace is one of the
+# kind operator's proxy namespaces (hack/kind/operator.sh).
+ingressClass:
+  enabled: true
+  isDefaultClass: false
+  name: traefik-chaos
+
+providers:
+  kubernetesIngress:
+    ingressClass: traefik-chaos
+  # The operator's Middleware is a Traefik CRD: without this provider, the
+  # wired Ingress's router can't find it and answers 404.
+  kubernetesCRD:
+    ingressClass: traefik-chaos
+  kubernetesGateway:
+    enabled: false
+
+gateway:
+  enabled: false
