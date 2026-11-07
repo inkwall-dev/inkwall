@@ -188,7 +188,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        proxy: [traefik, raw-envoy, envoy-gateway, istio, haproxy]
+        # networkpolicy: the chart's NetworkPolicies under a default deny.
+        proxy: [traefik, raw-envoy, envoy-gateway, istio, haproxy, networkpolicy]
     name: e2e (${{ matrix.proxy }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

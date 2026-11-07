@@ -125,6 +125,9 @@ What changes by itself:
   for a request an adapter can't read. `InkwallConfig.spec.engine.jsonDenials` (the engine's
   `--json-denials`) answers clients that accept `application/json` with a JSON body; off by
   default.
+- **NetworkPolicies, off by default** (#387): `networkPolicy.enabled` in the chart, for clusters
+  that deny traffic by default. See
+  [Network flows](../deploy/helm/inkwall/README.md#network-flows) for what connects to what.
 - **A monitoring kit, off by default** (#381): `metrics.serviceMonitor`, `metrics.podMonitor`,
   `metrics.prometheusRule` and `metrics.dashboard` in the chart. See [Monitoring](monitoring.md).
 

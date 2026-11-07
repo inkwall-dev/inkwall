@@ -13,6 +13,7 @@ builds them into a signed [bundle](../../../docs/glossary.md#bundle), serves the
 - [Values](#values)
 - [Proxy namespaces](#proxy-namespaces)
 - [Integration permissions](#integration-permissions)
+- [Network flows](#network-flows)
 - [Connecting to a control plane](#connecting-to-a-control-plane)
 - [Rotating the signing key](#rotating-the-signing-key)
 - [Suspending inspection](#suspending-inspection)
@@ -87,6 +88,9 @@ from the operator's generated manifests. Don't edit `files/` by hand.
 | `metrics.forceMonitoringObjects` | `false` | Render the ServiceMonitor, PodMonitor and PrometheusRule even when the cluster doesn't serve `monitoring.coreos.com/v1` (for `helm template`) |
 | `serviceAccount.name`, `annotations` | the operator's name (`inkwall-operator`), `{}` | |
 | `crds.install` | `true` | |
+| `networkPolicy.enabled` | `false` | NetworkPolicies for the operator's pods. See [network flows](#network-flows) |
+| `networkPolicy.webhookFrom`, `metricsFrom` | `[]` | The peers the webhook and metrics ports accept; empty: anywhere |
+| `networkPolicy.egress.enabled`, `apiServerCIDRs`, `apiServerPorts`, `extra` | `false`, `[]`, `[443, 6443]`, `[]` | Also limit what the chart's pods connect to: DNS, the API server (any address on its ports, unless `apiServerCIDRs`) and `extra` rules (the optional control plane) |
 | `distribution.port` | `9445` | The port engines connect to |
 | `webhook.port`, `timeoutSeconds` | `9443`, `2` | |
 | `webhook.certs.mode` | `rotate` | `rotate`: the operator creates, renews and injects a self-signed certificate. `certManager`: cert-manager issues it |
@@ -188,6 +192,36 @@ Changing `rbac.integrations` restarts the operator, which then checks again. A r
 revoked outside the chart is picked up within about a minute: each replica restarts, after a
 random delay, with the integration enabled or disabled. Routes the integration wired before it was
 disabled stay wired: unprotect them (or uninstall) before leaving its role out.
+
+## Network flows
+
+What Inkwall's components connect to, for clusters that deny traffic by default:
+
+| From | To | Port | |
+|---|---|---|---|
+| The API server | the operator's pods | `webhook.port` (9443) | The validating and Pod webhooks |
+| The kubelet | the operator's pods | 8081 | Probes |
+| The engines, in the proxy namespaces | the operator's pods | `distribution.port` (9445) | Policy bundles (gRPC over TLS) |
+| Prometheus | the operator's pods | 8080 | `/metrics` |
+| Prometheus | the engines | `inkwall-admin` | The engines' metrics |
+| The operator, the uninstall hook | the API server | 443 or 6443 | |
+| The engines | the API server | 443 or 6443 | The bundle Secret, when the operator is down |
+| The operator | the control plane | 443 | Only when `InkwallConfig.spec.controlPlane` is set |
+| The proxy | the engine | a Unix socket or localhost | In the same pod: no policy applies |
+
+`networkPolicy.enabled: true` creates a NetworkPolicy for the operator's pods that lets the first
+four in: the webhook and the probes from anywhere, since the API server's address isn't known in
+general (`networkPolicy.webhookFrom` narrows it), the distribution server from
+`injection.proxyNamespaces` (every namespace with `*`), and the metrics from anywhere
+(`networkPolicy.metricsFrom` narrows it, e.g. to Prometheus' namespace).
+`networkPolicy.egress.enabled: true` also limits what the chart's pods connect to: DNS, the API
+server's ports, and `networkPolicy.egress.extra` (add the control plane's address there). Engines
+run in the proxies' namespaces, which the chart doesn't own: if those deny by default, let the
+engines reach the operator's distribution port and the API server, and Prometheus reach their
+`inkwall-admin` port.
+
+The chart doesn't create a default-deny policy itself. CI checks these policies on kind under one
+(`make kind-e2e-networkpolicy`).
 
 ## Connecting to a control plane
 

@@ -186,6 +186,33 @@ crds:
   # (deleting a CRD deletes every object of its kind).
   install: true
 
+networkPolicy:
+  # NetworkPolicies for the chart's pods, for clusters that deny by default
+  # (the chart README's Network flows). Ingress to the operator: the
+  # webhook (the API server calls it) and the probes from anywhere, the
+  # distribution server from injection.proxyNamespaces (the engines), the
+  # metrics from anywhere.
+  enabled: false
+  # NetworkPolicy peers the webhook port accepts, e.g. the API server's
+  # address: [{ipBlock: {cidr: 10.0.0.10/32}}]. Empty: anywhere.
+  webhookFrom: []
+  # Peers the metrics port accepts, e.g. Prometheus' namespace:
+  # [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}}].
+  # Empty: anywhere.
+  metricsFrom: []
+  egress:
+    # Also limit what the chart's pods connect to: DNS, the API server, and
+    # extra.
+    enabled: false
+    # The API server's addresses as the network plugin sees them (after the
+    # kubernetes Service's translation; kubectl get endpoints kubernetes),
+    # and its ports. Empty: any address on these ports.
+    apiServerCIDRs: []
+    apiServerPorts: [443, 6443]
+    # Extra egress rules, e.g. the optional control plane's address:
+    # [{to: [{ipBlock: {cidr: 203.0.113.10/32}}], ports: [{port: 443}]}].
+    extra: []
+
 distribution:
   # Engines connect here (gRPC over TLS, with the webhook's certificate) to
   # receive the policy bundles.

@@ -184,4 +184,40 @@ if grep -q 'blob/main/' <<<"$out" || ! grep -q "blob/v$version/docs/monitoring.m
   echo "PrometheusRule: runbook_url must point at v$version's docs" >&2
   fail=1
 fi
+# NetworkPolicies (#387): none by default; the operator's ingress, with the
+# distribution server open to the proxy namespaces (or every namespace with
+# "*"); webhookFrom and metricsFrom; egress only when asked.
+# netpol [helm flags...]: the NetworkPolicies, on one line.
+netpol() {
+  helm template inkwall "$CHART" --namespace inkwall-system "$@" |
+    awk '/^kind: NetworkPolicy$/ {on=1} /^---$/ {on=0} on' | grep -v '^ *#' | tr -s ' \n' ' '
+}
+if [[ -n $(netpol) ]]; then
+  echo "NetworkPolicies by default: $(netpol); want none" >&2
+  fail=1
+fi
+# expect DESCRIPTION WANT [helm flags...]: the policies contain WANT.
+expect() {
+  local what=$1 want=$2 got
+  shift 2
+  got=$(netpol --set networkPolicy.enabled=true "$@")
+  if ! grep -qF -- "$want" <<<"$got"; then
+    echo "NetworkPolicy, $what: no \"$want\" in: $got" >&2
+    fail=1
+  fi
+}
+expect "distribution from the proxy namespaces" "- ports: - {port: distribution, protocol: TCP} from: - namespaceSelector: matchExpressions: - key: kubernetes.io/metadata.name operator: In values: - envoy-gateway-system - haproxy-controller - istio-ingress - istio-system - kube-system - traefik - ports:"
+expect "distribution from every namespace" "- {port: distribution, protocol: TCP} from: - namespaceSelector: {} - ports:" --set "injection.proxyNamespaces={*}"
+expect "webhook from anywhere" "ingress: - ports: - {port: webhook, protocol: TCP} - ports: - {port: probes, protocol: TCP}"
+expect "webhook from the API server" "- {port: webhook, protocol: TCP} from: - ipBlock: cidr: 10.0.0.10/32" --set 'networkPolicy.webhookFrom[0].ipBlock.cidr=10.0.0.10/32'
+expect "metrics from anywhere" "- ports: - {port: metrics, protocol: TCP} "
+expect "metrics from Prometheus' namespace" "- {port: metrics, protocol: TCP} from: - namespaceSelector: matchLabels: kubernetes.io/metadata.name: monitoring" --set 'networkPolicy.metricsFrom[0].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name=monitoring'
+if grep -q 'policyTypes: \[Egress\]' <<<"$(netpol --set networkPolicy.enabled=true)"; then
+  echo "NetworkPolicy: egress without networkPolicy.egress.enabled" >&2
+  fail=1
+fi
+expect "egress" "policyTypes: [Egress] egress: - ports: - {port: 53, protocol: UDP} - {port: 53, protocol: TCP} - ports: - {port: 443, protocol: TCP} - {port: 6443, protocol: TCP} - ports: - port: 443 to: - ipBlock: cidr: 203.0.113.10/32" \
+  --set networkPolicy.egress.enabled=true --set 'networkPolicy.egress.extra[0].to[0].ipBlock.cidr=203.0.113.10/32' --set 'networkPolicy.egress.extra[0].ports[0].port=443'
+expect "egress to the API server's addresses" "- {port: 6443, protocol: TCP} to: - ipBlock: {cidr: 172.18.0.2/32}" --set networkPolicy.egress.enabled=true --set 'networkPolicy.egress.apiServerCIDRs={172.18.0.2/32}'
+
 exit $fail
