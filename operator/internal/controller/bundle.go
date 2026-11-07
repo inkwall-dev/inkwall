@@ -645,9 +645,9 @@ func (r *BundleReconciler) writeConfigStatus(ctx context.Context, cfg *wafv1alph
 		cond.Message += fmt.Sprintf("; spec.suspend is %t, but its bundle couldn't be published (see the operator's log)", cfg.Spec.Suspend)
 	}
 	var bs *wafv1alpha1.BundleStatus
-	if published != nil {
+	if v := published.GetVersion(); published != nil && v <= math.MaxInt64 {
 		bs = &wafv1alpha1.BundleStatus{
-			Version:         int64(min(published.GetVersion(), math.MaxInt64)), // #nosec G115 -- bounded
+			Version:         int64(v),
 			CompressedBytes: int64(r.current.Size()),
 			LimitBytes:      bundle.MaxCompressedBytes,
 		}
