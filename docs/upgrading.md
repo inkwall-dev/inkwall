@@ -61,6 +61,11 @@ What's new:
 
 What changes by itself:
 
+- **In Detect mode, the responses of flagged requests are inspected** (with `responses.inspect`):
+  a request the rules flag is let through, and an SQL error or a leak in its response is now its
+  own event, as for any request. The request's event may list a few more rules than before: the
+  rules run to the end instead of stopping where Block mode would.
+
 - **Istio ingress gateways' `EnvoyFilter` is split.** The VirtualServices' filters move from
   `inkwall-istio-ingress` into shards `inkwall-istio-ingress-00` to `-31` in the same namespace;
   `inkwall-istio-ingress` keeps the engine's cluster. One object passed etcd's size limit at about

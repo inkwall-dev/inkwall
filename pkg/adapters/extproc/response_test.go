@@ -380,3 +380,22 @@ func TestResponseBeforeRequestBodyObserved(t *testing.T) {
 		})
 	}
 }
+
+// TestResponseOfFlaggedRequestDetectMode (#360): in Detect mode a request
+// the rules flag reaches the app, and its response is inspected too: two
+// events, the request's and the response's.
+func TestResponseOfFlaggedRequestDetectMode(t *testing.T) {
+	var logs bytes.Buffer
+	e := newEnvoy(t, newResponsePipeline(t, pipeline.ModeDetect, 256, pipeline.OversizeAuto), 64, &logs)
+	e.observe(t, headers("GET", "/?id=1%27%20OR%20%271%27%3D%271", true),
+		respHeaders(500, false, "content-type", "text/html"), respBody(sqlError, true))
+	evs := securityEvents(t, &logs)
+	if len(evs) != 2 {
+		t.Fatalf("%d events, want the request's and the response's: %s", len(evs), logs.String())
+	}
+	for i, phase := range []string{"request", "response"} {
+		if got, _ := evs[i]["phase"].(string); got != phase && !(phase == "request" && got == "") {
+			t.Errorf("event %d: phase %q, want %s: %v", i, got, phase, evs[i])
+		}
+	}
+}
