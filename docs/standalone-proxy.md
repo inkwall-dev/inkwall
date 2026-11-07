@@ -45,6 +45,9 @@ The main flags; `inkwall-engine proxy -h` lists them all:
 | `--disable-rule-groups` | | CRS attack families the app can't be vulnerable to, e.g. `php,java` |
 | `--websocket-origins`, `--websocket-required-headers` | | Origins a [WebSocket](websocket.md) handshake may come from, headers it must have |
 | `--websocket-messages` | `off` | `inspect` or `text-only`: inspect each text message a client sends on a [WebSocket](websocket.md#messages-through-the-standalone-proxy); a denied one closes it with 1008 |
+| `--websocket-idle-timeout` | `0` (never) | Close a WebSocket with `1001` (going away) when nothing passes either way for this long. On shutdown, open WebSockets get `1001` in any case ([idle WebSockets](websocket.md#idle-websockets-and-shutdown)) |
+| `--max-connections` | `0` (no limit) | Client connections open at a time, WebSockets included; past it, a new connection waits in the listen backlog until one closes. `inkwall_connections` and `inkwall_connection_limit_waits_total` count them |
+| `--body-read-timeout` | `0` (off) | Time to read the part of a body that is inspected (`--max-body-bytes`); a client that stalls in it gets `408`. The rest streams to the upstream under `--read-timeout`: for long uploads, set `--read-timeout 0` and this one |
 | `--max-body-bytes` | `65536` | Body bytes inspected; `--oversize-body` decides what happens to larger bodies |
 | `--failure-mode` | `auto` | Requests that can't be inspected: rejected (503) in block mode, let through in detect mode |
 | `--trusted-proxies` | | [CIDRs](https://www.rfc-editor.org/rfc/rfc4632) whose [`X-Forwarded-For`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For) is trusted |

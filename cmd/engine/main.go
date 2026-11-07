@@ -190,6 +190,10 @@ type engineConfig struct {
 	tlsCert, tlsKey string
 	upstreamH2C     bool
 	upstreamCA      string
+	// The proxy's long-lived connections (#368): 0 is no limit.
+	webSocketIdle   time.Duration
+	bodyReadTimeout time.Duration
+	maxConnections  int
 
 	// Bundle mode: policies come from the operator.
 	operator           string
@@ -237,6 +241,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	readTimeout := fs.Duration("read-timeout", 60*time.Second, "maximum time to read a whole request, including the body (0 = no limit; not ext-proc; spoe: time to read one frame once it has begun)")
 	var upstream *string
 	wsMessages := new(string)
+	wsIdle, bodyReadTimeout, maxConns := new(time.Duration), new(time.Duration), new(int)
 	h2c, upstreamH2C := new(bool), new(bool)
 	tlsCert, tlsKey, upstreamCA := new(string), new(string), new(string)
 	if command == cmdProxy {
@@ -245,6 +250,9 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 		tlsKey = fs.String("tls-key", "", "private key (PEM) of --tls-cert")
 		upstreamH2C = fs.Bool("upstream-h2c", false, "reach an http:// upstream over HTTP/2 without TLS, as a gRPC server needs (WebSocket upgrades can't pass then)")
 		upstreamCA = fs.String("upstream-ca", "", "CA certificates (PEM) that an https:// upstream's certificate is verified with, instead of the system's")
+		wsIdle = fs.Duration("websocket-idle-timeout", 0, "close a WebSocket with 1001 (going away) when nothing passes either way for this long (0 = never)")
+		bodyReadTimeout = fs.Duration("body-read-timeout", 0, "maximum time to read the part of a request body that is inspected (408 past it); the rest streams under --read-timeout, which can then be 0 for long uploads (0 = only --read-timeout)")
+		maxConns = fs.Int("max-connections", 0, "maximum client connections open at a time, WebSockets included; past it, new ones wait until one closes (0 = no limit)")
 		upstream = fs.String("upstream", "", "upstream URL that allowed requests are forwarded to (required)")
 		// Only the proxy sees a WebSocket's messages: the other adapters
 		// see its handshake alone.
@@ -387,6 +395,10 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 			return cfg, errors.New("--upstream-h2c needs an http:// --upstream")
 		}
 		cfg.h2c, cfg.tlsCert, cfg.tlsKey, cfg.upstreamH2C, cfg.upstreamCA = *h2c, *tlsCert, *tlsKey, *upstreamH2C, *upstreamCA
+		if *wsIdle < 0 || *bodyReadTimeout < 0 || *maxConns < 0 {
+			return cfg, errors.New("--websocket-idle-timeout, --body-read-timeout and --max-connections must not be negative")
+		}
+		cfg.webSocketIdle, cfg.bodyReadTimeout, cfg.maxConnections = *wsIdle, *bodyReadTimeout, *maxConns
 		switch *wsMessages {
 		case "off":
 		case "inspect":
@@ -608,7 +620,8 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 		}
 		handler, err = proxy.New(p,
 			proxy.Config{UpstreamH2C: cfg.upstreamH2C, UpstreamCAs: cas, Upstream: cfg.upstream, MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics, JSONDenials: cfg.jsonDenials,
-				WebSocketMessages: cfg.webSocketMessages},
+				WebSocketMessages: cfg.webSocketMessages, WebSocketIdleTimeout: cfg.webSocketIdle,
+				BodyReadTimeout: cfg.bodyReadTimeout, ReadTimeout: cfg.readTimeout},
 		)
 	}
 	if err != nil {
@@ -703,6 +716,9 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 		}
 		return err
 	}
+	if cfg.maxConnections > 0 {
+		ln = limitListener(ln, cfg.maxConnections, metrics)
+	}
 	go func() { errc <- srv.Serve(ln) }()
 	if ag != nil {
 		go func() { _ = ag.Run(ctx) }()
@@ -737,6 +753,10 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 	defer cancel()
 	logger.Info("shutting down")
 	err = srv.Shutdown(shutdownCtx)
+	// Hijacked, the proxy's WebSockets aren't the server's: they get 1001.
+	if ph, ok := handler.(*proxy.Handler); ok {
+		err = errors.Join(err, ph.CloseWebSockets(shutdownCtx))
+	}
 	if admin != nil {
 		err = errors.Join(err, admin.Shutdown(shutdownCtx))
 	}
