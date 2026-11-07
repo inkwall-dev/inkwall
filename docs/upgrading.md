@@ -35,6 +35,12 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 What's new:
 
+- **Responses through Istio.** A policy with `responses.inspect` now has the responses of its
+  Istio HTTPRoutes and VirtualServices inspected, as through Envoy Gateway: a response that leaks
+  is replaced with 403 in `Block` mode and logged in `Detect` mode. Such a policy was
+  `Programmed=False` (`ResponsesNotInspected`) on Istio's routes; it is `Programmed` once the
+  operator has rewritten their `EnvoyFilter` objects. Routes whose policies don't inspect
+  responses keep sending none to the engine. See [Istio](istio.md#settings).
 - **IP allow and deny lists.** A `WAFIPList` lists client addresses (CIDRs), and
   `WAFPolicy.spec.ipLists: {allow: [...], deny: [...]}` names lists in the policy's namespace: a
   denied client gets 403 (logged in `Detect` mode) before any rule, an allowed one isn't inspected.
@@ -73,6 +79,9 @@ What's new:
 
 What changes by itself:
 
+- **Enforced checks the newest field a policy needs.** A policy with fields of 0.4.0 and 0.5.0
+  (`webSocket` and `ipLists`, say) was `Enforced` while a 0.4.x engine ran it; it is now
+  `EnginesOutdated` until every engine runs 0.5.0.
 - **The chart keeps the operator's settings of the Pod webhooks** (`failurePolicy`,
   `objectSelector`, `namespaceSelector`). The operator sets `failurePolicy` to `Fail` while a
   policy blocks; an upgrade used to render `Ignore` until the operator set it again, and Helm 4,
