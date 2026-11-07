@@ -173,6 +173,10 @@ func requirement(p *wafv1alpha1.WAFPolicy) (string, [3]int) {
 	if b := p.Spec.Body; b != nil && b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect {
 		set("spec.body.grpcMessages", [3]int{0, 4, 0})
 	}
+	if b := p.Spec.Body; b != nil && b.GRPC == wafv1alpha1.GRPCDeny {
+		// An older engine lets gRPC through (#367).
+		set("spec.body.grpc", [3]int{0, 5, 0})
+	}
 	if r := p.Spec.Responses; r != nil && r.Inspect {
 		// An older engine inspects requests only (#274).
 		set("spec.responses", [3]int{0, 4, 0})

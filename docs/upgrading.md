@@ -42,6 +42,10 @@ What's new:
   ([client IP](client-ip.md)). Upgrade the chart first, for the new CRD; a policy with lists is
   `Enforced=False` (`EnginesOutdated`) until every engine runs 0.5.0. `inkwallctl test` reads
   `WAFIPList` files and takes `--client-ip`.
+- **Refuse gRPC where none is served.** `body.grpc: Deny` on a `WAFPolicy` denies requests with a
+  gRPC or gRPC-Web content type, instead of the SecLang rule `docs/grpc.md` suggested. Upgrade the
+  chart first, for the CRD field; a policy that sets it is `Enforced=False` (`EnginesOutdated`)
+  until every engine runs 0.5.0.
 
 - **The CRS's own settings on a policy.** The CRS rule set binding of a `WAFPolicy` takes an
   optional `crs` block: `allowedMethods` (for REST APIs that send `PUT`, `PATCH` or `DELETE`),
@@ -152,6 +156,10 @@ What changes by itself:
   `metrics.prometheusRule` and `metrics.dashboard` in the chart. See [Monitoring](monitoring.md).
 - **`inkwallctl tune` is new** (#383): it suggests the narrowest exclusions from Detect mode's
   security events. See [Suggest exclusions from the events](testing-policies.md#suggest-exclusions-from-the-events).
+- **`inkwallctl test --suite` is new** (#385, experimental format): a file of cases, each a
+  request and optionally its response, with the verdict expected; `--junit` writes the results for
+  CI. See [Test suites](testing-policies.md#test-suites). The other `inkwallctl test` flags are
+  unchanged.
 
 ## From 0.4.0 to 0.4.1
 
