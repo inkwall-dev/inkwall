@@ -42,7 +42,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$branch"
-          git add hack/versions.env examples/raw-envoy/kubernetes.yaml $(git ls-files -m '*.md')
+          git add hack/versions.env examples/raw-envoy/kubernetes.yaml
+          git ls-files -m '*.md' | xargs -r git add
           git commit -m "build(deps): bump the versions under test"
           git push origin "$branch"
           {

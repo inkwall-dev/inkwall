@@ -217,7 +217,8 @@ jobs:
           kubectl get pods -A -o wide || true
           kubectl -n inkwall-system logs deployment/inkwall-operator --tail=100 || true
           mkdir -p "$RUNNER_TEMP/kind-logs"
-          bin/kind-*/kind export logs "$RUNNER_TEMP/kind-logs" --name inkwall || true
+          kind=(bin/kind-*/kind)
+          "${kind[0]}" export logs "$RUNNER_TEMP/kind-logs" --name inkwall || true
       - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

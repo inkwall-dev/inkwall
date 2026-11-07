@@ -117,10 +117,10 @@ crs-test: ## Run the OWASP CRS regression suite through the proxy (test/crs)
 lint: workflow-check versions-check lint-scripts ## Run golangci-lint, check the workflows' runners, that versions come from hack/versions.env, and lint the workflows and the shell scripts
 	$(GOLANGCI_LINT) run ./...
 
-# The workflows' and scripts' linters (#398). shellcheck and zizmor run from
-# their images when they aren't installed.
-ACTIONLINT ?= $(GO) run github.com/rhysd/actionlint/cmd/actionlint@$(call version,ACTIONLINT_VERSION)
-SHELLCHECK ?= $(if $(shell command -v shellcheck),shellcheck,docker run --rm -v $(CURDIR):/mnt -w /mnt koalaman/shellcheck:$(call version,SHELLCHECK_VERSION))
+# The workflows' and scripts' linters (#398). shellcheck (also actionlint's)
+# and zizmor run from their images when they aren't installed.
+ACTIONLINT ?= $(GO) run github.com/rhysd/actionlint/cmd/actionlint@$(call version,ACTIONLINT_VERSION) -shellcheck=$(CURDIR)/hack/shellcheck.sh
+SHELLCHECK ?= hack/shellcheck.sh
 ZIZMOR     ?= $(if $(shell command -v zizmor),zizmor,docker run --rm -v $(CURDIR):/repo -w /repo ghcr.io/zizmorcore/zizmor:$(call version,ZIZMOR_VERSION))
 
 .PHONY: lint-scripts
