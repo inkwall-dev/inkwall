@@ -240,7 +240,8 @@ condition() {
 }
 ready() { [[ $(condition Ready status) == True ]]; }
 programmed() { [[ $(condition Programmed status) == True && $(condition Programmed message) == *"wired to the engine in Istio"* ]]; }
-# policy [MODE]: the policy, in Block mode by default.
+# policy [MODE [SPEC]]: the policy, in Block mode by default, with SPEC
+# (indented YAML) added.
 policy() {
   "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
 apiVersion: waf.inkwall.dev/v1alpha1
@@ -253,7 +254,38 @@ spec:
   # CRS on the 48 KB form field below, on a CI runner, can pass the
   # default 250 ms. Envoy waits 500 ms longer than this.
   timeout: 1s
+${2:-}
 YAML
+}
+RESPONSES='  responses: {inspect: true}'
+# whoami echoes the request's headers in its text/plain body: this one makes
+# it leak a MySQL error, which the request rules don't mind.
+LEAK='X-Debug: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version'
+# responses_sent MODE: both Gateways' EnvoyFilters send the responses, held
+# (BUFFERED_PARTIAL) or streamed (STREAMED) (#374).
+responses_sent() {
+  for gw in custom plain; do
+    "${KUBECTL[@]}" -n "$NS" get envoyfilter "inkwall-waf-$gw" -o json | grep "\"response_body_mode\": *\"$1\"" >/dev/null || return 1
+  done
+}
+# leak_is STATUS PORT HOST...: the leaking response's status through each.
+leak_is() {
+  local want=$1 port=$2
+  shift 2
+  for host in "$@"; do
+    [[ $(code "$port" "$host" /leak -H "$LEAK") == "$want" ]] || return 1
+  done
+}
+leak_replaced() {
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
+    ! curl -s -H "Host: $HOST" -H "$LEAK" "http://127.0.0.1:$port/leak" | grep -qF 'SQL syntax' || return 1
+  done
+}
+# logged_response SELECTOR ACTION PATH: an engine of the pods SELECTOR
+# selects logged a response event for PATH.
+logged_response() {
+  "${KUBECTL[@]}" -n "$NS" logs -l "$1" -c inkwall-engine --tail=-1 |
+    grep '"security event"' | grep '"phase":"response"' | grep "\"action\":\"$2\"" | grep "\"path\":\"$3\"" >/dev/null
 }
 has_sidecar() {
   "${KUBECTL[@]}" -n "$NS" get configmap custom-params -o jsonpath='{.data.deployment}' | grep 'name: inkwall-engine' >/dev/null
@@ -389,6 +421,25 @@ check "a body attack passes" both_are 200 "$body_path" --data-urlencode "q=1' OR
 eventually "and reaches the app" reached_app "$body_path"
 eventually "the engines log the streamed body's attack" logged "$body_path"
 
+echo "== responses"
+# Inspected through Istio since #374: a leak is replaced in Block mode,
+# logged in Detect mode, and the policy is Programmed.
+policy Block "$RESPONSES"
+eventually "the EnvoyFilters send the responses, held" responses_sent BUFFERED_PARTIAL
+eventually "Programmed with responses" programmed
+forward_all
+eventually "a response leaking a SQL error is replaced through both Gateways: 403" leak_is 403 "$CUSTOM_PORT" "$HOST"
+check "and through the other Gateway" leak_is 403 "$PLAIN_PORT" "$HOST"
+check "its body is gone" leak_replaced
+check "a clean response passes" both_are 200 /products/42
+check "the unprotected route lets the leak through" leak_is 200 "$CUSTOM_PORT" "$OPEN_HOST"
+eventually "the engines log it as a response deny" logged_response gateway.istio.io/managed=istio.io-gateway-controller deny /leak
+policy Detect "$RESPONSES"
+eventually "the EnvoyFilters stream the responses in detect mode" responses_sent STREAMED
+forward_all
+eventually "detect mode: the leak passes" leak_is 200 "$CUSTOM_PORT" "$HOST"
+eventually "and the engines log it" logged_response gateway.istio.io/managed=istio.io-gateway-controller log /leak
+
 echo "== unprotected"
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy shared --timeout=60s >/dev/null
 eventually "the operator's Istio objects are gone" no_wiring
@@ -460,6 +511,7 @@ vs_condition() {
 }
 vs_programmed() { [[ $(vs_condition Programmed status) == True && $(vs_condition Programmed message) == *"VirtualService(s) wired to the engine in Istio ingress gateway"* ]]; }
 vs_ready() { [[ $(vs_condition Ready status) == True ]]; }
+# vs_policy [MODE [SPEC]]: as policy, on the VirtualService.
 vs_policy() {
   "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
 apiVersion: waf.inkwall.dev/v1alpha1
@@ -468,8 +520,9 @@ metadata: {name: vs, namespace: $NS}
 spec:
   targetRefs:
     - {group: networking.istio.io, kind: VirtualService, name: shop-vs}
-  mode: Block
+  mode: ${1:-Block}
   timeout: 1s
+${2:-}
 YAML
 }
 vs_filter() { "${KUBECTL[@]}" -n "$NS" get envoyfilter inkwall-istio-ingress -o name >/dev/null 2>&1; }
@@ -512,6 +565,15 @@ eventually "and the policy is Unverified, not Programmed (the probe got the app'
 "${KUBECTL[@]}" -n "$NS" delete envoyfilter e2e-remove-inkwall >/dev/null
 eventually "the patch gone: blocking again" vs_is 403 "/api$SQLI"
 eventually "and Programmed once the probe answers" vs_programmed
+vs_policy Block "$RESPONSES"
+eventually "VirtualService, responses: a leak is replaced: 403" leak_is 403 "$VS_PORT" "$VS_HOST"
+check "a clean response passes" vs_is 200 /api/products/42
+check "the unprotected VirtualService lets the leak through" leak_is 200 "$VS_PORT" "$VS_OPEN_HOST"
+eventually "the ingress gateway's engine logs it as a response deny" logged_response istio=ingressgateway deny /leak
+vs_policy Detect "$RESPONSES"
+eventually "VirtualService, detect mode: the leak passes" leak_is 200 "$VS_PORT" "$VS_HOST"
+eventually "and the engine logs it" logged_response istio=ingressgateway log /leak
+vs_policy
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy vs --timeout=60s >/dev/null
 eventually "unprotected: the EnvoyFilter is gone" no_vs_filter
 eventually "and the attack passes again" vs_is 200 "/api$SQLI"
