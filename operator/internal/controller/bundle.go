@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -554,7 +555,7 @@ func (r *BundleReconciler) writeStatus(ctx context.Context, res resolver.Result,
 		}
 		var version int64
 		if st.Applied {
-			version = int64(versions[resolver.PolicyID(p.Namespace, p.Name)]) // #nosec G115 -- versions count builds
+			version = statusVersion(versions[resolver.PolicyID(p.Namespace, p.Name)])
 		}
 		g.Go(func() error {
 			return r.updateStatus(gctx, p, func(o client.Object) bool {
@@ -721,4 +722,14 @@ func eventsConfig(cfg *wafv1alpha1.InkwallConfig) *bundlev1.EventsConfig {
 		return nil
 	}
 	return out
+}
+
+// statusVersion is a bundle version as status.bundleVersion holds it: one
+// beyond int64 (never reached: versions count builds) is held at its
+// maximum, not wrapped to a negative version.
+func statusVersion(v uint64) int64 {
+	if v > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(v)
 }
