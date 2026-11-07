@@ -35,6 +35,13 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 What's new:
 
+- **IP allow and deny lists.** A `WAFIPList` lists client addresses (CIDRs), and
+  `WAFPolicy.spec.ipLists: {allow: [...], deny: [...]}` names lists in the policy's namespace: a
+  denied client gets 403 (logged in `Detect` mode) before any rule, an allowed one isn't inspected.
+  They match the client IP the engine resolves, so get that right first
+  ([client IP](client-ip.md)). Upgrade the chart first, for the new CRD; a policy with lists is
+  `Enforced=False` (`EnginesOutdated`) until every engine runs 0.5.0. `inkwallctl test` reads
+  `WAFIPList` files and takes `--client-ip`.
 - **Refuse gRPC where none is served.** `body.grpc: Deny` on a `WAFPolicy` denies requests with a
   gRPC or gRPC-Web content type, instead of the SecLang rule `docs/grpc.md` suggested. Upgrade the
   chart first, for the CRD field; a policy that sets it is `Enforced=False` (`EnginesOutdated`)

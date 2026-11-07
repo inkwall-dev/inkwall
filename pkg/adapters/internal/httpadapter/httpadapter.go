@@ -102,7 +102,7 @@ func IsEvent(v pipeline.Verdict) bool {
 		return true
 	}
 	switch v.Reason {
-	case pipeline.ReasonNone, pipeline.ReasonCanceled, pipeline.ReasonSkipped, pipeline.ReasonNoPolicy, pipeline.ReasonSuspended:
+	case pipeline.ReasonNone, pipeline.ReasonCanceled, pipeline.ReasonSkipped, pipeline.ReasonNoPolicy, pipeline.ReasonSuspended, pipeline.ReasonIPAllow:
 		return false
 	}
 	return true

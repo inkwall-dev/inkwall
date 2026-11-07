@@ -337,3 +337,16 @@ func TestSamples(t *testing.T) {
 		})
 	}
 }
+
+func ipListDoc(spec string) string {
+	return "apiVersion: waf.inkwall.dev/v1alpha1\nkind: WAFIPList\nmetadata: {name: l, namespace: default}\nspec:\n" + spec
+}
+
+func TestWAFIPListValidation(t *testing.T) {
+	check(t, []validationCase{
+		{name: "entries", doc: ipListDoc("  entries: [{cidr: 203.0.113.0/24, description: abuse}, {cidr: \"2001:db8::/32\"}, {cidr: 192.0.2.1}]\n")},
+		{name: "no entries", doc: ipListDoc("  entries: []\n"), wantErr: "should have at least 1 items"},
+		{name: "a host name", doc: ipListDoc("  entries: [{cidr: lb.example.com}]\n"), wantErr: "spec.entries[0].cidr"},
+		{name: "policy lists", doc: policy(target + "  ipLists: {allow: [monitors], deny: [abusers]}\n")},
+	})
+}

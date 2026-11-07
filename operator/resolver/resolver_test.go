@@ -389,3 +389,50 @@ func TestDeterministic(t *testing.T) {
 		wantProto(t, &bundlev1.Bundle{Policies: got.Policies, RuleSets: got.RuleSets}, &bundlev1.Bundle{Policies: want.Policies, RuleSets: want.RuleSets})
 	}
 }
+
+func ipList(name string, cidrs ...string) wafv1alpha1.WAFIPList {
+	l := wafv1alpha1.WAFIPList{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: name}}
+	for _, c := range cidrs {
+		l.Spec.Entries = append(l.Spec.Entries, wafv1alpha1.IPListEntry{CIDR: wafv1alpha1.CIDR(c)})
+	}
+	return l
+}
+
+// TestIPLists: a policy's IP lists are resolved into its CIDRs, merged
+// and without repeats; a missing list, or one in another namespace, fails
+// the policy (#358).
+func TestIPLists(t *testing.T) {
+	p := policy("shop", 0, "shop")
+	p.Spec.IPLists = &wafv1alpha1.IPListsSpec{Allow: []wafv1alpha1.IPListName{"monitors"}, Deny: []wafv1alpha1.IPListName{"bad", "worse"}}
+	other := ipList("bad", "192.0.2.0/24")
+	other.Namespace = "elsewhere"
+	in := Input{
+		Policies:  []wafv1alpha1.WAFPolicy{p},
+		Ingresses: []networkingv1.Ingress{ingress("shop", rule("shop.example.com", ipath("/", networkingv1.PathTypePrefix)))},
+		IPLists: []wafv1alpha1.WAFIPList{
+			ipList("monitors", "10.0.0.0/8"),
+			ipList("bad", "203.0.113.0/24", "2001:db8::/32"),
+			ipList("worse", "203.0.113.0/24", "198.51.100.7"),
+			other,
+		},
+	}
+	res := Resolve(in)
+	wantStatus(t, res, "shop", true, ReasonAccepted, "")
+	if len(res.Policies) != 1 {
+		t.Fatalf("%d policies", len(res.Policies))
+	}
+	got := res.Policies[0].GetIpLists()
+	if !slices.Equal(got.GetAllow(), []string{"10.0.0.0/8"}) || !slices.Equal(got.GetDeny(), []string{"203.0.113.0/24", "2001:db8::/32", "198.51.100.7"}) {
+		t.Errorf("IP lists %v", got)
+	}
+
+	in.IPLists = in.IPLists[:2]
+	res = Resolve(in)
+	wantStatus(t, res, "shop", false, ReasonInvalidRef, "WAFIPList worse not found")
+	in.IPLists = []wafv1alpha1.WAFIPList{ipList("monitors", "10.0.0.0/8"), ipList("worse", "1.2.3.4"), other}
+	res = Resolve(in)
+	wantStatus(t, res, "shop", false, ReasonInvalidRef, "WAFIPList bad not found")
+	in.IPLists = []wafv1alpha1.WAFIPList{ipList("monitors", "10.0.0.0/8"), ipList("bad", "lb.example.com"), ipList("worse", "1.2.3.4")}
+	res = Resolve(in)
+	wantStatus(t, res, "shop", false, ReasonInvalidRef, "WAFIPList bad: ")
+}

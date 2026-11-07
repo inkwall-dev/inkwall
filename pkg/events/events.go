@@ -358,6 +358,10 @@ func Reason(r pipeline.Reason) enginev1.Reason {
 		return enginev1.Reason_REASON_SUSPENDED
 	case pipeline.ReasonWebSocket:
 		return enginev1.Reason_REASON_WEBSOCKET
+	case pipeline.ReasonIPDeny:
+		return enginev1.Reason_REASON_IP_DENY
+	case pipeline.ReasonIPAllow:
+		return enginev1.Reason_REASON_IP_ALLOW
 	case pipeline.ReasonGRPC:
 		return enginev1.Reason_REASON_GRPC
 	default:

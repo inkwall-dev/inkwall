@@ -113,6 +113,18 @@ message Policy {
   // fields, ignore them (more rules apply) instead of reading them as
   // turning the rules off entirely.
   repeated Exclusion target_exclusions = 13;
+  // The client addresses the policy denies or lets through uninspected,
+  // resolved from its IP lists. Unset: none. Engines before 0.5.0 ignore
+  // it: the operator doesn't count them as enforcing a policy that sets it.
+  IPLists ip_lists = 14;
+}
+
+// IPLists are a policy's IP lists, as CIDR prefixes (10.0.0.0/8,
+// 2001:db8::/32) or addresses. A client in deny is denied; one in allow
+// and not in deny is not inspected.
+message IPLists {
+  repeated string allow = 1;
+  repeated string deny = 2;
 }
 
 // RouteMatch matches requests by host, path and method.

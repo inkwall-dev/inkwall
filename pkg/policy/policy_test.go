@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"net/netip"
 	"runtime"
 	"slices"
 	"strings"
@@ -355,6 +356,42 @@ func TestTargetExclusions(t *testing.T) {
 	b.Policies[0].TargetExclusions[0].Cookie = "a"
 	if _, err := Compile(b, Options{}); err == nil {
 		t.Error("an exclusion naming a header and a cookie compiled")
+	}
+}
+
+// TestIPLists: a policy's IP lists apply to its own routes, on the
+// request's client IP (#358).
+func TestIPLists(t *testing.T) {
+	b := testBundle()
+	b.Policies[0].IpLists = &bundlev1.IPLists{Allow: []string{"10.0.0.0/8"}, Deny: []string{"203.0.113.0/24", "2001:db8::/32"}}
+	set, err := Compile(b, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := func(host, uri, ip string) *request.Request {
+		r := req(host, uri)
+		r.ClientIP = netip.MustParseAddr(ip)
+		return r
+	}
+	for _, tc := range []struct {
+		r      *request.Request
+		action pipeline.Action
+		reason pipeline.Reason
+	}{
+		{from("shop.example.com", "/", "203.0.113.9"), pipeline.ActionDeny, pipeline.ReasonIPDeny},
+		{from("shop.example.com", "/", "2001:db8::7"), pipeline.ActionDeny, pipeline.ReasonIPDeny},
+		{from("shop.example.com", "/"+sqli, "10.1.2.3"), pipeline.ActionAllow, pipeline.ReasonIPAllow},
+		{from("shop.example.com", "/"+sqli, "198.51.100.7"), pipeline.ActionDeny, pipeline.ReasonRule},
+		// Another policy's route: its lists don't apply.
+		{from("admin.example.com", "/", "203.0.113.9"), pipeline.ActionAllow, pipeline.ReasonNone},
+	} {
+		if v := set.Check(context.Background(), tc.r); v.Action != tc.action || v.Reason != tc.reason {
+			t.Errorf("%s%s from %s: %s/%s, want %s/%s", tc.r.Host, tc.r.RawURI, tc.r.ClientIP, v.Action, v.Reason, tc.action, tc.reason)
+		}
+	}
+	b.Policies[0].IpLists.Deny = []string{"10.0.0.0/33"}
+	if _, err := Compile(b, Options{}); err == nil || !strings.Contains(err.Error(), "shop/site") {
+		t.Errorf("a bad prefix: %v, want an error naming the policy", err)
 	}
 }
 

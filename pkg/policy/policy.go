@@ -21,6 +21,7 @@ import (
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	"github.com/inkwall-dev/inkwall/pkg/events"
+	"github.com/inkwall-dev/inkwall/pkg/iplist"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/router"
@@ -314,6 +315,14 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 		Responses:    responses,
 		GRPCMessages: bp.GetBody().GetGrpcMessages(),
 		DenyGRPC:     bp.GetBody().GetDenyGrpc(),
+	}
+	if l := bp.GetIpLists(); l != nil {
+		if pc.IPAllow, err = iplist.Parse(l.GetAllow()); err != nil {
+			return nil, key, fmt.Errorf("IP allow list: %w", err)
+		}
+		if pc.IPDeny, err = iplist.Parse(l.GetDeny()); err != nil {
+			return nil, key, fmt.Errorf("IP deny list: %w", err)
+		}
 	}
 	if bp.GetMode() == bundlev1.Mode_MODE_BLOCK {
 		pc.Mode = pipeline.ModeBlock

@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/inkwall-dev/inkwall/pkg/iplist"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/router"
 	"github.com/inkwall-dev/inkwall/pkg/rules"
@@ -127,6 +128,12 @@ type Config struct {
 	// Responses configures response inspection; the zero value inspects
 	// none.
 	Responses ResponseConfig
+	// IPDeny and IPAllow are the policy's IP lists (#358), checked on the
+	// resolved client IP before anything else: a client in IPDeny is
+	// denied (logged in detect mode) with ReasonIPDeny, one in IPAllow and
+	// not in IPDeny is let through uninspected with ReasonIPAllow. Nil:
+	// none.
+	IPDeny, IPAllow *iplist.Set
 	// DenyGRPC denies a request with a gRPC or gRPC-Web content type
 	// (logged in detect mode) with ReasonGRPC, before the rules: for routes
 	// that serve no gRPC (#367).
@@ -210,6 +217,8 @@ type Pipeline struct {
 	observer Observer
 	routes   *router.Table
 	ws       *WebSocketRules
+	ipDeny   *iplist.Set
+	ipAllow  *iplist.Set
 	denyGRPC bool
 	// responses: Inspect, MaxBytes, and Oversize resolved for the mode.
 	responses ResponseConfig
@@ -238,6 +247,8 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 		observer: cfg.Observer,
 		routes:   cfg.Routes,
 		ws:       cfg.WebSocket,
+		ipDeny:   cfg.IPDeny,
+		ipAllow:  cfg.IPAllow,
 		denyGRPC: cfg.DenyGRPC,
 		responses: ResponseConfig{
 			Inspect:  cfg.Responses.Inspect,
@@ -253,10 +264,22 @@ var _ Inspector = (*Pipeline)(nil)
 // BodyLimit implements Inspector: max, or 0 for a path whose body is
 // skipped, so adapters don't buffer bodies that aren't inspected.
 func (p *Pipeline) BodyLimit(r *request.Request, max int64) int64 {
-	if p.routes.Decide(r.RawURI) != router.InspectAll || p.denyGRPC && p.mode == ModeBlock && GRPCContentType(r) {
+	if p.routes.Decide(r.RawURI) != router.InspectAll || p.ipListed(r) != ReasonNone || p.denyGRPC && p.mode == ModeBlock && GRPCContentType(r) {
 		return 0
 	}
 	return max
+}
+
+// ipListed returns ReasonIPDeny for a client in the deny list,
+// ReasonIPAllow for one in the allow list only, ReasonNone otherwise.
+func (p *Pipeline) ipListed(r *request.Request) Reason {
+	switch {
+	case p.ipDeny.Contains(r.ClientIP):
+		return ReasonIPDeny
+	case p.ipAllow.Contains(r.ClientIP):
+		return ReasonIPAllow
+	}
+	return ReasonNone
 }
 
 // Admission returns the pipeline's admission limit.
@@ -309,6 +332,12 @@ func (p *Pipeline) checkRequest(ctx context.Context, r *request.Request, keep bo
 }
 
 func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool) (Verdict, rules.Exchange) {
+	switch p.ipListed(r) {
+	case ReasonIPDeny:
+		return p.enforce(Verdict{Reason: ReasonIPDeny}, http.StatusForbidden), nil
+	case ReasonIPAllow:
+		return Verdict{Action: ActionAllow, Reason: ReasonIPAllow}, nil
+	}
 	switch p.routes.Decide(r.RawURI) {
 	case router.SkipAll:
 		return Verdict{Action: ActionAllow, Reason: ReasonSkipped}, nil

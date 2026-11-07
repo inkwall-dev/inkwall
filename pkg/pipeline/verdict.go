@@ -65,6 +65,11 @@ const (
 	// ReasonWebSocket means a WebSocket handshake didn't meet the policy's
 	// WebSocket rules: an origin not allowed, a required header missing.
 	ReasonWebSocket
+	// ReasonIPDeny means the client IP is in the policy's deny list.
+	ReasonIPDeny
+	// ReasonIPAllow means the client IP is in the policy's allow list, so
+	// the request was not inspected.
+	ReasonIPAllow
 	// ReasonGRPC means a gRPC call on a policy that refuses gRPC
 	// (DenyGRPC).
 	ReasonGRPC
@@ -94,6 +99,10 @@ func (r Reason) String() string {
 		return "suspended"
 	case ReasonWebSocket:
 		return "websocket"
+	case ReasonIPDeny:
+		return "ip-deny"
+	case ReasonIPAllow:
+		return "ip-allow"
 	case ReasonGRPC:
 		return "grpc"
 	default:

@@ -127,7 +127,37 @@ type WAFPolicySpec struct {
 	// (ResponsesNotInspected).
 	// +optional
 	Responses *ResponsesSpec `json:"responses,omitempty"`
+
+	// IPLists names WAFIPLists in the policy's namespace whose client
+	// addresses are denied, or let through uninspected. A deny list wins
+	// over an allow list. They are only as good as the client IP the
+	// engine resolves (docs/client-ip.md). Requires engines 0.5.0 or
+	// later.
+	// +optional
+	IPLists *IPListsSpec `json:"ipLists,omitempty"`
 }
+
+// IPListsSpec names a policy's IP lists.
+type IPListsSpec struct {
+	// Allow lists clients whose requests aren't inspected: health checkers,
+	// a scanner you run yourself. Their requests are not logged either.
+	// +kubebuilder:validation:MaxItems=16
+	// +listType=set
+	// +optional
+	Allow []IPListName `json:"allow,omitempty"`
+
+	// Deny lists clients whose requests are denied (403) before any rule,
+	// or logged in Detect mode.
+	// +kubebuilder:validation:MaxItems=16
+	// +listType=set
+	// +optional
+	Deny []IPListName `json:"deny,omitempty"`
+}
+
+// IPListName names a WAFIPList.
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:MaxLength=253
+type IPListName string
 
 // TargetRef names a route in the policy's namespace.
 // +kubebuilder:validation:XValidation:rule="(self.kind == 'Ingress' && (!has(self.group) || self.group == 'networking.k8s.io')) || (self.kind == 'HTTPRoute' && has(self.group) && self.group == 'gateway.networking.k8s.io') || (self.kind == 'IngressRoute' && has(self.group) && self.group == 'traefik.io') || (self.kind == 'VirtualService' && has(self.group) && self.group == 'networking.istio.io')",message="target must be a networking.k8s.io Ingress, a gateway.networking.k8s.io HTTPRoute, a traefik.io IngressRoute or a networking.istio.io VirtualService"

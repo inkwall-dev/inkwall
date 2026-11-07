@@ -100,8 +100,11 @@ enum Reason {
   // A WebSocket handshake didn't meet the policy's WebSocket rules (an
   // origin not allowed, a required header missing).
   REASON_WEBSOCKET = 11;
-  // A gRPC call on a policy that refuses gRPC (body.grpc: Deny). 12 and 13
-  // are the IP lists' (#358).
+  // The client IP is in the policy's IP deny list.
+  REASON_IP_DENY = 12;
+  // The client IP is in the policy's IP allow list: not inspected.
+  REASON_IP_ALLOW = 13;
+  // A gRPC call on a policy that refuses gRPC (body.grpc: Deny).
   REASON_GRPC = 14;
 }
 

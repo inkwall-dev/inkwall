@@ -159,6 +159,25 @@ argument, argument name, cookie or header, `skip` paths,
 `ClusterWAFRuleSet` objects: built-in, [SecLang](https://coraza.io/docs/seclang/) or a [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/).
 [`operator/config/samples`](operator/config/samples) has one object of each kind.
 
+**IP lists.** A `WAFIPList` lists client addresses, and a policy denies or allows them:
+
+```yaml
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFIPList
+metadata: {name: abusers, namespace: shop}
+spec:
+  entries:
+  - {cidr: 203.0.113.0/24, description: scraper}
+---
+# in the WAFPolicy's spec:
+  ipLists: {deny: [abusers], allow: [monitors]}
+```
+
+A denied client gets 403 before any rule (logged in `Detect` mode); an allowed one isn't inspected,
+and a deny list wins over an allow list. Lists match the client IP the engine resolves: behind a
+load balancer, set that up first ([client IP](docs/client-ip.md)), or every client is the load
+balancer. `inkwallctl test --client-ip 203.0.113.9` checks them offline (engines 0.5.0 or later).
+
 **CRS settings.** At paranoia level 1 the CRS denies `PUT`, `PATCH` and `DELETE`, and request
 content types outside its list. Set the CRS's own settings on the CRS rule set's binding (engines
 0.5.0 or later):
