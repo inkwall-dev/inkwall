@@ -154,6 +154,14 @@ What changes by itself:
   for a request an adapter can't read. `InkwallConfig.spec.engine.jsonDenials` (the engine's
   `--json-denials`) answers clients that accept `application/json` with a JSON body; off by
   default.
+- **The chart checks its values** (#386). A `values.schema.json` makes `helm install`, `upgrade`
+  and `template` fail on a key the chart doesn't have, a wrong type, or a value outside its set,
+  naming it, where 0.4.x ignored them. A typo such as `rbac.integration.traefik` was silently
+  ignored before. Run `helm upgrade ... --dry-run` first, and fix or remove what it names. `helm
+  upgrade --reuse-values` from 0.4.x passes (CI checks it). New values: `global.imageRegistry`,
+  `global.imagePullSecrets`, `operator.image.digest`, `engine.image.digest`, `operator.extraEnv`,
+  `extraVolumes`, `extraVolumeMounts` and `topologySpreadConstraints` (see
+  [Private registries](../deploy/helm/inkwall/README.md#private-registries)).
 - **A monitoring kit, off by default** (#381): `metrics.serviceMonitor`, `metrics.podMonitor`,
   `metrics.prometheusRule` and `metrics.dashboard` in the chart. See [Monitoring](monitoring.md).
 - **`inkwallctl tune` is new** (#383): it suggests the narrowest exclusions from Detect mode's
