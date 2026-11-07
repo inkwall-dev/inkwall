@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -177,5 +178,48 @@ func TestProveRoute(t *testing.T) {
 	}
 	if _, np, _ := proveRoute(p, "HTTPRoute web", false, func() ([]ProbeJob, string) { return nil, "a regular expression" }); np == "" {
 		t.Error("not probeable: nothing said")
+	}
+}
+
+// A route that leaves the probe's jobs for a moment (its pods SidecarMissing
+// during a rollout) and comes back on the same pods is proven at once: its
+// results are kept for the reprobe interval, so it doesn't go Unverified
+// first and rewrite the status twice more (#372, the wiring scale test).
+func TestProbeResultsOutliveAJobBriefly(t *testing.T) {
+	key := bytes.Repeat([]byte{5}, haproxyprobe.KeySize)
+	now := time.Unix(1_800_000_000, 0)
+	p := &Prober{
+		Key: func(context.Context) ([]byte, error) { return key, nil },
+		Now: func() time.Time { return now },
+		Do: func(_ context.Context, _ ProbePod, _ ProbeTarget, req *http.Request) (*http.Response, error) {
+			answer, _ := haproxyprobe.Check(key, req.URL.RequestURI(), req.Host, req.Header.Get(haproxyprobe.Header))
+			h := http.Header{}
+			h.Set(haproxyprobe.Header, answer)
+			return &http.Response{StatusCode: http.StatusOK, Header: h, Body: io.NopCloser(strings.NewReader(""))}, nil
+		},
+	}
+	job := ProbeJob{Route: ProbeRoute{Kind: "VirtualService", Key: types.NamespacedName{Namespace: "shop", Name: "web"}}, Proxy: "Istio ingress gateway",
+		Fingerprint: "1", Targets: []ProbeTarget{{Host: "web.example.com", Path: "/", Port: 80}},
+		Pods: []ProbePod{{Name: "gw-0", UID: "u0", IP: "10.0.0.1"}}}
+	ctx := context.Background()
+	p.Set("istio-ingress", []ProbeJob{job})
+	p.Run(ctx)
+	if why := p.Unverified(job); why != "" {
+		t.Fatalf("not proven: %s", why)
+	}
+	p.Set("istio-ingress", nil)
+	now = now.Add(10 * time.Second)
+	p.Run(ctx)
+	p.Set("istio-ingress", []ProbeJob{job})
+	if why := p.Unverified(job); why != "" {
+		t.Errorf("back after 10 s: %s", why)
+	}
+	// Gone for longer than the reprobe interval: probed again.
+	p.Set("istio-ingress", nil)
+	now = now.Add(haproxyReprobe + time.Second)
+	p.Run(ctx)
+	p.Set("istio-ingress", []ProbeJob{job})
+	if why := p.Unverified(job); why == "" {
+		t.Error("back after the reprobe interval: proven by an old result")
 	}
 }

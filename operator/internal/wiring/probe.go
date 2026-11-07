@@ -331,8 +331,11 @@ func (p *Prober) Run(ctx context.Context) {
 			}
 		}
 	}
-	for k := range p.results {
-		if !live[k] {
+	// A result outlives its job for the reprobe interval: a route that
+	// leaves the jobs for a moment (its pods SidecarMissing in a rollout)
+	// and comes back on the same pods is as proven as if it had stayed.
+	for k, r := range p.results {
+		if !live[k] && now.Sub(r.at) >= haproxyReprobe {
 			delete(p.results, k)
 		}
 	}
