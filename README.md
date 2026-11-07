@@ -1,5 +1,7 @@
 # Inkwall
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/inkwall-dev/inkwall/badge)](https://scorecard.dev/viewer/?uri=github.com/inkwall-dev/inkwall)
+
 **A Kubernetes-native [web application firewall](https://owasp.org/www-community/Web_Application_Firewall).** You install one [operator](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/); it injects an
 inspection engine next to your [ingress controller](https://kubernetes.io/docs/concepts/services-networking/ingress-controllers/) and enforces the `WAFPolicy` objects you attach
 to your routes. The engine runs OWASP [Coraza](https://coraza.io/) with the

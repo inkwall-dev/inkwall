@@ -1,5 +1,6 @@
 # Copyright 2026 The Inkwall Authors
 # SPDX-License-Identifier: Apache-2.0
+# shellcheck shell=bash
 
 # Shared helpers of the kind scripts (#391), sourced after `cd` to the
 # repository root:
