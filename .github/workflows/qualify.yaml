@@ -224,6 +224,9 @@ jobs:
         with:
           go-version: '1.27.x'
           check-latest: true
+          # No cache: the job runs another ref's code on a schedule, and
+          # mustn't write a cache main's jobs read (CodeQL's cache poisoning).
+          cache: false
       # The versions under test, hack/versions.env (#393).
       - id: versions
         run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_OUTPUT"
