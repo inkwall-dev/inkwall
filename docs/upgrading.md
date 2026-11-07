@@ -99,6 +99,13 @@ What's new:
 
 What changes by itself:
 
+- **The InkwallConfig reports the cluster's state.** Its status gains `bundle` (version, size and
+  limit), `engines` (connected, current, behind, rejected, outdated), `signingKey` (the active key,
+  the rotation's phase and what it waits for), and the conditions `SigningKeyRotation` and
+  `IntegrationsConfigured` (`False`, with the error, when a `spec.integrations` selector can't be
+  applied: until now only logged). `kubectl get inkwallconfig` shows the bundle version, the
+  engines and the key's phase. Upgrade the chart first, for the new CRD fields: an older CRD drops
+  them. See [key rotation](key-rotation.md#checking-it-worked).
 - **Policy condition metrics and Events.** The operator reports `inkwall_operator_policies`
   (policies by condition, status and reason), the signing key's age and rotation phase, and failed
   bundle publishes, and records a Kubernetes Event on a policy when its `Ready`, `Programmed` or

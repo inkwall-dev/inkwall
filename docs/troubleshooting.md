@@ -57,6 +57,15 @@ It reports:
   version. Engines behind, rejecting the bundle, or of another version than the operator are
   named by pod, with what to do: an engine of another version runs until its pod restarts.
 
+Without `inkwallctl`, the InkwallConfig's status has the cluster view too: the bundle version and
+size against its limit, the engines by state, the signing key and its rotation, and whether the
+integrations' selectors apply:
+
+```sh
+kubectl get inkwallconfig default
+kubectl get inkwallconfig default -o jsonpath='{.status.bundle}{"\n"}{.status.engines}{"\n"}{.status.signingKey}{"\n"}'
+```
+
 It exits 0 when nothing needs attention, 1 when something does (the report ends with what), and 2
 on an error. Flags: `--kubeconfig`, `--context`, `--namespace` (the operator's, default
 `inkwall-system`), `-o json`.
@@ -166,6 +175,11 @@ an unknown built-in rule set) and `RuleCompileError` (rules that don't compile),
 |---|---|---|---|
 | `Suspended` | `Suspended` | The bundle the engines get suspends inspection (`spec.suspend`). | Resume when ready. |
 | `Suspended` | `NotSuspended` | Inspection runs. | |
+| `SigningKeyRotation` | `Idle` | No signing key rotation is in progress. | |
+| `SigningKeyRotation` | `Publishing` | A rotation published the next key; the active one signs until every engine trusts it. The message, and `status.signingKey.waitingFor`, say what it waits for. | If it lasts, restart the engines the message names ([key rotation](key-rotation.md#when-a-rotation-waits)). |
+| `SigningKeyRotation` | `Retiring` | The new key signs; the previous one stays trusted until every engine runs a bundle the new one signed. | As for `Publishing`. |
+| `IntegrationsConfigured` | `Configured` | The integrations' proxy pod selectors apply. | |
+| `IntegrationsConfigured` | `InvalidSelector` | A `spec.integrations` selector can't be applied (an unknown operator); the operator keeps the selectors it runs with. | Fix the selector the message names. |
 | `EngineRollout` | `RollingOut` | `spec.engine.rollout: Automatic`: the operator evicted a proxy pod for a new engine and waits for its replacement. | |
 | `EngineRollout` | `Done` | No proxy pod the operator injects needs a new engine. | |
 | `EngineRollout` | `Paused` | An eviction was refused (a PodDisruptionBudget) or a replacement isn't ready in time; nothing else is evicted. The message says which. | Relax the budget, or fix the replacement pod the message names (is the Pod webhook answering?). |

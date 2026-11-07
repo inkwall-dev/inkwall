@@ -15,6 +15,8 @@ import (
 
 	networkingv1 "k8s.io/api/networking/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -122,13 +124,41 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		if err := r.Client.Get(ctx, request.NamespacedName, &cfg); err != nil {
 			return client.IgnoreNotFound(err)
 		}
-		if apiequality.Semantic.DeepEqual(cfg.Status.Proxies, proxies) {
+		changed := meta.SetStatusCondition(&cfg.Status.Conditions, integrationsConfigured(&cfg))
+		if !apiequality.Semantic.DeepEqual(cfg.Status.Proxies, proxies) {
+			cfg.Status.Proxies, changed = proxies, true
+		}
+		if !changed {
 			return nil
 		}
-		cfg.Status.Proxies = proxies
 		return r.Client.Status().Update(ctx, &cfg)
 	})
 	return reconcile.Result{}, err
+}
+
+// Reasons of the InkwallConfig's IntegrationsConfigured condition.
+const (
+	ReasonConfigured      = "Configured"
+	ReasonInvalidSelector = "InvalidSelector"
+)
+
+// integrationsConfigured says whether spec.integrations can be applied
+// (#375). A selector the CRD can't check (an unknown operator) can't: the
+// operator keeps the selectors it runs with, the defaults if it started
+// with this one.
+func integrationsConfigured(cfg *wafv1alpha1.InkwallConfig) metav1.Condition {
+	c := metav1.Condition{Type: wafv1alpha1.ConditionIntegrationsConfigured, Status: metav1.ConditionTrue,
+		Reason: ReasonConfigured, Message: "the integrations' proxy pod selectors apply", ObservedGeneration: cfg.Generation}
+	_, ignored, err := integrations.FromConfig(cfg.Spec.Integrations)
+	if err != nil {
+		c.Status, c.Reason = metav1.ConditionFalse, ReasonInvalidSelector
+		c.Message = fmt.Sprintf("spec.integrations: %v; the operator keeps the selectors it runs with (the defaults if it started with this one)", err)
+		return c
+	}
+	if len(ignored) > 0 {
+		c.Message += fmt.Sprintf("; not supported yet, ignored: %s", strings.Join(ignored, ", "))
+	}
+	return c
 }
 
 // Disable reports the proxies of the disabled integrations (name -> why)
