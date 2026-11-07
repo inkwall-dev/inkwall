@@ -61,9 +61,9 @@ track them: the Middleware `inkwall-waf` in each namespace with a protected rout
 Gateway, the `Backend` `inkwall-engine` in each namespace with a protected HTTPRoute, an
 `EnvoyExtensionPolicy` `inkwall-waf-<route>` per protected HTTPRoute, and a `ClientTrafficPolicy`
 and an `EnvoyProxy` `inkwall-waf-<gateway>` per Gateway that needs one; for Istio, an `EnvoyFilter`
-and a ConfigMap `inkwall-waf-<gateway>` per Gateway that needs them, and an `EnvoyFilter`
-`inkwall-istio-ingress` per namespace of Istio ingress gateway pods serving protected
-VirtualServices (the operator doesn't write VirtualServices); the [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/)
+and a ConfigMap `inkwall-waf-<gateway>` per Gateway that needs them, and `EnvoyFilter` objects
+`inkwall-istio-ingress` and `inkwall-istio-ingress-<00 to 31>` per namespace of Istio ingress
+gateway pods serving protected VirtualServices (the operator doesn't write VirtualServices); the [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/)
 `inkwall-trust` in each proxy namespace; and the [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/) and ConfigMaps in `inkwall-system`.
 They carry the [label](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/) `app.kubernetes.io/managed-by: inkwall-operator`.
 

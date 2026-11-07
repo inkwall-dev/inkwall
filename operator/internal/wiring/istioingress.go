@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"maps"
 	"slices"
 	"strings"
@@ -124,6 +125,8 @@ type istioIngressState struct {
 	gateways map[types.NamespacedName]*unstructured.Unstructured
 	// pods are the gateway pods of the integration (the cache's).
 	pods []corev1.Pod
+	// owners caches routeOwners, by namespace.
+	owners map[string]map[string][]types.NamespacedName
 }
 
 // vsGateways are the Istio Gateways a VirtualService is bound to, but the
@@ -340,21 +343,37 @@ func (i *IstioIngress) Wire(ctx context.Context, targets map[Target]bool, off bo
 	}
 
 	if st.crds {
-		keep := map[string]bool{}
+		keep := map[types.NamespacedName]bool{}
 		for ns, rs := range byNamespace {
 			slices.SortFunc(rs, func(a, b *istioVSRoute) int { return strings.Compare(vsKey(a), vsKey(b)) })
-			keep[ns] = true
-			if err := i.ensure(ctx, i.envoyFilter(ns, rs)); err != nil {
-				errs = append(errs, fmt.Errorf("ensure the EnvoyFilter of namespace %s: %w", ns, err))
+			fail := func(rs []*istioVSRoute, err error) {
 				for _, r := range rs {
 					if k := key(r.vs); failed[k] == "" {
 						failed[k] = fmt.Sprintf("namespace %s: %v", ns, err)
 					}
 				}
 			}
+			filters := i.filtersOf(ns, rs)
+			for _, f := range filters {
+				keep[types.NamespacedName{Namespace: ns, Name: f.GetName()}] = true
+			}
+			failedFilters, err := i.ensureFilters(ctx, filters)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("ensure the EnvoyFilters of namespace %s: %w", ns, err))
+			}
+			for _, r := range rs {
+				// The base filter's error fails them all, a shard's its own.
+				for _, name := range []string{istioIngressFilter, shardName(key(r.vs))} {
+					if err := failedFilters[name]; err != nil {
+						fail([]*istioVSRoute{r}, err)
+					}
+				}
+			}
 		}
+		// What's left: shards that no longer have VirtualServices, and the
+		// namespaces whose gateway pods serve none.
 		if _, err := deleteManaged(ctx, i.Client, EnvoyFilterGVK, func(u *unstructured.Unstructured) bool {
-			return !isIstioIngress(u) || keep[u.GetNamespace()]
+			return !isIstioIngress(u) || keep[types.NamespacedName{Namespace: u.GetNamespace(), Name: u.GetName()}]
 		}); err != nil {
 			errs = append(errs, err)
 		}
@@ -412,62 +431,153 @@ func istioVSReconciled(vs *unstructured.Unstructured) string {
 // gateway pods: another VirtualService those pods serve names an Envoy
 // route as it does, so its filter would be on for that route too.
 func (st *istioIngressState) sharedVSName(r *istioVSRoute, ns string, self types.NamespacedName) string {
-	ours := map[string]bool{}
+	owners := st.routeOwners(ns)
+	var other types.NamespacedName
+	name := ""
 	for _, n := range r.envoyRoutes {
-		ours[n] = true
-	}
-	for _, k := range slices.SortedFunc(maps.Keys(st.services), func(a, b types.NamespacedName) int { return strings.Compare(a.String(), b.String()) }) {
-		if k == self {
-			continue
-		}
-		other := st.services[k]
-		gws, _, _ := st.vsGateways(other)
-		serves := false
-		for _, gw := range gws {
-			if sel := selectorOf(st.gateways[gw]); sel != nil && slices.ContainsFunc(st.pods, func(p corev1.Pod) bool {
-				return p.Namespace == ns && sel.Matches(labels.Set(p.Labels))
-			}) {
-				serves = true
+		for _, k := range owners[n] {
+			if k == self {
+				continue
 			}
-		}
-		if !serves {
-			continue
-		}
-		names, _ := vsEnvoyRoutes(other)
-		for _, n := range names {
-			if ours[n] {
-				return fmt.Sprintf("http route %s of VirtualService %s has the name of one of VirtualService %s, served by the same gateway pods (namespace %s), and Istio names Envoy's routes after it: rename one of them",
-					n, self.Name, k, ns)
+			// The first other VirtualService by name, then its first route.
+			if name == "" || k.String() < other.String() || k == other && n < name {
+				other, name = k, n
 			}
 		}
 	}
-	return ""
+	if name == "" {
+		return ""
+	}
+	return fmt.Sprintf("http route %s of VirtualService %s has the name of one of VirtualService %s, served by the same gateway pods (namespace %s), and Istio names Envoy's routes after it: rename one of them",
+		name, self.Name, other, ns)
 }
 
-// envoyFilter is the operator's EnvoyFilter for a namespace's gateway pods,
-// with the protected VirtualServices they serve.
-func (i *IstioIngress) envoyFilter(ns string, routes []*istioVSRoute) *unstructured.Unstructured {
-	f := newObject(EnvoyFilterGVK, ns, istioIngressFilter)
-	lbl := f.GetLabels()
-	lbl[istioIntegrationLabel] = integrations.IstioIngress.Name
-	f.SetLabels(lbl)
-	var names []string
-	var fr []istioFilterRoute
-	for _, r := range routes {
-		k := key(r.vs)
-		names = append(names, k.String())
-		fr = append(fr, istioFilterRoute{filter: istioVSFilterPrefix + k.Namespace + "." + k.Name, envoyRoutes: r.envoyRoutes, routeSettings: r.routeSettings})
+// routeOwners are, for a namespace's gateway pods, the VirtualServices
+// they serve by the Envoy route names those give: worked out once per
+// namespace and reconcile, as comparing each VirtualService with every
+// other took 46 s at 5,000 (#424).
+func (st *istioIngressState) routeOwners(ns string) map[string][]types.NamespacedName {
+	if owners, ok := st.owners[ns]; ok {
+		return owners
 	}
+	owners := map[string][]types.NamespacedName{}
+	serves := map[types.NamespacedName]bool{}
+	for k, vs := range st.services {
+		gws, _, _ := st.vsGateways(vs)
+		on := false
+		for _, gw := range gws {
+			s, seen := serves[gw]
+			if !seen {
+				sel := selectorOf(st.gateways[gw])
+				s = sel != nil && slices.ContainsFunc(st.pods, func(p corev1.Pod) bool {
+					return p.Namespace == ns && sel.Matches(labels.Set(p.Labels))
+				})
+				serves[gw] = s
+			}
+			on = on || s
+		}
+		if !on {
+			continue
+		}
+		names, _ := vsEnvoyRoutes(vs)
+		for _, n := range names {
+			owners[n] = append(owners[n], k)
+		}
+	}
+	if st.owners == nil {
+		st.owners = map[string]map[string][]types.NamespacedName{}
+	}
+	st.owners[ns] = owners
+	return owners
+}
+
+// istioIngressShards is how many EnvoyFilters a namespace's gateway pods'
+// VirtualServices are spread over, by a hash of their names: one object
+// for them all outgrew etcd's 1.5 MiB limit at about 1,200 (#424); 32 keep
+// each under it up to about 38,000.
+const istioIngressShards = 32
+
+// shardName is the EnvoyFilter of a VirtualService's shard. A
+// VirtualService always lands in the same one.
+func shardName(k types.NamespacedName) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(k.String()))
+	return fmt.Sprintf("%s-%02d", istioIngressFilter, h.Sum32()%istioIngressShards)
+}
+
+// filtersOf are the operator's EnvoyFilters for a namespace's gateway pods
+// and the protected VirtualServices they serve: first the base one, with
+// the engine's cluster and the listeners' buffer limit, which Envoy must
+// get once; then a shard per hash bucket that has VirtualServices, each
+// with their filters and the annotation that lists them.
+func (i *IstioIngress) filtersOf(ns string, routes []*istioVSRoute) []*unstructured.Unstructured {
 	podLabels := map[string]any{}
 	for k, v := range i.PodLabels {
 		podLabels[k] = v
 	}
-	f.Object["spec"] = map[string]any{
-		"workloadSelector": map[string]any{"labels": podLabels},
-		"configPatches":    istioPatches(fr),
+	object := func(name string, patches []any) *unstructured.Unstructured {
+		f := newObject(EnvoyFilterGVK, ns, name)
+		lbl := f.GetLabels()
+		lbl[istioIntegrationLabel] = integrations.IstioIngress.Name
+		f.SetLabels(lbl)
+		f.Object["spec"] = map[string]any{"workloadSelector": map[string]any{"labels": podLabels}, "configPatches": patches}
+		f.SetAnnotations(map[string]string{})
+		return f
 	}
-	f.SetAnnotations(map[string]string{istioIngressRoutes: strings.Join(names, ",")})
-	return f
+	byShard := map[string][]*istioVSRoute{}
+	for _, r := range routes {
+		n := shardName(key(r.vs))
+		byShard[n] = append(byShard[n], r)
+	}
+	var shards []*unstructured.Unstructured
+	buffered := false
+	for _, name := range slices.Sorted(maps.Keys(byShard)) {
+		var names []string
+		var fr []istioFilterRoute
+		for _, r := range byShard[name] {
+			k := key(r.vs)
+			names = append(names, k.String())
+			fr = append(fr, istioFilterRoute{filter: istioVSFilterPrefix + k.Namespace + "." + k.Name, envoyRoutes: r.envoyRoutes, routeSettings: r.routeSettings})
+		}
+		patches, b := istioRoutePatches(fr)
+		buffered = buffered || b
+		f := object(name, patches)
+		f.SetAnnotations(map[string]string{istioIngressRoutes: strings.Join(names, ",")})
+		shards = append(shards, f)
+	}
+	return append([]*unstructured.Unstructured{object(istioIngressFilter, istioBasePatches(buffered))}, shards...)
+}
+
+// ensureFilters writes a namespace's EnvoyFilters (filtersOf), the base one
+// first so the shards' filters never point at a cluster Envoy doesn't have.
+// But a base one from before the shards (#424) still has the
+// VirtualServices' filters: the shards go first then, so no route is left
+// without its filter while Istio pushes the two writes (a filter twice for
+// a moment inspects a request twice, which fails safe).
+//
+// It returns the error of each EnvoyFilter it couldn't write, by name, and
+// them all joined.
+func (i *IstioIngress) ensureFilters(ctx context.Context, filters []*unstructured.Unstructured) (map[string]error, error) {
+	base, shards := filters[0], filters[1:]
+	old := &unstructured.Unstructured{}
+	old.SetGroupVersionKind(EnvoyFilterGVK)
+	err := i.Client.Get(ctx, client.ObjectKeyFromObject(base), old)
+	if client.IgnoreNotFound(err) != nil {
+		return map[string]error{base.GetName(): err}, err
+	}
+	order := filters
+	if err == nil && old.GetAnnotations()[istioIngressRoutes] != "" {
+		order = append(slices.Clone(shards), base)
+	}
+	failed := map[string]error{}
+	var errs []error
+	for _, f := range order {
+		if err := i.ensure(ctx, f); err != nil {
+			failed[f.GetName()] = err
+			errs = append(errs, fmt.Errorf("%s: %w", f.GetName(), err))
+		}
+	}
+	return failed, errors.Join(errs...)
 }
 
 // ensure creates or updates the operator's EnvoyFilter, as the Gateway API
