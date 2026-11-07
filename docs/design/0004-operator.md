@@ -652,10 +652,19 @@ has the decision), for `VirtualService` targets bound to Istio `Gateway` objects
 - **The pods of a VirtualService** are the running pods its Gateways' `selector` matches, listed
   uncached in every namespace. One outside the cache (outside the proxy namespaces, or without
   the integration's labels) gets no engine and would serve the route uninspected: `WiringFailed`.
-- **One `EnvoyFilter` per namespace of gateway pods**, `inkwall-istio-ingress`, labelled
+- **`EnvoyFilter` objects per namespace of gateway pods**, labelled
   `waf.inkwall.dev/integration: istio-ingress`, `workloadSelector` the integration's labels (the
-  `InkwallConfig` selector must be plain labels), with the patches of the Gateway API wiring
-  (`istioPatches`): a filter per protected VirtualService, `inkwall.ext_proc.vs.<ns>.<name>`, on
+  `InkwallConfig` selector must be plain labels), with the patches of the Gateway API wiring:
+  `inkwall-istio-ingress` has the engine's cluster and the listeners' buffer limit, which Envoy must
+  get once (`istioBasePatches`); shards `inkwall-istio-ingress-<00 to 31>` have the VirtualServices'
+  (`istioRoutePatches`), by FNV-32a hash of `namespace/name`, so a VirtualService never moves and
+  one change rewrites one shard. One object for them all passed etcd's 1.5 MiB limit at about
+  1,200 VirtualServices (about 1.2 KiB each, #424); 32 shards hold about 38,000. A shard that has
+  none is deleted. The base object is written first, so a shard's filters never name a missing
+  cluster, except when it still has the VirtualServices' filters (an operator before the shards):
+  the shards go first then, and Envoy rejects the configuration while both have a filter (two
+  filters of one name) and keeps the one before, still inspected, until the base is rewritten. In
+  each shard, a filter per protected VirtualService, `inkwall.ext_proc.vs.<ns>.<name>`, on
   for its Envoy routes, named after its http routes (`name`, `name.match`). A VirtualService is
   wired in a namespace once every pod there has the engine and the mount. An http route without a
   name, or a name another VirtualService on the same pods uses, is `WiringFailed`.
@@ -1420,13 +1429,16 @@ under 512 MiB. Same machine, 2026-11-06, one run each:
 | Before #373's fixes | 200 | 6.1 s | 0.33 s | 227 | 200 | 20 | 97 MiB |
 | After | 200 | 3.0 s | 0.13 s | 26.8 | 1 | 4 | 96 MiB |
 | After | 1,000 | 8.8 s | 2.6 s | 44.6 | 1 | 4 | 178 MiB |
+| After #424 (2026-11-07) | 5,000 | 22.1 s | 0.51 s | 40.6 | 1 | 4 | 449 MiB |
 
 Before the fixes, each VirtualService listed its Gateway's pods from the API server, and every pod
-of the rollout rewrote every policy's status, since the messages named the pods. 5,000 policies
-don't fit yet: the Istio ingress integration's one `EnvoyFilter` per gateway namespace passes
-etcd's 1.5 MiB limit at about 1,200 VirtualServices (1,245 KiB at 1,000; 6.2 MiB at 5,000), and
-every policy is then `WiringFailed` (fail safe, #424). So `SCALE=wiring` is 1,000 until that is
-fixed. Envoy Gateway's and Istio's HTTPRoutes aren't in this test yet.
+of the rollout rewrote every policy's status, since the messages named the pods. Before #424,
+5,000 policies didn't fit: the Istio ingress integration's one `EnvoyFilter` per gateway namespace
+passed etcd's 1.5 MiB limit at about 1,200 VirtualServices (1,245 KiB at 1,000; 6.2 MiB at 5,000),
+and every policy was `WiringFailed`. It is sharded now (§4.4), and a reconcile at 5,000 also no
+longer compares every VirtualService with every other for shared route names (46 s for one
+`Wire`, 0.6 s now). `SCALE=wiring` is 5,000 policies. Envoy Gateway's and Istio's HTTPRoutes
+aren't in this test yet.
 
 **Engine memory per policy.** A compiled Coraza WAF with the CRS keeps
 about 2.1 MiB of heap, and takes 10–15 ms to compile.

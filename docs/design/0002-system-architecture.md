@@ -615,9 +615,9 @@ controller `istio.io/gateway-controller`), with `ext_proc` through an `EnvoyFilt
   restore that mount if Istio's own injector rewrites the container. Pods that ran before get the
   engine when restarted (`PendingRestart`), and keep it after unwiring until restarted.
 - **Wiring.** An Istio Gateway selects pods in any namespace, and several Gateways may select the
-  same pods; Envoy rejects two HTTP filters of one name. So the `EnvoyFilter` is per namespace of
-  gateway pods, `inkwall-istio-ingress`, with the integration's labels as `workloadSelector`, and
-  one ext_proc filter per protected VirtualService (`inkwall.ext_proc.vs.<namespace>.<name>`),
+  same pods; Envoy rejects two HTTP filters of one name. So the `EnvoyFilter` objects are per
+  namespace of gateway pods, `inkwall-istio-ingress` (the cluster) and 32 shards (#424), with the
+  integration's labels as `workloadSelector`, and one ext_proc filter per protected VirtualService (`inkwall.ext_proc.vs.<namespace>.<name>`),
   turned on by `typed_per_filter_config` on its Envoy routes, with the same settings as for
   HTTPRoutes. Istio names those routes after the http route's `name` (then `.` and a named match's
   `name`; checked in Istio 1.31.3's `route.go` and on kind): an unnamed http route can't be selected
