@@ -39,6 +39,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -123,6 +124,8 @@ func (l *listFlag) String() string     { return strings.Join(*l, ", ") }
 func (l *listFlag) Set(v string) error { *l = append(*l, v); return nil }
 
 type config struct {
+	// clientIP replaces every request's client IP (test --client-ip).
+	clientIP string
 	// Input: at most one of url, requestFile, harFile.
 	url         string
 	method      string
@@ -247,7 +250,8 @@ func parseTestFlags(args []string, stderr io.Writer) (config, error) {
 	fs := newFlagSet("test", &cfg, stderr, "; every request in it is checked")
 	fs.StringVar(&cfg.expect, "expect", "", "exit 1 unless every request gets this verdict: allow or deny")
 	fs.BoolVar(&cfg.json, "json", false, "print each CheckResponse as a JSON line")
-	const objects = "; a file (or a directory of .yaml, .yml and .json files) may hold several YAML documents or a kubectl List, of any of the kinds --policy, --rule-set, --configmap and --ingress read (repeatable)"
+	fs.StringVar(&cfg.clientIP, "client-ip", "", "client IP of every request, as the engine would resolve it (default 127.0.0.1): for the policies' IP lists and rules on REMOTE_ADDR")
+	const objects = "; a file (or a directory of .yaml, .yml and .json files) may hold several YAML documents or a kubectl List, of any of the kinds --policy, --rule-set, --configmap and --ingress read, and WAFIPLists (repeatable)"
 	fs.Var(&cfg.policies, "policy", "WAFPolicy YAML file: inspect with the policies, resolved as the operator does, instead of the flags that define a policy"+objects)
 	fs.Var(&cfg.ruleSets, "rule-set", "WAFRuleSet or ClusterWAFRuleSet YAML file the policies use"+objects)
 	fs.Var(&cfg.configMaps, "configmap", "ConfigMap YAML file rule sets read rules from (labeled "+resolver.RulesLabel+"=true)"+objects)
@@ -262,6 +266,13 @@ func parseTestFlags(args []string, stderr io.Writer) (config, error) {
 	case "", "allow", "deny":
 	default:
 		return cfg, fmt.Errorf("--expect must be allow or deny, got %q", cfg.expect)
+	}
+	if cfg.clientIP != "" {
+		a, err := netip.ParseAddr(cfg.clientIP)
+		if err != nil {
+			return cfg, fmt.Errorf("--client-ip: %w", err)
+		}
+		cfg.clientIP = a.String()
 	}
 	if err := fs.checkPolicySource(); err != nil {
 		return cfg, err
@@ -324,6 +335,9 @@ func runTest(cfg config, stdout, stderr io.Writer) int {
 
 	mismatches := 0
 	for _, in := range reqs {
+		if cfg.clientIP != "" {
+			in.ClientIp = cfg.clientIP
+		}
 		out, err := check(in)
 		if err != nil {
 			fmt.Fprintf(stderr, "error: %s %s: %v\n", in.GetMethod(), in.GetRawUri(), err)
