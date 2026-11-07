@@ -183,6 +183,39 @@ spec:
                 - Open
                 - Closed
                 type: string
+              ipLists:
+                description: |-
+                  IPLists names WAFIPLists in the policy's namespace whose client
+                  addresses are denied, or let through uninspected. A deny list wins
+                  over an allow list. They are only as good as the client IP the
+                  engine resolves (docs/client-ip.md). Requires engines 0.5.0 or
+                  later.
+                properties:
+                  allow:
+                    description: |-
+                      Allow lists clients whose requests aren't inspected: health checkers,
+                      a scanner you run yourself. Their requests are not logged either.
+                    items:
+                      description: IPListName names a WAFIPList.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: set
+                  deny:
+                    description: |-
+                      Deny lists clients whose requests are denied (403) before any rule,
+                      or logged in Detect mode.
+                    items:
+                      description: IPListName names a WAFIPList.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: set
+                type: object
               mode:
                 default: Detect
                 description: Mode is Detect (log, let through) or Block (reject).

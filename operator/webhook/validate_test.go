@@ -264,3 +264,19 @@ func TestConfigValidation(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// TestIPListValidation: a WAFIPList's entries must parse as the engine
+// parses them (#358); the CRD's pattern lets 999.1.1.1 through.
+func TestIPListValidation(t *testing.T) {
+	ctx := context.Background()
+	v := specValidator[*wafv1alpha1.WAFIPList]{validate: validateWAFIPList}
+	l := &wafv1alpha1.WAFIPList{ObjectMeta: metav1.ObjectMeta{Name: "bad"}, Spec: wafv1alpha1.WAFIPListSpec{Entries: []wafv1alpha1.IPListEntry{
+		{CIDR: "203.0.113.0/24"}, {CIDR: "2001:db8::/32"}, {CIDR: "192.0.2.1"},
+	}}}
+	if _, err := v.ValidateCreate(ctx, l); err != nil {
+		t.Fatalf("valid list: %v", err)
+	}
+	l.Spec.Entries[1].CIDR = "999.1.1.1"
+	_, err := v.ValidateCreate(ctx, l)
+	wantInvalid(t, err, "spec.entries[1].cidr", "999.1.1.1")
+}

@@ -161,7 +161,7 @@ doc_block() {
     return 1
   fi
   (
-    # shellcheck disable=SC2329 # the block calls it
+    # shellcheck disable=SC2317,SC2329 # the block calls it
     kubectl() { command kubectl --context "kind-$CLUSTER" "$@"; }
     eval "$block"
   )

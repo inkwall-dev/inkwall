@@ -104,8 +104,15 @@ fi
 
 # The images of this checkout, loaded now so the upgrade doesn't wait on
 # them.
-docker build --target operator -t "$OPERATOR_IMAGE" .
-docker build --target engine -t "$ENGINE_IMAGE" .
+# PULL_IMAGES=1: the published images of a release candidate (make
+# IMAGES=ghcr:<version>).
+if [[ ${PULL_IMAGES:-} == 1 ]]; then
+  docker pull -q "$OPERATOR_IMAGE" >/dev/null
+  docker pull -q "$ENGINE_IMAGE" >/dev/null
+else
+  docker build --target operator -t "$OPERATOR_IMAGE" .
+  docker build --target engine -t "$ENGINE_IMAGE" .
+fi
 kind load docker-image "$OPERATOR_IMAGE" "$ENGINE_IMAGE" --name "$CLUSTER"
 
 # Envoy Gateway before Inkwall, so the release's rbac.integrations (auto)
@@ -469,6 +476,7 @@ probe_stop() {
       }
       exit fail
     }' <<<"$log") && rc=0 || rc=$?
+  # shellcheck disable=SC2001 # a prefix on every line
   sed 's/^/      /' <<<"$summary"
   # The wrong rounds, even within the gap allowed, with each request's
   # dns/connect/total times.
@@ -494,8 +502,9 @@ probe_stop() {
 # rbac.integrations auto (true by default), which the checks below test, and
 # Traefik's namespace listed in injection.proxyNamespaces, as the upgrade
 # guide says (not a default proxy namespace).
+# upgrade [HELM_FLAGS...]
 upgrade() {
-  "${HELM[@]}" upgrade inkwall "$CHART" --namespace "$OPERATOR_NS" \
+  "${HELM[@]}" upgrade inkwall "$CHART" --namespace "$OPERATOR_NS" "$@" \
     --set "injection.proxyNamespaces={$PROXY_NAMESPACES}" \
     --set operator.image.repository="${OPERATOR_IMAGE%:*}" \
     --set operator.image.tag="${OPERATOR_IMAGE##*:}" \
@@ -596,7 +605,13 @@ eventually "the user's Middleware still applies" user_header "$HOST"
 echo "== helm rollback to $FROM_VERSION"
 probe_start
 sleep 5
-if "${HELM[@]}" rollback inkwall --namespace "$OPERATOR_NS" --wait --timeout 5m >/dev/null; then
+# Helm 4 applies server-side: a release before 0.5.0 renders the Pod
+# webhooks' failurePolicy as Ignore, which the operator owns (Fail while a
+# policy blocks), so the rollback must force it, as docs/upgrading.md says;
+# the operator sets it back at once (#394).
+rollback_flags=()
+if [[ $(helm version --template '{{.Version}}') == v4.* ]]; then rollback_flags=(--force-conflicts); fi
+if "${HELM[@]}" rollback inkwall --namespace "$OPERATOR_NS" "${rollback_flags[@]}" --wait --timeout 5m >/dev/null; then
   ok "helm rollback"
 else
   fail "helm rollback"
@@ -634,12 +649,15 @@ check "the wiring is unchanged, not duplicated" same_wiring
 eventually "the policy is Accepted, Programmed and Ready" accepted_programmed
 eventually "the user's Middleware still applies" user_header "$HOST"
 
-# Upgraded again, so the uninstall below runs this chart's hook.
-echo "== helm upgrade to $CHART again"
-if upgrade; then
-  ok "helm upgrade"
+# Upgraded again, so the uninstall below runs this chart's hook; with
+# --reuse-values, which keeps the values of the release before (rendered by
+# the older chart, without this chart's new values: they default), as the
+# upgrade guide's GitOps and scripted upgrades do (#394).
+echo "== helm upgrade to $CHART again, --reuse-values"
+if upgrade --reuse-values; then
+  ok "helm upgrade --reuse-values"
 else
-  fail "helm upgrade"
+  fail "helm upgrade --reuse-values"
 fi
 "${KUBECTL[@]}" -n "$OPERATOR_NS" rollout status deployment/inkwall-operator --timeout=180s >/dev/null
 eventually "every operator replica runs the new image" operator_image_is "$OPERATOR_IMAGE"

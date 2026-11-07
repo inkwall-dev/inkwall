@@ -25,8 +25,8 @@ on:
         description: How long each target runs (Go duration)
         default: 5m
 
-permissions:
-  contents: read
+# Each job asks for what it needs (least privilege).
+permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -35,10 +35,14 @@ concurrency:
 jobs:
   targets:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     outputs:
       matrix: ${{ steps.list.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - id: list
         run: echo "matrix=$(hack/ci/fuzz-targets.sh)" >>"$GITHUB_OUTPUT"
 
@@ -46,14 +50,18 @@ jobs:
     name: ${{ matrix.name }}
     needs: targets
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.targets.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           check-latest: true
@@ -62,7 +70,7 @@ jobs:
       # The corpus the target grew on earlier nights: a new key each run,
       # restored from the latest. Interesting inputs only; a failing input
       # goes to testdata/fuzz, never the cache.
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.cache.outputs.fuzz }}
           key: fuzz-${{ matrix.package }}-${{ matrix.target }}-${{ github.run_id }}
@@ -95,7 +103,7 @@ jobs:
           PACKAGE: ${{ matrix.package }}
           TARGET: ${{ matrix.target }}
       - if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: crashers-${{ strategy.job-index }}-${{ matrix.target }}
           path: crashers.tar.gz.gpg
@@ -111,7 +119,9 @@ jobs:
       actions: read
       issues: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: |
           result=success
           if [[ $TARGETS != success || $FUZZ == failure ]]; then

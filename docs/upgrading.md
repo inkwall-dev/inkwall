@@ -41,6 +41,14 @@ What's new:
   `Programmed=False` (`ResponsesNotInspected`) on Istio's routes; it is `Programmed` once the
   operator has rewritten their `EnvoyFilter` objects. Routes whose policies don't inspect
   responses keep sending none to the engine. See [Istio](istio.md#settings).
+- **IP allow and deny lists.** A `WAFIPList` lists client addresses (CIDRs), and
+  `WAFPolicy.spec.ipLists: {allow: [...], deny: [...]}` names lists in the policy's namespace: a
+  denied client gets 403 (logged in `Detect` mode) before any rule, an allowed one isn't inspected.
+  They match the client IP the engine resolves, so get that right first
+  ([client IP](client-ip.md)). Upgrade the chart first, for the new CRD; a policy with lists is
+  `Enforced=False` (`EnginesOutdated`) until every engine runs 0.5.0. `inkwallctl test` reads
+  `WAFIPList` files and takes `--client-ip`.
+
 - **The CRS's own settings on a policy.** The CRS rule set binding of a `WAFPolicy` takes an
   optional `crs` block: `allowedMethods` (for REST APIs that send `PUT`, `PATCH` or `DELETE`),
   `allowedRequestContentTypes`, `detectionParanoiaLevel` (log the rules of a higher paranoia level
@@ -67,6 +75,14 @@ What's new:
 
 What changes by itself:
 
+- **The chart keeps the operator's settings of the Pod webhooks** (`failurePolicy`,
+  `objectSelector`, `namespaceSelector`). The operator sets `failurePolicy` to `Fail` while a
+  policy blocks; an upgrade used to render `Ignore` until the operator set it again, and Helm 4,
+  which applies server-side, refused the upgrade (a conflict with the operator's fields). An
+  upgrade now renders the live values; the operator applies a new proxy namespace list or
+  integration permissions once it restarts. With Helm 4, roll back to 0.4.x with `helm rollback
+  --force-conflicts`. The chart also passes Helm 4's `helm lint --strict` (its `license` moved to an
+  `artifacthub.io/license` annotation). Helm 3 and 4 are both tested.
 - **Istio ingress gateways' `EnvoyFilter` is split.** The VirtualServices' filters move from
   `inkwall-istio-ingress` into shards `inkwall-istio-ingress-00` to `-31` in the same namespace;
   `inkwall-istio-ingress` keeps the engine's cluster. One object passed etcd's size limit at about
