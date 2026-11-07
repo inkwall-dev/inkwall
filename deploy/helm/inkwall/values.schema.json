@@ -427,6 +427,60 @@
         }
       }
     },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "webhookFrom": {
+          "type": "array",
+          "description": "NetworkPolicy peers (from); empty: anywhere",
+          "items": {
+            "type": "object"
+          }
+        },
+        "metricsFrom": {
+          "type": "array",
+          "description": "NetworkPolicy peers (from); empty: anywhere",
+          "items": {
+            "type": "object"
+          }
+        },
+        "egress": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "apiServerCIDRs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F:.]+/[0-9]{1,3}$"
+              }
+            },
+            "apiServerPorts": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            },
+            "extra": {
+              "type": "array",
+              "description": "NetworkPolicy egress rules",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
     "distribution": {
       "type": "object",
       "additionalProperties": false,

@@ -166,6 +166,9 @@ What changes by itself:
   for a request an adapter can't read. `InkwallConfig.spec.engine.jsonDenials` (the engine's
   `--json-denials`) answers clients that accept `application/json` with a JSON body; off by
   default.
+- **NetworkPolicies, off by default** (#387): `networkPolicy.enabled` in the chart, for clusters
+  that deny traffic by default. See
+  [Network flows](../deploy/helm/inkwall/README.md#network-flows) for what connects to what.
 - **The chart checks its values** (#386). A `values.schema.json` makes `helm install`, `upgrade`
   and `template` fail on a key the chart doesn't have, a wrong type, or a value outside its set,
   naming it, where 0.4.x ignored them. A typo such as `rbac.integration.traefik` was silently
