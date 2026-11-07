@@ -39,12 +39,49 @@ app.kubernetes.io/component: operator
 {{- default (include "inkwall.operator.name" .) .Values.serviceAccount.name -}}
 {{- end -}}
 
+{{/*
+An image reference: global.imageRegistry, when set, replaces the
+repository's registry (its first path element when that has a "." or ":",
+or is localhost); a digest, when set, replaces the tag. Arguments: root,
+image (operator.image or engine.image).
+*/}}
+{{- define "inkwall.image" -}}
+{{- $repo := .image.repository -}}
+{{- $registry := ((.root.Values.global | default dict).imageRegistry | default "") -}}
+{{- if $registry -}}
+{{- $parts := splitList "/" $repo -}}
+{{- $first := first $parts -}}
+{{- if and (gt (len $parts) 1) (or (contains "." $first) (contains ":" $first) (eq $first "localhost")) -}}
+{{- $repo = join "/" (rest $parts) -}}
+{{- end -}}
+{{- $repo = printf "%s/%s" (trimSuffix "/" $registry) $repo -}}
+{{- end -}}
+{{- if .image.digest -}}
+{{- printf "%s@%s" $repo .image.digest -}}
+{{- else -}}
+{{- printf "%s:%s" $repo (default .root.Chart.AppVersion .image.tag) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "inkwall.operator.image" -}}
-{{- printf "%s:%s" .Values.operator.image.repository (default .Chart.AppVersion .Values.operator.image.tag) -}}
+{{- include "inkwall.image" (dict "root" . "image" .Values.operator.image) -}}
 {{- end -}}
 
 {{- define "inkwall.engine.image" -}}
-{{- printf "%s:%s" .Values.engine.image.repository (default .Chart.AppVersion .Values.engine.image.tag) -}}
+{{- include "inkwall.image" (dict "root" . "image" .Values.engine.image) -}}
+{{- end -}}
+
+{{/* The global.imagePullSecrets' names, comma-separated. */}}
+{{- define "inkwall.pullSecretNames" -}}
+{{- $names := list -}}
+{{- range ((.Values.global | default dict).imagePullSecrets | default list) -}}
+{{- if kindIs "string" . -}}
+{{- $names = append $names . -}}
+{{- else -}}
+{{- $names = append $names .name -}}
+{{- end -}}
+{{- end -}}
+{{- join "," $names -}}
 {{- end -}}
 
 {{/*

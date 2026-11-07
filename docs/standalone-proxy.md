@@ -8,6 +8,7 @@ the operator.
 - [Prerequisites](#prerequisites)
 - [Run the proxy](#run-the-proxy)
 - [Flags](#flags)
+- [Reloading the rules](#reloading-the-rules)
 - [Other modes](#other-modes)
 - [Checking it worked](#checking-it-worked)
 - [Undoing it](#undoing-it)
@@ -39,6 +40,7 @@ The main flags; `inkwall-engine proxy -h` lists them all:
 | `--mode` | `detect` | `block` to enforce |
 | `--paranoia-level` | `1` | [CRS](https://coreruleset.org/) [paranoia level](https://coreruleset.org/docs/concepts/paranoia_levels/), 1 to 4 |
 | `--rules`, `--rules-before-crs` | | [SecLang](https://coraza.io/docs/seclang/) rules and exclusions, loaded after or before the CRS |
+| `--watch-rules` | off | Reload `--rules` and `--rules-before-crs` when their content changes (checked every 2 s), as for a mounted ConfigMap; see [Reloading the rules](#reloading-the-rules) |
 | `--skip-paths`, `--skip-body-paths` | | Paths not inspected at all, or without their body |
 | `--disable-rule-groups` | | CRS attack families the app can't be vulnerable to, e.g. `php,java` |
 | `--websocket-origins`, `--websocket-required-headers` | | Origins a [WebSocket](websocket.md) handshake may come from, headers it must have |
@@ -56,6 +58,23 @@ The main flags; `inkwall-engine proxy -h` lists them all:
 | `--json-denials` | off | Answer a denied client that sends `Accept: application/json` with `{"error":"forbidden","status":403,"request_id":"..."}` instead of text. Every denial carries `X-Request-Id`, the request ID of its security event |
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error`; security events are logged at `warn` |
 | `--event-log-rate` | `10` | Security event lines per second for each policy and rule; the rest are counted in `inkwall_security_event_logs_suppressed_total` (`0`: no limit) |
+
+## Reloading the rules
+
+The engine reloads `--rules` and `--rules-before-crs` on `SIGHUP`, and with `--watch-rules` when
+their content changes (a ConfigMap mounted as a volume is updated by swapping a symlink: one
+reload). The new rules compile beside the old ones, which keep inspecting meanwhile; requests in
+flight finish on the old rules, and the next ones get the new. If the new rules don't compile, the
+old ones stay in force and the engine logs why:
+
+```sh
+kill -HUP "$(pidof inkwall-engine)"
+```
+
+Each reload is logged (`rules reloaded`, with the files' SHA-256, or `rules not reloaded` and the
+error) and counted in `inkwall_rules_reloads_total{result="ok"|"error"}`. The other flags (mode,
+paranoia level, skip paths...) still need a restart. In bundle mode the operator's bundles replace
+the rules, and neither applies.
 
 ## Other modes
 

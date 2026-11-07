@@ -175,6 +175,12 @@ func TestScaleWiring(t *testing.T) {
 		if err := c.Get(ctx, client.ObjectKeyFromObject(pod), pod); err != nil || !injection.HasEngine(pod) {
 			t.Fatalf("gateway pod %s not injected: %v", pod.Name, err)
 		}
+		// An address, for the operator's probe (answered by the fake
+		// prober, startOperator).
+		pod.Status.PodIP = fmt.Sprintf("10.0.0.%d", i+1)
+		if err := c.Status().Update(ctx, pod); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// A policy per VirtualService.
@@ -196,7 +202,10 @@ func TestScaleWiring(t *testing.T) {
 		}
 		return c.Create(ctx, &wafv1alpha1.WAFPolicy{
 			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name(i)},
-			Spec:       wafv1alpha1.WAFPolicySpec{TargetRefs: []wafv1alpha1.TargetRef{{Group: "networking.istio.io", Kind: "VirtualService", Name: name(i)}}},
+			// Block: a route in Detect mode can't be proven by the probe
+			// (#372), so it isn't Programmed.
+			Spec: wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock,
+				TargetRefs: []wafv1alpha1.TargetRef{{Group: "networking.istio.io", Kind: "VirtualService", Name: name(i)}}},
 		})
 	})
 	if err != nil {
@@ -250,7 +259,11 @@ func TestScaleWiring(t *testing.T) {
 		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace(i, n), Name: name(i)}, &p); err != nil {
 			t.Fatal(err)
 		}
-		p.Spec.Mode = map[bool]wafv1alpha1.PolicyMode{true: wafv1alpha1.PolicyBlock, false: wafv1alpha1.PolicyDetect}[p.Spec.Mode != wafv1alpha1.PolicyBlock]
+		// Another body limit (not Detect mode, which isn't Programmed).
+		if p.Spec.Body == nil {
+			p.Spec.Body = &wafv1alpha1.BodySpec{}
+		}
+		p.Spec.Body.MaxBytes = ptr.To(int64(65536 + i))
 		if err := c.Update(ctx, &p); err != nil {
 			t.Fatal(err)
 		}

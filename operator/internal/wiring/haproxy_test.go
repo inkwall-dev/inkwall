@@ -142,7 +142,7 @@ func TestHAProxyWire(t *testing.T) {
 		WithObjects(append(classes, policy, pod, haproxyIngress("web", "haproxy"), haproxyIngress("other", "traefik"))...).Build()
 	key := bytes.Repeat([]byte{3}, haproxyprobe.KeySize)
 	engineUp := false
-	prober := &HAProxyProber{
+	prober := &Prober{
 		Key: func(context.Context) ([]byte, error) { return key, nil },
 		Do: func(_ context.Context, p ProbePod, target ProbeTarget, req *http.Request) (*http.Response, error) {
 			if p.IP != "10.0.0.1" || p.HTTPPort != 8080 || target.Host != "web.example.com" || !strings.HasPrefix(req.URL.Path, "/api/.well-known/inkwall-probe/") {

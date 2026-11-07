@@ -89,6 +89,16 @@ jobs:
               fi
             done
           fi
+          # Only the refs a release is qualified from (#503): main, a
+          # release branch or a release tag. The jobs below check them out
+          # and run their code with the default branch's context: never a
+          # pull request's ref or an arbitrary commit.
+          for r in $refs; do
+            if ! [[ $r =~ ^(main|release-[0-9]+\.[0-9]+|v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?)$ ]]; then
+              echo "ref $r is not main, release-X.Y or vX.Y.Z[-rc.N]" >&2
+              exit 1
+            fi
+          done
           echo "refs=$(jq -Rnc '[inputs | select(length > 0)]' <<<"$refs")" >>"$GITHUB_OUTPUT"
           {
             echo "## Qualifying"
@@ -157,6 +167,8 @@ jobs:
         with:
           go-version: '1.27.x'
           check-latest: true
+          # Restore only: these jobs run the ref's code (#503).
+          cache: false
       # The versions under test, hack/versions.env (#393).
       - id: versions
         run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_OUTPUT"
@@ -240,6 +252,8 @@ jobs:
         with:
           go-version: '1.27.x'
           check-latest: true
+          # Restore only: these jobs run the ref's code (#503).
+          cache: false
       - run: make scale-test SCALE=full SCALE_RESPONSES="$RESPONSES" SCALE_OUT="$RUNNER_TEMP/scale.jsonl"
         env:
           RESPONSES: ${{ matrix.responses }}
@@ -272,6 +286,8 @@ jobs:
         with:
           go-version: '1.27.x'
           check-latest: true
+          # Restore only: these jobs run the ref's code (#503).
+          cache: false
       - run: make raw-envoy-e2e IMAGES="$IMAGES"
         env:
           IMAGES: ${{ inputs.images }}
@@ -302,6 +318,8 @@ jobs:
         with:
           go-version: '1.27.x'
           check-latest: true
+          # Restore only: these jobs run the ref's code (#503).
+          cache: false
       - run: make crs-test
 
   summary:
