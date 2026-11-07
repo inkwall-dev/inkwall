@@ -48,7 +48,7 @@ The [docs index](docs/README.md) lists every guide, reference and design doc.
 
 ## Install
 
-You need [Kubernetes](https://kubernetes.io/docs/concepts/overview/) 1.29 or later and [Helm](https://helm.sh/docs/) 3. CI
+You need [Kubernetes](https://kubernetes.io/docs/concepts/overview/) 1.29 or later and [Helm](https://helm.sh/docs/) 3 or 4. CI
 tests on Kubernetes 1.34 and on kind's newest (1.37).
 
 `<version>` is a [release](https://github.com/inkwall-dev/inkwall/releases) without its `v`, the latest
