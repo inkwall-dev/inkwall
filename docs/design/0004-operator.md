@@ -117,13 +117,13 @@ the webhook certificates.
 | `InkwallConfig` | Cluster, singleton `default` | Mode, engine, integrations, control plane, `suspend`, signing key rotation, event redaction |
 | `WAFPolicy` | Namespace | What to enforce on which routes |
 | `WAFRuleSet` / `ClusterWAFRuleSet` | Namespace / Cluster | Rules: builtin CRS, [SecLang](https://coraza.io/docs/seclang/), [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/) |
-| `WAFIPList` / `ClusterWAFIPList` | Namespace / Cluster | [CIDR](https://www.rfc-editor.org/rfc/rfc4632) lists (planned) |
+| `WAFIPList` / `ClusterWAFIPList` | Namespace / Cluster | [CIDR](https://www.rfc-editor.org/rfc/rfc4632) lists a policy allows or denies (`spec.ipLists`); `ClusterWAFIPList` planned |
 | `WAFPolicyDefault` | Namespace | Default for routes with no policy (planned) |
 
 A field is added only once the engine honours it. Adding a field to `v1alpha1` later is
 compatible; removing one is not.
 
-**Not yet:** IP lists and `spec.ipLists`, `spec.rateLimits`, `spec.response`,
+**Not yet:** `ClusterWAFIPList`, `spec.rateLimits`, `spec.response`,
 `BlockHighConfidence`, `body.contentTypes`, the `InspectPrefix` oversize action,
 `WAFPolicyDefault`.
 

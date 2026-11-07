@@ -111,6 +111,12 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    # The chart under Helm 3 and Helm 4 (#394).
+    strategy:
+      fail-fast: false
+      matrix:
+        helm: [3, 4]
+    name: helm (Helm ${{ matrix.helm }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -124,7 +130,7 @@ jobs:
         run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_OUTPUT"
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: ${{ steps.versions.outputs.HELM_VERSION }}
+          version: ${{ matrix.helm == 4 && steps.versions.outputs.HELM4_VERSION || steps.versions.outputs.HELM_VERSION }}
       - run: make helm-lint
       # The alerts' unit tests, with the Prometheus image's promtool.
       - run: make monitoring-test
@@ -232,10 +238,17 @@ jobs:
     # once, and their policies Accepted and Programmed; uninstall restores
     # the routes (#129, #390). Every run, from the latest release; the
     # release qualification runs upgrade.yaml, from each supported minor.
+    # With Helm 3 and Helm 4: install, upgrade (also --reuse-values),
+    # rollback and the uninstall hook (#394).
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        helm: [3, 4]
+    name: upgrade (Helm ${{ matrix.helm }})
     steps:
       # The tags: the test starts from the latest release (hack/releases).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -247,7 +260,7 @@ jobs:
         run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_OUTPUT"
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: ${{ steps.versions.outputs.HELM_VERSION }}
+          version: ${{ matrix.helm == 4 && steps.versions.outputs.HELM4_VERSION || steps.versions.outputs.HELM_VERSION }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'

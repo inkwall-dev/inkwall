@@ -279,11 +279,24 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
 - **`WAFIPList` / `ClusterWAFIPList`:** CIDRs, or a URL that the operator fetches (never the
   engine).
 
+  **Built (#358):** the namespaced `WAFIPList` with CIDR entries, named by
+  `WAFPolicy.spec.ipLists: {allow, deny}` in the policy's namespace. The operator resolves the
+  lists into each policy's `ip_lists` in the bundle (an unknown or invalid list makes the policy
+  `Accepted=False`, `InvalidRef`). The engine checks the resolved client IP before anything else,
+  skip paths and rules included, as sorted, merged ranges with a binary search (`pkg/iplist`:
+  about 60 ns at 10,000 prefixes, no allocation). A client in a deny list is denied with 403 and
+  reason `ip-deny` (logged in `Detect` mode). One in an allow list and not in a deny list is let
+  through uninspected, its body unread, with reason `ip-allow`: counted in the metrics, not a
+  security event, since allowed clients would flood the events. Deny wins over allow, so an
+  allowed range can't open a hole in a denied one. An engine before 0.5.0 ignores the lists, so
+  the policy is `Enforced=False` (`EnginesOutdated`) meanwhile. Not built: `ClusterWAFIPList`,
+  lists fetched from a URL.
+
 **Built:** `InkwallConfig`, `WAFPolicy`, `WAFRuleSet` and `ClusterWAFRuleSet`; `Ingress` and
 Traefik `IngressRoute` targets; `HTTPRoute` targets resolved, with the precedence above
 ([0004 §4.5](0004-operator.md#45-resolver)), and wired through Envoy Gateway or Traefik's Gateway
 API provider ([0004 §4.4](0004-operator.md#44-wiring-controller)).
-**Not yet:** IP lists, the policy fields `rateLimits` and `ipLists`, wiring other controllers'
+**Not yet:** cluster-wide and fetched IP lists, the policy field `rateLimits`, wiring other controllers'
 `HTTPRoute` targets, `BlockHighConfidence`, the `InspectPrefix` oversize action, and
 `InkwallConfig.events`.
 
@@ -1237,7 +1250,12 @@ names the failing targets only: a crash may be a vulnerability, reported private
 
 **Built (other levels):**
 
-- rule conformance (`make crs-test`, go-ftw);
+- rule conformance (`make crs-test`, go-ftw): the CRS's regression tests through the reverse
+  proxy at each paranoia level, and through ForwardAuth, ext_proc and SPOE (each behind an
+  in-process stand-in for its proxy) at level 4, with the response rules' tests through ext_proc.
+  A test one adapter fails while the reverse proxy passes it fails the suite, unless it is listed
+  as a difference with its reason (`test/crs/crs_test.go`): today, the `Content-Length: 0` the
+  adapters add to an empty POST, and requests without a Host, which Envoy answers itself;
 - E2E and upgrade tests on kind (`make kind-e2e`, `make kind-upgrade`; shell scripts in
   `hack/kind`, on every PR). The upgrade test runs `helm upgrade` from the last release and checks
   that routes stay protected;
