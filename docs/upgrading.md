@@ -69,6 +69,11 @@ What's new:
 
 What changes by itself:
 
+- **ForwardAuth refuses an invalid `X-Forwarded-Host`** (one with a path, a space or other
+  characters a Host can't have) with 400, as the reverse proxy refuses such a Host: the rules
+  would read one host and the application another. Traefik sends the client's Host, which it
+  validates already, so its requests aren't affected.
+
 - **The chart keeps the operator's settings of the Pod webhooks** (`failurePolicy`,
   `objectSelector`, `namespaceSelector`). The operator sets `failurePolicy` to `Fail` while a
   policy blocks; an upgrade used to render `Ignore` until the operator set it again, and Helm 4,

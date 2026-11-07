@@ -1182,7 +1182,7 @@ One shared request corpus drives every level.
 | Unit | `go test` | Package logic | every PR |
 | [Fuzz](https://go.dev/doc/security/fuzz/) | `go test -fuzz` | Parsers of untrusted input never panic and keep their properties | nightly; seeds every PR |
 | Rule conformance | [go-ftw](https://github.com/coreruleset/go-ftw) + CRS tests | Detection matches CRS | every PR |
-| Adapter parity | [testcontainers-go](https://golang.testcontainers.org/) | Adapters match the reverse proxy | every PR |
+| Adapter parity | `go test`, in-process stand-ins for each proxy | Adapters match the reverse proxy | every PR |
 | E2E | kind + [e2e-framework](https://github.com/kubernetes-sigs/e2e-framework) | Wiring, enforcement, status, failure modes | every PR |
 | Performance | [`testing.B`](https://pkg.go.dev/testing#B), [k6](https://grafana.com/docs/k6/latest/) | 0001 budgets | every PR / nightly |
 | Upgrade | kind | N-1 → N with no dropped requests | release |
@@ -1245,13 +1245,23 @@ names the failing targets only: a crash may be a vulnerability, reported private
   A test one adapter fails while the reverse proxy passes it fails the suite, unless it is listed
   as a difference with its reason (`test/crs/crs_test.go`): today, the `Content-Length: 0` the
   adapters add to an empty POST, and requests without a Host, which Envoy answers itself;
+- adapter parity (`TestAdapterParity` in `test/crs`, in `make test`): a corpus of clean traffic,
+  attacks, odd hosts and encodings, HTTP/1.0, chunked and large bodies, gRPC and a WebSocket
+  handshake goes through the reverse proxy, ForwardAuth, ext_proc, SPOE and `/v1/check`, each
+  behind the stand-in for its proxy the CRS suite uses, against one pipeline. For each adapter it
+  compares the request the rules saw (method, scheme, host, URI, protocol, headers, body, client
+  IP), the verdict (action, status, reason, rule IDs) and the client's answer (status, and a
+  denial's `X-Request-Id`) with the reverse proxy's. A difference fails the test, naming the
+  adapter, the case and the field, unless `parityDifferences` lists it with its reason: today,
+  ForwardAuth's HTTP/1.1 subrequest (the client's version isn't sent) and its own framing headers,
+  and how each proxy answers a denied gRPC call;
 - E2E and upgrade tests on kind (`make kind-e2e`, `make kind-upgrade`; shell scripts in
   `hack/kind`, on every PR). The upgrade test runs `helm upgrade` from the last release and checks
   that routes stay protected;
 - benchmarks (`testing.B`, and the CI `bench` gate;
   [0001 §8](0001-performance-first-architecture.md#8-proving-it-the-performance-test-harness)).
 
-**Not yet:** adapter parity, e2e-framework, k6, soak and chaos tests.
+**Not yet:** e2e-framework, k6, soak and chaos tests.
 
 ---
 

@@ -27,7 +27,7 @@ import (
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/inkwall-dev/inkwall/pkg/adapters/extproc"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/forwardauth"
@@ -46,7 +46,7 @@ const maxBody = 1 << 20
 var discard = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 // proxyFront is the engine's own reverse proxy: the adapter is the front.
-func proxyFront(t *testing.T, p *pipeline.Pipeline, upstream *url.URL) http.Handler {
+func proxyFront(t *testing.T, p pipeline.ExchangeInspector, upstream *url.URL) http.Handler {
 	h, err := proxy.New(p, proxy.Config{Upstream: upstream, MaxBodyBytes: maxBody, Logger: discard})
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +57,7 @@ func proxyFront(t *testing.T, p *pipeline.Pipeline, upstream *url.URL) http.Hand
 // forwardAuthFront asks the ForwardAuth adapter as Traefik does (with
 // forwardBody): a subrequest with the client's headers, X-Forwarded-*, and
 // the body. A 2xx forwards the request; anything else is the answer.
-func forwardAuthFront(t *testing.T, p *pipeline.Pipeline, upstream *url.URL) http.Handler {
+func forwardAuthFront(t *testing.T, p pipeline.ExchangeInspector, upstream *url.URL) http.Handler {
 	fa, err := forwardauth.New(p, forwardauth.Config{MaxBodyBytes: maxBody, Logger: discard})
 	if err != nil {
 		t.Fatal(err)
@@ -131,17 +131,25 @@ func copyHeader(dst, src http.Header) {
 // extProcFront asks the ext_proc adapter as Envoy does, with buffered
 // request and response bodies: the request headers and body, then the
 // upstream's response headers and body, so the response rules run too.
-func extProcFront(t *testing.T, p *pipeline.Pipeline, upstream *url.URL) http.Handler {
+func extProcFront(t *testing.T, p pipeline.ExchangeInspector, upstream *url.URL) http.Handler {
 	s, err := extproc.New(p, extproc.Config{MaxBodyBytes: maxBody, Logger: discard})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln := bufconn.Listen(1 << 20)
+	// A Unix socket, as Envoy reaches the engine in a pod: the stream's
+	// peer is then loopback, as there.
+	sock := filepath.Join(t.TempDir(), "extproc.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
 	g := s.NewGRPCServer()
 	go func() { _ = g.Serve(ln) }()
 	t.Cleanup(g.Stop)
 	conn, err := grpc.NewClient("passthrough:///engine",
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return ln.DialContext(ctx) }),
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+		}),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(16<<20), grpc.MaxCallSendMsgSize(16<<20)))
 	if err != nil {
@@ -189,6 +197,11 @@ func envoyExchange(client extprocv3.ExternalProcessorClient, w http.ResponseWrit
 			for _, h := range ir.GetHeaders().GetSetHeaders() {
 				w.Header().Set(h.GetHeader().GetKey(), string(h.GetHeader().GetRawValue()))
 			}
+			// A gRPC status: Envoy answers as a gRPC server, HTTP 200.
+			if ir.GetGrpcStatus() != nil {
+				w.WriteHeader(http.StatusOK)
+				return resp, true, nil
+			}
 			w.WriteHeader(int(ir.GetStatus().GetCode()))
 			_, _ = w.Write(ir.GetBody())
 			return resp, true, nil
@@ -199,6 +212,10 @@ func envoyExchange(client extprocv3.ExternalProcessorClient, w http.ResponseWrit
 		Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{
 			Headers: &corev3.HeaderMap{Headers: hs}, EndOfStream: len(body) == 0,
 		}},
+		// The attribute the operator's and examples' filters ask for.
+		Attributes: map[string]*structpb.Struct{"envoy.filters.http.ext_proc": {Fields: map[string]*structpb.Value{
+			"request.protocol": structpb.NewStringValue(r.Proto),
+		}}},
 		ProtocolConfig: &extprocv3.ProtocolConfiguration{
 			RequestBodyMode:  filterv3.ProcessingMode_BUFFERED,
 			ResponseBodyMode: filterv3.ProcessingMode_BUFFERED,
@@ -282,7 +299,7 @@ func setHeaders(c *extprocv3.CommonResponse) map[string]string {
 // spoe.conf: a NOTIFY with the request's method, path and query, version,
 // headers (req.hdrs_bin), body, address and TLS flag, over one connection
 // at a time; a denial is the answer, with the status the engine sent.
-func spoeFront(t *testing.T, p *pipeline.Pipeline, upstream *url.URL) http.Handler {
+func spoeFront(t *testing.T, p pipeline.ExchangeInspector, upstream *url.URL) http.Handler {
 	s, err := spoe.New(p, spoe.Config{MaxBodyBytes: maxBody, Logger: discard})
 	if err != nil {
 		t.Fatal(err)
