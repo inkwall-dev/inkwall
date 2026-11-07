@@ -68,10 +68,11 @@ BASE            ?= origin/main
 # it is the Contributor Covenant 2.1, kept verbatim. The install and verify
 # commands of the READMEs and CONTRIBUTING.md write <version>, never a
 # release, so they don't go stale when the next one ships. docs/monitoring.md
-# names every metric the code registers.
+# names every metric the code registers, and docs/troubleshooting.md every
+# condition reason the operator sets.
 DOCS_CHECK_STRICT ?= -contents-min-lines=80 -require-index -contents-exempt=CODE_OF_CONDUCT.md \
 	-unpinned=README.md,deploy/helm/inkwall/README.md,CONTRIBUTING.md -metrics-doc=docs/monitoring.md \
-	-versions=hack/versions.env
+	-reasons-doc=docs/troubleshooting.md -versions=hack/versions.env
 DOCS_CHECK        ?= $(GO) run ./hack/docscheck $(DOCS_CHECK_STRICT)
 
 # scale-test: sizes as <policies>x<engines>, one operator each; "full" is 0004 §8's matrix.
@@ -122,7 +123,7 @@ bench-compare: ## Compare benchmarks of changed packages with BASE (origin/main)
 	BENCH='$(BENCH)' hack/bench/compare.sh $(BASE)
 
 .PHONY: crs-test
-crs-test: ## Run the OWASP CRS regression suite through the proxy (test/crs)
+crs-test: ## Run the OWASP CRS regression suite through each adapter, and the response rules through ext_proc (test/crs)
 	cd test/crs && $(GO) test -count=1 -timeout 30m -v ./...
 
 

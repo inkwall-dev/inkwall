@@ -1,0 +1,31 @@
+# The exclusions to add to each WAFPolicy's spec.exclusions.
+- exclusions:
+  - ruleIDs:
+    - 100100
+    when:
+      argument: debug
+      path: /api/orders
+  policy: shop/api
+- exclusions:
+  - ruleIDs:
+    - 942440
+    when:
+      cookie: session_hint
+      path: /account
+  - ruleIDs:
+    - 920350
+    when:
+      header: Referer
+      path: /account
+  - ruleIDs:
+    - 942200
+    when:
+      argumentName: select
+      path: /api/import
+  - ruleIDs:
+    - 942100
+    - 942430
+    when:
+      argument: q
+      path: /search
+  policy: shop/storefront
