@@ -21,6 +21,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# The versions under test (#393).
+# shellcheck source=hack/versions.env
+. hack/versions.env
 
 CLUSTER=${KIND_CLUSTER:-inkwall}
 OPERATOR_NS=inkwall-system
@@ -28,7 +31,6 @@ OPERATOR_NS=inkwall-system
 # and the apps'.
 NS=haproxy-e2e
 # Controller v3.2.19 (HAProxy 3.2), from its chart.
-HAPROXY_CHART_VERSION=1.54.4
 HAPROXY_IMAGE_TAG=3.2.19
 HAPROXY_REPO=https://haproxytech.github.io/helm-charts
 CLASS=haproxy-e2e
@@ -79,7 +81,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: traefik/whoami:v1.10.3
+          image: traefik/whoami:$WHOAMI_VERSION
           # --verbose logs each request: the held-body check looks for one.
           args: ["--port", "8080", "--verbose"]
 ---

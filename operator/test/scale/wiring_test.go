@@ -36,10 +36,8 @@ import (
 // wiring reconcile makes, the policies' status writes through a rollout of
 // gateway pods, the reconcile's duration and the operator's memory.
 const (
-	// wiringDefault is the number of policies of SCALE=wiring: as many
-	// VirtualServices as one gateway namespace's EnvoyFilter holds under
-	// etcd's 1.5 MiB limit (about 1,200; #424). 5,000 once that is fixed.
-	wiringDefault = 1000
+	// wiringDefault is the number of policies of SCALE=wiring.
+	wiringDefault = 5000
 	// wiringPods are the ingress gateway pods; rolloutPods the pods of the
 	// rollout, created and deleted one at a time.
 	wiringPods, rolloutPods = 3, 5
