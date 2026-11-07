@@ -51,6 +51,7 @@ type Metrics struct {
 	ruleMatches    *prometheus.CounterVec
 	policyRequests *prometheus.CounterVec // nil unless enabled
 	adapterErrors  *prometheus.CounterVec
+	rulesReloads   *prometheus.CounterVec
 	connections    prometheus.Gauge
 	connWaits      prometheus.Counter
 	wsMessages     *prometheus.CounterVec
@@ -105,6 +106,11 @@ func NewMetrics(adapter string) *Metrics {
 			Help:        "Rules that matched, by rule ID and the verdict's action (allow, deny, log); every rule that matched counts, score-only ones included. At most 2000 rule IDs, then rule_id=\"other\".",
 			ConstLabels: labels,
 		}, []string{"rule_id", "action"}),
+		rulesReloads: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name:        "inkwall_rules_reloads_total",
+			Help:        "Reloads of standalone mode's rule files (SIGHUP, --watch-rules), by result: ok, or error (the old rules stay).",
+			ConstLabels: labels,
+		}, []string{"result"}),
 		connections: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name:        "inkwall_connections",
 			Help:        "Client connections the engine's proxy holds open, with --max-connections.",
@@ -139,7 +145,7 @@ func NewMetrics(adapter string) *Metrics {
 		labels: labels,
 	}
 	reg.MustRegister(m.requests, m.duration, m.responses, m.respTime,
-		m.ruleMatches, m.adapterErrors, m.connections, m.connWaits, m.wsMessages, m.wsConnections, m.wsViolations)
+		m.ruleMatches, m.adapterErrors, m.rulesReloads, m.connections, m.connWaits, m.wsMessages, m.wsConnections, m.wsViolations)
 	return m
 }
 
@@ -231,6 +237,14 @@ func (m *Metrics) ConnectionLimitWait() {
 		return
 	}
 	m.connWaits.Inc()
+}
+
+// RulesReloaded counts a reload of the rule files, by result (ok, error).
+func (m *Metrics) RulesReloaded(result string) {
+	if m == nil {
+		return
+	}
+	m.rulesReloads.WithLabelValues(result).Inc()
 }
 
 // AdapterError counts a request the adapter refused without inspecting

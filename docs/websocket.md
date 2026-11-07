@@ -100,7 +100,7 @@ the same rules ([standalone proxy](standalone-proxy.md#flags)).
 | Proxy | Handshake | Denial | Messages |
 |---|---|---|---|
 | Envoy Gateway, [raw Envoy](raw-envoy.md) (ext_proc) | Inspected on its headers | 403 before the upgrade | Not inspected |
-| [Istio](istio.md): HTTPRoutes of its Gateways, VirtualServices of its ingress gateways (ext_proc) | Inspected on its headers, as through Envoy Gateway (not covered by an e2e yet) | 403 before the upgrade | Not inspected |
+| [Istio](istio.md): HTTPRoutes of its Gateways, VirtualServices of its ingress gateways (ext_proc) | Inspected on its headers, as through Envoy Gateway | 403 before the upgrade | Not inspected |
 | [HAProxy](haproxy.md), and the HAProxy Kubernetes Ingress Controller (SPOE) | Inspected | 403 before the upgrade | Not inspected |
 | Traefik (ForwardAuth) | Inspected, without `Upgrade` and `Connection` | 403 before the upgrade | Not inspected |
 | [Standalone proxy](standalone-proxy.md) | Inspected | 403 before the upgrade | Inspected with `--websocket-messages`; a denial closes with 1008 |

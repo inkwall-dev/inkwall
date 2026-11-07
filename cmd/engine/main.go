@@ -70,6 +70,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/router"
+	"github.com/inkwall-dev/inkwall/pkg/rules"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
@@ -132,6 +133,9 @@ const (
 	cmdSPOE        = "spoe"
 )
 
+// rulesWatchInterval is how often --watch-rules checks the rule files.
+const rulesWatchInterval = 2 * time.Second
+
 // newLogger returns the engine's JSON logger, writing lines of level and
 // above to w.
 func newLogger(w io.Writer, level slog.Level) *slog.Logger {
@@ -166,12 +170,14 @@ type engineConfig struct {
 	threshold      int
 	rulesFile      string
 	rulesBeforeCRS string
-	clientIP       clientip.Options
-	skipPaths      []string
-	routes         *router.Table
-	skipBodyPaths  []string
-	pprof          bool
-	ruleGroupsOff  []string
+	// watchRules reloads the rule files when their content changes.
+	watchRules    bool
+	clientIP      clientip.Options
+	skipPaths     []string
+	routes        *router.Table
+	skipBodyPaths []string
+	pprof         bool
+	ruleGroupsOff []string
 	// webSocket is what a WebSocket handshake must meet; nil: nothing more
 	// than any request.
 	webSocket *pipeline.WebSocketRules
@@ -202,7 +208,7 @@ type engineConfig struct {
 // they can't be set.
 var policyFlags = []string{
 	"mode", "failure-mode", "timeout", "oversize-body", "grpc-messages", "paranoia-level", "anomaly-threshold",
-	"rules", "rules-before-crs", "skip-paths", "skip-body-paths", "disable-rule-groups",
+	"rules", "rules-before-crs", "watch-rules", "skip-paths", "skip-body-paths", "disable-rule-groups",
 	"websocket-origins", "websocket-allow-missing-origin", "websocket-required-headers", "websocket-messages",
 	"inspect-responses", "max-response-bytes", "oversize-response",
 }
@@ -258,6 +264,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	threshold := fs.Int("anomaly-threshold", coraza.DefaultInboundAnomalyThreshold, "OWASP CRS inbound anomaly score threshold")
 	rulesFile := fs.String("rules", "", "file with SecLang rules and configure-time exclusions (SecRuleRemoveById, SecRuleUpdateTargetById), loaded after CRS")
 	rulesBeforeCRS := fs.String("rules-before-crs", "", "file with SecLang runtime exclusions (rules using ctl:ruleRemoveById and similar) and settings, loaded before CRS")
+	watchRules := fs.Bool("watch-rules", false, "reload --rules and --rules-before-crs when their content changes, checked every 2s (a mounted ConfigMap); they are reloaded on SIGHUP in any case")
 	// The check API carries the client address resolved by the proxy.
 	trusted := new(string)
 	trustedHops := new(int)
@@ -344,6 +351,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 		threshold:        *threshold,
 		rulesFile:        *rulesFile,
 		rulesBeforeCRS:   *rulesBeforeCRS,
+		watchRules:       *watchRules,
 
 		operator:           *operator,
 		operatorCA:         *operatorCA,
@@ -531,7 +539,17 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 	if cfg.operator != "" {
 		ag, p, rec, err = bundleMode(cfg, metrics, logger)
 	} else {
-		p, err = flagMode(cfg, metrics)
+		var reloader *rulesReloader
+		if p, reloader, err = flagMode(cfg, metrics, logger); err == nil {
+			hup := make(chan os.Signal, 1)
+			signal.Notify(hup, syscall.SIGHUP)
+			defer signal.Stop(hup)
+			var watch time.Duration
+			if cfg.watchRules {
+				watch = rulesWatchInterval
+			}
+			go reloader.run(ctx, hup, watch)
+		}
 	}
 	if err != nil {
 		return err
@@ -730,29 +748,19 @@ func (g grpcServer) Shutdown(ctx context.Context) error {
 }
 
 // flagMode builds the one pipeline the flags define.
-func flagMode(cfg engineConfig, metrics *telemetry.Metrics) (pipeline.Inspector, error) {
-	directives, err := readOptional(cfg.rulesFile)
+func flagMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logger) (pipeline.Inspector, *rulesReloader, error) {
+	after, before, sum, err := ruleFiles(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("read --rules: %w", err)
+		return nil, nil, err
 	}
-	directivesBeforeCRS, err := readOptional(cfg.rulesBeforeCRS)
+	eval, err := compileRules(cfg, after, before)
 	if err != nil {
-		return nil, fmt.Errorf("read --rules-before-crs: %w", err)
+		return nil, nil, err
 	}
-	eval, err := coraza.New(coraza.Config{
-		ParanoiaLevel:           cfg.paranoiaLevel,
-		InboundAnomalyThreshold: cfg.threshold,
-		MaxArgs:                 cfg.maxArgs,
-		BodyLimit:               int(cfg.maxBodyBytes),
-		ResponseBodyLimit:       int(cfg.responses.MaxBytes),
-		DisabledRuleGroups:      cfg.ruleGroupsOff,
-		DirectivesBeforeCRS:     directivesBeforeCRS,
-		Directives:              directives,
-	})
-	if err != nil {
-		return nil, err
-	}
-	p := pipeline.New(eval, pipeline.Config{
+	// The rules can be reloaded (SIGHUP, --watch-rules): the pipeline
+	// evaluates with whichever is in force when a request starts.
+	reloader := &rulesReloader{cfg: cfg, swap: rules.NewSwap(eval), logger: logger, metrics: metrics, sum: sum}
+	p := pipeline.New(reloader.swap, pipeline.Config{
 		Mode:          cfg.mode,
 		FailureMode:   cfg.failureMode,
 		Timeout:       cfg.timeout,
@@ -766,7 +774,7 @@ func flagMode(cfg engineConfig, metrics *telemetry.Metrics) (pipeline.Inspector,
 	})
 	metrics.WatchAdmission(p.Admission())
 	metrics.WatchRuleSets(func() int { return 1 })
-	return p, nil
+	return p, reloader, nil
 }
 
 // bundleMode inspects with the policies of the operator's bundles, per
