@@ -1,0 +1,26 @@
+15 security events
+
+WAFPolicy shop/api
+  100100@ARGS:debug on /api/orders: 1 time, 1 client IP (request IDs req-a1)
+  Suggested exclusions:
+    rules 100100, on /api/orders, for argument debug
+
+WAFPolicy shop/storefront: 13 logged requests would be denied in Block mode
+  942100@ARGS:q on /search: 6 times, 4 client IPs (request IDs req-q0, req-q1, req-q2)
+  920350@REQUEST_HEADERS:Referer on /account: 1 time, 1 client IP (request IDs req-h1)
+  942440@REQUEST_COOKIES:session_hint on /account: 1 time, 1 client IP (request IDs req-c1)
+  942200@ARGS_NAMES:select on /api/import: 1 time, 1 client IP (request IDs req-n1)
+  941100@ARGS:q text on /search: 1 time, 1 client IP (request IDs req-o1)
+    not suggested: no exclusion field names ARGS:q text: --broad would turn the rule off for every variable on the path
+  942430@ARGS:q on /search: 1 time, 1 client IP (request IDs req-q9)
+  942100@ARGS:q on /search;jsessionid=1: 1 time, 1 client IP (request IDs req-p1)
+    not suggested: the path has characters a WAFPolicy path can't hold
+  932100@REQUEST_BODY on /upload: 1 time, 1 client IP (request IDs req-b1)
+    not suggested: no exclusion field names REQUEST_BODY: --broad would turn the rule off for every variable on the path
+  Suggested exclusions:
+    rules 942440, on /account, for cookie session_hint
+    rules 920350, on /account, for header Referer
+    rules 942200, on /api/import, for argument name select
+    rules 942100,942430, on /search, for argument q
+
+Suggestions are only as good as the events: check that each group is a false positive, not an attack, before you add it. -o yaml writes them.
