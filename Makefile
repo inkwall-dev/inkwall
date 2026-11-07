@@ -126,7 +126,7 @@ gitops-health-test: ## Test the Argo CD health checks and Flux healthCheckExprs 
 	cd hack/gitopshealth && $(GO) test -count=1 ./...
 
 .PHONY: crs-test
-crs-test: ## Run the OWASP CRS regression suite through the proxy (test/crs)
+crs-test: ## Run the OWASP CRS regression suite through each adapter, and the response rules through ext_proc (test/crs)
 	cd test/crs && $(GO) test -count=1 -timeout 30m -v ./...
 
 
