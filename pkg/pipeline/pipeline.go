@@ -422,6 +422,12 @@ func (p *Pipeline) partly(ctx context.Context, r *request.Request, keep bool) (V
 // request returns the evaluation of r, kept for the response if keep.
 func (p *Pipeline) request(r *request.Request, keep bool) func(context.Context) outcome {
 	return func(ctx context.Context) outcome {
+		// Detect mode lets every request through, so a flagged one's
+		// response reaches the client too: inspect it (#360).
+		if de, ok := p.eval.(rules.DetectingEvaluator); ok && keep && p.mode == ModeDetect {
+			res, x, err := de.EvaluateExchangeDetecting(ctx, r)
+			return outcome{res: res, x: x, err: err}
+		}
 		if ee, ok := p.eval.(rules.ExchangeEvaluator); ok && keep {
 			res, x, err := ee.EvaluateExchange(ctx, r)
 			return outcome{res: res, x: x, err: err}

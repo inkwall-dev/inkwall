@@ -924,6 +924,11 @@ func buildDirectives(cfg Config) (string, error) {
 	b.WriteString(argumentLimitRules)
 	// Enforce, and leave audit logging to Inkwall's own event pipeline.
 	b.WriteString("SecRuleEngine On\n")
+	// Detect mode with responses (EvaluateExchangeDetecting): the
+	// transaction runs DetectionOnly, so a request the rules would
+	// interrupt goes on to its response. The first phase 1 rule, so every
+	// other one runs under it.
+	fmt.Fprintf(&b, "SecRule TX:%s \"@eq 1\" \"id:%d,phase:1,pass,nolog,t:none,ctl:ruleEngine=DetectionOnly\"\n", txDetect, idDetect)
 	b.WriteString("SecAuditEngine Off\n")
 	// Coraza's regex prefilter (SecRxPreFilter) is deliberately left off: with
 	// Coraza 3.8.1 it misses CRS regression tests 942220-2 and 932311-7. Only
@@ -950,7 +955,7 @@ func buildDirectives(cfg Config) (string, error) {
 
 // Evaluate runs the request through phases 1 and 2 (headers and body).
 func (e *Evaluator) Evaluate(_ context.Context, r *request.Request) (rules.Result, error) {
-	res, tx, err := e.evaluate(r)
+	res, tx, err := e.evaluate(r, false)
 	if tx != nil {
 		closeTx(tx)
 	}
@@ -962,7 +967,7 @@ var _ rules.ExchangeEvaluator = (*Evaluator)(nil)
 // EvaluateExchange implements rules.ExchangeEvaluator: the transaction
 // stays open for the response, unless the request was interrupted.
 func (e *Evaluator) EvaluateExchange(_ context.Context, r *request.Request) (rules.Result, rules.Exchange, error) {
-	res, tx, err := e.evaluate(r)
+	res, tx, err := e.evaluate(r, false)
 	if err != nil || res.Interrupted || tx == nil {
 		if tx != nil {
 			closeTx(tx)
@@ -972,6 +977,43 @@ func (e *Evaluator) EvaluateExchange(_ context.Context, r *request.Request) (rul
 	return res, &exchange{tx: tx, seen: len(tx.MatchedRules())}, nil
 }
 
+var _ rules.DetectingEvaluator = (*Evaluator)(nil)
+
+// txDetect is the TX variable that runs a transaction DetectionOnly.
+const txDetect = "inkwall_detect"
+
+// EvaluateExchangeDetecting implements rules.DetectingEvaluator (#360): the
+// transaction runs DetectionOnly, so the rules never interrupt it; the
+// result reports the interruption they would have made (Coraza's first),
+// and the exchange is kept for the response whatever the request scored.
+// Rules keep running after that point, so a would-be interrupted request
+// may list more matches than in block mode.
+func (e *Evaluator) EvaluateExchangeDetecting(_ context.Context, r *request.Request) (rules.Result, rules.Exchange, error) {
+	res, tx, err := e.evaluate(r, true)
+	if err != nil || tx == nil {
+		if tx != nil {
+			closeTx(tx)
+		}
+		return res, nil, err
+	}
+	if tx.IsInterrupted() {
+		// Interrupted all the same (a rule that sets the engine back On):
+		// as EvaluateExchange.
+		closeTx(tx)
+		return res, nil, nil
+	}
+	return res, &exchange{tx: tx, seen: len(tx.MatchedRules()), detect: true}, nil
+}
+
+// detectionOnlyInterruption is the interruption a DetectionOnly
+// transaction would have made, nil if none.
+func detectionOnlyInterruption(tx types.Transaction) *types.Interruption {
+	if d, ok := tx.(interface{ DetectionOnlyInterruption() *types.Interruption }); ok {
+		return d.DetectionOnlyInterruption()
+	}
+	return nil
+}
+
 func closeTx(tx types.Transaction) {
 	tx.ProcessLogging()
 	_ = tx.Close()
@@ -979,7 +1021,7 @@ func closeTx(tx types.Transaction) {
 
 // evaluate runs phases 1 and 2, and returns the transaction (nil if none
 // was made), which the caller closes.
-func (e *Evaluator) evaluate(r *request.Request) (rules.Result, types.Transaction, error) {
+func (e *Evaluator) evaluate(r *request.Request, detect bool) (rules.Result, types.Transaction, error) {
 	waf, err := e.wafFor(r)
 	if err != nil {
 		return rules.Result{}, nil, err
@@ -1003,6 +1045,13 @@ func (e *Evaluator) evaluate(r *request.Request) (rules.Result, types.Transactio
 	tx.ProcessURI(r.RawURI, r.Method, r.Proto)
 	if err := e.setCRS(tx); err != nil {
 		return rules.Result{}, tx, err
+	}
+	if detect {
+		st, ok := tx.(plugintypes.TransactionState)
+		if !ok {
+			return rules.Result{}, tx, errNoTxState
+		}
+		st.Variables().TX().Set(txDetect, []string{"1"})
 	}
 	if e.exclusions != nil {
 		if err := e.exclusions.apply(tx, r.RawURI); err != nil {
@@ -1056,6 +1105,9 @@ func (e *Evaluator) evaluate(r *request.Request) (rules.Result, types.Transactio
 	if err != nil {
 		return rules.Result{}, tx, fmt.Errorf("process request body: %w", err)
 	}
+	if detect && it == nil {
+		it = detectionOnlyInterruption(tx)
+	}
 	return result(tx, it, 0, inbound), tx, nil
 }
 
@@ -1066,6 +1118,8 @@ type exchange struct {
 	// lists the others.
 	seen int
 	done bool
+	// detect: the transaction runs DetectionOnly (EvaluateExchangeDetecting).
+	detect bool
 }
 
 var errResponseTwice = errors.New("response evaluated twice")
@@ -1104,8 +1158,30 @@ func (x *exchange) EvaluateResponse(_ context.Context, resp *request.Response) (
 	if err != nil {
 		return rules.Result{}, fmt.Errorf("process response body: %w", err)
 	}
+	if x.detect && it == nil {
+		it = wouldInterrupt(tx, x.seen)
+	}
 	return result(tx, it, x.seen, outbound), nil
 }
+
+// wouldInterrupt is the interruption a rule that matched after the first
+// skip would have made, in a DetectionOnly transaction: Coraza keeps only
+// the first (the request's), and marks no matched rule disruptive then, so
+// the response's is found among the matched rules by their disruptive
+// action (deny, drop, redirect), as the CRS's outbound evaluation (959100)
+// has. Nil if none.
+func wouldInterrupt(tx types.Transaction, skip int) *types.Interruption {
+	matched := tx.MatchedRules()
+	for _, mr := range matched[min(skip, len(matched)):] {
+		if disruptiveAction.MatchString(mr.Rule().Raw()) {
+			return &types.Interruption{RuleID: mr.Rule().ID(), Action: "deny"}
+		}
+	}
+	return nil
+}
+
+// disruptiveAction finds a disruptive action in a rule's SecLang.
+var disruptiveAction = regexp.MustCompile(`(?i)[",]\s*'?(deny|drop|redirect)\b`)
 
 // Close implements rules.Exchange.
 func (x *exchange) Close() {
@@ -1181,6 +1257,9 @@ func txInt(tx types.Transaction, name string) int {
 // and Coraza use, so they never collide with user or CRS rules.
 const (
 	internalIDMin = 7700000
+	// idDetect switches a transaction to DetectionOnly when TX:txDetect is
+	// 1 (EvaluateExchangeDetecting).
+	idDetect      = 7700010
 	internalIDMax = 7709999
 	// idCRSContentType is CRS's rule for content types the policy
 	// doesn't allow (tx.allowed_request_content_type).
