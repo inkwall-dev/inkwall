@@ -1,0 +1,53 @@
+# Cases for the WAFPolicy health check (argocd-cm-patch.yaml).
+- name: ready
+  want: Healthy
+  object:
+    metadata: {generation: 2}
+    status:
+      observedGeneration: 2
+      conditions:
+        - {type: Ready, status: "True", reason: Ready, message: "accepted, programmed into the proxy and enforced by every engine"}
+- name: no status yet
+  want: Progressing
+  object:
+    metadata: {generation: 1}
+- name: the operator hasn't reported this generation
+  want: Progressing
+  object:
+    metadata: {generation: 3}
+    status:
+      observedGeneration: 2
+      conditions:
+        - {type: Ready, status: "True", reason: Ready}
+- name: waiting for a rollout
+  want: Progressing
+  object:
+    metadata: {generation: 1}
+    status:
+      observedGeneration: 1
+      conditions:
+        - {type: Ready, status: "False", reason: PendingRestart, message: "Programmed: Traefik pods started before Inkwall"}
+- name: an engine rejects the bundle
+  want: Degraded
+  object:
+    metadata: {generation: 1}
+    status:
+      observedGeneration: 1
+      conditions:
+        - {type: Ready, status: "False", reason: EngineNack, message: "Enforced: some engines rejected bundle 4"}
+- name: wiring failed
+  want: Degraded
+  object:
+    metadata: {generation: 1}
+    status:
+      observedGeneration: 1
+      conditions:
+        - {type: Ready, status: "False", reason: WiringFailed, message: "Programmed: a rule name is shared"}
+- name: suspended
+  want: Suspended
+  object:
+    metadata: {generation: 1}
+    status:
+      observedGeneration: 1
+      conditions:
+        - {type: Ready, status: "False", reason: Suspended, message: "Enforced: InkwallConfig default suspends inspection"}

@@ -1,0 +1,25 @@
+# Cases for the WAFRuleSet and ClusterWAFRuleSet health checks.
+- name: accepted
+  want: Healthy
+  object:
+    metadata: {generation: 1}
+    status:
+      observedGeneration: 1
+      conditions:
+        - {type: Accepted, status: "True", reason: Accepted}
+- name: not checked yet
+  want: Progressing
+  object:
+    metadata: {generation: 2}
+    status:
+      observedGeneration: 1
+      conditions:
+        - {type: Accepted, status: "True", reason: Accepted}
+- name: doesn't compile
+  want: Degraded
+  object:
+    metadata: {generation: 1}
+    status:
+      observedGeneration: 1
+      conditions:
+        - {type: Accepted, status: "False", reason: RuleCompileError, message: "line 3: unknown operator"}

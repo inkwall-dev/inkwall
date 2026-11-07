@@ -305,11 +305,12 @@ func checkCRS(path *field.Path, b wafv1alpha1.RuleSetBinding) field.ErrorList {
 // the proxy that serves each one, which the webhook doesn't resolve: an
 // Ingress may be Traefik's or the HAProxy Kubernetes Ingress Controller's,
 // an HTTPRoute Envoy Gateway's, Traefik's or Istio's; IngressRoutes are
-// Traefik's, VirtualServices Istio's ingress gateways'. Of these, only
-// Envoy Gateway sends responses to the engine. So it names the target
-// kinds, not a proxy, and leaves each target's verdict to its Programmed
-// condition (ResponsesNotInspected). The policy is accepted, as its
-// requests are inspected.
+// Traefik's. Envoy Gateway and Istio send responses to the engine (Istio
+// since #374, so VirtualServices, Istio's ingress gateways', get no
+// warning); Traefik and HAProxy don't. So it names the target kinds, not a
+// proxy, and leaves each target's verdict to its Programmed condition
+// (ResponsesNotInspected). The policy is accepted, as its requests are
+// inspected.
 func responseWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
 	if r := p.Spec.Responses; r == nil || !r.Inspect {
 		return nil
@@ -317,7 +318,7 @@ func responseWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
 	var targets []string
 	for _, ref := range p.Spec.TargetRefs {
 		switch ref.Kind {
-		case "Ingress", "IngressRoute", "HTTPRoute", "VirtualService":
+		case "Ingress", "IngressRoute", "HTTPRoute":
 			targets = append(targets, ref.Kind+" "+ref.Name)
 		}
 	}
@@ -329,7 +330,7 @@ func responseWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
 		list = strings.Join(targets[:n-1], ", ") + " and " + targets[n-1]
 	}
 	return admission.Warnings{"spec.responses: the responses of " + list + " may not be inspected, depending on the proxy that serves them: " +
-		"Traefik, the HAProxy Kubernetes Ingress Controller and Istio can't send responses to the engine, Envoy Gateway can. " +
+		"Traefik and the HAProxy Kubernetes Ingress Controller can't send responses to the engine, Envoy Gateway and Istio can. " +
 		"The requests are inspected either way; the policy's Programmed condition says which responses are not (ResponsesNotInspected)"}
 }
 
