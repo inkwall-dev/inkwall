@@ -11,10 +11,13 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/textproto"
@@ -71,6 +74,36 @@ type Config struct {
 	// (http.Server.ReadTimeout), set again once BodyReadTimeout's part is
 	// read (0: none).
 	ReadTimeout time.Duration
+	// UpstreamH2C reaches an http:// upstream over HTTP/2 without TLS
+	// (prior knowledge), as a gRPC server needs; WebSocket upgrades, HTTP/1
+	// only, can't pass then. An https:// upstream gets HTTP/2 or HTTP/1.1,
+	// as ALPN settles.
+	UpstreamH2C bool
+	// UpstreamCAs verifies an https:// upstream's certificate (nil: the
+	// system's roots).
+	UpstreamCAs *x509.CertPool
+}
+
+// Transport returns the upstream's transport: HTTP/2 over TLS by ALPN, or
+// over cleartext with h2c, and connections kept for reuse.
+func Transport(h2c bool, cas *x509.CertPool) *http.Transport {
+	t := &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		MaxIdleConns:          512,
+		MaxIdleConnsPerHost:   128,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		TLSClientConfig:       &tls.Config{RootCAs: cas, MinVersion: tls.VersionTLS12},
+		Protocols:             new(http.Protocols),
+	}
+	if h2c {
+		t.Protocols.SetUnencryptedHTTP2(true)
+	} else {
+		t.Protocols.SetHTTP1(true)
+		t.Protocols.SetHTTP2(true)
+	}
+	return t
 }
 
 // Handler is an inspecting reverse proxy.
@@ -97,6 +130,9 @@ func New(p pipeline.Inspector, cfg Config) (*Handler, error) {
 	if cfg.Upstream == nil || cfg.Upstream.Scheme == "" || cfg.Upstream.Host == "" {
 		return nil, errors.New("upstream must be an absolute URL")
 	}
+	if cfg.UpstreamH2C && cfg.Upstream.Scheme != "http" {
+		return nil, errors.New("HTTP/2 without TLS needs an http:// upstream")
+	}
 	if cfg.MaxBodyBytes < 0 {
 		return nil, fmt.Errorf("max body bytes %d must not be negative", cfg.MaxBodyBytes)
 	}
@@ -119,7 +155,8 @@ func New(p pipeline.Inspector, cfg Config) (*Handler, error) {
 			pr.Out.URL.RawQuery = joinQuery(upstream.RawQuery, pr.In.URL.RawQuery)
 			setForwarded(pr, resolver)
 		},
-		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
+		ErrorLog:  slog.NewLogLogger(logger.Handler(), slog.LevelError),
+		Transport: Transport(cfg.UpstreamH2C, cfg.UpstreamCAs),
 	}
 	if cfg.WebSocketMessages != pipeline.MessagesOff {
 		if _, ok := p.(messageInspector); !ok {

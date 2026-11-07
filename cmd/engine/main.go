@@ -35,6 +35,8 @@ package main
 import (
 	"cmp"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -183,6 +185,11 @@ type engineConfig struct {
 	webSocket *pipeline.WebSocketRules
 	// webSocketMessages: what the proxy does with a WebSocket's messages.
 	webSocketMessages pipeline.WebSocketMessages
+	// The proxy's protocols (#362).
+	h2c             bool
+	tlsCert, tlsKey string
+	upstreamH2C     bool
+	upstreamCA      string
 	// The proxy's long-lived connections (#368): 0 is no limit.
 	webSocketIdle   time.Duration
 	bodyReadTimeout time.Duration
@@ -235,7 +242,14 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	var upstream *string
 	wsMessages := new(string)
 	wsIdle, bodyReadTimeout, maxConns := new(time.Duration), new(time.Duration), new(int)
+	h2c, upstreamH2C := new(bool), new(bool)
+	tlsCert, tlsKey, upstreamCA := new(string), new(string), new(string)
 	if command == cmdProxy {
+		h2c = fs.Bool("h2c", false, "also accept HTTP/2 without TLS (prior knowledge, as gRPC clients send it) on --listen; HTTP/1.1 still works")
+		tlsCert = fs.String("tls-cert", "", "certificate (PEM) to serve TLS on --listen, with HTTP/2 and HTTP/1.1 by ALPN; re-read when it changes (with --tls-key)")
+		tlsKey = fs.String("tls-key", "", "private key (PEM) of --tls-cert")
+		upstreamH2C = fs.Bool("upstream-h2c", false, "reach an http:// upstream over HTTP/2 without TLS, as a gRPC server needs (WebSocket upgrades can't pass then)")
+		upstreamCA = fs.String("upstream-ca", "", "CA certificates (PEM) that an https:// upstream's certificate is verified with, instead of the system's")
 		wsIdle = fs.Duration("websocket-idle-timeout", 0, "close a WebSocket with 1001 (going away) when nothing passes either way for this long (0 = never)")
 		bodyReadTimeout = fs.Duration("body-read-timeout", 0, "maximum time to read the part of a request body that is inspected (408 past it); the rest streams under --read-timeout, which can then be 0 for long uploads (0 = only --read-timeout)")
 		maxConns = fs.Int("max-connections", 0, "maximum client connections open at a time, WebSockets included; past it, new ones wait until one closes (0 = no limit)")
@@ -374,6 +388,13 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 			return cfg, fmt.Errorf("--upstream: %w", err)
 		}
 		cfg.upstream = u
+		if (*tlsCert == "") != (*tlsKey == "") {
+			return cfg, errors.New("--tls-cert and --tls-key go together")
+		}
+		if *upstreamH2C && u.Scheme != "http" {
+			return cfg, errors.New("--upstream-h2c needs an http:// --upstream")
+		}
+		cfg.h2c, cfg.tlsCert, cfg.tlsKey, cfg.upstreamH2C, cfg.upstreamCA = *h2c, *tlsCert, *tlsKey, *upstreamH2C, *upstreamCA
 		if *wsIdle < 0 || *bodyReadTimeout < 0 || *maxConns < 0 {
 			return cfg, errors.New("--websocket-idle-timeout, --body-read-timeout and --max-connections must not be negative")
 		}
@@ -591,8 +612,14 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 	case cmdCheck:
 		handler, err = httpcheck.New(p, httpcheck.Config{MaxBodyBytes: maxBody, Logger: logger, Events: rec, Metrics: metrics})
 	default:
+		var cas *x509.CertPool
+		if cfg.upstreamCA != "" {
+			if cas, err = readCAs(cfg.upstreamCA); err != nil {
+				return err
+			}
+		}
 		handler, err = proxy.New(p,
-			proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics, JSONDenials: cfg.jsonDenials,
+			proxy.Config{UpstreamH2C: cfg.upstreamH2C, UpstreamCAs: cas, Upstream: cfg.upstream, MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics, JSONDenials: cfg.jsonDenials,
 				WebSocketMessages: cfg.webSocketMessages, WebSocketIdleTimeout: cfg.webSocketIdle,
 				BodyReadTimeout: cfg.bodyReadTimeout, ReadTimeout: cfg.readTimeout},
 		)
@@ -601,13 +628,29 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 		return err
 	}
 
-	var srv server = &http.Server{
+	hs := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		// Bounds slow uploads that would otherwise hold a connection and a
 		// goroutine open indefinitely.
 		ReadTimeout: cfg.readTimeout,
 		IdleTimeout: 120 * time.Second,
+	}
+	var srv server = hs
+	if cfg.h2c {
+		// HTTP/2 over TLS stays on, for a TLS listener.
+		hs.Protocols = new(http.Protocols)
+		hs.Protocols.SetHTTP1(true)
+		hs.Protocols.SetHTTP2(true)
+		hs.Protocols.SetUnencryptedHTTP2(true)
+	}
+	if cfg.tlsCert != "" {
+		cert, err := loadCertificate(cfg.tlsCert, cfg.tlsKey)
+		if err != nil {
+			return err
+		}
+		hs.TLSConfig = &tls.Config{GetCertificate: cert.get, MinVersion: tls.VersionTLS12}
+		srv = tlsServer{hs}
 	}
 	if ep != nil {
 		srv = grpcServer{ep.NewGRPCServer()}
