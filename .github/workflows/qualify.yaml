@@ -221,6 +221,8 @@ jobs:
     # Runs with published images, when images was skipped.
     if: always() && needs.plan.result == 'success' && (needs.images.result == 'success' || needs.images.result == 'skipped')
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -236,8 +238,7 @@ jobs:
         with:
           go-version: '1.27.x'
           check-latest: true
-          # No cache: the job runs another ref's code on a schedule, and
-          # mustn't write a cache main's jobs read (CodeQL's cache poisoning).
+          # Restore only: this job runs the ref's code (#503).
           cache: false
       # The versions under test, hack/versions.env (#393).
       - id: versions
