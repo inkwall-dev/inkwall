@@ -239,27 +239,43 @@ func testDistribution(ctx context.Context, t *testing.T, c client.Client) {
 	bad.Reject = func(*bundlev1.Bundle) error { return errors.New("line 1: rule does not compile") }
 	stopBad := run(bad)
 	wantEnforced("a rejecting engine", metav1.ConditionFalse, distribution.ReasonEngineNack, "some engines rejected bundle")
+	if n := policyGauge(t, "Enforced", "False", distribution.ReasonEngineNack); n < 1 {
+		t.Errorf("inkwall_operator_policies{Enforced,False,EngineNack} = %v, want at least 1", n)
+	}
 	// The change is an Event on the policy (#378), as kubectl describe
-	// shows it, and the gauge counts the policy.
-	eventually(t, "an EngineNack Event on the policy", func() string {
+	// shows it (its reason is Ready's: here the Ingress's ControllerUnsupported).
+	nackEvent := func() string {
 		var list eventsv1.EventList
 		if err := c.List(ctx, &list, client.InNamespace(pol.Namespace)); err != nil {
 			return err.Error()
 		}
 		for _, e := range list.Items {
-			if e.Regarding.Kind == "WAFPolicy" && e.Regarding.Name == pol.Name && e.Reason == distribution.ReasonEngineNack &&
-				e.Type == corev1.EventTypeWarning && strings.Contains(e.Note, "rule does not compile") {
+			if e.Regarding.Kind == "WAFPolicy" && e.Regarding.Name == pol.Name && e.Type == corev1.EventTypeWarning &&
+				strings.Contains(e.Note, "Enforced False (EngineNack)") && strings.Contains(e.Note, "rule does not compile") {
 				return ""
 			}
 		}
-		return fmt.Sprintf("%d events, none an EngineNack on the policy", len(list.Items))
-	})
-	if n := policyGauge(t, "Enforced", "False", distribution.ReasonEngineNack); n < 1 {
-		t.Errorf("inkwall_operator_policies{Enforced,False,EngineNack} = %v, want at least 1", n)
+		var seen []string
+		for _, e := range list.Items {
+			seen = append(seen, fmt.Sprintf("%s/%s %s %s: %s", e.Regarding.Kind, e.Regarding.Name, e.Type, e.Reason, e.Note))
+		}
+		return fmt.Sprintf("%d events, none an EngineNack on the policy: %q", len(list.Items), seen)
 	}
+	// Up to the Events' 30 s spacing, and not fatal: the rejecting engine
+	// must go either way.
+	for deadline := time.Now().Add(time.Minute); ; time.Sleep(200 * time.Millisecond) {
+		msg := nackEvent()
+		if msg == "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("an EngineNack Event on the policy: %s", msg)
+			break
+		}
+	}
+
 	stopBad()
 	wantEnforced("the rejecting engine gone", metav1.ConditionTrue, distribution.ReasonEnforced, "every engine runs bundle")
-
 	stopGood()
 	wantEnforced("all engines gone", metav1.ConditionFalse, distribution.ReasonNoEngines, "no engine")
 }
