@@ -48,6 +48,7 @@ type config struct {
 	contentsMinLines int
 	contentsExempt   map[string]bool
 	unpinned         map[string]bool // docs whose install commands must not pin a release
+	versions         string          // hack/versions.env, for <!-- versions: KEY --> paragraphs
 	metricsDoc       string          // the doc that must list every metric the code registers
 	external         bool
 	ext              externalConfig
@@ -60,6 +61,7 @@ func main() {
 		indexExempt    = flag.String("index-exempt", "CLAUDE.md", "comma-separated docs the index need not list")
 		contentsExempt = flag.String("contents-exempt", "", "comma-separated docs that need no Contents section, whatever their length")
 		unpinned       = flag.String("unpinned", "", "comma-separated docs whose chart and image references must write <version>, not a release")
+		versionsFile   = flag.String("versions", "", "the versions file (KEY=value lines) that <!-- versions: KEY ... --> paragraphs must match")
 		ignoreFile     = flag.String("external-ignore", "hack/docscheck/external-ignore.txt", "file of regular expressions, one per line, for URLs the external check skips")
 	)
 	flag.StringVar(&cfg.index, "index", "docs/README.md", "the docs index, which must link to every doc")
@@ -75,6 +77,7 @@ func main() {
 	cfg.indexExempt = set(*indexExempt)
 	cfg.contentsExempt = set(*contentsExempt)
 	cfg.unpinned = set(*unpinned)
+	cfg.versions = *versionsFile
 	if cfg.external {
 		var err error
 		if cfg.ext.ignore, err = readIgnore(*ignoreFile); err != nil {
@@ -142,6 +145,13 @@ func run(fsys fs.FS, files []string, cfg config, out, log io.Writer) int {
 	start := time.Now()
 	r := &repo{fsys: fsys, docs: map[string]*doc{}}
 	var probs []problem
+	var versions map[string]string
+	if cfg.versions != "" {
+		var err error
+		if versions, err = readVersions(fsys, cfg.versions); err != nil {
+			probs = append(probs, problem{cfg.versions, 0, err.Error()})
+		}
+	}
 	links := 0
 	for _, p := range files {
 		d := r.load(p)
@@ -158,6 +168,9 @@ func run(fsys fs.FS, files []string, cfg config, out, log io.Writer) int {
 		probs = append(probs, checkContents(d, minLines)...)
 		if cfg.unpinned[p] {
 			probs = append(probs, r.checkUnpinned(p)...)
+		}
+		if versions != nil {
+			probs = append(probs, r.checkVersions(p, cfg.versions, versions)...)
 		}
 	}
 	if cfg.metricsDoc != "" {

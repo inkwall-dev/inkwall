@@ -36,6 +36,7 @@ Either way, an [`EnvoyFilter`](glossary.md#envoyfilter) sends the protected rout
 
 ## Prerequisites
 
+<!-- versions: ISTIO_VERSION GATEWAY_API_VERSION -->
 - Istio 1.28 or later; for HTTPRoutes, its Gateway API implementation (on by default) and the
   [Gateway API CRDs](https://gateway-api.sigs.k8s.io/guides/getting-started/#installing-gateway-api); for VirtualServices, an ingress gateway from its
   `gateway` Helm chart. Tested with Istio 1.31.3 (its `base` and `istiod` Helm
