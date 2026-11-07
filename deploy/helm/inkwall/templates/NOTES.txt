@@ -45,9 +45,16 @@ If Traefik, Envoy Gateway, an Istio Gateway or the HAProxy controller runs in an
 (Istio runs a Gateway's pods in the Gateway's namespace), add it to
 injection.proxyNamespaces: its routes are not wired until then.
 
-A policy is Ready once accepted, wired and enforced by every engine:
+A policy is Ready once accepted, wired and enforced by every engine (REASON
+says why one isn't):
 
   kubectl get wafpolicy -A
+
+To check the whole cluster (proxies, policies, engines), and for what each
+condition reason means and what to do:
+
+  inkwallctl status
+  https://github.com/inkwall-dev/inkwall/blob/v{{ .Chart.AppVersion }}/docs/troubleshooting.md
 {{- $disabled := list }}
 {{- range (include "inkwall.generated" (dict "root" . "path" "files/rbac/role.yaml") | fromJsonArray) }}
 {{- $name := trimPrefix "inkwall-operator-" .metadata.name }}
