@@ -1,10 +1,14 @@
 // Copyright 2026 The Inkwall Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// Package crs runs the OWASP CRS regression test suite against Inkwall's
-// standalone reverse proxy, so detection is verified through the same code
-// path as production: request translation, the inspection pipeline and the
-// Coraza evaluator.
+// Package crs runs the OWASP CRS regression test suite through Inkwall's
+// adapters, so detection is verified through the same code paths as
+// production: each adapter's request translation, the inspection pipeline
+// and the Coraza evaluator. The reverse proxy runs it at each paranoia
+// level; ForwardAuth, ext_proc and SPOE, through a stand-in for their
+// proxy (fronts_test.go), at level 4, and ext_proc also the response
+// rules' tests. A test that passes through the reverse proxy must pass
+// through every adapter, but for the differences listed with a reason.
 //
 // The harness is adapted from Coraza's (testing/coreruleset, Apache-2.0).
 // It lives in its own module so go-ftw's dependencies stay out of the engine.
@@ -15,12 +19,14 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log/slog"
+	"maps"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,7 +44,6 @@ import (
 	"github.com/coreruleset/go-ftw/v2/test"
 	"github.com/rs/zerolog"
 
-	"github.com/inkwall-dev/inkwall/pkg/adapters/proxy"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
@@ -48,7 +53,16 @@ import (
 // that writes the X-CRS-Test header to the log so go-ftw can find the log
 // lines of each test. The README's paranoia level 4 is not set here: the
 // suite runs at each level, set per transaction as for a WAFPolicy.
+//
+// Coraza logs a response or reporting rule's match only with a default
+// action that logs for phases 3 to 5, which the CRS's setup doesn't set
+// (ModSecurity's does): without it, the response rules' tests find nothing
+// in the log.
 const testingConfig = `
+SecDefaultAction "phase:3,log,auditlog,pass"
+SecDefaultAction "phase:4,log,auditlog,pass"
+SecDefaultAction "phase:5,log,auditlog,pass"
+
 SecAction "id:900005,\
   phase:1,\
   nolog,\
@@ -73,9 +87,8 @@ SecRule REQUEST_HEADERS:X-CRS-Test "@rx ^.*$" \
   ctl:ruleRemoveById=1-999999"
 `
 
-// The suite runs through the reverse proxy, which inspects requests only
-// (phases 1 and 2): response rules (95x) are inspected through ext_proc,
-// not exercised here.
+// isResponseTest reports a test of the response rules (95x): they run
+// through the adapters that inspect responses (ext_proc).
 func isResponseTest(path string) bool {
 	return strings.HasPrefix(path, "RESPONSE-")
 }
@@ -121,7 +134,7 @@ func ruleParanoiaLevels(t *testing.T) map[uint]int {
 // a match the level turns off); the others must pass.
 func TestCRSRegression(t *testing.T) {
 	levels := ruleParanoiaLevels(t)
-	tests, skipped := crsTests(t)
+	tests, skipped := crsTests(t, false)
 	// CRS tests expect albedo as the backend.
 	backend := httptest.NewServer(albedo.Handler())
 	defer backend.Close()
@@ -144,18 +157,96 @@ func TestCRSRegression(t *testing.T) {
 				}
 			}
 			t.Logf("running %d test files at paranoia level %d, leaving out %d tests of higher levels and %d response-rule files (the reverse proxy inspects requests only)", len(run), pl, left, skipped)
-			runSuite(t, backend.URL, pl, run)
+			failed := runSuite(t, proxyAdapter, backend.URL, pl, run)
+			if n := len(failed); n > 0 {
+				t.Errorf("%d failed tests: %v", n, slices.Sorted(maps.Keys(failed)))
+			}
 		})
 	}
 }
 
-// crsTests loads the CRS regression tests, without the response rules'
-// (and returns how many files those are).
-func crsTests(t *testing.T) ([]*test.FTWTest, int) {
+// adapter is one way a proxy asks the engine: its front (fronts_test.go),
+// and whether it inspects responses.
+type adapter struct {
+	name      string
+	front     func(*testing.T, *pipeline.Pipeline, *url.URL) http.Handler
+	responses bool
+}
+
+var proxyAdapter = adapter{"proxy", proxyFront, false}
+
+// The other adapters, through a stand-in for their proxy (fronts_test.go).
+var otherAdapters = []adapter{
+	{"forwardauth", forwardAuthFront, false},
+	{"extproc", extProcFront, true},
+	{"spoe", spoeFront, false},
+}
+
+// differences are the tests an adapter fails while the reverse proxy
+// passes them, by adapter and test ID, each with its reason. Any other
+// failure fails the suite, and so does a listed one that passes.
+var differences = map[string]map[string]string{
+	"forwardauth": {
+		"920180-1": emptyPost,
+		"920180-3": emptyPost,
+		"920181-1": "Traefik's subrequest carries its own Content-Length and Transfer-Encoding for the forwarded body, not the client's",
+	},
+	"extproc": {
+		"920180-1": emptyPost,
+		"920180-3": emptyPost,
+		"920280-1": noAuthority,
+		"920290-1": noAuthority,
+		"920290-4": noAuthority,
+	},
+	"spoe": {
+		"920180-1": emptyPost,
+		"920180-3": emptyPost,
+	},
+}
+
+const (
+	emptyPost   = "an empty POST, PUT or PATCH without Content-Length gets Content-Length: 0 from the adapter (rule 920180 would score every empty POST from HTTP/2 clients and Traefik, which leave it out)"
+	noAuthority = "Envoy answers a request without a Host (or with an empty one) itself, so ext_proc always has an :authority: the stand-in sends what Envoy never would"
+)
+
+// TestCRSAdapters runs the suite at paranoia level 4 (every test) through
+// each other adapter, and the response rules' tests through the ones that
+// inspect responses: a test the reverse proxy passes (TestCRSRegression)
+// must pass through every adapter, but for the listed differences.
+func TestCRSAdapters(t *testing.T) {
+	backend := httptest.NewServer(albedo.Handler())
+	defer backend.Close()
+	for _, a := range otherAdapters {
+		t.Run(a.name, func(t *testing.T) {
+			tests, _ := crsTests(t, a.responses)
+			t.Logf("%s: running %d test files at paranoia level 4 (response rules: %t)", a.name, len(tests), a.responses)
+			failed := runSuite(t, a, backend.URL, 4, tests)
+			var unexpected []string
+			for id := range failed {
+				if _, ok := differences[a.name][id]; !ok {
+					unexpected = append(unexpected, id)
+				}
+			}
+			slices.Sort(unexpected)
+			if len(unexpected) > 0 {
+				t.Errorf("%s: %d tests fail through it but pass through the reverse proxy (list a reason in differences if expected): %v", a.name, len(unexpected), unexpected)
+			}
+			for id, reason := range differences[a.name] {
+				if !failed[id] {
+					t.Errorf("%s: %s is a listed difference (%s) but passes: remove it", a.name, id, reason)
+				}
+			}
+		})
+	}
+}
+
+// crsTests loads the CRS regression tests, the response rules' only with
+// responses (and returns how many files it left out).
+func crsTests(t *testing.T, responses bool) ([]*test.FTWTest, int) {
 	var tests []*test.FTWTest
 	skipped := 0
 	err := doublestar.GlobWalk(crstests.FS, "**/*.yaml", func(path string, _ fs.DirEntry) error {
-		if isResponseTest(path) {
+		if isResponseTest(path) && !responses {
 			skipped++
 			return nil
 		}
@@ -166,6 +257,15 @@ func crsTests(t *testing.T) ([]*test.FTWTest, int) {
 		ftwt, err := test.GetTestFromYaml(yaml, path)
 		if err != nil {
 			return err
+		}
+		// go-ftw stops the whole run on a retry_once test that fails
+		// twice; the log is flushed on every match here, so the race it
+		// works around doesn't happen, and a failure is recorded as any
+		// other.
+		for i := range ftwt.Tests {
+			for j := range ftwt.Tests[i].Stages {
+				ftwt.Tests[i].Stages[j].Output.RetryOnce = nil
+			}
 		}
 		tests = append(tests, ftwt)
 		return nil
@@ -179,8 +279,9 @@ func crsTests(t *testing.T) ([]*test.FTWTest, int) {
 	return tests, skipped
 }
 
-// runSuite runs tests through the standalone proxy at paranoia level pl.
-func runSuite(t *testing.T, backendURL string, pl int, tests []*test.FTWTest) {
+// runSuite runs tests through an adapter at paranoia level pl, and returns
+// the IDs of those that failed.
+func runSuite(t *testing.T, a adapter, backendURL string, pl int, tests []*test.FTWTest) map[string]bool {
 	logPath := filepath.Join(t.TempDir(), "error.log")
 	logFile, err := os.Create(logPath)
 	if err != nil {
@@ -205,39 +306,31 @@ func runSuite(t *testing.T, backendURL string, pl int, tests []*test.FTWTest) {
 	}
 
 	upstream, _ := url.Parse(backendURL)
-	handler, err := proxy.New(
-		pipeline.New(eval, pipeline.Config{
-			Mode: pipeline.ModeBlock,
-			// Generous limits: this suite checks detection, not latency.
-			Timeout:       10 * time.Second,
-			MaxConcurrent: 1024,
-		}),
-		proxy.Config{
-			Upstream: upstream,
-			// Large enough that no CRS test body is truncated.
-			MaxBodyBytes: 1 << 20,
-			Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
+	cfg := pipeline.Config{
+		Mode: pipeline.ModeBlock,
+		// Generous limits: this suite checks detection, not latency.
+		Timeout:       10 * time.Second,
+		MaxConcurrent: 1024,
 	}
-	engine := httptest.NewServer(handler)
+	if a.responses {
+		cfg.Responses = pipeline.ResponseConfig{Inspect: true, MaxBytes: maxBody}
+	}
+	engine := httptest.NewServer(a.front(t, pipeline.New(eval, cfg), upstream))
 	defer engine.Close()
 
 	u, _ := url.Parse(engine.URL)
 	host := u.Hostname()
 	port, _ := strconv.Atoi(u.Port())
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
-	cfg, err := config.NewConfigFromFile(".ftw.yml")
+	ftwCfg, err := config.NewConfigFromFile(".ftw.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.LogFile = logPath
-	cfg.TestOverride.Overrides.DestAddr = &host
-	cfg.TestOverride.Overrides.Port = &port
+	ftwCfg.LogFile = logPath
+	ftwCfg.TestOverride.Overrides.DestAddr = &host
+	ftwCfg.TestOverride.Overrides.Port = &port
 
-	runnerCfg := config.NewRunnerConfiguration(cfg)
+	runnerCfg := config.NewRunnerConfiguration(ftwCfg)
 	runnerCfg.ReadTimeout = 5 * time.Second
 	if err := runnerCfg.LoadPlatformOverrides(".ftw-overrides.yml"); err != nil {
 		t.Fatal(err)
@@ -249,12 +342,14 @@ func runSuite(t *testing.T, backendURL string, pl int, tests []*test.FTWTest) {
 	if n := len(res.Stats.Ignored); n > 0 {
 		t.Logf("%d ignored tests: %v", n, res.Stats.Ignored)
 	}
-	t.Logf("passed %d, failed %d, skipped %d, ignored %d",
+	t.Logf("%s: passed %d, failed %d, skipped %d, ignored %d", a.name,
 		len(res.Stats.Success), len(res.Stats.Failed), len(res.Stats.Skipped), len(res.Stats.Ignored))
 	if len(res.Stats.Success) == 0 {
 		t.Error("no test passed")
 	}
-	if n := len(res.Stats.Failed); n > 0 {
-		t.Errorf("%d failed tests: %v", n, res.Stats.Failed)
+	failed := map[string]bool{}
+	for _, id := range res.Stats.Failed {
+		failed[id] = true
 	}
+	return failed
 }

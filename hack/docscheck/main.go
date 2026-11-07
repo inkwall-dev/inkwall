@@ -48,6 +48,7 @@ type config struct {
 	contentsMinLines int
 	contentsExempt   map[string]bool
 	unpinned         map[string]bool // docs whose install commands must not pin a release
+	reasonsDoc       string          // the doc that must document every condition reason the operator sets
 	versions         string          // hack/versions.env, for <!-- versions: KEY --> paragraphs
 	metricsDoc       string          // the doc that must list every metric the code registers
 	external         bool
@@ -67,6 +68,7 @@ func main() {
 	flag.StringVar(&cfg.index, "index", "docs/README.md", "the docs index, which must link to every doc")
 	flag.BoolVar(&cfg.requireIndex, "require-index", false, "fail if the docs index does not exist")
 	flag.IntVar(&cfg.contentsMinLines, "contents-min-lines", 0, "require a ## Contents section in docs longer than this many lines (0: only check the ones that have it)")
+	flag.StringVar(&cfg.reasonsDoc, "reasons-doc", "", "doc that must name, in backticks, every condition reason (Reason* constant) in operator/")
 	flag.StringVar(&cfg.metricsDoc, "metrics-doc", "", "doc that must name, in backticks, every inkwall_* metric the Go code outside hack/ and test/ registers")
 	flag.BoolVar(&cfg.external, "external", false, "also check http(s) links")
 	flag.DurationVar(&cfg.ext.timeout, "timeout", 20*time.Second, "external check: timeout of one request")
@@ -172,6 +174,9 @@ func run(fsys fs.FS, files []string, cfg config, out, log io.Writer) int {
 		if versions != nil {
 			probs = append(probs, r.checkVersions(p, cfg.versions, versions)...)
 		}
+	}
+	if cfg.reasonsDoc != "" {
+		probs = append(probs, r.checkReasons(cfg.reasonsDoc)...)
 	}
 	if cfg.metricsDoc != "" {
 		probs = append(probs, r.checkMetrics(cfg.metricsDoc)...)
