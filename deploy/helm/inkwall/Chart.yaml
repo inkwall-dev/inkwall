@@ -9,7 +9,10 @@ kubeVersion: ">=1.29.0-0"
 home: https://github.com/inkwall-dev/inkwall
 sources:
   - https://github.com/inkwall-dev/inkwall
-license: Apache-2.0
+# The license as Artifact Hub reads it: Chart.yaml has no license field, and
+# Helm 4's lint --strict refuses unknown fields (#394).
+annotations:
+  artifacthub.io/license: Apache-2.0
 keywords:
   - waf
   - security
