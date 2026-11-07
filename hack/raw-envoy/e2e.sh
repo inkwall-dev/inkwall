@@ -29,12 +29,15 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# The versions under test (#393).
+# shellcheck source=hack/versions.env
+. hack/versions.env
 
 IMAGE=${IMAGE:-inkwall-engine:dev}
 # The Envoy the samples are written and tested for; kubernetes.yaml names it
 # too, and the test checks that they agree.
-ENVOY_IMAGE=envoyproxy/envoy:v1.39.6
-APP_IMAGE=traefik/whoami:v1.10.3
+ENVOY_IMAGE=envoyproxy/envoy:$ENVOY_VERSION
+APP_IMAGE=traefik/whoami:$WHOAMI_VERSION
 PORT=${RAW_ENVOY_PORT:-18190}
 ADMIN_PORT=$((PORT + 1))
 EXAMPLES=$PWD/examples/raw-envoy

@@ -4,6 +4,7 @@ name: docs-links
 # nightly and on demand rather than on every PR: other sites are slow, flaky
 # and rate limit, which must not fail an unrelated change. Hosts that fail
 # for reasons other than a broken link go in hack/docscheck/external-ignore.txt.
+# A failing scheduled run opens an issue (hack/ci/report-scheduled.sh).
 on:
   schedule:
     - cron: '23 3 * * *'
@@ -23,3 +24,19 @@ jobs:
           go-version: '1.27.x'
           check-latest: true
       - run: make docs-check-external
+
+  report:
+    needs: external-links
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - run: hack/ci/report-scheduled.sh "$GITHUB_WORKFLOW" "$RESULT" "$RUN_URL" "The run's log lists the broken links."
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RESULT: ${{ needs.external-links.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

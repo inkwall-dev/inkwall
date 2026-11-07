@@ -73,14 +73,27 @@ func testIstioIngress(ctx context.Context, t *testing.T, c client.Client) {
 			return ""
 		}
 	}
+	// filter is the specs of the gateway pods' EnvoyFilters: the base one,
+	// which must exist, and its shards (#424).
 	filter := func() (string, error) {
 		u := &unstructured.Unstructured{}
 		u.SetGroupVersionKind(wiring.EnvoyFilterGVK)
 		if err := c.Get(ctx, types.NamespacedName{Namespace: gw, Name: "inkwall-istio-ingress"}, u); err != nil {
 			return "", err
 		}
-		raw, _ := json.Marshal(u.Object["spec"])
-		return string(raw), nil
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(wiring.EnvoyFilterGVK.GroupVersion().WithKind("EnvoyFilterList"))
+		if err := c.List(ctx, list, client.InNamespace(gw)); err != nil {
+			return "", err
+		}
+		var specs []string
+		for _, f := range list.Items {
+			if strings.HasPrefix(f.GetName(), "inkwall-istio-ingress") {
+				raw, _ := json.Marshal(f.Object["spec"])
+				specs = append(specs, string(raw))
+			}
+		}
+		return strings.Join(specs, "\n"), nil
 	}
 	filterHas := func(want []string, not ...string) func() string {
 		return func() string {

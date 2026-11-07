@@ -10,6 +10,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# The versions under test (#393).
+# shellcheck source=hack/versions.env
+. hack/versions.env
 
 CLUSTER=${KIND_CLUSTER:-inkwall}
 IMAGE=${OPERATOR_IMAGE:-inkwall-operator:dev}
@@ -182,7 +185,7 @@ metadata:
 spec:
   containers:
     - name: proxy
-      image: traefik/whoami:v1.10.3
+      image: traefik/whoami:$WHOAMI_VERSION
 YAML
 if "${KUBECTL[@]}" -n "$CHECK_NS" wait pod/proxy --for=condition=Ready --timeout=120s >/dev/null 2>&1 &&
   [[ $("${KUBECTL[@]}" -n "$CHECK_NS" get pod proxy -o jsonpath='{.spec.initContainers[0].name}') == inkwall-engine ]]; then
@@ -225,7 +228,7 @@ metadata:
 spec:
   containers:
     - name: proxy
-      image: traefik/whoami:v1.10.3
+      image: traefik/whoami:$WHOAMI_VERSION
 YAML
 # The check pod's grant shows the operator has reconciled since.
 granted=""

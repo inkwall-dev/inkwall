@@ -139,13 +139,19 @@ for patching released versions.
    ```
 
 3. The [release workflow](.github/workflows/release.yaml) checks the tag is on `main` or a
-   `release-X.Y` branch, then publishes, in order:
+   `release-X.Y` branch and that a CI run succeeded on its commit (it waits up to an hour for one
+   still running, and publishes nothing without one), then publishes, in order:
    - the images `ghcr.io/inkwall-dev/inkwall-engine` and `ghcr.io/inkwall-dev/inkwall-operator`
      (`0.3.0`, `0.3`, and `latest` for the highest stable version; linux/amd64 and linux/arm64),
      with [SBOM](https://www.cisa.gov/sbom) and [provenance](https://slsa.dev/spec/v1.0/provenance) [attestations](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds);
    - the [Helm](https://helm.sh/docs/) chart [`oci://ghcr.io/inkwall-dev/charts/inkwall`](https://helm.sh/docs/topics/registries/), versioned from the tag (the
      version in `Chart.yaml` is only for development);
-   - the binaries, `checksums.txt` and the GitHub release with the changelog.
+   - the binaries, `checksums.txt`, an SPDX SBOM per archive (`<archive>.sbom.json`), build
+     provenance attestations of the archives, and the GitHub release with the changelog.
+
+   Then it checks what it published, as a user would, release candidates too: the images' and
+   the chart's signatures, both platforms and their attestations, `helm pull`, the checksums'
+   signature, an archive's checksum and provenance, and `inkwallctl version` from it.
 
    Images, chart and checksums are signed keyless with [cosign](https://docs.sigstore.dev/cosign/signing/overview/) v3 (`COSIGN_VERSION` in
    the workflow): verify them with cosign v3, as cosign v2 reports "no signatures found". To
@@ -155,6 +161,17 @@ for patching released versions.
    cosign verify ghcr.io/inkwall-dev/inkwall-engine:<version> \
      --certificate-identity-regexp '^https://github.com/inkwall-dev/inkwall/\.github/workflows/release\.yaml@refs/tags/v' \
      --certificate-oidc-issuer https://token.actions.githubusercontent.com
+   ```
+
+   To verify a binary archive: its checksum, the checksums' signature, and its build provenance
+   (with the [GitHub CLI](https://cli.github.com/)):
+
+   ```sh
+   cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+     --certificate-identity-regexp '^https://github.com/inkwall-dev/inkwall/\.github/workflows/release\.yaml@refs/tags/v' \
+     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+   sha256sum --check --ignore-missing checksums.txt
+   gh attestation verify inkwall_<version>_linux_amd64.tar.gz -R inkwall-dev/inkwall
    ```
 
 4. The first time, make the three new [GHCR](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry) packages (`inkwall-engine`, `inkwall-operator`,
