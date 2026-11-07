@@ -316,7 +316,7 @@ proxy.
 - **The sidecar uses the proxy's [ServiceAccount](https://kubernetes.io/docs/concepts/security/service-accounts/).** That account gets `get` on the bundle Secret
   only, for cold start ([§4.6](#46-bundle-builder-leader-only)).
 - **Rollout:** injection applies to new pods only. With `rollout: Manual` (the default), the
-  operator reports `PendingRestart` and names the workload. `rollout: Automatic` would restart it,
+  operator reports `PendingRestart` and names the workload. `rollout: Automatic` evicts its pods,
   respecting [PodDisruptionBudgets](https://kubernetes.io/docs/concepts/workloads/pods/disruptions/#pod-disruption-budgets). Engine upgrades follow the same path.
 
 **Built (v0.1.0)** (`operator/internal/injection`, `operator/webhook/inject.go`):
@@ -366,8 +366,22 @@ proxy.
   `ed25519.pub` (the active key, for older engines). The leader also keeps a [`Role` and
   `RoleBinding`](https://kubernetes.io/docs/reference/access-authn-authz/rbac/), `inkwall-bundle-reader`, for each proxy ServiceAccount. It deletes only ConfigMaps
   it labelled. Pods of a disabled integration ([§7](#7-rbac)) get neither.
-- **Not yet:** `rollout: Automatic`. Pods that were running before the operator are injected when
-  they restart.
+- **`rollout: Automatic`** (#376, `operator/internal/rollout`). `InkwallConfig.spec.engine.rollout`
+  is `Manual` by default: pods that were running before the operator, or run another engine image
+  than the one configured, are reported (`PendingRestart`) and injected when they restart. With
+  `Automatic`, the leader evicts them, at most one every 10 s, through the Eviction API, so
+  PodDisruptionBudgets hold. It evicts only pods of the integrations the Pod webhook injects
+  (Traefik, HAProxy, Istio's ingress gateways: Envoy Gateway and Istio's Gateway API deployments
+  roll their own), with a controller to replace them, not opted out. The next eviction waits for
+  the last one's workload: the evicted pod gone, a replacement, every pod ready, and each
+  replacement with the configured engine image running the bundle published. A refused eviction
+  (a budget) or a replacement not ready within 5 minutes (say, the webhook didn't inject it)
+  pauses the rollout: nothing else is evicted, and the InkwallConfig's `EngineRollout` condition
+  is `False` with reason `Paused` and why, until the budget allows it or the replacement is ready.
+  `EngineRollout` is `True` (`RollingOut`) while a replacement is awaited, `False` (`Done`) when
+  nothing needs one, and absent in `Manual`. One pod at a time across the cluster is slow for
+  large fleets, but never takes more than one proxy pod out at once. `pods/eviction` `create` is in
+  each of those integrations' roles, so the chart leaves it out with them.
 
 **Built since: Envoy Gateway** (`operator/internal/wiring/envoygateway.go`). Its Envoy pods are
 not injected by the Pod webhook: the engine goes into their pod template through the Gateway's

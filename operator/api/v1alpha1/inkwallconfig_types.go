@@ -167,6 +167,16 @@ type ControlPlane struct {
 	EnrollmentSecretRef SecretReference `json:"enrollmentSecretRef"`
 }
 
+// RolloutPolicy is how proxy pods get a new engine.
+// +kubebuilder:validation:Enum=Manual;Automatic
+type RolloutPolicy string
+
+// The rollout policies.
+const (
+	RolloutManual    RolloutPolicy = "Manual"
+	RolloutAutomatic RolloutPolicy = "Automatic"
+)
+
 // EngineSpec configures the engine sidecars.
 type EngineSpec struct {
 	// Image is the engine image. Empty means the image released with this
@@ -207,6 +217,20 @@ type EngineSpec struct {
 	// pods injected from then on.
 	// +optional
 	LogLevel LogLevel `json:"logLevel,omitempty"`
+
+	// Rollout is how proxy pods that need a new engine (none: started
+	// before Inkwall; or another image than the one configured) get one.
+	// Manual: they are reported (PendingRestart) and you restart them.
+	// Automatic: the operator evicts them one at a time through the
+	// Eviction API, which respects PodDisruptionBudgets, waiting for each
+	// replacement to be ready and run the current bundle before the next;
+	// it pauses, and says why on the InkwallConfig (EngineRollout), when an
+	// eviction is refused or a replacement isn't ready in time. Pods the
+	// Pod webhook injects only (Traefik, HAProxy, Istio's ingress gateways):
+	// Envoy Gateway and Istio's Gateway API deployments roll their pods
+	// themselves. Unset: Manual.
+	// +optional
+	Rollout RolloutPolicy `json:"rollout,omitempty"`
 
 	// PolicyMetrics adds inkwall_policy_requests_total, the engines'
 	// requests by policy, for up to 500 policies per engine (the rest count

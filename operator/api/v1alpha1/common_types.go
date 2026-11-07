@@ -25,6 +25,11 @@ const (
 	// bundle suspends inspection (spec.suspend): every engine allows every
 	// request.
 	ConditionSuspended = "Suspended"
+	// ConditionEngineRollout, on the InkwallConfig, is True while the
+	// operator replaces proxy pods for a new engine (spec.engine.rollout:
+	// Automatic), and False when it has nothing to replace, is paused
+	// (reason Paused, saying why) or the rollout is Manual.
+	ConditionEngineRollout = "EngineRollout"
 )
 
 // SecretReference names a Secret in a given namespace.

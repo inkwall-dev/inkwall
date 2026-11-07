@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,6 +48,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/operator/internal/podcache"
+	"github.com/inkwall-dev/inkwall/operator/internal/rollout"
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/operator/webhook"
@@ -302,6 +304,19 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 			}).SetupWithManager(mgr); err != nil {
 				return nil, err
 			}
+		}
+		// Proxy pods replaced for a new engine, when the InkwallConfig asks
+		// (#376).
+		var podIntegrations []string
+		for _, integration := range webhook.PodWebhooks {
+			podIntegrations = append(podIntegrations, integration)
+		}
+		slices.Sort(podIntegrations)
+		if err := mgr.Add(&rollout.Rollout{
+			Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Namespace: o.Namespace, Sidecar: sidecar,
+			Pods: selectors, Integrations: podIntegrations, Disabled: denied, EngineStale: engineStale(o),
+		}); err != nil {
+			return nil, err
 		}
 		if err := mgr.Add(&selectorWatch{client: mgr.GetClient(), current: selectors, maxDelay: o.SelectorRestartMaxDelay}); err != nil {
 			return nil, err

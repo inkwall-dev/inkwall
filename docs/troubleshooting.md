@@ -166,6 +166,9 @@ an unknown built-in rule set) and `RuleCompileError` (rules that don't compile),
 |---|---|---|---|
 | `Suspended` | `Suspended` | The bundle the engines get suspends inspection (`spec.suspend`). | Resume when ready. |
 | `Suspended` | `NotSuspended` | Inspection runs. | |
+| `EngineRollout` | `RollingOut` | `spec.engine.rollout: Automatic`: the operator evicted a proxy pod for a new engine and waits for its replacement. | |
+| `EngineRollout` | `Done` | No proxy pod the operator injects needs a new engine. | |
+| `EngineRollout` | `Paused` | An eviction was refused (a PodDisruptionBudget) or a replacement isn't ready in time; nothing else is evicted. The message says which. | Relax the budget, or fix the replacement pod the message names (is the Pod webhook answering?). |
 | `ControlPlaneConnected` | `Connected` | Connected to the control plane. | |
 | `ControlPlaneConnected` | `InvalidEndpoint` | `spec.controlPlane.endpoint` isn't a valid address. | Fix it. |
 | `ControlPlaneConnected` | `EnrollmentTokenMissing` | The enrollment token Secret, or its `token` key, is missing. | Create it ([control plane](control-plane.md)). |
