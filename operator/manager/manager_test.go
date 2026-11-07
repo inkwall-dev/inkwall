@@ -56,16 +56,8 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func freeAddr(t *testing.T) string {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := l.Addr().String()
-	_ = l.Close()
-	return addr
-}
+// freeAddr: testenv.FreeAddr (#452).
+func freeAddr(t *testing.T) string { return testenv.FreeAddr(t) }
 
 // testProbeKey is the key of the operator's probe in these tests.
 var testProbeKey = bytes.Repeat([]byte{9}, haproxyprobe.KeySize)
