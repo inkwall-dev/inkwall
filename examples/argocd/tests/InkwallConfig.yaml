@@ -1,0 +1,20 @@
+# Cases for the InkwallConfig health check.
+- name: standalone
+  want: Healthy
+  object:
+    metadata: {generation: 1}
+    status: {observedGeneration: 1}
+- name: suspended
+  want: Suspended
+  object:
+    metadata: {generation: 1}
+    status:
+      conditions:
+        - {type: Suspended, status: "True", reason: Suspended, message: "spec.suspend is true"}
+- name: control plane unreachable
+  want: Degraded
+  object:
+    metadata: {generation: 1}
+    status:
+      conditions:
+        - {type: ControlPlaneConnected, status: "False", reason: Unreachable, message: "dial tcp: connection refused"}

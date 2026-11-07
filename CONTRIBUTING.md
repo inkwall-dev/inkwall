@@ -102,6 +102,7 @@ Durations are on a laptop or a CI runner, roughly.
 | Build | `make build` | 1 min | Go | every PR (`test`) |
 | Generated code | `make generate-check` | 2 min | Go | every PR (`generate`) |
 | Chart | `make helm-lint`, `make monitoring-test` | 2 min | Go, Helm, Docker (promtool) | every PR (`helm`) |
+| GitOps health checks | `make gitops-health-test` (the Argo CD and Flux examples, `hack/gitopshealth`) | 1 min | Go | every PR (`docs`) |
 | Release configuration | `make release-check` | 1 min | goreleaser | every PR (`release`) |
 | CRS conformance | `make crs-test` | 2 min | Go | every PR (`crs`) |
 | Benchmarks | `make bench-compare` (base: `origin/main`) | 10 min | Go | every PR (`bench`) |
