@@ -271,14 +271,16 @@ Tracked on the [project board](https://github.com/orgs/inkwall-dev/projects/1) a
 ## Development
 
 ```sh
-make check        # lint, tests, vulnerability scan, docs checks
-make crs-test     # OWASP CRS regression suite through the proxy
+make check        # lint, unit tests, vulnerability scan, docs checks (minutes)
+make check-all    # every job CI runs on a pull request (hours; Docker and kind)
+make crs-test     # OWASP CRS regression suite through each adapter
 make kind-up      # kind cluster with a demo behind the engine and Traefik
 make kind-e2e     # operator end to end on kind, every proxy in turn (CI: one job per proxy)
 make kind-e2e-traefik  # one proxy: also -raw-envoy, -envoy-gateway, -istio, -haproxy
 ```
 
-`make help` lists every target. The design docs are in [`docs/design`](docs/design/README.md);
+`make help` lists every target; [CONTRIBUTING.md](CONTRIBUTING.md#development-and-testing) has
+the test tiers, what each needs, and when CI runs it. The design docs are in [`docs/design`](docs/design/README.md);
 start with the [component map](docs/design/0005-component-map.md).
 
 ## Contributing, security, license
