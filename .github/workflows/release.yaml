@@ -5,10 +5,13 @@
 #   1. the engine and operator images (linux/amd64, linux/arm64) on GHCR,
 #      with SBOM and provenance attestations, signed with cosign;
 #   2. the Helm chart on GHCR (OCI), versioned from the tag, signed;
-#   3. the binaries, signed checksums and the GitHub release with the
-#      changelog (goreleaser, .goreleaser.yaml), last, so the release notes
-#      never point at images or a chart that aren't published yet.
-# Signatures are keyless, with this workflow's identity.
+#   3. the binaries, signed checksums, an SBOM per archive and the GitHub
+#      release with the changelog (goreleaser, .goreleaser.yaml), last, so
+#      the release notes never point at images or a chart that aren't
+#      published yet; and build provenance attestations of the archives.
+# Signatures are keyless, with this workflow's identity. Nothing is
+# published unless CI passed on the tagged commit (verify), and what was
+# published is checked as a user would (check).
 name: release
 
 on:
@@ -24,7 +27,6 @@ concurrency:
 env:
   GORELEASER_VERSION: v2.18.3
   COSIGN_VERSION: v3.1.3
-  HELM_VERSION: v3.19.0
   REGISTRY: ghcr.io/inkwall-dev
 
 jobs:
@@ -32,6 +34,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      # The CI runs of the tagged commit.
+      actions: read
     outputs:
       version: ${{ steps.tag.outputs.version }}
       latest: ${{ steps.tag.outputs.latest }}
@@ -66,6 +70,31 @@ jobs:
             echo "latest=$latest"
           } >> "$GITHUB_OUTPUT"
           echo "Releasing ${TAG#v} (latest: $latest)" >> "$GITHUB_STEP_SUMMARY"
+      # CI must have passed on the tagged commit (#392): a push run can be
+      # replaced by a newer push before it finishes, so a commit can reach
+      # main without a completed run. Wait for one still running, up to an
+      # hour; fail if none succeeded.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs() {
+            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yaml/runs?head_sha=$GITHUB_SHA&per_page=100" \
+              --jq '[.workflow_runs[] | {status, conclusion, event, html_url}]'
+          }
+          for _ in $(seq 120); do
+            r=$(runs)
+            if jq -e 'any(.[]; .conclusion == "success")' <<<"$r" >/dev/null; then
+              echo "CI passed on $GITHUB_SHA: $(jq -r '[.[] | select(.conclusion == "success")][0].html_url' <<<"$r")" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            if ! jq -e 'any(.[]; .status != "completed")' <<<"$r" >/dev/null; then
+              echo "::error::no successful CI run on $GITHUB_SHA: $(jq -c '[.[] | {event, conclusion}]' <<<"$r")"
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "::error::CI on $GITHUB_SHA didn't finish within an hour"
+          exit 1
 
   images:
     needs: verify
@@ -134,9 +163,12 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v7
+      # The versions under test, hack/versions.env (#393).
+      - id: versions
+        run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_OUTPUT"
       - uses: azure/setup-helm@v5
         with:
-          version: ${{ env.HELM_VERSION }}
+          version: ${{ steps.versions.outputs.HELM_VERSION }}
       # For cosign; helm keeps its own login.
       - uses: docker/login-action@v4
         with:
@@ -169,6 +201,8 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      # The archives' build provenance.
+      attestations: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -181,6 +215,8 @@ jobs:
       - uses: sigstore/cosign-installer@v4.1.2
         with:
           cosign-release: ${{ env.COSIGN_VERSION }}
+      # Syft, for the archives' SBOMs (.goreleaser.yaml sboms).
+      - uses: anchore/sbom-action/download-syft@v0.20.9
       - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
@@ -193,3 +229,73 @@ jobs:
           # tags on the commit, and git sorts v0.1.0-rc.2 after v0.1.0: tagging
           # a release on its last rc's commit built the rc instead.
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: dist/*.tar.gz
+
+  # What was published, checked as a user would (#392): the signatures with
+  # the documented identity, both platforms and the attestations of each
+  # image, the chart, the checksums and a binary from the release. Release
+  # candidates too.
+  check:
+    needs: [verify, binaries]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      TAG: ${{ github.ref_name }}
+      IDENTITY: '^https://github.com/inkwall-dev/inkwall/\.github/workflows/release\.yaml@refs/tags/v'
+      ISSUER: https://token.actions.githubusercontent.com
+    steps:
+      - uses: sigstore/cosign-installer@v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+      - uses: azure/setup-helm@v5
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - uses: docker/setup-buildx-action@v4
+      - name: images
+        run: |
+          for c in engine operator; do
+            img="$REGISTRY/inkwall-$c:$VERSION"
+            cosign verify "$img" --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" >/dev/null
+            platforms=$(docker buildx imagetools inspect "$img" --format '{{json .Manifest}}' |
+              jq -r '[.manifests[] | select(.platform.os != "unknown") | .platform.os + "/" + .platform.architecture] | sort | join(",")')
+            if [[ $platforms != linux/amd64,linux/arm64 ]]; then
+              echo "::error::$img has platforms $platforms, want linux/amd64,linux/arm64"
+              exit 1
+            fi
+            for p in linux/amd64 linux/arm64; do
+              for a in SBOM:SPDX Provenance:SLSA; do
+                if ! docker buildx imagetools inspect "$img" --format "{{json (index .${a%:*} \"$p\")}}" | jq -e "has(\"${a#*:}\")" >/dev/null; then
+                  echo "::error::$img has no ${a%:*} attestation for $p"
+                  exit 1
+                fi
+              done
+            done
+            echo "$img: signed, $platforms, SBOM and provenance" >> "$GITHUB_STEP_SUMMARY"
+          done
+      - name: chart
+        run: |
+          cosign verify "$REGISTRY/charts/inkwall:$VERSION" --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" >/dev/null
+          mkdir chart
+          helm pull "oci://$REGISTRY/charts/inkwall" --version "$VERSION" --destination chart
+          helm show chart "chart/inkwall-$VERSION.tgz" | grep -qE "^appVersion: \"?$VERSION\"?$"
+          echo "chart $VERSION: signed, pulls, appVersion $VERSION" >> "$GITHUB_STEP_SUMMARY"
+      - name: binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir rel && cd rel
+          archive="inkwall_${VERSION}_linux_amd64.tar.gz"
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p checksums.txt -p checksums.txt.sigstore.json -p "$archive" -p "$archive.sbom.json"
+          cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+            --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER"
+          sha256sum --check --ignore-missing checksums.txt
+          gh attestation verify "$archive" -R "$GITHUB_REPOSITORY"
+          jq -e '.spdxVersion' "$archive.sbom.json" >/dev/null
+          tar -xzf "$archive" inkwallctl
+          ./inkwallctl version | tee version.txt
+          grep -qx "inkwallctl $VERSION" version.txt
+          echo "binaries: checksums signed and matching, provenance verified, SBOM, inkwallctl $VERSION" >> "$GITHUB_STEP_SUMMARY"

@@ -244,3 +244,57 @@ func (r *repo) checkUnpinned(p string) []problem {
 	}
 	return probs
 }
+
+// versionsRE is a marker before a paragraph that names versions under test.
+var versionsRE = regexp.MustCompile(`^\s*<!--\s*versions:\s*([A-Z0-9_ ]+?)\s*-->\s*$`)
+
+// readVersions reads a KEY=value file (hack/versions.env).
+func readVersions(fsys fs.FS, p string) (map[string]string, error) {
+	src, err := fs.ReadFile(fsys, p)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for _, line := range strings.Split(string(src), "\n") {
+		if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok && !strings.HasPrefix(k, "#") {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
+
+// checkVersions checks that the paragraph after each versions marker names
+// each version it lists, as in the versions file, with or without a
+// leading "v" (#393): "tested with" lines then follow the versions tested.
+func (r *repo) checkVersions(p, file string, versions map[string]string) []problem {
+	src, err := fs.ReadFile(r.fsys, p)
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(string(src), "\n")
+	var probs []problem
+	for i, line := range lines {
+		m := versionsRE.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		var para []string
+		for _, l := range lines[i+1:] {
+			if strings.TrimSpace(l) == "" {
+				break
+			}
+			para = append(para, l)
+		}
+		text := strings.Join(para, " ")
+		for _, key := range strings.Fields(m[1]) {
+			v, ok := versions[key]
+			switch {
+			case !ok:
+				probs = append(probs, problem{p, i + 1, key + " is not in " + file})
+			case !strings.Contains(text, v) && !strings.Contains(text, strings.TrimPrefix(v, "v")):
+				probs = append(probs, problem{p, i + 1, fmt.Sprintf("%s is %s in %s, but the paragraph doesn't say so", key, v, file)})
+			}
+		}
+	}
+	return probs
+}
