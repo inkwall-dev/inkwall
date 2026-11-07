@@ -11,6 +11,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# The versions under test (#393).
+# shellcheck source=hack/versions.env
+. hack/versions.env
 
 CLUSTER=${KIND_CLUSTER:-inkwall}
 IMAGE=${IMAGE:-inkwall-engine:dev}
@@ -24,8 +27,6 @@ TRAEFIK_NS=traefik-e2e
 TRAEFIK_HOST=traefik.e2e.example.com
 ROUTE_HOST=route.e2e.example.com
 HTTPROUTE_HOST=httproute.e2e.example.com
-TRAEFIK_CHART_VERSION=41.6.1 # Traefik v3.7.13, as hack/kind/up.sh
-GATEWAY_API_VERSION=v1.7.0  # sigs.k8s.io/gateway-api in go.mod
 KUBECTL=(kubectl --context "kind-$CLUSTER")
 SQLI='/?id=1%27%20OR%20%271%27%3D%271'
 
@@ -202,7 +203,7 @@ metadata:
   namespace: $NS
   labels: {app.kubernetes.io/name: traefik${extra:+, $extra}}
 spec:
-  containers: [{name: traefik, image: traefik:v3.7.13}]
+  containers: [{name: traefik, image: traefik:$TRAEFIK_VERSION}]
 YAML
 }
 "${KUBECTL[@]}" -n "$OPERATOR_NS" scale deployment/inkwall-operator --replicas=0 >/dev/null
@@ -362,7 +363,7 @@ spec:
     spec:
       containers:
         - name: web
-          image: traefik/whoami:v1.10.3
+          image: traefik/whoami:$WHOAMI_VERSION
           # --verbose logs each request: the engine-down check looks for one.
           args: ["--port", "8080", "--verbose"]
 ---

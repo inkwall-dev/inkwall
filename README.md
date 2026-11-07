@@ -72,6 +72,7 @@ Traefik's [Gateway API provider](https://doc.traefik.io/traefik/routing/provider
 Envoy Gateway needs no restart: Envoy Gateway rolls the Envoy pods of a Gateway when it gets its
 first protected route. Turn on its Backend API, which the engine's socket needs:
 
+<!-- versions: ENVOY_GATEWAY_VERSION -->
 ```sh
 helm upgrade --install eg oci://docker.io/envoyproxy/gateway-helm --version v1.9.3 \
   --namespace envoy-gateway-system --create-namespace \

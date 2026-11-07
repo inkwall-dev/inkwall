@@ -21,20 +21,21 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# The versions under test (#393).
+# shellcheck source=hack/versions.env
+. hack/versions.env
 
 CLUSTER=${KIND_CLUSTER:-inkwall}
 OPERATOR_NS=inkwall-system
 NS=eg-e2e
 EG_NS=envoy-gateway-e2e
-# Envoy Gateway v1.9.3 (Gateway API v1.6), on the Gateway API's standard
-# CRDs (v1.7.0, as operator/go.mod). Their safe-upgrades policy refuses
+# Envoy Gateway (ENVOY_GATEWAY_VERSION), on the Gateway API's standard
+# CRDs (GATEWAY_API_VERSION, as operator/go.mod). Their safe-upgrades policy refuses
 # the older ones Envoy Gateway's chart bundles, so Envoy Gateway is
 # installed as its docs say for Gateway API CRDs managed separately: its
 # own CRDs from gateway-crds-helm, then the chart with --skip-crds.
-EG_VERSION=v1.9.3
-GATEWAY_API_VERSION=v1.7.0
+EG_VERSION=$ENVOY_GATEWAY_VERSION
 TRAEFIK_NS=traefik-e2e
-TRAEFIK_CHART_VERSION=41.6.1 # Traefik v3.7.13, as hack/kind/up.sh
 HOST=eg.e2e.example.com
 # The origin the policy allows WebSockets from (#276).
 WS_ORIGIN=https://app.e2e.example.com
@@ -132,7 +133,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: traefik/whoami:v1.10.3
+          image: traefik/whoami:$WHOAMI_VERSION
           # --verbose logs each request: the held-body check looks for one.
           args: ["--port", "8080", "--verbose"]
 ---
@@ -154,7 +155,7 @@ spec:
     spec:
       containers:
         - name: grpc
-          image: registry.k8s.io/e2e-test-images/agnhost:2.53
+          image: registry.k8s.io/e2e-test-images/agnhost:$AGNHOST_VERSION
           args: ["grpc-health-checking", "--port", "5000"]
 ---
 apiVersion: v1

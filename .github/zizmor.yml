@@ -8,3 +8,8 @@ rules:
       # ci.yaml publishes nothing: its Go and image build caches speed up
       # tests. The release workflow, which publishes, uses no cache.
       - ci.yaml
+  artipacked:
+    ignore:
+      # The weekly bump pushes its branch with the checkout's credentials,
+      # and uploads no artifact.
+      - versions.yaml

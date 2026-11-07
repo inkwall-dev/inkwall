@@ -16,9 +16,12 @@ GOVULNCHECK     ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@v1.8.0
 BUF             ?= $(GO) run github.com/bufbuild/buf/cmd/buf@v1.50.0
 CONTROLLER_GEN  ?= $(GO) run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.23.0
 SETUP_ENVTEST   ?= $(GO) run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.2
+# The versions of the proxies and tools under test are in hack/versions.env
+# (#393); version reads one.
+version = $(shell sed -n 's/^$(1)=//p' hack/versions.env)
 # The API server the operator tests run against: the oldest tested Kubernetes
 # version (as KIND_NODE_IMAGE), so CRDs that pass here work on every newer one.
-ENVTEST_K8S_VERSION ?= 1.34.1
+ENVTEST_K8S_VERSION ?= $(call version,ENVTEST_K8S_VERSION)
 
 # Container images and local kind cluster (hack/kind).
 IMAGE           ?= inkwall-engine:dev
@@ -28,8 +31,8 @@ KIND_CLUSTER    ?= inkwall
 # kind, installed into bin/, and the node image of its clusters: the oldest Kubernetes this kind
 # release ships. The Gateway API's CRDs and Envoy Gateway's chart install on it
 # as shipped. CI's e2e job runs kind's newest instead (KIND_NODE_IMAGE empty).
-KIND_VERSION    ?= v0.33.0
-KIND_NODE_IMAGE ?= kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d
+KIND_VERSION    ?= $(call version,KIND_VERSION)
+KIND_NODE_IMAGE ?= $(call version,KIND_NODE_IMAGE)
 KIND_DIR        := $(abspath $(BIN_DIR))/kind-$(KIND_VERSION)
 # kind-upgrade: its own cluster, since it installs a release of its own.
 UPGRADE_CLUSTER ?= inkwall-upgrade
@@ -54,7 +57,8 @@ BASE            ?= origin/main
 # release, so they don't go stale when the next one ships. docs/monitoring.md
 # names every metric the code registers.
 DOCS_CHECK_STRICT ?= -contents-min-lines=80 -require-index -contents-exempt=CODE_OF_CONDUCT.md \
-	-unpinned=README.md,deploy/helm/inkwall/README.md,CONTRIBUTING.md -metrics-doc=docs/monitoring.md
+	-unpinned=README.md,deploy/helm/inkwall/README.md,CONTRIBUTING.md -metrics-doc=docs/monitoring.md \
+	-versions=hack/versions.env
 DOCS_CHECK        ?= $(GO) run ./hack/docscheck $(DOCS_CHECK_STRICT)
 
 # scale-test: sizes as <policies>x<engines>, one operator each; "full" is 0004 §8's matrix.
@@ -82,6 +86,12 @@ build: ## Build inkwall-engine and inkwallctl into ./bin
 test: ## Run unit tests with the race detector (operator tests run against a local API server, envtest)
 	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" $(GO) test -race -count=1 ./...
 
+.PHONY: stress-test
+stress-test: ## Tests under stress, for timing flakes: -race -shuffle -count=10, GOMAXPROCS=2, CPU hogs (STRESS_PACKAGES; SEED, COUNT, HOGS: hack/ci/stress.sh)
+	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" hack/ci/stress.sh $(STRESS_PACKAGES)
+
+STRESS_PACKAGES ?= ./pkg/adapters/... ./pkg/agent/... ./pkg/pipeline/... ./operator/...
+
 .PHONY: scale-test
 scale-test: ## Operator scale test with fake engines, in envtest (SCALE=<policies>x<engines>, default 100x50; SCALE=full; SCALE=wiring[:<policies>] for the wiring controller)
 	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; export KUBEBUILDER_ASSETS="$$a"; fail=0; \
@@ -104,25 +114,29 @@ crs-test: ## Run the OWASP CRS regression suite through the proxy (test/crs)
 
 
 .PHONY: lint
-lint: workflow-check lint-scripts ## Run golangci-lint, and check the workflows and the shell scripts
+lint: workflow-check versions-check lint-scripts ## Run golangci-lint, check the workflows' runners, that versions come from hack/versions.env, and lint the workflows and the shell scripts
 	$(GOLANGCI_LINT) run ./...
 
 # The workflows' and scripts' linters (#398). shellcheck and zizmor run from
 # their images when they aren't installed.
-ACTIONLINT ?= $(GO) run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-SHELLCHECK ?= $(if $(shell command -v shellcheck),shellcheck,docker run --rm -v $(CURDIR):/mnt -w /mnt koalaman/shellcheck:v0.10.0)
-ZIZMOR     ?= $(if $(shell command -v zizmor),zizmor,docker run --rm -v $(CURDIR):/repo -w /repo ghcr.io/zizmorcore/zizmor:1.16.3)
+ACTIONLINT ?= $(GO) run github.com/rhysd/actionlint/cmd/actionlint@$(call version,ACTIONLINT_VERSION)
+SHELLCHECK ?= $(if $(shell command -v shellcheck),shellcheck,docker run --rm -v $(CURDIR):/mnt -w /mnt koalaman/shellcheck:$(call version,SHELLCHECK_VERSION))
+ZIZMOR     ?= $(if $(shell command -v zizmor),zizmor,docker run --rm -v $(CURDIR):/repo -w /repo ghcr.io/zizmorcore/zizmor:$(call version,ZIZMOR_VERSION))
 
 .PHONY: lint-scripts
 lint-scripts: ## Lint the workflows (actionlint, zizmor; findings triaged in .github/zizmor.yml) and the shell scripts (shellcheck)
 	$(ACTIONLINT)
 	$(ZIZMOR) --offline --config .github/zizmor.yml .github/workflows
-	$(SHELLCHECK) $$(git ls-files '*.sh')
+	$(SHELLCHECK) -x $$(git ls-files '*.sh')
 
 # The runner every CI job runs on: a fixed Ubuntu release, never
 # ubuntu-latest, which GitHub moves to the next LTS unannounced (#400). Move
 # to the next one in a PR of its own, which runs the whole suite.
-CI_RUNNER ?= ubuntu-24.04
+CI_RUNNER ?= $(call version,CI_RUNNER)
+
+.PHONY: versions-check
+versions-check: ## Check that the versions under test are pinned in hack/versions.env only
+	hack/versions-check.sh
 
 .PHONY: workflow-check
 workflow-check: ## Check that every workflow job runs on CI_RUNNER
@@ -198,7 +212,7 @@ image: ## Build the engine and operator container images (IMAGE=name:tag, OPERAT
 
 .PHONY: release-snapshot
 release-snapshot: ## Build the release binaries and archives into ./dist, as a tag would, without signing or publishing
-	$(GORELEASER) release --snapshot --clean --skip=sign,publish
+	$(GORELEASER) release --snapshot --clean --skip=sign,publish,sbom
 
 .PHONY: release-check
 release-check: ## Check the goreleaser configuration

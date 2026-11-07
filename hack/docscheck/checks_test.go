@@ -279,3 +279,29 @@ var b = prometheus.GaugeOpts{
 		t.Errorf("got  %q\nwant %q", got, want)
 	}
 }
+
+// A paragraph after <!-- versions: KEY ... --> names each version (#393),
+// with or without its "v", so the docs' "tested with" lines follow
+// hack/versions.env.
+func TestVersions(t *testing.T) {
+	fsys := fstest.MapFS{
+		"hack/versions.env": file("# comment\nISTIO_VERSION=1.31.3\nENVOY_VERSION=v1.39.6\nGATEWAY_API_VERSION=v1.7.0\n"),
+		"README.md": file("# Inkwall\n" +
+			"<!-- versions: ISTIO_VERSION GATEWAY_API_VERSION -->\n" +
+			"Tested with Istio 1.31.3 and the\nGateway API v1.7.0.\n\n" +
+			"<!-- versions: ENVOY_VERSION -->\n" +
+			"Tested with Envoy 1.39.6.\n\n" +
+			"<!-- versions: ISTIO_VERSION -->\n" +
+			"Tested with Istio 1.30.0.\n\n" +
+			"<!-- versions: NOPE -->\n" +
+			"Anything.\n"),
+	}
+	got := check(t, fsys, config{versions: "hack/versions.env"})
+	want := []string{
+		"README.md:9: ISTIO_VERSION is 1.31.3 in hack/versions.env, but the paragraph doesn't say so",
+		"README.md:12: NOPE is not in hack/versions.env",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}

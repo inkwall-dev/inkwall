@@ -18,12 +18,14 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# The versions under test (#393).
+# shellcheck source=hack/versions.env
+. hack/versions.env
 
 CLUSTER=${KIND_CLUSTER:-inkwall}
 NS=response-load
 EG_NS=envoy-gateway-e2e # a proxy namespace (hack/kind/operator.sh)
-EG_VERSION=v1.9.3
-GATEWAY_API_VERSION=v1.7.0
+EG_VERSION=$ENVOY_GATEWAY_VERSION
 HOST=load.example.com
 CONCURRENCY=${CONCURRENCY:-8}
 DURATION=${DURATION:-20s}
