@@ -327,3 +327,17 @@ func TestEnforcedOutdatedEngineGRPCMessages(t *testing.T) {
 		}
 	}
 }
+// A policy setting fields of several releases needs the newest: an engine
+// new enough for the first field but not for a later one is outdated (#473).
+func TestEnforcedOutdatedNewestField(t *testing.T) {
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
+	p.Spec.WebSocket = &wafv1alpha1.WebSocketSpec{AllowedOrigins: []wafv1alpha1.WebSocketOrigin{"https://app.example.com"}}
+	p.Spec.IPLists = &wafv1alpha1.IPListsSpec{Deny: []wafv1alpha1.IPListName{"blocked"}}
+	p.Status.BundleVersion = 3
+	engines := []Engine{{ID: "e0", PodNamespace: "edge", PodName: "traefik-0", EngineVersion: "0.4.1", Applied: 3}}
+	conds, _ := enforcedConditions(p, 3, false, engines, 0)
+	c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
+	if c == nil || c.Reason != ReasonEnginesOutdated || !strings.Contains(c.Message, "spec.ipLists") || !strings.Contains(c.Message, "0.5.0 or later") {
+		t.Errorf("a 0.4.1 engine and a policy with webSocket and ipLists: Enforced %+v, want EnginesOutdated naming spec.ipLists", c)
+	}
+}
