@@ -121,6 +121,10 @@ bench: ## Run benchmarks (BENCH=regexp COUNT=n)
 bench-compare: ## Compare benchmarks of changed packages with BASE (origin/main); fail on a repeated significant regression over 5%
 	BENCH='$(BENCH)' hack/bench/compare.sh $(BASE)
 
+.PHONY: gitops-health-test
+gitops-health-test: ## Test the Argo CD health checks and Flux healthCheckExprs of examples/ (hack/gitopshealth)
+	cd hack/gitopshealth && $(GO) test -count=1 ./...
+
 .PHONY: crs-test
 crs-test: ## Run the OWASP CRS regression suite through the proxy (test/crs)
 	cd test/crs && $(GO) test -count=1 -timeout 30m -v ./...
