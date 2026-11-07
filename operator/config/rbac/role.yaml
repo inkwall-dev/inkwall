@@ -118,6 +118,7 @@ rules:
   - waf.inkwall.dev
   resources:
   - inkwallconfigs
+  - wafiplists
   verbs:
   - get
   - list
