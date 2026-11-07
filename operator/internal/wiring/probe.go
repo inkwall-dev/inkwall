@@ -4,13 +4,16 @@
 package wiring
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,10 +32,13 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
 )
 
-// HAProxyProbe is what the prober proves for one wired Ingress: that each
-// pod answers the probe on each of its targets.
-type HAProxyProbe struct {
-	Ingress types.NamespacedName
+// ProbeJob is what the prober proves for one wired route: that each pod
+// answers the probe on each of its targets (#282, #372).
+type ProbeJob struct {
+	// Route is the route, for the messages and the results' keys.
+	Route ProbeRoute
+	// Proxy names the proxy in the messages: "HAProxy", "Istio".
+	Proxy string
 	// Fingerprint changes when the wiring does (the snippet): the route
 	// is probed again.
 	Fingerprint string
@@ -40,16 +46,32 @@ type HAProxyProbe struct {
 	Pods        []ProbePod
 }
 
-// ProbeTarget is a request that reaches one of the Ingress's backends: a
+// ProbeRoute names a probed route: "Ingress", "HTTPRoute" or
+// "VirtualService", and its namespace and name.
+type ProbeRoute struct {
+	Kind string
+	Key  types.NamespacedName
+}
+
+func (r ProbeRoute) String() string { return r.Kind + " " + r.Key.Name }
+
+// ProbeTarget is a request that reaches one of the route's backends: a
 // host (any, for a rule without one), and a Prefix path, under which the
 // probe takes its reserved path, or an Exact one, probed as itself with a
-// query; over TLS when the Ingress has it for the host, as the controller
-// then redirects plain HTTP.
+// query; over TLS when the route has it for the host (HAProxy then
+// redirects plain HTTP, an Istio listener serves only TLS). Method, Query
+// and Headers are what the route's match asks for besides the path (an
+// Istio route); Port, when set, is the listener's on the pod, instead of
+// the pod's HTTP or HTTPS port.
 type ProbeTarget struct {
-	Host   string
-	Path   string
-	Prefix bool
-	TLS    bool
+	Host    string
+	Path    string
+	Prefix  bool
+	TLS     bool
+	Port    int32
+	Method  string
+	Query   string
+	Headers map[string]string
 }
 
 // ProbePod is a controller pod, probed directly.
@@ -134,12 +156,12 @@ const (
 	haproxyTimeout  = 3 * time.Second
 )
 
-// HAProxyProber probes the wired HAProxy routes (0002 §6.4): for each pod
+// Prober probes the wired HAProxy routes (0002 §6.4): for each pod
 // and route, a GET through the pod's HAProxy to the route, with a MAC
 // under the bundle's probe key, which only the engine behind the route's
 // filter answers (status 299 and its own MAC). It runs on the leader, and
 // triggers a reconcile when a result changes.
-type HAProxyProber struct {
+type Prober struct {
 	// Reader reads the bundle Secret, in Namespace, for the probe key.
 	Reader    client.Reader
 	Namespace string
@@ -151,7 +173,7 @@ type HAProxyProber struct {
 	Key func(ctx context.Context) ([]byte, error)
 
 	mu      sync.Mutex
-	jobs    []HAProxyProbe
+	jobs    map[string][]ProbeJob
 	results map[string]probeResult
 	events  chan event.GenericEvent
 	once    sync.Once
@@ -165,28 +187,31 @@ type probeResult struct {
 	at     time.Time
 }
 
-func (p *HAProxyProber) init() {
+func (p *Prober) init() {
 	p.once.Do(func() {
 		p.results = map[string]probeResult{}
+		p.jobs = map[string][]ProbeJob{}
 		p.events = make(chan event.GenericEvent, 1)
 	})
 }
 
 // Events triggers the wiring controller when a result changes.
-func (p *HAProxyProber) Events() <-chan event.GenericEvent {
+func (p *Prober) Events() <-chan event.GenericEvent {
 	p.init()
 	return p.events
 }
 
 // Set replaces the routes to probe.
-func (p *HAProxyProber) Set(jobs []HAProxyProbe) {
+// Set replaces the routes an integration ("haproxy", "istio", ...) has
+// to probe; the other integrations' stay.
+func (p *Prober) Set(integration string, jobs []ProbeJob) {
 	p.init()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.jobs = jobs
+	p.jobs[integration] = jobs
 }
 
-func (p *HAProxyProber) now() time.Time {
+func (p *Prober) now() time.Time {
 	if p.Now != nil {
 		return p.Now()
 	}
@@ -195,22 +220,32 @@ func (p *HAProxyProber) now() time.Time {
 
 // resultKey identifies a result: the route, its wiring and target, the pod
 // and the probe key; any change makes it pending again.
-func resultKey(job HAProxyProbe, pod ProbePod, t ProbeTarget, key []byte) string {
+func resultKey(job ProbeJob, pod ProbePod, t ProbeTarget, key []byte) string {
 	sum := sha256.Sum256([]byte(job.Fingerprint + "\x00" + string(key)))
-	return strings.Join([]string{job.Ingress.String(), string(pod.UID), pod.IP, t.Host, t.Path, strconv.FormatBool(t.TLS), hex.EncodeToString(sum[:8])}, "|")
+	return strings.Join([]string{job.Route.Kind, job.Route.Key.String(), string(pod.UID), pod.IP, t.Host, t.Path, strconv.FormatBool(t.TLS),
+		strconv.Itoa(int(t.Port)), t.Method, t.Query, headersKey(t.Headers), hex.EncodeToString(sum[:8])}, "|")
+}
+
+// headersKey is a target's headers, in a stable order.
+func headersKey(h map[string]string) string {
+	var out []string
+	for _, k := range slices.Sorted(maps.Keys(h)) {
+		out = append(out, k+"="+h[k])
+	}
+	return strings.Join(out, ",")
 }
 
 // Unverified is why a route isn't proven on every pod, or "".
-func (p *HAProxyProber) Unverified(job HAProxyProbe) string {
+func (p *Prober) Unverified(job ProbeJob) string {
 	p.init()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	name := "Ingress " + job.Ingress.Name
+	name := job.Route.String()
 	switch {
 	case len(p.key) == 0:
 		return name + " is wired; the filter is unverified until the operator can probe it (no bundle with a probe key yet)"
 	case len(job.Pods) == 0:
-		return name + " is wired; the filter is unverified: no HAProxy pod with the engine runs"
+		return name + " is wired; the filter is unverified: no " + job.Proxy + " pod with the engine runs"
 	case len(job.Targets) == 0:
 		return name + " is wired; the filter is unverified: it has no path to probe"
 	}
@@ -228,18 +263,18 @@ func (p *HAProxyProber) Unverified(job HAProxyProbe) string {
 	}
 	switch {
 	case len(failed) > 0:
-		return fmt.Sprintf("Ingress %s is wired, but the probe shows that HAProxy doesn't run the filter for it, so its traffic isn't inspected there: %s",
-			job.Ingress.Name, strings.Join(failed, "; "))
+		return fmt.Sprintf("%s is wired, but the probe shows that %s doesn't run the filter for it, so its traffic isn't inspected there: %s",
+			name, job.Proxy, strings.Join(failed, "; "))
 	case len(pending) > 0:
 		// Not the pods' names: each pod of a rollout would rewrite the
 		// status (#373).
-		return fmt.Sprintf("Ingress %s is wired; the filter is unverified until the operator's probe has reached it on every HAProxy pod with the engine", job.Ingress.Name)
+		return fmt.Sprintf("%s is wired; the filter is unverified until the operator's probe has reached it on every %s pod with the engine", name, job.Proxy)
 	}
 	return ""
 }
 
 // Start probes until ctx ends.
-func (p *HAProxyProber) Start(ctx context.Context) error {
+func (p *Prober) Start(ctx context.Context) error {
 	p.init()
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
@@ -254,19 +289,19 @@ func (p *HAProxyProber) Start(ctx context.Context) error {
 }
 
 // NeedLeaderElection implements manager.LeaderElectionRunnable.
-func (*HAProxyProber) NeedLeaderElection() bool { return true }
+func (*Prober) NeedLeaderElection() bool { return true }
 
 // Run probes what is due once.
-func (p *HAProxyProber) Run(ctx context.Context) {
+func (p *Prober) Run(ctx context.Context) {
 	p.init()
 	key, err := p.probeKey(ctx)
 	if err != nil {
-		log.FromContext(ctx).Error(err, "HAProxy probe: reading the bundle")
+		log.FromContext(ctx).Error(err, "probe: reading the bundle")
 		return
 	}
 	type task struct {
 		key  string
-		job  HAProxyProbe
+		job  ProbeJob
 		pod  ProbePod
 		t    ProbeTarget
 		prev probeResult
@@ -279,7 +314,7 @@ func (p *HAProxyProber) Run(ctx context.Context) {
 	now := p.now()
 	live := map[string]bool{}
 	if len(key) > 0 {
-		for _, job := range p.jobs {
+		for _, job := range slices.Concat(slices.Collect(maps.Values(p.jobs))...) {
 			for _, pod := range job.Pods {
 				for _, t := range job.Targets {
 					k := resultKey(job, pod, t, key)
@@ -296,8 +331,11 @@ func (p *HAProxyProber) Run(ctx context.Context) {
 			}
 		}
 	}
-	for k := range p.results {
-		if !live[k] {
+	// A result outlives its job for the reprobe interval: a route that
+	// leaves the jobs for a moment (its pods SidecarMissing in a rollout)
+	// and comes back on the same pods is as proven as if it had stayed.
+	for k, r := range p.results {
+		if !live[k] && now.Sub(r.at) >= haproxyReprobe {
 			delete(p.results, k)
 		}
 	}
@@ -320,7 +358,7 @@ func (p *HAProxyProber) Run(ctx context.Context) {
 				changed = true
 				mu.Unlock()
 				if !ok {
-					log.FromContext(ctx).Info("HAProxy probe failed", "ingress", tk.job.Ingress, "pod", tk.pod.Name, "host", tk.t.Host, "detail", detail)
+					log.FromContext(ctx).Info("probe failed", "proxy", tk.job.Proxy, "route", tk.job.Route.String(), "namespace", tk.job.Route.Key.Namespace, "pod", tk.pod.Name, "host", tk.t.Host, "detail", detail)
 				}
 			}
 		}()
@@ -335,7 +373,7 @@ func (p *HAProxyProber) Run(ctx context.Context) {
 }
 
 // probeKey is the key of the bundle in force: the one engines answer with.
-func (p *HAProxyProber) probeKey(ctx context.Context) ([]byte, error) {
+func (p *Prober) probeKey(ctx context.Context) ([]byte, error) {
 	if p.Key != nil {
 		return p.Key(ctx)
 	}
@@ -344,7 +382,7 @@ func (p *HAProxyProber) probeKey(ctx context.Context) ([]byte, error) {
 }
 
 // probe sends one probe, and reports whether the engine answered it.
-func (p *HAProxyProber) probe(ctx context.Context, key []byte, pod ProbePod, t ProbeTarget) (bool, string) {
+func (p *Prober) probe(ctx context.Context, key []byte, pod ProbePod, t ProbeTarget) (bool, string) {
 	if pod.IP == "" {
 		return false, "the pod has no IP yet"
 	}
@@ -353,21 +391,31 @@ func (p *HAProxyProber) probe(ctx context.Context, key []byte, pod ProbePod, t P
 		return false, err.Error()
 	}
 	uri := t.Path + "?inkwall-probe=" + nonce
+	if t.Query != "" {
+		uri = t.Path + "?" + t.Query + "&inkwall-probe=" + nonce
+	}
 	if t.Prefix {
 		uri = haproxyprobe.PrefixPath(t.Path, nonce)
+		if t.Query != "" {
+			uri += "?" + t.Query
+		}
 	}
+	method := cmp.Or(t.Method, http.MethodGet)
 	scheme := "http"
 	if t.TLS {
 		scheme = "https"
 	}
 	ctx, cancel := context.WithTimeout(ctx, haproxyTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, scheme+"://"+t.Host+uri, nil)
+	req, err := http.NewRequestWithContext(ctx, method, scheme+"://"+t.Host+uri, nil)
 	if err != nil {
 		return false, err.Error()
 	}
+	for k, v := range t.Headers {
+		req.Header.Set(k, v)
+	}
 	req.Header.Set(haproxyprobe.Header, haproxyprobe.Request(key, nonce, t.Host, uri))
-	req.Header.Set("User-Agent", "inkwall-operator-haproxy-probe")
+	req.Header.Set("User-Agent", "inkwall-operator-probe")
 	do := p.Do
 	if do == nil {
 		do = sendProbe
@@ -379,7 +427,9 @@ func (p *HAProxyProber) probe(ctx context.Context, key []byte, pod ProbePod, t P
 	_ = resp.Body.Close()
 	answer := resp.Header.Get(haproxyprobe.Header)
 	switch {
-	case resp.StatusCode == haproxyprobe.Status && haproxyprobe.Verify(key, nonce, t.Host, uri, answer):
+	case haproxyprobe.Verify(key, nonce, t.Host, uri, answer):
+		// The MAC proves the engine answered: HAProxy's rules return it
+		// with 299, Envoy's local reply with 200 (#372).
 		return true, ""
 	case resp.StatusCode == haproxyprobe.Status:
 		return false, "status 299 without the engine's answer"
@@ -394,6 +444,9 @@ func sendProbe(ctx context.Context, pod ProbePod, t ProbeTarget, req *http.Reque
 	port := pod.HTTPPort
 	if t.TLS {
 		port = pod.HTTPSPort
+	}
+	if t.Port != 0 {
+		port = t.Port
 	}
 	addr := net.JoinHostPort(pod.IP, strconv.Itoa(int(port)))
 	tr := &http.Transport{

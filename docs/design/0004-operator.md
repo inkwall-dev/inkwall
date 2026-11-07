@@ -699,7 +699,7 @@ has the decision), for `VirtualService` targets bound to Istio `Gateway` objects
   `haproxy.org/backend-config-snippet`, first, between `# inkwall:begin` and `# inkwall:end`; the
   user's lines stay after it. `waf.inkwall.dev/haproxy-wired` marks it (`Wired`), with the previous
   `standalone-backend`, restored when it is unwired.
-- **`Programmed`** only once the operator's probe (`HAProxyProber`, on the leader) has proven the
+- **`Programmed`** only once the operator's probe (`Prober`, on the leader) has proven the
   filter on every running pod; `Unverified` until then, and when a probe gets anything but the
   engine's answer. Before that, `PendingRestart` or `SidecarMissing`; `WiringFailed` for a pod
   without the agent's files or with `--disable-config-snippets` covering backends.
