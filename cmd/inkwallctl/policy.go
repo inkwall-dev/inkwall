@@ -57,6 +57,12 @@ func policyBundle(cfg config, notes io.Writer) (*bundlev1.Bundle, error) {
 	if err != nil {
 		return nil, err
 	}
+	return inputBundle(in, suspended, notes)
+}
+
+// inputBundle resolves loaded objects as the operator does, and fails on
+// the policies and rule sets it wouldn't enforce.
+func inputBundle(in resolver.Input, suspended bool, notes io.Writer) (*bundlev1.Bundle, error) {
 	if len(in.Policies) == 0 {
 		return nil, errors.New("no WAFPolicy in the files")
 	}

@@ -97,6 +97,8 @@ What changes by itself:
   rejected bundles. WebSocket messages the engine's proxy inspects are counted in
   `inkwall_websocket_messages_total`, no longer in `inkwall_requests_total`, so a dashboard of
   requests drops on routes with busy WebSockets.
+- **`inkwallctl tune` is new** (#383): it suggests the narrowest exclusions from Detect mode's
+  security events. See [Suggest exclusions from the events](testing-policies.md#suggest-exclusions-from-the-events).
 
 ## From 0.4.0 to 0.4.1
 
