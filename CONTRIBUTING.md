@@ -108,7 +108,7 @@ Durations are on a laptop or a CI runner, roughly.
 | Benchmarks | `make bench-compare` (base: `origin/main`) | 10 min | Go | every PR (`bench`) |
 | Images | `make image` | 5 min | Docker | every PR (`image`, both platforms) |
 | Proxies in Docker | `make raw-envoy-e2e`, `make websocket-e2e`, `make haproxy-e2e` | 5 min each | Docker | every PR (`raw-envoy`, `haproxy`) |
-| End to end on kind | `make kind-e2e` (all), `make kind-e2e-traefik`, `-raw-envoy`, `-envoy-gateway`, `-istio`, `-haproxy` | 25 min (all) | Docker, kind (installed by the target) | every PR (`e2e (<proxy>)`, one job each) |
+| End to end on kind | `make kind-e2e` (all), `make kind-e2e-traefik`, `-raw-envoy`, `-envoy-gateway`, `-istio`, `-haproxy`, `-networkpolicy` (the chart's NetworkPolicies under a default deny) | 25 min (all) | Docker, kind (installed by the target) | every PR (`e2e (<proxy>)`, one job each) |
 | Upgrade on kind | `make kind-upgrade` | 15 min | Docker, kind | every PR (`upgrade`, from the latest release); release qualification (`upgrade.yaml`, from each supported minor) |
 | Operator failure modes on kind | `make kind-chaos` | 20 min | Docker, kind | release qualification (`qualify.yaml`, `chaos`, nightly) |
 | Examples | `make test-examples` (each `examples/<proxy>` policy through `inkwallctl test --policy`, and the `examples/tests` suite) | 1 min | Go | every PR (`test`) |
@@ -124,7 +124,7 @@ The kind targets (`make kind-up`, `make kind-e2e`, `make kind-upgrade`) install 
 into `bin/` and run Kubernetes 1.34 (`KIND_NODE_IMAGE` in the Makefile; the operator tests' API
 server, `ENVTEST_K8S_VERSION`, runs it too), as CI's upgrade job does. CI's e2e jobs run kind's
 newest Kubernetes: one job per proxy (`e2e (traefik)`, `e2e (raw-envoy)`, `e2e (envoy-gateway)`,
-`e2e (istio)`, `e2e (haproxy)`), each on its own cluster with the images the `e2e-images` job
+`e2e (istio)`, `e2e (haproxy)`, and `e2e (networkpolicy)` for the chart's NetworkPolicies), each on its own cluster with the images the `e2e-images` job
 built, and the cluster's logs as an artifact when one fails. The chart still installs on 1.29 and
 later, untested. A cluster made at another version is recreated with `make kind-down kind-up`.
 

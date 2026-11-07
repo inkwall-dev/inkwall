@@ -35,6 +35,8 @@ package main
 import (
 	"cmp"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -70,6 +72,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/router"
+	"github.com/inkwall-dev/inkwall/pkg/rules"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
@@ -132,6 +135,9 @@ const (
 	cmdSPOE        = "spoe"
 )
 
+// rulesWatchInterval is how often --watch-rules checks the rule files.
+const rulesWatchInterval = 2 * time.Second
+
 // newLogger returns the engine's JSON logger, writing lines of level and
 // above to w.
 func newLogger(w io.Writer, level slog.Level) *slog.Logger {
@@ -166,17 +172,28 @@ type engineConfig struct {
 	threshold      int
 	rulesFile      string
 	rulesBeforeCRS string
-	clientIP       clientip.Options
-	skipPaths      []string
-	routes         *router.Table
-	skipBodyPaths  []string
-	pprof          bool
-	ruleGroupsOff  []string
+	// watchRules reloads the rule files when their content changes.
+	watchRules    bool
+	clientIP      clientip.Options
+	skipPaths     []string
+	routes        *router.Table
+	skipBodyPaths []string
+	pprof         bool
+	ruleGroupsOff []string
 	// webSocket is what a WebSocket handshake must meet; nil: nothing more
 	// than any request.
 	webSocket *pipeline.WebSocketRules
 	// webSocketMessages: what the proxy does with a WebSocket's messages.
 	webSocketMessages pipeline.WebSocketMessages
+	// The proxy's protocols (#362).
+	h2c             bool
+	tlsCert, tlsKey string
+	upstreamH2C     bool
+	upstreamCA      string
+	// The proxy's long-lived connections (#368): 0 is no limit.
+	webSocketIdle   time.Duration
+	bodyReadTimeout time.Duration
+	maxConnections  int
 
 	// Bundle mode: policies come from the operator.
 	operator           string
@@ -198,7 +215,7 @@ type engineConfig struct {
 // they can't be set.
 var policyFlags = []string{
 	"mode", "failure-mode", "timeout", "oversize-body", "grpc-messages", "paranoia-level", "anomaly-threshold",
-	"rules", "rules-before-crs", "skip-paths", "skip-body-paths", "disable-rule-groups",
+	"rules", "rules-before-crs", "watch-rules", "skip-paths", "skip-body-paths", "disable-rule-groups",
 	"websocket-origins", "websocket-allow-missing-origin", "websocket-required-headers", "websocket-messages",
 	"inspect-responses", "max-response-bytes", "oversize-response",
 }
@@ -224,7 +241,18 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	readTimeout := fs.Duration("read-timeout", 60*time.Second, "maximum time to read a whole request, including the body (0 = no limit; not ext-proc; spoe: time to read one frame once it has begun)")
 	var upstream *string
 	wsMessages := new(string)
+	wsIdle, bodyReadTimeout, maxConns := new(time.Duration), new(time.Duration), new(int)
+	h2c, upstreamH2C := new(bool), new(bool)
+	tlsCert, tlsKey, upstreamCA := new(string), new(string), new(string)
 	if command == cmdProxy {
+		h2c = fs.Bool("h2c", false, "also accept HTTP/2 without TLS (prior knowledge, as gRPC clients send it) on --listen; HTTP/1.1 still works")
+		tlsCert = fs.String("tls-cert", "", "certificate (PEM) to serve TLS on --listen, with HTTP/2 and HTTP/1.1 by ALPN; re-read when it changes (with --tls-key)")
+		tlsKey = fs.String("tls-key", "", "private key (PEM) of --tls-cert")
+		upstreamH2C = fs.Bool("upstream-h2c", false, "reach an http:// upstream over HTTP/2 without TLS, as a gRPC server needs (WebSocket upgrades can't pass then)")
+		upstreamCA = fs.String("upstream-ca", "", "CA certificates (PEM) that an https:// upstream's certificate is verified with, instead of the system's")
+		wsIdle = fs.Duration("websocket-idle-timeout", 0, "close a WebSocket with 1001 (going away) when nothing passes either way for this long (0 = never)")
+		bodyReadTimeout = fs.Duration("body-read-timeout", 0, "maximum time to read the part of a request body that is inspected (408 past it); the rest streams under --read-timeout, which can then be 0 for long uploads (0 = only --read-timeout)")
+		maxConns = fs.Int("max-connections", 0, "maximum client connections open at a time, WebSockets included; past it, new ones wait until one closes (0 = no limit)")
 		upstream = fs.String("upstream", "", "upstream URL that allowed requests are forwarded to (required)")
 		// Only the proxy sees a WebSocket's messages: the other adapters
 		// see its handshake alone.
@@ -250,6 +278,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	threshold := fs.Int("anomaly-threshold", coraza.DefaultInboundAnomalyThreshold, "OWASP CRS inbound anomaly score threshold")
 	rulesFile := fs.String("rules", "", "file with SecLang rules and configure-time exclusions (SecRuleRemoveById, SecRuleUpdateTargetById), loaded after CRS")
 	rulesBeforeCRS := fs.String("rules-before-crs", "", "file with SecLang runtime exclusions (rules using ctl:ruleRemoveById and similar) and settings, loaded before CRS")
+	watchRules := fs.Bool("watch-rules", false, "reload --rules and --rules-before-crs when their content changes, checked every 2s (a mounted ConfigMap); they are reloaded on SIGHUP in any case")
 	// The check API carries the client address resolved by the proxy.
 	trusted := new(string)
 	trustedHops := new(int)
@@ -336,6 +365,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 		threshold:        *threshold,
 		rulesFile:        *rulesFile,
 		rulesBeforeCRS:   *rulesBeforeCRS,
+		watchRules:       *watchRules,
 
 		operator:           *operator,
 		operatorCA:         *operatorCA,
@@ -358,6 +388,17 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 			return cfg, fmt.Errorf("--upstream: %w", err)
 		}
 		cfg.upstream = u
+		if (*tlsCert == "") != (*tlsKey == "") {
+			return cfg, errors.New("--tls-cert and --tls-key go together")
+		}
+		if *upstreamH2C && u.Scheme != "http" {
+			return cfg, errors.New("--upstream-h2c needs an http:// --upstream")
+		}
+		cfg.h2c, cfg.tlsCert, cfg.tlsKey, cfg.upstreamH2C, cfg.upstreamCA = *h2c, *tlsCert, *tlsKey, *upstreamH2C, *upstreamCA
+		if *wsIdle < 0 || *bodyReadTimeout < 0 || *maxConns < 0 {
+			return cfg, errors.New("--websocket-idle-timeout, --body-read-timeout and --max-connections must not be negative")
+		}
+		cfg.webSocketIdle, cfg.bodyReadTimeout, cfg.maxConnections = *wsIdle, *bodyReadTimeout, *maxConns
 		switch *wsMessages {
 		case "off":
 		case "inspect":
@@ -519,7 +560,17 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 	if cfg.operator != "" {
 		ag, p, rec, err = bundleMode(cfg, metrics, logger)
 	} else {
-		p, err = flagMode(cfg, metrics)
+		var reloader *rulesReloader
+		if p, reloader, err = flagMode(cfg, metrics, logger); err == nil {
+			hup := make(chan os.Signal, 1)
+			signal.Notify(hup, syscall.SIGHUP)
+			defer signal.Stop(hup)
+			var watch time.Duration
+			if cfg.watchRules {
+				watch = rulesWatchInterval
+			}
+			go reloader.run(ctx, hup, watch)
+		}
 	}
 	if err != nil {
 		return err
@@ -561,22 +612,45 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 	case cmdCheck:
 		handler, err = httpcheck.New(p, httpcheck.Config{MaxBodyBytes: maxBody, Logger: logger, Events: rec, Metrics: metrics})
 	default:
+		var cas *x509.CertPool
+		if cfg.upstreamCA != "" {
+			if cas, err = readCAs(cfg.upstreamCA); err != nil {
+				return err
+			}
+		}
 		handler, err = proxy.New(p,
-			proxy.Config{Upstream: cfg.upstream, MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics, JSONDenials: cfg.jsonDenials,
-				WebSocketMessages: cfg.webSocketMessages},
+			proxy.Config{UpstreamH2C: cfg.upstreamH2C, UpstreamCAs: cas, Upstream: cfg.upstream, MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics, JSONDenials: cfg.jsonDenials,
+				WebSocketMessages: cfg.webSocketMessages, WebSocketIdleTimeout: cfg.webSocketIdle,
+				BodyReadTimeout: cfg.bodyReadTimeout, ReadTimeout: cfg.readTimeout},
 		)
 	}
 	if err != nil {
 		return err
 	}
 
-	var srv server = &http.Server{
+	hs := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		// Bounds slow uploads that would otherwise hold a connection and a
 		// goroutine open indefinitely.
 		ReadTimeout: cfg.readTimeout,
 		IdleTimeout: 120 * time.Second,
+	}
+	var srv server = hs
+	if cfg.h2c {
+		// HTTP/2 over TLS stays on, for a TLS listener.
+		hs.Protocols = new(http.Protocols)
+		hs.Protocols.SetHTTP1(true)
+		hs.Protocols.SetHTTP2(true)
+		hs.Protocols.SetUnencryptedHTTP2(true)
+	}
+	if cfg.tlsCert != "" {
+		cert, err := loadCertificate(cfg.tlsCert, cfg.tlsKey)
+		if err != nil {
+			return err
+		}
+		hs.TLSConfig = &tls.Config{GetCertificate: cert.get, MinVersion: tls.VersionTLS12}
+		srv = tlsServer{hs}
 	}
 	if ep != nil {
 		srv = grpcServer{ep.NewGRPCServer()}
@@ -642,6 +716,9 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 		}
 		return err
 	}
+	if cfg.maxConnections > 0 {
+		ln = limitListener(ln, cfg.maxConnections, metrics)
+	}
 	go func() { errc <- srv.Serve(ln) }()
 	if ag != nil {
 		go func() { _ = ag.Run(ctx) }()
@@ -676,6 +753,10 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 	defer cancel()
 	logger.Info("shutting down")
 	err = srv.Shutdown(shutdownCtx)
+	// Hijacked, the proxy's WebSockets aren't the server's: they get 1001.
+	if ph, ok := handler.(*proxy.Handler); ok {
+		err = errors.Join(err, ph.CloseWebSockets(shutdownCtx))
+	}
 	if admin != nil {
 		err = errors.Join(err, admin.Shutdown(shutdownCtx))
 	}
@@ -710,29 +791,19 @@ func (g grpcServer) Shutdown(ctx context.Context) error {
 }
 
 // flagMode builds the one pipeline the flags define.
-func flagMode(cfg engineConfig, metrics *telemetry.Metrics) (pipeline.Inspector, error) {
-	directives, err := readOptional(cfg.rulesFile)
+func flagMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logger) (pipeline.Inspector, *rulesReloader, error) {
+	after, before, sum, err := ruleFiles(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("read --rules: %w", err)
+		return nil, nil, err
 	}
-	directivesBeforeCRS, err := readOptional(cfg.rulesBeforeCRS)
+	eval, err := compileRules(cfg, after, before)
 	if err != nil {
-		return nil, fmt.Errorf("read --rules-before-crs: %w", err)
+		return nil, nil, err
 	}
-	eval, err := coraza.New(coraza.Config{
-		ParanoiaLevel:           cfg.paranoiaLevel,
-		InboundAnomalyThreshold: cfg.threshold,
-		MaxArgs:                 cfg.maxArgs,
-		BodyLimit:               int(cfg.maxBodyBytes),
-		ResponseBodyLimit:       int(cfg.responses.MaxBytes),
-		DisabledRuleGroups:      cfg.ruleGroupsOff,
-		DirectivesBeforeCRS:     directivesBeforeCRS,
-		Directives:              directives,
-	})
-	if err != nil {
-		return nil, err
-	}
-	p := pipeline.New(eval, pipeline.Config{
+	// The rules can be reloaded (SIGHUP, --watch-rules): the pipeline
+	// evaluates with whichever is in force when a request starts.
+	reloader := &rulesReloader{cfg: cfg, swap: rules.NewSwap(eval), logger: logger, metrics: metrics, sum: sum}
+	p := pipeline.New(reloader.swap, pipeline.Config{
 		Mode:          cfg.mode,
 		FailureMode:   cfg.failureMode,
 		Timeout:       cfg.timeout,
@@ -746,7 +817,7 @@ func flagMode(cfg engineConfig, metrics *telemetry.Metrics) (pipeline.Inspector,
 	})
 	metrics.WatchAdmission(p.Admission())
 	metrics.WatchRuleSets(func() int { return 1 })
-	return p, nil
+	return p, reloader, nil
 }
 
 // bundleMode inspects with the policies of the operator's bundles, per

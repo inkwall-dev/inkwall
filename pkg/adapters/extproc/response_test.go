@@ -345,9 +345,9 @@ func TestResponseUpgradeRefused(t *testing.T) {
 // In observability mode Envoy doesn't hold the request: the upstream may
 // answer before the client has sent all of its body (an HTTP/2 body with
 // trailers, an app that answers before reading). The request is still
-// decided on its whole body, not as oversized, and then its response. (A
-// request the rules flag keeps no evaluation for its response: its event
-// stands.)
+// decided on its whole body, not as oversized, and then its response. In
+// detect mode a request the rules flag keeps its evaluation, and its
+// response is inspected too (#360).
 func TestResponseBeforeRequestBodyObserved(t *testing.T) {
 	trailers := &extprocv3.ProcessingRequest{Request: &extprocv3.ProcessingRequest_RequestTrailers{
 		RequestTrailers: &extprocv3.HttpTrailers{}}}
@@ -357,8 +357,8 @@ func TestResponseBeforeRequestBodyObserved(t *testing.T) {
 		last []*extprocv3.ProcessingRequest // what ends the request
 		want map[string]string              // event reasons by phase
 	}{
-		{"attack, body end", []*extprocv3.ProcessingRequest{body(attack, true)}, map[string]string{"request": "rule"}},
-		{"attack, trailers", []*extprocv3.ProcessingRequest{body(attack, false), trailers}, map[string]string{"request": "rule"}},
+		{"attack, body end", []*extprocv3.ProcessingRequest{body(attack, true)}, map[string]string{"request": "rule", "response": "rule"}},
+		{"attack, trailers", []*extprocv3.ProcessingRequest{body(attack, false), trailers}, map[string]string{"request": "rule", "response": "rule"}},
 		{"benign, body end", []*extprocv3.ProcessingRequest{body("23", true)}, map[string]string{"response": "rule"}},
 		{"benign, trailers", []*extprocv3.ProcessingRequest{body("23", false), trailers}, map[string]string{"response": "rule"}},
 	} {
@@ -378,5 +378,24 @@ func TestResponseBeforeRequestBodyObserved(t *testing.T) {
 				t.Errorf("events by phase %v, want %v: %s", got, tc.want, logs.String())
 			}
 		})
+	}
+}
+
+// TestResponseOfFlaggedRequestDetectMode (#360): in Detect mode a request
+// the rules flag reaches the app, and its response is inspected too: two
+// events, the request's and the response's.
+func TestResponseOfFlaggedRequestDetectMode(t *testing.T) {
+	var logs bytes.Buffer
+	e := newEnvoy(t, newResponsePipeline(t, pipeline.ModeDetect, 256, pipeline.OversizeAuto), 64, &logs)
+	e.observe(t, headers("GET", "/?id=1%27%20OR%20%271%27%3D%271", true),
+		respHeaders(500, false, "content-type", "text/html"), respBody(sqlError, true))
+	evs := securityEvents(t, &logs)
+	if len(evs) != 2 {
+		t.Fatalf("%d events, want the request's and the response's: %s", len(evs), logs.String())
+	}
+	for i, phase := range []string{"request", "response"} {
+		if got, _ := evs[i]["phase"].(string); got != phase && (phase != "request" || got != "") {
+			t.Errorf("event %d: phase %q, want %s: %v", i, got, phase, evs[i])
+		}
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"regexp"
 	"slices"
@@ -186,8 +187,13 @@ func readTuneEvents(r io.Reader, fromLogs bool) ([]tuneEvent, error) {
 			}
 		}
 		for _, m := range matches {
-			id, _ := strconv.Atoi(str(m, "rule_id", "ruleId"))
-			ev.Matches = append(ev.Matches, tuneMatch{RuleID: id, Variable: str(m, "variable")})
+			// Rule IDs are int32s in the bundle: one out of its range is
+			// no rule (0), not another rule's ID.
+			id, err := strconv.ParseInt(str(m, "rule_id", "ruleId"), 10, 32)
+			if err != nil {
+				id = 0
+			}
+			ev.Matches = append(ev.Matches, tuneMatch{RuleID: int(id), Variable: str(m, "variable")})
 		}
 		evs = append(evs, ev)
 	}
@@ -379,7 +385,10 @@ func tune(evs []tuneEvent, broad bool, minCount int) *tuneReport {
 				key    exKey
 			}{g.Policy, k})
 		}
-		id := int32(g.RuleID) // #nosec G115 -- rule IDs fit
+		if g.RuleID < math.MinInt32 || g.RuleID > math.MaxInt32 {
+			continue // readTuneEvents reads none
+		}
+		id := int32(g.RuleID)
 		if !slices.Contains(ex.RuleIDs, id) {
 			ex.RuleIDs = append(ex.RuleIDs, id)
 		}

