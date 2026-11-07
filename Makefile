@@ -217,7 +217,25 @@ tidy: ## Tidy go.mod and go.sum, here and in test/crs (which builds against this
 	cd test/crs && $(GO) mod tidy
 
 .PHONY: check
-check: lint test vuln docs-check ## Run everything CI runs
+check: lint test vuln docs-check ## Fast checks before a push: lint, unit tests, vulnerability scan, docs (make check-all: every PR job of CI)
+
+.PHONY: generate-check
+generate-check: generate ## Regenerate the code, CRDs and chart files, and fail if they differ from the committed ones (as CI's generate job)
+	git diff --exit-code
+
+.PHONY: check-all
+check-all: ## Run every job CI runs on a pull request, one after another: hours, and needs Docker and kind (CONTRIBUTING.md#development-and-testing)
+	$(MAKE) check
+	$(MAKE) scale-test SCALE_CHANGES=5
+	$(MAKE) scale-test SCALE=wiring:500
+	$(MAKE) build generate-check helm-lint monitoring-test release-check crs-test
+	$(MAKE) bench-compare
+	$(MAKE) image
+	$(MAKE) raw-envoy-e2e
+	SKIP_BUILD=1 $(MAKE) websocket-e2e
+	$(MAKE) haproxy-e2e
+	$(MAKE) kind-e2e
+	$(MAKE) kind-upgrade
 
 .PHONY: image
 image: ## Build the engine and operator container images (IMAGE=name:tag, OPERATOR_IMAGE=name:tag)
