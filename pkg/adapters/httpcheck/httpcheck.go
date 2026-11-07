@@ -16,6 +16,7 @@
 package httpcheck
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -152,6 +153,43 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = w.Write(body)
+}
+
+// CheckExchange inspects the request in describes, as ServeHTTP does
+// but without logging a security event, and then resp, its response, as
+// the ext_proc adapter does: when the request was let through and its
+// policy inspects responses, with the body inspected when the rules read
+// its Content-Type, up to the policy's response body limit (a longer one
+// has its prefix inspected and is truncated). It is for offline tests
+// (inkwallctl test --suite): the check API itself has no response. res is
+// nil when the response wasn't inspected: the request was denied, or its
+// policy (or the pipeline) doesn't inspect responses.
+func (h *Handler) CheckExchange(ctx context.Context, in *enginev1.CheckRequest, resp *request.Response) (req, res *enginev1.CheckResponse, err error) {
+	r, _, err := h.toRequest(in)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid check request: %w", err)
+	}
+	ei, ok := h.pipeline.(pipeline.ExchangeInspector)
+	if !ok {
+		return toResponse(r.ID, h.pipeline.Check(ctx, r)), nil, nil
+	}
+	v, x := ei.CheckExchange(ctx, r)
+	req = toResponse(r.ID, v)
+	if x == nil {
+		return req, nil, nil
+	}
+	defer x.Close()
+	out := *resp
+	if out.Proto == "" {
+		out.Proto = r.Proto
+	}
+	out.Body, out.BodyTruncated = nil, false
+	if x.WantsBody(resp.Headers.Get("Content-Type")) {
+		limit := x.BodyLimit()
+		out.Body = resp.Body[:min(int64(len(resp.Body)), limit)]
+		out.BodyTruncated = resp.BodyTruncated || int64(len(resp.Body)) > limit
+	}
+	return req, toResponse(r.ID, x.CheckResponse(ctx, &out)), nil
 }
 
 // encoding reports whether a Content-Type selects JSON (true) or protobuf.

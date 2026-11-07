@@ -473,6 +473,10 @@ wiring of the HAProxy Kubernetes Ingress Controller ([0002 §6.4](0002-system-ar
 
 **Built:** `pkg/adapters/httpcheck`, run as `inkwall-engine check`. `inkwallctl test`,
 `inkwallctl bench --engine` and the tests use it.
+`CheckRequest` has no response: the API serves proxies, which ask before forwarding. The response
+cases of `inkwallctl test --suite` (#385) are inspected in-process instead, by
+`Handler.CheckExchange`, with the policy's exchange as ext_proc keeps it; so they need no API
+change, and `--engine` can't run them.
 **Not yet:** the gRPC `CheckService/Check` (defined in `api/engine/v1`, not served) and the
 Traefik plugin.
 
