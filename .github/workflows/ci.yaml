@@ -52,6 +52,8 @@ jobs:
       # rollout, memory (#373). SCALE=wiring is 5,000 policies.
       - run: make scale-test SCALE=wiring:500
       - run: make build
+      # The examples' policies, as inkwallctl test --policy checks them.
+      - run: make test-examples
 
   image:
     # The engine and operator images must build; they are what the Helm
@@ -301,8 +303,7 @@ jobs:
         with:
           go-version: '1.27.x'
           check-latest: true
-      - run: make generate
-      - run: git diff --exit-code
+      - run: make generate-check
 
   crs:
     # Detection regression gate: the OWASP CRS test suite through the proxy.

@@ -1,12 +1,12 @@
 # Contributing to Inkwall
 
-This guide sets the rules for commit messages, pull requests, branch names and releases. To build
-and test Inkwall, see [Development](README.md#development) in the README.
+This guide sets the rules for commit messages, pull requests, branch names, testing and releases.
 
 ## Contents
 
 - [Commit messages](#commit-messages)
   - [Rules](#rules)
+- [Development and testing](#development-and-testing)
 - [Branches](#branches)
 - [Releases](#releases)
   - [Cutting a release](#cutting-a-release)
@@ -82,18 +82,47 @@ Existing objects must be updated before upgrading.
 5. Every pull request has an issue. Open the issue first with a label (`enhancement`, `bug`,
    `documentation`, ...), and start the PR description with `Closes #<issue>`, so merging the PR
    closes it.
-6. Run `make check` before opening a pull request: it runs the linter, the tests, the
-   vulnerability scan and the docs checks. CI also lints the chart and runs the end-to-end tests
-   on [kind](https://kind.sigs.k8s.io/).
+6. Run `make check` before opening a pull request: it runs the linter, the unit tests, the
+   vulnerability scan and the docs checks, in minutes. CI runs much more on every pull request
+   ([below](#development-and-testing)); `make check-all` runs all of it locally.
+
+## Development and testing
+
+`make help` lists every target. The tests, by tier: when CI runs each, and what it needs locally.
+Durations are on a laptop or a CI runner, roughly.
+
+| Tier | Target | Takes | Needs | CI |
+|---|---|---|---|---|
+| Fast checks | `make check` (`make lint`, `make test`, `make vuln`, `make docs-check`) | 5–10 min | Go | every PR (`lint`, `test`, `vuln`, `docs`) |
+| Unit tests | `make test` (race detector; the operator's against envtest) | 5 min | Go | every PR (`test`) |
+| Fuzz seeds | in `make test` (each target's `testdata/fuzz`) | | Go | every PR |
+| Fuzzing | `go test -run '^$' -fuzz '^FuzzX$' ./pkg/x` | 5 min per target | Go | nightly (`fuzz`) |
+| Stress | `make stress-test` | an hour | Go | nightly (`stress`) |
+| Scale | `make scale-test SCALE_CHANGES=5`, `make scale-test SCALE=wiring:500` (`SCALE=full`: the 0004 §8 matrix) | 5 min (`full`: hours) | Go | every PR (`test`) |
+| Build | `make build` | 1 min | Go | every PR (`test`) |
+| Generated code | `make generate-check` | 2 min | Go | every PR (`generate`) |
+| Chart | `make helm-lint`, `make monitoring-test` | 2 min | Go, Helm, Docker (promtool) | every PR (`helm`) |
+| Release configuration | `make release-check` | 1 min | goreleaser | every PR (`release`) |
+| CRS conformance | `make crs-test` | 2 min | Go | every PR (`crs`) |
+| Benchmarks | `make bench-compare` (base: `origin/main`) | 10 min | Go | every PR (`bench`) |
+| Images | `make image` | 5 min | Docker | every PR (`image`, both platforms) |
+| Proxies in Docker | `make raw-envoy-e2e`, `make websocket-e2e`, `make haproxy-e2e` | 5 min each | Docker | every PR (`raw-envoy`, `haproxy`) |
+| End to end on kind | `make kind-e2e` (all), `make kind-e2e-traefik`, `-raw-envoy`, `-envoy-gateway`, `-istio`, `-haproxy`, `-networkpolicy` (the chart's NetworkPolicies under a default deny) | 25 min (all) | Docker, kind (installed by the target) | every PR (`e2e (<proxy>)`, one job each) |
+| Upgrade on kind | `make kind-upgrade` | 15 min | Docker, kind | every PR (`upgrade`, from the latest release); release qualification (`upgrade.yaml`, from each supported minor) |
+| External links | `make docs-check-external` | 1 min | network | nightly (`docs-links`) |
+| Everything a PR runs | `make check-all` | hours | all of the above | |
+
+A failing nightly workflow opens an issue labeled `ci-scheduled-failure`
+(`hack/ci/report-scheduled.sh`). `hack/ci`'s tests check that this table names a target for every
+`make` target the workflows run, and only targets the Makefile has.
 
 The kind targets (`make kind-up`, `make kind-e2e`, `make kind-upgrade`) install kind `KIND_VERSION`
 into `bin/` and run Kubernetes 1.34 (`KIND_NODE_IMAGE` in the Makefile; the operator tests' API
 server, `ENVTEST_K8S_VERSION`, runs it too), as CI's upgrade job does. CI's e2e jobs run kind's
-newest Kubernetes (1.37): one job per proxy (`e2e (traefik)`, `e2e (raw-envoy)`,
-`e2e (envoy-gateway)`, `e2e (istio)`, `e2e (haproxy)`), each on its own cluster with the images
-the `e2e-images` job built, and the cluster's logs as an artifact when one fails. Locally,
-`make kind-e2e` runs them all in turn, and `make kind-e2e-<proxy>` one. The chart still installs on 1.29 and later, untested. A cluster made at another version is recreated with
-`make kind-down kind-up`.
+newest Kubernetes: one job per proxy (`e2e (traefik)`, `e2e (raw-envoy)`, `e2e (envoy-gateway)`,
+`e2e (istio)`, `e2e (haproxy)`, and `e2e (networkpolicy)` for the chart's NetworkPolicies), each on its own cluster with the images the `e2e-images` job
+built, and the cluster's logs as an artifact when one fails. The chart still installs on 1.29 and
+later, untested. A cluster made at another version is recreated with `make kind-down kind-up`.
 
 ## Branches
 
