@@ -35,6 +35,12 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 What's new:
 
+- **Responses through Istio.** A policy with `responses.inspect` now has the responses of its
+  Istio HTTPRoutes and VirtualServices inspected, as through Envoy Gateway: a response that leaks
+  is replaced with 403 in `Block` mode and logged in `Detect` mode. Such a policy was
+  `Programmed=False` (`ResponsesNotInspected`) on Istio's routes; it is `Programmed` once the
+  operator has rewritten their `EnvoyFilter` objects. Routes whose policies don't inspect
+  responses keep sending none to the engine. See [Istio](istio.md#settings).
 - **IP allow and deny lists.** A `WAFIPList` lists client addresses (CIDRs), and
   `WAFPolicy.spec.ipLists: {allow: [...], deny: [...]}` names lists in the policy's namespace: a
   denied client gets 403 (logged in `Detect` mode) before any rule, an allowed one isn't inspected.
