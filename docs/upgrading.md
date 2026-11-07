@@ -100,6 +100,10 @@ What changes by itself:
   regular expression, a server with mutual TLS or passthrough, or a match on header or query
   values over TLS, which the probe doesn't send there: they may be secrets). Before, they were `Programmed`
   without proof that the filter was on the route. Alerts on `Ready` should expect it.
+- **In Detect mode, the responses of flagged requests are inspected** (with `responses.inspect`):
+  a request the rules flag is let through, and an SQL error or a leak in its response is now its
+  own event, as for any request. The request's event may list a few more rules than before: the
+  rules run to the end instead of stopping where Block mode would.
 - **Enforced checks the newest field a policy needs.** A policy with fields of 0.4.0 and 0.5.0
   (`webSocket` and `ipLists`, say) was `Enforced` while a 0.4.x engine ran it; it is now
   `EnginesOutdated` until every engine runs 0.5.0.
