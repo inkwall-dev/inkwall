@@ -53,7 +53,8 @@ MAX_RESTART_GAP=${MAX_RESTART_GAP:-5}
 MAX_ENVOY_GAP=${MAX_ENVOY_GAP:-5}
 # Envoy Gateway, as in envoy-gateway-e2e.sh. UPGRADE_ENVOY_GATEWAY=0 leaves
 # it out; so does a FROM_VERSION before 0.3.0, which doesn't wire it.
-EG_VERSION=$ENVOY_GATEWAY_VERSION # hack/versions.env, as GATEWAY_API_VERSION
+# Both from hack/versions.env (sourced above).
+EG_VERSION=$ENVOY_GATEWAY_VERSION
 EG_NS=envoy-gateway-upgrade
 EG_HOST=gateway.upgrade.example.com
 eg=true
