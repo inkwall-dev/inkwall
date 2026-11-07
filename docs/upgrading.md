@@ -35,6 +35,9 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 What's new:
 
+- **Standalone mode reloads its rules without a restart**: on `SIGHUP`, or with `--watch-rules`
+  when the files change ([reloading the rules](standalone-proxy.md#reloading-the-rules)).
+
 - **The CRS's own settings on a policy.** The CRS rule set binding of a `WAFPolicy` takes an
   optional `crs` block: `allowedMethods` (for REST APIs that send `PUT`, `PATCH` or `DELETE`),
   `allowedRequestContentTypes`, `detectionParanoiaLevel` (log the rules of a higher paranoia level
