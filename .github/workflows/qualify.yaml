@@ -39,10 +39,11 @@ jobs:
     outputs:
       refs: ${{ steps.plan.outputs.refs }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           check-latest: true
@@ -85,10 +86,11 @@ jobs:
       matrix:
         ref: ${{ fromJSON(needs.plan.outputs.refs) }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ matrix.ref }}
-      - uses: actions/cache/restore@v6
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/go-build
           key: image-go-build-${{ hashFiles('go.sum', 'Dockerfile') }}
@@ -100,7 +102,7 @@ jobs:
         env:
           REF: ${{ matrix.ref }}
         run: echo "name=qualify-images-${REF//\//-}" >>"$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ steps.name.outputs.name }}
           path: ${{ runner.temp }}/images.tar.gz
@@ -120,17 +122,18 @@ jobs:
         proxy: [traefik, raw-envoy, envoy-gateway, istio, haproxy]
     name: e2e ${{ matrix.proxy }} (${{ matrix.ref }})
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ matrix.ref }}
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           check-latest: true
       # The versions under test, hack/versions.env (#393).
       - id: versions
         run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_OUTPUT"
-      - uses: azure/setup-helm@v5
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: ${{ steps.versions.outputs.HELM_VERSION }}
       - id: name
@@ -138,7 +141,7 @@ jobs:
           REF: ${{ matrix.ref }}
         run: echo "name=qualify-images-${REF//\//-}" >>"$GITHUB_OUTPUT"
       - if: inputs.images == ''
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ steps.name.outputs.name }}
           path: ${{ runner.temp }}
@@ -164,9 +167,10 @@ jobs:
         run: |
           kubectl get pods -A -o wide || true
           mkdir -p "$RUNNER_TEMP/kind-logs"
-          bin/kind-*/kind export logs "$RUNNER_TEMP/kind-logs" --name inkwall || true
+          kind=(bin/kind-*/kind)
+          "${kind[0]}" export logs "$RUNNER_TEMP/kind-logs" --name inkwall || true
       - if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ steps.name.outputs.name }}-kind-logs-${{ matrix.proxy }}
           path: ${{ runner.temp }}/kind-logs
@@ -197,10 +201,11 @@ jobs:
         responses: ['', '1']
     name: scale full${{ matrix.responses && ', responses' || '' }} (${{ matrix.ref }})
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ matrix.ref }}
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           check-latest: true
@@ -226,10 +231,11 @@ jobs:
         ref: ${{ fromJSON(needs.plan.outputs.refs) }}
     name: docker e2e (${{ matrix.ref }})
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ matrix.ref }}
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           check-latest: true
@@ -253,10 +259,11 @@ jobs:
         ref: ${{ fromJSON(needs.plan.outputs.refs) }}
     name: crs (${{ matrix.ref }})
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ matrix.ref }}
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           check-latest: true

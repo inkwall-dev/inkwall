@@ -51,7 +51,7 @@ import (
 // operator's namespace. The kube-system Namespace's UID identifies the
 // cluster.
 //
-// +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies;wafrulesets;clusterwafrulesets;inkwallconfigs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies;wafrulesets;clusterwafrulesets;wafiplists;inkwallconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies/status;wafrulesets/status;clusterwafrulesets/status;inkwallconfigs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=traefik.io,resources=ingressroutes,verbs=get;list;watch
@@ -190,6 +190,7 @@ func (r *BundleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&wafv1alpha1.WAFPolicy{}, enqueue, spec).
 		Watches(&wafv1alpha1.WAFRuleSet{}, enqueue, spec).
 		Watches(&wafv1alpha1.ClusterWAFRuleSet{}, enqueue, spec).
+		Watches(&wafv1alpha1.WAFIPList{}, enqueue, spec).
 		Watches(&wafv1alpha1.InkwallConfig{}, enqueue, config).
 		Watches(&networkingv1.Ingress{}, enqueue, spec).
 		// The manager only caches ConfigMaps labeled resolver.RulesLabel.
@@ -233,14 +234,15 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 		ruleSets        wafv1alpha1.WAFRuleSetList
 		clusterRuleSets wafv1alpha1.ClusterWAFRuleSetList
 		configMaps      corev1.ConfigMapList
+		ipLists         wafv1alpha1.WAFIPListList
 	)
-	for _, l := range []client.ObjectList{&policies, &ingresses, &ruleSets, &clusterRuleSets, &configMaps} {
+	for _, l := range []client.ObjectList{&policies, &ingresses, &ruleSets, &clusterRuleSets, &configMaps, &ipLists} {
 		if err := r.Client.List(ctx, l); err != nil {
 			return reconcile.Result{}, err
 		}
 	}
-	in.Policies, in.Ingresses, in.RuleSets, in.ClusterRuleSets, in.ConfigMaps =
-		policies.Items, ingresses.Items, ruleSets.Items, clusterRuleSets.Items, configMaps.Items
+	in.Policies, in.Ingresses, in.RuleSets, in.ClusterRuleSets, in.ConfigMaps, in.IPLists =
+		policies.Items, ingresses.Items, ruleSets.Items, clusterRuleSets.Items, configMaps.Items, ipLists.Items
 	// An error here is not "no IngressRoutes": building without them would
 	// drop their protection.
 	routes, _, err := wiring.IngressRoutes(ctx, r.Client)

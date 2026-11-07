@@ -161,7 +161,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpadapter.WriteDenial(w, v.Status, req.ID, req.Headers, h.jsonDenials)
 		return
 	}
-	if h.messages != pipeline.MessagesOff && v.Reason != pipeline.ReasonSkipped &&
+	if h.messages != pipeline.MessagesOff && v.Reason != pipeline.ReasonSkipped && v.Reason != pipeline.ReasonIPAllow &&
 		httpguts.HeaderValuesContainsToken(r.Header.Values("Upgrade"), "websocket") {
 		// No extension, so no compressed messages (permessage-deflate):
 		// a frame with an RSV bit is then an error.

@@ -152,6 +152,10 @@ func outdatedEngine(p *wafv1alpha1.WAFPolicy, engines []Engine) (*Engine, string
 			field, need = fmt.Sprintf("spec.ruleSets[%d].crs", i), [3]int{0, 5, 0}
 		}
 	}
+	if l := p.Spec.IPLists; field == "" && l != nil && (len(l.Allow) > 0 || len(l.Deny) > 0) {
+		// An older engine ignores the lists (#358).
+		field, need = "spec.ipLists", [3]int{0, 5, 0}
+	}
 	for i, e := range p.Spec.Exclusions {
 		if field == "" && e.When.Target() {
 			// An older engine ignores the exclusion (#357).

@@ -557,7 +557,13 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 	)
 	switch cfg.command {
 	case cmdExtProc:
-		ep, err = extproc.New(p, extproc.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics, JSONDenials: cfg.jsonDenials})
+		ec := extproc.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics, JSONDenials: cfg.jsonDenials}
+		if h, ok := p.(*policy.Holder); ok {
+			// Bundle mode: the operator's probe is answered with the
+			// bundle's key (#372).
+			ec.ProbeKey = h.ProbeKey
+		}
+		ep, err = extproc.New(p, ec)
 	case cmdSPOE:
 		sc := spoe.Config{MaxBodyBytes: maxBody, ClientIP: resolver, ReadTimeout: cfg.readTimeout, Logger: logger, Events: rec, Metrics: metrics}
 		if h, ok := p.(*policy.Holder); ok {

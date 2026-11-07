@@ -113,6 +113,10 @@ const (
 	// A WebSocket handshake didn't meet the policy's WebSocket rules (an
 	// origin not allowed, a required header missing).
 	Reason_REASON_WEBSOCKET Reason = 11
+	// The client IP is in the policy's IP deny list.
+	Reason_REASON_IP_DENY Reason = 12
+	// The client IP is in the policy's IP allow list: not inspected.
+	Reason_REASON_IP_ALLOW Reason = 13
 )
 
 // Enum value maps for Reason.
@@ -130,6 +134,8 @@ var (
 		9:  "REASON_NO_POLICY",
 		10: "REASON_SUSPENDED",
 		11: "REASON_WEBSOCKET",
+		12: "REASON_IP_DENY",
+		13: "REASON_IP_ALLOW",
 	}
 	Reason_value = map[string]int32{
 		"REASON_UNSPECIFIED": 0,
@@ -144,6 +150,8 @@ var (
 		"REASON_NO_POLICY":   9,
 		"REASON_SUSPENDED":   10,
 		"REASON_WEBSOCKET":   11,
+		"REASON_IP_DENY":     12,
+		"REASON_IP_ALLOW":    13,
 	}
 )
 
@@ -631,7 +639,7 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\fACTION_ALLOW\x10\x01\x12\x0f\n" +
 	"\vACTION_DENY\x10\x02\x12\x0e\n" +
 	"\n" +
-	"ACTION_LOG\x10\x03*\xfd\x01\n" +
+	"ACTION_LOG\x10\x03*\xa6\x02\n" +
 	"\x06Reason\x12\x16\n" +
 	"\x12REASON_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vREASON_NONE\x10\x01\x12\x0f\n" +
@@ -645,7 +653,9 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\x10REASON_NO_POLICY\x10\t\x12\x14\n" +
 	"\x10REASON_SUSPENDED\x10\n" +
 	"\x12\x14\n" +
-	"\x10REASON_WEBSOCKET\x10\v2Z\n" +
+	"\x10REASON_WEBSOCKET\x10\v\x12\x12\n" +
+	"\x0eREASON_IP_DENY\x10\f\x12\x13\n" +
+	"\x0fREASON_IP_ALLOW\x10\r2Z\n" +
 	"\fCheckService\x12J\n" +
 	"\x05Check\x12\x1f.inkwall.engine.v1.CheckRequest\x1a .inkwall.engine.v1.CheckResponseB7Z5github.com/inkwall-dev/inkwall/api/engine/v1;enginev1b\x06proto3"
 
