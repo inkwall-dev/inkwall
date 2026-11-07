@@ -27,8 +27,10 @@ updates:
       actions:
         update-types: [minor, patch]
 
+  # The base images are pinned by digest (tag@sha256:…); Dependabot bumps
+  # both. /hack/kind holds the e2e stub control plane's Dockerfile.
   - package-ecosystem: docker
-    directory: /
+    directories: ["/", "/hack/kind"]
     schedule: {interval: weekly}
     commit-message: {prefix: build, include: scope}
     groups:
