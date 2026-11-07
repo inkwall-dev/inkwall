@@ -327,6 +327,7 @@ func TestEnforcedOutdatedEngineGRPCMessages(t *testing.T) {
 		}
 	}
 }
+
 // A policy setting fields of several releases needs the newest: an engine
 // new enough for the first field but not for a later one is outdated (#473).
 func TestEnforcedOutdatedNewestField(t *testing.T) {
