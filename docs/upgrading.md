@@ -89,6 +89,9 @@ What changes by itself:
   mode), and routes the probe can't reach are `NotProbeable` (a rule whose every match is a
   regular expression, a server with mutual TLS or passthrough). Before, they were `Programmed`
   without proof that the filter was on the route. Alerts on `Ready` should expect it.
+- **Enforced checks the newest field a policy needs.** A policy with fields of 0.4.0 and 0.5.0
+  (`webSocket` and `ipLists`, say) was `Enforced` while a 0.4.x engine ran it; it is now
+  `EnginesOutdated` until every engine runs 0.5.0.
 - **The chart keeps the operator's settings of the Pod webhooks** (`failurePolicy`,
   `objectSelector`, `namespaceSelector`). The operator sets `failurePolicy` to `Fail` while a
   policy blocks; an upgrade used to render `Ignore` until the operator set it again, and Helm 4,
