@@ -308,3 +308,29 @@ func TestBodyLimitPerRoute(t *testing.T) {
 		}
 	}
 }
+
+// A request the adapter can't read is logged by the field that's wrong,
+// never with its value: a query string or a header can carry a secret.
+func TestInvalidRequestLogsNoValues(t *testing.T) {
+	var logs bytes.Buffer
+	h := newHandler(t, pipeline.ModeBlock, 64<<10, &logs)
+	for name, mutate := range map[string]func(r *http.Request){
+		"absolute uri":   func(r *http.Request) { r.Header.Set("X-Forwarded-Uri", "https://shop.example.com/login?token=SECRET") },
+		"relative uri":   func(r *http.Request) { r.Header.Set("X-Forwarded-Uri", "login?token=SECRET") },
+		"bad escape":     func(r *http.Request) { r.Header.Set("X-Forwarded-Uri", "/%zzSECRET?token=SECRET") },
+		"invalid method": func(r *http.Request) { r.Header.Set("X-Forwarded-Method", "GET SECRET") },
+	} {
+		logs.Reset()
+		r := subrequest("GET", "/", "", "")
+		mutate(r)
+		if w := serve(h, r); w.Code != http.StatusBadRequest {
+			t.Errorf("%s: got %d, want 400", name, w.Code)
+		}
+		if logs.Len() == 0 {
+			t.Errorf("%s: nothing logged", name)
+		}
+		if strings.Contains(logs.String(), "SECRET") {
+			t.Errorf("%s: the log has the request's value: %s", name, logs.String())
+		}
+	}
+}

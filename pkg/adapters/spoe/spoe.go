@@ -740,7 +740,7 @@ func (s *Server) toRequest(payload []byte, maxFrame uint32) (*request.Request, s
 		return nil, "", err
 	}
 	if !httpadapter.IsToken(a.method) {
-		return nil, "", fmt.Errorf("invalid method %q", a.method)
+		return nil, "", errors.New("invalid method")
 	}
 	path, err := httpadapter.URIPath(a.path)
 	if err != nil {
@@ -840,7 +840,7 @@ func bodyLength(h http.Header) (int64, bool, error) {
 	}
 	n, err := strconv.ParseInt(vs[0], 10, 64)
 	if err != nil || n < 0 {
-		return 0, false, fmt.Errorf("invalid Content-Length %q", vs[0])
+		return 0, false, errors.New("invalid Content-Length")
 	}
 	for _, v := range vs[1:] {
 		if v != vs[0] {
@@ -858,7 +858,7 @@ func protoName(v string) (string, error) {
 	}
 	major, minor, ok := strings.Cut(v, ".")
 	if !ok || len(major) != 1 || len(minor) != 1 || major[0] < '0' || major[0] > '9' || minor[0] < '0' || minor[0] > '9' {
-		return "", fmt.Errorf("invalid version %q", v)
+		return "", errors.New("invalid version")
 	}
 	return "HTTP/" + v, nil
 }
@@ -889,7 +889,7 @@ func parseHeaders(b []byte) (http.Header, string, error) {
 			break
 		}
 		if !httpadapter.IsToken(string(name)) {
-			return nil, "", fmt.Errorf("invalid header name %q", name)
+			return nil, "", errors.New("invalid header name")
 		}
 		if !httpguts.ValidHeaderFieldValue(string(val)) {
 			return nil, "", fmt.Errorf("invalid value of header %q", name)
@@ -909,7 +909,7 @@ func parseHeaders(b []byte) (http.Header, string, error) {
 	// HAProxy forwards the Host it received; inspect only a valid one, as
 	// the reverse proxy does.
 	if !httpguts.ValidHostHeader(host) {
-		return nil, "", fmt.Errorf("invalid Host %q", host)
+		return nil, "", errors.New("invalid Host")
 	}
 	return h, host, nil
 }
