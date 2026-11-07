@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc/status"
 	authnv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -27,6 +28,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
@@ -237,9 +239,51 @@ func testDistribution(ctx context.Context, t *testing.T, c client.Client) {
 	bad.Reject = func(*bundlev1.Bundle) error { return errors.New("line 1: rule does not compile") }
 	stopBad := run(bad)
 	wantEnforced("a rejecting engine", metav1.ConditionFalse, distribution.ReasonEngineNack, "some engines rejected bundle")
+	// The change is an Event on the policy (#378), as kubectl describe
+	// shows it, and the gauge counts the policy.
+	eventually(t, "an EngineNack Event on the policy", func() string {
+		var list eventsv1.EventList
+		if err := c.List(ctx, &list, client.InNamespace(pol.Namespace)); err != nil {
+			return err.Error()
+		}
+		for _, e := range list.Items {
+			if e.Regarding.Kind == "WAFPolicy" && e.Regarding.Name == pol.Name && e.Reason == distribution.ReasonEngineNack &&
+				e.Type == corev1.EventTypeWarning && strings.Contains(e.Note, "rule does not compile") {
+				return ""
+			}
+		}
+		return fmt.Sprintf("%d events, none an EngineNack on the policy", len(list.Items))
+	})
+	if n := policyGauge(t, "Enforced", "False", distribution.ReasonEngineNack); n < 1 {
+		t.Errorf("inkwall_operator_policies{Enforced,False,EngineNack} = %v, want at least 1", n)
+	}
 	stopBad()
 	wantEnforced("the rejecting engine gone", metav1.ConditionTrue, distribution.ReasonEnforced, "every engine runs bundle")
 
 	stopGood()
 	wantEnforced("all engines gone", metav1.ConditionFalse, distribution.ReasonNoEngines, "no engine")
+}
+
+// policyGauge reads inkwall_operator_policies for the labels.
+func policyGauge(t *testing.T, condition, status, reason string) float64 {
+	t.Helper()
+	families, err := metrics.Registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range families {
+		if f.GetName() != "inkwall_operator_policies" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			if labels["condition"] == condition && labels["status"] == status && labels["reason"] == reason {
+				return m.GetGauge().GetValue()
+			}
+		}
+	}
+	return 0
 }

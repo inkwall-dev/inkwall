@@ -69,6 +69,11 @@ What's new:
 
 What changes by itself:
 
+- **Policy condition metrics and Events.** The operator reports `inkwall_operator_policies`
+  (policies by condition, status and reason), the signing key's age and rotation phase, and failed
+  bundle publishes, and records a Kubernetes Event on a policy when its `Ready`, `Programmed` or
+  `Enforced` condition changes. Its ClusterRole gains `events` `create` and `patch` in every
+  namespace. See [monitoring](monitoring.md#operator).
 - **The chart keeps the operator's settings of the Pod webhooks** (`failurePolicy`,
   `objectSelector`, `namespaceSelector`). The operator sets `failurePolicy` to `Fail` while a
   policy blocks; an upgrade used to render `Ignore` until the operator set it again, and Helm 4,

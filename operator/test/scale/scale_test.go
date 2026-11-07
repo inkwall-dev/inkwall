@@ -54,6 +54,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	authnv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -188,6 +189,9 @@ type Result struct {
 	ReconcileSeconds float64 `json:"reconcileSeconds"`
 	// ResolveSeconds: resolver.Resolve alone, on the same objects.
 	ResolveSeconds float64 `json:"resolveSeconds"`
+	// PolicyEvents: the Kubernetes Events recorded on the policies over
+	// the run (#378), at most one per policy every 30 s.
+	PolicyEvents int `json:"policyEvents"`
 	// Bundle sizes in bytes: serialized, and gzipped as in the Secret.
 	BundleBytes           int `json:"bundleBytes"`
 	BundleCompressedBytes int `json:"bundleCompressedBytes"`
@@ -286,6 +290,7 @@ func TestScale(t *testing.T) {
 	defer cancel()
 	setupEngineAccess(ctx, t, c)
 
+	runStart := time.Now()
 	distAddr := startOperator(ctx, t, cfg)
 	engineCfg := engineConfig(ctx, t, c, distAddr, nEngines)
 
@@ -340,6 +345,11 @@ func TestScale(t *testing.T) {
 
 	_, res.EnginesRSSPeakBytes = engines.rss()
 	res.StreamsCut = engines.endedStreams() - endedBefore
+	res.PolicyEvents = policyEvents(ctx, t, c)
+	if most := nPolicies * (1 + int(time.Since(runStart)/(30*time.Second))); res.PolicyEvents > most {
+		t.Errorf("%d Events on the policies, want at most %d (one per policy every 30 s)", res.PolicyEvents, most)
+	}
+	t.Logf("%d Events on the %d policies", res.PolicyEvents, nPolicies)
 	b := measureBundle(ctx, t, c, &res)
 	if responses {
 		measureResponses(t, b, nPolicies, &res)
@@ -578,6 +588,26 @@ func report(t *testing.T, r Result) {
 
 func mib(b uint64) string { return fmt.Sprintf("%.0f MiB", float64(b)/(1<<20)) }
 func kib(b int) string    { return fmt.Sprintf("%.0f KiB", float64(b)/(1<<10)) }
+
+// policyEvents counts the Events on WAFPolicies, in every namespace. An
+// Event repeated (count, series) counts each time.
+func policyEvents(ctx context.Context, t *testing.T, c client.Client) int {
+	t.Helper()
+	var list eventsv1.EventList
+	if err := c.List(ctx, &list); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range list.Items {
+		if e.Regarding.Kind == "WAFPolicy" {
+			n += 1 + int(max(e.DeprecatedCount-1, 0))
+			if e.Series != nil {
+				n += int(e.Series.Count)
+			}
+		}
+	}
+	return n
+}
 
 func mustScheme(t *testing.T) *k8sruntime.Scheme {
 	t.Helper()
