@@ -651,9 +651,8 @@ controller `istio.io/gateway-controller`), with `ext_proc` through an `EnvoyFilt
 Response inspection (v0.4.0, [0006 §2](0006-adapter-protocols.md#response-inspection-v040)):
 the engine's ext_proc adapter inspects the response headers and body for policies that ask, and
 replaces a response that leaks in block mode; built for raw Envoy (flags or bundle) and Envoy
-Gateway (`WAFPolicy.spec.responses`). Istio's filter sends no response phase yet, so a policy with
-`responses.inspect` on an Istio route is `Programmed=False` (`ResponsesNotInspected`).
-**Not yet:** Contour; responses through Istio.
+Gateway and Istio (`WAFPolicy.spec.responses`; Istio's HTTPRoutes and VirtualServices since 0.5.0,
+#374). **Not yet:** Contour.
 
 ### 6.2 ingress-nginx
 
@@ -1217,8 +1216,8 @@ One shared request corpus drives every level.
   of the exact bytes reaches compilation;
 - event redaction (`FuzzNew`): valid UTF-8, within the field limits, with no query strings or
   credential snippets;
-- `inkwallctl test`'s URL, raw HTTP and HAR input (`FuzzSplitURL`, `FuzzFromRawHTTP`,
-  `FuzzFromHAR`).
+- `inkwallctl test`'s URL, raw HTTP, HAR and suite input (`FuzzSplitURL`, `FuzzFromRawHTTP`,
+  `FuzzFromHAR`, `FuzzParseSuite`).
 
 Their seed corpora (`testdata/fuzz/`) run in every `make test`. `.github/workflows/fuzz.yaml` runs
 each target for 5 minutes nightly and uploads the failing inputs, encrypted. Its matrix is every

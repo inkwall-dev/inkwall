@@ -134,43 +134,66 @@ func Enforced(version int64, engines []Engine, leftOut int) (metav1.ConditionSta
 // needs; nil when there is none. An engine whose version isn't a release
 // (a development build) counts as new enough.
 func outdatedEngine(p *wafv1alpha1.WAFPolicy, engines []Engine) (*Engine, string, string) {
-	var field string
-	var need [3]int
-	if w := p.Spec.WebSocket; w != nil && (len(w.AllowedOrigins) > 0 || len(w.RequiredHeaders) > 0) {
-		field, need = "spec.webSocket", [3]int{0, 4, 0}
-	}
-	if b := p.Spec.Body; field == "" && b != nil && b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect {
-		field, need = "spec.body.grpcMessages", [3]int{0, 4, 0}
-	}
-	if r := p.Spec.Responses; field == "" && r != nil && r.Inspect {
-		// An older engine inspects requests only (#274).
-		field, need = "spec.responses", [3]int{0, 4, 0}
-	}
-	for i, b := range p.Spec.RuleSets {
-		if field == "" && !b.CRS.IsZero() {
-			// An older engine keeps the CRS's defaults (#352).
-			field, need = fmt.Sprintf("spec.ruleSets[%d].crs", i), [3]int{0, 5, 0}
-		}
-	}
-	if l := p.Spec.IPLists; field == "" && l != nil && (len(l.Allow) > 0 || len(l.Deny) > 0) {
-		// An older engine ignores the lists (#358).
-		field, need = "spec.ipLists", [3]int{0, 5, 0}
-	}
-	for i, e := range p.Spec.Exclusions {
-		if field == "" && e.When.Target() {
-			// An older engine ignores the exclusion (#357).
-			field, need = fmt.Sprintf("spec.exclusions[%d].when", i), [3]int{0, 5, 0}
-		}
-	}
+	field, need := requirement(p)
 	if field == "" {
 		return nil, "", ""
 	}
 	for i := range engines {
-		if v, ok := releaseVersion(engines[i].EngineVersion); ok && slices.Compare(v[:], need[:]) < 0 {
+		if tooOld(engines[i], need) {
 			return &engines[i], field, fmt.Sprintf("%d.%d.%d", need[0], need[1], need[2])
 		}
 	}
 	return nil, "", ""
+}
+
+// tooOld reports whether e runs a release older than need.
+func tooOld(e Engine, need [3]int) bool {
+	v, ok := releaseVersion(e.EngineVersion)
+	return ok && slices.Compare(v[:], need[:]) < 0
+}
+
+// requirement returns the field p sets that needs the newest engine (an
+// older engine ignores it), and that version; "" when there is none. Of
+// fields needing the same version, the first.
+func requirement(p *wafv1alpha1.WAFPolicy) (string, [3]int) {
+	var field string
+	var need [3]int
+	set := func(f string, v [3]int) {
+		if field == "" || slices.Compare(v[:], need[:]) > 0 {
+			field, need = f, v
+		}
+	}
+	if w := p.Spec.WebSocket; w != nil && (len(w.AllowedOrigins) > 0 || len(w.RequiredHeaders) > 0) {
+		set("spec.webSocket", [3]int{0, 4, 0})
+	}
+	if b := p.Spec.Body; b != nil && b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect {
+		set("spec.body.grpcMessages", [3]int{0, 4, 0})
+	}
+	if b := p.Spec.Body; b != nil && b.GRPC == wafv1alpha1.GRPCDeny {
+		// An older engine lets gRPC through (#367).
+		set("spec.body.grpc", [3]int{0, 5, 0})
+	}
+	if r := p.Spec.Responses; r != nil && r.Inspect {
+		// An older engine inspects requests only (#274).
+		set("spec.responses", [3]int{0, 4, 0})
+	}
+	for i, b := range p.Spec.RuleSets {
+		if !b.CRS.IsZero() {
+			// An older engine keeps the CRS's defaults (#352).
+			set(fmt.Sprintf("spec.ruleSets[%d].crs", i), [3]int{0, 5, 0})
+		}
+	}
+	if l := p.Spec.IPLists; l != nil && (len(l.Allow) > 0 || len(l.Deny) > 0) {
+		// An older engine ignores the lists (#358).
+		set("spec.ipLists", [3]int{0, 5, 0})
+	}
+	for i, e := range p.Spec.Exclusions {
+		if e.When.Target() {
+			// An older engine ignores the exclusion (#357).
+			set(fmt.Sprintf("spec.exclusions[%d].when", i), [3]int{0, 5, 0})
+		}
+	}
+	return field, need
 }
 
 // releaseVersion parses "MAJOR.MINOR.PATCH", with or without a leading

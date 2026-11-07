@@ -115,7 +115,9 @@ app_trust() {
 app_trust
 
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy app --ignore-not-found >/dev/null
-"${KUBECTL[@]}" apply -f hack/kind/e2e.yaml >/dev/null
+# The app's standalone engine runs IMAGE: with make IMAGES=ghcr:<version>,
+# the published one, which hack/kind/operator.sh loaded into kind.
+sed "s|image: inkwall-engine:dev|image: $IMAGE|" hack/kind/e2e.yaml | "${KUBECTL[@]}" apply -f - >/dev/null
 "${KUBECTL[@]}" -n "$NS" rollout restart deployment/app >/dev/null
 "${KUBECTL[@]}" -n "$NS" rollout status deployment/app --timeout=120s >/dev/null
 eventually "one engine pod" bash -c "[[ \$(${KUBECTL[*]} -n $NS get pods -l app=e2e --no-headers | wc -l) == 1 ]]"

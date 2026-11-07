@@ -308,6 +308,10 @@ func TestEnforcedOutdatedEngineGRPCMessages(t *testing.T) {
 		{"new engines", &wafv1alpha1.BodySpec{GRPCMessages: wafv1alpha1.GRPCMessagesInspect}, []string{"0.4.0", "v0.4.1"}, ReasonEnforced},
 		{"Skip", &wafv1alpha1.BodySpec{GRPCMessages: wafv1alpha1.GRPCMessagesSkip}, []string{"0.3.1"}, ReasonEnforced},
 		{"no body", nil, []string{"0.3.1"}, ReasonEnforced},
+		// body.grpc: Deny (#367): an engine before 0.5.0 lets gRPC through.
+		{"grpc Deny, 0.4.1 engine", &wafv1alpha1.BodySpec{GRPC: wafv1alpha1.GRPCDeny}, []string{"0.5.0", "0.4.1"}, ReasonEnginesOutdated},
+		{"grpc Deny, new engines", &wafv1alpha1.BodySpec{GRPC: wafv1alpha1.GRPCDeny}, []string{"0.5.0"}, ReasonEnforced},
+		{"grpc Allow", &wafv1alpha1.BodySpec{GRPC: wafv1alpha1.GRPCAllow}, []string{"0.4.1"}, ReasonEnforced},
 	} {
 		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
 		p.Spec.Body = tc.body
@@ -322,8 +326,27 @@ func TestEnforcedOutdatedEngineGRPCMessages(t *testing.T) {
 			t.Errorf("%s: Enforced %+v, want %s", tc.name, c, tc.reason)
 			continue
 		}
-		if tc.reason == ReasonEnginesOutdated && !strings.Contains(c.Message, "spec.body.grpcMessages") {
+		field := "spec.body.grpcMessages"
+		if tc.body != nil && tc.body.GRPC == wafv1alpha1.GRPCDeny {
+			field = "spec.body.grpc,"
+		}
+		if tc.reason == ReasonEnginesOutdated && !strings.Contains(c.Message, field) {
 			t.Errorf("%s: message %q doesn't name the field", tc.name, c.Message)
 		}
+	}
+}
+
+// A policy setting fields of several releases needs the newest: an engine
+// new enough for the first field but not for a later one is outdated (#473).
+func TestEnforcedOutdatedNewestField(t *testing.T) {
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
+	p.Spec.WebSocket = &wafv1alpha1.WebSocketSpec{AllowedOrigins: []wafv1alpha1.WebSocketOrigin{"https://app.example.com"}}
+	p.Spec.IPLists = &wafv1alpha1.IPListsSpec{Deny: []wafv1alpha1.IPListName{"blocked"}}
+	p.Status.BundleVersion = 3
+	engines := []Engine{{ID: "e0", PodNamespace: "edge", PodName: "traefik-0", EngineVersion: "0.4.1", Applied: 3}}
+	conds, _ := enforcedConditions(p, 3, false, engines, 0)
+	c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
+	if c == nil || c.Reason != ReasonEnginesOutdated || !strings.Contains(c.Message, "spec.ipLists") || !strings.Contains(c.Message, "0.5.0 or later") {
+		t.Errorf("a 0.4.1 engine and a policy with webSocket and ipLists: Enforced %+v, want EnginesOutdated naming spec.ipLists", c)
 	}
 }
