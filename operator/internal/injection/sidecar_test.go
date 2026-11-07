@@ -175,6 +175,19 @@ func TestInject(t *testing.T) {
 		t.Errorf("client IP settings not passed: %v", args)
 	}
 
+	// The engine image's pull secrets go on the pod, once each (#386).
+	pulled := traefikPod()
+	pulled.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "mirror"}}
+	ps := sidecar
+	ps.PullSecrets = []string{"mirror", "inkwall-registry"}
+	Inject(pulled, ps)
+	if got := pulled.Spec.ImagePullSecrets; len(got) != 2 || got[0].Name != "mirror" || got[1].Name != "inkwall-registry" {
+		t.Errorf("pull secrets %v", got)
+	}
+	if len(pod.Spec.ImagePullSecrets) != 0 {
+		t.Errorf("pull secrets without any configured: %v", pod.Spec.ImagePullSecrets)
+	}
+
 	// Injecting again changes nothing.
 	before := pod.DeepCopy()
 	if Inject(pod, sidecar) || len(pod.Spec.InitContainers) != len(before.Spec.InitContainers) {

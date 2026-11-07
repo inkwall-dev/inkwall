@@ -193,8 +193,14 @@ func testIstio(ctx context.Context, t *testing.T, c client.Client) {
 		return p
 	}
 	old := istioPod("custom", "custom-old", false)
-	for _, p := range []*corev1.Pod{old, istioPod("custom", "custom-new", true), istioPod("plain", "plain-a", true)} {
+	for i, p := range []*corev1.Pod{old, istioPod("custom", "custom-new", true), istioPod("plain", "plain-a", true)} {
 		if err := c.Create(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+		// An address, for the operator's probe (#372; the test's prober
+		// answers as the engine would).
+		p.Status.PodIP = fmt.Sprintf("10.0.0.%d", 21+i)
+		if err := c.Status().Update(ctx, p); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -291,7 +297,9 @@ func testIstio(ctx context.Context, t *testing.T, c client.Client) {
 	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) { p.Spec.Mode = wafv1alpha1.PolicyDetect })
 	eventually(t, "detect mode: observability_mode, a streamed body, no buffer limit", filterHas("custom",
 		[]string{`"observability_mode":true`, `"request_body_mode":"STREAMED"`, `"failure_mode_allow":true`}, "per_connection_buffer_limit_bytes", "BUFFERED_PARTIAL"))
-	eventually(t, "Programmed in detect mode", programmed(metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
+	// Envoy discards the engine's answer to the probe in observability
+	// mode: not proven, so Unverified (#372).
+	eventually(t, "Unverified in detect mode", programmed(metav1.ConditionFalse, wiring.ReasonUnverified, "wired in Detect mode"))
 
 	// Unprotected: everything goes, the user's objects as they were.
 	if err := c.Delete(ctx, pol); err != nil {

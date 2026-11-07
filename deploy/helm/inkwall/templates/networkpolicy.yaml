@@ -1,0 +1,97 @@
+{{- /*
+Copyright 2026 The Inkwall Authors
+SPDX-License-Identifier: Apache-2.0
+*/}}
+{{- $np := .Values.networkPolicy | default dict }}
+{{- if $np.enabled }}
+{{- $ns := splitList "," (include "inkwall.proxyNamespaces" .) }}
+# What may reach the operator's pods (networkPolicy, the chart README's
+# Network flows): the webhook and the probes from anywhere (or
+# networkPolicy.webhookFrom), the distribution server from the proxy
+# namespaces, the metrics from anywhere (or networkPolicy.metricsFrom).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "inkwall.operator.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inkwall.operator.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "inkwall.operator.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    # The API server calls the webhooks; its address isn't known in
+    # general.
+    - ports:
+        - {port: webhook, protocol: TCP}
+      {{- with $np.webhookFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    # The kubelet's probes: some network plugins apply policies to them.
+    - ports:
+        - {port: probes, protocol: TCP}
+    # The engines, in the proxy namespaces.
+    - ports:
+        - {port: distribution, protocol: TCP}
+      from:
+        {{- if has "*" $ns }}
+        - namespaceSelector: {}
+        {{- else }}
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  {{- range sortAlpha $ns }}
+                  - {{ . }}
+                  {{- end }}
+        {{- end }}
+    - ports:
+        - {port: metrics, protocol: TCP}
+      {{- with $np.metricsFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- $egress := $np.egress | default dict }}
+{{- if $egress.enabled }}
+---
+# Where the chart's pods (the operator, the uninstall hook's Job) may
+# connect: DNS, the API server, and networkPolicy.egress.extra (the
+# optional control plane).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-egress" (include "inkwall.operator.name" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inkwall.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: [Egress]
+  egress:
+    - ports:
+        - {port: 53, protocol: UDP}
+        - {port: 53, protocol: TCP}
+    # The API server: its address after the kubernetes Service's
+    # translation, which network plugins see, isn't known in general.
+    - ports:
+        {{- range $egress.apiServerPorts | default (list 443 6443) }}
+        - {port: {{ . }}, protocol: TCP}
+        {{- end }}
+      {{- with $egress.apiServerCIDRs }}
+      to:
+        {{- range . }}
+        - ipBlock: {cidr: {{ . }}}
+        {{- end }}
+      {{- end }}
+    {{- with $egress.extra }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
+{{- end }}

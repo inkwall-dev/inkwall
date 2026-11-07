@@ -72,12 +72,22 @@ func TestPodInjector(t *testing.T) {
 		}
 	}
 
+	// The engine image's pull secrets (the chart's global.imagePullSecrets).
+	inj := injector(t)
+	inj.PullSecrets = []string{"regcred"}
+	if p := patched(inj.Handle(ctx, podRequest(t, traefik))); !strings.Contains(p, `/spec/imagePullSecrets`) || !strings.Contains(p, `"regcred"`) {
+		t.Errorf("pull secrets not in the patch: %s", p)
+	}
+	if strings.Contains(p, "imagePullSecrets") {
+		t.Errorf("pull secrets without any configured: %s", p)
+	}
+
 	// Traefik deployed with other labels, named in InkwallConfig.
 	custom, _, err := integrations.FromConfig([]wafv1alpha1.IntegrationSpec{{Controller: "traefik", Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "edge"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	inj := injector(t)
+	inj = injector(t)
 	inj.Integrations = custom
 	if resp := inj.Handle(ctx, podRequest(t, map[string]string{"app": "edge"})); len(resp.Patches) == 0 {
 		t.Error("a pod of the custom selector was not injected")

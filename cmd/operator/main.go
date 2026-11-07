@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -81,6 +82,7 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fs.StringVar(&o.EngineImage, "engine-image", "ghcr.io/inkwall-dev/inkwall-engine:latest", "engine image injected into proxy pods, unless InkwallConfig.spec.engine.image sets one")
 	proxyNamespaces := fs.String("proxy-namespaces", integrations.DefaultNamespaces.String(), "the namespaces the proxies' pods run in, comma-separated, or * for every namespace: only pods there that an integration selects get the engine and read access to the policy bundle (their labels can be set by whoever may create a pod)")
 	pullPolicy := fs.String("engine-image-pull-policy", "IfNotPresent", "pull policy of the injected engine: Always, IfNotPresent or Never")
+	pullSecrets := fs.String("engine-image-pull-secrets", "", "comma-separated Secrets (in each proxy pod's namespace) the pods the Pod webhook injects pull the engine image with, added to the pod's imagePullSecrets")
 	fs.StringVar(&o.EventsDir, "events-dir", "", "directory of this replica's buffer of security events for the optional control plane, kept across restarts (empty: in memory)")
 	fs.Int64Var(&o.EventsBufferBytes, "events-buffer-bytes", manager.DefaultEventsBufferBytes, "bound of the events buffer; when full, the oldest events are dropped and counted")
 	fs.DurationVar(&o.SigningKeyGrace, "signing-key-grace", manager.DefaultSigningKeyGrace, "least time each phase of a signing key rotation lasts; keep it above the kubelet's delay to update a mounted ConfigMap (about a minute by default)")
@@ -104,6 +106,11 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 		return o, fmt.Errorf("--proxy-namespaces: %w", err)
 	}
 	o.ProxyNamespaces = ns
+	for name := range strings.SplitSeq(*pullSecrets, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			o.EnginePullSecrets = append(o.EnginePullSecrets, name)
+		}
+	}
 	if o.SigningKeyGrace <= 0 || o.SelectorRestartMaxDelay <= 0 {
 		return o, errors.New("--signing-key-grace and --selector-restart-max-delay must be positive")
 	}

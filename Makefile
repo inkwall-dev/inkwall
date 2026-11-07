@@ -212,7 +212,7 @@ helm-lint: ## Lint the Helm chart, render it with each webhook certificate mode,
 	helm lint --strict $(CHART) --set metrics.forceMonitoringObjects=true --set metrics.serviceMonitor.enabled=true \
 		--set metrics.podMonitor.enabled=true --set metrics.prometheusRule.enabled=true --set metrics.dashboard.enabled=true
 	CHART=$(CHART) hack/helm-test.sh
-	@# What the chart looks up in a cluster, against envtest.
+	@# What the chart looks up in a cluster, and helm upgrade --reuse-values from 0.4.x (pulled from ghcr.io), against envtest.
 	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" CHART=$(abspath $(CHART)) $(GO) test -count=1 ./hack/helmcheck
 
 .PHONY: tidy
@@ -232,7 +232,7 @@ check-all: ## Run every job CI runs on a pull request, one after another: hours,
 	$(MAKE) check
 	$(MAKE) scale-test SCALE_CHANGES=5
 	$(MAKE) scale-test SCALE=wiring:500
-	$(MAKE) build generate-check helm-lint monitoring-test release-check crs-test
+	$(MAKE) build test-examples generate-check helm-lint monitoring-test release-check crs-test
 	$(MAKE) bench-compare
 	$(MAKE) image
 	$(MAKE) raw-envoy-e2e
@@ -255,7 +255,7 @@ release-check: ## Check the goreleaser configuration
 	$(GORELEASER) check
 
 # The kind targets, and the scripts they run, use the kind of KIND_VERSION.
-KIND_TARGETS := kind-quickstart kind-cluster kind-up kind-operator kind-e2e kind-e2e-traefik kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-response-load kind-upgrade kind-down
+KIND_TARGETS := kind-quickstart kind-cluster kind-up kind-operator kind-e2e kind-e2e-traefik kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-e2e-networkpolicy kind-response-load kind-upgrade kind-down
 $(KIND_TARGETS): export PATH := $(KIND_DIR):$(PATH)
 $(KIND_TARGETS): $(KIND_DIR)/kind
 
@@ -286,6 +286,7 @@ kind-e2e: ## End-to-end test on kind: a WAFPolicy is enforced by an engine in bu
 	SKIP_IMAGE_BUILD=1 $(MAKE) kind-e2e-envoy-gateway
 	SKIP_IMAGE_BUILD=1 $(MAKE) kind-e2e-istio
 	SKIP_IMAGE_BUILD=1 $(MAKE) kind-e2e-haproxy
+	SKIP_IMAGE_BUILD=1 $(MAKE) kind-e2e-networkpolicy
 
 .PHONY: kind-e2e-traefik
 kind-e2e-traefik: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
@@ -302,6 +303,10 @@ kind-e2e-raw-envoy: kind-operator ## End-to-end test on kind of raw Envoy with t
 kind-e2e-envoy-gateway: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
 kind-e2e-envoy-gateway: kind-operator ## End-to-end test on kind through Envoy Gateway and Traefik with one WAFPolicy, ending with an uninstall (installs the operator first)
 	KIND_CLUSTER=$(KIND_CLUSTER) hack/kind/envoy-gateway-e2e.sh
+
+.PHONY: kind-e2e-networkpolicy
+kind-e2e-networkpolicy: kind-operator ## End-to-end test on kind of the chart's NetworkPolicies under a default deny: webhook, injection, distribution, metrics (installs the operator first)
+	KIND_CLUSTER=$(KIND_CLUSTER) CHART=$(CHART) hack/kind/networkpolicy-e2e.sh
 
 .PHONY: kind-response-load
 kind-response-load: kind-operator ## Load test on kind through Envoy Gateway, response inspection off vs. on: p50/p99 latency and engine RSS (installs the operator first; CONCURRENCY, DURATION, OUT)
