@@ -37,6 +37,10 @@ What's new:
 
 - **Standalone mode reloads its rules without a restart**: on `SIGHUP`, or with `--watch-rules`
   when the files change ([reloading the rules](standalone-proxy.md#reloading-the-rules)).
+- **Limits for the standalone proxy's long-lived connections**: `--websocket-idle-timeout`,
+  `--max-connections` and `--body-read-timeout`, all off by default. On shutdown the proxy now
+  closes open WebSockets with `1001` (going away) instead of dropping them, and a client whose body
+  read times out gets `408` instead of `400`.
 - **Responses through Istio.** A policy with `responses.inspect` now has the responses of its
   Istio HTTPRoutes and VirtualServices inspected, as through Envoy Gateway: a response that leaks
   is replaced with 403 in `Block` mode and logged in `Detect` mode. Such a policy was
