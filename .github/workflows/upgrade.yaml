@@ -82,9 +82,12 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
+      # The versions under test, hack/versions.env (#393).
+      - id: versions
+        run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_OUTPUT"
       - uses: azure/setup-helm@v5
         with:
-          version: v3.19.0
+          version: ${{ steps.versions.outputs.HELM_VERSION }}
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.x'
