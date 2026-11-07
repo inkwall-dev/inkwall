@@ -100,6 +100,7 @@ Durations are on a laptop or a CI runner, roughly.
 | Stress | `make stress-test` | an hour | Go | nightly (`stress`) |
 | Scale | `make scale-test SCALE_CHANGES=5`, `make scale-test SCALE=wiring:500` (`SCALE=full`: the 0004 §8 matrix) | 5 min (`full`: hours) | Go | every PR (`test`) |
 | Build | `make build` | 1 min | Go | every PR (`test`) |
+| Examples | `make test-examples` (each `examples/<proxy>` policy through `inkwallctl test --policy`) | 1 min | Go | every PR (`test`) |
 | Generated code | `make generate-check` | 2 min | Go | every PR (`generate`) |
 | Chart | `make helm-lint`, `make monitoring-test` | 2 min | Go, Helm, Docker (promtool) | every PR (`helm`) |
 | Release configuration | `make release-check` | 1 min | goreleaser | every PR (`release`) |
@@ -109,6 +110,7 @@ Durations are on a laptop or a CI runner, roughly.
 | Proxies in Docker | `make raw-envoy-e2e`, `make websocket-e2e`, `make haproxy-e2e` | 5 min each | Docker | every PR (`raw-envoy`, `haproxy`) |
 | End to end on kind | `make kind-e2e` (all), `make kind-e2e-traefik`, `-raw-envoy`, `-envoy-gateway`, `-istio`, `-haproxy` | 25 min (all) | Docker, kind (installed by the target) | every PR (`e2e (<proxy>)`, one job each) |
 | Upgrade on kind | `make kind-upgrade` | 15 min | Docker, kind | every PR (`upgrade`, from the latest release); release qualification (`upgrade.yaml`, from each supported minor) |
+| Quickstart | `make kind-quickstart` ([`docs/quickstart.md`](docs/quickstart.md) as written, with the released chart) | 10 min | Docker, kind, network | nightly (`quickstart`) |
 | External links | `make docs-check-external` | 1 min | network | nightly (`docs-links`) |
 | Everything a PR runs | `make check-all` | hours | all of the above | |
 
