@@ -206,3 +206,55 @@ func BenchmarkEvaluateExchange(b *testing.B) {
 		})
 	}
 }
+
+// TestEvaluateExchangeDetecting (#360): in Detect mode an attack is
+// evaluated without interrupting it: the result says what would have
+// blocked it, and the exchange is kept, so its response (an SQL error, the
+// one most worth inspecting) is inspected and reported on its own.
+func TestEvaluateExchangeDetecting(t *testing.T) {
+	e, err := New(Config{ResponseBodyLimit: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqli := newRequest("GET", "/products?id=1%27%20OR%20%271%27%3D%271", nil, "")
+	res, x, err := e.EvaluateExchangeDetecting(context.Background(), sqli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Interrupted || res.RuleID != 949110 || !slices.Contains(res.MatchedRuleIDs, 942100) {
+		t.Fatalf("request: %+v, want what would have interrupted it (949110)", res)
+	}
+	if x == nil {
+		t.Fatal("no exchange for the response")
+	}
+	defer x.Close()
+	resp, err := x.EvaluateResponse(context.Background(), response(500, "text/html", sqlErrorPage))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Interrupted || !slices.Contains(resp.MatchedRuleIDs, 951230) || slices.Contains(resp.MatchedRuleIDs, 942100) {
+		t.Errorf("response: %+v, want 951230 and what would have blocked it, without the request's matches", resp)
+	}
+
+	// A clean response after an attack: nothing.
+	_, x, err = e.EvaluateExchangeDetecting(context.Background(), sqli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err = x.EvaluateResponse(context.Background(), response(200, "text/html", "<html><body>Hello</body></html>"))
+	x.Close()
+	if err != nil || resp.Interrupted || len(resp.MatchedRuleIDs) != 0 {
+		t.Errorf("clean response: %+v, %v", resp, err)
+	}
+
+	// A benign request: as EvaluateExchange.
+	res, x, err = e.EvaluateExchangeDetecting(context.Background(), newRequest("GET", "/products?id=42", nil, ""))
+	if err != nil || res.Interrupted || x == nil {
+		t.Fatalf("benign: %+v, %v, %v", res, x, err)
+	}
+	x.Close()
+	// Block mode is unchanged: no exchange for an interrupted request.
+	if res, x, err := e.EvaluateExchange(context.Background(), sqli); err != nil || !res.Interrupted || x != nil {
+		t.Errorf("EvaluateExchange of an attack: %+v, exchange %v, %v", res, x, err)
+	}
+}

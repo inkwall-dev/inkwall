@@ -352,7 +352,14 @@ proxy.
     directory;
   - an [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir) bundle cache;
   - non-root, with a read-only root filesystem;
-  - image and resources from `InkwallConfig.spec.engine`, else from `--engine-image`.
+  - image and resources from `InkwallConfig.spec.engine`, else from `--engine-image`;
+  - the image pull Secrets of `--engine-image-pull-secrets` (the chart's
+    `global.imagePullSecrets`, since v0.5.0), added to the pod's `imagePullSecrets`, keeping its
+    own. Envoy Gateway's and Istio Gateways' pods, which get the engine through their own
+    configuration, get none: there the operator owns only the containers, volumes and mounts it
+    adds, and a pod-level list it shared with the user's would have to be merged and pruned
+    without knowing which entries were its own. Their pull Secret goes in that configuration,
+    or on the ServiceAccount (the chart README).
 - **Trust and access per namespace.** The leader keeps an `inkwall-trust` ConfigMap in each
   namespace with proxy pods, and removes it with the last one. It holds `ca.crt`,
   `trusted-keys.pub` (every bundle key engines must accept; the engine reads this) and
@@ -692,7 +699,7 @@ has the decision), for `VirtualService` targets bound to Istio `Gateway` objects
   `haproxy.org/backend-config-snippet`, first, between `# inkwall:begin` and `# inkwall:end`; the
   user's lines stay after it. `waf.inkwall.dev/haproxy-wired` marks it (`Wired`), with the previous
   `standalone-backend`, restored when it is unwired.
-- **`Programmed`** only once the operator's probe (`HAProxyProber`, on the leader) has proven the
+- **`Programmed`** only once the operator's probe (`Prober`, on the leader) has proven the
   filter on every running pod; `Unverified` until then, and when a probe gets anything but the
   engine's answer. Before that, `PendingRestart` or `SidecarMissing`; `WiringFailed` for a pod
   without the agent's files or with `--disable-config-snippets` covering backends.
@@ -948,7 +955,23 @@ latency only) and `evicted`. Reconcile duration is controller-runtime's own
 `inkwall_operator_engines{state,integration}` counts the engines by the integration whose pod runs
 them (`unknown` while an engine isn't matched to one, #371).
 
-**Not yet:** policy condition counts.
+**Policy conditions** (#378). `inkwall_operator_policies{condition,status,reason}` counts the
+policies by each of their four conditions (counts, not a label per policy, so 5,000 policies are a
+few dozen series). The signing key has `inkwall_operator_signing_key_age_seconds` and
+`inkwall_operator_signing_key_rotation_phase{phase}` (1 for the current phase), and
+`inkwall_operator_bundle_publish_failures_total{reason}` counts the bundles not published
+(`too_large`, `error`). All are the leader's.
+
+**Events** (#378). A change of a policy's `Ready`, `Programmed` or `Enforced` condition records
+one Kubernetes Event (`events.k8s.io/v1`) on the policy: `Warning` while it isn't `Ready`, the
+reason of the first condition that changed (`Ready` first), and each changed condition's status,
+reason and message as the note. So `kubectl describe wafpolicy` and event-based tooling see a
+policy go from `Ready` to `EngineNack`. A policy's Events are at least 30 s apart: changes within
+that are recorded together once it has passed, compared with the last Event, so a flapping
+condition records at most one Event per policy every 30 s, and at most one when it settles where
+it was. The first sight of a policy (a new leader starting) records none, so a restart doesn't
+replay every policy's state. The watcher keeps each policy's last state in memory: a few hundred
+bytes per policy. RBAC: `events` `create` and `patch` in every namespace.
 
 ### 4.9 Upstream sync (leader only)
 
@@ -1222,6 +1245,18 @@ the disabled integration's message and the chart's notes say. When Helm can't as
 
 Missing CRDs don't disable an integration: its wiring waits for them
 ([§4.4](#44-wiring-controller)).
+
+**NetworkPolicies (v0.5.0, #387).** The chart's `networkPolicy.enabled` (off by default) lets into
+the operator's pods what it needs: the webhook port and the probes from anywhere, the
+distribution port from the proxy namespaces, and the metrics port from anywhere. The webhook is
+open by default because the API server's address, as a network plugin sees it, varies by
+cluster (host network, a managed control plane, a konnectivity proxy): a narrower default would
+break injection and admission on clusters it doesn't fit, and a Pod webhook failing closed would
+keep proxy pods from starting. `webhookFrom` and `metricsFrom` narrow them. Egress is a separate
+opt-in (`networkPolicy.egress.enabled`), to any address on the API server's ports unless
+`apiServerCIDRs` names them, for the same reason. The chart never creates a default-deny policy:
+whether the namespace denies by default is the cluster's choice, and the engines' namespaces
+aren't the chart's. The Network flows table in the chart README lists every connection.
 
 **Not yet:**
 

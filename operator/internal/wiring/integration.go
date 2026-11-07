@@ -109,6 +109,10 @@ type TargetState struct {
 	// Unverified: wired, but not proven in force yet, and why (HAProxy:
 	// the probe hasn't shown the filter on every pod).
 	Unverified string
+	// NotProbeable: wired, but the operator's probe can't reach it, and
+	// why (a regular expression match, a mutual TLS listener): it can't be
+	// proven in force (#372).
+	NotProbeable string
 	// Note is said on Programmed, whatever its status: a limit the proxy
 	// puts on inspection that fails safe, not missing protection
 	// (HAProxy's buffer below body.maxBytes).
@@ -130,8 +134,8 @@ type Config struct {
 	// Sidecar is the engine Envoy Gateway's and Istio's pods get, before
 	// the InkwallConfig's settings.
 	Sidecar injection.Sidecar
-	// HAProxyProber probes HAProxy's wired routes; nil: none is.
-	HAProxyProber *HAProxyProber
+	// Prober probes HAProxy's wired routes; nil: none is.
+	Prober *Prober
 }
 
 // Integrations are the wiring of every proxy Inkwall integrates: Traefik,
@@ -151,11 +155,13 @@ func Integrations(c client.Client, reader client.Reader, cfg Config) []Integrati
 		&Istio{
 			Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.Istio.Name), Sidecar: cfg.Sidecar,
 			HTTPRoutes: cfg.HTTPRoutes, Gateways: cfg.Gateways, GatewayClasses: cfg.GatewayClasses, EnvoyFilters: cfg.EnvoyFilters,
+			Prober: cfg.Prober,
 		},
-		&HAProxy{Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.HAProxy.Name), Prober: cfg.HAProxyProber},
+		&HAProxy{Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.HAProxy.Name), Prober: cfg.Prober},
 		&IstioIngress{
 			Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.IstioIngress.Name), PodLabels: plainLabels(cfg.Pods.LabelSelector(integrations.IstioIngress.Name)),
 			VirtualServices: cfg.VirtualServices, Gateways: cfg.IstioGateways, EnvoyFilters: cfg.EnvoyFilters,
+			Prober: cfg.Prober,
 		},
 	}
 }

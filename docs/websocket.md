@@ -100,7 +100,7 @@ the same rules ([standalone proxy](standalone-proxy.md#flags)).
 | Proxy | Handshake | Denial | Messages |
 |---|---|---|---|
 | Envoy Gateway, [raw Envoy](raw-envoy.md) (ext_proc) | Inspected on its headers | 403 before the upgrade | Not inspected |
-| [Istio](istio.md): HTTPRoutes of its Gateways, VirtualServices of its ingress gateways (ext_proc) | Inspected on its headers, as through Envoy Gateway (not covered by an e2e yet) | 403 before the upgrade | Not inspected |
+| [Istio](istio.md): HTTPRoutes of its Gateways, VirtualServices of its ingress gateways (ext_proc) | Inspected on its headers, as through Envoy Gateway | 403 before the upgrade | Not inspected |
 | [HAProxy](haproxy.md), and the HAProxy Kubernetes Ingress Controller (SPOE) | Inspected | 403 before the upgrade | Not inspected |
 | Traefik (ForwardAuth) | Inspected, without `Upgrade` and `Connection` | 403 before the upgrade | Not inspected |
 | [Standalone proxy](standalone-proxy.md) | Inspected | 403 before the upgrade | Inspected with `--websocket-messages`; a denial closes with 1008 |
@@ -173,6 +173,15 @@ forwards, and inspects every text message with the policy's rules, before the ap
   headers or query arguments sees none with a message.
 
 It needs a policy from flags: with `--operator`, the flag is refused.
+
+### Idle WebSockets and shutdown
+
+Once upgraded, a WebSocket is outside the proxy's request timeouts. With
+`--websocket-idle-timeout 10m`, one with nothing passing either way for 10 minutes is closed with a
+close frame `1001` (going away) to both the client and the upstream; unset, it stays open as long as
+both ends keep it. On `SIGTERM` the proxy sends `1001` to every open WebSocket and waits for them
+to close, within the 15-second shutdown grace period. This applies with or without
+`--websocket-messages`. `--max-connections` counts a WebSocket's connection until it closes.
 
 ## Checking it worked
 
