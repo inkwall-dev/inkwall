@@ -212,7 +212,7 @@ check "an attack in a body is blocked" all_are 403 "$HOST" / --data-urlencode "q
 mark=/held-$RANDOM$RANDOM
 check "a body attack on a marked path is blocked" all_are 403 "$HOST" "$mark" --data-urlencode "q=1' OR '1'='1"
 check "and never reached the app" never_reached_app "$mark"
-check "the user's snippet still applies" bash -c "curl -s -H 'Host: $HOST' http://127.0.0.1:$PORT/ | grep -qi 'X-User-Snippet: yes'"
+check "the snippet the user set still applies" bash -c "curl -s -H 'Host: $HOST' http://127.0.0.1:$PORT/ | grep -qi 'X-User-Snippet: yes'"
 # A client can't pass for the probe: without the key's MAC it is inspected.
 fake='/.well-known/inkwall-probe/AAAAAAAAAAAAAAAAAAAAAAAA'
 check "a forged probe gets no 299" bash -c "[[ \$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: $HOST' -H 'X-Inkwall-Probe: AAAAAAAAAAAAAAAAAAAAAAAA.00' http://127.0.0.1:$PORT$fake) != 299 ]]"
@@ -253,7 +253,7 @@ eventually "not Programmed while a pod runs without the engine" not_programmed S
 "${KUBECTL[@]}" -n "$NS" port-forward pod/haproxy-bare "$POD_PORT:8080" >/dev/null 2>&1 &
 pfs+=($!)
 sleep 1
-check "through that pod, the attack passes (uninspected, as the status says)" \
+check "through that pod, the attack passes: uninspected, as the status says" \
   bash -c "[[ \$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: $HOST' 'http://127.0.0.1:$POD_PORT$SQLI') == 200 ]]"
 "${KUBECTL[@]}" -n "$NS" delete pod haproxy-bare --wait=true --timeout=60s >/dev/null
 eventually "Programmed again once it is gone" programmed
