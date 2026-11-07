@@ -173,6 +173,9 @@ func TestInvalidSubrequestsAreRejected(t *testing.T) {
 		"relative uri":     func(r *http.Request) { r.Header.Set("X-Forwarded-Uri", "products") },
 		"wrong path":       func(r *http.Request) { r.URL.Path = "/v1/check" },
 		"empty uri header": func(r *http.Request) { r.Header.Set("X-Forwarded-Uri", "") },
+		// The reverse proxy refuses such a Host too (#365).
+		"invalid host":      func(r *http.Request) { r.Header.Set("X-Forwarded-Host", "shop.example.com/admin") },
+		"host with a space": func(r *http.Request) { r.Header.Set("X-Forwarded-Host", "shop example.com") },
 	} {
 		r := subrequest("GET", "/", "", "")
 		mutate(r)
@@ -184,7 +187,7 @@ func TestInvalidSubrequestsAreRejected(t *testing.T) {
 	}
 	// Each counts as a request the adapter can't read, but the wrong path
 	// (a 404, not a request to inspect).
-	if !strings.Contains(adminMetrics(m), `inkwall_adapter_errors_total{adapter="forwardauth",kind="invalid_request"} 9`) {
+	if !strings.Contains(adminMetrics(m), `inkwall_adapter_errors_total{adapter="forwardauth",kind="invalid_request"} 11`) {
 		t.Errorf("adapter errors:\n%s", adminMetrics(m))
 	}
 }

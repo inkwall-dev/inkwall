@@ -169,7 +169,7 @@ func TestCRSRegression(t *testing.T) {
 // and whether it inspects responses.
 type adapter struct {
 	name      string
-	front     func(*testing.T, *pipeline.Pipeline, *url.URL) http.Handler
+	front     func(*testing.T, pipeline.ExchangeInspector, *url.URL) http.Handler
 	responses bool
 }
 
