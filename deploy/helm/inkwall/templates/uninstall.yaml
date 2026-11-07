@@ -77,6 +77,12 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: {{ include "inkwall.serviceAccountName" . }}
+      {{- with include "inkwall.pullSecretNames" . }}
+      imagePullSecrets:
+        {{- range splitList "," . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
       {{- with .Values.operator.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
