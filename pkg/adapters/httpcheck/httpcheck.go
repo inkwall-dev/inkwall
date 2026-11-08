@@ -212,7 +212,7 @@ func encoding(contentType string) (bool, error) {
 // decoded path for logging.
 func (h *Handler) toRequest(in *enginev1.CheckRequest) (*request.Request, string, error) {
 	if !httpadapter.IsToken(in.GetMethod()) {
-		return nil, "", fmt.Errorf("invalid method %q", in.GetMethod())
+		return nil, "", errors.New("invalid method")
 	}
 	path, err := httpadapter.URIPath(in.GetRawUri())
 	if err != nil {
@@ -224,7 +224,7 @@ func (h *Handler) toRequest(in *enginev1.CheckRequest) (*request.Request, string
 	case "https":
 		scheme = s
 	default:
-		return nil, "", fmt.Errorf("invalid scheme %q", in.GetScheme())
+		return nil, "", errors.New("invalid scheme")
 	}
 	proto := in.GetProtocol()
 	if proto == "" {
@@ -246,7 +246,7 @@ func (h *Handler) toRequest(in *enginev1.CheckRequest) (*request.Request, string
 	for _, hf := range in.GetHeaders() {
 		name := hf.GetName()
 		if !httpadapter.IsToken(name) {
-			return nil, "", fmt.Errorf("invalid header name %q", name)
+			return nil, "", errors.New("invalid header name")
 		}
 		// The authority travels in its own field, as in request.Request.
 		if strings.EqualFold(name, "Host") {
@@ -295,7 +295,8 @@ func parseAddr(field, s string) (netip.Addr, error) {
 	}
 	a, err := netip.ParseAddr(s)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("%s: %w", field, err)
+		// Not netip's error: it quotes the value.
+		return netip.Addr{}, fmt.Errorf("%s: not an IP address", field)
 	}
 	return a.Unmap(), nil
 }
