@@ -50,3 +50,18 @@ func TestIsEvent(t *testing.T) {
 		}
 	}
 }
+
+// URIPath's errors don't quote the request target: its query can carry a
+// secret, and adapters log them.
+func TestURIPathErrorsHaveNoValues(t *testing.T) {
+	for _, uri := range []string{"https://shop.example.com/a?token=SECRET", "a?token=SECRET", "/%zzSECRET?token=SECRET", "/a#SECRET"} {
+		_, err := URIPath(uri)
+		if err == nil {
+			t.Errorf("%q: no error", uri)
+			continue
+		}
+		if strings.Contains(err.Error(), "SECRET") {
+			t.Errorf("%q: error %q quotes it", uri, err)
+		}
+	}
+}

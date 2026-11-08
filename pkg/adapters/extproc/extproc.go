@@ -719,7 +719,7 @@ func (s *Server) toRequest(h *extprocv3.HttpHeaders, peer netip.Addr, proto stri
 			continue
 		}
 		if !httpadapter.IsToken(name) {
-			return nil, "", fmt.Errorf("invalid header name %q", name)
+			return nil, "", errors.New("invalid header name")
 		}
 		// The authority travels in its own field, as in request.Request.
 		if strings.EqualFold(name, "Host") {
@@ -728,7 +728,7 @@ func (s *Server) toRequest(h *extprocv3.HttpHeaders, peer netip.Addr, proto stri
 		headers.Add(name, value)
 	}
 	if !httpadapter.IsToken(method) {
-		return nil, "", fmt.Errorf("invalid :method %q", method)
+		return nil, "", errors.New("invalid :method")
 	}
 	path, err := httpadapter.URIPath(rawURI)
 	if err != nil {
@@ -737,7 +737,7 @@ func (s *Server) toRequest(h *extprocv3.HttpHeaders, peer netip.Addr, proto stri
 	// Envoy forwards the authority it received; inspect only one that is a
 	// valid Host, as the reverse proxy does.
 	if !httpguts.ValidHostHeader(authority) {
-		return nil, "", fmt.Errorf("invalid :authority %q", authority)
+		return nil, "", errors.New("invalid :authority")
 	}
 	switch strings.ToLower(scheme) {
 	case "", "http":
@@ -745,7 +745,7 @@ func (s *Server) toRequest(h *extprocv3.HttpHeaders, peer netip.Addr, proto stri
 	case "https":
 		scheme = "https"
 	default:
-		return nil, "", fmt.Errorf("invalid :scheme %q", scheme)
+		return nil, "", errors.New("invalid :scheme")
 	}
 	// Clients send "Content-Length: 0" for an empty POST, PUT or PATCH, but
 	// HTTP/2 clients may not. Without it, rule 920180 (POST without

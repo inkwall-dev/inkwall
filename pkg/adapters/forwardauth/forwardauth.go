@@ -21,6 +21,7 @@
 package forwardauth
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -146,7 +147,7 @@ func (h *Handler) toRequest(r *http.Request) (*request.Request, string, error) {
 		return nil, "", err
 	}
 	if !httpadapter.IsToken(method) {
-		return nil, "", fmt.Errorf("invalid X-Forwarded-Method %q", method)
+		return nil, "", errors.New("invalid X-Forwarded-Method")
 	}
 	rawURI, err := single(r.Header, "X-Forwarded-Uri")
 	if err != nil {
