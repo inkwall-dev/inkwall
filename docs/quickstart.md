@@ -65,6 +65,7 @@ blocked.
 <!-- quickstart: protect -->
 ```sh
 kubectl apply -k 'https://github.com/inkwall-dev/inkwall//examples/traefik?ref=main'
+kubectl -n shop rollout status deployment/web --timeout=3m
 kubectl -n shop wait wafpolicy/web --for=condition=Ready --timeout=3m
 kubectl -n traefik port-forward service/traefik 8000:80 >/dev/null &
 sleep 2
