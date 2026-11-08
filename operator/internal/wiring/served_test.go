@@ -9,6 +9,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -16,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -76,10 +78,29 @@ func TestEnforcedCountsServingEngines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const ns = "served-371"
-	if err := c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}); err != nil {
-		t.Fatal(err)
-	}
+	ns := testenv.Namespace(t, c, "served-371")
+	// The wiring holds the policies with its finalizer: release and delete
+	// them, or the next test that counts every policy (TestFinalizer's
+	// uninstall) finds them too.
+	t.Cleanup(func() {
+		ctx := context.Background()
+		var list wafv1alpha1.WAFPolicyList
+		if err := c.List(ctx, &list, client.InNamespace(ns)); err != nil {
+			t.Error(err)
+			return
+		}
+		for i := range list.Items {
+			p := &list.Items[i]
+			if controllerutil.RemoveFinalizer(p, Finalizer) {
+				if err := c.Update(ctx, p); err != nil {
+					t.Error(err)
+				}
+			}
+			if err := c.Delete(ctx, p); err != nil && !apierrors.IsNotFound(err) {
+				t.Error(err)
+			}
+		}
+	})
 	policies := map[string]wafv1alpha1.TargetRef{
 		"on-envoy":   {Group: "gateway.networking.k8s.io", Kind: "HTTPRoute", Name: "web"},
 		"on-haproxy": {Kind: "Ingress", Name: "shop"},

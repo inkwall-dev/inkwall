@@ -37,6 +37,11 @@ type CertOptions struct {
 	// DNSNames are the names the certificate is valid for: the webhook
 	// Service's, and the distribution Service's.
 	DNSNames []string
+	// ControllerName names the rotator's controller; "": cert-rotator.
+	// controller-runtime refuses two controllers of the same name in a
+	// process, whatever its manager's SkipNameValidation (the rotator's
+	// controller isn't the manager's).
+	ControllerName string
 	// InjectWebhooks injects the CA into the validating webhook
 	// configuration; off when the webhook is disabled.
 	InjectWebhooks bool
@@ -93,6 +98,7 @@ func AddCertRotator(mgr manager.Manager, o CertOptions, ready chan struct{}) err
 		}
 	}
 	return rotator.AddRotator(mgr, &rotator.CertRotator{
+		ControllerName:        o.ControllerName,
 		SecretKey:             o.Secret,
 		CertDir:               o.CertDir,
 		CAName:                "inkwall-operator-webhook-ca",

@@ -132,6 +132,7 @@ func TestReconcile(t *testing.T) {
 		if err := c.Create(ctx, ic); err != nil {
 			t.Fatal(err)
 		}
+		testenv.DeleteOnCleanup(t, c, ic)
 	}
 	for name, controller := range map[string]string{"eg": "gateway.envoyproxy.io/gatewayclass-controller", "istio": "istio.io/gateway-controller"} {
 		gc := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"controllerName": controller}}}
@@ -140,6 +141,7 @@ func TestReconcile(t *testing.T) {
 		if err := c.Create(ctx, gc); err != nil {
 			t.Fatal(err)
 		}
+		testenv.DeleteOnCleanup(t, c, gc)
 	}
 
 	// No InkwallConfig: nothing to write to.
@@ -149,6 +151,7 @@ func TestReconcile(t *testing.T) {
 	if err := c.Create(ctx, cfg); err != nil {
 		t.Fatal(err)
 	}
+	testenv.DeleteOnCleanup(t, c, cfg)
 	reconcileOnce()
 	if err := c.Get(ctx, client.ObjectKeyFromObject(cfg), cfg); err != nil {
 		t.Fatal(err)

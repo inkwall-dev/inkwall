@@ -75,6 +75,9 @@ func TestFinalizer(t *testing.T) {
 		return c
 	}
 	c := newClient(nil)
+	// Namespaces of their own: envtest doesn't delete namespaces, and the
+	// test runs again against the same API server under -count.
+	shopNS, proxyNS := testenv.Namespace(t, c, "shop"), testenv.Namespace(t, c, "proxy")
 	traefikPods := integrations.Defaults().Selector(integrations.Traefik.Name)
 	// reconcileWith is one reconcile of an operator that has just
 	// (re)started; reconcileOnce, with a new client.
@@ -105,7 +108,7 @@ func TestFinalizer(t *testing.T) {
 		}
 	}
 	policy := func(name string, targets ...wafv1alpha1.TargetRef) *wafv1alpha1.WAFPolicy {
-		return &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: name}, Spec: wafv1alpha1.WAFPolicySpec{TargetRefs: targets}}
+		return &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: shopNS, Name: name}, Spec: wafv1alpha1.WAFPolicySpec{TargetRefs: targets}}
 	}
 	ingressRef := wafv1alpha1.TargetRef{Kind: "Ingress", Name: "web"}
 	routeRef := wafv1alpha1.TargetRef{Group: "traefik.io", Kind: "IngressRoute", Name: "app"}
@@ -137,7 +140,7 @@ func TestFinalizer(t *testing.T) {
 	ingressWired := func() bool {
 		t.Helper()
 		var ing networkingv1.Ingress
-		if err := c.Get(ctx, client.ObjectKey{Namespace: "shop", Name: "web"}, &ing); err != nil {
+		if err := c.Get(ctx, client.ObjectKey{Namespace: shopNS, Name: "web"}, &ing); err != nil {
 			t.Fatal(err)
 		}
 		return ing.Annotations[WiredAnnotation] != ""
@@ -146,7 +149,7 @@ func TestFinalizer(t *testing.T) {
 		t.Helper()
 		ir := &unstructured.Unstructured{}
 		ir.SetGroupVersionKind(integrations.TraefikIngressRouteGVK)
-		if err := c.Get(ctx, client.ObjectKey{Namespace: "shop", Name: "app"}, ir); err != nil {
+		if err := c.Get(ctx, client.ObjectKey{Namespace: shopNS, Name: "app"}, ir); err != nil {
 			t.Fatal(err)
 		}
 		return ir.GetAnnotations()[WiredAnnotation] != "" || middlewares(ir) != "auth"
@@ -155,7 +158,7 @@ func TestFinalizer(t *testing.T) {
 		t.Helper()
 		m := &unstructured.Unstructured{}
 		m.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
-		err := c.Get(ctx, client.ObjectKey{Namespace: "shop", Name: MiddlewareName}, m)
+		err := c.Get(ctx, client.ObjectKey{Namespace: shopNS, Name: MiddlewareName}, m)
 		if err != nil && !apierrors.IsNotFound(err) {
 			t.Fatal(err)
 		}
@@ -173,19 +176,22 @@ func TestFinalizer(t *testing.T) {
 		return ""
 	}
 
+	traefikClass := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "traefik"}, Spec: networkingv1.IngressClassSpec{Controller: integrations.Traefik.Controller}}
+	traefikPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: proxyNS, Name: "traefik", Labels: map[string]string{"app.kubernetes.io/name": "traefik"}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "traefik", Image: "traefik:v3.7.13"}}},
+	}
 	create(
-		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shop"}},
-		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "proxy"}},
-		&networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "traefik"}, Spec: networkingv1.IngressClassSpec{Controller: integrations.Traefik.Controller}},
-		&networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "web"}, Spec: networkingv1.IngressSpec{
+		traefikClass,
+		&networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Namespace: shopNS, Name: "web"}, Spec: networkingv1.IngressSpec{
 			IngressClassName: ptr.To("traefik"),
 			DefaultBackend:   &networkingv1.IngressBackend{Service: &networkingv1.IngressServiceBackend{Name: "web", Port: networkingv1.ServiceBackendPort{Number: 80}}},
 		}},
-		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "proxy", Name: "traefik", Labels: map[string]string{"app.kubernetes.io/name": "traefik"}},
-			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "traefik", Image: "traefik:v3.7.13"}}},
-		},
+		traefikPod,
 	)
+	// The class is cluster-scoped, and the Traefik pod would be selected
+	// again: neither may outlive the test, which runs again under -count.
+	testenv.DeleteOnCleanup(t, c, traefikClass, traefikPod)
 
 	// The IngressRoute CRD isn't installed, and the Ingress targeted is
 	// gone: nothing holds the policy once deleted.
@@ -200,7 +206,7 @@ func TestFinalizer(t *testing.T) {
 	if err := testenv.InstallLater(env); err != nil {
 		t.Fatal(err)
 	}
-	ir := ingressRoute("shop", "app", []any{map[string]any{"name": "auth"}})
+	ir := ingressRoute(shopNS, "app", []any{map[string]any{"name": "auth"}})
 	create(ir)
 
 	// Wired, then deleted while the operator is down: the routes stay wired

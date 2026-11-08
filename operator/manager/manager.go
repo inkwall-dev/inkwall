@@ -31,6 +31,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -153,6 +154,36 @@ type Options struct {
 	// control plane ("": in memory); EventsBufferBytes bounds it.
 	EventsDir         string
 	EventsBufferBytes int64
+
+	// SkipControllerNameValidation lets a process create more than one
+	// manager, which controller-runtime refuses by default (its
+	// controllers' names must be unique in the process): for tests that
+	// run again in the same process (go test -count). Never set in a
+	// cluster.
+	SkipControllerNameValidation bool
+}
+
+// skipNameValidation is nil (controller-runtime's default: validate)
+// unless skip.
+func skipNameValidation(skip bool) *bool {
+	if !skip {
+		return nil
+	}
+	return &skip
+}
+
+// certRotators numbers the managers' certificate rotators when their
+// names aren't validated.
+var certRotators atomic.Int64
+
+// certRotatorName is the rotator's default name, or, when the controller
+// names aren't validated, a name of its own in the process: the rotator's
+// controller is checked whatever the manager's options.
+func certRotatorName(skipValidation bool) string {
+	if !skipValidation {
+		return ""
+	}
+	return fmt.Sprintf("cert-rotator-%d", certRotators.Add(1))
 }
 
 // NewScheme returns the types the operator reads and writes.
@@ -216,6 +247,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		// The new leader starts at once instead of waiting out the lease,
 		// as the old one steps down cleanly on shutdown.
 		LeaderElectionReleaseOnCancel: true,
+		Controller:                    ctrlconfig.Controller{SkipNameValidation: skipNameValidation(o.SkipControllerNameValidation)},
 		WebhookServer: ctrlwebhook.NewServer(ctrlwebhook.Options{
 			Port:    o.WebhookPort,
 			CertDir: o.WebhookCertDir,
@@ -466,6 +498,7 @@ func addCerts(mgr manager.Manager, o Options) (<-chan struct{}, error) {
 		DNSNames:         dns,
 		InjectWebhooks:   o.Webhooks,
 		InjectPodWebhook: o.Inject && o.DistributionPort != 0,
+		ControllerName:   certRotatorName(o.SkipControllerNameValidation),
 	}, ready)
 	return ready, err
 }
