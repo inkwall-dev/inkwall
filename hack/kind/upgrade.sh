@@ -277,7 +277,7 @@ while true; do
         $(c "$EG_HOST" "$SQLI" "$eg") $(c "$EG_HOST" /products/42 "$eg")
     else
       set -- $(c "$HOST" "$SQLI") $(c "$HOST" /products/42) $(c "$ROUTE_HOST" "$SQLI") $(c "$HOST" "$SQLI" "$pod") \
-        "403 0/0/0" "200 0/0/0"
+        403 0/0/0 200 0/0/0
     fi
     echo "$up $1 $3 $5 $7 $9 ${11} | $2 $4 $6 $8 ${10} ${12}" >>/tmp/probe.log
   fi
