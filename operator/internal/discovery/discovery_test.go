@@ -7,10 +7,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -173,6 +175,29 @@ func TestReconcile(t *testing.T) {
 	}
 	if cfg.ResourceVersion != rv {
 		t.Error("an unchanged status was written again")
+	}
+
+	// IntegrationsConfigured (#375): True; False with the error for a
+	// selector the CRD can't check (an unknown operator).
+	configured := func() *metav1.Condition {
+		t.Helper()
+		reconcileOnce()
+		if err := c.Get(ctx, client.ObjectKeyFromObject(cfg), cfg); err != nil {
+			t.Fatal(err)
+		}
+		return meta.FindStatusCondition(cfg.Status.Conditions, wafv1alpha1.ConditionIntegrationsConfigured)
+	}
+	if c := configured(); c == nil || c.Status != metav1.ConditionTrue {
+		t.Errorf("IntegrationsConfigured %+v, want True", c)
+	}
+	cfg.Spec.Integrations = []wafv1alpha1.IntegrationSpec{{Controller: "traefik", Selector: &metav1.LabelSelector{
+		MatchExpressions: []metav1.LabelSelectorRequirement{{Key: "app", Operator: "Near", Values: []string{"traefik"}}}}}}
+	if err := c.Update(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if c := configured(); c == nil || c.Status != metav1.ConditionFalse || c.Reason != ReasonInvalidSelector ||
+		!strings.Contains(c.Message, "integration traefik") || !strings.Contains(c.Message, "Near") {
+		t.Errorf("IntegrationsConfigured with an invalid selector: %+v, want False InvalidSelector naming it", c)
 	}
 }
 

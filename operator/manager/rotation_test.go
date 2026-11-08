@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -98,6 +100,24 @@ func testKeyRotation(ctx context.Context, t *testing.T, c client.Client) {
 		t.Fatalf("%d trusted keys before the rotation, want 1", len(oldKeys))
 	}
 	oldID := bundlekey.ID(oldKeys[0])
+	// The InkwallConfig's status shows the key and the rotation's phase
+	// (#375).
+	keyPhase := func(phase wafv1alpha1.SigningKeyPhase, active, reason, waiting string) func() string {
+		return func() string {
+			var got wafv1alpha1.InkwallConfig
+			if err := c.Get(ctx, client.ObjectKeyFromObject(cfg), &got); err != nil {
+				return err.Error()
+			}
+			k := got.Status.SigningKey
+			cond := meta.FindStatusCondition(got.Status.Conditions, wafv1alpha1.ConditionSigningKeyRotation)
+			if k == nil || cond == nil || k.Phase != phase || k.ActiveKeyID != active || k.Since == nil || cond.Reason != reason ||
+				!strings.Contains(k.WaitingFor, waiting) || !strings.Contains(cond.Message, waiting) {
+				return fmt.Sprintf("signingKey %+v, condition %+v", k, cond)
+			}
+			return ""
+		}
+	}
+	eventually(t, "status: idle, the old key signs", keyPhase(wafv1alpha1.SigningKeyIdle, oldID, "Idle", ""))
 	if id, _ := signedWith(); id != oldID {
 		t.Fatalf("the bundle is signed with %q, the signing key is %q", id, oldID)
 	}
@@ -192,6 +212,20 @@ func testKeyRotation(ctx context.Context, t *testing.T, c client.Client) {
 		}
 	}
 	eventually(t, "both engines run the bundle", runs(version))
+	eventually(t, "status: the bundle and both engines current", func() string {
+		var got wafv1alpha1.InkwallConfig
+		if err := c.Get(ctx, client.ObjectKeyFromObject(cfg), &got); err != nil {
+			return err.Error()
+		}
+		b, e := got.Status.Bundle, got.Status.Engines
+		if b == nil || uint64(b.Version) != version || b.CompressedBytes <= 0 || b.LimitBytes != bundle.MaxCompressedBytes {
+			return fmt.Sprintf("bundle %+v, want version %d", b, version)
+		}
+		if e == nil || e.Connected < 2 || e.Current != e.Connected {
+			return fmt.Sprintf("engines %+v", e)
+		}
+		return ""
+	})
 
 	update(ctx, t, c, cfg, func(cfg *wafv1alpha1.InkwallConfig) {
 		if cfg.Annotations == nil {
@@ -209,6 +243,7 @@ func testKeyRotation(ctx context.Context, t *testing.T, c client.Client) {
 		return ""
 	})
 	newID := bundlekey.ID(newKey)
+	eventually(t, "status: publishing, waiting for the late engine", keyPhase(wafv1alpha1.SigningKeyPublishing, oldID, "Publishing", "late-engine"))
 	if s := secret(bundle.SigningKeySecret); s.Annotations[bundle.RotationPhaseAnnotation] != string(bundle.PhasePublishing) {
 		t.Errorf("phase %q, want Publishing", s.Annotations[bundle.RotationPhaseAnnotation])
 	}
@@ -255,6 +290,7 @@ func testKeyRotation(ctx context.Context, t *testing.T, c client.Client) {
 		return ""
 	})
 	_, switched := signedWith()
+	eventually(t, "status: retiring, the new key signs", keyPhase(wafv1alpha1.SigningKeyRetiring, newID, "Retiring", ""))
 	if switched <= version {
 		t.Fatalf("re-signed as version %d, want a version after %d", switched, version)
 	}
@@ -266,6 +302,7 @@ func testKeyRotation(ctx context.Context, t *testing.T, c client.Client) {
 		}
 		return ""
 	})
+	eventually(t, "status: idle, the new key signs", keyPhase(wafv1alpha1.SigningKeyIdle, newID, "Idle", ""))
 	eventually(t, "the engine trusts only the new key", func() string {
 		if got := a.TrustedKeys(); !slices.Equal(got, []string{newID}) {
 			return "trusts " + strings.Join(got, ", ")

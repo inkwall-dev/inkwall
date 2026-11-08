@@ -23,6 +23,18 @@ spec:
     - jsonPath: .spec.suspend
       name: Suspended
       type: boolean
+    - jsonPath: .status.bundle.version
+      name: Bundle
+      type: integer
+    - jsonPath: .status.engines.connected
+      name: Engines
+      type: integer
+    - jsonPath: .status.engines.current
+      name: Current
+      type: integer
+    - jsonPath: .status.signingKey.phase
+      name: Key
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -230,6 +242,23 @@ spec:
                           More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                         type: object
                     type: object
+                  rollout:
+                    description: |-
+                      Rollout is how proxy pods that need a new engine (none: started
+                      before Inkwall; or another image than the one configured) get one.
+                      Manual: they are reported (PendingRestart) and you restart them.
+                      Automatic: the operator evicts them one at a time through the
+                      Eviction API, which respects PodDisruptionBudgets, waiting for each
+                      replacement to be ready and run the current bundle before the next;
+                      it pauses, and says why on the InkwallConfig (EngineRollout), when an
+                      eviction is refused or a replacement isn't ready in time. Pods the
+                      Pod webhook injects only (Traefik, HAProxy, Istio's ingress gateways):
+                      Envoy Gateway and Istio's Gateway API deployments roll their pods
+                      themselves. Unset: Manual.
+                    enum:
+                    - Manual
+                    - Automatic
+                    type: string
                   socketDir:
                     description: |-
                       SocketDir is ignored: each integration places the engine's socket
@@ -415,6 +444,28 @@ spec:
           status:
             description: InkwallConfigStatus is the cluster view.
             properties:
+              bundle:
+                description: Bundle is the bundle the engines get.
+                properties:
+                  compressedBytes:
+                    description: CompressedBytes is its size as stored, gzip-compressed.
+                    format: int64
+                    type: integer
+                  limitBytes:
+                    description: |-
+                      LimitBytes is the largest bundle that can be published: past it,
+                      policy changes aren't published (BundleTooLarge).
+                    format: int64
+                    type: integer
+                  version:
+                    description: Version of the bundle published.
+                    format: int64
+                    type: integer
+                required:
+                - compressedBytes
+                - limitBytes
+                - version
+                type: object
               conditions:
                 description: Conditions describe the configuration's state.
                 items:
@@ -475,6 +526,41 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              engines:
+                description: Engines counts the connected engines by the bundle they
+                  run.
+                properties:
+                  behind:
+                    description: |-
+                      Behind engines run an older bundle, and haven't rejected the
+                      published one.
+                    format: int32
+                    type: integer
+                  connected:
+                    description: Connected engines.
+                    format: int32
+                    type: integer
+                  current:
+                    description: Current engines run the published bundle.
+                    format: int32
+                    type: integer
+                  outdated:
+                    description: |-
+                      Outdated engines are too old for a field some policy sets, which they
+                      ignore (EnginesOutdated).
+                    format: int32
+                    type: integer
+                  rejected:
+                    description: Rejected engines rejected the published bundle.
+                    format: int32
+                    type: integer
+                required:
+                - behind
+                - connected
+                - current
+                - outdated
+                - rejected
+                type: object
               observedGeneration:
                 description: ObservedGeneration is the generation the status describes.
                 format: int64
@@ -527,6 +613,36 @@ spec:
                 x-kubernetes-list-map-keys:
                 - controllerName
                 x-kubernetes-list-type: map
+              signingKey:
+                description: SigningKey is the bundle signing key and its rotation.
+                properties:
+                  activeKeyID:
+                    description: ActiveKeyID is the ID of the key that signs bundles.
+                    maxLength: 128
+                    type: string
+                  phase:
+                    description: Phase of the rotation.
+                    enum:
+                    - Idle
+                    - Publishing
+                    - Retiring
+                    type: string
+                  since:
+                    description: |-
+                      Since is when the phase began (Publishing, Retiring), or when the
+                      active key began to sign (Idle).
+                    format: date-time
+                    type: string
+                  waitingFor:
+                    description: |-
+                      WaitingFor says what the rotation waits for; empty when it waits for
+                      nothing.
+                    maxLength: 1024
+                    type: string
+                required:
+                - activeKeyID
+                - phase
+                type: object
             type: object
         type: object
         x-kubernetes-validations:

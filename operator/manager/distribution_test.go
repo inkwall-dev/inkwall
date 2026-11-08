@@ -239,8 +239,18 @@ func testDistribution(ctx context.Context, t *testing.T, c client.Client) {
 	bad.Reject = func(*bundlev1.Bundle) error { return errors.New("line 1: rule does not compile") }
 	stopBad := run(bad)
 	wantEnforced("a rejecting engine", metav1.ConditionFalse, distribution.ReasonEngineNack, "some engines rejected bundle")
-	if n := policyGauge(t, "Enforced", "False", distribution.ReasonEngineNack); n < 1 {
-		t.Errorf("inkwall_operator_policies{Enforced,False,EngineNack} = %v, want at least 1", n)
+	// The gauge follows the status through the policystatus watcher's own
+	// informer, a moment after the status itself: wait for it, but not
+	// fatally, so the rejecting engine goes either way (#515).
+	for deadline := time.Now().Add(time.Minute); ; time.Sleep(200 * time.Millisecond) {
+		n := policyGauge(t, "Enforced", "False", distribution.ReasonEngineNack)
+		if n >= 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("inkwall_operator_policies{Enforced,False,EngineNack} = %v after a minute, want at least 1", n)
+			break
+		}
 	}
 	// The change is an Event on the policy (#378), as kubectl describe
 	// shows it (its reason is Ready's: here the Ingress's ControllerUnsupported).

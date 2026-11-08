@@ -35,6 +35,17 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 What's new:
 
+- **Automatic engine rollout (opt-in).** Proxy pods started before Inkwall, or running another
+  engine image than the one configured, are `PendingRestart` until you restart them: that is still
+  the default (`spec.engine.rollout: Manual`). With
+  `kubectl patch inkwallconfig default --type=merge -p '{"spec":{"engine":{"rollout":"Automatic"}}}'`
+  the operator evicts them one at a time through the Eviction API, respecting
+  PodDisruptionBudgets, and waits for each replacement to be ready with the new engine before the
+  next, for the Traefik, HAProxy and Istio ingress gateway pods it injects. A refused eviction or a
+  replacement not ready within 5 minutes pauses it: `kubectl get inkwallconfig default -o
+  jsonpath='{.status.conditions[?(@.type=="EngineRollout")].message}'` says why. Upgrade the chart
+  first, for the new CRD field and the `pods/eviction` permission. With it, an engine upgrade
+  after a chart upgrade needs no restart by hand.
 - **Standalone mode reloads its rules without a restart**: on `SIGHUP`, or with `--watch-rules`
   when the files change ([reloading the rules](standalone-proxy.md#reloading-the-rules)).
 - **gRPC and HTTP/2 through the standalone proxy**: `--h2c`, `--tls-cert`/`--tls-key`,
@@ -88,6 +99,13 @@ What's new:
 
 What changes by itself:
 
+- **The InkwallConfig reports the cluster's state.** Its status gains `bundle` (version, size and
+  limit), `engines` (connected, current, behind, rejected, outdated), `signingKey` (the active key,
+  the rotation's phase and what it waits for), and the conditions `SigningKeyRotation` and
+  `IntegrationsConfigured` (`False`, with the error, when a `spec.integrations` selector can't be
+  applied: until now only logged). `kubectl get inkwallconfig` shows the bundle version, the
+  engines and the key's phase. Upgrade the chart first, for the new CRD fields: an older CRD drops
+  them. See [key rotation](key-rotation.md#checking-it-worked).
 - **Policy condition metrics and Events.** The operator reports `inkwall_operator_policies`
   (policies by condition, status and reason), the signing key's age and rotation phase, and failed
   bundle publishes, and records a Kubernetes Event on a policy when its `Ready`, `Programmed` or
@@ -108,6 +126,10 @@ What changes by itself:
   a request the rules flag is let through, and an SQL error or a leak in its response is now its
   own event, as for any request. The request's event may list a few more rules than before: the
   rules run to the end instead of stopping where Block mode would.
+- **ForwardAuth refuses an invalid `X-Forwarded-Host`** (one with a path, a space or other
+  characters a Host can't have) with 400, as the reverse proxy refuses such a Host: the rules
+  would read one host and the application another. Traefik sends the client's Host, which it
+  validates already, so its requests aren't affected.
 - **Enforced checks the newest field a policy needs.** A policy with fields of 0.4.0 and 0.5.0
   (`webSocket` and `ipLists`, say) was `Enforced` while a 0.4.x engine ran it; it is now
   `EnginesOutdated` until every engine runs 0.5.0.

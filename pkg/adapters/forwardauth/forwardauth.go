@@ -28,6 +28,8 @@ import (
 	"net/http"
 	"strings"
 
+	"golang.org/x/net/http/httpguts"
+
 	"github.com/inkwall-dev/inkwall/pkg/adapters/internal/httpadapter"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/events"
@@ -158,6 +160,11 @@ func (h *Handler) toRequest(r *http.Request) (*request.Request, string, error) {
 	host, err := optional(r.Header, "X-Forwarded-Host")
 	if err != nil {
 		return nil, "", err
+	}
+	// As the reverse proxy: a Host the rules would read one way and the
+	// application another is refused (#365).
+	if !httpguts.ValidHostHeader(host) {
+		return nil, "", fmt.Errorf("invalid X-Forwarded-Host %q", host)
 	}
 	scheme := "http"
 	if proto, _ := optional(r.Header, "X-Forwarded-Proto"); strings.EqualFold(proto, "https") {

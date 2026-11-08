@@ -97,8 +97,10 @@ build: ## Build inkwall-engine and inkwallctl into ./bin
 	$(GO) build -trimpath -tags $(GO_TAGS) -o $(BIN_DIR)/inkwall-operator ./cmd/operator
 
 .PHONY: test
-test: ## Run unit tests with the race detector (operator tests run against a local API server, envtest)
+test: ## Run unit tests with the race detector (operator tests run against a local API server, envtest), and the adapter parity test (test/crs)
 	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" $(GO) test -race -count=1 ./...
+	@# Adapter parity (#365): every adapter against the reverse proxy, in test/crs's module.
+	cd test/crs && $(GO) test -count=1 -run '^TestAdapterParity$$' .
 
 .PHONY: stress-test
 stress-test: ## Tests under stress, for timing flakes: -race -shuffle -count=10, GOMAXPROCS=2, CPU hogs (STRESS_PACKAGES; SEED, COUNT, HOGS: hack/ci/stress.sh)
@@ -255,7 +257,7 @@ release-check: ## Check the goreleaser configuration
 	$(GORELEASER) check
 
 # The kind targets, and the scripts they run, use the kind of KIND_VERSION.
-KIND_TARGETS := kind-quickstart kind-cluster kind-up kind-operator kind-e2e kind-e2e-traefik kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-e2e-networkpolicy kind-response-load kind-upgrade kind-down
+KIND_TARGETS := kind-quickstart kind-cluster kind-up kind-operator kind-chaos kind-e2e kind-e2e-traefik kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-e2e-networkpolicy kind-response-load kind-upgrade kind-down
 $(KIND_TARGETS): export PATH := $(KIND_DIR):$(PATH)
 $(KIND_TARGETS): $(KIND_DIR)/kind
 
@@ -321,6 +323,11 @@ kind-e2e-istio: kind-operator ## End-to-end test on kind through Istio's Gateway
 kind-e2e-haproxy: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
 kind-e2e-haproxy: kind-operator ## End-to-end test on kind through the HAProxy Kubernetes Ingress Controller with one WAFPolicy, ending with an uninstall (installs the operator first)
 	KIND_CLUSTER=$(KIND_CLUSTER) hack/kind/haproxy-e2e.sh
+
+.PHONY: kind-chaos
+kind-chaos: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
+kind-chaos: kind-operator ## The operator's failure modes on kind (hack/kind/chaos.sh): leader changes in a key rotation, the operator down, its Secrets deleted, the API server stopped, an expired webhook certificate (installs the operator first)
+	KIND_CLUSTER=$(KIND_CLUSTER) hack/kind/chaos.sh
 
 .PHONY: kind-upgrade
 kind-upgrade: ## Upgrade test on kind: helm upgrade from the last release to this checkout keeps routes protected, uninstall restores them (own cluster, UPGRADE_CLUSTER)
