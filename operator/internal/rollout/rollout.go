@@ -4,7 +4,8 @@
 // Package rollout replaces proxy pods that need a new engine, when the
 // InkwallConfig asks for it (spec.engine.rollout: Automatic, #376): pods
 // the Pod webhook would inject that run without the engine (started before
-// Inkwall) or with another engine image than the one configured. It evicts
+// Inkwall) or with an injected engine of another image than the one
+// configured (an engine in the pod's own spec is the user's). It evicts
 // them one at a time through the Eviction API, which respects
 // PodDisruptionBudgets, and evicts the next only once the last one's
 // workload has all its pods ready, each with the configured engine running
@@ -211,13 +212,20 @@ func (r *Rollout) ours(p *corev1.Pod) bool {
 	return false
 }
 
-// needsEngine reports whether a running pod lacks the engine image.
+// needsEngine reports whether a running pod lacks the engine image: it has
+// no engine, or one the webhook injected with another image. An engine in
+// the pod's own spec, not injected, is left alone: the webhook doesn't
+// touch a pod that has one, so its replacement would run the same image
+// and the rollout would wait for it forever.
 func needsEngine(p *corev1.Pod, image string) bool {
 	if p.Status.Phase != corev1.PodRunning {
 		return false
 	}
 	img, ok := engineImage(p)
-	return !ok || img != image
+	if !ok {
+		return true
+	}
+	return p.Annotations[injection.InjectedAnnotation] == "true" && img != image
 }
 
 func engineImage(p *corev1.Pod) (string, bool) {
