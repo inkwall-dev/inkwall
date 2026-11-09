@@ -288,7 +288,17 @@ Tracked on the [project board](https://github.com/orgs/inkwall-dev/projects/1) a
   denials; [WebSocket](docs/websocket.md) handshake rules, and messages inspected by the engine's
   own proxy; and status that says when an engine is too old for a policy's fields
   (`EnginesOutdated`).
-- **v1.0.0** (next): a stable API (out of `v1alpha1`) with an upgrade path.
+- **v0.5.0** (shipped): the Core Rule Set's own settings and exclusions for a cookie, a header or
+  an argument name on the policy; IP allow and deny lists (`WAFIPList`); the client IP behind an
+  HTTP load balancer; responses through Istio, and Istio routes proven by the operator's probe;
+  an opt-in automatic engine rollout; `inkwallctl status`, `tune` and `test --suite`; metrics,
+  alerts and a dashboard ([monitoring](docs/monitoring.md)); gRPC in the standalone proxy and
+  `body.grpc: Deny`; and the CRS compiled once for every policy setting.
+- **v0.6.0** (next): assistants that help users get answers faster (`inkwallctl explain` and a
+  read-only MCP server); responses through HAProxy, Traefik and the reverse proxy; gRPC streams
+  and server messages inspected per message; rule sets loaded before the CRS; and operator
+  metrics over HTTPS.
+- **v1.0.0**: a stable API (out of `v1alpha1`) with an upgrade path.
 - Then more proxies: Caddy. Not ingress-nginx, which is retired upstream: its users
   migrate with `inkwallctl migrate ingress-nginx`.
 
