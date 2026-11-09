@@ -41,7 +41,8 @@ What's new:
   `kubectl patch inkwallconfig default --type=merge -p '{"spec":{"engine":{"rollout":"Automatic"}}}'`
   the operator evicts them one at a time through the Eviction API, respecting
   PodDisruptionBudgets, and waits for each replacement to be ready with the new engine before the
-  next, for the Traefik, HAProxy and Istio ingress gateway pods it injects. A refused eviction or a
+  next, for the Traefik, HAProxy and Istio ingress gateway pods it injects (not a pod with the
+  engine in its own spec: that one keeps its image until you change it). A refused eviction or a
   replacement not ready within 5 minutes pauses it: `kubectl get inkwallconfig default -o
   jsonpath='{.status.conditions[?(@.type=="EngineRollout")].message}'` says why. Upgrade the chart
   first, for the new CRD field and the `pods/eviction` permission. With it, an engine upgrade

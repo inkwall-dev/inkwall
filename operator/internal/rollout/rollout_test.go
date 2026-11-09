@@ -44,6 +44,7 @@ func traefikPod(name, rs, image string) *corev1.Pod {
 	}
 	if image != "" {
 		p.Spec.InitContainers = []corev1.Container{{Name: injection.ContainerName, Image: image}}
+		p.Annotations = map[string]string{injection.InjectedAnnotation: "true"}
 	}
 	return p
 }
@@ -236,5 +237,28 @@ func TestReplacementNotReady(t *testing.T) {
 	}
 	if c := w.condition(); c == nil || c.Status != metav1.ConditionFalse || c.Reason != ReasonPaused || !strings.Contains(c.Message, "traefik/a2") {
 		t.Errorf("condition %+v, want False Paused naming traefik/a2", c)
+	}
+}
+
+// A pod whose engine is in its own spec, not injected, keeps it: the
+// webhook leaves its replacement as it is, so evicting it would only stall
+// the rollout, waiting for an engine image that never comes.
+func TestOwnEngineLeftAlone(t *testing.T) {
+	own := traefikPod("own", "rs1", oldImage)
+	own.Annotations = nil
+	own.Spec.Containers = append(own.Spec.Containers, own.Spec.InitContainers[0])
+	own.Spec.InitContainers = nil
+	w := newWorld(t, wafv1alpha1.RolloutAutomatic, own, traefikPod("b", "rs2", oldImage))
+	w.step()
+	if !slices.Equal(w.evicted, []string{"b"}) {
+		t.Fatalf("evicted %v, want [b]", w.evicted)
+	}
+	w.replace("b2", "rs2", newImage)
+	w.step()
+	if !slices.Equal(w.evicted, []string{"b"}) {
+		t.Errorf("evicted %v; the pod with its own engine should stay", w.evicted)
+	}
+	if c := w.condition(); c == nil || c.Reason != ReasonDone {
+		t.Errorf("condition %+v, want Done", c)
 	}
 }

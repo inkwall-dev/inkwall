@@ -372,7 +372,9 @@ proxy.
   `Automatic`, the leader evicts them, at most one every 10 s, through the Eviction API, so
   PodDisruptionBudgets hold. It evicts only pods of the integrations the Pod webhook injects
   (Traefik, HAProxy, Istio's ingress gateways: Envoy Gateway and Istio's Gateway API deployments
-  roll their own), with a controller to replace them, not opted out. The next eviction waits for
+  roll their own), with a controller to replace them, not opted out, and never a pod whose engine
+  is in its own spec rather than injected: the webhook leaves such a pod as it is, so its
+  replacement would run the same image and stall the rollout. The next eviction waits for
   the last one's workload: the evicted pod gone, a replacement, every pod ready, and each
   replacement with the configured engine image running the bundle published. A refused eviction
   (a budget) or a replacement not ready within 5 minutes (say, the webhook didn't inject it)
