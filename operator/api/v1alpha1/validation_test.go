@@ -164,6 +164,9 @@ func TestWAFPolicyValidation(t *testing.T) {
 		{name: "namespace on a cluster rule set", doc: policy(target + "  ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: crs, namespace: shop}}]\n"), wantErr: "namespace is only allowed for a WAFRuleSet"},
 		{name: "paranoia level 5", doc: policy(target + "  ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: crs}, paranoiaLevel: 5}]\n"), wantErr: "should be less than or equal to 4"},
 		{name: "zero anomaly threshold", doc: policy(target + "  ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: crs}, inboundAnomalyThreshold: 0}]\n"), wantErr: "should be greater than or equal to 1"},
+		{name: "rule set before the CRS", doc: policy(target + "  ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: crs}}, {ref: {kind: WAFRuleSet, name: tune}, placement: BeforeCRS}]\n")},
+		{name: "rule set after the CRS", doc: policy(target + "  ruleSets: [{ref: {kind: WAFRuleSet, name: custom}, placement: AfterCRS}]\n")},
+		{name: "unknown placement", doc: policy(target + "  ruleSets: [{ref: {kind: WAFRuleSet, name: tune}, placement: First}]\n"), wantErr: `Unsupported value: "First"`},
 
 		{name: "exclusion without rules", doc: policy(target + "  exclusions: [{ruleIDs: []}]\n"), wantErr: "should have at least 1 items"},
 		{name: "exclusion of rule 0", doc: policy(target + "  exclusions: [{ruleIDs: [0]}]\n"), wantErr: "should be greater than or equal to 1"},
