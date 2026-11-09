@@ -12,6 +12,7 @@ picture; the [glossary](../glossary.md) defines the terms all of them use.
 | [0005](0005-component-map.md) | Component Map and Rule Engine Choice | Draft | Where each component runs, key flows, why Coraza |
 | [0006](0006-adapter-protocols.md) | Adapter Protocols Primer | Draft | How each proxy asks the engine for a verdict |
 | [0007](0007-inkwall-engine.md) | Inkwall Rule Engine | Draft | Inkwall's own rule engine for the [OWASP Core Rule Set](https://coreruleset.org/) (CRS), to reach the latency budgets |
+| [0008](0008-assistants.md) | Assistants | Draft | `inkwallctl explain`, an MCP server for AI assistants, a docs assistant and a GitHub bot; the security rules for all of them |
 
 There is no 0003: no document with that number was ever published in this repository.
 
