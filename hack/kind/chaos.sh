@@ -108,9 +108,16 @@ kill_leader() {
 
 # The client: the attack through Traefik's Service every 0.2 s, one answer
 # per line, with the time.
+# Each answer is logged as "<epoch s> <uptime s> <code>". mark records both:
+# the epoch for event times, and the kernel's uptime, which the client
+# reads too (/proc/uptime, to 0.01 s; the node shares its kernel), so an
+# answer from earlier in the mark's second isn't the scenario's (#534).
+# It's read on the node, not through the API server, which may be down.
 since=0
-answers() { "${KUBECTL[@]}" -n "$NS" logs client | awk -v s="$since" '$1 >= s { print $2 }'; }
-mark() { since=$(date +%s); }
+since_up=0
+uptime_now() { docker exec "$CLUSTER-control-plane" cut -d' ' -f1 /proc/uptime; }
+answers() { "${KUBECTL[@]}" -n "$NS" logs client | awk -v s="$since_up" '$2 >= s { print $3 }'; }
+mark() { since=$(date +%s); since_up=$(uptime_now); }
 # never_uninspected: no answer since the last mark was the app's (200);
 # the engine's are 403, Traefik's own 500 while it can't reach it.
 never_uninspected() { ! answers | grep -qx 200; }
@@ -175,7 +182,7 @@ spec:
         - >-
           while true; do
           c=\$(curl -s -o /dev/null -m 5 -w '%{http_code}' -H 'Host: $HOST' 'http://$TRAEFIK.$TRAEFIK_NS.svc$SQLI');
-          echo "\$(date +%s) \$c"; sleep 0.2; done
+          echo "\$(date +%s) \$(cut -d' ' -f1 /proc/uptime) \$c"; sleep 0.2; done
 YAML
 "${KUBECTL[@]}" -n "$NS" rollout status deployment/web --timeout=120s >/dev/null
 "${KUBECTL[@]}" -n "$NS" wait --for=condition=Ready pod/client --timeout=120s >/dev/null
@@ -287,11 +294,11 @@ api_down() { ! api_up; }
 eventually "the API server is down" api_down
 mark
 sleep 20
-down_until=$(date +%s)
+down_until_up=$(uptime_now)
 docker exec "$node" mv /etc/kubernetes/kube-apiserver.yaml.chaos /etc/kubernetes/manifests/kube-apiserver.yaml
 eventually_within 180 "the API server is back" api_up
 while_down() {
-  "${KUBECTL[@]}" -n "$NS" logs client | awk -v s="$since" -v u="$down_until" '$1 >= s && $1 <= u { print $2 }' | grep -qx 403
+  "${KUBECTL[@]}" -n "$NS" logs client | awk -v s="$since_up" -v u="$down_until_up" '$2 >= s && $2 <= u { print $3 }' | grep -qx 403
 }
 check "the engine blocked the attack while the API server was down" while_down
 "${KUBECTL[@]}" -n "$OPERATOR_NS" rollout status deployment/inkwall-operator --timeout=300s >/dev/null
