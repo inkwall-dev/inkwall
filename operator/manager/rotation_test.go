@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
@@ -86,12 +87,17 @@ func testKeyRotation(ctx context.Context, t *testing.T, c client.Client) {
 		return s.Annotations[bundle.KeyIDAnnotation], v
 	}
 	// A schedule shorter than an hour is refused.
+	// The operator writes the InkwallConfig's status meanwhile: a conflict
+	// is retried, the refusal is what's checked.
 	cfg := &wafv1alpha1.InkwallConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
-	if err := c.Get(ctx, client.ObjectKeyFromObject(cfg), cfg); err != nil {
-		t.Fatal(err)
-	}
-	cfg.Spec.SigningKey.RotationInterval = &metav1.Duration{Duration: 30 * time.Minute}
-	if err := c.Update(ctx, cfg); err == nil || !strings.Contains(err.Error(), "rotationInterval must be at least 1h") {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := c.Get(ctx, client.ObjectKeyFromObject(cfg), cfg); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Spec.SigningKey.RotationInterval = &metav1.Duration{Duration: 30 * time.Minute}
+		return c.Update(ctx, cfg)
+	})
+	if err == nil || !strings.Contains(err.Error(), "rotationInterval must be at least 1h") {
 		t.Fatalf("a 30m rotation interval: got %v", err)
 	}
 
