@@ -4,6 +4,7 @@
 package telemetry
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -11,6 +12,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/rules"
 )
 
 func scrape(t *testing.T, m *Metrics) string {
@@ -81,6 +84,19 @@ func TestPolicyRequests(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("metrics missing %q", want)
 		}
+	}
+}
+
+// In standalone mode, the one pipeline enforces no policy: its requests
+// count under policy="none".
+func TestPolicyRequestsStandalone(t *testing.T) {
+	m := NewMetrics("proxy")
+	m.EnablePolicyMetrics(0)
+	p := pipeline.New(evaluator{res: rules.Result{Interrupted: true, Status: 403}}, pipeline.Config{Mode: pipeline.ModeBlock, Observer: m})
+	p.Check(context.Background(), &request.Request{})
+	want := `inkwall_policy_requests_total{action="deny",adapter="proxy",policy="none",reason="rule"} 1`
+	if body := scrape(t, m); !strings.Contains(body, want) {
+		t.Errorf("metrics missing %q", want)
 	}
 }
 

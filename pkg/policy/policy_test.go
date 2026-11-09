@@ -6,8 +6,10 @@ package policy
 import (
 	"context"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"runtime"
 	"slices"
@@ -23,6 +25,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/rules"
+	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
 
 const sqli = "?id=1%27%20OR%20%271%27%3D%271"
@@ -856,4 +859,103 @@ func TestBodyLimitClamped(t *testing.T) {
 	if got := set.BodyLimit(req("shop.example.com", "/api/orders"), 5); got != 5 {
 		t.Errorf("BodyLimit(/api, max 5) = %d, want 5", got)
 	}
+}
+
+// scrape returns what m's /metrics serves.
+func scrape(t *testing.T, m *telemetry.Metrics) string {
+	t.Helper()
+	w := httptest.NewRecorder()
+	m.AdminHandler(nil).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	b, _ := io.ReadAll(w.Body)
+	return string(b)
+}
+
+// TestPolicyMetrics: with the policy metrics on, a request a policy checks
+// counts under that policy, its rules', IP lists' and skipped routes'
+// verdicts alike, and once (#535); one no policy covers, under "none".
+func TestPolicyMetrics(t *testing.T) {
+	m := telemetry.NewMetrics("proxy")
+	m.EnablePolicyMetrics(0)
+	b := testBundle()
+	b.Policies[0].IpLists = &bundlev1.IPLists{Deny: []string{"203.0.113.0/24"}}
+	b.Policies[0].Responses = &bundlev1.ResponseConfig{Inspect: true}
+	set, err := Compile(b, Options{Observer: m, BodyLimit: 65536})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	set.Check(ctx, req("shop.example.com", "/"+sqli))
+	denied := req("shop.example.com", "/")
+	denied.ClientIP = netip.MustParseAddr("203.0.113.9")
+	set.Check(ctx, denied)
+	set.Check(ctx, req("shop.example.com", "/api/health"))
+	set.Check(ctx, req("admin.example.com", "/"))
+	set.Check(ctx, req("other.example.com", "/"))
+	v, x := set.CheckExchange(ctx, req("shop.example.com", "/products/42"))
+	if v.Action != pipeline.ActionAllow || x == nil {
+		t.Fatalf("benign request: %v, exchange %v", v.Action, x)
+	}
+	x.CheckResponse(ctx, &request.Response{Status: 200, Headers: http.Header{"Content-Type": {"text/html"}}, Body: []byte("<p>ok</p>")})
+	x.Close()
+
+	body := scrape(t, m)
+	for _, want := range []string{
+		`inkwall_policy_requests_total{action="deny",adapter="proxy",policy="shop/site",reason="rule"} 1`,
+		`inkwall_policy_requests_total{action="deny",adapter="proxy",policy="shop/site",reason="ip-deny"} 1`,
+		`inkwall_policy_requests_total{action="allow",adapter="proxy",policy="shop/site",reason="none"} 1`,
+		`inkwall_policy_requests_total{action="allow",adapter="proxy",policy="shop/api",reason="skipped"} 1`,
+		`inkwall_policy_requests_total{action="allow",adapter="proxy",policy="shop/admin",reason="none"} 1`,
+		`inkwall_policy_requests_total{action="allow",adapter="proxy",policy="none",reason="no-policy"} 1`,
+		`inkwall_requests_total{action="deny",adapter="proxy",reason="rule"} 1`,
+		`inkwall_requests_total{action="allow",adapter="proxy",reason="none"} 2`,
+		`inkwall_responses_total{action="allow",adapter="proxy",reason="none"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics missing %q", want)
+		}
+	}
+	if t.Failed() {
+		t.Logf("metrics:\n%s", grepLines(body, "inkwall_policy_requests_total{", "inkwall_requests_total{", "inkwall_responses_total{"))
+	}
+
+	// Before the first bundle, and with a suspended one, requests count
+	// under "none" too.
+	m = telemetry.NewMetrics("proxy")
+	m.EnablePolicyMetrics(0)
+	h := Holder{Observer: m}
+	h.Check(ctx, req("shop.example.com", "/"))
+	b.Suspended = true
+	if set, err = Compile(b, Options{Observer: m}); err != nil {
+		t.Fatal(err)
+	}
+	h.Store(set)
+	h.Check(ctx, req("shop.example.com", "/"+sqli))
+	if _, x := h.CheckExchange(ctx, req("shop.example.com", "/")); x != nil {
+		t.Error("a suspended set kept an exchange")
+		x.Close()
+	}
+	body = scrape(t, m)
+	for _, want := range []string{
+		`inkwall_policy_requests_total{action="allow",adapter="proxy",policy="none",reason="no-policy"} 1`,
+		`inkwall_policy_requests_total{action="allow",adapter="proxy",policy="none",reason="suspended"} 2`,
+		`inkwall_requests_total{action="allow",adapter="proxy",reason="suspended"} 2`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics missing %q", want)
+		}
+	}
+}
+
+// grepLines returns the lines of s that start with one of prefixes.
+func grepLines(s string, prefixes ...string) string {
+	var out []string
+	for _, l := range strings.Split(s, "\n") {
+		for _, p := range prefixes {
+			if strings.HasPrefix(l, p) {
+				out = append(out, l)
+				break
+			}
+		}
+	}
+	return strings.Join(out, "\n")
 }

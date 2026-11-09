@@ -200,7 +200,10 @@ What changes by itself:
   `inkwall_policy_requests_total` is opt-in. `inkwall_bundle_updates_total` has a `reason` label on
   rejected bundles. WebSocket messages the engine's proxy inspects are counted in
   `inkwall_websocket_messages_total`, no longer in `inkwall_requests_total`, so a dashboard of
-  requests drops on routes with busy WebSockets.
+  requests drops on routes with busy WebSockets. `inkwall_requests_total` now also counts the
+  requests no policy covers (reason `no-policy`, also before the first bundle) and those let
+  through while inspection is suspended (`suspended`), which 0.4 left out (#535): its totals rise
+  by them.
 - **Every denial carries `X-Request-Id`** (#366), the request ID of its security event: the
   engine's reverse proxy and Traefik's ForwardAuth answered without it before, and so did the 400
   for a request an adapter can't read. `InkwallConfig.spec.engine.jsonDenials` (the engine's

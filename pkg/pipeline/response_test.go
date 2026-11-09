@@ -113,13 +113,12 @@ func TestCheckResponse(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := New(&exchangeEvaluator{}, Config{Mode: tt.mode, Responses: ResponseConfig{Inspect: true, MaxBytes: 64, Oversize: tt.oversize}})
+			p := New(&exchangeEvaluator{}, Config{Mode: tt.mode, Policy: "ns/p", Responses: ResponseConfig{Inspect: true, MaxBytes: 64, Oversize: tt.oversize}})
 			v, x := p.CheckExchange(context.Background(), get("/"))
 			if v.Action != ActionAllow || x == nil {
 				t.Fatalf("request: %v, exchange %v", v.Action, x)
 			}
 			defer x.Close()
-			x.OnVerdict("ns/p", nil)
 			got := x.CheckResponse(context.Background(), tt.resp)
 			if got.Action != tt.action || got.Status != tt.status || got.Reason != tt.reason {
 				t.Errorf("verdict %v %d %v, want %v %d %v", got.Action, got.Status, got.Reason, tt.action, tt.status, tt.reason)
