@@ -7,7 +7,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/inkwall-dev/inkwall/pkg/request"
@@ -37,19 +39,22 @@ const (
 )
 
 // CheckWebSocketMessage inspects the text of a message a client sent on
-// the WebSocket that handshake opened, with the policy's rules: as a
-// request with the handshake's URL and headers whose form arguments are
-// the message (request.Request.WebSocketText). A message cut at the
-// body limit (truncated) is handled as an oversized body. A route the
-// policy skips, or whose body it skips, isn't inspected.
+// the WebSocket that handshake opened, with the policy's rules, on its own
+// (#363): as a request whose form arguments are the message
+// (request.Request.WebSocketText), with the handshake's identity (request
+// ID, client IP, host) and path, for exclusions and path rules, but not its
+// query arguments or headers. Those were inspected with the handshake; run
+// again, they would add the handshake's score to every message and count
+// toward the message's argument limit. A message cut at the body limit
+// (truncated) is handled as an oversized body. A route the policy skips,
+// or whose body it skips, isn't inspected.
 func (p *Pipeline) CheckWebSocketMessage(ctx context.Context, handshake *request.Request, text []byte, truncated bool) Verdict {
 	start := time.Now()
 	var v Verdict
 	if p.routes.Decide(handshake.RawURI) != router.InspectAll {
 		v = Verdict{Action: ActionAllow, Reason: ReasonSkipped}
 	} else {
-		msg := *handshake
-		msg.Body, msg.BodyTruncated = nil, false
+		msg := messageRequest(handshake)
 		msg.WebSocketText = messageArgs(text)
 		// No exchange is kept: a message has no response to inspect.
 		if truncated {
@@ -60,10 +65,37 @@ func (p *Pipeline) CheckWebSocketMessage(ctx context.Context, handshake *request
 	}
 	v.Duration = time.Since(start)
 	v.WebSocketMessage = true
+	v.Policy = p.policy
 	if p.observer != nil {
 		p.observer.ObserveVerdict(v)
 	}
 	return v
+}
+
+// messageHeaders are a message's request headers: what a clean request
+// has, so the rules on headers (missing Accept, User-Agent...) add nothing.
+// The handshake's own headers were inspected with it.
+var messageHeaders = http.Header{
+	"Accept":     {"*/*"},
+	"User-Agent": {"inkwall-websocket-message"},
+}
+
+// messageRequest is the request a message of the WebSocket handshake
+// opened is evaluated as: GET of the handshake's path, without its query
+// or headers.
+func messageRequest(handshake *request.Request) request.Request {
+	path, _, _ := strings.Cut(handshake.RawURI, "?")
+	return request.Request{
+		ID:       handshake.ID,
+		Proto:    handshake.Proto,
+		Method:   http.MethodGet,
+		Scheme:   handshake.Scheme,
+		Host:     handshake.Host,
+		RawURI:   path,
+		Headers:  messageHeaders.Clone(),
+		PeerIP:   handshake.PeerIP,
+		ClientIP: handshake.ClientIP,
+	}
 }
 
 // messageArgs returns a message's arguments: a JSON object's or array's

@@ -56,6 +56,13 @@ rules:
   verbs:
   - create
 - apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
   - gateway.networking.k8s.io
   resources:
   - gatewayclasses
@@ -118,6 +125,7 @@ rules:
   - waf.inkwall.dev
   resources:
   - inkwallconfigs
+  - wafiplists
   verbs:
   - get
   - list
@@ -188,6 +196,12 @@ kind: ClusterRole
 metadata:
   name: inkwall-operator-haproxy
 rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods/eviction
+  verbs:
+  - create
 - apiGroups:
   - ingress.v3.haproxy.org
   resources:
@@ -277,6 +291,12 @@ metadata:
   name: inkwall-operator-istio-ingress
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - pods/eviction
+  verbs:
+  - create
+- apiGroups:
   - networking.istio.io
   resources:
   - envoyfilters
@@ -303,6 +323,12 @@ kind: ClusterRole
 metadata:
   name: inkwall-operator-traefik
 rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods/eviction
+  verbs:
+  - create
 - apiGroups:
   - gateway.networking.k8s.io
   resources:

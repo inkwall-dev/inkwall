@@ -21,11 +21,14 @@
 package forwardauth
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"golang.org/x/net/http/httpguts"
 
 	"github.com/inkwall-dev/inkwall/pkg/adapters/internal/httpadapter"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
@@ -60,6 +63,9 @@ type Config struct {
 	// Logger receives one security event per denied or logged request.
 	// Nil uses slog.Default().
 	Logger *slog.Logger
+	// JSONDenials answers a denied client that accepts application/json
+	// with a JSON body (httpadapter.DenialBody); off: text.
+	JSONDenials bool
 	// Metrics counts the requests the adapter can't read (nil: none).
 	Metrics *telemetry.Metrics
 	// Events records each security event for the operator (nil: logged
@@ -75,6 +81,8 @@ type Handler struct {
 	metrics  *telemetry.Metrics
 	logger   *slog.Logger
 	events   *events.Recorder
+	// jsonDenials: Config.JSONDenials.
+	jsonDenials bool
 }
 
 // New returns a Handler that inspects requests with p.
@@ -90,7 +98,7 @@ func New(p pipeline.Inspector, cfg Config) (*Handler, error) {
 	if resolver == nil {
 		resolver = &clientip.Resolver{}
 	}
-	return &Handler{pipeline: p, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events, metrics: cfg.Metrics}, nil
+	return &Handler{pipeline: p, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events, metrics: cfg.Metrics, jsonDenials: cfg.JSONDenials}, nil
 }
 
 // ServeHTTP inspects the request described by r and answers 200 to allow it,
@@ -105,8 +113,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Only a misconfigured proxy sends this; the request can't be
 		// inspected, so it is not let through.
 		h.metrics.AdapterError(telemetry.ErrInvalidRequest)
-		h.logger.LogAttrs(r.Context(), slog.LevelError, "invalid forward-auth request", slog.Any("error", err))
-		http.Error(w, "Bad Request", http.StatusBadRequest)
+		id := httpadapter.NewRequestID()
+		h.logger.LogAttrs(r.Context(), slog.LevelError, "invalid forward-auth request", slog.Any("error", err), slog.String("request_id", id))
+		httpadapter.WriteDenial(w, http.StatusBadRequest, id, r.Header, h.jsonDenials)
 		return
 	}
 
@@ -121,7 +130,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			httpadapter.WriteGRPCDenial(w, g, v.Status, v.Status, req.ID)
 			return
 		}
-		http.Error(w, http.StatusText(v.Status), v.Status)
+		httpadapter.WriteDenial(w, v.Status, req.ID, req.Headers, h.jsonDenials)
 		return
 	}
 	// The proxy copies headers listed in its authResponseHeaders onto the
@@ -138,7 +147,7 @@ func (h *Handler) toRequest(r *http.Request) (*request.Request, string, error) {
 		return nil, "", err
 	}
 	if !httpadapter.IsToken(method) {
-		return nil, "", fmt.Errorf("invalid X-Forwarded-Method %q", method)
+		return nil, "", errors.New("invalid X-Forwarded-Method")
 	}
 	rawURI, err := single(r.Header, "X-Forwarded-Uri")
 	if err != nil {
@@ -151,6 +160,11 @@ func (h *Handler) toRequest(r *http.Request) (*request.Request, string, error) {
 	host, err := optional(r.Header, "X-Forwarded-Host")
 	if err != nil {
 		return nil, "", err
+	}
+	// As the reverse proxy: a Host the rules would read one way and the
+	// application another is refused (#365).
+	if !httpguts.ValidHostHeader(host) {
+		return nil, "", fmt.Errorf("invalid X-Forwarded-Host %q", host)
 	}
 	scheme := "http"
 	if proto, _ := optional(r.Header, "X-Forwarded-Proto"); strings.EqualFold(proto, "https") {

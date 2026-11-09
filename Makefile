@@ -16,20 +16,36 @@ GOVULNCHECK     ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@v1.8.0
 BUF             ?= $(GO) run github.com/bufbuild/buf/cmd/buf@v1.50.0
 CONTROLLER_GEN  ?= $(GO) run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.23.0
 SETUP_ENVTEST   ?= $(GO) run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.2
+# The versions of the proxies and tools under test are in hack/versions.env
+# (#393); version reads one.
+version = $(shell sed -n 's/^$(1)=//p' hack/versions.env)
 # The API server the operator tests run against: the oldest tested Kubernetes
 # version (as KIND_NODE_IMAGE), so CRDs that pass here work on every newer one.
-ENVTEST_K8S_VERSION ?= 1.34.1
+ENVTEST_K8S_VERSION ?= $(call version,ENVTEST_K8S_VERSION)
 
 # Container images and local kind cluster (hack/kind).
 IMAGE           ?= inkwall-engine:dev
 OPERATOR_IMAGE  ?= inkwall-operator:dev
+# IMAGES=ghcr:<version> tests the published images of a release or a release
+# candidate (#389): the kind and Docker tests pull them instead of building
+# this checkout's.
+IMAGES          ?=
+ifneq ($(filter ghcr:%,$(IMAGES)),)
+IMAGE           := ghcr.io/inkwall-dev/inkwall-engine:$(patsubst ghcr:%,%,$(IMAGES))
+OPERATOR_IMAGE  := ghcr.io/inkwall-dev/inkwall-operator:$(patsubst ghcr:%,%,$(IMAGES))
+export PULL_IMAGES := 1
+export SKIP_IMAGE_BUILD := 1
+export SKIP_BUILD := 1
+else ifneq ($(IMAGES),)
+$(error IMAGES must be ghcr:<version>, got $(IMAGES))
+endif
 CHART           ?= deploy/helm/inkwall
 KIND_CLUSTER    ?= inkwall
 # kind, installed into bin/, and the node image of its clusters: the oldest Kubernetes this kind
 # release ships. The Gateway API's CRDs and Envoy Gateway's chart install on it
 # as shipped. CI's e2e job runs kind's newest instead (KIND_NODE_IMAGE empty).
-KIND_VERSION    ?= v0.33.0
-KIND_NODE_IMAGE ?= kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d
+KIND_VERSION    ?= $(call version,KIND_VERSION)
+KIND_NODE_IMAGE ?= $(call version,KIND_NODE_IMAGE)
 KIND_DIR        := $(abspath $(BIN_DIR))/kind-$(KIND_VERSION)
 # kind-upgrade: its own cluster, since it installs a release of its own.
 UPGRADE_CLUSTER ?= inkwall-upgrade
@@ -52,9 +68,11 @@ BASE            ?= origin/main
 # it is the Contributor Covenant 2.1, kept verbatim. The install and verify
 # commands of the READMEs and CONTRIBUTING.md write <version>, never a
 # release, so they don't go stale when the next one ships. docs/monitoring.md
-# names every metric the code registers.
+# names every metric the code registers, and docs/troubleshooting.md every
+# condition reason the operator sets.
 DOCS_CHECK_STRICT ?= -contents-min-lines=80 -require-index -contents-exempt=CODE_OF_CONDUCT.md \
-	-unpinned=README.md,deploy/helm/inkwall/README.md,CONTRIBUTING.md -metrics-doc=docs/monitoring.md
+	-unpinned=README.md,deploy/helm/inkwall/README.md,CONTRIBUTING.md -metrics-doc=docs/monitoring.md \
+	-reasons-doc=docs/troubleshooting.md -versions=hack/versions.env
 DOCS_CHECK        ?= $(GO) run ./hack/docscheck $(DOCS_CHECK_STRICT)
 
 # scale-test: sizes as <policies>x<engines>, one operator each; "full" is 0004 §8's matrix.
@@ -79,8 +97,16 @@ build: ## Build inkwall-engine and inkwallctl into ./bin
 	$(GO) build -trimpath -tags $(GO_TAGS) -o $(BIN_DIR)/inkwall-operator ./cmd/operator
 
 .PHONY: test
-test: ## Run unit tests with the race detector (operator tests run against a local API server, envtest)
+test: ## Run unit tests with the race detector (operator tests run against a local API server, envtest), and the adapter parity test (test/crs)
 	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" $(GO) test -race -count=1 ./...
+	@# Adapter parity (#365): every adapter against the reverse proxy, in test/crs's module.
+	cd test/crs && $(GO) test -count=1 -run '^TestAdapterParity$$' .
+
+.PHONY: stress-test
+stress-test: ## Tests under stress, for timing flakes: -race -shuffle -count=10, GOMAXPROCS=2, CPU hogs (STRESS_PACKAGES; SEED, COUNT, HOGS: hack/ci/stress.sh)
+	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" hack/ci/stress.sh $(STRESS_PACKAGES)
+
+STRESS_PACKAGES ?= ./pkg/adapters/... ./pkg/agent/... ./pkg/pipeline/... ./operator/...
 
 .PHONY: scale-test
 scale-test: ## Operator scale test with fake engines, in envtest (SCALE=<policies>x<engines>, default 100x50; SCALE=full; SCALE=wiring[:<policies>] for the wiring controller)
@@ -98,19 +124,39 @@ bench: ## Run benchmarks (BENCH=regexp COUNT=n)
 bench-compare: ## Compare benchmarks of changed packages with BASE (origin/main); fail on a repeated significant regression over 5%
 	BENCH='$(BENCH)' hack/bench/compare.sh $(BASE)
 
+.PHONY: gitops-health-test
+gitops-health-test: ## Test the Argo CD health checks and Flux healthCheckExprs of examples/ (hack/gitopshealth)
+	cd hack/gitopshealth && $(GO) test -count=1 ./...
+
 .PHONY: crs-test
-crs-test: ## Run the OWASP CRS regression suite through the proxy (test/crs)
+crs-test: ## Run the OWASP CRS regression suite through each adapter, and the response rules through ext_proc (test/crs)
 	cd test/crs && $(GO) test -count=1 -timeout 30m -v ./...
 
 
 .PHONY: lint
-lint: workflow-check ## Run golangci-lint, and check the workflows' runners
+lint: workflow-check versions-check lint-scripts ## Run golangci-lint, check the workflows' runners, that versions come from hack/versions.env, and lint the workflows and the shell scripts
 	$(GOLANGCI_LINT) run ./...
+
+# The workflows' and scripts' linters (#398). shellcheck (also actionlint's)
+# and zizmor run from their images when they aren't installed.
+ACTIONLINT ?= $(GO) run github.com/rhysd/actionlint/cmd/actionlint@$(call version,ACTIONLINT_VERSION) -shellcheck=$(CURDIR)/hack/shellcheck.sh
+SHELLCHECK ?= hack/shellcheck.sh
+ZIZMOR     ?= $(if $(shell command -v zizmor),zizmor,docker run --rm -v $(CURDIR):/repo -w /repo ghcr.io/zizmorcore/zizmor:$(call version,ZIZMOR_VERSION))
+
+.PHONY: lint-scripts
+lint-scripts: ## Lint the workflows (actionlint, zizmor; findings triaged in .github/zizmor.yml) and the shell scripts (shellcheck)
+	$(ACTIONLINT)
+	$(ZIZMOR) --offline --config .github/zizmor.yml .github/workflows
+	$(SHELLCHECK) -x $$(git ls-files '*.sh')
 
 # The runner every CI job runs on: a fixed Ubuntu release, never
 # ubuntu-latest, which GitHub moves to the next LTS unannounced (#400). Move
 # to the next one in a PR of its own, which runs the whole suite.
-CI_RUNNER ?= ubuntu-24.04
+CI_RUNNER ?= $(call version,CI_RUNNER)
+
+.PHONY: versions-check
+versions-check: ## Check that the versions under test are pinned in hack/versions.env only
+	hack/versions-check.sh
 
 .PHONY: workflow-check
 workflow-check: ## Check that every workflow job runs on CI_RUNNER
@@ -168,7 +214,7 @@ helm-lint: ## Lint the Helm chart, render it with each webhook certificate mode,
 	helm lint --strict $(CHART) --set metrics.forceMonitoringObjects=true --set metrics.serviceMonitor.enabled=true \
 		--set metrics.podMonitor.enabled=true --set metrics.prometheusRule.enabled=true --set metrics.dashboard.enabled=true
 	CHART=$(CHART) hack/helm-test.sh
-	@# What the chart looks up in a cluster, against envtest.
+	@# What the chart looks up in a cluster, and helm upgrade --reuse-values from 0.4.x (pulled from ghcr.io), against envtest.
 	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" CHART=$(abspath $(CHART)) $(GO) test -count=1 ./hack/helmcheck
 
 .PHONY: tidy
@@ -177,7 +223,25 @@ tidy: ## Tidy go.mod and go.sum, here and in test/crs (which builds against this
 	cd test/crs && $(GO) mod tidy
 
 .PHONY: check
-check: lint test vuln docs-check ## Run everything CI runs
+check: lint test vuln docs-check ## Fast checks before a push: lint, unit tests, vulnerability scan, docs (make check-all: every PR job of CI)
+
+.PHONY: generate-check
+generate-check: generate ## Regenerate the code, CRDs and chart files, and fail if they differ from the committed ones (as CI's generate job)
+	git diff --exit-code
+
+.PHONY: check-all
+check-all: ## Run every job CI runs on a pull request, one after another: hours, and needs Docker and kind (CONTRIBUTING.md#development-and-testing)
+	$(MAKE) check
+	$(MAKE) scale-test SCALE_CHANGES=5
+	$(MAKE) scale-test SCALE=wiring:500
+	$(MAKE) build test-examples generate-check helm-lint monitoring-test release-check crs-test
+	$(MAKE) bench-compare
+	$(MAKE) image
+	$(MAKE) raw-envoy-e2e
+	SKIP_BUILD=1 $(MAKE) websocket-e2e
+	$(MAKE) haproxy-e2e
+	$(MAKE) kind-e2e
+	$(MAKE) kind-upgrade
 
 .PHONY: image
 image: ## Build the engine and operator container images (IMAGE=name:tag, OPERATOR_IMAGE=name:tag)
@@ -186,14 +250,14 @@ image: ## Build the engine and operator container images (IMAGE=name:tag, OPERAT
 
 .PHONY: release-snapshot
 release-snapshot: ## Build the release binaries and archives into ./dist, as a tag would, without signing or publishing
-	$(GORELEASER) release --snapshot --clean --skip=sign,publish
+	$(GORELEASER) release --snapshot --clean --skip=sign,publish,sbom
 
 .PHONY: release-check
 release-check: ## Check the goreleaser configuration
 	$(GORELEASER) check
 
 # The kind targets, and the scripts they run, use the kind of KIND_VERSION.
-KIND_TARGETS := kind-cluster kind-up kind-operator kind-e2e kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-response-load kind-upgrade kind-down
+KIND_TARGETS := kind-quickstart kind-cluster kind-up kind-operator kind-chaos kind-e2e kind-e2e-traefik kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-e2e-networkpolicy kind-response-load kind-upgrade kind-down
 $(KIND_TARGETS): export PATH := $(KIND_DIR):$(PATH)
 $(KIND_TARGETS): $(KIND_DIR)/kind
 
@@ -216,14 +280,21 @@ kind-operator: ## Build the operator image, install the Helm chart on the kind c
 
 .PHONY: kind-e2e
 kind-e2e: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
-kind-e2e: kind-operator ## End-to-end test on kind: a WAFPolicy is enforced by an engine in bundle mode, through Traefik, raw Envoy, Envoy Gateway, Istio and HAProxy (installs the operator first)
-	@# kind-operator built and loaded the engine image.
+kind-e2e: ## End-to-end test on kind: a WAFPolicy is enforced by an engine in bundle mode, through Traefik, raw Envoy, Envoy Gateway, Istio and HAProxy, one after another (CI runs them as separate jobs)
+	@# Each installs the operator first and ends with an uninstall. The
+	@# images are built once: SKIP_IMAGE_BUILD for the others.
+	$(MAKE) kind-e2e-traefik
+	SKIP_IMAGE_BUILD=1 $(MAKE) kind-e2e-raw-envoy
+	SKIP_IMAGE_BUILD=1 $(MAKE) kind-e2e-envoy-gateway
+	SKIP_IMAGE_BUILD=1 $(MAKE) kind-e2e-istio
+	SKIP_IMAGE_BUILD=1 $(MAKE) kind-e2e-haproxy
+	SKIP_IMAGE_BUILD=1 $(MAKE) kind-e2e-networkpolicy
+
+.PHONY: kind-e2e-traefik
+kind-e2e-traefik: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
+kind-e2e-traefik: kind-operator ## End-to-end test on kind through Traefik: a WAFPolicy enforced by an engine in bundle mode, the control plane, signing key rotation, suspension (installs the operator first)
+	@# kind-operator built (or, with SKIP_IMAGE_BUILD, found) and loaded the engine image.
 	KIND_CLUSTER=$(KIND_CLUSTER) IMAGE=$(IMAGE) SKIP_BUILD=1 hack/kind/e2e.sh
-	@# e2e.sh ends with an uninstall, as does each of these.
-	$(MAKE) kind-e2e-raw-envoy
-	$(MAKE) kind-e2e-envoy-gateway
-	$(MAKE) kind-e2e-istio
-	$(MAKE) kind-e2e-haproxy
 
 .PHONY: kind-e2e-raw-envoy
 kind-e2e-raw-envoy: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
@@ -234,6 +305,10 @@ kind-e2e-raw-envoy: kind-operator ## End-to-end test on kind of raw Envoy with t
 kind-e2e-envoy-gateway: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
 kind-e2e-envoy-gateway: kind-operator ## End-to-end test on kind through Envoy Gateway and Traefik with one WAFPolicy, ending with an uninstall (installs the operator first)
 	KIND_CLUSTER=$(KIND_CLUSTER) hack/kind/envoy-gateway-e2e.sh
+
+.PHONY: kind-e2e-networkpolicy
+kind-e2e-networkpolicy: kind-operator ## End-to-end test on kind of the chart's NetworkPolicies under a default deny: webhook, injection, distribution, metrics (installs the operator first)
+	KIND_CLUSTER=$(KIND_CLUSTER) CHART=$(CHART) hack/kind/networkpolicy-e2e.sh
 
 .PHONY: kind-response-load
 kind-response-load: kind-operator ## Load test on kind through Envoy Gateway, response inspection off vs. on: p50/p99 latency and engine RSS (installs the operator first; CONCURRENCY, DURATION, OUT)
@@ -249,6 +324,11 @@ kind-e2e-haproxy: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
 kind-e2e-haproxy: kind-operator ## End-to-end test on kind through the HAProxy Kubernetes Ingress Controller with one WAFPolicy, ending with an uninstall (installs the operator first)
 	KIND_CLUSTER=$(KIND_CLUSTER) hack/kind/haproxy-e2e.sh
 
+.PHONY: kind-chaos
+kind-chaos: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
+kind-chaos: kind-operator ## The operator's failure modes on kind (hack/kind/chaos.sh): leader changes in a key rotation, the operator down, its Secrets deleted, the API server stopped, an expired webhook certificate (installs the operator first)
+	KIND_CLUSTER=$(KIND_CLUSTER) hack/kind/chaos.sh
+
 .PHONY: kind-upgrade
 kind-upgrade: ## Upgrade test on kind: helm upgrade from the last release to this checkout keeps routes protected, uninstall restores them (own cluster, UPGRADE_CLUSTER)
 	UPGRADE_CLUSTER=$(UPGRADE_CLUSTER) KIND_NODE_IMAGE=$(KIND_NODE_IMAGE) OPERATOR_IMAGE=$(OPERATOR_IMAGE) IMAGE=$(IMAGE) CHART=$(CHART) hack/kind/upgrade.sh
@@ -260,7 +340,7 @@ kind-test: ## Send benign and attack requests to the kind demo and check verdict
 
 .PHONY: haproxy-e2e
 haproxy-e2e: ## End-to-end test of HAProxy with the engine's SPOE agent and the examples/haproxy samples, in Docker (no cluster; Linux)
-	hack/haproxy/e2e.sh
+	ENGINE_IMAGE=$(IMAGE) hack/haproxy/e2e.sh
 
 .PHONY: raw-envoy-e2e
 raw-envoy-e2e: ## End-to-end test of raw Envoy with the engine's ext_proc adapter and the examples/raw-envoy samples, in Docker (no cluster)
@@ -269,6 +349,14 @@ raw-envoy-e2e: ## End-to-end test of raw Envoy with the engine's ext_proc adapte
 .PHONY: websocket-e2e
 websocket-e2e: ## End-to-end test of WebSocket message inspection by the engine's proxy, with hack/wsecho, in Docker (no cluster)
 	IMAGE=$(IMAGE) hack/websocket/e2e.sh
+
+.PHONY: kind-quickstart
+kind-quickstart: ## Run docs/quickstart.md on a kind cluster of its own, with the released chart and images (needs network; CI runs it nightly)
+	hack/kind/quickstart.sh
+
+.PHONY: test-examples
+test-examples: ## Check each examples/<proxy> WAFPolicy with inkwallctl test --policy: benign requests allowed, attacks denied (examples/tests); run the example suite (inkwallctl test --suite)
+	hack/examples-test.sh
 
 .PHONY: kind-down
 kind-down: ## Delete the kind cluster

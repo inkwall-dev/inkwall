@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/inkwall-dev/inkwall/pkg/iplist"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/router"
 	"github.com/inkwall-dev/inkwall/pkg/rules"
@@ -110,6 +111,10 @@ type Config struct {
 	Oversize OversizeAction
 	// Observer, if set, is told about every verdict (metrics).
 	Observer Observer
+	// Policy is the policy the pipeline enforces, in bundle mode
+	// ("namespace/name"): its verdicts name it (Verdict.Policy), before the
+	// Observer is told about them. Empty in standalone mode.
+	Policy string
 	// Routes decides which paths skip inspection entirely or skip only body
 	// inspection (tier T0). Nil inspects everything.
 	Routes *router.Table
@@ -127,6 +132,16 @@ type Config struct {
 	// Responses configures response inspection; the zero value inspects
 	// none.
 	Responses ResponseConfig
+	// IPDeny and IPAllow are the policy's IP lists (#358), checked on the
+	// resolved client IP before anything else: a client in IPDeny is
+	// denied (logged in detect mode) with ReasonIPDeny, one in IPAllow and
+	// not in IPDeny is let through uninspected with ReasonIPAllow. Nil:
+	// none.
+	IPDeny, IPAllow *iplist.Set
+	// DenyGRPC denies a request with a gRPC or gRPC-Web content type
+	// (logged in detect mode) with ReasonGRPC, before the rules: for routes
+	// that serve no gRPC (#367).
+	DenyGRPC bool
 }
 
 // ResponseConfig configures response inspection.
@@ -204,8 +219,12 @@ type Pipeline struct {
 	adm      *Admission
 	oversize OversizeAction
 	observer Observer
+	policy   string
 	routes   *router.Table
 	ws       *WebSocketRules
+	ipDeny   *iplist.Set
+	ipAllow  *iplist.Set
+	denyGRPC bool
 	// responses: Inspect, MaxBytes, and Oversize resolved for the mode.
 	responses ResponseConfig
 	// grpcMessages: the text in gRPC calls' messages is inspected.
@@ -231,8 +250,12 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 		adm:      adm,
 		oversize: cfg.Oversize.Resolve(cfg.Mode),
 		observer: cfg.Observer,
+		policy:   cfg.Policy,
 		routes:   cfg.Routes,
 		ws:       cfg.WebSocket,
+		ipDeny:   cfg.IPDeny,
+		ipAllow:  cfg.IPAllow,
+		denyGRPC: cfg.DenyGRPC,
 		responses: ResponseConfig{
 			Inspect:  cfg.Responses.Inspect,
 			MaxBytes: max(cfg.Responses.MaxBytes, 0),
@@ -247,10 +270,22 @@ var _ Inspector = (*Pipeline)(nil)
 // BodyLimit implements Inspector: max, or 0 for a path whose body is
 // skipped, so adapters don't buffer bodies that aren't inspected.
 func (p *Pipeline) BodyLimit(r *request.Request, max int64) int64 {
-	if p.routes.Decide(r.RawURI) != router.InspectAll {
+	if p.routes.Decide(r.RawURI) != router.InspectAll || p.ipListed(r) != ReasonNone || p.denyGRPC && p.mode == ModeBlock && GRPCContentType(r) {
 		return 0
 	}
 	return max
+}
+
+// ipListed returns ReasonIPDeny for a client in the deny list,
+// ReasonIPAllow for one in the allow list only, ReasonNone otherwise.
+func (p *Pipeline) ipListed(r *request.Request) Reason {
+	switch {
+	case p.ipDeny.Contains(r.ClientIP):
+		return ReasonIPDeny
+	case p.ipAllow.Contains(r.ClientIP):
+		return ReasonIPAllow
+	}
+	return ReasonNone
 }
 
 // Admission returns the pipeline's admission limit.
@@ -292,6 +327,7 @@ func (p *Pipeline) checkRequest(ctx context.Context, r *request.Request, keep bo
 	start := time.Now()
 	v, x := p.check(ctx, r, keep)
 	v.Duration = time.Since(start)
+	v.Policy = p.policy
 	if p.observer != nil {
 		p.observer.ObserveVerdict(v)
 	}
@@ -303,6 +339,12 @@ func (p *Pipeline) checkRequest(ctx context.Context, r *request.Request, keep bo
 }
 
 func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool) (Verdict, rules.Exchange) {
+	switch p.ipListed(r) {
+	case ReasonIPDeny:
+		return p.enforce(Verdict{Reason: ReasonIPDeny}, http.StatusForbidden), nil
+	case ReasonIPAllow:
+		return Verdict{Action: ActionAllow, Reason: ReasonIPAllow}, nil
+	}
 	switch p.routes.Decide(r.RawURI) {
 	case router.SkipAll:
 		return Verdict{Action: ActionAllow, Reason: ReasonSkipped}, nil
@@ -321,9 +363,18 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool) (Ve
 	if ws && p.mode == ModeBlock {
 		return p.enforce(Verdict{Reason: ReasonWebSocket}, http.StatusForbidden), nil
 	}
+	// gRPC on a route that serves none, as the WebSocket rules.
+	grpc := p.denyGRPC && GRPCContentType(r)
+	if grpc && p.mode == ModeBlock {
+		return p.enforce(Verdict{Reason: ReasonGRPC}, http.StatusForbidden), nil
+	}
 	v, x := p.inspect(ctx, r, keep)
 	if ws && v.Reason == ReasonNone {
 		v.Reason = ReasonWebSocket
+		v = p.enforce(v, http.StatusForbidden)
+	}
+	if grpc && v.Reason == ReasonNone {
+		v.Reason = ReasonGRPC
 		v = p.enforce(v, http.StatusForbidden)
 	}
 	return v, x
@@ -378,6 +429,12 @@ func (p *Pipeline) partly(ctx context.Context, r *request.Request, keep bool) (V
 // request returns the evaluation of r, kept for the response if keep.
 func (p *Pipeline) request(r *request.Request, keep bool) func(context.Context) outcome {
 	return func(ctx context.Context) outcome {
+		// Detect mode lets every request through, so a flagged one's
+		// response reaches the client too: inspect it (#360).
+		if de, ok := p.eval.(rules.DetectingEvaluator); ok && keep && p.mode == ModeDetect {
+			res, x, err := de.EvaluateExchangeDetecting(ctx, r)
+			return outcome{res: res, x: x, err: err}
+		}
 		if ee, ok := p.eval.(rules.ExchangeEvaluator); ok && keep {
 			res, x, err := ee.EvaluateExchange(ctx, r)
 			return outcome{res: res, x: x, err: err}

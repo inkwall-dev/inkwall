@@ -4,8 +4,10 @@
 package distribution
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -13,9 +15,11 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/errgroup"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -134,39 +138,66 @@ func Enforced(version int64, engines []Engine, leftOut int) (metav1.ConditionSta
 // needs; nil when there is none. An engine whose version isn't a release
 // (a development build) counts as new enough.
 func outdatedEngine(p *wafv1alpha1.WAFPolicy, engines []Engine) (*Engine, string, string) {
-	var field string
-	var need [3]int
-	if w := p.Spec.WebSocket; w != nil && (len(w.AllowedOrigins) > 0 || len(w.RequiredHeaders) > 0) {
-		field, need = "spec.webSocket", [3]int{0, 4, 0}
-	}
-	if b := p.Spec.Body; field == "" && b != nil && b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect {
-		field, need = "spec.body.grpcMessages", [3]int{0, 4, 0}
-	}
-	if r := p.Spec.Responses; field == "" && r != nil && r.Inspect {
-		// An older engine inspects requests only (#274).
-		field, need = "spec.responses", [3]int{0, 4, 0}
-	}
-	for i, b := range p.Spec.RuleSets {
-		if field == "" && !b.CRS.IsZero() {
-			// An older engine keeps the CRS's defaults (#352).
-			field, need = fmt.Sprintf("spec.ruleSets[%d].crs", i), [3]int{0, 5, 0}
-		}
-	}
-	for i, e := range p.Spec.Exclusions {
-		if field == "" && e.When.Target() {
-			// An older engine ignores the exclusion (#357).
-			field, need = fmt.Sprintf("spec.exclusions[%d].when", i), [3]int{0, 5, 0}
-		}
-	}
+	field, need := requirement(p)
 	if field == "" {
 		return nil, "", ""
 	}
 	for i := range engines {
-		if v, ok := releaseVersion(engines[i].EngineVersion); ok && slices.Compare(v[:], need[:]) < 0 {
+		if tooOld(engines[i], need) {
 			return &engines[i], field, fmt.Sprintf("%d.%d.%d", need[0], need[1], need[2])
 		}
 	}
 	return nil, "", ""
+}
+
+// tooOld reports whether e runs a release older than need.
+func tooOld(e Engine, need [3]int) bool {
+	v, ok := releaseVersion(e.EngineVersion)
+	return ok && slices.Compare(v[:], need[:]) < 0
+}
+
+// requirement returns the field p sets that needs the newest engine (an
+// older engine ignores it), and that version; "" when there is none. Of
+// fields needing the same version, the first.
+func requirement(p *wafv1alpha1.WAFPolicy) (string, [3]int) {
+	var field string
+	var need [3]int
+	set := func(f string, v [3]int) {
+		if field == "" || slices.Compare(v[:], need[:]) > 0 {
+			field, need = f, v
+		}
+	}
+	if w := p.Spec.WebSocket; w != nil && (len(w.AllowedOrigins) > 0 || len(w.RequiredHeaders) > 0) {
+		set("spec.webSocket", [3]int{0, 4, 0})
+	}
+	if b := p.Spec.Body; b != nil && b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect {
+		set("spec.body.grpcMessages", [3]int{0, 4, 0})
+	}
+	if b := p.Spec.Body; b != nil && b.GRPC == wafv1alpha1.GRPCDeny {
+		// An older engine lets gRPC through (#367).
+		set("spec.body.grpc", [3]int{0, 5, 0})
+	}
+	if r := p.Spec.Responses; r != nil && r.Inspect {
+		// An older engine inspects requests only (#274).
+		set("spec.responses", [3]int{0, 4, 0})
+	}
+	for i, b := range p.Spec.RuleSets {
+		if !b.CRS.IsZero() {
+			// An older engine keeps the CRS's defaults (#352).
+			set(fmt.Sprintf("spec.ruleSets[%d].crs", i), [3]int{0, 5, 0})
+		}
+	}
+	if l := p.Spec.IPLists; l != nil && (len(l.Allow) > 0 || len(l.Deny) > 0) {
+		// An older engine ignores the lists (#358).
+		set("spec.ipLists", [3]int{0, 5, 0})
+	}
+	for i, e := range p.Spec.Exclusions {
+		if e.When.Target() {
+			// An older engine ignores the exclusion (#357).
+			set(fmt.Sprintf("spec.exclusions[%d].when", i), [3]int{0, 5, 0})
+		}
+	}
+	return field, need
 }
 
 // releaseVersion parses "MAJOR.MINOR.PATCH", with or without a leading
@@ -224,6 +255,9 @@ func Ready(conds []metav1.Condition, generation int64) metav1.Condition {
 		Message: "accepted, programmed into the proxy and enforced by every engine", ObservedGeneration: generation}
 }
 
+// DefaultConfigEvery is the Reporter's default ConfigEvery.
+const DefaultConfigEvery = 5 * time.Second
+
 // statusWriters is how many policy statuses the Reporter writes at once.
 const statusWriters = 8
 
@@ -242,6 +276,14 @@ type Reporter struct {
 	// Served maps policies to the pods that serve them; nil: every engine
 	// counts for every policy.
 	Served *ServedPods
+	// ConfigEvery is the least time between two writes of the engine
+	// counts to the InkwallConfig's status, so engines connecting don't
+	// churn it; 0: DefaultConfigEvery.
+	ConfigEvery time.Duration
+	// Now is the clock; nil: time.Now.
+	Now func() time.Time
+
+	lastConfigWrite time.Time
 }
 
 // Start implements manager.Runnable.
@@ -295,6 +337,9 @@ func (r *Reporter) report(ctx context.Context) error {
 	for k, n := range counts {
 		engineCount.WithLabelValues(k[0], k[1]).Set(n)
 	}
+	if err := r.writeConfig(ctx, engineCounts(engines, leftOut, latest, policies.Items)); err != nil {
+		return err
+	}
 
 	// Most policies don't change; those that do are written 8 at a time,
 	// like the bundle builder's writes.
@@ -319,6 +364,60 @@ func (r *Reporter) report(ctx context.Context) error {
 		g.Go(func() error { return r.write(gctx, p, version, suspended, mine, leftOut) })
 	}
 	return g.Wait()
+}
+
+// engineCounts counts the engines by the bundle they run (latest is the
+// one served), and those older than the newest release a field of some
+// policy needs. Engines left out of their replica's report count as
+// connected only.
+func engineCounts(engines []Engine, leftOut int, latest uint64, policies []wafv1alpha1.WAFPolicy) *wafv1alpha1.EngineCounts {
+	n := &wafv1alpha1.EngineCounts{Connected: int32(min(len(engines)+leftOut, math.MaxInt32))} // #nosec G115 -- bounded
+	var need [3]int
+	for i := range policies {
+		if f, v := requirement(&policies[i]); f != "" && slices.Compare(v[:], need[:]) > 0 {
+			need = v
+		}
+	}
+	for _, e := range engines {
+		switch {
+		case e.Applied >= latest:
+			n.Current++
+		case e.Rejected >= latest:
+			n.Rejected++
+		default:
+			n.Behind++
+		}
+		if tooOld(e, need) {
+			n.Outdated++
+		}
+	}
+	return n
+}
+
+// writeConfig writes the engine counts to the InkwallConfig's status when
+// they changed, at most once per ConfigEvery: a later report writes what a
+// skipped one would have.
+func (r *Reporter) writeConfig(ctx context.Context, counts *wafv1alpha1.EngineCounts) error {
+	now := time.Now
+	if r.Now != nil {
+		now = r.Now
+	}
+	if !r.lastConfigWrite.IsZero() && now().Sub(r.lastConfigWrite) < cmp.Or(r.ConfigEvery, DefaultConfigEvery) {
+		return nil
+	}
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var cfg wafv1alpha1.InkwallConfig
+		if err := r.Client.Get(ctx, types.NamespacedName{Name: "default"}, &cfg); err != nil {
+			return err
+		}
+		if apiequality.Semantic.DeepEqual(cfg.Status.Engines, counts) {
+			return nil
+		}
+		cfg.Status.Engines = counts
+		r.lastConfigWrite = now()
+		return r.Client.Status().Update(ctx, &cfg)
+	})
+	return client.IgnoreNotFound(err)
 }
 
 // enforcedConditions returns p's conditions with Enforced and Ready set

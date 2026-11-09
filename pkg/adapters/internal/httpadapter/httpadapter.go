@@ -10,7 +10,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/netip"
@@ -102,7 +101,7 @@ func IsEvent(v pipeline.Verdict) bool {
 		return true
 	}
 	switch v.Reason {
-	case pipeline.ReasonNone, pipeline.ReasonCanceled, pipeline.ReasonSkipped, pipeline.ReasonNoPolicy, pipeline.ReasonSuspended:
+	case pipeline.ReasonNone, pipeline.ReasonCanceled, pipeline.ReasonSkipped, pipeline.ReasonNoPolicy, pipeline.ReasonSuspended, pipeline.ReasonIPAllow:
 		return false
 	}
 	return true
@@ -172,14 +171,16 @@ func URIPath(rawURI string) (string, error) {
 		return rawURI, nil
 	}
 	if !strings.HasPrefix(rawURI, "/") {
-		return "", fmt.Errorf("request target %q is not in origin form", rawURI)
+		return "", errors.New("request target is not in origin form")
 	}
 	if strings.ContainsRune(rawURI, '#') {
 		return "", errors.New("request target contains a fragment")
 	}
 	u, err := url.ParseRequestURI(rawURI)
 	if err != nil {
-		return "", fmt.Errorf("request target: %w", err)
+		// Not url's error: it quotes the target, whose query may carry a
+		// secret, and adapters log it.
+		return "", errors.New("request target doesn't parse")
 	}
 	return u.Path, nil
 }

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -73,14 +74,27 @@ func testIstioIngress(ctx context.Context, t *testing.T, c client.Client) {
 			return ""
 		}
 	}
+	// filter is the specs of the gateway pods' EnvoyFilters: the base one,
+	// which must exist, and its shards (#424).
 	filter := func() (string, error) {
 		u := &unstructured.Unstructured{}
 		u.SetGroupVersionKind(wiring.EnvoyFilterGVK)
 		if err := c.Get(ctx, types.NamespacedName{Namespace: gw, Name: "inkwall-istio-ingress"}, u); err != nil {
 			return "", err
 		}
-		raw, _ := json.Marshal(u.Object["spec"])
-		return string(raw), nil
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(wiring.EnvoyFilterGVK.GroupVersion().WithKind("EnvoyFilterList"))
+		if err := c.List(ctx, list, client.InNamespace(gw)); err != nil {
+			return "", err
+		}
+		var specs []string
+		for _, f := range list.Items {
+			if strings.HasPrefix(f.GetName(), "inkwall-istio-ingress") {
+				raw, _ := json.Marshal(f.Object["spec"])
+				specs = append(specs, string(raw))
+			}
+		}
+		return strings.Join(specs, "\n"), nil
 	}
 	filterHas := func(want []string, not ...string) func() string {
 		return func() string {
@@ -145,6 +159,12 @@ http:
 	if err := c.Create(ctx, pod); err != nil {
 		t.Fatal(err)
 	}
+	// An address, for the operator's probe (#372; the test's prober
+	// answers as the engine would).
+	pod.Status.PodIP = "10.0.0.31"
+	if err := c.Status().Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
 	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), pod); err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +200,17 @@ http:
 	if err := c.Create(ctx, farPod); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "WiringFailed with a pod outside the proxy namespaces", programmed(metav1.ConditionFalse, wiring.ReasonWiringFailed, "istio-far/gw-far"))
+	// That pod is outside the operator's cache, so its creation brings no
+	// reconcile: a VirtualService event does.
+	eventually(t, "WiringFailed with a pod outside the proxy namespaces", func() string {
+		vs := &unstructured.Unstructured{}
+		vs.SetGroupVersionKind(wiring.IstioVirtualServiceGVK)
+		if err := c.Get(ctx, client.ObjectKeyFromObject(web), vs); err == nil {
+			vs.SetLabels(map[string]string{"touched": strings.ReplaceAll(time.Now().Format("150405.000"), ".", "")})
+			_ = c.Update(ctx, vs)
+		}
+		return programmed(metav1.ConditionFalse, wiring.ReasonWiringFailed, "istio-far/gw-far")()
+	})
 	if err := c.Delete(ctx, farPod); err != nil {
 		t.Fatal(err)
 	}

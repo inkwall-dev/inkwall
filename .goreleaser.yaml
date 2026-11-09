@@ -55,6 +55,12 @@ archives:
 checksum:
   name_template: checksums.txt
 
+# An SPDX SBOM per archive, by syft (installed by the release workflow),
+# published with the release: <archive>.sbom.json (#392). The archives'
+# build provenance is attested by the workflow (gh attestation verify).
+sboms:
+  - artifacts: archive
+
 # The checksums are signed keyless with the workflow's identity; verify:
 #   cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
 #     --certificate-identity-regexp '^https://github.com/inkwall-dev/inkwall/\.github/workflows/release\.yaml@refs/tags/v' \

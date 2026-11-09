@@ -21,6 +21,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# The versions under test (#393).
+# shellcheck source=hack/versions.env
+. hack/versions.env
 
 CLUSTER=${KIND_CLUSTER:-inkwall}
 OPERATOR_NS=inkwall-system
@@ -28,7 +31,6 @@ OPERATOR_NS=inkwall-system
 # and the apps'.
 NS=haproxy-e2e
 # Controller v3.2.19 (HAProxy 3.2), from its chart.
-HAPROXY_CHART_VERSION=1.54.4
 HAPROXY_IMAGE_TAG=3.2.19
 HAPROXY_REPO=https://haproxytech.github.io/helm-charts
 CLASS=haproxy-e2e
@@ -40,30 +42,9 @@ KUBECTL=(kubectl --context "kind-$CLUSTER")
 HELM=(helm --kube-context "kind-$CLUSTER")
 SQLI='/?id=1%27%20OR%20%271%27%3D%271'
 
-failures=0
-ok() { printf 'ok    %s\n' "$1"; }
-fail() {
-  printf 'FAIL  %s\n' "$1"
-  failures=$((failures + 1))
-}
-check() {
-  local what=$1
-  shift
-  if "$@" >/dev/null 2>&1; then ok "$what"; else fail "$what"; fi
-}
-# eventually DESCRIPTION COMMAND...: retries for up to 3 minutes.
-eventually() {
-  local what=$1
-  shift
-  for _ in $(seq 360); do
-    if "$@" >/dev/null 2>&1; then
-      ok "$what"
-      return 0
-    fi
-    sleep 0.5
-  done
-  fail "$what"
-}
+# eventually retries for up to 3 minutes.
+EVENTUALLY_TRIES=360
+. hack/kind/lib.sh
 
 if ! "${KUBECTL[@]}" -n "$OPERATOR_NS" get deployment/inkwall-operator >/dev/null 2>&1; then
   echo "the operator is not installed: run make kind-operator first" >&2
@@ -100,7 +81,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: traefik/whoami:v1.10.3
+          image: traefik/whoami:$WHOAMI_VERSION
           # --verbose logs each request: the held-body check looks for one.
           args: ["--port", "8080", "--verbose"]
 ---
@@ -231,7 +212,7 @@ check "an attack in a body is blocked" all_are 403 "$HOST" / --data-urlencode "q
 mark=/held-$RANDOM$RANDOM
 check "a body attack on a marked path is blocked" all_are 403 "$HOST" "$mark" --data-urlencode "q=1' OR '1'='1"
 check "and never reached the app" never_reached_app "$mark"
-check "the user's snippet still applies" bash -c "curl -s -H 'Host: $HOST' http://127.0.0.1:$PORT/ | grep -qi 'X-User-Snippet: yes'"
+check "the snippet the user set still applies" bash -c "curl -s -H 'Host: $HOST' http://127.0.0.1:$PORT/ | grep -qi 'X-User-Snippet: yes'"
 # A client can't pass for the probe: without the key's MAC it is inspected.
 fake='/.well-known/inkwall-probe/AAAAAAAAAAAAAAAAAAAAAAAA'
 check "a forged probe gets no 299" bash -c "[[ \$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: $HOST' -H 'X-Inkwall-Probe: AAAAAAAAAAAAAAAAAAAAAAAA.00' http://127.0.0.1:$PORT$fake) != 299 ]]"
@@ -272,7 +253,7 @@ eventually "not Programmed while a pod runs without the engine" not_programmed S
 "${KUBECTL[@]}" -n "$NS" port-forward pod/haproxy-bare "$POD_PORT:8080" >/dev/null 2>&1 &
 pfs+=($!)
 sleep 1
-check "through that pod, the attack passes (uninspected, as the status says)" \
+check "through that pod, the attack passes: uninspected, as the status says" \
   bash -c "[[ \$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: $HOST' 'http://127.0.0.1:$POD_PORT$SQLI') == 200 ]]"
 "${KUBECTL[@]}" -n "$NS" delete pod haproxy-bare --wait=true --timeout=60s >/dev/null
 eventually "Programmed again once it is gone" programmed

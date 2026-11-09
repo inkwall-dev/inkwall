@@ -1,0 +1,19 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# The demo app's Ingress, served by Traefik (IngressClass traefik).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+  namespace: shop
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: shop.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: {name: web, port: {number: 80}}

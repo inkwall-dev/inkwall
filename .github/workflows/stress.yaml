@@ -1,0 +1,76 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Nightly stress run (#395): the packages whose tests have flaked on timing,
+# with the race detector, shuffled, 10 times, on GOMAXPROCS=2 with CPU hogs
+# alongside (make stress-test). Each job prints its shuffle seed first:
+# rerun a failure with SEED=<it> COUNT=1 STRESS_PACKAGES=<package> make
+# stress-test. A failing scheduled run opens an issue
+# (hack/ci/report-scheduled.sh).
+name: stress
+
+on:
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+    inputs:
+      count:
+        description: Runs of each test
+        default: "10"
+
+# Each job asks for what it needs (least privilege).
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  stress:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: adapters, packages: ./pkg/adapters/... }
+          - { name: agent and pipeline, packages: ./pkg/agent/... ./pkg/pipeline/... }
+          - { name: operator, packages: ./operator/... }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+      - run: make stress-test STRESS_PACKAGES="$PACKAGES"
+        env:
+          PACKAGES: ${{ matrix.packages }}
+          COUNT: ${{ inputs.count || '10' }}
+
+  report:
+    needs: stress
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          failed=$(gh run view "$GITHUB_RUN_ID" --json jobs --jq '.jobs[] | select(.conclusion == "failure") | .name' | paste -sd, - | sed 's/,/, /g')
+          detail=
+          [[ -n $failed ]] && detail="Failing: $failed. Each job's log starts with its shuffle seed; rerun with SEED=<it> COUNT=1 STRESS_PACKAGES=<package> make stress-test, and file or fix the flake."
+          hack/ci/report-scheduled.sh "$GITHUB_WORKFLOW" "$RESULT" "$RUN_URL" "$detail"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RESULT: ${{ needs.stress.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

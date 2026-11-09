@@ -86,6 +86,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/adapters/internal/httpadapter"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/events"
+	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/telemetry"
@@ -107,6 +108,13 @@ type Config struct {
 	// Logger receives one security event per denied or logged request.
 	// Nil uses slog.Default().
 	Logger *slog.Logger
+	// JSONDenials answers a denied client that accepts application/json
+	// with a JSON body (httpadapter.DenialBody); off: text.
+	JSONDenials bool
+	// ProbeKey returns the key of the operator's probe (the bundle's), or
+	// nil: a request with a valid probe header is then answered by the
+	// engine, uninspected (#372). Nil: no probe is answered.
+	ProbeKey func() []byte
 	// Metrics counts the requests the adapter can't read (nil: none).
 	Metrics *telemetry.Metrics
 	// Events records each security event for the operator (nil: logged
@@ -124,6 +132,9 @@ type Server struct {
 	metrics  *telemetry.Metrics
 	logger   *slog.Logger
 	events   *events.Recorder
+	// jsonDenials: Config.JSONDenials.
+	jsonDenials bool
+	probeKey    func() []byte
 }
 
 // New returns a Server that inspects requests with p.
@@ -139,7 +150,7 @@ func New(p pipeline.Inspector, cfg Config) (*Server, error) {
 	if resolver == nil {
 		resolver = &clientip.Resolver{}
 	}
-	return &Server{pipeline: p, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events, metrics: cfg.Metrics}, nil
+	return &Server{pipeline: p, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events, metrics: cfg.Metrics, jsonDenials: cfg.JSONDenials, probeKey: cfg.ProbeKey}, nil
 }
 
 // NewGRPCServer returns a gRPC server that serves s. It accepts messages
@@ -335,6 +346,9 @@ func (s *Server) onHeaders(ctx context.Context, x *exchange, h *extprocv3.HttpHe
 		return s.uninspectable(ctx, err)
 	}
 	x.req, x.path = req, path
+	if r := s.answerProbe(req); r != nil {
+		return r
+	}
 	x.setID = !strings.EqualFold(req.ID, req.Headers.Get("X-Request-Id"))
 	if h.GetEndOfStream() {
 		return s.verdict(ctx, x, phaseRequestHeaders)
@@ -568,17 +582,17 @@ func (s *Server) responseVerdict(ctx context.Context, x *exchange, p phase) *ext
 		httpadapter.LogEvent(ctx, s.logger, s.events, x.req, x.path, v)
 	}
 	if v.Action == pipeline.ActionDeny {
-		return denial(x.req, v.Status)
+		return s.denial(x.req, v.Status)
 	}
 	return allow(p, nil)
 }
 
 // denial denies req's stream with status: a gRPC call with a gRPC status.
-func denial(req *request.Request, status int) *extprocv3.ProcessingResponse {
+func (s *Server) denial(req *request.Request, status int) *extprocv3.ProcessingResponse {
 	if g := httpadapter.GRPCOf(req.Headers); g != httpadapter.NotGRPC {
 		return denyGRPC(g, status, req.ID)
 	}
-	return deny(status, req.ID)
+	return deny(status, req.ID, httpadapter.DenialBody(status, req.ID, req.Headers, s.jsonDenials))
 }
 
 // toResponse reads the response's status and headers. Envoy validated
@@ -624,7 +638,7 @@ func (s *Server) verdict(ctx context.Context, x *exchange, p phase) *extprocv3.P
 		httpadapter.LogEvent(ctx, s.logger, s.events, x.req, x.path, v)
 	}
 	if v.Action == pipeline.ActionDeny {
-		return denial(x.req, v.Status)
+		return s.denial(x.req, v.Status)
 	}
 	m := &extprocv3.HeaderMutation{}
 	if x.setID {
@@ -672,8 +686,9 @@ func bodilessUpgrade(r *request.Request) bool {
 // misconfigured proxy sends one, and it is not let through.
 func (s *Server) uninspectable(ctx context.Context, err error) *extprocv3.ProcessingResponse {
 	s.metrics.AdapterError(telemetry.ErrInvalidRequest)
-	s.logger.LogAttrs(ctx, slog.LevelError, "invalid ext_proc request", slog.Any("error", err))
-	return deny(http.StatusBadRequest, httpadapter.NewRequestID())
+	id := httpadapter.NewRequestID()
+	s.logger.LogAttrs(ctx, slog.LevelError, "invalid ext_proc request", slog.Any("error", err), slog.String("request_id", id))
+	return deny(http.StatusBadRequest, id, httpadapter.DenialBody(http.StatusBadRequest, id, nil, false))
 }
 
 // toRequest reconstructs the client's request from its headers and
@@ -704,7 +719,7 @@ func (s *Server) toRequest(h *extprocv3.HttpHeaders, peer netip.Addr, proto stri
 			continue
 		}
 		if !httpadapter.IsToken(name) {
-			return nil, "", fmt.Errorf("invalid header name %q", name)
+			return nil, "", errors.New("invalid header name")
 		}
 		// The authority travels in its own field, as in request.Request.
 		if strings.EqualFold(name, "Host") {
@@ -713,7 +728,7 @@ func (s *Server) toRequest(h *extprocv3.HttpHeaders, peer netip.Addr, proto stri
 		headers.Add(name, value)
 	}
 	if !httpadapter.IsToken(method) {
-		return nil, "", fmt.Errorf("invalid :method %q", method)
+		return nil, "", errors.New("invalid :method")
 	}
 	path, err := httpadapter.URIPath(rawURI)
 	if err != nil {
@@ -722,7 +737,7 @@ func (s *Server) toRequest(h *extprocv3.HttpHeaders, peer netip.Addr, proto stri
 	// Envoy forwards the authority it received; inspect only one that is a
 	// valid Host, as the reverse proxy does.
 	if !httpguts.ValidHostHeader(authority) {
-		return nil, "", fmt.Errorf("invalid :authority %q", authority)
+		return nil, "", errors.New("invalid :authority")
 	}
 	switch strings.ToLower(scheme) {
 	case "", "http":
@@ -730,7 +745,7 @@ func (s *Server) toRequest(h *extprocv3.HttpHeaders, peer netip.Addr, proto stri
 	case "https":
 		scheme = "https"
 	default:
-		return nil, "", fmt.Errorf("invalid :scheme %q", scheme)
+		return nil, "", errors.New("invalid :scheme")
 	}
 	// Clients send "Content-Length: 0" for an empty POST, PUT or PATCH, but
 	// HTTP/2 clients may not. Without it, rule 920180 (POST without
@@ -830,19 +845,49 @@ func allow(p phase, m *extprocv3.HeaderMutation) *extprocv3.ProcessingResponse {
 	}
 }
 
+// answerProbe answers the operator's probe, uninspected, if req is one:
+// its X-Inkwall-Probe header has a valid MAC of its host and URI under the
+// probe key (haproxyprobe, as the SPOE agent checks it). The answer is
+// Envoy's local reply, 200 with the answer's MAC in the header: the request
+// never reaches the upstream, and only an engine with the key, behind a
+// route whose filter is on, can make it. Envoy's local replies take a
+// defined HTTP status only, so not HAProxy's 299; the MAC proves the answer.
+// In observability mode Envoy ignores the reply: a detect-mode route can't
+// be proven this way.
+func (s *Server) answerProbe(req *request.Request) *extprocv3.ProcessingResponse {
+	value := req.Headers.Get(haproxyprobe.Header)
+	if s.probeKey == nil || value == "" {
+		return nil
+	}
+	answer, ok := haproxyprobe.Check(s.probeKey(), req.RawURI, req.Host, value)
+	if !ok {
+		return nil
+	}
+	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ImmediateResponse{
+		ImmediateResponse: &extprocv3.ImmediateResponse{
+			Status: &typev3.HttpStatus{Code: typev3.StatusCode_OK},
+			Headers: &extprocv3.HeaderMutation{SetHeaders: []*corev3.HeaderValueOption{
+				header(strings.ToLower(haproxyprobe.Header), answer),
+				header("cache-control", "no-store"),
+			}},
+			Details: "inkwall_probe",
+		},
+	}}
+}
+
 // deny answers with status and the same plain-text body as the other
 // adapters.
-func deny(code int, id string) *extprocv3.ProcessingResponse {
+func deny(code int, id string, d httpadapter.Denial) *extprocv3.ProcessingResponse {
 	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ImmediateResponse{
 		ImmediateResponse: &extprocv3.ImmediateResponse{
 			// #nosec G115 -- an HTTP status
 			Status: &typev3.HttpStatus{Code: typev3.StatusCode(code)},
 			Headers: &extprocv3.HeaderMutation{SetHeaders: []*corev3.HeaderValueOption{
-				header("content-type", "text/plain; charset=utf-8"),
+				header("content-type", d.ContentType),
 				header("x-content-type-options", "nosniff"),
 				header("x-request-id", id),
 			}},
-			Body:    []byte(http.StatusText(code) + "\n"),
+			Body:    d.Body,
 			Details: "inkwall_denied",
 		},
 	}}

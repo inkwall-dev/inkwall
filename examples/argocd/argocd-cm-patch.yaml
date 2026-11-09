@@ -1,0 +1,75 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Argo CD health checks for Inkwall's kinds (#377): merge into the argocd-cm
+# ConfigMap (docs/gitops.md, "Health in Argo CD and Flux"). Each reads the
+# object's conditions and observedGeneration:
+#   WAFPolicy: Healthy when Ready; Progressing while the operator hasn't
+#     reported the current generation, or Ready waits (wiring, a rollout,
+#     engines catching up, the probe); Suspended while inspection is
+#     suspended; Degraded otherwise (failed wiring, an engine rejecting the
+#     bundle, ...).
+#   WAFRuleSet, ClusterWAFRuleSet: Healthy when Accepted; Degraded when not.
+#   InkwallConfig: Suspended while it suspends inspection; Degraded when it
+#     can't reach its control plane; Healthy otherwise.
+# hack/argocdhealth tests them against tests/<Kind>/*.yaml (make
+# argocd-health-test).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+data:
+  resource.customizations.health.waf.inkwall.dev_WAFPolicy: |
+    hs = {status = "Progressing", message = "Waiting for the operator to report the policy"}
+    if obj.status == nil then return hs end
+    if obj.metadata.generation ~= nil and (obj.status.observedGeneration or 0) < obj.metadata.generation then
+      hs.message = "Waiting for the operator to report generation " .. obj.metadata.generation
+      return hs
+    end
+    local waiting = {Pending = true, PendingRestart = true, EnginesBehind = true, EnginesUnreported = true,
+      NoEngines = true, NotInBundle = true, Unverified = true, NotAccepted = true, NotProgrammed = true, NotEnforced = true}
+    for _, c in ipairs(obj.status.conditions or {}) do
+      if c.type == "Ready" then
+        if c.status == "True" then
+          return {status = "Healthy", message = c.message or "Ready"}
+        end
+        local msg = (c.reason or "") .. ": " .. (c.message or "")
+        if c.reason == "Suspended" then return {status = "Suspended", message = msg} end
+        if waiting[c.reason] then return {status = "Progressing", message = msg} end
+        return {status = "Degraded", message = msg}
+      end
+    end
+    return hs
+  resource.customizations.health.waf.inkwall.dev_WAFRuleSet: |
+    hs = {status = "Progressing", message = "Waiting for the operator to check the rule set"}
+    if obj.status == nil then return hs end
+    if obj.metadata.generation ~= nil and (obj.status.observedGeneration or 0) < obj.metadata.generation then return hs end
+    for _, c in ipairs(obj.status.conditions or {}) do
+      if c.type == "Accepted" then
+        if c.status == "True" then return {status = "Healthy", message = c.message or "Accepted"} end
+        return {status = "Degraded", message = (c.reason or "") .. ": " .. (c.message or "")}
+      end
+    end
+    return hs
+  resource.customizations.health.waf.inkwall.dev_ClusterWAFRuleSet: |
+    hs = {status = "Progressing", message = "Waiting for the operator to check the rule set"}
+    if obj.status == nil then return hs end
+    if obj.metadata.generation ~= nil and (obj.status.observedGeneration or 0) < obj.metadata.generation then return hs end
+    for _, c in ipairs(obj.status.conditions or {}) do
+      if c.type == "Accepted" then
+        if c.status == "True" then return {status = "Healthy", message = c.message or "Accepted"} end
+        return {status = "Degraded", message = (c.reason or "") .. ": " .. (c.message or "")}
+      end
+    end
+    return hs
+  resource.customizations.health.waf.inkwall.dev_InkwallConfig: |
+    for _, c in ipairs((obj.status or {}).conditions or {}) do
+      if c.type == "Suspended" and c.status == "True" then
+        return {status = "Suspended", message = c.message or "Inspection is suspended"}
+      end
+      if c.type == "ControlPlaneConnected" and c.status == "False" then
+        return {status = "Degraded", message = (c.reason or "") .. ": " .. (c.message or "")}
+      end
+    end
+    return {status = "Healthy", message = ""}

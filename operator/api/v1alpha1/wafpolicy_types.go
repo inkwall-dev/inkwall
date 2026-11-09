@@ -42,6 +42,17 @@ const (
 	OversizeDeny OversizeAction = "Deny"
 )
 
+// GRPCAction is whether a policy lets gRPC calls through.
+// +kubebuilder:validation:Enum=Allow;Deny
+type GRPCAction string
+
+const (
+	// GRPCAllow inspects gRPC calls as gRPC (the default).
+	GRPCAllow GRPCAction = "Allow"
+	// GRPCDeny denies them: for routes that serve no gRPC.
+	GRPCDeny GRPCAction = "Deny"
+)
+
 // GRPCMessagesAction is whether gRPC messages are inspected.
 // +kubebuilder:validation:Enum=Inspect;Skip
 type GRPCMessagesAction string
@@ -110,13 +121,43 @@ type WAFPolicySpec struct {
 
 	// Responses configures response inspection, for data leaks (the CRS's
 	// RESPONSE-95x rules, and the rule sets' rules on RESPONSE_*
-	// variables). Unset: responses are not inspected. Only Envoy Gateway
-	// sends responses to the engine: on a route of another proxy
-	// (Traefik's ForwardAuth can't), the policy is not Programmed
+	// variables). Unset: responses are not inspected. Envoy Gateway and
+	// Istio send responses to the engine; on a route of Traefik (its
+	// ForwardAuth can't) or HAProxy, the policy is not Programmed
 	// (ResponsesNotInspected).
 	// +optional
 	Responses *ResponsesSpec `json:"responses,omitempty"`
+
+	// IPLists names WAFIPLists in the policy's namespace whose client
+	// addresses are denied, or let through uninspected. A deny list wins
+	// over an allow list. They are only as good as the client IP the
+	// engine resolves (docs/client-ip.md). Requires engines 0.5.0 or
+	// later.
+	// +optional
+	IPLists *IPListsSpec `json:"ipLists,omitempty"`
 }
+
+// IPListsSpec names a policy's IP lists.
+type IPListsSpec struct {
+	// Allow lists clients whose requests aren't inspected: health checkers,
+	// a scanner you run yourself. Their requests are not logged either.
+	// +kubebuilder:validation:MaxItems=16
+	// +listType=set
+	// +optional
+	Allow []IPListName `json:"allow,omitempty"`
+
+	// Deny lists clients whose requests are denied (403) before any rule,
+	// or logged in Detect mode.
+	// +kubebuilder:validation:MaxItems=16
+	// +listType=set
+	// +optional
+	Deny []IPListName `json:"deny,omitempty"`
+}
+
+// IPListName names a WAFIPList.
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:MaxLength=253
+type IPListName string
 
 // TargetRef names a route in the policy's namespace.
 // +kubebuilder:validation:XValidation:rule="(self.kind == 'Ingress' && (!has(self.group) || self.group == 'networking.k8s.io')) || (self.kind == 'HTTPRoute' && has(self.group) && self.group == 'gateway.networking.k8s.io') || (self.kind == 'IngressRoute' && has(self.group) && self.group == 'traefik.io') || (self.kind == 'VirtualService' && has(self.group) && self.group == 'networking.istio.io')",message="target must be a networking.k8s.io Ingress, a gateway.networking.k8s.io HTTPRoute, a traefik.io IngressRoute or a networking.istio.io VirtualService"
@@ -377,6 +418,13 @@ type BodySpec struct {
 	// call's path and metadata are inspected. See docs/grpc.md.
 	// +optional
 	GRPCMessages GRPCMessagesAction `json:"grpcMessages,omitempty"`
+
+	// GRPC: Deny refuses requests with a gRPC or gRPC-Web content type
+	// (403, or the gRPC status PermissionDenied to a gRPC client; logged in
+	// Detect mode), for routes that serve no gRPC. Unset: Allow. Requires
+	// engines 0.5.0 or later. See docs/grpc.md.
+	// +optional
+	GRPC GRPCAction `json:"grpc,omitempty"`
 }
 
 // WebSocketSpec is what a WebSocket handshake must meet.
@@ -479,6 +527,7 @@ type WAFPolicyStatus struct {
 // +kubebuilder:resource:categories=inkwall,shortName=wafp
 // +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.spec.mode`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
 // +kubebuilder:printcolumn:name="Bundle",type=integer,JSONPath=`.status.bundleVersion`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type WAFPolicy struct {

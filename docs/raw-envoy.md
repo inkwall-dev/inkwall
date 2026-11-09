@@ -34,6 +34,7 @@ the tests run them: `make raw-envoy-e2e` in Docker, `make kind-e2e-raw-envoy` on
 
 ## Prerequisites
 
+<!-- versions: ENVOY_VERSION -->
 - Envoy 1.33 or later, whose ext_proc filter tells the engine its processing mode. The samples are
   tested with Envoy v1.39.6 (`envoyproxy/envoy:v1.39.6`). `envoy.yaml` needs 1.36 for
   `status_on_error`: on 1.33 to 1.35, remove that setting, and Envoy answers 500 instead of 503

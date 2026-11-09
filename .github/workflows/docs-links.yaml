@@ -4,22 +4,45 @@ name: docs-links
 # nightly and on demand rather than on every PR: other sites are slow, flaky
 # and rate limit, which must not fail an unrelated change. Hosts that fail
 # for reasons other than a broken link go in hack/docscheck/external-ignore.txt.
+# A failing scheduled run opens an issue (hack/ci/report-scheduled.sh).
 on:
   schedule:
     - cron: '23 3 * * *'
   workflow_dispatch:
 
-permissions:
-  contents: read
+# Each job asks for what it needs (least privilege).
+permissions: {}
 
 jobs:
   external-links:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           check-latest: true
       - run: make docs-check-external
+
+  report:
+    needs: external-links
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: hack/ci/report-scheduled.sh "$GITHUB_WORKFLOW" "$RESULT" "$RUN_URL" "The run's log lists the broken links."
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RESULT: ${{ needs.external-links.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

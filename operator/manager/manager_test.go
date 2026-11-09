@@ -4,6 +4,7 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -28,10 +29,18 @@ import (
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
+	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
 	"github.com/inkwall-dev/inkwall/operator/test/testenv"
+	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
 )
 
-var env *testenv.Env
+var (
+	env *testenv.Env
+	// stopEnv stops env; operatorRuns counts TestOperator's runs in the
+	// process (go test -count).
+	stopEnv      = func() {}
+	operatorRuns int
+)
 
 // distAddr is the operator's distribution server in the test.
 var distAddr string
@@ -39,30 +48,22 @@ var distAddr string
 func TestMain(m *testing.M) {
 	// Operator logs go to stderr, shown for failing tests with -v.
 	ctrl.SetLogger(logr.FromSlogHandler(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	var (
-		stop func()
-		err  error
-	)
-	env, stop, err = testenv.Start(testenv.Options{Webhooks: true})
+	var err error
+	env, stopEnv, err = testenv.Start(testenv.Options{Webhooks: true})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "envtest:", err)
 		os.Exit(1)
 	}
 	code := m.Run()
-	stop()
+	stopEnv()
 	os.Exit(code)
 }
 
-func freeAddr(t *testing.T) string {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := l.Addr().String()
-	_ = l.Close()
-	return addr
-}
+// freeAddr: testenv.FreeAddr (#452).
+func freeAddr(t *testing.T) string { return testenv.FreeAddr(t) }
+
+// testProbeKey is the key of the operator's probe in these tests.
+var testProbeKey = bytes.Repeat([]byte{9}, haproxyprobe.KeySize)
 
 // warnings records the warnings the API server returns.
 type warnings struct {
@@ -122,6 +123,20 @@ func startOperator(t *testing.T) (_ context.Context, _ client.Client, _ *warning
 		EngineReportInterval: 200 * time.Millisecond,
 		SigningKeyGrace:      time.Second,
 		CRDInterval:          200 * time.Millisecond,
+		// The test runs again in this process under -count.
+		SkipControllerNameValidation: true,
+		// The wiring's probe answered as the engine would, with a key of
+		// its own, on pods with an address (the Istio tests give theirs
+		// one; HAProxy's pods have none and stay Unverified).
+		Prober: &wiring.Prober{
+			Key: func(context.Context) ([]byte, error) { return testProbeKey, nil },
+			Do: func(_ context.Context, _ wiring.ProbePod, _ wiring.ProbeTarget, req *http.Request) (*http.Response, error) {
+				answer, _ := haproxyprobe.Check(testProbeKey, req.URL.RequestURI(), req.Host, req.Header.Get(haproxyprobe.Header))
+				h := http.Header{}
+				h.Set(haproxyprobe.Header, answer)
+				return &http.Response{StatusCode: http.StatusOK, Header: h, Body: io.NopCloser(strings.NewReader(""))}, nil
+			},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -181,6 +196,16 @@ func startOperator(t *testing.T) (_ context.Context, _ client.Client, _ *warning
 // TestOperator runs one operator for all the checks: controller-runtime
 // allows one manager per process.
 func TestOperator(t *testing.T) {
+	// Run again (go test -count), it gets an API server of its own: its
+	// checks use fixed namespaces, which envtest never deletes, and count
+	// what the whole cluster holds, which the last run's uninstall left.
+	if operatorRuns++; operatorRuns > 1 && env != nil {
+		stopEnv()
+		var err error
+		if env, stopEnv, err = testenv.Start(testenv.Options{Webhooks: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	ctx, c, warn, stop := startOperator(t)
 	t.Run("webhook", func(t *testing.T) { testWebhook(ctx, t, c, warn) })
 	t.Run("bundles", func(t *testing.T) { testBundles(ctx, t, c) })

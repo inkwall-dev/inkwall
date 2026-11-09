@@ -11,6 +11,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# The versions under test (#393).
+# shellcheck source=hack/versions.env
+. hack/versions.env
 
 CLUSTER=${KIND_CLUSTER:-inkwall}
 IMAGE=${IMAGE:-inkwall-engine:dev}
@@ -24,43 +27,10 @@ TRAEFIK_NS=traefik-e2e
 TRAEFIK_HOST=traefik.e2e.example.com
 ROUTE_HOST=route.e2e.example.com
 HTTPROUTE_HOST=httproute.e2e.example.com
-TRAEFIK_CHART_VERSION=41.6.1 # Traefik v3.7.13, as hack/kind/up.sh
-GATEWAY_API_VERSION=v1.7.0  # sigs.k8s.io/gateway-api in go.mod
 KUBECTL=(kubectl --context "kind-$CLUSTER")
 SQLI='/?id=1%27%20OR%20%271%27%3D%271'
 
-failures=0
-ok() { printf 'ok    %s\n' "$1"; }
-fail() {
-  printf 'FAIL  %s\n' "$1"
-  failures=$((failures + 1))
-}
-
-# check DESCRIPTION COMMAND...: one try.
-check() {
-  local what=$1
-  shift
-  if "$@" >/dev/null 2>&1; then
-    ok "$what"
-  else
-    fail "$what"
-  fi
-}
-
-# eventually DESCRIPTION COMMAND...: retries for up to 60s; a failure is
-# counted, and the test goes on.
-eventually() {
-  local what=$1
-  shift
-  for _ in $(seq 120); do
-    if "$@" >/dev/null 2>&1; then
-      ok "$what"
-      return 0
-    fi
-    sleep 0.5
-  done
-  fail "$what"
-}
+. hack/kind/lib.sh
 
 code() {
   curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" "http://127.0.0.1:$PORT$1" || true
@@ -145,7 +115,9 @@ app_trust() {
 app_trust
 
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy app --ignore-not-found >/dev/null
-"${KUBECTL[@]}" apply -f hack/kind/e2e.yaml >/dev/null
+# The app's standalone engine runs IMAGE: with make IMAGES=ghcr:<version>,
+# the published one, which hack/kind/operator.sh loaded into kind.
+sed "s|image: inkwall-engine:dev|image: $IMAGE|" hack/kind/e2e.yaml | "${KUBECTL[@]}" apply -f - >/dev/null
 "${KUBECTL[@]}" -n "$NS" rollout restart deployment/app >/dev/null
 "${KUBECTL[@]}" -n "$NS" rollout status deployment/app --timeout=120s >/dev/null
 eventually "one engine pod" bash -c "[[ \$(${KUBECTL[*]} -n $NS get pods -l app=e2e --no-headers | wc -l) == 1 ]]"
@@ -191,7 +163,7 @@ doc_block() {
     return 1
   fi
   (
-    # shellcheck disable=SC2329 # the block calls it
+    # shellcheck disable=SC2317,SC2329 # the block calls it
     kubectl() { command kubectl --context "kind-$CLUSTER" "$@"; }
     eval "$block"
   )
@@ -233,7 +205,7 @@ metadata:
   namespace: $NS
   labels: {app.kubernetes.io/name: traefik${extra:+, $extra}}
 spec:
-  containers: [{name: traefik, image: traefik:v3.7.13}]
+  containers: [{name: traefik, image: traefik:$TRAEFIK_VERSION}]
 YAML
 }
 "${KUBECTL[@]}" -n "$OPERATOR_NS" scale deployment/inkwall-operator --replicas=0 >/dev/null
@@ -393,7 +365,7 @@ spec:
     spec:
       containers:
         - name: web
-          image: traefik/whoami:v1.10.3
+          image: traefik/whoami:$WHOAMI_VERSION
           # --verbose logs each request: the engine-down check looks for one.
           args: ["--port", "8080", "--verbose"]
 ---
@@ -716,6 +688,92 @@ check "neither engine restarted" same_engines
 eventually "the engine in Traefik's pod still blocks the attack" tstatus_is 403 "$SQLI"
 eventually "the policy is still Ready" ready
 if $created_config; then "${KUBECTL[@]}" delete inkwallconfig default >/dev/null; fi
+
+# Automatic rollout (#376): with spec.engine.rollout Automatic, a new
+# engine image replaces Traefik's two pods one at a time, through the
+# Eviction API, while a client in the cluster keeps sending the attack
+# through Traefik's Service: every answer is the engine's 403, none the
+# app's 200. A PodDisruptionBudget that allows no eviction pauses the
+# rollout, and the InkwallConfig says so.
+echo "== automatic engine rollout"
+engine_images() {
+  "${KUBECTL[@]}" -n "$TRAEFIK_NS" get pods -l app.kubernetes.io/name=traefik \
+    -o jsonpath='{range .items[*]}{.spec.initContainers[?(@.name=="inkwall-engine")].image}{"\n"}{end}' | sort -u
+}
+chart_image=$(engine_images)
+ROLLOUT_IMAGE=${chart_image%:*}:rollout
+docker tag "$chart_image" "$ROLLOUT_IMAGE"
+kind load docker-image "$ROLLOUT_IMAGE" --name "$CLUSTER" >/dev/null
+"${KUBECTL[@]}" -n "$TRAEFIK_NS" scale deployment/traefik-e2e --replicas=2 >/dev/null
+"${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout status deployment/traefik-e2e --timeout=180s >/dev/null
+pdb() {
+  "${KUBECTL[@]}" apply -f - >/dev/null <<YAML
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: traefik-e2e, namespace: $TRAEFIK_NS}
+spec:
+  $1
+  selector: {matchLabels: {app.kubernetes.io/name: traefik}}
+YAML
+}
+pdb "minAvailable: 1"
+"${KUBECTL[@]}" apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: Pod
+metadata: {name: rollout-client, namespace: $NS}
+spec:
+  containers:
+    - name: curl
+      image: curlimages/curl:8.11.1
+      command: ["sh", "-c", "while true; do curl -s -o /dev/null -m 5 -w '%{http_code}\\\\n' -H 'Host: $TRAEFIK_HOST' 'http://traefik-e2e.$TRAEFIK_NS.svc$SQLI'; sleep 0.2; done"]
+YAML
+"${KUBECTL[@]}" -n "$NS" wait --for=condition=Ready pod/rollout-client --timeout=120s >/dev/null
+created_config=false
+if ! "${KUBECTL[@]}" get inkwallconfig default >/dev/null 2>&1; then
+  "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: InkwallConfig
+metadata: {name: default}
+YAML
+  created_config=true
+fi
+traefik_runs() { [[ $(engine_images) == "$1" && $("${KUBECTL[@]}" -n "$TRAEFIK_NS" get deployment traefik-e2e -o jsonpath='{.status.readyReplicas}') == 2 ]]; }
+rollout_condition() {
+  "${KUBECTL[@]}" get inkwallconfig default -o jsonpath="{.status.conditions[?(@.type==\"EngineRollout\")].$1}"
+}
+rollout_is() { [[ $(rollout_condition reason) == "$1" && $(rollout_condition message) == *"$2"* ]]; }
+"${KUBECTL[@]}" patch inkwallconfig default --type=merge \
+  -p "{\"spec\":{\"engine\":{\"image\":\"$ROLLOUT_IMAGE\",\"rollout\":\"Automatic\"}}}" >/dev/null
+eventually "the rollout starts" rollout_is RollingOut "$ROLLOUT_IMAGE"
+eventually_within 300 "both Traefik pods replaced with the new engine" traefik_runs "$ROLLOUT_IMAGE"
+eventually_within 120 "and the rollout is done" rollout_is Done "$ROLLOUT_IMAGE"
+answers() { "${KUBECTL[@]}" -n "$NS" logs rollout-client; }
+never_uninspected() { ! answers | grep -qx 200; }
+mostly_blocked() {
+  local all blocked
+  all=$(answers | wc -l)
+  blocked=$(answers | grep -cx 403 || true)
+  echo "      $blocked of $all answers were the engine's 403"
+  ((all > 50 && blocked * 100 >= all * 98))
+}
+check "no request reached the app uninspected during the rollout" never_uninspected
+check "traffic kept flowing: at least 98% of the answers were 403" mostly_blocked
+# A PodDisruptionBudget that allows no eviction: paused, and said.
+pdb "maxUnavailable: 0"
+"${KUBECTL[@]}" patch inkwallconfig default --type=json -p '[{"op":"remove","path":"/spec/engine/image"}]' >/dev/null
+eventually_within 120 "a PodDisruptionBudget refusing evictions pauses the rollout" rollout_is Paused "disruption budget"
+check "and no Traefik pod was replaced" traefik_runs "$ROLLOUT_IMAGE"
+pdb "minAvailable: 1"
+eventually_within 300 "the budget relaxed, the pods get the chart's engine" traefik_runs "$chart_image"
+eventually_within 120 "and the rollout is done" rollout_is Done "$chart_image"
+"${KUBECTL[@]}" -n "$NS" delete pod rollout-client --wait=false >/dev/null
+"${KUBECTL[@]}" -n "$TRAEFIK_NS" delete pdb traefik-e2e >/dev/null
+"${KUBECTL[@]}" patch inkwallconfig default --type=json -p '[{"op":"remove","path":"/spec/engine/rollout"}]' >/dev/null
+if $created_config; then "${KUBECTL[@]}" delete inkwallconfig default >/dev/null; fi
+"${KUBECTL[@]}" -n "$TRAEFIK_NS" scale deployment/traefik-e2e --replicas=1 >/dev/null
+"${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout status deployment/traefik-e2e --timeout=180s >/dev/null
+forward_traefik
+eventually "the engine in Traefik's pod still blocks the attack" tstatus_is 403 "$SQLI"
 
 # Deleted while the operator is down (#81): the finalizer keeps the policy,
 # and the route wired, until the operator is back and unwires it.

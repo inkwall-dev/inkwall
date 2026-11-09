@@ -67,25 +67,26 @@ func TestCache(t *testing.T) {
 			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "c"}}},
 		}
 	}
-	pod := func(name string, labels map[string]string) *corev1.Pod { return podIn("proxy", name, labels) }
+	// Namespaces of their own: the test runs again against the same API
+	// server under -count.
+	proxyNS, tenantNS := testenv.Namespace(t, c, "proxy"), testenv.Namespace(t, c, "tenant")
+	pod := func(name string, labels map[string]string) *corev1.Pod { return podIn(proxyNS, name, labels) }
 	for _, o := range []client.Object{
-		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "proxy"}},
 		pod("edge-1", map[string]string{"app": "edge"}),
 		pod("envoy-1", envoy),
 		// Both integrations' labels: listed once.
 		pod("both-1", map[string]string{"app": "edge", "app.kubernetes.io/name": "envoy", "app.kubernetes.io/managed-by": "envoy-gateway"}),
 		pod("shop-1", map[string]string{"app": "shop"}),
-		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "tenant"}},
-		podIn("tenant", "edge-fake", map[string]string{"app": "edge"}),
-		podIn("tenant", "envoy-fake", envoy),
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "proxy", Name: "other"}},
+		podIn(tenantNS, "edge-fake", map[string]string{"app": "edge"}),
+		podIn(tenantNS, "envoy-fake", envoy),
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: proxyNS, Name: "other"}},
 	} {
 		if err := c.Create(ctx, o); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	pc, err := New(selectors.PodSelectors(), []string{"proxy"})(env.Config, cache.Options{Scheme: clientgoscheme.Scheme})
+	pc, err := New(selectors.PodSelectors(), []string{proxyNS})(env.Config, cache.Options{Scheme: clientgoscheme.Scheme})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,19 +136,19 @@ func TestCache(t *testing.T) {
 	if got := names(); !slices.Equal(got, []string{"both-1", "edge-1", "envoy-1"}) {
 		t.Errorf("pods cached %v", got)
 	}
-	if got := names(client.InNamespace("proxy"), client.MatchingLabels(envoy)); !slices.Equal(got, []string{"both-1", "envoy-1"}) {
+	if got := names(client.InNamespace(proxyNS), client.MatchingLabels(envoy)); !slices.Equal(got, []string{"both-1", "envoy-1"}) {
 		t.Errorf("Envoy Gateway's pods %v", got)
 	}
 	var p corev1.Pod
-	if err := pc.Get(ctx, types.NamespacedName{Namespace: "proxy", Name: "envoy-1"}, &p); err != nil {
+	if err := pc.Get(ctx, types.NamespacedName{Namespace: proxyNS, Name: "envoy-1"}, &p); err != nil {
 		t.Errorf("get a proxy pod: %v", err)
 	}
-	if err := pc.Get(ctx, types.NamespacedName{Namespace: "proxy", Name: "shop-1"}, &p); !apierrors.IsNotFound(err) {
+	if err := pc.Get(ctx, types.NamespacedName{Namespace: proxyNS, Name: "shop-1"}, &p); !apierrors.IsNotFound(err) {
 		t.Errorf("get another pod: %v, want not found", err)
 	}
 	// Other kinds are cached as usual.
 	var cm corev1.ConfigMap
-	if err := pc.Get(ctx, types.NamespacedName{Namespace: "proxy", Name: "other"}, &cm); err != nil {
+	if err := pc.Get(ctx, types.NamespacedName{Namespace: proxyNS, Name: "other"}, &cm); err != nil {
 		t.Errorf("get a ConfigMap: %v", err)
 	}
 	if err := informer.RemoveEventHandler(reg); err != nil {

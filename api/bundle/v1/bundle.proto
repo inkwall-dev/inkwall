@@ -113,6 +113,18 @@ message Policy {
   // fields, ignore them (more rules apply) instead of reading them as
   // turning the rules off entirely.
   repeated Exclusion target_exclusions = 13;
+  // The client addresses the policy denies or lets through uninspected,
+  // resolved from its IP lists. Unset: none. Engines before 0.5.0 ignore
+  // it: the operator doesn't count them as enforcing a policy that sets it.
+  IPLists ip_lists = 14;
+}
+
+// IPLists are a policy's IP lists, as CIDR prefixes (10.0.0.0/8,
+// 2001:db8::/32) or addresses. A client in deny is denied; one in allow
+// and not in deny is not inspected.
+message IPLists {
+  repeated string allow = 1;
+  repeated string deny = 2;
 }
 
 // RouteMatch matches requests by host, path and method.
@@ -248,6 +260,10 @@ message BodyConfig {
   OversizeAction on_oversize = 3;
   // Inspect the text in gRPC calls' messages (docs/grpc.md).
   bool grpc_messages = 4;
+  // Deny a request with a gRPC or gRPC-Web content type, on routes that
+  // serve no gRPC (#367). Engines before 0.5.0 ignore it: the operator
+  // doesn't count them as enforcing a policy that sets it.
+  bool deny_grpc = 5;
 }
 
 // WebSocketConfig is what a WebSocket handshake (a request with an

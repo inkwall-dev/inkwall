@@ -117,13 +117,13 @@ the webhook certificates.
 | `InkwallConfig` | Cluster, singleton `default` | Mode, engine, integrations, control plane, `suspend`, signing key rotation, event redaction |
 | `WAFPolicy` | Namespace | What to enforce on which routes |
 | `WAFRuleSet` / `ClusterWAFRuleSet` | Namespace / Cluster | Rules: builtin CRS, [SecLang](https://coraza.io/docs/seclang/), [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/) |
-| `WAFIPList` / `ClusterWAFIPList` | Namespace / Cluster | [CIDR](https://www.rfc-editor.org/rfc/rfc4632) lists (planned) |
+| `WAFIPList` / `ClusterWAFIPList` | Namespace / Cluster | [CIDR](https://www.rfc-editor.org/rfc/rfc4632) lists a policy allows or denies (`spec.ipLists`); `ClusterWAFIPList` planned |
 | `WAFPolicyDefault` | Namespace | Default for routes with no policy (planned) |
 
 A field is added only once the engine honours it. Adding a field to `v1alpha1` later is
 compatible; removing one is not.
 
-**Not yet:** IP lists and `spec.ipLists`, `spec.rateLimits`, `spec.response`,
+**Not yet:** `ClusterWAFIPList`, `spec.rateLimits`, `spec.response`,
 `BlockHighConfidence`, `body.contentTypes`, the `InspectPrefix` oversize action,
 `WAFPolicyDefault`.
 
@@ -316,7 +316,7 @@ proxy.
 - **The sidecar uses the proxy's [ServiceAccount](https://kubernetes.io/docs/concepts/security/service-accounts/).** That account gets `get` on the bundle Secret
   only, for cold start ([§4.6](#46-bundle-builder-leader-only)).
 - **Rollout:** injection applies to new pods only. With `rollout: Manual` (the default), the
-  operator reports `PendingRestart` and names the workload. `rollout: Automatic` would restart it,
+  operator reports `PendingRestart` and names the workload. `rollout: Automatic` evicts its pods,
   respecting [PodDisruptionBudgets](https://kubernetes.io/docs/concepts/workloads/pods/disruptions/#pod-disruption-budgets). Engine upgrades follow the same path.
 
 **Built (v0.1.0)** (`operator/internal/injection`, `operator/webhook/inject.go`):
@@ -352,15 +352,38 @@ proxy.
     directory;
   - an [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir) bundle cache;
   - non-root, with a read-only root filesystem;
-  - image and resources from `InkwallConfig.spec.engine`, else from `--engine-image`.
+  - image and resources from `InkwallConfig.spec.engine`, else from `--engine-image`;
+  - the image pull Secrets of `--engine-image-pull-secrets` (the chart's
+    `global.imagePullSecrets`, since v0.5.0), added to the pod's `imagePullSecrets`, keeping its
+    own. Envoy Gateway's and Istio Gateways' pods, which get the engine through their own
+    configuration, get none: there the operator owns only the containers, volumes and mounts it
+    adds, and a pod-level list it shared with the user's would have to be merged and pruned
+    without knowing which entries were its own. Their pull Secret goes in that configuration,
+    or on the ServiceAccount (the chart README).
 - **Trust and access per namespace.** The leader keeps an `inkwall-trust` ConfigMap in each
   namespace with proxy pods, and removes it with the last one. It holds `ca.crt`,
   `trusted-keys.pub` (every bundle key engines must accept; the engine reads this) and
   `ed25519.pub` (the active key, for older engines). The leader also keeps a [`Role` and
   `RoleBinding`](https://kubernetes.io/docs/reference/access-authn-authz/rbac/), `inkwall-bundle-reader`, for each proxy ServiceAccount. It deletes only ConfigMaps
   it labelled. Pods of a disabled integration ([§7](#7-rbac)) get neither.
-- **Not yet:** `rollout: Automatic`. Pods that were running before the operator are injected when
-  they restart.
+- **`rollout: Automatic`** (#376, `operator/internal/rollout`). `InkwallConfig.spec.engine.rollout`
+  is `Manual` by default: pods that were running before the operator, or run another engine image
+  than the one configured, are reported (`PendingRestart`) and injected when they restart. With
+  `Automatic`, the leader evicts them, at most one every 10 s, through the Eviction API, so
+  PodDisruptionBudgets hold. It evicts only pods of the integrations the Pod webhook injects
+  (Traefik, HAProxy, Istio's ingress gateways: Envoy Gateway and Istio's Gateway API deployments
+  roll their own), with a controller to replace them, not opted out, and never a pod whose engine
+  is in its own spec rather than injected: the webhook leaves such a pod as it is, so its
+  replacement would run the same image and stall the rollout. The next eviction waits for
+  the last one's workload: the evicted pod gone, a replacement, every pod ready, and each
+  replacement with the configured engine image running the bundle published. A refused eviction
+  (a budget) or a replacement not ready within 5 minutes (say, the webhook didn't inject it)
+  pauses the rollout: nothing else is evicted, and the InkwallConfig's `EngineRollout` condition
+  is `False` with reason `Paused` and why, until the budget allows it or the replacement is ready.
+  `EngineRollout` is `True` (`RollingOut`) while a replacement is awaited, `False` (`Done`) when
+  nothing needs one, and absent in `Manual`. One pod at a time across the cluster is slow for
+  large fleets, but never takes more than one proxy pod out at once. `pods/eviction` `create` is in
+  each of those integrations' roles, so the chart leaves it out with them.
 
 **Built since: Envoy Gateway** (`operator/internal/wiring/envoygateway.go`). Its Envoy pods are
 not injected by the Pod webhook: the engine goes into their pod template through the Gateway's
@@ -652,10 +675,19 @@ has the decision), for `VirtualService` targets bound to Istio `Gateway` objects
 - **The pods of a VirtualService** are the running pods its Gateways' `selector` matches, listed
   uncached in every namespace. One outside the cache (outside the proxy namespaces, or without
   the integration's labels) gets no engine and would serve the route uninspected: `WiringFailed`.
-- **One `EnvoyFilter` per namespace of gateway pods**, `inkwall-istio-ingress`, labelled
+- **`EnvoyFilter` objects per namespace of gateway pods**, labelled
   `waf.inkwall.dev/integration: istio-ingress`, `workloadSelector` the integration's labels (the
-  `InkwallConfig` selector must be plain labels), with the patches of the Gateway API wiring
-  (`istioPatches`): a filter per protected VirtualService, `inkwall.ext_proc.vs.<ns>.<name>`, on
+  `InkwallConfig` selector must be plain labels), with the patches of the Gateway API wiring:
+  `inkwall-istio-ingress` has the engine's cluster and the listeners' buffer limit, which Envoy must
+  get once (`istioBasePatches`); shards `inkwall-istio-ingress-<00 to 31>` have the VirtualServices'
+  (`istioRoutePatches`), by FNV-32a hash of `namespace/name`, so a VirtualService never moves and
+  one change rewrites one shard. One object for them all passed etcd's 1.5 MiB limit at about
+  1,200 VirtualServices (about 1.2 KiB each, #424); 32 shards hold about 38,000. A shard that has
+  none is deleted. The base object is written first, so a shard's filters never name a missing
+  cluster, except when it still has the VirtualServices' filters (an operator before the shards):
+  the shards go first then, and Envoy rejects the configuration while both have a filter (two
+  filters of one name) and keeps the one before, still inspected, until the base is rewritten. In
+  each shard, a filter per protected VirtualService, `inkwall.ext_proc.vs.<ns>.<name>`, on
   for its Envoy routes, named after its http routes (`name`, `name.match`). A VirtualService is
   wired in a namespace once every pod there has the engine and the mount. An http route without a
   name, or a name another VirtualService on the same pods uses, is `WiringFailed`.
@@ -683,7 +715,7 @@ has the decision), for `VirtualService` targets bound to Istio `Gateway` objects
   `haproxy.org/backend-config-snippet`, first, between `# inkwall:begin` and `# inkwall:end`; the
   user's lines stay after it. `waf.inkwall.dev/haproxy-wired` marks it (`Wired`), with the previous
   `standalone-backend`, restored when it is unwired.
-- **`Programmed`** only once the operator's probe (`HAProxyProber`, on the leader) has proven the
+- **`Programmed`** only once the operator's probe (`Prober`, on the leader) has proven the
   filter on every running pod; `Unverified` until then, and when a probe gets anything but the
   engine's answer. Before that, `PendingRestart` or `SidecarMissing`; `WiringFailed` for a pod
   without the agent's files or with `--disable-config-snippets` covering backends.
@@ -939,7 +971,23 @@ latency only) and `evicted`. Reconcile duration is controller-runtime's own
 `inkwall_operator_engines{state,integration}` counts the engines by the integration whose pod runs
 them (`unknown` while an engine isn't matched to one, #371).
 
-**Not yet:** policy condition counts.
+**Policy conditions** (#378). `inkwall_operator_policies{condition,status,reason}` counts the
+policies by each of their four conditions (counts, not a label per policy, so 5,000 policies are a
+few dozen series). The signing key has `inkwall_operator_signing_key_age_seconds` and
+`inkwall_operator_signing_key_rotation_phase{phase}` (1 for the current phase), and
+`inkwall_operator_bundle_publish_failures_total{reason}` counts the bundles not published
+(`too_large`, `error`). All are the leader's.
+
+**Events** (#378). A change of a policy's `Ready`, `Programmed` or `Enforced` condition records
+one Kubernetes Event (`events.k8s.io/v1`) on the policy: `Warning` while it isn't `Ready`, the
+reason of the first condition that changed (`Ready` first), and each changed condition's status,
+reason and message as the note. So `kubectl describe wafpolicy` and event-based tooling see a
+policy go from `Ready` to `EngineNack`. A policy's Events are at least 30 s apart: changes within
+that are recorded together once it has passed, compared with the last Event, so a flapping
+condition records at most one Event per policy every 30 s, and at most one when it settles where
+it was. The first sight of a policy (a new leader starting) records none, so a restart doesn't
+replay every policy's state. The watcher keeps each policy's last state in memory: a few hundred
+bytes per policy. RBAC: `events` `create` and `patch` in every namespace.
 
 ### 4.9 Upstream sync (leader only)
 
@@ -1128,6 +1176,7 @@ Removal must never leave a proxy failing closed on a missing engine.
 | Invalid rule | Rejected at admission | Error to `kubectl` / Argo CD | Fix the rule |
 | Engine can't compile (version skew) | Engine keeps its previous bundle | `EngineNack` | Upgrade the engines or fix the rule |
 | Bundle Secret deleted | None | Builder recreates it | Automatic |
+| Signing key Secret deleted while every replica is down | None: engines keep their bundle, and reject the new key's bundles (`EngineNack`) until the kubelet updates their trust ConfigMap with it | The replicas' memory is gone, so the operator creates a new key (with a replica up, it restores the keys it holds) | Automatic, within the kubelet's ConfigMap sync (`make kind-chaos`) |
 | Bundle chunk deleted or edited | None; meanwhile new engines can't cold start from the Secret | Builder logs it | Automatic: published again |
 | Bundle over 7,200 KiB compressed | None: the current bundle stays; changes are not published; `spec.suspend` still suspends and resumes it | Builder error; warning past 75%; `inkwall_operator_bundle_compressed_bytes`; `Accepted=False` (`BundleTooLarge`) on the policies not published | Shrink the policies (fewer, or smaller rule sets) |
 | Signing key rotated | None: the operator signs with the new key only once every connected engine trusts it | Secret's `rotation-phase`; operator logs the engines it waits for | Automatic ([§4.6](#46-bundle-builder-leader-only)); replace engines older than rotation |
@@ -1213,6 +1262,18 @@ the disabled integration's message and the chart's notes say. When Helm can't as
 
 Missing CRDs don't disable an integration: its wiring waits for them
 ([§4.4](#44-wiring-controller)).
+
+**NetworkPolicies (v0.5.0, #387).** The chart's `networkPolicy.enabled` (off by default) lets into
+the operator's pods what it needs: the webhook port and the probes from anywhere, the
+distribution port from the proxy namespaces, and the metrics port from anywhere. The webhook is
+open by default because the API server's address, as a network plugin sees it, varies by
+cluster (host network, a managed control plane, a konnectivity proxy): a narrower default would
+break injection and admission on clusters it doesn't fit, and a Pod webhook failing closed would
+keep proxy pods from starting. `webhookFrom` and `metricsFrom` narrow them. Egress is a separate
+opt-in (`networkPolicy.egress.enabled`), to any address on the API server's ports unless
+`apiServerCIDRs` names them, for the same reason. The chart never creates a default-deny policy:
+whether the namespace denies by default is the cluster's choice, and the engines' namespaces
+aren't the chart's. The Network flows table in the chart README lists every connection.
 
 **Not yet:**
 
@@ -1420,13 +1481,16 @@ under 512 MiB. Same machine, 2026-11-06, one run each:
 | Before #373's fixes | 200 | 6.1 s | 0.33 s | 227 | 200 | 20 | 97 MiB |
 | After | 200 | 3.0 s | 0.13 s | 26.8 | 1 | 4 | 96 MiB |
 | After | 1,000 | 8.8 s | 2.6 s | 44.6 | 1 | 4 | 178 MiB |
+| After #424 (2026-11-07) | 5,000 | 22.1 s | 0.51 s | 40.6 | 1 | 4 | 449 MiB |
 
 Before the fixes, each VirtualService listed its Gateway's pods from the API server, and every pod
-of the rollout rewrote every policy's status, since the messages named the pods. 5,000 policies
-don't fit yet: the Istio ingress integration's one `EnvoyFilter` per gateway namespace passes
-etcd's 1.5 MiB limit at about 1,200 VirtualServices (1,245 KiB at 1,000; 6.2 MiB at 5,000), and
-every policy is then `WiringFailed` (fail safe, #424). So `SCALE=wiring` is 1,000 until that is
-fixed. Envoy Gateway's and Istio's HTTPRoutes aren't in this test yet.
+of the rollout rewrote every policy's status, since the messages named the pods. Before #424,
+5,000 policies didn't fit: the Istio ingress integration's one `EnvoyFilter` per gateway namespace
+passed etcd's 1.5 MiB limit at about 1,200 VirtualServices (1,245 KiB at 1,000; 6.2 MiB at 5,000),
+and every policy was `WiringFailed`. It is sharded now (§4.4), and a reconcile at 5,000 also no
+longer compares every VirtualService with every other for shared route names (46 s for one
+`Wire`, 0.6 s now). `SCALE=wiring` is 5,000 policies. Envoy Gateway's and Istio's HTTPRoutes
+aren't in this test yet.
 
 **Engine memory per policy.** A compiled Coraza WAF with the CRS keeps
 about 2.1 MiB of heap, and takes 10–15 ms to compile.
@@ -1527,8 +1591,24 @@ Applying exclusions per request changes three things from v0.1.0:
   Pod webhook injects the gateway's pods, attacks on both http routes of the protected one are
   blocked, the other passes, and unprotecting and uninstalling unwire it.
 - **Upgrade** from the last release on kind (`make kind-upgrade`, every PR): routes stay protected
-  through Traefik, wired once.
-- **Planned:** chaos tests (kill the leader, delete the Secret, take the webhook down).
+  through Traefik and Envoy Gateway (an Ingress, an IngressRoute and an HTTPRoute), wired once, with
+  a probe through the upgrade, the rollback and the proxies' restarts (#390). The release
+  qualification runs it from the latest patch of each supported minor
+  (`.github/workflows/upgrade.yaml`, versions from `hack/releases`). Envoy Gateway rolls its pods
+  when the engine image changes, so its route may go `MAX_ENVOY_GAP` (5 s) without a verdict then;
+  Traefik's routes may not, except through its restart (`MAX_RESTART_GAP`).
+- **Failure modes on kind** (`make kind-chaos`, `hack/kind/chaos.sh`, #379; nightly in the release
+  qualification, which opens an issue when a scheduled run fails): a client in the cluster sends
+  an attack through a Traefik whose Ingress a `Block` policy protects, five times a second, and
+  each scenario checks that the engine kept blocking it and no request reached the app
+  uninspected, then the policy's conditions after recovery. The scenarios: the leader's pod
+  killed in each phase of a signing key rotation (the next leader finishes it, no engine rejects
+  a bundle); the operator down while Traefik scales up (refused while a policy blocks, the Pod
+  webhook failing closed; started without the engine and reported `SidecarMissing` while every
+  policy is in `Detect` mode, as it fails open); the bundle Secret, then the signing key Secret,
+  deleted while the operator is down; the API server stopped just after a policy change; and the
+  webhook certificate replaced with an expired one (`hack/expiredcert`), which the operator
+  renews and injects.
 
 ## 10. Code layout
 
@@ -1564,7 +1644,7 @@ development.
 | O2 | Resolver + bundle + distribution | An engine on its own (not injected) gets signed bundles; `Enforced` works | Done (v0.1.0) |
 | O3 | Envoy Gateway | kind: one `WAFPolicy`, attack blocked, `Ready=True` | Done (v0.3.0) |
 | O4 | Pod webhook + Traefik, HAProxy | Same attack blocked via all three in one cluster | Pod webhook and Traefik done (v0.1.0); HAProxy not yet. ingress-nginx, retired upstream, was dropped: its users migrate (`inkwallctl migrate ingress-nginx`) |
-| O5 | Uninstall, suspend, chaos, scale | [§5](#5-uninstall-and-disable) and [§6](#6-failure-modes) verified in CI | Uninstall, suspend, scale done; chaos not yet ([§9](#9-testing)) |
+| O5 | Uninstall, suspend, chaos, scale | [§5](#5-uninstall-and-disable) and [§6](#6-failure-modes) verified in CI | Done; chaos nightly ([§9](#9-testing)) |
 | O6 | Upstream sync | Enroll with a control plane stub; policy round-trip | Done, against the stub ([§4.9](#49-upstream-sync-leader-only)) |
 
 Shipped out of order: the Pod webhook and Traefik (part of O4) came first, in v0.1.0, before

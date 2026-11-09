@@ -252,6 +252,32 @@ func TestUnpinned(t *testing.T) {
 	}
 }
 
+// Every condition reason the operator sets is documented (#384).
+func TestReasonsDocumented(t *testing.T) {
+	fsys := fstest.MapFS{
+		"docs/README.md":          file("# Docs\n[Troubleshooting](troubleshooting.md)\n"),
+		"docs/troubleshooting.md": file("# Troubleshooting\n| `WiringFailed` | ... |\n"),
+		"operator/internal/wiring/controller.go": file(`package wiring
+const (
+	ReasonWiringFailed = "WiringFailed"
+	// ReasonUnverified: wired, not proven.
+	ReasonUnverified   = "Unverified"
+)
+`),
+		"operator/resolver/resolver.go":      file(`const ReasonConflict          = "Conflict"`),
+		"operator/resolver/resolver_test.go": file(`const ReasonTestOnly = "TestOnly"`),
+		"pkg/other/other.go":                 file(`const ReasonNotOperator = "NotOperator"`),
+	}
+	got := check(t, fsys, config{reasonsDoc: "docs/troubleshooting.md"})
+	want := []string{
+		"docs/troubleshooting.md: condition reason Conflict (operator/resolver/resolver.go) is not documented",
+		"docs/troubleshooting.md: condition reason Unverified (operator/internal/wiring/controller.go) is not documented",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+}
+
 // Every metric the code registers is listed in the metrics doc (#381).
 func TestMetricsListed(t *testing.T) {
 	fsys := fstest.MapFS{
@@ -277,5 +303,31 @@ var b = prometheus.GaugeOpts{
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got  %q\nwant %q", got, want)
+	}
+}
+
+// A paragraph after <!-- versions: KEY ... --> names each version (#393),
+// with or without its "v", so the docs' "tested with" lines follow
+// hack/versions.env.
+func TestVersions(t *testing.T) {
+	fsys := fstest.MapFS{
+		"hack/versions.env": file("# comment\nISTIO_VERSION=1.31.3\nENVOY_VERSION=v1.39.6\nGATEWAY_API_VERSION=v1.7.0\n"),
+		"README.md": file("# Inkwall\n" +
+			"<!-- versions: ISTIO_VERSION GATEWAY_API_VERSION -->\n" +
+			"Tested with Istio 1.31.3 and the\nGateway API v1.7.0.\n\n" +
+			"<!-- versions: ENVOY_VERSION -->\n" +
+			"Tested with Envoy 1.39.6.\n\n" +
+			"<!-- versions: ISTIO_VERSION -->\n" +
+			"Tested with Istio 1.30.0.\n\n" +
+			"<!-- versions: NOPE -->\n" +
+			"Anything.\n"),
+	}
+	got := check(t, fsys, config{versions: "hack/versions.env"})
+	want := []string{
+		"README.md:9: ISTIO_VERSION is 1.31.3 in hack/versions.env, but the paragraph doesn't say so",
+		"README.md:12: NOPE is not in hack/versions.env",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }

@@ -207,7 +207,8 @@ That check also produces the authoritative list. Indicative:
 
 Parity is the product. It is checked four ways:
 
-1. **CRS test suite** (`test/crs`, built): the same 4,572 tests Coraza passes.
+1. **CRS test suite** (`test/crs`, built): the same 4,572 tests Coraza passes, through each
+   adapter, and the response rules' tests through ext_proc.
 2. **Differential tests** (`test/diff`): the same rule IDs, scores and interruption as Coraza on
    CRS payloads, the benign corpus, recorded traffic and fuzzing.
 3. **Component conformance:** each transformation and body processor is fuzzed byte for byte

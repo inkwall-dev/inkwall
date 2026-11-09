@@ -8,6 +8,7 @@
 package testenv
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,10 +16,14 @@ import (
 	"testing"
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
 
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
 
@@ -177,4 +182,30 @@ func Skip(t testing.TB, e *Env) {
 	if e == nil {
 		t.Skip("no API server: KUBEBUILDER_ASSETS is not set (make test sets it)")
 	}
+}
+
+// Namespace creates a namespace named prefix and a random suffix, and
+// returns its name. A test that runs again against the same API server
+// (go test -count) gets a new one: envtest has no namespace controller, so
+// a deleted namespace stays Terminating and nothing can be created in it.
+func Namespace(t testing.TB, c client.Client, prefix string) string {
+	t.Helper()
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: prefix + "-"}}
+	if err := c.Create(context.Background(), ns); err != nil {
+		t.Fatal(err)
+	}
+	return ns.Name
+}
+
+// DeleteOnCleanup deletes objs (cluster-scoped ones, say) when t ends, so
+// that the test can run again against the same API server.
+func DeleteOnCleanup(t testing.TB, c client.Client, objs ...client.Object) {
+	t.Helper()
+	t.Cleanup(func() {
+		for _, o := range objs {
+			if err := c.Delete(context.Background(), o); err != nil && !apierrors.IsNotFound(err) {
+				t.Errorf("deleting %T %s: %v", o, o.GetName(), err)
+			}
+		}
+	})
 }

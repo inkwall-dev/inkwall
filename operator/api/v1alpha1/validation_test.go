@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -179,6 +180,8 @@ func TestWAFPolicyValidation(t *testing.T) {
 
 		{name: "body over 10 MiB", doc: policy(target + "  body: {maxBytes: 10485761}\n"), wantErr: "should be less than or equal to 10485760"},
 		{name: "unknown oversize action", doc: policy(target + "  body: {onOversize: InspectPrefix}\n"), wantErr: `Unsupported value: "InspectPrefix"`},
+		{name: "grpc Deny", doc: policy(target + "  body: {grpc: Deny}\n")},
+		{name: "unknown grpc action", doc: policy(target + "  body: {grpc: Block}\n"), wantErr: `Unsupported value: "Block"`},
 
 		{name: "websocket required headers only", doc: policy(target + "  webSocket: {requiredHeaders: [X-Api-Key]}\n")},
 		{name: "websocket origin with a path", doc: policy(target + "  webSocket: {allowedOrigins: [\"https://app.example.com/\"]}\n"), wantErr: "spec.webSocket.allowedOrigins[0]"},
@@ -315,8 +318,10 @@ func TestRuleSetValidation(t *testing.T) {
 // first.
 func TestSamples(t *testing.T) {
 	c := newClient(t)
+	// The samples' namespace; already there when the test runs again
+	// (-count): the samples are only dry-run, nothing is left in it.
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "inkwall-demo"}}
-	if err := c.Create(context.Background(), ns); err != nil {
+	if err := c.Create(context.Background(), ns); err != nil && !apierrors.IsAlreadyExists(err) {
 		t.Fatal(err)
 	}
 	files, err := filepath.Glob(filepath.Join(testenv.SamplesDir(), "*.yaml"))
@@ -334,4 +339,17 @@ func TestSamples(t *testing.T) {
 			}
 		})
 	}
+}
+
+func ipListDoc(spec string) string {
+	return "apiVersion: waf.inkwall.dev/v1alpha1\nkind: WAFIPList\nmetadata: {name: l, namespace: default}\nspec:\n" + spec
+}
+
+func TestWAFIPListValidation(t *testing.T) {
+	check(t, []validationCase{
+		{name: "entries", doc: ipListDoc("  entries: [{cidr: 203.0.113.0/24, description: abuse}, {cidr: \"2001:db8::/32\"}, {cidr: 192.0.2.1}]\n")},
+		{name: "no entries", doc: ipListDoc("  entries: []\n"), wantErr: "should have at least 1 items"},
+		{name: "a host name", doc: ipListDoc("  entries: [{cidr: lb.example.com}]\n"), wantErr: "spec.entries[0].cidr"},
+		{name: "policy lists", doc: policy(target + "  ipLists: {allow: [monitors], deny: [abusers]}\n")},
+	})
 }

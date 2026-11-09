@@ -81,7 +81,7 @@ Engine metrics carry `adapter` where it says so (`proxy`, `forwardauth`, `httpch
 | `inkwall_responses_total` | counter | `adapter`, `action`, `reason` | Responses checked, for policies that inspect responses. |
 | `inkwall_response_check_duration_seconds` | histogram | `adapter` | Time checking a response. |
 | `inkwall_rule_matches_total` | counter | `adapter`, `rule_id`, `action` | Rules that matched, score-only ones included, by the verdict's action. At most 2,000 rule IDs, then `rule_id="other"`. |
-| `inkwall_policy_requests_total` | counter | `adapter`, `policy`, `action`, `reason` | Opt-in (`--policy-metrics`, `InkwallConfig.spec.engine.policyMetrics`): requests by policy; `none` without one, `other` past `--policy-metrics-max` policies (default 500). |
+| `inkwall_policy_requests_total` | counter | `adapter`, `policy`, `action`, `reason` | Opt-in (`--policy-metrics`, `InkwallConfig.spec.engine.policyMetrics`): requests by policy, as the security event names it; `none` without one (a request no policy covers, or standalone mode), `other` past `--policy-metrics-max` policies (default 500). |
 | `inkwall_adapter_errors_total` | counter | `adapter`, `kind` | Requests refused without inspection: `invalid_request` (one the adapter can't read), `protocol` (an ext_proc stream or SPOE connection that breaks the protocol). |
 | `inkwall_websocket_connections` | gauge | `adapter` | WebSockets the engine's proxy holds open. |
 | `inkwall_websocket_messages_total` | counter | `adapter`, `action` | WebSocket messages inspected (`--websocket-messages`). |
@@ -89,6 +89,9 @@ Engine metrics carry `adapter` where it says so (`proxy`, `forwardauth`, `httpch
 | `inkwall_evaluations_in_flight` | gauge | | Evaluations running now. |
 | `inkwall_evaluation_slots` | gauge | | Maximum concurrent evaluations; past them, requests are shed with reason `overload`. |
 | `inkwall_rule_sets` | gauge | | Compiled rule sets in memory. |
+| `inkwall_rules_reloads_total` | counter | `adapter`, `result` | Standalone mode's rule reloads (`SIGHUP`, `--watch-rules`): `ok`, or `error` when the new rules don't compile and the old ones stay. |
+| `inkwall_connections` | gauge | `adapter` | Client connections the standalone proxy holds open, with `--max-connections`. |
+| `inkwall_connection_limit_waits_total` | counter | `adapter` | Times the standalone proxy reached `--max-connections`: the next connection waited until one closed. |
 | `inkwall_operator_connected` | gauge | | 1 while the engine has its stream to the operator. |
 | `inkwall_bundle_version` | gauge | | The bundle the engine enforces; 0 before the first. |
 | `inkwall_bundle_updates_total` | counter | `result`, `reason` | Bundles received: `applied`, or `rejected` with a reason (`signature`, `older`, `compile`, `other`). |
@@ -112,6 +115,10 @@ The engine also serves the Go runtime's `go_*` and the `process_*` metrics.
 | `inkwall_operator_engine_events_dropped_total` | counter | | Security events the engines reported dropping. |
 | `inkwall_operator_wired_targets` | gauge | `integration` | Policy targets wired to the engine. Leader only. |
 | `inkwall_operator_wiring_failures` | gauge | `integration` | Policy targets that couldn't be wired (`Programmed: WiringFailed`). Leader only. |
+| `inkwall_operator_policies` | gauge | `condition`, `status`, `reason` | WAFPolicies by each condition (`Accepted`, `Programmed`, `Enforced`, `Ready`), its status and reason. Leader only. |
+| `inkwall_operator_signing_key_age_seconds` | gauge | | Time since the active bundle signing key began to sign. Leader only. |
+| `inkwall_operator_signing_key_rotation_phase` | gauge | `phase` | 1 for the rotation's phase (`Idle`, `Publishing`, `Retiring`), 0 for the others. Leader only. |
+| `inkwall_operator_bundle_publish_failures_total` | counter | `reason` | Bundles not published: `too_large` (policy changes wait until it fits), `error` (retried). Leader only. |
 | `inkwall_operator_events_forwarded_total` | counter | | Security events sent to the control plane. |
 | `inkwall_operator_events_buffered` | gauge | | Security events buffered for the control plane. |
 | `inkwall_operator_events_buffer_errors_total` | counter | | Batches of events that couldn't be written to the buffer. |
@@ -120,6 +127,21 @@ The engine also serves the Go runtime's `go_*` and the `process_*` metrics.
 
 The operator also serves controller-runtime's `controller_runtime_*`, `workqueue_*` and
 `rest_client_*` metrics.
+
+Policies that aren't `Ready`, by reason:
+
+```promql
+sum by (reason) (inkwall_operator_policies{condition="Ready", status="False"})
+```
+
+The operator also records a Kubernetes Event on a policy when its `Ready`, `Programmed` or
+`Enforced` condition changes (`Warning` while it isn't `Ready`), at most one per policy every 30
+seconds:
+
+```sh
+kubectl describe wafpolicy -n shop web
+kubectl get events -n shop --field-selector involvedObject.kind=WAFPolicy
+```
 
 ## Alerts
 

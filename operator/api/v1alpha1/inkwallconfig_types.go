@@ -167,6 +167,16 @@ type ControlPlane struct {
 	EnrollmentSecretRef SecretReference `json:"enrollmentSecretRef"`
 }
 
+// RolloutPolicy is how proxy pods get a new engine.
+// +kubebuilder:validation:Enum=Manual;Automatic
+type RolloutPolicy string
+
+// The rollout policies.
+const (
+	RolloutManual    RolloutPolicy = "Manual"
+	RolloutAutomatic RolloutPolicy = "Automatic"
+)
+
 // EngineSpec configures the engine sidecars.
 type EngineSpec struct {
 	// Image is the engine image. Empty means the image released with this
@@ -208,12 +218,34 @@ type EngineSpec struct {
 	// +optional
 	LogLevel LogLevel `json:"logLevel,omitempty"`
 
+	// Rollout is how proxy pods that need a new engine (none: started
+	// before Inkwall; or another image than the one configured) get one.
+	// Manual: they are reported (PendingRestart) and you restart them.
+	// Automatic: the operator evicts them one at a time through the
+	// Eviction API, which respects PodDisruptionBudgets, waiting for each
+	// replacement to be ready and run the current bundle before the next;
+	// it pauses, and says why on the InkwallConfig (EngineRollout), when an
+	// eviction is refused or a replacement isn't ready in time. Pods the
+	// Pod webhook injects only (Traefik, HAProxy, Istio's ingress gateways):
+	// Envoy Gateway and Istio's Gateway API deployments roll their pods
+	// themselves. Unset: Manual.
+	// +optional
+	Rollout RolloutPolicy `json:"rollout,omitempty"`
+
 	// PolicyMetrics adds inkwall_policy_requests_total, the engines'
 	// requests by policy, for up to 500 policies per engine (the rest count
 	// as policy="other"). Off by default: one series per policy, action and
 	// reason. Applies to pods injected from then on.
 	// +optional
 	PolicyMetrics bool `json:"policyMetrics,omitempty"`
+
+	// JSONDenials answers a denied client that accepts application/json
+	// with a JSON body, {"error":"forbidden","status":403,"request_id":...},
+	// instead of text. Every denial carries X-Request-Id either way.
+	// Through Traefik, Envoy Gateway and Istio; HAProxy writes its own
+	// denials. Applies to pods injected from then on.
+	// +optional
+	JSONDenials bool `json:"jsonDenials,omitempty"`
 
 	// ClientIP configures which forwarding headers the engines trust for
 	// the client's address, behind an HTTP load balancer that appends it to
@@ -301,6 +333,89 @@ type InkwallConfigStatus struct {
 	// +listMapKey=controllerName
 	// +optional
 	Proxies []ProxyStatus `json:"proxies,omitempty"`
+
+	// Bundle is the bundle the engines get.
+	// +optional
+	Bundle *BundleStatus `json:"bundle,omitempty"`
+
+	// Engines counts the connected engines by the bundle they run.
+	// +optional
+	Engines *EngineCounts `json:"engines,omitempty"`
+
+	// SigningKey is the bundle signing key and its rotation.
+	// +optional
+	SigningKey *SigningKeyStatus `json:"signingKey,omitempty"`
+}
+
+// BundleStatus describes the published bundle.
+type BundleStatus struct {
+	// Version of the bundle published.
+	Version int64 `json:"version"`
+
+	// CompressedBytes is its size as stored, gzip-compressed.
+	CompressedBytes int64 `json:"compressedBytes"`
+
+	// LimitBytes is the largest bundle that can be published: past it,
+	// policy changes aren't published (BundleTooLarge).
+	LimitBytes int64 `json:"limitBytes"`
+}
+
+// EngineCounts counts the connected engines, as of the replicas' latest
+// engine reports.
+type EngineCounts struct {
+	// Connected engines.
+	Connected int32 `json:"connected"`
+
+	// Current engines run the published bundle.
+	Current int32 `json:"current"`
+
+	// Behind engines run an older bundle, and haven't rejected the
+	// published one.
+	Behind int32 `json:"behind"`
+
+	// Rejected engines rejected the published bundle.
+	Rejected int32 `json:"rejected"`
+
+	// Outdated engines are too old for a field some policy sets, which they
+	// ignore (EnginesOutdated).
+	Outdated int32 `json:"outdated"`
+}
+
+// SigningKeyPhase is where a signing key rotation is.
+// +kubebuilder:validation:Enum=Idle;Publishing;Retiring
+type SigningKeyPhase string
+
+// The phases of a signing key rotation.
+const (
+	// SigningKeyIdle: one key, which signs.
+	SigningKeyIdle SigningKeyPhase = "Idle"
+	// SigningKeyPublishing: the next key is published to the engines; the
+	// active one still signs.
+	SigningKeyPublishing SigningKeyPhase = "Publishing"
+	// SigningKeyRetiring: the new key signs; the previous one stays trusted
+	// until every engine runs a bundle the new one signed.
+	SigningKeyRetiring SigningKeyPhase = "Retiring"
+)
+
+// SigningKeyStatus describes the bundle signing key.
+type SigningKeyStatus struct {
+	// ActiveKeyID is the ID of the key that signs bundles.
+	// +kubebuilder:validation:MaxLength=128
+	ActiveKeyID string `json:"activeKeyID"`
+
+	// Phase of the rotation.
+	Phase SigningKeyPhase `json:"phase"`
+
+	// Since is when the phase began (Publishing, Retiring), or when the
+	// active key began to sign (Idle).
+	// +optional
+	Since *metav1.Time `json:"since,omitempty"`
+
+	// WaitingFor says what the rotation waits for; empty when it waits for
+	// nothing.
+	// +kubebuilder:validation:MaxLength=1024
+	// +optional
+	WaitingFor string `json:"waitingFor,omitempty"`
 }
 
 // Support is how far Inkwall wires a proxy controller's routes (0004 §4.1).
@@ -359,6 +474,10 @@ type ProxyStatus struct {
 // +kubebuilder:validation:XValidation:rule="self.metadata.name == 'default'",message="the InkwallConfig must be named default"
 // +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.spec.mode`
 // +kubebuilder:printcolumn:name="Suspended",type=boolean,JSONPath=`.spec.suspend`
+// +kubebuilder:printcolumn:name="Bundle",type=integer,JSONPath=`.status.bundle.version`
+// +kubebuilder:printcolumn:name="Engines",type=integer,JSONPath=`.status.engines.connected`
+// +kubebuilder:printcolumn:name="Current",type=integer,JSONPath=`.status.engines.current`
+// +kubebuilder:printcolumn:name="Key",type=string,JSONPath=`.status.signingKey.phase`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type InkwallConfig struct {
 	metav1.TypeMeta   `json:",inline"`

@@ -12,7 +12,8 @@
 #   - Block mode: benign requests pass with an X-Request-Id (HTTP/1.1 and
 #     HTTP/2), attacks in the query and in the body (Content-Length,
 #     chunked, HTTP/2) get 403 but on the route left uninspected, a
-#     client-sent X-Forwarded-For isn't taken for the client, a body over HAProxy's buffer 413, a denied
+#     client-sent X-Forwarded-For isn't taken for the client, a body over HAProxy's buffer 413, a
+#     request the engine can't read 400, a denied
 #     gRPC call HTTP 200 with grpc-status 7, a WebSocket handshake from a
 #     forbidden origin 403.
 #   - The engine down: 503 with the fail-closed rule (fail closed); without
@@ -23,8 +24,11 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# The versions under test (#393).
+# shellcheck source=hack/versions.env
+. hack/versions.env
 
-IMAGE=${HAPROXY_IMAGE:-haproxy:3.2}
+IMAGE=${HAPROXY_IMAGE:-haproxy:$HAPROXY_VERSION}
 # Below the kernel's ephemeral range (32768-60999 by default): a port in it
 # can be any process's for a while, and HAProxy, unable to bind, exits
 # (#340).
@@ -117,7 +121,16 @@ for f in haproxy.cfg spoe.conf; do
   check "docs/haproxy.md shows $f as it is" diff <(guide_copy "$f") "$EXAMPLES/$f"
 done
 
-go build -o "$WORK/inkwall-engine" ./cmd/engine
+# The engine: built from this checkout, or, with PULL_IMAGES=1, the binary
+# of the published image (make IMAGES=ghcr:<version>).
+if [[ ${PULL_IMAGES:-} == 1 ]]; then
+  docker pull -q "${ENGINE_IMAGE:?}" >/dev/null
+  cid=$(docker create "$ENGINE_IMAGE")
+  docker cp "$cid:/inkwall-engine" "$WORK/inkwall-engine"
+  docker rm "$cid" >/dev/null
+else
+  go build -o "$WORK/inkwall-engine" ./cmd/engine
+fi
 
 # The app echoes the request line and X-Request-Id.
 cat >"$WORK/app.py" <<'PY'
@@ -189,12 +202,17 @@ check "a benign POST passes" is 200 -X POST -d 'name=joe' "$U/form"
 check "a benign GET over HTTP/2 passes" is 200 --http2-prior-knowledge "$U/products?id=42"
 check "SQL injection in the query: 403" is 403 "$U/products?$SQLI"
 check "the route left uninspected passes an attack" is 200 "$U/healthz?$SQLI"
-check "a client-sent X-Forwarded-For isn't the client IP" bash -c "curl -s -o /dev/null -H 'X-Forwarded-For: 203.0.113.9' '$U/xff?$SQLI'; grep '\"path\":\"/xff\"' '$WORK/engine.log' | grep -q '\"client_ip\":\"127.0.0.1\"'"
+check "a client-sent X-Forwarded-For is not the client IP" bash -c "curl -s -o /dev/null -H 'X-Forwarded-For: 203.0.113.9' '$U/xff?$SQLI'; grep '\"path\":\"/xff\"' '$WORK/engine.log' | grep -q '\"client_ip\":\"127.0.0.1\"'"
 check "XSS in a body: 403" is 403 -X POST -d 'q=<script>alert(1)</script>' "$U/form"
 check "XSS in a chunked body: 403" is 403 -X POST -H 'Transfer-Encoding: chunked' -d 'q=<script>alert(1)</script>' "$U/form"
 check "XSS in an HTTP/2 body: 403" is 403 --http2-prior-knowledge -X POST -d 'q=<script>alert(1)</script>' "$U/form"
 check "a body over HAProxy's buffer: 413" is 413 -X POST --data-binary "name=$(head -c 20000 /dev/zero | tr '\0' a)" "$U/form"
 check "a denial carries the request ID" bash -c "curl -s -D - -o /dev/null '$U/products?$SQLI' | grep -qiE '^x-request-id: [0-9a-f]{16}'"
+# A request the engine can't read (a path with a malformed escape, which
+# HAProxy passes on): its 400, not a 403, with the request ID of the
+# engine's log line (#366).
+check "a request the engine can't read: 400" is 400 "$U/products/%zz"
+check "and its 400 carries the request ID" bash -c "curl -s -D - -o /dev/null '$U/products/%zz' | grep -qiE '^x-request-id: [0-9a-f]{16}'"
 grpc() { curl -s -D - -o /dev/null --http2-prior-knowledge -X POST -H 'Content-Type: application/grpc' -H 'TE: trailers' --data-binary @/dev/null "$U/pkg.Svc/Call?$SQLI"; }
 check "a denied gRPC call: HTTP 200" bash -c "$(declare -f grpc); U=$U SQLI='$SQLI' grpc | grep -q '^HTTP/2 200'"
 check "a denied gRPC call: grpc-status 7" bash -c "$(declare -f grpc); U=$U SQLI='$SQLI' grpc | grep -qi '^grpc-status: 7'"
@@ -202,7 +220,7 @@ check "a denied gRPC call: content-type application/grpc" bash -c "$(declare -f 
 ws=(-H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==')
 check "a WebSocket handshake from a forbidden origin: 403" is 403 "${ws[@]}" -H 'Origin: https://evil.example' "$U/chat"
 check "a WebSocket handshake from an allowed origin passes" is 200 "${ws[@]}" -H 'Origin: https://app.example.com' "$U/chat"
-check "the client's request ID reaches the app" bash -c "curl -s -H 'X-Request-Id: client-id-1' '$U/' | grep -q 'id=client-id-1'"
+check "the request ID the client sends reaches the app" bash -c "curl -s -H 'X-Request-Id: client-id-1' '$U/' | grep -q 'id=client-id-1'"
 check "a request ID reaches the app" bash -c "curl -s '$U/' | grep -qE 'id=[0-9a-f]{16}'"
 check "metrics count the denials" bash -c "curl -s 127.0.0.1:$ADMIN_PORT/metrics | grep -q 'inkwall_requests_total{action=\"deny\",adapter=\"spoe\",reason=\"rule\"}'"
 

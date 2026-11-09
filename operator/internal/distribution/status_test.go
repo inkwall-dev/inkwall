@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 )
 
@@ -232,6 +233,32 @@ func TestEnforcedOutdatedEngine(t *testing.T) {
 		}
 	}
 
+	// IP lists (#358): an engine before 0.5.0 ignores them, so it wouldn't
+	// deny what the deny list names.
+	for _, tc := range []struct {
+		name     string
+		lists    *wafv1alpha1.IPListsSpec
+		versions []string
+		reason   string
+	}{
+		{"deny list, 0.4.1 engine", &wafv1alpha1.IPListsSpec{Deny: []wafv1alpha1.IPListName{"bad"}}, []string{"0.5.0", "0.4.1"}, ReasonEnginesOutdated},
+		{"deny list, new engines", &wafv1alpha1.IPListsSpec{Deny: []wafv1alpha1.IPListName{"bad"}}, []string{"0.5.0"}, ReasonEnforced},
+		{"empty", &wafv1alpha1.IPListsSpec{}, []string{"0.4.1"}, ReasonEnforced},
+	} {
+		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
+		p.Spec.IPLists = tc.lists
+		p.Status.BundleVersion = 3
+		var engines []Engine
+		for i, v := range tc.versions {
+			engines = append(engines, Engine{ID: fmt.Sprintf("e%d", i), PodNamespace: "edge", PodName: fmt.Sprintf("envoy-%d", i), EngineVersion: v, Applied: 3})
+		}
+		conds, _ := enforcedConditions(p, 3, false, engines, 0)
+		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
+		if c == nil || c.Reason != tc.reason || tc.reason == ReasonEnginesOutdated && !strings.Contains(c.Message, "spec.ipLists") {
+			t.Errorf("%s: Enforced %+v, want %s", tc.name, c, tc.reason)
+		}
+	}
+
 	// Cookie, header and argument name exclusions (#357): an engine before
 	// 0.5.0 ignores them.
 	for _, tc := range []struct {
@@ -282,6 +309,10 @@ func TestEnforcedOutdatedEngineGRPCMessages(t *testing.T) {
 		{"new engines", &wafv1alpha1.BodySpec{GRPCMessages: wafv1alpha1.GRPCMessagesInspect}, []string{"0.4.0", "v0.4.1"}, ReasonEnforced},
 		{"Skip", &wafv1alpha1.BodySpec{GRPCMessages: wafv1alpha1.GRPCMessagesSkip}, []string{"0.3.1"}, ReasonEnforced},
 		{"no body", nil, []string{"0.3.1"}, ReasonEnforced},
+		// body.grpc: Deny (#367): an engine before 0.5.0 lets gRPC through.
+		{"grpc Deny, 0.4.1 engine", &wafv1alpha1.BodySpec{GRPC: wafv1alpha1.GRPCDeny}, []string{"0.5.0", "0.4.1"}, ReasonEnginesOutdated},
+		{"grpc Deny, new engines", &wafv1alpha1.BodySpec{GRPC: wafv1alpha1.GRPCDeny}, []string{"0.5.0"}, ReasonEnforced},
+		{"grpc Allow", &wafv1alpha1.BodySpec{GRPC: wafv1alpha1.GRPCAllow}, []string{"0.4.1"}, ReasonEnforced},
 	} {
 		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
 		p.Spec.Body = tc.body
@@ -296,8 +327,104 @@ func TestEnforcedOutdatedEngineGRPCMessages(t *testing.T) {
 			t.Errorf("%s: Enforced %+v, want %s", tc.name, c, tc.reason)
 			continue
 		}
-		if tc.reason == ReasonEnginesOutdated && !strings.Contains(c.Message, "spec.body.grpcMessages") {
+		field := "spec.body.grpcMessages"
+		if tc.body != nil && tc.body.GRPC == wafv1alpha1.GRPCDeny {
+			field = "spec.body.grpc,"
+		}
+		if tc.reason == ReasonEnginesOutdated && !strings.Contains(c.Message, field) {
 			t.Errorf("%s: message %q doesn't name the field", tc.name, c.Message)
 		}
+	}
+}
+
+// A policy setting fields of several releases needs the newest: an engine
+// new enough for the first field but not for a later one is outdated (#473).
+func TestEnforcedOutdatedNewestField(t *testing.T) {
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
+	p.Spec.WebSocket = &wafv1alpha1.WebSocketSpec{AllowedOrigins: []wafv1alpha1.WebSocketOrigin{"https://app.example.com"}}
+	p.Spec.IPLists = &wafv1alpha1.IPListsSpec{Deny: []wafv1alpha1.IPListName{"blocked"}}
+	p.Status.BundleVersion = 3
+	engines := []Engine{{ID: "e0", PodNamespace: "edge", PodName: "traefik-0", EngineVersion: "0.4.1", Applied: 3}}
+	conds, _ := enforcedConditions(p, 3, false, engines, 0)
+	c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
+	if c == nil || c.Reason != ReasonEnginesOutdated || !strings.Contains(c.Message, "spec.ipLists") || !strings.Contains(c.Message, "0.5.0 or later") {
+		t.Errorf("a 0.4.1 engine and a policy with webSocket and ipLists: Enforced %+v, want EnginesOutdated naming spec.ipLists", c)
+	}
+}
+
+// The InkwallConfig's status counts the engines (#375), and 1,000 engines
+// connecting one per report don't rewrite it more than once per
+// ConfigEvery; the last count is written once the engines settle.
+func TestReporterConfigStatus(t *testing.T) {
+	ctx := context.Background()
+	s := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(s)
+	_ = wafv1alpha1.AddToScheme(s)
+	cfg := &wafv1alpha1.InkwallConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "lists"}}
+	p.Spec.IPLists = &wafv1alpha1.IPListsSpec{Deny: []wafv1alpha1.IPListName{"blocked"}}
+	report := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "inkwall-system", Name: reportNamePrefix + "a", Labels: map[string]string{EnginesLabel: "true"}}}
+	var writes int
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(cfg, p, report).
+		WithStatusSubresource(&wafv1alpha1.WAFPolicy{}, &wafv1alpha1.InkwallConfig{}).
+		WithInterceptorFuncs(interceptor.Funcs{SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if _, ok := obj.(*wafv1alpha1.InkwallConfig); ok {
+				writes++
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		}}).Build()
+	now := time.Unix(1_800_000_000, 0)
+	store := NewStore()
+	store.Set(&bundlev1.SignedBundle{}, 2)
+	r := &Reporter{Client: c, Reader: c, Namespace: "inkwall-system", Stale: time.Minute, Store: store, Now: func() time.Time { return now }}
+
+	var engines []Engine
+	report.Data = map[string]string{}
+	set := func() {
+		t.Helper()
+		data, _ := json.Marshal(engines)
+		report.Data = map[string]string{enginesKey: string(data), updatedAtKey: time.Now().UTC().Format(time.RFC3339Nano)}
+		if err := c.Update(ctx, report); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.report(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 1,000 engines, one more every 100 ms: 100 s.
+	for i := range 1000 {
+		// A quarter each: current, rejecting bundle 2, behind, and current
+		// but a release too old for the policy's IP lists.
+		e := Engine{ID: fmt.Sprintf("e%d", i), EngineVersion: "0.5.0", Applied: 2}
+		switch i % 4 {
+		case 1:
+			e.Applied, e.Rejected = 1, 2
+		case 2:
+			e.Applied = 1
+		case 3:
+			e.EngineVersion = "0.4.1"
+		}
+		engines = append(engines, e)
+		set()
+		now = now.Add(100 * time.Millisecond)
+	}
+	if most := int(100*time.Second/DefaultConfigEvery) + 1; writes > most {
+		t.Errorf("%d InkwallConfig status writes for 1,000 engines connecting over 100 s, want at most %d", writes, most)
+	}
+	now = now.Add(DefaultConfigEvery)
+	set()
+	if err := c.Get(ctx, client.ObjectKeyFromObject(cfg), cfg); err != nil {
+		t.Fatal(err)
+	}
+	want := wafv1alpha1.EngineCounts{Connected: 1000, Current: 500, Behind: 250, Rejected: 250, Outdated: 250}
+	if got := cfg.Status.Engines; got == nil || *got != want {
+		t.Errorf("engines %+v, want %+v", got, want)
+	}
+	// Unchanged: not written again.
+	before := writes
+	now = now.Add(DefaultConfigEvery)
+	set()
+	if writes != before {
+		t.Error("unchanged engine counts written again")
 	}
 }

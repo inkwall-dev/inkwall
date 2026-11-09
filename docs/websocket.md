@@ -100,7 +100,7 @@ the same rules ([standalone proxy](standalone-proxy.md#flags)).
 | Proxy | Handshake | Denial | Messages |
 |---|---|---|---|
 | Envoy Gateway, [raw Envoy](raw-envoy.md) (ext_proc) | Inspected on its headers | 403 before the upgrade | Not inspected |
-| [Istio](istio.md): HTTPRoutes of its Gateways, VirtualServices of its ingress gateways (ext_proc) | Inspected on its headers, as through Envoy Gateway (not covered by an e2e yet) | 403 before the upgrade | Not inspected |
+| [Istio](istio.md): HTTPRoutes of its Gateways, VirtualServices of its ingress gateways (ext_proc) | Inspected on its headers, as through Envoy Gateway | 403 before the upgrade | Not inspected |
 | [HAProxy](haproxy.md), and the HAProxy Kubernetes Ingress Controller (SPOE) | Inspected | 403 before the upgrade | Not inspected |
 | Traefik (ForwardAuth) | Inspected, without `Upgrade` and `Connection` | 403 before the upgrade | Not inspected |
 | [Standalone proxy](standalone-proxy.md) | Inspected | 403 before the upgrade | Inspected with `--websocket-messages`; a denial closes with 1008 |
@@ -138,10 +138,13 @@ forwards each before the script decides. Neither is used; see
 `inkwall-engine proxy --websocket-messages inspect` reads what each client sends on a WebSocket it
 forwards, and inspects every text message with the policy's rules, before the application gets it:
 
-- **A text message** is inspected as a request with the handshake's URL and headers whose form
-  arguments (`ARGS_POST`) are the message: a JSON object's or array's values by path
-  (`json.user.name`, `json.items.0`), any other text as one argument, `message`. A message must be
-  valid UTF-8 (close 1007).
+- **A text message** is inspected on its own, as a request whose form arguments (`ARGS_POST`)
+  are the message: a JSON object's or array's values by path (`json.user.name`, `json.items.0`),
+  any other text as one argument, `message`. It keeps the handshake's path (for exclusions and
+  path rules), request ID and client IP, but not its query arguments or headers, which were
+  inspected with the handshake: what the handshake scored doesn't add to each message's score,
+  and its arguments don't count toward the message's argument limit. A message must be valid UTF-8
+  (close 1007).
 - **A binary message** passes uninspected with `inspect`; `text-only` refuses it (close 1003).
 - **Size**: a message is inspected up to `--max-body-bytes` (64 KiB by default). A longer one is
   handled as an oversized body (`--oversize-body`): in `block` mode, closed with 1009 by default;
@@ -166,10 +169,19 @@ forwards, and inspects every text message with the policy's rules, before the ap
 - **Paranoia**: at levels 1 to 3 typical chat and JSON messages raise nothing; at 4, rule 920273
   (the strict character range) denies a space in any argument, a message's as a form's.
 - **Not applied**: `--skip-paths` and `--skip-body-paths` routes aren't inspected; the policy's
-  `webSocket` rules (origins, required headers) are the handshake's. A rule the handshake matched
-  in `detect` mode is logged with every message, which carries the handshake's headers.
+  `webSocket` rules (origins, required headers) are the handshake's. A SecLang rule that reads
+  headers or query arguments sees none with a message.
 
 It needs a policy from flags: with `--operator`, the flag is refused.
+
+### Idle WebSockets and shutdown
+
+Once upgraded, a WebSocket is outside the proxy's request timeouts. With
+`--websocket-idle-timeout 10m`, one with nothing passing either way for 10 minutes is closed with a
+close frame `1001` (going away) to both the client and the upstream; unset, it stays open as long as
+both ends keep it. On `SIGTERM` the proxy sends `1001` to every open WebSocket and waits for them
+to close, within the 15-second shutdown grace period. This applies with or without
+`--websocket-messages`. `--max-connections` counts a WebSocket's connection until it closes.
 
 ## Checking it worked
 

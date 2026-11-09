@@ -57,6 +57,12 @@ func policyBundle(cfg config, notes io.Writer) (*bundlev1.Bundle, error) {
 	if err != nil {
 		return nil, err
 	}
+	return inputBundle(in, suspended, notes)
+}
+
+// inputBundle resolves loaded objects as the operator does, and fails on
+// the policies and rule sets it wouldn't enforce.
+func inputBundle(in resolver.Input, suspended bool, notes io.Writer) (*bundlev1.Bundle, error) {
 	if len(in.Policies) == 0 {
 		return nil, errors.New("no WAFPolicy in the files")
 	}
@@ -247,6 +253,11 @@ func loadObjects(files []string, namespace string, notes io.Writer) (resolver.In
 			var o wafv1alpha1.ClusterWAFRuleSet
 			err = yaml.UnmarshalStrict(doc, &o)
 			in.ClusterRuleSets = append(in.ClusterRuleSets, o)
+		case "WAFIPList":
+			var o wafv1alpha1.WAFIPList
+			err = yaml.UnmarshalStrict(doc, &o)
+			o.Namespace = ns
+			in.IPLists = append(in.IPLists, o)
 		case "InkwallConfig":
 			var o wafv1alpha1.InkwallConfig
 			err = yaml.UnmarshalStrict(doc, &o)
@@ -356,6 +367,7 @@ var apiVersions = map[string]string{
 	"WAFPolicy":         wafv1alpha1.GroupVersion.String(),
 	"WAFRuleSet":        wafv1alpha1.GroupVersion.String(),
 	"ClusterWAFRuleSet": wafv1alpha1.GroupVersion.String(),
+	"WAFIPList":         wafv1alpha1.GroupVersion.String(),
 	"InkwallConfig":     wafv1alpha1.GroupVersion.String(),
 	"Ingress":           networkingv1.SchemeGroupVersion.String(),
 	"IngressRoute":      integrations.TraefikIngressRouteGVK.GroupVersion().String(),

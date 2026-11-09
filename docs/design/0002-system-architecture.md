@@ -279,11 +279,24 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
 - **`WAFIPList` / `ClusterWAFIPList`:** CIDRs, or a URL that the operator fetches (never the
   engine).
 
+  **Built (#358):** the namespaced `WAFIPList` with CIDR entries, named by
+  `WAFPolicy.spec.ipLists: {allow, deny}` in the policy's namespace. The operator resolves the
+  lists into each policy's `ip_lists` in the bundle (an unknown or invalid list makes the policy
+  `Accepted=False`, `InvalidRef`). The engine checks the resolved client IP before anything else,
+  skip paths and rules included, as sorted, merged ranges with a binary search (`pkg/iplist`:
+  about 60 ns at 10,000 prefixes, no allocation). A client in a deny list is denied with 403 and
+  reason `ip-deny` (logged in `Detect` mode). One in an allow list and not in a deny list is let
+  through uninspected, its body unread, with reason `ip-allow`: counted in the metrics, not a
+  security event, since allowed clients would flood the events. Deny wins over allow, so an
+  allowed range can't open a hole in a denied one. An engine before 0.5.0 ignores the lists, so
+  the policy is `Enforced=False` (`EnginesOutdated`) meanwhile. Not built: `ClusterWAFIPList`,
+  lists fetched from a URL.
+
 **Built:** `InkwallConfig`, `WAFPolicy`, `WAFRuleSet` and `ClusterWAFRuleSet`; `Ingress` and
 Traefik `IngressRoute` targets; `HTTPRoute` targets resolved, with the precedence above
 ([0004 §4.5](0004-operator.md#45-resolver)), and wired through Envoy Gateway or Traefik's Gateway
 API provider ([0004 §4.4](0004-operator.md#44-wiring-controller)).
-**Not yet:** IP lists, the policy fields `rateLimits` and `ipLists`, wiring other controllers'
+**Not yet:** cluster-wide and fetched IP lists, the policy field `rateLimits`, wiring other controllers'
 `HTTPRoute` targets, `BlockHighConfidence`, the `InspectPrefix` oversize action, and
 `InkwallConfig.events`.
 
@@ -506,7 +519,17 @@ route, whatever Envoy Gateway allows.
 frames, holds a message until it is inspected, and in `Block` mode closes the connection with 1008
 ([0006 §6](0006-adapter-protocols.md#6-reverse-proxy-standalone-mode)). Routes wired through
 ext_proc (Envoy Gateway, raw Envoy) and Traefik inspect the handshake only, and no `WAFPolicy`
-field asks for message inspection, so nothing claims it there. The options weighed:
+field asks for message inspection, so nothing claims it there.
+
+**Built (#363):** a message is evaluated in its own scope: a `GET` of the handshake's path (for
+exclusions and path rules) with the handshake's request ID and client IP, fixed clean `Accept`
+and `User-Agent` headers, and the message as arguments. The handshake's query arguments and
+headers were inspected with it and aren't evaluated again, so its score doesn't add to every
+message's, and each message skips the header rules' work (`BenchmarkWebSocketMessage`: about 40%
+less time and 35% fewer allocations). A SecLang rule on headers or query arguments sees none with
+a message. Messages are counted apart from requests (`inkwall_websocket_messages_total`, #356).
+
+The options weighed:
 
 1. **The engine's reverse proxy:** chosen. It works for the standalone proxy, with its own flags,
    and is the reference for the others. On Envoy Gateway it would have to be in the request path,
@@ -578,8 +601,19 @@ controller `istio.io/gateway-controller`), with `ext_proc` through an `EnvoyFilt
   10 MiB, the largest `body.maxBytes`.
 - **Status.** A route is wired on a Gateway once every running pod of it has the engine; it is
   `Programmed` once that holds on all its Gateways and Istio has accepted it (its parent status,
-  `Accepted=True` from `istio.io/gateway-controller`) on each: Istio reports nothing on an
-  `EnvoyFilter`. Until then it is `Pending` (or `PendingRestart`, `SidecarMissing`), never `Ready`.
+  `Accepted=True` from `istio.io/gateway-controller`) on each, and the operator's probe has
+  reached the engine through every pod on every listener the route is attached to (#372): Istio
+  reports nothing on an `EnvoyFilter` and accepts patches that match no Envoy route. Until then it
+  is `Pending` (or `PendingRestart`, `SidecarMissing`, `Unverified`), never `Ready`.
+- **The probe** (#372, the same `Prober` as HAProxy's, §6.4, with a target builder per
+  integration): per Gateway, a target per protected rule (VirtualService http route) and per
+  listener (server) the route is on, from the rule's first match the probe can make (exact or
+  prefix path, exact headers and query parameters, the method), with the route's host (a wildcard
+  made concrete, `inkwall-probe.<suffix>`) on the listener's port, over TLS for HTTPS (`SIMPLE`).
+  The ext_proc adapter answers it with Envoy's local reply, 200 and the answer's MAC (0006 §2). A
+  rule whose matches are all regular expressions, or a mutual-TLS or passthrough server, can't be
+  probed: `NotProbeable`. In detect mode Envoy discards the answer: `Unverified`; proving those
+  by the engine's own record of the probe (a receipt in its report) is a follow-up.
   An Istio older than 1.28 (from the `istio-proxy` image tag) is `WiringFailed`: its Envoy (before
   1.36) would reject `status_on_error` and keep serving without the filter. Without the
   `EnvoyFilter` CRD nothing is wired (`WiringFailed`). Without its ClusterRole,
@@ -605,9 +639,9 @@ controller `istio.io/gateway-controller`), with `ext_proc` through an `EnvoyFilt
   restore that mount if Istio's own injector rewrites the container. Pods that ran before get the
   engine when restarted (`PendingRestart`), and keep it after unwiring until restarted.
 - **Wiring.** An Istio Gateway selects pods in any namespace, and several Gateways may select the
-  same pods; Envoy rejects two HTTP filters of one name. So the `EnvoyFilter` is per namespace of
-  gateway pods, `inkwall-istio-ingress`, with the integration's labels as `workloadSelector`, and
-  one ext_proc filter per protected VirtualService (`inkwall.ext_proc.vs.<namespace>.<name>`),
+  same pods; Envoy rejects two HTTP filters of one name. So the `EnvoyFilter` objects are per
+  namespace of gateway pods, `inkwall-istio-ingress` (the cluster) and 32 shards (#424), with the
+  integration's labels as `workloadSelector`, and one ext_proc filter per protected VirtualService (`inkwall.ext_proc.vs.<namespace>.<name>`),
   turned on by `typed_per_filter_config` on its Envoy routes, with the same settings as for
   HTTPRoutes. Istio names those routes after the http route's `name` (then `.` and a named match's
   `name`; checked in Istio 1.31.3's `route.go` and on kind): an unnamed http route can't be selected
@@ -628,9 +662,8 @@ controller `istio.io/gateway-controller`), with `ext_proc` through an `EnvoyFilt
 Response inspection (v0.4.0, [0006 §2](0006-adapter-protocols.md#response-inspection-v040)):
 the engine's ext_proc adapter inspects the response headers and body for policies that ask, and
 replaces a response that leaks in block mode; built for raw Envoy (flags or bundle) and Envoy
-Gateway (`WAFPolicy.spec.responses`). Istio's filter sends no response phase yet, so a policy with
-`responses.inspect` on an Istio route is `Programmed=False` (`ResponsesNotInspected`).
-**Not yet:** Contour; responses through Istio.
+Gateway and Istio (`WAFPolicy.spec.responses`; Istio's HTTPRoutes and VirtualServices since 0.5.0,
+#374). **Not yet:** Contour.
 
 ### 6.2 ingress-nginx
 
@@ -1159,7 +1192,7 @@ One shared request corpus drives every level.
 | Unit | `go test` | Package logic | every PR |
 | [Fuzz](https://go.dev/doc/security/fuzz/) | `go test -fuzz` | Parsers of untrusted input never panic and keep their properties | nightly; seeds every PR |
 | Rule conformance | [go-ftw](https://github.com/coreruleset/go-ftw) + CRS tests | Detection matches CRS | every PR |
-| Adapter parity | [testcontainers-go](https://golang.testcontainers.org/) | Adapters match the reverse proxy | every PR |
+| Adapter parity | `go test`, in-process stand-ins for each proxy | Adapters match the reverse proxy | every PR |
 | E2E | kind + [e2e-framework](https://github.com/kubernetes-sigs/e2e-framework) | Wiring, enforcement, status, failure modes | every PR |
 | Performance | [`testing.B`](https://pkg.go.dev/testing#B), [k6](https://grafana.com/docs/k6/latest/) | 0001 budgets | every PR / nightly |
 | Upgrade | kind | N-1 → N with no dropped requests | release |
@@ -1194,22 +1227,51 @@ One shared request corpus drives every level.
   of the exact bytes reaches compilation;
 - event redaction (`FuzzNew`): valid UTF-8, within the field limits, with no query strings or
   credential snippets;
-- `inkwallctl test`'s URL, raw HTTP and HAR input (`FuzzSplitURL`, `FuzzFromRawHTTP`,
-  `FuzzFromHAR`).
+- `inkwallctl test`'s URL, raw HTTP, HAR and suite input (`FuzzSplitURL`, `FuzzFromRawHTTP`,
+  `FuzzFromHAR`, `FuzzParseSuite`).
 
 Their seed corpora (`testdata/fuzz/`) run in every `make test`. `.github/workflows/fuzz.yaml` runs
-each target for 5 minutes nightly and uploads the failing inputs.
+each target for 5 minutes nightly and uploads the failing inputs, encrypted. Its matrix is every
+`func Fuzz` of the tests (`hack/ci/fuzz-targets.sh`, checked by `hack/ci`'s test), so a new target
+is fuzzed without editing the workflow, and each target keeps the corpus it grows in Go's fuzz
+cache from night to night (`actions/cache`).
+
+A nightly stress run (`.github/workflows/stress.yaml`, `make stress-test`, #395) looks for timing
+flakes: the adapters', agent's, pipeline's and operator's tests with the race detector, shuffled
+(the seed printed first), 10 times, on `GOMAXPROCS=2` with CPU hogs alongside. The SPOE, ext_proc
+and agent packages check every `make test` for goroutines a test leaves running
+([goleak](https://github.com/uber-go/goleak)).
+
+A scheduled workflow (fuzz, docs-links, stress) that fails opens one issue for it, labeled
+`ci-scheduled-failure` and pinned, or comments on the open one; the next passing run closes it
+(`hack/ci/report-scheduled.sh`, in a `report` job that alone may write issues). The fuzz issue
+names the failing targets only: a crash may be a vulnerability, reported privately.
 
 **Built (other levels):**
 
-- rule conformance (`make crs-test`, go-ftw);
+- rule conformance (`make crs-test`, go-ftw): the CRS's regression tests through the reverse
+  proxy at each paranoia level, and through ForwardAuth, ext_proc and SPOE (each behind an
+  in-process stand-in for its proxy) at level 4, with the response rules' tests through ext_proc.
+  A test one adapter fails while the reverse proxy passes it fails the suite, unless it is listed
+  as a difference with its reason (`test/crs/crs_test.go`): today, the `Content-Length: 0` the
+  adapters add to an empty POST, and requests without a Host, which Envoy answers itself;
+- adapter parity (`TestAdapterParity` in `test/crs`, in `make test`): a corpus of clean traffic,
+  attacks, odd hosts and encodings, HTTP/1.0, chunked and large bodies, gRPC and a WebSocket
+  handshake goes through the reverse proxy, ForwardAuth, ext_proc, SPOE and `/v1/check`, each
+  behind the stand-in for its proxy the CRS suite uses, against one pipeline. For each adapter it
+  compares the request the rules saw (method, scheme, host, URI, protocol, headers, body, client
+  IP), the verdict (action, status, reason, rule IDs) and the client's answer (status, and a
+  denial's `X-Request-Id`) with the reverse proxy's. A difference fails the test, naming the
+  adapter, the case and the field, unless `parityDifferences` lists it with its reason: today,
+  ForwardAuth's HTTP/1.1 subrequest (the client's version isn't sent) and its own framing headers,
+  and how each proxy answers a denied gRPC call;
 - E2E and upgrade tests on kind (`make kind-e2e`, `make kind-upgrade`; shell scripts in
   `hack/kind`, on every PR). The upgrade test runs `helm upgrade` from the last release and checks
   that routes stay protected;
 - benchmarks (`testing.B`, and the CI `bench` gate;
   [0001 §8](0001-performance-first-architecture.md#8-proving-it-the-performance-test-harness)).
 
-**Not yet:** adapter parity, e2e-framework, k6, soak and chaos tests.
+**Not yet:** e2e-framework, k6, soak and chaos tests.
 
 ---
 

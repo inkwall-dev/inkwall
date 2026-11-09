@@ -8,6 +8,7 @@ the operator.
 - [Prerequisites](#prerequisites)
 - [Run the proxy](#run-the-proxy)
 - [Flags](#flags)
+- [Reloading the rules](#reloading-the-rules)
 - [Other modes](#other-modes)
 - [Checking it worked](#checking-it-worked)
 - [Undoing it](#undoing-it)
@@ -39,18 +40,44 @@ The main flags; `inkwall-engine proxy -h` lists them all:
 | `--mode` | `detect` | `block` to enforce |
 | `--paranoia-level` | `1` | [CRS](https://coreruleset.org/) [paranoia level](https://coreruleset.org/docs/concepts/paranoia_levels/), 1 to 4 |
 | `--rules`, `--rules-before-crs` | | [SecLang](https://coraza.io/docs/seclang/) rules and exclusions, loaded after or before the CRS |
+| `--watch-rules` | off | Reload `--rules` and `--rules-before-crs` when their content changes (checked every 2 s), as for a mounted ConfigMap; see [Reloading the rules](#reloading-the-rules) |
 | `--skip-paths`, `--skip-body-paths` | | Paths not inspected at all, or without their body |
 | `--disable-rule-groups` | | CRS attack families the app can't be vulnerable to, e.g. `php,java` |
 | `--websocket-origins`, `--websocket-required-headers` | | Origins a [WebSocket](websocket.md) handshake may come from, headers it must have |
 | `--websocket-messages` | `off` | `inspect` or `text-only`: inspect each text message a client sends on a [WebSocket](websocket.md#messages-through-the-standalone-proxy); a denied one closes it with 1008 |
+| `--websocket-idle-timeout` | `0` (never) | Close a WebSocket with `1001` (going away) when nothing passes either way for this long. On shutdown, open WebSockets get `1001` in any case ([idle WebSockets](websocket.md#idle-websockets-and-shutdown)) |
+| `--max-connections` | `0` (no limit) | Client connections open at a time, WebSockets included; past it, a new connection waits in the listen backlog until one closes. `inkwall_connections` and `inkwall_connection_limit_waits_total` count them |
+| `--body-read-timeout` | `0` (off) | Time to read the part of a body that is inspected (`--max-body-bytes`); a client that stalls in it gets `408`. The rest streams to the upstream under `--read-timeout`: for long uploads, set `--read-timeout 0` and this one |
 | `--max-body-bytes` | `65536` | Body bytes inspected; `--oversize-body` decides what happens to larger bodies |
 | `--failure-mode` | `auto` | Requests that can't be inspected: rejected (503) in block mode, let through in detect mode |
 | `--trusted-proxies` | | [CIDRs](https://www.rfc-editor.org/rfc/rfc4632) whose [`X-Forwarded-For`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For) is trusted |
 | `--trusted-hops` | `0` | [`X-Forwarded-For`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For) entries, from the right, taken as proxies whatever their address (0 to 10), behind a trusted peer: see [client IP](client-ip.md#trusted-hops) |
 | `--client-ip-header` | `x-forwarded-for` | `x-forwarded-for`, or `forwarded` ([RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)) behind a proxy that sets or replaces it: a client can send either |
 | `--listen`, `--admin-listen` | `:8480`, `:9480` | Proxy address; address of `/metrics`, `/healthz` and `/readyz` |
+| `--h2c` | off | Also accept HTTP/2 without TLS (prior knowledge, as gRPC clients send it) on `--listen`; HTTP/1.1 still works |
+| `--tls-cert`, `--tls-key` | | Serve TLS on `--listen`, HTTP/2 and HTTP/1.1 by ALPN; the files are read again when they change (a renewed certificate) |
+| `--upstream-h2c` | off | Reach an `http://` upstream over HTTP/2 without TLS, as a [gRPC](grpc.md) server needs; WebSocket upgrades, HTTP/1.1 only, can't pass then |
+| `--upstream-ca` | | CA certificates (PEM) for an `https://` upstream, instead of the system's. Over TLS the upstream gets HTTP/2 or HTTP/1.1, as ALPN settles |
+| `--json-denials` | off | Answer a denied client that sends `Accept: application/json` with `{"error":"forbidden","status":403,"request_id":"..."}` instead of text. Every denial carries `X-Request-Id`, the request ID of its security event |
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error`; security events are logged at `warn` |
 | `--event-log-rate` | `10` | Security event lines per second for each policy and rule; the rest are counted in `inkwall_security_event_logs_suppressed_total` (`0`: no limit) |
+
+## Reloading the rules
+
+The engine reloads `--rules` and `--rules-before-crs` on `SIGHUP`, and with `--watch-rules` when
+their content changes (a ConfigMap mounted as a volume is updated by swapping a symlink: one
+reload). The new rules compile beside the old ones, which keep inspecting meanwhile; requests in
+flight finish on the old rules, and the next ones get the new. If the new rules don't compile, the
+old ones stay in force and the engine logs why:
+
+```sh
+kill -HUP "$(pidof inkwall-engine)"
+```
+
+Each reload is logged (`rules reloaded`, with the files' SHA-256, or `rules not reloaded` and the
+error) and counted in `inkwall_rules_reloads_total{result="ok"|"error"}`. The other flags (mode,
+paranoia level, skip paths...) still need a restart. In bundle mode the operator's bundles replace
+the rules, and neither applies.
 
 ## Other modes
 

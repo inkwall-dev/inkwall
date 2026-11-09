@@ -8,10 +8,12 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# The versions under test (#393).
+# shellcheck source=hack/versions.env
+. hack/versions.env
 
 CLUSTER=${KIND_CLUSTER:-inkwall}
 IMAGE=${IMAGE:-inkwall-engine:dev}
-TRAEFIK_CHART_VERSION=41.6.1 # Traefik v3.7.13
 
 if ! kind get clusters | grep -x "$CLUSTER" >/dev/null; then
   echo "no kind cluster $CLUSTER: run make kind-up" >&2

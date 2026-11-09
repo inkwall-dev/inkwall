@@ -35,6 +35,45 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 What's new:
 
+- **Automatic engine rollout (opt-in).** Proxy pods started before Inkwall, or running another
+  engine image than the one configured, are `PendingRestart` until you restart them: that is still
+  the default (`spec.engine.rollout: Manual`). With
+  `kubectl patch inkwallconfig default --type=merge -p '{"spec":{"engine":{"rollout":"Automatic"}}}'`
+  the operator evicts them one at a time through the Eviction API, respecting
+  PodDisruptionBudgets, and waits for each replacement to be ready with the new engine before the
+  next, for the Traefik, HAProxy and Istio ingress gateway pods it injects (not a pod with the
+  engine in its own spec: that one keeps its image until you change it). A refused eviction or a
+  replacement not ready within 5 minutes pauses it: `kubectl get inkwallconfig default -o
+  jsonpath='{.status.conditions[?(@.type=="EngineRollout")].message}'` says why. Upgrade the chart
+  first, for the new CRD field and the `pods/eviction` permission. With it, an engine upgrade
+  after a chart upgrade needs no restart by hand.
+- **Standalone mode reloads its rules without a restart**: on `SIGHUP`, or with `--watch-rules`
+  when the files change ([reloading the rules](standalone-proxy.md#reloading-the-rules)).
+- **gRPC and HTTP/2 through the standalone proxy**: `--h2c`, `--tls-cert`/`--tls-key`,
+  `--upstream-h2c` and `--upstream-ca` ([gRPC](grpc.md#through-the-standalone-proxy)). Its
+  upstream connections are now kept for reuse (128 idle per host instead of Go's default 2).
+- **Limits for the standalone proxy's long-lived connections**: `--websocket-idle-timeout`,
+  `--max-connections` and `--body-read-timeout`, all off by default. On shutdown the proxy now
+  closes open WebSockets with `1001` (going away) instead of dropping them, and a client whose body
+  read times out gets `408` instead of `400`.
+- **Responses through Istio.** A policy with `responses.inspect` now has the responses of its
+  Istio HTTPRoutes and VirtualServices inspected, as through Envoy Gateway: a response that leaks
+  is replaced with 403 in `Block` mode and logged in `Detect` mode. Such a policy was
+  `Programmed=False` (`ResponsesNotInspected`) on Istio's routes; it is `Programmed` once the
+  operator has rewritten their `EnvoyFilter` objects. Routes whose policies don't inspect
+  responses keep sending none to the engine. See [Istio](istio.md#settings).
+- **IP allow and deny lists.** A `WAFIPList` lists client addresses (CIDRs), and
+  `WAFPolicy.spec.ipLists: {allow: [...], deny: [...]}` names lists in the policy's namespace: a
+  denied client gets 403 (logged in `Detect` mode) before any rule, an allowed one isn't inspected.
+  They match the client IP the engine resolves, so get that right first
+  ([client IP](client-ip.md)). Upgrade the chart first, for the new CRD; a policy with lists is
+  `Enforced=False` (`EnginesOutdated`) until every engine runs 0.5.0. `inkwallctl test` reads
+  `WAFIPList` files and takes `--client-ip`.
+- **Refuse gRPC where none is served.** `body.grpc: Deny` on a `WAFPolicy` denies requests with a
+  gRPC or gRPC-Web content type, instead of the SecLang rule `docs/grpc.md` suggested. Upgrade the
+  chart first, for the CRD field; a policy that sets it is `Enforced=False` (`EnginesOutdated`)
+  until every engine runs 0.5.0.
+
 - **The CRS's own settings on a policy.** The CRS rule set binding of a `WAFPolicy` takes an
   optional `crs` block: `allowedMethods` (for REST APIs that send `PUT`, `PATCH` or `DELETE`),
   `allowedRequestContentTypes`, `detectionParanoiaLevel` (log the rules of a higher paranoia level
@@ -61,6 +100,59 @@ What's new:
 
 What changes by itself:
 
+- **The InkwallConfig reports the cluster's state.** Its status gains `bundle` (version, size and
+  limit), `engines` (connected, current, behind, rejected, outdated), `signingKey` (the active key,
+  the rotation's phase and what it waits for), and the conditions `SigningKeyRotation` and
+  `IntegrationsConfigured` (`False`, with the error, when a `spec.integrations` selector can't be
+  applied: until now only logged). `kubectl get inkwallconfig` shows the bundle version, the
+  engines and the key's phase. Upgrade the chart first, for the new CRD fields: an older CRD drops
+  them. See [key rotation](key-rotation.md#checking-it-worked).
+- **Policy condition metrics and Events.** The operator reports `inkwall_operator_policies`
+  (policies by condition, status and reason), the signing key's age and rotation phase, and failed
+  bundle publishes, and records a Kubernetes Event on a policy when its `Ready`, `Programmed` or
+  `Enforced` condition changes. Its ClusterRole gains `events` `create` and `patch` in every
+  namespace. See [monitoring](monitoring.md#operator).
+- **Istio routes are proven before they are `Programmed`.** The operator now sends its signed probe
+  through every Istio gateway pod, on every listener a protected HTTPRoute or VirtualService is
+  served on, and the engine answers it ([the operator's probe](istio.md#the-operators-probe)).
+  After the upgrade, Istio policies are `Unverified` until the probes have answered (seconds, once
+  the gateways' engines are 0.5.0: restart Istio's ingress gateways; Istio rolls the Gateway API
+  pods itself). Some stay out of `Programmed`, and so out of `Ready`: routes whose policies are
+  all in `Detect` mode stay `Unverified` (Envoy discards the engine's answer in observability
+  mode), and routes the probe can't reach are `NotProbeable` (a rule whose every match is a
+  regular expression, a server with mutual TLS or passthrough, or a match on header or query
+  values over TLS, which the probe doesn't send there: they may be secrets). Before, they were `Programmed`
+  without proof that the filter was on the route. Alerts on `Ready` should expect it.
+- **In Detect mode, the responses of flagged requests are inspected** (with `responses.inspect`):
+  a request the rules flag is let through, and an SQL error or a leak in its response is now its
+  own event, as for any request. The request's event may list a few more rules than before: the
+  rules run to the end instead of stopping where Block mode would.
+- **ForwardAuth refuses an invalid `X-Forwarded-Host`** (one with a path, a space or other
+  characters a Host can't have) with 400, as the reverse proxy refuses such a Host: the rules
+  would read one host and the application another. Traefik sends the client's Host, which it
+  validates already, so its requests aren't affected.
+- **Enforced checks the newest field a policy needs.** A policy with fields of 0.4.0 and 0.5.0
+  (`webSocket` and `ipLists`, say) was `Enforced` while a 0.4.x engine ran it; it is now
+  `EnginesOutdated` until every engine runs 0.5.0.
+- **The chart keeps the operator's settings of the Pod webhooks** (`failurePolicy`,
+  `objectSelector`, `namespaceSelector`). The operator sets `failurePolicy` to `Fail` while a
+  policy blocks; an upgrade used to render `Ignore` until the operator set it again, and Helm 4,
+  which applies server-side, refused the upgrade (a conflict with the operator's fields). An
+  upgrade now renders the live values; the operator applies a new proxy namespace list or
+  integration permissions once it restarts. With Helm 4, roll back to 0.4.x with `helm rollback
+  --force-conflicts`. The chart also passes Helm 4's `helm lint --strict` (its `license` moved to an
+  `artifacthub.io/license` annotation). Helm 3 and 4 are both tested.
+- **Istio ingress gateways' `EnvoyFilter` is split.** The VirtualServices' filters move from
+  `inkwall-istio-ingress` into shards `inkwall-istio-ingress-00` to `-31` in the same namespace;
+  `inkwall-istio-ingress` keeps the engine's cluster. One object passed etcd's size limit at about
+  1,200 protected VirtualServices per namespace of gateway pods, and they were all
+  `WiringFailed`. While the operator rewrites them, Envoy may reject a configuration with a filter
+  in both and keep the one before, still inspected. GitOps tools that ignore the operator's
+  objects by label need no change.
+- **WebSocket messages are scored on their own** (the standalone proxy's
+  `--websocket-messages`): a message is inspected without the handshake's query arguments and
+  headers, so a handshake that scored below the threshold no longer adds its score to every
+  message, and each message costs about a third less. Attacks in messages are still denied.
 - **`Enforced` counts the engines that serve the policy.** A policy's `Enforced` condition (and
   its `EnginesBehind`, `EngineNack` and `EnginesOutdated` reasons) now counts only the engines on
   the proxy pods that serve its routes, once the operator has wired them all. An engine of one
@@ -98,15 +190,44 @@ What changes by itself:
 - **A request body exactly `body.maxBytes` long is inspected.** Before, Coraza's own limit denied
   it (status 413 and no rule ID, in Block mode). Bodies over the limit are handled by
   `body.onOversize`, as before.
+- **`kubectl get wafpolicies` has a `REASON` column**, the `Ready` condition's reason, before
+  `BUNDLE`. A script that reads the columns by position should use `-o jsonpath` or
+  `-o custom-columns`. `inkwallctl status` is new: see
+  [Troubleshooting](troubleshooting.md#cluster-status).
 - **New engine metrics, and two that change** (#356). `inkwall_rule_matches_total`,
   `inkwall_adapter_errors_total`, `inkwall_bundle_compile_seconds`, `inkwall_rule_sets`,
   `inkwall_bundle_applied_timestamp_seconds` and the `inkwall_websocket_*` metrics are new;
   `inkwall_policy_requests_total` is opt-in. `inkwall_bundle_updates_total` has a `reason` label on
   rejected bundles. WebSocket messages the engine's proxy inspects are counted in
   `inkwall_websocket_messages_total`, no longer in `inkwall_requests_total`, so a dashboard of
-  requests drops on routes with busy WebSockets.
+  requests drops on routes with busy WebSockets. `inkwall_requests_total` now also counts the
+  requests no policy covers (reason `no-policy`, also before the first bundle) and those let
+  through while inspection is suspended (`suspended`), which 0.4 left out (#535): its totals rise
+  by them.
+- **Every denial carries `X-Request-Id`** (#366), the request ID of its security event: the
+  engine's reverse proxy and Traefik's ForwardAuth answered without it before, and so did the 400
+  for a request an adapter can't read. `InkwallConfig.spec.engine.jsonDenials` (the engine's
+  `--json-denials`) answers clients that accept `application/json` with a JSON body; off by
+  default.
+- **NetworkPolicies, off by default** (#387): `networkPolicy.enabled` in the chart, for clusters
+  that deny traffic by default. See
+  [Network flows](../deploy/helm/inkwall/README.md#network-flows) for what connects to what.
+- **The chart checks its values** (#386). A `values.schema.json` makes `helm install`, `upgrade`
+  and `template` fail on a key the chart doesn't have, a wrong type, or a value outside its set,
+  naming it, where 0.4.x ignored them. A typo such as `rbac.integration.traefik` was silently
+  ignored before. Run `helm upgrade ... --dry-run` first, and fix or remove what it names. `helm
+  upgrade --reuse-values` from 0.4.x passes (CI checks it). New values: `global.imageRegistry`,
+  `global.imagePullSecrets`, `operator.image.digest`, `engine.image.digest`, `operator.extraEnv`,
+  `extraVolumes`, `extraVolumeMounts` and `topologySpreadConstraints` (see
+  [Private registries](../deploy/helm/inkwall/README.md#private-registries)).
 - **A monitoring kit, off by default** (#381): `metrics.serviceMonitor`, `metrics.podMonitor`,
   `metrics.prometheusRule` and `metrics.dashboard` in the chart. See [Monitoring](monitoring.md).
+- **`inkwallctl tune` is new** (#383): it suggests the narrowest exclusions from Detect mode's
+  security events. See [Suggest exclusions from the events](testing-policies.md#suggest-exclusions-from-the-events).
+- **`inkwallctl test --suite` is new** (#385, experimental format): a file of cases, each a
+  request and optionally its response, with the verdict expected; `--junit` writes the results for
+  CI. See [Test suites](testing-policies.md#test-suites). The other `inkwallctl test` flags are
+  unchanged.
 
 ## From 0.4.0 to 0.4.1
 

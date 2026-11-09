@@ -27,10 +27,71 @@ updates:
       actions:
         update-types: [minor, patch]
 
+  # The base images are pinned by digest (tag@sha256:…); Dependabot bumps
+  # both. /hack/kind holds the e2e stub control plane's Dockerfile.
   - package-ecosystem: docker
-    directory: /
+    directories: ["/", "/hack/kind"]
     schedule: {interval: weekly}
     commit-message: {prefix: build, include: scope}
     groups:
       images:
         update-types: [minor, patch]
+
+  # The supported release branches (the latest three minor versions,
+  # CONTRIBUTING.md): patch updates only, grouped, for the Go modules and
+  # base images they ship (#398). Dependabot's security updates cover the
+  # default branch only; a patch release takes these.
+  - package-ecosystem: gomod
+    directories: ["/"]
+    target-branch: release-0.4
+    schedule: {interval: weekly}
+    commit-message: {prefix: build, include: scope}
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major, version-update:semver-minor]
+    groups: {release-0.4-go: {patterns: ["*"]}}
+  - package-ecosystem: gomod
+    directories: ["/"]
+    target-branch: release-0.3
+    schedule: {interval: weekly}
+    commit-message: {prefix: build, include: scope}
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major, version-update:semver-minor]
+    groups: {release-0.3-go: {patterns: ["*"]}}
+  - package-ecosystem: gomod
+    directories: ["/"]
+    target-branch: release-0.2
+    schedule: {interval: weekly}
+    commit-message: {prefix: build, include: scope}
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major, version-update:semver-minor]
+    groups: {release-0.2-go: {patterns: ["*"]}}
+  - package-ecosystem: docker
+    directory: /
+    target-branch: release-0.4
+    schedule: {interval: weekly}
+    commit-message: {prefix: build, include: scope}
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major, version-update:semver-minor]
+    groups: {release-0.4-images: {patterns: ["*"]}}
+  - package-ecosystem: docker
+    directory: /
+    target-branch: release-0.3
+    schedule: {interval: weekly}
+    commit-message: {prefix: build, include: scope}
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major, version-update:semver-minor]
+    groups: {release-0.3-images: {patterns: ["*"]}}
+  - package-ecosystem: docker
+    directory: /
+    target-branch: release-0.2
+    schedule: {interval: weekly}
+    commit-message: {prefix: build, include: scope}
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major, version-update:semver-minor]
+    groups: {release-0.2-images: {patterns: ["*"]}}

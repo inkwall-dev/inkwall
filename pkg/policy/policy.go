@@ -21,6 +21,7 @@ import (
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	"github.com/inkwall-dev/inkwall/pkg/events"
+	"github.com/inkwall-dev/inkwall/pkg/iplist"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/router"
@@ -74,6 +75,7 @@ type Set struct {
 	redaction *events.Redaction
 	policies  []*Policy
 	match     *matcher
+	observer  pipeline.Observer // told about the verdicts no policy's pipeline gives
 }
 
 var _ pipeline.Inspector = (*Set)(nil)
@@ -96,14 +98,14 @@ func (s *Set) Lookup(r *request.Request) *Policy {
 // Check implements pipeline.Inspector.
 func (s *Set) Check(ctx context.Context, r *request.Request) pipeline.Verdict {
 	if s.suspended {
-		return pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonSuspended}
+		return observe(s.observer, pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonSuspended})
 	}
 	p := s.Lookup(r)
 	if p == nil {
-		return pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy}
+		return observe(s.observer, pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy})
 	}
+	// The policy's pipeline names it on the verdict and tells the Observer.
 	v := p.pipeline.Check(ctx, r)
-	v.Policy = p.ID
 	p.counter.Observe(v)
 	return v
 }
@@ -115,17 +117,16 @@ var _ pipeline.ExchangeInspector = (*Set)(nil)
 // request, not as another allowed one.
 func (s *Set) CheckExchange(ctx context.Context, r *request.Request) (pipeline.Verdict, *pipeline.Exchange) {
 	if s.suspended {
-		return pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonSuspended}, nil
+		return observe(s.observer, pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonSuspended}), nil
 	}
 	p := s.Lookup(r)
 	if p == nil {
-		return pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy}, nil
+		return observe(s.observer, pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy}), nil
 	}
 	v, x := p.pipeline.CheckExchange(ctx, r)
-	v.Policy = p.ID
 	p.counter.Observe(v)
 	if x != nil {
-		x.OnVerdict(p.ID, func(v pipeline.Verdict) {
+		x.OnVerdict(func(v pipeline.Verdict) {
 			if v.Action != pipeline.ActionAllow {
 				p.counter.Observe(v)
 			}
@@ -160,7 +161,7 @@ func Compile(b *bundlev1.Bundle, o Options) (*Set, error) {
 		ruleSets[rs.GetId()] = rs
 	}
 	set := &Set{version: b.GetVersion(), suspended: b.GetSuspended(), probeKey: bytes.Clone(b.GetProbeKey()),
-		redaction: events.NewRedaction(b.GetEvents())}
+		redaction: events.NewRedaction(b.GetEvents()), observer: o.Observer}
 	var routes []route
 	used := map[[sha256.Size]byte]bool{}
 	ids := map[string]bool{}
@@ -309,10 +310,20 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 		Admission:    o.Admission,
 		Oversize:     oversize,
 		Observer:     o.Observer,
+		Policy:       bp.GetId(),
 		Routes:       routes,
 		WebSocket:    ws,
 		Responses:    responses,
 		GRPCMessages: bp.GetBody().GetGrpcMessages(),
+		DenyGRPC:     bp.GetBody().GetDenyGrpc(),
+	}
+	if l := bp.GetIpLists(); l != nil {
+		if pc.IPAllow, err = iplist.Parse(l.GetAllow()); err != nil {
+			return nil, key, fmt.Errorf("IP allow list: %w", err)
+		}
+		if pc.IPDeny, err = iplist.Parse(l.GetDeny()); err != nil {
+			return nil, key, fmt.Errorf("IP deny list: %w", err)
+		}
 	}
 	if bp.GetMode() == bundlev1.Mode_MODE_BLOCK {
 		pc.Mode = pipeline.ModeBlock
@@ -399,6 +410,9 @@ type Holder struct {
 	// DenyBeforeFirst rejects requests with 503 until the first set is
 	// stored, instead of letting them through uninspected.
 	DenyBeforeFirst bool
+	// Observer, if set, is told about the verdicts before the first set
+	// (metrics); a set tells its own Options.Observer.
+	Observer pipeline.Observer
 }
 
 var _ pipeline.Inspector = (*Holder)(nil)
@@ -431,11 +445,20 @@ func (h *Holder) Check(ctx context.Context, r *request.Request) pipeline.Verdict
 	s := h.set.Load()
 	if s == nil {
 		if h.DenyBeforeFirst {
-			return pipeline.Verdict{Action: pipeline.ActionDeny, Status: http.StatusServiceUnavailable, Reason: pipeline.ReasonNoPolicy}
+			return observe(h.Observer, pipeline.Verdict{Action: pipeline.ActionDeny, Status: http.StatusServiceUnavailable, Reason: pipeline.ReasonNoPolicy})
 		}
-		return pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy}
+		return observe(h.Observer, pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy})
 	}
 	return s.Check(ctx, r)
+}
+
+// observe tells o, if set, about v, a verdict no policy's pipeline gave
+// (which tells its Observer itself), and returns it.
+func observe(o pipeline.Observer, v pipeline.Verdict) pipeline.Verdict {
+	if o != nil {
+		o.ObserveVerdict(v)
+	}
+	return v
 }
 
 var _ pipeline.ExchangeInspector = (*Holder)(nil)

@@ -28,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -114,19 +115,13 @@ func grant(ctx context.Context, t *testing.T, c client.Client, user string, left
 				t.Fatal(err)
 			}
 		}
+		// Gone when the test ends, which runs again under -count.
+		testenv.DeleteOnCleanup(t, c, objs...)
 	}
 }
 
-func freeAddr(t *testing.T) string {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := l.Addr().String()
-	_ = l.Close()
-	return addr
-}
+// freeAddr: testenv.FreeAddr (#452).
+func freeAddr(t *testing.T) string { return testenv.FreeAddr(t) }
 
 // eventually retries cond until it returns "" or a minute passes.
 func eventually(t *testing.T, what string, cond func() string) {
@@ -234,11 +229,23 @@ func TestWithoutEnvoyGatewayAndIstio(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, ns := range []string{namespace, "proxy", "shop", "edge"} {
-		if err := c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}); err != nil {
-			t.Fatal(err)
-		}
+	// The operator's namespace, where role.yaml's Roles are: already there
+	// when the test runs again (-count). The others are new each time:
+	// envtest doesn't delete namespaces.
+	if err := c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatal(err)
 	}
+	proxyNS, shopNS, edgeNS := testenv.Namespace(t, c, "proxy"), testenv.Namespace(t, c, "shop"), testenv.Namespace(t, c, "edge")
+	// The cluster-scoped objects the test creates go once the operator has
+	// stopped (cleanups run last first).
+	var clusterScoped []client.Object
+	t.Cleanup(func() {
+		for _, o := range clusterScoped {
+			if err := c.Delete(context.Background(), o); err != nil && !apierrors.IsNotFound(err) {
+				t.Errorf("deleting %T %s: %v", o, o.GetName(), err)
+			}
+		}
+	})
 	const user = "inkwall-operator"
 	grant(ctx, t, c, user, integrations.EnvoyGateway.Name, integrations.Istio.Name, integrations.IstioIngress.Name)
 	cfg, err := env.User(user)
@@ -273,6 +280,8 @@ func TestWithoutEnvoyGatewayAndIstio(t *testing.T) {
 		WebhookSecret: "inkwall-operator-webhook-tls", WebhookDNSNames: []string{"localhost"},
 		DistributionPort: distPort, Inject: true, EngineImage: "inkwall-engine:test", EnginePullPolicy: corev1.PullNever,
 		Replica: "operator-0", CRDInterval: 200 * time.Millisecond,
+		// The test runs again in this process under -count.
+		SkipControllerNameValidation: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -300,10 +309,10 @@ func TestWithoutEnvoyGatewayAndIstio(t *testing.T) {
 	})
 
 	virtualService := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{
-		"hosts": []any{"shop.example.com"}, "gateways": []any{"edge/edge"}, "http": []any{map[string]any{"name": "web"}},
+		"hosts": []any{"shop.example.com"}, "gateways": []any{edgeNS + "/edge"}, "http": []any{map[string]any{"name": "web"}},
 	}}}
 	virtualService.SetGroupVersionKind(integrations.IstioVirtualServiceGVK)
-	virtualService.SetNamespace("shop")
+	virtualService.SetNamespace(shopNS)
 	virtualService.SetName("vs")
 
 	// Traefik: an Ingress, a pod, a policy.
@@ -312,50 +321,53 @@ func TestWithoutEnvoyGatewayAndIstio(t *testing.T) {
 	for _, o := range []client.Object{
 		&wafv1alpha1.InkwallConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"}},
 		&networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "traefik"}, Spec: networkingv1.IngressClassSpec{Controller: integrations.Traefik.Controller}},
-		&networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "web"}, Spec: networkingv1.IngressSpec{
+		&networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Namespace: shopNS, Name: "web"}, Spec: networkingv1.IngressSpec{
 			IngressClassName: ptr.To("traefik"),
 			DefaultBackend:   &networkingv1.IngressBackend{Service: &networkingv1.IngressServiceBackend{Name: "web", Port: networkingv1.ServiceBackendPort{Number: 80}}},
 		}},
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "proxy", Name: "traefik", Labels: map[string]string{"app.kubernetes.io/name": "traefik"}},
+			ObjectMeta: metav1.ObjectMeta{Namespace: proxyNS, Name: "traefik", Labels: map[string]string{"app.kubernetes.io/name": "traefik"}},
 			Spec:       corev1.PodSpec{ServiceAccountName: "traefik", Containers: []corev1.Container{{Name: "traefik", Image: "traefik:v3.7.13"}}},
 		},
-		&wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "web"}, Spec: wafv1alpha1.WAFPolicySpec{
+		&wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: shopNS, Name: "web"}, Spec: wafv1alpha1.WAFPolicySpec{
 			TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}},
 		}},
 		// Envoy Gateway: a Gateway of its class, a route, a policy.
 		gatewayClass,
-		&gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Namespace: "edge", Name: "eg"}, Spec: gatewayv1.GatewaySpec{GatewayClassName: "eg", Listeners: listeners}},
-		&gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "app"}, Spec: gatewayv1.HTTPRouteSpec{
-			CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: []gatewayv1.ParentReference{{Name: "eg", Namespace: ptr.To(gatewayv1.Namespace("edge"))}}},
+		&gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Namespace: edgeNS, Name: "eg"}, Spec: gatewayv1.GatewaySpec{GatewayClassName: "eg", Listeners: listeners}},
+		&gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: shopNS, Name: "app"}, Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: []gatewayv1.ParentReference{{Name: "eg", Namespace: ptr.To(gatewayv1.Namespace(edgeNS))}}},
 		}},
-		&wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "app"}, Spec: wafv1alpha1.WAFPolicySpec{
+		&wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: shopNS, Name: "app"}, Spec: wafv1alpha1.WAFPolicySpec{
 			TargetRefs: []wafv1alpha1.TargetRef{{Group: gatewayv1.GroupName, Kind: "HTTPRoute", Name: "app"}},
 		}},
 		// Istio: the same.
 		&gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: "istio"}, Spec: gatewayv1.GatewayClassSpec{ControllerName: gatewayv1.GatewayController(integrations.Istio.GatewayController)}},
-		&gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Namespace: "edge", Name: "istio"}, Spec: gatewayv1.GatewaySpec{GatewayClassName: "istio", Listeners: listeners}},
-		&gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "mesh"}, Spec: gatewayv1.HTTPRouteSpec{
-			CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: []gatewayv1.ParentReference{{Name: "istio", Namespace: ptr.To(gatewayv1.Namespace("edge"))}}},
+		&gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Namespace: edgeNS, Name: "istio"}, Spec: gatewayv1.GatewaySpec{GatewayClassName: "istio", Listeners: listeners}},
+		&gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: shopNS, Name: "mesh"}, Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: []gatewayv1.ParentReference{{Name: "istio", Namespace: ptr.To(gatewayv1.Namespace(edgeNS))}}},
 		}},
-		&wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "mesh"}, Spec: wafv1alpha1.WAFPolicySpec{
+		&wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: shopNS, Name: "mesh"}, Spec: wafv1alpha1.WAFPolicySpec{
 			TargetRefs: []wafv1alpha1.TargetRef{{Group: gatewayv1.GroupName, Kind: "HTTPRoute", Name: "mesh"}},
 		}},
 		// Istio's ingress gateways: a VirtualService, a policy.
 		virtualService,
-		&wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "vs"}, Spec: wafv1alpha1.WAFPolicySpec{
+		&wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: shopNS, Name: "vs"}, Spec: wafv1alpha1.WAFPolicySpec{
 			TargetRefs: []wafv1alpha1.TargetRef{{Group: "networking.istio.io", Kind: "VirtualService", Name: "vs"}},
 		}},
 	} {
 		if err := c.Create(ctx, o); err != nil {
 			t.Fatal(err)
 		}
+		if o.GetNamespace() == "" {
+			clusterScoped = append(clusterScoped, o)
+		}
 	}
 
 	programmed := func(name string, st metav1.ConditionStatus, reason, msg string) func() string {
 		return func() string {
 			var p wafv1alpha1.WAFPolicy
-			if err := c.Get(ctx, types.NamespacedName{Namespace: "shop", Name: name}, &p); err != nil {
+			if err := c.Get(ctx, types.NamespacedName{Namespace: shopNS, Name: name}, &p); err != nil {
 				return err.Error()
 			}
 			cnd := meta.FindStatusCondition(p.Status.Conditions, wafv1alpha1.ConditionProgrammed)

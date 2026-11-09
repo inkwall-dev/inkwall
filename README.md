@@ -1,5 +1,7 @@
 # Inkwall
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/inkwall-dev/inkwall/badge)](https://scorecard.dev/viewer/?uri=github.com/inkwall-dev/inkwall)
+
 **A Kubernetes-native [web application firewall](https://owasp.org/www-community/Web_Application_Firewall).** You install one [operator](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/); it injects an
 inspection engine next to your [ingress controller](https://kubernetes.io/docs/concepts/services-networking/ingress-controllers/) and enforces the `WAFPolicy` objects you attach
 to your routes. The engine runs OWASP [Coraza](https://coraza.io/) with the
@@ -10,7 +12,10 @@ to your routes. The engine runs OWASP [Coraza](https://coraza.io/) with the
 > [**Istio**](https://istio.io/latest/docs/) and their `HTTPRoute` routes, with Istio's `VirtualService` routes, and as a standalone reverse proxy in front of anything else. The API is
 > `v1alpha1` and will change. See [Limits](#limits) and the [roadmap](#roadmap).
 
-The [docs index](docs/README.md) lists every guide, reference and design doc.
+**New to Inkwall? Start with the [quickstart](docs/quickstart.md)**: a local kind cluster, the
+released chart, Traefik and a demo app, from nothing to a blocked attack in five minutes.
+[`examples/`](examples) has the same app behind Traefik, Envoy Gateway and Istio. The
+[docs index](docs/README.md) lists every guide, reference and design doc.
 
 ## Contents
 
@@ -46,7 +51,7 @@ The [docs index](docs/README.md) lists every guide, reference and design doc.
 
 ## Install
 
-You need [Kubernetes](https://kubernetes.io/docs/concepts/overview/) 1.29 or later and [Helm](https://helm.sh/docs/) 3. CI
+You need [Kubernetes](https://kubernetes.io/docs/concepts/overview/) 1.29 or later and [Helm](https://helm.sh/docs/) 3 or 4. CI
 tests on Kubernetes 1.34 and on kind's newest (1.37).
 
 `<version>` is a [release](https://github.com/inkwall-dev/inkwall/releases) without its `v`, the latest
@@ -70,6 +75,7 @@ Traefik's [Gateway API provider](https://doc.traefik.io/traefik/routing/provider
 Envoy Gateway needs no restart: Envoy Gateway rolls the Envoy pods of a Gateway when it gets its
 first protected route. Turn on its Backend API, which the engine's socket needs:
 
+<!-- versions: ENVOY_GATEWAY_VERSION -->
 ```sh
 helm upgrade --install eg oci://docker.io/envoyproxy/gateway-helm --version v1.9.3 \
   --namespace envoy-gateway-system --create-namespace \
@@ -133,16 +139,20 @@ Once the policy is `Ready`, every engine enforces it. Send an attack to check:
 
 ```console
 $ kubectl get wafpolicy -n shop
-NAME   MODE    READY   BUNDLE   AGE
-web    Block   True    2        3s
+NAME   MODE    READY   REASON   BUNDLE   AGE
+web    Block   True    Ready    2        3s
 $ curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: shop.example.com' "http://$TRAEFIK/?id=1%27%20OR%20%271%27%3D%271"
 403
 ```
 
+`REASON` says why a policy isn't `Ready`. `inkwallctl status` checks the whole cluster: the
+proxies, the policies that aren't `Ready`, and the engines, with what to do
+([Troubleshooting](docs/troubleshooting.md#cluster-status)).
+
 **Responses.** Add `responses: {inspect: true}` to a policy to inspect what the app answers too,
 for data leaks (SQL errors, stack traces, directory listings: the Core Rule Set's `RESPONSE-95x`
-rules). In `Block` mode a response that leaks is replaced with 403. Only through Envoy Gateway:
-Traefik's ForwardAuth never sees responses, so on a Traefik route such a policy is
+rules). In `Block` mode a response that leaks is replaced with 403. Through Envoy Gateway and
+Istio: Traefik's ForwardAuth and HAProxy never send responses, so on their routes such a policy is
 `Programmed=False` (`ResponsesNotInspected`) while its requests are still inspected
 ([design](docs/design/0006-adapter-protocols.md#response-inspection-v040)).
 
@@ -151,6 +161,25 @@ argument, argument name, cookie or header, `skip` paths,
 [`ruleSets[].paranoiaLevel`](https://coreruleset.org/docs/concepts/paranoia_levels/)), then switch to `Block`. Extra rules come from `WAFRuleSet` and
 `ClusterWAFRuleSet` objects: built-in, [SecLang](https://coraza.io/docs/seclang/) or a [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/).
 [`operator/config/samples`](operator/config/samples) has one object of each kind.
+
+**IP lists.** A `WAFIPList` lists client addresses, and a policy denies or allows them:
+
+```yaml
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFIPList
+metadata: {name: abusers, namespace: shop}
+spec:
+  entries:
+  - {cidr: 203.0.113.0/24, description: scraper}
+---
+# in the WAFPolicy's spec:
+  ipLists: {deny: [abusers], allow: [monitors]}
+```
+
+A denied client gets 403 before any rule (logged in `Detect` mode); an allowed one isn't inspected,
+and a deny list wins over an allow list. Lists match the client IP the engine resolves: behind a
+load balancer, set that up first ([client IP](docs/client-ip.md)), or every client is the load
+balancer. `inkwallctl test --client-ip 203.0.113.9` checks them offline (engines 0.5.0 or later).
 
 **CRS settings.** At paranoia level 1 the CRS denies `PUT`, `PATCH` and `DELETE`, and request
 content types outside its list. Set the CRS's own settings on the CRS rule set's binding (engines
@@ -227,8 +256,8 @@ an Envoy you configure yourself, in or out of Kubernetes, see [protecting raw En
   [connecting to a control plane](docs/control-plane.md).
 - A cluster's policies must fit in a bundle of 7,200 KiB compressed. Past 900 KiB, the bundle is
   split over several [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/).
-- Responses are inspected only through Envoy Gateway and raw Envoy (`responses`), never through
-  Traefik's ForwardAuth; a body over `responses.maxBytes` (64 KiB by default) has its prefix
+- Responses are inspected only through Envoy Gateway, Istio and raw Envoy (`responses`), never
+  through Traefik's ForwardAuth or HAProxy; a body over `responses.maxBytes` (64 KiB by default) has its prefix
   inspected, and streamed responses (Server-Sent Events, gRPC) pass with their headers inspected
   only.
 - gRPC: a call's path and metadata (headers) are inspected; the text in its protobuf messages
@@ -266,13 +295,16 @@ Tracked on the [project board](https://github.com/orgs/inkwall-dev/projects/1) a
 ## Development
 
 ```sh
-make check        # lint, tests, vulnerability scan, docs checks
-make crs-test     # OWASP CRS regression suite through the proxy
+make check        # lint, unit tests, vulnerability scan, docs checks (minutes)
+make check-all    # every job CI runs on a pull request (hours; Docker and kind)
+make crs-test     # OWASP CRS regression suite through each adapter
 make kind-up      # kind cluster with a demo behind the engine and Traefik
-make kind-e2e     # operator end to end on kind (what CI runs)
+make kind-e2e     # operator end to end on kind, every proxy in turn (CI: one job per proxy)
+make kind-e2e-traefik  # one proxy: also -raw-envoy, -envoy-gateway, -istio, -haproxy
 ```
 
-`make help` lists every target. The design docs are in [`docs/design`](docs/design/README.md);
+`make help` lists every target; [CONTRIBUTING.md](CONTRIBUTING.md#development-and-testing) has
+the test tiers, what each needs, and when CI runs it. The design docs are in [`docs/design`](docs/design/README.md);
 start with the [component map](docs/design/0005-component-map.md).
 
 ## Contributing, security, license

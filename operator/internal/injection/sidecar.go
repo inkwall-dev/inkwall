@@ -56,6 +56,11 @@ const (
 type Sidecar struct {
 	Image      string
 	PullPolicy corev1.PullPolicy
+	// PullSecrets are Secrets in the pod's namespace the engine image is
+	// pulled with: Inject adds them to the pod's imagePullSecrets. Proxies
+	// whose pod template the operator patches (Envoy Gateway, Istio) take
+	// them from their own configuration.
+	PullSecrets []string
 	// Resources of the engine; empty: the defaults below.
 	Resources *corev1.ResourceRequirements
 	// OperatorAddr is the distribution server, host:port.
@@ -73,6 +78,8 @@ type Sidecar struct {
 	LogLevel string
 	// PolicyMetrics passes --policy-metrics.
 	PolicyMetrics bool
+	// JSONDenials passes --json-denials.
+	JSONDenials bool
 	// Args are the adapter's command and its own flags, e.g.
 	// ["forward-auth"].
 	Args []string
@@ -111,6 +118,7 @@ func (s Sidecar) Configured(e wafv1alpha1.EngineSpec) Sidecar {
 	s.DenyBeforeBundle = e.BootstrapMode == wafv1alpha1.BootstrapDenyAll
 	s.LogLevel = strings.ToLower(string(e.LogLevel))
 	s.PolicyMetrics = e.PolicyMetrics
+	s.JSONDenials = e.JSONDenials
 	s.TrustedProxies, s.TrustedHops = nil, 0
 	if c := e.ClientIP; c != nil {
 		for _, p := range c.TrustedProxies {
@@ -182,6 +190,11 @@ func Inject(pod *corev1.Pod, s Sidecar) bool {
 	// container that needs traffic inspected.
 	pod.Spec.InitContainers = append([]corev1.Container{engine}, pod.Spec.InitContainers...)
 	pod.Spec.Volumes = append(pod.Spec.Volumes, volumes...)
+	for _, name := range s.PullSecrets {
+		if !slices.ContainsFunc(pod.Spec.ImagePullSecrets, func(r corev1.LocalObjectReference) bool { return r.Name == name }) {
+			pod.Spec.ImagePullSecrets = append(pod.Spec.ImagePullSecrets, corev1.LocalObjectReference{Name: name})
+		}
+	}
 	MountSocket(pod, s)
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
@@ -228,6 +241,9 @@ func Engine(s Sidecar) (corev1.Container, []corev1.Volume) {
 	}
 	if s.PolicyMetrics {
 		args = append(args, "--policy-metrics")
+	}
+	if s.JSONDenials {
+		args = append(args, "--json-denials")
 	}
 
 	resources := defaultResources()

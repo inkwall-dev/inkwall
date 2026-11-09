@@ -1,0 +1,56 @@
+# Copyright 2026 The Inkwall Authors
+# SPDX-License-Identifier: Apache-2.0
+
+# Weekly: the versions under test (hack/versions.env, #393) bumped to their
+# latest upstream releases, in a PR, with the docs' "tested with" lines and
+# the raw Envoy sample to match. A PR opened with the workflow's token
+# doesn't start CI by itself: close and reopen it (or push to it) to run CI.
+name: versions
+
+on:
+  schedule:
+    - cron: "37 5 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  bump:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # Credentials kept: this job pushes the bump's branch.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+          cache: false
+      - id: bump
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          go run ./hack/versionsbump | tee bumps.txt
+          if git diff --quiet; then echo "changed=false" >> "$GITHUB_OUTPUT"; else echo "changed=true" >> "$GITHUB_OUTPUT"; fi
+      - if: steps.bump.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch=deps/versions-$(date -u +%Y%m%d)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add hack/versions.env examples/raw-envoy/kubernetes.yaml
+          git ls-files -m '*.md' | xargs -r git add
+          git commit -m "build(deps): bump the versions under test"
+          git push origin "$branch"
+          {
+            echo "The versions under test, bumped to their latest upstream releases by the weekly workflow (#393):"
+            echo
+            sed 's/^/- /' bumps.txt
+            echo
+            echo "Close and reopen this PR to run CI on it."
+          } > body.md
+          gh pr create --base main --head "$branch" --title "build(deps): bump the versions under test" --body-file body.md --label dependencies

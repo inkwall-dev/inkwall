@@ -173,6 +173,9 @@ func TestInvalidSubrequestsAreRejected(t *testing.T) {
 		"relative uri":     func(r *http.Request) { r.Header.Set("X-Forwarded-Uri", "products") },
 		"wrong path":       func(r *http.Request) { r.URL.Path = "/v1/check" },
 		"empty uri header": func(r *http.Request) { r.Header.Set("X-Forwarded-Uri", "") },
+		// The reverse proxy refuses such a Host too (#365).
+		"invalid host":      func(r *http.Request) { r.Header.Set("X-Forwarded-Host", "shop.example.com/admin") },
+		"host with a space": func(r *http.Request) { r.Header.Set("X-Forwarded-Host", "shop example.com") },
 	} {
 		r := subrequest("GET", "/", "", "")
 		mutate(r)
@@ -184,7 +187,7 @@ func TestInvalidSubrequestsAreRejected(t *testing.T) {
 	}
 	// Each counts as a request the adapter can't read, but the wrong path
 	// (a 404, not a request to inspect).
-	if !strings.Contains(adminMetrics(m), `inkwall_adapter_errors_total{adapter="forwardauth",kind="invalid_request"} 9`) {
+	if !strings.Contains(adminMetrics(m), `inkwall_adapter_errors_total{adapter="forwardauth",kind="invalid_request"} 11`) {
 		t.Errorf("adapter errors:\n%s", adminMetrics(m))
 	}
 }
@@ -305,6 +308,32 @@ func TestBodyLimitPerRoute(t *testing.T) {
 	}{{4, true}, {100, false}, {0, false}} {
 		if got := insp.seen[i]; len(got.Body) != want.n || got.BodyTruncated != want.truncated {
 			t.Errorf("%s: read %d bytes (truncated %v), want %d (%v)", got.RawURI, len(got.Body), got.BodyTruncated, want.n, want.truncated)
+		}
+	}
+}
+
+// A request the adapter can't read is logged by the field that's wrong,
+// never with its value: a query string or a header can carry a secret.
+func TestInvalidRequestLogsNoValues(t *testing.T) {
+	var logs bytes.Buffer
+	h := newHandler(t, pipeline.ModeBlock, 64<<10, &logs)
+	for name, mutate := range map[string]func(r *http.Request){
+		"absolute uri":   func(r *http.Request) { r.Header.Set("X-Forwarded-Uri", "https://shop.example.com/login?token=SECRET") },
+		"relative uri":   func(r *http.Request) { r.Header.Set("X-Forwarded-Uri", "login?token=SECRET") },
+		"bad escape":     func(r *http.Request) { r.Header.Set("X-Forwarded-Uri", "/%zzSECRET?token=SECRET") },
+		"invalid method": func(r *http.Request) { r.Header.Set("X-Forwarded-Method", "GET SECRET") },
+	} {
+		logs.Reset()
+		r := subrequest("GET", "/", "", "")
+		mutate(r)
+		if w := serve(h, r); w.Code != http.StatusBadRequest {
+			t.Errorf("%s: got %d, want 400", name, w.Code)
+		}
+		if logs.Len() == 0 {
+			t.Errorf("%s: nothing logged", name)
+		}
+		if strings.Contains(logs.String(), "SECRET") {
+			t.Errorf("%s: the log has the request's value: %s", name, logs.String())
 		}
 	}
 }

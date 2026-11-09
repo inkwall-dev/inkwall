@@ -18,12 +18,14 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# The versions under test (#393).
+# shellcheck source=hack/versions.env
+. hack/versions.env
 
 CLUSTER=${KIND_CLUSTER:-inkwall}
 NS=response-load
 EG_NS=envoy-gateway-e2e # a proxy namespace (hack/kind/operator.sh)
-EG_VERSION=v1.9.3
-GATEWAY_API_VERSION=v1.7.0
+EG_VERSION=$ENVOY_GATEWAY_VERSION
 HOST=load.example.com
 CONCURRENCY=${CONCURRENCY:-8}
 DURATION=${DURATION:-20s}
@@ -178,8 +180,8 @@ go build -o "$work/loadgen" ./hack/loadgen
 # The engine's admin port, for its metrics.
 metrics_port=$((20000 + RANDOM % 10000))
 start_metrics() {
-  local try
-  for try in 1 2 3; do
+  local _
+  for _ in 1 2 3; do
     [[ -z $pf ]] || kill "$pf" 2>/dev/null || true
     # The Running pod with the engine, not one being replaced.
     pod=$("${KUBECTL[@]}" -n "$EG_NS" get pods -l "$gw_selector" \

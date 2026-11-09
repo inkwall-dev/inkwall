@@ -11,15 +11,20 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/textproto"
 	"net/url"
+	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/net/http/httpguts"
 
@@ -44,6 +49,9 @@ type Config struct {
 	// Logger receives one security event per denied or logged request.
 	// Nil uses slog.Default().
 	Logger *slog.Logger
+	// JSONDenials answers a denied client that accepts application/json
+	// with a JSON body (httpadapter.DenialBody); off: text.
+	JSONDenials bool
 	// Metrics counts the requests the proxy can't read, and its
 	// WebSockets (nil: none).
 	Metrics *telemetry.Metrics
@@ -54,6 +62,48 @@ type Config struct {
 	// forwards (websocket.go), each up to MaxBodyBytes. It needs a policy
 	// from flags (a *pipeline.Pipeline).
 	WebSocketMessages pipeline.WebSocketMessages
+	// WebSocketIdleTimeout closes a WebSocket with 1001 (going away) when
+	// no bytes pass either way for this long (0: never).
+	WebSocketIdleTimeout time.Duration
+	// BodyReadTimeout bounds reading the part of a request body that is
+	// inspected, from when the engine starts reading it: a client that
+	// stalls in it gets 408. The rest streams to the upstream under the
+	// server's own limits (0: none but the server's).
+	BodyReadTimeout time.Duration
+	// ReadTimeout is the server's limit to read a whole request
+	// (http.Server.ReadTimeout), set again once BodyReadTimeout's part is
+	// read (0: none).
+	ReadTimeout time.Duration
+	// UpstreamH2C reaches an http:// upstream over HTTP/2 without TLS
+	// (prior knowledge), as a gRPC server needs; WebSocket upgrades, HTTP/1
+	// only, can't pass then. An https:// upstream gets HTTP/2 or HTTP/1.1,
+	// as ALPN settles.
+	UpstreamH2C bool
+	// UpstreamCAs verifies an https:// upstream's certificate (nil: the
+	// system's roots).
+	UpstreamCAs *x509.CertPool
+}
+
+// Transport returns the upstream's transport: HTTP/2 over TLS by ALPN, or
+// over cleartext with h2c, and connections kept for reuse.
+func Transport(h2c bool, cas *x509.CertPool) *http.Transport {
+	t := &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		MaxIdleConns:          512,
+		MaxIdleConnsPerHost:   128,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		TLSClientConfig:       &tls.Config{RootCAs: cas, MinVersion: tls.VersionTLS12},
+		Protocols:             new(http.Protocols),
+	}
+	if h2c {
+		t.Protocols.SetUnencryptedHTTP2(true)
+	} else {
+		t.Protocols.SetHTTP1(true)
+		t.Protocols.SetHTTP2(true)
+	}
+	return t
 }
 
 // Handler is an inspecting reverse proxy.
@@ -66,12 +116,22 @@ type Handler struct {
 	events   *events.Recorder
 	messages pipeline.WebSocketMessages
 	metrics  *telemetry.Metrics
+	// jsonDenials: Config.JSONDenials.
+	jsonDenials bool
+	wsIdle      time.Duration
+	bodyTimeout time.Duration
+	readTimeout time.Duration
+	// live are the open WebSockets (longlived.go).
+	live liveConns
 }
 
 // New returns a Handler that inspects requests with p.
 func New(p pipeline.Inspector, cfg Config) (*Handler, error) {
 	if cfg.Upstream == nil || cfg.Upstream.Scheme == "" || cfg.Upstream.Host == "" {
 		return nil, errors.New("upstream must be an absolute URL")
+	}
+	if cfg.UpstreamH2C && cfg.Upstream.Scheme != "http" {
+		return nil, errors.New("HTTP/2 without TLS needs an http:// upstream")
 	}
 	if cfg.MaxBodyBytes < 0 {
 		return nil, fmt.Errorf("max body bytes %d must not be negative", cfg.MaxBodyBytes)
@@ -95,7 +155,8 @@ func New(p pipeline.Inspector, cfg Config) (*Handler, error) {
 			pr.Out.URL.RawQuery = joinQuery(upstream.RawQuery, pr.In.URL.RawQuery)
 			setForwarded(pr, resolver)
 		},
-		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
+		ErrorLog:  slog.NewLogLogger(logger.Handler(), slog.LevelError),
+		Transport: Transport(cfg.UpstreamH2C, cfg.UpstreamCAs),
 	}
 	if cfg.WebSocketMessages != pipeline.MessagesOff {
 		if _, ok := p.(messageInspector); !ok {
@@ -105,19 +166,24 @@ func New(p pipeline.Inspector, cfg Config) (*Handler, error) {
 			return nil, errors.New("WebSocket message inspection needs a body limit")
 		}
 	}
+	if cfg.WebSocketIdleTimeout < 0 || cfg.BodyReadTimeout < 0 {
+		return nil, errors.New("timeouts must not be negative")
+	}
 	return &Handler{pipeline: p, proxy: rp, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events,
-		messages: cfg.WebSocketMessages, metrics: cfg.Metrics}, nil
+		messages: cfg.WebSocketMessages, metrics: cfg.Metrics, jsonDenials: cfg.JSONDenials,
+		wsIdle: cfg.WebSocketIdleTimeout, bodyTimeout: cfg.BodyReadTimeout, readTimeout: cfg.ReadTimeout}, nil
 }
 
 // ServeHTTP inspects r, then denies it or forwards it to the upstream.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	// A raw '#' is not valid in a request target (RFC 9112), and clients
 	// never send fragments. Coraza stops reading the URI at '#' while the
 	// upstream still parses what follows, so parameters after it would
 	// reach the application uninspected.
 	if strings.ContainsRune(r.RequestURI, '#') {
 		h.metrics.AdapterError(telemetry.ErrInvalidRequest)
-		http.Error(w, "Bad Request", http.StatusBadRequest)
+		httpadapter.WriteDenial(w, http.StatusBadRequest, httpadapter.NewRequestID(), r.Header, h.jsonDenials)
 		return
 	}
 	// Only the origin form ("/path?query"). For an absolute-form target
@@ -127,19 +193,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// the upstream never sees. The asterisk form would be forwarded as "/*".
 	if r.RequestURI != "" && !strings.HasPrefix(r.RequestURI, "/") {
 		h.metrics.AdapterError(telemetry.ErrInvalidRequest)
-		http.Error(w, "Bad Request", http.StatusBadRequest)
+		httpadapter.WriteDenial(w, http.StatusBadRequest, httpadapter.NewRequestID(), r.Header, h.jsonDenials)
 		return
 	}
 	// Forward only a Host the client sends as it is: what was inspected.
 	if !httpguts.ValidHostHeader(r.Host) {
 		h.metrics.AdapterError(telemetry.ErrInvalidRequest)
-		http.Error(w, "Bad Request", http.StatusBadRequest)
+		httpadapter.WriteDenial(w, http.StatusBadRequest, httpadapter.NewRequestID(), r.Header, h.jsonDenials)
 		return
 	}
-	req, err := h.toRequest(r)
+	req, err := h.readRequest(r, w, start)
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		// The client stalled in the part of its body that is inspected.
+		h.metrics.AdapterError(telemetry.ErrInvalidRequest)
+		w.Header().Set("Connection", "close")
+		httpadapter.WriteDenial(w, http.StatusRequestTimeout, httpadapter.NewRequestID(), r.Header, h.jsonDenials)
+		return
+	}
 	if err != nil {
 		h.metrics.AdapterError(telemetry.ErrInvalidRequest)
-		http.Error(w, "Bad Request", http.StatusBadRequest)
+		httpadapter.WriteDenial(w, http.StatusBadRequest, httpadapter.NewRequestID(), r.Header, h.jsonDenials)
 		return
 	}
 
@@ -153,22 +226,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			httpadapter.WriteGRPCDenial(w, g, http.StatusOK, v.Status, req.ID)
 			return
 		}
-		http.Error(w, http.StatusText(v.Status), v.Status)
+		httpadapter.WriteDenial(w, v.Status, req.ID, req.Headers, h.jsonDenials)
 		return
 	}
-	if h.messages != pipeline.MessagesOff && v.Reason != pipeline.ReasonSkipped &&
+	if h.messages != pipeline.MessagesOff && v.Reason != pipeline.ReasonSkipped && v.Reason != pipeline.ReasonIPAllow &&
 		httpguts.HeaderValuesContainsToken(r.Header.Values("Upgrade"), "websocket") {
 		// No extension, so no compressed messages (permessage-deflate):
 		// a frame with an RSV bit is then an error.
 		r.Header.Del("Sec-Websocket-Extensions")
-		w = &inspectingWriter{ResponseWriter: w, h: h, ctx: r.Context(), req: req, path: r.URL.Path, mi: h.pipeline.(messageInspector)}
+		w = &liveWriter{ResponseWriter: &inspectingWriter{ResponseWriter: w, h: h, ctx: r.Context(), req: req, path: r.URL.Path, mi: h.pipeline.(messageInspector)}, h: h}
 	} else if httpguts.HeaderValuesContainsToken(r.Header.Values("Upgrade"), "websocket") {
-		w = &countingWriter{ResponseWriter: w, metrics: h.metrics}
+		w = &liveWriter{ResponseWriter: &countingWriter{ResponseWriter: w, metrics: h.metrics}, h: h}
 	}
 	h.proxy.ServeHTTP(w, r)
 }
 
 func (h *Handler) toRequest(r *http.Request) (*request.Request, error) {
+	return h.readRequest(r, nil, time.Time{})
+}
+
+// readRequest reads r for the pipeline; w, the request's start, is for
+// BodyReadTimeout (nil: none).
+func (h *Handler) readRequest(r *http.Request, w http.ResponseWriter, start time.Time) (*request.Request, error) {
 	peer := httpadapter.PeerAddr(r.RemoteAddr)
 	scheme := "http"
 	if r.TLS != nil {
@@ -201,7 +280,24 @@ func (h *Handler) toRequest(r *http.Request) (*request.Request, error) {
 		return req, nil
 	}
 	if limit := h.pipeline.BodyLimit(req, h.maxBody); limit > 0 {
+		var rc *http.ResponseController
+		if h.bodyTimeout > 0 && w != nil {
+			// Only the inspected part; then the server's whole-request
+			// limit again, from the request's start. Unsupported
+			// (HTTP/2): the server's limits alone.
+			rc = http.NewResponseController(w)
+			if rc.SetReadDeadline(time.Now().Add(h.bodyTimeout)) != nil {
+				rc = nil
+			}
+		}
 		prefix, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+		if rc != nil && err == nil {
+			var after time.Time
+			if h.readTimeout > 0 {
+				after = start.Add(h.readTimeout)
+			}
+			_ = rc.SetReadDeadline(after)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("read body: %w", err)
 		}

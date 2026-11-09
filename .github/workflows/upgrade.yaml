@@ -1,0 +1,136 @@
+name: upgrade
+
+# The upgrade test (hack/kind/upgrade.sh) from several releases (#390): the
+# latest patch of each of the newest `minors` minor versions (hack/releases;
+# on a release-X.Y branch, X.Y and older), or the versions given. Each runs
+# the whole test, Traefik and Envoy Gateway probed through the upgrade and
+# the rollback. The release qualification (#389) calls it with minors: 2;
+# CI's upgrade job runs the latest release only, on every change.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: The commit, branch or tag to test (default the caller's).
+        type: string
+        default: ''
+      minors:
+        description: How many minor versions to upgrade from, newest first.
+        type: number
+        default: 2
+      from:
+        description: Versions to upgrade from, space-separated (overrides minors).
+        type: string
+        default: ''
+      images:
+        description: ghcr:<version> upgrades to those published images instead of building the ref's.
+        type: string
+        default: ''
+  workflow_dispatch:
+    inputs:
+      minors:
+        description: How many minor versions to upgrade from, newest first.
+        type: number
+        default: 2
+      from:
+        description: Versions to upgrade from, space-separated (overrides minors).
+        type: string
+        default: ''
+
+# Each job asks for what it needs (least privilege).
+permissions: {}
+
+jobs:
+  versions:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      from: ${{ steps.versions.outputs.from }}
+    steps:
+      # Only main, a release branch or a release tag (#503): never a pull
+      # request's ref or an arbitrary commit. Empty: the caller's own.
+      - env:
+          REF: ${{ inputs.ref }}
+        run: |
+          if [ -n "$REF" ] && ! [[ $REF =~ ^(main|release-[0-9]+\.[0-9]+|v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?)$ ]]; then
+            echo "ref $REF is not main, release-X.Y or vX.Y.Z[-rc.N]" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+          # Restore only: this job runs the ref's code (#503).
+          cache: false
+      - id: versions
+        env:
+          FROM: ${{ inputs.from }}
+          MINORS: ${{ inputs.minors }}
+          BRANCH: ${{ inputs.ref || github.base_ref || github.ref_name }}
+        run: |
+          if [ -n "$FROM" ]; then
+            list=$(tr ' ' '\n' <<<"$FROM" | sed '/^$/d')
+          else
+            list=$(go run ./hack/releases -minors "$MINORS" -branch "$BRANCH")
+          fi
+          echo "from=$(jq -Rnc '[inputs]' <<<"$list")" >>"$GITHUB_OUTPUT"
+          echo "Upgrading from: $(tr '\n' ' ' <<<"$list")" >>"$GITHUB_STEP_SUMMARY"
+
+  upgrade:
+    needs: versions
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        from: ${{ fromJSON(needs.versions.outputs.from) }}
+    name: upgrade from ${{ matrix.from }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      # The versions under test, hack/versions.env (#393).
+      - id: versions
+        run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_OUTPUT"
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ steps.versions.outputs.HELM_VERSION }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+          # Restore only: this job runs the ref's code (#503).
+          cache: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-build
+          key: image-go-build-${{ hashFiles('go.sum', 'Dockerfile') }}
+          restore-keys: image-go-build-
+      - run: hack/kind/go-build-cache.sh inject "$RUNNER_TEMP/go-build"
+      - run: KEEP=1 make kind-upgrade IMAGES="$IMAGES"
+        env:
+          FROM_VERSION: ${{ matrix.from }}
+          IMAGES: ${{ inputs.images }}
+      - if: failure()
+        run: |
+          kubectl --context kind-inkwall-upgrade get pods -A
+          kubectl --context kind-inkwall-upgrade -n inkwall-system logs deployment/inkwall-operator --tail=100 || true
+          mkdir -p "$RUNNER_TEMP/kind-logs"
+          kind=(bin/kind-*/kind)
+          "${kind[0]}" export logs "$RUNNER_TEMP/kind-logs" --name inkwall-upgrade || true
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kind-logs-upgrade-${{ matrix.from }}
+          path: ${{ runner.temp }}/kind-logs
+          retention-days: 7

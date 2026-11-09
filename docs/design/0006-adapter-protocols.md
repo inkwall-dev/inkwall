@@ -139,6 +139,16 @@ fail open (the engine never rejects its requests) gets `observability_mode` (Env
 `shadowMode`) and a `STREAMED` body instead, and no buffer limit: Envoy forwards the request
 without waiting for the engine.
 
+**The operator's probe** (#372, bundle mode): as the SPOE agent does ([§4](#4-spoe-haproxy-stream-processing-offload-engine)), the ext_proc adapter
+answers a request whose `X-Inkwall-Probe` header carries a valid MAC of its host and URI under
+the bundle's probe key (`pkg/haproxyprobe`) itself, uninspected, before anything else: an
+immediate response, 200 with the answer's MAC in `X-Inkwall-Probe`, so the request never reaches
+the upstream. Envoy's local replies take a defined HTTP status only, so not HAProxy's 299; the
+MAC is the proof. A request with a wrong MAC, or before the engine has a key, is an ordinary
+request. In observability mode Envoy ignores the reply, so a detect-mode route can't be proven
+this way. The operator's side (probing each gateway pod for Istio's routes before `Programmed`)
+is not built yet.
+
 ### Response inspection (v0.4.0)
 
 Decided for v0.4.0 ([#274](https://github.com/inkwall-dev/inkwall/issues/274)). Responses are
@@ -165,9 +175,16 @@ phases 3 (status and headers) and 4 (body): the response rules see what the requ
 `956` (data leakage: generic, SQL, Java, PHP, IIS, web shells, Ruby), scored into the outbound
 anomaly score and blocked by `RESPONSE-959` at `tx.outbound_anomaly_score_threshold` (4 by
 default: one critical match). The user's `WAFRuleSet` rules on `RESPONSE_*` variables run too. The
-response's verdict lists only what matched the response. A request the rules interrupted keeps no
-transaction: in Block mode it was denied, and in Detect mode its event stands and its response
-isn't inspected.
+response's verdict lists only what matched the response. In Block mode a request the rules
+interrupt keeps no transaction: it was denied, and there is no response. In Detect mode (#360) the
+request is let through, so its response reaches the client, and it is the one most worth
+inspecting (an SQL injection's SQL error): the transaction runs DetectionOnly (a first phase 1
+rule, 7700010, sets `ctl:ruleEngine=DetectionOnly` when the engine sets `TX:inkwall_detect`), the
+request's event reports the interruption the rules would have made, and the response is inspected
+as any other, with its own event. In DetectionOnly the rules go on after that interruption, so the
+request's event may list more matches than in Block mode. The response's would-be interruption is
+its first matched rule with a disruptive action (`deny`, `drop`, `redirect`: the CRS's 959100),
+since Coraza records only the transaction's first.
 
 **What is read.** The status and headers always. The body only when its media type is one the
 rules read (`text/plain`, `text/html`, `text/xml`, `application/json`, `application/xml`,
@@ -224,13 +241,16 @@ policy with `responses.inspect` on a route Traefik serves is not silently half-e
 Traefik's routes are wired and their requests inspected. A separate condition was considered, with
 `Programmed` true for the requests: rejected, because `Ready` would then claim the whole policy is
 enforced. When such a policy is applied, the admission webhook warns that the responses of its
-`Ingress`, `IngressRoute`, `HTTPRoute` and `VirtualService` targets may not be inspected,
-depending on the proxy that serves them: it doesn't resolve the proxy (an `Ingress` may be
-Traefik's or HAProxy's, an `HTTPRoute` Envoy Gateway's, Traefik's or Istio's), so it names none as
-the target's and leaves that to `Programmed` (#380). The same holds for any integration whose `Result` doesn't
-set `Responses`: only Envoy Gateway's does. Istio's (v0.4.0) doesn't: its `EnvoyFilter` sends no
-response phase yet (#323), so a policy with `responses.inspect` on an Istio route is
-`ResponsesNotInspected` too, and the Gateway's buffer limit isn't raised for responses.
+`Ingress`, `IngressRoute` and `HTTPRoute` targets may not be inspected, depending on the proxy that
+serves them: it doesn't resolve the proxy (an `Ingress` may be Traefik's or HAProxy's, an
+`HTTPRoute` Envoy Gateway's, Traefik's or Istio's), so it names none as the target's and leaves
+that to `Programmed` (#380). The same holds for any integration whose `Result` doesn't set
+`Responses`: Traefik's and HAProxy's. Envoy Gateway's and, since 0.5.0, both Istio integrations'
+do (#374): Istio's `EnvoyFilter` gives a route whose policies inspect responses
+`response_header_mode: SEND` and `response_body_mode: BUFFERED_PARTIAL` (`STREAMED` in detect
+mode), with `allow_mode_override`, as Envoy Gateway's `EnvoyExtensionPolicy`, and raises the
+listeners' buffer limit for them; other routes keep `SKIP`. VirtualServices, always Istio's, get
+no warning.
 
 **Latency and memory.** A route that inspects responses adds one evaluation per response
 (phases 3 and 4; the CRS response rules are a few dozen, mostly `@pmFromFile` and `@rx` on the
@@ -388,6 +408,59 @@ Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/inkwall/issues/282)); 
 - Routes are left uninspected with a condition on the message's `event`; the fail-closed rule
   must leave them out too.
 
+### Responses through SPOE (design, #370)
+
+Proposed, not built: how a policy's `responses` would be inspected through HAProxy, with the same
+rules and budgets as through ext_proc ([§2](#response-inspection-v040)). Until it is built, a
+policy with `responses.inspect` on an HAProxy route is `ResponsesNotInspected`.
+
+- **The message.** A second SPOE message, `inkwall-response`, on the `on-http-response` event of
+  the same SPOE scope: `status` (`status`), `headers` (`res.hdrs_bin`), `body` (`res.body`), and
+  `request_id` (`var(txn.inkwall.request_id)`, which the request's answer set). HAProxy sends the
+  body only after `http-response wait-for-body time <t> at-least <bytes>` (HAProxy 2.4 or later;
+  we need 3.1 for SPOP 2.0 already), and at most what its buffer holds (`tune.bufsize` less
+  `tune.maxrewrite`, as for requests, #336): a body cut there is oversized, so the policy's
+  `responses.onOversize` decides, as a prefix through ext_proc. The route's rules send the message
+  only when the request's answer said its policy inspects responses (`txn.inkwall.responses`),
+  so other routes add nothing to their responses.
+- **Tying the response to its request.** The request and its response are separate NOTIFY frames,
+  possibly on different SPOP connections, so the engine keeps each request's open Coraza
+  transaction (or, cheaper, the variables the response rules read: anomaly scores, paranoia
+  level, the user's `tx` variables) keyed by request ID, in a table bounded by count and memory
+  (by default 10,000 entries or 64 MiB) with a TTL of the route's timeout plus HAProxy's response
+  timeout. An entry goes with its response, or at its TTL. A response whose request isn't there
+  (evicted, an engine restart in between, another engine of a scaled-out agent pool) is a miss:
+  in Block mode it gets the policy's failure mode for responses (by default fail closed: replaced
+  with 502, as an uninspectable response through ext_proc); in Detect mode it passes, logged.
+- **The verdict.** `txn.inkwall.response_action` (`allow` or `deny`) and `response_status`.
+  Block mode replaces a response that leaks with `http-response return status 403` (`502` for
+  oversized or uninspectable when the policy says Deny), with the engine's plain-text body and
+  the request ID; Detect mode only logs. An unset `response_action` (the agent timed out or is
+  down) follows the failure mode: a rule returns 502 first when it fails closed.
+- **Costs.** One more SPOP round trip per inspected response (HAProxy waits for it: SPOP 2.0 is
+  synchronous), the same evaluation cost as through ext_proc (about 0.3 ms per KiB of HTML,
+  `BenchmarkEvaluateExchange`), and the table: a kept transaction is a few KiB, so 10,000
+  responses in flight cost tens of MiB. Requests whose policies don't inspect responses keep
+  nothing.
+- **The operator** adds to the backend snippet, for the Ingresses whose policies inspect
+  responses: the message's group, `http-response wait-for-body`, and the `http-response` rules
+  above; and reports `Result.Responses` for HAProxy only when the controller's HAProxy is 3.1 or
+  later (it is, for the controller versions it wires). The probe ([above](#4-spoe-haproxy-stream-processing-offload-engine)) covers the
+  request filter only; a response probe (the engine answering a probe's response) would prove the
+  response rules, as a follow-up.
+
+**Open questions:**
+
+1. Keep the Coraza transaction (exact, as ext_proc; memory per request) or only the variables
+   (cheaper; the response rules lose request variables nothing else copies)?
+2. The failure mode on a miss: a policy setting of its own, or the request's failure mode?
+3. A scaled-out agent (several engine processes behind one HAProxy `mode spop` backend) sends the
+   response to any of them: sticky balancing on the request ID (`balance hdr`-like for SPOP) or a
+   shared table?
+4. `wait-for-body` holds the whole response up to the buffer: should streamed responses (SSE,
+   gRPC) skip the body by content type in HAProxy's rules, as the engine skips them through
+   ext_proc?
+
 `make haproxy-e2e` runs the configuration of [protecting HAProxy](../haproxy.md) with HAProxy 3.2 in
 Docker. **Built:** `pkg/adapters/spoe`, run as `inkwall-engine spoe`, and since 0.4.0 the operator's
 wiring of the HAProxy Kubernetes Ingress Controller ([0002 §6.4](0002-system-architecture.md#64-haproxy-haproxy-kubernetes-ingress-controller-haproxy-ingress)).
@@ -410,6 +483,10 @@ wiring of the HAProxy Kubernetes Ingress Controller ([0002 §6.4](0002-system-ar
 
 **Built:** `pkg/adapters/httpcheck`, run as `inkwall-engine check`. `inkwallctl test`,
 `inkwallctl bench --engine` and the tests use it.
+`CheckRequest` has no response: the API serves proxies, which ask before forwarding. The response
+cases of `inkwallctl test --suite` (#385) are inspected in-process instead, by
+`Handler.CheckExchange`, with the policy's exchange as ext_proc keeps it; so they need no API
+change, and `--engine` can't run them.
 **Not yet:** the gRPC `CheckService/Check` (defined in `api/engine/v1`, not served) and the
 Traefik plugin.
 
@@ -496,7 +573,7 @@ The messages themselves aren't read yet ([gRPC](../grpc.md)).
 | ext_authz | gRPC call | Buffered, optional | No | Yes | Envoy fallback | Not yet |
 | ext_proc | gRPC stream | Buffered (streamed in observability mode) | Yes (policies with `responses`) | Yes, or no (observability mode) | Envoy Gateway, Envoy, Istio, Contour | Built (Envoy Gateway, Istio, raw Envoy) |
 | forward-auth | HTTP subrequest | If forwarded | No | Yes | Traefik (nginx `auth_request` speaks it too) | Built |
-| SPOE | SPOP | Buffered, up to HAProxy's buffer | Possible | Yes | HAProxy | Built (by hand or by the operator: [protecting HAProxy](../haproxy.md)) |
+| SPOE | SPOP | Buffered, up to HAProxy's buffer | Designed, not built ([§4](#responses-through-spoe-design-370)) | Yes | HAProxy | Built (by hand or by the operator: [protecting HAProxy](../haproxy.md)) |
 | `/v1/check` | HTTP (gRPC planned) | Yes | No | Yes | CLI, tests; a Traefik plugin planned | Built |
 | Reverse proxy | HTTP proxying | Yes | Yes | It is the path | VMs, test reference | Built |
 

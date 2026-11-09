@@ -26,6 +26,7 @@ import (
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
+	"github.com/inkwall-dev/inkwall/pkg/iplist"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/router"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
@@ -46,6 +47,7 @@ const PolicyWebhookName = "wafpolicies.waf.inkwall.dev"
 // +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafruleset,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=wafrulesets,verbs=create;update,versions=v1alpha1,name=wafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
 // +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-clusterwafruleset,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=clusterwafrulesets,verbs=create;update,versions=v1alpha1,name=clusterwafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
 // +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafpolicy,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=wafpolicies,verbs=create;update,versions=v1alpha1,name=wafpolicies.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
+// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafiplist,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=wafiplists,verbs=create;update,versions=v1alpha1,name=wafiplists.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
 //
 // Deletes go to the same webhooks only for the control plane's objects (the
 // objectSelector), so deleting any other object never needs the operator.
@@ -73,6 +75,10 @@ func Setup(mgr manager.Manager, inject *PodInjector, guard *SourceGuard) error {
 	}
 	if err := builder.WebhookManagedBy(mgr, &wafv1alpha1.ClusterWAFRuleSet{}).
 		WithValidator(specValidator[*wafv1alpha1.ClusterWAFRuleSet]{validateClusterWAFRuleSet, guard}).Complete(); err != nil {
+		return err
+	}
+	if err := builder.WebhookManagedBy(mgr, &wafv1alpha1.WAFIPList{}).
+		WithValidator(specValidator[*wafv1alpha1.WAFIPList]{validateWAFIPList, guard}).Complete(); err != nil {
 		return err
 	}
 	if err := builder.WebhookManagedBy(mgr, &wafv1alpha1.WAFPolicy{}).
@@ -138,7 +144,7 @@ func socketDirWarnings(old string, cfg *wafv1alpha1.InkwallConfig) admission.War
 
 // object is a WAF kind with a spec.
 type object interface {
-	*wafv1alpha1.WAFRuleSet | *wafv1alpha1.ClusterWAFRuleSet | *wafv1alpha1.WAFPolicy
+	*wafv1alpha1.WAFRuleSet | *wafv1alpha1.ClusterWAFRuleSet | *wafv1alpha1.WAFPolicy | *wafv1alpha1.WAFIPList
 	GetName() string
 	GetLabels() map[string]string
 }
@@ -181,8 +187,23 @@ func spec(obj any) any {
 		return o.Spec
 	case *wafv1alpha1.WAFPolicy:
 		return o.Spec
+	case *wafv1alpha1.WAFIPList:
+		return o.Spec
 	}
 	return obj
+}
+
+// validateWAFIPList accepts the entries the engine parses: one it refused
+// would leave the policies that use the list out of the bundle.
+func validateWAFIPList(l *wafv1alpha1.WAFIPList) (admission.Warnings, error) {
+	var errs field.ErrorList
+	path := field.NewPath("spec", "entries")
+	for i, e := range l.Spec.Entries {
+		if _, err := iplist.Parse([]string{string(e.CIDR)}); err != nil {
+			errs = append(errs, field.Invalid(path.Index(i).Child("cidr"), string(e.CIDR), err.Error()))
+		}
+	}
+	return nil, invalid("WAFIPList", l.Name, errs)
 }
 
 func invalid(kind, name string, errs field.ErrorList) error {
@@ -284,11 +305,12 @@ func checkCRS(path *field.Path, b wafv1alpha1.RuleSetBinding) field.ErrorList {
 // the proxy that serves each one, which the webhook doesn't resolve: an
 // Ingress may be Traefik's or the HAProxy Kubernetes Ingress Controller's,
 // an HTTPRoute Envoy Gateway's, Traefik's or Istio's; IngressRoutes are
-// Traefik's, VirtualServices Istio's ingress gateways'. Of these, only
-// Envoy Gateway sends responses to the engine. So it names the target
-// kinds, not a proxy, and leaves each target's verdict to its Programmed
-// condition (ResponsesNotInspected). The policy is accepted, as its
-// requests are inspected.
+// Traefik's. Envoy Gateway and Istio send responses to the engine (Istio
+// since #374, so VirtualServices, Istio's ingress gateways', get no
+// warning); Traefik and HAProxy don't. So it names the target kinds, not a
+// proxy, and leaves each target's verdict to its Programmed condition
+// (ResponsesNotInspected). The policy is accepted, as its requests are
+// inspected.
 func responseWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
 	if r := p.Spec.Responses; r == nil || !r.Inspect {
 		return nil
@@ -296,7 +318,7 @@ func responseWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
 	var targets []string
 	for _, ref := range p.Spec.TargetRefs {
 		switch ref.Kind {
-		case "Ingress", "IngressRoute", "HTTPRoute", "VirtualService":
+		case "Ingress", "IngressRoute", "HTTPRoute":
 			targets = append(targets, ref.Kind+" "+ref.Name)
 		}
 	}
@@ -308,7 +330,7 @@ func responseWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
 		list = strings.Join(targets[:n-1], ", ") + " and " + targets[n-1]
 	}
 	return admission.Warnings{"spec.responses: the responses of " + list + " may not be inspected, depending on the proxy that serves them: " +
-		"Traefik, the HAProxy Kubernetes Ingress Controller and Istio can't send responses to the engine, Envoy Gateway can. " +
+		"Traefik and the HAProxy Kubernetes Ingress Controller can't send responses to the engine, Envoy Gateway and Istio can. " +
 		"The requests are inspected either way; the policy's Programmed condition says which responses are not (ResponsesNotInspected)"}
 }
 

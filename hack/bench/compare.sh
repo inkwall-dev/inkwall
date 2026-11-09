@@ -42,9 +42,10 @@ work=$(mktemp -d)
 OUT=${OUT:-$work/out}
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
+# shellcheck disable=SC2317 # called by the trap
 cleanup() {
   git -C "$root" worktree remove --force "$work/base" >/dev/null 2>&1 || true
-  rm -rf "$work/bin" "$work/base"
+  rm -rf "${work:?}/bin" "${work:?}/base"
 }
 trap cleanup EXIT
 rm -rf "$OUT/recheck"
@@ -142,7 +143,7 @@ bench() {
     echo "== run $i/$COUNT"
     for side in base head; do
       while read -r pkg re; do
-        bin= pdir=
+        bin='' pdir=''
         read -r bin pdir <<<"$(lookup "$side" "$pkg")" || true
         # A package new in head (or gone from it) has one side only;
         # benchstat shows it without a comparison.
