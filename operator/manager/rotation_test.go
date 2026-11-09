@@ -223,9 +223,12 @@ func testKeyRotation(ctx context.Context, t *testing.T, c client.Client) {
 		if err := c.Get(ctx, client.ObjectKeyFromObject(cfg), &got); err != nil {
 			return err.Error()
 		}
+		// The bundle published now: the operator may have published a
+		// newer one since (#528), which the status then reports.
+		_, now := signedWith()
 		b, e := got.Status.Bundle, got.Status.Engines
-		if b == nil || uint64(b.Version) != version || b.CompressedBytes <= 0 || b.LimitBytes != bundle.MaxCompressedBytes {
-			return fmt.Sprintf("bundle %+v, want version %d", b, version)
+		if b == nil || uint64(b.Version) < version || uint64(b.Version) != now || b.CompressedBytes <= 0 || b.LimitBytes != bundle.MaxCompressedBytes {
+			return fmt.Sprintf("bundle %+v, want version %d (at least %d)", b, now, version)
 		}
 		if e == nil || e.Connected < 2 || e.Current != e.Connected {
 			return fmt.Sprintf("engines %+v", e)
