@@ -35,14 +35,13 @@ type Exchange struct {
 	// was called, and the evaluation closes x when it finishes.
 	busy, closed, used bool
 
-	policy  string
 	observe func(Verdict)
 }
 
-// OnVerdict sets the policy the response's verdict names, and a function
-// told about that verdict (a policy's counter).
-func (e *Exchange) OnVerdict(policy string, observe func(Verdict)) {
-	e.policy, e.observe = policy, observe
+// OnVerdict sets a function told about the response's verdict (a policy's
+// counter).
+func (e *Exchange) OnVerdict(observe func(Verdict)) {
+	e.observe = observe
 }
 
 // BodyLimit is how much of the response body is inspected: 0 for none.
@@ -79,7 +78,7 @@ func (e *Exchange) CheckResponse(ctx context.Context, resp *request.Response) Ve
 	v := e.check(ctx, resp)
 	v.Duration = time.Since(start)
 	v.Response = true
-	v.Policy = e.policy
+	v.Policy = e.p.policy
 	if e.p.observer != nil {
 		e.p.observer.ObserveVerdict(v)
 	}

@@ -838,7 +838,7 @@ func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logge
 		Evaluators: evaluators,
 		Stats:      stats,
 	}
-	holder := &policy.Holder{DenyBeforeFirst: cfg.bootstrapDeny}
+	holder := &policy.Holder{DenyBeforeFirst: cfg.bootstrapDeny, Observer: metrics}
 	var secret *agent.SecretSource
 	if ns, name, ok := strings.Cut(cfg.bundleSecret, "/"); ok {
 		secret = &agent.SecretSource{Namespace: ns, Name: name, CAFile: cfg.kubeCA, TokenFile: cfg.kubeToken}

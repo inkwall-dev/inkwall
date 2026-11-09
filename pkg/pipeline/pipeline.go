@@ -111,6 +111,10 @@ type Config struct {
 	Oversize OversizeAction
 	// Observer, if set, is told about every verdict (metrics).
 	Observer Observer
+	// Policy is the policy the pipeline enforces, in bundle mode
+	// ("namespace/name"): its verdicts name it (Verdict.Policy), before the
+	// Observer is told about them. Empty in standalone mode.
+	Policy string
 	// Routes decides which paths skip inspection entirely or skip only body
 	// inspection (tier T0). Nil inspects everything.
 	Routes *router.Table
@@ -215,6 +219,7 @@ type Pipeline struct {
 	adm      *Admission
 	oversize OversizeAction
 	observer Observer
+	policy   string
 	routes   *router.Table
 	ws       *WebSocketRules
 	ipDeny   *iplist.Set
@@ -245,6 +250,7 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 		adm:      adm,
 		oversize: cfg.Oversize.Resolve(cfg.Mode),
 		observer: cfg.Observer,
+		policy:   cfg.Policy,
 		routes:   cfg.Routes,
 		ws:       cfg.WebSocket,
 		ipDeny:   cfg.IPDeny,
@@ -321,6 +327,7 @@ func (p *Pipeline) checkRequest(ctx context.Context, r *request.Request, keep bo
 	start := time.Now()
 	v, x := p.check(ctx, r, keep)
 	v.Duration = time.Since(start)
+	v.Policy = p.policy
 	if p.observer != nil {
 		p.observer.ObserveVerdict(v)
 	}
