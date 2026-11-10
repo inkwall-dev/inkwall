@@ -54,6 +54,12 @@ What's new:
 
 What changes by itself:
 
+- **The engine and the operator take their Go memory limit from the container's cgroup** when
+  `MEMORY_LIMIT` isn't set: a standalone engine in a plain container (`docker run --memory 256m`)
+  now sets `GOMEMLIMIT` to 90% of that limit, as the chart and the injected engine always did
+  from `MEMORY_LIMIT`, which still wins; `GOMEMLIMIT` set by hand still wins over both. The
+  `Go memory limit set` log line says where the limit came from
+  ([memory limit](standalone-proxy.md#memory-limit)).
 - **An older engine pinned in `InkwallConfig.spec.engine.image` starts.** It used to be injected
   with every `spec.engine` setting's flag, and an engine before 0.5.0 exits on `--log-level`,
   `--policy-metrics`, `--json-denials` or `--trusted-hops`, so its pod never became ready. The

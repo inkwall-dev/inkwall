@@ -50,7 +50,8 @@ jobs:
       # Every branch, even after one fails.
       - run: |
           status=0
-          for b in main release-0.5 release-0.4 release-0.3; do
+          # main: every Go module, the test modules too (#567).
+          for b in main main/test/crs main/test/perf/prefilter main/hack/gitopshealth release-0.5 release-0.4 release-0.3; do
             echo "::group::$b"
             (cd "$b" && go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...) || { echo "::error::govulncheck found vulnerabilities on $b"; status=1; }
             echo "::endgroup::"
