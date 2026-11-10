@@ -152,6 +152,38 @@ func TestPolicyValidation(t *testing.T) {
 	}
 }
 
+// A rule set placed before the CRS can't be the CRS, so a binding that
+// places one there can't carry the CRS's settings (#423).
+func TestPolicyValidationPlacement(t *testing.T) {
+	ctx := context.Background()
+	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy}
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "shop"}}
+	p.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{
+		{Ref: wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: "crs"}, ParanoiaLevel: ptr(int32(2)), Placement: wafv1alpha1.PlacementAfterCRS},
+		{Ref: wafv1alpha1.RuleSetRef{Kind: "WAFRuleSet", Name: "tune"}, Placement: wafv1alpha1.PlacementBeforeCRS},
+	}
+	if _, err := v.ValidateCreate(ctx, p); err != nil {
+		t.Fatalf("valid placement: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*wafv1alpha1.RuleSetBinding)
+	}{
+		{"paranoia level", func(b *wafv1alpha1.RuleSetBinding) { b.ParanoiaLevel = ptr(int32(2)) }},
+		{"threshold", func(b *wafv1alpha1.RuleSetBinding) { b.InboundAnomalyThreshold = ptr(int32(10)) }},
+		{"crs", func(b *wafv1alpha1.RuleSetBinding) {
+			b.CRS = &wafv1alpha1.CRSSettings{AllowedMethods: []wafv1alpha1.HTTPMethodToken{"GET"}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := p.DeepCopy()
+			tc.edit(&q.Spec.RuleSets[1])
+			_, err := v.ValidateCreate(ctx, q)
+			wantInvalid(t, err, "spec.ruleSets[1].placement", "only for SecLang rule sets")
+		})
+	}
+}
+
 // A policy that inspects responses gets a warning for its targets whose
 // responses may not be inspected, whichever proxy serves them (#380): the
 // webhook doesn't resolve the proxy, so it names none as the one. It is

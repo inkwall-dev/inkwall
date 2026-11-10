@@ -1,11 +1,12 @@
 # Upgrading
 
-This guide upgrades an Inkwall installation from 0.4.x to 0.5.0, from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
+This guide upgrades an Inkwall installation from 0.5.x to 0.6.0, from 0.4.x to 0.5.0, from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
 0.3.0, and from 0.1.x (0.1.0 to 0.1.5) to 0.2.2, the latest 0.2 release, and lists what changes on
 the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 ## Contents
 
+- [From 0.5.x to 0.6.0](#from-05x-to-060)
 - [From 0.4.x to 0.5.0](#from-04x-to-050)
 - [From 0.4.0 to 0.4.1](#from-040-to-041)
 - [From 0.3.x to 0.4.0](#from-03x-to-040)
@@ -30,6 +31,20 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
   - [Upgrading the chart](#upgrading-the-chart)
   - [Checking it worked](#checking-it-worked)
   - [Rolling back](#rolling-back)
+
+## From 0.5.x to 0.6.0
+
+What's new:
+
+- **Rule sets before the CRS** (#423). A `WAFPolicy`'s rule set binding takes an optional
+  `placement: BeforeCRS` (the default is `AfterCRS`, where every rule set loaded until now): the
+  rule set then loads before the CRS's initialization, as the standalone engine's
+  `--rules-before-crs`, so its `setvar:tx.…` and `ctl:ruleRemoveById` rules change what the CRS
+  does (see the [README](../README.md#protect-a-route)). Such a rule set can't use
+  `SecRuleRemoveBy*` or `SecRuleUpdate*` (the policy is `Accepted=False`, `InvalidRef`). Upgrade
+  the chart first, for the CRD field; a policy that sets it is `Enforced=False`
+  (`EnginesOutdated`) until every engine runs 0.6.0, since an older engine loads the rule set
+  after the CRS. `inkwallctl test --policy` honours it. Policies without it don't change.
 
 ## From 0.4.x to 0.5.0
 
