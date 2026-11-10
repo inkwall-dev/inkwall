@@ -445,12 +445,22 @@ inkwall-engine spoe --listen unix:/var/run/inkwall/spoe.sock --mode block --insp
    (`"phase":"response"` in the security event) and the response passes.
 
 - **What is read:** the status and headers always; the body of the media types above, up to
-  `--max-response-bytes` (64 KiB by default) and to HAProxy's buffer, as for [requests](#bodies): a
-  body HAProxy cut (shorter than its `Content-Length`) has its prefix inspected and is oversized
-  (`--oversize-response`: 502 in block mode by default). A chunked body without `Content-Length`
-  counts as complete only when it is well under half of HAProxy's buffer. `wait-for-body`'s `time`
-  (2 s in the sample) bounds how long HAProxy holds a response for its body: a body slower than that
-  is sent as far as it came. A `gzip` or `deflate` body is decoded first.
+  `--max-response-bytes` (64 KiB by default) and to HAProxy's buffer, as for [requests](#bodies). A
+  `gzip` or `deflate` body is decoded first. The engine never sees more of a body than HAProxy sends
+  it, and HAProxy sends only what arrived within `wait-for-body`'s `time` (2 s in the sample) and
+  fits its buffer (about 15 KiB by default). What happens to the rest:
+  - **A body with `Content-Length` that HAProxy cut** (by its buffer, or by `time`): only the part
+    the engine got is inspected, and the response counts as oversized. With `--oversize-response
+    deny` (the default in block mode) it is replaced with 502. With `allow` (the default in detect
+    mode) it reaches the client whole, and the part past what the engine got is not inspected.
+  - **A body without `Content-Length` (chunked, or HTTP/2) that is not well under half of HAProxy's
+    buffer** (about 7 KiB under the defaults): the engine can't tell whether it is whole, so it
+    counts as oversized, as above: replaced with 502 under `deny`, and under `allow` passed with
+    only its first part inspected.
+  - **A body without `Content-Length` that arrives slower than `time`:** when the part that arrived
+    in time is small, the engine can't tell it was cut, and inspects it as the whole body. The rest
+    reaches the client uninspected, in block mode too (#559). Keep `time` above how long your app
+    takes to send its bodies, or have it send `Content-Length`.
 - **Kept requests:** the engine holds each request whose response it inspects until the response
   comes, in a table bounded by `--max-pending-responses` (4096) and an estimate of their memory,
   `--max-pending-response-bytes` (64 MiB; about 128 KiB per request, more with a body). A request
