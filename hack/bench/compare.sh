@@ -42,7 +42,7 @@ work=$(mktemp -d)
 OUT=${OUT:-$work/out}
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
-# shellcheck disable=SC2317 # called by the trap
+# shellcheck disable=SC2317,SC2329 # called by the trap
 cleanup() {
   git -C "$root" worktree remove --force "$work/base" >/dev/null 2>&1 || true
   rm -rf "${work:?}/bin" "${work:?}/base"
