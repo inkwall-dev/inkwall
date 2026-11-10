@@ -1,11 +1,12 @@
 # Upgrading
 
-This guide upgrades an Inkwall installation from 0.4.x to 0.5.0, from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
+This guide upgrades an Inkwall installation from 0.5.x to 0.6.0, from 0.4.x to 0.5.0, from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
 0.3.0, and from 0.1.x (0.1.0 to 0.1.5) to 0.2.2, the latest 0.2 release, and lists what changes on
 the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 ## Contents
 
+- [From 0.5.x to 0.6.0](#from-05x-to-060)
 - [From 0.4.x to 0.5.0](#from-04x-to-050)
 - [From 0.4.0 to 0.4.1](#from-040-to-041)
 - [From 0.3.x to 0.4.0](#from-03x-to-040)
@@ -30,6 +31,19 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
   - [Upgrading the chart](#upgrading-the-chart)
   - [Checking it worked](#checking-it-worked)
   - [Rolling back](#rolling-back)
+
+## From 0.5.x to 0.6.0
+
+What's new:
+
+- **Responses through HAProxy, configured by hand.** `inkwall-engine spoe --inspect-responses`
+  inspects the responses HAProxy sends in the new `inkwall-response` SPOE group: a response that
+  leaks is replaced with 403 in block mode and logged in detect mode. Copy the new lines of
+  `examples/haproxy/spoe.conf` (the group, the message and the longer `register-var-names`) and
+  `haproxy.cfg` (the `Accept-Encoding` removal and the `http-response` rules): they do nothing
+  until the engine runs with the flag. See [protecting HAProxy](haproxy.md#responses). Through the
+  HAProxy Kubernetes Ingress Controller a policy with `responses.inspect` is still
+  `ResponsesNotInspected` (#470).
 
 ## From 0.4.x to 0.5.0
 

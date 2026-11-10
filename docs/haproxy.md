@@ -27,6 +27,7 @@ The samples in [`examples/haproxy`](../examples/haproxy) are the files this guid
   - [Block mode and detect mode](#block-mode-and-detect-mode)
   - [Timeout and failure mode](#timeout-and-failure-mode)
   - [Bodies](#bodies)
+  - [Responses](#responses)
   - [gRPC](#grpc)
   - [WebSocket](#websocket)
   - [Routes left uninspected](#routes-left-uninspected)
@@ -136,6 +137,10 @@ a controller run with `--disable-config-snippets` covering backends.
   about 15360 bytes of a request ...`). It reads `tune.bufsize` and `tune.maxrewrite` from the
   ConfigMap the controller's `--configmap` names, within a minute of a change. That is a note: the
   status stays as it is, since larger bodies still fail safe.
+- **Responses:** the operator doesn't send them to the engine yet (#470): a policy with
+  `responses.inspect` on an Ingress the controller serves is `Programmed=False`
+  (`ResponsesNotInspected`), and its requests are inspected. Configured by hand, HAProxy can send
+  them ([Responses](#responses)).
 - `haproxy.org/standalone-backend` is forced to `true` on a protected Ingress.
 - HTTP probing needs the controller's `http` container port, as the chart names it; with plain
   HTTP disabled (`--disable-http`) only hosts with TLS can be probed.
@@ -168,7 +173,7 @@ controller, then delete it.
 3. HAProxy's `http-request` rules deny on those variables, or let the request through. HAProxy
    holds the request until the engine answers, in block and in detect mode.
 
-The responses aren't sent to the engine. [SPOE](design/0006-adapter-protocols.md#4-spoe-haproxy-stream-processing-offload-engine) has the details of the protocol.
+The responses aren't sent to the engine, unless you [turn response inspection on](#responses). [SPOE](design/0006-adapter-protocols.md#4-spoe-haproxy-stream-processing-offload-engine) has the details of the protocol.
 
 ## Run the engine next to HAProxy
 
@@ -216,11 +221,16 @@ declares the engine as a `mode spop` backend.
 # the agent answers with the variables txn.inkwall.action ("allow" or
 # "deny"), txn.inkwall.status (the status to deny with),
 # txn.inkwall.request_id and, for a denied gRPC call, txn.inkwall.grpc_*.
+# With --inspect-responses, a request whose response is to be inspected
+# also gets txn.inkwall.responses and txn.inkwall.response_failure, and
+# haproxy.cfg sends its response in the group inkwall-response; the agent
+# answers with txn.inkwall.response_action and txn.inkwall.response_status.
 # See docs/haproxy.md.
 
 [inkwall]
 spoe-agent inkwall
     messages inkwall-request
+    groups inkwall-response
     option var-prefix inkwall
     # txn.inkwall.error says why there is no verdict (1: timeout, ...).
     option set-on-error error
@@ -229,12 +239,21 @@ spoe-agent inkwall
     # is for a hung engine.
     timeout processing 750ms
     use-backend inkwall-engine
-    register-var-names action status request_id error grpc_status grpc_message grpc_content_type
+    register-var-names action status request_id error grpc_status grpc_message grpc_content_type responses response_failure response_action response_status
 
 spoe-message inkwall-request
     args method=method path=pathq version=req.ver headers=req.hdrs_bin body=req.body ip=src https=ssl_fc
     # Every request but /healthz, a route left uninspected.
     event on-frontend-http-request unless { path /healthz }
+
+# The response, sent by haproxy.cfg's send-spoe-group for the requests
+# whose answer set txn.inkwall.responses: the key and the failure mode go
+# back to the agent with it.
+spoe-message inkwall-response
+    args status=status headers=res.hdrs_bin body=res.body key=var(txn.inkwall.responses) failure=var(txn.inkwall.response_failure)
+
+spoe-group inkwall-response
+    messages inkwall-response
 ```
 
 The message's name, `inkwall-request`, and its argument names are what the engine reads: keep
@@ -296,6 +315,24 @@ frontend web
     http-request deny deny_status 403 hdr x-request-id "%[var(txn.inkwall.request_id)]" if { var(txn.inkwall.action) -m str deny }
     # The request ID of the engine's log, for the app.
     http-request set-header X-Request-Id "%[var(txn.inkwall.request_id)]" if { var(txn.inkwall.request_id) -m found }
+    # Responses, inspected when the engine runs with --inspect-responses:
+    # its answer sets txn.inkwall.responses for the requests whose
+    # responses it inspects. The app sends them unencoded (the engine reads
+    # gzip and deflate, not br or zstd).
+    http-request del-header accept-encoding if { var(txn.inkwall.responses) -m found }
+    # Wait for the body the rules read, up to HAProxy's buffer, then send
+    # the response to the engine.
+    http-response wait-for-body time 2s if { var(txn.inkwall.responses) -m found } { res.hdr(content-type) -m beg -i text/plain text/html text/xml application/json application/xml application/problem+json }
+    http-response send-spoe-group inkwall inkwall-response if { var(txn.inkwall.responses) -m found }
+    # Fail closed: without a verdict on the response (the engine is down,
+    # or hung), replace it with 502 when the request's policy fails
+    # closed.
+    http-response return status 502 content-type text/plain lf-string "Bad Gateway. Request ID: %[var(txn.inkwall.request_id)]" hdr x-request-id "%[var(txn.inkwall.request_id)]" if { var(txn.inkwall.responses) -m found } !{ var(txn.inkwall.response_action) -m found } { var(txn.inkwall.response_failure) -m str closed }
+    # A denied response is replaced, the app's headers and body dropped: a
+    # rule per status the engine denies with, 403 for any other.
+    http-response return status 502 content-type text/plain lf-string "Bad Gateway. Request ID: %[var(txn.inkwall.request_id)]" hdr x-request-id "%[var(txn.inkwall.request_id)]" if { var(txn.inkwall.response_status) -m int 502 }
+    http-response return status 503 content-type text/plain lf-string "Service Unavailable. Request ID: %[var(txn.inkwall.request_id)]" hdr x-request-id "%[var(txn.inkwall.request_id)]" if { var(txn.inkwall.response_status) -m int 503 }
+    http-response return status 403 content-type text/plain lf-string "Forbidden. Request ID: %[var(txn.inkwall.request_id)]" hdr x-request-id "%[var(txn.inkwall.request_id)]" if { var(txn.inkwall.response_action) -m str deny }
     http-after-response set-header content-type "%[var(txn.inkwall.grpc_content_type)]" if { var(txn.inkwall.grpc_content_type) -m found }
     default_backend app
 
@@ -378,6 +415,64 @@ oversized above that. Without `option http-buffer-request`, bodies go uninspecte
 as oversized too.
 
 A larger `tune.bufsize` takes more memory per connection: see HAProxy's [`tune.bufsize`](https://docs.haproxy.org/3.2/configuration.html#3.2-tune.bufsize).
+
+### Responses
+
+New in 0.6.0, off by default. With `--inspect-responses`, the engine also inspects what the app
+answers, for data leaks, as through [Envoy](raw-envoy.md#responses): the CRS's `RESPONSE-95x` rules
+find SQL errors, stack traces, directory listings and source code, and your own `--rules` on
+`RESPONSE_*` variables run too. `haproxy.cfg` and `spoe.conf` above have the rules; they do nothing
+until the engine runs with the flag:
+
+```sh
+inkwall-engine spoe --listen unix:/var/run/inkwall/spoe.sock --mode block --inspect-responses
+```
+
+1. The request's answer sets `txn.inkwall.responses`, a key of the engine's own (not the request
+   ID, which a client may choose), and `txn.inkwall.response_failure`, `closed` or `open`: the
+   failure mode of the request's policy. The engine keeps the request's inspection under the key.
+2. `haproxy.cfg` removes the request's `Accept-Encoding`, so the app answers uncompressed, and, for a
+   response whose `Content-Type` the rules read (`text/plain`, `text/html`, `text/xml`,
+   `application/json`, `application/xml`, `application/problem+json`), waits for its body
+   (`http-response wait-for-body`). It then sends the response in the group `inkwall-response`: the
+   status, headers, body, and the key and failure mode back.
+3. The engine inspects the response with the request's inspection, and answers with
+   `txn.inkwall.response_action` (`allow` or `deny`) and `txn.inkwall.response_status`. HAProxy
+   replaces a denied response with that status and a plain-text body naming the request ID: 403 for
+   a leak, 502 for a body that couldn't be inspected (over `--max-response-bytes` or cut by HAProxy,
+   with `--oversize-response deny`) or a response whose request the engine doesn't hold, 503 when
+   inspecting it failed and the policy fails closed. In detect mode a leak is logged
+   (`"phase":"response"` in the security event) and the response passes.
+
+- **What is read:** the status and headers always; the body of the media types above, up to
+  `--max-response-bytes` (64 KiB by default) and to HAProxy's buffer, as for [requests](#bodies): a
+  body HAProxy cut (shorter than its `Content-Length`) has its prefix inspected and is oversized
+  (`--oversize-response`: 502 in block mode by default). A chunked body without `Content-Length`
+  counts as complete only when it is well under half of HAProxy's buffer. `wait-for-body`'s `time`
+  (2 s in the sample) bounds how long HAProxy holds a response for its body: a body slower than that
+  is sent as far as it came. A `gzip` or `deflate` body is decoded first.
+- **Kept requests:** the engine holds each request whose response it inspects until the response
+  comes, in a table bounded by `--max-pending-responses` (4096) and an estimate of their memory,
+  `--max-pending-response-bytes` (64 MiB; about 128 KiB per request, more with a body). A request
+  that doesn't fit gets the failure mode, as an overload (503 in block mode by default), rather than
+  a response let through uninspected. A request is held at most `--response-ttl` (1 minute): keep it
+  above HAProxy's `timeout server` plus `wait-for-body`'s `time`. A response that comes later, or after
+  the engine restarted, gets the failure mode HAProxy sends back: 502 when it fails closed, through
+  in detect mode. `inkwall_spoe_response_states_total{outcome}` counts the requests kept, refused
+  (`full`), answered, expired and the responses `miss`ing their request;
+  `inkwall_spoe_response_states` and `inkwall_spoe_response_state_bytes` show the table now.
+- **The engine down:** the response gets no verdict, and the first `http-response return` rule
+  replaces it with 502 when the request's policy fails closed; one that fails open passes.
+- **One engine per HAProxy:** the response must reach the engine that inspected its request. Run the
+  engine as HAProxy's sidecar, or as one process next to it, as above; behind several engines (a
+  `mode spop` backend with more than one server) a response would reach another engine and get the
+  failure mode.
+- **Cost:** one more SPOP round trip and evaluation per inspected response, under the same
+  `--timeout` and `--max-concurrent`; time to first byte grows by the wait for the body.
+
+[SPOE](design/0006-adapter-protocols.md#responses-through-spoe-370) has the details. With the
+policy [from the operator](#the-policy), the policy's `responses` field takes the place of the flags,
+and `--response-messages` tells the engine HAProxy sends the responses.
 
 ### gRPC
 

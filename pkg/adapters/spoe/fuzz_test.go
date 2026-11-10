@@ -5,6 +5,9 @@ package spoe
 
 import (
 	"bytes"
+	"context"
+	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,6 +17,9 @@ import (
 	"golang.org/x/net/http/httpguts"
 
 	"github.com/inkwall-dev/inkwall/pkg/adapters/internal/httpadapter"
+	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/rules"
 )
 
 const fuzzMaxBody = 16
@@ -108,4 +114,121 @@ func FuzzVarint(f *testing.F) {
 			t.Fatalf("% x decodes to %d, which encodes to % x", b[:n], v, enc)
 		}
 	})
+}
+
+// echoEvaluator lets every request through and keeps an evaluation for
+// its response, which it lets through too: the fuzz target checks the
+// agent, not the rules.
+type echoEvaluator struct{}
+
+func (echoEvaluator) Evaluate(context.Context, *request.Request) (rules.Result, error) {
+	return rules.Result{}, nil
+}
+
+func (echoEvaluator) EvaluateExchange(context.Context, *request.Request) (rules.Result, rules.Exchange, error) {
+	return rules.Result{}, echoExchange{}, nil
+}
+
+type echoExchange struct{}
+
+func (echoExchange) EvaluateResponse(context.Context, *request.Response) (rules.Result, error) {
+	return rules.Result{}, nil
+}
+
+func (echoExchange) Close() {}
+
+// FuzzSPOEResponse decodes arbitrary bytes as a frame, as the agent reads
+// them from HAProxy, and answers a NOTIFY payload as a response, to a
+// request kept under the key "k" or to none. Nothing panics, every answer
+// has a response_action (deny with a status), and a response the agent
+// inspects has at most the body limit of its body, a prefix of what
+// HAProxy sent, complete only when it is all there: as long as its
+// Content-Length, or, without one, from a frame well under half the
+// maximum size.
+func FuzzSPOEResponse(f *testing.F) {
+	key := "k"
+	f.Add(responseFrame(1, 1, response(key, FailureClosed, 200, "text/html", "<html>hello</html>")...), uint16(16380))
+	f.Add(responseFrame(1, 1, argInt(ArgStatus, 200), argBinary(ArgHeaders, hdrs("content-type", "application/json", "transfer-encoding", "chunked")),
+		argBinary(ArgBody, []byte(`{"a":1}`)), argString(ArgKey, key), argString(ArgFailure, FailureOpen)), uint16(4096))
+	f.Add(responseFrame(1, 1, argInt(ArgStatus, 404), argBinary(ArgHeaders, hdrs("content-type", "text/plain", "content-length", "100")),
+		argBinary(ArgBody, []byte("cut")), argString(ArgKey, "other")), uint16(4096))
+	p := pipeline.New(echoEvaluator{}, pipeline.Config{Mode: pipeline.ModeBlock,
+		Responses: pipeline.ResponseConfig{Inspect: true, MaxBytes: fuzzMaxBody}})
+	f.Fuzz(func(t *testing.T, b []byte, maxFrame uint16) {
+		fr, _, err := readFrame(bytes.NewReader(b), nil, 1<<20, nil)
+		if err != nil {
+			return
+		}
+		d := decoder{b: fr.payload}
+		msgs, err := d.messages()
+		if err != nil {
+			return
+		}
+		srv, err := New(p, Config{Responses: true, Logger: slog.New(slog.DiscardHandler)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := &request.Request{ID: "r", Proto: "HTTP/1.1", Method: "GET", RawURI: "/", Host: "a", Headers: http.Header{}}
+		_, x := p.CheckExchange(context.Background(), req)
+		srv.pending.add(&state{x: x, req: req, path: "/"})
+		// The key is random: the test's own goes in its place.
+		srv.pending.mu.Lock()
+		for k, st := range srv.pending.entries {
+			delete(srv.pending.entries, k)
+			st.key = key
+			srv.pending.entries[key] = st
+		}
+		srv.pending.mu.Unlock()
+
+		if a, err := readResponseArgs(msgs); err == nil && a.key == key {
+			resp, err := toResponse(a, req, x, len(fr.payload), uint32(maxFrame))
+			if err == nil {
+				checkResponse(t, a, resp, len(fr.payload), uint32(maxFrame))
+			}
+		}
+
+		ack := newFrame(frameAck, 1, 1)
+		srv.answerResponse(context.Background(), ack, msgs, len(fr.payload), uint32(maxFrame))
+		af, _, err := readFrame(bytes.NewReader(ack.finish()), nil, 1<<20, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		vars, err := decodeActions(af.payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch vars[VarResponseAction].String() {
+		case ActionAllow:
+		case ActionDeny:
+			if vars[VarResponseStatus].u < 400 {
+				t.Fatalf("denied with %d", vars[VarResponseStatus].u)
+			}
+		default:
+			t.Fatalf("variables %+v", vars)
+		}
+		srv.pending.closeAll()
+	})
+}
+
+func checkResponse(t *testing.T, a responseArgs, resp *request.Response, size int, maxFrame uint32) {
+	t.Helper()
+	if len(resp.Body) > fuzzMaxBody {
+		t.Fatalf("inspected %d body bytes, over the limit", len(resp.Body))
+	}
+	if !bytes.HasPrefix(a.body, resp.Body) {
+		t.Fatal("inspected a body HAProxy didn't send")
+	}
+	if resp.Body == nil || resp.BodyTruncated {
+		return
+	}
+	if len(resp.Body) != len(a.body) {
+		t.Fatalf("inspected %d of %d body bytes as complete", len(resp.Body), len(a.body))
+	}
+	if cl := resp.Headers.Get("Content-Length"); cl != "" && resp.Headers.Get("Transfer-Encoding") == "" {
+		if n, err := strconv.Atoi(cl); err != nil || n != len(a.body) {
+			t.Fatalf("body of %d bytes complete with Content-Length %q", len(a.body), cl)
+		}
+	} else if !uncut(size, len(resp.Headers), 0, maxFrame) {
+		t.Fatalf("body of %d bytes without Content-Length complete in a full frame", len(a.body))
+	}
 }

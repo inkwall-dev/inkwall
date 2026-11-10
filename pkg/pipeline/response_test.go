@@ -306,3 +306,24 @@ func TestInspectedResponseType(t *testing.T) {
 		t.Error("a body is wanted with no body limit")
 	}
 }
+
+// An exchange tells its request's failure mode, resolved for the mode.
+func TestExchangeFailureMode(t *testing.T) {
+	for _, tc := range []struct {
+		mode    Mode
+		failure FailureMode
+		want    FailureMode
+	}{
+		{ModeBlock, FailAuto, FailClosed},
+		{ModeDetect, FailAuto, FailOpen},
+		{ModeBlock, FailOpen, FailOpen},
+		{ModeDetect, FailClosed, FailClosed},
+	} {
+		p := New(&exchangeEvaluator{}, Config{Mode: tc.mode, FailureMode: tc.failure, Responses: ResponseConfig{Inspect: true}})
+		_, x := p.CheckExchange(context.Background(), get("/"))
+		if got := x.FailureMode(); got != tc.want {
+			t.Errorf("mode %v, failure %v: %v, want %v", tc.mode, tc.failure, got, tc.want)
+		}
+		x.Close()
+	}
+}
