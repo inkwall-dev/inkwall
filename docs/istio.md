@@ -40,7 +40,7 @@ Either way, an [`EnvoyFilter`](glossary.md#envoyfilter) sends the protected rout
 <!-- versions: ISTIO_VERSION GATEWAY_API_VERSION -->
 - Istio 1.28 or later; for HTTPRoutes, its Gateway API implementation (on by default) and the
   [Gateway API CRDs](https://gateway-api.sigs.k8s.io/guides/getting-started/#installing-gateway-api); for VirtualServices, an ingress gateway from its
-  `gateway` Helm chart. Tested with Istio 1.31.3 (its `base` and `istiod` Helm
+  `gateway` Helm chart. Tested with Istio 1.32.0 (its `base` and `istiod` Helm
   charts, no mesh) and the Gateway API's standard CRDs v1.7.0. Istio's Envoy must be 1.36 or later:
   older ones reject the filter's settings, so the operator refuses to wire an older Istio (it reads
   the version from the `istio-proxy` image tag).
