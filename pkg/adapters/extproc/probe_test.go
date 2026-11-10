@@ -70,3 +70,25 @@ func TestProbe(t *testing.T) {
 		t.Errorf("a probe was logged as an event: %s", logs.String())
 	}
 }
+
+// In observability mode (a Detect-mode route) Envoy ignores the engine's
+// answer and forwards the request: a request carrying the operator's probe
+// header is then inspected and logged as any other.
+func TestProbeObservabilityMode(t *testing.T) {
+	key := bytes.Repeat([]byte{7}, haproxyprobe.KeySize)
+	var logs bytes.Buffer
+	s, err := New(newPipeline(t, pipeline.ModeBlock), Config{MaxBodyBytes: 64 << 10, Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+		ProbeKey: func() []byte { return key }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln := bufconn.Listen(1 << 20)
+	e := startServer(t, s, ln, func(ctx context.Context, _ string) (net.Conn, error) { return ln.DialContext(ctx) })
+
+	nonce, _ := haproxyprobe.NewNonce()
+	uri := "/" + haproxyprobe.PathSuffix + nonce + "?q=<script>alert(1)</script>"
+	e.observe(t, headers("GET", uri, true, haproxyprobe.Header, haproxyprobe.Request(key, nonce, "shop.example.com", uri)))
+	if !strings.Contains(logs.String(), `"security event"`) {
+		t.Errorf("not inspected in observability mode: %q", logs.String())
+	}
+}

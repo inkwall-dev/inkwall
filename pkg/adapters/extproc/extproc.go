@@ -346,7 +346,7 @@ func (s *Server) onHeaders(ctx context.Context, x *exchange, h *extprocv3.HttpHe
 		return s.uninspectable(ctx, err)
 	}
 	x.req, x.path = req, path
-	if r := s.answerProbe(req); r != nil {
+	if r := s.answerProbe(req, x.observe); r != nil {
 		return r
 	}
 	x.setID = !strings.EqualFold(req.ID, req.Headers.Get("X-Request-Id"))
@@ -852,11 +852,12 @@ func allow(p phase, m *extprocv3.HeaderMutation) *extprocv3.ProcessingResponse {
 // never reaches the upstream, and only an engine with the key, behind a
 // route whose filter is on, can make it. Envoy's local replies take a
 // defined HTTP status only, so not HAProxy's 299; the MAC proves the answer.
-// In observability mode Envoy ignores the reply: a detect-mode route can't
-// be proven this way.
-func (s *Server) answerProbe(req *request.Request) *extprocv3.ProcessingResponse {
+// In observability mode Envoy ignores the reply and forwards the request,
+// so a detect-mode route can't be proven this way, and the request is
+// inspected as any other: answerProbe returns nil.
+func (s *Server) answerProbe(req *request.Request, observe bool) *extprocv3.ProcessingResponse {
 	value := req.Headers.Get(haproxyprobe.Header)
-	if s.probeKey == nil || value == "" {
+	if s.probeKey == nil || value == "" || observe {
 		return nil
 	}
 	answer, ok := haproxyprobe.Check(s.probeKey(), req.RawURI, req.Host, value)
