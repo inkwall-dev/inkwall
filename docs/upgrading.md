@@ -1,11 +1,12 @@
 # Upgrading
 
-This guide upgrades an Inkwall installation from 0.4.x to 0.5.0, from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
+This guide upgrades an Inkwall installation from 0.5.x to 0.6.0, from 0.4.x to 0.5.0, from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
 0.3.0, and from 0.1.x (0.1.0 to 0.1.5) to 0.2.2, the latest 0.2 release, and lists what changes on
 the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 ## Contents
 
+- [From 0.5.x to 0.6.0](#from-05x-to-060)
 - [From 0.4.x to 0.5.0](#from-04x-to-050)
 - [From 0.4.0 to 0.4.1](#from-040-to-041)
 - [From 0.3.x to 0.4.0](#from-03x-to-040)
@@ -30,6 +31,21 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
   - [Upgrading the chart](#upgrading-the-chart)
   - [Checking it worked](#checking-it-worked)
   - [Rolling back](#rolling-back)
+
+## From 0.5.x to 0.6.0
+
+What's new:
+
+- **`Detect`-mode Istio routes are `Programmed`.** Envoy discards the engine's answer to the
+  operator's probe in `Detect` mode, so those HTTPRoutes and VirtualServices were `Unverified`.
+  Now the engine keeps a receipt of each probe it verified and reports it to the operator, which
+  proves the route by it ([the operator's probe](istio.md#the-operators-probe)). Pods with an
+  engine older than 0.6.0 report no receipts: their `Detect` routes stay `Unverified` until the
+  pods run the 0.6.0 engine (restart them, or `spec.engine.rollout: Automatic`). In `Detect` mode
+  the probe now reaches your app (a `GET` on the reserved path `.well-known/inkwall-probe/<nonce>`,
+  or an exact path with `?inkwall-probe=<nonce>`), and a rule matching only another method than
+  `GET` or `HEAD` is `NotProbeable` there. A request with a valid probe header is inspected in
+  `Detect` mode, as any request.
 
 ## From 0.4.x to 0.5.0
 

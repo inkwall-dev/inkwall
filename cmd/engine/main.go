@@ -69,6 +69,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/agent"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/events"
+	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/router"
@@ -557,8 +558,11 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 		// rate-limits their lines.
 		rec = &events.Recorder{}
 	)
+	// The receipts of the operator's probes in observability mode, which
+	// the agent reports (#475).
+	receipts := &haproxyprobe.Receipts{}
 	if cfg.operator != "" {
-		ag, p, rec, err = bundleMode(cfg, metrics, logger)
+		ag, p, rec, err = bundleMode(cfg, metrics, logger, receipts.Recent)
 	} else {
 		var reloader *rulesReloader
 		if p, reloader, err = flagMode(cfg, metrics, logger); err == nil {
@@ -593,8 +597,9 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 		ec := extproc.Config{MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics, JSONDenials: cfg.jsonDenials}
 		if h, ok := p.(*policy.Holder); ok {
 			// Bundle mode: the operator's probe is answered with the
-			// bundle's key (#372).
-			ec.ProbeKey = h.ProbeKey
+			// bundle's key (#372), or kept as a receipt where Envoy
+			// discards the answer (#475).
+			ec.ProbeKey, ec.ProbeReceipts = h.ProbeKey, receipts
 		}
 		ep, err = extproc.New(p, ec)
 	case cmdSPOE:
@@ -824,7 +829,7 @@ func flagMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logger)
 // route. Until the first bundle (or the cached one) is applied, requests
 // are allowed and reported with reason no-policy. Security events and each
 // policy's request counts go to the operator through the agent.
-func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logger) (*agent.Agent, pipeline.Inspector, *events.Recorder, error) {
+func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logger, receipts func() []string) (*agent.Agent, pipeline.Inspector, *events.Recorder, error) {
 	adm := pipeline.NewAdmission(cfg.maxConcurrent)
 	metrics.WatchAdmission(adm)
 	evaluators := policy.NewEvaluators()
@@ -866,6 +871,7 @@ func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logge
 		Admission:     adm,
 		Events:        buf,
 		Stats:         stats,
+		ProbeReceipts: receipts,
 		Logger:        logger,
 	})
 	if err != nil {

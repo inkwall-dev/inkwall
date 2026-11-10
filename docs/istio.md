@@ -149,9 +149,9 @@ kubectl -n istio-ingress get pods -l gateway.networking.k8s.io/gateway-name=edge
 
 | `Programmed` reason | Meaning |
 |---|---|
-| `Programmed` | Every running pod of each of the route's Gateways has the engine, the `EnvoyFilter` has the route, Istio has accepted the route on each Gateway (its parent status, `Accepted=True`), and [the operator's probe](#the-operators-probe) has reached the engine through every pod, on every listener the route is attached to |
-| `Unverified` | Wired, but the probe hasn't reached the engine yet, or got another answer (the filter isn't on the route: its traffic isn't inspected there); also every route in `Detect` mode, whose answer Envoy discards |
-| `NotProbeable` | Wired, but the probe can't make a request the route serves: each match of one of its protected rules is a regular expression (path, header or query parameter) |
+| `Programmed` | Every running pod of each of the route's Gateways has the engine, the `EnvoyFilter` has the route, Istio has accepted the route on each Gateway (its parent status, `Accepted=True`), and [the operator's probe](#the-operators-probe) has reached the engine through every pod, on every listener the route is attached to (in `Detect` mode, as the engines' receipts of it show) |
+| `Unverified` | Wired, but the probe hasn't reached the engine yet, or got another answer (the filter isn't on the route: its traffic isn't inspected there); in `Detect` mode, no engine reported the probe's receipt yet, or one didn't within 30 s |
+| `NotProbeable` | Wired, but the probe can't make a request the route serves: each match of one of its protected rules is a regular expression (path, header or query parameter); in `Detect` mode, also a rule whose match is for another method than `GET` or `HEAD` |
 | `PendingRestart` | Istio is rolling a Gateway's pods; some don't have the engine yet |
 | `SidecarMissing` | A Gateway has no running pod, or its namespace isn't a proxy namespace |
 | `Pending` | Waiting for Istio to accept the route, or for another of its Gateways |
@@ -330,9 +330,9 @@ Istio names a VirtualService's Envoy routes after its http routes (`name`, then 
 
 | `Programmed` reason | Meaning |
 |---|---|
-| `Programmed` | Every running pod the VirtualService's Gateways select has the engine and the socket mount, the `EnvoyFilter` has the VirtualService, and [the operator's probe](#the-operators-probe) has reached the engine through every pod, on every Gateway server that serves its hosts |
-| `Unverified` | Wired, but not proven by the probe yet, or the probe got another answer; also every VirtualService in `Detect` mode |
-| `NotProbeable` | Wired, but the probe can't make a request it serves: one of its http routes has only regular expression matches, or a server serving it uses mutual TLS or passthrough |
+| `Programmed` | Every running pod the VirtualService's Gateways select has the engine and the socket mount, the `EnvoyFilter` has the VirtualService, and [the operator's probe](#the-operators-probe) has reached the engine through every pod, on every Gateway server that serves its hosts (in `Detect` mode, as the engines' receipts of it show) |
+| `Unverified` | Wired, but not proven by the probe yet, or the probe got another answer; in `Detect` mode, no engine reported the probe's receipt yet, or one didn't within 30 s |
+| `NotProbeable` | Wired, but the probe can't make a request it serves: one of its http routes has only regular expression matches, or a server serving it uses mutual TLS or passthrough; in `Detect` mode, also an http route whose match is for another method than `GET` or `HEAD` |
 | `PendingRestart` | Some of those pods started before Inkwall: restart them |
 | `SidecarMissing` | No such pod is running, or one opted out (`waf.inkwall.dev/inject: "false"`) |
 | `Pending` | Its Gateway doesn't exist yet; or, with Istio's status on (`PILOT_ENABLE_STATUS`), Istio hasn't reconciled the VirtualService |
@@ -352,8 +352,9 @@ each wired route (0002 §6.1, as for [HAProxy](haproxy.md#the-probe-and-programm
 each gateway pod, on each listener (HTTPRoute) or server (VirtualService) the route is served on,
 with the route's host and a path its rule matches, and a header `X-Inkwall-Probe` carrying a MAC
 under the bundle's probe key. The engine behind the route's filter answers it itself (200 and its
-own MAC): the request never reaches your app. A route is `Programmed` only once every pod answered
-on every listener; it is probed again every 5 minutes, and every 20 seconds until it answers.
+own MAC): in `Block` mode the request never reaches your app. A route is `Programmed` only once
+every pod answered on every listener (in `Detect` mode: once every pod's engine reported its
+receipt, below); it is probed again every 5 minutes, and every 20 seconds until it answers.
 Any change to an `EnvoyFilter` of yours (one that removes or replaces Inkwall's filter, say)
 probes every route again at once.
 
@@ -366,8 +367,26 @@ probes every route again at once.
   with mutual TLS or passthrough, and a rule whose match has header or query values on an HTTPS
   listener or TLS server: the probe doesn't verify the gateway's certificate, so it never sends
   those values (they may be secrets, an API key) over TLS. `NotProbeable`, with the reason.
-- **Detect mode:** Envoy's observability mode discards the engine's answer, so a route whose
-  policies are all in `Detect` mode stays `Unverified`.
+- **Detect mode** (since 0.6.0): Envoy's observability mode discards the engine's answer and
+  forwards the probe to your app. So the engine keeps a receipt of each probe it verified there
+  (another MAC under the key, of that probe's nonce, host and URI), and reports its receipts of the
+  last minute to the operator with its heartbeats; a route whose policies are all in `Detect` mode
+  is `Programmed` once the engine of every pod probed reported the receipt of that very probe, on
+  every listener. No receipt within 30 s is `Unverified`, as a wrong answer is. A receipt shows
+  that the engine sees the route's traffic on that pod, which is what `Detect` mode does with it
+  (it logs, never blocks): it never makes a `Block` route `Programmed`. A receipt from another
+  pod's engine, of an earlier probe, or under another key proves nothing.
+  - **The probe reaches your app** in `Detect` mode: a `GET` (or `HEAD`) with no body, the header
+    `X-Inkwall-Probe` and `User-Agent: inkwall-operator-probe`, on the reserved path
+    `.well-known/inkwall-probe/<nonce>` under a prefix match, or an exact path with the query
+    `inkwall-probe=<nonce>`, per pod and listener every 5 minutes. A rule whose match is only for
+    another method (`POST`, `DELETE`) isn't probed in `Detect` mode (`NotProbeable`): the probe
+    doesn't send your app requests that may change something.
+  - **The engine inspects the probe** in `Detect` mode, as any request (in `Block` mode it answers
+    it uninspected): Envoy forwards it to your app, so a probe's header doesn't carry a request
+    past the engine's log.
+  - **An engine older than 0.6.0** reports no receipts: its pods' `Detect`-mode routes stay
+    `Unverified` until the pod runs a 0.6.0 engine.
 - The probe reaches the pods on their listener's port (the pod address and the Gateway listener's
   or server's port number): a Gateway whose pods listen on another port than the server's (a
   `targetPort` mapping) stays `Unverified`.

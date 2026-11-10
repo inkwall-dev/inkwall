@@ -145,9 +145,11 @@ the bundle's probe key (`pkg/haproxyprobe`) itself, uninspected, before anything
 immediate response, 200 with the answer's MAC in `X-Inkwall-Probe`, so the request never reaches
 the upstream. Envoy's local replies take a defined HTTP status only, so not HAProxy's 299; the
 MAC is the proof. A request with a wrong MAC, or before the engine has a key, is an ordinary
-request. In observability mode Envoy ignores the reply, so a detect-mode route can't be proven
-this way. The operator's side (probing each gateway pod for Istio's routes before `Programmed`)
-is not built yet.
+request. In observability mode Envoy ignores the reply and forwards the request, so there
+(since v0.6.0, #475) the adapter doesn't answer: it keeps a receipt of the probe, which the agent
+reports to the operator with its heartbeats, and inspects the request as any other, so a probe's
+header carries nothing past the engine's log (0002 §6.1, proof by receipt). The operator probes
+each gateway pod for Istio's routes before `Programmed` (#372).
 
 ### Response inspection (v0.4.0)
 

@@ -105,6 +105,9 @@ type Config struct {
 	// Stats counts the requests of each policy, reported to the operator
 	// with the heartbeats (nil: none).
 	Stats *events.Stats
+	// ProbeReceipts returns the receipts of the operator's probes to
+	// report with each heartbeat (#475; nil: none).
+	ProbeReceipts func() []string
 
 	Logger     *slog.Logger
 	Heartbeat  time.Duration
@@ -433,6 +436,9 @@ func (a *Agent) stream(ctx context.Context) error {
 			select {
 			case <-t.C:
 				hb := &agentv1.Heartbeat{BundleVersion: a.Version(), TrustedKeyIds: a.TrustedKeys()}
+				if a.cfg.ProbeReceipts != nil {
+					hb.ProbeReceipts = a.cfg.ProbeReceipts()
+				}
 				if adm := a.cfg.Admission; adm != nil {
 					hb.InFlight, hb.Capacity = uint32(adm.InFlight()), uint32(adm.Capacity()) // #nosec G115 -- small counts
 				}
