@@ -176,8 +176,11 @@ docs-check-external: ## Check the Markdown docs' external links as well (slow; C
 	$(DOCS_CHECK) -external
 
 .PHONY: vuln
-vuln: ## Check dependencies for known vulnerabilities
-	$(GOVULNCHECK) ./...
+# Every Go module in the repository (#567): the test modules too.
+GO_MODULES      := . test/crs test/perf/prefilter hack/gitopshealth
+
+vuln: ## Check every Go module's dependencies for known vulnerabilities
+	@set -e; for m in $(GO_MODULES); do echo "govulncheck $$m"; (cd $$m && $(GOVULNCHECK) ./...); done
 
 .PHONY: generate
 generate: ## Lint the protobuf APIs (api/), regenerate their Go code, and regenerate the operator's deepcopy code, CRDs, RBAC and webhook configuration (also copied into the Helm chart)
