@@ -32,6 +32,7 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
+	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
 // RulesLabel must be set to "true" on a ConfigMap a rule set reads rules
@@ -393,12 +394,19 @@ func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.Nam
 			continue
 		}
 		id := RuleSetID(b.Ref.Kind, ns, b.Ref.Name)
-		if _, ok := r.ruleSets[id]; !ok {
+		rs, ok := r.ruleSets[id]
+		if !ok {
 			msg := fmt.Sprintf("%s %s not found", b.Ref.Kind, b.Ref.Name)
 			if st, ok := r.out.RuleSetStatus[id]; ok {
 				msg = fmt.Sprintf("%s %s is not usable: %s", b.Ref.Kind, b.Ref.Name, st.Message)
 			}
 			c.fail(ReasonInvalidRef, msg)
+			continue
+		}
+		if b.Placement == wafv1alpha1.PlacementBeforeCRS {
+			if msg := beforeCRS(rs); msg != "" {
+				c.fail(ReasonInvalidRef, fmt.Sprintf("%s %s %s", b.Ref.Kind, b.Ref.Name, msg))
+			}
 		}
 	}
 
@@ -517,6 +525,10 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 			binding.InboundAnomalyThreshold = *b.InboundAnomalyThreshold
 		}
 		binding.Crs = crsSettings(b.CRS)
+		// AfterCRS is the default: unset, so the bundle stays as before.
+		if b.Placement == wafv1alpha1.PlacementBeforeCRS {
+			binding.Placement = bundlev1.RuleSetPlacement_RULE_SET_PLACEMENT_BEFORE_CRS
+		}
 		p.RuleSets = append(p.RuleSets, binding)
 	}
 	for _, e := range s.Exclusions {
@@ -633,6 +645,22 @@ func describeRoute(m *bundlev1.RouteMatch) string {
 		host = "*"
 	}
 	return host + m.GetPath().GetValue()
+}
+
+// beforeCRS says why rs can't load before the CRS (#423); "" when it can.
+// The engine would compile it, but SecRuleUpdate* wouldn't compile there
+// (the engine would refuse the whole bundle), and SecRuleRemoveBy* would
+// silently remove nothing: refused, as the policy wouldn't do what it says.
+func beforeCRS(rs *bundlev1.RuleSet) string {
+	switch src := rs.GetSource().(type) {
+	case *bundlev1.RuleSet_Builtin:
+		return "is the built-in CRS: it can't be placed before itself"
+	case *bundlev1.RuleSet_Seclang:
+		if err := coraza.CheckRulesBeforeCRS(src.Seclang); err != nil {
+			return "can't be placed before the CRS: " + err.Error()
+		}
+	}
+	return ""
 }
 
 // crsSettings is a binding's CRS settings in the bundle, nil when it sets

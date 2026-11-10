@@ -272,6 +272,18 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
   WebSocket handshake that breaks the policy) still apply. Without a detection level above the
   blocking one, nothing changes: a request scored below the threshold stays `allow`.
 
+  **Rule set placement (#423).** A SecLang rule set's binding takes `placement: BeforeCRS` or
+  `AfterCRS` (the default). The bundle carries it on the binding (`RuleSetBinding.placement`,
+  unset for `AfterCRS`, so existing bundles don't change), and the engine compiles the rule sets
+  placed before the CRS, in order, as `DirectivesBeforeCRS`: the standalone engine's
+  `--rules-before-crs`. They run before the CRS's initialization (REQUEST-901), so a variable they
+  set with `setvar` is one the CRS keeps, and a `ctl:ruleRemoveById` turns a CRS rule off before it
+  runs. `AfterCRS` rules come too late for both in the CRS's own phase. A policy binding the same
+  rule set before and another after the CRS compiles two rule sets. What can't run before the CRS
+  is refused when the bundle is built ([0004 §3.1](0004-operator.md#31-validation)). An engine
+  before 0.6.0 ignores the field and loads the rule set after the CRS, so the policy is
+  `Enforced=False` (`EnginesOutdated`) while one runs it.
+
   The most specific target wins: an [HTTPRoute](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/) rule, then an HTTPRoute, then an Ingress, then the
   namespace default. Ties are rejected (`Accepted=False, reason=Conflict`).
 - **`WAFRuleSet` / `ClusterWAFRuleSet`:** `builtin: crs-v4` (pinned), inline `seclang`, or

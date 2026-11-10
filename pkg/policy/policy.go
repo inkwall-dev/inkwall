@@ -196,11 +196,13 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 	var crs coraza.CRSSettings
 
 	// Rule sets: the built-in CRS (with its paranoia level and threshold)
-	// and SecLang loaded after it, in order. No rule sets: the CRS with its
-	// defaults. Rule sets but no built-in one: those rules alone.
+	// and SecLang loaded after it, or before it when the binding says so
+	// (#423), each in order. No rule sets: the CRS with its defaults. Rule
+	// sets but no built-in one: those rules alone, the ones placed before
+	// the CRS first.
 	if len(bp.GetRuleSets()) > 0 {
 		cfg.DisableCRS = true
-		var directives []string
+		var before, directives []string
 		for _, binding := range bp.GetRuleSets() {
 			rs, ok := ruleSets[binding.GetRuleSetId()]
 			if !ok {
@@ -221,11 +223,16 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 					OutboundAnomalyThreshold:   int(binding.GetCrs().GetOutboundAnomalyThreshold()),
 				}
 			case *bundlev1.RuleSet_Seclang:
-				directives = append(directives, src.Seclang)
+				if binding.GetPlacement() == bundlev1.RuleSetPlacement_RULE_SET_PLACEMENT_BEFORE_CRS {
+					before = append(before, src.Seclang)
+				} else {
+					directives = append(directives, src.Seclang)
+				}
 			default:
 				return nil, key, fmt.Errorf("rule set %s has no source", rs.GetId())
 			}
 		}
+		cfg.DirectivesBeforeCRS = strings.Join(before, "\n")
 		cfg.Directives = strings.Join(directives, "\n")
 	}
 	var exclusions []coraza.Exclusion

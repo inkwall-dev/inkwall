@@ -36,6 +36,15 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 What's new:
 
+- **Rule sets before the CRS** (#423). A `WAFPolicy`'s rule set binding takes an optional
+  `placement: BeforeCRS` (the default is `AfterCRS`, where every rule set loaded until now): the
+  rule set then loads before the CRS's initialization, as the standalone engine's
+  `--rules-before-crs`, so its `setvar:tx.…` and `ctl:ruleRemoveById` rules change what the CRS
+  does (see the [README](../README.md#protect-a-route)). Such a rule set can't use
+  `SecRuleRemoveBy*` or `SecRuleUpdate*` (the policy is `Accepted=False`, `InvalidRef`). Upgrade
+  the chart first, for the CRD field; a policy that sets it is `Enforced=False`
+  (`EnginesOutdated`) until every engine runs 0.6.0, since an older engine loads the rule set
+  after the CRS. `inkwallctl test --policy` honours it. Policies without it don't change.
 - **Responses through HAProxy, configured by hand.** `inkwall-engine spoe --inspect-responses`
   inspects the responses HAProxy sends in the new `inkwall-response` SPOE group: a response that
   leaks is replaced with 403 in block mode and logged in detect mode. Copy the new lines of
