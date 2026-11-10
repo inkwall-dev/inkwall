@@ -45,6 +45,12 @@ What's new:
   the chart first, for the CRD field; a policy that sets it is `Enforced=False`
   (`EnginesOutdated`) until every engine runs 0.6.0, since an older engine loads the rule set
   after the CRS. `inkwallctl test --policy` honours it. Policies without it don't change.
+- **`inkwallctl explain`** says why a policy isn't `Ready` (`explain policy <namespace>/<name>`:
+  the cause and the fix of each condition that isn't `True`) and why a request was denied
+  (`explain request <request-id>`: the rules with their CRS descriptions, the score against the
+  threshold, and the narrowest exclusion, checked as `inkwallctl test --policy` does), with
+  `-o json` for scripts. It only reads; `explain request` reads the engines' logs, so it needs
+  `get` on `pods/log` ([Explaining a policy or a denial](troubleshooting.md#explaining-a-policy-or-a-denial)).
 - **The operator's metrics over HTTPS (opt-in).** `metrics.secure.enabled=true` serves `/metrics`
   over HTTPS, only to bearer tokens the API server authenticates and allows to get `/metrics`; the
   ServiceMonitor then scrapes with Prometheus' service account token. Bind the new

@@ -1,0 +1,94 @@
+{
+  "kind": "RequestExplanation",
+  "requestId": "req-deny",
+  "found": true,
+  "searched": [
+    "file testdata/explain/engine.log"
+  ],
+  "events": [
+    {
+      "source": "testdata/explain/engine.log",
+      "policy": "shop/storefront",
+      "phase": "request",
+      "action": "deny",
+      "mode": "Block",
+      "reason": "rule",
+      "status": 403,
+      "cause": "The rules found an attack: the anomaly score reached the policy's threshold, or a rule denies on its own.",
+      "fix": "If the request is legitimate, exclude the rules that matched, narrowly: `inkwallctl explain request` suggests the exclusion (From a log line to an exclusion (docs/testing-policies.md#from-a-log-line-to-an-exclusion)).",
+      "anomalyScore": 5,
+      "threshold": 5,
+      "rules": [
+        {
+          "id": 942100,
+          "source": "crs",
+          "description": "SQL Injection Attack Detected via libinjection",
+          "severity": "critical",
+          "paranoiaLevel": 1,
+          "scoring": false,
+          "interrupting": false,
+          "variables": [
+            "ARGS:q"
+          ]
+        },
+        {
+          "id": 949110,
+          "source": "crs",
+          "description": "Inbound Anomaly Score Exceeded",
+          "severity": "",
+          "paranoiaLevel": 0,
+          "scoring": true,
+          "interrupting": true,
+          "variables": [
+            "TX:blocking_inbound_anomaly_score"
+          ]
+        }
+      ],
+      "request": {
+        "id": "req-deny",
+        "method": "GET",
+        "host": "shop.example.com",
+        "path": "/search",
+        "clientIp": "203.0.113.7",
+        "matches": [
+          {
+            "ruleId": 942100,
+            "variable": "ARGS:q"
+          },
+          {
+            "ruleId": 949110,
+            "variable": "TX:blocking_inbound_anomaly_score"
+          }
+        ]
+      },
+      "suggestions": [
+        {
+          "policy": "shop/storefront",
+          "exclusion": {
+            "ruleIDs": [
+              942100
+            ],
+            "when": {
+              "path": "/search",
+              "argument": "q"
+            }
+          },
+          "yaml": "- ruleIDs:\n  - 942100\n  when:\n    argument: q\n    path: /search\n",
+          "verified": true,
+          "verifiedWith": "the --policy files",
+          "verifyError": ""
+        }
+      ],
+      "notSuggested": [],
+      "allowedWithSuggestions": true
+    }
+  ],
+  "untrusted": [
+    "requestId",
+    "events[].request",
+    "events[].suggestions[].exclusion.when",
+    "events[].suggestions[].yaml",
+    "events[].notSuggested[].variable"
+  ],
+  "warnings": []
+}

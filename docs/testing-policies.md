@@ -124,6 +124,10 @@ request body, the URI) can only be excluded for the whole path. Then check the e
 it reaches the cluster: the request that matched no longer shows `942100@ARGS:q`, and an attack in
 another argument still gets `deny`.
 
+For one request, `inkwallctl explain request <request-id>` does all this: it finds the event by
+the request ID the client got in `X-Request-Id`, describes each rule, and prints the narrowest
+exclusion, checked as `inkwallctl test --policy` does ([Explain a denied request](troubleshooting.md#explain-a-denied-request)).
+
 Each engine logs at most 10 security event lines per second for each policy and rule (the
 engine's `--event-log-rate`), so a scanner or one false positive on a busy route doesn't flood the
 logs. The lines left out are counted in `inkwall_security_event_logs_suppressed_total{policy}`,
