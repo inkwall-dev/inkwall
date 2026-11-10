@@ -77,7 +77,7 @@ first protected route. Turn on its Backend API, which the engine's socket needs:
 
 <!-- versions: ENVOY_GATEWAY_VERSION -->
 ```sh
-helm upgrade --install eg oci://docker.io/envoyproxy/gateway-helm --version v1.9.3 \
+helm upgrade --install eg oci://docker.io/envoyproxy/gateway-helm --version v1.10.0 \
   --namespace envoy-gateway-system --create-namespace \
   --set config.envoyGateway.extensionApis.enableBackend=true
 ```
@@ -197,8 +197,24 @@ content types outside its list. Set the CRS's own settings on the CRS rule set's
 ```
 
 Both lists replace the CRS's defaults: list every method and media type (`type/subtype`, without
-parameters) the application takes. To test
-policies before they reach the cluster, see [testing policies offline](docs/testing-policies.md).
+parameters) the application takes.
+
+**Rules before the CRS.** A SecLang rule set loads after the CRS. With `placement: BeforeCRS` on
+its binding, it loads before the CRS's initialization instead, as the standalone engine's
+`--rules-before-crs` (engines 0.6.0 or later): for rules that set other CRS variables (`setvar:tx.…`)
+or turn CRS rules off at runtime (`ctl:ruleRemoveById`) on a condition of their own.
+
+```yaml
+  ruleSets:
+  - ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}
+  - ref: {kind: WAFRuleSet, name: crs-tuning}
+    placement: BeforeCRS   # AfterCRS (the default) for custom rules and SecRuleRemoveById
+```
+
+A rule set placed before the CRS can't use `SecRuleRemoveBy*` or `SecRuleUpdate*`, which only
+change rules loaded before them: the policy is `Accepted=False` (`InvalidRef`) with the line.
+
+To test policies before they reach the cluster, see [testing policies offline](docs/testing-policies.md).
 Coming from ingress-nginx with ModSecurity? `inkwallctl migrate ingress-nginx` converts its
 annotations into policies: see [migrating from ingress-nginx](docs/migrating-from-ingress-nginx.md).
 

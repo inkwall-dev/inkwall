@@ -191,6 +191,63 @@ func (FailureMode) EnumDescriptor() ([]byte, []int) {
 	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{2}
 }
 
+// RuleSetPlacement is where a SecLang rule set loads, relative to the
+// built-in CRS. Rule sets of the same placement load in the policy's order.
+type RuleSetPlacement int32
+
+const (
+	// After the CRS, as RULE_SET_PLACEMENT_AFTER_CRS.
+	RuleSetPlacement_RULE_SET_PLACEMENT_UNSPECIFIED RuleSetPlacement = 0
+	// After the CRS: custom rules and configure-time exclusions
+	// (SecRuleRemoveById, SecRuleUpdateTargetById).
+	RuleSetPlacement_RULE_SET_PLACEMENT_AFTER_CRS RuleSetPlacement = 1
+	// Before the CRS (and its initialization, REQUEST-901), as the standalone
+	// engine's --rules-before-crs: rules that set the CRS's TX variables or
+	// turn CRS rules off at runtime (ctl:ruleRemoveById).
+	RuleSetPlacement_RULE_SET_PLACEMENT_BEFORE_CRS RuleSetPlacement = 2
+)
+
+// Enum value maps for RuleSetPlacement.
+var (
+	RuleSetPlacement_name = map[int32]string{
+		0: "RULE_SET_PLACEMENT_UNSPECIFIED",
+		1: "RULE_SET_PLACEMENT_AFTER_CRS",
+		2: "RULE_SET_PLACEMENT_BEFORE_CRS",
+	}
+	RuleSetPlacement_value = map[string]int32{
+		"RULE_SET_PLACEMENT_UNSPECIFIED": 0,
+		"RULE_SET_PLACEMENT_AFTER_CRS":   1,
+		"RULE_SET_PLACEMENT_BEFORE_CRS":  2,
+	}
+)
+
+func (x RuleSetPlacement) Enum() *RuleSetPlacement {
+	p := new(RuleSetPlacement)
+	*p = x
+	return p
+}
+
+func (x RuleSetPlacement) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RuleSetPlacement) Descriptor() protoreflect.EnumDescriptor {
+	return file_bundle_v1_bundle_proto_enumTypes[3].Descriptor()
+}
+
+func (RuleSetPlacement) Type() protoreflect.EnumType {
+	return &file_bundle_v1_bundle_proto_enumTypes[3]
+}
+
+func (x RuleSetPlacement) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RuleSetPlacement.Descriptor instead.
+func (RuleSetPlacement) EnumDescriptor() ([]byte, []int) {
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{3}
+}
+
 // BuiltinRuleSet names a rule set shipped in the engine image, pinned to the
 // engine's version.
 type BuiltinRuleSet int32
@@ -224,11 +281,11 @@ func (x BuiltinRuleSet) String() string {
 }
 
 func (BuiltinRuleSet) Descriptor() protoreflect.EnumDescriptor {
-	return file_bundle_v1_bundle_proto_enumTypes[3].Descriptor()
+	return file_bundle_v1_bundle_proto_enumTypes[4].Descriptor()
 }
 
 func (BuiltinRuleSet) Type() protoreflect.EnumType {
-	return &file_bundle_v1_bundle_proto_enumTypes[3]
+	return &file_bundle_v1_bundle_proto_enumTypes[4]
 }
 
 func (x BuiltinRuleSet) Number() protoreflect.EnumNumber {
@@ -237,7 +294,7 @@ func (x BuiltinRuleSet) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use BuiltinRuleSet.Descriptor instead.
 func (BuiltinRuleSet) EnumDescriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{3}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{4}
 }
 
 // OversizeAction is what happens to a body larger than max_bytes.
@@ -277,11 +334,11 @@ func (x OversizeAction) String() string {
 }
 
 func (OversizeAction) Descriptor() protoreflect.EnumDescriptor {
-	return file_bundle_v1_bundle_proto_enumTypes[4].Descriptor()
+	return file_bundle_v1_bundle_proto_enumTypes[5].Descriptor()
 }
 
 func (OversizeAction) Type() protoreflect.EnumType {
-	return &file_bundle_v1_bundle_proto_enumTypes[4]
+	return &file_bundle_v1_bundle_proto_enumTypes[5]
 }
 
 func (x OversizeAction) Number() protoreflect.EnumNumber {
@@ -290,7 +347,7 @@ func (x OversizeAction) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use OversizeAction.Descriptor instead.
 func (OversizeAction) EnumDescriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{4}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{5}
 }
 
 // SignedBundle carries a Bundle with its signature. The signature covers the
@@ -935,7 +992,12 @@ type RuleSetBinding struct {
 	InboundAnomalyThreshold int32 `protobuf:"varint,3,opt,name=inbound_anomaly_threshold,json=inboundAnomalyThreshold,proto3" json:"inbound_anomaly_threshold,omitempty"`
 	// The CRS's other settings. Built-in CRS only. Engines before 0.5.0
 	// ignore it.
-	Crs           *CRSSettings `protobuf:"bytes,4,opt,name=crs,proto3" json:"crs,omitempty"`
+	Crs *CRSSettings `protobuf:"bytes,4,opt,name=crs,proto3" json:"crs,omitempty"`
+	// Where a SecLang rule set loads: unset, after the built-in CRS. Ignored
+	// for the built-in CRS. Engines before 0.6.0 ignore it and load the rule
+	// set after the CRS: the operator doesn't count them as enforcing a
+	// policy that places one before it.
+	Placement     RuleSetPlacement `protobuf:"varint,5,opt,name=placement,proto3,enum=inkwall.bundle.v1.RuleSetPlacement" json:"placement,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -996,6 +1058,13 @@ func (x *RuleSetBinding) GetCrs() *CRSSettings {
 		return x.Crs
 	}
 	return nil
+}
+
+func (x *RuleSetBinding) GetPlacement() RuleSetPlacement {
+	if x != nil {
+		return x.Placement
+	}
+	return RuleSetPlacement_RULE_SET_PLACEMENT_UNSPECIFIED
 }
 
 // CRSSettings are OWASP CRS variables the engine sets on each transaction,
@@ -1547,12 +1616,13 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\x12wildcard_any_depth\x18\x04 \x01(\bR\x10wildcardAnyDepth\"W\n" +
 	"\tPathMatch\x124\n" +
 	"\x04type\x18\x01 \x01(\x0e2 .inkwall.bundle.v1.PathMatchTypeR\x04type\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value\"\xc5\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"\x88\x02\n" +
 	"\x0eRuleSetBinding\x12\x1e\n" +
 	"\vrule_set_id\x18\x01 \x01(\tR\truleSetId\x12%\n" +
 	"\x0eparanoia_level\x18\x02 \x01(\x05R\rparanoiaLevel\x12:\n" +
 	"\x19inbound_anomaly_threshold\x18\x03 \x01(\x05R\x17inboundAnomalyThreshold\x120\n" +
-	"\x03crs\x18\x04 \x01(\v2\x1e.inkwall.bundle.v1.CRSSettingsR\x03crs\"\xf1\x01\n" +
+	"\x03crs\x18\x04 \x01(\v2\x1e.inkwall.bundle.v1.CRSSettingsR\x03crs\x12A\n" +
+	"\tplacement\x18\x05 \x01(\x0e2#.inkwall.bundle.v1.RuleSetPlacementR\tplacement\"\xf1\x01\n" +
 	"\vCRSSettings\x12'\n" +
 	"\x0fallowed_methods\x18\x01 \x03(\tR\x0eallowedMethods\x12A\n" +
 	"\x1dallowed_request_content_types\x18\x02 \x03(\tR\x1aallowedRequestContentTypes\x128\n" +
@@ -1599,7 +1669,11 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\vFailureMode\x12\x1c\n" +
 	"\x18FAILURE_MODE_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11FAILURE_MODE_OPEN\x10\x01\x12\x17\n" +
-	"\x13FAILURE_MODE_CLOSED\x10\x02*O\n" +
+	"\x13FAILURE_MODE_CLOSED\x10\x02*{\n" +
+	"\x10RuleSetPlacement\x12\"\n" +
+	"\x1eRULE_SET_PLACEMENT_UNSPECIFIED\x10\x00\x12 \n" +
+	"\x1cRULE_SET_PLACEMENT_AFTER_CRS\x10\x01\x12!\n" +
+	"\x1dRULE_SET_PLACEMENT_BEFORE_CRS\x10\x02*O\n" +
 	"\x0eBuiltinRuleSet\x12 \n" +
 	"\x1cBUILTIN_RULE_SET_UNSPECIFIED\x10\x00\x12\x1b\n" +
 	"\x17BUILTIN_RULE_SET_CRS_V4\x10\x01*f\n" +
@@ -1620,58 +1694,60 @@ func file_bundle_v1_bundle_proto_rawDescGZIP() []byte {
 	return file_bundle_v1_bundle_proto_rawDescData
 }
 
-var file_bundle_v1_bundle_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
+var file_bundle_v1_bundle_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
 var file_bundle_v1_bundle_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_bundle_v1_bundle_proto_goTypes = []any{
 	(PathMatchType)(0),            // 0: inkwall.bundle.v1.PathMatchType
 	(Mode)(0),                     // 1: inkwall.bundle.v1.Mode
 	(FailureMode)(0),              // 2: inkwall.bundle.v1.FailureMode
-	(BuiltinRuleSet)(0),           // 3: inkwall.bundle.v1.BuiltinRuleSet
-	(OversizeAction)(0),           // 4: inkwall.bundle.v1.OversizeAction
-	(*SignedBundle)(nil),          // 5: inkwall.bundle.v1.SignedBundle
-	(*Bundle)(nil),                // 6: inkwall.bundle.v1.Bundle
-	(*EventsConfig)(nil),          // 7: inkwall.bundle.v1.EventsConfig
-	(*Policy)(nil),                // 8: inkwall.bundle.v1.Policy
-	(*IPLists)(nil),               // 9: inkwall.bundle.v1.IPLists
-	(*RouteMatch)(nil),            // 10: inkwall.bundle.v1.RouteMatch
-	(*PathMatch)(nil),             // 11: inkwall.bundle.v1.PathMatch
-	(*RuleSetBinding)(nil),        // 12: inkwall.bundle.v1.RuleSetBinding
-	(*CRSSettings)(nil),           // 13: inkwall.bundle.v1.CRSSettings
-	(*RuleSet)(nil),               // 14: inkwall.bundle.v1.RuleSet
-	(*Exclusion)(nil),             // 15: inkwall.bundle.v1.Exclusion
-	(*BodyConfig)(nil),            // 16: inkwall.bundle.v1.BodyConfig
-	(*WebSocketConfig)(nil),       // 17: inkwall.bundle.v1.WebSocketConfig
-	(*ResponseConfig)(nil),        // 18: inkwall.bundle.v1.ResponseConfig
-	(*timestamppb.Timestamp)(nil), // 19: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),   // 20: google.protobuf.Duration
+	(RuleSetPlacement)(0),         // 3: inkwall.bundle.v1.RuleSetPlacement
+	(BuiltinRuleSet)(0),           // 4: inkwall.bundle.v1.BuiltinRuleSet
+	(OversizeAction)(0),           // 5: inkwall.bundle.v1.OversizeAction
+	(*SignedBundle)(nil),          // 6: inkwall.bundle.v1.SignedBundle
+	(*Bundle)(nil),                // 7: inkwall.bundle.v1.Bundle
+	(*EventsConfig)(nil),          // 8: inkwall.bundle.v1.EventsConfig
+	(*Policy)(nil),                // 9: inkwall.bundle.v1.Policy
+	(*IPLists)(nil),               // 10: inkwall.bundle.v1.IPLists
+	(*RouteMatch)(nil),            // 11: inkwall.bundle.v1.RouteMatch
+	(*PathMatch)(nil),             // 12: inkwall.bundle.v1.PathMatch
+	(*RuleSetBinding)(nil),        // 13: inkwall.bundle.v1.RuleSetBinding
+	(*CRSSettings)(nil),           // 14: inkwall.bundle.v1.CRSSettings
+	(*RuleSet)(nil),               // 15: inkwall.bundle.v1.RuleSet
+	(*Exclusion)(nil),             // 16: inkwall.bundle.v1.Exclusion
+	(*BodyConfig)(nil),            // 17: inkwall.bundle.v1.BodyConfig
+	(*WebSocketConfig)(nil),       // 18: inkwall.bundle.v1.WebSocketConfig
+	(*ResponseConfig)(nil),        // 19: inkwall.bundle.v1.ResponseConfig
+	(*timestamppb.Timestamp)(nil), // 20: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),   // 21: google.protobuf.Duration
 }
 var file_bundle_v1_bundle_proto_depIdxs = []int32{
-	19, // 0: inkwall.bundle.v1.Bundle.created_at:type_name -> google.protobuf.Timestamp
-	8,  // 1: inkwall.bundle.v1.Bundle.policies:type_name -> inkwall.bundle.v1.Policy
-	14, // 2: inkwall.bundle.v1.Bundle.rule_sets:type_name -> inkwall.bundle.v1.RuleSet
-	7,  // 3: inkwall.bundle.v1.Bundle.events:type_name -> inkwall.bundle.v1.EventsConfig
-	10, // 4: inkwall.bundle.v1.Policy.routes:type_name -> inkwall.bundle.v1.RouteMatch
+	20, // 0: inkwall.bundle.v1.Bundle.created_at:type_name -> google.protobuf.Timestamp
+	9,  // 1: inkwall.bundle.v1.Bundle.policies:type_name -> inkwall.bundle.v1.Policy
+	15, // 2: inkwall.bundle.v1.Bundle.rule_sets:type_name -> inkwall.bundle.v1.RuleSet
+	8,  // 3: inkwall.bundle.v1.Bundle.events:type_name -> inkwall.bundle.v1.EventsConfig
+	11, // 4: inkwall.bundle.v1.Policy.routes:type_name -> inkwall.bundle.v1.RouteMatch
 	1,  // 5: inkwall.bundle.v1.Policy.mode:type_name -> inkwall.bundle.v1.Mode
 	2,  // 6: inkwall.bundle.v1.Policy.failure_mode:type_name -> inkwall.bundle.v1.FailureMode
-	20, // 7: inkwall.bundle.v1.Policy.timeout:type_name -> google.protobuf.Duration
-	12, // 8: inkwall.bundle.v1.Policy.rule_sets:type_name -> inkwall.bundle.v1.RuleSetBinding
-	15, // 9: inkwall.bundle.v1.Policy.exclusions:type_name -> inkwall.bundle.v1.Exclusion
-	16, // 10: inkwall.bundle.v1.Policy.body:type_name -> inkwall.bundle.v1.BodyConfig
-	17, // 11: inkwall.bundle.v1.Policy.websocket:type_name -> inkwall.bundle.v1.WebSocketConfig
-	18, // 12: inkwall.bundle.v1.Policy.responses:type_name -> inkwall.bundle.v1.ResponseConfig
-	15, // 13: inkwall.bundle.v1.Policy.target_exclusions:type_name -> inkwall.bundle.v1.Exclusion
-	9,  // 14: inkwall.bundle.v1.Policy.ip_lists:type_name -> inkwall.bundle.v1.IPLists
-	11, // 15: inkwall.bundle.v1.RouteMatch.path:type_name -> inkwall.bundle.v1.PathMatch
+	21, // 7: inkwall.bundle.v1.Policy.timeout:type_name -> google.protobuf.Duration
+	13, // 8: inkwall.bundle.v1.Policy.rule_sets:type_name -> inkwall.bundle.v1.RuleSetBinding
+	16, // 9: inkwall.bundle.v1.Policy.exclusions:type_name -> inkwall.bundle.v1.Exclusion
+	17, // 10: inkwall.bundle.v1.Policy.body:type_name -> inkwall.bundle.v1.BodyConfig
+	18, // 11: inkwall.bundle.v1.Policy.websocket:type_name -> inkwall.bundle.v1.WebSocketConfig
+	19, // 12: inkwall.bundle.v1.Policy.responses:type_name -> inkwall.bundle.v1.ResponseConfig
+	16, // 13: inkwall.bundle.v1.Policy.target_exclusions:type_name -> inkwall.bundle.v1.Exclusion
+	10, // 14: inkwall.bundle.v1.Policy.ip_lists:type_name -> inkwall.bundle.v1.IPLists
+	12, // 15: inkwall.bundle.v1.RouteMatch.path:type_name -> inkwall.bundle.v1.PathMatch
 	0,  // 16: inkwall.bundle.v1.PathMatch.type:type_name -> inkwall.bundle.v1.PathMatchType
-	13, // 17: inkwall.bundle.v1.RuleSetBinding.crs:type_name -> inkwall.bundle.v1.CRSSettings
-	3,  // 18: inkwall.bundle.v1.RuleSet.builtin:type_name -> inkwall.bundle.v1.BuiltinRuleSet
-	4,  // 19: inkwall.bundle.v1.BodyConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
-	4,  // 20: inkwall.bundle.v1.ResponseConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
-	21, // [21:21] is the sub-list for method output_type
-	21, // [21:21] is the sub-list for method input_type
-	21, // [21:21] is the sub-list for extension type_name
-	21, // [21:21] is the sub-list for extension extendee
-	0,  // [0:21] is the sub-list for field type_name
+	14, // 17: inkwall.bundle.v1.RuleSetBinding.crs:type_name -> inkwall.bundle.v1.CRSSettings
+	3,  // 18: inkwall.bundle.v1.RuleSetBinding.placement:type_name -> inkwall.bundle.v1.RuleSetPlacement
+	4,  // 19: inkwall.bundle.v1.RuleSet.builtin:type_name -> inkwall.bundle.v1.BuiltinRuleSet
+	5,  // 20: inkwall.bundle.v1.BodyConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
+	5,  // 21: inkwall.bundle.v1.ResponseConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
+	22, // [22:22] is the sub-list for method output_type
+	22, // [22:22] is the sub-list for method input_type
+	22, // [22:22] is the sub-list for extension type_name
+	22, // [22:22] is the sub-list for extension extendee
+	0,  // [0:22] is the sub-list for field type_name
 }
 
 func init() { file_bundle_v1_bundle_proto_init() }
@@ -1688,7 +1764,7 @@ func file_bundle_v1_bundle_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bundle_v1_bundle_proto_rawDesc), len(file_bundle_v1_bundle_proto_rawDesc)),
-			NumEnums:      5,
+			NumEnums:      6,
 			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   0,

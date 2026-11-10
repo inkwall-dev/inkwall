@@ -1,0 +1,17 @@
+WAFPolicy shop/web (generation 4, mode Block): not Ready
+Targets: Ingress web
+
+Accepted: True, Accepted
+
+Programmed: True, Programmed
+
+Enforced: False, EnginesBehind: 1 of 2 engines run bundle 7 or later
+  Cause: Some engines don't run the bundle yet.
+  Fix:   Usually seconds; if it lasts, `inkwallctl status` names them.
+
+Ready: False, EnginesBehind: Enforced: 1 of 2 engines run bundle 7 or later
+  Cause: Some engines don't run the bundle yet.
+  Fix:   Usually seconds; if it lasts, `inkwallctl status` names them.
+
+Engines that don't run the policy's bundle:
+  traefik/traefik-1 (v0.6.0, behind, bundle 6): the engine doesn't run the policy's bundle yet: check its connection to the operator
