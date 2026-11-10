@@ -148,8 +148,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctrl.SetLogger(logr.FromSlogHandler(logger.Handler()))
-	if limit := memlimit.Set(os.Getenv); limit > 0 {
-		logger.Info("Go memory limit set", slog.Int64("bytes", limit), slog.String("from", memlimit.Env))
+	if limit, from := memlimit.Set(os.Getenv); limit > 0 {
+		logger.Info("Go memory limit set", slog.Int64("bytes", limit), slog.String("from", from))
 	}
 
 	cfg, err := ctrl.GetConfig()

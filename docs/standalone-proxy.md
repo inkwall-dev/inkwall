@@ -8,6 +8,7 @@ the operator.
 - [Prerequisites](#prerequisites)
 - [Run the proxy](#run-the-proxy)
 - [Flags](#flags)
+- [Memory limit](#memory-limit)
 - [Reloading the rules](#reloading-the-rules)
 - [Other modes](#other-modes)
 - [Checking it worked](#checking-it-worked)
@@ -61,6 +62,27 @@ The main flags; `inkwall-engine proxy -h` lists them all:
 | `--json-denials` | off | Answer a denied client that sends `Accept: application/json` with `{"error":"forbidden","status":403,"request_id":"..."}` instead of text. Every denial carries `X-Request-Id`, the request ID of its security event |
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error`; security events are logged at `warn` |
 | `--event-log-rate` | `10` | Security event lines per second for each policy and rule; the rest are counted in `inkwall_security_event_logs_suppressed_total` (`0`: no limit) |
+
+## Memory limit
+
+The engine buffers request bodies, so it sets the Go runtime's soft memory limit
+([`GOMEMLIMIT`](https://go.dev/doc/gc-guide#Memory_limit)) to 90% of its container's memory limit:
+the garbage collector then runs more often near the limit, instead of letting the heap double
+past it. It takes that limit from, in order:
+
+1. `GOMEMLIMIT`, if you set it: the engine leaves it as it is.
+2. `MEMORY_LIMIT`, in bytes, which the operator's injected engine and the Helm chart set from the
+   pod's memory limit.
+3. The container's [cgroup](https://docs.kernel.org/admin-guide/cgroup-v2.html): `memory.max`
+   (cgroup v2) or `memory.limit_in_bytes` (v1), which `docker run --memory 256m` sets.
+
+The engine logs which, at startup:
+
+```json
+{"time":"2026-11-10T09:00:00Z","level":"INFO","msg":"Go memory limit set","bytes":241591905,"from":"/sys/fs/cgroup/memory.max"}
+```
+
+Without any of them (no `--memory`, or outside a container), it sets none.
 
 ## Reloading the rules
 
