@@ -138,6 +138,42 @@ func TestCheckUserRules(t *testing.T) {
 	}
 }
 
+// Before the CRS, the directives that change loaded rules would reach no
+// CRS rule: SecRuleRemoveBy* would silently do nothing, SecRuleUpdate*
+// wouldn't compile (#423).
+func TestCheckRulesBeforeCRS(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		rules    string
+		wantLine int
+	}{
+		{name: "empty"},
+		{name: "settings", rules: `SecAction "id:100100,phase:1,pass,nolog,setvar:tx.blocking_paranoia_level=2"`},
+		{name: "runtime exclusion", rules: `SecRule REQUEST_URI "@beginsWith /legacy" "id:100101,phase:1,pass,nolog,ctl:ruleRemoveById=920350"`},
+		{name: "marker", rules: "SecMarker BEFORE"},
+		{name: "remove by id", rules: "SecMarker A\nSecRuleRemoveById 920350", wantLine: 2},
+		{name: "remove by tag", rules: "secruleremovebytag attack-protocol", wantLine: 1},
+		{name: "remove by msg", rules: `SecRuleRemoveByMsg "x"`, wantLine: 1},
+		{name: "update target", rules: "# comment\nSecRuleUpdateTargetById 942100 \"!ARGS:q\"", wantLine: 2},
+		{name: "update target by tag", rules: `SecRuleUpdateTargetByTag attack-sqli "!ARGS:q"`, wantLine: 1},
+		{name: "update action", rules: `SecRuleUpdateActionById 942100 "pass"`, wantLine: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckRulesBeforeCRS(tc.rules)
+			if tc.wantLine == 0 {
+				if err != nil {
+					t.Fatalf("rejected: %v", err)
+				}
+				return
+			}
+			var re *RuleError
+			if !errors.As(err, &re) || re.Line != tc.wantLine || !strings.Contains(err.Error(), "AfterCRS") {
+				t.Fatalf("got %v, want a RuleError at line %d that says to place it AfterCRS", err, tc.wantLine)
+			}
+		})
+	}
+}
+
 // The error in a large rule set is still located exactly. It takes about
 // 10 compiles (~150ms without the race detector), well within the
 // webhook's 2s timeout.

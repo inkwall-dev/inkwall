@@ -142,6 +142,9 @@ Validation runs in three steps, cheapest first:
      `SecAuditLog`, `SecDebugLog`, `Include`) stay Inkwall's, since app teams write rule sets;
    - allows only operators that stay inside the engine: not `@inspectFile`, which runs a program,
      or `@rbl`, which queries DNS. The binaries don't register either;
+   - rejects a policy's rule set binding with `placement: BeforeCRS` that also sets
+     `paranoiaLevel`, `inboundAnomalyThreshold` or `crs`: those are the built-in CRS's, which
+     can't load before itself;
    - accepts updates that leave the spec unchanged, so objects a newer engine rejects can still be
      deleted;
    - uses a self-signed certificate that the operator rotates, with the CA injected; cert-manager
@@ -153,7 +156,13 @@ Validation runs in three steps, cheapest first:
    the deprecated `spec.engine.socketDir` is set or changed (each integration places the engine's
    socket itself), and the `InkwallConfig` stays editable while the operator is down.
 3. **Resolver** (asynchronous, reported in status): dangling references, conflicts, and targets
-   that can't be wired.
+   that can't be wired. Also a rule set bound with `placement: BeforeCRS` (#423) that can't load
+   before the CRS: the built-in CRS itself, or SecLang with `SecRuleRemoveBy*` or `SecRuleUpdate*`.
+   Those change the rules loaded before them, so before the CRS they would reach none of its
+   rules: `SecRuleUpdate*` wouldn't compile, and the engine would refuse the whole bundle, and
+   `SecRuleRemoveBy*` would silently remove nothing. The policy gets `InvalidRef` naming the line.
+   The check runs here, not in the webhook: the placement is the policy's, the rules the rule
+   set's (possibly a ConfigMap's), and the webhook reads neither from the other.
 
 ### 3.2 Status contract
 

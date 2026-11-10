@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Weekly: the versions under test (hack/versions.env, #393) bumped to their
-# latest upstream releases, in a PR, with the docs' "tested with" lines and
-# the raw Envoy sample to match. A PR opened with the workflow's token
-# doesn't start CI by itself: close and reopen it (or push to it) to run CI.
+# latest upstream releases on a branch, with the docs' "tested with" lines
+# and the raw Envoy sample to match, and one issue that lists the bumps and
+# links to open the PR. Actions may not open pull requests here, and a PR
+# opened with the workflow's token would start no CI (#556): a maintainer
+# opens it from the issue's link, and CI runs on it as on any other.
 name: versions
 
 on:
@@ -19,7 +21,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-      pull-requests: write
+      issues: write
     steps:
       # Credentials kept: this job pushes the bump's branch.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -37,8 +39,11 @@ jobs:
       - if: steps.bump.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
         run: |
-          branch=deps/versions-$(date -u +%Y%m%d)
+          # One branch per run: a rerun never has to overwrite a pushed one.
+          branch=deps/versions-$(date -u +%Y%m%d)-$RUN_ID
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$branch"
@@ -46,11 +51,22 @@ jobs:
           git ls-files -m '*.md' | xargs -r git add
           git commit -m "build(deps): bump the versions under test"
           git push origin "$branch"
+
+          # One open issue for the bumps: updated each week until a PR closes it.
+          title="Versions under test: upstream releases to bump to"
+          issue=$(gh issue list -R "$REPO" --state open --label dependencies --search "\"$title\" in:title" --json number,title \
+            -q "[.[] | select(.title == \"$title\")][0].number // empty")
+          if [[ -z $issue ]]; then
+            issue=$(gh issue create -R "$REPO" --title "$title" --label dependencies \
+              --body "The weekly versions workflow (#393) lists here the versions under test that have newer upstream releases, and links to open the PR that bumps them." | sed 's|.*/||')
+          fi
+          pr_title=$(jq -rn --arg v "build(deps): bump the versions under test" '$v|@uri')
+          pr_body=$(jq -rn --arg v "Closes #$issue" '$v|@uri')
           {
-            echo "The versions under test, bumped to their latest upstream releases by the weekly workflow (#393):"
+            echo "Bumps found on $(date -u +%Y-%m-%d), on branch \`$branch\`:"
             echo
             sed 's/^/- /' bumps.txt
             echo
-            echo "Close and reopen this PR to run CI on it."
-          } > body.md
-          gh pr create --base main --head "$branch" --title "build(deps): bump the versions under test" --body-file body.md --label dependencies
+            echo "[Open the PR](https://github.com/$REPO/compare/main...$branch?expand=1&title=$pr_title&body=$pr_body): CI runs on it as on any other. A newer week's comment supersedes this one."
+          } > comment.md
+          gh issue comment "$issue" -R "$REPO" --body-file comment.md

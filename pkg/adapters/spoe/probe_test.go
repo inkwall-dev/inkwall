@@ -22,6 +22,13 @@ func TestProbe(t *testing.T) {
 	}
 	path := haproxyprobe.PrefixPath("/", nonce)
 	mac := haproxyprobe.Request(key, nonce, "shop.example.com", path)
+	// A MAC that differs from the right one in every run: the last hex
+	// digit changed, never replaced by a fixed value it may already have.
+	last := "0"
+	if mac[len(mac)-1] == '0' {
+		last = "1"
+	}
+	wrong := mac[:len(mac)-1] + last
 	probe := func(header string) []byte {
 		return notifyFrame(1, 1, argString(ArgMethod, "GET"), argString(ArgPath, path),
 			argBinary(ArgHeaders, hdrs("host", "shop.example.com", "x-inkwall-probe", header)))
@@ -34,7 +41,7 @@ func TestProbe(t *testing.T) {
 		inspected bool
 	}{
 		{"probe", key, mac, true, false},
-		{"wrong MAC", key, mac[:len(mac)-2] + "00", false, true},
+		{"wrong MAC", key, wrong, false, true},
 		{"no key", nil, mac, false, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {

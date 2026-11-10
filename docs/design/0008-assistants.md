@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-11-07
-- Updated: 2026-11-07
+- Updated: 2026-11-10
 - Owner: noureldin
 - Depends on: [0002 §8](0002-system-architecture.md#8-cross-cutting-concerns) and
   [0004](0004-operator.md)
@@ -14,8 +14,9 @@ v0.5.0 the answers exist, but they are spread over `inkwallctl status`, the secu
 `inkwallctl tune`. This document decides how Inkwall helps users get those answers faster, with
 or without an AI model, and the rules every assistant must follow in a security product.
 
-**Not yet:** everything below. `inkwallctl explain` and the MCP server are planned for v0.6.0
-(#438, #439); the docs assistant (#440) and the GitHub bot (#441) are later.
+**Implemented:** [§3](#3-inkwallctl-explain), `inkwallctl explain` (v0.6.0, #438). **Not yet:**
+the rest. The MCP server is planned for v0.6.0 (#439); the docs assistant (#440) and the GitHub
+bot (#441) are later.
 
 ## Contents
 
@@ -63,6 +64,23 @@ or without an AI model, and the rules every assistant must follow in a security 
   reason table, with the targets or engines involved.
 - `-o json` gives the same answer for scripts and for the MCP server.
 - It needs only read permissions.
+
+As implemented (#438, [Explaining a policy or a denial](../troubleshooting.md#explaining-a-policy-or-a-denial)):
+
+- The reason → cause and fix text has one source, `operator/reasons`, which renders the troubleshooting
+  guide's reason tables; a test fails when the operator sets a reason without an entry there, or
+  when the guide's tables differ from it. Security event reasons (`rule`, `oversize`, ...) have
+  entries too.
+- Rule descriptions come from the rules embedded in the binary (`coraza.EmbeddedRule`: the rule's
+  `msg`, without its macros, which would hold request data).
+- "Verified" means the policy with the suggestion, and what it references, resolves as the operator
+  does and compiles as the engine does (`inkwallctl tune`'s validation, `inkwallctl test --policy`'s
+  code). The request can't be replayed: the event has no values. Explain also says whether the
+  suggestions cover every rule that matched.
+- The JSON lists the request-derived fields in `untrusted`, and the text quotes them when they
+  hold anything but printable text. Snippets of the events API's events are never read.
+- Exit status: `explain policy` 1 when the policy isn't `Ready`; `explain request` 1 when no event
+  has the ID; 2 on an error.
 
 ## 4. The MCP server
 

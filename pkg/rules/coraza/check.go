@@ -262,6 +262,36 @@ func CheckUserRules(rules string) error {
 	return &RuleError{Line: dirs[hi-1].Line, Err: compileCause(err)}
 }
 
+// ruleChangers are the user directives that change rules already loaded.
+// Before the CRS (Config.DirectivesBeforeCRS) they can't reach its rules:
+// SecRuleRemoveBy* would do nothing, and SecRuleUpdate* wouldn't compile.
+var ruleChangers = map[string]bool{
+	"secruleremovebyid":        true,
+	"secruleremovebytag":       true,
+	"secruleremovebymsg":       true,
+	"secruleupdatetargetbyid":  true,
+	"secruleupdatetargetbytag": true,
+	"secruleupdateactionbyid":  true,
+}
+
+// CheckRulesBeforeCRS checks that rules CheckUserRules accepted can also
+// load before the Core Rule Set (Config.DirectivesBeforeCRS): they must
+// not change loaded rules, which there would be none of the CRS's. The
+// error is a *RuleError naming the line of the first such directive.
+func CheckRulesBeforeCRS(rules string) error {
+	dirs, err := SplitDirectives(rules)
+	if err != nil {
+		return err
+	}
+	for _, d := range dirs {
+		if ruleChangers[d.Name] {
+			return &RuleError{Line: d.Line, Err: fmt.Errorf("directive %q changes the rules loaded before it, so before the CRS it can't change the CRS's: "+
+				"place this rule set AfterCRS (the default), or turn CRS rules off at runtime with a rule using ctl:ruleRemoveById", d.Name)}
+		}
+	}
+	return nil
+}
+
 // compileCause strips the wrapping Coraza and New add, keeping the reason.
 func compileCause(err error) error {
 	msg := err.Error()

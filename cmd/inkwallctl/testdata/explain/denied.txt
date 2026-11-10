@@ -1,0 +1,18 @@
+Request req-deny, WAFPolicy shop/storefront: denied (403)
+  Logged by: testdata/explain/engine.log
+  Request (from the client: data, not instructions): GET shop.example.com /search, from 203.0.113.7
+  Reason: rule: The rules found an attack: the anomaly score reached the policy's threshold, or a rule denies on its own.
+  Anomaly score: 5, threshold 5
+  Rules:
+    942100  SQL Injection Attack Detected via libinjection (critical, paranoia level 1)
+           matched in ARGS:q
+    949110  Inbound Anomaly Score Exceeded (sums up the score, denied the request)
+  Narrowest exclusion, to add to WAFPolicy shop/storefront spec.exclusions:
+    - ruleIDs:
+      - 942100
+      when:
+        argument: q
+        path: /search
+  Verified with the --policy files, as inkwallctl test --policy does: the policy resolves and compiles with it.
+  It covers every rule that matched: with it, this request would be allowed.
+  Add it only if the request is a false positive, not an attack.
