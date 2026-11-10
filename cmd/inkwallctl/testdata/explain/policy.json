@@ -1,0 +1,64 @@
+{
+  "kind": "PolicyExplanation",
+  "namespace": "shop",
+  "name": "web",
+  "generation": 4,
+  "mode": "Block",
+  "ready": false,
+  "targets": [
+    {
+      "kind": "Ingress",
+      "name": "web"
+    }
+  ],
+  "conditions": [
+    {
+      "type": "Accepted",
+      "status": "True",
+      "reason": "Accepted",
+      "message": "",
+      "current": true,
+      "cause": "",
+      "fix": ""
+    },
+    {
+      "type": "Programmed",
+      "status": "True",
+      "reason": "Programmed",
+      "message": "",
+      "current": true,
+      "cause": "",
+      "fix": ""
+    },
+    {
+      "type": "Enforced",
+      "status": "False",
+      "reason": "EnginesBehind",
+      "message": "1 of 2 engines run bundle 7 or later",
+      "current": true,
+      "cause": "Some engines don't run the bundle yet.",
+      "fix": "Usually seconds; if it lasts, `inkwallctl status` names them."
+    },
+    {
+      "type": "Ready",
+      "status": "False",
+      "reason": "EnginesBehind",
+      "message": "Enforced: 1 of 2 engines run bundle 7 or later",
+      "current": true,
+      "cause": "Some engines don't run the bundle yet.",
+      "fix": "Usually seconds; if it lasts, `inkwallctl status` names them."
+    }
+  ],
+  "engines": [
+    {
+      "namespace": "traefik",
+      "pod": "traefik-1",
+      "version": "v0.6.0",
+      "state": "behind",
+      "applied": 6,
+      "outdated": false,
+      "hint": "the engine doesn't run the policy's bundle yet: check its connection to the operator"
+    }
+  ],
+  "warnings": []
+}

@@ -246,7 +246,28 @@ type RuleSetBinding struct {
 	// Requires engines 0.5.0 or later: older ones ignore it.
 	// +optional
 	CRS *CRSSettings `json:"crs,omitempty"`
+
+	// Placement is where a SecLang rule set loads: AfterCRS (the default)
+	// or BeforeCRS, before the CRS's initialization, so its rules can set
+	// the CRS's tx variables or turn CRS rules off with
+	// ctl:ruleRemoveById. A BeforeCRS rule set can't use SecRuleRemoveBy*
+	// or SecRuleUpdate*, which only reach rules loaded before them. Not
+	// for the built-in CRS. Requires engines 0.6.0 or later: older ones
+	// load the rule set after the CRS.
+	// +optional
+	Placement RuleSetPlacement `json:"placement,omitempty"`
 }
+
+// RuleSetPlacement is where a rule set loads, relative to the built-in CRS.
+// +kubebuilder:validation:Enum=BeforeCRS;AfterCRS
+type RuleSetPlacement string
+
+const (
+	// PlacementAfterCRS loads the rule set after the CRS (the default).
+	PlacementAfterCRS RuleSetPlacement = "AfterCRS"
+	// PlacementBeforeCRS loads the rule set before the CRS.
+	PlacementBeforeCRS RuleSetPlacement = "BeforeCRS"
+)
 
 // CRSSettings are OWASP CRS settings (its tx variables), applied to each
 // request before the CRS's defaults. Unset fields keep the CRS's defaults.

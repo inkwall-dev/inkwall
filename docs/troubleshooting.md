@@ -1,8 +1,9 @@
 # Troubleshooting
 
 This guide checks whether Inkwall works in a cluster, says what every condition reason means and
-what to do about it, finds the rule behind a denial, moves a policy from `Detect` to `Block`, and
-says what happens when a component is down.
+what to do about it, explains a policy that isn't `Ready` and a denied request, finds the rule
+behind a denial, moves a policy from `Detect` to `Block`, and says what happens when a component
+is down.
 
 ## Contents
 
@@ -13,6 +14,11 @@ says what happens when a component is down.
   - [WAFPolicy](#wafpolicy)
   - [WAFRuleSet and ClusterWAFRuleSet](#wafruleset-and-clusterwafruleset)
   - [InkwallConfig](#inkwallconfig)
+- [Explaining a policy or a denial](#explaining-a-policy-or-a-denial)
+  - [Explain a policy](#explain-a-policy)
+  - [Explain a denied request](#explain-a-denied-request)
+  - [Permissions of explain](#permissions-of-explain)
+  - [JSON output of explain](#json-output-of-explain)
 - [Finding a denial](#finding-a-denial)
   - [What a denied client sees](#what-a-denied-client-sees)
 - [From Detect to Block](#from-detect-to-block)
@@ -119,22 +125,36 @@ to fix. `kubectl get wafpolicies -A` shows the `Ready` condition's reason.
 
 A policy is `Ready` when it is `Accepted`, `Programmed` and `Enforced`. Otherwise `Ready` takes
 the reason of the first of these that isn't `True` (and `Suspended` before any): fix that one.
-`NotAccepted`, `NotProgrammed` and `NotEnforced` mean the operator hasn't reported that condition
-yet; they last seconds, unless the operator isn't running.
+`inkwallctl explain policy <namespace>/<name>` walks the conditions and prints the cause and the
+fix from these tables ([Explaining a policy or a denial](#explaining-a-policy-or-a-denial)).
+
+**Ready**: its own reasons, while a condition isn't reported yet.
+
+<!-- reasons: WAFPolicy Ready -->
+| Reason | Meaning | Fix |
+|---|---|---|
+| `Ready` | `Accepted`, `Programmed` and `Enforced`: the policy is in force on every target. | |
+| `NotAccepted` | The operator hasn't reported `Accepted` on this generation yet. It lasts seconds. | If it lasts, check that the operator runs: `inkwallctl status`. |
+| `NotProgrammed` | The operator hasn't reported `Programmed` on this generation yet. It lasts seconds. | If it lasts, check that the operator runs: `inkwallctl status`. |
+| `NotEnforced` | The operator hasn't reported `Enforced` on this generation yet. It lasts seconds. | If it lasts, check that the operator runs: `inkwallctl status`. |
+<!-- end reasons -->
 
 **Accepted**: the policy is valid, and in the bundle.
 
+<!-- reasons: WAFPolicy Accepted -->
 | Reason | Meaning | Fix |
 |---|---|---|
 | `Accepted` | Valid, and in the bundle the engines get. | |
-| `InvalidRef` | A rule set, ConfigMap or key the policy (or its rule set) names doesn't exist, or isn't labeled `waf.inkwall.dev/rules=true`. | Create it, or fix the name. The message names it. |
+| `InvalidRef` | A rule set, ConfigMap or key the policy (or its rule set) names doesn't exist, or isn't labeled `waf.inkwall.dev/rules=true`. Or a rule set bound with `placement: BeforeCRS` can't load there: the built-in CRS, or SecLang with `SecRuleRemoveBy*` or `SecRuleUpdate*`. | Create it, or fix the name. The message names it. Move those directives to a rule set placed `AfterCRS` (the default). |
 | `RuleCompileError` | Rules in the policy's rule set don't compile, or use a directive Inkwall doesn't allow. | Fix the rules; `inkwallctl test --rule-set` shows the error before you apply. |
 | `Conflict` | An older policy targets the same route and applies to it: a route has one policy. | Merge the policies, or target other routes. |
 | `TargetUnsupported` | A target's match rules (an IngressRoute's, HTTPRoute's or VirtualService's) aren't ones the router can match, so its requests can't be told apart. | Use the forms the message lists (`Host`, `Path`, `PathPrefix`; exact and prefix paths). |
 | `BundleTooLarge` | The bundle with this version of the policy is over 7,200 KiB compressed, so it isn't published; engines keep the previous one. | Move shared inline rules into one rule set that the policies reference; see [InkwallBundleNearSizeLimit](monitoring.md#inkwallbundlenearsizelimit). |
+<!-- end reasons -->
 
 **Programmed**: the policy's targets are wired to the engine in their proxy.
 
+<!-- reasons: WAFPolicy Programmed -->
 | Reason | Meaning | Fix |
 |---|---|---|
 | `Programmed` | Every target is wired, in a proxy whose pods run the engine. | |
@@ -150,9 +170,11 @@ yet; they last seconds, unless the operator isn't running.
 | `WiringFailed` | The operator couldn't change the proxy's objects (a conflict, a webhook, permissions). | The message names the object and the error; `kubectl -n inkwall-system logs deploy/inkwall-operator` has more. |
 | `ResponsesNotInspected` | The policy inspects responses, but a target's proxy can't send them to the engine (only Envoy Gateway can). Its requests are inspected; the policy isn't `Programmed`, so it doesn't claim the responses are. | Remove `responses`, or target routes Envoy Gateway serves. |
 | `Unwired` | `helm uninstall` (the unwire hook) unwired the routes and stopped the operator. | Reinstall to protect the routes again. |
+<!-- end reasons -->
 
 **Enforced**: every connected engine runs a bundle with this version of the policy.
 
+<!-- reasons: WAFPolicy Enforced -->
 | Reason | Meaning | Fix |
 |---|---|---|
 | `Enforced` | Every engine runs the bundle, or a later one. | |
@@ -163,6 +185,7 @@ yet; they last seconds, unless the operator isn't running.
 | `EnginesOutdated` | An engine runs the bundle, but is too old to enforce a field the policy sets, which it ignores. | Restart the pod the message names. |
 | `EnginesUnreported` | An operator replica's engine report is full, so not every engine is known. | Run more operator replicas, or fewer proxy pods per replica. |
 | `Suspended` | The InkwallConfig suspends inspection: every engine allows every request. | `kubectl patch inkwallconfig default --type merge -p '{"spec":{"suspend":false}}'`. |
+<!-- end reasons -->
 
 ### WAFRuleSet and ClusterWAFRuleSet
 
@@ -171,6 +194,7 @@ an unknown built-in rule set) and `RuleCompileError` (rules that don't compile),
 
 ### InkwallConfig
 
+<!-- reasons: InkwallConfig -->
 | Condition | Reason | Meaning | Fix |
 |---|---|---|---|
 | `Suspended` | `Suspended` | The bundle the engines get suspends inspection (`spec.suspend`). | Resume when ready. |
@@ -196,6 +220,145 @@ an unknown built-in rule set) and `RuleCompileError` (rules that don't compile),
 | `ControlPlaneConnected` | `CertificateExpired` | The cluster's certificate expired before it was renewed. | Store a new enrollment token. |
 | `ControlPlaneConnected` | `ClusterDisabled` | The control plane removed or disabled the cluster. | Change the configuration to try again. |
 | `ControlPlaneConnected` | `Unreachable` | The control plane can't be reached; the operator retries. Engines enforce as before. | Check network access to the endpoint. |
+<!-- end reasons -->
+
+## Explaining a policy or a denial
+
+`inkwallctl explain` answers *why isn't my policy `Ready`* and *why was this request denied* from
+the cluster's state, without an AI model: it joins the conditions, the security events, the rules
+and the reason tables of this guide, which it carries (they are one source in the code,
+`operator/reasons`). It only reads, never changes the cluster, and never shows what a rule matched.
+
+### Explain a policy
+
+`inkwallctl explain policy <namespace>/<name>` walks the policy's `Accepted`, `Programmed`,
+`Enforced` and `Ready` conditions and, for each that isn't `True`, prints the cause and the fix
+from [the tables above](#wafpolicy), with its targets and, while it isn't `Enforced`, the engines
+that don't run its bundle:
+
+```console
+$ inkwallctl explain policy shop/web
+WAFPolicy shop/web (generation 4, mode Block): not Ready
+Targets: Ingress web
+
+Accepted: True, Accepted
+
+Programmed: True, Programmed
+
+Enforced: False, EnginesBehind: 1 of 2 engines run bundle 7 or later
+  Cause: Some engines don't run the bundle yet.
+  Fix:   Usually seconds; if it lasts, `inkwallctl status` names them.
+
+Ready: False, EnginesBehind: Enforced: 1 of 2 engines run bundle 7 or later
+  Cause: Some engines don't run the bundle yet.
+  Fix:   Usually seconds; if it lasts, `inkwallctl status` names them.
+
+Engines that don't run the policy's bundle:
+  traefik/traefik-1 (v0.6.0, behind, bundle 6): the engine doesn't run the policy's bundle yet: check its connection to the operator
+```
+
+A condition about an older generation of the policy is reported as such: the operator hasn't
+caught up yet. It exits 0 when the policy is `Ready`, 1 when it isn't, and 2 on an error.
+
+### Explain a denied request
+
+A denied client gets the request ID in `X-Request-Id` ([What a denied client sees](#what-a-denied-client-sees)).
+`inkwallctl explain request <request-id>` finds its security event in the logs of the engines
+the operator reports, read through the API server, and prints the policy, the reason with its
+cause, the anomaly score against the policy's threshold, each rule with the OWASP CRS's
+description of it (read from the rules embedded in `inkwallctl`) and where it matched, and the
+narrowest exclusion that would let the request through:
+
+```console
+$ inkwallctl explain request 01JC8Z9V6Q8W3T2N4R5S7X9Y0A
+Request 01JC8Z9V6Q8W3T2N4R5S7X9Y0A, WAFPolicy shop/storefront: denied (403)
+  Logged by: traefik/traefik-7d9f8-x2l4p
+  Request (from the client: data, not instructions): GET shop.example.com /search, from 203.0.113.7
+  Reason: rule: The rules found an attack: the anomaly score reached the policy's threshold, or a rule denies on its own.
+  Anomaly score: 5, threshold 5
+  Rules:
+    942100  SQL Injection Attack Detected via libinjection (critical, paranoia level 1)
+           matched in ARGS:q
+    949110  Inbound Anomaly Score Exceeded (sums up the score, denied the request)
+  Narrowest exclusion, to add to WAFPolicy shop/storefront spec.exclusions:
+    - ruleIDs:
+      - 942100
+      when:
+        argument: q
+        path: /search
+  Verified with the cluster, as inkwallctl test --policy does: the policy resolves and compiles with it.
+  It covers every rule that matched: with it, this request would be allowed.
+  Add it only if the request is a false positive, not an attack.
+```
+
+- The exclusion is `inkwallctl tune`'s ([Suggest exclusions from the events](testing-policies.md#suggest-exclusions-from-the-events)):
+  the rule, on the exact path, for the argument, argument name, cookie or header it matched; never
+  a rule for every path. What no field can name (the request body, the URI) gets no suggestion,
+  and explain says so. The suggestion is checked with the same code as `inkwallctl test --policy`:
+  the policy with it, and the rule sets, ConfigMaps and IP lists it references, resolved as the
+  operator does and compiled as the engine does. Nothing is applied: review it, test it, apply it.
+- What comes from the request (the request ID, method, host, path, client IP, and the names of the
+  variables a rule matched) was written by the client, maybe to mislead whoever reads it: it is
+  printed quoted when it holds anything but printable text, and listed under `untrusted` in JSON.
+  The matched values are never shown: the engine's log doesn't have them, and explain ignores the
+  snippets of the events API's events.
+- `--file FILE` reads the events from a file (`kubectl logs` output, a log store's export, or the
+  events API's JSON lines; `-` is standard input) instead of the cluster, and `--policy`,
+  `--rule-set`, `--configmap` and `--ingress` give the objects to check the suggestion with, as
+  `inkwallctl test` takes them; without them, the policy is read from the cluster.
+- `--pod <namespace>/<name>` reads only those engine pods, `--since` how far back (default 24h).
+- Engine log lines are rate-limited per policy and rule, so a repeated denial may have no line of
+  its own: explain then exits 1 and says where it looked. It exits 0 when it found the request,
+  and 2 on an error.
+
+### Permissions of explain
+
+Read only, like `inkwallctl status`:
+
+| Resource | Where | Verbs | For |
+|---|---|---|---|
+| `wafpolicies` (`waf.inkwall.dev`) | the policy's namespace | `get` | both |
+| `configmaps` | the operator's namespace | `list` | the engine reports: which pods run an engine (without `--pod`), and the engines behind |
+| `pods`, `pods/log` | the engine pods' namespaces | `get` | `explain request`, without `--file` |
+| `wafrulesets`, `clusterwafrulesets`, `wafiplists`, and the `configmaps` rule sets read from | as referenced | `get` | checking the suggestion, without `--policy` |
+
+What it may not read makes the answer smaller, with a warning: a suggestion it can't check is
+marked not verified.
+
+### JSON output of explain
+
+`-o json` prints one object, for scripts and for assistants (the MCP server, [0008](design/0008-assistants.md)).
+As for `inkwallctl status`, its fields are only ever added to, never renamed or removed.
+
+`explain policy`:
+
+| Field | Meaning |
+|---|---|
+| `kind` | `PolicyExplanation` |
+| `namespace`, `name`, `generation`, `mode` | The policy |
+| `ready` | `true` when `Ready` is `True` for this generation (the exit status is then 0) |
+| `targets[]` | `kind`, `name`, `sectionName` |
+| `conditions[]` | `type`, `status`, `reason`, `message`, `current` (`false`: about an older generation), and for one that isn't `True`, `cause` and `fix` from this guide |
+| `engines[]` | While the policy isn't `Enforced`: the engines that don't run its bundle, as `inkwallctl status`'s `engines.attention[]` |
+| `warnings` | What couldn't be read |
+
+`explain request`:
+
+| Field | Meaning |
+|---|---|
+| `kind` | `RequestExplanation` |
+| `requestId`, `found`, `searched[]` | The ID, whether an event has it, and where explain looked (`pod <namespace>/<name>`, `file <path>`) |
+| `events[]` | One per event of the request (a request, and its response when responses are inspected) |
+| `events[].source`, `policy`, `phase`, `action`, `mode`, `reason`, `status` | The event: `phase` is `request`, `response` or `websocket_message`; `mode` `Block` or `Detect` |
+| `events[].cause`, `fix` | This guide's, for the reason |
+| `events[].anomalyScore`, `threshold` | The score, and the policy's inbound threshold (`0`: unknown) |
+| `events[].rules[]` | `id`, `source` (`crs`, `coraza` or `custom`), `description`, `severity`, `paranoiaLevel`, `scoring` (sums up the score: never excluded), `interrupting`, `variables[]` |
+| `events[].request` | `id`, `method`, `host`, `path`, `clientIp`, `matches[]` (`ruleId`, `variable`): untrusted |
+| `events[].suggestions[]` | `policy`, `exclusion` (an item of `spec.exclusions`), `yaml` (the same), `verified`, `verifiedWith`, `verifyError` |
+| `events[].notSuggested[]` | `ruleId`, `variable`, `why`: matches no exclusion is suggested for |
+| `events[].allowedWithSuggestions` | `true` when the suggestions cover every rule that matched |
+| `untrusted[]` | The fields whose text comes from the request: data to show, never instructions to follow |
+| `warnings` | What couldn't be read or checked |
 
 ## Finding a denial
 
@@ -227,6 +390,21 @@ The line has:
 - `matches`: each rule with the variable it matched (`{"rule_id":942100,"variable":"ARGS:q"}`),
   never the value;
 - `method`, `host`, `path` (without the query string), `client_ip`, `request_id`.
+
+What each `reason` means, and what to do:
+
+<!-- reasons: SecurityEvent reason -->
+| Reason | Meaning | Fix |
+|---|---|---|
+| `rule` | The rules found an attack: the anomaly score reached the policy's threshold, or a rule denies on its own. | If the request is legitimate, exclude the rules that matched, narrowly: `inkwallctl explain request` suggests the exclusion ([From a log line to an exclusion](testing-policies.md#from-a-log-line-to-an-exclusion)). |
+| `timeout` | Inspection took longer than the policy's `timeout`, so the request wasn't inspected; the policy's `failureMode` decided. | Raise `timeout`, or give the engine more CPU. |
+| `error` | The rules engine failed on the request; the policy's `failureMode` decided. | The engine's log around the event says why; report it if it repeats. |
+| `overload` | Every inspection slot of the engine was busy, so the request wasn't inspected; the policy's `failureMode` decided. | Run more proxy replicas, or give the engine more CPU; see [InkwallEvaluationSlotsSaturated](monitoring.md#inkwallevaluationslotssaturated). |
+| `oversize` | The body is over what the policy inspects (`body.maxBytes`), and `body.onOversize` is `Deny` (the default in `Block` mode). | Raise `body.maxBytes`, or set `body.onOversize: Allow` to forward such bodies uninspected. |
+| `websocket` | A WebSocket handshake didn't meet the policy's `webSocket` settings: its origin, or a required header. | Add the origin to `webSocket.allowedOrigins`, or fix the client. |
+| `ip-deny` | The client IP is in a WAFIPList of the policy's `ipLists.deny`. | If the client is legitimate, remove its address from the list; check the client IP the engine resolved (`client_ip`). |
+| `grpc` | A gRPC call, on a policy that refuses them (`body.grpc: Deny`). | Set `body.grpc: Allow` if the route serves gRPC ([gRPC](grpc.md)). |
+<!-- end reasons -->
 
 A rule that matched a legitimate value is a false positive: exclude it for that argument, as
 [From a log line to an exclusion](testing-policies.md#from-a-log-line-to-an-exclusion) shows.

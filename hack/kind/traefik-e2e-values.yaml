@@ -46,4 +46,5 @@ ports:
       default: false
 
 service:
-  type: ClusterIP
+  spec:
+    type: ClusterIP
