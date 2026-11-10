@@ -322,6 +322,57 @@ func TestCRSSettings(t *testing.T) {
 	}
 }
 
+// TestRuleSetPlacement: a rule set placed before the CRS runs before the
+// CRS's initialization (REQUEST-901), as the standalone engine's
+// --rules-before-crs, so the TX variables it sets change what the CRS does
+// (#423). Placed after it (the default, or AfterCRS), the same rules come
+// too late: the CRS keeps its defaults.
+func TestRuleSetPlacement(t *testing.T) {
+	tune := &bundlev1.RuleSet{Id: "WAFRuleSet/shop/tune", Source: &bundlev1.RuleSet_Seclang{Seclang: `SecAction "id:100100,phase:1,pass,nolog,t:none,setvar:'tx.allowed_methods=GET HEAD POST OPTIONS PUT',setvar:tx.blocking_paranoia_level=2"`}}
+	policy := func(id, host string, placement bundlev1.RuleSetPlacement) *bundlev1.Policy {
+		return &bundlev1.Policy{Id: id, Mode: bundlev1.Mode_MODE_BLOCK, Timeout: testTimeout,
+			Routes: []*bundlev1.RouteMatch{rm(host, false, "/")},
+			RuleSets: []*bundlev1.RuleSetBinding{
+				{RuleSetId: "ClusterWAFRuleSet/crs"},
+				{RuleSetId: tune.Id, Placement: placement},
+			}}
+	}
+	b := &bundlev1.Bundle{Version: 1, RuleSets: append(testBundle().RuleSets, tune), Policies: []*bundlev1.Policy{
+		policy("shop/before", "before.example.com", bundlev1.RuleSetPlacement_RULE_SET_PLACEMENT_BEFORE_CRS),
+		policy("shop/after", "after.example.com", bundlev1.RuleSetPlacement_RULE_SET_PLACEMENT_AFTER_CRS),
+		policy("shop/default", "default.example.com", bundlev1.RuleSetPlacement_RULE_SET_PLACEMENT_UNSPECIFIED),
+	}}
+	ev := NewEvaluators()
+	set, err := Compile(b, Options{Evaluators: ev})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Len() != 2 {
+		t.Errorf("%d rule sets, want 2: one before the CRS, one after", ev.Len())
+	}
+	for _, tc := range []struct {
+		host, method, uri string
+		action            pipeline.Action
+	}{
+		// tx.allowed_methods (911100, phase 1).
+		{"before.example.com", "PUT", "/items/1", pipeline.ActionAllow},
+		{"after.example.com", "PUT", "/items/1", pipeline.ActionDeny},
+		{"default.example.com", "PUT", "/items/1", pipeline.ActionDeny},
+		{"before.example.com", "DELETE", "/items/1", pipeline.ActionDeny},
+		// tx.blocking_paranoia_level: 942480 is a paranoia level 2 rule.
+		{"before.example.com", "GET", "/?q=@@version", pipeline.ActionDeny},
+		{"after.example.com", "GET", "/?q=@@version", pipeline.ActionAllow},
+		{"default.example.com", "GET", "/?q=@@version", pipeline.ActionAllow},
+		{"before.example.com", "GET", "/", pipeline.ActionAllow},
+	} {
+		r := req(tc.host, tc.uri)
+		r.Method = tc.method
+		if v := set.Check(context.Background(), r); v.Action != tc.action {
+			t.Errorf("%s %s%s: %s/%s %v, want %s", tc.method, tc.host, tc.uri, v.Action, v.Reason, v.RuleIDs, tc.action)
+		}
+	}
+}
+
 // TestTargetExclusions: exclusions narrowed to a cookie, a header or an
 // argument name (target_exclusions) apply with the others.
 func TestTargetExclusions(t *testing.T) {
