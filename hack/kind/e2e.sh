@@ -701,6 +701,13 @@ engine_images() {
     -o jsonpath='{range .items[*]}{.spec.initContainers[?(@.name=="inkwall-engine")].image}{"\n"}{end}' | sort -u
 }
 chart_image=$(engine_images)
+# traefik_runs_one IMAGE: Traefik's pods, but those terminating, run the
+# engine IMAGE.
+traefik_runs_one() {
+  [[ $("${KUBECTL[@]}" -n "$TRAEFIK_NS" get pods -l app.kubernetes.io/name=traefik \
+    -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}|{.spec.initContainers[?(@.name=="inkwall-engine")].image}{"\n"}{end}' |
+    sed -n 's/^|//p' | sort -u) == "$1" ]]
+}
 ROLLOUT_IMAGE=${chart_image%:*}:rollout
 docker tag "$chart_image" "$ROLLOUT_IMAGE"
 kind load docker-image "$ROLLOUT_IMAGE" --name "$CLUSTER" >/dev/null
@@ -774,6 +781,68 @@ if $created_config; then "${KUBECTL[@]}" delete inkwallconfig default >/dev/null
 "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout status deployment/traefik-e2e --timeout=180s >/dev/null
 forward_traefik
 eventually "the engine in Traefik's pod still blocks the attack" tstatus_is 403 "$SQLI"
+
+# An older engine pinned in spec.engine.image (#536): it gets only the flags
+# its release knows, so its pod starts and blocks, without the settings it
+# would exit on; the InkwallConfig's EngineConfigured condition, and an
+# Event, name them. Unpinned, the chart's engine gets them all again.
+echo "== an older engine pinned in spec.engine.image"
+OLD_ENGINE=ghcr.io/inkwall-dev/inkwall-engine:${OLD_ENGINE_VERSION:-0.4.1}
+docker pull -q "$OLD_ENGINE" >/dev/null
+kind load docker-image "$OLD_ENGINE" --name "$CLUSTER" >/dev/null
+created_config=false
+if ! "${KUBECTL[@]}" get inkwallconfig default >/dev/null 2>&1; then
+  "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: InkwallConfig
+metadata: {name: default}
+YAML
+  created_config=true
+fi
+engine_configured() {
+  "${KUBECTL[@]}" get inkwallconfig default -o jsonpath="{.status.conditions[?(@.type==\"EngineConfigured\")].$1}"
+}
+engine_configured_is() { [[ $(engine_configured reason) == "$1" && $(engine_configured message) == *"$2"* ]]; }
+engine_event() {
+  "${KUBECTL[@]}" get events -A --field-selector reason=EngineTooOld,involvedObject.kind=InkwallConfig -o jsonpath='{.items[*].message}' |
+    grep -F spec.engine.jsonDenials
+}
+traefik_engine_args() {
+  "${KUBECTL[@]}" -n "$TRAEFIK_NS" get pods -l app.kubernetes.io/name=traefik \
+    -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}|{.spec.initContainers[?(@.name=="inkwall-engine")].args}{"\n"}{end}' |
+    grep -v '^[^|]'
+}
+restart_traefik_ready() {
+  "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout restart deployment/traefik-e2e >/dev/null
+  if "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout status deployment/traefik-e2e --timeout=180s >/dev/null; then
+    ok "$1"
+  else
+    fail "$1"
+  fi
+}
+"${KUBECTL[@]}" patch inkwallconfig default --type=merge \
+  -p "{\"spec\":{\"engine\":{\"image\":\"$OLD_ENGINE\",\"jsonDenials\":true,\"logLevel\":\"Debug\"}}}" >/dev/null
+eventually "EngineConfigured says the pinned engine is too old for the settings" \
+  engine_configured_is EngineTooOld "spec.engine.logLevel, spec.engine.jsonDenials"
+eventually "and a Warning Event says so" engine_event
+restart_traefik_ready "Traefik's new pod, with the $OLD_ENGINE engine, is ready"
+check "Traefik's pod runs the pinned engine" traefik_runs_one "$OLD_ENGINE"
+no_new_flags() { ! traefik_engine_args | grep -E -- '--json-denials|--log-level'; }
+check "its engine is injected without --json-denials and --log-level" no_new_flags
+forward_traefik
+eventually "the pinned engine blocks the attack" tstatus_is 403 "$SQLI"
+"${KUBECTL[@]}" patch inkwallconfig default --type=json -p '[{"op":"remove","path":"/spec/engine/image"}]' >/dev/null
+eventually "unpinned, EngineConfigured is True" engine_configured_is Configured "every spec.engine setting"
+restart_traefik_ready "Traefik's new pod, with the chart's engine, is ready"
+check "Traefik's pod runs the chart's engine" traefik_runs_one "$chart_image"
+new_flags() { traefik_engine_args | grep -- '--json-denials' | grep -- '--log-level=debug'; }
+check "with --json-denials and --log-level" new_flags
+"${KUBECTL[@]}" patch inkwallconfig default --type=json \
+  -p '[{"op":"remove","path":"/spec/engine/jsonDenials"},{"op":"remove","path":"/spec/engine/logLevel"}]' >/dev/null
+if $created_config; then "${KUBECTL[@]}" delete inkwallconfig default >/dev/null; fi
+restart_traefik_ready "Traefik restarted with the engine settings as before"
+forward_traefik
+eventually "the engine in Traefik's pod blocks the attack" tstatus_is 403 "$SQLI"
 
 # Deleted while the operator is down (#81): the finalizer keeps the policy,
 # and the route wired, until the operator is back and unwires it.

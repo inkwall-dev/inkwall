@@ -37,6 +37,11 @@ const (
 	// Automatic), and False when it has nothing to replace, is paused
 	// (reason Paused, saying why) or the rollout is Manual.
 	ConditionEngineRollout = "EngineRollout"
+	// ConditionEngineConfigured, on the InkwallConfig, is False when the
+	// engine pinned in spec.engine.image is injected without some
+	// spec.engine settings, because its release (or a custom build) may
+	// not know their flags; the message names them.
+	ConditionEngineConfigured = "EngineConfigured"
 )
 
 // SecretReference names a Secret in a given namespace.

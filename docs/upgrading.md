@@ -1,11 +1,12 @@
 # Upgrading
 
-This guide upgrades an Inkwall installation from 0.4.x to 0.5.0, from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
+This guide upgrades an Inkwall installation from 0.5.x to 0.6.0, from 0.4.x to 0.5.0, from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
 0.3.0, and from 0.1.x (0.1.0 to 0.1.5) to 0.2.2, the latest 0.2 release, and lists what changes on
 the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 ## Contents
 
+- [From 0.5.x to 0.6.0](#from-05x-to-060)
 - [From 0.4.x to 0.5.0](#from-04x-to-050)
 - [From 0.4.0 to 0.4.1](#from-040-to-041)
 - [From 0.3.x to 0.4.0](#from-03x-to-040)
@@ -30,6 +31,20 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
   - [Upgrading the chart](#upgrading-the-chart)
   - [Checking it worked](#checking-it-worked)
   - [Rolling back](#rolling-back)
+
+## From 0.5.x to 0.6.0
+
+What changes by itself:
+
+- **An older engine pinned in `InkwallConfig.spec.engine.image` starts.** It used to be injected
+  with every `spec.engine` setting's flag, and an engine before 0.5.0 exits on `--log-level`,
+  `--policy-metrics`, `--json-denials` or `--trusted-hops`, so its pod never became ready. The
+  operator now reads the engine's release from the image tag and leaves out the flags it doesn't
+  know; an image whose tag isn't a release (`latest`, a digest alone) gets only the flags every
+  release knows. The new `EngineConfigured` condition on the InkwallConfig, and a Warning Event,
+  name the settings left out: `kubectl get inkwallconfig default -o
+  jsonpath='{.status.conditions[?(@.type=="EngineConfigured")].message}'`. Pin a custom build with
+  its version in the tag (`:0.6.0@sha256:...`) to keep every setting.
 
 ## From 0.4.x to 0.5.0
 
