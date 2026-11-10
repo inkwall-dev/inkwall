@@ -125,16 +125,18 @@ else
   fail "no bundle Secret"
 fi
 # The samples live in the demo namespace and target its Ingress (make
-# kind-up); on a cluster without the demo, create both for the check.
-created_demo=false
+# kind-up); on a cluster without them, create what's missing for the check:
+# the namespace can be there without the Ingress, when kind-up stopped
+# before creating it (#544).
+created_ns=false
+created_ingress=false
 if ! "${KUBECTL[@]}" get namespace inkwall-demo >/dev/null 2>&1; then
-  created_demo=true
+  created_ns=true
+  "${KUBECTL[@]}" create namespace inkwall-demo >/dev/null
+fi
+if ! "${KUBECTL[@]}" -n inkwall-demo get ingress demo >/dev/null 2>&1; then
+  created_ingress=true
   "${KUBECTL[@]}" apply -f - >/dev/null <<'YAML'
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: inkwall-demo
----
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -162,8 +164,10 @@ fi
 # place it would cover every host in the cluster.
 "${KUBECTL[@]}" delete -f operator/config/samples/wafpolicy.yaml -f operator/config/samples/wafruleset.yaml \
   -f operator/config/samples/clusterwafruleset.yaml --ignore-not-found >/dev/null
-if $created_demo; then
+if $created_ns; then
   "${KUBECTL[@]}" delete namespace inkwall-demo --wait=false >/dev/null
+elif $created_ingress; then
+  "${KUBECTL[@]}" -n inkwall-demo delete ingress demo --ignore-not-found >/dev/null
 fi
 
 # Injection on a real kubelet: a pod labeled like Traefik's gets the engine
