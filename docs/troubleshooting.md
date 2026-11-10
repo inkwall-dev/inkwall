@@ -145,7 +145,7 @@ fix from these tables ([Explaining a policy or a denial](#explaining-a-policy-or
 | Reason | Meaning | Fix |
 |---|---|---|
 | `Accepted` | Valid, and in the bundle the engines get. | |
-| `InvalidRef` | A rule set, ConfigMap or key the policy (or its rule set) names doesn't exist, or isn't labeled `waf.inkwall.dev/rules=true`. | Create it, or fix the name. The message names it. |
+| `InvalidRef` | A rule set, ConfigMap or key the policy (or its rule set) names doesn't exist, or isn't labeled `waf.inkwall.dev/rules=true`. Or a rule set bound with `placement: BeforeCRS` can't load there: the built-in CRS, or SecLang with `SecRuleRemoveBy*` or `SecRuleUpdate*`. | Create it, or fix the name. The message names it. Move those directives to a rule set placed `AfterCRS` (the default). |
 | `RuleCompileError` | Rules in the policy's rule set don't compile, or use a directive Inkwall doesn't allow. | Fix the rules; `inkwallctl test --rule-set` shows the error before you apply. |
 | `Conflict` | An older policy targets the same route and applies to it: a route has one policy. | Merge the policies, or target other routes. |
 | `TargetUnsupported` | A target's match rules (an IngressRoute's, HTTPRoute's or VirtualService's) aren't ones the router can match, so its requests can't be told apart. | Use the forms the message lists (`Host`, `Path`, `PathPrefix`; exact and prefix paths). |

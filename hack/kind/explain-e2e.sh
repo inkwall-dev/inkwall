@@ -77,7 +77,7 @@ policy_explained() {
   [[ $? == 1 ]] && jq -e '
     (.ready | not) and
     (.conditions[] | select(.type == "Accepted") | .status == "False" and .reason == "InvalidRef" and .current and
-      (.message | test("explain-missing")) and .fix == "Create it, or fix the name. The message names it.") and
+      (.message | test("explain-missing")) and (.fix | startswith("Create it, or fix the name. The message names it."))) and
     (.conditions[] | select(.type == "Ready") | .reason == "InvalidRef" and (.cause | test("doesn.t exist"))) and
     (.targets == [{"kind": "Ingress", "name": "explain-missing"}])' "$explain_dir/policy.json"
 }

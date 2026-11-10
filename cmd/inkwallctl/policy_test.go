@@ -201,6 +201,71 @@ spec:
 	}
 }
 
+// TestTestPolicyPlacement: a rule set placed before the CRS runs before
+// it offline too, as the engine runs it (#423); after it (the default), the
+// TX variable it sets comes too late. One the operator would refuse fails.
+func TestTestPolicyPlacement(t *testing.T) {
+	ruleSets := writeFile(t, "tune.yaml", `apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFRuleSet
+metadata: {name: tune, namespace: shop}
+spec:
+  source:
+    seclang: |
+      SecAction "id:100100,phase:1,pass,nolog,t:none,setvar:'tx.allowed_methods=GET HEAD POST OPTIONS PUT'"
+---
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFRuleSet
+metadata: {name: remove, namespace: shop}
+spec:
+  source:
+    seclang: |
+      SecRuleRemoveById 911100
+`)
+	requests := writeFile(t, "requests.http", "PUT /api/items/1 HTTP/1.1\r\nHost: shop.example.com\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\n\r\n")
+	for _, tc := range []struct {
+		name, ruleSet, placement, want string
+	}{
+		{"BeforeCRS", "tune", "\n    placement: BeforeCRS", "allow      PUT /api/items/1  policy=shop/api"},
+		{"AfterCRS", "tune", "\n    placement: AfterCRS", "deny  403  PUT /api/items/1  policy=shop/api  reason=rule  rules=911100"},
+		{"default", "tune", "", "deny  403  PUT /api/items/1  policy=shop/api  reason=rule  rules=911100"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := writeFile(t, "wafpolicy.yaml", `apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata: {name: api, namespace: shop}
+spec:
+  targetRefs: [{kind: Ingress, name: api}]
+  mode: Block
+  ruleSets:
+  - ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}
+  - ref: {kind: WAFRuleSet, name: `+tc.ruleSet+`}`+tc.placement+"\n")
+			code, out, errOut := runCLI(t, "test", "--request", requests, "--policy", policy, "--rule-set", sampleRuleSets, "--rule-set", ruleSets,
+				"--configmap", sampleConfigMaps, "--ingress", sampleIngresses)
+			if code != 0 || errOut != "" {
+				t.Fatalf("exit %d, stderr %q", code, errOut)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("output lacks %q:\n%s", tc.want, out)
+			}
+		})
+	}
+	policy := writeFile(t, "wafpolicy.yaml", `apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata: {name: api, namespace: shop}
+spec:
+  targetRefs: [{kind: Ingress, name: api}]
+  ruleSets:
+  - ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}
+  - ref: {kind: WAFRuleSet, name: remove}
+    placement: BeforeCRS
+`)
+	code, _, errOut := runCLI(t, "test", "--request", requests, "--policy", policy, "--rule-set", sampleRuleSets, "--rule-set", ruleSets,
+		"--configmap", sampleConfigMaps, "--ingress", sampleIngresses)
+	if code == 0 || !strings.Contains(errOut, "WAFRuleSet remove can't be placed before the CRS: line 1") {
+		t.Errorf("a BeforeCRS rule set with SecRuleRemoveById: exit %d, stderr %q", code, errOut)
+	}
+}
+
 // TestTestPolicyTargetExclusions: header and cookie exclusions apply
 // offline as in the cluster (#357).
 func TestTestPolicyTargetExclusions(t *testing.T) {

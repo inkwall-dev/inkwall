@@ -265,6 +265,14 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 		if b.CRS != nil {
 			errs = append(errs, checkCRS(spec.Child("ruleSets").Index(i), b)...)
 		}
+		// The CRS can't load before itself (#423). Whether a SecLang rule
+		// set can is checked when the bundle is built: the rule set may
+		// come from a ConfigMap, and the webhook doesn't read other objects.
+		if b.Placement == wafv1alpha1.PlacementBeforeCRS && (b.ParanoiaLevel != nil || b.InboundAnomalyThreshold != nil || b.CRS != nil) {
+			errs = append(errs, field.Invalid(spec.Child("ruleSets").Index(i).Child("placement"), b.Placement,
+				"BeforeCRS is only for SecLang rule sets, and paranoiaLevel, inboundAnomalyThreshold and crs only for the built-in CRS: "+
+					"bind the CRS without placement, and the rule set to place before it in its own entry"))
+		}
 	}
 	return responseWarnings(p), invalid("WAFPolicy", p.Name, errs)
 }

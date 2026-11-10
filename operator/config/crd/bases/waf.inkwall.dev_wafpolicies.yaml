@@ -353,6 +353,19 @@ spec:
                       maximum: 4
                       minimum: 1
                       type: integer
+                    placement:
+                      description: |-
+                        Placement is where a SecLang rule set loads: AfterCRS (the default)
+                        or BeforeCRS, before the CRS's initialization, so its rules can set
+                        the CRS's tx variables or turn CRS rules off with
+                        ctl:ruleRemoveById. A BeforeCRS rule set can't use SecRuleRemoveBy*
+                        or SecRuleUpdate*, which only reach rules loaded before them. Not
+                        for the built-in CRS. Requires engines 0.6.0 or later: older ones
+                        load the rule set after the CRS.
+                      enum:
+                      - BeforeCRS
+                      - AfterCRS
+                      type: string
                     ref:
                       description: Ref is the rule set.
                       properties:
