@@ -51,6 +51,14 @@ What's new:
   threshold, and the narrowest exclusion, checked as `inkwallctl test --policy` does), with
   `-o json` for scripts. It only reads; `explain request` reads the engines' logs, so it needs
   `get` on `pods/log` ([Explaining a policy or a denial](troubleshooting.md#explaining-a-policy-or-a-denial)).
+- **Responses through HAProxy, configured by hand.** `inkwall-engine spoe --inspect-responses`
+  inspects the responses HAProxy sends in the new `inkwall-response` SPOE group: a response that
+  leaks is replaced with 403 in block mode and logged in detect mode. Copy the new lines of
+  `examples/haproxy/spoe.conf` (the group, the message and the longer `register-var-names`) and
+  `haproxy.cfg` (the `Accept-Encoding` removal and the `http-response` rules): they do nothing
+  until the engine runs with the flag. See [protecting HAProxy](haproxy.md#responses). Through the
+  HAProxy Kubernetes Ingress Controller a policy with `responses.inspect` is still
+  `ResponsesNotInspected` (#470).
 
 What changes by itself:
 
