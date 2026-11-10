@@ -372,6 +372,60 @@ func TestConfigMapRules(t *testing.T) {
 	}
 }
 
+// A rule set placed before the CRS (#423) goes into the bundle with its
+// placement; AfterCRS, the default, leaves the binding as before. The
+// built-in CRS can't be placed before itself, and a BeforeCRS rule set
+// can't hold directives that change loaded rules: they would reach no CRS
+// rule.
+func TestResolvePlacement(t *testing.T) {
+	crs := wafv1alpha1.ClusterWAFRuleSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "crs"},
+		Spec:       wafv1alpha1.ClusterWAFRuleSetSpec{Source: wafv1alpha1.ClusterRuleSetSource{Builtin: wafv1alpha1.BuiltinCRSv4}},
+	}
+	bind := func(kind, name string, placement wafv1alpha1.RuleSetPlacement) wafv1alpha1.RuleSetBinding {
+		return wafv1alpha1.RuleSetBinding{Ref: wafv1alpha1.RuleSetRef{Kind: kind, Name: name}, Placement: placement}
+	}
+	p := policy("shop", 0)
+	p.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{
+		bind("ClusterWAFRuleSet", "crs", ""),
+		bind("WAFRuleSet", "tune", wafv1alpha1.PlacementBeforeCRS),
+		bind("WAFRuleSet", "custom", wafv1alpha1.PlacementAfterCRS),
+	}
+	builtin := policy("builtin", 0)
+	builtin.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{bind("ClusterWAFRuleSet", "crs", wafv1alpha1.PlacementBeforeCRS)}
+	remove := policy("remove", 0)
+	remove.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{bind("ClusterWAFRuleSet", "crs", ""), bind("WAFRuleSet", "exclusions", wafv1alpha1.PlacementBeforeCRS)}
+	// The same rule set after the CRS is fine.
+	after := policy("after", 0)
+	after.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{bind("ClusterWAFRuleSet", "crs", ""), bind("WAFRuleSet", "exclusions", "")}
+
+	res := Resolve(Input{
+		Policies: []wafv1alpha1.WAFPolicy{p, builtin, remove, after},
+		RuleSets: []wafv1alpha1.WAFRuleSet{
+			seclangRuleSet("tune", `SecAction "id:100100,phase:1,pass,nolog,setvar:tx.blocking_paranoia_level=2"`),
+			seclangRuleSet("custom", "SecMarker X"),
+			seclangRuleSet("exclusions", "SecMarker Y\nSecRuleRemoveById 920350"),
+		},
+		ClusterRuleSets: []wafv1alpha1.ClusterWAFRuleSet{crs},
+	})
+	wantStatus(t, res, "shop", true, ReasonAccepted, "valid")
+	wantProto(t, findPolicy(res, "shop/shop"), &bundlev1.Policy{
+		Id:   "shop/shop",
+		Mode: bundlev1.Mode_MODE_DETECT,
+		RuleSets: []*bundlev1.RuleSetBinding{
+			{RuleSetId: "ClusterWAFRuleSet/crs"},
+			{RuleSetId: "WAFRuleSet/shop/tune", Placement: bundlev1.RuleSetPlacement_RULE_SET_PLACEMENT_BEFORE_CRS},
+			{RuleSetId: "WAFRuleSet/shop/custom"},
+		},
+	})
+	wantStatus(t, res, "builtin", false, ReasonInvalidRef, "ClusterWAFRuleSet crs is the built-in CRS: it can't be placed before itself")
+	wantStatus(t, res, "remove", false, ReasonInvalidRef, "WAFRuleSet exclusions can't be placed before the CRS: line 2")
+	wantStatus(t, res, "after", true, ReasonAccepted, "valid")
+	if findPolicy(res, "shop/builtin") != nil || findPolicy(res, "shop/remove") != nil {
+		t.Error("a policy whose rule set can't be placed before the CRS is in the bundle")
+	}
+}
+
 func TestDeterministic(t *testing.T) {
 	var in Input
 	for i := range 20 {

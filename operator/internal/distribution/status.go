@@ -186,6 +186,10 @@ func requirement(p *wafv1alpha1.WAFPolicy) (string, [3]int) {
 			// An older engine keeps the CRS's defaults (#352).
 			set(fmt.Sprintf("spec.ruleSets[%d].crs", i), [3]int{0, 5, 0})
 		}
+		if b.Placement == wafv1alpha1.PlacementBeforeCRS {
+			// An older engine loads the rule set after the CRS (#423).
+			set(fmt.Sprintf("spec.ruleSets[%d].placement", i), [3]int{0, 6, 0})
+		}
 	}
 	if l := p.Spec.IPLists; l != nil && (len(l.Allow) > 0 || len(l.Deny) > 0) {
 		// An older engine ignores the lists (#358).
