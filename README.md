@@ -77,7 +77,7 @@ first protected route. Turn on its Backend API, which the engine's socket needs:
 
 <!-- versions: ENVOY_GATEWAY_VERSION -->
 ```sh
-helm upgrade --install eg oci://docker.io/envoyproxy/gateway-helm --version v1.9.3 \
+helm upgrade --install eg oci://docker.io/envoyproxy/gateway-helm --version v1.10.0 \
   --namespace envoy-gateway-system --create-namespace \
   --set config.envoyGateway.extensionApis.enableBackend=true
 ```
