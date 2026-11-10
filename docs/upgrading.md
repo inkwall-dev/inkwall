@@ -62,6 +62,15 @@ What's new:
   `GET` or `HEAD` is `NotProbeable` there. A request with a valid probe header is inspected in
   `Detect` mode, as any request.
 
+What changes by itself:
+
+- **The engine and the operator take their Go memory limit from the container's cgroup** when
+  `MEMORY_LIMIT` isn't set: a standalone engine in a plain container (`docker run --memory 256m`)
+  now sets `GOMEMLIMIT` to 90% of that limit, as the chart and the injected engine always did
+  from `MEMORY_LIMIT`, which still wins; `GOMEMLIMIT` set by hand still wins over both. The
+  `Go memory limit set` log line says where the limit came from
+  ([memory limit](standalone-proxy.md#memory-limit)).
+
 ## From 0.4.x to 0.5.0
 
 What's new:
