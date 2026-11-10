@@ -51,6 +51,11 @@ What's new:
   threshold, and the narrowest exclusion, checked as `inkwallctl test --policy` does), with
   `-o json` for scripts. It only reads; `explain request` reads the engines' logs, so it needs
   `get` on `pods/log` ([Explaining a policy or a denial](troubleshooting.md#explaining-a-policy-or-a-denial)).
+- **`inkwallctl mcp`** serves those answers to an AI assistant (Claude Code, Cursor, VS Code, ...)
+  over the Model Context Protocol: read-only tools (`status`, `explain_policy`, `explain_request`,
+  `test_policy`, `suggest_exclusions`, `list_policies`, `get_policy`) and this version's docs. The
+  assistant starts it on your machine, with your kubeconfig; nothing is hosted
+  ([Using Inkwall from an AI assistant](mcp.md)).
 
 ## From 0.4.x to 0.5.0
 
