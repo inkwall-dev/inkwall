@@ -23,8 +23,11 @@ jobs:
       contents: write
       issues: write
     steps:
-      # Credentials kept: this job pushes the bump's branch.
+      # The bump is committed through the API (signed by GitHub, #566), not
+      # pushed with git: no credentials kept.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
@@ -44,13 +47,25 @@ jobs:
         run: |
           # One branch per run: a rerun never has to overwrite a pushed one.
           branch=deps/versions-$(date -u +%Y%m%d)-$RUN_ID
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$branch"
-          git add hack/versions.env examples/raw-envoy/kubernetes.yaml
-          git ls-files -m '*.md' | xargs -r git add
-          git commit -m "build(deps): bump the versions under test"
-          git push origin "$branch"
+          # main requires signed commits: a commit made with git here would be
+          # unsigned and its PR couldn't merge (#566). The API's
+          # createCommitOnBranch makes one GitHub signs, with the files the
+          # bump changed.
+          base=$(git rev-parse HEAD)
+          gh api -X POST "repos/$REPO/git/refs" -f ref="refs/heads/$branch" -f sha="$base" >/dev/null
+          git diff --name-only | while IFS= read -r f; do
+            jq -n --arg path "$f" --arg contents "$(base64 -w0 "$f")" '{path: $path, contents: $contents}'
+          done | jq -s . > additions.json
+          jq -n --arg repo "$REPO" --arg branch "$branch" --arg head "$base" --slurpfile additions additions.json '{
+            query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
+            variables: {input: {
+              branch: {repositoryNameWithOwner: $repo, branchName: $branch},
+              expectedHeadOid: $head,
+              message: {headline: "build(deps): bump the versions under test"},
+              fileChanges: {additions: $additions[0]}
+            }}
+          }' > commit.json
+          gh api graphql --input commit.json -q .data.createCommitOnBranch.commit.oid
 
           # One open issue for the bumps: updated each week until a PR closes it.
           title="Versions under test: upstream releases to bump to"
