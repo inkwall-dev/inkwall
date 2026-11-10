@@ -233,6 +233,36 @@ func TestEnforcedOutdatedEngine(t *testing.T) {
 		}
 	}
 
+	// A rule set placed before the CRS (#423): an engine before 0.6.0
+	// loads it after the CRS, where its TX settings come too late.
+	before := []wafv1alpha1.RuleSetBinding{
+		{Ref: wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: "crs"}},
+		{Ref: wafv1alpha1.RuleSetRef{Kind: "WAFRuleSet", Name: "tune"}, Placement: wafv1alpha1.PlacementBeforeCRS},
+	}
+	for _, tc := range []struct {
+		name     string
+		ruleSets []wafv1alpha1.RuleSetBinding
+		versions []string
+		reason   string
+	}{
+		{"BeforeCRS, 0.5.0 engine", before, []string{"0.6.0", "0.5.0"}, ReasonEnginesOutdated},
+		{"BeforeCRS, new engines", before, []string{"0.6.0", "v0.6.0-rc.1"}, ReasonEnforced},
+		{"AfterCRS, 0.5.0 engine", []wafv1alpha1.RuleSetBinding{{Placement: wafv1alpha1.PlacementAfterCRS}}, []string{"0.5.0"}, ReasonEnforced},
+	} {
+		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
+		p.Spec.RuleSets = tc.ruleSets
+		p.Status.BundleVersion = 3
+		var engines []Engine
+		for i, v := range tc.versions {
+			engines = append(engines, Engine{ID: fmt.Sprintf("e%d", i), PodNamespace: "edge", PodName: fmt.Sprintf("envoy-%d", i), EngineVersion: v, Applied: 3})
+		}
+		conds, _ := enforcedConditions(p, 3, false, engines, 0)
+		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
+		if c == nil || c.Reason != tc.reason || tc.reason == ReasonEnginesOutdated && (!strings.Contains(c.Message, "spec.ruleSets[1].placement") || !strings.Contains(c.Message, "0.6.0 or later")) {
+			t.Errorf("%s: Enforced %+v, want %s", tc.name, c, tc.reason)
+		}
+	}
+
 	// IP lists (#358): an engine before 0.5.0 ignores them, so it wouldn't
 	// deny what the deny list names.
 	for _, tc := range []struct {
@@ -349,6 +379,23 @@ func TestEnforcedOutdatedNewestField(t *testing.T) {
 	c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
 	if c == nil || c.Reason != ReasonEnginesOutdated || !strings.Contains(c.Message, "spec.ipLists") || !strings.Contains(c.Message, "0.5.0 or later") {
 		t.Errorf("a 0.4.1 engine and a policy with webSocket and ipLists: Enforced %+v, want EnginesOutdated naming spec.ipLists", c)
+	}
+}
+
+// A 0.5.0 field before a 0.6.0 one: the 0.6.0 one is named (#423).
+func TestEnforcedOutdatedNewestFieldPlacement(t *testing.T) {
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
+	p.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{
+		{Ref: wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: "crs"}, CRS: &wafv1alpha1.CRSSettings{AllowedMethods: []wafv1alpha1.HTTPMethodToken{"GET", "PUT"}}},
+		{Ref: wafv1alpha1.RuleSetRef{Kind: "WAFRuleSet", Name: "tune"}, Placement: wafv1alpha1.PlacementBeforeCRS},
+	}
+	p.Spec.IPLists = &wafv1alpha1.IPListsSpec{Deny: []wafv1alpha1.IPListName{"blocked"}}
+	p.Status.BundleVersion = 3
+	engines := []Engine{{ID: "e0", PodNamespace: "edge", PodName: "traefik-0", EngineVersion: "0.5.0", Applied: 3}}
+	conds, _ := enforcedConditions(p, 3, false, engines, 0)
+	c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
+	if c == nil || c.Reason != ReasonEnginesOutdated || !strings.Contains(c.Message, "spec.ruleSets[1].placement") || !strings.Contains(c.Message, "0.6.0 or later") {
+		t.Errorf("a 0.5.0 engine and a policy with crs, ipLists and a BeforeCRS rule set: Enforced %+v, want EnginesOutdated naming spec.ruleSets[1].placement", c)
 	}
 }
 

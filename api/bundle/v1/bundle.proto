@@ -190,6 +190,25 @@ message RuleSetBinding {
   // The CRS's other settings. Built-in CRS only. Engines before 0.5.0
   // ignore it.
   CRSSettings crs = 4;
+  // Where a SecLang rule set loads: unset, after the built-in CRS. Ignored
+  // for the built-in CRS. Engines before 0.6.0 ignore it and load the rule
+  // set after the CRS: the operator doesn't count them as enforcing a
+  // policy that places one before it.
+  RuleSetPlacement placement = 5;
+}
+
+// RuleSetPlacement is where a SecLang rule set loads, relative to the
+// built-in CRS. Rule sets of the same placement load in the policy's order.
+enum RuleSetPlacement {
+  // After the CRS, as RULE_SET_PLACEMENT_AFTER_CRS.
+  RULE_SET_PLACEMENT_UNSPECIFIED = 0;
+  // After the CRS: custom rules and configure-time exclusions
+  // (SecRuleRemoveById, SecRuleUpdateTargetById).
+  RULE_SET_PLACEMENT_AFTER_CRS = 1;
+  // Before the CRS (and its initialization, REQUEST-901), as the standalone
+  // engine's --rules-before-crs: rules that set the CRS's TX variables or
+  // turn CRS rules off at runtime (ctl:ruleRemoveById).
+  RULE_SET_PLACEMENT_BEFORE_CRS = 2;
 }
 
 // CRSSettings are OWASP CRS variables the engine sets on each transaction,

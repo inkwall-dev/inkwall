@@ -189,7 +189,8 @@ the routes instead, and apply once those routes serve the traffic.
 - **Rule ranges.** A `ctl:ruleRemoveById` range becomes the IDs of the CRS rules in it today; rules
   a later CRS adds to the range are not excluded (the summary marks these `check`).
 - **Order.** Kept rules load after the CRS, while snippet rules in ingress-nginx could load before
-  it. Path exclusions apply from the start of the request, as `ctl` rules in phase 1 did; a `ctl`
+  it. To load such rules before the CRS, move them to a rule set of their own and bind it with
+  `placement: BeforeCRS` (engines 0.6.0 or later). Path exclusions apply from the start of the request, as `ctl` rules in phase 1 did; a `ctl`
   rule in phase 2 (`phase:2`, `phase:request` or no `phase`) is marked `check`, since the excluded
   rules' phase 1 checks are now off on its path too.
 - **Failure mode.** In Block mode, a request that can't be inspected in time is rejected (503); see

@@ -26,6 +26,11 @@
 // The version subcommand (or --version) prints the version, the commit and
 // the Go version inkwallctl was built with.
 //
+// The explain subcommand says why a WAFPolicy isn't Ready (explain policy
+// NAMESPACE/NAME) or why a request was denied (explain request
+// REQUEST-ID), from the cluster's state, read only, with -o json for
+// scripts and assistants (docs/troubleshooting.md).
+//
 // The migrate ingress-nginx subcommand converts ingress-nginx's ModSecurity
 // annotations and ConfigMap settings into WAFPolicy objects, targeting the
 // Ingresses or (--target) the HTTPRoutes or IngressRoutes replacing them.
@@ -86,6 +91,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "status" {
 		return runStatus(args[1:], stdout, stderr)
 	}
+	if len(args) > 0 && args[0] == "explain" {
+		return runExplain(args[1:], os.Stdin, stdout, stderr)
+	}
 	if len(args) > 0 && args[0] == "tune" {
 		return runTune(args[1:], os.Stdin, stdout, stderr)
 	}
@@ -99,6 +107,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "       inkwallctl migrate ingress-nginx [flags] -f FILE ... | --cluster")
 		fmt.Fprintln(stderr, "       inkwallctl status [flags]")
 		fmt.Fprintln(stderr, "       inkwallctl tune [flags] [--policy FILE ...] FILE ...")
+		fmt.Fprintln(stderr, "       inkwallctl explain request [flags] REQUEST-ID")
+		fmt.Fprintln(stderr, "       inkwallctl explain policy [flags] NAMESPACE/NAME")
 		fmt.Fprintln(stderr, "       inkwallctl version")
 		fmt.Fprintln(stderr, "run 'inkwallctl <command> -h' for flags")
 		return 2
