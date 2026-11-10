@@ -84,7 +84,7 @@ cp_cleanup() {
   # The control plane's policies, if a Managed run stopped midway: out of
   # Managed mode (once the webhook sees it) anyone may delete them.
   for _ in $(seq 20); do
-    "${KUBECTL[@]}" delete wafpolicies,wafrulesets,clusterwafrulesets -A -l inkwall.dev/source=saas >/dev/null 2>&1 && break
+    "${KUBECTL[@]}" delete wafpolicies,wafrulesets,clusterwafrulesets,wafiplists -A -l inkwall.dev/source=saas >/dev/null 2>&1 && break
     sleep 0.5
   done
   "${KUBECTL[@]}" -n "$OPERATOR_NS" delete secret inkwall-control-plane-identity --ignore-not-found >/dev/null 2>&1 || true
@@ -1081,6 +1081,19 @@ eventually "a new WAFPolicy reaches the control plane" state_has "WAFPolicy $NS/
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy cp-sync --wait >/dev/null
 state_lacks() { ! state_has "$1"; }
 eventually "and so does its deletion" state_lacks "WAFPolicy $NS/cp-sync"
+# The IP lists too (#577).
+"${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFIPList
+metadata:
+  name: cp-sync
+  namespace: $NS
+spec:
+  entries: [{cidr: 203.0.113.0/24}]
+YAML
+eventually "a new WAFIPList reaches the control plane" state_has "WAFIPList $NS/cp-sync"
+"${KUBECTL[@]}" -n "$NS" delete wafiplist cp-sync --wait >/dev/null
+eventually "and so does its deletion" state_lacks "WAFIPList $NS/cp-sync"
 # Events (#92): an attack blocked in Traefik reaches the control plane, on
 # the events streams of the operator's replicas.
 "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
@@ -1131,6 +1144,8 @@ send_snapshot() {
 }
 acked() { stub_stats | grep -Eq "\"acks\":\[([0-9]+,)*$1[],]"; }
 nacked() { stub_stats | grep "\"$1: " >/dev/null; }
+# The policy denies an IP list the snapshot carries too (#577): a
+# documentation prefix, so the test's requests aren't in it.
 managed_policy() {
   cat <<YAML
 - apiVersion: waf.inkwall.dev/v1alpha1
@@ -1139,12 +1154,20 @@ managed_policy() {
   spec:
     targetRefs: [{kind: Ingress, name: web}]
     mode: Block
+    ipLists: {deny: [managed]}
+- apiVersion: waf.inkwall.dev/v1alpha1
+  kind: WAFIPList
+  metadata: {name: managed, namespace: $NS}
+  spec:
+    entries: [{cidr: 203.0.113.0/24}]
 YAML
 }
 managed_policy | send_snapshot 1
 eventually "the stub's snapshot is acknowledged (PolicyAck)" acked 1
-saas_label() { [[ $("${KUBECTL[@]}" -n "$NS" get wafpolicy managed -o jsonpath='{.metadata.labels.inkwall\.dev/source}') == saas ]]; }
-check "its policy is written, labelled inkwall.dev/source: saas" saas_label
+saas_label() { [[ $("${KUBECTL[@]}" -n "$NS" get "$1" managed -o jsonpath='{.metadata.labels.inkwall\.dev/source}') == saas ]]; }
+check "its policy is written, labelled inkwall.dev/source: saas" saas_label wafpolicy
+check "and its IP list" saas_label wafiplist
+eventually "the IP list is in the ClusterState" state_has "WAFIPList $NS/managed"
 eventually "Traefik blocks the attack under the stub's policy" tstatus_is 403 "$SQLI"
 eventually "the stub gets it back Enforced in the ClusterState" enforced_in_state managed
 # guarded COMMAND...: the webhook refuses it, naming the control plane.
@@ -1157,6 +1180,8 @@ check "kubectl edit of the policy is refused" guarded env KUBE_EDITOR="sed -i 's
 check "kubectl patch of the policy is refused" guarded "${KUBECTL[@]}" -n "$NS" patch wafpolicy managed --type=merge -p '{"spec":{"mode":"Detect"}}'
 check "removing its label is refused" guarded "${KUBECTL[@]}" -n "$NS" label wafpolicy managed inkwall.dev/source-
 check "deleting it is refused" guarded "${KUBECTL[@]}" -n "$NS" delete wafpolicy managed --wait=false
+check "kubectl patch of its IP list is refused" guarded "${KUBECTL[@]}" -n "$NS" patch wafiplist managed --type=merge -p '{"spec":{"entries":[{"cidr":"0.0.0.0/0"}]}}'
+check "deleting its IP list is refused" guarded "${KUBECTL[@]}" -n "$NS" delete wafiplist managed --wait=false
 forged() {
   "${KUBECTL[@]}" apply -f - <<YAML
 apiVersion: waf.inkwall.dev/v1alpha1
@@ -1182,13 +1207,28 @@ check "the policy is unchanged" still_block
 YAML
 } | send_snapshot 2
 eventually "a snapshot with a bad object is refused (PolicyNack)" nacked 2
-no_broken() { ! "${KUBECTL[@]}" -n "$NS" get wafpolicy broken >/dev/null 2>&1; }
-check "nothing of it is written" no_broken
+no_broken() { ! "${KUBECTL[@]}" -n "$NS" get "$1" broken >/dev/null 2>&1; }
+check "nothing of it is written" no_broken wafpolicy
 check "the policy in force stays" tstatus_is 403 "$SQLI"
-echo '[]' | send_snapshot 3
-eventually "an empty snapshot is acknowledged" acked 3
-no_managed() { ! "${KUBECTL[@]}" -n "$NS" get wafpolicy managed >/dev/null 2>&1; }
-eventually "and deletes the stub's policy" no_managed
+# An IP list the webhook refuses (an address the schema's pattern lets
+# through, the engine's parser doesn't): checked as the webhook does.
+{
+  managed_policy
+  cat <<YAML
+- apiVersion: waf.inkwall.dev/v1alpha1
+  kind: WAFIPList
+  metadata: {name: broken, namespace: $NS}
+  spec:
+    entries: [{cidr: 300.0.0.0/8}]
+YAML
+} | send_snapshot 3
+eventually "a snapshot with a bad IP list is refused (PolicyNack)" nacked 3
+check "nothing of it is written" no_broken wafiplist
+echo '[]' | send_snapshot 4
+eventually "an empty snapshot is acknowledged" acked 4
+no_managed() { ! "${KUBECTL[@]}" -n "$NS" get "$1" managed >/dev/null 2>&1; }
+eventually "and deletes the stub's policy" no_managed wafpolicy
+eventually "and its IP list" no_managed wafiplist
 eventually "the attack passes again" tstatus_is 200 "$SQLI"
 
 # A restarted operator without its certificate (lost, say) can only enroll

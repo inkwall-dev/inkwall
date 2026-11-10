@@ -51,9 +51,20 @@ What's new:
   threshold, and the narrowest exclusion, checked as `inkwallctl test --policy` does), with
   `-o json` for scripts. It only reads; `explain request` reads the engines' logs, so it needs
   `get` on `pods/log` ([Explaining a policy or a denial](troubleshooting.md#explaining-a-policy-or-a-denial)).
+- **A control plane can deliver and see `WAFIPList`s** (#577). In Managed mode, a policy snapshot
+  may carry the IP lists its policies name, written and pruned like the other kinds and labelled
+  `inkwall.dev/source: saas`; the cluster state lists every `WAFIPList`
+  ([Managed mode](control-plane.md#managed-mode)). A control plane that sends none changes
+  nothing.
 
 What changes by itself:
 
+- **In Managed mode, a `WAFIPList` labelled `inkwall.dev/source: saas` is the control plane's**,
+  as the other kinds were: besides edits, the webhook now refuses deleting it, and the next
+  snapshot that doesn't carry it deletes it. The operator never wrote such lists before 0.6.0, so
+  one you labelled yourself is pruned: find them with
+  `kubectl get wafiplist -A -l inkwall.dev/source=saas`, and remove the label before the cluster
+  is in Managed mode (in Managed mode the webhook refuses removing it).
 - **The engine and the operator take their Go memory limit from the container's cgroup** when
   `MEMORY_LIMIT` isn't set: a standalone engine in a plain container (`docker run --memory 256m`)
   now sets `GOMEMLIMIT` to 90% of that limit, as the chart and the injected engine always did

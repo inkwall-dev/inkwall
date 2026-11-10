@@ -147,6 +147,29 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /validate-waf-inkwall-dev-v1alpha1-wafiplist
+  failurePolicy: Fail
+  name: delete.wafiplists.waf.inkwall.dev
+  objectSelector:
+    matchLabels:
+      inkwall.dev/source: saas
+  rules:
+  - apiGroups:
+    - waf.inkwall.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - DELETE
+    resources:
+    - wafiplists
+  sideEffects: None
+  timeoutSeconds: 2
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /validate-waf-inkwall-dev-v1alpha1-wafpolicy
   failurePolicy: Fail
   name: delete.wafpolicies.waf.inkwall.dev

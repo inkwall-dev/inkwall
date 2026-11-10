@@ -52,8 +52,8 @@ type SecretReference struct {
 	Namespace string `json:"namespace"`
 }
 
-// SourceLabel says where a WAFPolicy, WAFRuleSet or ClusterWAFRuleSet comes
-// from. In Managed mode the operator writes the control plane's policies
+// SourceLabel says where a WAFPolicy, WAFRuleSet, ClusterWAFRuleSet or
+// WAFIPList comes from. In Managed mode the operator writes the control plane's policies
 // labelled SourceSaaS (0004 §4.9), and the validating webhook lets no one
 // else create, change or delete them, or add or remove the label.
 const (
