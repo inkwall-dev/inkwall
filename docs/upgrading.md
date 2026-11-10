@@ -1,11 +1,12 @@
 # Upgrading
 
-This guide upgrades an Inkwall installation from 0.4.x to 0.5.0, from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
+This guide upgrades an Inkwall installation from 0.5.x to 0.6.0, from 0.4.x to 0.5.0, from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
 0.3.0, and from 0.1.x (0.1.0 to 0.1.5) to 0.2.2, the latest 0.2 release, and lists what changes on
 the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
 
 ## Contents
 
+- [From 0.5.x to 0.6.0](#from-05x-to-060)
 - [From 0.4.x to 0.5.0](#from-04x-to-050)
 - [From 0.4.0 to 0.4.1](#from-040-to-041)
 - [From 0.3.x to 0.4.0](#from-03x-to-040)
@@ -30,6 +31,17 @@ the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
   - [Upgrading the chart](#upgrading-the-chart)
   - [Checking it worked](#checking-it-worked)
   - [Rolling back](#rolling-back)
+
+## From 0.5.x to 0.6.0
+
+What's new:
+
+- **`inkwallctl explain`** says why a policy isn't `Ready` (`explain policy <namespace>/<name>`:
+  the cause and the fix of each condition that isn't `True`) and why a request was denied
+  (`explain request <request-id>`: the rules with their CRS descriptions, the score against the
+  threshold, and the narrowest exclusion, checked as `inkwallctl test --policy` does), with
+  `-o json` for scripts. It only reads; `explain request` reads the engines' logs, so it needs
+  `get` on `pods/log` ([Explaining a policy or a denial](troubleshooting.md#explaining-a-policy-or-a-denial)).
 
 ## From 0.4.x to 0.5.0
 

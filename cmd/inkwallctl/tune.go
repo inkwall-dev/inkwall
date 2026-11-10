@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/yaml"
 
+	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
@@ -126,6 +127,8 @@ func runTune(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 // tuneEvent is a security event, from the events API or an engine's log.
+// Every field but Policy is the request's or comes from it: data written
+// by the client.
 type tuneEvent struct {
 	Policy    string
 	Path      string
@@ -134,6 +137,9 @@ type tuneEvent struct {
 	RequestID string
 	ClientIP  string
 	Matches   []tuneMatch
+	// For inkwallctl explain: the rest of the event.
+	Phase, Method, Host                string
+	Status, AnomalyScore, Interrupting int
 }
 
 type tuneMatch struct {
@@ -145,6 +151,31 @@ type tuneMatch struct {
 // "security event" ones) or events, with protojson's camelCase names or
 // the proto's snake_case ones.
 func readTuneEvents(r io.Reader, fromLogs bool) ([]tuneEvent, error) {
+	lines := eventsOnly
+	if fromLogs {
+		lines = logLines
+	}
+	return readEvents(r, lines, nil)
+}
+
+// eventLines is what readEvents reads.
+type eventLines int
+
+const (
+	// eventsOnly: one event per line, the events API's; any other line is
+	// an error.
+	eventsOnly eventLines = iota
+	// logLines: an engine's log, of which the "security event" lines are
+	// read and the others skipped.
+	logLines
+	// anyLines: either, line by line; lines that are neither are skipped.
+	anyLines
+)
+
+// readEvents reads the security events in r. keep, if set, is asked first
+// about every line: it skips the lines it returns false for, unparsed.
+func readEvents(r io.Reader, lines eventLines, keep func(string) bool) ([]tuneEvent, error) {
+	fromLogs := lines != eventsOnly
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64<<10), 4<<20)
 	var evs []tuneEvent
@@ -152,7 +183,7 @@ func readTuneEvents(r io.Reader, fromLogs bool) ([]tuneEvent, error) {
 	for sc.Scan() {
 		line++
 		text := strings.TrimSpace(sc.Text())
-		if text == "" {
+		if text == "" || (keep != nil && !keep(text)) {
 			continue
 		}
 		if fromLogs {
@@ -169,7 +200,8 @@ func readTuneEvents(r io.Reader, fromLogs bool) ([]tuneEvent, error) {
 			}
 			return nil, fmt.Errorf("line %d: %w", line, err)
 		}
-		if fromLogs && str(raw, "msg") != "security event" {
+		_, isLog := raw["msg"]
+		if fromLogs && (lines == logLines || isLog) && str(raw, "msg") != "security event" {
 			continue
 		}
 		ev := tuneEvent{
@@ -179,7 +211,13 @@ func readTuneEvents(r io.Reader, fromLogs bool) ([]tuneEvent, error) {
 			Reason:    strings.ToLower(strings.TrimPrefix(str(raw, "reason"), "REASON_")),
 			RequestID: str(raw, "request_id", "requestId"),
 			ClientIP:  str(raw, "client_ip", "clientIp"),
+			Phase:     strings.ToLower(strings.TrimPrefix(str(raw, "phase"), "PHASE_")),
+			Method:    str(raw, "method"),
+			Host:      str(raw, "host"),
 		}
+		ev.Status, _ = strconv.Atoi(str(raw, "status"))
+		ev.AnomalyScore, _ = strconv.Atoi(str(raw, "anomaly_score", "anomalyScore"))
+		ev.Interrupting, _ = strconv.Atoi(str(raw, "interrupting_rule_id", "interruptingRuleId"))
 		var matches []map[string]json.RawMessage
 		if m, ok := raw["matches"]; ok {
 			if err := json.Unmarshal(m, &matches); err != nil {
@@ -415,6 +453,14 @@ func (rep *tuneReport) validate(objects config, notes io.Writer) error {
 	if err != nil {
 		return err
 	}
+	_, err = rep.validateInput(in, suspended, notes)
+	return err
+}
+
+// validateInput adds the suggestions to the policies of in, and checks them
+// as validate does. It returns the bundle the operator would publish with
+// them. in's policies are changed.
+func (rep *tuneReport) validateInput(in resolver.Input, suspended bool, notes io.Writer) (*bundlev1.Bundle, error) {
 	for i := range in.Policies {
 		p := &in.Policies[i]
 		add := rep.Suggestions[resolver.PolicyID(p.Namespace, p.Name)]
@@ -423,7 +469,7 @@ func (rep *tuneReport) validate(objects config, notes io.Writer) error {
 		}
 		p.Spec.Exclusions = append(p.Spec.Exclusions, add...)
 		if n := len(p.Spec.Exclusions); n > 64 {
-			return fmt.Errorf("WAFPolicy %s/%s would have %d exclusions, over the 64 a policy takes: raise --min-count", p.Namespace, p.Name, n)
+			return nil, fmt.Errorf("WAFPolicy %s/%s would have %d exclusions, over the 64 a policy takes: raise --min-count", p.Namespace, p.Name, n)
 		}
 		rep.Patched = append(rep.Patched, *p)
 	}
@@ -437,12 +483,12 @@ func (rep *tuneReport) validate(objects config, notes io.Writer) error {
 	}
 	b, err := inputBundle(in, suspended, notes)
 	if err != nil {
-		return fmt.Errorf("the policies with the suggestions: %w", err)
+		return nil, fmt.Errorf("the policies with the suggestions: %w", err)
 	}
 	if _, err := policy.Compile(b, policy.Options{}); err != nil {
-		return fmt.Errorf("the engine would reject the policies with the suggestions: %w", err)
+		return nil, fmt.Errorf("the engine would reject the policies with the suggestions: %w", err)
 	}
-	return nil
+	return b, nil
 }
 
 func describeWhen(w *wafv1alpha1.ExclusionMatch) string {
