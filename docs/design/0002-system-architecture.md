@@ -648,7 +648,7 @@ controller `istio.io/gateway-controller`), with `ext_proc` through an `EnvoyFilt
     a `Detect` route. It proves nothing about blocking: a route with a policy in `Block` mode is
     proven only by the answer coming back, and the receipt flag is part of each result's key, so a
     route that moves between modes is probed again, not proven by the other mode's result.
-  - **Forged or replayed receipts prove nothing.** The receipt is under the probe key, with its
+  - **Forged receipts, and receipts of other probes, prove nothing.** The receipt is under the probe key, with its
     own purpose: neither the request's MAC nor the answer (the parts a party on the network sees)
     is one, so whoever sees the probe can't make its receipt. The operator expects one receipt per
     probe, for its fresh random nonce, only while that probe waits, and only from the probed pod's
@@ -659,10 +659,8 @@ controller `istio.io/gateway-controller`), with `ext_proc` through an `EnvoyFilt
     pass that pod's traffic uninspected, so this adds nothing to what it can do.
   - **The probe reaches the app** in `Detect` mode, Envoy forwarding it. So it is sent only as
     `GET` or `HEAD` without a body: a rule whose match is for another method is `NotProbeable` in
-    `Detect` mode. And the engine inspects a probe in observability mode as any request (it
-    answers one uninspected only in `Block` mode, where Envoy doesn't forward it): a probe's
-    header, which binds only the host and URI, then can't carry a request past the engine's log.
-    The TLS rules (#507, #511) are unchanged: no header or query values over TLS, the certificate
+    `Detect` mode. The engine inspects a probe in observability mode as any request Envoy
+    forwards (it answers one itself only in `Block` mode, where Envoy doesn't forward it). The TLS rules (#507, #511) are unchanged: no header or query values over TLS, the certificate
     not checked, the MAC (here the receipt) the proof.
   - **Rejected:** proving `Detect` routes by the answer (Envoy discards it); by the engine's
     request counts or security events (they don't name the probe, and can't be told from forged

@@ -313,7 +313,7 @@ func TestUserFiltersKey(t *testing.T) {
 // operator waits for the probed pod's engine to report the receipt of
 // that very probe in the engine reports. Nothing else proves it: no
 // receipt, a receipt under another key, one from another pod's engine, one
-// of an earlier probe (replayed), a stale report, or the probe's own
+// of an earlier probe, a stale report, or the probe's own
 // request or answer MAC passed off as a receipt; after receiptWait the
 // route is Unverified with the reason. A receipt never proves a Block-mode
 // route, whose answer must come back.
@@ -419,9 +419,9 @@ func TestProveDetectRouteByReceipt(t *testing.T) {
 	}
 }
 
-// A receipt proves one probe only: replayed for the next probe (after the
+// A receipt proves one probe only: reported again for the next probe (after the
 // route changed, or at the reprobe interval), it proves nothing.
-func TestDetectReceiptReplayed(t *testing.T) {
+func TestDetectReceiptOfEarlierProbe(t *testing.T) {
 	ctx := context.Background()
 	key := bytes.Repeat([]byte{5}, haproxyprobe.KeySize)
 	now := time.Unix(1_800_000_000, 0)
@@ -474,7 +474,7 @@ func TestDetectReceiptReplayed(t *testing.T) {
 	writeReport(ctx, t, c, "inkwall-system", now, false, "edge/gw-1", []string{first})
 	p.Run(ctx)
 	if _, _, u := proveRoute(p, "VirtualService web", true, jobsOf); !strings.Contains(u, "reported no receipt") {
-		t.Fatalf("proven by a replayed receipt: %q", u)
+		t.Fatalf("proven by an earlier probe's receipt: %q", u)
 	}
 }
 

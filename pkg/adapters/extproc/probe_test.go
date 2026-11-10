@@ -73,9 +73,8 @@ func TestProbe(t *testing.T) {
 
 // In observability mode (a Detect-mode route) Envoy discards the engine's
 // answer, so the engine keeps a receipt of the probe instead (#475), and
-// inspects the request as any other: Envoy forwards it to the app, so a
-// replayed probe header carrying an attack is still logged. A probe with
-// a wrong MAC, another key's, or a replayed one with a different host or
+// inspects the request as any other, as Envoy forwards it to the app. A
+// probe with a wrong MAC, another key's, or one made for another host or
 // URI gets no receipt; a probe answered in Block mode needs none.
 func TestProbeReceipt(t *testing.T) {
 	key := bytes.Repeat([]byte{7}, haproxyprobe.KeySize)
@@ -112,10 +111,10 @@ func TestProbeReceipt(t *testing.T) {
 	if logs.Len() != 0 {
 		t.Errorf("a probe was logged as an event: %s", logs.String())
 	}
-	// The probe's header doesn't let an attack past inspection.
+	// Inspected as any request: an attack in it is logged.
 	attack := uri + "?q=<script>alert(1)</script>"
 	e.observe(t, headers("GET", attack, true, haproxyprobe.Header, haproxyprobe.Request(key, nonce, "shop.example.com", attack)))
 	if !strings.Contains(logs.String(), `"security event"`) {
-		t.Errorf("an attack with a valid probe header wasn't logged in observability mode: %q", logs.String())
+		t.Errorf("a probe with an attack wasn't logged in observability mode: %q", logs.String())
 	}
 }

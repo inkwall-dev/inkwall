@@ -859,9 +859,8 @@ func allow(p phase, m *extprocv3.HeaderMutation) *extprocv3.ProcessingResponse {
 // defined HTTP status only, so not HAProxy's 299; the MAC proves the answer.
 // In observability mode Envoy ignores the reply and forwards the request:
 // the engine keeps a receipt of the probe instead, which the operator reads
-// in its report (#475), and returns nil, so the request is inspected as any
-// other. A probe's header, which binds only the host and URI, then can't
-// carry anything past inspection to the app.
+// in its report (#475), and returns nil: the request Envoy forwards is
+// inspected as any other.
 func (s *Server) answerProbe(req *request.Request, observe bool) *extprocv3.ProcessingResponse {
 	value := req.Headers.Get(haproxyprobe.Header)
 	if s.probeKey == nil || value == "" {

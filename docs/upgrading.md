@@ -59,8 +59,7 @@ What's new:
   pods run the 0.6.0 engine (restart them, or `spec.engine.rollout: Automatic`). In `Detect` mode
   the probe now reaches your app (a `GET` on the reserved path `.well-known/inkwall-probe/<nonce>`,
   or an exact path with `?inkwall-probe=<nonce>`), and a rule matching only another method than
-  `GET` or `HEAD` is `NotProbeable` there. A request with a valid probe header is inspected in
-  `Detect` mode, as any request.
+  `GET` or `HEAD` is `NotProbeable` there.
 
 What changes by itself:
 

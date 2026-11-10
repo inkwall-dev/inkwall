@@ -382,9 +382,8 @@ probes every route again at once.
     `inkwall-probe=<nonce>`, per pod and listener every 5 minutes. A rule whose match is only for
     another method (`POST`, `DELETE`) isn't probed in `Detect` mode (`NotProbeable`): the probe
     doesn't send your app requests that may change something.
-  - **The engine inspects the probe** in `Detect` mode, as any request (in `Block` mode it answers
-    it uninspected): Envoy forwards it to your app, so a probe's header doesn't carry a request
-    past the engine's log.
+  - **The engine inspects the probe** in `Detect` mode, as any request Envoy forwards to your app
+    (in `Block` mode it answers it itself).
   - **An engine older than 0.6.0** reports no receipts: its pods' `Detect`-mode routes stay
     `Unverified` until the pod runs a 0.6.0 engine.
 - The probe reaches the pods on their listener's port (the pod address and the Gateway listener's
