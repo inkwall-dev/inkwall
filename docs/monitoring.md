@@ -8,6 +8,7 @@ do when an alert fires.
 
 - [Prerequisites](#prerequisites)
 - [Turn it on](#turn-it-on)
+- [Metrics over HTTPS](#metrics-over-https)
 - [Metrics](#metrics)
   - [Engine](#engine)
   - [Operator](#operator)
@@ -35,7 +36,8 @@ do when an alert fires.
 
 What serves metrics:
 
-- **The operator**: `/metrics` on port 8080 (`metrics` in its pods).
+- **The operator**: `/metrics` on port 8080 (`metrics` in its pods), over plain HTTP, or over HTTPS
+  with authentication and authorization ([Metrics over HTTPS](#metrics-over-https)).
 - **Each engine**: `/metrics` on port 9480, named `inkwall-admin`, in the proxy pod it was injected
   into. A standalone engine serves them on `--admin-listen`.
 
@@ -66,6 +68,67 @@ helm upgrade inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version
 - `InkwallConfig.spec.engine.policyMetrics: true` adds `inkwall_policy_requests_total` on engines
   injected from then on (restart the proxy pods). It is off by default: one series per policy,
   action and reason.
+
+## Metrics over HTTPS
+
+By default the operator serves `/metrics` over plain HTTP to anything that reaches its port: the
+metrics carry no secrets, and `networkPolicy.metricsFrom` can narrow who reaches it. For clusters
+that require metrics endpoints behind TLS and authorization, `metrics.secure.enabled=true` serves
+them over HTTPS, and only to clients whose bearer token the API server authenticates (a
+[TokenReview](https://kubernetes.io/docs/reference/kubernetes-api/authentication-resources/token-review-v1/)) and
+allows to `get` the `/metrics` non-resource URL (a
+[SubjectAccessReview](https://kubernetes.io/docs/reference/access-authn-authz/authorization/#checking-api-access)):
+
+```sh
+helm upgrade inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> --namespace inkwall-system --reuse-values \
+  --set metrics.secure.enabled=true
+```
+
+With it on, the chart:
+
+- runs the operator with `--metrics-secure`, and grants it `create` on `tokenreviews` and
+  `subjectaccessreviews` (the `inkwall-operator-metrics-auth` ClusterRole; not granted otherwise);
+- creates the `inkwall-operator-metrics-reader` ClusterRole (`get` on `/metrics`), to bind to the
+  scrapers;
+- makes the ServiceMonitor scrape over HTTPS with Prometheus' service account token
+  (`bearerTokenFile`).
+
+Grant your Prometheus' service account the reader role. kube-prometheus-stack's Prometheus role
+already allows `get` on `/metrics`; otherwise:
+
+```sh
+kubectl create clusterrolebinding inkwall-metrics-prometheus --clusterrole=inkwall-operator-metrics-reader \
+  --serviceaccount=monitoring:prometheus-k8s
+```
+
+A scrape without a token gets 401, one whose service account lacks the permission 403. An
+invalid or expired token is refused with 500 (controller-runtime's filter, which also logs it).
+The API server's answers are cached: an allowed scraper for 5 minutes, a denied one for 30
+seconds, a token for a minute. The port keeps its name (`metrics`) and number, so
+`networkPolicy.metricsFrom` applies as before. The health probes stay on port 8081, over HTTP.
+
+The serving certificate, `metrics.secure.certs.mode`:
+
+| Mode | Certificate | The ServiceMonitor |
+|---|---|---|
+| `selfSigned` (default) | Made by the operator, in memory, each time it starts | Doesn't verify it (`insecureSkipVerify`): the scrape is encrypted, and the token still checked |
+| `certManager` | Issued by [cert-manager](https://cert-manager.io/) (it must be installed) for the `inkwall-operator-metrics` Service, in the Secret `inkwall-operator-metrics-tls`; the operator reloads it when it is renewed | Verifies it, with the Secret's `ca.crt` and the Service's name |
+
+`certManager` uses a self-signed Issuer the chart creates, unless
+`metrics.secure.certs.certManager.issuerRef` names yours (`kind: ClusterIssuer`, `name: ...`). With
+`selfSigned`, Prometheus would send its token to whatever answers at the operator pods'
+addresses: use `certManager` where that matters. The ServiceMonitor's `bearerTokenFile` needs a
+Prometheus Operator that allows it (`arbitraryFSAccessThroughSMs.deny` is `false`, the default).
+
+Without the Prometheus Operator, scrape `https://<operator pod>:8080/metrics` with
+`authorization: {credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token}` and a
+`tls_config` to match the mode. To read the metrics by hand:
+
+```sh
+TOKEN=$(kubectl -n monitoring create token prometheus-k8s)
+kubectl -n inkwall-system port-forward deploy/inkwall-operator 8080 &
+curl -sk -H "Authorization: Bearer $TOKEN" https://localhost:8080/metrics | head
+```
 
 ## Metrics
 
@@ -228,4 +291,5 @@ In Grafana the dashboard is `Inkwall`.
 ## Turning it off
 
 Set the values back to `false` and upgrade: the chart deletes what it created. Nothing in the
-engines or the operator changes.
+engines or the operator changes, except that `metrics.secure.enabled=false` serves the operator's
+metrics over plain HTTP again (the operator restarts).

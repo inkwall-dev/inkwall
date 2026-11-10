@@ -67,6 +67,8 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 		o.Namespace = "inkwall-system"
 	}
 	fs.StringVar(&o.MetricsAddr, "metrics-bind-address", ":8080", "address for /metrics (0 disables)")
+	fs.BoolVar(&o.MetricsSecure, "metrics-secure", false, "serve /metrics over HTTPS, only to bearer tokens the API server authenticates (TokenReview) and allows to get /metrics (SubjectAccessReview)")
+	fs.StringVar(&o.MetricsCertDir, "metrics-cert-dir", "", "directory of the metrics' tls.crt and tls.key, with --metrics-secure (empty: a self-signed certificate made at start)")
 	fs.StringVar(&o.ProbeAddr, "health-probe-bind-address", ":8081", "address for /healthz and /readyz (0 disables)")
 	fs.BoolVar(&o.LeaderElect, "leader-elect", false, "elect a leader through a Lease, so several replicas can run")
 	fs.StringVar(&o.Namespace, "namespace", o.Namespace, "the operator's namespace, for its Lease and Secrets (default: $POD_NAMESPACE, else inkwall-system)")
@@ -113,6 +115,9 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	}
 	if o.SigningKeyGrace <= 0 || o.SelectorRestartMaxDelay <= 0 {
 		return o, errors.New("--signing-key-grace and --selector-restart-max-delay must be positive")
+	}
+	if o.MetricsCertDir != "" && !o.MetricsSecure {
+		return o, errors.New("--metrics-cert-dir needs --metrics-secure")
 	}
 	if o.WebhookCerts != manager.CertsRotate && o.WebhookCerts != manager.CertsExternal {
 		return o, fmt.Errorf("--webhook-certs must be %s or %s, not %q", manager.CertsRotate, manager.CertsExternal, o.WebhookCerts)
@@ -169,7 +174,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	logger.Info("operator starting", slog.String("version", cmp.Or(version, "unknown")), slog.String("namespace", o.Namespace),
-		slog.Bool("leader_elect", o.LeaderElect), slog.Bool("webhooks", o.Webhooks))
+		slog.Bool("leader_elect", o.LeaderElect), slog.Bool("webhooks", o.Webhooks), slog.Bool("metrics_secure", o.MetricsSecure))
 	ctx := drain(ctrl.SetupSignalHandler(), o.shutdownDelay, &draining, logger)
 	if err := mgr.Start(ctx); err != nil {
 		logger.Error("operator stopped", slog.Any("error", err))
