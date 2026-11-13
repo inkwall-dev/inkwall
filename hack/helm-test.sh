@@ -248,6 +248,55 @@ if ! helm template inkwall "$CHART" --namespace inkwall-system --set global.stor
   fail=1
 fi
 
+# Secure metrics (#430): off by default, and without the values (helm
+# upgrade --reuse-values from 0.5): no TokenReview/SubjectAccessReview role,
+# no flag, a plain-HTTP ServiceMonitor. On: the roles, --metrics-secure, a
+# ServiceMonitor over HTTPS with Prometheus' token; certManager adds a
+# Certificate for the metrics Service, mounted, which the ServiceMonitor
+# verifies. The NetworkPolicy's metrics port is the same.
+# secure WANT... -- [helm flags...]: the render contains each WANT
+# (WANT starting with ! : doesn't).
+secure() {
+  local wants=() out w
+  while [[ $1 != -- ]]; do
+    wants+=("$1")
+    shift
+  done
+  shift
+  out=$(helm template inkwall "$CHART" --namespace inkwall-system --set metrics.serviceMonitor.enabled=true --set metrics.forceMonitoringObjects=true "$@")
+  for w in "${wants[@]}"; do
+    if [[ $w == !* ]]; then
+      if grep -qF -- "${w#!}" <<<"$out"; then
+        echo "secure metrics ($*): want no \"${w#!}\"" >&2
+        fail=1
+      fi
+    elif ! grep -qF -- "$w" <<<"$out"; then
+      echo "secure metrics ($*): no \"$w\"" >&2
+      fail=1
+    fi
+  done
+}
+off=('!metrics-auth' '!metrics-reader' '!--metrics-secure' '!scheme: https' '!bearerTokenFile' '!metrics-tls')
+secure "${off[@]}" --
+secure "${off[@]}" -- --set metrics.secure=null
+secure "${off[@]}" -- --set metrics.secure.certs.mode=certManager
+secure 'name: inkwall-operator-metrics-auth' 'resources: [tokenreviews]' 'resources: [subjectaccessreviews]' \
+  'kind: ClusterRoleBinding' 'name: inkwall-operator-metrics-reader' 'nonResourceURLs: [/metrics]' '- --metrics-secure' \
+  'scheme: https' 'bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token' 'insecureSkipVerify: true' \
+  '!--metrics-cert-dir' '!metrics-tls' '!kind: Certificate' -- --set metrics.secure.enabled=true
+secure '- --metrics-cert-dir=/metrics-certs' 'mountPath: /metrics-certs' 'secretName: inkwall-operator-metrics-tls' \
+  'kind: Certificate' '- inkwall-operator-metrics.inkwall-system.svc' 'name: inkwall-operator-metrics-selfsigned' \
+  'serverName: inkwall-operator-metrics.inkwall-system.svc' 'key: ca.crt' '!insecureSkipVerify' \
+  -- --set metrics.secure.enabled=true --set metrics.secure.certs.mode=certManager
+secure 'kind: ClusterIssuer' '!metrics-selfsigned' -- --set metrics.secure.enabled=true --set metrics.secure.certs.mode=certManager \
+  --set metrics.secure.certs.certManager.issuerRef.kind=ClusterIssuer --set metrics.secure.certs.certManager.issuerRef.name=corp
+expect "metrics from anywhere, secure" "- ports: - {port: metrics, protocol: TCP} " --set metrics.secure.enabled=true
+if out=$(helm template inkwall "$CHART" --namespace inkwall-system --set metrics.secure.certs.mode=vault 2>&1) ||
+  ! grep -q "metrics/secure/certs/mode': value must be one of 'selfSigned', 'certManager'" <<<"$out"; then
+  echo "metrics.secure.certs.mode=vault: want an error, got: $out" >&2
+  fail=1
+fi
+
 # Images (#386): global.imageRegistry replaces the registry, a digest the tag;
 # global.imagePullSecrets go on the operator's pods and the unwire Job's,
 # and to the operator for the pods it injects the engine into.

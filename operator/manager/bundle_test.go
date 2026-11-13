@@ -141,11 +141,24 @@ func testBundles(ctx context.Context, t *testing.T, c client.Client) {
 		}
 		return got.Status.BundleVersion
 	}
+	// Its first bundleVersion once it is Accepted: the operator's cache can
+	// see the policy before its Ingress, and a policy whose targets don't
+	// exist yet is published without routes (InvalidRef); its Ingress then
+	// changes what it enforces, so its bundleVersion with it (#581).
 	var o1 int64
 	eventually(t, "other policy reported", func() string {
-		if o1 = otherVersion(); o1 == 0 {
+		var got wafv1alpha1.WAFPolicy
+		if err := c.Get(ctx, client.ObjectKeyFromObject(other), &got); err != nil {
+			return err.Error()
+		}
+		cond := meta.FindStatusCondition(got.Status.Conditions, wafv1alpha1.ConditionAccepted)
+		switch {
+		case cond == nil || cond.Status != metav1.ConditionTrue || cond.ObservedGeneration != got.Generation:
+			return fmt.Sprintf("not Accepted yet: %v", cond)
+		case got.Status.BundleVersion == 0:
 			return "no bundleVersion"
 		}
+		o1 = got.Status.BundleVersion
 		return ""
 	})
 	wantOther := func(what string) {

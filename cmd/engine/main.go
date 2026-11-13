@@ -166,7 +166,7 @@ type engineConfig struct {
 	maxBodyBytes  int64
 	oversize      pipeline.OversizeAction
 	grpcMessages  bool
-	// responses: ext-proc and spoe, the adapters that see responses.
+	// responses: ext-proc, spoe and proxy, the adapters that see responses.
 	responses pipeline.ResponseConfig
 	// responseMessages (spoe): HAProxy sends the responses, so requests
 	// are kept for them. Standalone: with --inspect-responses; bundle
@@ -174,12 +174,14 @@ type engineConfig struct {
 	responseMessages        bool
 	maxPendingResponses     int
 	maxPendingResponseBytes int64
-	responseTTL             time.Duration
-	maxArgs                 int
-	paranoiaLevel           int
-	threshold               int
-	rulesFile               string
-	rulesBeforeCRS          string
+	// maxHeldResponseBytes: the proxy's --max-held-response-bytes.
+	maxHeldResponseBytes int64
+	responseTTL          time.Duration
+	maxArgs              int
+	paranoiaLevel        int
+	threshold            int
+	rulesFile            string
+	rulesBeforeCRS       string
 	// watchRules reloads the rule files when their content changes.
 	watchRules    bool
 	clientIP      clientip.Options
@@ -279,6 +281,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	wsMessages := new(string)
 	wsIdle, bodyReadTimeout, maxConns := new(time.Duration), new(time.Duration), new(int)
 	h2c, upstreamH2C := new(bool), new(bool)
+	maxHeldResponses := new(int64)
 	tlsCert, tlsKey, upstreamCA := new(string), new(string), new(string)
 	if command == cmdProxy {
 		h2c = fs.Bool("h2c", false, "also accept HTTP/2 without TLS (prior knowledge, as gRPC clients send it) on --listen; HTTP/1.1 still works")
@@ -288,6 +291,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 		upstreamCA = fs.String("upstream-ca", "", "CA certificates (PEM) that an https:// upstream's certificate is verified with, instead of the system's")
 		wsIdle = fs.Duration("websocket-idle-timeout", 0, "close a WebSocket with 1001 (going away) when nothing passes either way for this long (0 = never)")
 		bodyReadTimeout = fs.Duration("body-read-timeout", 0, "maximum time to read the part of a request body that is inspected (408 past it); the rest streams under --read-timeout, which can then be 0 for long uploads (0 = only --read-timeout)")
+		maxHeldResponses = fs.Int64("max-held-response-bytes", proxy.DefaultMaxHeldResponseBytes, "response bodies held at once for inspection, each up to its limit (--max-response-bytes, or the policy's); past it, a response gets the failure mode (overload)")
 		maxConns = fs.Int("max-connections", 0, "maximum client connections open at a time, WebSockets included; past it, new ones wait until one closes (0 = no limit)")
 		upstream = fs.String("upstream", "", "upstream URL that allowed requests are forwarded to (required)")
 		// Only the proxy sees a WebSocket's messages: the other adapters
@@ -301,13 +305,13 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	maxBody := fs.Int64("max-body-bytes", 64<<10, "request body bytes to inspect (0 disables body inspection); in bundle mode, for policies that don't set body.maxBytes")
 	oversize := fs.String("oversize-body", "auto", "bodies over --max-body-bytes: deny (413 in block mode), allow (forward with the body uninspected, logged), or auto (deny in block mode, allow in detect mode)")
 	grpcMessages := fs.String("grpc-messages", "skip", "gRPC calls' messages: inspect (the text in them, read without a schema; a message that can't be read is handled as an oversized body) or skip (path and metadata only)")
-	// Only ext-proc and spoe see responses: the other adapters don't take
-	// the flags, so none claims to inspect them.
+	// Only ext-proc, spoe and the proxy see responses: the other adapters
+	// don't take the flags, so none claims to inspect them.
 	inspectResponses, maxResponse, oversizeResponse := new(bool), new(int64), new(string)
 	responseStreams := new(string)
 	responseMessages, maxPending, maxPendingBytes, responseTTL := new(bool), new(int), new(int64), new(time.Duration)
-	if command == cmdExtProc || command == cmdSPOE {
-		inspectResponses = fs.Bool("inspect-responses", false, "inspect the upstream's responses too (CRS RESPONSE-95x data leakage rules and your phase 3 and 4 rules); the proxy must send them (Envoy: processing_mode; HAProxy: the inkwall-response group)")
+	if command == cmdExtProc || command == cmdSPOE || command == cmdProxy {
+		inspectResponses = fs.Bool("inspect-responses", false, "inspect the upstream's responses too (CRS RESPONSE-95x data leakage rules and your phase 3 and 4 rules); the proxy must send them (Envoy: processing_mode; HAProxy: the inkwall-response group; the engine's proxy sees them)")
 		maxResponse = fs.Int64("max-response-bytes", policy.DefaultResponseBytes, "with --inspect-responses: response body bytes inspected (0: status and headers only); a longer body has its prefix inspected and gets --oversize-response")
 		oversizeResponse = fs.String("oversize-response", "auto", "with --inspect-responses: responses over --max-response-bytes, or with a body that can't be inspected: deny (502 in block mode), allow, or auto (deny in block mode, allow in detect mode)")
 	}
@@ -427,6 +431,10 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 		bootstrapTimeout:   *bootstrapTimeout,
 	}
 	if command == cmdProxy {
+		if *maxHeldResponses < 1 {
+			return cfg, errors.New("--max-held-response-bytes must be positive")
+		}
+		cfg.maxHeldResponseBytes = *maxHeldResponses
 		if *upstream == "" {
 			return cfg, errors.New("--upstream is required")
 		}
@@ -690,7 +698,7 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 		handler, err = proxy.New(p,
 			proxy.Config{UpstreamH2C: cfg.upstreamH2C, UpstreamCAs: cas, Upstream: cfg.upstream, MaxBodyBytes: maxBody, ClientIP: resolver, Logger: logger, Events: rec, Metrics: metrics, JSONDenials: cfg.jsonDenials,
 				WebSocketMessages: cfg.webSocketMessages, WebSocketIdleTimeout: cfg.webSocketIdle,
-				BodyReadTimeout: cfg.bodyReadTimeout, ReadTimeout: cfg.readTimeout},
+				BodyReadTimeout: cfg.bodyReadTimeout, ReadTimeout: cfg.readTimeout, MaxHeldResponseBytes: cfg.maxHeldResponseBytes},
 		)
 	}
 	if err != nil {

@@ -1,5 +1,6 @@
 {{- $certManager := eq .Values.webhook.certs.mode "certManager" }}
 {{- $cp := include "inkwall.controlPlane.values" . | fromYaml }}
+{{- $metrics := include "inkwall.metrics.secure" . | fromYaml }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -69,6 +70,12 @@ spec:
             {{- end }}
             {{- if $cp.caBundle }}
             - --control-plane-ca=/etc/inkwall/control-plane/ca.crt
+            {{- end }}
+            {{- if $metrics.enabled }}
+            - --metrics-secure
+            {{- if $metrics.certManager }}
+            - --metrics-cert-dir=/metrics-certs
+            {{- end }}
             {{- end }}
             - --events-dir=/var/lib/inkwall/events
             - --events-buffer-bytes={{ mul $cp.eventsBufferMiB 1048576 }}
@@ -140,6 +147,11 @@ spec:
               mountPath: /etc/inkwall/control-plane
               readOnly: true
             {{- end }}
+            {{- if $metrics.certManager }}
+            - name: metrics-certs
+              mountPath: /metrics-certs
+              readOnly: true
+            {{- end }}
             {{- with .Values.operator.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -160,6 +172,11 @@ spec:
         - name: control-plane-ca
           configMap:
             name: {{ include "inkwall.controlPlane.ca" . }}
+        {{- end }}
+        {{- if $metrics.certManager }}
+        - name: metrics-certs
+          secret:
+            secretName: {{ include "inkwall.metrics.secret" . }}
         {{- end }}
         {{- with .Values.operator.extraVolumes }}
         {{- toYaml . | nindent 8 }}

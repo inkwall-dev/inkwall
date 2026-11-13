@@ -28,7 +28,8 @@ func TestFlags(t *testing.T) {
 	}
 	for _, args := range [][]string{{"--no-such-flag"}, {"extra"}, {"--webhook-certs", "cert-manager"},
 		{"--signing-key-grace", "0s"}, {"--selector-restart-max-delay", "-1s"},
-		{"--proxy-namespaces", ""}, {"--proxy-namespaces", "traefik,Not_A_Namespace"}} {
+		{"--proxy-namespaces", ""}, {"--proxy-namespaces", "traefik,Not_A_Namespace"},
+		{"--metrics-cert-dir", "/certs"}} {
 		if code := run(args, io.Discard, io.Discard); code != 2 {
 			t.Errorf("%v: exit %d, want 2", args, code)
 		}
@@ -57,6 +58,15 @@ func TestFlags(t *testing.T) {
 	}
 	if o, err := parseFlags([]string{"--proxy-namespaces=*"}, io.Discard); err != nil || !o.ProxyNamespaces.Has("tenant") {
 		t.Errorf("every namespace: %v, %v", o.ProxyNamespaces, err)
+	}
+	// The metrics: plain HTTP by default; HTTPS with authentication and
+	// authorization on request, with a certificate from a directory or
+	// self-signed.
+	if o, err := parseFlags(nil, io.Discard); err != nil || o.MetricsSecure || o.MetricsCertDir != "" || o.MetricsAddr != ":8080" {
+		t.Errorf("default metrics: secure %v, cert dir %q, address %q, %v", o.MetricsSecure, o.MetricsCertDir, o.MetricsAddr, err)
+	}
+	if o, err := parseFlags([]string{"--metrics-secure", "--metrics-cert-dir=/certs"}, io.Discard); err != nil || !o.MetricsSecure || o.MetricsCertDir != "/certs" {
+		t.Errorf("secure metrics: secure %v, cert dir %q, %v", o.MetricsSecure, o.MetricsCertDir, err)
 	}
 }
 
