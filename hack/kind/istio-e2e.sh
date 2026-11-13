@@ -566,6 +566,9 @@ body_path=/detect-body-$RANDOM$RANDOM
 check "a body attack passes" both_are 200 "$body_path" --data-urlencode "q=1' OR '1'='1"
 eventually "and reaches the app" reached_app "$body_path"
 eventually "the engines log the streamed body's attack" logged "$body_path"
+# Envoy discards the engine's answer to the probe: the engines' receipts of
+# it prove the route (#475).
+eventually "Programmed in detect mode, by the engines' probe receipts" programmed
 
 echo "== responses"
 # Inspected through Istio since #374: a leak is replaced in Block mode,
@@ -692,7 +695,8 @@ check "an attack in the body is blocked" vs_is 403 /api/ --data-urlencode "q=1' 
 # matches nothing would leave it off. Istio accepts it all; the operator's
 # probe gets the app's answer: Unverified, not Programmed.
 vs_unverified() { [[ $(vs_condition Programmed status) == False && $(vs_condition Programmed reason) == Unverified && $(vs_condition Programmed message) == *"doesn't run the filter"* ]]; }
-"${KUBECTL[@]}" apply -f - >/dev/null <<YAML
+remove_vs_filter() {
+  "${KUBECTL[@]}" apply -f - >/dev/null <<YAML
 apiVersion: networking.istio.io/v1alpha3
 kind: EnvoyFilter
 metadata: {name: e2e-remove-inkwall, namespace: $NS}
@@ -706,6 +710,8 @@ spec:
         listener: {filterChain: {filter: {name: envoy.filters.network.http_connection_manager, subFilter: {name: inkwall.ext_proc.vs.$NS.shop-vs}}}}
       patch: {operation: REMOVE}
 YAML
+}
+remove_vs_filter
 eventually "the filter removed by a later patch: the attack passes" vs_is 200 "/api$SQLI"
 eventually "and the policy is Unverified, not Programmed (the probe got the app's answer)" vs_unverified
 "${KUBECTL[@]}" -n "$NS" delete envoyfilter e2e-remove-inkwall >/dev/null
@@ -719,6 +725,13 @@ eventually "the ingress gateway's engine logs it as a response deny" logged_resp
 vs_policy Detect "$RESPONSES"
 eventually "VirtualService, detect mode: the leak passes" leak_is 200 "$VS_PORT" "$VS_HOST"
 eventually "and the engine logs it" leak_logged istio=ingressgateway "$VS_PORT" "$VS_HOST"
+# Detect mode is proven by the engine's receipt of the probe (#475); with
+# the filter removed no receipt comes: Unverified.
+eventually "VirtualService, detect mode: Programmed by the engine's probe receipts" vs_programmed
+remove_vs_filter
+eventually "detect mode, the filter removed: Unverified (no receipt)" vs_unverified
+"${KUBECTL[@]}" -n "$NS" delete envoyfilter e2e-remove-inkwall >/dev/null
+eventually "the patch gone: Programmed again by receipts" vs_programmed
 vs_policy
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy vs --timeout=60s >/dev/null
 eventually "unprotected: the EnvoyFilter is gone" no_vs_filter

@@ -469,6 +469,11 @@ type Heartbeat struct {
 	// The signing keys the engine trusts, as in Hello: they change while
 	// the stream is open when the engine reloads its key file.
 	TrustedKeyIds []string `protobuf:"bytes,4,rep,name=trusted_key_ids,json=trustedKeyIds,proto3" json:"trusted_key_ids,omitempty"`
+	// The receipts of the operator's probes the engine verified where the
+	// proxy discards its answer (ext_proc in observability mode, #475): the
+	// recent ones, at most 16, none older than a minute, each 32 lowercase
+	// hex digits (pkg/haproxyprobe). Empty from older engines.
+	ProbeReceipts []string `protobuf:"bytes,5,rep,name=probe_receipts,json=probeReceipts,proto3" json:"probe_receipts,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -531,6 +536,13 @@ func (x *Heartbeat) GetTrustedKeyIds() []string {
 	return nil
 }
 
+func (x *Heartbeat) GetProbeReceipts() []string {
+	if x != nil {
+		return x.ProbeReceipts
+	}
+	return nil
+}
+
 var File_agent_v1_agent_proto protoreflect.FileDescriptor
 
 const file_agent_v1_agent_proto_rawDesc = "" +
@@ -559,12 +571,13 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"\x0ebundle_version\x18\x01 \x01(\x04R\rbundleVersion\"C\n" +
 	"\x04Nack\x12%\n" +
 	"\x0ebundle_version\x18\x01 \x01(\x04R\rbundleVersion\x12\x14\n" +
-	"\x05error\x18\x02 \x01(\tR\x05error\"\x93\x01\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\"\xba\x01\n" +
 	"\tHeartbeat\x12%\n" +
 	"\x0ebundle_version\x18\x01 \x01(\x04R\rbundleVersion\x12\x1b\n" +
 	"\tin_flight\x18\x02 \x01(\rR\binFlight\x12\x1a\n" +
 	"\bcapacity\x18\x03 \x01(\rR\bcapacity\x12&\n" +
-	"\x0ftrusted_key_ids\x18\x04 \x03(\tR\rtrustedKeyIds2]\n" +
+	"\x0ftrusted_key_ids\x18\x04 \x03(\tR\rtrustedKeyIds\x12%\n" +
+	"\x0eprobe_receipts\x18\x05 \x03(\tR\rprobeReceipts2]\n" +
 	"\rBundleService\x12L\n" +
 	"\x05Watch\x12\x1e.inkwall.agent.v1.WatchRequest\x1a\x1f.inkwall.agent.v1.WatchResponse(\x010\x01B5Z3github.com/inkwall-dev/inkwall/api/agent/v1;agentv1b\x06proto3"
 

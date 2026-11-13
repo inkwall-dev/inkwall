@@ -31,6 +31,10 @@
 // REQUEST-ID), from the cluster's state, read only, with -o json for
 // scripts and assistants (docs/troubleshooting.md).
 //
+// The mcp subcommand serves those read-only tools and this version's docs
+// to an AI assistant over the Model Context Protocol, on standard input
+// and output (docs/mcp.md).
+//
 // The migrate ingress-nginx subcommand converts ingress-nginx's ModSecurity
 // annotations and ConfigMap settings into WAFPolicy objects, targeting the
 // Ingresses or (--target) the HTTPRoutes or IngressRoutes replacing them.
@@ -91,6 +95,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "status" {
 		return runStatus(args[1:], stdout, stderr)
 	}
+	if len(args) > 0 && args[0] == "mcp" {
+		return runMCP(args[1:], stderr)
+	}
 	if len(args) > 0 && args[0] == "explain" {
 		return runExplain(args[1:], os.Stdin, stdout, stderr)
 	}
@@ -109,6 +116,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "       inkwallctl tune [flags] [--policy FILE ...] FILE ...")
 		fmt.Fprintln(stderr, "       inkwallctl explain request [flags] REQUEST-ID")
 		fmt.Fprintln(stderr, "       inkwallctl explain policy [flags] NAMESPACE/NAME")
+		fmt.Fprintln(stderr, "       inkwallctl mcp [flags]")
 		fmt.Fprintln(stderr, "       inkwallctl version")
 		fmt.Fprintln(stderr, "run 'inkwallctl <command> -h' for flags")
 		return 2
@@ -145,10 +153,13 @@ type config struct {
 	// clientIP replaces every request's client IP (test --client-ip).
 	clientIP string
 	// Input: at most one of url, requestFile, harFile.
-	url         string
-	method      string
-	headers     listFlag
-	data        string
+	url     string
+	method  string
+	headers listFlag
+	data    string
+	// literalData: data is the body as is; a leading @ names no file (an
+	// MCP tool's input, which must not read local files).
+	literalData bool
 	requestFile string
 	harFile     string
 
@@ -490,6 +501,12 @@ func newLocalHandler(cfg config, notes io.Writer) (*httpcheck.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	return bundleHandler(b, cfg)
+}
+
+// bundleHandler returns the engine's check API, in-process, inspecting with
+// the bundle's policies, compiled as the engine does.
+func bundleHandler(b *bundlev1.Bundle, cfg config) (*httpcheck.Handler, error) {
 	set, err := policy.Compile(withDeadline(b, cfg.timeout), policy.Options{BodyLimit: cfg.maxBodyBytes})
 	if err != nil {
 		return nil, fmt.Errorf("the engine would reject the bundle: %w", err)

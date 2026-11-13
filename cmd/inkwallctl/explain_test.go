@@ -246,7 +246,7 @@ func explainTestCluster(t *testing.T, policies ...*wafv1alpha1.WAFPolicy) (*expl
 	)
 	var read []string
 	return &explainCluster{
-		c: fake.NewClientBuilder().WithScheme(statusScheme()).WithObjects(objs...).Build(),
+		c: fake.NewClientBuilder().WithScheme(statusScheme()).WithObjects(objs...).WithInterceptorFuncs(writeGuard).Build(),
 		logs: func(_ context.Context, ns, pod, container string, since time.Duration) (io.ReadCloser, error) {
 			read = append(read, ns+"/"+pod+":"+container+":"+since.String())
 			if pod != "traefik-2" {
@@ -500,5 +500,41 @@ func TestInboundThreshold(t *testing.T) {
 	}
 	if got := inboundThreshold(nil, "a/none"); got != 0 {
 		t.Errorf("no bundle: %d", got)
+	}
+}
+
+// A policy that can't take the suggestion (64 exclusions already): explain
+// says so without tune's --min-count, which isn't one of its flags; tune
+// still suggests it.
+func TestExclusionLimitMessage(t *testing.T) {
+	in, _, err := loadObjects([]string{"testdata/policy/wafpolicy.yaml", "testdata/policy/wafruleset.yaml", "testdata/policy/configmap.yaml"}, "shop", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &in.Policies[slices.IndexFunc(in.Policies, func(p wafv1alpha1.WAFPolicy) bool { return p.Name == "storefront" })]
+	for i := range 64 {
+		p.Spec.Exclusions = append(p.Spec.Exclusions, wafv1alpha1.Exclusion{RuleIDs: []int32{int32(920000 + i)}})
+	}
+	ec, _ := explainTestCluster(t, p)
+	withExplainCluster(t, ec)
+	code, out, errOut := runCLI(t, "explain", "request", "-o", "json", "--pod", "traefik/traefik-2", "req-deny")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	if !strings.Contains(out, "over the 64 a policy takes") || strings.Contains(out, "--min-count") {
+		t.Errorf("explain's error:\n%s", out)
+	}
+
+	f := writeFile(t, "policy.yaml", "")
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errOut = runCLI(t, "tune", "--from-logs", "--policy", f, "--rule-set", "testdata/policy/wafruleset.yaml", "testdata/explain/engine.log")
+	if code != 1 || !strings.Contains(errOut, "raise --min-count") {
+		t.Errorf("tune: exit %d, %s", code, errOut)
 	}
 }

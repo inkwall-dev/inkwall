@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/inkwall-dev/inkwall/operator/bundle"
+	"github.com/inkwall-dev/inkwall/operator/enginereport"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
 )
@@ -44,6 +45,11 @@ type ProbeJob struct {
 	Fingerprint string
 	Targets     []ProbeTarget
 	Pods        []ProbePod
+	// Receipt: the proxy discards the engine's answer (Envoy's ext_proc
+	// in observability mode, a Detect-mode Istio route), so the route is
+	// proven by the receipt of the probe that the pod's engine reports
+	// (#475) instead.
+	Receipt bool
 }
 
 // ProbeRoute names a probed route: "Ingress", "HTTPRoute" or
@@ -154,6 +160,18 @@ const (
 	haproxyRetry    = 20 * time.Second
 	haproxyParallel = 4
 	haproxyTimeout  = 3 * time.Second
+	// receiptWait is how long the operator waits for an engine to report
+	// the receipt of a probe (its heartbeat, every 5 s, then its replica's
+	// report, every 2 s) before the probe fails; the engine keeps
+	// receipts for haproxyprobe.ReceiptAge.
+	receiptWait = 30 * time.Second
+	// maxReceiptsPending bounds the probes waiting for a receipt per pod,
+	// under what an engine keeps (haproxyprobe.MaxReceipts): a pod's
+	// receipts aren't pushed out before they are reported.
+	maxReceiptsPending = haproxyprobe.MaxReceipts / 2
+	// engineReportStale: a replica's report older than this is ignored
+	// (as the status aggregator does).
+	engineReportStale = 30 * time.Second
 )
 
 // Prober probes the wired HAProxy routes (0002 §6.4): for each pod
@@ -175,6 +193,8 @@ type Prober struct {
 	mu      sync.Mutex
 	jobs    map[string][]ProbeJob
 	results map[string]probeResult
+	// pending are the probes waiting for their receipt, by result key.
+	pending map[string]pendingReceipt
 	events  chan event.GenericEvent
 	once    sync.Once
 	current bundle.Current
@@ -187,9 +207,22 @@ type probeResult struct {
 	at     time.Time
 }
 
+// pendingReceipt is a probe sent to a Receipt job's pod: the receipt its
+// engine must report, and when it was sent.
+type pendingReceipt struct {
+	receipt string
+	pod     string
+	sent    time.Time
+	job     ProbeJob
+	t       ProbeTarget
+	prev    probeResult
+	had     bool
+}
+
 func (p *Prober) init() {
 	p.once.Do(func() {
 		p.results = map[string]probeResult{}
+		p.pending = map[string]pendingReceipt{}
 		p.jobs = map[string][]ProbeJob{}
 		p.events = make(chan event.GenericEvent, 1)
 	})
@@ -222,7 +255,7 @@ func (p *Prober) now() time.Time {
 // and the probe key; any change makes it pending again.
 func resultKey(job ProbeJob, pod ProbePod, t ProbeTarget, key []byte) string {
 	sum := sha256.Sum256([]byte(job.Fingerprint + "\x00" + string(key)))
-	return strings.Join([]string{job.Route.Kind, job.Route.Key.String(), string(pod.UID), pod.IP, t.Host, t.Path, strconv.FormatBool(t.TLS),
+	return strings.Join([]string{job.Route.Kind, job.Route.Key.String(), strconv.FormatBool(job.Receipt), string(pod.UID), pod.IP, t.Host, t.Path, strconv.FormatBool(t.TLS),
 		strconv.Itoa(int(t.Port)), t.Method, t.Query, headersKey(t.Headers), hex.EncodeToString(sum[:8])}, "|")
 }
 
@@ -307,26 +340,42 @@ func (p *Prober) Run(ctx context.Context) {
 		prev probeResult
 		had  bool
 	}
+	changed := p.collectReceipts(ctx)
 	p.mu.Lock()
-	changed := string(p.key) != string(key)
+	changed = changed || string(p.key) != string(key)
 	p.key = key
 	var due []task
 	now := p.now()
 	live := map[string]bool{}
+	// Probes waiting for a receipt, per pod.
+	waiting := map[string]int{}
+	for _, pr := range p.pending {
+		waiting[pr.pod]++
+	}
 	if len(key) > 0 {
 		for _, job := range slices.Concat(slices.Collect(maps.Values(p.jobs))...) {
 			for _, pod := range job.Pods {
 				for _, t := range job.Targets {
 					k := resultKey(job, pod, t, key)
 					live[k] = true
+					if _, ok := p.pending[k]; ok {
+						continue
+					}
 					r, had := p.results[k]
 					wait := haproxyRetry
 					if r.ok {
 						wait = haproxyReprobe
 					}
-					if !had || now.Sub(r.at) >= wait {
-						due = append(due, task{key: k, job: job, pod: pod, t: t, prev: r, had: had})
+					if had && now.Sub(r.at) < wait {
+						continue
 					}
+					if job.Receipt {
+						if waiting[pod.Name] >= maxReceiptsPending {
+							continue
+						}
+						waiting[pod.Name]++
+					}
+					due = append(due, task{key: k, job: job, pod: pod, t: t, prev: r, had: had})
 				}
 			}
 		}
@@ -339,6 +388,11 @@ func (p *Prober) Run(ctx context.Context) {
 			delete(p.results, k)
 		}
 	}
+	for k := range p.pending {
+		if !live[k] {
+			delete(p.pending, k)
+		}
+	}
 	p.mu.Unlock()
 
 	sem := make(chan struct{}, haproxyParallel)
@@ -349,17 +403,20 @@ func (p *Prober) Run(ctx context.Context) {
 		wg.Add(1)
 		go func() {
 			defer func() { <-sem; wg.Done() }()
-			ok, detail := p.probe(ctx, key, tk.pod, tk.t)
+			ok, detail, receipt := p.probe(ctx, key, tk.pod, tk.t, tk.job.Receipt)
 			p.mu.Lock()
+			if receipt != "" {
+				// Proven once the pod's engine reports it (collectReceipts).
+				p.pending[tk.key] = pendingReceipt{receipt: receipt, pod: tk.pod.Name, sent: p.now(), job: tk.job, t: tk.t, prev: tk.prev, had: tk.had}
+				p.mu.Unlock()
+				return
+			}
 			p.results[tk.key] = probeResult{ok: ok, detail: detail, at: p.now()}
 			p.mu.Unlock()
-			if !tk.had || tk.prev.ok != ok || tk.prev.detail != detail {
+			if p.logChange(ctx, tk.job, tk.pod.Name, tk.t, tk.prev, tk.had, ok, detail) {
 				mu.Lock()
 				changed = true
 				mu.Unlock()
-				if !ok {
-					log.FromContext(ctx).Info("probe failed", "proxy", tk.job.Proxy, "route", tk.job.Route.String(), "namespace", tk.job.Route.Key.Namespace, "pod", tk.pod.Name, "host", tk.t.Host, "detail", detail)
-				}
 			}
 		}()
 	}
@@ -372,6 +429,84 @@ func (p *Prober) Run(ctx context.Context) {
 	}
 }
 
+// logChange reports whether a result differs from the previous one, and
+// logs a new failure.
+func (p *Prober) logChange(ctx context.Context, job ProbeJob, pod string, t ProbeTarget, prev probeResult, had, ok bool, detail string) bool {
+	if had && prev.ok == ok && prev.detail == detail {
+		return false
+	}
+	if !ok {
+		log.FromContext(ctx).Info("probe failed", "proxy", job.Proxy, "route", job.Route.String(), "namespace", job.Route.Key.Namespace, "pod", pod, "host", t.Host, "detail", detail)
+	}
+	return true
+}
+
+// collectReceipts settles the probes waiting for a receipt (#475): proven
+// once the probed pod's engine reports the receipt of that very probe,
+// failed after receiptWait without it. It reports whether a result
+// changed.
+func (p *Prober) collectReceipts(ctx context.Context) bool {
+	p.mu.Lock()
+	n := len(p.pending)
+	p.mu.Unlock()
+	if n == 0 {
+		return false
+	}
+	byPod, err := p.reportedReceipts(ctx)
+	if err != nil {
+		// Not proven, and not failed: they wait for the next round.
+		log.FromContext(ctx).Error(err, "probe: reading the engine reports")
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.now()
+	changed := false
+	for k, pr := range p.pending {
+		ok := byPod[pr.pod][pr.receipt]
+		if !ok && now.Sub(pr.sent) < receiptWait {
+			continue
+		}
+		detail := ""
+		if !ok {
+			detail = fmt.Sprintf("its engine reported no receipt of the probe within %s (the request didn't reach the engine)", receiptWait)
+		}
+		delete(p.pending, k)
+		p.results[k] = probeResult{ok: ok, detail: detail, at: now}
+		if p.logChange(ctx, pr.job, pr.pod, pr.t, pr.prev, pr.had, ok, detail) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+// reportedReceipts are the probe receipts the engines report, by their
+// pod ("namespace/name"), from the replicas' engine reports: the pod
+// comes from the engine's authenticated stream, not from the receipt.
+func (p *Prober) reportedReceipts(ctx context.Context) (map[string]map[string]bool, error) {
+	if p.Reader == nil {
+		return nil, nil
+	}
+	engines, _, err := enginereport.Read(ctx, p.Reader, p.Namespace, engineReportStale, p.now())
+	if err != nil {
+		return nil, err
+	}
+	byPod := map[string]map[string]bool{}
+	for _, e := range engines {
+		if len(e.ProbeReceipts) == 0 {
+			continue
+		}
+		pod := e.PodNamespace + "/" + e.PodName
+		if byPod[pod] == nil {
+			byPod[pod] = map[string]bool{}
+		}
+		for _, r := range e.ProbeReceipts {
+			byPod[pod][r] = true
+		}
+	}
+	return byPod, nil
+}
+
 // probeKey is the key of the bundle in force: the one engines answer with.
 func (p *Prober) probeKey(ctx context.Context) ([]byte, error) {
 	if p.Key != nil {
@@ -381,14 +516,16 @@ func (p *Prober) probeKey(ctx context.Context) ([]byte, error) {
 	return b.GetProbeKey(), err
 }
 
-// probe sends one probe, and reports whether the engine answered it.
-func (p *Prober) probe(ctx context.Context, key []byte, pod ProbePod, t ProbeTarget) (bool, string) {
+// probe sends one probe, and reports whether the engine answered it; for a
+// receipt probe that went out and wasn't answered, the receipt the pod's
+// engine is to report instead.
+func (p *Prober) probe(ctx context.Context, key []byte, pod ProbePod, t ProbeTarget, receipt bool) (ok bool, detail, wantReceipt string) {
 	if pod.IP == "" {
-		return false, "the pod has no IP yet"
+		return false, "the pod has no IP yet", ""
 	}
 	nonce, err := haproxyprobe.NewNonce()
 	if err != nil {
-		return false, err.Error()
+		return false, err.Error(), ""
 	}
 	uri := t.Path + "?inkwall-probe=" + nonce
 	if t.Query != "" {
@@ -409,7 +546,7 @@ func (p *Prober) probe(ctx context.Context, key []byte, pod ProbePod, t ProbeTar
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, method, scheme+"://"+t.Host+uri, nil)
 	if err != nil {
-		return false, err.Error()
+		return false, err.Error(), ""
 	}
 	for k, v := range t.Headers {
 		req.Header.Set(k, v)
@@ -422,7 +559,7 @@ func (p *Prober) probe(ctx context.Context, key []byte, pod ProbePod, t ProbeTar
 	}
 	resp, err := do(ctx, pod, t, req)
 	if err != nil {
-		return false, "no answer: " + err.Error()
+		return false, "no answer: " + err.Error(), ""
 	}
 	_ = resp.Body.Close()
 	answer := resp.Header.Get(haproxyprobe.Header)
@@ -430,11 +567,15 @@ func (p *Prober) probe(ctx context.Context, key []byte, pod ProbePod, t ProbeTar
 	case haproxyprobe.Verify(key, nonce, t.Host, uri, answer):
 		// The MAC proves the engine answered: HAProxy's rules return it
 		// with 299, Envoy's local reply with 200 (#372).
-		return true, ""
+		return true, "", ""
+	case receipt:
+		// Envoy forwarded the probe (the app answered): the engine's
+		// receipt proves it saw it on the way (#475).
+		return false, "", haproxyprobe.ExpectedReceipt(key, nonce, t.Host, uri)
 	case resp.StatusCode == haproxyprobe.Status:
-		return false, "status 299 without the engine's answer"
+		return false, "status 299 without the engine's answer", ""
 	}
-	return false, fmt.Sprintf("HTTP %d, not the engine's answer (the request reached past the filter)", resp.StatusCode)
+	return false, fmt.Sprintf("HTTP %d, not the engine's answer (the request reached past the filter)", resp.StatusCode), ""
 }
 
 // sendProbe sends a probe to a pod's HAProxy directly, over TLS for a TLS
