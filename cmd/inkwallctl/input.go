@@ -55,7 +55,7 @@ func fromCommandLine(cfg config) (*enginev1.CheckRequest, error) {
 	}
 	var body []byte
 	if cfg.data != "" {
-		if path, ok := strings.CutPrefix(cfg.data, "@"); ok {
+		if path, ok := strings.CutPrefix(cfg.data, "@"); ok && !cfg.literalData {
 			if body, err = os.ReadFile(filepath.Clean(path)); err != nil {
 				return nil, err
 			}
