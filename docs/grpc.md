@@ -1,8 +1,7 @@
 # gRPC
 
 What the engine inspects in a [gRPC](https://grpc.io/docs/what-is-grpc/core-concepts/) call, what
-it doesn't, and how it denies one. Planned: streams inspected message by message
-([#315](https://github.com/inkwall-dev/inkwall/issues/315)), messages read with their schema
+it doesn't, and how it denies one. Planned: messages read with their schema
 ([#316](https://github.com/inkwall-dev/inkwall/issues/316)), and server messages
 ([#317](https://github.com/inkwall-dev/inkwall/issues/317)).
 
@@ -11,6 +10,7 @@ it doesn't, and how it denies one. Planned: streams inspected message by message
 - [Which requests are gRPC calls](#which-requests-are-grpc-calls)
 - [What is inspected](#what-is-inspected)
 - [Inspecting the messages](#inspecting-the-messages)
+- [Long streams: one message at a time](#long-streams-one-message-at-a-time)
 - [Denied calls](#denied-calls)
 - [Streaming calls](#streaming-calls)
 - [If you serve no gRPC](#if-you-serve-no-grpc)
@@ -76,7 +76,8 @@ spec:
   mode by default (`RESOURCE_EXHAUSTED`, HTTP 413), logged in `Detect` mode. That is a message
   cut at `body.maxBytes` (a client stream longer than the limit), compressed other than with
   gzip, not protobuf, or with more than 4,096 text fields. With long client streams, set
-  `body.onOversize: Allow`: what fits under the limit is still inspected.
+  `body.onOversize: Allow`: what fits under the limit is still inspected; or, through Envoy, have
+  each message inspected as it comes ([below](#long-streams-one-message-at-a-time)).
 - **Argument limit:** the text fields count against the engine's argument limit (1,000 by
   default), as a form's or JSON body's do: more is denied (400, rule 200005).
 
@@ -88,6 +89,60 @@ protobuf messages carrying names, paths and text. That is why it is off by defau
 `Detect` mode first, read the events for a while, and add exclusions (`when: {argument: "3"}`) for binary
 fields that match before `Block`. The measurement and the decision are in
 [0002 §8.7](design/0002-system-architecture.md#87-grpc-messages).
+
+## Long streams: one message at a time
+
+From v0.6.0, through Envoy (Envoy Gateway, Istio, raw Envoy), a policy can have each message
+inspected on its own as it arrives, instead of the body Envoy buffers:
+
+```yaml
+spec:
+  body:
+    grpcMessages: Inspect
+    grpcStreams: PerMessage # default: Buffer
+```
+
+(The engine's flag, without the operator: `inkwall-engine ext-proc --grpc-messages inspect
+--grpc-streams per-message`; Envoy's filter needs `allow_mode_override: true`.)
+
+With `Buffer`, Envoy holds a call until the client has sent all of it, or `body.maxBytes`: a
+client stream longer than that is cut and handled as an oversized body, and a bidirectional call
+whose client waits for the server stalls. With `PerMessage`:
+
+- **The call is decided on its path and metadata**, and then reaches the application at once.
+  Envoy streams its body to the engine, which reads each message as it completes, whatever the
+  chunks it comes in.
+- **Each message is inspected on its own**, as its text fields (named by field numbers, as
+  above), with the policy's rules and exclusions, up to `body.maxBytes`. A longer message, or one
+  compressed other than with gzip, gets `body.onOversize`. Long client streams and bidirectional
+  calls work, however long they last.
+- **Block mode** holds each message until it is inspected; an allowed one goes on to the
+  application. A denied one ends the call with its gRPC status (`PERMISSION_DENIED`, or
+  `RESOURCE_EXHAUSTED` for an oversized message) and the request ID; the application never gets
+  it nor any message after it. If the application has already answered (a bidirectional call), the
+  client sees the call reset instead. **Detect mode** forwards each message at once and logs the
+  ones the rules flag, with `stream_event`, the message's index in the call.
+- A body that isn't gRPC messages at all (a JSON body labelled gRPC) is denied, whatever
+  `body.onOversize` says: under `Allow` it would otherwise pass uninspected.
+
+**What changes, and why it is opt-in.** With `Buffer`, a client stream with an attack in its third
+message is denied before the application sees anything of it. With `PerMessage` **the first two
+messages have already reached the application** when the third is denied: the application may have
+acted on them (written a row, started a job). That is the price of not holding the call. Choose
+`PerMessage` for routes with long client streams or bidirectional calls, where an application
+already handles calls that fail midway, and keep `Buffer` elsewhere.
+
+**Cost.** Each message is one evaluation, so a call of many small messages costs more than the
+same bytes buffered. Every evaluation goes through the engine's admission control and the policy's
+`timeout`, as a request does: a flood of messages is shed with the failure mode (in `Block` mode by
+default, the call ends with `UNAVAILABLE`), and never queues work. Memory per call is the message
+in progress, at most `body.maxBytes` and its 5-byte prefix.
+
+**Proxies.** Only Envoy streams a request body to the engine. Through Traefik, HAProxy and the
+standalone proxy, `PerMessage` inspects the buffered body as `Buffer` does: messages are still
+inspected, and long streams behave as below. gRPC-Web stays buffered everywhere: browsers don't
+stream requests. An engine before 0.6.0 ignores `grpcStreams` and buffers: the policy is
+`Enforced=False` (`EnginesOutdated`) while one runs it.
 
 ## Denied calls
 
@@ -131,16 +186,19 @@ its whole request, or as much as the proxy buffers:
 
 - **Envoy Gateway**, in `Block` mode, holds the call until the client ends its side or the body
   fills Envoy's buffer (`BufferedPartial`). A bidirectional call whose client waits for the server
-  before ending its side stalls. Set `body.inspect: false` on the policy for such routes: Envoy
-  then doesn't hold the body, and the headers are still inspected.
+  before ending its side stalls. With `grpcStreams: PerMessage` (from v0.6.0,
+  [above](#long-streams-one-message-at-a-time)), the call isn't held: each message is inspected as
+  it comes. Before v0.6.0, the workaround was `body.inspect: false` on such routes: Envoy then
+  doesn't hold the body, and only the headers are inspected.
 - **Istio** holds a call as Envoy Gateway does: its filter asks for the body
-  (`BUFFERED_PARTIAL`) when a policy inspects bodies.
+  (`BUFFERED_PARTIAL`) when a policy inspects bodies, and `grpcStreams: PerMessage` works the same.
 - **HAProxy** sends the agent a body only with `option http-buffer-request`, which waits for the
   whole body or until HAProxy's buffer is full (about 15 KiB by default): a call is held as through
   Envoy Gateway, and a message past the buffer is handled as an oversized body
   ([bodies](haproxy.md#bodies)).
 - **Traefik**'s ForwardAuth reads the whole body before asking the engine, whatever the policy
-  says, and refuses bodies over 10 MiB (401). Bidirectional calls stall there too.
+  says, and refuses bodies over 10 MiB (401). Bidirectional calls stall there too, with
+  `PerMessage` or not: that can't be changed on the engine's side.
 - **The standalone proxy** reads up to `--max-body-bytes` of the body before it decides, then
   streams the rest: a call is held as through Envoy Gateway, and a bidirectional call whose client
   waits for the server stalls unless the route is in `--skip-body-paths`.

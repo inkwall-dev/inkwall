@@ -86,6 +86,20 @@ spec:
                     - Inspect
                     - Skip
                     type: string
+                  grpcStreams:
+                    description: |-
+                      GRPCStreams decides how the messages are read, with grpcMessages:
+                      Inspect. PerMessage inspects each message on its own as it comes,
+                      up to maxBytes each, so long client streams and bidirectional calls
+                      work; the messages before a denied one have already reached the
+                      application. Through Envoy Gateway and Istio; other proxies buffer
+                      the body as with Buffer. Unset: Buffer, the body the proxy buffers,
+                      up to maxBytes in all. Requires engines 0.6.0 or later. See
+                      docs/grpc.md.
+                    enum:
+                    - Buffer
+                    - PerMessage
+                    type: string
                   inspect:
                     default: true
                     description: Inspect turns body inspection on or off.
@@ -108,6 +122,12 @@ spec:
                     - Deny
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: 'grpcStreams: PerMessage needs grpcMessages: Inspect and
+                    body inspection'
+                  rule: '!has(self.grpcStreams) || self.grpcStreams != ''PerMessage''
+                    || (has(self.grpcMessages) && self.grpcMessages == ''Inspect''
+                    && (!has(self.inspect) || self.inspect))'
               exclusions:
                 description: Exclusions turn rules off where they cause false positives.
                 items:

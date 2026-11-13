@@ -283,7 +283,8 @@ an Envoy you configure yourself, in or out of Kubernetes, see [protecting raw En
   only with `body.grpcMessages: Inspect`, read without a schema. gRPC with another codec is
   inspected as other requests, and denied by the Core Rule Set's content type rule. Client
   streams longer than the body limit are cut there, and bidirectional streaming calls stall while
-  the proxy holds the body. See [gRPC](docs/grpc.md).
+  the proxy holds the body, unless, through Envoy, the policy sets `body.grpcStreams: PerMessage`
+  (each message inspected as it arrives). See [gRPC](docs/grpc.md).
 - Behind a load balancer, the engine sees the client's IP only with the [PROXY protocol](https://github.com/haproxy/haproxy/blob/master/doc/proxy-protocol.txt) on Traefik's
   [entry points](https://doc.traefik.io/traefik/routing/entrypoints/) or with [`externalTrafficPolicy: Local`](https://kubernetes.io/docs/tasks/access-application-cluster/create-external-load-balancer/#preserving-the-client-source-ip): see [client IP](docs/client-ip.md).
 
