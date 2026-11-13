@@ -20,6 +20,7 @@ import (
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
@@ -307,6 +308,20 @@ func testWebhook(ctx context.Context, t *testing.T, c client.Client, warn *warni
 // update reads obj, changes it with mutate and saves it, again on a
 // conflict: the operator writes the status, a new resourceVersion, at any
 // time.
+// resume makes inspection run, and returns the InkwallConfig: the InkwallConfig default, created if
+// missing, not suspended. A subtest that needs it calls it rather than
+// rely on what an earlier subtest left, so one failure doesn't fail the
+// subtests after it (#581).
+func resume(ctx context.Context, t *testing.T, c client.Client) *wafv1alpha1.InkwallConfig {
+	t.Helper()
+	cfg := &wafv1alpha1.InkwallConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+	if err := c.Create(ctx, cfg); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("create the InkwallConfig: %v", err)
+	}
+	update(ctx, t, c, cfg, func(cfg *wafv1alpha1.InkwallConfig) { cfg.Spec.Suspend = false })
+	return cfg
+}
+
 func update[T client.Object](ctx context.Context, t *testing.T, c client.Client, obj T, mutate func(T)) {
 	t.Helper()
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {

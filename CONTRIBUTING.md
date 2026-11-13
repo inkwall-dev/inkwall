@@ -223,8 +223,13 @@ for patching released versions.
 4. The first time, make the three new [GHCR](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry) packages (`inkwall-engine`, `inkwall-operator`,
    `charts/inkwall`) public in the organization's package settings: they are created private.
 
-A failed run can be re-run from the Actions tab. If something was already published, fix it on
-`main` and release the next patch instead of moving the tag.
+A failed run can be re-run from the Actions tab. Signing needs the job's OIDC token, which GitHub
+can fail to hand out: each publishing job checks it gets one before it publishes anything, and
+retries signing after. If signing still fails, the job's summary says what was published unsigned:
+re-run the failed jobs, which publish it again, sign it and run the `check` job that was skipped.
+If the binaries job failed after the GitHub release was created, delete the release first, keeping
+the tag (`gh release delete <tag> --yes`), as its summary says. If something else was already
+published, fix it on `main` and release the next patch instead of moving the tag.
 
 ### Release branches and patches
 

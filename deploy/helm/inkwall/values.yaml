@@ -172,6 +172,24 @@ metrics:
   # monitoring.coreos.com/v1, or with forceMonitoringObjects (for helm
   # template, which can't ask the cluster, or CRDs applied in the same run).
   forceMonitoringObjects: false
+  secure:
+    # Serve the operator's /metrics over HTTPS, only to clients whose
+    # bearer token the API server authenticates and allows to get /metrics
+    # (bind the <operator>-metrics-reader ClusterRole to them). Off: plain
+    # HTTP to anything that reaches the port (networkPolicy.metricsFrom
+    # narrows that). The ServiceMonitor follows.
+    enabled: false
+    certs:
+      # selfSigned: the operator makes a certificate each time it starts;
+      #   the ServiceMonitor doesn't verify it.
+      # certManager: cert-manager issues it (it must be installed) for the
+      #   metrics Service, and the ServiceMonitor verifies it; a self-signed
+      #   Issuer is created unless issuerRef is set.
+      mode: selfSigned
+      certManager:
+        issuerRef: {}
+        #   kind: ClusterIssuer
+        #   name: my-issuer
   serviceMonitor:
     # A ServiceMonitor (and a Service) for the operator's /metrics.
     enabled: false

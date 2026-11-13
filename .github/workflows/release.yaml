@@ -13,6 +13,13 @@
 # Signatures are keyless, with this workflow's identity. Nothing is
 # published unless CI passed on the tagged commit (verify), and what was
 # published is checked as a user would (check).
+#
+# Signing needs the job's OIDC token, which GitHub can fail to hand out
+# (v0.5.1, #586). Each publishing job checks it gets one before it publishes
+# anything (hack/ci/sigstore.sh check) and retries signing after
+# (hack/ci/sigstore.sh retry); if signing still fails, the job summary says
+# what was published unsigned and how to finish the release: check is
+# skipped then.
 name: release
 
 on:
@@ -121,6 +128,8 @@ jobs:
         with:
           cosign-release: ${{ env.COSIGN_VERSION }}
       - run: cosign version
+      # Signing will get its token: checked before the push (#586).
+      - run: hack/ci/sigstore.sh check
       # No QEMU: Go cross-compiles on the build platform, and the final
       # stages only copy the binary.
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -155,12 +164,23 @@ jobs:
           sbom: true
           provenance: mode=max
           push: true
-      # By digest: a tag can be moved, the digest can't.
+      # By digest: a tag can be moved, the digest can't. Retried: the
+      # image is already published.
       - env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          cosign sign --yes "$IMAGE@$DIGEST"
+          hack/ci/sigstore.sh retry cosign sign --yes "$IMAGE@$DIGEST"
           echo "$IMAGE@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+      - if: failure() && steps.build.outcome == 'success'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          echo "::error::$IMAGE@$DIGEST is published but not signed"
+          {
+            echo "## $IMAGE@$DIGEST is published but not signed"
+            echo
+            echo "Signing failed after the push, retries included. Re-run the failed jobs: they push the image again, sign it and publish the rest of the release; the check job, skipped now, runs after them."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   chart:
     needs: [verify, images]
@@ -186,6 +206,8 @@ jobs:
       - run: |
           helm version
           cosign version
+      # Signing will get its token: checked before the push (#586).
+      - run: hack/ci/sigstore.sh check
       # For cosign; helm keeps its own login.
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
@@ -194,7 +216,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       # The chart and the images share the version: the chart deploys the
       # images of its appVersion.
-      - env:
+      - id: push
+        env:
           VERSION: ${{ needs.verify.outputs.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -206,8 +229,25 @@ jobs:
             echo "::error::no digest in the helm push output"
             exit 1
           fi
-          cosign sign --yes "$REGISTRY/charts/inkwall@$digest"
-          echo "$REGISTRY/charts/inkwall:$VERSION@$digest" >> "$GITHUB_STEP_SUMMARY"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      # Retried: the chart is already published.
+      - env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          hack/ci/sigstore.sh retry cosign sign --yes "$REGISTRY/charts/inkwall@$DIGEST"
+          echo "$REGISTRY/charts/inkwall:$VERSION@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+      - if: failure() && steps.push.outcome == 'success'
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          echo "::error::the chart $REGISTRY/charts/inkwall:$VERSION@$DIGEST is published but not signed"
+          {
+            echo "## The chart $REGISTRY/charts/inkwall:$VERSION@$DIGEST is published but not signed"
+            echo
+            echo "Signing failed after the push, retries included. Re-run the failed jobs: they push the chart again, sign it and publish the binaries; the check job, skipped now, runs after them."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   binaries:
     needs: [verify, images, chart]
@@ -246,7 +286,12 @@ jobs:
           cosign version
           syft version
           goreleaser --version
-      - run: goreleaser release --clean
+      # Signing will get its token: checked before anything is published
+      # (#586). GoReleaser signs the checksums before it publishes, so a
+      # signing failure in it publishes nothing.
+      - run: hack/ci/sigstore.sh check
+      - id: release
+        run: goreleaser release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MAKE_LATEST: ${{ needs.verify.outputs.latest }}
@@ -254,7 +299,24 @@ jobs:
           # tags on the commit, and git sorts v0.1.0-rc.2 after v0.1.0: tagging
           # a release on its last rc's commit built the rc instead.
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+      # The release is published by now: three attempts, 30 s apart (#586).
       - id: provenance
+        continue-on-error: true
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+      - if: steps.provenance.outcome == 'failure'
+        run: sleep 30
+      - id: provenance-2
+        if: steps.provenance.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+      - if: steps.provenance-2.outcome == 'failure'
+        run: sleep 30
+      - id: provenance-3
+        if: steps.provenance-2.outcome == 'failure'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*.tar.gz
@@ -264,12 +326,33 @@ jobs:
       # JSON line; gh attestation verify --bundle reads it.
       - env:
           GH_TOKEN: ${{ github.token }}
-          BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          BUNDLE: ${{ steps.provenance.outputs.bundle-path || steps.provenance-2.outputs.bundle-path || steps.provenance-3.outputs.bundle-path }}
           VERSION: ${{ needs.verify.outputs.version }}
           TAG: ${{ github.ref_name }}
         run: |
           cp "$BUNDLE" "dist/inkwall_$VERSION.intoto.jsonl"
           gh release upload "$TAG" "dist/inkwall_$VERSION.intoto.jsonl" -R "$GITHUB_REPOSITORY"
+      # A rerun runs GoReleaser again, which can't publish over the
+      # release's assets: delete the release first (its tag stays).
+      - if: failure() && steps.release.outcome != 'skipped'
+        env:
+          TAG: ${{ github.ref_name }}
+          RELEASE: ${{ steps.release.outcome }}
+          PROVENANCE: ${{ steps.provenance-3.outcome }}
+        run: |
+          if [[ $RELEASE == failure ]]; then
+            what="GoReleaser failed: the GitHub release $TAG may be published, in part (a signing failure in GoReleaser publishes nothing)"
+          elif [[ $PROVENANCE == failure ]]; then
+            what="The GitHub release $TAG is published, but attesting its archives' build provenance failed three times: it has no provenance"
+          else
+            what="The GitHub release $TAG is published, but uploading its provenance failed"
+          fi
+          echo "::error::$what"
+          {
+            echo "## $what"
+            echo
+            echo "If the release $TAG exists, delete it, keeping the tag: \`gh release delete $TAG --yes -R $GITHUB_REPOSITORY\`. Then re-run the failed jobs: they publish the release again; the check job, skipped now, runs after them."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # What was published, checked as a user would (#392): the signatures with
   # the documented identity, both platforms and the attestations of each
