@@ -229,12 +229,13 @@ func TestPolicyResponsesWarning(t *testing.T) {
 		// It names the proxies that can't send responses, and the
 		// condition that says which applies, never one proxy as the
 		// target's.
-		for _, s := range []string{"Traefik", "HAProxy", "Envoy Gateway and Istio can", "Programmed", "ResponsesNotInspected"} {
+		for _, s := range []string{"Traefik can't", "Envoy Gateway, Istio and the HAProxy Kubernetes Ingress Controller can", "Programmed", "ResponsesNotInspected"} {
 			if !strings.Contains(w, s) {
 				t.Errorf("%s: warning %q doesn't mention %s", tc.name, w, s)
 			}
 		}
-		for _, s := range []string{"served by Traefik", "only Envoy Gateway"} {
+		// HAProxy sends responses since #470: not named as unable.
+		for _, s := range []string{"served by Traefik", "only Envoy Gateway", "HAProxy Kubernetes Ingress Controller can't"} {
 			if strings.Contains(w, s) {
 				t.Errorf("%s: warning %q says %q", tc.name, w, s)
 			}

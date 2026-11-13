@@ -314,9 +314,10 @@ func checkCRS(path *field.Path, b wafv1alpha1.RuleSetBinding) field.ErrorList {
 // the proxy that serves each one, which the webhook doesn't resolve: an
 // Ingress may be Traefik's or the HAProxy Kubernetes Ingress Controller's,
 // an HTTPRoute Envoy Gateway's, Traefik's or Istio's; IngressRoutes are
-// Traefik's. Envoy Gateway and Istio send responses to the engine (Istio
-// since #374, so VirtualServices, Istio's ingress gateways', get no
-// warning); Traefik and HAProxy don't. So it names the target kinds, not a
+// Traefik's. Envoy Gateway, Istio (since #374, so VirtualServices, Istio's
+// ingress gateways', get no warning) and the HAProxy Kubernetes Ingress
+// Controller (since #470, once its pods' engines are 0.6.0 or later) send
+// responses to the engine; Traefik doesn't. So it names the target kinds, not a
 // proxy, and leaves each target's verdict to its Programmed condition
 // (ResponsesNotInspected). The policy is accepted, as its requests are
 // inspected.
@@ -339,7 +340,7 @@ func responseWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
 		list = strings.Join(targets[:n-1], ", ") + " and " + targets[n-1]
 	}
 	return admission.Warnings{"spec.responses: the responses of " + list + " may not be inspected, depending on the proxy that serves them: " +
-		"Traefik and the HAProxy Kubernetes Ingress Controller can't send responses to the engine, Envoy Gateway and Istio can. " +
+		"Traefik can't send responses to the engine; Envoy Gateway, Istio and the HAProxy Kubernetes Ingress Controller can (HAProxy once its pods run an engine of 0.6.0 or later). " +
 		"The requests are inspected either way; the policy's Programmed condition says which responses are not (ResponsesNotInspected)"}
 }
 

@@ -8,6 +8,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -29,7 +30,7 @@ import (
 )
 
 func TestHAProxySnippet(t *testing.T) {
-	closed := HAProxySnippet(false, true)
+	closed := HAProxySnippet(false, true, false)
 	for _, want := range []string{
 		"option http-buffer-request",
 		"filter spoe engine inkwall config " + injection.HAProxySPOEConf,
@@ -45,9 +46,98 @@ func TestHAProxySnippet(t *testing.T) {
 	if strings.Index(closed, "status 299") > strings.Index(closed, "deny_status") {
 		t.Error("the probe's rule is after a denial")
 	}
-	open := HAProxySnippet(true, false)
+	open := HAProxySnippet(true, false, false)
 	if strings.Contains(open, "if !{ var(txn.inkwall.action) -m found }") || strings.Contains(open, "http-buffer-request") {
 		t.Errorf("failing open, without bodies:\n%s", open)
+	}
+	for _, s := range []string{closed, open} {
+		if strings.Contains(s, "http-response") || strings.Contains(s, "inkwall-responses") {
+			t.Errorf("responses not inspected, yet response rules:\n%s", s)
+		}
+	}
+	// Responses: the agent's scope that tells the engine they come, the
+	// request's Accept-Encoding removed, the body waited for, the
+	// response sent, and the rules that replace it.
+	resp := HAProxySnippet(false, true, true)
+	for _, want := range []string{
+		"filter spoe engine inkwall-responses config " + injection.HAProxySPOEConf,
+		"http-request del-header accept-encoding",
+		"http-response wait-for-body time 2s",
+		"http-response send-spoe-group inkwall-responses inkwall-response",
+		`http-response return status 502 content-type text/plain lf-string "Bad Gateway. Request ID: %[var(txn.inkwall.request_id)]"`,
+		"{ var(txn.inkwall.response_failure) -m str closed }",
+		"if { var(txn.inkwall.response_status) -m int 503 }",
+		"http-response return status 403",
+	} {
+		if !strings.Contains(resp, want) {
+			t.Errorf("responses snippet lacks %q:\n%s", want, resp)
+		}
+	}
+	if strings.Contains(resp, "engine inkwall config") {
+		t.Errorf("both scopes:\n%s", resp)
+	}
+	// The response is sent before the rules that act on its verdict.
+	if strings.Index(resp, "send-spoe-group") > strings.Index(resp, "http-response return") {
+		t.Error("a response rule before the response is sent")
+	}
+}
+
+// A policy that inspects responses gets the response rules on its
+// Ingress, and the result says HAProxy sends responses, only when every
+// running controller pod's engine keeps requests for them
+// (--response-messages): otherwise neither, and why, naming the pods.
+func TestHAProxyWireResponses(t *testing.T) {
+	ctx := context.Background()
+	class := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "haproxy"}, Spec: networkingv1.IngressClassSpec{Controller: "haproxy.org/ingress-controller/haproxy-edge"}}
+	policy := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
+		Mode: wafv1alpha1.PolicyBlock, TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}},
+		Responses: &wafv1alpha1.ResponsesSpec{Inspect: true},
+	}}
+	plain := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "q"}, Spec: wafv1alpha1.WAFPolicySpec{
+		Mode: wafv1alpha1.PolicyBlock, TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "other"}},
+	}}
+	ready := haproxyControllerPod("hap-1")
+	c := fake.NewClientBuilder().WithScheme(haproxyScheme()).
+		WithObjects(class, policy, plain, ready, haproxyIngress("web", "haproxy"), haproxyIngress("other", "haproxy")).Build()
+	h := &HAProxy{Client: c, APIReader: c, Pods: integrationsSelector()}
+	web, other := Target{Kind: ingressKind, Key: types.NamespacedName{Namespace: "shop", Name: "web"}}, Target{Kind: ingressKind, Key: types.NamespacedName{Namespace: "shop", Name: "other"}}
+	targets := map[Target]bool{web: true, other: true}
+	snippet := func(tg Target) string {
+		var ing networkingv1.Ingress
+		_ = c.Get(ctx, tg.Key, &ing)
+		return ing.Annotations[HAProxySnippetAnnotation]
+	}
+
+	res, err := h.Wire(ctx, targets, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Responses || res.ResponsesWhy != "" {
+		t.Errorf("every pod ready: Responses %v, %q", res.Responses, res.ResponsesWhy)
+	}
+	if !strings.Contains(snippet(web), "send-spoe-group") {
+		t.Errorf("web's snippet lacks the response rules:\n%s", snippet(web))
+	}
+	if s := snippet(other); strings.Contains(s, "http-response") || !strings.Contains(s, "engine inkwall config") {
+		t.Errorf("other's policy doesn't inspect responses:\n%s", s)
+	}
+
+	// A pod whose engine was injected without the flag (before 0.6.0, or a
+	// pinned older engine): no response rules anywhere, and why.
+	old := haproxyControllerPod("hap-0")
+	old.Spec.InitContainers[0].Args = slices.DeleteFunc(old.Spec.InitContainers[0].Args, func(a string) bool { return a == injection.ResponseMessagesFlag })
+	if err := c.Create(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	res, err = h.Wire(ctx, targets, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Responses || !strings.Contains(res.ResponsesWhy, "haproxy-controller/hap-0") || !strings.Contains(res.ResponsesWhy, "restart") {
+		t.Errorf("a pod not ready: Responses %v, %q", res.Responses, res.ResponsesWhy)
+	}
+	if s := snippet(web); strings.Contains(s, "http-response") || !strings.Contains(s, "engine inkwall config") {
+		t.Errorf("response rules with a pod not ready:\n%s", s)
 	}
 }
 
@@ -59,7 +149,7 @@ func TestHAProxyAnnotate(t *testing.T) {
 		HAProxySnippetAnnotation: "http-request set-header X-Mine 1\n", HAProxyStandaloneAnnotation: "false",
 	}}}
 	c := fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).WithObjects(ing).Build()
-	ours := HAProxySnippet(false, true)
+	ours := HAProxySnippet(false, true, false)
 	if err := annotateHAProxy(ctx, c, ing, ours); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +163,7 @@ func TestHAProxyAnnotate(t *testing.T) {
 		t.Fatalf("wired again: %v, resourceVersion %s -> %s", err, rv, ing.ResourceVersion)
 	}
 	// Another mode: the operator's part is replaced, the user's kept.
-	if err := annotateHAProxy(ctx, c, ing, HAProxySnippet(true, false)); err != nil {
+	if err := annotateHAProxy(ctx, c, ing, HAProxySnippet(true, false, false)); err != nil {
 		t.Fatal(err)
 	}
 	if n := strings.Count(ing.Annotations[HAProxySnippetAnnotation], haproxySnippetBegin); n != 1 {
@@ -106,7 +196,7 @@ func haproxyControllerPod(name string, args ...string) *corev1.Pod {
 			Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 8080}}}}},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.1"},
 	}
-	injection.Inject(pod, injection.Sidecar{Image: "engine", SocketDir: integrations.HAProxySocketDir})
+	injection.Inject(pod, injection.Sidecar{Image: "engine", SocketDir: integrations.HAProxySocketDir, ResponseMessages: true})
 	injection.InjectHAProxy(pod)
 	return pod
 }
@@ -240,6 +330,20 @@ func TestHAProxyProgrammed(t *testing.T) {
 	}
 	if st, reason, msg := programmed(p, rep(TargetState{Wired: true}, pod)); st != metav1.ConditionTrue || msg != "1 Ingress(es) wired to the engine in HAProxy" {
 		t.Errorf("proven: %s %s %s", st, reason, msg)
+	}
+	// Responses: ResponsesNotInspected with the integration's why, until
+	// HAProxy sends them; then Programmed.
+	resp := p.DeepCopy()
+	resp.Spec.Responses = &wafv1alpha1.ResponsesSpec{Inspect: true}
+	r := rep(TargetState{Wired: true}, pod)
+	r.results[1].ResponsesWhy = "HAProxy pod haproxy-controller/hap-0 runs an engine without --response-messages: restart it"
+	if st, reason, msg := programmed(resp, r); st != metav1.ConditionFalse || reason != ReasonResponsesNotInspected ||
+		!strings.Contains(msg, "restart it") || strings.Contains(msg, "Envoy Gateway") {
+		t.Errorf("responses not yet sent: %s %s %s", st, reason, msg)
+	}
+	r.results[1].Responses, r.results[1].ResponsesWhy = true, ""
+	if st, reason, msg := programmed(resp, r); st != metav1.ConditionTrue {
+		t.Errorf("responses sent: %s %s %s", st, reason, msg)
 	}
 	// A pod without the engine: its traffic isn't inspected, whatever the
 	// probe says of the others.
