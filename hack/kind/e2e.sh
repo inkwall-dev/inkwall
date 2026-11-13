@@ -152,6 +152,8 @@ eventually "block mode again" status_is 403 "$SQLI"
 
 # shellcheck source=hack/kind/explain-e2e.sh
 . hack/kind/explain-e2e.sh
+# shellcheck source=hack/kind/mcp-e2e.sh
+. hack/kind/mcp-e2e.sh
 
 # The chart README's suspend switch (#299), as documented: doc_block runs
 # the sh block after the README's "<!-- e2e: NAME" comment, kubectl pointed
