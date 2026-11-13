@@ -66,6 +66,11 @@ func freeAddr(t *testing.T) string { return testenv.FreeAddr(t) }
 // testProbeKey is the key of the operator's probe in these tests.
 var testProbeKey = bytes.Repeat([]byte{9}, haproxyprobe.KeySize)
 
+// observedPods are the pods ("namespace/name") whose Envoy the test's
+// prober runs in observability mode: their engine keeps a receipt of each
+// probe (in the *haproxyprobe.Receipts) and the app answers (#475).
+var observedPods sync.Map
+
 // warnings records the warnings the API server returns.
 type warnings struct {
 	mu   sync.Mutex
@@ -131,9 +136,17 @@ func startOperator(t *testing.T) (_ context.Context, _ client.Client, _ *warning
 		// one; HAProxy's pods have none and stay Unverified).
 		Prober: &wiring.Prober{
 			Key: func(context.Context) ([]byte, error) { return testProbeKey, nil },
-			Do: func(_ context.Context, _ wiring.ProbePod, _ wiring.ProbeTarget, req *http.Request) (*http.Response, error) {
-				answer, _ := haproxyprobe.Check(testProbeKey, req.URL.RequestURI(), req.Host, req.Header.Get(haproxyprobe.Header))
+			Do: func(_ context.Context, pod wiring.ProbePod, _ wiring.ProbeTarget, req *http.Request) (*http.Response, error) {
 				h := http.Header{}
+				if r, ok := observedPods.Load(pod.Name); ok {
+					// Envoy in observability mode: the engine keeps a
+					// receipt, and the app answers (#475).
+					if receipt, ok := haproxyprobe.Receipt(testProbeKey, req.URL.RequestURI(), req.Host, req.Header.Get(haproxyprobe.Header)); ok {
+						r.(*haproxyprobe.Receipts).Add(receipt)
+					}
+					return &http.Response{StatusCode: http.StatusNotFound, Header: h, Body: io.NopCloser(strings.NewReader(""))}, nil
+				}
+				answer, _ := haproxyprobe.Check(testProbeKey, req.URL.RequestURI(), req.Host, req.Header.Get(haproxyprobe.Header))
 				h.Set(haproxyprobe.Header, answer)
 				return &http.Response{StatusCode: http.StatusOK, Header: h, Body: io.NopCloser(strings.NewReader(""))}, nil
 			},

@@ -51,6 +51,11 @@ What's new:
   threshold, and the narrowest exclusion, checked as `inkwallctl test --policy` does), with
   `-o json` for scripts. It only reads; `explain request` reads the engines' logs, so it needs
   `get` on `pods/log` ([Explaining a policy or a denial](troubleshooting.md#explaining-a-policy-or-a-denial)).
+- **`inkwallctl mcp`** serves those answers to an AI assistant (Claude Code, Cursor, VS Code, ...)
+  over the Model Context Protocol: read-only tools (`status`, `explain_policy`, `explain_request`,
+  `test_policy`, `suggest_exclusions`, `list_policies`, `get_policy`) and this version's docs. The
+  assistant starts it on your machine, with your kubeconfig; nothing is hosted
+  ([Using Inkwall from an AI assistant](mcp.md)).
 - **Responses through HAProxy, configured by hand.** `inkwall-engine spoe --inspect-responses`
   inspects the responses HAProxy sends in the new `inkwall-response` SPOE group: a response that
   leaks is replaced with 403 in block mode and logged in detect mode. Copy the new lines of
@@ -64,6 +69,15 @@ What's new:
   `inkwall.dev/source: saas`; the cluster state lists every `WAFIPList`
   ([Managed mode](control-plane.md#managed-mode)). A control plane that sends none changes
   nothing.
+- **`Detect`-mode Istio routes are `Programmed`.** Envoy discards the engine's answer to the
+  operator's probe in `Detect` mode, so those HTTPRoutes and VirtualServices were `Unverified`.
+  Now the engine keeps a receipt of each probe it verified and reports it to the operator, which
+  proves the route by it ([the operator's probe](istio.md#the-operators-probe)). Pods with an
+  engine older than 0.6.0 report no receipts: their `Detect` routes stay `Unverified` until the
+  pods run the 0.6.0 engine (restart them, or `spec.engine.rollout: Automatic`). In `Detect` mode
+  the probe now reaches your app (a `GET` on the reserved path `.well-known/inkwall-probe/<nonce>`,
+  or an exact path with `?inkwall-probe=<nonce>`), and a rule matching only another method than
+  `GET` or `HEAD` is `NotProbeable` there.
 
 What changes by itself:
 

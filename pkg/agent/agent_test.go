@@ -42,6 +42,7 @@ import (
 	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
 	"github.com/inkwall-dev/inkwall/pkg/events"
+	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/request"
@@ -63,6 +64,8 @@ type fakeOperator struct {
 	nacks    []*agentv1.Nack
 	beats    int
 	beatKeys []string
+	// receipts are the probe receipts of the last heartbeat.
+	receipts []string
 	events   []string
 	// stats are the request counts, by stream (one per Hello) and policy,
 	// as last reported.
@@ -111,6 +114,7 @@ func (f *fakeOperator) Watch(stream agentv1.BundleService_WatchServer) error {
 			case *agentv1.WatchRequest_Heartbeat:
 				f.beats++
 				f.beatKeys = x.Heartbeat.GetTrustedKeyIds()
+				f.receipts = x.Heartbeat.GetProbeReceipts()
 			case *agentv1.WatchRequest_Events:
 				for _, ev := range x.Events.GetEvents() {
 					f.events = append(f.events, ev.GetEventId())
@@ -488,6 +492,35 @@ func TestReconnect(t *testing.T) {
 	if len(hellos) != 2 || hellos[1].GetBundleVersion() != 2 || tokens[1] != "Bearer token-2" {
 		t.Fatalf("reconnect: hellos %v, tokens %v", hellos, tokens)
 	}
+}
+
+func (f *fakeOperator) heartbeatReceipts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.receipts
+}
+
+// The engine reports the receipts of the operator's probes it keeps with
+// its heartbeats (#475): the recent ones, as they are at each heartbeat.
+func TestProbeReceipts(t *testing.T) {
+	e := newEnv(t)
+	now := time.Unix(1_800_000_000, 0)
+	var mu sync.Mutex
+	receipts := &haproxyprobe.Receipts{Now: func() time.Time { mu.Lock(); defer mu.Unlock(); return now }}
+	a, _, _ := e.agent(t, func(c *Config) { c.ProbeReceipts = receipts.Recent })
+	run(t, a)
+	<-e.op.sawHello
+	waitFor(t, "a heartbeat", func() bool { _, _, _, _, beats := e.op.snapshot(); return beats > 0 })
+	if got := e.op.heartbeatReceipts(); got != nil {
+		t.Fatalf("receipts before any probe: %v", got)
+	}
+	r := strings.Repeat("ab", haproxyprobe.ReceiptSize/2)
+	receipts.Add(r)
+	waitFor(t, "the receipt in a heartbeat", func() bool { return slices.Equal(e.op.heartbeatReceipts(), []string{r}) })
+	mu.Lock()
+	now = now.Add(haproxyprobe.ReceiptAge)
+	mu.Unlock()
+	waitFor(t, "the receipt gone after ReceiptAge", func() bool { return len(e.op.heartbeatReceipts()) == 0 })
 }
 
 func (f *fakeOperator) heartbeatKeys() []string {
