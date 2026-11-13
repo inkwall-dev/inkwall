@@ -50,6 +50,12 @@ type ProbeJob struct {
 	// proven by the receipt of the probe that the pod's engine reports
 	// (#475) instead.
 	Receipt bool
+	// Responses: the route's policies inspect responses, and its proxy
+	// sends them to the engine: each pod and target is probed with the
+	// response leg too (#595), which proves that the route's responses
+	// reach the engine's response inspection there, by the engine's
+	// answer in its response phase or, with Receipt, its receipt.
+	Responses bool
 }
 
 // ProbeRoute names a probed route: "Ingress", "HTTPRoute" or
@@ -205,18 +211,28 @@ type probeResult struct {
 	ok     bool
 	detail string
 	at     time.Time
+	// outdated: the response leg was answered at the request phase by an
+	// engine older than the response leg (responseLegSince): its route's
+	// responses are configured, but can't be proven (#595).
+	outdated bool
 }
+
+// responseLegSince is the first engine release that answers the probe's
+// response leg (#595).
+var responseLegSince = injection.Version{0, 6, 0}
 
 // pendingReceipt is a probe sent to a Receipt job's pod: the receipt its
 // engine must report, and when it was sent.
 type pendingReceipt struct {
 	receipt string
-	pod     string
-	sent    time.Time
-	job     ProbeJob
-	t       ProbeTarget
-	prev    probeResult
-	had     bool
+	// response: the receipt of the response leg.
+	response bool
+	pod      string
+	sent     time.Time
+	job      ProbeJob
+	t        ProbeTarget
+	prev     probeResult
+	had      bool
 }
 
 func (p *Prober) init() {
@@ -251,11 +267,12 @@ func (p *Prober) now() time.Time {
 	return time.Now()
 }
 
-// resultKey identifies a result: the route, its wiring and target, the pod
-// and the probe key; any change makes it pending again.
-func resultKey(job ProbeJob, pod ProbePod, t ProbeTarget, key []byte) string {
+// resultKey identifies a result: the route, its wiring and target, the pod,
+// the probe key, and the leg (response: the response leg, #595); any change
+// makes it pending again.
+func resultKey(job ProbeJob, pod ProbePod, t ProbeTarget, key []byte, response bool) string {
 	sum := sha256.Sum256([]byte(job.Fingerprint + "\x00" + string(key)))
-	return strings.Join([]string{job.Route.Kind, job.Route.Key.String(), strconv.FormatBool(job.Receipt), string(pod.UID), pod.IP, t.Host, t.Path, strconv.FormatBool(t.TLS),
+	return strings.Join([]string{job.Route.Kind, job.Route.Key.String(), strconv.FormatBool(job.Receipt), strconv.FormatBool(response), string(pod.UID), pod.IP, t.Host, t.Path, strconv.FormatBool(t.TLS),
 		strconv.Itoa(int(t.Port)), t.Method, t.Query, headersKey(t.Headers), hex.EncodeToString(sum[:8])}, "|")
 }
 
@@ -285,7 +302,7 @@ func (p *Prober) Unverified(job ProbeJob) string {
 	var pending, failed []string
 	for _, pod := range job.Pods {
 		for _, t := range job.Targets {
-			r, ok := p.results[resultKey(job, pod, t, p.key)]
+			r, ok := p.results[resultKey(job, pod, t, p.key, false)]
 			switch {
 			case !ok:
 				pending = append(pending, pod.Name)
@@ -304,6 +321,49 @@ func (p *Prober) Unverified(job ProbeJob) string {
 		return fmt.Sprintf("%s is wired; the filter is unverified until the operator's probe has reached it on every %s pod with the engine", name, job.Proxy)
 	}
 	return ""
+}
+
+// ResponsesProof is what the probe's response leg (#595) shows of a job
+// with Responses: why its responses aren't proven yet (unverified), why
+// they aren't inspected on some pod (failed), and a note on the pods whose
+// engine predates the response leg, which keep today's evidence (the
+// configuration in place). All empty: proven on every pod, or the job has
+// no response leg. Without a key, pods or targets, Unverified says why.
+func (p *Prober) ResponsesProof(job ProbeJob) (unverified, failed, note string) {
+	p.init()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !job.Responses || len(p.key) == 0 || len(job.Pods) == 0 || len(job.Targets) == 0 {
+		return "", "", ""
+	}
+	name := job.Route.String()
+	var pending bool
+	var bad, old []string
+	for _, pod := range job.Pods {
+		for _, t := range job.Targets {
+			r, ok := p.results[resultKey(job, pod, t, p.key, true)]
+			switch {
+			case !ok:
+				pending = true
+			case r.outdated:
+				old = append(old, pod.Name)
+			case !r.ok:
+				bad = append(bad, fmt.Sprintf("pod %s, host %s: %s", pod.Name, t.Host, r.detail))
+			}
+		}
+	}
+	if len(old) > 0 {
+		slices.Sort(old)
+		note = fmt.Sprintf("%s's responses are sent to the engine, but unproven on %s pod %s: its engine predates the probe's response leg (%s); restart the pod with an engine of %s or later to prove them",
+			name, job.Proxy, strings.Join(slices.Compact(old), ", "), responseLegSince, responseLegSince)
+	}
+	switch {
+	case len(bad) > 0:
+		failed = fmt.Sprintf("the probe's response leg shows that %s's responses don't reach the engine on %s: %s", name, job.Proxy, strings.Join(bad, "; "))
+	case pending:
+		unverified = fmt.Sprintf("%s's responses are unverified until the operator's probe has reached the engine's response inspection on every %s pod with the engine", name, job.Proxy)
+	}
+	return unverified, failed, note
 }
 
 // Start probes until ctx ends.
@@ -333,12 +393,13 @@ func (p *Prober) Run(ctx context.Context) {
 		return
 	}
 	type task struct {
-		key  string
-		job  ProbeJob
-		pod  ProbePod
-		t    ProbeTarget
-		prev probeResult
-		had  bool
+		key      string
+		job      ProbeJob
+		pod      ProbePod
+		t        ProbeTarget
+		response bool
+		prev     probeResult
+		had      bool
 	}
 	changed := p.collectReceipts(ctx)
 	p.mu.Lock()
@@ -354,28 +415,34 @@ func (p *Prober) Run(ctx context.Context) {
 	}
 	if len(key) > 0 {
 		for _, job := range slices.Concat(slices.Collect(maps.Values(p.jobs))...) {
+			legs := []bool{false}
+			if job.Responses {
+				legs = append(legs, true)
+			}
 			for _, pod := range job.Pods {
 				for _, t := range job.Targets {
-					k := resultKey(job, pod, t, key)
-					live[k] = true
-					if _, ok := p.pending[k]; ok {
-						continue
-					}
-					r, had := p.results[k]
-					wait := haproxyRetry
-					if r.ok {
-						wait = haproxyReprobe
-					}
-					if had && now.Sub(r.at) < wait {
-						continue
-					}
-					if job.Receipt {
-						if waiting[pod.Name] >= maxReceiptsPending {
+					for _, response := range legs {
+						k := resultKey(job, pod, t, key, response)
+						live[k] = true
+						if _, ok := p.pending[k]; ok {
 							continue
 						}
-						waiting[pod.Name]++
+						r, had := p.results[k]
+						wait := haproxyRetry
+						if r.ok || r.outdated {
+							wait = haproxyReprobe
+						}
+						if had && now.Sub(r.at) < wait {
+							continue
+						}
+						if job.Receipt {
+							if waiting[pod.Name] >= maxReceiptsPending {
+								continue
+							}
+							waiting[pod.Name]++
+						}
+						due = append(due, task{key: k, job: job, pod: pod, t: t, response: response, prev: r, had: had})
 					}
-					due = append(due, task{key: k, job: job, pod: pod, t: t, prev: r, had: had})
 				}
 			}
 		}
@@ -398,29 +465,47 @@ func (p *Prober) Run(ctx context.Context) {
 	sem := make(chan struct{}, haproxyParallel)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	// early are the response legs the engine answered at the request
+	// phase: settled below, by the engine's version.
+	var early []task
+	settle := func(tk task, r probeResult) {
+		p.mu.Lock()
+		p.results[tk.key] = r
+		p.mu.Unlock()
+		if p.logChange(ctx, tk.job, tk.pod.Name, tk.t, tk.prev, tk.had, r) {
+			mu.Lock()
+			changed = true
+			mu.Unlock()
+		}
+	}
 	for _, tk := range due {
 		sem <- struct{}{}
 		wg.Add(1)
 		go func() {
 			defer func() { <-sem; wg.Done() }()
-			ok, detail, receipt := p.probe(ctx, key, tk.pod, tk.t, tk.job.Receipt)
-			p.mu.Lock()
-			if receipt != "" {
+			o := p.probe(ctx, key, tk.pod, tk.t, tk.job.Receipt, tk.response)
+			switch {
+			case o.receipt != "":
 				// Proven once the pod's engine reports it (collectReceipts).
-				p.pending[tk.key] = pendingReceipt{receipt: receipt, pod: tk.pod.Name, sent: p.now(), job: tk.job, t: tk.t, prev: tk.prev, had: tk.had}
+				p.mu.Lock()
+				p.pending[tk.key] = pendingReceipt{receipt: o.receipt, response: tk.response, pod: tk.pod.Name, sent: p.now(), job: tk.job, t: tk.t, prev: tk.prev, had: tk.had}
 				p.mu.Unlock()
-				return
-			}
-			p.results[tk.key] = probeResult{ok: ok, detail: detail, at: p.now()}
-			p.mu.Unlock()
-			if p.logChange(ctx, tk.job, tk.pod.Name, tk.t, tk.prev, tk.had, ok, detail) {
+			case o.early:
 				mu.Lock()
-				changed = true
+				early = append(early, tk)
 				mu.Unlock()
+			default:
+				settle(tk, probeResult{ok: o.ok, detail: o.detail, at: p.now()})
 			}
 		}()
 	}
 	wg.Wait()
+	if len(early) > 0 {
+		versions := p.engineVersions(ctx)
+		for _, tk := range early {
+			settle(tk, earlyResult(versions[tk.pod.Name], p.now()))
+		}
+	}
 	if changed {
 		select {
 		case p.events <- event.GenericEvent{Object: &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: "haproxy-probe"}}}:
@@ -429,14 +514,27 @@ func (p *Prober) Run(ctx context.Context) {
 	}
 }
 
+// earlyResult is the result of a response leg the engine answered at the
+// request phase (#595), from the engine's reported version: one older than
+// the response leg doesn't know it, and its route's responses keep today's
+// evidence (outdated); a newer one, or one whose version isn't a release,
+// doesn't keep the route's responses, which therefore aren't inspected.
+func earlyResult(version string, now time.Time) probeResult {
+	if v, ok := injection.ImageVersion("engine:" + version); ok && slices.Compare(v[:], responseLegSince[:]) < 0 {
+		return probeResult{outdated: true, detail: "its engine (" + version + ") predates the probe's response leg", at: now}
+	}
+	return probeResult{detail: "its engine answered the probe's response leg at the request phase: it doesn't keep the route's responses " +
+		"(its bundle's policy for the route doesn't inspect them yet, or the engine wasn't started for them)", at: now}
+}
+
 // logChange reports whether a result differs from the previous one, and
 // logs a new failure.
-func (p *Prober) logChange(ctx context.Context, job ProbeJob, pod string, t ProbeTarget, prev probeResult, had, ok bool, detail string) bool {
-	if had && prev.ok == ok && prev.detail == detail {
+func (p *Prober) logChange(ctx context.Context, job ProbeJob, pod string, t ProbeTarget, prev probeResult, had bool, r probeResult) bool {
+	if had && prev.ok == r.ok && prev.detail == r.detail && prev.outdated == r.outdated {
 		return false
 	}
-	if !ok {
-		log.FromContext(ctx).Info("probe failed", "proxy", job.Proxy, "route", job.Route.String(), "namespace", job.Route.Key.Namespace, "pod", pod, "host", t.Host, "detail", detail)
+	if !r.ok && !r.outdated {
+		log.FromContext(ctx).Info("probe failed", "proxy", job.Proxy, "route", job.Route.String(), "namespace", job.Route.Key.Namespace, "pod", pod, "host", t.Host, "detail", r.detail)
 	}
 	return true
 }
@@ -468,12 +566,17 @@ func (p *Prober) collectReceipts(ctx context.Context) bool {
 			continue
 		}
 		detail := ""
-		if !ok {
+		switch {
+		case ok:
+		case pr.response:
+			detail = fmt.Sprintf("its engine reported no receipt of the probe's response within %s (the response didn't reach the engine)", receiptWait)
+		default:
 			detail = fmt.Sprintf("its engine reported no receipt of the probe within %s (the request didn't reach the engine)", receiptWait)
 		}
 		delete(p.pending, k)
-		p.results[k] = probeResult{ok: ok, detail: detail, at: now}
-		if p.logChange(ctx, pr.job, pr.pod, pr.t, pr.prev, pr.had, ok, detail) {
+		r := probeResult{ok: ok, detail: detail, at: now}
+		p.results[k] = r
+		if p.logChange(ctx, pr.job, pr.pod, pr.t, pr.prev, pr.had, r) {
 			changed = true
 		}
 	}
@@ -507,6 +610,24 @@ func (p *Prober) reportedReceipts(ctx context.Context) (map[string]map[string]bo
 	return byPod, nil
 }
 
+// engineVersions are the engines' reported versions, by their pod
+// ("namespace/name"); none when the reports can't be read.
+func (p *Prober) engineVersions(ctx context.Context) map[string]string {
+	if p.Reader == nil {
+		return nil
+	}
+	engines, _, err := enginereport.Read(ctx, p.Reader, p.Namespace, engineReportStale, p.now())
+	if err != nil {
+		log.FromContext(ctx).Error(err, "probe: reading the engine reports")
+		return nil
+	}
+	out := map[string]string{}
+	for _, e := range engines {
+		out[e.PodNamespace+"/"+e.PodName] = e.EngineVersion
+	}
+	return out
+}
+
 // probeKey is the key of the bundle in force: the one engines answer with.
 func (p *Prober) probeKey(ctx context.Context) ([]byte, error) {
 	if p.Key != nil {
@@ -516,16 +637,26 @@ func (p *Prober) probeKey(ctx context.Context) ([]byte, error) {
 	return b.GetProbeKey(), err
 }
 
-// probe sends one probe, and reports whether the engine answered it; for a
-// receipt probe that went out and wasn't answered, the receipt the pod's
-// engine is to report instead.
-func (p *Prober) probe(ctx context.Context, key []byte, pod ProbePod, t ProbeTarget, receipt bool) (ok bool, detail, wantReceipt string) {
+// outcome is what one probe showed: proven (ok), or why not (detail); for
+// a receipt probe that went out and wasn't answered, the receipt the pod's
+// engine is to report instead; early: the response leg was answered at the
+// request phase (#595).
+type outcome struct {
+	ok      bool
+	detail  string
+	receipt string
+	early   bool
+}
+
+// probe sends one probe, its response leg when response (#595), and
+// reports what it showed.
+func (p *Prober) probe(ctx context.Context, key []byte, pod ProbePod, t ProbeTarget, receipt, response bool) outcome {
 	if pod.IP == "" {
-		return false, "the pod has no IP yet", ""
+		return outcome{detail: "the pod has no IP yet"}
 	}
 	nonce, err := haproxyprobe.NewNonce()
 	if err != nil {
-		return false, err.Error(), ""
+		return outcome{detail: err.Error()}
 	}
 	uri := t.Path + "?inkwall-probe=" + nonce
 	if t.Query != "" {
@@ -537,6 +668,9 @@ func (p *Prober) probe(ctx context.Context, key []byte, pod ProbePod, t ProbeTar
 			uri += "?" + t.Query
 		}
 	}
+	if response {
+		uri = haproxyprobe.ResponseURI(uri)
+	}
 	method := cmp.Or(t.Method, http.MethodGet)
 	scheme := "http"
 	if t.TLS {
@@ -546,7 +680,7 @@ func (p *Prober) probe(ctx context.Context, key []byte, pod ProbePod, t ProbeTar
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, method, scheme+"://"+t.Host+uri, nil)
 	if err != nil {
-		return false, err.Error(), ""
+		return outcome{detail: err.Error()}
 	}
 	for k, v := range t.Headers {
 		req.Header.Set(k, v)
@@ -559,23 +693,40 @@ func (p *Prober) probe(ctx context.Context, key []byte, pod ProbePod, t ProbeTar
 	}
 	resp, err := do(ctx, pod, t, req)
 	if err != nil {
-		return false, "no answer: " + err.Error(), ""
+		return outcome{detail: "no answer: " + err.Error()}
 	}
 	_ = resp.Body.Close()
 	answer := resp.Header.Get(haproxyprobe.Header)
+	if response {
+		switch {
+		case haproxyprobe.VerifyResponse(key, nonce, t.Host, uri, answer):
+			// The engine answered in its response phase: the response
+			// came back to it through the route's filter, which the
+			// proxy waited on (HAProxy's response rules return it with
+			// 299, Envoy's local reply with 200).
+			return outcome{ok: true}
+		case haproxyprobe.Verify(key, nonce, t.Host, uri, answer):
+			return outcome{early: true}
+		case receipt:
+			// Envoy doesn't wait in observability mode: the engine's
+			// receipt proves the response reached it.
+			return outcome{receipt: haproxyprobe.ExpectedResponseReceipt(key, nonce, t.Host, uri)}
+		}
+		return outcome{detail: fmt.Sprintf("HTTP %d, not the engine's answer to the response (the response passed without reaching the engine)", resp.StatusCode)}
+	}
 	switch {
 	case haproxyprobe.Verify(key, nonce, t.Host, uri, answer):
 		// The MAC proves the engine answered: HAProxy's rules return it
 		// with 299, Envoy's local reply with 200 (#372).
-		return true, "", ""
+		return outcome{ok: true}
 	case receipt:
 		// Envoy forwarded the probe (the app answered): the engine's
 		// receipt proves it saw it on the way (#475).
-		return false, "", haproxyprobe.ExpectedReceipt(key, nonce, t.Host, uri)
+		return outcome{receipt: haproxyprobe.ExpectedReceipt(key, nonce, t.Host, uri)}
 	case resp.StatusCode == haproxyprobe.Status:
-		return false, "status 299 without the engine's answer", ""
+		return outcome{detail: "status 299 without the engine's answer"}
 	}
-	return false, fmt.Sprintf("HTTP %d, not the engine's answer (the request reached past the filter)", resp.StatusCode), ""
+	return outcome{detail: fmt.Sprintf("HTTP %d, not the engine's answer (the request reached past the filter)", resp.StatusCode)}
 }
 
 // sendProbe sends a probe to a pod's HAProxy directly, over TLS for a TLS

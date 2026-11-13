@@ -95,6 +95,21 @@ What's new:
   the probe now reaches your app (a `GET` on the reserved path `.well-known/inkwall-probe/<nonce>`,
   or an exact path with `?inkwall-probe=<nonce>`), and a rule matching only another method than
   `GET` or `HEAD` is `NotProbeable` there.
+- **The probe proves responses** (#595). For a policy with `responses.inspect`, the operator's
+  probe now also proves that the route's responses reach the engine, on Istio's routes and the
+  HAProxy controller's Ingresses: a second request per pod (the *response leg*), which the engine
+  lets through and answers in its response phase (or, in `Detect` mode, reports a receipt of).
+  Until it has, the policy is `Unverified`; where a pod's engine doesn't see the responses,
+  `ResponsesNotInspected`, naming the pod. **This probe reaches your app, in `Block` mode too**:
+  a `GET` (or `HEAD`) with `User-Agent: inkwall-operator-probe` on the reserved path
+  `.well-known/inkwall-probe/<nonce>?inkwall-probe-leg=response` (or an exact path with
+  `?inkwall-probe=<nonce>&inkwall-probe-leg=response`), per pod and listener every 5 minutes;
+  your app can ignore it (a 404 is fine), as the engine replaces its answer. Pods whose engine is
+  older than 0.6.0 keep today's status, with a note that their responses are unproven until they
+  run a 0.6.0 engine; a rule matching only another method than `GET` or `HEAD` is `NotProbeable`
+  for such policies. Envoy Gateway's routes aren't probed: their responses rest on Envoy Gateway
+  accepting the `EnvoyExtensionPolicy`, as their requests do
+  ([Istio](istio.md#the-operators-probe), [HAProxy](haproxy.md#the-probe-and-programmed)).
 - **The operator's metrics over HTTPS (opt-in).** `metrics.secure.enabled=true` serves `/metrics`
   over HTTPS, only to bearer tokens the API server authenticates and allows to get `/metrics`; the
   ServiceMonitor then scrapes with Prometheus' service account token. Bind the new

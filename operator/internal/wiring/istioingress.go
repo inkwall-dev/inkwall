@@ -410,6 +410,7 @@ func (i *IstioIngress) Wire(ctx context.Context, targets map[Target]bool, off bo
 			if s.Pending = istioVSReconciled(r.vs); s.Pending == "" {
 				var jobs []ProbeJob
 				jobs, s.NotProbeable, s.Unverified = proveRoute(i.Prober, "VirtualService "+tg.Key.Name, r.detect, func() ([]ProbeJob, string) { jobs, why := st.vsProbes(r); return withFilters(jobs, userFilters), why })
+				jobs, s.Responses = proveResponses(i.Prober, "VirtualService "+tg.Key.Name, r.responses, jobs)
 				probes = append(probes, jobs...)
 			}
 		}

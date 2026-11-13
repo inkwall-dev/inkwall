@@ -125,6 +125,25 @@ type TargetState struct {
 	// Partly: it is wired, but some of its traffic goes through proxies
 	// Inkwall doesn't wire, and which.
 	Partly string
+	// Responses is what the probe's response leg shows (#595), said only
+	// on the policies that inspect responses.
+	Responses ResponsesProof
+}
+
+// ResponsesProof is what the probe's response leg (#595) shows of a
+// target's responses, on its proxy's pods: all empty once they are proven
+// to reach the engine on every pod (or the proxy isn't probed).
+type ResponsesProof struct {
+	// Unverified: not proven yet (Unverified).
+	Unverified string
+	// Failed: they don't reach the engine on some pod
+	// (ResponsesNotInspected).
+	Failed string
+	// NotProbeable: the response leg can't be sent (NotProbeable).
+	NotProbeable string
+	// Note: pods whose engine predates the response leg, where they keep
+	// the evidence of the configuration in place; said on Programmed.
+	Note string
 }
 
 // Config is what the integrations need besides the clients.

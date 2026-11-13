@@ -187,6 +187,10 @@ type exchange struct {
 	// setID: the request ID was generated here, and is set on the request
 	// Envoy forwards.
 	setID bool
+	// probeAnswer and probeReceipt: the request is the response leg of the
+	// operator's probe (#595), let through; its response is answered with
+	// probeAnswer, or, in observability mode, leaves probeReceipt.
+	probeAnswer, probeReceipt string
 	// upgrade: the request is an upgrade (a WebSocket handshake) without
 	// a body, answered on its headers. Its response is inspected unless it
 	// is a 101 (Switching Protocols).
@@ -366,7 +370,7 @@ func (s *Server) onHeaders(ctx context.Context, x *exchange, h *extprocv3.HttpHe
 		return s.uninspectable(ctx, err)
 	}
 	x.req, x.path = req, path
-	if r := s.answerProbe(req, x.observe); r != nil {
+	if r := s.answerProbe(x, req); r != nil {
 		return r
 	}
 	x.setID = !strings.EqualFold(req.ID, req.Headers.Get("X-Request-Id"))
@@ -515,6 +519,18 @@ func (s *Server) onResponseHeaders(ctx context.Context, x *exchange, h *extprocv
 		// first.
 		return allow(phaseResponseHeaders, nil)
 	}
+	if x.probeAnswer != "" {
+		// The probe's response leg (#595): the response reached the
+		// engine. Envoy waits for the answer, which replaces the
+		// upstream's response; in observability mode it doesn't, so a
+		// receipt is kept, and the response is inspected as any other.
+		if !x.observe {
+			x.respDone = true
+			x.ex.Close()
+			return probeReply(x.probeAnswer)
+		}
+		s.receipts.Add(x.probeReceipt)
+	}
 	x.resp = toResponse(h, x.req.Proto)
 	eos := h.GetEndOfStream()
 	buffered := x.buffersResponses()
@@ -662,6 +678,15 @@ func (s *Server) verdict(ctx context.Context, x *exchange, p phase) *extprocv3.P
 	}
 	if v.Action == pipeline.ActionDeny {
 		return s.denial(x.req, v.Status)
+	}
+	if x.probeAnswer != "" && x.ex == nil && !x.observe {
+		// The probe's response leg, but its response isn't kept (the
+		// route's policy doesn't inspect responses): answered as the
+		// request leg, as an engine before the response leg does, so the
+		// operator knows its response isn't seen (#595).
+		if answer, ok := haproxyprobe.Check(s.probeKey(), x.req.RawURI, x.req.Host, x.req.Headers.Get(haproxyprobe.Header)); ok {
+			return probeReply(answer)
+		}
 	}
 	m := &extprocv3.HeaderMutation{}
 	if x.setID {
@@ -879,12 +904,21 @@ func allow(p phase, m *extprocv3.HeaderMutation) *extprocv3.ProcessingResponse {
 // the engine keeps a receipt of the probe instead, which the operator reads
 // in its report (#475), and returns nil: the request Envoy forwards is
 // inspected as any other.
-func (s *Server) answerProbe(req *request.Request, observe bool) *extprocv3.ProcessingResponse {
+//
+// The probe's response leg (#595) isn't answered here: it is inspected and
+// let through to the upstream, and its response is answered (or leaves a
+// receipt) in onResponseHeaders. When its response isn't kept, verdict
+// answers it here after all.
+func (s *Server) answerProbe(x *exchange, req *request.Request) *extprocv3.ProcessingResponse {
 	value := req.Headers.Get(haproxyprobe.Header)
 	if s.probeKey == nil || value == "" {
 		return nil
 	}
-	if observe {
+	if answer, receipt, ok := haproxyprobe.ResponseLeg(s.probeKey(), req.RawURI, req.Host, value); ok {
+		x.probeAnswer, x.probeReceipt = answer, receipt
+		return nil
+	}
+	if x.observe {
 		if receipt, ok := haproxyprobe.Receipt(s.probeKey(), req.RawURI, req.Host, value); ok {
 			s.receipts.Add(receipt)
 		}
@@ -894,6 +928,11 @@ func (s *Server) answerProbe(req *request.Request, observe bool) *extprocv3.Proc
 	if !ok {
 		return nil
 	}
+	return probeReply(answer)
+}
+
+// probeReply is the answer to a probe: 200 with the answer's MAC.
+func probeReply(answer string) *extprocv3.ProcessingResponse {
 	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ImmediateResponse{
 		ImmediateResponse: &extprocv3.ImmediateResponse{
 			Status: &typev3.HttpStatus{Code: typev3.StatusCode_OK},

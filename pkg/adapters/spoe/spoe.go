@@ -32,7 +32,10 @@
 // The operator's probe (package haproxyprobe), a request whose
 // X-Inkwall-Probe header has a valid MAC under the bundle's probe key, is answered uninspected with the
 // variable probe, which the route's rules return: it tells the operator
-// that HAProxy runs the filter on that route.
+// that HAProxy runs the filter on that route. Its response leg (#595) is
+// let through when its response is kept, and that response is answered
+// with the variable response_probe, which the route's response rules
+// return: HAProxy sends the route's responses to the engine.
 //
 // A NOTIFY without the message, or with arguments the agent can't read,
 // gets action deny with status 400: only a misconfigured HAProxy sends one,
@@ -636,13 +639,20 @@ func (s *Server) answer(ctx context.Context, ack *encoder, payload []byte, maxFr
 		setVerdict(ack, ActionDeny, http.StatusBadRequest, id)
 		return
 	}
-	if s.answerProbe(ack, req) {
+	// The probe's response leg (#595) is let through, and its response
+	// answered, when the response is kept; otherwise it is answered here,
+	// as the request leg, as an engine before the response leg does.
+	leg := s.responseLeg(req)
+	if leg == "" && s.answerProbe(ack, req) {
 		return
 	}
 	v, x := s.check(ctx, req, !a.noResponses)
+	if leg != "" && x == nil && v.Action != pipeline.ActionDeny && s.answerProbe(ack, req) {
+		return
+	}
 	if x != nil {
 		// Kept for the response, or, the table full, an overload.
-		v = s.keep(ctx, ack, x, req, path, v)
+		v = s.keep(ctx, ack, x, req, path, v, leg)
 	}
 	if httpadapter.IsEvent(v) {
 		httpadapter.LogEvent(ctx, s.logger, s.events, req, path, v)
@@ -688,6 +698,17 @@ func (s *Server) answerProbe(ack *encoder, req *request.Request) bool {
 	setVerdict(ack, ActionDeny, http.StatusForbidden, req.ID)
 	ack.setVar(VarProbe, func(e *encoder) { e.str(answer) })
 	return true
+}
+
+// responseLeg returns the answer to give the response of req, if req is
+// the response leg of the operator's probe (haproxyprobe.ResponseLeg).
+func (s *Server) responseLeg(req *request.Request) string {
+	header := req.Headers.Get(haproxyprobe.Header)
+	if s.probeKey == nil || header == "" {
+		return ""
+	}
+	answer, _, _ := haproxyprobe.ResponseLeg(s.probeKey(), req.RawURI, req.Host, header)
+	return answer
 }
 
 // setVerdict adds the verdict's variables. Status is set only to deny.

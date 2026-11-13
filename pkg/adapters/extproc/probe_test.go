@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	filterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
+	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
@@ -117,4 +119,86 @@ func TestProbeReceipt(t *testing.T) {
 	if !strings.Contains(logs.String(), `"security event"`) {
 		t.Errorf("a probe with an attack wasn't logged in observability mode: %q", logs.String())
 	}
+}
+
+// The probe's response leg (#595): on a route whose policy inspects
+// responses, the engine lets the probe through to the app and answers its
+// response (Block mode: Envoy waits), or keeps a receipt of it
+// (observability mode), with the response leg's MACs; the request phase
+// keeps no request receipt for it. Where the response isn't kept (the
+// policy doesn't inspect responses), the engine answers at the request
+// phase, as an engine before #595 does, so the operator can tell.
+func TestProbeResponseLeg(t *testing.T) {
+	key := bytes.Repeat([]byte{7}, haproxyprobe.KeySize)
+	nonce, _ := haproxyprobe.NewNonce()
+	uri := haproxyprobe.ResponseURI("/" + haproxyprobe.PathSuffix + nonce)
+	valid := haproxyprobe.Request(key, nonce, "shop.example.com", uri)
+	start := func(t *testing.T, p pipeline.Inspector, receipts *haproxyprobe.Receipts, logs *bytes.Buffer) *envoy {
+		s, err := New(p, Config{MaxBodyBytes: 64 << 10, Logger: slog.New(slog.NewJSONHandler(logs, nil)),
+			ProbeKey: func() []byte { return key }, ProbeReceipts: receipts})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ln := bufconn.Listen(1 << 20)
+		return startServer(t, s, ln, func(ctx context.Context, _ string) (net.Conn, error) { return ln.DialContext(ctx) })
+	}
+	probeHeader := func(ir *extprocv3.ImmediateResponse) string {
+		for _, h := range ir.GetHeaders().GetSetHeaders() {
+			if strings.EqualFold(h.GetHeader().GetKey(), haproxyprobe.Header) {
+				return string(h.GetHeader().GetRawValue())
+			}
+		}
+		return ""
+	}
+
+	t.Run("block", func(t *testing.T) {
+		var logs bytes.Buffer
+		receipts := &haproxyprobe.Receipts{}
+		e := start(t, newResponsePipeline(t, pipeline.ModeBlock, 1024, pipeline.OversizeAuto), receipts, &logs)
+		resps := e.exchange(t, withModes(headers("GET", uri, true, haproxyprobe.Header, valid), filterv3.ProcessingMode_NONE, filterv3.ProcessingMode_BUFFERED_PARTIAL),
+			respHeaders(404, false, "content-type", "text/html"), respBody("not found", true))
+		if len(resps) != 2 || resps[0].GetImmediateResponse() != nil {
+			t.Fatalf("the request phase answered: %v", resps)
+		}
+		ir := resps[1].GetImmediateResponse()
+		if ir == nil || ir.GetStatus().GetCode() != 200 || !haproxyprobe.VerifyResponse(key, nonce, "shop.example.com", uri, probeHeader(ir)) {
+			t.Fatalf("response phase: %v, want the response leg's answer", resps[1])
+		}
+		if got := receipts.Recent(); got != nil {
+			t.Errorf("receipts in Block mode: %v", got)
+		}
+		if logs.Len() != 0 {
+			t.Errorf("logged: %s", logs.String())
+		}
+	})
+	t.Run("observe", func(t *testing.T) {
+		var logs bytes.Buffer
+		receipts := &haproxyprobe.Receipts{}
+		e := start(t, newResponsePipeline(t, pipeline.ModeDetect, 1024, pipeline.OversizeAuto), receipts, &logs)
+		e.observe(t, headers("GET", uri, true, haproxyprobe.Header, valid))
+		if got := receipts.Recent(); got != nil {
+			t.Fatalf("a receipt before the response: %v", got)
+		}
+		e.observe(t, headers("GET", uri, true, haproxyprobe.Header, valid), respHeaders(404, false, "content-type", "text/html"), respBody(sqlError, true))
+		want := haproxyprobe.ExpectedResponseReceipt(key, nonce, "shop.example.com", uri)
+		if got := receipts.Recent(); len(got) != 1 || got[0] != want {
+			t.Fatalf("receipts %v, want [%s]", got, want)
+		}
+		// The response is inspected as any other.
+		if evs := securityEvents(t, &logs); len(evs) != 1 {
+			t.Errorf("%d events, want the leak's: %s", len(evs), logs.String())
+		}
+	})
+	t.Run("responses not inspected", func(t *testing.T) {
+		receipts := &haproxyprobe.Receipts{}
+		e := start(t, newPipeline(t, pipeline.ModeBlock), receipts, &bytes.Buffer{})
+		resps := e.exchange(t, headers("GET", uri, true, haproxyprobe.Header, valid))
+		if len(resps) != 1 || !haproxyprobe.Verify(key, nonce, "shop.example.com", uri, probeHeader(resps[0].GetImmediateResponse())) {
+			t.Fatalf("%v, want the request leg's answer", resps)
+		}
+		e.observe(t, headers("GET", uri, true, haproxyprobe.Header, valid), respHeaders(404, true))
+		if got := receipts.Recent(); got != nil {
+			t.Fatalf("receipts %v for a response the engine doesn't see", got)
+		}
+	})
 }

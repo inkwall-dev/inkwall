@@ -142,3 +142,46 @@ func TestReceipts(t *testing.T) {
 		t.Fatal("a nil Receipts kept a receipt")
 	}
 }
+
+// The response leg (#595): the probe's URI says so, under the MAC; the
+// engine's answer and receipt in its response phase are MACs of their own
+// purpose, which neither the request's MAC, nor the request leg's answer
+// or receipt, can stand for.
+func TestResponseLeg(t *testing.T) {
+	nonce, _ := NewNonce()
+	for _, base := range []string{PrefixPath("/", nonce), PrefixPath("/", nonce) + "?a=b", "/exact?inkwall-probe=" + nonce} {
+		uri := ResponseURI(base)
+		if !IsResponseURI(uri) || IsResponseURI(base) {
+			t.Fatalf("%q: IsResponseURI(%q) %v, (%q) %v", base, uri, IsResponseURI(uri), base, IsResponseURI(base))
+		}
+		header := Request(key, nonce, "a.example", uri)
+		answer, receipt, ok := ResponseLeg(key, uri, "a.example", header)
+		if !ok {
+			t.Fatalf("%q: the engine refused the response leg", uri)
+		}
+		if !VerifyResponse(key, nonce, "a.example", uri, answer) || receipt != ExpectedResponseReceipt(key, nonce, "a.example", uri) || !ValidReceipt(receipt) {
+			t.Fatalf("%q: answer %q, receipt %q", uri, answer, receipt)
+		}
+		// The request leg's proofs aren't the response leg's.
+		reqAnswer, _ := Check(key, uri, "a.example", header)
+		if VerifyResponse(key, nonce, "a.example", uri, reqAnswer) || Verify(key, nonce, "a.example", uri, answer) ||
+			receipt == ExpectedReceipt(key, nonce, "a.example", uri) || strings.Contains(header, answer) {
+			t.Fatalf("%q: a leg's proof stands for the other's", uri)
+		}
+		// A request-leg probe isn't a response-leg one.
+		if _, _, ok := ResponseLeg(key, base, "a.example", Request(key, nonce, "a.example", base)); ok {
+			t.Fatalf("%q: a request-leg probe taken for a response leg", base)
+		}
+		if _, _, ok := ResponseLeg(bytes.Repeat([]byte{8}, KeySize), uri, "a.example", header); ok {
+			t.Fatal("another key's response leg accepted")
+		}
+	}
+	if VerifyResponse(nil, nonce, "a.example", "/", "") || ExpectedResponseReceipt(nil, nonce, "a", "/") != "" {
+		t.Fatal("verified without a key")
+	}
+	for _, u := range []string{"/x?" + LegParam + "=responses", "/x?" + LegParam + "=response&z=1", "/x" + LegParam + "=response"} {
+		if IsResponseURI(u) {
+			t.Errorf("IsResponseURI(%q)", u)
+		}
+	}
+}

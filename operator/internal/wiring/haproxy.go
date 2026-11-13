@@ -151,8 +151,9 @@ func haproxySettingsOf(policies []wafv1alpha1.WAFPolicy, ing types.NamespacedNam
 // inkwall-responses scope, and the response rules of
 // examples/haproxy/haproxy.cfg follow (0006 §4): the request's
 // Accept-Encoding removed, the body of a type the rules read waited for,
-// the response sent, and replaced when the engine denies it or, failing
-// closed, gives no verdict.
+// the response sent, the probe's response leg answered (#595), and the
+// response replaced when the engine denies it or, failing closed, gives no
+// verdict.
 func HAProxySnippet(failOpen, body, responses bool) string {
 	lines := []string{haproxySnippetBegin}
 	if body {
@@ -189,6 +190,10 @@ func HAProxySnippet(failOpen, body, responses bool) string {
 			"http-request del-header accept-encoding if "+kept,
 			"http-response wait-for-body time 2s if "+kept+" { res.hdr(content-type) -m beg -i "+strings.Join(engrules.ResponseBodyTypes, " ")+" }",
 			"http-response send-spoe-group "+injection.HAProxyResponsesScope+" "+injection.HAProxyResponseGroup+" if "+kept,
+			// The probe's response leg (#595): the engine's answer to its
+			// response, in place of the app's.
+			fmt.Sprintf(`http-response return status %d hdr %s "%%[%s]" if { %s -m found }`,
+				haproxyprobe.Status, strings.ToLower(haproxyprobe.Header), v("response_probe"), v("response_probe")),
 			reply(502, "Bad Gateway", kept+" !{ "+v("response_action")+" -m found } { "+v("response_failure")+" -m str closed }"),
 			reply(502, "Bad Gateway", "{ "+v("response_status")+" -m int 502 }"),
 			reply(503, "Service Unavailable", "{ "+v("response_status")+" -m int 503 }"),
@@ -390,6 +395,9 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 					job.Pods = append(job.Pods, probePod(pod))
 				}
 			}
+			var probed []ProbeJob
+			probed, s.Responses = proveResponses(h.Prober, "Ingress "+k.Name, settings.responses && res.Responses, []ProbeJob{job})
+			job = probed[0]
 			jobs = append(jobs, job)
 			s.Unverified = h.unverified(job)
 			if settings.body && settings.maxBody > buffer.visible() {

@@ -357,6 +357,7 @@ func (i *Istio) Wire(ctx context.Context, targets map[Target]bool, off bool) (*R
 					jobs, why := st.istioRouteProbes(r)
 					return withFilters(jobs, userFilters), why
 				})
+				jobs, s.Responses = proveResponses(i.Prober, "HTTPRoute "+tg.Key.Name, r.responses, jobs)
 				probes = append(probes, jobs...)
 			}
 		}

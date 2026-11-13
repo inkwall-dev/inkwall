@@ -736,7 +736,8 @@ has the decision), for `VirtualService` targets bound to Istio `Gateway` objects
   `standalone-backend`, restored when it is unwired.
 - **`Programmed`** only once the operator's probe (`Prober`, on the leader) has proven the
   filter on every running pod; `Unverified` until then, and when a probe gets anything but the
-  engine's answer. Before that, `PendingRestart` or `SidecarMissing`; `WiringFailed` for a pod
+  engine's answer. For a policy with `responses.inspect`, also the probe's response leg on every
+  pod (#595, [0006 §4](0006-adapter-protocols.md#proving-responses-the-probes-response-leg-595)). Before that, `PendingRestart` or `SidecarMissing`; `WiringFailed` for a pod
   without the agent's files or with `--disable-config-snippets` covering backends.
 - **HAProxy's buffer:** when a policy's `body.maxBytes` is more than HAProxy's buffer lets the
   engine see (`tune.bufsize` less `tune.maxrewrite`, from the `global-config-snippet` of the
@@ -917,7 +918,8 @@ leader-only. Losing a replica just moves its engines to another.
   - `node_name`: empty or a DNS subdomain (at most 253 bytes); `engine_version`: at most 128 bytes.
   - `trusted_key_ids`: at most 16, each 1 to 64 bytes (engines send 16 hex digits per key).
   - `probe_receipts` (a `Heartbeat`'s, #475): at most 16, each 32 lowercase hex digits. The last
-    ones are the engine record's `probeReceipts`, which the leader's probe reads (0002 §6.1).
+    ones are the engine record's `probeReceipts`, which the leader's probe reads (0002 §6.1);
+    receipts of the probe's response leg (#595) come in the same list.
   - `pod_namespace` and `pod_name`: when the token is bound to a pod, its pod is used and the
     `Hello`'s isn't. Otherwise they must be empty, a DNS label and a DNS subdomain.
   - A `Nack`'s error is cut to 1 KiB, without splitting a character. It goes into the engine's

@@ -17,6 +17,12 @@
 // ones to the operator (#475): another MAC under the key, which the
 // operator expects for the probe's nonce, host and URI, and which neither
 // the request nor an answer shows.
+//
+// The response leg (#595) proves that a route's responses reach the engine
+// too: the same probe, its URI marked with LegParam (under the MAC), which
+// the engine lets through to the app instead of answering, and answers (or
+// keeps a receipt of) in its response phase, with MACs of their own
+// purpose.
 package haproxyprobe
 
 import (
@@ -53,6 +59,13 @@ const (
 	MaxReceipts = 16
 	// ReceiptAge is how long an engine keeps a receipt.
 	ReceiptAge = time.Minute
+
+	// LegParam is the query parameter that marks a probe's response leg
+	// (LegParam=ResponseLeg, last in the query): the engine lets it
+	// through, and answers its response.
+	LegParam = "inkwall-probe-leg"
+	// ResponseLegValue is LegParam's value on the response leg.
+	ResponseLegValue = "response"
 )
 
 // NewNonce returns a random nonce: 32 base64url characters.
@@ -107,6 +120,54 @@ func ExpectedReceipt(key []byte, nonce, host, uri string) string {
 		return ""
 	}
 	return mac(key, "receipt", nonce, host, uri)[:ReceiptSize]
+}
+
+// ResponseURI is the response leg's URI for the request leg's uri.
+func ResponseURI(uri string) string {
+	if strings.Contains(uri, "?") {
+		return uri + "&" + LegParam + "=" + ResponseLegValue
+	}
+	return uri + "?" + LegParam + "=" + ResponseLegValue
+}
+
+// IsResponseURI reports whether uri is a response leg's (ResponseURI).
+func IsResponseURI(uri string) bool {
+	_, query, ok := strings.Cut(uri, "?")
+	return ok && (query == LegParam+"="+ResponseLegValue || strings.HasSuffix(query, "&"+LegParam+"="+ResponseLegValue))
+}
+
+// ResponseLeg is the engine's side of the response leg: for a request as
+// Check takes it, whether it is a response-leg probe made with key, and the
+// answer to give in the response phase (where the proxy waits for it) or
+// the receipt to keep there (where the proxy discards answers).
+func ResponseLeg(key []byte, uri, host, header string) (answer, receipt string, ok bool) {
+	if !IsResponseURI(uri) {
+		return "", "", false
+	}
+	nonce, ok := verified(key, uri, host, header)
+	if !ok {
+		return "", "", false
+	}
+	return mac(key, "response", nonce, host, uri), ExpectedResponseReceipt(key, nonce, host, uri), true
+}
+
+// ExpectedResponseReceipt is the operator's side: the receipt of the
+// response leg with nonce to host and uri; "" without a key.
+func ExpectedResponseReceipt(key []byte, nonce, host, uri string) string {
+	if len(key) == 0 {
+		return ""
+	}
+	return mac(key, "response-receipt", nonce, host, uri)[:ReceiptSize]
+}
+
+// VerifyResponse is the operator's side: whether answer is the engine's
+// answer to the response leg with nonce to host and uri, given in its
+// response phase.
+func VerifyResponse(key []byte, nonce, host, uri, answer string) bool {
+	if len(key) == 0 || answer == "" {
+		return false
+	}
+	return hmac.Equal([]byte(answer), []byte(mac(key, "response", nonce, host, uri)))
 }
 
 // ValidReceipt reports whether r has a receipt's form: ReceiptSize

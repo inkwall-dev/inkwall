@@ -72,3 +72,61 @@ func TestProbe(t *testing.T) {
 		})
 	}
 }
+
+// The probe's response leg (#595): where the request's response is kept,
+// the agent lets the probe through (no probe variable, no deny) and answers
+// its response, uninspected, with VarResponseProbe, which the route's
+// response rules return with status 299; in Block and Detect mode alike,
+// as HAProxy waits for both answers. Where it isn't kept (no
+// --response-messages, the backend's responses=false, a policy that
+// doesn't inspect responses), the request phase answers it as the request
+// leg, as an engine before #595 does.
+func TestProbeResponseLeg(t *testing.T) {
+	key := bytes.Repeat([]byte{1}, haproxyprobe.KeySize)
+	nonce, err := haproxyprobe.NewNonce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := haproxyprobe.ResponseURI(haproxyprobe.PrefixPath("/", nonce))
+	mac := haproxyprobe.Request(key, nonce, "shop.example.com", path)
+	probe := func(extra ...func(*encoder)) []byte {
+		return notifyFrame(1, 1, append([]func(*encoder){argString(ArgMethod, "GET"), argString(ArgPath, path),
+			argBinary(ArgHeaders, hdrs("host", "shop.example.com", "user-agent", "test/1.0", "accept", "*/*", "x-inkwall-probe", mac))}, extra...)...)
+	}
+	for _, mode := range []pipeline.Mode{pipeline.ModeBlock, pipeline.ModeDetect} {
+		t.Run(string(mode), func(t *testing.T) {
+			a := startAgent(t, responsePipeline(t, mode), Config{Responses: true, ProbeKey: func() []byte { return key }})
+			h := a.dial(t)
+			h.hello()
+			h.send(probe())
+			_, vars := h.ack()
+			if has(vars, VarProbe) || vars[VarAction].String() != ActionAllow || !has(vars, VarResponses) {
+				t.Fatalf("request phase: %+v, want it let through and kept", vars)
+			}
+			vars = h.respond(2, response(vars[VarResponses].String(), vars[VarResponseFailure].String(), 404, "text/html", sqlError)...)
+			if vars[VarResponseAction].String() != ActionAllow || !haproxyprobe.VerifyResponse(key, nonce, "shop.example.com", path, vars[VarResponseProbe].String()) {
+				t.Fatalf("response phase: %+v, want the response leg's answer", vars)
+			}
+		})
+	}
+	for name, c := range map[string]struct {
+		p     pipeline.Inspector
+		cfg   bool
+		extra []func(*encoder)
+	}{
+		"no --response-messages": {responsePipeline(t, pipeline.ModeBlock), false, nil},
+		"responses=false":        {responsePipeline(t, pipeline.ModeBlock), true, []func(*encoder){argBool(ArgResponses, false)}},
+		"policy without":         {&inspector{verdict: pipeline.Verdict{Action: pipeline.ActionAllow}}, true, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := startAgent(t, c.p, Config{Responses: c.cfg, ProbeKey: func() []byte { return key }})
+			h := a.dial(t)
+			h.hello()
+			h.send(probe(c.extra...))
+			_, vars := h.ack()
+			if !haproxyprobe.Verify(key, nonce, "shop.example.com", path, vars[VarProbe].String()) || vars[VarAction].String() != ActionDeny || has(vars, VarResponses) {
+				t.Fatalf("%+v, want the request leg's answer", vars)
+			}
+		})
+	}
+}

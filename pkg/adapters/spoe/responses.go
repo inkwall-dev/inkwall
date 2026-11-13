@@ -74,6 +74,10 @@ const (
 	// 403 for a leak, 502 for a body that couldn't be inspected or a
 	// response the agent can't inspect, 503 when inspecting it failed.
 	VarResponseStatus = "response_status"
+	// VarResponseProbe is set only to answer the response leg of the
+	// operator's probe (#595): the answer, which the route's response
+	// rules return with status 299, in place of the app's response.
+	VarResponseProbe = "response_probe"
 )
 
 // Values of VarResponseFailure.
@@ -116,7 +120,10 @@ func stateCost(r *request.Request) int64 {
 
 // state is a request kept for its response.
 type state struct {
-	key     string
+	key string
+	// probe: the request is the response leg of the operator's probe, and
+	// its response is answered with this (VarResponseProbe), uninspected.
+	probe   string
 	x       *pipeline.Exchange
 	req     *request.Request
 	path    string
@@ -304,11 +311,11 @@ func newKey() string {
 // and adds the response's variables to ack. When the table is full, it
 // returns the verdict of the policy's failure mode for an overload
 // instead, and keeps nothing.
-func (s *Server) keep(ctx context.Context, ack *encoder, x *pipeline.Exchange, req *request.Request, path string, v pipeline.Verdict) pipeline.Verdict {
+func (s *Server) keep(ctx context.Context, ack *encoder, x *pipeline.Exchange, req *request.Request, path string, v pipeline.Verdict, probe string) pipeline.Verdict {
 	failure := x.FailureMode()
 	kept := *req
 	kept.Body = nil // the transaction has it
-	st := &state{x: x, req: &kept, path: path, cost: stateCost(req)}
+	st := &state{x: x, req: &kept, path: path, cost: stateCost(req), probe: probe}
 	if !s.pending.add(st) {
 		x.Close()
 		s.logger.LogAttrs(ctx, slog.LevelWarn, "spoe: too many responses pending, the request gets the failure mode",
@@ -542,6 +549,14 @@ func (s *Server) answerResponse(ctx context.Context, ack *encoder, msgs []messag
 		return
 	}
 	defer st.x.Close()
+	if st.probe != "" {
+		// The probe's response leg (#595): the response reached the
+		// engine; HAProxy waits for the answer, which its rules return
+		// in place of the app's response.
+		setResponseVerdict(ack, ActionAllow, 0)
+		ack.setVar(VarResponseProbe, func(e *encoder) { e.str(st.probe) })
+		return
+	}
 	resp, err := toResponse(a, st.req, st.x, size, maxFrame)
 	if err != nil {
 		s.metrics.AdapterError(telemetry.ErrInvalidRequest)

@@ -149,7 +149,10 @@ request. In observability mode Envoy ignores the reply and forwards the request,
 (since v0.6.0, #475) the adapter doesn't answer: it keeps a receipt of the probe, which the agent
 reports to the operator with its heartbeats, and inspects the request as any other (0002 §6.1,
 proof by receipt). The operator probes
-each gateway pod for Istio's routes before `Programmed` (#372).
+each gateway pod for Istio's routes before `Programmed` (#372). The probe's response leg (#595,
+[§4](#proving-responses-the-probes-response-leg-595)) is let through to the upstream instead,
+and answered at the response headers (or, in observability mode, leaves a receipt of the
+response).
 
 ### Response inspection (v0.4.0)
 
@@ -498,7 +501,9 @@ Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/inkwall/issues/282)); 
   under the bundle's `probe_key`, is answered without inspection: `action=deny` (403) and the
   variable `probe`, another HMAC of them under the key, which the operator's per-route rules
   return with status 299 (`pkg/haproxyprobe`). Without a key, or with a wrong MAC, the request is
-  inspected as any other.
+  inspected as any other. The probe's response leg (#595, [below](#proving-responses-the-probes-response-leg-595))
+  is let through instead, kept for its response, and answered in the response's ACK
+  (`response_probe`).
 - Routes are left uninspected with a condition on the message's `event`; the fail-closed rule
   must leave them out too.
 
@@ -586,8 +591,89 @@ Ingress Controller (below).
   field older engines ignore (#473): an engine older than 0.6.0 on an HAProxy pod never has the
   flag, so `Programmed` is already `False` (`ResponsesNotInspected`) and `Ready` with it, naming the
   pod; and `spec.responses` needs only 0.4.0 on Envoy's engines, which the engine records (they
-  carry no adapter) couldn't tell apart. The probe covers the request filter only; a response
-  probe would prove the response rules, as a follow-up.
+  carry no adapter) couldn't tell apart. Since #595 the operator's probe proves the response rules
+  too (next section).
+
+### Proving responses: the probe's response leg (#595)
+
+Decided for v0.6.0. Until then `Programmed` counted a route's responses as inspected once their
+configuration was in place (the HAProxy snippet's response rules, Istio's and Envoy Gateway's
+response processing mode, the engines' `--response-messages`), while the probe (0002 §6.1, §6.4)
+proved the request filter only. A snippet another configuration overrides, a backend without the
+group, or an `EnvoyFilter` of the user's that drops the response stage would leave the responses
+uninspected under a `Programmed` policy. So a route whose policies inspect responses is probed with
+a second request per pod and target, the **response leg**, and a policy with `responses.inspect` is
+`Programmed` on that route only once it is proven on every pod.
+
+- **The request.** The probe as it is (a `GET`, or `HEAD`, without a body, with `X-Inkwall-Probe:
+  <nonce>.<MAC>`), its URI ending in the query parameter `inkwall-probe-leg=response`
+  (`haproxyprobe.ResponseURI`). The MAC covers the URI, so the mark can't be added to another
+  probe, and a request-leg probe can't be passed off as a response leg.
+- **The engine lets it through.** A response can't come back from the engine's own answer: an
+  ext_proc immediate response is Envoy's local reply, which skips the response stages, and
+  HAProxy's `http-request return` skips the `http-response` rules. So the engine doesn't answer
+  the response leg at the request phase: it inspects it as any request and lets it through to the
+  app, keeping the request for its response as it does for the route's other requests. The probe
+  therefore **reaches the app in `Block` mode too**: the reserved path
+  `<prefix>/.well-known/inkwall-probe/<nonce>?inkwall-probe-leg=response` under a prefix, or an
+  `Exact` path with `?inkwall-probe=<nonce>&inkwall-probe-leg=response`, per pod and target every
+  5 minutes. That is why it is sent only as a `GET` or `HEAD`: a rule matching only another method
+  can't have its responses probed (`NotProbeable`, for the policies with `responses.inspect`).
+- **The proof, as #475 split it.** Where the proxy waits for the engine's answer to the response,
+  the engine answers the response leg's response itself, uninspected, with another MAC under the
+  key, of the purpose `response` (`haproxyprobe.VerifyResponse`), in place of the app's response:
+  - **ext_proc, `Block` mode** (Envoy Gateway's and Istio's filters, not in observability mode):
+    an immediate response at the response headers, 200 with the MAC in `X-Inkwall-Probe`;
+  - **SPOE** (the HAProxy Kubernetes Ingress Controller, both modes: HAProxy waits for each
+    answer): the response's ACK sets `txn.inkwall.response_probe`, which one more line of the
+    Ingress's snippet, after `send-spoe-group`, returns with status 299 and the MAC. That line is
+    the only change to the snippet.
+
+  Where Envoy discards answers (ext_proc's observability mode: `Detect`-mode Istio routes), the
+  engine keeps a **receipt of the response** instead, in its response phase: an HMAC of the
+  purpose `response-receipt`, cut to 128 bits, reported in the heartbeat's `probe_receipts` as the
+  request receipts are (no new field: the operator expects one or the other for a probe), and the
+  response is inspected as any other.
+- **What it proves.** The answer, or receipt, of the response leg can be made only by an engine
+  with the key that kept the request and then got its response, through the route's filter on that
+  pod: the route's responses reach the engine's response inspection there. In `Block` mode the
+  proxy waited for that answer and served it, so it serves the engine's denials the same way; a
+  receipt proves the engine sees the responses, which is all `Detect` mode does with them.
+- **Forged and replayed proofs prove nothing.** Each proof is a MAC under the probe key of its own
+  purpose, for the probe's fresh nonce, host and URI: the request's MAC, the request leg's answer
+  or receipt, an earlier probe's answer, another key's or another pod's prove nothing, as for #475.
+  The response leg is part of a result's key, so a route is probed again on every change.
+- **Where the response isn't kept.** An engine that doesn't keep the request's response (its
+  bundle's policy for the route doesn't inspect responses yet, SPOE without
+  `--response-messages` or with the backend's `responses=false`) answers the response leg at the
+  request phase, as the request leg: the probe never reaches the app then, and the operator, seeing
+  the request leg's answer, reports that the engine doesn't keep the route's responses
+  (`ResponsesNotInspected`, naming the pod). In observability mode such an engine keeps no receipt
+  of it: none within 30 s is `ResponsesNotInspected` too.
+- **Engines before 0.6.0** don't know the mark: they answer the response leg at the request phase
+  too. The operator then reads the pod's engine version from the engine reports: before 0.6.0, the
+  route keeps the evidence it had (the configuration in place) and is `Programmed`, with a note
+  naming the pods and saying their responses are unproven until they run a 0.6.0 engine; an engine
+  of 0.6.0 or later, or one whose version isn't a release, fails the response leg. `EnginesOutdated`
+  was considered and rejected: `Enforced` is about bundle fields engines ignore, and
+  `spec.responses` needs only 0.4.0 on Envoy. (A `Detect`-mode route's engine older than 0.6.0
+  reports no receipts at all, so its request leg is already `Unverified`.) HAProxy's pods always run
+  an engine of 0.6.0 or later when their routes get the response rules (`--response-messages`).
+- **Status** (per policy): only a policy with `responses.inspect` is concerned; another policy on
+  the same route keeps the request leg's status. Not proven yet: `Unverified` ("... responses are
+  unverified until the operator's probe has reached the engine's response inspection on every ...
+  pod"); a pod where the response doesn't reach the engine: `ResponsesNotInspected`, naming the pod
+  and what came back; the method: `NotProbeable`; engines before 0.6.0: a note on `Programmed`. No
+  new reason.
+- **Envoy Gateway isn't probed**, for requests either: unlike Istio and the HAProxy controller,
+  Envoy Gateway reports on the operator's `EnvoyExtensionPolicy` (`Accepted`) after translating it,
+  and the response processing mode is part of that same object, so a route's responses rest on the
+  same evidence as its requests. A probe of Envoy Gateway's pods (both legs) is a follow-up.
+- **Rejected:** answering the probe's request leg in the response phase as well (it would then
+  reach the app on every route, also those without `responses.inspect`); a response-leg proof by
+  the engine's response counts or events (they don't name the probe, and can be forged by
+  traffic); a receipt in `Block` mode (it proves the engine saw the response, not that the proxy
+  serves its answer, #475); a new condition reason (the existing ones say it).
 
 **Open questions, resolved (#469):**
 

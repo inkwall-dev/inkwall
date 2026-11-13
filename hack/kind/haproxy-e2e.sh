@@ -15,7 +15,8 @@
 # controller pod without the engine leaves the policy not Programmed (its
 # traffic is uninspected), a stopped engine fails closed in block mode and
 # open in detect mode, a policy with responses.inspect gets the response
-# rules and Programmed, a response leaking a SQL error is replaced with 403
+# rules and is Programmed once the probe's response leg came back answered
+# by the engine from every pod (#595), a response leaking a SQL error is replaced with 403
 # in Block mode and logged in Detect mode (#470), and unprotecting or
 # uninstalling puts the user's Ingress back as it was. Needs the operator installed (make kind-operator)
 # with haproxy-e2e among the proxy namespaces; ends with helm uninstall.
@@ -181,7 +182,7 @@ LEAK='X-Debug: You have an error in your SQL syntax; check the manual that corre
 responses_wired() {
   local a
   a=$("${KUBECTL[@]}" -n "$NS" get ingress app -o jsonpath='{.metadata.annotations}')
-  [[ $a == *'filter spoe engine inkwall-responses'* && $a == *'http-response send-spoe-group'* ]]
+  [[ $a == *'filter spoe engine inkwall-responses'* && $a == *'http-response send-spoe-group'* && $a == *'txn.inkwall.response_probe'* ]]
 }
 responses_unwired() {
   local a
@@ -204,6 +205,7 @@ wired() {
   a=$("${KUBECTL[@]}" -n "$NS" get ingress app -o jsonpath='{.metadata.annotations}')
   [[ $a == *'filter spoe engine inkwall'* && $a == *'X-User-Snippet'* && $a == *'"haproxy.org/standalone-backend":"true"'* ]]
 }
+reached_app() { "${KUBECTL[@]}" -n "$NS" logs deployment/app --since=10m | grep -i "$1" >/dev/null; }
 never_reached_app() { ! "${KUBECTL[@]}" -n "$NS" logs deployment/app --since=10m | grep -i "$1" >/dev/null; }
 logged() {
   "${KUBECTL[@]}" -n "$NS" logs -l "$SELECTOR" -c inkwall-engine --tail=-1 |
@@ -311,6 +313,10 @@ echo "== responses"
 policy Block "$RESPONSES"
 eventually "the Ingress gets the response rules" responses_wired
 eventually "Programmed: HAProxy sends the responses" programmed
+# The probe's response leg (#595) goes through to the app, and the engine
+# answers its response: Programmed rests on that, on both pods.
+eventually "the probe's response leg went through to the app" reached_app "inkwall-probe-leg=response"
+eventually "Programmed with the responses proven on every pod" programmed
 # From Detect mode: the engines enforce Block once they run the new bundle
 # (Ready), which Programmed, the filter proven, doesn't wait for.
 eventually "the policy is Ready: the engines run it in Block mode" ready
@@ -325,6 +331,7 @@ policy Detect "$RESPONSES"
 eventually "the snippet fails open" no_closed_rule
 check "in detect mode, a leaking response passes" all_are 200 "$HOST" "$leak_path" -H "$LEAK"
 eventually "and the engines log it as a response event" logged_response "$leak_path" log
+eventually "detect mode: Programmed, the response leg answered too (HAProxy waits for it)" programmed
 policy Detect
 eventually "responses off: the response rules go" responses_unwired
 

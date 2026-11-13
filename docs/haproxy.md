@@ -125,6 +125,19 @@ the policy is `Programmed=True` only once every pod has answered:
   answers; a few at a time.
 - The operator must reach the controller pods' HTTP port: a NetworkPolicy that blocks it keeps
   the policies `Unverified`.
+- **Responses** (since 0.6.0): an Ingress whose policies inspect responses gets a second probe per
+  pod and path, the *response leg*, which proves that its responses reach the engine. It is the
+  same `GET`, its URI ending in `inkwall-probe-leg=response`
+  (`<path>/.well-known/inkwall-probe/<nonce>?inkwall-probe-leg=response`, or the `Exact` path with
+  `?inkwall-probe=<nonce>&inkwall-probe-leg=response`). The engine lets it through, so **it reaches
+  your app**, in `Block` mode too: once per pod and path every 5 minutes (every 20 seconds while it
+  fails), from the operator's pod, with `User-Agent: inkwall-operator-probe`. Your app can answer it
+  as any unknown path (a 404 is fine): the engine replaces that answer with its own, which the
+  snippet returns with status 299, so the client (the operator) never sees your app's. Until it
+  has come back from every pod, a policy with `responses.inspect` is `Unverified`; if a pod's engine
+  answers it before your app (it doesn't keep the Ingress's responses) or anything else comes back,
+  the policy is `Programmed=False`, reason `ResponsesNotInspected`, naming the pod. Policies without
+  `responses.inspect` on the same Ingress aren't affected.
 
 Other reasons the policy isn't `Programmed`: a running controller pod without the engine
 (`SidecarMissing` or `PendingRestart`), and, as `WiringFailed`, a pod without the agent's files, or
@@ -152,8 +165,8 @@ a controller run with `--disable-config-snippets` covering backends.
 - **Responses:** controller pods injected before 0.6.0, or running a pinned `spec.engine.image`
   older than 0.6.0, have an engine without `--response-messages`: while one runs, a policy with
   `responses.inspect` is `Programmed=False` (`ResponsesNotInspected`) and its responses are not
-  inspected (its requests are). Restart the controller's pods. The probe proves the request filter
-  only, not the response rules.
+  inspected (its requests are). Restart the controller's pods. Since 0.6.0 the probe proves the
+  response rules too (its response leg, [above](#the-probe-and-programmed)).
 - `haproxy.org/standalone-backend` is forced to `true` on a protected Ingress.
 - HTTP probing needs the controller's `http` container port, as the chart names it; with plain
   HTTP disabled (`--disable-http`) only hosts with TLS can be probed.
