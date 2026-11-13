@@ -89,6 +89,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/streams"
 	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
 
@@ -213,13 +214,21 @@ type exchange struct {
 	pending  []*extprocv3.ProcessingRequest
 	queued   int64
 	queueCut bool
+
+	// A streamed response inspected event by event (streams.go): split
+	// splits it, events counts the events inspected, and held, when
+	// holds, are the bytes of the event in progress, not let through yet.
+	split  *streams.Splitter
+	events int
+	holds  bool
+	held   []byte
 }
 
 // done reports whether nothing more is needed in observability mode: the
 // request was refused uninspected, or it was decided and so was its
 // response, if inspected.
 func (x *exchange) done() bool {
-	return x.req == nil || !x.waiting && (x.ex == nil || x.respDone)
+	return x.req == nil || !x.waiting && (x.ex == nil || x.respDone && x.split == nil)
 }
 
 // Process handles the stream of one HTTP request.
@@ -324,6 +333,9 @@ func (s *Server) handle(ctx context.Context, x *exchange, msg *extprocv3.Process
 		if r, err := s.onResponse(ctx, x, phaseResponseBody); r != nil || err != nil {
 			return r, err
 		}
+		if x.split != nil {
+			return s.onStreamChunk(ctx, x, m.ResponseBody), nil
+		}
 		if x.respWaiting && x.fillResponse(m.ResponseBody) {
 			return s.responseVerdict(ctx, x, phaseResponseBody), nil
 		}
@@ -337,6 +349,9 @@ func (s *Server) handle(ctx context.Context, x *exchange, msg *extprocv3.Process
 		if x.respWaiting {
 			x.fillResponse(&extprocv3.HttpBody{EndOfStream: true})
 			return s.responseVerdict(ctx, x, phaseResponseTrailers), nil
+		}
+		if x.split != nil {
+			return s.endStream(ctx, x, phaseResponseTrailers), nil
 		}
 		return allow(phaseResponseTrailers, nil), nil
 	default:
@@ -513,6 +528,9 @@ func (s *Server) onResponseHeaders(ctx context.Context, x *exchange, h *extprocv
 			r.ModeOverride = &filterv3.ProcessingMode{ResponseBodyMode: filterv3.ProcessingMode_NONE}
 		}
 		return r
+	}
+	if !eos && x.ex.Streams() && pipeline.StreamKind(x.resp.Headers.Get("Content-Type")) != streams.None {
+		return s.onStreamHeaders(ctx, x)
 	}
 	if !eos && x.ex.WantsBody(x.resp.Headers.Get("Content-Type")) {
 		x.respLimit = x.ex.BodyLimit()

@@ -135,4 +135,8 @@ type Verdict struct {
 	// WebSocketMessage reports a verdict on a message a client sent on a
 	// WebSocket, not on a request.
 	WebSocketMessage bool
+	// StreamEvent, with Response, is the index (from 1) of the event or
+	// message of a streamed response the verdict is about; 0 for a whole
+	// response.
+	StreamEvent int
 }

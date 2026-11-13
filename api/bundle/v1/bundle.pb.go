@@ -1490,7 +1490,7 @@ func (x *WebSocketConfig) GetRequiredHeaders() []string {
 
 // ResponseConfig configures response inspection (CRS RESPONSE-95x data
 // leakage rules, and the user's phase 3 and 4 rules). Only adapters that see
-// responses (ext_proc) inspect them.
+// responses (ext_proc, the SPOE agent, the reverse proxy) inspect them.
 type ResponseConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Inspect responses: their status and headers, and their body when its
@@ -1502,7 +1502,11 @@ type ResponseConfig struct {
 	// What happens to a response whose body is longer than max_bytes, or
 	// can't be inspected (an encoding the engine can't decode): DENY
 	// replaces it with 502 in block mode.
-	OnOversize    OversizeAction `protobuf:"varint,3,opt,name=on_oversize,json=onOversize,proto3,enum=inkwall.bundle.v1.OversizeAction" json:"on_oversize,omitempty"`
+	OnOversize OversizeAction `protobuf:"varint,3,opt,name=on_oversize,json=onOversize,proto3,enum=inkwall.bundle.v1.OversizeAction" json:"on_oversize,omitempty"`
+	// Inspect streamed responses (Server-Sent Events, gRPC server streams)
+	// event by event, each up to max_bytes; false: their bodies pass
+	// uninspected. Engines before 0.6.0 ignore it.
+	Streams       bool `protobuf:"varint,4,opt,name=streams,proto3" json:"streams,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1556,6 +1560,13 @@ func (x *ResponseConfig) GetOnOversize() OversizeAction {
 		return x.OnOversize
 	}
 	return OversizeAction_OVERSIZE_ACTION_UNSPECIFIED
+}
+
+func (x *ResponseConfig) GetStreams() bool {
+	if x != nil {
+		return x.Streams
+	}
+	return false
 }
 
 var File_bundle_v1_bundle_proto protoreflect.FileDescriptor
@@ -1651,12 +1662,13 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\x0fWebSocketConfig\x12'\n" +
 	"\x0fallowed_origins\x18\x01 \x03(\tR\x0eallowedOrigins\x120\n" +
 	"\x14allow_missing_origin\x18\x02 \x01(\bR\x12allowMissingOrigin\x12)\n" +
-	"\x10required_headers\x18\x03 \x03(\tR\x0frequiredHeaders\"\x8b\x01\n" +
+	"\x10required_headers\x18\x03 \x03(\tR\x0frequiredHeaders\"\xa5\x01\n" +
 	"\x0eResponseConfig\x12\x18\n" +
 	"\ainspect\x18\x01 \x01(\bR\ainspect\x12\x1b\n" +
 	"\tmax_bytes\x18\x02 \x01(\x03R\bmaxBytes\x12B\n" +
 	"\von_oversize\x18\x03 \x01(\x0e2!.inkwall.bundle.v1.OversizeActionR\n" +
-	"onOversize*g\n" +
+	"onOversize\x12\x18\n" +
+	"\astreams\x18\x04 \x01(\bR\astreams*g\n" +
 	"\rPathMatchType\x12\x1f\n" +
 	"\x1bPATH_MATCH_TYPE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15PATH_MATCH_TYPE_EXACT\x10\x01\x12\x1a\n" +

@@ -265,6 +265,7 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 			responses.MaxBytes = min(n, MaxBodyBytes)
 		}
 		responses.Oversize = oversizeAction(rc.GetOnOversize())
+		responses.Streams = rc.GetStreams()
 	}
 	// Coraza's body limits are compiled in, so every policy gets the largest
 	// any may have, for one rule set: the pipeline gives the rules no more

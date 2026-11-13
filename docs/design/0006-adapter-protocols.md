@@ -398,6 +398,16 @@ response hook in ForwardAuth would change this.
 with the flag and the bundle field), then the operator's `responses.streams` field with its
 `EnginesOutdated` requirement and the Envoy Gateway and Istio kind e2e sections.
 
+**Built (engine, ext_proc):** `pkg/streams` splits SSE and gRPC streams as they come (`Pending`
+is what block mode holds, at most the limit and a few bytes; `FuzzSSEEvents` checks that any
+chunking gives the same events), `Exchange.CheckEvent` inspects an event, the ext_proc adapter
+switches such responses to `STREAMED` and answers each chunk with a body mutation that lets
+through only complete, allowed events, `--response-streams` and the bundle's
+`ResponseConfig.streams`. A gRPC call's exchange is now kept when its policy inspects streams.
+The security event carries
+`stream_event`. `make raw-envoy-e2e` checks a leaking SSE event never reaches the client. **Not
+yet:** the reverse proxy's streams (after its responses), and the operator's field.
+
 ## 3. forward-auth (Traefik `ForwardAuth`, nginx `auth_request`)
 
 - The proxy sends an HTTP subrequest with the client's headers to `/v1/forward-auth`. The original
