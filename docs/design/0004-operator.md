@@ -1301,6 +1301,28 @@ opt-in (`networkPolicy.egress.enabled`), to any address on the API server's port
 whether the namespace denies by default is the cluster's choice, and the engines' namespaces
 aren't the chart's. The Network flows table in the chart README lists every connection.
 
+**Metrics over HTTPS (v0.6.0, #430).** The operator's `/metrics` stays plain HTTP by default: its
+metrics carry no secrets, and a default that needs every scraper reconfigured would break the
+monitoring kit's existing installs. `metrics.secure.enabled` (`--metrics-secure`) serves them over
+HTTPS behind controller-runtime's `filters.WithAuthenticationAndAuthorization`: a TokenReview for
+the bearer token, a SubjectAccessReview for `get` on `/metrics`, both cached (a token a minute, an
+allow five, a deny thirty seconds). Its `tokenreviews` and `subjectaccessreviews` rules are in a
+ClusterRole of their own, rendered only with the option, not in the kubebuilder markers: the
+default install doesn't grant them. Scrapers get a `nonResourceURLs: [/metrics]` ClusterRole to
+bind; the ServiceMonitor sends Prometheus' own service account token (`bearerTokenFile`), so no
+token is stored for it. The probes stay on their own HTTP port: the kubelet has no token.
+
+The serving certificate is controller-runtime's self-signed one by default (`selfSigned`), made
+in memory at each start, and the ServiceMonitor doesn't verify it. That is the least to set up and
+what kube-controller-manager does for its metrics, but a scraper that doesn't verify sends its
+token to whatever answers at the pod's address. So `certs.mode: certManager` has cert-manager issue
+a certificate for the metrics Service (the chart's self-signed Issuer, or `issuerRef`), mounted
+into the operator, reloaded on renewal, and verified by the ServiceMonitor with its `ca.crt` and
+the Service's name. The webhook's rotated certificate isn't reused: its CA's key is in the same
+Secret, which Prometheus' operator would have to read, and the operator's servers would have to
+wait for it at start. With `--metrics-cert-dir` set, a missing certificate stops the operator
+rather than falling back to a self-signed one a verifying scraper would refuse.
+
 **Not yet:**
 
 - rules for Istio and controller ConfigMaps;

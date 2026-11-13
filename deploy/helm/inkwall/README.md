@@ -101,6 +101,8 @@ parent chart may share.
 | `rbac.integrations.traefik`, `envoyGateway`, `istio`, `istioIngress`, `haproxy` | `true`, `true`, `true`, `true`, `true` | Grant each integration's `ClusterRole`: `true`, `auto` (when the cluster serves the proxy's API group) or `false`. See [integration permissions](#integration-permissions) |
 | `uninstall.unwire` | `true` | On `helm uninstall`, unwire the routes first (a pre-delete hook), so they keep working, and remove the operator's [finalizer](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/) from the `WAFPolicy` objects |
 | `metrics.serviceMonitor.enabled`, `podMonitor.enabled`, `prometheusRule.enabled`, `dashboard.enabled` | `false` | The monitoring kit: a ServiceMonitor for the operator, a PodMonitor for the engines, the alerts and a Grafana dashboard ConfigMap. See [Monitoring](../../../docs/monitoring.md) |
+| `metrics.secure.enabled` | `false` | Serve the operator's metrics over HTTPS, only to bearer tokens the API server authenticates and allows to get `/metrics` (bind the `<operator>-metrics-reader` ClusterRole to your Prometheus); the ServiceMonitor follows. See [metrics over HTTPS](../../../docs/monitoring.md#metrics-over-https) |
+| `metrics.secure.certs.mode`, `certs.certManager.issuerRef` | `selfSigned`, `{}` | The metrics' certificate: `selfSigned` (made by the operator at start, not verified by the ServiceMonitor) or `certManager` (issued by cert-manager for the metrics Service, verified; a self-signed Issuer unless `issuerRef` is set) |
 | `metrics.forceMonitoringObjects` | `false` | Render the ServiceMonitor, PodMonitor and PrometheusRule even when the cluster doesn't serve `monitoring.coreos.com/v1` (for `helm template`) |
 | `serviceAccount.name`, `annotations` | the operator's name (`inkwall-operator`), `{}` | |
 | `crds.install` | `true` | |
@@ -248,7 +250,7 @@ What Inkwall's components connect to, for clusters that deny traffic by default:
 | The API server | the operator's pods | `webhook.port` (9443) | The validating and Pod webhooks |
 | The kubelet | the operator's pods | 8081 | Probes |
 | The engines, in the proxy namespaces | the operator's pods | `distribution.port` (9445) | Policy bundles (gRPC over TLS) |
-| Prometheus | the operator's pods | 8080 | `/metrics` |
+| Prometheus | the operator's pods | 8080 | `/metrics` (HTTPS with `metrics.secure.enabled`) |
 | Prometheus | the engines | `inkwall-admin` | The engines' metrics |
 | The operator, the uninstall hook | the API server | 443 or 6443 | |
 | The engines | the API server | 443 or 6443 | The bundle Secret, when the operator is down |

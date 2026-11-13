@@ -1,0 +1,89 @@
+{{/*
+Copyright 2026 The Inkwall Authors
+SPDX-License-Identifier: Apache-2.0
+
+The operator's metrics over HTTPS with authentication and authorization
+(metrics.secure, off by default; docs/monitoring.md): the operator checks
+each scraper's bearer token with a TokenReview and its permission with a
+SubjectAccessReview, so it may create both; scrapers need the metrics
+reader ClusterRole (or any role that allows get on /metrics). With
+certs.mode certManager, cert-manager issues the serving certificate for the
+metrics Service, which the ServiceMonitor verifies.
+*/}}
+{{- $s := include "inkwall.metrics.secure" . | fromYaml }}
+{{- if $s.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "inkwall.operator.suffixed" (dict "root" . "suffix" "metrics-auth") }}
+  labels:
+    {{- include "inkwall.operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+  - apiGroups: [authorization.k8s.io]
+    resources: [subjectaccessreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "inkwall.operator.suffixed" (dict "root" . "suffix" "metrics-auth") }}
+  labels:
+    {{- include "inkwall.operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "inkwall.operator.suffixed" (dict "root" . "suffix" "metrics-auth") }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "inkwall.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Bind it to the scrapers' service accounts (Prometheus').
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "inkwall.operator.suffixed" (dict "root" . "suffix" "metrics-reader") }}
+  labels:
+    {{- include "inkwall.operator.labels" . | nindent 4 }}
+rules:
+  - nonResourceURLs: [/metrics]
+    verbs: [get]
+{{- if $s.certManager }}
+{{- if not $s.issuerRef }}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "inkwall.operator.suffixed" (dict "root" . "suffix" "metrics-selfsigned") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inkwall.operator.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+{{- end }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "inkwall.metrics.secret" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inkwall.operator.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "inkwall.metrics.secret" . }}
+  dnsNames:
+    - {{ include "inkwall.metrics.service" . }}.{{ .Release.Namespace }}.svc
+    - {{ include "inkwall.metrics.service" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    {{- with $s.issuerRef }}
+    {{- toYaml . | nindent 4 }}
+    {{- else }}
+    kind: Issuer
+    name: {{ include "inkwall.operator.suffixed" (dict "root" . "suffix" "metrics-selfsigned") }}
+    {{- end }}
+{{- end }}
+{{- end }}

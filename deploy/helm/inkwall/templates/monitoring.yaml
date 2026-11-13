@@ -15,12 +15,13 @@ template, or a cluster whose CRDs come with the same apply).
 {{- $pm := $m.podMonitor | default dict }}
 {{- $pr := $m.prometheusRule | default dict }}
 {{- $db := $m.dashboard | default dict }}
+{{- $secure := include "inkwall.metrics.secure" . | fromYaml }}
 {{- if and $sm.enabled $api }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "inkwall.operator.suffixed" (dict "root" . "suffix" "metrics") }}
+  name: {{ include "inkwall.metrics.service" . }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "inkwall.operator.labels" . | nindent 4 }}
@@ -55,6 +56,23 @@ spec:
       path: /metrics
       {{- with $sm.interval }}
       interval: {{ . }}
+      {{- end }}
+      {{- if $secure.enabled }}
+      # metrics.secure: HTTPS, with Prometheus' service account token,
+      # which needs get on /metrics (the metrics reader ClusterRole).
+      scheme: https
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        {{- if $secure.certManager }}
+        serverName: {{ include "inkwall.metrics.service" . }}.{{ .Release.Namespace }}.svc
+        ca:
+          secret:
+            name: {{ include "inkwall.metrics.secret" . }}
+            key: ca.crt
+        {{- else }}
+        # The operator's certificate is self-signed, made when it starts.
+        insecureSkipVerify: true
+        {{- end }}
       {{- end }}
 {{- end }}
 {{- if and $pm.enabled $api }}

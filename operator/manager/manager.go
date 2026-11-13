@@ -34,7 +34,6 @@ import (
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -78,7 +77,15 @@ const (
 // Options configures the operator.
 type Options struct {
 	MetricsAddr string
-	ProbeAddr   string
+	// MetricsSecure serves the metrics over HTTPS, only to clients whose
+	// bearer token the API server authenticates (TokenReview) and allows
+	// to get the /metrics non-resource URL (SubjectAccessReview).
+	MetricsSecure bool
+	// MetricsCertDir holds the metrics' tls.crt and tls.key (e.g. from
+	// cert-manager), reloaded when they change; empty: a self-signed
+	// certificate made when the operator starts.
+	MetricsCertDir string
+	ProbeAddr      string
 	// Prober, if set, is the wiring's probe with its Key or Do set (tests);
 	// nil: one that probes the pods with the bundle's key.
 	Prober      *wiring.Prober
@@ -220,6 +227,10 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	if !o.ProxyNamespaces.Any() {
 		podNamespaces = o.ProxyNamespaces
 	}
+	metricsOpts, err := metricsServerOptions(o)
+	if err != nil {
+		return nil, err
+	}
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:   s,
 		NewCache: podcache.New(selectors.PodSelectors(), podNamespaces),
@@ -237,7 +248,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		// Unstructured objects (Traefik's IngressRoutes) are read from the
 		// cache too: the wiring and the bundle read them all at every change.
 		Client:                  client.Options{Cache: &client.CacheOptions{Unstructured: true}},
-		Metrics:                 metricsserver.Options{BindAddress: o.MetricsAddr},
+		Metrics:                 metricsOpts,
 		HealthProbeBindAddress:  o.ProbeAddr,
 		LeaderElection:          o.LeaderElect,
 		LeaderElectionID:        leaderElectionID,

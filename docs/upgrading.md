@@ -78,6 +78,12 @@ What's new:
   the probe now reaches your app (a `GET` on the reserved path `.well-known/inkwall-probe/<nonce>`,
   or an exact path with `?inkwall-probe=<nonce>`), and a rule matching only another method than
   `GET` or `HEAD` is `NotProbeable` there.
+- **The operator's metrics over HTTPS (opt-in).** `metrics.secure.enabled=true` serves `/metrics`
+  over HTTPS, only to bearer tokens the API server authenticates and allows to get `/metrics`; the
+  ServiceMonitor then scrapes with Prometheus' service account token. Bind the new
+  `inkwall-operator-metrics-reader` ClusterRole to Prometheus' service account first, unless its
+  role already allows `get` on `/metrics`. Off by default, also with `--reuse-values`: the metrics
+  stay plain HTTP. See [Metrics over HTTPS](monitoring.md#metrics-over-https).
 
 What changes by itself:
 
