@@ -501,6 +501,37 @@ Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/inkwall/issues/282)); 
   size: `tune.maxrewrite` is at most half the buffer, so HAProxy's buffer holds at least that much
   before it is full. Under the defaults that is about 7 KB, headers included; larger chunked
   bodies count as oversized.
+- **One frame per message.** HAProxy sends a message in one SPOE frame, of at most
+  `tune.bufsize` − 4 bytes, or the engine's `max-frame-size` (its body limit plus 1 MiB) when that
+  is lower. A message that doesn't fit, with its headers and other arguments, isn't cut: HAProxy
+  sends none of it, sets `txn.inkwall.error` (`option set-on-error`) to 3 when encoding it fails
+  against its own `max-frame-size`, or to 259 (0x100 + 3, from the SPOP connection) when it is over
+  the size the engine announced, and gives no verdict.
+  The documented configuration and, for `Block`-mode policies, the operator's snippet handle it as
+  oversized, before the fail-closed rule: 413 for a request, 502 for a response (`txn.inkwall.error`
+  3 or 259 and `txn.inkwall.responses` set). Detect mode leaves it out: it never blocks.
+- **Bodies over HAProxy's buffer, decided (#336).** The engine sees at most HAProxy's buffer, and
+  the rest is handled as oversized; we keep that limit, say it on the status and make it exact,
+  rather than raise it:
+  - *SPOP fragmentation* would send a larger body in several frames, but HAProxy 3.1 removed it
+    (`doc/SPOE.txt` §3.2: the FIN flag on every frame; `option send-frag-payload` ignored), and
+    SPOP 2.0 needs 3.1. HAProxy 3.4's large buffers (`tune.bufsize.large`, `wait-for-body
+    use-large-buffer`) don't help: SPOE's `max-frame-size` stays at most `tune.bufsize` − 4, so a
+    body in a large buffer would be a message over one frame.
+  - *The operator raising `tune.bufsize`* in the controller's ConfigMap: rejected. The setting is
+    global (every route and connection of the controller), the ConfigMap is the user's (the chart's
+    `controller.config`, often owned by Helm or GitOps, which would revert it), and
+    `global-config-snippet` is one string the operator can't own a part of. The operator would also
+    need write access to ConfigMaps. Instead `Programmed`'s message names the buffer when a
+    policy's `body.maxBytes`, or `responses.maxBytes` for a policy that inspects responses, is
+    larger than it (#345), with the snippet to raise it.
+  - *The cost of raising it*, measured with HAProxy 3.2.26 (200 connections, each with a request
+    whose body fills the buffer held in inspection: about three buffers, the request channel's,
+    the SPOE context's and the SPOP connection's): about 56 KiB per request at 16384, 190 KiB at
+    81920, 628 KiB at 262144 and 2.4 MiB at 1 MiB. Idle and keep-alive connections hold no buffer
+    (under 1 KiB at any size): HAProxy takes buffers from a pool only while data is in flight. So
+    1,000 requests in inspection at once take about 55 MB at the default and 185 MB at 81920. The
+    user sizes it ([protecting HAProxy](../haproxy.md#bodies) has the table).
 - **WebSocket:** HAProxy asks before it upgrades, with the `Upgrade` header, so the policy's
   WebSocket rules apply to the handshake as they are.
 - The client address is `src`, HAProxy's client (from the [PROXY protocol](https://github.com/haproxy/haproxy/blob/master/doc/proxy-protocol.txt) when HAProxy accepts it),
@@ -548,7 +579,7 @@ Ingress Controller (below).
   came within `wait-for-body`'s `time`. A body shorter than its `Content-Length` was cut: its prefix
   is inspected, and the policy's `responses.onOversize` decides, as through ext_proc. One without
   `Content-Length` counts as complete only when its frame is well under half the maximum frame
-  size, as a request's body.
+  size, as a request's body. A response too large for one frame gets 502 in Block mode, as above.
 - **The verdict.** `txn.inkwall.response_action` (`allow` or `deny`, on every answer) and
   `txn.inkwall.response_status`: 403 for a leak (another status a rule names is returned as 403 by
   the sample rules), 502 for an oversized or uninspectable body under Deny, for a miss that fails

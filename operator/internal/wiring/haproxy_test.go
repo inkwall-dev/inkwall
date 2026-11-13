@@ -30,7 +30,7 @@ import (
 )
 
 func TestHAProxySnippet(t *testing.T) {
-	closed := HAProxySnippet(false, true, false)
+	closed := HAProxySnippet(HAProxySnippetOptions{Body: true})
 	for _, want := range []string{
 		"option http-buffer-request",
 		"filter spoe engine inkwall config " + injection.HAProxySPOEConf,
@@ -46,7 +46,7 @@ func TestHAProxySnippet(t *testing.T) {
 	if strings.Index(closed, "status 299") > strings.Index(closed, "deny_status") {
 		t.Error("the probe's rule is after a denial")
 	}
-	open := HAProxySnippet(true, false, false)
+	open := HAProxySnippet(HAProxySnippetOptions{FailOpen: true})
 	if strings.Contains(open, "if !{ var(txn.inkwall.action) -m found }") || strings.Contains(open, "http-buffer-request") {
 		t.Errorf("failing open, without bodies:\n%s", open)
 	}
@@ -58,7 +58,7 @@ func TestHAProxySnippet(t *testing.T) {
 	// Responses: the agent's scope that tells the engine they come, the
 	// request's Accept-Encoding removed, the body waited for, the
 	// response sent, and the rules that replace it.
-	resp := HAProxySnippet(false, true, true)
+	resp := HAProxySnippet(HAProxySnippetOptions{Body: true, Responses: true})
 	for _, want := range []string{
 		"filter spoe engine inkwall-responses config " + injection.HAProxySPOEConf,
 		"http-request del-header accept-encoding",
@@ -79,6 +79,68 @@ func TestHAProxySnippet(t *testing.T) {
 	// The response is sent before the rules that act on its verdict.
 	if strings.Index(resp, "send-spoe-group") > strings.Index(resp, "http-response return") {
 		t.Error("a response rule before the response is sent")
+	}
+	// Detect mode: nothing on SPOE's error.
+	for _, s := range []string{closed, open, resp} {
+		if strings.Contains(s, "var(txn.inkwall.error)") {
+			t.Errorf("detect mode, yet a rule on SPOE's error:\n%s", s)
+		}
+	}
+}
+
+// In Block mode, a request or a response HAProxy can't fit in one SPOE frame
+// (txn.inkwall.error 3) is handled as oversized, whatever the failure mode:
+// 413 for a request, 502 for a response, before the fail-closed rules.
+func TestHAProxySnippetFrameTooBig(t *testing.T) {
+	const (
+		request  = `http-request deny deny_status 413 if { var(txn.inkwall.error) -m int 3 259 }`
+		response = `http-response return status 502 content-type text/plain lf-string "Bad Gateway. Request ID: %[var(txn.inkwall.request_id)]" hdr x-request-id "%[var(txn.inkwall.request_id)]" if { var(txn.inkwall.responses) -m found } { var(txn.inkwall.error) -m int 3 259 }`
+	)
+	for _, o := range []HAProxySnippetOptions{
+		{Block: true, Body: true},
+		{Block: true, Body: true, FailOpen: true},
+		{Block: true, Body: true, Responses: true},
+		{Block: true, Body: true, FailOpen: true, Responses: true},
+	} {
+		s := HAProxySnippet(o)
+		i := strings.Index(s, request)
+		if i < 0 {
+			t.Errorf("%+v: no 413 rule:\n%s", o, s)
+			continue
+		}
+		if i < strings.Index(s, "status 299") {
+			t.Errorf("%+v: the 413 rule is before the probe's answer", o)
+		}
+		if j := strings.Index(s, "deny_status 503 if !{"); j >= 0 && j < i {
+			t.Errorf("%+v: the 413 rule is after the fail-closed rule", o)
+		}
+		if j := strings.Index(s, "http-request deny deny_status"); j < i {
+			t.Errorf("%+v: the 413 rule is after another denial", o)
+		}
+		r := strings.Index(s, response)
+		switch {
+		case !o.Responses && r >= 0:
+			t.Errorf("%+v: a response rule without responses", o)
+		case o.Responses && r < 0:
+			t.Errorf("%+v: no 502 rule for the response:\n%s", o, s)
+		case o.Responses && r > strings.Index(s, "http-response return"):
+			t.Errorf("%+v: the 502 rule is after another response rule", o)
+		}
+	}
+}
+
+// A route is in Block mode when one of its policies is.
+func TestHAProxySettingsBlock(t *testing.T) {
+	ing := types.NamespacedName{Namespace: "shop", Name: "web"}
+	policy := func(name string, mode wafv1alpha1.PolicyMode) wafv1alpha1.WAFPolicy {
+		return wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: name}, Spec: wafv1alpha1.WAFPolicySpec{
+			Mode: mode, TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}}}}
+	}
+	if s := haproxySettingsOf([]wafv1alpha1.WAFPolicy{policy("a", wafv1alpha1.PolicyDetect)}, ing); s.block {
+		t.Error("Detect: block")
+	}
+	if s := haproxySettingsOf([]wafv1alpha1.WAFPolicy{policy("a", wafv1alpha1.PolicyDetect), policy("b", wafv1alpha1.PolicyBlock)}, ing); !s.block {
+		t.Error("Detect and Block: not block")
 	}
 }
 
@@ -115,6 +177,9 @@ func TestHAProxyWireResponses(t *testing.T) {
 	if !res.Responses || res.ResponsesWhy != "" {
 		t.Errorf("every pod ready: Responses %v, %q", res.Responses, res.ResponsesWhy)
 	}
+	if !strings.Contains(snippet(web), "-m found } { var(txn.inkwall.error) -m int 3 259 }") || !strings.Contains(snippet(other), "deny_status 413 if { var(txn.inkwall.error) -m int 3 259 }") {
+		t.Errorf("Block mode, no rule for a message over one frame:\n%s\n%s", snippet(web), snippet(other))
+	}
 	if !strings.Contains(snippet(web), "send-spoe-group") {
 		t.Errorf("web's snippet lacks the response rules:\n%s", snippet(web))
 	}
@@ -149,7 +214,7 @@ func TestHAProxyAnnotate(t *testing.T) {
 		HAProxySnippetAnnotation: "http-request set-header X-Mine 1\n", HAProxyStandaloneAnnotation: "false",
 	}}}
 	c := fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).WithObjects(ing).Build()
-	ours := HAProxySnippet(false, true, false)
+	ours := HAProxySnippet(HAProxySnippetOptions{Body: true})
 	if err := annotateHAProxy(ctx, c, ing, ours); err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +228,7 @@ func TestHAProxyAnnotate(t *testing.T) {
 		t.Fatalf("wired again: %v, resourceVersion %s -> %s", err, rv, ing.ResourceVersion)
 	}
 	// Another mode: the operator's part is replaced, the user's kept.
-	if err := annotateHAProxy(ctx, c, ing, HAProxySnippet(true, false, false)); err != nil {
+	if err := annotateHAProxy(ctx, c, ing, HAProxySnippet(HAProxySnippetOptions{FailOpen: true})); err != nil {
 		t.Fatal(err)
 	}
 	if n := strings.Count(ing.Annotations[HAProxySnippetAnnotation], haproxySnippetBegin); n != 1 {
@@ -437,5 +502,55 @@ func TestHAProxyBufferNote(t *testing.T) {
 	}}
 	if st, reason, msg := programmed(p, rep); st != metav1.ConditionTrue || reason != ReasonProgrammed || !strings.HasSuffix(msg, "; the buffer note") {
 		t.Errorf("%s %s %s", st, reason, msg)
+	}
+}
+
+// A policy that inspects responses, with responses.maxBytes over what
+// HAProxy's buffer lets the engine see of a response, gets a note naming
+// both, as for request bodies; once the buffer is raised, none.
+func TestHAProxyResponseBufferNote(t *testing.T) {
+	ctx := context.Background()
+	class := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "haproxy"}, Spec: networkingv1.IngressClassSpec{Controller: "haproxy.org/ingress-controller/haproxy"}}
+	policy := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
+		TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}},
+		Body:       &wafv1alpha1.BodySpec{MaxBytes: new(int64(8192))},
+		Responses:  &wafv1alpha1.ResponsesSpec{Inspect: true, MaxBytes: new(int64(100000))},
+	}}
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "haproxy-controller", Name: "hap"}, Data: map[string]string{}}
+	c := fake.NewClientBuilder().WithScheme(haproxyScheme()).
+		WithObjects(class, policy, cm, haproxyControllerPod("hap-1", "--configmap=haproxy-controller/hap"), haproxyIngress("web", "haproxy")).Build()
+	h := &HAProxy{Client: c, APIReader: c, Pods: integrationsSelector()}
+	web := Target{Kind: ingressKind, Key: types.NamespacedName{Namespace: "shop", Name: "web"}}
+	note := func() string {
+		res, err := h.Wire(ctx, map[Target]bool{web: true}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Targets[web].Note
+	}
+	n := note()
+	for _, want := range []string{"tune.bufsize 16384", "about 15360 bytes of a response", "responses.maxBytes (100000)", "responses.onOversize"} {
+		if !strings.Contains(n, want) {
+			t.Errorf("note lacks %q: %q", want, n)
+		}
+	}
+	// body.maxBytes (8192) fits the buffer: the note is about responses only.
+	if strings.Contains(n, "body.maxBytes") {
+		t.Errorf("note names body.maxBytes: %q", n)
+	}
+	// Both over the buffer: one note naming both.
+	policy.Spec.Body.MaxBytes = new(int64(50000))
+	if err := c.Update(ctx, policy); err != nil {
+		t.Fatal(err)
+	}
+	if n := note(); !strings.Contains(n, "body.maxBytes (50000)") || !strings.Contains(n, "responses.maxBytes (100000)") || strings.Count(n, "tune.bufsize 16384") != 1 {
+		t.Errorf("both: %q", n)
+	}
+	cm.Data["global-config-snippet"] = "tune.bufsize 128k\n"
+	if err := c.Update(ctx, cm); err != nil {
+		t.Fatal(err)
+	}
+	if n := note(); n != "" {
+		t.Errorf("with a 128k buffer: %q", n)
 	}
 }
