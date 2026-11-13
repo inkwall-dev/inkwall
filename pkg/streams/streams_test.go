@@ -89,7 +89,7 @@ func TestSSEPendingAndLimit(t *testing.T) {
 	if ev := s.Write([]byte("data: abc")); len(ev) != 0 || s.Pending() != 9 {
 		t.Fatalf("partial event: %q, pending %d", datas(ev), s.Pending())
 	}
-	if ev := s.Write([]byte("\n\n")); !equal(datas(ev), []string{"abc"}) || s.Pending() != 0 {
+	if ev := s.Write([]byte("\n\n")); !equal(datas(ev), []string{"abc"}) || s.Pending() != 0 || ev[0].End != 11 {
 		t.Fatalf("ended: %q, pending %d", datas(ev), s.Pending())
 	}
 	long := "data: " + strings.Repeat("x", 40) + "\n"

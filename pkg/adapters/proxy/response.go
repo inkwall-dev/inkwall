@@ -17,6 +17,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/adapters/internal/httpadapter"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/streams"
 )
 
 // DefaultMaxHeldResponseBytes bounds the response bodies the proxy holds
@@ -62,7 +63,11 @@ func (h *Handler) inspectResponse(res *http.Response) error {
 		return nil
 	}
 	resp := &request.Response{Proto: x.req.Proto, Status: res.StatusCode, Headers: res.Header.Clone()}
-	if res.Body != nil && res.Body != http.NoBody && x.ex.WantsBody(res.Header.Get("Content-Type")) {
+	hasBody := res.Body != nil && res.Body != http.NoBody
+	if kind := pipeline.StreamKind(res.Header.Get("Content-Type")); hasBody && kind != streams.None && x.ex.Streams() {
+		return h.inspectStream(ctx, x, res, resp, kind)
+	}
+	if hasBody && x.ex.WantsBody(res.Header.Get("Content-Type")) {
 		limit := x.ex.BodyLimit()
 		// One byte over the limit tells a longer body.
 		weight := min(limit+1, h.heldMax)
@@ -79,6 +84,25 @@ func (h *Handler) inspectResponse(res *http.Response) error {
 			release: func() { h.held.Release(weight) }}
 	}
 	return h.decideResponse(ctx, x, x.ex.CheckResponse(ctx, resp))
+}
+
+// inspectStream inspects a streamed response (#323): its status and headers
+// now, its events as they come through a streamBody, which holds its share
+// of the bound on held bytes (an event's limit, and one byte) for the
+// stream's life. Past the bound, it gets the failure mode.
+func (h *Handler) inspectStream(ctx context.Context, x *exchange, res *http.Response, resp *request.Response, kind streams.Kind) error {
+	weight := min(x.ex.BodyLimit()+1, h.heldMax)
+	if !h.held.TryAcquire(weight) {
+		return h.decideResponse(ctx, x, x.ex.Refused())
+	}
+	if err := h.decideResponse(ctx, x, x.ex.CheckResponse(ctx, resp)); err != nil {
+		h.held.Release(weight)
+		return err
+	}
+	res.Body = &streamBody{ctx: ctx, h: h, x: x, resp: resp, body: res.Body,
+		split: streams.New(kind, x.ex.BodyLimit(), res.Header.Get("Grpc-Encoding")), holds: x.ex.HoldsEvents(),
+		buf: make([]byte, 32<<10), release: func() { h.held.Release(weight) }}
+	return nil
 }
 
 // decideResponse logs v, the response's verdict, and returns the error

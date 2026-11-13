@@ -291,8 +291,9 @@ allow_mode_override: true
   `--grpc-messages` reads requests) is inspected on its own, up to `--max-response-bytes`; the
   engine asks Envoy to stream the body (`mode_override`, so `allow_mode_override: true` is needed).
   In block mode each event is held until it is inspected, and a leaking one ends the stream: Envoy
-  resets it, so the client gets the events before it but neither it nor any after, and a gRPC client
-  sees the call fail. A longer event is cut and gets `--oversize-response`. Each event is one more
+  resets it, so the client gets the events of the chunks before it but neither it nor any after (an
+  event Envoy passed in the same chunk as the leaking one goes with it), and a gRPC client sees the
+  call fail. A longer event is cut and gets `--oversize-response`. Each event is one more
   evaluation: a token-by-token stream is many of them. The security event carries
   `"stream_event"`, the event's index.
 

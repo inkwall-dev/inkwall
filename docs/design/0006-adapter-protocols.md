@@ -409,8 +409,14 @@ The security event carries
 **Built (operator):** `WAFPolicy.spec.responses.streams` (`Inspect` or `Skip`, the default; it
 needs `inspect: true`), the bundle field from it, `Enforced=False` (`EnginesOutdated`) while an
 engine before 0.6.0 runs the policy, and the Envoy Gateway and Istio kind e2e sections (a leaking
-SSE event ends the stream through both Gateways, the events before it pass). **Not yet:** the
-reverse proxy's streams.
+SSE event ends the stream through both Gateways, the events before it pass). **Built (the
+reverse proxy):** a `streamBody` wraps the response's body: it splits it as it is read, inspects
+each event, and gives out only bytes up to the end of the last allowed event (`Event.End`, the
+offset the splitter reports), so the events before a denied one go out even when they came in the
+same read; the denied one ends the copy with an error, which aborts the response. A stream holds
+one event's limit of `--max-held-response-bytes` while open; past it, a new one gets the failure
+mode. Through ext_proc, a chunk's answer is either its body or a reset, so events that share a
+chunk with a denied one are dropped with it.
 
 ## 3. forward-auth (Traefik `ForwardAuth`, nginx `auth_request`)
 

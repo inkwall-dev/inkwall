@@ -275,7 +275,11 @@ func TestParseResponseFlags(t *testing.T) {
 			t.Errorf("%s accepted --inspect-responses", cmd)
 		}
 	}
-	// Streams, event by event (#323): off by default, ext-proc only.
+	// Streams, event by event (#323): off by default; ext-proc and the
+	// proxy.
+	if cfg, err := parseFlags(cmdProxy, []string{"--upstream", "http://app", "--inspect-responses", "--response-streams", "inspect"}, io.Discard); err != nil || !cfg.responses.Streams {
+		t.Errorf("proxy --response-streams inspect: %v, %v", cfg.responses, err)
+	}
 	if cfg, _ := parseFlags(cmdExtProc, []string{"--inspect-responses"}, io.Discard); cfg.responses.Streams {
 		t.Error("streams inspected by default")
 	}
