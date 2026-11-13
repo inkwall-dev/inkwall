@@ -326,6 +326,49 @@
         "forceMonitoringObjects": {
           "type": "boolean"
         },
+        "secure": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "certs": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "selfSigned",
+                    "certManager"
+                  ]
+                },
+                "certManager": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "issuerRef": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "kind": {
+                          "type": "string"
+                        },
+                        "group": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
         "serviceMonitor": {
           "type": "object",
           "additionalProperties": false,

@@ -243,3 +243,30 @@ cluster (helm template, Argo CD): then there is no check.
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+The operator's secure metrics (metrics.secure, docs/monitoring.md): their
+values, with defaults for releases whose values predate them (helm upgrade
+--reuse-values from 0.5), as YAML; the metrics Service, named in a
+cert-manager certificate; and the Secret that holds it.
+*/}}
+{{- define "inkwall.metrics.secure" -}}
+{{- $s := (.Values.metrics | default dict).secure | default dict -}}
+{{- $certs := $s.certs | default dict -}}
+{{- $mode := $certs.mode | default "selfSigned" -}}
+{{- if not (has $mode (list "selfSigned" "certManager")) -}}
+{{- fail (printf "metrics.secure.certs.mode must be selfSigned or certManager, not %q" $mode) -}}
+{{- end -}}
+{{- $enabled := eq (toString $s.enabled) "true" }}
+enabled: {{ $enabled }}
+certManager: {{ and $enabled (eq $mode "certManager") }}
+issuerRef: {{ ($certs.certManager | default dict).issuerRef | default dict | toJson }}
+{{- end -}}
+
+{{- define "inkwall.metrics.service" -}}
+{{- include "inkwall.operator.suffixed" (dict "root" . "suffix" "metrics") -}}
+{{- end -}}
+
+{{- define "inkwall.metrics.secret" -}}
+{{- include "inkwall.operator.suffixed" (dict "root" . "suffix" "metrics-tls") -}}
+{{- end -}}

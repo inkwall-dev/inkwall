@@ -9,8 +9,9 @@
 # webhook, a proxy pod gets the engine and the engine connects to the
 # distribution server, and Prometheus' namespace scrapes the metrics. Other
 # namespaces reach neither the distribution server nor the metrics. Then
-# puts the release's values back. make kind-operator installs the chart
-# first.
+# the same with the metrics over HTTPS (metrics.secure), authenticated and
+# authorized, and puts the release's values back. make kind-operator
+# installs the chart first.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -26,6 +27,9 @@ PROXY_NS=inkwall-np-proxy
 MONITORING_NS=inkwall-np-monitoring
 OTHER_NS=inkwall-np-other
 CURL_IMAGE=curlimages/curl:8.11.1
+# Grants the metrics reader ClusterRole to Prometheus' service account in
+# MONITORING_NS, for the metrics.secure section.
+READER_BINDING=inkwall-np-metrics-reader
 
 failures=0
 ok() { printf 'ok    %s\n' "$1"; }
@@ -44,6 +48,7 @@ proxy_namespaces=${proxy_namespaces:-traefik}
 restore() {
   "${KUBECTL[@]}" delete namespace "$PROXY_NS" "$MONITORING_NS" "$OTHER_NS" --ignore-not-found --timeout=120s >/dev/null || true
   "${KUBECTL[@]}" -n "$NAMESPACE" delete networkpolicy default-deny --ignore-not-found >/dev/null || true
+  "${KUBECTL[@]}" delete clusterrolebinding "$READER_BINDING" --ignore-not-found >/dev/null || true
   if ! "${HELM[@]}" upgrade inkwall "$CHART" --namespace "$NAMESPACE" -f "$work/values.yaml" >/dev/null; then
     fail "putting the release's values back"
   fi
@@ -192,6 +197,70 @@ if [[ $(reach "$OTHER_NS" "$operator_ip" 9445) == 28 ]]; then
   ok "a namespace that isn't a proxy namespace can't reach the distribution server"
 else
   fail "a namespace that isn't a proxy namespace reaches the distribution server"
+fi
+
+# Secure metrics (#430): with metrics.secure on, under the same policies,
+# the metrics are served over HTTPS behind the API server's TokenReview and
+# SubjectAccessReview. From Prometheus' namespace: no token is 401, a
+# service account without the metrics reader ClusterRole 403, and one bound
+# to it reads the metrics. Another namespace still can't reach the port.
+echo "== metrics.secure: HTTPS, authenticated and authorized"
+for sa in prometheus other; do
+  "${KUBECTL[@]}" -n "$MONITORING_NS" create serviceaccount "$sa" --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f - >/dev/null
+done
+"${KUBECTL[@]}" create clusterrolebinding "$READER_BINDING" --clusterrole=inkwall-operator-metrics-reader \
+  --serviceaccount="$MONITORING_NS:prometheus" --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f - >/dev/null
+if "${HELM[@]}" upgrade inkwall "$CHART" --namespace "$NAMESPACE" --reuse-values --set metrics.secure.enabled=true >/dev/null &&
+  "${KUBECTL[@]}" -n "$NAMESPACE" rollout status deployment/inkwall-operator --timeout=180s >/dev/null; then
+  ok "helm upgrade with metrics.secure.enabled"
+else
+  fail "helm upgrade with metrics.secure.enabled"
+fi
+# scrape NAMESPACE IP [TOKEN]: the body of an HTTPS scrape of /metrics from
+# a pod in NAMESPACE, then its status on a line of its own (000: no answer).
+scrape() {
+  local args=(-sk -w '\n%{http_code}' --connect-timeout 5 --max-time 15)
+  if [[ -n ${3:-} ]]; then
+    args+=(-H "Authorization: Bearer $3")
+  fi
+  "${KUBECTL[@]}" -n "$1" run "curl-$RANDOM" --rm -i --quiet --restart=Never --image "$CURL_IMAGE" --command -- \
+    curl "${args[@]}" "https://$2:8080/metrics" 2>/dev/null || true
+}
+status_of() { tail -n 1 <<<"$1"; }
+reader_token=$("${KUBECTL[@]}" -n "$MONITORING_NS" create token prometheus --duration=10m)
+other_token=$("${KUBECTL[@]}" -n "$MONITORING_NS" create token other --duration=10m)
+# The authorized scrape, retried: the new pods' addresses and the policies
+# are programmed asynchronously, as above.
+operator_ip="" got=""
+for _ in $(seq 12); do
+  operator_ip=$(live_operator_ip)
+  if [[ -n $operator_ip ]]; then
+    got=$(scrape "$MONITORING_NS" "$operator_ip" "$reader_token")
+    [[ $(status_of "$got") == 200 ]] && grep -q '^# TYPE inkwall_operator_' <<<"$got" && break
+  fi
+  sleep 5
+done
+if [[ $(status_of "$got") == 200 ]] && grep -q '^# TYPE inkwall_operator_' <<<"$got"; then
+  ok "a service account with the metrics reader role scrapes the metrics over HTTPS"
+else
+  fail "the authorized scrape: status $(status_of "$got") from operator pod ${operator_ip:-none ready}"
+fi
+got=$(status_of "$(scrape "$MONITORING_NS" "$operator_ip")")
+if [[ $got == 401 ]]; then
+  ok "a scrape without a token gets 401"
+else
+  fail "a scrape without a token: $got, want 401"
+fi
+got=$(status_of "$(scrape "$MONITORING_NS" "$operator_ip" "$other_token")")
+if [[ $got == 403 ]]; then
+  ok "a service account without the role gets 403"
+else
+  fail "a service account without the role: $got, want 403"
+fi
+if [[ $(reach "$OTHER_NS" "$operator_ip" 8080 /metrics) == 28 ]]; then
+  ok "another namespace still can't reach the metrics"
+else
+  fail "another namespace reaches the secure metrics"
 fi
 
 trap - EXIT
