@@ -9,13 +9,18 @@ import (
 )
 
 // FuzzCheck: whatever a client sends, the engine answers only a probe made
-// with the key, and its answer verifies.
+// with the key, and its answer verifies; it keeps a receipt (#475) of
+// those only, the one the operator expects.
 func FuzzCheck(f *testing.F) {
 	uri := PrefixPath("/", "0123456789abcdef0123")
 	f.Add(uri, "a.example", Request(key, "0123456789abcdef0123", "a.example", uri))
 	f.Add("/", "", "x.y")
 	f.Fuzz(func(t *testing.T, uri, host, header string) {
 		answer, ok := Check(key, uri, host, header)
+		receipt, kept := Receipt(key, uri, host, header)
+		if kept != ok {
+			t.Fatalf("Check %v, Receipt %v for %q", ok, kept, header)
+		}
 		if !ok {
 			return
 		}
@@ -25,6 +30,9 @@ func FuzzCheck(f *testing.F) {
 		}
 		if !Verify(key, nonce, host, uri, answer) {
 			t.Fatal("the answer doesn't verify")
+		}
+		if receipt != ExpectedReceipt(key, nonce, host, uri) || !ValidReceipt(receipt) {
+			t.Fatalf("receipt %q", receipt)
 		}
 	})
 }

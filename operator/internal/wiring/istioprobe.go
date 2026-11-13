@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net/http"
 	"net/url"
 	"slices"
 	"strings"
@@ -376,15 +377,25 @@ func gatewaySelects(s labels.Selector, p *corev1.Pod) bool { return s.Matches(la
 
 // proveRoute probes a wired Istio route: its jobs, and why it isn't
 // proven yet (unverified) or can't be (notProbeable). In detect mode
-// (ext_proc's observability mode) Envoy discards the engine's answer, so
-// the probe can't prove the route: it stays Unverified (#372).
+// (ext_proc's observability mode) Envoy discards the engine's answer and
+// forwards the probe to the app: the route is proven by the receipt the
+// probed pod's engine reports instead (#475), which shows that the engine
+// sees the route's traffic there, all a Detect-mode route does with it.
+// The probe then reaches the app, so it is sent only as a GET or HEAD.
 func proveRoute(p *Prober, name string, detect bool, jobsOf func() ([]ProbeJob, string)) (jobs []ProbeJob, notProbeable, unverified string) {
-	if detect {
-		return nil, "", name + " is wired in Detect mode; the filter is unverified: Envoy doesn't return the engine's answer to the operator's probe in observability mode"
-	}
 	jobs, why := jobsOf()
 	if why != "" {
 		return nil, why, ""
+	}
+	if detect {
+		for i := range jobs {
+			for _, t := range jobs[i].Targets {
+				if t.Method != "" && t.Method != http.MethodGet && t.Method != http.MethodHead {
+					return nil, fmt.Sprintf("%s can't be probed in Detect mode: a rule of it matches only %s requests, and in Detect mode Envoy forwards the probe to the app, so the probe sends only GET and HEAD requests", name, t.Method), ""
+				}
+			}
+			jobs[i].Receipt = true
+		}
 	}
 	if p == nil {
 		return nil, "", name + " is wired, but the operator doesn't probe Istio: the filter is unverified"

@@ -36,6 +36,10 @@ type Engine struct {
 	// TrustedKeys are the IDs of the bundle signing keys the engine
 	// accepts; empty from an engine older than key rotation.
 	TrustedKeys []string `json:"trustedKeys,omitempty"`
+	// ProbeReceipts are the receipts of the operator's probes the engine
+	// verified where the proxy discards its answer (#475), as its last
+	// heartbeat reported them: the leader's probe matches them.
+	ProbeReceipts []string `json:"probeReceipts,omitempty"`
 	// Replica is the operator replica the engine is connected to.
 	Replica     string    `json:"replica"`
 	ConnectedAt time.Time `json:"connectedAt"`

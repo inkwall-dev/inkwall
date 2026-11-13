@@ -916,6 +916,8 @@ leader-only. Losing a replica just moves its engines to another.
   refused with `InvalidArgument`, which ends the stream. Engines send far less.
   - `node_name`: empty or a DNS subdomain (at most 253 bytes); `engine_version`: at most 128 bytes.
   - `trusted_key_ids`: at most 16, each 1 to 64 bytes (engines send 16 hex digits per key).
+  - `probe_receipts` (a `Heartbeat`'s, #475): at most 16, each 32 lowercase hex digits. The last
+    ones are the engine record's `probeReceipts`, which the leader's probe reads (0002 §6.1).
   - `pod_namespace` and `pod_name`: when the token is bound to a pod, its pod is used and the
     `Hello`'s isn't. Otherwise they must be empty, a DNS label and a DNS subdomain.
   - A `Nack`'s error is cut to 1 KiB, without splitting a character. It goes into the engine's
@@ -925,7 +927,7 @@ leader-only. Losing a replica just moves its engines to another.
 - **Aggregation through ConfigMaps.** Each replica writes its engines to `inkwall-engines-<pod>`
   (owned by its Pod) on change and every 10 s. The leader merges them every 2 s, drops reports
   older than 30 s, and counts an engine that moved between replicas once.
-- **Report size.** An engine's record is at most about 3.5 KiB with the limits above, a few hundred
+- **Report size.** An engine's record is at most about 4 KiB with the limits above, a few hundred
   bytes in practice. A report holds at most 900 KiB of engines, by engine ID, so the ConfigMap
   stays under 1 MiB. The engines left out are counted by `inkwall_operator_engines_left_out`, and
   in the report (`leftOut`). While a report has engines left out, `Enforced` is `False`
