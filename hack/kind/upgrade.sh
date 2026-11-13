@@ -247,6 +247,13 @@ fi
 # seconds, 0 for a step it didn't finish). It runs as the pod's process: one started by
 # kubectl exec may die with the exec session.
 #
+# A round sends its requests at once, in parallel, and the next round
+# starts 0.2 s after the slowest one ends (#596): sent one after another,
+# a request that got no answer for 2 s delayed every other kind's next
+# request too, so one stall, or two in a round (the direct request to a
+# Traefik pod being replaced, below, stalls in every round once it's gone),
+# counted as a gap of 4 s or more for a kind that missed a single request.
+#
 # It sends to the Service's ClusterIP, which probe_start writes to
 # /tmp/svc, not to its DNS name (#320): a lookup in the pod (musl, five
 # search domains) that loses a UDP query retries it only after 2.5 s. The
@@ -265,20 +272,26 @@ fi
 trap 'exit 0' TERM
 # c HOST PATH [ADDR]: "CODE DNS/CONNECT/TOTAL" (curl's times, in seconds),
 # through the Service, or to ADDR.
-c() { curl -s -o /dev/null -m 2 -w '%{http_code} %{time_namelookup}/%{time_connect}/%{time_total}' -H "Host: $1" "http://${3:-$svc}$2"; }
+c() { curl -s -o /dev/null -m 2 -w '%{http_code} %{time_namelookup}/%{time_connect}/%{time_total}\n' -H "Host: $1" "http://${3:-$svc}$2"; }
 while true; do
   if [ -e /tmp/run ]; then
     read -r svc </tmp/svc
     read -r pod </tmp/pod
     eg=$(cat /tmp/eg 2>/dev/null)
     read -r up _ </proc/uptime
+    c "$HOST" "$SQLI" >/tmp/r1 &
+    c "$HOST" /products/42 >/tmp/r2 &
+    c "$ROUTE_HOST" "$SQLI" >/tmp/r3 &
+    c "$HOST" "$SQLI" "$pod" >/tmp/r4 &
     if [ -n "$eg" ]; then
-      set -- $(c "$HOST" "$SQLI") $(c "$HOST" /products/42) $(c "$ROUTE_HOST" "$SQLI") $(c "$HOST" "$SQLI" "$pod") \
-        $(c "$EG_HOST" "$SQLI" "$eg") $(c "$EG_HOST" /products/42 "$eg")
+      c "$EG_HOST" "$SQLI" "$eg" >/tmp/r5 &
+      c "$EG_HOST" /products/42 "$eg" >/tmp/r6 &
     else
-      set -- $(c "$HOST" "$SQLI") $(c "$HOST" /products/42) $(c "$ROUTE_HOST" "$SQLI") $(c "$HOST" "$SQLI" "$pod") \
-        403 0/0/0 200 0/0/0
+      echo 403 0/0/0 >/tmp/r5
+      echo 200 0/0/0 >/tmp/r6
     fi
+    wait
+    set -- $(cat /tmp/r1 /tmp/r2 /tmp/r3 /tmp/r4 /tmp/r5 /tmp/r6)
     echo "$up $1 $3 $5 $7 $9 ${11} | $2 $4 $6 $8 ${10} ${12}" >>/tmp/probe.log
   fi
   sleep 0.2
@@ -428,8 +441,9 @@ probe_start() {
 probe_stop() {
   local name=$1 max=$2 max_eg=${3:-$2} log summary
   "${KUBECTL[@]}" -n "$NS" exec probe -- rm -f /tmp/run
-  # A round in flight ends within its three 2s timeouts.
-  sleep 7
+  # A round in flight ends within its 2 s timeout (its requests run in
+  # parallel).
+  sleep 4
   log=$("${KUBECTL[@]}" -n "$NS" exec probe -- cat /tmp/probe.log 2>/dev/null || true)
   # For each request kind: requests, wrong answers, attacks that got
   # through (2xx), and the longest gap (s), from the first wrong answer to
