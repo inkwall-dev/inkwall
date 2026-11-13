@@ -8,6 +8,7 @@ package fakeengine
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
@@ -60,6 +61,12 @@ type Engine struct {
 	// gigabytes, and on a busy machine stalled long enough for the
 	// operator to close their connections (the scale test, #296).
 	Shared *Shared
+	// PodNamespace and PodName name the engine's pod in its Hello;
+	// default "test" and ID.
+	PodNamespace, PodName string
+	// ProbeReceipts, if set, returns the probe receipts each heartbeat
+	// reports (#475).
+	ProbeReceipts func() []string
 
 	mu      sync.Mutex
 	applied *bundlev1.Bundle
@@ -147,7 +154,7 @@ func (e *Engine) run(ctx context.Context) error {
 		current = a.GetVersion()
 	}
 	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{
-		EngineId: e.ID, PodNamespace: "test", PodName: e.ID, EngineVersion: "fake", BundleVersion: current,
+		EngineId: e.ID, PodNamespace: cmp.Or(e.PodNamespace, "test"), PodName: cmp.Or(e.PodName, e.ID), EngineVersion: "fake", BundleVersion: current,
 		TrustedKeyIds: e.TrustedKeys(),
 	}}}); err != nil {
 		// The operator may have ended the stream first (rejected the
@@ -179,6 +186,9 @@ func (e *Engine) run(ctx context.Context) error {
 					v = a.GetVersion()
 				}
 				hb := &agentv1.Heartbeat{BundleVersion: v, TrustedKeyIds: e.TrustedKeys()}
+				if e.ProbeReceipts != nil {
+					hb.ProbeReceipts = e.ProbeReceipts()
+				}
 				if send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Heartbeat{Heartbeat: hb}}) != nil {
 					return
 				}

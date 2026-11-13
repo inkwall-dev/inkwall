@@ -115,6 +115,10 @@ type Config struct {
 	// nil: a request with a valid probe header is then answered by the
 	// engine, uninspected (#372). Nil: no probe is answered.
 	ProbeKey func() []byte
+	// ProbeReceipts keeps a receipt of each probe that comes in
+	// observability mode, where Envoy discards the answer (#475); the
+	// agent reports them to the operator. Nil: none kept.
+	ProbeReceipts *haproxyprobe.Receipts
 	// Metrics counts the requests the adapter can't read (nil: none).
 	Metrics *telemetry.Metrics
 	// Events records each security event for the operator (nil: logged
@@ -135,6 +139,7 @@ type Server struct {
 	// jsonDenials: Config.JSONDenials.
 	jsonDenials bool
 	probeKey    func() []byte
+	receipts    *haproxyprobe.Receipts
 }
 
 // New returns a Server that inspects requests with p.
@@ -150,7 +155,7 @@ func New(p pipeline.Inspector, cfg Config) (*Server, error) {
 	if resolver == nil {
 		resolver = &clientip.Resolver{}
 	}
-	return &Server{pipeline: p, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events, metrics: cfg.Metrics, jsonDenials: cfg.JSONDenials, probeKey: cfg.ProbeKey}, nil
+	return &Server{pipeline: p, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events, metrics: cfg.Metrics, jsonDenials: cfg.JSONDenials, probeKey: cfg.ProbeKey, receipts: cfg.ProbeReceipts}, nil
 }
 
 // NewGRPCServer returns a gRPC server that serves s. It accepts messages
@@ -346,7 +351,7 @@ func (s *Server) onHeaders(ctx context.Context, x *exchange, h *extprocv3.HttpHe
 		return s.uninspectable(ctx, err)
 	}
 	x.req, x.path = req, path
-	if r := s.answerProbe(req); r != nil {
+	if r := s.answerProbe(req, x.observe); r != nil {
 		return r
 	}
 	x.setID = !strings.EqualFold(req.ID, req.Headers.Get("X-Request-Id"))
@@ -852,11 +857,19 @@ func allow(p phase, m *extprocv3.HeaderMutation) *extprocv3.ProcessingResponse {
 // never reaches the upstream, and only an engine with the key, behind a
 // route whose filter is on, can make it. Envoy's local replies take a
 // defined HTTP status only, so not HAProxy's 299; the MAC proves the answer.
-// In observability mode Envoy ignores the reply: a detect-mode route can't
-// be proven this way.
-func (s *Server) answerProbe(req *request.Request) *extprocv3.ProcessingResponse {
+// In observability mode Envoy ignores the reply and forwards the request:
+// the engine keeps a receipt of the probe instead, which the operator reads
+// in its report (#475), and returns nil: the request Envoy forwards is
+// inspected as any other.
+func (s *Server) answerProbe(req *request.Request, observe bool) *extprocv3.ProcessingResponse {
 	value := req.Headers.Get(haproxyprobe.Header)
 	if s.probeKey == nil || value == "" {
+		return nil
+	}
+	if observe {
+		if receipt, ok := haproxyprobe.Receipt(s.probeKey(), req.RawURI, req.Host, value); ok {
+			s.receipts.Add(receipt)
+		}
 		return nil
 	}
 	answer, ok := haproxyprobe.Check(s.probeKey(), req.RawURI, req.Host, value)
