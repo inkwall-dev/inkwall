@@ -298,8 +298,12 @@ func testIstio(ctx context.Context, t *testing.T, c client.Client) {
 	eventually(t, "detect mode: observability_mode, a streamed body, no buffer limit", filterHas("custom",
 		[]string{`"observability_mode":true`, `"request_body_mode":"STREAMED"`, `"failure_mode_allow":true`}, "per_connection_buffer_limit_bytes", "BUFFERED_PARTIAL"))
 	// Envoy discards the engine's answer to the probe in observability
-	// mode: not proven, so Unverified (#372).
-	eventually(t, "Unverified in detect mode", programmed(metav1.ConditionFalse, wiring.ReasonUnverified, "wired in Detect mode"))
+	// mode: the route is proven by the receipts the Gateways' engines
+	// report (#475), through the operator's distribution server and its
+	// engine report.
+	stopEngines := observeProbes(ctx, t, c, edge+"/custom-new", edge+"/plain-a")
+	eventually(t, "Programmed in detect mode by the engines' probe receipts", programmed(metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
+	stopEngines()
 
 	// Unprotected: everything goes, the user's objects as they were.
 	if err := c.Delete(ctx, pol); err != nil {

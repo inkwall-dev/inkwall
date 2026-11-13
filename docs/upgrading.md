@@ -75,6 +75,15 @@ What's new:
   `inkwall.dev/source: saas`; the cluster state lists every `WAFIPList`
   ([Managed mode](control-plane.md#managed-mode)). A control plane that sends none changes
   nothing.
+- **`Detect`-mode Istio routes are `Programmed`.** Envoy discards the engine's answer to the
+  operator's probe in `Detect` mode, so those HTTPRoutes and VirtualServices were `Unverified`.
+  Now the engine keeps a receipt of each probe it verified and reports it to the operator, which
+  proves the route by it ([the operator's probe](istio.md#the-operators-probe)). Pods with an
+  engine older than 0.6.0 report no receipts: their `Detect` routes stay `Unverified` until the
+  pods run the 0.6.0 engine (restart them, or `spec.engine.rollout: Automatic`). In `Detect` mode
+  the probe now reaches your app (a `GET` on the reserved path `.well-known/inkwall-probe/<nonce>`,
+  or an exact path with `?inkwall-probe=<nonce>`), and a rule matching only another method than
+  `GET` or `HEAD` is `NotProbeable` there.
 
 What changes by itself:
 

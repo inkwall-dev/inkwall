@@ -700,3 +700,61 @@ func TestWatchStats(t *testing.T) {
 		}
 	}
 }
+
+// An engine's heartbeats carry the receipts of the operator's probes it
+// verified where its answer is discarded (#475): the replica keeps the
+// last ones in the engine's record, which its report publishes and the
+// leader reads; a heartbeat without them clears them.
+func TestWatchProbeReceipts(t *testing.T) {
+	table, stream := connect(t, fakeAuth{}, "e", &agentv1.Hello{EngineId: "e", PodNamespace: "edge", PodName: "gw-1"})
+	receipts := []string{strings.Repeat("0a", 16), strings.Repeat("b1", 16)}
+	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Heartbeat{Heartbeat: &agentv1.Heartbeat{ProbeReceipts: receipts}}}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the receipts", func() bool { got, _ := table.Snapshot(); return slices.Equal(got[0].ProbeReceipts, receipts) })
+
+	engines, _ := table.Snapshot()
+	data, _, err := encodeEngines(engines, maxReport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(s)
+	now := time.Now()
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "inkwall-system", Name: reportNamePrefix + "r", Labels: map[string]string{EnginesLabel: "true"}},
+		Data:       reportData(data, 0),
+	}).Build()
+	read, _, err := ReadEngines(context.Background(), c, "inkwall-system", time.Minute, now)
+	if err != nil || len(read) != 1 || !slices.Equal(read[0].ProbeReceipts, receipts) || read[0].PodName != "gw-1" {
+		t.Fatalf("read %+v, %v", read, err)
+	}
+
+	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Heartbeat{Heartbeat: &agentv1.Heartbeat{}}}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "no receipts", func() bool { got, _ := table.Snapshot(); return len(got[0].ProbeReceipts) == 0 })
+}
+
+// Receipts over the limits end the stream: more than an engine keeps, or
+// one that isn't a receipt.
+func TestWatchProbeReceiptsOverLimits(t *testing.T) {
+	r := strings.Repeat("ab", 16)
+	for name, receipts := range map[string][]string{
+		"too many":  slices.Repeat([]string{r}, maxProbeReceipts+1),
+		"too long":  {r + "00"},
+		"not hex":   {strings.Repeat("zz", 16)},
+		"uppercase": {strings.Repeat("AB", 16)},
+		"empty":     {""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, stream := connect(t, fakeAuth{}, "e", &agentv1.Hello{EngineId: "e"})
+			if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Heartbeat{Heartbeat: &agentv1.Heartbeat{ProbeReceipts: receipts}}}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := stream.Recv(); status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("got %v, want InvalidArgument", err)
+			}
+		})
+	}
+}

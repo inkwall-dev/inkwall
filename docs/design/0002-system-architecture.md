@@ -367,6 +367,9 @@ ACK or a NACK.
 - `Hello` and `Heartbeat` carry the IDs of the keys the engine trusts (`--bundle-key`, re-read
   every 10 s). So the operator signs with a new key only once every engine has it. A bundle
   rejected for an unknown key is asked for again, on a new stream, once the keys change.
+- `Heartbeat` also carries the receipts of the operator's probes the engine verified where Envoy
+  discards its answer (`probe_receipts`, since v0.6.0): the proof of `Detect`-mode Istio routes
+  ([§6.1](#61-envoy-raw-envoy-envoy-gateway-istio-contour), #475).
 - The engine reconnects with jittered backoff. With no cache, it reads the bundle Secret from the
   API server (`--bundle-secret`, over plain HTTPS, without [client-go](https://github.com/kubernetes/client-go)).
 - Matching uses host, cleaned path and method, most specific first. An exact host wins over a
@@ -624,8 +627,45 @@ controller `istio.io/gateway-controller`), with `ext_proc` through an `EnvoyFilt
   made concrete, `inkwall-probe.<suffix>`) on the listener's port, over TLS for HTTPS (`SIMPLE`).
   The ext_proc adapter answers it with Envoy's local reply, 200 and the answer's MAC (0006 §2). A
   rule whose matches are all regular expressions, or a mutual-TLS or passthrough server, can't be
-  probed: `NotProbeable`. In detect mode Envoy discards the answer: `Unverified`; proving those
-  by the engine's own record of the probe (a receipt in its report) is a follow-up.
+  probed: `NotProbeable`. In detect mode Envoy discards the answer: such a route is proven by
+  the engine's receipt instead (below).
+- **Detect mode: proof by receipt** (decided for v0.6.0, #475). In observability mode Envoy
+  forwards the request without waiting and ignores the engine's reply, so the probe's answer never
+  comes back. The engine, on a probe whose MAC it verifies in observability mode, keeps a
+  *receipt* instead: an HMAC-SHA256 under the probe key of the purpose `receipt`, the nonce, host
+  and URI, cut to 128 bits (32 hex digits, `pkg/haproxyprobe`). It keeps at most 16, none older
+  than a minute, each once, and sends them with every heartbeat (`Heartbeat.probe_receipts`); the
+  replica keeps the last ones in the engine's record of its engine report (0004 §4.7), which the
+  leader's `Prober` reads. A route whose policies are all in `Detect` mode is `Programmed` once,
+  for every pod and target, the engine *of the probed pod* (its pod from the stream's
+  authenticated token, or the `Hello` when the token isn't bound to a pod) reported the receipt of
+  *that* probe; none within 30 s fails the probe (`Unverified`, "reported no receipt"), retried
+  every 20 s as any failed probe. At most 8 probes per pod wait for a receipt at once, under the
+  16 an engine keeps.
+  - **What a receipt proves, and what it doesn't.** It proves that the engine in that pod got the
+    request through the route's filter on that listener: it sees the route's traffic there, which
+    is all `Detect` mode does with it (it logs, never blocks). That is what `Programmed` means for
+    a `Detect` route. It proves nothing about blocking: a route with a policy in `Block` mode is
+    proven only by the answer coming back, and the receipt flag is part of each result's key, so a
+    route that moves between modes is probed again, not proven by the other mode's result.
+  - **Forged receipts, and receipts of other probes, prove nothing.** The receipt is under the probe key, with its
+    own purpose: neither the request's MAC nor the answer (the parts a party on the network sees)
+    is one, so whoever sees the probe can't make its receipt. The operator expects one receipt per
+    probe, for its fresh random nonce, only while that probe waits, and only from the probed pod's
+    engine: a receipt of an earlier probe, another pod's, under another key, or in a report older
+    than 30 s matches nothing. Engines report only over their authenticated stream (0004 §4.7),
+    whose limits refuse more than 16 receipts or one that isn't 32 lowercase hex digits. An engine
+    has the key, so a compromised engine could vouch for its own pod's routes: it can already
+    pass that pod's traffic uninspected, so this adds nothing to what it can do.
+  - **The probe reaches the app** in `Detect` mode, Envoy forwarding it. So it is sent only as
+    `GET` or `HEAD` without a body: a rule whose match is for another method is `NotProbeable` in
+    `Detect` mode. The engine inspects a probe in observability mode as any request Envoy
+    forwards (it answers one itself only in `Block` mode, where Envoy doesn't forward it). The TLS rules (#507, #511) are unchanged: no header or query values over TLS, the certificate
+    not checked, the MAC (here the receipt) the proof.
+  - **Rejected:** proving `Detect` routes by the answer (Envoy discards it); by the engine's
+    request counts or security events (they don't name the probe, and can't be told from forged
+    traffic); a receipt without a MAC (a ConfigMap writer, or anyone who saw the nonce, could make
+    it); switching the route to `Block` for the probe (it changes what the user's traffic gets).
   An Istio older than 1.28 (from the `istio-proxy` image tag) is `WiringFailed`: its Envoy (before
   1.36) would reject `status_on_error` and keep serving without the filter. Without the
   `EnvoyFilter` CRD nothing is wired (`WiringFailed`). Without its ClusterRole,
