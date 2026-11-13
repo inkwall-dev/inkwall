@@ -58,9 +58,9 @@ func token(ctx context.Context, t *testing.T, namespace, sa string) string {
 // allowed to read the bundle Secret, get the bundle over TLS, and their
 // acks and nacks become each policy's Enforced condition.
 func testDistribution(ctx context.Context, t *testing.T, c client.Client) {
-	// testBundles left the cluster suspended.
-	cfg := &wafv1alpha1.InkwallConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
-	update(ctx, t, c, cfg, func(cfg *wafv1alpha1.InkwallConfig) { cfg.Spec.Suspend = false })
+	// testBundles left the cluster suspended; if it failed before creating
+	// the InkwallConfig, there is none: either way, inspection runs.
+	cfg := resume(ctx, t, c)
 
 	for _, o := range []client.Object{
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "edge"}},
