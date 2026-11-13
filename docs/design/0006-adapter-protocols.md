@@ -315,8 +315,89 @@ detect mode). **Built (operator):** the CRD field and its validation, the bundle
 Envoy Gateway's response processing mode and buffer limit, `ResponsesNotInspected` for the
 other proxies, the webhook's warning; envtest, and the kind e2e through Envoy Gateway (a leaked
 SQL error replaced in Block mode, logged in Detect mode, and the policy not `Programmed` for its
-Traefik Ingress). **Not yet:** streamed responses (Server-Sent Events, gRPC streams) inspected
-per chunk or message; responses through Traefik; the reverse proxy adapter's responses.
+Traefik Ingress). **Not yet:** see the next section.
+
+### Streamed responses, the reverse proxy and Traefik (design, #323)
+
+What is left of #274's scope, decided for v0.6.0. The response API above doesn't change, except for
+one opt-in field for streams.
+
+**The reverse proxy (`inkwall-engine proxy`).** It sees every response, so it inspects them as
+ext_proc does, with the same `Exchange` and the same flags (`--inspect-responses`,
+`--max-response-bytes`, `--oversize-response`; or the policy's `responses` in bundle mode). Go's
+`ReverseProxy.ModifyResponse` runs before a byte is written to the client. There the proxy reads up
+to `maxBytes` of a body the rules read (the `WantsBody` types, `gzip`/`deflate` decoded as for
+ext_proc), evaluates it, and then:
+
+- forwards the response, with the prefix it read put back in front of the rest of the body;
+- or, in Block mode, replaces it with the denial (the rule's status, or 502 for `onOversize: Deny`).
+
+The proxy removes `Accept-Encoding` on routes whose response bodies it inspects. A body the rules
+don't read passes as it streams, without being held. This makes the proxy the reference for
+responses too ([0002 §10](0002-system-architecture.md#10-testing-architecture)): the CRS suite's
+response cases run through it and through ext_proc with the same verdicts. The response parser is
+the pipeline's and is already fuzzed; a new `FuzzProxyResponse` fuzzes the proxy's own
+read-and-replay path (cut bodies, lying `Content-Length`, encodings).
+
+**Streamed responses** (Server-Sent Events, `text/event-stream`, and gRPC server streams,
+`application/grpc*`). Holding a stream's body until `maxBytes` would stall it, possibly forever: an
+SSE stream may never end. So streams aren't buffered. Each **event** (SSE: the lines up to a blank
+line) or **message** (gRPC: one length-prefixed frame) is inspected on its own, as WebSocket messages
+are (`CheckWebSocketMessage`). Each is evaluated as a response whose body is the event's `data` or
+the message's text (the same text extraction as `grpcMessages` for requests), with the stream's
+status and headers. It gets a fresh transaction, carrying the request's identity (request ID,
+client IP, host, path) for exclusions and events but not the request's rules. A Coraza transaction
+runs phase 4 once, and re-running the request's rules for each event would add its score to every
+one.
+
+Events and messages are cut at `maxBytes`, as a WebSocket message is: a cut one is oversized.
+Holding an event while it is inspected delays only that event. Block mode holds each event until
+it is decided, as the reverse proxy holds a WebSocket message. Detect mode forwards at once and
+inspects a copy.
+
+A denied event can't be answered with a status: the stream's headers, and maybe earlier events,
+are already out. Block mode therefore **ends the stream** at that event, which the client never
+gets: ext_proc answers it with an immediate response, which makes Envoy reset the stream (a gRPC
+client sees `INTERNAL`/`CANCELLED`, an SSE client a dropped connection), and the proxy closes it.
+The event (`phase: response`, with the event's or message's index) says why.
+
+Through ext_proc, the engine switches such a response to `response_body_mode: STREAMED` with the
+`mode_override` it already sends for bodies it doesn't read. That needs `allow_mode_override`,
+which every route that inspects responses already gets, so the operator's wiring doesn't change.
+Each `STREAMED` chunk is answered at once, unless it completes an event that Block mode holds.
+
+**Decision: off by default.** Every event costs an evaluation; a token-by-token LLM stream is
+hundreds of them. A binary gRPC message has the false positives of `grpcMessages`
+([0002](0002-system-architecture.md)). So streams stay uninspected, as today, unless a policy asks
+for it: `WAFPolicy.spec.responses.streams: Inspect` (default `Skip`; bundle
+`ResponseConfig.streams`; the engine's `--response-streams`). An engine before 0.6.0 ignores the
+field, so such a policy is `Enforced=False` (`EnginesOutdated`), as for the other fields. The SSE
+parser is new and gets a fuzz target (`FuzzSSEEvents`); the gRPC framing is the request side's,
+already fuzzed.
+
+**Traefik: nothing built in; `ResponsesNotInspected` stays.** ForwardAuth asks before the request
+is forwarded and never sees the response. The other options, and why not:
+
+- **A Traefik Yaegi plugin calling the engine.** Traefik must download it from GitHub (the plugin
+  catalog) or load it from a local directory the operator would have to mount into Traefik's pods.
+  That means patching a Deployment the user's Helm owns, which 0004 §4.3 rules out. It also runs
+  interpreted, and every response would be copied through it.
+- **A WebAssembly plugin** (Traefik 3's `http-wasm`). It sees the response, but it can't open a
+  connection. It would have to run its own Coraza inside Traefik, apart from the bundle and the
+  engine's events: a second engine to keep equal.
+- **The engine's reverse proxy in front of the app.** That changes the app's Service or pods, which
+  the operator doesn't own.
+
+A policy with `responses.inspect` on a Traefik route therefore stays `Programmed=False`
+(`ResponsesNotInspected`), as since 0.4.0, and the Traefik guide says so. A user who needs
+responses inspected behind Traefik routes the app through Envoy Gateway or Istio, or puts the
+standalone reverse proxy (above) in front of the app themselves. Its responses are then inspected,
+but with the policy from flags, outside the operator's status. A future Traefik release with a
+response hook in ForwardAuth would change this.
+
+**Order:** the reverse proxy's responses (engine), then streams (engine: ext_proc and the proxy,
+with the flag and the bundle field), then the operator's `responses.streams` field with its
+`EnginesOutdated` requirement and the Envoy Gateway and Istio kind e2e sections.
 
 ## 3. forward-auth (Traefik `ForwardAuth`, nginx `auth_request`)
 

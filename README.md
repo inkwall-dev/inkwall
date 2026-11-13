@@ -155,7 +155,10 @@ rules). In `Block` mode a response that leaks is replaced with 403. Through Envo
 and, since 0.6.0, the HAProxy Kubernetes Ingress Controller: Traefik's ForwardAuth never sends
 responses, so on its routes such a policy is `Programmed=False` (`ResponsesNotInspected`) while
 its requests are still inspected
-([design](docs/design/0006-adapter-protocols.md#response-inspection-v040)).
+([design](docs/design/0006-adapter-protocols.md#response-inspection-v040)). Traefik will keep it
+that way: to have responses inspected behind Traefik, serve those routes through Envoy Gateway,
+Istio or HAProxy, or run the [standalone engine](docs/standalone-proxy.md) in front of the app yourself
+([why](docs/design/0006-adapter-protocols.md#streamed-responses-the-reverse-proxy-and-traefik-design-323)).
 
 Start in `Detect` mode, tune [false positives](https://coreruleset.org/docs/concepts/false_positives_tuning/) on the policy (`exclusions`, narrowed with `when` to a path and an
 argument, argument name, cookie or header, `skip` paths,
