@@ -44,6 +44,11 @@ func (e *Exchange) OnVerdict(observe func(Verdict)) {
 	e.observe = observe
 }
 
+// FailureMode is the request's failure mode, resolved for the pipeline's
+// mode: what an adapter that loses the exchange before the response (the
+// SPOE agent's table) does with that response.
+func (e *Exchange) FailureMode() FailureMode { return e.p.failure }
+
 // BodyLimit is how much of the response body is inspected: 0 for none.
 func (e *Exchange) BodyLimit() int64 { return e.p.responses.MaxBytes }
 

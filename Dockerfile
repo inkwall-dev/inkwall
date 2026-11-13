@@ -7,7 +7,7 @@
 #   docker build --target operator -t inkwall-operator .
 
 # Base images are pinned by digest (tag@sha256:…), bumped by Dependabot.
-FROM --platform=$BUILDPLATFORM golang:1.27@sha256:e519d3b0a5b285e5aa53ab9eef02bc6bbb9cb04608389b743a136a9ce75f0d1e AS build
+FROM --platform=$BUILDPLATFORM golang:1.27@sha256:ec47ea3725fea0cc88f6de94919aef19f40f12fc1ec0e2d1b3426dbf15ecca04 AS build
 ARG TARGETOS TARGETARCH
 # The release version (without "v") and commit, stamped into the binaries:
 # the build context has no .git for Go to read the commit from.

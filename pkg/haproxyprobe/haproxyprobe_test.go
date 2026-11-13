@@ -5,8 +5,10 @@ package haproxyprobe
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 var key = bytes.Repeat([]byte{7}, KeySize)
@@ -60,5 +62,83 @@ func TestCheckRefuses(t *testing.T) {
 	}
 	if Verify(key, nonce, "a.example", uri, "") || Verify(nil, nonce, "a.example", uri, header) {
 		t.Fatal("Verify accepted an empty answer or no key")
+	}
+}
+
+// A receipt (#475) is the engine's record that it verified a probe, for a
+// route whose answer Envoy discards (observability mode): only a probe made
+// with the key gets one, it is the operator's expected receipt for that
+// nonce, host and URI only, and it can't be made from what the probe's
+// request or answer show on the wire.
+func TestReceipt(t *testing.T) {
+	nonce, _ := NewNonce()
+	uri := PrefixPath("/", nonce)
+	header := Request(key, nonce, "Shop.Example.com", uri)
+	r, ok := Receipt(key, uri, "shop.example.com", header)
+	if !ok || !ValidReceipt(r) || len(r) != ReceiptSize {
+		t.Fatalf("receipt %q, %v", r, ok)
+	}
+	if want := ExpectedReceipt(key, nonce, "shop.example.com", uri); r != want {
+		t.Fatalf("receipt %q, the operator expects %q", r, want)
+	}
+	answer, _ := Check(key, uri, "shop.example.com", header)
+	if strings.Contains(header, r) || strings.Contains(answer, r) {
+		t.Fatal("the receipt is in the request or the answer: whoever sees them could forge it")
+	}
+	other, _ := NewNonce()
+	for name, want := range map[string]string{
+		"another nonce": ExpectedReceipt(key, other, "shop.example.com", uri),
+		"another host":  ExpectedReceipt(key, nonce, "other.example.com", uri),
+		"another URI":   ExpectedReceipt(key, nonce, "shop.example.com", "/login"),
+		"another key":   ExpectedReceipt(bytes.Repeat([]byte{8}, KeySize), nonce, "shop.example.com", uri),
+	} {
+		if r == want {
+			t.Errorf("%s: the same receipt", name)
+		}
+	}
+	if ExpectedReceipt(nil, nonce, "shop.example.com", uri) != "" {
+		t.Error("a receipt without a key")
+	}
+	if _, ok := Receipt(key, uri, "shop.example.com", nonce+".00"); ok {
+		t.Error("a receipt for a probe with a wrong MAC")
+	}
+	if _, ok := Receipt(nil, uri, "shop.example.com", header); ok {
+		t.Error("a receipt without a key")
+	}
+	for _, bad := range []string{"", "xyz", strings.Repeat("g", ReceiptSize), strings.Repeat("A", ReceiptSize), r + "0"} {
+		if ValidReceipt(bad) {
+			t.Errorf("ValidReceipt(%q)", bad)
+		}
+	}
+}
+
+// The engine keeps the receipts of recent probes only: at most
+// MaxReceipts, the newest, none older than ReceiptAge; and once each.
+func TestReceipts(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	rs := &Receipts{Now: func() time.Time { return now }}
+	receipt := func(i int) string { return fmt.Sprintf("%032x", i) }
+	for i := range MaxReceipts + 3 {
+		rs.Add(receipt(i))
+	}
+	rs.Add(receipt(MaxReceipts + 2))
+	got := rs.Recent()
+	if len(got) != MaxReceipts || got[0] != receipt(3) || got[len(got)-1] != receipt(MaxReceipts+2) {
+		t.Fatalf("recent: %v", got)
+	}
+	now = now.Add(ReceiptAge / 2)
+	rs.Add(receipt(100))
+	now = now.Add(ReceiptAge/2 + time.Second)
+	if got := rs.Recent(); len(got) != 1 || got[0] != receipt(100) {
+		t.Fatalf("after ReceiptAge: %v", got)
+	}
+	rs.Add("not a receipt")
+	if got := rs.Recent(); len(got) != 1 {
+		t.Fatalf("kept a malformed receipt: %v", got)
+	}
+	var none *Receipts
+	none.Add(receipt(1))
+	if none.Recent() != nil {
+		t.Fatal("a nil Receipts kept a receipt")
 	}
 }

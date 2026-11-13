@@ -60,6 +60,14 @@ func testSourceGuard(ctx context.Context, t *testing.T, c client.Client) {
 	if err := c.Create(ctx, managed); err != nil {
 		t.Fatal(err)
 	}
+	// The control plane's IP lists too (#577).
+	managedList := &wafv1alpha1.WAFIPList{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "managed", Labels: saas},
+		Spec:       wafv1alpha1.WAFIPListSpec{Entries: []wafv1alpha1.IPListEntry{{CIDR: "203.0.113.0/24"}}},
+	}
+	if err := c.Create(ctx, managedList); err != nil {
+		t.Fatal(err)
+	}
 	setMode(ctx, t, c, wafv1alpha1.ModeManaged)
 	defer setMode(ctx, t, c, wafv1alpha1.ModeStandalone)
 
@@ -77,6 +85,17 @@ func testSourceGuard(ctx context.Context, t *testing.T, c client.Client) {
 	})
 	if err := alice.Delete(ctx, managed.DeepCopy()); !apierrors.IsForbidden(err) {
 		t.Errorf("alice deletes it: %v", err)
+	}
+	if err := alice.Delete(ctx, managedList.DeepCopy()); !apierrors.IsForbidden(err) {
+		t.Errorf("alice deletes the IP list: %v", err)
+	}
+	l := managedList.DeepCopy()
+	if err := alice.Get(ctx, client.ObjectKeyFromObject(l), l); err != nil {
+		t.Fatal(err)
+	}
+	l.Spec.Entries[0].CIDR = "0.0.0.0/0"
+	if err := alice.Update(ctx, l); !apierrors.IsForbidden(err) {
+		t.Errorf("alice edits the IP list: %v", err)
 	}
 	// The operator writes the policy too (its finalizer, its status): a
 	// conflict means alice read it before that write, so she reads again.
@@ -113,6 +132,9 @@ func testSourceGuard(ctx context.Context, t *testing.T, c client.Client) {
 		}
 		return ""
 	})
+	if err := alice.Delete(ctx, managedList.DeepCopy()); client.IgnoreNotFound(err) != nil {
+		t.Errorf("alice deletes the IP list in GitOps mode: %v", err)
+	}
 }
 
 func errString(err error) string {

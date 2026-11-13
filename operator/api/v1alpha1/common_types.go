@@ -37,6 +37,11 @@ const (
 	// Automatic), and False when it has nothing to replace, is paused
 	// (reason Paused, saying why) or the rollout is Manual.
 	ConditionEngineRollout = "EngineRollout"
+	// ConditionEngineConfigured, on the InkwallConfig, is False when the
+	// engine pinned in spec.engine.image is injected without some
+	// spec.engine settings, because its release (or a custom build) may
+	// not know their flags; the message names them.
+	ConditionEngineConfigured = "EngineConfigured"
 )
 
 // SecretReference names a Secret in a given namespace.
@@ -52,8 +57,8 @@ type SecretReference struct {
 	Namespace string `json:"namespace"`
 }
 
-// SourceLabel says where a WAFPolicy, WAFRuleSet or ClusterWAFRuleSet comes
-// from. In Managed mode the operator writes the control plane's policies
+// SourceLabel says where a WAFPolicy, WAFRuleSet, ClusterWAFRuleSet or
+// WAFIPList comes from. In Managed mode the operator writes the control plane's policies
 // labelled SourceSaaS (0004 §4.9), and the validating webhook lets no one
 // else create, change or delete them, or add or remove the label.
 const (

@@ -22,6 +22,7 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 	"github.com/inkwall-dev/inkwall/pkg/events"
+	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
 )
 
 // Defaults of the Server.
@@ -50,6 +51,10 @@ const (
 	// maxRejectError bounds the error of a Nack, which goes into the
 	// policies' Enforced condition.
 	maxRejectError = 1 << 10
+	// maxProbeReceipts bounds the probe receipts of a heartbeat: what an
+	// engine keeps (haproxyprobe.MaxReceipts); each is a receipt
+	// (haproxyprobe.ValidReceipt).
+	maxProbeReceipts = haproxyprobe.MaxReceipts
 )
 
 // Server implements BundleService.
@@ -334,6 +339,18 @@ func checkHello(h *agentv1.Hello, podBound bool) error {
 	return checkKeyIDs(h.GetTrustedKeyIds())
 }
 
+func checkReceipts(receipts []string) error {
+	if len(receipts) > maxProbeReceipts {
+		return fmt.Errorf("over %d probe_receipts", maxProbeReceipts)
+	}
+	for _, r := range receipts {
+		if !haproxyprobe.ValidReceipt(r) {
+			return fmt.Errorf("a probe_receipt is not %d lowercase hex digits", haproxyprobe.ReceiptSize)
+		}
+	}
+	return nil
+}
+
 func checkKeyIDs(ids []string) error {
 	if len(ids) > maxKeyIDs {
 		return fmt.Errorf("over %d trusted_key_ids", maxKeyIDs)
@@ -373,14 +390,22 @@ func (s *Server) record(engineID string, msg *agentv1.WatchRequest, log logr.Log
 		log.Info("bundle rejected", "version", v, "error", reason)
 	case *agentv1.WatchRequest_Heartbeat:
 		// Mostly unchanged: it keeps the stream alive.
-		v, keys := m.Heartbeat.GetBundleVersion(), m.Heartbeat.GetTrustedKeyIds()
+		v, keys, receipts := m.Heartbeat.GetBundleVersion(), m.Heartbeat.GetTrustedKeyIds(), m.Heartbeat.GetProbeReceipts()
 		if err := checkKeyIDs(keys); err != nil {
+			return err
+		}
+		if err := checkReceipts(receipts); err != nil {
 			return err
 		}
 		s.Engines.Update(engineID, func(e *Engine) bool {
 			changed := set(&e.Applied, v)
 			if !slices.Equal(e.TrustedKeys, keys) {
 				e.TrustedKeys, changed = keys, true
+			}
+			// Receipts change the report, which the leader's probe waits
+			// for (#475).
+			if !slices.Equal(e.ProbeReceipts, receipts) {
+				e.ProbeReceipts, changed = receipts, true
 			}
 			return changed
 		})

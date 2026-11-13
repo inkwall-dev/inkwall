@@ -173,7 +173,7 @@ const (
 
 // maxReport bounds a replica's engine list, so its ConfigMap stays under
 // the API server's 1 MiB with room for the rest. An engine's record is at
-// most about 3.5 KiB with the limits of server.go, a few hundred bytes in
+// most about 4 KiB with the limits of server.go, a few hundred bytes in
 // practice.
 const maxReport = 900 << 10
 
@@ -307,7 +307,7 @@ func ReadEngines(ctx context.Context, c client.Reader, namespace string, stale t
 		engines[i] = Engine{
 			ID: e.ID, ServiceAccount: e.ServiceAccount, PodNamespace: e.PodNamespace, PodName: e.PodName,
 			NodeName: e.NodeName, EngineVersion: e.EngineVersion, Applied: e.Applied, Rejected: e.Rejected,
-			RejectError: e.RejectError, TrustedKeys: e.TrustedKeys, Replica: e.Replica, ConnectedAt: e.ConnectedAt,
+			RejectError: e.RejectError, TrustedKeys: e.TrustedKeys, ProbeReceipts: e.ProbeReceipts, Replica: e.Replica, ConnectedAt: e.ConnectedAt,
 		}
 	}
 	return engines, leftOut, nil

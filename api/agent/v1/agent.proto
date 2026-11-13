@@ -100,4 +100,9 @@ message Heartbeat {
   // The signing keys the engine trusts, as in Hello: they change while
   // the stream is open when the engine reloads its key file.
   repeated string trusted_key_ids = 4;
+  // The receipts of the operator's probes the engine verified where the
+  // proxy discards its answer (ext_proc in observability mode, #475): the
+  // recent ones, at most 16, none older than a minute, each 32 lowercase
+  // hex digits (pkg/haproxyprobe). Empty from older engines.
+  repeated string probe_receipts = 5;
 }

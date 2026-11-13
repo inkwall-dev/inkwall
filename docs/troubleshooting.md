@@ -165,8 +165,8 @@ fix from these tables ([Explaining a policy or a denial](#explaining-a-policy-or
 | `SidecarMissing` | The proxy's pods don't run the engine: none is in the proxy namespaces, the InkwallConfig's selector doesn't match them, they were created while the operator was down, or they opted out. Their traffic isn't inspected. | Add the namespace to `injection.proxyNamespaces`, fix the selector, or restart the pods the message names. |
 | `PendingRestart` | Proxy pods started before Inkwall run without the engine (or Envoy Gateway is replacing its pods with ones that have it). | Restart them: `kubectl rollout restart`. |
 | `Pending` | Wired, but not in force yet: the proxy hasn't loaded the configuration. | Wait; if it lasts, check the proxy's logs. |
-| `Unverified` | Wired, but the operator's probe hasn't proven the filter on every pod (HAProxy, Istio), or got another answer than the engine's: the filter isn't on the route. Also every Istio route in `Detect` mode, whose answer Envoy discards. | HAProxy: check the controller has the operator's snippets ([HAProxy](haproxy.md)). Istio: see [the operator's probe](istio.md#the-operators-probe); another `EnvoyFilter` may remove or bypass Inkwall's. |
-| `NotProbeable` | The operator's probe can't target an Istio route (a rule whose every match is a regular expression, a server with mutual TLS or passthrough, or header or query match values over TLS, which the probe doesn't send to a certificate it doesn't verify), so its filter can't be proven; the message says which. | Add an exact or prefix match to the rule, or accept it unproven: [Istio](istio.md#the-operators-probe). |
+| `Unverified` | Wired, but the operator's probe hasn't proven the filter on every pod (HAProxy, Istio), or got another answer than the engine's: the filter isn't on the route. For an Istio route in `Detect` mode: no engine reported the probe's receipt (in 30 s). | HAProxy: check the controller has the operator's snippets ([HAProxy](haproxy.md)). Istio: see [the operator's probe](istio.md#the-operators-probe); another `EnvoyFilter` may remove or bypass Inkwall's. In `Detect` mode, the pods need a 0.6.0 engine. |
+| `NotProbeable` | The operator's probe can't target an Istio route (a rule whose every match is a regular expression, a server with mutual TLS or passthrough, or header or query match values over TLS, which the probe doesn't send to a certificate it doesn't verify; in `Detect` mode, also a match only for another method than `GET` or `HEAD`), so its filter can't be proven; the message says which. | Add an exact or prefix match to the rule, or accept it unproven: [Istio](istio.md#the-operators-probe). |
 | `WiringFailed` | The operator couldn't change the proxy's objects (a conflict, a webhook, permissions). | The message names the object and the error; `kubectl -n inkwall-system logs deploy/inkwall-operator` has more. |
 | `ResponsesNotInspected` | The policy inspects responses, but a target's proxy can't send them to the engine (only Envoy Gateway can). Its requests are inspected; the policy isn't `Programmed`, so it doesn't claim the responses are. | Remove `responses`, or target routes Envoy Gateway serves. |
 | `Unwired` | `helm uninstall` (the unwire hook) unwired the routes and stopped the operator. | Reinstall to protect the routes again. |
@@ -204,6 +204,9 @@ an unknown built-in rule set) and `RuleCompileError` (rules that don't compile),
 | `SigningKeyRotation` | `Retiring` | The new key signs; the previous one stays trusted until every engine runs a bundle the new one signed. | As for `Publishing`. |
 | `IntegrationsConfigured` | `Configured` | The integrations' proxy pod selectors apply. | |
 | `IntegrationsConfigured` | `InvalidSelector` | A `spec.integrations` selector can't be applied (an unknown operator); the operator keeps the selectors it runs with. | Fix the selector the message names. |
+| `EngineConfigured` | `Configured` | The engine is injected with every `spec.engine` setting. | |
+| `EngineConfigured` | `EngineTooOld` | `spec.engine.image` pins an engine release too old for some settings (`logLevel`, `policyMetrics`, `jsonDenials`, `clientIP.trustedHops` need 0.5.0): it is injected without them, since it would exit on a flag it doesn't know. The message names them. | Pin a newer engine, or remove the settings. |
+| `EngineConfigured` | `EngineVersionUnknown` | `spec.engine.image`'s tag isn't a release (`latest`, a digest alone, a custom build), so the engine is injected without the settings some release doesn't know. | Tag the image with its version, such as `:0.6.0` or `:0.6.0@sha256:...`. |
 | `EngineRollout` | `RollingOut` | `spec.engine.rollout: Automatic`: the operator evicted a proxy pod for a new engine and waits for its replacement. | |
 | `EngineRollout` | `Done` | No proxy pod the operator injects needs a new engine. | |
 | `EngineRollout` | `Paused` | An eviction was refused (a PodDisruptionBudget) or a replacement isn't ready in time; nothing else is evicted. The message says which. | Relax the budget, or fix the replacement pod the message names (is the Pod webhook answering?). |
@@ -324,7 +327,8 @@ marked not verified.
 
 ### JSON output of explain
 
-`-o json` prints one object, for scripts and for assistants (the MCP server, [0008](design/0008-assistants.md)).
+`-o json` prints one object, for scripts and for assistants: `inkwallctl mcp` serves the same answers
+to an AI assistant ([Using Inkwall from an AI assistant](mcp.md)).
 As for `inkwallctl status`, its fields are only ever added to, never renamed or removed.
 
 `explain policy`:

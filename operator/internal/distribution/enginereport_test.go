@@ -18,7 +18,8 @@ func TestEngineReportFields(t *testing.T) {
 	e := Engine{
 		ID: "e1", ServiceAccount: "traefik/traefik", PodNamespace: "traefik", PodName: "traefik-1", NodeName: "n1",
 		EngineVersion: "v0.5.0", Applied: 7, Rejected: 8, RejectError: "bad", TrustedKeys: []string{"k1"},
-		Replica: "inkwall-operator-a", ConnectedAt: time.Unix(1700000000, 0).UTC(),
+		ProbeReceipts: []string{"0123456789abcdef0123456789abcdef"},
+		Replica:       "inkwall-operator-a", ConnectedAt: time.Unix(1700000000, 0).UTC(),
 	}
 	if n := reflect.TypeFor[Engine]().NumField() - 1; n != reflect.TypeFor[enginereport.Engine]().NumField() {
 		t.Fatalf("Engine has %d exported fields, enginereport.Engine %d: keep them the same", n, reflect.TypeFor[enginereport.Engine]().NumField())

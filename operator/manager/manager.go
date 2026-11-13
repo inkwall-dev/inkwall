@@ -421,7 +421,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	if err := (&policystatus.Watcher{Client: mgr.GetClient(), Recorder: mgr.GetEventRecorder("inkwall-operator")}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
-	if err := (&proxydiscovery.Reconciler{Client: mgr.GetClient(), GatewayClasses: gatewayClasses, Kinds: kinds, Disabled: denied}).SetupWithManager(mgr); err != nil {
+	if err := (&proxydiscovery.Reconciler{Client: mgr.GetClient(), GatewayClasses: gatewayClasses, Kinds: kinds, Disabled: denied, Recorder: mgr.GetEventRecorder("inkwall-operator")}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
 	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gateways, gatewayClasses, envoyProxies, extensionPolicies, trafficPolicies, envoyFilters, virtualServices, istioGateways} {

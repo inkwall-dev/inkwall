@@ -146,6 +146,9 @@ Engine metrics carry `adapter` where it says so (`proxy`, `forwardauth`, `httpch
 | `inkwall_rule_matches_total` | counter | `adapter`, `rule_id`, `action` | Rules that matched, score-only ones included, by the verdict's action. At most 2,000 rule IDs, then `rule_id="other"`. |
 | `inkwall_policy_requests_total` | counter | `adapter`, `policy`, `action`, `reason` | Opt-in (`--policy-metrics`, `InkwallConfig.spec.engine.policyMetrics`): requests by policy, as the security event names it; `none` without one (a request no policy covers, or standalone mode), `other` past `--policy-metrics-max` policies (default 500). |
 | `inkwall_adapter_errors_total` | counter | `adapter`, `kind` | Requests refused without inspection: `invalid_request` (one the adapter can't read), `protocol` (an ext_proc stream or SPOE connection that breaks the protocol). |
+| `inkwall_spoe_response_states_total` | counter | `outcome` | Requests the SPOE agent kept for their responses (`--inspect-responses`): `kept`, `full` (refused, the table full: the request got the failure mode), `answered`, `expired` (at `--response-ttl`), and responses that `miss`ed their request. |
+| `inkwall_spoe_response_states` | gauge | | Requests the SPOE agent holds for their responses now. |
+| `inkwall_spoe_response_state_bytes` | gauge | | Estimated memory of those requests, bounded by `--max-pending-response-bytes`. |
 | `inkwall_websocket_connections` | gauge | `adapter` | WebSockets the engine's proxy holds open. |
 | `inkwall_websocket_messages_total` | counter | `adapter`, `action` | WebSocket messages inspected (`--websocket-messages`). |
 | `inkwall_websocket_violations_total` | counter | `adapter`, `code` | WebSocket messages refused or breaking the protocol, by close code (1002, 1003, 1007, 1009). |

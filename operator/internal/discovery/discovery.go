@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -20,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -31,11 +33,13 @@ import (
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/crdwatch"
+	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 )
 
 // The discovery controller reads the classes and writes the InkwallConfig's
-// status.
+// status, and records Events on it.
 //
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingressclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gatewayclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=waf.inkwall.dev,resources=inkwallconfigs,verbs=get;list;watch
@@ -69,6 +73,10 @@ type Reconciler struct {
 	// Disabled are the integrations the operator may not wire, by name,
 	// and why: their proxies are Unsupported.
 	Disabled map[string]string
+	// Recorder records an Event on the InkwallConfig when its
+	// EngineConfigured condition changes, but for the first True; nil:
+	// none.
+	Recorder events.EventRecorder
 }
 
 var request = reconcile.Request{NamespacedName: types.NamespacedName{Name: "default"}}
@@ -119,12 +127,26 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	}
 	proxies := Disable(Proxies(ics, gcs, r.Kinds), r.Disabled)
 
+	var (
+		cfg    wafv1alpha1.InkwallConfig
+		notify *metav1.Condition
+	)
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		var cfg wafv1alpha1.InkwallConfig
+		notify = nil
 		if err := r.Client.Get(ctx, request.NamespacedName, &cfg); err != nil {
 			return client.IgnoreNotFound(err)
 		}
 		changed := meta.SetStatusCondition(&cfg.Status.Conditions, integrationsConfigured(&cfg))
+		// The engine as the Pod webhook and the wirings inject it (#536).
+		engine := injection.EngineConfiguredCondition(cfg.Spec.Engine, cfg.Generation)
+		prev := meta.FindStatusCondition(cfg.Status.Conditions, engine.Type)
+		if prev == nil && engine.Status == metav1.ConditionFalse ||
+			prev != nil && (prev.Status != engine.Status || prev.Reason != engine.Reason || prev.Message != engine.Message) {
+			notify = &engine
+		}
+		if meta.SetStatusCondition(&cfg.Status.Conditions, engine) {
+			changed = true
+		}
 		if !apiequality.Semantic.DeepEqual(cfg.Status.Proxies, proxies) {
 			cfg.Status.Proxies, changed = proxies, true
 		}
@@ -133,6 +155,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		}
 		return r.Client.Status().Update(ctx, &cfg)
 	})
+	if err == nil && notify != nil && r.Recorder != nil {
+		kind := corev1.EventTypeNormal
+		if notify.Status != metav1.ConditionTrue {
+			kind = corev1.EventTypeWarning
+		}
+		r.Recorder.Eventf(&cfg, nil, kind, notify.Reason, "InjectEngine", "%s", notify.Message)
+	}
 	return reconcile.Result{}, err
 }
 
