@@ -75,6 +75,15 @@ func testBundleChunks(ctx context.Context, t *testing.T, c client.Client) {
 			t.Fatal(err)
 		}
 	}
+	// Small again even if a check fails midway: a bundle left this large
+	// would fail the later subtests with BundleTooLarge (#581, as #304).
+	t.Cleanup(func() {
+		for _, o := range objs[1:] {
+			if err := c.Delete(ctx, o); err != nil && !apierrors.IsNotFound(err) {
+				t.Errorf("delete %s: %v", client.ObjectKeyFromObject(o), err)
+			}
+		}
+	})
 
 	var version uint64
 	eventually(t, "the bundle published in chunks", func() string {
