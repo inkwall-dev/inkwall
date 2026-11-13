@@ -2,7 +2,7 @@ module github.com/inkwall-dev/inkwall/test/crs
 
 go 1.27.0
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 replace github.com/inkwall-dev/inkwall => ../..
 
