@@ -68,6 +68,15 @@ What changes by itself:
   from `MEMORY_LIMIT`, which still wins; `GOMEMLIMIT` set by hand still wins over both. The
   `Go memory limit set` log line says where the limit came from
   ([memory limit](standalone-proxy.md#memory-limit)).
+- **An older engine pinned in `InkwallConfig.spec.engine.image` starts.** It used to be injected
+  with every `spec.engine` setting's flag, and an engine before 0.5.0 exits on `--log-level`,
+  `--policy-metrics`, `--json-denials` or `--trusted-hops`, so its pod never became ready. The
+  operator now reads the engine's release from the image tag and leaves out the flags it doesn't
+  know; an image whose tag isn't a release (`latest`, a digest alone) gets only the flags every
+  release knows. The new `EngineConfigured` condition on the InkwallConfig, and a Warning Event,
+  name the settings left out: `kubectl get inkwallconfig default -o
+  jsonpath='{.status.conditions[?(@.type=="EngineConfigured")].message}'`. Pin a custom build with
+  its version in the tag (`:0.6.0@sha256:...`) to keep every setting.
 
 ## From 0.4.x to 0.5.0
 
