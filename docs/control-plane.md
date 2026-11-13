@@ -170,8 +170,9 @@ The leader holds one **primary** connection. Over it the operator sends:
 
 - **Hello:** the replica's pod name, the operator and Kubernetes versions, the mode, the
   `kube-system` namespace [UID](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids), and the last [policy snapshot](glossary.md#policy-snapshot) applied.
-- **Cluster state:** every `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet` and `InkwallConfig`,
-  each with its name, namespace, labels, generation, spec (JSON) and status conditions. Also, for
+- **Cluster state:** every `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet`, `WAFIPList` and
+  `InkwallConfig`, each with its name, namespace, labels, generation, spec (JSON) and status
+  conditions (a `WAFIPList` has none). Also, for
   each integration ([Traefik](https://doc.traefik.io/traefik/) and
   [Envoy Gateway](https://gateway.envoyproxy.io/)), its controller names, the number of its
   running proxy pods and how many have the engine, and why it's disabled if the operator may not
@@ -246,9 +247,10 @@ kubectl patch inkwallconfig default --type merge -p '{"spec":{"mode":"Managed"}}
 
 The leader applies each policy snapshot all or nothing. It first does a [server-side dry run](https://kubernetes.io/docs/reference/using-api/api-concepts/#dry-run) of
 every object, so the CRD schema and the [validating webhook](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/) check each one. One refused object
-refuses the whole snapshot, and nothing changes. Then it writes the `WAFPolicy`, `WAFRuleSet` and
-`ClusterWAFRuleSet` objects labelled `inkwall.dev/source: saas`, deletes the labelled objects the
-snapshot no longer has, and acknowledges it. The bundle builder signs them with the cluster's key
+refuses the whole snapshot, and nothing changes. Then it writes the `WAFPolicy`, `WAFRuleSet`,
+`ClusterWAFRuleSet` and `WAFIPList` objects labelled `inkwall.dev/source: saas`, rule sets and IP
+lists before the policies that use them, deletes the labelled objects the snapshot no longer has,
+and acknowledges it. The bundle builder signs them with the cluster's key
 like any other policy, and their `Enforced` condition goes back to the control plane.
 
 - While the cluster is in Managed mode, the validating webhook refuses anyone but the operator
@@ -257,10 +259,13 @@ like any other policy, and their `Enforced` condition goes back to the control p
 - Your own unlabelled objects stay yours. The operator never overwrites one: a snapshot with an
   object of the same name is refused.
 - Rule sets from the control plane carry their rules inline: `configMapRef` is refused.
+- The IP lists a policy denies or allows (`spec.ipLists`) come in the same snapshot, in the
+  policy's namespace, and the webhook checks their addresses as for any `WAFIPList`. Operators
+  before 0.6.0 refuse a snapshot with a `WAFIPList`.
 - To list the control plane's objects:
 
   ```sh
-  kubectl get wafpolicy,wafruleset,clusterwafruleset -A -l inkwall.dev/source=saas
+  kubectl get wafpolicy,wafruleset,clusterwafruleset,wafiplist -A -l inkwall.dev/source=saas
   ```
 
 ## Disconnecting

@@ -2,9 +2,11 @@
 # Copyright 2026 The Inkwall Authors
 # SPDX-License-Identifier: Apache-2.0
 
-# Builds the engine image, loads it into the kind cluster (make kind-cluster
-# creates it) and deploys the demo app twice: behind the engine's reverse
-# proxy, and through Traefik with the engine as a forward-auth sidecar.
+# Builds the engine image (or, with PULL_IMAGES=1, pulls the published one:
+# make IMAGES=ghcr:<version>), loads it into the kind cluster (make
+# kind-cluster creates it) and deploys the demo app twice: behind the
+# engine's reverse proxy, and through Traefik with the engine as a
+# forward-auth sidecar.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -25,13 +27,20 @@ if ! docker port "$CLUSTER-control-plane" | grep '^30080/tcp' >/dev/null; then
   exit 1
 fi
 
-docker build --target engine -t "$IMAGE" .
+# PULL_IMAGES=1: a published image (#544); building this checkout under
+# its name would shadow it.
+if [[ ${PULL_IMAGES:-} == 1 ]]; then
+  docker pull -q "$IMAGE" >/dev/null
+else
+  docker build --target engine -t "$IMAGE" .
+fi
 kind load docker-image "$IMAGE" --name "$CLUSTER"
 
 KUBECTL=(kubectl --context "kind-$CLUSTER")
 existed=false
 "${KUBECTL[@]}" -n inkwall-demo get deployment/demo >/dev/null 2>&1 && existed=true
-"${KUBECTL[@]}" apply -f hack/kind/demo.yaml
+# The demo runs IMAGE, loaded above (demo.yaml names the default).
+sed "s|image: inkwall-engine:dev$|image: $IMAGE|" hack/kind/demo.yaml | "${KUBECTL[@]}" apply -f -
 # Pick up a rebuilt image with the same tag.
 if $existed; then
   "${KUBECTL[@]}" -n inkwall-demo rollout restart deployment/demo
