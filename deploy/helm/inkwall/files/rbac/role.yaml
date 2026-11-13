@@ -102,6 +102,7 @@ rules:
   - waf.inkwall.dev
   resources:
   - clusterwafrulesets
+  - wafiplists
   - wafrulesets
   verbs:
   - create
@@ -125,7 +126,6 @@ rules:
   - waf.inkwall.dev
   resources:
   - inkwallconfigs
-  - wafiplists
   verbs:
   - get
   - list

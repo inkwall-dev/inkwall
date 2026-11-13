@@ -18,10 +18,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/operator/test/testenv"
 )
 
@@ -220,5 +222,86 @@ func TestDisable(t *testing.T) {
 	}
 	if !apiequality.Semantic.DeepEqual(got, want) {
 		t.Errorf("got %+v\nwant %+v", got, want)
+	}
+}
+
+// EngineConfigured (#536): an engine pinned in spec.engine.image that is too
+// old for a setting, or whose tag isn't a release, is injected without it;
+// the InkwallConfig says which, with a Warning Event, and True again once
+// every setting applies.
+func TestEngineConfigured(t *testing.T) {
+	testenv.Skip(t, env)
+	ctx := context.Background()
+	s := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(s)
+	_ = wafv1alpha1.AddToScheme(s)
+	c, err := client.New(env.Config, client.Options{Scheme: s})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := events.NewFakeRecorder(10)
+	r := &Reconciler{Client: c, Recorder: recorder}
+	cfg := &wafv1alpha1.InkwallConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"},
+		Spec: wafv1alpha1.InkwallConfigSpec{Engine: wafv1alpha1.EngineSpec{
+			Image: "ghcr.io/inkwall-dev/inkwall-engine:0.4.1", JSONDenials: true, LogLevel: wafv1alpha1.LogLevelDebug}}}
+	if err := c.Create(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	testenv.DeleteOnCleanup(t, c, cfg)
+	condition := func() *metav1.Condition {
+		t.Helper()
+		if _, err := r.Reconcile(ctx, reconcile.Request{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Get(ctx, client.ObjectKeyFromObject(cfg), cfg); err != nil {
+			t.Fatal(err)
+		}
+		return meta.FindStatusCondition(cfg.Status.Conditions, wafv1alpha1.ConditionEngineConfigured)
+	}
+	event := func() string {
+		t.Helper()
+		select {
+		case e := <-recorder.Events:
+			return e
+		default:
+			return ""
+		}
+	}
+	update := func(e wafv1alpha1.EngineSpec) {
+		t.Helper()
+		cfg.Spec.Engine = e
+		if err := c.Update(ctx, cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := condition(); got == nil || got.Status != metav1.ConditionFalse || got.Reason != injection.ReasonEngineTooOld ||
+		!strings.Contains(got.Message, "spec.engine.logLevel, spec.engine.jsonDenials") || !strings.Contains(got.Message, "0.4.1") {
+		t.Errorf("EngineConfigured with a 0.4.1 engine: %+v, want False EngineTooOld naming the settings", got)
+	}
+	if e := event(); !strings.HasPrefix(e, "Warning EngineTooOld") || !strings.Contains(e, "spec.engine.jsonDenials") {
+		t.Errorf("event %q, want a Warning EngineTooOld naming spec.engine.jsonDenials", e)
+	}
+	// Unchanged: no second Event.
+	condition()
+	if e := event(); e != "" {
+		t.Errorf("an unchanged condition recorded %q", e)
+	}
+
+	update(wafv1alpha1.EngineSpec{Image: "registry.local:5000/inkwall-engine:custom", PolicyMetrics: true})
+	if got := condition(); got == nil || got.Status != metav1.ConditionFalse || got.Reason != injection.ReasonEngineVersionUnknown ||
+		!strings.Contains(got.Message, "spec.engine.policyMetrics") {
+		t.Errorf("EngineConfigured with a custom tag: %+v, want False EngineVersionUnknown", got)
+	}
+	if e := event(); !strings.HasPrefix(e, "Warning EngineVersionUnknown") {
+		t.Errorf("event %q, want a Warning EngineVersionUnknown", e)
+	}
+
+	update(wafv1alpha1.EngineSpec{Image: "ghcr.io/inkwall-dev/inkwall-engine:0.5.0", PolicyMetrics: true})
+	if got := condition(); got == nil || got.Status != metav1.ConditionTrue || got.Reason != injection.ReasonEngineConfigured {
+		t.Errorf("EngineConfigured with a 0.5.0 engine: %+v, want True", got)
+	}
+	if e := event(); !strings.HasPrefix(e, "Normal Configured") {
+		t.Errorf("event %q, want a Normal Configured", e)
 	}
 }

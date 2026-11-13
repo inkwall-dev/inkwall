@@ -42,6 +42,10 @@ func stateEnv(t *testing.T) *env {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "checkout", Generation: 3, Labels: map[string]string{"team": "payments"}},
 		Spec:       wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock},
 	}
+	ipList := &wafv1alpha1.WAFIPList{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "scanners", Labels: map[string]string{"team": "security"}},
+		Spec:       wafv1alpha1.WAFIPListSpec{Entries: []wafv1alpha1.IPListEntry{{CIDR: "203.0.113.0/24", Description: "a scanner"}}},
+	}
 	traefik := map[string]string{"app.kubernetes.io/name": "traefik"}
 	withEngine := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "traefik", Name: "traefik-a", Labels: traefik},
@@ -72,7 +76,7 @@ func stateEnv(t *testing.T) *env {
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "inkwall-engines-op-0", Labels: map[string]string{distribution.EnginesLabel: "true"}},
 		Data:       map[string]string{"engines.json": string(engines), "updatedAt": time.Now().UTC().Format(time.RFC3339Nano)},
 	}
-	for _, o := range []client.Object{policy, withEngine, without, pending, envoy, report} {
+	for _, o := range []client.Object{policy, ipList, withEngine, without, pending, envoy, report} {
 		if err := e.client.Create(ctx, o); err != nil {
 			t.Fatal(err)
 		}
@@ -108,15 +112,24 @@ func TestClusterStateAfterWelcome(t *testing.T) {
 		t.Error("no time")
 	}
 	var kinds []string
-	var policy *controlplanev1.Object
+	var policy, ipList *controlplanev1.Object
 	for _, o := range st.GetObjects() {
 		kinds = append(kinds, o.GetKind()+" "+o.GetNamespace()+"/"+o.GetName())
-		if o.GetKind() == "WAFPolicy" {
+		switch o.GetKind() {
+		case "WAFPolicy":
 			policy = o
+		case "WAFIPList":
+			ipList = o
 		}
 	}
-	if want := []string{"InkwallConfig /default", "WAFPolicy shop/checkout"}; !slices.Equal(kinds, want) {
+	if want := []string{"InkwallConfig /default", "WAFIPList shop/scanners", "WAFPolicy shop/checkout"}; !slices.Equal(kinds, want) {
 		t.Fatalf("objects = %v, want %v", kinds, want)
+	}
+	// The IP lists too (#577), so a control plane can show and mirror them.
+	var ipSpec wafv1alpha1.WAFIPListSpec
+	if err := json.Unmarshal(ipList.GetSpec(), &ipSpec); err != nil || len(ipSpec.Entries) != 1 || ipSpec.Entries[0].CIDR != "203.0.113.0/24" ||
+		ipList.GetLabels()["team"] != "security" || ipList.GetApiVersion() != "waf.inkwall.dev/v1alpha1" {
+		t.Errorf("IP list = %v (%v)", ipList, err)
 	}
 	if policy.GetApiVersion() != "waf.inkwall.dev/v1alpha1" || policy.GetGeneration() != 3 || policy.GetLabels()["team"] != "payments" {
 		t.Errorf("policy = %v", policy)
