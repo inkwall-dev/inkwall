@@ -774,10 +774,10 @@ func (x *Welcome) GetAcceptRequestStats() bool {
 }
 
 // Object is a Kubernetes object in Inkwall's API (waf.inkwall.dev):
-// WAFPolicy, WAFRuleSet, ClusterWAFRuleSet or InkwallConfig. Carried as the
-// object's JSON, so the contract doesn't repeat the CRD schemas and new
-// fields need no change here; the CRD schema and the validating webhook
-// check it where it is written.
+// WAFPolicy, WAFRuleSet, ClusterWAFRuleSet, WAFIPList or InkwallConfig.
+// Carried as the object's JSON, so the contract doesn't repeat the CRD
+// schemas and new fields need no change here; the CRD schema and the
+// validating webhook check it where it is written.
 type Object struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// e.g. "waf.inkwall.dev/v1alpha1" and "WAFPolicy".
@@ -1529,17 +1529,20 @@ func (x *Heartbeat) GetBufferedEvents() uint64 {
 // The cluster's InkwallConfig decides its mode: a cluster that isn't in
 // Managed mode answers PolicyNack and writes nothing.
 //
-// Only WAFPolicy, WAFRuleSet and ClusterWAFRuleSet are accepted: any other
-// kind (InkwallConfig included) refuses the snapshot. The operator sets the
-// inkwall.dev/source label itself; a snapshot's labels can't change it.
+// Only WAFPolicy, WAFRuleSet, ClusterWAFRuleSet and WAFIPList are
+// accepted: any other kind (InkwallConfig included) refuses the snapshot.
+// WAFIPList since operator 0.6.0: an older operator refuses it as any other
+// kind. The operator sets the inkwall.dev/source label itself; a snapshot's
+// labels can't change it.
 type PolicySnapshot struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Increases with every snapshot for the cluster.
 	Version uint64 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
-	// WAFPolicy, WAFRuleSet and ClusterWAFRuleSet objects. Rule sets carry
-	// their rules inline (source.seclang or source.builtin): the operator
-	// refuses a configMapRef, which would point at a ConfigMap the control
-	// plane can't create, with a PolicyNack naming the object.
+	// WAFPolicy, WAFRuleSet, ClusterWAFRuleSet and WAFIPList objects (a
+	// WAFIPList in the namespace of the policies that name it). Rule sets
+	// carry their rules inline (source.seclang or source.builtin): the
+	// operator refuses a configMapRef, which would point at a ConfigMap the
+	// control plane can't create, with a PolicyNack naming the object.
 	Objects       []*Object `protobuf:"bytes,2,rep,name=objects,proto3" json:"objects,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

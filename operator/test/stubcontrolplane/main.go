@@ -11,8 +11,8 @@
 // policy acks and nacks, request counts per policy, and a summary of the
 // newest ClusterState), for the
 // test's checks. POST /snapshot sends a PolicySnapshot (Managed mode): the
-// body is a YAML or JSON list of WAFPolicy, WAFRuleSet and
-// ClusterWAFRuleSet objects ([] for none), and ?version=N its version
+// body is a YAML or JSON list of WAFPolicy, WAFRuleSet, ClusterWAFRuleSet
+// and WAFIPList objects ([] for none), and ?version=N its version
 // (default: one more than the last).
 package main
 

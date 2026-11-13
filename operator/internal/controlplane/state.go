@@ -33,14 +33,14 @@ import (
 // The leader reports every Inkwall object to the control plane (and
 // writes only the control plane's own, in Managed mode: snapshot.go).
 //
-// +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies;wafrulesets;clusterwafrulesets;inkwallconfigs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies;wafrulesets;clusterwafrulesets;wafiplists;inkwallconfigs,verbs=get;list;watch
 
 // maxState bounds a ClusterState: the contract's message limit, less the
 // ConnectRequest around it (its tag and length).
 const maxState = maxMessage - 16
 
 // clusterState is a full snapshot of the cluster (0004 §4.9): every
-// Inkwall object with its conditions, the proxies, the engines and the
+// Inkwall object with its conditions (a WAFIPList has none), the proxies, the engines and the
 // bundle being served.
 func (c *Connector) clusterState(ctx context.Context) (*controlplanev1.ClusterState, error) {
 	st := &controlplanev1.ClusterState{Time: timestamppb.Now()}
@@ -125,6 +125,16 @@ func (c *Connector) objects(ctx context.Context) ([]*controlplanev1.Object, erro
 	for i := range clusterRuleSets.Items {
 		r := &clusterRuleSets.Items[i]
 		if err := add("ClusterWAFRuleSet", r, r.Spec, r.Status.Conditions); err != nil {
+			return nil, err
+		}
+	}
+	var ipLists wafv1alpha1.WAFIPListList
+	if err := c.Client.List(ctx, &ipLists); err != nil {
+		return nil, fmt.Errorf("WAFIPLists: %w", err)
+	}
+	for i := range ipLists.Items {
+		l := &ipLists.Items[i]
+		if err := add("WAFIPList", l, l.Spec, nil); err != nil {
 			return nil, err
 		}
 	}

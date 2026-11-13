@@ -1046,8 +1046,9 @@ leader only, and is idle in Standalone mode (the default).
 `operator/test/fakecontrolplane`), never a real one:
 
 - enroll, connect, heartbeats, state sync, events;
-- a Managed round trip: a policy sent through the stub's `POST /snapshot` is written, blocks
-  through Traefik, is acknowledged and comes back `Enforced`. `kubectl edit`, `patch`, label
+- a Managed round trip: a policy and the IP list it denies, sent through the stub's
+  `POST /snapshot`, are written, the policy blocks through Traefik, is acknowledged and comes back
+  `Enforced`, and the IP list is in the cluster state. `kubectl edit`, `patch`, label
   removal and delete are refused. A bad snapshot changes nothing; an empty one prunes;
 - a used token, refused.
 
@@ -1055,6 +1056,8 @@ leader only, and is idle in Standalone mode (the default).
 
 - The leader sends `ClusterState` after `Welcome`, on any change (checked every 5 s), on `Resync`,
   and every 5 min. It only reads the cluster to do so.
+- `ClusterState` carries every `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet`, `WAFIPList` (since
+  0.6.0, #577; it has no conditions) and `InkwallConfig`, with its spec.
 - The engines go last in `ClusterState`, by engine ID, as many as fit in the contract's 16 MiB.
   The engines left out are counted by `inkwall_operator_state_engines_left_out`.
 - Every replica forwards its engines' security events on its own events stream, while the control
@@ -1078,7 +1081,9 @@ leader only, and is idle in Standalone mode (the default).
 1. **Refuse** (`PolicyNack`, nothing written):
    - a cluster not in Managed mode;
    - version 0, or a version older than the last applied;
-   - any kind but `WAFPolicy`, `WAFRuleSet` and `ClusterWAFRuleSet`;
+   - any kind but `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet` and `WAFIPList` (since 0.6.0,
+     #577: the IP lists a policy's `spec.ipLists` names come with it; an older operator refuses a
+     snapshot with a `WAFIPList` as any other kind);
    - a rule set with `configMapRef`;
    - an object without the namespace its kind needs, or listed twice;
    - an existing object the operator didn't write (no source label): it never takes one over.
@@ -1087,7 +1092,7 @@ leader only, and is idle in Standalone mode (the default).
    than dropped). One refused object refuses the snapshot. A dry run that can't be done (the API
    server or the webhook is unreachable) isn't a refusal: the stream is dropped and the snapshot
    comes again.
-3. **Write** the objects, rule sets first, labelled `inkwall.dev/source: saas`. The operator sets
+3. **Write** the objects, rule sets and IP lists first, labelled `inkwall.dev/source: saas`. The operator sets
    the label itself and ignores the snapshot's own value.
 4. **Prune** the labelled objects the snapshot no longer has, policies first.
 5. **Record** the version on the identity Secret (`waf.inkwall.dev/policy-version`, sent in
@@ -1217,7 +1222,7 @@ holds what its wiring writes, and its proxy's own kinds.
 |---|---|---|
 | `waf.inkwall.dev/*` | read; update status | Own CRDs |
 | `wafpolicies` | update, patch | The `waf.inkwall.dev/unwire` finalizer ([§5](#5-uninstall-and-disable)) |
-| `wafpolicies`, `wafrulesets`, `clusterwafrulesets` | create, update, delete | Managed mode ([§4.9](#49-upstream-sync-leader-only)); the webhook keeps others off them |
+| `wafpolicies`, `wafrulesets`, `clusterwafrulesets`, `wafiplists` | create, update, delete | Managed mode ([§4.9](#49-upstream-sync-leader-only)); the webhook keeps others off them |
 | `ingressclasses`, `ingresses`, `pods` | read | Resolution, injection checks, discovery |
 | `gatewayclasses` (gateway.networking.k8s.io) | read | Discovery |
 | `ingressroutes` (traefik.io) | read | IngressRoute targets ([§4.5](#45-resolver)) |
