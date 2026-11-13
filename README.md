@@ -151,12 +151,13 @@ proxies, the policies that aren't `Ready`, and the engines, with what to do
 
 **Responses.** Add `responses: {inspect: true}` to a policy to inspect what the app answers too,
 for data leaks (SQL errors, stack traces, directory listings: the Core Rule Set's `RESPONSE-95x`
-rules). In `Block` mode a response that leaks is replaced with 403. Through Envoy Gateway and
-Istio: Traefik's ForwardAuth and HAProxy never send responses, so on their routes such a policy is
-`Programmed=False` (`ResponsesNotInspected`) while its requests are still inspected
+rules). In `Block` mode a response that leaks is replaced with 403. Through Envoy Gateway, Istio
+and, since 0.6.0, the HAProxy Kubernetes Ingress Controller: Traefik's ForwardAuth never sends
+responses, so on its routes such a policy is `Programmed=False` (`ResponsesNotInspected`) while
+its requests are still inspected
 ([design](docs/design/0006-adapter-protocols.md#response-inspection-v040)). Traefik will keep it
-that way: to have responses inspected behind Traefik, serve those routes through Envoy Gateway or
-Istio, or run the [standalone engine](docs/standalone-proxy.md) in front of the app yourself
+that way: to have responses inspected behind Traefik, serve those routes through Envoy Gateway,
+Istio or HAProxy, or run the [standalone engine](docs/standalone-proxy.md) in front of the app yourself
 ([why](docs/design/0006-adapter-protocols.md#streamed-responses-the-reverse-proxy-and-traefik-design-323)).
 Streamed responses (Server-Sent Events, gRPC) have only their status and headers inspected unless
 the policy adds `streams: Inspect`: then each event, or message, is inspected on its own, and in

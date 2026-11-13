@@ -105,7 +105,9 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 	s := injection.Sidecar{Image: p.Image, PullPolicy: p.PullPolicy, PullSecrets: p.PullSecrets, OperatorAddr: p.OperatorAddr, BundleSecret: p.BundleSecret, Args: integ.Adapter}
 	haproxy := integ.Name == integrations.HAProxy.Name
 	if haproxy {
-		s.SocketDir = integrations.HAProxySocketDir
+		// HAProxy sends the engine the responses of the backends whose
+		// policies inspect them (spoe.conf's inkwall-responses scope).
+		s.SocketDir, s.ResponseMessages = integrations.HAProxySocketDir, true
 	}
 	if integ.SocketContainer != "" {
 		s.SocketDir, s.SocketContainer = integrations.EnvoySocketDir, integ.SocketContainer

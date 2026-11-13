@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
 	"github.com/inkwall-dev/inkwall/operator/integrations"
@@ -90,5 +91,55 @@ func TestHAProxyFiles(t *testing.T) {
 		if !strings.Contains(f[HAProxySPOEKey], want) {
 			t.Errorf("spoe.conf lacks %q", want)
 		}
+	}
+}
+
+// spoe.conf has two scopes: inkwall, whose request message tells the engine
+// no response follows (responses=bool(0)), and inkwall-responses, for the
+// backends whose policies inspect responses, whose request message says
+// one does and whose group sends it, with the response variables
+// registered. The engine of an HAProxy pod keeps requests for their
+// responses (--response-messages); other proxies' engines don't take the
+// flag.
+func TestHAProxyResponseFiles(t *testing.T) {
+	conf := HAProxyFiles()[HAProxySPOEKey]
+	plain, responses, ok := strings.Cut(conf, "[inkwall-responses]")
+	if !ok {
+		t.Fatalf("no inkwall-responses scope:\n%s", conf)
+	}
+	for _, want := range []string{"[inkwall]", "spoe-agent inkwall\n", "responses=bool(0)"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("the inkwall scope lacks %q:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(plain, "inkwall-response\n") || strings.Contains(plain, "groups") {
+		t.Errorf("the inkwall scope sends responses:\n%s", plain)
+	}
+	for _, want := range []string{
+		"spoe-agent inkwall-responses", "groups inkwall-response", "option var-prefix inkwall", "responses=bool(1)",
+		"use-backend inkwall-engine", "event on-backend-http-request",
+		"args status=status headers=res.hdrs_bin body=res.body key=var(txn.inkwall.responses) failure=var(txn.inkwall.response_failure)",
+		"spoe-group inkwall-response", " responses response_failure response_action response_status",
+	} {
+		if !strings.Contains(responses, want) {
+			t.Errorf("the inkwall-responses scope lacks %q:\n%s", want, responses)
+		}
+	}
+
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "hap"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: HAProxyContainer}}}}
+	Inject(pod, Sidecar{Image: "engine", Args: integrations.HAProxy.Adapter, SocketDir: integrations.HAProxySocketDir, ResponseMessages: true})
+	if !slices.Contains(pod.Spec.InitContainers[0].Args, ResponseMessagesFlag) {
+		t.Errorf("HAProxy's engine args %v", pod.Spec.InitContainers[0].Args)
+	}
+	if ok, why := HAProxyResponsesReady(pod); !ok || why != "" {
+		t.Errorf("ready: %v %q", ok, why)
+	}
+	other := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "traefik"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "traefik"}}}}
+	Inject(other, Sidecar{Image: "engine", Args: []string{"forward-auth"}})
+	if slices.Contains(other.Spec.InitContainers[0].Args, ResponseMessagesFlag) {
+		t.Errorf("Traefik's engine args %v", other.Spec.InitContainers[0].Args)
+	}
+	if ok, why := HAProxyResponsesReady(other); ok || !strings.Contains(why, ResponseMessagesFlag) {
+		t.Errorf("not ready: %v %q", ok, why)
 	}
 }

@@ -30,6 +30,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
+	engrules "github.com/inkwall-dev/inkwall/pkg/rules"
 )
 
 // The HAProxy Kubernetes Ingress Controller's wiring (0002 §6.4): each
@@ -103,6 +104,8 @@ func (h *HAProxy) Watch(c controller.Controller, cache cache.Cache, eh handler.E
 type haproxySettings struct {
 	failOpen bool
 	body     bool
+	// responses: a policy inspects responses.
+	responses bool
 	// maxBody is the largest body.maxBytes of the policies that inspect
 	// bodies (the engine's 64 KiB for one that sets none).
 	maxBody int64
@@ -126,6 +129,9 @@ func haproxySettingsOf(policies []wafv1alpha1.WAFPolicy, ing types.NamespacedNam
 			}
 			s.maxBody = max(s.maxBody, limit)
 		}
+		if p.Spec.Responses != nil && p.Spec.Responses.Inspect {
+			s.responses = true
+		}
 		mode := cmp.Or(p.Spec.FailureMode, wafv1alpha1.FailOpen)
 		if p.Spec.Mode == wafv1alpha1.PolicyBlock && p.Spec.FailureMode == "" {
 			mode = wafv1alpha1.FailClosed
@@ -140,15 +146,25 @@ func haproxySettingsOf(policies []wafv1alpha1.WAFPolicy, ing types.NamespacedNam
 // SPOE filter, and the rules on its variables: the probe's answer first
 // (Prober), then, failing closed, 503 without a verdict, a denied
 // gRPC call's answer, and a rule per status the engine denies with; the
-// request ID for the app.
-func HAProxySnippet(failOpen, body bool) string {
+// request ID for the app. With responses (a policy inspects them, and
+// every pod's engine keeps requests for them), the filter is spoe.conf's
+// inkwall-responses scope, and the response rules of
+// examples/haproxy/haproxy.cfg follow (0006 §4): the request's
+// Accept-Encoding removed, the body of a type the rules read waited for,
+// the response sent, and replaced when the engine denies it or, failing
+// closed, gives no verdict.
+func HAProxySnippet(failOpen, body, responses bool) string {
 	lines := []string{haproxySnippetBegin}
 	if body {
 		lines = append(lines, "option http-buffer-request")
 	}
 	v := func(name string) string { return "var(txn.inkwall." + name + ")" }
+	scope := "inkwall"
+	if responses {
+		scope = injection.HAProxyResponsesScope
+	}
 	lines = append(lines,
-		"filter spoe engine inkwall config "+injection.HAProxySPOEConf,
+		"filter spoe engine "+scope+" config "+injection.HAProxySPOEConf,
 		fmt.Sprintf(`http-request return status %d hdr %s "%%[%s]" if { %s -m found }`,
 			haproxyprobe.Status, strings.ToLower(haproxyprobe.Header), v("probe"), v("probe")))
 	if !failOpen {
@@ -162,8 +178,23 @@ func HAProxySnippet(failOpen, body bool) string {
 	}
 	lines = append(lines,
 		`http-request deny deny_status 403 hdr x-request-id "%[`+v("request_id")+`]" if { `+v("action")+` -m str deny }`,
-		`http-request set-header X-Request-Id "%[`+v("request_id")+`]" if { `+v("request_id")+` -m found }`,
-		haproxySnippetEnd)
+		`http-request set-header X-Request-Id "%[`+v("request_id")+`]" if { `+v("request_id")+` -m found }`)
+	if responses {
+		kept := "{ " + v("responses") + " -m found }"
+		reply := func(status int, text, cond string) string {
+			return fmt.Sprintf(`http-response return status %d content-type text/plain lf-string "%s. Request ID: %%[%s]" hdr x-request-id "%%[%s]" if %s`,
+				status, text, v("request_id"), v("request_id"), cond)
+		}
+		lines = append(lines,
+			"http-request del-header accept-encoding if "+kept,
+			"http-response wait-for-body time 2s if "+kept+" { res.hdr(content-type) -m beg -i "+strings.Join(engrules.ResponseBodyTypes, " ")+" }",
+			"http-response send-spoe-group "+injection.HAProxyResponsesScope+" "+injection.HAProxyResponseGroup+" if "+kept,
+			reply(502, "Bad Gateway", kept+" !{ "+v("response_action")+" -m found } { "+v("response_failure")+" -m str closed }"),
+			reply(502, "Bad Gateway", "{ "+v("response_status")+" -m int 502 }"),
+			reply(503, "Service Unavailable", "{ "+v("response_status")+" -m int 503 }"),
+			reply(403, "Forbidden", "{ "+v("response_action")+" -m str deny }"))
+	}
+	lines = append(lines, haproxySnippetEnd)
 	return strings.Join(lines, "\n")
 }
 
@@ -255,6 +286,22 @@ func haproxyPodProblems(pods []*corev1.Pod) []string {
 	return slices.Compact(out)
 }
 
+// haproxyResponsesNotReady are the running pods with the engine whose
+// engine doesn't keep requests for their responses, as namespace/name.
+func haproxyResponsesNotReady(pods []*corev1.Pod) []string {
+	var out []string
+	for _, pod := range pods {
+		if !injection.HasEngine(pod) {
+			continue
+		}
+		if ok, _ := injection.HAProxyResponsesReady(pod); !ok {
+			out = append(out, "pod "+pod.Namespace+"/"+pod.Name)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 // Wire implements Integration: it wires every protected Ingress of the
 // controller's class, and unwires the rest.
 func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (*Result, error) {
@@ -286,8 +333,20 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 	on := !off && len(runningPods) > 0
 	problems := haproxyPodProblems(runningPods)
 	buffer := h.buffer(ctx, runningPods)
+	notReady := haproxyResponsesNotReady(runningPods)
 
 	res := &Result{Proxy: "HAProxy", Targets: map[Target]TargetState{}, Pods: pods.Items}
+	// HAProxy sends responses once every running pod's engine keeps
+	// requests for them: a pod whose engine doesn't would never hear of
+	// them, so no Ingress gets the response rules before (0006 §4).
+	switch {
+	case !on:
+	case len(notReady) > 0:
+		res.ResponsesWhy = "HAProxy " + strings.Join(notReady, ", ") + " run an engine injected without " + injection.ResponseMessagesFlag +
+			" (before 0.6.0, or a pinned spec.engine.image older than 0.6.0): restart them, with an engine of 0.6.0 or later"
+	default:
+		res.Responses = true
+	}
 	var (
 		errs []error
 		jobs []ProbeJob
@@ -301,7 +360,7 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 		snippet := ""
 		settings := haproxySettingsOf(policies.Items, k)
 		if want {
-			snippet = HAProxySnippet(settings.failOpen, settings.body)
+			snippet = HAProxySnippet(settings.failOpen, settings.body, settings.responses && res.Responses)
 		}
 		err := annotateHAProxy(ctx, h.Client, ing, snippet)
 		if err != nil && !apierrors.IsNotFound(err) {

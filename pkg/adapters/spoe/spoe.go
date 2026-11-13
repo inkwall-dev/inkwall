@@ -95,6 +95,10 @@ const (
 	ArgBody    = "body"
 	ArgIP      = "ip"
 	ArgHTTPS   = "https"
+	// ArgResponses, optional, says whether HAProxy sends the request's
+	// response (ResponseMessageName): false for a backend without the
+	// response rules, so the agent keeps nothing for it. Unset: it may.
+	ArgResponses = "responses"
 )
 
 // Variables the agent sets, in the transaction scope.
@@ -617,7 +621,14 @@ func (s *Server) answer(ctx context.Context, ack *encoder, payload []byte, maxFr
 			return
 		}
 	}
-	req, path, err := s.toRequest(payload, maxFrame)
+	a, err := readArgs(payload)
+	var (
+		req  *request.Request
+		path string
+	)
+	if err == nil {
+		req, path, err = s.requestOf(a, payload, maxFrame)
+	}
 	if err != nil {
 		s.metrics.AdapterError(telemetry.ErrInvalidRequest)
 		id := httpadapter.NewRequestID()
@@ -628,7 +639,7 @@ func (s *Server) answer(ctx context.Context, ack *encoder, payload []byte, maxFr
 	if s.answerProbe(ack, req) {
 		return
 	}
-	v, x := s.check(ctx, req)
+	v, x := s.check(ctx, req, !a.noResponses)
 	if x != nil {
 		// Kept for the response, or, the table full, an overload.
 		v = s.keep(ctx, ack, x, req, path, v)
@@ -647,10 +658,10 @@ func (s *Server) answer(ctx context.Context, ack *encoder, payload []byte, maxFr
 }
 
 // check inspects req, and returns its exchange when its response is to be
-// inspected and it was let through.
-func (s *Server) check(ctx context.Context, req *request.Request) (pipeline.Verdict, *pipeline.Exchange) {
+// inspected (HAProxy may send it: responses) and it was let through.
+func (s *Server) check(ctx context.Context, req *request.Request, responses bool) (pipeline.Verdict, *pipeline.Exchange) {
 	ei, ok := s.pipeline.(pipeline.ExchangeInspector)
-	if s.pending == nil || !ok {
+	if s.pending == nil || !ok || !responses {
 		return s.pipeline.Check(ctx, req), nil
 	}
 	v, x := ei.CheckExchange(ctx, req)
@@ -705,6 +716,8 @@ type args struct {
 	hasBody               bool
 	ip                    netip.Addr
 	https                 bool
+	// noResponses: ArgResponses is false.
+	noResponses bool
 }
 
 // readArgs finds the agent's message in a NOTIFY payload and reads its
@@ -771,6 +784,14 @@ func readArgs(payload []byte) (args, error) {
 				default:
 					err = fmt.Errorf("argument %s: type %d, want a boolean", arg.name, v.typ)
 				}
+			case ArgResponses:
+				switch v.typ {
+				case typeBool:
+					a.noResponses = !v.b
+				case typeNull:
+				default:
+					err = fmt.Errorf("argument %s: type %d, want a boolean", arg.name, v.typ)
+				}
 			}
 			if err != nil {
 				return args{}, err
@@ -802,6 +823,13 @@ func (s *Server) toRequest(payload []byte, maxFrame uint32) (*request.Request, s
 	if err != nil {
 		return nil, "", err
 	}
+	return s.requestOf(a, payload, maxFrame)
+}
+
+// requestOf reconstructs the client's request from a's arguments, read from
+// payload.
+func (s *Server) requestOf(a args, payload []byte, maxFrame uint32) (*request.Request, string, error) {
+	var err error
 	if !httpadapter.IsToken(a.method) {
 		return nil, "", errors.New("invalid method")
 	}

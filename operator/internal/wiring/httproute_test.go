@@ -273,7 +273,7 @@ func TestProgrammedResponses(t *testing.T) {
 	}{
 		{"Envoy Gateway", pol(inspect, "api"), metav1.ConditionTrue, ReasonProgrammed, "1 HTTPRoute(s) wired to the engine in Envoy Gateway"},
 		{"Traefik", pol(inspect, "web"), metav1.ConditionFalse, ReasonResponsesNotInspected,
-			"responses.inspect is set, but Traefik can't send responses to the engine: HTTPRoute web's requests are inspected, its responses are not; target routes Envoy Gateway serves, or remove responses"},
+			"responses.inspect is set, but Traefik can't send responses to the engine: HTTPRoute web's requests are inspected, its responses are not; target routes Envoy Gateway, Istio or HAProxy serves; or remove responses"},
 		{"both", pol(inspect, "api", "web"), metav1.ConditionFalse, ReasonResponsesNotInspected, "HTTPRoute web's requests are inspected"},
 		{"Traefik, responses off", pol(&wafv1alpha1.ResponsesSpec{}, "web"), metav1.ConditionTrue, ReasonProgrammed, "1 HTTPRoute(s) wired to the engine in Traefik"},
 		{"Traefik, no responses", pol(nil, "web"), metav1.ConditionTrue, ReasonProgrammed, "1 HTTPRoute(s) wired to the engine in Traefik"},

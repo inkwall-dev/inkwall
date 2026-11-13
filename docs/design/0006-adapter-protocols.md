@@ -247,8 +247,9 @@ enforced. When such a policy is applied, the admission webhook warns that the re
 serves them: it doesn't resolve the proxy (an `Ingress` may be Traefik's or HAProxy's, an
 `HTTPRoute` Envoy Gateway's, Traefik's or Istio's), so it names none as the target's and leaves
 that to `Programmed` (#380). The same holds for any integration whose `Result` doesn't set
-`Responses`: Traefik's and HAProxy's. Envoy Gateway's and, since 0.5.0, both Istio integrations'
-do (#374): Istio's `EnvoyFilter` gives a route whose policies inspect responses
+`Responses`: Traefik's, and HAProxy's while a controller pod's engine lacks `--response-messages`
+([§4](#responses-through-spoe-370), #470; its `ResponsesWhy` then names the pods). Envoy Gateway's,
+since 0.5.0 both Istio integrations', and since 0.6.0 HAProxy's do (#374): Istio's `EnvoyFilter` gives a route whose policies inspect responses
 `response_header_mode: SEND` and `response_body_mode: BUFFERED_PARTIAL` (`STREAMED` in detect
 mode), with `allow_mode_override`, as Envoy Gateway's `EnvoyExtensionPolicy`, and raises the
 listeners' buffer limit for them; other routes keep `SKIP`. VirtualServices, always Istio's, get
@@ -513,17 +514,19 @@ Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/inkwall/issues/282)); 
 
 ### Responses through SPOE (#370)
 
-Designed in #370; built in the engine for 0.6.0 (#469). A policy's `responses` are inspected through
-HAProxy with the same rules and budgets as through ext_proc ([§2](#response-inspection-v040)) when
-HAProxy is configured to send them: by hand ([protecting HAProxy](../haproxy.md#responses)), and,
-once #470 wires it, by the operator. Until then, a policy with `responses.inspect` on a route of the
-HAProxy Kubernetes Ingress Controller stays `ResponsesNotInspected`.
+Designed in #370; built for 0.6.0 in the engine (#469) and the operator (#470). A policy's
+`responses` are inspected through HAProxy with the same rules and budgets as through ext_proc
+([§2](#response-inspection-v040)) when HAProxy is configured to send them: by hand
+([protecting HAProxy](../haproxy.md#responses)), or by the operator for the HAProxy Kubernetes
+Ingress Controller (below).
 
 - **Turning it on.** The agent keeps nothing for responses unless told HAProxy sends them:
   standalone, `--inspect-responses` (which also defines the policy's `responses`); in bundle mode,
-  `--response-messages`, for the operator to pass once it adds the rules below (#470). Without it, a
-  bundle's policy with `responses.inspect` keeps nothing on HAProxy's routes, so states the
-  configuration never asks for can't fill the table.
+  `--response-messages`, which the operator passes to the controller's pods. Without it, a bundle's
+  policy with `responses.inspect` keeps nothing on HAProxy's routes, so states the configuration
+  never asks for can't fill the table. The request message's optional argument `responses`
+  (a boolean) narrows it per backend: `false` keeps nothing, so a backend without the response
+  rules can't fill the table either.
 - **The request's answer.** For a request let through whose policy inspects responses, the answer
   also sets `txn.inkwall.responses`, a 128-bit random key the engine keeps the request's inspection
   under, and `txn.inkwall.response_failure`, `closed` or `open`: the policy's failure mode,
@@ -577,11 +580,24 @@ HAProxy Kubernetes Ingress Controller stays `ResponsesNotInspected`.
 - **Tests.** Unit tests through the agent with the Core Rule Set (block, detect, misses, the bounds,
   the TTL, Shutdown), `FuzzSPOEResponse`, and `make haproxy-e2e`: a response leaking a SQL error is
   replaced with 403 in block mode and passes, logged, in detect mode, through HAProxy 3.2.
-- **The operator** (#470) adds to the backend snippet, for the Ingresses whose policies inspect
-  responses, the group, `wait-for-body`, the `Accept-Encoding` removal and the `http-response`
-  rules of `examples/haproxy/haproxy.cfg`, passes `--response-messages` to the sidecar, and reports
-  `Result.Responses` for HAProxy. The probe covers the request filter only; a response probe would
-  prove the response rules, as a follow-up.
+- **The operator** (#470). The injected `spoe.conf` has two scopes: `inkwall`, whose request
+  message sends `responses=bool(0)`, and `inkwall-responses`, whose request message sends
+  `responses=bool(1)` and whose group `inkwall-response` sends the response. The engine of a
+  controller pod gets `--response-messages`. An Ingress whose policies inspect responses gets the
+  `inkwall-responses` filter and the response rules of `examples/haproxy/haproxy.cfg` (the
+  `Accept-Encoding` removal, `wait-for-body`, the group, the fail-closed and `http-response return`
+  rules) in its backend snippet, and the HAProxy integration reports `Result.Responses`, only once
+  every running controller pod's engine has `--response-messages`: before, no Ingress gets the
+  rules (a pod whose engine lacks the flag would keep nothing, and every response would miss), and
+  the policy is `ResponsesNotInspected` with `Result.ResponsesWhy` naming the pods to restart. A
+  pinned engine older than 0.6.0 doesn't know the flag, so it isn't injected with it, and the policy
+  stays `ResponsesNotInspected`, rather than the engine crash-looping (`--response-messages` is a
+  0.6.0 flag of `injection/version.go`, #536). `Enforced` gets no `EnginesOutdated` for it, unlike a
+  field older engines ignore (#473): an engine older than 0.6.0 on an HAProxy pod never has the
+  flag, so `Programmed` is already `False` (`ResponsesNotInspected`) and `Ready` with it, naming the
+  pod; and `spec.responses` needs only 0.4.0 on Envoy's engines, which the engine records (they
+  carry no adapter) couldn't tell apart. The probe covers the request filter only; a response
+  probe would prove the response rules, as a follow-up.
 
 **Open questions, resolved (#469):**
 
