@@ -19,6 +19,8 @@
 #   - The engine down: 503 with the fail-closed rule (fail closed); without
 #     it, requests pass (fail open).
 #   - Detect mode: an attack passes, and is logged.
+#   - Responses (--inspect-responses): a response that leaks a SQL error is
+#     replaced with 403 in block mode, and passes, logged, in detect mode.
 #
 # HAPROXY_IMAGE picks HAProxy (3.1 or later); KEEP=1 leaves the container.
 set -euo pipefail
@@ -132,12 +134,17 @@ else
   go build -o "$WORK/inkwall-engine" ./cmd/engine
 fi
 
-# The app echoes the request line and X-Request-Id.
+# The app echoes the request line and X-Request-Id; /leak answers with a
+# page that leaks a SQL error.
 cat >"$WORK/app.py" <<'PY'
 import http.server, sys
+LEAK = b'<html><body>You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax</body></html>'
 class H(http.server.BaseHTTPRequestHandler):
     def handle_one(self):
         self.rfile.read(int(self.headers.get('Content-Length') or 0))
+        if self.path.startswith('/leak'):
+            self.send_response(200); self.send_header('Content-Type', 'text/html'); self.send_header('Content-Length', str(len(LEAK))); self.end_headers(); self.wfile.write(LEAK)
+            return
         out = ('%s %s id=%s\n' % (self.command, self.path, self.headers.get('X-Request-Id'))).encode()
         self.send_response(200); self.send_header('Content-Length', str(len(out))); self.end_headers(); self.wfile.write(out)
     do_GET = do_POST = handle_one
@@ -243,6 +250,23 @@ start_haproxy 's|^$||'
 start_engine --mode detect
 eventually "detect mode: an attack passes" is 200 "$U/products?$SQLI"
 check "detect mode: the attack is logged" grep -q '"action":"log"' "$WORK/engine.log"
+check "detect mode, responses not inspected: a leaking response passes" bash -c "curl -s '$U/leak' | grep -q 'SQL syntax'"
+
+# Responses (--inspect-responses): a leaking response is replaced in block
+# mode, and logged in detect mode.
+stop_engine
+start_engine --mode block --inspect-responses
+eventually "responses, block mode: a benign response passes" is 200 "$U/products?id=42"
+check "responses, block mode: a leaking response gets 403" is 403 "$U/leak"
+check "responses, block mode: the leak doesn't reach the client" bash -c "! curl -s '$U/leak' | grep -q 'SQL syntax'"
+check "responses, block mode: the 403 carries the request ID" bash -c "curl -s -D - -o /dev/null '$U/leak' | grep -qiE '^x-request-id: [0-9a-f]{16}'"
+check "responses, block mode: the leak is logged" grep -q '"phase":"response"' "$WORK/engine.log"
+check "responses, block mode: an attack still gets 403" is 403 "$U/products?$SQLI"
+check "responses, block mode: metrics count the responses answered" bash -c "curl -s 127.0.0.1:$ADMIN_PORT/metrics | grep -qE '^inkwall_spoe_response_states_total\{outcome=\"answered\"\} [1-9]'"
+stop_engine
+start_engine --mode detect --inspect-responses
+eventually "responses, detect mode: a leaking response passes" bash -c "curl -s '$U/leak' | grep -q 'SQL syntax'"
+check "responses, detect mode: the leak is logged" bash -c "grep '\"phase\":\"response\"' '$WORK/engine.log' | grep -q '\"action\":\"log\"'"
 
 if [[ $failures != 0 ]]; then
   echo "$failures check(s) failed"
