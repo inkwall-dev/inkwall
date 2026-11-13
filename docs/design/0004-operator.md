@@ -362,6 +362,16 @@ proxy.
   - an [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir) bundle cache;
   - non-root, with a read-only root filesystem;
   - image and resources from `InkwallConfig.spec.engine`, else from `--engine-image`;
+  - the flags of the other `spec.engine` settings (`logLevel`, `policyMetrics`, `jsonDenials`,
+    `clientIP`), only those the engine's release knows (#536): an engine exits on a flag it
+    doesn't know, so an older one pinned in `spec.engine.image` would never be ready. The
+    operator's own engine (`--engine-image`) knows them all; a pinned one's release is read from
+    its tag (`:0.4.1`, `:v0.5.0-rc.1@sha256:...`), and a tag that isn't a release (`latest`, a
+    digest alone, a custom build) fails safe: only the flags every release knows. The settings
+    left out are named by the InkwallConfig's `EngineConfigured` condition (`False`,
+    `EngineTooOld` or `EngineVersionUnknown`, written by the discovery controller) and a Warning
+    Event, never dropped silently. A policy field an engine is too old for is another matter,
+    reported by the policy's `Enforced` (`EnginesOutdated`) from the version the engine reports;
   - the image pull Secrets of `--engine-image-pull-secrets` (the chart's
     `global.imagePullSecrets`, since v0.5.0), added to the pod's `imagePullSecrets`, keeping its
     own. Envoy Gateway's and Istio Gateways' pods, which get the engine through their own
