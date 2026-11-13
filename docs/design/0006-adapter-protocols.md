@@ -545,6 +545,21 @@ Traefik plugin.
 inspected: an origin-form request target (`/path?query`) and a valid Host header. Anything else,
 such as `GET http://host/path`, gets 400, because Go's HTTP client would forward a different Host.
 
+**Responses** (#323, built for 0.6.0): with `--inspect-responses`, or a bundle policy's
+`responses`, the proxy inspects responses as ext_proc does ([§2](#response-inspection-v040)), in
+`ReverseProxy.ModifyResponse`, before anything is written to the client: it reads the first
+`maxBytes` (and one byte) of a body the rules read, inspects the response, and forwards it with
+that part put back in front of the rest, or replaces it (the denial, or 502 for `onOversize:
+Deny`). Bodies the rules don't read aren't held. Held bodies are bounded: each to its limit, all
+together to `--max-held-response-bytes` (64 MiB); past it, a response gets the failure mode as an
+evaluation refused a slot (`ReasonOverload`, `Exchange.Refused`), and its share is given back when
+the response's body is closed. The CRS suite's response rules run through it
+(`TestCRSRegression`), and `FuzzProxyResponse` checks that a forwarded body arrives byte for
+byte. `BenchmarkResponses` (the proxy end to end, an upstream on the loopback, 12-thread i7-1255U
+shared with other jobs, 2026-11-13): a 16 KB HTML page 0.68 ms uninspected, 7.0 ms inspected
+(0.39 ms per KiB, as ext_proc's evaluation); a 1 KB JSON body 1.3 ms; an image, whose body isn't
+read, 0.79 ms (the kept transaction alone).
+
 **WebSocket messages** (#276): with `--websocket-messages`, the proxy wraps the connection Go's
 reverse proxy hijacks for an upgrade, so what it copies to the upstream is only what was inspected
 (`pkg/websocket` reads the frames; fuzzed). It removes `Sec-WebSocket-Extensions` from the handshake,

@@ -59,6 +59,11 @@ What's new:
   until the engine runs with the flag. See [protecting HAProxy](haproxy.md#responses). Through the
   HAProxy Kubernetes Ingress Controller a policy with `responses.inspect` is still
   `ResponsesNotInspected` (#470).
+- **The standalone proxy inspects responses** (#323). `inkwall-engine proxy --inspect-responses`
+  inspects what the upstream answers, as ext_proc does: a response that leaks is replaced in block
+  mode and logged in detect mode; in bundle mode, a policy's `responses` decide. It holds at most
+  `--max-held-response-bytes` (64 MiB) of bodies at once; past it, a response gets the failure
+  mode. See [Responses](standalone-proxy.md#responses). Without the flag nothing changes.
 - **A control plane can deliver and see `WAFIPList`s** (#577). In Managed mode, a policy snapshot
   may carry the IP lists its policies name, written and pruned like the other kinds and labelled
   `inkwall.dev/source: saas`; the cluster state lists every `WAFIPList`

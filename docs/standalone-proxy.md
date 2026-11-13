@@ -8,6 +8,7 @@ the operator.
 - [Prerequisites](#prerequisites)
 - [Run the proxy](#run-the-proxy)
 - [Flags](#flags)
+- [Responses](#responses)
 - [Memory limit](#memory-limit)
 - [Reloading the rules](#reloading-the-rules)
 - [Other modes](#other-modes)
@@ -59,9 +60,43 @@ The main flags; `inkwall-engine proxy -h` lists them all:
 | `--tls-cert`, `--tls-key` | | Serve TLS on `--listen`, HTTP/2 and HTTP/1.1 by ALPN; the files are read again when they change (a renewed certificate) |
 | `--upstream-h2c` | off | Reach an `http://` upstream over HTTP/2 without TLS, as a [gRPC](grpc.md) server needs; WebSocket upgrades, HTTP/1.1 only, can't pass then |
 | `--upstream-ca` | | CA certificates (PEM) for an `https://` upstream, instead of the system's. Over TLS the upstream gets HTTP/2 or HTTP/1.1, as ALPN settles |
+| `--inspect-responses` | off | Inspect the upstream's responses too: see [Responses](#responses). With it, `--max-response-bytes` (`65536`), `--oversize-response` (`auto`) and `--max-held-response-bytes` (`67108864`) |
 | `--json-denials` | off | Answer a denied client that sends `Accept: application/json` with `{"error":"forbidden","status":403,"request_id":"..."}` instead of text. Every denial carries `X-Request-Id`, the request ID of its security event |
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error`; security events are logged at `warn` |
 | `--event-log-rate` | `10` | Security event lines per second for each policy and rule; the rest are counted in `inkwall_security_event_logs_suppressed_total` (`0`: no limit) |
+
+## Responses
+
+With `--inspect-responses`, the proxy inspects what the upstream answers too, for data leaks (SQL
+errors, stack traces, directory listings: the Core Rule Set's `RESPONSE-95x` rules, and your own
+phase 3 and 4 rules), as Envoy's ext_proc and HAProxy's SPOE agent do:
+
+```sh
+inkwall-engine proxy --upstream http://localhost:3000 --mode block --inspect-responses
+```
+
+- The status and headers are always inspected. A body is inspected when the rules read its media
+  type (`text/html`, `text/plain`, `application/json`, XML): its first `--max-response-bytes`
+  (64 KiB by default; `gzip` and `deflate` are decoded first) are read before anything goes to the
+  client. An image, a download, Server-Sent Events or a gRPC stream passes as it streams, its body
+  uninspected.
+- In `block` mode a response that leaks is replaced with the rule's status (403) and the usual
+  denial body. A body over the limit has its first part inspected and then gets
+  `--oversize-response` (`auto`: 502 in block mode, forwarded in detect mode). `detect` mode logs
+  the event (`"phase":"response"`) and forwards the response unchanged.
+- To read bodies, the proxy removes the client's `Accept-Encoding` from requests whose responses it
+  inspects: the upstream answers them uncompressed, or in `gzip`, which the proxy decodes.
+- Bodies held for inspection are bounded: each to `--max-response-bytes`, all of them together to
+  `--max-held-response-bytes` (64 MiB by default). Past it, a response gets `--failure-mode` as an
+  overloaded request does: 503 in block mode, forwarded uninspected in detect mode, counted with
+  reason `overload`.
+- Time to first byte grows by the time to read the body's first part and inspect it, about 0.4 ms
+  per KiB of HTML: a 16 KB page took 7.0 ms through the proxy instead of 0.7 ms, a 1 KB JSON body
+  1.3 ms, and an image (not read) 0.8 ms (`BenchmarkResponses`, 12-thread i7-1255U, shared). Raise
+  `--timeout` with `--max-response-bytes`
+  ([design](design/0006-adapter-protocols.md#response-inspection-v040)).
+
+In bundle mode (`--operator`), each policy's `responses` decide instead, and the flags are refused.
 
 ## Memory limit
 
