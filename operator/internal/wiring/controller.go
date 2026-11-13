@@ -426,9 +426,14 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 			if s.Note != "" {
 				notes = append(notes, s.Note)
 			}
-			if responses && !rep.results[i].Responses {
-				noResponses = append(noResponses, fmt.Sprintf("%s can't send responses to the engine: %s %s's requests are inspected, its responses are not",
-					rep.results[i].Proxy, t.Kind.Kind, t.Key.Name))
+			if res := rep.results[i]; responses && !res.Responses {
+				if res.ResponsesWhy != "" {
+					noResponses = append(noResponses, fmt.Sprintf("%s doesn't send responses to the engine yet: %s %s's requests are inspected, its responses are not: %s",
+						res.Proxy, t.Kind.Kind, t.Key.Name, res.ResponsesWhy))
+				} else {
+					noResponses = append(noResponses, fmt.Sprintf("%s can't send responses to the engine: %s %s's requests are inspected, its responses are not; target routes Envoy Gateway, Istio or HAProxy serves",
+						res.Proxy, t.Kind.Kind, t.Key.Name))
+				}
 			}
 			if wired[i] == nil {
 				wired[i] = map[schema.GroupKind]int{}
@@ -452,7 +457,7 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 		// Not Programmed: Ready would claim the responses are inspected.
 		slices.Sort(noResponses)
 		return metav1.ConditionFalse, ReasonResponsesNotInspected, "responses.inspect is set, but " +
-			strings.Join(slices.Compact(noResponses), "; ") + "; target routes Envoy Gateway serves, or remove responses"
+			strings.Join(slices.Compact(noResponses), "; ") + "; or remove responses"
 	}
 
 	// The routes go to the proxies' pods, whose sidecar must be there.

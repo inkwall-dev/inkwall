@@ -100,8 +100,8 @@ func testHAProxy(ctx context.Context, t *testing.T, c client.Client) {
 	if !slices.ContainsFunc(mounts, func(m corev1.VolumeMount) bool { return m.MountPath == injection.HAProxyAuxPath }) {
 		t.Fatalf("HAProxy's mounts %v", mounts)
 	}
-	if !slices.Contains(pod.Spec.InitContainers[0].Args, "spoe") {
-		t.Fatalf("engine args %v", pod.Spec.InitContainers[0].Args)
+	if args := pod.Spec.InitContainers[0].Args; !slices.Contains(args, "spoe") || !slices.Contains(args, injection.ResponseMessagesFlag) {
+		t.Fatalf("engine args %v", args)
 	}
 	eventually(t, "the agent's ConfigMap", func() string {
 		var cm corev1.ConfigMap
@@ -159,6 +159,75 @@ func testHAProxy(ctx context.Context, t *testing.T, c client.Client) {
 		}
 		return ""
 	})
+
+	// Responses (#470): the pod's engine keeps requests for them, so the
+	// Ingress gets the response rules, and the policy isn't
+	// ResponsesNotInspected: still Unverified until the probe answers.
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pol), pol); err != nil {
+		t.Fatal(err)
+	}
+	pol.Spec.Responses = &wafv1alpha1.ResponsesSpec{Inspect: true}
+	if err := c.Update(ctx, pol); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the Ingress gets the response rules", func() string {
+		var got networkingv1.Ingress
+		if err := c.Get(ctx, client.ObjectKeyFromObject(ing), &got); err != nil {
+			return err.Error()
+		}
+		sn := got.Annotations[wiring.HAProxySnippetAnnotation]
+		for _, want := range []string{"filter spoe engine " + injection.HAProxyResponsesScope, "http-response send-spoe-group", "http-response return status 403"} {
+			if !strings.Contains(sn, want) {
+				return sn
+			}
+		}
+		return ""
+	})
+	eventually(t, "responses: Unverified, not ResponsesNotInspected", programmed(metav1.ConditionFalse, wiring.ReasonUnverified, "Ingress shop is wired"))
+	eventually(t, "the agent's ConfigMap has the responses scope", func() string {
+		var cm corev1.ConfigMap
+		if err := c.Get(ctx, types.NamespacedName{Namespace: edge, Name: injection.HAProxyConfigMap}, &cm); err != nil {
+			return err.Error()
+		}
+		if !strings.Contains(cm.Data[injection.HAProxySPOEKey], "spoe-group "+injection.HAProxyResponseGroup) {
+			return cm.Data[injection.HAProxySPOEKey]
+		}
+		return ""
+	})
+	// A pod whose engine runs without --response-messages (injected
+	// before 0.6.0): no response rules, and ResponsesNotInspected naming
+	// it, until it is restarted.
+	old := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: edge, Name: "hap-old", Labels: map[string]string{"app.kubernetes.io/name": "kubernetes-ingress"},
+			Annotations: map[string]string{injection.InjectedAnnotation: "true", injection.HAProxyConfigAnnotation: injection.HAProxyConfigMounted}},
+		Spec: corev1.PodSpec{
+			InitContainers: []corev1.Container{{Name: injection.ContainerName, Image: "ghcr.io/inkwall-dev/inkwall-engine:0.5.0", Args: []string{"spoe"},
+				RestartPolicy: new(corev1.ContainerRestartPolicyAlways)}},
+			Containers: []corev1.Container{{Name: injection.HAProxyContainer, Image: "haproxytech/kubernetes-ingress:3.2.19",
+				Args: []string{"--configmap=" + edge + "/hap-config"}}},
+		},
+	}
+	if err := c.Create(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(old.Spec.InitContainers[0].Args, injection.ResponseMessagesFlag) {
+		t.Fatalf("the webhook changed an injected pod: %v", old.Spec.InitContainers[0].Args)
+	}
+	eventually(t, "a pod not ready: ResponsesNotInspected", programmed(metav1.ConditionFalse, wiring.ReasonResponsesNotInspected, edge+"/hap-old"))
+	eventually(t, "no response rules while a pod isn't ready", func() string {
+		var got networkingv1.Ingress
+		if err := c.Get(ctx, client.ObjectKeyFromObject(ing), &got); err != nil {
+			return err.Error()
+		}
+		if sn := got.Annotations[wiring.HAProxySnippetAnnotation]; strings.Contains(sn, "http-response") || !strings.Contains(sn, "filter spoe engine inkwall config") {
+			return sn
+		}
+		return ""
+	})
+	if err := c.Delete(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the pod gone: the response rules back", programmed(metav1.ConditionFalse, wiring.ReasonUnverified, "Ingress shop is wired"))
 
 	// Unprotected: the Ingress is as it was.
 	if err := c.Delete(ctx, pol); err != nil {
