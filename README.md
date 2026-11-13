@@ -278,11 +278,12 @@ an Envoy you configure yourself, in or out of Kubernetes, see [protecting raw En
   [connecting to a control plane](docs/control-plane.md).
 - A cluster's policies must fit in a bundle of 7,200 KiB compressed. Past 900 KiB, the bundle is
   split over several [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/).
-- Responses are inspected only through Envoy Gateway, Istio and raw Envoy (`responses`), never
+- Responses are inspected only through Envoy Gateway, Istio, raw Envoy (`responses`) and the
+  standalone engine (`--inspect-responses`), never
   through Traefik's ForwardAuth or HAProxy; a body over `responses.maxBytes` (64 KiB by default) has its prefix
   inspected, and streamed responses (Server-Sent Events, gRPC) pass with their headers inspected
-  only, unless `responses.streams: Inspect` (each event inspected on its own; Envoy Gateway, Istio
-  and raw Envoy).
+  only, unless `responses.streams: Inspect` (each event inspected on its own; Envoy Gateway, Istio,
+  raw Envoy and the [standalone engine](docs/standalone-proxy.md#responses)).
 - gRPC: a call's path and metadata (headers) are inspected; the text in its protobuf messages
   only with `body.grpcMessages: Inspect`, read without a schema. gRPC with another codec is
   inspected as other requests, and denied by the Core Rule Set's content type rule. Client

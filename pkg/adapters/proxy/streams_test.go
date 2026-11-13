@@ -37,10 +37,12 @@ func inspectStreams(max int64) pipeline.ResponseConfig {
 	return pipeline.ResponseConfig{Inspect: true, MaxBytes: max, Streams: true}
 }
 
+// getStream gets path through h and returns once h's handler is done, its
+// logs written: Close waits for the requests in flight.
 func getStream(t testing.TB, h *Handler, path string) (string, error) {
 	t.Helper()
 	srv := httptest.NewServer(h)
-	t.Cleanup(srv.Close)
+	defer srv.Close()
 	resp, err := http.Get(srv.URL + path)
 	if err != nil {
 		return "", err
@@ -127,8 +129,14 @@ func TestStreamsAreBounded(t *testing.T) {
 		_ = resp.Body.Close()
 	}()
 	<-started
-	if resp, err := http.Get(srv.URL + "/short"); err != nil || resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("a stream past the bound: %v, %v", resp, err)
+	// Errorf, not Fatalf: the long stream must still be released.
+	if resp, err := http.Get(srv.URL + "/short"); err != nil {
+		t.Errorf("a stream past the bound: %v", err)
+	} else {
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Errorf("a stream past the bound: %d, want 503", resp.StatusCode)
+		}
 	}
 	close(release)
 	<-done
