@@ -135,15 +135,19 @@ else
 fi
 
 # The app echoes the request line and X-Request-Id; /leak answers with a
-# page that leaks a SQL error.
+# page that leaks a SQL error, /large with 1.5 MB of text.
 cat >"$WORK/app.py" <<'PY'
 import http.server, sys
+LARGE = b'a' * 1500000
 LEAK = b'<html><body>You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax</body></html>'
 class H(http.server.BaseHTTPRequestHandler):
     def handle_one(self):
         self.rfile.read(int(self.headers.get('Content-Length') or 0))
         if self.path.startswith('/leak'):
             self.send_response(200); self.send_header('Content-Type', 'text/html'); self.send_header('Content-Length', str(len(LEAK))); self.end_headers(); self.wfile.write(LEAK)
+            return
+        if self.path.startswith('/large'):
+            self.send_response(200); self.send_header('Content-Type', 'text/plain'); self.send_header('Content-Length', str(len(LARGE))); self.end_headers(); self.wfile.write(LARGE)
             return
         out = ('%s %s id=%s\n' % (self.command, self.path, self.headers.get('X-Request-Id'))).encode()
         self.send_response(200); self.send_header('Content-Length', str(len(out))); self.end_headers(); self.wfile.write(out)
@@ -231,6 +235,18 @@ check "the request ID the client sends reaches the app" bash -c "curl -s -H 'X-R
 check "a request ID reaches the app" bash -c "curl -s '$U/' | grep -qE 'id=[0-9a-f]{16}'"
 check "metrics count the denials" bash -c "curl -s 127.0.0.1:$ADMIN_PORT/metrics | grep -q 'inkwall_requests_total{action=\"deny\",adapter=\"spoe\",reason=\"rule\"}'"
 
+# A request HAProxy can't fit in one SPOE frame: a 2 MiB buffer holds a
+# 1.5 MB body, over the engine's frame (its 64 KiB body limit plus 1 MiB).
+# HAProxy sends none of it, and haproxy.cfg handles it as oversized.
+head -c 1500000 /dev/zero | tr '\0' a >"$WORK/large"
+start_haproxy '/^    log stdout format raw local0$/a\    tune.bufsize 2097152'
+eventually "a 2 MiB buffer: HAProxy serves" is 200 "$U/"
+check "a request over one SPOE frame is oversized: 413" is 413 -X POST -H 'Content-Type: application/octet-stream' --data-binary "@$WORK/large" "$U/form"
+check "a 20 KB body fits the buffer and the frame: inspected, 200" is 200 -X POST --data-binary "name=$(head -c 20000 /dev/zero | tr '\0' a)" "$U/form"
+check "a 2 MiB buffer: an attack in a body still gets 403" is 403 -X POST -d 'q=<script>alert(1)</script>' "$U/form"
+start_haproxy 's|^$||'
+eventually "the default buffer: HAProxy serves" is 200 "$U/"
+
 # The engine down: the fail-closed rule denies, until the engine is back.
 stop_engine
 check "the engine down, fail closed: 503" is 503 "$U/products?id=42"
@@ -263,6 +279,14 @@ check "responses, block mode: the 403 carries the request ID" bash -c "curl -s -
 check "responses, block mode: the leak is logged" grep -q '"phase":"response"' "$WORK/engine.log"
 check "responses, block mode: an attack still gets 403" is 403 "$U/products?$SQLI"
 check "responses, block mode: metrics count the responses answered" bash -c "curl -s 127.0.0.1:$ADMIN_PORT/metrics | grep -qE '^inkwall_spoe_response_states_total\{outcome=\"answered\"\} [1-9]'"
+# A response HAProxy can't fit in one SPOE frame (1.5 MB of text in a
+# 2 MiB buffer): oversized, 502.
+start_haproxy '/^    log stdout format raw local0$/a\    tune.bufsize 2097152'
+eventually "responses, a 2 MiB buffer: HAProxy serves" is 200 "$U/products?id=42"
+check "responses, block mode: a response over one SPOE frame is oversized: 502" is 502 "$U/large"
+check "responses, a 2 MiB buffer: a leaking response still gets 403" is 403 "$U/leak"
+start_haproxy 's|^$||'
+eventually "responses, default buffer: HAProxy serves" is 200 "$U/products?id=42"
 stop_engine
 start_engine --mode detect --inspect-responses
 eventually "responses, detect mode: a leaking response passes" bash -c "curl -s '$U/leak' | grep -q 'SQL syntax'"

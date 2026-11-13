@@ -106,9 +106,14 @@ type haproxySettings struct {
 	body     bool
 	// responses: a policy inspects responses.
 	responses bool
+	// block: a policy is in Block mode.
+	block bool
 	// maxBody is the largest body.maxBytes of the policies that inspect
 	// bodies (the engine's 64 KiB for one that sets none).
 	maxBody int64
+	// maxResponse is the largest responses.maxBytes of the policies that
+	// inspect responses (64 KiB for one that sets none).
+	maxResponse int64
 }
 
 func haproxySettingsOf(policies []wafv1alpha1.WAFPolicy, ing types.NamespacedName) haproxySettings {
@@ -129,9 +134,15 @@ func haproxySettingsOf(policies []wafv1alpha1.WAFPolicy, ing types.NamespacedNam
 			}
 			s.maxBody = max(s.maxBody, limit)
 		}
-		if p.Spec.Responses != nil && p.Spec.Responses.Inspect {
+		if r := p.Spec.Responses; r != nil && r.Inspect {
 			s.responses = true
+			limit := int64(engineBodyBytes)
+			if r.MaxBytes != nil {
+				limit = *r.MaxBytes
+			}
+			s.maxResponse = max(s.maxResponse, limit)
 		}
+		s.block = s.block || p.Spec.Mode == wafv1alpha1.PolicyBlock
 		mode := cmp.Or(p.Spec.FailureMode, wafv1alpha1.FailOpen)
 		if p.Spec.Mode == wafv1alpha1.PolicyBlock && p.Spec.FailureMode == "" {
 			mode = wafv1alpha1.FailClosed
@@ -141,10 +152,34 @@ func haproxySettingsOf(policies []wafv1alpha1.WAFPolicy, ing types.NamespacedNam
 	return s
 }
 
+// haproxyFrameTooBig are the errors HAProxy's SPOE filter sets (option
+// set-on-error) for a message that doesn't fit in one frame, which it
+// sends none of (SPOP 2.0 has no fragmentation): 3 when it is larger than
+// spoe.conf's max-frame-size (HAProxy's buffer by default), 259 (0x100 +
+// 3, from the SPOP connection) when it is larger than the max-frame-size
+// the engine announced.
+const haproxyFrameTooBig = "3 259"
+
+// HAProxySnippetOptions are what a route's snippet depends on, from its
+// policies.
+type HAProxySnippetOptions struct {
+	// FailOpen: every policy fails open, so no fail-closed rule.
+	FailOpen bool
+	// Body: a policy inspects bodies, so HAProxy buffers them.
+	Body bool
+	// Responses: a policy inspects responses, and HAProxy sends them.
+	Responses bool
+	// Block: a policy is in Block mode.
+	Block bool
+}
+
 // HAProxySnippet is the operator's part of a protected Ingress's backend
 // snippet: the body buffered for the engine when a policy inspects it, the
 // SPOE filter, and the rules on its variables: the probe's answer first
-// (Prober), then, failing closed, 503 without a verdict, a denied
+// (Prober), then, in Block mode, 413 for a request HAProxy couldn't fit in
+// one SPOE frame (txn.inkwall.error 3 or 259: HAProxy sends no part of it, 0006
+// §4), handled as oversized whatever the failure mode; failing closed,
+// 503 without a verdict, a denied
 // gRPC call's answer, and a rule per status the engine denies with; the
 // request ID for the app. With responses (a policy inspects them, and
 // every pod's engine keeps requests for them), the filter is spoe.conf's
@@ -153,7 +188,8 @@ func haproxySettingsOf(policies []wafv1alpha1.WAFPolicy, ing types.NamespacedNam
 // Accept-Encoding removed, the body of a type the rules read waited for,
 // the response sent, and replaced when the engine denies it or, failing
 // closed, gives no verdict.
-func HAProxySnippet(failOpen, body, responses bool) string {
+func HAProxySnippet(o HAProxySnippetOptions) string {
+	failOpen, body, responses := o.FailOpen, o.Body, o.Responses
 	lines := []string{haproxySnippetBegin}
 	if body {
 		lines = append(lines, "option http-buffer-request")
@@ -167,6 +203,9 @@ func HAProxySnippet(failOpen, body, responses bool) string {
 		"filter spoe engine "+scope+" config "+injection.HAProxySPOEConf,
 		fmt.Sprintf(`http-request return status %d hdr %s "%%[%s]" if { %s -m found }`,
 			haproxyprobe.Status, strings.ToLower(haproxyprobe.Header), v("probe"), v("probe")))
+	if o.Block {
+		lines = append(lines, "http-request deny deny_status 413 if { "+v("error")+" -m int "+haproxyFrameTooBig+" }")
+	}
 	if !failOpen {
 		lines = append(lines, "http-request deny deny_status 503 if !{ "+v("action")+" -m found }")
 	}
@@ -188,7 +227,12 @@ func HAProxySnippet(failOpen, body, responses bool) string {
 		lines = append(lines,
 			"http-request del-header accept-encoding if "+kept,
 			"http-response wait-for-body time 2s if "+kept+" { res.hdr(content-type) -m beg -i "+strings.Join(engrules.ResponseBodyTypes, " ")+" }",
-			"http-response send-spoe-group "+injection.HAProxyResponsesScope+" "+injection.HAProxyResponseGroup+" if "+kept,
+			"http-response send-spoe-group "+injection.HAProxyResponsesScope+" "+injection.HAProxyResponseGroup+" if "+kept)
+		if o.Block {
+			// A response HAProxy couldn't fit in one frame: oversized.
+			lines = append(lines, reply(502, "Bad Gateway", kept+" { "+v("error")+" -m int "+haproxyFrameTooBig+" }"))
+		}
+		lines = append(lines,
 			reply(502, "Bad Gateway", kept+" !{ "+v("response_action")+" -m found } { "+v("response_failure")+" -m str closed }"),
 			reply(502, "Bad Gateway", "{ "+v("response_status")+" -m int 502 }"),
 			reply(503, "Service Unavailable", "{ "+v("response_status")+" -m int 503 }"),
@@ -360,7 +404,7 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 		snippet := ""
 		settings := haproxySettingsOf(policies.Items, k)
 		if want {
-			snippet = HAProxySnippet(settings.failOpen, settings.body, settings.responses && res.Responses)
+			snippet = HAProxySnippet(HAProxySnippetOptions{FailOpen: settings.failOpen, Body: settings.body, Responses: settings.responses && res.Responses, Block: settings.block})
 		}
 		err := annotateHAProxy(ctx, h.Client, ing, snippet)
 		if err != nil && !apierrors.IsNotFound(err) {
@@ -392,12 +436,7 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 			}
 			jobs = append(jobs, job)
 			s.Unverified = h.unverified(job)
-			if settings.body && settings.maxBody > buffer.visible() {
-				s.Note = fmt.Sprintf("Ingress %s: HAProxy's buffer (tune.bufsize %d, %s) lets the engine see at most about %d bytes of a request, "+
-					"headers included, less than its body.maxBytes (%d): a larger body is handled as oversized (body.onOversize); "+
-					"raise tune.bufsize in the controller ConfigMap's global-config-snippet (docs/haproxy.md, Bodies)",
-					k.Name, buffer.bufsize, buffer.source, buffer.visible(), settings.maxBody)
-			}
+			s.Note = haproxyBufferNote(k.Name, buffer, settings.body, settings.maxBody, settings.responses && res.Responses, settings.maxResponse)
 		}
 		res.Targets[tg] = s
 	}
@@ -408,6 +447,32 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 		log.FromContext(ctx).Error(errors.Join(errs...), "HAProxy Ingresses not wired")
 	}
 	return res, errors.Join(errs...)
+}
+
+// haproxyBufferNote says when HAProxy's buffer lets the engine see less of
+// a request or a response than the policies' body.maxBytes or
+// responses.maxBytes: HAProxy sends no more than its buffer, and a larger
+// body is handled as oversized. "" when it doesn't.
+func haproxyBufferNote(ingress string, buffer haproxyBuffer, body bool, maxBody int64, responses bool, maxResponse int64) string {
+	var what, limits, actions []string
+	section := "Bodies"
+	if body && maxBody > buffer.visible() {
+		what, limits, actions = append(what, "a request"), append(limits, fmt.Sprintf("body.maxBytes (%d)", maxBody)), append(actions, "body.onOversize")
+	}
+	if responses && maxResponse > buffer.visible() {
+		what, limits, actions = append(what, "a response"), append(limits, fmt.Sprintf("responses.maxBytes (%d)", maxResponse)), append(actions, "responses.onOversize")
+		if len(what) == 1 {
+			section = "Responses"
+		}
+	}
+	if len(what) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Ingress %s: HAProxy's buffer (tune.bufsize %d, %s) lets the engine see at most about %d bytes of %s, "+
+		"headers included, less than its %s: a larger body is handled as oversized (%s); "+
+		"raise tune.bufsize in the controller ConfigMap's global-config-snippet (docs/haproxy.md, %s)",
+		ingress, buffer.bufsize, buffer.source, buffer.visible(), strings.Join(what, " or "),
+		strings.Join(limits, " and "), strings.Join(actions, ", "), section)
 }
 
 // unverified is why a wired route isn't proven on every pod yet, or "".

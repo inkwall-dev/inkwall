@@ -127,6 +127,20 @@ func testHAProxy(ctx context.Context, t *testing.T, c client.Client) {
 		return ""
 	})
 	eventually(t, "Unverified until the probe answers", programmed(metav1.ConditionFalse, wiring.ReasonUnverified, "Ingress shop is wired"))
+	// Block mode: a request HAProxy can't fit in one SPOE frame is handled
+	// as oversized, before the fail-closed rule.
+	eventually(t, "Block mode: 413 for a request over one frame", func() string {
+		var got networkingv1.Ingress
+		if err := c.Get(ctx, client.ObjectKeyFromObject(ing), &got); err != nil {
+			return err.Error()
+		}
+		sn := got.Annotations[wiring.HAProxySnippetAnnotation]
+		i := strings.Index(sn, "http-request deny deny_status 413 if { var(txn.inkwall.error) -m int 3 259 }")
+		if i < 0 || i > strings.Index(sn, "deny_status 503 if !{") {
+			return sn
+		}
+		return ""
+	})
 
 	// body.maxBytes over what HAProxy's buffer lets the engine see: said,
 	// without changing the status (bigger bodies fail safe, #345). The
@@ -166,6 +180,15 @@ func testHAProxy(ctx context.Context, t *testing.T, c client.Client) {
 	if err := c.Get(ctx, client.ObjectKeyFromObject(pol), pol); err != nil {
 		t.Fatal(err)
 	}
+	// responses.maxBytes (4 MiB) over the 2m buffer: said, as for bodies.
+	pol.Spec.Responses = &wafv1alpha1.ResponsesSpec{Inspect: true, MaxBytes: new(int64(4 << 20))}
+	if err := c.Update(ctx, pol); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "responses.maxBytes over the buffer is said", programmed(metav1.ConditionFalse, wiring.ReasonUnverified, "responses.maxBytes (4194304)"))
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pol), pol); err != nil {
+		t.Fatal(err)
+	}
 	pol.Spec.Responses = &wafv1alpha1.ResponsesSpec{Inspect: true}
 	if err := c.Update(ctx, pol); err != nil {
 		t.Fatal(err)
@@ -176,7 +199,8 @@ func testHAProxy(ctx context.Context, t *testing.T, c client.Client) {
 			return err.Error()
 		}
 		sn := got.Annotations[wiring.HAProxySnippetAnnotation]
-		for _, want := range []string{"filter spoe engine " + injection.HAProxyResponsesScope, "http-response send-spoe-group", "http-response return status 403"} {
+		for _, want := range []string{"filter spoe engine " + injection.HAProxyResponsesScope, "http-response send-spoe-group", "http-response return status 403",
+			"{ var(txn.inkwall.responses) -m found } { var(txn.inkwall.error) -m int 3 259 }"} {
 			if !strings.Contains(sn, want) {
 				return sn
 			}
