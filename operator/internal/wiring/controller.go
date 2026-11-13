@@ -369,6 +369,7 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 	}
 	var unsupported, failed, disabled, pending, unverified, notProbeable, partly, noResponses, notes []string
 	responses := p.Spec.Responses != nil && p.Spec.Responses.Inspect
+	streams := responses && p.Spec.Responses.Streams == wafv1alpha1.StreamsInspect
 	// wired counts the wired targets by result, then kind.
 	wired := make([]map[schema.GroupKind]int, len(rep.results))
 	total := 0
@@ -434,6 +435,10 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 					noResponses = append(noResponses, fmt.Sprintf("%s can't send responses to the engine: %s %s's requests are inspected, its responses are not; target routes Envoy Gateway, Istio or HAProxy serves",
 						res.Proxy, t.Kind.Kind, t.Key.Name))
 				}
+			} else if res := rep.results[i]; streams && !res.Streams {
+				// Ready would claim the streams' events are inspected (#323).
+				noResponses = append(noResponses, fmt.Sprintf("%s doesn't send streamed responses' bodies to the engine: %s %s's Server-Sent Events and gRPC responses pass with their status and headers inspected only; set responses.streams: Skip, or target routes Envoy Gateway or Istio serves",
+					res.Proxy, t.Kind.Kind, t.Key.Name))
 			}
 			if wired[i] == nil {
 				wired[i] = map[schema.GroupKind]int{}

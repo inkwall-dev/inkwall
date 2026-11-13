@@ -223,7 +223,7 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 	if err != nil {
 		return nil, err
 	}
-	res := &Result{Proxy: "Envoy Gateway", Targets: map[Target]TargetState{}, Rolling: true, Responses: true}
+	res := &Result{Proxy: "Envoy Gateway", Targets: map[Target]TargetState{}, Rolling: true, Responses: true, Streams: true}
 
 	// The protected routes Envoy Gateway serves, and the others' reasons.
 	var policies wafv1alpha1.WAFPolicyList

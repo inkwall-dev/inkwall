@@ -83,7 +83,9 @@ What's new:
   leaking event ends the stream. In a `WAFPolicy` it is `responses: {inspect: true, streams:
   Inspect}`, through Envoy Gateway and Istio: upgrade the chart first, for the CRD field; a policy
   that sets it is `Enforced=False` (`EnginesOutdated`) until every engine runs 0.6.0, since an
-  older engine lets streams' bodies through uninspected. Off by default: nothing changes without it
+  older engine lets streams' bodies through uninspected, and `Programmed=False`
+  (`ResponsesNotInspected`) on HAProxy's Ingresses, since HAProxy doesn't send a streamed body.
+  Off by default: nothing changes without it
   ([raw Envoy](raw-envoy.md#responses)).
 - **A control plane can deliver and see `WAFIPList`s** (#577). In Managed mode, a policy snapshot
   may carry the IP lists its policies name, written and pruned like the other kinds and labelled

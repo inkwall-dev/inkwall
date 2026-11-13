@@ -255,7 +255,7 @@ func TestProgrammedResponses(t *testing.T) {
 		Spec: corev1.PodSpec{InitContainers: []corev1.Container{{Name: injection.ContainerName}}}}
 	rep := &report{kinds: []schema.GroupKind{ingressKind, routeKind, httpRouteKind, httpRouteKind}, results: []*Result{
 		{Proxy: "Traefik", Pods: []corev1.Pod{withEngine}, Targets: map[Target]TargetState{route("web"): {Wired: true}}},
-		{Proxy: "Envoy Gateway", Responses: true, Pods: []corev1.Pod{withEngine}, Targets: map[Target]TargetState{route("api"): {Wired: true}}},
+		{Proxy: "Envoy Gateway", Responses: true, Streams: true, Pods: []corev1.Pod{withEngine}, Targets: map[Target]TargetState{route("api"): {Wired: true}}},
 	}}
 	pol := func(responses *wafv1alpha1.ResponsesSpec, names ...string) *wafv1alpha1.WAFPolicy {
 		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{Responses: responses}}
@@ -275,6 +275,7 @@ func TestProgrammedResponses(t *testing.T) {
 		{"Traefik", pol(inspect, "web"), metav1.ConditionFalse, ReasonResponsesNotInspected,
 			"responses.inspect is set, but Traefik can't send responses to the engine: HTTPRoute web's requests are inspected, its responses are not; target routes Envoy Gateway, Istio or HAProxy serves; or remove responses"},
 		{"both", pol(inspect, "api", "web"), metav1.ConditionFalse, ReasonResponsesNotInspected, "HTTPRoute web's requests are inspected"},
+		{"Envoy Gateway, streams", pol(&wafv1alpha1.ResponsesSpec{Inspect: true, Streams: wafv1alpha1.StreamsInspect}, "api"), metav1.ConditionTrue, ReasonProgrammed, "1 HTTPRoute(s) wired to the engine in Envoy Gateway"},
 		{"Traefik, responses off", pol(&wafv1alpha1.ResponsesSpec{}, "web"), metav1.ConditionTrue, ReasonProgrammed, "1 HTTPRoute(s) wired to the engine in Traefik"},
 		{"Traefik, no responses", pol(nil, "web"), metav1.ConditionTrue, ReasonProgrammed, "1 HTTPRoute(s) wired to the engine in Traefik"},
 	} {

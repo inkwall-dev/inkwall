@@ -1088,5 +1088,5 @@ func (i *Istio) Unwire(ctx context.Context, c client.Client) (map[string]int, er
 // result is an empty Result of the Istio Gateway API wiring: its pods are
 // rolled by Istio, and its filter sends responses to the engine (#374).
 func (*Istio) result() *Result {
-	return &Result{Proxy: "Istio", Targets: map[Target]TargetState{}, Rolling: true, Responses: true}
+	return &Result{Proxy: "Istio", Targets: map[Target]TargetState{}, Rolling: true, Responses: true, Streams: true}
 }

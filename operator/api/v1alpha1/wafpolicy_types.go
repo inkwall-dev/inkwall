@@ -538,7 +538,9 @@ type ResponsesSpec struct {
 	// before it), and one over maxBytes gets onOversize. Each event is an
 	// evaluation, so a token-by-token stream costs many. Skip: only their
 	// status and headers are inspected. Through Envoy Gateway and Istio;
-	// engines before 0.6.0 skip them (the policy is then not Enforced).
+	// HAProxy doesn't send their bodies (the policy is then not Programmed
+	// on its Ingresses, ResponsesNotInspected), and engines before 0.6.0
+	// skip them (the policy is then not Enforced).
 	// Unset: Skip.
 	// +optional
 	Streams StreamsAction `json:"streams,omitempty"`

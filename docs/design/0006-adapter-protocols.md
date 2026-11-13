@@ -410,7 +410,11 @@ The security event carries
 **Built (operator):** `WAFPolicy.spec.responses.streams` (`Inspect` or `Skip`, the default; it
 needs `inspect: true`), the bundle field from it, `Enforced=False` (`EnginesOutdated`) while an
 engine before 0.6.0 runs the policy, and the Envoy Gateway and Istio kind e2e sections (a leaking
-SSE event ends the stream through both Gateways, the events before it pass). **Built (the
+SSE event ends the stream through both Gateways, the events before it pass). Since the HAProxy
+Ingress Controller sends responses too (#470), an integration reports whether it sends streamed
+bodies (`Result.Streams`): HAProxy doesn't (§4: SPOE never holds them), so a policy with `streams:
+Inspect` is `Programmed=False` (`ResponsesNotInspected`) on its Ingresses, as Traefik's routes are
+for `responses`, rather than `Ready` while the events pass uninspected. **Built (the
 reverse proxy):** a `streamBody` wraps the response's body: it splits it as it is read, inspects
 each event, and gives out only bytes up to the end of the last allowed event (`Event.End`, the
 offset the splitter reports), so the events before a denied one go out even when they came in the
