@@ -5,9 +5,9 @@
 // adapters, so detection is verified through the same code paths as
 // production: each adapter's request translation, the inspection pipeline
 // and the Coraza evaluator. The reverse proxy runs it at each paranoia
-// level; ForwardAuth, ext_proc and SPOE, through a stand-in for their
-// proxy (fronts_test.go), at level 4, and ext_proc also the response
-// rules' tests. A test that passes through the reverse proxy must pass
+// level, the response rules' tests too; ForwardAuth, ext_proc and SPOE,
+// through a stand-in for their proxy (fronts_test.go), at level 4, and
+// ext_proc also the response rules' tests. A test that passes through the reverse proxy must pass
 // through every adapter, but for the differences listed with a reason.
 //
 // The harness is adapted from Coraza's (testing/coreruleset, Apache-2.0).
@@ -88,7 +88,8 @@ SecRule REQUEST_HEADERS:X-CRS-Test "@rx ^.*$" \
 `
 
 // isResponseTest reports a test of the response rules (95x): they run
-// through the adapters that inspect responses (ext_proc).
+// through the adapters that inspect responses (the reverse proxy and
+// ext_proc).
 func isResponseTest(path string) bool {
 	return strings.HasPrefix(path, "RESPONSE-")
 }
@@ -134,7 +135,7 @@ func ruleParanoiaLevels(t *testing.T) map[uint]int {
 // a match the level turns off); the others must pass.
 func TestCRSRegression(t *testing.T) {
 	levels := ruleParanoiaLevels(t)
-	tests, skipped := crsTests(t, false)
+	tests, skipped := crsTests(t, proxyAdapter.responses)
 	// CRS tests expect albedo as the backend.
 	backend := httptest.NewServer(albedo.Handler())
 	defer backend.Close()
@@ -156,7 +157,7 @@ func TestCRSRegression(t *testing.T) {
 					run = append(run, &kept)
 				}
 			}
-			t.Logf("running %d test files at paranoia level %d, leaving out %d tests of higher levels and %d response-rule files (the reverse proxy inspects requests only)", len(run), pl, left, skipped)
+			t.Logf("running %d test files at paranoia level %d, leaving out %d tests of higher levels and %d response-rule files", len(run), pl, left, skipped)
 			failed := runSuite(t, proxyAdapter, backend.URL, pl, run)
 			if n := len(failed); n > 0 {
 				t.Errorf("%d failed tests: %v", n, slices.Sorted(maps.Keys(failed)))
@@ -173,7 +174,7 @@ type adapter struct {
 	responses bool
 }
 
-var proxyAdapter = adapter{"proxy", proxyFront, false}
+var proxyAdapter = adapter{"proxy", proxyFront, true}
 
 // The other adapters, through a stand-in for their proxy (fronts_test.go).
 var otherAdapters = []adapter{
