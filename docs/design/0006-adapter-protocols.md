@@ -488,8 +488,13 @@ Ingress Controller (below).
   rules (a pod whose engine lacks the flag would keep nothing, and every response would miss), and
   the policy is `ResponsesNotInspected` with `Result.ResponsesWhy` naming the pods to restart. A
   pinned engine older than 0.6.0 doesn't know the flag, so it isn't injected with it, and the policy
-  stays `ResponsesNotInspected`, rather than the engine crash-looping. The probe covers the
-  request filter only; a response probe would prove the response rules, as a follow-up.
+  stays `ResponsesNotInspected`, rather than the engine crash-looping (`--response-messages` is a
+  0.6.0 flag of `injection/version.go`, #536). `Enforced` gets no `EnginesOutdated` for it, unlike a
+  field older engines ignore (#473): an engine older than 0.6.0 on an HAProxy pod never has the
+  flag, so `Programmed` is already `False` (`ResponsesNotInspected`) and `Ready` with it, naming the
+  pod; and `spec.responses` needs only 0.4.0 on Envoy's engines, which the engine records (they
+  carry no adapter) couldn't tell apart. The probe covers the request filter only; a response
+  probe would prove the response rules, as a follow-up.
 
 **Open questions, resolved (#469):**
 

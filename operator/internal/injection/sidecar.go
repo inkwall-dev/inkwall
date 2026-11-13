@@ -253,7 +253,7 @@ func Engine(s Sidecar) (corev1.Container, []corev1.Volume) {
 	if s.passes(optJSONDenials) {
 		args = append(args, "--json-denials")
 	}
-	if s.ResponseMessages {
+	if s.passes(optResponseMessages) {
 		args = append(args, ResponseMessagesFlag)
 	}
 

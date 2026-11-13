@@ -121,3 +121,30 @@ func TestEngineConfiguredCondition(t *testing.T) {
 		}
 	}
 }
+
+// --response-messages (0.6.0) goes to an HAProxy pod's engine only when the
+// engine knows it: the operator's own, or a pinned release of 0.6.0 or
+// later. An older or custom pinned engine starts without it, and the
+// policies stay ResponsesNotInspected on its pods (#470).
+func TestResponseMessagesByVersion(t *testing.T) {
+	for _, tc := range []struct {
+		image  string
+		pinned bool
+		want   bool
+	}{
+		{"ghcr.io/inkwall-dev/inkwall-engine:0.6.0", false, true},
+		{"ghcr.io/inkwall-dev/inkwall-engine:0.6.0", true, true},
+		{"ghcr.io/inkwall-dev/inkwall-engine:v0.7.1", true, true},
+		{"ghcr.io/inkwall-dev/inkwall-engine:0.5.0", true, false},
+		{"registry.example.com/engine:custom", true, false},
+	} {
+		s := Sidecar{Image: tc.image, Pinned: tc.pinned, Args: []string{"spoe"}, ResponseMessages: true}
+		c, _ := Engine(s)
+		if got := slices.Contains(c.Args, ResponseMessagesFlag); got != tc.want {
+			t.Errorf("%s (pinned %v): %s %v, want %v", tc.image, tc.pinned, ResponseMessagesFlag, got, tc.want)
+		}
+		if c, _ := Engine(Sidecar{Image: tc.image, Pinned: tc.pinned, Args: []string{"spoe"}}); slices.Contains(c.Args, ResponseMessagesFlag) {
+			t.Errorf("%s: the flag without ResponseMessages", tc.image)
+		}
+	}
+}
