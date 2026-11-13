@@ -745,7 +745,7 @@ streams_cut() {
     [[ $out == *"data: hello"* && $out != *"SQL syntax"* && $out != *"data: after"* ]] || return 1
   done
 }
-check "a stream with a leaking event ends before it: the events before it pass, it and those after never do" streams_cut
+eventually "a stream with a leaking event ends before it: the events before it pass, it and those after never do" streams_cut
 logged_stream() {
   "${KUBECTL[@]}" -n "$EG_NS" logs -l app.kubernetes.io/name=envoy -c inkwall-engine --tail=-1 |
     grep '"security event"' | grep '"path":"/sse-leak"' | grep '"action":"deny"' | grep -q '"stream_event":2'

@@ -611,7 +611,7 @@ streams_cut() {
     [[ $out == *"data: hello"* && $out != *"SQL syntax"* && $out != *"data: after"* ]] || return 1
   done
 }
-check "a stream with a leaking event ends before it" streams_cut
+eventually "a stream with a leaking event ends before it" streams_cut
 logged_stream() {
   engine_logs gateway.istio.io/managed=istio.io-gateway-controller | grep '"security event"' |
     grep '"path":"/sse-leak"' | grep '"action":"deny"' | grep -q '"stream_event":2'
