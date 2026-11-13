@@ -64,6 +64,12 @@ What's new:
   `inkwall.dev/source: saas`; the cluster state lists every `WAFIPList`
   ([Managed mode](control-plane.md#managed-mode)). A control plane that sends none changes
   nothing.
+- **The operator's metrics over HTTPS (opt-in).** `metrics.secure.enabled=true` serves `/metrics`
+  over HTTPS, only to bearer tokens the API server authenticates and allows to get `/metrics`; the
+  ServiceMonitor then scrapes with Prometheus' service account token. Bind the new
+  `inkwall-operator-metrics-reader` ClusterRole to Prometheus' service account first, unless its
+  role already allows `get` on `/metrics`. Off by default, also with `--reuse-values`: the metrics
+  stay plain HTTP. See [Metrics over HTTPS](monitoring.md#metrics-over-https).
 
 What changes by itself:
 
