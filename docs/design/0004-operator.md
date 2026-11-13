@@ -1302,9 +1302,13 @@ aren't the chart's. The Network flows table in the chart README lists every conn
 **Metrics over HTTPS (v0.6.0, #430).** The operator's `/metrics` stays plain HTTP by default: its
 metrics carry no secrets, and a default that needs every scraper reconfigured would break the
 monitoring kit's existing installs. `metrics.secure.enabled` (`--metrics-secure`) serves them over
-HTTPS behind controller-runtime's `filters.WithAuthenticationAndAuthorization`: a TokenReview for
-the bearer token, a SubjectAccessReview for `get` on `/metrics`, both cached (a token a minute, an
-allow five, a deny thirty seconds). Its `tokenreviews` and `subjectaccessreviews` rules are in a
+HTTPS behind the API server's delegated authentication and authorization, as controller-runtime's
+`filters.WithAuthenticationAndAuthorization` builds them: a TokenReview for the bearer token, a
+SubjectAccessReview for `get` on `/metrics`, both cached (a token a minute, an allow five, a deny
+thirty seconds). The filter is the operator's own (#562): controller-runtime's answers 500 and logs
+an error for a token the TokenReview rejects, so any client reaching the port could fill the log.
+Here a rejected token is 401, as the API server answers it, and refusals (401, 403) are logged at
+info level, at most once a minute with their count. Its `tokenreviews` and `subjectaccessreviews` rules are in a
 ClusterRole of their own, rendered only with the option, not in the kubebuilder markers: the
 default install doesn't grant them. Scrapers get a `nonResourceURLs: [/metrics]` ClusterRole to
 bind; the ServiceMonitor sends Prometheus' own service account token (`bearerTokenFile`), so no

@@ -176,10 +176,10 @@ func TestSecureMetrics(t *testing.T) {
 	if code, _, err := scrape("https", ""); err != nil || code != http.StatusUnauthorized {
 		t.Errorf("no token: %d, %v; want 401", code, err)
 	}
-	// controller-runtime's filter answers 500 when the TokenReview rejects a
-	// token with an error, as it does a malformed one: refused all the same.
-	if code, _, err := scrape("https", "not-a-token"); err != nil || (code != http.StatusUnauthorized && code != http.StatusInternalServerError) {
-		t.Errorf("an invalid token: %d, %v; want 401 or 500", code, err)
+	// A token the TokenReview rejects (with an error, as a malformed one is)
+	// is unauthenticated, not a server error (#562).
+	if code, _, err := scrape("https", "not-a-token"); err != nil || code != http.StatusUnauthorized {
+		t.Errorf("an invalid token: %d, %v; want 401", code, err)
 	}
 	if code, _, err := scrape("https", other); err != nil || code != http.StatusForbidden {
 		t.Errorf("a service account without the role: %d, %v; want 403", code, err)

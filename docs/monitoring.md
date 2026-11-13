@@ -101,8 +101,11 @@ kubectl create clusterrolebinding inkwall-metrics-prometheus --clusterrole=inkwa
   --serviceaccount=monitoring:prometheus-k8s
 ```
 
-A scrape without a token gets 401, one whose service account lacks the permission 403. An
-invalid or expired token is refused with 500 (controller-runtime's filter, which also logs it).
+A scrape without a token, or with one the API server rejects (invalid, expired, from another
+cluster), gets 401; one whose service account lacks the permission 403. Refused scrapes are logged
+at info level, at most one line a minute, with how many were refused and the last reason
+(`Refused metrics scrapes`), so a client can't fill the operator's log. A failed
+SubjectAccessReview (the API server unreachable) is 500, logged as an error.
 The API server's answers are cached: an allowed scraper for 5 minutes, a denied one for 30
 seconds, a token for a minute. The port keeps its name (`metrics`) and number, so
 `networkPolicy.metricsFrom` applies as before. The health probes stay on port 8081, over HTTP.

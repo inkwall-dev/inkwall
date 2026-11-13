@@ -9,14 +9,13 @@ import (
 	"os"
 	"path/filepath"
 
-	metricsfilters "sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 // The secure metrics' authentication and authorization delegate to the
 // API server: a scraper's bearer token is checked with a TokenReview, and
 // its permission to get /metrics with a SubjectAccessReview
-// (docs/design/0004-operator.md, Metrics over HTTPS).
+// (docs/design/0004-operator.md, Metrics over HTTPS; metricsAuthFilter).
 //
 // The ClusterRole these need is the chart's, rendered only with
 // metrics.secure.enabled, not a kubebuilder:rbac marker: the default
@@ -36,7 +35,7 @@ func metricsServerOptions(o Options) (metricsserver.Options, error) {
 		return m, nil
 	}
 	m.SecureServing = true
-	m.FilterProvider = metricsfilters.WithAuthenticationAndAuthorization
+	m.FilterProvider = metricsAuthFilter
 	if o.MetricsCertDir != "" {
 		for _, f := range []string{"tls.crt", "tls.key"} {
 			if _, err := os.Stat(filepath.Join(o.MetricsCertDir, f)); err != nil {

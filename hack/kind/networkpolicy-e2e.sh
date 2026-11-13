@@ -201,9 +201,10 @@ fi
 
 # Secure metrics (#430): with metrics.secure on, under the same policies,
 # the metrics are served over HTTPS behind the API server's TokenReview and
-# SubjectAccessReview. From Prometheus' namespace: no token is 401, a
-# service account without the metrics reader ClusterRole 403, and one bound
-# to it reads the metrics. Another namespace still can't reach the port.
+# SubjectAccessReview. From Prometheus' namespace: no token or an invalid
+# one is 401, a service account without the metrics reader ClusterRole 403,
+# and one bound to it reads the metrics. Another namespace still can't
+# reach the port.
 echo "== metrics.secure: HTTPS, authenticated and authorized"
 for sa in prometheus other; do
   "${KUBECTL[@]}" -n "$MONITORING_NS" create serviceaccount "$sa" --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f - >/dev/null
@@ -250,6 +251,14 @@ if [[ $got == 401 ]]; then
   ok "a scrape without a token gets 401"
 else
   fail "a scrape without a token: $got, want 401"
+fi
+# A token the API server rejects is unauthenticated too (#562), not a
+# server error.
+got=$(status_of "$(scrape "$MONITORING_NS" "$operator_ip" not-a-token)")
+if [[ $got == 401 ]]; then
+  ok "a scrape with an invalid token gets 401"
+else
+  fail "a scrape with an invalid token: $got, want 401"
 fi
 got=$(status_of "$(scrape "$MONITORING_NS" "$operator_ip" "$other_token")")
 if [[ $got == 403 ]]; then
