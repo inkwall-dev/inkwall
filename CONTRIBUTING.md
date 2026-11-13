@@ -224,7 +224,10 @@ for patching released versions.
    `charts/inkwall`) public in the organization's package settings: they are created private.
 
 A failed run can be re-run from the Actions tab. If something was already published, fix it on
-`main` and release the next patch instead of moving the tag.
+`main` and release the next patch instead of moving the tag. Each job that signs checks first that
+it can (the workflow's OIDC token for Sigstore), so a token failure publishes nothing; signing is
+retried on transient errors; and a job that fails anyway says in its summary what it left published
+unsigned (the check job is then skipped): re-run the failed jobs before announcing the release.
 
 ### Release branches and patches
 

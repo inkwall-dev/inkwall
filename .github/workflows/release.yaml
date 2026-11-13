@@ -12,7 +12,10 @@
 #      also attached to the release as inkwall_<version>.intoto.jsonl.
 # Signatures are keyless, with this workflow's identity. Nothing is
 # published unless CI passed on the tagged commit (verify), and what was
-# published is checked as a user would (check).
+# published is checked as a user would (check). Each job that signs checks
+# first that it can (the OIDC token for Sigstore), retries signing on
+# transient errors, and on a failure says in its summary what it left
+# published unsigned (#586), since check is then skipped.
 name: release
 
 on:
@@ -121,6 +124,24 @@ jobs:
         with:
           cosign-release: ${{ env.COSIGN_VERSION }}
       - run: cosign version
+      # Signing must work before anything is published (#586): on v0.5.1
+      # the chart was pushed, then cosign couldn't fetch the workflow's OIDC
+      # token, and the chart stayed unsigned until a rerun. Fetch the token
+      # Sigstore gets (retrying transient errors) without printing it; if it
+      # can't be had, nothing is published.
+      - name: signing preflight
+        run: |
+          for i in 1 2 3 4; do
+            if curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sigstore" |
+              jq -e '.value | length > 0' >/dev/null; then
+              echo "OIDC token for Sigstore: available"
+              exit 0
+            fi
+            echo "::warning::no OIDC token for Sigstore, attempt $i of 4"
+            sleep $((15 * i))
+          done
+          echo "::error::no OIDC token for Sigstore after 4 attempts: nothing was published; re-run the failed jobs"
+          exit 1
       # No QEMU: Go cross-compiles on the build platform, and the final
       # stages only copy the binary.
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -155,12 +176,25 @@ jobs:
           sbom: true
           provenance: mode=max
           push: true
-      # By digest: a tag can be moved, the digest can't.
+      # By digest: a tag can be moved, the digest can't. Retried on
+      # Sigstore's transient errors (#586).
       - env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          cosign sign --yes "$IMAGE@$DIGEST"
+          hack/ci/retry.sh 4 cosign sign --yes "$IMAGE@$DIGEST"
           echo "$IMAGE@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+      # The check job is skipped after a failure: say what was left.
+      - if: failure()
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          if [[ -n $DIGEST ]]; then
+            msg="$IMAGE@$DIGEST was pushed but is NOT signed: re-run the failed jobs (they push and sign again) before announcing the release"
+          else
+            msg="$IMAGE was not published"
+          fi
+          echo "::error::$msg"
+          echo "**Release failed**: $msg." >> "$GITHUB_STEP_SUMMARY"
 
   chart:
     needs: [verify, images]
@@ -186,6 +220,24 @@ jobs:
       - run: |
           helm version
           cosign version
+      # Signing must work before anything is published (#586): on v0.5.1
+      # the chart was pushed, then cosign couldn't fetch the workflow's OIDC
+      # token, and the chart stayed unsigned until a rerun. Fetch the token
+      # Sigstore gets (retrying transient errors) without printing it; if it
+      # can't be had, nothing is published.
+      - name: signing preflight
+        run: |
+          for i in 1 2 3 4; do
+            if curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sigstore" |
+              jq -e '.value | length > 0' >/dev/null; then
+              echo "OIDC token for Sigstore: available"
+              exit 0
+            fi
+            echo "::warning::no OIDC token for Sigstore, attempt $i of 4"
+            sleep $((15 * i))
+          done
+          echo "::error::no OIDC token for Sigstore after 4 attempts: nothing was published; re-run the failed jobs"
+          exit 1
       # For cosign; helm keeps its own login.
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
@@ -194,7 +246,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       # The chart and the images share the version: the chart deploys the
       # images of its appVersion.
-      - env:
+      - id: push
+        env:
           VERSION: ${{ needs.verify.outputs.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -206,8 +259,27 @@ jobs:
             echo "::error::no digest in the helm push output"
             exit 1
           fi
-          cosign sign --yes "$REGISTRY/charts/inkwall@$digest"
-          echo "$REGISTRY/charts/inkwall:$VERSION@$digest" >> "$GITHUB_STEP_SUMMARY"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      # Retried on Sigstore's transient errors (#586).
+      - env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          hack/ci/retry.sh 4 cosign sign --yes "$REGISTRY/charts/inkwall@$DIGEST"
+          echo "$REGISTRY/charts/inkwall:$VERSION@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+      # The check job is skipped after a failure: say what was left.
+      - if: failure()
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          if [[ -n $DIGEST ]]; then
+            msg="the chart $REGISTRY/charts/inkwall:$VERSION@$DIGEST was pushed but is NOT signed: re-run the failed jobs (they push and sign again) before announcing the release"
+          else
+            msg="the chart $VERSION was not published"
+          fi
+          echo "::error::$msg"
+          echo "**Release failed**: $msg." >> "$GITHUB_STEP_SUMMARY"
 
   binaries:
     needs: [verify, images, chart]
@@ -246,6 +318,25 @@ jobs:
           cosign version
           syft version
           goreleaser --version
+      # Signing must work before anything is published (#586; GoReleaser
+      # signs the checksums before it creates the release): on v0.5.1
+      # the chart was pushed, then cosign couldn't fetch the workflow's OIDC
+      # token, and the chart stayed unsigned until a rerun. Fetch the token
+      # Sigstore gets (retrying transient errors) without printing it; if it
+      # can't be had, nothing is published.
+      - name: signing preflight
+        run: |
+          for i in 1 2 3 4; do
+            if curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sigstore" |
+              jq -e '.value | length > 0' >/dev/null; then
+              echo "OIDC token for Sigstore: available"
+              exit 0
+            fi
+            echo "::warning::no OIDC token for Sigstore, attempt $i of 4"
+            sleep $((15 * i))
+          done
+          echo "::error::no OIDC token for Sigstore after 4 attempts: nothing was published; re-run the failed jobs"
+          exit 1
       - run: goreleaser release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -254,7 +345,17 @@ jobs:
           # tags on the commit, and git sorts v0.1.0-rc.2 after v0.1.0: tagging
           # a release on its last rc's commit built the rc instead.
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+      # The attestation is signed through Sigstore too: once more on a
+      # transient error (#586), after the release exists.
       - id: provenance
+        continue-on-error: true
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+      - if: steps.provenance.outcome == 'failure'
+        run: sleep 30
+      - id: provenance-retry
+        if: steps.provenance.outcome == 'failure'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*.tar.gz
@@ -264,12 +365,25 @@ jobs:
       # JSON line; gh attestation verify --bundle reads it.
       - env:
           GH_TOKEN: ${{ github.token }}
-          BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          BUNDLE: ${{ steps.provenance.outputs.bundle-path || steps.provenance-retry.outputs.bundle-path }}
           VERSION: ${{ needs.verify.outputs.version }}
           TAG: ${{ github.ref_name }}
         run: |
           cp "$BUNDLE" "dist/inkwall_$VERSION.intoto.jsonl"
           gh release upload "$TAG" "dist/inkwall_$VERSION.intoto.jsonl" -R "$GITHUB_REPOSITORY"
+      # The check job is skipped after a failure: say what was left.
+      - if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            msg="the GitHub release $TAG exists but the job failed after creating it: its signed checksums, SBOMs or provenance may be missing; check its assets, then re-run the failed jobs or fix it by hand before announcing the release"
+          else
+            msg="the GitHub release $TAG was not created: nothing of the binaries was published; re-run the failed jobs"
+          fi
+          echo "::error::$msg"
+          echo "**Release failed**: $msg." >> "$GITHUB_STEP_SUMMARY"
 
   # What was published, checked as a user would (#392): the signatures with
   # the documented identity, both platforms and the attestations of each
