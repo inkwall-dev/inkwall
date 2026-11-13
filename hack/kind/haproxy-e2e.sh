@@ -311,8 +311,11 @@ echo "== responses"
 policy Block "$RESPONSES"
 eventually "the Ingress gets the response rules" responses_wired
 eventually "Programmed: HAProxy sends the responses" programmed
+# From Detect mode: the engines enforce Block once they run the new bundle
+# (Ready), which Programmed, the filter proven, doesn't wait for.
+eventually "the policy is Ready: the engines run it in Block mode" ready
 check "a clean response passes" all_are 200 "$HOST" /products/42
-check "a response leaking a SQL error is replaced: 403" all_are 403 "$HOST" /leak -H "$LEAK"
+eventually "a response leaking a SQL error is replaced: 403" all_are 403 "$HOST" /leak -H "$LEAK"
 check "its body is gone" leak_replaced
 eventually "the engines log it as a response deny" logged_response /leak deny
 check "the unprotected Ingress lets the leak through" all_are 200 "$OPEN_HOST" /leak -H "$LEAK"
