@@ -327,7 +327,8 @@ marked not verified.
 
 ### JSON output of explain
 
-`-o json` prints one object, for scripts and for assistants (the MCP server, [0008](design/0008-assistants.md)).
+`-o json` prints one object, for scripts and for assistants: `inkwallctl mcp` serves the same answers
+to an AI assistant ([Using Inkwall from an AI assistant](mcp.md)).
 As for `inkwallctl status`, its fields are only ever added to, never renamed or removed.
 
 `explain policy`:

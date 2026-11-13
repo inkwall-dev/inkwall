@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-11-07
-- Updated: 2026-11-10
+- Updated: 2026-11-11
 - Owner: noureldin
 - Depends on: [0002 §8](0002-system-architecture.md#8-cross-cutting-concerns) and
   [0004](0004-operator.md)
@@ -14,9 +14,9 @@ v0.5.0 the answers exist, but they are spread over `inkwallctl status`, the secu
 `inkwallctl tune`. This document decides how Inkwall helps users get those answers faster, with
 or without an AI model, and the rules every assistant must follow in a security product.
 
-**Implemented:** [§3](#3-inkwallctl-explain), `inkwallctl explain` (v0.6.0, #438). **Not yet:**
-the rest. The MCP server is planned for v0.6.0 (#439); the docs assistant (#440) and the GitHub
-bot (#441) are later.
+**Implemented:** [§3](#3-inkwallctl-explain), `inkwallctl explain` (v0.6.0, #438), and
+[§4](#4-the-mcp-server), the MCP server (v0.6.0, #439). **Not yet:** the docs assistant (#440) and
+the GitHub bot (#441), which are later.
 
 ## Contents
 
@@ -96,6 +96,29 @@ As implemented (#438, [Explaining a policy or a denial](../troubleshooting.md#ex
 
 Resources: the troubleshooting guide and the documentation of the installed version. Every tool is
 read-only. The server uses the user's kubeconfig, so it can do exactly what the user's RBAC allows.
+
+As implemented (#439, [Using Inkwall from an AI assistant](../mcp.md)):
+
+- **The SDK.** The server uses the official Go SDK, [`github.com/modelcontextprotocol/go-sdk`](https://github.com/modelcontextprotocol/go-sdk)
+  (v1.x, stable API), rather than a JSON-RPC implementation of our own. It is maintained by the MCP
+  project with Google, tracks the specification (it runs the MCP conformance suite), and is
+  licensed Apache-2.0 (older contributions MIT), which our Apache-2.0 license allows. It brings
+  three small dependencies into `inkwallctl` only (`jsonschema-go`, `segmentio/encoding`,
+  `uritemplate`), none into the engine or the operator. With the SDK parsing the messages, the
+  protocol parser is the SDK's, fuzzed upstream; our tools' inputs go through the same parsers as
+  the CLI's (`fromRawHTTP`, `fromHAR`), which have fuzz targets.
+- **Tools call the CLI's code in-process**, never a shell: `clusterStatus`, `explainPolicy`,
+  `explainRequest`, `tune` and its validation, and `inkwallctl test`'s bundle checker. Their
+  results are the CLI's `-o json` shapes, typed, so each tool publishes an output schema.
+- **Read-only by construction.** The cluster is a `client.Reader` and pod logs; a test calls every
+  tool against a client that refuses and counts every write verb, and expects none. Every tool is
+  annotated `readOnlyHint`. `test_policy` takes a changed spec (`policySpec`) to check an exclusion
+  in-process, never to apply it.
+- **Untrusted data.** Each result that holds request data lists its request-derived JSON paths in
+  `untrusted`; those tools' descriptions and the server's instructions say they are data, not
+  instructions. No tool reads a local file: a request body starting with `@` is sent as is.
+- **Resources** are `docs/*.md`, embedded at build time (`inkwall://docs/<file>.md`), so they are
+  the installed version's.
 
 ## 5. The docs assistant and the GitHub bot
 
