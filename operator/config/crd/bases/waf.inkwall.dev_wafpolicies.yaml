@@ -269,11 +269,26 @@ spec:
                     - Allow
                     - Deny
                     type: string
+                  streams:
+                    description: |-
+                      Streams is what happens to the body of a streamed response: Server-
+                      Sent Events (text/event-stream) and gRPC responses. Inspect: each
+                      event, or message, is inspected on its own, up to maxBytes; in Block
+                      mode one that leaks ends the stream (the client gets the events
+                      before it), and one over maxBytes gets onOversize. Each event is an
+                      evaluation, so a token-by-token stream costs many. Skip: only their
+                      status and headers are inspected. Through Envoy Gateway and Istio;
+                      engines before 0.6.0 skip them (the policy is then not Enforced).
+                      Unset: Skip.
+                    enum:
+                    - Inspect
+                    - Skip
+                    type: string
                 type: object
                 x-kubernetes-validations:
-                - message: 'maxBytes and onOversize need inspect: true'
+                - message: 'maxBytes, onOversize and streams need inspect: true'
                   rule: (has(self.inspect) && self.inspect) || (!has(self.maxBytes)
-                    && !has(self.onOversize))
+                    && !has(self.onOversize) && !has(self.streams))
               ruleSets:
                 description: |-
                   RuleSets are the rules to run, in order. Empty: the built-in OWASP CRS

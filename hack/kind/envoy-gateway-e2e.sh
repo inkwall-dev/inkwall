@@ -239,6 +239,9 @@ spec:
     - name: ws
       matches: [{path: {type: PathPrefix, value: /ws}}]
       backendRefs: [{name: wsecho, port: 8080}]
+    - name: sse
+      matches: [{path: {type: PathPrefix, value: /sse}}]
+      backendRefs: [{name: wsecho, port: 8080}]
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -724,6 +727,32 @@ leak_logged() {
   envoy_are 200 "$leak_path-$leak_tries" -H "$LEAK" && sleep 1 && logged_response "$leak_path-$leak_tries" log
 }
 eventually "a leak on a fresh path passes, and the engines log it as a response event" leak_logged
+
+# Streams, event by event (#323): wsecho's /sse streams Server-Sent Events.
+echo "== streamed responses (responses.streams: Inspect)"
+policy Block "" '  responses: {inspect: true, streams: Inspect}'
+sse_through() { curl -sN --max-time 10 -H "Host: $HOST" "http://127.0.0.1:$1$2" || true; }
+streams_clean() {
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
+    [[ $(sse_through "$port" /sse) == $'data: hello\n\ndata: world' ]] || return 1
+  done
+}
+eventually "a clean stream passes whole through both Gateways" streams_clean
+streams_cut() {
+  local out
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
+    out=$(sse_through "$port" /sse-leak)
+    [[ $out == *"data: hello"* && $out != *"SQL syntax"* && $out != *"data: after"* ]] || return 1
+  done
+}
+check "a stream with a leaking event ends before it: the events before it pass, it and those after never do" streams_cut
+logged_stream() {
+  "${KUBECTL[@]}" -n "$EG_NS" logs -l app.kubernetes.io/name=envoy -c inkwall-engine --tail=-1 |
+    grep '"security event"' | grep '"path":"/sse-leak"' | grep '"action":"deny"' | grep -q '"stream_event":2'
+}
+eventually "the engines log the leaking event, with its index" logged_stream
+enforced() { [[ $(condition Enforced status) == True ]]; }
+eventually "the policy is Enforced: this build's engines inspect streams" enforced
 
 echo "== detect mode"
 policy Detect

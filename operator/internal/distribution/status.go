@@ -181,6 +181,10 @@ func requirement(p *wafv1alpha1.WAFPolicy) (string, [3]int) {
 		// An older engine inspects requests only (#274).
 		set("spec.responses", [3]int{0, 4, 0})
 	}
+	if r := p.Spec.Responses; r != nil && r.Inspect && r.Streams == wafv1alpha1.StreamsInspect {
+		// An older engine lets streams' bodies through uninspected (#323).
+		set("spec.responses.streams", [3]int{0, 6, 0})
+	}
 	for i, b := range p.Spec.RuleSets {
 		if !b.CRS.IsZero() {
 			// An older engine keeps the CRS's defaults (#352).

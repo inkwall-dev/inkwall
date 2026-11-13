@@ -67,8 +67,10 @@ What's new:
 - **Streamed responses, event by event (opt-in, Envoy).** `inkwall-engine ext-proc
   --inspect-responses --response-streams inspect` inspects each Server-Sent Event and each message
   of a gRPC response on its own, instead of letting their bodies pass uninspected; in block mode a
-  leaking event ends the stream. Bundles carry it as the policy's `responses.streams`, which engines
-  before 0.6.0 ignore. Off by default: nothing changes without it
+  leaking event ends the stream. In a `WAFPolicy` it is `responses: {inspect: true, streams:
+  Inspect}`, through Envoy Gateway and Istio: upgrade the chart first, for the CRD field; a policy
+  that sets it is `Enforced=False` (`EnginesOutdated`) until every engine runs 0.6.0, since an
+  older engine lets streams' bodies through uninspected. Off by default: nothing changes without it
   ([raw Envoy](raw-envoy.md#responses)).
 - **A control plane can deliver and see `WAFIPList`s** (#577). In Managed mode, a policy snapshot
   may carry the IP lists its policies name, written and pruned like the other kinds and labelled

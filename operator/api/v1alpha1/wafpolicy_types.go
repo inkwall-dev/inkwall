@@ -64,6 +64,18 @@ const (
 	GRPCMessagesSkip GRPCMessagesAction = "Skip"
 )
 
+// StreamsAction is whether streamed responses are inspected event by event.
+// +kubebuilder:validation:Enum=Inspect;Skip
+type StreamsAction string
+
+const (
+	// StreamsInspect inspects each event of a Server-Sent Events stream
+	// and each message of a gRPC response on its own.
+	StreamsInspect StreamsAction = "Inspect"
+	// StreamsSkip inspects a stream's status and headers only.
+	StreamsSkip StreamsAction = "Skip"
+)
+
 // WAFPolicySpec is what to enforce on which routes.
 type WAFPolicySpec struct {
 	// TargetRefs are the routes this policy protects, in the policy's
@@ -493,7 +505,7 @@ type WebSocketOrigin string
 type HeaderName string
 
 // ResponsesSpec configures response inspection.
-// +kubebuilder:validation:XValidation:rule="(has(self.inspect) && self.inspect) || (!has(self.maxBytes) && !has(self.onOversize))",message="maxBytes and onOversize need inspect: true"
+// +kubebuilder:validation:XValidation:rule="(has(self.inspect) && self.inspect) || (!has(self.maxBytes) && !has(self.onOversize) && !has(self.streams))",message="maxBytes, onOversize and streams need inspect: true"
 type ResponsesSpec struct {
 	// Inspect turns response inspection on: the status and headers, and
 	// the body when its media type is text (plain, HTML, XML), JSON or XML.
@@ -517,6 +529,18 @@ type ResponsesSpec struct {
 	// Unset: Deny in Block mode, Allow in Detect mode.
 	// +optional
 	OnOversize OversizeAction `json:"onOversize,omitempty"`
+
+	// Streams is what happens to the body of a streamed response: Server-
+	// Sent Events (text/event-stream) and gRPC responses. Inspect: each
+	// event, or message, is inspected on its own, up to maxBytes; in Block
+	// mode one that leaks ends the stream (the client gets the events
+	// before it), and one over maxBytes gets onOversize. Each event is an
+	// evaluation, so a token-by-token stream costs many. Skip: only their
+	// status and headers are inspected. Through Envoy Gateway and Istio;
+	// engines before 0.6.0 skip them (the policy is then not Enforced).
+	// Unset: Skip.
+	// +optional
+	Streams StreamsAction `json:"streams,omitempty"`
 }
 
 // WAFPolicyStatus reports how far the policy got: accepted, programmed into

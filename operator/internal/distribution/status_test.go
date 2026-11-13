@@ -190,6 +190,11 @@ func TestEnforcedOutdatedEngine(t *testing.T) {
 		{"responses, 0.3.1 engine", &wafv1alpha1.ResponsesSpec{Inspect: true}, []string{"0.4.0", "0.3.1"}, ReasonEnginesOutdated},
 		{"responses, new engines", &wafv1alpha1.ResponsesSpec{Inspect: true}, []string{"0.4.0"}, ReasonEnforced},
 		{"responses off", &wafv1alpha1.ResponsesSpec{}, []string{"0.3.1"}, ReasonEnforced},
+		// Streams, event by event (#323): an engine before 0.6.0 lets their
+		// bodies through uninspected.
+		{"streams, 0.5.1 engine", &wafv1alpha1.ResponsesSpec{Inspect: true, Streams: wafv1alpha1.StreamsInspect}, []string{"0.6.0", "0.5.1"}, ReasonEnginesOutdated},
+		{"streams, new engines", &wafv1alpha1.ResponsesSpec{Inspect: true, Streams: wafv1alpha1.StreamsInspect}, []string{"0.6.0-rc.1"}, ReasonEnforced},
+		{"streams skipped, 0.5.1 engine", &wafv1alpha1.ResponsesSpec{Inspect: true, Streams: wafv1alpha1.StreamsSkip}, []string{"0.5.1"}, ReasonEnforced},
 	} {
 		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
 		p.Spec.Responses = tc.spec

@@ -405,8 +405,12 @@ switches such responses to `STREAMED` and answers each chunk with a body mutatio
 through only complete, allowed events, `--response-streams` and the bundle's
 `ResponseConfig.streams`. A gRPC call's exchange is now kept when its policy inspects streams.
 The security event carries
-`stream_event`. `make raw-envoy-e2e` checks a leaking SSE event never reaches the client. **Not
-yet:** the reverse proxy's streams (after its responses), and the operator's field.
+`stream_event`. `make raw-envoy-e2e` checks a leaking SSE event never reaches the client.
+**Built (operator):** `WAFPolicy.spec.responses.streams` (`Inspect` or `Skip`, the default; it
+needs `inspect: true`), the bundle field from it, `Enforced=False` (`EnginesOutdated`) while an
+engine before 0.6.0 runs the policy, and the Envoy Gateway and Istio kind e2e sections (a leaking
+SSE event ends the stream through both Gateways, the events before it pass). **Not yet:** the
+reverse proxy's streams.
 
 ## 3. forward-auth (Traefik `ForwardAuth`, nginx `auth_request`)
 

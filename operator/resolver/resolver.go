@@ -565,6 +565,7 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 		if r.MaxBytes != nil {
 			resp.MaxBytes = *r.MaxBytes
 		}
+		resp.Streams = r.Streams == wafv1alpha1.StreamsInspect
 		p.Responses = resp
 	}
 	if w := s.WebSocket; w != nil && (len(w.AllowedOrigins) > 0 || len(w.RequiredHeaders) > 0) {

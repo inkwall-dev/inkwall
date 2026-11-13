@@ -242,6 +242,9 @@ spec:
     - name: ws
       matches: [{path: {type: PathPrefix, value: /ws}}]
       backendRefs: [{name: wsecho, port: 8080}]
+    - name: sse
+      matches: [{path: {type: PathPrefix, value: /sse}}]
+      backendRefs: [{name: wsecho, port: 8080}]
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -588,6 +591,33 @@ eventually "the EnvoyFilters stream the responses in detect mode" responses_sent
 forward_all
 eventually "detect mode: the leak passes" leak_is 200 "$CUSTOM_PORT" "$HOST"
 eventually "and the engines log it" leak_logged gateway.istio.io/managed=istio.io-gateway-controller "$CUSTOM_PORT" "$HOST"
+
+# Streams, event by event (#323): wsecho's /sse streams Server-Sent Events.
+echo "== streamed responses (responses.streams: Inspect)"
+policy Block '  responses: {inspect: true, streams: Inspect}'
+eventually "the EnvoyFilters send the responses, held" responses_sent BUFFERED_PARTIAL
+forward_all
+sse_through() { curl -sN --max-time 10 -H "Host: $HOST" "http://127.0.0.1:$1$2" || true; }
+streams_clean() {
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
+    [[ $(sse_through "$port" /sse) == $'data: hello\n\ndata: world' ]] || return 1
+  done
+}
+eventually "a clean stream passes whole through both Gateways" streams_clean
+streams_cut() {
+  local out
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
+    out=$(sse_through "$port" /sse-leak)
+    [[ $out == *"data: hello"* && $out != *"SQL syntax"* && $out != *"data: after"* ]] || return 1
+  done
+}
+check "a stream with a leaking event ends before it" streams_cut
+logged_stream() {
+  engine_logs gateway.istio.io/managed=istio.io-gateway-controller | grep '"security event"' |
+    grep '"path":"/sse-leak"' | grep '"action":"deny"' | grep -q '"stream_event":2'
+}
+eventually "the engines log the leaking event, with its index" logged_stream
+eventually "the policy is Programmed" programmed
 
 echo "== unprotected"
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy shared --timeout=60s >/dev/null
