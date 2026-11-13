@@ -117,6 +117,10 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 	switch err := p.Client.Get(ctx, types.NamespacedName{Name: "default"}, &cfg); {
 	case err == nil:
 		s = s.Configured(cfg.Spec.Engine)
+		if left := s.LeftOut(); len(left) > 0 {
+			// The InkwallConfig's EngineConfigured condition says so too.
+			log.FromContext(ctx).Info("injecting the pinned engine without settings its version may not know", "image", s.Image, "settings", left)
+		}
 	case !apierrors.IsNotFound(err):
 		// The pod still gets the engine, with the operator's defaults:
 		// better than none, and the webhook may be failing closed.

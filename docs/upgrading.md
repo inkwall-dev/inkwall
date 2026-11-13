@@ -65,15 +65,35 @@ What's new:
   injected by 0.6.0: restart the controller's pods after the upgrade (with `spec.engine.rollout:
   Automatic` the operator does). A pinned `spec.engine.image` must be 0.6.0 or later. See
   [protecting HAProxy](haproxy.md#what-the-operator-does).
+- **A control plane can deliver and see `WAFIPList`s** (#577). In Managed mode, a policy snapshot
+  may carry the IP lists its policies name, written and pruned like the other kinds and labelled
+  `inkwall.dev/source: saas`; the cluster state lists every `WAFIPList`
+  ([Managed mode](control-plane.md#managed-mode)). A control plane that sends none changes
+  nothing.
 
 What changes by itself:
 
+- **In Managed mode, a `WAFIPList` labelled `inkwall.dev/source: saas` is the control plane's**,
+  as the other kinds were: besides edits, the webhook now refuses deleting it, and the next
+  snapshot that doesn't carry it deletes it. The operator never wrote such lists before 0.6.0, so
+  one you labelled yourself is pruned: find them with
+  `kubectl get wafiplist -A -l inkwall.dev/source=saas`, and remove the label before the cluster
+  is in Managed mode (in Managed mode the webhook refuses removing it).
 - **The engine and the operator take their Go memory limit from the container's cgroup** when
   `MEMORY_LIMIT` isn't set: a standalone engine in a plain container (`docker run --memory 256m`)
   now sets `GOMEMLIMIT` to 90% of that limit, as the chart and the injected engine always did
   from `MEMORY_LIMIT`, which still wins; `GOMEMLIMIT` set by hand still wins over both. The
   `Go memory limit set` log line says where the limit came from
   ([memory limit](standalone-proxy.md#memory-limit)).
+- **An older engine pinned in `InkwallConfig.spec.engine.image` starts.** It used to be injected
+  with every `spec.engine` setting's flag, and an engine before 0.5.0 exits on `--log-level`,
+  `--policy-metrics`, `--json-denials` or `--trusted-hops`, so its pod never became ready. The
+  operator now reads the engine's release from the image tag and leaves out the flags it doesn't
+  know; an image whose tag isn't a release (`latest`, a digest alone) gets only the flags every
+  release knows. The new `EngineConfigured` condition on the InkwallConfig, and a Warning Event,
+  name the settings left out: `kubectl get inkwallconfig default -o
+  jsonpath='{.status.conditions[?(@.type=="EngineConfigured")].message}'`. Pin a custom build with
+  its version in the tag (`:0.6.0@sha256:...`) to keep every setting.
 
 ## From 0.4.x to 0.5.0
 

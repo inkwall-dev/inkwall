@@ -30,12 +30,12 @@ import (
 // In Managed mode the leader writes the control plane's policies as CRDs
 // (0004 §4.9); the validating webhook lets no one else change them.
 //
-// +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies;wafrulesets;clusterwafrulesets,verbs=create;update;delete
+// +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies;wafrulesets;clusterwafrulesets;wafiplists,verbs=create;update;delete
 
 // snapshotKinds are the kinds a PolicySnapshot may carry, in the order they
-// are written: rule sets before the policies that use them. Deletes go in
-// the reverse order.
-var snapshotKinds = []string{"ClusterWAFRuleSet", "WAFRuleSet", "WAFPolicy"}
+// are written: rule sets and IP lists (#577) before the policies that use
+// them. Deletes go in the reverse order.
+var snapshotKinds = []string{"ClusterWAFRuleSet", "WAFRuleSet", "WAFIPList", "WAFPolicy"}
 
 // policyVersionAnnotation, on the identity Secret, is the version of the
 // last snapshot applied, for Hello. It belongs to the cluster ID: a cluster

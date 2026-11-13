@@ -86,6 +86,7 @@ func cluster(t *testing.T, mode wafv1alpha1.ClusterMode, endpoint string) client
 		_ = c.DeleteAllOf(ctx, &corev1.Secret{}, client.InNamespace(ns))
 		_ = c.DeleteAllOf(ctx, &wafv1alpha1.WAFPolicy{}, client.InNamespace(app))
 		_ = c.DeleteAllOf(ctx, &wafv1alpha1.WAFRuleSet{}, client.InNamespace(app))
+		_ = c.DeleteAllOf(ctx, &wafv1alpha1.WAFIPList{}, client.InNamespace(app))
 		_ = c.DeleteAllOf(ctx, &wafv1alpha1.ClusterWAFRuleSet{})
 	})
 	return c
@@ -111,6 +112,14 @@ func obj(kind, namespace, name, spec string, labels map[string]string) *controlp
 
 func policyObj(name, mode string) *controlplanev1.Object {
 	return obj("WAFPolicy", app, name, `{"targetRefs":[{"kind":"Ingress","name":"`+name+`"}],"mode":"`+mode+`"}`, nil)
+}
+
+func ipListObj(name string, cidrs ...string) *controlplanev1.Object {
+	entries := make([]string, len(cidrs))
+	for i, c := range cidrs {
+		entries[i] = `{"cidr":"` + c + `"}`
+	}
+	return obj("WAFIPList", app, name, `{"entries":[`+strings.Join(entries, ",")+`]}`, nil)
 }
 
 func snapshot(v uint64, objs ...*controlplanev1.Object) *controlplanev1.PolicySnapshot {
@@ -254,6 +263,9 @@ func TestSnapshotAllOrNothing(t *testing.T) {
 		{"another kind", obj("InkwallConfig", "", "default", `{"mode":"Standalone"}`, nil), `kind "InkwallConfig"`},
 		{"another API version", &controlplanev1.Object{ApiVersion: "waf.inkwall.dev/v2", Kind: "WAFPolicy", Namespace: app, Name: "bad", Spec: []byte(`{}`)}, "apiVersion"},
 		{"rules from a ConfigMap", obj("WAFRuleSet", app, "bad", `{"source":{"configMapRef":{"name":"r","key":"k"}}}`, nil), "configMapRef"},
+		{"an IP list refused by the schema", ipListObj("bad", "not-an-address"), "spec.entries[0].cidr"},
+		{"an IP list without entries", obj("WAFIPList", app, "bad", `{"entries":[]}`, nil), "spec.entries"},
+		{"an IP list without a namespace", obj("WAFIPList", "", "bad", `{"entries":[{"cidr":"192.0.2.1"}]}`, nil), "no namespace"},
 		{"no namespace", obj("WAFPolicy", "", "bad", `{}`, nil), "no namespace"},
 		{"a namespace that doesn't exist", obj("WAFPolicy", "nowhere", "bad", `{"targetRefs":[{"kind":"Ingress","name":"x"}]}`, nil), "not found"},
 		{"a spec that isn't an object", obj("WAFPolicy", app, "bad", `[]`, nil), "not a JSON object"},
@@ -279,6 +291,87 @@ func TestSnapshotAllOrNothing(t *testing.T) {
 	}
 	if v := policyVersion(t, c); v != "1" {
 		t.Errorf("policy version %q after refusals", v)
+	}
+}
+
+// A snapshot carries the WAFIPLists its policies use (#577): written
+// before the policies, labelled as the control plane's, pruned when the
+// snapshot no longer has them, never taking over the cluster's own list.
+func TestSnapshotWAFIPList(t *testing.T) {
+	c := cluster(t, wafv1alpha1.ModeManaged, "")
+	withIdentity(t, c)
+	ctx := context.Background()
+	mine := &wafv1alpha1.WAFIPList{
+		ObjectMeta: metav1.ObjectMeta{Namespace: app, Name: "mine"},
+		Spec:       wafv1alpha1.WAFIPListSpec{Entries: []wafv1alpha1.IPListEntry{{CIDR: "198.51.100.0/24"}}},
+	}
+	if err := c.Create(ctx, mine); err != nil {
+		t.Fatal(err)
+	}
+	a := newApplier(c)
+
+	policy := obj("WAFPolicy", app, "checkout", `{"targetRefs":[{"kind":"Ingress","name":"checkout"}],"ipLists":{"deny":["scanners"],"allow":["probes"]}}`, nil)
+	scanners := ipListObj("scanners", "203.0.113.0/24", "2001:db8::/32")
+	scanners.Labels = map[string]string{"team": "security", wafv1alpha1.SourceLabel: "gitops"}
+	wantAck(t, a, snapshot(1, policy, scanners, ipListObj("probes", "192.0.2.10")))
+	var l wafv1alpha1.WAFIPList
+	if !exists(t, c, &l, app, "scanners") {
+		t.Fatal("the IP list wasn't written")
+	}
+	if l.Labels[wafv1alpha1.SourceLabel] != wafv1alpha1.SourceSaaS || l.Labels["team"] != "security" ||
+		len(l.Spec.Entries) != 2 || l.Spec.Entries[1].CIDR != "2001:db8::/32" {
+		t.Errorf("IP list %v %+v", l.Labels, l.Spec)
+	}
+	if !exists(t, c, &wafv1alpha1.WAFIPList{}, app, "probes") || !exists(t, c, &wafv1alpha1.WAFPolicy{}, app, "checkout") {
+		t.Error("the other IP list or the policy wasn't written")
+	}
+
+	// The list changes, and the one the policy no longer names goes.
+	policy = obj("WAFPolicy", app, "checkout", `{"targetRefs":[{"kind":"Ingress","name":"checkout"}],"ipLists":{"deny":["scanners"]}}`, nil)
+	wantAck(t, a, snapshot(2, policy, ipListObj("scanners", "203.0.113.7")))
+	if exists(t, c, &l, app, "scanners"); len(l.Spec.Entries) != 1 || l.Spec.Entries[0].CIDR != "203.0.113.7" {
+		t.Errorf("IP list not updated: %+v", l.Spec)
+	}
+	if exists(t, c, &wafv1alpha1.WAFIPList{}, app, "probes") {
+		t.Error("the IP list the snapshot dropped wasn't deleted")
+	}
+
+	// The cluster's own list is never taken over, and a snapshot that
+	// tries is refused whole.
+	wantNack(t, a, snapshot(3, ipListObj("mine", "192.0.2.1")), "isn't the control plane's")
+	var own wafv1alpha1.WAFIPList
+	if exists(t, c, &own, app, "mine"); own.Labels[wafv1alpha1.SourceLabel] != "" || own.Spec.Entries[0].CIDR != "198.51.100.0/24" {
+		t.Errorf("the cluster's own IP list changed: %v %+v", own.Labels, own.Spec)
+	}
+
+	// An empty snapshot deletes the control plane's, never the cluster's.
+	wantAck(t, a, snapshot(4))
+	if exists(t, c, &wafv1alpha1.WAFIPList{}, app, "scanners") || exists(t, c, &wafv1alpha1.WAFPolicy{}, app, "checkout") {
+		t.Error("the control plane's objects weren't deleted")
+	}
+	if !exists(t, c, &wafv1alpha1.WAFIPList{}, app, "mine") {
+		t.Error("the cluster's own IP list was deleted")
+	}
+}
+
+// IP lists are written before the policies that name them, and deleted
+// after.
+func TestSnapshotOrder(t *testing.T) {
+	objs, errs := decode([]*controlplanev1.Object{
+		policyObj("checkout", "Block"),
+		ipListObj("scanners", "203.0.113.0/24"),
+		obj("WAFRuleSet", app, "custom", `{"source":{"builtin":"crs-v4"}}`, nil),
+		obj("ClusterWAFRuleSet", "", "crs", `{"source":{"builtin":"crs-v4"}}`, nil),
+	})
+	if len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	var kinds []string
+	for _, o := range objs {
+		kinds = append(kinds, o.GetKind())
+	}
+	if want := []string{"ClusterWAFRuleSet", "WAFRuleSet", "WAFIPList", "WAFPolicy"}; !slices.Equal(kinds, want) {
+		t.Errorf("written in the order %v, want %v", kinds, want)
 	}
 }
 
@@ -342,12 +435,13 @@ func TestManagedRoundTrip(t *testing.T) {
 	acked := func(v uint64) func() bool {
 		return func() bool { return slices.Contains(cp.Stats().Acks, v) }
 	}
-	if sent, err := cp.SendSnapshot(snapshot(1, policyObj("checkout", "Block"))); !sent || err != nil {
+	policy := obj("WAFPolicy", app, "checkout", `{"targetRefs":[{"kind":"Ingress","name":"checkout"}],"mode":"Block","ipLists":{"deny":["scanners"]}}`, nil)
+	if sent, err := cp.SendSnapshot(snapshot(1, policy, ipListObj("scanners", "203.0.113.0/24"))); !sent || err != nil {
 		t.Fatalf("send: %v %v", sent, err)
 	}
 	waitFor(t, "PolicyAck 1", acked(1))
-	if !exists(t, c, &wafv1alpha1.WAFPolicy{}, app, "checkout") {
-		t.Fatal("the policy wasn't written")
+	if !exists(t, c, &wafv1alpha1.WAFPolicy{}, app, "checkout") || !exists(t, c, &wafv1alpha1.WAFIPList{}, app, "scanners") {
+		t.Fatal("the policy or its IP list wasn't written")
 	}
 
 	// A new stream says which snapshot the cluster has: the control plane
@@ -370,8 +464,8 @@ func TestManagedRoundTrip(t *testing.T) {
 		t.Fatalf("send: %v %v", sent, err)
 	}
 	waitFor(t, "PolicyAck 2", acked(2))
-	if exists(t, c, &wafv1alpha1.WAFPolicy{}, app, "checkout") {
-		t.Error("the policy wasn't deleted")
+	if exists(t, c, &wafv1alpha1.WAFPolicy{}, app, "checkout") || exists(t, c, &wafv1alpha1.WAFIPList{}, app, "scanners") {
+		t.Error("the policy or its IP list wasn't deleted")
 	}
 	if st := cp.Stats(); len(st.Acks) != 2 || len(st.Nacks) != 0 {
 		t.Errorf("acks %v, nacks %v", st.Acks, st.Nacks)
