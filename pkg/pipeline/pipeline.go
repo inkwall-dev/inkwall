@@ -157,6 +157,10 @@ type ResponseConfig struct {
 	// (request.Response.BodyUninspected). OversizeDeny replaces it in
 	// block mode with 502.
 	Oversize OversizeAction
+	// Streams inspects streamed responses (Server-Sent Events, gRPC server
+	// streams) event by event (Exchange.CheckEvent); off, their bodies
+	// pass uninspected (#323).
+	Streams bool
 }
 
 // Observer receives every verdict. Implementations must be fast and safe for
@@ -260,6 +264,7 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 			Inspect:  cfg.Responses.Inspect,
 			MaxBytes: max(cfg.Responses.MaxBytes, 0),
 			Oversize: cfg.Responses.Oversize.Resolve(cfg.Mode),
+			Streams:  cfg.Responses.Streams,
 		},
 		grpcMessages: cfg.GRPCMessages,
 	}
@@ -387,17 +392,19 @@ func (p *Pipeline) inspect(ctx context.Context, r *request.Request, keep bool) (
 	// A gRPC call is inspected without its body, which is binary
 	// protobuf: so it isn't oversized either. With GRPCMessages, the text
 	// in its messages is, and a part that can't be read is handled as an
-	// oversized body. Its response, binary too, isn't inspected.
+	// oversized body. Its response, binary too, is inspected only message
+	// by message, when the policy inspects streams (#323).
 	if call, messages := asGRPC(r); call != nil {
+		keep = keep && p.responses.Streams
 		if !p.grpcMessages {
-			return p.evaluate(ctx, p.request(call, false))
+			return p.evaluate(ctx, p.request(call, keep))
 		}
 		text, complete := grpcText(r, messages)
 		call.GRPCText = text
 		if complete {
-			return p.evaluate(ctx, p.request(call, false))
+			return p.evaluate(ctx, p.request(call, keep))
 		}
-		return p.partly(ctx, call, false)
+		return p.partly(ctx, call, keep)
 	}
 	if !r.BodyTruncated {
 		return p.evaluate(ctx, p.request(r, keep))

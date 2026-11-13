@@ -285,6 +285,17 @@ allow_mode_override: true
   closed). Time to first byte grows by the body's buffering and its inspection. Responses are counted
   in `inkwall_responses_total` and timed in `inkwall_response_check_duration_seconds`.
 
+- **Streams** (new in 0.6.0, off by default): Server-Sent Events (`text/event-stream`) and gRPC
+  responses pass with only their status and headers inspected, unless `--response-streams inspect`
+  is set too. Then each event (its `data` lines) or gRPC message (the text in it, as
+  `--grpc-messages` reads requests) is inspected on its own, up to `--max-response-bytes`; the
+  engine asks Envoy to stream the body (`mode_override`, so `allow_mode_override: true` is needed).
+  In block mode each event is held until it is inspected, and a leaking one ends the stream: Envoy
+  resets it, so the client gets the events before it but neither it nor any after, and a gRPC client
+  sees the call fail. A longer event is cut and gets `--oversize-response`. Each event is one more
+  evaluation: a token-by-token stream is many of them. The security event carries
+  `"stream_event"`, the event's index.
+
 [ext_proc](design/0006-adapter-protocols.md#response-inspection-v040) has the details. With the
 policy [from the operator](#the-policy-from-the-operator), the policy's `responses` field
 (`inspect`, `maxBytes`, `onOversize`) takes the place of the flags, which are refused with

@@ -64,6 +64,12 @@ What's new:
   until the engine runs with the flag. See [protecting HAProxy](haproxy.md#responses). Through the
   HAProxy Kubernetes Ingress Controller a policy with `responses.inspect` is still
   `ResponsesNotInspected` (#470).
+- **Streamed responses, event by event (opt-in, Envoy).** `inkwall-engine ext-proc
+  --inspect-responses --response-streams inspect` inspects each Server-Sent Event and each message
+  of a gRPC response on its own, instead of letting their bodies pass uninspected; in block mode a
+  leaking event ends the stream. Bundles carry it as the policy's `responses.streams`, which engines
+  before 0.6.0 ignore. Off by default: nothing changes without it
+  ([raw Envoy](raw-envoy.md#responses)).
 - **A control plane can deliver and see `WAFIPList`s** (#577). In Managed mode, a policy snapshot
   may carry the IP lists its policies name, written and pruned like the other kinds and labelled
   `inkwall.dev/source: saas`; the cluster state lists every `WAFIPList`

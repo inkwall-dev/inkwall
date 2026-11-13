@@ -25,6 +25,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/rules"
+	"github.com/inkwall-dev/inkwall/pkg/streams"
 	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
 
@@ -1009,4 +1010,42 @@ func grepLines(s string, prefixes ...string) string {
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// A policy's responses.streams (#323): its streamed responses are
+// inspected event by event, with the real rules; off by default.
+func TestResponseStreams(t *testing.T) {
+	b := testBundle()
+	b.Policies[0].Responses = &bundlev1.ResponseConfig{Inspect: true, Streams: true}
+	set, err := Compile(b, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	r := req("shop.example.com", "/chat")
+	v, x := set.CheckExchange(ctx, r)
+	if v.Action != pipeline.ActionAllow || x == nil || !x.Streams() {
+		t.Fatalf("request: %v, exchange %v", v.Action, x)
+	}
+	stream := &request.Response{Status: 200, Headers: http.Header{"Content-Type": {"text/event-stream"}}}
+	x.CheckResponse(ctx, stream)
+	x.Close()
+	ev := x.CheckEvent(ctx, r, stream, streams.Event{Data: []byte("You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version")}, 2)
+	if ev.Action != pipeline.ActionDeny || ev.StreamEvent != 2 || ev.Policy != "shop/site" {
+		t.Errorf("leaking event: %v, event %d, policy %q", ev.Action, ev.StreamEvent, ev.Policy)
+	}
+	if ev := x.CheckEvent(ctx, r, stream, streams.Event{Data: []byte(`{"token":"Hello"}`)}, 3); ev.Action != pipeline.ActionAllow {
+		t.Errorf("clean event: %v %v", ev.Action, ev.RuleIDs)
+	}
+
+	b.Policies[0].Responses = &bundlev1.ResponseConfig{Inspect: true}
+	set, err = Compile(b, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, x = set.CheckExchange(ctx, r)
+	defer x.Close()
+	if x.Streams() {
+		t.Error("streams inspected without responses.streams")
+	}
 }

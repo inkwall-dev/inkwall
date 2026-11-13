@@ -225,7 +225,7 @@ var policyFlags = []string{
 	"mode", "failure-mode", "timeout", "oversize-body", "grpc-messages", "paranoia-level", "anomaly-threshold",
 	"rules", "rules-before-crs", "watch-rules", "skip-paths", "skip-body-paths", "disable-rule-groups",
 	"websocket-origins", "websocket-allow-missing-origin", "websocket-required-headers", "websocket-messages",
-	"inspect-responses", "max-response-bytes", "oversize-response",
+	"inspect-responses", "max-response-bytes", "oversize-response", "response-streams",
 }
 
 // spoeResponseFlags checks spoe's response flags: whether requests are
@@ -304,11 +304,15 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	// Only ext-proc and spoe see responses: the other adapters don't take
 	// the flags, so none claims to inspect them.
 	inspectResponses, maxResponse, oversizeResponse := new(bool), new(int64), new(string)
+	responseStreams := new(string)
 	responseMessages, maxPending, maxPendingBytes, responseTTL := new(bool), new(int), new(int64), new(time.Duration)
 	if command == cmdExtProc || command == cmdSPOE {
 		inspectResponses = fs.Bool("inspect-responses", false, "inspect the upstream's responses too (CRS RESPONSE-95x data leakage rules and your phase 3 and 4 rules); the proxy must send them (Envoy: processing_mode; HAProxy: the inkwall-response group)")
 		maxResponse = fs.Int64("max-response-bytes", policy.DefaultResponseBytes, "with --inspect-responses: response body bytes inspected (0: status and headers only); a longer body has its prefix inspected and gets --oversize-response")
 		oversizeResponse = fs.String("oversize-response", "auto", "with --inspect-responses: responses over --max-response-bytes, or with a body that can't be inspected: deny (502 in block mode), allow, or auto (deny in block mode, allow in detect mode)")
+	}
+	if command == cmdExtProc {
+		responseStreams = fs.String("response-streams", "skip", "with --inspect-responses: streamed responses (Server-Sent Events, gRPC server streams): inspect (each event or message on its own, up to --max-response-bytes; a denied one ends the stream) or skip (their bodies pass uninspected)")
 	}
 	if command == cmdSPOE {
 		responseMessages = fs.Bool("response-messages", false, "bundle mode: HAProxy sends the responses (the inkwall-response group), so requests whose policies inspect responses are kept for them; standalone, --inspect-responses says so")
@@ -494,7 +498,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	if !*inspectResponses {
 		var stray []string
 		fs.Visit(func(f *flag.Flag) {
-			if f.Name == "max-response-bytes" || f.Name == "oversize-response" {
+			if f.Name == "max-response-bytes" || f.Name == "oversize-response" || f.Name == "response-streams" {
 				stray = append(stray, "--"+f.Name)
 			}
 		})
@@ -516,6 +520,13 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 			cfg.responses.Oversize = pipeline.OversizeDeny
 		default:
 			return cfg, fmt.Errorf("--oversize-response must be auto, allow or deny, got %q", *oversizeResponse)
+		}
+		switch *responseStreams {
+		case "inspect":
+			cfg.responses.Streams = true
+		case "skip", "":
+		default:
+			return cfg, fmt.Errorf("--response-streams must be inspect or skip, got %q", *responseStreams)
 		}
 	}
 	if command == cmdSPOE {

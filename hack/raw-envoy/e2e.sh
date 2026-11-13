@@ -22,6 +22,11 @@
 #     responses as docs/raw-envoy.md shows: an app response that leaks a SQL
 #     error is replaced with 403 in block mode (--inspect-responses), and
 #     logged as a response event in detect mode; a clean one passes.
+#   - Streamed responses event by event (#323, --response-streams inspect):
+#     an app (a second Envoy, answering Server-Sent Events) streams a clean
+#     stream, which passes whole, and one with an event leaking a SQL
+#     error, whose stream is reset before the leak reaches the client in
+#     block mode; the event is logged with its index.
 #
 # The Kubernetes sample (kustomization.yaml) is rendered with kubectl, when
 # kubectl is installed. SKIP_BUILD=1 uses the engine image already built
@@ -82,7 +87,7 @@ event_has() { event "$1" | grep -qF "$2"; }
 
 cleanup() {
   if [[ ${KEEP:-} == 1 ]]; then return; fi
-  docker rm -f "$NAME-engine" "$NAME-envoy" "$NAME-app" >/dev/null 2>&1 || true
+  docker rm -f "$NAME-engine" "$NAME-envoy" "$NAME-app" "$NAME-sse" >/dev/null 2>&1 || true
   docker volume rm "$NAME-socket" >/dev/null 2>&1 || true
   docker network rm "$NAME" >/dev/null 2>&1 || true
   [[ -z ${RESPONSES:-} ]] || rm -rf "$RESPONSES"
@@ -230,6 +235,55 @@ eventually "a clean response: 200" get_is 200 /
 check "a response leaking a SQL error: 200" leak_is 200 /detect-leak
 eventually "the leak is logged as a response event" event_has /detect-leak '"phase":"response"'
 check "the event is a log" event_has /detect-leak '"action":"log"'
+# Streamed responses (#323): the app is now a second Envoy answering
+# Server-Sent Events itself (direct_response), the main one sending the
+# responses as above; the engine inspects each event.
+echo "== streamed responses, block mode (--response-streams inspect)"
+docker rm -f "$NAME-app" >/dev/null
+cat >"$RESPONSES/sse-app.yaml" <<'YAML'
+static_resources:
+  listeners:
+    - address:
+        socket_address: {address: 0.0.0.0, port_value: 80}
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: sse
+                route_config:
+                  virtual_hosts:
+                    - name: sse
+                      domains: ["*"]
+                      response_headers_to_add:
+                        - header: {key: content-type, value: text/event-stream}
+                          append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                      routes:
+                        - match: {prefix: /sse-leak}
+                          direct_response:
+                            status: 200
+                            body: {inline_string: "data: hello\n\ndata: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version\n\n"}
+                        - match: {prefix: /}
+                          direct_response:
+                            status: 200
+                            body: {inline_string: "data: hello\n\ndata: world\n\n"}
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+YAML
+chmod 644 "$RESPONSES/sse-app.yaml"
+docker run -d --name "$NAME-sse" --network "$NAME" --network-alias app --user 0:0 \
+  -v "$RESPONSES:/cfg:ro" "$ENVOY_IMAGE" -c /cfg/sse-app.yaml >/dev/null
+EXAMPLES=$RESPONSES start_envoy envoy.yaml
+start_engine --listen=unix:/var/run/inkwall/extproc.sock --mode=block --inspect-responses --response-streams=inspect
+sse() { curl -sN --max-time 10 -H "Host: $HOST" "http://127.0.0.1:$PORT$1" || true; }
+clean_stream() { [[ $(sse /sse) == $'data: hello\n\ndata: world' ]]; }
+eventually "a clean stream passes whole" clean_stream
+leak_cut() { ! sse /sse-leak | grep -qF 'SQL syntax'; }
+check "a stream with a leaking event: the leak never reaches the client" leak_cut
+eventually "the leaking event is logged as a response deny" event_has /sse-leak '"phase":"response"'
+check "with its index in the stream" event_has /sse-leak '"stream_event":2'
 
 if ((failures > 0)); then
   echo "$failures check(s) failed"

@@ -302,7 +302,7 @@ message WebSocketConfig {
 
 // ResponseConfig configures response inspection (CRS RESPONSE-95x data
 // leakage rules, and the user's phase 3 and 4 rules). Only adapters that see
-// responses (ext_proc) inspect them.
+// responses (ext_proc, the SPOE agent, the reverse proxy) inspect them.
 message ResponseConfig {
   // Inspect responses: their status and headers, and their body when its
   // media type is one the rules read and max_bytes is set.
@@ -314,6 +314,10 @@ message ResponseConfig {
   // can't be inspected (an encoding the engine can't decode): DENY
   // replaces it with 502 in block mode.
   OversizeAction on_oversize = 3;
+  // Inspect streamed responses (Server-Sent Events, gRPC server streams)
+  // event by event, each up to max_bytes; false: their bodies pass
+  // uninspected. Engines before 0.6.0 ignore it.
+  bool streams = 4;
 }
 
 // OversizeAction is what happens to a body larger than max_bytes.

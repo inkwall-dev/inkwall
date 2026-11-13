@@ -274,6 +274,18 @@ func TestParseResponseFlags(t *testing.T) {
 			t.Errorf("%s accepted --inspect-responses", cmd)
 		}
 	}
+	// Streams, event by event (#323): off by default, ext-proc only.
+	if cfg, _ := parseFlags(cmdExtProc, []string{"--inspect-responses"}, io.Discard); cfg.responses.Streams {
+		t.Error("streams inspected by default")
+	}
+	if cfg, err := parseFlags(cmdExtProc, []string{"--inspect-responses", "--response-streams", "inspect"}, io.Discard); err != nil || !cfg.responses.Streams {
+		t.Errorf("--response-streams inspect: %v, %v", cfg.responses, err)
+	}
+	for _, args := range [][]string{{"--response-streams", "inspect"}, {"--inspect-responses", "--response-streams", "yes"}} {
+		if _, err := parseFlags(cmdExtProc, args, io.Discard); err == nil {
+			t.Errorf("ext-proc accepted %v", args)
+		}
+	}
 	// A policy's responses come from the bundle in bundle mode.
 	if _, err := parseFlags(cmdExtProc, []string{"--operator", "op:9445", "--inspect-responses"}, io.Discard); err == nil || !strings.Contains(err.Error(), "bundle") {
 		t.Errorf("--inspect-responses with --operator: %v", err)

@@ -137,6 +137,10 @@ func LogEvent(ctx context.Context, logger *slog.Logger, rec *events.Recorder, re
 		slog.String("request_id", req.ID),
 		slog.Duration("inspection_time", v.Duration),
 	}
+	if v.StreamEvent > 0 {
+		// The event, or message, of a streamed response (#323).
+		attrs = append(attrs, slog.Int("stream_event", v.StreamEvent))
+	}
 	if suppressed > 0 {
 		// Lines of this policy and rule left out since the last one.
 		attrs = append(attrs, slog.Uint64("suppressed", suppressed))
