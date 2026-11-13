@@ -80,6 +80,10 @@ type Sidecar struct {
 	PolicyMetrics bool
 	// JSONDenials passes --json-denials.
 	JSONDenials bool
+	// ResponseMessages passes --response-messages (ResponseMessagesFlag):
+	// the proxy sends the responses of the routes whose policies inspect
+	// them (HAProxy, in the inkwall-responses scope of spoe.conf).
+	ResponseMessages bool
 	// Args are the adapter's command and its own flags, e.g.
 	// ["forward-auth"].
 	Args []string
@@ -244,6 +248,9 @@ func Engine(s Sidecar) (corev1.Container, []corev1.Volume) {
 	}
 	if s.JSONDenials {
 		args = append(args, "--json-denials")
+	}
+	if s.ResponseMessages {
+		args = append(args, ResponseMessagesFlag)
 	}
 
 	resources := defaultResources()

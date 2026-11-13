@@ -56,9 +56,15 @@ What's new:
   leaks is replaced with 403 in block mode and logged in detect mode. Copy the new lines of
   `examples/haproxy/spoe.conf` (the group, the message and the longer `register-var-names`) and
   `haproxy.cfg` (the `Accept-Encoding` removal and the `http-response` rules): they do nothing
-  until the engine runs with the flag. See [protecting HAProxy](haproxy.md#responses). Through the
-  HAProxy Kubernetes Ingress Controller a policy with `responses.inspect` is still
-  `ResponsesNotInspected` (#470).
+  until the engine runs with the flag. See [protecting HAProxy](haproxy.md#responses).
+- **Responses through the HAProxy Kubernetes Ingress Controller.** A policy with
+  `responses.inspect` now has the responses of its HAProxy Ingresses inspected, as through Envoy
+  Gateway: the operator injects the engine with `--response-messages` and adds the response rules
+  to the Ingress's backend snippet. Such a policy was `Programmed=False` (`ResponsesNotInspected`) on
+  HAProxy's Ingresses; it stays so, naming the pods, until every controller pod runs an engine
+  injected by 0.6.0: restart the controller's pods after the upgrade (with `spec.engine.rollout:
+  Automatic` the operator does). A pinned `spec.engine.image` must be 0.6.0 or later. See
+  [protecting HAProxy](haproxy.md#what-the-operator-does).
 
 What changes by itself:
 

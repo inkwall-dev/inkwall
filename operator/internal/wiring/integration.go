@@ -92,6 +92,11 @@ type Result struct {
 	// whose policies inspect them. Unset, such a policy is not Programmed
 	// on its targets (ResponsesNotInspected).
 	Responses bool
+	// ResponsesWhy, when Responses is unset, says why the proxy doesn't
+	// send them yet and what to do, for ResponsesNotInspected's message
+	// (HAProxy: pods whose engine was injected without
+	// --response-messages). Empty: the proxy can't send responses at all.
+	ResponsesWhy string
 }
 
 // TargetState is a target as an integration sees it.

@@ -121,10 +121,11 @@ type WAFPolicySpec struct {
 
 	// Responses configures response inspection, for data leaks (the CRS's
 	// RESPONSE-95x rules, and the rule sets' rules on RESPONSE_*
-	// variables). Unset: responses are not inspected. Envoy Gateway and
-	// Istio send responses to the engine; on a route of Traefik (its
-	// ForwardAuth can't) or HAProxy, the policy is not Programmed
-	// (ResponsesNotInspected).
+	// variables). Unset: responses are not inspected. Envoy Gateway,
+	// Istio and the HAProxy Kubernetes Ingress Controller (once its pods
+	// run an engine of 0.6.0 or later) send responses to the engine; on a
+	// route of Traefik (its ForwardAuth can't), or of HAProxy before then,
+	// the policy is not Programmed (ResponsesNotInspected).
 	// +optional
 	Responses *ResponsesSpec `json:"responses,omitempty"`
 

@@ -76,7 +76,10 @@ default) and its pods by the chart's label
   controller's namespace, two files: `/usr/local/etc/haproxy/haproxy-aux.cfg`, the controller's
   [auxiliary configuration file](https://www.haproxy.com/documentation/kubernetes-ingress/ingress-tutorials/auxiliary-config-file/), with the agent's `mode spop` backend; and
   `/usr/local/etc/inkwall/spoe.conf`. A pod that mounts its own `haproxy-aux.cfg` keeps it, and the
-  policy says the pod can't run the filter.
+  policy says the pod can't run the filter. Since 0.6.0 the engine also gets `--response-messages`,
+  and `spoe.conf` has two scopes: `inkwall`, whose request message tells the engine no response
+  follows, and `inkwall-responses`, for the Ingresses whose policies inspect responses, which also
+  sends the response.
 - **Each protected Ingress** gets two annotations: `haproxy.org/standalone-backend: "true"`, so
   that it has a backend of its own (Ingresses to one Service otherwise share one, and the
   controller would apply only one Ingress's snippet), and `haproxy.org/backend-config-snippet`,
@@ -87,6 +90,15 @@ default) and its pods by the chart's label
   snippet of your own on the Ingress stays, after the operator's lines; one on the Service comes
   before them. The previous value of `standalone-backend` is kept in
   `waf.inkwall.dev/haproxy-wired`, and restored when the Ingress is unprotected.
+- **Responses** (since 0.6.0): on an Ingress whose policies inspect responses
+  (`responses.inspect`), the snippet loads the `inkwall-responses` scope and adds the response
+  rules of [`haproxy.cfg`](#the-complete-haproxycfg): the request's `Accept-Encoding` removed,
+  `http-response wait-for-body` for the media types the rules read, the response sent to the
+  engine, and replaced with its status when the engine denies it (403 for a leak) or, failing
+  closed, gives no verdict (502). It does so only once every running controller pod's engine was
+  injected with `--response-messages`: until then no Ingress gets the response rules, and the
+  policy is `Programmed=False` (`ResponsesNotInspected`), naming the pods to restart. What a body
+  HAProxy cuts means is in [Responses](#responses).
 - **The failure mode:** the fail-closed rule is in the snippet when every policy on the Ingress
   fails closed, so HAProxy answers 503 while the engine is down; in `Detect` mode (failing open by
   default) it isn't, and requests pass uninspected.
@@ -137,10 +149,11 @@ a controller run with `--disable-config-snippets` covering backends.
   about 15360 bytes of a request ...`). It reads `tune.bufsize` and `tune.maxrewrite` from the
   ConfigMap the controller's `--configmap` names, within a minute of a change. That is a note: the
   status stays as it is, since larger bodies still fail safe.
-- **Responses:** the operator doesn't send them to the engine yet (#470): a policy with
-  `responses.inspect` on an Ingress the controller serves is `Programmed=False`
-  (`ResponsesNotInspected`), and its requests are inspected. Configured by hand, HAProxy can send
-  them ([Responses](#responses)).
+- **Responses:** controller pods injected before 0.6.0, or running a pinned `spec.engine.image`
+  older than 0.6.0, have an engine without `--response-messages`: while one runs, a policy with
+  `responses.inspect` is `Programmed=False` (`ResponsesNotInspected`) and its responses are not
+  inspected (its requests are). Restart the controller's pods. The probe proves the request filter
+  only, not the response rules.
 - `haproxy.org/standalone-backend` is forced to `true` on a protected Ingress.
 - HTTP probing needs the controller's `http` container port, as the chart names it; with plain
   HTTP disabled (`--disable-http`) only hosts with TLS can be probed.

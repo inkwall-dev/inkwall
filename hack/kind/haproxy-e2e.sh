@@ -14,8 +14,10 @@
 # body.maxBytes (a 48 KB body is oversized) until tune.bufsize is raised, a client can't pass for the probe, a
 # controller pod without the engine leaves the policy not Programmed (its
 # traffic is uninspected), a stopped engine fails closed in block mode and
-# open in detect mode, and unprotecting or uninstalling puts the user's
-# Ingress back as it was. Needs the operator installed (make kind-operator)
+# open in detect mode, a policy with responses.inspect gets the response
+# rules and Programmed, a response leaking a SQL error is replaced with 403
+# in Block mode and logged in Detect mode (#470), and unprotecting or
+# uninstalling puts the user's Ingress back as it was. Needs the operator installed (make kind-operator)
 # with haproxy-e2e among the proxy namespaces; ends with helm uninstall.
 # KEEP=1 leaves the test's objects.
 set -euo pipefail
@@ -169,7 +171,33 @@ spec:
   targetRefs: [{kind: Ingress, name: app}]
   mode: ${1:-Block}
   timeout: 1s
+${2:-}
 YAML
+}
+RESPONSES='  responses: {inspect: true}'
+# whoami echoes the request's headers in its text/plain body: this one makes
+# it leak a MySQL error, which the request rules don't mind.
+LEAK='X-Debug: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version'
+responses_wired() {
+  local a
+  a=$("${KUBECTL[@]}" -n "$NS" get ingress app -o jsonpath='{.metadata.annotations}')
+  [[ $a == *'filter spoe engine inkwall-responses'* && $a == *'http-response send-spoe-group'* ]]
+}
+responses_unwired() {
+  local a
+  a=$("${KUBECTL[@]}" -n "$NS" get ingress app -o jsonpath='{.metadata.annotations}')
+  [[ $a == *'filter spoe engine inkwall config'* && $a != *'http-response'* ]]
+}
+leak_replaced() {
+  for _ in 1 2 3 4; do
+    ! curl -s -H "Host: $HOST" -H "$LEAK" "http://127.0.0.1:$PORT/leak" | grep -qF 'SQL syntax' || return 1
+  done
+}
+# logged_response PATH ACTION: an engine in the controller's pods logged a
+# response event for PATH.
+logged_response() {
+  "${KUBECTL[@]}" -n "$NS" logs -l "$SELECTOR" -c inkwall-engine --tail=-1 |
+    grep '"security event"' | grep '"phase":"response"' | grep "\"action\":\"$2\"" | grep "\"path\":\"$1\"" >/dev/null
 }
 wired() {
   local a
@@ -278,6 +306,24 @@ eventually "and the engines log it" logged "$probe"
 signal_engines STOP
 eventually "engine down in detect mode: requests pass (fails open)" all_are 200 "$HOST" /
 signal_engines CONT
+
+echo "== responses"
+policy Block "$RESPONSES"
+eventually "the Ingress gets the response rules" responses_wired
+eventually "Programmed: HAProxy sends the responses" programmed
+check "a clean response passes" all_are 200 "$HOST" /products/42
+check "a response leaking a SQL error is replaced: 403" all_are 403 "$HOST" /leak -H "$LEAK"
+check "its body is gone" leak_replaced
+eventually "the engines log it as a response deny" logged_response /leak deny
+check "the unprotected Ingress lets the leak through" all_are 200 "$OPEN_HOST" /leak -H "$LEAK"
+check "an attack in the request is still blocked" all_are 403 "$HOST" "$SQLI"
+leak_path=/detect-leak-$RANDOM$RANDOM
+policy Detect "$RESPONSES"
+eventually "the snippet fails open" no_closed_rule
+check "in detect mode, a leaking response passes" all_are 200 "$HOST" "$leak_path" -H "$LEAK"
+eventually "and the engines log it as a response event" logged_response "$leak_path" log
+policy Detect
+eventually "responses off: the response rules go" responses_unwired
 
 echo "== unprotected"
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy shop --timeout=60s >/dev/null

@@ -378,3 +378,35 @@ func (s *syncBuilder) String() string {
 	defer s.mu.Unlock()
 	return s.b.String()
 }
+
+// The request message's optional argument responses says whether HAProxy
+// sends this request's response: false (a backend without the response
+// rules) keeps nothing, even with Responses on, so states its responses
+// never come for can't fill the table. Without it, or true, the request is
+// kept.
+func TestResponsesArgument(t *testing.T) {
+	a := startAgent(t, responsePipeline(t, pipeline.ModeBlock), Config{Responses: true})
+	h := a.dial(t)
+	h.hello()
+	send := func(frameID uint64, extra ...func(*encoder)) map[string]value {
+		args := append([]func(*encoder){argString(ArgMethod, "GET"), argString(ArgPath, "/"),
+			argBinary(ArgHeaders, hdrs("host", "a.example"))}, extra...)
+		h.send(notifyFrame(1, frameID, args...))
+		_, vars := h.ack()
+		return vars
+	}
+	if vars := send(1, argBool(ArgResponses, false)); has(vars, VarResponses) || vars[VarAction].String() != ActionAllow {
+		t.Errorf("responses=false: %+v", vars)
+	}
+	if n := a.srv.pending.len(); n != 0 {
+		t.Errorf("responses=false: %d states kept", n)
+	}
+	if vars := send(2, argBool(ArgResponses, true)); !has(vars, VarResponses) {
+		t.Errorf("responses=true: %+v", vars)
+	}
+	h.send(notifyFrame(1, 3, argString(ArgMethod, "GET"), argString(ArgPath, "/"),
+		argBinary(ArgHeaders, hdrs("host", "a.example")), argString(ArgResponses, "yes")))
+	if _, vars := h.ack(); vars[VarAction].String() != ActionDeny || vars[VarStatus].u != 400 {
+		t.Errorf("responses not a boolean: %+v", vars)
+	}
+}
