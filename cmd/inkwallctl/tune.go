@@ -454,8 +454,14 @@ func (rep *tuneReport) validate(objects config, notes io.Writer) error {
 		return err
 	}
 	_, err = rep.validateInput(in, suspended, notes)
+	if errors.Is(err, errExclusionLimit) {
+		return fmt.Errorf("%w: raise --min-count", err)
+	}
 	return err
 }
+
+// errExclusionLimit: a policy would have more exclusions than it takes.
+var errExclusionLimit = errors.New("over the 64 a policy takes")
 
 // validateInput adds the suggestions to the policies of in, and checks them
 // as validate does. It returns the bundle the operator would publish with
@@ -469,7 +475,7 @@ func (rep *tuneReport) validateInput(in resolver.Input, suspended bool, notes io
 		}
 		p.Spec.Exclusions = append(p.Spec.Exclusions, add...)
 		if n := len(p.Spec.Exclusions); n > 64 {
-			return nil, fmt.Errorf("WAFPolicy %s/%s would have %d exclusions, over the 64 a policy takes: raise --min-count", p.Namespace, p.Name, n)
+			return nil, fmt.Errorf("WAFPolicy %s/%s would have %d exclusions, %w", p.Namespace, p.Name, n, errExclusionLimit)
 		}
 		rep.Patched = append(rep.Patched, *p)
 	}

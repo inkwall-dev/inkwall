@@ -54,7 +54,11 @@ const (
 
 // Sidecar configures the injected engine.
 type Sidecar struct {
-	Image      string
+	Image string
+	// Pinned: Image is the InkwallConfig's spec.engine.image, not the
+	// operator's own engine, so it gets only the flags its release knows
+	// (ImageVersion, LeftOut).
+	Pinned     bool
 	PullPolicy corev1.PullPolicy
 	// PullSecrets are Secrets in the pod's namespace the engine image is
 	// pulled with: Inject adds them to the pod's imagePullSecrets. Proxies
@@ -112,7 +116,7 @@ func defaultResources() corev1.ResourceRequirements {
 // Configured returns s with an InkwallConfig's engine settings.
 func (s Sidecar) Configured(e wafv1alpha1.EngineSpec) Sidecar {
 	if e.Image != "" {
-		s.Image = e.Image
+		s.Image, s.Pinned = e.Image, true
 	}
 	s.Resources = e.Resources
 	s.DenyBeforeBundle = e.BootstrapMode == wafv1alpha1.BootstrapDenyAll
@@ -223,7 +227,7 @@ func Engine(s Sidecar) (corev1.Container, []corev1.Volume) {
 		// entries the InkwallConfig trusts.
 		"--trusted-proxies="+strings.Join(append([]string{"127.0.0.1/32", "::1/128"}, s.TrustedProxies...), ","),
 	)
-	if s.TrustedHops > 0 {
+	if s.passes(optTrustedHops) {
 		args = append(args, fmt.Sprintf("--trusted-hops=%d", s.TrustedHops))
 	}
 	if s.BundleSecret != "" {
@@ -236,13 +240,13 @@ func Engine(s Sidecar) (corev1.Container, []corev1.Volume) {
 	if s.DenyBeforeBundle {
 		args = append(args, "--bootstrap=deny")
 	}
-	if s.LogLevel != "" {
+	if s.passes(optLogLevel) {
 		args = append(args, "--log-level="+s.LogLevel)
 	}
-	if s.PolicyMetrics {
+	if s.passes(optPolicyMetrics) {
 		args = append(args, "--policy-metrics")
 	}
-	if s.JSONDenials {
+	if s.passes(optJSONDenials) {
 		args = append(args, "--json-denials")
 	}
 

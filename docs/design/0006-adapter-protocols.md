@@ -303,8 +303,8 @@ verdicts are counted apart: `inkwall_responses_total{action,reason}` and
 
 **Flags.** Without the operator, `inkwall-engine ext-proc` takes `--inspect-responses`,
 `--max-response-bytes` (64 KiB by default) and `--oversize-response` (`auto`, `allow`, `deny`), the
-policy's `responses` fields. Only `ext-proc` defines them: the other adapters never see a response,
-so none can be told to inspect one. With `--operator` they are refused, as the other policy flags.
+policy's `responses` fields. Only `ext-proc` and, since 0.6.0, `spoe` ([§4](#responses-through-spoe-370))
+define them: the other adapters never see a response, so none can be told to inspect one. With `--operator` they are refused, as the other policy flags.
 
 **Built (engine):** the bundle field, the Coraza response phases, the pipeline's `Exchange`
 (`CheckExchange`, `CheckResponse`), decoding, events and metrics, the ext_proc response stages
@@ -410,58 +410,99 @@ Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/inkwall/issues/282)); 
 - Routes are left uninspected with a condition on the message's `event`; the fail-closed rule
   must leave them out too.
 
-### Responses through SPOE (design, #370)
+### Responses through SPOE (#370)
 
-Proposed, not built: how a policy's `responses` would be inspected through HAProxy, with the same
-rules and budgets as through ext_proc ([§2](#response-inspection-v040)). Until it is built, a
-policy with `responses.inspect` on an HAProxy route is `ResponsesNotInspected`.
+Designed in #370; built in the engine for 0.6.0 (#469). A policy's `responses` are inspected through
+HAProxy with the same rules and budgets as through ext_proc ([§2](#response-inspection-v040)) when
+HAProxy is configured to send them: by hand ([protecting HAProxy](../haproxy.md#responses)), and,
+once #470 wires it, by the operator. Until then, a policy with `responses.inspect` on a route of the
+HAProxy Kubernetes Ingress Controller stays `ResponsesNotInspected`.
 
-- **The message.** A second SPOE message, `inkwall-response`, on the `on-http-response` event of
-  the same SPOE scope: `status` (`status`), `headers` (`res.hdrs_bin`), `body` (`res.body`), and
-  `request_id` (`var(txn.inkwall.request_id)`, which the request's answer set). HAProxy sends the
-  body only after `http-response wait-for-body time <t> at-least <bytes>` (HAProxy 2.4 or later;
-  we need 3.1 for SPOP 2.0 already), and at most what its buffer holds (`tune.bufsize` less
-  `tune.maxrewrite`, as for requests, #336): a body cut there is oversized, so the policy's
-  `responses.onOversize` decides, as a prefix through ext_proc. The route's rules send the message
-  only when the request's answer said its policy inspects responses (`txn.inkwall.responses`),
-  so other routes add nothing to their responses.
-- **Tying the response to its request.** The request and its response are separate NOTIFY frames,
-  possibly on different SPOP connections, so the engine keeps each request's open Coraza
-  transaction (or, cheaper, the variables the response rules read: anomaly scores, paranoia
-  level, the user's `tx` variables) keyed by request ID, in a table bounded by count and memory
-  (by default 10,000 entries or 64 MiB) with a TTL of the route's timeout plus HAProxy's response
-  timeout. An entry goes with its response, or at its TTL. A response whose request isn't there
-  (evicted, an engine restart in between, another engine of a scaled-out agent pool) is a miss:
-  in Block mode it gets the policy's failure mode for responses (by default fail closed: replaced
-  with 502, as an uninspectable response through ext_proc); in Detect mode it passes, logged.
-- **The verdict.** `txn.inkwall.response_action` (`allow` or `deny`) and `response_status`.
-  Block mode replaces a response that leaks with `http-response return status 403` (`502` for
-  oversized or uninspectable when the policy says Deny), with the engine's plain-text body and
-  the request ID; Detect mode only logs. An unset `response_action` (the agent timed out or is
-  down) follows the failure mode: a rule returns 502 first when it fails closed.
-- **Costs.** One more SPOP round trip per inspected response (HAProxy waits for it: SPOP 2.0 is
-  synchronous), the same evaluation cost as through ext_proc (about 0.3 ms per KiB of HTML,
-  `BenchmarkEvaluateExchange`), and the table: a kept transaction is a few KiB, so 10,000
-  responses in flight cost tens of MiB. Requests whose policies don't inspect responses keep
-  nothing.
-- **The operator** adds to the backend snippet, for the Ingresses whose policies inspect
-  responses: the message's group, `http-response wait-for-body`, and the `http-response` rules
-  above; and reports `Result.Responses` for HAProxy only when the controller's HAProxy is 3.1 or
-  later (it is, for the controller versions it wires). The probe ([above](#4-spoe-haproxy-stream-processing-offload-engine)) covers the
-  request filter only; a response probe (the engine answering a probe's response) would prove the
-  response rules, as a follow-up.
+- **Turning it on.** The agent keeps nothing for responses unless told HAProxy sends them:
+  standalone, `--inspect-responses` (which also defines the policy's `responses`); in bundle mode,
+  `--response-messages`, for the operator to pass once it adds the rules below (#470). Without it, a
+  bundle's policy with `responses.inspect` keeps nothing on HAProxy's routes, so states the
+  configuration never asks for can't fill the table.
+- **The request's answer.** For a request let through whose policy inspects responses, the answer
+  also sets `txn.inkwall.responses`, a 128-bit random key the engine keeps the request's inspection
+  under, and `txn.inkwall.response_failure`, `closed` or `open`: the policy's failure mode,
+  resolved for its mode. The key is not the request ID: a client may send its own `X-Request-Id`,
+  and two requests with one ID would swap their inspections, and so their policies.
+- **The message.** `inkwall-response`, in an SPOE group of the same name, which `http-response
+  send-spoe-group` sends after `http-response wait-for-body` (HAProxy 2.4 or later; SPOP 2.0 needs
+  3.1 already): a group rather than the `on-http-response` event, so that the body is there first.
+  Its arguments: `status` (`status`), `headers` (`res.hdrs_bin`), `body` (`res.body`), `key`
+  (`var(txn.inkwall.responses)`) and `failure` (`var(txn.inkwall.response_failure)`). The rules send
+  it, wait for the body and remove the request's `Accept-Encoding` only when
+  `txn.inkwall.responses` is set, so other routes add nothing to their responses; they wait for the
+  body only for the media types the rules read (`rules.ResponseBodyTypes`).
+- **The body.** At most HAProxy's buffer (`tune.bufsize` less `tune.maxrewrite`, #336), and what
+  came within `wait-for-body`'s `time`. A body shorter than its `Content-Length` was cut: its prefix
+  is inspected, and the policy's `responses.onOversize` decides, as through ext_proc. One without
+  `Content-Length` counts as complete only when its frame is well under half the maximum frame
+  size, as a request's body.
+- **The verdict.** `txn.inkwall.response_action` (`allow` or `deny`, on every answer) and
+  `txn.inkwall.response_status`: 403 for a leak (another status a rule names is returned as 403 by
+  the sample rules), 502 for an oversized or uninspectable body under Deny, for a miss that fails
+  closed and for a message the agent can't read, 503 when the evaluation failed (timeout, overload)
+  and the policy fails closed. HAProxy's `http-response return` replaces the response, its headers
+  and body dropped, with that status and a plain-text body naming the request ID. Detect mode only
+  logs. An unset `response_action` (the agent down or timed out) is replaced with 502 by the first
+  rule when `response_failure` is `closed`.
+- **The table** (`pkg/adapters/spoe`, `pendingTable`). Bounded by entries
+  (`--max-pending-responses`, 4096), by an estimate of their memory
+  (`--max-pending-response-bytes`, 64 MiB) and by a TTL (`--response-ttl`, 1 minute, above HAProxy's
+  usual `timeout server`: 30 s in the samples, 50 s in the controller). A state leaves with its
+  response or at its TTL; expired states are swept, oldest first, on each request and response (the
+  TTL is the same for all, so insertion order is expiry order), with no goroutine of its own. A kept
+  Coraza transaction with the Core Rule Set measured about 77 KiB for a GET with a few headers, 124
+  KiB with a 1 KiB urlencoded body, 198 KiB at 16 KiB and 454 KiB at 64 KiB (`runtime.MemStats`,
+  500 transactions); the estimate, 128 KiB plus 6 bytes per body byte and 2 per header byte, is above
+  each. So 64 MiB holds about 500 GETs in flight, well under the engine sidecar's 512 MiB limit; the
+  design's first guess, "a few KiB" per state and 10,000 entries, was two orders of magnitude off.
+- **A full table** refuses the new state, and the request gets its policy's failure mode as an
+  overload (503 in block mode by default), logged: the alternatives were evicting the oldest state,
+  whose response, possibly legitimate and slow, then misses and fails closed, or letting the request
+  through with its response uninspected. Refusing up front keeps the failure on the request that
+  can't be held, before it reaches the app.
+- **A miss** (a response whose state isn't there: expired, the engine restarted, another engine)
+  gets the failure mode HAProxy sent back with it: `open` passes, logged; `closed`, or none, gets
+  502. Shutdown releases the states left: their responses go to the next engine as misses.
+- **Costs.** One more SPOP round trip per inspected response, the evaluation as through ext_proc
+  (about 0.3 ms per KiB of HTML, `BenchmarkEvaluateExchange`), the wait for the body, and the table
+  above. Requests whose policies don't inspect responses keep nothing.
+- **Metrics.** `inkwall_spoe_response_states_total{outcome}` (`kept`, `full`, `answered`,
+  `expired`, `miss`), `inkwall_spoe_response_states` and `inkwall_spoe_response_state_bytes`.
+- **Tests.** Unit tests through the agent with the Core Rule Set (block, detect, misses, the bounds,
+  the TTL, Shutdown), `FuzzSPOEResponse`, and `make haproxy-e2e`: a response leaking a SQL error is
+  replaced with 403 in block mode and passes, logged, in detect mode, through HAProxy 3.2.
+- **The operator** (#470) adds to the backend snippet, for the Ingresses whose policies inspect
+  responses, the group, `wait-for-body`, the `Accept-Encoding` removal and the `http-response`
+  rules of `examples/haproxy/haproxy.cfg`, passes `--response-messages` to the sidecar, and reports
+  `Result.Responses` for HAProxy. The probe covers the request filter only; a response probe would
+  prove the response rules, as a follow-up.
 
-**Open questions:**
+**Open questions, resolved (#469):**
 
-1. Keep the Coraza transaction (exact, as ext_proc; memory per request) or only the variables
-   (cheaper; the response rules lose request variables nothing else copies)?
-2. The failure mode on a miss: a policy setting of its own, or the request's failure mode?
-3. A scaled-out agent (several engine processes behind one HAProxy `mode spop` backend) sends the
-   response to any of them: sticky balancing on the request ID (`balance hdr`-like for SPOP) or a
-   shared table?
-4. `wait-for-body` holds the whole response up to the buffer: should streamed responses (SSE,
-   gRPC) skip the body by content type in HAProxy's rules, as the engine skips them through
-   ext_proc?
+1. *The Coraza transaction or only its variables?* The transaction, as through ext_proc: the
+   response rules see exactly what they see there (request variables, the user's `tx` variables,
+   per-route exclusions), and the code path is the same (`pipeline.Exchange`). Its cost is bounded
+   by the table, above; copying variables would save memory but give HAProxy's routes rules that
+   behave differently from Envoy's.
+2. *The failure mode on a miss?* The request's policy's failure mode (`failureMode`, resolved for
+   its mode), carried by HAProxy in `txn.inkwall.response_failure`: no new policy field (the API
+   stays as it is), and it is known on a miss, when the engine holds nothing. A miss that fails
+   closed gets 502, as an uninspectable response; one that fails open passes, logged.
+3. *A scaled-out agent?* Not supported for responses: the engine runs one per HAProxy (a sidecar in
+   the controller's pod, or a process next to HAProxy), which is how the operator and the guide run
+   it. HAProxy's `mode spop` backends offer no balancing on a transaction variable we could rely on,
+   and a shared table would put a network hop and a store on every response. Behind several engines,
+   responses that reach another engine miss and get the failure mode, which fails safe; the guide
+   says so.
+4. *Streamed responses and `wait-for-body`?* HAProxy waits for the body only of the media types the
+   rules read, so Server-Sent Events, gRPC and downloads aren't held: their status and headers are
+   inspected, as through ext_proc. `wait-for-body`'s `time` bounds the hold for the others; a body
+   slower than it is inspected as far as it came, complete or not by the rules above.
 
 `make haproxy-e2e` runs the configuration of [protecting HAProxy](../haproxy.md) with HAProxy 3.2 in
 Docker. **Built:** `pkg/adapters/spoe`, run as `inkwall-engine spoe`, and since 0.4.0 the operator's
@@ -575,7 +616,7 @@ The messages themselves aren't read yet ([gRPC](../grpc.md)).
 | ext_authz | gRPC call | Buffered, optional | No | Yes | Envoy fallback | Not yet |
 | ext_proc | gRPC stream | Buffered (streamed in observability mode) | Yes (policies with `responses`) | Yes, or no (observability mode) | Envoy Gateway, Envoy, Istio, Contour | Built (Envoy Gateway, Istio, raw Envoy) |
 | forward-auth | HTTP subrequest | If forwarded | No | Yes | Traefik (nginx `auth_request` speaks it too) | Built |
-| SPOE | SPOP | Buffered, up to HAProxy's buffer | Designed, not built ([§4](#responses-through-spoe-design-370)) | Yes | HAProxy | Built (by hand or by the operator: [protecting HAProxy](../haproxy.md)) |
+| SPOE | SPOP | Buffered, up to HAProxy's buffer | Yes (policies with `responses`; configured by hand until #470, [§4](#responses-through-spoe-370)) | Yes | HAProxy | Built (by hand or by the operator: [protecting HAProxy](../haproxy.md)) |
 | `/v1/check` | HTTP (gRPC planned) | Yes | No | Yes | CLI, tests; a Traefik plugin planned | Built |
 | Reverse proxy | HTTP proxying | Yes | Yes | It is the path | VMs, test reference | Built |
 

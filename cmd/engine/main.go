@@ -166,13 +166,20 @@ type engineConfig struct {
 	maxBodyBytes  int64
 	oversize      pipeline.OversizeAction
 	grpcMessages  bool
-	// responses: ext-proc only, the one adapter that sees responses.
-	responses      pipeline.ResponseConfig
-	maxArgs        int
-	paranoiaLevel  int
-	threshold      int
-	rulesFile      string
-	rulesBeforeCRS string
+	// responses: ext-proc and spoe, the adapters that see responses.
+	responses pipeline.ResponseConfig
+	// responseMessages (spoe): HAProxy sends the responses, so requests
+	// are kept for them. Standalone: with --inspect-responses; bundle
+	// mode: --response-messages.
+	responseMessages        bool
+	maxPendingResponses     int
+	maxPendingResponseBytes int64
+	responseTTL             time.Duration
+	maxArgs                 int
+	paranoiaLevel           int
+	threshold               int
+	rulesFile               string
+	rulesBeforeCRS          string
 	// watchRules reloads the rule files when their content changes.
 	watchRules    bool
 	clientIP      clientip.Options
@@ -221,6 +228,34 @@ var policyFlags = []string{
 	"inspect-responses", "max-response-bytes", "oversize-response",
 }
 
+// spoeResponseFlags checks spoe's response flags: whether requests are
+// kept for their responses (--inspect-responses standalone,
+// --response-messages in bundle mode) and the table's bounds, which only
+// apply then.
+func spoeResponseFlags(cfg *engineConfig, fs *flag.FlagSet, inspect, messages, bundle bool) error {
+	switch {
+	case messages && !bundle:
+		return errors.New("--response-messages: only with --operator; standalone, --inspect-responses tells the engine HAProxy sends the responses")
+	case bundle:
+		cfg.responseMessages = messages
+	default:
+		cfg.responseMessages = inspect
+	}
+	var stray []string
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "max-pending-responses", "max-pending-response-bytes", "response-ttl":
+			if !cfg.responseMessages {
+				stray = append(stray, "--"+f.Name)
+			}
+		}
+	})
+	if len(stray) > 0 {
+		return fmt.Errorf("%s: only with --inspect-responses (or --response-messages in bundle mode)", strings.Join(stray, ", "))
+	}
+	return nil
+}
+
 func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, error) {
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -266,13 +301,20 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	maxBody := fs.Int64("max-body-bytes", 64<<10, "request body bytes to inspect (0 disables body inspection); in bundle mode, for policies that don't set body.maxBytes")
 	oversize := fs.String("oversize-body", "auto", "bodies over --max-body-bytes: deny (413 in block mode), allow (forward with the body uninspected, logged), or auto (deny in block mode, allow in detect mode)")
 	grpcMessages := fs.String("grpc-messages", "skip", "gRPC calls' messages: inspect (the text in them, read without a schema; a message that can't be read is handled as an oversized body) or skip (path and metadata only)")
-	// Only ext-proc sees responses: the other adapters don't take the
-	// flags, so none claims to inspect them.
+	// Only ext-proc and spoe see responses: the other adapters don't take
+	// the flags, so none claims to inspect them.
 	inspectResponses, maxResponse, oversizeResponse := new(bool), new(int64), new(string)
-	if command == cmdExtProc {
-		inspectResponses = fs.Bool("inspect-responses", false, "inspect the upstream's responses too (CRS RESPONSE-95x data leakage rules and your phase 3 and 4 rules); Envoy must send them (processing_mode)")
+	responseMessages, maxPending, maxPendingBytes, responseTTL := new(bool), new(int), new(int64), new(time.Duration)
+	if command == cmdExtProc || command == cmdSPOE {
+		inspectResponses = fs.Bool("inspect-responses", false, "inspect the upstream's responses too (CRS RESPONSE-95x data leakage rules and your phase 3 and 4 rules); the proxy must send them (Envoy: processing_mode; HAProxy: the inkwall-response group)")
 		maxResponse = fs.Int64("max-response-bytes", policy.DefaultResponseBytes, "with --inspect-responses: response body bytes inspected (0: status and headers only); a longer body has its prefix inspected and gets --oversize-response")
 		oversizeResponse = fs.String("oversize-response", "auto", "with --inspect-responses: responses over --max-response-bytes, or with a body that can't be inspected: deny (502 in block mode), allow, or auto (deny in block mode, allow in detect mode)")
+	}
+	if command == cmdSPOE {
+		responseMessages = fs.Bool("response-messages", false, "bundle mode: HAProxy sends the responses (the inkwall-response group), so requests whose policies inspect responses are kept for them; standalone, --inspect-responses says so")
+		maxPending = fs.Int("max-pending-responses", spoe.DefaultMaxPendingResponses, "requests kept for their responses at a time; past it, or --max-pending-response-bytes, a request whose response is inspected gets the failure mode (overload)")
+		maxPendingBytes = fs.Int64("max-pending-response-bytes", spoe.DefaultMaxPendingResponseBytes, "estimated memory of the requests kept for their responses (about 128 KiB each, more with a body)")
+		responseTTL = fs.Duration("response-ttl", spoe.DefaultResponseTTL, "how long a request is kept for its response: above HAProxy's timeout server; a later response gets the failure mode")
 	}
 	maxArgs := fs.Int("max-args", 0, "maximum arguments per source (query, body); more is rejected with 400 before CRS runs (0 = 1000)")
 	paranoia := fs.Int("paranoia-level", coraza.DefaultParanoiaLevel, "OWASP CRS paranoia level (1-4)")
@@ -476,6 +518,15 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 			return cfg, fmt.Errorf("--oversize-response must be auto, allow or deny, got %q", *oversizeResponse)
 		}
 	}
+	if command == cmdSPOE {
+		if err := spoeResponseFlags(&cfg, fs, *inspectResponses, *responseMessages, *operator != ""); err != nil {
+			return cfg, err
+		}
+		if *maxPending < 1 || *maxPendingBytes < 1 || *responseTTL <= 0 {
+			return cfg, errors.New("--max-pending-responses, --max-pending-response-bytes and --response-ttl must be positive")
+		}
+		cfg.maxPendingResponses, cfg.maxPendingResponseBytes, cfg.responseTTL = *maxPending, *maxPendingBytes, *responseTTL
+	}
 	cfg.clientIP = clientip.Options{TrustedProxies: splitList(*trusted), TrustedHops: *trustedHops, Header: *clientIPHeader}
 	if _, err := clientip.New(cfg.clientIP); err != nil {
 		return cfg, err
@@ -603,7 +654,9 @@ func serve(ctx context.Context, cfg engineConfig, logger *slog.Logger) error {
 		}
 		ep, err = extproc.New(p, ec)
 	case cmdSPOE:
-		sc := spoe.Config{MaxBodyBytes: maxBody, ClientIP: resolver, ReadTimeout: cfg.readTimeout, Logger: logger, Events: rec, Metrics: metrics}
+		sc := spoe.Config{MaxBodyBytes: maxBody, ClientIP: resolver, ReadTimeout: cfg.readTimeout, Logger: logger, Events: rec, Metrics: metrics,
+			Responses: cfg.responseMessages, MaxPendingResponses: cfg.maxPendingResponses,
+			MaxPendingResponseBytes: cfg.maxPendingResponseBytes, ResponseTTL: cfg.responseTTL}
 		if h, ok := p.(*policy.Holder); ok {
 			// Bundle mode: the operator's HAProxy probe is answered with
 			// the bundle's key.

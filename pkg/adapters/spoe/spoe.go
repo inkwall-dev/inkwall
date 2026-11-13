@@ -50,9 +50,14 @@
 // The client address is src, HAProxy's client (the PROXY protocol's, if
 // HAProxy accepts it), resolved through the trusted proxies with the
 // request's X-Forwarded-For.
+//
+// With Config.Responses, the agent also inspects the responses of the
+// requests whose policies inspect them, which HAProxy sends in the message
+// ResponseMessageName: see responses.go.
 package spoe
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -158,6 +163,20 @@ type Config struct {
 	// ProbeKey returns the key of the operator's probe (the bundle's), or
 	// nil: no probes are answered. Nil: none.
 	ProbeKey func() []byte
+	// Responses keeps the inspection of each request whose policy
+	// inspects responses for its response, which HAProxy sends in the
+	// message ResponseMessageName (responses.go). Off, the agent keeps
+	// nothing, whatever the policies say: HAProxy must be configured to
+	// send the responses first.
+	Responses bool
+	// MaxPendingResponses and MaxPendingResponseBytes bound the requests
+	// kept for their responses: their number and an estimate of their
+	// memory (0: DefaultMaxPendingResponses, DefaultMaxPendingResponseBytes).
+	MaxPendingResponses     int
+	MaxPendingResponseBytes int64
+	// ResponseTTL is how long a request is kept for its response (0:
+	// DefaultResponseTTL): above HAProxy's timeout server.
+	ResponseTTL time.Duration
 }
 
 // Server is an SPOE agent.
@@ -171,6 +190,9 @@ type Server struct {
 	metrics     *telemetry.Metrics
 	events      *events.Recorder
 	probeKey    func() []byte
+	// pending holds the requests kept for their responses; nil when
+	// responses aren't inspected.
+	pending *pendingTable
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -189,6 +211,17 @@ type Server struct {
 func New(p pipeline.Inspector, cfg Config) (*Server, error) {
 	if cfg.MaxBodyBytes < 0 {
 		return nil, fmt.Errorf("max body bytes %d must not be negative", cfg.MaxBodyBytes)
+	}
+	if cfg.MaxPendingResponses < 0 || cfg.MaxPendingResponseBytes < 0 || cfg.ResponseTTL < 0 {
+		return nil, errors.New("the bounds of pending responses must not be negative")
+	}
+	var pending *pendingTable
+	if cfg.Responses {
+		pending = newPendingTable(cmp.Or(cfg.MaxPendingResponses, DefaultMaxPendingResponses),
+			cmp.Or(cfg.MaxPendingResponseBytes, DefaultMaxPendingResponseBytes), cmp.Or(cfg.ResponseTTL, DefaultResponseTTL))
+		if cfg.Metrics != nil {
+			pending.register(cfg.Metrics)
+		}
 	}
 	logger := cfg.Logger
 	if logger == nil {
@@ -212,6 +245,7 @@ func New(p pipeline.Inspector, cfg Config) (*Server, error) {
 		metrics:     cfg.Metrics,
 		events:      cfg.Events,
 		probeKey:    cfg.ProbeKey,
+		pending:     pending,
 		ctx:         ctx,
 		cancel:      cancel,
 		listeners:   map[net.Listener]struct{}{},
@@ -300,6 +334,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.wg.Wait()
 		close(done)
 	}()
+	// The requests kept for their responses go with the connections:
+	// their responses come to another engine, as misses.
+	defer s.pending.closeAll()
 	select {
 	case <-done:
 		s.cancel()
@@ -570,9 +607,16 @@ func (c *conn) notify(f frame) {
 	}
 }
 
-// answer inspects the request of a NOTIFY payload and adds the verdict's
-// variables to ack.
+// answer inspects the request, or the response, of a NOTIFY payload and
+// adds the verdict's variables to ack.
 func (s *Server) answer(ctx context.Context, ack *encoder, payload []byte, maxFrame uint32, peer netip.Addr) {
+	if s.pending != nil {
+		d := decoder{b: payload}
+		if msgs, err := d.messages(); err == nil && isResponse(msgs) {
+			s.answerResponse(ctx, ack, msgs, len(payload), maxFrame)
+			return
+		}
+	}
 	req, path, err := s.toRequest(payload, maxFrame)
 	if err != nil {
 		s.metrics.AdapterError(telemetry.ErrInvalidRequest)
@@ -584,7 +628,11 @@ func (s *Server) answer(ctx context.Context, ack *encoder, payload []byte, maxFr
 	if s.answerProbe(ack, req) {
 		return
 	}
-	v := s.pipeline.Check(ctx, req)
+	v, x := s.check(ctx, req)
+	if x != nil {
+		// Kept for the response, or, the table full, an overload.
+		v = s.keep(ctx, ack, x, req, path, v)
+	}
 	if httpadapter.IsEvent(v) {
 		httpadapter.LogEvent(ctx, s.logger, s.events, req, path, v)
 	}
@@ -596,6 +644,21 @@ func (s *Server) answer(ctx context.Context, ack *encoder, payload []byte, maxFr
 		return
 	}
 	setVerdict(ack, ActionAllow, 0, req.ID)
+}
+
+// check inspects req, and returns its exchange when its response is to be
+// inspected and it was let through.
+func (s *Server) check(ctx context.Context, req *request.Request) (pipeline.Verdict, *pipeline.Exchange) {
+	ei, ok := s.pipeline.(pipeline.ExchangeInspector)
+	if s.pending == nil || !ok {
+		return s.pipeline.Check(ctx, req), nil
+	}
+	v, x := ei.CheckExchange(ctx, req)
+	if x != nil && v.Action == pipeline.ActionDeny {
+		x.Close()
+		x = nil
+	}
+	return v, x
 }
 
 // answerProbe answers the operator's probe, uninspected, and reports

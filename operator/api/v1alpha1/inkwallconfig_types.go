@@ -180,7 +180,11 @@ const (
 // EngineSpec configures the engine sidecars.
 type EngineSpec struct {
 	// Image is the engine image. Empty means the image released with this
-	// operator version.
+	// operator version. An image whose tag is an older release (0.4.1) is
+	// injected without the settings below that release doesn't know, and
+	// one whose tag isn't a release (latest, a digest alone) without any
+	// setting some release doesn't know, so it starts: the EngineConfigured
+	// condition names them.
 	// +kubebuilder:validation:MaxLength=512
 	// +optional
 	Image string `json:"image,omitempty"`

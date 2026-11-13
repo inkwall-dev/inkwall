@@ -744,3 +744,45 @@ func TestParseJSONDenialsFlag(t *testing.T) {
 		t.Fatalf("--json-denials: %t, %v", cfg.jsonDenials, err)
 	}
 }
+
+// spoe takes the response flags too, and the bounds of the requests it
+// keeps for their responses. In bundle mode, --response-messages says
+// HAProxy sends the responses; standalone, --inspect-responses does.
+func TestParseSPOEResponseFlags(t *testing.T) {
+	cfg, err := parseFlags(cmdSPOE, nil, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.responses.Inspect || cfg.responseMessages {
+		t.Error("responses inspected by default")
+	}
+	cfg, err = parseFlags(cmdSPOE, []string{"--inspect-responses", "--max-response-bytes", "4096",
+		"--max-pending-responses", "10", "--max-pending-response-bytes", "1048576", "--response-ttl", "2m"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.responses.Inspect || cfg.responses.MaxBytes != 4096 || !cfg.responseMessages ||
+		cfg.maxPendingResponses != 10 || cfg.maxPendingResponseBytes != 1<<20 || cfg.responseTTL != 2*time.Minute {
+		t.Errorf("config %+v", cfg)
+	}
+	cfg, err = parseFlags(cmdSPOE, []string{"--operator", "op:9445", "--response-messages"}, io.Discard)
+	if err != nil || !cfg.responseMessages {
+		t.Errorf("--response-messages in bundle mode: %v, %v", cfg.responseMessages, err)
+	}
+	for _, args := range [][]string{
+		{"--response-messages"}, // standalone: --inspect-responses
+		{"--max-pending-responses", "10"},
+		{"--inspect-responses", "--max-pending-responses", "-1"},
+		{"--inspect-responses", "--max-pending-response-bytes", "0"},
+		{"--inspect-responses", "--response-ttl", "0s"},
+	} {
+		if _, err := parseFlags(cmdSPOE, args, io.Discard); err == nil {
+			t.Errorf("spoe accepted %v", args)
+		}
+	}
+	for _, cmd := range []string{cmdExtProc, cmdProxy} {
+		if _, err := parseFlags(cmd, []string{"--upstream", "http://app", "--response-messages"}, io.Discard); err == nil {
+			t.Errorf("%s accepted --response-messages", cmd)
+		}
+	}
+}
