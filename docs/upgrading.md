@@ -64,6 +64,11 @@ What's new:
   until the engine runs with the flag. See [protecting HAProxy](haproxy.md#responses). Through the
   HAProxy Kubernetes Ingress Controller a policy with `responses.inspect` is still
   `ResponsesNotInspected` (#470).
+- **The standalone proxy inspects responses** (#323). `inkwall-engine proxy --inspect-responses`
+  inspects what the upstream answers, as ext_proc does: a response that leaks is replaced in block
+  mode and logged in detect mode; in bundle mode, a policy's `responses` decide. It holds at most
+  `--max-held-response-bytes` (64 MiB) of bodies at once; past it, a response gets the failure
+  mode. See [Responses](standalone-proxy.md#responses). Without the flag nothing changes.
 - **Streamed responses, event by event (opt-in, Envoy).** `inkwall-engine ext-proc
   --inspect-responses --response-streams inspect` inspects each Server-Sent Event and each message
   of a gRPC response on its own, instead of letting their bodies pass uninspected; in block mode a

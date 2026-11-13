@@ -93,6 +93,26 @@ func (e *Exchange) CheckResponse(ctx context.Context, resp *request.Response) Ve
 	return v
 }
 
+// Refused is the verdict of a response the adapter can't hold for
+// inspection (the bodies it holds are at their bound): the failure mode,
+// as for an evaluation refused a slot (ReasonOverload), reported as a
+// response's verdict. The exchange is spent.
+func (e *Exchange) Refused() Verdict {
+	e.mu.Lock()
+	e.used = true
+	e.mu.Unlock()
+	v := e.p.failed(ReasonOverload)
+	v.Response = true
+	v.Policy = e.p.policy
+	if e.p.observer != nil {
+		e.p.observer.ObserveVerdict(v)
+	}
+	if e.observe != nil {
+		e.observe(v)
+	}
+	return v
+}
+
 func (e *Exchange) check(ctx context.Context, resp *request.Response) Verdict {
 	p := e.p
 	e.mu.Lock()

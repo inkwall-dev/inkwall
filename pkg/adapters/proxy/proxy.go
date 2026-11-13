@@ -11,6 +11,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	"golang.org/x/net/http/httpguts"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/inkwall-dev/inkwall/pkg/adapters/internal/httpadapter"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
@@ -82,6 +84,11 @@ type Config struct {
 	// UpstreamCAs verifies an https:// upstream's certificate (nil: the
 	// system's roots).
 	UpstreamCAs *x509.CertPool
+	// MaxHeldResponseBytes bounds the response bodies held at once for
+	// inspection, each up to its policy's limit (and one byte): past it,
+	// a response gets the failure mode, as an evaluation refused for
+	// overload (0: DefaultMaxHeldResponseBytes).
+	MaxHeldResponseBytes int64
 }
 
 // Transport returns the upstream's transport: HTTP/2 over TLS by ALPN, or
@@ -123,6 +130,10 @@ type Handler struct {
 	readTimeout time.Duration
 	// live are the open WebSockets (longlived.go).
 	live liveConns
+	// held bounds the response bodies held for inspection, heldMax bytes
+	// (response.go).
+	held    *semaphore.Weighted
+	heldMax int64
 }
 
 // New returns a Handler that inspects requests with p.
@@ -169,9 +180,16 @@ func New(p pipeline.Inspector, cfg Config) (*Handler, error) {
 	if cfg.WebSocketIdleTimeout < 0 || cfg.BodyReadTimeout < 0 {
 		return nil, errors.New("timeouts must not be negative")
 	}
-	return &Handler{pipeline: p, proxy: rp, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events,
+	if cfg.MaxHeldResponseBytes < 0 {
+		return nil, errors.New("max held response bytes must not be negative")
+	}
+	h := &Handler{pipeline: p, proxy: rp, maxBody: cfg.MaxBodyBytes, clientIP: resolver, logger: logger, events: cfg.Events,
 		messages: cfg.WebSocketMessages, metrics: cfg.Metrics, jsonDenials: cfg.JSONDenials,
-		wsIdle: cfg.WebSocketIdleTimeout, bodyTimeout: cfg.BodyReadTimeout, readTimeout: cfg.ReadTimeout}, nil
+		wsIdle: cfg.WebSocketIdleTimeout, bodyTimeout: cfg.BodyReadTimeout, readTimeout: cfg.ReadTimeout}
+	h.held, h.heldMax = newHeld(cfg.MaxHeldResponseBytes)
+	rp.ModifyResponse = h.inspectResponse
+	rp.ErrorHandler = h.proxyError
+	return h, nil
 }
 
 // ServeHTTP inspects r, then denies it or forwards it to the upstream.
@@ -216,7 +234,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	v := h.pipeline.Check(r.Context(), req)
+	// When the request's policy inspects responses, its evaluation is kept
+	// for the response (inspectResponse).
+	var v pipeline.Verdict
+	var ex *pipeline.Exchange
+	if ei, ok := h.pipeline.(pipeline.ExchangeInspector); ok {
+		v, ex = ei.CheckExchange(r.Context(), req)
+		defer ex.Close()
+	} else {
+		v = h.pipeline.Check(r.Context(), req)
+	}
 	if httpadapter.IsEvent(v) {
 		httpadapter.LogEvent(r.Context(), h.logger, h.events, req, r.URL.Path, v)
 	}
@@ -237,6 +264,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w = &liveWriter{ResponseWriter: &inspectingWriter{ResponseWriter: w, h: h, ctx: r.Context(), req: req, path: r.URL.Path, mi: h.pipeline.(messageInspector)}, h: h}
 	} else if httpguts.HeaderValuesContainsToken(r.Header.Values("Upgrade"), "websocket") {
 		w = &liveWriter{ResponseWriter: &countingWriter{ResponseWriter: w, metrics: h.metrics}, h: h}
+	}
+	if ex != nil {
+		if ex.BodyLimit() > 0 {
+			// Response bodies as the upstream has them, which the rules
+			// can read: not in an encoding they can't decode.
+			r.Header.Del("Accept-Encoding")
+		}
+		r = r.WithContext(context.WithValue(r.Context(), exchangeKey{}, &exchange{ex: ex, req: req, path: r.URL.Path}))
 	}
 	h.proxy.ServeHTTP(w, r)
 }

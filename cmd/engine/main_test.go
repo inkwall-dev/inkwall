@@ -28,6 +28,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	"github.com/inkwall-dev/inkwall/pkg/adapters/proxy"
 	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
@@ -236,8 +237,8 @@ func TestParseExtProcFlags(t *testing.T) {
 	}
 }
 
-// Response inspection is ext-proc's alone: the other adapters never see
-// the response, so they don't accept the flags.
+// Response inspection is for ext-proc, spoe and the proxy: the other
+// adapters never see the response, so they don't accept the flags.
 func TestParseResponseFlags(t *testing.T) {
 	cfg, err := parseFlags(cmdExtProc, nil, io.Discard)
 	if err != nil {
@@ -269,7 +270,7 @@ func TestParseResponseFlags(t *testing.T) {
 	if _, err := parseFlags(cmdExtProc, []string{"--max-response-bytes", "4096"}, io.Discard); err == nil {
 		t.Error("ext-proc accepted --max-response-bytes without --inspect-responses")
 	}
-	for _, cmd := range []string{cmdProxy, cmdForwardAuth, cmdCheck} {
+	for _, cmd := range []string{cmdForwardAuth, cmdCheck} {
 		if _, err := parseFlags(cmd, []string{"--upstream", "http://app", "--inspect-responses"}, io.Discard); err == nil {
 			t.Errorf("%s accepted --inspect-responses", cmd)
 		}
@@ -285,6 +286,22 @@ func TestParseResponseFlags(t *testing.T) {
 		if _, err := parseFlags(cmdExtProc, args, io.Discard); err == nil {
 			t.Errorf("ext-proc accepted %v", args)
 		}
+	}
+	// The engine's proxy sees responses (#323), and bounds the bodies it
+	// holds for them.
+	cfg, err = parseFlags(cmdProxy, []string{"--upstream", "http://app", "--inspect-responses", "--max-response-bytes", "4096",
+		"--max-held-response-bytes", "1048576"}, io.Discard)
+	if err != nil || !cfg.responses.Inspect || cfg.responses.MaxBytes != 4096 || cfg.maxHeldResponseBytes != 1<<20 {
+		t.Errorf("proxy --inspect-responses: %+v, %d, %v", cfg.responses, cfg.maxHeldResponseBytes, err)
+	}
+	if cfg, _ := parseFlags(cmdProxy, []string{"--upstream", "http://app"}, io.Discard); cfg.maxHeldResponseBytes != proxy.DefaultMaxHeldResponseBytes {
+		t.Errorf("proxy's default held response bytes: %d", cfg.maxHeldResponseBytes)
+	}
+	if _, err := parseFlags(cmdProxy, []string{"--upstream", "http://app", "--max-held-response-bytes", "0"}, io.Discard); err == nil {
+		t.Error("proxy accepted --max-held-response-bytes 0")
+	}
+	if _, err := parseFlags(cmdProxy, []string{"--upstream", "http://app", "--operator", "op:9445", "--inspect-responses"}, io.Discard); err == nil || !strings.Contains(err.Error(), "bundle") {
+		t.Errorf("proxy --inspect-responses with --operator: %v", err)
 	}
 	// A policy's responses come from the bundle in bundle mode.
 	if _, err := parseFlags(cmdExtProc, []string{"--operator", "op:9445", "--inspect-responses"}, io.Discard); err == nil || !strings.Contains(err.Error(), "bundle") {
