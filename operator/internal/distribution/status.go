@@ -173,6 +173,11 @@ func requirement(p *wafv1alpha1.WAFPolicy) (string, [3]int) {
 	if b := p.Spec.Body; b != nil && b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect {
 		set("spec.body.grpcMessages", [3]int{0, 4, 0})
 	}
+	if b := p.Spec.Body; b != nil && b.GRPCStreams == wafv1alpha1.GRPCStreamsPerMessage {
+		// An older engine buffers the body: a long client stream or a
+		// bidirectional call fails there (#315).
+		set("spec.body.grpcStreams", [3]int{0, 6, 0})
+	}
 	if b := p.Spec.Body; b != nil && b.GRPC == wafv1alpha1.GRPCDeny {
 		// An older engine lets gRPC through (#367).
 		set("spec.body.grpc", [3]int{0, 5, 0})

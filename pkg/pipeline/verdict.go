@@ -136,7 +136,8 @@ type Verdict struct {
 	// WebSocket, not on a request.
 	WebSocketMessage bool
 	// StreamEvent, with Response, is the index (from 1) of the event or
-	// message of a streamed response the verdict is about; 0 for a whole
-	// response.
+	// message of a streamed response the verdict is about; without
+	// Response, of the message of a gRPC call's request stream (#315). 0
+	// for a whole request or response.
 	StreamEvent int
 }

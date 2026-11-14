@@ -125,6 +125,12 @@ type Config struct {
 	// protobuf) is handled as an oversized body. Off by default: see
 	// docs/design/0002 §8.7.
 	GRPCMessages bool
+	// GRPCPerMessage, with GRPCMessages, inspects a gRPC call's messages
+	// one by one as they come, through the adapters that can stream a
+	// request body (ext_proc), instead of the buffered body: long client
+	// streams and bidirectional calls then work (#315, GRPCStream). Other
+	// adapters inspect the buffered body as without it.
+	GRPCPerMessage bool
 	// WebSocket is what a WebSocket handshake must meet (allowed origins,
 	// required headers), checked before the rules. Nil: nothing more than
 	// any request.
@@ -233,6 +239,8 @@ type Pipeline struct {
 	responses ResponseConfig
 	// grpcMessages: the text in gRPC calls' messages is inspected.
 	grpcMessages bool
+	// grpcPerMessage: and one by one, where the adapter can (#315).
+	grpcPerMessage bool
 }
 
 // New returns a pipeline that evaluates requests with eval.
@@ -266,7 +274,8 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 			Oversize: cfg.Responses.Oversize.Resolve(cfg.Mode),
 			Streams:  cfg.Responses.Streams,
 		},
-		grpcMessages: cfg.GRPCMessages,
+		grpcMessages:   cfg.GRPCMessages,
+		grpcPerMessage: cfg.GRPCMessages && cfg.GRPCPerMessage,
 	}
 }
 

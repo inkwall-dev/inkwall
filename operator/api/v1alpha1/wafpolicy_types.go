@@ -64,6 +64,20 @@ const (
 	GRPCMessagesSkip GRPCMessagesAction = "Skip"
 )
 
+// GRPCStreamsMode is how a gRPC call's messages are read: the buffered
+// body, or one by one as they come.
+// +kubebuilder:validation:Enum=Buffer;PerMessage
+type GRPCStreamsMode string
+
+const (
+	// GRPCStreamsBuffer inspects the messages in the body the proxy
+	// buffers, up to maxBytes in all (the default).
+	GRPCStreamsBuffer GRPCStreamsMode = "Buffer"
+	// GRPCStreamsPerMessage inspects each message as it comes, up to
+	// maxBytes each, through Envoy (#315).
+	GRPCStreamsPerMessage GRPCStreamsMode = "PerMessage"
+)
+
 // WAFPolicySpec is what to enforce on which routes.
 type WAFPolicySpec struct {
 	// TargetRefs are the routes this policy protects, in the policy's
@@ -413,6 +427,7 @@ func (m *ExclusionMatch) Target() bool {
 }
 
 // BodySpec configures request body inspection.
+// +kubebuilder:validation:XValidation:rule="!has(self.grpcStreams) || self.grpcStreams != 'PerMessage' || (has(self.grpcMessages) && self.grpcMessages == 'Inspect' && (!has(self.inspect) || self.inspect))",message="grpcStreams: PerMessage needs grpcMessages: Inspect and body inspection"
 type BodySpec struct {
 	// Inspect turns body inspection on or off.
 	// +kubebuilder:default=true
@@ -440,6 +455,17 @@ type BodySpec struct {
 	// call's path and metadata are inspected. See docs/grpc.md.
 	// +optional
 	GRPCMessages GRPCMessagesAction `json:"grpcMessages,omitempty"`
+
+	// GRPCStreams decides how the messages are read, with grpcMessages:
+	// Inspect. PerMessage inspects each message on its own as it comes,
+	// up to maxBytes each, so long client streams and bidirectional calls
+	// work; the messages before a denied one have already reached the
+	// application. Through Envoy Gateway and Istio; other proxies buffer
+	// the body as with Buffer. Unset: Buffer, the body the proxy buffers,
+	// up to maxBytes in all. Requires engines 0.6.0 or later. See
+	// docs/grpc.md.
+	// +optional
+	GRPCStreams GRPCStreamsMode `json:"grpcStreams,omitempty"`
 
 	// GRPC: Deny refuses requests with a gRPC or gRPC-Web content type
 	// (403, or the gRPC status PermissionDenied to a gRPC client; logged in
