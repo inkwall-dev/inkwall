@@ -358,7 +358,8 @@ verdicts are counted apart: `inkwall_responses_total{action,reason}` and
 
 **Measured under load (#344).** Same 12-thread i7-1255U, 2026-11-04, shared with other jobs:
 
-- **Through Envoy Gateway** (`make kind-response-load`): one Envoy pod with the engine, one
+- **Through Envoy Gateway** (`make kind-response-load PROXIES=envoy-gateway`; without `PROXIES`, every
+  proxy, #600): one Envoy pod with the engine, one
   `WAFPolicy` in Block mode on an HTTPRoute to nginx, 8 closed-loop clients for 20 s per run
   (`hack/loadgen`, from the host to the Envoy Service's NodePort), every response a 200. Envoy,
   the engine, nginx and the clients share the machine, so the throughput is the machine's, not a

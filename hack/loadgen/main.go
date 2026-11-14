@@ -5,6 +5,14 @@
 // clients for a while, and prints the latency percentiles and the status
 // codes as one JSON line: a small, closed-loop load test for the kind
 // measurements (hack/kind/response-load.sh), not a benchmark tool.
+//
+// With -clean (and -attacks), it sends a mix of clean requests and attacks
+// instead, at a steady rate, and reports every -report which got through
+// and which were denied (mix.go): the soak test's traffic
+// (hack/kind/soak.sh).
+//
+//	loadgen -url http://127.0.0.1:30080 -host shop.example.com -clean clean.http \
+//	  -attacks attacks.http -app-header X-Soak-App -rate 20 -d 24h -report 10s
 package main
 
 import (
@@ -15,9 +23,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -49,7 +59,32 @@ func main() {
 	warm := flag.Duration("warmup", 3*time.Second, "how long to send before measuring")
 	var hs headers
 	flag.Var(&hs, "H", "extra header, \"Name: value\" (repeatable)")
+	cleanFile := flag.String("clean", "", "mix mode: file of raw HTTP requests every one of which the app must answer")
+	attackFile := flag.String("attacks", "", "mix mode: file of raw HTTP requests the WAF must deny")
+	appHeader := flag.String("app-header", "", "mix mode: response header only the app sets")
+	rate := flag.Float64("rate", 10, "mix mode: requests per second")
+	attackEvery := flag.Int("attack-every", 5, "mix mode: one request in this many is an attack")
+	report := flag.Duration("report", 10*time.Second, "mix mode: how often to print the counts")
 	flag.Parse()
+	if *cleanFile != "" {
+		// Until -d, or until stopped (SIGINT, SIGTERM) if -d is 0.
+		run := func() error {
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			if *dur > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, *dur)
+				defer cancel()
+			}
+			return mixMain(ctx, *cleanFile, *attackFile, *url, *host, *appHeader, *rate, *attackEvery, *conc,
+				*report, 10*time.Second, os.Stdout)
+		}
+		if err := run(); err != nil {
+			fmt.Fprintln(os.Stderr, "loadgen:", err)
+			os.Exit(2)
+		}
+		return
+	}
 	if *url == "" {
 		fmt.Fprintln(os.Stderr, "loadgen: -url is required")
 		os.Exit(2)
