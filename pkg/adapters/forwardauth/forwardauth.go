@@ -164,7 +164,7 @@ func (h *Handler) toRequest(r *http.Request) (*request.Request, string, error) {
 	// As the reverse proxy: a Host the rules would read one way and the
 	// application another is refused (#365).
 	if !httpguts.ValidHostHeader(host) {
-		return nil, "", fmt.Errorf("invalid X-Forwarded-Host %q", host)
+		return nil, "", errors.New("invalid X-Forwarded-Host")
 	}
 	scheme := "http"
 	if proto, _ := optional(r.Header, "X-Forwarded-Proto"); strings.EqualFold(proto, "https") {
