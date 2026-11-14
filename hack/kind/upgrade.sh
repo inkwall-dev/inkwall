@@ -115,6 +115,27 @@ else
 fi
 kind load docker-image "$OPERATOR_IMAGE" "$ENGINE_IMAGE" --name "$CLUSTER"
 
+# registry_retry COMMAND...: a command that reads a registry (a chart),
+# retried: a registry hiccup isn't a result. Its error shows; after the last
+# try the test stops (set -e), never reading an empty answer as one (#606).
+registry_retry() {
+  local i
+  for i in 1 2 3 4; do
+    "$@" && return 0
+    echo "retrying ($i) after a failed registry read: $*" >&2
+    sleep $((i * 5))
+  done
+  "$@"
+}
+# The old chart's values, read once: which settings it has decides what
+# the test sets and expects (proxyNamespaces, integrations).
+FROM_VALUES=$(registry_retry helm show values "$FROM_CHART" --version "$FROM_VERSION")
+if [[ -z $FROM_VALUES ]]; then
+  echo "chart $FROM_VERSION's values from $FROM_CHART are empty" >&2
+  exit 1
+fi
+from_has() { grep -q "^  $1:" <<<"$FROM_VALUES"; }
+
 # Envoy Gateway before Inkwall, so the release's rbac.integrations (auto)
 # grants it.
 PROXY_NAMESPACES=$TRAEFIK_NS
@@ -125,9 +146,9 @@ if $eg; then
     curl -fsSL "https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml" |
       "${KUBECTL[@]}" apply --server-side --force-conflicts -f - >/dev/null
   fi
-  helm template eg-crds oci://docker.io/envoyproxy/gateway-crds-helm --version "$EG_VERSION" \
-    --set crds.gatewayAPI.enabled=false --set crds.envoyGateway.enabled=true 2>/dev/null |
-    "${KUBECTL[@]}" apply --server-side --force-conflicts -f - >/dev/null
+  eg_crds=$(registry_retry helm template eg-crds oci://docker.io/envoyproxy/gateway-crds-helm --version "$EG_VERSION" \
+    --set crds.gatewayAPI.enabled=false --set crds.envoyGateway.enabled=true)
+  "${KUBECTL[@]}" apply --server-side --force-conflicts -f - <<<"$eg_crds" >/dev/null
   # The Backend API is off by default; the engine's socket is a Backend.
   "${HELM[@]}" upgrade --install eg oci://docker.io/envoyproxy/gateway-helm --version "$EG_VERSION" --skip-crds \
     --set crds.enabled=false --namespace "$EG_NS" --create-namespace --set config.envoyGateway.extensionApis.enableBackend=true \
@@ -139,7 +160,7 @@ echo "== install $FROM_VERSION"
 # From 0.2.2 and 0.1.5, only pods in injection.proxyNamespaces get the
 # engine: list the proxies' namespaces when the old chart has the value.
 from_values=()
-if helm show values "$FROM_CHART" --version "$FROM_VERSION" 2>/dev/null | grep -q '^  proxyNamespaces:'; then
+if from_has proxyNamespaces; then
   from_values=(--set "injection.proxyNamespaces={$PROXY_NAMESPACES}")
 fi
 "${HELM[@]}" install inkwall "$FROM_CHART" --version "$FROM_VERSION" "${from_values[@]}" \
@@ -639,7 +660,7 @@ release_chart_is() { "${HELM[@]}" -n "$OPERATOR_NS" list --filter '^inkwall$' -o
 check "the release is back on chart $FROM_VERSION" release_chart_is "$FROM_VERSION"
 # 0.3.0 added a ClusterRole per integration: rolling back to an older
 # release removes it, to 0.3.0 or later keeps it.
-if helm show values "$FROM_CHART" --version "$FROM_VERSION" 2>/dev/null | grep -q '^  integrations:'; then
+if from_has integrations; then
   integration_roles() { "${KUBECTL[@]}" get clusterrole inkwall-operator-traefik; }
   check "the integration roles are back to $FROM_VERSION's" integration_roles
 else
