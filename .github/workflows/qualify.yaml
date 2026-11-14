@@ -336,7 +336,18 @@ jobs:
           check-latest: true
           # Restore only: these jobs run the ref's code (#503).
           cache: false
-      - run: make scale-test SCALE=full SCALE_RESPONSES="$RESPONSES" SCALE_OUT="$RUNNER_TEMP/scale.jsonl"
+      # A release branch from before #344 has no response inspection to
+      # scale: say so rather than run the test without it and pass.
+      - id: target
+        env:
+          RESPONSES: ${{ matrix.responses }}
+        run: |
+          if [ -z "$RESPONSES" ] || grep -q '^SCALE_RESPONSES' Makefile; then echo "ok=true" >>"$GITHUB_OUTPUT"; else
+            echo "ok=false" >>"$GITHUB_OUTPUT"
+            echo "::warning::make scale-test has no SCALE_RESPONSES on this ref: not run"
+          fi
+      - if: steps.target.outputs.ok == 'true'
+        run: make scale-test SCALE=full SCALE_RESPONSES="$RESPONSES" SCALE_OUT="$RUNNER_TEMP/scale.jsonl"
         env:
           RESPONSES: ${{ matrix.responses }}
       # The measurements (JSON lines), in the summary.
