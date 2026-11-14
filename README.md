@@ -159,6 +159,11 @@ its requests are still inspected
 that way: to have responses inspected behind Traefik, serve those routes through Envoy Gateway,
 Istio or HAProxy, or run the [standalone engine](docs/standalone-proxy.md) in front of the app yourself
 ([why](docs/design/0006-adapter-protocols.md#streamed-responses-the-reverse-proxy-and-traefik-design-323)).
+Streamed responses (Server-Sent Events, gRPC) have only their status and headers inspected unless
+the policy adds `streams: Inspect`: then each event, or message, is inspected on its own, and in
+`Block` mode one that leaks ends the stream (the client gets the events before it). Through Envoy
+Gateway and Istio: HAProxy doesn't send a streamed body, so on its Ingresses such a policy is
+`Programmed=False` (`ResponsesNotInspected`).
 
 Start in `Detect` mode, tune [false positives](https://coreruleset.org/docs/concepts/false_positives_tuning/) on the policy (`exclusions`, narrowed with `when` to a path and an
 argument, argument name, cookie or header, `skip` paths,
@@ -276,10 +281,11 @@ an Envoy you configure yourself, in or out of Kubernetes, see [protecting raw En
   [connecting to a control plane](docs/control-plane.md).
 - A cluster's policies must fit in a bundle of 7,200 KiB compressed. Past 900 KiB, the bundle is
   split over several [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/).
-- Responses are inspected only through Envoy Gateway, Istio and raw Envoy (`responses`), never
-  through Traefik's ForwardAuth or HAProxy; a body over `responses.maxBytes` (64 KiB by default) has its prefix
+- Responses are inspected only through Envoy Gateway, Istio, HAProxy, raw Envoy (`responses`) and
+  the standalone engine (`--inspect-responses`), never through Traefik's ForwardAuth; a body over `responses.maxBytes` (64 KiB by default) has its prefix
   inspected, and streamed responses (Server-Sent Events, gRPC) pass with their headers inspected
-  only.
+  only, unless `responses.streams: Inspect` (each event inspected on its own; Envoy Gateway, Istio,
+  raw Envoy and the [standalone engine](docs/standalone-proxy.md#responses), not HAProxy).
 - gRPC: a call's path and metadata (headers) are inspected; the text in its protobuf messages
   only with `body.grpcMessages: Inspect`, read without a schema. gRPC with another codec is
   inspected as other requests, and denied by the Core Rule Set's content type rule. Client
@@ -316,7 +322,8 @@ Tracked on the [project board](https://github.com/orgs/inkwall-dev/projects/1) a
   alerts and a dashboard ([monitoring](docs/monitoring.md)); gRPC in the standalone proxy and
   `body.grpc: Deny`; and the CRS compiled once for every policy setting.
 - **v0.6.0** (next): assistants that help users get answers faster (`inkwallctl explain` and a
-  read-only MCP server); responses through HAProxy, Traefik and the reverse proxy; gRPC streams
+  read-only MCP server); responses through HAProxy and the reverse proxy, and streamed ones event by event (not through
+  Traefik, whose ForwardAuth never sees them); gRPC streams
   and server messages inspected per message; rule sets loaded before the CRS; and operator
   metrics over HTTPS.
 - **v1.0.0**: a stable API (out of `v1alpha1`) with an upgrade path.

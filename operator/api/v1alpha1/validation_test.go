@@ -212,8 +212,13 @@ func TestWAFPolicyValidation(t *testing.T) {
 		{name: "zero response body", doc: policy(target + "  responses: {inspect: true, maxBytes: 0}\n"), wantErr: "should be greater than or equal to 1"},
 		{name: "unknown response oversize action", doc: policy(target + "  responses: {inspect: true, onOversize: Truncate}\n"), wantErr: `Unsupported value: "Truncate"`},
 		// Limits without inspection would read as if responses were inspected.
-		{name: "response limits without inspect", doc: policy(target + "  responses: {maxBytes: 1024}\n"), wantErr: "maxBytes and onOversize need inspect: true"},
-		{name: "response oversize without inspect", doc: policy(target + "  responses: {inspect: false, onOversize: Deny}\n"), wantErr: "maxBytes and onOversize need inspect: true"},
+		{name: "response limits without inspect", doc: policy(target + "  responses: {maxBytes: 1024}\n"), wantErr: "maxBytes, onOversize and streams need inspect: true"},
+		{name: "response oversize without inspect", doc: policy(target + "  responses: {inspect: false, onOversize: Deny}\n"), wantErr: "maxBytes, onOversize and streams need inspect: true"},
+		// Streams, event by event (#323).
+		{name: "streams inspected", doc: policy(target + "  responses: {inspect: true, streams: Inspect}\n")},
+		{name: "streams skipped", doc: policy(target + "  responses: {inspect: true, streams: Skip}\n")},
+		{name: "streams without inspect", doc: policy(target + "  responses: {streams: Inspect}\n"), wantErr: "maxBytes, onOversize and streams need inspect: true"},
+		{name: "unknown streams action", doc: policy(target + "  responses: {inspect: true, streams: Buffer}\n"), wantErr: `Unsupported value: "Buffer"`},
 	})
 }
 

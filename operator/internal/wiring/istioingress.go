@@ -680,7 +680,7 @@ func (i *IstioIngress) Unwire(ctx context.Context, c client.Client) (map[string]
 }
 
 // result is an empty Result of the Istio ingress wiring: its filter sends
-// responses to the engine (#374).
+// responses to the engine (#374), streamed ones too (#323).
 func (*IstioIngress) result() *Result {
-	return &Result{Proxy: "Istio ingress gateway", Targets: map[Target]TargetState{}, Responses: true}
+	return &Result{Proxy: "Istio ingress gateway", Targets: map[Target]TargetState{}, Responses: true, Streams: true}
 }

@@ -239,6 +239,10 @@ spec:
     - name: ws
       matches: [{path: {type: PathPrefix, value: /ws}}]
       backendRefs: [{name: wsecho, port: 8080}]
+    # A PathPrefix matches whole segments: /sse doesn't match /sse-leak.
+    - name: sse
+      matches: [{path: {type: PathPrefix, value: /sse}}, {path: {type: PathPrefix, value: /sse-leak}}]
+      backendRefs: [{name: wsecho, port: 8080}]
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -724,6 +728,46 @@ leak_logged() {
   envoy_are 200 "$leak_path-$leak_tries" -H "$LEAK" && sleep 1 && logged_response "$leak_path-$leak_tries" log
 }
 eventually "a leak on a fresh path passes, and the engines log it as a response event" leak_logged
+
+# Streams, event by event (#323): wsecho's /sse streams Server-Sent Events.
+echo "== streamed responses (responses.streams: Inspect)"
+policy Block "" '  responses: {inspect: true, streams: Inspect}'
+# From Detect: Envoy must hold the responses again, and every engine run the
+# bundle with streams, before a leaking stream can be cut.
+eventually "Envoy Gateway accepts the EnvoyExtensionPolicy holding the responses" responses_held BufferedPartial
+# enforced: Enforced for this generation of the policy, not the last one.
+enforced() {
+  [[ $(condition Enforced status) == True &&
+    $(condition Enforced observedGeneration) == $("${KUBECTL[@]}" -n "$NS" get wafpolicy shared -o jsonpath='{.metadata.generation}') ]]
+}
+eventually "the policy is Enforced: every engine runs the bundle with streams" enforced
+sse_through() { curl -sN --max-time 10 -H "Host: $HOST" "http://127.0.0.1:$1$2" || true; }
+streams_clean() {
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
+    [[ $(sse_through "$port" /sse) == $'data: hello\n\ndata: world' ]] || return 1
+  done
+}
+eventually "a clean stream passes whole through both Gateways" streams_clean
+streams_cut() {
+  local out
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
+    out=$(sse_through "$port" /sse-leak)
+    [[ $out == *"data: hello"* && $out != *"SQL syntax"* && $out != *"data: after"* ]] || return 1
+  done
+}
+before=$failures
+eventually "a stream with a leaking event ends before it: the events before it pass, it and those after never do" streams_cut
+logged_stream() {
+  "${KUBECTL[@]}" -n "$EG_NS" logs -l app.kubernetes.io/name=envoy -c inkwall-engine --tail=-1 |
+    grep '"security event"' | grep '"path":"/sse-leak"' | grep '"action":"deny"' | grep -q '"stream_event":2'
+}
+eventually "the engines log the leaking event, with its index" logged_stream
+if ((failures > before)); then
+  echo "-- /sse-leak through each Gateway, the policy's Enforced, and the engines' lines for it:"
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do sse_through "$port" /sse-leak | head -c 600; echo; done
+  condition Enforced message; echo
+  "${KUBECTL[@]}" -n "$EG_NS" logs -l app.kubernetes.io/name=envoy -c inkwall-engine --tail=-1 | grep -E 'sse|bundle' | tail -20 || true
+fi
 
 echo "== detect mode"
 policy Detect

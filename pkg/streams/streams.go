@@ -70,6 +70,10 @@ type Event struct {
 	// stream that isn't framed as gRPC): Data is what was read, and the
 	// rest went uninspected.
 	Truncated bool
+	// End is the offset in the stream (the bytes written to the Splitter)
+	// where the event ends: the bytes before it can go out once the event
+	// and those before it are allowed.
+	End int64
 	// Fields are a gRPC message's text fields, named by their field
 	// numbers as grpcMessages names a request's ("2.1": field 1 of the
 	// message in field 2): what a request message's rules see (#315).
@@ -90,8 +94,9 @@ type Splitter struct {
 	kind     Kind
 	max      int64
 	encoding string
-	// pending: bytes written that belong to the event in progress.
-	pending int64
+	// pending: bytes written that belong to the event in progress;
+	// written: all the bytes written.
+	pending, written int64
 	// skip: the event in progress was returned cut; its rest isn't held.
 	skip bool
 
@@ -155,6 +160,9 @@ func (s *Splitter) Close() []Event {
 		}
 		s.header, s.msg = nil, nil
 	}
+	for i := range out {
+		out[i].End = s.written
+	}
 	s.pending, s.skip = 0, false
 	return out
 }
@@ -162,6 +170,7 @@ func (s *Splitter) Close() []Event {
 func (s *Splitter) writeSSE(p []byte) []Event {
 	var out []Event
 	for _, c := range p {
+		s.written++
 		if !s.skip {
 			s.pending++
 		}
@@ -173,6 +182,7 @@ func (s *Splitter) writeSSE(p []byte) []Event {
 		if c == '\r' || c == '\n' {
 			s.lastCR = c == '\r'
 			if ev, ok := s.endLine(); ok {
+				ev.End = s.written
 				out = append(out, ev)
 			}
 			continue
@@ -188,7 +198,7 @@ func (s *Splitter) writeSSE(p []byte) []Event {
 			if v, ok := dataValue(s.line); ok {
 				data = append(data, v...)
 			}
-			out = append(out, Event{Data: data[:min(int64(len(data)), s.max)], Truncated: true})
+			out = append(out, Event{Data: data[:min(int64(len(data)), s.max)], Truncated: true, End: s.written})
 			s.skip, s.skipLine, s.pending = true, true, 0
 			s.line, s.data, s.hasData = s.line[:0], nil, false
 		}
@@ -250,6 +260,7 @@ func (s *Splitter) writeGRPC(p []byte) []Event {
 			n := min(s.skipLeft, int64(len(p)))
 			s.skipLeft -= n
 			p = p[n:]
+			s.written += n
 			if s.skipLeft == 0 {
 				s.skip = false
 			}
@@ -259,13 +270,14 @@ func (s *Splitter) writeGRPC(p []byte) []Event {
 			n := min(grpcwire.FrameHeader-len(s.header), len(p))
 			s.header = append(s.header, p[:n]...)
 			s.pending += int64(n)
+			s.written += int64(n)
 			p = p[n:]
 			if len(s.header) < grpcwire.FrameHeader {
 				break
 			}
 			if s.header[0] > 1 {
 				// Not gRPC framing: inspected no further.
-				out = append(out, Event{Truncated: true, Unframed: true})
+				out = append(out, Event{Truncated: true, Unframed: true, End: s.written})
 				s.broken, s.pending, s.header = true, 0, nil
 				break
 			}
@@ -277,18 +289,23 @@ func (s *Splitter) writeGRPC(p []byte) []Event {
 		n := min(want, int64(len(p)))
 		s.msg = append(s.msg, p[:n]...)
 		s.pending += n
+		s.written += n
 		p = p[n:]
 		if int64(len(s.msg)) < min(s.length, s.max) {
 			break
 		}
 		cut := s.length > s.max
-		out = append(out, s.grpcEvent(cut))
+		ev := s.grpcEvent(cut)
+		ev.End = s.written
+		out = append(out, ev)
 		if cut {
 			s.skipLeft, s.skip = s.length-s.max, true
 		}
 		s.header, s.msg, s.pending = s.header[:0], nil, 0
 	}
 	if s.broken {
+		// The rest isn't read, but it is part of the stream.
+		s.written += int64(len(p))
 		s.pending = 0
 	}
 	return out

@@ -97,6 +97,12 @@ type Result struct {
 	// (HAProxy: pods whose engine was injected without
 	// --response-messages). Empty: the proxy can't send responses at all.
 	ResponsesWhy string
+	// Streams: the proxy sends the engine the bodies of streamed responses
+	// (Server-Sent Events, gRPC), so their events are inspected for a
+	// policy with responses.streams: Inspect (#323). Unset while Responses
+	// is set (HAProxy: SPOE doesn't hold them), such a policy is not
+	// Programmed on its targets (ResponsesNotInspected).
+	Streams bool
 }
 
 // TargetState is a target as an integration sees it.

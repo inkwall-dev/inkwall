@@ -60,7 +60,7 @@ The main flags; `inkwall-engine proxy -h` lists them all:
 | `--tls-cert`, `--tls-key` | | Serve TLS on `--listen`, HTTP/2 and HTTP/1.1 by ALPN; the files are read again when they change (a renewed certificate) |
 | `--upstream-h2c` | off | Reach an `http://` upstream over HTTP/2 without TLS, as a [gRPC](grpc.md) server needs; WebSocket upgrades, HTTP/1.1 only, can't pass then |
 | `--upstream-ca` | | CA certificates (PEM) for an `https://` upstream, instead of the system's. Over TLS the upstream gets HTTP/2 or HTTP/1.1, as ALPN settles |
-| `--inspect-responses` | off | Inspect the upstream's responses too: see [Responses](#responses). With it, `--max-response-bytes` (`65536`), `--oversize-response` (`auto`) and `--max-held-response-bytes` (`67108864`) |
+| `--inspect-responses` | off | Inspect the upstream's responses too: see [Responses](#responses). With it, `--max-response-bytes` (`65536`), `--oversize-response` (`auto`), `--response-streams` (`skip`) and `--max-held-response-bytes` (`67108864`) |
 | `--json-denials` | off | Answer a denied client that sends `Accept: application/json` with `{"error":"forbidden","status":403,"request_id":"..."}` instead of text. Every denial carries `X-Request-Id`, the request ID of its security event |
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error`; security events are logged at `warn` |
 | `--event-log-rate` | `10` | Security event lines per second for each policy and rule; the rest are counted in `inkwall_security_event_logs_suppressed_total` (`0`: no limit) |
@@ -78,8 +78,15 @@ inkwall-engine proxy --upstream http://localhost:3000 --mode block --inspect-res
 - The status and headers are always inspected. A body is inspected when the rules read its media
   type (`text/html`, `text/plain`, `application/json`, XML): its first `--max-response-bytes`
   (64 KiB by default; `gzip` and `deflate` are decoded first) are read before anything goes to the
-  client. An image, a download, Server-Sent Events or a gRPC stream passes as it streams, its body
-  uninspected.
+  client. An image or a download passes as it streams, its body uninspected; so do Server-Sent
+  Events and gRPC streams, unless `--response-streams inspect` is set too.
+- With `--response-streams inspect`, each event of a Server-Sent Events stream (its `data` lines)
+  and each message of a gRPC response (the text in it) is inspected on its own, up to
+  `--max-response-bytes`. In `block` mode an event is held until it is whole and inspected; one that
+  leaks ends the stream there: the client gets every event before it, and neither it nor any after
+  (the connection is closed, or the HTTP/2 stream reset). `detect` mode forwards each part at once
+  and logs the event with its index (`"stream_event"`). A stream holds its share of
+  `--max-held-response-bytes` (one event's limit) while it is open.
 - In `block` mode a response that leaks is replaced with the rule's status (403) and the usual
   denial body. A body over the limit has its first part inspected and then gets
   `--oversize-response` (`auto`: 502 in block mode, forwarded in detect mode). `detect` mode logs

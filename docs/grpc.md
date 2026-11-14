@@ -2,8 +2,7 @@
 
 What the engine inspects in a [gRPC](https://grpc.io/docs/what-is-grpc/core-concepts/) call, what
 it doesn't, and how it denies one. Planned: messages read with their schema
-([#316](https://github.com/inkwall-dev/inkwall/issues/316)), and server messages
-([#317](https://github.com/inkwall-dev/inkwall/issues/317)).
+([#316](https://github.com/inkwall-dev/inkwall/issues/316)).
 
 ## Contents
 
@@ -11,6 +10,7 @@ it doesn't, and how it denies one. Planned: messages read with their schema
 - [What is inspected](#what-is-inspected)
 - [Inspecting the messages](#inspecting-the-messages)
 - [Long streams: one message at a time](#long-streams-one-message-at-a-time)
+- [Server messages](#server-messages)
 - [Denied calls](#denied-calls)
 - [Streaming calls](#streaming-calls)
 - [If you serve no gRPC](#if-you-serve-no-grpc)
@@ -143,6 +143,36 @@ standalone proxy, `PerMessage` inspects the buffered body as `Buffer` does: mess
 inspected, and long streams behave as below. gRPC-Web stays buffered everywhere: browsers don't
 stream requests. An engine before 0.6.0 ignores `grpcStreams` and buffers: the policy is
 `Enforced=False` (`EnginesOutdated`) while one runs it.
+
+## Server messages
+
+From v0.6.0, through Envoy, what a gRPC server sends back can be inspected for data leaks (a SQL
+error, a stack trace, whatever your response rules look for), when the policy inspects responses
+and their streams: `responses.inspect` and `responses.streams` (the engine's flags:
+`--inspect-responses --response-streams inspect`; see [raw Envoy](raw-envoy.md#responses)). Off by
+default: without `streams`, a gRPC response passes with only its status and headers inspected.
+
+- **Each message** of a response, unary or a server stream, is inspected on its own as it comes, its
+  text read as `grpcMessages` reads a request's (without a schema, gzip decoded), up to
+  `responses.maxBytes`, with the response rules (the Core Rule Set's 95x data leakage rules and your
+  phase 3 and 4 rules). In `Block` mode each message is held until it is inspected; a leaking one
+  ends the call: Envoy resets the stream, so the client gets the messages before it but neither it
+  nor any after, and sees the call fail (`INTERNAL` or `UNAVAILABLE`). A longer message is cut and
+  gets `responses.onOversize`. `Detect` mode forwards at once and logs.
+- **The call's status message** (`grpc-message`), where a server's error text goes, is inspected
+  too, decoded, as one more event. When the server answers with an error and nothing else
+  (trailers-only), Envoy still holds that answer, so a leak there is replaced by the engine's
+  denial (`PERMISSION_DENIED`, with the request ID). When it comes in the trailers after messages,
+  the engine asks Envoy for them, and a leak ends the call before the client gets the status.
+- **Events** carry `phase: response` and `stream_event`, the message's index in the response (the
+  status message counts as the last).
+
+**False positives.** Binary fields in a response's messages can match a rule as a request's can
+([above](#inspecting-the-messages)): turn it on in `Detect` mode first.
+
+**Not inspected:** gRPC-Web responses (their trailers are framed in the body, and the text form is
+base64). The status message is read through Envoy only; Traefik never shows the engine a
+response.
 
 ## Denied calls
 

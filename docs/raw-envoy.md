@@ -299,10 +299,14 @@ allow_mode_override: true
   `--grpc-messages` reads requests) is inspected on its own, up to `--max-response-bytes`; the
   engine asks Envoy to stream the body (`mode_override`, so `allow_mode_override: true` is needed).
   In block mode each event is held until it is inspected, and a leaking one ends the stream: Envoy
-  resets it, so the client gets the events before it but neither it nor any after, and a gRPC client
-  sees the call fail. A longer event is cut and gets `--oversize-response`. Each event is one more
+  resets it, so the client gets the events of the chunks before it but neither it nor any after (an
+  event Envoy passed in the same chunk as the leaking one goes with it), and a gRPC client sees the
+  call fail. A longer event is cut and gets `--oversize-response`. Each event is one more
   evaluation: a token-by-token stream is many of them. The security event carries
-  `"stream_event"`, the event's index.
+  `"stream_event"`, the event's index. A gRPC call's status message (`grpc-message`) is inspected
+  as one more event, from the headers of a trailers-only answer or from the trailers, which the
+  engine asks Envoy to send (`mode_override` again): a leak there is replaced by the denial, or
+  ends the call ([gRPC](grpc.md#server-messages)).
 
 [ext_proc](design/0006-adapter-protocols.md#response-inspection-v040) has the details. With the
 policy [from the operator](#the-policy-from-the-operator), the policy's `responses` field

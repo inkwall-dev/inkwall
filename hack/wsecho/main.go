@@ -7,7 +7,9 @@
 // echoes, a denied one gets no upgrade (#276).
 //
 // The server answers a WebSocket handshake on any path, from any origin,
-// and echoes every message; any other request gets 200 "ok".
+// and echoes every message; /sse and /sse-leak answer Server-Sent Events
+// (#323): two clean events, or a clean one, one leaking a MySQL error and
+// a last one, each flushed on its own; any other request gets 200 "ok".
 //
 //	wsecho -listen :8080
 //
@@ -85,6 +87,8 @@ func serve(addr string) error {
 		Handler:   func(ws *websocket.Conn) { _, _ = io.Copy(ws, ws) },
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/sse", sse("hello", "world"))
+	mux.HandleFunc("/sse-leak", sse("hello", "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version", "after"))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 			echo.ServeHTTP(w, r)
@@ -94,6 +98,22 @@ func serve(addr string) error {
 	})
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	return srv.ListenAndServe()
+}
+
+// sse returns a handler streaming one event per datum, each flushed on its
+// own, a moment apart.
+func sse(data ...string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		for _, d := range data {
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", d)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
 }
 
 // dial sends a handshake to target (HOST:PORT/PATH) and, once upgraded,

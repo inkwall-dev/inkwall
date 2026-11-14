@@ -323,7 +323,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 		maxResponse = fs.Int64("max-response-bytes", policy.DefaultResponseBytes, "with --inspect-responses: response body bytes inspected (0: status and headers only); a longer body has its prefix inspected and gets --oversize-response")
 		oversizeResponse = fs.String("oversize-response", "auto", "with --inspect-responses: responses over --max-response-bytes, or with a body that can't be inspected: deny (502 in block mode), allow, or auto (deny in block mode, allow in detect mode)")
 	}
-	if command == cmdExtProc {
+	if command == cmdExtProc || command == cmdProxy {
 		responseStreams = fs.String("response-streams", "skip", "with --inspect-responses: streamed responses (Server-Sent Events, gRPC server streams): inspect (each event or message on its own, up to --max-response-bytes; a denied one ends the stream) or skip (their bodies pass uninspected)")
 	}
 	if command == cmdSPOE {

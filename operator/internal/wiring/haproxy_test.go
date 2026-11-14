@@ -410,6 +410,18 @@ func TestHAProxyProgrammed(t *testing.T) {
 	if st, reason, msg := programmed(resp, r); st != metav1.ConditionTrue {
 		t.Errorf("responses sent: %s %s %s", st, reason, msg)
 	}
+	// Streams, event by event (#323): HAProxy doesn't send a streamed
+	// body, so the policy doesn't claim its events are inspected.
+	streams := resp.DeepCopy()
+	streams.Spec.Responses.Streams = wafv1alpha1.StreamsInspect
+	if st, reason, msg := programmed(streams, r); st != metav1.ConditionFalse || reason != ReasonResponsesNotInspected ||
+		!strings.Contains(msg, "HAProxy doesn't send streamed responses' bodies") || !strings.Contains(msg, "streams: Skip") {
+		t.Errorf("streams through HAProxy: %s %s %s", st, reason, msg)
+	}
+	streams.Spec.Responses.Streams = wafv1alpha1.StreamsSkip
+	if st, reason, msg := programmed(streams, r); st != metav1.ConditionTrue {
+		t.Errorf("streams skipped through HAProxy: %s %s %s", st, reason, msg)
+	}
 	// A pod without the engine: its traffic isn't inspected, whatever the
 	// probe says of the others.
 	bare := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "haproxy-controller", Name: "hap-0"}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}

@@ -488,8 +488,49 @@ switches such responses to `STREAMED` and answers each chunk with a body mutatio
 through only complete, allowed events, `--response-streams` and the bundle's
 `ResponseConfig.streams`. A gRPC call's exchange is now kept when its policy inspects streams.
 The security event carries
-`stream_event`. `make raw-envoy-e2e` checks a leaking SSE event never reaches the client. **Not
-yet:** the reverse proxy's streams (after its responses), and the operator's field.
+`stream_event`. `make raw-envoy-e2e` checks a leaking SSE event never reaches the client.
+**Built (operator):** `WAFPolicy.spec.responses.streams` (`Inspect` or `Skip`, the default; it
+needs `inspect: true`), the bundle field from it, `Enforced=False` (`EnginesOutdated`) while an
+engine before 0.6.0 runs the policy, and the Envoy Gateway and Istio kind e2e sections (a leaking
+SSE event ends the stream through both Gateways, the events before it pass). Since the HAProxy
+Ingress Controller sends responses too (#470), an integration reports whether it sends streamed
+bodies (`Result.Streams`): HAProxy doesn't (§4: SPOE never holds them), so a policy with `streams:
+Inspect` is `Programmed=False` (`ResponsesNotInspected`) on its Ingresses, as Traefik's routes are
+for `responses`, rather than `Ready` while the events pass uninspected. **Built (the
+reverse proxy):** a `streamBody` wraps the response's body: it splits it as it is read, inspects
+each event, and gives out only bytes up to the end of the last allowed event (`Event.End`, the
+offset the splitter reports), so the events before a denied one go out even when they came in the
+same read; the denied one ends the copy with an error, which aborts the response. A stream holds
+one event's limit of `--max-held-response-bytes` while open; past it, a new one gets the failure
+mode. Through ext_proc, a chunk's answer is either its body or a reset, so events that share a
+chunk with a denied one are dropped with it.
+
+**gRPC server messages (v0.6.0, #317).** A gRPC response's messages go through the stream path
+above. What #317 adds is the call's **status message**: `grpc-message`, where a server puts its
+error text, and so where a SQL error or a stack trace leaks. It is in the trailers, or in the
+headers of a trailers-only answer (an error before any message), and was never read as text.
+With streams inspected it is now one more event of the response (percent-decoded, up to
+`maxBytes`, with the stream's index after the last message), under the same opt-in, so no new
+field, flag or `EnginesOutdated` requirement:
+
+- **Trailers-only:** Envoy sends the headers with `end_of_stream` and holds them for the answer,
+  so a denied status message is replaced by the engine's denial, as a leaking response body is
+  (`PERMISSION_DENIED`, the request ID in `grpc-message`): the client never sees the leak.
+- **Trailers:** the operator's and the samples' routes never ask for response trailers
+  (`response_trailer_mode: SKIP`). So the `mode_override` that streams a gRPC response's body also
+  sets `response_trailer_mode: SEND` (the response path takes any mode change). A denial there
+  is an immediate response after the headers, which Envoy turns into a reset: the client gets the
+  messages before, then a failed call (`INTERNAL`/`UNAVAILABLE`), never the status message.
+- `grpc-status` itself isn't inspected: a number. gRPC-Web isn't split (its trailers are framed in
+  the body), as above.
+
+The decoding is the one new parser (`FuzzGRPCStatusEvent`: within the limit, cut only when
+longer, and gRPC's percent-encoding round-trips). The Core Rule Set's 95x rules read the
+decoded text as a response body; binary fields of response messages carry the false positives
+measured for requests (0002 §8.7), which is why it stays behind `streams`, off by default.
+`make raw-envoy-e2e` checks, with `hack/grpcecho`, that a server stream leaking in its third
+message is cut before it, that a trailers-only status leak is replaced by the denial, and that a
+status leak in the trailers ends the call without reaching the client.
 
 ## 3. forward-auth (Traefik `ForwardAuth`, nginx `auth_request`)
 
@@ -570,7 +611,8 @@ Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/inkwall/issues/282)); 
   before it is full. Under the defaults that is about 7 KB, headers included; larger chunked
   bodies count as oversized.
 - **One frame per message.** HAProxy sends a message in one SPOE frame, of at most
-  `tune.bufsize` − 4 bytes, or the engine's `max-frame-size` (its body limit plus 1 MiB) when that
+  `tune.bufsize` − 4 bytes, or the engine's `max-frame-size` (its body limit plus 1 MiB: 1 MiB +
+  64 KiB by default, 11 MiB in bundle mode, where the limit is `body.maxBytes`' maximum) when that
   is lower. A message that doesn't fit, with its headers and other arguments, isn't cut: HAProxy
   sends none of it, sets `txn.inkwall.error` (`option set-on-error`) to 3 when encoding it fails
   against its own `max-frame-size`, or to 259 (0x100 + 3, from the SPOP connection) when it is over

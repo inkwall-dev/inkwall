@@ -98,7 +98,10 @@ default) and its pods by the chart's label
   closed, gives no verdict (502). It does so only once every running controller pod's engine was
   injected with `--response-messages`: until then no Ingress gets the response rules, and the
   policy is `Programmed=False` (`ResponsesNotInspected`), naming the pods to restart. What a body
-  HAProxy cuts means is in [Responses](#responses).
+  HAProxy cuts means is in [Responses](#responses). Streamed responses (Server-Sent Events, gRPC)
+  aren't held, so their bodies never reach the engine: a policy with `responses.streams: Inspect`
+  is `Programmed=False` (`ResponsesNotInspected`) on HAProxy's Ingresses; set `streams: Skip`, or
+  serve those routes through Envoy Gateway or Istio.
 - **The failure mode:** the fail-closed rule is in the snippet when every policy on the Ingress
   fails closed, so HAProxy answers 503 while the engine is down; in `Detect` mode (failing open by
   default) it isn't, and requests pass uninspected.
@@ -454,8 +457,9 @@ oversized above that. Without `option http-buffer-request`, bodies go uninspecte
 as oversized too.
 
 HAProxy sends each request to the engine in one SPOE frame (SPOP 2.0 has no fragmentation since
-HAProxy 3.1), of at most its buffer less 4 bytes, or the engine's limit (its body limit plus 1
-MiB) when that is lower: a request that doesn't fit, with its headers and other arguments, isn't
+HAProxy 3.1), of at most its buffer less 4 bytes, or the engine's limit when that is lower: its
+body limit plus 1 MiB (`--max-body-bytes`; with the [policy from the operator](#the-policy), at
+least the 10 MiB `body.maxBytes` allows, so 11 MiB): a request that doesn't fit, with its headers and other arguments, isn't
 sent at all. HAProxy sets `txn.inkwall.error` to 3 (over its own frame size) or 259 (over the
 engine's), and the first rule of `haproxy.cfg` handles it
 as oversized: 413. Keep that rule whatever your failure mode; leave it out in detect mode. The same
