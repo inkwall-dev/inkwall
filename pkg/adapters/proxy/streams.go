@@ -4,9 +4,12 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log"
+	"log/slog"
 	"sync"
 
 	"github.com/inkwall-dev/inkwall/pkg/adapters/internal/httpadapter"
@@ -18,6 +21,24 @@ import (
 // errStreamDenied ends a stream at an event the rules denied: ReverseProxy
 // aborts the response, so the client never gets the event.
 var errStreamDenied = errors.New("streamed response denied")
+
+// proxyErrorLog is ReverseProxy's ErrorLog: its lines at error level, but
+// for a stream ended at a denied event, which it reports as a read error
+// during the body copy (#615). The denial is logged as a security event;
+// it isn't an error.
+func proxyErrorLog(logger *slog.Logger) *log.Logger {
+	return log.New(deniedStreamFilter{slog.NewLogLogger(logger.Handler(), slog.LevelError).Writer()}, "", 0)
+}
+
+// deniedStreamFilter drops the lines that report errStreamDenied.
+type deniedStreamFilter struct{ w io.Writer }
+
+func (f deniedStreamFilter) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte(errStreamDenied.Error())) {
+		return len(p), nil
+	}
+	return f.w.Write(p)
+}
 
 // streamBody is the body of a streamed response inspected event by event
 // (#323, 0006 §2), as ext_proc inspects it: it reads the upstream's body,

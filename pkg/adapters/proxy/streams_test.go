@@ -152,3 +152,42 @@ func TestStreamsAreBounded(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// A stream the proxy ends at a denied event is a security event, not an
+// error (#615): ReverseProxy's "read error during body copy" isn't logged
+// for it, while an upstream that breaks off a stream still logs one at
+// error level.
+func TestDeniedStreamLogsNoError(t *testing.T) {
+	leaky := "data: hello\n\ndata: " + leakData + "\n\ndata: after\n\n"
+	var logs bytes.Buffer
+	h := newResponseHandler(t, pipeline.ModeBlock, inspectStreams(1<<10), chunkedSSE(t, leaky, 7), &logs, 0)
+	if got, _ := getStream(t, h, "/sse-leak"); got != "data: hello\n\n" {
+		t.Errorf("denied: got %q, want the first event only", got)
+	}
+	if !strings.Contains(logs.String(), `"action":"deny"`) {
+		t.Errorf("denied: no security event in %s", logs.String())
+	}
+	if strings.Contains(logs.String(), `"level":"ERROR"`) {
+		t.Errorf("denied: logged an error: %s", logs.String())
+	}
+
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "data: hello\n\n")
+		w.(http.Flusher).Flush()
+		// The connection drops in the middle of the chunked body.
+		if conn, _, err := http.NewResponseController(w).Hijack(); err == nil {
+			_ = conn.Close()
+		}
+	}))
+	t.Cleanup(broken.Close)
+	for _, responses := range []pipeline.ResponseConfig{inspectStreams(1 << 10), inspect(1 << 10)} {
+		logs.Reset()
+		h = newResponseHandler(t, pipeline.ModeBlock, responses, broken, &logs, 0)
+		_, _ = getStream(t, h, "/sse")
+		if !strings.Contains(logs.String(), `"level":"ERROR"`) || !strings.Contains(logs.String(), "read error during body copy") {
+			t.Errorf("broken upstream (streams %t): no error logged: %s", responses.Streams, logs.String())
+		}
+	}
+}
