@@ -7,6 +7,7 @@ This guide sets the rules for commit messages, pull requests, branch names, test
 - [Commit messages](#commit-messages)
   - [Rules](#rules)
 - [Development and testing](#development-and-testing)
+  - [Battle test](#battle-test)
 - [Branches](#branches)
 - [Releases](#releases)
   - [Cutting a release](#cutting-a-release)
@@ -113,6 +114,7 @@ Durations are on a laptop or a CI runner, roughly.
 | Operator failure modes on kind | `make kind-chaos` | 20 min | Docker, kind | release qualification (`qualify.yaml`, `chaos`, nightly) |
 | Examples | `make test-examples` (each `examples/<proxy>` policy through `inkwallctl test --policy`, and the `examples/tests` suite) | 1 min | Go | every PR (`test`) |
 | Quickstart | `make kind-quickstart` (`docs/quickstart.md` as written, released chart and images) | 10 min | Docker, kind, network | nightly (`quickstart`) |
+| False positives | `make fp-run` (a real application's recorded traffic per CRS paranoia level; `make fp-har` records it again) | 1 min | Go (`make fp-har`: Docker, network) | release battle test ([below](#battle-test)) |
 | External links | `make docs-check-external` | 1 min | network | nightly (`docs-links`) |
 | Everything a PR runs | `make check-all` | hours | all of the above | |
 
@@ -127,6 +129,34 @@ newest Kubernetes: one job per proxy (`e2e (traefik)`, `e2e (raw-envoy)`, `e2e (
 `e2e (istio)`, `e2e (haproxy)`, and `e2e (networkpolicy)` for the chart's NetworkPolicies), each on its own cluster with the images the `e2e-images` job
 built, and the cluster's logs as an artifact when one fails. The chart still installs on 1.29 and
 later, untested. A cluster made at another version is recreated with `make kind-down kind-up`.
+
+### Battle test
+
+Before the release Inkwall is announced with (v0.6.0's checklist, #520), its battle test runs these
+tools, by hand, and its release notes publish their numbers.
+
+**False positives** (`make fp-run`, `hack/fp-run.sh`): the traffic of a real application, every
+request a user's, checked with `inkwallctl test --har` against a policy at each
+[CRS paranoia level](https://coreruleset.org/docs/concepts/paranoia_levels/), 1 to 4: the policy in
+`Block` mode with the built-in CRS and nothing excluded, as the operator would resolve it and the
+engine compile it. Every denial is a false positive. It prints a markdown table, per level, of the
+requests, the denials, their rate and the rules behind them (the CRS rules that scored), and with
+`OUT=<dir>` writes it with a JSON file of each denied request and its rules.
+
+The traffic is `hack/fptraffic/juice-shop.har.gz`, 560 requests: [OWASP Juice Shop](https://github.com/juice-shop/juice-shop),
+an online shop with an Angular front end and a REST API, played by `hack/fptraffic` as six shoppers
+with six browsers' headers. Each loads the shop and its assets, registers, logs in, searches,
+writes reviews, fills a basket, adds an address and a card, checks out, sends feedback, uploads a
+complaint and a photo, and changes their password, with free text, names and passwords that are
+hard on a WAF (apostrophes, accents, symbols). Only the requests and their statuses are recorded, no
+response. `make fp-har` records it again (Docker, `JUICE_SHOP_VERSION` in `hack/versions.env`, a
+new shop each time; IDs and tokens change, the requests don't); review the new table with it.
+
+- `HAR=<file>`: other traffic, a HAR file (`.har`, or `.har.gz`), e.g. your own application's,
+  saved from a browser's developer tools.
+- `LEVELS="1 2"`: some levels only.
+- `POLICY=<file>`: one run with your own `WAFPolicy` instead, as it is (with its exclusions and
+  `crs.allowedMethods`): the rate once tuned.
 
 ## Branches
 
