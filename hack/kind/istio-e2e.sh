@@ -315,6 +315,9 @@ condition() {
 }
 ready() { [[ $(condition Ready status) == True ]]; }
 programmed() { [[ $(condition Programmed status) == True && $(condition Programmed message) == *"wired to the engine in Istio"* ]]; }
+# responses_proven: Programmed, with the responses proven by the probe's
+# response leg on every pod (#595): no note of an engine that predates it.
+responses_proven() { programmed && [[ $(condition Programmed message) != *unproven* ]]; }
 # policy [MODE [SPEC]]: the policy, in Block mode by default, with SPEC
 # (indented YAML) added.
 policy() {
@@ -446,6 +449,11 @@ labelled() { "${KUBECTL[@]}" -n "$NS" get pods -l e2e=custom -o name | grep . >/
 # whoami --verbose logs the request line of each request it gets.
 never_reached_app() { ! "${KUBECTL[@]}" -n "$NS" logs deployment/app --since=10m | grep -i "$1" >/dev/null; }
 reached_app() { "${KUBECTL[@]}" -n "$NS" logs deployment/app --since=10m | grep -i "$1" >/dev/null; }
+# probe_reached_app_since TIME: the app logged a request on the probe's
+# reserved path since TIME. Where the engine answers the request leg itself
+# (Block mode; HAProxy in both modes), only the response leg reaches the app
+# (#595). whoami logs the path, not the query, so the leg's mark isn't in it.
+probe_reached_app_since() { "${KUBECTL[@]}" -n "$NS" logs deployment/app --since-time="$1" | grep -F ".well-known/inkwall-probe/" >/dev/null; }
 # logged PATH: an engine in the Gateways' pods logged a detect-mode event
 # for PATH.
 logged() {
@@ -577,9 +585,13 @@ eventually "Programmed in detect mode, by the engines' probe receipts" programme
 echo "== responses"
 # Inspected through Istio since #374: a leak is replaced in Block mode,
 # logged in Detect mode, and the policy is Programmed.
+responses_since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 policy Block "$RESPONSES"
 eventually "the EnvoyFilters send the responses, held" responses_sent BUFFERED_PARTIAL
-eventually "Programmed with responses" programmed
+eventually "Programmed with responses, proven by the probe's response leg" responses_proven
+# The response leg reaches the app (the engine lets it through and answers
+# its response), in Block mode too (#595).
+eventually "the probe's response leg went through to the app" probe_reached_app_since "$responses_since"
 forward_all
 eventually "a response leaking a SQL error is replaced through both Gateways: 403" leak_is 403 "$CUSTOM_PORT" "$HOST"
 check "and through the other Gateway" leak_is 403 "$PLAIN_PORT" "$HOST"
@@ -592,6 +604,9 @@ eventually "the EnvoyFilters stream the responses in detect mode" responses_sent
 forward_all
 eventually "detect mode: the leak passes" leak_is 200 "$CUSTOM_PORT" "$HOST"
 eventually "and the engines log it" leak_logged gateway.istio.io/managed=istio.io-gateway-controller "$CUSTOM_PORT" "$HOST"
+# Envoy discards the answers: the engines' receipts of the response leg's
+# responses prove them (#595).
+eventually "Programmed in detect mode with responses, by the engines' response receipts" responses_proven
 
 # Streams, event by event (#323): wsecho's /sse streams Server-Sent Events.
 echo "== streamed responses (responses.streams: Inspect)"
@@ -764,6 +779,7 @@ eventually "and the policy is Unverified, not Programmed (the probe got the app'
 eventually "the patch gone: blocking again" vs_is 403 "/api$SQLI"
 eventually "and Programmed once the probe answers" vs_programmed
 vs_policy Block "$RESPONSES"
+eventually "VirtualService, responses: Programmed once the probe's response leg is answered (#595)" vs_programmed
 eventually "VirtualService, responses: a leak is replaced: 403" leak_is 403 "$VS_PORT" "$VS_HOST"
 check "a clean response passes" vs_is 200 /api/products/42
 check "the unprotected VirtualService lets the leak through" leak_is 200 "$VS_PORT" "$VS_OPEN_HOST"

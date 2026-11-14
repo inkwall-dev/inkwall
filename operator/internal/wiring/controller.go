@@ -427,6 +427,22 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 			if s.Note != "" {
 				notes = append(notes, s.Note)
 			}
+			if responses {
+				// The probe's response leg (#595): only this policy's
+				// concern if it inspects responses.
+				if f := s.Responses.Failed; f != "" {
+					noResponses = append(noResponses, f)
+				}
+				if u := s.Responses.Unverified; u != "" {
+					unverified = append(unverified, u)
+				}
+				if np := s.Responses.NotProbeable; np != "" {
+					notProbeable = append(notProbeable, np)
+				}
+				if n := s.Responses.Note; n != "" {
+					notes = append(notes, n)
+				}
+			}
 			if res := rep.results[i]; responses && !res.Responses {
 				if res.ResponsesWhy != "" {
 					noResponses = append(noResponses, fmt.Sprintf("%s doesn't send responses to the engine yet: %s %s's requests are inspected, its responses are not: %s",
