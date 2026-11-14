@@ -365,6 +365,14 @@ kind-quickstart: ## Run docs/quickstart.md on a kind cluster of its own, with th
 test-examples: ## Check each examples/<proxy> WAFPolicy with inkwallctl test --policy: benign requests allowed, attacks denied (examples/tests); run the example suite (inkwallctl test --suite)
 	hack/examples-test.sh
 
+.PHONY: fp-run
+fp-run: ## False positives of a real application's traffic per CRS paranoia level, with inkwallctl test --har (hack/fp-run.sh; HAR, default hack/fptraffic/juice-shop.har.gz; LEVELS, POLICY, OUT)
+	hack/fp-run.sh
+
+.PHONY: fp-har
+fp-har: ## Record hack/fptraffic/juice-shop.har.gz again: OWASP Juice Shop (JUICE_SHOP_VERSION) in Docker, played by hack/fptraffic (needs network)
+	hack/fptraffic/record.sh
+
 .PHONY: kind-down
 kind-down: ## Delete the kind cluster
 	kind delete cluster --name $(KIND_CLUSTER)

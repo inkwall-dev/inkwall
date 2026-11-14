@@ -125,6 +125,14 @@ What changes by itself:
   name the settings left out: `kubectl get inkwallconfig default -o
   jsonpath='{.status.conditions[?(@.type=="EngineConfigured")].message}'`. Pin a custom build with
   its version in the tag (`:0.6.0@sha256:...`) to keep every setting.
+- **HAProxy: a request or a response too large for one SPOE frame is handled as oversized** (#336).
+  HAProxy sends each in one frame (SPOP 2.0 has no fragmentation), and sends none of one that
+  doesn't fit. For `Block`-mode policies, the operator's backend snippet now answers such a
+  request with 413 and replaces such a response with 502, as `body.onOversize` and
+  `responses.onOversize` say. By hand, copy the two new rules on `txn.inkwall.error` from
+  `examples/haproxy/haproxy.cfg`. `Programmed`'s note on HAProxy's buffer now also names a
+  `responses.maxBytes` larger than it, and [Bodies](haproxy.md#bodies) gives the memory a larger
+  `tune.bufsize` costs.
 
 ## From 0.4.x to 0.5.0
 
