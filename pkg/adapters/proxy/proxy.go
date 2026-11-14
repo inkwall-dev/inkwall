@@ -166,7 +166,7 @@ func New(p pipeline.Inspector, cfg Config) (*Handler, error) {
 			pr.Out.URL.RawQuery = joinQuery(upstream.RawQuery, pr.In.URL.RawQuery)
 			setForwarded(pr, resolver)
 		},
-		ErrorLog:  slog.NewLogLogger(logger.Handler(), slog.LevelError),
+		ErrorLog:  proxyErrorLog(logger),
 		Transport: Transport(cfg.UpstreamH2C, cfg.UpstreamCAs),
 	}
 	if cfg.WebSocketMessages != pipeline.MessagesOff {
