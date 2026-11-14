@@ -2,7 +2,9 @@ name: upgrade
 
 # The upgrade test (hack/kind/upgrade.sh) from several releases (#390): the
 # latest patch of each of the newest `minors` minor versions (hack/releases;
-# on a release-X.Y branch, X.Y and older), or the versions given. Each runs
+# on a release-X.Y branch, X.Y and older), or the versions given; with the
+# ref's Helm version (hack/ci/ref-versions.sh: before 0.5, the one its CI
+# pinned, #618). Each runs
 # the whole test, Traefik and Envoy Gateway probed through the upgrade and
 # the rollback. The release qualification (#389) calls it with minors: 2;
 # CI's upgrade job runs the latest release only, on every change.
@@ -47,6 +49,7 @@ jobs:
       contents: read
     outputs:
       from: ${{ steps.versions.outputs.from }}
+      helm: ${{ steps.versions.outputs.helm }}
     steps:
       # Only main, a release branch or a release tag (#503): never a pull
       # request's ref or an arbitrary commit. Empty: the caller's own.
@@ -57,21 +60,24 @@ jobs:
             echo "ref $REF is not main, release-X.Y or vX.Y.Z[-rc.N]" >&2
             exit 1
           fi
+      # This workflow's own commit, with every branch and tag: the ref's
+      # versions are read with git (a release branch from before 0.5 has
+      # neither hack/releases nor hack/versions.env, #618), none of its code
+      # runs here.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ inputs.ref }}
           fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           check-latest: true
-          # Restore only: this job runs the ref's code (#503).
           cache: false
       - id: versions
         env:
           FROM: ${{ inputs.from }}
           MINORS: ${{ inputs.minors }}
+          REF: ${{ inputs.ref }}
           BRANCH: ${{ inputs.ref || github.base_ref || github.ref_name }}
         run: |
           if [ -n "$FROM" ]; then
@@ -79,8 +85,25 @@ jobs:
           else
             list=$(go run ./hack/releases -minors "$MINORS" -branch "$BRANCH")
           fi
+          c=HEAD
+          if [ -n "$REF" ]; then
+            c=$(git rev-parse -q --verify "origin/$REF^{commit}" || git rev-parse -q --verify "$REF^{commit}") || {
+              echo "no such ref: $REF" >&2
+              exit 1
+            }
+          fi
+          helm=$(hack/ci/ref-versions.sh "$c" | sed -n 's/^HELM_VERSION=//p')
+          if [ -z "$helm" ]; then
+            echo "${REF:-$BRANCH}: no Helm version (hack/ci/ref-versions.sh)" >&2
+            exit 1
+          fi
           echo "from=$(jq -Rnc '[inputs]' <<<"$list")" >>"$GITHUB_OUTPUT"
-          echo "Upgrading from: $(tr '\n' ' ' <<<"$list")" >>"$GITHUB_STEP_SUMMARY"
+          echo "helm=$helm" >>"$GITHUB_OUTPUT"
+          {
+            echo "Upgrading from: $(tr '\n' ' ' <<<"$list")"
+            echo
+            echo "Helm: $helm"
+          } >>"$GITHUB_STEP_SUMMARY"
 
   upgrade:
     needs: versions
@@ -99,12 +122,10 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.ref }}
           fetch-depth: 0
-      # The versions under test, hack/versions.env (#393).
-      - id: versions
-        run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_OUTPUT"
+      # The ref's Helm version (versions).
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: ${{ steps.versions.outputs.HELM_VERSION }}
+          version: ${{ needs.versions.outputs.helm }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
