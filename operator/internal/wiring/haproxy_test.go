@@ -29,7 +29,7 @@ import (
 )
 
 func TestHAProxySnippet(t *testing.T) {
-	closed := HAProxySnippet(false, true)
+	closed := HAProxySnippet(false, true, false)
 	for _, want := range []string{
 		"option http-buffer-request",
 		"filter spoe engine inkwall config " + injection.HAProxySPOEConf,
@@ -45,9 +45,51 @@ func TestHAProxySnippet(t *testing.T) {
 	if strings.Index(closed, "status 299") > strings.Index(closed, "deny_status") {
 		t.Error("the probe's rule is after a denial")
 	}
-	open := HAProxySnippet(true, false)
+	open := HAProxySnippet(true, false, false)
 	if strings.Contains(open, "if !{ var(txn.inkwall.action) -m found }") || strings.Contains(open, "http-buffer-request") {
 		t.Errorf("failing open, without bodies:\n%s", open)
+	}
+	// Detect mode: nothing on SPOE's error.
+	for _, s := range []string{closed, open} {
+		if strings.Contains(s, "var(txn.inkwall.error)") {
+			t.Errorf("detect mode, yet a rule on SPOE's error:\n%s", s)
+		}
+	}
+}
+
+// In Block mode, a request HAProxy can't fit in one SPOE frame
+// (txn.inkwall.error 3 or 259) is handled as oversized, whatever the
+// failure mode: 413, after the probe's answer and before the other rules.
+func TestHAProxySnippetFrameTooBig(t *testing.T) {
+	const rule = `http-request deny deny_status 413 if { var(txn.inkwall.error) -m int 3 259 }`
+	for _, failOpen := range []bool{false, true} {
+		s := HAProxySnippet(failOpen, true, true)
+		i := strings.Index(s, rule)
+		if i < 0 {
+			t.Errorf("failOpen %v: no 413 rule:\n%s", failOpen, s)
+			continue
+		}
+		if i < strings.Index(s, "status 299") {
+			t.Errorf("failOpen %v: the 413 rule is before the probe's answer", failOpen)
+		}
+		if j := strings.Index(s, "http-request deny deny_status"); j < i {
+			t.Errorf("failOpen %v: the 413 rule is after another denial", failOpen)
+		}
+	}
+}
+
+// A route is in Block mode when one of its policies is.
+func TestHAProxySettingsBlock(t *testing.T) {
+	ing := types.NamespacedName{Namespace: "shop", Name: "web"}
+	policy := func(name string, mode wafv1alpha1.PolicyMode) wafv1alpha1.WAFPolicy {
+		return wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: name}, Spec: wafv1alpha1.WAFPolicySpec{
+			Mode: mode, TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}}}}
+	}
+	if s := haproxySettingsOf([]wafv1alpha1.WAFPolicy{policy("a", wafv1alpha1.PolicyDetect)}, ing); s.block {
+		t.Error("Detect: block")
+	}
+	if s := haproxySettingsOf([]wafv1alpha1.WAFPolicy{policy("a", wafv1alpha1.PolicyDetect), policy("b", wafv1alpha1.PolicyBlock)}, ing); !s.block {
+		t.Error("Detect and Block: not block")
 	}
 }
 
@@ -59,7 +101,7 @@ func TestHAProxyAnnotate(t *testing.T) {
 		HAProxySnippetAnnotation: "http-request set-header X-Mine 1\n", HAProxyStandaloneAnnotation: "false",
 	}}}
 	c := fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).WithObjects(ing).Build()
-	ours := HAProxySnippet(false, true)
+	ours := HAProxySnippet(false, true, false)
 	if err := annotateHAProxy(ctx, c, ing, ours); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +115,7 @@ func TestHAProxyAnnotate(t *testing.T) {
 		t.Fatalf("wired again: %v, resourceVersion %s -> %s", err, rv, ing.ResourceVersion)
 	}
 	// Another mode: the operator's part is replaced, the user's kept.
-	if err := annotateHAProxy(ctx, c, ing, HAProxySnippet(true, false)); err != nil {
+	if err := annotateHAProxy(ctx, c, ing, HAProxySnippet(true, false, false)); err != nil {
 		t.Fatal(err)
 	}
 	if n := strings.Count(ing.Annotations[HAProxySnippetAnnotation], haproxySnippetBegin); n != 1 {

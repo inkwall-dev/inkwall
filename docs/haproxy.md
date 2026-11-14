@@ -281,6 +281,11 @@ frontend web
     # uninspected.
     option http-buffer-request
     filter spoe engine inkwall config /usr/local/etc/haproxy/spoe.conf
+    # A request HAProxy can't fit in one SPOE frame (txn.inkwall.error 3,
+    # or 259 over the engine's frame size) doesn't reach the engine: it is
+    # oversized, 413, as --oversize-body deny says. Keep this rule first,
+    # whatever the failure mode; leave it out in detect mode.
+    http-request deny deny_status 413 if { var(txn.inkwall.error) -m int 3 259 }
     # Fail closed: without a verdict (the engine is down, or hung), deny
     # with 503. Leave this rule out to fail open. /healthz is left
     # uninspected (spoe.conf), so it has no verdict.
@@ -313,7 +318,8 @@ backend inkwall-engine
 ```
 
 Check a changed configuration with `haproxy -c -f haproxy.cfg`. The order of the `http-request`
-rules matters: the fail-closed rule first, then the gRPC answer, then a rule per status. Put your
+rules matters: the rule for a request too large for one SPOE frame first, then the fail-closed
+rule, the gRPC answer, and a rule per status. Put your
 own `http-request` rules after them, so a denied request goes no further.
 
 `deny_status` takes a fixed status, so the configuration has a rule for each status the engine
@@ -375,7 +381,8 @@ A body HAProxy cut is handled as oversized (`--oversize-body`, or the policy's `
 chunked or HTTP/2 body without one can't say, so the engine takes it as complete only when it is
 well under half of HAProxy's buffer (about 7 KiB, headers included, under the defaults), and as
 oversized above that. Without `option http-buffer-request`, bodies go uninspected, and are handled
-as oversized too.
+as oversized too. A request HAProxy can't fit in one SPOE frame is handled as oversized by the first
+rule of `haproxy.cfg` (413), and, for `Block`-mode policies, by the operator's.
 
 A larger `tune.bufsize` takes more memory per connection: see HAProxy's [`tune.bufsize`](https://docs.haproxy.org/3.2/configuration.html#3.2-tune.bufsize).
 

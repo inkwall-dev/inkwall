@@ -103,6 +103,8 @@ func (h *HAProxy) Watch(c controller.Controller, cache cache.Cache, eh handler.E
 type haproxySettings struct {
 	failOpen bool
 	body     bool
+	// block: a policy is in Block mode.
+	block bool
 	// maxBody is the largest body.maxBytes of the policies that inspect
 	// bodies (the engine's 64 KiB for one that sets none).
 	maxBody int64
@@ -131,17 +133,27 @@ func haproxySettingsOf(policies []wafv1alpha1.WAFPolicy, ing types.NamespacedNam
 			mode = wafv1alpha1.FailClosed
 		}
 		s.failOpen = s.failOpen && mode == wafv1alpha1.FailOpen
+		s.block = s.block || p.Spec.Mode == wafv1alpha1.PolicyBlock
 	}
 	return s
 }
 
+// haproxyFrameTooBig are the errors HAProxy's SPOE filter sets (option
+// set-on-error) for a message that doesn't fit in one frame, which it
+// sends none of (SPOP 2.0 has no fragmentation): 3 when it is larger than
+// spoe.conf's max-frame-size (HAProxy's buffer by default), 259 (0x100 +
+// 3, from the SPOP connection) when it is larger than the max-frame-size
+// the engine announced.
+const haproxyFrameTooBig = "3 259"
+
 // HAProxySnippet is the operator's part of a protected Ingress's backend
 // snippet: the body buffered for the engine when a policy inspects it, the
 // SPOE filter, and the rules on its variables: the probe's answer first
-// (Prober), then, failing closed, 503 without a verdict, a denied
-// gRPC call's answer, and a rule per status the engine denies with; the
-// request ID for the app.
-func HAProxySnippet(failOpen, body bool) string {
+// (Prober), then, in Block mode, 413 for a request HAProxy couldn't fit in
+// one SPOE frame (haproxyFrameTooBig), handled as oversized; failing
+// closed, 503 without a verdict, a denied gRPC call's answer, and a rule
+// per status the engine denies with; the request ID for the app.
+func HAProxySnippet(failOpen, body, block bool) string {
 	lines := []string{haproxySnippetBegin}
 	if body {
 		lines = append(lines, "option http-buffer-request")
@@ -151,6 +163,9 @@ func HAProxySnippet(failOpen, body bool) string {
 		"filter spoe engine inkwall config "+injection.HAProxySPOEConf,
 		fmt.Sprintf(`http-request return status %d hdr %s "%%[%s]" if { %s -m found }`,
 			haproxyprobe.Status, strings.ToLower(haproxyprobe.Header), v("probe"), v("probe")))
+	if block {
+		lines = append(lines, "http-request deny deny_status 413 if { "+v("error")+" -m int "+haproxyFrameTooBig+" }")
+	}
 	if !failOpen {
 		lines = append(lines, "http-request deny deny_status 503 if !{ "+v("action")+" -m found }")
 	}
@@ -301,7 +316,7 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 		snippet := ""
 		settings := haproxySettingsOf(policies.Items, k)
 		if want {
-			snippet = HAProxySnippet(settings.failOpen, settings.body)
+			snippet = HAProxySnippet(settings.failOpen, settings.body, settings.block)
 		}
 		err := annotateHAProxy(ctx, h.Client, ing, snippet)
 		if err != nil && !apierrors.IsNotFound(err) {
