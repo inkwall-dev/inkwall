@@ -29,7 +29,7 @@ develop it.
   and gives them the `inkwall-trust` [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/) and read access to the bundle. A pod labelled
   `waf.inkwall.dev/inject: "false"` is left alone. `--inject=false` turns injection off and
   unwires the routes.
-- **Wires** each targeted [`Ingress`](https://kubernetes.io/docs/concepts/services-networking/ingress/) or [`IngressRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) to an `inkwall-waf` [ForwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/) [Middleware](https://doc.traefik.io/traefik/middlewares/overview/),
+- **Wires** each targeted [`Ingress`](https://kubernetes.io/docs/concepts/services-networking/ingress/) or [`IngressRoute`](https://doc.traefik.io/traefik/routing/providers/kubernetes-crd/) to an `inkwall-waf` [Middleware](https://doc.traefik.io/traefik/middlewares/overview/) (a body limit, then a [ForwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/) to the engine),
   placed first in its middlewares, and reports `Programmed`. The `waf.inkwall.dev/unwire`
   [finalizer](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/) keeps a deleted policy until its routes are unwired.
 - **Connects** to the optional control plane in `GitOps` and `Managed` mode

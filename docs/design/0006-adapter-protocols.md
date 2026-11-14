@@ -555,16 +555,47 @@ The Traefik middleware must set:
 - `trustForwardHeader: false`. Otherwise the engine inspects an `X-Forwarded-Uri` the client
   supplied. Behind a load balancer, the client IP then comes from the [PROXY protocol](https://github.com/haproxy/haproxy/blob/master/doc/proxy-protocol.txt) on Traefik's
   [entry point](https://doc.traefik.io/traefik/routing/entrypoints/), not from the load balancer's [`X-Forwarded-For`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For) ([client IP](../client-ip.md)).
-- `forwardBody: true`, with `maxBodySize` above `--max-body-bytes`. Otherwise bodies pass
-  uninspected.
+- `forwardBody: true`. Otherwise bodies pass uninspected. The body must be bounded above
+  `--max-body-bytes`, but not with ForwardAuth's `maxBodySize` (below).
 - `authResponseHeaders: X-Request-Id`, to pass the request ID on to the app.
 
-**Built:** `pkg/adapters/forwardauth`, run as `inkwall-engine forward-auth`.
+**Latency (#625).** ForwardAuth allocates `maxBodySize + 1` bytes for every request, with a body
+or not (`readBodyBytes` in `pkg/middlewares/auth/forward.go`, v3.7.17 and Traefik's main branch).
+At the 10 MiB a policy may inspect, Traefik zeroed 10 MiB per request: the battle test measured
++8.4 ms at p50 through Traefik, against about 1.5 ms through the other proxies. Measured again on
+one machine (Traefik v3.7.17, the engine and nginx in Docker, `hack/loadgen` with 8 clients for
+15 s, GET of a 1 KiB and a 15 KiB page; added: against Traefik without the Middleware), the cost
+grows with the setting:
 
-Traefik asks before it upgrades a WebSocket handshake, so a denial reaches the client instead of a
-`101`. It drops the hop-by-hop `Upgrade` and `Connection` headers from the subrequest: the engine
-tells a handshake by `Sec-WebSocket-Key` or `Sec-WebSocket-Version` too (#276). It never sees the
-messages after the upgrade.
+| ForwardAuth body setting | Added p50 / p99, 1 KiB | Added p50 / p99, 15 KiB |
+|---|---|---|
+| `maxBodySize: 10485760` (0.5.x) | +8.19 / +16.18 ms | +8.77 / +18.36 ms |
+| `maxBodySize: 1048577` | +3.08 / +8.55 ms | +3.06 / +7.68 ms |
+| `maxBodySize: 65537` | +1.82 / +5.26 ms | +1.36 / +3.34 ms |
+| no `forwardBody` (bodies uninspected) | +1.33 / +3.42 ms | +1.22 / +2.63 ms |
+| Buffering, then `maxBodySize: -1` (0.6.0) | +1.34 / +3.23 ms | +1.37 / +3.01 ms |
+
+The engine's standalone proxy took 1.10 / 1.14 ms at p50 on the same run (Traefik without the
+Middleware: 0.28 / 0.42 ms). Go's GC settings in Traefik
+(`GOGC=off` with a memory limit) didn't change it: it is the per-request zeroing of the buffer.
+A smaller `maxBodySize` isn't an answer: Traefik answers bodies over it itself (401), so it can't
+be lower than the largest body a policy lets through (any size up to 10 MiB in `Detect` mode or
+with `onOversize: Allow`), and `maxBodySize: -1` alone reads any body into memory. So from Traefik
+v3.7, the operator puts a [Buffering](https://doc.traefik.io/traefik/middlewares/http/buffering/)
+Middleware before ForwardAuth: it reads the body as it comes, in memory up to 10 MiB + 1, answers
+413 past it, and passes responses unbuffered (`disableResponseBuffer`, new in v3.7). ForwardAuth
+then forwards the whole bounded body, with `maxBodySize: -1`. The engine sees the same requests;
+a body over 10 MiB + 1 gets 413 instead of 401, and a chunked body reaches the application with a
+`Content-Length`. Before v3.7, Buffering always holds the response too, so the operator keeps
+ForwardAuth alone with `maxBodySize: 10485760`, and its cost
+([0004 §4.4](0004-operator.md#44-wiring-controller)).
+
+ForwardAuth's client is Go's `http.DefaultTransport`, whose pool keeps at most 2 idle connections
+to the engine (`MaxIdleConnsPerHost`), and ForwardAuth has no setting for it: under 8 concurrent
+requests, some open a new loopback connection (about 14,000 sockets in `TIME_WAIT` during the
+0.6.0 runs above, every one closed by Traefik, none by the engine, whose server keeps connections
+alive). That costs little: with the body allocation gone, ForwardAuth is within the "no
+`forwardBody`" row, and it can't be changed on the engine's side.
 
 ## 4. SPOE (HAProxy Stream Processing Offload Engine)
 

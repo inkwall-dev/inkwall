@@ -742,16 +742,38 @@ and ConfigMap settings into `WAFPolicy` objects for Traefik or Envoy Gateway
 ```yaml
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
-metadata: {name: inkwall-waf, namespace: shop}
+metadata: {name: inkwall-waf, namespace: shop}   # what routes refer to
+spec:
+  chain:
+    middlewares: [{name: inkwall-waf-body}, {name: inkwall-waf-auth}]
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata: {name: inkwall-waf-body, namespace: shop}
+spec:
+  buffering:
+    maxRequestBodyBytes: 10485761 # the largest body.maxBytes, + 1; 413 past it
+    memRequestBodyBytes: 10485761 # in memory, not in a file
+    disableResponseBuffer: true   # responses stream (Traefik v3.7+)
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata: {name: inkwall-waf-auth, namespace: shop}
 spec:
   forwardAuth:
     address: http://127.0.0.1:9001/v1/forward-auth
     trustForwardHeader: false   # required, see below
-    forwardBody: true           # required for body inspection (Traefik v3)
-    maxBodySize: 10485760       # the largest body.maxBytes
+    forwardBody: true           # required for body inspection (Traefik v3.3+)
+    maxBodySize: -1             # bounded by inkwall-waf-body
     maxResponseBodySize: 65536  # the engine's answer (Traefik v3.7+)
     authResponseHeaders: ["X-Request-Id"]
 ```
+
+ForwardAuth's own `maxBodySize` is allocated whole for every request, with a body or not: at
+10 MiB it cost 8 ms per request, so the Buffering Middleware bounds the body instead (#625,
+[0006 §3](0006-adapter-protocols.md#3-forward-auth-traefik-forwardauth-nginx-auth_request)).
+Before Traefik v3.7, whose Buffering always holds responses, `inkwall-waf` is the ForwardAuth
+alone, with `maxBodySize: 10485760` and no `maxResponseBodySize`.
 
 The Middleware is attached with the `traefik.ingress.kubernetes.io/router.middlewares` [annotation](https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/)
 on an `Ingress`, or in each route's `middlewares` on an `IngressRoute`
@@ -764,8 +786,8 @@ on an `Ingress`, or in each route's `middlewares` on an `IngressRoute`
 - **`forwardBody: true`** is required, or bodies go uninspected.
 - Missing or invalid forwarded headers get a 400, even in detect mode: the engine can't inspect
   the request, so it can't allow it.
-- Limitation: Traefik itself rejects bodies over `maxBodySize`, whatever `body.onOversize` says.
-  The operator sets it to 10 MiB, the largest inspectable body.
+- Limitation: Traefik itself rejects bodies over 10 MiB + 1 (413; 401 before Traefik v3.7, over
+  10 MiB), whatever `body.onOversize` says: the largest inspectable body is 10 MiB.
 - Limitation: ForwardAuth never sees the response, so Traefik can't inspect responses
   ([0006 §2](0006-adapter-protocols.md#response-inspection-v040)): the engine's forward-auth
   adapter has no response flags, and a policy with `responses.inspect` on a Traefik route is

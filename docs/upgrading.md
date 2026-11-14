@@ -161,6 +161,19 @@ What changes by itself:
   name the settings left out: `kubectl get inkwallconfig default -o
   jsonpath='{.status.conditions[?(@.type=="EngineConfigured")].message}'`. Pin a custom build with
   its version in the tag (`:0.6.0@sha256:...`) to keep every setting.
+- **Traefik adds about 1.3 ms instead of 8 ms** (#625). Traefik's ForwardAuth allocated its
+  `maxBodySize` (10 MiB) for every request, body or not. On Traefik v3.7 and later, the operator's
+  `inkwall-waf` Middleware is now a `chain` of two new ones in the same namespace:
+  `inkwall-waf-body`, a Buffering Middleware that bounds request bodies (10 MiB + 1, in memory;
+  responses aren't buffered), then `inkwall-waf-auth`, the ForwardAuth, with no body limit of its
+  own. Routes keep referring to `inkwall-waf`, and the engine inspects the same requests. A body
+  over 10 MiB + 1 now gets 413 from Traefik instead of 401, and a chunked request body reaches the
+  application with a `Content-Length`. The operator rewrites the Middlewares on its first
+  reconcile, with no restart of Traefik. A Middleware named `inkwall-waf-body` or `inkwall-waf-auth`
+  that the operator didn't create stops the wiring in its namespace (`WiringFailed`): rename it.
+  Before Traefik v3.7 (by its CRD or its image tag), the Middleware stays as it was, and so does
+  the latency: upgrade Traefik and its CRDs together
+  ([0006 §3](design/0006-adapter-protocols.md#3-forward-auth-traefik-forwardauth-nginx-auth_request)).
 - **HAProxy: a request or a response too large for one SPOE frame is handled as oversized** (#336).
   HAProxy sends each in one frame (SPOP 2.0 has no fragmentation), and sends none of one that
   doesn't fit. For `Block`-mode policies, the operator's backend snippet now answers such a

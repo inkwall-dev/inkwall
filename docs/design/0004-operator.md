@@ -468,15 +468,26 @@ longer needed.
   accepted or not. Traefik serves it by `ingressClassName`, the legacy `kubernetes.io/ingress.class`,
   or the default class. Each targeted `IngressRoute` (`traefik.io/v1alpha1`) is wired too. Until a
   route's rules are in a bundle, the engine passes it (reason `no-policy`).
-- **The Middleware.** There is one ForwardAuth `Middleware`, `inkwall-waf`, per such namespace,
-  removed when unused. It sets:
-  - `trustForwardHeader: false`;
-  - `forwardBody: true`;
-  - `maxBodySize` 10 MiB, the largest `body.maxBytes`;
-  - `maxResponseBodySize` 64 KiB for the engine's answer. This is left out on Traefik before v3.7,
-    whose CRD has no such field.
+- **The Middleware.** There is one `Middleware` routes refer to, `inkwall-waf`, per such
+  namespace, removed when unused. Since 0.6.0 (#625) it is a `chain` of two more:
+  - `inkwall-waf-body`, a Buffering Middleware that bounds the request body:
+    `maxRequestBodyBytes` and `memRequestBodyBytes` 10 MiB + 1 (the largest `body.maxBytes`, plus
+    the byte that makes such a body oversized; 413 past it), and `disableResponseBuffer`;
+  - `inkwall-waf-auth`, the ForwardAuth: `trustForwardHeader: false`, `forwardBody: true`,
+    `maxBodySize: -1` (no limit of its own: Traefik allocates that limit for every request, 8 ms at
+    10 MiB, [0006 §3](0006-adapter-protocols.md#3-forward-auth-traefik-forwardauth-nginx-auth_request)),
+    and `maxResponseBodySize` 64 KiB for the engine's answer.
 
-  A Middleware of the same name that the operator didn't create is left alone (`WiringFailed`).
+  On Traefik before v3.7, whose Buffering can't pass responses unbuffered, `inkwall-waf` is the
+  ForwardAuth alone, as before 0.6.0: `maxBodySize` 10 MiB, and no `maxResponseBodySize`, which its
+  CRD doesn't have. The operator tells it from the CRD (the API server drops
+  `disableResponseBuffer` or `maxResponseBodySize` from a Middleware it writes; the operator then
+  keeps to the older Middleware until it restarts) or from a Traefik pod's image tag before v3.7
+  (one it can't read, a digest or `latest`, goes by the CRD), and deletes `inkwall-waf-body` and
+  `inkwall-waf-auth` if it made them.
+
+  A Middleware of one of these names that the operator didn't create is left alone, and nothing is
+  written in that namespace (`WiringFailed`).
   The operator doesn't configure Traefik's [entry points](https://doc.traefik.io/traefik/routing/entrypoints/). Behind a load balancer, the user turns on
   the [PROXY protocol](https://github.com/haproxy/haproxy/blob/master/doc/proxy-protocol.txt) there, so the engine sees the client IP ([client IP](../client-ip.md)).
 - **Ingress.** The annotation gets the operator's Middleware first, with the user's entries kept in
