@@ -103,6 +103,8 @@ run() {
   jq -c --arg proxy "$p" --arg mode "$mode" --arg page "$page" --argjson rss "${peak:-0}" --arg checks "${checks:-0}" --arg sum "${sum:-0}" \
     '. + {proxy: $proxy, mode: $mode, page: $page, engineRssPeakBytes: $rss, responseChecks: ($checks | tonumber), responseCheckSeconds: ($sum | tonumber)}' \
     <<<"$result" >>"$results"
+  # As it goes: a later failure keeps the runs before it.
+  [[ -z $OUT ]] || tail -n 1 "$results" >>"$OUT"
   if ! jq -e '.status | keys == ["200"]' <<<"$result" >/dev/null; then
     echo "FAIL  $p $mode $page: not every response was a 200" >&2
     exit 1
@@ -118,8 +120,9 @@ responses_on() {
     STACK_STANDALONE_ARGS="--mode=block --inspect-responses" stacks_standalone
     ;;
   raw-envoy)
-    stack_policy "$p" '  responses: {inspect: true}'
+    # The sample again (its policy too), then the policy: this order.
     stacks_raw_envoy responses
+    stack_policy "$p" '  responses: {inspect: true}'
     ;;
   *) stack_policy "$p" '  responses: {inspect: true}' ;;
   esac
@@ -160,7 +163,6 @@ for p in "${PROXIES[@]}"; do
   stack_down "$p"
 done
 
-[[ -z $OUT ]] || cat "$results" >>"$OUT"
 {
   echo "Latency Inkwall adds, per proxy: $CONCURRENCY concurrent clients, $DURATION per run (closed loop, after a 3 s warm-up),"
   echo "GET of an nginx HTML page, small.html (about 1 KB) or page.html (about 15 KB), uncompressed. One kind node"

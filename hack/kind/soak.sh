@@ -22,7 +22,9 @@
 # which must reach every engine (claimed and the new canary denied) within
 # SOAK_RECOVERY.
 #
-# With SOAK_CHAOS=1, every SOAK_CHAOS_EVERY one of these, in turn: the
+# With SOAK_CHAOS=1, every SOAK_CHAOS_EVERY one of these, in turn
+# (SOAK_CHAOS_SCENARIOS, default "operator engine proxy apiserver
+# distribution", narrows or reorders them): the
 # operator's leader killed; an engine killed (each proxy's in turn); a
 # proxy's pod deleted (each in turn); the API server stopped for 20 s; the
 # bundle distribution cut (a NetworkPolicy keeps the engines from the
@@ -43,16 +45,17 @@
 #   - a restart outside chaos;
 #   - a status that claimed protection the canary showed wasn't there;
 #   - a policy edit or a chaos scenario not recovered from in SOAK_RECOVERY;
-#   - memory growth of an engine or the operator beyond the bound: the
-#     median RSS of a container's last fifth of samples over that of its
-#     samples after the first fifth (its warm-up) may grow by
-#     SOAK_MEM_GROWTH percent of the latter, or SOAK_MEM_MIN_MIB, whichever
-#     is larger. Steady traffic at a fixed rate keeps the engine's memory
-#     flat (the compiled rule sets and buffers it reuses); the floor is above
-#     the garbage collector's swings, and a leak of one KiB per request at
-#     the default rate passes it within two hours. A container that chaos
-#     replaced is a new series; one with fewer than 10 samples is reported,
-#     not judged.
+#   - memory growth of the engines or the operator beyond the bound, per
+#     proxy (its engines' RSS summed) and for the operator (its replicas'
+#     summed: a sum holds across a leader change and a replaced pod): the
+#     median of the last fifth of the samples over that of the second
+#     fifth (after the first, the warm-up) may grow by SOAK_MEM_GROWTH
+#     percent of the latter, or SOAK_MEM_MIN_MIB, whichever is larger.
+#     Steady traffic at a fixed rate keeps the engine's memory flat (the
+#     compiled rule sets and buffers it reuses); the floor is above the
+#     garbage collector's swings, and a leak of one KiB per request at the
+#     default rate passes it within two hours. A series of fewer than 10
+#     samples is reported, not judged.
 #
 # Needs the operator installed (make kind-soak installs it first, with the
 # bt-* proxy namespaces). PROXIES narrows the stacks; KEEP=1 leaves them.
@@ -329,11 +332,11 @@ rotate_canary() {
 }
 
 # Chaos: the scenarios, each run in turn.
-scenarios=(operator engine proxy apiserver distribution)
+read -r -a scenarios <<<"${SOAK_CHAOS_SCENARIOS:-operator engine proxy apiserver distribution}"
 scenario_i=0
 # The proxies whose engine, and whose pod, go next.
 engine_i=0
-proxy_i=0
+proxy_i=$((${#PROXIES[@]} / 2))
 chaos_begin() {
   chaos_on=true
   chaos_start=$(date +%s)
@@ -486,8 +489,8 @@ for p in "${PROXIES[@]}"; do
      sentOutsideChaos: ($calm | sum(.clean.sent) + sum(.attack.sent)),
      deniedDuringChaos: (map(select(inchaos(.))) | sum(.clean.denied)),
      skipped: sum(.skipped),
-     p50ms: (map(.p50ms) | sort | .[length / 2 | floor] // 0),
-     p99ms: (map(.p99ms) | max // 0)}' "$OUT/traffic-$p.jsonl"
+     p50ms: ($calm | map(.p50ms) | sort | .[length / 2 | floor] // 0),
+     p99ms: ($calm | map(.p99ms) | max // 0)}' "$OUT/traffic-$p.jsonl"
 done | jq -s . >"$work/traffic.json"
 jq -c '.[]' "$work/traffic.json" | while read -r t; do
   p=$(jq -r .proxy <<<"$t")
@@ -502,8 +505,10 @@ done
 jq -s --argjson pct "$SOAK_MEM_GROWTH" --argjson min "$SOAK_MEM_MIN_MIB" '
   def median: sort | .[length / 2 | floor];
   def mib: . / 1048576 | . * 10 | round / 10;
-  group_by(.container + "@" + .id) | map(sort_by(.time) | . as $s | ($s | length) as $n | ($n / 5 | floor) as $f |
-    {container: $s[0].container, id: $s[0].id, samples: $n, from: $s[0].time, to: $s[-1].time} +
+  map(. + {group: (.container | split("/") | "\(.[0])/\(.[2])")}) | group_by(.group) |
+  map(group_by(.time) | map({time: .[0].time, group: .[0].group, rssBytes: (map(.rssBytes) | add), containers: length})) |
+  map(sort_by(.time) | . as $s | ($s | length) as $n | ($n / 5 | floor) as $f |
+    {container: $s[0].group, replicas: ($s | map(.containers) | max), samples: $n, from: $s[0].time, to: $s[-1].time} +
     if $n < 10 then {judged: false}
     else ($s[$f:2 * $f] | map(.rssBytes) | median) as $base | ($s[$n - $f:] | map(.rssBytes) | median) as $last |
       ([$min * 1048576, $base * $pct / 100] | max) as $bound |
@@ -530,11 +535,11 @@ jq -n --arg duration "$DURATION" --arg chaos "${SOAK_CHAOS:-0}" --argjson rate "
   echo "**$(jq -r 'if .pass then "Passed" else "Failed: \(.violations | length) violation(s)" end' "$OUT/summary.json")**."
   echo "$SOAK_RATE requests per second per proxy, one in five an attack; $(jq -r '.canary.rotations' "$OUT/summary.json") policy edits (canaries), $(jq -r '.canary.statusChecks' "$OUT/summary.json") status checks."
   echo
-  echo "| Proxy | Clean (app answered) | Attacks (denied) | Attacks through | False denials | Failed outside chaos | p50 / p99 |"
+  echo "| Proxy | Clean (app answered) | Attacks (denied) | Attacks through | False denials | Failed outside chaos | p50 / worst p99 outside chaos |"
   echo "|---|---|---|---|---|---|---|"
   jq -r '.traffic[] | "| \(.proxy) | \(.clean.sent) (\(.clean.app)) | \(.attack.sent) (\(.attack.denied)) | \(.attacksThrough) | \(.falseDenials) | \(.errorsOutsideChaos) of \(.sentOutsideChaos) | \(.p50ms) / \(.p99ms) ms |"' "$OUT/summary.json"
   echo
-  echo "| Container | Samples | RSS after warm-up | At the end | Peak | Growth (bound) |"
+  echo "| Containers (summed) | Samples | RSS after warm-up | At the end | Peak | Growth (bound) |"
   echo "|---|---|---|---|---|---|"
   jq -r '.memory[] | if .judged then "| \(.container) | \(.samples) | \(.baselineMiB) MiB | \(.finalMiB) MiB | \(.peakMiB) MiB | \(.growthMiB) MiB (\(.boundMiB))\(if .ok then "" else " **over**" end) |"
     else "| \(.container) | \(.samples) | | | | too few samples |" end' "$OUT/summary.json"

@@ -12,7 +12,9 @@
 #   traefik        Traefik (its chart), an Ingress
 #   envoy-gateway  Envoy Gateway, a Gateway and an HTTPRoute
 #   istio          Istio's Gateway API Gateway, an HTTPRoute
-#   haproxy        the HAProxy Kubernetes Ingress Controller, an Ingress
+#   haproxy        the HAProxy Kubernetes Ingress Controller, an Ingress;
+#                  tune.bufsize 81920, as docs/haproxy.md advises, so the
+#                  engine sees bodies (and the larger page) whole
 #   raw-envoy      examples/raw-envoy (Envoy with the engine next to it),
 #                  its Ingress (only the policy reads it)
 #   standalone     the engine's reverse proxy in front of the app, in the
@@ -307,6 +309,7 @@ YAML
       --version "$HAPROXY_CHART_VERSION" --namespace "$ns" --set controller.image.tag="$STACK_HAPROXY_IMAGE_TAG" \
       --set controller.replicaCount=1 --set controller.ingressClass=bt-haproxy \
       --set controller.ingressClassResource.name=bt-haproxy --set controller.service.type=NodePort \
+      --set-string 'controller.config.global-config-snippet=tune.bufsize 81920' \
       --wait --timeout 5m >/dev/null
     stacks_ingresses "$ns" bt-haproxy
     ;;
@@ -602,12 +605,33 @@ stack_down() {
 # KEEP=1.
 stacks_cleanup() {
   [[ ${KEEP:-} != 1 ]] || return 0
-  local p
-  for p in ${stacks_created[@]+"${stacks_created[@]}"}; do stack_down "$p"; done
+  local p nss=()
+  # All at once: the releases, then the namespaces, waited for together.
+  for p in ${stacks_created[@]+"${stacks_created[@]}"}; do
+    case $p in
+    traefik) "${HELM[@]}" -n bt-traefik uninstall bt-traefik >/dev/null 2>&1 || true ;;
+    envoy-gateway)
+      "${KUBECTL[@]}" -n bt-envoy-gateway delete gateway bt --ignore-not-found --timeout=60s >/dev/null 2>&1 || true
+      "${HELM[@]}" -n bt-envoy-gateway uninstall eg >/dev/null 2>&1 || true
+      ;;
+    haproxy) "${HELM[@]}" -n bt-haproxy uninstall haproxy >/dev/null 2>&1 || true ;;
+    esac
+    nss+=("$(stack_ns "$p")")
+  done
+  if ((${#nss[@]} > 0)); then
+    "${KUBECTL[@]}" delete namespace "${nss[@]}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    "${KUBECTL[@]}" delete gatewayclass bt-envoy-gateway --ignore-not-found >/dev/null 2>&1 || true
+    "${KUBECTL[@]}" delete ingressclass bt-traefik bt-haproxy --ignore-not-found >/dev/null 2>&1 || true
+  fi
+  stacks_created=()
   if $stacks_istio_installed; then
-    "${HELM[@]}" -n istio-system uninstall istiod --wait >/dev/null 2>&1 || true
-    "${HELM[@]}" -n istio-system uninstall istio-base --wait >/dev/null 2>&1 || true
-    "${KUBECTL[@]}" delete namespace istio-system --ignore-not-found --timeout=120s >/dev/null 2>&1 || true
+    "${HELM[@]}" -n istio-system uninstall istiod >/dev/null 2>&1 || true
+    "${HELM[@]}" -n istio-system uninstall istio-base >/dev/null 2>&1 || true
+    "${KUBECTL[@]}" delete namespace istio-system --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    nss+=(istio-system)
+  fi
+  if ((${#nss[@]} > 0)); then
+    "${KUBECTL[@]}" wait --for=delete "${nss[@]/#/namespace/}" --timeout=300s >/dev/null 2>&1 || true
   fi
   if $stacks_eg_crds_installed; then "${KUBECTL[@]}" delete -f "$work/eg-crds.yaml" --ignore-not-found >/dev/null 2>&1 || true; fi
   if $stacks_gateway_api_installed; then "${KUBECTL[@]}" delete -f "$work/gateway-api.yaml" --ignore-not-found >/dev/null 2>&1 || true; fi

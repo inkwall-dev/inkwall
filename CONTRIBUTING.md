@@ -114,6 +114,8 @@ Durations are on a laptop or a CI runner, roughly.
 | Operator failure modes on kind | `make kind-chaos` | 20 min | Docker, kind | release qualification (`qualify.yaml`, `chaos`, nightly) |
 | Examples | `make test-examples` (each `examples/<proxy>` policy through `inkwallctl test --policy`, and the `examples/tests` suite) | 1 min | Go | every PR (`test`) |
 | Quickstart | `make kind-quickstart` (`docs/quickstart.md` as written, released chart and images) | 10 min | Docker, kind, network | nightly (`quickstart`) |
+| Soak on kind | `make kind-soak DURATION=24h SOAK_CHAOS=1` (every proxy, steady clean and attack traffic, chaos; [below](#battle-test)) | the duration, plus 10 min | Docker, kind | release battle test |
+| Latency per proxy on kind | `make kind-response-load` (added p50/p99 per proxy, response inspection off and on) | 40 min | Docker, kind | release battle test |
 | False positives | `make fp-run` (a real application's recorded traffic per CRS paranoia level; `make fp-har` records it again) | 1 min | Go (`make fp-har`: Docker, network) | release battle test ([below](#battle-test)) |
 | External links | `make docs-check-external` | 1 min | network | nightly (`docs-links`) |
 | Everything a PR runs | `make check-all` | hours | all of the above | |
@@ -134,6 +136,60 @@ later, untested. A cluster made at another version is recreated with `make kind-
 
 Before the release Inkwall is announced with (v0.6.0's checklist, #520), its battle test runs these
 tools, by hand, and its release notes publish their numbers.
+
+**Soak** (`make kind-soak DURATION=24h`, `hack/kind/soak.sh`): every proxy Inkwall protects on one
+kind cluster (`hack/kind/stacks.sh`: Traefik, Envoy Gateway, Istio, HAProxy, raw Envoy and the
+standalone proxy, one replica each, an nginx app behind each and a `WAFPolicy` in `Block` mode on its
+route), each serving steady traffic from `hack/loadgen`'s mix mode: the clean requests of
+`hack/kind/soak/clean.http` and the attacks of `attacks.http`, `SOAK_RATE` (5) requests a second per
+proxy, one in five an attack. The app marks its answers (`X-Soak-App`), so each answer is the app's,
+the WAF's (403) or a failure. Every `SOAK_SAMPLE` (1 min) it samples the containers' restarts, the
+engines' and the operator's RSS (from `crictl stats` on the node), and each policy's status: when a
+policy claims its protection (`Ready`, `Enforced` for raw Envoy, for its current generation), a canary
+request that only that generation's rules deny must be denied through its proxy. Every
+`SOAK_CANARY_EVERY` (10 min) the canary changes, a policy edit that must reach every engine within
+`SOAK_RECOVERY` (5 min).
+
+With `SOAK_CHAOS=1`, every `SOAK_CHAOS_EVERY` (15 min) one of these, in turn: the operator's leader
+killed; an engine killed (each proxy's in turn); a proxy's pod deleted; the API server stopped for
+20 s; the bundle distribution cut for `SOAK_CUT_FOR` (90 s: a NetworkPolicy keeps the engines from the
+operator, which restarts so their streams end, and the canary changes meanwhile). Each must recover
+within `SOAK_RECOVERY`: every policy claims its protection again, the app answers through every proxy,
+and attacks and the canary are denied. The status checks run throughout: status never claims
+protection that isn't there.
+
+It writes `OUT/summary.json` and `OUT/summary.md` (default `OUT`: `bin/soak/<time>`) and the raw
+samples, and fails on any of:
+
+- an attack the app answered, at any time;
+- a clean request denied, outside chaos (a chaos window lasts until `SOAK_GRACE`, 1 min, after its
+  recovery);
+- other failures (5xx, no answer) to more than `SOAK_MAX_ERROR_RATE` (0.1%) of the requests outside
+  chaos;
+- a restart outside chaos; a status that claimed protection the canary showed wasn't there; a policy
+  edit or chaos scenario not recovered from;
+- memory growth, per proxy (its engines' RSS summed) and for the operator (its replicas' summed,
+  which holds across a leader change or a replaced pod): the median of the last fifth of the samples
+  may exceed that of the second fifth (after the warm-up) by `SOAK_MEM_GROWTH` percent (20) or
+  `SOAK_MEM_MIN_MIB` (32 MiB), whichever is larger. Under steady traffic at a fixed rate the engine's
+  memory is flat: the compiled rule sets and the buffers it reuses. The floor stays above the garbage
+  collector's swings, and a leak of 1 KiB per request at the default rate passes it within two hours.
+
+`PROXIES` narrows the stacks, `SOAK_CHAOS_SCENARIOS` the scenarios, `KEEP=1` leaves the stacks. A short run to check the tool:
+`make kind-soak DURATION=10m SOAK_CHAOS=1 SOAK_CHAOS_EVERY=1m SOAK_SAMPLE=20s`.
+
+**Latency per proxy** (`make kind-response-load`, `hack/kind/response-load.sh`): the same stacks,
+one at a time on the node. Each page of the app, `small.html` (about 1 KB) and `page.html` (about
+15 KB, HTML, which response inspection reads), is loaded by `hack/loadgen` from the host to the
+proxy's NodePort, closed loop, `CONCURRENCY` (8) clients for `DURATION` (20 s) after a 3 s warm-up:
+through the proxy on a route no policy protects (the baseline; raw Envoy: a virtual host with the
+filter off; standalone: the app's own Service), then on the protected route (requests inspected),
+then with `responses.inspect` on (not Traefik, which can't send responses). HAProxy runs with
+`tune.bufsize 81920`, as [its guide](docs/haproxy.md) advises, so the engine sees the larger page
+whole. Every answer must be a 200. It prints a markdown table (`OUT_MD=<file>` writes it) of the p50 and p99 of each run and the
+latency added over the baseline, with the engine's peak RSS and the machine it ran on; `OUT=<file>`
+appends each run as a JSON line. `PROXIES` narrows it. For the release notes, run it on an otherwise
+idle machine and say which, as the table's header does.
 
 **False positives** (`make fp-run`, `hack/fp-run.sh`): the traffic of a real application, every
 request a user's, checked with `inkwallctl test --har` against a policy at each
