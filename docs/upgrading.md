@@ -91,6 +91,11 @@ What's new:
   the operator then sets `allowModeOverride` on the routes of such policies, and the policy is
   `Enforced=False` (`EnginesOutdated`) until every engine runs 0.6.0. Policies without it don't
   change.
+- **gRPC server messages (opt-in, Envoy)** (#317). With streamed responses inspected (above), a
+  gRPC response's status message (`grpc-message`, where a server's error text goes) is inspected
+  too, as one more event: a SQL error leaked there is replaced by the denial when the server
+  answers with nothing else, and ends the call when it comes in the trailers
+  ([gRPC](grpc.md#server-messages)). Nothing changes without streams.
 - **A control plane can deliver and see `WAFIPList`s** (#577). In Managed mode, a policy snapshot
   may carry the IP lists its policies name, written and pruned like the other kinds and labelled
   `inkwall.dev/source: saas`; the cluster state lists every `WAFIPList`

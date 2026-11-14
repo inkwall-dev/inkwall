@@ -488,6 +488,33 @@ The security event carries
 `stream_event`. `make raw-envoy-e2e` checks a leaking SSE event never reaches the client. **Not
 yet:** the reverse proxy's streams (after its responses), and the operator's field.
 
+**gRPC server messages (v0.6.0, #317).** A gRPC response's messages go through the stream path
+above. What #317 adds is the call's **status message**: `grpc-message`, where a server puts its
+error text, and so where a SQL error or a stack trace leaks. It is in the trailers, or in the
+headers of a trailers-only answer (an error before any message), and was never read as text.
+With streams inspected it is now one more event of the response (percent-decoded, up to
+`maxBytes`, with the stream's index after the last message), under the same opt-in, so no new
+field, flag or `EnginesOutdated` requirement:
+
+- **Trailers-only:** Envoy sends the headers with `end_of_stream` and holds them for the answer,
+  so a denied status message is replaced by the engine's denial, as a leaking response body is
+  (`PERMISSION_DENIED`, the request ID in `grpc-message`): the client never sees the leak.
+- **Trailers:** the operator's and the samples' routes never ask for response trailers
+  (`response_trailer_mode: SKIP`). So the `mode_override` that streams a gRPC response's body also
+  sets `response_trailer_mode: SEND` (the response path takes any mode change). A denial there
+  is an immediate response after the headers, which Envoy turns into a reset: the client gets the
+  messages before, then a failed call (`INTERNAL`/`UNAVAILABLE`), never the status message.
+- `grpc-status` itself isn't inspected: a number. gRPC-Web isn't split (its trailers are framed in
+  the body), as above.
+
+The decoding is the one new parser (`FuzzGRPCStatusEvent`: within the limit, cut only when
+longer, and gRPC's percent-encoding round-trips). The Core Rule Set's 95x rules read the
+decoded text as a response body; binary fields of response messages carry the false positives
+measured for requests (0002 §8.7), which is why it stays behind `streams`, off by default.
+`make raw-envoy-e2e` checks, with `hack/grpcecho`, that a server stream leaking in its third
+message is cut before it, that a trailers-only status leak is replaced by the denial, and that a
+status leak in the trailers ends the call without reaching the client.
+
 ## 3. forward-auth (Traefik `ForwardAuth`, nginx `auth_request`)
 
 - The proxy sends an HTTP subrequest with the client's headers to `/v1/forward-auth`. The original

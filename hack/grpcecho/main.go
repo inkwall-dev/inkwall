@@ -11,7 +11,9 @@
 //     the client waits for each echo before it sends the next, so a proxy
 //     that holds the call until the client ends its side stalls it.
 //   - Stream, a server stream: the server sends the request's text split at
-//     "|", one message each.
+//     "|", one message each; a part "status:TEXT" ends the call there with
+//     status INTERNAL and TEXT as its message (before any message: a
+//     trailers-only answer).
 //
 // The server logs each message it gets ("got: TEXT"), so a test can tell a
 // message never reached it.
@@ -39,6 +41,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -131,6 +134,9 @@ func (echoServer) stream(stream grpc.ServerStream) error {
 	}
 	log.Printf("got: %s", m.GetValue())
 	for _, part := range strings.Split(m.GetValue(), "|") {
+		if text, ok := strings.CutPrefix(part, "status:"); ok {
+			return status.Error(codes.Internal, text)
+		}
 		if err := stream.SendMsg(wrapperspb.String(part)); err != nil {
 			return err
 		}
