@@ -224,6 +224,18 @@ check "the request ID the client sends reaches the app" bash -c "curl -s -H 'X-R
 check "a request ID reaches the app" bash -c "curl -s '$U/' | grep -qE 'id=[0-9a-f]{16}'"
 check "metrics count the denials" bash -c "curl -s 127.0.0.1:$ADMIN_PORT/metrics | grep -q 'inkwall_requests_total{action=\"deny\",adapter=\"spoe\",reason=\"rule\"}'"
 
+# A request HAProxy can't fit in one SPOE frame: a 2 MiB buffer holds a
+# 1.5 MB body, over the engine's frame (its 64 KiB body limit plus 1 MiB).
+# HAProxy sends none of it, and haproxy.cfg handles it as oversized.
+head -c 1500000 /dev/zero | tr '\0' a >"$WORK/large"
+start_haproxy '/^    log stdout format raw local0$/a\    tune.bufsize 2097152'
+eventually "a 2 MiB buffer: HAProxy serves" is 200 "$U/"
+check "a request over one SPOE frame is oversized: 413" is 413 -X POST -H 'Content-Type: application/octet-stream' --data-binary "@$WORK/large" "$U/form"
+check "a 20 KB body fits the buffer and the frame: inspected, 200" is 200 -X POST --data-binary "name=$(head -c 20000 /dev/zero | tr '\0' a)" "$U/form"
+check "a 2 MiB buffer: an attack in a body still gets 403" is 403 -X POST -d 'q=<script>alert(1)</script>' "$U/form"
+start_haproxy 's|^$||'
+eventually "the default buffer: HAProxy serves" is 200 "$U/"
+
 # The engine down: the fail-closed rule denies, until the engine is back.
 stop_engine
 check "the engine down, fail closed: 503" is 503 "$U/products?id=42"
