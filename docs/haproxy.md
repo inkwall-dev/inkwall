@@ -441,8 +441,9 @@ oversized above that. Without `option http-buffer-request`, bodies go uninspecte
 as oversized too.
 
 HAProxy sends each request to the engine in one SPOE frame (SPOP 2.0 has no fragmentation since
-HAProxy 3.1), of at most its buffer less 4 bytes, or the engine's limit (its body limit plus 1
-MiB) when that is lower: a request that doesn't fit, with its headers and other arguments, isn't
+HAProxy 3.1), of at most its buffer less 4 bytes, or the engine's limit when that is lower: its
+body limit plus 1 MiB (`--max-body-bytes`; with the [policy from the operator](#the-policy), at
+least the 10 MiB `body.maxBytes` allows, so 11 MiB): a request that doesn't fit, with its headers and other arguments, isn't
 sent at all. HAProxy sets `txn.inkwall.error` to 3 (over its own frame size) or 259 (over the
 engine's), and the first rule of `haproxy.cfg` handles it
 as oversized: 413. Keep that rule whatever your failure mode; leave it out in detect mode. The same
