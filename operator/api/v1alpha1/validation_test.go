@@ -185,6 +185,16 @@ func TestWAFPolicyValidation(t *testing.T) {
 		{name: "unknown oversize action", doc: policy(target + "  body: {onOversize: InspectPrefix}\n"), wantErr: `Unsupported value: "InspectPrefix"`},
 		{name: "grpc Deny", doc: policy(target + "  body: {grpc: Deny}\n")},
 		{name: "unknown grpc action", doc: policy(target + "  body: {grpc: Block}\n"), wantErr: `Unsupported value: "Block"`},
+		// grpcStreams (#315): PerMessage needs the messages inspected.
+		{name: "grpcStreams PerMessage", doc: policy(target + "  body: {grpcMessages: Inspect, grpcStreams: PerMessage}\n")},
+		{name: "grpcStreams Buffer alone", doc: policy(target + "  body: {grpcStreams: Buffer}\n")},
+		{name: "grpcStreams PerMessage without grpcMessages", doc: policy(target + "  body: {grpcStreams: PerMessage}\n"),
+			wantErr: "grpcStreams: PerMessage needs grpcMessages: Inspect"},
+		{name: "grpcStreams PerMessage with Skip", doc: policy(target + "  body: {grpcMessages: Skip, grpcStreams: PerMessage}\n"),
+			wantErr: "grpcStreams: PerMessage needs grpcMessages: Inspect"},
+		{name: "grpcStreams PerMessage without body inspection", doc: policy(target + "  body: {inspect: false, grpcMessages: Inspect, grpcStreams: PerMessage}\n"),
+			wantErr: "grpcStreams: PerMessage needs grpcMessages: Inspect"},
+		{name: "unknown grpcStreams", doc: policy(target + "  body: {grpcMessages: Inspect, grpcStreams: Stream}\n"), wantErr: `Unsupported value: "Stream"`},
 
 		{name: "websocket required headers only", doc: policy(target + "  webSocket: {requiredHeaders: [X-Api-Key]}\n")},
 		{name: "websocket origin with a path", doc: policy(target + "  webSocket: {allowedOrigins: [\"https://app.example.com/\"]}\n"), wantErr: "spec.webSocket.allowedOrigins[0]"},

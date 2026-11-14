@@ -1,0 +1,5 @@
+go test fuzz v1
+[]byte("\x00\x00\x00\x00\a2\x0500000\x00\x00\x00\x00\a2\x05\adeny")
+uint16(3)
+uint16(53)
+bool(true)

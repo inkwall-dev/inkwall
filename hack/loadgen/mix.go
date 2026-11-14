@@ -40,7 +40,7 @@ func (m mixRequest) name() string { return m.method + " " + m.uri }
 
 // readMix reads raw HTTP/1.x requests, separated by blank lines.
 func readMix(path string, attack bool) ([]mixRequest, error) {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) //nolint:gosec // the request file the caller names
 	if err != nil {
 		return nil, err
 	}

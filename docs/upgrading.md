@@ -81,6 +81,16 @@ What's new:
   leaking event ends the stream. Bundles carry it as the policy's `responses.streams`, which engines
   before 0.6.0 ignore. Off by default: nothing changes without it
   ([raw Envoy](raw-envoy.md#responses)).
+- **gRPC streams, one message at a time (opt-in, Envoy)** (#315). A policy with
+  `body.grpcMessages: Inspect` can set `body.grpcStreams: PerMessage` (default `Buffer`): through
+  Envoy Gateway, Istio and raw Envoy (`--grpc-streams per-message`), each message of a gRPC call is
+  then inspected as it arrives, instead of the body Envoy buffers, so long client streams and
+  bidirectional calls work in `Block` mode. The messages before a denied one have already reached
+  the application, which is why it is off by default
+  ([gRPC](grpc.md#long-streams-one-message-at-a-time)). Upgrade the chart first, for the CRD field;
+  the operator then sets `allowModeOverride` on the routes of such policies, and the policy is
+  `Enforced=False` (`EnginesOutdated`) until every engine runs 0.6.0. Policies without it don't
+  change.
 - **A control plane can deliver and see `WAFIPList`s** (#577). In Managed mode, a policy snapshot
   may carry the IP lists its policies name, written and pruned like the other kinds and labelled
   `inkwall.dev/source: saas`; the cluster state lists every `WAFIPList`

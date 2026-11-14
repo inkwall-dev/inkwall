@@ -166,6 +166,9 @@ type engineConfig struct {
 	maxBodyBytes  int64
 	oversize      pipeline.OversizeAction
 	grpcMessages  bool
+	// grpcPerMessage: with grpcMessages, each message is inspected on its
+	// own as it comes (ext-proc, #315).
+	grpcPerMessage bool
 	// responses: ext-proc, spoe and proxy, the adapters that see responses.
 	responses pipeline.ResponseConfig
 	// responseMessages (spoe): HAProxy sends the responses, so requests
@@ -224,7 +227,7 @@ type engineConfig struct {
 // policyFlags define a policy: in bundle mode the operator's bundle does, so
 // they can't be set.
 var policyFlags = []string{
-	"mode", "failure-mode", "timeout", "oversize-body", "grpc-messages", "paranoia-level", "anomaly-threshold",
+	"mode", "failure-mode", "timeout", "oversize-body", "grpc-messages", "grpc-streams", "paranoia-level", "anomaly-threshold",
 	"rules", "rules-before-crs", "watch-rules", "skip-paths", "skip-body-paths", "disable-rule-groups",
 	"websocket-origins", "websocket-allow-missing-origin", "websocket-required-headers", "websocket-messages",
 	"inspect-responses", "max-response-bytes", "oversize-response", "response-streams",
@@ -305,6 +308,11 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	maxBody := fs.Int64("max-body-bytes", 64<<10, "request body bytes to inspect (0 disables body inspection); in bundle mode, for policies that don't set body.maxBytes")
 	oversize := fs.String("oversize-body", "auto", "bodies over --max-body-bytes: deny (413 in block mode), allow (forward with the body uninspected, logged), or auto (deny in block mode, allow in detect mode)")
 	grpcMessages := fs.String("grpc-messages", "skip", "gRPC calls' messages: inspect (the text in them, read without a schema; a message that can't be read is handled as an oversized body) or skip (path and metadata only)")
+	// Only ext-proc streams a request body to the engine (#315).
+	grpcStreams := new(string)
+	if command == cmdExtProc {
+		grpcStreams = fs.String("grpc-streams", "buffer", "with --grpc-messages inspect: per-message (each message of a call inspected on its own as it comes, up to --max-body-bytes, Envoy told to stream the body: long client streams and bidirectional calls work, and the messages before a denied one reach the upstream; needs allow_mode_override) or buffer (the body Envoy buffers, up to --max-body-bytes in all)")
+	}
 	// Only ext-proc, spoe and the proxy see responses: the other adapters
 	// don't take the flags, so none claims to inspect them.
 	inspectResponses, maxResponse, oversizeResponse := new(bool), new(int64), new(string)
@@ -502,6 +510,16 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	case "skip":
 	default:
 		return cfg, fmt.Errorf("--grpc-messages must be inspect or skip, got %q", *grpcMessages)
+	}
+	switch *grpcStreams {
+	case "per-message":
+		if !cfg.grpcMessages {
+			return cfg, errors.New("--grpc-streams per-message needs --grpc-messages inspect")
+		}
+		cfg.grpcPerMessage = true
+	case "buffer", "":
+	default:
+		return cfg, fmt.Errorf("--grpc-streams must be per-message or buffer, got %q", *grpcStreams)
 	}
 	if !*inspectResponses {
 		var stray []string
@@ -881,16 +899,17 @@ func flagMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logger)
 	// evaluates with whichever is in force when a request starts.
 	reloader := &rulesReloader{cfg: cfg, swap: rules.NewSwap(eval), logger: logger, metrics: metrics, sum: sum}
 	p := pipeline.New(reloader.swap, pipeline.Config{
-		Mode:          cfg.mode,
-		FailureMode:   cfg.failureMode,
-		Timeout:       cfg.timeout,
-		MaxConcurrent: cfg.maxConcurrent,
-		Oversize:      cfg.oversize,
-		Observer:      metrics,
-		Routes:        cfg.routes,
-		GRPCMessages:  cfg.grpcMessages,
-		WebSocket:     cfg.webSocket,
-		Responses:     cfg.responses,
+		Mode:           cfg.mode,
+		FailureMode:    cfg.failureMode,
+		Timeout:        cfg.timeout,
+		MaxConcurrent:  cfg.maxConcurrent,
+		Oversize:       cfg.oversize,
+		Observer:       metrics,
+		Routes:         cfg.routes,
+		GRPCMessages:   cfg.grpcMessages,
+		GRPCPerMessage: cfg.grpcPerMessage,
+		WebSocket:      cfg.webSocket,
+		Responses:      cfg.responses,
 	})
 	metrics.WatchAdmission(p.Admission())
 	metrics.WatchRuleSets(func() int { return 1 })

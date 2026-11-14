@@ -68,15 +68,18 @@ func main() {
 	flag.Parse()
 	if *cleanFile != "" {
 		// Until -d, or until stopped (SIGINT, SIGTERM) if -d is 0.
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
-		if *dur > 0 {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, *dur)
-			defer cancel()
+		run := func() error {
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			if *dur > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, *dur)
+				defer cancel()
+			}
+			return mixMain(ctx, *cleanFile, *attackFile, *url, *host, *appHeader, *rate, *attackEvery, *conc,
+				*report, 10*time.Second, os.Stdout)
 		}
-		if err := mixMain(ctx, *cleanFile, *attackFile, *url, *host, *appHeader, *rate, *attackEvery, *conc,
-			*report, 10*time.Second, os.Stdout); err != nil {
+		if err := run(); err != nil {
 			fmt.Fprintln(os.Stderr, "loadgen:", err)
 			os.Exit(2)
 		}

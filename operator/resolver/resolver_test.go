@@ -131,7 +131,7 @@ func TestResolvePolicy(t *testing.T) {
 		{RuleIDs: []int32{920350}},
 	}
 	p.Spec.Body = &wafv1alpha1.BodySpec{MaxBytes: ptr(int64(1024)), OnOversize: wafv1alpha1.OversizeDeny,
-		GRPCMessages: wafv1alpha1.GRPCMessagesInspect, GRPC: wafv1alpha1.GRPCDeny}
+		GRPCMessages: wafv1alpha1.GRPCMessagesInspect, GRPCStreams: wafv1alpha1.GRPCStreamsPerMessage, GRPC: wafv1alpha1.GRPCDeny}
 	p.Spec.Responses = &wafv1alpha1.ResponsesSpec{Inspect: true, MaxBytes: ptr(int64(4096)), OnOversize: wafv1alpha1.OversizeAllow}
 	p.Spec.WebSocket = &wafv1alpha1.WebSocketSpec{
 		AllowedOrigins:     []wafv1alpha1.WebSocketOrigin{"https://shop.example.com", "https://*.shop.example.com"},
@@ -196,7 +196,7 @@ func TestResolvePolicy(t *testing.T) {
 			{RuleIds: []uint32{942100}, ArgumentName: "q"},
 		},
 		Body: &bundlev1.BodyConfig{Inspect: true, MaxBytes: 1024, OnOversize: bundlev1.OversizeAction_OVERSIZE_ACTION_DENY,
-			GrpcMessages: true, DenyGrpc: true},
+			GrpcMessages: true, DenyGrpc: true, GrpcPerMessage: true},
 		Responses: &bundlev1.ResponseConfig{Inspect: true, MaxBytes: 4096, OnOversize: bundlev1.OversizeAction_OVERSIZE_ACTION_ALLOW},
 		Websocket: &bundlev1.WebSocketConfig{
 			AllowedOrigins:     []string{"https://shop.example.com", "https://*.shop.example.com"},

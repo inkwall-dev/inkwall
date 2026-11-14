@@ -188,6 +188,15 @@ func TestExtensionPolicy(t *testing.T) {
 		t.Errorf("responses in detect mode: processingMode %v", pm)
 	}
 
+	// gRPC messages one by one (#315): the engine may switch a call's
+	// request body to STREAMED; the route keeps BufferedPartial for the
+	// rest, and no response stage is added.
+	p = extensionPolicy(&envoyRoute{route: hr, sections: []string{""}, routeSettings: routeSettings{body: true, timeout: def, grpcPerMessage: true}})
+	pm = p.Object["spec"].(map[string]any)["extProc"].([]any)[0].(map[string]any)["processingMode"].(map[string]any)
+	if pm["allowModeOverride"] != true || pm["response"] != nil || pm["request"].(map[string]any)["body"] != "BufferedPartial" {
+		t.Errorf("gRPC per message: processingMode %v", pm)
+	}
+
 	b := backend("shop")
 	if path, _, _ := unstructured.NestedSlice(b.Object, "spec", "endpoints"); path[0].(map[string]any)["unix"].(map[string]any)["path"] != "/var/run/inkwall-socket/extproc.sock" {
 		t.Errorf("Backend %v", b.Object)
@@ -285,6 +294,17 @@ func TestRouteSettings(t *testing.T) {
 			pol("b", wafv1alpha1.WAFPolicySpec{Body: noBody, Responses: &wafv1alpha1.ResponsesSpec{Inspect: true, MaxBytes: ptr.To[int64](32 << 10)}}),
 			pol("c", wafv1alpha1.WAFPolicySpec{Body: noBody, Responses: &wafv1alpha1.ResponsesSpec{}}),
 		}, routeSettings{timeout: def, responses: true, maxResponse: policy.DefaultResponseBytes}},
+		// gRPC messages one by one (#315): the engine tells Envoy to
+		// stream such a call's body, which needs allowModeOverride.
+		{"gRPC per message", []wafv1alpha1.WAFPolicy{
+			pol("a", wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock, Body: &wafv1alpha1.BodySpec{
+				GRPCMessages: wafv1alpha1.GRPCMessagesInspect, GRPCStreams: wafv1alpha1.GRPCStreamsPerMessage}}),
+			pol("b", wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock, Body: &wafv1alpha1.BodySpec{
+				GRPCMessages: wafv1alpha1.GRPCMessagesInspect, GRPCStreams: wafv1alpha1.GRPCStreamsBuffer}}),
+		}, routeSettings{body: true, maxBody: engineBodyBytes, timeout: def, grpcPerMessage: true}},
+		{"gRPC buffered", []wafv1alpha1.WAFPolicy{
+			pol("a", wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock, Body: &wafv1alpha1.BodySpec{GRPCMessages: wafv1alpha1.GRPCMessagesInspect}}),
+		}, routeSettings{body: true, maxBody: engineBodyBytes, timeout: def}},
 		{"another route's", []wafv1alpha1.WAFPolicy{{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "x"},
 			Spec: wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock, TargetRefs: []wafv1alpha1.TargetRef{{Group: "gateway.networking.k8s.io", Kind: "HTTPRoute", Name: "other"}}}}},
 			routeSettings{timeout: def, failOpen: true, detect: true}},
