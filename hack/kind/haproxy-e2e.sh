@@ -206,7 +206,11 @@ wired() {
   a=$("${KUBECTL[@]}" -n "$NS" get ingress app -o jsonpath='{.metadata.annotations}')
   [[ $a == *'filter spoe engine inkwall'* && $a == *'X-User-Snippet'* && $a == *'"haproxy.org/standalone-backend":"true"'* ]]
 }
-reached_app() { "${KUBECTL[@]}" -n "$NS" logs deployment/app --since=10m | grep -i "$1" >/dev/null; }
+# probe_reached_app_since TIME: the app logged a request on the probe's
+# reserved path since TIME. Where the engine answers the request leg itself
+# (Block mode; HAProxy in both modes), only the response leg reaches the app
+# (#595). whoami logs the path, not the query, so the leg's mark isn't in it.
+probe_reached_app_since() { "${KUBECTL[@]}" -n "$NS" logs deployment/app --since-time="$1" | grep -F ".well-known/inkwall-probe/" >/dev/null; }
 never_reached_app() { ! "${KUBECTL[@]}" -n "$NS" logs deployment/app --since=10m | grep -i "$1" >/dev/null; }
 logged() {
   "${KUBECTL[@]}" -n "$NS" logs -l "$SELECTOR" -c inkwall-engine --tail=-1 |
@@ -327,12 +331,13 @@ eventually "engine down in detect mode: requests pass (fails open)" all_are 200 
 signal_engines CONT
 
 echo "== responses"
+responses_since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 policy Block "$RESPONSES"
 eventually "the Ingress gets the response rules" responses_wired
 eventually "Programmed: HAProxy sends the responses" programmed
 # The probe's response leg (#595) goes through to the app, and the engine
 # answers its response: Programmed rests on that, on both pods.
-eventually "the probe's response leg went through to the app" reached_app "inkwall-probe-leg=response"
+eventually "the probe's response leg went through to the app" probe_reached_app_since "$responses_since"
 eventually "Programmed with the responses proven on every pod" programmed
 # From Detect mode: the engines enforce Block once they run the new bundle
 # (Ready), which Programmed, the filter proven, doesn't wait for.

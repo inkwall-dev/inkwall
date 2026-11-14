@@ -445,6 +445,11 @@ labelled() { "${KUBECTL[@]}" -n "$NS" get pods -l e2e=custom -o name | grep . >/
 # whoami --verbose logs the request line of each request it gets.
 never_reached_app() { ! "${KUBECTL[@]}" -n "$NS" logs deployment/app --since=10m | grep -i "$1" >/dev/null; }
 reached_app() { "${KUBECTL[@]}" -n "$NS" logs deployment/app --since=10m | grep -i "$1" >/dev/null; }
+# probe_reached_app_since TIME: the app logged a request on the probe's
+# reserved path since TIME. Where the engine answers the request leg itself
+# (Block mode; HAProxy in both modes), only the response leg reaches the app
+# (#595). whoami logs the path, not the query, so the leg's mark isn't in it.
+probe_reached_app_since() { "${KUBECTL[@]}" -n "$NS" logs deployment/app --since-time="$1" | grep -F ".well-known/inkwall-probe/" >/dev/null; }
 # logged PATH: an engine in the Gateways' pods logged a detect-mode event
 # for PATH.
 logged() {
@@ -576,12 +581,13 @@ eventually "Programmed in detect mode, by the engines' probe receipts" programme
 echo "== responses"
 # Inspected through Istio since #374: a leak is replaced in Block mode,
 # logged in Detect mode, and the policy is Programmed.
+responses_since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 policy Block "$RESPONSES"
 eventually "the EnvoyFilters send the responses, held" responses_sent BUFFERED_PARTIAL
 eventually "Programmed with responses, proven by the probe's response leg" responses_proven
 # The response leg reaches the app (the engine lets it through and answers
 # its response), in Block mode too (#595).
-eventually "the probe's response leg went through to the app" reached_app "inkwall-probe-leg=response"
+eventually "the probe's response leg went through to the app" probe_reached_app_since "$responses_since"
 forward_all
 eventually "a response leaking a SQL error is replaced through both Gateways: 403" leak_is 403 "$CUSTOM_PORT" "$HOST"
 check "and through the other Gateway" leak_is 403 "$PLAIN_PORT" "$HOST"
