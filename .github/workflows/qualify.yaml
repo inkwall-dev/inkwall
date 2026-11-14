@@ -38,9 +38,9 @@ concurrency:
 
 jobs:
   plan:
-    # The refs to qualify: main nightly, the release branches of the
-    # supported minor versions (the latest three, SECURITY.md) weekly, the
-    # ref given on demand. And the Helm version each is tested with.
+    # The refs to qualify: main nightly, the release branches of the two
+    # newest minor versions weekly, the ref given on demand. And the Helm
+    # version each is tested with.
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -65,9 +65,17 @@ jobs:
           case "$SCHEDULE" in
             '41 2 * * *') refs=main ;;
             '7 4 * * 6')
-              # release-X.Y for each supported minor version with a branch.
-              refs=$(go run ./hack/releases -minors 3 | sed -E 's/^([0-9]+\.[0-9]+)\..*/release-\1/' |
-                while read -r b; do git rev-parse -q --verify "origin/$b" >/dev/null && echo "$b"; done) ;;
+              # release-X.Y for each of the newest two minor versions with a
+              # branch. The third supported one (SECURITY.md) misses its
+              # scale target on release-0.3 (#622): it's named, not
+              # qualified, so the run never reads as covering it.
+              branches=$(go run ./hack/releases -minors 3 | sed -E 's/^([0-9]+\.[0-9]+)\..*/release-\1/' |
+                while read -r b; do git rev-parse -q --verify "origin/$b" >/dev/null && echo "$b"; done)
+              refs=$(head -n 2 <<<"$branches")
+              unqualified=$(tail -n +3 <<<"$branches")
+              for b in $unqualified; do
+                echo "::warning::$b is supported but not qualified weekly (#622): dispatch qualify with ref $b"
+              done ;;
             *) refs=$REF ;;
           esac
           if [ -n "$IMAGES" ] && ! [[ $IMAGES =~ ^ghcr:[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
@@ -122,6 +130,10 @@ jobs:
             echo "Helm: $(jq -r 'to_entries | map("\(.key) \(.value)") | join(", ")' <<<"$helm")"
             echo
             echo "A test a ref doesn't have yet is not run, with a warning: see the jobs' annotations."
+            if [ -n "${unqualified:-}" ]; then
+              echo
+              echo "Supported but not qualified weekly (#622): $(tr '\n' ' ' <<<"$unqualified")"
+            fi
           } >>"$GITHUB_STEP_SUMMARY"
 
   images:
