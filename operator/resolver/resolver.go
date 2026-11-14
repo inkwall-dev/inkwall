@@ -555,6 +555,7 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 			body.MaxBytes = *b.MaxBytes
 		}
 		body.GrpcMessages = b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect
+		body.GrpcPerMessage = body.GrpcMessages && b.GRPCStreams == wafv1alpha1.GRPCStreamsPerMessage
 		body.DenyGrpc = b.GRPC == wafv1alpha1.GRPCDeny
 		p.Body = body
 	}

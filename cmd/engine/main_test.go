@@ -819,3 +819,29 @@ func TestParseSPOEResponseFlags(t *testing.T) {
 		}
 	}
 }
+
+// --grpc-streams (#315): ext-proc only, which can stream a request body;
+// it needs --grpc-messages inspect, and is a policy flag, refused with the
+// operator's bundle.
+func TestParseGRPCStreamsFlag(t *testing.T) {
+	cfg, err := parseFlags(cmdExtProc, []string{"--grpc-messages", "inspect"}, io.Discard)
+	if err != nil || cfg.grpcPerMessage {
+		t.Errorf("default: per message %v, %v", cfg.grpcPerMessage, err)
+	}
+	cfg, err = parseFlags(cmdExtProc, []string{"--grpc-messages", "inspect", "--grpc-streams", "per-message"}, io.Discard)
+	if err != nil || !cfg.grpcPerMessage || !cfg.grpcMessages {
+		t.Errorf("--grpc-streams per-message: %v, %v", cfg.grpcPerMessage, err)
+	}
+	for _, args := range [][]string{
+		{"--grpc-streams", "per-message"},
+		{"--grpc-messages", "inspect", "--grpc-streams", "yes"},
+		{"--grpc-messages", "inspect", "--grpc-streams", "per-message", "--operator", "http://op:9443"},
+	} {
+		if _, err := parseFlags(cmdExtProc, args, io.Discard); err == nil {
+			t.Errorf("ext-proc accepted %v", args)
+		}
+	}
+	if _, err := parseFlags(cmdProxy, []string{"--upstream", "http://app", "--grpc-messages", "inspect", "--grpc-streams", "per-message"}, io.Discard); err == nil {
+		t.Error("proxy accepted --grpc-streams")
+	}
+}

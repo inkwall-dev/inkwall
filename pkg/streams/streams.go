@@ -74,10 +74,20 @@ type Event struct {
 	// where the event ends: the bytes before it can go out once the event
 	// and those before it are allowed.
 	End int64
+	// Fields are a gRPC message's text fields, named by their field
+	// numbers as grpcMessages names a request's ("2.1": field 1 of the
+	// message in field 2): what a request message's rules see (#315).
+	// Nil for SSE.
+	Fields []grpcwire.Field
+	// Unframed: the stream isn't gRPC framing (a flag other than 0 or 1),
+	// with Truncated; nothing more of it is inspected. Unlike a message
+	// cut at the limit, it says the body isn't gRPC at all.
+	Unframed bool
 }
 
-// grpcLimits bound the reading of one message's text.
-var grpcLimits = grpcwire.Limits{Depth: 16, Fields: 1024}
+// grpcLimits bound the reading of one message's text: those of a
+// request's messages (grpcMessages).
+var grpcLimits = grpcwire.Limits{Depth: 16, Fields: 4096}
 
 // Splitter splits one stream into events.
 type Splitter struct {
@@ -267,7 +277,7 @@ func (s *Splitter) writeGRPC(p []byte) []Event {
 			}
 			if s.header[0] > 1 {
 				// Not gRPC framing: inspected no further.
-				out = append(out, Event{Truncated: true, End: s.written})
+				out = append(out, Event{Truncated: true, Unframed: true, End: s.written})
 				s.broken, s.pending, s.header = true, 0, nil
 				break
 			}
@@ -323,5 +333,5 @@ func (s *Splitter) grpcEvent(cut bool) Event {
 		}
 		text = append(text, f.Value...)
 	}
-	return Event{Data: text[:min(int64(len(text)), s.max)], Truncated: cut || !whole && len(data) > 0}
+	return Event{Data: text[:min(int64(len(text)), s.max)], Fields: fields, Truncated: cut || !whole && len(data) > 0}
 }

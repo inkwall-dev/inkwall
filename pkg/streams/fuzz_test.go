@@ -8,9 +8,10 @@ import (
 	"testing"
 )
 
-// FuzzSSEEvents fuzzes the splitters (#323): whatever the stream and
-// wherever it is cut into chunks, the events are the same as from the
-// stream in one piece, no event's data is over the limit, and the bytes
+// FuzzSSEEvents fuzzes the splitters (#323, and #315 for gRPC request
+// streams): whatever the stream and wherever it is cut into chunks, the
+// events are the same as from the stream in one piece (their text, gRPC
+// fields and framing), no event's data is over the limit, and the bytes
 // held for the event in progress stay bounded.
 func FuzzSSEEvents(f *testing.F) {
 	f.Add([]byte("data: a\n\ndata: b\r\ndata: c\r\n\r\n: x\n\n"), uint16(3), uint8(16), false)
@@ -43,7 +44,8 @@ func FuzzSSEEvents(f *testing.F) {
 			if got[i].End != want[i].End || got[i].End > int64(len(stream)) || i > 0 && got[i].End < got[i-1].End {
 				t.Fatalf("split at %d, event %d: ends at %d, whole: %d (stream %d bytes)", split, i, got[i].End, want[i].End, len(stream))
 			}
-			if string(got[i].Data) != string(want[i].Data) || got[i].Truncated != want[i].Truncated {
+			if string(got[i].Data) != string(want[i].Data) || got[i].Truncated != want[i].Truncated ||
+				got[i].Unframed != want[i].Unframed || !slices.Equal(got[i].Fields, want[i].Fields) {
 				t.Fatalf("split at %d, event %d: %q %v, whole: %q %v", split, i, got[i].Data, got[i].Truncated, want[i].Data, want[i].Truncated)
 			}
 			if int64(len(got[i].Data)) > limit {

@@ -187,3 +187,30 @@ func slicesConcat(bs ...[]byte) []byte {
 	}
 	return out
 }
+
+// A gRPC message's event carries its text fields by name, as grpcMessages
+// names a request's (#315: request streams inspected per message need them
+// for exclusions); a stream that isn't gRPC framing says so (Unframed),
+// apart from a message cut at the limit.
+func TestGRPCFields(t *testing.T) {
+	nested := append([]byte{0x12, byte(len(message("inner")))}, message("inner")...)
+	s := New(GRPC, 1<<10, "")
+	ev := s.Write(frame(false, append(message("outer"), nested...)))
+	if len(ev) != 1 || len(ev[0].Fields) != 2 || ev[0].Fields[0].Name != "1" || ev[0].Fields[1].Name != "2.1" ||
+		ev[0].Fields[1].Value != "inner" || ev[0].Unframed {
+		t.Fatalf("event %+v", ev)
+	}
+	s = New(GRPC, 8, "")
+	if ev := s.Write(frame(false, message(strings.Repeat("y", 30)))); len(ev) != 1 || !ev[0].Truncated || ev[0].Unframed {
+		t.Errorf("long message: %+v", ev)
+	}
+	s = New(GRPC, 1<<10, "")
+	if ev := s.Write([]byte(`{"q":1}`)); len(ev) != 1 || !ev[0].Truncated || !ev[0].Unframed {
+		t.Errorf("JSON body: %+v", ev)
+	}
+	// SSE events have no fields.
+	s = New(SSE, 1<<10, "")
+	if ev := s.Write([]byte("data: a\n\n")); len(ev) != 1 || ev[0].Fields != nil {
+		t.Errorf("SSE event: %+v", ev)
+	}
+}

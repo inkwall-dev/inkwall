@@ -190,6 +190,10 @@ type routeSettings struct {
 	// responses.maxBytes of those policies.
 	responses   bool
 	maxResponse int64
+	// grpcPerMessage: a policy inspects gRPC calls' messages one by one
+	// (#315): the engine switches such a call's request body to STREAMED
+	// (mode_override), which Envoy allows only with allowModeOverride.
+	grpcPerMessage bool
 }
 
 // buffered reports whether Envoy holds the route's request body, or its
@@ -598,6 +602,9 @@ func settingsOf(policies []wafv1alpha1.WAFPolicy, kind schema.GroupKind, route t
 			}
 			s.maxBody = max(s.maxBody, limit)
 		}
+		if b := p.Spec.Body; b != nil && b.GRPCStreams == wafv1alpha1.GRPCStreamsPerMessage && b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect {
+			s.grpcPerMessage = true
+		}
 		if r := p.Spec.Responses; r != nil && r.Inspect {
 			s.responses = true
 			s.maxResponse = max(s.maxResponse, cmp.Or(ptr.Deref(r.MaxBytes, 0), policy.DefaultResponseBytes))
@@ -667,7 +674,8 @@ func backend(namespace string) *unstructured.Unstructured {
 // buffer limit) for the engine's verdict. The response's headers and body
 // only when a policy inspects responses (0006 §2), held likewise, and the
 // engine may tell Envoy not to send a body it doesn't read
-// (allowModeOverride). Envoy
+// (allowModeOverride). allowModeOverride too when a policy inspects gRPC
+// messages one by one: the engine streams such a call's body (#315). Envoy
 // waits for the engine a little longer than its deadline, as the engine
 // applies the policy's failure mode; failOpen covers an engine that can't
 // be reached, as the policies would. In detect mode Envoy doesn't wait
@@ -697,6 +705,9 @@ func extensionPolicy(r *envoyRoute) *unstructured.Unstructured {
 			body = "Streamed"
 		}
 		mode["response"] = map[string]any{"body": body}
+		mode["allowModeOverride"] = true
+	}
+	if r.grpcPerMessage {
 		mode["allowModeOverride"] = true
 	}
 	extProc := map[string]any{
