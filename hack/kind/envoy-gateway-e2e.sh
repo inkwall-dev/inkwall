@@ -239,8 +239,9 @@ spec:
     - name: ws
       matches: [{path: {type: PathPrefix, value: /ws}}]
       backendRefs: [{name: wsecho, port: 8080}]
+    # A PathPrefix matches whole segments: /sse doesn't match /sse-leak.
     - name: sse
-      matches: [{path: {type: PathPrefix, value: /sse}}]
+      matches: [{path: {type: PathPrefix, value: /sse}}, {path: {type: PathPrefix, value: /sse-leak}}]
       backendRefs: [{name: wsecho, port: 8080}]
 ---
 apiVersion: networking.k8s.io/v1
