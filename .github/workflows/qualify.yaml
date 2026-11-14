@@ -8,6 +8,9 @@ name: qualify
 # against a release candidate's published images instead of the ref's own,
 # by default with that version's own tests (ref v<version>), so a check of
 # a later feature doesn't run against images that predate it (#472).
+# A release branch from before 0.5 has no hack/versions.env: it's tested
+# with the Helm version its own CI pinned (hack/ci/ref-versions.sh), and a
+# test it doesn't have yet is reported as not run, never passed (#618).
 # A release is cut only after a green run (CONTRIBUTING.md, "Cutting a
 # release").
 
@@ -35,13 +38,15 @@ concurrency:
 
 jobs:
   plan:
-    # The refs to qualify: main nightly, the release branches of the two
-    # newest minor versions weekly, the ref given on demand.
+    # The refs to qualify: main nightly, the release branches of the
+    # supported minor versions (the latest three, SECURITY.md) weekly, the
+    # ref given on demand. And the Helm version each is tested with.
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     outputs:
       refs: ${{ steps.plan.outputs.refs }}
+      helm: ${{ steps.plan.outputs.helm }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -60,9 +65,8 @@ jobs:
           case "$SCHEDULE" in
             '41 2 * * *') refs=main ;;
             '7 4 * * 6')
-              # release-X.Y for each of the newest two minor versions with a
-              # branch.
-              refs=$(go run ./hack/releases -minors 2 | sed -E 's/^([0-9]+\.[0-9]+)\..*/release-\1/' |
+              # release-X.Y for each supported minor version with a branch.
+              refs=$(go run ./hack/releases -minors 3 | sed -E 's/^([0-9]+\.[0-9]+)\..*/release-\1/' |
                 while read -r b; do git rev-parse -q --verify "origin/$b" >/dev/null && echo "$b"; done) ;;
             *) refs=$REF ;;
           esac
@@ -75,20 +79,6 @@ jobs:
           if [ -z "$SCHEDULE" ] && [ -z "$refs" ]; then
             if [ -n "$IMAGES" ]; then refs=v${IMAGES#ghcr:}; else refs=main; fi
           fi
-          # Testing published images needs the ref's Makefile to know
-          # IMAGES (0.5.0 and later).
-          if [ -n "$IMAGES" ]; then
-            for r in $refs; do
-              c=$(git rev-parse -q --verify "origin/$r^{commit}" || git rev-parse -q --verify "$r^{commit}") || {
-                echo "no such ref: $r" >&2
-                exit 1
-              }
-              if ! git show "$c:Makefile" | grep -q '^IMAGES'; then
-                echo "$r predates qualifying published images (its Makefile has no IMAGES): give a later ref" >&2
-                exit 1
-              fi
-            done
-          fi
           # Only the refs a release is qualified from (#503): main, a
           # release branch or a release tag. The jobs below check them out
           # and run their code with the default branch's context: never a
@@ -99,13 +89,39 @@ jobs:
               exit 1
             fi
           done
+          helm='{}'
+          for r in $refs; do
+            c=$(git rev-parse -q --verify "origin/$r^{commit}" || git rev-parse -q --verify "$r^{commit}") || {
+              echo "no such ref: $r" >&2
+              exit 1
+            }
+            # Testing published images needs the ref's Makefile to know
+            # IMAGES (0.5.0 and later).
+            if [ -n "$IMAGES" ] && ! git show "$c:Makefile" | grep -q '^IMAGES'; then
+              echo "$r predates qualifying published images (its Makefile has no IMAGES): give a later ref" >&2
+              exit 1
+            fi
+            # The Helm version it's tested with: its hack/versions.env, or
+            # before 0.5 its CI workflow's.
+            v=$(hack/ci/ref-versions.sh "$c" | sed -n 's/^HELM_VERSION=//p')
+            if [ -z "$v" ]; then
+              echo "$r: no Helm version (hack/ci/ref-versions.sh)" >&2
+              exit 1
+            fi
+            helm=$(jq -c --arg r "$r" --arg v "$v" '.[$r] = $v' <<<"$helm")
+          done
           echo "refs=$(jq -Rnc '[inputs | select(length > 0)]' <<<"$refs")" >>"$GITHUB_OUTPUT"
+          echo "helm=$helm" >>"$GITHUB_OUTPUT"
           {
             echo "## Qualifying"
             echo
             echo "Refs: $(tr '\n' ' ' <<<"$refs")"
             echo
             echo "Images: ${IMAGES:-built from each ref}"
+            echo
+            echo "Helm: $(jq -r 'to_entries | map("\(.key) \(.value)") | join(", ")' <<<"$helm")"
+            echo
+            echo "A test a ref doesn't have yet is not run, with a warning: see the jobs' annotations."
           } >>"$GITHUB_STEP_SUMMARY"
 
   images:
@@ -169,12 +185,11 @@ jobs:
           check-latest: true
           # Restore only: these jobs run the ref's code (#503).
           cache: false
-      # The versions under test, hack/versions.env (#393).
-      - id: versions
-        run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_OUTPUT"
+      # The ref's Helm version: its hack/versions.env (#393), or before 0.5
+      # its CI workflow's (plan, #618).
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: ${{ steps.versions.outputs.HELM_VERSION }}
+          version: ${{ fromJSON(needs.plan.outputs.helm)[matrix.ref] }}
       - id: name
         env:
           REF: ${{ matrix.ref }}
@@ -240,12 +255,11 @@ jobs:
           check-latest: true
           # Restore only: this job runs the ref's code (#503).
           cache: false
-      # The versions under test, hack/versions.env (#393).
-      - id: versions
-        run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_OUTPUT"
+      # The ref's Helm version: its hack/versions.env (#393), or before 0.5
+      # its CI workflow's (plan, #618).
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: ${{ steps.versions.outputs.HELM_VERSION }}
+          version: ${{ fromJSON(needs.plan.outputs.helm)[matrix.ref] }}
       - id: name
         env:
           REF: ${{ matrix.ref }}
@@ -356,13 +370,27 @@ jobs:
           check-latest: true
           # Restore only: these jobs run the ref's code (#503).
           cache: false
-      - run: make raw-envoy-e2e IMAGES="$IMAGES"
+      # A release branch from before 0.4 has none of these: say so rather
+      # than fail.
+      - id: target
+        run: |
+          for t in raw-envoy websocket haproxy; do
+            if make -n "$t-e2e" >/dev/null 2>&1; then echo "$t=true" >>"$GITHUB_OUTPUT"; else
+              echo "$t=false" >>"$GITHUB_OUTPUT"
+              echo "::warning::make $t-e2e doesn't exist on this ref: not run"
+            fi
+          done
+      - if: steps.target.outputs.raw-envoy == 'true'
+        run: make raw-envoy-e2e IMAGES="$IMAGES"
         env:
           IMAGES: ${{ inputs.images }}
-      - run: make websocket-e2e SKIP_BUILD=1 IMAGES="$IMAGES"
+      # With the engine image raw-envoy-e2e built (they came together).
+      - if: steps.target.outputs.websocket == 'true'
+        run: make websocket-e2e SKIP_BUILD=1 IMAGES="$IMAGES"
         env:
           IMAGES: ${{ inputs.images }}
-      - run: make haproxy-e2e IMAGES="$IMAGES"
+      - if: steps.target.outputs.haproxy == 'true'
+        run: make haproxy-e2e IMAGES="$IMAGES"
         env:
           IMAGES: ${{ inputs.images }}
 
