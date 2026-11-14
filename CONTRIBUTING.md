@@ -248,7 +248,10 @@ for patching released versions.
    supported release, the full scale test with and without responses, the Docker e2e tests and the
    CRS suite against those images. **Cut the release only after a green run**, and link it in the
    release's PR or notes. The same workflow runs nightly on `main` and weekly on the supported
-   release branches. The examples that pin the engine image,
+   release branches of the two newest minor versions (the run's summary names the third supported
+   one, which is qualified on demand); an older branch runs the tests it has, with the Helm version
+   its own CI pinned, and each test it doesn't have yet is reported as not run (a warning on the
+   job), never as passed. The examples that pin the engine image,
    `examples/raw-envoy/kustomization.yaml` (`newTag`), name the release being cut: bump them in
    a PR before tagging. The READMEs write `<version>` (`make docs-check` fails on a pinned
    release there), so they need no bump.
