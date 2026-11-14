@@ -596,6 +596,14 @@ eventually "and the engines log it" leak_logged gateway.istio.io/managed=istio.i
 echo "== streamed responses (responses.streams: Inspect)"
 policy Block '  responses: {inspect: true, streams: Inspect}'
 eventually "the EnvoyFilters send the responses, held" responses_sent BUFFERED_PARTIAL
+# Every engine must run the bundle with streams before a leaking stream can
+# be cut.
+# enforced: Enforced for this generation of the policy, not the last one.
+enforced() {
+  [[ $(condition Enforced status) == True &&
+    $(condition Enforced observedGeneration) == $("${KUBECTL[@]}" -n "$NS" get wafpolicy shared -o jsonpath='{.metadata.generation}') ]]
+}
+eventually "the policy is Enforced: every engine runs the bundle with streams" enforced
 forward_all
 sse_through() { curl -sN --max-time 10 -H "Host: $HOST" "http://127.0.0.1:$1$2" || true; }
 streams_clean() {
@@ -611,12 +619,19 @@ streams_cut() {
     [[ $out == *"data: hello"* && $out != *"SQL syntax"* && $out != *"data: after"* ]] || return 1
   done
 }
+before=$failures
 eventually "a stream with a leaking event ends before it" streams_cut
 logged_stream() {
   engine_logs gateway.istio.io/managed=istio.io-gateway-controller | grep '"security event"' |
     grep '"path":"/sse-leak"' | grep '"action":"deny"' | grep -q '"stream_event":2'
 }
 eventually "the engines log the leaking event, with its index" logged_stream
+if ((failures > before)); then
+  echo "-- /sse-leak through each Gateway, the policy's Enforced, and the engines' lines for it:"
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do sse_through "$port" /sse-leak | head -c 600; echo; done
+  condition Enforced message; echo
+  engine_logs gateway.istio.io/managed=istio.io-gateway-controller | grep -E 'sse|bundle' | tail -20 || true
+fi
 eventually "the policy is Programmed" programmed
 
 echo "== unprotected"
