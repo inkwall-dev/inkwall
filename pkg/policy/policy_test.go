@@ -22,6 +22,7 @@ import (
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	"github.com/inkwall-dev/inkwall/pkg/events"
+	"github.com/inkwall-dev/inkwall/pkg/grpcwire"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/rules"
@@ -1047,5 +1048,41 @@ func TestResponseStreams(t *testing.T) {
 	defer x.Close()
 	if x.Streams() {
 		t.Error("streams inspected without responses.streams")
+	}
+}
+
+// A policy's body.grpcPerMessage (#315): its gRPC calls' messages are
+// inspected one by one with the real rules, each named by its field
+// numbers; a clean one adds nothing of the call's (no header rule fires on
+// the message's own request). Off without it.
+func TestGRPCPerMessage(t *testing.T) {
+	b := testBundle()
+	b.Policies[0].Body = &bundlev1.BodyConfig{Inspect: true, GrpcMessages: true, GrpcPerMessage: true}
+	set, err := Compile(b, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	call := req("shop.example.com", "/chat.Chat/Talk")
+	call.Method, call.Proto = http.MethodPost, "HTTP/2"
+	call.Headers = http.Header{"Content-Type": {"application/grpc"}, "Te": {"trailers"}, "User-Agent": {"grpc-go/1.75.0"}}
+	stream := set.GRPCStream(call)
+	if stream == nil {
+		t.Fatal("GRPCStream nil with grpcPerMessage set")
+	}
+	if v := stream.CheckGRPCMessage(ctx, call, streams.Event{Fields: []grpcwire.Field{{Name: "1", Value: "hello"}, {Name: "2.1", Value: "a plain sentence"}}}, 1); v.Action != pipeline.ActionAllow || v.Reason != pipeline.ReasonNone {
+		t.Errorf("clean message: %v %v %v", v.Action, v.Reason, v.RuleIDs)
+	}
+	v := stream.CheckGRPCMessage(ctx, call, streams.Event{Fields: []grpcwire.Field{{Name: "2.1", Value: "1' OR '1'='1' -- "}}}, 2)
+	if v.Action != pipeline.ActionDeny || v.StreamEvent != 2 || v.Policy != "shop/site" {
+		t.Errorf("attack: %v, message %d, policy %q", v.Action, v.StreamEvent, v.Policy)
+	}
+
+	b.Policies[0].Body = &bundlev1.BodyConfig{Inspect: true, GrpcMessages: true}
+	if set, err = Compile(b, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if set.GRPCStream(call) != nil {
+		t.Error("messages inspected one by one without grpcPerMessage")
 	}
 }

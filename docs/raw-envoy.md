@@ -245,6 +245,14 @@ default, or the largest `body.maxBytes` of your policies): a body Envoy cuts at 
 handled as oversized (`--oversize-body`, or the policy's `body.onOversize`). With
 `request_body_mode: NONE`, bodies go uninspected, and are handled as oversized too.
 
+**gRPC streams, one message at a time** (new in 0.6.0, off by default). With `--grpc-messages
+inspect --grpc-streams per-message`, a gRPC call isn't held until its client has sent it all: the
+engine decides it on its headers and asks Envoy to stream its body (`mode_override`, so add
+`allow_mode_override: true` to the filter), then inspects each message as it completes, up to
+`--max-body-bytes`. Long client streams and bidirectional calls work; in block mode a denied
+message ends the call with its gRPC status, after the messages before it reached the app. See
+[gRPC](grpc.md#long-streams-one-message-at-a-time).
+
 ### Responses
 
 New in 0.4.0, off by default. With `--inspect-responses`, the engine also inspects what the app

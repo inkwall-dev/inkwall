@@ -27,6 +27,13 @@
 #     stream, which passes whole, and one with an event leaking a SQL
 #     error, whose stream is reset before the leak reaches the client in
 #     block mode; the event is logged with its index.
+#   - gRPC streams one message at a time (#315, --grpc-streams per-message):
+#     the app is hack/grpcecho, a gRPC server, and Envoy speaks HTTP/2 to
+#     it. A client stream whose third message carries an attack is denied
+#     after the first two reach the server, never the third; a
+#     bidirectional call (each message waits for the server's echo) passes,
+#     where a buffered body would stall it; one with an attack in a later
+#     message is cut there, the server never getting it.
 #
 # The Kubernetes sample (kustomization.yaml) is rendered with kubectl, when
 # kubectl is installed. SKIP_BUILD=1 uses the engine image already built
@@ -87,7 +94,7 @@ event_has() { event "$1" | grep -qF "$2"; }
 
 cleanup() {
   if [[ ${KEEP:-} == 1 ]]; then return; fi
-  docker rm -f "$NAME-engine" "$NAME-envoy" "$NAME-app" "$NAME-sse" >/dev/null 2>&1 || true
+  docker rm -f "$NAME-engine" "$NAME-envoy" "$NAME-app" "$NAME-sse" "$NAME-grpc" >/dev/null 2>&1 || true
   docker volume rm "$NAME-socket" >/dev/null 2>&1 || true
   docker network rm "$NAME" >/dev/null 2>&1 || true
   [[ -z ${RESPONSES:-} ]] || rm -rf "$RESPONSES"
@@ -284,6 +291,57 @@ leak_cut() { ! sse /sse-leak | grep -qF 'SQL syntax'; }
 check "a stream with a leaking event: the leak never reaches the client" leak_cut
 eventually "the leaking event is logged as a response deny" event_has /sse-leak '"phase":"response"'
 check "with its index in the stream" event_has /sse-leak '"stream_event":2'
+
+# gRPC streams one message at a time (#315): the app is now hack/grpcecho,
+# built here (test only, never released) and run in the engine's image
+# (distroless, static), behind Envoy's sample with HTTP/2 to the app and
+# allow_mode_override, which the engine's mode_override needs.
+echo "== gRPC streams, one message at a time (--grpc-streams per-message)"
+docker rm -f "$NAME-sse" >/dev/null
+mkdir -p "$RESPONSES/grpc"
+CGO_ENABLED=0 go build -trimpath -o "$RESPONSES/grpc/grpcecho" ./hack/grpcecho
+chmod 755 "$RESPONSES/grpc" "$RESPONSES/grpc/grpcecho"
+docker run -d --name "$NAME-grpc" --network "$NAME" --network-alias app --entrypoint /grpc/grpcecho \
+  -v "$RESPONSES/grpc:/grpc:ro" "$IMAGE" serve -listen :80 >/dev/null
+# grpc_config: envoy.yaml with allow_mode_override, and HTTP/2 to the app.
+grpc_config() {
+  sed -e 's/^\( *\)request_attributes:/\1allow_mode_override: true\n&/' \
+    -e '/^      type: STRICT_DNS$/a\      typed_extension_protocol_options:\n        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:\n          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions\n          explicit_http_config:\n            http2_protocol_options: {}' \
+    "$EXAMPLES/envoy.yaml" >"$RESPONSES/envoy-grpc.yaml"
+  chmod 644 "$RESPONSES/envoy-grpc.yaml"
+  grep -q allow_mode_override "$RESPONSES/envoy-grpc.yaml" && grep -q http2_protocol_options: "$RESPONSES/envoy-grpc.yaml"
+}
+check "envoy.yaml for gRPC: written" grpc_config
+check "Envoy accepts envoy.yaml for gRPC" \
+  docker run --rm -v "$RESPONSES:/cfg:ro" "$ENVOY_IMAGE" --mode validate -c /cfg/envoy-grpc.yaml
+EXAMPLES=$RESPONSES start_envoy envoy-grpc.yaml
+start_engine --listen=unix:/var/run/inkwall/extproc.sock --mode=block --grpc-messages=inspect --grpc-streams=per-message
+GRPC_SQLI="1' OR '1'='1' -- "
+# grpcecho_out CALL MESSAGE...: what the client prints (the messages it got
+# back, then the call's status code).
+grpcecho_out() { "$RESPONSES/grpc/grpcecho" "$1" -authority "$HOST" "127.0.0.1:$PORT" "${@:2}" 2>/dev/null || true; }
+collect_ok() { [[ $(grpcecho_out collect hello world again) == $'3 messages\nOK' ]]; }
+eventually "a clean client stream passes: 3 messages, OK" collect_ok
+collect_denied() { [[ $(grpcecho_out collect one two "$GRPC_SQLI" four) == PermissionDenied ]]; }
+check "a client stream with an attack in its third message: PermissionDenied" collect_denied
+server_got() { docker logs "$NAME-grpc" 2>&1 | grep -qF "got: $1"; }
+check "the messages before it reached the server" server_got two
+never_got() { ! docker logs "$NAME-grpc" 2>&1 | grep -qF -e "$GRPC_SQLI" -e 'got: four'; }
+check "the attack, and what followed it, never did" never_got
+eventually "the denied message is logged with its index" event_has /inkwall.test.Echo/Collect '"stream_event":3'
+# A bidirectional call: the client sends each message only after the
+# server's echo of the last, so it never ends its side first. Buffered,
+# Envoy would hold the call until the client's timeout.
+chat_ok() { [[ $(grpcecho_out chat hello world) == $'echo: hello\necho: world\nOK' ]]; }
+check "a bidirectional call passes, message by message" chat_ok
+chat_cut() {
+  local out
+  out=$(grpcecho_out chat hi "$GRPC_SQLI" after)
+  [[ ${out%%$'\n'*} == 'echo: hi' && $out != *OK && $out != *"echo: $GRPC_SQLI"* ]]
+}
+check "a bidirectional call with an attack in a later message: cut there" chat_cut
+check "the server never got that attack, nor what followed" never_got
+eventually "the bidirectional call's attack is logged" event_has /inkwall.test.Echo/Chat '"stream_event":2'
 
 if ((failures > 0)); then
   echo "$failures check(s) failed"

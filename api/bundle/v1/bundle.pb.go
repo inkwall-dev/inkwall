@@ -1349,9 +1349,15 @@ type BodyConfig struct {
 	// Deny a request with a gRPC or gRPC-Web content type, on routes that
 	// serve no gRPC (#367). Engines before 0.5.0 ignore it: the operator
 	// doesn't count them as enforcing a policy that sets it.
-	DenyGrpc      bool `protobuf:"varint,5,opt,name=deny_grpc,json=denyGrpc,proto3" json:"deny_grpc,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	DenyGrpc bool `protobuf:"varint,5,opt,name=deny_grpc,json=denyGrpc,proto3" json:"deny_grpc,omitempty"`
+	// With grpc_messages, inspect a gRPC call's messages one by one as they
+	// come (ext_proc streams the body), not the buffered body: long client
+	// streams and bidirectional calls then work (#315). Engines before 0.6.0
+	// ignore it and buffer: the operator doesn't count them as enforcing a
+	// policy that sets it.
+	GrpcPerMessage bool `protobuf:"varint,6,opt,name=grpc_per_message,json=grpcPerMessage,proto3" json:"grpc_per_message,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *BodyConfig) Reset() {
@@ -1415,6 +1421,13 @@ func (x *BodyConfig) GetGrpcMessages() bool {
 func (x *BodyConfig) GetDenyGrpc() bool {
 	if x != nil {
 		return x.DenyGrpc
+	}
+	return false
+}
+
+func (x *BodyConfig) GetGrpcPerMessage() bool {
+	if x != nil {
+		return x.GrpcPerMessage
 	}
 	return false
 }
@@ -1650,7 +1663,7 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\bargument\x18\x03 \x01(\tR\bargument\x12#\n" +
 	"\rargument_name\x18\x04 \x01(\tR\fargumentName\x12\x16\n" +
 	"\x06cookie\x18\x05 \x01(\tR\x06cookie\x12\x16\n" +
-	"\x06header\x18\x06 \x01(\tR\x06header\"\xc9\x01\n" +
+	"\x06header\x18\x06 \x01(\tR\x06header\"\xf3\x01\n" +
 	"\n" +
 	"BodyConfig\x12\x18\n" +
 	"\ainspect\x18\x01 \x01(\bR\ainspect\x12\x1b\n" +
@@ -1658,7 +1671,8 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\von_oversize\x18\x03 \x01(\x0e2!.inkwall.bundle.v1.OversizeActionR\n" +
 	"onOversize\x12#\n" +
 	"\rgrpc_messages\x18\x04 \x01(\bR\fgrpcMessages\x12\x1b\n" +
-	"\tdeny_grpc\x18\x05 \x01(\bR\bdenyGrpc\"\x97\x01\n" +
+	"\tdeny_grpc\x18\x05 \x01(\bR\bdenyGrpc\x12(\n" +
+	"\x10grpc_per_message\x18\x06 \x01(\bR\x0egrpcPerMessage\"\x97\x01\n" +
 	"\x0fWebSocketConfig\x12'\n" +
 	"\x0fallowed_origins\x18\x01 \x03(\tR\x0eallowedOrigins\x120\n" +
 	"\x14allow_missing_origin\x18\x02 \x01(\bR\x12allowMissingOrigin\x12)\n" +

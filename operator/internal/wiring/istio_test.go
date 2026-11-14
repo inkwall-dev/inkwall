@@ -346,6 +346,12 @@ func TestIstioResponses(t *testing.T) {
 		r := &istioRoute{route: istioTestRoute("shop", "app", "web", ""), sections: []string{""}, routeSettings: s}
 		return jsonOf(envoyFilter(gw, []*istioRoute{r}).Object["spec"])
 	}
+	// gRPC messages one by one (#315): allow_mode_override, and still no
+	// response stage.
+	if spec := route(routeSettings{timeout: time.Second, body: true, grpcPerMessage: true}); !strings.Contains(spec, `"allow_mode_override":true`) ||
+		!strings.Contains(spec, `"response_header_mode":"SKIP"`) || !strings.Contains(spec, `"request_body_mode":"BUFFERED_PARTIAL"`) {
+		t.Errorf("gRPC per message: %s", spec)
+	}
 	spec := route(routeSettings{timeout: time.Second, responses: true, maxResponse: 64 << 10})
 	for _, want := range []string{`"response_header_mode":"SEND"`, `"response_body_mode":"BUFFERED_PARTIAL"`,
 		`"allow_mode_override":true`, `"per_connection_buffer_limit_bytes":10485760`} {
