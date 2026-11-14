@@ -293,15 +293,33 @@ func testIstio(ctx context.Context, t *testing.T, c client.Client) {
 	})
 	eventually(t, "Programmed again", programmed(metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
 
+	// Responses (#595): the probe's response leg proves they reach the
+	// engine, answered in its response phase on every pod. An engine that
+	// answers it at the request phase doesn't keep the route's responses:
+	// ResponsesNotInspected, naming the pod.
+	t.Cleanup(func() { earlyPods.Delete(edge + "/plain-a") })
+	earlyPods.Store(edge+"/plain-a", true)
+	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) { p.Spec.Responses = &wafv1alpha1.ResponsesSpec{Inspect: true} })
+	eventually(t, "responses: the filter sends them", filterHas("custom", []string{`"response_header_mode":"SEND"`}))
+	eventually(t, "responses not reaching an engine: ResponsesNotInspected", programmed(metav1.ConditionFalse, wiring.ReasonResponsesNotInspected,
+		"don't reach the engine on Istio: pod "+edge+"/plain-a"))
+	earlyPods.Delete(edge + "/plain-a")
+	eventually(t, "Programmed once the response leg is answered", programmed(metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
+
 	// Detect mode: Envoy doesn't wait for the engine, nor holds the body.
-	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) { p.Spec.Mode = wafv1alpha1.PolicyDetect })
-	eventually(t, "detect mode: observability_mode, a streamed body, no buffer limit", filterHas("custom",
-		[]string{`"observability_mode":true`, `"request_body_mode":"STREAMED"`, `"failure_mode_allow":true`}, "per_connection_buffer_limit_bytes", "BUFFERED_PARTIAL"))
 	// Envoy discards the engine's answer to the probe in observability
 	// mode: the route is proven by the receipts the Gateways' engines
 	// report (#475), through the operator's distribution server and its
-	// engine report.
+	// engine report; its responses by the receipts of the response leg
+	// (#595), which an engine that doesn't keep them never reports.
 	stopEngines := observeProbes(ctx, t, c, edge+"/custom-new", edge+"/plain-a")
+	earlyPods.Store(edge+"/plain-a", true)
+	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) { p.Spec.Mode = wafv1alpha1.PolicyDetect })
+	eventually(t, "detect mode: observability_mode, a streamed body, no buffer limit", filterHas("custom",
+		[]string{`"observability_mode":true`, `"request_body_mode":"STREAMED"`, `"failure_mode_allow":true`}, "per_connection_buffer_limit_bytes", "BUFFERED_PARTIAL"))
+	eventually(t, "detect mode: no receipt of the response, ResponsesNotInspected", programmed(metav1.ConditionFalse, wiring.ReasonResponsesNotInspected,
+		"no receipt of the probe's response"))
+	earlyPods.Delete(edge + "/plain-a")
 	eventually(t, "Programmed in detect mode by the engines' probe receipts", programmed(metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
 	stopEngines()
 

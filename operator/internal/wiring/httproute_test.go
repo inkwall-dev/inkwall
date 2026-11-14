@@ -284,3 +284,45 @@ func TestProgrammedResponses(t *testing.T) {
 		}
 	}
 }
+
+// What the probe's response leg shows (#595) is said only on a policy that
+// inspects responses: not proven yet, Unverified; not reaching the engine
+// on a pod, ResponsesNotInspected; not probeable, NotProbeable; an engine
+// before the response leg, a note on Programmed. Another policy on the same
+// route keeps its status.
+func TestProgrammedResponsesProof(t *testing.T) {
+	route := Target{Kind: httpRouteKind, Key: types.NamespacedName{Namespace: "shop", Name: "api"}}
+	withEngine := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "edge", Name: "e"},
+		Spec: corev1.PodSpec{InitContainers: []corev1.Container{{Name: injection.ContainerName}}}}
+	pol := func(responses bool) *wafv1alpha1.WAFPolicy {
+		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
+			TargetRefs: []wafv1alpha1.TargetRef{{Group: gatewayv1.GroupName, Kind: "HTTPRoute", Name: "api"}}}}
+		if responses {
+			p.Spec.Responses = &wafv1alpha1.ResponsesSpec{Inspect: true}
+		}
+		return p
+	}
+	for _, tc := range []struct {
+		name        string
+		proof       ResponsesProof
+		status      metav1.ConditionStatus
+		reason, msg string
+	}{
+		{"proven", ResponsesProof{}, metav1.ConditionTrue, ReasonProgrammed, "1 HTTPRoute(s) wired to the engine in Istio"},
+		{"unverified", ResponsesProof{Unverified: "HTTPRoute api's responses are unverified"}, metav1.ConditionFalse, ReasonUnverified, "HTTPRoute api's responses are unverified"},
+		{"failed", ResponsesProof{Failed: "the probe's response leg shows that HTTPRoute api's responses don't reach the engine on Istio: pod edge/e"},
+			metav1.ConditionFalse, ReasonResponsesNotInspected, "responses.inspect is set, but the probe's response leg shows that HTTPRoute api's responses don't reach the engine on Istio: pod edge/e; or remove responses"},
+		{"not probeable", ResponsesProof{NotProbeable: "HTTPRoute api's responses can't be probed"}, metav1.ConditionFalse, ReasonNotProbeable, "HTTPRoute api's responses can't be probed"},
+		{"outdated engine", ResponsesProof{Note: "HTTPRoute api's responses are sent to the engine, but unproven"}, metav1.ConditionTrue, ReasonProgrammed, "wired to the engine in Istio; HTTPRoute api's responses are sent to the engine, but unproven"},
+	} {
+		rep := &report{kinds: []schema.GroupKind{httpRouteKind}, results: []*Result{
+			{Proxy: "Istio", Responses: true, Pods: []corev1.Pod{withEngine}, Targets: map[Target]TargetState{route: {Wired: true, Responses: tc.proof}}},
+		}}
+		if st, reason, msg := programmed(pol(true), rep); st != tc.status || reason != tc.reason || !strings.Contains(msg, tc.msg) {
+			t.Errorf("%s: %s %s %q", tc.name, st, reason, msg)
+		}
+		if st, reason, msg := programmed(pol(false), rep); st != metav1.ConditionTrue || reason != ReasonProgrammed || msg != "1 HTTPRoute(s) wired to the engine in Istio" {
+			t.Errorf("%s, a policy without responses: %s %s %q", tc.name, st, reason, msg)
+		}
+	}
+}

@@ -71,6 +71,11 @@ var testProbeKey = bytes.Repeat([]byte{9}, haproxyprobe.KeySize)
 // probe (in the *haproxyprobe.Receipts) and the app answers (#475).
 var observedPods sync.Map
 
+// earlyPods are the pods ("namespace/name") whose engine doesn't keep the
+// routes' responses for the test's prober: it answers the probe's response
+// leg at the request phase (#595).
+var earlyPods sync.Map
+
 // warnings records the warnings the API server returns.
 type warnings struct {
 	mu   sync.Mutex
@@ -138,15 +143,27 @@ func startOperator(t *testing.T) (_ context.Context, _ client.Client, _ *warning
 			Key: func(context.Context) ([]byte, error) { return testProbeKey, nil },
 			Do: func(_ context.Context, pod wiring.ProbePod, _ wiring.ProbeTarget, req *http.Request) (*http.Response, error) {
 				h := http.Header{}
+				uri, header := req.URL.RequestURI(), req.Header.Get(haproxyprobe.Header)
+				// The probe's response leg (#595): an engine that keeps
+				// the route's responses answers it in its response phase,
+				// or keeps a receipt of the response.
+				respAnswer, respReceipt, leg := haproxyprobe.ResponseLeg(testProbeKey, uri, req.Host, header)
+				_, early := earlyPods.Load(pod.Name)
 				if r, ok := observedPods.Load(pod.Name); ok {
 					// Envoy in observability mode: the engine keeps a
 					// receipt, and the app answers (#475).
-					if receipt, ok := haproxyprobe.Receipt(testProbeKey, req.URL.RequestURI(), req.Host, req.Header.Get(haproxyprobe.Header)); ok {
+					switch receipt, ok := haproxyprobe.Receipt(testProbeKey, uri, req.Host, header); {
+					case leg && !early:
+						r.(*haproxyprobe.Receipts).Add(respReceipt)
+					case ok && !leg:
 						r.(*haproxyprobe.Receipts).Add(receipt)
 					}
 					return &http.Response{StatusCode: http.StatusNotFound, Header: h, Body: io.NopCloser(strings.NewReader(""))}, nil
 				}
-				answer, _ := haproxyprobe.Check(testProbeKey, req.URL.RequestURI(), req.Host, req.Header.Get(haproxyprobe.Header))
+				answer, _ := haproxyprobe.Check(testProbeKey, uri, req.Host, header)
+				if leg && !early {
+					answer = respAnswer
+				}
 				h.Set(haproxyprobe.Header, answer)
 				return &http.Response{StatusCode: http.StatusOK, Header: h, Body: io.NopCloser(strings.NewReader(""))}, nil
 			},

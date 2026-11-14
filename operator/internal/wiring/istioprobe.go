@@ -408,6 +408,49 @@ func proveRoute(p *Prober, name string, detect bool, jobsOf func() ([]ProbeJob, 
 	return jobs, "", ""
 }
 
+// proveResponses adds the probe's response leg (#595) to a probed route's
+// jobs when its policies inspect responses (responses), and returns what
+// it shows. The response leg reaches the app in every mode (the engine
+// lets it through to answer its response), so it is sent only as a GET or
+// HEAD: a route whose rule matches only another method can't have its
+// responses probed.
+func proveResponses(p *Prober, name string, responses bool, jobs []ProbeJob) ([]ProbeJob, ResponsesProof) {
+	var proof ResponsesProof
+	if !responses || p == nil || len(jobs) == 0 {
+		return jobs, proof
+	}
+	for i := range jobs {
+		for _, t := range jobs[i].Targets {
+			if t.Method != "" && t.Method != http.MethodGet && t.Method != http.MethodHead {
+				proof.NotProbeable = fmt.Sprintf("%s's responses can't be probed: a rule of it matches only %s requests, and the probe's response leg reaches the app, so it is sent only as a GET or HEAD", name, t.Method)
+				return jobs, proof
+			}
+		}
+	}
+	var unverified, failed, notes []string
+	for i := range jobs {
+		jobs[i].Responses = true
+		u, f, n := p.ResponsesProof(jobs[i])
+		if f != "" && p.Unverified(jobs[i]) != "" {
+			// The request leg isn't proven either (the pod has no
+			// address, the probe gets no answer): the route is
+			// unverified, not shown to leave its responses uninspected.
+			u, f = f, ""
+		}
+		unverified, failed, notes = appendSet(unverified, u), appendSet(failed, f), appendSet(notes, n)
+	}
+	proof.Unverified, proof.Failed, proof.Note = strings.Join(unverified, "; "), strings.Join(failed, "; "), strings.Join(notes, "; ")
+	return jobs, proof
+}
+
+// appendSet appends s to list unless it is empty or listed.
+func appendSet(list []string, s string) []string {
+	if s == "" || slices.Contains(list, s) {
+		return list
+	}
+	return append(list, s)
+}
+
 // userFiltersKey identifies the users' EnvoyFilters as they are now (each
 // one's namespace, name and resourceVersion), for the Istio routes' probe
 // fingerprints: a user's EnvoyFilter can take Inkwall's filter off a

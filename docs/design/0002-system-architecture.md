@@ -666,6 +666,17 @@ controller `istio.io/gateway-controller`), with `ext_proc` through an `EnvoyFilt
     request counts or security events (they don't name the probe, and can't be told from forged
     traffic); a receipt without a MAC (a ConfigMap writer, or anyone who saw the nonce, could make
     it); switching the route to `Block` for the probe (it changes what the user's traffic gets).
+- **Responses: the probe's response leg** (decided for v0.6.0, #595; [0006 §4](0006-adapter-protocols.md#proving-responses-the-probes-response-leg-595)).
+  A route whose policies inspect responses is also probed with a response leg per pod and target
+  (the probe's URI ends in `inkwall-probe-leg=response`, under the MAC): the engine lets it through
+  to the app, keeps it for its response, and answers that response at the response headers (`Block`
+  mode: 200 and a MAC of its own purpose, in place of the app's) or keeps a receipt of it
+  (`Detect` mode, reported as #475's). A policy with `responses.inspect` is `Programmed` on the
+  route only once that is proven on every pod and listener: until then `Unverified`; an engine that
+  doesn't keep the route's responses (it answers the response leg at the request phase, or keeps no
+  receipt) is `ResponsesNotInspected`, naming the pod; a rule matching only another method than
+  `GET` or `HEAD` is `NotProbeable` for them (the response leg reaches the app in both modes); an
+  engine older than 0.6.0 keeps today's evidence with a note on `Programmed`.
   An Istio older than 1.28 (from the `istio-proxy` image tag) is `WiringFailed`: its Envoy (before
   1.36) would reject `status_on_error` and keep serving without the filter. Without the
   `EnvoyFilter` CRD nothing is wired (`WiringFailed`). Without its ClusterRole,
@@ -879,6 +890,13 @@ above the body limit. Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/
     backends.
   - `Detect` mode is reported as wired, not as blocking: `Ready` follows `Programmed` and
     `Enforced` as for the other proxies.
+  - **Responses** (#595, [0006 §4](0006-adapter-protocols.md#proving-responses-the-probes-response-leg-595)):
+    an Ingress with the response rules is also probed with the response leg, in both modes (HAProxy
+    waits for both answers). The engine lets it through to the app and answers its response with
+    `response_probe`, which one more snippet line returns with 299 and the MAC: proof that the
+    Ingress's response rules run on that pod. A policy with `responses.inspect` is `Unverified`
+    until then, and `ResponsesNotInspected`, naming the pod, when the response doesn't reach the
+    engine.
 - **HAProxy's buffer below `body.maxBytes`** (decided for v0.4.0, [#345](https://github.com/inkwall-dev/inkwall/issues/345)): HAProxy sends the
   engine at most `tune.bufsize` less `tune.maxrewrite` of a request (about 15 KiB by default), so
   a larger body is handled as oversized (`body.onOversize`) whatever `body.maxBytes` says. The

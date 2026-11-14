@@ -152,6 +152,7 @@ kubectl -n istio-ingress get pods -l gateway.networking.k8s.io/gateway-name=edge
 | `Programmed` | Every running pod of each of the route's Gateways has the engine, the `EnvoyFilter` has the route, Istio has accepted the route on each Gateway (its parent status, `Accepted=True`), and [the operator's probe](#the-operators-probe) has reached the engine through every pod, on every listener the route is attached to (in `Detect` mode, as the engines' receipts of it show) |
 | `Unverified` | Wired, but the probe hasn't reached the engine yet, or got another answer (the filter isn't on the route: its traffic isn't inspected there); in `Detect` mode, no engine reported the probe's receipt yet, or one didn't within 30 s |
 | `NotProbeable` | Wired, but the probe can't make a request the route serves: each match of one of its protected rules is a regular expression (path, header or query parameter); in `Detect` mode, also a rule whose match is for another method than `GET` or `HEAD` |
+| `ResponsesNotInspected` | The policy inspects responses, and [the probe's response leg](#the-operators-probe) shows that a pod's engine doesn't see the route's responses (it names the pod); until the response leg is proven on every pod, `Unverified` |
 | `PendingRestart` | Istio is rolling a Gateway's pods; some don't have the engine yet |
 | `SidecarMissing` | A Gateway has no running pod, or its namespace isn't a proxy namespace |
 | `Pending` | Waiting for Istio to accept the route, or for another of its Gateways |
@@ -333,6 +334,7 @@ Istio names a VirtualService's Envoy routes after its http routes (`name`, then 
 | `Programmed` | Every running pod the VirtualService's Gateways select has the engine and the socket mount, the `EnvoyFilter` has the VirtualService, and [the operator's probe](#the-operators-probe) has reached the engine through every pod, on every Gateway server that serves its hosts (in `Detect` mode, as the engines' receipts of it show) |
 | `Unverified` | Wired, but not proven by the probe yet, or the probe got another answer; in `Detect` mode, no engine reported the probe's receipt yet, or one didn't within 30 s |
 | `NotProbeable` | Wired, but the probe can't make a request it serves: one of its http routes has only regular expression matches, or a server serving it uses mutual TLS or passthrough; in `Detect` mode, also an http route whose match is for another method than `GET` or `HEAD` |
+| `ResponsesNotInspected` | The policy inspects responses, and [the probe's response leg](#the-operators-probe) shows that a pod's engine doesn't see the route's responses (it names the pod); until the response leg is proven on every pod, `Unverified` |
 | `PendingRestart` | Some of those pods started before Inkwall: restart them |
 | `SidecarMissing` | No such pod is running, or one opted out (`waf.inkwall.dev/inject: "false"`) |
 | `Pending` | Its Gateway doesn't exist yet; or, with Istio's status on (`PILOT_ENABLE_STATUS`), Istio hasn't reconciled the VirtualService |
@@ -386,6 +388,23 @@ probes every route again at once.
     (in `Block` mode it answers it itself).
   - **An engine older than 0.6.0** reports no receipts: its pods' `Detect`-mode routes stay
     `Unverified` until the pod runs a 0.6.0 engine.
+- **Responses** (since 0.6.0): a route whose policies inspect responses gets a second probe per
+  pod and listener, the *response leg*, which proves that its responses reach the engine. It is the
+  same request, its URI ending in `inkwall-probe-leg=response` (on the reserved path
+  `.well-known/inkwall-probe/<nonce>?inkwall-probe-leg=response` under a prefix match, or an exact
+  path with `?inkwall-probe=<nonce>&inkwall-probe-leg=response`). The engine lets it through, so
+  **it reaches your app, in `Block` mode too**: a `GET` (or `HEAD`) with no body, `User-Agent:
+  inkwall-operator-probe`, per pod and listener every 5 minutes (every 20 seconds while it fails).
+  Your app can answer it as any unknown path (a 404 is fine): in `Block` mode the engine replaces
+  that answer with its own (200 and a MAC), in `Detect` mode it keeps a receipt of the response
+  and reports it, as for the request. Until that is proven on every pod, a policy with
+  `responses.inspect` is `Unverified`; if a pod's engine doesn't see the response (it answers the
+  response leg before your app, or reports no receipt within 30 s), the policy is
+  `Programmed=False`, reason `ResponsesNotInspected`, naming the pod. A rule whose match is only for
+  another method than `GET` or `HEAD` can't have its responses probed: `NotProbeable` for such a
+  policy. Policies without `responses.inspect` on the same route aren't affected. An engine older
+  than 0.6.0 doesn't know the response leg: the route stays `Programmed`, and its message says the
+  pod's responses are unproven until it runs a 0.6.0 engine.
 - The probe reaches the pods on their listener's port (the pod address and the Gateway listener's
   or server's port number): a Gateway whose pods listen on another port than the server's (a
   `targetPort` mapping) stays `Unverified`.
