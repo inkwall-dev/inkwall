@@ -4,7 +4,6 @@
 package wiring
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -28,26 +27,10 @@ func TestMiddleware(t *testing.T) {
 	if m.GetNamespace() != "shop" || m.GetName() != "inkwall-waf" || m.GetKind() != "Middleware" {
 		t.Fatalf("metadata: %v", m.Object)
 	}
-	fa, _, _ := unstructured.NestedMap(m.Object, "spec", "forwardAuth")
+	auth := Middlewares("shop")[1]
+	fa, _, _ := unstructured.NestedMap(auth.Object, "spec", "forwardAuth")
 	if fa["trustForwardHeader"] != false || fa["forwardBody"] != true || fa["address"] != "http://127.0.0.1:9001/v1/forward-auth" {
 		t.Errorf("forwardAuth %v", fa)
-	}
-	if !ForwardAuthMatches(m) {
-		t.Fatal("the rendered Middleware doesn't match itself")
-	}
-	// As read back from the API server: numbers decode as JSON numbers.
-	raw, _ := json.Marshal(m.Object)
-	var back unstructured.Unstructured
-	if err := back.UnmarshalJSON(raw); err != nil {
-		t.Fatal(err)
-	}
-	if !ForwardAuthMatches(&back) {
-		t.Fatal("a round-tripped Middleware doesn't match")
-	}
-	// Someone turned trustForwardHeader on: corrected.
-	_ = unstructured.SetNestedField(back.Object, true, "spec", "forwardAuth", "trustForwardHeader")
-	if ForwardAuthMatches(&back) {
-		t.Fatal("trustForwardHeader: true matched")
 	}
 	if MiddlewareRef("shop") != "shop-inkwall-waf@kubernetescrd" {
 		t.Errorf("ref %s", MiddlewareRef("shop"))

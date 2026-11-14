@@ -103,14 +103,18 @@ func testWiring(ctx context.Context, t *testing.T, c client.Client) {
 	web := targeting("store", "web", "web")
 	create(web)
 
-	eventually(t, "the Middleware and the annotation", func() string {
-		m := &unstructured.Unstructured{}
-		m.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
-		if err := c.Get(ctx, types.NamespacedName{Namespace: "store", Name: wiring.MiddlewareName}, m); err != nil {
-			return err.Error()
-		}
-		if !wiring.ForwardAuthMatches(m) {
-			return "Middleware spec"
+	// Traefik v3.7 and later: the body bounded by a Buffering Middleware,
+	// then ForwardAuth, chained by the one routes refer to (#625).
+	eventually(t, "the Middlewares and the annotation", func() string {
+		for _, want := range wiring.Middlewares("store") {
+			m := &unstructured.Unstructured{}
+			m.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
+			if err := c.Get(ctx, client.ObjectKeyFromObject(want), m); err != nil {
+				return err.Error()
+			}
+			if !wiring.SpecMatches(m, want) {
+				return "Middleware " + want.GetName() + " spec"
+			}
 		}
 		var ing networkingv1.Ingress
 		if err := c.Get(ctx, types.NamespacedName{Namespace: "store", Name: "web"}, &ing); err != nil {
@@ -189,10 +193,12 @@ func testWiring(ctx context.Context, t *testing.T, c client.Client) {
 		if ing.Annotations[wiring.MiddlewaresAnnotation] != "store-auth@kubernetescrd" || ing.Annotations[wiring.WiredAnnotation] != "" {
 			return "annotations " + strings.Join([]string{ing.Annotations[wiring.MiddlewaresAnnotation], ing.Annotations[wiring.WiredAnnotation]}, " | ")
 		}
-		m := &unstructured.Unstructured{}
-		m.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
-		if err := c.Get(ctx, types.NamespacedName{Namespace: "store", Name: wiring.MiddlewareName}, m); !apierrors.IsNotFound(err) {
-			return "Middleware still there"
+		for _, want := range wiring.Middlewares("store") {
+			m := &unstructured.Unstructured{}
+			m.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
+			if err := c.Get(ctx, client.ObjectKeyFromObject(want), m); !apierrors.IsNotFound(err) {
+				return "Middleware " + want.GetName() + " still there"
+			}
 		}
 		if err := c.Get(ctx, client.ObjectKeyFromObject(web), &got); !apierrors.IsNotFound(err) {
 			return "policy still there"

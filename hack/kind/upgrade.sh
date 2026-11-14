@@ -609,9 +609,13 @@ same_wiring() { [[ $(wiring) == "$wiring_before" ]]; }
 check "the wiring is unchanged, not duplicated" same_wiring
 # The new operator may add settings to its Middleware (it rewrites it to its
 # own spec), so check the ones protection depends on, not the whole spec.
+# From 0.6.0 (#625), the Middleware routes refer to chains a body limit and
+# the ForwardAuth.
 operator_middleware() {
-  [[ $("${KUBECTL[@]}" -n "$NS" get middlewares.traefik.io inkwall-waf \
-    -o jsonpath='{.spec.forwardAuth.address} {.spec.forwardAuth.trustForwardHeader} {.spec.forwardAuth.forwardBody}') == \
+  [[ $("${KUBECTL[@]}" -n "$NS" get middlewares.traefik.io inkwall-waf -o jsonpath='{.spec.chain.middlewares[*].name}') == \
+    "inkwall-waf-body inkwall-waf-auth" &&
+    $("${KUBECTL[@]}" -n "$NS" get middlewares.traefik.io inkwall-waf-auth \
+      -o jsonpath='{.spec.forwardAuth.address} {.spec.forwardAuth.trustForwardHeader} {.spec.forwardAuth.forwardBody}') == \
     "http://127.0.0.1:9001/v1/forward-auth false true" ]]
 }
 eventually "Inkwall's Middleware calls the engine, with trustForwardHeader off and bodies forwarded" operator_middleware
@@ -713,8 +717,10 @@ fi
 same_routes() { [[ $(route_state) == "$users_routes" ]]; }
 check "the Ingress and the IngressRoute are as the user wrote them" same_routes
 same_routes || diff <(echo "$users_routes") <(route_state) | sed 's/^/      /' || true
-no_middleware() { ! "${KUBECTL[@]}" -n "$NS" get middlewares.traefik.io inkwall-waf >/dev/null 2>&1; }
-check "Inkwall's Middleware is deleted" no_middleware
+no_middleware() {
+  ! "${KUBECTL[@]}" -n "$NS" get middlewares.traefik.io inkwall-waf inkwall-waf-body inkwall-waf-auth -o name 2>/dev/null | grep . >/dev/null
+}
+check "Inkwall's Middlewares are deleted" no_middleware
 "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout restart deployment/traefik-e2e >/dev/null
 "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout status deployment/traefik-e2e --timeout=180s >/dev/null
 eventually "a new Traefik pod has no engine" engine_image_is ""

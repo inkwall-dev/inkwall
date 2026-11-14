@@ -11,8 +11,10 @@ package wiring
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -58,7 +60,21 @@ const (
 	// maxAuthResponseBytes caps the engine's answer that Traefik reads: a
 	// status line's worth today, with room for a block page.
 	maxAuthResponseBytes = 64 << 10
+
+	// From Traefik v3.7, MiddlewareName chains two Middlewares (#625):
+	// bodyMiddlewareName bounds the request body (Buffering), then
+	// authMiddlewareName asks the engine (ForwardAuth).
+	bodyMiddlewareName = MiddlewareName + "-body"
+	authMiddlewareName = MiddlewareName + "-auth"
+	// maxBufferedBody is the largest body Traefik reads: one byte more than
+	// the largest body.maxBytes, so such a body reaches the engine, which
+	// handles it as oversized. Traefik answers 413 to a larger one.
+	maxBufferedBody = policy.MaxBodyBytes + 1
 )
+
+// middlewareNames are the operator's Middlewares in a namespace, the one
+// routes refer to first.
+var middlewareNames = []string{MiddlewareName, bodyMiddlewareName, authMiddlewareName}
 
 // MiddlewareRef is how an Ingress in namespace refers to the operator's
 // Middleware there.
@@ -66,31 +82,72 @@ func MiddlewareRef(namespace string) string {
 	return namespace + "-" + MiddlewareName + "@kubernetescrd"
 }
 
-// Middleware returns the operator's Middleware for namespace.
+// Middleware returns the operator's Middleware for namespace that routes
+// refer to, as Traefik v3.7 and later get it.
 func Middleware(namespace string) *unstructured.Unstructured {
-	return middleware(namespace, true)
+	ms := ourMiddlewares(namespace, false)
+	return ms[len(ms)-1]
 }
 
-// middleware is Middleware, with maxResponseBodySize or without it: Traefik
-// before v3.7 has no such field, and its API server drops it.
-func middleware(namespace string, responseLimit bool) *unstructured.Unstructured {
-	m := &unstructured.Unstructured{}
-	m.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
-	m.SetNamespace(namespace)
-	m.SetName(MiddlewareName)
-	m.SetLabels(map[string]string{"app.kubernetes.io/managed-by": "inkwall-operator"})
-	m.Object["spec"] = map[string]any{"forwardAuth": forwardAuth(responseLimit)}
-	return m
+// Middlewares returns the operator's Middlewares for namespace, as Traefik
+// v3.7 and later get them, in the order they are written: the one routes
+// refer to last.
+func Middlewares(namespace string) []*unstructured.Unstructured {
+	return ourMiddlewares(namespace, false)
 }
 
-// forwardAuth is the Middleware's spec. It sets no timeout or failure
-// behaviour: Traefik has neither. When Traefik can't reach the engine, it
-// answers 500 itself and doesn't forward the request, at once on a refused
-// connection, after its fixed 30 s client timeout on a hung engine
-// (pkg/middlewares/auth/forward.go, v3.7; traefik/traefik#9857). The
-// policy's mode and failure mode apply only while the engine answers
+// ourMiddlewares returns the operator's Middlewares for namespace, in the
+// order they are written, the one routes refer to (MiddlewareName) last.
+//
+// Traefik's ForwardAuth allocates maxBodySize+1 bytes for every request,
+// with a body or not (pkg/middlewares/auth/forward.go, v3.7): at the 10 MiB
+// a policy may inspect, that added 8 ms to every request (#625). From
+// Traefik v3.7, a Buffering Middleware bounds the body instead: it reads
+// what comes, and answers 413 past maxBufferedBody. ForwardAuth, after it,
+// then reads the whole (bounded) body, with no limit of its own. Before
+// v3.7 (legacy), Buffering can't let responses through unbuffered, which
+// would hold back streamed responses: ForwardAuth bounds the body itself,
+// as before.
+func ourMiddlewares(namespace string, legacy bool) []*unstructured.Unstructured {
+	m := func(name string, spec map[string]any) *unstructured.Unstructured {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
+		u.SetNamespace(namespace)
+		u.SetName(name)
+		u.SetLabels(map[string]string{"app.kubernetes.io/managed-by": "inkwall-operator"})
+		u.Object["spec"] = spec
+		return u
+	}
+	if legacy {
+		return []*unstructured.Unstructured{m(MiddlewareName, map[string]any{"forwardAuth": forwardAuth(true)})}
+	}
+	return []*unstructured.Unstructured{
+		m(bodyMiddlewareName, map[string]any{"buffering": map[string]any{
+			"maxRequestBodyBytes": int64(maxBufferedBody),
+			// In memory, as ForwardAuth held it: Traefik writes a body
+			// as large as this to a file (which a read-only root file
+			// system may not allow).
+			"memRequestBodyBytes": int64(maxBufferedBody),
+			// Responses pass as they come (Server-Sent Events,
+			// downloads): only the request is held.
+			"disableResponseBuffer": true,
+		}}),
+		m(authMiddlewareName, map[string]any{"forwardAuth": forwardAuth(false)}),
+		m(MiddlewareName, map[string]any{"chain": map[string]any{"middlewares": []any{
+			map[string]any{"name": bodyMiddlewareName},
+			map[string]any{"name": authMiddlewareName},
+		}}}),
+	}
+}
+
+// forwardAuth is the ForwardAuth Middleware's spec. It sets no timeout or
+// failure behaviour: Traefik has neither. When Traefik can't reach the
+// engine, it answers 500 itself and doesn't forward the request, at once on
+// a refused connection, after its fixed 30 s client timeout on a hung
+// engine (pkg/middlewares/auth/forward.go, v3.7; traefik/traefik#9857).
+// The policy's mode and failure mode apply only while the engine answers
 // (0002 §7.3).
-func forwardAuth(responseLimit bool) map[string]any {
+func forwardAuth(legacy bool) map[string]any {
 	fa := map[string]any{
 		"address": forwardAuthAddress,
 		// Must be false: with true, Traefik keeps a client's own
@@ -98,70 +155,78 @@ func forwardAuth(responseLimit bool) map[string]any {
 		// the real URI (0002 §6.3).
 		"trustForwardHeader": false,
 		// Without it, bodies reach the application uninspected.
-		"forwardBody": true,
-		// The largest body a policy can inspect: smaller bodies reach the
-		// engine, whose policy decides; Traefik refuses larger ones (401)
-		// itself.
-		"maxBodySize":         int64(policy.MaxBodyBytes),
+		"forwardBody":         true,
 		"authResponseHeaders": []any{"X-Request-Id"},
 	}
-	if responseLimit {
-		// Without it, Traefik reads any size of answer from the engine,
-		// and warns about it.
-		fa["maxResponseBodySize"] = int64(maxAuthResponseBytes)
+	if legacy {
+		// The largest body a policy can inspect: smaller bodies reach
+		// the engine, whose policy decides; Traefik refuses larger ones
+		// (401) itself. Traefik allocates it for every request.
+		fa["maxBodySize"] = int64(policy.MaxBodyBytes)
+		return fa
 	}
+	// No limit: the Buffering Middleware before it bounds the body.
+	fa["maxBodySize"] = int64(-1)
+	// Without it, Traefik reads any size of answer from the engine, and
+	// warns about it (v3.7).
+	fa["maxResponseBodySize"] = int64(maxAuthResponseBytes)
 	return fa
 }
 
-// ForwardAuthMatches reports whether a Middleware's spec is the operator's.
-func ForwardAuthMatches(m *unstructured.Unstructured) bool {
-	return forwardAuthMatches(m, true)
+// SpecMatches reports whether a Middleware's spec, as read from the API
+// server, is want's.
+func SpecMatches(got, want *unstructured.Unstructured) bool {
+	// Through JSON, numbers compare whatever their Go type (int64 as
+	// written, int64 or float64 as read).
+	norm := func(u *unstructured.Unstructured) any {
+		raw, err := json.Marshal(u.Object["spec"])
+		if err != nil {
+			return nil
+		}
+		var v any
+		if json.Unmarshal(raw, &v) != nil {
+			return nil
+		}
+		return v
+	}
+	g, w := norm(got), norm(want)
+	return w != nil && reflect.DeepEqual(g, w)
 }
 
-func forwardAuthMatches(m *unstructured.Unstructured, responseLimit bool) bool {
-	got, ok, _ := unstructured.NestedMap(m.Object, "spec", "forwardAuth")
-	if !ok {
-		return false
+// dropsV37Fields reports whether the API server dropped, from a Middleware
+// it stored (m, as returned), a field of want that Traefik v3.7 added: its
+// CRD is older.
+func dropsV37Fields(m, want *unstructured.Unstructured) bool {
+	for _, path := range [][]string{
+		{"spec", "buffering", "disableResponseBuffer"},
+		{"spec", "forwardAuth", "maxResponseBodySize"},
+	} {
+		_, asked, _ := unstructured.NestedFieldNoCopy(want.Object, path...)
+		_, kept, _ := unstructured.NestedFieldNoCopy(m.Object, path...)
+		if asked && !kept {
+			return true
+		}
 	}
-	want := forwardAuth(responseLimit)
-	if len(got) != len(want) {
-		return false
-	}
-	for k, v := range want {
-		switch v := v.(type) {
-		case []any:
-			g, ok := got[k].([]any)
-			if !ok || len(g) != len(v) || g[0] != v[0] {
-				return false
+	return false
+}
+
+// oldTraefik reports whether one of Traefik's pods runs Traefik before
+// v3.7, by its image's tag. An image whose version can't be told (a digest,
+// latest, another name) is taken to match Traefik's CRDs.
+func oldTraefik(pods []corev1.Pod) bool {
+	for i := range pods {
+		for _, c := range pods[i].Spec.Containers {
+			repo, tag, ok := strings.Cut(c.Image[strings.LastIndex(c.Image, "/")+1:], ":")
+			if !ok || repo != "traefik" {
+				continue
 			}
-		case int64:
-			// JSON numbers decode as int64 or float64.
-			switch g := got[k].(type) {
-			case int64:
-				if g != v {
-					return false
-				}
-			case float64:
-				if int64(g) != v {
-					return false
-				}
-			default:
-				return false
-			}
-		default:
-			if got[k] != v {
-				return false
+			var major, minor int
+			if n, _ := fmt.Sscanf(strings.TrimPrefix(tag, "v"), "%d.%d", &major, &minor); n == 2 && (major < 3 || major == 3 && minor < 7) {
+				return true
 			}
 		}
 	}
-	return true
-}
-
-// hasResponseLimit reports whether a Middleware, as the API server stored
-// it, kept maxResponseBodySize.
-func hasResponseLimit(m *unstructured.Unstructured) bool {
-	_, ok, _ := unstructured.NestedFieldNoCopy(m.Object, "spec", "forwardAuth", "maxResponseBodySize")
-	return ok
+	return false
 }
 
 // WithMiddleware returns the annotation value with ref added (first, so the
@@ -291,10 +356,11 @@ type Traefik struct {
 	// once their CRDs are installed; nil: only read at each reconcile.
 	IngressRoutes, HTTPRoutes, Gateways, GatewayClasses *crdwatch.Kind
 
-	// noResponseLimit: the API server dropped the Middleware's
-	// maxResponseBodySize (Traefik before v3.7), so it isn't asked for
-	// again; otherwise every reconcile would rewrite the Middleware.
-	noResponseLimit atomic.Bool
+	// legacyCRD: the API server dropped a field Traefik v3.7 added from a
+	// Middleware (its CRD is older), so the Middlewares of older Traefiks
+	// are written from then on; otherwise every reconcile would rewrite
+	// them.
+	legacyCRD atomic.Bool
 }
 
 var (
@@ -473,8 +539,9 @@ func (t *Traefik) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 		for k := range wireRules {
 			needed[k.Namespace] = true
 		}
+		old := oldTraefik(pods.Items)
 		for ns := range needed {
-			if err := t.ensureMiddleware(ctx, ns); err != nil {
+			if err := t.ensureMiddleware(ctx, ns, old); err != nil {
 				st.middlewareErr[ns] = err.Error()
 				logger.Error(err, "Middleware not wired", "namespace", ns)
 			}
@@ -644,44 +711,89 @@ func (t *Traefik) middlewaresInstalled() bool {
 	return err == nil
 }
 
-// ensureMiddleware creates or corrects the operator's Middleware. One with
-// the same name the operator didn't create is left alone, and reported.
-func (t *Traefik) ensureMiddleware(ctx context.Context, namespace string) error {
-	limit := !t.noResponseLimit.Load()
-	want := middleware(namespace, limit)
-	cur := &unstructured.Unstructured{}
-	cur.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
-	err := t.APIReader.Get(ctx, client.ObjectKeyFromObject(want), cur)
-	switch {
-	case apierrors.IsNotFound(err):
-		if err := t.Client.Create(ctx, want); err != nil {
+// errLegacyCRD: the API server dropped a field Traefik v3.7 added.
+var errLegacyCRD = errors.New("the Traefik Middleware CRD is older than v3.7")
+
+// ensureMiddleware creates or corrects the operator's Middlewares in
+// namespace: those of Traefik v3.7 and later, or, when Traefik's pods
+// (oldTraefik) or its CRD are older, the ForwardAuth alone. A Middleware of
+// one of their names that the operator didn't create is left alone, and
+// reported.
+func (t *Traefik) ensureMiddleware(ctx context.Context, namespace string, oldTraefik bool) error {
+	if !oldTraefik && !t.legacyCRD.Load() {
+		err := t.ensureMiddlewares(ctx, ourMiddlewares(namespace, false))
+		if !errors.Is(err, errLegacyCRD) {
 			return err
 		}
-		t.noteResponseLimit(ctx, want, limit)
-		return nil
-	case err != nil:
+		if !t.legacyCRD.Swap(true) {
+			log.FromContext(ctx).Info("Traefik's Middleware CRD is older than v3.7 (no buffering.disableResponseBuffer or forwardAuth.maxResponseBodySize): " +
+				"ForwardAuth bounds request bodies itself, which costs Traefik milliseconds on every request, and the engine's answers are not size-capped; upgrade Traefik and its CRDs to v3.7 or later")
+		}
+	}
+	if err := t.ensureMiddlewares(ctx, ourMiddlewares(namespace, true)); err != nil {
 		return err
 	}
-	if cur.GetLabels()["app.kubernetes.io/managed-by"] != "inkwall-operator" {
-		return fmt.Errorf("Middleware %s/%s exists and wasn't created by Inkwall; rename or delete it", namespace, MiddlewareName)
+	// The Middlewares of Traefik v3.7 that the ForwardAuth no longer
+	// chains, if made before.
+	for _, name := range []string{bodyMiddlewareName, authMiddlewareName} {
+		if cur, err := t.ours(ctx, namespace, name); err == nil && cur != nil {
+			if err := t.Client.Delete(ctx, cur); client.IgnoreNotFound(err) != nil {
+				return err
+			}
+		}
 	}
-	if forwardAuthMatches(cur, limit) {
-		return nil
-	}
-	cur.Object["spec"] = want.Object["spec"]
-	if err := t.Client.Update(ctx, cur); err != nil {
-		return err
-	}
-	t.noteResponseLimit(ctx, cur, limit)
 	return nil
 }
 
-// noteResponseLimit stops asking for maxResponseBodySize once the API
-// server drops it from a Middleware it stored (m, as returned).
-func (t *Traefik) noteResponseLimit(ctx context.Context, m *unstructured.Unstructured, asked bool) {
-	if asked && !hasResponseLimit(m) && !t.noResponseLimit.Swap(true) {
-		log.FromContext(ctx).Info("Traefik's Middleware CRD has no maxResponseBodySize (Traefik before v3.7); the engine's answers are not size-capped")
+// ensureMiddlewares creates or corrects each of want, in order, once none
+// of them is someone else's. It returns errLegacyCRD, before the next one,
+// when the API server drops a field of Traefik v3.7 from one.
+func (t *Traefik) ensureMiddlewares(ctx context.Context, want []*unstructured.Unstructured) error {
+	cur := make([]*unstructured.Unstructured, len(want))
+	for i, w := range want {
+		var err error
+		if cur[i], err = t.ours(ctx, w.GetNamespace(), w.GetName()); err != nil {
+			return err
+		}
 	}
+	for i, w := range want {
+		stored := w.DeepCopy()
+		switch {
+		case cur[i] == nil:
+			if err := t.Client.Create(ctx, stored); err != nil {
+				return err
+			}
+		case SpecMatches(cur[i], w):
+			continue
+		default:
+			stored = cur[i]
+			stored.Object["spec"] = w.DeepCopy().Object["spec"]
+			if err := t.Client.Update(ctx, stored); err != nil {
+				return err
+			}
+		}
+		if dropsV37Fields(stored, w) {
+			return errLegacyCRD
+		}
+	}
+	return nil
+}
+
+// ours reads the Middleware name in namespace: nil if there is none, an
+// error if the operator didn't create it.
+func (t *Traefik) ours(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
+	cur := &unstructured.Unstructured{}
+	cur.SetGroupVersionKind(integrations.TraefikMiddlewareGVK)
+	switch err := t.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, cur); {
+	case apierrors.IsNotFound(err):
+		return nil, nil
+	case err != nil:
+		return nil, err
+	}
+	if cur.GetLabels()["app.kubernetes.io/managed-by"] != "inkwall-operator" {
+		return nil, fmt.Errorf("Middleware %s/%s exists and wasn't created by Inkwall; rename or delete it", namespace, name)
+	}
+	return cur, nil
 }
 
 // pruneMiddlewares deletes the operator's Middlewares in namespaces that no
@@ -694,7 +806,7 @@ func (t *Traefik) pruneMiddlewares(ctx context.Context, needed map[string]bool) 
 	}
 	for i := range list.Items {
 		m := &list.Items[i]
-		if m.GetName() == MiddlewareName && !needed[m.GetNamespace()] {
+		if slices.Contains(middlewareNames, m.GetName()) && !needed[m.GetNamespace()] {
 			if err := t.Client.Delete(ctx, m); client.IgnoreNotFound(err) != nil {
 				return err
 			}
