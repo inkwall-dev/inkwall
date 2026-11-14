@@ -668,7 +668,7 @@ a second request per pod and target, the **response leg**, and a policy with `re
 - **Envoy Gateway isn't probed**, for requests either: unlike Istio and the HAProxy controller,
   Envoy Gateway reports on the operator's `EnvoyExtensionPolicy` (`Accepted`) after translating it,
   and the response processing mode is part of that same object, so a route's responses rest on the
-  same evidence as its requests. A probe of Envoy Gateway's pods (both legs) is a follow-up.
+  same evidence as its requests. A probe of Envoy Gateway's pods (both legs) is a follow-up (#604).
 - **Rejected:** answering the probe's request leg in the response phase as well (it would then
   reach the app on every route, also those without `responses.inspect`); a response-leg proof by
   the engine's response counts or events (they don't name the probe, and can be forged by
