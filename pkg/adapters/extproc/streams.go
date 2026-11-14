@@ -5,7 +5,10 @@ package extproc
 
 import (
 	"context"
+	"net/http"
+	"strconv"
 
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	filterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 
@@ -21,6 +24,7 @@ import (
 // events inspected, check inspects one, and held, when holds (block mode),
 // are the bytes of the event in progress, not let through yet.
 type eventStream struct {
+	kind  streams.Kind
 	split *streams.Splitter
 	n     int
 	holds bool
@@ -42,6 +46,7 @@ func (s *Server) onStreamHeaders(ctx context.Context, x *exchange) *extprocv3.Pr
 	kind := pipeline.StreamKind(x.resp.Headers.Get("Content-Type"))
 	ex, req, resp := x.ex, x.req, x.resp
 	x.respStream = &eventStream{
+		kind:  kind,
 		split: streams.New(kind, ex.BodyLimit(), resp.Headers.Get("Grpc-Encoding")),
 		holds: ex.HoldsEvents() && !x.observe,
 		check: func(ctx context.Context, ev streams.Event, n int) pipeline.Verdict {
@@ -50,8 +55,87 @@ func (s *Server) onStreamHeaders(ctx context.Context, x *exchange) *extprocv3.Pr
 	}
 	if !x.observe {
 		r.ModeOverride = &filterv3.ProcessingMode{ResponseBodyMode: filterv3.ProcessingMode_STREAMED}
+		if kind == streams.GRPC {
+			// The call's status message comes in the trailers (#317).
+			r.ModeOverride.ResponseTrailerMode = filterv3.ProcessingMode_SEND
+		}
 	}
 	return r
+}
+
+// endResponseStream ends a streamed response at its trailers: an event
+// the stream ended inside is inspected, and a gRPC call's status message,
+// as one more event (#317). Held bytes, a message the stream cut, can't be
+// let through in a trailers answer: they are dropped.
+func (s *Server) endResponseStream(ctx context.Context, x *exchange, t *extprocv3.HttpTrailers) *extprocv3.ProcessingResponse {
+	st := x.respStream
+	if r := s.checkEvents(ctx, x, &x.respStream, st.split.Close()); r != nil {
+		return r
+	}
+	x.respStream = nil
+	if st.kind == streams.GRPC {
+		if r := s.checkGRPCStatus(ctx, x, headerMap(t.GetTrailers()), st.n+1); r != nil {
+			return r
+		}
+	}
+	return allow(phaseResponseTrailers, nil)
+}
+
+// checkGRPCStatus inspects the status message (grpc-message) of x's gRPC
+// response, in h (its trailers, or its headers when trailers-only), as
+// the n-th event of the stream (#317): a server's error text is its text
+// too, and where an SQL error or a stack trace leaks. It is decoded
+// (gRPC percent-encodes it) and inspected as an event, up to the limit.
+// It returns the denial, or nil.
+func (s *Server) checkGRPCStatus(ctx context.Context, x *exchange, h http.Header, n int) *extprocv3.ProcessingResponse {
+	msg := h.Get("Grpc-Message")
+	if msg == "" {
+		return nil
+	}
+	ev := grpcStatusEvent(msg, x.ex.BodyLimit())
+	v := x.ex.CheckEvent(ctx, x.req, x.resp, ev, n)
+	if httpadapter.IsEvent(v) {
+		httpadapter.LogEvent(ctx, s.logger, s.events, x.req, x.path, v)
+	}
+	if v.Action == pipeline.ActionDeny {
+		return s.denial(x.req, v.Status)
+	}
+	return nil
+}
+
+// grpcStatusEvent is a grpc-message as an event: percent-decoded (a bad
+// escape is kept as it is), up to limit bytes; a longer one is cut.
+func grpcStatusEvent(msg string, limit int64) streams.Event {
+	out := make([]byte, 0, len(msg))
+	for i := 0; i < len(msg); i++ {
+		if msg[i] == '%' && i+2 < len(msg) {
+			if b, err := strconv.ParseUint(msg[i+1:i+3], 16, 8); err == nil {
+				out = append(out, byte(b))
+				i += 2
+				continue
+			}
+		}
+		out = append(out, msg[i])
+	}
+	if int64(len(out)) > limit {
+		return streams.Event{Data: out[:limit], Truncated: true}
+	}
+	return streams.Event{Data: out}
+}
+
+// headerMap returns Envoy's header map (trailers) as an http.Header.
+func headerMap(m *corev3.HeaderMap) http.Header {
+	h := http.Header{}
+	for _, f := range m.GetHeaders() {
+		v := f.GetValue()
+		if raw := f.GetRawValue(); len(raw) > 0 {
+			v = string(raw)
+		}
+		if httpadapter.IsToken(f.GetKey()) {
+			h.Add(f.GetKey(), v)
+		}
+	}
+	return h
 }
 
 // grpcStream returns how req's messages are inspected one by one, or nil

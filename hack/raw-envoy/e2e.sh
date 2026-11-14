@@ -34,6 +34,12 @@
 #     bidirectional call (each message waits for the server's echo) passes,
 #     where a buffered body would stall it; one with an attack in a later
 #     message is cut there, the server never getting it.
+#   - gRPC server messages (#317, --inspect-responses --response-streams
+#     inspect): a server stream whose third message leaks a SQL error is
+#     cut before it, the client getting the first two; a leak in the
+#     call's status message is replaced by the engine's denial when the
+#     server answers with nothing else (trailers-only), and ends the call
+#     when it comes in the trailers after a message.
 #
 # The Kubernetes sample (kustomization.yaml) is rendered with kubectl, when
 # kubectl is installed. SKIP_BUILD=1 uses the engine image already built
@@ -342,6 +348,43 @@ chat_cut() {
 check "a bidirectional call with an attack in a later message: cut there" chat_cut
 check "the server never got that attack, nor what followed" never_got
 eventually "the bidirectional call's attack is logged" event_has /inkwall.test.Echo/Chat '"stream_event":2'
+
+# gRPC server messages (#317): the same app, Envoy sending the responses
+# too (as "Response inspection" in docs/raw-envoy.md shows), and the engine
+# inspecting each message of a response, and its status message.
+echo "== gRPC server messages (--inspect-responses --response-streams inspect)"
+sed -e 's/response_header_mode: SKIP/response_header_mode: SEND/' -e 's/response_body_mode: NONE/response_body_mode: BUFFERED_PARTIAL/' \
+  "$RESPONSES/envoy-grpc.yaml" >"$RESPONSES/envoy-grpc-responses.yaml"
+chmod 644 "$RESPONSES/envoy-grpc-responses.yaml"
+check "Envoy accepts envoy.yaml for gRPC sending responses" \
+  docker run --rm -v "$RESPONSES:/cfg:ro" "$ENVOY_IMAGE" --mode validate -c /cfg/envoy-grpc-responses.yaml
+EXAMPLES=$RESPONSES start_envoy envoy-grpc-responses.yaml
+start_engine --listen=unix:/var/run/inkwall/extproc.sock --mode=block --inspect-responses --response-streams=inspect
+GRPC_LEAK="You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version"
+# stream_all PARTS: what the client prints of a server stream, its status
+# message (stderr) too.
+stream_all() { "$RESPONSES/grpc/grpcecho" stream -authority "$HOST" "127.0.0.1:$PORT" "$1" 2>&1 || true; }
+stream_ok() { [[ $(grpcecho_out stream 'hello|world') == $'hello\nworld\nOK' ]]; }
+eventually "a clean server stream passes whole" stream_ok
+stream_cut() {
+  local out
+  out=$(stream_all "hello|world|$GRPC_LEAK|after")
+  [[ $out == $'hello\nworld\n'* && $out != *'SQL syntax'* && $out != *after* && $out != *$'\nOK' ]]
+}
+check "a server stream leaking in its third message: cut before it" stream_cut
+eventually "the leaking message is logged as a response deny, message 3" event_has /inkwall.test.Echo/Stream '"stream_event":3'
+status_only_denied() {
+  local out
+  out=$(stream_all "status:$GRPC_LEAK")
+  [[ $out == *PermissionDenied && $out != *'SQL syntax'* ]]
+}
+check "a status message leaking, trailers-only: replaced by the denial" status_only_denied
+status_cut() {
+  local out
+  out=$(stream_all "hello|status:$GRPC_LEAK")
+  [[ $out == hello$'\n'* && $out != *'SQL syntax'* && $out != *$'\nOK' ]]
+}
+check "a status message leaking in the trailers: the call ends without it" status_cut
 
 if ((failures > 0)); then
   echo "$failures check(s) failed"

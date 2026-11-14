@@ -355,7 +355,7 @@ func (s *Server) handle(ctx context.Context, x *exchange, msg *extprocv3.Process
 			return s.responseVerdict(ctx, x, phaseResponseTrailers), nil
 		}
 		if x.respStream != nil {
-			return s.endStream(ctx, x, &x.respStream, phaseResponseTrailers), nil
+			return s.endResponseStream(ctx, x, m.ResponseTrailers), nil
 		}
 		return allow(phaseResponseTrailers, nil), nil
 	default:
@@ -539,6 +539,19 @@ func (s *Server) onResponseHeaders(ctx context.Context, x *exchange, h *extprocv
 	}
 	if !eos && x.ex.Streams() && pipeline.StreamKind(x.resp.Headers.Get("Content-Type")) != streams.None {
 		return s.onStreamHeaders(ctx, x)
+	}
+	if eos && x.ex.Streams() && pipeline.StreamKind(x.resp.Headers.Get("Content-Type")) == streams.GRPC {
+		// A trailers-only gRPC answer (an error before any message):
+		// its status message is in the headers, which Envoy still holds,
+		// so a leak there is replaced by the denial (#317).
+		r := s.responseVerdict(ctx, x, phaseResponseHeaders)
+		if r.GetImmediateResponse() != nil {
+			return r
+		}
+		if d := s.checkGRPCStatus(ctx, x, x.resp.Headers, 1); d != nil {
+			return d
+		}
+		return r
 	}
 	if !eos && x.ex.WantsBody(x.resp.Headers.Get("Content-Type")) {
 		x.respLimit = x.ex.BodyLimit()

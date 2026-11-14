@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	filterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 
@@ -137,4 +138,83 @@ func protoString(field byte, s string) []byte {
 func respTrailers() *extprocv3.ProcessingRequest {
 	return &extprocv3.ProcessingRequest{Request: &extprocv3.ProcessingRequest_ResponseTrailers{
 		ResponseTrailers: &extprocv3.HttpTrailers{}}}
+}
+
+// leakStatus is a MySQL error as a gRPC status message: percent-encoded,
+// as the gRPC spec sends grpc-message.
+const leakStatus = "You%20have%20an%20error%20in%20your%20SQL%20syntax%3B%20check%20the%20manual%20that%20corresponds%20to%20your%20MySQL%20server%20version"
+
+func respTrailersWith(kv ...string) *extprocv3.ProcessingRequest {
+	var hs []*corev3.HeaderValue
+	for i := 0; i+1 < len(kv); i += 2 {
+		hs = append(hs, &corev3.HeaderValue{Key: kv[i], RawValue: []byte(kv[i+1])})
+	}
+	return &extprocv3.ProcessingRequest{Request: &extprocv3.ProcessingRequest_ResponseTrailers{
+		ResponseTrailers: &extprocv3.HttpTrailers{Trailers: &corev3.HeaderMap{Headers: hs}}}}
+}
+
+// A gRPC call's status message (grpc-message) is the server's text too
+// (#317): an error that leaks SQL, a stack trace. With streams inspected it
+// is inspected as one more event, decoded: in a trailers-only answer (an
+// error before any message), whose headers Envoy still holds, the leak is
+// replaced by the engine's denial; in the trailers after the messages,
+// which Envoy is told to send, it ends the stream before the client gets
+// the status.
+func TestGRPCStatusMessage(t *testing.T) {
+	bp := filterv3.ProcessingMode_BUFFERED_PARTIAL
+	call := func() *extprocv3.ProcessingRequest {
+		return withModes(headers("POST", "/chat.Chat/Stream", true, "content-type", "application/grpc"), 0, bp)
+	}
+	t.Run("trailers-only", func(t *testing.T) {
+		var logs bytes.Buffer
+		e := newEnvoy(t, newStreamPipeline(t, pipeline.ModeBlock), 64, &logs)
+		resps := e.exchange(t, call(), respHeaders(200, true, "content-type", "application/grpc", "grpc-status", "13", "grpc-message", leakStatus))
+		if len(resps) != 2 || denied(t, resps[1]) == 0 {
+			t.Fatalf("a leaking status message wasn't denied: %v", resps)
+		}
+		if evs := securityEvents(t, &logs); len(evs) != 1 || evs[0]["phase"] != "response" || evs[0]["stream_event"] != float64(1) {
+			t.Errorf("events %v", evs)
+		}
+		resps = e.exchange(t, call(), respHeaders(200, true, "content-type", "application/grpc", "grpc-status", "5", "grpc-message", "user%20not%20found"))
+		if denied(t, resps[1]) != 0 {
+			t.Errorf("a clean status message denied: %v", resps[1])
+		}
+	})
+	t.Run("trailers", func(t *testing.T) {
+		var logs bytes.Buffer
+		e := newEnvoy(t, newStreamPipeline(t, pipeline.ModeBlock), 64, &logs)
+		clean := string(grpcFrame(protoString(1, "hello")))
+		resps := e.exchange(t, call(), respHeaders(200, false, "content-type", "application/grpc"), respBody(clean, false),
+			respTrailersWith("grpc-status", "13", "grpc-message", leakStatus))
+		if m := resps[1].GetModeOverride(); m.GetResponseBodyMode() != filterv3.ProcessingMode_STREAMED || m.GetResponseTrailerMode() != filterv3.ProcessingMode_SEND {
+			t.Fatalf("mode override %v, want the body streamed and the trailers sent", m)
+		}
+		if len(resps) != 4 || denied(t, resps[3]) == 0 {
+			t.Fatalf("a leaking status message in the trailers wasn't denied: %v", resps)
+		}
+		if evs := securityEvents(t, &logs); len(evs) != 1 || evs[0]["stream_event"] != float64(2) {
+			t.Errorf("events %v, want the status as event 2", evs)
+		}
+		resps = e.exchange(t, call(), respHeaders(200, false, "content-type", "application/grpc"), respBody(clean, false),
+			respTrailersWith("grpc-status", "0"))
+		if len(resps) != 4 || denied(t, resps[3]) != 0 {
+			t.Errorf("clean trailers: %v", resps)
+		}
+	})
+	// SSE has no trailers to ask for.
+	t.Run("SSE", func(t *testing.T) {
+		e := newEnvoy(t, newStreamPipeline(t, pipeline.ModeBlock), 64, &bytes.Buffer{})
+		resps := e.exchange(t, withModes(headers("GET", "/chat", true), 0, bp), respHeaders(200, false, "content-type", "text/event-stream"))
+		if m := resps[1].GetModeOverride(); m.GetResponseTrailerMode() == filterv3.ProcessingMode_SEND {
+			t.Errorf("mode override %v: no trailers for SSE", m)
+		}
+	})
+	// Without streams, as before: the status isn't read.
+	t.Run("off", func(t *testing.T) {
+		e := newEnvoy(t, newResponsePipeline(t, pipeline.ModeBlock, 256, pipeline.OversizeAuto), 64, &bytes.Buffer{})
+		resps := e.exchange(t, call(), respHeaders(200, true, "content-type", "application/grpc", "grpc-status", "13", "grpc-message", leakStatus))
+		if denied(t, resps[1]) != 0 {
+			t.Errorf("status message inspected without streams: %v", resps[1])
+		}
+	})
 }
