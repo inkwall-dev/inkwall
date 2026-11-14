@@ -270,17 +270,21 @@ check "an attack in a body is still blocked" all_are 403 "$HOST" / --data-urlenc
 
 echo "== a request over one SPOE frame (#336)"
 # In Block mode the snippet handles a request HAProxy can't fit in one SPOE
-# frame as oversized: a 2 MiB buffer holds a 1.5 MB body, more than the
-# engine's frame (its body limit plus 1 MiB), so HAProxy sends none of it.
+# frame as oversized: a 12 MiB buffer holds an 11.6 MB body, more than the
+# engine's frame (in bundle mode, body.maxBytes' 10 MiB maximum plus 1 MiB),
+# so HAProxy sends none of it.
 frame_rule() { "${KUBECTL[@]}" -n "$NS" get ingress app -o jsonpath='{.metadata.annotations}' | grep -F 'deny_status 413 if { var(txn.inkwall.error) -m int 3 259 }' >/dev/null; }
 check "Block mode: the snippet has the rule" frame_rule
 "${HELM[@]}" upgrade haproxy kubernetes-ingress --repo "$HAPROXY_REPO" --version "$HAPROXY_CHART_VERSION" \
-  --namespace "$NS" --reuse-values --set-string 'controller.config.global-config-snippet=tune.bufsize 2097152' --wait --timeout 5m >/dev/null
+  --namespace "$NS" --reuse-values --set-string 'controller.config.global-config-snippet=tune.bufsize 12582912' --wait --timeout 5m >/dev/null
 forward
-head -c 1500000 /dev/zero | tr '\0' a >"$work_big"
-eventually "a 1.5 MB body over one SPOE frame is oversized: 413" all_are 413 "$HOST" / -H 'Content-Type: application/octet-stream' --data-binary "@$work_big"
+head -c 11600000 /dev/zero | tr '\0' a >"$work_big"
+eventually "an 11.6 MB body over one SPOE frame is oversized: 413" all_are 413 "$HOST" / -H 'Content-Type: application/octet-stream' --data-binary "@$work_big"
 check "a benign request still passes" all_are 200 "$HOST" /products/42
 check "an attack in a body is still blocked" all_are 403 "$HOST" / --data-urlencode "q=1' OR '1'='1"
+"${HELM[@]}" upgrade haproxy kubernetes-ingress --repo "$HAPROXY_REPO" --version "$HAPROXY_CHART_VERSION" \
+  --namespace "$NS" --reuse-values --set-string 'controller.config.global-config-snippet=tune.bufsize 81920' --wait --timeout 5m >/dev/null
+forward
 
 echo "== a controller pod without the engine"
 # A pod of the controller that opted out: its HAProxy can't load the filter

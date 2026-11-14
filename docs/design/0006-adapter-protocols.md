@@ -567,7 +567,8 @@ Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/inkwall/issues/282)); 
   before it is full. Under the defaults that is about 7 KB, headers included; larger chunked
   bodies count as oversized.
 - **One frame per message.** HAProxy sends a message in one SPOE frame, of at most
-  `tune.bufsize` − 4 bytes, or the engine's `max-frame-size` (its body limit plus 1 MiB) when that
+  `tune.bufsize` − 4 bytes, or the engine's `max-frame-size` (its body limit plus 1 MiB: 1 MiB +
+  64 KiB by default, 11 MiB in bundle mode, where the limit is `body.maxBytes`' maximum) when that
   is lower. A message that doesn't fit, with its headers and other arguments, isn't cut: HAProxy
   sends none of it, sets `txn.inkwall.error` (`option set-on-error`) to 3 when encoding it fails
   against its own `max-frame-size`, or to 259 (0x100 + 3, from the SPOP connection) when it is over
