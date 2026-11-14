@@ -1,0 +1,98 @@
+GET / HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+Accept-Language: en-US,en;q=0.5
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+
+
+GET /small.html HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+Accept-Language: en-US,en;q=0.5
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+
+
+GET /page.html HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+Accept-Language: en-US,en;q=0.5
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+Cookie: session=4f2c9e1a7b; theme=dark
+
+
+GET /products?id=42&sort=price&order=asc HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+Accept-Language: en-US,en;q=0.5
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+Referer: http://shop.example.com/
+
+
+GET /search?q=oak+table+120+x+80+cm&page=2 HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+Accept-Language: en-US,en;q=0.5
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+
+
+GET /search?q=children%27s+books HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+Accept-Language: en-US,en;q=0.5
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+
+
+GET /api/orders/1093?fields=id,status,total HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+Accept-Language: en-US,en;q=0.5
+Accept: application/json, text/plain, */*
+Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.c2lnbmF0dXJl
+
+
+POST /login HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+Accept-Language: en-US,en;q=0.5
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+Content-Type: application/x-www-form-urlencoded
+Origin: http://shop.example.com
+Content-Length: 41
+
+user=alice&password=hunter2xx&remember=on
+
+POST /api/cart HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+Accept-Language: en-US,en;q=0.5
+Accept: application/json, text/plain, */*
+Content-Type: application/json
+Origin: http://shop.example.com
+Content-Length: 84
+
+{"productId":42,"quantity":2,"note":"Gift wrap, please - it is a birthday present!"}
+
+POST /contact HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+Accept-Language: en-US,en;q=0.5
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 103
+
+name=Jean-Luc+Lef%C3%A8vre&email=jl%40example.org&message=Hello%2C+when+will+order+1093+ship%3F+Thanks.
+
+HEAD /small.html HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+Accept-Language: en-US,en;q=0.5
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+
+
+OPTIONS /api/cart HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+Accept-Language: en-US,en;q=0.5
+Access-Control-Request-Method: POST
+Origin: http://shop.example.com
+

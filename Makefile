@@ -260,7 +260,7 @@ release-check: ## Check the goreleaser configuration
 	$(GORELEASER) check
 
 # The kind targets, and the scripts they run, use the kind of KIND_VERSION.
-KIND_TARGETS := kind-quickstart kind-cluster kind-up kind-operator kind-chaos kind-e2e kind-e2e-traefik kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-e2e-networkpolicy kind-response-load kind-upgrade kind-down
+KIND_TARGETS := kind-quickstart kind-cluster kind-up kind-operator kind-chaos kind-e2e kind-e2e-traefik kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-e2e-networkpolicy kind-response-load kind-soak kind-upgrade kind-down
 $(KIND_TARGETS): export PATH := $(KIND_DIR):$(PATH)
 $(KIND_TARGETS): $(KIND_DIR)/kind
 
@@ -314,8 +314,12 @@ kind-e2e-networkpolicy: kind-operator ## End-to-end test on kind of the chart's 
 	KIND_CLUSTER=$(KIND_CLUSTER) CHART=$(CHART) hack/kind/networkpolicy-e2e.sh
 
 .PHONY: kind-response-load
-kind-response-load: kind-operator ## Load test on kind through Envoy Gateway, response inspection off vs. on: p50/p99 latency and engine RSS (installs the operator first; CONCURRENCY, DURATION, OUT)
-	KIND_CLUSTER=$(KIND_CLUSTER) hack/kind/response-load.sh
+kind-response-load: kind-operator ## Latency per proxy on kind (Traefik, Envoy Gateway, Istio, HAProxy, raw Envoy, standalone): p50/p99 added, response inspection off and on, engine RSS, as a markdown table (installs the operator first; PROXIES, CONCURRENCY, DURATION, OUT, OUT_MD)
+	KIND_CLUSTER=$(KIND_CLUSTER) IMAGE=$(IMAGE) hack/kind/response-load.sh
+
+.PHONY: kind-soak
+kind-soak: kind-operator ## Soak on kind (hack/kind/soak.sh): every proxy serving clean and attack traffic for DURATION (default 1h), restarts, memory, status checked; SOAK_CHAOS=1 adds chaos (operator, engines, proxies killed, API server stopped, distribution cut); summary under OUT (installs the operator first)
+	KIND_CLUSTER=$(KIND_CLUSTER) IMAGE=$(IMAGE) hack/kind/soak.sh
 
 .PHONY: kind-e2e-istio
 kind-e2e-istio: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)

