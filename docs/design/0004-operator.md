@@ -739,8 +739,8 @@ has the decision), for `VirtualService` targets bound to Istio `Gateway` objects
   engine's answer. For a policy with `responses.inspect`, also the probe's response leg on every
   pod (#595, [0006 §4](0006-adapter-protocols.md#proving-responses-the-probes-response-leg-595)). Before that, `PendingRestart` or `SidecarMissing`; `WiringFailed` for a pod
   without the agent's files or with `--disable-config-snippets` covering backends.
-- **HAProxy's buffer:** when a policy's `body.maxBytes` is more than HAProxy's buffer lets the
-  engine see (`tune.bufsize` less `tune.maxrewrite`, from the `global-config-snippet` of the
+- **HAProxy's buffer:** when a policy's `body.maxBytes`, or `responses.maxBytes` for one whose
+  responses HAProxy sends, is more than HAProxy's buffer lets the engine see (`tune.bufsize` less `tune.maxrewrite`, from the `global-config-snippet` of the
   ConfigMap the controller's `--configmap` names, or HAProxy's defaults), `Programmed`'s message
   says so, without changing its status ([0002 §6.4](0002-system-architecture.md#64-haproxy-haproxy-kubernetes-ingress-controller-haproxy-ingress)).
 - **Not yet:** HAProxy Ingress (`jcmoraisjr/haproxy-ingress`); the controller's own CRDs as
@@ -950,7 +950,7 @@ reason is `NoEngines`, `EnginesBehind` (`some engines don't run bundle 42 yet`),
 left engines out, [§4.7](#47-distribution-server-all-replicas)), `NotInBundle` or `Suspended` (the
 bundle served suspends inspection, #263), or `EnginesOutdated` when an engine runs the bundle but
 is a release too old for a field the policy sets, which it would ignore (`spec.webSocket` needs
-0.4.0, #276, as does `spec.body.grpcMessages: Inspect`, #275; an engine whose version isn't a release, a development build, counts as new enough). It waits for the bundle builder to report the policy's
+0.4.0, #276, as does `spec.body.grpcMessages: Inspect`, #275; `spec.body.grpcStreams: PerMessage` needs 0.6.0, #315; an engine whose version isn't a release, a development build, counts as new enough). It waits for the bundle builder to report the policy's
 current generation (`status.observedGeneration`). The version engines must run is the policy's
 `status.bundleVersion`, or its version in the bundle served when that is newer: the builder writes
 the status just after publishing, and engines still on a suspended bundle mustn't count once it

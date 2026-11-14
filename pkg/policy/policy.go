@@ -26,6 +26,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/router"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
+	"github.com/inkwall-dev/inkwall/pkg/streams"
 )
 
 // MaxBodyBytes is the largest body a policy may inspect, as WAFPolicy's
@@ -134,6 +135,36 @@ func (s *Set) CheckExchange(ctx context.Context, r *request.Request) (pipeline.V
 	}
 	return v, x
 }
+
+var _ pipeline.GRPCStreamInspector = (*Set)(nil)
+
+// GRPCStream implements pipeline.GRPCStreamInspector: r's policy's, if it
+// inspects r's messages one by one (#315). Each message's verdict is
+// counted as the policy's, as a request's.
+func (s *Set) GRPCStream(r *request.Request) pipeline.GRPCStream {
+	if s.suspended {
+		return nil
+	}
+	p := s.Lookup(r)
+	if p == nil {
+		return nil
+	}
+	if p.pipeline.GRPCStream(r) == nil {
+		return nil
+	}
+	return countedStream{p}
+}
+
+// countedStream is a policy's GRPCStream whose verdicts its counter sees.
+type countedStream struct{ p *Policy }
+
+func (c countedStream) CheckGRPCMessage(ctx context.Context, call *request.Request, ev streams.Event, n int) pipeline.Verdict {
+	v := c.p.pipeline.CheckGRPCMessage(ctx, call, ev, n)
+	c.p.counter.Observe(v)
+	return v
+}
+
+func (c countedStream) Mode() pipeline.Mode { return c.p.pipeline.Mode() }
 
 // BodyLimit implements pipeline.Inspector: the policy's body limit, at
 // most max (the adapter's own) when max is positive, or 0 when its bodies,
@@ -314,16 +345,17 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 		}
 	}
 	pc := pipeline.Config{
-		Mode:         pipeline.ModeDetect,
-		Admission:    o.Admission,
-		Oversize:     oversize,
-		Observer:     o.Observer,
-		Policy:       bp.GetId(),
-		Routes:       routes,
-		WebSocket:    ws,
-		Responses:    responses,
-		GRPCMessages: bp.GetBody().GetGrpcMessages(),
-		DenyGRPC:     bp.GetBody().GetDenyGrpc(),
+		Mode:           pipeline.ModeDetect,
+		Admission:      o.Admission,
+		Oversize:       oversize,
+		Observer:       o.Observer,
+		Policy:         bp.GetId(),
+		Routes:         routes,
+		WebSocket:      ws,
+		Responses:      responses,
+		GRPCMessages:   bp.GetBody().GetGrpcMessages(),
+		GRPCPerMessage: bp.GetBody().GetGrpcPerMessage(),
+		DenyGRPC:       bp.GetBody().GetDenyGrpc(),
 	}
 	if l := bp.GetIpLists(); l != nil {
 		if pc.IPAllow, err = iplist.Parse(l.GetAllow()); err != nil {

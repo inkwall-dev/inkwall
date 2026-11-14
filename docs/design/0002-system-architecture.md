@@ -907,7 +907,10 @@ above the body limit. Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/
   It is a note, not a reason: `Programmed` and `Ready` don't change, as the body still fails safe
   (it isn't missing protection), and the probe still decides `Programmed` (`Unverified`). A
   separate condition type was rejected: another type for one proxy's limit, which `Ready` would
-  have to ignore. The operator doesn't change `tune.bufsize` (#336: memory per connection).
+  have to ignore. Since 0.6.0 the note also names a `responses.maxBytes` larger than the buffer,
+  for a policy whose responses HAProxy sends. The operator doesn't change `tune.bufsize`: it is
+  global, its memory is the user's to spend, and the ConfigMap is the user's ([0006 §4](0006-adapter-protocols.md#4-spoe-haproxy-stream-processing-offload-engine),
+  #336, with the measured cost).
 
 **Built:** the agent, `inkwall-engine spoe`, with a configuration written by hand
 ([protecting HAProxy](../haproxy.md)), and the operator's wiring above (v0.4.0, [#333](https://github.com/inkwall-dev/inkwall/pull/333),

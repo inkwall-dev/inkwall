@@ -219,20 +219,18 @@ type exchange struct {
 	queued   int64
 	queueCut bool
 
-	// A streamed response inspected event by event (streams.go): split
-	// splits it, events counts the events inspected, and held, when
-	// holds, are the bytes of the event in progress, not let through yet.
-	split  *streams.Splitter
-	events int
-	holds  bool
-	held   []byte
+	// A streamed response inspected event by event (streams.go, #323),
+	// and a gRPC call's request stream inspected message by message
+	// (#315); nil when not, or once ended.
+	respStream *eventStream
+	reqStream  *eventStream
 }
 
 // done reports whether nothing more is needed in observability mode: the
-// request was refused uninspected, or it was decided and so was its
-// response, if inspected.
+// request was refused uninspected, or it was decided (each message of a
+// call inspected one by one, too) and so was its response, if inspected.
 func (x *exchange) done() bool {
-	return x.req == nil || !x.waiting && (x.ex == nil || x.respDone && x.split == nil)
+	return x.req == nil || !x.waiting && x.reqStream == nil && (x.ex == nil || x.respDone && x.respStream == nil)
 }
 
 // Process handles the stream of one HTTP request.
@@ -308,6 +306,9 @@ func (s *Server) handle(ctx context.Context, x *exchange, msg *extprocv3.Process
 		if x.req == nil {
 			return s.uninspectable(ctx, errors.New("request body before the request headers")), nil
 		}
+		if x.reqStream != nil {
+			return s.streamChunk(ctx, x, &x.reqStream, phaseRequestBody, m.RequestBody), nil
+		}
 		if x.waiting && x.fillBody(m.RequestBody) {
 			return s.verdict(ctx, x, phaseRequestBody), nil
 		}
@@ -320,6 +321,9 @@ func (s *Server) handle(ctx context.Context, x *exchange, msg *extprocv3.Process
 			// The body ended with the last body message, or was empty.
 			x.fillBody(&extprocv3.HttpBody{EndOfStream: true})
 			return s.verdict(ctx, x, phaseRequestTrailers), nil
+		}
+		if x.reqStream != nil {
+			return s.endStream(ctx, x, &x.reqStream, phaseRequestTrailers), nil
 		}
 		return allow(phaseRequestTrailers, nil), nil
 	case *extprocv3.ProcessingRequest_ResponseHeaders:
@@ -337,8 +341,8 @@ func (s *Server) handle(ctx context.Context, x *exchange, msg *extprocv3.Process
 		if r, err := s.onResponse(ctx, x, phaseResponseBody); r != nil || err != nil {
 			return r, err
 		}
-		if x.split != nil {
-			return s.onStreamChunk(ctx, x, m.ResponseBody), nil
+		if x.respStream != nil {
+			return s.streamChunk(ctx, x, &x.respStream, phaseResponseBody, m.ResponseBody), nil
 		}
 		if x.respWaiting && x.fillResponse(m.ResponseBody) {
 			return s.responseVerdict(ctx, x, phaseResponseBody), nil
@@ -354,8 +358,8 @@ func (s *Server) handle(ctx context.Context, x *exchange, msg *extprocv3.Process
 			x.fillResponse(&extprocv3.HttpBody{EndOfStream: true})
 			return s.responseVerdict(ctx, x, phaseResponseTrailers), nil
 		}
-		if x.split != nil {
-			return s.endStream(ctx, x, phaseResponseTrailers), nil
+		if x.respStream != nil {
+			return s.endStream(ctx, x, &x.respStream, phaseResponseTrailers), nil
 		}
 		return allow(phaseResponseTrailers, nil), nil
 	default:
@@ -388,6 +392,10 @@ func (s *Server) onHeaders(ctx context.Context, x *exchange, h *extprocv3.HttpHe
 		return s.verdict(ctx, x, phaseRequestHeaders)
 	}
 	if x.limit = s.pipeline.BodyLimit(req, s.maxBody); x.limit > 0 {
+		if g := s.grpcStream(req); g != nil {
+			// A gRPC call whose messages are inspected one by one (#315).
+			return s.onGRPCStreamHeaders(ctx, x, g)
+		}
 		switch {
 		case x.bodyMode == filterv3.ProcessingMode_BUFFERED, x.bodyMode == filterv3.ProcessingMode_BUFFERED_PARTIAL:
 			// Envoy holds the headers until the body is answered.

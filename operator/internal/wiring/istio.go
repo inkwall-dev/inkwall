@@ -668,7 +668,10 @@ func istioExtProc(r routeSettings) (config, mode map[string]any) {
 	if r.detect {
 		config["observability_mode"] = true
 	}
-	if r.responses {
+	if r.responses || r.grpcPerMessage {
+		// The engine may skip a response body it doesn't read, or stream
+		// a gRPC call's request body to inspect its messages one by one
+		// (#315).
 		config["allow_mode_override"] = true
 	}
 	return config, mode

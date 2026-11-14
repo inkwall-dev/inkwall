@@ -11,7 +11,8 @@
 # filter, the policy is Programmed only once the operator's probe has
 # proven the filter on every pod, attacks are blocked on the protected
 # Ingress and pass on the other, Programmed notes HAProxy's buffer below
-# body.maxBytes (a 48 KB body is oversized) until tune.bufsize is raised, a client can't pass for the probe, a
+# body.maxBytes (a 48 KB body is oversized) until tune.bufsize is raised, a
+# request over one SPOE frame gets 413 in Block mode, a client can't pass for the probe, a
 # controller pod without the engine leaves the policy not Programmed (its
 # traffic is uninspected), a stopped engine fails closed in block mode and
 # open in detect mode, a policy with responses.inspect gets the response
@@ -269,6 +270,20 @@ forward
 eventually "the 48 KB benign body passes" all_are 200 "$HOST" / -H 'Content-Type: application/x-www-form-urlencoded' --data-binary "@$work_big"
 check "an attack in a body is still blocked" all_are 403 "$HOST" / --data-urlencode "q=1' OR '1'='1"
 
+echo "== a request over one SPOE frame (#336)"
+# In Block mode the snippet handles a request HAProxy can't fit in one SPOE
+# frame as oversized: a 2 MiB buffer holds a 1.5 MB body, more than the
+# engine's frame (its body limit plus 1 MiB), so HAProxy sends none of it.
+frame_rule() { "${KUBECTL[@]}" -n "$NS" get ingress app -o jsonpath='{.metadata.annotations}' | grep -F 'deny_status 413 if { var(txn.inkwall.error) -m int 3 259 }' >/dev/null; }
+check "Block mode: the snippet has the rule" frame_rule
+"${HELM[@]}" upgrade haproxy kubernetes-ingress --repo "$HAPROXY_REPO" --version "$HAPROXY_CHART_VERSION" \
+  --namespace "$NS" --reuse-values --set-string 'controller.config.global-config-snippet=tune.bufsize 2097152' --wait --timeout 5m >/dev/null
+forward
+head -c 1500000 /dev/zero | tr '\0' a >"$work_big"
+eventually "a 1.5 MB body over one SPOE frame is oversized: 413" all_are 413 "$HOST" / -H 'Content-Type: application/octet-stream' --data-binary "@$work_big"
+check "a benign request still passes" all_are 200 "$HOST" /products/42
+check "an attack in a body is still blocked" all_are 403 "$HOST" / --data-urlencode "q=1' OR '1'='1"
+
 echo "== a controller pod without the engine"
 # A pod of the controller that opted out: its HAProxy can't load the filter
 # (the controller drops the snippet), so the route isn't protected there,
@@ -300,6 +315,8 @@ echo "== detect mode"
 policy Detect
 no_closed_rule() { ! "${KUBECTL[@]}" -n "$NS" get ingress app -o jsonpath='{.metadata.annotations}' | grep -F 'deny_status 503 if !{' >/dev/null; }
 eventually "the snippet fails open" no_closed_rule
+no_frame_rule() { ! frame_rule; }
+check "Detect mode: no rule on SPOE's error" no_frame_rule
 forward
 eventually "the attack passes" all_are 200 "$HOST" "$SQLI"
 probe=/detect-$RANDOM$RANDOM

@@ -156,12 +156,16 @@ a controller run with `--disable-config-snippets` covering backends.
       tune.bufsize 81920
   ```
 
-  The operator doesn't change it, but says on the policy when its `body.maxBytes` (64 KiB when
-  unset) is more than the buffer lets the engine see: `Programmed`'s message names the effective
-  limit (`HAProxy's buffer (tune.bufsize 16384, HAProxy's default) lets the engine see at most
-  about 15360 bytes of a request ...`). It reads `tune.bufsize` and `tune.maxrewrite` from the
-  ConfigMap the controller's `--configmap` names, within a minute of a change. That is a note: the
-  status stays as it is, since larger bodies still fail safe.
+  The operator doesn't change it (it is global, so every connection pays for it: see
+  [the cost](#bodies)), but says on the policy when its `body.maxBytes` (64 KiB when unset), or
+  the `responses.maxBytes` of a policy that inspects responses, is more than the buffer lets the
+  engine see: `Programmed`'s message names the effective limit (`HAProxy's buffer (tune.bufsize
+  16384, HAProxy's default) lets the engine see at most about 15360 bytes of a request ...`, or
+  `... of a response ...`). It reads `tune.bufsize` and `tune.maxrewrite` from the ConfigMap the
+  controller's `--configmap` names, within a minute of a change. That is a note: the status stays
+  as it is, since larger bodies are still handled as oversized. In `Block` mode, a request or a
+  response HAProxy can't fit in one SPOE frame is handled as oversized too, by the operator's
+  rules: 413 for a request, 502 for a response.
 - **Responses:** controller pods injected before 0.6.0, or running a pinned `spec.engine.image`
   older than 0.6.0, have an engine without `--response-messages`: while one runs, a policy with
   `responses.inspect` is `Programmed=False` (`ResponsesNotInspected`) and its responses are not
@@ -326,6 +330,11 @@ frontend web
     # uninspected.
     option http-buffer-request
     filter spoe engine inkwall config /usr/local/etc/haproxy/spoe.conf
+    # A request HAProxy can't fit in one SPOE frame (txn.inkwall.error 3,
+    # or 259 over the engine's frame size) doesn't reach the engine: it is
+    # oversized, 413, as --oversize-body deny says. Keep this rule first,
+    # whatever the failure mode; leave it out in detect mode.
+    http-request deny deny_status 413 if { var(txn.inkwall.error) -m int 3 259 }
     # Fail closed: without a verdict (the engine is down, or hung), deny
     # with 503. Leave this rule out to fail open. /healthz is left
     # uninspected (spoe.conf), so it has no verdict.
@@ -350,6 +359,9 @@ frontend web
     # the response to the engine.
     http-response wait-for-body time 2s if { var(txn.inkwall.responses) -m found } { res.hdr(content-type) -m beg -i text/plain text/html text/xml application/json application/xml application/problem+json }
     http-response send-spoe-group inkwall inkwall-response if { var(txn.inkwall.responses) -m found }
+    # A response HAProxy can't fit in one SPOE frame: oversized, 502, as
+    # --oversize-response deny says (leave it out in detect mode).
+    http-response return status 502 content-type text/plain lf-string "Bad Gateway. Request ID: %[var(txn.inkwall.request_id)]" hdr x-request-id "%[var(txn.inkwall.request_id)]" if { var(txn.inkwall.responses) -m found } { var(txn.inkwall.error) -m int 3 259 }
     # Fail closed: without a verdict on the response (the engine is down,
     # or hung), replace it with 502 when the request's policy fails
     # closed.
@@ -376,7 +388,8 @@ backend inkwall-engine
 ```
 
 Check a changed configuration with `haproxy -c -f haproxy.cfg`. The order of the `http-request`
-rules matters: the fail-closed rule first, then the gRPC answer, then a rule per status. Put your
+rules matters: the rule for a request too large for one SPOE frame first, then the fail-closed
+rule, the gRPC answer, and a rule per status. Put your
 own `http-request` rules after them, so a denied request goes no further.
 
 `deny_status` takes a fixed status, so the configuration has a rule for each status the engine
@@ -440,7 +453,30 @@ well under half of HAProxy's buffer (about 7 KiB, headers included, under the de
 oversized above that. Without `option http-buffer-request`, bodies go uninspected, and are handled
 as oversized too.
 
-A larger `tune.bufsize` takes more memory per connection: see HAProxy's [`tune.bufsize`](https://docs.haproxy.org/3.2/configuration.html#3.2-tune.bufsize).
+HAProxy sends each request to the engine in one SPOE frame (SPOP 2.0 has no fragmentation since
+HAProxy 3.1), of at most its buffer less 4 bytes, or the engine's limit (its body limit plus 1
+MiB) when that is lower: a request that doesn't fit, with its headers and other arguments, isn't
+sent at all. HAProxy sets `txn.inkwall.error` to 3 (over its own frame size) or 259 (over the
+engine's), and the first rule of `haproxy.cfg` handles it
+as oversized: 413. Keep that rule whatever your failure mode; leave it out in detect mode. The same
+holds for responses, with 502.
+
+A larger `tune.bufsize` takes more memory, but only while a request is in flight: HAProxy takes
+its buffers from a pool as data arrives and gives them back. Measured with HAProxy 3.2.26, 200
+connections each holding a request whose body fills the buffer while the engine inspects it (about
+three buffers each: the request's, the SPOE filter's and the SPOP connection's):
+
+| `tune.bufsize` | Body the engine sees, at most | Memory per request in inspection | Per idle connection |
+|---|---|---|---|
+| 16384 (the default) | about 15 KiB | about 56 KiB | under 1 KiB |
+| 81920 | about 79 KiB | about 190 KiB | under 1 KiB |
+| 262144 | about 255 KiB | about 630 KiB | under 1 KiB |
+| 1048576 | about 1 MiB | about 2.4 MiB | under 1 KiB |
+
+So 1,000 requests inspected at once take about 55 MB at the default and about 185 MB at 81920.
+Size it from your largest `body.maxBytes` (or `--max-body-bytes`) and how many requests with bodies
+you expect at once; HAProxy's [`tune.bufsize`](https://docs.haproxy.org/3.2/configuration.html#3.2-tune.bufsize)
+has the rest. HTTP/2 needs at least 16384.
 
 ### Responses
 
@@ -497,6 +533,10 @@ inkwall-engine spoe --listen unix:/var/run/inkwall/spoe.sock --mode block --insp
   in detect mode. `inkwall_spoe_response_states_total{outcome}` counts the requests kept, refused
   (`full`), answered, expired and the responses `miss`ing their request;
   `inkwall_spoe_response_states` and `inkwall_spoe_response_state_bytes` show the table now.
+- **A response HAProxy can't fit in one SPOE frame** (with its headers; see [Bodies](#bodies)):
+  HAProxy sends none of it and sets `txn.inkwall.error` to 3 or 259; in block mode the rule before the
+  fail-closed one replaces it with 502, as oversized. The operator adds that rule for `Block`-mode
+  policies.
 - **The engine down:** the response gets no verdict, and the first `http-response return` rule
   replaces it with 502 when the request's policy fails closed; one that fails open passes.
 - **One engine per HAProxy:** the response must reach the engine that inspected its request. Run the

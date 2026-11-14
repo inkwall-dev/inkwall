@@ -343,6 +343,14 @@ func TestEnforcedOutdatedEngineGRPCMessages(t *testing.T) {
 		{"grpc Deny, 0.4.1 engine", &wafv1alpha1.BodySpec{GRPC: wafv1alpha1.GRPCDeny}, []string{"0.5.0", "0.4.1"}, ReasonEnginesOutdated},
 		{"grpc Deny, new engines", &wafv1alpha1.BodySpec{GRPC: wafv1alpha1.GRPCDeny}, []string{"0.5.0"}, ReasonEnforced},
 		{"grpc Allow", &wafv1alpha1.BodySpec{GRPC: wafv1alpha1.GRPCAllow}, []string{"0.4.1"}, ReasonEnforced},
+		// grpcStreams: PerMessage (#315): an engine before 0.6.0 buffers,
+		// so a long client stream or a bidirectional call fails there.
+		{"PerMessage, 0.5.0 engine", &wafv1alpha1.BodySpec{GRPCMessages: wafv1alpha1.GRPCMessagesInspect, GRPCStreams: wafv1alpha1.GRPCStreamsPerMessage},
+			[]string{"0.6.0", "0.5.0"}, ReasonEnginesOutdated},
+		{"PerMessage, new engines", &wafv1alpha1.BodySpec{GRPCMessages: wafv1alpha1.GRPCMessagesInspect, GRPCStreams: wafv1alpha1.GRPCStreamsPerMessage},
+			[]string{"0.6.0"}, ReasonEnforced},
+		{"Buffer, 0.5.0 engine", &wafv1alpha1.BodySpec{GRPCMessages: wafv1alpha1.GRPCMessagesInspect, GRPCStreams: wafv1alpha1.GRPCStreamsBuffer},
+			[]string{"0.5.0"}, ReasonEnforced},
 	} {
 		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
 		p.Spec.Body = tc.body
@@ -360,6 +368,9 @@ func TestEnforcedOutdatedEngineGRPCMessages(t *testing.T) {
 		field := "spec.body.grpcMessages"
 		if tc.body != nil && tc.body.GRPC == wafv1alpha1.GRPCDeny {
 			field = "spec.body.grpc,"
+		}
+		if tc.body != nil && tc.body.GRPCStreams == wafv1alpha1.GRPCStreamsPerMessage {
+			field = "spec.body.grpcStreams,"
 		}
 		if tc.reason == ReasonEnginesOutdated && !strings.Contains(c.Message, field) {
 			t.Errorf("%s: message %q doesn't name the field", tc.name, c.Message)
