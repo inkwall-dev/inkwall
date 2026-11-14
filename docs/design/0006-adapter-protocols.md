@@ -485,8 +485,22 @@ switches such responses to `STREAMED` and answers each chunk with a body mutatio
 through only complete, allowed events, `--response-streams` and the bundle's
 `ResponseConfig.streams`. A gRPC call's exchange is now kept when its policy inspects streams.
 The security event carries
-`stream_event`. `make raw-envoy-e2e` checks a leaking SSE event never reaches the client. **Not
-yet:** the reverse proxy's streams (after its responses), and the operator's field.
+`stream_event`. `make raw-envoy-e2e` checks a leaking SSE event never reaches the client.
+**Built (operator):** `WAFPolicy.spec.responses.streams` (`Inspect` or `Skip`, the default; it
+needs `inspect: true`), the bundle field from it, `Enforced=False` (`EnginesOutdated`) while an
+engine before 0.6.0 runs the policy, and the Envoy Gateway and Istio kind e2e sections (a leaking
+SSE event ends the stream through both Gateways, the events before it pass). Since the HAProxy
+Ingress Controller sends responses too (#470), an integration reports whether it sends streamed
+bodies (`Result.Streams`): HAProxy doesn't (§4: SPOE never holds them), so a policy with `streams:
+Inspect` is `Programmed=False` (`ResponsesNotInspected`) on its Ingresses, as Traefik's routes are
+for `responses`, rather than `Ready` while the events pass uninspected. **Built (the
+reverse proxy):** a `streamBody` wraps the response's body: it splits it as it is read, inspects
+each event, and gives out only bytes up to the end of the last allowed event (`Event.End`, the
+offset the splitter reports), so the events before a denied one go out even when they came in the
+same read; the denied one ends the copy with an error, which aborts the response. A stream holds
+one event's limit of `--max-held-response-bytes` while open; past it, a new one gets the failure
+mode. Through ext_proc, a chunk's answer is either its body or a reset, so events that share a
+chunk with a denied one are dropped with it.
 
 **gRPC server messages (v0.6.0, #317).** A gRPC response's messages go through the stream path
 above. What #317 adds is the call's **status message**: `grpc-message`, where a server puts its

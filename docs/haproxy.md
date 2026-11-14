@@ -98,7 +98,10 @@ default) and its pods by the chart's label
   closed, gives no verdict (502). It does so only once every running controller pod's engine was
   injected with `--response-messages`: until then no Ingress gets the response rules, and the
   policy is `Programmed=False` (`ResponsesNotInspected`), naming the pods to restart. What a body
-  HAProxy cuts means is in [Responses](#responses).
+  HAProxy cuts means is in [Responses](#responses). Streamed responses (Server-Sent Events, gRPC)
+  aren't held, so their bodies never reach the engine: a policy with `responses.streams: Inspect`
+  is `Programmed=False` (`ResponsesNotInspected`) on HAProxy's Ingresses; set `streams: Skip`, or
+  serve those routes through Envoy Gateway or Istio.
 - **The failure mode:** the fail-closed rule is in the snippet when every policy on the Ingress
   fails closed, so HAProxy answers 503 while the engine is down; in `Detect` mode (failing open by
   default) it isn't, and requests pass uninspected.

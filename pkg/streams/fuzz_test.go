@@ -41,6 +41,9 @@ func FuzzSSEEvents(f *testing.F) {
 			t.Fatalf("split at %d: %d events, whole: %d", split, len(got), len(want))
 		}
 		for i := range got {
+			if got[i].End != want[i].End || got[i].End > int64(len(stream)) || i > 0 && got[i].End < got[i-1].End {
+				t.Fatalf("split at %d, event %d: ends at %d, whole: %d (stream %d bytes)", split, i, got[i].End, want[i].End, len(stream))
+			}
 			if string(got[i].Data) != string(want[i].Data) || got[i].Truncated != want[i].Truncated ||
 				got[i].Unframed != want[i].Unframed || !slices.Equal(got[i].Fields, want[i].Fields) {
 				t.Fatalf("split at %d, event %d: %q %v, whole: %q %v", split, i, got[i].Data, got[i].Truncated, want[i].Data, want[i].Truncated)
