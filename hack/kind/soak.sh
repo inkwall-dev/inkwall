@@ -26,7 +26,8 @@
 # (SOAK_CHAOS_SCENARIOS, default "operator engine proxy apiserver
 # distribution", narrows or reorders them): the
 # operator's leader killed; an engine killed (each proxy's in turn); a
-# proxy's pod deleted (each in turn); the API server stopped for 20 s; the
+# proxy's pod deleted (each in turn); the API server stopped for 20 s (timed:
+# while it is down, the samples skip what needs it); the
 # bundle distribution cut (a NetworkPolicy keeps the engines from the
 # operator, which restarts so their streams end, and a policy edit is made
 # while they can't get it) for SOAK_CUT_FOR. Each must recover within
@@ -42,7 +43,9 @@
 #     window lasts from its start to SOAK_GRACE after its recovery);
 #   - other failed answers (5xx, no answer) to more than SOAK_MAX_ERROR_RATE
 #     of the requests outside chaos;
-#   - a restart outside chaos;
+#   - a restart outside chaos (hack/kind/soak-restarts.sh: the restarts a
+#     scenario caused, reported late or coming out of back-off after its
+#     window, are its own until the container has run for SOAK_GRACE);
 #   - a status that claimed protection the canary showed wasn't there;
 #   - a policy edit or a chaos scenario not recovered from in SOAK_RECOVERY;
 #   - memory growth of the engines or the operator beyond the bound, per
@@ -83,11 +86,15 @@ OUT=${OUT:-bin/soak/$(date -u +%Y%m%dT%H%M%SZ)}
 OPERATOR_NS=inkwall-system
 NODE=$CLUSTER-control-plane
 KUBECTL=(kubectl --context "kind-$CLUSTER" --request-timeout=20s)
+# For the API server's own state: a stopped one must not hold up the
+# scenario.
+KUBECTL_QUICK=(kubectl --context "kind-$CLUSTER" --request-timeout=2s)
 HELM=(helm --kube-context "kind-$CLUSTER")
 LEASE=inkwall-operator.waf.inkwall.dev
 
 . hack/kind/lib.sh
 . hack/kind/stacks.sh
+. hack/kind/soak-restarts.sh
 read -r -a PROXIES <<<"${PROXIES:-${STACK_PROXIES[*]}}"
 
 # secs DURATION: 90s, 15m, 24h, or seconds.
@@ -134,11 +141,6 @@ trap cleanup EXIT
 : >"$OUT/samples.jsonl"
 : >"$OUT/memory.jsonl"
 : >"$OUT/canary.jsonl"
-# violation KIND MESSAGE: recorded, and printed.
-violation() {
-  jq -nc --argjson t "$(date +%s)" --arg kind "$1" --arg msg "$2" '{time: $t, kind: $kind, message: $msg}' >>"$OUT/violations.jsonl"
-  echo "FAIL  $1: $2"
-}
 
 echo "== the request mixes, checked offline against the soak's policy"
 go build -o "$work/inkwallctl" ./cmd/inkwallctl
@@ -217,36 +219,11 @@ check_claims() {
   done
 }
 
-# Restarts: the containers' restart counts at the last sample, and the
-# namespaces watched.
-declare -A restarts=()
+# The namespaces whose restarts are watched (sample_restarts,
+# hack/kind/soak-restarts.sh).
 watched=("$OPERATOR_NS")
 for p in "${PROXIES[@]}"; do watched+=("$(stack_ns "$p")"); done
 if [[ " ${PROXIES[*]} " == *" istio "* ]]; then watched+=(istio-system); fi
-# sample_restarts [expected]: compares restart counts with the last sample;
-# a new restart is a violation unless chaos is on (or "expected" is given).
-chaos_on=false
-chaos_until=0
-sample_restarts() {
-  local ns line key n prev
-  for ns in "${watched[@]}"; do
-    "${KUBECTL[@]}" -n "$ns" get pods -o json 2>/dev/null |
-      jq -r '.items[] | .metadata.namespace as $ns | .metadata.name as $pod |
-        ((.status.initContainerStatuses // []) + (.status.containerStatuses // []))[] | "\($ns)/\($pod)/\(.name) \(.restartCount)"' ||
-      return 0
-  done >"$work/restarts"
-  while read -r key n; do
-    prev=${restarts[$key]:-0}
-    if ((n > prev)); then
-      jq -nc --argjson t "$(date +%s)" --arg c "$key" --argjson d $((n - prev)) --argjson chaos "$({ $chaos_on || (($(date +%s) < chaos_until)) || [[ ${1:-} == expected ]]; } && echo true || echo false)" \
-        '{time: $t, restart: $c, count: $d, duringChaos: $chaos}' >>"$OUT/samples.jsonl"
-      if ! $chaos_on && (($(date +%s) >= chaos_until)) && [[ ${1:-} != expected ]]; then
-        violation restart "$key restarted $((n - prev)) time(s)"
-      fi
-    fi
-    restarts[$key]=$n
-  done <"$work/restarts"
-}
 # sample_memory: the RSS of the engines and the operator.
 sample_memory() {
   local t
@@ -259,15 +236,18 @@ sample_memory() {
 }
 next_sample=0
 start=$(date +%s)
-# tick: a sample when one is due; called by every wait.
+# Whether the API server is stopped (the apiserver scenario).
+api_down=false
+# tick: a sample when one is due; called by every wait. While the API server
+# is stopped, only the memory (each kubectl call would wait for its timeout).
 tick() {
   local now
   now=$(date +%s)
   ((now >= next_sample)) || return 0
   next_sample=$((now + sample_every))
-  sample_restarts
+  if ! $api_down; then sample_restarts; fi
   sample_memory
-  check_claims
+  if ! $api_down; then check_claims; fi
   progress
 }
 progress() {
@@ -337,17 +317,11 @@ scenario_i=0
 # The proxies whose engine, and whose pod, go next.
 engine_i=0
 proxy_i=$((${#PROXIES[@]} / 2))
-chaos_begin() {
-  chaos_on=true
-  chaos_start=$(date +%s)
-  echo "== chaos: $1"
-}
+# chaos_end SCENARIO DETAIL OK: the window closes (chaos_stop) and is
+# recorded.
 chaos_end() {
   local name=$1 detail=$2 ok=$3
-  # The restarts the scenario caused are its own.
-  sample_restarts expected
-  chaos_on=false
-  chaos_until=$(($(date +%s) + grace))
+  chaos_stop
   jq -nc --arg s "$name" --arg d "$detail" --argjson start "$chaos_start" --argjson end "$(date +%s)" \
     --argjson rec "$recovered_in" --argjson ok "$ok" --argjson grace "$grace" \
     '{scenario: $s, detail: $d, start: $start, end: $end, graceUntil: ($end + $grace), recoverySeconds: $rec, recovered: $ok}' >>"$OUT/chaos.jsonl"
@@ -366,7 +340,7 @@ leader() {
   holder=$("${KUBECTL[@]}" -n "$OPERATOR_NS" get lease "$LEASE" -o jsonpath='{.spec.holderIdentity}' 2>/dev/null)
   echo "${holder%%_*}"
 }
-api_up() { "${KUBECTL[@]}" get --raw /readyz >/dev/null 2>&1; }
+api_up() { "${KUBECTL_QUICK[@]}" get --raw /readyz >/dev/null 2>&1; }
 run_chaos() {
   local s=${scenarios[$((scenario_i % ${#scenarios[@]}))]} victim detail ok=true
   scenario_i=$((scenario_i + 1))
@@ -374,37 +348,47 @@ run_chaos() {
   case $s in
   operator)
     detail="leader $(leader) killed"
-    chaos_begin "$s: $detail"
+    chaos_begin "$s" "$detail"
     "${KUBECTL[@]}" -n "$OPERATOR_NS" delete pod "$(leader)" --grace-period=0 --force >/dev/null 2>&1 || true
     ;;
   engine)
     victim=${PROXIES[$((engine_i % ${#PROXIES[@]}))]}
     engine_i=$((engine_i + 1))
     detail="$victim's engine killed (SIGKILL)"
-    chaos_begin "$s: $detail"
+    chaos_begin "$s" "$detail"
     docker exec "$NODE" kill -KILL "$(engine_pid "$victim")" || true
     ;;
   proxy)
     victim=${PROXIES[$((proxy_i % ${#PROXIES[@]}))]}
     proxy_i=$((proxy_i + 1))
     detail="$victim's pod deleted"
-    chaos_begin "$s: $detail"
+    chaos_begin "$s" "$detail"
     "${KUBECTL[@]}" -n "$(stack_ns "$victim")" delete pod "$(stack_running_pods "$victim" | head -1)" --wait=false >/dev/null
     ;;
   apiserver)
     detail="stopped for 20 s"
-    chaos_begin "$s: $detail"
+    chaos_begin "$s" "$detail"
     docker exec "$NODE" mv /etc/kubernetes/manifests/kube-apiserver.yaml /etc/kubernetes/kube-apiserver.yaml.soak
     apiserver_moved=true
-    for _ in $(seq 120); do api_up || break; sleep 0.5; done
-    for _ in $(seq 10); do tick; sleep 2; done
+    # Down within a minute, then down for 20 s by the clock: the ticks
+    # meanwhile skip the API server (#627).
+    local deadline=$(($(date +%s) + 60))
+    while api_up && (($(date +%s) < deadline)); do sleep 0.5; done
+    api_down=true
+    deadline=$(($(date +%s) + 20))
+    while (($(date +%s) < deadline)); do
+      tick
+      sleep 2
+    done
     docker exec "$NODE" mv /etc/kubernetes/kube-apiserver.yaml.soak /etc/kubernetes/manifests/kube-apiserver.yaml
     apiserver_moved=false
-    for _ in $(seq 360); do api_up && break; sleep 0.5; done
+    deadline=$(($(date +%s) + 180))
+    until api_up || (($(date +%s) >= deadline)); do sleep 0.5; done
+    api_down=false
     ;;
   distribution)
     detail="engines cut from the operator for $SOAK_CUT_FOR, a policy edit made meanwhile"
-    chaos_begin "$s: $detail"
+    chaos_begin "$s" "$detail"
     cut_applied=true
     "${KUBECTL[@]}" apply -f - >/dev/null <<YAML
 apiVersion: networking.k8s.io/v1
@@ -448,7 +432,7 @@ start=$(date +%s)
 end=$((start + duration))
 next_canary=$((start + canary_every))
 next_chaos=$((start + chaos_every))
-sample_restarts expected
+sample_restarts baseline
 while (($(date +%s) < end)); do
   tick
   now=$(date +%s)
