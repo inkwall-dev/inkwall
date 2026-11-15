@@ -512,6 +512,19 @@ func (h *Holder) CheckExchange(ctx context.Context, r *request.Request) (pipelin
 	return s.CheckExchange(ctx, r)
 }
 
+var _ pipeline.GRPCStreamInspector = (*Holder)(nil)
+
+// GRPCStream implements pipeline.GRPCStreamInspector: the active set's,
+// nil before the first. Without it an engine in bundle mode would buffer
+// every gRPC call whatever its policy's grpcStreams (#646).
+func (h *Holder) GRPCStream(r *request.Request) pipeline.GRPCStream {
+	s := h.set.Load()
+	if s == nil {
+		return nil
+	}
+	return s.GRPCStream(r)
+}
+
 // BodyLimit implements pipeline.Inspector.
 func (h *Holder) BodyLimit(r *request.Request, max int64) int64 {
 	s := h.set.Load()
