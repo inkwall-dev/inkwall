@@ -9,7 +9,8 @@
 // The server answers a WebSocket handshake on any path, from any origin,
 // and echoes every message; /sse and /sse-leak answer Server-Sent Events
 // (#323): two clean events, or a clean one, one leaking a MySQL error and
-// a last one, each flushed on its own; any other request gets 200 "ok".
+// a last one, each flushed on its own; /leak answers an HTML page leaking
+// the same error; any other request gets 200 "ok".
 //
 //	wsecho -listen :8080
 //
@@ -78,6 +79,10 @@ func main() {
 	fmt.Println(out)
 }
 
+// mysqlError is what /sse-leak and /leak leak: the CRS's RESPONSE-951 rules
+// find it.
+const mysqlError = "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version"
+
 // serve echoes WebSocket messages, from any origin.
 func serve(addr string) error {
 	echo := websocket.Server{
@@ -88,7 +93,11 @@ func serve(addr string) error {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/sse", sse("hello", "world"))
-	mux.HandleFunc("/sse-leak", sse("hello", "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version", "after"))
+	mux.HandleFunc("/sse-leak", sse("hello", mysqlError, "after"))
+	mux.HandleFunc("/leak", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "<html><body>"+mysqlError+"</body></html>\n")
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 			echo.ServeHTTP(w, r)
