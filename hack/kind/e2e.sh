@@ -210,7 +210,8 @@ eventually "placement: AfterCRS: Enforced" enforced_now
 check "PUT still gets 403" put_is 403
 placed_policy BeforeCRS
 eventually "placement: BeforeCRS: the CRS reads the rule set's tx.allowed_methods, PUT passes" put_is 200
-check "Enforced by the engine" enforced_now
+# The engine applies the bundle before the operator records that it runs it.
+eventually "Enforced by the engine" enforced_now
 check "an attack still gets 403" status_is 403 "$SQLI"
 check "a benign request passes" status_is 200 /products/42
 check "same engine pod, no restart" same_pod
