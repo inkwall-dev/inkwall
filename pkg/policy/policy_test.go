@@ -1078,11 +1078,31 @@ func TestGRPCPerMessage(t *testing.T) {
 		t.Errorf("attack: %v, message %d, policy %q", v.Action, v.StreamEvent, v.Policy)
 	}
 
+	// Bundle mode: the adapters get the Holder, which must say so too
+	// (#646); before the first set, no call is streamed.
+	var h Holder
+	var gi pipeline.Inspector = &h
+	hs, ok := gi.(pipeline.GRPCStreamInspector)
+	if !ok {
+		t.Fatal("Holder doesn't implement pipeline.GRPCStreamInspector")
+	}
+	if hs.GRPCStream(call) != nil {
+		t.Error("Holder before the first set: GRPCStream not nil")
+	}
+	h.Store(set)
+	if hs.GRPCStream(call) == nil {
+		t.Error("Holder: GRPCStream nil with grpcPerMessage set")
+	}
+
 	b.Policies[0].Body = &bundlev1.BodyConfig{Inspect: true, GrpcMessages: true}
 	if set, err = Compile(b, Options{}); err != nil {
 		t.Fatal(err)
 	}
 	if set.GRPCStream(call) != nil {
 		t.Error("messages inspected one by one without grpcPerMessage")
+	}
+	h.Store(set)
+	if hs.GRPCStream(call) != nil {
+		t.Error("Holder: messages inspected one by one without grpcPerMessage")
 	}
 }
