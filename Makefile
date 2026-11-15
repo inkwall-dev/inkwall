@@ -354,7 +354,7 @@ raw-envoy-e2e: ## End-to-end test of raw Envoy with the engine's ext_proc adapte
 	IMAGE=$(IMAGE) hack/raw-envoy/e2e.sh
 
 .PHONY: websocket-e2e
-websocket-e2e: ## End-to-end test of WebSocket message inspection by the engine's proxy, with hack/wsecho, in Docker (no cluster)
+websocket-e2e: ## End-to-end test of the engine's proxy in Docker (no cluster), with hack/wsecho: WebSocket message inspection, and responses and streamed responses inspected
 	IMAGE=$(IMAGE) hack/websocket/e2e.sh
 
 .PHONY: kind-quickstart
