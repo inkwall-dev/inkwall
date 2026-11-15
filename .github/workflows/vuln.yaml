@@ -57,13 +57,17 @@ jobs:
           path: main
           persist-credentials: false
           fetch-depth: 0
+      # Only the go command that fetches each module's own toolchain below.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: main/go.mod
-          check-latest: true
           cache: false
       # Every branch, even after one fails. A supported version without its
       # release branch yet (tagged, not cut) is scanned at its latest tag.
+      # govulncheck reports the standard library advisories of the Go it runs
+      # with, so each module is scanned with the Go it is built with (#648):
+      # the toolchain line of its go.mod, else its go line. The newest Go
+      # would hide an advisory that the branch's toolchain still has.
       - env:
           MINORS: ${{ needs.plan.outputs.minors }}
         run: |
@@ -79,10 +83,26 @@ jobs:
             git -C main worktree add -q --detach "../release-$m" "$ref"
             dirs="$dirs release-$m"
           done
+          {
+            echo "| Module | Go | govulncheck |"
+            echo "| --- | --- | --- |"
+          } >>"$GITHUB_STEP_SUMMARY"
           for b in $dirs; do
-            echo "::group::$b"
-            (cd "$b" && go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...) || { echo "::error::govulncheck found vulnerabilities on $b"; status=1; }
+            toolchain=$(awk '$1 == "toolchain" { print $2; exit }' "$b/go.mod")
+            if [ -z "$toolchain" ]; then
+              v=$(awk '$1 == "go" { print $2; exit }' "$b/go.mod")
+              if [[ "$v" =~ ^[0-9]+\.[0-9]+$ ]]; then v=$v.0; fi
+              toolchain=go$v
+            fi
+            echo "::group::$b ($toolchain)"
+            result=ok
+            if ! (cd "$b" && export GOTOOLCHAIN="$toolchain" && go version && go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...); then
+              echo "::error::govulncheck found vulnerabilities on $b with $toolchain"
+              result=failed
+              status=1
+            fi
             echo "::endgroup::"
+            echo "| $b | $toolchain | $result |" >>"$GITHUB_STEP_SUMMARY"
           done
           exit "$status"
 
