@@ -152,7 +152,7 @@ request that only that generation's rules deny must be denied through its proxy.
 
 With `SOAK_CHAOS=1`, every `SOAK_CHAOS_EVERY` (15 min) one of these, in turn: the operator's leader
 killed; an engine killed (each proxy's in turn); a proxy's pod deleted; the API server stopped for
-20 s; the bundle distribution cut for `SOAK_CUT_FOR` (90 s: a NetworkPolicy keeps the engines from the
+20 s (by the clock; the samples meanwhile skip what needs it); the bundle distribution cut for `SOAK_CUT_FOR` (90 s: a NetworkPolicy keeps the engines from the
 operator, which restarts so their streams end, and the canary changes meanwhile). Each must recover
 within `SOAK_RECOVERY`: every policy claims its protection again, the app answers through every proxy,
 and attacks and the canary are denied. The status checks run throughout: status never claims
@@ -166,7 +166,9 @@ samples, and fails on any of:
   recovery);
 - other failures (5xx, no answer) to more than `SOAK_MAX_ERROR_RATE` (0.1%) of the requests outside
   chaos;
-- a restart outside chaos; a status that claimed protection the canary showed wasn't there; a policy
+- a restart outside chaos (`hack/kind/soak-restarts.sh`): the restarts a scenario caused are its own,
+  also when they show after its window (the kubelet reports them late, or a container comes out of
+  back-off), until the container has run for `SOAK_GRACE`; a status that claimed protection the canary showed wasn't there; a policy
   edit or chaos scenario not recovered from;
 - memory growth, per proxy (its engines' RSS summed) and for the operator (its replicas' summed,
   which holds across a leader change or a replaced pod): the median of the last fifth of the samples
