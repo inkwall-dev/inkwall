@@ -427,8 +427,12 @@ wiring() {
   "${KUBECTL[@]}" -n "$NS" get ingressroutes.traefik.io web \
     -o jsonpath='{range .spec.routes[*]}{.middlewares[*].name}{";"}{end}|{.metadata.annotations.waf\.inkwall\.dev/wired}'
   echo
-  "${KUBECTL[@]}" -n "$NS" get middlewares.traefik.io -o jsonpath='{.items[*].metadata.name}'
-  echo
+  # From 0.6.0 (#625), inkwall-waf chains inkwall-waf-body and
+  # inkwall-waf-auth, which routes don't refer to: left out here, so a
+  # second inkwall-waf or route entry still shows. A rollback to 0.5.x
+  # leaves them unused (operator_middleware checks them after the upgrade).
+  "${KUBECTL[@]}" -n "$NS" get middlewares.traefik.io -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' |
+    grep -vx 'inkwall-waf-body\|inkwall-waf-auth' | paste -sd' ' -
 }
 wired_once() {
   [[ $(wiring) == "$NS-inkwall-waf@kubernetescrd,$NS-user-header@kubernetescrd|$NS-inkwall-waf@kubernetescrd
@@ -672,6 +676,13 @@ else
   check "the integration roles are gone" no_integration_roles
 fi
 check "the wiring is unchanged, not duplicated" same_wiring
+# The older operator rewrites inkwall-waf to its ForwardAuth, in place
+# (inkwall-waf-body and inkwall-waf-auth stay, unused).
+forward_auth_again() {
+  [[ $("${KUBECTL[@]}" -n "$NS" get middlewares.traefik.io inkwall-waf \
+    -o jsonpath='{.spec.forwardAuth.address} {.spec.chain.middlewares}') == "http://127.0.0.1:9001/v1/forward-auth " ]]
+}
+eventually "the older operator's Middleware is its ForwardAuth again" forward_auth_again
 eventually "the policy is Accepted, Programmed and Ready" accepted_programmed
 check "the attack is blocked on the Ingress" status_is 403 "$HOST" "$SQLI"
 check "the attack is blocked on the IngressRoute" status_is 403 "$ROUTE_HOST" "$SQLI"

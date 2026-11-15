@@ -174,6 +174,10 @@ What changes by itself:
   Before Traefik v3.7 (by its CRD or its image tag), the Middleware stays as it was, and so does
   the latency: upgrade Traefik and its CRDs together
   ([0006 §3](design/0006-adapter-protocols.md#3-forward-auth-traefik-forwardauth-nginx-auth_request)).
+  After a rollback to 0.5.x, the older operator rewrites `inkwall-waf` to its ForwardAuth in place,
+  and leaves `inkwall-waf-body` and `inkwall-waf-auth`, unused, until 0.6.0 takes them back:
+  `kubectl delete middlewares.traefik.io -A -l app.kubernetes.io/managed-by=inkwall-operator
+  --field-selector metadata.name=inkwall-waf-body` (and `inkwall-waf-auth`) removes them.
 - **HAProxy: a request or a response too large for one SPOE frame is handled as oversized** (#336).
   HAProxy sends each in one frame (SPOP 2.0 has no fragmentation), and sends none of one that
   doesn't fit. For `Block`-mode policies, the operator's backend snippet now answers such a
