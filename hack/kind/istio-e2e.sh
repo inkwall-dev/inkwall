@@ -14,7 +14,11 @@
 # objects as they were. WebSocket handshakes and gRPC calls through the
 # Gateways (#369): an allowed handshake upgrades, one from another origin or
 # with an attack gets 403; a gRPC (and gRPC-Web) call with an attack in its
-# metadata gets HTTP 200 and the engine's gRPC status. Then Istio's own API (#281): an ingress gateway
+# metadata gets HTTP 200 and the engine's gRPC status. gRPC streams
+# (#315, #317, hack/grpcecho): with body.grpcStreams: PerMessage a client
+# stream or a bidirectional call is inspected message by message and cut at
+# an attack, and with responses.streams: Inspect a server stream is cut
+# before a leaking message. Then Istio's own API (#281): an ingress gateway
 # from Istio's gateway chart, an Istio Gateway and a protected
 # VirtualService: the Pod webhook injects the engine into the gateway's
 # pods, attacks on the VirtualService are blocked, another passes, and
@@ -112,15 +116,18 @@ if ! "${KUBECTL[@]}" -n "$ISTIO_NS" get deployment/istiod >/dev/null 2>&1; then
 fi
 ok "Istio installed"
 
-# The WebSocket echo server (hack/wsecho), built here: test only, never
-# released; and the clients.
+# The WebSocket echo server (hack/wsecho) and the gRPC one (hack/grpcecho,
+# /grpcecho in the same image), built here: test only, never released; and
+# the clients.
 mkdir -p "$work/wsimg"
 CGO_ENABLED=0 go build -trimpath -o "$work/wsimg/wsecho" ./hack/wsecho
-printf 'FROM gcr.io/distroless/static-debian12:nonroot\nCOPY wsecho /wsecho\nENTRYPOINT ["/wsecho"]\n' >"$work/wsimg/Dockerfile"
+CGO_ENABLED=0 go build -trimpath -o "$work/wsimg/grpcecho" ./hack/grpcecho
+printf 'FROM gcr.io/distroless/static-debian12:nonroot\nCOPY wsecho grpcecho /\nENTRYPOINT ["/wsecho"]\n' >"$work/wsimg/Dockerfile"
 docker build -q -t "$WS_IMAGE" "$work/wsimg" >/dev/null
 kind load docker-image "$WS_IMAGE" --name "$CLUSTER" >/dev/null
 go build -o "$work/grpchealth" ./hack/grpchealth
 go build -o "$work/wsecho" ./hack/wsecho
+go build -o "$work/grpcecho" ./hack/grpcecho
 printf '\0\0\0\0\0' >"$work/grpc-empty"
 
 # The user's objects: an app, a ConfigMap customizing a Gateway's pods
@@ -170,6 +177,29 @@ spec:
   selector: {app: istio-e2e-grpc}
   # Istio's protocol selection: HTTP/2 to the backend.
   ports: [{name: grpc, port: 5000, appProtocol: grpc}]
+---
+# A gRPC service with streams: inkwall.test.Echo (hack/grpcecho), over h2c.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: grpcecho, namespace: $NS}
+spec:
+  selector: {matchLabels: {app: istio-e2e-grpcecho}}
+  template:
+    metadata: {labels: {app: istio-e2e-grpcecho}}
+    spec:
+      containers:
+        - name: grpcecho
+          image: $WS_IMAGE
+          imagePullPolicy: Never
+          command: ["/grpcecho"]
+          args: ["serve", "-listen", ":5001"]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: grpcecho, namespace: $NS}
+spec:
+  selector: {app: istio-e2e-grpcecho}
+  ports: [{name: grpc, port: 5001, appProtocol: grpc}]
 ---
 # A WebSocket echo server.
 apiVersion: apps/v1
@@ -239,6 +269,9 @@ spec:
     - name: grpc
       matches: [{path: {type: PathPrefix, value: /grpc.health.v1.Health/}}]
       backendRefs: [{name: grpc, port: 5000}]
+    - name: grpcecho
+      matches: [{path: {type: PathPrefix, value: /inkwall.test.Echo/}}]
+      backendRefs: [{name: grpcecho, port: 5001}]
     - name: ws
       matches: [{path: {type: PathPrefix, value: /ws}}]
       backendRefs: [{name: wsecho, port: 8080}]
@@ -256,7 +289,7 @@ spec:
   rules:
     - backendRefs: [{name: app, port: 8080}]
 YAML
-for d in app grpc wsecho; do
+for d in app grpc grpcecho wsecho; do
   "${KUBECTL[@]}" -n "$NS" rollout status "deployment/$d" --timeout=120s >/dev/null
 done
 
@@ -647,6 +680,93 @@ if ((failures > before)); then
   for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do sse_through "$port" /sse-leak | head -c 600; echo; done
   condition Enforced message; echo
   engine_logs gateway.istio.io/managed=istio.io-gateway-controller | grep -E 'sse|bundle' | tail -20 || true
+fi
+eventually "the policy is Programmed" programmed
+
+# gRPC streams one message at a time (#315): the operator lets the engine
+# stream a call's request body (allow_mode_override in the EnvoyFilters),
+# and the engines read each message as it comes. hack/grpcecho logs each
+# message it gets ("got: TEXT").
+echo "== gRPC streams, one message at a time (body.grpcStreams: PerMessage)"
+policy Block '  body: {grpcMessages: Inspect, grpcStreams: PerMessage}'
+# mode_override: both Gateways' EnvoyFilters let the engine change the
+# processing mode.
+mode_override() {
+  for gw in custom plain; do
+    "${KUBECTL[@]}" -n "$NS" get envoyfilter "inkwall-waf-$gw" -o json | grep '"allow_mode_override": *true' >/dev/null || return 1
+  done
+}
+eventually "the EnvoyFilters let the engine stream a call's messages (allow_mode_override)" mode_override
+eventually "the policy is Enforced: every engine runs the bundle with grpcStreams" enforced
+forward_all
+GRPC_SQLI="1' OR '1'='1' -- "
+# grpcecho_out PORT CALL MESSAGE...: what the client prints through a
+# Gateway (the messages it got back, then the call's status code).
+grpcecho_out() { "$work/grpcecho" "$2" -authority "$HOST" "127.0.0.1:$1" "${@:3}" 2>/dev/null || true; }
+# grpc_both WANT CALL MESSAGE...: the client prints WANT through both.
+grpc_both() {
+  local want=$1 port
+  shift
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
+    [[ $(grpcecho_out "$port" "$@") == "$want" ]] || return 1
+  done
+}
+grpcecho_logs() { "${KUBECTL[@]}" -n "$NS" logs deployment/grpcecho --tail=-1 2>/dev/null || true; }
+before=$failures
+eventually "a clean client stream passes through both Gateways: 3 messages, OK" grpc_both $'3 messages\nOK' collect hello world again
+check "a client stream with an attack in its third message: PermissionDenied" grpc_both PermissionDenied collect one two "$GRPC_SQLI" four
+server_got() { grpcecho_logs | grep -qF "got: $1"; }
+check "the messages before it reached the server" server_got two
+never_got() { ! grpcecho_logs | grep -qF -e "$GRPC_SQLI" -e 'got: four'; }
+check "the attack, and what followed it, never did" never_got
+# logged_message PATH INDEX: an engine logged a deny for PATH's message INDEX.
+logged_message() {
+  engine_logs gateway.istio.io/managed=istio.io-gateway-controller | grep '"security event"' |
+    grep "\"path\":\"$1\"" | grep '"action":"deny"' | grep -q "\"stream_event\":$2"
+}
+eventually "the engines log the denied message with its index" logged_message /inkwall.test.Echo/Collect 3
+# A bidirectional call: the client sends each message only after the
+# server's echo of the last. Buffered, Envoy would hold it until the
+# client's timeout.
+check "a bidirectional call passes, message by message" grpc_both $'echo: hello\necho: world\nOK' chat hello world
+chat_cut() {
+  local out port
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
+    out=$(grpcecho_out "$port" chat hi "$GRPC_SQLI" after)
+    [[ ${out%%$'\n'*} == 'echo: hi' && $out != *OK && $out != *"echo: $GRPC_SQLI"* ]] || return 1
+  done
+}
+check "a bidirectional call with an attack in a later message: cut there" chat_cut
+check "the server never got that attack, nor what followed" never_got
+eventually "the engines log the bidirectional call's attack" logged_message /inkwall.test.Echo/Chat 2
+
+# gRPC server messages (#317): with responses.streams: Inspect, each
+# message of a gRPC response is inspected on its own; one leaking a SQL
+# error ends the call before it.
+echo "== gRPC server messages (responses.streams: Inspect)"
+policy Block '  responses: {inspect: true, streams: Inspect}'
+eventually "the policy is Enforced: every engine runs the bundle with streams" enforced
+eventually "the EnvoyFilters send the responses, held" responses_sent BUFFERED_PARTIAL
+forward_all
+GRPC_LEAK="You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version"
+eventually "a clean server stream passes whole through both Gateways" grpc_both $'hello\nworld\nOK' stream 'hello|world'
+stream_cut() {
+  local out port
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
+    out=$("$work/grpcecho" stream -authority "$HOST" "127.0.0.1:$port" "hello|world|$GRPC_LEAK|after" 2>&1 || true)
+    [[ $out == $'hello\nworld\n'* && $out != *'SQL syntax'* && $out != *after* && $out != *$'\nOK' ]] || return 1
+  done
+}
+check "a server stream leaking in its third message: cut before it" stream_cut
+eventually "the engines log the leaking message as a response deny, message 3" logged_message /inkwall.test.Echo/Stream 3
+if ((failures > before)); then
+  echo "-- the EnvoyFilters' processing, the policy's Enforced, grpcecho's and the engines' lines for the calls:"
+  for gw in custom plain; do
+    "${KUBECTL[@]}" -n "$NS" get envoyfilter "inkwall-waf-$gw" -o json | grep -E '"(allow_mode_override|request_body_mode|response_body_mode)"' || true
+  done
+  condition Enforced message; echo
+  grpcecho_logs | tail -20
+  engine_logs gateway.istio.io/managed=istio.io-gateway-controller | grep -F inkwall.test.Echo | tail -20 || true
 fi
 eventually "the policy is Programmed" programmed
 
