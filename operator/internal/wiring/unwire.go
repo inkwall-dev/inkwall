@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -180,7 +181,7 @@ func (*Traefik) Unwire(ctx context.Context, c client.Client) (map[string]int, er
 	}
 	for i := range mws.Items {
 		m := &mws.Items[i]
-		if m.GetName() != MiddlewareName {
+		if !slices.Contains(middlewareNames, m.GetName()) {
 			continue
 		}
 		if err := c.Delete(ctx, m); client.IgnoreNotFound(err) != nil {

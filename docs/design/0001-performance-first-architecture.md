@@ -246,7 +246,7 @@ Unix socket.** There is no hop to another node, no [Service](https://kubernetes.
 | Caddy | Native module (in-process) | Function call |
 | Envoy / [Envoy Gateway](https://gateway.envoyproxy.io/) / [Istio](https://istio.io/latest/docs/) | ext_proc; optional Envoy Go filter | gRPC over a Unix socket |
 | HAProxy | SPOE agent | Unix socket |
-| Traefik | ForwardAuth; a plugin later | HTTP keepalive over localhost |
+| Traefik | ForwardAuth; a plugin later | HTTP over localhost (Traefik keeps at most 2 idle connections, [0006 §3](0006-adapter-protocols.md#3-forward-auth-traefik-forwardauth-nginx-auth_request)) |
 
 - The engine is injected through the ingress controller's extension point or a Pod [webhook](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/), never
   by patching the controller's [Deployment](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) ([0004 §4.3](0004-operator.md#43-injection-controller)).

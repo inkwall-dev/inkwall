@@ -226,8 +226,8 @@ its whole request, or as much as the proxy buffers:
   whole body or until HAProxy's buffer is full (about 15 KiB by default): a call is held as through
   Envoy Gateway, and a message past the buffer is handled as an oversized body
   ([bodies](haproxy.md#bodies)).
-- **Traefik**'s ForwardAuth reads the whole body before asking the engine, whatever the policy
-  says, and refuses bodies over 10 MiB (401). Bidirectional calls stall there too, with
+- **Traefik** reads the whole body before asking the engine, whatever the policy says, and refuses
+  bodies over 10 MiB + 1 (413; 401 before Traefik v3.7, over 10 MiB). Bidirectional calls stall there too, with
   `PerMessage` or not: that can't be changed on the engine's side.
 - **The standalone proxy** reads up to `--max-body-bytes` of the body before it decides, then
   streams the rest: a call is held as through Envoy Gateway, and a bidirectional call whose client

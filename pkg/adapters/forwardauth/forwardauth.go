@@ -15,9 +15,11 @@
 // X-Forwarded-Uri, and the engine would inspect a URI chosen by the attacker
 // while the real one is forwarded.
 //
-// The proxy must also forward the body (Traefik: forwardBody: true with a
-// maxBodySize above the engine's limit). Otherwise bodies reach the
-// application uninspected.
+// The proxy must also forward the body (Traefik: forwardBody: true, the body
+// bounded above the engine's limit). Otherwise bodies reach the application
+// uninspected. Traefik allocates ForwardAuth's maxBodySize for every request,
+// so the operator bounds the body with a Buffering Middleware before it
+// instead (#625).
 package forwardauth
 
 import (

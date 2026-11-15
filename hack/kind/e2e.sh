@@ -321,7 +321,9 @@ held() {
   [[ $("${KUBECTL[@]}" -n "$NS" get wafpolicy "$1" -o jsonpath='{.metadata.finalizers}' 2>/dev/null) == *waf.inkwall.dev/unwire* ]]
 }
 policy_gone() { ! "${KUBECTL[@]}" -n "$NS" get wafpolicy "$1" >/dev/null 2>&1; }
-no_middleware() { ! "${KUBECTL[@]}" -n "$NS" get middlewares.traefik.io inkwall-waf >/dev/null 2>&1; }
+no_middleware() {
+  ! "${KUBECTL[@]}" -n "$NS" get middlewares.traefik.io inkwall-waf inkwall-waf-body inkwall-waf-auth -o name 2>/dev/null | grep . >/dev/null
+}
 stop_operator() {
   "${KUBECTL[@]}" -n "$OPERATOR_NS" scale deployment/inkwall-operator --replicas=0 >/dev/null
   eventually "operator stopped" bash -c "[[ -z \$(${KUBECTL[*]} -n $OPERATOR_NS get pods -l app.kubernetes.io/component=operator -o name) ]]"
@@ -408,6 +410,24 @@ eventually "the operator wired the Ingress" wired
 eventually "the engine in Traefik's pod blocks the attack" tstatus_is 403 "$SQLI"
 check "benign traffic passes through Traefik" tstatus_is 200 /products/42
 eventually "the policy is Ready" ready
+# Bodies (#625): a Buffering Middleware bounds them, then ForwardAuth sends
+# them whole, with no limit of its own (Traefik allocates that limit for
+# every request).
+chained() {
+  [[ $("${KUBECTL[@]}" -n "$NS" get middlewares.traefik.io inkwall-waf -o jsonpath='{.spec.chain.middlewares[*].name}') == "inkwall-waf-body inkwall-waf-auth" &&
+    $("${KUBECTL[@]}" -n "$NS" get middlewares.traefik.io inkwall-waf-auth -o jsonpath='{.spec.forwardAuth.maxBodySize} {.spec.forwardAuth.forwardBody}') == "-1 true" &&
+    $("${KUBECTL[@]}" -n "$NS" get middlewares.traefik.io inkwall-waf-body -o jsonpath='{.spec.buffering.maxRequestBodyBytes} {.spec.buffering.disableResponseBuffer}') == "10485761 true" ]]
+}
+check "the Middleware bounds the body, then calls the engine" chained
+# tpost_is CODE CURL_ARGS...: a POST through Traefik gets CODE.
+tpost_is() {
+  local want=$1
+  shift
+  [[ $(curl -s -o /dev/null -w '%{http_code}' -H "Host: $TRAEFIK_HOST" "$@" "http://127.0.0.1:$TRAEFIK_PORT/" || true) == "$want" ]]
+}
+check "an attack in a POST body is blocked through Traefik" tpost_is 403 --data 'q=<script>alert(1)</script>'
+check "an attack in a chunked POST body is blocked through Traefik" tpost_is 403 -H 'Transfer-Encoding: chunked' --data 'q=<script>alert(1)</script>'
+check "a body over 10 MiB gets 413 from Traefik" tpost_is 413 -H 'Content-Type: text/plain' --data-binary @<(head -c $((11 << 20)) /dev/zero)
 # Security events (#91): the engine sends what it blocked to the operator.
 events_received() {
   local pod n total=0
