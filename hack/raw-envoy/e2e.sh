@@ -40,6 +40,9 @@
 #     call's status message is replaced by the engine's denial when the
 #     server answers with nothing else (trailers-only), and ends the call
 #     when it comes in the trailers after a message.
+#   - The Go memory limit (#537): the engine under docker run --memory, with
+#     neither MEMORY_LIMIT nor GOMEMLIMIT, sets 90% of its cgroup's limit;
+#     MEMORY_LIMIT takes precedence, GOMEMLIMIT leaves it to the runtime.
 #
 # The Kubernetes sample (kustomization.yaml) is rendered with kubectl, when
 # kubectl is installed. SKIP_BUILD=1 uses the engine image already built
@@ -100,7 +103,7 @@ event_has() { event "$1" | grep -qF "$2"; }
 
 cleanup() {
   if [[ ${KEEP:-} == 1 ]]; then return; fi
-  docker rm -f "$NAME-engine" "$NAME-envoy" "$NAME-app" "$NAME-sse" "$NAME-grpc" >/dev/null 2>&1 || true
+  docker rm -f "$NAME-engine" "$NAME-envoy" "$NAME-app" "$NAME-sse" "$NAME-grpc" "$NAME-memlimit" >/dev/null 2>&1 || true
   docker volume rm "$NAME-socket" >/dev/null 2>&1 || true
   docker network rm "$NAME" >/dev/null 2>&1 || true
   [[ -z ${RESPONSES:-} ]] || rm -rf "$RESPONSES"
@@ -385,6 +388,48 @@ status_cut() {
   [[ $out == hello$'\n'* && $out != *'SQL syntax'* && $out != *$'\nOK' ]]
 }
 check "a status message leaking in the trailers: the call ends without it" status_cut
+
+# The Go memory limit (#537, "Memory limit" in docs/standalone-proxy.md):
+# the engine in a plain container, with docker run --memory and neither
+# MEMORY_LIMIT nor GOMEMLIMIT, reads its cgroup's limit (Docker's private
+# cgroup namespace: cgroup v2's /sys/fs/cgroup/memory.max, v1's
+# /sys/fs/cgroup/memory/memory.limit_in_bytes) and sets 90% of it.
+echo "== the Go memory limit from the container's cgroup"
+# memlimit_line DOCKER_ARGS...: the engine's "Go memory limit set" line
+# ("none" when it logged none) once it has started, in a container of its
+# own with DOCKER_ARGS.
+memlimit_line() {
+  docker rm -f "$NAME-memlimit" >/dev/null 2>&1 || true
+  docker run -d --name "$NAME-memlimit" --network "$NAME" --read-only --tmpfs /tmp "$@" \
+    "$IMAGE" ext-proc --listen=127.0.0.1:9003 --mode=block >/dev/null
+  for _ in $(seq 60); do
+    if docker logs "$NAME-memlimit" 2>&1 | grep -qF '"msg":"inkwall-engine ext-proc started"'; then
+      docker logs "$NAME-memlimit" 2>&1 | grep -F '"msg":"Go memory limit set"' || echo none
+      return
+    fi
+    sleep 0.5
+  done
+  echo "not started"
+  docker logs --tail 20 "$NAME-memlimit" 2>&1 || true
+}
+# memlimit_is BYTES FROM LINE: LINE sets BYTES, read from FROM (an extended
+# regular expression).
+memlimit_is() {
+  local bytes='"bytes":'"$1"'[,}]' from='"from":"'"$2"'"'
+  [[ $3 =~ $bytes && $3 =~ $from ]]
+}
+cgroup_line=$(memlimit_line --memory 256m)
+# 90% of 256 MiB, as memlimit.Detect rounds it.
+check "docker run --memory 256m: 90% of it, from the cgroup's memory.max (v2) or memory.limit_in_bytes (v1)" \
+  memlimit_is 241591905 '/sys/fs/cgroup/(memory\.max|memory/memory\.limit_in_bytes)' "$cgroup_line"
+env_line=$(memlimit_line --memory 256m -e MEMORY_LIMIT=536870912)
+check "with MEMORY_LIMIT too: 90% of MEMORY_LIMIT, the cgroup's limit not read" memlimit_is 483183819 MEMORY_LIMIT "$env_line"
+check "with GOMEMLIMIT: the runtime's, none set" test "$(memlimit_line --memory 256m -e GOMEMLIMIT=200MiB)" == none
+check "no limit at all: none set" test "$(memlimit_line)" == none
+if ((failures > 0)); then
+  echo "-- the engine's lines: $cgroup_line | $env_line"
+fi
+docker rm -f "$NAME-memlimit" >/dev/null 2>&1 || true
 
 if ((failures > 0)); then
   echo "$failures check(s) failed"
