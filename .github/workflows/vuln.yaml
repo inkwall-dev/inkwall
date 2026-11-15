@@ -97,7 +97,7 @@ jobs:
             echo "::group::$b ($toolchain)"
             result=ok
             if ! (cd "$b" && export GOTOOLCHAIN="$toolchain" && go version && go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...); then
-              echo "::error::govulncheck found vulnerabilities on $b (Go $toolchain)"
+              echo "::error::govulncheck found vulnerabilities on $b with $toolchain"
               result=failed
               status=1
             fi
