@@ -69,7 +69,7 @@ func TestEnforced(t *testing.T) {
 		{"rejected and left out", 3, []Engine{{Rejected: 3}}, 1, metav1.ConditionFalse, ReasonEngineNack, "some engines rejected bundle 3"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			st, reason, msg := Enforced(tc.version, tc.engines, tc.leftOut)
+			st, reason, msg := Enforced(tc.version, tc.engines, tc.leftOut, 0)
 			if st != tc.status || reason != tc.reason || !strings.Contains(msg, tc.message) {
 				t.Fatalf("got %s %s %q, want %s %s %q", st, reason, msg, tc.status, tc.reason, tc.message)
 			}
@@ -363,7 +363,7 @@ func TestWatchNackErrorTruncated(t *testing.T) {
 	if e := got[0].RejectError; len(e) != maxRejectError-1 || !utf8.ValidString(e) || !strings.HasPrefix(reason, e) {
 		t.Fatalf("reject error of %d bytes (valid UTF-8: %t), want %d", len(e), utf8.ValidString(e), maxRejectError-1)
 	}
-	if _, msg, _ := (Enforced(2, got, 0)); len(msg) > maxRejectError+200 {
+	if _, msg, _ := (Enforced(2, got, 0, 0)); len(msg) > maxRejectError+200 {
 		t.Fatalf("Enforced message of %d bytes", len(msg))
 	}
 }

@@ -96,12 +96,14 @@ func init() {
 // of them when that isn't known (ServedPods).
 //
 // leftOut engines are connected but missing from their replica's report.
+// missing counts the policy's proxy pods with the engine container whose
+// engine isn't connected: until it is, the pod may serve an older bundle.
 //
 // The messages don't count engines, so engines connecting or going away
 // don't rewrite every policy's status; the inkwall_operator_engines metric
 // has the counts. EngineNack names the first engine (by ID) that rejected
 // the bundle, with its error.
-func Enforced(version int64, engines []Engine, leftOut int) (metav1.ConditionStatus, string, string) {
+func Enforced(version int64, engines []Engine, leftOut, missing int) (metav1.ConditionStatus, string, string) {
 	if version <= 0 {
 		return metav1.ConditionFalse, ReasonNotInBundle, "the policy's current spec is not in a bundle"
 	}
@@ -129,6 +131,9 @@ func Enforced(version int64, engines []Engine, leftOut int) (metav1.ConditionSta
 			fmt.Sprintf("some engines are not in their replica's report (over its size limit), so bundle %d is not known to run everywhere", v)
 	case current < total:
 		return metav1.ConditionFalse, ReasonEnginesBehind, fmt.Sprintf("some engines don't run bundle %d yet", v)
+	case missing > 0:
+		return metav1.ConditionFalse, ReasonEnginesBehind,
+			fmt.Sprintf("some proxy pods' engines are not connected, so bundle %d is not known to run there", v)
 	}
 	return metav1.ConditionTrue, ReasonEnforced, fmt.Sprintf("every engine runs bundle %d or later", v)
 }
@@ -368,13 +373,13 @@ func (r *Reporter) report(ctx context.Context) error {
 		}
 		key := p.Namespace + "/" + p.Name
 		version := r.Store.PolicyVersion(key)
-		mine := served.enginesFor(key, engines)
+		mine, missing := served.enginesFor(key, engines)
 		// The list is the cache's, not a copy: copy only what is written.
-		if _, changed := enforcedConditions(p, version, suspended, mine, leftOut); !changed {
+		if _, changed := enforcedConditions(p, version, suspended, mine, leftOut, missing); !changed {
 			continue
 		}
 		p = p.DeepCopy()
-		g.Go(func() error { return r.write(gctx, p, version, suspended, mine, leftOut) })
+		g.Go(func() error { return r.write(gctx, p, version, suspended, mine, leftOut, missing) })
 	}
 	return g.Wait()
 }
@@ -441,10 +446,10 @@ func (r *Reporter) writeConfig(ctx context.Context, counts *wafv1alpha1.EngineCo
 // publishing. Engines must run it too, so that when inspection resumes,
 // engines still on the suspended bundle don't count. A suspended bundle
 // enforces nothing.
-func enforcedConditions(p *wafv1alpha1.WAFPolicy, served uint64, suspended bool, engines []Engine, leftOut int) ([]metav1.Condition, bool) {
+func enforcedConditions(p *wafv1alpha1.WAFPolicy, served uint64, suspended bool, engines []Engine, leftOut, missing int) ([]metav1.Condition, bool) {
 	conds := slices.Clone(p.Status.Conditions)
 	version := max(p.Status.BundleVersion, int64(served)) // #nosec G115 -- versions count builds
-	st, reason, msg := Enforced(version, engines, leftOut)
+	st, reason, msg := Enforced(version, engines, leftOut, missing)
 	if st == metav1.ConditionTrue {
 		if e, field, need := outdatedEngine(p, engines); e != nil {
 			st, reason = metav1.ConditionFalse, ReasonEnginesOutdated
@@ -464,7 +469,7 @@ func enforcedConditions(p *wafv1alpha1.WAFPolicy, served uint64, suspended bool,
 	return conds, changed
 }
 
-func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, served uint64, suspended bool, engines []Engine, leftOut int) error {
+func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, served uint64, suspended bool, engines []Engine, leftOut, missing int) error {
 	first := true
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if !first {
@@ -473,7 +478,7 @@ func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, served u
 			}
 		}
 		first = false
-		conds, changed := enforcedConditions(p, served, suspended, engines, leftOut)
+		conds, changed := enforcedConditions(p, served, suspended, engines, leftOut, missing)
 		if !changed {
 			return nil
 		}

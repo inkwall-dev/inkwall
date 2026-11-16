@@ -180,7 +180,7 @@ fix from these tables ([Explaining a policy or a denial](#explaining-a-policy-or
 | `Enforced` | Every engine runs the bundle, or a later one. | |
 | `NotInBundle` | The policy's current spec isn't in a published bundle yet. | Wait; if it lasts, see `Accepted`. |
 | `NoEngines` | No engine is connected to the operator. | Check the proxy pods run the engine (`Programmed`), and that engines reach the operator ([InkwallEngineDisconnected](monitoring.md#inkwallenginedisconnected)). |
-| `EnginesBehind` | Some engines don't run the bundle yet. | Usually seconds; if it lasts, `inkwallctl status` names them. |
+| `EnginesBehind` | Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting). | Usually seconds; if it lasts, `inkwallctl status` names them; check that the pod's engine reaches the operator ([InkwallEngineDisconnected](monitoring.md#inkwallenginedisconnected)). |
 | `EngineNack` | An engine rejected the bundle; the message names it and why (often an engine older than the operator, or a key it doesn't trust). | Restart the engine's pod so it runs the operator's version; see [InkwallBundleRejected](monitoring.md#inkwallbundlerejected). |
 | `EnginesOutdated` | An engine runs the bundle, but is too old to enforce a field the policy sets, which it ignores. | Restart the pod the message names. |
 | `EnginesUnreported` | An operator replica's engine report is full, so not every engine is known. | Run more operator replicas, or fewer proxy pods per replica. |
@@ -246,12 +246,12 @@ Accepted: True, Accepted
 Programmed: True, Programmed
 
 Enforced: False, EnginesBehind: 1 of 2 engines run bundle 7 or later
-  Cause: Some engines don't run the bundle yet.
-  Fix:   Usually seconds; if it lasts, `inkwallctl status` names them.
+  Cause: Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting).
+  Fix:   Usually seconds; if it lasts, `inkwallctl status` names them; check that the pod's engine reaches the operator (InkwallEngineDisconnected (docs/monitoring.md#inkwallenginedisconnected)).
 
 Ready: False, EnginesBehind: Enforced: 1 of 2 engines run bundle 7 or later
-  Cause: Some engines don't run the bundle yet.
-  Fix:   Usually seconds; if it lasts, `inkwallctl status` names them.
+  Cause: Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting).
+  Fix:   Usually seconds; if it lasts, `inkwallctl status` names them; check that the pod's engine reaches the operator (InkwallEngineDisconnected (docs/monitoring.md#inkwallenginedisconnected)).
 
 Engines that don't run the policy's bundle:
   traefik/traefik-1 (v0.6.0, behind, bundle 6): the engine doesn't run the policy's bundle yet: check its connection to the operator

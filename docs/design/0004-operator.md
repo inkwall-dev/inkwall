@@ -956,7 +956,10 @@ conditions of [§3.2](#32-status-contract). It writes only on change, at most on
 those on the pods that serve it, [§4.4](#44-wiring-controller); all of them when that isn't known)
 runs a bundle whose version is at
 least the policy's `status.bundleVersion` (`every engine runs bundle 42 or later`). Otherwise the
-reason is `NoEngines`, `EnginesBehind` (`some engines don't run bundle 42 yet`), `EngineNack`
+reason is `NoEngines`, `EnginesBehind` (`some engines don't run bundle 42 yet`; since 0.6.0 also
+`some proxy pods' engines are not connected, so bundle 42 is not known to run there`, when a running
+pod that serves the policy has the engine container but no connected engine, #652, unless some
+engine reports no pod), `EngineNack`
 (`some engines rejected bundle 42 (first: traefik/traefik-1: …)`), `EnginesUnreported` (a replica's report
 left engines out, [§4.7](#47-distribution-server-all-replicas)), `NotInBundle` or `Suspended` (the
 bundle served suspends inspection, #263), or `EnginesOutdated` when an engine runs the bundle but
