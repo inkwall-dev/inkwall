@@ -40,7 +40,7 @@ The samples in [`examples/haproxy`](../examples/haproxy) are the files this guid
 
 <!-- versions: HAPROXY_CHART_VERSION -->
 The operator protects the Ingresses of the [HAProxy Kubernetes Ingress Controller](https://www.haproxy.com/documentation/kubernetes-ingress/) (`haproxytech/kubernetes-ingress`,
-3.1 or later: its HAProxy must be 3.1 or later; tested with 3.2.19, chart 1.54.4), installed with
+3.1 or later: its HAProxy must be 3.1 or later; tested with 3.2.19, chart 1.56.3), installed with
 nothing about Inkwall. Not [HAProxy Ingress](https://haproxy-ingress.github.io/) (`jcmoraisjr/haproxy-ingress`), another controller.
 
 ### Protecting an Ingress
