@@ -107,6 +107,13 @@ What's new:
   `inkwall.dev/source: saas`; the cluster state lists every `WAFIPList`
   ([Managed mode](control-plane.md#managed-mode)). A control plane that sends none changes
   nothing.
+- **`Enforced` waits for every serving pod's engine** (#652). A running proxy pod with the
+  engine container that serves a policy, but whose engine isn't connected to the operator (it is
+  starting or reconnecting), now makes the policy `Enforced=False` (`EnginesBehind`: `some proxy
+  pods' engines are not connected`) until it connects and runs the bundle. Before, only connected
+  engines counted, so the other engines could make a policy `Ready` while such a pod still served
+  an older bundle, for a few seconds after an operator restart or a lost connection. Expect a
+  few seconds of `EnginesBehind` after a proxy pod starts.
 - **`Detect`-mode Istio routes are `Programmed`.** Envoy discards the engine's answer to the
   operator's probe in `Detect` mode, so those HTTPRoutes and VirtualServices were `Unverified`.
   Now the engine keeps a receipt of each probe it verified and reports it to the operator, which
