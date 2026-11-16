@@ -52,7 +52,7 @@ explains why the engine evaluates rules with [Coraza](https://coraza.io/) today.
 - **Control path:** policies come from Git or [`kubectl`](https://kubernetes.io/docs/reference/kubectl/) and reach the [kube-apiserver](https://kubernetes.io/docs/reference/command-line-tools-reference/kube-apiserver/). The operator
   validates them in its [webhooks](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/), stores a signed bundle in a [Secret](https://kubernetes.io/docs/concepts/configuration/secret/) and streams it to the engines.
   Status goes back onto the [custom resources](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/).
-- **Planned:** [Caddy](https://caddyserver.com/docs/), with the engine compiled in.
+- **Not planned:** [Caddy](https://caddyserver.com/docs/), with the engine compiled in; designed in 0002 §6.5, not built.
 - **Optional:** a control plane, connected over one primary [mTLS](https://www.rfc-editor.org/rfc/rfc8446#section-4.3.2) stream per cluster, plus an
   events stream per operator replica. The operator's side is built
   ([0004 §4.9](0004-operator.md#49-upstream-sync-leader-only)).
@@ -67,7 +67,7 @@ which only adds management, analytics and threat intelligence.
 | **inkwall-engine** | Sidecar in ingress controller pods, or standalone | `cmd/engine`, `pkg/` | Built |
 | **Engine adapters** | Engine process | `pkg/adapters/*` | Built: `forwardauth`, `httpcheck` (`/v1/check`), `proxy`, `extproc` ([ext_proc](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter)), `spoe` ([SPOE](https://github.com/haproxy/haproxy/blob/master/doc/SPOE.txt)). Not yet: [ext_authz](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter) |
 | **Proxy-side glue** | Proxy configuration | `operator/integrations`, `operator/internal/wiring` | Built: Traefik [Middleware](https://doc.traefik.io/traefik/middlewares/overview/); Envoy Gateway's `EnvoyProxy`, `EnvoyExtensionPolicy`, `Backend` and `ClientTrafficPolicy`. Not yet: SPOE, other Envoy products |
-| **Caddy module** | Compiled into Caddy | `adapters/caddy` (own [`go.mod`](https://go.dev/ref/mod#go-mod-file)) | Not yet |
+| **Caddy module** | Compiled into Caddy | `adapters/caddy` (own [`go.mod`](https://go.dev/ref/mod#go-mod-file)) | Not planned |
 | **Traefik plugin** (thin client) | Traefik ([Yaegi](https://github.com/traefik/yaegi)) | `adapters/traefik-plugin` (own `go.mod`) | Not yet |
 | **inkwall-operator** | `inkwall-system`, 2 replicas | `cmd/operator`, `operator/` | Built |
 | **Admission webhooks** | Operator process | `operator/webhook` | Built (validate, inject) |
