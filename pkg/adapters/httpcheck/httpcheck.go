@@ -184,7 +184,7 @@ func (h *Handler) CheckExchange(ctx context.Context, in *enginev1.CheckRequest, 
 		out.Proto = r.Proto
 	}
 	out.Body, out.BodyTruncated = nil, false
-	if x.WantsBody(resp.Headers.Get("Content-Type")) {
+	if x.WantsBody(pipeline.ResponseContentType(resp.Headers)) {
 		limit := x.BodyLimit()
 		out.Body = resp.Body[:min(int64(len(resp.Body)), limit)]
 		out.BodyTruncated = resp.BodyTruncated || int64(len(resp.Body)) > limit

@@ -187,10 +187,14 @@ its first matched rule with a disruptive action (`deny`, `drop`, `redirect`: the
 since Coraza records only the transaction's first.
 
 **What is read.** The status and headers always. The body only when its media type is one the
-rules read (`text/plain`, `text/html`, `text/xml`, `application/json`, `application/xml`,
-`application/problem+json`; Coraza's `SecResponseBodyMimeType` is set to the same list): an
-image, a download, Server-Sent Events or a gRPC stream passes without its body inspected, and
-isn't oversized. A body over `maxBytes` has its prefix inspected (unlike a request body, a prefix
+rules read (`rules.ResponseBodyType`: text, JavaScript, JSON and XML types, any `+json` or `+xml`
+type but gRPC's and Connect's, and a missing or malformed `Content-Type`, which a browser may sniff
+as HTML; the media type is what comes before the first `;`, so a parameter a strict parser rejects
+doesn't hide it; Coraza's `SecResponseBodyMimeType` is set to `rules.ResponseBodyTypes`, and the
+engine gives Coraza the one of them a body reads as): an image, a download, Server-Sent Events or a
+gRPC stream passes without its body inspected, and isn't oversized. The request's `Range` and
+`If-Range` are removed so the body comes whole; a part of one (206 of a type the rules read, or
+`multipart/byteranges`) can't be inspected as the whole, and gets `onOversize`. A body over `maxBytes` has its prefix inspected (unlike a request body, a prefix
 is meaningful to data leakage rules: no parser needs the whole), and then gets `onOversize`. A
 `gzip` or `deflate` body is decoded, up to `maxBytes`, before the rules see it (the CRS skips
 encoded bodies); another encoding (`br`, `zstd`) goes uninspected and gets `onOversize`. To keep

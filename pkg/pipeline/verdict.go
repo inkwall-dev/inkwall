@@ -136,3 +136,18 @@ type Verdict struct {
 	// WebSocket, not on a request.
 	WebSocketMessage bool
 }
+
+// Stricter reports whether verdict a is stricter than b: deny over log
+// over allow.
+func Stricter(a, b Verdict) bool {
+	rank := func(a Action) int {
+		switch a {
+		case ActionDeny:
+			return 2
+		case ActionLog:
+			return 1
+		}
+		return 0
+	}
+	return rank(a.Action) > rank(b.Action)
+}
