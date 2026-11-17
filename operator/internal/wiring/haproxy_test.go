@@ -88,6 +88,32 @@ func TestHAProxySnippet(t *testing.T) {
 	}
 }
 
+// Every snippet forwards an upgrade only to WebSocket: any other Upgrade and
+// HTTP2-Settings are removed after the verdict's rules, before the request
+// goes on.
+func TestHAProxySnippetWebSocketUpgradeOnly(t *testing.T) {
+	const (
+		upgrade  = "http-request del-header upgrade unless { req.fhdr_cnt(upgrade) eq 1 } { req.fhdr(upgrade) -m str -i websocket }"
+		settings = "http-request del-header http2-settings"
+	)
+	for _, o := range []HAProxySnippetOptions{
+		{}, {Body: true}, {FailOpen: true}, {Block: true, Body: true},
+		{Block: true, Body: true, Responses: true}, {FailOpen: true, Responses: true},
+	} {
+		s := HAProxySnippet(o)
+		for _, rule := range []string{upgrade, settings} {
+			i := strings.Index(s, rule)
+			if i < 0 {
+				t.Errorf("%+v: no %q:\n%s", o, rule, s)
+				continue
+			}
+			if i < strings.Index(s, "deny_status 403") || i > strings.Index(s, "set-header X-Request-Id") {
+				t.Errorf("%+v: %q isn't between the last denial and the request ID", o, rule)
+			}
+		}
+	}
+}
+
 // In Block mode, a request or a response HAProxy can't fit in one SPOE frame
 // (txn.inkwall.error 3) is handled as oversized, whatever the failure mode:
 // 413 for a request, 502 for a response, before the fail-closed rules.

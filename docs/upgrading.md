@@ -225,6 +225,11 @@ What changes by itself:
   HTTP/1.1 request, so the upstream can't switch the connection to another protocol. A client that
   offers `h2c` (`curl --http2` on `http://`) gets HTTP/1.1. WebSocket handshakes don't change
   ([Which requests are handshakes](websocket.md#which-requests-are-handshakes)).
+- **HAProxy forwards only WebSocket upgrades.** The operator's backend snippet and
+  `examples/haproxy/haproxy.cfg` now remove any `Upgrade` but a single `websocket` token, and
+  `HTTP2-Settings`, after the engine's verdict: the app gets such a request as a plain one. The
+  operator rewrites the snippets on its first reconcile; by hand, copy the two `del-header` rules
+  ([WebSocket](haproxy.md#websocket)).
 
 ## From 0.4.x to 0.5.0
 
