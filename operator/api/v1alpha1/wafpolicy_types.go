@@ -535,7 +535,9 @@ type HeaderName string
 // +kubebuilder:validation:XValidation:rule="(has(self.inspect) && self.inspect) || (!has(self.maxBytes) && !has(self.onOversize) && !has(self.streams))",message="maxBytes, onOversize and streams need inspect: true"
 type ResponsesSpec struct {
 	// Inspect turns response inspection on: the status and headers, and
-	// the body when its media type is text (plain, HTML, XML), JSON or XML.
+	// the body when its media type is text (plain, HTML, XML, CSV),
+	// JavaScript, JSON or XML (a +json or +xml type too), malformed, or
+	// missing. A request's Range is removed, so the body comes whole.
 	// In Block mode a response the rules flag is replaced with the
 	// rule's status (403) and a plain-text error.
 	// +optional

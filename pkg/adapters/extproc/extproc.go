@@ -22,8 +22,9 @@
 // mode_override, not to send or buffer it. A body Envoy cut, or doesn't send
 // in one piece, has its prefix inspected and is handled as oversized
 // (responses.onOversize). On a route whose response bodies are inspected,
-// the request's Accept-Encoding is removed, so the upstream sends bodies
-// the rules can read; gzip and deflate bodies are decoded all the same.
+// the request's Accept-Encoding, Range and If-Range are removed, so the
+// upstream sends whole bodies the rules can read; gzip and deflate bodies
+// are decoded all the same.
 //
 // The body is inspected when the policy asks for it and Envoy sends it in
 // one message: request_body_mode BUFFERED or BUFFERED_PARTIAL. A body Envoy
@@ -569,7 +570,7 @@ func (s *Server) onResponseHeaders(ctx context.Context, x *exchange, h *extprocv
 		}
 		return r
 	}
-	if !eos && x.ex.WantsBody(x.resp.Headers.Get("Content-Type")) {
+	if !eos && x.ex.WantsBody(pipeline.ResponseContentType(x.resp.Headers)) {
 		x.respLimit = x.ex.BodyLimit()
 		switch {
 		case x.observe:
@@ -684,7 +685,7 @@ func toResponse(h *extprocv3.HttpHeaders, proto string) *request.Response {
 // verdict inspects the request and answers it in phase p. When the
 // request's policy inspects responses, its evaluation is kept for the
 // response, and, if response bodies are inspected, the request's
-// Accept-Encoding is removed.
+// Accept-Encoding, Range and If-Range are removed.
 func (s *Server) verdict(ctx context.Context, x *exchange, p phase) *extprocv3.ProcessingResponse {
 	var v pipeline.Verdict
 	// An upgrade's evaluation is kept too: the upstream may answer it with
@@ -717,7 +718,7 @@ func (s *Server) verdict(ctx context.Context, x *exchange, p phase) *extprocv3.P
 		// The request body is no longer needed.
 		x.req.Body, x.streamed = nil, nil
 		if x.ex.BodyLimit() > 0 {
-			m.RemoveHeaders = []string{"accept-encoding"}
+			m.RemoveHeaders = []string{"accept-encoding", "range", "if-range"}
 		}
 	}
 	if len(m.SetHeaders) == 0 && len(m.RemoveHeaders) == 0 {

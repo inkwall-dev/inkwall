@@ -258,3 +258,59 @@ func BenchmarkResponses(b *testing.B) {
 		})
 	}
 }
+
+// A leak reaches no client whatever its Content-Type (one with a
+// structured syntax suffix, a script, one a strict parser rejects) or the
+// range of it the client asks for: the upstream gets no Range or If-Range,
+// so it answers with the whole body, which is inspected.
+func TestResponsesWholeBodyAnyType(t *testing.T) {
+	var mu sync.Mutex
+	var ranges []string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		ranges = append(ranges, r.Header.Get("Range")+r.Header.Get("If-Range"))
+		mu.Unlock()
+		w.Header()["Content-Type"] = []string{r.URL.Query().Get("ct")}
+		// ServeContent answers a Range with 206, several with
+		// multipart/byteranges.
+		http.ServeContent(w, r, "", time.Unix(1e9, 0), strings.NewReader(sqlError))
+	}))
+	t.Cleanup(up.Close)
+	h := newResponseHandler(t, pipeline.ModeBlock, pipeline.ResponseConfig{Inspect: true, MaxBytes: 64 << 10, Oversize: pipeline.OversizeDeny},
+		up, io.Discard, 0)
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	for _, tc := range []struct{ ct, rng string }{
+		{"text/html", ""},
+		{"text/html", "bytes=0-40,41-"},
+		{"text/html", "bytes=20-60"},
+		{"application/vnd.api+json", ""},
+		{"application/javascript", ""},
+		{"text/html; charset", ""},
+		{"text/html;;charset=utf-8", "bytes=0-40,41-"},
+	} {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/item?ct="+url.QueryEscape(tc.ct), nil)
+		req.Header.Set("User-Agent", "Mozilla/5.0 inkwall-test")
+		req.Header.Set("Accept", "*/*")
+		if tc.rng != "" {
+			req.Header.Set("Range", tc.rng)
+			req.Header.Set("If-Range", time.Unix(1e9, 0).UTC().Format(http.TimeFormat))
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(res.Body)
+		_ = res.Body.Close()
+		if res.StatusCode != http.StatusForbidden || strings.Contains(string(body), "SQL") {
+			t.Errorf("Content-Type %q, Range %q: %d %.60q, want 403", tc.ct, tc.rng, res.StatusCode, body)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, r := range ranges {
+		if r != "" {
+			t.Errorf("the upstream got Range or If-Range %q", r)
+		}
+	}
+}

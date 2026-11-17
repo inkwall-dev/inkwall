@@ -269,8 +269,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if ex != nil {
 		if ex.BodyLimit() > 0 {
 			// Response bodies as the upstream has them, which the rules
-			// can read: not in an encoding they can't decode.
+			// can read: not in an encoding they can't decode, and whole,
+			// not a range of them.
 			r.Header.Del("Accept-Encoding")
+			r.Header.Del("Range")
+			r.Header.Del("If-Range")
 		}
 		r = r.WithContext(context.WithValue(r.Context(), exchangeKey{}, &exchange{ex: ex, req: req, path: r.URL.Path}))
 	}

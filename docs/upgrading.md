@@ -231,6 +231,17 @@ What changes by itself:
   operator rewrites the snippets on its first reconcile; by hand, copy the two `del-header` rules
   ([WebSocket](haproxy.md#websocket)).
 
+- **Response bodies are read in more media types, and whole.** With `responses.inspect` (or
+  `--inspect-responses`), the body of a response is now also inspected when its `Content-Type` is
+  `text/csv`, JavaScript, `application/xhtml+xml`, any `+json` or `+xml` type (such as
+  `application/vnd.api+json` or `image/svg+xml`), a type with a malformed parameter (`text/html;
+  charset`), or missing, read up to `maxBytes` like the others. On those routes the engine removes
+  the request's `Range` and `If-Range`, as it removes `Accept-Encoding`, so the app sends the whole
+  body: a client gets `200` with the whole body instead of `206`. A part of a body the app sends
+  anyway (`206 Partial Content` of a type the rules read, or `multipart/byteranges`) isn't
+  inspected, and gets `responses.onOversize`; so does a body with several `Content-Encoding` values
+  other than `identity`.
+
 ## From 0.4.x to 0.5.0
 
 What's new:

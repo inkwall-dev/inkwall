@@ -454,7 +454,7 @@ func toResponse(a responseArgs, req *request.Request, x *pipeline.Exchange, size
 		return nil, fmt.Errorf("headers: %w", err)
 	}
 	resp := &request.Response{Status: a.status, Proto: req.Proto, Headers: headers}
-	if !x.WantsBody(headers.Get("Content-Type")) || !hasResponseBody(req.Method, a.status, headers) {
+	if !x.WantsBody(pipeline.ResponseContentType(headers)) || !hasResponseBody(req.Method, a.status, headers) {
 		return resp, nil
 	}
 	if !a.hasBody {
