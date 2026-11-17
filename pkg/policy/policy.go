@@ -9,10 +9,12 @@ package policy
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -87,9 +89,40 @@ func (s *Set) Version() uint64 { return s.version }
 // Policies returns the number of policies.
 func (s *Set) Policies() int { return len(s.policies) }
 
-// Lookup returns the policy for a request, or nil if no policy covers it.
+// Lookup returns the policy for a request, or nil if no policy covers it:
+// the policy of its decoded, cleaned path, when the forms of its path
+// select several (policiesFor).
 func (s *Set) Lookup(r *request.Request) *Policy {
 	return s.match.lookup(r.Host, r.RawURI, r.Method)
+}
+
+// policiesFor appends to buf the policies r is inspected with: none when
+// no policy covers it, or each policy the forms of its path select
+// (matcher.policies), those in block mode first. A request inspected by
+// several gets the strictest of their verdicts.
+func (s *Set) policiesFor(r *request.Request, buf []*Policy) []*Policy {
+	ps := s.match.policies(r.Host, r.RawURI, r.Method, buf)
+	if len(ps) > 1 {
+		slices.SortStableFunc(ps, func(a, b *Policy) int {
+			return cmp.Compare(b.pipeline.Mode(), a.pipeline.Mode())
+		})
+	}
+	return ps
+}
+
+// view returns r as p inspects it when r's body was read for another
+// policy too: without its body when p inspects none, cut at p's limit.
+func (p *Policy) view(r *request.Request) *request.Request {
+	if p.bodyLimit > 0 && int64(len(r.Body)) <= p.bodyLimit || p.bodyLimit == 0 && r.Body == nil && !r.BodyTruncated {
+		return r
+	}
+	v := *r
+	if p.bodyLimit == 0 {
+		v.Body, v.BodyTruncated = nil, false
+	} else {
+		v.Body, v.BodyTruncated = r.Body[:p.bodyLimit], true
+	}
+	return &v
 }
 
 // Check implements pipeline.Inspector.
@@ -97,53 +130,89 @@ func (s *Set) Check(ctx context.Context, r *request.Request) pipeline.Verdict {
 	if s.suspended {
 		return pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonSuspended}
 	}
-	p := s.Lookup(r)
-	if p == nil {
+	var buf [4]*Policy
+	ps := s.policiesFor(r, buf[:0])
+	if len(ps) == 0 {
 		return pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy}
 	}
-	v := p.pipeline.Check(ctx, r)
-	v.Policy = p.ID
-	p.counter.Observe(v)
-	return v
+	var out pipeline.Verdict
+	for i, p := range ps {
+		pr := r
+		if len(ps) > 1 {
+			pr = p.view(r)
+		}
+		v := p.pipeline.Check(ctx, pr)
+		v.Policy = p.ID
+		p.counter.Observe(v)
+		if i == 0 || pipeline.Stricter(v, out) {
+			out = v
+		}
+		if out.Action == pipeline.ActionDeny {
+			break
+		}
+	}
+	return out
 }
 
 var _ pipeline.ExchangeInspector = (*Set)(nil)
 
 // CheckExchange implements pipeline.ExchangeInspector. The response's
 // verdict names the policy and is counted as its own denied or detected
-// request, not as another allowed one.
+// request, not as another allowed one. A request inspected by several
+// policies has its response inspected by each that inspects responses.
 func (s *Set) CheckExchange(ctx context.Context, r *request.Request) (pipeline.Verdict, *pipeline.Exchange) {
 	if s.suspended {
 		return pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonSuspended}, nil
 	}
-	p := s.Lookup(r)
-	if p == nil {
+	var buf [4]*Policy
+	ps := s.policiesFor(r, buf[:0])
+	if len(ps) == 0 {
 		return pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy}, nil
 	}
-	v, x := p.pipeline.CheckExchange(ctx, r)
-	v.Policy = p.ID
-	p.counter.Observe(v)
-	if x != nil {
-		x.OnVerdict(p.ID, func(v pipeline.Verdict) {
-			if v.Action != pipeline.ActionAllow {
-				p.counter.Observe(v)
+	var out pipeline.Verdict
+	var xs []*pipeline.Exchange
+	for i, p := range ps {
+		pr := r
+		if len(ps) > 1 {
+			pr = p.view(r)
+		}
+		v, x := p.pipeline.CheckExchange(ctx, pr)
+		v.Policy = p.ID
+		p.counter.Observe(v)
+		if x != nil {
+			x.OnVerdict(p.ID, func(v pipeline.Verdict) {
+				if v.Action != pipeline.ActionAllow {
+					p.counter.Observe(v)
+				}
+			})
+			xs = append(xs, x)
+		}
+		if i == 0 || pipeline.Stricter(v, out) {
+			out = v
+		}
+		if out.Action == pipeline.ActionDeny {
+			for _, x := range xs {
+				x.Close()
 			}
-		})
+			return out, nil
+		}
 	}
-	return v, x
+	return out, pipeline.JoinExchanges(xs)
 }
 
 // BodyLimit implements pipeline.Inspector: the policy's body limit, or 0
-// when its bodies, or the route's, are not inspected.
+// when its bodies, or the route's, are not inspected. A request inspected
+// by several policies is read to the largest of their limits.
 func (s *Set) BodyLimit(r *request.Request, _ int64) int64 {
 	if s.suspended {
 		return 0
 	}
-	p := s.Lookup(r)
-	if p == nil {
-		return 0
+	var buf [4]*Policy
+	var limit int64
+	for _, p := range s.policiesFor(r, buf[:0]) {
+		limit = max(limit, p.pipeline.BodyLimit(r, p.bodyLimit))
 	}
-	return p.pipeline.BodyLimit(r, p.bodyLimit)
+	return limit
 }
 
 // Compile compiles a bundle. An error names the policy that failed: the
@@ -184,34 +253,9 @@ func Compile(b *bundlev1.Bundle, o Options) (*Set, error) {
 
 func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o Options) (*Policy, [sha256.Size]byte, error) {
 	var key [sha256.Size]byte
-	cfg := coraza.Config{MaxArgs: o.MaxArgs, OnMatch: o.OnMatch}
-
-	// Rule sets: the built-in CRS (with its paranoia level and threshold)
-	// and SecLang loaded after it, in order. No rule sets: the CRS with its
-	// defaults. Rule sets but no built-in one: those rules alone.
-	if len(bp.GetRuleSets()) > 0 {
-		cfg.DisableCRS = true
-		var directives []string
-		for _, binding := range bp.GetRuleSets() {
-			rs, ok := ruleSets[binding.GetRuleSetId()]
-			if !ok {
-				return nil, key, fmt.Errorf("rule set %s is not in the bundle", binding.GetRuleSetId())
-			}
-			switch src := rs.GetSource().(type) {
-			case *bundlev1.RuleSet_Builtin:
-				if src.Builtin != bundlev1.BuiltinRuleSet_BUILTIN_RULE_SET_CRS_V4 {
-					return nil, key, fmt.Errorf("rule set %s: unknown built-in rule set %s", rs.GetId(), src.Builtin)
-				}
-				cfg.DisableCRS = false
-				cfg.ParanoiaLevel = int(binding.GetParanoiaLevel())
-				cfg.InboundAnomalyThreshold = int(binding.GetInboundAnomalyThreshold())
-			case *bundlev1.RuleSet_Seclang:
-				directives = append(directives, src.Seclang)
-			default:
-				return nil, key, fmt.Errorf("rule set %s has no source", rs.GetId())
-			}
-		}
-		cfg.Directives = strings.Join(directives, "\n")
+	cfg, err := rulesConfig(bp, ruleSets, o)
+	if err != nil {
+		return nil, key, err
 	}
 	var exclusions []coraza.Exclusion
 	for _, e := range bp.GetExclusions() {
@@ -248,7 +292,6 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 	// The compiled rules, shared by every policy with the same key whatever
 	// its exclusions, then this policy's exclusions on top.
 	var shared *coraza.Evaluator
-	var err error
 	key = cfg.Key()
 	if o.Evaluators != nil {
 		shared, err = o.Evaluators.get(key, cfg)
@@ -301,6 +344,87 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 		pc.Timeout = t.AsDuration()
 	}
 	return &Policy{ID: bp.GetId(), pipeline: pipeline.New(eval, pc), bodyLimit: bodyLimit}, key, nil
+}
+
+// rulesConfig is the rules a policy compiles to: its rule sets in order.
+func rulesConfig(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o Options) (coraza.Config, error) {
+	cfg := coraza.Config{MaxArgs: o.MaxArgs, OnMatch: o.OnMatch}
+
+	// Rule sets: the built-in CRS (with its paranoia level and threshold)
+	// and SecLang loaded after it, in order. No rule sets: the CRS with its
+	// defaults. Rule sets but no built-in one: those rules alone.
+	if len(bp.GetRuleSets()) > 0 {
+		cfg.DisableCRS = true
+		var directives []string
+		for _, binding := range bp.GetRuleSets() {
+			rs, ok := ruleSets[binding.GetRuleSetId()]
+			if !ok {
+				return cfg, fmt.Errorf("rule set %s is not in the bundle", binding.GetRuleSetId())
+			}
+			switch src := rs.GetSource().(type) {
+			case *bundlev1.RuleSet_Builtin:
+				if src.Builtin != bundlev1.BuiltinRuleSet_BUILTIN_RULE_SET_CRS_V4 {
+					return cfg, fmt.Errorf("rule set %s: unknown built-in rule set %s", rs.GetId(), src.Builtin)
+				}
+				cfg.DisableCRS = false
+				cfg.ParanoiaLevel = int(binding.GetParanoiaLevel())
+				cfg.InboundAnomalyThreshold = int(binding.GetInboundAnomalyThreshold())
+			case *bundlev1.RuleSet_Seclang:
+				directives = append(directives, src.Seclang)
+			default:
+				return cfg, fmt.Errorf("rule set %s has no source", rs.GetId())
+			}
+		}
+		cfg.Directives = strings.Join(directives, "\n")
+	}
+	return cfg, nil
+}
+
+// RuleChecker checks that a policy's rule sets compile together, as
+// Compile compiles them: rule sets that are valid alone may not be (the
+// same rule ID in two). It remembers each combination's result, not the
+// compiled rules.
+type RuleChecker struct {
+	mu   sync.Mutex
+	errs map[[sha256.Size]byte]error
+}
+
+// NewRuleChecker returns a RuleChecker that has checked nothing.
+func NewRuleChecker() *RuleChecker {
+	return &RuleChecker{errs: map[[sha256.Size]byte]error{}}
+}
+
+// Check compiles the rules of policy bp, whose rule sets are among
+// ruleSets. A policy without SecLang rule sets runs only the built-in rules
+// and isn't compiled.
+func (c *RuleChecker) Check(bp *bundlev1.Policy, ruleSets []*bundlev1.RuleSet) error {
+	byID := map[string]*bundlev1.RuleSet{}
+	seclang := false
+	for _, rs := range ruleSets {
+		byID[rs.GetId()] = rs
+	}
+	for _, b := range bp.GetRuleSets() {
+		if _, ok := byID[b.GetRuleSetId()].GetSource().(*bundlev1.RuleSet_Seclang); ok {
+			seclang = true
+		}
+	}
+	if !seclang {
+		return nil
+	}
+	cfg, err := rulesConfig(bp, byID, Options{})
+	if err != nil {
+		return err
+	}
+	cfg.BodyLimit, cfg.ResponseBodyLimit = MaxBodyBytes, MaxBodyBytes
+	key := cfg.Key()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err, ok := c.errs[key]; ok {
+		return err
+	}
+	_, err = coraza.New(cfg)
+	c.errs[key] = err
+	return err
 }
 
 func oversizeAction(a bundlev1.OversizeAction) pipeline.OversizeAction {

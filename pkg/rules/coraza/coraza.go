@@ -723,9 +723,20 @@ func (x *exchange) EvaluateResponse(_ context.Context, resp *request.Response) (
 	if tx.IsRuleEngineOff() {
 		return rules.Result{}, nil
 	}
+	var contentType []string
 	for name, values := range resp.Headers {
+		if strings.EqualFold(name, "Content-Type") {
+			contentType = append(contentType, values...)
+			continue
+		}
 		for _, v := range values {
 			tx.AddResponseHeader(name, v)
+		}
+	}
+	// A response without a type or a body has nothing to read as text.
+	if len(contentType) > 0 || len(resp.Body) > 0 {
+		for _, v := range bodyType(contentType) {
+			tx.AddResponseHeader("Content-Type", v)
 		}
 	}
 	if it := tx.ProcessResponseHeaders(resp.Status, resp.Proto); it != nil {
@@ -745,6 +756,26 @@ func (x *exchange) EvaluateResponse(_ context.Context, resp *request.Response) (
 		return rules.Result{}, fmt.Errorf("process response body: %w", err)
 	}
 	return result(tx, it, x.seen, outboundScore), nil
+}
+
+// bodyType returns a response's Content-Type values as Coraza is to see
+// them: as they are when Coraza reads the body they describe as the
+// adapters do (rules.ResponseBodyType), else, for a body the adapters
+// read, the one type of SecResponseBodyMimeType it reads as. Coraza takes
+// the last value's text before ";" as it is, so it wouldn't read
+// application/vnd.api+json, Text/HTML, a value without a type, no value
+// or a header sent twice, which adapters do read.
+func bodyType(values []string) []string {
+	want := rules.ResponseBodyType(strings.Join(values, ","))
+	if want == "" {
+		return values
+	}
+	if len(values) == 1 {
+		if media, _, _ := strings.Cut(values[0], ";"); media == want {
+			return values
+		}
+	}
+	return []string{want}
 }
 
 // Close implements rules.Exchange.

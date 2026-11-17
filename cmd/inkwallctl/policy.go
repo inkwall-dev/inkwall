@@ -181,7 +181,9 @@ func policyBundle(cfg config, notes io.Writer) (*bundlev1.Bundle, error) {
 // apply does.
 func loadObjects(files []string, namespace string, notes io.Writer) (resolver.Input, bool, error) {
 	var (
-		in        resolver.Input
+		// Files have no status: an HTTPRoute is taken as its Gateway
+		// accepted it.
+		in        = resolver.Input{AssumeAttached: true}
 		suspended bool
 	)
 	seen := map[string]string{} // kind/namespace/name -> file

@@ -128,9 +128,12 @@ func (i *Istio) Watch(c controller.Controller, cache cache.Cache, h handler.Even
 
 // istioRoute is a protected HTTPRoute that Istio serves.
 type istioRoute struct {
-	route    *gatewayv1.HTTPRoute
+	route *gatewayv1.HTTPRoute
+	// gateways are its Istio parents that accept it.
 	gateways []types.NamespacedName
 	others   []string
+	// waiting: some of its Istio parents haven't accepted it yet.
+	waiting string
 	// sections are the rules protected, or [""] for the whole route.
 	sections []string
 	routeSettings
@@ -196,9 +199,15 @@ func (i *Istio) Wire(ctx context.Context, targets map[Target]bool, off bool) (*R
 			res.Targets[tg] = TargetState{Unsupported: fmt.Sprintf("HTTPRoute %s is served by %s, which Inkwall doesn't wire yet", tg.Key.Name, why)}
 			continue
 		}
+		gws, waiting, refused := st.accepting(hr, gws, "Istio")
+		if len(gws) == 0 {
+			// No Gateway of Istio serves the route: none is changed.
+			res.Targets[tg] = TargetState{Pending: notAccepted(waiting, refused)}
+			continue
+		}
 		r := routes[tg.Key]
 		if r == nil {
-			r = &istioRoute{route: hr, gateways: gws, others: st.unwired(others)}
+			r = &istioRoute{route: hr, gateways: gws, others: st.unwired(others), waiting: waiting}
 			routes[tg.Key] = r
 		}
 		r.sections = append(r.sections, tg.Section)
@@ -341,6 +350,9 @@ func (i *Istio) Wire(ctx context.Context, targets map[Target]bool, off bool) (*R
 			// Istio reports nothing on an EnvoyFilter: in force once Istio
 			// serves the route on each of its Gateways.
 			s.Pending = istioAccepted(r.route, r.gateways)
+		}
+		if s.Failed == "" && s.Pending == "" && r.waiting != "" {
+			s.Pending = r.waiting
 		}
 		res.Targets[tg] = s
 	}

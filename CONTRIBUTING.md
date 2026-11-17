@@ -139,8 +139,8 @@ for patching released versions.
    verify an image:
 
    ```sh
-   cosign verify ghcr.io/inkwall-dev/inkwall-engine:0.3.0 \
-     --certificate-identity-regexp '^https://github.com/inkwall-dev/inkwall/\.github/workflows/release\.yaml@refs/tags/v' \
+   cosign verify ghcr.io/inkwall-dev/inkwall-engine:<version> \
+     --certificate-identity 'https://github.com/inkwall-dev/inkwall/.github/workflows/release.yaml@refs/tags/v<version>' \
      --certificate-oidc-issuer https://token.actions.githubusercontent.com
    ```
 

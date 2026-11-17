@@ -1,0 +1,50 @@
+exit 1
+# The built-in OWASP CRS v4, for the policies that tune it or add rules.
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: ClusterWAFRuleSet
+metadata:
+  name: owasp-crs-v4
+spec:
+  source:
+    builtin: crs-v4
+---
+# From the ingress-nginx ModSecurity settings of Ingress web/shop.
+# 2 setting(s) were not migrated: see the summary of inkwallctl migrate.
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFRuleSet
+metadata:
+  name: shop-modsecurity
+  namespace: web
+spec:
+  source:
+    seclang: |
+      # annotation modsecurity-snippet, line 6
+      SecRule REQUEST_HEADERS:X-Debug "@streq 1" "id:1002,phase:1,deny,status:403,chain"
+      SecRule REMOTE_ADDR "!@ipMatch 10.0.0.0/8"
+---
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: shop
+  namespace: web
+spec:
+  mode: Block
+  ruleSets:
+  - ref:
+      kind: ClusterWAFRuleSet
+      name: owasp-crs-v4
+  - ref:
+      kind: WAFRuleSet
+      name: shop-modsecurity
+  targetRefs:
+  - kind: Ingress
+    name: shop
+--- stderr
+note: no ConfigMap ingress-nginx/ingress-nginx-controller in the files: ModSecurity is taken as off globally (only the annotations count)
+Ingress web/shop: WAFPolicy web/shop (Block), WAFRuleSet web/shop-modsecurity
+  TODO    annotation modsecurity-snippet, line 2: not migrated: SecRule REQUEST_METHOD "@streq OPTIONS" "id:1000,phase:1,pass,nolog,chain" SecRule REQUEST_FILENAME "@beginsWith /api" "ctl:ruleEngine=Off": a ctl action in a chain runs only when the whole chain matches, and an exclusion or skipped path can't carry the chain's other conditions; convert it by hand
+  TODO    annotation modsecurity-snippet, line 4: not migrated: SecRule ARGS:action "@streq heartbeat" "id:1001,phase:1,pass,nolog,chain" SecRule REQUEST_FILENAME "@streq /wp-admin/admin-ajax.php" "ctl:ruleRemoveById=942100": a ctl action in a chain runs only when the whole chain matches, and an exclusion or skipped path can't carry the chain's other conditions; convert it by hand
+  mapped  annotation modsecurity-snippet, line 6: kept in the WAFRuleSet: SecRule REQUEST_HEADERS:X-Debug "@streq 1" "id:1002,phase:1,deny,status:403,chain" SecRule REMOTE_ADDR "!@ipMatch 10.0.0.0/8"
+  mapped  annotation enable-owasp-core-rules: the built-in OWASP CRS v4
+  mapped  annotation modsecurity-snippet, line 1: SecRuleEngine On: mode: Block
+1 Ingress(es) read: 1 WAFPolicy, 1 WAFRuleSet; 2 setting(s) not migrated need a human (TODO)

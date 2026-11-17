@@ -119,13 +119,14 @@ done
 
 go build -o "$WORK/inkwall-engine" ./cmd/engine
 
-# The app echoes the request line and X-Request-Id.
+# The app echoes the request line, X-Request-Id, Upgrade and HTTP2-Settings.
 cat >"$WORK/app.py" <<'PY'
 import http.server, sys
 class H(http.server.BaseHTTPRequestHandler):
     def handle_one(self):
         self.rfile.read(int(self.headers.get('Content-Length') or 0))
-        out = ('%s %s id=%s\n' % (self.command, self.path, self.headers.get('X-Request-Id'))).encode()
+        out = ('%s %s id=%s upgrade=%s settings=%s\n' % (self.command, self.path, self.headers.get('X-Request-Id'),
+            ','.join(self.headers.get_all('Upgrade') or []), self.headers.get('HTTP2-Settings', ''))).encode()
         self.send_response(200); self.send_header('Content-Length', str(len(out))); self.end_headers(); self.wfile.write(out)
     do_GET = do_POST = handle_one
     def log_message(self, *a): pass
@@ -202,6 +203,13 @@ check "a denied gRPC call: content-type application/grpc" bash -c "$(declare -f 
 ws=(-H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==')
 check "a WebSocket handshake from a forbidden origin: 403" is 403 "${ws[@]}" -H 'Origin: https://evil.example' "$U/chat"
 check "a WebSocket handshake from an allowed origin passes" is 200 "${ws[@]}" -H 'Origin: https://app.example.com' "$U/chat"
+check "a WebSocket handshake reaches the app with its Upgrade" bash -c "curl -s -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' -H 'Origin: https://app.example.com' '$U/chat' | grep -q 'upgrade=websocket '"
+# Any other upgrade reaches the app without Upgrade and HTTP2-Settings: the
+# app can't switch the connection to a protocol the engine doesn't see.
+check "an h2c upgrade reaches the app as a plain request" bash -c "curl -s -H 'Connection: Upgrade, HTTP2-Settings' -H 'Upgrade: h2c' -H 'HTTP2-Settings: AAMAAABkAARAAAAAAAIAAAAA' '$U/h2c' | grep -q 'upgrade= settings=\$'"
+check "another protocol's upgrade reaches the app as a plain request" bash -c "curl -s -H 'Connection: Upgrade' -H 'Upgrade: TLS/1.2' '$U/h2c' | grep -q 'upgrade= settings=\$'"
+# HAProxy forwards a WebSocket handshake's Upgrade as "websocket" alone.
+check "a WebSocket and h2c upgrade reaches the app as WebSocket's" bash -c "curl -s -H 'Connection: Upgrade, HTTP2-Settings' -H 'Upgrade: websocket, h2c' -H 'HTTP2-Settings: AAMAAABkAARAAAAAAAIAAAAA' -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' -H 'Origin: https://app.example.com' '$U/h2c' | grep -q 'upgrade=websocket settings=\$'"
 check "the client's request ID reaches the app" bash -c "curl -s -H 'X-Request-Id: client-id-1' '$U/' | grep -q 'id=client-id-1'"
 check "a request ID reaches the app" bash -c "curl -s '$U/' | grep -qE 'id=[0-9a-f]{16}'"
 check "metrics count the denials" bash -c "curl -s 127.0.0.1:$ADMIN_PORT/metrics | grep -q 'inkwall_requests_total{action=\"deny\",adapter=\"spoe\",reason=\"rule\"}'"

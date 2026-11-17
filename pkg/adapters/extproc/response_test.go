@@ -157,9 +157,10 @@ func TestResponse(t *testing.T) {
 			if tt.status == 0 && len(resps) != len(msgs) {
 				t.Fatalf("%d answers to %d messages", len(resps), len(msgs))
 			}
-			// The request's answer removes Accept-Encoding.
-			if rm := resps[0].GetRequestHeaders().GetResponse().GetHeaderMutation().GetRemoveHeaders(); !slices.Equal(rm, []string{"accept-encoding"}) {
-				t.Errorf("request headers removed %v, want accept-encoding", rm)
+			// The request's answer removes Accept-Encoding, Range and
+			// If-Range: the upstream sends the whole body, unencoded.
+			if rm := resps[0].GetRequestHeaders().GetResponse().GetHeaderMutation().GetRemoveHeaders(); !slices.Equal(rm, []string{"accept-encoding", "range", "if-range"}) {
+				t.Errorf("request headers removed %v, want accept-encoding, range and if-range", rm)
 			}
 			override := resps[1].GetModeOverride().GetResponseBodyMode() == filterv3.ProcessingMode_NONE && resps[1].GetModeOverride() != nil
 			if override != tt.override {
@@ -229,9 +230,9 @@ func TestResponseAfterBody(t *testing.T) {
 	if len(resps) != 4 || denied(t, resps[3]) != 403 {
 		t.Fatalf("answers %v, want the response denied", resps)
 	}
-	// The request body's answer removes Accept-Encoding: Envoy held the
-	// headers.
-	if rm := resps[1].GetRequestBody().GetResponse().GetHeaderMutation().GetRemoveHeaders(); len(rm) != 1 {
+	// The request body's answer removes Accept-Encoding, Range and
+	// If-Range: Envoy held the headers.
+	if rm := resps[1].GetRequestBody().GetResponse().GetHeaderMutation().GetRemoveHeaders(); len(rm) != 3 {
 		t.Errorf("request body answer removed %v", rm)
 	}
 }

@@ -66,7 +66,7 @@ func newReplacements(kind string, httpRoutes []gatewayv1.HTTPRoute, ingressRoute
 		}
 	}
 	for _, hr := range httpRoutes {
-		in := resolver.Input{HTTPRoutes: []gatewayv1.HTTPRoute{hr}}
+		in := resolver.Input{HTTPRoutes: []gatewayv1.HTTPRoute{hr}, AssumeAttached: true}
 		ref := wafv1alpha1.TargetRef{Group: httpRouteGroup, Kind: "HTTPRoute", Name: hr.Name}
 		add(hr.Namespace, ref, in)
 		for _, rule := range hr.Spec.Rules {
