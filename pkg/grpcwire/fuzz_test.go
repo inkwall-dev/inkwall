@@ -10,7 +10,7 @@ import (
 )
 
 // FuzzMessages checks the reading of a client's body: the messages cover
-// the body, and the text found in them is valid UTF-8 from the body, within
+// the body, and the text found in them is valid UTF-8 read from the body, within
 // the limits.
 func FuzzMessages(f *testing.F) {
 	f.Add([]byte(frame(0, string(pb(1, "world", 2, pb(1, "in"))))), false)
@@ -32,7 +32,9 @@ func FuzzMessages(f *testing.F) {
 				t.Fatalf("%d fields over the limit", len(fields))
 			}
 			for _, fd := range fields {
-				if fd.Value == "" || !utf8.ValidString(fd.Value) || !bytes.Contains(m.Data, []byte(fd.Value)) {
+				// A field's text is its bytes, or as long: a byte that
+				// isn't UTF-8 or a control character becomes a space.
+				if fd.Value == "" || !utf8.ValidString(fd.Value) || len(fd.Value) > len(m.Data) {
 					t.Fatalf("field %q = %q, not text from %q", fd.Name, fd.Value, m.Data)
 				}
 				if n := bytes.Count([]byte(fd.Name), []byte(".")); n >= lim.Depth {

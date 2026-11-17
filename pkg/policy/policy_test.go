@@ -513,6 +513,46 @@ func TestResponses(t *testing.T) {
 	}
 }
 
+// TestGRPCMessagesInspectEveryCharacter: a text field is inspected whatever
+// characters it holds: a control or format character, or a byte that
+// isn't UTF-8, doesn't keep the rest of the field from the rules.
+func TestGRPCMessagesInspectEveryCharacter(t *testing.T) {
+	frame := func(value string) []byte {
+		msg := append([]byte{0x0a, byte(len(value))}, value...)
+		return append([]byte{0, 0, 0, 0, byte(len(msg))}, msg...)
+	}
+	b := testBundle()
+	b.Policies[0].Body = &bundlev1.BodyConfig{Inspect: true, GrpcMessages: true}
+	set, err := Compile(b, Options{BodyLimit: 65536})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{
+		"sql":             "1' OR '1'='1' -- ",
+		"xss":             "<script>alert(document.cookie)</script>",
+		"sql, NUL":        "1' OR '1'='1' -- \x00",
+		"sql, SOH":        "1' OR '1'='1' -- \x01",
+		"sql, DEL":        "1' OR '1'='1' -- \x7f",
+		"sql, zero width": "1' OR '1'='1' -- \u200b",
+		"sql, not UTF-8":  "1' OR '1'='1' -- \xff",
+		"sql, BOM first":  "\ufeff1' OR '1'='1' -- ",
+		"xss, ESC":        "<script>alert(document.cookie)</script>\x1b",
+		"xss, C1 control": "<script>alert(document.cookie)</script>\u0085",
+		"xss, not UTF-8":  "\xc0<script>alert(document.cookie)</script>",
+		"xss, bidi":       "<script>alert(document.cookie)</script>\u202e",
+	} {
+		r := req("shop.example.com", "/helloworld.Greeter/SayHello")
+		r.Method = "POST"
+		r.Proto = "HTTP/2.0"
+		r.Headers.Set("Content-Type", "application/grpc")
+		r.Headers.Set("Te", "trailers")
+		r.Body = frame(value)
+		if v := set.Check(context.Background(), r); v.Action != pipeline.ActionDeny {
+			t.Errorf("%s: %s/%s, rules %v; want denied", name, v.Action, v.Reason, v.RuleIDs)
+		}
+	}
+}
+
 // TestGRPCMessages: body.grpc_messages turns on the inspection of the
 // text in a gRPC call's messages, for that policy only.
 func TestGRPCMessages(t *testing.T) {
