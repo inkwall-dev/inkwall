@@ -62,14 +62,16 @@ type Engine struct {
 // Read merges the replicas' reports in namespace, skipping those not
 // refreshed within stale (their replica is gone). An engine listed twice,
 // while it moves between replicas, counts once, with its newest
-// connection. They are sorted by ID. leftOut counts the engines left out
+// connection: the same engine ID, ServiceAccount and pod, so an engine
+// can't hide another's record by naming its engine ID. They are sorted by
+// ID. leftOut counts the engines left out
 // of full reports: while it isn't 0, the list is incomplete.
 func Read(ctx context.Context, c client.Reader, namespace string, stale time.Duration, now time.Time) (engines []Engine, leftOut int, err error) {
 	var list corev1.ConfigMapList
 	if err := c.List(ctx, &list, client.InNamespace(namespace), client.MatchingLabels{Label: "true"}); err != nil {
 		return nil, 0, err
 	}
-	byID := map[string]Engine{}
+	byID := map[string]Engine{} // by key()
 	for _, cm := range list.Items {
 		updated, err := time.Parse(time.RFC3339Nano, cm.Data[UpdatedAtKey])
 		if err != nil || now.Sub(updated) > stale {
@@ -83,8 +85,8 @@ func Read(ctx context.Context, c client.Reader, namespace string, stale time.Dur
 		n, _ := strconv.Atoi(cm.Data[LeftOutKey])
 		leftOut += max(n, 0)
 		for _, e := range listed {
-			if old, ok := byID[e.ID]; !ok || e.ConnectedAt.After(old.ConnectedAt) {
-				byID[e.ID] = e
+			if old, ok := byID[e.key()]; !ok || e.ConnectedAt.After(old.ConnectedAt) {
+				byID[e.key()] = e
 			}
 		}
 	}
@@ -92,6 +94,16 @@ func Read(ctx context.Context, c client.Reader, namespace string, stale time.Dur
 	for _, e := range byID {
 		engines = append(engines, e)
 	}
-	slices.SortFunc(engines, func(a, b Engine) int { return strings.Compare(a.ID, b.ID) })
+	slices.SortFunc(engines, func(a, b Engine) int {
+		if c := strings.Compare(a.ID, b.ID); c != 0 {
+			return c
+		}
+		return strings.Compare(a.key(), b.key())
+	})
 	return engines, leftOut, nil
+}
+
+// key identifies an engine across the replicas' reports.
+func (e Engine) key() string {
+	return strings.Join([]string{e.ID, e.ServiceAccount, e.PodNamespace, e.PodName}, "\x00")
 }
