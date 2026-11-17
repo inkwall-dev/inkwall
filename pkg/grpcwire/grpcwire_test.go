@@ -75,11 +75,18 @@ func TestStrings(t *testing.T) {
 		{"empty", nil, nil, true},
 		{"string", pb(1, "world"), []Field{{"1", "world"}}, true},
 		{"numbers", pb(1, uint64(42), 2, "x"), []Field{{"2", "x"}}, true},
+		// A nested message with control characters in its own bytes
+		// gives their readable runs: here none.
 		{"nested", pb(2, pb(1, "inner", 3, uint64(7)), 4, "outer"), []Field{{"2.1", "inner"}, {"4", "outer"}}, true},
+		{"printable nested", pb(2, []byte(" (")), []Field{{"2", " ("}}, true},
+		// Text in a nested message's numbers: fixed64 field 2 (tag 0x11).
+		{"text in numbers", pb(1, []byte("\x11' OR 1=1\x11 -- abcd\x08\x00")), []Field{{"1", "' OR 1=1  -- abcd"}}, true},
 		{"binary", pb(1, []byte{0, 1, 2, 0xff}), nil, true},
+		{"binary with text", pb(1, []byte("\xff\x00ab\xfe<script>\x00abcdefg")), []Field{{"1", "<script>"}}, true},
 		{"unicode", pb(1, "Zoë 李\n\ttab"), []Field{{"1", "Zoë 李\n\ttab"}}, true},
-		{"control", pb(1, "a\x00b"), nil, true},
-		{"invalid utf-8", pb(1, "a\xffb"), nil, true},
+		{"control", pb(1, "a\x00b\x1bc\x7f"), []Field{{"1", "a b c "}}, true},
+		{"format", pb(1, "a\u200bb\ufeff"), []Field{{"1", "a\u200bb\ufeff"}}, true},
+		{"invalid utf-8", pb(1, "a\xffbcdefgh\n"), []Field{{"1", "bcdefgh\n"}}, true},
 		// " (" is field 4 varint 0x28: both text and a message, which has
 		// no text field.
 		{"text that parses", pb(1, " ("), []Field{{"1", " ("}}, true},

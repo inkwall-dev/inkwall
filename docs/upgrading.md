@@ -147,6 +147,15 @@ What's new:
 
 What changes by itself:
 
+- **gRPC messages: every text field is read** (`body.grpcMessages: Inspect`). A field with a
+  control or invisible character (NUL, ESC, DEL, a zero-width space) was left out; it is now
+  inspected, a control character read as a space. A field of binary bytes gives its runs of at least 8
+  readable characters, and the bytes between a nested message's fields their runs of at least 4.
+  Measured on random binary fields and real messages, no more false positives than before; if a
+  policy's events show one, exclude that field (`when: {argument: "3"}`).
+- **Fewer snippets in security events.** A match on XML text, on a gRPC message's field (named by
+  numbers, `2.1`) or on a WebSocket message's text leaves no snippet, as a credential's doesn't:
+  their names don't say whether they hold one ([Redacting security events](../deploy/helm/inkwall/README.md#redacting-security-events)).
 - **In Managed mode, a `WAFIPList` labelled `inkwall.dev/source: saas` is the control plane's**,
   as the other kinds were: besides edits, the webhook now refuses deleting it, and the next
   snapshot that doesn't carry it deletes it. The operator never wrote such lists before 0.6.0, so

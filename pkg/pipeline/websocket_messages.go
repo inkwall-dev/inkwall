@@ -100,19 +100,26 @@ func messageRequest(handshake *request.Request) request.Request {
 
 // messageArgs returns a message's arguments: a JSON object's or array's
 // values by path, as Coraza's JSON body processor names them; any other
-// text as one argument, "message".
-func messageArgs(text []byte) []request.Arg {
+// text as one argument, "message". A panic while reading JSON (on an
+// adapter's goroutine, which nothing else recovers) gives the text as
+// "message" too, so the message is still inspected.
+func messageArgs(text []byte) (args []request.Arg) {
+	defer func() {
+		if recover() != nil {
+			args = []request.Arg{{Name: "message", Value: string(text)}}
+		}
+	}()
 	trimmed := bytes.TrimSpace(text)
 	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
 		d := json.NewDecoder(bytes.NewReader(trimmed))
 		d.UseNumber()
 		var v any
 		if err := d.Decode(&v); err == nil && !d.More() {
-			var args []request.Arg
-			if flatten("json", v, 0, &args) {
-				return args
+			var out []request.Arg
+			if flatten("json", v, 0, &out) {
+				return out
 			}
-			return append(args, request.Arg{Name: "message", Value: string(text)})
+			return append(out, request.Arg{Name: "message", Value: string(text)})
 		}
 	}
 	return []request.Arg{{Name: "message", Value: string(text)}}
