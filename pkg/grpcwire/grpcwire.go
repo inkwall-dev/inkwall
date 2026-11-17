@@ -19,6 +19,7 @@ import (
 	"compress/gzip"
 	"encoding/binary"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -155,7 +156,7 @@ func (w *walker) field(v []byte, name string, depth int) {
 	if len(v) == 0 {
 		return
 	}
-	nested := valid(v)
+	nested, numbersRun := valid(v, minNumbersRun)
 	var value string
 	switch {
 	case nested && printable(v):
@@ -163,7 +164,9 @@ func (w *walker) field(v []byte, name string, depth int) {
 	case !nested && utf8.Valid(v):
 		value = spaced(v)
 	case nested:
-		value = runs(between(v), minNumbersRun)
+		if numbersRun {
+			value = runs(between(v), minNumbersRun)
+		}
 	default:
 		value = runs(v, minBinaryRun)
 	}
@@ -203,16 +206,38 @@ func between(msg []byte) []byte {
 	return out
 }
 
-// valid reports whether v parses as a protobuf message, one level deep.
-func valid(v []byte) bool {
+// valid reports whether v parses as a protobuf message, one level deep,
+// and whether between(v) may hold a run of at least minRun readable
+// characters: one pass finds both, so that runs builds between(v) only for
+// the few messages whose tags, lengths and numbers may hold text. It counts
+// each byte from 0x80 as a character, so it may say yes where runs finds
+// none, never no where it finds one.
+func valid(v []byte, minRun int) (ok, run bool) {
+	chars := 0
 	for len(v) > 0 {
-		_, _, n := protowire.ConsumeField(v)
+		_, typ, n := protowire.ConsumeField(v)
 		if n < 0 {
-			return false
+			return false, false
+		}
+		end := n
+		if typ == protowire.BytesType {
+			_, _, tag := protowire.ConsumeTag(v)
+			b, _ := protowire.ConsumeBytes(v[tag:])
+			end = n - len(b)
+		}
+		for _, c := range v[:end] {
+			if run {
+				break
+			}
+			if control(rune(c)) {
+				chars = 0
+			} else if chars++; chars >= minRun {
+				run = true
+			}
 		}
 		v = v[n:]
 	}
-	return true
+	return true, run
 }
 
 // Gunzip decompresses a message compressed with grpc-encoding gzip, up
@@ -253,7 +278,9 @@ func printable(v []byte) bool {
 // matching a rule (920270 on NUL) in the binary fields that happen to be
 // UTF-8.
 func spaced(v []byte) string {
-	if !bytes.ContainsFunc(v, control) {
+	// Control characters are ASCII, never part of a multi-byte UTF-8
+	// sequence: looking for them byte by byte is exact, and cheaper.
+	if !slices.ContainsFunc(v, func(c byte) bool { return control(rune(c)) }) {
 		return string(v)
 	}
 	return strings.Map(func(r rune) rune {
