@@ -193,6 +193,13 @@ What changes by itself:
   `examples/haproxy/haproxy.cfg`. `Programmed`'s note on HAProxy's buffer now also names a
   `responses.maxBytes` larger than it, and [Bodies](haproxy.md#bodies) gives the memory a larger
   `tune.bufsize` costs.
+- **`inkwallctl migrate ingress-nginx` doesn't convert a `ctl` action in a chained rule.** The
+  `ctl` of a `chain` runs only when every rule of the chain matches, which an exclusion or a
+  skipped path can't express: such a chain is now `TODO` and left out, so the CRS rules it turned
+  off stay on, where it used to become an exclusion or `skip.paths` entry for every request. Other
+  chains are kept whole in the `WAFRuleSet`. Run the migration again and convert those chains by
+  hand. With `-f`, an object whose name or namespace isn't a valid Kubernetes name is refused, and
+  `--output` writes only inside its directory.
 
 ## From 0.4.x to 0.5.0
 
