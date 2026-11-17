@@ -121,7 +121,8 @@ it, and the other annotations do nothing without ModSecurity on.
 | `SecRequestBodyAccess`, `SecRequestBodyLimit`, `SecRequestBodyLimitAction` | `body.inspect`, `body.maxBytes`, `body.onOversize` |
 | `SecRequestBodyLimitAction ProcessPartial` without `SecRequestBodyLimit` | `body.onOversize: Allow` and `body.maxBytes` of `modsecurity.conf`'s limit (12.5 MiB) capped at 10 MiB; `TODO` when `modsecurity.conf` isn't loaded |
 | `Include .../modsecurity.conf` after body directives | `TODO`: the file sets them again, so those above it are left out |
-| Other `SecRule` and `SecAction` rules, and `SecRuleRemoveById` ranges, tags and messages to remove | Kept as they are in a `WAFRuleSet` named `<ingress>-modsecurity`, loaded after the CRS |
+| A `ctl` action in a chained rule (`chain`), on any of its rules | `TODO`: the `ctl` runs only when the whole chain matches, which an exclusion or skipped path can't express |
+| Other `SecRule` and `SecAction` rules (a chain with all its rules), and `SecRuleRemoveById` ranges, tags and messages to remove | Kept as they are in a `WAFRuleSet` named `<ingress>-modsecurity`, loaded after the CRS |
 
 A policy that tunes the CRS or adds rules refers to a `ClusterWAFRuleSet` named `owasp-crs-v4` with
 the built-in CRS, which is written alongside. Policies that only use the CRS's defaults leave
@@ -144,7 +145,7 @@ Ingress files/cloud: WAFPolicy files/cloud (Detect), WAFRuleSet files/cloud-mods
 - `TODO`: not migrated; it needs a human. Nothing is dropped or weakened silently: a rule that
   can't be converted faithfully is listed here and left out of the objects. Typical ones are
   `Include` of other files, exclusions keyed on anything but the path (`@contains`, `@rx`, a header's value), targets named by a pattern (`!REQUEST_COOKIES:/^_ga/`),
-  `ctl:ruleRemoveById` ranges reaching outside the CRS's IDs (900000-999999), `ctl:ruleRemoveByTag`, CRS variables without a `WAFPolicy` field
+  `ctl:ruleRemoveById` ranges reaching outside the CRS's IDs (900000-999999), `ctl:ruleRemoveByTag`, `ctl` in a chained rule, CRS variables without a `WAFPolicy` field
   (`tx.restricted_extensions`, `tx.allowed_http_versions`...), and rules the engine rejects.
 
 Each file with something not migrated says so in a comment at the top. `inkwallctl migrate` exits

@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop
+  namespace: web
+  annotations:
+    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
+    nginx.ingress.kubernetes.io/modsecurity-snippet: |
+      SecRuleEngine On
+      SecRule REQUEST_METHOD "@streq OPTIONS" "id:1000,phase:1,pass,nolog,chain"
+        SecRule REQUEST_FILENAME "@beginsWith /api" "ctl:ruleEngine=Off"
+      SecRule ARGS:action "@streq heartbeat" "id:1001,phase:1,pass,nolog,chain"
+        SecRule REQUEST_FILENAME "@streq /wp-admin/admin-ajax.php" "ctl:ruleRemoveById=942100"
+      SecRule REQUEST_HEADERS:X-Debug "@streq 1" "id:1002,phase:1,deny,status:403,chain"
+        SecRule REMOTE_ADDR "!@ipMatch 10.0.0.0/8"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: shop.example
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: {service: {name: shop, port: {number: 80}}}
