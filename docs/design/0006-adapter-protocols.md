@@ -719,15 +719,19 @@ Ingress Controller (below).
   send-spoe-group` sends after `http-response wait-for-body` (HAProxy 2.4 or later; SPOP 2.0 needs
   3.1 already): a group rather than the `on-http-response` event, so that the body is there first.
   Its arguments: `status` (`status`), `headers` (`res.hdrs_bin`), `body` (`res.body`), `key`
-  (`var(txn.inkwall.responses)`) and `failure` (`var(txn.inkwall.response_failure)`). The rules send
-  it, wait for the body and remove the request's `Accept-Encoding` only when
-  `txn.inkwall.responses` is set, so other routes add nothing to their responses; they wait for the
-  body only for the media types the rules read (`rules.ResponseBodyTypes`).
+  (`var(txn.inkwall.responses)`), `failure` (`var(txn.inkwall.response_failure)`) and `whole`
+  (`var(txn.inkwall.response_whole)`). The rules send it, wait for the body and remove the
+  request's `Accept-Encoding`, `Range` and `If-Range` only when `txn.inkwall.responses` is set, so
+  other routes add nothing to their responses; they wait for the body only for the media types the
+  rules read (`rules.ResponseBodyType`, as a regular expression over the `Content-Type` that holds
+  for a superset of them), and set `whole` for those: no sample fetch tells the end of the
+  message, but `wait-for-body` waits for it or a full buffer, and answers 504 itself when its
+  `time` passes.
 - **The body.** At most HAProxy's buffer (`tune.bufsize` less `tune.maxrewrite`, #336), and what
   came within `wait-for-body`'s `time`. A body shorter than its `Content-Length` was cut: its prefix
   is inspected, and the policy's `responses.onOversize` decides, as through ext_proc. One without
-  `Content-Length` counts as complete only when its frame is well under half the maximum frame
-  size, as a request's body. A response too large for one frame gets 502 in Block mode, as above.
+  `Content-Length` counts as complete only when HAProxy sent `whole` and its frame is well under
+  half the maximum frame size, as a request's body; a part HAProxy didn't wait for may be small. A response too large for one frame gets 502 in Block mode, as above.
 - **The verdict.** `txn.inkwall.response_action` (`allow` or `deny`, on every answer) and
   `txn.inkwall.response_status`: 403 for a leak (another status a rule names is returned as 403 by
   the sample rules), 502 for an oversized or uninspectable body under Deny, for a miss that fails
@@ -883,7 +887,7 @@ a second request per pod and target, the **response leg**, and a policy with `re
 4. *Streamed responses and `wait-for-body`?* HAProxy waits for the body only of the media types the
    rules read, so Server-Sent Events, gRPC and downloads aren't held: their status and headers are
    inspected, as through ext_proc. `wait-for-body`'s `time` bounds the hold for the others; a body
-   slower than it is inspected as far as it came, complete or not by the rules above.
+   slower than it gets HAProxy's 504.
 
 `make haproxy-e2e` runs the configuration of [protecting HAProxy](../haproxy.md) with HAProxy 3.2 in
 Docker. **Built:** `pkg/adapters/spoe`, run as `inkwall-engine spoe`, and since 0.4.0 the operator's

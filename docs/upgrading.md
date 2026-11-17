@@ -240,7 +240,11 @@ What changes by itself:
   body: a client gets `200` with the whole body instead of `206`. A part of a body the app sends
   anyway (`206 Partial Content` of a type the rules read, or `multipart/byteranges`) isn't
   inspected, and gets `responses.onOversize`; so does a body with several `Content-Encoding` values
-  other than `identity`.
+  other than `identity`. By hand, HAProxy needs the new `del-header range` and `del-header
+  if-range` lines of `examples/haproxy/haproxy.cfg`, and its new `wait-for-body` rules, with
+  `whole=var(txn.inkwall.response_whole)` in `spoe.conf`'s `inkwall-response` message: through
+  HAProxy, a body without `Content-Length` (chunked) is taken as whole only when HAProxy waited for
+  it, and counts as oversized otherwise.
 
 ## From 0.4.x to 0.5.0
 

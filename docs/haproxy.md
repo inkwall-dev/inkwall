@@ -93,8 +93,9 @@ default) and its pods by the chart's label
   `waf.inkwall.dev/haproxy-wired`, and restored when the Ingress is unprotected.
 - **Responses** (since 0.6.0): on an Ingress whose policies inspect responses
   (`responses.inspect`), the snippet loads the `inkwall-responses` scope and adds the response
-  rules of [`haproxy.cfg`](#the-complete-haproxycfg): the request's `Accept-Encoding` removed,
-  `http-response wait-for-body` for the media types the rules read, the response sent to the
+  rules of [`haproxy.cfg`](#the-complete-haproxycfg): the request's `Accept-Encoding`, `Range` and
+  `If-Range` removed, `http-response wait-for-body` for the media types the rules read, timed, the
+  response sent to the
   engine, and replaced with its status when the engine denies it (403 for a leak) or, failing
   closed, gives no verdict (502). It does so only once every running controller pod's engine was
   injected with `--response-messages`: until then no Ingress gets the response rules, and the
@@ -284,7 +285,7 @@ spoe-message inkwall-request
 # whose answer set txn.inkwall.responses: the key and the failure mode go
 # back to the agent with it.
 spoe-message inkwall-response
-    args status=status headers=res.hdrs_bin body=res.body key=var(txn.inkwall.responses) failure=var(txn.inkwall.response_failure)
+    args status=status headers=res.hdrs_bin body=res.body key=var(txn.inkwall.responses) failure=var(txn.inkwall.response_failure) whole=var(txn.inkwall.response_whole)
 
 spoe-group inkwall-response
     messages inkwall-response
@@ -363,11 +364,19 @@ frontend web
     # Responses, inspected when the engine runs with --inspect-responses:
     # its answer sets txn.inkwall.responses for the requests whose
     # responses it inspects. The app sends them unencoded (the engine reads
-    # gzip and deflate, not br or zstd).
+    # gzip and deflate, not br or zstd) and whole, not a range of them.
     http-request del-header accept-encoding if { var(txn.inkwall.responses) -m found }
-    # Wait for the body the rules read, up to HAProxy's buffer, then send
-    # the response to the engine.
-    http-response wait-for-body time 2s if { var(txn.inkwall.responses) -m found } { res.hdr(content-type) -m beg -i text/plain text/html text/xml application/json application/xml application/problem+json }
+    http-request del-header range if { var(txn.inkwall.responses) -m found }
+    http-request del-header if-range if { var(txn.inkwall.responses) -m found }
+    # Wait for the body the rules read, up to HAProxy's buffer: of a
+    # Content-Type that isn't one type (or none), of a type they read, or
+    # with a +json or +xml suffix but for gRPC's and Connect's streams.
+    # txn.inkwall.response_whole tells the engine HAProxy waited for it
+    # (a body slower than time gets HAProxy's 504), without which a body
+    # without Content-Length counts as cut. Then send the response to the
+    # engine.
+    http-response set-var(txn.inkwall.response_whole) bool(1) if { var(txn.inkwall.responses) -m found } !{ res.fhdr(content-type) -m reg -i '^[a-z0-9.+_-]+/[a-z0-9.+_-]+[[:blank:]]*(;|$)' } || { var(txn.inkwall.responses) -m found } { res.fhdr(content-type) -m reg -i '^(text/plain|text/html|text/xml|text/csv|text/javascript|application/javascript|application/x-javascript|application/ecmascript|application/json|application/xml|application/problem[+]json|application/xhtml[+]xml|[a-z0-9.+_-]+/[a-z0-9.+_-]*[+](json|xml))[[:blank:]]*(;|$)' } !{ res.fhdr(content-type) -m beg -i application/grpc application/connect+ }
+    http-response wait-for-body time 2s if { var(txn.inkwall.response_whole) -m found }
     http-response send-spoe-group inkwall inkwall-response if { var(txn.inkwall.responses) -m found }
     # A response HAProxy can't fit in one SPOE frame: oversized, 502, as
     # --oversize-response deny says (leave it out in detect mode).
@@ -504,11 +513,15 @@ inkwall-engine spoe --listen unix:/var/run/inkwall/spoe.sock --mode block --insp
 1. The request's answer sets `txn.inkwall.responses`, a key of the engine's own (not the request
    ID, which a client may choose), and `txn.inkwall.response_failure`, `closed` or `open`: the
    failure mode of the request's policy. The engine keeps the request's inspection under the key.
-2. `haproxy.cfg` removes the request's `Accept-Encoding`, so the app answers uncompressed, and, for a
-   response whose `Content-Type` the rules read (`text/plain`, `text/html`, `text/xml`,
-   `application/json`, `application/xml`, `application/problem+json`), waits for its body
-   (`http-response wait-for-body`). It then sends the response in the group `inkwall-response`: the
-   status, headers, body, and the key and failure mode back.
+2. `haproxy.cfg` removes the request's `Accept-Encoding`, `Range` and `If-Range`, so the app answers
+   whole and uncompressed, and, for a response whose `Content-Type` the rules read, waits for its
+   body (`http-response wait-for-body`): text (`text/plain`, `text/html`, `text/xml`, `text/csv`),
+   JavaScript, JSON or XML (with any `+json` or `+xml` type, such as `application/vnd.api+json` or
+   `image/svg+xml`, but for gRPC's and Connect's streams), and a missing or malformed
+   `Content-Type`, which a browser may sniff as HTML; it marks such a response
+   `txn.inkwall.response_whole`. A body that doesn't come within `wait-for-body`'s `time` gets
+   HAProxy's own 504. It then sends the response in the group `inkwall-response`: the status,
+   headers, body, the key and failure mode back, and `whole`.
 3. The engine inspects the response with the request's inspection, and answers with
    `txn.inkwall.response_action` (`allow` or `deny`) and `txn.inkwall.response_status`. HAProxy
    replaces a denied response with that status and a plain-text body naming the request ID: 403 for
@@ -520,20 +533,24 @@ inkwall-engine spoe --listen unix:/var/run/inkwall/spoe.sock --mode block --insp
 - **What is read:** the status and headers always; the body of the media types above, up to
   `--max-response-bytes` (64 KiB by default) and to HAProxy's buffer, as for [requests](#bodies). A
   `gzip` or `deflate` body is decoded first. The engine never sees more of a body than HAProxy sends
-  it, and HAProxy sends only what arrived within `wait-for-body`'s `time` (2 s in the sample) and
-  fits its buffer (about 15 KiB by default). What happens to the rest:
-  - **A body with `Content-Length` that HAProxy cut** (by its buffer, or by `time`): only the part
+  it, and HAProxy sends only what fits its buffer (about 15 KiB by default); a body that doesn't
+  come within `wait-for-body`'s `time` (2 s in the sample) gets HAProxy's own 504. What happens to
+  the rest:
+  - **A body with `Content-Length` that HAProxy cut** (by its buffer): only the part
     the engine got is inspected, and the response counts as oversized. With `--oversize-response
     deny` (the default in block mode) it is replaced with 502. With `allow` (the default in detect
     mode) it reaches the client whole, and the part past what the engine got is not inspected.
-  - **A body without `Content-Length` (chunked, or HTTP/2) that is not well under half of HAProxy's
-    buffer** (about 7 KiB under the defaults): the engine can't tell whether it is whole, so it
-    counts as oversized, as above: replaced with 502 under `deny`, and under `allow` passed with
-    only its first part inspected.
-  - **A body without `Content-Length` that arrives slower than `time`:** when the part that arrived
-    in time is small, the engine can't tell it was cut, and inspects it as the whole body. The rest
-    reaches the client uninspected, in block mode too (#559). Keep `time` above how long your app
-    takes to send its bodies, or have it send `Content-Length`.
+  - **A body without `Content-Length` (chunked, or HTTP/2)** is whole only when HAProxy waited for
+    it (`whole`) and it is well under half of HAProxy's buffer (about 7 KiB under the defaults).
+    Otherwise the engine can't tell whether it is whole, so it counts as oversized, as above:
+    replaced with 502 under `deny`, and under `allow` passed with only its first part inspected. A
+    `spoe.conf` without `whole` makes every such body count as oversized.
+  - **A body slower than `time`:** HAProxy answers 504 Gateway Time-out itself, and the engine
+    doesn't see the response. Keep `time` above how long your app takes to send its bodies.
+  - **A part of a body** (`206 Partial Content` of a type the rules read, or
+    `multipart/byteranges`, from an app that answers a range though `Range` was removed): not
+    inspected, and counted as oversized. So is a body in an encoding the engine can't decode
+    (`br`, `zstd`) or in more than one.
 - **Kept requests:** the engine holds each request whose response it inspects until the response
   comes, in a table bounded by `--max-pending-responses` (4096) and an estimate of their memory,
   `--max-pending-response-bytes` (64 MiB; about 128 KiB per request, more with a body). A request

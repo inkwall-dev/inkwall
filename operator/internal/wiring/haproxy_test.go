@@ -8,6 +8,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -27,6 +28,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
+	engrules "github.com/inkwall-dev/inkwall/pkg/rules"
 )
 
 func TestHAProxySnippet(t *testing.T) {
@@ -62,7 +64,9 @@ func TestHAProxySnippet(t *testing.T) {
 	for _, want := range []string{
 		"filter spoe engine inkwall-responses config " + injection.HAProxySPOEConf,
 		"http-request del-header accept-encoding",
-		"http-response wait-for-body time 2s",
+		"http-request del-header range",
+		"http-request del-header if-range",
+		"http-response set-var(txn.inkwall.response_whole) bool(1) if " + HAProxyReadBody("{ var(txn.inkwall.responses) -m found }") + "\nhttp-response wait-for-body time 2s if { var(txn.inkwall.response_whole) -m found }",
 		"http-response send-spoe-group inkwall-responses inkwall-response",
 		`http-response return status 502 content-type text/plain lf-string "Bad Gateway. Request ID: %[var(txn.inkwall.request_id)]"`,
 		"{ var(txn.inkwall.response_failure) -m str closed }",
@@ -578,5 +582,41 @@ func TestHAProxyResponseBufferNote(t *testing.T) {
 	}
 	if n := note(); n != "" {
 		t.Errorf("with a 128k buffer: %q", n)
+	}
+}
+
+// HAProxy waits for the body of every response whose body the engine
+// reads (rules.ResponseBodyType): its condition, as a regular expression
+// over the Content-Type, holds for each type the engine reads, and only
+// fails for some it doesn't.
+func TestHAProxyReadBodyMatchesEngine(t *testing.T) {
+	cond := HAProxyReadBody("K")
+	quoted := regexp.MustCompile(`'([^']*)'`).FindAllStringSubmatch(cond, -1)
+	if len(quoted) != 2 {
+		t.Fatalf("condition %s", cond)
+	}
+	// [[:blank:]] is POSIX; Go's RE2 reads it inside a bracket too.
+	valid := regexp.MustCompile("(?i)" + quoted[0][1])
+	read := regexp.MustCompile("(?i)" + quoted[1][1])
+	stream := func(ct string) bool {
+		l := strings.ToLower(ct)
+		return strings.HasPrefix(l, "application/grpc") || strings.HasPrefix(l, "application/connect+")
+	}
+	waits := func(ct string) bool { return !valid.MatchString(ct) || read.MatchString(ct) && !stream(ct) }
+	for _, ct := range []string{
+		"text/html", "text/html; charset=utf-8", "TEXT/HTML", "text/html ;charset=utf-8", "application/json",
+		"application/problem+json", "application/vnd.api+json", "image/svg+xml", "application/xhtml+xml",
+		"text/javascript", "application/javascript", "text/csv", "text/html; charset", "text/html;;x",
+		"html", "", "text/html, image/png", "text/html/x", "application/x!y+json",
+		"image/png", "text/event-stream", "application/grpc", "application/grpc+json", "application/connect+json",
+		"application/octet-stream", "video/mp4", "text/x-unknown",
+	} {
+		engine := engrules.ResponseBodyType(ct) != ""
+		if engine && !waits(ct) {
+			t.Errorf("%q: the engine reads its body, HAProxy doesn't wait for it", ct)
+		}
+		if !engine && waits(ct) {
+			t.Errorf("%q: HAProxy waits for a body the engine doesn't read", ct)
+		}
 	}
 }

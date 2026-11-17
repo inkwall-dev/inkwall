@@ -57,6 +57,12 @@ const (
 	ArgKey = "key"
 	// ArgFailure is the request's VarResponseFailure.
 	ArgFailure = "failure"
+	// ArgWhole is true when HAProxy waited for the whole body
+	// (wait-for-body, which answers 504 itself when the body doesn't come
+	// in time): the message ended, or the buffer filled, which the frame's
+	// size tells. Without it, a body without Content-Length counts as
+	// cut: nothing else tells it whole.
+	ArgWhole = "whole"
 )
 
 // Variables of responses, in the transaction scope.
@@ -343,6 +349,7 @@ type responseArgs struct {
 	hasBody bool
 	key     string
 	failure string
+	whole   bool
 }
 
 // isResponse reports whether a NOTIFY payload carries the response message
@@ -419,6 +426,14 @@ func readResponseArgs(msgs []message) (responseArgs, error) {
 				default:
 					err = fmt.Errorf("argument %s: type %d, want binary", arg.name, v.typ)
 				}
+			case ArgWhole:
+				switch v.typ {
+				case typeNull:
+				case typeBool:
+					a.whole = v.b
+				default:
+					err = fmt.Errorf("argument %s: type %d, want a boolean", arg.name, v.typ)
+				}
 			}
 			if err != nil {
 				return a, err
@@ -445,9 +460,10 @@ func optionalString(arg kv) (string, error) {
 }
 
 // toResponse builds the response to req from its message's arguments, with
-// the body x inspects, cut at its limit. A body HAProxy cut (shorter than
-// its Content-Length; or, without one, in a frame that may have filled
-// HAProxy's buffer) is truncated, and one it didn't send uninspected.
+// the body x inspects, cut at its limit. A body HAProxy cut is truncated:
+// one shorter than its Content-Length; or, without one, unless HAProxy
+// tells it has the whole body (ArgWhole) in a frame that couldn't have
+// filled its buffer. A body HAProxy didn't send is uninspected.
 func toResponse(a responseArgs, req *request.Request, x *pipeline.Exchange, size int, maxFrame uint32) (*request.Response, error) {
 	headers, err := parseResponseHeaders(a.headers)
 	if err != nil {
@@ -468,7 +484,10 @@ func toResponse(a responseArgs, req *request.Request, x *pipeline.Exchange, size
 	n := int64(len(a.body))
 	complete := n == length
 	if !hasLength || headers.Get("Transfer-Encoding") != "" {
-		complete = uncut(size, len(headers), 0, maxFrame)
+		// Only the end of the message tells a body without
+		// Content-Length whole: a part of it HAProxy didn't wait for
+		// may be small.
+		complete = a.whole && uncut(size, len(headers), 0, maxFrame)
 	}
 	limit := x.BodyLimit()
 	resp.Body = a.body[:min(n, limit)]

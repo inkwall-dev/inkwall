@@ -241,7 +241,10 @@ func HAProxySnippet(o HAProxySnippetOptions) string {
 		}
 		lines = append(lines,
 			"http-request del-header accept-encoding if "+kept,
-			"http-response wait-for-body time 2s if "+kept+" { res.hdr(content-type) -m beg -i "+strings.Join(engrules.ResponseBodyTypes, " ")+" }",
+			"http-request del-header range if "+kept,
+			"http-request del-header if-range if "+kept,
+			"http-response set-var(txn.inkwall.response_whole) bool(1) if "+HAProxyReadBody(kept),
+			"http-response wait-for-body time 2s if { var(txn.inkwall.response_whole) -m found }",
 			"http-response send-spoe-group "+injection.HAProxyResponsesScope+" "+injection.HAProxyResponseGroup+" if "+kept)
 		if o.Block {
 			// A response HAProxy couldn't fit in one frame: oversized.
@@ -260,6 +263,35 @@ func HAProxySnippet(o HAProxySnippetOptions) string {
 	lines = append(lines, haproxySnippetEnd)
 	return strings.Join(lines, "\n")
 }
+
+// HAProxyReadBody is the condition, for a response on a route where cond
+// holds, that the engine reads its body (rules.ResponseBodyType): a
+// Content-Type that isn't one type/subtype (or none), one of
+// rules.ResponseBodyTypes, or one with a +json or +xml suffix but for
+// gRPC's and Connect's streams. HAProxy's types are a narrower set of
+// characters than the engine's, so it waits for a body the engine might
+// not read rather than miss one it reads. Such a response gets
+// txn.inkwall.response_whole, sent to the engine (spoe.ArgWhole): HAProxy
+// waits for its whole body (wait-for-body), up to a full buffer, which the
+// engine tells by the frame's size, and answers 504 itself when the body
+// doesn't come in time. Without it, the engine counts a body without
+// Content-Length as cut.
+func HAProxyReadBody(cond string) string {
+	types := make([]string, len(engrules.ResponseBodyTypes))
+	for i, t := range engrules.ResponseBodyTypes {
+		types[i] = strings.ReplaceAll(t, "+", "[+]")
+	}
+	const ct = "res.fhdr(content-type)"
+	valid := `'^` + haproxyTypePart + `/` + haproxyTypePart + `[[:blank:]]*(;|$)'`
+	read := `'^(` + strings.Join(types, "|") + `|` + haproxyTypePart + `/[a-z0-9.+_-]*[+](json|xml))[[:blank:]]*(;|$)'`
+	return cond + " !{ " + ct + " -m reg -i " + valid + " } || " +
+		cond + " { " + ct + " -m reg -i " + read + " } !{ " + ct + " -m beg -i application/grpc application/connect+ }"
+}
+
+// haproxyTypePart is a media type's part as HAProxy's response rules match
+// it: fewer characters than a token's, so a type with others counts as
+// malformed, whose body the engine reads.
+const haproxyTypePart = "[a-z0-9.+_-]+"
 
 // withSnippet returns a backend snippet with the operator's part (ours,
 // empty: none) first, and the user's lines after it, kept as they were.
