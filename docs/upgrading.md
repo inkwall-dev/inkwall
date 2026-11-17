@@ -156,7 +156,6 @@ What changes by itself:
 - **Fewer snippets in security events.** A match on XML text, on a gRPC message's field (named by
   numbers, `2.1`) or on a WebSocket message's text leaves no snippet, as a credential's doesn't:
   their names don't say whether they hold one ([Redacting security events](../deploy/helm/inkwall/README.md#redacting-security-events)).
-
 - **A policy applies to an HTTPRoute only once a Gateway accepts it.** The route must have a
   parent in `status.parents` with `Accepted=True`, from Envoy Gateway, Istio or Traefik; until
   then the policy is `Accepted=False` (`TargetNotAttached`) and its routes aren't in the bundle.
@@ -227,7 +226,6 @@ What changes by itself:
   chains are kept whole in the `WAFRuleSet`. Run the migration again and convert those chains by
   hand. With `-f`, an object whose name or namespace isn't a valid Kubernetes name is refused, and
   `--output` writes only inside its directory.
-
 - **A request whose path a proxy may route differently from the engine is inspected by every
   policy its path could select.** A path with dot segments (`/a/../b`), encoded characters
   (`%2F`, `%2e`) or repeated slashes can match one route as received and another once decoded and
@@ -236,7 +234,6 @@ What changes by itself:
   `Block` policy's deny wins over a `Detect` policy's log. Plain paths, and hosts whose routes
   agree, don't change. Such a request is counted under each policy that inspected it
   ([0002 §5.2](design/0002-system-architecture.md#52-engine--operator-bundle-distribution)).
-
 - **The standalone proxy forwards only WebSocket upgrades.** A request whose `Upgrade` is anything
   but a single `websocket` token with `Connection: Upgrade` (`h2c`, `websocket, h2c`, `TLS/1.2`,
   ...) now reaches the upstream without its `Upgrade` and `HTTP2-Settings` headers, as a plain
@@ -248,7 +245,6 @@ What changes by itself:
   `HTTP2-Settings`, after the engine's verdict: the app gets such a request as a plain one. The
   operator rewrites the snippets on its first reconcile; by hand, copy the two `del-header` rules
   ([WebSocket](haproxy.md#websocket)).
-
 - **Response bodies are read in more media types, and whole.** With `responses.inspect` (or
   `--inspect-responses`), the body of a response is now also inspected when its `Content-Type` is
   `text/csv`, JavaScript, `application/xhtml+xml`, any `+json` or `+xml` type (such as
