@@ -11,9 +11,7 @@ import (
 	"context"
 	"errors"
 	"io"
-	"mime"
 	"net/http"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -69,23 +67,43 @@ func (e *Exchange) BodyLimit() int64 {
 	return limit
 }
 
-// WantsBody reports whether a response body with this Content-Type is
-// inspected: a body limit is set and the rules read its media type
-// (rules.ResponseBodyTypes). Others, such as images and streams (Server-Sent
-// Events, gRPC), pass without their body inspected and without being
-// counted as oversized.
+// WantsBody reports whether a response body with this Content-Type
+// (ResponseContentType of the headers) is inspected: a body limit is set
+// and the rules read its media type (rules.ResponseBodyType). Others, such
+// as images and streams (Server-Sent Events, gRPC), pass without their
+// body inspected and without being counted as oversized.
 func (e *Exchange) WantsBody(contentType string) bool {
 	return e.BodyLimit() > 0 && InspectedResponseType(contentType)
 }
 
 // InspectedResponseType reports whether the rules read a response body
-// with this Content-Type.
+// with this Content-Type: rules.ResponseBodyType, so also one with a
+// structured syntax suffix (+json, +xml), one a strict parser rejects, or
+// none.
 func InspectedResponseType(contentType string) bool {
-	media, _, err := mime.ParseMediaType(contentType)
-	if err != nil {
-		return false
+	return rules.ResponseBodyType(contentType) != ""
+}
+
+// ResponseContentType is the Content-Type of a response with headers h,
+// as WantsBody takes it: its values joined with ",", so a header sent
+// twice, which isn't one type, reads as text.
+func ResponseContentType(h http.Header) string {
+	return strings.Join(h.Values("Content-Type"), ",")
+}
+
+// partial reports whether resp is a part of its body (206 Partial Content,
+// or a multipart/byteranges body) of a type the rules read: a part can't
+// be inspected as the whole, as a leak cut across parts would pass.
+// Adapters remove a request's Range and If-Range for this when responses
+// are inspected; an upstream that answers with a part anyway has the body
+// counted as uninspected.
+func partial(resp *request.Response) bool {
+	ct := ResponseContentType(resp.Headers)
+	media, _, _ := strings.Cut(ct, ";")
+	if strings.EqualFold(strings.TrimSpace(media), "multipart/byteranges") {
+		return true
 	}
-	return slices.Contains(rules.ResponseBodyTypes, media)
+	return resp.Status == http.StatusPartialContent && InspectedResponseType(ct)
 }
 
 // CheckResponse inspects resp, the response to the exchange's request, with
@@ -145,6 +163,11 @@ func (e *Exchange) check(ctx context.Context, resp *request.Response) Verdict {
 	e.used = true
 	e.mu.Unlock()
 
+	if p.responses.MaxBytes > 0 && partial(resp) {
+		out := *resp
+		out.Body, out.BodyTruncated, out.BodyUninspected = nil, false, true
+		resp = &out
+	}
 	resp = decodeBody(resp, p.responses.MaxBytes)
 	v, _ := p.evaluate(ctx, func(ctx context.Context) outcome {
 		// busy only once the evaluation runs: refused a slot, it never
@@ -204,14 +227,26 @@ func (e *Exchange) Close() {
 
 // decodeBody returns resp with its body decoded, up to limit, when it came
 // gzip- or deflate-encoded, and without the Content-Encoding header the
-// rules would skip it for (CRS skips encoded bodies). A body in another
-// encoding is not inspected (BodyUninspected). A body that doesn't decode
-// to its end, as one cut by the proxy, keeps the prefix that did, marked
-// truncated.
+// rules would skip it for (CRS skips encoded bodies). Every
+// Content-Encoding value counts, as a client decodes the list of all: a
+// body in another encoding, or in more than one, is not inspected
+// (BodyUninspected). A body that doesn't decode to its end, as one cut by
+// the proxy, keeps the prefix that did, marked truncated.
 func decodeBody(resp *request.Response, limit int64) *request.Response {
-	encoding := strings.ToLower(strings.TrimSpace(resp.Headers.Get("Content-Encoding")))
-	if len(resp.Body) == 0 || encoding == "" || encoding == "identity" {
+	var codings []string
+	for _, v := range resp.Headers.Values("Content-Encoding") {
+		for c := range strings.SplitSeq(v, ",") {
+			if c = strings.ToLower(strings.TrimSpace(c)); c != "" && c != "identity" {
+				codings = append(codings, c)
+			}
+		}
+	}
+	if len(resp.Body) == 0 || len(codings) == 0 {
 		return resp
+	}
+	encoding := codings[0]
+	if len(codings) > 1 {
+		encoding = "several"
 	}
 	out := *resp
 	out.Headers = resp.Headers.Clone()
