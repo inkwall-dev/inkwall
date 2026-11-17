@@ -63,7 +63,7 @@ sboms:
 
 # The checksums are signed keyless with the workflow's identity; verify:
 #   cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
-#     --certificate-identity-regexp '^https://github.com/inkwall-dev/inkwall/\.github/workflows/release\.yaml@refs/tags/v' \
+#     --certificate-identity 'https://github.com/inkwall-dev/inkwall/.github/workflows/release.yaml@refs/tags/v<version>' \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 signs:
   - cmd: cosign
