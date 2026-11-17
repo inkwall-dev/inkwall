@@ -423,7 +423,12 @@ jobs:
           cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
             --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER"
           sha256sum --check --ignore-missing checksums.txt
+          # --source-ref pins the tag; an older gh without it gets the same
+          # check from the certificate's exact identity.
           signer=(--signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yaml" --source-ref "$GITHUB_REF")
+          if ! gh attestation verify --help | grep -q -- --source-ref; then
+            signer=(--cert-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/release.yaml@$GITHUB_REF")
+          fi
           gh attestation verify "$archive" -R "$GITHUB_REPOSITORY" "${signer[@]}"
           gh attestation verify "$archive" -R "$GITHUB_REPOSITORY" "${signer[@]}" --bundle "$provenance"
           jq -e '.spdxVersion' "$archive.sbom.json" >/dev/null
