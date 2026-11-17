@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -43,6 +44,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
 	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
+	enginepolicy "github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
@@ -140,6 +142,8 @@ type BundleReconciler struct {
 	// checked caches CheckUserRules results by rule text: compiling with
 	// the Core Rule Set takes milliseconds, and rules rarely change.
 	checked map[[sha256.Size]byte]error
+	// rules checks that each policy's rule sets compile together.
+	rules *enginepolicy.RuleChecker
 }
 
 // SetupWithManager registers the builder with mgr.
@@ -207,7 +211,7 @@ func (r *BundleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.IngressRoutes.Add(c, enqueue, predicate.GenerationChangedPredicate{})
 	}
 	if r.HTTPRoutes != nil {
-		r.HTTPRoutes.Add(c, enqueue, predicate.GenerationChangedPredicate{})
+		r.HTTPRoutes.Add(c, enqueue, httpRouteChanged)
 	}
 	if r.VirtualServices != nil {
 		r.VirtualServices.Add(c, enqueue, predicate.GenerationChangedPredicate{})
@@ -226,7 +230,10 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 		return reconcile.Result{}, err
 	}
 
-	in := resolver.Input{CheckRules: r.checkRules}
+	if r.rules == nil {
+		r.rules = enginepolicy.NewRuleChecker()
+	}
+	in := resolver.Input{CheckRules: r.checkRules, CheckPolicy: r.rules.Check}
 	var (
 		policies        wafv1alpha1.WAFPolicyList
 		ingresses       networkingv1.IngressList
@@ -699,3 +706,14 @@ func HTTPRoutes(ctx context.Context, c client.Client) ([]gatewayv1.HTTPRoute, er
 	}
 	return list.Items, nil
 }
+
+// httpRouteChanged passes an HTTPRoute's new generation, and a change of
+// the Gateways that accepted it, which its status says: a route only
+// protects (and takes) traffic once a Gateway accepts it.
+var httpRouteChanged = predicate.Or[client.Object](predicate.GenerationChangedPredicate{}, predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		before, ok := e.ObjectOld.(*gatewayv1.HTTPRoute)
+		after, ok2 := e.ObjectNew.(*gatewayv1.HTTPRoute)
+		return ok && ok2 && !slices.Equal(resolver.AttachedGateways(before), resolver.AttachedGateways(after))
+	},
+})

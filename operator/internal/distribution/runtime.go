@@ -299,8 +299,8 @@ func encodeEngines(engines []Engine, limit int) ([]byte, int, error) {
 
 // ReadEngines merges the replicas' reports, skipping those not refreshed
 // within stale (their replica is gone). An engine listed twice, while it
-// moves between replicas, counts once, with its newest connection. They
-// are sorted by ID. leftOut counts the engines left out of full reports:
+// moves between replicas, counts once, with its newest connection
+// (reportKey). They are sorted by ID. leftOut counts the engines left out of full reports:
 // while it isn't 0, the list is incomplete.
 func ReadEngines(ctx context.Context, c client.Reader, namespace string, stale time.Duration, now time.Time) (engines []Engine, leftOut int, err error) {
 	var list corev1.ConfigMapList
@@ -321,8 +321,8 @@ func ReadEngines(ctx context.Context, c client.Reader, namespace string, stale t
 		n, _ := strconv.Atoi(cm.Data[leftOutKey])
 		leftOut += max(n, 0)
 		for _, e := range listed {
-			if old, ok := byID[e.ID]; !ok || e.ConnectedAt.After(old.ConnectedAt) {
-				byID[e.ID] = e
+			if old, ok := byID[reportKey(e)]; !ok || e.ConnectedAt.After(old.ConnectedAt) {
+				byID[reportKey(e)] = e
 			}
 		}
 	}
@@ -330,6 +330,18 @@ func ReadEngines(ctx context.Context, c client.Reader, namespace string, stale t
 	for _, e := range byID {
 		engines = append(engines, e)
 	}
-	slices.SortFunc(engines, func(a, b Engine) int { return strings.Compare(a.ID, b.ID) })
+	slices.SortFunc(engines, func(a, b Engine) int {
+		if c := strings.Compare(a.ID, b.ID); c != 0 {
+			return c
+		}
+		return strings.Compare(reportKey(a), reportKey(b))
+	})
 	return engines, leftOut, nil
+}
+
+// reportKey identifies an engine across the replicas' reports: the same
+// engine ID, ServiceAccount and pod, so an engine can't hide another's
+// record by naming its engine ID.
+func reportKey(e Engine) string {
+	return strings.Join([]string{e.ID, e.ServiceAccount, e.PodNamespace, e.PodName}, "\x00")
 }

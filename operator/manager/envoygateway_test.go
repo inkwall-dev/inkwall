@@ -23,6 +23,7 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
 	"github.com/inkwall-dev/inkwall/operator/test/testenv"
@@ -101,6 +102,9 @@ func testEnvoyGateway(ctx context.Context, t *testing.T, c client.Client) {
 		if err := c.Create(ctx, o); err != nil {
 			t.Fatal(err)
 		}
+	}
+	for _, hr := range []*gatewayv1.HTTPRoute{app, api} {
+		acceptRoute(ctx, t, c, hr, acceptedBy(integrations.EnvoyGateway.GatewayController))
 	}
 	pol := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "eg"}, Spec: wafv1alpha1.WAFPolicySpec{
 		Mode: wafv1alpha1.PolicyBlock,
@@ -355,6 +359,12 @@ func testEnvoyGateway(ctx context.Context, t *testing.T, c client.Client) {
 			for _, gw := range gws {
 				hr.Spec.ParentRefs = append(hr.Spec.ParentRefs, gatewayv1.ParentReference{Name: gatewayv1.ObjectName(gw), Namespace: new(gatewayv1.Namespace(edge))})
 			}
+		})
+		acceptRoute(ctx, t, c, hr, func(gw string) string {
+			if gw == "foreign" {
+				return "example.com/other"
+			}
+			return integrations.EnvoyGateway.GatewayController
 		})
 	}
 	attach(app, "foreign")
