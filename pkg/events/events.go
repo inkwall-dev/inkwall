@@ -215,7 +215,7 @@ func New(src Source, req *request.Request, path string, v pipeline.Verdict, now 
 		ev.Matches = append(ev.Matches, &eventsv1.Match{
 			RuleId:   int32(m.RuleID), // #nosec G115 -- rule IDs fit
 			Variable: truncate(m.Variable, maxVariable),
-			Snippet:  snippet(redact, m.Variable, m.Value),
+			Snippet:  snippet(redact, m.Variable, m.Value, v.WebSocketMessage),
 		})
 	}
 	return ev
@@ -223,9 +223,11 @@ func New(src Source, req *request.Request, path string, v pipeline.Verdict, now 
 
 // snippet is at most maxSnippet bytes of a matched value: none for a
 // cookie, a response body, a credential header, an argument or header whose
-// name looks sensitive, a raw query string or body that names one, or
-// anything r redacts.
-func snippet(r *Redaction, variable, value string) string {
+// name looks sensitive, a raw query string or body that names one, a value
+// whose name says nothing of what it holds (XML text, a gRPC message's
+// field, named by its numbers, a WebSocket message's text), or anything r
+// redacts. webSocket: the value is from a WebSocket message.
+func snippet(r *Redaction, variable, value string, webSocket bool) string {
 	if r != nil && r.noSnippets {
 		return ""
 	}
@@ -245,8 +247,15 @@ func snippet(r *Redaction, variable, value string) string {
 		if Sensitive(key) || r.header(key) {
 			return ""
 		}
+	case "XML":
+		// Element text, without its element's name.
+		return ""
 	case "ARGS", "ARGS_GET", "ARGS_POST", "FILES", "MULTIPART_PART_HEADERS":
-		if Sensitive(key) || r.argument(key) {
+		if Sensitive(key) || r.argument(key) || fieldNumbers(key) {
+			return ""
+		}
+		if webSocket && key == "message" {
+			// A WebSocket message's text, not a JSON value by its path.
 			return ""
 		}
 	case "QUERY_STRING", "REQUEST_URI", "REQUEST_URI_RAW", "REQUEST_LINE", "REQUEST_BODY", "FULL_REQUEST":
@@ -259,6 +268,21 @@ func snippet(r *Redaction, variable, value string) string {
 		}
 	}
 	return truncate(value, maxSnippet)
+}
+
+// fieldNumbers reports whether name is a path of field numbers ("1",
+// "2.1"), as a gRPC message's text fields are named: what a field holds
+// can't be told from it.
+func fieldNumbers(name string) bool {
+	if name == "" {
+		return false
+	}
+	for part := range strings.SplitSeq(name, ".") {
+		if part == "" || strings.Trim(part, "0123456789") != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // protocol is what req speaks: a WebSocket handshake asks to upgrade to

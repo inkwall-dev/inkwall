@@ -1013,6 +1013,10 @@ dropped. This is enforced before anything leaves the cluster.
   `REQUEST_URI_RAW`, `REQUEST_LINE`, `REQUEST_BODY`, `FULL_REQUEST`) whose snippet contains such
   a name. A value comes after its name, so a snippet that shows part of a value holds its whole
   name: checking the 64-byte snippet is enough, and bounded however large the body;
+- a value whose name can't be checked (0.5.4): XML text (`XML`, element text without its
+  element's name), a gRPC message's field (an argument named by field numbers only, `2.1`) and a
+  WebSocket message's text (`ARGS_POST:message` in a WebSocket message's event). A password in a
+  gRPC field or an XML element would otherwise reach the event as any other value;
 - what `InkwallConfig.spec.events.redact` adds: `headers` (exact names, any case), `arguments`
   (parts of argument names, any case, also checked against raw query strings and bodies) and
   `snippets: false` (no snippets at all).
@@ -1124,9 +1128,21 @@ prefix); a gRPC-Web text body is decoded from base64 first (groups of four chara
 allowed at the end of each piece the client encoded, no line breaks; a cut body up to its last
 whole group), and one that isn't base64 of messages isn't a gRPC call. Each message is read as protobuf without its schema (`pkg/grpcwire`): a
 length-delimited field whose bytes are a whole protobuf message is read as one, to a depth of 16;
-one whose bytes are printable UTF-8 (no control characters but tab, CR, LF) is text. Some bytes
-are both, and give both: an attacker could otherwise write an attack that also parses as a
-message, to have it read only as one. Numbers, fixed-width fields and binary bytes give nothing.
+one whose bytes are UTF-8 is text, whatever its characters: a control or format character (NUL,
+ESC, a zero-width space) is part of the string the application gets, so it can't keep the field
+from the rules (until 0.5.4, only printable UTF-8 was text). A control character (but tab, CR,
+LF) is read as a space: the text around it is what the rules are for, and a NUL itself would match
+920270 in every binary field that happens to be UTF-8. Some bytes are both, and give both:
+an attacker could otherwise write an attack that also parses as a message, to have it read only
+as one. A message whose bytes aren't printable gives, as its text, the readable runs of what lies
+between its length-delimited fields (tags, lengths, numbers, where text could otherwise hide): the
+whole of it would join field names and tag bytes into text that matches command and SQL rules
+(`timeout (`, `interval`) in ordinary messages. Binary bytes (not UTF-8, not a message) give their
+runs of at least 8 readable characters, joined by spaces: an attack with a byte that isn't UTF-8
+before or after it is still read, while the short runs random bytes are full of aren't (from runs
+of 4, `5b|W` and `"4_y#` made 16 messages in 5,000 of the measurement below; from 8, none more
+than without runs). A nested message's own bytes keep runs of 4: tags split them more often, and
+the descriptors below give none that matches. Numbers of the top-level message give nothing.
 Each text field becomes a form argument (`ARGS_POST`) named by its path of field numbers (`2.1`:
 field 1 of the message in field 2), so CRS's argument rules and custom rules on `ARGS` see it.
 The raw body stays out of the rules (`REQUEST_BODY` is empty), and rule 920420 stays removed for
