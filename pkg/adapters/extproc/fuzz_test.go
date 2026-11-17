@@ -286,7 +286,7 @@ func FuzzExtProcResponse(f *testing.F) {
 		if code, err := strconv.Atoi(status); err == nil && code >= 100 && code <= 999 && resp.Status != code {
 			t.Errorf("status %d, Envoy sent %q", resp.Status, status)
 		}
-		ct := resp.Headers.Get("Content-Type")
+		ct := pipeline.ResponseContentType(resp.Headers)
 		if resp.Body != nil && !pipeline.InspectedResponseType(ct) {
 			t.Errorf("inspected a %q body", ct)
 		}

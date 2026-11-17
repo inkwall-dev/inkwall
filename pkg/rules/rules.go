@@ -18,6 +18,8 @@ package rules
 
 import (
 	"context"
+	"slices"
+	"strings"
 
 	"github.com/inkwall-dev/inkwall/pkg/request"
 )
@@ -77,9 +79,59 @@ type Exchange interface {
 }
 
 // ResponseBodyTypes are the media types of the response bodies the rules
-// read; adapters buffer no others. A user's SecResponseBodyMimeType
-// changes what Coraza reads, not what adapters buffer.
+// read, besides those ResponseBodyType reads as one of them; adapters
+// buffer no others. A user's SecResponseBodyMimeType changes what Coraza
+// reads, not what adapters buffer.
 var ResponseBodyTypes = []string{
-	"text/plain", "text/html", "text/xml",
-	"application/json", "application/xml", "application/problem+json",
+	"text/plain", "text/html", "text/xml", "text/csv",
+	"text/javascript", "application/javascript", "application/x-javascript", "application/ecmascript",
+	"application/json", "application/xml", "application/problem+json", "application/xhtml+xml",
+}
+
+// ResponseBodyType is the media type of ResponseBodyTypes the rules read a
+// response body with this Content-Type as, or "" for a body they don't
+// read. The media type is what comes before the first ";", trimmed and
+// lowercased, so a parameter a strict parser rejects ("text/html;
+// charset") doesn't hide the type a browser renders. A type with a
+// structured syntax suffix reads as its suffix's (application/vnd.api+json
+// as application/json, image/svg+xml as application/xml), but for gRPC's
+// and Connect's streams. No type, or one that isn't type/subtype, may be
+// anything a browser sniffs: it reads as text/plain. Several values (a
+// header sent twice, joined with ",") aren't one type, so they read as
+// text/plain too.
+func ResponseBodyType(contentType string) string {
+	media, _, _ := strings.Cut(contentType, ";")
+	media = strings.ToLower(strings.TrimSpace(media))
+	if slices.Contains(ResponseBodyTypes, media) {
+		return media
+	}
+	typ, sub, ok := strings.Cut(media, "/")
+	if !ok || !isToken(typ) || !isToken(sub) {
+		return "text/plain"
+	}
+	if typ == "application" && (strings.HasPrefix(sub, "grpc") || strings.HasPrefix(sub, "connect+")) {
+		return ""
+	}
+	switch {
+	case strings.HasSuffix(sub, "+json"):
+		return "application/json"
+	case strings.HasSuffix(sub, "+xml"):
+		return "application/xml"
+	}
+	return ""
+}
+
+// isToken reports whether s is an HTTP token (RFC 9110 §5.6.2).
+func isToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0 {
+			continue
+		}
+		return false
+	}
+	return true
 }
