@@ -220,6 +220,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpadapter.WriteDenial(w, http.StatusBadRequest, httpadapter.NewRequestID(), r.Header, h.jsonDenials)
 		return
 	}
+	webSocketUpgradeOnly(r.Header)
 	req, err := h.readRequest(r, w, start)
 	if errors.Is(err, os.ErrDeadlineExceeded) {
 		// The client stalled in the part of its body that is inspected.
@@ -274,6 +275,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(context.WithValue(r.Context(), exchangeKey{}, &exchange{ex: ex, req: req, path: r.URL.Path}))
 	}
 	h.proxy.ServeHTTP(w, r)
+}
+
+// webSocketUpgradeOnly keeps a request's Upgrade only for a WebSocket
+// handshake: a single "websocket" token (in any case), with "upgrade" in
+// Connection. Any other Upgrade, h2c in particular, is removed with
+// HTTP2-Settings, before the request is inspected, and the request is
+// proxied as a plain one (a server may ignore an Upgrade, RFC 9110 7.8):
+// after a 101 to another protocol, the client could send requests on the
+// connection that the engine never sees.
+func webSocketUpgradeOnly(h http.Header) {
+	up := h.Values("Upgrade")
+	if len(up) == 0 {
+		return
+	}
+	if len(up) == 1 && strings.EqualFold(textproto.TrimString(up[0]), "websocket") &&
+		httpguts.HeaderValuesContainsToken(h.Values("Connection"), "upgrade") {
+		return
+	}
+	h.Del("Upgrade")
+	h.Del("Http2-Settings")
 }
 
 func (h *Handler) toRequest(r *http.Request) (*request.Request, error) {

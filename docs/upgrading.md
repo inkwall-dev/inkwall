@@ -219,6 +219,13 @@ What changes by itself:
   agree, don't change. Such a request is counted under each policy that inspected it
   ([0002 §5.2](design/0002-system-architecture.md#52-engine--operator-bundle-distribution)).
 
+- **The standalone proxy forwards only WebSocket upgrades.** A request whose `Upgrade` is anything
+  but a single `websocket` token with `Connection: Upgrade` (`h2c`, `websocket, h2c`, `TLS/1.2`,
+  ...) now reaches the upstream without its `Upgrade` and `HTTP2-Settings` headers, as a plain
+  HTTP/1.1 request, so the upstream can't switch the connection to another protocol. A client that
+  offers `h2c` (`curl --http2` on `http://`) gets HTTP/1.1. WebSocket handshakes don't change
+  ([Which requests are handshakes](websocket.md#which-requests-are-handshakes)).
+
 ## From 0.4.x to 0.5.0
 
 What's new:
