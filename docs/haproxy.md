@@ -82,7 +82,8 @@ default) and its pods by the chart's label
   whose first lines, between `# inkwall:begin` and `# inkwall:end`, load the filter and deny on the
   engine's verdict, as [`haproxy.cfg`](#the-complete-haproxycfg) does: `option
   http-buffer-request` when a policy inspects bodies, the probe's rule, the fail-closed rule when
-  the policies fail closed (`Block` mode by default), the gRPC answer and a rule per status. A
+  the policies fail closed (`Block` mode by default), the gRPC answer, a rule per status, and the
+  removal of any `Upgrade` but WebSocket's. A
   snippet of your own on the Ingress stays, after the operator's lines; one on the Service comes
   before them. The previous value of `standalone-backend` is kept in
   `waf.inkwall.dev/haproxy-wired`, and restored when the Ingress is unprotected.
@@ -299,6 +300,12 @@ frontend web
     http-request deny deny_status 413 hdr x-request-id "%[var(txn.inkwall.request_id)]" if { var(txn.inkwall.status) -m int 413 }
     http-request deny deny_status 503 hdr x-request-id "%[var(txn.inkwall.request_id)]" if { var(txn.inkwall.status) -m int 503 }
     http-request deny deny_status 403 hdr x-request-id "%[var(txn.inkwall.request_id)]" if { var(txn.inkwall.action) -m str deny }
+    # Forward an upgrade only to WebSocket: any other Upgrade (TLS/1.2,
+    # "h2c, foo", ...) and HTTP2-Settings are removed, so the app can't
+    # switch the connection to a protocol whose requests the engine
+    # doesn't see.
+    http-request del-header upgrade unless { req.fhdr_cnt(upgrade) eq 1 } { req.fhdr(upgrade) -m str -i websocket }
+    http-request del-header http2-settings
     # The request ID of the engine's log, for the app.
     http-request set-header X-Request-Id "%[var(txn.inkwall.request_id)]" if { var(txn.inkwall.request_id) -m found }
     http-after-response set-header content-type "%[var(txn.inkwall.grpc_content_type)]" if { var(txn.inkwall.grpc_content_type) -m found }
@@ -403,6 +410,11 @@ handshake's URL and headers are inspected, a policy's `webSocket` rules apply (o
 upgrade. The messages after the upgrade aren't requests, and aren't sent to the agent: they are not
 inspected. `hack/haproxy/e2e.sh` checks a handshake from a forbidden origin (403) and from an
 allowed one (let through), without completing an upgrade. See [WebSocket](websocket.md).
+
+`haproxy.cfg` and the operator's snippet (since 0.5.4) forward an upgrade only to WebSocket: they
+remove any other `Upgrade` (`TLS/1.2`, `h2c, foo`, ...) and `HTTP2-Settings`, so the app can't
+switch the connection to a protocol whose traffic the agent never sees. If you configure HAProxy
+by hand, copy the two `del-header` rules.
 
 ### Routes left uninspected
 

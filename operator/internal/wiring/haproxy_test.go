@@ -95,6 +95,34 @@ func TestHAProxySettingsBlock(t *testing.T) {
 
 // The user's own snippet lines stay, after the operator's; wiring twice
 // changes nothing; unwiring restores the user's annotations.
+// Every snippet forwards an upgrade only to WebSocket: any other Upgrade and
+// HTTP2-Settings are removed after the verdict's rules, before the request
+// goes on.
+func TestHAProxySnippetWebSocketUpgradeOnly(t *testing.T) {
+	const (
+		upgrade  = "http-request del-header upgrade unless { req.fhdr_cnt(upgrade) eq 1 } { req.fhdr(upgrade) -m str -i websocket }"
+		settings = "http-request del-header http2-settings"
+	)
+	for _, s := range []string{
+		HAProxySnippet(false, false, false),
+		HAProxySnippet(false, true, false),
+		HAProxySnippet(true, false, false),
+		HAProxySnippet(false, true, true),
+		HAProxySnippet(true, true, true),
+	} {
+		for _, rule := range []string{upgrade, settings} {
+			i := strings.Index(s, rule)
+			if i < 0 {
+				t.Errorf("no %q:\n%s", rule, s)
+				continue
+			}
+			if i < strings.Index(s, "deny_status 403") || i > strings.Index(s, "set-header X-Request-Id") {
+				t.Errorf("%q isn't between the last denial and the request ID:\n%s", rule, s)
+			}
+		}
+	}
+}
+
 func TestHAProxyAnnotate(t *testing.T) {
 	ctx := context.Background()
 	ing := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "web", Annotations: map[string]string{

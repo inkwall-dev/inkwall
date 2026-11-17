@@ -146,13 +146,26 @@ func haproxySettingsOf(policies []wafv1alpha1.WAFPolicy, ing types.NamespacedNam
 // the engine announced.
 const haproxyFrameTooBig = "3 259"
 
+// haproxyUpgradeRule and haproxyHTTP2SettingsRule forward an upgrade only
+// to WebSocket, after the engine's verdict: any other Upgrade (TLS/1.2,
+// "h2c, foo", ...) and HTTP2-Settings are removed, so the app can't switch
+// the connection to a protocol whose traffic the engine doesn't see.
+// req.fhdr reads the whole value, not its comma-separated parts. (HAProxy
+// itself drops h2c and h2, and forwards a WebSocket handshake's Upgrade as
+// "websocket" alone.)
+const (
+	haproxyUpgradeRule       = "http-request del-header upgrade unless { req.fhdr_cnt(upgrade) eq 1 } { req.fhdr(upgrade) -m str -i websocket }"
+	haproxyHTTP2SettingsRule = "http-request del-header http2-settings"
+)
+
 // HAProxySnippet is the operator's part of a protected Ingress's backend
 // snippet: the body buffered for the engine when a policy inspects it, the
 // SPOE filter, and the rules on its variables: the probe's answer first
 // (Prober), then, in Block mode, 413 for a request HAProxy couldn't fit in
 // one SPOE frame (haproxyFrameTooBig), handled as oversized; failing
 // closed, 503 without a verdict, a denied gRPC call's answer, and a rule
-// per status the engine denies with; the request ID for the app.
+// per status the engine denies with; the request ID for the app; any
+// Upgrade but WebSocket's removed.
 func HAProxySnippet(failOpen, body, block bool) string {
 	lines := []string{haproxySnippetBegin}
 	if body {
@@ -177,6 +190,8 @@ func HAProxySnippet(failOpen, body, block bool) string {
 	}
 	lines = append(lines,
 		`http-request deny deny_status 403 hdr x-request-id "%[`+v("request_id")+`]" if { `+v("action")+` -m str deny }`,
+		haproxyUpgradeRule,
+		haproxyHTTP2SettingsRule,
 		`http-request set-header X-Request-Id "%[`+v("request_id")+`]" if { `+v("request_id")+` -m found }`,
 		haproxySnippetEnd)
 	return strings.Join(lines, "\n")
