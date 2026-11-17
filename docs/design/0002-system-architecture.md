@@ -338,6 +338,13 @@ ACK or a NACK.
   (the bundle's `wildcard_any_depth`; engines before 0.3.0 ignore it and match one label). Neither
   matches `example.com` itself. A request for a host no policy covers is not inspected. A request for a covered host that matches no path gets that host's most
   general policy, so normalization differences can't skip inspection.
+- Proxies route on different forms of a path: as received (HAProxy), with dot segments removed and
+  `%2F` kept (Envoy, Istio's default), with slashes merged too (Envoy Gateway), or decoded and
+  cleaned (Traefik). The engine matches each form, and a request whose forms match different
+  policies is inspected by each of them and gets the strictest verdict (a deny over a log over an
+  allow), so it never gets a weaker policy than the route the proxy chose (since 0.4.3). Its body
+  is read to the largest of their body limits, each policy inspects it to its own, and its response
+  is inspected by each that inspects responses.
 - Engines send their security events on the same stream, in `EventBatch`es of up to 1,000
   (`pkg/events`, [§5.4](#54-event-schema)). The operator drops and counts the events beyond that.
 - With each heartbeat, engines also send how many requests each policy allowed, denied and
