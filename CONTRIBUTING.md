@@ -286,7 +286,7 @@ for patching released versions.
 
    ```sh
    cosign verify ghcr.io/inkwall-dev/inkwall-engine:<version> \
-     --certificate-identity-regexp '^https://github.com/inkwall-dev/inkwall/\.github/workflows/release\.yaml@refs/tags/v' \
+     --certificate-identity 'https://github.com/inkwall-dev/inkwall/.github/workflows/release.yaml@refs/tags/v<version>' \
      --certificate-oidc-issuer https://token.actions.githubusercontent.com
    ```
 
@@ -295,11 +295,17 @@ for patching released versions.
 
    ```sh
    cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
-     --certificate-identity-regexp '^https://github.com/inkwall-dev/inkwall/\.github/workflows/release\.yaml@refs/tags/v' \
+     --certificate-identity 'https://github.com/inkwall-dev/inkwall/.github/workflows/release.yaml@refs/tags/v<version>' \
      --certificate-oidc-issuer https://token.actions.githubusercontent.com
    sha256sum --check --ignore-missing checksums.txt
-   gh attestation verify inkwall_<version>_linux_amd64.tar.gz -R inkwall-dev/inkwall
+   gh attestation verify inkwall_<version>_linux_amd64.tar.gz -R inkwall-dev/inkwall \
+     --signer-workflow inkwall-dev/inkwall/.github/workflows/release.yaml --source-ref refs/tags/v<version>
    ```
+
+   The exact identity, with the version, only accepts what the release workflow signed for that
+   tag: not another release's image, chart or archive served under its name. A GitHub CLI without
+   `--source-ref` takes `--cert-identity` with the same value as cosign's `--certificate-identity`
+   instead of both flags.
 
    The provenance is also a release asset, `inkwall_<version>.intoto.jsonl` (the attestation's
    [Sigstore bundle](https://docs.sigstore.dev/about/bundle/), one JSON line, covering every
@@ -308,6 +314,7 @@ for patching released versions.
 
    ```sh
    gh attestation verify inkwall_<version>_linux_amd64.tar.gz -R inkwall-dev/inkwall \
+     --signer-workflow inkwall-dev/inkwall/.github/workflows/release.yaml --source-ref refs/tags/v<version> \
      --bundle inkwall_<version>.intoto.jsonl
    ```
 

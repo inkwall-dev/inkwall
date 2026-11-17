@@ -162,8 +162,10 @@ func (e *EnvoyGateway) Watch(c controller.Controller, cache cache.Cache, h handl
 // envoyRoute is a protected HTTPRoute that Envoy Gateway serves.
 type envoyRoute struct {
 	route *gatewayv1.HTTPRoute
-	// gateways are its Envoy Gateway parents.
+	// gateways are its Envoy Gateway parents that accept it.
 	gateways []types.NamespacedName
+	// waiting: some of its Envoy Gateway parents haven't accepted it yet.
+	waiting string
 	// others are the controllers of its other Gateways that no integration
 	// wires.
 	others []string
@@ -252,9 +254,15 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 			res.Targets[tg] = TargetState{Unsupported: fmt.Sprintf("HTTPRoute %s is served by %s, which Inkwall doesn't wire yet", tg.Key.Name, why)}
 			continue
 		}
+		gws, waiting, refused := st.accepting(hr, gws, "Envoy Gateway")
+		if len(gws) == 0 {
+			// No Gateway of Envoy Gateway serves the route: none is changed.
+			res.Targets[tg] = TargetState{Pending: notAccepted(waiting, refused)}
+			continue
+		}
 		r := routes[tg.Key]
 		if r == nil {
-			r = &envoyRoute{route: hr, gateways: gws, others: st.unwired(others)}
+			r = &envoyRoute{route: hr, gateways: gws, others: st.unwired(others), waiting: waiting}
 			routes[tg.Key] = r
 		}
 		// "" is the whole route.
@@ -465,6 +473,9 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 				}
 			}
 		}
+		if s.Failed == "" && s.Pending == "" && r.waiting != "" {
+			s.Pending = r.waiting
+		}
 		res.Targets[tg] = s
 	}
 	return res, errors.Join(errs...)
@@ -556,6 +567,71 @@ func (st *envoyState) parents(hr *gatewayv1.HTTPRoute) (ours []types.NamespacedN
 	}
 	slices.SortFunc(ours, func(a, b types.NamespacedName) int { return cmp.Compare(a.String(), b.String()) })
 	return ours, others
+}
+
+// accepting returns, of a route's Gateways, those that accept it: the
+// route's status has Accepted=True for a parentRef naming the Gateway, from
+// its class's controller. The operator changes only those Gateways (their
+// pods, their EnvoyProxy, their parametersRef): a parentRef alone is the
+// route's claim, not the Gateway owner's consent. waiting says which
+// Gateways haven't decided yet, refused which don't accept it, and why;
+// both "" when every Gateway accepts it.
+func (st *envoyState) accepting(hr *gatewayv1.HTTPRoute, gws []types.NamespacedName, proxy string) (ok []types.NamespacedName, waiting, refused string) {
+	var wait, refuse []string
+	for _, gw := range gws {
+		controller := ""
+		if g := st.gateways[gw]; g != nil {
+			controller = st.controllers[string(g.Spec.GatewayClassName)]
+		}
+		accepted, why, decided := false, "", false
+		for _, p := range hr.Status.Parents {
+			ref := p.ParentRef
+			if controller == "" || string(p.ControllerName) != controller || string(ref.Name) != gw.Name ||
+				ref.Group != nil && *ref.Group != gatewayv1.GroupName || ref.Kind != nil && *ref.Kind != "Gateway" {
+				continue
+			}
+			ns := hr.Namespace
+			if ref.Namespace != nil {
+				ns = string(*ref.Namespace)
+			}
+			if ns != gw.Namespace {
+				continue
+			}
+			c := meta.FindStatusCondition(p.Conditions, string(gatewayv1.RouteConditionAccepted))
+			switch {
+			case c == nil || c.Status == metav1.ConditionUnknown:
+			case c.Status == metav1.ConditionTrue:
+				accepted = true
+			default:
+				decided = true
+				if why == "" {
+					why = cmp.Or(c.Message, c.Reason)
+				}
+			}
+		}
+		switch {
+		case accepted:
+			ok = append(ok, gw)
+		case decided:
+			refuse = append(refuse, fmt.Sprintf("Gateway %s doesn't accept HTTPRoute %s (%s)", gw, hr.Name, why))
+		default:
+			wait = append(wait, gw.String())
+		}
+	}
+	if len(wait) > 0 {
+		waiting = fmt.Sprintf("waiting for %s to accept HTTPRoute %s on Gateway %s: the operator wires a Gateway once it accepts the route",
+			proxy, hr.Name, strings.Join(wait, ", "))
+	}
+	if len(refuse) > 0 {
+		refused = strings.Join(refuse, "; ") + ": the operator wires only Gateways that accept the route"
+	}
+	return ok, waiting, refused
+}
+
+// notAccepted is the Pending message of a route that no Gateway of the
+// integration accepts.
+func notAccepted(waiting, refused string) string {
+	return strings.Join(slices.DeleteFunc([]string{waiting, refused}, func(s string) bool { return s == "" }), "; ")
 }
 
 // unwired are the controllers of classes that no integration wires: their

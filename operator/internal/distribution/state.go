@@ -44,9 +44,22 @@ type Engine struct {
 	Replica     string    `json:"replica"`
 	ConnectedAt time.Time `json:"connectedAt"`
 
-	// conn identifies the stream that owns the record: an engine that
-	// reconnects to the same replica replaces it.
+	// key is the record's key in the table (Key); conn identifies the
+	// stream that owns the record: an engine that reconnects to the same
+	// replica replaces it.
+	key  string
 	conn uint64
+}
+
+// Key is the table key of an engine authenticated as id that says it is
+// engineID: the pod its token is bound to, otherwise its ServiceAccount
+// and engineID. An engine can't take the record of another pod, or of
+// another ServiceAccount's engine, by naming its engine ID.
+func Key(id Identity, engineID string) string {
+	if id.PodName != "" {
+		return "pod/" + id.PodNamespace + "/" + id.PodName
+	}
+	return "sa/" + id.ServiceAccount + "/" + engineID
 }
 
 // Table is a replica's connected engines.
@@ -60,34 +73,35 @@ type Table struct {
 // NewTable returns an empty table.
 func NewTable() *Table { return &Table{engines: map[string]*Engine{}} }
 
-// Update changes the engine with id, if it is connected; f reports whether
-// it changed anything.
-func (t *Table) Update(id string, f func(*Engine) bool) {
+// Update changes the record of key if conn still owns it; f reports
+// whether it changed anything.
+func (t *Table) Update(key string, conn uint64, f func(*Engine) bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if e, ok := t.engines[id]; ok && f(e) {
+	if e, ok := t.engines[key]; ok && e.conn == conn && f(e) {
 		t.gen++
 	}
 }
 
-// Connect records a new stream for the engine e.ID, replacing an older one,
-// and returns the connection to pass to Disconnect.
-func (t *Table) Connect(e Engine) uint64 {
+// Connect records a new stream for the engine e under key (Key), replacing
+// an older one, and returns the connection to pass to Update and
+// Disconnect.
+func (t *Table) Connect(key string, e Engine) uint64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.conns++
-	e.conn = t.conns
-	t.engines[e.ID] = &e
+	e.key, e.conn = key, t.conns
+	t.engines[key] = &e
 	t.gen++
 	return e.conn
 }
 
-// Disconnect forgets the engine id if conn still owns its record.
-func (t *Table) Disconnect(id string, conn uint64) {
+// Disconnect forgets the record of key if conn still owns it.
+func (t *Table) Disconnect(key string, conn uint64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if e, ok := t.engines[id]; ok && e.conn == conn {
-		delete(t.engines, id)
+	if e, ok := t.engines[key]; ok && e.conn == conn {
+		delete(t.engines, key)
 		t.gen++
 	}
 }
@@ -101,7 +115,12 @@ func (t *Table) Snapshot() ([]Engine, uint64) {
 	for _, e := range t.engines {
 		out = append(out, *e)
 	}
-	slices.SortFunc(out, func(a, b Engine) int { return strings.Compare(a.ID, b.ID) })
+	slices.SortFunc(out, func(a, b Engine) int {
+		if c := strings.Compare(a.ID, b.ID); c != 0 {
+			return c
+		}
+		return strings.Compare(a.key, b.key)
+	})
 	return out, t.gen
 }
 

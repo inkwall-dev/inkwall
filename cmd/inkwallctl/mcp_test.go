@@ -378,3 +378,18 @@ func TestMCPFlags(t *testing.T) {
 		t.Errorf("exit %d, %s", code, errOut)
 	}
 }
+
+// TestMCPExplainRuleVariablesUntrusted: the match variables name what the
+// client sent (ARGS:<its argument name>), so they are listed as untrusted.
+func TestMCPExplainRuleVariablesUntrusted(t *testing.T) {
+	ec, _ := explainTestCluster(t)
+	cs := mcpSession(t, ec)
+	var re RequestExplanation
+	call(t, cs, "explain_request", map[string]any{"requestId": "req-deny", "since": "2h"}, &re)
+	if !re.Found || len(re.Events) == 0 || len(re.Events[0].Rules) == 0 || len(re.Events[0].Rules[0].Variables) == 0 {
+		t.Fatalf("no rule variables: %+v", re)
+	}
+	if !slices.Contains(re.Untrusted, "events[].rules[].variables") {
+		t.Errorf("untrusted %q lacks events[].rules[].variables", re.Untrusted)
+	}
+}

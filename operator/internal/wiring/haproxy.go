@@ -160,6 +160,18 @@ func haproxySettingsOf(policies []wafv1alpha1.WAFPolicy, ing types.NamespacedNam
 // the engine announced.
 const haproxyFrameTooBig = "3 259"
 
+// haproxyUpgradeRule and haproxyHTTP2SettingsRule forward an upgrade only
+// to WebSocket, after the engine's verdict: any other Upgrade (TLS/1.2,
+// "h2c, foo", ...) and HTTP2-Settings are removed, so the app can't switch
+// the connection to a protocol whose traffic the engine doesn't see.
+// req.fhdr reads the whole value, not its comma-separated parts. (HAProxy
+// itself drops h2c and h2, and forwards a WebSocket handshake's Upgrade as
+// "websocket" alone.)
+const (
+	haproxyUpgradeRule       = "http-request del-header upgrade unless { req.fhdr_cnt(upgrade) eq 1 } { req.fhdr(upgrade) -m str -i websocket }"
+	haproxyHTTP2SettingsRule = "http-request del-header http2-settings"
+)
+
 // HAProxySnippetOptions are what a route's snippet depends on, from its
 // policies.
 type HAProxySnippetOptions struct {
@@ -181,7 +193,7 @@ type HAProxySnippetOptions struct {
 // §4), handled as oversized whatever the failure mode; failing closed,
 // 503 without a verdict, a denied
 // gRPC call's answer, and a rule per status the engine denies with; the
-// request ID for the app. With responses (a policy inspects them, and
+// request ID for the app, and any Upgrade but WebSocket's removed. With responses (a policy inspects them, and
 // every pod's engine keeps requests for them), the filter is spoe.conf's
 // inkwall-responses scope, and the response rules of
 // examples/haproxy/haproxy.cfg follow (0006 §4): the request's
@@ -218,6 +230,8 @@ func HAProxySnippet(o HAProxySnippetOptions) string {
 	}
 	lines = append(lines,
 		`http-request deny deny_status 403 hdr x-request-id "%[`+v("request_id")+`]" if { `+v("action")+` -m str deny }`,
+		haproxyUpgradeRule,
+		haproxyHTTP2SettingsRule,
 		`http-request set-header X-Request-Id "%[`+v("request_id")+`]" if { `+v("request_id")+` -m found }`)
 	if responses {
 		kept := "{ " + v("responses") + " -m found }"
@@ -227,7 +241,10 @@ func HAProxySnippet(o HAProxySnippetOptions) string {
 		}
 		lines = append(lines,
 			"http-request del-header accept-encoding if "+kept,
-			"http-response wait-for-body time 2s if "+kept+" { res.hdr(content-type) -m beg -i "+strings.Join(engrules.ResponseBodyTypes, " ")+" }",
+			"http-request del-header range if "+kept,
+			"http-request del-header if-range if "+kept,
+			"http-response set-var(txn.inkwall.response_whole) bool(1) if "+HAProxyReadBody(kept),
+			"http-response wait-for-body time 2s if { var(txn.inkwall.response_whole) -m found }",
 			"http-response send-spoe-group "+injection.HAProxyResponsesScope+" "+injection.HAProxyResponseGroup+" if "+kept)
 		if o.Block {
 			// A response HAProxy couldn't fit in one frame: oversized.
@@ -246,6 +263,35 @@ func HAProxySnippet(o HAProxySnippetOptions) string {
 	lines = append(lines, haproxySnippetEnd)
 	return strings.Join(lines, "\n")
 }
+
+// HAProxyReadBody is the condition, for a response on a route where cond
+// holds, that the engine reads its body (rules.ResponseBodyType): a
+// Content-Type that isn't one type/subtype (or none), one of
+// rules.ResponseBodyTypes, or one with a +json or +xml suffix but for
+// gRPC's and Connect's streams. HAProxy's types are a narrower set of
+// characters than the engine's, so it waits for a body the engine might
+// not read rather than miss one it reads. Such a response gets
+// txn.inkwall.response_whole, sent to the engine (spoe.ArgWhole): HAProxy
+// waits for its whole body (wait-for-body), up to a full buffer, which the
+// engine tells by the frame's size, and answers 504 itself when the body
+// doesn't come in time. Without it, the engine counts a body without
+// Content-Length as cut.
+func HAProxyReadBody(cond string) string {
+	types := make([]string, len(engrules.ResponseBodyTypes))
+	for i, t := range engrules.ResponseBodyTypes {
+		types[i] = strings.ReplaceAll(t, "+", "[+]")
+	}
+	const ct = "res.fhdr(content-type)"
+	valid := `'^` + haproxyTypePart + `/` + haproxyTypePart + `[[:blank:]]*(;|$)'`
+	read := `'^(` + strings.Join(types, "|") + `|` + haproxyTypePart + `/[a-z0-9.+_-]*[+](json|xml))[[:blank:]]*(;|$)'`
+	return cond + " !{ " + ct + " -m reg -i " + valid + " } || " +
+		cond + " { " + ct + " -m reg -i " + read + " } !{ " + ct + " -m beg -i application/grpc application/connect+ }"
+}
+
+// haproxyTypePart is a media type's part as HAProxy's response rules match
+// it: fewer characters than a token's, so a type with others counts as
+// malformed, whose body the engine reads.
+const haproxyTypePart = "[a-z0-9.+_-]+"
 
 // withSnippet returns a backend snippet with the operator's part (ours,
 // empty: none) first, and the user's lines after it, kept as they were.

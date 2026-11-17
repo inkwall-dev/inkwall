@@ -46,6 +46,15 @@ const (
 	ReasonConflict          = "Conflict"
 	ReasonRuleCompileError  = "RuleCompileError"
 	ReasonTargetUnsupported = "TargetUnsupported"
+	// ReasonTargetNotAttached: an HTTPRoute target no Gateway of an
+	// integration accepted; the policy doesn't apply to it.
+	ReasonTargetNotAttached = "TargetNotAttached"
+	// ReasonRouteOverlap: a route of the policy overlaps a route of a
+	// policy in another namespace that the engine can't tell apart from it.
+	ReasonRouteOverlap = "RouteOverlap"
+	// ReasonRuleSetsIncompatible: the policy's rule sets compile alone but
+	// not together, as the engine loads them.
+	ReasonRuleSetsIncompatible = "RuleSetsIncompatible"
 )
 
 // PolicyValid is the Accepted message of a policy that resolved with
@@ -75,6 +84,13 @@ type Input struct {
 	// CheckRules checks SecLang read from a ConfigMap
 	// (coraza.CheckUserRules); inline rules were checked at admission.
 	CheckRules func(string) error
+	// AssumeAttached takes every HTTPRoute as accepted by its Gateways,
+	// for objects read from files, which have no status.
+	AssumeAttached bool
+	// CheckPolicy compiles a policy with its rule sets as the engine does
+	// (policy.CheckPolicy): rule sets valid alone may not be together
+	// (duplicate rule IDs). Nil: not checked.
+	CheckPolicy func(*bundlev1.Policy, []*bundlev1.RuleSet) error
 }
 
 // Status is a resolved Accepted condition.
@@ -206,14 +222,27 @@ type candidate struct {
 	// rank is the precedence of each route (by routeKey), from its most
 	// specific target.
 	rank map[string]int
+	// domains are the domains of each route (by routeKey): see overlap.go.
+	domains map[string]map[string]bool
+	// overlaps describe the routes the policy shares with policies of
+	// other namespaces; lost is set when one of them applies instead.
+	overlaps []string
+	lost     bool
 }
 
-// addRoutes adds routes from a target of the given precedence.
-func (c *candidate) addRoutes(rank int, routes []*bundlev1.RouteMatch) {
+// addRoutes adds routes from a target of the given precedence, routed in
+// the given domains.
+func (c *candidate) addRoutes(rank int, routes []*bundlev1.RouteMatch, domains ...string) {
 	c.policy.Routes = append(c.policy.Routes, routes...)
 	for _, m := range routes {
 		k := routeKey(m)
 		c.rank[k] = max(c.rank[k], rank)
+		if c.domains[k] == nil {
+			c.domains[k] = map[string]bool{}
+		}
+		for _, d := range domains {
+			c.domains[k][d] = true
+		}
 	}
 }
 
@@ -282,13 +311,26 @@ func (r *resolution) resolvePolicies() {
 	}
 
 	// The policy each candidate puts in the bundle: its spec, or its
-	// previous version; nil: left out.
+	// previous version; nil: left out. A policy whose rule sets the engine
+	// can't compile together is left out too (or keeps its previous
+	// version, if that compiles): in the bundle, it would make every engine
+	// refuse the bundle, for every policy.
 	pols := make([]*bundlev1.Policy, len(cands))
 	for i, c := range cands {
 		pols[i] = c.policy
+		if !c.failed {
+			if err := r.checkPolicy(c.policy, r.ruleSets); err != nil {
+				c.fail(ReasonRuleSetsIncompatible, fmt.Sprintf("its rule sets don't compile together: %v", err))
+			}
+		}
 		if c.failed {
 			prev, ok := previous[c.policy.GetId()]
 			if !ok {
+				pols[i] = nil
+				continue
+			}
+			if err := r.checkPolicy(prev, previousRuleSets); err != nil {
+				c.status.Message += "; its previous version doesn't compile either, so the policy is left out"
 				pols[i] = nil
 				continue
 			}
@@ -300,25 +342,39 @@ func (r *resolution) resolvePolicies() {
 	// A route of several policies (from routes with the same host and path)
 	// goes to the most specific target, then to the older policy. A route
 	// of a previous version that the spec doesn't give ranks as an Ingress.
+	// Between namespaces, it goes to the older policy unless a newer one is
+	// stricter (dominates): a tenant can't take a route from another
+	// tenant's policy with a more specific target, nor weaken it.
 	type claim struct {
 		c    *candidate
 		rank int
+		i    int
 	}
 	routeOwner := map[string]claim{}
 	for i, c := range cands {
 		for _, m := range pols[i].GetRoutes() {
 			k := routeKey(m)
-			if o, ok := routeOwner[k]; !ok || c.rank[k] > o.rank {
-				routeOwner[k] = claim{c, c.rank[k]}
+			o, ok := routeOwner[k]
+			switch {
+			case !ok:
+				routeOwner[k] = claim{c, c.rank[k], i}
+			case o.c.key.Namespace != c.key.Namespace:
+				if dominates(pols[i], pols[o.i]) {
+					routeOwner[k] = claim{c, c.rank[k], i}
+				}
+			case c.rank[k] > o.rank:
+				routeOwner[k] = claim{c, c.rank[k], i}
 			}
 		}
 	}
+
+	// Overlapping routes of different namespaces, not of the same key.
+	removed := r.overlaps(cands, pols, func(i int, m *bundlev1.RouteMatch) bool { return routeOwner[routeKey(m)].i == i })
 
 	used := map[string]*bundlev1.RuleSet{}
 	for i, c := range cands {
 		pol := pols[i]
 		if pol == nil {
-			r.out.PolicyStatus[c.key] = c.status
 			continue
 		}
 		usedRuleSets := r.ruleSets
@@ -331,12 +387,21 @@ func (r *resolution) resolvePolicies() {
 		for _, m := range pol.GetRoutes() {
 			k := routeKey(m)
 			switch o := routeOwner[k]; {
+			case o.c != c && o.c.key.Namespace != c.key.Namespace:
+				if !seen[k] {
+					seen[k] = true
+					c.lost = true
+					c.overlaps = append(c.overlaps, fmt.Sprintf("%s: WAFPolicy %s applies to it", describeRoute(m), o.c.policy.GetId()))
+					o.c.overlaps = append(o.c.overlaps, fmt.Sprintf("%s: this policy applies to it, not WAFPolicy %s", describeRoute(m), c.policy.GetId()))
+				}
 			case o.c != c:
 				why := "older policy"
 				if o.rank > c.rank[k] {
 					why = "policy on a more specific target"
 				}
 				shadowed = append(shadowed, fmt.Sprintf("%s (%s %s)", describeRoute(m), why, o.c.policy.GetId()))
+			case removed[i][k]:
+				seen[k] = true
 			case !seen[k]:
 				seen[k] = true
 				kept = append(kept, m)
@@ -352,6 +417,10 @@ func (r *resolution) resolvePolicies() {
 		}
 		c.status.Applied = !c.failed
 		r.out.Policies = append(r.out.Policies, pol)
+	}
+	// After every policy's routes: an overlap is reported on both.
+	for _, c := range cands {
+		c.reportOverlaps()
 		r.out.PolicyStatus[c.key] = c.status
 	}
 
@@ -362,6 +431,111 @@ func (r *resolution) resolvePolicies() {
 		}
 	}
 	slices.SortFunc(r.out.RuleSets, func(a, b *bundlev1.RuleSet) int { return cmp.Compare(a.GetId(), b.GetId()) })
+}
+
+// reportOverlaps adds the routes the policy shares with policies of other
+// namespaces to its status. A policy that doesn't apply to one of its
+// routes is not Accepted; one that applies to them is, with
+// ReasonRouteOverlap, so that both sides see the overlap.
+func (c *candidate) reportOverlaps() {
+	if len(c.overlaps) == 0 {
+		return
+	}
+	slices.Sort(c.overlaps)
+	msg := "routes that overlap routes of WAFPolicies in other namespaces, which the engine can't tell apart (a host served by two proxies or Gateways, or the same route): " +
+		strings.Join(slices.Compact(c.overlaps), ", ")
+	if c.failed {
+		c.status.Message += "; " + msg
+		return
+	}
+	if c.lost {
+		c.status.Accepted = false
+		c.status.Reason = ReasonRouteOverlap
+	} else if c.status.Reason == ReasonAccepted {
+		c.status.Reason = ReasonRouteOverlap
+	}
+	c.status.Message += "; " + msg
+}
+
+// checkPolicy compiles a policy with the rule sets it binds (from
+// ruleSets), as the engine does; nil when Input.CheckPolicy isn't set.
+func (r *resolution) checkPolicy(p *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet) error {
+	if r.in.CheckPolicy == nil {
+		return nil
+	}
+	var bound []*bundlev1.RuleSet
+	for _, b := range p.GetRuleSets() {
+		if rs, ok := ruleSets[b.GetRuleSetId()]; ok {
+			bound = append(bound, rs)
+		}
+	}
+	return r.in.CheckPolicy(p, bound)
+}
+
+// overlaps settles the routes of different namespaces that overlap without
+// being the same route (overlap.go): where the engine can't follow the
+// proxy, the more specific route, which the engine picks, is left out
+// unless its policy is the one the overlap goes to. owned reports whether
+// a candidate's route is its own after the same-route precedence. It
+// returns, by candidate, the route keys left out.
+func (r *resolution) overlaps(cands []*candidate, pols []*bundlev1.Policy, owned func(int, *bundlev1.RouteMatch) bool) map[int]map[string]bool {
+	type entry struct {
+		i int
+		m *bundlev1.RouteMatch
+	}
+	var entries []entry
+	var routes []*bundlev1.RouteMatch
+	for i, pol := range pols {
+		seen := map[string]bool{}
+		for _, m := range pol.GetRoutes() {
+			if k := routeKey(m); !seen[k] && owned(i, m) {
+				seen[k] = true
+				entries = append(entries, entry{i, m})
+				routes = append(routes, m)
+			}
+		}
+	}
+	removed := map[int]map[string]bool{}
+	domains := func(e entry) map[string]bool {
+		if cands[e.i].failed { // a previous version: its routes' domains are unknown
+			return nil
+		}
+		return cands[e.i].domains[routeKey(e.m)]
+	}
+	overlapPairs(routes, func(x, y int) {
+		a, b := entries[x], entries[y]
+		ca, cb := cands[a.i], cands[b.i]
+		if ca.key.Namespace == cb.key.Namespace || !routesOverlap(a.m, b.m) {
+			return
+		}
+		spec := compareSpecificity(a.m, b.m)
+		if spec != 0 && sameDomain(domains(a), domains(b)) {
+			return // one proxy routes both, as the engine does
+		}
+		// The policy the overlap goes to: the stricter, else the older
+		// (cands are oldest first).
+		win, lose := a, b
+		if dominates(pols[b.i], pols[a.i]) || !dominates(pols[a.i], pols[b.i]) && b.i < a.i {
+			win, lose = b, a
+		}
+		// The route the engine picks in the overlap; on a tie, either.
+		picked := a
+		if spec > 0 {
+			picked = b
+		}
+		if spec == 0 || picked == lose {
+			k := routeKey(lose.m)
+			if removed[lose.i] == nil {
+				removed[lose.i] = map[string]bool{}
+			}
+			removed[lose.i][k] = true
+		}
+		cl, cw := cands[lose.i], cands[win.i]
+		cl.lost = true
+		cl.overlaps = append(cl.overlaps, fmt.Sprintf("%s: WAFPolicy %s applies to %s", describeRoute(lose.m), cw.policy.GetId(), describeRoute(win.m)))
+		cw.overlaps = append(cw.overlaps, fmt.Sprintf("%s: this policy applies to it, not WAFPolicy %s's %s", describeRoute(win.m), cl.policy.GetId(), describeRoute(lose.m)))
+	})
+	return removed
 }
 
 func (c *candidate) fail(reason, message string) {
@@ -377,10 +551,11 @@ func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.Nam
 	ingressRoutes map[types.NamespacedName]*unstructured.Unstructured, httpRoutes map[types.NamespacedName]*gatewayv1.HTTPRoute,
 	virtualServices map[types.NamespacedName]*unstructured.Unstructured) *candidate {
 	c := &candidate{
-		obj:    p,
-		key:    types.NamespacedName{Namespace: p.Namespace, Name: p.Name},
-		status: Status{Accepted: true, Reason: ReasonAccepted, Message: PolicyValid},
-		rank:   map[string]int{},
+		obj:     p,
+		key:     types.NamespacedName{Namespace: p.Namespace, Name: p.Name},
+		status:  Status{Accepted: true, Reason: ReasonAccepted, Message: PolicyValid},
+		rank:    map[string]int{},
+		domains: map[string]map[string]bool{},
 	}
 	c.policy = convertSpec(PolicyID(p.Namespace, p.Name), p.Spec)
 
@@ -420,7 +595,7 @@ func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.Nam
 		}
 	}
 
-	var missing []string
+	var missing, unattached []string
 	for _, t := range p.Spec.TargetRefs {
 		switch t.Kind {
 		case "Ingress":
@@ -429,7 +604,7 @@ func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.Nam
 				missing = append(missing, "Ingress "+t.Name)
 				continue
 			}
-			c.addRoutes(rankIngress, ingressMatches(ing))
+			c.addRoutes(rankIngress, ingressMatches(ing), ingressDomain(ing))
 		case "IngressRoute":
 			ir, ok := ingressRoutes[types.NamespacedName{Namespace: p.Namespace, Name: t.Name}]
 			if !ok {
@@ -441,11 +616,19 @@ func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.Nam
 				c.fail(ReasonTargetUnsupported, fmt.Sprintf("IngressRoute %s: %v", t.Name, err))
 				continue
 			}
-			c.addRoutes(rankIngress, routes)
+			c.addRoutes(rankIngress, routes, objectDomain(t.Kind, p.Namespace, t.Name))
 		case "HTTPRoute":
 			hr, ok := httpRoutes[types.NamespacedName{Namespace: p.Namespace, Name: t.Name}]
 			if !ok {
 				missing = append(missing, "HTTPRoute "+t.Name)
+				continue
+			}
+			gateways := AttachedGateways(hr)
+			if len(gateways) == 0 && r.in.AssumeAttached {
+				gateways = []string{"HTTPRoute " + p.Namespace + "/" + t.Name}
+			}
+			if len(gateways) == 0 {
+				unattached = append(unattached, "HTTPRoute "+t.Name)
 				continue
 			}
 			routes, err := httpRouteMatches(hr, t.SectionName)
@@ -461,7 +644,11 @@ func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.Nam
 			if t.SectionName != "" {
 				rank = rankHTTPRouteRule
 			}
-			c.addRoutes(rank, routes)
+			var domains []string
+			for _, gw := range gateways {
+				domains = append(domains, gatewayDomain(gw))
+			}
+			c.addRoutes(rank, routes, domains...)
 		case "VirtualService":
 			vs, ok := virtualServices[types.NamespacedName{Namespace: p.Namespace, Name: t.Name}]
 			if !ok {
@@ -473,22 +660,35 @@ func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.Nam
 				c.fail(ReasonTargetUnsupported, fmt.Sprintf("VirtualService %s: %v", t.Name, err))
 				continue
 			}
-			c.addRoutes(rankIngress, routes)
+			c.addRoutes(rankIngress, routes, objectDomain(t.Kind, p.Namespace, t.Name))
 		default:
 			c.fail(ReasonTargetUnsupported, fmt.Sprintf("%s %s: only Ingress, IngressRoute, HTTPRoute and VirtualService targets are resolved", t.Kind, t.Name))
 		}
 	}
-	if len(missing) > 0 {
+	if len(missing) > 0 || len(unattached) > 0 {
 		// A missing target is a route that doesn't exist (yet), not a reason
-		// to fall back: the policy still applies to its other targets.
-		msg := strings.Join(missing, ", ") + " not found"
-		if len(missing) < len(p.Spec.TargetRefs) {
+		// to fall back: the policy still applies to its other targets. So is
+		// an HTTPRoute no Gateway accepted: no proxy routes it (yet).
+		var msgs []string
+		reason := ReasonInvalidRef
+		if len(missing) > 0 {
+			msgs = append(msgs, strings.Join(missing, ", ")+" not found")
+		}
+		if len(unattached) > 0 {
+			msgs = append(msgs, strings.Join(unattached, ", ")+
+				" not accepted by a Gateway of a proxy Inkwall integrates with (no Accepted parent in its status), so the policy doesn't apply to it")
+			if len(missing) == 0 {
+				reason = ReasonTargetNotAttached
+			}
+		}
+		msg := strings.Join(msgs, "; ")
+		if len(missing)+len(unattached) < len(p.Spec.TargetRefs) {
 			msg += "; the policy applies to its other targets"
 		}
 		if c.failed {
 			c.status.Message += "; " + msg
 		} else {
-			c.status = Status{Reason: ReasonInvalidRef, Message: msg}
+			c.status = Status{Reason: reason, Message: msg}
 		}
 	}
 	return c

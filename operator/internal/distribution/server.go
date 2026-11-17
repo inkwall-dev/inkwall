@@ -174,12 +174,14 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 		Replica:        s.Replica,
 		ConnectedAt:    time.Now().UTC(),
 	}
-	// A pod-bound token is the authoritative source.
+	// A pod-bound token is the authoritative source, and the record is the
+	// pod's: the engine ID the Hello gives can't name another's record.
 	if id.PodName != "" {
 		e.PodNamespace, e.PodName = id.PodNamespace, id.PodName
 	}
-	conn := s.Engines.Connect(e)
-	defer s.Engines.Disconnect(engineID, conn)
+	key := Key(id, engineID)
+	conn := s.Engines.Connect(key, e)
+	defer s.Engines.Disconnect(key, conn)
 	log := s.Log.WithValues("engine", engineID, "serviceAccount", id.ServiceAccount, "pod", e.PodNamespace+"/"+e.PodName)
 	log.Info("engine connected", "bundle", hello.GetBundleVersion())
 	defer log.Info("engine disconnected")
@@ -222,7 +224,7 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 				s.stats(counts, st)
 				continue
 			}
-			if err := s.record(engineID, r.msg, log); err != nil {
+			if err := s.record(key, conn, r.msg, log); err != nil {
 				return status.Error(codes.InvalidArgument, err.Error())
 			}
 		case <-idle.C:
@@ -375,15 +377,15 @@ func truncate(s string, n int) string {
 }
 
 // record takes an engine's Ack, Nack or Heartbeat; an error ends the stream.
-func (s *Server) record(engineID string, msg *agentv1.WatchRequest, log logr.Logger) error {
+func (s *Server) record(key string, conn uint64, msg *agentv1.WatchRequest, log logr.Logger) error {
 	switch m := msg.GetMsg().(type) {
 	case *agentv1.WatchRequest_Ack:
 		v := m.Ack.GetBundleVersion()
-		s.Engines.Update(engineID, func(e *Engine) bool { return set(&e.Applied, v) })
+		s.Engines.Update(key, conn, func(e *Engine) bool { return set(&e.Applied, v) })
 		log.V(1).Info("bundle applied", "version", v)
 	case *agentv1.WatchRequest_Nack:
 		v, reason := m.Nack.GetBundleVersion(), truncate(m.Nack.GetError(), maxRejectError)
-		s.Engines.Update(engineID, func(e *Engine) bool {
+		s.Engines.Update(key, conn, func(e *Engine) bool {
 			a, b := set(&e.Rejected, v), set(&e.RejectError, reason) // both, no short circuit
 			return a || b
 		})
@@ -397,7 +399,7 @@ func (s *Server) record(engineID string, msg *agentv1.WatchRequest, log logr.Log
 		if err := checkReceipts(receipts); err != nil {
 			return err
 		}
-		s.Engines.Update(engineID, func(e *Engine) bool {
+		s.Engines.Update(key, conn, func(e *Engine) bool {
 			changed := set(&e.Applied, v)
 			if !slices.Equal(e.TrustedKeys, keys) {
 				e.TrustedKeys, changed = keys, true

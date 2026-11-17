@@ -367,7 +367,10 @@ most 64 bytes of what it matched. The engine never sends a snippet of:
   `ARGS:q` keeps its snippet. Some harmless names match (`author`): a missing snippet is the safe
   mistake;
 - a whole query string or body (`QUERY_STRING`, `REQUEST_URI`, `REQUEST_BODY`) whose snippet
-  contains one of those names.
+  contains one of those names;
+- a value whose name says nothing of what it holds: XML text (`XML:/*`), a gRPC message's field,
+  named by its numbers (`ARGS_POST:2.1`), and a WebSocket message's text (`ARGS_POST:message`;
+  a JSON message's values keep their paths and are checked as arguments).
 
 `spec.events.redact` on the `InkwallConfig` adds to that:
 

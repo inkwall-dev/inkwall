@@ -65,7 +65,7 @@ func spoeScope(name string, responses bool) string {
 		groups, respond = "    groups "+HAProxyResponseGroup+"\n", "bool(1)"
 		group = `
 spoe-message inkwall-response
-    args status=status headers=res.hdrs_bin body=res.body key=var(txn.inkwall.responses) failure=var(txn.inkwall.response_failure)
+    args status=status headers=res.hdrs_bin body=res.body key=var(txn.inkwall.responses) failure=var(txn.inkwall.response_failure) whole=var(txn.inkwall.response_whole)
 
 spoe-group ` + HAProxyResponseGroup + `
     messages inkwall-response
