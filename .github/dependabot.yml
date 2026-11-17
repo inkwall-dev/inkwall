@@ -52,13 +52,13 @@ updates:
     groups: {release-0.4-go: {patterns: ["*"]}}
   - package-ecosystem: gomod
     directories: ["/"]
-    target-branch: release-0.3
+    target-branch: release-0.6
     schedule: {interval: weekly}
     commit-message: {prefix: build, include: scope}
     ignore:
       - dependency-name: "*"
         update-types: [version-update:semver-major, version-update:semver-minor]
-    groups: {release-0.3-go: {patterns: ["*"]}}
+    groups: {release-0.6-go: {patterns: ["*"]}}
   - package-ecosystem: gomod
     directories: ["/"]
     target-branch: release-0.5
@@ -79,13 +79,13 @@ updates:
     groups: {release-0.4-images: {patterns: ["*"]}}
   - package-ecosystem: docker
     directory: /
-    target-branch: release-0.3
+    target-branch: release-0.6
     schedule: {interval: weekly}
     commit-message: {prefix: build, include: scope}
     ignore:
       - dependency-name: "*"
         update-types: [version-update:semver-major, version-update:semver-minor]
-    groups: {release-0.3-images: {patterns: ["*"]}}
+    groups: {release-0.6-images: {patterns: ["*"]}}
   - package-ecosystem: docker
     directory: /
     target-branch: release-0.5
