@@ -55,6 +55,8 @@ func TestMigrateGolden(t *testing.T) {
 		{"canary", []string{"-f", filepath.Join("testdata", "migrate", "canary.yaml")}, 0},
 		{"streq", []string{"-f", filepath.Join("testdata", "migrate", "streq.yaml")}, 1},
 		{"partial", []string{"-f", filepath.Join("testdata", "migrate", "partial.yaml")}, 0},
+		// A ctl action in a chain is conditional: not migrated.
+		{"chain", []string{"-f", filepath.Join("testdata", "migrate", "chain.yaml")}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			code, out, errOut := runCLI(t, append([]string{"migrate", "ingress-nginx"}, tc.args...)...)
@@ -440,6 +442,19 @@ SecRule ARGS:debug "@streq true" "id:1100,phase:1,deny,status:403"`},
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1},
 		{name: "custom ctl rule", annotations: snippet(`SecRule REQUEST_HEADERS:Host "@streq a" "id:1,phase:1,pass,nolog,ctl:ruleRemoveById=942100"`),
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1},
+		{name: "chained ctl skip", annotations: snippet("SecRule REQUEST_METHOD \"@streq OPTIONS\" \"id:1000,phase:1,pass,nolog,chain\"\n  SecRule REQUEST_FILENAME \"@beginsWith /api\" \"ctl:ruleEngine=Off\""),
+			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1, contains: "whole chain matches"},
+		{name: "chained ctl exclusion", annotations: snippet("SecRule ARGS:action \"@streq heartbeat\" \"id:1001,phase:1,pass,nolog,chain\"\n  SecRule REQUEST_FILENAME \"@streq /wp-admin/admin-ajax.php\" \"ctl:ruleRemoveById=942100\""),
+			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1, contains: "whole chain matches"},
+		{name: "chained ctl on the first rule", annotations: snippet("SecRule REQUEST_FILENAME \"@beginsWith /api\" \"id:1002,phase:1,pass,nolog,ctl:ruleEngine=Off,chain\"\n  SecRule REQUEST_METHOD \"@streq OPTIONS\""),
+			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1, contains: "whole chain matches"},
+		{name: "chained ctl three rules", annotations: snippet("SecRule REQUEST_METHOD \"@streq OPTIONS\" \"id:1003,phase:1,pass,nolog,chain\"\n  SecRule ARGS:a \"@streq b\" \"chain\"\n  SecRule REQUEST_FILENAME \"@beginsWith /api\" \"ctl:ruleRemoveById=942100\""),
+			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1, contains: "whole chain matches"},
+		{name: "chained rule kept whole", annotations: snippet("SecRule ARGS:a \"@streq x\" \"id:1004,phase:1,deny,status:403,chain\"\n  SecRule ARGS:b \"@streq y\""),
+			want:    "mode: Detect\nruleSets:\n- ref:\n    kind: ClusterWAFRuleSet\n    name: owasp-crs-v4\n- ref:\n    kind: WAFRuleSet\n    name: app-modsecurity\ntargetRefs:\n- kind: Ingress\n  name: app\n",
+			ruleSet: "SecRule ARGS:a \"@streq x\" \"id:1004,phase:1,deny,status:403,chain\"\nSecRule ARGS:b \"@streq y\"\n"},
+		{name: "chain without its last rule", annotations: snippet("SecRule ARGS:a \"@streq x\" \"id:1005,phase:1,deny,status:403,chain\"\nSecRuleRemoveById 942100"),
+			want: "exclusions:\n- ruleIDs:\n  - 942100\nmode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1, contains: "doesn't end in a rule"},
 		{name: "unsupported directives", annotations: snippet("SecRequestBodyNoFilesLimit 1\nSecResponseBodyAccess On\nInclude /x.conf\nSecAuditLog /dev/stdout"),
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 3},
 		{name: "unbalanced quotes", annotations: snippet(`SecRule ARGS "@rx a`),
@@ -670,5 +685,70 @@ func TestGlobalNginxSnippets(t *testing.T) {
 	got := globalSettings(cm, io.Discard).nginxSnippets
 	if want := []string{"ConfigMap ingress-nginx/c http-snippet"}; !slices.Equal(got, want) {
 		t.Errorf("nginx snippets %q, want %q", got, want)
+	}
+}
+
+// TestMigrateOutputStaysInDirectory refuses objects from files whose names
+// the API server wouldn't accept: the names make the file names --output
+// writes.
+func TestMigrateOutputStaysInDirectory(t *testing.T) {
+	for _, tc := range []struct{ name, namespace string }{
+		{"/../../../escaped", "web"},
+		{"../escaped", "web"},
+		{"a/b", "web"},
+		{"Web", "web"},
+		{"shop", "../x"},
+		{"shop", "a.b"},
+	} {
+		t.Run(tc.name+" in "+tc.namespace, func(t *testing.T) {
+			dir := t.TempDir()
+			file := filepath.Join(dir, "in.yaml")
+			doc := fmt.Sprintf(`apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: %q
+  namespace: %q
+  annotations:
+    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
+spec:
+  ingressClassName: nginx
+`, tc.name, tc.namespace)
+			if err := os.WriteFile(file, []byte(doc), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out := filepath.Join(dir, "out", "sub")
+			code, _, errOut := runCLI(t, "migrate", "ingress-nginx", "-f", file, "--output", out)
+			if code != 2 || !strings.Contains(errOut, "error:") {
+				t.Errorf("exit %d, want 2; stderr:\n%s", code, errOut)
+			}
+			err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+				if err == nil && !d.IsDir() && path != file {
+					t.Errorf("wrote %s", path)
+				}
+				return err
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// TestWriteMigrationRefusesPaths writes only plain file names into the
+// output directory.
+func TestWriteMigrationRefusesPaths(t *testing.T) {
+	dir := t.TempDir()
+	m := migrateIngress(ingressWith(map[string]string{annEnable: "true", annCRS: "true"}), nginxGlobal{}, "nginx.ingress.kubernetes.io")
+	m.namespace, m.name = "web", "../../escaped"
+	out := filepath.Join(dir, "out")
+	if err := writeMigration(migrateConfig{outDir: out}, []*migration{m}, io.Discard); err == nil {
+		t.Error("no error")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "web-..", "escaped.yaml")); err == nil {
+		t.Error("wrote outside the directory")
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) > 0 {
+		t.Errorf("wrote %v", entries)
 	}
 }

@@ -285,11 +285,19 @@ func (s *modsec) apply(m *migration, snippet, source string) {
 		m.add(itemTodo, source, "not migrated: can't read it as SecLang: %v", err)
 		return
 	}
-	for _, d := range dirs {
+	for i := 0; i < len(dirs); i++ {
+		d := dirs[i]
 		src := fmt.Sprintf("%s, line %d", source, d.Line)
 		args, ok := splitArgs(d.Text)
 		if !ok {
 			m.add(itemTodo, src, "not migrated: %s: unbalanced quotes", d.Text)
+			continue
+		}
+		if chains(d.Name, args) {
+			// A chain is one rule: never map or keep a part of it.
+			end := chainEnd(dirs, i)
+			s.chain(m, dirs[i:end], src)
+			i = end - 1
 			continue
 		}
 		arg := func(i int) string {
@@ -384,6 +392,68 @@ func (s *modsec) apply(m *migration, snippet, source string) {
 			}
 			m.add(itemTodo, src, "not migrated: %s: no equivalent in Inkwall", d.Text)
 		}
+	}
+}
+
+// ruleActions returns the actions of a SecRule or SecAction, nil for other
+// directives or a rule without actions.
+func ruleActions(name string, args []string) []action {
+	switch {
+	case name == "secrule" && len(args) == 4:
+		return parseActions(args[3])
+	case name == "secaction" && len(args) == 2:
+		return parseActions(args[1])
+	}
+	return nil
+}
+
+// chains reports whether a directive has the chain action: the rule after
+// it is part of it.
+func chains(name string, args []string) bool {
+	return slices.ContainsFunc(ruleActions(name, args), func(a action) bool { return a.name == "chain" })
+}
+
+// chainEnd returns the index after the last directive of the chain that
+// starts at dirs[i]: the SecRules that follow while the one before them
+// has the chain action.
+func chainEnd(dirs []coraza.Directive, i int) int {
+	for j := i; j+1 < len(dirs); j++ {
+		args, ok := splitArgs(dirs[j].Text)
+		if !ok || !chains(dirs[j].Name, args) || dirs[j+1].Name != "secrule" {
+			return j + 1
+		}
+	}
+	return len(dirs)
+}
+
+// chain handles the rules of a chain together. Its ctl actions run only
+// when every rule of the chain matches, which a WAFPolicy exclusion or
+// skipped path can't express: such a chain is not migrated (the CRS rules
+// it would turn off stay on). Any other chain is kept whole.
+func (s *modsec) chain(m *migration, dirs []coraza.Directive, src string) {
+	texts := make([]string, len(dirs))
+	hasCtl, complete := false, true
+	for i, d := range dirs {
+		texts[i] = d.Text
+		args, ok := splitArgs(d.Text)
+		if !ok {
+			complete = false
+			continue
+		}
+		hasCtl = hasCtl || slices.ContainsFunc(ruleActions(d.Name, args), func(a action) bool { return a.name == "ctl" })
+		if i == len(dirs)-1 && chains(d.Name, args) {
+			complete = false
+		}
+	}
+	summary := strings.Join(texts, " ")
+	switch {
+	case !complete:
+		m.add(itemTodo, src, "not migrated: %s: the chain doesn't end in a rule", summary)
+	case hasCtl:
+		m.add(itemTodo, src, "not migrated: %s: a ctl action in a chain runs only when the whole chain matches, and an exclusion or skipped path can't carry the chain's other conditions; convert it by hand", summary)
+	default:
+		s.rules = append(s.rules, rule{text: strings.Join(texts, "\n"), source: src, item: len(m.items)})
+		m.add(itemMapped, src, "kept in the WAFRuleSet: %s", summary)
 	}
 }
 
@@ -802,7 +872,7 @@ func (s *modsec) build(m *migration) {
 			err = re.Err
 		}
 		r := s.rules[bad]
-		m.items[r.item] = item{kind: itemTodo, source: r.source, text: fmt.Sprintf("not migrated: %s: the engine rejects it: %v", r.text, err)}
+		m.items[r.item] = item{kind: itemTodo, source: r.source, text: fmt.Sprintf("not migrated: %s: the engine rejects it: %v", strings.ReplaceAll(r.text, "\n", " "), err)}
 		s.rules = slices.Delete(s.rules, bad, bad+1)
 	}
 	for _, r := range s.rules {
