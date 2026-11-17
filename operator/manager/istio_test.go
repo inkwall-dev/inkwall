@@ -20,6 +20,7 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
 	"github.com/inkwall-dev/inkwall/operator/test/testenv"
@@ -126,6 +127,9 @@ func testIstio(ctx context.Context, t *testing.T, c client.Client) {
 			t.Fatal(err)
 		}
 	}
+	for _, hr := range []*gatewayv1.HTTPRoute{app, api} {
+		acceptRoute(ctx, t, c, hr, acceptedBy(integrations.Istio.GatewayController))
+	}
 	pol := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "istio"}, Spec: wafv1alpha1.WAFPolicySpec{
 		Mode: wafv1alpha1.PolicyBlock,
 		TargetRefs: []wafv1alpha1.TargetRef{
@@ -218,7 +222,6 @@ func testIstio(ctx context.Context, t *testing.T, c client.Client) {
 	eventually(t, "Gateway custom's EnvoyFilter, the whole route", filterHas("custom", []string{`"route":{"name":"istio-apps.app.0"}`}))
 
 	// Wired, in force once Istio accepts the routes on their Gateways.
-	eventually(t, "Pending until Istio accepts the routes", programmed(metav1.ConditionFalse, wiring.ReasonPending, "waiting for Istio to accept HTTPRoute"))
 	accept := func(hr *gatewayv1.HTTPRoute, gw string, status metav1.ConditionStatus) {
 		t.Helper()
 		update(ctx, t, c, hr, func(hr *gatewayv1.HTTPRoute) {
@@ -231,6 +234,7 @@ func testIstio(ctx context.Context, t *testing.T, c client.Client) {
 		})
 	}
 	accept(app, "custom", metav1.ConditionTrue)
+	accept(api, "plain", metav1.ConditionUnknown)
 	eventually(t, "Pending on the other route", programmed(metav1.ConditionFalse, wiring.ReasonPending, "HTTPRoute api on Gateway istio-edge/plain"))
 	accept(api, "plain", metav1.ConditionTrue)
 	eventually(t, "Programmed", programmed(metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s) wired to the engine in Istio"))
@@ -273,6 +277,7 @@ func testIstio(ctx context.Context, t *testing.T, c client.Client) {
 	update(ctx, t, c, app, func(hr *gatewayv1.HTTPRoute) {
 		hr.Spec.ParentRefs = append(hr.Spec.ParentRefs, gatewayv1.ParentReference{Name: "far", Namespace: new(gatewayv1.Namespace("istio-elsewhere"))})
 	})
+	acceptRoute(ctx, t, c, app, acceptedBy(integrations.Istio.GatewayController))
 	eventually(t, "Pending on a Gateway outside the proxy namespaces", programmed(metav1.ConditionFalse, wiring.ReasonPending, "Gateway istio-elsewhere/far has no running Istio pod"))
 	// Still inspected on the Gateway that has the engine.
 	if s, err := filter("custom"); err != nil || !strings.Contains(s, "inkwall.ext_proc.istio-apps.app") {

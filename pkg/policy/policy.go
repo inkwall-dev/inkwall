@@ -298,48 +298,9 @@ func Compile(b *bundlev1.Bundle, o Options) (*Set, error) {
 
 func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o Options) (*Policy, [sha256.Size]byte, error) {
 	var key [sha256.Size]byte
-	cfg := coraza.Config{MaxArgs: o.MaxArgs, OnMatch: o.OnMatch}
-	var crs coraza.CRSSettings
-
-	// Rule sets: the built-in CRS (with its paranoia level and threshold)
-	// and SecLang loaded after it, or before it when the binding says so
-	// (#423), each in order. No rule sets: the CRS with its defaults. Rule
-	// sets but no built-in one: those rules alone, the ones placed before
-	// the CRS first.
-	if len(bp.GetRuleSets()) > 0 {
-		cfg.DisableCRS = true
-		var before, directives []string
-		for _, binding := range bp.GetRuleSets() {
-			rs, ok := ruleSets[binding.GetRuleSetId()]
-			if !ok {
-				return nil, key, fmt.Errorf("rule set %s is not in the bundle", binding.GetRuleSetId())
-			}
-			switch src := rs.GetSource().(type) {
-			case *bundlev1.RuleSet_Builtin:
-				if src.Builtin != bundlev1.BuiltinRuleSet_BUILTIN_RULE_SET_CRS_V4 {
-					return nil, key, fmt.Errorf("rule set %s: unknown built-in rule set %s", rs.GetId(), src.Builtin)
-				}
-				cfg.DisableCRS = false
-				crs = coraza.CRSSettings{
-					ParanoiaLevel:              int(binding.GetParanoiaLevel()),
-					InboundAnomalyThreshold:    int(binding.GetInboundAnomalyThreshold()),
-					AllowedMethods:             binding.GetCrs().GetAllowedMethods(),
-					AllowedRequestContentTypes: binding.GetCrs().GetAllowedRequestContentTypes(),
-					DetectionParanoiaLevel:     int(binding.GetCrs().GetDetectionParanoiaLevel()),
-					OutboundAnomalyThreshold:   int(binding.GetCrs().GetOutboundAnomalyThreshold()),
-				}
-			case *bundlev1.RuleSet_Seclang:
-				if binding.GetPlacement() == bundlev1.RuleSetPlacement_RULE_SET_PLACEMENT_BEFORE_CRS {
-					before = append(before, src.Seclang)
-				} else {
-					directives = append(directives, src.Seclang)
-				}
-			default:
-				return nil, key, fmt.Errorf("rule set %s has no source", rs.GetId())
-			}
-		}
-		cfg.DirectivesBeforeCRS = strings.Join(before, "\n")
-		cfg.Directives = strings.Join(directives, "\n")
+	cfg, crs, err := rulesConfig(bp, ruleSets, o)
+	if err != nil {
+		return nil, key, err
 	}
 	var exclusions []coraza.Exclusion
 	for _, e := range append(bp.GetExclusions(), bp.GetTargetExclusions()...) {
@@ -386,7 +347,6 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 	// The compiled rules, shared by every policy with the same key whatever
 	// its CRS settings and exclusions, then this policy's on top.
 	var shared *coraza.Evaluator
-	var err error
 	key = cfg.Key()
 	if o.Evaluators != nil {
 		shared, err = o.Evaluators.get(key, cfg)
@@ -453,6 +413,102 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 		pc.Timeout = t.AsDuration()
 	}
 	return &Policy{ID: bp.GetId(), pipeline: pipeline.New(eval, pc), bodyLimit: bodyLimit}, key, nil
+}
+
+// rulesConfig is the rules a policy compiles to: its rule sets in order,
+// and its CRS settings.
+func rulesConfig(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o Options) (coraza.Config, coraza.CRSSettings, error) {
+	cfg := coraza.Config{MaxArgs: o.MaxArgs, OnMatch: o.OnMatch}
+	var crs coraza.CRSSettings
+
+	// Rule sets: the built-in CRS (with its paranoia level and threshold)
+	// and SecLang loaded after it, or before it when the binding says so
+	// (#423), each in order. No rule sets: the CRS with its defaults. Rule
+	// sets but no built-in one: those rules alone, the ones placed before
+	// the CRS first.
+	if len(bp.GetRuleSets()) > 0 {
+		cfg.DisableCRS = true
+		var before, directives []string
+		for _, binding := range bp.GetRuleSets() {
+			rs, ok := ruleSets[binding.GetRuleSetId()]
+			if !ok {
+				return cfg, crs, fmt.Errorf("rule set %s is not in the bundle", binding.GetRuleSetId())
+			}
+			switch src := rs.GetSource().(type) {
+			case *bundlev1.RuleSet_Builtin:
+				if src.Builtin != bundlev1.BuiltinRuleSet_BUILTIN_RULE_SET_CRS_V4 {
+					return cfg, crs, fmt.Errorf("rule set %s: unknown built-in rule set %s", rs.GetId(), src.Builtin)
+				}
+				cfg.DisableCRS = false
+				crs = coraza.CRSSettings{
+					ParanoiaLevel:              int(binding.GetParanoiaLevel()),
+					InboundAnomalyThreshold:    int(binding.GetInboundAnomalyThreshold()),
+					AllowedMethods:             binding.GetCrs().GetAllowedMethods(),
+					AllowedRequestContentTypes: binding.GetCrs().GetAllowedRequestContentTypes(),
+					DetectionParanoiaLevel:     int(binding.GetCrs().GetDetectionParanoiaLevel()),
+					OutboundAnomalyThreshold:   int(binding.GetCrs().GetOutboundAnomalyThreshold()),
+				}
+			case *bundlev1.RuleSet_Seclang:
+				if binding.GetPlacement() == bundlev1.RuleSetPlacement_RULE_SET_PLACEMENT_BEFORE_CRS {
+					before = append(before, src.Seclang)
+				} else {
+					directives = append(directives, src.Seclang)
+				}
+			default:
+				return cfg, crs, fmt.Errorf("rule set %s has no source", rs.GetId())
+			}
+		}
+		cfg.DirectivesBeforeCRS = strings.Join(before, "\n")
+		cfg.Directives = strings.Join(directives, "\n")
+	}
+	return cfg, crs, nil
+}
+
+// RuleChecker checks that a policy's rule sets compile together, as
+// Compile compiles them: rule sets that are valid alone may not be (the
+// same rule ID in two). It remembers each combination's result, not the
+// compiled rules.
+type RuleChecker struct {
+	mu   sync.Mutex
+	errs map[[sha256.Size]byte]error
+}
+
+// NewRuleChecker returns a RuleChecker that has checked nothing.
+func NewRuleChecker() *RuleChecker {
+	return &RuleChecker{errs: map[[sha256.Size]byte]error{}}
+}
+
+// Check compiles the rules of policy bp, whose rule sets are among
+// ruleSets. A policy without SecLang rule sets runs only the built-in rules
+// and isn't compiled.
+func (c *RuleChecker) Check(bp *bundlev1.Policy, ruleSets []*bundlev1.RuleSet) error {
+	byID := map[string]*bundlev1.RuleSet{}
+	seclang := false
+	for _, rs := range ruleSets {
+		byID[rs.GetId()] = rs
+	}
+	for _, b := range bp.GetRuleSets() {
+		if _, ok := byID[b.GetRuleSetId()].GetSource().(*bundlev1.RuleSet_Seclang); ok {
+			seclang = true
+		}
+	}
+	if !seclang {
+		return nil
+	}
+	cfg, _, err := rulesConfig(bp, byID, Options{})
+	if err != nil {
+		return err
+	}
+	cfg.BodyLimit, cfg.ResponseBodyLimit = MaxBodyBytes, MaxBodyBytes
+	key := cfg.Key()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err, ok := c.errs[key]; ok {
+		return err
+	}
+	_, err = coraza.New(cfg)
+	c.errs[key] = err
+	return err
 }
 
 func oversizeAction(a bundlev1.OversizeAction) pipeline.OversizeAction {

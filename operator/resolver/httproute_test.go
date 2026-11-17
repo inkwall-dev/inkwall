@@ -14,12 +14,34 @@ import (
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 )
 
-// httpRoute returns an HTTPRoute in namespace shop.
+// httpRoute returns an HTTPRoute in namespace shop, accepted by Gateway gw
+// of its namespace.
 func httpRoute(name string, hostnames []gatewayv1.Hostname, rules ...gatewayv1.HTTPRouteRule) gatewayv1.HTTPRoute {
-	return gatewayv1.HTTPRoute{
+	hr := gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: name},
 		Spec:       gatewayv1.HTTPRouteSpec{Hostnames: hostnames, Rules: rules},
 	}
+	attach(&hr, "", "gw", true)
+	return hr
+}
+
+// attach adds Gateway namespace/name (namespace "": the route's) to an
+// HTTPRoute's parentRefs, and its status as Envoy Gateway writes it.
+func attach(hr *gatewayv1.HTTPRoute, namespace, name string, accepted bool) {
+	ref := gatewayv1.ParentReference{Name: gatewayv1.ObjectName(name)}
+	if namespace != "" {
+		ref.Namespace = ptr(gatewayv1.Namespace(namespace))
+	}
+	hr.Spec.ParentRefs = append(hr.Spec.ParentRefs, ref)
+	status := metav1.ConditionFalse
+	if accepted {
+		status = metav1.ConditionTrue
+	}
+	hr.Status.Parents = append(hr.Status.Parents, gatewayv1.RouteParentStatus{
+		ParentRef:      ref,
+		ControllerName: "gateway.envoyproxy.io/gatewayclass-controller",
+		Conditions:     []metav1.Condition{{Type: "Accepted", Status: status, Reason: "Accepted"}},
+	})
 }
 
 // hrule returns a rule named name (none when empty) with the given matches.

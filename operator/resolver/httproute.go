@@ -7,11 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"slices"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/types"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 )
 
 // errNoRule is a sectionName that names no rule of the HTTPRoute.
@@ -110,4 +114,54 @@ func httpRouteMatch(m gatewayv1.HTTPRouteMatch) (*bundlev1.PathMatch, []string, 
 		methods = []string{strings.ToUpper(string(*m.Method))}
 	}
 	return pm, methods, nil
+}
+
+// gatewayControllers are the GatewayClass controllers of the integrations.
+var gatewayControllers = func() map[string]bool {
+	out := map[string]bool{}
+	for _, i := range integrations.All {
+		if i.GatewayController != "" {
+			out[i.GatewayController] = true
+		}
+	}
+	return out
+}()
+
+// AttachedGateways returns the Gateways ("namespace/name") that accepted an
+// HTTPRoute, as their status says: a parent of its parentRefs whose
+// controller is an integration's, with Accepted True. A route no such
+// Gateway accepted carries no traffic through a proxy the engine is in.
+func AttachedGateways(hr *gatewayv1.HTTPRoute) []string {
+	ref := func(p gatewayv1.ParentReference) (types.NamespacedName, bool) {
+		if p.Group != nil && *p.Group != gatewayv1.GroupName || p.Kind != nil && *p.Kind != "Gateway" {
+			return types.NamespacedName{}, false
+		}
+		ns := hr.Namespace
+		if p.Namespace != nil {
+			ns = string(*p.Namespace)
+		}
+		return types.NamespacedName{Namespace: ns, Name: string(p.Name)}, true
+	}
+	var out []string
+	for _, st := range hr.Status.Parents {
+		if !gatewayControllers[string(st.ControllerName)] ||
+			!meta.IsStatusConditionTrue(st.Conditions, string(gatewayv1.RouteConditionAccepted)) {
+			continue
+		}
+		gw, ok := ref(st.ParentRef)
+		if !ok {
+			continue
+		}
+		// A status left from a parentRef the spec no longer names doesn't
+		// count.
+		inSpec := slices.ContainsFunc(hr.Spec.ParentRefs, func(p gatewayv1.ParentReference) bool {
+			k, ok := ref(p)
+			return ok && k == gw
+		})
+		if inSpec {
+			out = append(out, gw.String())
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }

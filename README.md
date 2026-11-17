@@ -133,7 +133,11 @@ For an `HTTPRoute`, served by Envoy Gateway, Istio or Traefik, target it with it
 rule: `{group: gateway.networking.k8s.io, kind: HTTPRoute, name: web, sectionName: api}`. One policy
 can target routes of both proxies. Traefik wires an HTTPRoute only when every Gateway it is attached
 to is Traefik's: another proxy fails the rules that refer to Traefik's Middleware, so a route also
-attached to one is `WiringFailed`. Give each proxy its own HTTPRoute.
+attached to one is `WiringFailed`. Give each proxy its own HTTPRoute. A policy applies to an
+HTTPRoute once a Gateway accepts it (`Accepted` in the route's `status.parents`); until then the policy
+is `Accepted=False` (`TargetNotAttached`). Where routes of two namespaces overlap and the engine can't
+tell which one the proxy used (a host served by two proxies or Gateways), the overlap goes to the
+stricter policy, or else the older one, and both policies say so (`RouteOverlap`).
 
 Once the policy is `Ready`, every engine enforces it. Send an attack to check:
 

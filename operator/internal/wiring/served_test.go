@@ -136,8 +136,8 @@ func TestEnforcedCountsServingEngines(t *testing.T) {
 	store := distribution.NewStore()
 	store.SetPolicies(versions, false)
 	table := distribution.NewTable()
-	table.Connect(distribution.Engine{ID: "a1", PodNamespace: "envoy", PodName: "a1", Applied: 2})
-	table.Connect(distribution.Engine{ID: "b1", PodNamespace: "haproxy", PodName: "b1", Applied: 1, Rejected: 2, RejectError: "bad rule"})
+	table.Connect("pod/envoy/a1", distribution.Engine{ID: "a1", PodNamespace: "envoy", PodName: "a1", Applied: 2})
+	table.Connect("pod/haproxy/b1", distribution.Engine{ID: "b1", PodNamespace: "haproxy", PodName: "b1", Applied: 1, Rejected: 2, RejectError: "bad rule"})
 	pub := &distribution.Publisher{Client: c, Reader: c, Namespace: ns, Replica: "r1", Engines: table, Interval: 50 * time.Millisecond, Refresh: time.Second}
 	rep := &distribution.Reporter{Client: c, Reader: c, Namespace: ns, Interval: 100 * time.Millisecond, Stale: time.Minute, Store: store, Served: served}
 	for _, run := range []func(context.Context) error{pub.Start, rep.Start} {

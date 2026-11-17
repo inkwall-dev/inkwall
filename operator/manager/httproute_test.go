@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -15,6 +16,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -44,6 +47,38 @@ func filters(hr *gatewayv1.HTTPRoute) string {
 	}
 	return strings.Join(out, "|")
 }
+
+// acceptRoute writes an HTTPRoute's status as its Gateways' controllers
+// do: each parentRef Accepted, by the controller controllerOf gives its
+// Gateway's name.
+func acceptRoute(ctx context.Context, t *testing.T, c client.Client, hr *gatewayv1.HTTPRoute, controllerOf func(gateway string) string) {
+	t.Helper()
+	// The client's cache may not have the route yet.
+	err := retry.OnError(wait.Backoff{Steps: 50, Duration: 100 * time.Millisecond}, func(err error) bool {
+		return apierrors.IsConflict(err) || apierrors.IsNotFound(err)
+	}, func() error {
+		if err := c.Get(ctx, client.ObjectKeyFromObject(hr), hr); err != nil {
+			return err
+		}
+		hr.Status.Parents = nil
+		for _, ref := range hr.Spec.ParentRefs {
+			hr.Status.Parents = append(hr.Status.Parents, gatewayv1.RouteParentStatus{
+				ParentRef:      ref,
+				ControllerName: gatewayv1.GatewayController(controllerOf(string(ref.Name))),
+				Conditions: []metav1.Condition{{Type: string(gatewayv1.RouteConditionAccepted), Status: metav1.ConditionTrue,
+					Reason: string(gatewayv1.RouteReasonAccepted), LastTransitionTime: metav1.Now(), ObservedGeneration: hr.Generation}},
+			})
+		}
+		// The stand-in CRD has no status subresource (testenv/gateway-api).
+		return c.Update(ctx, hr)
+	})
+	if err != nil {
+		t.Fatalf("accept %s: %v", client.ObjectKeyFromObject(hr), err)
+	}
+}
+
+// acceptedBy returns a controllerOf for acceptRoute: every Gateway's is name.
+func acceptedBy(name string) func(string) string { return func(string) string { return name } }
 
 // testHTTPRoutes follows a policy on a Gateway API HTTPRoute: the operator
 // runs without the Gateway API CRDs, notices them once installed, puts the
@@ -107,7 +142,8 @@ func testHTTPRoutes(ctx context.Context, t *testing.T, c client.Client) {
 	hr := &gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "app"},
 		Spec: gatewayv1.HTTPRouteSpec{
-			Hostnames: []gatewayv1.Hostname{"app.example.com"},
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: []gatewayv1.ParentReference{{Name: "edge"}}},
+			Hostnames:       []gatewayv1.Hostname{"app.example.com"},
 			Rules: []gatewayv1.HTTPRouteRule{{Matches: []gatewayv1.HTTPRouteMatch{
 				{Path: &gatewayv1.HTTPPathMatch{Type: &prefix, Value: new("/api")}},
 				{Path: &gatewayv1.HTTPPathMatch{Type: &exact, Value: new("/login")}, Method: &post},
@@ -117,6 +153,10 @@ func testHTTPRoutes(ctx context.Context, t *testing.T, c client.Client) {
 	if err := c.Create(ctx, hr); err != nil {
 		t.Fatal(err)
 	}
+	// No Gateway accepted it yet: the policy doesn't apply to it.
+	eventually(t, "not attached", cond(wafv1alpha1.ConditionAccepted, metav1.ConditionFalse,
+		resolver.ReasonTargetNotAttached, "HTTPRoute app not accepted by a Gateway"))
+	acceptRoute(ctx, t, c, hr, acceptedBy(integrations.Traefik.GatewayController))
 	eventually(t, "Accepted", cond(wafv1alpha1.ConditionAccepted, metav1.ConditionTrue, resolver.ReasonAccepted, ""))
 	eventually(t, "Programmed=False without a Gateway", cond(wafv1alpha1.ConditionProgrammed, metav1.ConditionFalse,
 		wiring.ReasonControllerUnsupported, "HTTPRoute app is attached to no Gateway of a known GatewayClass"))
@@ -266,6 +306,10 @@ func testMixedGateways(ctx context.Context, t *testing.T, c client.Client) {
 			t.Fatal(err)
 		}
 	}
+	controllers := func(gw string) string {
+		return map[string]string{"traefik": "traefik.io/gateway-controller", "eg": "gateway.envoyproxy.io/gatewayclass-controller", "other": "example.com/gateway"}[gw]
+	}
+	acceptRoute(ctx, t, c, hr, controllers)
 	wiredAs := func(want, marker string) func() string {
 		return func() string {
 			var got gatewayv1.HTTPRoute
@@ -294,6 +338,7 @@ func testMixedGateways(ctx context.Context, t *testing.T, c client.Client) {
 				r.Spec.ParentRefs = append(r.Spec.ParentRefs, gatewayv1.ParentReference{Name: gatewayv1.ObjectName(n)})
 			}
 		})
+		acceptRoute(ctx, t, c, hr, controllers)
 	}
 	parents("traefik", "eg")
 	eventually(t, "Traefik's filter removed", wiredAs("", ""))

@@ -156,6 +156,24 @@ What changes by itself:
 - **Fewer snippets in security events.** A match on XML text, on a gRPC message's field (named by
   numbers, `2.1`) or on a WebSocket message's text leaves no snippet, as a credential's doesn't:
   their names don't say whether they hold one ([Redacting security events](../deploy/helm/inkwall/README.md#redacting-security-events)).
+
+- **A policy applies to an HTTPRoute only once a Gateway accepts it.** The route must have a
+  parent in `status.parents` with `Accepted=True`, from Envoy Gateway, Istio or Traefik; until
+  then the policy is `Accepted=False` (`TargetNotAttached`) and its routes aren't in the bundle.
+- **Envoy Gateway and Istio: the operator wires a Gateway for a protected HTTPRoute only once the
+  route's status shows that Gateway accepts it** (`Accepted=True`); until then the policy is
+  `Programmed=False` (`Pending`) and the Gateway is left unchanged.
+- **Overlapping routes of different namespaces.** Where the engine can't tell which of two
+  namespaces' routes the proxy used (the same route, or a host served by two proxies or Gateways),
+  the overlap goes to the stricter policy (when they differ only in `mode` and `skip`), otherwise to
+  the older one, no longer to the more specific target; both policies say so (`RouteOverlap`, and
+  the one that doesn't apply is `Accepted=False`).
+- **A policy whose rule sets don't compile together is left out** (`Accepted=False`,
+  `RuleSetsIncompatible`, for example the same rule ID in two rule sets), or keeps its previous
+  version if that compiles. The other policies' bundle is published as usual.
+- **The operator records each engine under the pod its token is bound to** (or its ServiceAccount
+  and engine ID without a pod-bound token), so engines that report the same engine ID no longer
+  share one record in `inkwallctl status` or the `Enforced` condition.
 - **In Managed mode, a `WAFIPList` labelled `inkwall.dev/source: saas` is the control plane's**,
   as the other kinds were: besides edits, the webhook now refuses deleting it, and the next
   snapshot that doesn't carry it deletes it. The operator never wrote such lists before 0.6.0, so

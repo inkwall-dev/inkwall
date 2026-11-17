@@ -155,7 +155,7 @@ kubectl -n istio-ingress get pods -l gateway.networking.k8s.io/gateway-name=edge
 | `ResponsesNotInspected` | The policy inspects responses, and [the probe's response leg](#the-operators-probe) shows that a pod's engine doesn't see the route's responses (it names the pod); until the response leg is proven on every pod, `Unverified` |
 | `PendingRestart` | Istio is rolling a Gateway's pods; some don't have the engine yet |
 | `SidecarMissing` | A Gateway has no running pod, or its namespace isn't a proxy namespace |
-| `Pending` | Waiting for Istio to accept the route, or for another of its Gateways |
+| `Pending` | Waiting for Istio to accept the route, or for another of its Gateways; the operator changes a Gateway (its ConfigMap, its `parametersRef`, its `EnvoyFilter`) only once its parent status says it accepts the route. A Gateway that refuses the route (`Accepted=False`) is left as it is, and the message says why |
 | `WiringFailed` | Istio's `EnvoyFilter` CRD isn't installed; Istio is older than 1.28; a rule name is shared ([rule names](#rule-names)); the Gateway's ConfigMap doesn't exist or its `deployment` key isn't YAML; or an `EnvoyFilter` named `inkwall-waf-<gateway>` isn't the operator's |
 | `IntegrationDisabled` | The operator lacks the `inkwall-operator-istio` ClusterRole (`rbac.integrations.istio`) |
 
