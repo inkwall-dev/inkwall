@@ -266,7 +266,7 @@ an Envoy you configure yourself, in or out of Kubernetes, see [protecting raw En
   [with the operator](docs/haproxy.md#with-the-operator-haproxy-kubernetes-ingress-controller)), wired by the operator; **raw [Envoy](https://www.envoyproxy.io/docs/envoy/latest/)** (1.33 or later) that you configure with
   the engine's ext_proc adapter ([protecting raw Envoy](docs/raw-envoy.md)); any other **[HAProxy](https://docs.haproxy.org/)** (3.1 or later) that you
   configure with the engine's SPOE agent ([protecting HAProxy](docs/haproxy.md)); and the standalone
-  proxy. [Caddy](https://caddyserver.com/docs/) is designed, not built. [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) is retired upstream, so it gets no integration:
+  proxy. [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) is retired upstream, so it gets no integration:
   `inkwallctl migrate ingress-nginx` moves its ModSecurity settings to a supported proxy.
 - Targets: **`Ingress`** and Traefik **`IngressRoute`** (match rules that join `Host`, `Path` and
   `PathPrefix` with `&&`) through Traefik; [Gateway API](https://gateway-api.sigs.k8s.io/) **[`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/)** through Envoy Gateway, Istio or
@@ -327,8 +327,9 @@ Tracked on the [project board](https://github.com/orgs/inkwall-dev/projects/1) a
   and server messages inspected per message; rule sets loaded before the CRS; and operator
   metrics over HTTPS.
 - **v1.0.0**: a stable API (out of `v1alpha1`) with an upgrade path.
-- Then more proxies: Caddy. Not ingress-nginx, which is retired upstream: its users
-  migrate with `inkwallctl migrate ingress-nginx`.
+- No other proxy is planned. Not ingress-nginx, which is retired upstream: its users
+  migrate with `inkwallctl migrate ingress-nginx`. Not Caddy: its design (0002 §6.5) stays as a
+  record.
 
 ## Development
 
