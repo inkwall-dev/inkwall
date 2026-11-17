@@ -201,6 +201,15 @@ What changes by itself:
   hand. With `-f`, an object whose name or namespace isn't a valid Kubernetes name is refused, and
   `--output` writes only inside its directory.
 
+- **A request whose path a proxy may route differently from the engine is inspected by every
+  policy its path could select.** A path with dot segments (`/a/../b`), encoded characters
+  (`%2F`, `%2e`) or repeated slashes can match one route as received and another once decoded and
+  cleaned; the engine used only the decoded, cleaned form. It now matches each form, and when they
+  select different policies the request is inspected by each and gets the strictest verdict: a
+  `Block` policy's deny wins over a `Detect` policy's log. Plain paths, and hosts whose routes
+  agree, don't change. Such a request is counted under each policy that inspected it
+  ([0002 §5.2](design/0002-system-architecture.md#52-engine--operator-bundle-distribution)).
+
 ## From 0.4.x to 0.5.0
 
 What's new:

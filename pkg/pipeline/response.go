@@ -36,6 +36,22 @@ type Exchange struct {
 	busy, closed, used bool
 
 	observe func(Verdict)
+
+	// others are the exchanges of the request's other policies
+	// (JoinExchanges), which inspect the response too.
+	others []*Exchange
+}
+
+// JoinExchanges returns one Exchange for the exchanges of a request
+// inspected by several policies: the response is inspected by each, each
+// to its own body limit, and gets the strictest verdict. nil for none.
+func JoinExchanges(xs []*Exchange) *Exchange {
+	if len(xs) == 0 {
+		return nil
+	}
+	x := xs[0]
+	x.others = append(x.others, xs[1:]...)
+	return x
 }
 
 // OnVerdict sets a function told about the response's verdict (a policy's
@@ -47,10 +63,23 @@ func (e *Exchange) OnVerdict(observe func(Verdict)) {
 // FailureMode is the request's failure mode, resolved for the pipeline's
 // mode: what an adapter that loses the exchange before the response (the
 // SPOE agent's table) does with that response.
-func (e *Exchange) FailureMode() FailureMode { return e.p.failure }
+func (e *Exchange) FailureMode() FailureMode {
+	for _, o := range e.others {
+		if o.p.failure == FailClosed {
+			return FailClosed
+		}
+	}
+	return e.p.failure
+}
 
 // BodyLimit is how much of the response body is inspected: 0 for none.
-func (e *Exchange) BodyLimit() int64 { return e.p.responses.MaxBytes }
+func (e *Exchange) BodyLimit() int64 {
+	limit := e.p.responses.MaxBytes
+	for _, o := range e.others {
+		limit = max(limit, o.p.responses.MaxBytes)
+	}
+	return limit
+}
 
 // WantsBody reports whether a response body with this Content-Type is
 // inspected: a body limit is set and the rules read its media type
@@ -79,6 +108,30 @@ func InspectedResponseType(contentType string) bool {
 // response in block mode with 502 Bad Gateway. In block mode, a deny
 // replaces the response with the verdict's status.
 func (e *Exchange) CheckResponse(ctx context.Context, resp *request.Response) Verdict {
+	v := e.checkResponse(ctx, cut(resp, e.p.responses.MaxBytes))
+	for _, o := range e.others {
+		if v.Action == ActionDeny {
+			break
+		}
+		if ov := o.checkResponse(ctx, cut(resp, o.p.responses.MaxBytes)); Stricter(ov, v) {
+			v = ov
+		}
+	}
+	return v
+}
+
+// cut returns resp with its body cut at limit, as the adapter would have
+// read it for that limit.
+func cut(resp *request.Response, limit int64) *request.Response {
+	if int64(len(resp.Body)) <= limit {
+		return resp
+	}
+	out := *resp
+	out.Body, out.BodyTruncated = resp.Body[:limit], true
+	return &out
+}
+
+func (e *Exchange) checkResponse(ctx context.Context, resp *request.Response) Verdict {
 	start := time.Now()
 	v := e.check(ctx, resp)
 	v.Duration = time.Since(start)
@@ -98,6 +151,16 @@ func (e *Exchange) CheckResponse(ctx context.Context, resp *request.Response) Ve
 // as for an evaluation refused a slot (ReasonOverload), reported as a
 // response's verdict. The exchange is spent.
 func (e *Exchange) Refused() Verdict {
+	v := e.refused()
+	for _, o := range e.others {
+		if ov := o.refused(); Stricter(ov, v) {
+			v = ov
+		}
+	}
+	return v
+}
+
+func (e *Exchange) refused() Verdict {
 	e.mu.Lock()
 	e.used = true
 	e.mu.Unlock()
@@ -168,6 +231,9 @@ func (e *Exchange) release() {
 func (e *Exchange) Close() {
 	if e == nil {
 		return
+	}
+	for _, o := range e.others {
+		o.Close()
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
