@@ -244,6 +244,9 @@ const maxPathForms = 12
 // path, which none of these change, has one form, or two with a trailing
 // slash path.Clean drops.
 func pathForms(rawURI string, buf []string) []string {
+	if p := targetPath(rawURI); simplePath(p) {
+		return append(buf, p)
+	}
 	add := func(p string) {
 		if !slices.Contains(buf, p) {
 			buf = append(buf, p)
@@ -263,6 +266,25 @@ func pathForms(rawURI string, buf []string) []string {
 		add(path.Clean(d))
 	}
 	return buf
+}
+
+// simplePath reports whether every form of p is p itself: it holds no
+// escape or backslash, no empty, "." or ".." segment, and no trailing
+// slash but the root's. Most paths are, and get one form without the cost
+// of decoding and cleaning them.
+func simplePath(p string) bool {
+	if p == "/" {
+		return true
+	}
+	if strings.HasSuffix(p, "/") || strings.Contains(p, "//") || strings.ContainsAny(p, "%\\") {
+		return false
+	}
+	for seg := range strings.SplitSeq(p[1:], "/") {
+		if seg == "." || seg == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // decodeAll decodes every percent-encoded byte of p, or returns p when it

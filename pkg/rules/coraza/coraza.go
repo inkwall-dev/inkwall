@@ -1147,8 +1147,11 @@ func (x *exchange) EvaluateResponse(_ context.Context, resp *request.Response) (
 			tx.AddResponseHeader(name, v)
 		}
 	}
-	for _, v := range bodyType(contentType) {
-		tx.AddResponseHeader("Content-Type", v)
+	// A response without a type or a body has nothing to read as text.
+	if len(contentType) > 0 || len(resp.Body) > 0 {
+		for _, v := range bodyType(contentType) {
+			tx.AddResponseHeader("Content-Type", v)
+		}
 	}
 	if it := tx.ProcessResponseHeaders(resp.Status, resp.Proto); it != nil {
 		return result(tx, it, x.seen, outbound), nil
