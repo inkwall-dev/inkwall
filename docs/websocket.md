@@ -30,6 +30,13 @@ over HTTP/2 ([RFC 8441](https://www.rfc-editor.org/rfc/rfc8441)) has no `Sec-Web
 server doesn't upgrade a request without `Sec-WebSocket-Version`, so a real handshake can't hide
 from this check; a request that only looks like one gets the WebSocket rules too.
 
+The standalone proxy forwards an upgrade only to WebSocket: a single `websocket` token in
+`Upgrade` (in any case), with `upgrade` in `Connection`. It removes any other `Upgrade` (`h2c`,
+`websocket, h2c`, ...) and `HTTP2-Settings` before it inspects the request, and proxies it as a
+plain one: a server may ignore an upgrade, and a client that offers `h2c` goes on over HTTP/1.1.
+Otherwise an upstream could switch the connection to HTTP/2 and take requests on it that the engine
+never sees.
+
 ## What is inspected
 
 - **Inspected**, as in any request, by the policy's rules and exclusions: the path, the query and
