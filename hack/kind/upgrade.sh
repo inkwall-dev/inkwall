@@ -676,13 +676,18 @@ else
   check "the integration roles are gone" no_integration_roles
 fi
 check "the wiring is unchanged, not duplicated" same_wiring
-# The older operator rewrites inkwall-waf to its ForwardAuth, in place
-# (inkwall-waf-body and inkwall-waf-auth stay, unused).
+# An operator older than 0.6.0 (#625) rewrites inkwall-waf to its
+# ForwardAuth, in place (inkwall-waf-body and inkwall-waf-auth stay,
+# unused); from 0.6.0 it keeps the chain.
 forward_auth_again() {
   [[ $("${KUBECTL[@]}" -n "$NS" get middlewares.traefik.io inkwall-waf \
     -o jsonpath='{.spec.forwardAuth.address} {.spec.chain.middlewares}') == "http://127.0.0.1:9001/v1/forward-auth " ]]
 }
-eventually "the older operator's Middleware is its ForwardAuth again" forward_auth_again
+if [[ $(printf '%s\n' 0.6.0 "$FROM_VERSION" | sort -V | head -1) == 0.6.0 ]]; then
+  eventually "the $FROM_VERSION operator's Middleware still chains the body limit and the ForwardAuth" operator_middleware
+else
+  eventually "the older operator's Middleware is its ForwardAuth again" forward_auth_again
+fi
 eventually "the policy is Accepted, Programmed and Ready" accepted_programmed
 check "the attack is blocked on the Ingress" status_is 403 "$HOST" "$SQLI"
 check "the attack is blocked on the IngressRoute" status_is 403 "$ROUTE_HOST" "$SQLI"
