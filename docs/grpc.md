@@ -64,8 +64,12 @@ spec:
 (The engine's flag, without the operator: `--grpc-messages inspect`.)
 
 - **What is read:** the body, up to `body.maxBytes` (gRPC-Web text decoded from base64 first), as
-  gRPC messages, each read as protobuf without its schema. A field whose bytes are printable UTF-8 is text, and a field whose bytes
-  are a protobuf message is read as one, down to 16 levels. Numbers and binary bytes give nothing.
+  gRPC messages, each read as protobuf without its schema. A field whose bytes are UTF-8 is text,
+  whatever its characters (a control character is read as a space, an invisible one as it is), and a field whose bytes are a protobuf message is
+  read as one, down to 16 levels. A field of binary bytes gives its runs of at least 8 readable
+  characters (a control character or a byte that isn't UTF-8 ends a run), and what lies between
+  the fields of a nested message (its tags, lengths and numbers) its runs of at least 4. Numbers in the message
+  itself give nothing.
 - **What the rules see:** each text field as a form argument (`ARGS`, `ARGS_POST`) named by its
   field numbers: `1` is field 1 of the message, `2.1` field 1 of the message in field 2. An
   attack in a field (`name: "1' OR '1'='1' -- "`) is denied as in a form. `REQUEST_BODY` stays

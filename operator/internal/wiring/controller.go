@@ -250,18 +250,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 // running pods of the proxies that serve them, by integration (#371). A
 // policy with a target that isn't wired (not served, failed, disabled,
 // missing) or no running pod is left out: every engine counts for it.
-func servedPods(policies []wafv1alpha1.WAFPolicy, rep *report) map[string]map[string]string {
+func servedPods(policies []wafv1alpha1.WAFPolicy, rep *report) map[string]map[string]distribution.ServedPod {
 	if rep.disabled {
 		return nil
 	}
-	out := map[string]map[string]string{}
+	out := map[string]map[string]distribution.ServedPod{}
 next:
 	for i := range policies {
 		p := &policies[i]
 		if p.DeletionTimestamp != nil || len(p.Spec.TargetRefs) == 0 {
 			continue
 		}
-		pods := map[string]string{}
+		pods := map[string]distribution.ServedPod{}
 		for _, ref := range p.Spec.TargetRefs {
 			t := targetOf(p.Namespace, ref)
 			served := false
@@ -275,7 +275,10 @@ next:
 				}
 				served = true
 				for _, pod := range running(res.Pods) {
-					pods[pod.Namespace+"/"+pod.Name] = rep.names[j]
+					// A running pod with the engine container: its engine is
+					// expected to be connected (#652).
+					engine := pod.Status.Phase == corev1.PodRunning && injection.HasEngine(pod)
+					pods[pod.Namespace+"/"+pod.Name] = distribution.ServedPod{Integration: rep.names[j], Engine: engine}
 				}
 			}
 			if !served {

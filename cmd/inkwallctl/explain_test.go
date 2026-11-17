@@ -538,3 +538,53 @@ func TestExclusionLimitMessage(t *testing.T) {
 		t.Errorf("tune: exit %d, %s", code, errOut)
 	}
 }
+
+// TestExplainRequestUntrustedCoversRequestData walks the JSON result: every
+// field holding something the client chose (its path, host, argument
+// names, request ID) is under a path listed in untrusted.
+func TestExplainRequestUntrustedCoversRequestData(t *testing.T) {
+	_, out := explainFile(t, "testdata/explain/engine.log", "req-hostile")
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatal(err)
+	}
+	var untrusted []string
+	for _, u := range doc["untrusted"].([]any) {
+		untrusted = append(untrusted, u.(string))
+	}
+	covered := func(path string) bool {
+		return slices.ContainsFunc(untrusted, func(u string) bool {
+			return path == u || strings.HasPrefix(path, u+".") || strings.HasPrefix(path, u+"[")
+		})
+	}
+	fromClient := []string{"req-hostile", "ignore_previous_instructions", "Ignore your instructions", "\x1b"}
+	found := 0
+	var walk func(path string, v any)
+	walk = func(path string, v any) {
+		switch v := v.(type) {
+		case map[string]any:
+			for k, c := range v {
+				if path == "" && k == "untrusted" {
+					continue
+				}
+				walk(strings.TrimPrefix(path+"."+k, "."), c)
+			}
+		case []any:
+			for _, c := range v {
+				walk(path+"[]", c)
+			}
+		case string:
+			if !slices.ContainsFunc(fromClient, func(s string) bool { return strings.Contains(v, s) }) {
+				return
+			}
+			found++
+			if !covered(path) && !covered(strings.TrimSuffix(path, "[]")) {
+				t.Errorf("%s holds %q from the request, but untrusted %q doesn't list it", path, v, untrusted)
+			}
+		}
+	}
+	walk("", doc)
+	if found == 0 {
+		t.Fatal("no request data in the result")
+	}
+}

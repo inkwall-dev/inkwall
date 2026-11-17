@@ -6,12 +6,12 @@ Accepted: True, Accepted
 Programmed: True, Programmed
 
 Enforced: False, EnginesBehind: 1 of 2 engines run bundle 7 or later
-  Cause: Some engines don't run the bundle yet.
-  Fix:   Usually seconds; if it lasts, `inkwallctl status` names them.
+  Cause: Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting).
+  Fix:   Usually seconds; if it lasts, `inkwallctl status` names them; check that the pod's engine reaches the operator (InkwallEngineDisconnected (docs/monitoring.md#inkwallenginedisconnected)).
 
 Ready: False, EnginesBehind: Enforced: 1 of 2 engines run bundle 7 or later
-  Cause: Some engines don't run the bundle yet.
-  Fix:   Usually seconds; if it lasts, `inkwallctl status` names them.
+  Cause: Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting).
+  Fix:   Usually seconds; if it lasts, `inkwallctl status` names them; check that the pod's engine reaches the operator (InkwallEngineDisconnected (docs/monitoring.md#inkwallenginedisconnected)).
 
 Engines that don't run the policy's bundle:
   traefik/traefik-1 (v0.6.0, behind, bundle 6): the engine doesn't run the policy's bundle yet: check its connection to the operator

@@ -63,6 +63,23 @@ func TestCheck(t *testing.T) {
 	}
 }
 
+// A rate is better higher: its rise is not a regression, its fall is.
+func TestCheckRates(t *testing.T) {
+	in := `pkg: github.com/inkwall-dev/inkwall/pkg/grpcwire
+,base.txt,,head.txt,,,
+,B/s,CI,B/s,CI,vs base,P
+GRPCMessages/small-12,146430000,16%,156750000,15%,+7.05%,p=0.005 n=8
+GRPCMessages/large-12,96060000,1%,72560000,1%,-24.47%,p=0.000 n=8
+`
+	got, err := check(strings.NewReader(in), limits{threshold: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].key() != "github.com/inkwall-dev/inkwall/pkg/grpcwire\tGRPCMessages/large-12\tB/s" {
+		t.Fatalf("regressions: %v", got)
+	}
+}
+
 func TestCheckRejectsOtherInput(t *testing.T) {
 	for _, in := range []string{"", "goos: linux\n", "name old time/op new time/op delta\n"} {
 		if _, err := check(strings.NewReader(in), limits{threshold: 5}); err == nil {

@@ -20,7 +20,10 @@
 #     it, requests pass (fail open).
 #   - Detect mode: an attack passes, and is logged.
 #   - Responses (--inspect-responses): a response that leaks a SQL error is
-#     replaced with 403 in block mode, and passes, logged, in detect mode.
+#     replaced with 403 in block mode (as JSON:API, JavaScript, CSV, SVG or
+#     a malformed Content-Type too, a range of it, or chunked), and passes,
+#     logged, in detect mode; one slower than wait-for-body's time gets
+#     HAProxy's 504.
 #
 # HAPROXY_IMAGE picks HAProxy (3.1 or later); KEEP=1 leaves the container.
 set -euo pipefail
@@ -134,22 +137,48 @@ else
   go build -o "$WORK/inkwall-engine" ./cmd/engine
 fi
 
-# The app echoes the request line and X-Request-Id; /leak answers with a
-# page that leaks a SQL error, /large with 1.5 MB of text.
+# The app echoes the request line, X-Request-Id, Upgrade and HTTP2-Settings;
+# /leak answers with a page that leaks a SQL error (as ?ct=, and a range of
+# it for a Range header), /chunked with a page in two chunks, the second a
+# leak with ?leak=1 and 3 s late with ?slow=1, /slowlength with a page with
+# Content-Length whose leak comes 3 s late, /large with 1.5 MB of text.
 cat >"$WORK/app.py" <<'PY'
-import http.server, sys
+import http.server, sys, time, urllib.parse
 LARGE = b'a' * 1500000
 LEAK = b'<html><body>You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax</body></html>'
+HEAD = b'<html><head><title>Products</title></head><body><h1>Results</h1>'
 class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
     def handle_one(self):
         self.rfile.read(int(self.headers.get('Content-Length') or 0))
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
         if self.path.startswith('/leak'):
-            self.send_response(200); self.send_header('Content-Type', 'text/html'); self.send_header('Content-Length', str(len(LEAK))); self.end_headers(); self.wfile.write(LEAK)
+            body, status, rng = LEAK, 200, self.headers.get('Range', '')
+            if rng.startswith('bytes=') and '-' in rng and ',' not in rng:
+                first, last = rng[6:].split('-')
+                body, status = LEAK[int(first):int(last) + 1], 206
+            self.send_response(status); self.send_header('Content-Type', q.get('ct', ['text/html'])[0]); self.send_header('Content-Length', str(len(body)))
+            if status == 206:
+                self.send_header('Content-Range', 'bytes %s-%d/%d' % (first, int(first) + len(body) - 1, len(LEAK)))
+            self.end_headers(); self.wfile.write(body)
+            return
+        if self.path.startswith('/slowlength'):
+            self.send_response(200); self.send_header('Content-Type', 'text/html'); self.send_header('Content-Length', str(len(HEAD + LEAK))); self.end_headers()
+            self.wfile.write(HEAD); self.wfile.flush(); time.sleep(3); self.wfile.write(LEAK); self.wfile.flush()
+            return
+        if self.path.startswith('/chunked'):
+            self.send_response(200); self.send_header('Content-Type', 'text/html'); self.send_header('Transfer-Encoding', 'chunked'); self.end_headers()
+            self.wfile.write(b'%x\r\n%s\r\n' % (len(HEAD), HEAD)); self.wfile.flush()
+            if 'slow' in q:
+                time.sleep(3)
+            tail = LEAK if 'leak' in q else b'</body></html>'
+            self.wfile.write(b'%x\r\n%s\r\n0\r\n\r\n' % (len(tail), tail)); self.wfile.flush()
             return
         if self.path.startswith('/large'):
             self.send_response(200); self.send_header('Content-Type', 'text/plain'); self.send_header('Content-Length', str(len(LARGE))); self.end_headers(); self.wfile.write(LARGE)
             return
-        out = ('%s %s id=%s\n' % (self.command, self.path, self.headers.get('X-Request-Id'))).encode()
+        out = ('%s %s id=%s upgrade=%s settings=%s\n' % (self.command, self.path, self.headers.get('X-Request-Id'),
+            ','.join(self.headers.get_all('Upgrade') or []), self.headers.get('HTTP2-Settings', ''))).encode()
         self.send_response(200); self.send_header('Content-Length', str(len(out))); self.end_headers(); self.wfile.write(out)
     do_GET = do_POST = handle_one
     def log_message(self, *a): pass
@@ -231,6 +260,13 @@ check "a denied gRPC call: content-type application/grpc" bash -c "$(declare -f 
 ws=(-H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==')
 check "a WebSocket handshake from a forbidden origin: 403" is 403 "${ws[@]}" -H 'Origin: https://evil.example' "$U/chat"
 check "a WebSocket handshake from an allowed origin passes" is 200 "${ws[@]}" -H 'Origin: https://app.example.com' "$U/chat"
+check "a WebSocket handshake reaches the app with its Upgrade" bash -c "curl -s -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' -H 'Origin: https://app.example.com' '$U/chat' | grep -q 'upgrade=websocket '"
+# Any other upgrade reaches the app without Upgrade and HTTP2-Settings: the
+# app can't switch the connection to a protocol the engine doesn't see.
+check "an h2c upgrade reaches the app as a plain request" bash -c "curl -s -H 'Connection: Upgrade, HTTP2-Settings' -H 'Upgrade: h2c' -H 'HTTP2-Settings: AAMAAABkAARAAAAAAAIAAAAA' '$U/h2c' | grep -q 'upgrade= settings=\$'"
+check "another protocol's upgrade reaches the app as a plain request" bash -c "curl -s -H 'Connection: Upgrade' -H 'Upgrade: TLS/1.2' '$U/h2c' | grep -q 'upgrade= settings=\$'"
+# HAProxy forwards a WebSocket handshake's Upgrade as "websocket" alone.
+check "a WebSocket and h2c upgrade reaches the app as WebSocket's" bash -c "curl -s -H 'Connection: Upgrade, HTTP2-Settings' -H 'Upgrade: websocket, h2c' -H 'HTTP2-Settings: AAMAAABkAARAAAAAAAIAAAAA' -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' -H 'Origin: https://app.example.com' '$U/h2c' | grep -q 'upgrade=websocket settings=\$'"
 check "the request ID the client sends reaches the app" bash -c "curl -s -H 'X-Request-Id: client-id-1' '$U/' | grep -q 'id=client-id-1'"
 check "a request ID reaches the app" bash -c "curl -s '$U/' | grep -qE 'id=[0-9a-f]{16}'"
 check "metrics count the denials" bash -c "curl -s 127.0.0.1:$ADMIN_PORT/metrics | grep -q 'inkwall_requests_total{action=\"deny\",adapter=\"spoe\",reason=\"rule\"}'"
@@ -278,6 +314,14 @@ check "responses, block mode: the leak doesn't reach the client" bash -c "! curl
 check "responses, block mode: the 403 carries the request ID" bash -c "curl -s -D - -o /dev/null '$U/leak' | grep -qiE '^x-request-id: [0-9a-f]{16}'"
 check "responses, block mode: the leak is logged" grep -q '"phase":"response"' "$WORK/engine.log"
 check "responses, block mode: an attack still gets 403" is 403 "$U/products?$SQLI"
+for ct in 'application/vnd.api+json' 'application/javascript' 'text/csv' 'text/html; charset' 'Text/HTML;;charset=utf-8' 'image/svg+xml'; do
+  check "responses, block mode: a leak as $ct gets 403" is 403 --get --data-urlencode "ct=$ct" "$U/leak"
+done
+check "responses, block mode: the app gets no Range: a leak's range gets 403" is 403 -H 'Range: bytes=20-60' "$U/leak"
+check "responses, block mode: a chunked page passes" is 200 "$U/chunked"
+check "responses, block mode: a chunked leak gets 403" is 403 "$U/chunked?leak=1"
+check "responses, block mode: a chunked leak slower than wait-for-body's time gets HAProxy's 504" is 504 "$U/chunked?leak=1&slow=1"
+check "responses, block mode: a leak with Content-Length slower than wait-for-body's time gets HAProxy's 504" is 504 "$U/slowlength"
 check "responses, block mode: metrics count the responses answered" bash -c "curl -s 127.0.0.1:$ADMIN_PORT/metrics | grep -qE '^inkwall_spoe_response_states_total\{outcome=\"answered\"\} [1-9]'"
 # A response HAProxy can't fit in one SPOE frame (1.5 MB of text in a
 # 2 MiB buffer): oversized, 502.

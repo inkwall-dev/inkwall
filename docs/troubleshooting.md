@@ -149,6 +149,9 @@ fix from these tables ([Explaining a policy or a denial](#explaining-a-policy-or
 | `RuleCompileError` | Rules in the policy's rule set don't compile, or use a directive Inkwall doesn't allow. | Fix the rules; `inkwallctl test --rule-set` shows the error before you apply. |
 | `Conflict` | An older policy targets the same route and applies to it: a route has one policy. | Merge the policies, or target other routes. |
 | `TargetUnsupported` | A target's match rules (an IngressRoute's, HTTPRoute's or VirtualService's) aren't ones the router can match, so its requests can't be told apart. | Use the forms the message lists (`Host`, `Path`, `PathPrefix`; exact and prefix paths). |
+| `RuleSetsIncompatible` | The policy's rule sets compile alone but not together, as the engine loads them (the same rule ID in two of them, or a rule that changes a rule the policy doesn't load). The policy is left out of the bundle (or keeps its previous version, if that compiles), so the other policies' bundle still applies. | Give the rules distinct IDs, or bind rule sets that load together; the message has the compiler's error. |
+| `TargetNotAttached` | A target HTTPRoute isn't accepted by a Gateway of a proxy Inkwall integrates with: no parent in its `status.parents` has `Accepted` `True`. No proxy routes its requests, so the policy doesn't apply to it. | Fix the route's `parentRefs`, or the Gateway's `allowedRoutes`; `kubectl get httproute -o yaml` shows why the Gateway didn't accept it. |
+| `RouteOverlap` | A route of the policy overlaps a route of a policy in another namespace, and the engine can't tell from the request which one the proxy used: a host served by two proxies or Gateways, or the same route. The overlap goes to the stricter policy (when they differ only in `mode` and `skip`), otherwise to the older one. `True`: this policy applies to the overlap; `False`: the other one does. | Serve a host from one proxy or Gateway, or don't share it between namespaces; the message names the routes and the other policy. |
 | `BundleTooLarge` | The bundle with this version of the policy is over 7,200 KiB compressed, so it isn't published; engines keep the previous one. | Move shared inline rules into one rule set that the policies reference; see [InkwallBundleNearSizeLimit](monitoring.md#inkwallbundlenearsizelimit). |
 <!-- end reasons -->
 
@@ -164,7 +167,7 @@ fix from these tables ([Explaining a policy or a denial](#explaining-a-policy-or
 | `InjectionDisabled` | The chart's `injection.enabled` is `false`: no proxy pod gets the engine, so nothing is wired. | Turn injection on. |
 | `SidecarMissing` | The proxy's pods don't run the engine: none is in the proxy namespaces, the InkwallConfig's selector doesn't match them, they were created while the operator was down, or they opted out. Their traffic isn't inspected. | Add the namespace to `injection.proxyNamespaces`, fix the selector, or restart the pods the message names. |
 | `PendingRestart` | Proxy pods started before Inkwall run without the engine (or Envoy Gateway is replacing its pods with ones that have it). | Restart them: `kubectl rollout restart`. |
-| `Pending` | Wired, but not in force yet: the proxy hasn't loaded the configuration. | Wait; if it lasts, check the proxy's logs. |
+| `Pending` | Wired, but not in force yet: the proxy hasn't loaded the configuration. Or, for an HTTPRoute of Envoy Gateway or Istio, a Gateway hasn't accepted the route (or refuses it): the operator changes a Gateway only once the route's status says it accepts the route. | Wait; if it lasts, check the proxy's logs. |
 | `Unverified` | Wired, but the operator's probe hasn't proven the filter on every pod (HAProxy, Istio), or got another answer than the engine's: the filter isn't on the route. For an Istio route in `Detect` mode: no engine reported the probe's receipt (in 30 s). For a policy with `responses.inspect`: the probe's response leg hasn't proven yet that the route's responses reach the engine on every pod. | HAProxy: check the controller has the operator's snippets ([HAProxy](haproxy.md)). Istio: see [the operator's probe](istio.md#the-operators-probe); another `EnvoyFilter` may remove or bypass Inkwall's. In `Detect` mode, the pods need a 0.6.0 engine. |
 | `NotProbeable` | The operator's probe can't target an Istio route (a rule whose every match is a regular expression, a server with mutual TLS or passthrough, or header or query match values over TLS, which the probe doesn't send to a certificate it doesn't verify; in `Detect` mode, also a match only for another method than `GET` or `HEAD`, and for a policy with `responses.inspect` in either mode, as the probe's response leg reaches the app), so its filter can't be proven; the message says which. | Add an exact or prefix match to the rule, or accept it unproven: [Istio](istio.md#the-operators-probe). |
 | `WiringFailed` | The operator couldn't change the proxy's objects (a conflict, a webhook, permissions). | The message names the object and the error; `kubectl -n inkwall-system logs deploy/inkwall-operator` has more. |
@@ -180,7 +183,7 @@ fix from these tables ([Explaining a policy or a denial](#explaining-a-policy-or
 | `Enforced` | Every engine runs the bundle, or a later one. | |
 | `NotInBundle` | The policy's current spec isn't in a published bundle yet. | Wait; if it lasts, see `Accepted`. |
 | `NoEngines` | No engine is connected to the operator. | Check the proxy pods run the engine (`Programmed`), and that engines reach the operator ([InkwallEngineDisconnected](monitoring.md#inkwallenginedisconnected)). |
-| `EnginesBehind` | Some engines don't run the bundle yet. | Usually seconds; if it lasts, `inkwallctl status` names them. |
+| `EnginesBehind` | Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting). | Usually seconds; if it lasts, `inkwallctl status` names them; check that the pod's engine reaches the operator ([InkwallEngineDisconnected](monitoring.md#inkwallenginedisconnected)). |
 | `EngineNack` | An engine rejected the bundle; the message names it and why (often an engine older than the operator, or a key it doesn't trust). | Restart the engine's pod so it runs the operator's version; see [InkwallBundleRejected](monitoring.md#inkwallbundlerejected). |
 | `EnginesOutdated` | An engine runs the bundle, but is too old to enforce a field the policy sets, which it ignores. | Restart the pod the message names. |
 | `EnginesUnreported` | An operator replica's engine report is full, so not every engine is known. | Run more operator replicas, or fewer proxy pods per replica. |
@@ -246,12 +249,12 @@ Accepted: True, Accepted
 Programmed: True, Programmed
 
 Enforced: False, EnginesBehind: 1 of 2 engines run bundle 7 or later
-  Cause: Some engines don't run the bundle yet.
-  Fix:   Usually seconds; if it lasts, `inkwallctl status` names them.
+  Cause: Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting).
+  Fix:   Usually seconds; if it lasts, `inkwallctl status` names them; check that the pod's engine reaches the operator (InkwallEngineDisconnected (docs/monitoring.md#inkwallenginedisconnected)).
 
 Ready: False, EnginesBehind: Enforced: 1 of 2 engines run bundle 7 or later
-  Cause: Some engines don't run the bundle yet.
-  Fix:   Usually seconds; if it lasts, `inkwallctl status` names them.
+  Cause: Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting).
+  Fix:   Usually seconds; if it lasts, `inkwallctl status` names them; check that the pod's engine reaches the operator (InkwallEngineDisconnected (docs/monitoring.md#inkwallenginedisconnected)).
 
 Engines that don't run the policy's bundle:
   traefik/traefik-1 (v0.6.0, behind, bundle 6): the engine doesn't run the policy's bundle yet: check its connection to the operator

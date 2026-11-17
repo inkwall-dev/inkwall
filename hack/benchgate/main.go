@@ -211,6 +211,10 @@ func check(r io.Reader, lim limits) ([]regression, error) {
 			// From zero (e.g. a zero-allocation path that now allocates):
 			// any increase is a regression.
 			pct = 100
+		case strings.HasSuffix(unit, "/s"):
+			// A rate (B/s from b.SetBytes): higher is better, so a fall
+			// is the regression.
+			pct = (base - head) / base * 100
 		default:
 			pct = (head - base) / base * 100
 		}

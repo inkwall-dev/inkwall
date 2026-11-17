@@ -276,15 +276,18 @@ processing_mode:
 allow_mode_override: true
 ```
 
-- **What is read:** the status and headers always; the body when its `Content-Type` is `text/plain`,
-  `text/html`, `text/xml`, `application/json`, `application/xml` or `application/problem+json`, up
-  to `--max-response-bytes` (64 KiB by default, 10 MiB at most). A `gzip` or `deflate` body is
-  decoded first; the engine also removes `Accept-Encoding` from the requests it forwards, so most apps
-  answer uncompressed.
+- **What is read:** the status and headers always; the body when its `Content-Type` is text
+  (`text/plain`, `text/html`, `text/xml`, `text/csv`), JavaScript, JSON or XML (with any `+json` or
+  `+xml` type, such as `application/vnd.api+json` or `image/svg+xml`), or is missing or malformed
+  (a browser may sniff it as HTML), up to `--max-response-bytes` (64 KiB by default, 10 MiB at
+  most). A `gzip` or `deflate` body is decoded first; the engine also removes `Accept-Encoding`,
+  `Range` and `If-Range` from the requests it forwards, so most apps answer whole and uncompressed.
+  A part of a body (`206 Partial Content` of a type the rules read, or `multipart/byteranges`) isn't
+  inspected, and gets `--oversize-response`, as below.
 - **Larger bodies:** their first `--max-response-bytes` are inspected, and then
   `--oversize-response` decides: `deny` replaces the response with 502 in block mode, `allow` lets it
   through; `auto` (the default) denies in block mode and allows in detect mode. A body in another
-  encoding (`br`, `zstd`) or one Envoy cut short is handled the same way.
+  encoding (`br`, `zstd`), in more than one, or one Envoy cut short is handled the same way.
 - **Envoy's buffer:** in block mode Envoy holds the response until the engine answers. Keep the app
   cluster's `per_connection_buffer_limit_bytes` (1 MiB by default) at least `--max-response-bytes`,
   or longer bodies arrive cut and are handled as oversized.

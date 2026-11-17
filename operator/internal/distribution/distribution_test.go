@@ -69,7 +69,7 @@ func TestEnforced(t *testing.T) {
 		{"rejected and left out", 3, []Engine{{Rejected: 3}}, 1, metav1.ConditionFalse, ReasonEngineNack, "some engines rejected bundle 3"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			st, reason, msg := Enforced(tc.version, tc.engines, tc.leftOut)
+			st, reason, msg := Enforced(tc.version, tc.engines, tc.leftOut, 0)
 			if st != tc.status || reason != tc.reason || !strings.Contains(msg, tc.message) {
 				t.Fatalf("got %s %s %q, want %s %s %q", st, reason, msg, tc.status, tc.reason, tc.message)
 			}
@@ -79,16 +79,16 @@ func TestEnforced(t *testing.T) {
 
 func TestTableReconnect(t *testing.T) {
 	tab := NewTable()
-	old := tab.Connect(Engine{ID: "e1", Applied: 1})
+	old := tab.Connect("e1", Engine{ID: "e1", Applied: 1})
 	// The engine reconnects before its old stream ended.
-	cur := tab.Connect(Engine{ID: "e1", Applied: 2})
+	cur := tab.Connect("e1", Engine{ID: "e1", Applied: 2})
 	tab.Disconnect("e1", old)
 	got, _ := tab.Snapshot()
 	if len(got) != 1 || got[0].Applied != 2 {
 		t.Fatalf("the old stream's disconnect removed the new one: %+v", got)
 	}
 	_, gen := tab.Snapshot()
-	tab.Update("e1", func(e *Engine) bool { return set(&e.Applied, 2) })
+	tab.Update("e1", cur, func(e *Engine) bool { return set(&e.Applied, 2) })
 	if _, g := tab.Snapshot(); g != gen {
 		t.Error("an update that changed nothing changed the generation")
 	}
@@ -363,7 +363,7 @@ func TestWatchNackErrorTruncated(t *testing.T) {
 	if e := got[0].RejectError; len(e) != maxRejectError-1 || !utf8.ValidString(e) || !strings.HasPrefix(reason, e) {
 		t.Fatalf("reject error of %d bytes (valid UTF-8: %t), want %d", len(e), utf8.ValidString(e), maxRejectError-1)
 	}
-	if _, msg, _ := (Enforced(2, got, 0)); len(msg) > maxRejectError+200 {
+	if _, msg, _ := (Enforced(2, got, 0, 0)); len(msg) > maxRejectError+200 {
 		t.Fatalf("Enforced message of %d bytes", len(msg))
 	}
 }
@@ -378,7 +378,7 @@ func TestReadEnginesLeftOut(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 	ctx := context.Background()
 	table := NewTable()
-	table.Connect(Engine{ID: "e1"})
+	table.Connect("e1", Engine{ID: "e1"})
 	p := &Publisher{Client: c, Reader: c, Namespace: "inkwall-system", Replica: "a", Engines: table}
 	engines, _ := table.Snapshot()
 	if err := p.write(ctx, engines); err != nil {

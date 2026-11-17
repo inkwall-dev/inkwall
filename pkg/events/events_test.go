@@ -263,6 +263,35 @@ func TestNewRedactsSensitiveArguments(t *testing.T) {
 	}
 }
 
+// TestNewRedactsUnnamedValues: a value whose name doesn't say what it
+// holds leaves no snippet: XML text, a gRPC message's field (named by its
+// numbers) and a WebSocket message's text. A WebSocket JSON value keeps
+// its path and its snippet.
+func TestNewRedactsUnnamedValues(t *testing.T) {
+	req := &request.Request{Method: "POST", Host: "shop.example"}
+	v := pipeline.Verdict{Action: pipeline.ActionLog, Reason: pipeline.ReasonRule}
+	for _, variable := range []string{"XML:/*", "xml://@*", "XML", "ARGS:1", "ARGS_POST:2.1", "ARGS_POST:10.3.7"} {
+		v.Matches = []rules.Match{{RuleID: 942100, Variable: variable, Value: "1' OR '1'='1"}}
+		if got := New(Source{}, req, "/", v, time.Now()).GetMatches()[0].GetSnippet(); got != "" {
+			t.Errorf("%s: snippet %q, want none", variable, got)
+		}
+	}
+	for _, variable := range []string{"ARGS:1a", "ARGS:v1.2", "ARGS:.1", "ARGS:1..2", "ARGS_POST:message"} {
+		v.Matches = []rules.Match{{RuleID: 942100, Variable: variable, Value: "1' OR '1'='1"}}
+		if got := New(Source{}, req, "/", v, time.Now()).GetMatches()[0].GetSnippet(); got != "1' OR '1'='1" {
+			t.Errorf("%s: snippet %q, want it kept", variable, got)
+		}
+	}
+	ws := v
+	ws.WebSocketMessage = true
+	for variable, want := range map[string]string{"ARGS_POST:message": "", "ARGS_POST:json.q": "1' OR '1'='1", "ARGS_POST:json.token": ""} {
+		ws.Matches = []rules.Match{{RuleID: 942100, Variable: variable, Value: "1' OR '1'='1"}}
+		if got := New(Source{}, req, "/", ws, time.Now()).GetMatches()[0].GetSnippet(); got != want {
+			t.Errorf("WebSocket %s: snippet %q, want %q", variable, got, want)
+		}
+	}
+}
+
 // TestNewRedactsConfigured: events.redact adds headers and argument
 // patterns, and snippets: false sends none.
 func TestNewRedactsConfigured(t *testing.T) {

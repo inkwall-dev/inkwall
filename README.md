@@ -99,7 +99,7 @@ with cosign v3, as cosign v2 reports "no signatures found". To verify an image:
 
 ```sh
 cosign verify ghcr.io/inkwall-dev/inkwall-engine:<version> \
-  --certificate-identity-regexp '^https://github.com/inkwall-dev/inkwall/\.github/workflows/release\.yaml@refs/tags/v' \
+  --certificate-identity 'https://github.com/inkwall-dev/inkwall/.github/workflows/release.yaml@refs/tags/v<version>' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
@@ -133,7 +133,11 @@ For an `HTTPRoute`, served by Envoy Gateway, Istio or Traefik, target it with it
 rule: `{group: gateway.networking.k8s.io, kind: HTTPRoute, name: web, sectionName: api}`. One policy
 can target routes of both proxies. Traefik wires an HTTPRoute only when every Gateway it is attached
 to is Traefik's: another proxy fails the rules that refer to Traefik's Middleware, so a route also
-attached to one is `WiringFailed`. Give each proxy its own HTTPRoute.
+attached to one is `WiringFailed`. Give each proxy its own HTTPRoute. A policy applies to an
+HTTPRoute once a Gateway accepts it (`Accepted` in the route's `status.parents`); until then the policy
+is `Accepted=False` (`TargetNotAttached`). Where routes of two namespaces overlap and the engine can't
+tell which one the proxy used (a host served by two proxies or Gateways), the overlap goes to the
+stricter policy, or else the older one, and both policies say so (`RouteOverlap`).
 
 Once the policy is `Ready`, every engine enforces it. Send an attack to check:
 
@@ -266,7 +270,7 @@ an Envoy you configure yourself, in or out of Kubernetes, see [protecting raw En
   [with the operator](docs/haproxy.md#with-the-operator-haproxy-kubernetes-ingress-controller)), wired by the operator; **raw [Envoy](https://www.envoyproxy.io/docs/envoy/latest/)** (1.33 or later) that you configure with
   the engine's ext_proc adapter ([protecting raw Envoy](docs/raw-envoy.md)); any other **[HAProxy](https://docs.haproxy.org/)** (3.1 or later) that you
   configure with the engine's SPOE agent ([protecting HAProxy](docs/haproxy.md)); and the standalone
-  proxy. [Caddy](https://caddyserver.com/docs/) is designed, not built. [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) is retired upstream, so it gets no integration:
+  proxy. [ingress-nginx](https://kubernetes.github.io/ingress-nginx/) is retired upstream, so it gets no integration:
   `inkwallctl migrate ingress-nginx` moves its ModSecurity settings to a supported proxy.
 - Targets: **`Ingress`** and Traefik **`IngressRoute`** (match rules that join `Host`, `Path` and
   `PathPrefix` with `&&`) through Traefik; [Gateway API](https://gateway-api.sigs.k8s.io/) **[`HTTPRoute`](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/)** through Envoy Gateway, Istio or
@@ -327,8 +331,9 @@ Tracked on the [project board](https://github.com/orgs/inkwall-dev/projects/1) a
   and server messages inspected per message; rule sets loaded before the CRS; and operator
   metrics over HTTPS.
 - **v1.0.0**: a stable API (out of `v1alpha1`) with an upgrade path.
-- Then more proxies: Caddy. Not ingress-nginx, which is retired upstream: its users
-  migrate with `inkwallctl migrate ingress-nginx`.
+- No other proxy is planned. Not ingress-nginx, which is retired upstream: its users
+  migrate with `inkwallctl migrate ingress-nginx`. Not Caddy: its design (0002 §6.5) stays as a
+  record.
 
 ## Development
 

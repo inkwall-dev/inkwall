@@ -67,7 +67,7 @@ func (h *Handler) inspectResponse(res *http.Response) error {
 	if kind := pipeline.StreamKind(res.Header.Get("Content-Type")); hasBody && kind != streams.None && x.ex.Streams() {
 		return h.inspectStream(ctx, x, res, resp, kind)
 	}
-	if hasBody && x.ex.WantsBody(res.Header.Get("Content-Type")) {
+	if hasBody && x.ex.WantsBody(pipeline.ResponseContentType(res.Header)) {
 		limit := x.ex.BodyLimit()
 		// One byte over the limit tells a longer body.
 		weight := min(limit+1, h.heldMax)

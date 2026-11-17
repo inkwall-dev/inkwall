@@ -294,8 +294,13 @@ func TestInspectedResponseType(t *testing.T) {
 		"image/png":                false,
 		"text/event-stream":        false,
 		"application/grpc":         false,
-		"":                         false,
-		";;":                       false,
+		"application/grpc+json":    false,
+		"application/vnd.api+json": true,
+		"image/svg+xml":            true,
+		"text/html; charset":       true,
+		// No type, or not one: what a browser sniffs, read as text.
+		"":   true,
+		";;": true,
 	} {
 		if got := InspectedResponseType(ct); got != want {
 			t.Errorf("%q: %v, want %v", ct, got, want)
