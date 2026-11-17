@@ -253,6 +253,7 @@ type RequestExplanation struct {
 var requestUntrusted = []string{
 	"requestId",
 	"events[].request",
+	"events[].rules[].variables",
 	"events[].suggestions[].exclusion.when",
 	"events[].suggestions[].yaml",
 	"events[].notSuggested[].variable",

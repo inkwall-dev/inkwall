@@ -61,9 +61,9 @@ func TestEnforcedServedEngines(t *testing.T) {
 			c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&wafv1alpha1.WAFPolicy{}).
 				WithObjects(policy("envoy-only", tc.websocket), policy("haproxy-only", tc.websocket), policy("unknown", tc.websocket), report).Build()
 			served := &ServedPods{}
-			served.Set(map[string]map[string]string{
-				"web/envoy-only":   {"envoy/a1": "envoy-gateway"},
-				"web/haproxy-only": {"haproxy/b1": "haproxy"},
+			served.Set(map[string]map[string]ServedPod{
+				"web/envoy-only":   {"envoy/a1": {Integration: "envoy-gateway"}},
+				"web/haproxy-only": {"haproxy/b1": {Integration: "haproxy"}},
 			})
 			r := &Reporter{Client: c, Reader: c, Namespace: "inkwall-system", Stale: time.Minute, Store: NewStore(), Served: served}
 			enforced := func(name string) *metav1.Condition {
@@ -107,5 +107,53 @@ func TestEnforcedServedEngines(t *testing.T) {
 			served.Set(nil)
 			step([]Engine{good, tc.bad}, map[string]string{"envoy-only": tc.reason})
 		})
+	}
+}
+
+// A served pod with the engine container whose engine isn't connected
+// holds its policy back (#652): while that engine reconnects, the pod may
+// serve an older bundle, whatever the other engines run. A pod without the
+// engine container (not injected, not running) isn't waited for, and an
+// engine that reports no pod may be any pod's, so then none is.
+func TestEnforcedWaitsForServedPodsEngines(t *testing.T) {
+	served := &ServedPods{}
+	served.Set(map[string]map[string]ServedPod{
+		"web/eg": {
+			"envoy/a1": {Integration: "envoy-gateway", Engine: true},
+			"envoy/a2": {Integration: "envoy-gateway", Engine: true},
+			"envoy/a3": {Integration: "envoy-gateway"},
+		},
+	})
+	v := served.view()
+	a1 := Engine{ID: "a1", PodNamespace: "envoy", PodName: "a1", Applied: 2}
+	a2 := Engine{ID: "a2", PodNamespace: "envoy", PodName: "a2", Applied: 2}
+	// The standalone engine: a pod no integration maps, so it counts.
+	standalone := Engine{ID: "s", PodNamespace: "web", PodName: "standalone", Applied: 2}
+	anonymous := Engine{ID: "x", Applied: 2}
+	for _, tc := range []struct {
+		name    string
+		engines []Engine
+		missing int
+		reason  string
+	}{
+		{"every served engine connected", []Engine{a1, a2, standalone}, 0, ReasonEnforced},
+		{"a served pod's engine reconnecting", []Engine{a1, standalone}, 1, ReasonEnginesBehind},
+		{"only other engines connected", []Engine{standalone}, 2, ReasonEnginesBehind},
+		{"an engine without a pod", []Engine{a1, anonymous}, 0, ReasonEnforced},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mine, missing := v.enginesFor("web/eg", tc.engines)
+			if missing != tc.missing {
+				t.Errorf("missing %d, want %d", missing, tc.missing)
+			}
+			st, reason, msg := Enforced(2, mine, 0, missing)
+			if reason != tc.reason || (st == metav1.ConditionTrue) != (tc.reason == ReasonEnforced) {
+				t.Errorf("Enforced %s %s (%s), want %s", st, reason, msg, tc.reason)
+			}
+		})
+	}
+	// A policy whose pods aren't known: nothing to wait for.
+	if _, missing := v.enginesFor("web/other", []Engine{standalone}); missing != 0 {
+		t.Errorf("unknown policy: missing %d, want 0", missing)
 	}
 }

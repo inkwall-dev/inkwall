@@ -118,7 +118,7 @@ func TestHAProxyResponseFiles(t *testing.T) {
 	for _, want := range []string{
 		"spoe-agent inkwall-responses", "groups inkwall-response", "option var-prefix inkwall", "responses=bool(1)",
 		"use-backend inkwall-engine", "event on-backend-http-request",
-		"args status=status headers=res.hdrs_bin body=res.body key=var(txn.inkwall.responses) failure=var(txn.inkwall.response_failure)",
+		"args status=status headers=res.hdrs_bin body=res.body key=var(txn.inkwall.responses) failure=var(txn.inkwall.response_failure) whole=var(txn.inkwall.response_whole)",
 		"spoe-group inkwall-response", " responses response_failure response_action response_status",
 	} {
 		if !strings.Contains(responses, want) {

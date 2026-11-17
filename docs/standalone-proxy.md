@@ -76,7 +76,9 @@ inkwall-engine proxy --upstream http://localhost:3000 --mode block --inspect-res
 ```
 
 - The status and headers are always inspected. A body is inspected when the rules read its media
-  type (`text/html`, `text/plain`, `application/json`, XML): its first `--max-response-bytes`
+  type (`text/html`, `text/plain`, `text/csv`, JavaScript, JSON, XML, any `+json` or `+xml` type
+  such as `application/vnd.api+json` or `image/svg+xml`, and a missing or malformed `Content-Type`,
+  which a browser may sniff as HTML): its first `--max-response-bytes`
   (64 KiB by default; `gzip` and `deflate` are decoded first) are read before anything goes to the
   client. An image or a download passes as it streams, its body uninspected; so do Server-Sent
   Events and gRPC streams, unless `--response-streams inspect` is set too.
@@ -91,8 +93,11 @@ inkwall-engine proxy --upstream http://localhost:3000 --mode block --inspect-res
   denial body. A body over the limit has its first part inspected and then gets
   `--oversize-response` (`auto`: 502 in block mode, forwarded in detect mode). `detect` mode logs
   the event (`"phase":"response"`) and forwards the response unchanged.
-- To read bodies, the proxy removes the client's `Accept-Encoding` from requests whose responses it
-  inspects: the upstream answers them uncompressed, or in `gzip`, which the proxy decodes.
+- To read bodies, the proxy removes the client's `Accept-Encoding`, `Range` and `If-Range` from
+  requests whose responses it inspects: the upstream answers them whole and uncompressed, or in
+  `gzip`, which the proxy decodes. A part of a body the upstream sends anyway (`206 Partial
+  Content` of a type the rules read, or `multipart/byteranges`), or a body in another encoding or
+  in several, isn't inspected and gets `--oversize-response`.
 - Bodies held for inspection are bounded: each to `--max-response-bytes`, all of them together to
   `--max-held-response-bytes` (64 MiB by default). Past it, a response gets `--failure-mode` as an
   overloaded request does: 503 in block mode, forwarded uninspected in detect mode, counted with

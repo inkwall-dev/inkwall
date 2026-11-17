@@ -410,3 +410,53 @@ func TestResponsesArgument(t *testing.T) {
 		t.Errorf("responses not a boolean: %+v", vars)
 	}
 }
+
+// A body without Content-Length (chunked) is whole only when HAProxy tells
+// it waited for it (ArgWhole): a part of it HAProxy had at once is small,
+// and inspected alone it would pass, the rest after it uninspected.
+// Without ArgWhole it counts as cut, oversized: 502 with onOversize Deny.
+func TestResponseChunkedWholeOnlyWhenHAProxySays(t *testing.T) {
+	eval, err := coraza.New(coraza.Config{ResponseBodyLimit: 1 << 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 10 * time.Second,
+		Responses: pipeline.ResponseConfig{Inspect: true, MaxBytes: 1 << 10, Oversize: pipeline.OversizeDeny}})
+	a := startAgent(t, p, Config{Responses: true})
+	h := a.dial(t)
+	h.hello()
+	const head = "<html><head><title>Products</title></head><body><h1>Results</h1>"
+	chunked := func(frameID uint64, body string, whole ...bool) map[string]value {
+		key := h.request(frameID, "/")[VarResponses].String()
+		args := []func(*encoder){argInt(ArgStatus, 200), argBinary(ArgHeaders, hdrs("content-type", "text/html", "transfer-encoding", "chunked")),
+			argBinary(ArgBody, []byte(body)), argString(ArgKey, key), argString(ArgFailure, FailureClosed)}
+		for _, w := range whole {
+			args = append(args, argBool(ArgWhole, w))
+		}
+		return h.respond(frameID+1, args...)
+	}
+	for _, tc := range []struct {
+		name   string
+		body   string
+		whole  []bool
+		action string
+		status uint64
+	}{
+		{"a part, HAProxy says nothing", head, nil, ActionDeny, 502},
+		{"a part, not whole", head, []bool{false}, ActionDeny, 502},
+		{"whole, benign", head + "</body></html>", []bool{true}, ActionAllow, 0},
+		{"whole, a leak", sqlError, []bool{true}, ActionDeny, 403},
+	} {
+		vars := chunked(uint64(10+len(tc.name)*2), tc.body, tc.whole...)
+		if vars[VarResponseAction].String() != tc.action || vars[VarResponseStatus].u != tc.status {
+			t.Errorf("%s: %+v, want %s %d", tc.name, vars, tc.action, tc.status)
+		}
+	}
+	// With Content-Length, the length tells a cut body.
+	key := h.request(100, "/")[VarResponses].String()
+	vars := h.respond(101, argInt(ArgStatus, 200), argBinary(ArgHeaders, hdrs("content-type", "text/html", "content-length", "500")),
+		argBinary(ArgBody, []byte(head)), argString(ArgKey, key), argString(ArgFailure, FailureClosed))
+	if vars[VarResponseAction].String() != ActionDeny || vars[VarResponseStatus].u != 502 {
+		t.Errorf("Content-Length, cut: %+v", vars)
+	}
+}

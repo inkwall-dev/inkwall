@@ -11,6 +11,12 @@
 #     with 1008, and the engine logs its rule.
 #   - detect mode: an attack in a message is echoed, and logged.
 #   - off (the default): an attack in a message is echoed, unlogged.
+#   - responses (#323, --inspect-responses): a response leaking a SQL error
+#     is replaced with 403 in block mode and logged; a stream (Server-Sent
+#     Events) passes uninspected, leak and all, unless --response-streams
+#     inspect: then a clean stream passes whole, and one with a leaking
+#     event ends before it in block mode (passes in detect mode), the event
+#     logged with its index.
 #
 # The proxy is the only adapter that sees a WebSocket's messages: through
 # Envoy (ext_proc) and Traefik (ForwardAuth) only the handshake is
@@ -117,6 +123,45 @@ echo "== messages off (the default)"
 start_engine --mode block
 eventually "an attack in a message is echoed" ws_is upgraded /ws/off "$SQLI_MESSAGE"
 check "and not logged" bash -c "! docker logs $NAME-engine 2>/dev/null | grep -F '\"path\":\"/ws/off\"' | grep -q 'security event'"
+
+# Responses through the proxy (#323): wsecho's /leak answers an HTML page
+# leaking a MySQL error, /sse and /sse-leak Server-Sent Events (the second's
+# second event leaks it).
+LEAK_TEXT='SQL syntax'
+http_is() { [[ $(curl -s -o /dev/null -w '%{http_code}' -H 'Host: app.example.com' "http://127.0.0.1:$PORT$2") == "$1" ]]; }
+body() { curl -s -H 'Host: app.example.com' "http://127.0.0.1:$PORT$1" || true; }
+leak_gone() { ! body /leak | grep -qF "$LEAK_TEXT"; }
+sse() { curl -sN --max-time 10 -H 'Host: app.example.com' "http://127.0.0.1:$PORT$1" || true; }
+stream_whole() { [[ $(sse "$1") == "$2" ]]; }
+stream_cut() {
+  local out
+  out=$(sse /sse-leak)
+  [[ $out == *"data: hello"* && $out != *"$LEAK_TEXT"* && $out != *"data: after"* ]]
+}
+LEAKING_STREAM=$'data: hello\n\ndata: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version\n\ndata: after'
+
+echo "== responses, block mode (--inspect-responses)"
+start_engine --mode block --inspect-responses
+eventually "a clean response passes" http_is 200 /products/42
+check "a response leaking a SQL error gets 403" http_is 403 /leak
+check "its body never reaches the client" leak_gone
+eventually "the engine logs it as a response deny" logged /leak '"phase":"response"'
+check "an attack in the request still gets 403" http_is 403 "/?id=1%27%20OR%20%271%27%3D%271"
+check "a stream passes uninspected (--response-streams skip, the default), its leak too" stream_whole /sse-leak "$LEAKING_STREAM"
+
+echo "== streamed responses, block mode (--response-streams inspect)"
+start_engine --mode block --inspect-responses --response-streams inspect
+eventually "a clean stream passes whole" stream_whole /sse $'data: hello\n\ndata: world'
+check "a stream with a leaking event ends before it: the event before it passes, it and the one after never do" stream_cut
+eventually "the engine logs the leaking event, with its index" logged /sse-leak '"stream_event":2'
+check "as a response deny" logged /sse-leak '"action":"deny"'
+
+echo "== streamed responses, detect mode"
+start_engine --mode detect --inspect-responses --response-streams inspect
+eventually "a stream with a leaking event passes whole" stream_whole /sse-leak "$LEAKING_STREAM"
+eventually "and the engine logs the event, with its index" logged /sse-leak '"stream_event":2'
+check "as a response log" logged /sse-leak '"action":"log"'
+check "a leaking response passes in detect mode" http_is 200 /leak
 
 if ((failures > 0)); then
   echo "$failures check(s) failed"

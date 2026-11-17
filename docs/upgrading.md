@@ -107,6 +107,13 @@ What's new:
   `inkwall.dev/source: saas`; the cluster state lists every `WAFIPList`
   ([Managed mode](control-plane.md#managed-mode)). A control plane that sends none changes
   nothing.
+- **`Enforced` waits for every serving pod's engine** (#652). A running proxy pod with the
+  engine container that serves a policy, but whose engine isn't connected to the operator (it is
+  starting or reconnecting), now makes the policy `Enforced=False` (`EnginesBehind`: `some proxy
+  pods' engines are not connected`) until it connects and runs the bundle. Before, only connected
+  engines counted, so the other engines could make a policy `Ready` while such a pod still served
+  an older bundle, for a few seconds after an operator restart or a lost connection. Expect a
+  few seconds of `EnginesBehind` after a proxy pod starts.
 - **`Detect`-mode Istio routes are `Programmed`.** Envoy discards the engine's answer to the
   operator's probe in `Detect` mode, so those HTTPRoutes and VirtualServices were `Unverified`.
   Now the engine keeps a receipt of each probe it verified and reports it to the operator, which
@@ -140,6 +147,32 @@ What's new:
 
 What changes by itself:
 
+- **gRPC messages: every text field is read** (`body.grpcMessages: Inspect`). A field with a
+  control or invisible character (NUL, ESC, DEL, a zero-width space) was left out; it is now
+  inspected, a control character read as a space. A field of binary bytes gives its runs of at least 8
+  readable characters, and the bytes between a nested message's fields their runs of at least 4.
+  Measured on random binary fields and real messages, no more false positives than before; if a
+  policy's events show one, exclude that field (`when: {argument: "3"}`).
+- **Fewer snippets in security events.** A match on XML text, on a gRPC message's field (named by
+  numbers, `2.1`) or on a WebSocket message's text leaves no snippet, as a credential's doesn't:
+  their names don't say whether they hold one ([Redacting security events](../deploy/helm/inkwall/README.md#redacting-security-events)).
+- **A policy applies to an HTTPRoute only once a Gateway accepts it.** The route must have a
+  parent in `status.parents` with `Accepted=True`, from Envoy Gateway, Istio or Traefik; until
+  then the policy is `Accepted=False` (`TargetNotAttached`) and its routes aren't in the bundle.
+- **Envoy Gateway and Istio: the operator wires a Gateway for a protected HTTPRoute only once the
+  route's status shows that Gateway accepts it** (`Accepted=True`); until then the policy is
+  `Programmed=False` (`Pending`) and the Gateway is left unchanged.
+- **Overlapping routes of different namespaces.** Where the engine can't tell which of two
+  namespaces' routes the proxy used (the same route, or a host served by two proxies or Gateways),
+  the overlap goes to the stricter policy (when they differ only in `mode` and `skip`), otherwise to
+  the older one, no longer to the more specific target; both policies say so (`RouteOverlap`, and
+  the one that doesn't apply is `Accepted=False`).
+- **A policy whose rule sets don't compile together is left out** (`Accepted=False`,
+  `RuleSetsIncompatible`, for example the same rule ID in two rule sets), or keeps its previous
+  version if that compiles. The other policies' bundle is published as usual.
+- **The operator records each engine under the pod its token is bound to** (or its ServiceAccount
+  and engine ID without a pod-bound token), so engines that report the same engine ID no longer
+  share one record in `inkwallctl status` or the `Enforced` condition.
 - **In Managed mode, a `WAFIPList` labelled `inkwall.dev/source: saas` is the control plane's**,
   as the other kinds were: besides edits, the webhook now refuses deleting it, and the next
   snapshot that doesn't carry it deletes it. The operator never wrote such lists before 0.6.0, so
@@ -186,6 +219,46 @@ What changes by itself:
   `examples/haproxy/haproxy.cfg`. `Programmed`'s note on HAProxy's buffer now also names a
   `responses.maxBytes` larger than it, and [Bodies](haproxy.md#bodies) gives the memory a larger
   `tune.bufsize` costs.
+- **`inkwallctl migrate ingress-nginx` doesn't convert a `ctl` action in a chained rule.** The
+  `ctl` of a `chain` runs only when every rule of the chain matches, which an exclusion or a
+  skipped path can't express: such a chain is now `TODO` and left out, so the CRS rules it turned
+  off stay on, where it used to become an exclusion or `skip.paths` entry for every request. Other
+  chains are kept whole in the `WAFRuleSet`. Run the migration again and convert those chains by
+  hand. With `-f`, an object whose name or namespace isn't a valid Kubernetes name is refused, and
+  `--output` writes only inside its directory.
+- **A request whose path a proxy may route differently from the engine is inspected by every
+  policy its path could select.** A path with dot segments (`/a/../b`), encoded characters
+  (`%2F`, `%2e`) or repeated slashes can match one route as received and another once decoded and
+  cleaned; the engine used only the decoded, cleaned form. It now matches each form, and when they
+  select different policies the request is inspected by each and gets the strictest verdict: a
+  `Block` policy's deny wins over a `Detect` policy's log. Plain paths, and hosts whose routes
+  agree, don't change. Such a request is counted under each policy that inspected it
+  ([0002 §5.2](design/0002-system-architecture.md#52-engine--operator-bundle-distribution)).
+- **The standalone proxy forwards only WebSocket upgrades.** A request whose `Upgrade` is anything
+  but a single `websocket` token with `Connection: Upgrade` (`h2c`, `websocket, h2c`, `TLS/1.2`,
+  ...) now reaches the upstream without its `Upgrade` and `HTTP2-Settings` headers, as a plain
+  HTTP/1.1 request, so the upstream can't switch the connection to another protocol. A client that
+  offers `h2c` (`curl --http2` on `http://`) gets HTTP/1.1. WebSocket handshakes don't change
+  ([Which requests are handshakes](websocket.md#which-requests-are-handshakes)).
+- **HAProxy forwards only WebSocket upgrades.** The operator's backend snippet and
+  `examples/haproxy/haproxy.cfg` now remove any `Upgrade` but a single `websocket` token, and
+  `HTTP2-Settings`, after the engine's verdict: the app gets such a request as a plain one. The
+  operator rewrites the snippets on its first reconcile; by hand, copy the two `del-header` rules
+  ([WebSocket](haproxy.md#websocket)).
+- **Response bodies are read in more media types, and whole.** With `responses.inspect` (or
+  `--inspect-responses`), the body of a response is now also inspected when its `Content-Type` is
+  `text/csv`, JavaScript, `application/xhtml+xml`, any `+json` or `+xml` type (such as
+  `application/vnd.api+json` or `image/svg+xml`), a type with a malformed parameter (`text/html;
+  charset`), or missing, read up to `maxBytes` like the others. On those routes the engine removes
+  the request's `Range` and `If-Range`, as it removes `Accept-Encoding`, so the app sends the whole
+  body: a client gets `200` with the whole body instead of `206`. A part of a body the app sends
+  anyway (`206 Partial Content` of a type the rules read, or `multipart/byteranges`) isn't
+  inspected, and gets `responses.onOversize`; so does a body with several `Content-Encoding` values
+  other than `identity`. By hand, HAProxy needs the new `del-header range` and `del-header
+  if-range` lines of `examples/haproxy/haproxy.cfg`, and its new `wait-for-body` rules, with
+  `whole=var(txn.inkwall.response_whole)` in `spoe.conf`'s `inkwall-response` message: through
+  HAProxy, a body without `Content-Length` (chunked) is taken as whole only when HAProxy waited for
+  it, and counts as oversized otherwise.
 
 ## From 0.4.x to 0.5.0
 

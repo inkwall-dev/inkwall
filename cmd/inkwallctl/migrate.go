@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/dynamic"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -248,6 +249,13 @@ func readMigrateFiles(cfg migrateConfig, notes io.Writer) (migrateInput, error) 
 			return err
 		}
 		ns := cmp.Or(head.Metadata.Namespace, namespace)
+		switch head.Kind {
+		case "Ingress", "HTTPRoute", "IngressRoute":
+			// The names make the objects' and the files' names.
+			if err := checkObjectName(head.Kind, ns, head.Metadata.Name); err != nil {
+				return err
+			}
+		}
 		switch {
 		case strings.HasSuffix(head.Kind, "List"):
 			for _, item := range head.Items {
@@ -446,6 +454,18 @@ func readCluster(cfg migrateConfig, notes io.Writer) (migrateInput, error) {
 	}
 }
 
+// checkObjectName refuses an object read from a file whose namespace or
+// name the API server wouldn't accept.
+func checkObjectName(kind, namespace, name string) error {
+	if errs := validation.IsDNS1123Label(namespace); len(errs) > 0 {
+		return fmt.Errorf("the %s %q: namespace %q: %s", kind, name, namespace, strings.Join(errs, "; "))
+	}
+	if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
+		return fmt.Errorf("the %s %q in namespace %s: %s", kind, name, namespace, strings.Join(errs, "; "))
+	}
+	return nil
+}
+
 // writeMigration prints the objects, or writes them to cfg.outDir: one file
 // per Ingress, and one for the CRS rule set they share.
 func writeMigration(cfg migrateConfig, results []*migration, stdout io.Writer) error {
@@ -502,6 +522,12 @@ func writeMigration(cfg migrateConfig, results []*migration, stdout io.Writer) e
 		}
 		_, err := stdout.Write(bytes.Join(all, []byte("---\n")))
 		return err
+	}
+	for _, f := range files {
+		// Only plain file names, inside the directory.
+		if !filepath.IsLocal(f.name) || filepath.Base(f.name) != f.name || strings.ContainsAny(f.name, `/\`) {
+			return fmt.Errorf("can't write %q: not a file name in %s", f.name, cfg.outDir)
+		}
 	}
 	if err := os.MkdirAll(cfg.outDir, 0o750); err != nil {
 		return err

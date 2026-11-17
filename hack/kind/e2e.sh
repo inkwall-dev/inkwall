@@ -96,6 +96,7 @@ cleanup() {
   if [[ -n ${tpf:-} ]]; then kill "$tpf" 2>/dev/null || true; fi
   rm -rf "$trust"
   if [[ ${KEEP:-} != 1 ]]; then
+    if [[ ${crs_created:-} == true ]]; then "${KUBECTL[@]}" delete clusterwafruleset owasp-crs-v4 --ignore-not-found >/dev/null 2>&1 || true; fi
     "${KUBECTL[@]}" delete namespace "$NS" --wait=false >/dev/null 2>&1 || true
     "${KUBECTL[@]}" -n "$OPERATOR_NS" delete role,rolebinding inkwall-e2e-bundle-reader >/dev/null 2>&1 || true
     helm --kube-context "kind-$CLUSTER" -n "$TRAEFIK_NS" uninstall traefik-e2e >/dev/null 2>&1 || true
@@ -154,6 +155,73 @@ eventually "block mode again" status_is 403 "$SQLI"
 . hack/kind/explain-e2e.sh
 # shellcheck source=hack/kind/mcp-e2e.sh
 . hack/kind/mcp-e2e.sh
+
+# A rule set placed before the CRS (#423): it sets tx.allowed_methods, which
+# the CRS's initialisation (REQUEST-901) only defaults when it is unset, to
+# let PUT through. After the CRS (the default) it comes too late: rule
+# 911100 has denied the method. Before it, PUT passes, as with the
+# standalone engine's --rules-before-crs; the engine applies each bundle
+# without a restart.
+echo "== a rule set placed before the CRS (placement: BeforeCRS)"
+crs_created=false
+if ! "${KUBECTL[@]}" get clusterwafruleset owasp-crs-v4 >/dev/null 2>&1; then
+  crs_created=true
+  "${KUBECTL[@]}" apply --server-side -f operator/config/samples/clusterwafruleset.yaml >/dev/null
+fi
+"${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFRuleSet
+metadata: {name: methods, namespace: $NS}
+spec:
+  source:
+    seclang: |
+      SecAction "id:100100,phase:1,pass,nolog,t:none,setvar:'tx.allowed_methods=GET HEAD POST OPTIONS PUT'"
+YAML
+# placed_policy [PLACEMENT]: the policy, in Block mode, with the built-in
+# CRS and the rule set after it, bound with PLACEMENT (unset: none).
+placed_policy() {
+  "${KUBECTL[@]}" apply --server-side -f - >/dev/null <<YAML
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata:
+  name: app
+  namespace: $NS
+spec:
+  targetRefs: [{kind: Ingress, name: app}]
+  mode: Block
+  ruleSets:
+    - ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}
+    - ref: {kind: WAFRuleSet, name: methods}
+${1:+      placement: $1}
+YAML
+}
+put_is() { [[ $(curl -s -o /dev/null -w '%{http_code}' -X PUT -H "Host: $HOST" "http://127.0.0.1:$PORT/api/items/1" || true) == "$1" ]]; }
+# enforced_now: every engine runs the bundle of this generation of the policy.
+enforced_now() {
+  enforced_by_all && [[ $(condition Enforced observedGeneration) == $("${KUBECTL[@]}" -n "$NS" get wafpolicy app -o jsonpath='{.metadata.generation}') ]]
+}
+pod=$(engine_pod)
+check "without the rule set, PUT gets 403 (CRS 911100)" put_is 403
+placed_policy
+eventually "the rule set bound without a placement: Enforced" enforced_now
+check "loaded after the CRS (the default), it comes too late: PUT gets 403" put_is 403
+placed_policy AfterCRS
+eventually "placement: AfterCRS: Enforced" enforced_now
+check "PUT still gets 403" put_is 403
+placed_policy BeforeCRS
+eventually "placement: BeforeCRS: the CRS reads the rule set's tx.allowed_methods, PUT passes" put_is 200
+# The engine applies the bundle before the operator records that it runs it.
+eventually "Enforced by the engine" enforced_now
+check "an attack still gets 403" status_is 403 "$SQLI"
+check "a benign request passes" status_is 200 /products/42
+check "same engine pod, no restart" same_pod
+policy Block
+eventually "the rule set unbound: PUT gets 403 again" put_is 403
+"${KUBECTL[@]}" -n "$NS" delete wafruleset methods --ignore-not-found >/dev/null
+if $crs_created; then
+  "${KUBECTL[@]}" delete clusterwafruleset owasp-crs-v4 --ignore-not-found >/dev/null
+  crs_created=false
+fi
 
 # The chart README's suspend switch (#299), as documented: doc_block runs
 # the sh block after the README's "<!-- e2e: NAME" comment, kubectl pointed

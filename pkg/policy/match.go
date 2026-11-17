@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	"github.com/inkwall-dev/inkwall/pkg/router"
 )
 
 // route is one RouteMatch of a policy.
@@ -118,13 +119,30 @@ func newMatcher(routes []route) *matcher {
 }
 
 // lookup returns the policy for a request, or nil when no policy covers its
-// host. A request to a covered host whose path matches none of the host's
-// routes gets the host's most general policy: in front of a proxy that only
-// sends requests from protected routes, a path that fails to match is one
-// the proxy normalizes differently, and must not go uninspected.
+// host: the policy of its decoded, cleaned path (policies returns them
+// all).
 func (m *matcher) lookup(host, rawURI, method string) *Policy {
+	var buf [4]*Policy
+	if ps := m.policies(host, rawURI, method, buf[:0]); len(ps) > 0 {
+		return ps[0]
+	}
+	return nil
+}
+
+// policies appends to buf the policies of a request, none when no policy
+// covers its host. Proxies route on different forms of a path: as received
+// (HAProxy), with dot segments removed and %2F kept (Envoy, Istio's
+// default), with slashes merged too (Envoy Gateway), or decoded and cleaned
+// (Traefik). Each form a proxy may route on selects a policy, and a request
+// whose forms select different policies gets each of them, so that it is
+// never inspected by a weaker policy than the one of the route the proxy
+// chose. The policy of the decoded, cleaned path comes first. A request to
+// a covered host whose path matches none of the host's routes gets the
+// host's most general policy: in front of a proxy that only sends requests
+// from protected routes, a path that fails to match is one the proxy
+// normalizes differently, and must not go uninspected.
+func (m *matcher) policies(host, rawURI, method string, buf []*Policy) []*Policy {
 	host = normalizeHost(host)
-	p := normalizePath(rawURI)
 	var candidates [][]*route
 	if rs, ok := m.byHost[host]; ok {
 		candidates = append(candidates, rs)
@@ -146,6 +164,21 @@ func (m *matcher) lookup(host, rawURI, method string) *Policy {
 	if len(m.anyHost) > 0 {
 		candidates = append(candidates, m.anyHost)
 	}
+	if len(candidates) == 0 {
+		return buf
+	}
+	var forms [maxPathForms]string
+	for _, p := range pathForms(rawURI, forms[:0]) {
+		if pol := match(candidates, p, method); !slices.Contains(buf, pol) {
+			buf = append(buf, pol)
+		}
+	}
+	return buf
+}
+
+// match returns the policy of the first route of candidates that matches
+// p and method, or the most general route of the most specific host.
+func match(candidates [][]*route, p, method string) *Policy {
 	for _, rs := range candidates {
 		for _, r := range rs {
 			if r.matches(p, method) {
@@ -153,10 +186,6 @@ func (m *matcher) lookup(host, rawURI, method string) *Policy {
 			}
 		}
 	}
-	if len(candidates) == 0 {
-		return nil
-	}
-	// The most general route of the most specific host.
 	rs := candidates[0]
 	return rs[len(rs)-1].policy
 }
@@ -184,14 +213,163 @@ func normalizeHost(h string) string {
 }
 
 // normalizePath returns the decoded, cleaned path of a request target, as
-// proxies route on it.
+// Traefik routes on it.
 func normalizePath(rawURI string) string {
-	p, _, _ := strings.Cut(rawURI, "?")
+	p := targetPath(rawURI)
 	if u, err := url.PathUnescape(p); err == nil {
 		p = u
 	}
+	return path.Clean(p)
+}
+
+// targetPath returns the path of a request target, from "/".
+func targetPath(rawURI string) string {
+	p, _, _ := strings.Cut(rawURI, "?")
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p
 	}
-	return path.Clean(p)
+	return p
+}
+
+// maxPathForms bounds the forms pathForms returns: three decodings, four
+// normalizations of each.
+const maxPathForms = 12
+
+// pathForms appends to buf the distinct forms of a request target's path a
+// proxy may route on, normalizePath's first. The path is decoded not at
+// all, of the unreserved characters only (RFC 3986 §6.2.2.2, as Envoy
+// does), or entirely (%2F included); then kept as is, its dot segments
+// removed (RFC 3986 §5.2.4, "//" kept), its dot segments removed then its
+// slashes merged, or cleaned (path.Clean: slashes merged first). A plain
+// path, which none of these change, has one form, or two with a trailing
+// slash path.Clean drops.
+func pathForms(rawURI string, buf []string) []string {
+	if p := targetPath(rawURI); simplePath(p) {
+		return append(buf, p)
+	}
+	add := func(p string) {
+		if !slices.Contains(buf, p) {
+			buf = append(buf, p)
+		}
+	}
+	add(normalizePath(rawURI))
+	p := targetPath(rawURI)
+	if _, ok := router.UnambiguousPath(p); ok {
+		add(p)
+		return buf
+	}
+	for _, d := range [...]string{p, decodeUnreserved(p), decodeAll(p)} {
+		add(d)
+		r := removeDotSegments(d)
+		add(r)
+		add(mergeSlashes(r))
+		add(path.Clean(d))
+	}
+	return buf
+}
+
+// simplePath reports whether every form of p is p itself: it holds no
+// escape or backslash, no empty, "." or ".." segment, and no trailing
+// slash but the root's. Most paths are, and get one form without the cost
+// of decoding and cleaning them.
+func simplePath(p string) bool {
+	if p == "/" {
+		return true
+	}
+	if strings.HasSuffix(p, "/") || strings.Contains(p, "//") || strings.ContainsAny(p, "%\\") {
+		return false
+	}
+	for seg := range strings.SplitSeq(p[1:], "/") {
+		if seg == "." || seg == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// decodeAll decodes every percent-encoded byte of p, or returns p when it
+// holds an invalid escape.
+func decodeAll(p string) string {
+	if u, err := url.PathUnescape(p); err == nil {
+		return u
+	}
+	return p
+}
+
+// decodeUnreserved decodes the percent-encoded unreserved characters of p
+// (ALPHA, DIGIT, "-", ".", "_", "~") and keeps the other escapes.
+func decodeUnreserved(p string) string {
+	if !strings.Contains(p, "%") {
+		return p
+	}
+	var b strings.Builder
+	b.Grow(len(p))
+	for i := 0; i < len(p); i++ {
+		if p[i] == '%' && i+2 < len(p) {
+			if c, ok := unhex(p[i+1], p[i+2]); ok && unreserved(c) {
+				b.WriteByte(c)
+				i += 2
+				continue
+			}
+		}
+		b.WriteByte(p[i])
+	}
+	return b.String()
+}
+
+func unhex(h, l byte) (byte, bool) {
+	v := func(c byte) (byte, bool) {
+		switch {
+		case c >= '0' && c <= '9':
+			return c - '0', true
+		case c >= 'a' && c <= 'f':
+			return c - 'a' + 10, true
+		case c >= 'A' && c <= 'F':
+			return c - 'A' + 10, true
+		}
+		return 0, false
+	}
+	hv, ok1 := v(h)
+	lv, ok2 := v(l)
+	return hv<<4 | lv, ok1 && ok2
+}
+
+func unreserved(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("-._~", c) >= 0
+}
+
+// removeDotSegments removes the "." and ".." segments of p, which starts
+// with "/", as RFC 3986 §5.2.4 does: an empty segment ("//") is a segment,
+// so "/a//../b" is "/a/b".
+func removeDotSegments(p string) string {
+	if !strings.Contains(p, "/.") {
+		return p
+	}
+	segs := strings.Split(p[1:], "/")
+	out := make([]string, 0, len(segs))
+	for i, s := range segs {
+		last := i == len(segs)-1
+		switch s {
+		case ".":
+		case "..":
+			if len(out) > 0 {
+				out = out[:len(out)-1]
+			}
+		default:
+			out = append(out, s)
+			continue
+		}
+		if last {
+			out = append(out, "")
+		}
+	}
+	return "/" + strings.Join(out, "/")
+}
+
+// mergeSlashes replaces each run of slashes in p with one.
+func mergeSlashes(p string) string {
+	for strings.Contains(p, "//") {
+		p = strings.ReplaceAll(p, "//", "/")
+	}
+	return p
 }

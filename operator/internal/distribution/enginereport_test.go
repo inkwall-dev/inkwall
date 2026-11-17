@@ -21,7 +21,7 @@ func TestEngineReportFields(t *testing.T) {
 		ProbeReceipts: []string{"0123456789abcdef0123456789abcdef"},
 		Replica:       "inkwall-operator-a", ConnectedAt: time.Unix(1700000000, 0).UTC(),
 	}
-	if n := reflect.TypeFor[Engine]().NumField() - 1; n != reflect.TypeFor[enginereport.Engine]().NumField() {
+	if n := reflect.TypeFor[Engine]().NumField() - 2; n != reflect.TypeFor[enginereport.Engine]().NumField() {
 		t.Fatalf("Engine has %d exported fields, enginereport.Engine %d: keep them the same", n, reflect.TypeFor[enginereport.Engine]().NumField())
 	}
 	raw, err := json.Marshal(e)

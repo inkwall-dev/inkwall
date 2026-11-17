@@ -36,8 +36,8 @@
       "reason": "EnginesBehind",
       "message": "1 of 2 engines run bundle 7 or later",
       "current": true,
-      "cause": "Some engines don't run the bundle yet.",
-      "fix": "Usually seconds; if it lasts, `inkwallctl status` names them."
+      "cause": "Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting).",
+      "fix": "Usually seconds; if it lasts, `inkwallctl status` names them; check that the pod's engine reaches the operator (InkwallEngineDisconnected (docs/monitoring.md#inkwallenginedisconnected))."
     },
     {
       "type": "Ready",
@@ -45,8 +45,8 @@
       "reason": "EnginesBehind",
       "message": "Enforced: 1 of 2 engines run bundle 7 or later",
       "current": true,
-      "cause": "Some engines don't run the bundle yet.",
-      "fix": "Usually seconds; if it lasts, `inkwallctl status` names them."
+      "cause": "Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting).",
+      "fix": "Usually seconds; if it lasts, `inkwallctl status` names them; check that the pod's engine reaches the operator (InkwallEngineDisconnected (docs/monitoring.md#inkwallenginedisconnected))."
     }
   ],
   "engines": [

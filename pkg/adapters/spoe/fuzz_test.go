@@ -144,12 +144,14 @@ func (echoExchange) Close() {}
 // inspects has at most the body limit of its body, a prefix of what
 // HAProxy sent, complete only when it is all there: as long as its
 // Content-Length, or, without one, from a frame well under half the
-// maximum size.
+// maximum size that HAProxy tells whole (ArgWhole).
 func FuzzSPOEResponse(f *testing.F) {
 	key := "k"
 	f.Add(responseFrame(1, 1, response(key, FailureClosed, 200, "text/html", "<html>hello</html>")...), uint16(16380))
 	f.Add(responseFrame(1, 1, argInt(ArgStatus, 200), argBinary(ArgHeaders, hdrs("content-type", "application/json", "transfer-encoding", "chunked")),
 		argBinary(ArgBody, []byte(`{"a":1}`)), argString(ArgKey, key), argString(ArgFailure, FailureOpen)), uint16(4096))
+	f.Add(responseFrame(1, 1, argInt(ArgStatus, 200), argBinary(ArgHeaders, hdrs("content-type", "application/json", "transfer-encoding", "chunked")),
+		argBinary(ArgBody, []byte(`{"a":1}`)), argString(ArgKey, key), argString(ArgFailure, FailureOpen), argBool(ArgWhole, true)), uint16(4096))
 	f.Add(responseFrame(1, 1, argInt(ArgStatus, 404), argBinary(ArgHeaders, hdrs("content-type", "text/plain", "content-length", "100")),
 		argBinary(ArgBody, []byte("cut")), argString(ArgKey, "other")), uint16(4096))
 	p := pipeline.New(echoEvaluator{}, pipeline.Config{Mode: pipeline.ModeBlock,
@@ -228,7 +230,7 @@ func checkResponse(t *testing.T, a responseArgs, resp *request.Response, size in
 		if n, err := strconv.Atoi(cl); err != nil || n != len(a.body) {
 			t.Fatalf("body of %d bytes complete with Content-Length %q", len(a.body), cl)
 		}
-	} else if !uncut(size, len(resp.Headers), 0, maxFrame) {
-		t.Fatalf("body of %d bytes without Content-Length complete in a full frame", len(a.body))
+	} else if !a.whole || !uncut(size, len(resp.Headers), 0, maxFrame) {
+		t.Fatalf("body of %d bytes without Content-Length complete in a full frame, or without HAProxy telling it whole", len(a.body))
 	}
 }

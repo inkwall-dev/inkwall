@@ -5,7 +5,8 @@
 # change, but a new advisory also concerns code that doesn't change. So
 # every night: govulncheck on main and the supported release branches (the
 # latest three minor versions, CONTRIBUTING.md), and Trivy on the published
-# images of each of those minor versions.
+# images of each of those minor versions. The supported versions come from
+# the release tags (#631), so the set moves when a minor version ships.
 name: vuln
 
 on:
@@ -16,49 +17,97 @@ on:
 permissions: {}
 
 jobs:
+  plan:
+    # The supported minor versions: the three newest with a release tag.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      minors: ${{ steps.plan.outputs.minors }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+      - id: plan
+        run: |
+          minors=$(go run ./hack/releases -minors 3 | sed -E 's/^([0-9]+\.[0-9]+)\..*/\1/')
+          if [ "$(wc -l <<<"$minors")" -ne 3 ]; then
+            echo "::error::expected three supported minor versions, got: $(tr '\n' ' ' <<<"$minors")"
+            exit 1
+          fi
+          echo "minors=$(jq -Rnc '[inputs | select(length > 0)]' <<<"$minors")" >>"$GITHUB_OUTPUT"
+          echo "Supported minor versions: $(tr '\n' ' ' <<<"$minors")" >>"$GITHUB_STEP_SUMMARY"
+
   govulncheck:
+    needs: plan
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
-      # The branches by name, each in its directory: protected branches,
-      # whose code is reviewed.
+      # main, and each supported version's release branch in its own
+      # directory: protected branches, whose code is reviewed.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: main
           persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: release-0.5
-          path: release-0.5
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: release-0.4
-          path: release-0.4
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: release-0.3
-          path: release-0.3
-          persist-credentials: false
+          fetch-depth: 0
+      # Only the go command that fetches each module's own toolchain below.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: main/go.mod
-          check-latest: true
           cache: false
-      # Every branch, even after one fails.
-      - run: |
+      # Every branch, even after one fails. A supported version without its
+      # release branch yet (tagged, not cut) is scanned at its latest tag.
+      # govulncheck reports the standard library advisories of the Go it runs
+      # with, so each module is scanned with the Go it is built with (#648):
+      # the toolchain line of its go.mod, else its go line. The newest Go
+      # would hide an advisory that the branch's toolchain still has.
+      - env:
+          MINORS: ${{ needs.plan.outputs.minors }}
+        run: |
           status=0
           # main: every Go module, the test modules too (#567).
-          for b in main main/test/crs main/test/perf/prefilter main/hack/gitopshealth release-0.5 release-0.4 release-0.3; do
-            echo "::group::$b"
-            (cd "$b" && go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...) || { echo "::error::govulncheck found vulnerabilities on $b"; status=1; }
+          dirs="main main/test/crs main/test/perf/prefilter main/hack/gitopshealth"
+          for m in $(jq -r '.[]' <<<"$MINORS"); do
+            ref=origin/release-$m
+            if ! git -C main rev-parse -q --verify "$ref^{commit}" >/dev/null; then
+              ref=v$(cd main && go run ./hack/releases -branch "release-$m")
+              echo "::warning::no release-$m branch: scanning $ref"
+            fi
+            git -C main worktree add -q --detach "../release-$m" "$ref"
+            dirs="$dirs release-$m"
+          done
+          {
+            echo "| Module | Go | govulncheck |"
+            echo "| --- | --- | --- |"
+          } >>"$GITHUB_STEP_SUMMARY"
+          for b in $dirs; do
+            toolchain=$(awk '$1 == "toolchain" { print $2; exit }' "$b/go.mod")
+            if [ -z "$toolchain" ]; then
+              v=$(awk '$1 == "go" { print $2; exit }' "$b/go.mod")
+              if [[ "$v" =~ ^[0-9]+\.[0-9]+$ ]]; then v=$v.0; fi
+              toolchain=go$v
+            fi
+            echo "::group::$b ($toolchain)"
+            result=ok
+            if ! (cd "$b" && export GOTOOLCHAIN="$toolchain" && go version && go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...); then
+              echo "::error::govulncheck found vulnerabilities on $b with $toolchain"
+              result=failed
+              status=1
+            fi
             echo "::endgroup::"
+            echo "| $b | $toolchain | $result |" >>"$GITHUB_STEP_SUMMARY"
           done
           exit "$status"
 
   images:
+    needs: plan
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -66,7 +115,7 @@ jobs:
       fail-fast: false
       matrix:
         image: [inkwall-engine, inkwall-operator]
-        version: ["0.5", "0.4", "0.3"]
+        version: ${{ fromJSON(needs.plan.outputs.minors) }}
     steps:
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
