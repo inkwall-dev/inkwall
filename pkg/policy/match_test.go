@@ -4,6 +4,7 @@
 package policy
 
 import (
+	"slices"
 	"testing"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
@@ -144,6 +145,40 @@ func TestLookupFallback(t *testing.T) {
 	// A host no policy covers.
 	if got := m.lookup("other.example.com", "/api", "GET"); got != nil {
 		t.Errorf("uncovered host: got %s, want none", got.ID)
+	}
+}
+
+// TestPoliciesOfEveryPathForm: the policies of every form of a path a
+// proxy may route on, the decoded, cleaned path's first; one for a plain
+// path. Another namespace's route on the same host (a shared Gateway) is
+// one of them, not a replacement.
+func TestPoliciesOfEveryPathForm(t *testing.T) {
+	m := testMatcher(map[string][]*bundlev1.RouteMatch{
+		"victim/admin": {rm("shop.example.com", false, "/admin")},
+		"other/site":   {rm("shop.example.com", false, "/")},
+		"victim/login": {rm("shop.example.com", true, "/login")},
+	})
+	for _, tc := range []struct {
+		uri  string
+		want []string
+	}{
+		{"/admin/users", []string{"victim/admin"}},
+		{"/products/42?x=..%2F", []string{"other/site"}},
+		{"/admin/..%2Fsite", []string{"other/site", "victim/admin"}},
+		{"/admin/../site", []string{"other/site", "victim/admin"}},
+		{"/admin//../site", []string{"other/site", "victim/admin"}},
+		{"/site/..%2Fadmin", []string{"victim/admin", "other/site"}},
+		{"/%61dmin", []string{"victim/admin", "other/site"}},
+		{"//admin", []string{"victim/admin", "other/site"}},
+		{"/login/", []string{"victim/login", "other/site"}},
+	} {
+		var ids []string
+		for _, p := range m.policies("shop.example.com", tc.uri, "GET", nil) {
+			ids = append(ids, p.ID)
+		}
+		if !slices.Equal(ids, tc.want) {
+			t.Errorf("%s: %q, want %q", tc.uri, ids, tc.want)
+		}
 	}
 }
 

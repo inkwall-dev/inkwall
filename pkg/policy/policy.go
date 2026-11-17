@@ -9,10 +9,12 @@ package policy
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -90,9 +92,40 @@ func (s *Set) Version() uint64 { return s.version }
 // Policies returns the number of policies.
 func (s *Set) Policies() int { return len(s.policies) }
 
-// Lookup returns the policy for a request, or nil if no policy covers it.
+// Lookup returns the policy for a request, or nil if no policy covers it:
+// the policy of its decoded, cleaned path, when the forms of its path
+// select several (policiesFor).
 func (s *Set) Lookup(r *request.Request) *Policy {
 	return s.match.lookup(r.Host, r.RawURI, r.Method)
+}
+
+// policiesFor appends to buf the policies r is inspected with: none when
+// no policy covers it, or each policy the forms of its path select
+// (matcher.policies), those in block mode first. A request inspected by
+// several gets the strictest of their verdicts.
+func (s *Set) policiesFor(r *request.Request, buf []*Policy) []*Policy {
+	ps := s.match.policies(r.Host, r.RawURI, r.Method, buf)
+	if len(ps) > 1 {
+		slices.SortStableFunc(ps, func(a, b *Policy) int {
+			return cmp.Compare(b.pipeline.Mode(), a.pipeline.Mode())
+		})
+	}
+	return ps
+}
+
+// view returns r as p inspects it when r's body was read for another
+// policy too: without its body when p inspects none, cut at p's limit.
+func (p *Policy) view(r *request.Request) *request.Request {
+	if p.bodyLimit > 0 && int64(len(r.Body)) <= p.bodyLimit || p.bodyLimit == 0 && r.Body == nil && !r.BodyTruncated {
+		return r
+	}
+	v := *r
+	if p.bodyLimit == 0 {
+		v.Body, v.BodyTruncated = nil, false
+	} else {
+		v.Body, v.BodyTruncated = r.Body[:p.bodyLimit], true
+	}
+	return &v
 }
 
 // Check implements pipeline.Inspector.
@@ -100,57 +133,96 @@ func (s *Set) Check(ctx context.Context, r *request.Request) pipeline.Verdict {
 	if s.suspended {
 		return observe(s.observer, pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonSuspended})
 	}
-	p := s.Lookup(r)
-	if p == nil {
+	var buf [4]*Policy
+	ps := s.policiesFor(r, buf[:0])
+	if len(ps) == 0 {
 		return observe(s.observer, pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy})
 	}
-	// The policy's pipeline names it on the verdict and tells the Observer.
-	v := p.pipeline.Check(ctx, r)
-	p.counter.Observe(v)
-	return v
+	if len(ps) == 1 {
+		// The policy's pipeline names it on the verdict and tells the Observer.
+		v := ps[0].pipeline.Check(ctx, r)
+		ps[0].counter.Observe(v)
+		return v
+	}
+	var out pipeline.Verdict
+	for i, p := range ps {
+		v := p.pipeline.Check(ctx, p.view(r))
+		p.counter.Observe(v)
+		if i == 0 || pipeline.Stricter(v, out) {
+			out = v
+		}
+		if out.Action == pipeline.ActionDeny {
+			break
+		}
+	}
+	return out
 }
 
 var _ pipeline.ExchangeInspector = (*Set)(nil)
 
 // CheckExchange implements pipeline.ExchangeInspector. The response's
 // verdict names the policy and is counted as its own denied or detected
-// request, not as another allowed one.
+// request, not as another allowed one. A request inspected by several
+// policies has its response inspected by each that inspects responses.
 func (s *Set) CheckExchange(ctx context.Context, r *request.Request) (pipeline.Verdict, *pipeline.Exchange) {
 	if s.suspended {
 		return observe(s.observer, pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonSuspended}), nil
 	}
-	p := s.Lookup(r)
-	if p == nil {
+	var buf [4]*Policy
+	ps := s.policiesFor(r, buf[:0])
+	if len(ps) == 0 {
 		return observe(s.observer, pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy}), nil
 	}
-	v, x := p.pipeline.CheckExchange(ctx, r)
-	p.counter.Observe(v)
-	if x != nil {
-		x.OnVerdict(func(v pipeline.Verdict) {
-			if v.Action != pipeline.ActionAllow {
-				p.counter.Observe(v)
+	var out pipeline.Verdict
+	var xs []*pipeline.Exchange
+	for i, p := range ps {
+		pr := r
+		if len(ps) > 1 {
+			pr = p.view(r)
+		}
+		v, x := p.pipeline.CheckExchange(ctx, pr)
+		p.counter.Observe(v)
+		if x != nil {
+			x.OnVerdict(func(v pipeline.Verdict) {
+				if v.Action != pipeline.ActionAllow {
+					p.counter.Observe(v)
+				}
+			})
+			xs = append(xs, x)
+		}
+		if i == 0 || pipeline.Stricter(v, out) {
+			out = v
+		}
+		if out.Action == pipeline.ActionDeny {
+			for _, x := range xs {
+				x.Close()
 			}
-		})
+			return out, nil
+		}
 	}
-	return v, x
+	return out, pipeline.JoinExchanges(xs)
 }
 
 // BodyLimit implements pipeline.Inspector: the policy's body limit, at
 // most max (the adapter's own) when max is positive, or 0 when its bodies,
-// or the route's, are not inspected.
+// or the route's, are not inspected. A request inspected by several
+// policies is read to the largest of their limits.
 func (s *Set) BodyLimit(r *request.Request, max int64) int64 {
 	if s.suspended {
 		return 0
 	}
-	p := s.Lookup(r)
-	if p == nil {
-		return 0
+	var buf [4]*Policy
+	var limit int64
+	for _, p := range s.policiesFor(r, buf[:0]) {
+		l := p.bodyLimit
+		if max > 0 {
+			l = min(l, max)
+		}
+		if l = p.pipeline.BodyLimit(r, l); l > limit {
+			limit = l
+		}
 	}
-	limit := p.bodyLimit
-	if max > 0 {
-		limit = min(limit, max)
-	}
-	return p.pipeline.BodyLimit(r, limit)
+	return limit
 }
 
 // Compile compiles a bundle. An error names the policy that failed: the
