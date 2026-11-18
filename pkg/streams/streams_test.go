@@ -214,3 +214,27 @@ func TestGRPCFields(t *testing.T) {
 		t.Errorf("SSE event: %+v", ev)
 	}
 }
+
+// TestSSELeadingBOM: a stream may start with a UTF-8 byte order mark,
+// which an EventSource strips (HTML, 9.2.6 "Parsing an event stream"):
+// the first event's data is still inspected, however the BOM is cut into
+// chunks.
+func TestSSELeadingBOM(t *testing.T) {
+	stream := "\xef\xbb\xbfdata: ' UNION SELECT password FROM users--\n\ndata: b\n\n"
+	for cut := 0; cut <= 4; cut++ {
+		s := New(SSE, 1024, "")
+		evs := append(s.Write([]byte(stream[:cut])), s.Write([]byte(stream[cut:]))...)
+		evs = append(evs, s.Close()...)
+		if len(evs) != 2 || string(evs[0].Data) != "' UNION SELECT password FROM users--" || string(evs[1].Data) != "b" {
+			t.Fatalf("cut at %d: events %+v", cut, evs)
+		}
+		if evs[0].End != int64(len(stream)-len("data: b\n\n")) {
+			t.Errorf("cut at %d: first event ends at %d", cut, evs[0].End)
+		}
+	}
+	// Only at the start: a BOM later is part of the field name.
+	s := New(SSE, 1024, "")
+	if evs := s.Write([]byte("data: a\n\n\xef\xbb\xbfdata: b\n\n")); len(evs) != 1 {
+		t.Errorf("BOM after the start: %+v", evs)
+	}
+}
