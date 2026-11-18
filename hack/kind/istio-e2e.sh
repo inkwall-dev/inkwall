@@ -391,7 +391,7 @@ leak_is() {
 }
 leak_replaced() {
   for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
-    ! curl -s -H "Host: $HOST" -H "$LEAK" "http://127.0.0.1:$port/leak" | grep -qF 'SQL syntax' || return 1
+    ! curl -s -H "Host: $HOST" -H "$LEAK" "http://127.0.0.1:$port/leak" | matches -F 'SQL syntax' || return 1
   done
 }
 # engine_logs SELECTOR: the engine log of every pod SELECTOR selects, each
@@ -672,7 +672,7 @@ before=$failures
 eventually "a stream with a leaking event ends before it" streams_cut
 logged_stream() {
   engine_logs gateway.istio.io/managed=istio.io-gateway-controller | grep '"security event"' |
-    grep '"path":"/sse-leak"' | grep '"action":"deny"' | grep -q '"stream_event":2'
+    grep '"path":"/sse-leak"' | grep '"action":"deny"' | matches '"stream_event":2'
 }
 eventually "the engines log the leaking event, with its index" logged_stream
 if ((failures > before)); then
@@ -715,14 +715,14 @@ grpcecho_logs() { "${KUBECTL[@]}" -n "$NS" logs deployment/grpcecho --tail=-1 2>
 before=$failures
 eventually "a clean client stream passes through both Gateways: 3 messages, OK" grpc_both $'3 messages\nOK' collect hello world again
 check "a client stream with an attack in its third message: PermissionDenied" grpc_both PermissionDenied collect one two "$GRPC_SQLI" four
-server_got() { grpcecho_logs | grep -qF "got: $1"; }
+server_got() { grpcecho_logs | matches -F "got: $1"; }
 check "the messages before it reached the server" server_got two
-never_got() { ! grpcecho_logs | grep -qF -e "$GRPC_SQLI" -e 'got: four'; }
+never_got() { ! grpcecho_logs | matches -F -e "$GRPC_SQLI" -e 'got: four'; }
 check "the attack, and what followed it, never did" never_got
 # logged_message PATH INDEX: an engine logged a deny for PATH's message INDEX.
 logged_message() {
   engine_logs gateway.istio.io/managed=istio.io-gateway-controller | grep '"security event"' |
-    grep "\"path\":\"$1\"" | grep '"action":"deny"' | grep -q "\"stream_event\":$2"
+    grep "\"path\":\"$1\"" | grep '"action":"deny"' | matches "\"stream_event\":$2"
 }
 eventually "the engines log the denied message with its index" logged_message /inkwall.test.Echo/Collect 3
 # A bidirectional call: the client sends each message only after the
