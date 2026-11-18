@@ -33,7 +33,9 @@ first time they mention it.
   engine **fails open** (lets it through) or **fails closed** (rejects it with 503). By default it
   fails closed in block mode and open in detect mode. It applies only while the engine answers:
   Traefik answers 500 when it can't reach the engine, in both modes; Envoy, through Envoy Gateway,
-  answers 500 too, unless every policy on the route fails open.
+  answers 500 too, and through Istio 503 (504 for a hung engine), unless every policy on the route
+  fails open; the HAProxy Kubernetes Ingress Controller answers 503 when every policy on the
+  Ingress fails closed, and otherwise lets the request through.
 - <a id="injection"></a>**Injection**: Adding the engine to proxy [pods](#pod) as a
   [sidecar](#sidecar) (a container in the same pod).
 - <a id="inkwallconfig"></a>**InkwallConfig**: The cluster-wide singleton, named `default`, that
@@ -325,7 +327,8 @@ first time they mention it.
   ([Wikipedia](https://en.wikipedia.org/wiki/Intermediate_representation))
 - <a id="istio"></a>**Istio**: A service mesh built on Envoy, which also implements the Gateway API
   (GatewayClass controller `istio.io/gateway-controller`); an `EnvoyFilter` adds Envoy
-  configuration to it. Inkwall protects the HTTPRoutes its Gateways serve. ([Istio
+  configuration to it. Inkwall protects the HTTPRoutes its Gateways serve, and the
+  [VirtualServices](#virtualservice) bound to its ingress gateways. ([Istio
   docs](https://istio.io/latest/docs/))
 
 ### J
@@ -523,8 +526,8 @@ first time they mention it.
   check a token and whether its identity may do something. The operator authenticates engines with
   them. ([Kubernetes
   docs](https://kubernetes.io/docs/reference/access-authn-authz/authorization/#checking-api-access))
-- <a id="traefik"></a>**Traefik**: A reverse proxy and Kubernetes ingress controller, the one
-  Inkwall supports today. Its plugins run in Yaegi. ([Traefik
+- <a id="traefik"></a>**Traefik**: A reverse proxy and Kubernetes ingress controller, one of the
+  proxies Inkwall supports. Its plugins run in Yaegi. ([Traefik
   docs](https://doc.traefik.io/traefik/))
 - <a id="trie"></a>**Trie**: A tree that stores keys by their prefixes, so keys that share a prefix
   share nodes. ([Wikipedia](https://en.wikipedia.org/wiki/Trie))
