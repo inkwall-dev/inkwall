@@ -445,7 +445,7 @@ func (r *Reporter) report(ctx context.Context) error {
 		key := p.Namespace + "/" + p.Name
 		version := r.Store.PolicyVersion(key)
 		mine, missing := served.enginesFor(key, engines)
-		gone, _ := served.enginesFor(key, disconnected)
+		gone := served.goneFor(key, disconnected)
 		// The list is the cache's, not a copy: copy only what is written.
 		if _, changed := enforcedConditions(p, version, suspended, mine, gone, leftOut, missing); !changed {
 			continue

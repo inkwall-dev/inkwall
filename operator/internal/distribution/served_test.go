@@ -244,3 +244,22 @@ func TestEnforcedWaitsForDisconnectedEngines(t *testing.T) {
 	setReport(a, now, other(4))
 	check(r, "raw Envoy's engine gone for good", ReasonEnforced)
 }
+
+// A policy whose pods are known isn't held back by an engine that
+// disconnected: enginesFor counts its pods whose engine isn't connected, and
+// a pod deleted since (a rollout) has no say (#675's fix, which a Traefik
+// rollout in the e2e caught).
+func TestGoneForKnownPods(t *testing.T) {
+	served := &ServedPods{}
+	served.Set(map[string]map[string]ServedPod{
+		"web/traefik": {"traefik/new": {Integration: "traefik", Engine: true}},
+	})
+	v := served.view()
+	old := Engine{ID: "old", PodNamespace: "traefik", PodName: "old", Applied: 1}
+	if got := v.goneFor("web/traefik", []Engine{old}); len(got) != 0 {
+		t.Errorf("known pods: gone %v, want none", got)
+	}
+	if got := v.goneFor("raw-envoy/app", []Engine{old}); len(got) != 1 {
+		t.Errorf("unknown pods: gone %v, want the engine", got)
+	}
+}
