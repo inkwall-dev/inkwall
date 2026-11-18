@@ -186,7 +186,7 @@ var entries = []Entry{
 		Meaning: "No engine is connected to the operator.",
 		Fix:     "Check the proxy pods run the engine (`Programmed`), and that engines reach the operator ([InkwallEngineDisconnected](monitoring.md#inkwallenginedisconnected))."},
 	{Kind: "WAFPolicy", Condition: "Enforced", Reason: "EnginesBehind",
-		Meaning: "Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting), or, for a policy whose proxy pods the operator doesn't know (raw Envoy, the standalone proxy), an engine outside the integrations' pods that disconnected in the last 2 minutes hadn't run its current version (it keeps its older bundle until it reconnects).",
+		Meaning: "Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting), or, for a policy whose proxy pods the operator doesn't know (raw Envoy, the standalone proxy), an engine outside the integrations' pods that disconnected in the last 2 minutes, and whose pod still exists, hadn't run its current version (it keeps its older bundle until it reconnects).",
 		Fix:     "Usually seconds; if it lasts, `inkwallctl status` names them; check that the pod's engine reaches the operator ([InkwallEngineDisconnected](monitoring.md#inkwallenginedisconnected))."},
 	{Kind: "WAFPolicy", Condition: "Enforced", Reason: "EngineNack",
 		Meaning: "An engine rejected the bundle; the message names it and why (often an engine older than the operator, or a key it doesn't trust).",

@@ -15,6 +15,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/errgroup"
+	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -362,10 +363,32 @@ func (r *Reporter) disconnected(ctx context.Context, engines []Engine, served se
 		case now.Sub(s.at) > gone:
 			delete(r.seen, k)
 		case !connected[k] && !s.managed:
+			if r.podGone(ctx, s.engine) {
+				delete(r.seen, k)
+				continue
+			}
 			out = append(out, s.engine)
 		}
 	}
 	return out, nil
+}
+
+// podGone tells that a disconnected engine's pod was deleted (or is being
+// deleted): it won't come back, and doesn't hold policies back. A pod that
+// can't be read (the API server down) is taken as there.
+func (r *Reporter) podGone(ctx context.Context, e Engine) bool {
+	if e.PodName == "" {
+		return false
+	}
+	var pod corev1.Pod
+	err := r.Reader.Get(ctx, types.NamespacedName{Namespace: e.PodNamespace, Name: e.PodName}, &pod)
+	switch {
+	case apierrors.IsNotFound(err):
+		return true
+	case err != nil:
+		return false
+	}
+	return pod.DeletionTimestamp != nil
 }
 
 // engineKey identifies an engine across reconnects: its pod, or its

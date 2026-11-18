@@ -179,7 +179,9 @@ func TestEnforcedWaitsForDisconnectedEngines(t *testing.T) {
 		return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "inkwall-system", Name: reportNamePrefix + replica, Labels: map[string]string{EnginesLabel: "true"}}}
 	}
 	a, b := reportOf("a"), reportOf("b")
-	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&wafv1alpha1.WAFPolicy{}).WithObjects(p, a, b).Build()
+	// Raw Envoy's pod: while it exists, its engine is reconnecting.
+	rawPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "raw-envoy", Name: "envoy-1"}}
+	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&wafv1alpha1.WAFPolicy{}).WithObjects(p, a, b, rawPod).Build()
 	now := time.Now()
 	setReport := func(cm *corev1.ConfigMap, at time.Time, engines ...Engine) {
 		t.Helper()
@@ -256,6 +258,17 @@ func TestEnforcedWaitsForDisconnectedEngines(t *testing.T) {
 	setReport(a, now)
 	setReport(b, now, raw(5))
 	check(r, "Traefik's pod deleted, then an edit", ReasonEnforced)
+
+	// Raw Envoy's pod deleted (a rollout): its engine won't come back, and
+	// doesn't hold an edit back for Gone.
+	edit(6)
+	setReport(a, now, other(6))
+	setReport(b, now)
+	check(r, "edited while raw Envoy's engine is away, its pod there", ReasonEnginesBehind)
+	if err := c.Delete(ctx, rawPod); err != nil {
+		t.Fatal(err)
+	}
+	check(r, "raw Envoy's pod deleted", ReasonEnforced)
 }
 
 // A policy whose pods are known isn't held back by an engine that
