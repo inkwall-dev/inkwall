@@ -379,7 +379,7 @@ leak_is() {
 leak_replaced() {
   local port
   for port in "$CUSTOM_PORT" "$PLAIN_PORT"; do
-    ! curl -s -H "Host: $HOST" -H "$LEAK" "http://127.0.0.1:$port/leak" | grep -qF 'SQL syntax' || return 1
+    ! curl -s -H "Host: $HOST" -H "$LEAK" "http://127.0.0.1:$port/leak" | matches -F 'SQL syntax' || return 1
   done
 }
 # logged_response PATH ACTION: an engine in the Envoy pods logged a
@@ -669,7 +669,7 @@ blocked_from() {
 trusts_lb() {
   "${KUBECTL[@]}" -n "$EG_NS" get pods -l "gateway.envoyproxy.io/owning-gateway-name=$1,gateway.envoyproxy.io/owning-gateway-namespace=$NS" \
     -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}|{.spec.initContainers[0].args}{"\n"}{end}' |
-    grep '^|' | grep -qF "::1/128,$lb_ip/32" && ! envoy_pods "$1" | grep -qv inkwall-engine
+    grep '^|' | matches -F "::1/128,$lb_ip/32" && ! envoy_pods "$1" | matches -v inkwall-engine
 }
 for gw in custom plain; do
   eventually "Gateway $gw: untrusted, the client-sent X-Forwarded-For is ignored: the client is the pod" blocked_from "$gw" "$lb_ip"
@@ -759,7 +759,7 @@ before=$failures
 eventually "a stream with a leaking event ends before it: the events before it pass, it and those after never do" streams_cut
 logged_stream() {
   "${KUBECTL[@]}" -n "$EG_NS" logs -l app.kubernetes.io/name=envoy -c inkwall-engine --tail=-1 |
-    grep '"security event"' | grep '"path":"/sse-leak"' | grep '"action":"deny"' | grep -q '"stream_event":2'
+    grep '"security event"' | grep '"path":"/sse-leak"' | grep '"action":"deny"' | matches '"stream_event":2'
 }
 eventually "the engines log the leaking event, with its index" logged_stream
 if ((failures > before)); then

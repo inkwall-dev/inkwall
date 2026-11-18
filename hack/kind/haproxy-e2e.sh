@@ -192,7 +192,7 @@ responses_unwired() {
 }
 leak_replaced() {
   for _ in 1 2 3 4; do
-    ! curl -s -H "Host: $HOST" -H "$LEAK" "http://127.0.0.1:$PORT/leak" | grep -qF 'SQL syntax' || return 1
+    ! curl -s -H "Host: $HOST" -H "$LEAK" "http://127.0.0.1:$PORT/leak" | matches -F 'SQL syntax' || return 1
   done
 }
 # logged_response PATH ACTION: an engine in the controller's pods logged a

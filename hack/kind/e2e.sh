@@ -848,7 +848,7 @@ eventually "the rollout starts" rollout_is RollingOut "$ROLLOUT_IMAGE"
 eventually_within 300 "both Traefik pods replaced with the new engine" traefik_runs "$ROLLOUT_IMAGE"
 eventually_within 120 "and the rollout is done" rollout_is Done "$ROLLOUT_IMAGE"
 answers() { "${KUBECTL[@]}" -n "$NS" logs rollout-client; }
-never_uninspected() { ! answers | grep -qx 200; }
+never_uninspected() { ! answers | matches -x 200; }
 mostly_blocked() {
   local all blocked
   all=$(answers | wc -l)
@@ -1481,13 +1481,13 @@ monitors() {
 check "the ServiceMonitor, PodMonitor, PrometheusRule and dashboard exist" monitors
 raw_metrics() { "${KUBECTL[@]}" get --raw "$1" 2>/dev/null; }
 operator_metrics() {
-  raw_metrics "/api/v1/namespaces/$OPERATOR_NS/services/inkwall-operator-metrics:8080/proxy/metrics" | grep -q '^inkwall_operator_bundle_version '
+  raw_metrics "/api/v1/namespaces/$OPERATOR_NS/services/inkwall-operator-metrics:8080/proxy/metrics" | matches '^inkwall_operator_bundle_version '
 }
 eventually "the operator's metrics Service serves its metrics" operator_metrics
 engine_metrics() {
   local pod
   pod=$("${KUBECTL[@]}" -n "$TRAEFIK_NS" get pods -l app.kubernetes.io/name=traefik --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
-  raw_metrics "/api/v1/namespaces/$TRAEFIK_NS/pods/$pod:9480/proxy/metrics" | grep -q '^inkwall_bundle_applied_timestamp_seconds '
+  raw_metrics "/api/v1/namespaces/$TRAEFIK_NS/pods/$pod:9480/proxy/metrics" | matches '^inkwall_bundle_applied_timestamp_seconds '
 }
 eventually "an engine's inkwall-admin port, the PodMonitor's, serves its metrics" engine_metrics
 no_monitors() {

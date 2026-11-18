@@ -39,7 +39,7 @@ explained() {
 }
 # The engine logs the event as it answers; the log may lag a little.
 eventually "explain request finds the denial in the engine's log, and suggests a verified exclusion" explained
-text_names_rule() { iwc request "$rid" | grep -q 'SQL Injection Attack Detected'; }
+text_names_rule() { iwc request "$rid" | matches 'SQL Injection Attack Detected'; }
 check "explain request's text names the rule" text_names_rule
 explain_unknown() {
   iwc request no-such-request-id >/dev/null
