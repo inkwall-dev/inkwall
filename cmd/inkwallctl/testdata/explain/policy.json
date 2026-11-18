@@ -36,7 +36,7 @@
       "reason": "EnginesBehind",
       "message": "1 of 2 engines run bundle 7 or later",
       "current": true,
-      "cause": "Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting).",
+      "cause": "Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting), or, for a policy whose proxy pods the operator doesn't know (raw Envoy, the standalone proxy), an engine outside the integrations' pods that disconnected in the last 2 minutes, and whose pod still exists, hadn't run its current version (it keeps its older bundle until it reconnects).",
       "fix": "Usually seconds; if it lasts, `inkwallctl status` names them; check that the pod's engine reaches the operator (InkwallEngineDisconnected (docs/monitoring.md#inkwallenginedisconnected))."
     },
     {
@@ -45,7 +45,7 @@
       "reason": "EnginesBehind",
       "message": "Enforced: 1 of 2 engines run bundle 7 or later",
       "current": true,
-      "cause": "Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting).",
+      "cause": "Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting), or, for a policy whose proxy pods the operator doesn't know (raw Envoy, the standalone proxy), an engine outside the integrations' pods that disconnected in the last 2 minutes, and whose pod still exists, hadn't run its current version (it keeps its older bundle until it reconnects).",
       "fix": "Usually seconds; if it lasts, `inkwallctl status` names them; check that the pod's engine reaches the operator (InkwallEngineDisconnected (docs/monitoring.md#inkwallenginedisconnected))."
     }
   ],
