@@ -241,10 +241,11 @@ func TestEnforcedWaitsForDisconnectedEngines(t *testing.T) {
 	setReport(b, now.Add(-40*time.Second), raw(3))
 	r = &Reporter{Client: c, Reader: c, Namespace: "inkwall-system", Stale: 30 * time.Second, Gone: time.Minute, Store: NewStore(), Now: clock}
 	check(r, "new leader, raw Envoy's engine reconnecting", ReasonEnginesBehind)
-	// It never comes back (its pod was deleted): it counts for Gone only.
+	// Away past Gone (a partition, #695): its pod is there, it still runs
+	// the older bundle.
 	now = now.Add(61 * time.Second)
 	setReport(a, now, other(4))
-	check(r, "raw Envoy's engine gone for good", ReasonEnforced)
+	check(r, "raw Envoy's engine away past Gone, its pod there", ReasonEnginesBehind)
 
 	// An integration's pod (Traefik's) deleted: its engine doesn't hold
 	// raw Envoy's policy back, though every engine counts for it.
@@ -269,6 +270,19 @@ func TestEnforcedWaitsForDisconnectedEngines(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(r, "raw Envoy's pod deleted", ReasonEnforced)
+
+	// An engine that reports no pod counts for Gone only.
+	solo := func(applied uint64) Engine {
+		return Engine{ID: "solo", ServiceAccount: "solo", Applied: applied}
+	}
+	setReport(a, now, other(6), solo(6))
+	check(r, "every engine runs it, one with no pod", ReasonEnforced)
+	edit(7)
+	setReport(a, now, other(7))
+	check(r, "edited while the engine with no pod is away", ReasonEnginesBehind)
+	now = now.Add(61 * time.Second)
+	setReport(a, now, other(7))
+	check(r, "the engine with no pod away past Gone", ReasonEnforced)
 }
 
 // A policy whose pods are known isn't held back by an engine that
