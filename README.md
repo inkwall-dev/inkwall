@@ -109,7 +109,7 @@ The binaries (`inkwall-engine`, `inkwall-operator`, `inkwallctl`) are on the
 
 ```console
 $ inkwallctl version
-inkwallctl 0.4.1
+inkwallctl 0.6.0
 commit: 0123456789abcdef0123456789abcdef01234567
 go: go1.27.3 linux/amd64
 ```
@@ -264,7 +264,7 @@ an Envoy you configure yourself, in or out of Kubernetes, see [protecting raw En
 
 ## Limits
 
-- Proxies: **Traefik**, **Envoy Gateway** (v1.9; not with `mergeGateways` or Envoy as a
+- Proxies: **Traefik**, **Envoy Gateway** (v1.9 or later; not with `mergeGateways` or Envoy as a
   DaemonSet), **Istio** (1.28 or later; its Gateway API and its ingress gateways, not mesh
   sidecars) and the **HAProxy Kubernetes Ingress Controller** (3.1 or later;
   [with the operator](docs/haproxy.md#with-the-operator-haproxy-kubernetes-ingress-controller)), wired by the operator; **raw [Envoy](https://www.envoyproxy.io/docs/envoy/latest/)** (1.33 or later) that you configure with
@@ -325,7 +325,7 @@ Tracked on the [project board](https://github.com/orgs/inkwall-dev/projects/1) a
   an opt-in automatic engine rollout; `inkwallctl status`, `tune` and `test --suite`; metrics,
   alerts and a dashboard ([monitoring](docs/monitoring.md)); gRPC in the standalone proxy and
   `body.grpc: Deny`; and the CRS compiled once for every policy setting.
-- **v0.6.0** (next): assistants that help users get answers faster (`inkwallctl explain` and a
+- **v0.6.0** (shipped): assistants that help users get answers faster (`inkwallctl explain` and a
   read-only MCP server); responses through HAProxy and the reverse proxy, and streamed ones event by event (not through
   Traefik, whose ForwardAuth never sees them); gRPC streams
   and server messages inspected per message; rule sets loaded before the CRS; and operator

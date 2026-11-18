@@ -249,9 +249,8 @@ for patching released versions.
    than 0.5.0 can't test published images. It runs every proxy's e2e, the upgrade from each
    supported release, the full scale test with and without responses, the Docker e2e tests and the
    CRS suite against those images. **Cut the release only after a green run**, and link it in the
-   release's PR or notes. The same workflow runs nightly on `main` and weekly on the supported
-   release branches of the two newest minor versions (the run's summary names the third supported
-   one, which is qualified on demand); an older branch runs the tests it has, with the Helm version
+   release's PR or notes. The same workflow runs nightly on `main` and weekly on the release
+   branch of each supported minor version; an older branch runs the tests it has, with the Helm version
    its own CI pinned, and each test it doesn't have yet is reported as not run (a warning on the
    job), never as passed. The examples that pin the engine image,
    `examples/raw-envoy/kustomization.yaml` (`newTag`), name the release being cut: bump them in

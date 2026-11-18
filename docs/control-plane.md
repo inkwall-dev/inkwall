@@ -173,8 +173,9 @@ The leader holds one **primary** connection. Over it the operator sends:
 - **Cluster state:** every `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet`, `WAFIPList` and
   `InkwallConfig`, each with its name, namespace, labels, generation, spec (JSON) and status
   conditions (a `WAFIPList` has none). Also, for
-  each integration ([Traefik](https://doc.traefik.io/traefik/) and
-  [Envoy Gateway](https://gateway.envoyproxy.io/)), its controller names, the number of its
+  each integration ([Traefik](https://doc.traefik.io/traefik/),
+  [Envoy Gateway](https://gateway.envoyproxy.io/), Istio's Gateway API and Ingress gateways, and
+  the HAProxy Kubernetes Ingress Controller), its controller names, the number of its
   running proxy pods and how many have the engine, and why it's disabled if the operator may not
   wire it; each connected engine (pod, node, version, the bundle version it runs or rejected), and the
   bundle version and content hash.
