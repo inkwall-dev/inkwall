@@ -22,7 +22,7 @@ mcp_tools() {
 check "mcp lists its seven tools, each read-only" mcp_tools
 mcp_doc() {
   "$mcp_dir/mcpclient" -read inkwall://docs/troubleshooting.md -- "$mcp_dir/inkwallctl" mcp --context "kind-$CLUSTER" |
-    grep -q '^## Explaining a policy or a denial'
+    matches '^## Explaining a policy or a denial'
 }
 check "mcp serves this version's troubleshooting guide" mcp_doc
 

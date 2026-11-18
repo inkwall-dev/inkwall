@@ -19,6 +19,10 @@ fail() {
   printf 'FAIL  %s\n' "$1"
   failures=$((failures + 1))
 }
+# matches GREP-ARGS...: grep's status, reading all its input (unlike grep -q,
+# which exits at the first match, so that the command writing into it can die
+# of SIGPIPE and, with pipefail, fail the pipeline).
+matches() { grep "$@" >/dev/null; }
 # check DESCRIPTION COMMAND...: one try.
 check() {
   local what=$1
