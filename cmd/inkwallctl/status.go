@@ -202,15 +202,16 @@ type Inspects struct {
 	GRPCMessages      bool `json:"grpcMessages"`
 }
 
-// inspects is what each integration's adapter sees: ext_proc gets the
-// responses (Envoy Gateway's routes only), every adapter gets request
-// bodies, and only the standalone proxy sees WebSocket messages.
+// inspects is what each integration's adapter sees: ext_proc (Envoy
+// Gateway, Istio) and SPOE (HAProxy) get the responses, Traefik's
+// ForwardAuth doesn't, every adapter gets request bodies, and only the
+// standalone proxy sees WebSocket messages.
 var inspects = map[string]Inspects{
 	"traefik":       {Requests: true, GRPCMessages: true},
 	"envoy-gateway": {Requests: true, Responses: true, GRPCMessages: true},
-	"istio":         {Requests: true, GRPCMessages: true},
-	"istio-ingress": {Requests: true, GRPCMessages: true},
-	"haproxy":       {Requests: true, GRPCMessages: true},
+	"istio":         {Requests: true, Responses: true, GRPCMessages: true},
+	"istio-ingress": {Requests: true, Responses: true, GRPCMessages: true},
+	"haproxy":       {Requests: true, Responses: true, GRPCMessages: true},
 }
 
 // PoliciesStatus counts the WAFPolicies, and lists those not Ready.
