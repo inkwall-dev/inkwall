@@ -63,7 +63,10 @@ helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version
 kubectl -n inkwall-system rollout status deployment/inkwall-operator
 ```
 
-Then install Traefik, or restart it: only pods created after the operator get the engine.
+Then install Traefik, or restart it: only pods created after the operator get the engine. Use
+Traefik v3.7 or later: before v3.7, Traefik forwards `Upgrade: h2c` to the app, and requests sent on
+such a connection reach an app that accepts h2c without the engine seeing them
+([WebSocket](docs/websocket.md#through-each-proxy)).
 
 ```sh
 kubectl -n <traefik namespace> rollout restart deployment/<traefik>
