@@ -55,8 +55,8 @@ It reports:
 - **The InkwallConfig**: its mode and whether inspection is suspended.
 - **The operator**: its replicas and the version they run, and the bundle it publishes.
 - **The proxies** the cluster's IngressClasses and GatewayClasses name: whether Inkwall wires
-  them, and what the engine inspects through each. Responses are inspected through Envoy Gateway
-  only, and WebSocket messages only through the standalone proxy.
+  them, and what the engine inspects through each. Responses are inspected through Envoy Gateway,
+  Istio and HAProxy (not Traefik), and WebSocket messages only through the standalone proxy.
 - **The policies that aren't `Ready`**, grouped by the reason of their `Ready` condition, with
   its message. `kubectl get wafpolicies -A` shows the same reason in its `REASON` column.
 - **The engines**: how many run the current bundle, are behind, or rejected it, by engine
@@ -183,7 +183,7 @@ fix from these tables ([Explaining a policy or a denial](#explaining-a-policy-or
 | `Enforced` | Every engine runs the bundle, or a later one. | |
 | `NotInBundle` | The policy's current spec isn't in a published bundle yet. | Wait; if it lasts, see `Accepted`. |
 | `NoEngines` | No engine is connected to the operator. | Check the proxy pods run the engine (`Programmed`), and that engines reach the operator ([InkwallEngineDisconnected](monitoring.md#inkwallenginedisconnected)). |
-| `EnginesBehind` | Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting). | Usually seconds; if it lasts, `inkwallctl status` names them; check that the pod's engine reaches the operator ([InkwallEngineDisconnected](monitoring.md#inkwallenginedisconnected)). |
+| `EnginesBehind` | Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting), or, for a policy whose proxy pods the operator doesn't know (raw Envoy, the standalone proxy), an engine outside the integrations' pods that disconnected in the last 2 minutes, and whose pod still exists, hadn't run its current version (it keeps its older bundle until it reconnects). | Usually seconds; if it lasts, `inkwallctl status` names them; check that the pod's engine reaches the operator ([InkwallEngineDisconnected](monitoring.md#inkwallenginedisconnected)). |
 | `EngineNack` | An engine rejected the bundle; the message names it and why (often an engine older than the operator, or a key it doesn't trust). | Restart the engine's pod so it runs the operator's version; see [InkwallBundleRejected](monitoring.md#inkwallbundlerejected). |
 | `EnginesOutdated` | An engine runs the bundle, but is too old to enforce a field the policy sets, which it ignores. | Restart the pod the message names. |
 | `EnginesUnreported` | An operator replica's engine report is full, so not every engine is known. | Run more operator replicas, or fewer proxy pods per replica. |

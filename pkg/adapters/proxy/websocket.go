@@ -118,7 +118,18 @@ type inspectedConn struct {
 	closed  bool   // the close frame was sent: the upstream's bytes are dropped
 }
 
-func (c *inspectedConn) Read(p []byte) (int, error) {
+func (c *inspectedConn) Read(p []byte) (n int, err error) {
+	// Read runs in ReverseProxy's copy goroutine, outside net/http's
+	// recover: a panic here would end the engine. It closes this
+	// connection instead, and nothing more of the client's passes.
+	defer func() {
+		if v := recover(); v != nil {
+			c.w.h.metrics.Panicked(c.w.ctx, c.w.h.logger, telemetry.PanicWebSocket, v)
+			c.out, c.held, c.text, c.err = nil, nil, nil, net.ErrClosed
+			_ = c.Close()
+			n, err = 0, c.err
+		}
+	}()
 	for {
 		if len(c.out) > 0 {
 			n := copy(p, c.out)

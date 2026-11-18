@@ -109,6 +109,18 @@ func (v servedView) enginesFor(policy string, engines []Engine) ([]Engine, int) 
 	return out, missing
 }
 
+// goneFor returns the engines that disconnected recently that count for a
+// policy: all of them when its pods aren't known (raw Envoy, the standalone
+// proxy), as nothing else tells that one is missing (#675); none when they
+// are, since enginesFor counts the known pods whose engine isn't connected,
+// and a pod deleted since must not hold the policy back.
+func (v servedView) goneFor(policy string, gone []Engine) []Engine {
+	if _, known := v.byPolicy[policy]; known {
+		return nil
+	}
+	return gone
+}
+
 // integrationOf names the integration whose pod runs the engine, or
 // "unknown".
 func (v servedView) integrationOf(e Engine) string {
