@@ -278,7 +278,9 @@ func Ready(conds []metav1.Condition, generation int64) metav1.Condition {
 const DefaultConfigEvery = 5 * time.Second
 
 // DefaultGone is the Reporter's default Gone: more than an engine's longest
-// wait between reconnects (30 s), once a replica answers it.
+// wait between reconnects (30 s), once a replica answers it. It bounds only
+// engines that report no pod: one whose pod is known counts while its pod
+// exists (#695).
 const DefaultGone = 2 * time.Minute
 
 // statusWriters is how many policy statuses the Reporter writes at once.
@@ -303,11 +305,13 @@ type Reporter struct {
 	// counts to the InkwallConfig's status, so engines connecting don't
 	// churn it; 0: DefaultConfigEvery.
 	ConfigEvery time.Duration
-	// Gone is how long an engine that disconnected still holds back the
-	// policies it counts for, while it hasn't run their current version
-	// (#675): it serves the bundle it last ran until it reconnects. For a
-	// policy whose pods aren't known (raw Envoy, the standalone proxy),
-	// nothing else tells that it is missing. 0: DefaultGone.
+	// Gone is how long an engine that disconnected, and reports no pod,
+	// still holds back the policies it counts for, while it hasn't run
+	// their current version (#675): it serves the bundle it last ran until
+	// it reconnects. For a policy whose pods aren't known (raw Envoy, the
+	// standalone proxy), nothing else tells that it is missing. An engine
+	// that reports its pod holds them back while the pod exists, however
+	// long it is away (#695). 0: DefaultGone.
 	Gone time.Duration
 	// Now is the clock; nil: time.Now.
 	Now func() time.Time
@@ -336,8 +340,9 @@ func (r *Reporter) now() time.Time {
 }
 
 // disconnected remembers the engines connected now, and returns those
-// reported within Gone that aren't, as they were last reported, but for
-// those whose pod is an integration's.
+// that aren't, as they were last reported: those whose pod still exists,
+// and those that report no pod for Gone. Engines whose pod is an
+// integration's are left out.
 func (r *Reporter) disconnected(ctx context.Context, engines []Engine, served servedView, now time.Time) ([]Engine, error) {
 	gone := cmp.Or(r.Gone, DefaultGone)
 	if r.seen == nil {
@@ -360,9 +365,15 @@ func (r *Reporter) disconnected(ctx context.Context, engines []Engine, served se
 	var out []Engine
 	for k, s := range r.seen {
 		switch {
-		case now.Sub(s.at) > gone:
-			delete(r.seen, k)
-		case !connected[k] && !s.managed:
+		case connected[k]:
+		case s.managed || enginePod(s.engine) == "":
+			// Forgotten after Gone; an integration's never holds back.
+			if now.Sub(s.at) > gone {
+				delete(r.seen, k)
+			} else if !s.managed {
+				out = append(out, s.engine)
+			}
+		default:
 			if r.podGone(ctx, s.engine) {
 				delete(r.seen, k)
 				continue
