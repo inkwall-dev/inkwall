@@ -79,6 +79,14 @@ uninjected() {
 }
 injected() { [[ $(uninjected) == 0 ]]; }
 one_uninjected() { [[ $(uninjected) == 1 ]]; }
+# pod_webhook_injects: the Pod webhook injects a Traefik pod (a server-side
+# dry run). The operator's pods are ready a moment before the API server
+# reaches them through the webhook's Service: a pod created meanwhile in
+# Detect mode starts without the engine, as the webhook fails open (#676).
+pod_webhook_injects() {
+  "${KUBECTL[@]}" -n "$TRAEFIK_NS" run chaos-webhook-check --image=traefik --restart=Never --labels="$pods" \
+    --dry-run=server -o jsonpath='{.spec.initContainers[*].name}' 2>/dev/null | grep -qw inkwall-engine
+}
 pod_webhook_policy() {
   "${KUBECTL[@]}" get mutatingwebhookconfiguration inkwall-operator-mutating -o jsonpath='{.webhooks[?(@.name=="pods.waf.inkwall.dev")].failurePolicy}'
 }
@@ -246,6 +254,7 @@ check "without the engine (uninspected, as documented for Detect mode)" one_unin
 start_operator
 missing() { [[ $(condition Programmed reason) == SidecarMissing ]]; }
 eventually "the operator back, the policy reports SidecarMissing" missing
+eventually "the Pod webhook answers again" pod_webhook_injects
 "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout restart "deployment/$TRAEFIK" >/dev/null
 "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout status "deployment/$TRAEFIK" --timeout=180s >/dev/null
 eventually "restarted, every pod has the engine" injected
