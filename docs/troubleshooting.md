@@ -55,8 +55,8 @@ It reports:
 - **The InkwallConfig**: its mode and whether inspection is suspended.
 - **The operator**: its replicas and the version they run, and the bundle it publishes.
 - **The proxies** the cluster's IngressClasses and GatewayClasses name: whether Inkwall wires
-  them, and what the engine inspects through each. Responses are inspected through Envoy Gateway
-  only, and WebSocket messages only through the standalone proxy.
+  them, and what the engine inspects through each. Responses are inspected through Envoy Gateway,
+  Istio and HAProxy (not Traefik), and WebSocket messages only through the standalone proxy.
 - **The policies that aren't `Ready`**, grouped by the reason of their `Ready` condition, with
   its message. `kubectl get wafpolicies -A` shows the same reason in its `REASON` column.
 - **The engines**: how many run the current bundle, are behind, or rejected it, by engine
@@ -146,7 +146,7 @@ fix from these tables ([Explaining a policy or a denial](#explaining-a-policy-or
 |---|---|---|
 | `Accepted` | Valid, and in the bundle the engines get. | |
 | `InvalidRef` | A rule set, ConfigMap or key the policy (or its rule set) names doesn't exist, or isn't labeled `waf.inkwall.dev/rules=true`. Or a rule set bound with `placement: BeforeCRS` can't load there: the built-in CRS, or SecLang with `SecRuleRemoveBy*` or `SecRuleUpdate*`. | Create it, or fix the name. The message names it. Move those directives to a rule set placed `AfterCRS` (the default). |
-| `RuleCompileError` | Rules in the policy's rule set don't compile, or use a directive Inkwall doesn't allow. | Fix the rules; `inkwallctl test --rule-set` shows the error before you apply. |
+| `RuleCompileError` | Rules in the policy's rule set don't compile, use a directive Inkwall doesn't allow, or end in an open chain (the last `SecRule` has the `chain` action, with no rule after it to complete the chain). | Fix the rules; `inkwallctl test --rule-set` shows the error before you apply. |
 | `Conflict` | An older policy targets the same route and applies to it: a route has one policy. | Merge the policies, or target other routes. |
 | `TargetUnsupported` | A target's match rules (an IngressRoute's, HTTPRoute's or VirtualService's) aren't ones the router can match, so its requests can't be told apart. | Use the forms the message lists (`Host`, `Path`, `PathPrefix`; exact and prefix paths). |
 | `RuleSetsIncompatible` | The policy's rule sets compile alone but not together, as the engine loads them (the same rule ID in two of them, or a rule that changes a rule the policy doesn't load). The policy is left out of the bundle (or keeps its previous version, if that compiles), so the other policies' bundle still applies. | Give the rules distinct IDs, or bind rule sets that load together; the message has the compiler's error. |
@@ -183,7 +183,7 @@ fix from these tables ([Explaining a policy or a denial](#explaining-a-policy-or
 | `Enforced` | Every engine runs the bundle, or a later one. | |
 | `NotInBundle` | The policy's current spec isn't in a published bundle yet. | Wait; if it lasts, see `Accepted`. |
 | `NoEngines` | No engine is connected to the operator. | Check the proxy pods run the engine (`Programmed`), and that engines reach the operator ([InkwallEngineDisconnected](monitoring.md#inkwallenginedisconnected)). |
-| `EnginesBehind` | Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting). | Usually seconds; if it lasts, `inkwallctl status` names them; check that the pod's engine reaches the operator ([InkwallEngineDisconnected](monitoring.md#inkwallenginedisconnected)). |
+| `EnginesBehind` | Some engines don't run the bundle yet, or a proxy pod that serves the policy has an engine that isn't connected (starting or reconnecting), or, for a policy whose proxy pods the operator doesn't know (raw Envoy, the standalone proxy), an engine outside the integrations' pods that disconnected, while its pod exists (or, for an engine that reports no pod, for 2 minutes), hadn't run its current version (it keeps its older bundle until it reconnects). | Usually seconds; if it lasts, `inkwallctl status` names them; check that the pod's engine reaches the operator ([InkwallEngineDisconnected](monitoring.md#inkwallenginedisconnected)). |
 | `EngineNack` | An engine rejected the bundle; the message names it and why (often an engine older than the operator, or a key it doesn't trust). | Restart the engine's pod so it runs the operator's version; see [InkwallBundleRejected](monitoring.md#inkwallbundlerejected). |
 | `EnginesOutdated` | An engine runs the bundle, but is too old to enforce a field the policy sets, which it ignores. | Restart the pod the message names. |
 | `EnginesUnreported` | An operator replica's engine report is full, so not every engine is known. | Run more operator replicas, or fewer proxy pods per replica. |

@@ -6,11 +6,15 @@ package wiring
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -245,6 +249,38 @@ func TestOldTraefik(t *testing.T) {
 	} {
 		if got := oldTraefik([]corev1.Pod{pod(tc.images...)}); got != tc.old {
 			t.Errorf("oldTraefik(%v) = %v, want %v", tc.images, got, tc.old)
+		}
+	}
+}
+
+// Traefik v3 before v3.7 forwards h2c upgrades past ForwardAuth: a target
+// it serves is wired, and its policy says so (Partly).
+func TestH2CTraefik(t *testing.T) {
+	pod := func(image string) corev1.Pod {
+		return corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Image: image}}}}
+	}
+	for image, want := range map[string]bool{
+		"traefik:v3.6.25": true, "traefik:3.0": true, "mirror.example.com/traefik:v3.4.5": true,
+		"traefik:v3.7.13": false, "traefik:v2.11.63": false, "traefik:latest": false, "traefik@sha256:0123": false,
+	} {
+		if got := h2cTraefik([]corev1.Pod{pod(image)}) != ""; got != want {
+			t.Errorf("h2cTraefik(%s): %v, want %v", image, got, want)
+		}
+	}
+
+	k := types.NamespacedName{Namespace: "shop", Name: "web"}
+	tg := Target{Kind: ingressKind, Key: k}
+	for image, want := range map[string]bool{"traefik:v3.6.25": true, "traefik:v3.7.13": false} {
+		st := &state{
+			ingresses:   map[types.NamespacedName]*networkingv1.Ingress{k: {}},
+			wire:        map[types.NamespacedName]target{k: {controller: integrations.Traefik.Controller}},
+			traefikCRDs: true, middlewareErr: map[string]string{}, ingressErr: map[types.NamespacedName]string{},
+			wanted: map[schema.GroupKind]map[types.NamespacedName]bool{ingressKind: {k: true}},
+			pods:   []corev1.Pod{pod(image)},
+		}
+		s := st.result(map[Target]bool{tg: true}).Targets[tg]
+		if !s.Wired || (s.Partly != "") != want || want && !strings.Contains(s.Partly, "upgrade Traefik to v3.7") {
+			t.Errorf("%s: %+v, want wired, warned %v", image, s, want)
 		}
 	}
 }

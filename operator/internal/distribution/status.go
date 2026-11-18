@@ -15,6 +15,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/errgroup"
+	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -276,6 +277,12 @@ func Ready(conds []metav1.Condition, generation int64) metav1.Condition {
 // DefaultConfigEvery is the Reporter's default ConfigEvery.
 const DefaultConfigEvery = 5 * time.Second
 
+// DefaultGone is the Reporter's default Gone: more than an engine's longest
+// wait between reconnects (30 s), once a replica answers it. It bounds only
+// engines that report no pod: one whose pod is known counts while its pod
+// exists (#695).
+const DefaultGone = 2 * time.Minute
+
 // statusWriters is how many policy statuses the Reporter writes at once.
 const statusWriters = 8
 
@@ -298,10 +305,110 @@ type Reporter struct {
 	// counts to the InkwallConfig's status, so engines connecting don't
 	// churn it; 0: DefaultConfigEvery.
 	ConfigEvery time.Duration
+	// Gone is how long an engine that disconnected, and reports no pod,
+	// still holds back the policies it counts for, while it hasn't run
+	// their current version (#675): it serves the bundle it last ran until
+	// it reconnects. For a policy whose pods aren't known (raw Envoy, the
+	// standalone proxy), nothing else tells that it is missing. An engine
+	// that reports its pod holds them back while the pod exists, however
+	// long it is away (#695). 0: DefaultGone.
+	Gone time.Duration
 	// Now is the clock; nil: time.Now.
 	Now func() time.Time
 
 	lastConfigWrite time.Time
+	// seen: the engines reported, by engineKey, as last reported, and when.
+	// The first report takes them from the reports of the last Stale+Gone:
+	// a new leader doesn't know the engines that were on the old one.
+	seen map[string]seenEngine
+}
+
+type seenEngine struct {
+	engine Engine
+	at     time.Time
+	// managed: its pod was an integration's (ServedPods). Such a pod's
+	// engine never holds a policy back once disconnected: its pods are
+	// known, and a pod deleted (a rollout, a scale-down) is gone for good.
+	managed bool
+}
+
+func (r *Reporter) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
+
+// disconnected remembers the engines connected now, and returns those
+// that aren't, as they were last reported: those whose pod still exists,
+// and those that report no pod for Gone. Engines whose pod is an
+// integration's are left out.
+func (r *Reporter) disconnected(ctx context.Context, engines []Engine, served servedView, now time.Time) ([]Engine, error) {
+	gone := cmp.Or(r.Gone, DefaultGone)
+	if r.seen == nil {
+		recent, _, err := ReadEngines(ctx, r.Reader, r.Namespace, r.Stale+gone, now)
+		if err != nil {
+			return nil, err
+		}
+		r.seen = map[string]seenEngine{}
+		for _, e := range recent {
+			r.seen[engineKey(e)] = seenEngine{engine: e, at: now, managed: served.integration[enginePod(e)] != ""}
+		}
+	}
+	connected := make(map[string]bool, len(engines))
+	for _, e := range engines {
+		k := engineKey(e)
+		connected[k] = true
+		managed := r.seen[k].managed || served.integration[enginePod(e)] != ""
+		r.seen[k] = seenEngine{engine: e, at: now, managed: managed}
+	}
+	var out []Engine
+	for k, s := range r.seen {
+		switch {
+		case connected[k]:
+		case s.managed || enginePod(s.engine) == "":
+			// Forgotten after Gone; an integration's never holds back.
+			if now.Sub(s.at) > gone {
+				delete(r.seen, k)
+			} else if !s.managed {
+				out = append(out, s.engine)
+			}
+		default:
+			if r.podGone(ctx, s.engine) {
+				delete(r.seen, k)
+				continue
+			}
+			out = append(out, s.engine)
+		}
+	}
+	return out, nil
+}
+
+// podGone tells that a disconnected engine's pod was deleted (or is being
+// deleted): it won't come back, and doesn't hold policies back. A pod that
+// can't be read (the API server down) is taken as there.
+func (r *Reporter) podGone(ctx context.Context, e Engine) bool {
+	if e.PodName == "" {
+		return false
+	}
+	var pod corev1.Pod
+	err := r.Reader.Get(ctx, types.NamespacedName{Namespace: e.PodNamespace, Name: e.PodName}, &pod)
+	switch {
+	case apierrors.IsNotFound(err):
+		return true
+	case err != nil:
+		return false
+	}
+	return pod.DeletionTimestamp != nil
+}
+
+// engineKey identifies an engine across reconnects: its pod, or its
+// ServiceAccount and ID.
+func engineKey(e Engine) string {
+	if pod := enginePod(e); pod != "" {
+		return "pod/" + pod
+	}
+	return "sa/" + e.ServiceAccount + "/" + e.ID
 }
 
 // Start implements manager.Runnable.
@@ -329,6 +436,11 @@ func (r *Reporter) report(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	served := r.Served.view()
+	disconnected, err := r.disconnected(ctx, engines, served, r.now())
+	if err != nil {
+		return err
+	}
 	var policies wafv1alpha1.WAFPolicyList
 	if err := r.Client.List(ctx, &policies, client.UnsafeDisableDeepCopy); err != nil {
 		return err
@@ -336,7 +448,6 @@ func (r *Reporter) report(ctx context.Context) error {
 
 	_, latest, _ := r.Store.Current()
 	suspended := r.Store.Suspended()
-	served := r.Served.view()
 	counts := map[[2]string]float64{}
 	for _, e := range engines {
 		state := "behind"
@@ -374,12 +485,13 @@ func (r *Reporter) report(ctx context.Context) error {
 		key := p.Namespace + "/" + p.Name
 		version := r.Store.PolicyVersion(key)
 		mine, missing := served.enginesFor(key, engines)
+		gone := served.goneFor(key, disconnected)
 		// The list is the cache's, not a copy: copy only what is written.
-		if _, changed := enforcedConditions(p, version, suspended, mine, leftOut, missing); !changed {
+		if _, changed := enforcedConditions(p, version, suspended, mine, gone, leftOut, missing); !changed {
 			continue
 		}
 		p = p.DeepCopy()
-		g.Go(func() error { return r.write(gctx, p, version, suspended, mine, leftOut, missing) })
+		g.Go(func() error { return r.write(gctx, p, version, suspended, mine, gone, leftOut, missing) })
 	}
 	return g.Wait()
 }
@@ -416,10 +528,7 @@ func engineCounts(engines []Engine, leftOut int, latest uint64, policies []wafv1
 // they changed, at most once per ConfigEvery: a later report writes what a
 // skipped one would have.
 func (r *Reporter) writeConfig(ctx context.Context, counts *wafv1alpha1.EngineCounts) error {
-	now := time.Now
-	if r.Now != nil {
-		now = r.Now
-	}
+	now := r.now
 	if !r.lastConfigWrite.IsZero() && now().Sub(r.lastConfigWrite) < cmp.Or(r.ConfigEvery, DefaultConfigEvery) {
 		return nil
 	}
@@ -446,9 +555,19 @@ func (r *Reporter) writeConfig(ctx context.Context, counts *wafv1alpha1.EngineCo
 // publishing. Engines must run it too, so that when inspection resumes,
 // engines still on the suspended bundle don't count. A suspended bundle
 // enforces nothing.
-func enforcedConditions(p *wafv1alpha1.WAFPolicy, served uint64, suspended bool, engines []Engine, leftOut, missing int) ([]metav1.Condition, bool) {
+//
+// gone are engines that disconnected recently (Reporter.Gone): each that
+// had neither run nor rejected the policy's version counts as missing
+// (#675). One that rejected it was EngineNack: gone, it no longer counts,
+// as before.
+func enforcedConditions(p *wafv1alpha1.WAFPolicy, served uint64, suspended bool, engines, gone []Engine, leftOut, missing int) ([]metav1.Condition, bool) {
 	conds := slices.Clone(p.Status.Conditions)
 	version := max(p.Status.BundleVersion, int64(served)) // #nosec G115 -- versions count builds
+	for _, e := range gone {
+		if v := uint64(version); version > 0 && e.Applied < v && e.Rejected < v { // #nosec G115 -- positive
+			missing++
+		}
+	}
 	st, reason, msg := Enforced(version, engines, leftOut, missing)
 	if st == metav1.ConditionTrue {
 		if e, field, need := outdatedEngine(p, engines); e != nil {
@@ -469,7 +588,7 @@ func enforcedConditions(p *wafv1alpha1.WAFPolicy, served uint64, suspended bool,
 	return conds, changed
 }
 
-func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, served uint64, suspended bool, engines []Engine, leftOut, missing int) error {
+func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, served uint64, suspended bool, engines, gone []Engine, leftOut, missing int) error {
 	first := true
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if !first {
@@ -478,7 +597,7 @@ func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, served u
 			}
 		}
 		first = false
-		conds, changed := enforcedConditions(p, served, suspended, engines, leftOut, missing)
+		conds, changed := enforcedConditions(p, served, suspended, engines, gone, leftOut, missing)
 		if !changed {
 			return nil
 		}

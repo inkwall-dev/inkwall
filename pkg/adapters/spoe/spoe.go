@@ -404,6 +404,7 @@ func (c *conn) setIdle(idle bool) {
 // server ends the connection.
 func (c *conn) serve() {
 	defer func() { _ = c.nc.Close() }()
+	defer c.recoverPanic(telemetry.PanicSPOEConnection)
 	if !c.hello() {
 		return
 	}
@@ -586,6 +587,16 @@ func supportsVersion(list string) bool {
 	return false
 }
 
+// recoverPanic, deferred in a goroutine that reads the connection, turns a
+// panic there into the end of the connection, rather than of the engine:
+// HAProxy applies its failure mode to the frames it awaits.
+func (c *conn) recoverPanic(component string) {
+	if v := recover(); v != nil {
+		c.srv.metrics.Panicked(c.srv.ctx, c.srv.logger, component, v)
+		_ = c.nc.Close()
+	}
+}
+
 // disconnect sends AGENT-DISCONNECT; the caller closes the connection.
 func (c *conn) disconnect(status uint32, msg string) {
 	if status != statusNormal && status != statusTimeout {
@@ -607,6 +618,7 @@ func (c *conn) write(b []byte) error {
 
 // notify answers one NOTIFY frame with an ACK.
 func (c *conn) notify(f frame) {
+	defer c.recoverPanic(telemetry.PanicSPOENotify)
 	ack := newFrame(frameAck, f.streamID, f.frameID)
 	c.srv.answer(c.srv.ctx, ack, f.payload, c.maxFrame, peerAddr(c.nc))
 	if err := c.write(ack.finish()); err != nil {

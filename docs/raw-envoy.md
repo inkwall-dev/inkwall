@@ -328,7 +328,7 @@ typed_per_filter_config:
     disabled: true
 ```
 
-The engine's `--skip-paths` (or a policy's `skipPaths`) does the same on the engine's side, but Envoy
+The engine's `--skip-paths` (or a policy's `skip.paths`) does the same on the engine's side, but Envoy
 still calls the engine.
 
 ## The policy from flags
@@ -421,7 +421,10 @@ The policy flags (`--mode`, `--rules`, ...) can't be combined with `--operator`.
 The operator doesn't wire raw Envoy: your `envoy.yaml` does. So the policy is
 `Programmed=False`, reason `ControllerUnsupported` (its Ingress's class has no controller Inkwall
 knows), and `Ready=False`. `Enforced` reports the engines: `True`, `every engine runs bundle <n> or
-later`, once Envoy's engines run the policy.
+later`, once Envoy's engines run the policy. The operator doesn't know Envoy's pods, so an engine
+that isn't connected counts while its pod exists, however long it is away (it reports its pod from
+`POD_NAME` and `POD_NAMESPACE`, as in the sample; without them, for 2 minutes after it disconnects):
+a policy edited meanwhile stays `EnginesBehind` until that engine reconnects and runs it.
 
 ```sh
 kubectl -n raw-envoy get wafpolicy app -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'

@@ -79,6 +79,14 @@ uninjected() {
 }
 injected() { [[ $(uninjected) == 0 ]]; }
 one_uninjected() { [[ $(uninjected) == 1 ]]; }
+# pod_webhook_injects: the Pod webhook injects a Traefik pod (a server-side
+# dry run). The operator's pods are ready a moment before the API server
+# reaches them through the webhook's Service: a pod created meanwhile in
+# Detect mode starts without the engine, as the webhook fails open (#676).
+pod_webhook_injects() {
+  "${KUBECTL[@]}" -n "$TRAEFIK_NS" run chaos-webhook-check --image=traefik --restart=Never --labels="$pods" \
+    --dry-run=server -o jsonpath='{.spec.initContainers[*].name}' 2>/dev/null | matches -w inkwall-engine
+}
 pod_webhook_policy() {
   "${KUBECTL[@]}" get mutatingwebhookconfiguration inkwall-operator-mutating -o jsonpath='{.webhooks[?(@.name=="pods.waf.inkwall.dev")].failurePolicy}'
 }
@@ -120,7 +128,7 @@ answers() { "${KUBECTL[@]}" -n "$NS" logs client | awk -v s="$since_up" '$2 >= s
 mark() { since=$(date +%s); since_up=$(uptime_now); }
 # never_uninspected: no answer since the last mark was the app's (200);
 # the engine's are 403, Traefik's own 500 while it can't reach it.
-never_uninspected() { ! answers | grep -qx 200; }
+never_uninspected() { ! answers | matches -x 200; }
 # answered: the engine blocked the attack since the last mark.
 answered() { [[ $(answers | grep -cx 403 || true) -gt 0 ]]; }
 
@@ -246,6 +254,7 @@ check "without the engine (uninspected, as documented for Detect mode)" one_unin
 start_operator
 missing() { [[ $(condition Programmed reason) == SidecarMissing ]]; }
 eventually "the operator back, the policy reports SidecarMissing" missing
+eventually "the Pod webhook answers again" pod_webhook_injects
 "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout restart "deployment/$TRAEFIK" >/dev/null
 "${KUBECTL[@]}" -n "$TRAEFIK_NS" rollout status "deployment/$TRAEFIK" --timeout=180s >/dev/null
 eventually "restarted, every pod has the engine" injected
@@ -298,7 +307,7 @@ down_until_up=$(uptime_now)
 docker exec "$node" mv /etc/kubernetes/kube-apiserver.yaml.chaos /etc/kubernetes/manifests/kube-apiserver.yaml
 eventually_within 180 "the API server is back" api_up
 while_down() {
-  "${KUBECTL[@]}" -n "$NS" logs client | awk -v s="$since_up" -v u="$down_until_up" '$2 >= s && $2 <= u { print $3 }' | grep -qx 403
+  "${KUBECTL[@]}" -n "$NS" logs client | awk -v s="$since_up" -v u="$down_until_up" '$2 >= s && $2 <= u { print $3 }' | matches -x 403
 }
 check "the engine blocked the attack while the API server was down" while_down
 "${KUBECTL[@]}" -n "$OPERATOR_NS" rollout status deployment/inkwall-operator --timeout=300s >/dev/null

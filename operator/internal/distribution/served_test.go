@@ -157,3 +157,149 @@ func TestEnforcedWaitsForServedPodsEngines(t *testing.T) {
 		t.Errorf("unknown policy: missing %d, want 0", missing)
 	}
 }
+
+// An engine that disconnected holds back, for Reporter.Gone, the policies
+// it counts for while it hasn't run their current version (#675): until it
+// reconnects, it serves the bundle it last ran. Raw Envoy's pods aren't
+// known, so nothing else tells that its engine is missing. An engine gone
+// with the policy's version doesn't change the status; a new leader knows
+// the engines of the old one's report.
+func TestEnforcedWaitsForDisconnectedEngines(t *testing.T) {
+	ctx := context.Background()
+	s := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(s)
+	_ = wafv1alpha1.AddToScheme(s)
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "raw-envoy", Name: "app", Generation: 1}}
+	p.Status.ObservedGeneration = 1
+	p.Status.BundleVersion = 2
+	for _, c := range []string{wafv1alpha1.ConditionAccepted, wafv1alpha1.ConditionProgrammed} {
+		meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{Type: c, Status: metav1.ConditionTrue, Reason: c, ObservedGeneration: 1})
+	}
+	reportOf := func(replica string) *corev1.ConfigMap {
+		return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "inkwall-system", Name: reportNamePrefix + replica, Labels: map[string]string{EnginesLabel: "true"}}}
+	}
+	a, b := reportOf("a"), reportOf("b")
+	// Raw Envoy's pod: while it exists, its engine is reconnecting.
+	rawPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "raw-envoy", Name: "envoy-1"}}
+	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&wafv1alpha1.WAFPolicy{}).WithObjects(p, a, b, rawPod).Build()
+	now := time.Now()
+	setReport := func(cm *corev1.ConfigMap, at time.Time, engines ...Engine) {
+		t.Helper()
+		data, _ := json.Marshal(engines)
+		cm.Data = map[string]string{enginesKey: string(data), updatedAtKey: at.UTC().Format(time.RFC3339Nano)}
+		if err := c.Update(ctx, cm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	edit := func(version int64) {
+		t.Helper()
+		var got wafv1alpha1.WAFPolicy
+		if err := c.Get(ctx, client.ObjectKeyFromObject(p), &got); err != nil {
+			t.Fatal(err)
+		}
+		got.Status.BundleVersion = version
+		if err := c.Status().Update(ctx, &got); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(r *Reporter, what, want string) {
+		t.Helper()
+		if err := r.report(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var got wafv1alpha1.WAFPolicy
+		if err := c.Get(ctx, client.ObjectKeyFromObject(p), &got); err != nil {
+			t.Fatal(err)
+		}
+		if cond := meta.FindStatusCondition(got.Status.Conditions, wafv1alpha1.ConditionEnforced); cond == nil || cond.Reason != want {
+			t.Errorf("%s: Enforced %v, want %s", what, cond, want)
+		}
+	}
+	raw := func(applied uint64) Engine {
+		return Engine{ID: "raw", PodNamespace: "raw-envoy", PodName: "envoy-1", Applied: applied}
+	}
+	other := func(applied uint64) Engine {
+		return Engine{ID: "traefik", PodNamespace: "traefik", PodName: "traefik-1", Applied: applied}
+	}
+	clock := func() time.Time { return now }
+	r := &Reporter{Client: c, Reader: c, Namespace: "inkwall-system", Stale: 30 * time.Second, Gone: time.Minute, Store: NewStore(), Now: clock}
+
+	setReport(a, now, raw(2), other(2))
+	check(r, "every engine runs it", ReasonEnforced)
+	setReport(a, now, other(2))
+	check(r, "raw Envoy's engine reconnecting, with the policy's version", ReasonEnforced)
+	edit(3)
+	setReport(a, now, other(3))
+	check(r, "edited while raw Envoy's engine reconnects", ReasonEnginesBehind)
+	setReport(b, now, raw(3))
+	check(r, "raw Envoy's engine reconnected, runs it", ReasonEnforced)
+
+	// A new leader: raw Envoy's engine was on the old leader, whose report
+	// is stale; it reconnects to another replica.
+	edit(4)
+	setReport(a, now, other(4))
+	setReport(b, now.Add(-40*time.Second), raw(3))
+	r = &Reporter{Client: c, Reader: c, Namespace: "inkwall-system", Stale: 30 * time.Second, Gone: time.Minute, Store: NewStore(), Now: clock}
+	check(r, "new leader, raw Envoy's engine reconnecting", ReasonEnginesBehind)
+	// Away past Gone (a partition, #695): its pod is there, it still runs
+	// the older bundle.
+	now = now.Add(61 * time.Second)
+	setReport(a, now, other(4))
+	check(r, "raw Envoy's engine away past Gone, its pod there", ReasonEnginesBehind)
+
+	// An integration's pod (Traefik's) deleted: its engine doesn't hold
+	// raw Envoy's policy back, though every engine counts for it.
+	served := &ServedPods{}
+	served.Set(map[string]map[string]ServedPod{"web/traefik": {"traefik/traefik-1": {Integration: "traefik", Engine: true}}})
+	r = &Reporter{Client: c, Reader: c, Namespace: "inkwall-system", Stale: 30 * time.Second, Gone: time.Minute, Store: NewStore(), Now: clock, Served: served}
+	setReport(b, now, raw(4))
+	check(r, "every engine runs it, Traefik's pod known", ReasonEnforced)
+	served.Set(nil)
+	edit(5)
+	setReport(a, now)
+	setReport(b, now, raw(5))
+	check(r, "Traefik's pod deleted, then an edit", ReasonEnforced)
+
+	// Raw Envoy's pod deleted (a rollout): its engine won't come back, and
+	// doesn't hold an edit back for Gone.
+	edit(6)
+	setReport(a, now, other(6))
+	setReport(b, now)
+	check(r, "edited while raw Envoy's engine is away, its pod there", ReasonEnginesBehind)
+	if err := c.Delete(ctx, rawPod); err != nil {
+		t.Fatal(err)
+	}
+	check(r, "raw Envoy's pod deleted", ReasonEnforced)
+
+	// An engine that reports no pod counts for Gone only.
+	solo := func(applied uint64) Engine {
+		return Engine{ID: "solo", ServiceAccount: "solo", Applied: applied}
+	}
+	setReport(a, now, other(6), solo(6))
+	check(r, "every engine runs it, one with no pod", ReasonEnforced)
+	edit(7)
+	setReport(a, now, other(7))
+	check(r, "edited while the engine with no pod is away", ReasonEnginesBehind)
+	now = now.Add(61 * time.Second)
+	setReport(a, now, other(7))
+	check(r, "the engine with no pod away past Gone", ReasonEnforced)
+}
+
+// A policy whose pods are known isn't held back by an engine that
+// disconnected: enginesFor counts its pods whose engine isn't connected, and
+// a pod deleted since (a rollout) has no say (#675's fix, which a Traefik
+// rollout in the e2e caught).
+func TestGoneForKnownPods(t *testing.T) {
+	served := &ServedPods{}
+	served.Set(map[string]map[string]ServedPod{
+		"web/traefik": {"traefik/new": {Integration: "traefik", Engine: true}},
+	})
+	v := served.view()
+	old := Engine{ID: "old", PodNamespace: "traefik", PodName: "old", Applied: 1}
+	if got := v.goneFor("web/traefik", []Engine{old}); len(got) != 0 {
+		t.Errorf("known pods: gone %v, want none", got)
+	}
+	if got := v.goneFor("raw-envoy/app", []Engine{old}); len(got) != 1 {
+		t.Errorf("unknown pods: gone %v, want the engine", got)
+	}
+}

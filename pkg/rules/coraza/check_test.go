@@ -98,6 +98,35 @@ func TestCheckUserRules(t *testing.T) {
 			rules:    "SecRule ARGS \"@rx a\" \"id:100007,phase:2,deny,chain\"\nSecRule ARGS \"@rx b\" \"t:none\"\nSecRule ARGS \"@nosuchop a\" \"id:100008,phase:1,deny\"",
 			wantLine: 3, wantErr: `operator "nosuchop" is not allowed`,
 		},
+		// A chain no SecRule completes compiles, but its starter would
+		// match alone (#682).
+		{
+			name:     "trailing chain",
+			rules:    "SecRule ARGS \"@rx a\" \"id:100017,phase:1,deny\"\n\nSecRule REQUEST_METHOD \"@streq OPTIONS\" \"id:100018,phase:1,pass,nolog,chain\"",
+			wantLine: 3, wantErr: "the last SecRule has the chain action",
+		},
+		{
+			name:     "trailing chain of three",
+			rules:    "SecRule ARGS \"@rx a\" \"id:100019,phase:1,deny,chain\"\nSecRule ARGS \"@rx b\" \"chain\"\nSecRule ARGS \"@rx c\" \"t:none, Chain \"",
+			wantLine: 3, wantErr: "the last SecRule has the chain action",
+		},
+		{
+			name:     "chain followed by a SecAction",
+			rules:    "SecRule ARGS \"@rx a\" \"id:100020,phase:1,pass,nolog,chain\"\nSecAction \"nolog\"\nSecMarker END",
+			wantLine: 1, wantErr: "the last SecRule has the chain action",
+		},
+		{
+			name:     "trailing chain over lines",
+			rules:    "SecRule ARGS \"@rx a\" \"id:100021,phase:1,deny\"\nSecRule ARGS \"@rx a\" \\\n    \"id:100022,phase:1,pass,nolog,\\\n    msg:'x',\\\n    chain\"",
+			wantLine: 2, wantErr: "the last SecRule has the chain action",
+		},
+		{name: "chain then marker", rules: "SecRule ARGS \"@rx a\" \"id:100023,phase:1,deny,chain\"\nSecRule ARGS \"@rx b\" \"t:none\"\nSecMarker END"},
+		{name: "chain over lines", rules: "SecRule ARGS \"@rx a\" \\\n    \"id:100029,phase:1,deny,\\\n    chain\"\nSecRule ARGS \"@rx b\" \\\n    \"t:none\""},
+		{name: "chain in a msg", rules: `SecRule ARGS "@rx a" "id:100024,phase:1,deny,msg:'a chain, chain',tag:'chain'"`},
+		{name: "chain in a quoted msg", rules: `SecRule ARGS "@rx a" "id:100025,phase:1,deny,msg:'it\'s a chain,chain'"`},
+		{name: "chain-like actions", rules: `SecRule ARGS "@rx a" "id:100026,phase:1,deny,setvar:tx.chain=1,logdata:chain"`},
+		{name: "chain in the operator", rules: `SecRule ARGS "@rx chain" "id:100027,phase:1,deny"`},
+		{name: "chained rule without actions", rules: "SecRule ARGS \"@rx a\" \"id:100028,phase:1,deny,chain\"\nSecRule ARGS \"@rx chain\""},
 		{name: "negated operator", rules: `SecRule ARGS "!@within a b" "id:100009,phase:1,deny"`},
 		{name: "default operator", rules: `SecRule ARGS "^a$" "id:100010,phase:1,deny"`},
 		{name: "escaped quote", rules: `SecRule ARGS "@rx a\"b" "id:100011,phase:1,deny"`},

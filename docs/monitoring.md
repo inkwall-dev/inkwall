@@ -142,7 +142,7 @@ Engine metrics carry `adapter` where it says so (`proxy`, `forwardauth`, `httpch
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `inkwall_requests_total` | counter | `adapter`, `action`, `reason` | Requests checked, by action (`allow`, `deny`, `log`) and reason (`none`, `rule`, `timeout`, `error`, `canceled`, `overload`, `oversize`, `skipped`, `no-policy`, `suspended`, `websocket`). `timeout`, `error` and `overload` were not inspected. WebSocket messages are not counted here. |
+| `inkwall_requests_total` | counter | `adapter`, `action`, `reason` | Requests checked, by action (`allow`, `deny`, `log`) and reason (`none`, `rule`, `timeout`, `error`, `canceled`, `overload`, `oversize`, `skipped`, `no-policy`, `suspended`, `websocket`, `ip-deny`, `ip-allow`, `grpc`). `timeout`, `error` and `overload` were not inspected, nor `ip-allow` (a client in the policy's IP allow list). WebSocket messages are not counted here. |
 | `inkwall_check_duration_seconds` | histogram | `adapter` | Time checking a request, queueing for an evaluation slot included. |
 | `inkwall_responses_total` | counter | `adapter`, `action`, `reason` | Responses checked, for policies that inspect responses. |
 | `inkwall_response_check_duration_seconds` | histogram | `adapter` | Time checking a response. |
@@ -155,6 +155,7 @@ Engine metrics carry `adapter` where it says so (`proxy`, `forwardauth`, `httpch
 | `inkwall_websocket_connections` | gauge | `adapter` | WebSockets the engine's proxy holds open. |
 | `inkwall_websocket_messages_total` | counter | `adapter`, `action` | WebSocket messages inspected (`--websocket-messages`). |
 | `inkwall_websocket_violations_total` | counter | `adapter`, `code` | WebSocket messages refused or breaking the protocol, by close code (1002, 1003, 1007, 1009). |
+| `inkwall_panics_total` | counter | `adapter`, `component` | Panics recovered where the engine reads a proxy's traffic: `extproc_stream` (an ext_proc stream, ended with an error, so Envoy applies its failure mode), `spoe_connection` and `spoe_notify` (a SPOE connection, or a NOTIFY frame on it: the connection is closed), `websocket` (the standalone proxy's WebSocket inspection: the connection is closed). Each ends only that stream or connection; the engine's log has the panic and its stack. Any is a bug: please report it. |
 | `inkwall_evaluations_in_flight` | gauge | | Evaluations running now. |
 | `inkwall_evaluation_slots` | gauge | | Maximum concurrent evaluations; past them, requests are shed with reason `overload`. |
 | `inkwall_rule_sets` | gauge | | Compiled rule sets in memory. |
@@ -178,7 +179,7 @@ The engine also serves the Go runtime's `go_*` and the `process_*` metrics.
 |---|---|---|---|
 | `inkwall_operator_bundle_version` | gauge | | The bundle this replica serves. |
 | `inkwall_operator_bundle_compressed_bytes` | gauge | | Its size, gzip-compressed: over 900 KiB it is split into chunks, over 7,200 KiB it can't be published. |
-| `inkwall_operator_engines` | gauge | `state` | Connected engines by whether they run the current bundle (`current`, `behind`, `rejected`). Leader only. |
+| `inkwall_operator_engines` | gauge | `state`, `integration` | Connected engines by whether they run the current bundle (`current`, `behind`, `rejected`), and by the integration whose proxy pod runs them (`unknown` until matched to one). Leader only. |
 | `inkwall_operator_engines_left_out` | gauge | | Engines left out of this replica's engine report (over the ConfigMap limit). |
 | `inkwall_operator_events_received_total` | counter | | Security events received from the engines. |
 | `inkwall_operator_engine_events_dropped_total` | counter | | Security events the engines reported dropping. |

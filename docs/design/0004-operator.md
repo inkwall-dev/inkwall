@@ -142,6 +142,8 @@ Validation runs in three steps, cheapest first:
      `SecAuditLog`, `SecDebugLog`, `Include`) stay Inkwall's, since app teams write rule sets;
    - allows only operators that stay inside the engine: not `@inspectFile`, which runs a program,
      or `@rbl`, which queries DNS. The binaries don't register either;
+   - rejects SecLang whose last `SecRule` has the `chain` action: no rule completes the chain, so
+     after the CRS its starter would match alone;
    - rejects a policy's rule set binding with `placement: BeforeCRS` that also sets
      `paranoiaLevel`, `inboundAnomalyThreshold` or `crs`: those are the built-in CRS's, which
      can't load before itself;
@@ -170,8 +172,8 @@ Validation runs in three steps, cheapest first:
 
 | Condition | True when | False reasons |
 |---|---|---|
-| `Accepted` | Spec valid, references resolve, and the bundle with it fits | `InvalidRef` (also a rule set that isn't usable), `Conflict`, `TargetUnsupported`, `BundleTooLarge` |
-| `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `IntegrationDisabled`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `Pending`, `NoTargets`, `ResponsesNotInspected`, `InjectionDisabled`, `Unwired` |
+| `Accepted` | Spec valid, references resolve, and the bundle with it fits | `InvalidRef` (also a rule set that isn't usable), `RuleCompileError`, `RuleSetsIncompatible`, `Conflict`, `TargetUnsupported`, `TargetNotAttached`, `RouteOverlap`, `BundleTooLarge` |
+| `Programmed` | Every target's proxy is wired | `ControllerUnsupported`, `IntegrationDisabled`, `SidecarMissing`, `WiringFailed`, `PendingRestart`, `Pending`, `Unverified`, `NotProbeable`, `NoTargets`, `ResponsesNotInspected`, `InjectionDisabled`, `Unwired` |
 | `Enforced` | Every serving engine ACKed a bundle with this generation, and inspection isn't suspended | `EnginesBehind`, `EngineNack` (first error), `EnginesUnreported`, `EnginesOutdated`, `NoEngines`, `NotInBundle`, `Suspended` |
 | `Ready` | The three above are True | `Suspended` while inspection is suspended, else the first failing condition's reason; `NotAccepted`, `NotProgrammed` or `NotEnforced` while it isn't reported yet |
 

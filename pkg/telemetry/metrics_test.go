@@ -4,8 +4,10 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -150,6 +152,25 @@ func TestAdapterErrors(t *testing.T) {
 	none.AdapterError(ErrProtocol)
 	none.WebSocketOpened()()
 	none.WebSocketViolation(1002)
+}
+
+// A recovered panic is logged with its value and stack, and counted by
+// component; a nil Metrics only logs.
+func TestPanicked(t *testing.T) {
+	m := NewMetrics("spoe")
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	m.Panicked(context.Background(), logger, PanicSPOENotify, "boom")
+	if want := `inkwall_panics_total{adapter="spoe",component="spoe_notify"} 1`; !strings.Contains(scrape(t, m), want) {
+		t.Errorf("metrics missing %q", want)
+	}
+	var none *Metrics
+	none.Panicked(context.Background(), logger, PanicSPOENotify, "boom")
+	for _, want := range []string{`"level":"ERROR"`, `"component":"spoe_notify"`, `"panic":"boom"`, `"stack":"goroutine `, "TestPanicked"} {
+		if strings.Count(logs.String(), want) != 2 {
+			t.Errorf("logs %s: want %q twice", logs.String(), want)
+		}
+	}
 }
 
 // inkwall_rule_sets reports the compiled rule sets in memory.

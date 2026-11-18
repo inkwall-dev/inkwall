@@ -6,6 +6,7 @@ package grpcwire
 import (
 	"bytes"
 	"compress/gzip"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -136,5 +137,20 @@ func TestGunzip(t *testing.T) {
 	}
 	if _, ok := Gunzip(b.Bytes()[:b.Len()-4], 100); ok {
 		t.Error("cut: ok")
+	}
+}
+
+// TestGunzipLimitBounds: at the largest limit, a message is read whole;
+// at a negative one, as at 0, nothing is.
+func TestGunzipLimitBounds(t *testing.T) {
+	var b bytes.Buffer
+	zw := gzip.NewWriter(&b)
+	_, _ = zw.Write([]byte("' UNION SELECT password FROM users--"))
+	_ = zw.Close()
+	if out, ok := Gunzip(b.Bytes(), math.MaxInt64); !ok || string(out) != "' UNION SELECT password FROM users--" {
+		t.Errorf("limit MaxInt64: %q, %v", out, ok)
+	}
+	if out, ok := Gunzip(b.Bytes(), -1); ok || len(out) != 0 {
+		t.Errorf("limit -1: %q, %v", out, ok)
 	}
 }

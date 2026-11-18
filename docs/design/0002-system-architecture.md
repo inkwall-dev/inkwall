@@ -146,7 +146,8 @@ The compiled policy sits in an [`atomic.Pointer[Snapshot]`](https://pkg.go.dev/s
 | `pkg/telemetry` | Metrics, tracing, [`slog`](https://pkg.go.dev/log/slog) | built |
 | `pkg/adapters/*` | One per listener | `forwardauth`, `httpcheck`, `proxy`, `extproc`, `spoe` built; `extauthz` not yet |
 | `pkg/events` | Redacted security events, bounded buffer ([§5.4](#54-event-schema)) | built |
-| `pkg/ratelimit`, `pkg/iplist` | [Token buckets](https://en.wikipedia.org/wiki/Token_bucket), [CIDR](https://www.rfc-editor.org/rfc/rfc4632) trie | not yet |
+| `pkg/iplist` | [CIDR](https://www.rfc-editor.org/rfc/rfc4632) lists as sorted, merged ranges ([§4.2](#42-crds-wafinkwalldevv1alpha1)) | built |
+| `pkg/ratelimit` | [Token buckets](https://en.wikipedia.org/wiki/Token_bucket) | not yet |
 
 Lifecycle:
 
@@ -304,13 +305,14 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
   the policy is `Enforced=False` (`EnginesOutdated`) meanwhile. Not built: `ClusterWAFIPList`,
   lists fetched from a URL.
 
-**Built:** `InkwallConfig`, `WAFPolicy`, `WAFRuleSet` and `ClusterWAFRuleSet`; `Ingress` and
-Traefik `IngressRoute` targets; `HTTPRoute` targets resolved, with the precedence above
-([0004 §4.5](0004-operator.md#45-resolver)), and wired through Envoy Gateway or Traefik's Gateway
-API provider ([0004 §4.4](0004-operator.md#44-wiring-controller)).
+**Built:** `InkwallConfig`, `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet` and `WAFIPList`;
+`Ingress` targets (Traefik's and the HAProxy Kubernetes Ingress Controller's), Traefik
+`IngressRoute` and Istio `VirtualService` targets; `HTTPRoute` targets resolved, with the
+precedence above ([0004 §4.5](0004-operator.md#45-resolver)), and wired through Envoy Gateway,
+Istio or Traefik's Gateway API provider ([0004 §4.4](0004-operator.md#44-wiring-controller)).
 **Not yet:** cluster-wide and fetched IP lists, the policy field `rateLimits`, wiring other controllers'
-`HTTPRoute` targets, `BlockHighConfidence`, the `InspectPrefix` oversize action, and
-`InkwallConfig.events`.
+`HTTPRoute` targets, `BlockHighConfidence`, and the `InspectPrefix` oversize action.
+`InkwallConfig.events` is built for redaction only (`events.redact`, [§8.3](#83-data-privacy)).
 
 ### 4.3 Bundle format
 
@@ -955,7 +957,7 @@ into Caddy with [`xcaddy`](https://github.com/caddyserver/xcaddy).
 ### 6.6 Standalone reverse proxy (universal fallback)
 
 ```sh
-inkwall-engine proxy --listen :8080 --upstream http://app:80 --bundle bundle.pb
+inkwall-engine proxy --listen :8080 --upstream http://app:80 --mode block --rules rules.conf
 ```
 
 For use outside Kubernetes and with unsupported proxies. It is also the test reference that every
@@ -1176,6 +1178,10 @@ Target:
     `inkwall_websocket_violations_total{code}` (the engine's proxy). WebSocket messages are counted
     there, not in `inkwall_requests_total`: a request count that grows with chat traffic would
     hide what the requests do.
+  - `inkwall_panics_total{adapter,component}` (#684): panics recovered in the goroutines that read
+    a proxy's traffic (an ext_proc stream, a SPOE connection or NOTIFY frame, the proxy's WebSocket
+    inspection). A recover there ends only that stream or connection, failing closed for it,
+    rather than the engine, which every proxy it serves would lose.
   - Events say what they are about: `protocol` (`http`, `grpc`, `websocket`) and the phase
     `PHASE_WEBSOCKET_MESSAGE`; operators before v0.5.0 ignore both.
 - Engine logs (#354): JSON, at `--log-level` (default `info`; `InkwallConfig.spec.engine.logLevel`
