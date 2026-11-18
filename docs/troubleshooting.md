@@ -55,8 +55,8 @@ It reports:
 - **The InkwallConfig**: its mode and whether inspection is suspended.
 - **The operator**: its replicas and the version they run, and the bundle it publishes.
 - **The proxies** the cluster's IngressClasses and GatewayClasses name: whether Inkwall wires
-  them, and what the engine inspects through each. Responses are inspected through Envoy Gateway
-  only, and WebSocket messages only through the standalone proxy.
+  them, and what the engine inspects through each. Responses are inspected through Envoy Gateway,
+  Istio and HAProxy (not Traefik), and WebSocket messages only through the standalone proxy.
 - **The policies that aren't `Ready`**, grouped by the reason of their `Ready` condition, with
   its message. `kubectl get wafpolicies -A` shows the same reason in its `REASON` column.
 - **The engines**: how many run the current bundle, are behind, or rejected it, by engine
