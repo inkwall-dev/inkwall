@@ -155,6 +155,7 @@ Engine metrics carry `adapter` where it says so (`proxy`, `forwardauth`, `httpch
 | `inkwall_websocket_connections` | gauge | `adapter` | WebSockets the engine's proxy holds open. |
 | `inkwall_websocket_messages_total` | counter | `adapter`, `action` | WebSocket messages inspected (`--websocket-messages`). |
 | `inkwall_websocket_violations_total` | counter | `adapter`, `code` | WebSocket messages refused or breaking the protocol, by close code (1002, 1003, 1007, 1009). |
+| `inkwall_panics_total` | counter | `adapter`, `component` | Panics recovered where the engine reads a proxy's traffic: `extproc_stream` (an ext_proc stream, ended with an error, so Envoy applies its failure mode), `spoe_connection` and `spoe_notify` (a SPOE connection, or a NOTIFY frame on it: the connection is closed), `websocket` (the standalone proxy's WebSocket inspection: the connection is closed). Each ends only that stream or connection; the engine's log has the panic and its stack. Any is a bug: please report it. |
 | `inkwall_evaluations_in_flight` | gauge | | Evaluations running now. |
 | `inkwall_evaluation_slots` | gauge | | Maximum concurrent evaluations; past them, requests are shed with reason `overload`. |
 | `inkwall_rule_sets` | gauge | | Compiled rule sets in memory. |

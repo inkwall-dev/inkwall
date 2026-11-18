@@ -1176,6 +1176,10 @@ Target:
     `inkwall_websocket_violations_total{code}` (the engine's proxy). WebSocket messages are counted
     there, not in `inkwall_requests_total`: a request count that grows with chat traffic would
     hide what the requests do.
+  - `inkwall_panics_total{adapter,component}` (#684): panics recovered in the goroutines that read
+    a proxy's traffic (an ext_proc stream, a SPOE connection or NOTIFY frame, the proxy's WebSocket
+    inspection). A recover there ends only that stream or connection, failing closed for it,
+    rather than the engine, which every proxy it serves would lose.
   - Events say what they are about: `protocol` (`http`, `grpc`, `websocket`) and the phase
     `PHASE_WEBSOCKET_MESSAGE`; operators before v0.5.0 ignore both.
 - Engine logs (#354): JSON, at `--log-level` (default `info`; `InkwallConfig.spec.engine.logLevel`

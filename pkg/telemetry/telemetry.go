@@ -6,7 +6,10 @@
 package telemetry
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"sync"
 
@@ -39,6 +42,20 @@ const (
 	ErrProtocol = "protocol"
 )
 
+// Components of inkwall_panics_total: the goroutines that read a proxy's
+// connection, where a recovered panic ends only that stream or connection.
+const (
+	// PanicExtProcStream: an ext_proc stream, ended with an error.
+	PanicExtProcStream = "extproc_stream"
+	// PanicSPOEConnection: a SPOE connection, closed.
+	PanicSPOEConnection = "spoe_connection"
+	// PanicSPOENotify: a SPOE NOTIFY frame; its connection is closed.
+	PanicSPOENotify = "spoe_notify"
+	// PanicWebSocket: the standalone proxy's inspection of a WebSocket's
+	// client side; its connection is closed.
+	PanicWebSocket = "websocket"
+)
+
 // Metrics records verdicts. It implements pipeline.Observer. Its methods
 // are safe on a nil *Metrics, which records nothing.
 type Metrics struct {
@@ -57,6 +74,7 @@ type Metrics struct {
 	wsMessages     *prometheus.CounterVec
 	wsConnections  prometheus.Gauge
 	wsViolations   *prometheus.CounterVec
+	panics         *prometheus.CounterVec
 
 	labels      prometheus.Labels
 	mu          sync.Mutex
@@ -141,11 +159,16 @@ func NewMetrics(adapter string) *Metrics {
 			Help:        "WebSocket messages the proxy couldn't inspect or that broke the protocol, by the close code it would send (1002 protocol error, 1003 binary message refused, 1007 text not UTF-8, 1009 too big).",
 			ConstLabels: labels,
 		}, []string{"code"}),
+		panics: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name:        "inkwall_panics_total",
+			Help:        "Panics recovered in a goroutine that reads a proxy's connection, by component (extproc_stream, spoe_connection, spoe_notify, websocket). Each ended only its stream or connection, failing closed for it.",
+			ConstLabels: labels,
+		}, []string{"component"}),
 		rules:  map[int]string{},
 		labels: labels,
 	}
 	reg.MustRegister(m.requests, m.duration, m.responses, m.respTime,
-		m.ruleMatches, m.adapterErrors, m.rulesReloads, m.connections, m.connWaits, m.wsMessages, m.wsConnections, m.wsViolations)
+		m.ruleMatches, m.adapterErrors, m.rulesReloads, m.connections, m.connWaits, m.wsMessages, m.wsConnections, m.wsViolations, m.panics)
 	return m
 }
 
@@ -254,6 +277,20 @@ func (m *Metrics) AdapterError(kind string) {
 		return
 	}
 	m.adapterErrors.WithLabelValues(kind).Inc()
+}
+
+// Panicked reports a panic recovered in a goroutine that reads a proxy's
+// connection, by component (PanicExtProcStream...): it logs v and the stack
+// at error level and counts it in inkwall_panics_total. Call it from the
+// deferred function that recovered, then end that stream or connection. On
+// a nil *Metrics it only logs.
+func (m *Metrics) Panicked(ctx context.Context, logger *slog.Logger, component string, v any) {
+	logger.LogAttrs(ctx, slog.LevelError, "panic recovered: closing its stream or connection",
+		slog.String("component", component), slog.Any("panic", v), slog.String("stack", string(debug.Stack())))
+	if m == nil {
+		return
+	}
+	m.panics.WithLabelValues(component).Inc()
 }
 
 // WebSocketOpened counts an open WebSocket connection; the returned
