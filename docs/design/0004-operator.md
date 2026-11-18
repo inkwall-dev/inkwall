@@ -142,6 +142,8 @@ Validation runs in three steps, cheapest first:
      `SecAuditLog`, `SecDebugLog`, `Include`) stay Inkwall's, since app teams write rule sets;
    - allows only operators that stay inside the engine: not `@inspectFile`, which runs a program,
      or `@rbl`, which queries DNS. The binaries don't register either;
+   - rejects SecLang whose last `SecRule` has the `chain` action: no rule completes the chain, so
+     after the CRS its starter would match alone;
    - rejects a policy's rule set binding with `placement: BeforeCRS` that also sets
      `paranoiaLevel`, `inboundAnomalyThreshold` or `crs`: those are the built-in CRS's, which
      can't load before itself;
