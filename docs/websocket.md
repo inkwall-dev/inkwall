@@ -131,6 +131,10 @@ the same rules ([standalone proxy](standalone-proxy.md#flags)).
 - **Traefik**: ForwardAuth asks the engine before Traefik upgrades, so a denied handshake gets the
   engine's answer and no upgrade. Traefik doesn't pass the hop-by-hop headers `Upgrade` and
   `Connection` to the engine; `Sec-WebSocket-Key` and `Sec-WebSocket-Version` tell it's a handshake.
+  Use Traefik v3.7 or later: before v3.7 (checked up to v3.6.25), Traefik also forwards
+  `Upgrade: h2c` to the app, and an app that switches to HTTP/2 on it serves the requests sent on
+  that connection without Traefik's Middlewares, ForwardAuth included, seeing them. A policy whose
+  routes such a Traefik serves says so in its `Programmed` message.
 - **Standalone proxy**: the engine forwards an allowed upgrade to `--upstream` and copies the
   connection both ways, reading the client's frames when `--websocket-messages` asks it to.
 
