@@ -157,3 +157,90 @@ func TestEnforcedWaitsForServedPodsEngines(t *testing.T) {
 		t.Errorf("unknown policy: missing %d, want 0", missing)
 	}
 }
+
+// An engine that disconnected holds back, for Reporter.Gone, the policies
+// it counts for while it hasn't run their current version (#675): until it
+// reconnects, it serves the bundle it last ran. Raw Envoy's pods aren't
+// known, so nothing else tells that its engine is missing. An engine gone
+// with the policy's version doesn't change the status; a new leader knows
+// the engines of the old one's report.
+func TestEnforcedWaitsForDisconnectedEngines(t *testing.T) {
+	ctx := context.Background()
+	s := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(s)
+	_ = wafv1alpha1.AddToScheme(s)
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "raw-envoy", Name: "app", Generation: 1}}
+	p.Status.ObservedGeneration = 1
+	p.Status.BundleVersion = 2
+	for _, c := range []string{wafv1alpha1.ConditionAccepted, wafv1alpha1.ConditionProgrammed} {
+		meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{Type: c, Status: metav1.ConditionTrue, Reason: c, ObservedGeneration: 1})
+	}
+	reportOf := func(replica string) *corev1.ConfigMap {
+		return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "inkwall-system", Name: reportNamePrefix + replica, Labels: map[string]string{EnginesLabel: "true"}}}
+	}
+	a, b := reportOf("a"), reportOf("b")
+	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&wafv1alpha1.WAFPolicy{}).WithObjects(p, a, b).Build()
+	now := time.Now()
+	setReport := func(cm *corev1.ConfigMap, at time.Time, engines ...Engine) {
+		t.Helper()
+		data, _ := json.Marshal(engines)
+		cm.Data = map[string]string{enginesKey: string(data), updatedAtKey: at.UTC().Format(time.RFC3339Nano)}
+		if err := c.Update(ctx, cm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	edit := func(version int64) {
+		t.Helper()
+		var got wafv1alpha1.WAFPolicy
+		if err := c.Get(ctx, client.ObjectKeyFromObject(p), &got); err != nil {
+			t.Fatal(err)
+		}
+		got.Status.BundleVersion = version
+		if err := c.Status().Update(ctx, &got); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(r *Reporter, what, want string) {
+		t.Helper()
+		if err := r.report(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var got wafv1alpha1.WAFPolicy
+		if err := c.Get(ctx, client.ObjectKeyFromObject(p), &got); err != nil {
+			t.Fatal(err)
+		}
+		if cond := meta.FindStatusCondition(got.Status.Conditions, wafv1alpha1.ConditionEnforced); cond == nil || cond.Reason != want {
+			t.Errorf("%s: Enforced %v, want %s", what, cond, want)
+		}
+	}
+	raw := func(applied uint64) Engine {
+		return Engine{ID: "raw", PodNamespace: "raw-envoy", PodName: "envoy-1", Applied: applied}
+	}
+	other := func(applied uint64) Engine {
+		return Engine{ID: "traefik", PodNamespace: "traefik", PodName: "traefik-1", Applied: applied}
+	}
+	clock := func() time.Time { return now }
+	r := &Reporter{Client: c, Reader: c, Namespace: "inkwall-system", Stale: 30 * time.Second, Gone: time.Minute, Store: NewStore(), Now: clock}
+
+	setReport(a, now, raw(2), other(2))
+	check(r, "every engine runs it", ReasonEnforced)
+	setReport(a, now, other(2))
+	check(r, "raw Envoy's engine reconnecting, with the policy's version", ReasonEnforced)
+	edit(3)
+	setReport(a, now, other(3))
+	check(r, "edited while raw Envoy's engine reconnects", ReasonEnginesBehind)
+	setReport(b, now, raw(3))
+	check(r, "raw Envoy's engine reconnected, runs it", ReasonEnforced)
+
+	// A new leader: raw Envoy's engine was on the old leader, whose report
+	// is stale; it reconnects to another replica.
+	edit(4)
+	setReport(a, now, other(4))
+	setReport(b, now.Add(-40*time.Second), raw(3))
+	r = &Reporter{Client: c, Reader: c, Namespace: "inkwall-system", Stale: 30 * time.Second, Gone: time.Minute, Store: NewStore(), Now: clock}
+	check(r, "new leader, raw Envoy's engine reconnecting", ReasonEnginesBehind)
+	// It never comes back (its pod was deleted): it counts for Gone only.
+	now = now.Add(61 * time.Second)
+	setReport(a, now, other(4))
+	check(r, "raw Envoy's engine gone for good", ReasonEnforced)
+}

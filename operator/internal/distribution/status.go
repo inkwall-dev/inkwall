@@ -276,6 +276,10 @@ func Ready(conds []metav1.Condition, generation int64) metav1.Condition {
 // DefaultConfigEvery is the Reporter's default ConfigEvery.
 const DefaultConfigEvery = 5 * time.Second
 
+// DefaultGone is the Reporter's default Gone: more than an engine's longest
+// wait between reconnects (30 s), once a replica answers it.
+const DefaultGone = 2 * time.Minute
+
 // statusWriters is how many policy statuses the Reporter writes at once.
 const statusWriters = 8
 
@@ -298,10 +302,73 @@ type Reporter struct {
 	// counts to the InkwallConfig's status, so engines connecting don't
 	// churn it; 0: DefaultConfigEvery.
 	ConfigEvery time.Duration
+	// Gone is how long an engine that disconnected still holds back the
+	// policies it counts for, while it hasn't run their current version
+	// (#675): it serves the bundle it last ran until it reconnects. For a
+	// policy whose pods aren't known (raw Envoy, the standalone proxy),
+	// nothing else tells that it is missing. 0: DefaultGone.
+	Gone time.Duration
 	// Now is the clock; nil: time.Now.
 	Now func() time.Time
 
 	lastConfigWrite time.Time
+	// seen: the engines reported, by engineKey, as last reported, and when.
+	// The first report takes them from the reports of the last Stale+Gone:
+	// a new leader doesn't know the engines that were on the old one.
+	seen map[string]seenEngine
+}
+
+type seenEngine struct {
+	engine Engine
+	at     time.Time
+}
+
+func (r *Reporter) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
+
+// disconnected remembers the engines connected now, and returns those
+// reported within Gone that aren't, as they were last reported.
+func (r *Reporter) disconnected(ctx context.Context, engines []Engine, now time.Time) ([]Engine, error) {
+	gone := cmp.Or(r.Gone, DefaultGone)
+	if r.seen == nil {
+		recent, _, err := ReadEngines(ctx, r.Reader, r.Namespace, r.Stale+gone, now)
+		if err != nil {
+			return nil, err
+		}
+		r.seen = map[string]seenEngine{}
+		for _, e := range recent {
+			r.seen[engineKey(e)] = seenEngine{engine: e, at: now}
+		}
+	}
+	connected := make(map[string]bool, len(engines))
+	for _, e := range engines {
+		k := engineKey(e)
+		connected[k] = true
+		r.seen[k] = seenEngine{engine: e, at: now}
+	}
+	var out []Engine
+	for k, s := range r.seen {
+		switch {
+		case now.Sub(s.at) > gone:
+			delete(r.seen, k)
+		case !connected[k]:
+			out = append(out, s.engine)
+		}
+	}
+	return out, nil
+}
+
+// engineKey identifies an engine across reconnects: its pod, or its
+// ServiceAccount and ID.
+func engineKey(e Engine) string {
+	if pod := enginePod(e); pod != "" {
+		return "pod/" + pod
+	}
+	return "sa/" + e.ServiceAccount + "/" + e.ID
 }
 
 // Start implements manager.Runnable.
@@ -326,6 +393,10 @@ func (*Reporter) NeedLeaderElection() bool { return true }
 
 func (r *Reporter) report(ctx context.Context) error {
 	engines, leftOut, err := ReadEngines(ctx, r.Reader, r.Namespace, r.Stale, time.Now())
+	if err != nil {
+		return err
+	}
+	disconnected, err := r.disconnected(ctx, engines, r.now())
 	if err != nil {
 		return err
 	}
@@ -374,12 +445,13 @@ func (r *Reporter) report(ctx context.Context) error {
 		key := p.Namespace + "/" + p.Name
 		version := r.Store.PolicyVersion(key)
 		mine, missing := served.enginesFor(key, engines)
+		gone, _ := served.enginesFor(key, disconnected)
 		// The list is the cache's, not a copy: copy only what is written.
-		if _, changed := enforcedConditions(p, version, suspended, mine, leftOut, missing); !changed {
+		if _, changed := enforcedConditions(p, version, suspended, mine, gone, leftOut, missing); !changed {
 			continue
 		}
 		p = p.DeepCopy()
-		g.Go(func() error { return r.write(gctx, p, version, suspended, mine, leftOut, missing) })
+		g.Go(func() error { return r.write(gctx, p, version, suspended, mine, gone, leftOut, missing) })
 	}
 	return g.Wait()
 }
@@ -416,10 +488,7 @@ func engineCounts(engines []Engine, leftOut int, latest uint64, policies []wafv1
 // they changed, at most once per ConfigEvery: a later report writes what a
 // skipped one would have.
 func (r *Reporter) writeConfig(ctx context.Context, counts *wafv1alpha1.EngineCounts) error {
-	now := time.Now
-	if r.Now != nil {
-		now = r.Now
-	}
+	now := r.now
 	if !r.lastConfigWrite.IsZero() && now().Sub(r.lastConfigWrite) < cmp.Or(r.ConfigEvery, DefaultConfigEvery) {
 		return nil
 	}
@@ -446,9 +515,19 @@ func (r *Reporter) writeConfig(ctx context.Context, counts *wafv1alpha1.EngineCo
 // publishing. Engines must run it too, so that when inspection resumes,
 // engines still on the suspended bundle don't count. A suspended bundle
 // enforces nothing.
-func enforcedConditions(p *wafv1alpha1.WAFPolicy, served uint64, suspended bool, engines []Engine, leftOut, missing int) ([]metav1.Condition, bool) {
+//
+// gone are engines that disconnected recently (Reporter.Gone): each that
+// had neither run nor rejected the policy's version counts as missing
+// (#675). One that rejected it was EngineNack: gone, it no longer counts,
+// as before.
+func enforcedConditions(p *wafv1alpha1.WAFPolicy, served uint64, suspended bool, engines, gone []Engine, leftOut, missing int) ([]metav1.Condition, bool) {
 	conds := slices.Clone(p.Status.Conditions)
 	version := max(p.Status.BundleVersion, int64(served)) // #nosec G115 -- versions count builds
+	for _, e := range gone {
+		if v := uint64(version); version > 0 && e.Applied < v && e.Rejected < v { // #nosec G115 -- positive
+			missing++
+		}
+	}
 	st, reason, msg := Enforced(version, engines, leftOut, missing)
 	if st == metav1.ConditionTrue {
 		if e, field, need := outdatedEngine(p, engines); e != nil {
@@ -469,7 +548,7 @@ func enforcedConditions(p *wafv1alpha1.WAFPolicy, served uint64, suspended bool,
 	return conds, changed
 }
 
-func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, served uint64, suspended bool, engines []Engine, leftOut, missing int) error {
+func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, served uint64, suspended bool, engines, gone []Engine, leftOut, missing int) error {
 	first := true
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if !first {
@@ -478,7 +557,7 @@ func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, served u
 			}
 		}
 		first = false
-		conds, changed := enforcedConditions(p, served, suspended, engines, leftOut, missing)
+		conds, changed := enforcedConditions(p, served, suspended, engines, gone, leftOut, missing)
 		if !changed {
 			return nil
 		}
