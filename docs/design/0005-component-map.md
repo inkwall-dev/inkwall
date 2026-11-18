@@ -94,13 +94,14 @@ which only adds management, analytics and threat intelligence.
   on the agent stream, and per-policy request counts and latency (`RequestStats`);
 - `pkg/bundlekey`: the trusted signing keys;
 - `pkg/bundlesecret`: the bundle Secret's format, chunks included;
-- `pkg/adapters/extproc`: Envoy's external processing over [gRPC](https://grpc.io/docs/) ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing)).
+- `pkg/adapters/extproc`: Envoy's external processing over [gRPC](https://grpc.io/docs/) ([0006 §2](0006-adapter-protocols.md#2-ext_proc-envoy-external-processing));
+- `pkg/adapters/spoe`: HAProxy's SPOE agent (SPOP);
+- `pkg/iplist`: tier T1's IP lists, checked before the rules.
 
 **Not yet:**
 
-- The adapters `extauthz` (gRPC) and `spoe` (SPOP).
-- Tier T1, IP lists and rate limits (`pkg/iplist`, `pkg/ratelimit`), between the route table and
-  the rules ([0001 §4](0001-performance-first-architecture.md#4-request-pipeline-tiered-cheapest-first)).
+- The adapter `extauthz` (gRPC).
+- Rate limits (`pkg/ratelimit`) in tier T1, between the route table and the rules ([0001 §4](0001-performance-first-architecture.md#4-request-pipeline-tiered-cheapest-first)).
 - Traces in telemetry.
 - Inkwall's own rule engine ([0007](0007-inkwall-engine.md)) as a second `pkg/rules` evaluator.
 

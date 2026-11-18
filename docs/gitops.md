@@ -43,6 +43,8 @@ its own entries when the route is no longer protected. It writes with
 |---|---|---|
 | `Ingress` (Traefik's) | [annotation](https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/) `traefik.ingress.kubernetes.io/router.middlewares` | `<namespace>-inkwall-waf@kubernetescrd` added first; your entries kept after it |
 | `Ingress` | annotation `waf.inkwall.dev/wired` | `<namespace>-inkwall-waf@kubernetescrd`: marks what the operator added |
+| `Ingress` (the [HAProxy Kubernetes Ingress Controller](haproxy.md#what-the-operator-does)'s) | annotations `haproxy.org/standalone-backend`, `haproxy.org/backend-config-snippet` | `"true"`; the operator's lines between `# inkwall:begin` and `# inkwall:end` first in the snippet, yours kept after them |
+| That `Ingress` | annotation `waf.inkwall.dev/haproxy-wired` | Your previous `standalone-backend` value, to put back |
 | `IngressRoute` (`traefik.io`) | `spec.routes[*].middlewares` | `{name: inkwall-waf}` added first in every route; your entries kept after it |
 | `IngressRoute` | annotation `waf.inkwall.dev/wired` | `inkwall-waf` |
 | `HTTPRoute` (`gateway.networking.k8s.io`, of Traefik's Gateways only) | `spec.rules[*].filters` | `{type: ExtensionRef, extensionRef: {group: traefik.io, kind: Middleware, name: inkwall-waf}}` added first in every protected rule (with `sectionName`, that rule only); your filters kept after it |
@@ -68,7 +70,7 @@ gateway pods serving protected VirtualServices (the operator doesn't write Virtu
 `inkwall-trust` in each proxy namespace; and the [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/) and ConfigMaps in `inkwall-system`.
 They carry the [label](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/) `app.kubernetes.io/managed-by: inkwall-operator`.
 
-The engine is injected into Traefik's pods, and Istio's ingress gateway pods, when they are
+The engine is injected into Traefik's pods, the HAProxy Kubernetes Ingress Controller's pods and Istio's ingress gateway pods, when they are
 created, by a mutating
 [admission webhook](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/).
 Their [`Deployment`](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) or [`DaemonSet`](https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/) isn't changed, so it doesn't drift. Envoy Gateway's
@@ -90,6 +92,7 @@ when your manifest sets the same field:
 |---|---|
 | An `Ingress` without the `router.middlewares` annotation | None |
 | An `Ingress` with its own `router.middlewares` annotation | The annotation |
+| A protected HAProxy `Ingress` with its own `haproxy.org/backend-config-snippet` or `haproxy.org/standalone-backend` annotation | That annotation. Undoing it removes the filter, and the route isn't inspected until the operator writes it back |
 | Any `IngressRoute` | `spec.routes`. Traefik's CRD doesn't declare a [list type](https://kubernetes.io/docs/reference/using-api/server-side-apply/#merge-strategy) for `routes`, so the whole list is one value to the API server and to both tools |
 | A protected `HTTPRoute` of a Traefik Gateway | `spec.rules`. The Gateway API's CRD declares `rules` and `filters` `atomic` lists, so the whole list is one value too |
 | An `EnvoyProxy` that doesn't set those three lists, or a `Gateway` | None |
@@ -267,7 +270,8 @@ The operator also changes objects of the Inkwall [Helm](https://helm.sh/docs/) c
 | Field | Why |
 |---|---|
 | `webhooks[*].failurePolicy` | `Fail` while a policy is in block mode, else `Ignore` (the chart's value) |
-| `webhooks[*].objectSelector` | Follows an `InkwallConfig` integration selector, when you set one; selects no pod while Traefik's integration is disabled |
+| `webhooks[*].objectSelector` | Follows an `InkwallConfig` integration selector, when you set one; selects no pod while the webhook's integration is disabled |
+| `webhooks[*].namespaceSelector` | The proxy namespaces (the operator's `--proxy-namespaces`) |
 | `webhooks[*].clientConfig.caBundle` | The webhook CA, injected by the operator (or by [cert-manager](https://cert-manager.io/docs/)) |
 
 The same `caBundle` is injected into `ValidatingWebhookConfiguration` `inkwall-operator-validating`.
@@ -304,6 +308,7 @@ spec:
       jqPathExpressions:
         - .webhooks[]?.failurePolicy
         - .webhooks[]?.objectSelector
+        - .webhooks[]?.namespaceSelector
         - .webhooks[]?.clientConfig.caBundle
     - group: admissionregistration.k8s.io
       kind: ValidatingWebhookConfiguration
@@ -326,7 +331,8 @@ before the operator goes.
 
 [helm-controller](https://fluxcd.io/flux/components/helm/) compares a `HelmRelease` with the cluster only when
 [drift detection](https://fluxcd.io/flux/components/helm/helmreleases/#drift-detection) is on. If
-you turn it on, ignore the fields above. The mutating configuration has one webhook:
+you turn it on, ignore the fields above. The mutating configuration has three webhooks, one per
+injected proxy (HAProxy, Istio, Traefik):
 
 ```yaml
 apiVersion: helm.toolkit.fluxcd.io/v2
@@ -345,6 +351,13 @@ spec:
       - paths:
           - /webhooks/0/failurePolicy
           - /webhooks/0/objectSelector
+          - /webhooks/0/namespaceSelector
+          - /webhooks/1/failurePolicy
+          - /webhooks/1/objectSelector
+          - /webhooks/1/namespaceSelector
+          - /webhooks/2/failurePolicy
+          - /webhooks/2/objectSelector
+          - /webhooks/2/namespaceSelector
         target:
           kind: MutatingWebhookConfiguration
           name: inkwall-operator-mutating
@@ -386,7 +399,7 @@ reported on yet as current. Tell them (both tested by `make gitops-health-test`)
 
 | Object | Healthy (Argo CD) / current (Flux) | Progressing / in progress | Degraded / failed |
 |---|---|---|---|
-| `WAFPolicy` | `Ready=True` for its generation | The operator hasn't reported its generation; `Ready=False` for a reason that resolves itself: `Pending`, `PendingRestart`, `EnginesBehind`, `EnginesUnreported`, `NoEngines`, `NotInBundle`, `Unverified` | `Ready=False` for any other reason: `WiringFailed`, `EngineNack`, `EnginesOutdated`, `SidecarMissing`, ... |
+| `WAFPolicy` | `Ready=True` for its generation | The operator hasn't reported its generation; `Ready=False` for a reason that resolves itself: `NotAccepted`, `NotProgrammed`, `NotEnforced` (a condition not reported yet), `Pending`, `PendingRestart`, `EnginesBehind`, `EnginesUnreported`, `NoEngines`, `NotInBundle`, `Unverified` | `Ready=False` for any other reason: `WiringFailed`, `EngineNack`, `EnginesOutdated`, `SidecarMissing`, ... |
 | `WAFRuleSet`, `ClusterWAFRuleSet` | `Accepted=True` | Not checked for its generation yet | `Accepted=False` (`RuleCompileError`) |
 | `InkwallConfig` (Argo CD) | Otherwise | | `ControlPlaneConnected=False` |
 

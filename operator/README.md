@@ -71,7 +71,7 @@ kubectl apply --server-side -f operator/config/crd/bases -f operator/config/samp
 
 | Path | What |
 |---|---|
-| `api/v1alpha1/` | `waf.inkwall.dev/v1alpha1` types: `InkwallConfig`, `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet` |
+| `api/v1alpha1/` | `waf.inkwall.dev/v1alpha1` types: `InkwallConfig`, `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet`, `WAFIPList` |
 | `config/` | Generated CRDs, RBAC and webhook configuration (don't edit by hand); `samples/` has one object of each kind |
 | `manager/` | Assembles the [controllers](https://kubernetes.io/docs/concepts/architecture/controller/), webhooks and [probes](https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/) ([`../cmd/operator`](../cmd/operator) is the binary) |
 | `webhook/` | Validating webhook and its certificate |

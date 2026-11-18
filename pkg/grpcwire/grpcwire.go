@@ -19,6 +19,7 @@ import (
 	"compress/gzip"
 	"encoding/binary"
 	"io"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -248,7 +249,10 @@ func Gunzip(data []byte, limit int64) (out []byte, ok bool) {
 	if err != nil {
 		return nil, false
 	}
-	out, err = io.ReadAll(io.LimitReader(zr, limit+1))
+	// One byte past the limit tells a message over it (bounded, so that
+	// it doesn't overflow).
+	limit = max(limit, 0)
+	out, err = io.ReadAll(io.LimitReader(zr, min(limit, math.MaxInt64-1)+1))
 	if int64(len(out)) > limit {
 		return out[:limit], false
 	}
