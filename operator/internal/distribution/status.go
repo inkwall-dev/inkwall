@@ -321,6 +321,10 @@ type Reporter struct {
 type seenEngine struct {
 	engine Engine
 	at     time.Time
+	// managed: its pod was an integration's (ServedPods). Such a pod's
+	// engine never holds a policy back once disconnected: its pods are
+	// known, and a pod deleted (a rollout, a scale-down) is gone for good.
+	managed bool
 }
 
 func (r *Reporter) now() time.Time {
@@ -331,8 +335,9 @@ func (r *Reporter) now() time.Time {
 }
 
 // disconnected remembers the engines connected now, and returns those
-// reported within Gone that aren't, as they were last reported.
-func (r *Reporter) disconnected(ctx context.Context, engines []Engine, now time.Time) ([]Engine, error) {
+// reported within Gone that aren't, as they were last reported, but for
+// those whose pod is an integration's.
+func (r *Reporter) disconnected(ctx context.Context, engines []Engine, served servedView, now time.Time) ([]Engine, error) {
 	gone := cmp.Or(r.Gone, DefaultGone)
 	if r.seen == nil {
 		recent, _, err := ReadEngines(ctx, r.Reader, r.Namespace, r.Stale+gone, now)
@@ -341,21 +346,22 @@ func (r *Reporter) disconnected(ctx context.Context, engines []Engine, now time.
 		}
 		r.seen = map[string]seenEngine{}
 		for _, e := range recent {
-			r.seen[engineKey(e)] = seenEngine{engine: e, at: now}
+			r.seen[engineKey(e)] = seenEngine{engine: e, at: now, managed: served.integration[enginePod(e)] != ""}
 		}
 	}
 	connected := make(map[string]bool, len(engines))
 	for _, e := range engines {
 		k := engineKey(e)
 		connected[k] = true
-		r.seen[k] = seenEngine{engine: e, at: now}
+		managed := r.seen[k].managed || served.integration[enginePod(e)] != ""
+		r.seen[k] = seenEngine{engine: e, at: now, managed: managed}
 	}
 	var out []Engine
 	for k, s := range r.seen {
 		switch {
 		case now.Sub(s.at) > gone:
 			delete(r.seen, k)
-		case !connected[k]:
+		case !connected[k] && !s.managed:
 			out = append(out, s.engine)
 		}
 	}
@@ -396,7 +402,8 @@ func (r *Reporter) report(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	disconnected, err := r.disconnected(ctx, engines, r.now())
+	served := r.Served.view()
+	disconnected, err := r.disconnected(ctx, engines, served, r.now())
 	if err != nil {
 		return err
 	}
@@ -407,7 +414,6 @@ func (r *Reporter) report(ctx context.Context) error {
 
 	_, latest, _ := r.Store.Current()
 	suspended := r.Store.Suspended()
-	served := r.Served.view()
 	counts := map[[2]string]float64{}
 	for _, e := range engines {
 		state := "behind"

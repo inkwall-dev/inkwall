@@ -243,6 +243,19 @@ func TestEnforcedWaitsForDisconnectedEngines(t *testing.T) {
 	now = now.Add(61 * time.Second)
 	setReport(a, now, other(4))
 	check(r, "raw Envoy's engine gone for good", ReasonEnforced)
+
+	// An integration's pod (Traefik's) deleted: its engine doesn't hold
+	// raw Envoy's policy back, though every engine counts for it.
+	served := &ServedPods{}
+	served.Set(map[string]map[string]ServedPod{"web/traefik": {"traefik/traefik-1": {Integration: "traefik", Engine: true}}})
+	r = &Reporter{Client: c, Reader: c, Namespace: "inkwall-system", Stale: 30 * time.Second, Gone: time.Minute, Store: NewStore(), Now: clock, Served: served}
+	setReport(b, now, raw(4))
+	check(r, "every engine runs it, Traefik's pod known", ReasonEnforced)
+	served.Set(nil)
+	edit(5)
+	setReport(a, now)
+	setReport(b, now, raw(5))
+	check(r, "Traefik's pod deleted, then an edit", ReasonEnforced)
 }
 
 // A policy whose pods are known isn't held back by an engine that
