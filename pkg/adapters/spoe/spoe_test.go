@@ -11,10 +11,12 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -23,6 +25,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
+	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
 
 // inspector records the requests it is asked to check, and answers with
@@ -62,6 +65,13 @@ type agent struct {
 
 func startAgent(t *testing.T, p pipeline.Inspector, cfg Config) *agent {
 	t.Helper()
+	return startAgentWrapped(t, p, cfg, nil)
+}
+
+// startAgentWrapped starts an agent that serves the listener wrap returns
+// (nil: the socket's own).
+func startAgentWrapped(t *testing.T, p pipeline.Inspector, cfg Config, wrap func(net.Listener) net.Listener) *agent {
+	t.Helper()
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
@@ -75,7 +85,11 @@ func startAgent(t *testing.T, p pipeline.Inspector, cfg Config) *agent {
 		t.Fatal(err)
 	}
 	a := &agent{srv: srv, sock: sock, done: make(chan error, 1)}
-	go func() { a.done <- srv.Serve(ln) }()
+	served := ln
+	if wrap != nil {
+		served = wrap(ln)
+	}
+	go func() { a.done <- srv.Serve(served) }()
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -620,6 +634,98 @@ func TestAbort(t *testing.T) {
 	if got := insp.requests(); len(got) != 1 || got[0].RawURI != "/b" {
 		t.Fatalf("inspected %v", got)
 	}
+}
+
+// panicListener's connections panic on the first SetReadDeadline once
+// armed: the agent sets one when a frame begins.
+type panicListener struct {
+	net.Listener
+	armed *atomic.Bool
+}
+
+func (l panicListener) Accept() (net.Conn, error) {
+	nc, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return panicConn{Conn: nc, armed: l.armed}, nil
+}
+
+type panicConn struct {
+	net.Conn
+	armed *atomic.Bool
+}
+
+func (c panicConn) SetReadDeadline(t time.Time) error {
+	if c.armed.CompareAndSwap(true, false) {
+		panic("injected")
+	}
+	return c.Conn.SetReadDeadline(t)
+}
+
+// A panic while reading a connection, or answering one of its NOTIFY
+// frames, closes only that connection; it is logged and counted (#684).
+func TestPanic(t *testing.T) {
+	get := func(path string) []byte {
+		return notifyFrame(1, 1, argString(ArgMethod, "GET"), argString(ArgPath, path), argBinary(ArgHeaders, hdrs("host", "a")))
+	}
+	for name, component := range map[string]string{"reading": telemetry.PanicSPOEConnection, "answering": telemetry.PanicSPOENotify} {
+		t.Run(name, func(t *testing.T) {
+			insp := &inspector{decide: func(r *request.Request) pipeline.Verdict {
+				if r.RawURI == "/panic" {
+					panic("injected")
+				}
+				return pipeline.Verdict{}
+			}}
+			m := telemetry.NewMetrics("spoe")
+			var logs syncBuffer
+			armed := &atomic.Bool{}
+			a := startAgentWrapped(t, insp, Config{Metrics: m, Logger: slog.New(slog.NewJSONHandler(&logs, nil))},
+				func(ln net.Listener) net.Listener { return panicListener{Listener: ln, armed: armed} })
+			h := a.dial(t)
+			h.hello()
+			path := "/panic"
+			if component == telemetry.PanicSPOEConnection {
+				armed.Store(true)
+				path = "/"
+			}
+			h.send(get(path))
+			h.closed()
+			// The agent still serves.
+			h = a.dial(t)
+			h.hello()
+			h.send(get("/"))
+			if _, vars := h.ack(); vars[VarAction].String() != ActionAllow {
+				t.Errorf("variables %+v", vars)
+			}
+			w := httptest.NewRecorder()
+			m.AdminHandler(nil).ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
+			if want := `inkwall_panics_total{adapter="spoe",component="` + component + `"} 1`; !strings.Contains(w.Body.String(), want) {
+				t.Errorf("metrics missing %q", want)
+			}
+			if !strings.Contains(logs.String(), `"panic":"injected"`) {
+				t.Errorf("panic not logged: %s", logs.String())
+			}
+		})
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for the agent's goroutines.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
 }
 
 // A frame begun must arrive within the read timeout; an idle connection
