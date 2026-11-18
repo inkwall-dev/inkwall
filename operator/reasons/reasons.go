@@ -117,7 +117,7 @@ var entries = []Entry{
 		Meaning: "A rule set, ConfigMap or key the policy (or its rule set) names doesn't exist, or isn't labeled `waf.inkwall.dev/rules=true`. Or a rule set bound with `placement: BeforeCRS` can't load there: the built-in CRS, or SecLang with `SecRuleRemoveBy*` or `SecRuleUpdate*`.",
 		Fix:     "Create it, or fix the name. The message names it. Move those directives to a rule set placed `AfterCRS` (the default)."},
 	{Kind: "WAFPolicy", Condition: "Accepted", Reason: "RuleCompileError",
-		Meaning: "Rules in the policy's rule set don't compile, or use a directive Inkwall doesn't allow.",
+		Meaning: "Rules in the policy's rule set don't compile, use a directive Inkwall doesn't allow, or end in an open chain (the last `SecRule` has the `chain` action, with no rule after it to complete the chain).",
 		Fix:     "Fix the rules; `inkwallctl test --rule-set` shows the error before you apply."},
 	{Kind: "WAFPolicy", Condition: "Accepted", Reason: "Conflict",
 		Meaning: "An older policy targets the same route and applies to it: a route has one policy.",
