@@ -229,6 +229,27 @@ func oldTraefik(pods []corev1.Pod) bool {
 	return false
 }
 
+// h2cTraefik returns the image of a Traefik pod that forwards h2c upgrades:
+// Traefik v3 before v3.7 passes `Upgrade: h2c` to the app, and an app that
+// switches to HTTP/2 on it serves the requests sent on that connection past
+// every Middleware, ForwardAuth included (v3.7 and v2.11 remove it). Empty
+// when none does, or none's version can be told.
+func h2cTraefik(pods []corev1.Pod) string {
+	for i := range pods {
+		for _, c := range pods[i].Spec.Containers {
+			repo, tag, ok := strings.Cut(c.Image[strings.LastIndex(c.Image, "/")+1:], ":")
+			if !ok || repo != "traefik" {
+				continue
+			}
+			var major, minor int
+			if n, _ := fmt.Sscanf(strings.TrimPrefix(tag, "v"), "%d.%d", &major, &minor); n == 2 && major == 3 && minor < 7 {
+				return c.Image
+			}
+		}
+	}
+	return ""
+}
+
 // WithMiddleware returns the annotation value with ref added (first, so the
 // engine sees the request before other Middlewares change it), unchanged if
 // present.
@@ -675,6 +696,10 @@ func (st *state) result(targets map[Target]bool) *Result {
 			continue
 		}
 		s.Wired = st.wanted[tg.Kind][k]
+		if image := h2cTraefik(st.pods); s.Wired && image != "" {
+			s.Partly = fmt.Sprintf("Traefik before v3.7 (%s) forwards h2c upgrades to the app: requests sent on an upgraded connection to %s %s reach it uninspected if the app accepts h2c; upgrade Traefik to v3.7 or later",
+				image, tg.Kind.Kind, k.Name)
+		}
 		res.Targets[tg] = s
 	}
 	return res
