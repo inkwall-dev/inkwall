@@ -38,8 +38,8 @@ concurrency:
 
 jobs:
   plan:
-    # The refs to qualify: main nightly, the release branches of the two
-    # newest minor versions weekly, the ref given on demand. And the Helm
+    # The refs to qualify: main nightly, the release branches of the
+    # supported minor versions weekly, the ref given on demand. And the Helm
     # version each is tested with.
     runs-on: ubuntu-24.04
     permissions:

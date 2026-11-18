@@ -12,8 +12,8 @@
 #   WAFRuleSet, ClusterWAFRuleSet: Healthy when Accepted; Degraded when not.
 #   InkwallConfig: Suspended while it suspends inspection; Degraded when it
 #     can't reach its control plane; Healthy otherwise.
-# hack/argocdhealth tests them against tests/<Kind>/*.yaml (make
-# argocd-health-test).
+# hack/gitopshealth tests them against tests/<Kind>/*.yaml (make
+# gitops-health-test).
 apiVersion: v1
 kind: ConfigMap
 metadata:

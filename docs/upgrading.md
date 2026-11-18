@@ -1,8 +1,11 @@
 # Upgrading
 
-This guide upgrades an Inkwall installation from 0.5.x to 0.6.0, from 0.4.x to 0.5.0, from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.2) to
-0.3.0, and from 0.1.x (0.1.0 to 0.1.5) to 0.2.2, the latest 0.2 release, and lists what changes on
-the way. From 0.1.x, upgrade to 0.2.2 first, then to 0.3.0.
+This guide upgrades an Inkwall installation from 0.5.x to 0.6.0, from 0.4.x to 0.5.0, from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.3) to
+0.3.0, and from 0.1.x (0.1.0 to 0.1.5) to 0.2.2, and lists what changes on the way. 0.2.3, the
+latest 0.2 release, is a security patch of 0.2.2: upgrade to it as to 0.2.2, then remove rules
+that use `@inspectFile` or `@rbl`, which no longer match
+([its upgrade notes](https://github.com/inkwall-dev/inkwall/blob/v0.2.3/docs/upgrading.md#from-022-to-023)).
+From 0.1.x, upgrade to 0.2.3 (or 0.2.2) first, then to 0.3.0.
 
 ## Contents
 
@@ -145,7 +148,10 @@ What's new:
   role already allows `get` on `/metrics`. Off by default, also with `--reuse-values`: the metrics
   stay plain HTTP. See [Metrics over HTTPS](monitoring.md#metrics-over-https).
 
-What changes by itself:
+What changes by itself (from 0.5.4, the security fixes below are already in: gRPC messages'
+text fields, fewer snippets, HTTPRoutes a Gateway accepts, overlapping routes, rule sets that
+don't compile together, engines recorded by pod, `migrate`'s chained `ctl`, the paths a proxy may
+route differently, WebSocket-only upgrades, and response bodies):
 
 - **gRPC messages: every text field is read** (`body.grpcMessages: Inspect`). A field with a
   control or invisible character (NUL, ESC, DEL, a zero-width space) was left out; it is now
@@ -892,7 +898,7 @@ To protect `HTTPRoute` objects, the proxy that serves them needs the Gateway API
   Traefik's Gateway API provider (`providers.kubernetesGateway.enabled=true` in its chart). The
   operator wires the HTTPRoutes whose parent Gateway has a GatewayClass of controller
   `traefik.io/gateway-controller`.
-- **Envoy Gateway** (v1.9; not with `mergeGateways`, nor Envoy as a DaemonSet): turn on its
+- **Envoy Gateway** (v1.9 or later; not with `mergeGateways`, nor Envoy as a DaemonSet): turn on its
   Backend API, which the engine's socket needs, with
   `--set config.envoyGateway.extensionApis.enableBackend=true` on its chart, as in the
   [README](../README.md#install). The operator puts the engine into the Envoy pods through each
