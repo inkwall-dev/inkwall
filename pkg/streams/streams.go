@@ -108,6 +108,8 @@ type Splitter struct {
 	lastCR  bool
 	// skipLine: the line in progress, while skipping, isn't blank.
 	skipLine bool
+	// lines: a line was read; the first may start with a byte order mark.
+	lines bool
 
 	// gRPC: the message prefix in progress, the message's length, what
 	// was read of it, and how much of it is left to skip; broken: the
@@ -146,8 +148,8 @@ func (s *Splitter) Close() []Event {
 	switch s.kind {
 	case SSE:
 		if !s.skip {
-			if len(s.line) > 0 {
-				s.field(s.line)
+			if line := s.firstLine(s.line); len(line) > 0 {
+				s.field(line)
 			}
 			if s.hasData {
 				out = append(out, Event{Data: trimLastNewline(s.data)})
@@ -195,7 +197,7 @@ func (s *Splitter) writeSSE(p []byte) []Event {
 		if s.pending > s.max {
 			// Too long: inspect what was read, and let the rest pass.
 			data := s.data
-			if v, ok := dataValue(s.line); ok {
+			if v, ok := dataValue(s.firstLine(s.line)); ok {
 				data = append(data, v...)
 			}
 			out = append(out, Event{Data: data[:min(int64(len(data)), s.max)], Truncated: true, End: s.written})
@@ -208,7 +210,7 @@ func (s *Splitter) writeSSE(p []byte) []Event {
 
 // endLine handles the end of a line: a blank one ends the event.
 func (s *Splitter) endLine() (Event, bool) {
-	line := s.line
+	line := s.firstLine(s.line)
 	s.line = s.line[:0]
 	if s.skip {
 		if !s.skipLine {
@@ -229,6 +231,21 @@ func (s *Splitter) endLine() (Event, bool) {
 	ev := Event{Data: trimLastNewline(s.data)}
 	s.data, s.hasData = nil, false
 	return ev, true
+}
+
+// bom is the UTF-8 byte order mark, which an EventSource strips from the
+// start of a stream (HTML, "Parsing an event stream"): a first line
+// "\uFEFFdata: x" is a data line.
+var bom = []byte("\uFEFF")
+
+// firstLine returns line without the byte order mark the stream may start
+// with, when it is the stream's first line.
+func (s *Splitter) firstLine(line []byte) []byte {
+	if s.lines {
+		return line
+	}
+	s.lines = true
+	return bytes.TrimPrefix(line, bom)
 }
 
 // field reads a line of an event: only data lines are inspected.

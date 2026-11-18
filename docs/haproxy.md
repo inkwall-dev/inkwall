@@ -608,7 +608,7 @@ The message's `event` takes a condition: `spoe.conf` leaves `/healthz` uninspect
 those requests, so they have no verdict: the fail-closed rule must leave them out too, as
 `haproxy.cfg`'s does with `!{ path /healthz }`. Otherwise they get 503.
 
-The engine's `--skip-paths` (or a policy's `skipPaths`) does the same on the engine's side, but
+The engine's `--skip-paths` (or a policy's `skip.paths`) does the same on the engine's side, but
 HAProxy still calls the engine.
 
 ## The policy

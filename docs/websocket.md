@@ -1,6 +1,6 @@
 # WebSocket
 
-What the engine inspects in a [WebSocket](https://www.rfc-editor.org/rfc/rfc6455) at v0.4.0, and
+What the engine inspects in a [WebSocket](https://www.rfc-editor.org/rfc/rfc6455) at v0.6.0, and
 what it doesn't. In short: the handshake is inspected through every proxy; the messages after it
 only when the engine is the proxy itself ([standalone proxy](standalone-proxy.md)), with
 `--websocket-messages`. Through Envoy Gateway, Istio, raw Envoy, HAProxy and Traefik the messages
@@ -94,7 +94,7 @@ spec:
 
 A handshake that doesn't meet them is denied with 403 in `Block` mode, before the rules run, and
 gets no upgrade. In `Detect` mode it is upgraded, and logged as a security event with reason
-`websocket` (or `rule`, when a rule matched too). Other requests, and routes in `skipPaths`, aren't
+`websocket` (or `rule`, when a rule matched too). Other requests, and routes in `skip.paths`, aren't
 affected.
 
 Engines before 0.4.0 ignore `webSocket`: while one runs a policy that sets it, the policy is

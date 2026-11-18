@@ -180,7 +180,8 @@ the routes instead, and apply once those routes serve the traffic.
   blocking paranoia level.
 - **Responses.** `inkwallctl migrate` doesn't convert `SecResponseBodyAccess`: set
   `responses: {inspect: true}` on a policy to run the CRS's response rules (`RESPONSE-95x`), on
-  routes Envoy Gateway serves only; Traefik's ForwardAuth can't send responses to the engine.
+  routes Envoy Gateway, Istio or the HAProxy Kubernetes Ingress Controller (engines 0.6.0 or
+  later) serve; Traefik's ForwardAuth can't send responses to the engine.
   `tx.outbound_anomaly_score_threshold` becomes `ruleSets[].crs.outboundAnomalyThreshold`, which
   applies once the policy inspects responses.
 - **Body limits.** Inkwall inspects up to `body.maxBytes` (64 KiB by default, 10 MiB at most) and,

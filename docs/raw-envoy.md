@@ -328,7 +328,7 @@ typed_per_filter_config:
     disabled: true
 ```
 
-The engine's `--skip-paths` (or a policy's `skipPaths`) does the same on the engine's side, but Envoy
+The engine's `--skip-paths` (or a policy's `skip.paths`) does the same on the engine's side, but Envoy
 still calls the engine.
 
 ## The policy from flags
