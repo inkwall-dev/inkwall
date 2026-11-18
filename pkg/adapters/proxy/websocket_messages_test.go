@@ -6,6 +6,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +24,7 @@ import (
 	xws "golang.org/x/net/websocket"
 
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 	"github.com/inkwall-dev/inkwall/pkg/websocket"
@@ -57,6 +60,14 @@ func newWSProxyMetrics(t *testing.T, mode pipeline.Mode, messages pipeline.WebSo
 // with, and the Handler.
 func newWSProxyWith(t *testing.T, mode pipeline.Mode, messages pipeline.WebSocketMessages, oversize pipeline.OversizeAction, maxBody int64,
 	m *telemetry.Metrics, with func(*Config)) (*wsUpstream, string, *bytes.Buffer, *Handler) {
+	t.Helper()
+	return newWSProxyWrapped(t, mode, messages, oversize, maxBody, m, with, nil)
+}
+
+// newWSProxyWrapped is newWSProxyWith with the pipeline wrapped by wrap
+// (nil: as is).
+func newWSProxyWrapped(t *testing.T, mode pipeline.Mode, messages pipeline.WebSocketMessages, oversize pipeline.OversizeAction, maxBody int64,
+	m *telemetry.Metrics, with func(*Config), wrap func(*pipeline.Pipeline) pipeline.Inspector) (*wsUpstream, string, *bytes.Buffer, *Handler) {
 	t.Helper()
 	u := &wsUpstream{}
 	echo := xws.Server{
@@ -99,7 +110,11 @@ func newWSProxyWith(t *testing.T, mode pipeline.Mode, messages pipeline.WebSocke
 	if with != nil {
 		with(&cfg)
 	}
-	h, err := New(pipeline.New(eval, pcfg), cfg)
+	var p pipeline.Inspector = pipeline.New(eval, pcfg)
+	if wrap != nil {
+		p = wrap(p.(*pipeline.Pipeline))
+	}
+	h, err := New(p, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,6 +408,50 @@ func TestWebSocketMetrics(t *testing.T) {
 		_ = c.conn.Close()
 		waitGauge(t, m, `inkwall_websocket_connections{adapter="proxy"} 0`)
 	})
+}
+
+// panickyMessages panics on a WebSocket message "panic".
+type panickyMessages struct{ *pipeline.Pipeline }
+
+func (p panickyMessages) CheckWebSocketMessage(ctx context.Context, handshake *request.Request, text []byte, truncated bool) pipeline.Verdict {
+	if string(text) == "panic" {
+		panic("injected")
+	}
+	return p.Pipeline.CheckWebSocketMessage(ctx, handshake, text, truncated)
+}
+
+// A panic while inspecting a WebSocket's client side closes only that
+// connection, before the message reaches the upstream; it is logged and
+// counted (#684).
+func TestWebSocketPanic(t *testing.T) {
+	m := telemetry.NewMetrics("proxy")
+	u, addr, logs, _ := newWSProxyWrapped(t, pipeline.ModeBlock, pipeline.MessagesInspect, pipeline.OversizeAuto, 4096, m, nil,
+		func(p *pipeline.Pipeline) pipeline.Inspector { return panickyMessages{p} })
+	c := dialWS(t, addr)
+	c.send(t, clientFrame(true, websocket.OpText, []byte("hello")))
+	c.echoes(t, "hello")
+	c.send(t, clientFrame(true, websocket.OpText, []byte("panic")))
+	for {
+		if _, _, err := c.next(); err != nil {
+			break
+		}
+	}
+	// The proxy still serves.
+	c = dialWS(t, addr)
+	c.send(t, clientFrame(true, websocket.OpText, []byte("again")))
+	c.echoes(t, "again")
+	if got := u.received(); slices.Contains(got, "panic") {
+		t.Errorf("the upstream got %q", got)
+	}
+	metrics := scrapeMetrics(t, m)
+	for _, want := range []string{`inkwall_panics_total{adapter="proxy",component="websocket"} 1`, `inkwall_websocket_connections{adapter="proxy"} 1`} {
+		if !strings.Contains(metrics, want) {
+			t.Errorf("metrics missing %q", want)
+		}
+	}
+	if !strings.Contains(logs.String(), `"panic":"injected"`) {
+		t.Errorf("panic not logged: %s", logs.String())
+	}
 }
 
 func scrapeMetrics(t *testing.T, m *telemetry.Metrics) string {

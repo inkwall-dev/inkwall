@@ -235,8 +235,17 @@ func (x *exchange) done() bool {
 }
 
 // Process handles the stream of one HTTP request.
-func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error {
+func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err error) {
 	ctx := stream.Context()
+	// grpc-go doesn't recover a handler's panic: one would end the
+	// engine. It ends this stream instead, with an error, so Envoy applies
+	// the filter's failure mode to its request.
+	defer func() {
+		if v := recover(); v != nil {
+			s.metrics.Panicked(ctx, s.logger, telemetry.PanicExtProcStream, v)
+			err = status.Error(codes.Internal, "internal error")
+		}
+	}()
 	x := &exchange{peer: peerAddr(ctx)}
 	// The response's evaluation, if kept, ends with the stream.
 	defer func() { x.ex.Close() }()

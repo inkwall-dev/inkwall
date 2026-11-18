@@ -12,10 +12,12 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,6 +36,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
+	"github.com/inkwall-dev/inkwall/pkg/telemetry"
 )
 
 func newPipeline(t testing.TB, mode pipeline.Mode) *pipeline.Pipeline {
@@ -385,6 +388,44 @@ func TestRequest(t *testing.T) {
 	e.exchange(t, headers("POST", "/", true))
 	if cl := insp.got[0].Headers.Get("Content-Length"); cl != "0" {
 		t.Errorf("empty POST: Content-Length %q, want 0", cl)
+	}
+}
+
+// panicky panics on its first check, then allows.
+type panicky struct{ calls atomic.Int32 }
+
+func (p *panicky) Check(context.Context, *request.Request) pipeline.Verdict {
+	if p.calls.Add(1) == 1 {
+		panic("injected")
+	}
+	return pipeline.Verdict{}
+}
+
+func (*panicky) BodyLimit(_ *request.Request, limit int64) int64 { return limit }
+
+// A panic in a stream ends only that stream, with an error for Envoy's
+// failure mode; it is logged and counted (#684).
+func TestProcessPanic(t *testing.T) {
+	m := telemetry.NewMetrics("extproc")
+	var logs bytes.Buffer
+	s, err := New(&panicky{}, Config{Metrics: m, Logger: slog.New(slog.NewJSONHandler(&logs, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln := bufconn.Listen(1 << 20)
+	e := startServer(t, s, ln, func(ctx context.Context, _ string) (net.Conn, error) { return ln.DialContext(ctx) })
+	if _, err := e.try(headers("GET", "/", true)); status.Code(err) != codes.Internal {
+		t.Fatalf("got %v, want the stream ended with Internal", err)
+	}
+	// The engine still serves.
+	continued(t, e.exchange(t, headers("GET", "/", true))[0])
+	w := httptest.NewRecorder()
+	m.AdminHandler(nil).ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
+	if want := `inkwall_panics_total{adapter="extproc",component="extproc_stream"} 1`; !strings.Contains(w.Body.String(), want) {
+		t.Errorf("metrics missing %q", want)
+	}
+	if !strings.Contains(logs.String(), `"panic":"injected"`) {
+		t.Errorf("panic not logged: %s", logs.String())
 	}
 }
 
