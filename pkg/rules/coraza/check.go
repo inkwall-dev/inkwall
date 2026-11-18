@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -152,21 +153,21 @@ func UserOperatorNames() []string {
 	return names
 }
 
-// ruleOperator returns the operator name of a SecRule directive, read the
-// way Coraza's rule parser reads it (parseActionOperator, ParseOperator):
-// the second field is a quoted operator, "@name args" or "!@name args", and
-// anything else is rx. ok is false when the rule doesn't parse; compiling
-// it then fails.
-func ruleOperator(text string) (op string, ok bool) {
+// ruleFields splits a SecRule directive the way Coraza's rule parser does
+// (parseActionOperator): the variables, a space, the operator in double
+// quotes and, after it, the actions. It returns the operator unquoted and
+// what follows it, the quoted actions or nothing. ok is false when the rule
+// doesn't parse; compiling it then fails.
+func ruleFields(text string) (operator, rest string, ok bool) {
 	_, data, _ := strings.Cut(text, " ")
 	data = strings.Trim(data, " ")
 	_, rest, found := strings.Cut(data, " ")
 	if !found {
-		return "", false
+		return "", "", false
 	}
 	rest = strings.TrimLeft(rest, " ")
 	if rest == "" || rest[0] != '"' {
-		return "", false
+		return "", "", false
 	}
 	end, escapes := -1, 0
 	for i := 1; i < len(rest); i++ {
@@ -183,9 +184,35 @@ func ruleOperator(text string) (op string, ok bool) {
 		}
 	}
 	if end < 0 {
+		return "", "", false
+	}
+	return strings.ReplaceAll(rest[1:end], `\"`, `"`), strings.TrimLeft(rest[end+1:], " "), true
+}
+
+// ruleActions returns the action list of a SecRule directive, unquoted:
+// empty when it has none. ok is false when the rule doesn't parse.
+func ruleActions(text string) (actions string, ok bool) {
+	_, rest, ok := ruleFields(text)
+	switch {
+	case !ok:
+		return "", false
+	case rest == "":
+		return "", true
+	case len(rest) < 2 || rest[0] != '"' || rest[len(rest)-1] != '"':
 		return "", false
 	}
-	operator := strings.ReplaceAll(rest[1:end], `\"`, `"`)
+	return rest[1 : len(rest)-1], true
+}
+
+// ruleOperator returns the operator name of a SecRule directive, read the
+// way Coraza's rule parser reads it (ParseOperator): "@name args" or
+// "!@name args", and anything else is rx. ok is false when the rule doesn't
+// parse.
+func ruleOperator(text string) (op string, ok bool) {
+	operator, _, ok := ruleFields(text)
+	if !ok {
+		return "", false
+	}
 	switch {
 	case strings.HasPrefix(operator, "!@"):
 		operator = operator[2:]
@@ -196,6 +223,51 @@ func ruleOperator(text string) (op string, ok bool) {
 	}
 	name, _, _ := strings.Cut(operator, " ")
 	return strings.TrimSpace(name), true
+}
+
+// actionNames returns the names of the actions in a rule's action list, in
+// lower case, split the way Coraza's parseActions splits them: on commas
+// outside single quotes, a backslash escaping the next character, the name
+// before the first colon.
+func actionNames(actions string) []string {
+	var names []string
+	start, colon, inQuotes := 0, -1, false
+	add := func(end int) {
+		if colon < 0 {
+			colon = end
+		}
+		names = append(names, strings.ToLower(strings.TrimSpace(actions[start:colon])))
+	}
+	for i := 1; i < len(actions); i++ {
+		c := actions[i]
+		if actions[i-1] == '\\' {
+			continue
+		}
+		if c == '\'' {
+			inQuotes = !inQuotes
+			continue
+		}
+		if inQuotes {
+			continue
+		}
+		switch c {
+		case ':':
+			if colon < 0 {
+				colon = i
+			}
+		case ',':
+			add(i)
+			start, colon = i+1, -1
+		}
+	}
+	add(len(actions))
+	return names
+}
+
+// hasChain reports whether a SecRule directive has the chain action.
+func hasChain(text string) bool {
+	actions, ok := ruleActions(text)
+	return ok && slices.Contains(actionNames(actions), "chain")
 }
 
 // RuleError is a problem in user rules, at a line.
@@ -216,14 +288,16 @@ func (e *RuleError) Unwrap() error { return e.Err }
 
 // CheckUserRules checks SecLang written by policy authors, as the engine
 // loads it: after the Core Rule Set (Config.Directives), so it may refer to
-// CRS rules. Only the directives of UserDirectiveNames are allowed. The
-// error is a *RuleError naming the line of the first problem.
+// CRS rules. Only the directives of UserDirectiveNames are allowed, and the
+// last SecRule can't open a chain. The error is a *RuleError naming the line
+// of the first problem.
 func CheckUserRules(rules string) error {
 	dirs, err := SplitDirectives(rules)
 	if err != nil {
 		return err
 	}
-	for _, d := range dirs {
+	var lastRule *Directive
+	for i, d := range dirs {
 		if !userDirectives[d.Name] {
 			return &RuleError{Line: d.Line, Err: fmt.Errorf("directive %q is not allowed in rule sets (allowed: %s)",
 				d.Name, strings.Join(UserDirectiveNames(), ", "))}
@@ -233,7 +307,14 @@ func CheckUserRules(rules string) error {
 				return &RuleError{Line: d.Line, Err: fmt.Errorf("operator %q is not allowed in rule sets (allowed: %s)",
 					op, strings.Join(UserOperatorNames(), ", "))}
 			}
+			lastRule = &dirs[i]
 		}
+	}
+	// A chain that no SecRule completes still compiles after the CRS, where
+	// its starter then matches alone; before the CRS it doesn't load.
+	if lastRule != nil && hasChain(lastRule.Text) {
+		return &RuleError{Line: lastRule.Line, Err: errors.New("the last SecRule has the chain action but no SecRule follows to complete the chain: " +
+			"add the chained rule after it, or remove chain")}
 	}
 	compile := func(n int) error {
 		var b strings.Builder
