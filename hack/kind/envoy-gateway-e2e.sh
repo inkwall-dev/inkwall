@@ -717,12 +717,20 @@ done
 forward_all
 
 echo "== responses"
+# enforced: Enforced for this generation of the policy, not the last one.
+enforced() {
+  [[ $(condition Enforced status) == True &&
+    $(condition Enforced observedGeneration) == $("${KUBECTL[@]}" -n "$NS" get wafpolicy shared -o jsonpath='{.metadata.generation}') ]]
+}
 responses_since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 policy Block "" "$RESPONSES"
 eventually "Envoy Gateway accepts the EnvoyExtensionPolicy sending responses" responses_held BufferedPartial
 eventually "not Programmed: Traefik can't send responses to the engine" not_programmed_traefik
+# Envoy takes the EnvoyExtensionPolicy a moment after Envoy Gateway accepts
+# it, and every engine must run the bundle that reads responses.
+eventually "the policy is Enforced: every engine reads responses" enforced
 check "a clean response passes through both Gateways" envoy_are 200 /products/42
-check "a response leaking a SQL error is replaced through both Gateways: 403" leak_is 403 "$CUSTOM_PORT" "$PLAIN_PORT"
+eventually "a response leaking a SQL error is replaced through both Gateways: 403" leak_is 403 "$CUSTOM_PORT" "$PLAIN_PORT"
 check "its body is gone" leak_replaced
 eventually "the engines log it as a response deny" logged_response /leak deny
 # The probe's response leg reaches the app (the engine lets it through and
@@ -751,11 +759,6 @@ policy Block "" '  responses: {inspect: true, streams: Inspect}'
 # From Detect: Envoy must hold the responses again, and every engine run the
 # bundle with streams, before a leaking stream can be cut.
 eventually "Envoy Gateway accepts the EnvoyExtensionPolicy holding the responses" responses_held BufferedPartial
-# enforced: Enforced for this generation of the policy, not the last one.
-enforced() {
-  [[ $(condition Enforced status) == True &&
-    $(condition Enforced observedGeneration) == $("${KUBECTL[@]}" -n "$NS" get wafpolicy shared -o jsonpath='{.metadata.generation}') ]]
-}
 eventually "the policy is Enforced: every engine runs the bundle with streams" enforced
 sse_through() { curl -sN --max-time 10 -H "Host: $HOST" "http://127.0.0.1:$1$2" || true; }
 streams_clean() {
