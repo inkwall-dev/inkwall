@@ -106,8 +106,11 @@ in metrics and status, and how it is tested. **Nothing here is built yet** (#723
    them in a bounded queue, on disk under `--events-dir` when set, and sends them on the replica's
    own events stream. Otherwise it drops them: the engines' logs are the record.
 
-So every event already arrives, redacted and authenticated, at exactly one replica, and a hook
-exists that sees each batch once.
+So every event already arrives, redacted and authenticated, at one replica, and a hook exists that
+sees each batch as it arrives. Normally once: an agent whose send failed puts the batch back and
+sends it again (`Buffer.Return`, `pkg/events/buffer.go`), possibly to another replica after a
+reconnect, so a few events can already arrive twice. `event_id` deduplicates them
+([§2.4](#24-buffering-loss-and-restarts)).
 
 ### 2.2 From the operator, on every replica
 
@@ -124,8 +127,9 @@ connected to it, as the `Forwarder` does for the control plane. `Server.Events` 
   ([0004 §8](0004-operator.md#8-scale-targets-v1)), the operator receives at most what engines
   send: each engine's ring drops its oldest past 10,000, so a flood is cut in the engine, not in
   the operator. The new work per event is one encoding (JSON or OTLP, about 1 KiB) and its share of
-  a gzip-compressed HTTP request. Target: 10,000 events per second per replica per sink at under
-  half a CPU, measured by the benchmark of [§9](#9-testing) before the defaults are final.
+  a compressed request. Target: 10,000 events per second per replica per sink at under half a CPU,
+  with a 100 ms round trip to the sink, measured by the benchmark of [§9](#9-testing) (with the
+  round trip injected) before the defaults are final.
 - **Order.** Events from one engine keep their order on one replica. An engine that reconnects to
   another replica continues there, so across replicas only the event's `time` orders them. SIEMs
   sort by time anyway.
@@ -164,24 +168,48 @@ dropped; a sink whose cursor hadn't reached it counts its events as dropped (`re
 So a dead sink costs memory up to the bound, and a healthy sink never loses events because
 another is down: it has sent them already.
 
+The buffer holds each batch as its encoded protobuf bytes, decoded by each sender when it reads
+it, so the bound in bytes is also the buffer's memory.
+
+Cursors follow the sinks by name, the key of the metrics and the condition:
+
+- **A new sink** starts at the buffer's end: it gets the events that arrive after it is added, not
+  the backlog.
+- **A removed sink** frees its cursor, and the batches only it was waiting for.
+- **A changed sink** (endpoint, format, credentials) keeps its cursor: what it hadn't sent goes to
+  the new configuration. A renamed sink is a removal and a new sink.
+- **Persisted:** each sink's cursor is written beside the batches (a file per sink, rewritten after
+  each acknowledged request), so a restart resends at most the requests in flight, not the whole
+  buffer.
+
 - **Bound:** `--export-buffer-bytes` (default 32 MiB; chart `events.export.bufferMiB`). It is an
   operator flag, not an `InkwallConfig` field, for two reasons. The buffer is in memory, and the
-  operator's memory limit (512 MiB by default, with peaks of about 518 MiB at the largest scale
-  test, [0004 §8](0004-operator.md#8-scale-targets-v1)) is the chart's. And its disk copy lives in
-  the `events` emptyDir, whose `sizeLimit` the chart computes
-  (`deploy/helm/inkwall/templates/deployment.yaml`): a bound set in the CRD could exceed it, and
-  the kubelet evicts a pod whose emptyDir passes its limit. The chart adds the export buffer to
-  the emptyDir's `sizeLimit` and says to add it to `limits.memory` at large scale.
+  operator's memory limit is the chart's. And its disk copy lives in the `events` emptyDir, whose
+  `sizeLimit` the chart computes (`deploy/helm/inkwall/templates/deployment.yaml`): a bound set in
+  the CRD could exceed it, and the kubelet evicts a pod whose emptyDir passes its limit.
+- **Memory.** Today's budget has no room for it: the control plane's queue already holds up to
+  `eventsBufferMiB` (64 MiB) in memory as well as on disk (`queue.go`), and the largest scale test
+  peaks at about 518 MiB against the 512 MiB default limit
+  ([0004 §8](0004-operator.md#8-scale-targets-v1)). Export adds the buffer, plus at most
+  `sinks × requests in flight × 4 MiB` of encoded requests (64 MiB with 4 sinks). So the chart
+  raises the default `limits.memory` to 640 MiB, adds `bufferMiB` to the emptyDir's `sizeLimit`,
+  and its values document the formula: `limits.memory ≥ the scale test's peak + eventsBufferMiB +
+  bufferMiB + 16 MiB × sinks`. The scale test of [§9](#9-testing) runs with export on.
 - **On disk.** The buffer is written to `--events-dir/export`, as the control plane's queue is
   (`operator/internal/controlplane/queue.go`): a file per batch, a random buffer ID, oldest
-  dropped first. The writes happen on the export goroutine, not on the engine's stream. A
-  container restart (a crash, an OOM kill) keeps the emptyDir, and the replica sends what was left.
-  A pod deletion (a rollout, a drain) loses it.
-- **Shutdown.** On SIGTERM a replica keeps serving for `--shutdown-delay` (5 s,
-  `cmd/operator/main.go`); the exporter uses that time to flush what it can, then stops.
-- **Delivery:** at least once per sink while the buffer holds the event. A retry after a timeout
-  or a restart can send an event twice. `event_id` is a ULID, unique per event: the guide shows
-  how each SIEM deduplicates on it, where it can.
+  dropped first. Unlike that queue, which writes inside `Add` on the engine's stream
+  (`queue.add`), the export buffer writes on its own goroutine, at most 1 s after `Add`, so a slow
+  disk never slows a stream. The cost: a crash loses what arrived in the last second. A container
+  restart (a crash, an OOM kill) keeps the emptyDir, and the replica sends the rest. A pod deletion
+  (a rollout, a drain) loses it.
+- **Shutdown.** On SIGTERM a replica keeps serving engine streams for `--shutdown-delay` (5 s,
+  `cmd/operator/main.go`), so events keep arriving. The exporter flushes after the distribution
+  server stops, sending what it can within the manager's graceful shutdown timeout; what is left
+  stays on disk and is lost with the pod.
+- **Delivery:** at least once per sink while the replica runs and the buffer holds the event;
+  best effort across a crash (the last second) and lost on pod deletion, which every rollout of
+  the operator does. A retry after a timeout or a restart can send an event twice. `event_id` is a
+  ULID, unique per event: the guide shows how each SIEM deduplicates on it, where it can.
 
 Rejected:
 
@@ -204,7 +232,8 @@ HTTP(S)** (one event per line, or a JSON array). Syslog waits ([§3.3](#33-syslo
 [OTLP](https://opentelemetry.io/docs/specs/otlp/) is the one protocol every major backend now takes,
 directly or through a Collector, and the Collector reaches the rest. Requests are
 `ExportLogsServiceRequest` messages, sent as gRPC (`LogsService/Export`) or as an HTTP `POST` of
-the protobuf body (`Content-Type: application/x-protobuf`), gzip-compressed. Both report
+the protobuf body (`Content-Type: application/x-protobuf`), compressed with gzip unless the sink
+sets `compression: None`. Both report
 [partial success](https://opentelemetry.io/docs/specs/otlp/#partial-success), counted as rejected
 events.
 
@@ -218,7 +247,8 @@ encoding is less to test.
 
 ### 3.2 JSON over HTTP
 
-A `POST` of the events in the schema of [§5.1](#51-json), gzip-compressed, in one of two framings:
+A `POST` of the events in the schema of [§5.1](#51-json), compressed with gzip unless the sink sets
+`compression: None`, in one of two framings:
 
 - **`Lines`** ([NDJSON](https://github.com/ndjson/ndjson-spec), `application/x-ndjson`): one event
   per line. Splunk's HEC raw endpoint, Logstash's `http` input, Vector and Fluent Bit take it.
@@ -258,10 +288,11 @@ the HTTP sink ([§9](#9-testing)).
 | SIEM | Sink | Notes |
 |---|---|---|
 | Any, through a Collector | `otlp`, gRPC or HTTP, to the Collector's OTLP receiver | The general answer: the Collector has exporters for most backends, and can batch, filter and route further |
-| Splunk | `json`, `Lines`, to HEC's `/services/collector/raw?sourcetype=_json` | Header `Authorization: Splunk <token>` from the Secret. Or a Collector with the `splunk_hec` exporter |
+| Splunk | `json`, `Lines`, to HEC's `/services/collector/raw?sourcetype=_json` | Header `Authorization: Splunk <token>` from the Secret, and `X-Splunk-Request-Channel` too when the HEC token has indexer acknowledgement on. Or a Collector with the `splunk_hec` exporter |
 | Elastic | `otlp` to Elastic's OTLP intake (APM Server or the Elastic Distribution of the Collector) | Or `json`, `Lines`, to Logstash's `http` input. Deduplicate by setting the document `_id` to `event_id` in the pipeline |
-| Grafana Loki (3.0 and later) | `otlp`, HTTP, to `/otlp/v1/logs` | Loki keeps resource attributes as labels; the guide lists which to keep as labels (cluster, namespace), never `client.address` |
+| Grafana Loki (3.0 and later) | `otlp`, HTTP, to `/otlp/v1/logs` | Loki turns a default list of resource attributes into labels, `k8s.pod.name` among them; the guide shows how to drop the pod from the labels (its cardinality grows with every rollout) and keep it as structured metadata |
 | Datadog | `otlp` to the Datadog Agent's OTLP receiver, or a Collector with the `datadog` exporter | Or `json`, `Array`, to the HTTP logs intake with `DD-API-KEY` from the Secret |
+| Sumo Logic | `json`, `Array`, to an HTTP source | The source's URL holds its token: give it with `json.urlSecretRef`, not `json.url` |
 | Microsoft Sentinel | A Collector with the Azure Monitor exporter | |
 | QRadar, ArcSight and other syslog receivers | A Collector with the syslog exporter | [§3.3](#33-syslog-deferred) |
 | Vector, Fluent Bit, Logstash | `json`, `Lines`, to their HTTP input | Then anywhere they route |
@@ -306,6 +337,8 @@ spec:
 | `sinks[].name` | DNS label, ≤ 63 | required | Unique; the `sink` label of the metrics and the name in the condition |
 | `sinks[].otlp.endpoint` | URL, ≤ 512 | — | `grpcs://host:port` or `grpc://` for gRPC; `https://…` or `http://…` for HTTP, used as is (OTLP/HTTP's path, usually `/v1/logs`, is part of it) |
 | `sinks[].json.url` | URL, ≤ 2048 | — | `https://…` or `http://…`, with any path and query |
+| `sinks[].json.urlSecretRef` | Secret name and key | — | The URL from a Secret instead, for intakes whose URL holds a token (Sumo Logic, query-string keys); exactly one of `url` and `urlSecretRef` |
+| `sinks[].compression` | `Gzip`, `None` | `Gzip` | The request body's compression |
 | `sinks[].json.framing` | `Lines`, `Array` | `Lines` | [§3.2](#32-json-over-http) |
 | `sinks[].insecure` | bool | false | Allows a plaintext `http://` or `grpc://` endpoint |
 | `sinks[].tls.caSecretRef.name` | Secret name | system roots | A Secret with `ca.crt`: the CAs trusted for the server |
@@ -314,6 +347,7 @@ spec:
 | `sinks[].headersSecretRef.name` | Secret name | — | Each key a header name, each value its value ([§4.2](#42-credentials-and-tls)) |
 | `sinks[].batch.maxEvents` | 1–1,000 | 500 | Events per request at most |
 | `sinks[].batch.maxDelay` | duration, 100ms–60s | 5s | The longest an event waits for its batch to fill |
+| `sinks[].batch.maxInFlight` | 1–4 | 2 | Requests sent before the first is answered ([§4.3](#43-batching-retries-and-backpressure)) |
 | `sinks[].timeout` | duration, 1s–60s | 10s | One request's deadline |
 | `sinks[].filter.actions` | `Deny`, `Log` (a set) | both | Which events this sink takes |
 | `sinks[].filter.policyNamespaces` | namespace list, ≤ 64 | all | Only events of policies in these namespaces |
@@ -351,7 +385,8 @@ in Git in GitOps setups, and its spec travels to the control plane in `ClusterSt
 - **TLS.** TLS 1.2 or later, Go's defaults. The server's certificate is always verified: there is
   no `insecureSkipVerify`. A self-signed SIEM gets its CA in `caSecretRef`. Plaintext needs
   `insecure: true`, meant for a Collector in the cluster, and the condition's message says the sink
-  is plaintext.
+  is plaintext. A plaintext sink can't have `headersSecretRef`: credentials never travel in clear
+  ([§4.5](#45-validation)).
 
 ### 4.3 Batching, retries and backpressure
 
@@ -365,21 +400,30 @@ drop events, never apply backpressure.
   forwarding is untouched.
 - **One sender per sink.** Each sink has one goroutine that reads from its cursor, filters
   ([§4.4](#44-filtering-and-redaction)), encodes up to `maxEvents` events, and sends when the batch
-  is full or `maxDelay` has passed since its first event. One request in flight per sink keeps the
-  order and the memory simple; at 500 events a request, that is enough for the target of
-  [§2.2](#22-from-the-operator-on-every-replica). A request body is at most 4 MiB before
-  compression (gRPC's default message limit), cut with `events.Split` (`pkg/events/split.go`).
+  is full or `maxDelay` has passed since its first event. Up to `maxInFlight` requests (default 2)
+  are in flight at once: one at a time caps a sink at `maxEvents` per round trip, 5,000 events per
+  second at 100 ms, below the target of [§2.2](#22-from-the-operator-on-every-replica). The cursor
+  moves only past a run of answered requests, in order, so a restart never skips an unanswered
+  one; requests may arrive out of order, and SIEMs sort by `time`.
+- **Request size.** A request body is at most 4 MiB before compression (gRPC's default message
+  limit), measured after encoding in the sink's format: the encoder closes a request when the next
+  event would pass the limit. `events.Split` can't do it: it measures protobuf, and the same
+  events are larger as JSON or OTLP.
 - **Retries** with exponential backoff and full jitter, from 1 s to 60 s, for as long as the
   buffer holds the batch:
-  - retried: connection and TLS errors, timeouts, HTTP 408, 429, 502, 503, 504; gRPC
-    `UNAVAILABLE`, `RESOURCE_EXHAUSTED`, `DEADLINE_EXCEEDED`, `ABORTED`. A `Retry-After` header,
-    or OTLP's `RetryInfo`, sets the next wait, capped at 5 min;
+  - retried: connection and TLS errors, timeouts, HTTP 408, 429, 500, 502, 503, 504; gRPC
+    `UNAVAILABLE`, `DEADLINE_EXCEEDED`, `ABORTED`, `CANCELLED`, `OUT_OF_RANGE`, `DATA_LOSS`, and
+    `RESOURCE_EXHAUSTED` with `RetryInfo` (the retryable set of the
+    [OTLP spec](https://opentelemetry.io/docs/specs/otlp/#failures)). A `Retry-After` header, or
+    `RetryInfo`, sets the next wait, capped at 5 min;
   - HTTP 401 and 403, gRPC `UNAUTHENTICATED` and `PERMISSION_DENIED`: retried at the slowest
     pace, since a fixed Secret should resume the flow without losing what waited;
-  - HTTP 413: the batch is split in half and retried; a single event refused is dropped
-    (`reason="too_large"`);
-  - any other 4xx, gRPC `INVALID_ARGUMENT`, and OTLP's partial success: the refused events are
-    dropped (`reason="rejected"`), because sending them again gets the same answer.
+  - HTTP 413, and gRPC `RESOURCE_EXHAUSTED` without `RetryInfo` (what gRPC answers to a message
+    over the server's limit): the batch is split in half and retried; a single event refused is
+    dropped (`reason="too_large"`);
+  - any other 4xx or 5xx (501, for example), any other gRPC code (`INVALID_ARGUMENT`,
+    `UNIMPLEMENTED`), and OTLP's partial success: the refused events are dropped
+    (`reason="rejected"`), because sending them again gets the same answer.
 - **No redirects.** A 3xx is a failure, not followed ([§7](#7-security)).
 - **Responses** are read up to 4 KiB, for the error class and a short message; the body is never
   logged in full or put in status.
@@ -414,13 +458,14 @@ applies to every destination; per-destination differences belong to the destinat
 Schema and CEL, the first step of [0004 §3.1](0004-operator.md#31-validation):
 
 - `sinks`: at most 4, names unique (the `exists_one` pattern of `targetRefs`); exactly one of
-  `otlp` and `json`.
-- `otlp.endpoint`: `^(grpcs?|https?)://[^/\s]+(/\S*)?$`, and no path for `grpc`/`grpcs`;
-  `json.url`: `^https?://[^/\s]+(/\S*)?$`. No user info (`user:pass@`) in either: credentials go in
-  the Secret.
-- `http://` and `grpc://` only with `insecure: true`.
-- Durations: `duration(self) >= duration('100ms') && duration(self) <= duration('60s')`, the
-  pattern of `WAFPolicy`'s `timeout` (`operator/api/v1alpha1/wafpolicy_types.go`).
+  `otlp` and `json`; in `json`, exactly one of `url` and `urlSecretRef`.
+- `otlp.endpoint`: `^grpcs?://[^/?#@\s]+$` (no path) or `^https?://[^/?#@\s]+([/?]\S*)?$`;
+  `json.url`: `^https?://[^/?#@\s]+([/?]\S*)?$`. The host part refuses `@`, so no user info
+  (`user:pass@`): credentials go in the Secret. A URL read from `urlSecretRef` gets the same check
+  when the sink starts.
+- `http://` and `grpc://` only with `insecure: true`, and never with `headersSecretRef`.
+- Durations, each its own rule in the pattern of `WAFPolicy`'s `timeout`
+  (`operator/api/v1alpha1/wafpolicy_types.go`): `batch.maxDelay` 100ms–60s, `timeout` 1s–60s.
 - `policyNamespaces`: DNS labels, a set.
 
 What the schema can't see is checked when the sink starts and reported in the condition
@@ -434,10 +479,20 @@ with three additions from the operator: `cluster.id` (the `kube-system` Namespac
 already identifies the cluster to the control plane, `operator/internal/controlplane/connector.go`),
 `cluster.name` (`export.clusterName`, if set) and `observed_time` (when the replica received it).
 
-Field names are stable within a schema version ([§5.3](#53-versioning)). Enums are written as the
-engine's lower-case strings (`pkg/pipeline/verdict.go`: `deny`, `log`; `rule`, `ip-deny`,
-`overload`, ...), never as numbers. A field the engine didn't set (an older engine) is left out,
-not written as zero.
+Field names are stable within a schema version ([§5.3](#53-versioning)). Enums are written as
+lower-case strings, never as numbers: the encoder maps the `inkwall.engine.v1` values of `action`
+and `reason` to the names the engine already logs (`pkg/pipeline/verdict.go`: `deny`, `log`;
+`rule`, `ip-deny`, `overload`, ...), `phase` to `request`, `response`, `websocket-message`, and
+`protocol` to `http`, `grpc`, `websocket`.
+
+The event's fields are proto3 scalars, without presence, so a zero can't be told from "not set".
+The rule per field:
+
+- **Always written:** `event_id`, `time`, `action`, `reason`, `status` (0 means the request was
+  forwarded), `policy`, `bundle_version`, `latency_seconds`.
+- **Left out when zero or empty:** `rule_id` (0: no rule interrupted), `anomaly_score` (0: no
+  anomaly scoring), every string (`request.*`, `engine.*`), `matches`.
+- **Left out when unspecified:** `phase` and `protocol` (engines before 0.4.0 don't set them).
 
 ### 5.1 JSON
 
@@ -446,7 +501,7 @@ not written as zero.
   "schema": "inkwall.dev/security-event/v1",
   "event_id": "01JD3Q4Z8M2N5X7Y9A1B3C5D7E",
   "time": "2026-11-20T10:15:02.123456Z",
-  "observed_time": "2026-11-20T10:15:02.401Z",
+  "observed_time": "2026-11-20T10:15:02.401337Z",
   "cluster": {"id": "6f1c…", "name": "prod-eu-1"},
   "engine": {"id": "01JD…", "namespace": "traefik", "pod": "traefik-7d9c…"},
   "policy": {"namespace": "shop", "name": "web", "bundle_version": 42},
@@ -468,11 +523,11 @@ not written as zero.
 
 | JSON field | `SecurityEvent` field |
 |---|---|
-| `event_id`, `time` | `event_id`, `time` (RFC 3339, UTC, microseconds) |
+| `event_id`, `time`, `observed_time` | `event_id`, `time`, and the replica's receipt time (RFC 3339, UTC, microseconds) |
 | `engine.id`, `.namespace`, `.pod` | `engine_id`, `pod_namespace`, `pod_name` (set by the operator from the stream) |
 | `policy.namespace`, `.name`, `.bundle_version` | `policy` split at `/`, `bundle_version` |
 | `action`, `reason`, `status` | `action`, `reason`, `status` |
-| `rule_id`, `anomaly_score`, `matches[]` | `interrupting_rule_id` (left out when 0), `anomaly_score`, `matches` |
+| `rule_id`, `anomaly_score`, `matches[]` | `interrupting_rule_id`, `anomaly_score`, `matches` |
 | `phase`, `protocol` | `phase`, `protocol` (left out when unspecified) |
 | `request.*` | `request_id`, `method`, `host`, `path`, `client_ip`, `user_agent` |
 | `latency_seconds` | `latency` |
@@ -530,9 +585,11 @@ mode.
   admin's, and a control plane can't add a destination for the cluster's events. This is kept as
   a rule: if a future control plane manages the `InkwallConfig`, `spec.events.export` stays out of
   what it may write.
-- The control plane sees the sinks' configuration (names, endpoints, filters; never Secrets) in
-  `ClusterState`, and their health in the `EventsExported` condition, as it sees every other
-  condition.
+- The control plane sees the sinks' configuration in `ClusterState`, and their health in the
+  `EventsExported` condition, as it sees every other condition. The spec it gets has each sink's
+  endpoint cut to its scheme, host and port: a path or query can carry a token (some intakes take
+  keys in the query string), and `ClusterState` sends the `InkwallConfig`'s spec as it is today
+  (`operator/internal/controlplane/state.go`). Secrets never go.
 
 Rejected: export only in Standalone mode, as 0002 §5.3 once sketched ("in Standalone mode, events
 go to logs and optionally to OTLP"). Teams with a control plane still have a SIEM, and the SIEM is
@@ -550,10 +607,16 @@ operator's network position, which is documented and narrowed:
 - **Requests from the operator's address (SSRF).** The operator can reach in-cluster Services and,
   on many clouds, the instance metadata service. The exporter only `POST`s to the configured URL,
   but a hostile endpoint could aim at an internal service and read its errors through status. So:
-  - the dialer refuses loopback, link-local (`169.254.0.0/16`, `fe80::/10`, which holds the
-    metadata services) and unspecified addresses, checked on the resolved address at connect time
-    (a `net.Dialer.Control`), so DNS rebinding can't get around it. Private ranges stay allowed:
+  - the dialer refuses loopback, unspecified and link-local addresses (`169.254.0.0/16`,
+    `fe80::/10`, which hold most clouds' metadata services), and the metadata addresses outside
+    them: AWS's IPv6 `fd00:ec2::254` and Alibaba Cloud's `100.100.100.200`. IPv4-mapped IPv6 is
+    checked as IPv4. The check is on the resolved address at connect time (a
+    `net.Dialer.Control`), so DNS rebinding can't get around it. Other private ranges stay allowed:
     in-cluster Collectors live there;
+  - no proxy: the HTTP transport has `Proxy: nil` and the gRPC client `grpc.WithNoProxy()`. Both
+    would otherwise follow `HTTPS_PROXY` from the environment, and the dialer would then check the
+    proxy's address instead of the sink's. A sink behind a proxy is
+    [open question 7](#11-open-questions);
   - no redirects are followed ([§4.3](#43-batching-retries-and-backpressure));
   - status and logs carry the HTTP status, the gRPC code or an error class, and at most 128 bytes
     of the response, escaped: enough to fix a token, not enough to read a service;
@@ -615,9 +678,9 @@ counts engines across replicas. `docs/troubleshooting.md` gets each reason (`-re
 | Layer | What | Where |
 |---|---|---|
 | Unit | The buffer: cursors per sink, a slow sink losing only its own events, the bound in bytes, drop-oldest, reload from disk after a restart, torn files | new `operator/internal/export` |
-| Unit | Each sender with a fake clock and a fake server: batching by size and delay, `Split` at 4 MiB, the retry table of [§4.3](#43-batching-retries-and-backpressure) (each status and gRPC code), `Retry-After` and `RetryInfo`, 413 halving, partial success, no redirect followed, response read capped | `operator/internal/export` |
+| Unit | Each sender with a fake clock and a fake server: batching by size and delay, the 4 MiB cut per format, requests in flight and the cursor moving only past answered ones, the retry table of [§4.3](#43-batching-retries-and-backpressure) (each status and gRPC code), `Retry-After` and `RetryInfo`, 413 halving, partial success, no redirect followed, response read capped | `operator/internal/export` |
 | Unit | `Add` never blocks: a sink that never answers, with the stream's `Add` timed under `-race` | `operator/internal/export` |
-| Unit | Filters and `omit`; the dialer guard (loopback, link-local, IPv4-mapped IPv6, a name that resolves to 169.254.169.254); headers from a Secret (refused names), Secret rotation | `operator/internal/export` |
+| Unit | Filters and `omit`; the dialer guard (loopback, link-local, IPv4-mapped IPv6, `fd00:ec2::254`, `100.100.100.200`, a name that resolves to 169.254.169.254, `HTTPS_PROXY` set and ignored); headers from a Secret (refused names), Secret rotation; cursors after adding, removing, changing and renaming a sink | `operator/internal/export` |
 | Unit | Golden files for JSON (both framings) and OTLP, from the events in `pkg/events/testdata`; a field-list golden that fails on any v1 rename; an event from an engine before 0.4.0 (no phase, no protocol) | `operator/internal/export/testdata` |
 | Unit | CRD validation: each CEL rule accepted and refused; the condition's reasons from replica reports | `operator/api/v1alpha1/validation_test.go`, `operator/internal/distribution` |
 | Fuzz | `FuzzEncodeJSON`: any `SecurityEvent` (from fuzzed protobuf) encodes to valid JSON, one line in `Lines` (no raw newline from any field), and decodes back to the same fields | `operator/internal/export` |
@@ -643,7 +706,7 @@ counts engines across replicas. `docs/troubleshooting.md` gets each reason (`-re
 | 10 | Redaction stays in the engine; a sink can only omit more | Export-only redaction settings |
 | 11 | Inkwall's own versioned schema, OTLP semantic conventions where they exist | ECS or another vendor's schema in the operator |
 | 12 | Export and the control plane independent; both allowed; the control plane can't add sinks | Export only in Standalone mode |
-| 13 | Dialer refuses loopback and link-local; no redirects; short errors in status | Following redirects; full responses in status |
+| 13 | Dialer refuses loopback, link-local and the metadata addresses; no proxy; no redirects; short errors in status | Following redirects or `HTTPS_PROXY`; full responses in status |
 | 14 | `EventsExported` condition aggregated by the leader from replica reports; per-sink metrics | Each replica writing the condition |
 
 ## 11. Open questions
@@ -661,3 +724,5 @@ counts engines across replicas. `docs/troubleshooting.md` gets each reason (`-re
    with no Kubernetes, or is a log agent enough?
 6. **One buffer.** Should the control plane's queue become one more cursor on the export buffer, so
    a replica holds each event once?
+7. **Sinks behind a proxy.** An explicit `proxy` URL per sink, with the dialer guard checking the
+   proxy and the proxy trusted to refuse internal targets?

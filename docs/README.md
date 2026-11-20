@@ -2,14 +2,6 @@
 
 Every doc in this repository, by topic, with the question each one answers.
 
-## Contents
-
-- [Get started](#get-started)
-- [Guides](#guides)
-- [Reference](#reference)
-- [Design](#design)
-- [Contributing](#contributing)
-
 ## Get started
 
 - [Quickstart](quickstart.md): how do I see Inkwall block an attack in five minutes, on a local
@@ -80,7 +72,7 @@ Every doc in this repository, by topic, with the question each one answers.
   an MCP server for the AI assistants they already use, a docs assistant and a GitHub bot, and the
   security rules every one of them follows.
 - [0010 — Exporting Security Events to a SIEM](design/0010-siem-export.md): how do security events
-  reach a SIEM (Splunk, Elastic, Loki, Datadog) without the control plane?
+  reach a SIEM (Splunk, Elastic, Loki, Datadog), with or without the control plane?
 
 ## Contributing
 

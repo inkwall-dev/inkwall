@@ -464,7 +464,7 @@ Rules of the contract:
   fails closed.
 - In every mode, events go to the engines' logs and, optionally, from each operator replica to a
   SIEM over [OTLP](https://opentelemetry.io/docs/specs/otlp/) or JSON, beside the control plane
-  ([0010](0010-siem-export.md)). Not yet: only the engine's log.
+  ([0010](0010-siem-export.md)). Not yet: the SIEM export; events reach the control plane today.
 
 **Built:** the contract (#86), enrollment and the primary stream, state sync (`ClusterState`), the
 events streams with each replica's disk buffer, request counts per policy (#119), and Managed mode (policy snapshots written as
