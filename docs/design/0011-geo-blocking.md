@@ -657,7 +657,7 @@ when it comes from a Secret (16 MiB); the mapped file is page cache. Every repli
 geo chunk Secrets (at most 14,400 KiB per slot). That is up to about 100 MiB at the bounds, on top
 of an operator whose largest scale test already peaks at about 518 MiB against a 512 MiB limit
 ([0004 §8](0004-operator.md#8-scale-targets-v1)). So the chart's default operator
-`limits.memory` becomes 768 MiB, the same change [0010](0010-siem-export.md) makes for its buffer,
+`limits.memory` becomes 768 MiB, the same change 0010 (SIEM export) makes for its buffer,
 and the scale test runs with geo on and asserts the peak stays under it ([§10](#10-testing)).
 
 The input is the cluster admin's own file, so the threat is a corrupt download more than an
