@@ -83,6 +83,8 @@ Every doc in this repository, by topic, with the question each one answers.
   what does a limited client get, and why does each engine count on its own?
 - [0010 — Exporting Security Events to a SIEM](design/0010-siem-export.md): how do security events
   reach a SIEM (Splunk, Elastic, Loki, Datadog), with or without the control plane?
+- [0011 — Geo Blocking](design/0011-geo-blocking.md): how does a policy allow or deny clients by
+  country, where does the country database come from, and how does it reach the engines?
 
 ## Contributing
 
