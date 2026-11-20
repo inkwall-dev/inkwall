@@ -169,6 +169,8 @@ func TestWAFPolicyValidation(t *testing.T) {
 		{name: "unknown placement", doc: policy(target + "  ruleSets: [{ref: {kind: WAFRuleSet, name: tune}, placement: First}]\n"), wantErr: `Unsupported value: "First"`},
 
 		{name: "exclusion without rules", doc: policy(target + "  exclusions: [{ruleIDs: []}]\n"), wantErr: "should have at least 1 items"},
+		{name: "exclusion missing rules", doc: policy(target + "  exclusions: [{when: {path: /api/*}}]\n"), wantErr: "ruleIDs is required"},
+		{name: "exclusion with null rules", doc: policy(target + "  exclusions: [{ruleIDs: null}]\n"), wantErr: "ruleIDs is required"},
 		{name: "exclusion of rule 0", doc: policy(target + "  exclusions: [{ruleIDs: [0]}]\n"), wantErr: "should be greater than or equal to 1"},
 		{name: "empty exclusion match", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {}}]\n"), wantErr: "when needs a path, or what in the request to stop looking at"},
 		{name: "exclusion for a cookie", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {cookie: session}}]\n")},
@@ -367,6 +369,9 @@ func TestWAFIPListValidation(t *testing.T) {
 	check(t, []validationCase{
 		{name: "entries", doc: ipListDoc("  entries: [{cidr: 203.0.113.0/24, description: abuse}, {cidr: \"2001:db8::/32\"}, {cidr: 192.0.2.1}]\n")},
 		{name: "no entries", doc: ipListDoc("  entries: []\n"), wantErr: "should have at least 1 items"},
+		{name: "missing entries", doc: ipListDoc("  {}\n"), wantErr: "entries is required"},
+		{name: "null entries", doc: ipListDoc("  entries: null\n"), wantErr: "entries is required"},
+		{name: "missing spec", doc: "apiVersion: waf.inkwall.dev/v1alpha1\nkind: WAFIPList\nmetadata: {name: l, namespace: default}\n", wantErr: "spec: Required value"},
 		{name: "a host name", doc: ipListDoc("  entries: [{cidr: lb.example.com}]\n"), wantErr: "spec.entries[0].cidr"},
 		{name: "policy lists", doc: policy(target + "  ipLists: {allow: [monitors], deny: [abusers]}\n")},
 	})

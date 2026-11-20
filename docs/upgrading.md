@@ -55,6 +55,10 @@ From 0.1.x, upgrade to 0.2.3 (or 0.2.2) first, then to 0.3.0.
   valid and nothing changes, but creating one that sets it, or changing it, draws a warning; v1
   removes the field. Delete it from your InkwallConfig (the sample, which set `adapter:
   ForwardAuth`, no longer does); an entry with only `controller` does nothing.
+- A WAFIPList without `spec.entries`, or an exclusion without `ruleIDs`, is still refused, but
+  with `entries is required` or `ruleIDs is required` instead of `Required value`. The schema
+  now marks both fields optional and a validation rule requires them, so a later source of
+  addresses or way to name rules only relaxes that rule. The objects accepted are the same.
 
 ## From 0.5.x to 0.6.0
 
