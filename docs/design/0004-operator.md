@@ -156,7 +156,9 @@ Validation runs in three steps, cheapest first:
 
    The `InkwallConfig` goes to the webhook too, with `failurePolicy: Ignore`: it only warns, when
    the deprecated `spec.engine.socketDir` is set or changed (each integration places the engine's
-   socket itself), and the `InkwallConfig` stays editable while the operator is down.
+   socket itself), or an integration's deprecated `adapter` (each integration's adapter comes from
+   the built-in table; v1 removes the field), and the `InkwallConfig` stays editable while the
+   operator is down.
 3. **Resolver** (asynchronous, reported in status): dangling references, conflicts, and targets
    that can't be wired. Also a rule set bound with `placement: BeforeCRS` (#423) that can't load
    before the CRS: the built-in CRS itself, or SecLang with `SecRuleRemoveBy*` or `SecRuleUpdate*`.
