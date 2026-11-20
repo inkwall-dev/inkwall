@@ -378,8 +378,8 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	}
 	// Without injection, the wiring controller unwires what was wired: new
 	// proxy pods won't have the engine.
-	// HAProxy's and Istio's routes are Programmed once probed (0002 §6.4,
-	// #372).
+	// HAProxy's, Envoy Gateway's and Istio's routes are Programmed once
+	// probed (0002 §6.4, #372, #604).
 	prober := o.Prober
 	if prober == nil {
 		prober = &wiring.Prober{}

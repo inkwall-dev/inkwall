@@ -133,6 +133,10 @@ type EnvoyGateway struct {
 	// Watches of kinds whose CRD may be missing; nil: only read at each
 	// reconcile.
 	HTTPRoutes, Gateways, GatewayClasses, EnvoyProxies, ExtensionPolicies, TrafficPolicies *crdwatch.Kind
+	// Prober proves the wired routes through every Envoy pod before they
+	// are Programmed (#604), once Envoy Gateway has accepted their policy;
+	// nil: Envoy Gateway's acceptance is the only evidence.
+	Prober *Prober
 }
 
 // Name implements Integration.
@@ -415,6 +419,23 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 			errs = append(errs, err)
 		}
 	}
+	// The ClientTrafficPolicies, for the probe: a user's that asks for a
+	// client certificate makes a listener not probeable.
+	var traffic unstructured.UnstructuredList
+	if st.egCRDs && e.Prober != nil {
+		traffic.SetGroupVersionKind(ClientTrafficPolicyGVK.GroupVersion().WithKind("ClientTrafficPolicyList"))
+		if err := e.Client.List(ctx, &traffic); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	// probed are the routes' probes, once per route whatever its targets
+	// (rules).
+	type routeProof struct {
+		jobs                     []ProbeJob
+		notProbeable, unverified string
+		responses                ResponsesProof
+	}
+	probed := map[types.NamespacedName]*routeProof{}
 	for tg := range targets {
 		r := routes[tg.Key]
 		if _, ok := res.Targets[tg]; ok || tg.Kind != httpRouteKind || r == nil || !rules(nil).with(tg.Section).any(r.route) {
@@ -472,11 +493,36 @@ func (e *EnvoyGateway) Wire(ctx context.Context, targets map[Target]bool, off bo
 					s.Pending = pending
 				}
 			}
+			// Accepted shows Envoy Gateway translated the policy, not that
+			// Envoy runs the filter on the route (a user's EnvoyPatchPolicy
+			// may take it off): proven once the probe has reached the
+			// engine through each Envoy pod of its Gateways (#604), as
+			// Istio's routes are.
+			if e.Prober != nil && s.Failed == "" && s.Pending == "" {
+				pr := probed[tg.Key]
+				if pr == nil {
+					pr = &routeProof{}
+					name := "HTTPRoute " + tg.Key.Name
+					pr.jobs, pr.notProbeable, pr.unverified = proveRoute(e.Prober, name, r.detect, func() ([]ProbeJob, string) {
+						return st.envoyRouteProbes(r, traffic.Items)
+					})
+					pr.jobs, pr.responses = proveResponses(e.Prober, name, r.responses, pr.jobs)
+					probed[tg.Key] = pr
+				}
+				s.NotProbeable, s.Unverified, s.Responses = pr.notProbeable, pr.unverified, pr.responses
+			}
 		}
 		if s.Failed == "" && s.Pending == "" && r.waiting != "" {
 			s.Pending = r.waiting
 		}
 		res.Targets[tg] = s
+	}
+	if e.Prober != nil {
+		var probes []ProbeJob
+		for _, k := range slices.SortedFunc(maps.Keys(probed), func(a, b types.NamespacedName) int { return strings.Compare(a.String(), b.String()) }) {
+			probes = append(probes, probed[k].jobs...)
+		}
+		e.Prober.Set(integrations.EnvoyGateway.Name, probes)
 	}
 	return res, errors.Join(errs...)
 }

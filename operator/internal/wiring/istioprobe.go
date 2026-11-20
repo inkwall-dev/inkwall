@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
@@ -27,6 +28,9 @@ import (
 // probe through every pod, on every listener (server) the route is served
 // on, has reached the engine (pkg/haproxyprobe; the ext_proc adapter
 // answers it, 0006 §2). These build the probes; the Prober sends them.
+// Envoy Gateway's HTTPRoutes are probed the same way (#604,
+// envoygatewayprobe.go), through httpRouteProbes, proveRoute and
+// proveResponses.
 
 // probeHost is the concrete host the probe asks for: a wildcard's made
 // concrete with a label of the probe's own, "*" and "" any host.
@@ -112,11 +116,39 @@ func httpRouteMatchTarget(m gatewayv1.HTTPRouteMatch) (ProbeTarget, string) {
 
 // istioRouteProbes are the probes of a protected HTTPRoute, one job per
 // Istio Gateway; why says why the route can't be probed, if it can't.
+// Istio's pods serve a listener on its own port.
 func (st *envoyState) istioRouteProbes(r *istioRoute) ([]ProbeJob, string) {
-	hr := r.route
+	return st.httpRouteProbes(r.route, r.sections, r.gateways, gatewayProbes{
+		proxy: "Istio",
+		pods:  func(gw types.NamespacedName) []*corev1.Pod { return istioPodsOf(st, gw) },
+	})
+}
+
+// gatewayProbes is how a proxy serves its Gateways, for the probes of
+// their HTTPRoutes (Istio's, Envoy Gateway's).
+type gatewayProbes struct {
+	// proxy names the proxy in the jobs and their messages.
+	proxy string
+	// pods are a Gateway's running pods.
+	pods func(gw types.NamespacedName) []*corev1.Pod
+	// port is the port the pods serve a listener on; nil: the listener's.
+	port func(pods []*corev1.Pod, l gatewayv1.Listener) int32
+	// clientCert says why the proxy asks the clients of a Gateway's HTTPS
+	// listener for a certificate, besides the Gateway's own
+	// spec.tls.frontend, or ""; nil: never.
+	clientCert func(gw types.NamespacedName, l gatewayv1.Listener) string
+}
+
+// httpRouteProbes are the probes of a protected HTTPRoute (its protected
+// rules, sections), one job per Gateway of the proxy that serves it
+// (gateways): a target per protected rule, from its first match the probe
+// can make, and per HTTP or HTTPS listener the route is attached to, on
+// each running pod of the Gateway; why says why the route can't be
+// probed, if it can't.
+func (st *envoyState) httpRouteProbes(hr *gatewayv1.HTTPRoute, sections []string, gateways []types.NamespacedName, gp gatewayProbes) ([]ProbeJob, string) {
 	name := "HTTPRoute " + hr.Name
 	sel := rules{}
-	for _, s := range r.sections {
+	for _, s := range sections {
 		sel = sel.with(s)
 	}
 	// A target per protected rule, from its first match the probe can make.
@@ -156,12 +188,13 @@ func (st *envoyState) istioRouteProbes(r *istioRoute) ([]ProbeJob, string) {
 		hosts = append(hosts, string(h))
 	}
 	var jobs []ProbeJob
-	for _, gwKey := range r.gateways {
+	for _, gwKey := range gateways {
 		gw := st.gateways[gwKey]
 		if gw == nil {
 			continue
 		}
-		job := ProbeJob{Route: ProbeRoute{Kind: "HTTPRoute", Key: key(hr)}, Proxy: "Istio",
+		pods := gp.pods(gwKey)
+		job := ProbeJob{Route: ProbeRoute{Kind: "HTTPRoute", Key: key(hr)}, Proxy: gp.proxy,
 			Fingerprint: fmt.Sprintf("%s/%d/%d", gwKey, hr.Generation, gw.Generation)}
 		for _, l := range attachedListeners(hr, gw) {
 			if l.Protocol != gatewayv1.HTTPProtocolType && l.Protocol != gatewayv1.HTTPSProtocolType {
@@ -175,8 +208,22 @@ func (st *envoyState) istioRouteProbes(r *istioRoute) ([]ProbeJob, string) {
 			if !ok {
 				continue
 			}
+			tls := l.Protocol == gatewayv1.HTTPSProtocolType
+			if tls {
+				why := frontendValidation(gw, l)
+				if why == "" && gp.clientCert != nil {
+					why = gp.clientCert(gwKey, l)
+				}
+				if why != "" {
+					return nil, fmt.Sprintf("%s can't be probed: Gateway %s serves it on port %d with mutual TLS (%s), where the probe has no client certificate", name, gwKey, l.Port, why)
+				}
+			}
+			port := l.Port
+			if gp.port != nil {
+				port = gp.port(pods, l)
+			}
 			for k, t := range ruleTargets {
-				t.Host, t.Port, t.TLS = host, l.Port, l.Protocol == gatewayv1.HTTPSProtocolType
+				t.Host, t.Port, t.TLS = host, port, tls
 				if t.TLS && sendsValues(t) {
 					return nil, fmt.Sprintf("%s can't be probed: rule %s %s, and Gateway %s serves it over HTTPS on port %d", name, ruleLabels[k], overTLS, gwKey, l.Port)
 				}
@@ -186,12 +233,32 @@ func (st *envoyState) istioRouteProbes(r *istioRoute) ([]ProbeJob, string) {
 		if len(job.Targets) == 0 {
 			return nil, fmt.Sprintf("%s can't be probed: it is on no HTTP or HTTPS listener of Gateway %s", name, gwKey)
 		}
-		for _, p := range istioPodsOf(st, gwKey) {
+		for _, p := range pods {
 			job.Pods = append(job.Pods, ProbePod{Name: p.Namespace + "/" + p.Name, UID: p.UID, IP: p.Status.PodIP})
 		}
 		jobs = append(jobs, job)
 	}
 	return jobs, ""
+}
+
+// frontendValidation says that a Gateway asks the clients of an HTTPS
+// listener for a certificate (the Gateway API's spec.tls.frontend: its
+// port's, else the default), or "" when it doesn't, or lets a client
+// without one in (AllowInsecureFallback).
+func frontendValidation(gw *gatewayv1.Gateway, l gatewayv1.Listener) string {
+	if gw.Spec.TLS == nil || gw.Spec.TLS.Frontend == nil {
+		return ""
+	}
+	v := gw.Spec.TLS.Frontend.Default.Validation
+	for _, pp := range gw.Spec.TLS.Frontend.PerPort {
+		if pp.Port == l.Port {
+			v = pp.TLS.Validation
+		}
+	}
+	if v == nil || v.Mode == gatewayv1.AllowInsecureFallback {
+		return ""
+	}
+	return "the Gateway's spec.tls.frontend validation"
 }
 
 // attachedListeners are the listeners of a Gateway an HTTPRoute's
@@ -375,7 +442,7 @@ func (st *istioIngressState) vsProbes(r *istioVSRoute) ([]ProbeJob, string) {
 
 func gatewaySelects(s labels.Selector, p *corev1.Pod) bool { return s.Matches(labels.Set(p.Labels)) }
 
-// proveRoute probes a wired Istio route: its jobs, and why it isn't
+// proveRoute probes a wired Envoy route (Istio's, Envoy Gateway's): its jobs, and why it isn't
 // proven yet (unverified) or can't be (notProbeable). In detect mode
 // (ext_proc's observability mode) Envoy discards the engine's answer and
 // forwards the probe to the app: the route is proven by the receipt the

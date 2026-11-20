@@ -149,7 +149,8 @@ request. In observability mode Envoy ignores the reply and forwards the request,
 (since v0.6.0, #475) the adapter doesn't answer: it keeps a receipt of the probe, which the agent
 reports to the operator with its heartbeats, and inspects the request as any other (0002 §6.1,
 proof by receipt). The operator probes
-each gateway pod for Istio's routes before `Programmed` (#372). The probe's response leg (#595,
+each gateway pod for Istio's routes before `Programmed` (#372), and each Envoy pod for Envoy
+Gateway's (#604). The probe's response leg (#595,
 [§4](#proving-responses-the-probes-response-leg-595)) is let through to the upstream instead,
 and answered at the response headers (or, in observability mode, leaves a receipt of the
 response).
@@ -857,10 +858,16 @@ a second request per pod and target, the **response leg**, and a policy with `re
   pod"); a pod where the response doesn't reach the engine: `ResponsesNotInspected`, naming the pod
   and what came back; the method: `NotProbeable`; engines before 0.6.0: a note on `Programmed`. No
   new reason.
-- **Envoy Gateway isn't probed**, for requests either: unlike Istio and the HAProxy controller,
-  Envoy Gateway reports on the operator's `EnvoyExtensionPolicy` (`Accepted`) after translating it,
-  and the response processing mode is part of that same object, so a route's responses rest on the
-  same evidence as its requests. A probe of Envoy Gateway's pods (both legs) is a follow-up (#604).
+- **Envoy Gateway is probed too** (**Built**, #604). Envoy Gateway reports on the operator's
+  `EnvoyExtensionPolicy` (`Accepted`) after translating it, so until #604 a route's requests and
+  responses rested on that report. It shows the translation, not the filter in Envoy: a user's
+  `EnvoyPatchPolicy` or a translation bug could drop it. So once the policy is accepted, the
+  route is probed as Istio's are, both legs, through each Envoy pod of its Gateways, on the Envoy
+  container's port for each listener (Envoy Gateway adds 10000 to a port below 1024, unless the
+  pods serve the listener's own, `useListenerPortAsContainerPort`). `Detect` mode
+  (`shadowMode`, ext_proc's observability mode) is proven by receipts, as Istio's. An HTTPS
+  listener that asks for a client certificate (a user's `ClientTrafficPolicy` with
+  `tls.clientValidation`, or the Gateway's `spec.tls.frontend`) can't be probed: `NotProbeable`.
 - **Rejected:** answering the probe's request leg in the response phase as well (it would then
   reach the app on every route, also those without `responses.inspect`); a response-leg proof by
   the engine's response counts or events (they don't name the probe, and can be forged by

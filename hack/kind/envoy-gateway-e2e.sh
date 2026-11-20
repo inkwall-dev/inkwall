@@ -15,7 +15,9 @@
 # SQL error is replaced through Envoy Gateway in block mode and logged in
 # detect mode while the policy reports that Traefik can't inspect responses
 # (#274), the engines take the client from an X-Forwarded-For entry only once
-# the InkwallConfig trusts the proxy that sent it (#364), and unprotecting or
+# the InkwallConfig trusts the proxy that sent it (#364), the routes are
+# Programmed only once the operator's probe has reached the engine through
+# the Envoy pods, its response leg too (#604), and unprotecting or
 # uninstalling leaves the user's objects as they were. Needs the operator installed (make
 # kind-operator); ends with helm uninstall. KEEP=1 leaves the test's objects.
 set -euo pipefail
@@ -328,6 +330,15 @@ condition() {
 }
 ready() { [[ $(condition Ready status) == True ]]; }
 programmed_both() { [[ $(condition Programmed message) == *"wired to the engine in Traefik"*"wired to the engine in Envoy Gateway"* ]]; }
+# probed: Programmed, so the operator's probe reached the engine through
+# every Envoy pod of both Gateways (#604): until then the policy is
+# Unverified.
+probed() { [[ $(condition Programmed status) == True ]] && programmed_both; }
+# probe_reached_app_since TIME: the app logged a request on the probe's
+# reserved path since TIME. In Block mode the engine answers the request
+# leg itself; only the response leg, and in Detect mode the request leg,
+# reach the app (#595). whoami logs the path, not the query.
+probe_reached_app_since() { "${KUBECTL[@]}" -n "$NS" logs deployment/app --since-time="$1" | grep -F ".well-known/inkwall-probe/" >/dev/null; }
 # policy [MODE [GRPC_MESSAGES [SPEC]]]: the shared policy, in Block mode by
 # default; GRPC_MESSAGES sets body.grpcMessages, and SPEC (YAML lines) is
 # added.
@@ -561,7 +572,8 @@ for gw in custom plain; do
 done
 eventually "Envoy Gateway accepts the EnvoyExtensionPolicy on both Gateways" eep_accepted
 eventually "and the buffer limit on both Gateways" limits_accepted
-eventually "Programmed through Traefik and Envoy Gateway" programmed_both
+eventually "Programmed through Traefik and Envoy Gateway, proven by the operator's probe" probed
+check "Block mode: the engine answered the probe, which never reached the app" never_reached_app ".well-known/inkwall-probe/"
 eventually "the policy is Ready" ready
 forward_all
 eventually "the attack is blocked through both Gateways and Traefik" all_are 403 "$SQLI"
@@ -705,6 +717,7 @@ done
 forward_all
 
 echo "== responses"
+responses_since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 policy Block "" "$RESPONSES"
 eventually "Envoy Gateway accepts the EnvoyExtensionPolicy sending responses" responses_held BufferedPartial
 eventually "not Programmed: Traefik can't send responses to the engine" not_programmed_traefik
@@ -712,6 +725,9 @@ check "a clean response passes through both Gateways" envoy_are 200 /products/42
 check "a response leaking a SQL error is replaced through both Gateways: 403" leak_is 403 "$CUSTOM_PORT" "$PLAIN_PORT"
 check "its body is gone" leak_replaced
 eventually "the engines log it as a response deny" logged_response /leak deny
+# The probe's response leg reaches the app (the engine lets it through and
+# answers its response), in Block mode too (#595, #604).
+eventually "the probe's response leg went through to the app" probe_reached_app_since "$responses_since"
 check "through Traefik it passes, as the status says" leak_is 200 "$TRAEFIK_PORT"
 check "an attack in the request is still blocked" all_are 403 "$SQLI"
 check "a gRPC call passes (its response isn't read)" grpc_are OK
@@ -782,6 +798,9 @@ body_path=/detect-body-$RANDOM$RANDOM
 check "a body attack passes" envoy_are 200 "$body_path" --data-urlencode "q=1' OR '1'='1"
 eventually "and reaches the app" reached_app "$body_path"
 eventually "the engines log the streamed body's attack" logged "$body_path"
+# Envoy discards the engine's answer to the probe in shadow mode: the
+# engines' receipts of it prove the route (#475, #604).
+eventually "Programmed in detect mode, by the engines' probe receipts" probed
 h2_path=/detect-h2-$RANDOM$RANDOM
 check "a body attack with trailers (HTTP/2) passes" h2_are 200 "$h2_path" "q=1%27%20OR%20%271%27%3D%271"
 eventually "the engines log its rule, not an oversized body" logged_rule "$h2_path"

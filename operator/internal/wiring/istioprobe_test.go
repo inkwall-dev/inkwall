@@ -110,6 +110,14 @@ func TestIstioRouteProbe(t *testing.T) {
 	if _, why := st.istioRouteProbes(&istioRoute{route: route, gateways: []types.NamespacedName{{Namespace: "edge", Name: "gw"}}, sections: []string{"health"}}); !strings.Contains(why, "rule health") || !strings.Contains(why, "regular expression") {
 		t.Errorf("why %q", why)
 	}
+
+	// An HTTPS listener whose Gateway asks for a client certificate (the
+	// Gateway API's frontend validation): the probe has none.
+	gw.Spec.TLS = &gatewayv1.GatewayTLSConfig{Frontend: &gatewayv1.FrontendTLSConfig{Default: gatewayv1.TLSConfig{
+		Validation: &gatewayv1.FrontendTLSValidation{CACertificateRefs: []gatewayv1.ObjectReference{{Name: "ca"}}}}}}
+	if _, why := st.istioRouteProbes(&istioRoute{route: route, gateways: []types.NamespacedName{{Namespace: "edge", Name: "gw"}}, sections: []string{"api"}}); !strings.Contains(why, "mutual TLS") || !strings.Contains(why, "port 443") {
+		t.Errorf("frontend validation: why %q", why)
+	}
 }
 
 // A VirtualService's probe: per Gateway server whose hosts it serves, on
