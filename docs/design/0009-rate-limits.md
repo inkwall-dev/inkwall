@@ -115,8 +115,9 @@ client on one connection. So a client that reaches the proxies directly meets th
 and one that opens many connections at once can get up to N times it. Behind an L7 load balancer
 or a CDN, the common setup of [§7](#7-client-ip), the load balancer pools clients onto its own
 connections and spreads their requests over the pods, so every client can get up to N times the
-limit. Either way it stays bounded: with 3 proxy replicas and `requests: 10`, a brute-forcer gets
-at most 30 tries a minute instead of thousands. That is the job of a per-IP limit in front of a
+limit. Either way it stays bounded: with 3 proxy replicas, `requests: 10` and `burst: 20`, a
+brute-forcer gets at most 30 tries a minute in steady state, plus each engine's burst once (90 in
+the first minute, and one more burst per engine restart), instead of thousands. That is the job of a per-IP limit in front of a
 login, and it is what v0.7.0 promises. The docs say to pick a limit as "what one engine allows",
 and `inkwallctl explain policy` prints the ceiling ([§6](#6-observability)).
 
@@ -167,7 +168,7 @@ spec:
     - name: api
       requests: 600
       period: 1m
-      key: {clientIP: {ipv6PrefixLength: 56}}
+      key: {clientIP: {ipv6PrefixLength: 64}}
       mode: Detect                 # optional: log only, on a Block policy
 ```
 
@@ -179,7 +180,7 @@ spec:
 | `requests` | 1–1,000,000 | required | Requests allowed per `period`, per key, per engine |
 | `period` | duration, 1s–1h | required | The period of `requests` |
 | `burst` | 1–1,000,000 | `requests` | Requests a key may send at once after being idle |
-| `key.clientIP.ipv6PrefixLength` | 32–128 | 64 | IPv6 clients are counted by this prefix; IPv4 by the address |
+| `key.clientIP.ipv6PrefixLength` | 32–128 | 56 | IPv6 clients are counted by this prefix; IPv4 by the address |
 | `key.header.name` | header name, ≤ 128 | — | Count by this header's value instead ([§3.3](#33-keys)) |
 | `match.paths` | `PathPattern` list, ≤ 16 | all | Exact paths or prefixes ending in `*`, the type of `skip.paths` (`operator/api/v1alpha1/wafpolicy_types.go`) |
 | `match.methods` | method list, ≤ 9 | all | Only these methods count |
@@ -191,12 +192,19 @@ shared by policies like `WAFIPList`, was rejected for v0.7.0: an IP list is data
 share; a limit is tied to one application's endpoints.
 
 `match.paths` narrows within the policy's routes; it cannot reach other routes, since the engine
-consults a policy only for requests on its routes (`pkg/policy`). Paths match with the patterns of
-`skip.paths`, on the path `router.UnambiguousPath` returns (`pkg/router`). The failure differs:
-for a skip, a path that can't be read one way (percent-encoding, `;`, `//`, dot segments) is
-inspected, the safe side. For a limit, the safe side is counting, so such a path counts against
-every path-scoped limit of the policy. Otherwise `POST /%6Cogin`, `/login;x` or `//login` would
-never touch a `/login` limit, though the application may read them as `/login`.
+consults a policy only for requests on its routes (`pkg/policy`). Paths use the patterns of
+`skip.paths`, on the path `router.UnambiguousPath` returns (`pkg/router`), with two differences,
+both toward counting:
+
+- **A path that can't be read one way** (percent-encoding, `;`, `//`, dot segments) counts against
+  every path-scoped limit of the policy. For a skip such a path is inspected, the safe side; for a
+  limit the safe side is counting. Otherwise `POST /%6Cogin`, `/login;x` or `//login` would never
+  touch a `/login` limit, though the application may read them as `/login`.
+- **Case and one trailing slash are ignored.** `UnambiguousPath` accepts `/Login` and `/login/` as
+  they are, and `skip.paths` compares exactly (`matchAny`), so they would escape an exact `/login`
+  limit. Many frameworks route both to `/login`. A limit compares both sides in ASCII lower case,
+  with one trailing slash removed (`/login/` matches `/login`; a prefix `/api/*` is unchanged).
+  This can only count more requests, never fewer.
 
 ### 3.2 Token bucket semantics
 
@@ -218,12 +226,21 @@ arrival time*, TAT). With `T = period / requests`:
 One `int64` per key, no floating point, and an exact `Retry-After`. A bucket whose TAT is in the
 past is full, the same as no bucket, which is what makes eviction safe ([§5.3](#53-memory-bound-and-eviction)).
 
-**Several limits** on one request: every limit that matches it is checked first, without
-charging. If any is over, the request is over, `Retry-After` is the largest of theirs, and no limit
-is charged. Only when all pass is each charged. So a refused request never spends a token of
-another limit. Checking and charging happen under each bucket's shard lock in turn, not under one
-lock for all: two requests of one key racing on two limits can both pass, at most one extra
-request each, the same over-admission as a race between engines.
+**One limit** is checked and charged in one step, under its bucket's shard lock: steps 1–3 run
+without releasing it. Two requests racing on one key can't both take its last token.
+
+**Several limits** on one request. The `Block` limits that match it are charged in order, each
+atomically as above. If one refuses, the ones already charged are refunded (`TAT −= T`, under their
+locks), the request is over, and `Retry-After` is the largest of the refusing limit's and of those
+the request would have exceeded. So a refused request spends no token of another limit, and no
+limit ever admits more than its rate. The cost of not holding every lock at once: between a charge
+and its refund, a concurrent request of the same key can find that bucket a token short and be
+refused. That needs the key to be at its limit on another limit at the same instant, and errs
+toward refusing, which the client retries after `Retry-After`.
+
+**`Detect` limits never gate the others.** Each is checked and charged on its own, after the
+`Block` limits, and only logs. Otherwise a client over a loose `Detect` limit would leave the
+`Block` limits uncharged and never denied.
 
 Rejected: a fixed or sliding window counter. A fixed window lets 2 × `requests` through across a
 window boundary; a sliding window needs two counters and a timestamp per key for the same
@@ -239,9 +256,11 @@ guarantee the bucket gives with one number, and has no natural burst.
   count as IPv4 whichever adapter set them. A request with no valid address (a `/v1/check` call
   with neither field) is not limited by an IP key: one shared bucket would let one caller deny
   every such request. It is counted in `inkwall_rate_limit_skipped_total{reason="no_key"}`, and
-  the `/v1/check` docs say to send `client_ip`. IPv6 clients count by their `/64` by default: one
-  subscriber usually holds a whole `/64`, so per address an attacker would have 2^64 keys, and
-  would flush the table too ([§5.3](#53-memory-bound-and-eviction)).
+  the `/v1/check` docs say to send `client_ip`. IPv6 clients count by their `/56` by default. One
+  subscriber holds at least a `/64`, so per address an attacker would have 2^64 keys and would
+  flush the table ([§5.3](#53-memory-bound-and-eviction)); providers often hand out a `/56` or a
+  `/48`, which a `/64` key would split into 256 or 65,536 keys. `/56` bounds a `/48` holder to 256
+  keys, and a policy can choose `/64` or finer.
 - **`header`**: the value of a request header (its first value), for fairness between
   authenticated clients: an API key, a tenant ID. The engine keeps a 64-bit keyed hash of the
   value ([`hash/maphash`](https://pkg.go.dev/hash/maphash), with a seed chosen at engine start),
@@ -341,10 +360,12 @@ writes its own denials (`--json-denials` doesn't apply there, `cmd/engine/main.g
 
 **gRPC.** A denied gRPC call is answered with a gRPC status (`httpadapter.GRPCCode`,
 [0006 §7](0006-adapter-protocols.md#7-denying-grpc-calls)). Today 429 maps to `UNAVAILABLE`, gRPC's
-own mapping of HTTP statuses. A rate-limited call gets `RESOURCE_EXHAUSTED` instead, as an
-oversized body already does: `UNAVAILABLE` tells gRPC clients the call is safe to retry at once,
-which is the opposite of what a limit means. `Retry-After` is sent too, where the adapter can; gRPC
-clients don't read it.
+own mapping of HTTP statuses (`pkg/adapters/internal/httpadapter/grpc.go`). `GRPCCode` maps by
+status alone, so 429 itself moves to `RESOURCE_EXHAUSTED`, as an oversized body's 413 already
+does: `UNAVAILABLE` tells gRPC clients the call is safe to retry at once, which is the opposite of
+what a limit means. Only limits answer 429 by default; a SecLang rule that denies with
+`status:429` changes too, and the upgrade notes say so. `grpc_test.go`'s table changes with it.
+`Retry-After` is sent too, where the adapter can; gRPC clients don't read it.
 
 The status is fixed at 429. A configurable status was rejected: 429 is the one every client and
 CDN understands, and a 403 would hide from the client that waiting helps.
@@ -373,11 +394,20 @@ their configuration would have no home in the API; an engine-wide limit is a lat
 ([§1](#1-goals-and-scope)).
 
 Limits are decided once, in `BodyLimit`, which adapters call before reading a body
-(`pkg/pipeline/pipeline.go`), when the adapter calls it, and otherwise at step 3. The decision,
-charged once, is carried on the `Request` to `Check`, which uses it instead of checking again. A
-denied request gets a body limit of 0, so a flood over its limit isn't even read. Deciding in both
-places was rejected: the key might gain a token between them, and the request would then be
-inspected without its body.
+(`pkg/pipeline/pipeline.go`), when the adapter calls it, and otherwise at step 3:
+
+- **Per policy, in `Check`'s order.** `Set.BodyLimit` asks every policy of the request
+  (`policiesFor`, no early stop: `pkg/policy/policy.go`), while `Set.Check` stops at the first
+  deny. So `Set.BodyLimit` decides limits in `Check`'s order and stops charging after the first
+  policy whose limits deny, as `Check` would. Each policy's decision is kept: a request has up to 4
+  policies (`policiesFor`'s buffer).
+- **Tagged with the set's version.** The decisions ride on the `Request`, with `Set.Version()`.
+  A bundle swap between `BodyLimit` and `Check` gives `Check` a set whose limits may differ, so on
+  a mismatch `Check` decides again (charging again: the rare cost of a swap mid-request).
+- **A denied request gets a body limit of 0**, so a flood over its limit isn't even read.
+
+Deciding in both places on every request was rejected: the key might gain a token between them,
+and the request would then be inspected without its body.
 
 ### 5.2 Data structure
 
@@ -389,16 +419,22 @@ holds its ID in it.
   least 64), each a mutex and a fixed-size, open-addressed array of entries. The shard and the slot
   come from one `maphash` of (limit ID, key). The mutex is held for the lookup and the GCRA
   update: tens of nanoseconds.
-- **Entry:** the key (16 bytes: the masked address, or the header hash, with its tag), the limit
-  ID (4), the TAT (8, nanoseconds on the engine's monotonic clock), and, for event sampling, the
-  time of the last event and the requests limited since (4 + 4). About 40 bytes, with no pointers,
-  so the garbage collector never scans the table, and nothing is allocated per request.
-- **Probing:** a key's neighbourhood is the 8 slots from its hashed slot, one cache line pair;
-  lookup, insert and eviction look only there.
-- **Limit IDs.** The bundle builder assigns each limit a `uint32` ID, stable across bundles for the
-  same (policy UID, limit name, rate, burst, key), and never reuses one for a different limit:
-  IDs only grow, and the next one is kept in the bundle. Each bundle's compiled set holds its
-  live IDs; an entry whose ID isn't live counts as free.
+- **Entry:** a one-byte tag (IPv4, IPv6 or header hash), the key (16 bytes: the masked address, or
+  the 8-byte header hash), the limit ID (4), the TAT (8, nanoseconds on the engine's monotonic
+  clock), and, for event sampling, the time of the last event and the requests limited since
+  (4 + 4). 37 bytes, padded to 40, with no pointers, so the garbage collector never scans the
+  table, and nothing is allocated per request.
+- **Probing:** a key's neighbourhood is the 8 slots from its hashed slot (320 bytes, five cache
+  lines); lookup, insert and eviction look only there.
+- **Limit IDs, in the engine.** The `Store` interns each limit's identity, (policy UID, limit name,
+  key spec), to a `uint32` ID of its own, and never reuses one while the engine runs. The bundle
+  carries no ID: it would depend on operator state (a deleted bundle Secret restarts the
+  operator's counters, [0004 §4.6](0004-operator.md#46-bundle-builder-leader-only)), and the
+  engine's own table outlives bundles anyway. Changing `requests`, `period` or `burst` keeps the
+  ID and its buckets: GCRA reads `T` and `burst` from the limit at each request, so the new rate
+  applies at once to the TAT already there. Changing the name or the key spec is a new limit,
+  which starts full. Each compiled set holds its live IDs; an entry whose ID isn't live counts as
+  free.
 - **Cost target:** ≤ 1 µs per request with limits, 0 allocations, measured by the benchmarks of
   [§8](#8-testing) (the T1 budget of [0001 §4](0001-performance-first-architecture.md#4-request-pipeline-tiered-cheapest-first);
   for scale, `pkg/iplist` takes about 60 ns, the policy lookup about 440 ns).
@@ -424,11 +460,14 @@ Rejected:
 ### 5.3 Memory bound and eviction
 
 The table has a fixed capacity, allocated when the first bundle with limits arrives and never
-grown: **`--rate-limit-keys`**, default 262,144 entries per engine (about 12 MiB with the table's
-slack), set for injected engines by `InkwallConfig.spec.engine.rateLimitKeys`. The engine's default
-memory limit is 512 MiB, with `GOMEMLIMIT` at 90% of it (`operator/internal/injection/sidecar.go`,
-`internal/memlimit`). The engine caps the table at a quarter of `GOMEMLIMIT` and logs when it does,
-so a large setting can't starve the rules. The capacity is shared by all limits: most keys are
+grown: **`--rate-limit-keys`**, default 262,144 entries per engine (10 MiB of entries, held at a
+load factor of at most 0.85, so about 12 MiB of table), set for injected engines by
+`InkwallConfig.spec.engine.rateLimitKeys`. The flag is read at start: a change reaches injected
+engines when their pods are recreated (a rollout, or `spec.engine.rollout: Automatic`). The
+engine's default memory limit is 512 MiB, with `GOMEMLIMIT` at 90% of it
+(`operator/internal/injection/sidecar.go`, `internal/memlimit`). The engine caps the table at a
+quarter of `GOMEMLIMIT` and logs when it does, so a large setting can't starve the rules. With no
+`GOMEMLIMIT` (a standalone engine without a memory limit) the cap is 64 MiB. The capacity is shared by all limits: most keys are
 idle at any time, and a per-limit split would waste it.
 
 When a key is new and its slot's neighbourhood is full, the engine evicts, in this order:
@@ -448,7 +487,8 @@ the table is full, was rejected: either new clients would go unlimited (an attac
 first, then everything passes) or they would share one overflow bucket (one attacker gets everyone
 new denied).
 
-The `/64` default for IPv6 ([§3.3](#33-keys)) keeps one subscriber from filling the table alone.
+The `/56` default for IPv6 ([§3.3](#33-keys)) keeps one subscriber from filling the table alone:
+a holder of a `/48`, the most a provider usually assigns, has 256 keys.
 
 ### 5.4 Clock, bundle swaps and restarts
 
@@ -457,11 +497,11 @@ The `/64` default for IPv6 ([§3.3](#33-keys)) keeps one subscriber from filling
   aren't moved by wall-clock steps. Today `check` doesn't get it, so it is passed down, and
   `BodyLimit` reads the clock when it decides ([§5.1](#51-where-in-the-pipeline)).
 - **Bundle swaps.** Every bundle compiles new pipelines (`policy.Compile`), but the `Store`
-  outlives them, as `Evaluators` does. A limit keeps its ID, and so its buckets, when its policy,
-  `name`, rate, burst and key are unchanged; a changed limit gets a new ID and starts full, and the
-  old ID's entries are free at once, counted as `idle` when reused ([§5.2](#52-data-structure)). So
-  an unrelated policy change never resets limits, and an edit never looks like an attack in the
-  `active` count.
+  outlives them, as `Evaluators` does. A limit keeps its ID, and so its buckets, while its policy,
+  `name` and key spec are unchanged, whatever its rate and burst; a new name or key spec gets a new
+  ID and starts full, and the old ID's entries are free at once, counted as `idle` when reused
+  ([§5.2](#52-data-structure)). So an unrelated policy change never resets limits, and an edit
+  never looks like an attack in the `active` count.
 - **Restarts.** State is in memory only. A restarted engine starts every bucket full: a client gets
   one extra burst per restart. Accepted, as [0001 §5.3](0001-performance-first-architecture.md#53-state-rate-limits-reputation)
   accepts a little over-admission; persisting buckets to the disk cache was rejected for the I/O it
@@ -470,19 +510,23 @@ The `/64` default for IPv6 ([§3.3](#33-keys)) keeps one subscriber from filling
 ### 5.5 Bundle and API changes
 
 - **`api/bundle/v1/bundle.proto`:** `Policy` gains `repeated RateLimit rate_limits = 15`. A new
-  message `RateLimit`: `id` ([§5.2](#52-data-structure)), `name`, `requests`, `period` (`google.protobuf.Duration`), `burst`, a
+  message `RateLimit`: `name`, `requests`, `period` (`google.protobuf.Duration`), `burst`, a
   `RateLimitKey` (`oneof`: `ClientIPKey { ipv6_prefix_length }`, `HeaderKey { name }`),
   `repeated string paths` (the router's syntax, as `skip_paths`), `repeated string methods`, and
-  `bool detect`. Engines before 0.7.0 skip the unknown field ([§3.6](#36-older-engines)).
+  `bool detect`. No ID: the engine assigns its own ([§5.2](#52-data-structure)). Engines before
+  0.7.0 skip the unknown field ([§3.6](#36-older-engines)).
 - **`api/engine/v1/engine.proto`:** `REASON_RATE_LIMIT = 15` in `Reason` (the next number after
   `REASON_GRPC`); `pkg/pipeline` gains `ReasonRateLimit`, written `rate-limit` like `ip-deny`.
 - **`api/events/v1/events.proto`:** `SecurityEvent` gains `string rate_limit = 23`, the limit's
-  name, and `uint32 rate_limited = 24`, the requests it limited since the key's last event
-  ([§6](#6-observability)). Operators before 0.7.0 ignore both.
+  name, and `uint32 sampled_count = 24`, how many events this one stands for: for a limit, the
+  requests limited since the key's last event ([§6](#6-observability)). It is generic, so other
+  sampled events (geo blocking, design 0011) reuse it; 0 or 1 means the event stands for
+  itself. Operators before 0.7.0 ignore both.
 - **`pkg/pipeline.Verdict`:** `RetryAfter`, the limit's name, an `Event` flag (whether this
-  verdict becomes a security event) and the count of limited requests it stands for. Adapters
+  verdict becomes a security event) and its sampled count, the requests it stands for. Adapters
   decide events through `httpadapter.IsEvent`, which reads the flag for a `rate-limit` verdict.
-- **`pkg/request.Request`:** the limit decision of `BodyLimit` ([§5.1](#51-where-in-the-pipeline)).
+- **`pkg/request.Request`:** the per-policy limit decisions of `BodyLimit`, with the set's version
+  ([§5.1](#51-where-in-the-pipeline)).
 - **Capacity:** the engine flag `--rate-limit-keys`, set on injected engines from
   `InkwallConfig.spec.engine.rateLimitKeys` (`operator/internal/injection/sidecar.go` adds the
   flag when the field is set).
@@ -500,7 +544,7 @@ The `/64` default for IPv6 ([§3.3](#33-keys)) keeps one subscriber from filling
 | `inkwall_rate_limit_key_capacity` | gauge | | The table's capacity after the memory cap |
 | `inkwall_rate_limit_evictions_total` | counter | `kind` | `idle` (a free entry, harmless) or `active` (state forgotten) |
 | `inkwall_rate_limit_skipped_total` | counter | `reason` | Requests a limit couldn't count: `no_key` (no valid client address) |
-| `inkwall_rate_limit_events_dropped_total` | counter | | Limit events past the per-limit event cap |
+| `inkwall_rate_limit_events_dropped_total` | counter | | Limit events past the per-limit or the engine-wide event cap |
 
 No metric is labelled by limit or key: 5,000 policies × 8 limits would be 40,000 series per engine,
 and keys are unbounded. Per-policy counts come from the opt-in `inkwall_policy_requests_total`; the
@@ -512,18 +556,22 @@ attacker cycling addresses.
 that isn't `allow`). But a flood would fill the bounded event buffer (`pkg/events`), which drops
 the oldest events, and push out the attacks that matter. So limit events are **sampled per key**:
 the first limited request of a key, then at most one event per key per minute, carrying the
-number of requests limited since the last one. The sampling state is in the bucket entry, so it
+number of requests limited since the last one in `sampled_count`. The sampling state is in the
+bucket entry, so it
 costs nothing more. Per key isn't enough when many keys are limited at once (100,000 bot
 addresses would still send 100,000 events a minute), so each (policy, limit) also has an event
 cap: a token bucket of 100 events per second, in the style of the log limiter
-(`pkg/events/loglimit.go`), with the rest counted in
-`inkwall_rate_limit_events_dropped_total`. The log lines go through the existing log limiter
+(`pkg/events/loglimit.go`). And all limits together have an engine-wide cap of 10 events per
+second: the ring holds 10,000 events (`pkg/events/buffer.go`, `DefaultCapacity`), and at 100 per
+second one flooded limit would fill it in 100 s while the operator is away, pushing out the
+attacks that matter. The rest are counted in `inkwall_rate_limit_events_dropped_total`. The log lines go through the existing log limiter
 (`--event-log-rate`), unchanged. Every limited request is still counted in the metrics.
 
 **`inkwallctl explain`** ([0008](0008-assistants.md)):
 
 - `explain request <id>` on a `rate-limit` event: the policy, the limit's name, rate, burst and key
-  kind, the requests limited since the last event, and the cause and fix from the reasons registry
+  kind, the requests limited since the last event (`sampled_count`), and the cause and fix from
+  the reasons registry
   (`operator/reasons/reasons.go` gains the `SecurityEvent` reason `rate-limit`: raise the limit,
   check the client IP the engine resolved, or narrow `match`). Since events are sampled, some 429s
   have no event; their `X-Request-Id` then isn't found, and the troubleshooting guide says so.
@@ -557,17 +605,17 @@ step. The guide `docs/client-ip.md` changes "the planned rate limits" to the bui
 
 | Layer | What | Where |
 |---|---|---|
-| Unit | GCRA with a fake clock: burst from idle, steady rate, refill, `Retry-After` rounding, a period of 1 h with `requests: 1`, the clock reading the same twice; key derivation: IPv4, IPv4-mapped (unmapped by the key), IPv6 masked at each prefix length, no valid address (`no_key`), header missing (falls back to the IP, a different tag), first value of a repeated header; eviction order (free entries first, then the earliest TAT) and the `active` count; the memory cap from `GOMEMLIMIT`; the per-limit event cap; concurrent use under `-race` | `pkg/ratelimit` |
-| Unit | The pipeline order of [§5.1](#51-where-in-the-pipeline): `ip-deny` before limits, `ip-allow` and `SkipAll` not counted, `SkipBody` counted, `Detect` runs the rules and a rule's reason wins, `mode: Detect` on a `Block` policy, several limits (none charged when one is over, the largest `Retry-After`), several policies (later ones not charged after a deny), the decision made in `BodyLimit` used by `Check` and charged once, a body limit of 0 when denied | `pkg/pipeline`, `pkg/policy` |
-| Unit | Bundle swaps keep unchanged limits' buckets and reset changed ones; a changed limit's old entries reused as `idle`, never `active` | `pkg/policy` |
-| Unit | Each adapter's denial: 429, `Retry-After`, `X-Request-Id`, JSON body; gRPC `RESOURCE_EXHAUSTED`; SPOE's `retry_after` variable | each adapter's `denial_test.go`, `pkg/adapters/spoe` |
+| Unit | GCRA with a fake clock: burst from idle, steady rate, refill, `Retry-After` rounding, a period of 1 h with `requests: 1`, the clock reading the same twice, a changed rate applied to an existing TAT; charging several limits with a refund when a later one refuses, never more than the rate per limit under concurrent requests; key derivation: IPv4, IPv4-mapped (unmapped by the key), IPv6 masked at each prefix length, no valid address (`no_key`), header missing (falls back to the IP, a different tag), first value of a repeated header; eviction order (free entries first, then the earliest TAT) and the `active` count; the memory cap from `GOMEMLIMIT` and without it; the per-limit and engine-wide event caps; concurrent use under `-race` | `pkg/ratelimit` |
+| Unit | The pipeline order of [§5.1](#51-where-in-the-pipeline): `ip-deny` before limits, `ip-allow` and `SkipAll` not counted, `SkipBody` counted, `Detect` runs the rules and a rule's reason wins, `mode: Detect` on a `Block` policy, several limits (none left charged when one is over, the largest `Retry-After`), a `Detect` limit over its rate not stopping a `Block` limit, several policies (later ones not charged after a deny, in `BodyLimit` as in `Check`), the decisions made in `BodyLimit` used by `Check` and charged once, a bundle swap between them, a body limit of 0 when denied | `pkg/pipeline`, `pkg/policy` |
+| Unit | Bundle swaps keep a limit's buckets when only its rate or burst changed, and reset it when its name or key spec changed; a renamed limit's old entries reused as `idle`, never `active` | `pkg/policy` |
+| Unit | Each adapter's denial: 429, `Retry-After`, `X-Request-Id`, JSON body; gRPC `RESOURCE_EXHAUSTED` for 429 (`GRPCCode`'s table); SPOE's `retry_after` variable | each adapter's `denial_test.go`, `pkg/adapters/internal/httpadapter/grpc_test.go`, `pkg/adapters/spoe` |
 | Unit | CRD validation (each CEL rule, accepted and refused), `requirement` returns 0.7.0 for `spec.rateLimits`, the bundle builder's output, the HAProxy snippet's 429 rule before the 403 one | `operator/api/v1alpha1/validation_test.go`, `operator/internal/distribution`, `operator/bundle`, `operator/internal/wiring` |
 | Fuzz | Random sequences of (key, time step) against a reference token bucket in floating point: never more than `burst + requests × elapsed / period` admitted per key, never a refusal when the model has a token (within rounding), `Retry-After` ≥ 1 and correct; with the table forced tiny, eviction never admits more than a fresh bucket would | `pkg/ratelimit` |
 | Fuzz | The existing adapter fuzzers run with a policy that has limits | `pkg/adapters/*` |
-| Fuzz | Paths: any request path that `router.UnambiguousPath` refuses counts against every path-scoped limit, and no path the application could read as a limited path escapes its limit (`%6C`, `;`, `//`, dot segments, case) | `pkg/pipeline` |
+| Fuzz | Paths: any request path that `router.UnambiguousPath` refuses counts against every path-scoped limit; an accepted path that differs from a limited path only in ASCII case or one trailing slash counts against it; no path counts against fewer limits than its lower-cased, slash-trimmed form | `pkg/pipeline` |
 | Benchmark | `BenchmarkAllow` over one hot key from every CPU (worst contention), 1M distinct keys (cache misses), and a full table (eviction path); `BenchmarkCheck` with and without limits. Target ≤ 1 µs and 0 allocs/op; gated by `make bench-compare` (`hack/benchgate`) like every benchmark, with the under-1 µs threshold of [0001 §8](0001-performance-first-architecture.md#8-proving-it-the-performance-test-harness) | `pkg/ratelimit`, `pkg/pipeline` |
 | e2e on kind | Per proxy: Traefik (`hack/kind/e2e.sh`), Envoy Gateway, Istio, raw Envoy and HAProxy (their `*-e2e.sh`). From one client pod, `burst` requests pass and the next gets 429 with `Retry-After`; after it, one passes again; a second client pod is not affected; a policy in `Detect` passes everything and logs a `rate-limit` event; an engine before 0.7.0 makes the policy `EnginesOutdated` (`hack/kind/upgrade.sh`) | `hack/kind` |
-| Soak | `hack/kind/soak.sh` gains a limited policy, a few steady clients over their limit, and a client cycling through new header values and IPv6 `/64`s at 2,000 keys per second for the soak's duration: engine memory stays flat under its limit, the steady clients stay limited throughout (their state is kept while the cycling client's keys are evicted), clean traffic is never limited, and p99 doesn't move | `hack/kind/soak.sh` |
+| Soak | `hack/kind/soak.sh` gains a limited policy, a few steady clients over their limit, and a client cycling through new header values and IPv6 `/56`s at 2,000 keys per second for the soak's duration: engine memory stays flat under its limit, the steady clients stay limited throughout (their state is kept while the cycling client's keys are evicted), clean traffic is never limited, and p99 doesn't move | `hack/kind/soak.sh` |
 
 ## 9. Decisions
 
@@ -577,17 +625,18 @@ step. The guide `docs/client-ip.md` changes "the planned rate limits" to the bui
 | 2 | Cluster-wide limits deferred; operator-relayed sync is the first option to evaluate | Redis; gossip ([§2.2](#22-cluster-wide-limits-deferred)) |
 | 3 | `WAFPolicy.spec.rateLimits`, up to 8, per policy | A separate CRD |
 | 4 | Token bucket stored as GCRA (one `int64` per key) | Fixed and sliding windows |
-| 5 | Keys: client IP (IPv6 by `/64`), or a header's hashed value falling back to the IP | Raw header values; per-address IPv6 |
-| 6 | After IP lists and the skip list, before WebSocket, gRPC and the rules; decided once, in `BodyLimit` when the adapter calls it | Before the policy match; deciding in both `BodyLimit` and `Check` |
+| 5 | Keys: client IP (IPv6 by `/56`), or a header's hashed value falling back to the IP | Raw header values; per-address IPv6 |
+| 6 | After IP lists and the skip list, before WebSocket, gRPC and the rules; decided once, in `BodyLimit` when the adapter calls it, per policy in `Check`'s order, tagged with the set's version | Before the policy match; deciding in both `BodyLimit` and `Check` |
 | 7 | Allow-listed clients and skipped paths are never limited; exclusions don't apply | Limits over the allow list |
-| 8 | 429 and `Retry-After` from every adapter; gRPC `RESOURCE_EXHAUSTED` | A configurable status; `RateLimit-*` headers |
+| 8 | 429 and `Retry-After` from every adapter; 429 maps to gRPC `RESOURCE_EXHAUSTED` | A configurable status; `RateLimit-*` headers; a reason-aware gRPC mapping |
 | 9 | `Detect` counts and logs, the rules still run; `mode: Detect` per limit | A per-limit `Block` on a `Detect` policy |
 | 10 | Sharded, fixed-capacity, pointer-free table; striped mutexes | Per-CPU buckets; `x/time/rate` per key; `sync.Map` |
-| 11 | Fixed capacity (`--rate-limit-keys`, at most a quarter of `GOMEMLIMIT`); evict free entries, then the closest to full; stable limit IDs | Growing tables; refusing new keys; clearing all |
-| 12 | Buckets survive bundle swaps when the limit is unchanged, not restarts | Persisting buckets |
+| 11 | Fixed capacity (`--rate-limit-keys`, at most a quarter of `GOMEMLIMIT`, 64 MiB without one); evict free entries, then the closest to full | Growing tables; refusing new keys; clearing all |
+| 12 | Limit IDs interned by the engine from (policy UID, name, key spec); buckets survive bundle swaps, and rate or burst changes, not restarts | IDs assigned by the operator; persisting buckets |
 | 13 | Old engines: `Enforced=False`, `EnginesOutdated` | A new condition |
-| 14 | Sampled limit events (one per key per minute, with a count, capped at 100 per second per limit); no per-limit metric labels | An event per limited request |
-| 15 | Several limits: checked first, all charged only when all pass; an ambiguous path counts against every path-scoped limit | Charging in order; skipping ambiguous paths |
+| 14 | Sampled limit events (one per key per minute, with a count, capped at 100 per second per limit and 10 per second per engine); no per-limit metric labels | An event per limited request |
+| 15 | Several `Block` limits: charged atomically each, in order, refunded when a later one refuses; `Detect` limits judged on their own | Check-then-charge without atomicity; `Detect` limits gating the others |
+| 16 | Limit paths: an ambiguous path counts against every path-scoped limit; case and one trailing slash ignored | Skipping ambiguous paths; exact, case-sensitive matching |
 
 ## 10. Open questions
 
