@@ -79,6 +79,8 @@ Every doc in this repository, by topic, with the question each one answers.
 - [0008 — Assistants](design/0008-assistants.md): how can users get answers faster: `inkwallctl explain`,
   an MCP server for the AI assistants they already use, a docs assistant and a GitHub bot, and the
   security rules every one of them follows.
+- [0009 — Rate Limits](design/0009-rate-limits.md): how does a policy limit a client's requests,
+  what does a limited client get, and why does each engine count on its own?
 - [0010 — Exporting Security Events to a SIEM](design/0010-siem-export.md): how do security events
   reach a SIEM (Splunk, Elastic, Loki, Datadog), with or without the control plane?
 
