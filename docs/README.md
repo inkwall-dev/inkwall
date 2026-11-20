@@ -2,6 +2,14 @@
 
 Every doc in this repository, by topic, with the question each one answers.
 
+## Contents
+
+- [Get started](#get-started)
+- [Guides](#guides)
+- [Reference](#reference)
+- [Design](#design)
+- [Contributing](#contributing)
+
 ## Get started
 
 - [Quickstart](quickstart.md): how do I see Inkwall block an attack in five minutes, on a local
