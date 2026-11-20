@@ -209,7 +209,7 @@ plane itself is not in this repository.
 
 ### 3.5 `inkwallctl` (CLI)
 
-Three commands are built:
+Seven commands are built:
 
 - `test` replays a request or a [HAR](https://w3c.github.io/web-performance/specs/HAR/Overview.html) file and shows the rules that match. It runs offline, for CI.
   It checks one of three things: the policy set by its flags; `WAFPolicy` objects (`--policy`,
@@ -220,7 +220,14 @@ Three commands are built:
   into `WAFPolicy` and `WAFRuleSet` objects targeting the Ingresses, or the HTTPRoutes or
   IngressRoutes that replace them (`--target`), and lists what it can't convert ([migrating from ingress-nginx](../migrating-from-ingress-nginx.md)). It only reads.
 
-Planned: `status` (engine versions, drift).
+- `status` answers "is Inkwall working in this cluster?" from the kubeconfig context: the
+  operator, the bundle, each proxy's integration and what it inspects, the engines and the
+  policies ([cluster status](../troubleshooting.md#cluster-status)). It only reads.
+- `explain` tells why a policy isn't `Ready`, or why a request was denied, from its request ID
+  ([explaining a policy or a denial](../troubleshooting.md#explaining-a-policy-or-a-denial)).
+- `tune` suggests the narrowest exclusions for the security events in the engines' logs, verified
+  against the policy ([suggest exclusions from the events](../testing-policies.md#suggest-exclusions-from-the-events)).
+- `mcp` serves read-only tools to an AI assistant over the Model Context Protocol ([MCP](../mcp.md)).
 
 ---
 
@@ -1067,8 +1074,8 @@ than the certificate's lifetime enrolls again with a new token. Keys are [ECDSA 
 - Bundles are signed, so editing the bundle Secret can't disable the WAF without the signing key.
 - The operator's [RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) is scoped ([0004 §7](0004-operator.md#7-rbac)).
 - Supply chain: [goreleaser](https://goreleaser.com/), [cosign](https://docs.sigstore.dev/cosign/signing/overview/), an [SBOM](https://www.cisa.gov/sbom) ([syft](https://github.com/anchore/syft)), [SLSA provenance](https://slsa.dev/spec/v1.0/provenance), [`govulncheck`](https://go.dev/doc/security/vuln/) and [Trivy](https://trivy.dev/) in
-  CI, pinned [GitHub Actions](https://docs.github.com/en/actions), and `SECURITY.md`. **Built:** all but Trivy. Actions are pinned by
-  version tag, not by commit.
+  CI, pinned [GitHub Actions](https://docs.github.com/en/actions), and `SECURITY.md`. **Built:** all of it. Actions are pinned by
+  commit, with their version in a comment.
 
 ### 8.2 Client IP correctness
 
