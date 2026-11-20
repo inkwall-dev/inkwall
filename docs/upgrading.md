@@ -49,6 +49,12 @@ From 0.1.x, upgrade to 0.2.3 (or 0.2.2) first, then to 0.3.0.
   Istio. A policy in `Detect` mode is proven by the engines' probe receipts.
 - Through Istio, an HTTPRoute on an HTTPS listener whose Gateway validates client certificates
   (`spec.tls.frontend`) is now `NotProbeable` instead of `Unverified`: the probe can't present one.
+- **`InkwallConfig.spec.integrations[].adapter` is deprecated** (#711). The operator never read it:
+  each integration's adapter comes from its built-in table, and four of its values (`ExtAuthz`,
+  `LuaPlugin`, `AuthURL`, `Module`) have no implementation. An InkwallConfig that sets it stays
+  valid and nothing changes, but creating one that sets it, or changing it, draws a warning; v1
+  removes the field. Delete it from your InkwallConfig (the sample, which set `adapter:
+  ForwardAuth`, no longer does); an entry with only `controller` does nothing.
 - A WAFIPList without `spec.entries`, or an exclusion without `ruleIDs`, is still refused, but
   with `entries is required` or `ruleIDs is required` instead of `Required value`. The schema
   now marks both fields optional and a validation rule requires them, so a later source of

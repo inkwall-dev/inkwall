@@ -324,14 +324,19 @@ spec:
                 description: |-
                   Integrations pins how a proxy controller is wired. Controllers are
                   discovered without an entry here; an entry overrides the workload
-                  selector or the adapter for one controller.
+                  selector for one controller.
                 items:
                   description: IntegrationSpec overrides discovery for one proxy controller.
                   properties:
                     adapter:
                       description: |-
-                        Adapter is how the proxy hands requests to the engine, when the
-                        controller supports several.
+                        Adapter is ignored: the operator takes each integration's adapter
+                        from its built-in table, and four of the values (ExtAuthz, LuaPlugin,
+                        AuthURL, Module) have no implementation. It stays so that
+                        InkwallConfigs that set it remain valid; setting or changing it draws
+                        a warning, and v1 removes it.
+
+                        Deprecated: remove it from the InkwallConfig.
                       enum:
                       - ExtProc
                       - ExtAuthz
@@ -342,8 +347,10 @@ spec:
                       - Module
                       type: string
                     controller:
-                      description: Controller is the integration name, such as traefik
-                        or ingress-nginx.
+                      description: |-
+                        Controller is the integration name: traefik, envoy-gateway, istio,
+                        istio-ingress or haproxy. The operator ignores an entry for any other
+                        controller.
                       maxLength: 63
                       minLength: 1
                       type: string
