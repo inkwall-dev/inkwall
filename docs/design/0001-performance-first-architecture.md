@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-09-27
-- Updated: 2026-10-30
+- Updated: 2026-11-20
 - Owner: noureldin
 
 Inkwall is a [web application firewall](https://owasp.org/www-community/Web_Application_Firewall) (WAF) that sits in the request path, so every request pays
@@ -217,9 +217,12 @@ it to block mode.
 
 ### 5.3 State (rate limits, reputation)
 
-**Not built yet.** Each CPU keeps local [token buckets](https://en.wikipedia.org/wiki/Token_bucket). Cluster-wide limits sync asynchronously,
-about every 100 ms. The hot path never waits on the network, and we accept a little
-over-admission.
+**Not built yet.** The hot path never waits on the network, and we accept a little
+over-admission. Rate limits are designed in [0009](0009-rate-limits.md): each engine keeps its own
+[token buckets](https://en.wikipedia.org/wiki/Token_bucket), one per key in a sharded table with striped locks (not per CPU:
+[0009 §5.2](0009-rate-limits.md#52-data-structure)), and limits per engine in v0.7.0.
+Cluster-wide limits, synced asynchronously, are deferred
+([0009 §2.2](0009-rate-limits.md#22-cluster-wide-limits-deferred)).
 
 ### 5.4 Telemetry
 

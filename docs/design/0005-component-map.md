@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-09-27
-- Updated: 2026-10-31
+- Updated: 2026-11-20
 - Owner: noureldin
 - Depends on: [0002 — System Architecture](0002-system-architecture.md),
   [0004 — Kubernetes Operator](0004-operator.md)
@@ -101,7 +101,8 @@ which only adds management, analytics and threat intelligence.
 **Not yet:**
 
 - The adapter `extauthz` (gRPC).
-- Rate limits (`pkg/ratelimit`) in tier T1, between the route table and the rules ([0001 §4](0001-performance-first-architecture.md#4-request-pipeline-tiered-cheapest-first)).
+- Rate limits (`pkg/ratelimit`) in tier T1, between the route table and the rules ([0001 §4](0001-performance-first-architecture.md#4-request-pipeline-tiered-cheapest-first)),
+  designed in [0009](0009-rate-limits.md).
 - Traces in telemetry.
 - Inkwall's own rule engine ([0007](0007-inkwall-engine.md)) as a second `pkg/rules` evaluator.
 
