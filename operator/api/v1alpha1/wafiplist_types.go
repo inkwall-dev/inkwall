@@ -19,12 +19,17 @@ type IPListEntry struct {
 	Description string `json:"description,omitempty"`
 }
 
+// The rule, not the schema, makes entries required, so that another source of
+// addresses (a URL the operator fetches) only relaxes the rule.
+
 // WAFIPListSpec is a list of client addresses.
+// +kubebuilder:validation:XValidation:rule="has(self.entries)",message="entries is required"
 type WAFIPListSpec struct {
-	// Entries are the list's addresses and prefixes.
+	// Entries are the list's addresses and prefixes. Required.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=10000
-	Entries []IPListEntry `json:"entries"`
+	// +optional
+	Entries []IPListEntry `json:"entries,omitempty"`
 }
 
 // WAFIPList is a list of client addresses that WAFPolicies in its

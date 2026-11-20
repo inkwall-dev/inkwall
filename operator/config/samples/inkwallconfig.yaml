@@ -9,6 +9,9 @@ spec:
     resources:
       requests: {cpu: 500m, memory: 256Mi}
       limits: {memory: 512Mi} # no CPU limit: throttling shows up as tail latency
-  integrations:
-  - controller: traefik
-    adapter: ForwardAuth
+  # Proxy controllers are discovered; an entry overrides one controller's pod
+  # selector, for proxy pods without its default labels:
+  # integrations:
+  # - controller: traefik
+  #   selector:
+  #     matchLabels: {app.kubernetes.io/name: my-traefik}

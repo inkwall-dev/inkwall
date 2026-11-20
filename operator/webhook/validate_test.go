@@ -296,6 +296,57 @@ func TestConfigValidation(t *testing.T) {
 	}
 }
 
+// An integration's adapter is ignored: setting or changing it draws one
+// warning per integration, keeping or removing it none.
+func TestConfigAdapterWarning(t *testing.T) {
+	ctx := context.Background()
+	v := configValidator{}
+	cfg := func(integrations ...wafv1alpha1.IntegrationSpec) *wafv1alpha1.InkwallConfig {
+		return &wafv1alpha1.InkwallConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "default"},
+			Spec:       wafv1alpha1.InkwallConfigSpec{Integrations: integrations},
+		}
+	}
+	in := func(controller string, adapter wafv1alpha1.AdapterKind) wafv1alpha1.IntegrationSpec {
+		return wafv1alpha1.IntegrationSpec{Controller: controller, Adapter: adapter} //nolint:staticcheck // the deprecated field
+	}
+	traefik := in("traefik", wafv1alpha1.AdapterForwardAuth)
+	haproxy := in("haproxy", wafv1alpha1.AdapterSPOE)
+
+	for _, tc := range []struct {
+		name     string
+		old, cfg *wafv1alpha1.InkwallConfig // old nil: create
+		want     []string                   // the integrations warned of
+	}{
+		{name: "absent on create", cfg: cfg(in("traefik", ""))},
+		{name: "set on create", cfg: cfg(traefik, haproxy), want: []string{"[0].adapter (traefik)", "[1].adapter (haproxy)"}},
+		{name: "absent on update", old: cfg(), cfg: cfg(in("traefik", ""))},
+		{name: "unchanged", old: cfg(traefik, haproxy), cfg: cfg(haproxy, traefik)},
+		{name: "added", old: cfg(in("traefik", "")), cfg: cfg(traefik), want: []string{"[0].adapter (traefik)"}},
+		{name: "changed", old: cfg(traefik, haproxy), cfg: cfg(in("traefik", wafv1alpha1.AdapterExtAuthz), haproxy), want: []string{"[0].adapter (traefik)"}},
+		{name: "removed", old: cfg(traefik), cfg: cfg(in("traefik", ""))},
+	} {
+		var warnings []string
+		var err error
+		if tc.old == nil {
+			warnings, err = v.ValidateCreate(ctx, tc.cfg)
+		} else {
+			warnings, err = v.ValidateUpdate(ctx, tc.old, tc.cfg)
+		}
+		if err != nil || len(warnings) != len(tc.want) {
+			t.Errorf("%s: warnings %q, error %v; want %d", tc.name, warnings, err, len(tc.want))
+			continue
+		}
+		for i, w := range warnings {
+			for _, s := range []string{"spec.integrations" + tc.want[i], "deprecated and ignored", "v1 removes"} {
+				if !strings.Contains(w, s) {
+					t.Errorf("%s: warning %q doesn't say %q", tc.name, w, s)
+				}
+			}
+		}
+	}
+}
+
 func ptr[T any](v T) *T { return &v }
 
 // TestIPListValidation: a WAFIPList's entries must parse as the engine

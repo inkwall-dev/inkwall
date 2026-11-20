@@ -9,6 +9,7 @@ From 0.1.x, upgrade to 0.2.3 (or 0.2.2) first, then to 0.3.0.
 
 ## Contents
 
+- [From 0.6.x to 0.7.0](#from-06x-to-070)
 - [From 0.5.x to 0.6.0](#from-05x-to-060)
 - [From 0.4.x to 0.5.0](#from-04x-to-050)
 - [From 0.4.0 to 0.4.1](#from-040-to-041)
@@ -34,6 +35,30 @@ From 0.1.x, upgrade to 0.2.3 (or 0.2.2) first, then to 0.3.0.
   - [Upgrading the chart](#upgrading-the-chart)
   - [Checking it worked](#checking-it-worked)
   - [Rolling back](#rolling-back)
+
+## From 0.6.x to 0.7.0
+
+0.7.0 isn't released yet; this section grows as its changes land.
+
+- **Envoy Gateway's routes are proven by the operator's probe**, as Istio's and the HAProxy
+  controller's are. After the upgrade, a policy on an HTTPRoute that Envoy Gateway serves is
+  `Programmed=False`, reason `Unverified`, until the probe has reached the engine on every Envoy
+  pod (seconds), then `Programmed`. A route whose Envoy doesn't run the filter stays `Unverified`,
+  and one on an HTTPS listener that asks for a client certificate is `NotProbeable`. With
+  `responses.inspect`, the probe's response leg reaches your app's backend, as it does through
+  Istio. A policy in `Detect` mode is proven by the engines' probe receipts.
+- Through Istio, an HTTPRoute on an HTTPS listener whose Gateway validates client certificates
+  (`spec.tls.frontend`) is now `NotProbeable` instead of `Unverified`: the probe can't present one.
+- **`InkwallConfig.spec.integrations[].adapter` is deprecated** (#711). The operator never read it:
+  each integration's adapter comes from its built-in table, and four of its values (`ExtAuthz`,
+  `LuaPlugin`, `AuthURL`, `Module`) have no implementation. An InkwallConfig that sets it stays
+  valid and nothing changes, but creating one that sets it, or changing it, draws a warning; v1
+  removes the field. Delete it from your InkwallConfig (the sample, which set `adapter:
+  ForwardAuth`, no longer does); an entry with only `controller` does nothing.
+- A WAFIPList without `spec.entries`, or an exclusion without `ruleIDs`, is still refused, but
+  with `entries is required` or `ruleIDs is required` instead of `Required value`. The schema
+  now marks both fields optional and a validation rule requires them, so a later source of
+  addresses or way to name rules only relaxes that rule. The objects accepted are the same.
 
 ## From 0.5.x to 0.6.0
 

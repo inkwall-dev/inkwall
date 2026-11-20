@@ -156,7 +156,9 @@ Validation runs in three steps, cheapest first:
 
    The `InkwallConfig` goes to the webhook too, with `failurePolicy: Ignore`: it only warns, when
    the deprecated `spec.engine.socketDir` is set or changed (each integration places the engine's
-   socket itself), and the `InkwallConfig` stays editable while the operator is down.
+   socket itself), or an integration's deprecated `adapter` (each integration's adapter comes from
+   the built-in table; v1 removes the field), and the `InkwallConfig` stays editable while the
+   operator is down.
 3. **Resolver** (asynchronous, reported in status): dangling references, conflicts, and targets
    that can't be wired. Also a rule set bound with `placement: BeforeCRS` (#423) that can't load
    before the CRS: the built-in CRS itself, or SecLang with `SecRuleRemoveBy*` or `SecRuleUpdate*`.
@@ -622,6 +624,17 @@ integration), for `HTTPRoute` targets whose parent Gateways have a GatewayClass 
   Envoy has the buffer limit and a body isn't cut short. `Accepted=False` (a disabled Backend API,
   say) or `Overridden=True` is `WiringFailed` with Envoy Gateway's message. The operator watches both kinds. An object of the operator's name it didn't create
   is left alone (`WiringFailed`).
+  - **Built since (#604): the probe.** Accepted shows Envoy Gateway translated the policy, not
+    that Envoy runs the filter (a user's `EnvoyPatchPolicy` may take it off). Once accepted, the
+    route is `Unverified` until the operator's probe (`Prober`, as Istio's routes,
+    [0002 §6.1](0002-system-architecture.md#61-envoy-raw-envoy-envoy-gateway-istio-contour)) has
+    reached the engine through every running Envoy pod of its Gateways, on every HTTP or HTTPS
+    listener the route is attached to, at the Envoy container's port (the listener's plus 10000
+    below 1024, unless the pods serve its own); in `Detect` mode by the engines' receipts; for a
+    policy with `responses.inspect`, the response leg too (#595). A route the probe can't make
+    (only regular expressions, header or query values over TLS, a listener asking for a client
+    certificate: a `ClientTrafficPolicy`'s `tls.clientValidation` or the Gateway's
+    `spec.tls.frontend`) is `NotProbeable`.
   - Envoy Gateway applies one `EnvoyExtensionPolicy` to a route (the oldest; the others are
     `Accepted=False`, reason `Conflicted`) and one to a rule, over the route's (which gets
     `Overridden=True`). So a user's `EnvoyExtensionPolicy` on a protected route (`targetRefs`, or a

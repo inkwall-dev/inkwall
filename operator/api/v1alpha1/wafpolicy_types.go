@@ -371,13 +371,19 @@ type RuleSetRef struct {
 	Namespace string `json:"namespace,omitempty"`
 }
 
+// The rule, not the schema, makes ruleIDs required, so that another way to
+// name rules (by tag or ID range) only relaxes the rule.
+
 // Exclusion turns rules off, everywhere or only for one path or argument.
+// +kubebuilder:validation:XValidation:rule="has(self.ruleIDs)",message="ruleIDs is required"
 type Exclusion struct {
 	// RuleIDs are the rules to turn off. An ID no rule has is ignored.
+	// Required.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=64
 	// +kubebuilder:validation:items:Minimum=1
-	RuleIDs []int32 `json:"ruleIDs"`
+	// +optional
+	RuleIDs []int32 `json:"ruleIDs,omitempty"`
 
 	// When narrows the exclusion. Unset: the rules are off for every request
 	// this policy covers.

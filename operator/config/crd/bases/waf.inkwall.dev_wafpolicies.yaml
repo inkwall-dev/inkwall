@@ -135,8 +135,9 @@ spec:
                     path or argument.
                   properties:
                     ruleIDs:
-                      description: RuleIDs are the rules to turn off. An ID no rule
-                        has is ignored.
+                      description: |-
+                        RuleIDs are the rules to turn off. An ID no rule has is ignored.
+                        Required.
                       items:
                         format: int32
                         minimum: 1
@@ -200,9 +201,10 @@ spec:
                           header
                         rule: '[has(self.argument), has(self.argumentName), has(self.cookie),
                           has(self.header)].filter(x, x).size() <= 1'
-                  required:
-                  - ruleIDs
                   type: object
+                  x-kubernetes-validations:
+                  - message: ruleIDs is required
+                    rule: has(self.ruleIDs)
                 maxItems: 128
                 type: array
               failureMode:

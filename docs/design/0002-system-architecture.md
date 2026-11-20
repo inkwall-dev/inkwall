@@ -252,7 +252,9 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
 
 - **`InkwallConfig`** (a cluster singleton): `mode`, `controlPlane`, `engine`, `integrations` and
   `events`. `engine` holds the image, resources and `bootstrapMode`; its `socketDir` is deprecated and ignored. Its resources
-  have no CPU limit, since throttling hurts p99 latency.
+  have no CPU limit, since throttling hurts p99 latency. Each of `integrations` overrides one
+  controller's pod `selector`; its `adapter` is deprecated and ignored (the operator takes each
+  integration's adapter from its built-in table), and v1 removes it (#711).
 - **`WAFPolicy`**:
 
   ```yaml
@@ -588,6 +590,10 @@ experimental.
 Envoy Gateway, with `ext_proc`, not `ext_authz`: the engine joins the Envoy pods through the
 Gateway's `EnvoyProxy`, and each protected HTTPRoute gets an `EnvoyExtensionPolicy` calling it
 through a `Backend` on a Unix socket ([0004 §4.4](0004-operator.md#44-wiring-controller)).
+**Built since (#604):** its routes are probed as Istio's are (the probe below, both legs), once
+Envoy Gateway has accepted the `EnvoyExtensionPolicy`, through each Envoy pod on the Envoy
+container's port for each listener (Envoy Gateway adds 10000 to a port below 1024 unless the pods
+serve the listener's own); a listener that asks for a client certificate is `NotProbeable`.
 Raw Envoy, configured by its user: no operator integration, since there is no API object to wire.
 The user adds the `ext_proc` filter to `envoy.yaml` and runs the engine next to Envoy, with the
 policy from flags or, in a cluster with the operator, from its bundles: the user grants the read

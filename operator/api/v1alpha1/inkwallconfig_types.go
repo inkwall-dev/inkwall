@@ -23,7 +23,11 @@ const (
 	ModeManaged ClusterMode = "Managed"
 )
 
-// AdapterKind is how a proxy hands requests to the engine (0006).
+// AdapterKind is how a proxy hands requests to the engine (0006). Only
+// IntegrationSpec's deprecated Adapter uses it: the operator takes each
+// integration's adapter from its built-in table, and ExtAuthz, LuaPlugin,
+// AuthURL and Module have no implementation. The enum stays so that
+// InkwallConfigs that set the field remain valid; v1 drops it.
 // +kubebuilder:validation:Enum=ExtProc;ExtAuthz;LuaPlugin;AuthURL;ForwardAuth;SPOE;Module
 type AdapterKind string
 
@@ -72,7 +76,7 @@ type InkwallConfigSpec struct {
 
 	// Integrations pins how a proxy controller is wired. Controllers are
 	// discovered without an entry here; an entry overrides the workload
-	// selector or the adapter for one controller.
+	// selector for one controller.
 	// +listType=map
 	// +listMapKey=controller
 	// +kubebuilder:validation:MaxItems=32
@@ -300,7 +304,9 @@ type CIDR string
 
 // IntegrationSpec overrides discovery for one proxy controller.
 type IntegrationSpec struct {
-	// Controller is the integration name, such as traefik or ingress-nginx.
+	// Controller is the integration name: traefik, envoy-gateway, istio,
+	// istio-ingress or haproxy. The operator ignores an entry for any other
+	// controller.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	Controller string `json:"controller"`
@@ -313,8 +319,14 @@ type IntegrationSpec struct {
 	// +optional
 	Selector *metav1.LabelSelector `json:"selector,omitempty"`
 
-	// Adapter is how the proxy hands requests to the engine, when the
-	// controller supports several.
+	// Adapter is ignored: the operator takes each integration's adapter
+	// from its built-in table, and four of the values (ExtAuthz, LuaPlugin,
+	// AuthURL, Module) have no implementation. It stays so that
+	// InkwallConfigs that set it remain valid; setting or changing it draws
+	// a warning, and v1 removes it.
+	//
+	// Deprecated: remove it from the InkwallConfig.
+	//
 	// +optional
 	Adapter AdapterKind `json:"adapter,omitempty"`
 }

@@ -94,19 +94,20 @@ const socketDirWarning = "spec.engine.socketDir is deprecated and ignored: each 
 
 // configValidator warns about the InkwallConfig's deprecated fields, and
 // checks its client IP settings as the engine does. It warns when socketDir
-// is set or changed, not when an update keeps it: InkwallConfigs created
-// before v0.3.0 hold its old default, which a client-side apply never
-// removes.
+// or an integration's adapter is set or changed, not when an update keeps
+// it: InkwallConfigs created before v0.3.0 hold socketDir's old default,
+// which a client-side apply never removes, and an update that leaves the
+// field alone shouldn't repeat the warning.
 type configValidator struct{}
 
 func (configValidator) ValidateCreate(_ context.Context, cfg *wafv1alpha1.InkwallConfig) (admission.Warnings, error) {
 	warnings, err := checkClientIP(cfg)
-	return append(socketDirWarnings("", cfg), warnings...), err
+	return append(append(socketDirWarnings("", cfg), adapterWarnings(nil, cfg)...), warnings...), err
 }
 
 func (configValidator) ValidateUpdate(_ context.Context, oldCfg, newCfg *wafv1alpha1.InkwallConfig) (admission.Warnings, error) {
 	warnings, err := checkClientIP(newCfg)
-	return append(socketDirWarnings(oldCfg.Spec.Engine.SocketDir, newCfg), warnings...), err //nolint:staticcheck // warns about the deprecated field
+	return append(append(socketDirWarnings(oldCfg.Spec.Engine.SocketDir, newCfg), adapterWarnings(oldCfg, newCfg)...), warnings...), err //nolint:staticcheck // warns about the deprecated field
 }
 
 // checkClientIP rejects trusted proxies the engine would refuse (it would
@@ -141,6 +142,33 @@ func socketDirWarnings(old string, cfg *wafv1alpha1.InkwallConfig) admission.War
 		return admission.Warnings{socketDirWarning}
 	}
 	return nil
+}
+
+// adapterWarnings warns, once per integration, of an adapter that cfg sets
+// and old (nil on create) doesn't hold for the same controller.
+func adapterWarnings(old, cfg *wafv1alpha1.InkwallConfig) admission.Warnings {
+	var warnings admission.Warnings
+	for i, in := range cfg.Spec.Integrations {
+		a := in.Adapter //nolint:staticcheck // warns about the deprecated field
+		if a == "" || a == oldAdapter(old, in.Controller) {
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf("spec.integrations[%d].adapter (%s) is deprecated and ignored: the operator picks each integration's adapter itself, and v1 removes the field; remove it", i, in.Controller))
+	}
+	return warnings
+}
+
+// oldAdapter is the adapter old sets for controller, or "".
+func oldAdapter(old *wafv1alpha1.InkwallConfig, controller string) wafv1alpha1.AdapterKind {
+	if old == nil {
+		return ""
+	}
+	for _, in := range old.Spec.Integrations {
+		if in.Controller == controller {
+			return in.Adapter //nolint:staticcheck // warns about the deprecated field
+		}
+	}
+	return ""
 }
 
 // object is a WAF kind with a spec.

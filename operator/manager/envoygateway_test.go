@@ -190,8 +190,14 @@ func testEnvoyGateway(ctx context.Context, t *testing.T, c client.Client) {
 		t.Fatal(err)
 	}
 	old := envoyPod("custom", "envoy-custom-old", false)
-	for _, p := range []*corev1.Pod{old, envoyPod("custom", "envoy-custom-new", true), envoyPod("plain", "envoy-plain", true)} {
+	for i, p := range []*corev1.Pod{old, envoyPod("custom", "envoy-custom-new", true), envoyPod("plain", "envoy-plain", true)} {
 		if err := c.Create(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+		// An address, for the operator's probe (#604; the test's prober
+		// answers as the engine would).
+		p.Status.PodIP = fmt.Sprintf("10.0.1.%d", 21+i)
+		if err := c.Status().Update(ctx, p); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -481,6 +487,10 @@ func testEnvoyGateway(ctx context.Context, t *testing.T, c client.Client) {
 	eventually(t, "Programmed with the operator's buffer limit", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
 
 	// Detect mode: Envoy doesn't wait for the engine, nor buffers the body.
+	// Envoy discards the engine's answer to the probe in shadow mode: the
+	// route is proven by the receipts the Envoy pods' engines report
+	// (#475, #604).
+	stopEngines := observeProbes(ctx, t, c, "eg-system/envoy-custom-new", "eg-system/envoy-plain")
 	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) { p.Spec.Mode = wafv1alpha1.PolicyDetect })
 	eventually(t, "detect mode: shadowMode, a streamed body", func() string {
 		p, err := get(wiring.EnvoyExtensionPolicyGVK, ns, "inkwall-waf-app")
@@ -493,11 +503,17 @@ func testEnvoyGateway(ctx context.Context, t *testing.T, c client.Client) {
 		return ""
 	})
 	eventually(t, "no buffer limit in detect mode", gone(wiring.ClientTrafficPolicyGVK, edge, "inkwall-waf-plain"))
-	eventually(t, "Programmed in detect mode", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
+	eventually(t, "Programmed in detect mode, by the engines' probe receipts", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
+	stopEngines()
 
 	// Responses, in Block mode with request bodies uninspected: Envoy sends
 	// them, holds their body (mode override allowed), and the Gateways'
-	// buffer limit comes back for them.
+	// buffer limit comes back for them. The probe's response leg proves
+	// they reach the engine (#595, #604): an engine that answers it at the
+	// request phase doesn't keep them, ResponsesNotInspected, naming the
+	// pod.
+	t.Cleanup(func() { earlyPods.Delete("eg-system/envoy-plain") })
+	earlyPods.Store("eg-system/envoy-plain", true)
 	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) {
 		p.Spec.Mode = wafv1alpha1.PolicyBlock
 		p.Spec.Body = &wafv1alpha1.BodySpec{Inspect: new(false)}
@@ -523,7 +539,10 @@ func testEnvoyGateway(ctx context.Context, t *testing.T, c client.Client) {
 		})
 		accept(wiring.ClientTrafficPolicyGVK, edge, gw, "True", "")
 	}
-	eventually(t, "Programmed with responses", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
+	eventually(t, "responses not reaching an engine: ResponsesNotInspected", programmed("eg", metav1.ConditionFalse, wiring.ReasonResponsesNotInspected,
+		"don't reach the engine on Envoy Gateway: pod eg-system/envoy-plain"))
+	earlyPods.Delete("eg-system/envoy-plain")
+	eventually(t, "Programmed with responses, once the response leg is answered", programmed("eg", metav1.ConditionTrue, wiring.ReasonProgrammed, "2 HTTPRoute(s)"))
 
 	// Unprotected: everything goes, the user's objects as they were.
 	if err := c.Delete(ctx, pol); err != nil {
