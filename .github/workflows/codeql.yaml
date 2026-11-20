@@ -8,6 +8,8 @@ on:
   push:
     branches: [main, "release-*"]
   pull_request:
+    # Markdown holds no code to analyze.
+    paths-ignore: ['**/*.md']
   schedule:
     - cron: "41 3 * * 2"
 

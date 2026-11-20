@@ -17,6 +17,34 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    # A pull request that changes only Markdown skips the jobs Markdown can't
+    # affect: images, the e2e and upgrade tests, the proxies in Docker, CRS,
+    # benchmarks, govulncheck. A skipped job counts as passed for the
+    # required checks. lint, test (docs/*.md is embedded in inkwallctl),
+    # generate and docs always run, and pushes run everything.
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: read
+    outputs:
+      code: ${{ steps.files.outputs.code }}
+    steps:
+      - id: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          code=true
+          if [[ $EVENT == pull_request ]]; then
+            files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[] | .filename, (.previous_filename // empty)')
+            if [[ -n $files ]] && ! grep -qvE '\.md$' <<<"$files"; then
+              code=false
+            fi
+          fi
+          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+
   lint:
     runs-on: ubuntu-24.04
     permissions:
@@ -58,6 +86,8 @@ jobs:
   image:
     # The engine and operator images must build; they are what the Helm
     # chart deploys.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -78,6 +108,8 @@ jobs:
     # detect mode, and Envoy's behaviour with the engine down. Then, with
     # the same engine image, WebSocket message inspection by the engine's
     # proxy (#276).
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -96,6 +128,8 @@ jobs:
   release:
     # The release configuration must stay valid: a broken one only shows
     # when a tag is pushed (.github/workflows/release.yaml).
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -110,6 +144,8 @@ jobs:
           args: check
 
   helm:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -145,6 +181,8 @@ jobs:
     # fail or cancel the job (#298): its steps have their own time limits
     # and continue on error, and a cache is saved only if it was extracted
     # completely.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -188,6 +226,7 @@ jobs:
     # KIND_NODE_IMAGE in the Makefile). One job per proxy, each on its own
     # kind cluster with the images built once (#391): a failure in one
     # doesn't hide the others' results, and a flaky one reruns alone.
+    # Skipped with e2e-images on a Markdown-only pull request.
     needs: e2e-images
     runs-on: ubuntu-24.04
     permissions:
@@ -243,6 +282,8 @@ jobs:
     # release qualification runs upgrade.yaml, from each supported minor.
     # With Helm 3 and Helm 4: install, upgrade (also --reuse-values),
     # rollback and the uninstall hook (#394).
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -307,6 +348,8 @@ jobs:
 
   crs:
     # Detection regression gate: the OWASP CRS test suite through the proxy.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -325,6 +368,8 @@ jobs:
     # HAProxy with the engine's SPOE agent, in Docker (#282): the samples of
     # examples/haproxy validated by HAProxy and run, block and detect mode,
     # and HAProxy's behaviour with the engine down (fail closed, fail open).
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -344,7 +389,8 @@ jobs:
     # base, interleaved, compared with benchstat. Packages whose test binary
     # the PR does not change are skipped, and a regression must repeat on a
     # re-check of the flagged benchmarks to fail (hack/bench/compare.sh).
-    if: github.event_name == 'pull_request'
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -374,6 +420,8 @@ jobs:
           if-no-files-found: ignore
 
   vuln:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
