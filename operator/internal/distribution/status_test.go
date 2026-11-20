@@ -415,6 +415,26 @@ func TestEnforcedOutdatedNewestFieldPlacement(t *testing.T) {
 	}
 }
 
+// Rate limits need 0.7.0 (#705): an older engine limits nothing.
+func TestEnforcedOutdatedRateLimits(t *testing.T) {
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
+	p.Spec.RateLimits = []wafv1alpha1.RateLimit{{Name: "login", Requests: 10, Period: metav1.Duration{Duration: time.Minute}}}
+	p.Spec.IPLists = &wafv1alpha1.IPListsSpec{Deny: []wafv1alpha1.IPListName{"blocked"}}
+	p.Status.BundleVersion = 3
+	for _, tc := range []struct {
+		version  string
+		outdated bool
+	}{{"0.6.1", true}, {"0.7.0", false}, {"0.7.1", false}} {
+		engines := []Engine{{ID: "e0", PodNamespace: "edge", PodName: "traefik-0", EngineVersion: tc.version, Applied: 3}}
+		conds, _ := enforcedConditions(p, 3, false, engines, nil, 0, 0)
+		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
+		outdated := c != nil && c.Reason == ReasonEnginesOutdated
+		if outdated != tc.outdated || outdated && (!strings.Contains(c.Message, "spec.rateLimits") || !strings.Contains(c.Message, "0.7.0 or later")) {
+			t.Errorf("a %s engine and a policy with rate limits: Enforced %+v, outdated %v want %v", tc.version, c, outdated, tc.outdated)
+		}
+	}
+}
+
 // The InkwallConfig's status counts the engines (#375), and 1,000 engines
 // connecting one per report don't rewrite it more than once per
 // ConfigEvery; the last count is written once the engines settle.

@@ -779,7 +779,38 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 		}
 		p.Websocket = ws
 	}
+	for _, l := range s.RateLimits {
+		p.RateLimits = append(p.RateLimits, rateLimit(l))
+	}
 	return p
+}
+
+func rateLimit(l wafv1alpha1.RateLimit) *bundlev1.RateLimit {
+	r := &bundlev1.RateLimit{
+		Name:     l.Name,
+		Requests: uint32(l.Requests), // #nosec G115 -- the CRD bounds it to 1,000,000
+		Period:   durationpb.New(l.Period.Duration),
+		Detect:   l.Mode == wafv1alpha1.PolicyDetect,
+	}
+	if l.Burst != nil {
+		r.Burst = uint32(*l.Burst) // #nosec G115 -- the CRD bounds it to 1,000,000
+	}
+	switch k := l.Key; {
+	case k != nil && k.Header != nil:
+		r.Key = &bundlev1.RateLimitKey{Key: &bundlev1.RateLimitKey_Header{Header: &bundlev1.HeaderKey{Name: strings.ToLower(string(k.Header.Name))}}}
+	case k != nil && k.ClientIP != nil && k.ClientIP.IPv6PrefixLength != nil:
+		ip := &bundlev1.ClientIPKey{Ipv6PrefixLength: uint32(*k.ClientIP.IPv6PrefixLength)} // #nosec G115 -- the CRD bounds it to 32-128
+		r.Key = &bundlev1.RateLimitKey{Key: &bundlev1.RateLimitKey_ClientIp{ClientIp: ip}}
+	}
+	if m := l.Match; m != nil {
+		for _, p := range m.Paths {
+			r.Paths = append(r.Paths, string(p))
+		}
+		for _, m := range m.Methods {
+			r.Methods = append(r.Methods, string(m))
+		}
+	}
+	return r
 }
 
 func oversizeAction(a wafv1alpha1.OversizeAction) bundlev1.OversizeAction {

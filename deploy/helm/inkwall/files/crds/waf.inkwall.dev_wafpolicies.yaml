@@ -255,6 +255,160 @@ spec:
                 - Detect
                 - Block
                 type: string
+              rateLimits:
+                description: |-
+                  RateLimits limit how many requests a client may send, per engine:
+                  over a limit, a request is denied with 429 and Retry-After before the
+                  rules (logged in Detect mode). Each engine counts on its own, so a
+                  client spread over N engines gets up to N times the limit
+                  (docs/rate-limits.md). Clients in an IP allow list, and skipped
+                  paths, are never counted. Requires engines 0.7.0 or later.
+                items:
+                  description: |-
+                    RateLimit is a token bucket per key: it holds at most burst requests and
+                    gains requests per period, evenly.
+                  properties:
+                    burst:
+                      description: |-
+                        Burst is the requests a key may send at once after being idle.
+                        Unset: requests.
+                      format: int64
+                      maximum: 1000000
+                      minimum: 1
+                      type: integer
+                    key:
+                      description: 'Key is what the limit counts by. Unset: the client
+                        IP.'
+                      properties:
+                        clientIP:
+                          description: |-
+                            ClientIP counts by the client address the engine resolves
+                            (docs/client-ip.md).
+                          properties:
+                            ipv6PrefixLength:
+                              description: |-
+                                IPv6PrefixLength counts IPv6 clients by this prefix, 32 to 128;
+                                IPv4 clients by their address. Unset: 56.
+                              format: int32
+                              maximum: 128
+                              minimum: 32
+                              type: integer
+                          type: object
+                        header:
+                          description: |-
+                            Header counts by a request header's value, for fairness between
+                            authenticated clients (an API key, a tenant). A client chooses its
+                            header's value, so this doesn't stop an attacker: a request without
+                            the header is counted by its client IP.
+                          properties:
+                            name:
+                              allOf:
+                              - maxLength: 256
+                              - maxLength: 128
+                              description: |-
+                                Name is the header. Not X-Forwarded-For, Forwarded or Host: count
+                                by the client IP instead.
+                              minLength: 1
+                              pattern: ^[A-Za-z0-9!#$%&'*+.^_|~-]+$
+                              type: string
+                              x-kubernetes-validations:
+                              - message: count by clientIP, not by X-Forwarded-For,
+                                  Forwarded or Host
+                                rule: '!(self.lowerAscii() in [''x-forwarded-for'',
+                                  ''forwarded'', ''host''])'
+                          required:
+                          - name
+                          type: object
+                      type: object
+                      x-kubernetes-validations:
+                      - message: key needs exactly one of clientIP and header
+                        rule: has(self.clientIP) != has(self.header)
+                    match:
+                      description: |-
+                        Match narrows the limit to some of the policy's requests. Unset:
+                        every request of the policy.
+                      properties:
+                        methods:
+                          description: Methods the limit counts.
+                          items:
+                            description: RateLimitMethod is a standard HTTP request
+                              method.
+                            enum:
+                            - GET
+                            - HEAD
+                            - POST
+                            - PUT
+                            - PATCH
+                            - DELETE
+                            - OPTIONS
+                            - CONNECT
+                            - TRACE
+                            type: string
+                          maxItems: 9
+                          type: array
+                          x-kubernetes-list-type: set
+                        paths:
+                          description: |-
+                            Paths the limit counts: exact paths or prefixes ending in "*",
+                            compared in ASCII lower case with one trailing slash ignored. A path
+                            the engine can't read one way (percent-encoding, ";", "//", dot
+                            segments) counts against every limit with paths.
+                          items:
+                            description: |-
+                              PathPattern is an exact path ("/healthz") or a prefix ending in "*"
+                              ("/static/*"), using only plain ASCII path characters, as the engine
+                              matches paths (pkg/router).
+                            maxLength: 1024
+                            pattern: ^/[A-Za-z0-9._~/:@!$&'()+,=-]*\*?$
+                            type: string
+                          maxItems: 16
+                          type: array
+                      type: object
+                    mode:
+                      description: |-
+                        Mode Detect logs the requests over the limit instead of denying
+                        them, on a Block policy. Unset: the policy's mode. Block isn't
+                        allowed: a limit can't be stricter than its policy.
+                      enum:
+                      - Detect
+                      - Block
+                      type: string
+                      x-kubernetes-validations:
+                      - message: 'a rate limit''s mode can only be Detect: a limit
+                          can''t be stricter than its policy'
+                        rule: self == 'Detect'
+                    name:
+                      description: |-
+                        Name names the limit in events and logs; unique in the policy.
+                        Renaming a limit starts its buckets again full.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    period:
+                      description: Period is the period of requests, 1s to 1h.
+                      type: string
+                      x-kubernetes-validations:
+                      - message: period must be 1s to 1h
+                        rule: duration(self) >= duration('1s') && duration(self) <=
+                          duration('1h')
+                    requests:
+                      description: Requests are the requests allowed per period, per
+                        key, per engine.
+                      format: int64
+                      maximum: 1000000
+                      minimum: 1
+                      type: integer
+                  required:
+                  - name
+                  - period
+                  - requests
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-validations:
+                - message: rateLimits must not repeat a name
+                  rule: self.all(a, self.exists_one(b, b.name == a.name))
               responses:
                 description: |-
                   Responses configures response inspection, for data leaks (the CRS's

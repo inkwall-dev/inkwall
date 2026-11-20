@@ -221,6 +221,38 @@ func TestWAFPolicyValidation(t *testing.T) {
 		{name: "streams skipped", doc: policy(target + "  responses: {inspect: true, streams: Skip}\n")},
 		{name: "streams without inspect", doc: policy(target + "  responses: {streams: Inspect}\n"), wantErr: "maxBytes, onOversize and streams need inspect: true"},
 		{name: "unknown streams action", doc: policy(target + "  responses: {inspect: true, streams: Buffer}\n"), wantErr: `Unsupported value: "Buffer"`},
+
+		// Rate limits (#705, design 0009 §3.5).
+		{name: "rate limits", doc: policy(target + `  rateLimits:
+  - name: login
+    requests: 10
+    period: 1m
+    burst: 20
+    key: {clientIP: {ipv6PrefixLength: 64}}
+    match: {paths: ["/login", "/api/session/*"], methods: [POST]}
+  - {name: api, requests: 600, period: 1m, key: {header: {name: X-Api-Key}}, mode: Detect}
+  - {name: all, requests: 1000000, period: 1h}
+  - {name: fast, requests: 1, period: 1s}
+`)},
+		{name: "rate limit repeated name", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s}, {name: a, requests: 2, period: 1s}]\n"), wantErr: "rateLimits must not repeat a name"},
+		{name: "nine rate limits", doc: policy(target + "  rateLimits: [" + strings.TrimSuffix(strings.Repeat("{name: a, requests: 1, period: 1s},", 9), ",") + "]\n"), wantErr: "must have at most 8 items"},
+		{name: "rate limit name not a DNS label", doc: policy(target + "  rateLimits: [{name: Login_1, requests: 1, period: 1s}]\n"), wantErr: "spec.rateLimits[0].name"},
+		{name: "rate limit without requests", doc: policy(target + "  rateLimits: [{name: a, period: 1s}]\n"), wantErr: "spec.rateLimits[0].requests: Required value"},
+		{name: "rate limit of 0 requests", doc: policy(target + "  rateLimits: [{name: a, requests: 0, period: 1s}]\n"), wantErr: "should be greater than or equal to 1"},
+		{name: "rate limit over a million requests", doc: policy(target + "  rateLimits: [{name: a, requests: 1000001, period: 1s}]\n"), wantErr: "should be less than or equal to 1000000"},
+		{name: "rate limit period under 1s", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 500ms}]\n"), wantErr: "period must be 1s to 1h"},
+		{name: "rate limit period over 1h", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 2h}]\n"), wantErr: "period must be 1s to 1h"},
+		{name: "rate limit burst of 0", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, burst: 0}]\n"), wantErr: "should be greater than or equal to 1"},
+		{name: "rate limit with both keys", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, key: {clientIP: {}, header: {name: X-Key}}}]\n"), wantErr: "key needs exactly one of clientIP and header"},
+		{name: "rate limit with no key", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, key: {}}]\n"), wantErr: "key needs exactly one of clientIP and header"},
+		{name: "rate limit IPv6 prefix /16", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, key: {clientIP: {ipv6PrefixLength: 16}}}]\n"), wantErr: "should be greater than or equal to 32"},
+		{name: "rate limit by X-Forwarded-For", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, key: {header: {name: x-forwarded-For}}}]\n"), wantErr: "count by clientIP, not by X-Forwarded-For, Forwarded or Host"},
+		{name: "rate limit by Host", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, key: {header: {name: HOST}}}]\n"), wantErr: "count by clientIP"},
+		{name: "rate limit by a pseudo-header", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, key: {header: {name: \":authority\"}}}]\n"), wantErr: "spec.rateLimits[0].key.header.name"},
+		{name: "rate limit relative path", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, match: {paths: [login]}}]\n"), wantErr: "spec.rateLimits[0].match.paths[0]"},
+		{name: "rate limit unknown method", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, match: {methods: [PURGE]}}]\n"), wantErr: `Unsupported value: "PURGE"`},
+		{name: "rate limit repeated method", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, match: {methods: [GET, GET]}}]\n"), wantErr: "Duplicate value"},
+		{name: "rate limit in Block mode", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, mode: Block}]\n"), wantErr: "a rate limit's mode can only be Detect"},
 	})
 }
 
