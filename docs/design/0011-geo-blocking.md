@@ -117,7 +117,7 @@ countries there would also make the resolver depend on the database to turn a li
 default for a namespace's routes that have no policy belongs to the planned `WAFPolicyDefault`
 ([0004 §3](0004-operator.md#3-api-wafinkwalldevv1alpha1)).
 
-`mode: Detect` follows the rate limits' design (0009, in review): a policy already in `Block` can
+`mode: Detect` follows the rate limits' design ([0009](0009-rate-limits.md)): a policy already in `Block` can
 try geo first without moving the whole policy back to `Detect`. The enum has only `Detect`, so geo
 can never block on a `Detect` policy.
 
@@ -164,7 +164,7 @@ the rest. Geo goes right after the IP lists:
 2. **Geo (new):** a denied country, or an unknown address with `unknown: Deny` → 403 `geo-deny` in
    `Block`; in `Detect`, remember it and go on.
 3. T0 skip list (`routes.Decide`).
-4. Rate limits (0009).
+4. Rate limits ([0009](0009-rate-limits.md)).
 5. WebSocket handshake rules, `body.grpc: Deny`, then the rules.
 
 | Situation | What happens |
@@ -178,7 +178,7 @@ the rest. Geo goes right after the IP lists:
 | A request several policies inspect | Each applies its own geo; the strictest verdict wins, as for the rules |
 | `exclusions` | No effect: exclusions turn rules off by ID, and geo is not a rule |
 
-0009 §5.1 gives the pipeline order without geo; whichever of the two is built second adds the geo
+[0009 §5.1](0009-rate-limits.md#51-where-in-the-pipeline) gives the pipeline order without geo; whichever of the two is built second adds the geo
 step there, at this place.
 
 Geo runs before the skip list, as the IP deny list does today, and before the rate limits, so a
@@ -657,7 +657,7 @@ when it comes from a Secret (16 MiB); the mapped file is page cache. Every repli
 geo chunk Secrets (at most 14,400 KiB per slot). That is up to about 100 MiB at the bounds, on top
 of an operator whose largest scale test already peaks at about 518 MiB against a 512 MiB limit
 ([0004 §8](0004-operator.md#8-scale-targets-v1)). So the chart's default operator
-`limits.memory` becomes 768 MiB, the same change 0010 (SIEM export) makes for its buffer,
+`limits.memory` becomes 768 MiB, the same change [0010](0010-siem-export.md) makes for its buffer,
 and the scale test runs with geo on and asserts the peak stays under it ([§10](#10-testing)).
 
 The input is the cluster admin's own file, so the threat is a corrupt download more than an

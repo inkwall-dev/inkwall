@@ -147,7 +147,7 @@ The compiled policy sits in an [`atomic.Pointer[Snapshot]`](https://pkg.go.dev/s
 | `pkg/adapters/*` | One per listener | `forwardauth`, `httpcheck`, `proxy`, `extproc`, `spoe` built; `extauthz` not yet |
 | `pkg/events` | Redacted security events, bounded buffer ([§5.4](#54-event-schema)) | built |
 | `pkg/iplist` | [CIDR](https://www.rfc-editor.org/rfc/rfc4632) lists as sorted, merged ranges ([§4.2](#42-crds-wafinkwalldevv1alpha1)) | built |
-| `pkg/ratelimit` | [Token buckets](https://en.wikipedia.org/wiki/Token_bucket) | not yet |
+| `pkg/ratelimit` | [Token buckets](https://en.wikipedia.org/wiki/Token_bucket) ([0009](0009-rate-limits.md)) | not yet |
 
 Lifecycle:
 
@@ -465,7 +465,9 @@ Rules of the contract:
   is sent in `Hello`, and an older policy snapshot is refused.
 - In Managed mode the [validating webhook](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/) lets only the operator write the labelled objects. It
   fails closed.
-- In Standalone mode, events go to logs and optionally to [OTLP](https://opentelemetry.io/docs/specs/otlp/). Not yet: only the engine's log.
+- In every mode, events go to the engines' logs and, optionally, from each operator replica to a
+  SIEM over [OTLP](https://opentelemetry.io/docs/specs/otlp/) or JSON, beside the control plane
+  ([0010](0010-siem-export.md)). Not yet: the SIEM export; events reach the control plane today.
 
 **Built:** the contract (#86), enrollment and the primary stream, state sync (`ClusterState`), the
 events streams with each replica's disk buffer, request counts per policy (#119), and Managed mode (policy snapshots written as
@@ -1224,7 +1226,8 @@ Target:
   use only registered ones.
 
 **Not yet:** a proxy-side adapter failure metric (see [§7.3](#73-engine-unavailable)),
-rate-limit metrics, tracing.
+rate-limit metrics, tracing, exporting events to a SIEM and its metrics
+([0010](0010-siem-export.md)).
 
 ### 8.6 Versioning and compatibility
 
@@ -1442,6 +1445,8 @@ Other docs cite these decisions by ID (D1–D9).
 1. An optional [Hyperscan](https://github.com/intel/hyperscan) ([cgo](https://pkg.go.dev/cmd/cgo)) build?
 2. Envoy's Go filter: supported or experimental?
 3. Default body cap: 8 KB, 64 KB, or per content type?
-4. Distributed rate limiting: gossip or [Redis](https://redis.io/docs/latest/)?
+4. Distributed rate limiting: gossip or [Redis](https://redis.io/docs/latest/)? **Decided for v0.7.0:** neither yet; each engine
+   limits on its own, and cluster-wide limits are deferred, with a sync relayed by the operator
+   as the first option to evaluate ([0009 §2](0009-rate-limits.md#2-per-engine-limits-first)).
 5. A bot challenge in v1? It needs response rewriting, which only ext_proc, Caddy and the reverse
    proxy can do.

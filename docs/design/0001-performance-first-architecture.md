@@ -217,9 +217,12 @@ it to block mode.
 
 ### 5.3 State (rate limits, reputation)
 
-**Not built yet.** Each CPU keeps local [token buckets](https://en.wikipedia.org/wiki/Token_bucket). Cluster-wide limits sync asynchronously,
-about every 100 ms. The hot path never waits on the network, and we accept a little
-over-admission.
+**Not built yet.** The hot path never waits on the network, and we accept a little
+over-admission. Rate limits are designed in [0009](0009-rate-limits.md): each engine keeps its own
+[token buckets](https://en.wikipedia.org/wiki/Token_bucket), one per key in a sharded table with striped locks (not per CPU:
+[0009 §5.2](0009-rate-limits.md#52-data-structure)), and limits per engine in v0.7.0.
+Cluster-wide limits, synced asynchronously, are deferred
+([0009 §2.2](0009-rate-limits.md#22-cluster-wide-limits-deferred)).
 
 ### 5.4 Telemetry
 
@@ -228,7 +231,8 @@ over-admission.
 - **Built:** [Prometheus](https://prometheus.io/docs/introduction/overview/) metrics, `/healthz` and `/readyz` (`pkg/telemetry`), and [pprof](https://pkg.go.dev/net/http/pprof)
   (`--pprof`). Security events go to a bounded ring buffer and are shipped to the operator in
   batches (`pkg/events`); that buffer uses a mutex, not a lock-free design. **Not yet:** a
-  lock-free buffer, audit logs.
+  lock-free buffer, audit logs, and shipping events on from the operator to a SIEM
+  ([0010](0010-siem-export.md)), which keeps the same rule: drop and count, never backpressure.
 
 ### 5.5 Wire format
 

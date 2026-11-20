@@ -13,6 +13,8 @@ picture; the [glossary](../glossary.md) defines the terms all of them use.
 | [0006](0006-adapter-protocols.md) | Adapter Protocols Primer | Draft | How each proxy asks the engine for a verdict |
 | [0007](0007-inkwall-engine.md) | Inkwall Rule Engine | Draft | Inkwall's own rule engine for the [OWASP Core Rule Set](https://coreruleset.org/) (CRS), to reach the latency budgets |
 | [0008](0008-assistants.md) | Assistants | Draft | `inkwallctl explain`, an MCP server for AI assistants, a docs assistant and a GitHub bot; the security rules for all of them |
+| [0009](0009-rate-limits.md) | Rate Limits | Draft | Per-engine rate limits in tier T1: the `WAFPolicy` API, 429 with `Retry-After` per adapter, the engine's bounded table, observability, tests |
+| [0010](0010-siem-export.md) | Exporting Security Events to a SIEM | Draft | Security events from the operator to a SIEM over OTLP or JSON: API, schema, buffering, security, status |
 | [0011](0011-geo-blocking.md) | Geo Blocking | Draft | Allow or deny clients by country in tier T1: the `WAFPolicy` API, the user's MMDB compiled by the operator into a country table, its distribution, lookup cost, status, tests |
 
 There is no 0003: no document with that number was ever published in this repository.

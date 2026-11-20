@@ -101,7 +101,8 @@ which only adds management, analytics and threat intelligence.
 **Not yet:**
 
 - The adapter `extauthz` (gRPC).
-- Rate limits (`pkg/ratelimit`) in tier T1, between the route table and the rules ([0001 §4](0001-performance-first-architecture.md#4-request-pipeline-tiered-cheapest-first)).
+- Rate limits (`pkg/ratelimit`) in tier T1, between the route table and the rules ([0001 §4](0001-performance-first-architecture.md#4-request-pipeline-tiered-cheapest-first)),
+  designed in [0009](0009-rate-limits.md).
 - Geo blocking (`pkg/geo`) in tier T1, right after the IP lists, with a country table the operator
   compiles from the user's database ([0011](0011-geo-blocking.md)).
 - Traces in telemetry.
