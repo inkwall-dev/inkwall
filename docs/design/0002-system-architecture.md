@@ -252,7 +252,9 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
 
 - **`InkwallConfig`** (a cluster singleton): `mode`, `controlPlane`, `engine`, `integrations` and
   `events`. `engine` holds the image, resources and `bootstrapMode`; its `socketDir` is deprecated and ignored. Its resources
-  have no CPU limit, since throttling hurts p99 latency.
+  have no CPU limit, since throttling hurts p99 latency. Each of `integrations` overrides one
+  controller's pod `selector`; its `adapter` is deprecated and ignored (the operator takes each
+  integration's adapter from its built-in table), and v1 removes it (#711).
 - **`WAFPolicy`**:
 
   ```yaml
