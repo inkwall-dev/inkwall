@@ -164,7 +164,8 @@ type Config struct {
 	// Sidecar is the engine Envoy Gateway's and Istio's pods get, before
 	// the InkwallConfig's settings.
 	Sidecar injection.Sidecar
-	// Prober probes HAProxy's wired routes; nil: none is.
+	// Prober probes the wired routes of HAProxy, Envoy Gateway and Istio;
+	// nil: none is.
 	Prober *Prober
 }
 
@@ -181,6 +182,7 @@ func Integrations(c client.Client, reader client.Reader, cfg Config) []Integrati
 			Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.EnvoyGateway.Name), Sidecar: cfg.Sidecar,
 			HTTPRoutes: cfg.HTTPRoutes, Gateways: cfg.Gateways, GatewayClasses: cfg.GatewayClasses,
 			EnvoyProxies: cfg.EnvoyProxies, ExtensionPolicies: cfg.ExtensionPolicies, TrafficPolicies: cfg.TrafficPolicies,
+			Prober: cfg.Prober,
 		},
 		&Istio{
 			Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.Istio.Name), Sidecar: cfg.Sidecar,
