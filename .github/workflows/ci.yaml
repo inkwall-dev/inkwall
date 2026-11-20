@@ -19,15 +19,18 @@ concurrency:
 jobs:
   changes:
     # A pull request that changes only Markdown skips the jobs Markdown can't
-    # affect: images, the e2e and upgrade tests, the proxies in Docker, CRS,
-    # benchmarks, govulncheck. A skipped job counts as passed for the
-    # required checks. lint, test (docs/*.md is embedded in inkwallctl),
-    # generate and docs always run, and pushes run everything.
+    # affect: everything but docs and pr-title. test still runs when a
+    # Markdown file the tests read changes: docs/*.md (embedded in
+    # inkwallctl, and the troubleshooting and monitoring guides) and
+    # CONTRIBUTING.md; docs/design/ and the other guides it never reads. A
+    # skipped job counts as passed for the required checks, and pushes run
+    # everything.
     runs-on: ubuntu-24.04
     permissions:
       pull-requests: read
     outputs:
       code: ${{ steps.files.outputs.code }}
+      tested: ${{ steps.files.outputs.tested }}
     steps:
       - id: files
         env:
@@ -36,16 +39,20 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
-          code=true
+          code=true tested=true
           if [[ $EVENT == pull_request ]]; then
             files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[] | .filename, (.previous_filename // empty)')
             if [[ -n $files ]] && ! grep -qvE '\.md$' <<<"$files"; then
               code=false
+              grep -qE '^(docs/[^/]+\.md|CONTRIBUTING\.md)$' <<<"$files" || tested=false
             fi
           fi
           echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+          echo "tested=$tested" | tee -a "$GITHUB_OUTPUT"
 
   lint:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -60,6 +67,8 @@ jobs:
       - run: make lint
 
   test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.tested == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -333,6 +342,8 @@ jobs:
     # Generated code is committed: the protobuf code must match api/*.proto,
     # and the operator's CRDs, RBAC and webhooks (also in the Helm chart)
     # must match its markers.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
