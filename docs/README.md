@@ -81,6 +81,8 @@ Every doc in this repository, by topic, with the question each one answers.
   security rules every one of them follows.
 - [0009 — Rate Limits](design/0009-rate-limits.md): how does a policy limit a client's requests,
   what does a limited client get, and why does each engine count on its own?
+- [0010 — Exporting Security Events to a SIEM](design/0010-siem-export.md): how do security events
+  reach a SIEM (Splunk, Elastic, Loki, Datadog), with or without the control plane?
 
 ## Contributing
 

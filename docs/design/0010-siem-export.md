@@ -1,0 +1,809 @@
+# 0010 — Exporting Security Events to a SIEM
+
+- Status: Draft
+- Date: 2026-11-20
+- Updated: 2026-11-20
+- Owner: noureldin
+- Depends on: [0002 — System Architecture](0002-system-architecture.md),
+  [0004 — Kubernetes Operator](0004-operator.md)
+
+Today a security event goes to the engine's log and, when a control plane is connected, to the
+control plane ([0002 §5.3](0002-system-architecture.md#53-operator--saas)). Production users need
+the events in their own SIEM: Splunk, Elastic, Loki, Datadog, Sentinel and the like. This document
+decides where the export runs, which formats and transports v0.7.0 speaks, the `InkwallConfig`
+API, the exported schema, how export lives beside the control plane, its security, what it shows
+in metrics and status, and how it is tested. **Nothing here is built yet** (#723).
+
+[Terms](../glossary.md) used here:
+
+- **Engine:** `inkwall-engine`, the process that inspects requests and records security events.
+- **Replica:** one pod of the operator's Deployment. **Leader:** the replica that holds the
+  leader-election lease.
+- **Event:** a `SecurityEvent` (`api/events/v1/events.proto`): one blocked or detected request.
+- **SIEM:** a security information and event management system: where security teams search,
+  correlate and alert on events.
+- **Sink:** one export destination in `InkwallConfig.spec.events.export.sinks`: an endpoint, its
+  format, TLS and credentials.
+- **Collector:** an [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/), which
+  receives OTLP and forwards it to almost any backend.
+
+## Contents
+
+- [1. Goals and scope](#1-goals-and-scope)
+- [2. Where export runs](#2-where-export-runs)
+  - [2.1 The path events take today](#21-the-path-events-take-today)
+  - [2.2 From the operator, on every replica](#22-from-the-operator-on-every-replica)
+  - [2.3 Rejected: from each engine](#23-rejected-from-each-engine)
+  - [2.4 Buffering, loss and restarts](#24-buffering-loss-and-restarts)
+- [3. Formats and transports](#3-formats-and-transports)
+  - [3.1 OTLP logs](#31-otlp-logs)
+  - [3.2 JSON over HTTP](#32-json-over-http)
+  - [3.3 Syslog, deferred](#33-syslog-deferred)
+  - [3.4 Recipes per SIEM](#34-recipes-per-siem)
+- [4. API](#4-api)
+  - [4.1 Fields](#41-fields)
+  - [4.2 Credentials and TLS](#42-credentials-and-tls)
+  - [4.3 Batching, retries and backpressure](#43-batching-retries-and-backpressure)
+  - [4.4 Filtering and redaction](#44-filtering-and-redaction)
+  - [4.5 Validation](#45-validation)
+- [5. Event schema](#5-event-schema)
+  - [5.1 JSON](#51-json)
+  - [5.2 OTLP](#52-otlp)
+  - [5.3 Versioning](#53-versioning)
+- [6. Beside the control plane](#6-beside-the-control-plane)
+- [7. Security](#7-security)
+- [8. Observability](#8-observability)
+- [9. Testing](#9-testing)
+- [10. Decisions](#10-decisions)
+- [11. Open questions](#11-open-questions)
+
+## 1. Goals and scope
+
+**In v0.7.0:**
+
+- `InkwallConfig.spec.events.export`: up to 4 sinks, each OTLP logs (gRPC or HTTP) or JSON over
+  HTTP(S) ([§3](#3-formats-and-transports), [§4](#4-api)).
+- Export runs in the operator, on every replica, from the events it already receives
+  ([§2](#2-where-export-runs)). Engines don't change and get no egress.
+- A bounded buffer per replica: a slow or down sink drops the oldest events and counts them; it
+  never blocks a request, an engine's stream or the control plane's forwarding
+  ([§4.3](#43-batching-retries-and-backpressure)).
+- The redaction engines already apply is the most an exported event carries; a sink can only
+  leave out more ([§4.4](#44-filtering-and-redaction)).
+- A versioned schema with stable field names ([§5](#5-event-schema)).
+- Metrics per sink, and an `EventsExported` condition on the `InkwallConfig`
+  ([§8](#8-observability)).
+- A guide with a recipe per common SIEM ([§3.4](#34-recipes-per-siem)), and an e2e test on kind
+  against a Collector and a small HTTP sink ([§9](#9-testing)).
+
+**Later, not in v0.7.0:**
+
+- Syslog ([RFC 5424](https://www.rfc-editor.org/rfc/rfc5424)) over TCP or TLS
+  ([§3.3](#33-syslog-deferred)).
+- Exporting request counts (`RequestStats`) as OTLP metrics: Prometheus already has them.
+- Sinks owned by a namespace's team rather than the cluster admin ([open question 4](#11-open-questions)).
+- Export from an engine that runs without an operator (the standalone proxy). Its JSON log lines
+  ([0002 §8.5](0002-system-architecture.md#85-observability)) are already shippable by any log
+  agent; the guide says how.
+
+## 2. Where export runs
+
+### 2.1 The path events take today
+
+1. The engine turns each verdict that isn't `allow` into a `SecurityEvent`, redacted
+   (`pkg/events/events.go`, [0002 §8.3](0002-system-architecture.md#83-data-privacy)), and adds
+   it to a bounded ring of 10,000 events that drops the oldest when full (`pkg/events/buffer.go`,
+   `DefaultCapacity`).
+2. The agent sends batches of at most 1,000 events on its `Watch` stream to whichever replica it
+   is connected to (`api/agent/v1`, `WatchRequest.events`). Engines connect to any replica through
+   the Service ([0004 §4.7](0004-operator.md#47-distribution-server-all-replicas)).
+3. The replica stamps each event with the engine and pod of the stream, not what the event claims
+   (`Server.events`, `operator/internal/distribution/server.go`), and hands the batch to
+   `Server.Events`. The pod is authenticated only when the engine connects with a pod-bound token;
+   otherwise the pod's namespace and name are what the engine's `Hello` claims, and `engine_id`
+   always is (`Server.Watch`). The exported `engine.*` fields and `k8s.pod.name` carry the same
+   trust, and the guide says so.
+4. `Server.Events` is `Forwarder.Add` (`operator/manager/manager.go`, `addDistribution`). Every
+   replica runs a `Forwarder` (`NeedLeaderElection` is false,
+   `operator/internal/controlplane/forwarder.go`). While the control plane accepts events, it puts
+   them in a bounded queue, on disk under `--events-dir` when set, and sends them on the replica's
+   own events stream. Otherwise it drops them: the engines' logs are the record.
+
+So every event already arrives, redacted and authenticated, at one replica, and a hook exists that
+sees each batch as it arrives. Normally once: an agent whose send failed puts the batch back and
+sends it again (`Buffer.Return`, `pkg/events/buffer.go`), possibly to another replica after a
+reconnect, so a few events can already arrive twice. `event_id` deduplicates them
+([§2.4](#24-buffering-loss-and-restarts)).
+
+### 2.2 From the operator, on every replica
+
+**Decision:** export runs in the operator. Each replica exports the events of the engines
+connected to it, as the `Forwarder` does for the control plane. `Server.Events` becomes a fan-out:
+`Forwarder.Add` and `Exporter.Add`, both of which treat the batch as read-only.
+
+- **No leader.** Events are already split between replicas by engine connection. Exporting from the
+  leader only would need the other replicas to relay events to it: a new protocol between replicas
+  ([0004 §12](0004-operator.md#12-open-questions), question 4), and a single replica carrying the
+  whole cluster's events. Each replica exporting its own share scales with replicas and loses
+  only its share when it stops.
+- **Fan-in load.** At the scale target of 500 engines
+  ([0004 §8](0004-operator.md#8-scale-targets-v1)), a flood reaches the operator in full. The
+  engine's ring of 10,000 bounds a backlog while the operator is away, not a rate, and the
+  engine's log limiter (`pkg/events/loglimit.go`) leaves the events sent to the operator alone. So
+  the export buffer is where a flood is cut ([§2.4](#24-buffering-loss-and-restarts)). The new
+  work per event is one encoding (JSON or OTLP, about 1 KiB) and its share of a compressed
+  request. Target: 10,000 events per second per replica per sink at under half a CPU,
+  with a 100 ms round trip to the sink, measured by the benchmark of [§9](#9-testing) (with the
+  round trip injected) before the defaults are final.
+- **Order.** Events from one engine keep their order on one replica. An engine that reconnects to
+  another replica continues there, so across replicas only the event's `time` orders them. SIEMs
+  sort by time anyway.
+
+### 2.3 Rejected: from each engine
+
+Each engine could send its events straight to the SIEM. Rejected:
+
+- **Engines have no egress, by design.** "The control plane talks only to operators, never to
+  engines. That means fewer connections, no egress from engines"
+  ([0002 §3.4](0002-system-architecture.md#34-control-plane-optional), decision D4 of
+  [0002 §11](0002-system-architecture.md#11-decisions-adr-log)). An engine runs in the proxy's
+  pod, in the proxy's namespace; letting it reach a SIEM opens egress from every proxy pod, in
+  namespaces the chart doesn't own and can't write NetworkPolicies for
+  ([0004 §7](0004-operator.md#7-rbac)).
+- **Credentials in every proxy pod.** The SIEM's token would have to reach each engine: either in
+  the bundle, which every engine's ServiceAccount can read and which is not a secret, or as a
+  Secret mounted in every proxy pod.
+- **N connections.** 500 engines means 500 TLS connections and 500 small batch streams to the
+  SIEM, instead of one or two per replica.
+- **The hot process.** TLS, retries and encoding would run beside the inspection, competing with it
+  for the engine's CPU and memory, which the latency budgets of
+  [0001](0001-performance-first-architecture.md) are about.
+- **Configuration.** Sink changes would have to reach the engines through the bundle, adding fields
+  older engines ignore without saying so.
+
+What the engine path would have given: events still flowing while every replica is down. The
+engine's ring already holds 10,000 events while its operator is away, and a replica outage longer
+than that is visible in `inkwall_engine_events_dropped_total`.
+
+### 2.4 Buffering, loss and restarts
+
+Each replica has **one export buffer** shared by all its sinks: a log of batches with a cursor per
+sink. A batch is freed once every sink has passed it. When the buffer is full, the oldest batch is
+dropped; a sink whose cursor hadn't reached it counts its events as dropped (`reason="buffer_full"`).
+So a dead sink costs memory up to the bound, and a healthy sink never loses events because
+another is down: it has sent them already.
+
+The buffer holds each batch as its encoded protobuf bytes, decoded by each sender when it reads
+it, so the bound in bytes is also the buffer's memory.
+
+A **cursor** is a position (batch sequence number, event index) in that log. A sender reads from
+its cursor, skips the events its filters leave out, and cuts what is left into requests by
+`maxEvents`, by the 4 MiB limit and by 413 halving. Each request records the position just past
+its last event, and past any filtered events after it. When requests are answered, in order, the
+cursor moves to the last one's position. Filtered events advance the cursor like sent ones, so a
+sink that takes only `Deny` doesn't hold `Log` batches in the buffer.
+
+Cursors follow the sinks by name, the key of the metrics and the condition:
+
+- **A new sink** starts at the buffer's end: it gets the events that arrive after it is added, not
+  the backlog.
+- **A removed sink** frees its cursor, and the batches only it was waiting for.
+- **A changed sink** (endpoint, format, credentials) keeps its cursor: what it hadn't sent goes to
+  the new configuration. A renamed sink is a removal and a new sink.
+- **Persisted:** each sink's cursor is written beside the batches (a file per sink, rewritten after
+  each acknowledged request), so a restart resends at most the requests in flight, not the whole
+  buffer. A cursor is never persisted past a batch that isn't on disk yet: a sender may send a
+  batch still in memory, but its cursor file stops at the last batch written. After a crash, the
+  next sequence number is one past the highest of the batches on disk and the persisted cursors,
+  so a new batch never takes a number a cursor has already passed.
+
+- **Two bounds.** In memory, `--export-buffer-bytes` (default 32 MiB; chart
+  `events.export.bufferMiB`): the newest batches. On disk, `--export-disk-bytes` (default 512 MiB;
+  chart `events.export.diskMiB`): every batch. A batch past the memory bound stays on disk only,
+  and a sender whose cursor reaches it reads it back. The oldest batch is dropped when the disk
+  bound is reached, or, with no `--events-dir`, the memory bound. At 10,000 events per second and
+  about 1 KiB each (10 MB/s), the memory bound covers about 3 seconds of a sink's outage, and the
+  disk bound about 50 seconds; at a more usual 1,000 events per second, about 8 minutes.
+- **Flags, not fields.** The bounds are operator flags, not `InkwallConfig` fields, for two
+  reasons. The operator's memory limit is the chart's. And the disk copy lives in the `events`
+  emptyDir, whose `sizeLimit` the chart computes (`deploy/helm/inkwall/templates/deployment.yaml`):
+  a bound set in the CRD could exceed it, and the kubelet evicts a pod whose emptyDir passes its
+  limit. The chart adds `diskMiB` to the emptyDir's `sizeLimit`.
+- **Memory.** Today's budget has no room for it. The largest scale test peaks at about 518 MiB
+  against the 512 MiB default limit ([0004 §8](0004-operator.md#8-scale-targets-v1)). The control
+  plane's queue (`controlPlane.eventsBufferMiB`, 64 MiB) bounds its batches' wire size, but holds
+  them decoded (`queue.go`), which takes more heap than that. Export adds its memory bound, plus
+  at most `sinks × maxInFlight × 4 MiB` of encoded requests (64 MiB with 4 sinks at the default of
+  4 in flight, the worst case). So the chart raises the default `limits.memory` to 768 MiB
+  (`GOMEMLIMIT` about 691 MiB) when export ships, and its values document the formula:
+  `limits.memory ≥ (the scale test's peak + the control plane queue's heap + bufferMiB × 1.25 +
+  4 MiB × maxInFlight × sinks) / 0.9`. The queue's heap and the scale test's peak are the numbers
+  the scale test of [§9](#9-testing) measures with export on, and the chart's default and formula
+  are filled in from them before 0.7.0.
+- **On disk.** The buffer is written to `--events-dir/export`, as the control plane's queue is
+  (`operator/internal/controlplane/queue.go`): a file per batch, a random buffer ID, oldest
+  dropped first, up to the disk bound. Unlike that queue, which writes inside `Add` on the
+  engine's stream (`queue.add`), the export buffer writes on its own goroutine, at most 1 s after
+  `Add`, so a slow disk never slows a stream. The cost: a crash loses what arrived in the last
+  second. A container restart (a crash, an OOM kill) keeps the emptyDir, and the replica sends the
+  rest. A pod deletion (a rollout, a drain) loses it.
+- **Shutdown.** On SIGTERM a replica keeps serving engine streams for `--shutdown-delay` (5 s,
+  `cmd/operator/main.go`), so events keep arriving. The distribution server and the forwarder are
+  plain runnables today (`mgr.Add`, `operator/manager/manager.go`), which the manager stops
+  concurrently, so the exporter isn't one: the distribution server's runnable stops the exporter
+  itself, after its gRPC server has stopped, so no `Add` comes after the flush. The flush has its
+  own deadline, 15 s (`--export-flush-timeout`); what is left stays on disk and is lost with the
+  pod. The chart sets `terminationGracePeriodSeconds` to 30 explicitly (5 s of delay, 15 s of
+  flush, the rest for the manager's other runnables), and says to raise it with either flag.
+- **Delivery:** at least once per sink while the replica runs and the buffer holds the event;
+  best effort across a crash (the last second) and lost on pod deletion, which every rollout of
+  the operator does. A retry after a timeout or a restart can send an event twice. `event_id` is a
+  ULID, unique per event: the guide shows how each SIEM deduplicates on it, where it can.
+
+Rejected:
+
+- **A buffer per sink.** Four sinks would multiply the memory by four for the same events.
+- **Sharing the control plane's queue.** Its batches are acknowledged by the control plane with
+  sequence numbers and buffer IDs ([0002 §5.3](0002-system-architecture.md#53-operator--saas)),
+  and it holds events only while the control plane accepts them. Tying the SIEM to that lifecycle
+  would let a control plane outage, or a control plane that refuses events, decide what reaches
+  the SIEM. A shared log with one more cursor is [open question 6](#11-open-questions).
+- **Memory only.** Simpler, but loses the buffer on every crash, which the control plane's path
+  already avoids at the same cost.
+
+## 3. Formats and transports
+
+**Decision:** two formats in v0.7.0: **OTLP logs** (gRPC, or HTTP with protobuf) and **JSON over
+HTTP(S)** (one event per line, or a JSON array). Syslog waits ([§3.3](#33-syslog-deferred)).
+
+### 3.1 OTLP logs
+
+[OTLP](https://opentelemetry.io/docs/specs/otlp/) is the one protocol every major backend now takes,
+directly or through a Collector, and the Collector reaches the rest. Requests are
+`ExportLogsServiceRequest` messages, sent as gRPC (`LogsService/Export`) or as an HTTP `POST` of
+the protobuf body (`Content-Type: application/x-protobuf`), compressed with gzip unless the sink
+sets `compression: None`. Both report
+[partial success](https://opentelemetry.io/docs/specs/otlp/#partial-success), counted as rejected
+events.
+
+The operator builds the messages with `go.opentelemetry.io/proto/otlp`, already in `go.mod`
+(indirect), and its existing gRPC stack. It doesn't use the OpenTelemetry SDK's log pipeline: that
+has its own batching and queue, which would sit on top of the buffer of
+[§2.4](#24-buffering-loss-and-restarts) and hide its drops.
+
+OTLP over HTTP with a JSON body is not offered: every OTLP receiver must accept protobuf, and one
+encoding is less to test.
+
+### 3.2 JSON over HTTP
+
+A `POST` of the events in the schema of [§5.1](#51-json), compressed with gzip unless the sink sets
+`compression: None`, in one of two framings:
+
+- **`Lines`** ([NDJSON](https://github.com/ndjson/ndjson-spec), `application/x-ndjson`): one event
+  per line. Splunk's HEC raw endpoint, Logstash's `http` input, Vector and Fluent Bit take it.
+- **`Array`** (`application/json`): one JSON array. Datadog's HTTP logs intake, Sumo Logic and most
+  webhook-style receivers take it.
+
+Every attacker-controlled field is a JSON string, so a newline in a path or user agent is escaped
+(`\n`) and can't start a fake event in `Lines`. The encoder's fuzz test checks it
+([§9](#9-testing)).
+
+A vendor envelope (Splunk's HEC `event` wrapper, Loki's push streams) is not built in: each would
+be a format to keep and test per vendor. The vendors that need one take OTLP ([§3.4](#34-recipes-per-siem)).
+
+### 3.3 Syslog, deferred
+
+[RFC 5424](https://www.rfc-editor.org/rfc/rfc5424) over TLS ([RFC 5425](https://www.rfc-editor.org/rfc/rfc5425))
+is what older SIEMs (QRadar, ArcSight) collect natively. Deferred, because:
+
+- **No acknowledgement.** A TCP or TLS syslog sender learns nothing about what the receiver
+  processed: a connection that drops loses what was in flight, silently. The at-least-once
+  delivery and the `failed` and `rejected` counts of [§8](#8-observability) can't be kept.
+- **Size.** Receivers need only accept 2,048 octets per message (RFC 5424 §6.1), and many
+  truncate there. An event with 32 matches is larger.
+- **Escaping.** Events carry attacker-controlled text; structured data needs its own escaping
+  (`]`, `"`, `\`) and framing (octet counting, RFC 6587), each a new place to get injection wrong.
+
+A Collector with its [syslog exporter](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/exporter/syslogexporter)
+covers these SIEMs today ([§3.4](#34-recipes-per-siem)). Native syslog is
+[open question 1](#11-open-questions), to decide from the users who ask.
+
+### 3.4 Recipes per SIEM
+
+The guide (`docs/siem-export.md`, written with the implementation) has one recipe per row, each
+checked against the product's current documentation when written. CI tests only the Collector and
+the HTTP sink ([§9](#9-testing)).
+
+| SIEM | Sink | Notes |
+|---|---|---|
+| Any, through a Collector | `otlp`, gRPC or HTTP, to the Collector's OTLP receiver | The general answer: the Collector has exporters for most backends, and can batch, filter and route further |
+| Splunk | `json`, `Lines`, to HEC's `/services/collector/raw?sourcetype=_json` | Header `Authorization: Splunk <token>` from the Secret, and `X-Splunk-Request-Channel` too when the HEC token has indexer acknowledgement on. Or a Collector with the `splunk_hec` exporter |
+| Elastic | `otlp` to Elastic's OTLP intake (APM Server or the Elastic Distribution of the Collector) | Or `json`, `Lines`, to Logstash's `http` input. Deduplicate by setting the document `_id` to `event_id` in the pipeline |
+| Grafana Loki (3.0 and later) | `otlp`, HTTP, to `/otlp/v1/logs` | Loki turns a default list of resource attributes into labels, `k8s.pod.name` among them; the guide shows how to drop the pod from the labels (its cardinality grows with every rollout) and keep it as structured metadata |
+| Datadog | `otlp` to the Datadog Agent's OTLP receiver, or a Collector with the `datadog` exporter | Or `json`, `Array`, to the HTTP logs intake with `DD-API-KEY` from the Secret |
+| Sumo Logic | `json`, `Array`, to an HTTP source | The source's URL holds its token: give it with `json.urlSecretRef`, not `json.url` |
+| Microsoft Sentinel | A Collector with the Azure Monitor exporter | |
+| QRadar, ArcSight and other syslog receivers | A Collector with the syslog exporter | [§3.3](#33-syslog-deferred) |
+| Vector, Fluent Bit, Logstash | `json`, `Lines`, to their HTTP input | Then anywhere they route |
+
+## 4. API
+
+```yaml
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: InkwallConfig
+metadata:
+  name: default
+spec:
+  events:
+    redact: {...}                           # unchanged: applied in the engines
+    export:
+      clusterName: prod-eu-1                # optional, in every event
+      sinks:
+        - name: collector                   # DNS label: in metrics and status
+          otlp:
+            endpoint: grpc://otel-collector.observability:4317
+          insecure: true                    # plaintext: an in-cluster Collector
+        - name: splunk
+          json:
+            url: https://splunk.example.com:8088/services/collector/raw?sourcetype=_json
+            framing: Lines
+          headersSecretRef: {name: splunk-hec}    # in the operator's namespace
+          tls:
+            caSecretRef: {name: splunk-ca}
+          batch: {maxEvents: 500, maxDelay: 5s}
+          filter:
+            actions: [Deny]
+            policyNamespaces: [shop, payments]
+          omit: [Snippets]
+```
+
+### 4.1 Fields
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `export.clusterName` | DNS subdomain, ≤ 253 | — | A name for the cluster in every event, beside its ID ([§5](#5-event-schema)) |
+| `export.sinks` | list, ≤ 4 | none | No sinks: no export (the default) |
+| `sinks[].name` | DNS label, ≤ 63 | required | Unique; the `sink` label of the metrics and the name in the condition |
+| `sinks[].otlp.endpoint` | URL, ≤ 512 | — | `grpcs://host:port` or `grpc://` for gRPC; `https://…` or `http://…` for HTTP, used as is (OTLP/HTTP's path, usually `/v1/logs`, is part of it) |
+| `sinks[].json.url` | URL, ≤ 2048 | — | `https://…` or `http://…`, with any path and query |
+| `sinks[].json.urlSecretRef` | Secret name and key | — | The URL from a Secret instead, for intakes whose URL holds a token (Sumo Logic, query-string keys); exactly one of `url` and `urlSecretRef` |
+| `sinks[].compression` | `Gzip`, `None` | `Gzip` | The request body's compression |
+| `sinks[].json.framing` | `Lines`, `Array` | `Lines` | [§3.2](#32-json-over-http) |
+| `sinks[].insecure` | bool | false | Allows a plaintext `http://` or `grpc://` endpoint |
+| `sinks[].tls.caSecretRef.name` | Secret name | system roots | A Secret with `ca.crt`: the CAs trusted for the server |
+| `sinks[].tls.clientCertificateSecretRef.name` | Secret name | — | A `kubernetes.io/tls` Secret: the client certificate for mTLS |
+| `sinks[].tls.serverName` | DNS name | the URL's host | The name checked in the server's certificate |
+| `sinks[].headersSecretRef.name` | Secret name | — | Each key a header name, each value its value ([§4.2](#42-credentials-and-tls)) |
+| `sinks[].batch.maxEvents` | 1–1,000 | 500 | Events per request at most |
+| `sinks[].batch.maxDelay` | duration, 100ms–60s | 5s | The longest an event waits for its batch to fill |
+| `sinks[].batch.maxInFlight` | 1–4 | 4 | Requests sent before the first is answered ([§4.3](#43-batching-retries-and-backpressure)) |
+| `sinks[].timeout` | duration, 1s–60s | 10s | One request's deadline |
+| `sinks[].filter.actions` | `Deny`, `Log` (a set) | both | Which events this sink takes |
+| `sinks[].filter.policyNamespaces` | namespace list, ≤ 64 | all | Only events of policies in these namespaces |
+| `sinks[].omit` | `Snippets`, `ClientIP`, `UserAgent`, `RequestID` (a set) | none | Fields this sink never gets ([§4.4](#44-filtering-and-redaction)) |
+
+Exactly one of `otlp` and `json` per sink. The export config doesn't go into the bundle: engines
+need nothing from it, and bundles keep their content hash.
+
+The sinks are under `spec.events`, beside `redact`, because both decide what leaves the cluster
+and the guide documents them together. A separate CRD (`WAFEventSink`) was rejected for v0.7.0:
+there is one cluster-wide answer to "where do events go", and the `InkwallConfig` is where the
+cluster admin already gives it for the control plane. A namespaced kind is
+[open question 4](#11-open-questions).
+
+### 4.2 Credentials and TLS
+
+Credentials are never in the CR. The `InkwallConfig` is read by anyone with read access to it, is
+in Git in GitOps setups, and its spec travels to the control plane in `ClusterState`
+([0002 §5.3](0002-system-architecture.md#53-operator--saas)).
+
+- **Headers from a Secret.** `headersSecretRef` names a Secret whose keys are header names and
+  whose values are the headers' values: `Authorization: Bearer …`, `Authorization: Splunk …`,
+  `DD-API-KEY: …`. One mechanism covers bearer tokens, basic auth and API keys. For gRPC the
+  headers become metadata, lower-cased. Keys that aren't HTTP tokens are refused, and so are the
+  names the transports own: `Host`, `Content-Type`, `Content-Length`, `Content-Encoding`,
+  `Transfer-Encoding`, `Connection`, `TE`, `Trailer`, `Upgrade`, any `Proxy-*`, and for gRPC any
+  `grpc-*` and any key ending in `-bin` (binary metadata) ([§4.5](#45-validation)).
+- **Secrets in the operator's namespace only.** The references carry a name, no namespace. The
+  operator may read Secrets only in its own namespace (`operator/webhook/certs.go`'s RBAC marker,
+  [0004 §7](0004-operator.md#7-rbac)), and the control plane's enrollment token is already held to
+  that rule (`ReasonTokenSecretElsewhere`, `operator/internal/controlplane/connector.go`). A
+  namespace field that must always equal one value would be a trap; it was rejected.
+- **Rotation.** The operator watches its namespace's Secrets already; a changed Secret takes effect
+  with no restart. A header Secret takes effect on the next request. A changed CA, client
+  certificate or URL Secret rebuilds the sink's transport and closes its pooled HTTP and gRPC
+  connections, so the next request makes a new TLS handshake with the new material. A missing
+  Secret or key stops that sink only ([§8](#8-observability)).
+- **TLS.** TLS 1.2 or later, Go's defaults. The server's certificate is always verified: there is
+  no `insecureSkipVerify`. A self-signed SIEM gets its CA in `caSecretRef`. Plaintext needs
+  `insecure: true`, meant for a Collector in the cluster, and the condition's message says the sink
+  is plaintext. A plaintext sink can't have `headersSecretRef`: credentials never travel in clear
+  ([§4.5](#45-validation)).
+
+### 4.3 Batching, retries and backpressure
+
+The rule of [0001 §2](0001-performance-first-architecture.md#2-where-latency-comes-from-and-how-we-kill-each-source):
+drop events, never apply backpressure.
+
+- **Add never blocks.** `Exporter.Add` runs on the goroutine that reads an engine's stream. It
+  appends the batch to the buffer under a mutex and returns; a full buffer drops the oldest
+  ([§2.4](#24-buffering-loss-and-restarts)). A sink that is slow, down or refusing never slows the
+  stream, so engines never fill their own ring because of a SIEM, and the control plane's
+  forwarding is untouched.
+- **One sender per sink.** Each sink has one goroutine that reads from its cursor, filters
+  ([§4.4](#44-filtering-and-redaction)), encodes up to `maxEvents` events, and sends when the batch
+  is full or `maxDelay` has passed since its first event. Up to `maxInFlight` requests (default 4)
+  are in flight at once: one at a time caps a sink at `maxEvents` per round trip, 5,000 events per
+  second at 100 ms. Four give 20,000, twice the target of
+  [§2.2](#22-from-the-operator-on-every-replica), for headroom over slower round trips. The cursor
+  moves only past a run of answered requests, in order, so a restart never skips an unanswered
+  one; requests may arrive out of order, and SIEMs sort by `time`.
+- **Request size.** A request body is at most 4 MiB before compression (gRPC's default message
+  limit), measured after encoding in the sink's format: the encoder closes a request when the next
+  event would pass the limit. `events.Split` can't do it: it measures protobuf, and the same
+  events are larger as JSON or OTLP.
+- **Retries** with exponential backoff and full jitter, from 1 s to 60 s, for as long as the
+  buffer holds the batch:
+  - retried, for `otlp` sinks, exactly the retryable set of the
+    [OTLP spec](https://opentelemetry.io/docs/specs/otlp/#failures): connection and TLS errors,
+    timeouts, HTTP 429, 502, 503, 504; gRPC `UNAVAILABLE`, `DEADLINE_EXCEEDED`, `ABORTED`,
+    `CANCELLED`, `OUT_OF_RANGE`, `DATA_LOSS`, and `RESOURCE_EXHAUSTED` with `RetryInfo`. `json`
+    sinks also retry HTTP 408 and 500, which plain HTTP intakes use for passing faults. A
+    `Retry-After` header, or `RetryInfo`, sets the next wait, capped at 5 min;
+  - the one deviation from the spec, for both formats: HTTP 401 and 403, gRPC `UNAUTHENTICATED`
+    and `PERMISSION_DENIED` are retried at the slowest pace, not dropped, since fixing the Secret
+    should resume the flow without losing what waited;
+  - HTTP 413: the request is split in half and retried; a single event refused is dropped
+    (`reason="too_large"`);
+  - gRPC `RESOURCE_EXHAUSTED` without `RetryInfo` means either a message over the server's limit
+    or a quota. A request over 1 MiB is split in half, as for 413; a smaller one is treated as
+    throttled (`kind="throttled"`) and retried with backoff, since halving it would only drop a
+    throttled batch one event at a time;
+  - any other 4xx or 5xx (501, for example), any other gRPC code (`INVALID_ARGUMENT`,
+    `UNIMPLEMENTED`), and OTLP's partial success: the refused events are dropped
+    (`reason="rejected"`), because sending them again gets the same answer.
+- **No redirects.** A 3xx is a failure, not followed ([§7](#7-security)).
+- **Responses** are read up to 4 KiB, for the error class and a short message; the body is never
+  logged in full or put in status.
+
+### 4.4 Filtering and redaction
+
+Redaction stays where it is: in the engine, before the event leaves it
+([0002 §8.3](0002-system-architecture.md#83-data-privacy); `events.redact` reaches engines in the
+bundle). The operator passes events on as they come, so an exported event carries no more than
+what the control plane gets, and never a body, a query string, a cookie or a credential-looking
+value. The exporter adds only what the operator knows: the cluster's ID and name, and the time it
+received the event.
+
+A sink can leave out more, never put back:
+
+- **`omit`:** `Snippets` (keep the rule and variable, not the up to 64 bytes matched),
+  `ClientIP`, `UserAgent`, `RequestID`. For a SIEM outside the jurisdiction where personal data
+  may go, or one that only needs counts per rule.
+- **`filter.actions`:** `Deny` only, for a SIEM that alerts and doesn't want `Detect`-mode noise.
+- **`filter.policyNamespaces`:** only the events of some teams' policies, for a team's own SIEM.
+  The namespace is the policy's (`SecurityEvent.policy` is `namespace/name`). The replica stamps
+  the engine and pod but not the policy, which is what the engine says, so before filtering the
+  sender checks it against the bundle the replica serves (`Store.HasPolicy`,
+  `operator/internal/distribution/state.go`, as the `Forwarder` does for request counts). An event
+  whose policy isn't in the bundle counts as having no policy, so an engine can't label its events
+  `payments/web` to reach that team's SIEM. An event with no policy is sent only to sinks without
+  this filter.
+
+Filters are applied by the sender, per sink, after the shared buffer: one buffer holds every event
+once, whatever the filters.
+
+Rejected: engine-wide `events.redact` fields for export only. Redaction is configured once and
+applies to every destination; per-destination differences belong to the destination.
+
+### 4.5 Validation
+
+Schema and CEL, the first step of [0004 §3.1](0004-operator.md#31-validation):
+
+- `sinks`: at most 4, names unique (the `exists_one` pattern of `targetRefs`); exactly one of
+  `otlp` and `json`; in `json`, exactly one of `url` and `urlSecretRef`.
+- `otlp.endpoint`: `^grpcs?://[^/?#@\s]+$` (no path) or `^https?://[^/?#@\s]+([/?]\S*)?$`;
+  `json.url`: `^https?://[^/?#@\s]+([/?]\S*)?$`. The host part refuses `@`, so no user info
+  (`user:pass@`): credentials go in the Secret. A URL read from `urlSecretRef` gets the same check
+  when the sink starts.
+- `http://` and `grpc://` only with `insecure: true`, and never with `headersSecretRef`.
+- Durations, each its own rule in the pattern of `WAFPolicy`'s `timeout`
+  (`operator/api/v1alpha1/wafpolicy_types.go`): `batch.maxDelay` 100ms–60s, `timeout` 1s–60s.
+- `policyNamespaces`: DNS labels, a set.
+
+What the schema can't see is checked when the sink starts and reported in the condition
+([§8](#8-observability)): the Secrets exist and hold valid keys, the CA parses, the client
+certificate matches its key.
+
+## 5. Event schema
+
+The exported event is the `SecurityEvent` of [0002 §5.4](0002-system-architecture.md#54-event-schema),
+with three additions from the operator: `cluster.id` (the `kube-system` Namespace's UID, which
+already identifies the cluster to the control plane, `operator/internal/controlplane/connector.go`),
+`cluster.name` (`export.clusterName`, if set) and `observed_time` (when the replica received it).
+
+Field names are stable within a schema version ([§5.3](#53-versioning)). Enums are written as
+lower-case strings, never as numbers: the encoder maps the `inkwall.engine.v1` values of `action`
+and `reason` to the names the engine already logs (`pkg/pipeline/verdict.go`: `deny`, `log`;
+`rule`, `ip-deny`, `overload`, ...), `phase` to `request`, `response`, `websocket-message`, and
+`protocol` to `http`, `grpc`, `websocket`.
+
+The event's scalar fields have no presence in proto3, so a zero can't be told from "not set";
+`time` and `latency` are messages, which can be nil. The rule per field:
+
+- **Always written:** `event_id`, `action`, `reason`, `status` (0 means the request was
+  forwarded), `bundle_version`.
+- **Written from the replica when nil:** `time` takes `observed_time`; `latency_seconds` is left
+  out.
+- **Left out when zero or empty:** `rule_id` (0: no rule interrupted), `anomaly_score` (0: no
+  anomaly scoring), `policy` (an event with no policy, or one not in the bundle,
+  [§4.4](#44-filtering-and-redaction)), every string (`request.*`, `engine.*`), `matches`.
+- **Left out when unspecified:** `phase` (engines before 0.4.0 don't set it) and `protocol`
+  (engines before 0.5.0).
+
+The engines' own drops (`EventBatch.dropped`) aren't events, so no sink gets them: a SIEM can't
+see that gap. `inkwall_operator_engine_events_dropped_total` counts them, and the guide says to
+alert on it beside the export alert of [§8](#8-observability).
+
+### 5.1 JSON
+
+```json
+{
+  "schema": "inkwall.dev/security-event/v1",
+  "event_id": "01JD3Q4Z8M2N5X7Y9A1B3C5D7E",
+  "time": "2026-11-20T10:15:02.123456Z",
+  "observed_time": "2026-11-20T10:15:02.401337Z",
+  "cluster": {"id": "6f1c…", "name": "prod-eu-1"},
+  "engine": {"id": "01JD…", "namespace": "traefik", "pod": "traefik-7d9c…"},
+  "policy": {"namespace": "shop", "name": "web", "bundle_version": 42},
+  "action": "deny",
+  "reason": "rule",
+  "status": 403,
+  "rule_id": 949110,
+  "anomaly_score": 25,
+  "matches": [{"rule_id": 942100, "variable": "ARGS:id", "snippet": "1' OR '1'='1"}],
+  "phase": "request",
+  "protocol": "http",
+  "request": {
+    "id": "a1b2c3", "method": "GET", "host": "shop.example.com", "path": "/search",
+    "client_ip": "203.0.113.7", "user_agent": "curl/8.10.1"
+  },
+  "latency_seconds": 0.00042
+}
+```
+
+| JSON field | `SecurityEvent` field |
+|---|---|
+| `event_id`, `time`, `observed_time` | `event_id`, `time`, and the replica's receipt time (RFC 3339, UTC, microseconds) |
+| `engine.id`, `.namespace`, `.pod` | `engine_id`, `pod_namespace`, `pod_name` (set by the operator from the stream) |
+| `policy.namespace`, `.name`, `.bundle_version` | `policy` split at `/`, `bundle_version` |
+| `action`, `reason`, `status` | `action`, `reason`, `status` |
+| `rule_id`, `anomaly_score`, `matches[]` | `interrupting_rule_id`, `anomaly_score`, `matches` |
+| `phase`, `protocol` | `phase`, `protocol` (left out when unspecified) |
+| `request.*` | `request_id`, `method`, `host`, `path`, `client_ip`, `user_agent` |
+| `latency_seconds` | `latency` |
+
+`snake_case` and nesting, rather than [ECS](https://www.elastic.co/guide/en/ecs/current/index.html)
+or another vendor's names: the schema is Inkwall's own, documented once, and each SIEM maps it in
+its pipeline (the guide gives the mapping for ECS and Splunk's CIM). Mapping to a vendor schema in
+the operator would tie the format to that vendor's releases.
+
+### 5.2 OTLP
+
+One `LogRecord` per event, grouped in a `ResourceLogs` per engine pod:
+
+- **Resource:** `service.name=inkwall-engine`, `k8s.cluster.uid`, `k8s.cluster.name`,
+  `k8s.namespace.name`, `k8s.pod.name`, the
+  [semantic conventions](https://opentelemetry.io/docs/specs/semconv/resource/k8s/) for
+  Kubernetes.
+- **Scope:** `inkwall.dev/events`, version `1` (the schema version).
+- **Record:** `time_unix_nano` from `time`, `observed_time_unix_nano` from `observed_time`,
+  `event_name` `inkwall.security_event`, severity `WARN` for `deny` and `INFO` for `log` (the
+  engine logs events at Warn, `operator/api/v1alpha1/inkwallconfig_types.go`'s `logLevel` docs),
+  and a short body: `deny 403 rule 949110 GET shop.example.com/search`.
+- **Attributes:** the semantic conventions where one exists, the rest under `inkwall.`, flat
+  (OTLP attributes are a flat map; §5.1's nesting becomes dots). The full v1 list, which the
+  golden test pins, with the same presence rules as §5:
+
+  | OTLP attribute | §5.1 JSON field |
+  |---|---|
+  | `http.request.method` | `request.method` |
+  | `server.address` | `request.host` |
+  | `url.path` | `request.path` |
+  | `client.address` | `request.client_ip` |
+  | `user_agent.original` | `request.user_agent` |
+  | `http.response.status_code` | `status` |
+  | `inkwall.event_id` | `event_id` |
+  | `inkwall.engine.id` | `engine.id` |
+  | `inkwall.policy.namespace`, `inkwall.policy.name` | `policy.namespace`, `policy.name` |
+  | `inkwall.policy.bundle_version` | `policy.bundle_version` |
+  | `inkwall.action`, `inkwall.reason` | `action`, `reason` |
+  | `inkwall.rule_id`, `inkwall.anomaly_score` | `rule_id`, `anomaly_score` |
+  | `inkwall.matches` (an array of maps: `rule_id`, `variable`, `snippet`) | `matches` |
+  | `inkwall.request.id` | `request.id` |
+  | `inkwall.phase`, `inkwall.protocol` | `phase`, `protocol` |
+  | `inkwall.latency_seconds` | `latency_seconds` |
+
+  The engine's namespace and pod, and the cluster, are the resource's attributes, not the
+  record's.
+
+Events' strings are valid UTF-8 already: they crossed the engine's stream as proto3 strings, which
+Go's protobuf checks on marshal.
+
+### 5.3 Versioning
+
+- The version is in every event: `schema` in JSON, the scope version in OTLP.
+- Within v1, fields are only added. A rename, a removal or a change of meaning is v2.
+- New `SecurityEvent` fields (the rate limit's name, for example) appear in the export in the
+  release that adds them, under new names; old fields keep theirs.
+- A v2 would be opt-in per sink first (a `schemaVersion` field added then), with v1 kept for at
+  least two minor releases, as the API's own fields are.
+- A golden test fixes v1's field names ([§9](#9-testing)), so a rename fails CI rather than a
+  user's saved searches.
+
+## 6. Beside the control plane
+
+**Decision:** export and the control plane are independent, and both may run at once, in every
+mode.
+
+- The fan-out of [§2.2](#22-from-the-operator-on-every-replica) gives each the same batches. Each
+  has its own buffer, bound and metrics; neither waits for the other. A control plane that refuses
+  events (`Welcome`) doesn't affect export, and a dead sink doesn't affect the control plane.
+- In Managed mode the control plane writes policies, never the `InkwallConfig`: policy snapshots
+  take only `WAFPolicy` and the rule set and IP list kinds
+  ([0002 §5.3](0002-system-architecture.md#53-operator--saas)). So sinks are always the cluster
+  admin's, and a control plane can't add a destination for the cluster's events. This is kept as
+  a rule: if a future control plane manages the `InkwallConfig`, `spec.events.export` stays out of
+  what it may write.
+- The control plane sees the sinks' configuration in `ClusterState`, and their health in the
+  `EventsExported` condition, as it sees every other condition. The spec it gets has each sink's
+  endpoint cut to its scheme, host and port: a path or query can carry a token (some intakes take
+  keys in the query string), and `ClusterState` sends the `InkwallConfig`'s spec as it is today
+  (`operator/internal/controlplane/state.go`). Secrets never go.
+
+Rejected: export only in Standalone mode, as 0002 §5.3 once sketched ("in Standalone mode, events
+go to logs and optionally to OTLP"). Teams with a control plane still have a SIEM, and the SIEM is
+where their security team works.
+
+## 7. Security
+
+Only cluster admins can edit the `InkwallConfig`: it is cluster-scoped, named `default`, and the
+chart grants no one else write access to it. Export still gives that role new reach from the
+operator's network position, which is documented and narrowed:
+
+- **Exfiltration.** Whoever can edit the `InkwallConfig` can send events to an address of their
+  choice. They can already read the engines' logs; events carry no more ([§4.4](#44-filtering-and-redaction)).
+  The guide says so, and audit logging of `InkwallConfig` changes is the control.
+- **Requests from the operator's address (SSRF).** The operator can reach in-cluster Services and,
+  on many clouds, the instance metadata service. The exporter only `POST`s to the configured URL,
+  but a hostile endpoint could aim at an internal service and read its errors through status. So:
+  - the dialer refuses loopback, unspecified and link-local addresses (`169.254.0.0/16`,
+    `fe80::/10`, which hold most clouds' metadata services), and the metadata addresses outside
+    them: AWS's IPv6 `fd00:ec2::254` and Alibaba Cloud's `100.100.100.200`. IPv4-mapped IPv6 is
+    checked as IPv4, and so is an address in the NAT64 prefix `64:ff9b::/96` (its last 32 bits),
+    so `64:ff9b::a9fe:a9fe` is 169.254.169.254 and refused. The check is on the resolved address
+    at connect time (a `net.Dialer.Control`), so DNS rebinding can't get around it. Other private
+    ranges stay allowed: in-cluster Collectors live there;
+  - no proxy: the HTTP transport has `Proxy: nil` and the gRPC client `grpc.WithNoProxy()`. Both
+    would otherwise follow `HTTPS_PROXY` from the environment, and the dialer would then check the
+    proxy's address instead of the sink's. A sink behind a proxy is
+    [open question 7](#11-open-questions);
+  - no redirects are followed ([§4.3](#43-batching-retries-and-backpressure));
+  - status and logs carry the HTTP status, the gRPC code or an error class, and at most 128 bytes
+    of the response, escaped: enough to fix a token, not enough to read a service;
+  - the operator's own ServiceAccount token is never sent: headers come only from the named Secret.
+- **NetworkPolicy.** The chart's egress policy is opt-in (`networkPolicy.egress.enabled`,
+  `deploy/helm/inkwall/templates/networkpolicy.yaml`) and allows DNS, the API server and
+  `networkPolicy.egress.extra`. The chart can't know the sinks (they are in the `InkwallConfig`, not
+  its values), so with egress enabled each sink needs an entry in `extra`, as the control plane
+  does today. The chart README's Network flows table gets a row: the operator to each sink, only
+  when `spec.events.export` has sinks. A sink blocked by a policy shows as connection timeouts in
+  the condition. Engines' egress doesn't change: none.
+- **Secrets.** Read only from the operator's namespace, never logged, never in status, metrics or
+  `ClusterState`. Header values are held in memory only while the sink runs.
+- **Attacker-controlled content.** Paths, hosts, user agents, request IDs and snippets come from
+  the client. The encoders escape them for their format (JSON strings, protobuf), and the guide
+  tells SIEM users to treat them as untrusted in dashboards, as the contract already says for
+  every consumer (`api/events/v1/events.proto`: "must be escaped wherever they are shown").
+
+## 8. Observability
+
+**Metrics** (operator, per replica; names in the style of `docs/monitoring.md`, beside
+`inkwall_operator_events_forwarded_total`; `sink` is bounded by the 4 sinks):
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `inkwall_operator_events_exported_total` | counter | `sink` | Events the sink accepted |
+| `inkwall_operator_events_export_dropped_total` | counter | `sink`, `reason` | Events never delivered: `buffer_full`, `rejected` (a 4xx or partial success), `too_large` |
+| `inkwall_operator_events_export_failures_total` | counter | `sink`, `kind` | Failed requests, retried or not: `network`, `tls`, `timeout`, `auth`, `throttled`, `server`, `client` |
+| `inkwall_operator_events_export_pending` | gauge | `sink` | Events in the buffer the sink hasn't sent yet |
+| `inkwall_operator_events_export_buffer_bytes` | gauge | | The export buffer's size |
+| `inkwall_operator_events_export_last_success_timestamp_seconds` | gauge | `sink` | When the sink last accepted a request (0: never) |
+| `inkwall_operator_events_export_request_duration_seconds` | histogram | `sink` | Time per request, retries apart |
+
+Events filtered out by a sink aren't counted: that is configuration, not loss. A new alert,
+`InkwallEventExportFailing`, fires when a sink has pending events and no success for 15 minutes,
+or when `buffer_full` drops continue for 15 minutes, with a runbook in `docs/monitoring.md`.
+`docs/monitoring.md` must list each metric (`make docs-check`, `-metrics-doc`).
+
+**Status.** A new condition on the `InkwallConfig`, `EventsExported`:
+
+| Status | Reason | When |
+|---|---|---|
+| True | `Exporting` | Every sink on every replica succeeded in the last 5 minutes, or has had nothing to send |
+| False | `ExportFailing` | A sink on some replica has failed for 5 minutes without a success; the message names the sink, the replica and the last error class |
+| False | `ExportConfigInvalid` | A sink can't start: a missing Secret or key, a CA that doesn't parse, a refused header name |
+| False | `ExportDropping` | A sink dropped events for a full buffer in the last 5 minutes while still succeeding (it can't keep up) |
+| False | `ExportAddressRefused` | A sink's host resolves only to addresses the dialer refuses ([§7](#7-security)); the message names the sink and the address class, not the address |
+
+When several apply, the first in this order wins: `ExportConfigInvalid`, `ExportAddressRefused`,
+`ExportFailing`, `ExportDropping`; the message lists the sinks for each.
+
+No condition when there are no sinks. The state is per replica, so each replica reports its sinks'
+state in the engine report ConfigMap it already publishes (`Publisher`,
+`operator/internal/distribution/runtime.go`; `operator/enginereport`). The `Publisher` writes on
+every change today; sink state changes often (pending counts, last success), so its writes are
+debounced: at most one every 10 s, and only when a sink's state class changes, never for a count.
+The leader folds the replicas' reports into the condition, in the discovery reconciler, which
+already writes the `InkwallConfig`'s status (`operator/internal/discovery/discovery.go`). It
+patches only the `EventsExported` condition (a server-side apply with its own field manager), so
+it never overwrites the conditions the discovery and the control plane connector write.
+`docs/troubleshooting.md` gets each reason (`-reasons-doc`).
+
+`inkwallctl status` prints the condition and each sink's pending count.
+
+## 9. Testing
+
+| Layer | What | Where |
+|---|---|---|
+| Unit | The buffer: cursors per sink as (batch, event) with filtered events advancing them, a slow sink losing only its own events, the memory and disk bounds, batches read back from disk, drop-oldest, reload from disk after a restart, torn files, and a crash after a sink sent a batch not yet on disk (the persisted cursor stays behind it, and new batches never take a number below a cursor) | new `operator/internal/export` |
+| Unit | Shutdown: the exporter stops after the distribution server, no `Add` after the flush, the flush deadline | `operator/internal/export`, `operator/manager` |
+| Unit | Each sender with a fake clock and a fake server: batching by size and delay, the 4 MiB cut per format, requests in flight and the cursor moving only past answered ones, the retry table of [§4.3](#43-batching-retries-and-backpressure) (each status and gRPC code), `Retry-After` and `RetryInfo`, 413 halving, partial success, no redirect followed, response read capped | `operator/internal/export` |
+| Unit | `Add` never blocks: a sink that never answers, with the stream's `Add` timed under `-race` | `operator/internal/export` |
+| Unit | Filters and `omit`; the dialer guard (loopback, link-local, IPv4-mapped IPv6, `fd00:ec2::254`, `100.100.100.200`, a name that resolves to 169.254.169.254, `64:ff9b::a9fe:a9fe`, `HTTPS_PROXY` set and ignored); headers from a Secret (refused names, `grpc-*`, `-bin`), Secret rotation (a changed CA closes pooled connections); a `policyNamespaces` filter given an event whose policy isn't in the bundle; cursors after adding, removing, changing and renaming a sink | `operator/internal/export` |
+| Unit | Golden files for JSON (both framings) and OTLP, from the events in `pkg/events/testdata`; a field-list golden, JSON and OTLP, that fails on any v1 rename; an event from an engine before 0.4.0 (no phase, no protocol); nil `time` and `latency` | `operator/internal/export/testdata` |
+| Unit | CRD validation: each CEL rule accepted and refused; the condition's reasons from replica reports | `operator/api/v1alpha1/validation_test.go`, `operator/internal/distribution` |
+| Fuzz | `FuzzEncodeJSON`: any `SecurityEvent` (from fuzzed protobuf) encodes to valid JSON, one line in `Lines` (no raw newline from any field), and decodes back to the same fields | `operator/internal/export` |
+| Fuzz | `FuzzEncodeOTLP`: any event encodes, marshals and unmarshals to the same attributes | `operator/internal/export` |
+| Benchmark | Encode per event (JSON, OTLP) and a full 500-event batch with gzip: allocations bounded, and the throughput target of [§2.2](#22-from-the-operator-on-every-replica) | `operator/internal/export` |
+| e2e on kind | `hack/kind/export-e2e.sh`: an OTel Collector (pinned image, OTLP receivers, file exporter) and a small HTTP sink (`operator/test/eventsink`, in the style of `operator/test/stubcontrolplane`: records requests, checks headers, can be told to answer 503, 429 with `Retry-After`, or hang). An attack through Traefik reaches both with the cluster ID, policy, rule IDs and request ID; a `password` argument's snippet is absent; `omit` and filters hold; a rotated header Secret is used without restart; the condition goes `ExportFailing` and back; both a control plane stub and a sink receive the same events | `hack/kind` |
+| e2e on kind | `hack/kind/networkpolicy-e2e.sh`: with egress enabled, the sink works only once listed in `extra` | `hack/kind` |
+| Soak | `hack/kind/soak.sh` with a sink that fails half the time, then is down for 10 minutes: operator memory stays under its limit with the buffer full, drops are counted, the engines' `inkwall_engine_events_dropped_total` stays at 0, request p99 doesn't move, and the backlog drains once the sink is back | `hack/kind/soak.sh` |
+
+## 10. Decisions
+
+| # | Decision | Rejected |
+|---|---|---|
+| 1 | Export from the operator | From each engine (egress, credentials and connections in every proxy pod) |
+| 2 | Every replica exports its own engines' events | Leader only (relay between replicas) |
+| 3 | One buffer per replica, a persisted cursor (batch, event) per sink, on the `events` emptyDir; at least once while the replica runs | A buffer per sink; sharing the control plane's queue; memory only |
+| 4 | Two bounds, memory (32 MiB) and disk (512 MiB), as operator flags and chart values; the chart's memory limit to 768 MiB | A bound in the `InkwallConfig` (can exceed the emptyDir and the memory limit) |
+| 5 | OTLP logs (gRPC and HTTP/protobuf) and JSON over HTTP (`Lines`, `Array`) | Syslog now; OTLP/JSON; vendor envelopes |
+| 6 | `spec.events.export.sinks`, at most 4 | A separate CRD now |
+| 7 | Credentials as headers from a Secret in the operator's namespace | Credentials in the CR; a Secret namespace field |
+| 8 | Server certificates always verified; plaintext needs `insecure: true` | `insecureSkipVerify` |
+| 9 | `Add` never blocks; drop oldest and count; retries with backoff while buffered, the OTLP spec's retry set plus retried auth failures | Backpressure on the engines' streams |
+| 10 | Redaction stays in the engine; a sink can only omit more | Export-only redaction settings |
+| 11 | Inkwall's own versioned schema, OTLP semantic conventions where they exist | ECS or another vendor's schema in the operator |
+| 12 | Export and the control plane independent; both allowed; the control plane can't add sinks | Export only in Standalone mode |
+| 13 | Dialer refuses loopback, link-local and the metadata addresses; no proxy; no redirects; short errors in status | Following redirects or `HTTPS_PROXY`; full responses in status |
+| 14 | `EventsExported` condition aggregated by the leader's discovery reconciler from replica reports, patched alone; per-sink metrics | Each replica writing the condition |
+| 15 | `policyNamespaces` checks the event's policy against the replica's bundle | Trusting the policy the engine claims |
+
+## 11. Open questions
+
+1. **Native syslog.** RFC 5424 over TLS for QRadar and ArcSight users without a Collector, with
+   the delivery caveats of [§3.3](#33-syslog-deferred)?
+2. **Client IP prefixes.** `omit: [ClientIP]` is all or nothing. Should a sink (or `events.redact`,
+   for every destination) keep only a `/24` or `/48`, as some privacy rules ask?
+3. **Request counts as OTLP metrics.** Useful for SIEMs without Prometheus, or a duplicate of the
+   metrics they can scrape?
+4. **Sinks per team.** A namespaced `WAFEventSink` that sends a namespace's policies' events to the
+   team's SIEM, without the cluster admin. It needs the operator to read Secrets in that
+   namespace, which today it can't ([§4.2](#42-credentials-and-tls)).
+5. **Engines without an operator.** A flag on the standalone engine to send OTLP itself, for setups
+   with no Kubernetes, or is a log agent enough?
+6. **One buffer.** Should the control plane's queue become one more cursor on the export buffer, so
+   a replica holds each event once?
+7. **Sinks behind a proxy.** An explicit `proxy` URL per sink, with the dialer guard checking the
+   proxy and the proxy trusted to refuse internal targets?

@@ -231,7 +231,8 @@ Cluster-wide limits, synced asynchronously, are deferred
 - **Built:** [Prometheus](https://prometheus.io/docs/introduction/overview/) metrics, `/healthz` and `/readyz` (`pkg/telemetry`), and [pprof](https://pkg.go.dev/net/http/pprof)
   (`--pprof`). Security events go to a bounded ring buffer and are shipped to the operator in
   batches (`pkg/events`); that buffer uses a mutex, not a lock-free design. **Not yet:** a
-  lock-free buffer, audit logs.
+  lock-free buffer, audit logs, and shipping events on from the operator to a SIEM
+  ([0010](0010-siem-export.md)), which keeps the same rule: drop and count, never backpressure.
 
 ### 5.5 Wire format
 
