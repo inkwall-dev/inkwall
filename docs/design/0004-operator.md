@@ -123,7 +123,7 @@ the webhook certificates.
 A field is added only once the engine honours it. Adding a field to `v1alpha1` later is
 compatible; removing one is not.
 
-**Not yet:** `ClusterWAFIPList`, `spec.rateLimits`, `spec.response`,
+**Not yet:** `ClusterWAFIPList`, `spec.rateLimits` ([0009](0009-rate-limits.md)), `spec.response`,
 `BlockHighConfidence`, `body.contentTypes`, the `InspectPrefix` oversize action,
 `WAFPolicyDefault`.
 

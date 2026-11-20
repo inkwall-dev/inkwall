@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-09-27
-- Updated: 2026-11-04
+- Updated: 2026-11-20
 - Owner: noureldin
 - Depends on: [0001 — Performance-First Architecture](0001-performance-first-architecture.md)
 
@@ -147,7 +147,7 @@ The compiled policy sits in an [`atomic.Pointer[Snapshot]`](https://pkg.go.dev/s
 | `pkg/adapters/*` | One per listener | `forwardauth`, `httpcheck`, `proxy`, `extproc`, `spoe` built; `extauthz` not yet |
 | `pkg/events` | Redacted security events, bounded buffer ([§5.4](#54-event-schema)) | built |
 | `pkg/iplist` | [CIDR](https://www.rfc-editor.org/rfc/rfc4632) lists as sorted, merged ranges ([§4.2](#42-crds-wafinkwalldevv1alpha1)) | built |
-| `pkg/ratelimit` | [Token buckets](https://en.wikipedia.org/wiki/Token_bucket) | not yet |
+| `pkg/ratelimit` | [Token buckets](https://en.wikipedia.org/wiki/Token_bucket) ([0009](0009-rate-limits.md)) | not yet |
 
 Lifecycle:
 
@@ -1440,6 +1440,8 @@ Other docs cite these decisions by ID (D1–D9).
 1. An optional [Hyperscan](https://github.com/intel/hyperscan) ([cgo](https://pkg.go.dev/cmd/cgo)) build?
 2. Envoy's Go filter: supported or experimental?
 3. Default body cap: 8 KB, 64 KB, or per content type?
-4. Distributed rate limiting: gossip or [Redis](https://redis.io/docs/latest/)?
+4. Distributed rate limiting: gossip or [Redis](https://redis.io/docs/latest/)? **Decided for v0.7.0:** neither yet; each engine
+   limits on its own, and cluster-wide limits are deferred, with a sync relayed by the operator
+   as the first option to evaluate ([0009 §2](0009-rate-limits.md#2-per-engine-limits-first)).
 5. A bot challenge in v1? It needs response rewriting, which only ext_proc, Caddy and the reverse
    proxy can do.
