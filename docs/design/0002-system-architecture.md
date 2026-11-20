@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-09-27
-- Updated: 2026-11-04
+- Updated: 2026-11-20
 - Owner: noureldin
 - Depends on: [0001 — Performance-First Architecture](0001-performance-first-architecture.md)
 
@@ -317,7 +317,8 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
 `IngressRoute` and Istio `VirtualService` targets; `HTTPRoute` targets resolved, with the
 precedence above ([0004 §4.5](0004-operator.md#45-resolver)), and wired through Envoy Gateway,
 Istio or Traefik's Gateway API provider ([0004 §4.4](0004-operator.md#44-wiring-controller)).
-**Not yet:** cluster-wide and fetched IP lists, the policy field `rateLimits`, wiring other controllers'
+**Not yet:** cluster-wide and fetched IP lists, the policy fields `rateLimits` and `geo`
+([0011](0011-geo-blocking.md)), wiring other controllers'
 `HTTPRoute` targets, `BlockHighConfidence`, and the `InspectPrefix` oversize action.
 `InkwallConfig.events` is built for redaction only (`events.redact`, [§8.3](#83-data-privacy)).
 
@@ -1083,7 +1084,8 @@ than the certificate's lifetime enrolls again with a new token. Keys are [ECDSA 
 
 ### 8.2 Client IP correctness
 
-A wrong client IP makes rate limits and IP lists worse than none. The engine takes the first of:
+A wrong client IP makes rate limits, IP lists and geo blocking
+([0011 §9](0011-geo-blocking.md#9-client-ip)) worse than none. The engine takes the first of:
 
 1. the proxy's resolved client IP;
 2. `X-Forwarded-For`, walked from right to left, skipping only `trustedProxies`;

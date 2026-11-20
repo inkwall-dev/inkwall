@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-09-27
-- Updated: 2026-10-30
+- Updated: 2026-11-20
 - Owner: noureldin
 
 Inkwall is a [web application firewall](https://owasp.org/www-community/Web_Application_Firewall) (WAF) that sits in the request path, so every request pays
@@ -142,7 +142,7 @@ The engine checks a request in tiers. Each tier runs only if the previous ones r
 | Tier | Does | Built (v0.1.0) |
 |---|---|---|
 | T0 | Route match and skip list (static files, health checks) | Yes (`pkg/router`) |
-| T1 | IP allow and deny lists, rate limits (~1 µs); answers 403 or 429 | No |
+| T1 | IP allow and deny lists, countries ([0011](0011-geo-blocking.md)), rate limits (~1 µs); answers 403 or 429 | No |
 | T2 | CRS rules on headers and URI, with early exit; answers 403 | Yes |
 | T3 | Body rules, only if the policy and the content type need them, with a size cap | Yes |
 | T4 | Response inspection, off by default | No |

@@ -2,6 +2,14 @@
 
 Every doc in this repository, by topic, with the question each one answers.
 
+## Contents
+
+- [Get started](#get-started)
+- [Guides](#guides)
+- [Reference](#reference)
+- [Design](#design)
+- [Contributing](#contributing)
+
 ## Get started
 
 - [Quickstart](quickstart.md): how do I see Inkwall block an attack in five minutes, on a local
@@ -71,6 +79,8 @@ Every doc in this repository, by topic, with the question each one answers.
 - [0008 — Assistants](design/0008-assistants.md): how can users get answers faster: `inkwallctl explain`,
   an MCP server for the AI assistants they already use, a docs assistant and a GitHub bot, and the
   security rules every one of them follows.
+- [0011 — Geo Blocking](design/0011-geo-blocking.md): how does a policy allow or deny clients by
+  country, where does the country database come from, and how does it reach the engines?
 
 ## Contributing
 

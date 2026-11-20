@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-09-27
-- Updated: 2026-11-04
+- Updated: 2026-11-20
 - Owner: noureldin
 - Depends on: [0001 — Performance-First Architecture](0001-performance-first-architecture.md),
   [0002 — System Architecture](0002-system-architecture.md)
@@ -123,7 +123,7 @@ the webhook certificates.
 A field is added only once the engine honours it. Adding a field to `v1alpha1` later is
 compatible; removing one is not.
 
-**Not yet:** `ClusterWAFIPList`, `spec.rateLimits`, `spec.response`,
+**Not yet:** `ClusterWAFIPList`, `spec.rateLimits`, `spec.geo` ([0011](0011-geo-blocking.md)), `spec.response`,
 `BlockHighConfidence`, `body.contentTypes`, the `InspectPrefix` oversize action,
 `WAFPolicyDefault`.
 
