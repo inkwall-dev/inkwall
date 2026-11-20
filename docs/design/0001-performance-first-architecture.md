@@ -142,7 +142,7 @@ The engine checks a request in tiers. Each tier runs only if the previous ones r
 | Tier | Does | Built (v0.1.0) |
 |---|---|---|
 | T0 | Route match and skip list (static files, health checks) | Yes (`pkg/router`) |
-| T1 | IP allow and deny lists, countries ([0011](0011-geo-blocking.md)), rate limits (~1 µs); answers 403 or 429, or 503 when a policy that fails closed has no country table yet | No |
+| T1 | IP allow and deny lists, countries ([0011](0011-geo-blocking.md)), rate limits (~1 µs); answers 403 or 429, or 503 when a policy that fails closed runs a bundle naming a country table the engine doesn't hold | No |
 | T2 | CRS rules on headers and URI, with early exit; answers 403 | Yes |
 | T3 | Body rules, only if the policy and the content type need them, with a size cap | Yes |
 | T4 | Response inspection, off by default | No |

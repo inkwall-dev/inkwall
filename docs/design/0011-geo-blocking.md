@@ -45,6 +45,7 @@ engine looks a country up in about 100 ns, what the operator reports, and how it
   - [4.3 The bundle pins the table](#43-the-bundle-pins-the-table)
   - [4.4 The stream and the Secrets](#44-the-stream-and-the-secrets)
   - [4.5 Before the table arrives](#45-before-the-table-arrives)
+  - [4.6 Upgrade and rollback](#46-upgrade-and-rollback)
 - [5. Engine design](#5-engine-design)
   - [5.1 Lookup](#51-lookup)
   - [5.2 Memory](#52-memory)
@@ -170,9 +171,9 @@ the rest. Geo goes right after the IP lists:
 |---|---|
 | Client in an IP deny list | Denied with `ip-deny`; geo isn't looked up |
 | Client in an IP allow list | Let through uninspected; geo isn't looked up. A partner in a denied country can be let in this way |
-| Denied country, path in `skip.paths` | Denied: like an IP deny, geo covers the whole route, skipped paths included |
+| Denied country, path in `skip.paths` | Denied: like an IP deny, geo covers the whole route, skipped paths included. In `Detect`, the verdict is `log` with reason `geo-deny`, not `allow skipped`, so `Detect` shows what `Block` would deny |
 | Denied country, `Block` | 403, not counted by rate limits, rules not run |
-| Denied country, `Detect` (the policy's or `geo.mode`) | Counted, then the request goes on: skip list, rate limits, rules. If nothing else decides, the verdict is `log` with reason `geo-deny`; if a rule matched, its reason wins and the metric still counts the geo match |
+| Denied country, `Detect` (the policy's or `geo.mode`) | Counted, then the request goes on: skip list, rate limits, rules. If nothing else decides, the verdict is `log` with reason `geo-deny`; if a rule matched, its reason wins and the metric still counts the geo match. If a rate limit in `Detect` also matched, `geo-deny` wins: geo comes first in the order |
 | Inspection suspended (`InkwallConfig.spec.suspend`) | No geo: the engine allows every request before any policy (`pkg/policy`, `Set.Check`) |
 | A request several policies inspect | Each applies its own geo; the strictest verdict wins, as for the rules |
 | `exclusions` | No effect: exclusions turn rules off by ID, and geo is not a rule |
@@ -272,8 +273,14 @@ spec:
 - **`secretRef`**: a Secret in the operator's namespace, raw or gzipped (by its magic bytes). A
   Secret holds at most [1 MiB](https://kubernetes.io/docs/concepts/configuration/secret/#restriction-data-size),
   which a full country database (about 9 MB, half that gzipped) doesn't fit. It is for small custom
-  databases and the tests. A gzipped value is read through a limit of 128 MiB decompressed, the
-  source limit of [§6](#6-parsing-the-mmdb), so a small Secret can't expand without end. A ConfigMap was rejected as a third kind: the same 1 MiB, no gain.
+  databases and the tests. A gzipped value is read through a limit of 16 MiB decompressed, so a
+  small Secret can't expand without end. A ConfigMap was rejected as a third kind: the same 1 MiB,
+  no gain.
+- **Egress.** With the `geoipupdate` sidecar, the operator's pod reaches MaxMind over the internet,
+  and that pod holds the bundle signing key. The sidecar is a separate container with its own
+  credentials and no access to the key's volume, and the NetworkPolicy opens only MaxMind's
+  endpoints for it, but the guide says plainly that the pod gains internet egress, and offers a
+  volume filled from outside the cluster as the alternative.
 
 Only the operator reads the source. The engines never see it, never reach the vendor, and never
 need its credentials.
@@ -312,9 +319,11 @@ message CountryTable {
   bytes v6_codes = 4;
   // Where it came from, for status and explain.
   string database_type = 5;        // the MMDB's metadata, e.g. GeoLite2-Country
-  google.protobuf.Timestamp database_built = 6;
+  uint64 database_build_epoch = 6; // the MMDB's build_epoch (Unix seconds): its build time
   bytes database_sha256 = 7;       // of the source MMDB, to skip recompiling it
-  uint64 database_build_epoch = 8; // the MMDB's build_epoch, never allowed to go back
+  // IPv6 prefixes that alias the IPv4 table (found by the compiler, §4.2):
+  // 17 bytes each, the 16-byte address and the prefix length.
+  bytes v6_aliases = 8;
 }
 ```
 
@@ -341,33 +350,51 @@ by its decoded size, the one that costs engine memory: at most **32 MiB** decode
 range, 18 per IPv6 range), and so at most 14,400 KiB compressed (16 chunks of 900 KiB,
 [§4.4](#44-the-stream-and-the-secrets)). Within 32 MiB any mix fits: 5.5 million IPv4 ranges with
 no IPv6, or 1.8 million IPv6 ranges with no IPv4. Today's country databases need about 1 MB of IPv4
-ranges and 3 MB of IPv6, a tenth of the bound. A database over either bound is refused with reason
+ranges and 3.6 MB of IPv6 (about 4.8 MB decoded, 2–3 MB compressed), a seventh of the bound. A
+database over either bound is refused with reason
 `TooLarge`.
 
-The table never goes back in time: a database whose `build_epoch` is older than the current
-table's is refused (`Invalid`, "older than the loaded database") and the current table stays. A new
-leader whose source file is older than the stored table so keeps the stored one. A user who means
-to go back deletes the geo Secrets, and the next compile starts again.
+The table never goes back in time: a source whose `build_epoch` is older than the stored table's
+isn't compiled, and the stored table stays. The reason is the replicas, not an attacker (the signed
+bundle already stops an attacker's rollback): with a `geoipupdate` sidecar per replica, each
+replica has its own copy, updated at its own moment, and a leader change would otherwise flip the
+cluster between two databases. An older or a missing source next to a valid stored table is not an
+error: the condition stays `Loaded`, and its message says the source is older (or missing) and
+the stored table is in use. That is the normal state for a minute after a leader change or an
+operator rollout. An equal `build_epoch` with a different source hash (two builds in one second,
+or a custom database rebuilt by hand) takes the source, logged. A user who means to go back
+deletes the geo Secrets, and the next compile starts again.
 
-**Aliases.** In an IPv6 MMDB the IPv4 tree sits at `::/96`, and three prefixes point to it as
-aliases: `::ffff:0:0/96` (IPv4-mapped), `2001::/32` (Teredo) and `2002::/16` (6to4). The library's
-`Lookup` follows them; `Networks()` skips them unless asked (`IncludeAliasedNetworks`). The
-compiler walks without the aliases, writes the IPv4 tree into the v4 table, and leaves the three
-prefixes out of the v6 table. The engine resolves them as `Lookup` does
-([§5.1](#51-lookup)), so the table and the library give one answer, which the differential fuzz
-checks with aliases in the test database ([§10](#10-testing)).
+**Aliases.** In an IPv6 MMDB the IPv4 tree sits at `::/96`, and other prefixes may point to the
+same node as aliases. MaxMind's writer aliases `::ffff:0:0/96` (IPv4-mapped), `2001::/32` (Teredo)
+and `2002::/16` (6to4), but the aliases are structural, not fixed: the library's `Lookup` simply
+follows the pointer, and `Networks()` skips any pointer to the IPv4 start outside the IPv4 subtree
+"without hardcoding the networks that the writer currently aliases" (`traverse.go`, v2.8.0). A
+custom database may have none, or others. So the compiler finds them: it walks once with
+`IncludeAliasedNetworks()` and once without, and the prefixes only the first walk yields are the
+aliases. It writes the IPv4 tree into the v4 table, leaves the alias prefixes out of the v6 table,
+and lists them in the table (`v6_aliases`). The engine resolves only the aliases the table lists
+([§5.1](#51-lookup)), so the table and the library give one answer for any database. The
+differential fuzz checks it with the aliases present or not, at random ([§10](#10-testing)).
 
 ### 4.3 The bundle pins the table
 
-`Bundle` gains `GeoTableRef geo_table = 11`: the table hash and its decoded size. The bundle is
+`Bundle` gains `GeoTableRef geo_table = 11`: the table hash and its decoded size (`size`, the
+length of the decompressed `CountryTable` proto, at most 32 MiB plus its framing). The bundle is
 signed, so the hash is signed: an engine uses a table only once it runs a bundle that names its
-hash. A table that arrives first (on connect, [§4.4](#44-the-stream-and-the-secrets)) waits,
-unused, for that bundle, and is dropped if the next bundle names another. No second signature, no
+hash. A table that arrives first (on connect, or an update sent before its bundle,
+[§4.4](#44-the-stream-and-the-secrets)) waits as compressed bytes, unchecked and unused: at most
+14,400 KiB, and one pending table at a time (a newer one replaces it). When a bundle names it, the
+engine checks the bytes against the bundle's hash, then decompresses through the bundle's `size`.
+A pending table the next bundle doesn't name is dropped. No second signature, no
 second version counter, no second rollback check: the bundle has all three (D5,
 [0002 §11](0002-system-architecture.md#11-decisions-adr-log)).
 
-**An update never opens a gap.** The operator sends the new table to every engine before it
-publishes the bundle that names it. An engine that runs a bundle naming a table it doesn't hold
+**An update never opens a gap.** The rule is per stream: a replica never sends, on a stream, a
+bundle naming table T before T itself. The leader writes the geo Secrets before the bundle Secret
+that names them, so every replica, which serves both from the Secrets
+([§4.4](#44-the-stream-and-the-secrets)), has T before it can send the bundle. An engine that runs
+a bundle naming a table it doesn't hold
 yet, but holds the table of its previous bundle, keeps enforcing with that previous table until
 the named one arrives and checks out, then switches. Only an engine with no table at all is in the
 case of [§4.5](#45-before-the-table-arrives).
@@ -399,18 +426,19 @@ its own monotonic check and its own `Ack`, to save a bundle version twice a week
   about to name): on connect, before the bundle, so a new engine applies both at once; after a
   database update, to every engine, before the new bundle ([§4.3](#43-the-bundle-pins-the-table)).
   Sends share the distribution server's limit of 50 at once
-  ([0004 §4.7](0004-operator.md#47-distribution-server-all-replicas)). For 500 engines and a 4 MB
-  compressed table that is 2 GB per update, spread over the slots; the scale test measures how
-  long ([§10](#10-testing)).
+  ([0004 §4.7](0004-operator.md#47-distribution-server-all-replicas)). For 500 engines and a
+  table of about 3 MB compressed that is 1.5 GB per update, spread over the slots; the scale test
+  measures how long ([§10](#10-testing)).
 - **Every replica.** Engines connect to any replica, and every replica serves streams. Non-leader
   replicas watch the geo Secrets, as they watch the bundle's, and serve the table from them; only
   the leader compiles and writes. Each replica's engine report (`inkwall-engines-<pod>`,
   `operator/enginereport`) carries each engine's `geo_table_sha256`, so the leader's status
   aggregator sees which engines hold which table. The field gets the reports' input limits (#205):
   exactly 32 bytes, or empty.
-- The engine checks the hash of the bytes it received against the message's (and, once it runs
-  the bundle, the bundle's) before it decompresses, then decompresses through a limit of the
-  `GeoTableRef.size` the bundle names, never more than 32 MiB. It then decodes, checks the table
+- The engine refuses a message over 14,400 KiB, holds it as compressed bytes until a bundle names
+  its hash ([§4.3](#43-the-bundle-pins-the-table)), checks the bytes against the bundle's hash
+  before it decompresses, then decompresses through the `GeoTableRef.size` the bundle names, never
+  more than 32 MiB and a little framing. It then decodes, checks the table
   ([§5.1](#51-lookup)), swaps it in with the bundle ([§5.3](#53-where-in-the-pipeline)), writes it
   to its cache (`/var/run/inkwall/geo.table`, the `emptyDir` beside `bundle.pb`), and reports the
   new hash in its next heartbeat. No restart.
@@ -432,7 +460,7 @@ parameter of the format (`Format{Name, MaxChunks}`), 8 for the bundle and 16 for
 - **Leader change.** A new leader reads the stored table instead of compiling the source again
   before its first bundle.
 
-Cost: about 4 MB in etcd per slot for a country database. Accepted.
+Cost: about 3 MB in etcd per slot for a country database (the compressed table). Accepted.
 
 ### 4.5 Before the table arrives
 
@@ -469,6 +497,25 @@ When the source becomes invalid later, the operator keeps the last good table in
 engines keep enforcing with it, and reports the problem ([§7](#7-operator-status)). Only when no
 good table was ever compiled does the bundle carry none.
 
+### 4.6 Upgrade and rollback
+
+Modeled on the Compatibility list of [0004 §4.6](0004-operator.md#46-bundle-builder-leader-only):
+
+- **Engines first or operator first.** An engine before 0.7.0 doesn't advertise `geo-table`, gets
+  no table and ignores `spec.geo`: the policy is `EnginesOutdated`
+  ([§2.5](#25-older-engines)). A 0.7.0 engine behind an older operator gets no table and no
+  `geo_table` in its bundle, so geo is off, as before.
+- **Rolling the operator back below 0.7.0.** The older operator doesn't know `spec.geo`, builds
+  bundles without it, and says nothing: geo stops silently, as any new field does on rollback.
+  The upgrade guide says so. It leaves the `inkwall-geo` Secrets behind (harmless, in its own
+  namespace; the guide gives the `kubectl delete` line), and its `inkwall-bundle-reader` Role
+  loses their names, so engines can't read them at cold start, which they no longer need.
+- **Rolling forward again.** The new leader finds the stored table, compares its build epoch with
+  the source ([§4.2](#42-the-operator-compiles-a-country-table)) and goes on.
+- **The CRD.** `spec.geo` is a new optional field: an older CRD prunes it from new writes, so
+  rolling the CRD back drops geo from policies stored after that. The guide says to roll the CRD
+  back last, as for every field.
+
 ## 5. Engine design
 
 ### 5.1 Lookup
@@ -481,13 +528,17 @@ New package `pkg/geo`, built like `pkg/iplist` (sorted, merged ranges and a bina
 - **Lookup:** unmap an IPv4-mapped address (as `iplist.Set.Contains` does), pick the family,
   `slices.BinarySearch` for the last start ≤ the address, return its code. 5.5 million ranges are
   23 steps. The MMDB's aliases are resolved as the library's `Lookup` resolves them
-  ([§4.2](#42-the-operator-compiles-a-country-table)): an address in `::/96`, `2002::/16` (6to4) or
-  `2001::/32` (Teredo) is looked up in the v4 table by the 32 bits that follow the prefix.
+  ([§4.2](#42-the-operator-compiles-a-country-table)): an address in `::/96` or in one of the
+  table's `v6_aliases` (in MaxMind's databases `::ffff:0:0/96`, `2002::/16` and `2001::/32`) is
+  looked up in the v4 table by the 32 bits that follow the prefix. A database without aliases has
+  none, and those addresses are looked up in the v6 table like any other.
 - **Per policy:** a 676-bit set (26 × 26, every two-letter code, 88 bytes) for `deny` or `allow`.
   It doesn't depend on the table, so a new table recompiles no policy.
-- **Once per request.** The country is looked up at most once, the first time a policy with geo
-  (or an event, [§8](#8-observability)) needs it, and kept in the request. Several policies and
-  `BodyLimit` reuse it.
+- **Once per request, in the set.** `Set.Check` and `Set.BodyLimit` (`pkg/policy`) look the
+  country up once, when any policy that matched the request has geo, and set it on the `Request`
+  before they make each policy's view (`Policy.view` copies the request when its body differs, so
+  a lookup made inside one policy's pipeline wouldn't reach the next). An event made without geo
+  ([§8](#8-observability)) looks it up when the event is built.
 - **Check at load:** lengths match, starts strictly increasing, `starts[0]` is zero, codes are 0
   or two letters, counts within the bounds of [§4.2](#42-the-operator-compiles-a-country-table).
   The table is then trusted: a bad table can only give a wrong country, never a crash.
@@ -512,18 +563,20 @@ and all, in memory. It stays as the reference in the differential fuzz ([§10](#
 6 bytes per IPv4 range and 18 per IPv6 range, in pointer-free slices, so the garbage collector
 never scans them. The exact size is in the status before any engine loads it
 ([§7](#7-operator-status)), and in the gauge `inkwall_geo_table_bytes`. Today's databases make a
-table of about 4 MB.
+table of about 4.8 MB decoded.
 
-The worst case is during a swap: the old table, the new one, and the decoded message it was built
-from, three copies for one bundle apply. At the 32 MiB bound that is about 96 MiB, under a fifth of
-the 512 MiB limit; at today's size, about 12 MB. The decoder releases the message as soon as the
-slices are built.
+The worst case is during a swap, at the 32 MiB bound: the compressed bytes (14 MiB), the
+decompressed buffer (32), the unmarshalled message (32), the new slices (32) and the old table
+(32), about 142 MiB, for a moment. A bundle decode (up to 64 MiB) can overlap it, since a new
+database comes with a new bundle. That is under half of the 512 MiB limit; at today's size the
+peak is about 20 MB. The decoder releases the buffer and the message as soon as the slices are
+built.
 
 The engine's default memory limit is 512 MiB, with `GOMEMLIMIT` at 90% of it
 (`operator/internal/injection/sidecar.go`, `internal/memlimit`). The table is on the heap and
 counts toward it. Rejected: `mmap` of the cached file. Page cache counts toward the container's
-memory limit anyway, the cache volume may be a memory-backed `emptyDir`, a truncated file faults
-the process, and the table is small enough to read.
+memory limit anyway, a truncated file faults the process, and the table is small enough to read.
+The cache (`inkwall-cache`, `operator/internal/injection/sidecar.go`) is a disk-backed `emptyDir`.
 
 ### 5.3 Where in the pipeline
 
@@ -544,11 +597,15 @@ table; it is swapped in the same way. Tables outlive sets by being shared betwee
   bool detect }`; field 15 is the rate limits' in 0009). Engines before 0.7.0 skip both.
 - **`api/agent/v1`:** `WatchResponse.geo_table = 3`; `Hello.geo_table_sha256 = 8`,
   `Hello.capabilities = 9`; `Heartbeat.geo_table_sha256 = 6`.
-- **`api/engine/v1/engine.proto`:** `REASON_GEO_DENY` and `REASON_GEO_UNAVAILABLE`, the next
-  free numbers after 0009's `REASON_RATE_LIMIT`; `pkg/pipeline` gains `ReasonGeoDeny` and
+- **`api/engine/v1/engine.proto`:** `REASON_GEO_DENY = 16` and `REASON_GEO_UNAVAILABLE = 17`, the
+  next free numbers after 0009's `REASON_RATE_LIMIT = 15`; `pkg/pipeline` gains `ReasonGeoDeny` and
   `ReasonGeoUnavailable`, written `geo-deny` and `geo-unavailable`.
 - **`api/events/v1/events.proto`:** `SecurityEvent.country = 25` ([§8](#8-observability)).
-  0009 takes 23 (the limit's name) and 24 (the sampled count), which geo's sampled events reuse.
+  0009 takes 23 (`rate_limit`, the limit's name) and 24 (`sampled_count`, how many requests a
+  sampled event stands for; named for any sampled event, not only a limit's), which geo's sampled
+  events reuse.
+- **`pkg/pipeline`:** geo uses the `Verdict` event flag 0009 adds (an adapter makes an event only
+  when the verdict says so, `httpadapter.IsEvent`), and the sampled count.
 - **`operator/enginereport`:** each engine's `geo_table_sha256`
   ([§4.4](#44-the-stream-and-the-secrets)).
 
@@ -569,21 +626,39 @@ in the operator only.**
 
 How the operator uses it:
 
-1. Read at most 128 MiB (the source limit; a City database fits), compute the source's SHA-256.
-   Skip everything else if it is unchanged.
-2. `OpenBytes`, then `Verify`. Refuse what fails, with reason `Invalid`.
-3. Walk `Networks()` (without aliases, [§4.2](#42-the-operator-compiles-a-country-table)),
-   decoding only `country.iso_code` and `registered_country.iso_code` into a two-field struct.
-   Refuse codes that aren't two ASCII letters; upper-case lower-case ones; write `ZZ` as no
-   country.
-4. Fill the gaps between networks with "no country", merge neighbours, and check the bounds.
-5. All of it in a goroutine with `recover`, under a context with a deadline of one minute that the
-   walk checks at every network. `Verify` doesn't stop a file whose tree nodes share children (it
-   skips nodes it has checked), and such a tree can yield exponentially many networks, so the
-   loop also counts the networks and stops at a cap (16 million, past any real database), and
-   the merged ranges stop at the 32 MiB bound as they are built, not after. A deadline alone
-   can't stop a goroutine, so the loop has to. A crafted file that panics, loops or grows makes
-   an `Invalid` or `TooLarge` condition, never a crashed or out-of-memory leader.
+1. Open the source. A file is opened with `os.OpenInRoot` ([§3.2](#32-where-the-operator-reads-it))
+   and mapped read-only (`mmap`, at most 256 MiB; a City database fits), then given to
+   `OpenBytes`: its pages are the kernel's page cache, not the operator's heap. A Secret's value is
+   at most 1 MiB, 16 MiB decompressed, read into memory. Compute the source's SHA-256, and skip
+   everything else if it is unchanged.
+2. `Verify`. Refuse what fails, with reason `Invalid`.
+3. Walk `Networks(IncludeNetworksWithoutData())` (and once more with `IncludeAliasedNetworks()`
+   to find the aliases, [§4.2](#42-the-operator-compiles-a-country-table)), decoding only
+   `country.iso_code` and `registered_country.iso_code` into a two-field struct. Without
+   `IncludeNetworksWithoutData`, the iterator yields nothing for an empty leaf, so a tree whose
+   shared children all end in empty leaves would make it work exponentially long without ever
+   handing control back; with it, every path end yields, and the gaps come with it. A code that
+   isn't two ASCII letters makes that record "no country", counted and named in the condition's
+   message (one bad record doesn't refuse a vendor's database); lower case is upper-cased; `ZZ`
+   is no country.
+4. Merge neighbours with the same country, and check the bounds as the ranges are built.
+5. All of it in a goroutine with `recover` and `debug.SetPanicOnFault` (a mapped file truncated
+   under the reader faults; this turns the fault into a recovered panic), under a context with a
+   deadline of one minute that the walk checks at every network it yields. `Verify` doesn't stop a
+   file whose tree nodes share children (it skips nodes it has checked), and such a tree can yield
+   exponentially many networks, so the loop also counts them and stops at a cap (16 million, past
+   any real database), and the merged ranges stop at the 32 MiB bound. A deadline alone can't stop
+   a goroutine, so the loop has to. A crafted file that panics, loops or grows makes an `Invalid`
+   or `TooLarge` condition, never a crashed or out-of-memory leader.
+
+**Operator memory.** Only the leader compiles. Its heap during a compile: the merged ranges (at
+most 32 MiB), their marshalled proto and its gzip (at most 32 MiB and 14,400 KiB), and the source
+when it comes from a Secret (16 MiB); the mapped file is page cache. Every replica also caches the
+geo chunk Secrets (at most 14,400 KiB per slot). That is up to about 100 MiB at the bounds, on top
+of an operator whose largest scale test already peaks at about 518 MiB against a 512 MiB limit
+([0004 §8](0004-operator.md#8-scale-targets-v1)). So the chart's default operator
+`limits.memory` becomes 768 MiB, the same change [0010](0010-siem-export.md) makes for its buffer,
+and the scale test runs with geo on and asserts the peak stays under it ([§10](#10-testing)).
 
 The input is the cluster admin's own file, so the threat is a corrupt download more than an
 attacker. It is still parsed as untrusted, since a broken file must not stop the operator, which
@@ -601,26 +676,27 @@ less risk than a new one, and only the operator runs it.
 
 | Status | Reason | When |
 |---|---|---|
-| True | `Loaded` | Compiled and published; the message gives the type, build date, ranges and table size |
+| True | `Loaded` | Compiled and published; the message gives the type, build date, ranges and table size, and says when the source is older than the stored table, or missing, and the stored one is in use ([§4.2](#42-the-operator-compiles-a-country-table)) |
 | True | `Stale` | Loaded, but built more than 30 days ago; check the updater |
 | False | `NotFound` | The file or the Secret key doesn't exist |
-| False | `Invalid` | Not a valid MMDB, a bad country code, or parsing failed or timed out |
+| False | `Invalid` | Not a valid MMDB, or parsing failed or timed out (bad country codes only make their records "no country", [§6](#6-parsing-the-mmdb)) |
 | False | `NoCountryData` | No record has `country.iso_code` |
-| False | `TooLarge` | Over 128 MiB of source, 16 million networks, or 32 MiB of table (14,400 KiB compressed) |
+| False | `TooLarge` | Over 256 MiB of file or 16 MiB of Secret, 16 million networks, or 32 MiB of table (14,400 KiB compressed) |
 
   While it is `False` after a good load, engines keep the last good table, and the message says
-  which and since when. A database older than the loaded one is `Invalid`
+  which and since when. A source older than the stored table is not `False`: it stays `Loaded`
   ([§4.2](#42-the-operator-compiles-a-country-table)).
-- `status.geo`: `sha256`, `databaseType`, `built`, `ranges`, `compressedBytes`, like
+- `status.geo`: `sha256`, `databaseType`, `built` (from the build epoch), `ranges`, `compressedBytes`, like
   `status.bundle`.
 
 **`WAFPolicy`:** a policy with `spec.geo` is `Enforced=False` with a new reason
 `GeoDatabaseUnavailable` when the cluster has no table (geo is then skipped,
-[§4.5](#45-before-the-table-arrives)), or while some engines that run the bundle don't hold its
-table yet (they report it in their heartbeats, which reach the leader through the engine
-reports). The message says which: "no country
-database: set InkwallConfig spec.geo.database", or "2 of 6 engines don't have the country table
-yet (first: …)". `Accepted` stays `True`: the policy is valid, and it will be enforced once the
+[§4.5](#45-before-the-table-arrives)), or while some engines that run the bundle hold no table at
+all (they report it in their heartbeats, which reach the leader through the engine reports). An
+engine still on the previous table during an update enforces geo with it
+([§4.3](#43-the-bundle-pins-the-table)) and doesn't count, so the condition doesn't flap at every
+database update. The message says which: "no country database: set InkwallConfig
+spec.geo.database", or "2 of 6 engines have no country table (first: …)". `Accepted` stays `True`: the policy is valid, and it will be enforced once the
 table arrives. `EnginesOutdated` ([§2.5](#25-older-engines)) takes precedence.
 
 A policy with `spec.geo` but no database configured gets one Warning event, and the webhook warns
@@ -662,8 +738,11 @@ SIEM wants next to `client_ip`. Geo denials are events (every verdict that isn't
 `httpadapter.IsEvent`), and a denied country can be a flood that pushes other events out of the
 bounded buffer (`pkg/events`). So geo events are **sampled per (policy, country)**: the first, then
 at most one per minute, as 0009 samples its limit events, each carrying how many requests it stands
-for, in the field 0009 adds (`SecurityEvent` field 24). `unknown` counts as one country. A
-`geo-unavailable` flood has no country, so it is sampled per policy, on the same schedule. The
+for in `sampled_count` (field 24). `unknown` counts as one country. A `geo-unavailable` flood has
+no country, so it is sampled per policy, on the same schedule. The sampling state lives in the
+engine, in a bounded map keyed by (policy, country), built like the log limiter's
+(`pkg/events`, 4,096 keys, oldest evicted); the verdict's event flag carries the decision to the
+adapter. The
 metrics count every request. The log lines go through the existing per-(policy, rule, reason) log
 limiter.
 
@@ -702,18 +781,18 @@ events. `docs/client-ip.md` lists geo blocking among the features that use the a
 
 | Layer | What | Where |
 |---|---|---|
-| Unit | The compiler: gaps filled, neighbours merged, `registered_country` fallback, `ZZ` as no country, lower case folded, bad codes refused, each bound (networks, table size), a database older than the current one refused; the same table from the same database, byte for byte | `operator/internal/geo` |
+| Unit | The compiler: gaps filled, neighbours merged, `registered_country` fallback, `ZZ` as no country, lower case folded, a bad code making its record "no country", aliases found (none, MaxMind's three, others), each bound (file, Secret, networks, table size), an older or missing source keeping the stored table and `Loaded`, an equal epoch with another hash taken; the same table from the same database, byte for byte | `operator/internal/geo` |
 | Unit | Table checks (each refusal), the hash checked before decompressing, the decompression limit, lookup at range edges, `0.0.0.0` and `255.255.255.255`, `::` and the last IPv6 address, IPv4-mapped IPv6, 6to4 and Teredo through the v4 table, the bitsets | `pkg/geo` |
-| Unit | The order of [§2.3](#23-order-with-ip-lists-skips-and-rate-limits): IP deny and allow before geo, geo before skips and rate limits, `Detect` runs the rules and a rule's reason wins, `geo.mode: Detect`, `unknown`, private and zero client IPs, no table named (skipped, with `Closed` too), a named table missing with `Open` and `Closed`, a `Detect` geo never 503, `BodyLimit` | `pkg/pipeline`, `pkg/policy` |
-| Unit | The agent: table before bundle, a table with the wrong hash dropped, the previous table kept until the named one arrives, table and policy set swapped together, the cache read at start, the readiness wait at bootstrap only | `pkg/agent` |
+| Unit | The order of [§2.3](#23-order-with-ip-lists-skips-and-rate-limits): IP deny and allow before geo, geo before skips and rate limits, `Detect` runs the rules and a rule's reason wins, `Detect` on a skipped path logs `geo-deny`, one lookup per request across several policies and `BodyLimit`, `geo.mode: Detect`, `unknown`, private and zero client IPs, no table named (skipped, with `Closed` too), a named table missing with `Open` and `Closed`, a `Detect` geo never 503, `BodyLimit` | `pkg/pipeline`, `pkg/policy` |
+| Unit | The agent: table before bundle (held compressed, one at a time, over 14,400 KiB refused), a table with the wrong hash dropped, the previous table kept until the named one arrives, table and policy set swapped together, the cache read at start, the readiness wait at bootstrap only | `pkg/agent` |
 | Unit | The distribution server: the table sent only to engines with the `geo-table` capability, before the bundle that names it; a non-leader replica serving it from the Secrets; `geo_table_sha256` in the engine reports and its input limit; `bundlesecret` with 8 and 16 chunks | `operator/internal/distribution`, `pkg/bundlesecret` |
 | Unit | CRD validation (each CEL rule), webhook warnings (`UK`, `EU`, an unassigned code, a path outside the mount), `requirement` returns 0.7.0, `GeoDatabaseReady` reasons, `GeoDatabaseUnavailable` | `operator/api/v1alpha1/validation_test.go`, `operator/webhook`, `operator/internal/distribution`, `operator/internal/controller` |
-| Fuzz | `FuzzCompile`: arbitrary bytes, valid databases with random bytes flipped, and trees whose nodes share children, into the compiler: an error or a table that passes the engine's checks, never a panic, a timeout or unbounded memory | `operator/internal/geo` |
+| Fuzz | `FuzzCompile`: arbitrary bytes, valid databases with random bytes flipped, and trees whose nodes share children (seeds among them whose shared children all end in empty leaves), into the compiler: an error or a table that passes the engine's checks, never a panic, a timeout or unbounded memory | `operator/internal/geo` |
 | Fuzz | `FuzzTable`: arbitrary bytes into the engine's decoder and checks | `pkg/geo` |
-| Fuzz | Differential: an IPv6 database with the IPv4 aliases, built from random networks and codes, then random addresses (aliased ones included): the table's answer equals the library's `Lookup` | `operator/internal/geo` |
+| Fuzz | Differential: an IPv6 database built from random networks and codes, with the IPv4 aliases present or not and at random prefixes, then random addresses (aliased ones included): the table's answer equals the library's `Lookup` | `operator/internal/geo` |
 | Benchmark | `BenchmarkLookup` over synthetic tables of today's size (200,000 IPv4 and 200,000 IPv6 ranges) and of the 32 MiB bound, random addresses; `BenchmarkCheck` with and without geo. Target ≤ 150 ns and 0 allocs/op, gated by `make bench-compare` (`hack/benchgate`) | `pkg/geo`, `pkg/pipeline` |
-| e2e on kind | Per proxy (`hack/kind/e2e.sh` and the other `*-e2e.sh`): the test builds a tiny database mapping one client pod's address to `XA` and the rest of `10.0.0.0/8` to `XB`, and loads it with `secretRef`. `deny: [XA]` denies that pod with 403 `geo-deny` and lets another through; replacing the database flips it with no engine restart (restart counts unchanged); `Detect` logs; no database makes the policy `GeoDatabaseUnavailable` and a `Closed` policy answer 503; an engine before 0.7.0 makes it `EnginesOutdated` (`hack/kind/upgrade.sh`) | `hack/kind` |
-| Scale | `operator/test/scale` with a 4 MB compressed table and 500 engines: time until all hold a new table, operator memory | `operator/test/scale` |
+| e2e on kind | Per proxy (`hack/kind/e2e.sh` and the other `*-e2e.sh`): the client reaches the proxy through a NodePort, so the address the engine sees may be a kind node's, not the client pod's. So the test sets the client IP itself: it trusts the client pod's range as a proxy (`trustedProxies`) and sends `X-Forwarded-For` with test addresses. It builds a tiny database mapping `198.51.100.0/24` to `XA` and `203.0.113.0/24` to `XB`, and loads it with `secretRef`. `deny: [XA]` denies `198.51.100.7` with 403 `geo-deny` and lets `203.0.113.7` through; replacing the database flips it with no engine restart (restart counts unchanged); `Detect` logs; no database makes the policy `GeoDatabaseUnavailable` and a `Closed` policy answer 503; an engine before 0.7.0 makes it `EnginesOutdated` (`hack/kind/upgrade.sh`) | `hack/kind` |
+| Scale | `operator/test/scale` with a 3 MB compressed table, and one at the bound, and 500 engines: time until all hold a new table; the leader's memory during a compile, every replica's under the 768 MiB limit with geo on | `operator/test/scale` |
 
 **The test database.** Tests write their own MMDBs with a small writer in
 `operator/internal/geo/mmdbtest`: a search tree with 24-bit records and a data section of
@@ -735,11 +814,12 @@ database is committed to the repository, for their licenses.
 | 5 | The user provides an MMDB; Inkwall ships none | Shipping DB-IP Lite in the image |
 | 6 | Source: a file in the operator's pod (any volume, or a `geoipupdate` sidecar) or a small Secret | A ConfigMap; a volume in every sidecar; engines downloading |
 | 7 | The operator compiles the MMDB into a country table; the engine never parses MMDB | MMDB lookups in the engine |
-| 8 | The table on the operator stream, to engines that advertise it, before the bundle that pins its hash; stored in chunk Secrets (16) for cold start and other replicas; the previous table kept until the new one arrives | The table in the bundle; a separately signed manifest; sending to every engine |
+| 8 | The table on the operator stream, to engines that advertise it, never after the bundle that pins its hash on a stream; held compressed until a bundle names it; stored in chunk Secrets (16), written before the bundle's, for cold start and other replicas; the previous table kept until the new one arrives | The table in the bundle; a separately signed manifest; sending to every engine |
 | 9 | No table named: geo skipped, `Enforced=False`. A named table missing: the policy's `failureMode`, except `Detect`. Readiness waits only at bootstrap | Always the `failureMode`; unready mid-life |
-| 10 | `pkg/geo`: sorted ranges and a binary search, a country bitset per policy, one lookup per request, the table swapped with the policy set; ≤ 150 ns, 0 allocs; at most 32 MiB | A per-IP cache; `mmap`; a table swapped on its own |
-| 11 | `maxminddb-golang/v2` (ISC) in the operator only, behind `Verify`, `recover`, a deadline checked in the walk and a network cap; never an older database | Our own MMDB reader |
-| 12 | `GeoDatabaseReady` on the `InkwallConfig`; `Enforced=False`, `GeoDatabaseUnavailable` on policies; `EnginesOutdated` for old engines | `Accepted=False` while the table is missing |
+| 10 | `pkg/geo`: sorted ranges and a binary search, a country bitset per policy, one lookup per request in `Set.Check`, the table swapped with the policy set; ≤ 150 ns, 0 allocs; at most 32 MiB | A per-IP cache; `mmap` in the engine; a table swapped on its own |
+| 11 | `maxminddb-golang/v2` (ISC) in the operator only, the leader only, on a mapped file; behind `Verify`, `recover`, a walk that yields empty networks so its deadline and network cap always run; aliases found, not assumed; never an older database, without an error for it | Our own MMDB reader; reading the file into the heap |
+| 12 | `GeoDatabaseReady` on the `InkwallConfig`; `Enforced=False`, `GeoDatabaseUnavailable` on policies, only for engines with no table; `EnginesOutdated` for old engines | `Accepted=False` while the table is missing |
+| 14 | The chart's default operator memory limit goes to 768 MiB, shared with 0010 | Compiling within today's 512 MiB |
 | 13 | Every event carries `country`; geo events sampled per (policy, country), once a minute | An event per denied request |
 
 ## 12. Open questions
