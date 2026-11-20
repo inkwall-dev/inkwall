@@ -51,7 +51,7 @@ spec:
             description: WAFIPListSpec is a list of client addresses.
             properties:
               entries:
-                description: Entries are the list's addresses and prefixes.
+                description: Entries are the list's addresses and prefixes. Required.
                 items:
                   description: IPListEntry is one address or CIDR prefix of a WAFIPList.
                   properties:
@@ -73,9 +73,10 @@ spec:
                 maxItems: 10000
                 minItems: 1
                 type: array
-            required:
-            - entries
             type: object
+            x-kubernetes-validations:
+            - message: entries is required
+              rule: has(self.entries)
         required:
         - spec
         type: object
