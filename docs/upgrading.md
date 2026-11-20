@@ -49,6 +49,10 @@ From 0.1.x, upgrade to 0.2.3 (or 0.2.2) first, then to 0.3.0.
   Istio. A policy in `Detect` mode is proven by the engines' probe receipts.
 - Through Istio, an HTTPRoute on an HTTPS listener whose Gateway validates client certificates
   (`spec.tls.frontend`) is now `NotProbeable` instead of `Unverified`: the probe can't present one.
+- A WAFIPList without `spec.entries`, or an exclusion without `ruleIDs`, is still refused, but
+  with `entries is required` or `ruleIDs is required` instead of `Required value`. The schema
+  now marks both fields optional and a validation rule requires them, so a later source of
+  addresses or way to name rules only relaxes that rule. The objects accepted are the same.
 
 ## From 0.5.x to 0.6.0
 
