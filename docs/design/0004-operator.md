@@ -1106,6 +1106,8 @@ leader only, and is idle in Standalone mode (the default).
   decrease as a reset, the rule the operator applies to its engines. The fake control plane does.
 - The events stream reconnects with jittered backoff bounded at 10 s (the leader's primary stream:
   1 min), so the backlog drains soon after an outage.
+- **Not yet:** exporting the same events to a SIEM, from every replica, with or without a control
+  plane ([0010](0010-siem-export.md)).
 
 **Built: Managed mode.** The leader applies each policy snapshot beside the stream, all or nothing.
 

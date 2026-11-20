@@ -462,7 +462,9 @@ Rules of the contract:
   is sent in `Hello`, and an older policy snapshot is refused.
 - In Managed mode the [validating webhook](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/) lets only the operator write the labelled objects. It
   fails closed.
-- In Standalone mode, events go to logs and optionally to [OTLP](https://opentelemetry.io/docs/specs/otlp/). Not yet: only the engine's log.
+- In every mode, events go to the engines' logs and, optionally, from each operator replica to a
+  SIEM over [OTLP](https://opentelemetry.io/docs/specs/otlp/) or JSON, beside the control plane
+  ([0010](0010-siem-export.md)). Not yet: only the engine's log.
 
 **Built:** the contract (#86), enrollment and the primary stream, state sync (`ClusterState`), the
 events streams with each replica's disk buffer, request counts per policy (#119), and Managed mode (policy snapshots written as
@@ -1220,7 +1222,8 @@ Target:
   use only registered ones.
 
 **Not yet:** a proxy-side adapter failure metric (see [§7.3](#73-engine-unavailable)),
-rate-limit metrics, tracing.
+rate-limit metrics, tracing, exporting events to a SIEM and its metrics
+([0010](0010-siem-export.md)).
 
 ### 8.6 Versioning and compatibility
 
