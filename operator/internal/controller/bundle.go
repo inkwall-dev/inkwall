@@ -57,7 +57,7 @@ import (
 // cluster.
 //
 // +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies;wafrulesets;clusterwafrulesets;wafiplists;inkwallconfigs,verbs=get;list;watch
-// +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies/status;wafrulesets/status;clusterwafrulesets/status;inkwallconfigs/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=waf.inkwall.dev,resources=wafpolicies/status;wafrulesets/status;clusterwafrulesets/status;wafiplists/status;inkwallconfigs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=traefik.io,resources=ingressroutes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes;gateways;gatewayclasses,verbs=get;list;watch
@@ -346,6 +346,9 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 		err = r.writeStatus(ctx, res, next, policies.Items, ruleSets.Items, clusterRuleSets.Items)
 	}
 	if err != nil {
+		return reconcile.Result{}, err
+	}
+	if err := r.writeIPListStatus(ctx, res, ipLists.Items); err != nil {
 		return reconcile.Result{}, err
 	}
 	if err := r.writeConfigStatus(ctx, cfg, published, keys); err != nil {
@@ -726,6 +729,29 @@ func truncate(s string, n int) string {
 		n--
 	}
 	return s[:n]
+}
+
+// writeIPListStatus writes each WAFIPList's Accepted condition (#719),
+// only where it changed.
+func (r *BundleReconciler) writeIPListStatus(ctx context.Context, res resolver.Result, lists []wafv1alpha1.WAFIPList) error {
+	for i := range lists {
+		l := &lists[i]
+		st, ok := res.IPListStatus[types.NamespacedName{Namespace: l.Namespace, Name: l.Name}]
+		if !ok {
+			continue
+		}
+		if err := r.updateStatus(ctx, l, func(o client.Object) bool {
+			status := &o.(*wafv1alpha1.WAFIPList).Status
+			changed := meta.SetStatusCondition(&status.Conditions, condition(st, o.GetGeneration()))
+			if status.ObservedGeneration != o.GetGeneration() {
+				status.ObservedGeneration, changed = o.GetGeneration(), true
+			}
+			return changed
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *BundleReconciler) updateRuleSetStatus(ctx context.Context, obj client.Object, st resolver.Status) error {

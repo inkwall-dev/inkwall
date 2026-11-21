@@ -25,11 +25,33 @@ type IPListEntry struct {
 // WAFIPListSpec is a list of client addresses.
 // +kubebuilder:validation:XValidation:rule="has(self.entries)",message="entries is required"
 type WAFIPListSpec struct {
-	// Entries are the list's addresses and prefixes. Required.
+	// Entries are the list's addresses and prefixes. Required. Up to
+	// 10,000, but the object must also fit etcd's request limit (1.5 MiB by
+	// default): 10,000 entries fit without descriptions, about 4,500 with
+	// 256-byte ones; split a longer list into several WAFIPLists. A CIDR
+	// listed twice draws a warning: v1 keys the entries by cidr
+	// (listType=map) and refuses it.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=10000
+	// +listType=atomic
 	// +optional
 	Entries []IPListEntry `json:"entries,omitempty"`
+}
+
+// WAFIPListStatus says whether the list is usable.
+type WAFIPListStatus struct {
+	// ObservedGeneration is the generation the status describes.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Conditions describe the list's state: Accepted is True when every
+	// entry parses as the engine parses it, and False (InvalidEntries)
+	// naming the first that doesn't; the policies that use the list are
+	// then not Accepted either.
+	// +listType=map
+	// +listMapKey=type
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // WAFIPList is a list of client addresses that WAFPolicies in its
@@ -37,13 +59,17 @@ type WAFIPListSpec struct {
 // engine resolves: see docs/client-ip.md.
 //
 // +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
 // +kubebuilder:resource:categories=inkwall,shortName=wafip
+// +kubebuilder:printcolumn:name="Accepted",type=string,JSONPath=`.status.conditions[?(@.type=="Accepted")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type WAFIPList struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	Spec WAFIPListSpec `json:"spec"`
+	// +optional
+	Status WAFIPListStatus `json:"status,omitempty"`
 }
 
 // WAFIPListList is a list of WAFIPList.

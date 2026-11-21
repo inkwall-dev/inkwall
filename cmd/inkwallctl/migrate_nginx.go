@@ -847,11 +847,11 @@ func requestTarget(target string) (wafv1alpha1.ExclusionMatch, bool) {
 	}
 	switch strings.ToUpper(collection) {
 	case "ARGS":
-		return wafv1alpha1.ExclusionMatch{Argument: name}, true
+		return wafv1alpha1.ExclusionMatch{Argument: wafv1alpha1.ArgumentPattern(name)}, true
 	case "ARGS_NAMES":
-		return wafv1alpha1.ExclusionMatch{ArgumentName: name}, true
+		return wafv1alpha1.ExclusionMatch{ArgumentName: wafv1alpha1.ArgumentPattern(name)}, true
 	case "REQUEST_COOKIES":
-		return wafv1alpha1.ExclusionMatch{Cookie: name}, true
+		return wafv1alpha1.ExclusionMatch{Cookie: wafv1alpha1.ArgumentPattern(name)}, true
 	case "REQUEST_HEADERS":
 		return wafv1alpha1.ExclusionMatch{Header: name}, true
 	}

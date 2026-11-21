@@ -64,7 +64,7 @@ func TestEveryOperatorReasonHasAnEntry(t *testing.T) {
 	}
 	for reason, file := range defined {
 		if !slices.ContainsFunc(entries, func(e Entry) bool {
-			return e.Reason == reason && (e.Kind == KindWAFPolicy || e.Kind == KindInkwallConfig)
+			return e.Reason == reason && (e.Kind == KindWAFPolicy || e.Kind == KindInkwallConfig || e.Kind == KindWAFIPList)
 		}) {
 			t.Errorf("condition reason %s (%s) has no entry in operator/reasons: add what it means and the fix", reason, file)
 		}

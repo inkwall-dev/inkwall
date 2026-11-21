@@ -223,3 +223,85 @@ tests:
               summary: Inkwall's policy bundle is near its size limit.
               description: The bundle is 6.199MiB compressed; past 7,200 KiB, policy changes can't be published.
               runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallbundlenearsizelimit
+
+  - name: event export failing
+    interval: 1m
+    input_series:
+      # splunk: events wait and nothing was ever accepted.
+      - series: 'inkwall_operator_events_export_pending{namespace="inkwall-system",pod="inkwall-operator-a",sink="splunk"}'
+        values: '50x40'
+      - series: 'inkwall_operator_events_export_last_success_timestamp_seconds{namespace="inkwall-system",pod="inkwall-operator-a",sink="splunk"}'
+        values: '0x40'
+      # collector: accepts a request every minute, with events always pending: healthy.
+      - series: 'inkwall_operator_events_export_pending{namespace="inkwall-system",pod="inkwall-operator-a",sink="collector"}'
+        values: '500x40'
+      - series: 'inkwall_operator_events_export_last_success_timestamp_seconds{namespace="inkwall-system",pod="inkwall-operator-a",sink="collector"}'
+        values: '0+60x40'
+      - series: 'inkwall_operator_events_export_dropped_total{namespace="inkwall-system",pod="inkwall-operator-a",sink="collector",reason="buffer_full"}'
+        values: '0x40'
+      # loki: succeeds, but its full buffer keeps dropping.
+      - series: 'inkwall_operator_events_export_pending{namespace="inkwall-system",pod="inkwall-operator-b",sink="loki"}'
+        values: '0x40'
+      - series: 'inkwall_operator_events_export_last_success_timestamp_seconds{namespace="inkwall-system",pod="inkwall-operator-b",sink="loki"}'
+        values: '0+60x40'
+      - series: 'inkwall_operator_events_export_dropped_total{namespace="inkwall-system",pod="inkwall-operator-b",sink="loki",reason="buffer_full"}'
+        values: '0+100x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: InkwallEventExportFailing
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: InkwallEventExportFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: inkwall-system
+              pod: inkwall-operator-a
+              sink: splunk
+            exp_annotations:
+              summary: Inkwall can't export security events to a sink.
+              description: The export sink splunk of the operator replica inkwall-system/inkwall-operator-a has accepted no events for 15 minutes while some wait, or its full buffer drops events.
+              runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwalleventexportfailing
+          - exp_labels:
+              severity: warning
+              namespace: inkwall-system
+              pod: inkwall-operator-b
+              sink: loki
+            exp_annotations:
+              summary: Inkwall can't export security events to a sink.
+              description: The export sink loki of the operator replica inkwall-system/inkwall-operator-b has accepted no events for 15 minutes while some wait, or its full buffer drops events.
+              runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwalleventexportfailing
+
+  - name: event export idle and recovering
+    interval: 1m
+    input_series:
+      # idle: nothing pending, its last success long ago: never fires.
+      - series: 'inkwall_operator_events_export_pending{namespace="inkwall-system",pod="inkwall-operator-a",sink="idle"}'
+        values: '0x60'
+      - series: 'inkwall_operator_events_export_last_success_timestamp_seconds{namespace="inkwall-system",pod="inkwall-operator-a",sink="idle"}'
+        values: '0x60'
+      # recovering: events wait and nothing is accepted for 30 minutes, then
+      # requests succeed again every minute.
+      - series: 'inkwall_operator_events_export_pending{namespace="inkwall-system",pod="inkwall-operator-a",sink="recovering"}'
+        values: '40x60'
+      - series: 'inkwall_operator_events_export_last_success_timestamp_seconds{namespace="inkwall-system",pod="inkwall-operator-a",sink="recovering"}'
+        values: '0x30 1860+60x30'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: InkwallEventExportFailing
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: InkwallEventExportFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: inkwall-system
+              pod: inkwall-operator-a
+              sink: recovering
+            exp_annotations:
+              summary: Inkwall can't export security events to a sink.
+              description: The export sink recovering of the operator replica inkwall-system/inkwall-operator-a has accepted no events for 15 minutes while some wait, or its full buffer drops events.
+              runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwalleventexportfailing
+      - eval_time: 35m
+        alertname: InkwallEventExportFailing
+        exp_alerts: []

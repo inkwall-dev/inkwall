@@ -13,6 +13,7 @@ is down.
 - [Conditions](#conditions)
   - [WAFPolicy](#wafpolicy)
   - [WAFRuleSet and ClusterWAFRuleSet](#wafruleset-and-clusterwafruleset)
+  - [WAFIPList](#wafiplist)
   - [InkwallConfig](#inkwallconfig)
 - [Explaining a policy or a denial](#explaining-a-policy-or-a-denial)
   - [Explain a policy](#explain-a-policy)
@@ -62,6 +63,9 @@ It reports:
 - **The engines**: how many run the current bundle, are behind, or rejected it, by engine
   version. Engines behind, rejecting the bundle, or of another version than the operator are
   named by pod, with what to do: an engine of another version runs until its pod restarts.
+- **The export of security events**, when `spec.events.export` has sinks: the `EventsExported`
+  condition, and each sink's state and pending events on each operator replica (`export` in the
+  JSON).
 
 Without `inkwallctl`, the InkwallConfig's status has the cluster view too: the bundle version and
 size against its limit, the engines by state, the signing key and its rotation, and whether the
@@ -163,12 +167,13 @@ fix from these tables ([Explaining a policy or a denial](#explaining-a-policy-or
 | `Programmed` | Every target is wired, in a proxy whose pods run the engine. | |
 | `NoTargets` | None of the policy's targets exists. | Fix `targetRefs`, or create the route. |
 | `ControllerUnsupported` | A target is served by a proxy Inkwall has no integration for, or is of a kind not wired yet. | Target routes of a supported proxy; `inkwallctl status` lists the proxies. |
+| `ProxyVersionUnsupported` | A target's proxy runs a release the operator can't tell from its pods, or doesn't wire: the HAProxy Kubernetes Ingress Controller is wired through backend config snippets on 3.1 to 3.2 and through its Backend custom resources on 3.4 and later, decided from the controller's own pods (in a proxy namespace, owned by its ReplicaSet or DaemonSet); a release before 3.1 isn't, nor is one whose image tag isn't a release (`latest`, a digest alone) when the controller's Backend CRD isn't installed (with it, such a release is wired with the Backend). The operator leaves the target's Ingress as it is: its traffic may not be inspected. | Run a supported release (the HAProxy chart's `controller.image.tag`), or, for an image whose tag isn't its release, say it in the controller pods' `waf.inkwall.dev/haproxy-controller-version` annotation (`controller.podAnnotations`, e.g. `3.4.1`); the message names the pods ([HAProxy](haproxy.md#controller-releases)). |
 | `IntegrationDisabled` | The operator may not wire the proxy that serves a target: its ClusterRole isn't granted (`rbac.integrations`). | Set the chart value to `true` (or `auto` once the proxy is installed), and `helm upgrade`. |
 | `InjectionDisabled` | The chart's `injection.enabled` is `false`: no proxy pod gets the engine, so nothing is wired. | Turn injection on. |
 | `SidecarMissing` | The proxy's pods don't run the engine: none is in the proxy namespaces, the InkwallConfig's selector doesn't match them, they were created while the operator was down, or they opted out. Their traffic isn't inspected. | Add the namespace to `injection.proxyNamespaces`, fix the selector, or restart the pods the message names. |
 | `PendingRestart` | Proxy pods started before Inkwall run without the engine (or Envoy Gateway is replacing its pods with ones that have it). | Restart them: `kubectl rollout restart`. |
 | `Pending` | Wired, but not in force yet: the proxy hasn't loaded the configuration. Or, for an HTTPRoute of Envoy Gateway or Istio, a Gateway hasn't accepted the route (or refuses it): the operator changes a Gateway only once the route's status says it accepts the route. | Wait; if it lasts, check the proxy's logs. |
-| `Unverified` | Wired, but the operator's probe hasn't proven the filter on every pod (HAProxy, Envoy Gateway, Istio), or got another answer than the engine's: the filter isn't on the route. For an Envoy Gateway or Istio route in `Detect` mode: no engine reported the probe's receipt (in 30 s). For a policy with `responses.inspect`: the probe's response leg hasn't proven yet that the route's responses reach the engine on every pod. | HAProxy: check the controller has the operator's snippets ([HAProxy](haproxy.md)). Istio: see [the operator's probe](istio.md#the-operators-probe); another `EnvoyFilter` may remove or bypass Inkwall's. Envoy Gateway: an `EnvoyPatchPolicy` may remove Inkwall's ext_proc filter. In `Detect` mode, the pods need a 0.6.0 engine. |
+| `Unverified` | Wired, but the operator's probe hasn't proven the filter on every pod (HAProxy, Envoy Gateway, Istio), or got another answer than the engine's: the filter isn't on the route. For an Envoy Gateway or Istio route in `Detect` mode: no engine reported the probe's receipt (in 30 s). For a policy with `responses.inspect`: the probe's response leg hasn't proven yet that the route's responses reach the engine on every pod. | HAProxy: check the controller has the operator's snippets, or, on 3.4, that HAProxy didn't reject its `Backend` custom resource, which the controller then sets aside, serving the route without the filter: the message names the `Backend` to look for in the controller's log ([HAProxy](haproxy.md#controller-releases)). Istio: see [the operator's probe](istio.md#the-operators-probe); another `EnvoyFilter` may remove or bypass Inkwall's. Envoy Gateway: an `EnvoyPatchPolicy` may remove Inkwall's ext_proc filter. In `Detect` mode, the pods need a 0.6.0 engine. |
 | `NotProbeable` | The operator's probe can't target an Envoy Gateway or Istio route (a rule whose every match is a regular expression, a listener or server with mutual TLS or passthrough, or header or query match values over TLS, which the probe doesn't send to a certificate it doesn't verify; in `Detect` mode, also a match only for another method than `GET` or `HEAD`, and for a policy with `responses.inspect` in either mode, as the probe's response leg reaches the app), so its filter can't be proven; the message says which. | Add an exact or prefix match to the rule, take the client certificate requirement off the listener, or accept it unproven: [Istio](istio.md#the-operators-probe). |
 | `WiringFailed` | The operator couldn't change the proxy's objects (a conflict, a webhook, permissions). | The message names the object and the error; `kubectl -n inkwall-system logs deploy/inkwall-operator` has more. |
 | `ResponsesNotInspected` | The policy inspects responses, but a target's proxy doesn't send them to the engine: Traefik can't (Envoy Gateway, Istio and HAProxy can); HAProxy doesn't until every controller pod's engine was injected with `--response-messages` (0.6.0 or later), and never sends streamed responses' bodies, which `responses.streams: Inspect` asks for; or the operator's probe shows that a pod's engine doesn't see the route's responses (HAProxy, Envoy Gateway, Istio: the probe's response leg came back without the engine's answer, or no receipt of it). Its requests are inspected; the policy isn't `Programmed`, so it doesn't claim the responses are. | Traefik: remove `responses`, or target routes another proxy serves. HAProxy: restart the controller's pods the message names (with a pinned `spec.engine.image`, pin 0.6.0 or later first); for streams, set `responses.streams: Skip` or target routes Envoy Gateway or Istio serves. A failed response probe: the message names the pod and what came back; check that the route's response rules ([HAProxy](haproxy.md#the-probe-and-programmed)) or response stage ([Istio](istio.md#the-operators-probe)) aren't overridden, and that the pod's engine has the policy's bundle. |
@@ -194,6 +199,17 @@ fix from these tables ([Explaining a policy or a denial](#explaining-a-policy-or
 
 `Accepted`, with the reasons `Accepted`, `InvalidRef` (a ConfigMap or key that doesn't exist, or
 an unknown built-in rule set) and `RuleCompileError` (rules that don't compile), as above.
+
+### WAFIPList
+
+`Accepted` (since 0.7.0):
+
+<!-- reasons: WAFIPList Accepted -->
+| Reason | Meaning | Fix |
+|---|---|---|
+| `Accepted` | Every entry parses as the engines parse it. | |
+| `InvalidEntries` | An entry isn't an address or CIDR prefix the engines can parse (999.1.1.1, a prefix length over 32 or 128). The webhook refuses such entries, so the list was written while it was down. The policies that use the list aren't `Accepted` either (`InvalidRef`). | Fix or remove the entry the message names. |
+<!-- end reasons -->
 
 ### InkwallConfig
 
@@ -229,6 +245,12 @@ an unknown built-in rule set) and `RuleCompileError` (rules that don't compile),
 | `GeoDatabaseReady` | `Invalid` | The source isn't a valid MaxMind DB, or reading it failed or took more than a minute. Engines keep the last good table, if there was one. | Download the database again; the message says what failed. |
 | `GeoDatabaseReady` | `NoCountryData` | No record of the database has `country.iso_code`: it isn't a country database (an ASN database, or another schema). | Use a country or city database: GeoLite2 or GeoIP2 Country or City, DB-IP's Country Lite. |
 | `GeoDatabaseReady` | `TooLarge` | The database is over a bound: 256 MiB of file, 16 MiB from a Secret (decompressed), 32 Mi networks (more than its tree can have), or a country table of 32 MiB (14,400 KiB compressed). | Use a country database; for a Secret, a small custom one, or a file instead. |
+| `EventsExported` | `Exporting` | Every sink of `spec.events.export` succeeded on every operator replica within the status window (`--export-status-window`, 5 minutes by default), or had nothing to send. The message names the plaintext sinks (`insecure: true`). | |
+| `EventsExported` | `ExportConfigInvalid` | A sink can't start: a missing Secret or key, a CA that doesn't parse, a client certificate without its key, a refused header name, or a URL from `urlSecretRef` that isn't a valid one. The other sinks go on. | Fix what the message names, in the operator's namespace ([InkwallEventExportFailing](monitoring.md#inkwalleventexportfailing)). |
+| `EventsExported` | `ExportAddressRefused` | A sink's host resolves only to addresses the operator never connects to: loopback, link-local or a cloud metadata service. The message names the class, not the address. | Point the sink at its real address ([InkwallEventExportFailing](monitoring.md#inkwalleventexportfailing)). |
+| `EventsExported` | `ExportFailing` | A sink has failed for the status window (`--export-status-window`, 5 minutes by default) without a success on some replica; its events wait in that replica's buffer, which drops the oldest when full. The message names the sink, the replica and the last error class. | Check the sink's address, its NetworkPolicy egress (`networkPolicy.egress.extra`), its TLS and its credentials; auth failures go on being retried, at most a minute apart, so fixing the Secret resumes the flow ([InkwallEventExportFailing](monitoring.md#inkwalleventexportfailing)). |
+| `EventsExported` | `ExportNotReported` | A live operator replica hasn't reported a sink for a minute, or no replica reports it at all: a replica still starting, an operator older than the export during a rollout, or replicas whose engine reports stopped. The message names the sink and the replica. | Usually seconds after a change or a rollout; if it lasts, check the operator's replicas (`inkwallctl status`) and their logs. |
+| `EventsExported` | `ExportDropping` | A sink succeeds but dropped events for a full buffer within the status window (`--export-status-window`, 5 minutes by default): it can't keep up. | Raise the sink's `batch.maxEvents` or `batch.maxInFlight`, the buffer (`events.export.bufferMiB`, `diskMiB`), or the sink's capacity ([InkwallEventExportFailing](monitoring.md#inkwalleventexportfailing)). |
 <!-- end reasons -->
 
 ## Explaining a policy or a denial

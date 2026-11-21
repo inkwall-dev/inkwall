@@ -860,12 +860,17 @@ func bufferLimit(gw *gatewayv1.Gateway) *unstructured.Unstructured {
 // ensure creates the operator's object, or sets its spec and owner. One of
 // the same name it didn't create is left alone, and reported.
 func (e *EnvoyGateway) ensure(ctx context.Context, want *unstructured.Unstructured) error {
+	return ensureObject(ctx, e.Client, want)
+}
+
+// ensureObject is EnvoyGateway.ensure with a client.
+func ensureObject(ctx context.Context, c client.Client, want *unstructured.Unstructured) error {
 	cur := &unstructured.Unstructured{}
 	cur.SetGroupVersionKind(want.GroupVersionKind())
-	switch err := e.Client.Get(ctx, client.ObjectKeyFromObject(want), cur); {
+	switch err := c.Get(ctx, client.ObjectKeyFromObject(want), cur); {
 	case apierrors.IsNotFound(err):
 		want.SetAnnotations(map[string]string{hashAnnotation: hashOf(want.Object["spec"])})
-		return e.Client.Create(ctx, want)
+		return c.Create(ctx, want)
 	case err != nil:
 		return err
 	}
@@ -880,7 +885,7 @@ func (e *EnvoyGateway) ensure(ctx context.Context, want *unstructured.Unstructur
 	cur.Object["spec"] = want.Object["spec"]
 	cur.SetOwnerReferences(want.GetOwnerReferences())
 	cur.SetAnnotations(map[string]string{hashAnnotation: hash})
-	return e.Client.Update(ctx, cur)
+	return c.Update(ctx, cur)
 }
 
 // hashOf is a short hash of what the operator wrote, kept in

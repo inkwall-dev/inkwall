@@ -491,6 +491,49 @@ func TestConfigControllerWarning(t *testing.T) {
 	}
 }
 
+// Repeats in the lists v1 makes sets, and an exclusion header that isn't a
+// header name, draw warnings (#717); the objects stay accepted.
+func TestListWarnings(t *testing.T) {
+	ctx := context.Background()
+	pv := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy}
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "shop"}}
+	p.Spec.Skip = &wafv1alpha1.SkipSpec{Paths: []wafv1alpha1.PathPattern{"/a", "/b"}, BodyPaths: []wafv1alpha1.PathPattern{"/up"}}
+	p.Spec.Exclusions = []wafv1alpha1.Exclusion{{RuleIDs: []int32{942100, 942200}, When: &wafv1alpha1.ExclusionMatch{Header: "Referer"}}}
+	if warnings, err := pv.ValidateCreate(ctx, p); err != nil || len(warnings) != 0 {
+		t.Errorf("no repeats: warnings %q, error %v", warnings, err)
+	}
+	p.Spec.Skip.Paths = append(p.Spec.Skip.Paths, "/a")
+	p.Spec.Skip.BodyPaths = append(p.Spec.Skip.BodyPaths, "/up", "/up")
+	p.Spec.Exclusions[0].RuleIDs = append(p.Spec.Exclusions[0].RuleIDs, 942100)
+	p.Spec.Exclusions[0].When.Header = "X-Forwarded[0]"
+	warnings, err := pv.ValidateCreate(ctx, p)
+	want := []string{
+		"spec.skip.paths[2]: /a is also spec.skip.paths[0]",
+		"spec.skip.bodyPaths[1]: /up is also spec.skip.bodyPaths[0]",
+		"spec.skip.bodyPaths[2]: /up is also spec.skip.bodyPaths[0]",
+		"spec.exclusions[0].ruleIDs[2]: 942100 is also spec.exclusions[0].ruleIDs[0]",
+		`spec.exclusions[0].when.header: "X-Forwarded[0]" is not a header name; v1 refuses it`,
+	}
+	if err != nil || len(warnings) != len(want) {
+		t.Fatalf("warnings %q, error %v; want %d", warnings, err, len(want))
+	}
+	for i, w := range want {
+		if !strings.Contains(warnings[i], w) {
+			t.Errorf("warning %q doesn't say %q", warnings[i], w)
+		}
+	}
+
+	lv := specValidator[*wafv1alpha1.WAFIPList]{validate: validateWAFIPList}
+	l := &wafv1alpha1.WAFIPList{ObjectMeta: metav1.ObjectMeta{Name: "l"}, Spec: wafv1alpha1.WAFIPListSpec{Entries: []wafv1alpha1.IPListEntry{
+		{CIDR: "203.0.113.0/24"}, {CIDR: "192.0.2.1"}, {CIDR: "203.0.113.0/24", Description: "again"},
+	}}}
+	warnings, err = lv.ValidateCreate(ctx, l)
+	if err != nil || len(warnings) != 1 || !strings.Contains(warnings[0], "spec.entries[2]: 203.0.113.0/24 is also spec.entries[0]") ||
+		!strings.Contains(warnings[0], "v1 keys the entries by cidr") {
+		t.Errorf("IP list repeat: warnings %q, error %v", warnings, err)
+	}
+}
+
 func ptr[T any](v T) *T { return &v }
 
 // TestIPListValidation: a WAFIPList's entries must parse as the engine

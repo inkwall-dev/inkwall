@@ -9,6 +9,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -125,6 +126,50 @@ func TestStatusConflictNewGeneration(t *testing.T) {
 	if got.Generation != 2 || got.Status.ObservedGeneration == 2 {
 		t.Fatalf("generation %d reported observed (%d) with bundleVersion %d, which holds generation 1's spec",
 			got.Generation, got.Status.ObservedGeneration, got.Status.BundleVersion)
+	}
+}
+
+// A WAFIPList gets its Accepted condition for the generation it was read
+// at (#719), and isn't written again when nothing changed.
+func TestIPListStatus(t *testing.T) {
+	ctx := context.Background()
+	s := runtime.NewScheme()
+	_ = wafv1alpha1.AddToScheme(s)
+	good := &wafv1alpha1.WAFIPList{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "good", Generation: 3}}
+	bad := &wafv1alpha1.WAFIPList{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "bad", Generation: 1}}
+	writes := 0
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(good, bad).WithStatusSubresource(good, bad).WithInterceptorFuncs(interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			writes++
+			return cl.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	}).Build()
+	r := &BundleReconciler{Client: c}
+	res := resolver.Result{IPListStatus: map[types.NamespacedName]resolver.Status{
+		{Namespace: "shop", Name: "good"}: {Accepted: true, Reason: resolver.ReasonAccepted, Message: resolver.IPListValid},
+		{Namespace: "shop", Name: "bad"}:  {Reason: resolver.ReasonInvalidEntries, Message: "entry 1: lb.example.com"},
+	}}
+	var lists wafv1alpha1.WAFIPListList
+	if err := c.List(ctx, &lists); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := r.writeIPListStatus(ctx, res, lists.Items); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.List(ctx, &lists); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if writes != 2 {
+		t.Errorf("%d status writes, want 2: one per list, none when unchanged", writes)
+	}
+	for _, l := range lists.Items {
+		cond := meta.FindStatusCondition(l.Status.Conditions, wafv1alpha1.ConditionAccepted)
+		want := map[string]metav1.ConditionStatus{"good": metav1.ConditionTrue, "bad": metav1.ConditionFalse}[l.Name]
+		if cond == nil || cond.Status != want || cond.ObservedGeneration != l.Generation || l.Status.ObservedGeneration != l.Generation {
+			t.Errorf("%s: status %+v, want Accepted=%s at generation %d", l.Name, l.Status, want, l.Generation)
+		}
 	}
 }
 

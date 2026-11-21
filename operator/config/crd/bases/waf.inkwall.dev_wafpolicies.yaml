@@ -107,7 +107,8 @@ spec:
                   maxBytes:
                     description: |-
                       MaxBytes is how much of a body is inspected, at most 10 MiB. Unset:
-                      the engine's default (64 KiB).
+                      64 KiB, which the operator writes into the bundle, so an engine's own
+                      default never applies.
                     format: int64
                     maximum: 10485760
                     minimum: 1
@@ -137,7 +138,8 @@ spec:
                     ruleIDs:
                       description: |-
                         RuleIDs are the rules to turn off. An ID no rule has is ignored.
-                        Required.
+                        Required. A set: an ID listed twice draws a warning, and v1 refuses
+                        it.
                       items:
                         format: int32
                         minimum: 1
@@ -145,6 +147,7 @@ spec:
                       maxItems: 64
                       minItems: 1
                       type: array
+                      x-kubernetes-list-type: atomic
                     when:
                       description: |-
                         When narrows the exclusion. Unset: the rules are off for every request
@@ -182,6 +185,9 @@ spec:
                             Header is a request header (REQUEST_HEADERS) the rules stop looking
                             at, such as Referer, compared case-insensitively. Requires engines
                             0.5.0 or later.
+                            v1 types it as a header name, refusing [ and ] and allowing the other
+                            token characters (!#$%&'*+^|~): a header that isn't one draws a
+                            warning.
                           maxLength: 256
                           minLength: 1
                           pattern: ^[A-Za-z0-9_.\-\[\]]+$
@@ -207,6 +213,7 @@ spec:
                     rule: has(self.ruleIDs)
                 maxItems: 128
                 type: array
+                x-kubernetes-list-type: atomic
               failureMode:
                 description: |-
                   FailureMode is what happens to a request that can't be inspected in
@@ -363,6 +370,7 @@ spec:
                             type: string
                           maxItems: 16
                           type: array
+                          x-kubernetes-list-type: set
                       type: object
                     mode:
                       description: |-
@@ -406,6 +414,7 @@ spec:
                   type: object
                 maxItems: 8
                 type: array
+                x-kubernetes-list-type: atomic
                 x-kubernetes-validations:
                 - message: rateLimits must not repeat a name
                   rule: self.all(a, self.exists_one(b, b.name == a.name))
@@ -431,8 +440,8 @@ spec:
                   maxBytes:
                     description: |-
                       MaxBytes is how much of a response body is inspected, at most 10
-                      MiB. Unset: 64 KiB (each KiB costs about 0.3 ms of inspection: raise
-                      timeout with it). A longer body has this much inspected, and then
+                      MiB. Unset: 64 KiB, which the operator writes into the bundle (each
+                      KiB costs about 0.3 ms of inspection: raise timeout with it). A longer body has this much inspected, and then
                       gets onOversize.
                     format: int64
                     maximum: 10485760
@@ -449,6 +458,7 @@ spec:
                     - Deny
                     type: string
                   streams:
+                    default: Skip
                     description: |-
                       Streams is what happens to the body of a streamed response: Server-
                       Sent Events (text/event-stream) and gRPC responses. Inspect: each
@@ -460,16 +470,17 @@ spec:
                       HAProxy doesn't send their bodies (the policy is then not Programmed
                       on its Ingresses, ResponsesNotInspected), and engines before 0.6.0
                       skip them (the policy is then not Enforced).
-                      Unset: Skip.
                     enum:
                     - Inspect
                     - Skip
                     type: string
                 type: object
                 x-kubernetes-validations:
-                - message: 'maxBytes, onOversize and streams need inspect: true'
+                - message: 'maxBytes, onOversize and streams: Inspect need inspect:
+                    true'
                   rule: (has(self.inspect) && self.inspect) || (!has(self.maxBytes)
-                    && !has(self.onOversize) && !has(self.streams))
+                    && !has(self.onOversize) && (!has(self.streams) || self.streams
+                    == 'Skip'))
               ruleSets:
                 description: |-
                   RuleSets are the rules to run, in order. Empty: the built-in OWASP CRS
@@ -576,9 +587,9 @@ spec:
                       minimum: 1
                       type: integer
                     placement:
+                      default: AfterCRS
                       description: |-
-                        Placement is where a SecLang rule set loads: AfterCRS (the default)
-                        or BeforeCRS, before the CRS's initialization, so its rules can set
+                        Placement is where a SecLang rule set loads: AfterCRS or BeforeCRS, before the CRS's initialization, so its rules can set
                         the CRS's tx variables or turn CRS rules off with
                         ctl:ruleRemoveById. A BeforeCRS rule set can't use SecRuleRemoveBy*
                         or SecRuleUpdate*, which only reach rules loaded before them. Not
@@ -632,13 +643,15 @@ spec:
                       !has(self.crs.inboundAnomalyThreshold)'
                 maxItems: 8
                 type: array
+                x-kubernetes-list-type: atomic
               skip:
                 description: Skip lists requests that are never inspected.
                 properties:
                   bodyPaths:
                     description: |-
                       BodyPaths are paths whose body is not inspected; their headers and URI
-                      still are.
+                      still are. A set: a path listed twice draws a warning, and v1 refuses
+                      it.
                     items:
                       description: |-
                         PathPattern is an exact path ("/healthz") or a prefix ending in "*"
@@ -649,8 +662,11 @@ spec:
                       type: string
                     maxItems: 64
                     type: array
+                    x-kubernetes-list-type: atomic
                   paths:
-                    description: Paths that are never inspected.
+                    description: |-
+                      Paths that are never inspected. A set: a path listed twice draws a
+                      warning, and v1 refuses it.
                     items:
                       description: |-
                         PathPattern is an exact path ("/healthz") or a prefix ending in "*"
@@ -661,6 +677,7 @@ spec:
                       type: string
                     maxItems: 64
                     type: array
+                    x-kubernetes-list-type: atomic
                 type: object
               targetRefs:
                 description: |-
@@ -731,15 +748,16 @@ spec:
                 maxItems: 16
                 minItems: 1
                 type: array
+                x-kubernetes-list-type: atomic
                 x-kubernetes-validations:
                 - message: targetRefs must not repeat a target
                   rule: 'self.all(a, self.exists_one(b, b.kind == a.kind && b.name
                     == a.name && (has(b.sectionName) ? b.sectionName : '''') == (has(a.sectionName)
                     ? a.sectionName : '''')))'
               timeout:
-                description: |-
-                  Timeout is the inspection deadline per request, at most 1s. Unset:
-                  the engine's default (250ms).
+                default: 250ms
+                description: Timeout is the inspection deadline per request, at most
+                  1s.
                 type: string
                 x-kubernetes-validations:
                 - message: timeout must be more than 0s and at most 1s

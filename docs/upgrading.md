@@ -93,6 +93,26 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   ([HAProxy](haproxy.md)), or limited clients get 403. A SecLang rule that denies with
   `status:429` now answers gRPC calls with `RESOURCE_EXHAUSTED` instead of `UNAVAILABLE`.
 
+- **The HAProxy Kubernetes Ingress Controller 3.4** (the default of its chart since 1.55.0) is
+  wired: 3.4 dropped the config snippets the operator loads the filter with on 3.1 to 3.2, so on
+  3.4 each protected Ingress gets a `Backend` custom resource of the controller's
+  (`inkwall-waf-<ingress>`), which its `haproxy.org/cr-backend` annotation names. The operator
+  tells each controller's release from its own pods' image tag (pods in the proxy namespaces,
+  owned by its ReplicaSet or DaemonSet); one it can't tell (a digest, a mirror's own tags) is
+  wired with the `Backend` when its CRD is installed, and a release before 3.1, or one it can't
+  tell without the CRD, leaves the policy `Programmed=False`, reason `ProxyVersionUnsupported`:
+  say the release in the pods' `waf.inkwall.dev/haproxy-controller-version` annotation. On 3.4
+  the backend annotations of a protected Ingress (`timeout-server`, `server-ssl`, ...) and a
+  `cr-backend` default in the controller's ConfigMap don't apply, and an Ingress that names a
+  `Backend` of its own, or routes to a Service that does, can't be protected
+  ([HAProxy](haproxy.md#controller-releases)). Upgrading the controller from 3.2 to 3.4 moves its
+  Ingresses from the snippet to the `Backend`, and rolling back moves them back; nothing to do.
+  **Security:** a `Backend` HAProxy rejects is set aside by the controller, which then serves the
+  Ingress without the filter (a rejected 3.2 snippet kept the last good configuration): the
+  policy goes `Programmed=False` (`Unverified`), naming the `Backend` to look for in the
+  controller's log; alert on `haproxy_rejected_custom_resource_generation` and on policies that
+  aren't `Ready`.
+
 - **Envoy Gateway's routes are proven by the operator's probe**, as Istio's and the HAProxy
   controller's are. After the upgrade, a policy on an HTTPRoute that Envoy Gateway serves is
   `Programmed=False`, reason `Unverified`, until the probe has reached the engine on every Envoy
@@ -146,6 +166,31 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   `ClusterWAFRuleSet` for rules several namespaces share. The v1.0 upgrade will refuse to start
   while a policy names another namespace. `spec.ipLists` doesn't change in v1alpha1; v1 turns each
   name into `{kind: WAFIPList, name: ...}`, which the API server converts for you.
+- **Lists that v1 makes sets warn about repeats** (#717): a path listed twice in `skip.paths` or
+  `skip.bodyPaths`, a rule ID twice in an exclusion's `ruleIDs`, and a CIDR twice in a
+  `WAFIPList`'s `entries` (v1 keys them by `cidr`). An exclusion's `when.header` that isn't a header
+  name (it has `[` or `]`) warns too. They're still accepted and behave as before; the v1 schema
+  refuses them, so clean them up. Server-side apply sees no change: the other lists were atomic
+  already and now say so. A `WAFIPList` with 10,000 entries fits etcd's default 1.5 MiB limit
+  only without descriptions (about 4,500 with 256-byte ones), so split longer lists. The
+  InkwallConfig's `status.proxies[].ingressClasses` and `gatewayClasses` list at most 64 classes
+  each.
+- **A policy's defaults are in the API and the bundle, not only the engine** (#718).
+  `spec.timeout` defaults to `250ms`, `ruleSets[].placement` to `AfterCRS` and
+  `responses.streams` to `Skip`, so `kubectl get -o yaml` and `kubectl explain` show them. The
+  operator writes the 64 KiB body limit into the bundle for every policy that inspects bodies and
+  sets no `body.maxBytes`, and the same for `responses.maxBytes`, instead of leaving it to the
+  engine. Every value is the one that applied before, so nothing behaves differently. The bundle
+  grows by a few bytes per policy, so after the upgrade every policy's `bundleVersion` moves to the
+  operator's first bundle, and policies are `Enforced=False` (`EnginesBehind`) for the seconds the
+  engines take to load it. `responses: {streams: Skip}` without `inspect: true` is now accepted
+  (it is the default).
+- **`WAFIPList` has a status** (#719): an `Accepted` condition, `InvalidEntries` when an entry
+  doesn't parse (only possible for a list written while the webhook was down), and an `Accepted`
+  column in `kubectl get wafiplists`. The operator needs `update` on `wafiplists/status`, which
+  the chart's ClusterRole now grants; with your own RBAC, add it. The
+  [API compatibility](api-compatibility.md) page says what may change in the API from here to
+  v1.0.0, and what v1.0.0 will freeze.
 
 ## From 0.5.x to 0.6.0
 

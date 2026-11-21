@@ -68,6 +68,24 @@ func TestFlags(t *testing.T) {
 	if o, err := parseFlags([]string{"--metrics-secure", "--metrics-cert-dir=/certs"}, io.Discard); err != nil || !o.MetricsSecure || o.MetricsCertDir != "/certs" {
 		t.Errorf("secure metrics: secure %v, cert dir %q, %v", o.MetricsSecure, o.MetricsCertDir, err)
 	}
+	// The export buffer's bounds and flush (design 0010 §2.4).
+	if o, err := parseFlags(nil, io.Discard); err != nil || o.ExportBufferBytes != 32<<20 || o.ExportDiskBytes != 512<<20 || o.ExportFlushTimeout != 15*time.Second {
+		t.Errorf("export defaults: %d, %d, %v, %v", o.ExportBufferBytes, o.ExportDiskBytes, o.ExportFlushTimeout, err)
+	}
+	if _, err := parseFlags([]string{"--export-disk-bytes=0"}, io.Discard); err == nil {
+		t.Error("a disk bound of 0 accepted")
+	}
+	if o, err := parseFlags(nil, io.Discard); err != nil || o.ExportStatusWindow != 5*time.Minute {
+		t.Errorf("export status window %v, %v, want 5m", o.ExportStatusWindow, err)
+	}
+	if o, err := parseFlags([]string{"--export-status-window=30s"}, io.Discard); err != nil || o.ExportStatusWindow != 30*time.Second {
+		t.Errorf("export status window %v, %v, want 30s", o.ExportStatusWindow, err)
+	}
+	for _, bad := range []string{"0s", "-1m"} {
+		if _, err := parseFlags([]string{"--export-status-window=" + bad}, io.Discard); err == nil {
+			t.Errorf("--export-status-window=%s accepted", bad)
+		}
+	}
 }
 
 func TestDrain(t *testing.T) {

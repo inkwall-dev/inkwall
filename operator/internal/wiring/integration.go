@@ -112,6 +112,10 @@ type TargetState struct {
 	Unsupported string
 	// Failed: why it couldn't be wired.
 	Failed string
+	// VersionUnsupported: its proxy runs a release the operator can't
+	// tell or doesn't wire, and which, with what to do
+	// (ProxyVersionUnsupported).
+	VersionUnsupported string
 	// Wired: the integration keeps the target wired.
 	Wired bool
 	// Pending: wired, but not in force yet, and why (the proxy hasn't
@@ -161,6 +165,10 @@ type Config struct {
 	IngressRoutes, HTTPRoutes, Gateways, GatewayClasses, EnvoyProxies, ExtensionPolicies, TrafficPolicies *crdwatch.Kind
 	// EnvoyFilters, VirtualServices and IstioGateways are Istio's.
 	EnvoyFilters, VirtualServices, IstioGateways *crdwatch.Kind
+	// HAProxyBackends are the HAProxy controller's Backend custom resources.
+	HAProxyBackends *crdwatch.Kind
+	// ProxyNamespaces are the proxy namespaces (nil: every namespace).
+	ProxyNamespaces integrations.Namespaces
 	// Sidecar is the engine Envoy Gateway's and Istio's pods get, before
 	// the InkwallConfig's settings.
 	Sidecar injection.Sidecar
@@ -189,7 +197,8 @@ func Integrations(c client.Client, reader client.Reader, cfg Config) []Integrati
 			HTTPRoutes: cfg.HTTPRoutes, Gateways: cfg.Gateways, GatewayClasses: cfg.GatewayClasses, EnvoyFilters: cfg.EnvoyFilters,
 			Prober: cfg.Prober,
 		},
-		&HAProxy{Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.HAProxy.Name), Prober: cfg.Prober},
+		&HAProxy{Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.HAProxy.Name), Prober: cfg.Prober,
+			Namespaces: cfg.ProxyNamespaces, Backends: cfg.HAProxyBackends},
 		&IstioIngress{
 			Client: c, APIReader: reader, Pods: cfg.Pods.Selector(integrations.IstioIngress.Name), PodLabels: plainLabels(cfg.Pods.LabelSelector(integrations.IstioIngress.Name)),
 			VirtualServices: cfg.VirtualServices, Gateways: cfg.IstioGateways, EnvoyFilters: cfg.EnvoyFilters,
@@ -218,7 +227,7 @@ func record(name string, res *Result) {
 	wired, failed := 0, 0
 	for _, s := range res.Targets {
 		switch {
-		case s.Failed != "":
+		case s.Failed != "" || s.VersionUnsupported != "":
 			failed++
 		case s.Wired:
 			wired++

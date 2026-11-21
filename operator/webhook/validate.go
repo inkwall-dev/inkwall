@@ -13,6 +13,8 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"regexp"
+	"strconv"
 	"strings"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -275,8 +277,49 @@ func validateWAFIPList(l *wafv1alpha1.WAFIPList) (admission.Warnings, error) {
 			errs = append(errs, field.Invalid(path.Index(i).Child("cidr"), string(e.CIDR), err.Error()))
 		}
 	}
-	return nil, invalid("WAFIPList", l.Name, errs)
+	return duplicates(path, len(l.Spec.Entries), func(i int) string { return string(l.Spec.Entries[i].CIDR) },
+		"v1 keys the entries by cidr and refuses it"), invalid("WAFIPList", l.Name, errs)
 }
+
+// duplicates warns of each value listed again, at the path of the repeat:
+// v1 makes these lists sets (or maps), which refuse repeats (#717).
+func duplicates(path *field.Path, n int, value func(int) string, v1 string) admission.Warnings {
+	var warnings admission.Warnings
+	seen := map[string]int{}
+	for i := range n {
+		v := value(i)
+		if first, ok := seen[v]; ok {
+			warnings = append(warnings, fmt.Sprintf("%s: %s is also %s; remove the repeat: %s", path.Index(i), v, path.Index(first), v1))
+			continue
+		}
+		seen[v] = i
+	}
+	return warnings
+}
+
+// policyListWarnings warns of what the v1 schema refuses in a policy's
+// lists: repeats in the sets, and an exclusion's header that isn't a
+// header name (#717).
+func policyListWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
+	const v1 = "v1 refuses it"
+	var warnings admission.Warnings
+	spec := field.NewPath("spec")
+	if s := p.Spec.Skip; s != nil {
+		warnings = append(warnings, duplicates(spec.Child("skip", "paths"), len(s.Paths), func(i int) string { return string(s.Paths[i]) }, v1)...)
+		warnings = append(warnings, duplicates(spec.Child("skip", "bodyPaths"), len(s.BodyPaths), func(i int) string { return string(s.BodyPaths[i]) }, v1)...)
+	}
+	for i, e := range p.Spec.Exclusions {
+		path := spec.Child("exclusions").Index(i)
+		warnings = append(warnings, duplicates(path.Child("ruleIDs"), len(e.RuleIDs), func(j int) string { return strconv.Itoa(int(e.RuleIDs[j])) }, v1)...)
+		if e.When != nil && e.When.Header != "" && !headerName.MatchString(e.When.Header) {
+			warnings = append(warnings, fmt.Sprintf("%s: %q is not a header name; v1 refuses it", path.Child("when", "header"), e.When.Header))
+		}
+	}
+	return warnings
+}
+
+// headerName is the CRD's HeaderName pattern: an HTTP token.
+var headerName = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+.^_|~-]+$`)
 
 func invalid(kind, name string, errs field.ErrorList) error {
 	if len(errs) == 0 {
@@ -346,7 +389,8 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 					"bind the CRS without placement, and the rule set to place before it in its own entry"))
 		}
 	}
-	return append(append(responseWarnings(p), crsWarnings(p)...), ruleSetNamespaceWarnings(p)...), invalid("WAFPolicy", p.Name, errs)
+	warnings := append(append(responseWarnings(p), crsWarnings(p)...), ruleSetNamespaceWarnings(p)...)
+	return append(warnings, policyListWarnings(p)...), invalid("WAFPolicy", p.Name, errs)
 }
 
 // ruleSetNamespaceWarnings warns of a rule set reference's namespace

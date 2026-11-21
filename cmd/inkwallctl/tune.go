@@ -453,11 +453,11 @@ func tune(evs []tuneEvent, broad bool, minCount int) *tuneReport {
 			ex = &wafv1alpha1.Exclusion{When: &wafv1alpha1.ExclusionMatch{Path: wafv1alpha1.PathPattern(g.Path)}}
 			switch g.Field {
 			case targetArgument:
-				ex.When.Argument = g.Name
+				ex.When.Argument = wafv1alpha1.ArgumentPattern(g.Name)
 			case targetArgumentName:
-				ex.When.ArgumentName = g.Name
+				ex.When.ArgumentName = wafv1alpha1.ArgumentPattern(g.Name)
 			case targetCookie:
-				ex.When.Cookie = g.Name
+				ex.When.Cookie = wafv1alpha1.ArgumentPattern(g.Name)
 			case targetHeader:
 				ex.When.Header = g.Name
 			}
@@ -545,11 +545,11 @@ func (rep *tuneReport) validateInput(in resolver.Input, suspended bool, notes io
 func describeWhen(w *wafv1alpha1.ExclusionMatch) string {
 	switch {
 	case w.Argument != "":
-		return "argument " + w.Argument
+		return "argument " + string(w.Argument)
 	case w.ArgumentName != "":
-		return "argument name " + w.ArgumentName
+		return "argument name " + string(w.ArgumentName)
 	case w.Cookie != "":
-		return "cookie " + w.Cookie
+		return "cookie " + string(w.Cookie)
 	case w.Header != "":
 		return "header " + w.Header
 	}

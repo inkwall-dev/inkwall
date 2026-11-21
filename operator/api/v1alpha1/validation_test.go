@@ -214,12 +214,13 @@ func TestWAFPolicyValidation(t *testing.T) {
 		{name: "zero response body", doc: policy(target + "  responses: {inspect: true, maxBytes: 0}\n"), wantErr: "should be greater than or equal to 1"},
 		{name: "unknown response oversize action", doc: policy(target + "  responses: {inspect: true, onOversize: Truncate}\n"), wantErr: `Unsupported value: "Truncate"`},
 		// Limits without inspection would read as if responses were inspected.
-		{name: "response limits without inspect", doc: policy(target + "  responses: {maxBytes: 1024}\n"), wantErr: "maxBytes, onOversize and streams need inspect: true"},
-		{name: "response oversize without inspect", doc: policy(target + "  responses: {inspect: false, onOversize: Deny}\n"), wantErr: "maxBytes, onOversize and streams need inspect: true"},
+		{name: "response limits without inspect", doc: policy(target + "  responses: {maxBytes: 1024}\n"), wantErr: "maxBytes, onOversize and streams: Inspect need inspect: true"},
+		{name: "response oversize without inspect", doc: policy(target + "  responses: {inspect: false, onOversize: Deny}\n"), wantErr: "maxBytes, onOversize and streams: Inspect need inspect: true"},
 		// Streams, event by event (#323).
 		{name: "streams inspected", doc: policy(target + "  responses: {inspect: true, streams: Inspect}\n")},
 		{name: "streams skipped", doc: policy(target + "  responses: {inspect: true, streams: Skip}\n")},
-		{name: "streams without inspect", doc: policy(target + "  responses: {streams: Inspect}\n"), wantErr: "maxBytes, onOversize and streams need inspect: true"},
+		{name: "streams without inspect", doc: policy(target + "  responses: {streams: Inspect}\n"), wantErr: "maxBytes, onOversize and streams: Inspect need inspect: true"},
+		{name: "streams Skip without inspect", doc: policy(target + "  responses: {streams: Skip}\n")},
 		{name: "unknown streams action", doc: policy(target + "  responses: {inspect: true, streams: Buffer}\n"), wantErr: `Unsupported value: "Buffer"`},
 
 		// Rate limits (#705, design 0009 §3.5).
@@ -262,6 +263,16 @@ func TestWAFPolicyValidation(t *testing.T) {
 		{name: "threshold twice", doc: policy(target + "  ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: crs}, inboundAnomalyThreshold: 7, crs: {inboundAnomalyThreshold: 7}}]\n"), wantErr: "set crs.inboundAnomalyThreshold, not also the deprecated inboundAnomalyThreshold"},
 		{name: "crs paranoia level over 4", doc: policy(target + "  ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: crs}, crs: {paranoiaLevel: 5}}]\n"), wantErr: "should be less than or equal to 4"},
 		{name: "crs threshold 0", doc: policy(target + "  ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: crs}, crs: {inboundAnomalyThreshold: 0}}]\n"), wantErr: "should be greater than or equal to 1"},
+
+		// Repeats in the lists v1 makes sets, and a header with [ ], are
+		// warned by the webhook and accepted until v1 (#717).
+		{name: "skip path twice", doc: policy(target + "  skip: {paths: [/a, /a], bodyPaths: [/b, /b]}\n")},
+		{name: "rule ID twice", doc: policy(target + "  exclusions: [{ruleIDs: [942100, 942100]}]\n")},
+		{name: "exclusion header with brackets", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {header: \"X-A[0]\"}}]\n")},
+		{name: "exclusion argument pattern", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {argument: \"user[name]\"}}]\n")},
+		{name: "exclusion cookie with a space", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {cookie: \"a b\"}}]\n"), wantErr: "spec.exclusions[0].when.cookie"},
+		// New in 0.7.0, so a set already.
+		{name: "rate limit path twice", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, match: {paths: [/login, /login]}}]\n"), wantErr: "Duplicate value"},
 	})
 }
 
@@ -276,6 +287,23 @@ func TestWAFPolicyDefaults(t *testing.T) {
 	}
 	if inspect, _, _ := unstructured.NestedBool(u.Object, "spec", "body", "inspect"); !inspect {
 		t.Error("body.inspect did not default to true")
+	}
+	if timeout, _, _ := unstructured.NestedString(u.Object, "spec", "timeout"); timeout != "250ms" {
+		t.Errorf("timeout defaulted to %q, want 250ms", timeout)
+	}
+
+	// The static defaults are in the API (#718); responses that aren't
+	// inspected still take streams: Skip, the default.
+	u = object(t, policy(target+"  ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: crs}}]\n  responses: {inspect: false}\n"))
+	if err := c.Create(context.Background(), u, client.DryRunAll); err != nil {
+		t.Fatal(err)
+	}
+	rs, _, _ := unstructured.NestedSlice(u.Object, "spec", "ruleSets")
+	if len(rs) != 1 || rs[0].(map[string]any)["placement"] != "AfterCRS" {
+		t.Errorf("ruleSets %v, want placement defaulted to AfterCRS", rs)
+	}
+	if streams, _, _ := unstructured.NestedString(u.Object, "spec", "responses", "streams"); streams != "Skip" {
+		t.Errorf("responses.streams defaulted to %q, want Skip", streams)
 	}
 }
 
@@ -416,6 +444,8 @@ func TestInkwallConfigExportValidation(t *testing.T) {
 		{name: "plaintext json with insecure", doc: exportConfig("      - {name: a, json: {url: \"http://a/in\"}, insecure: true}\n")},
 		{name: "plaintext with headers", doc: exportConfig("      - {name: a, otlp: {endpoint: \"http://a:4318/v1/logs\"}, insecure: true, headersSecretRef: {name: h}}\n"), wantErr: "can't have headersSecretRef"},
 		{name: "plaintext json with headers", doc: exportConfig("      - {name: a, json: {url: \"http://a/in\"}, insecure: true, headersSecretRef: {name: h}}\n"), wantErr: "can't have headersSecretRef"},
+		{name: "URL Secret with insecure", doc: exportConfig("      - {name: a, json: {urlSecretRef: {name: s, key: url}}, insecure: true}\n"), wantErr: "a URL from a Secret holds a credential"},
+		{name: "URL Secret with headers", doc: exportConfig("      - {name: a, json: {urlSecretRef: {name: s, key: url}}, headersSecretRef: {name: h}}\n")},
 		{name: "TLS with headers", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}, headersSecretRef: {name: h}}\n")},
 		{name: "unknown framing", doc: exportConfig("      - {name: a, json: {url: \"https://a\", framing: CSV}}\n"), wantErr: `Unsupported value: "CSV"`},
 		{name: "unknown compression", doc: exportConfig("      - {name: a, json: {url: \"https://a\"}, compression: Zstd}\n"), wantErr: `Unsupported value: "Zstd"`},
@@ -553,5 +583,7 @@ func TestWAFIPListValidation(t *testing.T) {
 		{name: "missing spec", doc: "apiVersion: waf.inkwall.dev/v1alpha1\nkind: WAFIPList\nmetadata: {name: l, namespace: default}\n", wantErr: "spec: Required value"},
 		{name: "a host name", doc: ipListDoc("  entries: [{cidr: lb.example.com}]\n"), wantErr: "spec.entries[0].cidr"},
 		{name: "policy lists", doc: policy(target + "  ipLists: {allow: [monitors], deny: [abusers]}\n")},
+		// Warned by the webhook, refused by v1 only (#717).
+		{name: "a CIDR twice", doc: ipListDoc("  entries: [{cidr: 203.0.113.0/24}, {cidr: 203.0.113.0/24, description: again}]\n")},
 	})
 }

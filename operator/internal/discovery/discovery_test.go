@@ -305,3 +305,17 @@ func TestEngineConfigured(t *testing.T) {
 		t.Errorf("event %q, want a Normal Configured", e)
 	}
 }
+
+// The class lists are sets of at most 64 (#717): the CRD refuses longer
+// ones, and support needs only one class of each kind.
+func TestProxiesBoundsClasses(t *testing.T) {
+	var classes []Class
+	for i := range 100 {
+		classes = append(classes, Class{fmt.Sprintf("c%03d", 99-i), "traefik.io/ingress-controller"})
+	}
+	got := Proxies(classes, nil, traefikKinds)
+	if len(got) != 1 || len(got[0].IngressClasses) != 64 || got[0].IngressClasses[0] != "c000" || got[0].IngressClasses[63] != "c063" ||
+		got[0].Support != wafv1alpha1.SupportFull {
+		t.Fatalf("got %+v", got)
+	}
+}

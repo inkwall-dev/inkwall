@@ -456,7 +456,8 @@ spec:
                                   description: |-
                                     URLSecretRef reads the URL from a Secret's key in the operator's
                                     namespace instead, for intakes whose URL holds a token (Sumo Logic,
-                                    query-string keys). It gets url's checks when the sink starts.
+                                    query-string keys). It gets url's checks when the sink starts, and
+                                    must be https://: a URL from a Secret holds a credential.
                                   properties:
                                     key:
                                       description: Key in the Secret.
@@ -580,6 +581,10 @@ spec:
                             rule: '!has(self.headersSecretRef) || !((has(self.otlp)
                               && self.otlp.endpoint.matches(''^(grpc|http)://''))
                               || (has(self.json) && has(self.json.url) && self.json.url.startsWith(''http://'')))'
+                          - message: 'a URL from a Secret holds a credential: it must
+                              be https://, without insecure: true'
+                            rule: '!(has(self.insecure) && self.insecure && has(self.json)
+                              && has(self.json.urlSecretRef))'
                         maxItems: 4
                         type: array
                         x-kubernetes-list-type: atomic
@@ -901,15 +906,25 @@ spec:
                       maxLength: 253
                       type: string
                     gatewayClasses:
-                      description: GatewayClasses are the GatewayClasses of the controller.
+                      description: |-
+                        GatewayClasses are the GatewayClasses of the controller, sorted, up
+                        to 64.
                       items:
+                        maxLength: 253
                         type: string
+                      maxItems: 64
                       type: array
+                      x-kubernetes-list-type: set
                     ingressClasses:
-                      description: IngressClasses are the IngressClasses of the controller.
+                      description: |-
+                        IngressClasses are the IngressClasses of the controller, sorted, up
+                        to 64.
                       items:
+                        maxLength: 253
                         type: string
+                      maxItems: 64
                       type: array
+                      x-kubernetes-list-type: set
                     integration:
                       description: |-
                         Integration is Inkwall's integration for the controller, such as
@@ -943,7 +958,9 @@ spec:
                     maxLength: 128
                     type: string
                   phase:
-                    description: Phase of the rotation.
+                    description: |-
+                      Phase of the rotation. New phases may be added: to wait for a
+                      rotation, watch the SigningKeyRotation condition instead.
                     enum:
                     - Idle
                     - Publishing

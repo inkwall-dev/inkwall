@@ -97,6 +97,7 @@ type WAFPolicySpec struct {
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=16
 	// +kubebuilder:validation:XValidation:rule="self.all(a, self.exists_one(b, b.kind == a.kind && b.name == a.name && (has(b.sectionName) ? b.sectionName : '') == (has(a.sectionName) ? a.sectionName : '')))",message="targetRefs must not repeat a target"
+	// +listType=atomic
 	TargetRefs []TargetRef `json:"targetRefs"`
 
 	// Mode is Detect (log, let through) or Block (reject).
@@ -109,8 +110,8 @@ type WAFPolicySpec struct {
 	// +optional
 	FailureMode FailureMode `json:"failureMode,omitempty"`
 
-	// Timeout is the inspection deadline per request, at most 1s. Unset:
-	// the engine's default (250ms).
+	// Timeout is the inspection deadline per request, at most 1s.
+	// +kubebuilder:default="250ms"
 	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s') && duration(self) <= duration('1s')",message="timeout must be more than 0s and at most 1s"
 	// +optional
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
@@ -123,11 +124,13 @@ type WAFPolicySpec struct {
 	// with its default paranoia level and threshold.
 	// +kubebuilder:validation:MaxItems=8
 	// +optional
+	// +listType=atomic
 	RuleSets []RuleSetBinding `json:"ruleSets,omitempty"`
 
 	// Exclusions turn rules off where they cause false positives.
 	// +kubebuilder:validation:MaxItems=128
 	// +optional
+	// +listType=atomic
 	Exclusions []Exclusion `json:"exclusions,omitempty"`
 
 	// Body configures request body inspection.
@@ -172,6 +175,7 @@ type WAFPolicySpec struct {
 	// +kubebuilder:validation:MaxItems=8
 	// +kubebuilder:validation:XValidation:rule="self.all(a, self.exists_one(b, b.name == a.name))",message="rateLimits must not repeat a name"
 	// +optional
+	// +listType=atomic
 	RateLimits []RateLimit `json:"rateLimits,omitempty"`
 }
 
@@ -261,6 +265,7 @@ type RateLimitMatch struct {
 	// the engine can't read one way (percent-encoding, ";", "//", dot
 	// segments) counts against every limit with paths.
 	// +kubebuilder:validation:MaxItems=16
+	// +listType=set
 	// +optional
 	Paths []PathPattern `json:"paths,omitempty"`
 
@@ -349,14 +354,18 @@ type PathPattern string
 
 // SkipSpec lists requests that are never inspected.
 type SkipSpec struct {
-	// Paths that are never inspected.
+	// Paths that are never inspected. A set: a path listed twice draws a
+	// warning, and v1 refuses it.
 	// +kubebuilder:validation:MaxItems=64
+	// +listType=atomic
 	// +optional
 	Paths []PathPattern `json:"paths,omitempty"`
 
 	// BodyPaths are paths whose body is not inspected; their headers and URI
-	// still are.
+	// still are. A set: a path listed twice draws a warning, and v1 refuses
+	// it.
 	// +kubebuilder:validation:MaxItems=64
+	// +listType=atomic
 	// +optional
 	BodyPaths []PathPattern `json:"bodyPaths,omitempty"`
 }
@@ -399,13 +408,13 @@ type RuleSetBinding struct {
 	// +optional
 	CRS *CRSSettings `json:"crs,omitempty"`
 
-	// Placement is where a SecLang rule set loads: AfterCRS (the default)
-	// or BeforeCRS, before the CRS's initialization, so its rules can set
+	// Placement is where a SecLang rule set loads: AfterCRS or BeforeCRS, before the CRS's initialization, so its rules can set
 	// the CRS's tx variables or turn CRS rules off with
 	// ctl:ruleRemoveById. A BeforeCRS rule set can't use SecRuleRemoveBy*
 	// or SecRuleUpdate*, which only reach rules loaded before them. Not
 	// for the built-in CRS. Requires engines 0.6.0 or later: older ones
 	// load the rule set after the CRS.
+	// +kubebuilder:default=AfterCRS
 	// +optional
 	Placement RuleSetPlacement `json:"placement,omitempty"`
 }
@@ -549,10 +558,12 @@ type RuleSetRef struct {
 // +kubebuilder:validation:XValidation:rule="has(self.ruleIDs)",message="ruleIDs is required"
 type Exclusion struct {
 	// RuleIDs are the rules to turn off. An ID no rule has is ignored.
-	// Required.
+	// Required. A set: an ID listed twice draws a warning, and v1 refuses
+	// it.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=64
 	// +kubebuilder:validation:items:Minimum=1
+	// +listType=atomic
 	// +optional
 	RuleIDs []int32 `json:"ruleIDs,omitempty"`
 
@@ -576,32 +587,26 @@ type ExclusionMatch struct {
 	// to them, stop looking at. With a rule set whose own SecLang negates
 	// ARGS targets (!ARGS:name), the policy gets its own compiled rules, and
 	// the exclusion covers the rule only, not its chained rules.
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=256
-	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.\-\[\]]+$`
 	// +optional
-	Argument string `json:"argument,omitempty"`
+	Argument ArgumentPattern `json:"argument,omitempty"`
 
 	// ArgumentName is a query or body argument whose name (ARGS_NAMES) the
 	// rules stop looking at. Requires engines 0.5.0 or later: older ones
 	// ignore the exclusion.
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=256
-	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.\-\[\]]+$`
 	// +optional
-	ArgumentName string `json:"argumentName,omitempty"`
+	ArgumentName ArgumentPattern `json:"argumentName,omitempty"`
 
 	// Cookie is a request cookie (REQUEST_COOKIES) the rules stop looking
 	// at, such as a session token. Requires engines 0.5.0 or later.
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=256
-	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.\-\[\]]+$`
 	// +optional
-	Cookie string `json:"cookie,omitempty"`
+	Cookie ArgumentPattern `json:"cookie,omitempty"`
 
 	// Header is a request header (REQUEST_HEADERS) the rules stop looking
 	// at, such as Referer, compared case-insensitively. Requires engines
 	// 0.5.0 or later.
+	// v1 types it as a header name, refusing [ and ] and allowing the other
+	// token characters (!#$%&'*+^|~): a header that isn't one draws a
+	// warning.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.\-\[\]]+$`
@@ -624,7 +629,8 @@ type BodySpec struct {
 	Inspect *bool `json:"inspect,omitempty"`
 
 	// MaxBytes is how much of a body is inspected, at most 10 MiB. Unset:
-	// the engine's default (64 KiB).
+	// 64 KiB, which the operator writes into the bundle, so an engine's own
+	// default never applies.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10485760
 	// +optional
@@ -709,7 +715,7 @@ type WebSocketOrigin string
 type HeaderName string
 
 // ResponsesSpec configures response inspection.
-// +kubebuilder:validation:XValidation:rule="(has(self.inspect) && self.inspect) || (!has(self.maxBytes) && !has(self.onOversize) && !has(self.streams))",message="maxBytes, onOversize and streams need inspect: true"
+// +kubebuilder:validation:XValidation:rule="(has(self.inspect) && self.inspect) || (!has(self.maxBytes) && !has(self.onOversize) && (!has(self.streams) || self.streams == 'Skip'))",message="maxBytes, onOversize and streams: Inspect need inspect: true"
 type ResponsesSpec struct {
 	// Inspect turns response inspection on: the status and headers, and
 	// the body when its media type is text (plain, HTML, XML, CSV),
@@ -721,8 +727,8 @@ type ResponsesSpec struct {
 	Inspect bool `json:"inspect,omitempty"`
 
 	// MaxBytes is how much of a response body is inspected, at most 10
-	// MiB. Unset: 64 KiB (each KiB costs about 0.3 ms of inspection: raise
-	// timeout with it). A longer body has this much inspected, and then
+	// MiB. Unset: 64 KiB, which the operator writes into the bundle (each
+	// KiB costs about 0.3 ms of inspection: raise timeout with it). A longer body has this much inspected, and then
 	// gets onOversize.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10485760
@@ -746,7 +752,7 @@ type ResponsesSpec struct {
 	// HAProxy doesn't send their bodies (the policy is then not Programmed
 	// on its Ingresses, ResponsesNotInspected), and engines before 0.6.0
 	// skip them (the policy is then not Enforced).
-	// Unset: Skip.
+	// +kubebuilder:default=Skip
 	// +optional
 	Streams StreamsAction `json:"streams,omitempty"`
 }
