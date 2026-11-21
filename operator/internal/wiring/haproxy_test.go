@@ -620,3 +620,14 @@ func TestHAProxyReadBodyMatchesEngine(t *testing.T) {
 		}
 	}
 }
+
+// A rate limit's 429 has its own rule, with Retry-After, before the
+// catch-all 403 that would otherwise answer it (#705).
+func TestHAProxySnippetRateLimit(t *testing.T) {
+	s := HAProxySnippet(HAProxySnippetOptions{Body: true})
+	rule := `http-request deny deny_status 429 hdr x-request-id "%[var(txn.inkwall.request_id)]" hdr retry-after "%[var(txn.inkwall.retry_after)]" if { var(txn.inkwall.status) -m int 429 }`
+	i, j := strings.Index(s, rule), strings.Index(s, "deny_status 403")
+	if i < 0 || j < 0 || i > j {
+		t.Errorf("the 429 rule is missing or after the 403:\n%s", s)
+	}
+}

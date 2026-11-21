@@ -58,7 +58,7 @@ const HAProxyResponseGroup = "inkwall-response"
 // spoeScope is one scope of spoe.conf: the agent named name, whose request
 // message says whether the request's response follows.
 func spoeScope(name string, responses bool) string {
-	vars := "action status request_id error grpc_status grpc_message grpc_content_type probe"
+	vars := "action status request_id retry_after error grpc_status grpc_message grpc_content_type probe"
 	groups, respond, group := "", "bool(0)", ""
 	if responses {
 		vars += " responses response_failure response_action response_status"

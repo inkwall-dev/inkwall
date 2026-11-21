@@ -274,7 +274,7 @@ spoe-agent inkwall
     # is for a hung engine.
     timeout processing 750ms
     use-backend inkwall-engine
-    register-var-names action status request_id error grpc_status grpc_message grpc_content_type responses response_failure response_action response_status
+    register-var-names action status request_id retry_after error grpc_status grpc_message grpc_content_type responses response_failure response_action response_status
 
 spoe-message inkwall-request
     args method=method path=pathq version=req.ver headers=req.hdrs_bin body=req.body ip=src https=ssl_fc
@@ -352,6 +352,8 @@ frontend web
     http-request deny deny_status 400 hdr x-request-id "%[var(txn.inkwall.request_id)]" if { var(txn.inkwall.status) -m int 400 }
     http-request deny deny_status 413 hdr x-request-id "%[var(txn.inkwall.request_id)]" if { var(txn.inkwall.status) -m int 413 }
     http-request deny deny_status 503 hdr x-request-id "%[var(txn.inkwall.request_id)]" if { var(txn.inkwall.status) -m int 503 }
+    # A rate limit's 429 (spec.rateLimits), with its Retry-After.
+    http-request deny deny_status 429 hdr x-request-id "%[var(txn.inkwall.request_id)]" hdr retry-after "%[var(txn.inkwall.retry_after)]" if { var(txn.inkwall.status) -m int 429 }
     http-request deny deny_status 403 hdr x-request-id "%[var(txn.inkwall.request_id)]" if { var(txn.inkwall.action) -m str deny }
     # Forward an upgrade only to WebSocket: any other Upgrade (TLS/1.2,
     # "h2c, foo", ...) and HTTP2-Settings are removed, so the app can't
