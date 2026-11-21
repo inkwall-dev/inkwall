@@ -166,6 +166,40 @@ spec:
                     - Text
                     - JSON
                     type: string
+                  denyResponse:
+                    description: |-
+                      DenyResponse is the body of the denials of every WAFPolicy that sets
+                      no spec.denyResponse, instead of the engine's own (denialFormat's).
+                      It goes in the bundle, so it applies without restarting a pod.
+                      Requires engines 0.7.0 or later; older ones ignore it.
+                    properties:
+                      body:
+                        description: |-
+                          Body is the denial's body, at most 8 KiB of UTF-8. Each
+                          {{request_id}} in it is replaced with the request's ID. With a JSON
+                          content type, it must be a JSON document.
+                        maxLength: 8192
+                        minLength: 1
+                        type: string
+                        x-kubernetes-validations:
+                        - message: body must be at most 8 KiB (8192 bytes of UTF-8)
+                          rule: size(bytes(self)) <= 8192
+                      contentType:
+                        description: |-
+                          ContentType is the body's media type: text/html, text/plain,
+                          application/json or application/problem+json, optionally with
+                          "; charset=utf-8" (the body is UTF-8 either way).
+                        maxLength: 64
+                        type: string
+                        x-kubernetes-validations:
+                        - message: contentType must be text/html, text/plain, application/json
+                            or application/problem+json, optionally with ; charset=utf-8
+                          rule: self.lowerAscii().matches('^(text/html|text/plain|application/json|application/problem[+]json)(
+                            *; *charset=utf-8)?$')
+                    required:
+                    - body
+                    - contentType
+                    type: object
                   image:
                     description: |-
                       Image is the engine image. Empty means the image released with this

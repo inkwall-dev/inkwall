@@ -437,6 +437,26 @@ func TestEnforcedOutdatedRateLimits(t *testing.T) {
 	}
 }
 
+// A custom denial needs 0.7.0 (#725): an older engine answers with its own
+// body.
+func TestEnforcedOutdatedDenyResponse(t *testing.T) {
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
+	p.Spec.DenyResponse = &wafv1alpha1.DenyResponse{ContentType: "text/html", Body: "<p>Blocked</p>"}
+	p.Status.BundleVersion = 3
+	for _, tc := range []struct {
+		version  string
+		outdated bool
+	}{{"0.6.1", true}, {"0.7.0", false}} {
+		engines := []Engine{{ID: "e0", PodNamespace: "edge", PodName: "traefik-0", EngineVersion: tc.version, Applied: 3}}
+		conds, _ := enforcedConditions(p, 3, false, engines, nil, 0, 0)
+		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
+		outdated := c != nil && c.Reason == ReasonEnginesOutdated
+		if outdated != tc.outdated || outdated && (!strings.Contains(c.Message, "spec.denyResponse") || !strings.Contains(c.Message, "0.7.0 or later")) {
+			t.Errorf("a %s engine and a policy with a denyResponse: Enforced %+v, outdated %v want %v", tc.version, c, outdated, tc.outdated)
+		}
+	}
+}
+
 // The InkwallConfig's status counts the engines (#375), and 1,000 engines
 // connecting one per report don't rewrite it more than once per
 // ConfigEvery; the last count is written once the engines settle.

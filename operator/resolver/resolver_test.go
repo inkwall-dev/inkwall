@@ -150,6 +150,7 @@ func TestResolvePolicy(t *testing.T) {
 		// No key: the client IP, by the engine's default prefix.
 		{Name: "all", Requests: 1, Period: metav1.Duration{Duration: time.Second}, Key: &wafv1alpha1.RateLimitKey{ClientIP: &wafv1alpha1.ClientIPKey{}}},
 	}
+	p.Spec.DenyResponse = &wafv1alpha1.DenyResponse{ContentType: "text/html", Body: "<p>Blocked: {{request_id}}</p>"}
 
 	res := Resolve(Input{
 		Policies: []wafv1alpha1.WAFPolicy{p},
@@ -224,6 +225,7 @@ func TestResolvePolicy(t *testing.T) {
 				Key: &bundlev1.RateLimitKey{Key: &bundlev1.RateLimitKey_Header{Header: &bundlev1.HeaderKey{Name: "x-api-key"}}}},
 			{Name: "all", Requests: 1, Period: durationpb.New(time.Second)},
 		},
+		DenyResponse: &bundlev1.DenyResponse{ContentType: "text/html", Body: "<p>Blocked: {{request_id}}</p>"},
 	})
 	// Only the rule sets in use are in the bundle; all of them get a status.
 	var ids []string

@@ -314,7 +314,7 @@ func toResponse(id string, v pipeline.Verdict) *enginev1.CheckResponse {
 	if ra := httpadapter.RetryAfter(v); ra != "" {
 		headers = append(headers, &enginev1.Header{Name: "Retry-After", Value: ra})
 	}
-	return &enginev1.CheckResponse{
+	out := &enginev1.CheckResponse{
 		Matches:            matches,
 		AnomalyScore:       int32(v.AnomalyScore), // #nosec G115 -- scores are small
 		Action:             events.Action(v.Action),
@@ -327,4 +327,11 @@ func toResponse(id string, v pipeline.Verdict) *enginev1.CheckResponse {
 		InspectionTime:     durationpb.New(v.Duration),
 		Policy:             v.Policy,
 	}
+	if d := v.DenyResponse; d != nil && v.Action == pipeline.ActionDeny {
+		// The policy's denial, for the caller to answer the client with
+		// as the other adapters do; without one, the caller writes its
+		// own.
+		out.DenyContentType, out.DenyBody = d.ContentType(), string(d.Render(id))
+	}
+	return out
 }

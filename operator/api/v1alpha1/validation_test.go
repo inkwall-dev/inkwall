@@ -273,6 +273,19 @@ func TestWAFPolicyValidation(t *testing.T) {
 		{name: "exclusion cookie with a space", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {cookie: \"a b\"}}]\n"), wantErr: "spec.exclusions[0].when.cookie"},
 		// New in 0.7.0, so a set already.
 		{name: "rate limit path twice", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, match: {paths: [/login, /login]}}]\n"), wantErr: "Duplicate value"},
+
+		// Custom denials (#725).
+		{name: "deny response HTML", doc: policy(target + "  denyResponse: {contentType: text/html, body: \"<h1>Blocked</h1><p>{{request_id}}</p>\"}\n")},
+		{name: "deny response with charset", doc: policy(target + "  denyResponse: {contentType: \"Text/Plain; charset=UTF-8\", body: blocked}\n")},
+		{name: "deny response problem JSON", doc: policy(target + "  denyResponse: {contentType: application/problem+json, body: '{\"title\":\"Forbidden\"}'}\n")},
+		{name: "deny response JavaScript", doc: policy(target + "  denyResponse: {contentType: text/javascript, body: x}\n"), wantErr: "contentType must be text/html, text/plain, application/json or application/problem+json"},
+		{name: "deny response another charset", doc: policy(target + "  denyResponse: {contentType: \"text/html; charset=iso-8859-1\", body: x}\n"), wantErr: "contentType must be"},
+		{name: "deny response without a body", doc: policy(target + "  denyResponse: {contentType: text/html}\n"), wantErr: "spec.denyResponse.body: Required value"},
+		{name: "deny response empty body", doc: policy(target + "  denyResponse: {contentType: text/html, body: \"\"}\n"), wantErr: "spec.denyResponse.body"},
+		{name: "deny response of 8 KiB", doc: policy(target + "  denyResponse: {contentType: text/plain, body: " + strings.Repeat("a", 8192) + "}\n")},
+		{name: "deny response over 8 KiB", doc: policy(target + "  denyResponse: {contentType: text/plain, body: " + strings.Repeat("a", 8193) + "}\n"), wantErr: "spec.denyResponse.body"},
+		// Bytes of UTF-8, not characters: 2,731 euro signs are 8,193 bytes.
+		{name: "deny response over 8 KiB of UTF-8", doc: policy(target + "  denyResponse: {contentType: text/plain, body: " + strings.Repeat("€", 2731) + "}\n"), wantErr: "body must be at most 8 KiB"},
 	})
 }
 
@@ -342,6 +355,8 @@ func TestInkwallConfigValidation(t *testing.T) {
 
 		{name: "rate limit keys", doc: inkwallConfig("default", "  engine: {rateLimitKeys: 1048576}\n")},
 		{name: "JSON denials", doc: inkwallConfig("default", "  engine: {denialFormat: JSON}\n")},
+		{name: "deny response", doc: inkwallConfig("default", "  engine: {denyResponse: {contentType: application/json, body: '{\"id\":\"{{request_id}}\"}'}}\n")},
+		{name: "deny response XML", doc: inkwallConfig("default", "  engine: {denyResponse: {contentType: application/xml, body: x}}\n"), wantErr: "contentType must be"},
 		{name: "text denials", doc: inkwallConfig("default", "  engine: {denialFormat: Text}\n")},
 		{name: "unknown denial format", doc: inkwallConfig("default", "  engine: {denialFormat: HTML}\n"), wantErr: `Unsupported value: "HTML"`},
 		// Deprecated: still accepted, alone or agreeing with denialFormat.

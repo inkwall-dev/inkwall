@@ -192,6 +192,10 @@ func requirement(p *wafv1alpha1.WAFPolicy) (string, [3]int) {
 		// An older engine limits nothing (#705).
 		set("spec.rateLimits", [3]int{0, 7, 0})
 	}
+	if p.Spec.DenyResponse != nil {
+		// An older engine answers with its own body (#725).
+		set("spec.denyResponse", [3]int{0, 7, 0})
+	}
 	if r := p.Spec.Responses; r != nil && r.Inspect {
 		// An older engine inspects requests only (#274).
 		set("spec.responses", [3]int{0, 4, 0})

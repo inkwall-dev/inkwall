@@ -73,3 +73,27 @@ const (
 	SourceLabel = "inkwall.dev/source"
 	SourceSaaS  = "saas"
 )
+
+// DenyResponse is the body a denied client gets instead of the engine's
+// own (docs/denial-responses.md): an HTML page or a JSON document, served
+// with the denial's status (403, 429 with Retry-After, 503, ...) and
+// X-Request-Id, which it can't change. The only substitution is
+// {{request_id}}, replaced with the request's ID, escaped for the content
+// type: nothing else of the request goes in. A denied gRPC call still gets
+// its gRPC status and no body.
+type DenyResponse struct {
+	// ContentType is the body's media type: text/html, text/plain,
+	// application/json or application/problem+json, optionally with
+	// "; charset=utf-8" (the body is UTF-8 either way).
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:XValidation:rule="self.lowerAscii().matches('^(text/html|text/plain|application/json|application/problem[+]json)( *; *charset=utf-8)?$')",message="contentType must be text/html, text/plain, application/json or application/problem+json, optionally with ; charset=utf-8"
+	ContentType string `json:"contentType"`
+
+	// Body is the denial's body, at most 8 KiB of UTF-8. Each
+	// {{request_id}} in it is replaced with the request's ID. With a JSON
+	// content type, it must be a JSON document.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=8192
+	// +kubebuilder:validation:XValidation:rule="size(bytes(self)) <= 8192",message="body must be at most 8 KiB (8192 bytes of UTF-8)"
+	Body string `json:"body"`
+}

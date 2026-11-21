@@ -255,7 +255,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			httpadapter.WriteGRPCDenial(w, g, http.StatusOK, v.Status, req.ID)
 			return
 		}
-		httpadapter.WriteDenial(w, v.Status, req.ID, req.Headers, h.jsonDenials)
+		httpadapter.WriteVerdictDenial(w, v, req.ID, req.Headers, h.jsonDenials)
 		return
 	}
 	if h.messages != pipeline.MessagesOff && v.Reason != pipeline.ReasonSkipped && v.Reason != pipeline.ReasonIPAllow &&

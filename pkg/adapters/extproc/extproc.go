@@ -664,7 +664,7 @@ func (s *Server) denial(req *request.Request, v pipeline.Verdict) *extprocv3.Pro
 	if g := httpadapter.GRPCOf(req.Headers); g != httpadapter.NotGRPC {
 		resp = denyGRPC(g, v.Status, req.ID)
 	} else {
-		resp = deny(v.Status, req.ID, httpadapter.DenialBody(v.Status, req.ID, req.Headers, s.jsonDenials))
+		resp = deny(v.Status, req.ID, httpadapter.VerdictDenial(v, req.ID, req.Headers, s.jsonDenials))
 	}
 	if ra := httpadapter.RetryAfter(v); ra != "" {
 		h := resp.GetImmediateResponse().GetHeaders()

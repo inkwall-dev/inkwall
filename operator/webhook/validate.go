@@ -10,6 +10,7 @@
 package webhook
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net/netip"
@@ -105,6 +106,7 @@ type configValidator struct{}
 
 func (configValidator) ValidateCreate(_ context.Context, cfg *wafv1alpha1.InkwallConfig) (admission.Warnings, error) {
 	warnings, err := checkClientIP(cfg)
+	err = cmp.Or(err, invalid("InkwallConfig", cfg.Name, checkDenyResponse(field.NewPath("spec", "engine", "denyResponse"), cfg.Spec.Engine.DenyResponse)))
 	deprecated := append(socketDirWarnings("", cfg), adapterWarnings(nil, cfg)...)
 	deprecated = append(append(deprecated, jsonDenialsWarnings(false, cfg)...), controllerWarnings(nil, cfg)...)
 	return append(deprecated, warnings...), err
@@ -112,6 +114,7 @@ func (configValidator) ValidateCreate(_ context.Context, cfg *wafv1alpha1.Inkwal
 
 func (configValidator) ValidateUpdate(_ context.Context, oldCfg, newCfg *wafv1alpha1.InkwallConfig) (admission.Warnings, error) {
 	warnings, err := checkClientIP(newCfg)
+	err = cmp.Or(err, invalid("InkwallConfig", newCfg.Name, checkDenyResponse(field.NewPath("spec", "engine", "denyResponse"), newCfg.Spec.Engine.DenyResponse)))
 	deprecated := append(socketDirWarnings(oldCfg.Spec.Engine.SocketDir, newCfg), adapterWarnings(oldCfg, newCfg)...) //nolint:staticcheck // warns about the deprecated field
 	deprecated = append(deprecated, jsonDenialsWarnings(oldCfg.Spec.Engine.JSONDenials, newCfg)...)                   //nolint:staticcheck // warns about the deprecated field
 	deprecated = append(deprecated, controllerWarnings(oldCfg, newCfg)...)
@@ -376,6 +379,7 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 	if w := p.Spec.WebSocket; w != nil {
 		errs = append(errs, checkWebSocket(spec.Child("webSocket"), w)...)
 	}
+	errs = append(errs, checkDenyResponse(spec.Child("denyResponse"), p.Spec.DenyResponse)...)
 	for i, b := range p.Spec.RuleSets {
 		if b.CRS != nil {
 			errs = append(errs, checkCRS(spec.Child("ruleSets").Index(i), b)...)
@@ -500,6 +504,23 @@ func responseWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
 
 // checkWebSocket accepts what the engine compiles: one entry the engine
 // refused would make it refuse the whole bundle.
+// checkDenyResponse rejects a denial body the engine would refuse, and a
+// JSON one that isn't a JSON document (which the engine would serve as it
+// is): the CRD checks its content type and size only.
+func checkDenyResponse(path *field.Path, d *wafv1alpha1.DenyResponse) field.ErrorList {
+	if d == nil {
+		return nil
+	}
+	compiled, err := pipeline.CompileDenyResponse(d.ContentType, d.Body)
+	if err == nil {
+		err = compiled.CheckJSON()
+	}
+	if err != nil {
+		return field.ErrorList{field.Invalid(path, d.ContentType, err.Error())}
+	}
+	return nil
+}
+
 func checkWebSocket(path *field.Path, w *wafv1alpha1.WebSocketSpec) field.ErrorList {
 	var errs field.ErrorList
 	for i, o := range w.AllowedOrigins {

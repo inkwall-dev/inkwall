@@ -133,7 +133,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			httpadapter.WriteGRPCDenial(w, g, v.Status, v.Status, req.ID)
 			return
 		}
-		httpadapter.WriteDenial(w, v.Status, req.ID, req.Headers, h.jsonDenials)
+		httpadapter.WriteVerdictDenial(w, v, req.ID, req.Headers, h.jsonDenials)
 		return
 	}
 	// The proxy copies headers listed in its authResponseHeaders onto the

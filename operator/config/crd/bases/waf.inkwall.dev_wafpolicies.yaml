@@ -129,6 +129,43 @@ spec:
                   rule: '!has(self.grpcStreams) || self.grpcStreams != ''PerMessage''
                     || (has(self.grpcMessages) && self.grpcMessages == ''Inspect''
                     && (!has(self.inspect) || self.inspect))'
+              denyResponse:
+                description: |-
+                  DenyResponse is the body of the policy's denials (by a rule, an IP
+                  list, the WebSocket or gRPC checks, a rate limit, a request that
+                  couldn't be inspected in time, a response replaced), instead of the
+                  engine's own text, with the denial's status. Unset: the
+                  InkwallConfig's spec.engine.denyResponse, if set. Through Traefik,
+                  Envoy Gateway, Istio and the engine's check API; HAProxy writes its
+                  own denials. Requires engines 0.7.0 or later.
+                properties:
+                  body:
+                    description: |-
+                      Body is the denial's body, at most 8 KiB of UTF-8. Each
+                      {{request_id}} in it is replaced with the request's ID. With a JSON
+                      content type, it must be a JSON document.
+                    maxLength: 8192
+                    minLength: 1
+                    type: string
+                    x-kubernetes-validations:
+                    - message: body must be at most 8 KiB (8192 bytes of UTF-8)
+                      rule: size(bytes(self)) <= 8192
+                  contentType:
+                    description: |-
+                      ContentType is the body's media type: text/html, text/plain,
+                      application/json or application/problem+json, optionally with
+                      "; charset=utf-8" (the body is UTF-8 either way).
+                    maxLength: 64
+                    type: string
+                    x-kubernetes-validations:
+                    - message: contentType must be text/html, text/plain, application/json
+                        or application/problem+json, optionally with ; charset=utf-8
+                      rule: self.lowerAscii().matches('^(text/html|text/plain|application/json|application/problem[+]json)(
+                        *; *charset=utf-8)?$')
+                required:
+                - body
+                - contentType
+                type: object
               exclusions:
                 description: Exclusions turn rules off where they cause false positives.
                 items:

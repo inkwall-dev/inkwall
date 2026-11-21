@@ -1190,6 +1190,55 @@ func TestRateLimits(t *testing.T) {
 	}
 }
 
+// TestDenyResponse (#725): a policy's verdicts carry its own denial, or
+// the bundle's when it sets none, or none; an invalid one names its policy.
+func TestDenyResponse(t *testing.T) {
+	b := testBundle()
+	b.DenyResponse = &bundlev1.DenyResponse{ContentType: "text/plain", Body: "default"}
+	b.Policies[0].DenyResponse = &bundlev1.DenyResponse{ContentType: "text/html", Body: "<p>{{request_id}}</p>"}
+	b.Policies[0].RateLimits = []*bundlev1.RateLimit{{Name: "site", Requests: 1, Period: durationpb.New(time.Hour), Burst: 1}}
+	b.Policies[2].RateLimits = []*bundlev1.RateLimit{{Name: "admin", Requests: 1, Period: durationpb.New(time.Hour), Burst: 1}}
+	body := func(b *bundlev1.Bundle, host string) string {
+		t.Helper()
+		set, err := Compile(b, Options{RateLimits: ratelimit.New(1024, 0)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var v pipeline.Verdict
+		for range 2 {
+			r := req(host, "/")
+			r.ClientIP = netip.MustParseAddr("198.51.100.7")
+			v = set.Check(context.Background(), r)
+		}
+		if v.Action != pipeline.ActionDeny {
+			t.Fatalf("%s: %s, want a deny", host, v.Action)
+		}
+		if v.DenyResponse == nil {
+			return ""
+		}
+		return v.DenyResponse.ContentType() + " " + string(v.DenyResponse.Render("id"))
+	}
+	if got := body(b, "shop.example.com"); got != "text/html; charset=utf-8 <p>id</p>" {
+		t.Errorf("the policy's own: %q", got)
+	}
+	if got := body(b, "admin.example.com"); got != "text/plain; charset=utf-8 default" {
+		t.Errorf("the bundle's: %q", got)
+	}
+	b.DenyResponse = nil
+	if got := body(b, "admin.example.com"); got != "" {
+		t.Errorf("none: %q", got)
+	}
+	b.Policies[2].DenyResponse = &bundlev1.DenyResponse{ContentType: "text/javascript", Body: "x"}
+	if _, err := Compile(b, Options{RateLimits: ratelimit.New(1024, 0)}); err == nil || !strings.Contains(err.Error(), b.Policies[2].GetId()) {
+		t.Errorf("an invalid one: %v, want an error naming the policy", err)
+	}
+	b.Policies[2].DenyResponse = nil
+	b.DenyResponse = &bundlev1.DenyResponse{ContentType: "text/plain", Body: "\xff"}
+	if _, err := Compile(b, Options{RateLimits: ratelimit.New(1024, 0)}); err == nil || !strings.Contains(err.Error(), "deny response") {
+		t.Errorf("an invalid default: %v", err)
+	}
+}
+
 // A request two policies inspect: once the first denies it by a rate
 // limit, in BodyLimit, its body isn't read and the second isn't charged,
 // as Check stops at the first deny (#705).
