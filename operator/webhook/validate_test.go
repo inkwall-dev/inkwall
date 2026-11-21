@@ -581,3 +581,37 @@ func TestIPListValidation(t *testing.T) {
 	_, err := v.ValidateCreate(ctx, l)
 	wantInvalid(t, err, "spec.entries[1].cidr", "999.1.1.1")
 }
+
+// A JSON denial must be a JSON document with the request ID in it, which
+// the CRD can't check; the engine would serve it as it is (#725).
+func TestDenyResponseValidation(t *testing.T) {
+	ctx := context.Background()
+	pv := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy}
+	policy := func(d *wafv1alpha1.DenyResponse) *wafv1alpha1.WAFPolicy {
+		return &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Name: "shop"}, Spec: wafv1alpha1.WAFPolicySpec{
+			TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "shop"}}, DenyResponse: d}}
+	}
+	cv := configValidator{}
+	config := func(d *wafv1alpha1.DenyResponse) *wafv1alpha1.InkwallConfig {
+		return &wafv1alpha1.InkwallConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"},
+			Spec: wafv1alpha1.InkwallConfigSpec{Engine: wafv1alpha1.EngineSpec{DenyResponse: d}}}
+	}
+	for _, d := range []*wafv1alpha1.DenyResponse{
+		{ContentType: "application/json", Body: `{"error":"blocked","request_id":"{{request_id}}"}`},
+		{ContentType: "text/html; charset=utf-8", Body: "<p>{{request_id}}</p>"},
+	} {
+		if _, err := pv.ValidateCreate(ctx, policy(d)); err != nil {
+			t.Errorf("policy %q: %v", d.Body, err)
+		}
+		if _, err := cv.ValidateCreate(ctx, config(d)); err != nil {
+			t.Errorf("InkwallConfig %q: %v", d.Body, err)
+		}
+	}
+	bad := &wafv1alpha1.DenyResponse{ContentType: "application/problem+json", Body: `{"request_id":{{request_id}}}`}
+	_, err := pv.ValidateCreate(ctx, policy(bad))
+	wantInvalid(t, err, "spec.denyResponse", "not a JSON document")
+	_, err = cv.ValidateCreate(ctx, config(bad))
+	wantInvalid(t, err, "spec.engine.denyResponse", "not a JSON document")
+	_, err = cv.ValidateUpdate(ctx, config(nil), config(bad))
+	wantInvalid(t, err, "spec.engine.denyResponse", "not a JSON document")
+}

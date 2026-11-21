@@ -43,7 +43,7 @@ func TestGeoEnforced(t *testing.T) {
 		{"an engine holds none", true, []Engine{held, none}, metav1.ConditionFalse, ReasonGeoDatabaseUnavailable, "1 of 2 engines have no country table (first: shop/traefik-2)"},
 		{"an old engine", true, []Engine{held, old}, metav1.ConditionFalse, ReasonEnginesOutdated, "spec.geo"},
 	} {
-		conds, _ := enforcedConditions(p, 3, false, tc.named, tc.engines, nil, 0, 0)
+		conds, _ := enforcedConditions(p, false, 3, false, tc.named, tc.engines, nil, 0, 0)
 		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
 		if c.Status != tc.status || c.Reason != tc.reason || !strings.Contains(c.Message, tc.message) {
 			t.Errorf("%s: %s %s %q", tc.name, c.Status, c.Reason, c.Message)
@@ -52,11 +52,11 @@ func TestGeoEnforced(t *testing.T) {
 	// Without spec.geo, a table or not changes nothing.
 	plain := p.DeepCopy()
 	plain.Spec.Geo = nil
-	conds, _ := enforcedConditions(plain, 3, false, false, []Engine{none}, nil, 0, 0)
+	conds, _ := enforcedConditions(plain, false, 3, false, false, []Engine{none}, nil, 0, 0)
 	if c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced); c.Reason != ReasonEnforced {
 		t.Errorf("without geo: %s", c.Reason)
 	}
-	if f, v := requirement(p); f != "spec.geo" || v != [3]int{0, 7, 0} {
+	if f, v := requirement(p, false); f != "spec.geo" || v != [3]int{0, 7, 0} {
 		t.Errorf("requirement %s %v", f, v)
 	}
 }

@@ -335,8 +335,12 @@ func Compile(b *bundlev1.Bundle, o Options) (*Set, error) {
 	used := map[[sha256.Size]byte]bool{}
 	ids := map[string]bool{}
 	live := ratelimit.NewLive()
+	deny, err := denyResponse(b.GetDenyResponse())
+	if err != nil {
+		return nil, fmt.Errorf("deny response: %w", err)
+	}
 	for _, bp := range b.GetPolicies() {
-		p, key, err := compilePolicy(bp, ruleSets, o, live)
+		p, key, err := compilePolicy(bp, ruleSets, o, live, deny)
 		if err != nil {
 			return nil, fmt.Errorf("policy %s: %w", bp.GetId(), err)
 		}
@@ -360,7 +364,7 @@ func Compile(b *bundlev1.Bundle, o Options) (*Set, error) {
 	return set, nil
 }
 
-func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o Options, live *ratelimit.Live) (*Policy, [sha256.Size]byte, error) {
+func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o Options, live *ratelimit.Live, deny *pipeline.DenyResponse) (*Policy, [sha256.Size]byte, error) {
 	var key [sha256.Size]byte
 	cfg, crs, err := rulesConfig(bp, ruleSets, o)
 	if err != nil {
@@ -487,7 +491,22 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 	if o.IgnoreRateLimits {
 		pc.RateLimits = nil
 	}
+	// The policy's own denial, or the bundle's.
+	if pc.DenyResponse, err = denyResponse(bp.GetDenyResponse()); err != nil {
+		return nil, key, fmt.Errorf("deny response: %w", err)
+	}
+	if pc.DenyResponse == nil {
+		pc.DenyResponse = deny
+	}
 	return &Policy{ID: bp.GetId(), pipeline: pipeline.New(eval, pc), bodyLimit: bodyLimit, hasGeo: pc.Geo != nil}, key, nil
+}
+
+// denyResponse compiles a bundle's DenyResponse; nil for none.
+func denyResponse(d *bundlev1.DenyResponse) (*pipeline.DenyResponse, error) {
+	if d == nil {
+		return nil, nil
+	}
+	return pipeline.CompileDenyResponse(d.GetContentType(), d.GetBody())
 }
 
 // rulesConfig is the rules a policy compiles to: its rule sets in order,

@@ -314,6 +314,8 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 		ProbeKey:  signer.ProbeKey(),
 		Events:    eventsConfig(cfg),
 		GeoTable:  geoRef,
+		// A policy's own spec.denyResponse wins over it.
+		DenyResponse: denyResponse(cfg),
 	}, r.lastVersion, r.Now(), resign)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -887,6 +889,15 @@ func eventsConfig(cfg *wafv1alpha1.InkwallConfig) *bundlev1.EventsConfig {
 		return nil
 	}
 	return out
+}
+
+// denyResponse is the InkwallConfig's spec.engine.denyResponse for the
+// bundle, nil for none.
+func denyResponse(cfg *wafv1alpha1.InkwallConfig) *bundlev1.DenyResponse {
+	if cfg == nil {
+		return nil
+	}
+	return resolver.DenyResponse(cfg.Spec.Engine.DenyResponse)
 }
 
 // statusVersion is a bundle version as status.bundleVersion holds it: one

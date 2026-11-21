@@ -88,6 +88,7 @@ func (p *Pipeline) CheckGRPCMessage(ctx context.Context, call *request.Request, 
 	v.Duration = time.Since(start)
 	v.StreamEvent = n
 	v.Policy = p.policy
+	v.DenyResponse = p.denyResponse
 	if p.observer != nil {
 		p.observer.ObserveVerdict(v)
 	}

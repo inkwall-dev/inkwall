@@ -155,8 +155,8 @@ func Enforced(version int64, engines []Engine, leftOut, missing int) (metav1.Con
 // (an engine ignores fields it doesn't know), the field and the version it
 // needs; nil when there is none. An engine whose version isn't a release
 // (a development build) counts as new enough.
-func outdatedEngine(p *wafv1alpha1.WAFPolicy, engines []Engine) (*Engine, string, string) {
-	field, need := requirement(p)
+func outdatedEngine(p *wafv1alpha1.WAFPolicy, defaultDeny bool, engines []Engine) (*Engine, string, string) {
+	field, need := requirement(p, defaultDeny)
 	if field == "" {
 		return nil, "", ""
 	}
@@ -176,8 +176,10 @@ func tooOld(e Engine, need [3]int) bool {
 
 // requirement returns the field p sets that needs the newest engine (an
 // older engine ignores it), and that version; "" when there is none. Of
-// fields needing the same version, the first.
-func requirement(p *wafv1alpha1.WAFPolicy) (string, [3]int) {
+// fields needing the same version, the first. defaultDeny: the
+// InkwallConfig sets spec.engine.denyResponse, every policy's denial
+// unless it sets its own, which an older engine ignores too.
+func requirement(p *wafv1alpha1.WAFPolicy, defaultDeny bool) (string, [3]int) {
 	var field string
 	var need [3]int
 	set := func(f string, v [3]int) {
@@ -207,6 +209,13 @@ func requirement(p *wafv1alpha1.WAFPolicy) (string, [3]int) {
 	if len(p.Spec.RateLimits) > 0 {
 		// An older engine limits nothing (#705).
 		set("spec.rateLimits", [3]int{0, 7, 0})
+	}
+	switch {
+	case p.Spec.DenyResponse != nil:
+		// An older engine answers with its own body (#725).
+		set("spec.denyResponse", [3]int{0, 7, 0})
+	case defaultDeny:
+		set("the InkwallConfig's spec.engine.denyResponse", [3]int{0, 7, 0})
 	}
 	if r := p.Spec.Responses; r != nil && r.Inspect {
 		// An older engine inspects requests only (#274).
@@ -486,7 +495,11 @@ func (r *Reporter) report(ctx context.Context) error {
 	for k, n := range counts {
 		engineCount.WithLabelValues(k[0], k[1]).Set(n)
 	}
-	if err := r.writeConfig(ctx, engineCounts(engines, leftOut, latest, policies.Items)); err != nil {
+	defaultDeny, err := r.defaultDenyResponse(ctx)
+	if err != nil {
+		return err
+	}
+	if err := r.writeConfig(ctx, engineCounts(engines, leftOut, latest, policies.Items, defaultDeny)); err != nil {
 		return err
 	}
 
@@ -507,11 +520,11 @@ func (r *Reporter) report(ctx context.Context) error {
 		mine, missing := served.enginesFor(key, engines)
 		gone := served.goneFor(key, disconnected)
 		// The list is the cache's, not a copy: copy only what is written.
-		if _, changed := enforcedConditions(p, version, suspended, r.Store.GeoNamed(), mine, gone, leftOut, missing); !changed {
+		if _, changed := enforcedConditions(p, defaultDeny, version, suspended, r.Store.GeoNamed(), mine, gone, leftOut, missing); !changed {
 			continue
 		}
 		p = p.DeepCopy()
-		g.Go(func() error { return r.write(gctx, p, version, suspended, mine, gone, leftOut, missing) })
+		g.Go(func() error { return r.write(gctx, p, defaultDeny, version, suspended, mine, gone, leftOut, missing) })
 	}
 	return g.Wait()
 }
@@ -520,11 +533,11 @@ func (r *Reporter) report(ctx context.Context) error {
 // one served), and those older than the newest release a field of some
 // policy needs. Engines left out of their replica's report count as
 // connected only.
-func engineCounts(engines []Engine, leftOut int, latest uint64, policies []wafv1alpha1.WAFPolicy) *wafv1alpha1.EngineCounts {
+func engineCounts(engines []Engine, leftOut int, latest uint64, policies []wafv1alpha1.WAFPolicy, defaultDeny bool) *wafv1alpha1.EngineCounts {
 	n := &wafv1alpha1.EngineCounts{Connected: int32(min(len(engines)+leftOut, math.MaxInt32))} // #nosec G115 -- bounded
 	var need [3]int
 	for i := range policies {
-		if f, v := requirement(&policies[i]); f != "" && slices.Compare(v[:], need[:]) > 0 {
+		if f, v := requirement(&policies[i], defaultDeny); f != "" && slices.Compare(v[:], need[:]) > 0 {
 			need = v
 		}
 	}
@@ -542,6 +555,17 @@ func engineCounts(engines []Engine, leftOut int, latest uint64, policies []wafv1
 		}
 	}
 	return n
+}
+
+// defaultDenyResponse reports whether the InkwallConfig sets
+// spec.engine.denyResponse, the denial of every policy without its own
+// (#725); false without an InkwallConfig.
+func (r *Reporter) defaultDenyResponse(ctx context.Context) (bool, error) {
+	var cfg wafv1alpha1.InkwallConfig
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: "default"}, &cfg); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	return cfg.Spec.Engine.DenyResponse != nil, nil
 }
 
 // writeConfig writes the engine counts to the InkwallConfig's status when
@@ -580,7 +604,7 @@ func (r *Reporter) writeConfig(ctx context.Context, counts *wafv1alpha1.EngineCo
 // had neither run nor rejected the policy's version counts as missing
 // (#675). One that rejected it was EngineNack: gone, it no longer counts,
 // as before.
-func enforcedConditions(p *wafv1alpha1.WAFPolicy, served uint64, suspended, geoNamed bool, engines, gone []Engine, leftOut, missing int) ([]metav1.Condition, bool) {
+func enforcedConditions(p *wafv1alpha1.WAFPolicy, defaultDeny bool, served uint64, suspended, geoNamed bool, engines, gone []Engine, leftOut, missing int) ([]metav1.Condition, bool) {
 	conds := slices.Clone(p.Status.Conditions)
 	version := max(p.Status.BundleVersion, int64(served)) // #nosec G115 -- versions count builds
 	for _, e := range gone {
@@ -590,7 +614,7 @@ func enforcedConditions(p *wafv1alpha1.WAFPolicy, served uint64, suspended, geoN
 	}
 	st, reason, msg := Enforced(version, engines, leftOut, missing)
 	if st == metav1.ConditionTrue {
-		if e, field, need := outdatedEngine(p, engines); e != nil {
+		if e, field, need := outdatedEngine(p, defaultDeny, engines); e != nil {
 			st, reason = metav1.ConditionFalse, ReasonEnginesOutdated
 			msg = fmt.Sprintf("some engines are too old to enforce %s, which they ignore (first: %s runs %s; it needs %s or later)",
 				field, engineName(*e), e.EngineVersion, need)
@@ -635,7 +659,7 @@ func geoEnforced(named bool, engines []Engine) (bool, string) {
 	return true, ""
 }
 
-func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, served uint64, suspended bool, engines, gone []Engine, leftOut, missing int) error {
+func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, defaultDeny bool, served uint64, suspended bool, engines, gone []Engine, leftOut, missing int) error {
 	first := true
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if !first {
@@ -644,7 +668,7 @@ func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, served u
 			}
 		}
 		first = false
-		conds, changed := enforcedConditions(p, served, suspended, r.Store.GeoNamed(), engines, gone, leftOut, missing)
+		conds, changed := enforcedConditions(p, defaultDeny, served, suspended, r.Store.GeoNamed(), engines, gone, leftOut, missing)
 		if !changed {
 			return nil
 		}

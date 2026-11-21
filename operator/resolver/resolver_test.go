@@ -152,6 +152,7 @@ func TestResolvePolicy(t *testing.T) {
 	}
 	// Sorted in the bundle, so a reordered list is the same bundle.
 	p.Spec.Geo = &wafv1alpha1.GeoSpec{Deny: []wafv1alpha1.CountryCode{"RU", "KP"}, Unknown: wafv1alpha1.GeoUnknownDeny, Mode: wafv1alpha1.GeoModeDetect}
+	p.Spec.DenyResponse = &wafv1alpha1.DenyResponse{ContentType: "text/html", Body: "<p>Blocked: {{request_id}}</p>"}
 
 	res := Resolve(Input{
 		Policies: []wafv1alpha1.WAFPolicy{p},
@@ -226,7 +227,8 @@ func TestResolvePolicy(t *testing.T) {
 				Key: &bundlev1.RateLimitKey{Key: &bundlev1.RateLimitKey_Header{Header: &bundlev1.HeaderKey{Name: "x-api-key"}}}},
 			{Name: "all", Requests: 1, Period: durationpb.New(time.Second)},
 		},
-		Geo: &bundlev1.Geo{Deny: []string{"KP", "RU"}, UnknownDeny: true, Detect: true},
+		Geo:          &bundlev1.Geo{Deny: []string{"KP", "RU"}, UnknownDeny: true, Detect: true},
+		DenyResponse: &bundlev1.DenyResponse{ContentType: "text/html", Body: "<p>Blocked: {{request_id}}</p>"},
 	})
 	// Only the rule sets in use are in the bundle; all of them get a status.
 	var ids []string

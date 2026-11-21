@@ -537,7 +537,8 @@ denies with, and each carries the request ID in `x-request-id`:
 
 The fail-closed rule's 503 has no request ID: the engine never saw the request. The engine doesn't
 write the body of HAProxy's denials, so `--json-denials` doesn't apply here: HAProxy answers with
-its own error page.
+its own error page. A policy's `denyResponse` doesn't either: HAProxy routes keep that page
+([Denial responses](denial-responses.md#through-each-proxy)).
 
 ### Block mode and detect mode
 

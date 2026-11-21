@@ -145,6 +145,13 @@ message CheckResponse {
   // The request's inbound anomaly score (the Core Rule Set's), 0 when no
   // rule added to it.
   int32 anomaly_score = 11;
+  // With ACTION_DENY and a policy that sets spec.denyResponse (or an
+  // InkwallConfig that does), the denial's Content-Type and body (UTF-8,
+  // with the request ID in it), for the caller to answer the client with,
+  // as the other adapters do. Empty: the caller writes its own denial.
+  // Engines before 0.7.0 leave them empty.
+  string deny_content_type = 12;
+  string deny_body = 13;
 }
 
 // RuleMatch is where a rule matched.

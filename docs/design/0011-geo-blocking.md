@@ -596,8 +596,8 @@ table; it is swapped in the same way. Tables outlive sets by being shared betwee
 - **`api/geo/v1/geo.proto`** (new): `CountryTable` ([§4.2](#42-the-operator-compiles-a-country-table)).
 - **`api/bundle/v1/bundle.proto`:** `Bundle.geo_table = 11` (`GeoTableRef { sha256, size }`:
   the table hash, and the decoded size);
-  `Policy.geo = 16` (`Geo { repeated string deny; repeated string allow; bool unknown_deny;
-  bool detect }`; field 15 is the rate limits' in 0009). Engines before 0.7.0 skip both.
+  `Policy.geo = 17` (`Geo { repeated string deny; repeated string allow; bool unknown_deny;
+  bool detect }`; field 15 is the rate limits' in 0009, 16 the custom denial response's, which landed first). Engines before 0.7.0 skip both.
 - **`api/agent/v1`:** `WatchResponse.geo_table = 3`; `Hello.geo_table_sha256 = 8`,
   `Hello.capabilities = 9`; `Heartbeat.geo_table_sha256 = 6`.
 - **`api/engine/v1/engine.proto`:** `REASON_GEO_DENY = 16` and `REASON_GEO_UNAVAILABLE = 17`, the

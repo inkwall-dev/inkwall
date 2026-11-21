@@ -458,6 +458,8 @@ security event, also on the 400 for a request an adapter can't read), and a shor
 |---|---|
 | 403 | The rules found an attack (or a rule of your own denies with another status: HAProxy turns any other into 403) |
 | 413 | A body over the inspected limit, with `body.onOversize: Deny` |
+| 429 | Over one of the policy's rate limits, with `Retry-After` ([Rate limits](rate-limits.md)) |
+| 502 | A response replaced: over `responses.maxBytes` with `responses.onOversize: Deny` (a leak the rules find gets 403) |
 | 503 | The request couldn't be inspected in time (timeout, overload) and the policy fails closed |
 | 400 | The proxy sent the engine a request it can't read |
 
@@ -465,6 +467,13 @@ With `InkwallConfig.spec.engine.denialFormat: JSON` (the engine's `--json-denial
 `jsonDenials: true` does the same), a client that accepts `application/json` gets `{"error":"forbidden","status":403,"request_id":"..."}` instead of
 the text body, through Traefik, Envoy Gateway, Istio and the standalone proxy. HAProxy writes its
 own denials, so it keeps its error page there.
+
+A policy's `denyResponse` (or the InkwallConfig's `spec.engine.denyResponse`, for policies that set
+none) replaces the body of every denial of the policy but the 400 with your own HTML page or JSON
+document, the request ID in it, whatever the client accepts; the status and headers stay as above,
+and a gRPC call keeps its gRPC status ([Denial responses](denial-responses.md)). A client that
+still gets `Forbidden` on such a policy is behind HAProxy, or an engine before 0.7.0 (the policy
+is then `Enforced=False`, `EnginesOutdated`).
 
 ## From Detect to Block
 

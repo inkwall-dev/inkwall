@@ -338,6 +338,22 @@ func testBundles(ctx context.Context, t *testing.T, c client.Client) {
 		return ""
 	})
 
+	// The InkwallConfig's denyResponse goes in the bundle, the default of
+	// every policy without its own; changing it builds a new bundle (#725).
+	for _, body := range []string{"<p>{{request_id}}</p>", "<p>Blocked: {{request_id}}</p>"} {
+		before := current(ctx, t, c).GetVersion()
+		update(ctx, t, c, cfg, func(cfg *wafv1alpha1.InkwallConfig) {
+			cfg.Spec.Engine.DenyResponse = &wafv1alpha1.DenyResponse{ContentType: "text/html", Body: body}
+		})
+		eventually(t, "the default denyResponse in a new bundle", func() string {
+			b := current(ctx, t, c)
+			if d := b.GetDenyResponse(); d.GetContentType() != "text/html" || d.GetBody() != body || b.GetVersion() <= before {
+				return fmt.Sprintf("bundle %d (after %d), deny response %v", b.GetVersion(), before, d)
+			}
+			return ""
+		})
+	}
+
 	// A deleted bundle Secret is recreated, and the version sequence goes on.
 	before := current(ctx, t, c).GetVersion()
 	if err := c.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: bundle.BundleSecret}}); err != nil {

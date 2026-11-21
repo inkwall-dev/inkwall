@@ -139,7 +139,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpadapter.LogEvent(r.Context(), h.logger, h.events, req, path, v)
 	}
 
-	out := toResponse(req.ID, v)
+	out := toResponse(req, v)
 	var body []byte
 	if isJSON {
 		w.Header().Set("Content-Type", ContentTypeJSON)
@@ -171,10 +171,10 @@ func (h *Handler) CheckExchange(ctx context.Context, in *enginev1.CheckRequest, 
 	}
 	ei, ok := h.pipeline.(pipeline.ExchangeInspector)
 	if !ok {
-		return toResponse(r.ID, h.pipeline.Check(ctx, r)), nil, nil
+		return toResponse(r, h.pipeline.Check(ctx, r)), nil, nil
 	}
 	v, x := ei.CheckExchange(ctx, r)
-	req = toResponse(r.ID, v)
+	req = toResponse(r, v)
 	if x == nil {
 		return req, nil, nil
 	}
@@ -189,7 +189,7 @@ func (h *Handler) CheckExchange(ctx context.Context, in *enginev1.CheckRequest, 
 		out.Body = resp.Body[:min(int64(len(resp.Body)), limit)]
 		out.BodyTruncated = resp.BodyTruncated || int64(len(resp.Body)) > limit
 	}
-	return req, toResponse(r.ID, x.CheckResponse(ctx, &out)), nil
+	return req, toResponse(r, x.CheckResponse(ctx, &out)), nil
 }
 
 // encoding reports whether a Content-Type selects JSON (true) or protobuf.
@@ -301,7 +301,8 @@ func parseAddr(field, s string) (netip.Addr, error) {
 	return a.Unmap(), nil
 }
 
-func toResponse(id string, v pipeline.Verdict) *enginev1.CheckResponse {
+func toResponse(r *request.Request, v pipeline.Verdict) *enginev1.CheckResponse {
+	id, grpc := r.ID, httpadapter.GRPCOf(r.Headers) != httpadapter.NotGRPC
 	ids := make([]uint32, 0, len(v.RuleIDs))
 	for _, rid := range v.RuleIDs {
 		ids = append(ids, uint32(rid)) // #nosec G115 -- rule IDs are positive and below 2^32
@@ -314,7 +315,7 @@ func toResponse(id string, v pipeline.Verdict) *enginev1.CheckResponse {
 	if ra := httpadapter.RetryAfter(v); ra != "" {
 		headers = append(headers, &enginev1.Header{Name: "Retry-After", Value: ra})
 	}
-	return &enginev1.CheckResponse{
+	out := &enginev1.CheckResponse{
 		Matches:            matches,
 		AnomalyScore:       int32(v.AnomalyScore), // #nosec G115 -- scores are small
 		Action:             events.Action(v.Action),
@@ -327,4 +328,15 @@ func toResponse(id string, v pipeline.Verdict) *enginev1.CheckResponse {
 		InspectionTime:     durationpb.New(v.Duration),
 		Policy:             v.Policy,
 	}
+	if d := v.DenyResponse; d != nil && v.Action == pipeline.ActionDeny && !grpc {
+		// The policy's denial, for the caller to answer the client with
+		// as the other adapters do, with their headers; without one, the
+		// caller writes its own. A gRPC call gets its gRPC status, no
+		// body.
+		out.DenyContentType, out.DenyBody = d.ContentType(), string(d.Render(id))
+		for _, kv := range httpadapter.CustomDenialHeaders {
+			out.ResponseHeaders = append(out.ResponseHeaders, &enginev1.Header{Name: kv[0], Value: kv[1]})
+		}
+	}
+	return out
 }

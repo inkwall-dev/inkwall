@@ -155,6 +155,9 @@ type Config struct {
 	// (logged in detect mode) with ReasonGRPC, before the rules: for routes
 	// that serve no gRPC (#367).
 	DenyGRPC bool
+	// DenyResponse is the body of the policy's denials, which its verdicts
+	// carry (Verdict.DenyResponse). Nil: the adapter's own.
+	DenyResponse *DenyResponse
 }
 
 // ResponseConfig configures response inspection.
@@ -254,6 +257,8 @@ type Pipeline struct {
 	// samples its events.
 	geo       *GeoRules
 	geoEvents *geoSampler
+	// denyResponse: Config.DenyResponse.
+	denyResponse *DenyResponse
 }
 
 // New returns a pipeline that evaluates requests with eval.
@@ -292,6 +297,7 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 		limits:         cfg.RateLimits,
 		geo:            cfg.Geo,
 		geoEvents:      newGeoSampler(cfg.Geo),
+		denyResponse:   cfg.DenyResponse,
 	}
 }
 
@@ -369,6 +375,7 @@ func (p *Pipeline) checkRequest(ctx context.Context, r *request.Request, keep bo
 	v, x := p.check(ctx, r, keep, start)
 	v.Duration = time.Since(start)
 	v.Policy = p.policy
+	v.DenyResponse = p.denyResponse
 	if p.observer != nil {
 		p.observer.ObserveVerdict(v)
 	}

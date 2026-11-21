@@ -64,6 +64,10 @@ message Bundle {
   // the bundle, signed, pins it by hash. Unset: geo is skipped. Engines
   // before 0.7.0 ignore it.
   GeoTableRef geo_table = 11;
+  // The denial of a policy that sets none
+  // (InkwallConfig.spec.engine.denyResponse). Unset: the engine's own.
+  // Engines before 0.7.0 ignore it.
+  DenyResponse deny_response = 12;
 }
 
 // GeoTableRef names a country table.
@@ -73,6 +77,18 @@ message GeoTableRef {
   bytes sha256 = 1;
   // The serialized CountryTable's size: the engine decompresses no more.
   uint64 size = 2;
+}
+
+// DenyResponse is the body of a policy's denials (docs/denial-responses.md):
+// every denial its verdicts give, with the verdict's status and headers.
+// A denied gRPC call keeps its gRPC status and no body.
+message DenyResponse {
+  // text/html, text/plain, application/json or application/problem+json,
+  // with charset=utf-8 or no parameter.
+  string content_type = 1;
+  // At most 8 KiB of UTF-8. Each {{request_id}} in it is replaced with the
+  // request's ID, escaped for the content type.
+  string body = 2;
 }
 
 // EventsConfig redacts the security events engines send to the operator
@@ -136,11 +152,15 @@ message Policy {
   // the rules. Engines before 0.7.0 ignore them: the operator doesn't count
   // them as enforcing a policy that sets them.
   repeated RateLimit rate_limits = 15;
+  // The body of the policy's denials. Unset: Bundle.deny_response. Engines
+  // before 0.7.0 ignore it: the operator doesn't count them as enforcing a
+  // policy that sets it.
+  DenyResponse deny_response = 16;
   // Geo blocking (WAFPolicy spec.geo, design 0011 §2): checked after the
   // IP lists, before the skipped paths, with the country table the bundle
   // names (geo_table). Unset: none. Engines before 0.7.0 ignore it: the
   // operator doesn't count them as enforcing a policy that sets it.
-  Geo geo = 16;
+  Geo geo = 17;
 }
 
 // Geo is a policy's geo blocking.

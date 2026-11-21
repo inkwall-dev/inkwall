@@ -664,7 +664,7 @@ func (s *Server) denial(req *request.Request, v pipeline.Verdict) *extprocv3.Pro
 	if g := httpadapter.GRPCOf(req.Headers); g != httpadapter.NotGRPC {
 		resp = denyGRPC(g, v.Status, req.ID)
 	} else {
-		resp = deny(v.Status, req.ID, httpadapter.DenialBody(v.Status, req.ID, req.Headers, s.jsonDenials))
+		resp = deny(v.Status, req.ID, httpadapter.VerdictDenial(v, req.ID, req.Headers, s.jsonDenials))
 	}
 	if ra := httpadapter.RetryAfter(v); ra != "" {
 		h := resp.GetImmediateResponse().GetHeaders()
@@ -987,15 +987,21 @@ func probeReply(answer string) *extprocv3.ProcessingResponse {
 // deny answers with status and the same plain-text body as the other
 // adapters.
 func deny(code int, id string, d httpadapter.Denial) *extprocv3.ProcessingResponse {
+	headers := []*corev3.HeaderValueOption{
+		header("content-type", d.ContentType),
+		header("x-content-type-options", "nosniff"),
+		header("x-request-id", id),
+	}
+	if d.Custom {
+		for _, kv := range httpadapter.CustomDenialHeaders {
+			headers = append(headers, header(strings.ToLower(kv[0]), kv[1]))
+		}
+	}
 	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ImmediateResponse{
 		ImmediateResponse: &extprocv3.ImmediateResponse{
 			// #nosec G115 -- an HTTP status
-			Status: &typev3.HttpStatus{Code: typev3.StatusCode(code)},
-			Headers: &extprocv3.HeaderMutation{SetHeaders: []*corev3.HeaderValueOption{
-				header("content-type", d.ContentType),
-				header("x-content-type-options", "nosniff"),
-				header("x-request-id", id),
-			}},
+			Status:  &typev3.HttpStatus{Code: typev3.StatusCode(code)},
+			Headers: &extprocv3.HeaderMutation{SetHeaders: headers},
 			Body:    d.Body,
 			Details: "inkwall_denied",
 		},
