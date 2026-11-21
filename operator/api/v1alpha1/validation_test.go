@@ -337,6 +337,112 @@ func TestInkwallConfigValidation(t *testing.T) {
 	})
 }
 
+func exportConfig(sinks string) string {
+	return inkwallConfig("default", "  events:\n    export:\n      sinks:\n"+sinks)
+}
+
+// Every CEL rule and schema bound of design 0010 §4.5, accepted and refused.
+func TestInkwallConfigExportValidation(t *testing.T) {
+	otel := "      - {name: otel, otlp: {endpoint: \"grpc://otel.observability:4317\"}, insecure: true}\n"
+	check(t, []validationCase{
+		{name: "full", doc: inkwallConfig("default", `
+  events:
+    export:
+      clusterName: prod-eu-1.example
+      sinks:
+      - name: collector
+        otlp: {endpoint: "grpc://otel-collector.observability:4317"}
+        insecure: true
+      - name: splunk
+        json:
+          url: https://splunk.example.com:8088/services/collector/raw?sourcetype=_json
+          framing: Lines
+        headersSecretRef: {name: splunk-hec}
+        tls:
+          caSecretRef: {name: splunk-ca}
+          clientCertificateSecretRef: {name: splunk-client}
+          serverName: splunk.example.com
+        compression: None
+        batch: {maxEvents: 1000, maxDelay: 100ms, maxInFlight: 1}
+        timeout: 60s
+        filter:
+          actions: [Deny]
+          policyNamespaces: [shop, payments]
+        omit: [Snippets, ClientIP, UserAgent, RequestID]
+      - name: sumo
+        json:
+          urlSecretRef: {name: sumo-url, key: url}
+          framing: Array
+        batch: {maxEvents: 1, maxDelay: 60s, maxInFlight: 4}
+        timeout: 1s
+      - name: otlp-http
+        otlp: {endpoint: "https://otlp.example.com/v1/logs"}
+`)},
+		{name: "no sinks", doc: inkwallConfig("default", "  events: {export: {clusterName: prod}}\n")},
+		{name: "five sinks", doc: exportConfig(otel +
+			"      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}}\n      - {name: b, otlp: {endpoint: \"grpcs://b:4317\"}}\n" +
+			"      - {name: c, otlp: {endpoint: \"grpcs://c:4317\"}}\n      - {name: d, otlp: {endpoint: \"grpcs://d:4317\"}}\n"), wantErr: "must have at most 4 items"},
+		{name: "repeated name", doc: exportConfig(otel + otel), wantErr: "sinks must not repeat a name"},
+		{name: "name not a DNS label", doc: exportConfig("      - {name: Otel_1, otlp: {endpoint: \"grpcs://a:4317\"}}\n"), wantErr: "spec.events.export.sinks[0].name"},
+		{name: "cluster name not a DNS subdomain", doc: inkwallConfig("default", "  events: {export: {clusterName: \"Prod EU\"}}\n"), wantErr: "spec.events.export.clusterName"},
+		{name: "neither otlp nor json", doc: exportConfig("      - {name: a}\n"), wantErr: "a sink needs exactly one of otlp and json"},
+		{name: "both otlp and json", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}, json: {url: \"https://a\"}}\n"), wantErr: "a sink needs exactly one of otlp and json"},
+		{name: "json without url", doc: exportConfig("      - {name: a, json: {framing: Lines}}\n"), wantErr: "json needs exactly one of url and urlSecretRef"},
+		{name: "json with url and urlSecretRef", doc: exportConfig("      - {name: a, json: {url: \"https://a\", urlSecretRef: {name: s, key: url}}}\n"), wantErr: "json needs exactly one of url and urlSecretRef"},
+		{name: "grpc endpoint with a path", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317/v1/logs\"}}\n"), wantErr: "spec.events.export.sinks[0].otlp.endpoint"},
+		{name: "otlp user info", doc: exportConfig("      - {name: a, otlp: {endpoint: \"https://user:pass@a/v1/logs\"}}\n"), wantErr: "spec.events.export.sinks[0].otlp.endpoint"},
+		{name: "json user info", doc: exportConfig("      - {name: a, json: {url: \"https://user:pass@a/in\"}}\n"), wantErr: "spec.events.export.sinks[0].json.url"},
+		{name: "json not http", doc: exportConfig("      - {name: a, json: {url: \"ftp://a/in\"}}\n"), wantErr: "spec.events.export.sinks[0].json.url"},
+		{name: "otlp unknown scheme", doc: exportConfig("      - {name: a, otlp: {endpoint: \"tcp://a:4317\"}}\n"), wantErr: "spec.events.export.sinks[0].otlp.endpoint"},
+		{name: "json url with a space", doc: exportConfig("      - {name: a, json: {url: \"https://a/in put\"}}\n"), wantErr: "spec.events.export.sinks[0].json.url"},
+		{name: "json url too long", doc: exportConfig("      - {name: a, json: {url: \"https://a/" + strings.Repeat("x", 2048) + "\"}}\n"), wantErr: "spec.events.export.sinks[0].json.url"},
+		{name: "plaintext grpc without insecure", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpc://a:4317\"}}\n"), wantErr: "needs insecure: true"},
+		{name: "plaintext http otlp without insecure", doc: exportConfig("      - {name: a, otlp: {endpoint: \"http://a:4318/v1/logs\"}}\n"), wantErr: "needs insecure: true"},
+		{name: "plaintext json without insecure", doc: exportConfig("      - {name: a, json: {url: \"http://a/in\"}}\n"), wantErr: "needs insecure: true"},
+		{name: "plaintext json with insecure", doc: exportConfig("      - {name: a, json: {url: \"http://a/in\"}, insecure: true}\n")},
+		{name: "plaintext with headers", doc: exportConfig("      - {name: a, otlp: {endpoint: \"http://a:4318/v1/logs\"}, insecure: true, headersSecretRef: {name: h}}\n"), wantErr: "can't have headersSecretRef"},
+		{name: "plaintext json with headers", doc: exportConfig("      - {name: a, json: {url: \"http://a/in\"}, insecure: true, headersSecretRef: {name: h}}\n"), wantErr: "can't have headersSecretRef"},
+		{name: "TLS with headers", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}, headersSecretRef: {name: h}}\n")},
+		{name: "unknown framing", doc: exportConfig("      - {name: a, json: {url: \"https://a\", framing: CSV}}\n"), wantErr: `Unsupported value: "CSV"`},
+		{name: "unknown compression", doc: exportConfig("      - {name: a, json: {url: \"https://a\"}, compression: Zstd}\n"), wantErr: `Unsupported value: "Zstd"`},
+		{name: "secret key with a slash", doc: exportConfig("      - {name: a, json: {urlSecretRef: {name: s, key: a/b}}}\n"), wantErr: "spec.events.export.sinks[0].json.urlSecretRef.key"},
+		{name: "server name with a port", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}, tls: {serverName: \"a:443\"}}\n"), wantErr: "spec.events.export.sinks[0].tls.serverName"},
+		{name: "max events 0", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}, batch: {maxEvents: 0}}\n"), wantErr: "should be greater than or equal to 1"},
+		{name: "max events over 1000", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}, batch: {maxEvents: 1001}}\n"), wantErr: "should be less than or equal to 1000"},
+		{name: "max in flight 0", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}, batch: {maxInFlight: 0}}\n"), wantErr: "should be greater than or equal to 1"},
+		{name: "max in flight over 4", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}, batch: {maxInFlight: 5}}\n"), wantErr: "should be less than or equal to 4"},
+		{name: "max delay under 100ms", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}, batch: {maxDelay: 99ms}}\n"), wantErr: "maxDelay must be from 100ms to 60s"},
+		{name: "max delay over 60s", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}, batch: {maxDelay: 61s}}\n"), wantErr: "maxDelay must be from 100ms to 60s"},
+		{name: "timeout under 1s", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}, timeout: 999ms}\n"), wantErr: "timeout must be from 1s to 60s"},
+		{name: "timeout over 60s", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}, timeout: 2m}\n"), wantErr: "timeout must be from 1s to 60s"},
+		{name: "unknown action", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}, filter: {actions: [Allow]}}\n"), wantErr: `Unsupported value: "Allow"`},
+		{name: "action twice", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}, filter: {actions: [Deny, Deny]}}\n"), wantErr: "Duplicate value"},
+		{name: "policy namespace not a DNS label", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}, filter: {policyNamespaces: [Shop]}}\n"), wantErr: "spec.events.export.sinks[0].filter.policyNamespaces[0]"},
+		{name: "policy namespace twice", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}, filter: {policyNamespaces: [shop, shop]}}\n"), wantErr: "Duplicate value"},
+		{name: "unknown omit", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}, omit: [Path]}\n"), wantErr: `Unsupported value: "Path"`},
+		{name: "omit twice", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}, omit: [ClientIP, ClientIP]}\n"), wantErr: "Duplicate value"},
+	})
+}
+
+// A sink's unset compression and framing take their defaults.
+func TestInkwallConfigExportDefaults(t *testing.T) {
+	c := newClient(t)
+	u := object(t, exportConfig("      - {name: a, json: {url: \"https://a/in\"}}\n"))
+	if err := c.Create(context.Background(), u, client.DryRunAll); err != nil {
+		t.Fatal(err)
+	}
+	sinks, _, _ := unstructured.NestedSlice(u.Object, "spec", "events", "export", "sinks")
+	if len(sinks) != 1 {
+		t.Fatalf("sinks = %v", sinks)
+	}
+	s := sinks[0].(map[string]any)
+	framing, _, _ := unstructured.NestedString(s, "json", "framing")
+	compression, _, _ := unstructured.NestedString(s, "compression")
+	if framing != "Lines" || compression != "Gzip" {
+		t.Errorf("framing %q, compression %q, want Lines and Gzip", framing, compression)
+	}
+}
+
 func TestInkwallConfigDefaults(t *testing.T) {
 	c := newClient(t)
 	u := object(t, inkwallConfig("default", "  {}\n"))

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"slices"
 	"time"
 
@@ -144,7 +145,7 @@ func (c *Connector) objects(ctx context.Context) ([]*controlplanev1.Object, erro
 	}
 	for i := range configs.Items {
 		cfg := &configs.Items[i]
-		if err := add("InkwallConfig", cfg, cfg.Spec, cfg.Status.Conditions); err != nil {
+		if err := add("InkwallConfig", cfg, stateSpec(cfg.Spec), cfg.Status.Conditions); err != nil {
 			return nil, err
 		}
 	}
@@ -152,6 +153,39 @@ func (c *Connector) objects(ctx context.Context) ([]*controlplanev1.Object, erro
 		return cmp.Or(cmp.Compare(a.GetKind(), b.GetKind()), cmp.Compare(a.GetNamespace(), b.GetNamespace()), cmp.Compare(a.GetName(), b.GetName()))
 	})
 	return out, nil
+}
+
+// stateSpec is the InkwallConfig's spec as the control plane gets it: each
+// export sink's endpoint cut to its scheme, host and port, since a path or
+// query can carry a token (design 0010 §6).
+func stateSpec(spec wafv1alpha1.InkwallConfigSpec) wafv1alpha1.InkwallConfigSpec {
+	if spec.Events.Export == nil || len(spec.Events.Export.Sinks) == 0 {
+		return spec
+	}
+	export := spec.Events.Export.DeepCopy()
+	for i := range export.Sinks {
+		s := &export.Sinks[i]
+		if s.OTLP != nil {
+			s.OTLP = &wafv1alpha1.OTLPSink{Endpoint: endpointOrigin(s.OTLP.Endpoint)}
+		}
+		if s.JSON != nil && s.JSON.URL != "" {
+			j := *s.JSON
+			j.URL = endpointOrigin(j.URL)
+			s.JSON = &j
+		}
+	}
+	spec.Events.Export = export
+	return spec
+}
+
+// endpointOrigin is a URL's scheme, host and port, or nothing when it
+// doesn't parse.
+func endpointOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 func object(kind string, o metav1.Object, spec any, conds []metav1.Condition) (*controlplanev1.Object, error) {
