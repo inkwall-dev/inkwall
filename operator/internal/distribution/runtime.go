@@ -142,6 +142,9 @@ func (g *GRPCServer) Start(ctx context.Context) error {
 		// Find dead connections, and refuse keepalive floods.
 		grpc.KeepaliveParams(keepalive.ServerParameters{Time: 30 * time.Second, Timeout: 10 * time.Second}),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}),
+		// Stop returns only once every handler has: no stream adds events
+		// after the export's flush, even after the 5 s fallback to Stop.
+		grpc.WaitForHandlers(true),
 	)
 	agentv1.RegisterBundleServiceServer(srv, g.Service)
 	lis, err := (&net.ListenConfig{}).Listen(ctx, "tcp", fmt.Sprintf(":%d", g.Port))

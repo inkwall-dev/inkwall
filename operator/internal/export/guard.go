@@ -40,6 +40,8 @@ var (
 	// The NAT64 well-known prefix (RFC 6052): its last 32 bits are an
 	// IPv4 address.
 	nat64 = netip.MustParsePrefix("64:ff9b::/96")
+	// The local-use NAT64 prefix (RFC 8215).
+	localNAT64 = netip.MustParsePrefix("64:ff9b:1::/48")
 	// "This network": Linux connects 0.0.0.0 to the host itself.
 	thisNetwork = netip.MustParsePrefix("0.0.0.0/8")
 )
@@ -49,6 +51,24 @@ var (
 // checked as the IPv4 address it carries.
 func refusedClass(addr netip.Addr) string {
 	addr = addr.WithZone("")
+	if addr.Is6() && localNAT64.Contains(addr) {
+		// RFC 8215's local-use prefix, which a network divides as it
+		// likes: the IPv4 address may sit where any RFC 6052 prefix length
+		// within it puts it. Refused if any of them is.
+		b := addr.As16()
+		for _, v4 := range [][4]byte{
+			{b[6], b[7], b[9], b[10]},    // /48
+			{b[7], b[9], b[10], b[11]},   // /56
+			{b[9], b[10], b[11], b[12]},  // /64
+			{b[12], b[13], b[14], b[15]}, // /96
+		} {
+			// Zeros elsewhere read as 0.x.x.x: not a target in any layout.
+			if class := refusedClass(netip.AddrFrom4(v4)); class != "" && class != "unspecified" {
+				return class
+			}
+		}
+		return ""
+	}
 	if addr.Is6() && nat64.Contains(addr) {
 		b := addr.As16()
 		addr = netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
