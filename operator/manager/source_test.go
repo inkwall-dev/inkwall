@@ -89,12 +89,17 @@ func testSourceGuard(ctx context.Context, t *testing.T, c client.Client) {
 	if err := alice.Delete(ctx, managedList.DeepCopy()); !apierrors.IsForbidden(err) {
 		t.Errorf("alice deletes the IP list: %v", err)
 	}
-	l := managedList.DeepCopy()
-	if err := alice.Get(ctx, client.ObjectKeyFromObject(l), l); err != nil {
-		t.Fatal(err)
-	}
-	l.Spec.Entries[0].CIDR = "0.0.0.0/0"
-	if err := alice.Update(ctx, l); !apierrors.IsForbidden(err) {
+	// The operator writes the list's status: a conflict means alice read
+	// it before that write, so she reads again.
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		l := managedList.DeepCopy()
+		if err := alice.Get(ctx, client.ObjectKeyFromObject(l), l); err != nil {
+			return err
+		}
+		l.Spec.Entries[0].CIDR = "0.0.0.0/0"
+		return alice.Update(ctx, l)
+	})
+	if !apierrors.IsForbidden(err) {
 		t.Errorf("alice edits the IP list: %v", err)
 	}
 	// The operator writes the policy too (its finalizer, its status): a

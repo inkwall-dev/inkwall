@@ -103,7 +103,7 @@ func TestSourceGuardFailsClosed(t *testing.T) {
 
 // The validators run the guard on every operation, before the spec checks.
 func TestValidatorsGuard(t *testing.T) {
-	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy, guard: guardFor(t, wafv1alpha1.ModeManaged)}
+	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy, deprecated: policyDeprecations, guard: guardFor(t, wafv1alpha1.ModeManaged)}
 	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Name: "shop", Labels: map[string]string{wafv1alpha1.SourceLabel: wafv1alpha1.SourceSaaS}}}
 	ctx := asUser("alice", admissionv1.Delete)
 	if _, err := v.ValidateCreate(ctx, p); !apierrors.IsForbidden(err) {

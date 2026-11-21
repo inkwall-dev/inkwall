@@ -224,7 +224,7 @@ func newFlagSet(name string, cfg *config, stderr io.Writer, inputHelp string) fl
 	fs.StringVar(&cfg.harFile, "har", "", "HAR file"+inputHelp)
 	fs.StringVar(&cfg.engine, "engine", "", "check API of a running engine (http://127.0.0.1:9002 or unix:/path); default is in-process")
 	mode := fs.String("mode", "block", "enforcement mode for in-process checks: block or detect")
-	fs.Int64Var(&cfg.maxBodyBytes, "max-body-bytes", 64<<10, "request body bytes to inspect, in-process")
+	fs.Int64Var(&cfg.maxBodyBytes, "max-body-bytes", 64<<10, "request body bytes to inspect, in-process; with --policy or --bundle, for policies that don't set body.maxBytes (as the engine's flag)")
 	fs.IntVar(&cfg.paranoiaLevel, "paranoia-level", coraza.DefaultParanoiaLevel, "OWASP CRS paranoia level (1-4), in-process")
 	fs.IntVar(&cfg.threshold, "anomaly-threshold", coraza.DefaultInboundAnomalyThreshold, "OWASP CRS inbound anomaly score threshold, in-process")
 	fs.StringVar(&cfg.rules, "rules", "", "SecLang rules file loaded after CRS, in-process (as the engine's --rules)")

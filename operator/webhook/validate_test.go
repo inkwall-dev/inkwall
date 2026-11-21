@@ -70,7 +70,7 @@ func TestClusterRuleSetValidation(t *testing.T) {
 
 func TestPolicyValidation(t *testing.T) {
 	ctx := context.Background()
-	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy}
+	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy, deprecated: policyDeprecations}
 	p := &wafv1alpha1.WAFPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "shop"},
 		Spec: wafv1alpha1.WAFPolicySpec{
@@ -162,7 +162,7 @@ func TestPolicyValidation(t *testing.T) {
 // namespace is never resolved, the policy's own does nothing; v1 drops it.
 func TestPolicyRuleSetNamespaceWarning(t *testing.T) {
 	ctx := context.Background()
-	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy}
+	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy, deprecated: policyDeprecations}
 	ref := func(ns string) wafv1alpha1.RuleSetBinding {
 		return wafv1alpha1.RuleSetBinding{Ref: wafv1alpha1.RuleSetRef{Kind: "WAFRuleSet", Name: "rules", Namespace: ns}} //nolint:staticcheck // the deprecated field
 	}
@@ -190,7 +190,7 @@ func TestPolicyRuleSetNamespaceWarning(t *testing.T) {
 // deprecated for crs's (#714): each draws a warning, crs's none.
 func TestPolicyCRSWarnings(t *testing.T) {
 	ctx := context.Background()
-	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy}
+	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy, deprecated: policyDeprecations}
 	ref := wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: "crs"}
 	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "shop"}}
 	p.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{{Ref: ref, CRS: &wafv1alpha1.CRSSettings{ParanoiaLevel: ptr(int32(2)), InboundAnomalyThreshold: ptr(int32(7))}}}
@@ -213,11 +213,41 @@ func TestPolicyCRSWarnings(t *testing.T) {
 	}
 }
 
+// The deprecation warnings are for what an update sets, not for what it
+// leaves as it was: another spec change draws none, as the InkwallConfig's.
+func TestPolicyDeprecationWarningsOnUpdate(t *testing.T) {
+	ctx := context.Background()
+	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy, deprecated: policyDeprecations}
+	crs := wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: "crs"}
+	old := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "shop"}}
+	old.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{
+		{Ref: crs, ParanoiaLevel: ptr(int32(2))},
+		{Ref: wafv1alpha1.RuleSetRef{Kind: "WAFRuleSet", Name: "rules", Namespace: "shop"}}, //nolint:staticcheck // the deprecated field
+	}
+	changed := old.DeepCopy()
+	changed.Spec.Mode = wafv1alpha1.PolicyBlock
+	if warnings, err := v.ValidateUpdate(ctx, old, changed); err != nil || len(warnings) != 0 {
+		t.Errorf("unchanged deprecated fields: warnings %q, error %v", warnings, err)
+	}
+	// A new value, or a newly set field, warns again.
+	changed.Spec.RuleSets[0].ParanoiaLevel = ptr(int32(3))           //nolint:staticcheck // the deprecated field
+	changed.Spec.RuleSets[0].InboundAnomalyThreshold = ptr(int32(7)) //nolint:staticcheck // the deprecated field
+	warnings, err := v.ValidateUpdate(ctx, old, changed)
+	if err != nil || len(warnings) != 2 || !strings.Contains(warnings[0], "spec.ruleSets[0].paranoiaLevel is deprecated") ||
+		!strings.Contains(warnings[1], "spec.ruleSets[0].inboundAnomalyThreshold is deprecated") {
+		t.Errorf("changed deprecated fields: warnings %q, error %v", warnings, err)
+	}
+	// Creating the same policy warns of each.
+	if warnings, err := v.ValidateCreate(ctx, old); err != nil || len(warnings) != 2 {
+		t.Errorf("create: warnings %q, error %v", warnings, err)
+	}
+}
+
 // A rule set placed before the CRS can't be the CRS, so a binding that
 // places one there can't carry the CRS's settings (#423).
 func TestPolicyValidationPlacement(t *testing.T) {
 	ctx := context.Background()
-	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy}
+	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy, deprecated: policyDeprecations}
 	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "shop"}}
 	p.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{
 		{Ref: wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: "crs"}, CRS: &wafv1alpha1.CRSSettings{ParanoiaLevel: ptr(int32(2))}, Placement: wafv1alpha1.PlacementAfterCRS},
@@ -254,7 +284,7 @@ func TestPolicyValidationPlacement(t *testing.T) {
 // which sends responses since #374: no warning.
 func TestPolicyResponsesWarning(t *testing.T) {
 	ctx := context.Background()
-	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy}
+	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy, deprecated: policyDeprecations}
 	ingress := wafv1alpha1.TargetRef{Kind: "Ingress", Name: "web"}
 	route := wafv1alpha1.TargetRef{Group: "gateway.networking.k8s.io", Kind: "HTTPRoute", Name: "api"}
 	ingressRoute := wafv1alpha1.TargetRef{Group: "traefik.io", Kind: "IngressRoute", Name: "admin"}
@@ -495,7 +525,7 @@ func TestConfigControllerWarning(t *testing.T) {
 // header name, draw warnings (#717); the objects stay accepted.
 func TestListWarnings(t *testing.T) {
 	ctx := context.Background()
-	pv := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy}
+	pv := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy, deprecated: policyDeprecations}
 	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "shop"}}
 	p.Spec.Skip = &wafv1alpha1.SkipSpec{Paths: []wafv1alpha1.PathPattern{"/a", "/b"}, BodyPaths: []wafv1alpha1.PathPattern{"/up"}}
 	p.Spec.Exclusions = []wafv1alpha1.Exclusion{{RuleIDs: []int32{942100, 942200}, When: &wafv1alpha1.ExclusionMatch{Header: "Referer"}}}

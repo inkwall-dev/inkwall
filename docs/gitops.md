@@ -57,7 +57,7 @@ its own entries when the route is no longer protected. It writes with
 | That `ConfigMap` | label `waf.inkwall.dev/sidecar`, annotation `waf.inkwall.dev/original-deployment` | `"true"`, and your `deployment` overlay as you wrote it, to put back |
 | `Gateway` (Istio's) that names no ConfigMap | `spec.infrastructure.parametersRef`, annotation `waf.inkwall.dev/configmap` | The operator's ConfigMap, `inkwall-waf-<gateway>` |
 | `WAFPolicy` | `metadata.finalizers` | `waf.inkwall.dev/unwire` ([finalizer](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/)): the operator unwires the policy's routes before it can be deleted |
-| `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet`, `InkwallConfig` | `status` | Conditions, bundle version |
+| `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet`, `WAFIPList`, `InkwallConfig` | `status` | Conditions, bundle version |
 
 Objects the operator creates and owns are not in your Git repository, and [GitOps](https://opengitops.dev/) tools don't
 track them: the Middleware `inkwall-waf` in each namespace with a protected route; for Envoy
@@ -393,7 +393,7 @@ reported on yet as current. Tell them (both tested by `make gitops-health-test`)
 
 - **Argo CD:** merge [`examples/argocd/argocd-cm-patch.yaml`](../examples/argocd/argocd-cm-patch.yaml)
   into the `argocd-cm` ConfigMap (or the `configs.cm` values of Argo CD's chart). It adds health
-  checks for `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet` and `InkwallConfig`.
+  checks for `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet`, `WAFIPList` and `InkwallConfig`.
 - **Flux** (2.5 or later): give the Kustomization that applies the policies `wait: true` and the
   `healthCheckExprs` of [`examples/flux/kustomization.yaml`](../examples/flux/kustomization.yaml).
 
@@ -401,6 +401,7 @@ reported on yet as current. Tell them (both tested by `make gitops-health-test`)
 |---|---|---|---|
 | `WAFPolicy` | `Ready=True` for its generation | The operator hasn't reported its generation; `Ready=False` for a reason that resolves itself: `NotAccepted`, `NotProgrammed`, `NotEnforced` (a condition not reported yet), `Pending`, `PendingRestart`, `EnginesBehind`, `EnginesUnreported`, `NoEngines`, `NotInBundle`, `Unverified` | `Ready=False` for any other reason: `WiringFailed`, `EngineNack`, `EnginesOutdated`, `SidecarMissing`, ... |
 | `WAFRuleSet`, `ClusterWAFRuleSet` | `Accepted=True` | Not checked for its generation yet | `Accepted=False` (`RuleCompileError`) |
+| `WAFIPList` | `Accepted=True` | Not checked for its generation yet | `Accepted=False` (`InvalidEntries`) |
 | `InkwallConfig` (Argo CD) | Otherwise | | `ControlPlaneConnected=False` |
 
 While inspection is suspended (`InkwallConfig` `spec.suspend`), Argo CD shows the policies and the
