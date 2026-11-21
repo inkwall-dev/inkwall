@@ -1248,17 +1248,12 @@ func result(tx types.Transaction, it *types.Interruption, skip int, score scores
 		}
 		id := mr.Rule().ID()
 		res.MatchedRuleIDs = append(res.MatchedRuleIDs, id)
-		// Where it matched: the first variable with data.
-		for _, md := range mr.MatchedDatas() {
-			if md.Variable().Name() == "UNKNOWN" {
-				continue
-			}
+		if md := matchPoint(mr.MatchedDatas()); md != nil {
 			variable := md.Variable().Name()
 			if k := md.Key(); k != "" {
 				variable += ":" + k
 			}
 			res.Matches = append(res.Matches, rules.Match{RuleID: id, Variable: variable, Value: md.Value()})
-			break
 		}
 	}
 	res.AnomalyScore = txInt(tx, score.blocking)
@@ -1268,6 +1263,61 @@ func result(tx types.Transaction, it *types.Interruption, skip int, score scores
 	res.Detected = it == nil && txInt(tx, "detection_paranoia_level") > txInt(tx, "blocking_paranoia_level") &&
 		txInt(tx, score.threshold) > 0 && txInt(tx, score.detection) >= txInt(tx, score.threshold)
 	return res
+}
+
+// matchPoint is where a rule matched: its first variable with data, nil if
+// none.
+//
+// A chain records the matches of its first rule (chain level 0) before those
+// of its chained rules, and a first rule may match many values only for the
+// chained rule to pick some: the CRS's restricted headers (920450, 920451)
+// match every header name with "@rx ^.*$", keep each in
+// TX:header_name_920450_<name>, and the chained rule checks those TX
+// variables "@within" the restricted list; 931130 keeps every URL argument in
+// TX:rfi_parameter_<variable>. Level 0 then lists every header, in no
+// particular order, and its first is seldom the one the chain accepted
+// (#762). So, for a chain, the level-0 match that a chained match names wins
+// (see names). This is how chains record matches, as in ModSecurity, not a
+// Coraza bug.
+func matchPoint(mds []types.MatchData) types.MatchData {
+	var first types.MatchData
+	var chained []types.MatchData
+	for _, md := range mds {
+		switch {
+		case md.Variable().Name() == "UNKNOWN":
+		case md.ChainLevel() > 0:
+			chained = append(chained, md)
+		case first == nil:
+			first = md
+		}
+	}
+	if first == nil || len(chained) == 0 {
+		return first
+	}
+	for _, md := range mds {
+		if md.ChainLevel() != 0 || md.Variable().Name() == "UNKNOWN" {
+			continue
+		}
+		for _, c := range chained {
+			if names(c, md) {
+				return md
+			}
+		}
+	}
+	return first
+}
+
+// names reports whether the chained match c names md, a match of the chain's
+// first rule: c's key ends in _<value> or _<VARIABLE:key> of md, or c's value
+// is md's or /<value>/ (as @within lists are), case aside, as TX keys are
+// lowercase.
+func names(c, md types.MatchData) bool {
+	key, val := strings.ToLower(c.Key()), strings.ToLower(c.Value())
+	if v := strings.ToLower(md.Value()); v != "" &&
+		(strings.HasSuffix(key, "_"+v) || val == v || val == "/"+v+"/") {
+		return true
+	}
+	return md.Key() != "" && strings.HasSuffix(key, "_"+strings.ToLower(md.Variable().Name()+":"+md.Key()))
 }
 
 // txInt reads TX:name as an integer, 0 if unset.
