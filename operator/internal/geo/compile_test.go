@@ -240,13 +240,14 @@ func TestCompileHostile(t *testing.T) {
 		}
 	}
 	// Shared children that end in aliases: a walk that skips aliases
-	// would skip 2^100 of them without yielding once.
+	// would skip 2^100 of them without yielding once. The guard counts
+	// them: refused past MaxAliases, at once.
 	start := time.Now()
 	_, err := Compile(context.Background(), mmdbtest.SharedAliases(100), nil)
-	if ReasonOf(err) != ReasonTooLarge {
-		t.Errorf("shared aliases: %v, want too many networks", err)
+	if ReasonOf(err) != ReasonInvalid || !strings.Contains(err.Error(), "alias") {
+		t.Errorf("shared aliases: %v, want too many aliases", err)
 	}
-	if d := time.Since(start); d > 5*time.Second {
+	if d := time.Since(start); d > time.Second {
 		t.Errorf("shared aliases took %v", d)
 	}
 	maxNetworks, timeout = MaxNetworks, 50*time.Millisecond

@@ -663,11 +663,13 @@ How the operator uses it:
    most 32 Mi nodes of 8 bytes, so no database within the file bound is refused for it
    (GeoLite2-City has about 4 million nodes). A skipped alias yields nothing either, so a tree
    whose shared children all end in pointers to the IPv4 subtree would make that walk skip
-   exponentially many aliases unchecked: a first walk follows the aliases, where every path end
-   yields, checked and capped at four times the cap (the IPv4 networks under MaxMind's three
-   aliases, and past the IPv4 networks to the cap plus 256 times their number), and it bounds the
-   path ends of the walk that skips them. That walk's gaps, one per alias, stop at 256 (`Invalid`)
-   as they are found: a tree of alternating aliases and empty leaves would add one per network. A deadline alone can't stop
+   exponentially many aliases unchecked: a first pass walks the search tree's records as the
+   library's walk does, decoding nothing, and counts its path ends (capped at the network cap) and
+   its aliases (records pointing to the IPv4 subtree from outside `::/96`, capped at 256,
+   `Invalid`). Following the aliases instead would yield the cap's worth of networks under a 1 KiB
+   tree of 2^26 aliases: about 30 s under the race detector. The walk that skips them then ends at
+   no more path ends, and its gaps, one per alias at most, stop at 256 too (`Invalid`) as they
+   are found. A deadline alone can't stop
    a goroutine, so the loop has to. A cancelled context (leadership lost) and the API server's
    errors are transient: they leave the condition as it is, and are retried. A crafted file that panics, loops or grows makes an `Invalid`
    or `TooLarge` condition, never a crashed or out-of-memory leader.
@@ -840,7 +842,7 @@ database is committed to the repository, for their licenses.
 | 8 | The table on the operator stream, to engines that advertise it, never after the bundle that pins its hash on a stream; held compressed until a bundle names it; stored in chunk Secrets (16), written before the bundle's, for cold start and other replicas; the previous table kept until the new one arrives | The table in the bundle; a separately signed manifest; sending to every engine |
 | 9 | No table named: geo skipped, `Enforced=False`. A named table missing: the policy's `failureMode`, except `Detect`. Readiness waits only at bootstrap | Always the `failureMode`; unready mid-life |
 | 10 | `pkg/geo`: sorted ranges and a binary search, a country bitset per policy, one lookup per request in `Set.Check`, the table swapped with the policy set; ≤ 150 ns, 0 allocs; at most 32 MiB | A per-IP cache; `mmap` in the engine; a table swapped on its own |
-| 11 | `maxminddb-golang/v2` (ISC) in the operator only, the leader only, on a mapped file; behind `recover`, walks that yield empty networks and follow aliases first so their deadline and network cap always run (not `Verify`, whose memory nothing bounds); aliases found from the walk's gaps, not assumed; never an older database, without an error for it | Our own MMDB reader; reading the file into the heap |
+| 11 | `maxminddb-golang/v2` (ISC) in the operator only, the leader only, on a mapped file; behind `recover`, walks that yield empty networks, after a pass over the tree that counts its path ends and aliases, so their deadline and caps always run (not `Verify`, whose memory nothing bounds); aliases found from the walk's gaps, not assumed; never an older database, without an error for it | Our own MMDB reader; reading the file into the heap |
 | 12 | `GeoDatabaseReady` on the `InkwallConfig`; `Enforced=False`, `GeoDatabaseUnavailable` on policies, only for engines with no table; `EnginesOutdated` for old engines | `Accepted=False` while the table is missing |
 | 14 | The chart's default operator memory limit goes to 768 MiB, shared with 0010 | Compiling within today's 512 MiB |
 | 13 | Every event carries `country`; geo events sampled per (policy, country), once a minute | An event per denied request |

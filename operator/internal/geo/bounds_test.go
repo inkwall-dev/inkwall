@@ -84,7 +84,8 @@ func TestNodeCountBound(t *testing.T) {
 
 // TestAlternatingAliases: a tree of alternating aliases and empty leaves,
 // under 1 KiB, would grow the walk's gap list by a gap per network, to
-// gigabytes; it is refused at MaxAliases gaps, at once.
+// gigabytes, and a walk following its 2^26 aliases would yield the cap's
+// worth of networks; the guard refuses it past MaxAliases aliases, at once.
 func TestAlternatingAliases(t *testing.T) {
 	// A lower cap keeps the guard walk's yields (bounded by it) quick
 	// under the race detector; the gaps stop at MaxAliases either way.
@@ -103,12 +104,12 @@ func TestAlternatingAliases(t *testing.T) {
 	_, err := Compile(context.Background(), db, nil)
 	var after runtime.MemStats
 	runtime.ReadMemStats(&after)
-	if r := ReasonOf(err); r != ReasonInvalid && r != ReasonTooLarge {
-		t.Errorf("%v, want Invalid or TooLarge", err)
+	if ReasonOf(err) != ReasonInvalid || !strings.Contains(err.Error(), "alias") {
+		t.Errorf("%v, want too many aliases", err)
 	}
-	// The guard walk's yields, bounded by the network cap: seconds under
-	// the race detector, well within the deadline.
-	if d := time.Since(start); d > 30*time.Second {
+	// A few steps per alias, MaxAliases of them: milliseconds, under the
+	// race detector too.
+	if d := time.Since(start); d > 5*time.Second {
 		t.Errorf("took %v", d)
 	}
 	if grew := after.TotalAlloc - before.TotalAlloc; grew > 64<<20 {
