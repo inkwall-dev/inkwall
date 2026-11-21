@@ -6,6 +6,7 @@ package agent
 import (
 	"bytes"
 	"crypto/ed25519"
+	"errors"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -326,4 +327,46 @@ func TestGeoInterleaved(t *testing.T) {
 	waitFor(t, "the last table", func() bool { h, _ := enforced(t, a); return a.Version() == 9 && h == string(last.hash[:]) })
 	close(stop)
 	readers.Wait()
+}
+
+// TestGeoCacheOffAndOrder: a bundle without geo removes the cached table,
+// so a later restart can't enforce an old one as the previous table; and
+// cache writes, made after a.mu is released, never put an older table over
+// a newer one.
+func TestGeoCacheOffAndOrder(t *testing.T) {
+	e := newEnv(t)
+	file := filepath.Join(e.dir, "geo.table")
+	a, _, _ := e.agent(t, func(c *Config) { c.GeoCacheFile = file; c.Addr = "127.0.0.1:1" })
+	de, fr := newTable(t, "DE"), newTable(t, "FR")
+	mustApply(t, a, geoBundle(t, e.priv, 1, &de))
+	a.offerTable(de.hash[:], de.gz)
+	if _, err := os.Stat(file); err != nil {
+		t.Fatalf("not cached: %v", err)
+	}
+	mustApply(t, a, geoBundle(t, e.priv, 2, nil))
+	if _, err := os.Stat(file); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the cache outlived geo: %v", err)
+	}
+	// Geo on again after a restart: no previous table to enforce.
+	mustApply(t, a, geoBundle(t, e.priv, 3, &fr))
+	b, _, _ := e.agent(t, func(c *Config) { c.GeoCacheFile = file; c.Addr = "127.0.0.1:1" })
+	b.LoadCache()
+	if h, named := enforced(t, b); h != "" || !named {
+		t.Fatalf("enforced %x after geo was off", h)
+	}
+
+	// Writes out of order: the older one is dropped.
+	a.mu.Lock()
+	a.geoSeq += 2
+	newer, older := a.geoSeq, a.geoSeq-1
+	a.geoWrite = &geoCacheWrite{seq: newer, data: []byte("newer")}
+	a.mu.Unlock()
+	a.flushGeoCache()
+	a.mu.Lock()
+	a.geoWrite = &geoCacheWrite{seq: older, data: []byte("older")}
+	a.mu.Unlock()
+	a.flushGeoCache()
+	if got, err := os.ReadFile(file); err != nil || string(got) != "newer" {
+		t.Errorf("cache %q, %v: an older write replaced a newer one", got, err)
+	}
 }

@@ -37,7 +37,8 @@ type pendingTable struct {
 	size   uint64
 }
 
-// geoCacheWrite is a table to write to the cache, once a.mu is released.
+// geoCacheWrite is a table to write to the cache, once a.mu is released;
+// without data, the cache file is removed.
 type geoCacheWrite struct {
 	seq  uint64
 	data []byte
@@ -93,7 +94,13 @@ func (a *Agent) GeoReady() <-chan struct{} { return a.geoReady }
 // until the named one arrives, or none. a.mu is held.
 func (a *Agent) attachGeo(set *policy.Set, ref *bundlev1.GeoTableRef) *policy.Set {
 	if ref == nil {
-		// No geo: nothing to hold.
+		// No geo: nothing to hold, nor to cache: a cached table would
+		// otherwise come back, however old, as the previous one of a later
+		// bundle that turns geo on again (design 0011 §4.3).
+		if (a.table != nil || a.pending != nil) && a.cfg.GeoCacheFile != "" {
+			a.geoSeq++
+			a.geoWrite = &geoCacheWrite{seq: a.geoSeq} // no data: remove
+		}
 		a.table, a.pending = nil, nil
 		a.geo.bytes.Set(0)
 		a.geo.built.Set(0)
@@ -180,6 +187,12 @@ func (a *Agent) flushGeoCache() {
 		return // a newer table was written meanwhile
 	}
 	a.geoCached = w.seq
+	if w.data == nil {
+		if err := os.Remove(a.cfg.GeoCacheFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+			a.log.Warn("can't remove the cached country table", slog.Any("error", err))
+		}
+		return
+	}
 	if err := replaceFile(a.cfg.GeoCacheFile, ".geo-", w.data); err != nil {
 		a.log.Warn("can't cache the country table", slog.Any("error", err))
 	}
