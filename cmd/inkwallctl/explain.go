@@ -703,7 +703,7 @@ func clusterInput(ctx context.Context, c client.Reader, ns, name string) (resolv
 		switch b.Ref.Kind {
 		case "WAFRuleSet":
 			var rs wafv1alpha1.WAFRuleSet
-			rsNS := cmp.Or(b.Ref.Namespace, ns)
+			rsNS := cmp.Or(b.Ref.Namespace, ns) //nolint:staticcheck // the deprecated field still resolves
 			if err := c.Get(ctx, types.NamespacedName{Namespace: rsNS, Name: b.Ref.Name}, &rs); err != nil {
 				if apierrors.IsNotFound(err) {
 					continue
