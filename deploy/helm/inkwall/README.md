@@ -95,8 +95,10 @@ parent chart may share.
 | `global.imagePullSecrets` | `[]` | Secrets the images are pulled with, `[{name: regcred}]` or `[regcred]`: for the operator's pods, and added to the proxy pods the Pod webhook injects. See [private registries](#private-registries) |
 | `operator.image.repository`, `tag`, `digest`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-operator`, the chart's `appVersion`, `""`, `IfNotPresent` | A `digest` (`sha256:...`) replaces the tag |
 | `operator.replicas` | `2` | One leads; all serve the webhooks |
-| `operator.resources` | 100m CPU and 128Mi requested; 512Mi limit | The operator sets `GOMEMLIMIT` to 90% of the memory limit, unless `GOMEMLIMIT` is set |
+| `operator.resources` | 100m CPU and 128Mi requested; 768Mi limit (geo blocking compiles its database on the leader) | The operator sets `GOMEMLIMIT` to 90% of the memory limit, unless `GOMEMLIMIT` is set |
 | `operator.extraArgs` | `[]` | Extra `inkwall-operator` flags |
+| `geo.volume` | `{}` | A volume source with the country database, mounted read-only at `/var/lib/inkwall/geo` ([geo blocking](../../../docs/geo-blocking.md)) |
+| `geo.geoipupdate.enabled`, `image`, `secretName`, `editionIDs`, `frequency`, `egressCIDRs` | `false`, MaxMind's image, `""`, `GeoLite2-Country`, `24`, `[0.0.0.0/0]` | MaxMind's `geoipupdate` beside each operator replica, with the account in Secret `secretName` (`account-id`, `license-key`); the NetworkPolicy opens HTTPS to `egressCIDRs` for it |
 | `operator.extraEnv`, `extraVolumes`, `extraVolumeMounts` | `[]` | Extra environment variables, volumes and mounts of the operator, e.g. `HTTPS_PROXY` for the control plane, or a CA bundle |
 | `operator.topologySpreadConstraints` | `[]` | [Topology spread](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/), e.g. across zones; rendered as a template, so a `labelSelector` can say `app.kubernetes.io/instance: '{{ .Release.Name }}'` |
 | `operator.podAnnotations`, `podLabels`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName` | | The default [affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/) spreads the replicas across nodes |

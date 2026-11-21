@@ -34,7 +34,9 @@ operator:
       cpu: 100m
       memory: 128Mi
     limits:
-      memory: 512Mi
+      # The leader compiles geo blocking's country database: up to about
+      # 100 MiB more at the bounds (design 0011 §6).
+      memory: 768Mi
 
   # Extra inkwall-operator flags.
   extraArgs: []
@@ -227,6 +229,33 @@ crds:
   # Install and upgrade the CRDs with the chart. They are kept on uninstall
   # (deleting a CRD deletes every object of its kind).
   install: true
+
+# Geo blocking's country database (docs/geo-blocking.md): the operator
+# reads InkwallConfig spec.geo.database.file under /var/lib/inkwall/geo,
+# where one of these mounts it. Inkwall ships no database.
+geo:
+  # A volume holding the database, filled from outside the cluster: any
+  # volume source, e.g. {persistentVolumeClaim: {claimName: geo,
+  # readOnly: true}} (ReadOnlyMany: two operator replicas mount it) or an
+  # image volume. Mounted read-only.
+  volume: {}
+  # MaxMind's geoipupdate beside each operator replica, writing to that
+  # pod's own volume. The pod then needs internet egress to MaxMind.
+  geoipupdate:
+    enabled: false
+    image: ghcr.io/maxmind/geoipupdate:v7.1.1
+    # A Secret in the release namespace with keys account-id and
+    # license-key: your MaxMind account.
+    secretName: ""
+    editionIDs: GeoLite2-Country
+    # Hours between updates.
+    frequency: 24
+    # Where the NetworkPolicy lets it connect, over HTTPS: a NetworkPolicy
+    # can't name MaxMind's hosts, so every address by default.
+    egressCIDRs: [0.0.0.0/0]
+    resources:
+      requests: {cpu: 10m, memory: 32Mi}
+      limits: {memory: 128Mi}
 
 networkPolicy:
   # NetworkPolicies for the chart's pods, for clusters that deny by default

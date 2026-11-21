@@ -93,6 +93,17 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   ([HAProxy](haproxy.md)), or limited clients get 403. A SecLang rule that denies with
   `status:429` now answers gRPC calls with `RESOURCE_EXHAUSTED` instead of `UNAVAILABLE`.
 
+- **Geo blocking** (`spec.geo`, [Geo blocking](geo-blocking.md)). Upgrade the chart first (the
+  CRD fields and the operator), then the engines: an engine before 0.7.0 ignores `spec.geo` and
+  gets no country table, and the policy is `Enforced=False`, `EnginesOutdated`. A policy with
+  `spec.geo` and no country database (`InkwallConfig.spec.geo.database`) is `Enforced=False`,
+  `GeoDatabaseUnavailable`, and geo is skipped. The chart's default operator `limits.memory` is now
+  768 MiB (it was 512 MiB): compiling a database takes up to about 100 MiB on the leader. Rolling
+  the operator back below 0.7.0 drops geo without a word, and leaves the `inkwall-geo` Secrets
+  behind: `kubectl -n inkwall-system delete secret inkwall-geo` and
+  `kubectl -n inkwall-system delete secret -l waf.inkwall.dev/bundle-chunk=inkwall-geo`. Roll the
+  CRD back last.
+
 - **The HAProxy Kubernetes Ingress Controller 3.4** (the default of its chart since 1.55.0) is
   wired: 3.4 dropped the config snippets the operator loads the filter with on 3.1 to 3.2, so on
   3.4 each protected Ingress gets a `Backend` custom resource of the controller's

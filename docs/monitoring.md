@@ -317,6 +317,20 @@ The bundle is over 80% of the 7,200 KiB it can be, compressed. Past it, policy c
 published (`Accepted=False`, `BundleTooLarge`). Rules written inline in many policies are the
 usual cause: put shared rules in one rule set the policies reference.
 
+### InkwallGeoDatabaseStale
+
+An engine's country table was built from a database more than 30 days old, for an hour. Countries'
+ranges move every week, and GeoLite2's terms ask you to move to an update within 30 days. Check the
+database's updater (`geoipupdate`, or whatever fills the volume or the Secret), and the
+InkwallConfig's `GeoDatabaseReady` ([geo blocking](geo-blocking.md#status)).
+
+### InkwallGeoClientIPPrivate
+
+More than half of an engine's country lookups have been for private addresses for 15 minutes. Geo
+never denies a private address, so it does nothing: the client IP the engine resolves is probably
+the load balancer's. Set up the [client IP](client-ip.md), then check the `client_ip` of a few
+events.
+
 ### InkwallEventExportFailing
 
 An export sink of `spec.events.export` has had events waiting on a replica and accepted none of

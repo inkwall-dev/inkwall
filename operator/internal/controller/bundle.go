@@ -5,12 +5,14 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
 	"slices"
+	"strconv"
 	"time"
 	"unicode/utf8"
 
@@ -42,6 +44,7 @@ import (
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/bundle"
 	"github.com/inkwall-dev/inkwall/operator/internal/crdwatch"
+	"github.com/inkwall-dev/inkwall/operator/internal/geo"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
@@ -186,7 +189,7 @@ func (r *BundleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	config := builder.WithPredicates(predicate.Or(predicate.GenerationChangedPredicate{}, predicate.AnnotationChangedPredicate{}))
 	secrets := builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
 		return o.GetNamespace() == r.Namespace && (o.GetName() == bundle.BundleSecret || o.GetName() == bundle.SigningKeySecret ||
-			bundlesecret.IsChunk(bundle.BundleSecret, o.GetName()))
+			bundlesecret.IsChunk(bundle.BundleSecret, o.GetName()) || o.GetName() == bundlesecret.Geo.Name)
 	}))
 	// One build at startup, even in an empty cluster: engines need a bundle.
 	start := make(chan event.GenericEvent, 1)
@@ -299,6 +302,10 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	// rotated) is signed again, as a new version: engines then cache a
 	// bundle the active key signed.
 	resign := current != nil && currentKey != signer.KeyID()
+	geoRef, err := r.geoTable(ctx, res.Policies)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
 	next, changed, err := bundle.Next(current, &bundlev1.Bundle{
 		ClusterId: r.clusterID,
 		Policies:  res.Policies,
@@ -306,6 +313,7 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 		Suspended: suspended,
 		ProbeKey:  signer.ProbeKey(),
 		Events:    eventsConfig(cfg),
+		GeoTable:  geoRef,
 	}, r.lastVersion, r.Now(), resign)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -339,6 +347,14 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	if err := bundle.Prune(ctx, r.Client, r.APIReader, r.Namespace); err != nil {
 		return reconcile.Result{}, fmt.Errorf("delete stale bundle chunks: %w", err)
 	}
+	// The previous country table's chunks go only once the published
+	// bundle names the current table, or none: until then a replica that
+	// starts must find the table the bundle names (design 0011 §4.4).
+	if ref := published.GetGeoTable(); ref == nil || geoRef != nil && bytes.Equal(ref.GetSha256(), geoRef.GetSha256()) {
+		if err := geo.Prune(ctx, r.Client, r.APIReader, r.Namespace); err != nil {
+			return reconcile.Result{}, fmt.Errorf("delete stale country table chunks: %w", err)
+		}
+	}
 
 	if tooLarge != nil {
 		err = r.writeTooLarge(ctx, res, published, next, tooLarge, policies.Items, ruleSets.Items, clusterRuleSets.Items)
@@ -358,6 +374,36 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 		return reconcile.Result{RequeueAfter: min(rotationPoll, r.RotationGrace)}, nil
 	}
 	return reconcile.Result{RequeueAfter: resync}, nil
+}
+
+// geoTable returns the reference to the stored country table when some
+// policy uses spec.geo, nil otherwise or when there is no table yet (geo
+// is then skipped, and the policies say so). The table's Secrets are
+// written before this reads them, so a bundle never names a table that
+// isn't stored.
+func (r *BundleReconciler) geoTable(ctx context.Context, policies []*bundlev1.Policy) (*bundlev1.GeoTableRef, error) {
+	if !slices.ContainsFunc(policies, func(p *bundlev1.Policy) bool { return p.GetGeo() != nil }) {
+		return nil, nil
+	}
+	var s corev1.Secret
+	err := r.Client.Get(ctx, types.NamespacedName{Namespace: r.Namespace, Name: bundlesecret.Geo.Name}, &s)
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	m, err := bundlesecret.Geo.ParseManifest(s.Data[bundlesecret.ManifestKey])
+	if err != nil {
+		log.FromContext(ctx).Error(err, "the country table's manifest can't be read; the bundle names no table")
+		return nil, nil
+	}
+	size, err := strconv.ParseUint(s.Annotations[geo.SizeAnnotation], 10, 64)
+	if err != nil || size == 0 {
+		log.FromContext(ctx).Error(err, "the country table's size can't be read; the bundle names no table")
+		return nil, nil
+	}
+	return &bundlev1.GeoTableRef{Sha256: m.SHA256Bytes(), Size: size}, nil
 }
 
 // publish signs and stores next.

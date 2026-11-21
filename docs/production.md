@@ -45,7 +45,7 @@ and links to the guide that explains it.
   Traefik, HAProxy and Istio ingress gateway pods can't start, so those proxies can't scale or
   replace pods ([when the operator is down](../deploy/helm/inkwall/README.md#when-the-operator-is-down)).
   Give the operator an `operator.priorityClassName` that outranks the workloads it protects.
-- [ ] **Size its memory.** It requests 100m CPU and 128Mi, with a 512Mi limit, and sets
+- [ ] **Size its memory.** It requests 100m CPU and 128Mi, with a 768Mi limit, and sets
   `GOMEMLIMIT` to 90% of the limit (`operator.resources`). Its memory grows with the policies and
   routes, not with the engines: see [Scale](#scale) for the numbers, and raise the limit for a
   cluster near them.

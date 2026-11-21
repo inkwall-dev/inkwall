@@ -42,6 +42,10 @@ const (
 	// ReasonEnginesOutdated: an engine runs the bundle but is too old to
 	// enforce a field the policy sets, which it ignores.
 	ReasonEnginesOutdated = "EnginesOutdated"
+	// ReasonGeoDatabaseUnavailable: the policy has spec.geo, but the
+	// cluster has no country table, or some engines that run the bundle
+	// hold none: geo is skipped (or fails closed) there.
+	ReasonGeoDatabaseUnavailable = "GeoDatabaseUnavailable"
 	// ReasonSuspended: the bundle suspends inspection (the InkwallConfig's
 	// spec.suspend), so engines allow every request.
 	ReasonSuspended = "Suspended"
@@ -195,6 +199,10 @@ func requirement(p *wafv1alpha1.WAFPolicy) (string, [3]int) {
 	if b := p.Spec.Body; b != nil && b.GRPC == wafv1alpha1.GRPCDeny {
 		// An older engine lets gRPC through (#367).
 		set("spec.body.grpc", [3]int{0, 5, 0})
+	}
+	if p.Spec.Geo != nil {
+		// An older engine denies nothing by country (#724).
+		set("spec.geo", [3]int{0, 7, 0})
 	}
 	if len(p.Spec.RateLimits) > 0 {
 		// An older engine limits nothing (#705).
@@ -499,7 +507,7 @@ func (r *Reporter) report(ctx context.Context) error {
 		mine, missing := served.enginesFor(key, engines)
 		gone := served.goneFor(key, disconnected)
 		// The list is the cache's, not a copy: copy only what is written.
-		if _, changed := enforcedConditions(p, version, suspended, mine, gone, leftOut, missing); !changed {
+		if _, changed := enforcedConditions(p, version, suspended, r.Store.GeoNamed(), mine, gone, leftOut, missing); !changed {
 			continue
 		}
 		p = p.DeepCopy()
@@ -572,7 +580,7 @@ func (r *Reporter) writeConfig(ctx context.Context, counts *wafv1alpha1.EngineCo
 // had neither run nor rejected the policy's version counts as missing
 // (#675). One that rejected it was EngineNack: gone, it no longer counts,
 // as before.
-func enforcedConditions(p *wafv1alpha1.WAFPolicy, served uint64, suspended bool, engines, gone []Engine, leftOut, missing int) ([]metav1.Condition, bool) {
+func enforcedConditions(p *wafv1alpha1.WAFPolicy, served uint64, suspended, geoNamed bool, engines, gone []Engine, leftOut, missing int) ([]metav1.Condition, bool) {
 	conds := slices.Clone(p.Status.Conditions)
 	version := max(p.Status.BundleVersion, int64(served)) // #nosec G115 -- versions count builds
 	for _, e := range gone {
@@ -586,6 +594,10 @@ func enforcedConditions(p *wafv1alpha1.WAFPolicy, served uint64, suspended bool,
 			st, reason = metav1.ConditionFalse, ReasonEnginesOutdated
 			msg = fmt.Sprintf("some engines are too old to enforce %s, which they ignore (first: %s runs %s; it needs %s or later)",
 				field, engineName(*e), e.EngineVersion, need)
+		} else if p.Spec.Geo != nil {
+			if ok, m := geoEnforced(geoNamed, engines); !ok {
+				st, reason, msg = metav1.ConditionFalse, ReasonGeoDatabaseUnavailable, m
+			}
 		}
 	}
 	if suspended {
@@ -600,6 +612,29 @@ func enforcedConditions(p *wafv1alpha1.WAFPolicy, served uint64, suspended bool,
 	return conds, changed
 }
 
+// geoEnforced reports whether a policy's geo is enforced: the bundle names
+// a country table, and every engine that runs it holds one. An engine
+// still on the previous table during an update enforces geo with it, so
+// it counts (the condition doesn't flap at every database update).
+func geoEnforced(named bool, engines []Engine) (bool, string) {
+	if !named {
+		return false, "no country database: set InkwallConfig spec.geo.database (geo is skipped until then)"
+	}
+	var first *Engine
+	n := 0
+	for i := range engines {
+		if engines[i].GeoTable == "" {
+			if n++; first == nil {
+				first = &engines[i]
+			}
+		}
+	}
+	if n > 0 {
+		return false, fmt.Sprintf("%d of %d engines have no country table (first: %s)", n, len(engines), engineName(*first))
+	}
+	return true, ""
+}
+
 func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, served uint64, suspended bool, engines, gone []Engine, leftOut, missing int) error {
 	first := true
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -609,7 +644,7 @@ func (r *Reporter) write(ctx context.Context, p *wafv1alpha1.WAFPolicy, served u
 			}
 		}
 		first = false
-		conds, changed := enforcedConditions(p, served, suspended, engines, gone, leftOut, missing)
+		conds, changed := enforcedConditions(p, served, suspended, r.Store.GeoNamed(), engines, gone, leftOut, missing)
 		if !changed {
 			return nil
 		}

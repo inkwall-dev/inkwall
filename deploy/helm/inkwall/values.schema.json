@@ -470,6 +470,52 @@
         }
       }
     },
+    "geo": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Geo blocking's country database (docs/geo-blocking.md)",
+      "properties": {
+        "volume": {
+          "type": "object",
+          "description": "A volume source holding the database, mounted read-only at /var/lib/inkwall/geo"
+        },
+        "geoipupdate": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "image": {
+              "type": "string",
+              "minLength": 1
+            },
+            "secretName": {
+              "type": "string",
+              "description": "Secret with keys account-id and license-key"
+            },
+            "editionIDs": {
+              "type": "string",
+              "minLength": 1
+            },
+            "frequency": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "egressCIDRs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F:.]+/[0-9]{1,3}$"
+              }
+            },
+            "resources": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
     "networkPolicy": {
       "type": "object",
       "additionalProperties": false,

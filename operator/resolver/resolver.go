@@ -813,6 +813,18 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 	for _, l := range s.RateLimits {
 		p.RateLimits = append(p.RateLimits, rateLimit(l))
 	}
+	if g := s.Geo; g != nil {
+		p.Geo = &bundlev1.Geo{UnknownDeny: g.Unknown == wafv1alpha1.GeoUnknownDeny, Detect: g.Mode == wafv1alpha1.GeoModeDetect}
+		for _, c := range g.Deny {
+			p.Geo.Deny = append(p.Geo.Deny, string(c))
+		}
+		for _, c := range g.Allow {
+			p.Geo.Allow = append(p.Geo.Allow, string(c))
+		}
+		// Sorted, so a reordered list is the same bundle.
+		slices.Sort(p.Geo.Deny)
+		slices.Sort(p.Geo.Allow)
+	}
 	return p
 }
 

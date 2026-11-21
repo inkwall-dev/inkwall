@@ -90,6 +90,16 @@ spec:
         - ipBlock: {cidr: {{ . }}}
         {{- end }}
       {{- end }}
+    {{- $geo := $.Values.geo | default dict }}
+    {{- if ($geo.geoipupdate | default dict).enabled }}
+    # geoipupdate, to MaxMind (docs/geo-blocking.md).
+    - ports:
+        - {port: 443, protocol: TCP}
+      to:
+        {{- range $geo.geoipupdate.egressCIDRs }}
+        - ipBlock: {cidr: {{ . }}}
+        {{- end }}
+    {{- end }}
     {{- with $egress.extra }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
