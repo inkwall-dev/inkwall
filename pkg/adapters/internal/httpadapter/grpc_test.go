@@ -52,12 +52,13 @@ func TestGRPCCode(t *testing.T) {
 		http.StatusForbidden:             codes.PermissionDenied,
 		http.StatusNotFound:              codes.Unimplemented,
 		http.StatusRequestEntityTooLarge: codes.ResourceExhausted,
-		http.StatusTooManyRequests:       codes.Unavailable,
-		http.StatusBadGateway:            codes.Unavailable,
-		http.StatusServiceUnavailable:    codes.Unavailable,
-		http.StatusGatewayTimeout:        codes.Unavailable,
-		http.StatusTeapot:                codes.Unknown,
-		599:                              codes.Unknown,
+		// A rate limit: not UNAVAILABLE, which tells clients to retry at once.
+		http.StatusTooManyRequests:    codes.ResourceExhausted,
+		http.StatusBadGateway:         codes.Unavailable,
+		http.StatusServiceUnavailable: codes.Unavailable,
+		http.StatusGatewayTimeout:     codes.Unavailable,
+		http.StatusTeapot:             codes.Unknown,
+		599:                           codes.Unknown,
 	}
 	for status, want := range tests {
 		if got := GRPCCode(status); got != want {

@@ -106,6 +106,9 @@ enum Reason {
   REASON_IP_ALLOW = 13;
   // A gRPC call on a policy that refuses gRPC (body.grpc: Deny).
   REASON_GRPC = 14;
+  // The client was over one of the policy's rate limits (spec.rateLimits):
+  // 429 with Retry-After in Block mode.
+  REASON_RATE_LIMIT = 15;
 }
 
 // CheckResponse is the verdict for one CheckRequest.

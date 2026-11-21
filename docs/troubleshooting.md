@@ -408,6 +408,7 @@ What each `reason` means, and what to do:
 | `websocket` | A WebSocket handshake didn't meet the policy's `webSocket` settings: its origin, or a required header. | Add the origin to `webSocket.allowedOrigins`, or fix the client. |
 | `ip-deny` | The client IP is in a WAFIPList of the policy's `ipLists.deny`. | If the client is legitimate, remove its address from the list; check the client IP the engine resolved (`client_ip`). |
 | `grpc` | A gRPC call, on a policy that refuses them (`body.grpc: Deny`). | Set `body.grpc: Allow` if the route serves gRPC ([gRPC](grpc.md)). |
+| `rate-limit` | The client was over one of the policy's `rateLimits` (the event's `rate_limit`): 429 with `Retry-After` in `Block` mode. Each engine counts on its own, and limited requests are sampled: one event per client a minute, with the count in `sampled_count`. | Check the client IP the engine resolved (`client_ip`): behind a load balancer that hides it, every client shares one limit ([client IP](client-ip.md)). Otherwise raise the limit's `requests` or `burst`, or narrow its `match`. |
 <!-- end reasons -->
 
 A rule that matched a legitimate value is a false positive: exclude it for that argument, as

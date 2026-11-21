@@ -119,6 +119,9 @@ const (
 	Reason_REASON_IP_ALLOW Reason = 13
 	// A gRPC call on a policy that refuses gRPC (body.grpc: Deny).
 	Reason_REASON_GRPC Reason = 14
+	// The client was over one of the policy's rate limits (spec.rateLimits):
+	// 429 with Retry-After in Block mode.
+	Reason_REASON_RATE_LIMIT Reason = 15
 )
 
 // Enum value maps for Reason.
@@ -139,6 +142,7 @@ var (
 		12: "REASON_IP_DENY",
 		13: "REASON_IP_ALLOW",
 		14: "REASON_GRPC",
+		15: "REASON_RATE_LIMIT",
 	}
 	Reason_value = map[string]int32{
 		"REASON_UNSPECIFIED": 0,
@@ -156,6 +160,7 @@ var (
 		"REASON_IP_DENY":     12,
 		"REASON_IP_ALLOW":    13,
 		"REASON_GRPC":        14,
+		"REASON_RATE_LIMIT":  15,
 	}
 )
 
@@ -643,7 +648,7 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\fACTION_ALLOW\x10\x01\x12\x0f\n" +
 	"\vACTION_DENY\x10\x02\x12\x0e\n" +
 	"\n" +
-	"ACTION_LOG\x10\x03*\xb7\x02\n" +
+	"ACTION_LOG\x10\x03*\xce\x02\n" +
 	"\x06Reason\x12\x16\n" +
 	"\x12REASON_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vREASON_NONE\x10\x01\x12\x0f\n" +
@@ -660,7 +665,8 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\x10REASON_WEBSOCKET\x10\v\x12\x12\n" +
 	"\x0eREASON_IP_DENY\x10\f\x12\x13\n" +
 	"\x0fREASON_IP_ALLOW\x10\r\x12\x0f\n" +
-	"\vREASON_GRPC\x10\x0e2Z\n" +
+	"\vREASON_GRPC\x10\x0e\x12\x15\n" +
+	"\x11REASON_RATE_LIMIT\x10\x0f2Z\n" +
 	"\fCheckService\x12J\n" +
 	"\x05Check\x12\x1f.inkwall.engine.v1.CheckRequest\x1a .inkwall.engine.v1.CheckResponseB7Z5github.com/inkwall-dev/inkwall/api/engine/v1;enginev1b\x06proto3"
 

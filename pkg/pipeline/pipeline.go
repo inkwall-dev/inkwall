@@ -138,6 +138,9 @@ type Config struct {
 	// Responses configures response inspection; the zero value inspects
 	// none.
 	Responses ResponseConfig
+	// RateLimits are the policy's limits (CompileRateLimits), checked after
+	// the IP lists and the skipped paths, before anything else. Nil: none.
+	RateLimits *RateLimits
 	// IPDeny and IPAllow are the policy's IP lists (#358), checked on the
 	// resolved client IP before anything else: a client in IPDeny is
 	// denied (logged in detect mode) with ReasonIPDeny, one in IPAllow and
@@ -241,6 +244,8 @@ type Pipeline struct {
 	grpcMessages bool
 	// grpcPerMessage: and one by one, where the adapter can (#315).
 	grpcPerMessage bool
+	// limits: the policy's rate limits, nil when it has none.
+	limits *RateLimits
 }
 
 // New returns a pipeline that evaluates requests with eval.
@@ -276,6 +281,7 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 		},
 		grpcMessages:   cfg.GRPCMessages,
 		grpcPerMessage: cfg.GRPCMessages && cfg.GRPCPerMessage,
+		limits:         cfg.RateLimits,
 	}
 }
 
@@ -339,7 +345,7 @@ func (p *Pipeline) CheckExchange(ctx context.Context, r *request.Request) (Verdi
 
 func (p *Pipeline) checkRequest(ctx context.Context, r *request.Request, keep bool) (Verdict, rules.Exchange) {
 	start := time.Now()
-	v, x := p.check(ctx, r, keep)
+	v, x := p.check(ctx, r, keep, start)
 	v.Duration = time.Since(start)
 	v.Policy = p.policy
 	if p.observer != nil {
@@ -352,7 +358,8 @@ func (p *Pipeline) checkRequest(ctx context.Context, r *request.Request, keep bo
 	return v, x
 }
 
-func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool) (Verdict, rules.Exchange) {
+// check decides r, which arrived at now.
+func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool, now time.Time) (Verdict, rules.Exchange) {
 	switch p.ipListed(r) {
 	case ReasonIPDeny:
 		return p.enforce(Verdict{Reason: ReasonIPDeny}, http.StatusForbidden), nil
@@ -368,6 +375,13 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool) (Ve
 		withoutBody.BodyTruncated = false
 		r = &withoutBody
 	case router.InspectAll:
+	}
+	// Rate limits: past the IP lists and the skipped paths, which they
+	// don't count, and before anything takes an evaluation slot, so a
+	// flood over its limit costs no rule evaluation.
+	lim := p.limits.check(r, now, p.mode == ModeBlock)
+	if lim.over != nil {
+		return p.rateLimited(lim), nil
 	}
 
 	// A WebSocket handshake that breaks the policy's WebSocket rules is
@@ -390,6 +404,12 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool) (Ve
 	if grpc && v.Reason == ReasonNone {
 		v.Reason = ReasonGRPC
 		v = p.enforce(v, http.StatusForbidden)
+	}
+	// A Detect limit over its rate only logs, on a Block policy too; a
+	// rule's reason wins over it.
+	if lim.detect != nil && v.Reason == ReasonNone {
+		v.Action, v.Reason, v.RateLimit, v.RetryAfter = ActionLog, ReasonRateLimit, lim.detect.name, lim.retryAfter
+		v.RateLimitEvent, v.SampledCount = lim.event, lim.sampled
 	}
 	return v, x
 }

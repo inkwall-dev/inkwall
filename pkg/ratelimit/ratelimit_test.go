@@ -343,6 +343,7 @@ func TestCapacity(t *testing.T) {
 		}
 	}
 	s := New(DefaultKeys, 460<<20)
+	s.allocate()
 	slots := len(s.shards) * len(s.shards[0].e)
 	if slots*loadPercent/100 < s.Capacity() {
 		t.Errorf("%d slots hold fewer than %d keys at %d%%", slots, s.Capacity(), loadPercent)

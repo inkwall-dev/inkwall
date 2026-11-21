@@ -426,14 +426,15 @@ holds its ID in it.
   table, and nothing is allocated per request.
 - **Probing:** a key's neighbourhood is the 8 slots from its hashed slot (320 bytes, five cache
   lines); lookup, insert and eviction look only there.
-- **Limit IDs, in the engine.** The `Store` interns each limit's identity, (policy UID, limit name,
+- **Limit IDs, in the engine.** The `Store` interns each limit's identity, (policy namespace/name, limit name,
   key spec), to a `uint32` ID of its own, and never reuses one while the engine runs. The bundle
   carries no ID: it would depend on operator state (a deleted bundle Secret restarts the
   operator's counters, [0004 §4.6](0004-operator.md#46-bundle-builder-leader-only)), and the
   engine's own table outlives bundles anyway. Changing `requests`, `period` or `burst` keeps the
   ID and its buckets: GCRA reads `T` and `burst` from the limit at each request, so the new rate
   applies at once to the TAT already there. Changing the name or the key spec is a new limit,
-  which starts full. Each compiled set holds its live IDs; an entry whose ID isn't live counts as
+  which starts full. The policy is named as the bundle names it, namespace/name: a policy deleted and
+  recreated under the same name keeps its buckets. Each compiled set holds its live IDs; an entry whose ID isn't live counts as
   free.
 - **Cost target:** ≤ 1 µs per request with limits, 0 allocations, measured by the benchmarks of
   [§8](#8-testing) (the T1 budget of [0001 §4](0001-performance-first-architecture.md#4-request-pipeline-tiered-cheapest-first);
@@ -632,7 +633,7 @@ step. The guide `docs/client-ip.md` changes "the planned rate limits" to the bui
 | 9 | `Detect` counts and logs, the rules still run; `mode: Detect` per limit | A per-limit `Block` on a `Detect` policy |
 | 10 | Sharded, fixed-capacity, pointer-free table; striped mutexes | Per-CPU buckets; `x/time/rate` per key; `sync.Map` |
 | 11 | Fixed capacity (`--rate-limit-keys`, at most a quarter of `GOMEMLIMIT`, 64 MiB without one); evict free entries, then the closest to full | Growing tables; refusing new keys; clearing all |
-| 12 | Limit IDs interned by the engine from (policy UID, name, key spec); buckets survive bundle swaps, and rate or burst changes, not restarts | IDs assigned by the operator; persisting buckets |
+| 12 | Limit IDs interned by the engine from (policy namespace/name, name, key spec); buckets survive bundle swaps, and rate or burst changes, not restarts | IDs assigned by the operator; persisting buckets |
 | 13 | Old engines: `Enforced=False`, `EnginesOutdated` | A new condition |
 | 14 | Sampled limit events (one per key per minute, with a count, capped at 100 per second per limit and 10 per second per engine); no per-limit metric labels | An event per limited request |
 | 15 | Several `Block` limits: charged atomically each, in order, refunded when a later one refuses; `Detect` limits judged on their own | Check-then-charge without atomicity; `Detect` limits gating the others |

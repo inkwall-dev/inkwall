@@ -305,4 +305,7 @@ var entries = []Entry{
 	{Kind: "SecurityEvent", Condition: "reason", Reason: "grpc",
 		Meaning: "A gRPC call, on a policy that refuses them (`body.grpc: Deny`).",
 		Fix:     "Set `body.grpc: Allow` if the route serves gRPC ([gRPC](grpc.md))."},
+	{Kind: "SecurityEvent", Condition: "reason", Reason: "rate-limit",
+		Meaning: "The client was over one of the policy's `rateLimits` (the event's `rate_limit`): 429 with `Retry-After` in `Block` mode. Each engine counts on its own, and limited requests are sampled: one event per client a minute, with the count in `sampled_count`.",
+		Fix:     "Check the client IP the engine resolved (`client_ip`): behind a load balancer that hides it, every client shares one limit ([client IP](client-ip.md)). Otherwise raise the limit's `requests` or `burst`, or narrow its `match`."},
 }

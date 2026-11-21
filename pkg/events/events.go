@@ -192,6 +192,9 @@ func New(src Source, req *request.Request, path string, v pipeline.Verdict, now 
 		Phase:              eventsv1.Phase_PHASE_REQUEST,
 	}
 	ev.Protocol = protocol(req)
+	if v.Reason == pipeline.ReasonRateLimit {
+		ev.RateLimit, ev.SampledCount = truncate(v.RateLimit, 63), v.SampledCount
+	}
 	switch {
 	case v.WebSocketMessage:
 		ev.Phase, ev.Protocol = eventsv1.Phase_PHASE_WEBSOCKET_MESSAGE, eventsv1.Protocol_PROTOCOL_WEBSOCKET
@@ -388,6 +391,8 @@ func Reason(r pipeline.Reason) enginev1.Reason {
 		return enginev1.Reason_REASON_IP_ALLOW
 	case pipeline.ReasonGRPC:
 		return enginev1.Reason_REASON_GRPC
+	case pipeline.ReasonRateLimit:
+		return enginev1.Reason_REASON_RATE_LIMIT
 	default:
 		return enginev1.Reason_REASON_UNSPECIFIED
 	}

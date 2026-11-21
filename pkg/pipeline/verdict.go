@@ -73,6 +73,9 @@ const (
 	// ReasonGRPC means a gRPC call on a policy that refuses gRPC
 	// (DenyGRPC).
 	ReasonGRPC
+	// ReasonRateLimit means the client was over one of the policy's rate
+	// limits (Verdict.RateLimit).
+	ReasonRateLimit
 )
 
 func (r Reason) String() string {
@@ -105,6 +108,8 @@ func (r Reason) String() string {
 		return "ip-allow"
 	case ReasonGRPC:
 		return "grpc"
+	case ReasonRateLimit:
+		return "rate-limit"
 	default:
 		return "unknown"
 	}
@@ -128,6 +133,17 @@ type Verdict struct {
 	Duration time.Duration
 	// Policy is the policy that decided, in bundle mode ("namespace/name").
 	Policy string
+	// RateLimit is, with ReasonRateLimit, the limit the client was over,
+	// and RetryAfter how long until a request would be within it (whole
+	// seconds; the answer's Retry-After).
+	RateLimit  string
+	RetryAfter time.Duration
+	// RateLimitEvent is, with ReasonRateLimit, whether the verdict becomes
+	// a security event: limited requests are sampled per client and capped
+	// (pkg/ratelimit), so a flood can't push other events out. SampledCount
+	// is the limited requests the event stands for, this one included.
+	RateLimitEvent bool
+	SampledCount   uint32
 	// Response reports a verdict on the upstream's response, not on the
 	// request: a deny replaces the response, and AnomalyScore is the CRS
 	// outbound score.

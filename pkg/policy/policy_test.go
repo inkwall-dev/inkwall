@@ -24,6 +24,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/grpcwire"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/rules"
 	"github.com/inkwall-dev/inkwall/pkg/streams"
@@ -1144,5 +1145,47 @@ func TestGRPCPerMessage(t *testing.T) {
 	h.Store(set)
 	if hs.GRPCStream(call) != nil {
 		t.Error("Holder: messages inspected one by one without grpcPerMessage")
+	}
+}
+
+// TestRateLimits (#705): a bundle's limits are compiled into the shared
+// store and checked per policy; the same limit in the next bundle keeps its
+// buckets; a bundle with limits needs a store.
+func TestRateLimits(t *testing.T) {
+	b := testBundle()
+	b.Policies[0].RateLimits = []*bundlev1.RateLimit{{Name: "site", Requests: 1, Period: durationpb.New(time.Hour), Burst: 1}}
+	store := ratelimit.New(1024, 0)
+	set, err := Compile(b, Options{RateLimits: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := func(host, ip string) *request.Request {
+		r := req(host, "/")
+		r.ClientIP = netip.MustParseAddr(ip)
+		return r
+	}
+	if v := set.Check(context.Background(), from("shop.example.com", "198.51.100.7")); v.Action != pipeline.ActionAllow {
+		t.Fatalf("first: %s/%s", v.Action, v.Reason)
+	}
+	v := set.Check(context.Background(), from("shop.example.com", "198.51.100.7"))
+	if v.Status != 429 || v.Reason != pipeline.ReasonRateLimit || v.Policy != "shop/site" || v.RateLimit != "site" {
+		t.Errorf("second: %d %s %s %q, want 429 rate-limit from shop/site's limit site", v.Status, v.Reason, v.Policy, v.RateLimit)
+	}
+	// Another policy's routes aren't limited.
+	for range 3 {
+		if v := set.Check(context.Background(), from("admin.example.com", "198.51.100.7")); v.Reason == pipeline.ReasonRateLimit {
+			t.Fatal("another policy's route was limited")
+		}
+	}
+	// The next bundle, the same limit: still over.
+	b.Version++
+	if set, err = Compile(b, Options{RateLimits: store}); err != nil {
+		t.Fatal(err)
+	}
+	if v := set.Check(context.Background(), from("shop.example.com", "198.51.100.7")); v.Reason != pipeline.ReasonRateLimit {
+		t.Errorf("the next bundle: %s, want the bucket kept", v.Reason)
+	}
+	if _, err := Compile(b, Options{}); err == nil || !strings.Contains(err.Error(), "shop/site") {
+		t.Errorf("limits without a store: %v, want an error naming the policy", err)
 	}
 }

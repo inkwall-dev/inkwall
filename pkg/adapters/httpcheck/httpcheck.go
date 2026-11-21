@@ -310,12 +310,16 @@ func toResponse(id string, v pipeline.Verdict) *enginev1.CheckResponse {
 	for _, m := range events.LogMatches(v) {
 		matches = append(matches, &enginev1.RuleMatch{RuleId: uint32(m.RuleID), Variable: m.Variable}) // #nosec G115 -- a rule ID
 	}
+	headers := []*enginev1.Header{{Name: "X-Request-Id", Value: id}}
+	if ra := httpadapter.RetryAfter(v); ra != "" {
+		headers = append(headers, &enginev1.Header{Name: "Retry-After", Value: ra})
+	}
 	return &enginev1.CheckResponse{
 		Matches:            matches,
 		AnomalyScore:       int32(v.AnomalyScore), // #nosec G115 -- scores are small
 		Action:             events.Action(v.Action),
 		Status:             uint32(v.Status), // #nosec G115 -- an HTTP status
-		ResponseHeaders:    []*enginev1.Header{{Name: "X-Request-Id", Value: id}},
+		ResponseHeaders:    headers,
 		RuleIds:            ids,
 		Reason:             events.Reason(v.Reason),
 		InterruptingRuleId: uint32(v.InterruptingRuleID), // #nosec G115 -- a rule ID

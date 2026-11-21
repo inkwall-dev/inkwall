@@ -652,17 +652,25 @@ func (s *Server) responseVerdict(ctx context.Context, x *exchange, p phase) *ext
 		httpadapter.LogEvent(ctx, s.logger, s.events, x.req, x.path, v)
 	}
 	if v.Action == pipeline.ActionDeny {
-		return s.denial(x.req, v.Status)
+		return s.denial(x.req, v)
 	}
 	return allow(p, nil)
 }
 
-// denial denies req's stream with status: a gRPC call with a gRPC status.
-func (s *Server) denial(req *request.Request, status int) *extprocv3.ProcessingResponse {
+// denial denies req's stream with v's status, and its Retry-After: a gRPC
+// call with a gRPC status.
+func (s *Server) denial(req *request.Request, v pipeline.Verdict) *extprocv3.ProcessingResponse {
+	var resp *extprocv3.ProcessingResponse
 	if g := httpadapter.GRPCOf(req.Headers); g != httpadapter.NotGRPC {
-		return denyGRPC(g, status, req.ID)
+		resp = denyGRPC(g, v.Status, req.ID)
+	} else {
+		resp = deny(v.Status, req.ID, httpadapter.DenialBody(v.Status, req.ID, req.Headers, s.jsonDenials))
 	}
-	return deny(status, req.ID, httpadapter.DenialBody(status, req.ID, req.Headers, s.jsonDenials))
+	if ra := httpadapter.RetryAfter(v); ra != "" {
+		h := resp.GetImmediateResponse().GetHeaders()
+		h.SetHeaders = append(h.SetHeaders, header("retry-after", ra))
+	}
+	return resp
 }
 
 // toResponse reads the response's status and headers. Envoy validated
@@ -708,7 +716,7 @@ func (s *Server) verdict(ctx context.Context, x *exchange, p phase) *extprocv3.P
 		httpadapter.LogEvent(ctx, s.logger, s.events, x.req, x.path, v)
 	}
 	if v.Action == pipeline.ActionDeny {
-		return s.denial(x.req, v.Status)
+		return s.denial(x.req, v)
 	}
 	if x.probeAnswer != "" && x.ex == nil && !x.observe {
 		// The probe's response leg, but its response isn't kept (the
