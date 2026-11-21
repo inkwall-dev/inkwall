@@ -223,6 +223,8 @@ func TestEnforcedOutdatedEngine(t *testing.T) {
 		{"crs, new engines", crs, []string{"0.5.0", "v0.5.0-rc.1"}, ReasonEnforced},
 		{"empty crs", []wafv1alpha1.RuleSetBinding{{CRS: &wafv1alpha1.CRSSettings{}}}, []string{"0.4.1"}, ReasonEnforced},
 		{"no crs", []wafv1alpha1.RuleSetBinding{{ParanoiaLevel: ptr.To(int32(2))}}, []string{"0.4.1"}, ReasonEnforced},
+		// Every engine applies the paranoia level and threshold (#714).
+		{"crs paranoia level and threshold", []wafv1alpha1.RuleSetBinding{{CRS: &wafv1alpha1.CRSSettings{ParanoiaLevel: ptr.To(int32(2)), InboundAnomalyThreshold: ptr.To(int32(7))}}}, []string{"0.4.1"}, ReasonEnforced},
 	} {
 		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
 		p.Spec.RuleSets = tc.ruleSets

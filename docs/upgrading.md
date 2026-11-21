@@ -130,6 +130,16 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
 - A `spec.integrations[].controller` that isn't a DNS label (`Traefik`, `ingress_nginx`) now draws
   a warning when it is added: no integration has such a name, so the entry never did anything,
   and v1 refuses it.
+- **Every CRS setting of a rule set binding is under `crs`** (#714). `ruleSets[].paranoiaLevel` and
+  `ruleSets[].inboundAnomalyThreshold` are deprecated for `ruleSets[].crs.paranoiaLevel` and
+  `crs.inboundAnomalyThreshold`, next to `detectionParanoiaLevel` and `outboundAnomalyThreshold`.
+  The old fields still work, and the bundle is the same either way (every engine applies both),
+  but setting them draws a warning, and setting one together with its new counterpart is
+  refused. Move them (`crs: {paranoiaLevel: 2}` for `paranoiaLevel: 2`); v1 moves them for you.
+  The sample, the README and `inkwallctl migrate ingress-nginx` use the new fields, so a policy
+  the migration writes needs the 0.7.0 CRDs. CRS settings on a binding to a rule set that isn't
+  the built-in CRS (SecLang, a ConfigMap) were always ignored; the policy's `Accepted` message now
+  says so, and v1 refuses them.
 
 ## From 0.5.x to 0.6.0
 

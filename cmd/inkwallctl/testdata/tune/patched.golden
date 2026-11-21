@@ -29,8 +29,9 @@ spec:
       path: /search
   mode: Block
   ruleSets:
-  - inboundAnomalyThreshold: 5
-    paranoiaLevel: 1
+  - crs:
+      inboundAnomalyThreshold: 5
+      paranoiaLevel: 1
     ref:
       kind: ClusterWAFRuleSet
       name: owasp-crs-v4

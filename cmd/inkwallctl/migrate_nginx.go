@@ -609,12 +609,12 @@ func (s *modsec) secAction(m *migration, text string, args []string, src string)
 			m.add(itemTodo, src, "not migrated: setvar:%s: the paranoia level is 1 to 4", a.value)
 		case field == "paranoiaLevel":
 			s.paranoia = int32(n)
-			m.add(itemMapped, src, "setvar:%s: paranoiaLevel: %d", a.value, n)
+			m.add(itemMapped, src, "setvar:%s: crs.paranoiaLevel: %d", a.value, n)
 		case n < 1 || n > 10000:
 			m.add(itemTodo, src, "not migrated: setvar:%s: the threshold is 1 to 10000", a.value)
 		default:
 			s.threshold = int32(n)
-			m.add(itemMapped, src, "setvar:%s: inboundAnomalyThreshold: %d", a.value, n)
+			m.add(itemMapped, src, "setvar:%s: crs.inboundAnomalyThreshold: %d", a.value, n)
 		}
 	}
 	if len(unmapped) == 0 {
@@ -1108,14 +1108,14 @@ func (s *modsec) build(m *migration) {
 	}
 	if s.crs && (s.paranoia != 0 || s.threshold != 0 || !s.crsSettings.IsZero() || len(s.rules) > 0) {
 		b := wafv1alpha1.RuleSetBinding{Ref: wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: crsRuleSetName}}
+		c := s.crsSettings
 		if s.paranoia != 0 {
-			b.ParanoiaLevel = &s.paranoia
+			c.ParanoiaLevel = &s.paranoia
 		}
 		if s.threshold != 0 {
-			b.InboundAnomalyThreshold = &s.threshold
+			c.InboundAnomalyThreshold = &s.threshold
 		}
-		if !s.crsSettings.IsZero() {
-			c := s.crsSettings
+		if c.ParanoiaLevel != nil || c.InboundAnomalyThreshold != nil || !c.IsZero() {
 			b.CRS = &c
 		}
 		p.Spec.RuleSets = append(p.Spec.RuleSets, b)

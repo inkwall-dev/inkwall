@@ -122,9 +122,9 @@ func TestPolicyValidation(t *testing.T) {
 	// CRS settings the engine wouldn't apply.
 	crs := p.DeepCopy()
 	crs.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{{
-		Ref:           wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: "crs"},
-		ParanoiaLevel: ptr(int32(2)),
+		Ref: wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: "crs"},
 		CRS: &wafv1alpha1.CRSSettings{
+			ParanoiaLevel:              ptr(int32(2)),
 			AllowedMethods:             []wafv1alpha1.HTTPMethodToken{"GET", "PUT", "PROPFIND"},
 			AllowedRequestContentTypes: []wafv1alpha1.MediaType{"application/json", "application/vnd.api+json"},
 			DetectionParanoiaLevel:     ptr(int32(3)),
@@ -150,6 +150,39 @@ func TestPolicyValidation(t *testing.T) {
 			wantInvalid(t, err, tc.field, tc.detail)
 		})
 	}
+	// The deprecated binding-level paranoia level still counts (#714).
+	old := crs.DeepCopy()
+	old.Spec.RuleSets[0].CRS.ParanoiaLevel = nil
+	old.Spec.RuleSets[0].ParanoiaLevel = ptr(int32(4)) //nolint:staticcheck // the deprecated field
+	_, err = v.ValidateCreate(ctx, old)
+	wantInvalid(t, err, "spec.ruleSets[0].crs.detectionParanoiaLevel", "paranoia level")
+}
+
+// The binding-level paranoiaLevel and inboundAnomalyThreshold are
+// deprecated for crs's (#714): each draws a warning, crs's none.
+func TestPolicyCRSWarnings(t *testing.T) {
+	ctx := context.Background()
+	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy}
+	ref := wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: "crs"}
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "shop"}}
+	p.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{{Ref: ref, CRS: &wafv1alpha1.CRSSettings{ParanoiaLevel: ptr(int32(2)), InboundAnomalyThreshold: ptr(int32(7))}}}
+	if warnings, err := v.ValidateCreate(ctx, p); err != nil || len(warnings) != 0 {
+		t.Errorf("crs: warnings %q, error %v", warnings, err)
+	}
+	p.Spec.RuleSets = append(p.Spec.RuleSets, wafv1alpha1.RuleSetBinding{Ref: ref, ParanoiaLevel: ptr(int32(2)), InboundAnomalyThreshold: ptr(int32(7))}) //nolint:staticcheck // the deprecated fields
+	warnings, err := v.ValidateCreate(ctx, p)
+	want := []string{
+		"spec.ruleSets[1].paranoiaLevel is deprecated: set spec.ruleSets[1].crs.paranoiaLevel instead",
+		"spec.ruleSets[1].inboundAnomalyThreshold is deprecated: set spec.ruleSets[1].crs.inboundAnomalyThreshold instead",
+	}
+	if err != nil || len(warnings) != len(want) {
+		t.Fatalf("deprecated fields: warnings %q, error %v", warnings, err)
+	}
+	for i, w := range want {
+		if !strings.Contains(warnings[i], w) {
+			t.Errorf("warning %q doesn't say %q", warnings[i], w)
+		}
+	}
 }
 
 // A rule set placed before the CRS can't be the CRS, so a binding that
@@ -159,7 +192,7 @@ func TestPolicyValidationPlacement(t *testing.T) {
 	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy}
 	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "shop"}}
 	p.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{
-		{Ref: wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: "crs"}, ParanoiaLevel: ptr(int32(2)), Placement: wafv1alpha1.PlacementAfterCRS},
+		{Ref: wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: "crs"}, CRS: &wafv1alpha1.CRSSettings{ParanoiaLevel: ptr(int32(2))}, Placement: wafv1alpha1.PlacementAfterCRS},
 		{Ref: wafv1alpha1.RuleSetRef{Kind: "WAFRuleSet", Name: "tune"}, Placement: wafv1alpha1.PlacementBeforeCRS},
 	}
 	if _, err := v.ValidateCreate(ctx, p); err != nil {
@@ -169,8 +202,9 @@ func TestPolicyValidationPlacement(t *testing.T) {
 		name string
 		edit func(*wafv1alpha1.RuleSetBinding)
 	}{
-		{"paranoia level", func(b *wafv1alpha1.RuleSetBinding) { b.ParanoiaLevel = ptr(int32(2)) }},
-		{"threshold", func(b *wafv1alpha1.RuleSetBinding) { b.InboundAnomalyThreshold = ptr(int32(10)) }},
+		{"paranoia level", func(b *wafv1alpha1.RuleSetBinding) { b.ParanoiaLevel = ptr(int32(2)) }}, //nolint:staticcheck // the deprecated field
+		{"crs paranoia level", func(b *wafv1alpha1.RuleSetBinding) { b.CRS = &wafv1alpha1.CRSSettings{ParanoiaLevel: ptr(int32(2))} }},
+		{"threshold", func(b *wafv1alpha1.RuleSetBinding) { b.InboundAnomalyThreshold = ptr(int32(10)) }}, //nolint:staticcheck // the deprecated field
 		{"crs", func(b *wafv1alpha1.RuleSetBinding) {
 			b.CRS = &wafv1alpha1.CRSSettings{AllowedMethods: []wafv1alpha1.HTTPMethodToken{"GET"}}
 		}},
