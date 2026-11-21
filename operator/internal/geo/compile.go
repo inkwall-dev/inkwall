@@ -212,7 +212,7 @@ func compile(ctx context.Context, db []byte, floor *Table) (*Table, error) {
 	// every tree record they follow is bounds-checked, every data record
 	// decoded, under the deadline and the caps.
 	c := &compiler{ctx: ctx, r: r, codes: map[uintptr]code{}, firstV4: -1}
-	if err := c.walk(); err != nil {
+	if err := c.walk(db); err != nil {
 		return nil, err
 	}
 	if c.country == 0 {
@@ -296,38 +296,19 @@ func (c *compiler) stepUpTo(limit int) error {
 	return nil
 }
 
-// guardWalks bounds the walk that follows the aliases: the IPv4 networks
-// once in their subtree and once under each of MaxMind's three aliases.
-const guardWalks = 4
-
 // walk walks every network, those without data included: without them an
 // empty leaf yields nothing, and a tree whose shared children all end in
 // empty leaves would keep the walk from ever coming back to check the
 // deadline. The IPv4 aliases are skipped, and leave gaps.
 //
 // A skipped alias doesn't yield either, so a tree whose shared children end
-// in aliases would make that walk as long, unchecked. So a first walk
-// follows the aliases, where every path end yields: it is checked and
-// capped, and the walk that skips them ends at no more path ends than it
-// yielded.
-func (c *compiler) walk() error {
-	// The IPv4 networks come first, in ::/96. Past them, the walk yields
-	// at most the networks outside any alias (the cap) and the IPv4
-	// networks again under each alias, of which there are at most
-	// MaxAliases, or the compile fails anyway.
-	limit, v4 := guardWalks*maxNetworks, 0
-	for res := range c.r.Networks(maxminddb.IncludeAliasedNetworks(), maxminddb.IncludeNetworksWithoutData()) {
-		if err := c.stepUpTo(limit); err != nil {
-			return err
-		}
-		if err := res.Err(); err != nil {
-			return fail(ReasonInvalid, "reading the database: %v", err)
-		}
-		if res.Prefix().Addr().Is4() {
-			v4++
-		} else if v4 > 0 {
-			limit = min(limit, maxNetworks+v4+geotable.MaxAliases*v4)
-		}
+// in aliases would make that walk as long, unchecked. So guard walks the
+// search tree first, as the library's walk does, counting its path ends
+// and its aliases, and refuses the tree past either cap: the walk then
+// yields at most maxNetworks networks and skips at most MaxAliases.
+func (c *compiler) walk(db []byte) error {
+	if err := c.guard(db); err != nil {
+		return err
 	}
 	c.networks = 0
 	c.v6.init()
@@ -379,6 +360,86 @@ func (c *compiler) walk() error {
 	if c.r.Metadata.IPVersion == 6 && !c.v6.full() {
 		if err := c.addGap(span6{c.v6.next, u128{^uint64(0), ^uint64(0)}}); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// guard walks the search tree in db as the library's network walk does
+// (maxminddb-golang v2.9.1, traverse.go), without decoding anything: each
+// empty or data record ends a path, and so does an alias, a record that
+// points to the IPv4 subtree from outside ::/96, where the walk that skips
+// aliases stops. It refuses more than maxNetworks path ends (TooLarge) or
+// more than MaxAliases aliases (Invalid), so a crafted tree of shared
+// children is refused within a few steps per alias, not after the cap's
+// worth of networks under them.
+func (c *compiler) guard(db []byte) error {
+	m := c.r.Metadata
+	nodes := m.NodeCount
+	nodeBytes := m.RecordSize / 4 // two records
+	if uint64(len(db)) < uint64(nodes)*uint64(nodeBytes) {
+		return fail(ReasonInvalid, "not a valid MaxMind DB: the search tree is cut short")
+	}
+	record := func(node uint, right bool) uint {
+		b := db[node*nodeBytes : (node+1)*nodeBytes]
+		switch m.RecordSize {
+		case 24:
+			if right {
+				return uint(b[3])<<16 | uint(b[4])<<8 | uint(b[5])
+			}
+			return uint(b[0])<<16 | uint(b[1])<<8 | uint(b[2])
+		case 28:
+			if right {
+				return uint(b[3]&0x0f)<<24 | uint(b[4])<<16 | uint(b[5])<<8 | uint(b[6])
+			}
+			return uint(b[3]&0xf0)<<20 | uint(b[0])<<16 | uint(b[1])<<8 | uint(b[2])
+		default:
+			if right {
+				return uint(b[4])<<24 | uint(b[5])<<16 | uint(b[6])<<8 | uint(b[7])
+			}
+			return uint(b[0])<<24 | uint(b[1])<<16 | uint(b[2])<<8 | uint(b[3])
+		}
+	}
+	// The IPv4 subtree: ::/96, as the library finds it. Pointing to it
+	// from elsewhere is an alias, only in an IPv6 tree that has one.
+	bits := uint(32)
+	var v4 uint
+	if m.IPVersion == 6 {
+		bits = 128
+		for i := 0; i < 96 && v4 < nodes; i++ {
+			v4 = record(v4, false)
+		}
+	}
+	aliasing := m.IPVersion == 6 && v4 != 0 && v4 < nodes
+	type pending struct {
+		node, bit uint
+		// outside: a bit of the first 96 is set, the path leaves ::/96.
+		outside bool
+	}
+	stack := []pending{{}}
+	aliases := 0
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for {
+			if aliasing && n.node == v4 && n.outside {
+				if aliases++; aliases > geotable.MaxAliases {
+					return fail(ReasonInvalid, "more than %d prefixes alias the IPv4 subtree", geotable.MaxAliases)
+				}
+				break
+			}
+			if n.node >= nodes {
+				if err := c.step(); err != nil {
+					return err
+				}
+				break
+			}
+			if n.bit >= bits {
+				return fail(ReasonInvalid, "not a valid MaxMind DB: the search tree is deeper than %d bits", bits)
+			}
+			setsPrefix := bits == 128 && n.bit < 96
+			stack = append(stack, pending{record(n.node, true), n.bit + 1, n.outside || setsPrefix})
+			n = pending{record(n.node, false), n.bit + 1, n.outside}
 		}
 	}
 	return nil
