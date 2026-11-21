@@ -191,6 +191,15 @@ func (f Format) ParseManifest(data []byte) (*Manifest, error) {
 	return &m, nil
 }
 
+// SHA256Bytes returns the manifest's hash, nil if it isn't valid hex.
+func (m *Manifest) SHA256Bytes() []byte {
+	b, err := hex.DecodeString(m.SHA256)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
 // Marshal encodes m for ManifestKey.
 func (m *Manifest) Marshal() ([]byte, error) { return json.Marshal(m) }
 

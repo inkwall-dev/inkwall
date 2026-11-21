@@ -71,23 +71,24 @@ func (s *SecretSource) server() (string, error) {
 	return "https://" + net.JoinHostPort(host, port), nil
 }
 
-// fetch reads the signed bundle from the Secret, and its chunks.
-func (s *SecretSource) fetch(ctx context.Context) (*bundlev1.SignedBundle, error) {
+// getter returns a function that reads a Secret of the namespace, and one
+// that releases its connections.
+func (s *SecretSource) getter(ctx context.Context) (func(name string) (map[string][]byte, int, error), func(), error) {
 	server, err := s.server()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	token, err := os.ReadFile(filepath.Clean(s.TokenFile))
 	if err != nil {
-		return nil, fmt.Errorf("token: %w", err)
+		return nil, nil, fmt.Errorf("token: %w", err)
 	}
 	ca, err := os.ReadFile(filepath.Clean(s.CAFile))
 	if err != nil {
-		return nil, fmt.Errorf("API server CA: %w", err)
+		return nil, nil, fmt.Errorf("API server CA: %w", err)
 	}
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(ca) {
-		return nil, fmt.Errorf("API server CA %s: no PEM certificate", s.CAFile)
+		return nil, nil, fmt.Errorf("API server CA %s: no PEM certificate", s.CAFile)
 	}
 	client := &http.Client{
 		Timeout: secretTimeout,
@@ -95,10 +96,19 @@ func (s *SecretSource) fetch(ctx context.Context) (*bundlev1.SignedBundle, error
 			TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
 		},
 	}
-	defer client.CloseIdleConnections()
 	get := func(name string) (map[string][]byte, int, error) {
 		return getSecret(ctx, client, server, string(bytes.TrimSpace(token)), s.Namespace, name)
 	}
+	return get, client.CloseIdleConnections, nil
+}
+
+// fetch reads the signed bundle from the Secret, and its chunks.
+func (s *SecretSource) fetch(ctx context.Context) (*bundlev1.SignedBundle, error) {
+	get, done, err := s.getter(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 
 	data, _, err := get(s.Name)
 	if err != nil {
@@ -126,6 +136,37 @@ func (s *SecretSource) fetch(ctx context.Context) (*bundlev1.SignedBundle, error
 		return nil, fmt.Errorf("secret %s/%s has no %s yet", s.Namespace, s.Name, SecretBundleKey)
 	}
 	return decodeSecretBundle(gz)
+}
+
+// fetchGeo reads the gzipped country table from its Secrets, beside the
+// bundle Secret (design 0011 §4.4), checked against their manifest's hash.
+// The caller checks it against the bundle's.
+func (s *SecretSource) fetchGeo(ctx context.Context) ([]byte, error) {
+	get, done, err := s.getter(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	name := bundlesecret.Geo.Name
+	data, _, err := get(name)
+	if err != nil {
+		return nil, err
+	}
+	m, err := bundlesecret.Geo.ParseManifest(data[bundlesecret.ManifestKey])
+	if err != nil {
+		return nil, fmt.Errorf("secret %s/%s: %w", s.Namespace, name, err)
+	}
+	gz, err := bundlesecret.Join(m, func(chunk string) ([]byte, error) {
+		d, status, err := get(chunk)
+		if status == http.StatusNotFound {
+			return nil, fmt.Errorf("%w: %w", bundlesecret.ErrIncomplete, err)
+		}
+		return d[bundlesecret.ChunkKey], err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("secret %s/%s: %w", s.Namespace, name, err)
+	}
+	return gz, nil
 }
 
 // getSecret reads a Secret's data, and the response status.

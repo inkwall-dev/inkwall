@@ -58,6 +58,9 @@ type Engine struct {
 	// verified where the proxy discards its answer (#475), as its last
 	// heartbeat reported them: the leader's probe matches them.
 	ProbeReceipts []string `json:"probeReceipts,omitempty"`
+	// GeoTable is the hash of the country table the engine holds, in hex
+	// (design 0011 §4.4); empty if none, or from an engine before 0.7.0.
+	GeoTable string `json:"geoTable,omitempty"`
 	// Replica is the operator replica the engine is connected to.
 	Replica     string    `json:"replica"`
 	ConnectedAt time.Time `json:"connectedAt"`

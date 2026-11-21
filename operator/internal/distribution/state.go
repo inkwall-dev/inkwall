@@ -8,11 +8,13 @@
 package distribution
 
 import (
+	"bytes"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	agentv1 "github.com/inkwall-dev/inkwall/api/agent/v1"
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 )
 
@@ -40,6 +42,9 @@ type Engine struct {
 	// verified where the proxy discards its answer (#475), as its last
 	// heartbeat reported them: the leader's probe matches them.
 	ProbeReceipts []string `json:"probeReceipts,omitempty"`
+	// GeoTable is the hash of the country table the engine holds, in hex
+	// (design 0011 §4.4); empty if none, or from an engine before 0.7.0.
+	GeoTable string `json:"geoTable,omitempty"`
 	// Replica is the operator replica the engine is connected to.
 	Replica     string    `json:"replica"`
 	ConnectedAt time.Time `json:"connectedAt"`
@@ -135,21 +140,75 @@ type Store struct {
 	policies map[string]uint64
 	// suspended: the bundle suspends inspection.
 	suspended bool
+	// geo is the table hash the current bundle names, nil if none; tables
+	// are the country tables the replica serves, newest first: the current
+	// one and the one before, for streams still sending it.
+	geo    []byte
+	tables []*agentv1.WatchResponse
 }
+
+// geoTables is how many country tables a Store keeps.
+const geoTables = 2
 
 // NewStore returns an empty store.
 func NewStore() *Store { return &Store{changed: make(chan struct{})} }
 
 // Set makes signed, of version, the current bundle.
 func (s *Store) Set(signed *bundlev1.SignedBundle, version uint64) {
+	s.SetWithGeo(signed, version, nil)
+}
+
+// SetWithGeo makes signed, of version, the current bundle, naming the
+// country table geo (nil: none), which the Store must hold already
+// (AddGeoTable): a stream never sends a bundle before its table.
+func (s *Store) SetWithGeo(signed *bundlev1.SignedBundle, version uint64, geo []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if version == s.version && s.signed != nil {
 		return
 	}
-	s.signed, s.version = signed, version
+	s.signed, s.version, s.geo = signed, version, geo
 	close(s.changed)
 	s.changed = make(chan struct{})
+}
+
+// AddGeoTable keeps the gzipped country table gz, of table hash hash, to
+// send to engines.
+func (s *Store) AddGeoTable(hash, gz []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.geoTable(hash) != nil {
+		return
+	}
+	m := &agentv1.WatchResponse{Msg: &agentv1.WatchResponse_GeoTable{GeoTable: &agentv1.CountryTableMessage{Sha256: hash, Table: gz}}}
+	s.tables = append([]*agentv1.WatchResponse{m}, s.tables...)
+	if len(s.tables) > geoTables {
+		s.tables = s.tables[:geoTables]
+	}
+}
+
+// HasGeoTable reports whether the Store holds the table hash.
+func (s *Store) HasGeoTable(hash []byte) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.geoTable(hash) != nil
+}
+
+// GeoTable returns the message carrying the table hash, nil if the Store
+// doesn't hold it.
+func (s *Store) GeoTable(hash []byte) *agentv1.WatchResponse {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.geoTable(hash)
+}
+
+func (s *Store) geoTable(hash []byte) *agentv1.WatchResponse {
+	for _, m := range s.tables {
+		if bytes.Equal(m.GetGeoTable().GetSha256(), hash) {
+			return m
+		}
+	}
+	return nil
 }
 
 // SetPolicies records the current bundle's policies, the only ones whose
@@ -190,4 +249,11 @@ func (s *Store) Current() (*bundlev1.SignedBundle, uint64, <-chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.signed, s.version, s.changed
+}
+
+// current is Current, with the table hash the bundle names.
+func (s *Store) current() (*bundlev1.SignedBundle, uint64, []byte, <-chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.signed, s.version, s.geo, s.changed
 }

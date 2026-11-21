@@ -40,7 +40,9 @@ type fakeAPI struct {
 	missing, stale string
 	// gz is signed compressed, computed once: under the race detector,
 	// compressing a large bundle on every read takes seconds.
-	gz     []byte
+	gz []byte
+	// extra are more Secrets: the country table's.
+	extra  map[string]map[string][]byte
 	tokens []string
 	reads  atomic.Int32
 }
@@ -61,6 +63,9 @@ func newFakeAPI(t *testing.T, dir string) *fakeAPI {
 			return
 		}
 		data := f.secrets(t)[name]
+		if d, ok := f.extra[name]; ok {
+			data = d
+		}
 		if data == nil {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"kind":"Status","message":"secrets \"` + name + `\" not found"}`))
