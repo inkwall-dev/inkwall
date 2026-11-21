@@ -133,7 +133,7 @@ So write the page self-contained: styles in a `<style>` element or `style` attri
 | Envoy Gateway, Istio, raw Envoy (ext_proc) | Yes, in the immediate response |
 | The standalone proxy | Yes |
 | The check API (`POST /v1/check`) | `deny_content_type` and `deny_body` in the answer, and `Cache-Control` and `Content-Security-Policy` in its `response_headers`, for the caller to send; none of them for a gRPC call |
-| HAProxy (SPOE) | No: HAProxy writes its own denials, so its routes keep the fixed body ([HAProxy](haproxy.md)) |
+| HAProxy (SPOE) | No: HAProxy writes its own denials, so its routes keep its error page, and the policy's `Programmed` message says so ([HAProxy](haproxy.md)) |
 
 ## Testing it
 
