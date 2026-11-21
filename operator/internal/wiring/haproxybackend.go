@@ -13,12 +13,15 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 )
 
@@ -34,6 +37,13 @@ import (
 //
 // +kubebuilder:rbac:groups=ingress.v3.haproxy.org,resources=backends,verbs=get;list;watch;create;update;patch;delete,roleName=inkwall-operator-haproxy
 // +kubebuilder:rbac:groups=ingress.v3.haproxy.org,resources=globals,verbs=get,roleName=inkwall-operator-haproxy
+// +kubebuilder:rbac:groups="",resources=services,verbs=get,roleName=inkwall-operator-haproxy
+//
+// globals is cluster-wide, as every integration's role is (a ClusterRole
+// the chart grants by rbac.integrations): the controller's namespace,
+// where its Global is, isn't known when the chart is installed. The
+// operator only gets the one its controller's ConfigMap names. services:
+// a protected Ingress's backend Services, for their cr-backend.
 
 // HAProxy's custom resources.
 var (
@@ -61,8 +71,10 @@ var haproxyPrefixes = []string{"haproxy.org/", "haproxy.com/", "ingress.kubernet
 var haproxyBackendAnnotations = []string{
 	"abortonclose", "timeout-check", "timeout-server", "load-balance", "check", "check-interval", "pod-maxconn",
 	"send-proxy-protocol", "server-ssl", "server-crt", "server-ca", "server-proto", "check-http", "forwarded-for",
-	"cookie-persistence",
 }
+
+// The controller reads cookie-persistence from a Service only, never an
+// Ingress, so it isn't among the annotations a protected Ingress loses.
 
 // haproxyMechanism is how the operator loads the filter in a controller's
 // backends.
@@ -145,36 +157,130 @@ func versionString(v [3]int) string {
 	return fmt.Sprintf("%d.%d.%d", v[0], v[1], v[2])
 }
 
-// haproxyMechanismOf is how the operator wires the controller's running
-// pods with the engine: snippets while every one runs 3.1 to 3.2, the
-// Backend custom resource once one runs 3.4 or later (a 3.2 pod of a
-// rollout to 3.4 reads it too; the probe says where it doesn't). A pod
-// whose release the operator can't tell, or doesn't wire, makes it
-// haproxyUnknown, and why.
-func haproxyMechanismOf(pods []*corev1.Pod) (haproxyMechanism, string) {
-	m := haproxySnippets
-	var unknown []string
+// haproxyMechanismOf is how the operator wires the Ingresses a controller
+// serves, from its pods (haproxyControllerPods): snippets while every one
+// runs 3.1 to 3.2, the Backend custom resource once one runs 3.4 or later
+// (a 3.2 pod of a rollout to 3.4 reads it too; the probe says where it
+// doesn't). A pod whose release the operator can't tell (its tag isn't
+// one, or a major release after 3) is wired with the Backend custom
+// resource when its CRD is installed (backendCRD), which the controller
+// reads since 3.2, and note says so; otherwise, and for a release before
+// 3.1, it is haproxyUnknown, and unsupported says why.
+func haproxyMechanismOf(pods []*corev1.Pod, backendCRD bool) (m haproxyMechanism, unsupported, note string) {
+	m = haproxySnippets
+	var old, untold []string
 	for _, pod := range pods {
-		if !injection.HasEngine(pod) {
-			continue
-		}
 		v, raw, ok := haproxyControllerVersion(pod)
 		switch {
 		case !ok:
-			unknown = append(unknown, fmt.Sprintf("HAProxy pod %s/%s runs a release of the controller the operator can't tell from its %s", pod.Namespace, pod.Name, raw))
+			untold = append(untold, fmt.Sprintf("HAProxy pod %s/%s runs a release of the controller the operator can't tell from its %s", pod.Namespace, pod.Name, raw))
+		case v[0] > 3:
+			untold = append(untold, fmt.Sprintf("HAProxy pod %s/%s runs the HAProxy Kubernetes Ingress Controller %s (%s), a release the operator doesn't know", pod.Namespace, pod.Name, versionString(v), raw))
 		case mechanismOf(v) == haproxyUnknown:
-			unknown = append(unknown, fmt.Sprintf("HAProxy pod %s/%s runs the HAProxy Kubernetes Ingress Controller %s (%s), which the operator doesn't wire", pod.Namespace, pod.Name, versionString(v), raw))
+			old = append(old, fmt.Sprintf("HAProxy pod %s/%s runs the HAProxy Kubernetes Ingress Controller %s (%s), which the operator doesn't wire", pod.Namespace, pod.Name, versionString(v), raw))
 		case mechanismOf(v) == haproxyBackendCR:
 			m = haproxyBackendCR
 		}
 	}
-	if len(unknown) > 0 {
-		slices.Sort(unknown)
-		return haproxyUnknown, strings.Join(unknown, "; ") +
-			": the operator loads the filter through backend config snippets on controller 3.1 to 3.2 and through the controller's Backend custom resources on 3.4 and later; " +
-			"run one of those (the chart's controller.image.tag), or, for an image whose tag isn't its release, say it in the pods' " + HAProxyVersionAnnotation + " annotation (controller.podAnnotations)"
+	slices.Sort(old)
+	slices.Sort(untold)
+	const how = "the operator loads the filter through backend config snippets on controller 3.1 to 3.2 and through the controller's Backend custom resources on 3.4 and later"
+	const say = "for an image whose tag isn't its release, say it in the pods' " + HAProxyVersionAnnotation + " annotation (controller.podAnnotations)"
+	switch {
+	case len(old) > 0:
+		return haproxyUnknown, strings.Join(slices.Concat(old, untold), "; ") + ": " + how + "; run one of those (the chart's controller.image.tag), or, " + say, ""
+	case len(untold) > 0 && !backendCRD:
+		return haproxyUnknown, strings.Join(untold, "; ") + ": " + how + ", and the controller's Backend CRD (backends.ingress.v3.haproxy.org) isn't installed; " +
+			"run one of those releases (the chart's controller.image.tag), or, " + say, ""
+	case len(untold) > 0:
+		return haproxyBackendCR, "", strings.Join(untold, "; ") + ": it is wired through the controller's Backend custom resource, which the controller reads since 3.2 (the probe shows whether it does); " + say
 	}
-	return m, ""
+	return m, "", ""
+}
+
+// haproxyGroup is what the Ingresses of one controller (an IngressClass's
+// spec.controller) are wired with: its pods (haproxyControllerPods), the
+// mechanism they call for, and their problems and buffer.
+type haproxyGroup struct {
+	pods                    []*corev1.Pod
+	mech                    haproxyMechanism
+	versionWhy, versionNote string
+	problems                []string
+	buffer                  haproxyBuffer
+}
+
+// haproxyRejectedHint follows a failed probe on an Ingress wired with the
+// operator's Backend custom resource: HAProxy may have rejected it, and the
+// controller then builds the backend without it, so without the filter.
+func haproxyRejectedHint(ing *networkingv1.Ingress) string {
+	return fmt.Sprintf("the controller sets aside a Backend custom resource HAProxy rejects and builds the backend without it, so without the filter: "+
+		"look for Backend %s in the controller's log (and its haproxy_rejected_custom_resource_generation metric)", haproxyBackendRef(ing))
+}
+
+// haproxyControllerPods are the running pods of the controller with the
+// engine that decide how its Ingresses are wired: in a proxy namespace and
+// owned by a ReplicaSet or DaemonSet (the chart's Deployment or DaemonSet),
+// so a pod anyone else makes with the controller's labels counts for
+// nothing.
+func (h *HAProxy) haproxyControllerPods(pods []*corev1.Pod) []*corev1.Pod {
+	var out []*corev1.Pod
+	for _, pod := range pods {
+		if !injection.HasEngine(pod) || !h.Namespaces.Has(pod.Namespace) {
+			continue
+		}
+		owner := metav1.GetControllerOf(pod)
+		if owner == nil || (owner.Kind != "ReplicaSet" && owner.Kind != "DaemonSet") || !strings.HasPrefix(owner.APIVersion, "apps/") {
+			continue
+		}
+		out = append(out, pod)
+	}
+	return out
+}
+
+// haproxyPodClass is the IngressClass controller name's suffix a
+// controller pod serves (haproxy.org/ingress-controller/<class>): its
+// --ingress.class, "" when unset.
+func haproxyPodClass(pod *corev1.Pod) string {
+	for _, c := range pod.Spec.Containers {
+		args := append(slices.Clone(c.Command), c.Args...)
+		for i, arg := range args {
+			if v, ok := strings.CutPrefix(arg, "--ingress.class="); ok {
+				return v
+			}
+			if arg == "--ingress.class" && i+1 < len(args) {
+				return args[i+1]
+			}
+		}
+	}
+	return ""
+}
+
+// podsServing are the pods of the controller that serves Ingresses of
+// controller (an IngressClass's spec.controller): those whose
+// --ingress.class it names, or, when none does (a controller run without
+// it), all of them.
+func podsServing(pods []*corev1.Pod, controller string) []*corev1.Pod {
+	class, _ := strings.CutPrefix(controller, integrations.HAProxy.ControllerPrefix)
+	var out []*corev1.Pod
+	for _, pod := range pods {
+		if haproxyPodClass(pod) == class {
+			out = append(out, pod)
+		}
+	}
+	if len(out) == 0 {
+		return pods
+	}
+	return out
+}
+
+// haproxyBackendCRDInstalled reports whether the API server serves the
+// controller's Backend kind: one it can't tell of (an error) counts as
+// not, so a controller of unknown release is reported rather than wired
+// with a kind that may not be served.
+func haproxyBackendCRDInstalled(ctx context.Context, r client.Reader) bool {
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(HAProxyBackendGVK.GroupVersion().WithKind("BackendList"))
+	return r.List(ctx, list, client.Limit(1)) == nil
 }
 
 // haproxyBackendName is the operator's Backend custom resource for an
@@ -209,6 +315,47 @@ func userCRBackend(ing *networkingv1.Ingress) string {
 		}
 	}
 	return ""
+}
+
+// ingressServices are the Services an Ingress routes to.
+func ingressServices(ing *networkingv1.Ingress) []string {
+	var out []string
+	if b := ing.Spec.DefaultBackend; b != nil && b.Service != nil {
+		out = append(out, b.Service.Name)
+	}
+	for _, r := range ing.Spec.Rules {
+		if r.HTTP == nil {
+			continue
+		}
+		for _, p := range r.HTTP.Paths {
+			if p.Backend.Service != nil {
+				out = append(out, p.Backend.Service.Name)
+			}
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// serviceCRBackends are the Ingress's Services that name a Backend custom
+// resource of their own (cr-backend), which the controller takes over the
+// Ingress's (Service, then Ingress, then ConfigMap): "Service app
+// (cr-backend: ns/name)". A Service that doesn't exist names none.
+func (h *HAProxy) serviceCRBackends(ctx context.Context, ing *networkingv1.Ingress) ([]string, error) {
+	var out []string
+	for _, name := range ingressServices(ing) {
+		var svc corev1.Service
+		switch err := h.APIReader.Get(ctx, types.NamespacedName{Namespace: ing.Namespace, Name: name}, &svc); {
+		case apierrors.IsNotFound(err):
+			continue
+		case err != nil:
+			return nil, fmt.Errorf("service %s: %w", name, err)
+		}
+		if key, v, ok := haproxyAnnotation(svc.Annotations, "cr-backend"); ok {
+			out = append(out, fmt.Sprintf("Service %s (%s: %s)", name, key, v))
+		}
+	}
+	return out, nil
 }
 
 // ignoredBackendAnnotations are the Ingress's backend annotations that

@@ -286,7 +286,10 @@ func haproxyScheme() *runtime.Scheme {
 func haproxyControllerPod(name string, args ...string) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "haproxy-controller", Name: name, UID: types.UID(name),
-			Labels: map[string]string{"app.kubernetes.io/name": "kubernetes-ingress"}},
+			Labels: map[string]string{"app.kubernetes.io/name": "kubernetes-ingress"},
+			// The chart's Deployment's: only such a pod says how its
+			// controller is wired.
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "haproxy-kubernetes-ingress-1", UID: "rs-1", Controller: new(true)}}},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: injection.HAProxyContainer, Image: "haproxytech/kubernetes-ingress:3.2.20", Args: args,
 			Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 8080}}}}},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.1"},

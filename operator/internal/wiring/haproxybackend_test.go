@@ -4,9 +4,12 @@
 package wiring
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -23,34 +26,38 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
+	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
 )
 
 // The controller's release, from the pod's annotation or its image's tag,
 // and how the operator wires it: snippets on 3.1 to 3.2, the Backend
-// custom resource on 3.4 and later, nothing it can't tell or doesn't wire.
+// custom resource on 3.4 and later; one it can't tell, the Backend when its
+// CRD is installed (noted), else nothing; nothing before 3.1.
 func TestHAProxyControllerVersion(t *testing.T) {
 	for _, c := range []struct {
 		image, annotation string
 		ok                bool
-		want              haproxyMechanism
+		// want without the Backend CRD, withCRD with it.
+		want, withCRD haproxyMechanism
 	}{
-		{"haproxytech/kubernetes-ingress:3.2.20", "", true, haproxySnippets},
-		{"haproxytech/kubernetes-ingress:3.1.17", "", true, haproxySnippets},
-		{"haproxytech/kubernetes-ingress:v3.2", "", true, haproxySnippets},
-		{"haproxytech/kubernetes-ingress:3.4.1", "", true, haproxyBackendCR},
-		{"haproxytech/kubernetes-ingress:3.4", "", true, haproxyBackendCR},
-		{"registry.example.com:5000/haproxy/ingress:3.5.0-rc1@sha256:abc", "", true, haproxyBackendCR},
-		{"haproxytech/kubernetes-ingress:3.0.5", "", true, haproxyUnknown},
-		{"haproxytech/kubernetes-ingress:1.11.3", "", true, haproxyUnknown},
-		{"haproxytech/kubernetes-ingress:4.0.0", "", true, haproxyUnknown},
-		{"haproxytech/kubernetes-ingress:latest", "", false, haproxyUnknown},
-		{"haproxytech/kubernetes-ingress@sha256:abc", "", false, haproxyUnknown},
-		{"registry.example.com:5000/haproxy/ingress", "", false, haproxyUnknown},
+		{"haproxytech/kubernetes-ingress:3.2.20", "", true, haproxySnippets, haproxySnippets},
+		{"haproxytech/kubernetes-ingress:3.1.17", "", true, haproxySnippets, haproxySnippets},
+		{"haproxytech/kubernetes-ingress:v3.2", "", true, haproxySnippets, haproxySnippets},
+		{"haproxytech/kubernetes-ingress:3.4.1", "", true, haproxyBackendCR, haproxyBackendCR},
+		{"haproxytech/kubernetes-ingress:3.4", "", true, haproxyBackendCR, haproxyBackendCR},
+		{"registry.example.com:5000/haproxy/ingress:3.5.0-rc1@sha256:abc", "", true, haproxyBackendCR, haproxyBackendCR},
+		{"haproxytech/kubernetes-ingress:3.0.5", "", true, haproxyUnknown, haproxyUnknown},
+		{"haproxytech/kubernetes-ingress:1.11.3", "", true, haproxyUnknown, haproxyUnknown},
+		{"haproxytech/kubernetes-ingress:4.0.0", "", true, haproxyUnknown, haproxyBackendCR},
+		{"haproxytech/kubernetes-ingress:latest", "", false, haproxyUnknown, haproxyBackendCR},
+		{"haproxytech/kubernetes-ingress@sha256:abc", "", false, haproxyUnknown, haproxyBackendCR},
+		{"registry.example.com:5000/haproxy/ingress", "", false, haproxyUnknown, haproxyBackendCR},
 		// The annotation says what the tag doesn't, and wins over it.
-		{"haproxytech/kubernetes-ingress@sha256:abc", "3.4.1", true, haproxyBackendCR},
-		{"haproxytech/kubernetes-ingress:3.4.1", "3.2", true, haproxySnippets},
-		{"haproxytech/kubernetes-ingress:3.4.1", "soon", false, haproxyUnknown},
+		{"haproxytech/kubernetes-ingress@sha256:abc", "3.4.1", true, haproxyBackendCR, haproxyBackendCR},
+		{"haproxytech/kubernetes-ingress:3.4.1", "3.2", true, haproxySnippets, haproxySnippets},
+		{"haproxytech/kubernetes-ingress:3.4.1", "soon", false, haproxyUnknown, haproxyBackendCR},
 	} {
 		pod := haproxyControllerPod("hap-1")
 		pod.Spec.Containers[0].Image = c.image
@@ -61,36 +68,76 @@ func TestHAProxyControllerVersion(t *testing.T) {
 		if ok != c.ok {
 			t.Errorf("%s %q: ok %t", c.image, c.annotation, ok)
 		}
-		m, why := haproxyMechanismOf([]*corev1.Pod{pod})
-		if m != c.want || (m == haproxyUnknown) != (why != "") {
-			t.Errorf("%s %q (%v): mechanism %d %q, want %d", c.image, c.annotation, v, m, why, c.want)
+		m, why, note := haproxyMechanismOf([]*corev1.Pod{pod}, false)
+		if m != c.want || (m == haproxyUnknown) != (why != "") || note != "" {
+			t.Errorf("%s %q (%v), no CRD: mechanism %d %q %q, want %d", c.image, c.annotation, v, m, why, note, c.want)
+		}
+		m, why, note = haproxyMechanismOf([]*corev1.Pod{pod}, true)
+		if m != c.withCRD || (m == haproxyUnknown) != (why != "") || (c.want == haproxyUnknown && m == haproxyBackendCR) != (note != "") {
+			t.Errorf("%s %q (%v), the CRD: mechanism %d %q %q, want %d", c.image, c.annotation, v, m, why, note, c.withCRD)
 		}
 	}
 	// A rollout from 3.2 to 3.4: the Backend, which 3.2 reads too.
 	old, next := haproxyControllerPod("hap-1"), haproxyControllerPod("hap-2")
 	next.Spec.Containers[0].Image = "haproxytech/kubernetes-ingress:3.4.1"
-	if m, _ := haproxyMechanismOf([]*corev1.Pod{old, next}); m != haproxyBackendCR {
+	if m, _, _ := haproxyMechanismOf([]*corev1.Pod{old, next}, false); m != haproxyBackendCR {
 		t.Errorf("3.2 and 3.4: %d", m)
 	}
-	// One pod the operator can't tell: none, naming it and what to do.
+	// One pod the operator can't tell, without the CRD: none, naming it
+	// and what to do.
 	next.Spec.Containers[0].Image = "haproxytech/kubernetes-ingress:latest"
-	m, why := haproxyMechanismOf([]*corev1.Pod{old, next})
-	for _, want := range []string{"haproxy-controller/hap-2", "image haproxytech/kubernetes-ingress:latest", "controller.image.tag", HAProxyVersionAnnotation} {
+	m, why, _ := haproxyMechanismOf([]*corev1.Pod{old, next}, false)
+	for _, want := range []string{"haproxy-controller/hap-2", "image haproxytech/kubernetes-ingress:latest", "controller.image.tag", HAProxyVersionAnnotation, "Backend CRD"} {
 		if m != haproxyUnknown || !strings.Contains(why, want) {
 			t.Errorf("%d %q lacks %q", m, why, want)
 		}
 	}
-	// A pod without the engine doesn't count (the sidecar check reports it).
-	bare := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "haproxy-controller", Name: "bare"},
-		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: injection.HAProxyContainer, Image: "haproxytech/kubernetes-ingress:latest"}}}}
-	if m, why := haproxyMechanismOf([]*corev1.Pod{old, bare}); m != haproxySnippets {
-		t.Errorf("a pod without the engine: %d %q", m, why)
+	// With the CRD: the Backend, and the note says why.
+	m, _, note := haproxyMechanismOf([]*corev1.Pod{old, next}, true)
+	for _, want := range []string{"haproxy-controller/hap-2", "reads since 3.2", HAProxyVersionAnnotation} {
+		if m != haproxyBackendCR || !strings.Contains(note, want) {
+			t.Errorf("%d %q lacks %q", m, note, want)
+		}
 	}
 }
 
-// renderModel writes a rule of the Backend custom resource as the
-// controller does (client-native's config-parser), to compare it with the
-// snippet's line.
+// Only the controller's own pods say how it is wired: running with the
+// engine, in a proxy namespace, owned by a ReplicaSet or DaemonSet. A pod
+// with its labels elsewhere, or made by hand, counts for nothing.
+func TestHAProxyControllerPods(t *testing.T) {
+	h := &HAProxy{Namespaces: integrations.Namespaces{"haproxy-controller"}}
+	ok := haproxyControllerPod("hap-1")
+	elsewhere := haproxyControllerPod("hap-2")
+	elsewhere.Namespace = "tenant"
+	bare := haproxyControllerPod("hap-3")
+	bare.OwnerReferences = nil
+	job := haproxyControllerPod("hap-4")
+	job.OwnerReferences[0].Kind, job.OwnerReferences[0].APIVersion = "Job", "batch/v1"
+	ds := haproxyControllerPod("hap-5")
+	ds.OwnerReferences[0].Kind = "DaemonSet"
+	noEngine := &corev1.Pod{ObjectMeta: *ok.ObjectMeta.DeepCopy()}
+	noEngine.Name = "hap-6"
+	got := h.haproxyControllerPods([]*corev1.Pod{ok, elsewhere, bare, job, ds, noEngine})
+	var names []string
+	for _, p := range got {
+		names = append(names, p.Name)
+	}
+	if strings.Join(names, ",") != "hap-1,hap-5" {
+		t.Errorf("trusted %v", names)
+	}
+	// Every namespace a proxy namespace: the one elsewhere counts.
+	h.Namespaces = nil
+	if got := h.haproxyControllerPods([]*corev1.Pod{elsewhere}); len(got) != 1 {
+		t.Errorf("every namespace: %d", len(got))
+	}
+}
+
+// renderModel writes a rule of the Backend custom resource back as a
+// configuration line, field by field as client-native's config-parser
+// (v6.4.4) orders them, so that each resource rule can be compared with
+// the snippet line it stands for. It is a reading of that code, not the
+// code (client-native isn't a dependency): what the controller really
+// writes is checked end to end (make kind-e2e-haproxy, controller 3.4).
 func renderModel(section string, m map[string]any) string {
 	str := func(k string) string { s, _ := m[k].(string); return s }
 	num := func(k string) int64 { n, _ := m[k].(int64); return n }
@@ -337,53 +384,206 @@ func TestHAProxyWireBackendCR(t *testing.T) {
 	}
 }
 
-// A controller whose release the operator can't tell: the protected
-// Ingress stays as it is, and the policy is Programmed=False
-// (ProxyVersionUnsupported), naming the pod and what to do; the pods'
-// annotation then says it, and the Ingress is wired.
+// A controller whose release the operator can't tell: without the Backend
+// CRD, the protected Ingress stays as it is, and the policy is
+// Programmed=False (ProxyVersionUnsupported), naming the pod and what to
+// do; the pods' annotation then says it, and the Ingress is wired. With the
+// CRD, it is wired with the Backend, and the note says why.
 func TestHAProxyVersionUnsupported(t *testing.T) {
 	ctx := context.Background()
 	class := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "haproxy"}, Spec: networkingv1.IngressClassSpec{Controller: "haproxy.org/ingress-controller/haproxy"}}
 	policy := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
 		TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}},
 	}}
-	pod := haproxyControllerPod("hap-1")
-	pod.Spec.Containers[0].Image = "mirror.example.com/kubernetes-ingress@sha256:0123"
-	c := fake.NewClientBuilder().WithScheme(haproxyCRScheme()).WithObjects(class, policy, pod, haproxyIngress("web", "haproxy")).Build()
+	web := Target{Kind: ingressKind, Key: types.NamespacedName{Namespace: "shop", Name: "web"}}
+	for _, withCRD := range []bool{false, true} {
+		pod := haproxyControllerPod("hap-1")
+		pod.Spec.Containers[0].Image = "mirror.example.com/kubernetes-ingress@sha256:0123"
+		b := fake.NewClientBuilder().WithScheme(haproxyCRScheme()).WithObjects(class, policy.DeepCopy(), pod, haproxyIngress("web", "haproxy"))
+		if !withCRD {
+			b = b.WithInterceptorFuncs(noBackendCRD)
+		}
+		c := b.Build()
+		h := &HAProxy{Client: c, APIReader: c, Pods: integrationsSelector()}
+		res, err := h.Wire(ctx, map[Target]bool{web: true}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := res.Targets[web]
+		var ing networkingv1.Ingress
+		_ = c.Get(ctx, web.Key, &ing)
+		if withCRD {
+			if !s.Wired || s.VersionUnsupported != "" || !strings.Contains(s.Note, "reads since 3.2") || ing.Annotations[HAProxyCRBackendAnnotation] != "shop/inkwall-waf-web" {
+				t.Errorf("with the CRD: %+v, annotations %v", s, ing.Annotations)
+			}
+			continue
+		}
+		if s.Wired || s.VersionUnsupported == "" {
+			t.Fatalf("%+v", s)
+		}
+		if len(ing.Annotations) != 0 {
+			t.Errorf("the Ingress changed: %v", ing.Annotations)
+		}
+		st, reason, msg := programmed(policy, &report{kinds: []schema.GroupKind{ingressKind}, results: []*Result{res}})
+		for _, want := range []string{"haproxy-controller/hap-1", "mirror.example.com/kubernetes-ingress@sha256:0123", "3.1 to 3.2", "3.4 and later", HAProxyVersionAnnotation} {
+			if st != metav1.ConditionFalse || reason != ReasonProxyVersionUnsupported || !strings.Contains(msg, want) {
+				t.Errorf("%s %s %q lacks %q", st, reason, msg, want)
+			}
+		}
+		// It says its release.
+		pod.Annotations[HAProxyVersionAnnotation] = "3.2.20"
+		if err := c.Update(ctx, pod); err != nil {
+			t.Fatal(err)
+		}
+		if res, err = h.Wire(ctx, map[Target]bool{web: true}, false); err != nil || !res.Targets[web].Wired {
+			t.Fatalf("with the annotation: %+v %v", res.Targets[web], err)
+		}
+		_ = c.Get(ctx, web.Key, &ing)
+		if !strings.Contains(ing.Annotations[HAProxySnippetAnnotation], "filter spoe") {
+			t.Errorf("not wired with the snippet: %v", ing.Annotations)
+		}
+	}
+}
+
+// A pod anyone can make with the controller's labels, in another
+// namespace or not owned by a ReplicaSet, says nothing of how the
+// controller is wired: a `latest` one, or one with a forged release
+// annotation, leaves a 3.2 controller wired with snippets.
+func TestHAProxyForgedPod(t *testing.T) {
+	ctx := context.Background()
+	class := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "haproxy"}, Spec: networkingv1.IngressClassSpec{Controller: "haproxy.org/ingress-controller/haproxy"}}
+	policy := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
+		TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}},
+	}}
+	latest := haproxyControllerPod("latest")
+	latest.Namespace = "tenant"
+	latest.Spec.Containers[0].Image = "haproxytech/kubernetes-ingress:latest"
+	forged := haproxyControllerPod("forged")
+	forged.Namespace = "tenant"
+	forged.Annotations[HAProxyVersionAnnotation] = "3.4.1"
+	byHand := haproxyControllerPod("by-hand")
+	byHand.OwnerReferences = nil
+	byHand.Annotations[HAProxyVersionAnnotation] = "3.4.1"
+	c := fake.NewClientBuilder().WithScheme(haproxyCRScheme()).
+		WithObjects(class, policy, haproxyControllerPod("hap-1"), latest, forged, byHand, haproxyIngress("web", "haproxy")).Build()
+	h := &HAProxy{Client: c, APIReader: c, Pods: integrationsSelector(), Namespaces: integrations.Namespaces{"haproxy-controller"}}
+	web := Target{Kind: ingressKind, Key: types.NamespacedName{Namespace: "shop", Name: "web"}}
+	res, err := h.Wire(ctx, map[Target]bool{web: true}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := res.Targets[web]; !s.Wired || s.VersionUnsupported != "" || s.Failed != "" {
+		t.Fatalf("%+v", s)
+	}
+	var ing networkingv1.Ingress
+	_ = c.Get(ctx, web.Key, &ing)
+	if !strings.Contains(ing.Annotations[HAProxySnippetAnnotation], "filter spoe") || ing.Annotations[HAProxyCRBackendAnnotation] != "" {
+		t.Errorf("not the snippet: %v", ing.Annotations)
+	}
+}
+
+// Two controllers, of two IngressClasses, at 3.2 and 3.4: each one's
+// Ingresses are wired as its own release asks, and probed on its own pods.
+func TestHAProxyTwoControllers(t *testing.T) {
+	ctx := context.Background()
+	legacy := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "legacy"}, Spec: networkingv1.IngressClassSpec{Controller: "haproxy.org/ingress-controller/legacy"}}
+	current := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "current"}, Spec: networkingv1.IngressClassSpec{Controller: "haproxy.org/ingress-controller/current"}}
+	policy := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
+		TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "old"}, {Kind: "Ingress", Name: "new"}},
+	}}
+	old := haproxyControllerPod("hap-32", "--ingress.class=legacy")
+	old.Status.PodIP = "10.0.0.32"
+	next := haproxy34Pod("hap-34", "--ingress.class=current")
+	next.Status.PodIP = "10.0.0.34"
+	c := fake.NewClientBuilder().WithScheme(haproxyCRScheme()).
+		WithObjects(legacy, current, policy, old, next, haproxyIngress("old", "legacy"), haproxyIngress("new", "current")).Build()
+	h := &HAProxy{Client: c, APIReader: c, Pods: integrationsSelector(), Prober: &Prober{}}
+	oldT := Target{Kind: ingressKind, Key: types.NamespacedName{Namespace: "shop", Name: "old"}}
+	newT := Target{Kind: ingressKind, Key: types.NamespacedName{Namespace: "shop", Name: "new"}}
+	res, err := h.Wire(ctx, map[Target]bool{oldT: true, newT: true}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tg := range []Target{oldT, newT} {
+		if s := res.Targets[tg]; !s.Wired || s.Failed != "" || s.VersionUnsupported != "" {
+			t.Errorf("%s: %+v", tg.Key.Name, s)
+		}
+	}
+	get := func(name string) map[string]string {
+		var ing networkingv1.Ingress
+		_ = c.Get(ctx, types.NamespacedName{Namespace: "shop", Name: name}, &ing)
+		return ing.Annotations
+	}
+	if a := get("old"); !strings.Contains(a[HAProxySnippetAnnotation], "filter spoe") || a[HAProxyCRBackendAnnotation] != "" {
+		t.Errorf("3.2's Ingress: %v", a)
+	}
+	if a := get("new"); a[HAProxyCRBackendAnnotation] != "shop/inkwall-waf-new" || a[HAProxySnippetAnnotation] != "" {
+		t.Errorf("3.4's Ingress: %v", a)
+	}
+	// Each is probed on its controller's pods only.
+	h.Prober.mu.Lock()
+	jobs := h.Prober.jobs[integrations.HAProxy.Name]
+	h.Prober.mu.Unlock()
+	for _, j := range jobs {
+		want := map[string]string{"old": "10.0.0.32", "new": "10.0.0.34"}[j.Route.Key.Name]
+		if len(j.Pods) != 1 || j.Pods[0].IP != want {
+			t.Errorf("%s probed on %+v", j.Route.Key.Name, j.Pods)
+		}
+	}
+}
+
+// On 3.4 an Ingress whose Service names a Backend of its own isn't wired:
+// the controller would take the Service's over the operator's.
+func TestHAProxyServiceCRBackend(t *testing.T) {
+	ctx := context.Background()
+	class := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "haproxy"}, Spec: networkingv1.IngressClassSpec{Controller: "haproxy.org/ingress-controller/haproxy"}}
+	policy := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
+		TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}},
+	}}
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "app", Annotations: map[string]string{"haproxy.org/cr-backend": "shop/theirs"}}}
+	c := fake.NewClientBuilder().WithScheme(haproxyCRScheme()).WithObjects(class, policy, svc, haproxy34Pod("hap-1"), haproxyIngress("web", "haproxy")).Build()
 	h := &HAProxy{Client: c, APIReader: c, Pods: integrationsSelector()}
 	web := Target{Kind: ingressKind, Key: types.NamespacedName{Namespace: "shop", Name: "web"}}
 	res, err := h.Wire(ctx, map[Target]bool{web: true}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := res.Targets[web]
-	if s.Wired || s.VersionUnsupported == "" {
+	if s := res.Targets[web]; s.Wired || !strings.Contains(s.Failed, "Service app (haproxy.org/cr-backend: shop/theirs)") {
 		t.Fatalf("%+v", s)
 	}
 	var ing networkingv1.Ingress
 	_ = c.Get(ctx, web.Key, &ing)
 	if len(ing.Annotations) != 0 {
-		t.Errorf("the Ingress changed: %v", ing.Annotations)
+		t.Errorf("wired: %v", ing.Annotations)
 	}
-	p := policy.DeepCopy()
-	st, reason, msg := programmed(p, &report{kinds: []schema.GroupKind{ingressKind}, results: []*Result{res}})
-	for _, want := range []string{"haproxy-controller/hap-1", "mirror.example.com/kubernetes-ingress@sha256:0123", "3.1 to 3.2", "3.4 and later", HAProxyVersionAnnotation} {
-		if st != metav1.ConditionFalse || reason != ReasonProxyVersionUnsupported || !strings.Contains(msg, want) {
-			t.Errorf("%s %s %q lacks %q", st, reason, msg, want)
-		}
+	if _, err := getBackend(ctx, c, "shop", "inkwall-waf-web"); err == nil {
+		t.Error("a Backend")
 	}
-	// It says its release.
-	pod.Annotations[HAProxyVersionAnnotation] = "3.4.1"
-	if err := c.Update(ctx, pod); err != nil {
+	// Removed from the Service: wired.
+	svc.Annotations = nil
+	if err := c.Update(ctx, svc); err != nil {
 		t.Fatal(err)
 	}
 	if res, err = h.Wire(ctx, map[Target]bool{web: true}, false); err != nil || !res.Targets[web].Wired {
-		t.Fatalf("with the annotation: %+v %v", res.Targets[web], err)
+		t.Fatalf("%+v %v", res.Targets[web], err)
 	}
-	_ = c.Get(ctx, web.Key, &ing)
-	if ing.Annotations[HAProxyCRBackendAnnotation] != "shop/inkwall-waf-web" {
-		t.Errorf("not wired with the Backend: %v", ing.Annotations)
-	}
+}
+
+// noBackendCRD makes a fake client answer as an API server without the
+// controller's Backend CRD.
+var noBackendCRD = interceptor.Funcs{
+	Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+		if u, ok := obj.(*unstructured.Unstructured); ok && u.GroupVersionKind() == HAProxyBackendGVK {
+			return &meta.NoKindMatchError{GroupKind: HAProxyBackendGVK.GroupKind(), SearchedVersions: []string{"v3"}}
+		}
+		return c.Get(ctx, key, obj, opts...)
+	},
+	List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+		if u, ok := list.(*unstructured.UnstructuredList); ok && u.GroupVersionKind().Group == HAProxyBackendGVK.Group {
+			return &meta.NoKindMatchError{GroupKind: HAProxyBackendGVK.GroupKind()}
+		}
+		return c.List(ctx, list, opts...)
+	},
 }
 
 // Without the controller's Backend CRD, a 3.4 controller's Ingress isn't
@@ -394,27 +594,8 @@ func TestHAProxyBackendCRDMissing(t *testing.T) {
 	policy := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
 		TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}},
 	}}
-	noMatch := func(obj client.Object) error {
-		if u, ok := obj.(*unstructured.Unstructured); ok && u.GroupVersionKind() == HAProxyBackendGVK {
-			return &meta.NoKindMatchError{GroupKind: HAProxyBackendGVK.GroupKind(), SearchedVersions: []string{"v3"}}
-		}
-		return nil
-	}
 	c := fake.NewClientBuilder().WithScheme(haproxyCRScheme()).WithObjects(class, policy, haproxy34Pod("hap-1"), haproxyIngress("web", "haproxy")).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-				if err := noMatch(obj); err != nil {
-					return err
-				}
-				return c.Get(ctx, key, obj, opts...)
-			},
-			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-				if u, ok := list.(*unstructured.UnstructuredList); ok && u.GroupVersionKind().Group == HAProxyBackendGVK.Group {
-					return &meta.NoKindMatchError{GroupKind: HAProxyBackendGVK.GroupKind()}
-				}
-				return c.List(ctx, list, opts...)
-			},
-		}).Build()
+		WithInterceptorFuncs(noBackendCRD).Build()
 	h := &HAProxy{Client: c, APIReader: c, Pods: integrationsSelector()}
 	web := Target{Kind: ingressKind, Key: types.NamespacedName{Namespace: "shop", Name: "web"}}
 	res, err := h.Wire(ctx, map[Target]bool{web: true}, false)
@@ -467,5 +648,45 @@ func TestHAProxyGlobalBuffer(t *testing.T) {
 	}
 	if b := h.globalBuffer(ctx, "haproxy-controller", "elsewhere/none"); b.bufsize != haproxyDefaultBufsize {
 		t.Errorf("a missing Global: %+v", b)
+	}
+}
+
+// A failed probe on an Ingress wired with the operator's Backend says that
+// HAProxy may have rejected it, and where to look: the controller then
+// builds the backend without it, so without the filter.
+func TestHAProxyBackendRejected(t *testing.T) {
+	ctx := context.Background()
+	class := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "haproxy"}, Spec: networkingv1.IngressClassSpec{Controller: "haproxy.org/ingress-controller/haproxy"}}
+	policy := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
+		TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}},
+	}}
+	c := fake.NewClientBuilder().WithScheme(haproxyCRScheme()).WithObjects(class, policy, haproxy34Pod("hap-1"), haproxyIngress("web", "haproxy")).Build()
+	key := bytes.Repeat([]byte{3}, haproxyprobe.KeySize)
+	prober := &Prober{
+		Key: func(context.Context) ([]byte, error) { return key, nil },
+		// The app answers: the filter isn't there.
+		Do: func(context.Context, ProbePod, ProbeTarget, *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 404, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}, nil
+		},
+	}
+	h := &HAProxy{Client: c, APIReader: c, Pods: integrationsSelector(), Prober: prober}
+	web := Target{Kind: ingressKind, Key: types.NamespacedName{Namespace: "shop", Name: "web"}}
+	wire := func() TargetState {
+		t.Helper()
+		res, err := h.Wire(ctx, map[Target]bool{web: true}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Targets[web]
+	}
+	if s := wire(); strings.Contains(s.Unverified, "sets aside") {
+		t.Errorf("before a probe: %q", s.Unverified)
+	}
+	prober.Run(ctx)
+	s := wire()
+	for _, want := range []string{"HTTP 404", "Backend shop/inkwall-waf-web in the controller's log", "haproxy_rejected_custom_resource_generation"} {
+		if !strings.Contains(s.Unverified, want) {
+			t.Errorf("%q lacks %q", s.Unverified, want)
+		}
 	}
 }

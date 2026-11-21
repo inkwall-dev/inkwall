@@ -203,6 +203,12 @@ rules:
   verbs:
   - create
 - apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - get
+- apiGroups:
   - ingress.v3.haproxy.org
   resources:
   - backends
