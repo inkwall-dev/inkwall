@@ -62,6 +62,9 @@ It reports:
 - **The engines**: how many run the current bundle, are behind, or rejected it, by engine
   version. Engines behind, rejecting the bundle, or of another version than the operator are
   named by pod, with what to do: an engine of another version runs until its pod restarts.
+- **The export of security events**, when `spec.events.export` has sinks: the `EventsExported`
+  condition, and each sink's state and pending events on each operator replica (`export` in the
+  JSON).
 
 Without `inkwallctl`, the InkwallConfig's status has the cluster view too: the bundle version and
 size against its limit, the engines by state, the signing key and its rotation, and whether the
@@ -223,6 +226,11 @@ an unknown built-in rule set) and `RuleCompileError` (rules that don't compile),
 | `ControlPlaneConnected` | `CertificateExpired` | The cluster's certificate expired before it was renewed. | Store a new enrollment token. |
 | `ControlPlaneConnected` | `ClusterDisabled` | The control plane removed or disabled the cluster. | Change the configuration to try again. |
 | `ControlPlaneConnected` | `Unreachable` | The control plane can't be reached; the operator retries. Engines enforce as before. | Check network access to the endpoint. |
+| `EventsExported` | `Exporting` | Every sink of `spec.events.export` succeeded on every operator replica in the last 5 minutes, or had nothing to send. The message names the plaintext sinks (`insecure: true`). | |
+| `EventsExported` | `ExportConfigInvalid` | A sink can't start: a missing Secret or key, a CA that doesn't parse, a client certificate without its key, a refused header name, or a URL from `urlSecretRef` that isn't a valid one. The other sinks go on. | Fix what the message names, in the operator's namespace ([InkwallEventExportFailing](monitoring.md#inkwalleventexportfailing)). |
+| `EventsExported` | `ExportAddressRefused` | A sink's host resolves only to addresses the operator never connects to: loopback, link-local or a cloud metadata service. The message names the class, not the address. | Point the sink at its real address ([InkwallEventExportFailing](monitoring.md#inkwalleventexportfailing)). |
+| `EventsExported` | `ExportFailing` | A sink has failed for 5 minutes without a success on some replica; its events wait in that replica's buffer, which drops the oldest when full. The message names the sink, the replica and the last error class. | Check the sink's address, its NetworkPolicy egress (`networkPolicy.egress.extra`), its TLS and its credentials; auth failures go on being retried, at most a minute apart, so fixing the Secret resumes the flow ([InkwallEventExportFailing](monitoring.md#inkwalleventexportfailing)). |
+| `EventsExported` | `ExportDropping` | A sink succeeds but dropped events for a full buffer in the last 5 minutes: it can't keep up. | Raise the sink's `batch.maxEvents` or `batch.maxInFlight`, the buffer (`events.export.bufferMiB`, `diskMiB`), or the sink's capacity ([InkwallEventExportFailing](monitoring.md#inkwalleventexportfailing)). |
 <!-- end reasons -->
 
 ## Explaining a policy or a denial

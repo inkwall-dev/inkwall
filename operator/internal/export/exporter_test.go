@@ -67,6 +67,7 @@ func (*recorder) Succeeded(string, time.Time)    {}
 func (*recorder) Pending(string, uint64)         {}
 func (*recorder) BufferBytes(int64)              {}
 func (*recorder) Forget(string)                  {}
+func (*recorder) Start(string)                   {}
 
 func (r *recorder) get(m map[string]int, k string) int {
 	r.mu.Lock()

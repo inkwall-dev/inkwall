@@ -144,6 +144,27 @@ type Status struct {
 	Proxies  []ProxyStatus  `json:"proxies"`
 	Policies PoliciesStatus `json:"policies"`
 	Engines  EnginesStatus  `json:"engines"`
+	// Export is the export of security events to SIEMs
+	// (spec.events.export); empty without sinks.
+	Export ExportStatus `json:"export"`
+}
+
+// ExportStatus is the InkwallConfig's export sinks.
+type ExportStatus struct {
+	// Condition is EventsExported; nil before the leader writes it.
+	Condition *ConditionStatus `json:"condition"`
+	// Sinks are each sink on each replica, as the replicas report them.
+	Sinks []ExportSink `json:"sinks"`
+}
+
+// ExportSink is one sink on one operator replica.
+type ExportSink struct {
+	Name    string `json:"name"`
+	Replica string `json:"replica"`
+	State   string `json:"state"`
+	// Pending counts the events waiting in that replica's buffer.
+	Pending uint64 `json:"pending"`
+	Message string `json:"message,omitempty"`
 }
 
 // ConfigStatus is the InkwallConfig named default.
@@ -286,6 +307,7 @@ func clusterStatus(ctx context.Context, c client.Reader, namespace string, stale
 	st.Policies.NotReady = []PolicyGroup{}
 	st.Engines.ByVersion = []EngineVersionGroup{}
 	st.Engines.Attention = []EngineRef{}
+	st.Export.Sinks = []ExportSink{}
 	problem := func(format string, a ...any) { st.Problems = append(st.Problems, fmt.Sprintf(format, a...)) }
 	warn := func(what string, err error) {
 		st.Warnings = append(st.Warnings, fmt.Sprintf("can't read %s: %v", what, err))
@@ -322,6 +344,9 @@ func clusterStatus(ctx context.Context, c client.Reader, namespace string, stale
 	if cond := meta.FindStatusCondition(cfg.Status.Conditions, wafv1alpha1.ConditionControlPlaneConnected); cond != nil &&
 		cond.Status == "False" && st.Config.Mode != string(wafv1alpha1.ModeStandalone) {
 		problem("the control plane is not connected (%s): %s", cond.Reason, cond.Message)
+	}
+	if ex := cfg.Spec.Events.Export; ex != nil && len(ex.Sinks) > 0 {
+		exportStatus(ctx, c, namespace, stale, now, &cfg, st, problem, warn)
 	}
 
 	// The operator's pods.
@@ -600,6 +625,8 @@ func printStatus(w io.Writer, st *Status) {
 		}
 	}
 
+	printExport(w, st.Export)
+
 	for _, warning := range st.Warnings {
 		fmt.Fprintf(w, "\nwarning: %s\n", warning)
 	}
@@ -611,4 +638,56 @@ func printStatus(w io.Writer, st *Status) {
 	for _, p := range st.Problems {
 		fmt.Fprintf(w, "  - %s\n", p)
 	}
+}
+
+// exportStatus fills st.Export: the EventsExported condition, and each
+// configured sink as each replica reports it.
+func exportStatus(ctx context.Context, c client.Reader, namespace string, stale time.Duration, now time.Time,
+	cfg *wafv1alpha1.InkwallConfig, st *Status, problem func(string, ...any), warn func(string, error)) {
+	if cond := meta.FindStatusCondition(cfg.Status.Conditions, wafv1alpha1.ConditionEventsExported); cond != nil {
+		st.Export.Condition = &ConditionStatus{cond.Type, string(cond.Status), cond.Reason, cond.Message}
+		if cond.Status == "False" {
+			problem("security events aren't exported (EventsExported %s): %s", cond.Reason, cond.Message)
+		}
+	}
+	configured := map[string]bool{}
+	for _, s := range cfg.Spec.Events.Export.Sinks {
+		configured[s.Name] = true
+	}
+	reports, err := enginereport.ReadExport(ctx, c, namespace, stale, now)
+	if err != nil {
+		warn("the export sinks' reports", err)
+		return
+	}
+	for _, r := range reports {
+		for _, s := range r.Sinks {
+			if configured[s.Name] {
+				st.Export.Sinks = append(st.Export.Sinks, ExportSink{Name: s.Name, Replica: r.Replica, State: s.State, Pending: s.Pending, Message: s.Message})
+			}
+		}
+	}
+	slices.SortFunc(st.Export.Sinks, func(a, b ExportSink) int {
+		return cmp.Or(strings.Compare(a.Name, b.Name), strings.Compare(a.Replica, b.Replica))
+	})
+}
+
+func printExport(w io.Writer, ex ExportStatus) {
+	if ex.Condition == nil && len(ex.Sinks) == 0 {
+		return
+	}
+	fmt.Fprint(w, "\nExport:")
+	if c := ex.Condition; c != nil {
+		fmt.Fprintf(w, " EventsExported %s (%s)", c.Status, c.Reason)
+	}
+	fmt.Fprintln(w)
+	if len(ex.Sinks) == 0 {
+		fmt.Fprintln(w, "  no replica reports its sinks yet")
+		return
+	}
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "  SINK\tREPLICA\tSTATE\tPENDING")
+	for _, s := range ex.Sinks {
+		fmt.Fprintf(tw, "  %s\t%s\t%s\t%d\n", s.Name, s.Replica, s.State, s.Pending)
+	}
+	_ = tw.Flush()
 }

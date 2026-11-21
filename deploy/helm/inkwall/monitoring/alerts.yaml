@@ -101,3 +101,20 @@ groups:
           summary: Inkwall's policy bundle is near its size limit.
           description: The bundle is {{ $value | humanize1024 }}B compressed; past 7,200 KiB, policy changes can't be published.
           runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallbundlenearsizelimit
+      - alert: InkwallEventExportFailing
+        # Per replica and sink: events wait and no request was accepted in
+        # the last 2 minutes (never: the timestamp is 0), for 15 minutes; or
+        # a full export buffer drops events for 15 minutes.
+        expr: |
+          (
+            max by (namespace, pod, sink) (inkwall_operator_events_export_pending) > 0
+            and max by (namespace, pod, sink) (time() - inkwall_operator_events_export_last_success_timestamp_seconds) > 120
+          )
+          or max by (namespace, pod, sink) (increase(inkwall_operator_events_export_dropped_total{reason="buffer_full"}[5m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Inkwall can't export security events to a sink.
+          description: The export sink {{ $labels.sink }} of the operator replica {{ $labels.namespace }}/{{ $labels.pod }} has accepted no events for 15 minutes while some wait, or its full buffer drops events.
+          runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwalleventexportfailing

@@ -40,6 +40,8 @@ type Metrics interface {
 	Pending(sink string, n uint64)
 	BufferBytes(n int64)
 	Forget(sink string)
+	// Start makes a new sink's series, at 0.
+	Start(sink string)
 }
 
 type noMetrics struct{}
@@ -52,6 +54,7 @@ func (noMetrics) Succeeded(string, time.Time)    {}
 func (noMetrics) Pending(string, uint64)         {}
 func (noMetrics) BufferBytes(int64)              {}
 func (noMetrics) Forget(string)                  {}
+func (noMetrics) Start(string)                   {}
 
 // sinkRuntime is a sink's configuration and the client it sends with.
 type sinkRuntime struct {

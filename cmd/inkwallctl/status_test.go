@@ -5,6 +5,8 @@ package main
 
 import (
 	"encoding/json"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +30,7 @@ type statusCluster struct {
 	policies []*wafv1alpha1.WAFPolicy
 	engines  map[string][]enginereport.Engine // replica -> its report
 	stale    []enginereport.Engine
+	exports  map[string][]enginereport.Sink // replica -> its export sinks
 }
 
 var statusNow = time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
@@ -80,11 +83,16 @@ func (sc *statusCluster) client(t *testing.T) client.Reader {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return &corev1.ConfigMap{
+		cm := &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "inkwall-system", Name: enginereport.NamePrefix + replica, Labels: map[string]string{enginereport.Label: "true"}},
 			Data: map[string]string{enginereport.EnginesKey: string(raw), enginereport.UpdatedAtKey: updated.Format(time.RFC3339Nano),
 				enginereport.LeftOutKey: "0"},
 		}
+		if sinks := sc.exports[replica]; sinks != nil {
+			raw, _ := json.Marshal(sinks)
+			cm.Data[enginereport.ExportKey] = string(raw)
+		}
+		return cm
 	}
 	for replica, engines := range sc.engines {
 		objs = append(objs, report(replica, engines, statusNow.Add(-2*time.Second)))
@@ -204,6 +212,36 @@ func TestStatusSuspended(t *testing.T) {
 	if st.Healthy || st.Config.Exists || st.Config.Mode != "Standalone" ||
 		!strings.Contains(strings.Join(st.Problems, "\n"), "no engine is connected") {
 		t.Fatalf("no engines: %+v", st)
+	}
+}
+
+// The export sinks: the EventsExported condition, each sink's pending
+// events per replica, and a sink failing needs attention.
+func TestStatusExport(t *testing.T) {
+	sc := healthyCluster()
+	sc.config.Spec.Events.Export = &wafv1alpha1.ExportSpec{Sinks: []wafv1alpha1.EventSink{{Name: "splunk"}, {Name: "collector"}}}
+	sc.config.Status.Conditions = []metav1.Condition{{Type: wafv1alpha1.ConditionEventsExported, Status: metav1.ConditionFalse,
+		Reason: "ExportFailing", Message: "ExportFailing: sink splunk on inkwall-operator-b: auth: 401"}}
+	sc.exports = map[string][]enginereport.Sink{
+		"inkwall-operator-a": {{Name: "collector", State: "Exporting", Pending: 3}, {Name: "splunk", State: "Exporting"}, {Name: "removed", State: "Failing"}},
+		"inkwall-operator-b": {{Name: "splunk", State: "Failing", Pending: 1200, Message: "auth: 401"}},
+	}
+	st := sc.status(t)
+	if st.Healthy || !strings.Contains(strings.Join(st.Problems, "\n"), "EventsExported ExportFailing") {
+		t.Errorf("problems %v", st.Problems)
+	}
+	want := []ExportSink{
+		{Name: "collector", Replica: "inkwall-operator-a", State: "Exporting", Pending: 3},
+		{Name: "splunk", Replica: "inkwall-operator-a", State: "Exporting"},
+		{Name: "splunk", Replica: "inkwall-operator-b", State: "Failing", Pending: 1200, Message: "auth: 401"},
+	}
+	if !slices.Equal(st.Export.Sinks, want) || st.Export.Condition == nil || st.Export.Condition.Reason != "ExportFailing" {
+		t.Errorf("export %+v", st.Export)
+	}
+	var text strings.Builder
+	printStatus(&text, st)
+	if !strings.Contains(text.String(), "Export: EventsExported False (ExportFailing)") || !regexp.MustCompile(`splunk +inkwall-operator-b +Failing +1200`).MatchString(text.String()) {
+		t.Errorf("text:\n%s", text.String())
 	}
 }
 

@@ -198,6 +198,13 @@ The engine also serves the Go runtime's `go_*` and the `process_*` metrics.
 | `inkwall_operator_events_forwarded_total` | counter | | Security events sent to the control plane. |
 | `inkwall_operator_events_buffered` | gauge | | Security events buffered for the control plane. |
 | `inkwall_operator_events_buffer_errors_total` | counter | | Batches of events that couldn't be written to the buffer. |
+| `inkwall_operator_events_exported_total` | counter | `sink` | Security events an export sink (`spec.events.export`) accepted from this replica. |
+| `inkwall_operator_events_export_dropped_total` | counter | `sink`, `reason` | Events a sink never got: `buffer_full` (dropped from a full export buffer before the sink sent them), `rejected` (refused: a 4xx, or OTLP partial success), `too_large` (one event refused as too large). Events a sink's filters leave out aren't counted. |
+| `inkwall_operator_events_export_failures_total` | counter | `sink`, `kind` | Failed requests to a sink, retried or not: `network`, `tls`, `timeout`, `auth`, `throttled`, `server`, `client`. |
+| `inkwall_operator_events_export_pending` | gauge | `sink` | Events in this replica's export buffer that the sink hasn't accepted yet. |
+| `inkwall_operator_events_export_buffer_bytes` | gauge | | The export buffer's size, in memory and on disk. |
+| `inkwall_operator_events_export_last_success_timestamp_seconds` | gauge | `sink` | When the sink last accepted a request from this replica (0: never). |
+| `inkwall_operator_events_export_request_duration_seconds` | histogram | `sink` | Time per request to a sink, retries apart. |
 | `inkwall_operator_request_stats_dropped_total` | counter | `reason` | Policies' request counts dropped (`not_in_bundle`, `latency_buckets`, `evicted`). |
 | `inkwall_operator_state_engines_left_out` | gauge | | Engines left out of the last ClusterState sent to the control plane. |
 
@@ -302,6 +309,33 @@ say why in `Programmed=False`, reason `WiringFailed`:
 The bundle is over 80% of the 7,200 KiB it can be, compressed. Past it, policy changes can't be
 published (`Accepted=False`, `BundleTooLarge`). Rules written inline in many policies are the
 usual cause: put shared rules in one rule set the policies reference.
+
+### InkwallEventExportFailing
+
+An export sink of `spec.events.export` has had events waiting on a replica and accepted none of
+its requests for 15 minutes, or a replica's full export buffer has dropped events for it for 15
+minutes. The replica keeps the events in its buffer, up to its bounds, and drops the oldest when
+it is full. The engines and the control plane are never slowed. The InkwallConfig's
+`EventsExported` condition names the sink, the replica and the last error class:
+
+```sh
+kubectl get inkwallconfig default -o jsonpath='{.status.conditions[?(@.type=="EventsExported")]}'
+```
+
+`inkwall_operator_events_export_failures_total` says which kind of failure:
+
+- `network` or `timeout`: the sink isn't reachable. With the chart's egress NetworkPolicy, the
+  sink needs an entry in `networkPolicy.egress.extra`.
+- `tls`: the sink's certificate isn't trusted, or doesn't match its name. Set the sink's
+  `tls.caSecretRef` or `tls.serverName`.
+- `auth`: the sink refuses the credentials. Fix the header Secret; it takes effect without a
+  restart, and these failures go on being retried, at most a minute apart.
+- `throttled` or `server`: the sink is overloaded.
+
+When it fires only for dropped events, the sink can't keep up. Raise its `batch.maxEvents` or
+`batch.maxInFlight`, or the export buffer (`events.export.bufferMiB`, `diskMiB`). The engines'
+own drops (`inkwall_operator_engine_events_dropped_total`) are a gap no sink sees: alert on them
+too.
 
 ## Checking it worked
 

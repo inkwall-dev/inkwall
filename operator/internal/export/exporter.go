@@ -24,6 +24,7 @@ import (
 
 	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/enginereport"
 )
 
 // Defaults of the Exporter (design 0010 §2.4).
@@ -57,8 +58,12 @@ type Exporter struct {
 	// HasPolicy reports whether the bundle this replica serves has a policy
 	// (distribution.Store.HasPolicy): an event's policy counts only then.
 	HasPolicy func(string) bool
-	Metrics   Metrics
-	Log       logr.Logger
+	// StatusWindow: a sink failing this long without a success is
+	// Failing; one that dropped for a full buffer within it, Dropping
+	// (default DefaultStatusWindow; the e2e test shortens it).
+	StatusWindow time.Duration
+	Metrics      Metrics
+	Log          logr.Logger
 
 	buf     atomic.Pointer[buffer]
 	mu      sync.Mutex
@@ -100,6 +105,9 @@ func (e *Exporter) defaults() {
 	}
 	if e.Poll <= 0 {
 		e.Poll = defaultPoll
+	}
+	if e.StatusWindow <= 0 {
+		e.StatusWindow = DefaultStatusWindow
 	}
 	if e.Metrics == nil {
 		e.Metrics = noMetrics{}
@@ -205,6 +213,7 @@ func (e *Exporter) apply(buf *buffer, sinks []*sinkConfig) {
 			rs.sender.log = func(msg string, kv ...any) { e.Log.Info(msg, kv...) }
 			e.sinks[sc.name] = rs
 			go rs.sender.run(sctx)
+			e.Metrics.Start(sc.name)
 			e.Log.Info("export sink added", "sink", sc.name)
 		}
 		var ce *configError
@@ -276,7 +285,7 @@ func (e *Exporter) Status() []SinkStatus {
 	now := time.Now()
 	out := make([]SinkStatus, 0, len(e.sinks))
 	for name, rs := range e.sinks {
-		out = append(out, rs.state.status(name, buf.pending(name), now))
+		out = append(out, rs.state.status(name, buf.pending(name), now, e.StatusWindow))
 	}
 	slices.SortFunc(out, func(a, b SinkStatus) int {
 		switch {
@@ -324,4 +333,15 @@ wait:
 		e.stopSink(rs)
 	}
 	buf.close()
+}
+
+// Report is Status as the replica's engine report carries it, for the
+// leader's EventsExported condition and inkwallctl status.
+func (e *Exporter) Report() []enginereport.Sink {
+	st := e.Status()
+	out := make([]enginereport.Sink, len(st))
+	for i, s := range st {
+		out[i] = enginereport.Sink{Name: s.Name, State: s.State, Message: s.Message, Pending: s.Pending, Plaintext: s.Plaintext}
+	}
+	return out
 }

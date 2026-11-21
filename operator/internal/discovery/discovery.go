@@ -12,6 +12,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -31,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/enginereport"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/crdwatch"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
@@ -77,6 +79,12 @@ type Reconciler struct {
 	// EngineConfigured condition changes, but for the first True; nil:
 	// none.
 	Recorder events.EventRecorder
+	// Reports reads the replicas' engine reports (uncached), in Namespace;
+	// those older than ReportStale are from replicas that are gone. Nil:
+	// no EventsExported condition.
+	Reports     client.Reader
+	Namespace   string
+	ReportStale time.Duration
 }
 
 var request = reconcile.Request{NamespacedName: types.NamespacedName{Name: "default"}}
@@ -162,7 +170,44 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		}
 		r.Recorder.Eventf(&cfg, nil, kind, notify.Reason, "InjectEngine", "%s", notify.Message)
 	}
-	return reconcile.Result{}, err
+	if err != nil || cfg.Name == "" {
+		return reconcile.Result{}, err
+	}
+	return r.exported(ctx, &cfg)
+}
+
+// exported folds the replicas' reports of the export sinks into the
+// EventsExported condition, and looks again every exportResync while
+// there are sinks: the reports aren't watched.
+func (r *Reconciler) exported(ctx context.Context, cfg *wafv1alpha1.InkwallConfig) (reconcile.Result, error) {
+	if r.Reports == nil {
+		return reconcile.Result{}, nil
+	}
+	var sinks []string
+	if ex := cfg.Spec.Events.Export; ex != nil {
+		for _, s := range ex.Sinks {
+			sinks = append(sinks, s.Name)
+		}
+	}
+	var cond *metav1.Condition
+	if len(sinks) > 0 {
+		reports, err := enginereport.ReadExport(ctx, r.Reports, r.Namespace, r.ReportStale, time.Now())
+		if err != nil {
+			return reconcile.Result{}, err
+		}
+		cond = ExportCondition(sinks, reports, cfg.Generation)
+		if cond == nil {
+			// No replica reports the sinks yet: as it was, until one does.
+			return reconcile.Result{RequeueAfter: exportResync}, nil
+		}
+	}
+	if err := applyExportCondition(ctx, r.Client, cfg, cond); err != nil {
+		return reconcile.Result{}, err
+	}
+	if len(sinks) == 0 {
+		return reconcile.Result{}, nil
+	}
+	return reconcile.Result{RequeueAfter: exportResync}, nil
 }
 
 // Reasons of the InkwallConfig's IntegrationsConfigured condition.

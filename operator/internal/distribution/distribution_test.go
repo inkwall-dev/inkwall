@@ -381,7 +381,7 @@ func TestReadEnginesLeftOut(t *testing.T) {
 	table.Connect("e1", Engine{ID: "e1"})
 	p := &Publisher{Client: c, Reader: c, Namespace: "inkwall-system", Replica: "a", Engines: table}
 	engines, _ := table.Snapshot()
-	if err := p.write(ctx, engines); err != nil {
+	if err := p.write(ctx, engines, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got, left, err := ReadEngines(ctx, c, "inkwall-system", time.Minute, time.Now()); err != nil || len(got) != 1 || left != 0 {
@@ -389,7 +389,7 @@ func TestReadEnginesLeftOut(t *testing.T) {
 	}
 	full := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "inkwall-system", Name: reportNamePrefix + "b", Labels: map[string]string{EnginesLabel: "true"}},
-		Data:       reportData([]byte(`[{"id":"e2"}]`), 3),
+		Data:       reportData([]byte(`[{"id":"e2"}]`), 3, nil),
 	}
 	if err := c.Create(ctx, full); err != nil {
 		t.Fatal(err)
@@ -723,7 +723,7 @@ func TestWatchProbeReceipts(t *testing.T) {
 	now := time.Now()
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(&corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "inkwall-system", Name: reportNamePrefix + "r", Labels: map[string]string{EnginesLabel: "true"}},
-		Data:       reportData(data, 0),
+		Data:       reportData(data, 0, nil),
 	}).Build()
 	read, _, err := ReadEngines(context.Background(), c, "inkwall-system", time.Minute, now)
 	if err != nil || len(read) != 1 || !slices.Equal(read[0].ProbeReceipts, receipts) || read[0].PodName != "gw-1" {

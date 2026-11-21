@@ -94,6 +94,7 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fs.StringVar(&o.ControlPlaneCAFile, "control-plane-ca", "", "CA certificate (PEM) trusted for the optional control plane's server certificate, in GitOps and Managed mode (empty: the system roots)")
 	fs.IntVar(&o.DistributionPort, "distribution-port", 9445, "port of the gRPC server that sends bundles to the engines, over TLS with the webhook's certificate (0 disables)")
 	fs.StringVar(&o.DistributionService, "distribution-service", "inkwall-operator", "Service engines reach the distribution server through, named in the certificate")
+	fs.DurationVar(&o.ExportStatusWindow, "export-status-window", 5*time.Minute, "an export sink failing this long without a success is reported failing (EventsExported: ExportFailing), and one that dropped events for a full buffer within it, dropping; tests shorten it")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
@@ -115,6 +116,9 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 		if name = strings.TrimSpace(name); name != "" {
 			o.EnginePullSecrets = append(o.EnginePullSecrets, name)
 		}
+	}
+	if o.ExportStatusWindow <= 0 {
+		return o, errors.New("--export-status-window must be positive")
 	}
 	if o.ExportBufferBytes <= 0 || o.ExportDiskBytes <= 0 || o.ExportFlushTimeout <= 0 {
 		return o, errors.New("--export-buffer-bytes, --export-disk-bytes and --export-flush-timeout must be positive")
