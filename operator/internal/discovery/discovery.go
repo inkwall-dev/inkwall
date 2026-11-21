@@ -12,6 +12,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -31,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/enginereport"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/crdwatch"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
@@ -77,6 +79,20 @@ type Reconciler struct {
 	// EngineConfigured condition changes, but for the first True; nil:
 	// none.
 	Recorder events.EventRecorder
+	// Reports reads the replicas' engine reports (uncached), in Namespace;
+	// those older than ReportStale are from replicas that are gone. Nil:
+	// no EventsExported condition.
+	Reports     client.Reader
+	Namespace   string
+	ReportStale time.Duration
+	// NotReportedAfter: a configured sink missing this long from a live
+	// replica's report, or from every report, is not exporting from there
+	// (0: DefaultNotReportedAfter).
+	NotReportedAfter time.Duration
+
+	// missingSince: since when each sink, per replica, has been missing.
+	missingSince map[NotReported]time.Time
+	now          func() time.Time
 }
 
 var request = reconcile.Request{NamespacedName: types.NamespacedName{Name: "default"}}
@@ -162,7 +178,73 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		}
 		r.Recorder.Eventf(&cfg, nil, kind, notify.Reason, "InjectEngine", "%s", notify.Message)
 	}
-	return reconcile.Result{}, err
+	if err != nil || cfg.Name == "" {
+		return reconcile.Result{}, err
+	}
+	return r.exported(ctx, &cfg)
+}
+
+// notReported keeps since when each missing sink has been missing, and
+// returns those missing past the grace.
+func (r *Reconciler) notReported(missing []NotReported, now time.Time) []NotReported {
+	after := r.NotReportedAfter
+	if after <= 0 {
+		after = DefaultNotReportedAfter
+	}
+	since := make(map[NotReported]time.Time, len(missing))
+	var out []NotReported
+	for _, m := range missing {
+		t, ok := r.missingSince[m]
+		if !ok {
+			t = now
+		}
+		since[m] = t
+		if now.Sub(t) >= after {
+			out = append(out, m)
+		}
+	}
+	r.missingSince = since
+	return out
+}
+
+// exported folds the replicas' reports of the export sinks into the
+// EventsExported condition, and looks again every exportResync while
+// there are sinks: the reports aren't watched.
+func (r *Reconciler) exported(ctx context.Context, cfg *wafv1alpha1.InkwallConfig) (reconcile.Result, error) {
+	if r.Reports == nil {
+		return reconcile.Result{}, nil
+	}
+	var sinks []string
+	if ex := cfg.Spec.Events.Export; ex != nil {
+		for _, s := range ex.Sinks {
+			sinks = append(sinks, s.Name)
+		}
+	}
+	var cond *metav1.Condition
+	now := time.Now()
+	if r.now != nil {
+		now = r.now()
+	}
+	if len(sinks) > 0 {
+		reports, err := enginereport.ReadExport(ctx, r.Reports, r.Namespace, r.ReportStale, now)
+		if err != nil {
+			return reconcile.Result{}, err
+		}
+		cond = ExportCondition(sinks, reports, r.notReported(Missing(sinks, reports), now), cfg.Generation)
+		if cond == nil {
+			// Nothing reported yet, nor missing for long: as it was.
+			return reconcile.Result{RequeueAfter: exportResync}, nil
+		}
+	} else {
+		r.missingSince = nil
+	}
+	if err := applyExportCondition(ctx, r.Client, cfg, cond); err != nil {
+		return reconcile.Result{}, err
+	}
+	if len(sinks) == 0 {
+		return reconcile.Result{}, nil
+	}
+	return reconcile.Result{RequeueAfter: exportResync}, nil
 }
 
 // Reasons of the InkwallConfig's IntegrationsConfigured condition.

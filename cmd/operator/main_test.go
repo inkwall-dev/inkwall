@@ -75,6 +75,17 @@ func TestFlags(t *testing.T) {
 	if _, err := parseFlags([]string{"--export-disk-bytes=0"}, io.Discard); err == nil {
 		t.Error("a disk bound of 0 accepted")
 	}
+	if o, err := parseFlags(nil, io.Discard); err != nil || o.ExportStatusWindow != 5*time.Minute {
+		t.Errorf("export status window %v, %v, want 5m", o.ExportStatusWindow, err)
+	}
+	if o, err := parseFlags([]string{"--export-status-window=30s"}, io.Discard); err != nil || o.ExportStatusWindow != 30*time.Second {
+		t.Errorf("export status window %v, %v, want 30s", o.ExportStatusWindow, err)
+	}
+	for _, bad := range []string{"0s", "-1m"} {
+		if _, err := parseFlags([]string{"--export-status-window=" + bad}, io.Discard); err == nil {
+			t.Errorf("--export-status-window=%s accepted", bad)
+		}
+	}
 }
 
 func TestDrain(t *testing.T) {

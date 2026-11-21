@@ -6,21 +6,23 @@ package export
 import (
 	"sync"
 	"time"
+
+	"github.com/inkwall-dev/inkwall/operator/enginereport"
 )
 
-// statusWindow: a sink that failed this long without a success is
-// failing; one that dropped for a full buffer this recently is dropping
+// DefaultStatusWindow is how long a sink fails without a success to be
+// Failing, and how recently one that dropped for a full buffer is Dropping
 // (design 0010 §8).
-const statusWindow = 5 * time.Minute
+const DefaultStatusWindow = 5 * time.Minute
 
 // The state classes of a sink, in the order of precedence of the
 // EventsExported condition: the first that applies wins.
 const (
-	StateConfigInvalid  = "ConfigInvalid"
-	StateAddressRefused = "AddressRefused"
-	StateFailing        = "Failing"
-	StateDropping       = "Dropping"
-	StateExporting      = "Exporting"
+	StateConfigInvalid  = enginereport.SinkConfigInvalid
+	StateAddressRefused = enginereport.SinkAddressRefused
+	StateFailing        = enginereport.SinkFailing
+	StateDropping       = enginereport.SinkDropping
+	StateExporting      = enginereport.SinkExporting
 )
 
 // SinkStatus is a sink's state on this replica.
@@ -83,7 +85,7 @@ func (s *sinkState) configure(err error, plaintext bool) {
 }
 
 // status classes the sink at now.
-func (s *sinkState) status(name string, pending uint64, now time.Time) SinkStatus {
+func (s *sinkState) status(name string, pending uint64, now time.Time, window time.Duration) SinkStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := SinkStatus{Name: name, Pending: pending, Plaintext: s.plaintext, LastSuccess: s.lastSuccess, State: StateExporting}
@@ -93,9 +95,9 @@ func (s *sinkState) status(name string, pending uint64, now time.Time) SinkStatu
 		st.State, st.Message = StateConfigInvalid, s.configErr
 	case failing && s.refused != "":
 		st.State, st.Message = StateAddressRefused, "the sink's host resolves only to refused addresses: "+s.refused
-	case failing && now.Sub(s.failingSince) >= statusWindow:
+	case failing && now.Sub(s.failingSince) >= window:
 		st.State, st.Message = StateFailing, "failing since "+s.failingSince.UTC().Format(time.RFC3339)+": "+s.lastKind+": "+s.lastDetail
-	case !s.lastFullDrop.IsZero() && now.Sub(s.lastFullDrop) < statusWindow:
+	case !s.lastFullDrop.IsZero() && now.Sub(s.lastFullDrop) < window:
 		st.State, st.Message = StateDropping, "dropping events for a full buffer: the sink can't keep up"
 	}
 	return st

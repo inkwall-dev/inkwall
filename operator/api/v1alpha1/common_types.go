@@ -42,6 +42,10 @@ const (
 	// spec.engine settings, because its release (or a custom build) may
 	// not know their flags; the message names them.
 	ConditionEngineConfigured = "EngineConfigured"
+	// ConditionEventsExported, on the InkwallConfig, says whether every
+	// sink of spec.events.export exports from every operator replica;
+	// absent without sinks.
+	ConditionEventsExported = "EventsExported"
 )
 
 // SecretReference names a Secret in the operator's namespace.

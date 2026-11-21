@@ -67,6 +67,7 @@ func (*recorder) Succeeded(string, time.Time)    {}
 func (*recorder) Pending(string, uint64)         {}
 func (*recorder) BufferBytes(int64)              {}
 func (*recorder) Forget(string)                  {}
+func (*recorder) Start(string)                   {}
 
 func (r *recorder) get(m map[string]int, k string) int {
 	r.mu.Lock()
@@ -109,6 +110,16 @@ type harness struct {
 	rec *recorder
 }
 
+// wrapMetrics, when set, wraps the recorder start gives the exporter.
+var wrapMetrics func(*recorder) Metrics
+
+func metricsFor(rec *recorder) Metrics {
+	if wrapMetrics != nil {
+		return wrapMetrics(rec)
+	}
+	return rec
+}
+
 func start(t *testing.T, dir string, objs ...client.Object) *harness {
 	t.Helper()
 	allowLoopback(t)
@@ -117,7 +128,7 @@ func start(t *testing.T, dir string, objs ...client.Object) *harness {
 	rec := newRecorder()
 	exp := &Exporter{
 		Client: c, APIReader: c, Namespace: ns, Dir: dir, Poll: 20 * time.Millisecond, FlushTimeout: 2 * time.Second,
-		HasPolicy: inBundle, Metrics: rec, Log: testr.New(t), after: rec.after,
+		HasPolicy: inBundle, Metrics: metricsFor(rec), Log: testr.New(t), after: rec.after,
 	}
 	if err := exp.Start(); err != nil {
 		t.Fatal(err)

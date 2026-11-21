@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -219,25 +220,60 @@ type Publisher struct {
 	Engines  *Table
 	Interval time.Duration
 	Refresh  time.Duration
+	// Export, if set, is the replica's export sinks (design 0010 §8). A
+	// change of a sink's state class is written at most every
+	// ExportDebounce (default 10 s); counts alone never cause a write.
+	Export         func() []enginereport.Sink
+	ExportDebounce time.Duration
+}
+
+// exportClasses is what of the sinks' states causes a write: each sink and
+// its state class, not its counts.
+func exportClasses(sinks []enginereport.Sink) string {
+	var b strings.Builder
+	for _, s := range sinks {
+		b.WriteString(s.Name)
+		b.WriteByte('=')
+		b.WriteString(s.State)
+		b.WriteByte(';')
+	}
+	return b.String()
 }
 
 // Start implements manager.Runnable.
 func (p *Publisher) Start(ctx context.Context) error {
 	logger := log.FromContext(ctx).WithName("engine-report")
 	var (
-		lastGen   uint64
-		lastWrite time.Time
-		written   bool
+		lastGen     uint64
+		lastWrite   time.Time
+		written     bool
+		lastClasses string
+		classWrite  time.Time
 	)
+	debounce := p.ExportDebounce
+	if debounce <= 0 {
+		debounce = 10 * time.Second
+	}
 	tick := time.NewTicker(p.Interval)
 	defer tick.Stop()
 	for {
 		engines, gen := p.Engines.Snapshot()
-		if !written || gen != lastGen || time.Since(lastWrite) >= p.Refresh {
-			if err := p.write(ctx, engines); err != nil {
+		var sinks []enginereport.Sink
+		if p.Export != nil {
+			if sinks = p.Export(); sinks == nil {
+				sinks = []enginereport.Sink{}
+			}
+		}
+		classes := exportClasses(sinks)
+		classChanged := classes != lastClasses && time.Since(classWrite) >= debounce
+		if !written || gen != lastGen || time.Since(lastWrite) >= p.Refresh || classChanged {
+			if err := p.write(ctx, engines, sinks); err != nil {
 				logger.Error(err, "can't publish the connected engines")
 			} else {
 				lastGen, lastWrite, written = gen, time.Now(), true
+				if classes != lastClasses {
+					lastClasses, classWrite = classes, time.Now()
+				}
 			}
 		}
 		select {
@@ -258,7 +294,7 @@ func (*Publisher) NeedLeaderElection() bool { return false }
 
 func (p *Publisher) name() string { return reportNamePrefix + p.Replica }
 
-func (p *Publisher) write(ctx context.Context, engines []Engine) error {
+func (p *Publisher) write(ctx context.Context, engines []Engine, sinks []enginereport.Sink) error {
 	data, left, err := encodeEngines(engines, maxReport)
 	if err != nil {
 		return err
@@ -279,22 +315,31 @@ func (p *Publisher) write(ctx context.Context, engines []Engine) error {
 		if p.Owner != nil {
 			cm.OwnerReferences = []metav1.OwnerReference{*p.Owner}
 		}
-		cm.Data = reportData(data, left)
+		cm.Data = reportData(data, left, sinks)
 		return p.Client.Create(ctx, cm)
 	}
 	if err != nil {
 		return err
 	}
-	cm.Data = reportData(data, left)
+	cm.Data = reportData(data, left, sinks)
 	return p.Client.Update(ctx, cm)
 }
 
-func reportData(engines []byte, left int) map[string]string {
-	return map[string]string{
+func reportData(engines []byte, left int, sinks []enginereport.Sink) map[string]string {
+	d := map[string]string{
 		enginesKey:   string(engines),
 		updatedAtKey: time.Now().UTC().Format(time.RFC3339Nano),
 		leftOutKey:   strconv.Itoa(left),
 	}
+	if sinks != nil {
+		// Always, [] with no sinks, so the leader tells a replica without
+		// sinks from one that doesn't report them. At most 4 sinks with
+		// short messages: far within the room maxReport leaves.
+		if raw, err := json.Marshal(sinks); err == nil {
+			d[enginereport.ExportKey] = string(raw)
+		}
+	}
+	return d
 }
 
 // encodeEngines encodes engines as a JSON array of at most limit bytes: the

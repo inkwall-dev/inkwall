@@ -171,6 +171,8 @@ type Options struct {
 	ExportBufferBytes  int64
 	ExportDiskBytes    int64
 	ExportFlushTimeout time.Duration
+	// ExportStatusWindow: a sink failing this long is Failing (0: 5 min).
+	ExportStatusWindow time.Duration
 
 	// SkipControllerNameValidation lets a process create more than one
 	// manager, which controller-runtime refuses by default (its
@@ -433,7 +435,8 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	if err := (&policystatus.Watcher{Client: mgr.GetClient(), Recorder: mgr.GetEventRecorder("inkwall-operator")}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
-	if err := (&proxydiscovery.Reconciler{Client: mgr.GetClient(), GatewayClasses: gatewayClasses, Kinds: kinds, Disabled: denied, Recorder: mgr.GetEventRecorder("inkwall-operator")}).SetupWithManager(mgr); err != nil {
+	if err := (&proxydiscovery.Reconciler{Client: mgr.GetClient(), GatewayClasses: gatewayClasses, Kinds: kinds, Disabled: denied, Recorder: mgr.GetEventRecorder("inkwall-operator"),
+		Reports: mgr.GetAPIReader(), Namespace: o.Namespace, ReportStale: engineStale(o)}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
 	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gateways, gatewayClasses, envoyProxies, extensionPolicies, trafficPolicies, envoyFilters, virtualServices, istioGateways, haproxyBackends} {
@@ -550,7 +553,8 @@ func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}, forw
 	exporter := &export.Exporter{
 		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Namespace: o.Namespace,
 		Dir: exportDir(o.EventsDir), MemoryBytes: o.ExportBufferBytes, DiskBytes: o.ExportDiskBytes,
-		FlushTimeout: o.ExportFlushTimeout, HasPolicy: store.HasPolicy, Log: ctrl.Log.WithName("export"),
+		FlushTimeout: o.ExportFlushTimeout, StatusWindow: o.ExportStatusWindow, HasPolicy: store.HasPolicy,
+		Metrics: export.PrometheusMetrics{}, Log: ctrl.Log.WithName("export"),
 	}
 	service.Events = func(b *eventsv1.EventBatch) {
 		forwarder.Add(b)
@@ -580,6 +584,8 @@ func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}, forw
 		Interval:  interval,
 		// The leader ignores a report older than three refreshes.
 		Refresh: 5 * interval,
+		// The export sinks' states, for the leader's EventsExported.
+		Export: exporter.Report,
 	}
 	if o.ReplicaUID != "" {
 		pub.Owner = &metav1.OwnerReference{APIVersion: "v1", Kind: "Pod", Name: replica, UID: o.ReplicaUID}
