@@ -137,6 +137,10 @@ before the ConfigMap's CRS but after an annotation's. Each rule kept before the 
 `check`: `placement: BeforeCRS` needs engines 0.6.0 or later, and older ones load the rule set after
 the CRS.
 
+A rule set name that would be longer than Kubernetes allows (253 characters) keeps the start of the
+Ingress's name, followed by the first 8 hex digits of its SHA-256: names stay distinct and the same
+from one run to the next.
+
 A policy that tunes the CRS or adds rules refers to a `ClusterWAFRuleSet` named `owasp-crs-v4` with
 the built-in CRS, which is written alongside. Policies that only use the CRS's defaults leave
 `ruleSets` empty.

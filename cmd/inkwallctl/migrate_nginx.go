@@ -5,6 +5,8 @@ package main
 
 import (
 	"cmp"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
@@ -1129,9 +1131,9 @@ func (s *modsec) build(m *migration) {
 		if b.Len() == 0 {
 			continue
 		}
-		binding := wafv1alpha1.RuleSetBinding{Ref: wafv1alpha1.RuleSetRef{Kind: "WAFRuleSet", Name: m.name + "-modsecurity"}}
+		binding := wafv1alpha1.RuleSetBinding{Ref: wafv1alpha1.RuleSetRef{Kind: "WAFRuleSet", Name: derivedName(m.name, "-modsecurity")}}
 		if before {
-			binding.Ref.Name += "-before-crs"
+			binding.Ref.Name = derivedName(m.name, "-modsecurity-before-crs")
 			binding.Placement = wafv1alpha1.PlacementBeforeCRS
 		}
 		m.ruleSets = append(m.ruleSets, &wafv1alpha1.WAFRuleSet{
@@ -1177,6 +1179,25 @@ func (s *modsec) build(m *migration) {
 		p.Spec.Body = &s.body
 	}
 	m.policy = p
+}
+
+// maxObjectName is the longest name of a Kubernetes object (a DNS
+// subdomain), and of a WAFPolicy's rule set reference.
+const maxObjectName = 253
+
+// derivedName is the name of an object made for an Ingress: its name and
+// suffix. When that is too long, the Ingress's name is cut and followed by
+// the first 8 hex digits of its SHA-256, so two long names sharing a prefix
+// don't collide, and a new run gives the same name.
+func derivedName(name, suffix string) string {
+	if len(name)+len(suffix) <= maxObjectName {
+		return name + suffix
+	}
+	sum := sha256.Sum256([]byte(name))
+	hash := hex.EncodeToString(sum[:])[:8]
+	// Ending in an alphanumeric, the cut name stays a DNS subdomain.
+	cut := strings.TrimRight(name[:maxObjectName-len(suffix)-len(hash)-1], ".-")
+	return cut + "-" + hash + suffix
 }
 
 // action is one action of a SecRule or SecAction.

@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -637,6 +638,58 @@ SecRule ARGS:debug "@streq true" "id:1100,phase:1,deny,status:403"`},
 				t.Errorf("BeforeCRS rule set %q, want %q", got, tc.beforeCRS)
 			}
 		})
+	}
+}
+
+// TestDerivedName checks the names of the objects made for an Ingress:
+// valid, stable, and distinct for long names sharing a prefix.
+func TestDerivedName(t *testing.T) {
+	const suffix = "-modsecurity-before-crs"
+	if got := derivedName("app", suffix); got != "app"+suffix {
+		t.Errorf("short name: %q, want it unchanged", got)
+	}
+	long := strings.Repeat("a", 240) + "-1234567890"
+	other := strings.Repeat("a", 240) + "-0987654321"
+	// A cut ending in '.' or '-' is trimmed, to stay a DNS subdomain.
+	dotted := strings.Repeat("a.", 125)
+	names := map[string]string{}
+	for _, name := range []string{long, other, dotted, strings.Repeat("b", 253)} {
+		for _, sfx := range []string{"-modsecurity", suffix} {
+			got := derivedName(name, sfx)
+			if errs := validation.IsDNS1123Subdomain(got); len(errs) > 0 {
+				t.Errorf("%q: %s", got, strings.Join(errs, "; "))
+			}
+			if !strings.HasSuffix(got, sfx) {
+				t.Errorf("%q doesn't end in %s", got, sfx)
+			}
+			if again := derivedName(name, sfx); again != got {
+				t.Errorf("%q, then %q: not stable", got, again)
+			}
+			if prev, ok := names[got]; ok {
+				t.Errorf("%q and %q both give %q", prev, name, got)
+			}
+			names[got] = name
+		}
+	}
+
+	// The objects of a 250-character Ingress name.
+	ing := ingressWith(map[string]string{annEnable: "true", annCRS: "true", annSnippet: "SecRuleRemoveByTag attack-sqli\nSecRule ARGS:a \"@streq x\" \"id:1,phase:1,deny\""})
+	ing.Name = strings.Repeat("x", 250)
+	m := migrateIngress(ing, nginxGlobal{}, "nginx.ingress.kubernetes.io")
+	if m.policy == nil || len(m.ruleSets) != 2 {
+		t.Fatalf("policy %v, %d rule sets, want 2", m.policy, len(m.ruleSets))
+	}
+	refs := map[string]bool{}
+	for _, b := range m.policy.Spec.RuleSets {
+		refs[b.Ref.Name] = true
+	}
+	for _, rs := range m.ruleSets {
+		if errs := validation.IsDNS1123Subdomain(rs.Name); len(errs) > 0 {
+			t.Errorf("rule set %q: %s", rs.Name, strings.Join(errs, "; "))
+		}
+		if !refs[rs.Name] {
+			t.Errorf("rule set %q: the policy doesn't refer to it (%v)", rs.Name, refs)
+		}
 	}
 }
 
