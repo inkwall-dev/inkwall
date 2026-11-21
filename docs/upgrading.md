@@ -13,6 +13,7 @@ From 0.1.x, upgrade to 0.2.3 (or 0.2.2) first, then to 0.3.0.
 
 - [Every upgrade](#every-upgrade)
 - [From 0.6.x to 0.7.0](#from-06x-to-070)
+  - [Rolling back to 0.6.x](#rolling-back-to-06x)
 - [From 0.5.x to 0.6.0](#from-05x-to-060)
 - [From 0.4.x to 0.5.0](#from-04x-to-050)
 - [From 0.4.0 to 0.4.1](#from-040-to-041)
@@ -125,7 +126,22 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   policy goes `Programmed=False` (`Unverified`), naming the `Backend` to look for in the
   controller's log; alert on `haproxy_rejected_custom_resource_generation` and on policies that
   aren't `Ready`.
-
+- **Export of security events to SIEMs** (`spec.events.export`, [SIEM export](siem-export.md)).
+  Nothing is exported until you add sinks. The chart changes with it, also for clusters that
+  don't export:
+  - The operator's default `operator.resources.limits.memory` is 1Gi (was 512Mi), for the
+    control plane's queue decoded, the export buffer and its requests; `values.yaml` gives the
+    formula. An upgrade with `--reuse-values` keeps the release's values, so an existing
+    install stays at 512Mi: before you add sinks, raise `operator.resources.limits.memory`
+    (`--set operator.resources.limits.memory=1Gi`), or upgrade without `--reuse-values`. If you
+    set your own limit, check it against the formula.
+  - The `events` emptyDir's `sizeLimit` grows by `events.export.diskMiB` (512 MiB by default):
+    the node needs that much ephemeral storage free per replica once sinks fill the buffer. Lower
+    `diskMiB` on small nodes.
+  - `operator.terminationGracePeriodSeconds` is set to 30, explicitly: 5 s of shutdown delay, up
+    to 15 s for the sinks to send what is buffered, and the rest of the shutdown.
+  - The new `events.export` values default with `--reuse-values` too. With the chart's egress NetworkPolicy, list
+    each sink in `networkPolicy.egress.extra`.
 - **Envoy Gateway's routes are proven by the operator's probe**, as Istio's and the HAProxy
   controller's are. After the upgrade, a policy on an HTTPRoute that Envoy Gateway serves is
   `Programmed=False`, reason `Unverified`, until the probe has reached the engine on every Envoy
@@ -171,8 +187,8 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   refused. Move them (`crs: {paranoiaLevel: 2}` for `paranoiaLevel: 2`); v1 moves them for you.
   The sample, the README and `inkwallctl migrate ingress-nginx` use the new fields, so a policy
   the migration writes needs the 0.7.0 CRDs. CRS settings on a binding to a rule set that isn't
-  the built-in CRS (SecLang, a ConfigMap) were always ignored; the policy's `Accepted` message now
-  says so, and v1 refuses them.
+  the built-in CRS (SecLang, a ConfigMap) were always ignored, and still are; the policy's
+  `Accepted` message now says so.
 - **`WAFPolicy.spec.ruleSets[].ref.namespace` is deprecated** (#715). It can only name the policy's
   own namespace: any other was always refused (`InvalidRef`, "rule sets in other namespaces can't
   be used yet"). Setting it now draws a warning, and v1 removes it. Remove it, and bind a
@@ -188,22 +204,43 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   only without descriptions (about 4,500 with 256-byte ones), so split longer lists. The
   InkwallConfig's `status.proxies[].ingressClasses` and `gatewayClasses` list at most 64 classes
   each.
-- **A policy's defaults are in the API and the bundle, not only the engine** (#718).
-  `spec.timeout` defaults to `250ms`, `ruleSets[].placement` to `AfterCRS` and
-  `responses.streams` to `Skip`, so `kubectl get -o yaml` and `kubectl explain` show them. The
-  operator writes the 64 KiB body limit into the bundle for every policy that inspects bodies and
-  sets no `body.maxBytes`, and the same for `responses.maxBytes`, instead of leaving it to the
-  engine. Every value is the one that applied before, so nothing behaves differently. The bundle
-  grows by a few bytes per policy, so after the upgrade every policy's `bundleVersion` moves to the
-  operator's first bundle, and policies are `Enforced=False` (`EnginesBehind`) for the seconds the
-  engines take to load it. `responses: {streams: Skip}` without `inspect: true` is now accepted
-  (it is the default).
+- **A policy's static defaults are in the API** (#718). `spec.timeout` defaults to `250ms` and
+  `responses.streams` to `Skip`, so `kubectl get -o yaml` and `kubectl explain` show them. Both are
+  what applied before: an engine in bundle mode refuses `--timeout`, so its 250 ms default was the
+  only one, and `inkwallctl test` still applies its own `--timeout`. Nothing behaves differently.
+  The timeout goes into the bundle, so after the upgrade every policy's `bundleVersion` moves to
+  the operator's first bundle, and policies are `Enforced=False` (`EnginesBehind`) for the seconds
+  the engines take to load it. `responses: {streams: Skip}` without `inspect: true` is now
+  accepted (it is the default). The body and response limits stay out of the bundle unless the
+  policy sets `body.maxBytes` or `responses.maxBytes`: an engine's `--max-body-bytes` (raw Envoy,
+  HAProxy outside the controller, `inkwallctl test --max-body-bytes`) still applies to the policies
+  that set none, and the response limit is 64 KiB as before. `ruleSets[].placement` has no API
+  default: unset means `AfterCRS`, as it always did, and a default inside a list item would make
+  Argo CD show every policy with rule sets `OutOfSync`. For the same reason the InkwallConfig's
+  `events.sinks[].compression` and `json.framing` have none either (unset: `Gzip`, `Lines`).
 - **`WAFIPList` has a status** (#719): an `Accepted` condition, `InvalidEntries` when an entry
   doesn't parse (only possible for a list written while the webhook was down), and an `Accepted`
   column in `kubectl get wafiplists`. The operator needs `update` on `wafiplists/status`, which
   the chart's ClusterRole now grants; with your own RBAC, add it. The
   [API compatibility](api-compatibility.md) page says what may change in the API from here to
   v1.0.0, and what v1.0.0 will freeze.
+
+### Rolling back to 0.6.x
+
+0.6.x's CRDs don't have the fields 0.7.0 added: the API server drops them when it reads the
+objects, and may drop them from storage at the next write, with nothing in a status to say so.
+Before `helm rollback` (0.6.1's CRDs with it):
+
+- Move `ruleSets[].crs.paranoiaLevel` and `crs.inboundAnomalyThreshold` back to the binding's
+  `paranoiaLevel` and `inboundAnomalyThreshold`. Otherwise the policy runs the CRS at paranoia
+  level 1 and threshold 5 again.
+- Replace the InkwallConfig's `engine.denialFormat: JSON` with `engine.jsonDenials: true`, or the
+  engines answer denials in text.
+- Set `spec.controlPlane.enrollmentSecretRef.namespace` (the operator's namespace) if the
+  InkwallConfig leaves it out: 0.6.x requires it, so the API server refuses every update of an
+  InkwallConfig without it, the operator's included.
+- Note what else 0.7.0 added, `spec.rateLimits` and the InkwallConfig's `spec.events.export` among
+  it: it is dropped without a word, and has to be set again after upgrading to 0.7.0 again.
 
 ## From 0.5.x to 0.6.0
 

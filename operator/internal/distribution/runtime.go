@@ -4,7 +4,9 @@
 package distribution
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -41,13 +43,16 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	"github.com/inkwall-dev/inkwall/operator/bundle"
 	"github.com/inkwall-dev/inkwall/operator/enginereport"
+	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 )
 
 // Each replica publishes its engines in a ConfigMap in its namespace.
 //
 // +kubebuilder:rbac:groups="",namespace=inkwall-system,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 
-// BundleSource loads the bundle Secret into the Store on every replica.
+// BundleSource loads the bundle Secret into the Store on every replica,
+// with the country table the bundle names, from its Secrets (design 0011
+// §4.4): a replica serves a bundle only once it holds its table.
 type BundleSource struct {
 	Client    client.Client
 	Namespace string
@@ -59,17 +64,17 @@ func (b *BundleSource) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("bundle-source").
 		For(&corev1.Secret{}, builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
-			return o.GetNamespace() == b.Namespace && o.GetName() == bundle.BundleSecret
+			return o.GetNamespace() == b.Namespace && (o.GetName() == bundle.BundleSecret || o.GetName() == bundlesecret.Geo.Name)
 		}))).
 		// Every replica serves engines, not only the leader.
 		WithOptions(controller.Options{NeedLeaderElection: ptr.To(false)}).
 		Complete(b)
 }
 
-// Reconcile loads the current bundle.
-func (b *BundleSource) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
+// Reconcile loads the current bundle, and its country table.
+func (b *BundleSource) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
 	var s corev1.Secret
-	if err := b.Client.Get(ctx, req.NamespacedName, &s); err != nil {
+	if err := b.Client.Get(ctx, types.NamespacedName{Namespace: b.Namespace, Name: bundle.BundleSecret}, &s); err != nil {
 		// Deleted: engines keep the bundle they have until the builder
 		// writes a new one.
 		return reconcile.Result{}, client.IgnoreNotFound(err)
@@ -82,12 +87,81 @@ func (b *BundleSource) Reconcile(ctx context.Context, req reconcile.Request) (re
 	if err := proto.Unmarshal(signed.GetBundle(), &bun); err != nil {
 		return reconcile.Result{}, fmt.Errorf("bundle Secret: %w", err)
 	}
-	b.Store.Set(signed, bun.GetVersion())
+	geo := bun.GetGeoTable().GetSha256()
+	if geo != nil && !b.Store.HasGeoTable(geo) {
+		gz, err := readGeoTable(ctx, b.Client, b.Namespace, geo)
+		if err != nil {
+			// The leader writes the table before the bundle, but this
+			// replica's cache may see the bundle first: wait for it.
+			log.FromContext(ctx).V(1).Info("waiting for the bundle's country table", "version", bun.GetVersion(), "reason", err.Error())
+			return reconcile.Result{RequeueAfter: time.Second}, nil
+		}
+		b.Store.AddGeoTable(geo, gz)
+		geoTableBytes.Set(float64(len(gz)))
+	}
+	if geo == nil {
+		geoTableBytes.Set(0)
+	}
+	b.Store.SetWithGeo(signed, bun.GetVersion(), geo)
 	b.Store.SetPolicies(bundle.PolicyVersions(&bun), bun.GetSuspended())
 	bundleVersion.Set(float64(bun.GetVersion()))
 	bundleBytes.Set(float64(bundle.CompressedSize(&s)))
 	log.FromContext(ctx).V(1).Info("serving bundle", "version", bun.GetVersion())
 	return reconcile.Result{}, nil
+}
+
+// readGeoTable reads the gzipped country table of table hash want from
+// its Secrets: the slot the manifest names, or else the other one, which
+// keeps the previous table until the leader prunes it once the bundle has
+// moved on. A replica that starts while the leader has written a newer
+// table, before the bundle that names it, still serves the current one.
+func readGeoTable(ctx context.Context, c client.Reader, namespace string, want []byte) ([]byte, error) {
+	name := bundlesecret.Geo.Name
+	get := func(chunk string) ([]byte, error) {
+		var s corev1.Secret
+		err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: chunk}, &s)
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("%w: Secret %s not found", bundlesecret.ErrIncomplete, chunk)
+		}
+		return s.Data[bundlesecret.ChunkKey], err
+	}
+	var s corev1.Secret
+	err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &s)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return nil, err
+	}
+	tried := ""
+	if m, merr := bundlesecret.Geo.ParseManifest(s.Data[bundlesecret.ManifestKey]); merr == nil {
+		tried = m.Slot(name)
+		if bytes.Equal(m.SHA256Bytes(), want) {
+			return bundlesecret.Join(m, get)
+		}
+	}
+	for _, slot := range []string{"a", "b"} {
+		if slot == tried {
+			continue
+		}
+		var buf []byte
+		for i := range bundlesecret.Geo.MaxChunks {
+			chunk, err := get(bundlesecret.ChunkName(name, slot, i))
+			if errors.Is(err, bundlesecret.ErrIncomplete) || len(chunk) == 0 {
+				break
+			}
+			if err != nil {
+				return nil, err
+			}
+			buf = append(buf, chunk...)
+			if bytes.Equal(hashOf(buf), want) {
+				return buf, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("no slot of the Secret %s holds the table the bundle names yet", name)
+}
+
+func hashOf(b []byte) []byte {
+	h := sha256.Sum256(b)
+	return h[:]
 }
 
 // GRPCServer serves the BundleService over TLS, with the certificate in

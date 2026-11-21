@@ -32,7 +32,6 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
-	enginepolicy "github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
@@ -602,9 +601,10 @@ func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.Nam
 				c.fail(ReasonInvalidRef, fmt.Sprintf("%s %s %s", b.Ref.Kind, b.Ref.Name, msg))
 			}
 		}
-		// Ignored by the engine; v1 refuses them (#714).
+		// Ignored by the engine, and noted (#714): no schema can tell what
+		// a reference points to.
 		if _, crs := rs.GetSource().(*bundlev1.RuleSet_Builtin); !crs && b.SetsCRS() {
-			c.notes = append(c.notes, fmt.Sprintf("spec.ruleSets[%d] sets CRS settings, which are ignored: %s %s isn't the built-in CRS; remove them, v1 refuses them",
+			c.notes = append(c.notes, fmt.Sprintf("spec.ruleSets[%d] sets CRS settings, which are ignored: %s %s isn't the built-in CRS; remove them",
 				i, b.Ref.Kind, b.Ref.Name))
 		}
 	}
@@ -776,27 +776,28 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 		}
 		p.Exclusions = append(p.Exclusions, ex)
 	}
-	// The body limit is written even when the policy sets none (#718): the
-	// API's default, not the engine's, so that an engine with another
-	// default can't change what a stored policy inspects.
-	b := s.Body
-	if b == nil {
-		b = &wafv1alpha1.BodySpec{}
+	// A limit goes into the bundle only when the policy sets one: unset,
+	// the engine's own applies (--max-body-bytes for bodies, which bundle
+	// mode keeps for policies without body.maxBytes; 64 KiB for responses),
+	// as before 0.7.0. Those defaults don't change within v1
+	// (docs/api-compatibility.md), so a stored policy can't change with them.
+	if b := s.Body; b != nil {
+		body := &bundlev1.BodyConfig{Inspect: b.Inspect == nil || *b.Inspect, OnOversize: oversizeAction(b.OnOversize)}
+		if b.MaxBytes != nil {
+			body.MaxBytes = *b.MaxBytes
+		}
+		body.GrpcMessages = b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect
+		body.GrpcPerMessage = body.GrpcMessages && b.GRPCStreams == wafv1alpha1.GRPCStreamsPerMessage
+		body.DenyGrpc = b.GRPC == wafv1alpha1.GRPCDeny
+		p.Body = body
 	}
-	body := &bundlev1.BodyConfig{Inspect: b.Inspect == nil || *b.Inspect, OnOversize: oversizeAction(b.OnOversize)}
-	body.MaxBytes = deref(b.MaxBytes)
-	if body.Inspect {
-		body.MaxBytes = cmp.Or(body.MaxBytes, enginepolicy.DefaultBodyBytes)
-	}
-	body.GrpcMessages = b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect
-	body.GrpcPerMessage = body.GrpcMessages && b.GRPCStreams == wafv1alpha1.GRPCStreamsPerMessage
-	body.DenyGrpc = b.GRPC == wafv1alpha1.GRPCDeny
-	p.Body = body
 	// Unset when not inspected: the bundles of policies without responses
 	// stay as before 0.4.0.
 	if r := s.Responses; r != nil && r.Inspect {
 		resp := &bundlev1.ResponseConfig{Inspect: true, OnOversize: oversizeAction(r.OnOversize)}
-		resp.MaxBytes = cmp.Or(deref(r.MaxBytes), enginepolicy.DefaultResponseBytes)
+		if r.MaxBytes != nil {
+			resp.MaxBytes = *r.MaxBytes
+		}
 		resp.Streams = r.Streams == wafv1alpha1.StreamsInspect
 		p.Responses = resp
 	}
@@ -936,18 +937,10 @@ func beforeCRS(rs *bundlev1.RuleSet) string {
 	return ""
 }
 
-// deref is *n, or 0 when n is nil.
-func deref(n *int64) int64 {
-	if n == nil {
-		return 0
-	}
-	return *n
-}
-
 // crsSettings is a binding's CRS settings in the bundle, nil when it sets
 // none.
 func crsSettings(c *wafv1alpha1.CRSSettings) *bundlev1.CRSSettings {
-	if c.IsZero() {
+	if !c.NeedsEngine050() {
 		return nil
 	}
 	s := &bundlev1.CRSSettings{}

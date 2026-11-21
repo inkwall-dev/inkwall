@@ -250,13 +250,12 @@ func TestDefaults(t *testing.T) {
 		Id:     "shop/shop",
 		Mode:   bundlev1.Mode_MODE_DETECT,
 		Routes: []*bundlev1.RouteMatch{prefix("", "/")},
-		// The body limit is the API's, not the engine's (#718).
-		Body: &bundlev1.BodyConfig{Inspect: true, MaxBytes: 65536},
 	})
 }
 
-// Every body and response limit the bundle gets is the API's: 64 KiB when
-// the policy sets none (#718); no body limit when bodies aren't inspected.
+// A body or response limit is in the bundle only when the policy sets one:
+// unset, the engine's own applies (its --max-body-bytes for bodies), as
+// before 0.7.0.
 func TestBodyLimitDefaults(t *testing.T) {
 	limits := policy("limits", 0)
 	limits.Spec.Body = &wafv1alpha1.BodySpec{OnOversize: wafv1alpha1.OversizeAllow}
@@ -268,8 +267,8 @@ func TestBodyLimitDefaults(t *testing.T) {
 	off.Spec.Body = &wafv1alpha1.BodySpec{Inspect: ptr(false)}
 	res := Resolve(Input{Policies: []wafv1alpha1.WAFPolicy{limits, set, off}})
 	for name, want := range map[string]*bundlev1.Policy{
-		"limits": {Body: &bundlev1.BodyConfig{Inspect: true, MaxBytes: 65536, OnOversize: bundlev1.OversizeAction_OVERSIZE_ACTION_ALLOW},
-			Responses: &bundlev1.ResponseConfig{Inspect: true, MaxBytes: 65536}},
+		"limits": {Body: &bundlev1.BodyConfig{Inspect: true, OnOversize: bundlev1.OversizeAction_OVERSIZE_ACTION_ALLOW},
+			Responses: &bundlev1.ResponseConfig{Inspect: true}},
 		"set": {Body: &bundlev1.BodyConfig{Inspect: true, MaxBytes: 1024}, Responses: &bundlev1.ResponseConfig{Inspect: true, MaxBytes: 2048}},
 		"off": {Body: &bundlev1.BodyConfig{}},
 	} {
@@ -452,12 +451,12 @@ func TestResolveCRSSettingsLocation(t *testing.T) {
 		}
 		// No Crs: the bundle is the one the binding-level fields made.
 		wantProto(t, findPolicy(res, "shop/"+name), &bundlev1.Policy{
-			Id: "shop/" + name, Mode: bundlev1.Mode_MODE_DETECT, Body: &bundlev1.BodyConfig{Inspect: true, MaxBytes: 65536},
+			Id: "shop/" + name, Mode: bundlev1.Mode_MODE_DETECT,
 			RuleSets: []*bundlev1.RuleSetBinding{{RuleSetId: "ClusterWAFRuleSet/crs", ParanoiaLevel: 3, InboundAnomalyThreshold: 9}},
 		})
 	}
 	wantStatus(t, res, "seclang", true, ReasonAccepted,
-		"spec.ruleSets[1] sets CRS settings, which are ignored: WAFRuleSet custom isn't the built-in CRS; remove them, v1 refuses them")
+		"spec.ruleSets[1] sets CRS settings, which are ignored: WAFRuleSet custom isn't the built-in CRS; remove them")
 }
 
 // A rule set placed before the CRS (#423) goes into the bundle with its
@@ -500,7 +499,6 @@ func TestResolvePlacement(t *testing.T) {
 	wantProto(t, findPolicy(res, "shop/shop"), &bundlev1.Policy{
 		Id:   "shop/shop",
 		Mode: bundlev1.Mode_MODE_DETECT,
-		Body: &bundlev1.BodyConfig{Inspect: true, MaxBytes: 65536},
 		RuleSets: []*bundlev1.RuleSetBinding{
 			{RuleSetId: "ClusterWAFRuleSet/crs"},
 			{RuleSetId: "WAFRuleSet/shop/tune", Placement: bundlev1.RuleSetPlacement_RULE_SET_PLACEMENT_BEFORE_CRS},

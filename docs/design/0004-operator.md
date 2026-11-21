@@ -159,7 +159,7 @@ Validation runs in three steps, cheapest first:
      the deprecated `paranoiaLevel` and `inboundAnomalyThreshold`, which `crs` holds since
      0.7.0): those are the built-in CRS's, which can't load before itself. On a binding to a
      rule set that isn't the built-in CRS, the resolver notes them in `Accepted`'s message as
-     ignored; v1 refuses them;
+     ignored (no schema can tell what a reference points to);
    - accepts updates that leave the spec unchanged, so objects a newer engine rejects can still be
      deleted;
    - uses a self-signed certificate that the operator rotates, with the CA injected; cert-manager

@@ -54,6 +54,8 @@ import (
 type fakeOperator struct {
 	agentv1.UnimplementedBundleServiceServer
 	bundles chan *bundlev1.SignedBundle
+	// msgs are sent as they are: country tables.
+	msgs chan *agentv1.WatchResponse
 	// closeStream ends the current stream, to test reconnecting.
 	closeStream chan struct{}
 
@@ -66,7 +68,9 @@ type fakeOperator struct {
 	beatKeys []string
 	// receipts are the probe receipts of the last heartbeat.
 	receipts []string
-	events   []string
+	// beatGeo is the table hash of the last heartbeat.
+	beatGeo []byte
+	events  []string
 	// stats are the request counts, by stream (one per Hello) and policy,
 	// as last reported.
 	stats    []map[string]*eventsv1.PolicyStats
@@ -78,6 +82,7 @@ type fakeOperator struct {
 func newFakeOperator() *fakeOperator {
 	return &fakeOperator{
 		bundles:     make(chan *bundlev1.SignedBundle, 10),
+		msgs:        make(chan *agentv1.WatchResponse, 10),
 		closeStream: make(chan struct{}, 1),
 		sawHello:    make(chan struct{}, 10),
 		replies:     make(chan *agentv1.WatchRequest, 100),
@@ -115,6 +120,7 @@ func (f *fakeOperator) Watch(stream agentv1.BundleService_WatchServer) error {
 				f.beats++
 				f.beatKeys = x.Heartbeat.GetTrustedKeyIds()
 				f.receipts = x.Heartbeat.GetProbeReceipts()
+				f.beatGeo = x.Heartbeat.GetGeoTableSha256()
 			case *agentv1.WatchRequest_Events:
 				for _, ev := range x.Events.GetEvents() {
 					f.events = append(f.events, ev.GetEventId())
@@ -131,6 +137,10 @@ func (f *fakeOperator) Watch(stream agentv1.BundleService_WatchServer) error {
 		select {
 		case b := <-f.bundles:
 			if err := stream.Send(&agentv1.WatchResponse{Msg: &agentv1.WatchResponse_Bundle{Bundle: b}}); err != nil {
+				return err
+			}
+		case m := <-f.msgs:
+			if err := stream.Send(m); err != nil {
 				return err
 			}
 		case <-f.closeStream:

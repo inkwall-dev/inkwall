@@ -187,6 +187,15 @@ a client dry run, whose API groups are only Kubernetes' own and those of
 {{- end -}}
 
 {{- /*
+events.export values, defaulted: an upgrade with --reuse-values from a
+release before 0.7.0 has none. Use with fromYaml.
+*/}}
+{{- define "inkwall.export.values" -}}
+{{- $events := .Values.events | default dict }}
+{{- toYaml (mergeOverwrite (dict "bufferMiB" 32 "diskMiB" 512) (deepCopy ($events.export | default dict))) }}
+{{- end }}
+
+{{- /*
 controlPlane values, defaulted: an upgrade with --reuse-values from a release
 whose values had no controlPlane (0.1.0) has none. Use with fromYaml.
 */}}

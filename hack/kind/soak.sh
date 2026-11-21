@@ -62,6 +62,13 @@
 #     samples is reported, not judged; a proxy or the operator with no
 #     memory sample at all is a violation (the sampling broke).
 #
+# With SOAK_EXPORT=1 (the default), the engines' events are exported to an
+# HTTP sink that fails half the time, then is down for
+# SOAK_EXPORT_DOWN_FOR (10m) from a third of the run: the operator stays
+# under its memory limit with its export buffer full, the drops are
+# counted, the engines drop nothing, and the backlog drains once the sink
+# is back (hack/kind/soak-export.sh).
+#
 # With SOAK_RATE_LIMITS=1 (the default), each policy has two rate limits
 # (#705) on paths the mixes never use: every sample, a burst of 20 requests
 # past one must get 429s, and 50 requests with new header values fill the
@@ -96,6 +103,8 @@ SOAK_MEM_GROWTH=${SOAK_MEM_GROWTH:-20}
 SOAK_MEM_MIN_MIB=${SOAK_MEM_MIN_MIB:-32}
 SOAK_MAX_ERROR_RATE=${SOAK_MAX_ERROR_RATE:-0.001}
 SOAK_RATE_LIMITS=${SOAK_RATE_LIMITS:-1}
+SOAK_EXPORT=${SOAK_EXPORT:-1}
+CHART=${CHART:-deploy/helm/inkwall}
 OUT=${OUT:-bin/soak/$(date -u +%Y%m%dT%H%M%SZ)}
 OPERATOR_NS=inkwall-system
 NODE=$CLUSTER-control-plane
@@ -109,6 +118,8 @@ LEASE=inkwall-operator.waf.inkwall.dev
 . hack/kind/lib.sh
 . hack/kind/stacks.sh
 . hack/kind/soak-restarts.sh
+# shellcheck source=hack/kind/soak-export.sh
+. hack/kind/soak-export.sh
 read -r -a PROXIES <<<"${PROXIES:-${STACK_PROXIES[*]}}"
 
 # secs DURATION: 90s, 15m, 5h30m, 24h, or seconds; fails on anything else.
@@ -158,6 +169,10 @@ cleanup() {
   fi
   if $cut_applied; then "${KUBECTL[@]}" -n "$OPERATOR_NS" delete networkpolicy bt-soak-cut --ignore-not-found >/dev/null 2>&1 || true; fi
   stacks_cleanup
+  if [[ $SOAK_EXPORT == 1 && -z ${KEEP:-} ]]; then
+    export_restore
+    "${KUBECTL[@]}" delete namespace "$EXPORT_NS" --wait=false >/dev/null 2>&1 || true
+  fi
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -311,6 +326,7 @@ tick() {
   if ! $api_down; then
     check_claims
     check_limits
+    if [[ $SOAK_EXPORT == 1 ]]; then export_tick; fi
   fi
   progress
 }
@@ -485,6 +501,7 @@ YAML
   chaos_end "$s" "$detail" "$ok"
 }
 
+if [[ $SOAK_EXPORT == 1 ]]; then export_setup; fi
 echo "== traffic: $SOAK_RATE requests per second per proxy for $DURATION$([[ $SOAK_CHAOS == 1 ]] && echo ", chaos every $SOAK_CHAOS_EVERY (${scenarios[*]})")"
 for p in "${PROXIES[@]}"; do
   "$work/loadgen" -url "$(stack_url "$p")" -host "$(stack_host "$p")" -clean hack/kind/soak/clean.http \
@@ -595,6 +612,7 @@ fi
 if ! jq -se 'any(.[]; .kind == "recovery")' "$OUT/violations.jsonl" >/dev/null; then
   ok "every policy edit and chaos scenario recovered within $SOAK_RECOVERY ($(jq -s length "$OUT/chaos.jsonl") chaos runs)"
 fi
+if [[ $SOAK_EXPORT == 1 ]]; then export_summary; fi
 if [[ $SOAK_CHAOS == 1 ]] && ((duration > chaos_every + recovery)) && [[ $(jq -s length "$OUT/chaos.jsonl") == 0 ]]; then
   violation chaos "SOAK_CHAOS=1, but no chaos scenario ran in $DURATION"
 fi

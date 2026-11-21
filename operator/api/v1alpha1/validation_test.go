@@ -306,14 +306,15 @@ func TestWAFPolicyDefaults(t *testing.T) {
 	}
 
 	// The static defaults are in the API (#718); responses that aren't
-	// inspected still take streams: Skip, the default.
+	// inspected still take streams: Skip, the default. A list item's
+	// field gets none: GitOps diffs would show every policy changed.
 	u = object(t, policy(target+"  ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: crs}}]\n  responses: {inspect: false}\n"))
 	if err := c.Create(context.Background(), u, client.DryRunAll); err != nil {
 		t.Fatal(err)
 	}
 	rs, _, _ := unstructured.NestedSlice(u.Object, "spec", "ruleSets")
-	if len(rs) != 1 || rs[0].(map[string]any)["placement"] != "AfterCRS" {
-		t.Errorf("ruleSets %v, want placement defaulted to AfterCRS", rs)
+	if _, ok := rs[0].(map[string]any)["placement"]; len(rs) != 1 || ok {
+		t.Errorf("ruleSets %v, want placement left unset", rs)
 	}
 	if streams, _, _ := unstructured.NestedString(u.Object, "spec", "responses", "streams"); streams != "Skip" {
 		t.Errorf("responses.streams defaulted to %q, want Skip", streams)
@@ -483,7 +484,9 @@ func TestInkwallConfigExportValidation(t *testing.T) {
 	})
 }
 
-// A sink's unset compression and framing take their defaults.
+// A sink's unset compression and framing stay unset (Gzip and Lines): a
+// default inside a list item would make GitOps diffs show every sink
+// changed.
 func TestInkwallConfigExportDefaults(t *testing.T) {
 	c := newClient(t)
 	u := object(t, exportConfig("      - {name: a, json: {url: \"https://a/in\"}}\n"))
@@ -497,8 +500,8 @@ func TestInkwallConfigExportDefaults(t *testing.T) {
 	s := sinks[0].(map[string]any)
 	framing, _, _ := unstructured.NestedString(s, "json", "framing")
 	compression, _, _ := unstructured.NestedString(s, "compression")
-	if framing != "Lines" || compression != "Gzip" {
-		t.Errorf("framing %q, compression %q, want Lines and Gzip", framing, compression)
+	if framing != "" || compression != "" {
+		t.Errorf("framing %q, compression %q, want both unset", framing, compression)
 	}
 }
 

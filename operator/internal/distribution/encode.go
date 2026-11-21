@@ -32,8 +32,9 @@ type encoder struct {
 }
 
 type encoded struct {
-	signed *bundlev1.SignedBundle
-	msgs   map[string]*grpc.PreparedMsg
+	// key is what is sent: a bundle, or a country table's message.
+	key  any
+	msgs map[string]*grpc.PreparedMsg
 }
 
 // message returns the message carrying signed for stream, encoded once
@@ -41,7 +42,14 @@ type encoded struct {
 // is gRPC's own for the stream, so engines receive the same bytes as when
 // each stream marshalled the bundle.
 func (e *encoder) message(stream grpc.ServerStream, signed *bundlev1.SignedBundle) (any, error) {
-	msg := &agentv1.WatchResponse{Msg: &agentv1.WatchResponse_Bundle{Bundle: signed}}
+	return e.prepared(stream, signed, &agentv1.WatchResponse{Msg: &agentv1.WatchResponse_Bundle{Bundle: signed}})
+}
+
+// prepared returns msg, keyed by key, encoded once for all the streams
+// that send it with the same compressor. A country table (design 0011
+// §4.4) is sent the same way: hundreds of engines' queued sends hold its
+// one encoding, not one each.
+func (e *encoder) prepared(stream grpc.ServerStream, key any, msg *agentv1.WatchResponse) (any, error) {
 	comp, ok := sendCompressor(stream.Context())
 	if !ok {
 		// Can't tell how the stream compresses: let it encode itself.
@@ -50,7 +58,7 @@ func (e *encoder) message(stream grpc.ServerStream, signed *bundlev1.SignedBundl
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	i := 0
-	for i < len(e.bundles) && e.bundles[i].signed != signed {
+	for i < len(e.bundles) && e.bundles[i].key != key {
 		i++
 	}
 	if i == len(e.bundles) {
@@ -59,7 +67,7 @@ func (e *encoder) message(stream grpc.ServerStream, signed *bundlev1.SignedBundl
 		if len(e.bundles) == encodedVersions {
 			e.bundles = e.bundles[:encodedVersions-1]
 		}
-		e.bundles = append([]encoded{{signed: signed, msgs: map[string]*grpc.PreparedMsg{}}}, e.bundles...)
+		e.bundles = append([]encoded{{key: key, msgs: map[string]*grpc.PreparedMsg{}}}, e.bundles...)
 		i = 0
 	}
 	b := e.bundles[i]

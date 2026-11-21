@@ -58,10 +58,25 @@ message Bundle {
   // What the engines' security events may carry
   // (InkwallConfig.spec.events). Unset: the defaults.
   EventsConfig events = 10;
+  // The country table the policies' geo blocking uses (design 0011 §4.3),
+  // set only when some policy uses it. The table travels on its own on the
+  // stream (agent.v1 CountryTableMessage) and in the inkwall-geo Secrets;
+  // the bundle, signed, pins it by hash. Unset: geo is skipped. Engines
+  // before 0.7.0 ignore it.
+  GeoTableRef geo_table = 11;
   // The denial of a policy that sets none
   // (InkwallConfig.spec.engine.denyResponse). Unset: the engine's own.
   // Engines before 0.7.0 ignore it.
-  DenyResponse deny_response = 11;
+  DenyResponse deny_response = 12;
+}
+
+// GeoTableRef names a country table.
+message GeoTableRef {
+  // The table hash: the SHA-256 of the gzipped CountryTable, as it is sent
+  // and stored.
+  bytes sha256 = 1;
+  // The serialized CountryTable's size: the engine decompresses no more.
+  uint64 size = 2;
 }
 
 // DenyResponse is the body of a policy's denials (docs/denial-responses.md):

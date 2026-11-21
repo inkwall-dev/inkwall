@@ -30,8 +30,8 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/bundle"
+	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/pkg/agent"
-	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
 )
@@ -111,7 +111,7 @@ func testBundleChunks(ctx context.Context, t *testing.T, c client.Client) {
 		&rbacv1.Role{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "chunk-reader"},
 			Rules: []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get"},
-				ResourceNames: append([]string{bundle.BundleSecret}, bundlesecret.ChunkNames(bundle.BundleSecret)...)}},
+				ResourceNames: injection.BundleReaderSecrets()}},
 		},
 		&rbacv1.RoleBinding{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "chunk-reader"},

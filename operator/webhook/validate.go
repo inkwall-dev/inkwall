@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -75,19 +76,19 @@ func Setup(mgr manager.Manager, inject *PodInjector, guard *SourceGuard) error {
 		mgr.GetWebhookServer().Register(InjectPath, &ctrlwebhook.Admission{Handler: inject})
 	}
 	if err := builder.WebhookManagedBy(mgr, &wafv1alpha1.WAFRuleSet{}).
-		WithValidator(specValidator[*wafv1alpha1.WAFRuleSet]{validateWAFRuleSet, guard}).Complete(); err != nil {
+		WithValidator(specValidator[*wafv1alpha1.WAFRuleSet]{validate: validateWAFRuleSet, guard: guard}).Complete(); err != nil {
 		return err
 	}
 	if err := builder.WebhookManagedBy(mgr, &wafv1alpha1.ClusterWAFRuleSet{}).
-		WithValidator(specValidator[*wafv1alpha1.ClusterWAFRuleSet]{validateClusterWAFRuleSet, guard}).Complete(); err != nil {
+		WithValidator(specValidator[*wafv1alpha1.ClusterWAFRuleSet]{validate: validateClusterWAFRuleSet, guard: guard}).Complete(); err != nil {
 		return err
 	}
 	if err := builder.WebhookManagedBy(mgr, &wafv1alpha1.WAFIPList{}).
-		WithValidator(specValidator[*wafv1alpha1.WAFIPList]{validateWAFIPList, guard}).Complete(); err != nil {
+		WithValidator(specValidator[*wafv1alpha1.WAFIPList]{validate: validateWAFIPList, guard: guard}).Complete(); err != nil {
 		return err
 	}
 	if err := builder.WebhookManagedBy(mgr, &wafv1alpha1.WAFPolicy{}).
-		WithValidator(specValidator[*wafv1alpha1.WAFPolicy]{validateWAFPolicy, guard}).Complete(); err != nil {
+		WithValidator(specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy, guard: guard, deprecated: policyDeprecations}).Complete(); err != nil {
 		return err
 	}
 	return builder.WebhookManagedBy(mgr, &wafv1alpha1.InkwallConfig{}).
@@ -233,13 +234,27 @@ type object interface {
 type specValidator[T object] struct {
 	validate func(T) (admission.Warnings, error)
 	guard    *SourceGuard
+	// deprecated, if set, warns of the deprecated fields obj sets that old
+	// (nil on create) doesn't, as the InkwallConfig's: an update that
+	// leaves them alone draws no warning again.
+	deprecated func(old, obj T) admission.Warnings
 }
 
 func (v specValidator[T]) ValidateCreate(ctx context.Context, obj T) (admission.Warnings, error) {
 	if err := v.guard.check(ctx, obj.GetName(), nil, obj.GetLabels()); err != nil {
 		return nil, err
 	}
-	return v.validate(obj)
+	var none T
+	return v.warnings(none, obj)
+}
+
+// warnings validates obj, and warns of its new deprecated fields first.
+func (v specValidator[T]) warnings(old, obj T) (admission.Warnings, error) {
+	warnings, err := v.validate(obj)
+	if v.deprecated != nil {
+		warnings = append(v.deprecated(old, obj), warnings...)
+	}
+	return warnings, err
 }
 
 func (v specValidator[T]) ValidateUpdate(ctx context.Context, oldObj, newObj T) (admission.Warnings, error) {
@@ -249,7 +264,7 @@ func (v specValidator[T]) ValidateUpdate(ctx context.Context, oldObj, newObj T) 
 	if apiequality.Semantic.DeepEqual(spec(oldObj), spec(newObj)) {
 		return nil, nil
 	}
-	return v.validate(newObj)
+	return v.warnings(oldObj, newObj)
 }
 
 func (v specValidator[T]) ValidateDelete(ctx context.Context, obj T) (admission.Warnings, error) {
@@ -393,19 +408,34 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 					"bind the CRS without placement, and the rule set to place before it in its own entry"))
 		}
 	}
-	warnings := append(append(responseWarnings(p), crsWarnings(p)...), ruleSetNamespaceWarnings(p)...)
-	return append(warnings, policyListWarnings(p)...), invalid("WAFPolicy", p.Name, errs)
+	return append(responseWarnings(p), policyListWarnings(p)...), invalid("WAFPolicy", p.Name, errs)
+}
+
+// policyDeprecations warns of the deprecated fields p sets that old (nil
+// on create) doesn't, binding by binding: a binding is old's when old binds
+// the same reference.
+func policyDeprecations(old, p *wafv1alpha1.WAFPolicy) admission.Warnings {
+	var oldBindings []wafv1alpha1.RuleSetBinding
+	if old != nil {
+		oldBindings = old.Spec.RuleSets
+	}
+	return append(crsWarnings(oldBindings, p), ruleSetNamespaceWarnings(oldBindings, p)...)
+}
+
+// bound reports whether one of bindings has b's reference and satisfies same.
+func bound(bindings []wafv1alpha1.RuleSetBinding, b wafv1alpha1.RuleSetBinding, same func(wafv1alpha1.RuleSetBinding) bool) bool {
+	return slices.ContainsFunc(bindings, func(o wafv1alpha1.RuleSetBinding) bool { return o.Ref == b.Ref && same(o) })
 }
 
 // ruleSetNamespaceWarnings warns of a rule set reference's namespace
 // (#715): another namespace than the policy's is never resolved, so the
 // policy isn't Accepted; the policy's own does nothing. v1 drops the field
 // rather than promise cross-namespace references without a grant.
-func ruleSetNamespaceWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
+func ruleSetNamespaceWarnings(old []wafv1alpha1.RuleSetBinding, p *wafv1alpha1.WAFPolicy) admission.Warnings {
 	var warnings admission.Warnings
 	for i, b := range p.Spec.RuleSets {
 		switch ns := b.Ref.Namespace; { //nolint:staticcheck // warns about the deprecated field
-		case ns == "":
+		case ns == "", bound(old, b, func(wafv1alpha1.RuleSetBinding) bool { return true }):
 		case ns == p.Namespace:
 			warnings = append(warnings, fmt.Sprintf("spec.ruleSets[%d].ref.namespace is the policy's own, which is what unset means; remove it: v1 removes the field", i))
 		default:
@@ -417,18 +447,20 @@ func ruleSetNamespaceWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
 }
 
 // crsWarnings warns of the deprecated binding-level CRS settings, which
-// crs holds now (#714).
-func crsWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
+// crs holds now (#714), when old doesn't bind the same reference with the
+// same value.
+func crsWarnings(old []wafv1alpha1.RuleSetBinding, p *wafv1alpha1.WAFPolicy) admission.Warnings {
 	var warnings admission.Warnings
 	for i, b := range p.Spec.RuleSets {
 		for _, f := range []struct {
-			name string
-			set  bool
+			name  string
+			value func(wafv1alpha1.RuleSetBinding) *int32
 		}{
-			{"paranoiaLevel", b.ParanoiaLevel != nil},                     //nolint:staticcheck // warns about the deprecated field
-			{"inboundAnomalyThreshold", b.InboundAnomalyThreshold != nil}, //nolint:staticcheck // warns about the deprecated field
+			{"paranoiaLevel", func(b wafv1alpha1.RuleSetBinding) *int32 { return b.ParanoiaLevel }},                     //nolint:staticcheck // warns about the deprecated field
+			{"inboundAnomalyThreshold", func(b wafv1alpha1.RuleSetBinding) *int32 { return b.InboundAnomalyThreshold }}, //nolint:staticcheck // warns about the deprecated field
 		} {
-			if f.set {
+			v := f.value(b)
+			if v != nil && !bound(old, b, func(o wafv1alpha1.RuleSetBinding) bool { w := f.value(o); return w != nil && *w == *v }) {
 				warnings = append(warnings, fmt.Sprintf("spec.ruleSets[%d].%s is deprecated: set spec.ruleSets[%d].crs.%s instead; v1 moves it there", i, f.name, i, f.name))
 			}
 		}

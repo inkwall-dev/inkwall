@@ -152,6 +152,10 @@
               ]
             }
           }
+        },
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "minimum": 1
         }
       }
     },
@@ -580,6 +584,26 @@
                   }
                 }
               }
+            }
+          }
+        }
+      }
+    },
+    "events": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "export": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "bufferMiB": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "diskMiB": {
+              "type": "integer",
+              "minimum": 1
             }
           }
         }

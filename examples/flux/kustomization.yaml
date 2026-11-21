@@ -48,3 +48,11 @@ spec:
       failed: >-
         has(status.observedGeneration) && status.observedGeneration == metadata.generation &&
         status.conditions.exists(c, c.type == 'Accepted' && c.status == 'False')
+    - apiVersion: waf.inkwall.dev/v1alpha1
+      kind: WAFIPList
+      current: >-
+        has(status.observedGeneration) && status.observedGeneration == metadata.generation &&
+        status.conditions.exists(c, c.type == 'Accepted' && c.status == 'True')
+      failed: >-
+        has(status.observedGeneration) && status.observedGeneration == metadata.generation &&
+        status.conditions.exists(c, c.type == 'Accepted' && c.status == 'False')
