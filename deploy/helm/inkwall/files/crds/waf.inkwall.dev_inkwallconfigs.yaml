@@ -901,15 +901,25 @@ spec:
                       maxLength: 253
                       type: string
                     gatewayClasses:
-                      description: GatewayClasses are the GatewayClasses of the controller.
+                      description: |-
+                        GatewayClasses are the GatewayClasses of the controller, sorted, up
+                        to 64.
                       items:
+                        maxLength: 253
                         type: string
+                      maxItems: 64
                       type: array
+                      x-kubernetes-list-type: set
                     ingressClasses:
-                      description: IngressClasses are the IngressClasses of the controller.
+                      description: |-
+                        IngressClasses are the IngressClasses of the controller, sorted, up
+                        to 64.
                       items:
+                        maxLength: 253
                         type: string
+                      maxItems: 64
                       type: array
+                      x-kubernetes-list-type: set
                     integration:
                       description: |-
                         Integration is Inkwall's integration for the controller, such as

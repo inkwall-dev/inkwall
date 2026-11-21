@@ -758,9 +758,9 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 		}
 		if e.When != nil {
 			ex.Path = string(e.When.Path)
-			ex.Argument = e.When.Argument
-			ex.ArgumentName = e.When.ArgumentName
-			ex.Cookie = e.When.Cookie
+			ex.Argument = string(e.When.Argument)
+			ex.ArgumentName = string(e.When.ArgumentName)
+			ex.Cookie = string(e.When.Cookie)
 			ex.Header = e.When.Header
 		}
 		if e.When.Target() {
