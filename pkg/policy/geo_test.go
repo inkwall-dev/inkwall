@@ -10,11 +10,15 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	geov1 "github.com/inkwall-dev/inkwall/api/geo/v1"
 	"github.com/inkwall-dev/inkwall/pkg/geo"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 )
 
@@ -134,5 +138,40 @@ func TestGeoCompileErrors(t *testing.T) {
 		if _, err := Compile(b, Options{}); err == nil || !strings.Contains(err.Error(), "shop/site") {
 			t.Errorf("%s: %v, want an error naming the policy", name, err)
 		}
+	}
+}
+
+// TestGeoBeforeOtherPolicysRateLimits: a request two policies inspect,
+// one denying its country in Block, the other limiting it: the geo deny
+// answers, and the other policy's limit isn't charged (design 0011 §2.3).
+func TestGeoBeforeOtherPolicysRateLimits(t *testing.T) {
+	b := testBundle()
+	b.Policies[0].Geo = &bundlev1.Geo{Deny: []string{"RU"}}
+	b.Policies[1].RateLimits = []*bundlev1.RateLimit{{Name: "api", Requests: 1, Period: durationpb.New(time.Hour), Burst: 1}}
+	compiled, err := Compile(b, Options{RateLimits: ratelimit.New(1024, 0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := compiled.WithGeo(true, geoTable(t))
+	from := func(uri string) *request.Request {
+		r := req("shop.example.com", uri)
+		r.Method, r.ClientIP = "POST", netip.MustParseAddr("198.51.100.7")
+		return r
+	}
+	ctx := context.Background()
+	for range 3 {
+		r := from("/api/../x")
+		if got := set.BodyLimit(r, 1<<10); got != 0 {
+			t.Errorf("geo-denied: body limit %d, want 0", got)
+		}
+		if v := set.Check(ctx, r); v.Reason != pipeline.ReasonGeoDeny || v.Status != 403 {
+			t.Errorf("geo-denied: %d %s, want 403 geo-deny", v.Status, v.Reason)
+		}
+	}
+	// api's one token is still there: the denied requests didn't spend it.
+	r := from("/api/y")
+	set.BodyLimit(r, 1<<10)
+	if v := set.Check(ctx, r); v.Reason == pipeline.ReasonRateLimit {
+		t.Error("api's limit was charged for geo-denied requests")
 	}
 }

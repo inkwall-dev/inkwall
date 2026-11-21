@@ -418,11 +418,14 @@ func (a u128) mask(bits uint8) u128 {
 // 2002::/16) is looked up in the IPv4 table by the 32 bits after the
 // prefix, as the database's own reader resolves it.
 func (t *Table) Lookup(a netip.Addr) (Country, Result) {
-	if !a.IsValid() {
-		return NoCountry, ResultPrivate
-	}
+	// No table first: a policy that fails closed answers 503 for every
+	// request while the engine lacks its table, one without a client IP
+	// too.
 	if t == nil {
 		return NoCountry, ResultNoTable
+	}
+	if !a.IsValid() {
+		return NoCountry, ResultPrivate
 	}
 	a = a.Unmap()
 	var c Country

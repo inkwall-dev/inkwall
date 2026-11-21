@@ -177,7 +177,13 @@ func (s *Set) Check(ctx context.Context, r *request.Request) pipeline.Verdict {
 		ps[0].counter.Observe(v)
 		return v
 	}
-	if p := rateLimited(ps, r); p != nil {
+	// Geo comes before the rate limits (design 0011 §2.3): a policy whose
+	// geo decides alone answers before another's limit is charged.
+	p := geoBlocked(ps, r)
+	if p == nil {
+		p = rateLimited(ps, r)
+	}
+	if p != nil {
 		v := p.pipeline.Check(ctx, p.view(r))
 		p.counter.Observe(v)
 		return v
@@ -212,7 +218,11 @@ func (s *Set) CheckExchange(ctx context.Context, r *request.Request) (pipeline.V
 		return observe(s.observer, pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy}), nil
 	}
 	s.lookupGeo(r, ps)
-	if p := rateLimited(ps, r); p != nil && len(ps) > 1 {
+	p := geoBlocked(ps, r)
+	if p == nil {
+		p = rateLimited(ps, r)
+	}
+	if p != nil && len(ps) > 1 {
 		v := p.pipeline.Check(ctx, p.view(r))
 		p.counter.Observe(v)
 		return v, nil
@@ -305,6 +315,10 @@ func (s *Set) BodyLimit(r *request.Request, max int64) int64 {
 	var limit int64
 	ps := s.policiesFor(r, buf[:0])
 	s.lookupGeo(r, ps)
+	// Geo decides alone: no body is read, and no policy's limit charged.
+	if geoBlocked(ps, r) != nil {
+		return 0
+	}
 	for _, p := range ps {
 		l := p.bodyLimit
 		if max > 0 {
@@ -724,6 +738,17 @@ func (h *Holder) Check(ctx context.Context, r *request.Request) pipeline.Verdict
 		return observe(h.Observer, pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy})
 	}
 	return s.Check(ctx, r)
+}
+
+// geoBlocked returns the first policy whose geo decides r on its own, nil
+// if none.
+func geoBlocked(ps []*Policy, r *request.Request) *Policy {
+	for _, p := range ps {
+		if p.hasGeo && p.pipeline.GeoBlocks(r) {
+			return p
+		}
+	}
+	return nil
 }
 
 // GeoObserver is an Observer that also counts the country lookups of geo

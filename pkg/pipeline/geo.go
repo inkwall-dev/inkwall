@@ -146,3 +146,11 @@ func (o geoOutcome) mark(v Verdict) Verdict {
 func (o geoOutcome) blocks(p *Pipeline) bool {
 	return o.deny && !o.detect || o.noTable && !o.detect && p.failure == FailClosed
 }
+
+// GeoBlocks reports whether the policy's geo decides r on its own, the IP
+// lists not deciding first: a denied country in Block, or a missing table
+// failing closed. A set of policies asks it before any policy's rate
+// limits, which geo comes before (design 0011 §2.3).
+func (p *Pipeline) GeoBlocks(r *request.Request) bool {
+	return p.geo != nil && p.ipListed(r) == ReasonNone && p.geoCheck(r, time.Time{}, false).blocks(p)
+}

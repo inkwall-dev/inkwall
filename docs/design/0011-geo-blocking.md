@@ -188,7 +188,9 @@ A country is a large population, and a user trying geo wants to see what the rul
 rest of it.
 
 `BodyLimit` (`pkg/pipeline/pipeline.go`) returns 0 for a client the IP lists decide, so adapters
-don't read a body that won't be inspected. It does the same for a geo deny in `Block`.
+don't read a body that won't be inspected. It does the same for a geo deny in `Block`. A request
+several policies inspect follows the same order across them: any policy's geo deny in `Block` (or
+missing table failing closed) answers before any policy's rate limit is charged.
 
 ### 2.4 Validation
 
