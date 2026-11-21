@@ -143,6 +143,10 @@ func LogEvent(ctx context.Context, logger *slog.Logger, rec *events.Recorder, re
 		slog.String("request_id", req.ID),
 		slog.Duration("inspection_time", v.Duration),
 	}
+	if v.Reason == pipeline.ReasonRateLimit {
+		// The limit, and the limited requests the sampled event stands for.
+		attrs = append(attrs, slog.String("rate_limit", v.RateLimit), slog.Uint64("sampled_count", uint64(v.SampledCount)))
+	}
 	if v.StreamEvent > 0 {
 		// The event, or message, of a streamed response (#323).
 		attrs = append(attrs, slog.Int("stream_event", v.StreamEvent))

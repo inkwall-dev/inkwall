@@ -34,6 +34,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/enginereport"
 	"github.com/inkwall-dev/inkwall/operator/reasons"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
+	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
@@ -290,6 +291,70 @@ type EventExplanation struct {
 	// AllowedWithSuggestions: with every suggestion, no rule that matched
 	// is left to deny the request.
 	AllowedWithSuggestions bool `json:"allowedWithSuggestions"`
+	// RateLimit is, for a rate-limit event, the limit and what it allows.
+	RateLimit *RateLimitExplain `json:"rateLimit,omitempty"`
+}
+
+// RateLimitExplain is one of a policy's rate limits.
+type RateLimitExplain struct {
+	Name     string `json:"name"`
+	Requests int64  `json:"requests,omitempty"`
+	Period   string `json:"period,omitempty"`
+	Burst    int64  `json:"burst,omitempty"`
+	// Key is "client IP (IPv6 by /56)" or "header X-Api-Key".
+	Key     string   `json:"key,omitempty"`
+	Paths   []string `json:"paths,omitempty"`
+	Methods []string `json:"methods,omitempty"`
+	Detect  bool     `json:"detect,omitempty"`
+	// Sampled is, for an event, the limited requests it stands for.
+	Sampled int `json:"sampled,omitempty"`
+	// Allows says what the limit allows, and its ceiling over engines.
+	Allows string `json:"allows,omitempty"`
+}
+
+// rateLimitExplain describes a policy's limit l.
+func rateLimitExplain(l wafv1alpha1.RateLimit) RateLimitExplain {
+	re := RateLimitExplain{Name: l.Name, Requests: l.Requests, Period: l.Period.Duration.String(), Burst: l.Requests,
+		Detect: l.Mode == wafv1alpha1.PolicyDetect}
+	if l.Burst != nil {
+		re.Burst = *l.Burst
+	}
+	prefix := int32(pipeline.DefaultIPv6Prefix)
+	re.Key = fmt.Sprintf("client IP (IPv6 by /%d)", prefix)
+	if k := l.Key; k != nil {
+		switch {
+		case k.Header != nil:
+			re.Key = "header " + string(k.Header.Name) + " (by client IP without it)"
+		case k.ClientIP != nil && k.ClientIP.IPv6PrefixLength != nil:
+			re.Key = fmt.Sprintf("client IP (IPv6 by /%d)", *k.ClientIP.IPv6PrefixLength)
+		}
+	}
+	if m := l.Match; m != nil {
+		for _, p := range m.Paths {
+			re.Paths = append(re.Paths, string(p))
+		}
+		for _, m := range m.Methods {
+			re.Methods = append(re.Methods, string(m))
+		}
+	}
+	re.Allows = fmt.Sprintf("each engine serving the policy allows %d per %s per %s, in bursts of up to %d; a client whose requests reach N engines gets up to N times that (docs/rate-limits.md)",
+		re.Requests, re.Period, re.Key, re.Burst)
+	return re
+}
+
+// policyRateLimit finds the limit name of policy id in in.
+func policyRateLimit(in resolver.Input, id, name string) (wafv1alpha1.RateLimit, bool) {
+	for _, p := range in.Policies {
+		if p.Namespace+"/"+p.Name != id {
+			continue
+		}
+		for _, l := range p.Spec.RateLimits {
+			if l.Name == name {
+				return l, true
+			}
+		}
+	}
+	return wafv1alpha1.RateLimit{}, false
 }
 
 // RuleExplain is one rule that matched.
@@ -520,6 +585,21 @@ func explainEvent(ctx context.Context, cluster *explainCluster, cfg explainConfi
 		ee.Rules = append(ee.Rules, *byID[id])
 	}
 
+	// A rate limit's: the limit, from the policy.
+	if reason == "rate-limit" {
+		ee.RateLimit = &RateLimitExplain{Name: ev.RateLimit, Sampled: ev.Sampled}
+		if in, _, err := explainInput(ctx, cluster, cfg, ev.Policy); err != nil {
+			re.Warnings = append(re.Warnings, fmt.Sprintf("WAFPolicy %s: %v: the limit's settings are unknown", ev.Policy, err))
+		} else if l, ok := policyRateLimit(in, ev.Policy, ev.RateLimit); ok {
+			rl := rateLimitExplain(l)
+			rl.Sampled = ev.Sampled
+			ee.RateLimit = &rl
+		} else {
+			re.Warnings = append(re.Warnings, fmt.Sprintf("WAFPolicy %s has no rate limit %q now: it was renamed or removed since", ev.Policy, ev.RateLimit))
+		}
+		return ee
+	}
+
 	// The narrowest exclusions, by tune's logic, for a request the rules
 	// denied (or would have, in Detect mode).
 	if reason != "rule" || ev.Policy == "" {
@@ -709,6 +789,8 @@ type PolicyExplanation struct {
 	Targets    []TargetExplain    `json:"targets"`
 	Conditions []ConditionExplain `json:"conditions"`
 	Engines    []EngineRef        `json:"engines"`
+	// RateLimits are the policy's limits, and what each allows.
+	RateLimits []RateLimitExplain `json:"rateLimits,omitempty"`
 	Warnings   []string           `json:"warnings"`
 }
 
@@ -754,6 +836,9 @@ func explainPolicy(ctx context.Context, cluster *explainCluster, namespace, id s
 		Conditions: []ConditionExplain{}, Engines: []EngineRef{}, Warnings: []string{}}
 	for _, t := range p.Spec.TargetRefs {
 		pe.Targets = append(pe.Targets, TargetExplain{Kind: t.Kind, Name: t.Name, SectionName: t.SectionName})
+	}
+	for _, l := range p.Spec.RateLimits {
+		pe.RateLimits = append(pe.RateLimits, rateLimitExplain(l))
 	}
 	for _, t := range policyConditions {
 		ce := ConditionExplain{Type: t, Status: string(metav1.ConditionUnknown)}
@@ -846,6 +931,16 @@ func printPolicyExplanation(w io.Writer, pe *PolicyExplanation) {
 		targets = append(targets, s)
 	}
 	fmt.Fprintf(w, "Targets: %s\n", cmp.Or(strings.Join(targets, ", "), "none"))
+	for _, rl := range pe.RateLimits {
+		mode := ""
+		if rl.Detect {
+			mode = " (Detect: logs only)"
+		}
+		fmt.Fprintf(w, "Rate limit %s%s: %s\n", rl.Name, mode, rl.Allows)
+		if len(rl.Paths) > 0 || len(rl.Methods) > 0 {
+			fmt.Fprintf(w, "  Counts: %s %s\n", cmp.Or(strings.Join(rl.Methods, ","), "any method"), cmp.Or(strings.Join(rl.Paths, ", "), "any path"))
+		}
+	}
 	for _, c := range pe.Conditions {
 		fmt.Fprintf(w, "\n%s: %s, %s", c.Type, c.Status, c.Reason)
 		if c.Message != "" {
@@ -911,6 +1006,19 @@ func printRequestExplanation(w io.Writer, re *RequestExplanation) {
 			fmt.Fprintf(w, ": %s", ev.Cause)
 		}
 		fmt.Fprintln(w)
+		if rl := ev.RateLimit; rl != nil {
+			fmt.Fprintf(w, "  Rate limit: %s", terminalSafe(rl.Name))
+			if rl.Allows != "" {
+				fmt.Fprintf(w, ": %s", rl.Allows)
+			}
+			fmt.Fprintln(w)
+			if len(rl.Paths) > 0 || len(rl.Methods) > 0 {
+				fmt.Fprintf(w, "    Counts: %s %s\n", cmp.Or(strings.Join(rl.Methods, ","), "any method"), cmp.Or(strings.Join(rl.Paths, ", "), "any path"))
+			}
+			if rl.Sampled > 1 {
+				fmt.Fprintf(w, "    This event stands for %d limited requests of the client (one event a minute per client).\n", rl.Sampled)
+			}
+		}
 		if ev.Reason == "rule" {
 			fmt.Fprintf(w, "  Anomaly score: %d", ev.AnomalyScore)
 			if ev.Threshold > 0 {
