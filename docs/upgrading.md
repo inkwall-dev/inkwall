@@ -97,8 +97,8 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   CRD fields and the operator), then the engines: an engine before 0.7.0 ignores `spec.geo` and
   gets no country table, and the policy is `Enforced=False`, `EnginesOutdated`. A policy with
   `spec.geo` and no country database (`InkwallConfig.spec.geo.database`) is `Enforced=False`,
-  `GeoDatabaseUnavailable`, and geo is skipped. The chart's default operator `limits.memory` is now
-  768 MiB (it was 512 MiB): compiling a database takes up to about 100 MiB on the leader. Rolling
+  `GeoDatabaseUnavailable`, and geo is skipped. Compiling a database takes up to about 100 MiB on the
+  leader, within the chart's default operator `limits.memory` (now 1Gi). Rolling
   the operator back below 0.7.0 drops geo without a word, and leaves the `inkwall-geo` Secrets
   behind: `kubectl -n inkwall-system delete secret inkwall-geo` and
   `kubectl -n inkwall-system delete secret -l waf.inkwall.dev/bundle-chunk=inkwall-geo`. Roll the
@@ -123,7 +123,22 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   policy goes `Programmed=False` (`Unverified`), naming the `Backend` to look for in the
   controller's log; alert on `haproxy_rejected_custom_resource_generation` and on policies that
   aren't `Ready`.
-
+- **Export of security events to SIEMs** (`spec.events.export`, [SIEM export](siem-export.md)).
+  Nothing is exported until you add sinks. The chart changes with it, also for clusters that
+  don't export:
+  - The operator's default `operator.resources.limits.memory` is 1Gi (was 512Mi), for the
+    control plane's queue decoded, the export buffer and its requests; `values.yaml` gives the
+    formula. An upgrade with `--reuse-values` keeps the release's values, so an existing
+    install stays at 512Mi: before you add sinks, raise `operator.resources.limits.memory`
+    (`--set operator.resources.limits.memory=1Gi`), or upgrade without `--reuse-values`. If you
+    set your own limit, check it against the formula.
+  - The `events` emptyDir's `sizeLimit` grows by `events.export.diskMiB` (512 MiB by default):
+    the node needs that much ephemeral storage free per replica once sinks fill the buffer. Lower
+    `diskMiB` on small nodes.
+  - `operator.terminationGracePeriodSeconds` is set to 30, explicitly: 5 s of shutdown delay, up
+    to 15 s for the sinks to send what is buffered, and the rest of the shutdown.
+  - The new `events.export` values default with `--reuse-values` too. With the chart's egress NetworkPolicy, list
+    each sink in `networkPolicy.egress.extra`.
 - **Envoy Gateway's routes are proven by the operator's probe**, as Istio's and the HAProxy
   controller's are. After the upgrade, a policy on an HTTPRoute that Envoy Gateway serves is
   `Programmed=False`, reason `Unverified`, until the probe has reached the engine on every Envoy

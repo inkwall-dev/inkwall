@@ -1,5 +1,6 @@
 {{- $certManager := eq .Values.webhook.certs.mode "certManager" }}
 {{- $cp := include "inkwall.controlPlane.values" . | fromYaml }}
+{{- $export := include "inkwall.export.values" . | fromYaml }}
 {{- $metrics := include "inkwall.metrics.secure" . | fromYaml }}
 {{- /* geo, as helm upgrade --reuse-values from before 0.7.0 renders it: absent. */}}
 {{- $geo := .Values.geo | default dict }}
@@ -41,6 +42,8 @@ spec:
       {{- with .Values.operator.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
+      # The shutdown delay, the export's flush, and the rest of the shutdown.
+      terminationGracePeriodSeconds: {{ .Values.operator.terminationGracePeriodSeconds | default 30 }}
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -82,6 +85,8 @@ spec:
             {{- end }}
             - --events-dir=/var/lib/inkwall/events
             - --events-buffer-bytes={{ mul $cp.eventsBufferMiB 1048576 }}
+            - --export-buffer-bytes={{ mul $export.bufferMiB 1048576 }}
+            - --export-disk-bytes={{ mul $export.diskMiB 1048576 }}
             {{- with .Values.operator.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -199,11 +204,12 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
-        # Security events waiting for the optional control plane; kept
-        # across container restarts. Room for the buffer and a margin.
+        # Security events waiting for the optional control plane and for
+        # the export sinks; kept across container restarts. Room for both
+        # buffers and a margin: past its limit, the kubelet evicts the pod.
         - name: events
           emptyDir:
-            sizeLimit: {{ add $cp.eventsBufferMiB 16 }}Mi
+            sizeLimit: {{ add $cp.eventsBufferMiB $export.diskMiB 16 }}Mi
         {{- if $certManager }}
         - name: certs
           secret:

@@ -1398,6 +1398,10 @@ policy_requests() {
 counted() { [[ $(policy_requests web denied) -ge 1 && $(policy_requests web timed) -ge 1 ]]; }
 eventually "the blocked attack is counted, with its latency, in the policy's request counts" counted ||
   echo "      stub stats: $(stub_stats)"
+# Export to SIEMs (#723): a Collector and an HTTP sink get the events the
+# stub control plane gets.
+# shellcheck source=hack/kind/export-e2e.sh
+. hack/kind/export-e2e.sh
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy web --wait >/dev/null
 
 # Managed mode (#93, #94): the stub's policies are written as CRDs labelled
