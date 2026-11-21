@@ -369,10 +369,13 @@ deletes the geo Secrets, and the next compile starts again.
 same node as aliases. MaxMind's writer aliases `::ffff:0:0/96` (IPv4-mapped), `2001::/32` (Teredo)
 and `2002::/16` (6to4), but the aliases are structural, not fixed: the library's `Lookup` simply
 follows the pointer, and `Networks()` skips any pointer to the IPv4 start outside the IPv4 subtree
-"without hardcoding the networks that the writer currently aliases" (`traverse.go`, v2.8.0). A
-custom database may have none, or others. So the compiler finds them: it walks once with
-`IncludeAliasedNetworks()` and once without, and the prefixes only the first walk yields are the
-aliases. It writes the IPv4 tree into the v4 table, leaves the alias prefixes out of the v6 table,
+"without hardcoding the networks that the writer currently aliases" (`traverse.go`, v2.9.1). A
+custom database may have none, or others. So the compiler finds them. The walk without
+`IncludeAliasedNetworks()` yields every network but those under an alias, so its gaps are exactly
+the aliased subtrees. Within a gap, the first network the library yields with aliases followed
+lies under the IPv4 subtree's first network, so its prefix length, minus that network's, is the
+alias's. That tells two sibling aliases (`4000::/3` and `6000::/3`) from one `/2`, which the
+difference of two walks can't. It writes the IPv4 tree into the v4 table, leaves the alias prefixes out of the v6 table,
 and lists them in the table (`v6_aliases`). The engine resolves only the aliases the table lists
 ([§5.1](#51-lookup)), so the table and the library give one answer for any database. The
 differential fuzz checks it with the aliases present or not, at random ([§10](#10-testing)).
@@ -616,23 +619,30 @@ in the operator only.**
 
 - **License:** [ISC](https://opensource.org/license/isc-license-txt), a permissive license
   compatible with Inkwall's Apache-2.0; its notice goes with the others in the release's SBOM.
-- **Dependencies:** `golang.org/x/sys`, already in `go.mod`. Its `go.mod` (v2.8.0) also lists
+- **Version:** v2.9.1, which fixes `Networks` omitting IPv6 networks that share a data record
+  with the record IPv4 lookups reach (a table would have lacked them).
+- **Dependencies:** `golang.org/x/sys`, already in `go.mod`. Its `go.mod` (v2.9.1) also lists
   `testify` and, through a `tool` directive for its code generator (`maxminddb-gen`),
   `golang.org/x/tools`; neither is built into Inkwall, though both enter `go.sum`. It needs Go
   1.26; the repository builds with 1.27.
-- **Safety:** it reads from a byte slice (`OpenBytes`) with bounds checks, has a `Verify` that
-  checks the tree and the data section, and fuzz targets of its own (`FuzzDatabase`,
-  `FuzzNetworks`).
+- **Safety:** it reads from a byte slice (`OpenBytes`) with bounds checks, and has fuzz targets
+  of its own (`FuzzDatabase`, `FuzzNetworks`). Its `Verify` isn't used: its memory grows with
+  the distinct data records (about 85 bytes each at its peak, measured), which no bound here
+  limits, so a crafted file of a few million records would take the leader's memory. The walks
+  check what matters as they go: every tree record they follow is bounds-checked and every data
+  record decoded, under the deadline and the caps.
 
 How the operator uses it:
 
-1. Open the source. A file is opened with `os.OpenInRoot` ([§3.2](#32-where-the-operator-reads-it))
-   and mapped read-only (`mmap`, at most 256 MiB; a City database fits), then given to
+1. Open the source. A file is opened through an `os.Root` ([§3.2](#32-where-the-operator-reads-it)),
+   without blocking (a FIFO in its place would block the open), refused unless it is a regular
+   file, and mapped read-only (`mmap`, at most 256 MiB; a City database fits), then given to
    `OpenBytes`: its pages are the kernel's page cache, not the operator's heap. A Secret's value is
-   at most 1 MiB, 16 MiB decompressed, read into memory. Compute the source's SHA-256, and skip
-   everything else if it is unchanged.
-2. `Verify`. Refuse what fails, with reason `Invalid`.
-3. Walk `Networks(IncludeNetworksWithoutData())` (and once more with `IncludeAliasedNetworks()`
+   at most 1 MiB, 16 MiB decompressed, read into memory. Compute the source's SHA-256, inside the
+   guard of step 5 (hashing reads every page), and skip everything else if it is unchanged.
+2. Check the metadata: format 2, IP version 4 or 6, a record size of 24, 28 or 32, and no more
+   nodes than the network cap. Refuse what fails, with reason `Invalid` or `TooLarge`.
+3. Walk `Networks(IncludeNetworksWithoutData())` (and the gaps with `IncludeAliasedNetworks()`
    to find the aliases, [§4.2](#42-the-operator-compiles-a-country-table)), decoding only
    `country.iso_code` and `registered_country.iso_code` into a two-field struct. Without
    `IncludeNetworksWithoutData`, the iterator yields nothing for an empty leaf, so a tree whose
@@ -644,11 +654,18 @@ How the operator uses it:
 4. Merge neighbours with the same country, and check the bounds as the ranges are built.
 5. All of it in a goroutine with `recover` and `debug.SetPanicOnFault` (a mapped file truncated
    under the reader faults; this turns the fault into a recovered panic), under a context with a
-   deadline of one minute that the walk checks at every network it yields. `Verify` doesn't stop a
-   file whose tree nodes share children (it skips nodes it has checked), and such a tree can yield
-   exponentially many networks, so the loop also counts them and stops at a cap (16 million, past
-   any real database), and the merged ranges stop at the 32 MiB bound. A deadline alone can't stop
-   a goroutine, so the loop has to. A crafted file that panics, loops or grows makes an `Invalid`
+   deadline of one minute that the walk checks at every network it yields. A tree whose nodes
+   share children can yield exponentially many networks, so the loop also counts them and stops at
+   a cap, and the merged ranges stop at the 32 MiB bound. The cap is 32 Mi networks: a tree
+   without shared children yields one network per node, plus one, and a file of 256 MiB holds at
+   most 32 Mi nodes of 8 bytes, so no database within the file bound is refused for it
+   (GeoLite2-City has about 4 million nodes). A skipped alias yields nothing either, so a tree
+   whose shared children all end in pointers to the IPv4 subtree would make that walk skip
+   exponentially many aliases unchecked: a first walk follows the aliases, where every path end
+   yields, checked and capped at four times the cap (the IPv4 networks under MaxMind's three
+   aliases), and it bounds the path ends of the walk that skips them. A deadline alone can't stop
+   a goroutine, so the loop has to. A cancelled context (leadership lost) and the API server's
+   errors are transient: they leave the condition as it is, and are retried. A crafted file that panics, loops or grows makes an `Invalid`
    or `TooLarge` condition, never a crashed or out-of-memory leader.
 
 **Operator memory.** Only the leader compiles. Its heap during a compile: the merged ranges (at
@@ -681,7 +698,7 @@ less risk than a new one, and only the operator runs it.
 | False | `NotFound` | The file or the Secret key doesn't exist |
 | False | `Invalid` | Not a valid MMDB, or parsing failed or timed out (bad country codes only make their records "no country", [§6](#6-parsing-the-mmdb)) |
 | False | `NoCountryData` | No record has `country.iso_code` |
-| False | `TooLarge` | Over 256 MiB of file or 16 MiB of Secret, 16 million networks, or 32 MiB of table (14,400 KiB compressed) |
+| False | `TooLarge` | Over 256 MiB of file or 16 MiB of Secret, 32 Mi networks, or 32 MiB of table (14,400 KiB compressed) |
 
   While it is `False` after a good load, engines keep the last good table, and the message says
   which and since when. A source older than the stored table is not `False`: it stays `Loaded`
@@ -817,7 +834,7 @@ database is committed to the repository, for their licenses.
 | 8 | The table on the operator stream, to engines that advertise it, never after the bundle that pins its hash on a stream; held compressed until a bundle names it; stored in chunk Secrets (16), written before the bundle's, for cold start and other replicas; the previous table kept until the new one arrives | The table in the bundle; a separately signed manifest; sending to every engine |
 | 9 | No table named: geo skipped, `Enforced=False`. A named table missing: the policy's `failureMode`, except `Detect`. Readiness waits only at bootstrap | Always the `failureMode`; unready mid-life |
 | 10 | `pkg/geo`: sorted ranges and a binary search, a country bitset per policy, one lookup per request in `Set.Check`, the table swapped with the policy set; ≤ 150 ns, 0 allocs; at most 32 MiB | A per-IP cache; `mmap` in the engine; a table swapped on its own |
-| 11 | `maxminddb-golang/v2` (ISC) in the operator only, the leader only, on a mapped file; behind `Verify`, `recover`, a walk that yields empty networks so its deadline and network cap always run; aliases found, not assumed; never an older database, without an error for it | Our own MMDB reader; reading the file into the heap |
+| 11 | `maxminddb-golang/v2` (ISC) in the operator only, the leader only, on a mapped file; behind `recover`, walks that yield empty networks and follow aliases first so their deadline and network cap always run (not `Verify`, whose memory nothing bounds); aliases found from the walk's gaps, not assumed; never an older database, without an error for it | Our own MMDB reader; reading the file into the heap |
 | 12 | `GeoDatabaseReady` on the `InkwallConfig`; `Enforced=False`, `GeoDatabaseUnavailable` on policies, only for engines with no table; `EnginesOutdated` for old engines | `Accepted=False` while the table is missing |
 | 14 | The chart's default operator memory limit goes to 768 MiB, shared with 0010 | Compiling within today's 512 MiB |
 | 13 | Every event carries `country`; geo events sampled per (policy, country), once a minute | An event per denied request |

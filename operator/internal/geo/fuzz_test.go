@@ -17,10 +17,10 @@ import (
 	geotable "github.com/inkwall-dev/inkwall/pkg/geo"
 )
 
-// randomDB is an IPv6 database of random networks and codes, with the
-// IPv4 aliases present or not, at MaxMind's prefixes or at random ones, and
-// the addresses to probe: the networks' edges, random ones, and ones in the
-// aliases.
+// randomDB is a database of random networks and codes: an IPv4 one, or an
+// IPv6 one with the IPv4 aliases present or not, at MaxMind's prefixes or
+// at random ones, or whose tree ends above ::/96; and the addresses to
+// probe: the networks' edges, random ones, and ones in the aliases.
 func randomDB(r *rand.Rand) ([]byte, []netip.Addr) {
 	codes := []string{"AU", "DE", "FR", "US", "ZZ", "de", "D1", ""}
 	record := func() *mmdbtest.Record {
@@ -35,6 +35,10 @@ func randomDB(r *rand.Rand) ([]byte, []netip.Addr) {
 		return &mmdbtest.Record{Country: codes[r.IntN(len(codes))], Registered: codes[r.IntN(len(codes))]}
 	}
 	d := mmdbtest.DB{BuildEpoch: r.Uint64N(1 << 40)}
+	kind := r.IntN(6) // 0: IPv4, 1: ends above ::/96, else IPv6 with aliases or not
+	if kind == 0 {
+		d.IPVersion = 4
+	}
 	var probes []netip.Addr
 	random16 := func() [16]byte {
 		var b [16]byte
@@ -46,7 +50,7 @@ func randomDB(r *rand.Rand) ([]byte, []netip.Addr) {
 	d.Networks = append(d.Networks, nw("1.0.0.0/8", cc("AU")))
 	for range 1 + r.IntN(40) {
 		var p netip.Prefix
-		if r.IntN(2) == 0 {
+		if kind == 0 || r.IntN(2) == 0 {
 			b := random16()
 			p, _ = netip.AddrFrom4([4]byte(b[:4])).Prefix(1 + r.IntN(32))
 		} else {
@@ -55,10 +59,16 @@ func randomDB(r *rand.Rand) ([]byte, []netip.Addr) {
 		d.Networks = append(d.Networks, mmdbtest.Network{Prefix: p, Record: record()})
 		probes = append(probes, p.Addr())
 	}
-	switch r.IntN(3) {
-	case 1:
+	if kind == 1 {
+		// The tree ends above ::/96: all of IPv4 is one record.
+		p, _ := netip.IPv6Unspecified().Prefix(1 + r.IntN(95))
+		d.Networks = append(d.Networks, mmdbtest.Network{Prefix: p, Record: cc(codes[r.IntN(4)])})
+	}
+	switch aliases := r.IntN(3); {
+	case kind < 2:
+	case aliases == 1:
 		d.Aliases = mmdbtest.MaxMindAliases
-	case 2:
+	case aliases == 2:
 		for range 1 + r.IntN(4) {
 			p, _ := netip.AddrFrom16(random16()).Prefix(1 + r.IntN(96))
 			if p.Overlaps(netip.MustParsePrefix("::/96")) || slices.ContainsFunc(d.Aliases, p.Overlaps) {
@@ -82,6 +92,9 @@ func randomDB(r *rand.Rand) ([]byte, []netip.Addr) {
 		b := random16()
 		probes = append(probes, netip.AddrFrom16(b), netip.AddrFrom4([4]byte(b[:4])))
 	}
+	if kind == 0 {
+		probes = slices.DeleteFunc(probes, func(a netip.Addr) bool { return !a.Unmap().Is4() })
+	}
 	for _, p := range slices.Clone(probes) {
 		probes = append(probes, p.Next(), p.Prev())
 	}
@@ -95,20 +108,72 @@ func randomDB(r *rand.Rand) ([]byte, []netip.Addr) {
 // libraryCountry is the reference: the library's Lookup, its record's
 // country as the compiler reads it. An IPv4-mapped address is its IPv4
 // address, as everywhere in Inkwall.
-func libraryCountry(t *testing.T, r *maxminddb.Reader, a netip.Addr) geotable.Country {
+func libraryCountry(r *maxminddb.Reader, a netip.Addr) (geotable.Country, error) {
 	res := r.Lookup(a.Unmap())
 	if err := res.Err(); err != nil {
-		t.Fatalf("library Lookup(%s): %v", a, err)
+		return 0, err
 	}
 	if !res.Found() {
-		return geotable.NoCountry
+		return geotable.NoCountry, nil
 	}
-	c := &compiler{codes: map[uintptr]geotable.Country{}}
-	code, err := c.code(res)
+	c := &compiler{codes: map[uintptr]code{}}
+	return c.code(res)
+}
+
+// agree checks the table against the library's Lookup at probes.
+func agree(t *testing.T, db []byte, tb *Table, probes []netip.Addr, mustLookUp bool) {
+	t.Helper()
+	g, err := geotable.Decode(tb.Compressed, tb.Hash[:], uint64(tb.Size))
+	if err != nil {
+		t.Fatalf("the engine refuses the compiled table: %v", err)
+	}
+	lib, err := maxminddb.OpenBytes(db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return code
+	for _, a := range probes {
+		want, err := libraryCountry(lib, a)
+		if err != nil {
+			if mustLookUp {
+				t.Fatalf("library Lookup(%s): %v", a, err)
+			}
+			continue
+		}
+		if got, _ := g.Lookup(a); got != want {
+			t.Fatalf("aliases %v: %s is %q, the library says %q", tb.Aliases, a, got, want)
+		}
+	}
+}
+
+// edges returns the first and last address of the database's first
+// networks, aliases followed, and addresses inside the table's aliases.
+func edges(db []byte, tb *Table) []netip.Addr {
+	lib, err := maxminddb.OpenBytes(db)
+	if err != nil {
+		return nil
+	}
+	var out []netip.Addr
+	n := 0
+	for res := range lib.Networks(maxminddb.IncludeAliasedNetworks(), maxminddb.IncludeNetworksWithoutData()) {
+		if n++; n > 512 || res.Err() != nil {
+			break
+		}
+		p := res.Prefix()
+		out = append(out, p.Addr(), lastAddr(p))
+	}
+	for _, p := range tb.Aliases {
+		out = append(out, p.Addr(), lastAddr(p), lastAddr(p).Next())
+	}
+	return slices.DeleteFunc(out, func(a netip.Addr) bool { return !a.IsValid() })
+}
+
+func lastAddr(p netip.Prefix) netip.Addr {
+	b := p.Masked().Addr().AsSlice()
+	for bit := p.Bits(); bit < len(b)*8; bit++ {
+		b[bit/8] |= 1 << (7 - bit%8)
+	}
+	a, _ := netip.AddrFromSlice(b)
+	return a
 }
 
 // FuzzDifferential checks the compiled table against the library's own
@@ -127,20 +192,7 @@ func FuzzDifferential(f *testing.F) {
 			}
 			t.Fatalf("compile: %v", err)
 		}
-		g, err := geotable.Decode(tb.Compressed, tb.Hash[:], uint64(tb.Size))
-		if err != nil {
-			t.Fatal(err)
-		}
-		lib, err := maxminddb.OpenBytes(db)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, a := range probes {
-			want := libraryCountry(t, lib, a)
-			if got, _ := g.Lookup(a); got != want {
-				t.Fatalf("seed %d, aliases %v: %s is %q, the library says %q", seed, tb.Aliases, a, got, want)
-			}
-		}
+		agree(t, db, tb, append(probes, edges(db, tb)...), true)
 	})
 }
 
@@ -171,8 +223,7 @@ func FuzzCompile(f *testing.F) {
 			}
 			return
 		}
-		if _, err := geotable.Decode(tb.Compressed, tb.Hash[:], uint64(tb.Size)); err != nil {
-			t.Fatalf("the engine refuses the compiled table: %v", err)
-		}
+		// The table the library's own answers, wherever it can give one.
+		agree(t, db, tb, edges(db, tb), false)
 	})
 }

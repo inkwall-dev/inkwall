@@ -82,8 +82,15 @@ func openFile(root, name string) (*os.File, error) {
 	if err != nil {
 		return nil, fail(ReasonInvalid, "database file: %v", err)
 	}
-	// OpenInRoot refuses a path, or a symlink, that leads out of root.
-	f, err := os.OpenInRoot(root, rel)
+	// A Root refuses a path, or a symlink, that leads out of it. Opened
+	// without blocking: a FIFO in its place would block the open, before
+	// the check that refuses anything but a regular file.
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, fail(ReasonNotFound, "database directory %s: %v", root, err)
+	}
+	defer func() { _ = r.Close() }()
+	f, err := r.OpenFile(rel, os.O_RDONLY|openNonblock, 0)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fail(ReasonNotFound, "database file %s not found", name)
 	}

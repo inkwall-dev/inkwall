@@ -8,8 +8,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"maps"
+	"net/netip"
 	"slices"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -33,6 +35,11 @@ const (
 	// For people and tools.
 	DatabaseTypeAnnotation = "waf.inkwall.dev/geo-database-type"
 	BuildEpochAnnotation   = "waf.inkwall.dev/geo-build-epoch"
+	// AliasesAnnotation lists the aliases found, comma-separated, and
+	// BadCodesAnnotation counts the networks with a bad code: the status
+	// message after a leader change.
+	AliasesAnnotation  = "waf.inkwall.dev/geo-aliases"
+	BadCodesAnnotation = "waf.inkwall.dev/geo-bad-codes"
 )
 
 // Format is the format of the table's Secrets: a manifest Secret,
@@ -79,6 +86,13 @@ func Load(ctx context.Context, r client.Reader, namespace string) (*Table, error
 	if err != nil {
 		return nil, fmt.Errorf("the Secret %s: %w", Format.Name, err)
 	}
+	var aliases []netip.Prefix
+	for a := range strings.SplitSeq(s.Annotations[AliasesAnnotation], ",") {
+		if p, err := netip.ParsePrefix(a); err == nil {
+			aliases = append(aliases, p)
+		}
+	}
+	bad, _ := strconv.Atoi(s.Annotations[BadCodesAnnotation])
 	return &Table{
 		Compressed:     gz,
 		Hash:           hash,
@@ -87,6 +101,8 @@ func Load(ctx context.Context, r client.Reader, namespace string) (*Table, error
 		BuildEpoch:     uint64(max(t.Built().Unix(), 0)), // #nosec G115 -- not negative
 		DatabaseSHA256: [32]byte(dbHash),
 		Ranges:         t.Ranges(),
+		Aliases:        aliases,
+		BadCodes:       max(bad, 0),
 	}, nil
 }
 
@@ -126,8 +142,18 @@ func Store(ctx context.Context, c client.Client, r client.Reader, namespace stri
 		DatabaseHashAnnotation: hex.EncodeToString(t.DatabaseSHA256[:]),
 		DatabaseTypeAnnotation: t.DatabaseType,
 		BuildEpochAnnotation:   strconv.FormatUint(t.BuildEpoch, 10),
+		AliasesAnnotation:      joinPrefixes(t.Aliases),
+		BadCodesAnnotation:     strconv.Itoa(t.BadCodes),
 	}
 	return save(ctx, c, s, exists, managedLabels(), annotations, map[string][]byte{bundlesecret.ManifestKey: manifest})
+}
+
+func joinPrefixes(ps []netip.Prefix) string {
+	s := make([]string, len(ps))
+	for i, p := range ps {
+		s[i] = p.String()
+	}
+	return strings.Join(s, ",")
 }
 
 func writeChunk(ctx context.Context, c client.Client, r client.Reader, namespace, name string, chunk []byte) error {

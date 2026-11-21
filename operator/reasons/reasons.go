@@ -297,7 +297,7 @@ var entries = []Entry{
 		Meaning: "No record of the database has `country.iso_code`: it isn't a country database (an ASN database, or another schema).",
 		Fix:     "Use a country or city database: GeoLite2 or GeoIP2 Country or City, DB-IP's Country Lite."},
 	{Kind: "InkwallConfig", Condition: "GeoDatabaseReady", Reason: "TooLarge",
-		Meaning: "The database is over a bound: 256 MiB of file, 16 MiB from a Secret (decompressed), 16 million networks, or a country table of 32 MiB (14,400 KiB compressed).",
+		Meaning: "The database is over a bound: 256 MiB of file, 16 MiB from a Secret (decompressed), 32 Mi networks (more than its tree can have), or a country table of 32 MiB (14,400 KiB compressed).",
 		Fix:     "Use a country database; for a Secret, a small custom one, or a file instead."},
 	{Kind: "SecurityEvent", Condition: "reason", Reason: "rule",
 		Meaning: "The rules found an attack: the anomaly score reached the policy's threshold, or a rule denies on its own.",
