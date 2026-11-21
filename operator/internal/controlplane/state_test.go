@@ -257,3 +257,38 @@ func TestAddEnginesWithinLimit(t *testing.T) {
 		t.Fatalf("%d engines, %d left out, want all", len(st.GetEngines()), left)
 	}
 }
+
+// The control plane gets each export sink's scheme, host and port only: a
+// path or query can carry a token (design 0010 §6).
+func TestStateSpecCutsSinkEndpoints(t *testing.T) {
+	spec := wafv1alpha1.InkwallConfigSpec{Events: wafv1alpha1.EventsSpec{Export: &wafv1alpha1.ExportSpec{
+		ClusterName: "prod",
+		Sinks: []wafv1alpha1.EventSink{
+			{Name: "otel", OTLP: &wafv1alpha1.OTLPSink{Endpoint: "https://otlp.example.com:4318/v1/logs?key=secret"}},
+			{Name: "grpc", OTLP: &wafv1alpha1.OTLPSink{Endpoint: "grpcs://collector:4317"}},
+			{Name: "sumo", JSON: &wafv1alpha1.JSONSink{URL: "https://collectors.sumologic.com/receiver/v1/http/TOKEN", Framing: wafv1alpha1.JSONArray}},
+			{Name: "fromsecret", JSON: &wafv1alpha1.JSONSink{URLSecretRef: &wafv1alpha1.SecretKeyReference{Name: "s", Key: "url"}}},
+		},
+	}}}
+	got := stateSpec(spec)
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leak := range []string{"key=secret", "TOKEN", "/v1/logs", "receiver"} {
+		if strings.Contains(string(raw), leak) {
+			t.Errorf("state spec %s carries %q", raw, leak)
+		}
+	}
+	s := got.Events.Export.Sinks
+	if s[0].OTLP.Endpoint != "https://otlp.example.com:4318" || s[1].OTLP.Endpoint != "grpcs://collector:4317" ||
+		s[2].JSON.URL != "https://collectors.sumologic.com" || s[2].JSON.Framing != wafv1alpha1.JSONArray ||
+		s[3].JSON.URLSecretRef.Name != "s" || got.Events.Export.ClusterName != "prod" {
+		t.Errorf("state spec = %s", raw)
+	}
+	// The InkwallConfig itself is left alone.
+	if spec.Events.Export.Sinks[0].OTLP.Endpoint != "https://otlp.example.com:4318/v1/logs?key=secret" ||
+		spec.Events.Export.Sinks[2].JSON.URL != "https://collectors.sumologic.com/receiver/v1/http/TOKEN" {
+		t.Error("stateSpec changed the spec it was given")
+	}
+}

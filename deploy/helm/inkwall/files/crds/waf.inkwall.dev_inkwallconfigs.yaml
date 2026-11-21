@@ -292,6 +292,274 @@ spec:
                   Events configures what the engines' security events carry to the
                   operator (and on to the control plane, when one is connected).
                 properties:
+                  export:
+                    description: |-
+                      Export sends the security events to SIEMs and log pipelines, from
+                      every operator replica, without the control plane (see
+                      docs/siem-export.md). Events carry no more than Redact leaves; a sink
+                      can only leave out more.
+                    properties:
+                      clusterName:
+                        description: |-
+                          ClusterName names the cluster in every exported event, beside its ID
+                          (the kube-system Namespace's UID).
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                      sinks:
+                        description: 'Sinks are where the events go, at most 4. None:
+                          no export.'
+                        items:
+                          description: 'EventSink is one export destination: OTLP
+                            logs or JSON over HTTP.'
+                          properties:
+                            batch:
+                              description: Batch configures how events are grouped
+                                into requests.
+                              properties:
+                                maxDelay:
+                                  description: |-
+                                    MaxDelay is the longest an event waits for its request to fill,
+                                    100ms to 60s. Unset: 5s.
+                                  type: string
+                                  x-kubernetes-validations:
+                                  - message: maxDelay must be from 100ms to 60s
+                                    rule: duration(self) >= duration('100ms') && duration(self)
+                                      <= duration('60s')
+                                maxEvents:
+                                  description: 'MaxEvents is the most events per request,
+                                    1 to 1,000. Unset: 500.'
+                                  format: int32
+                                  maximum: 1000
+                                  minimum: 1
+                                  type: integer
+                                maxInFlight:
+                                  description: |-
+                                    MaxInFlight is how many requests are sent before the first is
+                                    answered, 1 to 4. Unset: 4.
+                                  format: int32
+                                  maximum: 4
+                                  minimum: 1
+                                  type: integer
+                              type: object
+                            compression:
+                              default: Gzip
+                              description: 'Compression of the request body. Unset:
+                                Gzip.'
+                              enum:
+                              - Gzip
+                              - None
+                              type: string
+                            filter:
+                              description: Filter limits the events this sink takes.
+                              properties:
+                                actions:
+                                  description: 'Actions are the verdicts this sink
+                                    takes: Deny, Log. Unset: both.'
+                                  items:
+                                    description: ExportAction is a verdict a sink
+                                      filters on.
+                                    enum:
+                                    - Deny
+                                    - Log
+                                    type: string
+                                  maxItems: 2
+                                  type: array
+                                  x-kubernetes-list-type: set
+                                policyNamespaces:
+                                  description: |-
+                                    PolicyNamespaces takes only the events of policies in these
+                                    namespaces, as the bundle the replica serves knows them: an event
+                                    whose policy isn't in the bundle, or that has none, goes only to
+                                    sinks without this filter. Unset: all.
+                                  items:
+                                    description: 'NamespaceName is a Kubernetes namespace''s
+                                      name: a DNS label.'
+                                    maxLength: 63
+                                    minLength: 1
+                                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                    type: string
+                                  maxItems: 64
+                                  type: array
+                                  x-kubernetes-list-type: set
+                              type: object
+                            headersSecretRef:
+                              description: |-
+                                HeadersSecretRef names a Secret in the operator's namespace whose
+                                keys are header names and whose values are their values
+                                (Authorization: Bearer ..., DD-API-KEY: ...). Over gRPC they are sent
+                                as metadata, lower-cased. A changed Secret is used from the next
+                                request.
+                              properties:
+                                name:
+                                  description: Name of the Secret.
+                                  maxLength: 253
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            insecure:
+                              description: |-
+                                Insecure allows a plaintext endpoint (http://, grpc://): for a
+                                Collector in the cluster. A plaintext sink can't have
+                                headersSecretRef.
+                              type: boolean
+                            json:
+                              description: JSON sends the events as JSON over HTTP(S).
+                              properties:
+                                framing:
+                                  default: Lines
+                                  description: |-
+                                    Framing is Lines (one event per line, application/x-ndjson) or
+                                    Array (one JSON array, application/json). Unset: Lines.
+                                  enum:
+                                  - Lines
+                                  - Array
+                                  type: string
+                                url:
+                                  description: |-
+                                    URL is the https:// (or http://, with insecure) URL the events are
+                                    POSTed to, with any path and query. A URL that holds a token belongs
+                                    in urlSecretRef.
+                                  maxLength: 2048
+                                  pattern: ^https?://[^/?#@\s]+([/?]\S*)?$
+                                  type: string
+                                urlSecretRef:
+                                  description: |-
+                                    URLSecretRef reads the URL from a Secret's key in the operator's
+                                    namespace instead, for intakes whose URL holds a token (Sumo Logic,
+                                    query-string keys). It gets url's checks when the sink starts.
+                                  properties:
+                                    key:
+                                      description: Key in the Secret.
+                                      maxLength: 253
+                                      minLength: 1
+                                      pattern: ^[-._a-zA-Z0-9]+$
+                                      type: string
+                                    name:
+                                      description: Name of the Secret.
+                                      maxLength: 253
+                                      minLength: 1
+                                      type: string
+                                  required:
+                                  - key
+                                  - name
+                                  type: object
+                              type: object
+                              x-kubernetes-validations:
+                              - message: json needs exactly one of url and urlSecretRef
+                                rule: has(self.url) != has(self.urlSecretRef)
+                            name:
+                              description: |-
+                                Name identifies the sink: the sink label of the export metrics and
+                                the name in the EventsExported condition. Renaming a sink starts it
+                                afresh, without the events the old name hadn't sent.
+                              maxLength: 63
+                              minLength: 1
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                              type: string
+                            omit:
+                              description: |-
+                                Omit are fields this sink never gets: Snippets (each match keeps its
+                                rule and variable), ClientIP, UserAgent, RequestID.
+                              items:
+                                description: ExportOmit is a field a sink leaves out.
+                                enum:
+                                - Snippets
+                                - ClientIP
+                                - UserAgent
+                                - RequestID
+                                type: string
+                              maxItems: 4
+                              type: array
+                              x-kubernetes-list-type: set
+                            otlp:
+                              description: |-
+                                OTLP sends the events as OpenTelemetry logs, over gRPC or HTTP with
+                                protobuf.
+                              properties:
+                                endpoint:
+                                  description: |-
+                                    Endpoint is grpcs://host:port (or grpc://, with insecure) for gRPC,
+                                    or an https:// (or http://) URL for HTTP with protobuf, used as is:
+                                    OTLP/HTTP's path, usually /v1/logs, is part of it.
+                                  maxLength: 512
+                                  pattern: ^(grpcs?://[^/?#@\s]+|https?://[^/?#@\s]+([/?]\S*)?)$
+                                  type: string
+                              required:
+                              - endpoint
+                              type: object
+                            timeout:
+                              description: 'Timeout is one request''s deadline, 1s
+                                to 60s. Unset: 10s.'
+                              type: string
+                              x-kubernetes-validations:
+                              - message: timeout must be from 1s to 60s
+                                rule: duration(self) >= duration('1s') && duration(self)
+                                  <= duration('60s')
+                            tls:
+                              description: |-
+                                TLS configures the connection to an https:// or grpcs:// endpoint.
+                                The server's certificate is always verified.
+                              properties:
+                                caSecretRef:
+                                  description: |-
+                                    CASecretRef names a Secret in the operator's namespace whose ca.crt
+                                    holds the CAs trusted for the server. Unset: the system roots.
+                                  properties:
+                                    name:
+                                      description: Name of the Secret.
+                                      maxLength: 253
+                                      minLength: 1
+                                      type: string
+                                  required:
+                                  - name
+                                  type: object
+                                clientCertificateSecretRef:
+                                  description: |-
+                                    ClientCertificateSecretRef names a kubernetes.io/tls Secret in the
+                                    operator's namespace: the client certificate for mutual TLS.
+                                  properties:
+                                    name:
+                                      description: Name of the Secret.
+                                      maxLength: 253
+                                      minLength: 1
+                                      type: string
+                                  required:
+                                  - name
+                                  type: object
+                                serverName:
+                                  description: |-
+                                    ServerName is the name checked in the server's certificate. Unset:
+                                    the endpoint's host.
+                                  maxLength: 253
+                                  pattern: ^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?(\.[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?)*$
+                                  type: string
+                              type: object
+                          required:
+                          - name
+                          type: object
+                          x-kubernetes-validations:
+                          - message: a sink needs exactly one of otlp and json
+                            rule: has(self.otlp) != has(self.json)
+                          - message: 'a plaintext endpoint (http://, grpc://) needs
+                              insecure: true'
+                            rule: (has(self.insecure) && self.insecure) || !((has(self.otlp)
+                              && self.otlp.endpoint.matches('^(grpc|http)://')) ||
+                              (has(self.json) && has(self.json.url) && self.json.url.startsWith('http://')))
+                          - message: 'a plaintext endpoint (http://, grpc://) can''t
+                              have headersSecretRef: credentials never travel in clear'
+                            rule: '!has(self.headersSecretRef) || !((has(self.otlp)
+                              && self.otlp.endpoint.matches(''^(grpc|http)://''))
+                              || (has(self.json) && has(self.json.url) && self.json.url.startsWith(''http://'')))'
+                        maxItems: 4
+                        type: array
+                        x-kubernetes-list-type: atomic
+                        x-kubernetes-validations:
+                        - message: sinks must not repeat a name
+                          rule: self.all(a, self.exists_one(b, b.name == a.name))
+                    type: object
                   redact:
                     description: Redact keeps more of what rules matched out of the
                       events.
