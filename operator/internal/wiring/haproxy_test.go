@@ -245,7 +245,7 @@ func TestHAProxyAnnotate(t *testing.T) {
 	}}}
 	c := fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).WithObjects(ing).Build()
 	ours := HAProxySnippet(HAProxySnippetOptions{Body: true})
-	if err := annotateHAProxy(ctx, c, ing, ours); err != nil {
+	if err := annotateHAProxy(ctx, c, ing, ours, ""); err != nil {
 		t.Fatal(err)
 	}
 	a := ing.Annotations
@@ -254,17 +254,17 @@ func TestHAProxyAnnotate(t *testing.T) {
 		t.Fatalf("annotations %v", a)
 	}
 	rv := ing.ResourceVersion
-	if err := annotateHAProxy(ctx, c, ing, ours); err != nil || ing.ResourceVersion != rv {
+	if err := annotateHAProxy(ctx, c, ing, ours, ""); err != nil || ing.ResourceVersion != rv {
 		t.Fatalf("wired again: %v, resourceVersion %s -> %s", err, rv, ing.ResourceVersion)
 	}
 	// Another mode: the operator's part is replaced, the user's kept.
-	if err := annotateHAProxy(ctx, c, ing, HAProxySnippet(HAProxySnippetOptions{FailOpen: true})); err != nil {
+	if err := annotateHAProxy(ctx, c, ing, HAProxySnippet(HAProxySnippetOptions{FailOpen: true}), ""); err != nil {
 		t.Fatal(err)
 	}
 	if n := strings.Count(ing.Annotations[HAProxySnippetAnnotation], haproxySnippetBegin); n != 1 {
 		t.Fatalf("%d operator parts", n)
 	}
-	if err := annotateHAProxy(ctx, c, ing, ""); err != nil {
+	if err := annotateHAProxy(ctx, c, ing, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	// Exactly as it was, its final newline (a YAML block's) included.
@@ -287,7 +287,7 @@ func haproxyControllerPod(name string, args ...string) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "haproxy-controller", Name: name, UID: types.UID(name),
 			Labels: map[string]string{"app.kubernetes.io/name": "kubernetes-ingress"}},
-		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: injection.HAProxyContainer, Args: args,
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: injection.HAProxyContainer, Image: "haproxytech/kubernetes-ingress:3.2.20", Args: args,
 			Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 8080}}}}},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.1"},
 	}

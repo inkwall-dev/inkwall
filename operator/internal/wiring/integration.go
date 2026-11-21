@@ -112,6 +112,10 @@ type TargetState struct {
 	Unsupported string
 	// Failed: why it couldn't be wired.
 	Failed string
+	// VersionUnsupported: its proxy runs a release the operator can't
+	// tell or doesn't wire, and which, with what to do
+	// (ProxyVersionUnsupported).
+	VersionUnsupported string
 	// Wired: the integration keeps the target wired.
 	Wired bool
 	// Pending: wired, but not in force yet, and why (the proxy hasn't
@@ -218,7 +222,7 @@ func record(name string, res *Result) {
 	wired, failed := 0, 0
 	for _, s := range res.Targets {
 		switch {
-		case s.Failed != "":
+		case s.Failed != "" || s.VersionUnsupported != "":
 			failed++
 		case s.Wired:
 			wired++

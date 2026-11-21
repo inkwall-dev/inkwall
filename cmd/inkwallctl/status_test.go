@@ -145,6 +145,26 @@ func TestStatusPolicyNotReady(t *testing.T) {
 	}
 }
 
+// A policy whose proxy runs a release the operator can't wire (an HAProxy
+// controller it can't tell the release of) is listed under
+// ProxyVersionUnsupported, with the message naming the pod and what to do.
+func TestStatusProxyVersionUnsupported(t *testing.T) {
+	sc := healthyCluster()
+	const msg = "Programmed: HAProxy pod haproxy/hap-1 runs a release of the controller the operator can't tell from its image haproxytech/kubernetes-ingress:latest: " +
+		"run one of those (the chart's controller.image.tag), or say it in the pods' waf.inkwall.dev/haproxy-controller-version annotation"
+	sc.policies[0].Status.Conditions[0] = metav1.Condition{Type: wafv1alpha1.ConditionReady, Status: metav1.ConditionFalse,
+		Reason: "ProxyVersionUnsupported", Message: msg, ObservedGeneration: 2}
+	st := sc.status(t)
+	if st.Healthy || len(st.Policies.NotReady) != 1 || st.Policies.NotReady[0].Reason != "ProxyVersionUnsupported" {
+		t.Fatalf("policies %+v", st.Policies)
+	}
+	var text strings.Builder
+	printStatus(&text, st)
+	if !strings.Contains(text.String(), "  ProxyVersionUnsupported:\n    shop/web: "+msg) {
+		t.Errorf("status:\n%s", text.String())
+	}
+}
+
 // An engine behind, one that rejected the bundle, and one of another
 // version are named, with what to do.
 func TestStatusEngines(t *testing.T) {

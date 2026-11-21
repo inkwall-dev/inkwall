@@ -16,6 +16,7 @@ The samples in [`examples/haproxy`](../examples/haproxy) are the files this guid
   - [Protecting an Ingress](#protecting-an-ingress)
   - [What the operator does](#what-the-operator-does)
   - [The probe, and Programmed](#the-probe-and-programmed)
+  - [Controller releases](#controller-releases)
   - [Limits](#limits)
   - [Uninstalling](#uninstalling)
 - [Prerequisites](#prerequisites)
@@ -40,10 +41,12 @@ The samples in [`examples/haproxy`](../examples/haproxy) are the files this guid
 
 <!-- versions: HAPROXY_CHART_VERSION -->
 The operator protects the Ingresses of the [HAProxy Kubernetes Ingress Controller](https://www.haproxy.com/documentation/kubernetes-ingress/) (`haproxytech/kubernetes-ingress`,
-3.1 to 3.2: its HAProxy must be 3.1 or later; tested with 3.2.20, chart 1.57.1), installed with
-nothing about Inkwall. Not [HAProxy Ingress](https://haproxy-ingress.github.io/) (`jcmoraisjr/haproxy-ingress`), another controller.
-The controller 3.4, the chart's default since chart 1.55.0, dropped the backend snippets the
-operator loads the filter with: install the chart with `--set controller.image.tag=3.2.20`.
+3.1 to 3.2, and 3.4 and later: its HAProxy must be 3.1 or later; tested with 3.4.1, the chart's
+default, and 3.2.20, chart 1.57.1), installed with nothing about Inkwall. Not
+[HAProxy Ingress](https://haproxy-ingress.github.io/) (`jcmoraisjr/haproxy-ingress`), another controller.
+On 3.1 to 3.2 the operator loads the filter with a backend config snippet; 3.4 dropped snippets,
+so there it loads it with a `Backend` custom resource of the controller's
+([Controller releases](#controller-releases)).
 
 ### Protecting an Ingress
 
@@ -82,17 +85,23 @@ default) and its pods by the chart's label
   and `spoe.conf` has two scopes: `inkwall`, whose request message tells the engine no response
   follows, and `inkwall-responses`, for the Ingresses whose policies inspect responses, which also
   sends the response.
-- **Each protected Ingress** gets two annotations: `haproxy.org/standalone-backend: "true"`, so
-  that it has a backend of its own (Ingresses to one Service otherwise share one, and the
-  controller would apply only one Ingress's snippet), and `haproxy.org/backend-config-snippet`,
-  whose first lines, between `# inkwall:begin` and `# inkwall:end`, load the filter and deny on the
-  engine's verdict, as [`haproxy.cfg`](#the-complete-haproxycfg) does: `option
-  http-buffer-request` when a policy inspects bodies, the probe's rule, the fail-closed rule when
-  the policies fail closed (`Block` mode by default), the gRPC answer, a rule per status, and the
-  removal of any `Upgrade` but WebSocket's. A
-  snippet of your own on the Ingress stays, after the operator's lines; one on the Service comes
-  before them. The previous value of `standalone-backend` is kept in
-  `waf.inkwall.dev/haproxy-wired`, and restored when the Ingress is unprotected.
+- **Each protected Ingress** gets `haproxy.org/standalone-backend: "true"`, so that it has a
+  backend of its own (Ingresses to one Service otherwise share one, and the controller would
+  apply only one Ingress's configuration), and the operator's configuration of that backend,
+  which loads the filter and denies on the engine's verdict, as
+  [`haproxy.cfg`](#the-complete-haproxycfg) does: `option http-buffer-request` when a policy
+  inspects bodies, the probe's rule, the fail-closed rule when the policies fail closed (`Block`
+  mode by default), the gRPC answer, a rule per status, and the removal of any `Upgrade` but
+  WebSocket's. The previous value of `standalone-backend` is kept in
+  `waf.inkwall.dev/haproxy-wired`, and restored when the Ingress is unprotected. That
+  configuration is:
+  - on controller 3.1 to 3.2, the first lines of the Ingress's `haproxy.org/backend-config-snippet`,
+    between `# inkwall:begin` and `# inkwall:end`. A snippet of your own on the Ingress stays,
+    after the operator's lines; one on the Service comes before them;
+  - on controller 3.4 and later, the operator's `Backend` custom resource
+    (`ingress.v3.haproxy.org/v3`, `inkwall-waf-<ingress>` in the Ingress's namespace, owned by
+    it), the same rules as its `filter_list` and rule lists, which the Ingress's
+    `haproxy.org/cr-backend` names ([Controller releases](#controller-releases)).
 - **Responses** (since 0.6.0): on an Ingress whose policies inspect responses
   (`responses.inspect`), the snippet loads the `inkwall-responses` scope and adds the response
   rules of [`haproxy.cfg`](#the-complete-haproxycfg): the request's `Accept-Encoding`, `Range` and
@@ -147,14 +156,61 @@ the policy is `Programmed=True` only once every pod has answered:
   `responses.inspect` on the same Ingress aren't affected.
 
 Other reasons the policy isn't `Programmed`: a running controller pod without the engine
-(`SidecarMissing` or `PendingRestart`), and, as `WiringFailed`, a pod without the agent's files, or
-a controller run with `--disable-config-snippets` covering backends.
+(`SidecarMissing` or `PendingRestart`); a controller whose release the operator can't tell or
+doesn't wire (`ProxyVersionUnsupported`, [below](#controller-releases)); and, as `WiringFailed`, a
+pod without the agent's files, a 3.1 to 3.2 controller run with `--disable-config-snippets`
+covering backends, and, on 3.4, an Ingress that names a `Backend` of its own, or the controller's
+`Backend` CRD missing.
+
+### Controller releases
+
+The operator reads the controller's release from the tag of its pods' image (the chart's
+`controller.image.tag`, `3.4.1` or `v3.4`, say), and loads the filter:
+
+- on **3.1 to 3.2**, with the Ingress's backend config snippet;
+- on **3.4 and later** (3.x), which dropped config snippets ("MAJOR: annotations: drop support for
+  config snippets" in its [changelog](https://github.com/haproxytech/kubernetes-ingress/releases/tag/v3.4.0)),
+  with the controller's [`Backend` custom resource](https://github.com/haproxytech/kubernetes-ingress/blob/master/documentation/custom-resources.md#backend),
+  whose CRD the controller's chart installs (its `crdjob`).
+
+While a rollout from 3.2 to 3.4 runs, its Ingresses get the `Backend`, which 3.2 reads too; the
+probe says where it isn't in force.
+
+A pod whose image tag isn't its release (a digest alone, `latest`, a mirror's own tags), or that
+runs a release before 3.1 or a major release after 3, makes the policies on the controller's
+Ingresses `Programmed=False`, reason `ProxyVersionUnsupported`, naming the pod: the operator
+leaves those Ingresses as they are, wired or not. Say the release in the pods'
+`waf.inkwall.dev/haproxy-controller-version` annotation:
+
+```sh
+helm upgrade <release> haproxytech/kubernetes-ingress --reuse-values \
+  --set-string 'controller.podAnnotations.waf\.inkwall\.dev/haproxy-controller-version=3.4.1'
+```
+
+On **3.4**, the controller builds the backend of an Ingress that names a `Backend` from that
+resource alone ([custom resources](https://github.com/haproxytech/kubernetes-ingress/blob/master/documentation/custom-resources.md):
+"if the backend resource is used no backend annotation will be processed"), so on a protected
+Ingress:
+
+- the backend annotations of the Ingress, its Services and the controller's ConfigMap
+  (`timeout-server`, `load-balance`, `check`, `server-ssl`, `server-proto`, `cookie-persistence`,
+  ...) don't apply. `Programmed`'s message names those the Ingress has (`... haproxy.org/timeout-server
+  don't apply`). Its frontend annotations (`allow-list`, `rate-limit-*`, `path-rewrite`, ...) do;
+- an Ingress that names a `Backend` of its own (`cr-backend`) can't be protected: the policy is
+  `Programmed=False` (`WiringFailed`), and the Ingress is left as it is. So can't an Ingress whose
+  Service names one, which takes precedence over the Ingress's: the probe shows it `Unverified`;
+- HAProxy's buffer is set in a `Global` custom resource (no `global-config-snippet`):
+  [Limits](#limits).
+
+If HAProxy rejects the operator's `Backend`, the controller sets it aside and logs it
+(`haproxy_rejected_custom_resource_generation`): the probe shows the policy `Unverified`.
 
 ### Limits
 
 - **Bodies:** HAProxy sends the engine at most its buffer (about 15 KiB by default), and a body it
-  cut is handled as oversized (413 in `Block` mode by default): raise `tune.bufsize` with the
-  controller ConfigMap's `global-config-snippet` to inspect larger bodies (see [Bodies](#bodies)):
+  cut is handled as oversized (413 in `Block` mode by default): raise `tune.bufsize` to inspect
+  larger bodies (see [Bodies](#bodies)), on controller 3.1 to 3.2 with the controller ConfigMap's
+  `global-config-snippet`:
 
   ```yaml
   # The controller's ConfigMap (the chart's controller.config)
@@ -163,13 +219,28 @@ a controller run with `--disable-config-snippets` covering backends.
       tune.bufsize 81920
   ```
 
+  and on 3.4, which has no snippets, with a `Global` custom resource the ConfigMap's `cr-global`
+  names (which configures the whole `global` section in place of the ConfigMap's global settings):
+
+  ```yaml
+  apiVersion: ingress.v3.haproxy.org/v3
+  kind: Global
+  metadata: {name: inkwall-buffer, namespace: haproxy-controller}
+  spec:
+    tune_buffer_options: {bufsize: 81920}
+  ---
+  # The controller's ConfigMap (the chart's controller.config)
+  data:
+    cr-global: haproxy-controller/inkwall-buffer
+  ```
+
   The operator doesn't change it (it is global, so every connection pays for it: see
   [the cost](#bodies)), but says on the policy when its `body.maxBytes` (64 KiB when unset), or
   the `responses.maxBytes` of a policy that inspects responses, is more than the buffer lets the
   engine see: `Programmed`'s message names the effective limit (`HAProxy's buffer (tune.bufsize
   16384, HAProxy's default) lets the engine see at most about 15360 bytes of a request ...`, or
   `... of a response ...`). It reads `tune.bufsize` and `tune.maxrewrite` from the ConfigMap the
-  controller's `--configmap` names, within a minute of a change. That is a note: the status stays
+  controller's `--configmap` names (on 3.4, from the `Global` it names), within a minute of a change. That is a note: the status stays
   as it is, since larger bodies are still handled as oversized. In `Block` mode, a request or a
   response HAProxy can't fit in one SPOE frame is handled as oversized too, by the operator's
   rules: 413 for a request, 502 for a response.
@@ -184,8 +255,9 @@ a controller run with `--disable-config-snippets` covering backends.
 
 ### Uninstalling
 
-`helm uninstall` removes the operator's lines and restores `standalone-backend` on every Ingress it
-wired; the controller then serves them uninspected. Running controller pods keep the engine until
+`helm uninstall` removes the operator's lines (or, on controller 3.4, its `cr-backend` and its
+`Backend` objects) and restores `standalone-backend` on every Ingress it wired; the controller then
+serves them uninspected. Running controller pods keep the engine until
 they are restarted, and the ConfigMap `inkwall-haproxy` stays while they mount it: restart the
 controller, then delete it.
 

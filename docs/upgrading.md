@@ -93,6 +93,18 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   ([HAProxy](haproxy.md)), or limited clients get 403. A SecLang rule that denies with
   `status:429` now answers gRPC calls with `RESOURCE_EXHAUSTED` instead of `UNAVAILABLE`.
 
+- **The HAProxy Kubernetes Ingress Controller 3.4** (the default of its chart since 1.55.0) is
+  wired: 3.4 dropped the config snippets the operator loads the filter with on 3.1 to 3.2, so on
+  3.4 each protected Ingress gets a `Backend` custom resource of the controller's
+  (`inkwall-waf-<ingress>`), which its `haproxy.org/cr-backend` annotation names. The operator
+  tells the release from the controller pods' image tag; a controller it can't tell (a digest, a
+  mirror's own tags, before 3.1) leaves the policy `Programmed=False`, reason
+  `ProxyVersionUnsupported`: say the release in the pods' `waf.inkwall.dev/haproxy-controller-version`
+  annotation. On 3.4 the backend annotations of a protected Ingress (`timeout-server`,
+  `server-ssl`, ...) don't apply, and an Ingress that names a `Backend` of its own can't be
+  protected ([HAProxy](haproxy.md#controller-releases)). Upgrading the controller from 3.2 to 3.4
+  moves its Ingresses from the snippet to the `Backend`; nothing to do.
+
 - **Envoy Gateway's routes are proven by the operator's probe**, as Istio's and the HAProxy
   controller's are. After the upgrade, a policy on an HTTPRoute that Envoy Gateway serves is
   `Programmed=False`, reason `Unverified`, until the probe has reached the engine on every Envoy

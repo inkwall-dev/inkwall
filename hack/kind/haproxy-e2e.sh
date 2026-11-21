@@ -21,7 +21,11 @@
 # in Block mode and logged in Detect mode (#470), and unprotecting or
 # uninstalling puts the user's Ingress back as it was. Needs the operator installed (make kind-operator)
 # with haproxy-e2e among the proxy namespaces; ends with helm uninstall.
-# KEEP=1 leaves the test's objects.
+# HAPROXY_IMAGE_TAG is the controller's release: 3.4 and later (the
+# chart's default since 1.55.0) are wired through the controller's Backend
+# custom resource, 3.1 to 3.2 through backend config snippets, which 3.4
+# dropped (#753); the Ingress then carries a snippet of the user's own,
+# which stays. KEEP=1 leaves the test's objects.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -34,10 +38,15 @@ OPERATOR_NS=inkwall-system
 # The controller's namespace, a proxy namespace (hack/kind/operator.sh),
 # and the apps'.
 NS=haproxy-e2e
-# Controller v3.2.20 (HAProxy 3.2), from its chart. Not the chart's default
-# (3.4 since chart 1.55.0): 3.4 dropped the backend snippets that load the
-# filter.
-HAPROXY_IMAGE_TAG=3.2.20
+# The controller's release, from its chart: 3.4.1 (HAProxy 3.4), the
+# chart's, or 3.2.20 (HAProxy 3.2, make kind-e2e-haproxy-3.2).
+HAPROXY_IMAGE_TAG=${HAPROXY_IMAGE_TAG:-3.4.1}
+# v34: wired through the Backend custom resource (3.4 and later).
+v34=false
+IFS=. read -r haproxy_major haproxy_minor _ <<<"$HAPROXY_IMAGE_TAG"
+if ((haproxy_major > 3 || (haproxy_major == 3 && haproxy_minor >= 4))); then v34=true; fi
+BACKEND=backends.ingress.v3.haproxy.org/inkwall-waf-app
+GLOBAL=inkwall-e2e-global
 HAPROXY_REPO=https://haproxytech.github.io/helm-charts
 CLASS=haproxy-e2e
 HOST=haproxy.e2e.example.com
@@ -104,8 +113,13 @@ metadata:
   name: app
   namespace: $NS
   annotations:
-    haproxy.org/backend-config-snippet: |
-      http-request set-header X-User-Snippet yes
+$(if $v34; then
+  # 3.4 has no snippets: a backend annotation of the user's, which the
+  # operator's Backend makes the controller ignore, and the status says.
+  echo "    haproxy.org/timeout-server: 30s"
+else
+  printf '    haproxy.org/backend-config-snippet: |\n      http-request set-header X-User-Snippet yes\n'
+fi)
 spec:
   ingressClassName: $CLASS
   rules:
@@ -182,15 +196,36 @@ RESPONSES='  responses: {inspect: true}'
 # whoami echoes the request's headers in its text/plain body: this one makes
 # it leak a MySQL error, which the request rules don't mind.
 LEAK='X-Debug: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version'
+# wiring: what the operator wrote for the protected Ingress: its
+# annotations, with the snippet (3.2), or its Backend's spec (3.4), as JSON.
+wiring() {
+  if $v34; then
+    "${KUBECTL[@]}" -n "$NS" get "$BACKEND" -o jsonpath='{.spec}' 2>/dev/null
+  else
+    "${KUBECTL[@]}" -n "$NS" get ingress app -o jsonpath='{.metadata.annotations}'
+  fi
+}
+# The rules the checks look for, as each writes them.
+if $v34; then
+  RESPONSES_SCOPE='"spoe_engine":"inkwall-responses"' REQUEST_SCOPE='"spoe_engine":"inkwall"'
+  SEND_RESPONSE='"type":"send-spoe-group"' RESPONSE_RULES='http_response_rule_list'
+  FRAME_RULE='"cond_test":"{ var(txn.inkwall.error) -m int 3 259 }","deny_status":413'
+  CLOSED_RULE='"cond_test":"!{ var(txn.inkwall.action) -m found }","deny_status":503'
+else
+  RESPONSES_SCOPE='filter spoe engine inkwall-responses' REQUEST_SCOPE='filter spoe engine inkwall config'
+  SEND_RESPONSE='http-response send-spoe-group' RESPONSE_RULES='http-response'
+  FRAME_RULE='deny_status 413 if { var(txn.inkwall.error) -m int 3 259 }'
+  CLOSED_RULE='deny_status 503 if !{'
+fi
 responses_wired() {
   local a
-  a=$("${KUBECTL[@]}" -n "$NS" get ingress app -o jsonpath='{.metadata.annotations}')
-  [[ $a == *'filter spoe engine inkwall-responses'* && $a == *'http-response send-spoe-group'* && $a == *'txn.inkwall.response_probe'* ]]
+  a=$(wiring)
+  [[ $a == *"$RESPONSES_SCOPE"* && $a == *"$SEND_RESPONSE"* && $a == *'txn.inkwall.response_probe'* ]]
 }
 responses_unwired() {
   local a
-  a=$("${KUBECTL[@]}" -n "$NS" get ingress app -o jsonpath='{.metadata.annotations}')
-  [[ $a == *'filter spoe engine inkwall config'* && $a != *'http-response'* ]]
+  a=$(wiring)
+  [[ $a == *"$REQUEST_SCOPE"* && $a != *"$RESPONSE_RULES"* ]]
 }
 leak_replaced() {
   for _ in 1 2 3 4; do
@@ -206,7 +241,30 @@ logged_response() {
 wired() {
   local a
   a=$("${KUBECTL[@]}" -n "$NS" get ingress app -o jsonpath='{.metadata.annotations}')
-  [[ $a == *'filter spoe engine inkwall'* && $a == *'X-User-Snippet'* && $a == *'"haproxy.org/standalone-backend":"true"'* ]]
+  [[ $a == *'"haproxy.org/standalone-backend":"true"'* ]] || return 1
+  if $v34; then
+    [[ $a == *"\"haproxy.org/cr-backend\":\"$NS/inkwall-waf-app\""* && $(wiring) == *'"type":"spoe"'* ]]
+  else
+    [[ $a == *'filter spoe engine inkwall'* && $a == *'X-User-Snippet'* ]]
+  fi
+}
+# set_bufsize SIZE: tune.bufsize, in the controller ConfigMap's
+# global-config-snippet (3.2), or the Global custom resource its cr-global
+# names (3.4, which has no snippets).
+set_bufsize() {
+  if $v34; then
+    "${KUBECTL[@]}" apply -f - >/dev/null <<YAML
+apiVersion: ingress.v3.haproxy.org/v3
+kind: Global
+metadata: {name: $GLOBAL, namespace: $NS}
+spec: {tune_buffer_options: {bufsize: $1}}
+YAML
+    "${HELM[@]}" upgrade haproxy kubernetes-ingress --repo "$HAPROXY_REPO" --version "$HAPROXY_CHART_VERSION" \
+      --namespace "$NS" --reuse-values --set-string "controller.config.cr-global=$NS/$GLOBAL" --wait --timeout 5m >/dev/null
+  else
+    "${HELM[@]}" upgrade haproxy kubernetes-ingress --repo "$HAPROXY_REPO" --version "$HAPROXY_CHART_VERSION" \
+      --namespace "$NS" --reuse-values --set-string "controller.config.global-config-snippet=tune.bufsize $1" --wait --timeout 5m >/dev/null
+  fi
 }
 # probe_reached_app_since TIME: the app logged a request on the probe's
 # reserved path since TIME. Where the engine answers the request leg itself
@@ -238,7 +296,11 @@ policy
 "${KUBECTL[@]}" -n "$NS" rollout status deployment/haproxy-kubernetes-ingress --timeout=180s >/dev/null
 eventually "the controller's pods have the engine" injected
 check "the agent's ConfigMap is in the controller's namespace" "${KUBECTL[@]}" -n "$NS" get configmap inkwall-haproxy
-eventually "the Ingress has its own backend with the filter, the user's snippet kept" wired
+if $v34; then
+  eventually "the Ingress has its own backend, with the operator's Backend and its filter" wired
+else
+  eventually "the Ingress has its own backend with the filter, the user's snippet kept" wired
+fi
 eventually "Programmed once the probe proved the filter on both pods" programmed
 eventually "the policy is Ready" ready
 forward
@@ -249,7 +311,12 @@ check "an attack in a body is blocked" all_are 403 "$HOST" / --data-urlencode "q
 mark=/held-$RANDOM$RANDOM
 check "a body attack on a marked path is blocked" all_are 403 "$HOST" "$mark" --data-urlencode "q=1' OR '1'='1"
 check "and never reached the app" never_reached_app "$mark"
-check "the snippet the user set still applies" bash -c "curl -s -H 'Host: $HOST' http://127.0.0.1:$PORT/ | grep -qi 'X-User-Snippet: yes'"
+if $v34; then
+  ignored_noted() { [[ $(condition Programmed message) == *"haproxy.org/timeout-server don't apply"* ]]; }
+  check "Programmed notes the user's backend annotation that doesn't apply with the Backend" ignored_noted
+else
+  check "the snippet the user set still applies" bash -c "curl -s -H 'Host: $HOST' http://127.0.0.1:$PORT/ | grep -qi 'X-User-Snippet: yes'"
+fi
 # A client can't pass for the probe: without the key's MAC it is inspected.
 fake='/.well-known/inkwall-probe/AAAAAAAAAAAAAAAAAAAAAAAA'
 check "a forged probe gets no 299" bash -c "[[ \$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: $HOST' -H 'X-Inkwall-Probe: AAAAAAAAAAAAAAAAAAAAAAAA.00' http://127.0.0.1:$PORT$fake) != 299 ]]"
@@ -266,10 +333,8 @@ check "and stays True" programmed
   head -c 48000 /dev/zero | tr '\0' a
 } >"$work_big"
 check "a 48 KB benign body is oversized for the default buffer: 413" all_are 413 "$HOST" / -H 'Content-Type: application/x-www-form-urlencoded' --data-binary "@$work_big"
-# tune.bufsize raised in the controller's ConfigMap: the note goes, and the
-# body is inspected whole.
-"${HELM[@]}" upgrade haproxy kubernetes-ingress --repo "$HAPROXY_REPO" --version "$HAPROXY_CHART_VERSION" \
-  --namespace "$NS" --reuse-values --set-string 'controller.config.global-config-snippet=tune.bufsize 81920' --wait --timeout 5m >/dev/null
+# tune.bufsize raised: the note goes, and the body is inspected whole.
+set_bufsize 81920
 not_noted() { programmed && ! buffer_noted; }
 eventually "Programmed no longer names the buffer once tune.bufsize is raised" not_noted
 forward
@@ -281,17 +346,15 @@ echo "== a request over one SPOE frame (#336)"
 # frame as oversized: a 12 MiB buffer holds an 11.6 MB body, more than the
 # engine's frame (in bundle mode, body.maxBytes' 10 MiB maximum plus 1 MiB),
 # so HAProxy sends none of it.
-frame_rule() { "${KUBECTL[@]}" -n "$NS" get ingress app -o jsonpath='{.metadata.annotations}' | grep -F 'deny_status 413 if { var(txn.inkwall.error) -m int 3 259 }' >/dev/null; }
+frame_rule() { wiring | grep -F "$FRAME_RULE" >/dev/null; }
 check "Block mode: the snippet has the rule" frame_rule
-"${HELM[@]}" upgrade haproxy kubernetes-ingress --repo "$HAPROXY_REPO" --version "$HAPROXY_CHART_VERSION" \
-  --namespace "$NS" --reuse-values --set-string 'controller.config.global-config-snippet=tune.bufsize 12582912' --wait --timeout 5m >/dev/null
+set_bufsize 12582912
 forward
 head -c 11600000 /dev/zero | tr '\0' a >"$work_big"
 eventually "an 11.6 MB body over one SPOE frame is oversized: 413" all_are 413 "$HOST" / -H 'Content-Type: application/octet-stream' --data-binary "@$work_big"
 check "a benign request still passes" all_are 200 "$HOST" /products/42
 check "an attack in a body is still blocked" all_are 403 "$HOST" / --data-urlencode "q=1' OR '1'='1"
-"${HELM[@]}" upgrade haproxy kubernetes-ingress --repo "$HAPROXY_REPO" --version "$HAPROXY_CHART_VERSION" \
-  --namespace "$NS" --reuse-values --set-string 'controller.config.global-config-snippet=tune.bufsize 81920' --wait --timeout 5m >/dev/null
+set_bufsize 81920
 forward
 
 echo "== a controller pod without the engine"
@@ -323,7 +386,7 @@ eventually "engine back: the attack is blocked" all_are 403 "$HOST" "$SQLI"
 
 echo "== detect mode"
 policy Detect
-no_closed_rule() { ! "${KUBECTL[@]}" -n "$NS" get ingress app -o jsonpath='{.metadata.annotations}' | grep -F 'deny_status 503 if !{' >/dev/null; }
+no_closed_rule() { ! wiring | grep -F "$CLOSED_RULE" >/dev/null; }
 eventually "the snippet fails open" no_closed_rule
 no_frame_rule() { ! frame_rule; }
 check "Detect mode: no rule on SPOE's error" no_frame_rule
@@ -366,6 +429,8 @@ eventually "responses off: the response rules go" responses_unwired
 echo "== unprotected"
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy shop --timeout=60s >/dev/null
 eventually "the user's Ingress is as it was" as_it_was
+backend_gone() { ! "${KUBECTL[@]}" -n "$NS" get "$BACKEND" >/dev/null 2>&1; }
+if $v34; then eventually "the operator's Backend is gone" backend_gone; fi
 eventually "the attack passes again" all_are 200 "$HOST" "$SQLI"
 
 echo "== uninstall"
@@ -378,6 +443,7 @@ else
   fail "helm uninstall"
 fi
 check "the user's Ingress is as it was" as_it_was
+if $v34; then check "the operator's Backend is gone" backend_gone; fi
 check "the agent's ConfigMap stays while the controller's pods mount it" "${KUBECTL[@]}" -n "$NS" get configmap inkwall-haproxy
 eventually "the route still answers after the uninstall (uninspected)" all_are 200 "$HOST" "$SQLI"
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy shop --ignore-not-found --timeout=30s >/dev/null || true

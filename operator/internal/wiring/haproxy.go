@@ -16,6 +16,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -35,18 +36,20 @@ import (
 
 // The HAProxy Kubernetes Ingress Controller's wiring (0002 §6.4): each
 // protected Ingress of its class gets a backend of its own
-// (haproxy.org/standalone-backend) whose configuration snippet
-// (haproxy.org/backend-config-snippet) loads the SPOE filter, which calls
-// the engine, and denies on its verdict. The agent's backend and spoe.conf
+// (haproxy.org/standalone-backend) that loads the SPOE filter, which calls
+// the engine, and denies on its verdict: through its configuration snippet
+// (haproxy.org/backend-config-snippet) on controller 3.1 to 3.2, through a
+// Backend custom resource of the controller's on 3.4 and later, which
+// dropped snippets (haproxybackend.go). The agent's backend and spoe.conf
 // are in the controller's pods (injection.InjectHAProxy). The controller
-// says nothing about a snippet it drops, so a route is Programmed only once
-// the operator's probe (Prober) has proven the filter on every pod.
+// says nothing about a snippet it drops, or a Backend HAProxy rejects, so a
+// route is Programmed only once the operator's probe (Prober) has proven
+// the filter on every pod.
 //
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;update;patch,roleName=inkwall-operator-haproxy
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingressclasses,verbs=get;list;watch,roleName=inkwall-operator-haproxy
-// +kubebuilder:rbac:groups=ingress.v3.haproxy.org,resources=backends,verbs=get;list;watch,roleName=inkwall-operator-haproxy
 //
-// The controller's Backend kind is in the role only so that it is the
+// The controller's Backend kind is in the role also so that it is the
 // integration's own: Traefik's role grants the same Ingress access, and
 // the operator tells the integrations it may wire by their roles'
 // permissions (access.Denied).
@@ -167,9 +170,10 @@ const haproxyFrameTooBig = "3 259"
 // req.fhdr reads the whole value, not its comma-separated parts. (HAProxy
 // itself drops h2c and h2, and forwards a WebSocket handshake's Upgrade as
 // "websocket" alone.)
-const (
-	haproxyUpgradeRule       = "http-request del-header upgrade unless { req.fhdr_cnt(upgrade) eq 1 } { req.fhdr(upgrade) -m str -i websocket }"
-	haproxyHTTP2SettingsRule = "http-request del-header http2-settings"
+var (
+	haproxyUpgradeRule = haproxyRule{section: "http-request", action: "del-header", header: "upgrade",
+		cond: "unless", condTest: "{ req.fhdr_cnt(upgrade) eq 1 } { req.fhdr(upgrade) -m str -i websocket }"}
+	haproxyHTTP2SettingsRule = haproxyRule{section: "http-request", action: "del-header", header: "http2-settings"}
 )
 
 // HAProxySnippetOptions are what a route's snippet depends on, from its
@@ -202,72 +206,174 @@ type HAProxySnippetOptions struct {
 // response replaced when the engine denies it or, failing closed, gives no
 // verdict.
 func HAProxySnippet(o HAProxySnippetOptions) string {
-	failOpen, body, responses := o.FailOpen, o.Body, o.Responses
+	c := haproxyConfigOf(o)
 	lines := []string{haproxySnippetBegin}
-	if body {
+	if c.bufferRequest {
 		lines = append(lines, "option http-buffer-request")
 	}
-	v := func(name string) string { return "var(txn.inkwall." + name + ")" }
-	scope := "inkwall"
-	if responses {
-		scope = injection.HAProxyResponsesScope
+	lines = append(lines, "filter spoe engine "+c.engine+" config "+injection.HAProxySPOEConf)
+	for _, r := range c.rules {
+		lines = append(lines, r.String())
 	}
-	lines = append(lines,
-		"filter spoe engine "+scope+" config "+injection.HAProxySPOEConf,
-		fmt.Sprintf(`http-request return status %d hdr %s "%%[%s]" if { %s -m found }`,
-			haproxyprobe.Status, strings.ToLower(haproxyprobe.Header), v("probe"), v("probe")))
+	lines = append(lines, haproxySnippetEnd)
+	return strings.Join(lines, "\n")
+}
+
+// haproxyConfig is the operator's part of a protected Ingress's backend,
+// which HAProxySnippet writes as a config snippet (controller 3.1 to 3.2)
+// and HAProxyBackendSpec as the controller's Backend custom resource
+// (3.4 and later).
+type haproxyConfig struct {
+	// bufferRequest: option http-buffer-request.
+	bufferRequest bool
+	// engine is the SPOE filter's engine: spoe.conf's scope.
+	engine string
+	rules  []haproxyRule
+}
+
+// haproxyRule is one http-request, http-response or http-after-response
+// rule of haproxyConfig, with the fields the controller's Backend custom
+// resource has for it (client-native's models).
+type haproxyRule struct {
+	// section is http-request, http-response or http-after-response.
+	section string
+	// action is return, deny, del-header, set-header, set-var,
+	// wait-for-body or send-spoe-group.
+	action string
+	// status is return's and deny's.
+	status int
+	// contentType, contentFormat and content are return's payload.
+	contentType, contentFormat, content string
+	// hdrs are return's and deny's headers: name and log-format, quoted.
+	hdrs [][2]string
+	// header and format are del-header's and set-header's.
+	header, format string
+	// varScope, varName and expr are set-var's.
+	varScope, varName, expr string
+	// waitMillis is wait-for-body's time.
+	waitMillis int64
+	// spoeEngine and spoeGroup are send-spoe-group's.
+	spoeEngine, spoeGroup string
+	// cond is if or unless ("" for none), condTest its ACLs.
+	cond, condTest string
+}
+
+// String is the rule as HAProxy's configuration writes it.
+func (r haproxyRule) String() string {
+	var b strings.Builder
+	b.WriteString(r.section)
+	switch r.action {
+	case "return":
+		fmt.Fprintf(&b, " return status %d", r.status)
+		if r.contentType != "" {
+			b.WriteString(" content-type " + r.contentType)
+		}
+		if r.contentFormat != "" {
+			b.WriteString(" " + r.contentFormat + " " + r.content)
+		}
+	case "deny":
+		fmt.Fprintf(&b, " deny deny_status %d", r.status)
+	case "del-header":
+		b.WriteString(" del-header " + r.header)
+	case "set-header":
+		b.WriteString(" set-header " + r.header + " " + r.format)
+	case "set-var":
+		b.WriteString(" set-var(" + r.varScope + "." + r.varName + ") " + r.expr)
+	case "wait-for-body":
+		fmt.Fprintf(&b, " wait-for-body time %s", haproxyDuration(r.waitMillis))
+	case "send-spoe-group":
+		b.WriteString(" send-spoe-group " + r.spoeEngine + " " + r.spoeGroup)
+	}
+	for _, h := range r.hdrs {
+		b.WriteString(" hdr " + h[0] + " " + h[1])
+	}
+	if r.cond != "" {
+		b.WriteString(" " + r.cond + " " + r.condTest)
+	}
+	return b.String()
+}
+
+// haproxyDuration writes milliseconds as HAProxy's configuration does: in
+// seconds when whole.
+func haproxyDuration(ms int64) string {
+	if ms%1000 == 0 {
+		return strconv.FormatInt(ms/1000, 10) + "s"
+	}
+	return strconv.FormatInt(ms, 10) + "ms"
+}
+
+// haproxyConfigOf is the operator's part of a protected Ingress's backend
+// (HAProxySnippet says what each rule is for).
+func haproxyConfigOf(o HAProxySnippetOptions) haproxyConfig {
+	failOpen, responses := o.FailOpen, o.Responses
+	v := func(name string) string { return "var(txn.inkwall." + name + ")" }
+	fmtOf := func(name string) string { return `"%[` + v(name) + `]"` }
+	requestID := [2]string{"x-request-id", fmtOf("request_id")}
+	c := haproxyConfig{bufferRequest: o.Body, engine: "inkwall"}
+	if responses {
+		c.engine = injection.HAProxyResponsesScope
+	}
+	req := func(r haproxyRule) haproxyRule { r.section = "http-request"; return r }
+	res := func(r haproxyRule) haproxyRule { r.section = "http-response"; return r }
+	found := func(name string) string { return "{ " + v(name) + " -m found }" }
+	c.rules = append(c.rules, req(haproxyRule{action: "return", status: haproxyprobe.Status,
+		hdrs: [][2]string{{strings.ToLower(haproxyprobe.Header), fmtOf("probe")}}, cond: "if", condTest: found("probe")}))
 	if o.Block {
-		lines = append(lines, "http-request deny deny_status 413 if { "+v("error")+" -m int "+haproxyFrameTooBig+" }")
+		c.rules = append(c.rules, req(haproxyRule{action: "deny", status: 413, cond: "if", condTest: "{ " + v("error") + " -m int " + haproxyFrameTooBig + " }"}))
 	}
 	if !failOpen {
-		lines = append(lines, "http-request deny deny_status 503 if !{ "+v("action")+" -m found }")
+		c.rules = append(c.rules, req(haproxyRule{action: "deny", status: 503, cond: "if", condTest: "!" + found("action")}))
 	}
-	lines = append(lines,
-		`http-request return status 200 hdr grpc-status "%[`+v("grpc_status")+`]" hdr grpc-message "%[`+v("grpc_message")+`]" hdr x-request-id "%[`+v("request_id")+`]" if { `+v("grpc_status")+` -m found }`,
-		`http-after-response set-header content-type "%[`+v("grpc_content_type")+`]" if { `+v("grpc_content_type")+` -m found }`)
+	c.rules = append(c.rules,
+		req(haproxyRule{action: "return", status: 200,
+			hdrs: [][2]string{{"grpc-status", fmtOf("grpc_status")}, {"grpc-message", fmtOf("grpc_message")}, requestID},
+			cond: "if", condTest: found("grpc_status")}),
+		haproxyRule{section: "http-after-response", action: "set-header", header: "content-type", format: fmtOf("grpc_content_type"),
+			cond: "if", condTest: found("grpc_content_type")})
 	for _, status := range []int{400, 413, 503} {
-		lines = append(lines, fmt.Sprintf(`http-request deny deny_status %d hdr x-request-id "%%[%s]" if { %s -m int %d }`, status, v("request_id"), v("status"), status))
+		c.rules = append(c.rules, req(haproxyRule{action: "deny", status: status, hdrs: [][2]string{requestID},
+			cond: "if", condTest: fmt.Sprintf("{ %s -m int %d }", v("status"), status)}))
 	}
 	// A rate limit's 429, with its Retry-After (#705); without this rule
 	// it would be the 403 below.
 	// A SecLang rule's status:429 has no Retry-After: no empty header.
-	lines = append(lines,
-		fmt.Sprintf(`http-request deny deny_status 429 hdr x-request-id "%%[%s]" hdr retry-after "%%[%s]" if { %s -m int 429 } { %s -m found }`, v("request_id"), v("retry_after"), v("status"), v("retry_after")),
-		fmt.Sprintf(`http-request deny deny_status 429 hdr x-request-id "%%[%s]" if { %s -m int 429 }`, v("request_id"), v("status")))
-	lines = append(lines,
-		`http-request deny deny_status 403 hdr x-request-id "%[`+v("request_id")+`]" if { `+v("action")+` -m str deny }`,
+	c.rules = append(c.rules,
+		req(haproxyRule{action: "deny", status: 429, hdrs: [][2]string{requestID, {"retry-after", fmtOf("retry_after")}},
+			cond: "if", condTest: "{ " + v("status") + " -m int 429 } " + found("retry_after")}),
+		req(haproxyRule{action: "deny", status: 429, hdrs: [][2]string{requestID}, cond: "if", condTest: "{ " + v("status") + " -m int 429 }"}),
+		req(haproxyRule{action: "deny", status: 403, hdrs: [][2]string{requestID}, cond: "if", condTest: "{ " + v("action") + " -m str deny }"}),
 		haproxyUpgradeRule,
 		haproxyHTTP2SettingsRule,
-		`http-request set-header X-Request-Id "%[`+v("request_id")+`]" if { `+v("request_id")+` -m found }`)
+		req(haproxyRule{action: "set-header", header: "X-Request-Id", format: fmtOf("request_id"), cond: "if", condTest: found("request_id")}))
 	if responses {
-		kept := "{ " + v("responses") + " -m found }"
-		reply := func(status int, text, cond string) string {
-			return fmt.Sprintf(`http-response return status %d content-type text/plain lf-string "%s. Request ID: %%[%s]" hdr x-request-id "%%[%s]" if %s`,
-				status, text, v("request_id"), v("request_id"), cond)
+		kept := found("responses")
+		reply := func(status int, text, cond string) haproxyRule {
+			return res(haproxyRule{action: "return", status: status, contentType: "text/plain", contentFormat: "lf-string",
+				content: fmt.Sprintf(`"%s. Request ID: %%[%s]"`, text, v("request_id")), hdrs: [][2]string{requestID},
+				cond: "if", condTest: cond})
 		}
-		lines = append(lines,
-			"http-request del-header accept-encoding if "+kept,
-			"http-request del-header range if "+kept,
-			"http-request del-header if-range if "+kept,
-			"http-response set-var(txn.inkwall.response_whole) bool(1) if "+HAProxyReadBody(kept),
-			"http-response wait-for-body time 2s if { var(txn.inkwall.response_whole) -m found }",
-			"http-response send-spoe-group "+injection.HAProxyResponsesScope+" "+injection.HAProxyResponseGroup+" if "+kept)
+		for _, h := range []string{"accept-encoding", "range", "if-range"} {
+			c.rules = append(c.rules, req(haproxyRule{action: "del-header", header: h, cond: "if", condTest: kept}))
+		}
+		c.rules = append(c.rules,
+			res(haproxyRule{action: "set-var", varScope: "txn", varName: "inkwall.response_whole", expr: "bool(1)", cond: "if", condTest: HAProxyReadBody(kept)}),
+			res(haproxyRule{action: "wait-for-body", waitMillis: 2000, cond: "if", condTest: found("response_whole")}),
+			res(haproxyRule{action: "send-spoe-group", spoeEngine: injection.HAProxyResponsesScope, spoeGroup: injection.HAProxyResponseGroup, cond: "if", condTest: kept}))
 		if o.Block {
 			// A response HAProxy couldn't fit in one frame: oversized.
-			lines = append(lines, reply(502, "Bad Gateway", kept+" { "+v("error")+" -m int "+haproxyFrameTooBig+" }"))
+			c.rules = append(c.rules, reply(502, "Bad Gateway", kept+" { "+v("error")+" -m int "+haproxyFrameTooBig+" }"))
 		}
-		lines = append(lines,
+		c.rules = append(c.rules,
 			// The probe's response leg (#595): the engine's answer to its
 			// response, in place of the app's.
-			fmt.Sprintf(`http-response return status %d hdr %s "%%[%s]" if { %s -m found }`,
-				haproxyprobe.Status, strings.ToLower(haproxyprobe.Header), v("response_probe"), v("response_probe")),
-			reply(502, "Bad Gateway", kept+" !{ "+v("response_action")+" -m found } { "+v("response_failure")+" -m str closed }"),
+			res(haproxyRule{action: "return", status: haproxyprobe.Status,
+				hdrs: [][2]string{{strings.ToLower(haproxyprobe.Header), fmtOf("response_probe")}}, cond: "if", condTest: found("response_probe")}),
+			reply(502, "Bad Gateway", kept+" !"+found("response_action")+" { "+v("response_failure")+" -m str closed }"),
 			reply(502, "Bad Gateway", "{ "+v("response_status")+" -m int 502 }"),
 			reply(503, "Service Unavailable", "{ "+v("response_status")+" -m int 503 }"),
 			reply(403, "Forbidden", "{ "+v("response_action")+" -m str deny }"))
 	}
-	lines = append(lines, haproxySnippetEnd)
-	return strings.Join(lines, "\n")
+	return c
 }
 
 // HAProxyReadBody is the condition, for a response on a route where cond
@@ -319,49 +425,11 @@ func withSnippet(current, ours string) string {
 	return ours + "\n" + user
 }
 
-// annotateHAProxy wires an Ingress (snippet not empty) or unwires it if the
-// operator wired it before.
-func annotateHAProxy(ctx context.Context, c client.Client, ing *networkingv1.Ingress, snippet string) error {
-	before, wired := ing.Annotations[HAProxyWiredAnnotation]
-	if snippet == "" && !wired {
-		return nil
-	}
-	cur := ing.Annotations[HAProxySnippetAnnotation]
-	next := withSnippet(cur, snippet)
-	if snippet != "" && wired && next == cur && ing.Annotations[HAProxyStandaloneAnnotation] == "true" {
-		return nil
-	}
-	patch := client.MergeFrom(ing.DeepCopy())
-	if ing.Annotations == nil {
-		ing.Annotations = map[string]string{}
-	}
-	a := ing.Annotations
-	if snippet != "" {
-		if !wired {
-			a[HAProxyWiredAnnotation] = a[HAProxyStandaloneAnnotation]
-		}
-		a[HAProxyStandaloneAnnotation] = "true"
-		a[HAProxySnippetAnnotation] = next
-	} else {
-		if before == "" {
-			delete(a, HAProxyStandaloneAnnotation)
-		} else {
-			a[HAProxyStandaloneAnnotation] = before
-		}
-		if next == "" {
-			delete(a, HAProxySnippetAnnotation)
-		} else {
-			a[HAProxySnippetAnnotation] = next
-		}
-		delete(a, HAProxyWiredAnnotation)
-	}
-	return c.Patch(ctx, ing, patch)
-}
-
 // haproxyPodProblems are why the controller's running pods can't run the
 // filter, besides a missing engine (the wiring controller's sidecar check):
-// the agent's configuration isn't mounted, or snippets are disabled.
-func haproxyPodProblems(pods []*corev1.Pod) []string {
+// the agent's configuration isn't mounted, or, wired with snippets, they
+// are disabled.
+func haproxyPodProblems(pods []*corev1.Pod, m haproxyMechanism) []string {
 	var out []string
 	for _, pod := range pods {
 		if !injection.HasEngine(pod) {
@@ -370,6 +438,9 @@ func haproxyPodProblems(pods []*corev1.Pod) []string {
 		name := workloadOf(pod)
 		if ok, why := injection.HAProxyConfigured(pod); !ok {
 			out = append(out, fmt.Sprintf("HAProxy %s: %s", name, why))
+		}
+		if m != haproxySnippets {
+			continue
 		}
 		for _, c := range pod.Spec.Containers {
 			for _, arg := range append(slices.Clone(c.Command), c.Args...) {
@@ -432,8 +503,11 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 	// pods would have no engine to call.
 	runningPods := running(pods.Items)
 	on := !off && len(runningPods) > 0
-	problems := haproxyPodProblems(runningPods)
-	buffer := h.buffer(ctx, runningPods)
+	// The controller's release says how the filter is loaded: snippets
+	// (3.1 to 3.2), or the controller's Backend custom resource (3.4).
+	mech, versionWhy := haproxyMechanismOf(runningPods)
+	problems := haproxyPodProblems(runningPods, mech)
+	buffer := h.buffer(ctx, runningPods, mech)
 	notReady := haproxyResponsesNotReady(runningPods)
 
 	res := &Result{Proxy: "HAProxy", Targets: map[Target]TargetState{}, Pods: pods.Items}
@@ -452,18 +526,56 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 		errs []error
 		jobs []ProbeJob
 	)
+	// The operator's Backend custom resources still wanted.
+	backends := map[types.NamespacedName]bool{}
 	for i := range ingresses.Items {
 		ing := &ingresses.Items[i]
 		k := types.NamespacedName{Namespace: ing.Namespace, Name: ing.Name}
 		tg := Target{Kind: ingressKind, Key: k}
 		mine := integrations.HAProxy.ServesIngresses(Controller(ing, classes, defaultClass))
 		want := targets[tg] && mine && on
-		snippet := ""
 		settings := haproxySettingsOf(policies.Items, k)
-		if want {
-			snippet = HAProxySnippet(HAProxySnippetOptions{FailOpen: settings.failOpen, Body: settings.body, Responses: settings.responses && res.Responses, Block: settings.block})
+		opts := HAProxySnippetOptions{FailOpen: settings.failOpen, Body: settings.body, Responses: settings.responses && res.Responses, Block: settings.block}
+		var (
+			err error
+			// failed is why the Ingress isn't wired, besides err.
+			failed      string
+			fingerprint string
+		)
+		switch {
+		case want && mech == haproxyUnknown:
+			// The operator can't tell how to load the filter: the Ingress
+			// stays as it is, wired by a mechanism the controller may no
+			// longer read, or not, and the status says why.
+			if _, wired := ing.Annotations[HAProxyWiredAnnotation]; wired && ing.Annotations[HAProxyCRBackendAnnotation] == haproxyBackendRef(ing) {
+				backends[types.NamespacedName{Namespace: k.Namespace, Name: haproxyBackendName(k.Name)}] = true
+			}
+		case want && mech == haproxyBackendCR:
+			if theirs := userCRBackend(ing); theirs != "" {
+				failed = fmt.Sprintf("Ingress %s names its own Backend custom resource (%s): the controller builds a backend from one Backend custom resource, "+
+					"so on controller 3.4 the operator, which loads the filter with its own, can't wire it; remove the annotation, or protect another Ingress", k.Name, theirs)
+				err = annotateHAProxy(ctx, h.Client, ing, "", "")
+				break
+			}
+			// The Backend first, so the controller finds the one the
+			// Ingress names. One it can't write leaves the Ingress as it is.
+			b := haproxyBackend(ing, opts)
+			if why := ensureHAProxyBackend(ctx, h.Client, b); why != "" {
+				failed = "Ingress " + k.Name + ": " + why
+				if ing.Annotations[HAProxyCRBackendAnnotation] == haproxyBackendRef(ing) {
+					backends[client.ObjectKeyFromObject(b)] = true
+				}
+				break
+			}
+			backends[client.ObjectKeyFromObject(b)] = true
+			err = annotateHAProxy(ctx, h.Client, ing, "", haproxyBackendRef(ing))
+			fingerprint = haproxyBackendRef(ing) + "\n" + HAProxySnippet(opts)
+		case want:
+			err = annotateHAProxy(ctx, h.Client, ing, HAProxySnippet(opts), "")
+			fingerprint = ing.Annotations[HAProxySnippetAnnotation]
+		default:
+			err = annotateHAProxy(ctx, h.Client, ing, "", "")
 		}
-		err := annotateHAProxy(ctx, h.Client, ing, snippet)
 		if err != nil && !apierrors.IsNotFound(err) {
 			errs = append(errs, fmt.Errorf("wire Ingress %s: %w", k, err))
 		}
@@ -478,14 +590,19 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 				c = "no known IngressClass"
 			}
 			s.Unsupported = fmt.Sprintf("Ingress %s is served by %s, which Inkwall doesn't wire yet", k.Name, c)
+		case !on:
+		case mech == haproxyUnknown:
+			s.VersionUnsupported = versionWhy
 		case err != nil:
 			s.Failed = fmt.Sprintf("Ingress %s: %v", k.Name, err)
+		case failed != "":
+			s.Failed = failed
 		case len(problems) > 0:
 			s.Failed = strings.Join(problems, "; ")
 		}
-		s.Wired = want && err == nil
+		s.Wired = want && err == nil && fingerprint != ""
 		if s.Wired && s.Failed == "" {
-			job := ProbeJob{Route: ProbeRoute{Kind: "Ingress", Key: k}, Proxy: "HAProxy", Fingerprint: ing.Annotations[HAProxySnippetAnnotation], Targets: probeTargets(ing)}
+			job := ProbeJob{Route: ProbeRoute{Kind: "Ingress", Key: k}, Proxy: "HAProxy", Fingerprint: fingerprint, Targets: probeTargets(ing)}
 			for _, pod := range runningPods {
 				if injection.HasEngine(pod) {
 					job.Pods = append(job.Pods, probePod(pod))
@@ -496,9 +613,22 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 			job = probed[0]
 			jobs = append(jobs, job)
 			s.Unverified = h.unverified(job)
-			s.Note = haproxyBufferNote(k.Name, buffer, settings.body, settings.maxBody, settings.responses && res.Responses, settings.maxResponse)
+			var notes []string
+			if n := haproxyBufferNote(k.Name, buffer, mech, settings.body, settings.maxBody, settings.responses && res.Responses, settings.maxResponse); n != "" {
+				notes = append(notes, n)
+			}
+			if mech == haproxyBackendCR {
+				if n := haproxyIgnoredNote(ing); n != "" {
+					notes = append(notes, n)
+				}
+			}
+			s.Note = strings.Join(notes, "; ")
 		}
 		res.Targets[tg] = s
+	}
+	// The Ingresses are unwired: their Backends can go.
+	if _, err := pruneHAProxyBackends(ctx, h.Client, backends); err != nil {
+		errs = append(errs, err)
 	}
 	if h.Prober != nil {
 		h.Prober.Set(integrations.HAProxy.Name, jobs)
@@ -513,7 +643,7 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 // a request or a response than the policies' body.maxBytes or
 // responses.maxBytes: HAProxy sends no more than its buffer, and a larger
 // body is handled as oversized. "" when it doesn't.
-func haproxyBufferNote(ingress string, buffer haproxyBuffer, body bool, maxBody int64, responses bool, maxResponse int64) string {
+func haproxyBufferNote(ingress string, buffer haproxyBuffer, m haproxyMechanism, body bool, maxBody int64, responses bool, maxResponse int64) string {
 	var what, limits, actions []string
 	section := "Bodies"
 	if body && maxBody > buffer.visible() {
@@ -528,11 +658,15 @@ func haproxyBufferNote(ingress string, buffer haproxyBuffer, body bool, maxBody 
 	if len(what) == 0 {
 		return ""
 	}
+	raise := "raise tune.bufsize in the controller ConfigMap's global-config-snippet"
+	if m == haproxyBackendCR {
+		raise = "raise tune_buffer_options.bufsize in the Global custom resource the controller ConfigMap's cr-global names"
+	}
 	return fmt.Sprintf("Ingress %s: HAProxy's buffer (tune.bufsize %d, %s) lets the engine see at most about %d bytes of %s, "+
 		"headers included, less than its %s: a larger body is handled as oversized (%s); "+
-		"raise tune.bufsize in the controller ConfigMap's global-config-snippet (docs/haproxy.md, %s)",
+		"%s (docs/haproxy.md, %s)",
 		ingress, buffer.bufsize, buffer.source, buffer.visible(), strings.Join(what, " or "),
-		strings.Join(limits, " and "), strings.Join(actions, ", "), section)
+		strings.Join(limits, " and "), strings.Join(actions, ", "), raise, section)
 }
 
 // unverified is why a wired route isn't proven on every pod yet, or "".
@@ -559,8 +693,9 @@ func (h *HAProxy) Wired(ctx context.Context, tg Target) (bool, error) {
 	return wired, nil
 }
 
-// Unwire implements Integration: it removes the operator's snippet from
-// every Ingress it wired, and restores standalone-backend.
+// Unwire implements Integration: it removes the operator's snippet or
+// cr-backend from every Ingress it wired, restores standalone-backend, and
+// deletes its Backend custom resources.
 func (*HAProxy) Unwire(ctx context.Context, c client.Client) (map[string]int, error) {
 	n := map[string]int{}
 	var list networkingv1.IngressList
@@ -572,12 +707,16 @@ func (*HAProxy) Unwire(ctx context.Context, c client.Client) (map[string]int, er
 		if _, wired := ing.Annotations[HAProxyWiredAnnotation]; !wired {
 			continue
 		}
-		if err := annotateHAProxy(ctx, c, ing, ""); client.IgnoreNotFound(err) != nil {
+		if err := annotateHAProxy(ctx, c, ing, "", ""); client.IgnoreNotFound(err) != nil {
 			return n, fmt.Errorf("unwire Ingress %s/%s: %w", ing.Namespace, ing.Name, err)
 		}
 		n["Ingress (HAProxy)"]++
 	}
-	return n, nil
+	deleted, err := pruneHAProxyBackends(ctx, c, nil)
+	if deleted > 0 {
+		n["Backend (HAProxy)"] = deleted
+	}
+	return n, err
 }
 
 // haproxyBuffer is HAProxy's request buffer: tune.bufsize, less
@@ -652,9 +791,11 @@ func haproxySize(s string) (int64, bool) {
 
 // buffer is the smallest buffer of the controller's running pods with the
 // engine: from tune.bufsize in the global-config-snippet of the ConfigMap
-// each names (--configmap), or HAProxy's default. A ConfigMap it can't
-// read counts as the default.
-func (h *HAProxy) buffer(ctx context.Context, pods []*corev1.Pod) haproxyBuffer {
+// each names (--configmap), or, on controller 3.4, which has no snippets,
+// in the Global custom resource the ConfigMap's cr-global names; else
+// HAProxy's default. A ConfigMap or Global it can't read counts as the
+// default.
+func (h *HAProxy) buffer(ctx context.Context, pods []*corev1.Pod, m haproxyMechanism) haproxyBuffer {
 	out := haproxyBuffer{bufsize: math.MaxInt64}
 	seen := map[types.NamespacedName]bool{}
 	for _, pod := range pods {
@@ -669,7 +810,11 @@ func (h *HAProxy) buffer(ctx context.Context, pods []*corev1.Pod) haproxyBuffer 
 			seen[key] = true
 			var cm corev1.ConfigMap
 			if err := h.APIReader.Get(ctx, key, &cm); err == nil {
-				b = parseHAProxyBuffer(cm.Data["global-config-snippet"])
+				if m == haproxyBackendCR {
+					b = h.globalBuffer(ctx, pod.Namespace, cm.Data["cr-global"])
+				} else {
+					b = parseHAProxyBuffer(cm.Data["global-config-snippet"])
+				}
 			}
 		}
 		if b.visible() < out.visible() || out.bufsize == math.MaxInt64 {
@@ -680,6 +825,26 @@ func (h *HAProxy) buffer(ctx context.Context, pods []*corev1.Pod) haproxyBuffer 
 		return parseHAProxyBuffer("")
 	}
 	return out
+}
+
+// globalBuffer is the buffer the Global custom resource ref
+// ("namespace/name", or a name in the controller's namespace) sets.
+func (h *HAProxy) globalBuffer(ctx context.Context, namespace, ref string) haproxyBuffer {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return parseHAProxyBuffer("")
+	}
+	ns, name, found := strings.Cut(ref, "/")
+	if !found {
+		ns, name = namespace, ref
+	}
+	g := &unstructured.Unstructured{}
+	g.SetGroupVersionKind(HAProxyGlobalGVK)
+	if err := h.APIReader.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, g); err != nil {
+		return parseHAProxyBuffer("")
+	}
+	spec, _, _ := unstructured.NestedMap(g.Object, "spec")
+	return parseHAProxyGlobal(spec)
 }
 
 // haproxyConfigMap is the ConfigMap the controller's container names with

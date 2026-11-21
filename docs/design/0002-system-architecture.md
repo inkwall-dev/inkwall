@@ -888,6 +888,10 @@ above the body limit. Decided for v0.4.0 ([#282](https://github.com/inkwall-dev/
   - A `backend-config-snippet` on the Service is kept: the controller puts it before the
     Ingress's (verified). A user's own snippet on the Ingress would be kept too, after
     ours, between markers the operator owns (not verified yet).
+  - Controller 3.4 dropped config snippets (#753): there the same rules are a `Backend` custom
+    resource of the controller's (`ingress.v3.haproxy.org/v3`) that the Ingress names in
+    `haproxy.org/cr-backend`, which the controller builds the Ingress's backend from alone (its
+    backend annotations don't apply). The operator picks by the controller pods' release.
 - **Responses** (0.6.0, #470; [0006 §4](0006-adapter-protocols.md#responses-through-spoe-370)).
   For an Ingress whose policies inspect responses, the snippet's filter is `spoe.conf`'s
   `inkwall-responses` scope (its request message says the response follows) and it adds the
