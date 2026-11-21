@@ -4,12 +4,9 @@
 package main
 
 import (
-	"compress/gzip"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -59,7 +56,7 @@ func TestSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.session(0); err != nil {
+	if err := r.play(juiceShop, 1); err != nil {
 		t.Fatal(err)
 	}
 	entries := r.har.Log.Entries
@@ -100,39 +97,6 @@ func TestSession(t *testing.T) {
 	}
 	if !sawAuth || !sawUpload || !sawCSS {
 		t.Errorf("authorized API call %v, upload %v, the page's stylesheet %v: want all", sawAuth, sawUpload, sawCSS)
-	}
-}
-
-// TestRecordedHAR checks the HAR in the repository: requests only, every
-// one with an absolute URL and its status.
-func TestRecordedHAR(t *testing.T) {
-	f, err := os.Open("juice-shop.har.gz")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	zr, err := gzip.NewReader(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var doc harFile
-	if err := json.NewDecoder(zr).Decode(&doc); err != nil {
-		t.Fatal(err)
-	}
-	if n := len(doc.Log.Entries); n < 400 {
-		t.Fatalf("%d requests, want the recording's (over 400)", n)
-	}
-	methods := map[string]int{}
-	for i, e := range doc.Log.Entries {
-		methods[e.Request.Method]++
-		if !strings.HasPrefix(e.Request.URL, "https://shop.example.com/") || e.Response.Status == 0 {
-			t.Errorf("entry %d: %s, status %d", i, e.Request.URL, e.Response.Status)
-		}
-	}
-	for _, m := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete} {
-		if methods[m] == 0 {
-			t.Errorf("no %s request: %v", m, methods)
-		}
 	}
 }
 

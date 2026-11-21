@@ -9,11 +9,14 @@
 # positive. Prints, per level, the requests, the denials and their rate, and
 # the rules that denied (the CRS rule each denial's score came from), as a
 # markdown table; with OUT, also writes OUT/fp-run.md and OUT/fp-run.json
-# (each level's counts, rules and denied requests).
+# (each level's counts, rules and denied requests), and OUT/tune.md: what
+# inkwallctl tune suggests for each level's denials, read as the security
+# events an engine logs (#707).
 #
 #   HAR      the traffic, a HAR file, gzip-compressed if its name ends
-#            with .gz (default hack/fptraffic/juice-shop.har.gz, recorded
-#            from OWASP Juice Shop by hack/fptraffic: make fp-har)
+#            with .gz (default hack/fptraffic/juice-shop.har.gz; the
+#            applications' recordings in hack/fptraffic are made by
+#            hack/fptraffic: make fp-har APP=<app>)
 #   LEVELS   the paranoia levels (default "1 2 3 4")
 #   POLICY   a WAFPolicy file of your own (with its rule sets, as
 #            inkwallctl test --policy reads them): one run with it as it
@@ -60,6 +63,8 @@ requests=$(jq '.log.entries | length' "$har")
 jq -r '.log.entries[].request | "\(.method) \(.url | sub("^[a-z]+://[^/]*"; ""))"' "$har" >"$work/requests"
 
 : >"$work/levels.jsonl"
+echo "# The exclusions inkwallctl tune suggests for the denials of $HAR" >"$work/tune.md"
+echo >>"$work/tune.md"
 for level in $LEVELS; do
   if [[ $level == policy ]]; then cp "$POLICY" "$work/policy-$level.yaml"; else policy "$level" >"$work/policy-$level.yaml"; fi
   "$work/inkwallctl" test --policy "$work/policy-$level.yaml" "${rule_sets[@]}" --har "$har" --json \
@@ -82,6 +87,22 @@ for level in $LEVELS; do
      rate: (if $total > 0 then ($denied | length) / $total else 0 end),
      rules: ([$denied[].rules[]] | group_by(.) | map({rule: .[0], requests: length}) | sort_by(-.requests, .rule)),
      deniedRequests: $denied}' "$work/verdicts-$level.jsonl" >>"$work/levels.jsonl"
+  # The denials as the security events an engine logs (with the request's
+  # path, without its query), and the exclusions inkwallctl tune suggests
+  # for them.
+  jq -nc --rawfile reqs "$work/requests" '
+    ($reqs | split("\n")) as $r |
+    [inputs] | to_entries[] | select(.value.action == "ACTION_DENY") |
+    .value + {path: ($r[.key] | split(" ")[1] | split("?")[0]), request_id: "req-\(.key + 1)"}' \
+    "$work/verdicts-$level.jsonl" >"$work/events-$level.jsonl"
+  {
+    echo "## Paranoia level $level"
+    echo
+    echo '```console'
+    "$work/inkwallctl" tune "$work/events-$level.jsonl"
+    echo '```'
+    echo
+  } >>"$work/tune.md"
 done
 
 jq -s --arg har "$HAR" --arg policy "${POLICY:-default}" '{har: $har, policy: $policy, levels: .}' "$work/levels.jsonl" >"$work/fp-run.json"
@@ -96,7 +117,7 @@ jq -s --arg har "$HAR" --arg policy "${POLICY:-default}" '{har: $har, policy: $p
 cat "$work/fp-run.md"
 if [[ -n $OUT ]]; then
   mkdir -p "$OUT"
-  cp "$work/fp-run.md" "$work/fp-run.json" "$OUT/"
+  cp "$work/fp-run.md" "$work/fp-run.json" "$work/tune.md" "$OUT/"
   echo
-  echo "wrote $OUT/fp-run.md and $OUT/fp-run.json"
+  echo "wrote $OUT/fp-run.md, $OUT/fp-run.json and $OUT/tune.md"
 fi
