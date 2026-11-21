@@ -253,6 +253,15 @@ func TestWAFPolicyValidation(t *testing.T) {
 		{name: "rate limit unknown method", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, match: {methods: [PURGE]}}]\n"), wantErr: `Unsupported value: "PURGE"`},
 		{name: "rate limit repeated method", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, match: {methods: [GET, GET]}}]\n"), wantErr: "Duplicate value"},
 		{name: "rate limit in Block mode", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, mode: Block}]\n"), wantErr: "a rate limit's mode can only be Detect"},
+
+		// The CRS settings under crs (#714); the binding-level pair is
+		// deprecated, still accepted alone or next to other crs settings.
+		{name: "crs paranoia level and threshold", doc: policy(target + "  ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: crs}, crs: {paranoiaLevel: 2, inboundAnomalyThreshold: 7}}]\n")},
+		{name: "deprecated paranoia level beside crs", doc: policy(target + "  ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: crs}, paranoiaLevel: 2, crs: {inboundAnomalyThreshold: 7}}]\n")},
+		{name: "paranoia level twice", doc: policy(target + "  ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: crs}, paranoiaLevel: 2, crs: {paranoiaLevel: 2}}]\n"), wantErr: "set crs.paranoiaLevel, not also the deprecated paranoiaLevel"},
+		{name: "threshold twice", doc: policy(target + "  ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: crs}, inboundAnomalyThreshold: 7, crs: {inboundAnomalyThreshold: 7}}]\n"), wantErr: "set crs.inboundAnomalyThreshold, not also the deprecated inboundAnomalyThreshold"},
+		{name: "crs paranoia level over 4", doc: policy(target + "  ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: crs}, crs: {paranoiaLevel: 5}}]\n"), wantErr: "should be less than or equal to 4"},
+		{name: "crs threshold 0", doc: policy(target + "  ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: crs}, crs: {inboundAnomalyThreshold: 0}}]\n"), wantErr: "should be greater than or equal to 1"},
 	})
 }
 

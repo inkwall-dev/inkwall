@@ -197,6 +197,19 @@ func TestRunInProcess(t *testing.T) {
 	}
 }
 
+// A 920450 event names the restricted header, not another one (#762).
+func TestRunNamesTheRestrictedHeader(t *testing.T) {
+	raw := writeFile(t, "req.http", "POST /wp-json/wp/v2/posts/25 HTTP/1.1\r\nHost: blog.example.com\r\n"+
+		"User-Agent: Mozilla/5.0\r\nAccept: application/json\r\nContent-Type: application/json\r\n"+
+		"X-HTTP-Method-Override: PUT\r\nX-WP-Nonce: abc\r\nContent-Length: 2\r\n\r\n{}")
+	for range 10 {
+		code, out, _ := runCLI(t, "test", "--json", "--request", raw)
+		if code != 0 || !regexp.MustCompile(`\{"rule_id":\s*920450,\s*"variable":\s*"REQUEST_HEADERS_NAMES:X-Http-Method-Override"\}`).MatchString(out) {
+			t.Fatalf("exit %d, output %q", code, out)
+		}
+	}
+}
+
 func TestRunFilesAndExpect(t *testing.T) {
 	har := writeFile(t, "traffic.har", harDoc)
 	code, out, errOut := runCLI(t, "test", "--expect", "allow", "--har", har)

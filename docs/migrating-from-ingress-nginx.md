@@ -109,7 +109,7 @@ it, and the other annotations do nothing without ModSecurity on.
 | `enable-owasp-core-rules`, `enable-owasp-modsecurity-crs`, `Include .../nginx-modsecurity.conf` | The built-in OWASP CRS v4 |
 | `SecRuleEngine On` / `DetectionOnly` | `mode: Block` / `mode: Detect`; ingress-nginx's own `modsecurity.conf` sets `DetectionOnly` |
 | `SecRuleEngine Off` | No policy |
-| `setvar:tx.paranoia_level` or `tx.blocking_paranoia_level`, `tx.inbound_anomaly_score_threshold` (in a `SecAction`) | `ruleSets[].paranoiaLevel`, `inboundAnomalyThreshold` |
+| `setvar:tx.paranoia_level` or `tx.blocking_paranoia_level`, `tx.inbound_anomaly_score_threshold` (in a `SecAction`) | `ruleSets[].crs.paranoiaLevel`, `crs.inboundAnomalyThreshold` |
 | `setvar:tx.allowed_methods`, `tx.allowed_request_content_type` (CRS v4's `\|type\|` list or v3's `type\|type`), `tx.detection_paranoia_level` | `ruleSets[].crs.allowedMethods`, `allowedRequestContentTypes`, `detectionParanoiaLevel` |
 | `setvar:tx.outbound_anomaly_score_threshold` | `ruleSets[].crs.outboundAnomalyThreshold`, marked `check`: it only applies with `responses.inspect: true` |
 | `SecRuleRemoveById 942100 ...` | `exclusions` |
