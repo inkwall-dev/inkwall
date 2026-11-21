@@ -1,4 +1,4 @@
-exit 1
+exit 0
 # The built-in OWASP CRS v4, for the policies that tune it or add rules.
 apiVersion: waf.inkwall.dev/v1alpha1
 kind: ClusterWAFRuleSet
@@ -9,15 +9,20 @@ spec:
     builtin: crs-v4
 ---
 # From the ingress-nginx ModSecurity settings of Ingress web/shop.
-# 2 setting(s) were not migrated: see the summary of inkwallctl migrate.
 apiVersion: waf.inkwall.dev/v1alpha1
 kind: WAFRuleSet
 metadata:
-  name: shop-modsecurity
+  name: shop-modsecurity-before-crs
   namespace: web
 spec:
   source:
     seclang: |
+      # annotation modsecurity-snippet, line 2
+      SecRule REQUEST_METHOD "@streq OPTIONS" "id:1000,phase:1,pass,nolog,chain"
+      SecRule REQUEST_FILENAME "@beginsWith /api" "ctl:ruleEngine=Off"
+      # annotation modsecurity-snippet, line 4
+      SecRule ARGS:action "@streq heartbeat" "id:1001,phase:1,pass,nolog,chain"
+      SecRule REQUEST_FILENAME "@streq /wp-admin/admin-ajax.php" "ctl:ruleRemoveById=942100"
       # annotation modsecurity-snippet, line 6
       SecRule REQUEST_HEADERS:X-Debug "@streq 1" "id:1002,phase:1,deny,status:403,chain"
       SecRule REMOTE_ADDR "!@ipMatch 10.0.0.0/8"
@@ -30,21 +35,22 @@ metadata:
 spec:
   mode: Block
   ruleSets:
+  - placement: BeforeCRS
+    ref:
+      kind: WAFRuleSet
+      name: shop-modsecurity-before-crs
   - ref:
       kind: ClusterWAFRuleSet
       name: owasp-crs-v4
-  - ref:
-      kind: WAFRuleSet
-      name: shop-modsecurity
   targetRefs:
   - kind: Ingress
     name: shop
 --- stderr
 note: no ConfigMap ingress-nginx/ingress-nginx-controller in the files: ModSecurity is taken as off globally (only the annotations count)
-Ingress web/shop: WAFPolicy web/shop (Block), WAFRuleSet web/shop-modsecurity
-  TODO    annotation modsecurity-snippet, line 2: not migrated: SecRule REQUEST_METHOD "@streq OPTIONS" "id:1000,phase:1,pass,nolog,chain" SecRule REQUEST_FILENAME "@beginsWith /api" "ctl:ruleEngine=Off": a ctl action in a chain runs only when the whole chain matches, and an exclusion or skipped path can't carry the chain's other conditions; convert it by hand
-  TODO    annotation modsecurity-snippet, line 4: not migrated: SecRule ARGS:action "@streq heartbeat" "id:1001,phase:1,pass,nolog,chain" SecRule REQUEST_FILENAME "@streq /wp-admin/admin-ajax.php" "ctl:ruleRemoveById=942100": a ctl action in a chain runs only when the whole chain matches, and an exclusion or skipped path can't carry the chain's other conditions; convert it by hand
-  mapped  annotation modsecurity-snippet, line 6: kept in the WAFRuleSet: SecRule REQUEST_HEADERS:X-Debug "@streq 1" "id:1002,phase:1,deny,status:403,chain" SecRule REMOTE_ADDR "!@ipMatch 10.0.0.0/8"
+Ingress web/shop: WAFPolicy web/shop (Block), WAFRuleSet web/shop-modsecurity-before-crs
+  check   annotation modsecurity-snippet, line 2: kept in the BeforeCRS WAFRuleSet: SecRule REQUEST_METHOD "@streq OPTIONS" "id:1000,phase:1,pass,nolog,chain" SecRule REQUEST_FILENAME "@beginsWith /api" "ctl:ruleEngine=Off"; ModSecurity ran it before the CRS, and placement: BeforeCRS needs engines 0.6.0 or later (older ones load it after the CRS)
+  check   annotation modsecurity-snippet, line 4: kept in the BeforeCRS WAFRuleSet: SecRule ARGS:action "@streq heartbeat" "id:1001,phase:1,pass,nolog,chain" SecRule REQUEST_FILENAME "@streq /wp-admin/admin-ajax.php" "ctl:ruleRemoveById=942100"; ModSecurity ran it before the CRS, and placement: BeforeCRS needs engines 0.6.0 or later (older ones load it after the CRS)
+  check   annotation modsecurity-snippet, line 6: kept in the BeforeCRS WAFRuleSet: SecRule REQUEST_HEADERS:X-Debug "@streq 1" "id:1002,phase:1,deny,status:403,chain" SecRule REMOTE_ADDR "!@ipMatch 10.0.0.0/8"; ModSecurity ran it before the CRS, and placement: BeforeCRS needs engines 0.6.0 or later (older ones load it after the CRS)
   mapped  annotation enable-owasp-core-rules: the built-in OWASP CRS v4
   mapped  annotation modsecurity-snippet, line 1: SecRuleEngine On: mode: Block
-1 Ingress(es) read: 1 WAFPolicy, 1 WAFRuleSet; 2 setting(s) not migrated need a human (TODO)
+1 Ingress(es) read: 1 WAFPolicy, 1 WAFRuleSet; 0 setting(s) not migrated need a human (TODO)

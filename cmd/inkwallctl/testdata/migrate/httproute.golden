@@ -95,7 +95,7 @@ spec:
 apiVersion: waf.inkwall.dev/v1alpha1
 kind: WAFRuleSet
 metadata:
-  name: shop-modsecurity
+  name: shop-modsecurity-before-crs
   namespace: shop
 spec:
   source:
@@ -138,6 +138,10 @@ spec:
       path: /cms/editor*
   mode: Block
   ruleSets:
+  - placement: BeforeCRS
+    ref:
+      kind: WAFRuleSet
+      name: shop-modsecurity-before-crs
   - crs:
       outboundAnomalyThreshold: 5
     inboundAnomalyThreshold: 10
@@ -145,9 +149,6 @@ spec:
     ref:
       kind: ClusterWAFRuleSet
       name: owasp-crs-v4
-  - ref:
-      kind: WAFRuleSet
-      name: shop-modsecurity
   skip:
     bodyPaths:
     - /upload/*
@@ -185,7 +186,7 @@ Ingress shop/api: WAFPolicy shop/api (Block), WAFRuleSet shop/api-modsecurity
   mapped  targetRefs: rule api of HTTPRoute api: the Ingress's hosts and paths
 Ingress shop/legacy: no WAFPolicy
   check   annotation enable-modsecurity: ModSecurity is off for this Ingress (enable-modsecurity is not true, nor enable-modsecurity in the ConfigMap): its other ModSecurity annotations have no effect; nothing to migrate
-Ingress shop/shop: WAFPolicy shop/shop (Block), WAFRuleSet shop/shop-modsecurity
+Ingress shop/shop: WAFPolicy shop/shop (Block), WAFRuleSet shop/shop-modsecurity-before-crs
   mapped  annotation modsecurity-snippet, line 2: SecRequestBodyAccess On: body.inspect: true
   mapped  annotation modsecurity-snippet, line 3: setvar:tx.blocking_paranoia_level=2: paranoiaLevel: 2
   mapped  annotation modsecurity-snippet, line 4: setvar:tx.inbound_anomaly_score_threshold=10: inboundAnomalyThreshold: 10
@@ -197,7 +198,7 @@ Ingress shop/shop: WAFPolicy shop/shop (Block), WAFRuleSet shop/shop-modsecurity
   mapped  annotation modsecurity-snippet, line 18: SecRule REQUEST_URI "@beginsWith /upload/" "id:1003,phase:1,pass,nolog,ctl:requestBodyAccess=Off": skip.bodyPaths on /upload/*
   mapped  annotation modsecurity-snippet, line 19: SecRule REQUEST_FILENAME "@beginsWith /cms/editor" "id:1005,phase:1,pass,nolog,ctl:ruleRemoveById=941100-941130": exclusions on /cms/editor*
   check   annotation modsecurity-snippet, line 19: the range(s) 941100-941130 (5 rules) expanded to the embedded CRS's rules in them: rules a later CRS adds to a range are not excluded
-  mapped  annotation modsecurity-snippet, line 20: kept in the WAFRuleSet: SecRule REQUEST_HEADERS:User-Agent "@contains sqlmap" "id:1004,phase:1,deny,status:403,msg:'sqlmap'"
+  check   annotation modsecurity-snippet, line 20: kept in the BeforeCRS WAFRuleSet: SecRule REQUEST_HEADERS:User-Agent "@contains sqlmap" "id:1004,phase:1,deny,status:403,msg:'sqlmap'"; ModSecurity ran it before the CRS, and placement: BeforeCRS needs engines 0.6.0 or later (older ones load it after the CRS)
   check   annotation modsecurity-transaction-id: not migrated: Inkwall has no setting for the ModSecurity transaction ID (logging only; protection is unchanged)
   mapped  annotation enable-owasp-core-rules: the built-in OWASP CRS v4
   mapped  annotation modsecurity-snippet, line 1: SecRuleEngine On: mode: Block

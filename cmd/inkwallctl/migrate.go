@@ -499,8 +499,8 @@ func writeMigration(cfg migrateConfig, results []*migration, stdout io.Writer) e
 		if n := m.todos(); n > 0 {
 			head += fmt.Sprintf("# %d setting(s) were not migrated: see the summary of inkwallctl migrate.\n", n)
 		}
-		if m.ruleSet != nil {
-			doc, err := objectYAML(head, m.ruleSet)
+		for _, rs := range m.ruleSets {
+			doc, err := objectYAML(head, rs)
 			if err != nil {
 				return err
 			}
@@ -572,9 +572,9 @@ func report(w io.Writer, results []*migration, read, skipped int, class string) 
 		if m.policy != nil {
 			policies++
 			target = fmt.Sprintf("WAFPolicy %s/%s (%s)", m.namespace, m.name, m.policy.Spec.Mode)
-			if m.ruleSet != nil {
+			for _, rs := range m.ruleSets {
 				ruleSets++
-				target += ", WAFRuleSet " + m.namespace + "/" + m.ruleSet.Name
+				target += ", WAFRuleSet " + m.namespace + "/" + rs.Name
 			}
 		}
 		fmt.Fprintf(w, "Ingress %s/%s: %s\n", m.namespace, m.name, target)

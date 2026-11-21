@@ -80,7 +80,9 @@ type nginxGlobal struct {
 type migration struct {
 	namespace, name string
 	policy          *wafv1alpha1.WAFPolicy
-	ruleSet         *wafv1alpha1.WAFRuleSet
+	// ruleSets are the kept rules: those ModSecurity ran before the CRS,
+	// bound BeforeCRS, then the others, bound AfterCRS.
+	ruleSets []*wafv1alpha1.WAFRuleSet
 	// usesCRSRuleSet is set when the policy refers to crsRuleSetName.
 	usesCRSRuleSet bool
 	items          []item
@@ -148,15 +150,72 @@ type modsec struct {
 	// any, and partialItem the index of its item.
 	partial     string
 	partialItem int
-	// rules are directives kept as they are, in a WAFRuleSet loaded after
-	// the CRS, with where they came from.
+	// rules are directives kept as they are, in a WAFRuleSet bound before
+	// or after the CRS, as ModSecurity ran them, with where they came from.
 	rules []rule
+	// http is set while reading the ConfigMap's settings, which nginx
+	// loads in the http block, and n counts the directives read: they
+	// make a directive's position (at).
+	http bool
+	n    int
+	// crsAt is where the CRS loads first; nil until it does.
+	crsAt *position
+}
+
+// position is where ModSecurity ran a directive, for one Ingress's
+// location. libmodsecurity's nginx module merges the location's rules
+// with the http block's by appending the http block's (msc_rules_merge):
+// the location's own (the annotations) run first, then the http block's
+// (the ConfigMap's), each in the order they are read.
+type position struct {
+	http bool
+	n    int
+}
+
+// before reports whether ModSecurity ran p before q.
+func (p position) before(q position) bool {
+	if p.http != q.http {
+		return q.http
+	}
+	return p.n < q.n
+}
+
+// at returns the position of the next directive read.
+func (s *modsec) at() position {
+	s.n++
+	return position{http: s.http, n: s.n}
+}
+
+// loadCRS records that the CRS loads here.
+func (s *modsec) loadCRS() {
+	s.crs = true
+	if p := s.at(); s.crsAt == nil || p.before(*s.crsAt) {
+		s.crsAt = &p
+	}
+}
+
+// beforeCRS reports whether ModSecurity ran the directive at p before the
+// CRS; false when it loads no CRS.
+func (s *modsec) beforeCRS(p position) bool {
+	return s.crsAt != nil && p.before(*s.crsAt)
 }
 
 type rule struct {
 	text, source string
 	// item is the index of the rule's item in the migration.
 	item int
+	at   position
+	// afterCRS is set for the directives that change the rules loaded
+	// before them (SecRuleRemoveBy*, SecRuleUpdate*): libmodsecurity
+	// applies them to every rule wherever they are, Coraza only to those
+	// already loaded, so they stay after the CRS.
+	afterCRS bool
+	// beforeOnly, when set, is what to report instead of keeping the rule
+	// if ModSecurity didn't run it before the CRS: a rule only worth
+	// keeping there, such as one turning CRS rules off.
+	beforeOnly *item
+	// placedBefore is set by build for a rule bound BeforeCRS.
+	placedBefore bool
 }
 
 // migrateIngress converts the ModSecurity settings of one Ingress, with the
@@ -236,15 +295,17 @@ func migrateSettings(ing *networkingv1.Ingress, global nginxGlobal, prefix strin
 
 	var s modsec
 	if global.enable {
+		s.http = true
 		if global.snippet != "" {
 			s.apply(m, global.snippet, global.source+" "+cmSnippet)
 		} else {
 			s.recommended(global.source + " " + cmEnable)
 		}
 		if global.crs {
-			s.crs = true
+			s.loadCRS()
 			m.add(itemMapped, global.source+" "+cmCRS, "the built-in OWASP CRS v4")
 		}
+		s.http = false
 	}
 	if snippet != "" {
 		s.apply(m, snippet, annSource(annSnippet))
@@ -256,7 +317,7 @@ func migrateSettings(ing *networkingv1.Ingress, global nginxGlobal, prefix strin
 		s.recommended(annSource(annEnable))
 	}
 	if !global.crs && crs {
-		s.crs = true
+		s.loadCRS()
 		m.add(itemMapped, annSource(annCRS), "the built-in OWASP CRS v4")
 	}
 	s.build(m)
@@ -324,7 +385,7 @@ func (s *modsec) apply(m *migration, snippet, source string) {
 		case "include":
 			switch arg(1) {
 			case nginxCRSConf:
-				s.crs = true
+				s.loadCRS()
 				m.add(itemMapped, src, "%s: the built-in OWASP CRS v4", d.Text)
 			case nginxRecommendedConf:
 				// It sets the body directives again, over those above it.
@@ -378,8 +439,10 @@ func (s *modsec) apply(m *migration, snippet, source string) {
 			s.removeByID(m, d.Text, args, src)
 		case "secruleupdatetargetbyid":
 			s.updateTarget(m, d.Text, args, src)
-		case "secmarker", "secruleremovebytag", "secruleremovebymsg", "secruleupdatetargetbytag", "secruleupdateactionbyid":
+		case "secmarker":
 			s.keep(m, d.Text, src)
+		case "secruleremovebytag", "secruleremovebymsg", "secruleupdatetargetbytag", "secruleupdateactionbyid":
+			s.keepAfterCRS(m, d.Text, src)
 		case "secresponsebodyaccess":
 			if strings.EqualFold(arg(1), "off") {
 				m.add(itemMapped, src, "%s: Inkwall doesn't inspect responses", d.Text)
@@ -451,20 +514,38 @@ func (s *modsec) chain(m *migration, dirs []coraza.Directive, src string) {
 	case !complete:
 		m.add(itemTodo, src, "not migrated: %s: the chain doesn't end in a rule", summary)
 	case hasCtl:
-		m.add(itemTodo, src, "not migrated: %s: a ctl action in a chain runs only when the whole chain matches, and an exclusion or skipped path can't carry the chain's other conditions; convert it by hand", summary)
+		// Kept whole if it ran before the CRS: its ctl actions then reach
+		// the CRS's rules as they did.
+		s.keepBeforeCRS(m, strings.Join(texts, "\n"), src, item{kind: itemTodo, source: src,
+			text: fmt.Sprintf("not migrated: %s: a ctl action in a chain runs only when the whole chain matches, and an exclusion or skipped path can't carry the chain's other conditions; convert it by hand", summary)})
 	default:
-		s.rules = append(s.rules, rule{text: strings.Join(texts, "\n"), source: src, item: len(m.items)})
-		m.add(itemMapped, src, "kept in the WAFRuleSet: %s", summary)
+		s.keep(m, strings.Join(texts, "\n"), src)
 	}
 }
 
 // policyMaxBodyBytes is the CRD's limit on body.maxBytes.
 const policyMaxBodyBytes = 10 << 20
 
-// keep adds a directive to the policy's WAFRuleSet, loaded after the CRS.
+// keep adds a directive to the policy's WAFRuleSets: build binds it before
+// or after the CRS, where ModSecurity ran it.
 func (s *modsec) keep(m *migration, text, src string) {
-	s.rules = append(s.rules, rule{text: text, source: src, item: len(m.items)})
+	s.rules = append(s.rules, rule{text: text, source: src, item: len(m.items), at: s.at()})
 	m.add(itemMapped, src, "kept in the WAFRuleSet: %s", text)
+}
+
+// keepAfterCRS keeps a directive that changes the rules loaded before it
+// (SecRuleRemoveBy*, SecRuleUpdate*): it stays after the CRS, wherever it
+// was, to reach the CRS's rules as in ModSecurity.
+func (s *modsec) keepAfterCRS(m *migration, text, src string) {
+	s.keep(m, text, src)
+	s.rules[len(s.rules)-1].afterCRS = true
+}
+
+// keepBeforeCRS keeps a directive if ModSecurity ran it before the CRS;
+// otherwise build reports instead.
+func (s *modsec) keepBeforeCRS(m *migration, text, src string, instead item) {
+	s.keep(m, text, src)
+	s.rules[len(s.rules)-1].beforeOnly = &instead
 }
 
 // crsVariables are the CRS settings a WAFPolicy has a field for.
@@ -482,7 +563,7 @@ func (s *modsec) secAction(m *migration, text string, args []string, src string)
 		return
 	}
 	acts := parseActions(args[1])
-	var setvars []action
+	var setvars, unmapped []action
 	for _, a := range acts {
 		switch {
 		case a.name == "setvar" && strings.HasPrefix(strings.ToLower(a.value), "tx."):
@@ -519,7 +600,7 @@ func (s *modsec) secAction(m *migration, text string, args []string, src string)
 			s.crsSettings.OutboundAnomalyThreshold = &t
 			m.add(itemCheck, src, "setvar:%s: crs.outboundAnomalyThreshold: %d; it applies only when the policy inspects responses (responses.inspect: true)", a.value, n)
 		case field == "":
-			m.add(itemTodo, src, "not migrated: setvar:%s: no WAFPolicy field sets this CRS variable", a.value)
+			unmapped = append(unmapped, a)
 		case err != nil:
 			m.add(itemTodo, src, "not migrated: setvar:%s: not a number", a.value)
 		case field == "paranoiaLevel" && (n < 1 || n > 4):
@@ -534,6 +615,21 @@ func (s *modsec) secAction(m *migration, text string, args []string, src string)
 			m.add(itemMapped, src, "setvar:%s: inboundAnomalyThreshold: %d", a.value, n)
 		}
 	}
+	if len(unmapped) == 0 {
+		return
+	}
+	// Before the CRS, the rule sets them as it did: the CRS's
+	// initialization keeps a variable already set. The variables mapped
+	// above get the same values from the policy.
+	names := make([]string, len(unmapped))
+	for i, a := range unmapped {
+		names[i] = "setvar:" + a.value
+	}
+	why := "no WAFPolicy field sets this CRS variable"
+	if len(unmapped) > 1 {
+		why = "no WAFPolicy field sets these CRS variables"
+	}
+	s.keepBeforeCRS(m, text, src, item{kind: itemTodo, source: src, text: fmt.Sprintf("not migrated: %s: %s", strings.Join(names, ", "), why)})
 }
 
 // allowedMethods maps tx.allowed_methods, space-separated methods.
@@ -583,8 +679,10 @@ func (s *modsec) secRule(m *migration, text string, args []string, src string) {
 		s.keep(m, text, src)
 		return
 	}
+	// A rule that doesn't map to exclusions is kept as it is if it ran
+	// before the CRS: there its ctl actions do what they did.
 	todo := func(why string) {
-		m.add(itemTodo, src, "not migrated: %s: %s", text, why)
+		s.keepBeforeCRS(m, text, src, item{kind: itemTodo, source: src, text: fmt.Sprintf("not migrated: %s: %s", text, why)})
 	}
 	path, why := exclusionPath(args[1], args[2])
 	if why != "" {
@@ -814,7 +912,7 @@ func (s *modsec) removeByID(m *migration, text string, args []string, src string
 	for _, a := range args[1:] {
 		id, err := ruleID(a)
 		if err != nil {
-			s.keep(m, text, src)
+			s.keepAfterCRS(m, text, src)
 			return
 		}
 		ids = append(ids, id)
@@ -834,19 +932,19 @@ func (s *modsec) removeByID(m *migration, text string, args []string, src string
 // other form is kept.
 func (s *modsec) updateTarget(m *migration, text string, args []string, src string) {
 	if len(args) != 3 {
-		s.keep(m, text, src)
+		s.keepAfterCRS(m, text, src)
 		return
 	}
 	id, err := ruleID(args[1])
 	if err != nil {
-		s.keep(m, text, src)
+		s.keepAfterCRS(m, text, src)
 		return
 	}
 	var matches []wafv1alpha1.ExclusionMatch
 	for _, t := range strings.Split(args[2], "|") {
 		match, ok := requestTarget(strings.TrimPrefix(t, "!"))
 		if !ok || !strings.HasPrefix(t, "!") {
-			s.keep(m, text, src)
+			s.keepAfterCRS(m, text, src)
 			return
 		}
 		matches = append(matches, match)
@@ -895,13 +993,46 @@ func appendUnique(list []wafv1alpha1.PathPattern, p wafv1alpha1.PathPattern) []w
 	return append(list, p)
 }
 
-// build makes the policy and rule set.
+// place puts the kept rules in the order ModSecurity ran them, and those
+// it ran before the CRS first, to bind BeforeCRS. A rule only worth
+// keeping before the CRS that ModSecurity ran after it, or without a CRS,
+// is reported instead.
+func (s *modsec) place(m *migration) {
+	s.rules = slices.DeleteFunc(s.rules, func(r rule) bool {
+		if r.beforeOnly != nil && !s.beforeCRS(r.at) {
+			m.items[r.item] = *r.beforeOnly
+			return true
+		}
+		return false
+	})
+	for i := range s.rules {
+		r := &s.rules[i]
+		r.placedBefore = !r.afterCRS && s.beforeCRS(r.at)
+	}
+	slices.SortStableFunc(s.rules, func(a, b rule) int {
+		switch {
+		case a.placedBefore != b.placedBefore:
+			if a.placedBefore {
+				return -1
+			}
+			return 1
+		case a.at.before(b.at):
+			return -1
+		case b.at.before(a.at):
+			return 1
+		}
+		return 0
+	})
+}
+
+// build makes the policy and rule sets.
 func (s *modsec) build(m *migration) {
 	if s.engine == engineOff {
 		m.add(itemCheck, s.engineSource, "SecRuleEngine Off: ModSecurity inspects nothing; nothing to migrate")
 		return
 	}
 
+	s.place(m)
 	// Rules kept as SecLang must load: drop (and report) those the
 	// validating webhook would reject, one at a time.
 	for len(s.rules) > 0 {
@@ -933,8 +1064,8 @@ func (s *modsec) build(m *migration) {
 		s.rules = slices.Delete(s.rules, bad, bad+1)
 	}
 	for _, r := range s.rules {
-		if strings.Contains(strings.ToLower(r.text), "ctl:") {
-			m.add(itemCheck, r.source, "kept rule with a ctl action now runs after the CRS, not before: check what it changes")
+		if r.placedBefore {
+			m.items[r.item] = item{kind: itemCheck, source: r.source, text: fmt.Sprintf("kept in the BeforeCRS WAFRuleSet: %s; ModSecurity ran it before the CRS, and placement: BeforeCRS needs engines 0.6.0 or later (older ones load it after the CRS)", strings.ReplaceAll(r.text, "\n", " "))}
 		}
 	}
 
@@ -988,18 +1119,32 @@ func (s *modsec) build(m *migration) {
 		p.Spec.RuleSets = append(p.Spec.RuleSets, b)
 		m.usesCRSRuleSet = true
 	}
-	if len(s.rules) > 0 {
-		name := m.name + "-modsecurity"
+	for _, before := range []bool{true, false} {
 		var b strings.Builder
 		for _, r := range s.rules {
-			fmt.Fprintf(&b, "# %s\n%s\n", r.source, r.text)
+			if r.placedBefore == before {
+				fmt.Fprintf(&b, "# %s\n%s\n", r.source, r.text)
+			}
 		}
-		m.ruleSet = &wafv1alpha1.WAFRuleSet{
+		if b.Len() == 0 {
+			continue
+		}
+		binding := wafv1alpha1.RuleSetBinding{Ref: wafv1alpha1.RuleSetRef{Kind: "WAFRuleSet", Name: m.name + "-modsecurity"}}
+		if before {
+			binding.Ref.Name += "-before-crs"
+			binding.Placement = wafv1alpha1.PlacementBeforeCRS
+		}
+		m.ruleSets = append(m.ruleSets, &wafv1alpha1.WAFRuleSet{
 			TypeMeta:   metav1.TypeMeta{APIVersion: wafv1alpha1.GroupVersion.String(), Kind: "WAFRuleSet"},
-			ObjectMeta: metav1.ObjectMeta{Namespace: m.namespace, Name: name},
+			ObjectMeta: metav1.ObjectMeta{Namespace: m.namespace, Name: binding.Ref.Name},
 			Spec:       wafv1alpha1.WAFRuleSetSpec{Source: wafv1alpha1.RuleSetSource{SecLang: b.String()}},
+		})
+		if before {
+			// Listed in the order they load: this one, the CRS, the others.
+			p.Spec.RuleSets = slices.Insert(p.Spec.RuleSets, 0, binding)
+		} else {
+			p.Spec.RuleSets = append(p.Spec.RuleSets, binding)
 		}
-		p.Spec.RuleSets = append(p.Spec.RuleSets, wafv1alpha1.RuleSetBinding{Ref: wafv1alpha1.RuleSetRef{Kind: "WAFRuleSet", Name: name}})
 	}
 	if len(s.exclusions) > maxExclusions {
 		m.add(itemTodo, "", "%d exclusions, more than a WAFPolicy's %d: the last %d are left out", len(s.exclusions), maxExclusions, len(s.exclusions)-maxExclusions)
