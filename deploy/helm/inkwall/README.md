@@ -95,7 +95,8 @@ parent chart may share.
 | `global.imagePullSecrets` | `[]` | Secrets the images are pulled with, `[{name: regcred}]` or `[regcred]`: for the operator's pods, and added to the proxy pods the Pod webhook injects. See [private registries](#private-registries) |
 | `operator.image.repository`, `tag`, `digest`, `pullPolicy` | `ghcr.io/inkwall-dev/inkwall-operator`, the chart's `appVersion`, `""`, `IfNotPresent` | A `digest` (`sha256:...`) replaces the tag |
 | `operator.replicas` | `2` | One leads; all serve the webhooks |
-| `operator.resources` | 100m CPU and 128Mi requested; 512Mi limit | The operator sets `GOMEMLIMIT` to 90% of the memory limit, unless `GOMEMLIMIT` is set |
+| `operator.resources` | 100m CPU and 128Mi requested; 768Mi limit | The operator sets `GOMEMLIMIT` to 90% of the memory limit, unless `GOMEMLIMIT` is set; `values.yaml` gives the formula with the export of security events |
+| `operator.terminationGracePeriodSeconds` | `30` | The shutdown delay (5 s), the export's flush (up to 15 s), and the rest of the shutdown |
 | `operator.extraArgs` | `[]` | Extra `inkwall-operator` flags |
 | `operator.extraEnv`, `extraVolumes`, `extraVolumeMounts` | `[]` | Extra environment variables, volumes and mounts of the operator, e.g. `HTTPS_PROXY` for the control plane, or a CA bundle |
 | `operator.topologySpreadConstraints` | `[]` | [Topology spread](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/), e.g. across zones; rendered as a template, so a `labelSelector` can say `app.kubernetes.io/instance: '{{ .Release.Name }}'` |
@@ -106,6 +107,7 @@ parent chart may share.
 | `injection.proxyNamespaces` | `[traefik, kube-system, envoy-gateway-system, istio-ingress, istio-system, haproxy-controller]` | The namespaces the proxies' pods run in; only pods there get the engine and the policy bundle. See [proxy namespaces](#proxy-namespaces) |
 | `controlPlane.caBundle` | `""` | The optional control plane's CA (PEM), when its certificate isn't from a public CA, e.g. `--set-file controlPlane.caBundle=ca.crt` |
 | `controlPlane.enrollmentToken` | `""` | The control plane's one-time enrollment token, stored in the Secret `inkwall-enrollment` (key `token`); or leave it empty and create that Secret yourself |
+| `events.export.bufferMiB`, `diskMiB` | `32`, `512` | Each replica's buffer of security events for the export sinks ([SIEM export](../../../docs/siem-export.md)): the newest in memory, every one on disk in the `events` emptyDir, whose `sizeLimit` includes `diskMiB`; when full, the oldest are dropped and counted |
 | `controlPlane.eventsBufferMiB` | `64` | Each replica's buffer of security events while the control plane is unreachable (an [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir)); when it is full, the oldest events are dropped and counted |
 | `rbac.integrations.traefik`, `envoyGateway`, `istio`, `istioIngress`, `haproxy` | `true`, `true`, `true`, `true`, `true` | Grant each integration's `ClusterRole`: `true`, `auto` (when the cluster serves the proxy's API group) or `false`. See [integration permissions](#integration-permissions) |
 | `uninstall.unwire` | `true` | On `helm uninstall`, unwire the routes first (a pre-delete hook), so they keep working, and remove the operator's [finalizer](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/) from the `WAFPolicy` objects |
@@ -265,6 +267,7 @@ What Inkwall's components connect to, for clusters that deny traffic by default:
 | The operator, the uninstall hook | the API server | 443 or 6443 | |
 | The engines | the API server | 443 or 6443 | The bundle Secret, when the operator is down |
 | The operator | the control plane | 443 | Only when `InkwallConfig.spec.controlPlane` is set |
+| The operator | each export sink (a SIEM, a Collector) | the sink's port | Only when `InkwallConfig.spec.events.export` has sinks ([SIEM export](../../../docs/siem-export.md)) |
 | The operator | Envoy Gateway's, Istio's and the HAProxy controller's gateway pods | the ports the pods serve HTTP on | The probe that proves a route is wired ([Istio](../../../docs/istio.md#the-operators-probe), [HAProxy](../../../docs/haproxy.md#the-probe-and-programmed)) |
 | The proxy | the engine | a Unix socket or localhost | In the same pod: no policy applies |
 
@@ -274,7 +277,7 @@ general (`networkPolicy.webhookFrom` narrows it), the distribution server from
 `injection.proxyNamespaces` (every namespace with `*`), and the metrics from anywhere
 (`networkPolicy.metricsFrom` narrows it, e.g. to Prometheus' namespace).
 `networkPolicy.egress.enabled: true` also limits what the chart's pods connect to: DNS, the API
-server's ports, and `networkPolicy.egress.extra`: add the control plane's address there, and the
+server's ports, and `networkPolicy.egress.extra`: add the control plane's address there, each export sink's, and the
 ports the probe connects to on the proxy pods, or policies on their routes stay `Unverified`.
 Engines run in the proxies' namespaces, which the chart doesn't own: if those deny by default, let the
 engines reach the operator's distribution port and the API server, and Prometheus reach their

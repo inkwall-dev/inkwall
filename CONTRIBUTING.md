@@ -178,6 +178,14 @@ samples, and fails on any of:
   memory is flat: the compiled rule sets and the buffers it reuses. The floor stays above the garbage
   collector's swings, and a leak of 1 KiB per request at the default rate passes it within two hours.
 
+With `SOAK_EXPORT=1` (the default), the engines' events are also exported to an HTTP sink
+(`operator/test/eventsink`, `hack/kind/soak-export.sh`). The sink fails half the requests, then is
+down for `SOAK_EXPORT_DOWN_FOR` (10 min) from a third of the run, with the operator's export
+buffer kept small (`SOAK_EXPORT_BUFFER_MIB`, 1, and `SOAK_EXPORT_DISK_MIB`, 2) so the outage fills
+it. The run fails if the operator passes its memory limit, if the full buffer's drops aren't
+counted, if an engine drops events, or if the backlog doesn't drain within `SOAK_RECOVERY` once
+the sink is back.
+
 Each check prints an `ok` or `FAIL` line, as the e2e scripts do, and a memory series with no sample
 at all (the sampling broke) fails too, as does `SOAK_CHAOS=1` with no scenario run.
 

@@ -112,7 +112,19 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   policy goes `Programmed=False` (`Unverified`), naming the `Backend` to look for in the
   controller's log; alert on `haproxy_rejected_custom_resource_generation` and on policies that
   aren't `Ready`.
-
+- **Export of security events to SIEMs** (`spec.events.export`, [SIEM export](siem-export.md)).
+  Nothing is exported until you add sinks. The chart changes with it, also for clusters that
+  don't export:
+  - The operator's default `operator.resources.limits.memory` is 768Mi (was 512Mi), for the
+    export buffer and its requests; `values.yaml` gives the formula. If you set your own limit,
+    check it against the formula before you add sinks.
+  - The `events` emptyDir's `sizeLimit` grows by `events.export.diskMiB` (512 MiB by default):
+    the node needs that much ephemeral storage free per replica once sinks fill the buffer. Lower
+    `diskMiB` on small nodes.
+  - `operator.terminationGracePeriodSeconds` is set to 30, explicitly: 5 s of shutdown delay, up
+    to 15 s for the sinks to send what is buffered, and the rest of the shutdown.
+  - The new values default with `--reuse-values` too. With the chart's egress NetworkPolicy, list
+    each sink in `networkPolicy.egress.extra`.
 - **Envoy Gateway's routes are proven by the operator's probe**, as Istio's and the HAProxy
   controller's are. After the upgrade, a policy on an HTTPRoute that Envoy Gateway serves is
   `Programmed=False`, reason `Unverified`, until the probe has reached the engine on every Envoy
