@@ -1189,3 +1189,48 @@ func TestRateLimits(t *testing.T) {
 		t.Errorf("limits without a store: %v, want an error naming the policy", err)
 	}
 }
+
+// A request two policies inspect: once the first denies it by a rate
+// limit, in BodyLimit, its body isn't read and the second isn't charged,
+// as Check stops at the first deny (#705).
+func TestRateLimitsSeveralPolicies(t *testing.T) {
+	b := testBundle()
+	// shop/site (Block) covers /, shop/api (Detect) /api: "/api/../x" is
+	// inspected by both, its raw form and its cleaned one (policiesFor).
+	b.Policies[0].RateLimits = []*bundlev1.RateLimit{{Name: "site", Requests: 1, Period: durationpb.New(time.Hour), Burst: 1}}
+	b.Policies[1].RateLimits = []*bundlev1.RateLimit{{Name: "api", Requests: 1, Period: durationpb.New(time.Hour), Burst: 5}}
+	set, err := Compile(b, Options{RateLimits: ratelimit.New(1024, 0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := func(uri string) *request.Request {
+		r := req("shop.example.com", uri)
+		r.Method, r.ClientIP = "POST", netip.MustParseAddr("198.51.100.7")
+		return r
+	}
+	var buf [4]*Policy
+	if ps := set.policiesFor(from("/api/../x"), buf[:0]); len(ps) != 2 {
+		t.Fatalf("/api/../x is inspected by %d policies, want 2", len(ps))
+	}
+	r := from("/api/../x")
+	if got := set.BodyLimit(r, 1<<10); got == 0 {
+		t.Fatal("first: body limit 0")
+	}
+	set.Check(context.Background(), r) // site: 1 of 1, api: 1 of 5
+	r = from("/api/../x")
+	if got := set.BodyLimit(r, 1<<10); got != 0 {
+		t.Errorf("over site's limit: body limit %d, want 0", got)
+	}
+	if v := set.Check(context.Background(), r); v.Status != 429 || v.RateLimit != "site" {
+		t.Errorf("over site's limit: %d %q, want 429 by site", v.Status, v.RateLimit)
+	}
+	// api was charged once, not for the denied request: 4 tokens left.
+	for i := range 4 {
+		if v := set.Check(context.Background(), from("/api/y")); v.Reason == pipeline.ReasonRateLimit {
+			t.Fatalf("api's request %d of its 4 left: limited (charged for the denied request)", i+1)
+		}
+	}
+	if v := set.Check(context.Background(), from("/api/y")); v.Reason != pipeline.ReasonRateLimit || v.Action != pipeline.ActionLog {
+		t.Errorf("api past its burst: %s/%s, want logged rate-limit (Detect)", v.Action, v.Reason)
+	}
+}

@@ -269,3 +269,40 @@ func TestCompileRateLimitsErrors(t *testing.T) {
 		t.Error("no limits needs no store")
 	}
 }
+
+// BodyLimit decides the limits before the body is read: a request over a
+// Block limit gets a body limit of 0, and Check uses that outcome instead
+// of charging again (#705).
+func TestRateLimitBodyLimit(t *testing.T) {
+	eval := &recordingEvaluator{}
+	p, _ := limitedPipeline(t, ModeBlock, eval, RateLimitConfig{Name: "upload", Requests: 1, Period: time.Hour, Burst: 2})
+	c := "198.51.100.7"
+	// Charged once per request, though both BodyLimit and Check ask.
+	for i := range 2 {
+		r := req(c, "POST", "/x")
+		if got := p.BodyLimit(r, 100); got != 100 {
+			t.Fatalf("request %d: body limit %d, want 100", i+1, got)
+		}
+		if v := check(p, r); v.Action != ActionAllow {
+			t.Fatalf("request %d: %s/%s, want allowed (charged once)", i+1, v.Action, v.Reason)
+		}
+	}
+	r := req(c, "POST", "/x")
+	if got := p.BodyLimit(r, 100); got != 0 {
+		t.Fatalf("over the limit: body limit %d, want 0 (the body isn't read)", got)
+	}
+	if v := check(p, r); v.Status != http.StatusTooManyRequests || !v.RateLimitEvent {
+		t.Fatalf("over the limit: %+v, want 429 decided in BodyLimit", v)
+	}
+	// A swap between BodyLimit and Check: the new bundle's pipeline finds
+	// no outcome of its own and decides again.
+	other, _ := limitedPipeline(t, ModeBlock, eval, RateLimitConfig{Name: "upload", Requests: 1, Period: time.Hour, Burst: 2})
+	r = req(c, "POST", "/x")
+	p.BodyLimit(r, 100)
+	if v := check(other, r); v.Action != ActionAllow {
+		t.Errorf("after a swap: %s/%s, want the new store's fresh bucket", v.Action, v.Reason)
+	}
+	if !p.RateLimited(r) || other.RateLimited(r) {
+		t.Error("RateLimited doesn't name the pipeline that limited")
+	}
+}

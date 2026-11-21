@@ -43,6 +43,10 @@ type Request struct {
 	Body []byte
 	// BodyTruncated reports that the body was longer than Body.
 	BodyTruncated bool
+	// RateLimits holds the rate limit outcomes the pipeline charged in
+	// BodyLimit, before the body was read, for its Check (pkg/pipeline):
+	// a request is charged once.
+	RateLimits any
 
 	// GRPC reports that the pipeline found the request to be a gRPC call:
 	// a POST with a gRPC content type whose body is gRPC messages. Its

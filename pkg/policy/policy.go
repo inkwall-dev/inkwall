@@ -259,6 +259,11 @@ func (s *Set) BodyLimit(r *request.Request, max int64) int64 {
 		if l = p.pipeline.BodyLimit(r, l); l > limit {
 			limit = l
 		}
+		// Over one of its rate limits: Check denies here, without the
+		// body, and charges no later policy.
+		if p.pipeline.RateLimited(r) {
+			return 0
+		}
 	}
 	return limit
 }

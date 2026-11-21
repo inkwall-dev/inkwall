@@ -289,8 +289,14 @@ var _ Inspector = (*Pipeline)(nil)
 
 // BodyLimit implements Inspector: max, or 0 for a path whose body is
 // skipped, so adapters don't buffer bodies that aren't inspected.
+// A request over one of the policy's Block rate limits is decided here,
+// before its body is read, and gets 0: a flood over its limit isn't read.
 func (p *Pipeline) BodyLimit(r *request.Request, max int64) int64 {
-	if p.routes.Decide(r.RawURI) != router.InspectAll || p.ipListed(r) != ReasonNone || p.denyGRPC && p.mode == ModeBlock && GRPCContentType(r) {
+	decision, listed := p.routes.Decide(r.RawURI), p.ipListed(r)
+	if p.limits != nil && listed == ReasonNone && decision != router.SkipAll && p.limitsFor(r, time.Now()).over != nil {
+		return 0
+	}
+	if decision != router.InspectAll || listed != ReasonNone || p.denyGRPC && p.mode == ModeBlock && GRPCContentType(r) {
 		return 0
 	}
 	return max
@@ -379,7 +385,7 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool, now
 	// Rate limits: past the IP lists and the skipped paths, which they
 	// don't count, and before anything takes an evaluation slot, so a
 	// flood over its limit costs no rule evaluation.
-	lim := p.limits.check(r, now, p.mode == ModeBlock)
+	lim := p.limitsFor(r, now)
 	if lim.over != nil {
 		return p.rateLimited(lim), nil
 	}

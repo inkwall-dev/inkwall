@@ -257,6 +257,59 @@ func (rl *RateLimits) check(r *request.Request, t time.Time, block bool) limited
 	return out
 }
 
+// decisions are the rate limit outcomes charged for one request, by
+// pipeline: up to 4, the policies a request can have (pkg/policy).
+type decisions struct {
+	n int
+	d [4]struct {
+		p *Pipeline
+		o limited
+	}
+}
+
+// limitsFor charges r against p's limits at now, once: BodyLimit and Check
+// both ask, and the second gets the first's outcome. A pipeline of another
+// bundle (a swap between the two) finds none of its own and decides again.
+func (p *Pipeline) limitsFor(r *request.Request, now time.Time) limited {
+	if p.limits == nil {
+		return limited{}
+	}
+	ds, _ := r.RateLimits.(*decisions)
+	if ds != nil {
+		for _, d := range ds.d[:ds.n] {
+			if d.p == p {
+				return d.o
+			}
+		}
+	}
+	o := p.limits.check(r, now, p.mode == ModeBlock)
+	if ds == nil {
+		ds = &decisions{}
+		r.RateLimits = ds
+	}
+	if ds.n < len(ds.d) {
+		ds.d[ds.n].p, ds.d[ds.n].o = p, o
+		ds.n++
+	}
+	return o
+}
+
+// RateLimited reports whether r was charged and found over one of p's
+// Block limits (in BodyLimit): pkg/policy stops charging other policies
+// then, as Check stops at the first deny.
+func (p *Pipeline) RateLimited(r *request.Request) bool {
+	ds, _ := r.RateLimits.(*decisions)
+	if ds == nil {
+		return false
+	}
+	for _, d := range ds.d[:ds.n] {
+		if d.p == p {
+			return d.o.over != nil
+		}
+	}
+	return false
+}
+
 // rateLimited is the verdict of a request over a Block limit: 429 with
 // Retry-After.
 func (p *Pipeline) rateLimited(o limited) Verdict {
