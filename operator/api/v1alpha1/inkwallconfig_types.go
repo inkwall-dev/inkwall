@@ -724,7 +724,8 @@ type SigningKeyStatus struct {
 	// +kubebuilder:validation:MaxLength=128
 	ActiveKeyID string `json:"activeKeyID"`
 
-	// Phase of the rotation.
+	// Phase of the rotation. New phases may be added: to wait for a
+	// rotation, watch the SigningKeyRotation condition instead.
 	Phase SigningKeyPhase `json:"phase"`
 
 	// Since is when the phase began (Publishing, Retiring), or when the

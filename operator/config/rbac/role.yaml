@@ -116,6 +116,7 @@ rules:
   resources:
   - clusterwafrulesets/status
   - inkwallconfigs/status
+  - wafiplists/status
   - wafpolicies/status
   - wafrulesets/status
   verbs:

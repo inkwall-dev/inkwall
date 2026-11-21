@@ -13,6 +13,7 @@ is down.
 - [Conditions](#conditions)
   - [WAFPolicy](#wafpolicy)
   - [WAFRuleSet and ClusterWAFRuleSet](#wafruleset-and-clusterwafruleset)
+  - [WAFIPList](#wafiplist)
   - [InkwallConfig](#inkwallconfig)
 - [Explaining a policy or a denial](#explaining-a-policy-or-a-denial)
   - [Explain a policy](#explain-a-policy)
@@ -198,6 +199,17 @@ fix from these tables ([Explaining a policy or a denial](#explaining-a-policy-or
 
 `Accepted`, with the reasons `Accepted`, `InvalidRef` (a ConfigMap or key that doesn't exist, or
 an unknown built-in rule set) and `RuleCompileError` (rules that don't compile), as above.
+
+### WAFIPList
+
+`Accepted` (since 0.7.0):
+
+<!-- reasons: WAFIPList Accepted -->
+| Reason | Meaning | Fix |
+|---|---|---|
+| `Accepted` | Every entry parses as the engines parse it. | |
+| `InvalidEntries` | An entry isn't an address or CIDR prefix the engines can parse (999.1.1.1, a prefix length over 32 or 128). The webhook refuses such entries, so the list was written while it was down. The policies that use the list aren't `Accepted` either (`InvalidRef`). | Fix or remove the entry the message names. |
+<!-- end reasons -->
 
 ### InkwallConfig
 
