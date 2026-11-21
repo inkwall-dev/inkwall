@@ -34,8 +34,10 @@ OPERATOR_NS=inkwall-system
 # The controller's namespace, a proxy namespace (hack/kind/operator.sh),
 # and the apps'.
 NS=haproxy-e2e
-# Controller v3.2.19 (HAProxy 3.2), from its chart.
-HAPROXY_IMAGE_TAG=3.2.19
+# Controller v3.2.20 (HAProxy 3.2), from its chart. Not the chart's default
+# (3.4 since chart 1.55.0): 3.4 dropped the backend snippets that load the
+# filter.
+HAPROXY_IMAGE_TAG=3.2.20
 HAPROXY_REPO=https://haproxytech.github.io/helm-charts
 CLASS=haproxy-e2e
 HOST=haproxy.e2e.example.com

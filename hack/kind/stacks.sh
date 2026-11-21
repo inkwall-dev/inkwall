@@ -48,7 +48,7 @@ STACK_POLICY_SPEC=${STACK_POLICY_SPEC:-}
 # The engine's flags of the standalone proxy, besides its upstream.
 STACK_STANDALONE_ARGS=${STACK_STANDALONE_ARGS:---mode=block}
 # The HAProxy controller's image, as hack/kind/haproxy-e2e.sh's.
-STACK_HAPROXY_IMAGE_TAG=3.2.19
+STACK_HAPROXY_IMAGE_TAG=3.2.20
 STACK_ISTIO_REPO=https://blob.istio.io/istio-release/charts
 
 stack_ns() {
