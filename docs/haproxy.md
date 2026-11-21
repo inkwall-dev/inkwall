@@ -159,13 +159,15 @@ Other reasons the policy isn't `Programmed`: a running controller pod without th
 (`SidecarMissing` or `PendingRestart`); a controller whose release the operator can't tell or
 doesn't wire (`ProxyVersionUnsupported`, [below](#controller-releases)); and, as `WiringFailed`, a
 pod without the agent's files, a 3.1 to 3.2 controller run with `--disable-config-snippets`
-covering backends, and, on 3.4, an Ingress that names a `Backend` of its own, or the controller's
-`Backend` CRD missing.
+covering backends, and, on 3.4, an Ingress (or a Service it routes to) that names a `Backend` of
+its own, or the controller's `Backend` CRD missing. On 3.4, a failed probe may mean that HAProxy
+rejected the operator's `Backend` ([below](#controller-releases)): the message says where to look.
 
 ### Controller releases
 
-The operator reads the controller's release from the tag of its pods' image (the chart's
-`controller.image.tag`, `3.4.1` or `v3.4`, say), and loads the filter:
+The operator reads each controller's release from the tag of its pods' image (the chart's
+`controller.image.tag`, `3.4.1` or `v3.4`, say), and loads the filter in the Ingresses that
+controller serves:
 
 - on **3.1 to 3.2**, with the Ingress's backend config snippet;
 - on **3.4 and later** (3.x), which dropped config snippets ("MAJOR: annotations: drop support for
@@ -173,14 +175,24 @@ The operator reads the controller's release from the tag of its pods' image (the
   with the controller's [`Backend` custom resource](https://github.com/haproxytech/kubernetes-ingress/blob/master/documentation/custom-resources.md#backend),
   whose CRD the controller's chart installs (its `crdjob`).
 
+It decides per controller: an Ingress's IngressClass names its controller
+(`haproxy.org/ingress-controller/<class>`), whose pods are those run with that `--ingress.class`
+(all of them, if none is). Only the controller's own pods count: running with the engine, in a
+proxy namespace (`injection.proxyNamespaces`), and owned by a ReplicaSet or DaemonSet (the chart's
+Deployment or DaemonSet). A pod someone else makes with the controller's labels, in another
+namespace or by hand, changes nothing, nor does the annotation below on such a pod. Two
+controllers of different releases are each wired as their own release asks, and each Ingress is
+probed on its own controller's pods.
+
 While a rollout from 3.2 to 3.4 runs, its Ingresses get the `Backend`, which 3.2 reads too; the
-probe says where it isn't in force.
+probe says where it isn't in force. Rolling back to 3.2 moves them back to the snippet.
 
 A pod whose image tag isn't its release (a digest alone, `latest`, a mirror's own tags), or that
-runs a release before 3.1 or a major release after 3, makes the policies on the controller's
-Ingresses `Programmed=False`, reason `ProxyVersionUnsupported`, naming the pod: the operator
-leaves those Ingresses as they are, wired or not. Say the release in the pods'
-`waf.inkwall.dev/haproxy-controller-version` annotation:
+runs a major release after 3, is wired with the `Backend` when its CRD is installed (the
+controller reads it since 3.2), and `Programmed`'s message says so; without the CRD, and for a
+release before 3.1, the policies on the controller's Ingresses are `Programmed=False`, reason
+`ProxyVersionUnsupported`, naming the pod: the operator leaves those Ingresses as they are, wired
+or not. Say the release in the pods' `waf.inkwall.dev/haproxy-controller-version` annotation:
 
 ```sh
 helm upgrade <release> haproxytech/kubernetes-ingress --reuse-values \
@@ -193,17 +205,32 @@ resource alone ([custom resources](https://github.com/haproxytech/kubernetes-ing
 Ingress:
 
 - the backend annotations of the Ingress, its Services and the controller's ConfigMap
-  (`timeout-server`, `load-balance`, `check`, `server-ssl`, `server-proto`, `cookie-persistence`,
-  ...) don't apply. `Programmed`'s message names those the Ingress has (`... haproxy.org/timeout-server
-  don't apply`). Its frontend annotations (`allow-list`, `rate-limit-*`, `path-rewrite`, ...) do;
-- an Ingress that names a `Backend` of its own (`cr-backend`) can't be protected: the policy is
-  `Programmed=False` (`WiringFailed`), and the Ingress is left as it is. So can't an Ingress whose
-  Service names one, which takes precedence over the Ingress's: the probe shows it `Unverified`;
+  (`timeout-server`, `load-balance`, `check`, `server-ssl`, `server-proto`, a Service's
+  `cookie-persistence`, ...) don't apply. `Programmed`'s message names those the Ingress has
+  (`... haproxy.org/timeout-server don't apply`). Its frontend annotations (`allow-list`,
+  `rate-limit-*`, `path-rewrite`, ...) do;
+- an Ingress that names a `Backend` of its own (`cr-backend`), or routes to a Service that does
+  (the controller takes a Service's over the Ingress's), can't be protected: the policy is
+  `Programmed=False` (`WiringFailed`), naming the annotation, and the Ingress is left as it is;
+- a `cr-backend` in the controller's ConfigMap, a default `Backend` for every Ingress, no longer
+  applies to the protected ones, whose `cr-backend` is the operator's;
 - HAProxy's buffer is set in a `Global` custom resource (no `global-config-snippet`):
   [Limits](#limits).
 
-If HAProxy rejects the operator's `Backend`, the controller sets it aside and logs it
-(`haproxy_rejected_custom_resource_generation`): the probe shows the policy `Unverified`.
+**A `Backend` HAProxy rejects fails open.** HAProxy checks the whole configuration at once, so
+the controller [sets aside](https://github.com/haproxytech/kubernetes-ingress/blob/master/documentation/custom-resources.md#when-haproxy-rejects-a-custom-resource)
+a custom resource it rejects and builds that backend from the annotations instead: the Ingress
+is then served **without the filter**, uninspected, until the `Backend` changes. (On 3.1 to 3.2 a
+snippet HAProxy rejects keeps the last configuration that loaded.) The operator's probe shows it:
+the policy is `Programmed=False`, `Unverified`, and the message says to look for the `Backend` in
+the controller's log and its `haproxy_rejected_custom_resource_generation` metric. Alert on that
+metric, and on policies that aren't `Ready`.
+
+**`standalone-backend` is deprecated** in 3.4: the controller logs `DEPRECATED: annotation
+"standalone-backend" will be removed in a future version`. The operator still needs it, so that
+each protected Ingress has a backend of its own; it keeps setting it while the controller reads
+it, and will move to whatever upstream gives in its place in the Inkwall release that supports
+the controller release that drops it (the warning is harmless until then).
 
 ### Limits
 

@@ -1283,6 +1283,7 @@ holds what its wiring writes, and its proxy's own kinds.
 | HAProxy's `ClusterRole`: `ingresses` | update, patch | The backend snippet and `cr-backend` annotations |
 | HAProxy's: `backends` (ingress.v3.haproxy.org) | full | The operator's `Backend` per protected Ingress (controller 3.4 and later); makes the role the integration's own |
 | HAProxy's: `globals` (ingress.v3.haproxy.org) | get | HAProxy's buffer on controller 3.4 (`tune.bufsize`) |
+| HAProxy's: `services` | get | A protected Ingress's Services, whose `cr-backend` would take over the operator's (3.4) |
 | `configmaps` | full, cluster-wide | `inkwall-trust` and `inkwall-haproxy` per namespace, engine reports |
 | `secrets` | in `inkwall-system` | Bundle, signing key, certificates |
 | `roles`, `rolebindings` | in `inkwall-system` | Bundle Secret grant ([§4.3](#43-injection-controller)) |

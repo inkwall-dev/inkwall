@@ -97,13 +97,21 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   wired: 3.4 dropped the config snippets the operator loads the filter with on 3.1 to 3.2, so on
   3.4 each protected Ingress gets a `Backend` custom resource of the controller's
   (`inkwall-waf-<ingress>`), which its `haproxy.org/cr-backend` annotation names. The operator
-  tells the release from the controller pods' image tag; a controller it can't tell (a digest, a
-  mirror's own tags, before 3.1) leaves the policy `Programmed=False`, reason
-  `ProxyVersionUnsupported`: say the release in the pods' `waf.inkwall.dev/haproxy-controller-version`
-  annotation. On 3.4 the backend annotations of a protected Ingress (`timeout-server`,
-  `server-ssl`, ...) don't apply, and an Ingress that names a `Backend` of its own can't be
-  protected ([HAProxy](haproxy.md#controller-releases)). Upgrading the controller from 3.2 to 3.4
-  moves its Ingresses from the snippet to the `Backend`; nothing to do.
+  tells each controller's release from its own pods' image tag (pods in the proxy namespaces,
+  owned by its ReplicaSet or DaemonSet); one it can't tell (a digest, a mirror's own tags) is
+  wired with the `Backend` when its CRD is installed, and a release before 3.1, or one it can't
+  tell without the CRD, leaves the policy `Programmed=False`, reason `ProxyVersionUnsupported`:
+  say the release in the pods' `waf.inkwall.dev/haproxy-controller-version` annotation. On 3.4
+  the backend annotations of a protected Ingress (`timeout-server`, `server-ssl`, ...) and a
+  `cr-backend` default in the controller's ConfigMap don't apply, and an Ingress that names a
+  `Backend` of its own, or routes to a Service that does, can't be protected
+  ([HAProxy](haproxy.md#controller-releases)). Upgrading the controller from 3.2 to 3.4 moves its
+  Ingresses from the snippet to the `Backend`, and rolling back moves them back; nothing to do.
+  **Security:** a `Backend` HAProxy rejects is set aside by the controller, which then serves the
+  Ingress without the filter (a rejected 3.2 snippet kept the last good configuration): the
+  policy goes `Programmed=False` (`Unverified`), naming the `Backend` to look for in the
+  controller's log; alert on `haproxy_rejected_custom_resource_generation` and on policies that
+  aren't `Ready`.
 
 - **Envoy Gateway's routes are proven by the operator's probe**, as Istio's and the HAProxy
   controller's are. After the upgrade, a policy on an HTTPRoute that Envoy Gateway serves is
