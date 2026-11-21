@@ -245,6 +245,25 @@ func TestStatusExport(t *testing.T) {
 	}
 }
 
+// What status can't tell from the condition alone is a warning: no
+// condition yet, one behind the InkwallConfig's generation, a replica's
+// sink failing under a True condition.
+func TestStatusExportWarnings(t *testing.T) {
+	sc := healthyCluster()
+	sc.config.Spec.Events.Export = &wafv1alpha1.ExportSpec{Sinks: []wafv1alpha1.EventSink{{Name: "splunk"}}}
+	sc.exports = map[string][]enginereport.Sink{"inkwall-operator-a": {{Name: "splunk", State: "Exporting"}}}
+	if w := strings.Join(sc.status(t).Warnings, "\n"); !strings.Contains(w, "isn't written yet") {
+		t.Errorf("no condition: warnings %q", w)
+	}
+	sc.config.Generation = 4
+	sc.config.Status.Conditions = []metav1.Condition{{Type: wafv1alpha1.ConditionEventsExported, Status: metav1.ConditionTrue, Reason: "Exporting", ObservedGeneration: 3}}
+	sc.exports["inkwall-operator-b"] = []enginereport.Sink{{Name: "splunk", State: "Failing", Message: "auth: 401"}}
+	w := strings.Join(sc.status(t).Warnings, "\n")
+	if !strings.Contains(w, "describes generation 3") || !strings.Contains(w, "sink splunk on inkwall-operator-b is Failing while EventsExported is True") {
+		t.Errorf("warnings %q", w)
+	}
+}
+
 // The command: exit 0 when healthy, 1 when not, 2 on a usage error.
 func TestRunStatus(t *testing.T) {
 	sc := healthyCluster()

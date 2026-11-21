@@ -313,8 +313,9 @@ usual cause: put shared rules in one rule set the policies reference.
 ### InkwallEventExportFailing
 
 An export sink of `spec.events.export` has had events waiting on a replica and accepted none of
-its requests for 15 minutes, or a replica's full export buffer has dropped events for it for 15
-minutes. The replica keeps the events in its buffer, up to its bounds, and drops the oldest when
+its requests for about 17 minutes (2 minutes without a success, held for 15), or a replica's full
+export buffer has dropped events for it for 15 minutes. A sink with nothing to send never fires
+it. The replica keeps the events in its buffer, up to its bounds, and drops the oldest when
 it is full. The engines and the control plane are never slowed. The InkwallConfig's
 `EventsExported` condition names the sink, the replica and the last error class:
 

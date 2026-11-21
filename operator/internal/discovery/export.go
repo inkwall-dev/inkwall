@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,13 +22,15 @@ import (
 
 // Reasons of the InkwallConfig's EventsExported condition (design 0010
 // §8). When several apply, the first of ExportConfigInvalid,
-// ExportAddressRefused, ExportFailing and ExportDropping wins.
+// ExportAddressRefused, ExportFailing, ExportNotReported and ExportDropping
+// wins.
 const (
 	ReasonExporting            = "Exporting"
 	ReasonExportFailing        = "ExportFailing"
 	ReasonExportConfigInvalid  = "ExportConfigInvalid"
 	ReasonExportDropping       = "ExportDropping"
 	ReasonExportAddressRefused = "ExportAddressRefused"
+	ReasonExportNotReported    = "ExportNotReported"
 )
 
 // exportFieldManager owns the EventsExported condition alone: it is
@@ -42,18 +45,51 @@ const exportResync = 10 * time.Second
 // maxConditionMessage keeps the message readable.
 const maxConditionMessage = 1024
 
+// DefaultNotReportedAfter is how long a configured sink may be missing from
+// a live replica's report (it is starting, or picking the sink up) before
+// it counts as not reported: not exporting from there.
+const DefaultNotReportedAfter = time.Minute
+
+// NotReported is a configured sink a live replica doesn't report, or, with
+// Replica "", that no live replica reports at all.
+type NotReported struct{ Sink, Replica string }
+
 // The replicas' sink states, by precedence, and the reason each gives.
 var exportPrecedence = []struct{ state, reason string }{
 	{enginereport.SinkConfigInvalid, ReasonExportConfigInvalid},
 	{enginereport.SinkAddressRefused, ReasonExportAddressRefused},
 	{enginereport.SinkFailing, ReasonExportFailing},
+	{sinkNotReported, ReasonExportNotReported},
 	{enginereport.SinkDropping, ReasonExportDropping},
 }
 
+// sinkNotReported is the state of a sink missing from a replica's report.
+const sinkNotReported = "NotReported"
+
+// Missing lists the configured sinks the fresh reports don't name: per live
+// replica, or with Replica "" when no replica reports at all.
+func Missing(sinks []string, reports []enginereport.ReplicaSinks) []NotReported {
+	var out []NotReported
+	for _, s := range sinks {
+		if len(reports) == 0 {
+			out = append(out, NotReported{Sink: s})
+			continue
+		}
+		for _, r := range reports {
+			if !slices.ContainsFunc(r.Sinks, func(rs enginereport.Sink) bool { return rs.Name == s }) {
+				out = append(out, NotReported{Sink: s, Replica: r.Replica})
+			}
+		}
+	}
+	return out
+}
+
 // ExportCondition folds the replicas' reports of the configured sinks
-// into the EventsExported condition; nil with no sinks, or before any
-// replica reports one.
-func ExportCondition(sinks []string, reports []enginereport.ReplicaSinks, generation int64) *metav1.Condition {
+// into the EventsExported condition. notReported are the configured sinks
+// missing from the reports past the grace (Missing, held for
+// DefaultNotReportedAfter): not exporting from there. Nil with no sinks,
+// or while nothing is reported nor missing for long.
+func ExportCondition(sinks []string, reports []enginereport.ReplicaSinks, notReported []NotReported, generation int64) *metav1.Condition {
 	if len(sinks) == 0 {
 		return nil
 	}
@@ -84,7 +120,17 @@ func ExportCondition(sinks []string, reports []enginereport.ReplicaSinks, genera
 			byState[s.State] = append(byState[s.State], what)
 		}
 	}
-	if reported == 0 {
+	for _, m := range notReported {
+		if !configured[m.Sink] {
+			continue
+		}
+		what := fmt.Sprintf("sink %s on %s: not in its report", m.Sink, m.Replica)
+		if m.Replica == "" {
+			what = fmt.Sprintf("sink %s: no operator replica reports it", m.Sink)
+		}
+		byState[sinkNotReported] = append(byState[sinkNotReported], what)
+	}
+	if reported == 0 && len(byState[sinkNotReported]) == 0 {
 		return nil
 	}
 	c := &metav1.Condition{Type: wafv1alpha1.ConditionEventsExported, ObservedGeneration: generation}
@@ -106,11 +152,20 @@ func ExportCondition(sinks []string, reports []enginereport.ReplicaSinks, genera
 		slices.Sort(plaintext)
 		parts = append(parts, "plaintext (insecure: true): "+strings.Join(plaintext, ", "))
 	}
-	c.Message = strings.Join(parts, ". ")
-	if len(c.Message) > maxConditionMessage {
-		c.Message = c.Message[:maxConditionMessage-3] + "..."
-	}
+	c.Message = cut(strings.Join(parts, ". "), maxConditionMessage)
 	return c
+}
+
+// cut shortens s to at most n bytes, at a rune boundary, with "...".
+func cut(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	i := n - 3
+	for i > 0 && !utf8.RuneStart(s[i]) {
+		i--
+	}
+	return s[:i] + "..."
 }
 
 // applyExportCondition sets the InkwallConfig's EventsExported condition,

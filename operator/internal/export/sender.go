@@ -137,6 +137,8 @@ type sender struct {
 	// that a request couldn't be encoded.
 	log          func(msg string, kv ...any)
 	encodeFailed atomic.Bool
+	// requests are the goroutines of the requests in flight.
+	requests sync.WaitGroup
 }
 
 func newSender(name string, buf *buffer, hasPolicy func(string) bool, m Metrics, st *sinkState) *sender {
@@ -168,6 +170,9 @@ type held struct {
 // run sends until ctx ends.
 func (s *sender) run(ctx context.Context) {
 	defer close(s.done)
+	// done only once every request goroutine has returned: nothing counts
+	// for the sink after it is stopped (its metrics forgotten).
+	defer s.requests.Wait()
 	var (
 		cur      *held
 		b        builder
@@ -341,7 +346,9 @@ func (s *sender) dispatch(ctx context.Context, b builder, encoding string, items
 	f := &flight{items: items, end: end}
 	p := b.payload()
 	f.size = p.size
+	s.requests.Add(1)
 	go func() {
+		defer s.requests.Done()
 		s.deliver(ctx, f, part{items: items, p: p, encoding: encoding})
 		select {
 		case answered <- f:

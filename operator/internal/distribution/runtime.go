@@ -260,7 +260,9 @@ func (p *Publisher) Start(ctx context.Context) error {
 		engines, gen := p.Engines.Snapshot()
 		var sinks []enginereport.Sink
 		if p.Export != nil {
-			sinks = p.Export()
+			if sinks = p.Export(); sinks == nil {
+				sinks = []enginereport.Sink{}
+			}
 		}
 		classes := exportClasses(sinks)
 		classChanged := classes != lastClasses && time.Since(classWrite) >= debounce
@@ -329,8 +331,10 @@ func reportData(engines []byte, left int, sinks []enginereport.Sink) map[string]
 		updatedAtKey: time.Now().UTC().Format(time.RFC3339Nano),
 		leftOutKey:   strconv.Itoa(left),
 	}
-	if len(sinks) > 0 {
-		// At most 4 sinks with short messages: far within the room maxReport leaves.
+	if sinks != nil {
+		// Always, [] with no sinks, so the leader tells a replica without
+		// sinks from one that doesn't report them. At most 4 sinks with
+		// short messages: far within the room maxReport leaves.
 		if raw, err := json.Marshal(sinks); err == nil {
 			d[enginereport.ExportKey] = string(raw)
 		}

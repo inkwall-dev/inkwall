@@ -6,9 +6,11 @@ package discovery
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -38,6 +40,7 @@ func TestExportCondition(t *testing.T) {
 		name     string
 		sinks    []string
 		reports  []enginereport.ReplicaSinks
+		missing  []NotReported // past the grace
 		nilCond  bool
 		status   metav1.ConditionStatus
 		reason   string
@@ -47,8 +50,26 @@ func TestExportCondition(t *testing.T) {
 		{name: "no sinks", reports: []enginereport.ReplicaSinks{replica("a", ok("x"))}, nilCond: true},
 		{name: "no report yet", sinks: []string{"x"}, nilCond: true},
 		{name: "every sink exports", sinks: []string{"x", "y"},
-			reports: []enginereport.ReplicaSinks{replica("a", ok("x"), ok("y")), replica("b", ok("x"))},
+			reports: []enginereport.ReplicaSinks{replica("a", ok("x"), ok("y")), replica("b", ok("x"), ok("y"))},
 			status:  metav1.ConditionTrue, reason: ReasonExporting, contains: []string{"every sink exports (2)"}},
+		// A live replica that doesn't report a sink, past the grace, doesn't
+		// export it.
+		{name: "a sink a replica doesn't report", sinks: []string{"x", "y"},
+			reports: []enginereport.ReplicaSinks{replica("a", ok("x"), ok("y")), replica("b", ok("x"))},
+			missing: []NotReported{{Sink: "y", Replica: "b"}},
+			status:  metav1.ConditionFalse, reason: ReasonExportNotReported, contains: []string{"ExportNotReported: sink y on b: not in its report"}},
+		{name: "no replica reports", sinks: []string{"x"},
+			missing: []NotReported{{Sink: "x"}},
+			status:  metav1.ConditionFalse, reason: ReasonExportNotReported, contains: []string{"sink x: no operator replica reports it"}},
+		// Renamed: the old name is still reported, the new one by no one.
+		{name: "renamed sink", sinks: []string{"new"},
+			reports: []enginereport.ReplicaSinks{replica("a", ok("old"))},
+			missing: []NotReported{{Sink: "new", Replica: "a"}},
+			status:  metav1.ConditionFalse, reason: ReasonExportNotReported, lacks: []string{"old"}},
+		{name: "failing over not reported", sinks: []string{"x", "y"},
+			reports: []enginereport.ReplicaSinks{replica("a", enginereport.Sink{Name: "x", State: enginereport.SinkFailing})},
+			missing: []NotReported{{Sink: "y", Replica: "a"}},
+			status:  metav1.ConditionFalse, reason: ReasonExportFailing, contains: []string{"ExportNotReported: sink y on a"}},
 		{name: "plaintext named", sinks: []string{"x"},
 			reports: []enginereport.ReplicaSinks{replica("a", enginereport.Sink{Name: "x", State: enginereport.SinkExporting, Plaintext: true})},
 			status:  metav1.ConditionTrue, reason: ReasonExporting, contains: []string{"plaintext (insecure: true): x"}},
@@ -73,7 +94,7 @@ func TestExportCondition(t *testing.T) {
 			status:  metav1.ConditionTrue, reason: ReasonExporting, lacks: []string{"old"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := ExportCondition(tc.sinks, tc.reports, 3)
+			c := ExportCondition(tc.sinks, tc.reports, tc.missing, 3)
 			if tc.nilCond {
 				if c != nil {
 					t.Fatalf("condition %+v, want none", c)
@@ -99,8 +120,47 @@ func TestExportCondition(t *testing.T) {
 	for range 40 {
 		long = append(long, enginereport.Sink{Name: "x", State: enginereport.SinkFailing, Message: strings.Repeat("m", 100)})
 	}
-	if c := ExportCondition([]string{"x"}, []enginereport.ReplicaSinks{replica("a", long...)}, 1); len(c.Message) > maxConditionMessage {
+	if c := ExportCondition([]string{"x"}, []enginereport.ReplicaSinks{replica("a", long...)}, nil, 1); len(c.Message) > maxConditionMessage {
 		t.Errorf("message of %d bytes", len(c.Message))
+	}
+	// Cut at a rune boundary.
+	if got := cut(strings.Repeat("é", 600), maxConditionMessage); !utf8.ValidString(got) || len(got) > maxConditionMessage {
+		t.Errorf("cut to %d bytes, valid UTF-8 %t", len(got), utf8.ValidString(got))
+	}
+}
+
+// Missing names each configured sink a live replica's report lacks, or
+// every one when no replica reports.
+func TestMissing(t *testing.T) {
+	ok := enginereport.Sink{Name: "x", State: enginereport.SinkExporting}
+	got := Missing([]string{"x", "y"}, []enginereport.ReplicaSinks{replica("a", ok), replica("b")})
+	want := []NotReported{{"x", "b"}, {"y", "a"}, {"y", "b"}}
+	if !slices.Equal(got, want) {
+		t.Errorf("missing %v, want %v", got, want)
+	}
+	if got := Missing([]string{"x"}, nil); !slices.Equal(got, []NotReported{{Sink: "x"}}) {
+		t.Errorf("missing %v with no reports", got)
+	}
+}
+
+// A missing sink counts only once missing for the grace.
+func TestNotReportedAfterGrace(t *testing.T) {
+	now := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
+	r := &Reconciler{NotReportedAfter: time.Minute}
+	m := []NotReported{{Sink: "x", Replica: "a"}}
+	if got := r.notReported(m, now); len(got) != 0 {
+		t.Errorf("at once: %v", got)
+	}
+	if got := r.notReported(m, now.Add(59*time.Second)); len(got) != 0 {
+		t.Errorf("within the grace: %v", got)
+	}
+	if got := r.notReported(m, now.Add(time.Minute)); len(got) != 1 {
+		t.Errorf("past the grace: %v", got)
+	}
+	// Reported again: forgotten, and the grace starts over.
+	r.notReported(nil, now.Add(2*time.Minute))
+	if got := r.notReported(m, now.Add(3*time.Minute)); len(got) != 0 {
+		t.Errorf("missing again: %v, want the grace again", got)
 	}
 }
 
@@ -188,6 +248,24 @@ func TestReconcileEventsExported(t *testing.T) {
 	if ee == nil || ee.Status != metav1.ConditionTrue || ee.Reason != ReasonExporting || ee.LastTransitionTime.Before(&failedAt) {
 		t.Fatalf("EventsExported %+v after the sink recovered", ee)
 	}
+
+	// The replicas stop reporting (gone, or their reports stale): not
+	// True forever, but NotReported once missing for the grace.
+	if err := c.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: enginereport.NamePrefix + "op-a"}}); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now()
+	r.now = func() time.Time { return later }
+	if _, got = reconcileOnce(); meta.FindStatusCondition(got.Status.Conditions, wafv1alpha1.ConditionEventsExported).Reason != ReasonExporting {
+		t.Error("changed within the grace")
+	}
+	later = later.Add(DefaultNotReportedAfter)
+	_, got = reconcileOnce()
+	ee = meta.FindStatusCondition(got.Status.Conditions, wafv1alpha1.ConditionEventsExported)
+	if ee == nil || ee.Status != metav1.ConditionFalse || ee.Reason != ReasonExportNotReported || !strings.Contains(ee.Message, "no operator replica reports it") {
+		t.Fatalf("EventsExported %+v with no report past the grace", ee)
+	}
+	r.now = nil
 
 	// No sinks: the condition goes, the others stay.
 	got.Spec.Events.Export = nil

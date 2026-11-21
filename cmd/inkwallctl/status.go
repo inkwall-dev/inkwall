@@ -644,10 +644,17 @@ func printStatus(w io.Writer, st *Status) {
 // configured sink as each replica reports it.
 func exportStatus(ctx context.Context, c client.Reader, namespace string, stale time.Duration, now time.Time,
 	cfg *wafv1alpha1.InkwallConfig, st *Status, problem func(string, ...any), warn func(string, error)) {
-	if cond := meta.FindStatusCondition(cfg.Status.Conditions, wafv1alpha1.ConditionEventsExported); cond != nil {
+	note := func(format string, a ...any) { st.Warnings = append(st.Warnings, fmt.Sprintf(format, a...)) }
+	cond := meta.FindStatusCondition(cfg.Status.Conditions, wafv1alpha1.ConditionEventsExported)
+	if cond == nil {
+		note("spec.events.export has sinks, but the EventsExported condition isn't written yet (the operator's leader writes it within a minute)")
+	} else {
 		st.Export.Condition = &ConditionStatus{cond.Type, string(cond.Status), cond.Reason, cond.Message}
 		if cond.Status == "False" {
 			problem("security events aren't exported (EventsExported %s): %s", cond.Reason, cond.Message)
+		}
+		if cond.ObservedGeneration < cfg.Generation {
+			note("EventsExported describes generation %d of the InkwallConfig, which is at %d: it may be out of date", cond.ObservedGeneration, cfg.Generation)
 		}
 	}
 	configured := map[string]bool{}
@@ -669,6 +676,15 @@ func exportStatus(ctx context.Context, c client.Reader, namespace string, stale 
 	slices.SortFunc(st.Export.Sinks, func(a, b ExportSink) int {
 		return cmp.Or(strings.Compare(a.Name, b.Name), strings.Compare(a.Replica, b.Replica))
 	})
+	// The replicas' reports are newer than the condition, which the leader
+	// folds every few seconds: say when they disagree.
+	if cond != nil && cond.Status == "True" {
+		for _, s := range st.Export.Sinks {
+			if s.State != "" && s.State != "Exporting" {
+				note("sink %s on %s is %s while EventsExported is True: the condition hasn't caught up yet", s.Name, s.Replica, s.State)
+			}
+		}
+	}
 }
 
 func printExport(w io.Writer, ex ExportStatus) {

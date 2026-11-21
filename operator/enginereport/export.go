@@ -45,7 +45,8 @@ type ReplicaSinks struct {
 }
 
 // ReadExport reads the replicas' sinks from their reports in namespace,
-// skipping those not refreshed within stale; sorted by replica.
+// skipping those not refreshed within stale; sorted by replica. Every
+// fresh report is listed, a replica that reports no sinks with none.
 func ReadExport(ctx context.Context, c client.Reader, namespace string, stale time.Duration, now time.Time) ([]ReplicaSinks, error) {
 	var list corev1.ConfigMapList
 	if err := c.List(ctx, &list, client.InNamespace(namespace), client.MatchingLabels{Label: "true"}); err != nil {
@@ -57,13 +58,13 @@ func ReadExport(ctx context.Context, c client.Reader, namespace string, stale ti
 		if err != nil || now.Sub(updated) > stale {
 			continue
 		}
-		raw, ok := cm.Data[ExportKey]
-		if !ok {
-			continue
-		}
+		// A live replica that reports no sinks (still starting, or older
+		// than export) is listed too: its sinks are missing.
 		var sinks []Sink
-		if err := json.Unmarshal([]byte(raw), &sinks); err != nil {
-			continue
+		if raw, ok := cm.Data[ExportKey]; ok {
+			if err := json.Unmarshal([]byte(raw), &sinks); err != nil {
+				sinks = nil
+			}
 		}
 		out = append(out, ReplicaSinks{Replica: strings.TrimPrefix(cm.Name, NamePrefix), Sinks: sinks})
 	}

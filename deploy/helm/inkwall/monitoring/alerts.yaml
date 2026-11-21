@@ -103,8 +103,10 @@ groups:
           runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallbundlenearsizelimit
       - alert: InkwallEventExportFailing
         # Per replica and sink: events wait and no request was accepted in
-        # the last 2 minutes (never: the timestamp is 0), for 15 minutes; or
-        # a full export buffer drops events for 15 minutes.
+        # the last 2 minutes (never: the timestamp is 0), held for 15
+        # minutes, so about 17 minutes after the last success; or a full
+        # export buffer drops events for 15 minutes. An idle sink (nothing
+        # pending) never fires.
         expr: |
           (
             max by (namespace, pod, sink) (inkwall_operator_events_export_pending) > 0
