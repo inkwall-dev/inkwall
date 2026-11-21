@@ -281,8 +281,10 @@ geo:
     # Hours between updates.
     frequency: 24
     # Where the NetworkPolicy lets it connect, over HTTPS: a NetworkPolicy
-    # can't name MaxMind's hosts, so every address by default.
-    egressCIDRs: [0.0.0.0/0]
+    # can't name MaxMind's hosts, so every address by default, IPv4 and
+    # IPv6. The rule is the pod's: the operator's containers, which hold
+    # the bundle signing key, may reach these addresses over 443 too.
+    egressCIDRs: [0.0.0.0/0, "::/0"]
     resources:
       requests: {cpu: 10m, memory: 32Mi}
       limits: {memory: 128Mi}

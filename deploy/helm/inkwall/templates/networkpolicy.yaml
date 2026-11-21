@@ -97,7 +97,7 @@ spec:
         - {port: 443, protocol: TCP}
       to:
         {{- range $geo.geoipupdate.egressCIDRs }}
-        - ipBlock: {cidr: {{ . }}}
+        - ipBlock: {cidr: {{ . | quote }}}
         {{- end }}
     {{- end }}
     {{- with $egress.extra }}
