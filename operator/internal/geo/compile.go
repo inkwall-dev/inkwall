@@ -22,6 +22,7 @@ import (
 	"net/netip"
 	"runtime/debug"
 	"time"
+	"unicode/utf8"
 
 	"github.com/oschwald/maxminddb-golang/v2"
 
@@ -45,15 +46,19 @@ const (
 	MaxFileBytes = 256 << 20
 	// MaxSecretBytes bounds a database from a Secret, decompressed.
 	MaxSecretBytes = 16 << 20
-	// MaxNetworks bounds the networks a walk yields, past any real
-	// database: a tree whose nodes share children yields exponentially
-	// many.
-	MaxNetworks = 16_000_000
+	// MaxNetworks bounds the networks a walk yields: a tree whose nodes
+	// share children yields exponentially many. A tree without shared
+	// children yields one network per node, plus one (empty networks
+	// included), and a file of MaxFileBytes holds at most 32 Mi nodes of
+	// the smallest node a large database uses (8 bytes, 32-bit records): so
+	// no database within the file bound is refused for its networks.
+	// GeoLite2-City, the largest free one, has about 4 million nodes.
+	MaxNetworks = MaxFileBytes / 8
 	// Timeout bounds a compile.
 	Timeout = time.Minute
 	// maxCachedRecords bounds the records whose country is remembered by
 	// offset.
-	maxCachedRecords = 1 << 20
+	maxCachedRecords = 1 << 18
 )
 
 // The limits a compile applies; tests lower them.
@@ -77,12 +82,14 @@ func fail(reason, format string, args ...any) error {
 	return &Error{Reason: reason, Err: fmt.Errorf(format, args...)}
 }
 
-// ReasonOf returns the reason of err: its Error's, else Invalid.
+// ReasonOf returns the reason of err: its Error's. Other errors, such as
+// the API server's or a cancelled context (leadership lost), have none:
+// they are transient, and leave the condition as it is.
 func ReasonOf(err error) string {
 	if e, ok := errors.AsType[*Error](err); ok {
 		return e.Reason
 	}
-	return ReasonInvalid
+	return ""
 }
 
 // Table is a compiled country table.
@@ -117,10 +124,15 @@ func (t *Table) Built() time.Time {
 // isn't compiled (design 0011 §4.2).
 var ErrOlder = errors.New("the database is older than the stored table")
 
+// ErrUnchanged is returned for the database the stored table was compiled
+// from: it isn't compiled again.
+var ErrUnchanged = errors.New("the database is the stored table's")
+
 // Compile compiles the database db into a country table. db must not
 // change while it runs; a mapped file truncated under it is a recovered
-// fault, reported as Invalid. A database whose build epoch is before
-// floor's isn't compiled: ErrOlder.
+// fault, reported as Invalid: so db is read, hashed included, only in
+// here. The database floor was compiled from isn't compiled again
+// (ErrUnchanged), nor one whose build epoch is before floor's (ErrOlder).
 func Compile(ctx context.Context, db []byte, floor *Table) (*Table, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -153,6 +165,12 @@ type record struct {
 	} `maxminddb:"registered_country"`
 }
 
+// code is a record's country, and whether its code was bad.
+type code struct {
+	c   geotable.Country
+	bad bool
+}
+
 type compiler struct {
 	ctx      context.Context
 	r        *maxminddb.Reader
@@ -161,15 +179,21 @@ type compiler struct {
 	v6       ranges6
 	// gaps in the IPv6 walk: the alias prefixes it skips.
 	gaps    []span6
-	codes   map[uintptr]geotable.Country
+	codes   map[uintptr]code
 	country int // records with country.iso_code
-	bad     int
+	bad     int // networks whose record's code isn't two letters
 	firstV4 int // the bits of the first IPv4 network, -1 before it
 	sawIPv4 bool
 }
 
 func compile(ctx context.Context, db []byte, floor *Table) (*Table, error) {
+	if len(db) == 0 {
+		return nil, fail(ReasonInvalid, "the database is empty")
+	}
 	sum := sha256.Sum256(db)
+	if floor != nil && sum == floor.DatabaseSHA256 {
+		return nil, ErrUnchanged
+	}
 	r, err := maxminddb.OpenBytes(db, maxminddb.DisableStringCache())
 	if err != nil {
 		return nil, fail(ReasonInvalid, "not a valid MaxMind DB: %v", err)
@@ -178,10 +202,16 @@ func compile(ctx context.Context, db []byte, floor *Table) (*Table, error) {
 		return nil, fmt.Errorf("%w: built %s, the stored table %s", ErrOlder,
 			time.Unix(int64(min(r.Metadata.BuildEpoch, 1<<62)), 0).UTC().Format(time.RFC3339), floor.Built().Format(time.RFC3339)) // #nosec G115 -- capped
 	}
-	if err := r.Verify(); err != nil {
-		return nil, fail(ReasonInvalid, "not a valid MaxMind DB: %v", err)
+	if err := checkMetadata(r.Metadata); err != nil {
+		return nil, err
 	}
-	c := &compiler{ctx: ctx, r: r, codes: map[uintptr]geotable.Country{}, firstV4: -1}
+	// No Verify: its memory grows with the database's distinct records
+	// (about 85 bytes each at its peak, measured on v2.9.1), which nothing
+	// here bounds, so a crafted file of a few million records would take
+	// the leader's memory. The walks below check what matters as they go:
+	// every tree record they follow is bounds-checked, every data record
+	// decoded, under the deadline and the caps.
+	c := &compiler{ctx: ctx, r: r, codes: map[uintptr]code{}, firstV4: -1}
 	if err := c.walk(); err != nil {
 		return nil, err
 	}
@@ -226,6 +256,27 @@ func compile(ctx context.Context, db []byte, floor *Table) (*Table, error) {
 		Aliases:        aliases,
 		BadCodes:       c.bad,
 	}, nil
+}
+
+// checkMetadata checks what Verify would of the metadata, and that the tree
+// can be walked within the cap: a tree without shared children has a
+// network per node, plus one.
+func checkMetadata(m maxminddb.Metadata) error {
+	switch {
+	case m.BinaryFormatMajorVersion != 2:
+		return fail(ReasonInvalid, "not a valid MaxMind DB: binary format %d, want 2", m.BinaryFormatMajorVersion)
+	case m.IPVersion != 4 && m.IPVersion != 6:
+		return fail(ReasonInvalid, "not a valid MaxMind DB: IP version %d", m.IPVersion)
+	case m.RecordSize != 24 && m.RecordSize != 28 && m.RecordSize != 32:
+		return fail(ReasonInvalid, "not a valid MaxMind DB: record size %d", m.RecordSize)
+	case m.NodeCount == 0:
+		return fail(ReasonInvalid, "not a valid MaxMind DB: no nodes")
+	case m.NodeCount >= uint(maxNetworks):
+		return fail(ReasonTooLarge, "%d nodes in the search tree, more than %d networks", m.NodeCount, maxNetworks)
+	case !utf8.ValidString(m.DatabaseType):
+		return fail(ReasonInvalid, "not a valid MaxMind DB: the database type isn't UTF-8")
+	}
+	return nil
 }
 
 // step counts a network and checks the deadline and the cap.
@@ -341,13 +392,16 @@ func (c *compiler) add6(p netip.Prefix, code geotable.Country) error {
 
 // code returns the country of a network's record: country.iso_code, else
 // registered_country.iso_code; upper-cased; no country for ZZ or for a code
-// that isn't two ASCII letters (counted).
+// that isn't two ASCII letters (counted per network).
 func (c *compiler) code(res maxminddb.Result) (geotable.Country, error) {
 	if !res.Found() {
 		return geotable.NoCountry, nil
 	}
-	if code, ok := c.codes[res.Offset()]; ok {
-		return code, nil
+	if k, ok := c.codes[res.Offset()]; ok {
+		if k.bad {
+			c.bad++
+		}
+		return k.c, nil
 	}
 	var rec record
 	if err := res.Decode(&rec); err != nil {
@@ -359,7 +413,7 @@ func (c *compiler) code(res maxminddb.Result) (geotable.Country, error) {
 	} else {
 		s = rec.Registered.ISOCode
 	}
-	code := geotable.NoCountry
+	k := code{}
 	if s != "" {
 		b := []byte(s)
 		for i, ch := range b {
@@ -368,16 +422,17 @@ func (c *compiler) code(res maxminddb.Result) (geotable.Country, error) {
 			}
 		}
 		var ok bool
-		if code, ok = geotable.ParseCountry(string(b)); !ok {
+		if k.c, ok = geotable.ParseCountry(string(b)); !ok {
+			k.bad = true
 			c.bad++
-		} else if code.String() == "ZZ" {
-			code = geotable.NoCountry
+		} else if k.c.String() == "ZZ" {
+			k.c = geotable.NoCountry
 		}
 	}
 	if len(c.codes) < maxCachedRecords {
-		c.codes[res.Offset()] = code
+		c.codes[res.Offset()] = k
 	}
-	return code, nil
+	return k.c, nil
 }
 
 // aliases finds the prefixes in the walk's gaps: each points to the IPv4

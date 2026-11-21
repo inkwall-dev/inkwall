@@ -228,7 +228,7 @@ an unknown built-in rule set) and `RuleCompileError` (rules that don't compile),
 | `GeoDatabaseReady` | `NotFound` | The database file, or the Secret or its key, doesn't exist. Engines keep the last good table, if there was one. | Check `spec.geo.database`, the volume mounted at `/var/lib/inkwall/geo/`, or the Secret in the operator's namespace. |
 | `GeoDatabaseReady` | `Invalid` | The source isn't a valid MaxMind DB, or reading it failed or took more than a minute. Engines keep the last good table, if there was one. | Download the database again; the message says what failed. |
 | `GeoDatabaseReady` | `NoCountryData` | No record of the database has `country.iso_code`: it isn't a country database (an ASN database, or another schema). | Use a country or city database: GeoLite2 or GeoIP2 Country or City, DB-IP's Country Lite. |
-| `GeoDatabaseReady` | `TooLarge` | The database is over a bound: 256 MiB of file, 16 MiB from a Secret (decompressed), 16 million networks, or a country table of 32 MiB (14,400 KiB compressed). | Use a country database; for a Secret, a small custom one, or a file instead. |
+| `GeoDatabaseReady` | `TooLarge` | The database is over a bound: 256 MiB of file, 16 MiB from a Secret (decompressed), 32 Mi networks (more than its tree can have), or a country table of 32 MiB (14,400 KiB compressed). | Use a country database; for a Secret, a small custom one, or a file instead. |
 <!-- end reasons -->
 
 ## Explaining a policy or a denial

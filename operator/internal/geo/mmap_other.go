@@ -10,6 +10,9 @@ import (
 	"os"
 )
 
+// openNonblock: no FIFOs to guard against here.
+const openNonblock = 0
+
 // mapFile reads f into memory where there is no mmap: the operator runs on
 // Linux, this is for building elsewhere.
 func mapFile(f *os.File, size int) ([]byte, func() error, error) {
