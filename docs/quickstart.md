@@ -91,6 +91,16 @@ kubectl -n traefik logs deployment/traefik -c inkwall-engine | grep '"security e
 
 On a real application, run in `Detect` mode until the events show only attacks, excluding what
 they show to be false positives: see [From a log line to an exclusion](testing-policies.md#from-a-log-line-to-an-exclusion).
+A REST API needs one more setting first. The CRS allows only GET, HEAD, POST and OPTIONS, and rule
+911100 denies the rest. Allow the methods the API serves in the rule set binding:
+
+```yaml
+spec:
+  ruleSets:
+  - ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}
+    crs:
+      allowedMethods: [GET, HEAD, POST, OPTIONS, PUT, PATCH, DELETE]
+```
 
 ## Block
 
