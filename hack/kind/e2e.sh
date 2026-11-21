@@ -782,6 +782,12 @@ check "and geo is skipped: XA passes" geo_status 198.51.100.7 e2e-geo-0 200
 geo_db 1700000000 XA XB
 geo_secret
 restarts_before=$(engine_restarts)
+# The cluster may have no InkwallConfig yet: one made here goes after.
+geo_made_config=false
+if ! "${KUBECTL[@]}" get inkwallconfig default >/dev/null 2>&1; then
+  printf 'apiVersion: waf.inkwall.dev/v1alpha1\nkind: InkwallConfig\nmetadata: {name: default}\nspec: {}\n' | "${KUBECTL[@]}" apply -f - >/dev/null
+  geo_made_config=true
+fi
 "${KUBECTL[@]}" patch inkwallconfig default --type merge \
   -p '{"spec":{"geo":{"database":{"secretRef":{"name":"e2e-geo-db","key":"db"}}}}}' >/dev/null
 eventually "the database is Loaded" geo_loaded
@@ -804,7 +810,11 @@ eventually "geo in Detect mode is Enforced" web_current
 eventually "in Detect mode, XA passes" geo_status 203.0.113.7 e2e-geo-5 200
 eventually "and is logged (geo-deny, log)" geo_event 203.0.113.7 XA log
 "${KUBECTL[@]}" -n "$NS" patch wafpolicy web --type json -p '[{"op":"remove","path":"/spec/geo"}]' >/dev/null
-"${KUBECTL[@]}" patch inkwallconfig default --type json -p '[{"op":"remove","path":"/spec/geo"}]' >/dev/null
+if $geo_made_config; then
+  "${KUBECTL[@]}" delete inkwallconfig default >/dev/null
+else
+  "${KUBECTL[@]}" patch inkwallconfig default --type json -p '[{"op":"remove","path":"/spec/geo"}]' >/dev/null
+fi
 "${KUBECTL[@]}" -n "$OPERATOR_NS" delete secret e2e-geo-db >/dev/null
 eventually "the policy without geo is Enforced" web_current
 rm -rf "$geo_dir"
