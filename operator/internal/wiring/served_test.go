@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -91,10 +92,19 @@ func TestEnforcedCountsServingEngines(t *testing.T) {
 		}
 		for i := range list.Items {
 			p := &list.Items[i]
-			if controllerutil.RemoveFinalizer(p, Finalizer) {
-				if err := c.Update(ctx, p); err != nil {
-					t.Error(err)
+			// A status write still in flight from the stopped controllers
+			// conflicts: read again (#801).
+			err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				if err := c.Get(ctx, client.ObjectKeyFromObject(p), p); err != nil {
+					return err
 				}
+				if !controllerutil.RemoveFinalizer(p, Finalizer) {
+					return nil
+				}
+				return c.Update(ctx, p)
+			})
+			if client.IgnoreNotFound(err) != nil {
+				t.Error(err)
 			}
 			if err := c.Delete(ctx, p); err != nil && !apierrors.IsNotFound(err) {
 				t.Error(err)

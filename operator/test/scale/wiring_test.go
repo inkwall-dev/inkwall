@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -255,16 +256,21 @@ func TestScaleWiring(t *testing.T) {
 	before := reconcileStatsOf(t, "wiring")
 	counter.take()
 	for i := range edits {
-		var p wafv1alpha1.WAFPolicy
-		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace(i, n), Name: name(i)}, &p); err != nil {
-			t.Fatal(err)
-		}
-		// Another body limit (not Detect mode, which isn't Programmed).
-		if p.Spec.Body == nil {
-			p.Spec.Body = &wafv1alpha1.BodySpec{}
-		}
-		p.Spec.Body.MaxBytes = ptr.To(int64(65536 + i))
-		if err := c.Update(ctx, &p); err != nil {
+		// Another body limit (not Detect mode, which isn't Programmed). The
+		// operator writes the policy's status meanwhile: a conflict means
+		// the read came before that write, so read again (#801).
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			var p wafv1alpha1.WAFPolicy
+			if err := c.Get(ctx, client.ObjectKey{Namespace: namespace(i, n), Name: name(i)}, &p); err != nil {
+				return err
+			}
+			if p.Spec.Body == nil {
+				p.Spec.Body = &wafv1alpha1.BodySpec{}
+			}
+			p.Spec.Body.MaxBytes = ptr.To(int64(65536 + i))
+			return c.Update(ctx, &p)
+		})
+		if err != nil {
 			t.Fatal(err)
 		}
 		settleController(t, "wiring")
