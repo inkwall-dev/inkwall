@@ -347,10 +347,8 @@ schema doesn't list.
   `Any`'s path (`payload.sku`); otherwise `value` is read schema-less (`payload.value`, `payload.2.1`).
   The application unpacks by the same `type_url`, so an attacker who names another type changes
   the application's reading too.
-- **Groups.** Today `grpcwire.walker.message` skips a group's contents (wire type 3 goes through
-  `ConsumeFieldValue`), so text in a proto2 group, or in an editions `DELIMITED` field, is never
-  read. The schema reader reads described groups, and both readers read unknown groups as nested
-  messages: a fix to today's reader that ships with this work.
+- **Groups:** both readers read a group like a nested message, by its type when the schema
+  describes it, with the same depth and field limits.
 
 ### 6.3 Names
 
@@ -467,7 +465,7 @@ altogether. What a hostile set can do:
 - *Oneof and duplicate confusion:* every occurrence and every member is read ([§6.2](#62-each-field-by-its-kind)).
 - *Unknown fields and wire-type mismatches:* read schema-less, never dropped, so data can't be
   smuggled past the rules in a field the schema doesn't list.
-- *Groups:* read, closing today's gap.
+- *Groups:* read like nested messages.
 - *`Any`:* the type the `type_url` names, or schema-less.
 - *Depth, size, count:* the limits of today, with `onOversize` past them; recursion in the schema
   doesn't matter since the data bounds the walk.
@@ -542,7 +540,7 @@ gives the application (fields and unknown fields alike) is in what the rules see
 | 6 | Unknown numbers and wire-type mismatches read schema-less | Dropping them |
 | 7 | Names are proto field paths without indexes or prefix; extensions in brackets; unknown parts by number | JSON names; `json.`-style prefixes; indexes |
 | 8 | Undescribed methods read schema-less | Treating them as unread (`onOversize`) |
-| 9 | A bad schema keeps the previous version (`InvalidGRPCSchema`); old engines read schema-less (`EnginesOutdated`); groups read in both readers | Failing closed on a bad schema; today's group skip |
+| 9 | A bad schema keeps the previous version (`InvalidGRPCSchema`); old engines read schema-less (`EnginesOutdated`) | Failing closed on a bad schema |
 
 ## 14. Open questions
 
