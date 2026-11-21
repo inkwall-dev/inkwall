@@ -294,6 +294,23 @@ func TestTokenOutsideTheOperatorNamespace(t *testing.T) {
 	e.waitReason(t, ReasonTokenSecretMissing)
 }
 
+// enrollmentSecretRef without a namespace is the operator's (#712).
+func TestTokenWithoutNamespace(t *testing.T) {
+	e := newEnv(t, wafv1alpha1.ModeGitOps, "token-1")
+	e.cp.AddToken("token-1")
+	var cfg wafv1alpha1.InkwallConfig
+	ctx := context.Background()
+	if err := e.client.Get(ctx, types.NamespacedName{Name: "default"}, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Spec.ControlPlane.EnrollmentSecretRef.Namespace = ""
+	if err := e.client.Update(ctx, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	e.run(t)
+	e.waitReason(t, ReasonConnected)
+}
+
 func TestParseEndpoint(t *testing.T) {
 	for _, tc := range []struct{ in, target, host string }{
 		{"grpcs://cp-gateway:8443", "cp-gateway:8443", "cp-gateway"},

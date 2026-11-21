@@ -100,12 +100,12 @@ contains only the cluster side: the operator's client and the protocol,
        endpoint: grpcs://<control-plane-address>:<port>
        enrollmentSecretRef:
          name: inkwall-enrollment
-         namespace: inkwall-system
    YAML
    ```
 
    The `InkwallConfig` must be named `default`, and the endpoint must have the form
-   `grpcs://host:port`.
+   `grpcs://host:port`. The Secret is the operator's namespace's: `enrollmentSecretRef.namespace`
+   can be left out, and any other namespace is refused (`EnrollmentTokenNotInOperatorNamespace`).
 
 The leader generates an [ECDSA P-256](https://csrc.nist.gov/pubs/fips/186-5/final) key, sends a
 [certificate signing request](https://www.rfc-editor.org/rfc/rfc2986) with the token, and

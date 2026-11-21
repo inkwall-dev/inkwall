@@ -77,8 +77,9 @@ spec:
                     pattern: ^grpcs://[^/\s]+$
                     type: string
                   enrollmentSecretRef:
-                    description: EnrollmentSecretRef is the Secret holding the enrollment
-                      token.
+                    description: |-
+                      EnrollmentSecretRef is the Secret holding the enrollment token, in
+                      the operator's namespace (its namespace can be left out).
                     properties:
                       name:
                         description: Name of the Secret.
@@ -86,20 +87,24 @@ spec:
                         minLength: 1
                         type: string
                       namespace:
-                        description: Namespace of the Secret.
+                        description: |-
+                          Namespace of the Secret, which can only be the operator's namespace.
+                          Unset: the operator's namespace.
                         maxLength: 63
                         minLength: 1
                         type: string
                     required:
                     - name
-                    - namespace
                     type: object
                 required:
                 - endpoint
                 - enrollmentSecretRef
                 type: object
               engine:
-                description: Engine configures the engine sidecars the operator injects.
+                default: {}
+                description: |-
+                  Engine configures the engine sidecars the operator injects. Omitted,
+                  it is {}, so that its defaults show.
                 properties:
                   bootstrapMode:
                     default: AllowAll
@@ -274,6 +279,7 @@ spec:
                         type: object
                     type: object
                   rollout:
+                    default: Manual
                     description: |-
                       Rollout is how proxy pods that need a new engine (none: started
                       before Inkwall; or another image than the one configured) get one.
@@ -285,7 +291,7 @@ spec:
                       eviction is refused or a replacement isn't ready in time. Pods the
                       Pod webhook injects only (Traefik, HAProxy, Istio's ingress gateways):
                       Envoy Gateway and Istio's Gateway API deployments roll their pods
-                      themselves. Unset: Manual.
+                      themselves.
                     enum:
                     - Manual
                     - Automatic
@@ -307,9 +313,11 @@ spec:
                   rule: '!(has(self.jsonDenials) && self.jsonDenials && has(self.denialFormat)
                     && self.denialFormat == ''Text'')'
               events:
+                default: {}
                 description: |-
                   Events configures what the engines' security events carry to the
                   operator (and on to the control plane, when one is connected).
+                  Omitted, it is {}, so that its defaults show.
                 properties:
                   export:
                     description: |-
@@ -580,8 +588,10 @@ spec:
                           rule: self.all(a, self.exists_one(b, b.name == a.name))
                     type: object
                   redact:
-                    description: Redact keeps more of what rules matched out of the
-                      events.
+                    default: {}
+                    description: |-
+                      Redact keeps more of what rules matched out of the events. Omitted,
+                      it is {}, so that its defaults show.
                     properties:
                       arguments:
                         description: |-
@@ -650,7 +660,8 @@ spec:
                       description: |-
                         Controller is the integration name: traefik, envoy-gateway, istio,
                         istio-ingress or haproxy. The operator ignores an entry for any other
-                        controller.
+                        controller. It should be a DNS label (lower case letters, digits and
+                        "-"): any other name draws a warning, and v1 refuses it.
                       maxLength: 63
                       minLength: 1
                       type: string

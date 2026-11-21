@@ -215,7 +215,7 @@ func (c *Connector) run(ctx context.Context) (bool, error) {
 		if err := deleteIdentity(ctx, c.Client, c.Namespace); err != nil {
 			return false, err
 		}
-		ref := cp.EnrollmentSecretRef
+		ref := c.tokenSecret(cp)
 		if err := c.setCondition(ctx, &cfg, metav1.ConditionFalse, ReasonCertificateExpired, fmt.Sprintf(
 			"the cluster's certificate expired on %s: store a new enrollment token in %s/%s",
 			id.notAfter.UTC().Format(time.RFC3339), ref.Namespace, ref.Name)); err != nil {
@@ -234,9 +234,19 @@ func (c *Connector) run(ctx context.Context) (bool, error) {
 	return c.connect(ctx, &cfg, target, host, id)
 }
 
+// tokenSecret is cp's enrollment token Secret, its namespace the
+// operator's when it is left out.
+func (c *Connector) tokenSecret(cp *wafv1alpha1.ControlPlane) wafv1alpha1.SecretReference {
+	ref := cp.EnrollmentSecretRef
+	if ref.Namespace == "" {
+		ref.Namespace = c.Namespace
+	}
+	return ref
+}
+
 // enroll exchanges the token for the cluster's certificate.
 func (c *Connector) enroll(ctx context.Context, cfg *wafv1alpha1.InkwallConfig, target, host string) (*identity, error) {
-	ref := cfg.Spec.ControlPlane.EnrollmentSecretRef
+	ref := c.tokenSecret(cfg.Spec.ControlPlane)
 	if ref.Namespace != c.Namespace {
 		return nil, c.idle(ctx, cfg, ReasonTokenSecretElsewhere, fmt.Sprintf(
 			"the enrollment token Secret must be in the operator's namespace %s, not %s", c.Namespace, ref.Namespace))
@@ -516,7 +526,7 @@ func (c *Connector) streamError(ctx context.Context, cfg *wafv1alpha1.InkwallCon
 			return derr
 		}
 		return c.idle(ctx, cfg, ReasonCertificateRejected, "the control plane rejected the cluster's certificate: store a new enrollment token in "+
-			cfg.Spec.ControlPlane.EnrollmentSecretRef.Namespace+"/"+cfg.Spec.ControlPlane.EnrollmentSecretRef.Name)
+			c.tokenSecret(cfg.Spec.ControlPlane).Namespace+"/"+cfg.Spec.ControlPlane.EnrollmentSecretRef.Name)
 	case codes.PermissionDenied:
 		c.disabled = disabledKey(cfg, id)
 		return c.idle(ctx, cfg, ReasonClusterDisabled, "the control plane removed or disabled this cluster; change the configuration to try again")

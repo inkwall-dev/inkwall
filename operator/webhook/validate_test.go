@@ -386,6 +386,49 @@ func TestConfigJSONDenialsWarning(t *testing.T) {
 	}
 }
 
+// A controller that isn't a DNS label draws a warning when it is added
+// (#712): v1 refuses it.
+func TestConfigControllerWarning(t *testing.T) {
+	ctx := context.Background()
+	v := configValidator{}
+	cfg := func(controllers ...string) *wafv1alpha1.InkwallConfig {
+		c := &wafv1alpha1.InkwallConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+		for _, n := range controllers {
+			c.Spec.Integrations = append(c.Spec.Integrations, wafv1alpha1.IntegrationSpec{Controller: n})
+		}
+		return c
+	}
+	for _, tc := range []struct {
+		name     string
+		old, cfg *wafv1alpha1.InkwallConfig // old nil: create
+		want     []string
+	}{
+		{name: "DNS labels", cfg: cfg("traefik", "envoy-gateway", "istio-ingress")},
+		{name: "not DNS labels", cfg: cfg("traefik", "Traefik", "ingress_nginx"), want: []string{`[1].controller "Traefik"`, `[2].controller "ingress_nginx"`}},
+		{name: "added", old: cfg("traefik"), cfg: cfg("traefik", "HAProxy"), want: []string{`[1].controller "HAProxy"`}},
+		{name: "kept", old: cfg("HAProxy"), cfg: cfg("traefik", "HAProxy")},
+	} {
+		var warnings []string
+		var err error
+		if tc.old == nil {
+			warnings, err = v.ValidateCreate(ctx, tc.cfg)
+		} else {
+			warnings, err = v.ValidateUpdate(ctx, tc.old, tc.cfg)
+		}
+		if err != nil || len(warnings) != len(tc.want) {
+			t.Errorf("%s: warnings %q, error %v; want %d", tc.name, warnings, err, len(tc.want))
+			continue
+		}
+		for i, w := range warnings {
+			for _, s := range []string{"spec.integrations" + tc.want[i], "not a DNS label", "v1 refuses it"} {
+				if !strings.Contains(w, s) {
+					t.Errorf("%s: warning %q doesn't say %q", tc.name, w, s)
+				}
+			}
+		}
+	}
+}
+
 func ptr[T any](v T) *T { return &v }
 
 // TestIPListValidation: a WAFIPList's entries must parse as the engine
