@@ -115,6 +115,38 @@ func TestExplainRequestPartly(t *testing.T) {
 	}
 }
 
+// 921180 (HTTP parameter pollution) is a detection rule, not a score rule,
+// though it matches a TX variable: explain suggests excluding its counter,
+// 921170, for the argument name, verified (#764).
+func TestExplainRequestParameterPollution(t *testing.T) {
+	events := writeFile(t, "events.jsonl", `{"action":"ACTION_DENY","reason":"REASON_RULE","policy":"default/directus","path":"/items/articles","request_id":"req-1",`+
+		`"matches":[{"rule_id":921180,"variable":"TX:paramcounter_args_names:fields[]"},{"rule_id":949110,"variable":"TX:blocking_inbound_anomaly_score"}]}`+"\n")
+	policy := writeFile(t, "policy.yaml", `apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata: {name: directus, namespace: default}
+spec:
+  targetRefs: [{kind: Ingress, name: app}]
+  mode: Block
+  ruleSets:
+    - ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}
+      paranoiaLevel: 3
+`)
+	code, out, errOut := runCLI(t, "explain", "request", "--file", events, "--policy", policy,
+		"--rule-set", "../../operator/config/samples/clusterwafruleset.yaml", "-o", "json", "req-1")
+	var re RequestExplanation
+	if err := json.Unmarshal([]byte(out), &re); err != nil || code != 0 || len(re.Events) != 1 {
+		t.Fatalf("exit %d, %s: %v\n%s", code, errOut, err, out)
+	}
+	ev := re.Events[0]
+	if i := slices.IndexFunc(ev.Rules, func(r RuleExplain) bool { return r.ID == 921180 }); i < 0 || ev.Rules[i].Scoring {
+		t.Errorf("rules %+v: want 921180, not scoring", ev.Rules)
+	}
+	if len(ev.Suggestions) != 1 || !ev.Suggestions[0].Verified || !ev.AllowedWithSuggestions ||
+		!slices.Equal(ev.Suggestions[0].Exclusion.RuleIDs, []int32{921170}) || ev.Suggestions[0].Exclusion.When.ArgumentName != "fields[]" {
+		t.Errorf("suggestions %+v, not suggested %+v", ev.Suggestions, ev.NotSuggested)
+	}
+}
+
 // A request the rules didn't deny: the guide's cause and fix for its
 // reason, and nothing to exclude.
 func TestExplainRequestOversize(t *testing.T) {
