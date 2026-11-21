@@ -68,6 +68,13 @@ func TestFlags(t *testing.T) {
 	if o, err := parseFlags([]string{"--metrics-secure", "--metrics-cert-dir=/certs"}, io.Discard); err != nil || !o.MetricsSecure || o.MetricsCertDir != "/certs" {
 		t.Errorf("secure metrics: secure %v, cert dir %q, %v", o.MetricsSecure, o.MetricsCertDir, err)
 	}
+	// The export buffer's bounds and flush (design 0010 §2.4).
+	if o, err := parseFlags(nil, io.Discard); err != nil || o.ExportBufferBytes != 32<<20 || o.ExportDiskBytes != 512<<20 || o.ExportFlushTimeout != 15*time.Second {
+		t.Errorf("export defaults: %d, %d, %v, %v", o.ExportBufferBytes, o.ExportDiskBytes, o.ExportFlushTimeout, err)
+	}
+	if _, err := parseFlags([]string{"--export-disk-bytes=0"}, io.Discard); err == nil {
+		t.Error("a disk bound of 0 accepted")
+	}
 }
 
 func TestDrain(t *testing.T) {

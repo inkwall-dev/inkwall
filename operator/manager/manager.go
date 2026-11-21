@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -38,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/bundle"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
@@ -46,6 +48,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/internal/crdwatch"
 	proxydiscovery "github.com/inkwall-dev/inkwall/operator/internal/discovery"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
+	"github.com/inkwall-dev/inkwall/operator/internal/export"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/operator/internal/podcache"
 	"github.com/inkwall-dev/inkwall/operator/internal/policystatus"
@@ -161,6 +164,13 @@ type Options struct {
 	// control plane ("": in memory); EventsBufferBytes bounds it.
 	EventsDir         string
 	EventsBufferBytes int64
+	// ExportBufferBytes and ExportDiskBytes bound the replica's buffer of
+	// security events for the InkwallConfig's export sinks, in memory and
+	// on disk (under EventsDir/export; with no EventsDir, in memory only);
+	// ExportFlushTimeout bounds its flush on shutdown. 0: the defaults.
+	ExportBufferBytes  int64
+	ExportDiskBytes    int64
+	ExportFlushTimeout time.Duration
 
 	// SkipControllerNameValidation lets a process create more than one
 	// manager, which controller-runtime refuses by default (its
@@ -532,13 +542,26 @@ func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}, forw
 	}
 	auth := &distribution.KubeAuthenticator{Client: mgr.GetClient(), Namespace: o.Namespace, TTL: time.Minute}
 	service := distribution.NewServer(store, table, auth, replica, ctrl.Log.WithName("distribution"))
-	service.Events, service.Stats = forwarder.Add, forwarder.AddStats
+	// Every replica exports its own engines' events to the InkwallConfig's
+	// sinks, beside the control plane's forwarding: each gets every batch,
+	// read only, and neither waits for the other (design 0010 §6).
+	exporter := &export.Exporter{
+		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Namespace: o.Namespace,
+		Dir: exportDir(o.EventsDir), MemoryBytes: o.ExportBufferBytes, DiskBytes: o.ExportDiskBytes,
+		FlushTimeout: o.ExportFlushTimeout, HasPolicy: store.HasPolicy, Log: ctrl.Log.WithName("export"),
+	}
+	service.Events = func(b *eventsv1.EventBatch) {
+		forwarder.Add(b)
+		exporter.Add(b)
+	}
+	service.Stats = forwarder.AddStats
 	forwarder.HasPolicy = store.HasPolicy
 	srv := &distribution.GRPCServer{
-		Port:    o.DistributionPort,
-		CertDir: o.WebhookCertDir,
-		Ready:   ready,
-		Service: service,
+		Port:     o.DistributionPort,
+		CertDir:  o.WebhookCertDir,
+		Ready:    ready,
+		Service:  service,
+		Exporter: exporter,
 	}
 	if err := mgr.Add(srv); err != nil {
 		return err
@@ -658,6 +681,22 @@ func kubernetesVersion(cfg *rest.Config) func() string {
 		return v
 	}
 }
+
+// exportDir is where the export buffer lives: beside the control plane's,
+// in the events directory; "" (memory) without one.
+func exportDir(eventsDir string) string {
+	if eventsDir == "" {
+		return ""
+	}
+	return filepath.Join(eventsDir, "export")
+}
+
+// Defaults of the export buffer (design 0010 §2.4).
+const (
+	DefaultExportBufferBytes  = export.DefaultBufferBytes
+	DefaultExportDiskBytes    = export.DefaultDiskBytes
+	DefaultExportFlushTimeout = export.DefaultFlushTimeout
+)
 
 // DefaultEventsBufferBytes bounds each replica's events buffer by default.
 const DefaultEventsBufferBytes = controlplane.DefaultEventsBufferBytes
