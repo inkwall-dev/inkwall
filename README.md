@@ -194,7 +194,7 @@ Gateway and Istio: HAProxy doesn't send a streamed body, so on its Ingresses suc
 
 Start in `Detect` mode, tune [false positives](https://coreruleset.org/docs/concepts/false_positives_tuning/) on the policy (`exclusions`, narrowed with `when` to a path and an
 argument, argument name, cookie or header, `skip` paths,
-[`ruleSets[].paranoiaLevel`](https://coreruleset.org/docs/concepts/paranoia_levels/)), then switch to `Block`. Extra rules come from `WAFRuleSet` and
+[`ruleSets[].crs.paranoiaLevel`](https://coreruleset.org/docs/concepts/paranoia_levels/)), then switch to `Block`. Extra rules come from `WAFRuleSet` and
 `ClusterWAFRuleSet` objects: built-in, [SecLang](https://coraza.io/docs/seclang/) or a [ConfigMap](https://kubernetes.io/docs/concepts/configuration/configmap/).
 [`operator/config/samples`](operator/config/samples) has one object of each kind.
 
@@ -218,14 +218,16 @@ load balancer, set that up first ([client IP](docs/client-ip.md)), or every clie
 balancer. `inkwallctl test --client-ip 203.0.113.9` checks them offline (engines 0.5.0 or later).
 
 **CRS settings.** At paranoia level 1 the CRS denies `PUT`, `PATCH` and `DELETE`, and request
-content types outside its list. Set the CRS's own settings on the CRS rule set's binding (engines
-0.5.0 or later):
+content types outside its list. Set the CRS's own settings under `crs` on the CRS rule set's
+binding (engines 0.5.0 or later, except the paranoia level and inbound threshold, which every
+engine applies):
 
 ```yaml
   ruleSets:
   - ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}
-    paranoiaLevel: 1
     crs:
+      paranoiaLevel: 1               # rules up to this level block (1 to 4)
+      inboundAnomalyThreshold: 5     # the request score that blocks
       allowedMethods: [GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS]   # replaces the CRS's list
       allowedRequestContentTypes: [application/json, application/x-www-form-urlencoded, multipart/form-data]
       detectionParanoiaLevel: 2      # level 2 rules log (action log) but never block

@@ -264,7 +264,7 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
     failureMode: Open             # Open | Closed
     timeout: 250ms
     skip: {paths: ["/healthz"]}
-    ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}, paranoiaLevel: 1}]
+    ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}, crs: {paranoiaLevel: 1}}]
     exclusions: [{ruleIDs: [942100], when: {path: /api/search, argument: q}}]
     body: {inspect: true, maxBytes: 65536, onOversize: InspectPrefix}   # | Allow | Deny
     responses: {inspect: true, maxBytes: 65536, onOversize: Deny}       # | Allow

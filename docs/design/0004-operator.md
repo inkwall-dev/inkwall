@@ -144,9 +144,11 @@ Validation runs in three steps, cheapest first:
      or `@rbl`, which queries DNS. The binaries don't register either;
    - rejects SecLang whose last `SecRule` has the `chain` action: no rule completes the chain, so
      after the CRS its starter would match alone;
-   - rejects a policy's rule set binding with `placement: BeforeCRS` that also sets
-     `paranoiaLevel`, `inboundAnomalyThreshold` or `crs`: those are the built-in CRS's, which
-     can't load before itself;
+   - rejects a policy's rule set binding with `placement: BeforeCRS` that also sets `crs` (or
+     the deprecated `paranoiaLevel` and `inboundAnomalyThreshold`, which `crs` holds since
+     0.7.0): those are the built-in CRS's, which can't load before itself. On a binding to a
+     rule set that isn't the built-in CRS, the resolver notes them in `Accepted`'s message as
+     ignored; v1 refuses them;
    - accepts updates that leave the spec unchanged, so objects a newer engine rejects can still be
      deleted;
    - uses a self-signed certificate that the operator rotates, with the CA injected; cert-manager

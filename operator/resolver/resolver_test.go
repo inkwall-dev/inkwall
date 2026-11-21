@@ -114,8 +114,10 @@ func TestResolvePolicy(t *testing.T) {
 	p.Spec.Timeout = &metav1.Duration{Duration: 100 * time.Millisecond}
 	p.Spec.Skip = &wafv1alpha1.SkipSpec{Paths: []wafv1alpha1.PathPattern{"/healthz"}, BodyPaths: []wafv1alpha1.PathPattern{"/upload"}}
 	p.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{
-		{Ref: wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: "crs"}, ParanoiaLevel: ptr(int32(2)), InboundAnomalyThreshold: ptr(int32(7)),
+		{Ref: wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: "crs"},
 			CRS: &wafv1alpha1.CRSSettings{
+				ParanoiaLevel:              ptr(int32(2)),
+				InboundAnomalyThreshold:    ptr(int32(7)),
 				AllowedMethods:             []wafv1alpha1.HTTPMethodToken{"GET", "PUT"},
 				AllowedRequestContentTypes: []wafv1alpha1.MediaType{"application/json"},
 				DetectionParanoiaLevel:     ptr(int32(3)),
@@ -389,6 +391,46 @@ func TestConfigMapRules(t *testing.T) {
 	if len(res.RuleSets) != 1 || res.RuleSets[0].GetSeclang() != "SecMarker GOOD" {
 		t.Fatalf("the ConfigMap's rules must be inlined: %v", res.RuleSets)
 	}
+}
+
+// The paranoia level and inbound threshold go to the same bundle fields
+// from crs or from the deprecated binding fields; crs wins (CEL refuses
+// both, so only the operator's reading order is tested). CRS settings on a
+// rule set that isn't the built-in CRS are noted as ignored (#714).
+func TestResolveCRSSettingsLocation(t *testing.T) {
+	crs := wafv1alpha1.ClusterWAFRuleSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "crs"},
+		Spec:       wafv1alpha1.ClusterWAFRuleSetSpec{Source: wafv1alpha1.ClusterRuleSetSource{Builtin: wafv1alpha1.BuiltinCRSv4}},
+	}
+	ref := wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: "crs"}
+	settings := &wafv1alpha1.CRSSettings{ParanoiaLevel: ptr(int32(3)), InboundAnomalyThreshold: ptr(int32(9))}
+	moved := policy("moved", 0)
+	moved.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{{Ref: ref, CRS: settings}}
+	old := policy("old", 0)
+	old.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{{Ref: ref, ParanoiaLevel: ptr(int32(3)), InboundAnomalyThreshold: ptr(int32(9))}}
+	both := policy("both", 0)
+	both.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{{Ref: ref, ParanoiaLevel: ptr(int32(1)), InboundAnomalyThreshold: ptr(int32(5)), CRS: settings}}
+	seclang := policy("seclang", 0)
+	seclang.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{{Ref: ref}, {Ref: wafv1alpha1.RuleSetRef{Kind: "WAFRuleSet", Name: "custom"}, CRS: settings}}
+
+	res := Resolve(Input{
+		Policies:        []wafv1alpha1.WAFPolicy{moved, old, both, seclang},
+		RuleSets:        []wafv1alpha1.WAFRuleSet{seclangRuleSet("custom", "SecMarker X")},
+		ClusterRuleSets: []wafv1alpha1.ClusterWAFRuleSet{crs},
+	})
+	for _, name := range []string{"moved", "old", "both"} {
+		wantStatus(t, res, name, true, ReasonAccepted, PolicyValid)
+		if st := res.PolicyStatus[key(name)]; st.Message != PolicyValid {
+			t.Errorf("%s: message %q, want only %q", name, st.Message, PolicyValid)
+		}
+		// No Crs: the bundle is the one the binding-level fields made.
+		wantProto(t, findPolicy(res, "shop/"+name), &bundlev1.Policy{
+			Id: "shop/" + name, Mode: bundlev1.Mode_MODE_DETECT,
+			RuleSets: []*bundlev1.RuleSetBinding{{RuleSetId: "ClusterWAFRuleSet/crs", ParanoiaLevel: 3, InboundAnomalyThreshold: 9}},
+		})
+	}
+	wantStatus(t, res, "seclang", true, ReasonAccepted,
+		"spec.ruleSets[1] sets CRS settings, which are ignored: WAFRuleSet custom isn't the built-in CRS; remove them, v1 refuses them")
 }
 
 // A rule set placed before the CRS (#423) goes into the bundle with its

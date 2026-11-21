@@ -228,6 +228,17 @@ type candidate struct {
 	// other namespaces; lost is set when one of them applies instead.
 	overlaps []string
 	lost     bool
+	// notes are what the Accepted message adds about a spec that resolves
+	// but sets something ignored.
+	notes []string
+}
+
+// reportNotes adds the notes to the status of a policy that resolved.
+func (c *candidate) reportNotes() {
+	if len(c.notes) == 0 || c.failed {
+		return
+	}
+	c.status.Message += "; " + strings.Join(c.notes, "; ")
 }
 
 // addRoutes adds routes from a target of the given precedence, routed in
@@ -420,6 +431,7 @@ func (r *resolution) resolvePolicies() {
 	}
 	// After every policy's routes: an overlap is reported on both.
 	for _, c := range cands {
+		c.reportNotes()
 		c.reportOverlaps()
 		r.out.PolicyStatus[c.key] = c.status
 	}
@@ -559,7 +571,7 @@ func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.Nam
 	}
 	c.policy = convertSpec(PolicyID(p.Namespace, p.Name), p.Spec)
 
-	for _, b := range p.Spec.RuleSets {
+	for i, b := range p.Spec.RuleSets {
 		ns := b.Ref.Namespace
 		if ns == "" {
 			ns = p.Namespace
@@ -582,6 +594,11 @@ func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.Nam
 			if msg := beforeCRS(rs); msg != "" {
 				c.fail(ReasonInvalidRef, fmt.Sprintf("%s %s %s", b.Ref.Kind, b.Ref.Name, msg))
 			}
+		}
+		// Ignored by the engine; v1 refuses them (#714).
+		if _, crs := rs.GetSource().(*bundlev1.RuleSet_Builtin); !crs && b.SetsCRS() {
+			c.notes = append(c.notes, fmt.Sprintf("spec.ruleSets[%d] sets CRS settings, which are ignored: %s %s isn't the built-in CRS; remove them, v1 refuses them",
+				i, b.Ref.Kind, b.Ref.Name))
 		}
 	}
 
@@ -718,11 +735,14 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 	}
 	for _, b := range s.RuleSets {
 		binding := &bundlev1.RuleSetBinding{RuleSetId: RuleSetID(b.Ref.Kind, cmp.Or(b.Ref.Namespace, namespaceOf(id)), b.Ref.Name)}
-		if b.ParanoiaLevel != nil {
-			binding.ParanoiaLevel = *b.ParanoiaLevel
+		// crs.paranoiaLevel and crs.inboundAnomalyThreshold go where the
+		// deprecated binding-level fields always went, so every engine
+		// applies them.
+		if l := b.CRSParanoiaLevel(); l != nil {
+			binding.ParanoiaLevel = *l
 		}
-		if b.InboundAnomalyThreshold != nil {
-			binding.InboundAnomalyThreshold = *b.InboundAnomalyThreshold
+		if t := b.CRSInboundAnomalyThreshold(); t != nil {
+			binding.InboundAnomalyThreshold = *t
 		}
 		binding.Crs = crsSettings(b.CRS)
 		// AfterCRS is the default: unset, so the bundle stays as before.

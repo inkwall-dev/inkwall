@@ -15,8 +15,9 @@ spec:
     paths: ["/health"]
   ruleSets:
   - ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}
-    paranoiaLevel: 1
-    inboundAnomalyThreshold: 5
+    crs:
+      paranoiaLevel: 1
+      inboundAnomalyThreshold: 5
   - ref: {kind: WAFRuleSet, name: shop-custom}
   exclusions:
   - ruleIDs: [942100]

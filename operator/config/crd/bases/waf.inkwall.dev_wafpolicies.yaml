@@ -479,8 +479,11 @@ spec:
                   properties:
                     crs:
                       description: |-
-                        CRS sets the OWASP CRS's own settings. Only used by the built-in CRS.
-                        Requires engines 0.5.0 or later: older ones ignore it.
+                        CRS sets the OWASP CRS's own settings. Only used by the built-in CRS:
+                        on another rule set they are ignored, which the Accepted condition
+                        says, and v1 refuses them. Every engine applies paranoiaLevel and
+                        inboundAnomalyThreshold; the other settings require engines 0.5.0 or
+                        later, and older ones ignore them.
                       properties:
                         allowedMethods:
                           description: |-
@@ -523,6 +526,14 @@ spec:
                           maximum: 4
                           minimum: 1
                           type: integer
+                        inboundAnomalyThreshold:
+                          description: |-
+                            InboundAnomalyThreshold is the request anomaly score at which a
+                            request is flagged (blocked in Block mode). Unset: 5.
+                          format: int32
+                          maximum: 10000
+                          minimum: 1
+                          type: integer
                         outboundAnomalyThreshold:
                           description: |-
                             OutboundAnomalyThreshold is the response anomaly score at which a
@@ -532,19 +543,34 @@ spec:
                           maximum: 10000
                           minimum: 1
                           type: integer
+                        paranoiaLevel:
+                          description: |-
+                            ParanoiaLevel is the OWASP CRS paranoia level, 1 to 4: the rules up
+                            to this level can block. Unset: 1.
+                          format: int32
+                          maximum: 4
+                          minimum: 1
+                          type: integer
                       type: object
                     inboundAnomalyThreshold:
                       description: |-
-                        InboundAnomalyThreshold is the OWASP CRS anomaly score at which a
-                        request is flagged. Only used by the built-in CRS.
+                        InboundAnomalyThreshold is crs.inboundAnomalyThreshold, which takes
+                        its place, and can't be set with it. It stays so that policies that
+                        set it remain valid; setting it draws a warning, and v1 moves it to
+                        crs.
+
+                        Deprecated: use crs.inboundAnomalyThreshold.
                       format: int32
                       maximum: 10000
                       minimum: 1
                       type: integer
                     paranoiaLevel:
                       description: |-
-                        ParanoiaLevel is the OWASP CRS paranoia level, 1 to 4. Only used by
-                        the built-in CRS.
+                        ParanoiaLevel is crs.paranoiaLevel, which takes its place, and can't
+                        be set with it. It stays so that policies that set it remain valid;
+                        setting it draws a warning, and v1 moves it to crs.
+
+                        Deprecated: use crs.paranoiaLevel.
                       format: int32
                       maximum: 4
                       minimum: 1
@@ -592,6 +618,13 @@ spec:
                   required:
                   - ref
                   type: object
+                  x-kubernetes-validations:
+                  - message: set crs.paranoiaLevel, not also the deprecated paranoiaLevel
+                    rule: '!has(self.paranoiaLevel) || !has(self.crs) || !has(self.crs.paranoiaLevel)'
+                  - message: set crs.inboundAnomalyThreshold, not also the deprecated
+                      inboundAnomalyThreshold
+                    rule: '!has(self.inboundAnomalyThreshold) || !has(self.crs) ||
+                      !has(self.crs.inboundAnomalyThreshold)'
                 maxItems: 8
                 type: array
               skip:

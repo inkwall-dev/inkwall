@@ -362,26 +362,40 @@ type SkipSpec struct {
 }
 
 // RuleSetBinding uses a rule set in a policy.
+// +kubebuilder:validation:XValidation:rule="!has(self.paranoiaLevel) || !has(self.crs) || !has(self.crs.paranoiaLevel)",message="set crs.paranoiaLevel, not also the deprecated paranoiaLevel"
+// +kubebuilder:validation:XValidation:rule="!has(self.inboundAnomalyThreshold) || !has(self.crs) || !has(self.crs.inboundAnomalyThreshold)",message="set crs.inboundAnomalyThreshold, not also the deprecated inboundAnomalyThreshold"
 type RuleSetBinding struct {
 	// Ref is the rule set.
 	Ref RuleSetRef `json:"ref"`
 
-	// ParanoiaLevel is the OWASP CRS paranoia level, 1 to 4. Only used by
-	// the built-in CRS.
+	// ParanoiaLevel is crs.paranoiaLevel, which takes its place, and can't
+	// be set with it. It stays so that policies that set it remain valid;
+	// setting it draws a warning, and v1 moves it to crs.
+	//
+	// Deprecated: use crs.paranoiaLevel.
+	//
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=4
 	// +optional
 	ParanoiaLevel *int32 `json:"paranoiaLevel,omitempty"`
 
-	// InboundAnomalyThreshold is the OWASP CRS anomaly score at which a
-	// request is flagged. Only used by the built-in CRS.
+	// InboundAnomalyThreshold is crs.inboundAnomalyThreshold, which takes
+	// its place, and can't be set with it. It stays so that policies that
+	// set it remain valid; setting it draws a warning, and v1 moves it to
+	// crs.
+	//
+	// Deprecated: use crs.inboundAnomalyThreshold.
+	//
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10000
 	// +optional
 	InboundAnomalyThreshold *int32 `json:"inboundAnomalyThreshold,omitempty"`
 
-	// CRS sets the OWASP CRS's own settings. Only used by the built-in CRS.
-	// Requires engines 0.5.0 or later: older ones ignore it.
+	// CRS sets the OWASP CRS's own settings. Only used by the built-in CRS:
+	// on another rule set they are ignored, which the Accepted condition
+	// says, and v1 refuses them. Every engine applies paranoiaLevel and
+	// inboundAnomalyThreshold; the other settings require engines 0.5.0 or
+	// later, and older ones ignore them.
 	// +optional
 	CRS *CRSSettings `json:"crs,omitempty"`
 
@@ -410,6 +424,20 @@ const (
 // CRSSettings are OWASP CRS settings (its tx variables), applied to each
 // request before the CRS's defaults. Unset fields keep the CRS's defaults.
 type CRSSettings struct {
+	// ParanoiaLevel is the OWASP CRS paranoia level, 1 to 4: the rules up
+	// to this level can block. Unset: 1.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4
+	// +optional
+	ParanoiaLevel *int32 `json:"paranoiaLevel,omitempty"`
+
+	// InboundAnomalyThreshold is the request anomaly score at which a
+	// request is flagged (blocked in Block mode). Unset: 5.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10000
+	// +optional
+	InboundAnomalyThreshold *int32 `json:"inboundAnomalyThreshold,omitempty"`
+
 	// AllowedMethods replaces the request methods the CRS allows (GET, HEAD,
 	// POST and OPTIONS by default; rule 911100). List every method the
 	// application serves, for example PUT, PATCH and DELETE for a REST API.
@@ -445,10 +473,36 @@ type CRSSettings struct {
 	OutboundAnomalyThreshold *int32 `json:"outboundAnomalyThreshold,omitempty"`
 }
 
-// IsZero reports whether s sets nothing (s may be nil).
+// IsZero reports whether s sets none of the settings that need engines
+// 0.5.0 or later (s may be nil): its paranoiaLevel and
+// inboundAnomalyThreshold, which every engine applies, don't count.
 func (s *CRSSettings) IsZero() bool {
 	return s == nil || len(s.AllowedMethods) == 0 && len(s.AllowedRequestContentTypes) == 0 &&
 		s.DetectionParanoiaLevel == nil && s.OutboundAnomalyThreshold == nil
+}
+
+// CRSParanoiaLevel is b's paranoia level: crs.paranoiaLevel, else the
+// deprecated paranoiaLevel; nil when neither is set.
+func (b *RuleSetBinding) CRSParanoiaLevel() *int32 {
+	if b.CRS != nil && b.CRS.ParanoiaLevel != nil {
+		return b.CRS.ParanoiaLevel
+	}
+	return b.ParanoiaLevel
+}
+
+// CRSInboundAnomalyThreshold is b's inbound anomaly threshold:
+// crs.inboundAnomalyThreshold, else the deprecated inboundAnomalyThreshold;
+// nil when neither is set.
+func (b *RuleSetBinding) CRSInboundAnomalyThreshold() *int32 {
+	if b.CRS != nil && b.CRS.InboundAnomalyThreshold != nil {
+		return b.CRS.InboundAnomalyThreshold
+	}
+	return b.InboundAnomalyThreshold
+}
+
+// SetsCRS reports whether b sets any CRS setting, deprecated or not.
+func (b *RuleSetBinding) SetsCRS() bool {
+	return b.CRSParanoiaLevel() != nil || b.CRSInboundAnomalyThreshold() != nil || !b.CRS.IsZero()
 }
 
 // HTTPMethodToken is an HTTP request method, such as PUT.

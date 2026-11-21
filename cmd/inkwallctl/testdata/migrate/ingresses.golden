@@ -140,9 +140,9 @@ spec:
       kind: WAFRuleSet
       name: shop-modsecurity-before-crs
   - crs:
+      inboundAnomalyThreshold: 10
       outboundAnomalyThreshold: 5
-    inboundAnomalyThreshold: 10
-    paranoiaLevel: 2
+      paranoiaLevel: 2
     ref:
       kind: ClusterWAFRuleSet
       name: owasp-crs-v4
@@ -181,8 +181,8 @@ Ingress shop/legacy: no WAFPolicy
   check   annotation enable-modsecurity: ModSecurity is off for this Ingress (enable-modsecurity is not true, nor enable-modsecurity in the ConfigMap): its other ModSecurity annotations have no effect; nothing to migrate
 Ingress shop/shop: WAFPolicy shop/shop (Block), WAFRuleSet shop/shop-modsecurity-before-crs
   mapped  annotation modsecurity-snippet, line 2: SecRequestBodyAccess On: body.inspect: true
-  mapped  annotation modsecurity-snippet, line 3: setvar:tx.blocking_paranoia_level=2: paranoiaLevel: 2
-  mapped  annotation modsecurity-snippet, line 4: setvar:tx.inbound_anomaly_score_threshold=10: inboundAnomalyThreshold: 10
+  mapped  annotation modsecurity-snippet, line 3: setvar:tx.blocking_paranoia_level=2: crs.paranoiaLevel: 2
+  mapped  annotation modsecurity-snippet, line 4: setvar:tx.inbound_anomaly_score_threshold=10: crs.inboundAnomalyThreshold: 10
   check   annotation modsecurity-snippet, line 4: setvar:tx.outbound_anomaly_score_threshold=5: crs.outboundAnomalyThreshold: 5; it applies only when the policy inspects responses (responses.inspect: true)
   mapped  annotation modsecurity-snippet, line 13: SecRuleRemoveById 920350 942430: exclusions
   mapped  annotation modsecurity-snippet, line 14: SecRuleUpdateTargetById 942100 "!ARGS:password": exclusions
