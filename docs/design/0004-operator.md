@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-09-27
-- Updated: 2026-11-04
+- Updated: 2026-11-20
 - Owner: noureldin
 - Depends on: [0001 — Performance-First Architecture](0001-performance-first-architecture.md),
   [0002 — System Architecture](0002-system-architecture.md)
@@ -123,7 +123,7 @@ the webhook certificates.
 A field is added only once the engine honours it. Adding a field to `v1alpha1` later is
 compatible; removing one is not.
 
-**Not yet:** `ClusterWAFIPList`, `spec.rateLimits` ([0009](0009-rate-limits.md)), `spec.response`,
+**Not yet:** `ClusterWAFIPList`, `spec.rateLimits` ([0009](0009-rate-limits.md)), `spec.geo` ([0011](0011-geo-blocking.md)), `spec.response`,
 `BlockHighConfidence`, `body.contentTypes`, the `InspectPrefix` oversize action,
 `WAFPolicyDefault`.
 
@@ -1108,6 +1108,8 @@ leader only, and is idle in Standalone mode (the default).
   decrease as a reset, the rule the operator applies to its engines. The fake control plane does.
 - The events stream reconnects with jittered backoff bounded at 10 s (the leader's primary stream:
   1 min), so the backlog drains soon after an outage.
+- **Not yet:** exporting the same events to a SIEM, from every replica, with or without a control
+  plane ([0010](0010-siem-export.md)).
 
 **Built: Managed mode.** The leader applies each policy snapshot beside the stream, all or nothing.
 

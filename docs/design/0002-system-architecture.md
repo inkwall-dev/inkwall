@@ -319,7 +319,8 @@ Reference: [`operator/api/v1alpha1`](../../operator/api/v1alpha1).
 `IngressRoute` and Istio `VirtualService` targets; `HTTPRoute` targets resolved, with the
 precedence above ([0004 §4.5](0004-operator.md#45-resolver)), and wired through Envoy Gateway,
 Istio or Traefik's Gateway API provider ([0004 §4.4](0004-operator.md#44-wiring-controller)).
-**Not yet:** cluster-wide and fetched IP lists, the policy field `rateLimits`, wiring other controllers'
+**Not yet:** cluster-wide and fetched IP lists, the policy fields `rateLimits` and `geo`
+([0011](0011-geo-blocking.md)), wiring other controllers'
 `HTTPRoute` targets, `BlockHighConfidence`, and the `InspectPrefix` oversize action.
 `InkwallConfig.events` is built for redaction only (`events.redact`, [§8.3](#83-data-privacy)).
 
@@ -464,7 +465,9 @@ Rules of the contract:
   is sent in `Hello`, and an older policy snapshot is refused.
 - In Managed mode the [validating webhook](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/) lets only the operator write the labelled objects. It
   fails closed.
-- In Standalone mode, events go to logs and optionally to [OTLP](https://opentelemetry.io/docs/specs/otlp/). Not yet: only the engine's log.
+- In every mode, events go to the engines' logs and, optionally, from each operator replica to a
+  SIEM over [OTLP](https://opentelemetry.io/docs/specs/otlp/) or JSON, beside the control plane
+  ([0010](0010-siem-export.md)). Not yet: the SIEM export; events reach the control plane today.
 
 **Built:** the contract (#86), enrollment and the primary stream, state sync (`ClusterState`), the
 events streams with each replica's disk buffer, request counts per policy (#119), and Managed mode (policy snapshots written as
@@ -1085,7 +1088,8 @@ than the certificate's lifetime enrolls again with a new token. Keys are [ECDSA 
 
 ### 8.2 Client IP correctness
 
-A wrong client IP makes rate limits and IP lists worse than none. The engine takes the first of:
+A wrong client IP makes rate limits, IP lists and geo blocking
+([0011 §9](0011-geo-blocking.md#9-client-ip)) worse than none. The engine takes the first of:
 
 1. the proxy's resolved client IP;
 2. `X-Forwarded-For`, walked from right to left, skipping only `trustedProxies`;
@@ -1222,7 +1226,8 @@ Target:
   use only registered ones.
 
 **Not yet:** a proxy-side adapter failure metric (see [§7.3](#73-engine-unavailable)),
-rate-limit metrics, tracing.
+rate-limit metrics, tracing, exporting events to a SIEM and its metrics
+([0010](0010-siem-export.md)).
 
 ### 8.6 Versioning and compatibility
 
