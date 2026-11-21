@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -85,6 +86,15 @@ func TestNodeCountBound(t *testing.T) {
 // under 1 KiB, would grow the walk's gap list by a gap per network, to
 // gigabytes; it is refused at MaxAliases gaps, at once.
 func TestAlternatingAliases(t *testing.T) {
+	// A lower cap keeps the guard walk's yields (bounded by it) quick
+	// under the race detector; the gaps stop at MaxAliases either way.
+	defer func(n int) { maxNetworks = n }(maxNetworks)
+	maxNetworks = 1 << 21
+	// 1,024 aliases pass the guard walk; the gaps stop at MaxAliases.
+	if _, err := Compile(context.Background(), mmdbtest.AlternatingAliases(10), nil); ReasonOf(err) != ReasonInvalid ||
+		!strings.Contains(err.Error(), "prefixes alias the IPv4 subtree") {
+		t.Errorf("1,024 aliases: %v", err)
+	}
 	db := mmdbtest.AlternatingAliases(26)
 	runtime.GC()
 	var before runtime.MemStats
