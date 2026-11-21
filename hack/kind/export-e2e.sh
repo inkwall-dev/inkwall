@@ -216,7 +216,9 @@ eventually "Detect mode lets the attack through" tstatus_is 200 "$log_path?q=1%2
 logged() { tcode "$log_path?q=1%27%20OR%20%271%27%3D%271" >/dev/null; sink_events_at /all "$log_path" | jq -e 'select(.action == "log")' | grep -q .; }
 eventually "the Log event reaches the sink that takes both actions" logged
 sleep 5 # a batch delay (1 s) and more
-not_denials_log() { ! denials_has "$log_path"; }
+# Its probes before Detect applied were denied, and those deny events do
+# reach the Deny-only sink: only the log ones mustn't.
+not_denials_log() { ! sink_events_at /denials "$log_path" | jq -e 'select(.action == "log")' | grep -q .; }
 check "and not the Deny-only sink" not_denials_log
 "${KUBECTL[@]}" -n "$NS" patch wafpolicy web --type=merge -p '{"spec":{"mode":"Block"}}' >/dev/null
 eventually "Block mode again" tstatus_is 403 "$attack"
