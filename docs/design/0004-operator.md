@@ -123,6 +123,15 @@ the webhook certificates.
 A field is added only once the engine honours it. Adding a field to `v1alpha1` later is
 compatible; removing one is not.
 
+References are shaped for v1 (#715). `spec.ipLists.allow`/`deny` name `WAFIPList`s by name in
+v1alpha1; v1 makes each item `{kind: WAFIPList | ClusterWAFIPList, name}` (kind defaulting to
+`WAFIPList`, `listType=map`), so `ClusterWAFIPList` lands after v1 without a breaking change.
+`spec.ruleSets[].ref.namespace` can only be the policy's own: it draws a warning in 0.7.0 and v1
+drops it, rather than promise cross-namespace references without a grant kind. WAFPolicy's
+conversion webhook maps the strings to `WAFIPList` references and back
+(`operator/internal/conversion`), and the v1.0 upgrade preflight refuses while a policy names
+another namespace.
+
 **Not yet:** `ClusterWAFIPList`, `spec.rateLimits` ([0009](0009-rate-limits.md)), `spec.geo` ([0011](0011-geo-blocking.md)), `spec.response`,
 `BlockHighConfidence`, `body.contentTypes`, the `InspectPrefix` oversize action,
 `WAFPolicyDefault`.

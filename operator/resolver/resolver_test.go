@@ -308,7 +308,7 @@ func TestMissingRuleSet(t *testing.T) {
 
 func TestCrossNamespaceRuleSet(t *testing.T) {
 	p := policy("shop", 0, "shop")
-	p.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{{Ref: wafv1alpha1.RuleSetRef{Kind: "WAFRuleSet", Name: "theirs", Namespace: "other"}}}
+	p.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{{Ref: wafv1alpha1.RuleSetRef{Kind: "WAFRuleSet", Name: "theirs", Namespace: "other"}}} //nolint:staticcheck // the deprecated field
 	res := Resolve(Input{Policies: []wafv1alpha1.WAFPolicy{p}})
 	wantStatus(t, res, "shop", false, ReasonInvalidRef, "use a ClusterWAFRuleSet")
 }

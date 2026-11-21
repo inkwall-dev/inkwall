@@ -572,7 +572,7 @@ func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.Nam
 	c.policy = convertSpec(PolicyID(p.Namespace, p.Name), p.Spec)
 
 	for i, b := range p.Spec.RuleSets {
-		ns := b.Ref.Namespace
+		ns := b.Ref.Namespace //nolint:staticcheck // the deprecated field still resolves
 		if ns == "" {
 			ns = p.Namespace
 		}
@@ -734,7 +734,7 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 		}
 	}
 	for _, b := range s.RuleSets {
-		binding := &bundlev1.RuleSetBinding{RuleSetId: RuleSetID(b.Ref.Kind, cmp.Or(b.Ref.Namespace, namespaceOf(id)), b.Ref.Name)}
+		binding := &bundlev1.RuleSetBinding{RuleSetId: RuleSetID(b.Ref.Kind, cmp.Or(b.Ref.Namespace, namespaceOf(id)), b.Ref.Name)} //nolint:staticcheck // the deprecated field still resolves
 		// crs.paranoiaLevel and crs.inboundAnomalyThreshold go where the
 		// deprecated binding-level fields always went, so every engine
 		// applies them.

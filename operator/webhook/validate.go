@@ -346,7 +346,26 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 					"bind the CRS without placement, and the rule set to place before it in its own entry"))
 		}
 	}
-	return append(responseWarnings(p), crsWarnings(p)...), invalid("WAFPolicy", p.Name, errs)
+	return append(append(responseWarnings(p), crsWarnings(p)...), ruleSetNamespaceWarnings(p)...), invalid("WAFPolicy", p.Name, errs)
+}
+
+// ruleSetNamespaceWarnings warns of a rule set reference's namespace
+// (#715): another namespace than the policy's is never resolved, so the
+// policy isn't Accepted; the policy's own does nothing. v1 drops the field
+// rather than promise cross-namespace references without a grant.
+func ruleSetNamespaceWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
+	var warnings admission.Warnings
+	for i, b := range p.Spec.RuleSets {
+		switch ns := b.Ref.Namespace; { //nolint:staticcheck // warns about the deprecated field
+		case ns == "":
+		case ns == p.Namespace:
+			warnings = append(warnings, fmt.Sprintf("spec.ruleSets[%d].ref.namespace is the policy's own, which is what unset means; remove it: v1 removes the field", i))
+		default:
+			warnings = append(warnings, fmt.Sprintf("spec.ruleSets[%d].ref.namespace %s: rule sets in other namespaces can't be used, so the policy won't be Accepted; "+
+				"bind the rule set from a policy in %s, or use a ClusterWAFRuleSet; v1 removes the field", i, ns, ns))
+		}
+	}
+	return warnings
 }
 
 // crsWarnings warns of the deprecated binding-level CRS settings, which

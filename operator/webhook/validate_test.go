@@ -158,6 +158,34 @@ func TestPolicyValidation(t *testing.T) {
 	wantInvalid(t, err, "spec.ruleSets[0].crs.detectionParanoiaLevel", "paranoia level")
 }
 
+// A rule set reference's namespace draws a warning (#715): another
+// namespace is never resolved, the policy's own does nothing; v1 drops it.
+func TestPolicyRuleSetNamespaceWarning(t *testing.T) {
+	ctx := context.Background()
+	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy}
+	ref := func(ns string) wafv1alpha1.RuleSetBinding {
+		return wafv1alpha1.RuleSetBinding{Ref: wafv1alpha1.RuleSetRef{Kind: "WAFRuleSet", Name: "rules", Namespace: ns}} //nolint:staticcheck // the deprecated field
+	}
+	for _, tc := range []struct {
+		ns, want string
+	}{
+		{ns: ""},
+		{ns: "shop", want: "spec.ruleSets[0].ref.namespace is the policy's own"},
+		{ns: "security", want: "spec.ruleSets[0].ref.namespace security: rule sets in other namespaces can't be used, so the policy won't be Accepted"},
+	} {
+		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "shop"}}
+		p.Spec.RuleSets = []wafv1alpha1.RuleSetBinding{ref(tc.ns)}
+		warnings, err := v.ValidateCreate(ctx, p)
+		if err != nil || (tc.want == "") != (len(warnings) == 0) || len(warnings) > 1 {
+			t.Errorf("namespace %q: warnings %q, error %v", tc.ns, warnings, err)
+			continue
+		}
+		if tc.want != "" && (!strings.Contains(warnings[0], tc.want) || !strings.Contains(warnings[0], "v1 removes the field")) {
+			t.Errorf("namespace %q: warning %q doesn't say %q", tc.ns, warnings[0], tc.want)
+		}
+	}
+}
+
 // The binding-level paranoiaLevel and inboundAnomalyThreshold are
 // deprecated for crs's (#714): each draws a warning, crs's none.
 func TestPolicyCRSWarnings(t *testing.T) {
