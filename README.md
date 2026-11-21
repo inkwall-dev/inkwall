@@ -63,10 +63,12 @@ helm install inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version
 kubectl -n inkwall-system rollout status deployment/inkwall-operator
 ```
 
-Then install Traefik, or restart it: only pods created after the operator get the engine. Use
-Traefik v3.7 or later: before v3.7, Traefik forwards `Upgrade: h2c` to the app, and requests sent on
-such a connection reach an app that accepts h2c without the engine seeing them
-([WebSocket](docs/websocket.md#through-each-proxy)).
+Then install Traefik, or restart it: only pods created after the operator get the engine. Its pods
+must run in a [proxy namespace](deploy/helm/inkwall/README.md#proxy-namespaces), `traefik` or
+`kube-system` by default (list another in `injection.proxyNamespaces`): elsewhere they get no
+engine, and its routes stay uninspected (`SidecarMissing`). Use Traefik v3.7 or later: before
+v3.7, Traefik forwards `Upgrade: h2c` to the app, and requests sent on such a connection reach an
+app that accepts h2c without the engine seeing them ([WebSocket](docs/websocket.md#through-each-proxy)).
 
 ```sh
 kubectl -n <traefik namespace> rollout restart deployment/<traefik>
@@ -91,14 +93,21 @@ protected route. Its Gateways' namespaces must be proxy namespaces (`istio-ingre
 Istio's ingress gateway (`kubectl -n <namespace> rollout restart deployment/istio-ingressgateway`)
 once Inkwall is installed, as for Traefik.
 
+For the HAProxy Kubernetes Ingress Controller (3.1 or later), install it in `haproxy-controller`,
+where its docs put it and a proxy namespace by default, and restart its pods once Inkwall is
+installed, as for Traefik
+([HAProxy](docs/haproxy.md#with-the-operator-haproxy-kubernetes-ingress-controller)).
+
 The [chart README](deploy/helm/inkwall/README.md) lists the chart's values and shows how to
-uninstall. The guides cover [upgrading](docs/upgrading.md),
+uninstall. Before production traffic depends on it, go through the
+[production checklist](docs/production.md). The guides cover [upgrading](docs/upgrading.md),
 [GitOps with Argo CD and Flux](docs/gitops.md), [rotating the signing key](docs/key-rotation.md),
 [connecting to a control plane](docs/control-plane.md) and
 [the client IP behind a load balancer](docs/client-ip.md).
 
 The images, the chart and the checksums are signed keyless with [cosign](https://docs.sigstore.dev/cosign/signing/overview/) v3: verify them
-with cosign v3, as cosign v2 reports "no signatures found". To verify an image:
+with cosign v3, as cosign v2 reports "no signatures found". To verify an image, and the chart
+(`ghcr.io/inkwall-dev/charts/inkwall:<version>` instead):
 
 ```sh
 cosign verify ghcr.io/inkwall-dev/inkwall-engine:<version> \
@@ -107,8 +116,19 @@ cosign verify ghcr.io/inkwall-dev/inkwall-engine:<version> \
 ```
 
 The binaries (`inkwall-engine`, `inkwall-operator`, `inkwallctl`) are on the
-[releases page](https://github.com/inkwall-dev/inkwall/releases). Each one's `version` subcommand
-(or `--version`) prints the release, the commit and the Go version it was built with:
+[releases page](https://github.com/inkwall-dev/inkwall/releases), all three in one archive per
+platform (`linux` or `darwin`, `amd64` or `arm64`). To install `inkwallctl`, which checks a
+cluster (`inkwallctl status`) and tests policies offline:
+
+```sh
+curl -fsSLO https://github.com/inkwall-dev/inkwall/releases/download/v<version>/inkwall_<version>_linux_amd64.tar.gz
+tar -xzf inkwall_<version>_linux_amd64.tar.gz inkwallctl
+sudo install inkwallctl /usr/local/bin/
+```
+
+[CONTRIBUTING.md](CONTRIBUTING.md#cutting-a-release) shows how to verify an archive. Each binary's
+`version` subcommand (or `--version`) prints the release, the commit and the Go version it was
+built with:
 
 ```console
 $ inkwallctl version
