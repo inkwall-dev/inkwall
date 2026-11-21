@@ -712,9 +712,12 @@ spec:
 
 // --max-body-bytes is the body limit of the policies that set no
 // body.maxBytes, as the engine's flag in bundle mode; body.maxBytes
-// overrides it.
+// overrides it. One cheap rule instead of the CRS, which takes seconds on
+// such a body under the race detector.
 func TestTestPolicyMaxBodyBytes(t *testing.T) {
 	body := "a=" + strings.Repeat("x", 100<<10)
+	ruleSet := writeFile(t, "rs.yaml", "apiVersion: waf.inkwall.dev/v1alpha1\nkind: WAFRuleSet\nmetadata: {name: rs}\nspec:\n  source:\n"+
+		"    seclang: 'SecRule ARGS \"@contains attack\" \"id:100001,phase:2,deny,status:403,log\"'\n")
 	for _, tc := range []struct {
 		name, spec string
 		args       []string
@@ -726,8 +729,8 @@ func TestTestPolicyMaxBodyBytes(t *testing.T) {
 		{"maxBytes set", "  body: {maxBytes: 1024}\n", []string{"--max-body-bytes", "131072"}, "deny  413  POST /"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := writeFile(t, "p.yaml", singlePolicy+tc.spec)
-			args := append(append([]string{"test", "--policy", p, "-d", body}, tc.args...), "http://a/")
+			p := writeFile(t, "p.yaml", singlePolicy+"  ruleSets: [{ref: {kind: WAFRuleSet, name: rs}}]\n"+tc.spec)
+			args := append(append([]string{"test", "--policy", p, "--rule-set", ruleSet, "-d", body}, tc.args...), "http://a/")
 			code, out, errOut := runCLI(t, args...)
 			if !strings.Contains(out, tc.want) {
 				t.Fatalf("exit %d\nstdout %q\nwant   %q\nstderr %q", code, out, tc.want, errOut)
