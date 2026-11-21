@@ -87,6 +87,9 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	pullSecrets := fs.String("engine-image-pull-secrets", "", "comma-separated Secrets (in each proxy pod's namespace) the pods the Pod webhook injects pull the engine image with, added to the pod's imagePullSecrets")
 	fs.StringVar(&o.EventsDir, "events-dir", "", "directory of this replica's buffer of security events for the optional control plane, kept across restarts (empty: in memory)")
 	fs.Int64Var(&o.EventsBufferBytes, "events-buffer-bytes", manager.DefaultEventsBufferBytes, "bound of the events buffer; when full, the oldest events are dropped and counted")
+	fs.Int64Var(&o.ExportBufferBytes, "export-buffer-bytes", manager.DefaultExportBufferBytes, "memory bound of the buffer of security events for the InkwallConfig's export sinks (spec.events.export): the newest batches; without --events-dir, the whole buffer, which drops the oldest when full")
+	fs.Int64Var(&o.ExportDiskBytes, "export-disk-bytes", manager.DefaultExportDiskBytes, "disk bound of the export buffer, in --events-dir/export: every batch; when full, the oldest are dropped and counted. Keep it within the directory's volume")
+	fs.DurationVar(&o.ExportFlushTimeout, "export-flush-timeout", manager.DefaultExportFlushTimeout, "on shutdown, after --shutdown-delay, how long the export sinks may take to send what is buffered; what is left stays in --events-dir. Keep --shutdown-delay, this and 10s within the pod's termination grace period")
 	fs.DurationVar(&o.SigningKeyGrace, "signing-key-grace", manager.DefaultSigningKeyGrace, "least time each phase of a signing key rotation lasts; keep it above the kubelet's delay to update a mounted ConfigMap (about a minute by default)")
 	fs.StringVar(&o.ControlPlaneCAFile, "control-plane-ca", "", "CA certificate (PEM) trusted for the optional control plane's server certificate, in GitOps and Managed mode (empty: the system roots)")
 	fs.IntVar(&o.DistributionPort, "distribution-port", 9445, "port of the gRPC server that sends bundles to the engines, over TLS with the webhook's certificate (0 disables)")
@@ -112,6 +115,9 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 		if name = strings.TrimSpace(name); name != "" {
 			o.EnginePullSecrets = append(o.EnginePullSecrets, name)
 		}
+	}
+	if o.ExportBufferBytes <= 0 || o.ExportDiskBytes <= 0 || o.ExportFlushTimeout <= 0 {
+		return o, errors.New("--export-buffer-bytes, --export-disk-bytes and --export-flush-timeout must be positive")
 	}
 	if o.SigningKeyGrace <= 0 || o.SelectorRestartMaxDelay <= 0 {
 		return o, errors.New("--signing-key-grace and --selector-restart-max-delay must be positive")

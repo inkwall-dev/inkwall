@@ -96,8 +96,19 @@ type GRPCServer struct {
 	CertDir string
 	Ready   <-chan struct{}
 	Service agentv1.BundleServiceServer
+	// Exporter, if set, starts with the server and stops after it: the
+	// manager stops runnables concurrently, so the server stops the
+	// exporter itself once its gRPC server has stopped, and no event comes
+	// after the export's flush (design 0010 §2.4).
+	Exporter Exporter
 
 	started atomic.Bool
+}
+
+// Exporter is the security events' export (operator/internal/export).
+type Exporter interface {
+	Start() error
+	Stop()
 }
 
 // maxEngineMessage bounds a message from an engine: a batch of events at
@@ -106,6 +117,13 @@ const maxEngineMessage = 4 << 20
 
 // Start implements manager.Runnable.
 func (g *GRPCServer) Start(ctx context.Context) error {
+	if g.Exporter != nil {
+		if err := g.Exporter.Start(); err != nil {
+			return fmt.Errorf("events export: %w", err)
+		}
+		// Deferred first, so it runs last: after the gRPC server stopped.
+		defer g.Exporter.Stop()
+	}
 	select {
 	case <-g.Ready:
 	case <-ctx.Done():
@@ -124,6 +142,9 @@ func (g *GRPCServer) Start(ctx context.Context) error {
 		// Find dead connections, and refuse keepalive floods.
 		grpc.KeepaliveParams(keepalive.ServerParameters{Time: 30 * time.Second, Timeout: 10 * time.Second}),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: true}),
+		// Stop returns only once every handler has: no stream adds events
+		// after the export's flush, even after the 5 s fallback to Stop.
+		grpc.WaitForHandlers(true),
 	)
 	agentv1.RegisterBundleServiceServer(srv, g.Service)
 	lis, err := (&net.ListenConfig{}).Listen(ctx, "tcp", fmt.Sprintf(":%d", g.Port))
