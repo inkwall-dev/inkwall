@@ -441,8 +441,9 @@ eventually "responses off: the response rules go" responses_unwired
 
 if ! $started_v34; then
   # A live upgrade (#753): the controller from 3.2 to 3.4 moves the route
-  # from the snippet to the operator's Backend, protected all along as the
-  # probe proves; and back down to 3.2, back to the snippet.
+  # from the snippet to the operator's Backend, and once the rollout is
+  # done the probe proves it and attacks are blocked; and back down to
+  # 3.2, back to the snippet. Traffic during the rollout isn't checked.
   echo "== the controller upgraded to $UPGRADE_TAG, and back to $HAPROXY_IMAGE_TAG"
   policy
   controller_release() {

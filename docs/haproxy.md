@@ -177,12 +177,15 @@ controller serves:
 
 It decides per controller: an Ingress's IngressClass names its controller
 (`haproxy.org/ingress-controller/<class>`), whose pods are those run with that `--ingress.class`
-(all of them, if none is). Only the controller's own pods count: running with the engine, in a
-proxy namespace (`injection.proxyNamespaces`), and owned by a ReplicaSet or DaemonSet (the chart's
-Deployment or DaemonSet). A pod someone else makes with the controller's labels, in another
-namespace or by hand, changes nothing, nor does the annotation below on such a pod. Two
+(the chart's `controller.ingressClass`). Only the controller's own pods count: in a proxy
+namespace (`injection.proxyNamespaces`) and owned by a ReplicaSet or DaemonSet (the chart's
+Deployment or DaemonSet); its release is read from those with the engine. A pod someone else
+makes with the controller's labels, in another namespace or by hand, changes nothing (not the
+release, not whether HAProxy sends responses), nor does the annotation below on such a pod. Two
 controllers of different releases are each wired as their own release asks, and each Ingress is
-probed on its own controller's pods.
+probed on its own controller's pods. An Ingress of a class no such pod serves isn't wired from
+another controller's pods: the policy is `Programmed=False` (`WiringFailed`), naming the
+`--ingress.class` no pod runs with.
 
 While a rollout from 3.2 to 3.4 runs, its Ingresses get the `Backend`, which 3.2 reads too; the
 probe says where it isn't in force. Rolling back to 3.2 moves them back to the snippet.
@@ -211,7 +214,12 @@ Ingress:
   `rate-limit-*`, `path-rewrite`, ...) do;
 - an Ingress that names a `Backend` of its own (`cr-backend`), or routes to a Service that does
   (the controller takes a Service's over the Ingress's), can't be protected: the policy is
-  `Programmed=False` (`WiringFailed`), naming the annotation, and the Ingress is left as it is;
+  `Programmed=False` (`WiringFailed`), naming the annotation, and the Ingress is unwired. The
+  operator reads the Services when it reconciles, which a change to the Ingress, the policy or the
+  controller's pods brings at once, and otherwise every minute: a `cr-backend` added to a Service
+  later takes over the operator's, unfiltered, for up to a minute before the policy says so. A
+  Service it can't read leaves the Ingress as it is, its `Backend`
+  with it, and is retried;
 - a `cr-backend` in the controller's ConfigMap, a default `Backend` for every Ingress, no longer
   applies to the protected ones, whose `cr-backend` is the operator's;
 - HAProxy's buffer is set in a `Global` custom resource (no `global-config-snippet`):
