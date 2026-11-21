@@ -62,6 +62,12 @@
 #     samples is reported, not judged; a proxy or the operator with no
 #     memory sample at all is a violation (the sampling broke).
 #
+# With SOAK_RATE_LIMITS=1 (the default), each policy has two rate limits
+# (#705) on paths the mixes never use: every sample, a burst of 20 requests
+# past one must get 429s, and 50 requests with new header values fill the
+# other's buckets, so the engines' tables fill and recycle under the memory
+# check; a burst outside chaos that gets no 429 is a violation.
+#
 # Each check prints an ok or FAIL line, as the other e2e scripts do. The
 # weekly qualify run (.github/workflows/qualify.yaml, soak) runs it with
 # chaos for 5h30m; before a release it runs 24 hours locally
@@ -89,6 +95,7 @@ SOAK_GRACE=${SOAK_GRACE:-60s}
 SOAK_MEM_GROWTH=${SOAK_MEM_GROWTH:-20}
 SOAK_MEM_MIN_MIB=${SOAK_MEM_MIN_MIB:-32}
 SOAK_MAX_ERROR_RATE=${SOAK_MAX_ERROR_RATE:-0.001}
+SOAK_RATE_LIMITS=${SOAK_RATE_LIMITS:-1}
 OUT=${OUT:-bin/soak/$(date -u +%Y%m%dT%H%M%SZ)}
 OPERATOR_NS=inkwall-system
 NODE=$CLUSTER-control-plane
@@ -157,6 +164,7 @@ trap cleanup EXIT
 
 : >"$OUT/violations.jsonl"
 : >"$OUT/chaos.jsonl"
+: >"$OUT/limits.jsonl"
 : >"$OUT/samples.jsonl"
 : >"$OUT/memory.jsonl"
 : >"$OUT/canary.jsonl"
@@ -182,6 +190,17 @@ canary_spec() {
     - ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}
     - ref: {kind: WAFRuleSet, name: bt-canary-$1}
 YAML
+  # Rate limits (#705), on paths the clean and attack mixes never use:
+  # soak, which check_limits bursts past; soak-keys, by a header whose
+  # value is new on every request, so the engines' tables fill and recycle
+  # buckets through the soak, under the memory check.
+  if [[ $SOAK_RATE_LIMITS == 1 ]]; then
+    cat <<YAML
+  rateLimits:
+    - {name: soak, requests: 2, period: 1s, burst: 4, match: {paths: ["/soak-limited/*"]}}
+    - {name: soak-keys, requests: 1, period: 1m, key: {header: {name: X-Soak-Key}}, match: {paths: ["/soak-keys/*"]}}
+YAML
+  fi
 }
 {
   printf 'apiVersion: waf.inkwall.dev/v1alpha1\nkind: WAFPolicy\nmetadata: {name: app, namespace: bt}\n'
@@ -238,6 +257,29 @@ check_claims() {
   done
 }
 
+# check_limits: for every policy that claims its protection, a burst of 20
+# requests past its soak limit (2 a second, bursts of 4) through its proxy
+# must get 429s, and 50 requests with new X-Soak-Key values fill the
+# soak-keys limit's buckets. Logged in OUT/limits.jsonl; judged outside
+# chaos at the end.
+check_limits() {
+  [[ $SOAK_RATE_LIMITS == 1 ]] || return 0
+  local p ns url host t limited codes i
+  t=$(date +%s)
+  for p in ${operator_proxies[@]+"${operator_proxies[@]}"}; do
+    stack_claimed "$p" 2>/dev/null || continue
+    url=$(stack_url "$p" "") host=$(stack_host "$p")
+    codes=$(for i in $(seq 20); do
+      curl -s -o /dev/null -m 5 -w '%{http_code}\n' -H "Host: $host" "$url/soak-limited/$t-$i" 2>/dev/null || echo 000
+    done)
+    limited=$(grep -c '^429$' <<<"$codes" || true)
+    for i in $(seq 50); do
+      curl -s -o /dev/null -m 5 -H "Host: $host" -H "X-Soak-Key: k-$t-$i" "$url/soak-keys/x" 2>/dev/null || true
+    done
+    jq -nc --argjson t "$t" --arg p "$p" --argjson limited "$limited" '{time: $t, proxy: $p, sent: 20, limited: $limited}' >>"$OUT/limits.jsonl"
+  done
+}
+
 # The namespaces whose restarts are watched (sample_restarts,
 # hack/kind/soak-restarts.sh).
 watched=("$OPERATOR_NS")
@@ -266,7 +308,10 @@ tick() {
   next_sample=$((now + sample_every))
   if ! $api_down; then sample_restarts; fi
   sample_memory
-  if ! $api_down; then check_claims; fi
+  if ! $api_down; then
+    check_claims
+    check_limits
+  fi
   progress
 }
 progress() {
@@ -552,6 +597,19 @@ if ! jq -se 'any(.[]; .kind == "recovery")' "$OUT/violations.jsonl" >/dev/null; 
 fi
 if [[ $SOAK_CHAOS == 1 ]] && ((duration > chaos_every + recovery)) && [[ $(jq -s length "$OUT/chaos.jsonl") == 0 ]]; then
   violation chaos "SOAK_CHAOS=1, but no chaos scenario ran in $DURATION"
+fi
+# Rate limits: every burst past the soak limit, outside chaos, got 429s.
+if [[ $SOAK_RATE_LIMITS == 1 ]] && ((${#operator_proxies[@]} > 0)); then
+  calm_limits=$(jq -s --slurpfile chaos "$OUT/chaos.jsonl" \
+    'map(. as $w | select(any($chaos[]; $w.time >= .start and $w.time < .graceUntil) | not))' "$OUT/limits.jsonl")
+  unlimited=$(jq -c 'map(select(.limited == 0))' <<<"$calm_limits")
+  if [[ $(jq length <<<"$calm_limits") == 0 ]]; then
+    violation rate-limit "no rate limit sample outside chaos: the sampling broke"
+  elif [[ $(jq length <<<"$unlimited") == 0 ]]; then
+    ok "rate limits held: every burst past the limit outside chaos got 429s ($(jq length <<<"$calm_limits") bursts, $(jq 'map(.limited) | add' <<<"$calm_limits") limited of $(jq 'map(.sent) | add' <<<"$calm_limits"))"
+  else
+    violation rate-limit "$(jq length <<<"$unlimited") burst(s) past the soak limit outside chaos got no 429: $(jq -c '.[:5]' <<<"$unlimited")"
+  fi
 fi
 
 jq -n --arg duration "$DURATION" --arg chaos "${SOAK_CHAOS:-0}" --argjson rate "$SOAK_RATE" --arg started "$(date -u -d "@$start" +%FT%TZ)" \

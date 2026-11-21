@@ -70,8 +70,10 @@ type InkwallConfigSpec struct {
 	// +optional
 	ControlPlane *ControlPlane `json:"controlPlane,omitempty"`
 
-	// Engine configures the engine sidecars the operator injects.
+	// Engine configures the engine sidecars the operator injects. Omitted,
+	// it is {}, so that its defaults show.
 	// +optional
+	// +kubebuilder:default={}
 	Engine EngineSpec `json:"engine,omitempty"`
 
 	// Integrations pins how a proxy controller is wired. Controllers are
@@ -94,14 +96,18 @@ type InkwallConfigSpec struct {
 
 	// Events configures what the engines' security events carry to the
 	// operator (and on to the control plane, when one is connected).
+	// Omitted, it is {}, so that its defaults show.
 	// +optional
+	// +kubebuilder:default={}
 	Events EventsSpec `json:"events,omitempty"`
 }
 
 // EventsSpec configures the engines' security events.
 type EventsSpec struct {
-	// Redact keeps more of what rules matched out of the events.
+	// Redact keeps more of what rules matched out of the events. Omitted,
+	// it is {}, so that its defaults show.
 	// +optional
+	// +kubebuilder:default={}
 	Redact RedactSpec `json:"redact,omitempty"`
 
 	// Export sends the security events to SIEMs and log pipelines, from
@@ -425,7 +431,8 @@ type ControlPlane struct {
 	// +kubebuilder:validation:MaxLength=512
 	Endpoint string `json:"endpoint"`
 
-	// EnrollmentSecretRef is the Secret holding the enrollment token.
+	// EnrollmentSecretRef is the Secret holding the enrollment token, in
+	// the operator's namespace (its namespace can be left out).
 	EnrollmentSecretRef SecretReference `json:"enrollmentSecretRef"`
 }
 
@@ -508,7 +515,8 @@ type EngineSpec struct {
 	// eviction is refused or a replacement isn't ready in time. Pods the
 	// Pod webhook injects only (Traefik, HAProxy, Istio's ingress gateways):
 	// Envoy Gateway and Istio's Gateway API deployments roll their pods
-	// themselves. Unset: Manual.
+	// themselves.
+	// +kubebuilder:default=Manual
 	// +optional
 	Rollout RolloutPolicy `json:"rollout,omitempty"`
 
@@ -602,7 +610,8 @@ type CIDR string
 type IntegrationSpec struct {
 	// Controller is the integration name: traefik, envoy-gateway, istio,
 	// istio-ingress or haproxy. The operator ignores an entry for any other
-	// controller.
+	// controller. It should be a DNS label (lower case letters, digits and
+	// "-"): any other name draws a warning, and v1 refuses it.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	Controller string `json:"controller"`

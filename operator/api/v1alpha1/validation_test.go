@@ -319,6 +319,11 @@ func TestInkwallConfigValidation(t *testing.T) {
 		{name: "Managed without a control plane", doc: inkwallConfig("default", "  mode: Managed\n"), wantErr: "controlPlane is required in GitOps and Managed mode"},
 		{name: "Managed", doc: inkwallConfig("default", "  mode: Managed\n"+controlPlane)},
 		{name: "unknown mode", doc: inkwallConfig("default", "  mode: Hybrid\n"), wantErr: `Unsupported value: "Hybrid"`},
+		{name: "enrollment Secret without a namespace", doc: inkwallConfig("default", "  mode: GitOps\n  controlPlane:\n    endpoint: grpcs://agents.example.com:443\n    enrollmentSecretRef: {name: e}\n")},
+		{name: "enrollment Secret with an empty namespace", doc: inkwallConfig("default", "  mode: GitOps\n  controlPlane:\n    endpoint: grpcs://agents.example.com:443\n    enrollmentSecretRef: {name: e, namespace: \"\"}\n"), wantErr: "spec.controlPlane.enrollmentSecretRef.namespace"},
+		{name: "rollout", doc: inkwallConfig("default", "  engine: {rollout: Automatic}\n")},
+		// Warned by the webhook, refused by v1 only.
+		{name: "controller that isn't a DNS label", doc: inkwallConfig("default", "  integrations: [{controller: Ingress_Nginx}]\n")},
 		{name: "plaintext control plane", doc: inkwallConfig("default", "  mode: GitOps\n  controlPlane:\n    endpoint: http://agents.example.com\n    enrollmentSecretRef: {name: e, namespace: inkwall-system}\n"), wantErr: "spec.controlPlane.endpoint"},
 		// Deprecated and ignored: any value stays accepted.
 		{name: "deprecated socket dir", doc: inkwallConfig("default", "  engine: {socketDir: run/inkwall}\n")},
@@ -453,6 +458,22 @@ func TestInkwallConfigDefaults(t *testing.T) {
 	}
 	if mode, _, _ := unstructured.NestedString(u.Object, "spec", "mode"); mode != "Standalone" {
 		t.Errorf("mode defaulted to %q, want Standalone", mode)
+	}
+	// The blocks' defaults apply without the blocks (#712); logLevel stays
+	// unset, which pinned engines before 0.5.0 need.
+	for _, d := range []struct {
+		path []string
+		want any
+	}{
+		{[]string{"spec", "engine", "bootstrapMode"}, "AllowAll"},
+		{[]string{"spec", "engine", "rollout"}, "Manual"},
+		{[]string{"spec", "events", "redact", "snippets"}, true},
+		{[]string{"spec", "engine", "logLevel"}, nil},
+	} {
+		got, _, _ := unstructured.NestedFieldNoCopy(u.Object, d.path...)
+		if got != d.want {
+			t.Errorf("%s defaulted to %v, want %v", strings.Join(d.path, "."), got, d.want)
+		}
 	}
 }
 

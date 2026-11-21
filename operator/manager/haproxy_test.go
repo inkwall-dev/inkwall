@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/client-go/util/retry"
+
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -177,22 +179,16 @@ func testHAProxy(ctx context.Context, t *testing.T, c client.Client) {
 	// Responses (#470): the pod's engine keeps requests for them, so the
 	// Ingress gets the response rules, and the policy isn't
 	// ResponsesNotInspected: still Unverified until the probe answers.
-	if err := c.Get(ctx, client.ObjectKeyFromObject(pol), pol); err != nil {
-		t.Fatal(err)
-	}
 	// responses.maxBytes (4 MiB) over the 2m buffer: said, as for bodies.
-	pol.Spec.Responses = &wafv1alpha1.ResponsesSpec{Inspect: true, MaxBytes: new(int64(4 << 20))}
-	if err := c.Update(ctx, pol); err != nil {
-		t.Fatal(err)
-	}
+	// The operator writes the policy's status meanwhile: retried on a
+	// conflict.
+	updatePolicy(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) {
+		p.Spec.Responses = &wafv1alpha1.ResponsesSpec{Inspect: true, MaxBytes: new(int64(4 << 20))}
+	})
 	eventually(t, "responses.maxBytes over the buffer is said", programmed(metav1.ConditionFalse, wiring.ReasonUnverified, "responses.maxBytes (4194304)"))
-	if err := c.Get(ctx, client.ObjectKeyFromObject(pol), pol); err != nil {
-		t.Fatal(err)
-	}
-	pol.Spec.Responses = &wafv1alpha1.ResponsesSpec{Inspect: true}
-	if err := c.Update(ctx, pol); err != nil {
-		t.Fatal(err)
-	}
+	updatePolicy(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) {
+		p.Spec.Responses = &wafv1alpha1.ResponsesSpec{Inspect: true}
+	})
 	eventually(t, "the Ingress gets the response rules", func() string {
 		var got networkingv1.Ingress
 		if err := c.Get(ctx, client.ObjectKeyFromObject(ing), &got); err != nil {
@@ -268,6 +264,22 @@ func testHAProxy(ctx context.Context, t *testing.T, c client.Client) {
 		return ""
 	})
 	if err := c.Delete(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// updatePolicy applies change to the latest pol, retrying when the
+// operator's status writes got in between (a conflict).
+func updatePolicy(ctx context.Context, t *testing.T, c client.Client, pol *wafv1alpha1.WAFPolicy, change func(*wafv1alpha1.WAFPolicy)) {
+	t.Helper()
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := c.Get(ctx, client.ObjectKeyFromObject(pol), pol); err != nil {
+			return err
+		}
+		change(pol)
+		return c.Update(ctx, pol)
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 }
