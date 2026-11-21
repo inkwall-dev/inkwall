@@ -214,12 +214,13 @@ func TestWAFPolicyValidation(t *testing.T) {
 		{name: "zero response body", doc: policy(target + "  responses: {inspect: true, maxBytes: 0}\n"), wantErr: "should be greater than or equal to 1"},
 		{name: "unknown response oversize action", doc: policy(target + "  responses: {inspect: true, onOversize: Truncate}\n"), wantErr: `Unsupported value: "Truncate"`},
 		// Limits without inspection would read as if responses were inspected.
-		{name: "response limits without inspect", doc: policy(target + "  responses: {maxBytes: 1024}\n"), wantErr: "maxBytes, onOversize and streams need inspect: true"},
-		{name: "response oversize without inspect", doc: policy(target + "  responses: {inspect: false, onOversize: Deny}\n"), wantErr: "maxBytes, onOversize and streams need inspect: true"},
+		{name: "response limits without inspect", doc: policy(target + "  responses: {maxBytes: 1024}\n"), wantErr: "maxBytes, onOversize and streams: Inspect need inspect: true"},
+		{name: "response oversize without inspect", doc: policy(target + "  responses: {inspect: false, onOversize: Deny}\n"), wantErr: "maxBytes, onOversize and streams: Inspect need inspect: true"},
 		// Streams, event by event (#323).
 		{name: "streams inspected", doc: policy(target + "  responses: {inspect: true, streams: Inspect}\n")},
 		{name: "streams skipped", doc: policy(target + "  responses: {inspect: true, streams: Skip}\n")},
-		{name: "streams without inspect", doc: policy(target + "  responses: {streams: Inspect}\n"), wantErr: "maxBytes, onOversize and streams need inspect: true"},
+		{name: "streams without inspect", doc: policy(target + "  responses: {streams: Inspect}\n"), wantErr: "maxBytes, onOversize and streams: Inspect need inspect: true"},
+		{name: "streams Skip without inspect", doc: policy(target + "  responses: {streams: Skip}\n")},
 		{name: "unknown streams action", doc: policy(target + "  responses: {inspect: true, streams: Buffer}\n"), wantErr: `Unsupported value: "Buffer"`},
 
 		// Rate limits (#705, design 0009 §3.5).
@@ -286,6 +287,23 @@ func TestWAFPolicyDefaults(t *testing.T) {
 	}
 	if inspect, _, _ := unstructured.NestedBool(u.Object, "spec", "body", "inspect"); !inspect {
 		t.Error("body.inspect did not default to true")
+	}
+	if timeout, _, _ := unstructured.NestedString(u.Object, "spec", "timeout"); timeout != "250ms" {
+		t.Errorf("timeout defaulted to %q, want 250ms", timeout)
+	}
+
+	// The static defaults are in the API (#718); responses that aren't
+	// inspected still take streams: Skip, the default.
+	u = object(t, policy(target+"  ruleSets: [{ref: {kind: ClusterWAFRuleSet, name: crs}}]\n  responses: {inspect: false}\n"))
+	if err := c.Create(context.Background(), u, client.DryRunAll); err != nil {
+		t.Fatal(err)
+	}
+	rs, _, _ := unstructured.NestedSlice(u.Object, "spec", "ruleSets")
+	if len(rs) != 1 || rs[0].(map[string]any)["placement"] != "AfterCRS" {
+		t.Errorf("ruleSets %v, want placement defaulted to AfterCRS", rs)
+	}
+	if streams, _, _ := unstructured.NestedString(u.Object, "spec", "responses", "streams"); streams != "Skip" {
+		t.Errorf("responses.streams defaulted to %q, want Skip", streams)
 	}
 }
 
