@@ -11,13 +11,13 @@ name: qualify
 # A release branch from before 0.5 has no hack/versions.env: it's tested
 # with the Helm version its own CI pinned (hack/ci/ref-versions.sh), and a
 # test it doesn't have yet is reported as not run, never passed (#618).
-# A release is cut only after a green run (CONTRIBUTING.md, "Cutting a
-# release").
+# Weekly, main also soaks with chaos (soak, #706). A release is cut only
+# after a green run (CONTRIBUTING.md, "Cutting a release").
 
 on:
   schedule:
     - cron: '41 2 * * *'   # nightly: main
-    - cron: '7 4 * * 6'    # weekly: the supported release branches
+    - cron: '7 4 * * 6'    # weekly: the supported release branches, and main's soak
   workflow_dispatch:
     inputs:
       ref:
@@ -26,6 +26,10 @@ on:
         default: ''
       images:
         description: ghcr:<version> tests those published images (a release candidate's) instead of building the ref's.
+        type: string
+        default: ''
+      soak_duration:
+        description: Also soak main with chaos for this long (e.g. 30m, 2h, at most 5h30m). Empty, no soak.
         type: string
         default: ''
 
@@ -298,6 +302,118 @@ jobs:
           path: ${{ runner.temp }}/kind-logs
           retention-days: 7
 
+  soak-images:
+    # main's images for the soak: the images job builds the plan's refs,
+    # weekly the release branches.
+    if: github.event.schedule == '7 4 * * 6' || inputs.soak_duration != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: main
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-build
+          key: image-go-build-${{ hashFiles('go.sum', 'Dockerfile') }}
+          restore-keys: image-go-build-
+      - run: hack/kind/go-build-cache.sh inject "$RUNNER_TEMP/go-build"
+      - run: make image
+      - run: docker save inkwall-engine:dev inkwall-operator:dev | gzip -1 > "$RUNNER_TEMP/images.tar.gz"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qualify-soak-images
+          path: ${{ runner.temp }}/images.tar.gz
+          retention-days: 2
+          compression-level: 0
+
+  soak:
+    # The soak with chaos (#706, hack/kind/soak.sh): every proxy on one
+    # cluster under steady clean and attack traffic, while the operator,
+    # an engine, a proxy, the API server and the distribution are broken in
+    # turn. It fails on an attack through, a status claim a canary
+    # disproves, memory growth past the bound or a restart outside chaos.
+    # Weekly on main only: a hosted runner stops a job at 6 hours, so 5h30m
+    # of soak leaves time for the setup and the summary. The 24-hour soak
+    # runs locally before each release (CONTRIBUTING.md, "Battle test").
+    needs: soak-images
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 358
+    name: soak (main)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: main
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+          check-latest: true
+          # Restore only: this job runs main's code (#503).
+          cache: false
+      # The soak's duration: soak_duration on demand, 5h30m weekly; at most
+      # 5h30m, so the job ends within the runner's 6 hours.
+      - id: duration
+        env:
+          SOAK_DURATION: ${{ inputs.soak_duration }}
+        run: |
+          d=${SOAK_DURATION:-5h30m}
+          if ! [[ -n $d && $d =~ ^(([0-9]+)h)?(([0-9]+)m)?$ ]]; then
+            echo "soak_duration must be like 30m, 2h or 5h30m, got $d" >&2
+            exit 1
+          fi
+          m=$((10#${BASH_REMATCH[2]:-0} * 60 + 10#${BASH_REMATCH[4]:-0}))
+          if ((m < 10 || m > 330)); then
+            echo "soak_duration must be from 10m to 5h30m, got $d" >&2
+            exit 1
+          fi
+          echo "duration=$d" >>"$GITHUB_OUTPUT"
+      # The versions under test, hack/versions.env (#393).
+      - id: versions
+        run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_OUTPUT"
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: ${{ steps.versions.outputs.HELM_VERSION }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: qualify-soak-images
+          path: ${{ runner.temp }}
+      - run: gunzip -c "$RUNNER_TEMP/images.tar.gz" | docker load
+      # The Kubernetes version a local soak runs (KIND_NODE_IMAGE).
+      - run: make kind-cluster
+      # KEEP=1: the stacks stay for the logs on failure.
+      - run: make kind-soak SKIP_IMAGE_BUILD=1 SOAK_CHAOS=1 SOAK_DURATION="$DURATION" KEEP=1 OUT="$RUNNER_TEMP/soak"
+        timeout-minutes: 350
+        env:
+          DURATION: ${{ steps.duration.outputs.duration }}
+      - if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/soak/summary.md" ]; then cat "$RUNNER_TEMP/soak/summary.md" >>"$GITHUB_STEP_SUMMARY"; fi
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qualify-soak
+          path: ${{ runner.temp }}/soak
+          if-no-files-found: ignore
+          retention-days: 30
+      - if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          mkdir -p "$RUNNER_TEMP/kind-logs"
+          kind=(bin/kind-*/kind)
+          "${kind[0]}" export logs "$RUNNER_TEMP/kind-logs" --name inkwall || true
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qualify-soak-kind-logs
+          path: ${{ runner.temp }}/kind-logs
+          retention-days: 7
+
   upgrade:
     needs: plan
     permissions:
@@ -433,7 +549,7 @@ jobs:
   summary:
     # One table of results in the run's summary: a release needs every row
     # green.
-    needs: [plan, images, e2e, chaos, upgrade, scale, docker-e2e, crs]
+    needs: [plan, images, e2e, chaos, soak-images, soak, upgrade, scale, docker-e2e, crs]
     if: always()
     runs-on: ubuntu-24.04
     permissions:
