@@ -7,7 +7,8 @@
 # default-deny policy for every pod of the operator's namespace, the
 # operator restarts and reaches the API server, the API server reaches the
 # webhook, a proxy pod gets the engine and the engine connects to the
-# distribution server, and Prometheus' namespace scrapes the metrics. Other
+# distribution server, an export sink works only once listed in
+# networkPolicy.egress.extra, and Prometheus' namespace scrapes the metrics. Other
 # namespaces reach neither the distribution server nor the metrics. Then
 # the same with the metrics over HTTPS (metrics.secure), authenticated and
 # authorized, and puts the release's values back. make kind-operator
@@ -46,7 +47,7 @@ proxy_namespaces=${proxy_namespaces:-traefik}
 # The engine's pod goes first: the chart refuses an upgrade that leaves
 # pods with the engine outside the proxy namespaces.
 restore() {
-  "${KUBECTL[@]}" delete namespace "$PROXY_NS" "$MONITORING_NS" "$OTHER_NS" --ignore-not-found --timeout=120s >/dev/null || true
+  "${KUBECTL[@]}" delete namespace "$PROXY_NS" "$MONITORING_NS" "$OTHER_NS" inkwall-np-sink --ignore-not-found --timeout=120s >/dev/null || true
   "${KUBECTL[@]}" -n "$NAMESPACE" delete networkpolicy default-deny --ignore-not-found >/dev/null || true
   "${KUBECTL[@]}" delete clusterrolebinding "$READER_BINDING" --ignore-not-found >/dev/null || true
   if ! "${HELM[@]}" upgrade inkwall "$CHART" --namespace "$NAMESPACE" -f "$work/values.yaml" >/dev/null; then
@@ -198,6 +199,9 @@ if [[ $(reach "$OTHER_NS" "$operator_ip" 9445) == 28 ]]; then
 else
   fail "a namespace that isn't a proxy namespace reaches the distribution server"
 fi
+
+# shellcheck source=hack/kind/networkpolicy-export-e2e.sh
+. hack/kind/networkpolicy-export-e2e.sh
 
 # Secure metrics (#430): with metrics.secure on, under the same policies,
 # the metrics are served over HTTPS behind the API server's TokenReview and

@@ -149,15 +149,17 @@ func TestBufferSlowSinkLosesOnlyItsOwn(t *testing.T) {
 func TestBufferMemoryAndDiskBounds(t *testing.T) {
 	dir := t.TempDir()
 	size := batchSize(10)
-	b := newTestBuffer(t, dir, 2*size, 6*size)
+	// On disk, each batch counts as its file in whole blocks.
+	onDisk := (size + batchHeader + diskBlock - 1) / diskBlock * diskBlock
+	b := newTestBuffer(t, dir, 2*size, 6*onDisk)
 	b.setSinks([]string{"a"})
 	for range 8 {
 		b.add(batchOf(10, numbered("x")))
 		b.writeRound()
 	}
 	mem, all := b.bytes()
-	if mem > 2*size || all > 6*size || all < 5*size {
-		t.Errorf("memory %d (bound %d), all %d (bound %d)", mem, 2*size, all, 6*size)
+	if mem > 2*size || all > 6*onDisk || all < 5*onDisk {
+		t.Errorf("memory %d (bound %d), all %d (bound %d)", mem, 2*size, all, 6*onDisk)
 	}
 	if d := b.takeDropped("a"); d != 20 {
 		t.Errorf("dropped %d, want the 2 oldest batches' 20", d)

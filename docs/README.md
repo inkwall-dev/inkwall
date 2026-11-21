@@ -56,6 +56,8 @@ Every doc in this repository, by topic, with the question each one answers.
   and what do I do when an alert fires?
 - [The audit log of policy changes](audit-log.md): who changed which policy, rule set, IP list or
   `InkwallConfig`, when, and what changed?
+- [Exporting security events to a SIEM](siem-export.md): how do I send blocked and detected
+  requests to Splunk, Elastic, Loki, Datadog, Sentinel or an OpenTelemetry Collector?
 - [Running the engine without Kubernetes](standalone-proxy.md): how do I put the engine in front
   of any HTTP service as a reverse proxy, and which flags does it take?
 

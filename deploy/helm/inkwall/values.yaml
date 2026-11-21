@@ -28,13 +28,31 @@ operator:
 
   # The operator sets the Go runtime's soft memory limit (GOMEMLIMIT) to
   # 90% of limits.memory, so its GC works harder near the limit instead of
-  # letting the heap double.
+  # letting the heap double. With the export of security events to SIEMs
+  # (events.export below), each replica holds its export buffer and the
+  # requests in flight too:
+  #   limits.memory >= (the operator's own peak + the control plane queue's
+  #     heap + events.export.bufferMiB x 1.25
+  #     + 4 MiB x maxInFlight x sinks) / 0.9
+  # The largest scale test peaks at about 518 MiB (docs/design/0004 §8);
+  # the control plane's queue, full (controlPlane.eventsBufferMiB, 64 MiB
+  # on the wire), holds about 2.8 times that decoded: 176 MiB
+  # (TestQueueHeap, operator/internal/controlplane); export adds 40 MiB of
+  # buffer and at most 64 MiB of requests (4 sinks of 4 in flight): (518 +
+  # 176 + 40 + 64) / 0.9 = 887 MiB, hence 1Gi. A cluster far from the scale
+  # test, without a control plane or sinks, needs much less.
   resources:
     requests:
       cpu: 100m
       memory: 128Mi
     limits:
-      memory: 512Mi
+      memory: 1Gi
+
+  # Time a terminating replica has: --shutdown-delay (5 s) serving, then
+  # up to 15 s (--export-flush-timeout) sending the buffered security
+  # events to the export sinks, then the rest of the shutdown. Raise it
+  # with either flag (operator.extraArgs).
+  terminationGracePeriodSeconds: 30
 
   # Extra inkwall-operator flags.
   extraArgs: []
@@ -122,6 +140,18 @@ controlPlane:
   # the oldest are dropped and counted. Only used when the control plane
   # accepts events.
   eventsBufferMiB: 64
+
+events:
+  export:
+    # Each operator replica's buffer of security events for the
+    # InkwallConfig's export sinks (spec.events.export,
+    # docs/siem-export.md): the newest batches in memory, up to bufferMiB,
+    # and every batch on disk, in the events emptyDir (kept across
+    # container restarts), up to diskMiB. When full, the oldest are
+    # dropped and counted. Used only when spec.events.export has sinks;
+    # the emptyDir's sizeLimit includes diskMiB.
+    bufferMiB: 32
+    diskMiB: 512
 
 uninstall:
   # On helm uninstall, stop the operator and remove Inkwall's Middleware from

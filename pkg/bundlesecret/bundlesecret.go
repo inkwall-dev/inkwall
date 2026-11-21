@@ -10,6 +10,10 @@
 // two sets of names, the one the current manifest doesn't use, before the
 // manifest: a reader never sees a manifest whose chunks are not all
 // written, and the hash in the manifest rejects chunks overwritten since.
+//
+// The country table of geo blocking (design 0011 §4.4) is stored the same
+// way, always in chunks, with its own limit: a Format names the manifest
+// Secret and bounds its chunks.
 package bundlesecret
 
 import (
@@ -43,9 +47,32 @@ const (
 	MaxChunks = 8
 	// MaxBytes is the largest compressed bundle.
 	MaxBytes = MaxChunks * ChunkBytes
+	// GeoMaxChunks bounds the chunks of the country table: 14,400 KiB.
+	GeoMaxChunks = 16
 	// MaxBundleBytes is the largest bundle decompressed.
 	MaxBundleBytes = 64 << 20
 )
+
+// GeoSecret is the manifest Secret of the country table, in the operator's
+// namespace, beside the bundle Secret.
+const GeoSecret = "inkwall-geo" // #nosec G101 -- the Secret's name, not a credential
+
+// Format is a manifest Secret and the bound of its chunks.
+type Format struct {
+	// Name is the manifest Secret's name; its chunks are named after it.
+	Name string
+	// MaxChunks bounds the chunks.
+	MaxChunks int
+}
+
+// Bundle returns the format of the bundle Secret named secret.
+func Bundle(secret string) Format { return Format{Name: secret, MaxChunks: MaxChunks} }
+
+// Geo is the format of the country table's Secrets.
+var Geo = Format{Name: GeoSecret, MaxChunks: GeoMaxChunks}
+
+// MaxBytes is the most compressed data f's chunks hold.
+func (f Format) MaxBytes() int { return f.MaxChunks * ChunkBytes }
 
 // Slots of chunk names: a bundle is written to the one the current
 // manifest doesn't use.
@@ -74,11 +101,15 @@ func ChunkName(secret, slot string, i int) string {
 
 // ChunkNames returns every name a chunk of secret can have: what engines
 // need get on, besides the bundle Secret.
-func ChunkNames(secret string) []string {
-	names := make([]string, 0, len(slots)*MaxChunks)
+func ChunkNames(secret string) []string { return Bundle(secret).ChunkNames() }
+
+// ChunkNames returns every name a chunk of f can have: what engines need
+// get on, besides the manifest Secret.
+func (f Format) ChunkNames() []string {
+	names := make([]string, 0, len(slots)*f.MaxChunks)
 	for _, slot := range slots {
-		for i := range MaxChunks {
-			names = append(names, ChunkName(secret, slot, i))
+		for i := range f.MaxChunks {
+			names = append(names, ChunkName(f.Name, slot, i))
 		}
 	}
 	return names
@@ -106,8 +137,15 @@ func NextSlot(secret string, current *Manifest) string {
 // Split splits a compressed bundle into chunks named in slot, and returns
 // their manifest.
 func Split(secret, slot string, data []byte) (Manifest, [][]byte, error) {
-	if len(data) > MaxBytes {
-		return Manifest{}, nil, fmt.Errorf("%d bytes, at most %d", len(data), MaxBytes)
+	return Bundle(secret).Split(slot, data)
+}
+
+// Split splits compressed data into f's chunks named in slot, and returns
+// their manifest.
+func (f Format) Split(slot string, data []byte) (Manifest, [][]byte, error) {
+	secret := f.Name
+	if len(data) > f.MaxBytes() {
+		return Manifest{}, nil, fmt.Errorf("%d bytes, at most %d", len(data), f.MaxBytes())
 	}
 	sum := sha256.Sum256(data)
 	m := Manifest{SHA256: hex.EncodeToString(sum[:]), Size: len(data)}
@@ -124,12 +162,19 @@ func Split(secret, slot string, data []byte) (Manifest, [][]byte, error) {
 // ParseManifest reads the manifest of secret, and checks that its chunks
 // are named as Split names them.
 func ParseManifest(secret string, data []byte) (*Manifest, error) {
+	return Bundle(secret).ParseManifest(data)
+}
+
+// ParseManifest reads f's manifest, and checks that its chunks are named as
+// Split names them, within f's bounds.
+func (f Format) ParseManifest(data []byte) (*Manifest, error) {
+	secret := f.Name
 	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("manifest: %w", err)
 	}
-	if len(m.Chunks) == 0 || len(m.Chunks) > MaxChunks {
-		return nil, fmt.Errorf("manifest: %d chunks, want 1 to %d", len(m.Chunks), MaxChunks)
+	if len(m.Chunks) == 0 || len(m.Chunks) > f.MaxChunks {
+		return nil, fmt.Errorf("manifest: %d chunks, want 1 to %d", len(m.Chunks), f.MaxChunks)
 	}
 	slot := m.Slot(secret)
 	for i, name := range m.Chunks {
@@ -137,8 +182,8 @@ func ParseManifest(secret string, data []byte) (*Manifest, error) {
 			return nil, fmt.Errorf("manifest: chunk %d is %q, not a chunk of %s", i, name, secret)
 		}
 	}
-	if m.Size <= 0 || m.Size > MaxBytes {
-		return nil, fmt.Errorf("manifest: size %d, want 1 to %d", m.Size, MaxBytes)
+	if m.Size <= 0 || m.Size > f.MaxBytes() {
+		return nil, fmt.Errorf("manifest: size %d, want 1 to %d", m.Size, f.MaxBytes())
 	}
 	if b, err := hex.DecodeString(m.SHA256); err != nil || len(b) != sha256.Size {
 		return nil, fmt.Errorf("manifest: sha256 %q is not a SHA-256 in hex", m.SHA256)
@@ -171,4 +216,7 @@ func Join(m *Manifest, get func(name string) ([]byte, error)) ([]byte, error) {
 }
 
 // IsChunk reports whether name is a chunk of secret.
-func IsChunk(secret, name string) bool { return slices.Contains(ChunkNames(secret), name) }
+func IsChunk(secret, name string) bool { return Bundle(secret).IsChunk(name) }
+
+// IsChunk reports whether name is a chunk of f.
+func (f Format) IsChunk(name string) bool { return slices.Contains(f.ChunkNames(), name) }
