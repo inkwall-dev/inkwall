@@ -141,6 +141,10 @@ type tuneEvent struct {
 	// For inkwallctl explain: the rest of the event.
 	Phase, Method, Host                string
 	Status, AnomalyScore, Interrupting int
+	// RateLimit and Sampled: a rate-limit event's limit, and the limited
+	// requests it stands for.
+	RateLimit string
+	Sampled   int
 }
 
 type tuneMatch struct {
@@ -219,6 +223,8 @@ func readEvents(r io.Reader, lines eventLines, keep func(string) bool) ([]tuneEv
 		ev.Status, _ = strconv.Atoi(str(raw, "status"))
 		ev.AnomalyScore, _ = strconv.Atoi(str(raw, "anomaly_score", "anomalyScore"))
 		ev.Interrupting, _ = strconv.Atoi(str(raw, "interrupting_rule_id", "interruptingRuleId"))
+		ev.RateLimit = str(raw, "rate_limit", "rateLimit")
+		ev.Sampled, _ = strconv.Atoi(str(raw, "sampled_count", "sampledCount"))
 		var matches []map[string]json.RawMessage
 		if m, ok := raw["matches"]; ok {
 			if err := json.Unmarshal(m, &matches); err != nil {

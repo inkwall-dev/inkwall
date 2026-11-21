@@ -588,3 +588,68 @@ func TestExplainRequestUntrustedCoversRequestData(t *testing.T) {
 		t.Fatal("no request data in the result")
 	}
 }
+
+// A rate-limit event: the limit, from the policy, what it allows over
+// engines, and how many limited requests the sampled event stands for
+// (#705).
+func TestExplainRequestRateLimit(t *testing.T) {
+	policy := writeFile(t, "policy.yaml", `apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata: {name: storefront, namespace: shop}
+spec:
+  targetRefs: [{kind: Ingress, name: storefront}]
+  mode: Block
+  rateLimits:
+    - {name: login, requests: 10, period: 1m, burst: 20, match: {paths: [/login], methods: [POST]}}
+`)
+	log := writeFile(t, "engine.log", `{"time":"2026-11-21T10:00:00Z","level":"WARN","msg":"security event","phase":"request","status":429,"client_ip":"203.0.113.7","method":"POST","host":"shop.example.com","policy":"shop/storefront","action":"deny","reason":"rate-limit","rate_limit":"login","sampled_count":37,"interrupting_rule_id":0,"rule_ids":[],"matches":[],"anomaly_score":0,"path":"/login","request_id":"req-limited"}
+{"time":"2026-11-21T10:00:01Z","level":"WARN","msg":"security event","phase":"request","status":429,"client_ip":"203.0.113.8","method":"POST","host":"shop.example.com","policy":"shop/storefront","action":"deny","reason":"rate-limit","rate_limit":"gone","sampled_count":1,"path":"/login","request_id":"req-renamed"}
+`)
+	run := func(id string, extra ...string) (int, string) {
+		args := slices.Concat([]string{"explain", "request", "--file", log, "--policy", policy, "--ingress", "testdata/policy/ingress.yaml"}, extra, []string{id})
+		code, out, _ := runCLI(t, args...)
+		return code, out
+	}
+	code, out := run("req-limited", "-o", "json")
+	var re RequestExplanation
+	if err := json.Unmarshal([]byte(out), &re); err != nil || code != 0 || len(re.Events) != 1 {
+		t.Fatalf("exit %d, %v: %s", code, err, out)
+	}
+	rl := re.Events[0].RateLimit
+	if rl == nil || rl.Name != "login" || rl.Requests != 10 || rl.Burst != 20 || rl.Period != "1m0s" || rl.Sampled != 37 ||
+		!slices.Equal(rl.Paths, []string{"/login"}) || !slices.Equal(rl.Methods, []string{"POST"}) || !strings.Contains(rl.Allows, "N times") {
+		t.Errorf("rate limit %+v", rl)
+	}
+	if e, _ := reasons.Lookup(reasons.KindSecurityEvent, "reason", "rate-limit"); re.Events[0].Cause != reasons.Text(e.Meaning) {
+		t.Errorf("cause %q, want the guide's", re.Events[0].Cause)
+	}
+	_, text := run("req-limited")
+	for _, want := range []string{"Rate limit: login: each engine serving the policy allows 10 per 1m0s per client IP (IPv6 by /56), in bursts of up to 20",
+		"Counts: POST /login", "stands for 37 limited requests"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("text lacks %q:\n%s", want, text)
+		}
+	}
+	// A limit no longer in the policy: its name, and a warning.
+	_, out = run("req-renamed", "-o", "json")
+	re = RequestExplanation{}
+	if err := json.Unmarshal([]byte(out), &re); err != nil || re.Events[0].RateLimit == nil || re.Events[0].RateLimit.Name != "gone" ||
+		len(re.Warnings) != 1 || !strings.Contains(re.Warnings[0], `no rate limit "gone"`) {
+		t.Errorf("a renamed limit: %+v, warnings %v", re.Events, re.Warnings)
+	}
+}
+
+// explain policy lists the limits and what each allows.
+func TestExplainPolicyRateLimits(t *testing.T) {
+	p := failingPolicy("", "", "")
+	p.Spec.RateLimits = []wafv1alpha1.RateLimit{
+		{Name: "api", Requests: 600, Period: metav1.Duration{Duration: time.Minute},
+			Key: &wafv1alpha1.RateLimitKey{Header: &wafv1alpha1.HeaderKey{Name: "X-Api-Key"}}, Mode: wafv1alpha1.PolicyDetect},
+	}
+	ec, _ := explainTestCluster(t, p)
+	withExplainCluster(t, ec)
+	_, out, errOut := runCLI(t, "explain", "policy", "shop/web")
+	if !strings.Contains(out, "Rate limit api (Detect: logs only): each engine serving the policy allows 600 per 1m0s per header X-Api-Key (by client IP without it), in bursts of up to 600") {
+		t.Errorf("explain policy: %s%s", out, errOut)
+	}
+}

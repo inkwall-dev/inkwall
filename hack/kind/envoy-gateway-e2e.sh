@@ -788,6 +788,29 @@ if ((failures > before)); then
   "${KUBECTL[@]}" -n "$EG_NS" logs -l app.kubernetes.io/name=envoy -c inkwall-engine --tail=-1 | grep -E 'sse|bundle' | tail -20 || true
 fi
 
+# Rate limits through Envoy Gateway (#705): each Gateway's engines count
+# on their own; through one Gateway, past the burst, 429 with Retry-After
+# in Envoy's local reply.
+echo "== rate limits"
+policy Block "" '  rateLimits: [{name: e2e, requests: 1, period: 1h, burst: 2, match: {paths: ["/limited/*"]}}]'
+eventually "the policy with a rate limit is Enforced" enforced
+# limited_answer PATH: "status retry-after" through the custom Gateway.
+limited_answer() {
+  curl -s -o /dev/null -w '%{http_code} %header{retry-after}' -H "Host: $HOST" "http://127.0.0.1:$CUSTOM_PORT$1" || true
+}
+rl_first=$(limited_answer /limited/1)$(limited_answer /limited/2)
+check "the burst of 2 passes" bash -c "[[ '$rl_first' == '200 200 ' ]]"
+rl_over=$(limited_answer /limited/3)
+over_429() { [[ $rl_over == "429 "359[0-9] || $rl_over == "429 3600" ]]; }
+check "the 3rd gets 429 with Retry-After of about an hour" over_429
+[[ $rl_over == 429* ]] || echo "      got: $rl_over (first two: $rl_first)"
+check "a path the limit doesn't name passes" envoy_are 200 /products/42
+logged_limit() {
+  "${KUBECTL[@]}" -n "$EG_NS" logs -l app.kubernetes.io/name=envoy -c inkwall-engine --tail=-1 |
+    grep '"security event"' | grep '"reason":"rate-limit"' | matches '"rate_limit":"e2e"'
+}
+eventually "the engines log the limit's event" logged_limit
+
 echo "== detect mode"
 policy Detect
 eventually "Envoy Gateway accepts the EnvoyExtensionPolicy without responses" responses_off
