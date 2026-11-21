@@ -288,7 +288,12 @@ func TestGeoSecretColdStart(t *testing.T) {
 }
 
 // TestGeoInterleaved: tables and bundles interleaved on a real stream,
-// while requests read the set; under the race detector.
+// while requests read the set; under the race detector. Both go through
+// the one channel msgs, in order, as the operator's single send loop sends
+// them: across the fake operator's two channels their order would be
+// random, and a table sent before an earlier bundle is dropped when that
+// bundle applies (it names another), which the operator would resend on
+// the engine's next heartbeat and the fake operator doesn't.
 func TestGeoInterleaved(t *testing.T) {
 	e := newEnv(t)
 	a, holder, _ := e.agent(t, nil)
@@ -315,11 +320,12 @@ func TestGeoInterleaved(t *testing.T) {
 	tables := []countryTable{newTable(t, "DE"), newTable(t, "FR"), newTable(t, "US")}
 	for v := range uint64(9) {
 		tb := tables[v%3]
+		b := &agentv1.WatchResponse{Msg: &agentv1.WatchResponse_Bundle{Bundle: geoBundle(t, e.priv, v+1, &tb)}}
 		if v%2 == 0 {
 			e.op.msgs <- tb.msg()
-			e.op.bundles <- geoBundle(t, e.priv, v+1, &tb)
+			e.op.msgs <- b
 		} else {
-			e.op.bundles <- geoBundle(t, e.priv, v+1, &tb)
+			e.op.msgs <- b
 			e.op.msgs <- tb.msg()
 		}
 	}
