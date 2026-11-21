@@ -181,7 +181,21 @@ const (
 	RolloutAutomatic RolloutPolicy = "Automatic"
 )
 
+// DenialFormat is the body of an engine's denials.
+// +kubebuilder:validation:Enum=Text;JSON
+type DenialFormat string
+
+// The denial formats.
+const (
+	// DenialText answers every denied client with plain text.
+	DenialText DenialFormat = "Text"
+	// DenialJSON answers a denied client that accepts application/json
+	// with a JSON body, and any other client with text.
+	DenialJSON DenialFormat = "JSON"
+)
+
 // EngineSpec configures the engine sidecars.
+// +kubebuilder:validation:XValidation:rule="!(has(self.jsonDenials) && self.jsonDenials && has(self.denialFormat) && self.denialFormat == 'Text')",message="jsonDenials: true contradicts denialFormat: Text; remove jsonDenials, which is deprecated"
 type EngineSpec struct {
 	// Image is the engine image. Empty means the image released with this
 	// operator version. An image whose tag is an older release (0.4.1) is
@@ -247,11 +261,23 @@ type EngineSpec struct {
 	// +optional
 	PolicyMetrics bool `json:"policyMetrics,omitempty"`
 
-	// JSONDenials answers a denied client that accepts application/json
-	// with a JSON body, {"error":"forbidden","status":403,"request_id":...},
-	// instead of text. Every denial carries X-Request-Id either way.
-	// Through Traefik, Envoy Gateway and Istio; HAProxy writes its own
-	// denials. Applies to pods injected from then on.
+	// DenialFormat is the body of the engines' denials. Text: plain text.
+	// JSON: a client that accepts application/json gets a JSON body,
+	// {"error":"forbidden","status":403,"request_id":...}, and any other
+	// client text. Every denial carries X-Request-Id either way. Through
+	// Traefik, Envoy Gateway and Istio; HAProxy writes its own denials.
+	// Unset: Text, or JSON when the deprecated jsonDenials is true. Applies
+	// to pods injected from then on. JSON requires engines 0.5.0 or later.
+	// +optional
+	DenialFormat DenialFormat `json:"denialFormat,omitempty"`
+
+	// JSONDenials true means denialFormat: JSON, which takes its place. It
+	// stays so that InkwallConfigs that set it remain valid; setting or
+	// changing it draws a warning, and v1 removes it. It can't be true
+	// with denialFormat: Text.
+	//
+	// Deprecated: use denialFormat.
+	//
 	// +optional
 	JSONDenials bool `json:"jsonDenials,omitempty"`
 

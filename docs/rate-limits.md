@@ -126,7 +126,7 @@ request one limit refuses spends nothing of the others, and gets the longest `Re
 
 Over a limit in `Block` mode, `429 Too Many Requests` with `Retry-After` (whole seconds until a
 token comes) and the `X-Request-Id` of every denial. The body is the usual denial's
-(`Too Many Requests`, or JSON with `spec.engine.jsonDenials`). The body of a limited request isn't
+(`Too Many Requests`, or JSON with `spec.engine.denialFormat: JSON`). The body of a limited request isn't
 read, except through HAProxy, which sends it with the request.
 
 | Proxy | Notes |

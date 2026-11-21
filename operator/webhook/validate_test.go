@@ -347,6 +347,45 @@ func TestConfigAdapterWarning(t *testing.T) {
 	}
 }
 
+// jsonDenials is deprecated for denialFormat: turning it on warns, keeping
+// it on or using denialFormat doesn't.
+func TestConfigJSONDenialsWarning(t *testing.T) {
+	ctx := context.Background()
+	v := configValidator{}
+	cfg := func(e wafv1alpha1.EngineSpec) *wafv1alpha1.InkwallConfig {
+		return &wafv1alpha1.InkwallConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"}, Spec: wafv1alpha1.InkwallConfigSpec{Engine: e}}
+	}
+	on := cfg(wafv1alpha1.EngineSpec{JSONDenials: true}) //nolint:staticcheck // the deprecated field
+	off := cfg(wafv1alpha1.EngineSpec{})
+	format := cfg(wafv1alpha1.EngineSpec{DenialFormat: wafv1alpha1.DenialJSON})
+	for _, tc := range []struct {
+		name     string
+		old, cfg *wafv1alpha1.InkwallConfig // old nil: create
+		warn     bool
+	}{
+		{name: "set on create", cfg: on, warn: true},
+		{name: "denialFormat on create", cfg: format},
+		{name: "turned on", old: off, cfg: on, warn: true},
+		{name: "kept on", old: on, cfg: on},
+		{name: "moved to denialFormat", old: on, cfg: format},
+	} {
+		var warnings []string
+		var err error
+		if tc.old == nil {
+			warnings, err = v.ValidateCreate(ctx, tc.cfg)
+		} else {
+			warnings, err = v.ValidateUpdate(ctx, tc.old, tc.cfg)
+		}
+		if err != nil || (len(warnings) == 1) != tc.warn || len(warnings) > 1 {
+			t.Errorf("%s: warnings %q, error %v; want a warning: %t", tc.name, warnings, err, tc.warn)
+			continue
+		}
+		if tc.warn && (!strings.Contains(warnings[0], "spec.engine.jsonDenials is deprecated") || !strings.Contains(warnings[0], "denialFormat: JSON")) {
+			t.Errorf("%s: warning %q", tc.name, warnings[0])
+		}
+	}
+}
+
 func ptr[T any](v T) *T { return &v }
 
 // TestIPListValidation: a WAFIPList's entries must parse as the engine

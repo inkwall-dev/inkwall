@@ -145,14 +145,26 @@ func TestInject(t *testing.T) {
 	if !slices.Contains(quiet.Spec.InitContainers[0].Args, "--log-level=warn") {
 		t.Errorf("log level Warn: args %v", quiet.Spec.InitContainers[0].Args)
 	}
-	// JSON denials, only when asked for (#366).
+	// JSON denials, only when asked for (#366): denialFormat JSON, or the
+	// deprecated jsonDenials when denialFormat is unset (#713).
 	if slices.Contains(pod.Spec.InitContainers[0].Args, "--json-denials") {
-		t.Error("--json-denials passed without jsonDenials")
+		t.Error("--json-denials passed without denialFormat")
 	}
-	jsonPod := traefikPod()
-	Inject(jsonPod, sidecar.Configured(wafv1alpha1.EngineSpec{JSONDenials: true}))
-	if !slices.Contains(jsonPod.Spec.InitContainers[0].Args, "--json-denials") {
-		t.Errorf("jsonDenials: args %v", jsonPod.Spec.InitContainers[0].Args)
+	for _, tc := range []struct {
+		name string
+		e    wafv1alpha1.EngineSpec
+		want bool
+	}{
+		{name: "denialFormat JSON", e: wafv1alpha1.EngineSpec{DenialFormat: wafv1alpha1.DenialJSON}, want: true},
+		{name: "denialFormat Text", e: wafv1alpha1.EngineSpec{DenialFormat: wafv1alpha1.DenialText}},
+		{name: "jsonDenials", e: wafv1alpha1.EngineSpec{JSONDenials: true}, want: true},                                                             //nolint:staticcheck // the deprecated field
+		{name: "denialFormat JSON and jsonDenials", e: wafv1alpha1.EngineSpec{DenialFormat: wafv1alpha1.DenialJSON, JSONDenials: true}, want: true}, //nolint:staticcheck // the deprecated field
+	} {
+		jsonPod := traefikPod()
+		Inject(jsonPod, sidecar.Configured(tc.e))
+		if got := slices.Contains(jsonPod.Spec.InitContainers[0].Args, "--json-denials"); got != tc.want {
+			t.Errorf("%s: --json-denials passed: %t, want %t (args %v)", tc.name, got, tc.want, jsonPod.Spec.InitContainers[0].Args)
+		}
 	}
 	// Requests by policy, only when asked for (#356).
 	if slices.Contains(pod.Spec.InitContainers[0].Args, "--policy-metrics") {
