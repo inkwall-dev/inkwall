@@ -18,6 +18,7 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -103,14 +104,42 @@ type configValidator struct{}
 func (configValidator) ValidateCreate(_ context.Context, cfg *wafv1alpha1.InkwallConfig) (admission.Warnings, error) {
 	warnings, err := checkClientIP(cfg)
 	deprecated := append(socketDirWarnings("", cfg), adapterWarnings(nil, cfg)...)
-	return append(append(deprecated, jsonDenialsWarnings(false, cfg)...), warnings...), err
+	deprecated = append(append(deprecated, jsonDenialsWarnings(false, cfg)...), controllerWarnings(nil, cfg)...)
+	return append(deprecated, warnings...), err
 }
 
 func (configValidator) ValidateUpdate(_ context.Context, oldCfg, newCfg *wafv1alpha1.InkwallConfig) (admission.Warnings, error) {
 	warnings, err := checkClientIP(newCfg)
 	deprecated := append(socketDirWarnings(oldCfg.Spec.Engine.SocketDir, newCfg), adapterWarnings(oldCfg, newCfg)...) //nolint:staticcheck // warns about the deprecated field
 	deprecated = append(deprecated, jsonDenialsWarnings(oldCfg.Spec.Engine.JSONDenials, newCfg)...)                   //nolint:staticcheck // warns about the deprecated field
+	deprecated = append(deprecated, controllerWarnings(oldCfg, newCfg)...)
 	return append(deprecated, warnings...), err
+}
+
+// controllerWarnings warns of an integration whose controller isn't a DNS
+// label, as v1 will require, unless old (nil on create) already lists it.
+func controllerWarnings(old, cfg *wafv1alpha1.InkwallConfig) admission.Warnings {
+	var warnings admission.Warnings
+	for i, in := range cfg.Spec.Integrations {
+		if len(validation.IsDNS1123Label(in.Controller)) == 0 || listsController(old, in.Controller) {
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf("spec.integrations[%d].controller %q is not a DNS label (lower case letters, digits and '-'), so no integration has that name and the entry does nothing; v1 refuses it", i, in.Controller))
+	}
+	return warnings
+}
+
+// listsController reports whether old has an integration for controller.
+func listsController(old *wafv1alpha1.InkwallConfig, controller string) bool {
+	if old == nil {
+		return false
+	}
+	for _, in := range old.Spec.Integrations {
+		if in.Controller == controller {
+			return true
+		}
+	}
+	return false
 }
 
 const jsonDenialsWarning = "spec.engine.jsonDenials is deprecated: set spec.engine.denialFormat: JSON instead and remove it; v1 removes the field"

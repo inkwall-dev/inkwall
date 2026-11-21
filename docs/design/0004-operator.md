@@ -1058,7 +1058,7 @@ leader only, and is idle in Standalone mode (the default).
 
 - **Enrollment.** The leader reads the enrollment token from
   `spec.controlPlane.enrollmentSecretRef`, key `token`; the Secret must be in the operator's
-  namespace. It generates an [ECDSA P-256](https://csrc.nist.gov/pubs/fips/186-5/final) key and enrolls. A retry after a lost response reuses the
+  namespace, which is also what an unset `namespace` means. It generates an [ECDSA P-256](https://csrc.nist.gov/pubs/fips/186-5/final) key and enrolls. A retry after a lost response reuses the
   key.
 - **Identity.** The certificate and key go in the `inkwall-control-plane-identity` Secret (type
   [`kubernetes.io/tls`](https://kubernetes.io/docs/concepts/configuration/secret/#tls-secrets), plus `cluster-id`).

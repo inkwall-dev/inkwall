@@ -119,6 +119,17 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   `denialFormat: JSON`: v1 removes `jsonDenials`, and the v1.0 upgrade will refuse to start while
   an InkwallConfig still sets it. A pinned engine older than 0.5.0 is still injected without JSON
   denials, and `EngineConfigured` names whichever of the two fields asked for them.
+- **The InkwallConfig shows its defaults** (#712). `spec.engine`, `spec.events` and
+  `spec.events.redact` default to `{}`, so their defaults (`bootstrapMode: AllowAll`,
+  `snippets: true`) appear whether or not you wrote the block, and `spec.engine.rollout` defaults
+  to `Manual`, as it behaved unset. The API server adds them when it next reads or writes the
+  InkwallConfig; nothing behaves differently. `logLevel` stays unset, so a pinned engine older
+  than 0.5.0 still gets no `--log-level`.
+- `spec.controlPlane.enrollmentSecretRef.namespace` is optional, meaning the operator's namespace,
+  the only one it ever accepted. InkwallConfigs that set it are unchanged.
+- A `spec.integrations[].controller` that isn't a DNS label (`Traefik`, `ingress_nginx`) now draws
+  a warning when it is added: no integration has such a name, so the entry never did anything,
+  and v1 refuses it.
 
 ## From 0.5.x to 0.6.0
 

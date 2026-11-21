@@ -44,17 +44,19 @@ const (
 	ConditionEngineConfigured = "EngineConfigured"
 )
 
-// SecretReference names a Secret in a given namespace.
+// SecretReference names a Secret in the operator's namespace.
 type SecretReference struct {
 	// Name of the Secret.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 
-	// Namespace of the Secret.
+	// Namespace of the Secret, which can only be the operator's namespace.
+	// Unset: the operator's namespace.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
-	Namespace string `json:"namespace"`
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // SourceLabel says where a WAFPolicy, WAFRuleSet, ClusterWAFRuleSet or
