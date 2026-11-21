@@ -229,7 +229,8 @@ inkwallctl geo lookup 198.51.100.7 2001:db8::1
 ```
 
 It checks the table against the bundle's hash of it, but doesn't verify the bundle's signature: the
-engines verify their own copy.
+engines verify their own copy. `inkwallctl explain policy` shows a policy's `geo` in a line, and
+`inkwallctl explain request` an event's country.
 
 ## Metrics, alerts and events
 
