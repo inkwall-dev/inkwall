@@ -243,7 +243,7 @@ func TestEngineConfigured(t *testing.T) {
 	r := &Reconciler{Client: c, Recorder: recorder}
 	cfg := &wafv1alpha1.InkwallConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"},
 		Spec: wafv1alpha1.InkwallConfigSpec{Engine: wafv1alpha1.EngineSpec{
-			Image: "ghcr.io/inkwall-dev/inkwall-engine:0.4.1", JSONDenials: true, LogLevel: wafv1alpha1.LogLevelDebug}}}
+			Image: "ghcr.io/inkwall-dev/inkwall-engine:0.4.1", JSONDenials: true, LogLevel: wafv1alpha1.LogLevelDebug}}} //nolint:staticcheck // the deprecated field
 	if err := c.Create(ctx, cfg); err != nil {
 		t.Fatal(err)
 	}

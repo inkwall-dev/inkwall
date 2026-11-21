@@ -46,12 +46,12 @@ func TestImageVersion(t *testing.T) {
 func TestPinnedEngineFlags(t *testing.T) {
 	hops := int32(2)
 	settings := wafv1alpha1.EngineSpec{
-		LogLevel: wafv1alpha1.LogLevelDebug, PolicyMetrics: true, JSONDenials: true,
+		LogLevel: wafv1alpha1.LogLevelDebug, PolicyMetrics: true, DenialFormat: wafv1alpha1.DenialJSON,
 		BootstrapMode: wafv1alpha1.BootstrapDenyAll, RateLimitKeys: ptr.To(int32(1 << 20)),
 		ClientIP: &wafv1alpha1.ClientIPSpec{TrustedProxies: []wafv1alpha1.CIDR{"10.0.0.0/8"}, TrustedHops: &hops},
 	}
 	newer := []string{"--log-level=debug", "--policy-metrics", "--json-denials", "--trusted-hops=2"}
-	allSettings := []string{"spec.engine.clientIP.trustedHops", "spec.engine.logLevel", "spec.engine.policyMetrics", "spec.engine.jsonDenials", "spec.engine.rateLimitKeys"}
+	allSettings := []string{"spec.engine.clientIP.trustedHops", "spec.engine.logLevel", "spec.engine.policyMetrics", "spec.engine.denialFormat", "spec.engine.rateLimitKeys"}
 	// --rate-limit-keys is 0.7.0's (#705).
 	const keysFlag = "--rate-limit-keys=1048576"
 	only07 := []string{"spec.engine.rateLimitKeys"}
@@ -96,7 +96,7 @@ func TestPinnedEngineFlags(t *testing.T) {
 	}
 
 	// Settings left unset are not reported left out.
-	s := sidecar.Configured(wafv1alpha1.EngineSpec{Image: "ghcr.io/inkwall-dev/inkwall-engine:0.4.1", JSONDenials: true})
+	s := sidecar.Configured(wafv1alpha1.EngineSpec{Image: "ghcr.io/inkwall-dev/inkwall-engine:0.4.1", JSONDenials: true}) //nolint:staticcheck // the deprecated field
 	if got := s.LeftOut(); !slices.Equal(got, []string{"spec.engine.jsonDenials"}) {
 		t.Errorf("LeftOut() = %v, want only spec.engine.jsonDenials", got)
 	}
@@ -112,10 +112,10 @@ func TestEngineConfiguredCondition(t *testing.T) {
 		reason string
 		says   []string
 	}{
-		{name: "operator's engine", e: wafv1alpha1.EngineSpec{JSONDenials: true}, ok: true, reason: ReasonEngineConfigured},
+		{name: "operator's engine", e: wafv1alpha1.EngineSpec{DenialFormat: wafv1alpha1.DenialJSON}, ok: true, reason: ReasonEngineConfigured},
 		{name: "pinned, new enough", e: wafv1alpha1.EngineSpec{Image: "x/inkwall-engine:0.5.0", LogLevel: wafv1alpha1.LogLevelWarn}, ok: true, reason: ReasonEngineConfigured},
 		{name: "pinned, nothing newer set", e: wafv1alpha1.EngineSpec{Image: "x/inkwall-engine:0.4.1"}, ok: true, reason: ReasonEngineConfigured},
-		{name: "pinned, too old", e: wafv1alpha1.EngineSpec{Image: "x/inkwall-engine:0.4.1", JSONDenials: true, LogLevel: wafv1alpha1.LogLevelWarn},
+		{name: "pinned, too old", e: wafv1alpha1.EngineSpec{Image: "x/inkwall-engine:0.4.1", JSONDenials: true, LogLevel: wafv1alpha1.LogLevelWarn}, //nolint:staticcheck // the deprecated field
 			reason: ReasonEngineTooOld, says: []string{"x/inkwall-engine:0.4.1", "0.4.1", "spec.engine.logLevel", "spec.engine.jsonDenials", "0.5.0"}},
 		{name: "pinned, unknown", e: wafv1alpha1.EngineSpec{Image: "x/inkwall-engine:custom", PolicyMetrics: true},
 			reason: ReasonEngineVersionUnknown, says: []string{"x/inkwall-engine:custom", "spec.engine.policyMetrics"}},

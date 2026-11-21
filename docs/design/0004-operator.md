@@ -366,7 +366,7 @@ proxy.
   - an [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir) bundle cache;
   - non-root, with a read-only root filesystem;
   - image and resources from `InkwallConfig.spec.engine`, else from `--engine-image`;
-  - the flags of the other `spec.engine` settings (`logLevel`, `policyMetrics`, `jsonDenials`,
+  - the flags of the other `spec.engine` settings (`logLevel`, `policyMetrics`, `denialFormat`,
     `clientIP`), only those the engine's release knows (#536): an engine exits on a flag it
     doesn't know, so an older one pinned in `spec.engine.image` would never be ready. The
     operator's own engine (`--engine-image`) knows them all; a pinned one's release is read from

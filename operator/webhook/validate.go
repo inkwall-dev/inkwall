@@ -102,12 +102,26 @@ type configValidator struct{}
 
 func (configValidator) ValidateCreate(_ context.Context, cfg *wafv1alpha1.InkwallConfig) (admission.Warnings, error) {
 	warnings, err := checkClientIP(cfg)
-	return append(append(socketDirWarnings("", cfg), adapterWarnings(nil, cfg)...), warnings...), err
+	deprecated := append(socketDirWarnings("", cfg), adapterWarnings(nil, cfg)...)
+	return append(append(deprecated, jsonDenialsWarnings(false, cfg)...), warnings...), err
 }
 
 func (configValidator) ValidateUpdate(_ context.Context, oldCfg, newCfg *wafv1alpha1.InkwallConfig) (admission.Warnings, error) {
 	warnings, err := checkClientIP(newCfg)
-	return append(append(socketDirWarnings(oldCfg.Spec.Engine.SocketDir, newCfg), adapterWarnings(oldCfg, newCfg)...), warnings...), err //nolint:staticcheck // warns about the deprecated field
+	deprecated := append(socketDirWarnings(oldCfg.Spec.Engine.SocketDir, newCfg), adapterWarnings(oldCfg, newCfg)...) //nolint:staticcheck // warns about the deprecated field
+	deprecated = append(deprecated, jsonDenialsWarnings(oldCfg.Spec.Engine.JSONDenials, newCfg)...)                   //nolint:staticcheck // warns about the deprecated field
+	return append(deprecated, warnings...), err
+}
+
+const jsonDenialsWarning = "spec.engine.jsonDenials is deprecated: set spec.engine.denialFormat: JSON instead and remove it; v1 removes the field"
+
+// jsonDenialsWarnings warns when cfg turns jsonDenials on and old (false
+// on create) didn't have it on.
+func jsonDenialsWarnings(old bool, cfg *wafv1alpha1.InkwallConfig) admission.Warnings {
+	if cfg.Spec.Engine.JSONDenials && !old { //nolint:staticcheck // warns about the deprecated field
+		return admission.Warnings{jsonDenialsWarning}
+	}
+	return nil
 }
 
 // checkClientIP rejects trusted proxies the engine would refuse (it would

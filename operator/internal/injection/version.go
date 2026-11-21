@@ -64,14 +64,38 @@ var (
 	optTrustedHops   = option{"spec.engine.clientIP.trustedHops", Version{0, 5, 0}, func(s Sidecar) bool { return s.TrustedHops > 0 }}
 	optLogLevel      = option{"spec.engine.logLevel", Version{0, 5, 0}, func(s Sidecar) bool { return s.LogLevel != "" }}
 	optPolicyMetrics = option{"spec.engine.policyMetrics", Version{0, 5, 0}, func(s Sidecar) bool { return s.PolicyMetrics }}
-	optJSONDenials   = option{"spec.engine.jsonDenials", Version{0, 5, 0}, func(s Sidecar) bool { return s.JSONDenials }}
+	// optDenialFormat and optJSONDenials pass the same flag, and name the
+	// setting that asked for it.
+	optDenialFormat = option{settingDenialFormat, Version{0, 5, 0}, func(s Sidecar) bool {
+		return s.JSONDenials && s.JSONDenialsSetting == settingDenialFormat
+	}}
+	optJSONDenials = option{settingJSONDenials, Version{0, 5, 0}, func(s Sidecar) bool {
+		return s.JSONDenials && s.JSONDenialsSetting == settingJSONDenials
+	}}
 	optRateLimitKeys = option{"spec.engine.rateLimitKeys", Version{0, 7, 0}, func(s Sidecar) bool { return s.RateLimitKeys > 0 }}
 	// optResponseMessages isn't a spec.engine setting: the HAProxy pods'
 	// engine gets it, for response inspection (#470). Without it, the
 	// policies are ResponsesNotInspected on those pods.
 	optResponseMessages = option{"response inspection through HAProxy (" + ResponseMessagesFlag + ")", Version{0, 6, 0}, func(s Sidecar) bool { return s.ResponseMessages }}
-	options             = []option{optTrustedHops, optLogLevel, optPolicyMetrics, optJSONDenials, optRateLimitKeys, optResponseMessages}
+	options             = []option{optTrustedHops, optLogLevel, optPolicyMetrics, optDenialFormat, optJSONDenials, optRateLimitKeys, optResponseMessages}
 )
+
+const (
+	settingDenialFormat = "spec.engine.denialFormat"
+	settingJSONDenials  = "spec.engine.jsonDenials"
+)
+
+// jsonDenials reports whether e asks for JSON denial bodies, and which
+// setting does: denialFormat when set, else the deprecated jsonDenials.
+func jsonDenials(e wafv1alpha1.EngineSpec) (bool, string) {
+	switch {
+	case e.DenialFormat != "":
+		return e.DenialFormat == wafv1alpha1.DenialJSON, settingDenialFormat
+	case e.JSONDenials: //nolint:staticcheck // the deprecated field still applies
+		return true, settingJSONDenials
+	}
+	return false, ""
+}
 
 // passes reports whether Engine passes o: s sets it, and s's engine knows
 // it. The operator's own engine knows every flag; an engine pinned in

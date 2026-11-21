@@ -84,6 +84,9 @@ type Sidecar struct {
 	PolicyMetrics bool
 	// JSONDenials passes --json-denials.
 	JSONDenials bool
+	// JSONDenialsSetting is the setting that asked for JSONDenials:
+	// spec.engine.denialFormat, or the deprecated spec.engine.jsonDenials.
+	JSONDenialsSetting string
 	// RateLimitKeys is the engine's --rate-limit-keys, 0 for its default.
 	RateLimitKeys int32
 	// ResponseMessages passes --response-messages (ResponseMessagesFlag):
@@ -128,7 +131,7 @@ func (s Sidecar) Configured(e wafv1alpha1.EngineSpec) Sidecar {
 	s.DenyBeforeBundle = e.BootstrapMode == wafv1alpha1.BootstrapDenyAll
 	s.LogLevel = strings.ToLower(string(e.LogLevel))
 	s.PolicyMetrics = e.PolicyMetrics
-	s.JSONDenials = e.JSONDenials
+	s.JSONDenials, s.JSONDenialsSetting = jsonDenials(e)
 	s.RateLimitKeys = 0
 	if e.RateLimitKeys != nil {
 		s.RateLimitKeys = *e.RateLimitKeys
@@ -256,7 +259,7 @@ func Engine(s Sidecar) (corev1.Container, []corev1.Volume) {
 	if s.passes(optPolicyMetrics) {
 		args = append(args, "--policy-metrics")
 	}
-	if s.passes(optJSONDenials) {
+	if s.passes(optDenialFormat) || s.passes(optJSONDenials) {
 		args = append(args, "--json-denials")
 	}
 	if s.passes(optRateLimitKeys) {
