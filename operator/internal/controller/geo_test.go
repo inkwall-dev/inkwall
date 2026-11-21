@@ -122,11 +122,13 @@ func TestGeoReconcilerFile(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	path := filepath.Join(root, "country.mmdb")
+	// The InkwallConfig names it as in the operator's pod.
+	specPath := geo.FileRoot + "/country.mmdb"
 	if err := os.WriteFile(path, geoDB(t, 1_700_000_000, "XA"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg := &wafv1alpha1.InkwallConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"},
-		Spec: wafv1alpha1.InkwallConfigSpec{Geo: &wafv1alpha1.GeoConfig{Database: wafv1alpha1.GeoDatabase{File: path}}}}
+		Spec: wafv1alpha1.InkwallConfigSpec{Geo: &wafv1alpha1.GeoConfig{Database: wafv1alpha1.GeoDatabase{File: specPath}}}}
 	c := geoClient(t, cfg)
 	r := &GeoReconciler{Client: c, APIReader: c, Namespace: geoNS, Root: root, Now: func() time.Time { return time.Unix(1_700_000_000, 0) }}
 	for range 2 {

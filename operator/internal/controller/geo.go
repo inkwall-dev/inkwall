@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -58,7 +59,9 @@ type GeoReconciler struct {
 	APIReader client.Reader
 	// Namespace is the operator's, where the geo Secrets are.
 	Namespace string
-	// Root is where database files are (geo.FileRoot).
+	// Root is where database files are: spec.geo.database.file names a
+	// path under geo.FileRoot, which is Root in the operator's pod (the
+	// default) and a directory of their own in tests.
 	Root string
 	Now  func() time.Time
 
@@ -120,12 +123,13 @@ func (r *GeoReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (rec
 	var srcErr error
 	switch {
 	case db.File != "":
-		size, mtime, err := geo.StatFile(r.Root, db.File)
+		file := r.Root + strings.TrimPrefix(db.File, geo.FileRoot)
+		size, mtime, err := geo.StatFile(r.Root, file)
 		if err == nil && r.stored != nil && db.File == r.filePath && size == r.fileSize && mtime.Equal(r.fileTime) {
 			// Unchanged since compiled: no need to hash it.
 			return reconcile.Result{RequeueAfter: geoPoll}, r.writeStatus(ctx, &cfg, &geo.Outcome{Table: r.stored, Reason: geo.ReasonLoaded, Message: describeTable(r.stored)})
 		}
-		src, srcErr = geo.ReadFile(r.Root, db.File)
+		src, srcErr = geo.ReadFile(r.Root, file)
 	case db.SecretRef != nil:
 		src, srcErr = geo.ReadSecret(ctx, r.APIReader, r.Namespace, db.SecretRef.Name, db.SecretRef.Key)
 	}
