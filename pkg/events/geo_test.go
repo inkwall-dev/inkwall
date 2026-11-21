@@ -36,6 +36,9 @@ func TestEventCountry(t *testing.T) {
 		want string
 	}{
 		{"looked up by the policy", Source{}, request.Geo{Looked: true, Country: ru, Result: geo.ResultCountry}, "198.51.100.1", "RU"},
+		// The decision's lookup wins over the table held now, which may
+		// have changed since.
+		{"the decision's, not the table's now", withTable, request.Geo{Looked: true, Country: ru, Result: geo.ResultCountry}, "8.8.8.8", "RU"},
 		{"looked up for the event", withTable, request.Geo{}, "8.8.8.8", "US"},
 		{"unknown", withTable, request.Geo{}, "7.7.7.7", "unknown"},
 		{"private", withTable, request.Geo{}, "10.0.0.1", ""},

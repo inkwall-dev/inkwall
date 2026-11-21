@@ -216,6 +216,20 @@ delete the table's Secrets: `kubectl -n inkwall-system delete secret inkwall-geo
 On a policy with `geo`, `Enforced` is `False` with `GeoDatabaseUnavailable` when the cluster has no
 table, or while some engines that run the bundle hold none; `EnginesOutdated` when an engine is
 older than 0.7.0, which ignores `geo`.
+The policy gets a Warning Event when `Enforced` turns `GeoDatabaseUnavailable`.
+
+Removing `spec.geo` from the InkwallConfig turns geo off: the next bundle names no table, the
+policies with `geo` say `GeoDatabaseUnavailable`, and the operator deletes the table's Secrets once
+that bundle is published.
+
+To see the country the engines give an address, from the table the published bundle names:
+
+```sh
+inkwallctl geo lookup 198.51.100.7 2001:db8::1
+```
+
+It checks the table against the bundle's hash of it, but doesn't verify the bundle's signature: the
+engines verify their own copy.
 
 ## Metrics, alerts and events
 

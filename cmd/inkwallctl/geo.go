@@ -37,8 +37,10 @@ type GeoLookup struct {
 }
 
 // runGeo looks addresses up in the country table the published bundle
-// names, read from its Secrets and checked against the bundle, so a user can
-// test an address before blocking it (design 0011 §8).
+// names, read from its Secrets and checked against the bundle's hash of it,
+// so a user can test an address before blocking it (design 0011 §8). The
+// bundle's signature isn't verified: a diagnostic, as the engines' own
+// verified copy decides.
 func runGeo(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "lookup" {
 		fmt.Fprintln(stderr, geoUsage)
@@ -49,6 +51,7 @@ func runGeo(args []string, stdout, stderr io.Writer) int {
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, geoUsage)
 		fmt.Fprintln(stderr, "Prints each address's country, as the engines see it, from the country table the published bundle names. Read only.")
+		fmt.Fprintln(stderr, "The table is checked against the bundle's hash of it; the bundle's signature isn't verified: the engines verify their own copy.")
 		fs.PrintDefaults()
 	}
 	kubeconfig := fs.String("kubeconfig", "", "kubeconfig file (default: $KUBECONFIG or ~/.kube/config)")
