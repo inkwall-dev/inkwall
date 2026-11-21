@@ -122,6 +122,68 @@ func TestTuneEventsFile(t *testing.T) {
 	}
 }
 
+// Only the anomaly score's rules are score rules: 921180 matches a TX
+// variable too, its argument counter (#764).
+func TestScoreRule(t *testing.T) {
+	for _, tt := range []struct {
+		id       int
+		variable string
+		want     bool
+	}{
+		{949110, "TX:blocking_inbound_anomaly_score", true},
+		{959100, "TX:blocking_outbound_anomaly_score", true},
+		{980170, "", true},
+		{100001, "TX:anomaly_score", true},
+		{100002, "TX:inbound_anomaly_score_pl1", true},
+		{921180, "TX:paramcounter_args_names:fields[]", false},
+		{942100, "ARGS:q", false},
+		{100003, "TX:my_flag", false},
+	} {
+		if got := scoreRule(tt.id, tt.variable); got != tt.want {
+			t.Errorf("scoreRule(%d, %q) = %t, want %t", tt.id, tt.variable, got, tt.want)
+		}
+	}
+}
+
+// 921180 (HTTP parameter pollution) is reported, and excluded through 921170,
+// the counter of the argument it checks: an exclusion of 921180 for the
+// argument name wouldn't stop it. The suggestions let Directus's request
+// through (#764).
+func TestTuneParameterPollution(t *testing.T) {
+	const query = "/items/articles?limit=25&fields[]=id&fields[]=title&sort[]=-date_created"
+	events := writeFile(t, "events.jsonl", `{"action":"ACTION_DENY","reason":"REASON_RULE","policy":"default/directus","path":"/items/articles","request_id":"req-1",`+
+		`"matches":[{"rule_id":921180,"variable":"TX:paramcounter_args_names:fields[]"},{"rule_id":932350,"variable":"ARGS:fields[]"},`+
+		`{"rule_id":949110,"variable":"TX:blocking_inbound_anomaly_score"}]}`+"\n")
+	code, out, errOut := runCLI(t, "tune", events)
+	if code != 0 || !strings.Contains(out, "921180@TX:paramcounter_args_names:fields[] on /items/articles") ||
+		!strings.Contains(out, "excluded as rule 921170") || !strings.Contains(out, "rules 921170, on /items/articles, for argument name fields[]") {
+		t.Fatalf("exit %d, output %q %q", code, out, errOut)
+	}
+
+	policy := writeFile(t, "policy.yaml", `apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata: {name: directus, namespace: default}
+spec:
+  targetRefs: [{kind: Ingress, name: app}]
+  mode: Block
+  ruleSets:
+    - ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}
+      paranoiaLevel: 3
+`)
+	ruleSet := "../../operator/config/samples/clusterwafruleset.yaml"
+	if code, out, _ := runCLI(t, "test", "--policy", policy, "--rule-set", ruleSet, "--expect", "deny", "http://directus.example.com"+query); code != 0 {
+		t.Fatalf("without the suggestions: exit %d, output %q", code, out)
+	}
+	code, out, errOut = runCLI(t, "tune", "-o", "yaml", "--policy", policy, "--rule-set", ruleSet, events)
+	if code != 0 {
+		t.Fatalf("tune --policy: exit %d: %s", code, errOut)
+	}
+	patched := writeFile(t, "patched.yaml", out)
+	if code, out, _ := runCLI(t, "test", "--policy", patched, "--rule-set", ruleSet, "--expect", "allow", "http://directus.example.com"+query); code != 0 {
+		t.Fatalf("with the suggestions: exit %d, output %q", code, out)
+	}
+}
+
 // A rule ID out of int32's range (the bundle's type) is no rule: it isn't
 // wrapped into another rule's ID.
 func TestTuneRuleIDRange(t *testing.T) {

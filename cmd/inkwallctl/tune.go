@@ -281,7 +281,18 @@ var pathRE = regexp.MustCompile(`^/[A-Za-z0-9._~/:@!$&'()+,=-]*$`)
 // when no field can name it.
 func target(variable string) (field, name string) {
 	collection, key, ok := strings.Cut(variable, ":")
-	if !ok || !nameRE.MatchString(key) {
+	if !ok {
+		return "", ""
+	}
+	if strings.EqualFold(collection, "TX") {
+		// TX:paramcounter_args_names:<name> (921180), from the 921170 counter.
+		prefix, name, ok := strings.Cut(key, ":")
+		if ok && strings.EqualFold(prefix, paramCounter) && nameRE.MatchString(name) {
+			return targetArgumentName, name
+		}
+		return "", ""
+	}
+	if !nameRE.MatchString(key) {
 		return "", ""
 	}
 	switch strings.ToUpper(collection) {
@@ -297,15 +308,41 @@ func target(variable string) (field, name string) {
 	return "", ""
 }
 
-// scoreRule reports a rule that only sums up the anomaly score (the CRS's
-// 949xxx, 959xxx and 980xxx): excluding it would turn the policy off, and
-// the rules that added to the score are what to tune.
+// The CRS's HTTP parameter pollution: 921170 counts each argument name in
+// TX:paramcounter_args_names:<name>, and 921180 matches a count over 1. An
+// exclusion of 921180 for the argument name changes nothing (921180 reads
+// the TX counter, not ARGS_NAMES); one of 921170 stops the count, and so
+// 921180.
+const (
+	idParamCount     = 921170
+	idParamPollution = 921180
+	paramCounter     = "paramcounter_args_names"
+)
+
+// exclusionRule is the rule to exclude for ruleID's match of variable: the
+// rule itself, or 921170 for 921180's counter.
+func exclusionRule(ruleID int, variable string) int {
+	if ruleID == idParamPollution {
+		if field, _ := target(variable); field == targetArgumentName {
+			return idParamCount
+		}
+	}
+	return ruleID
+}
+
+// scoreRule reports a rule that only sums up or checks the anomaly score
+// (the CRS's 949xxx, 959xxx and 980xxx, or a rule that matched a TX
+// anomaly score, as blocking_inbound_anomaly_score): excluding it would
+// turn the policy off, and the rules that added to the score are what to
+// tune. Other TX variables are detection rules' (921180's
+// TX:paramcounter_args_names:<name>).
 func scoreRule(id int, variable string) bool {
 	switch id / 1000 {
 	case 949, 959, 980:
 		return true
 	}
-	return strings.HasPrefix(strings.ToUpper(variable), "TX:")
+	collection, key, _ := strings.Cut(variable, ":")
+	return strings.EqualFold(collection, "TX") && strings.Contains(strings.ToLower(key), "anomaly_score")
 }
 
 // tuneGroup is one rule matching one variable on one path of one policy.
@@ -430,10 +467,11 @@ func tune(evs []tuneEvent, broad bool, minCount int) *tuneReport {
 				key    exKey
 			}{g.Policy, k})
 		}
-		if g.RuleID < math.MinInt32 || g.RuleID > math.MaxInt32 {
+		rule := exclusionRule(g.RuleID, g.Variable)
+		if rule < math.MinInt32 || rule > math.MaxInt32 {
 			continue // readTuneEvents reads none
 		}
-		id := int32(g.RuleID)
+		id := int32(rule)
 		if !slices.Contains(ex.RuleIDs, id) {
 			ex.RuleIDs = append(ex.RuleIDs, id)
 		}
@@ -545,6 +583,8 @@ func (rep *tuneReport) print(w io.Writer) {
 			fmt.Fprintln(w)
 			if g.Skip != "" {
 				fmt.Fprintf(w, "    not suggested: %s\n", g.Skip)
+			} else if r := exclusionRule(g.RuleID, g.Variable); r != g.RuleID {
+				fmt.Fprintf(w, "    excluded as rule %d, which counts the argument %d checks\n", r, g.RuleID)
 			}
 		}
 		if exs := rep.Suggestions[p]; len(exs) > 0 {
