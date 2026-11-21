@@ -1,0 +1,39 @@
+// Copyright 2026 The Inkwall Authors
+// SPDX-License-Identifier: Apache-2.0
+
+// The country table (design 0011 §4.2): what the operator compiles a
+// country database (MMDB) into for engines. Engines never parse an MMDB;
+// they check this table of sorted integers (pkg/geo) and look a client's
+// country up in it with a binary search.
+//
+// The table hash, the SHA-256 of the gzipped CountryTable bytes exactly as
+// they are sent on the stream and stored in the geo Secrets, names a table
+// everywhere: the bundle's GeoTableRef, the stream, the engine's cache, its
+// heartbeats and the status.
+syntax = "proto3";
+
+package inkwall.geo.v1;
+
+option go_package = "github.com/inkwall-dev/inkwall/api/geo/v1;geov1";
+
+// CountryTable maps every IP address to a country, or to none.
+message CountryTable {
+  // IPv4 ranges: starts[i] is the first address of range i, which runs to
+  // starts[i+1]-1 (the last to 255.255.255.255). Strictly increasing,
+  // starts[0] == 0. codes[i] is range i's country, two bytes 'A'-'Z', or
+  // 0x0000: no country.
+  repeated fixed32 v4_starts = 1; // packed
+  bytes v4_codes = 2; // 2 bytes per range
+  // IPv6, the same, each start 16 bytes big-endian.
+  bytes v6_starts = 3;
+  bytes v6_codes = 4;
+  // Where it came from, for status and explain.
+  string database_type = 5; // the MMDB's metadata, e.g. GeoLite2-Country
+  uint64 database_build_epoch = 6; // the MMDB's build_epoch (Unix seconds): its build time
+  bytes database_sha256 = 7; // of the source MMDB, to skip recompiling it
+  // IPv6 prefixes that alias the IPv4 table (found by the compiler): 17
+  // bytes each, the 16-byte address and the prefix length. An address in
+  // one is looked up in the IPv4 table by the 32 bits that follow the
+  // prefix, as an address in ::/96 always is.
+  bytes v6_aliases = 8;
+}
