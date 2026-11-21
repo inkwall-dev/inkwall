@@ -157,7 +157,8 @@ func TestBundleGeoTable(t *testing.T) {
 	c := geoClient(t)
 	r := &BundleReconciler{Client: c, APIReader: c, Namespace: geoNS}
 	withGeo := []*bundlev1.Policy{{Id: "a/b"}, {Id: "c/d", Geo: &bundlev1.Geo{Deny: []string{"RU"}}}}
-	if ref, err := r.geoTable(ctx, withGeo); err != nil || ref != nil {
+	geoCfg := &wafv1alpha1.InkwallConfig{Spec: wafv1alpha1.InkwallConfigSpec{Geo: &wafv1alpha1.GeoConfig{}}}
+	if ref, err := r.geoTable(ctx, geoCfg, withGeo); err != nil || ref != nil {
 		t.Fatalf("no table stored: %v %v", ref, err)
 	}
 	tb, err := geo.Compile(ctx, geoDB(t, 1, "XA"), nil)
@@ -167,11 +168,11 @@ func TestBundleGeoTable(t *testing.T) {
 	if err := geo.Store(ctx, c, c, geoNS, tb); err != nil {
 		t.Fatal(err)
 	}
-	ref, err := r.geoTable(ctx, withGeo)
+	ref, err := r.geoTable(ctx, geoCfg, withGeo)
 	if err != nil || ref == nil || !bytes.Equal(ref.GetSha256(), tb.Hash[:]) || ref.GetSize() != uint64(tb.Size) {
 		t.Fatalf("stored table: %v %v", ref, err)
 	}
-	if ref, _ := r.geoTable(ctx, withGeo[:1]); ref != nil {
+	if ref, _ := r.geoTable(ctx, geoCfg, withGeo[:1]); ref != nil {
 		t.Error("named a table without a geo policy")
 	}
 }

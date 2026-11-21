@@ -302,7 +302,7 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	// rotated) is signed again, as a new version: engines then cache a
 	// bundle the active key signed.
 	resign := current != nil && currentKey != signer.KeyID()
-	geoRef, err := r.geoTable(ctx, res.Policies)
+	geoRef, err := r.geoTable(ctx, cfg, res.Policies)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -352,7 +352,7 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	// The previous country table's chunks go only once the published
 	// bundle names the current table, or none: until then a replica that
 	// starts must find the table the bundle names (design 0011 §4.4).
-	if ref := published.GetGeoTable(); ref == nil || geoRef != nil && bytes.Equal(ref.GetSha256(), geoRef.GetSha256()) {
+	if prunesGeo(published, geoRef) {
 		if err := geo.Prune(ctx, r.Client, r.APIReader, r.Namespace); err != nil {
 			return reconcile.Result{}, fmt.Errorf("delete stale country table chunks: %w", err)
 		}
@@ -378,13 +378,21 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	return reconcile.Result{RequeueAfter: resync}, nil
 }
 
+// prunesGeo reports whether the country table's other slot can go: the
+// published bundle names no table, or the current one (current, as the
+// manifest names it).
+func prunesGeo(published *bundlev1.Bundle, current *bundlev1.GeoTableRef) bool {
+	ref := published.GetGeoTable()
+	return ref == nil || current != nil && bytes.Equal(ref.GetSha256(), current.GetSha256())
+}
+
 // geoTable returns the reference to the stored country table when some
-// policy uses spec.geo, nil otherwise or when there is no table yet (geo
-// is then skipped, and the policies say so). The table's Secrets are
-// written before this reads them, so a bundle never names a table that
-// isn't stored.
-func (r *BundleReconciler) geoTable(ctx context.Context, policies []*bundlev1.Policy) (*bundlev1.GeoTableRef, error) {
-	if !slices.ContainsFunc(policies, func(p *bundlev1.Policy) bool { return p.GetGeo() != nil }) {
+// policy uses spec.geo and the InkwallConfig configures a database; nil
+// otherwise, or when there is no table yet (geo is then skipped, and the
+// policies say so). The table's Secrets are written before this reads
+// them, so a bundle never names a table that isn't stored.
+func (r *BundleReconciler) geoTable(ctx context.Context, cfg *wafv1alpha1.InkwallConfig, policies []*bundlev1.Policy) (*bundlev1.GeoTableRef, error) {
+	if cfg == nil || cfg.Spec.Geo == nil || !slices.ContainsFunc(policies, func(p *bundlev1.Policy) bool { return p.GetGeo() != nil }) {
 		return nil, nil
 	}
 	var s corev1.Secret

@@ -4,15 +4,18 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
 	"math"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
@@ -27,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/bundle"
 	"github.com/inkwall-dev/inkwall/operator/internal/geo"
 	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 )
@@ -51,11 +55,13 @@ const ReasonGeoStale = "Stale"
 // GeoReconciler compiles the InkwallConfig's country database into a
 // country table, stores it in its Secrets, and reports GeoDatabaseReady
 // and status.geo. It runs on the leader only. The bundle builder names the
-// stored table in the bundle once a policy uses spec.geo: the table is
-// always written before the bundle that names it.
+// stored table in the bundle once a policy uses spec.geo and the
+// InkwallConfig sets spec.geo: the table is always written before the
+// bundle that names it.
 type GeoReconciler struct {
 	Client client.Client
-	// APIReader reads uncached: the stored table and the source Secret.
+	// APIReader reads uncached: the stored table, the published bundle and
+	// the source Secret.
 	APIReader client.Reader
 	// Namespace is the operator's, where the geo Secrets are.
 	Namespace string
@@ -68,10 +74,18 @@ type GeoReconciler struct {
 	// stored is the table in the Secrets, loaded once, then as stored.
 	stored *geo.Table
 	loaded bool
-	// file is the source file's size and time when last compiled.
-	fileSize int64
-	fileTime time.Time
-	filePath string
+	// pending is a compiled table not stored yet: the published bundle
+	// still names a table other than the stored one, whose slot it would
+	// overwrite.
+	pending *geo.Outcome
+	// source is the state of the source last refreshed (a file's path,
+	// size and time; a Secret's name, key and resourceVersion), and last
+	// its outcome: an unchanged source isn't read again, a broken one
+	// included.
+	source string
+	last   *geo.Outcome
+	// dbSecret is the source Secret's name, for the watch's predicate.
+	dbSecret atomic.Value
 }
 
 // SetupWithManager registers the reconciler with mgr.
@@ -85,10 +99,12 @@ func (r *GeoReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	enqueue := handler.EnqueueRequestsFromMapFunc(func(context.Context, client.Object) []reconcile.Request {
 		return []reconcile.Request{clusterRequest}
 	})
-	// A Secret in the operator's namespace may be the source: not the
-	// table's own.
+	// Only the database's Secret, once a reconcile has read its name; the
+	// bundle Secret too, whose bundle naming no table lets the table's
+	// Secrets go after spec.geo is removed.
 	secrets := builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
-		return o.GetNamespace() == r.Namespace && o.GetName() != bundlesecret.Geo.Name && !bundlesecret.Geo.IsChunk(o.GetName())
+		name, _ := r.dbSecret.Load().(string)
+		return o.GetNamespace() == r.Namespace && (name != "" && o.GetName() == name || o.GetName() == bundle.BundleSecret)
 	}))
 	start := make(chan event.GenericEvent, 1)
 	start <- event.GenericEvent{Object: &corev1.Secret{}}
@@ -104,11 +120,19 @@ func (r *GeoReconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *GeoReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
 	logger := log.FromContext(ctx)
 	var cfg wafv1alpha1.InkwallConfig
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: "default"}, &cfg); err != nil {
-		return reconcile.Result{}, client.IgnoreNotFound(err)
+	err := r.Client.Get(ctx, client.ObjectKey{Name: "default"}, &cfg)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return reconcile.Result{}, err
 	}
 	if cfg.Spec.Geo == nil {
-		return reconcile.Result{}, r.writeStatus(ctx, &cfg, nil)
+		r.dbSecret.Store("")
+		r.pending, r.source, r.last = nil, "", nil
+		if err == nil {
+			if err := r.writeStatus(ctx, &cfg, nil); err != nil {
+				return reconcile.Result{}, err
+			}
+		}
+		return r.removeTable(ctx)
 	}
 	if !r.loaded {
 		stored, err := geo.Load(ctx, r.APIReader, r.Namespace)
@@ -118,19 +142,34 @@ func (r *GeoReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (rec
 		}
 		r.stored, r.loaded = stored, true
 	}
+	if r.pending != nil {
+		return r.store(ctx, &cfg, r.pending)
+	}
 	db := cfg.Spec.Geo.Database
 	var src *geo.Source
 	var srcErr error
+	var state string
 	switch {
 	case db.File != "":
+		r.dbSecret.Store("")
 		file := r.Root + strings.TrimPrefix(db.File, geo.FileRoot)
-		size, mtime, err := geo.StatFile(r.Root, file)
-		if err == nil && r.stored != nil && db.File == r.filePath && size == r.fileSize && mtime.Equal(r.fileTime) {
-			// Unchanged since compiled: no need to hash it.
-			return reconcile.Result{RequeueAfter: geoPoll}, r.writeStatus(ctx, &cfg, &geo.Outcome{Table: r.stored, Reason: geo.ReasonLoaded, Message: describeTable(r.stored)})
+		if size, mtime, err := geo.StatFile(r.Root, file); err == nil {
+			state = fmt.Sprintf("file %s %d %d", db.File, size, mtime.UnixNano())
+		}
+		if state != "" && state == r.source && r.last != nil {
+			// Unchanged since read: neither hashed nor compiled again.
+			return reconcile.Result{RequeueAfter: geoPoll}, r.writeStatus(ctx, &cfg, r.last)
 		}
 		src, srcErr = geo.ReadFile(r.Root, file)
 	case db.SecretRef != nil:
+		r.dbSecret.Store(db.SecretRef.Name)
+		var s corev1.Secret
+		if err := r.Client.Get(ctx, client.ObjectKey{Namespace: r.Namespace, Name: db.SecretRef.Name}, &s); err == nil {
+			state = fmt.Sprintf("secret %s %s %s", db.SecretRef.Name, db.SecretRef.Key, s.ResourceVersion)
+		}
+		if state != "" && state == r.source && r.last != nil {
+			return reconcile.Result{RequeueAfter: geoPoll}, r.writeStatus(ctx, &cfg, r.last)
+		}
 		src, srcErr = geo.ReadSecret(ctx, r.APIReader, r.Namespace, db.SecretRef.Name, db.SecretRef.Key)
 	}
 	o := geo.Refresh(ctx, src, srcErr, r.stored)
@@ -139,21 +178,75 @@ func (r *GeoReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (rec
 		logger.Info("country database not read; retrying", "error", o.Err.Error())
 		return reconcile.Result{RequeueAfter: geoRetry}, nil
 	}
-	if o.New {
-		if err := geo.Store(ctx, r.Client, r.APIReader, r.Namespace, o.Table); err != nil {
-			return reconcile.Result{}, fmt.Errorf("store the country table: %w", err)
-		}
-		r.stored = o.Table
-		logger.Info("country table published", "database", o.Table.DatabaseType, "built", o.Table.Built(), "ranges", o.Table.Ranges,
-			"bytes", len(o.Table.Compressed), "hash", hex.EncodeToString(o.Table.Hash[:]))
-	}
-	if src != nil && db.File != "" && o.Err == nil {
-		r.filePath, r.fileSize, r.fileTime = db.File, src.Size, src.ModTime
-	}
+	// Compiled or failed, the outcome stands until the source changes.
+	r.source, r.last = state, &o
 	if o.Err != nil {
 		logger.Error(o.Err, "country database not compiled", "reason", o.Reason)
 	}
+	if o.New {
+		return r.store(ctx, &cfg, &o)
+	}
 	return reconcile.Result{RequeueAfter: geoPoll}, r.writeStatus(ctx, &cfg, &o)
+}
+
+// store writes a new table to its Secrets, unless the published bundle
+// names another table than the stored one: the new table would go to that
+// table's slot, which engines may still read. It is then kept, and stored
+// once the bundle names the stored table (design 0011 §4.4).
+func (r *GeoReconciler) store(ctx context.Context, cfg *wafv1alpha1.InkwallConfig, o *geo.Outcome) (reconcile.Result, error) {
+	published, err := r.publishedTable(ctx)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	if published != nil && (r.stored == nil || !bytes.Equal(published, r.stored.Hash[:])) {
+		r.pending = o
+		log.FromContext(ctx).Info("a new country table waits: the published bundle doesn't name the stored one yet")
+		return reconcile.Result{RequeueAfter: geoRetry}, nil
+	}
+	if err := geo.Store(ctx, r.Client, r.APIReader, r.Namespace, o.Table); err != nil {
+		return reconcile.Result{}, fmt.Errorf("store the country table: %w", err)
+	}
+	r.stored, r.pending = o.Table, nil
+	log.FromContext(ctx).Info("country table published", "database", o.Table.DatabaseType, "built", o.Table.Built(), "ranges", o.Table.Ranges,
+		"bytes", len(o.Table.Compressed), "hash", hex.EncodeToString(o.Table.Hash[:]))
+	return reconcile.Result{RequeueAfter: geoPoll}, r.writeStatus(ctx, cfg, o)
+}
+
+// removeTable deletes the table's Secrets once spec.geo is gone and the
+// published bundle names no table: engines no longer need them.
+func (r *GeoReconciler) removeTable(ctx context.Context) (reconcile.Result, error) {
+	// Most clusters have none: checked in the cache, before the bundle is
+	// read.
+	var s corev1.Secret
+	if err := r.Client.Get(ctx, client.ObjectKey{Namespace: r.Namespace, Name: bundlesecret.Geo.Name}, &s); apierrors.IsNotFound(err) {
+		r.stored, r.loaded = nil, false
+		return reconcile.Result{}, nil
+	} else if err != nil {
+		return reconcile.Result{}, err
+	}
+	published, err := r.publishedTable(ctx)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	if published != nil {
+		// The bundle builder publishes a bundle without it next.
+		return reconcile.Result{RequeueAfter: geoRetry}, nil
+	}
+	if err := geo.Delete(ctx, r.Client, r.APIReader, r.Namespace); err != nil {
+		return reconcile.Result{}, fmt.Errorf("delete the country table: %w", err)
+	}
+	r.stored, r.loaded = nil, false
+	return reconcile.Result{}, nil
+}
+
+// publishedTable returns the table hash the published bundle names, nil
+// if none (or no bundle).
+func (r *GeoReconciler) publishedTable(ctx context.Context) ([]byte, error) {
+	b, _, err := bundle.Load(ctx, r.APIReader, r.Namespace)
+	if err != nil {
+		return nil, fmt.Errorf("read the published bundle: %w", err)
+	}
+	return b.GetGeoTable().GetSha256(), nil
 }
 
 // writeStatus writes GeoDatabaseReady and status.geo; without spec.geo
@@ -197,8 +290,4 @@ func (r *GeoReconciler) writeStatus(ctx context.Context, cfg *wafv1alpha1.Inkwal
 		}
 		return r.Client.Status().Update(ctx, &cur)
 	})
-}
-
-func describeTable(t *geo.Table) string {
-	return fmt.Sprintf("%s built %s, %d ranges, %d KiB compressed", t.DatabaseType, t.Built().Format(time.DateOnly), t.Ranges, (len(t.Compressed)+1023)>>10)
 }
