@@ -38,7 +38,7 @@ func geoPipeline(t *testing.T, mode Mode, failure FailureMode, g *GeoRules, res 
 	cfg := Config{Mode: mode, FailureMode: failure, IPAllow: allow, IPDeny: deny, Routes: routes, Geo: g}
 	if len(limits) > 0 {
 		p, _ := limitedPipeline(t, mode, eval, limits...)
-		p.geo, p.failure = g, failure.Resolve(mode)
+		p.geo, p.geoEvents, p.failure = g, newGeoSampler(g), failure.Resolve(mode)
 		return p, eval
 	}
 	return New(eval, cfg), eval

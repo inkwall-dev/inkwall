@@ -34,8 +34,10 @@ const geoSampleEvery = time.Minute
 // geoSampler samples a policy's geo events per country. Its keys are
 // bounded: the 676 two-letter codes, unknown, and the table missing.
 type geoSampler struct {
-	mu   sync.Mutex
-	last [26*26 + 2]time.Time
+	mu sync.Mutex
+	// last is each key's last event, in Unix nanoseconds (0: none); n the
+	// requests since. Only a policy with geo has one: 8 KiB.
+	last [26*26 + 2]int64
 	n    [26*26 + 2]uint32
 }
 
@@ -44,17 +46,26 @@ const (
 	sampleNoTable = 26*26 + 1
 )
 
+// newGeoSampler returns a sampler for a policy with geo, nil without.
+func newGeoSampler(g *GeoRules) *geoSampler {
+	if g == nil {
+		return nil
+	}
+	return &geoSampler{}
+}
+
 // sample reports whether a geo verdict of key at now makes an event, and
 // how many requests that event stands for.
 func (s *geoSampler) sample(key int, now time.Time) (bool, uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.n[key]++
-	if !s.last[key].IsZero() && now.Sub(s.last[key]) < geoSampleEvery {
+	t := now.UnixNano()
+	if s.last[key] != 0 && t-s.last[key] < int64(geoSampleEvery) {
 		return false, 0
 	}
 	n := s.n[key]
-	s.last[key], s.n[key] = now, 0
+	s.last[key], s.n[key] = t, 0
 	return true, n
 }
 

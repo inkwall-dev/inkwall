@@ -291,7 +291,7 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 		grpcPerMessage: cfg.GRPCMessages && cfg.GRPCPerMessage,
 		limits:         cfg.RateLimits,
 		geo:            cfg.Geo,
-		geoEvents:      &geoSampler{},
+		geoEvents:      newGeoSampler(cfg.Geo),
 	}
 }
 
