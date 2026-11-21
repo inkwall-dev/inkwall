@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 )
 
@@ -127,5 +128,44 @@ func TestChunkNames(t *testing.T) {
 	names := ChunkNames(secret)
 	if len(names) != 2*MaxChunks || !IsChunk(secret, "inkwall-bundle-b-7") || IsChunk(secret, "inkwall-bundle-signing-key") {
 		t.Errorf("chunk names %v", names)
+	}
+}
+
+// TestFormats: the bundle's 8 chunks and the country table's 16.
+func TestFormats(t *testing.T) {
+	data := make([]byte, 16*ChunkBytes)
+	for i := range data {
+		data[i] = byte(i * 7)
+	}
+	if _, _, err := Bundle(secret).Split("a", data); err == nil {
+		t.Error("the bundle format took 16 chunks")
+	}
+	m, chunks, err := Geo.Split("b", data)
+	if err != nil || len(chunks) != 16 || m.Chunks[15] != "inkwall-geo-b-15" {
+		t.Fatalf("geo: %v, %d chunks, %v", err, len(chunks), m.Chunks)
+	}
+	raw, _ := m.Marshal()
+	got, err := Geo.ParseManifest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseManifest(GeoSecret, raw); err == nil {
+		t.Error("the bundle format took a manifest of 16 chunks")
+	}
+	joined, err := Join(got, func(name string) ([]byte, error) {
+		return chunks[slices.Index(m.Chunks, name)], nil
+	})
+	if err != nil || !bytes.Equal(joined, data) {
+		t.Fatalf("join: %v", err)
+	}
+	if _, _, err := Geo.Split("a", append(data, 1)); err == nil {
+		t.Error("geo took 16 chunks and a byte")
+	}
+	names := Geo.ChunkNames()
+	if len(names) != 32 || !Geo.IsChunk("inkwall-geo-a-15") || Geo.IsChunk("inkwall-geo-a-16") || Geo.IsChunk("inkwall-bundle-a-0") {
+		t.Errorf("geo chunk names: %v", names)
+	}
+	if Geo.MaxBytes() != 14400<<10 || Bundle(secret).MaxBytes() != MaxBytes {
+		t.Errorf("MaxBytes: %d, %d", Geo.MaxBytes(), Bundle(secret).MaxBytes())
 	}
 }

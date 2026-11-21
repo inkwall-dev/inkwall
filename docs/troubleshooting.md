@@ -223,6 +223,12 @@ an unknown built-in rule set) and `RuleCompileError` (rules that don't compile),
 | `ControlPlaneConnected` | `CertificateExpired` | The cluster's certificate expired before it was renewed. | Store a new enrollment token. |
 | `ControlPlaneConnected` | `ClusterDisabled` | The control plane removed or disabled the cluster. | Change the configuration to try again. |
 | `ControlPlaneConnected` | `Unreachable` | The control plane can't be reached; the operator retries. Engines enforce as before. | Check network access to the endpoint. |
+| `GeoDatabaseReady` | `Loaded` | The country database (`spec.geo.database`) is compiled into a country table and published to the engines. The message gives its type, build date, ranges and size, and says when the source is older than the stored table, or missing, and the stored table is in use. | |
+| `GeoDatabaseReady` | `Stale` | The country table is published, but its database was built more than 30 days ago: countries' ranges move every week, and vendors' terms may ask for updates. | Check the database's updater (`geoipupdate`, or whatever fills the volume or the Secret). |
+| `GeoDatabaseReady` | `NotFound` | The database file, or the Secret or its key, doesn't exist. Engines keep the last good table, if there was one. | Check `spec.geo.database`, the volume mounted at `/var/lib/inkwall/geo/`, or the Secret in the operator's namespace. |
+| `GeoDatabaseReady` | `Invalid` | The source isn't a valid MaxMind DB, or reading it failed or took more than a minute. Engines keep the last good table, if there was one. | Download the database again; the message says what failed. |
+| `GeoDatabaseReady` | `NoCountryData` | No record of the database has `country.iso_code`: it isn't a country database (an ASN database, or another schema). | Use a country or city database: GeoLite2 or GeoIP2 Country or City, DB-IP's Country Lite. |
+| `GeoDatabaseReady` | `TooLarge` | The database is over a bound: 256 MiB of file, 16 MiB from a Secret (decompressed), 16 million networks, or a country table of 32 MiB (14,400 KiB compressed). | Use a country database; for a Secret, a small custom one, or a file instead. |
 <!-- end reasons -->
 
 ## Explaining a policy or a denial
