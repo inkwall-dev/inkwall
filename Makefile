@@ -366,12 +366,14 @@ test-examples: ## Check each examples/<proxy> WAFPolicy with inkwallctl test --p
 	hack/examples-test.sh
 
 .PHONY: fp-run
-fp-run: ## False positives of a real application's traffic per CRS paranoia level, with inkwallctl test --har (hack/fp-run.sh; HAR, default hack/fptraffic/juice-shop.har.gz; LEVELS, POLICY, OUT)
+fp-run: ## False positives of a real application's traffic per CRS paranoia level, with inkwallctl test --har, and the exclusions inkwallctl tune suggests (hack/fp-run.sh; HAR, default hack/fptraffic/juice-shop.har.gz; LEVELS, POLICY, OUT)
 	hack/fp-run.sh
 
+# The application make fp-har records.
+APP ?= juice-shop
 .PHONY: fp-har
-fp-har: ## Record hack/fptraffic/juice-shop.har.gz again: OWASP Juice Shop (JUICE_SHOP_VERSION) in Docker, played by hack/fptraffic (needs network)
-	hack/fptraffic/record.sh
+fp-har: ## Record hack/fptraffic/<APP>.har.gz again: the application (APP: juice-shop, the default, gitea, wordpress or directus; its version in hack/versions.env) in Docker, played by hack/fptraffic (needs network)
+	APP=$(APP) hack/fptraffic/record.sh
 
 .PHONY: kind-down
 kind-down: ## Delete the kind cluster
