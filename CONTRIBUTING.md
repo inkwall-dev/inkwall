@@ -116,7 +116,7 @@ Durations are on a laptop or a CI runner, roughly.
 | Quickstart | `make kind-quickstart` (`docs/quickstart.md` as written, released chart and images) | 10 min | Docker, kind, network | nightly (`quickstart`) |
 | Soak on kind | `make kind-soak SOAK_DURATION=24h SOAK_CHAOS=1` (every proxy, steady clean and attack traffic, chaos; [below](#battle-test)) | the duration, plus 10 min | Docker, kind | release qualification (`qualify.yaml`, `soak`: main, weekly, 5h30m with chaos); 24 hours by hand before each release ([below](#the-24-hour-soak-before-a-release)) |
 | Latency per proxy on kind | `make kind-response-load` (added p50/p99 per proxy, response inspection off and on) | 40 min | Docker, kind | release battle test |
-| False positives | `make fp-run` (a real application's recorded traffic per CRS paranoia level; `make fp-har` records it again) | 1 min | Go (`make fp-har`: Docker, network) | release battle test ([below](#battle-test)) |
+| False positives | `make fp-run` (a real application's recorded traffic per CRS paranoia level, and `inkwallctl tune`'s exclusions; `HAR=` another of the four applications; `make fp-har APP=<app>` records one again) | 1 min | Go (`make fp-har`: Docker, network) | release battle test ([below](#battle-test)) |
 | External links | `make docs-check-external` | 1 min | network | nightly (`docs-links`) |
 | Everything a PR runs | `make check-all` | hours | all of the above | |
 
@@ -228,22 +228,97 @@ request a user's, checked with `inkwallctl test --har` against a policy at each
 `Block` mode with the built-in CRS and nothing excluded, as the operator would resolve it and the
 engine compile it. Every denial is a false positive. It prints a markdown table, per level, of the
 requests, the denials, their rate and the rules behind them (the CRS rules that scored), and with
-`OUT=<dir>` writes it with a JSON file of each denied request and its rules.
+`OUT=<dir>` writes it with a JSON file of each denied request and its rules, and `tune.md`: what
+[`inkwallctl tune`](docs/testing-policies.md#suggest-exclusions-from-the-events) suggests for each
+level's denials, read as the security events an engine logs.
 
-The traffic is `hack/fptraffic/juice-shop.har.gz`, 560 requests: [OWASP Juice Shop](https://github.com/juice-shop/juice-shop),
-an online shop with an Angular front end and a REST API, played by `hack/fptraffic` as six shoppers
-with six browsers' headers. Each loads the shop and its assets, registers, logs in, searches,
-writes reviews, fills a basket, adds an address and a card, checks out, sends feedback, uploads a
-complaint and a photo, and changes their password, with free text, names and passwords that are
-hard on a WAF (apostrophes, accents, symbols). Only the requests and their statuses are recorded, no
-response. `make fp-har` records it again (Docker, `JUICE_SHOP_VERSION` in `hack/versions.env`, a
-new shop each time; IDs and tokens change, the requests don't); review the new table with it.
+The traffic is four applications' in `hack/fptraffic`, played by `hack/fptraffic` with six browsers'
+headers (and the headers of the API clients and services that call them), with free text, names
+and passwords that are hard on a WAF (apostrophes, accents, symbols, other scripts). Only the
+requests and their statuses are recorded, no response, and the address the recording was made at
+is replaced by the application's public origin. `make fp-har APP=<app>` records one again (Docker,
+its version in `hack/versions.env`, a new application each time; IDs, nonces and tokens change, the
+requests don't); review its new table with it.
+
+- `juice-shop.har.gz` (the default), 560 requests: [OWASP Juice Shop](https://github.com/juice-shop/juice-shop),
+  an online shop with an Angular front end and a REST API. Six shoppers load the shop and its
+  assets, register, log in, search, write reviews, fill a basket, add an address and a card, check
+  out, send feedback, upload a complaint and a photo, and change their password.
+- `gitea.har.gz`, 335 requests: [Gitea](https://about.gitea.com), a code forge, its web UI and
+  its REST API. Five developers sign up, fill their profile and upload an avatar, create a
+  repository and a token; their scripts add files (Markdown, SQL, shell, TypeScript), labels, a
+  milestone, issues, a branch and a pull request through the API, and edit and search them; in the
+  web UI they preview and post an issue with an attachment, comment on another's, star, search
+  and sign out. Issues and comments are written as developers write them: Markdown with code
+  blocks, shell commands, SQL and stack traces.
+- `wordpress.har.gz`, 762 requests: [WordPress](https://wordpress.org), a CMS, its admin, the REST
+  calls of its block editor and its site. The administrator sets the permalinks and the site's
+  title and adds four authors and the categories; each author saves a quick draft and writes a
+  post in the block editor (HTML blocks: links, lists, a table, quotes, code, an uploaded image with
+  its caption), tags and publishes it; readers browse, search and comment; the administrator
+  approves and answers the comments.
+- `directus.har.gz`, 147 requests: [Directus](https://directus.io), a headless CMS's JSON API. The
+  administrator's script models the content (collections, fields, a relation), the roles, their
+  policies and permissions, and the users; two editors use its Data Studio (a session cookie) and
+  two the team's front end (tokens); they list, search and filter (JSON filters, `fields[]`,
+  aggregates), create and edit articles (Markdown and HTML bodies, JSON fields) and customers,
+  upload a cover and load it resized, and query GraphQL; a service with a static token imports
+  customers in a batch and reads through REST (bracket filters) and GraphQL.
 
 - `HAR=<file>`: other traffic, a HAR file (`.har`, or `.har.gz`), e.g. your own application's,
   saved from a browser's developer tools.
 - `LEVELS="1 2"`: some levels only.
 - `POLICY=<file>`: one run with your own `WAFPolicy` instead, as it is (with its exclusions and
   `crs.allowedMethods`): the rate once tuned.
+
+The rates, with nothing excluded (#707; the rules of the most denials first, each with the requests
+it scored on):
+
+| Application | Paranoia level | Requests | Denied | Rate | Rules (requests) |
+|---|---|---|---|---|---|
+| Juice Shop | 1 | 560 | 23 | 4.11% | 911100 (22), 920120 (1) |
+| Juice Shop | 2 | 560 | 46 | 8.21% | 911100 (22), 931130 (6), 942120 (6), 942200 (5), 942131 (4), 942440 (4), 932200 (2), 920120 (1) |
+| Juice Shop | 3 | 560 | 65 | 11.61% | 911100 (22), 920272 (18), 942460 (11), 942431 (7), 931130 (6), 942120 (6), 942200 (5), 942131 (4) |
+| Juice Shop | 4 | 560 | 108 | 19.29% | 920273 (90), 942432 (52), 942421 (42), 911100 (22), 920272 (18), 942460 (11), 942431 (7), 931130 (6) |
+| Gitea | 1 | 335 | 51 | 15.22% | 911100 (35), 920440 (15), 930120 (4), 932235 (4), 932260 (4), 932370 (4) |
+| Gitea | 2 | 335 | 91 | 27.16% | 911100 (35), 942200 (27), 942430 (23), 942510 (21), 942120 (17), 920440 (15), 932200 (15), 942370 (15) |
+| Gitea | 3 | 335 | 121 | 36.12% | 920272 (67), 911100 (35), 942460 (35), 942431 (31), 942200 (27), 942430 (23), 942510 (21), 942120 (17) |
+| Gitea | 4 | 335 | 154 | 45.97% | 920273 (118), 942432 (79), 920272 (67), 911100 (35), 942460 (35), 942431 (31), 942200 (27), 942430 (23) |
+| WordPress | 1 | 762 | 16 | 2.1% | 920450 (12), 941160 (8), 941180 (8), 932130 (4), 932230 (2), 932235 (2), 932250 (2), 933135 (2) |
+| WordPress | 2 | 762 | 30 | 3.94% | 920450 (12), 932236 (12), 942131 (10), 942200 (10), 942440 (9), 941150 (8), 941160 (8), 941180 (8) |
+| WordPress | 3 | 762 | 85 | 11.15% | 920272 (60), 932350 (14), 920450 (12), 932236 (12), 942460 (11), 942131 (10), 942200 (10), 942431 (10) |
+| WordPress | 4 | 762 | 678 | 88.98% | 942421 (659), 920272 (60), 920273 (57), 942432 (40), 932350 (14), 920450 (12), 932236 (12), 942460 (11) |
+| Directus | 1 | 147 | 21 | 14.29% | 911100 (18), 932125 (1), 932235 (1), 932370 (1), 933180 (1), 942140 (1), 942190 (1) |
+| Directus | 2 | 147 | 59 | 40.14% | 942200 (33), 942430 (27), 932236 (22), 911100 (18), 942340 (15), 942370 (15), 942440 (4), 942520 (4) |
+| Directus | 3 | 147 | 90 | 61.22% | 942200 (33), 942431 (31), 942460 (30), 920272 (27), 942430 (27), 921180 (22), 932236 (22), 932350 (22) |
+| Directus | 4 | 147 | 114 | 77.55% | 920273 (100), 942432 (85), 942200 (33), 942431 (31), 921220 (30), 942460 (30), 920272 (27), 942430 (27) |
+
+What tunes them at level 1, from `tune.md`:
+
+- 911100, most of the level-1 denials of Juice Shop, Gitea and Directus: their PUT, PATCH and
+  DELETE, which the CRS doesn't allow by default. No exclusion names a method (tune says so);
+  `crs.allowedMethods` allows them.
+- Gitea: tune suggests rules 930120, 932235, 932260 and 932370 for the Markdown of issues and
+  comments (shell commands and paths in code blocks), for one argument on one path each: `json.Text`
+  on `/api/v1/markdown`, `json.body` on `/api/v1/repos/<owner>/<repo>/issues`, `content` on
+  `/<owner>/<repo>/issues/new` and `text` on `/<owner>/<repo>/markup`. 920440 (a restricted file
+  extension) denies `.sql` and `.sh` files in the repositories' paths (the contents API, raw files,
+  the source view): no exclusion field names the path's file name, so tune suggests none.
+- WordPress: rules 941160 and 941180 (and 932130, 932230, 932235, 932250, 933135 for the outage
+  post's code) for `json.content` of the block editor's saves, one suggestion per post
+  (`/wp-json/wp/v2/posts/<id>` and its `/autosaves`): with an operator's eye, one exclusion on
+  `/wp-json/wp/v2/posts/*`. 920450 is the block editor's `X-HTTP-Method-Override` header, a
+  restricted header of the CRS; tune can't name it, and the event names another header (#762).
+- Directus: 933180 for `filter[published_at][_gte]` on `/items/articles` (`$NOW(-7 days)`, which
+  reads as a PHP function call), and 932125, 932235, 932370, 942140 and 942190 for `json.body` on
+  `/items/articles` (the article with a shell command in Markdown). At level 3, 921180 (repeated
+  `fields[]` and `sort[]`) gets no suggestion and isn't listed (#764).
+- Juice Shop: 920120, a multipart file name with an accent, gets none either (no exclusion field
+  names an uploaded file's name).
+
+Above level 1 the rate climbs with the free text, the SQL-like JSON filters and, at level 4, the
+cookies (WordPress's `wordpress_logged_in_*`, 942421 on 659 requests): level 1 is the default for
+these applications, and a higher level needs a tuned policy (`POLICY=`).
 
 ## Branches
 

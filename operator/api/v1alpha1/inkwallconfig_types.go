@@ -70,8 +70,10 @@ type InkwallConfigSpec struct {
 	// +optional
 	ControlPlane *ControlPlane `json:"controlPlane,omitempty"`
 
-	// Engine configures the engine sidecars the operator injects.
+	// Engine configures the engine sidecars the operator injects. Omitted,
+	// it is {}, so that its defaults show.
 	// +optional
+	// +kubebuilder:default={}
 	Engine EngineSpec `json:"engine,omitempty"`
 
 	// Integrations pins how a proxy controller is wired. Controllers are
@@ -94,15 +96,275 @@ type InkwallConfigSpec struct {
 
 	// Events configures what the engines' security events carry to the
 	// operator (and on to the control plane, when one is connected).
+	// Omitted, it is {}, so that its defaults show.
 	// +optional
+	// +kubebuilder:default={}
 	Events EventsSpec `json:"events,omitempty"`
 }
 
 // EventsSpec configures the engines' security events.
 type EventsSpec struct {
-	// Redact keeps more of what rules matched out of the events.
+	// Redact keeps more of what rules matched out of the events. Omitted,
+	// it is {}, so that its defaults show.
 	// +optional
+	// +kubebuilder:default={}
 	Redact RedactSpec `json:"redact,omitempty"`
+
+	// Export sends the security events to SIEMs and log pipelines, from
+	// every operator replica, without the control plane (see
+	// docs/siem-export.md). Events carry no more than Redact leaves; a sink
+	// can only leave out more.
+	// +optional
+	Export *ExportSpec `json:"export,omitempty"`
+}
+
+// ExportSpec configures the export of security events.
+type ExportSpec struct {
+	// ClusterName names the cluster in every exported event, beside its ID
+	// (the kube-system Namespace's UID).
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +optional
+	ClusterName string `json:"clusterName,omitempty"`
+
+	// Sinks are where the events go, at most 4. None: no export.
+	// +kubebuilder:validation:MaxItems=4
+	// +kubebuilder:validation:XValidation:rule="self.all(a, self.exists_one(b, b.name == a.name))",message="sinks must not repeat a name"
+	// +listType=atomic
+	// +optional
+	Sinks []EventSink `json:"sinks,omitempty"`
+}
+
+// EventSink is one export destination: OTLP logs or JSON over HTTP.
+// +kubebuilder:validation:XValidation:rule="has(self.otlp) != has(self.json)",message="a sink needs exactly one of otlp and json"
+// +kubebuilder:validation:XValidation:rule="(has(self.insecure) && self.insecure) || !((has(self.otlp) && self.otlp.endpoint.matches('^(grpc|http)://')) || (has(self.json) && has(self.json.url) && self.json.url.startsWith('http://')))",message="a plaintext endpoint (http://, grpc://) needs insecure: true"
+// +kubebuilder:validation:XValidation:rule="!has(self.headersSecretRef) || !((has(self.otlp) && self.otlp.endpoint.matches('^(grpc|http)://')) || (has(self.json) && has(self.json.url) && self.json.url.startsWith('http://')))",message="a plaintext endpoint (http://, grpc://) can't have headersSecretRef: credentials never travel in clear"
+type EventSink struct {
+	// Name identifies the sink: the sink label of the export metrics and
+	// the name in the EventsExported condition. Renaming a sink starts it
+	// afresh, without the events the old name hadn't sent.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// OTLP sends the events as OpenTelemetry logs, over gRPC or HTTP with
+	// protobuf.
+	// +optional
+	OTLP *OTLPSink `json:"otlp,omitempty"`
+
+	// JSON sends the events as JSON over HTTP(S).
+	// +optional
+	JSON *JSONSink `json:"json,omitempty"`
+
+	// Compression of the request body. Unset: Gzip.
+	// +kubebuilder:default=Gzip
+	// +optional
+	Compression ExportCompression `json:"compression,omitempty"`
+
+	// Insecure allows a plaintext endpoint (http://, grpc://): for a
+	// Collector in the cluster. A plaintext sink can't have
+	// headersSecretRef.
+	// +optional
+	Insecure bool `json:"insecure,omitempty"`
+
+	// TLS configures the connection to an https:// or grpcs:// endpoint.
+	// The server's certificate is always verified.
+	// +optional
+	TLS *SinkTLS `json:"tls,omitempty"`
+
+	// HeadersSecretRef names a Secret in the operator's namespace whose
+	// keys are header names and whose values are their values
+	// (Authorization: Bearer ..., DD-API-KEY: ...). Over gRPC they are sent
+	// as metadata, lower-cased. A changed Secret is used from the next
+	// request.
+	// +optional
+	HeadersSecretRef *LocalSecretReference `json:"headersSecretRef,omitempty"`
+
+	// Batch configures how events are grouped into requests.
+	// +optional
+	Batch ExportBatch `json:"batch,omitempty"`
+
+	// Timeout is one request's deadline, 1s to 60s. Unset: 10s.
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('60s')",message="timeout must be from 1s to 60s"
+	// +optional
+	Timeout *metav1.Duration `json:"timeout,omitempty"`
+
+	// Filter limits the events this sink takes.
+	// +optional
+	Filter ExportFilter `json:"filter,omitempty"`
+
+	// Omit are fields this sink never gets: Snippets (each match keeps its
+	// rule and variable), ClientIP, UserAgent, RequestID.
+	// +kubebuilder:validation:MaxItems=4
+	// +listType=set
+	// +optional
+	Omit []ExportOmit `json:"omit,omitempty"`
+}
+
+// OTLPSink is an OpenTelemetry (OTLP) logs receiver.
+type OTLPSink struct {
+	// Endpoint is grpcs://host:port (or grpc://, with insecure) for gRPC,
+	// or an https:// (or http://) URL for HTTP with protobuf, used as is:
+	// OTLP/HTTP's path, usually /v1/logs, is part of it.
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^(grpcs?://[^/?#@\s]+|https?://[^/?#@\s]+([/?]\S*)?)$`
+	Endpoint string `json:"endpoint"`
+}
+
+// JSONSink is an HTTP intake for JSON events.
+// +kubebuilder:validation:XValidation:rule="has(self.url) != has(self.urlSecretRef)",message="json needs exactly one of url and urlSecretRef"
+type JSONSink struct {
+	// URL is the https:// (or http://, with insecure) URL the events are
+	// POSTed to, with any path and query. A URL that holds a token belongs
+	// in urlSecretRef.
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^https?://[^/?#@\s]+([/?]\S*)?$`
+	// +optional
+	URL string `json:"url,omitempty"`
+
+	// URLSecretRef reads the URL from a Secret's key in the operator's
+	// namespace instead, for intakes whose URL holds a token (Sumo Logic,
+	// query-string keys). It gets url's checks when the sink starts.
+	// +optional
+	URLSecretRef *SecretKeyReference `json:"urlSecretRef,omitempty"`
+
+	// Framing is Lines (one event per line, application/x-ndjson) or
+	// Array (one JSON array, application/json). Unset: Lines.
+	// +kubebuilder:default=Lines
+	// +optional
+	Framing JSONFraming `json:"framing,omitempty"`
+}
+
+// JSONFraming is how JSON events are put in a request body.
+// +kubebuilder:validation:Enum=Lines;Array
+type JSONFraming string
+
+// The JSON framings.
+const (
+	JSONLines JSONFraming = "Lines"
+	JSONArray JSONFraming = "Array"
+)
+
+// ExportCompression is a request body's compression.
+// +kubebuilder:validation:Enum=Gzip;None
+type ExportCompression string
+
+// The compressions.
+const (
+	CompressionGzip ExportCompression = "Gzip"
+	CompressionNone ExportCompression = "None"
+)
+
+// SinkTLS configures a sink's TLS: version 1.2 or later, the server's
+// certificate always verified.
+type SinkTLS struct {
+	// CASecretRef names a Secret in the operator's namespace whose ca.crt
+	// holds the CAs trusted for the server. Unset: the system roots.
+	// +optional
+	CASecretRef *LocalSecretReference `json:"caSecretRef,omitempty"`
+
+	// ClientCertificateSecretRef names a kubernetes.io/tls Secret in the
+	// operator's namespace: the client certificate for mutual TLS.
+	// +optional
+	ClientCertificateSecretRef *LocalSecretReference `json:"clientCertificateSecretRef,omitempty"`
+
+	// ServerName is the name checked in the server's certificate. Unset:
+	// the endpoint's host.
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?(\.[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?)*$`
+	// +optional
+	ServerName string `json:"serverName,omitempty"`
+}
+
+// ExportBatch configures a sink's requests.
+type ExportBatch struct {
+	// MaxEvents is the most events per request, 1 to 1,000. Unset: 500.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1000
+	// +optional
+	MaxEvents *int32 `json:"maxEvents,omitempty"`
+
+	// MaxDelay is the longest an event waits for its request to fill,
+	// 100ms to 60s. Unset: 5s.
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('100ms') && duration(self) <= duration('60s')",message="maxDelay must be from 100ms to 60s"
+	// +optional
+	MaxDelay *metav1.Duration `json:"maxDelay,omitempty"`
+
+	// MaxInFlight is how many requests are sent before the first is
+	// answered, 1 to 4. Unset: 4.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4
+	// +optional
+	MaxInFlight *int32 `json:"maxInFlight,omitempty"`
+}
+
+// ExportFilter limits a sink's events.
+type ExportFilter struct {
+	// Actions are the verdicts this sink takes: Deny, Log. Unset: both.
+	// +kubebuilder:validation:MaxItems=2
+	// +listType=set
+	// +optional
+	Actions []ExportAction `json:"actions,omitempty"`
+
+	// PolicyNamespaces takes only the events of policies in these
+	// namespaces, as the bundle the replica serves knows them: an event
+	// whose policy isn't in the bundle, or that has none, goes only to
+	// sinks without this filter. Unset: all.
+	// +kubebuilder:validation:MaxItems=64
+	// +listType=set
+	// +optional
+	PolicyNamespaces []NamespaceName `json:"policyNamespaces,omitempty"`
+}
+
+// ExportAction is a verdict a sink filters on.
+// +kubebuilder:validation:Enum=Deny;Log
+type ExportAction string
+
+// The actions.
+const (
+	ExportDeny ExportAction = "Deny"
+	ExportLog  ExportAction = "Log"
+)
+
+// ExportOmit is a field a sink leaves out.
+// +kubebuilder:validation:Enum=Snippets;ClientIP;UserAgent;RequestID
+type ExportOmit string
+
+// The fields a sink can omit.
+const (
+	OmitSnippets  ExportOmit = "Snippets"
+	OmitClientIP  ExportOmit = "ClientIP"
+	OmitUserAgent ExportOmit = "UserAgent"
+	OmitRequestID ExportOmit = "RequestID"
+)
+
+// NamespaceName is a Kubernetes namespace's name: a DNS label.
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:MaxLength=63
+// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+type NamespaceName string
+
+// LocalSecretReference names a Secret in the operator's namespace.
+type LocalSecretReference struct {
+	// Name of the Secret.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+}
+
+// SecretKeyReference names a key of a Secret in the operator's namespace.
+type SecretKeyReference struct {
+	// Name of the Secret.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+
+	// Key in the Secret.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]+$`
+	Key string `json:"key"`
 }
 
 // RedactSpec adds to the redaction every engine applies to the snippets of
@@ -167,7 +429,8 @@ type ControlPlane struct {
 	// +kubebuilder:validation:MaxLength=512
 	Endpoint string `json:"endpoint"`
 
-	// EnrollmentSecretRef is the Secret holding the enrollment token.
+	// EnrollmentSecretRef is the Secret holding the enrollment token, in
+	// the operator's namespace (its namespace can be left out).
 	EnrollmentSecretRef SecretReference `json:"enrollmentSecretRef"`
 }
 
@@ -181,7 +444,21 @@ const (
 	RolloutAutomatic RolloutPolicy = "Automatic"
 )
 
+// DenialFormat is the body of an engine's denials.
+// +kubebuilder:validation:Enum=Text;JSON
+type DenialFormat string
+
+// The denial formats.
+const (
+	// DenialText answers every denied client with plain text.
+	DenialText DenialFormat = "Text"
+	// DenialJSON answers a denied client that accepts application/json
+	// with a JSON body, and any other client with text.
+	DenialJSON DenialFormat = "JSON"
+)
+
 // EngineSpec configures the engine sidecars.
+// +kubebuilder:validation:XValidation:rule="!(has(self.jsonDenials) && self.jsonDenials && has(self.denialFormat) && self.denialFormat == 'Text')",message="jsonDenials: true contradicts denialFormat: Text; remove jsonDenials, which is deprecated"
 type EngineSpec struct {
 	// Image is the engine image. Empty means the image released with this
 	// operator version. An image whose tag is an older release (0.4.1) is
@@ -236,7 +513,8 @@ type EngineSpec struct {
 	// eviction is refused or a replacement isn't ready in time. Pods the
 	// Pod webhook injects only (Traefik, HAProxy, Istio's ingress gateways):
 	// Envoy Gateway and Istio's Gateway API deployments roll their pods
-	// themselves. Unset: Manual.
+	// themselves.
+	// +kubebuilder:default=Manual
 	// +optional
 	Rollout RolloutPolicy `json:"rollout,omitempty"`
 
@@ -247,11 +525,23 @@ type EngineSpec struct {
 	// +optional
 	PolicyMetrics bool `json:"policyMetrics,omitempty"`
 
-	// JSONDenials answers a denied client that accepts application/json
-	// with a JSON body, {"error":"forbidden","status":403,"request_id":...},
-	// instead of text. Every denial carries X-Request-Id either way.
-	// Through Traefik, Envoy Gateway and Istio; HAProxy writes its own
-	// denials. Applies to pods injected from then on.
+	// DenialFormat is the body of the engines' denials. Text: plain text.
+	// JSON: a client that accepts application/json gets a JSON body,
+	// {"error":"forbidden","status":403,"request_id":...}, and any other
+	// client text. Every denial carries X-Request-Id either way. Through
+	// Traefik, Envoy Gateway and Istio; HAProxy writes its own denials.
+	// Unset: Text, or JSON when the deprecated jsonDenials is true. Applies
+	// to pods injected from then on. JSON requires engines 0.5.0 or later.
+	// +optional
+	DenialFormat DenialFormat `json:"denialFormat,omitempty"`
+
+	// JSONDenials true means denialFormat: JSON, which takes its place. It
+	// stays so that InkwallConfigs that set it remain valid; setting or
+	// changing it draws a warning, and v1 removes it. It can't be true
+	// with denialFormat: Text.
+	//
+	// Deprecated: use denialFormat.
+	//
 	// +optional
 	JSONDenials bool `json:"jsonDenials,omitempty"`
 
@@ -318,7 +608,8 @@ type CIDR string
 type IntegrationSpec struct {
 	// Controller is the integration name: traefik, envoy-gateway, istio,
 	// istio-ingress or haproxy. The operator ignores an entry for any other
-	// controller.
+	// controller. It should be a DNS label (lower case letters, digits and
+	// "-"): any other name draws a warning, and v1 refuses it.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	Controller string `json:"controller"`

@@ -366,7 +366,7 @@ proxy.
   - an [`emptyDir`](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir) bundle cache;
   - non-root, with a read-only root filesystem;
   - image and resources from `InkwallConfig.spec.engine`, else from `--engine-image`;
-  - the flags of the other `spec.engine` settings (`logLevel`, `policyMetrics`, `jsonDenials`,
+  - the flags of the other `spec.engine` settings (`logLevel`, `policyMetrics`, `denialFormat`,
     `clientIP`), only those the engine's release knows (#536): an engine exits on a flag it
     doesn't know, so an older one pinned in `spec.engine.image` would never be ready. The
     operator's own engine (`--engine-image`) knows them all; a pinned one's release is read from
@@ -1064,7 +1064,7 @@ leader only, and is idle in Standalone mode (the default).
 
 - **Enrollment.** The leader reads the enrollment token from
   `spec.controlPlane.enrollmentSecretRef`, key `token`; the Secret must be in the operator's
-  namespace. It generates an [ECDSA P-256](https://csrc.nist.gov/pubs/fips/186-5/final) key and enrolls. A retry after a lost response reuses the
+  namespace, which is also what an unset `namespace` means. It generates an [ECDSA P-256](https://csrc.nist.gov/pubs/fips/186-5/final) key and enrolls. A retry after a lost response reuses the
   key.
 - **Identity.** The certificate and key go in the `inkwall-control-plane-identity` Secret (type
   [`kubernetes.io/tls`](https://kubernetes.io/docs/concepts/configuration/secret/#tls-secrets), plus `cluster-id`).

@@ -126,7 +126,7 @@ request one limit refuses spends nothing of the others, and gets the longest `Re
 
 Over a limit in `Block` mode, `429 Too Many Requests` with `Retry-After` (whole seconds until a
 token comes) and the `X-Request-Id` of every denial. The body is the usual denial's
-(`Too Many Requests`, or JSON with `spec.engine.jsonDenials`). The body of a limited request isn't
+(`Too Many Requests`, or JSON with `spec.engine.denialFormat: JSON`). The body of a limited request isn't
 read, except through HAProxy, which sends it with the request.
 
 | Proxy | Notes |
@@ -179,6 +179,10 @@ client's first limited request, then one a minute, with `sampled_count` saying h
 it stands for; at most 100 a second per limit and 10 a second per engine. Every limited request is
 still counted in the metrics. So a 429's `X-Request-Id` may have no event: look up the client's
 earlier one.
+
+`inkwallctl explain request <id>` on a `rate-limit` event names the limit, what it allows (and
+the ceiling over engines), what it counts, and how many requests the event stands for;
+`inkwallctl explain policy` lists a policy's limits the same way.
 
 `inkwallctl test` compiles a policy's limits, so a wrong one is an error there too, but doesn't
 apply them: it checks one request at a time and keeps no state, and says so on stderr.

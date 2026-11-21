@@ -240,7 +240,7 @@ var entries = []Entry{
 		Meaning: "The engine is injected with every `spec.engine` setting.",
 		Fix:     ""},
 	{Kind: "InkwallConfig", Condition: "EngineConfigured", Reason: "EngineTooOld",
-		Meaning: "`spec.engine.image` pins an engine release too old for some settings (`logLevel`, `policyMetrics`, `jsonDenials`, `clientIP.trustedHops` need 0.5.0): it is injected without them, since it would exit on a flag it doesn't know. The message names them.",
+		Meaning: "`spec.engine.image` pins an engine release too old for some settings (`logLevel`, `policyMetrics`, `denialFormat: JSON`, `clientIP.trustedHops` need 0.5.0): it is injected without them, since it would exit on a flag it doesn't know. The message names them.",
 		Fix:     "Pin a newer engine, or remove the settings."},
 	{Kind: "InkwallConfig", Condition: "EngineConfigured", Reason: "EngineVersionUnknown",
 		Meaning: "`spec.engine.image`'s tag isn't a release (`latest`, a digest alone, a custom build), so the engine is injected without the settings some release doesn't know.",

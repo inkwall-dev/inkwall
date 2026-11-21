@@ -1182,6 +1182,65 @@ func TestExclusionsRejectUnsafeValues(t *testing.T) {
 	}
 }
 
+// A chain whose first rule matches every value and whose chained rule picks
+// some reports the value the chain picked, not the first rule's first match
+// (#762). 931130 is at paranoia level 2.
+func TestChainReportsTheValueItPicked(t *testing.T) {
+	e, err := New(Config{ParanoiaLevel: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		req  *request.Request
+		id   int
+		want string
+	}{
+		{
+			name: "920450 restricted header among others",
+			req: newRequest("POST", "/wp-json/wp/v2/posts/25", http.Header{
+				"Content-Type":           {"application/json"},
+				"X-Http-Method-Override": {"PUT"},
+				"X-Wp-Nonce":             {"abc"},
+			}, "{}"),
+			id:   920450,
+			want: "REQUEST_HEADERS_NAMES:X-Http-Method-Override",
+		},
+		{
+			name: "920450 Proxy on a GET",
+			req:  newRequest("GET", "/", http.Header{"Proxy": {"x"}, "X-Request-Id": {"1"}}, ""),
+			id:   920450,
+			want: "REQUEST_HEADERS_NAMES:Proxy",
+		},
+		{
+			name: "931130 off-site URL among on-site ones",
+			req:  newRequest("GET", "/?a=https://shop.example.com/x&b=https://evil.example.net/x&c=https://shop.example.com/y", nil, ""),
+			id:   931130,
+			want: "ARGS:b",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Headers and arguments are matched in map order: try a few times.
+			for range 20 {
+				res, err := e.Evaluate(context.Background(), tt.req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var got []string
+				for _, m := range res.Matches {
+					if m.RuleID == tt.id {
+						got = append(got, m.Variable)
+					}
+				}
+				if len(got) != 1 || got[0] != tt.want {
+					t.Fatalf("%d matched %v, want [%s]; all: %+v", tt.id, got, tt.want, res.Matches)
+				}
+			}
+		})
+	}
+}
+
 func TestMatchesAndAnomalyScore(t *testing.T) {
 	e, err := New(Config{})
 	if err != nil {

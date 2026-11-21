@@ -209,7 +209,7 @@ an unknown built-in rule set) and `RuleCompileError` (rules that don't compile),
 | `IntegrationsConfigured` | `Configured` | The integrations' proxy pod selectors apply. | |
 | `IntegrationsConfigured` | `InvalidSelector` | A `spec.integrations` selector can't be applied (an unknown operator); the operator keeps the selectors it runs with. | Fix the selector the message names. |
 | `EngineConfigured` | `Configured` | The engine is injected with every `spec.engine` setting. | |
-| `EngineConfigured` | `EngineTooOld` | `spec.engine.image` pins an engine release too old for some settings (`logLevel`, `policyMetrics`, `jsonDenials`, `clientIP.trustedHops` need 0.5.0): it is injected without them, since it would exit on a flag it doesn't know. The message names them. | Pin a newer engine, or remove the settings. |
+| `EngineConfigured` | `EngineTooOld` | `spec.engine.image` pins an engine release too old for some settings (`logLevel`, `policyMetrics`, `denialFormat: JSON`, `clientIP.trustedHops` need 0.5.0): it is injected without them, since it would exit on a flag it doesn't know. The message names them. | Pin a newer engine, or remove the settings. |
 | `EngineConfigured` | `EngineVersionUnknown` | `spec.engine.image`'s tag isn't a release (`latest`, a digest alone, a custom build), so the engine is injected without the settings some release doesn't know. | Tag the image with its version, such as `:0.6.0` or `:0.6.0@sha256:...`. |
 | `EngineRollout` | `RollingOut` | `spec.engine.rollout: Automatic`: the operator evicted a proxy pod for a new engine and waits for its replacement. | |
 | `EngineRollout` | `Done` | No proxy pod the operator injects needs a new engine. | |
@@ -431,8 +431,8 @@ security event, also on the 400 for a request an adapter can't read), and a shor
 | 503 | The request couldn't be inspected in time (timeout, overload) and the policy fails closed |
 | 400 | The proxy sent the engine a request it can't read |
 
-With `InkwallConfig.spec.engine.jsonDenials: true` (the engine's `--json-denials`), a client that
-accepts `application/json` gets `{"error":"forbidden","status":403,"request_id":"..."}` instead of
+With `InkwallConfig.spec.engine.denialFormat: JSON` (the engine's `--json-denials`; the deprecated
+`jsonDenials: true` does the same), a client that accepts `application/json` gets `{"error":"forbidden","status":403,"request_id":"..."}` instead of
 the text body, through Traefik, Envoy Gateway, Istio and the standalone proxy. HAProxy writes its
 own denials, so it keeps its error page there.
 
