@@ -40,8 +40,10 @@ The samples in [`examples/haproxy`](../examples/haproxy) are the files this guid
 
 <!-- versions: HAPROXY_CHART_VERSION -->
 The operator protects the Ingresses of the [HAProxy Kubernetes Ingress Controller](https://www.haproxy.com/documentation/kubernetes-ingress/) (`haproxytech/kubernetes-ingress`,
-3.1 or later: its HAProxy must be 3.1 or later; tested with 3.2.19, chart 1.54.4), installed with
+3.1 to 3.2: its HAProxy must be 3.1 or later; tested with 3.2.20, chart 1.57.1), installed with
 nothing about Inkwall. Not [HAProxy Ingress](https://haproxy-ingress.github.io/) (`jcmoraisjr/haproxy-ingress`), another controller.
+The controller 3.4, the chart's default since chart 1.55.0, dropped the backend snippets the
+operator loads the filter with: install the chart with `--set controller.image.tag=3.2.20`.
 
 ### Protecting an Ingress
 
@@ -191,7 +193,7 @@ controller, then delete it.
 
 <!-- versions: HAPROXY_VERSION -->
 - HAProxy 3.1 or later, whose SPOE speaks SPOP 2.0 through a `mode spop` backend. The samples are
-  tested with HAProxy 3.2.26 (`haproxy:3.2.26`).
+  tested with HAProxy 3.2.27 (`haproxy:3.2.27`).
 - `inkwall-engine`, from the [releases page](https://github.com/inkwall-dev/inkwall/releases), or the image
   `ghcr.io/inkwall-dev/inkwall-engine`.
 
