@@ -161,6 +161,9 @@ WAFPolicy shop/storefront: 13 logged requests would be denied in Block mode
 
 - The anomaly score rules (949110 and the other 949, 959 and 980 rules) are never suggested:
   the rules that added to the score are what to tune.
+- A repeated argument (rule 921180, `TX:paramcounter_args_names:<name>`) is excluded as rule
+  921170, which counts the argument, for that argument name: an exclusion of 921180 itself
+  wouldn't stop it.
 - It never suggests a rule off for every path. A rule off for every variable on a path, for what
   no exclusion field names, only with `--broad`. A path a policy can't hold (`;`, `%`) and a name
   outside the exclusion syntax get no suggestion.
