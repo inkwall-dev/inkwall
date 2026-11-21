@@ -119,7 +119,7 @@ type sinkClient interface {
 // transportConfig is what a sink's connections are made with; a change
 // makes a new client (and closes the old one's connections).
 type transportConfig struct {
-	grpc     bool
+	grpc bool
 	// otlp: an HTTP sink of OTLP (protobuf), not JSON.
 	otlp     bool
 	url      string // HTTP: the URL; gRPC: host:port
