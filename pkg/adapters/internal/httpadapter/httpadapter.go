@@ -144,9 +144,17 @@ func LogEvent(ctx context.Context, logger *slog.Logger, rec *events.Recorder, re
 		slog.String("request_id", req.ID),
 		slog.Duration("inspection_time", v.Duration),
 	}
-	if v.Reason == pipeline.ReasonRateLimit {
+	if c := req.Geo.Label(); c != "" {
+		// The client's country, when a geo policy looked it up.
+		attrs = append(attrs, slog.String("country", c))
+	}
+	switch v.Reason {
+	case pipeline.ReasonRateLimit:
 		// The limit, and the limited requests the sampled event stands for.
 		attrs = append(attrs, slog.String("rate_limit", v.RateLimit), slog.Uint64("sampled_count", uint64(v.SampledCount)))
+	case pipeline.ReasonGeoDeny, pipeline.ReasonGeoUnavailable:
+		// The requests the sampled event stands for.
+		attrs = append(attrs, slog.Uint64("sampled_count", uint64(v.SampledCount)))
 	}
 	if v.StreamEvent > 0 {
 		// The event, or message, of a streamed response (#323).

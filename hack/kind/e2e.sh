@@ -757,6 +757,8 @@ check "without limits, the limited client passes again" bash -c "[[ \"$(limited 
 # XB passes; a new database flips them with no engine restart; Detect logs.
 echo "== geo blocking through Traefik"
 geo_dir=$(mktemp -d)
+# Built now, or a day later: an older one would be Stale, past 30 days.
+geo_now=$(date +%s)
 geo_db() { go run ./operator/internal/geo/mmdbtest/mmdbgen -epoch "$1" "198.51.100.0/24=$2" "203.0.113.0/24=$3" >"$geo_dir/db.mmdb"; }
 geo_secret() {
   "${KUBECTL[@]}" -n "$OPERATOR_NS" create secret generic e2e-geo-db --from-file=db="$geo_dir/db.mmdb" \
@@ -779,7 +781,7 @@ geo_status() { [[ $(limited "$1" /geo "$2" | cut -d' ' -f1) == "$3" ]]; }
 geo_unavailable() { [[ $(tcondition Enforced reason) == GeoDatabaseUnavailable ]]; }
 eventually "without a database, the policy is GeoDatabaseUnavailable" geo_unavailable
 check "and geo is skipped: XA passes" geo_status 198.51.100.7 e2e-geo-0 200
-geo_db 1700000000 XA XB
+geo_db "$geo_now" XA XB
 geo_secret
 restarts_before=$(engine_restarts)
 # The cluster may have no InkwallConfig yet: one made here goes after.
@@ -797,7 +799,7 @@ eventually "XA (198.51.100.7) gets 403" geo_status 198.51.100.7 e2e-geo-1 403
 check "XB (203.0.113.7) passes" geo_status 203.0.113.7 e2e-geo-2 200
 eventually "the engine logs geo-deny with the country" geo_event 198.51.100.7 XA deny
 # A new database, the countries swapped: no restart.
-geo_db 1700086400 XB XA
+geo_db "$((geo_now + 1))" XB XA
 geo_secret
 eventually "the new database flips them: XA (now 203.0.113.7) gets 403" geo_status 203.0.113.7 e2e-geo-3 403
 check "and 198.51.100.7 (now XB) passes" geo_status 198.51.100.7 e2e-geo-4 200
