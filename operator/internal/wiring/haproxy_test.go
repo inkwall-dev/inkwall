@@ -180,7 +180,7 @@ func TestHAProxySettingsBlock(t *testing.T) {
 // (--response-messages): otherwise neither, and why, naming the pods.
 func TestHAProxyWireResponses(t *testing.T) {
 	ctx := context.Background()
-	class := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "haproxy"}, Spec: networkingv1.IngressClassSpec{Controller: "haproxy.org/ingress-controller/haproxy-edge"}}
+	class := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "haproxy"}, Spec: networkingv1.IngressClassSpec{Controller: "haproxy.org/ingress-controller/haproxy"}}
 	policy := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
 		Mode: wafv1alpha1.PolicyBlock, TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}},
 		Responses: &wafv1alpha1.ResponsesSpec{Inspect: true},
@@ -283,7 +283,13 @@ func haproxyScheme() *runtime.Scheme {
 	return s
 }
 
+// haproxyControllerPod is a pod of the chart's controller, 3.2.20, that
+// serves IngressClass controller haproxy.org/ingress-controller/haproxy
+// unless args name another --ingress.class.
 func haproxyControllerPod(name string, args ...string) *corev1.Pod {
+	if !slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, "--ingress.class") }) {
+		args = append(args, "--ingress.class=haproxy")
+	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "haproxy-controller", Name: name, UID: types.UID(name),
 			Labels: map[string]string{"app.kubernetes.io/name": "kubernetes-ingress"},
@@ -319,7 +325,7 @@ func haproxyIngress(name, class string) *networkingv1.Ingress {
 func TestHAProxyWire(t *testing.T) {
 	ctx := context.Background()
 	classes := []client.Object{
-		&networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "haproxy"}, Spec: networkingv1.IngressClassSpec{Controller: "haproxy.org/ingress-controller/haproxy-edge"}},
+		&networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "haproxy"}, Spec: networkingv1.IngressClassSpec{Controller: "haproxy.org/ingress-controller/haproxy"}},
 		&networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "traefik"}, Spec: networkingv1.IngressClassSpec{Controller: integrations.Traefik.Controller}},
 	}
 	policy := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{

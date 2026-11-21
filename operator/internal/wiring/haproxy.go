@@ -512,21 +512,29 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 			defaultClass = ic.Name
 		}
 	}
-	// As Traefik's: nothing is wired while no controller pod runs, as new
-	// pods would have no engine to call.
+	// Only the controllers' own pods count (haproxyControllerPods): in a
+	// proxy namespace, owned by a ReplicaSet or DaemonSet. As Traefik's,
+	// nothing is wired while none runs, as new pods would have no engine to
+	// call.
 	runningPods := running(pods.Items)
-	on := !off && len(runningPods) > 0
-	// How each controller's Ingresses are wired, from its own pods: the
-	// release says how the filter is loaded, snippets (3.1 to 3.2) or the
-	// controller's Backend custom resource (3.4).
-	trusted := h.haproxyControllerPods(runningPods)
+	owned := h.haproxyControllerPods(runningPods)
+	on := !off && len(owned) > 0
+	// How each controller's Ingresses are wired, from its own pods with the
+	// engine: the release says how the filter is loaded, snippets (3.1 to
+	// 3.2) or the controller's Backend custom resource (3.4).
 	crd := -1 // the Backend CRD: unknown until a controller needs it
 	groups := map[string]*haproxyGroup{}
 	group := func(controller string) *haproxyGroup {
 		if g, ok := groups[controller]; ok {
 			return g
 		}
-		g := &haproxyGroup{pods: podsServing(trusted, controller)}
+		serving := podsServing(owned, controller)
+		g := &haproxyGroup{serving: len(serving)}
+		for _, pod := range serving {
+			if injection.HasEngine(pod) {
+				g.pods = append(g.pods, pod)
+			}
+		}
 		if crd < 0 {
 			crd = 0
 			if haproxyBackendCRDInstalled(ctx, h.APIReader) {
@@ -539,7 +547,7 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 		groups[controller] = g
 		return g
 	}
-	notReady := haproxyResponsesNotReady(runningPods)
+	notReady := haproxyResponsesNotReady(owned)
 
 	res := &Result{Proxy: "HAProxy", Targets: map[Target]TargetState{}, Pods: pods.Items}
 	// HAProxy sends responses once every running pod's engine keeps
@@ -568,9 +576,24 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 		want := targets[tg] && mine && on
 		var g *haproxyGroup
 		mech := haproxySnippets
+		// noPods is why no pod of the Ingress's controller runs.
+		noPods := ""
 		if want {
 			g = group(served)
 			mech = g.mech
+			if g.serving == 0 {
+				class, _ := strings.CutPrefix(served, integrations.HAProxy.ControllerPrefix)
+				noPods = fmt.Sprintf("Ingress %s is of a class whose controller is %s, and no pod of the HAProxy Kubernetes Ingress Controller run with --ingress.class=%s "+
+					"(in a proxy namespace, owned by its Deployment or DaemonSet) runs: it isn't wired, and isn't served by another controller's pods", k.Name, served, class)
+				want = false
+			}
+		}
+		// The operator's Backend, when the Ingress names it: kept while
+		// the operator can't tell whether the Ingress should be wired.
+		keepBackend := func() {
+			if ing.Annotations[HAProxyCRBackendAnnotation] == haproxyBackendRef(ing) {
+				backends[types.NamespacedName{Namespace: k.Namespace, Name: haproxyBackendName(k.Name)}] = true
+			}
 		}
 		settings := haproxySettingsOf(policies.Items, k)
 		opts := HAProxySnippetOptions{FailOpen: settings.failOpen, Body: settings.body, Responses: settings.responses && res.Responses, Block: settings.block}
@@ -585,8 +608,8 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 			// The operator can't tell how to load the filter: the Ingress
 			// stays as it is, wired by a mechanism the controller may no
 			// longer read, or not, and the status says why.
-			if _, wired := ing.Annotations[HAProxyWiredAnnotation]; wired && ing.Annotations[HAProxyCRBackendAnnotation] == haproxyBackendRef(ing) {
-				backends[types.NamespacedName{Namespace: k.Namespace, Name: haproxyBackendName(k.Name)}] = true
+			if _, wired := ing.Annotations[HAProxyWiredAnnotation]; wired {
+				keepBackend()
 			}
 		case want && mech == haproxyBackendCR:
 			theirs := userCRBackend(ing)
@@ -595,17 +618,22 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 			case theirs != "":
 				failed = fmt.Sprintf("Ingress %s names its own Backend custom resource (%s): the controller builds a backend from one Backend custom resource, "+
 					"so on controller 3.4 the operator, which loads the filter with its own, can't wire it; remove the annotation, or protect another Ingress", k.Name, theirs)
+				err = annotateHAProxy(ctx, h.Client, ing, "", "")
 			case serr != nil:
+				// The Services can't be read (an API error, a role without
+				// services get): the Ingress stays as it is, its Backend
+				// with it, so its filter stays in force, and the reconcile
+				// is retried.
 				failed = fmt.Sprintf("Ingress %s: %v", k.Name, serr)
+				keepBackend()
+				errs = append(errs, fmt.Errorf("wire Ingress %s: %w", k, serr))
 			case len(services) > 0:
 				failed = fmt.Sprintf("Ingress %s routes to %s, which names its own Backend custom resource: the controller takes a Service's over the Ingress's, "+
 					"so on controller 3.4 the operator, which loads the filter with its own, can't wire it; remove the Service's annotation, or protect another Ingress",
 					k.Name, strings.Join(services, ", "))
+				err = annotateHAProxy(ctx, h.Client, ing, "", "")
 			}
 			if failed != "" {
-				if serr == nil {
-					err = annotateHAProxy(ctx, h.Client, ing, "", "")
-				}
 				break
 			}
 			// The Backend first, so the controller finds the one the
@@ -613,9 +641,7 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 			b := haproxyBackend(ing, opts)
 			if why := ensureHAProxyBackend(ctx, h.Client, b); why != "" {
 				failed = "Ingress " + k.Name + ": " + why
-				if ing.Annotations[HAProxyCRBackendAnnotation] == haproxyBackendRef(ing) {
-					backends[client.ObjectKeyFromObject(b)] = true
-				}
+				keepBackend()
 				break
 			}
 			backends[client.ObjectKeyFromObject(b)] = true
@@ -642,6 +668,8 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 			}
 			s.Unsupported = fmt.Sprintf("Ingress %s is served by %s, which Inkwall doesn't wire yet", k.Name, c)
 		case !on:
+		case noPods != "":
+			s.Failed = noPods
 		case mech == haproxyUnknown:
 			s.VersionUnsupported = g.versionWhy
 		case err != nil:

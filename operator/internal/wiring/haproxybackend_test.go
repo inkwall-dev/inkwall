@@ -7,14 +7,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -101,9 +104,10 @@ func TestHAProxyControllerVersion(t *testing.T) {
 	}
 }
 
-// Only the controller's own pods say how it is wired: running with the
-// engine, in a proxy namespace, owned by a ReplicaSet or DaemonSet. A pod
-// with its labels elsewhere, or made by hand, counts for nothing.
+// Only the controller's own pods say whether and how it is wired: in a
+// proxy namespace, owned by a ReplicaSet or DaemonSet (with the engine or
+// not: one without is the sidecar check's). A pod with its labels
+// elsewhere, or made by hand, counts for nothing.
 func TestHAProxyControllerPods(t *testing.T) {
 	h := &HAProxy{Namespaces: integrations.Namespaces{"haproxy-controller"}}
 	ok := haproxyControllerPod("hap-1")
@@ -122,7 +126,7 @@ func TestHAProxyControllerPods(t *testing.T) {
 	for _, p := range got {
 		names = append(names, p.Name)
 	}
-	if strings.Join(names, ",") != "hap-1,hap-5" {
+	if strings.Join(names, ",") != "hap-1,hap-5,hap-6" {
 		t.Errorf("trusted %v", names)
 	}
 	// Every namespace a proxy namespace: the one elsewhere counts.
@@ -688,5 +692,98 @@ func TestHAProxyBackendRejected(t *testing.T) {
 		if !strings.Contains(s.Unverified, want) {
 			t.Errorf("%q lacks %q", s.Unverified, want)
 		}
+	}
+}
+
+// A Service the operator can't read (an API error, a role without services
+// get after an upgrade) leaves a wired 3.4 Ingress as it is: it keeps
+// naming the operator's Backend, which stays, so its filter stays in
+// force; the policy says why, and Wire returns the error to be retried.
+func TestHAProxyServiceReadError(t *testing.T) {
+	ctx := context.Background()
+	class := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "haproxy"}, Spec: networkingv1.IngressClassSpec{Controller: "haproxy.org/ingress-controller/haproxy"}}
+	policy := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
+		TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}},
+	}}
+	forbidden := false
+	c := fake.NewClientBuilder().WithScheme(haproxyCRScheme()).WithObjects(class, policy, haproxy34Pod("hap-1"), haproxyIngress("web", "haproxy")).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.Service); ok && forbidden {
+					return apierrors.NewForbidden(schema.GroupResource{Resource: "services"}, key.Name, errors.New("no services get"))
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+	h := &HAProxy{Client: c, APIReader: c, Pods: integrationsSelector()}
+	web := Target{Kind: ingressKind, Key: types.NamespacedName{Namespace: "shop", Name: "web"}}
+	if res, err := h.Wire(ctx, map[Target]bool{web: true}, false); err != nil || !res.Targets[web].Wired {
+		t.Fatalf("wired: %+v %v", res.Targets[web], err)
+	}
+	forbidden = true
+	res, err := h.Wire(ctx, map[Target]bool{web: true}, false)
+	if err == nil || !strings.Contains(err.Error(), "no services get") {
+		t.Errorf("no error to retry: %v", err)
+	}
+	if s := res.Targets[web]; s.Wired || !strings.Contains(s.Failed, "service app") {
+		t.Errorf("%+v", s)
+	}
+	var ing networkingv1.Ingress
+	_ = c.Get(ctx, web.Key, &ing)
+	if ing.Annotations[HAProxyCRBackendAnnotation] != "shop/inkwall-waf-web" {
+		t.Errorf("the Ingress lost its Backend: %v", ing.Annotations)
+	}
+	if _, err := getBackend(ctx, c, "shop", "inkwall-waf-web"); err != nil {
+		t.Errorf("the Backend was deleted: %v", err)
+	}
+}
+
+// An Ingress whose class no pod of the controller serves (none runs with
+// its --ingress.class) isn't wired from another controller's pods: the
+// policy names the class.
+func TestHAProxyNoControllerForClass(t *testing.T) {
+	ctx := context.Background()
+	other := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "other"}, Spec: networkingv1.IngressClassSpec{Controller: "haproxy.org/ingress-controller/other"}}
+	policy := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
+		TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}},
+	}}
+	c := fake.NewClientBuilder().WithScheme(haproxyCRScheme()).WithObjects(other, policy, haproxyControllerPod("hap-1"), haproxyIngress("web", "other")).Build()
+	h := &HAProxy{Client: c, APIReader: c, Pods: integrationsSelector()}
+	web := Target{Kind: ingressKind, Key: types.NamespacedName{Namespace: "shop", Name: "web"}}
+	res, err := h.Wire(ctx, map[Target]bool{web: true}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := res.Targets[web]; s.Wired || !strings.Contains(s.Failed, "--ingress.class=other") {
+		t.Errorf("%+v", s)
+	}
+	var ing networkingv1.Ingress
+	_ = c.Get(ctx, web.Key, &ing)
+	if len(ing.Annotations) != 0 {
+		t.Errorf("wired: %v", ing.Annotations)
+	}
+}
+
+// A pod with the controller's labels outside the proxy namespaces, whose
+// engine runs without --response-messages, doesn't keep responses from
+// being inspected through the controller's own pods.
+func TestHAProxyUntrustedPodResponses(t *testing.T) {
+	ctx := context.Background()
+	class := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "haproxy"}, Spec: networkingv1.IngressClassSpec{Controller: "haproxy.org/ingress-controller/haproxy"}}
+	policy := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
+		TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}}, Responses: &wafv1alpha1.ResponsesSpec{Inspect: true},
+	}}
+	stray := haproxyControllerPod("stray")
+	stray.Namespace = "tenant"
+	stray.Spec.InitContainers[0].Args = slices.DeleteFunc(stray.Spec.InitContainers[0].Args, func(a string) bool { return a == injection.ResponseMessagesFlag })
+	c := fake.NewClientBuilder().WithScheme(haproxyCRScheme()).WithObjects(class, policy, haproxyControllerPod("hap-1"), stray, haproxyIngress("web", "haproxy")).Build()
+	h := &HAProxy{Client: c, APIReader: c, Pods: integrationsSelector(), Namespaces: integrations.Namespaces{"haproxy-controller"}}
+	web := Target{Kind: ingressKind, Key: types.NamespacedName{Namespace: "shop", Name: "web"}}
+	res, err := h.Wire(ctx, map[Target]bool{web: true}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Responses || res.ResponsesWhy != "" {
+		t.Errorf("the stray pod counts: %v %q", res.Responses, res.ResponsesWhy)
 	}
 }

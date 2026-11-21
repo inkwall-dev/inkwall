@@ -202,6 +202,9 @@ func haproxyMechanismOf(pods []*corev1.Pod, backendCRD bool) (m haproxyMechanism
 // spec.controller) are wired with: its pods (haproxyControllerPods), the
 // mechanism they call for, and their problems and buffer.
 type haproxyGroup struct {
+	// serving counts the controller's running pods (podsServing), pods
+	// those of them with the engine.
+	serving                 int
 	pods                    []*corev1.Pod
 	mech                    haproxyMechanism
 	versionWhy, versionNote string
@@ -217,15 +220,17 @@ func haproxyRejectedHint(ing *networkingv1.Ingress) string {
 		"look for Backend %s in the controller's log (and its haproxy_rejected_custom_resource_generation metric)", haproxyBackendRef(ing))
 }
 
-// haproxyControllerPods are the running pods of the controller with the
-// engine that decide how its Ingresses are wired: in a proxy namespace and
-// owned by a ReplicaSet or DaemonSet (the chart's Deployment or DaemonSet),
-// so a pod anyone else makes with the controller's labels counts for
-// nothing.
+// haproxyControllerPods are the running pods of the controllers that
+// decide whether and how their Ingresses are wired, and whether HAProxy
+// sends responses: in a proxy namespace and owned by a ReplicaSet or
+// DaemonSet (the chart's Deployment or DaemonSet), so a pod anyone else
+// makes with the controller's labels counts for nothing. (The sidecar
+// check still names every pod with the labels that runs without the
+// engine.)
 func (h *HAProxy) haproxyControllerPods(pods []*corev1.Pod) []*corev1.Pod {
 	var out []*corev1.Pod
 	for _, pod := range pods {
-		if !injection.HasEngine(pod) || !h.Namespaces.Has(pod.Namespace) {
+		if !h.Namespaces.Has(pod.Namespace) {
 			continue
 		}
 		owner := metav1.GetControllerOf(pod)
@@ -239,7 +244,8 @@ func (h *HAProxy) haproxyControllerPods(pods []*corev1.Pod) []*corev1.Pod {
 
 // haproxyPodClass is the IngressClass controller name's suffix a
 // controller pod serves (haproxy.org/ingress-controller/<class>): its
-// --ingress.class, "" when unset.
+// --ingress.class, "" when unset (the controller then serves
+// haproxy.org/ingress-controller, which the operator doesn't wire).
 func haproxyPodClass(pod *corev1.Pod) string {
 	for _, c := range pod.Spec.Containers {
 		args := append(slices.Clone(c.Command), c.Args...)
@@ -257,8 +263,8 @@ func haproxyPodClass(pod *corev1.Pod) string {
 
 // podsServing are the pods of the controller that serves Ingresses of
 // controller (an IngressClass's spec.controller): those whose
-// --ingress.class it names, or, when none does (a controller run without
-// it), all of them.
+// --ingress.class it names. None: no pod serves them, and another
+// controller's don't stand in.
 func podsServing(pods []*corev1.Pod, controller string) []*corev1.Pod {
 	class, _ := strings.CutPrefix(controller, integrations.HAProxy.ControllerPrefix)
 	var out []*corev1.Pod
@@ -266,9 +272,6 @@ func podsServing(pods []*corev1.Pod, controller string) []*corev1.Pod {
 		if haproxyPodClass(pod) == class {
 			out = append(out, pod)
 		}
-	}
-	if len(out) == 0 {
-		return pods
 	}
 	return out
 }
@@ -341,6 +344,12 @@ func ingressServices(ing *networkingv1.Ingress) []string {
 // resource of their own (cr-backend), which the controller takes over the
 // Ingress's (Service, then Ingress, then ConfigMap): "Service app
 // (cr-backend: ns/name)". A Service that doesn't exist names none.
+//
+// Uncached: the manager caches no Services, and caching every Service of
+// the cluster (with list and watch on them) for the few a protected 3.4
+// Ingress routes to costs more than a GET per such Service at each
+// reconcile; a cr-backend added to a Service is seen at the next one
+// (within the wiring's one-minute resync, docs/haproxy.md).
 func (h *HAProxy) serviceCRBackends(ctx context.Context, ing *networkingv1.Ingress) ([]string, error) {
 	var out []string
 	for _, name := range ingressServices(ing) {

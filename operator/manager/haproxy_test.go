@@ -91,7 +91,7 @@ func testHAProxy(ctx context.Context, t *testing.T, c client.Client) {
 			ServiceAccountName: "haproxy",
 			SecurityContext:    &corev1.PodSecurityContext{RunAsUser: new(int64(1000))},
 			Containers: []corev1.Container{{Name: injection.HAProxyContainer, Image: "haproxytech/kubernetes-ingress:3.2.19",
-				Args:  []string{"--configmap=" + edge + "/hap-config", "--http-bind-port=8080"},
+				Args:  []string{"--configmap=" + edge + "/hap-config", "--http-bind-port=8080", "--ingress.class=haproxy-edge"},
 				Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 8080}}}},
 		},
 	}
@@ -228,7 +228,7 @@ func testHAProxy(ctx context.Context, t *testing.T, c client.Client) {
 			InitContainers: []corev1.Container{{Name: injection.ContainerName, Image: "ghcr.io/inkwall-dev/inkwall-engine:0.5.0", Args: []string{"spoe"},
 				RestartPolicy: new(corev1.ContainerRestartPolicyAlways)}},
 			Containers: []corev1.Container{{Name: injection.HAProxyContainer, Image: "haproxytech/kubernetes-ingress:3.2.19",
-				Args: []string{"--configmap=" + edge + "/hap-config"}}},
+				Args: []string{"--configmap=" + edge + "/hap-config", "--ingress.class=haproxy-edge"}}},
 		},
 	}
 	if err := c.Create(ctx, old); err != nil {
