@@ -80,6 +80,18 @@ and links to the guide that explains it.
 - [ ] **Start every policy in `Detect` mode** (the default), on real traffic, for a week or a
   release cycle. Exclude the false positives narrowly, test the policy offline, then switch to
   `Block` one policy at a time ([From Detect to Block](troubleshooting.md#from-detect-to-block)).
+- [ ] **Before Block mode, allow the methods a REST API uses.** The CRS allows only GET, HEAD,
+  POST and OPTIONS, so rule 911100 denies PUT, PATCH and DELETE. In the false-positive run that
+  was most of the denials at paranoia level 1, 14 to 15% of the requests of Gitea and Directus. No
+  exclusion names a method. List the methods in the rule set binding instead:
+
+  ```yaml
+  spec:
+    ruleSets:
+    - ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}
+      crs:
+        allowedMethods: [GET, HEAD, POST, OPTIONS, PUT, PATCH, DELETE]
+  ```
 - [ ] **Explain and tune.** `inkwallctl explain request <request-id>` says why a request was
   denied and the narrowest exclusion; `inkwallctl tune` suggests exclusions from the events
   ([Explaining a policy or a denial](troubleshooting.md#explaining-a-policy-or-a-denial),
