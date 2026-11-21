@@ -54,6 +54,8 @@ Every doc in this repository, by topic, with the question each one answers.
   client answer questions about my cluster with Inkwall's read-only tools?
 - [Monitoring](monitoring.md): how do I scrape Inkwall's metrics, install its alerts and dashboard,
   and what do I do when an alert fires?
+- [The audit log of policy changes](audit-log.md): who changed which policy, rule set, IP list or
+  `InkwallConfig`, when, and what changed?
 - [Running the engine without Kubernetes](standalone-proxy.md): how do I put the engine in front
   of any HTTP service as a reverse proxy, and which flags does it take?
 

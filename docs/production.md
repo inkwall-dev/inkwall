@@ -168,6 +168,10 @@ and links to the guide that explains it.
 - [ ] **Collect the engines' logs.** Each security event is a JSON line, `"msg":"security event"`,
   in the `inkwall-engine` container of the proxy pods. Keep `spec.engine.logLevel` at `Info` or
   `Warn`: `Error` hides the events (they still go to the operator).
+- [ ] **Keep the audit log of policy changes.** Each change of a policy, rule set, IP list or
+  `InkwallConfig` is a `"msg":"policy change"` line in the operator's log, from every replica:
+  ship it with the rest ([The audit log](audit-log.md)). The API server's audit log stays the
+  authoritative record.
 - [ ] **Redact what your events must not carry.** Snippets of credentials, cookies and response
   bodies are never sent; `spec.events.redact` adds header and argument names, or turns snippets
   off ([Redacting security events](../deploy/helm/inkwall/README.md#redacting-security-events)).
