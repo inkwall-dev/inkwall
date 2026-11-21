@@ -201,7 +201,7 @@ func requirement(p *wafv1alpha1.WAFPolicy) (string, [3]int) {
 		set("spec.responses.streams", [3]int{0, 6, 0})
 	}
 	for i, b := range p.Spec.RuleSets {
-		if !b.CRS.IsZero() {
+		if b.CRS.NeedsEngine050() {
 			// An older engine keeps the CRS's defaults (#352).
 			set(fmt.Sprintf("spec.ruleSets[%d].crs", i), [3]int{0, 5, 0})
 		}

@@ -26,8 +26,11 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/pkg/adapters/proxy"
 	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
@@ -843,5 +846,101 @@ func TestParseGRPCStreamsFlag(t *testing.T) {
 	}
 	if _, err := parseFlags(cmdProxy, []string{"--upstream", "http://app", "--grpc-messages", "inspect", "--grpc-streams", "per-message"}, io.Discard); err == nil {
 		t.Error("proxy accepted --grpc-streams")
+	}
+}
+
+// In bundle mode, --max-body-bytes is the body limit of the policies that
+// set no body.maxBytes: the operator leaves it out of their bundle.
+func TestBundleModeMaxBodyBytes(t *testing.T) {
+	dir := t.TempDir()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	write := func(name string, data []byte) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	wp := wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "shop"}}
+	wp.Spec.Mode = wafv1alpha1.PolicyBlock
+	wp.Spec.Body = &wafv1alpha1.BodySpec{OnOversize: wafv1alpha1.OversizeDeny}
+	res := resolver.Resolve(resolver.Input{Policies: []wafv1alpha1.WAFPolicy{wp}})
+	if len(res.Policies) != 1 || res.Policies[0].GetBody().GetMaxBytes() != 0 {
+		t.Fatalf("resolved %v, want one policy without a body limit", res.Policies)
+	}
+	// Routed, and one cheap rule instead of the CRS.
+	p := res.Policies[0]
+	p.Routes = []*bundlev1.RouteMatch{{Host: "shop.example.com", Path: &bundlev1.PathMatch{Type: bundlev1.PathMatchType_PATH_MATCH_TYPE_PREFIX, Value: "/"}}}
+	p.RuleSets = []*bundlev1.RuleSetBinding{{RuleSetId: "WAFRuleSet/shop/rules"}}
+	raw, err := proto.Marshal(&bundlev1.Bundle{Version: 1, CreatedAt: timestamppb.Now(), ContentHash: []byte("body"), Policies: []*bundlev1.Policy{p},
+		RuleSets: []*bundlev1.RuleSet{{Id: "WAFRuleSet/shop/rules", Source: &bundlev1.RuleSet_Seclang{
+			Seclang: `SecRule ARGS "@contains attack" "id:100001,phase:2,deny,status:403,log"`,
+		}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := proto.Marshal(&bundlev1.SignedBundle{Bundle: raw, Signature: ed25519.Sign(priv, raw), KeyId: bundlekey.ID(pub)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, cache := write("ed25519.pub", pub), write("bundle.pb", signed)
+	// An attack past 64 KiB, the flag's default.
+	body := "a=" + strings.Repeat("x", 80<<10) + "&q=attack"
+
+	answer := func(maxBodyBytes string) int {
+		t.Helper()
+		sock := filepath.Join(dir, "engine.sock")
+		cfg, err := parseFlags(cmdForwardAuth, []string{
+			"--listen", "unix:" + sock,
+			"--admin-listen", "",
+			"--operator", "127.0.0.1:1",
+			"--operator-ca", filepath.Join(dir, "ca.crt"),
+			"--operator-token", filepath.Join(dir, "token"),
+			"--bundle-key", key,
+			"--bundle-cache", cache,
+			"--max-body-bytes", maxBodyBytes,
+		}, io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- serve(ctx, cfg, slog.New(slog.DiscardHandler)) }()
+		defer func() {
+			cancel()
+			if err := <-done; err != nil {
+				t.Errorf("serve: %v", err)
+			}
+		}()
+		client := &http.Client{Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+			},
+			DisableKeepAlives: true,
+		}}
+		for deadline := time.Now().Add(10 * time.Second); ; {
+			req, _ := http.NewRequest(http.MethodPost, "http://engine/v1/forward-auth", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("X-Forwarded-Method", "POST")
+			req.Header.Set("X-Forwarded-Proto", "http")
+			req.Header.Set("X-Forwarded-Host", "shop.example.com")
+			req.Header.Set("X-Forwarded-Uri", "/form")
+			resp, err := client.Do(req)
+			if err == nil {
+				_ = resp.Body.Close()
+				return resp.StatusCode
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the engine never answered: %v", err)
+			}
+		}
+	}
+
+	if code := answer("65536"); code != http.StatusRequestEntityTooLarge {
+		t.Errorf("--max-body-bytes 65536: %d, want 413 (body.onOversize: Deny)", code)
+	}
+	if code := answer("1048576"); code != http.StatusForbidden {
+		t.Errorf("--max-body-bytes 1048576: %d, want 403 (the attack inspected)", code)
 	}
 }

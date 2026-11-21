@@ -1072,7 +1072,7 @@ func (s *modsec) build(m *migration) {
 	}
 
 	if !s.crs {
-		if s.paranoia != 0 || s.threshold != 0 || !s.crsSettings.IsZero() {
+		if s.paranoia != 0 || s.threshold != 0 || s.crsSettings.NeedsEngine050() {
 			m.add(itemCheck, "", "a CRS paranoia level, threshold or other CRS setting is set but the CRS is not loaded: left out")
 			s.paranoia, s.threshold, s.crsSettings = 0, 0, wafv1alpha1.CRSSettings{}
 		}
@@ -1106,7 +1106,7 @@ func (s *modsec) build(m *migration) {
 		m.add(itemTodo, "", "not migrated: tx.detection_paranoia_level=%d is below the paranoia level, %d", *d, max(s.paranoia, 1))
 		s.crsSettings.DetectionParanoiaLevel = nil
 	}
-	if s.crs && (s.paranoia != 0 || s.threshold != 0 || !s.crsSettings.IsZero() || len(s.rules) > 0) {
+	if s.crs && (s.paranoia != 0 || s.threshold != 0 || s.crsSettings.NeedsEngine050() || len(s.rules) > 0) {
 		b := wafv1alpha1.RuleSetBinding{Ref: wafv1alpha1.RuleSetRef{Kind: "ClusterWAFRuleSet", Name: crsRuleSetName}}
 		c := s.crsSettings
 		if s.paranoia != 0 {
@@ -1115,7 +1115,7 @@ func (s *modsec) build(m *migration) {
 		if s.threshold != 0 {
 			c.InboundAnomalyThreshold = &s.threshold
 		}
-		if c.ParanoiaLevel != nil || c.InboundAnomalyThreshold != nil || !c.IsZero() {
+		if c.ParanoiaLevel != nil || c.InboundAnomalyThreshold != nil || c.NeedsEngine050() {
 			b.CRS = &c
 		}
 		p.Spec.RuleSets = append(p.Spec.RuleSets, b)

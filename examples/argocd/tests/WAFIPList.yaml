@@ -1,0 +1,29 @@
+# Cases for the WAFIPList health check.
+- name: accepted
+  want: Healthy
+  object:
+    metadata: {generation: 1}
+    status:
+      observedGeneration: 1
+      conditions:
+        - {type: Accepted, status: "True", reason: Accepted}
+- name: not checked yet
+  want: Progressing
+  object:
+    metadata: {generation: 2}
+    status:
+      observedGeneration: 1
+      conditions:
+        - {type: Accepted, status: "True", reason: Accepted}
+- name: no status yet
+  want: Progressing
+  object:
+    metadata: {generation: 1}
+- name: an entry doesn't parse
+  want: Degraded
+  object:
+    metadata: {generation: 1}
+    status:
+      observedGeneration: 1
+      conditions:
+        - {type: Accepted, status: "False", reason: InvalidEntries, message: "entries[2]: 10.0.0.0/33 is not a CIDR"}

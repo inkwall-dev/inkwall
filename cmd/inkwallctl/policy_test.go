@@ -709,3 +709,29 @@ spec:
 		t.Errorf("stderr %q, want the note about the untested limits", errOut)
 	}
 }
+
+// --max-body-bytes is the body limit of the policies that set no
+// body.maxBytes, as the engine's flag in bundle mode; body.maxBytes
+// overrides it.
+func TestTestPolicyMaxBodyBytes(t *testing.T) {
+	body := "a=" + strings.Repeat("x", 100<<10)
+	for _, tc := range []struct {
+		name, spec string
+		args       []string
+		want       string
+	}{
+		{"default limit", "", nil, "deny  413  POST /"},
+		{"no body settings", "", []string{"--max-body-bytes", "131072"}, "allow      POST /"},
+		{"body settings without maxBytes", "  body: {onOversize: Deny}\n", []string{"--max-body-bytes", "131072"}, "allow      POST /"},
+		{"maxBytes set", "  body: {maxBytes: 1024}\n", []string{"--max-body-bytes", "131072"}, "deny  413  POST /"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := writeFile(t, "p.yaml", singlePolicy+tc.spec)
+			args := append(append([]string{"test", "--policy", p, "-d", body}, tc.args...), "http://a/")
+			code, out, errOut := runCLI(t, args...)
+			if !strings.Contains(out, tc.want) {
+				t.Fatalf("exit %d\nstdout %q\nwant   %q\nstderr %q", code, out, tc.want, errOut)
+			}
+		})
+	}
+}

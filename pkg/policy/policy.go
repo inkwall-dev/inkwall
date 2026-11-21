@@ -43,12 +43,6 @@ const MaxBodyBytes = 10 << 20
 // A policy may inspect up to MaxBodyBytes.
 const DefaultResponseBytes = 64 << 10
 
-// DefaultBodyBytes is the request body a policy inspects when it sets no
-// limit: the engine's --max-body-bytes default, which the operator writes
-// into the bundle for each policy (#718), so that a later engine default
-// can't change stored policies.
-const DefaultBodyBytes = 64 << 10
-
 // Options are the engine-wide settings every policy shares.
 type Options struct {
 	// Admission bounds concurrent evaluations across all policies.
