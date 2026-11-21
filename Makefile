@@ -318,7 +318,7 @@ kind-response-load: kind-operator ## Latency per proxy on kind (Traefik, Envoy G
 	KIND_CLUSTER=$(KIND_CLUSTER) IMAGE=$(IMAGE) hack/kind/response-load.sh
 
 .PHONY: kind-soak
-kind-soak: kind-operator ## Soak on kind (hack/kind/soak.sh): every proxy serving clean and attack traffic for DURATION (default 1h), restarts, memory, status checked; SOAK_CHAOS=1 adds chaos (operator, engines, proxies killed, API server stopped, distribution cut); summary under OUT (installs the operator first)
+kind-soak: kind-operator ## Soak on kind (hack/kind/soak.sh): every proxy serving clean and attack traffic for SOAK_DURATION (or DURATION, default 1h; 24h before a release), restarts, memory, status checked; SOAK_CHAOS=1 adds chaos (operator, engines, proxies killed, API server stopped, distribution cut); summary under OUT (installs the operator first)
 	KIND_CLUSTER=$(KIND_CLUSTER) IMAGE=$(IMAGE) hack/kind/soak.sh
 
 .PHONY: kind-e2e-istio

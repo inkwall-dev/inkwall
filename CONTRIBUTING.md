@@ -114,7 +114,7 @@ Durations are on a laptop or a CI runner, roughly.
 | Operator failure modes on kind | `make kind-chaos` | 20 min | Docker, kind | release qualification (`qualify.yaml`, `chaos`, nightly) |
 | Examples | `make test-examples` (each `examples/<proxy>` policy through `inkwallctl test --policy`, and the `examples/tests` suite) | 1 min | Go | every PR (`test`) |
 | Quickstart | `make kind-quickstart` (`docs/quickstart.md` as written, released chart and images) | 10 min | Docker, kind, network | nightly (`quickstart`) |
-| Soak on kind | `make kind-soak DURATION=24h SOAK_CHAOS=1` (every proxy, steady clean and attack traffic, chaos; [below](#battle-test)) | the duration, plus 10 min | Docker, kind | release battle test |
+| Soak on kind | `make kind-soak SOAK_DURATION=24h SOAK_CHAOS=1` (every proxy, steady clean and attack traffic, chaos; [below](#battle-test)) | the duration, plus 10 min | Docker, kind | release qualification (`qualify.yaml`, `soak`: main, weekly, 5h30m with chaos); 24 hours by hand before each release ([below](#the-24-hour-soak-before-a-release)) |
 | Latency per proxy on kind | `make kind-response-load` (added p50/p99 per proxy, response inspection off and on) | 40 min | Docker, kind | release battle test |
 | False positives | `make fp-run` (a real application's recorded traffic per CRS paranoia level; `make fp-har` records it again) | 1 min | Go (`make fp-har`: Docker, network) | release battle test ([below](#battle-test)) |
 | External links | `make docs-check-external` | 1 min | network | nightly (`docs-links`) |
@@ -137,12 +137,13 @@ later, untested. A cluster made at another version is recreated with `make kind-
 Before the release Inkwall is announced with (v0.6.0's checklist, #520), its battle test runs these
 tools, by hand, and its release notes publish their numbers.
 
-**Soak** (`make kind-soak DURATION=24h`, `hack/kind/soak.sh`): every proxy Inkwall protects on one
+**Soak** (`make kind-soak SOAK_DURATION=24h`, `hack/kind/soak.sh`): every proxy Inkwall protects on one
 kind cluster (`hack/kind/stacks.sh`: Traefik, Envoy Gateway, Istio, HAProxy, raw Envoy and the
 standalone proxy, one replica each, an nginx app behind each and a `WAFPolicy` in `Block` mode on its
 route), each serving steady traffic from `hack/loadgen`'s mix mode: the clean requests of
 `hack/kind/soak/clean.http` and the attacks of `attacks.http`, `SOAK_RATE` (5) requests a second per
-proxy, one in five an attack. The app marks its answers (`X-Soak-App`), so each answer is the app's,
+proxy, one in five an attack, for `SOAK_DURATION` (1 h; `DURATION` too; `90s`, `15m`, `5h30m`, `24h` or
+seconds). The app marks its answers (`X-Soak-App`), so each answer is the app's,
 the WAF's (403) or a failure. Every `SOAK_SAMPLE` (1 min) it samples the containers' restarts, the
 engines' and the operator's RSS (from `crictl stats` on the node), and each policy's status: when a
 policy claims its protection (`Ready`, `Enforced` for raw Envoy, for its current generation), a canary
@@ -177,8 +178,36 @@ samples, and fails on any of:
   memory is flat: the compiled rule sets and the buffers it reuses. The floor stays above the garbage
   collector's swings, and a leak of 1 KiB per request at the default rate passes it within two hours.
 
-`PROXIES` narrows the stacks, `SOAK_CHAOS_SCENARIOS` the scenarios, `KEEP=1` leaves the stacks. A short run to check the tool:
-`make kind-soak DURATION=10m SOAK_CHAOS=1 SOAK_CHAOS_EVERY=1m SOAK_SAMPLE=20s`.
+Each check prints an `ok` or `FAIL` line, as the e2e scripts do, and a memory series with no sample
+at all (the sampling broke) fails too, as does `SOAK_CHAOS=1` with no scenario run.
+
+`PROXIES` narrows the stacks, `SOAK_CHAOS_SCENARIOS` the scenarios (`operator engine proxy apiserver
+distribution`, an unknown one fails), `KEEP=1` leaves the stacks. A short run to check the tool:
+`make kind-cluster kind-soak SOAK_DURATION=10m SOAK_CHAOS=1 SOAK_CHAOS_EVERY=1m SOAK_SAMPLE=20s`.
+
+The [qualify workflow](.github/workflows/qualify.yaml) soaks `main` weekly (`soak`): every proxy, with
+chaos, for 5h30m, the longest that fits a hosted runner's 6-hour job limit with the setup. Its
+summary is in the run's summary and, with the raw samples, in the `qualify-soak` artifact; the
+cluster's logs, when it fails, in `qualify-soak-kind-logs`. On demand, "Run workflow" with
+`soak_duration` (`30m` to `5h30m`) runs it too.
+
+#### The 24-hour soak before a release
+
+A release is cut only after a 24-hour soak with chaos of its commit (the release gate, #727), as a
+CI job can't run that long. On an otherwise idle machine with Docker (16 GB of memory or more: every
+proxy on one node), from the commit to release (the tag or the release candidate's):
+
+```sh
+make kind-down kind-cluster
+SOAK_DURATION=24h SOAK_CHAOS=1 OUT=bin/soak/v<version> make kind-soak
+make kind-down
+```
+
+It takes 24 hours and about 15 minutes, so keep the machine awake (`systemd-inhibit make ...` on
+Linux, `caffeinate -i make ...` on macOS). It must end with `Passed` and no `FAIL` line, and exit 0.
+Link `OUT/summary.md` in the release's PR or notes, with the machine it ran on; a failure blocks the
+release until fixed and soaked again. The chaos knobs (`SOAK_CHAOS_EVERY`, `SOAK_CHAOS_SCENARIOS`,
+`SOAK_CUT_FOR`, `SOAK_RECOVERY`) and the bounds keep their defaults for the gate.
 
 **Latency per proxy** (`make kind-response-load`, `hack/kind/response-load.sh`): the same stacks,
 one at a time on the node. Each page of the app, `small.html` (about 1 KB) and `page.html` (about
@@ -249,7 +278,8 @@ for patching released versions.
    than 0.5.0 can't test published images. It runs every proxy's e2e, the upgrade from each
    supported release, the full scale test with and without responses, the Docker e2e tests and the
    CRS suite against those images. **Cut the release only after a green run**, and link it in the
-   release's PR or notes. The same workflow runs nightly on `main` and weekly on the release
+   release's PR or notes, with the release candidate's
+   [24-hour soak](#the-24-hour-soak-before-a-release). The same workflow runs nightly on `main` and weekly on the release
    branch of each supported minor version; an older branch runs the tests it has, with the Helm version
    its own CI pinned, and each test it doesn't have yet is reported as not run (a warning on the
    job), never as passed. The examples that pin the engine image,

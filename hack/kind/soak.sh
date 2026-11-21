@@ -4,7 +4,8 @@
 
 # The soak test of the announcement's battle test (#600, #520): every proxy
 # Inkwall protects on one kind cluster (hack/kind/stacks.sh), each serving
-# steady mixed traffic for DURATION: clean requests and attacks
+# steady mixed traffic for SOAK_DURATION (or DURATION; default 1h, any of
+# 90s, 15m, 5h30m, 24h or seconds): clean requests and attacks
 # (hack/kind/soak/clean.http and attacks.http, from hack/loadgen's mix
 # mode, SOAK_RATE requests per second per proxy, one in five an attack).
 # Every SOAK_SAMPLE it samples:
@@ -58,7 +59,13 @@
 #     compiled rule sets and buffers it reuses); the floor is above the
 #     garbage collector's swings, and a leak of one KiB per request at the
 #     default rate passes it within two hours. A series of fewer than 10
-#     samples is reported, not judged.
+#     samples is reported, not judged; a proxy or the operator with no
+#     memory sample at all is a violation (the sampling broke).
+#
+# Each check prints an ok or FAIL line, as the other e2e scripts do. The
+# weekly qualify run (.github/workflows/qualify.yaml, soak) runs it with
+# chaos for 5h30m; before a release it runs 24 hours locally
+# (CONTRIBUTING.md, "Battle test").
 #
 # Needs the operator installed (make kind-soak installs it first, with the
 # bt-* proxy namespaces). PROXIES narrows the stacks; KEEP=1 leaves them.
@@ -70,7 +77,7 @@ cd "$(dirname "$0")/../.."
 
 CLUSTER=${KIND_CLUSTER:-inkwall}
 IMAGE=${IMAGE:-inkwall-engine:dev}
-DURATION=${DURATION:-1h}
+DURATION=${SOAK_DURATION:-${DURATION:-1h}}
 SOAK_CHAOS=${SOAK_CHAOS:-}
 SOAK_RATE=${SOAK_RATE:-5}
 SOAK_SAMPLE=${SOAK_SAMPLE:-60s}
@@ -97,14 +104,16 @@ LEASE=inkwall-operator.waf.inkwall.dev
 . hack/kind/soak-restarts.sh
 read -r -a PROXIES <<<"${PROXIES:-${STACK_PROXIES[*]}}"
 
-# secs DURATION: 90s, 15m, 24h, or seconds.
+# secs DURATION: 90s, 15m, 5h30m, 24h, or seconds; fails on anything else.
 secs() {
-  case $1 in
-  *h) echo $((${1%h} * 3600)) ;;
-  *m) echo $((${1%m} * 60)) ;;
-  *s) echo "${1%s}" ;;
-  *) echo "$1" ;;
-  esac
+  if [[ $1 =~ ^[0-9]+$ ]]; then
+    echo "$1"
+  elif [[ -n $1 && $1 =~ ^(([0-9]+)h)?(([0-9]+)m)?(([0-9]+)s)?$ ]]; then
+    echo $((10#${BASH_REMATCH[2]:-0} * 3600 + 10#${BASH_REMATCH[4]:-0} * 60 + 10#${BASH_REMATCH[6]:-0}))
+  else
+    echo "not a duration: $1 (90s, 15m, 5h30m, 24h or seconds)" >&2
+    return 1
+  fi
 }
 duration=$(secs "$DURATION")
 sample_every=$(secs "$SOAK_SAMPLE")
@@ -113,6 +122,16 @@ chaos_every=$(secs "$SOAK_CHAOS_EVERY")
 cut_for=$(secs "$SOAK_CUT_FOR")
 recovery=$(secs "$SOAK_RECOVERY")
 grace=$(secs "$SOAK_GRACE")
+read -r -a scenarios <<<"${SOAK_CHAOS_SCENARIOS:-operator engine proxy apiserver distribution}"
+for s in "${scenarios[@]}"; do
+  case $s in
+  operator | engine | proxy | apiserver | distribution) ;;
+  *)
+    echo "SOAK_CHAOS_SCENARIOS: no scenario $s (operator engine proxy apiserver distribution)" >&2
+    exit 1
+    ;;
+  esac
+done
 
 if ! "${KUBECTL[@]}" -n "$OPERATOR_NS" get deployment/inkwall-operator >/dev/null 2>&1; then
   echo "the operator is not installed: run make kind-soak, which installs it" >&2
@@ -311,8 +330,8 @@ rotate_canary() {
   done
 }
 
-# Chaos: the scenarios, each run in turn.
-read -r -a scenarios <<<"${SOAK_CHAOS_SCENARIOS:-operator engine proxy apiserver distribution}"
+# Chaos: the scenarios (SOAK_CHAOS_SCENARIOS, checked above), each run in
+# turn.
 scenario_i=0
 # The proxies whose engine, and whose pod, go next.
 engine_i=0
@@ -421,7 +440,7 @@ YAML
   chaos_end "$s" "$detail" "$ok"
 }
 
-echo "== traffic: $SOAK_RATE requests per second per proxy for $DURATION"
+echo "== traffic: $SOAK_RATE requests per second per proxy for $DURATION$([[ $SOAK_CHAOS == 1 ]] && echo ", chaos every $SOAK_CHAOS_EVERY (${scenarios[*]})")"
 for p in "${PROXIES[@]}"; do
   "$work/loadgen" -url "$(stack_url "$p")" -host "$(stack_host "$p")" -clean hack/kind/soak/clean.http \
     -attacks hack/kind/soak/attacks.http -app-header "$STACK_APP_HEADER" -rate "$SOAK_RATE" -c 16 -d 0 \
@@ -478,11 +497,22 @@ for p in "${PROXIES[@]}"; do
 done | jq -s . >"$work/traffic.json"
 jq -c '.[]' "$work/traffic.json" | while read -r t; do
   p=$(jq -r .proxy <<<"$t")
-  (($(jq .attacksThrough <<<"$t") == 0)) || violation attack-through "$p: $(jq .attacksThrough <<<"$t") attack(s) got through: $(jq -c .attacksThroughExamples <<<"$t")"
-  (($(jq .falseDenials <<<"$t") == 0)) || violation false-denial "$p: $(jq .falseDenials <<<"$t") clean request(s) denied outside chaos: $(jq -c .falseDenialExamples <<<"$t")"
+  if (($(jq .attacksThrough <<<"$t") == 0)); then
+    ok "$p: none of $(jq .attack.sent <<<"$t") attacks got through"
+  else
+    violation attack-through "$p: $(jq .attacksThrough <<<"$t") attack(s) got through: $(jq -c .attacksThroughExamples <<<"$t")"
+  fi
+  if (($(jq .falseDenials <<<"$t") == 0)); then
+    ok "$p: no clean request denied outside chaos"
+  else
+    violation false-denial "$p: $(jq .falseDenials <<<"$t") clean request(s) denied outside chaos: $(jq -c .falseDenialExamples <<<"$t")"
+  fi
   (($(jq '.clean.app' <<<"$t") > 0)) || violation traffic "$p: the app answered no clean request"
-  jq -e --argjson max "$SOAK_MAX_ERROR_RATE" '.sentOutsideChaos == 0 or .errorsOutsideChaos / .sentOutsideChaos <= $max' <<<"$t" >/dev/null ||
+  if jq -e --argjson max "$SOAK_MAX_ERROR_RATE" '.sentOutsideChaos == 0 or .errorsOutsideChaos / .sentOutsideChaos <= $max' <<<"$t" >/dev/null; then
+    ok "$p: $(jq .errorsOutsideChaos <<<"$t") of $(jq .sentOutsideChaos <<<"$t") requests outside chaos failed (at most $SOAK_MAX_ERROR_RATE)"
+  else
     violation errors "$p: $(jq .errorsOutsideChaos <<<"$t") of $(jq .sentOutsideChaos <<<"$t") requests outside chaos failed (over $SOAK_MAX_ERROR_RATE)"
+  fi
 done
 
 # Memory: per container (a new container is a new series).
@@ -499,9 +529,30 @@ jq -s --argjson pct "$SOAK_MEM_GROWTH" --argjson min "$SOAK_MEM_MIN_MIB" '
       {judged: true, baselineMiB: ($base | mib), finalMiB: ($last | mib), peakMiB: ($s | map(.rssBytes) | max | mib),
        growthMiB: (($last - $base) | mib), boundMiB: ($bound | mib), ok: (($last - $base) <= $bound)}
     end)' "$OUT/memory.jsonl" >"$work/memory.json"
-jq -c '.[] | select(.judged and (.ok | not))' "$work/memory.json" | while read -r m; do
-  violation memory "$(jq -r '"\(.container): \(.baselineMiB) MiB to \(.finalMiB) MiB (+\(.growthMiB), bound \(.boundMiB))"' <<<"$m")"
+jq -c '.[]' "$work/memory.json" | while read -r m; do
+  line=$(jq -r 'if .judged then "\(.container): \(.baselineMiB) MiB to \(.finalMiB) MiB (+\(.growthMiB), bound \(.boundMiB))"
+    else "\(.container): \(.samples) samples, too few to judge" end' <<<"$m")
+  if jq -e '.judged and (.ok | not)' <<<"$m" >/dev/null; then violation memory "$line"; else ok "memory $line"; fi
 done
+# Every proxy's engines and the operator were sampled: no series is a broken
+# sampling, not a pass.
+for c in "$OPERATOR_NS/operator" $(for p in "${PROXIES[@]}"; do echo "$(stack_ns "$p")/inkwall-engine"; done); do
+  jq -e --arg c "$c" 'any(.[]; .container == $c)' "$work/memory.json" >/dev/null || violation memory "$c: no memory sample"
+done
+
+# The checks made as the soak ran: restarts, status claims, recoveries.
+if ! jq -se 'any(.[]; .kind == "restart")' "$OUT/violations.jsonl" >/dev/null; then
+  ok "no restart outside chaos ($(jq -s 'map(select(.duringChaos)) | map(.count) | add // 0' "$OUT/samples.jsonl") during it)"
+fi
+if ! jq -se 'any(.[]; .kind == "status")' "$OUT/violations.jsonl" >/dev/null; then
+  ok "no status claimed protection a canary disproved ($(jq -s length "$OUT/canary.jsonl") checks, $((canary - 1)) policy edits)"
+fi
+if ! jq -se 'any(.[]; .kind == "recovery")' "$OUT/violations.jsonl" >/dev/null; then
+  ok "every policy edit and chaos scenario recovered within $SOAK_RECOVERY ($(jq -s length "$OUT/chaos.jsonl") chaos runs)"
+fi
+if [[ $SOAK_CHAOS == 1 ]] && ((duration > chaos_every + recovery)) && [[ $(jq -s length "$OUT/chaos.jsonl") == 0 ]]; then
+  violation chaos "SOAK_CHAOS=1, but no chaos scenario ran in $DURATION"
+fi
 
 jq -n --arg duration "$DURATION" --arg chaos "${SOAK_CHAOS:-0}" --argjson rate "$SOAK_RATE" --arg started "$(date -u -d "@$start" +%FT%TZ)" \
   --slurpfile traffic "$work/traffic.json" --slurpfile memory "$work/memory.json" \
