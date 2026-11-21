@@ -354,4 +354,10 @@ var entries = []Entry{
 	{Kind: "SecurityEvent", Condition: "reason", Reason: "rate-limit",
 		Meaning: "The client was over one of the policy's `rateLimits` (the event's `rate_limit`): 429 with `Retry-After` in `Block` mode. Each engine counts on its own, and limited requests are sampled: one event per client a minute, with the count in `sampled_count`.",
 		Fix:     "Check the client IP the engine resolved (`client_ip`): behind a load balancer that hides it, every client shares one limit ([client IP](client-ip.md)). Otherwise raise the limit's `requests` or `burst`, or narrow its `match`."},
+	{Kind: "SecurityEvent", Condition: "reason", Reason: "geo-deny",
+		Meaning: "The client's country (the event's `country`, `unknown` for a public address the database has none for) is denied by the policy's `geo`: 403 in `Block` mode, logged in `Detect` or with `geo.mode: Detect`. Events are sampled: one per policy and country a minute, with the count in `sampled_count`.",
+		Fix:     "Check the client IP the engine resolved (`client_ip`): it is only as right as that address ([client IP](client-ip.md)). If the country is wrong for the address, the database is out of date. Otherwise change the policy's `geo.deny` or `geo.allow`, or let a partner in through `ipLists.allow`."},
+	{Kind: "SecurityEvent", Condition: "reason", Reason: "geo-unavailable",
+		Meaning: "The bundle names a country table this engine doesn't hold yet (it just started without a cache, or every send of the table failed), and the policy fails closed: 503. In `Detect`, or with `failureMode: Open`, geo is skipped instead.",
+		Fix:     "Check that the engine can reach the operator, and the InkwallConfig's `GeoDatabaseReady`; set the policy's `failureMode: Open` to let requests through meanwhile."},
 }

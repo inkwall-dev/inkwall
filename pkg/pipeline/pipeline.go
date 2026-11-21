@@ -147,6 +147,10 @@ type Config struct {
 	// not in IPDeny is let through uninspected with ReasonIPAllow. Nil:
 	// none.
 	IPDeny, IPAllow *iplist.Set
+	// Geo is the policy's geo blocking (design 0011), checked right after
+	// the IP lists, on the country the policy set looked up for the
+	// request (request.Request.Geo). Nil: none.
+	Geo *GeoRules
 	// DenyGRPC denies a request with a gRPC or gRPC-Web content type
 	// (logged in detect mode) with ReasonGRPC, before the rules: for routes
 	// that serve no gRPC (#367).
@@ -246,6 +250,10 @@ type Pipeline struct {
 	grpcPerMessage bool
 	// limits: the policy's rate limits, nil when it has none.
 	limits *RateLimits
+	// geo: the policy's geo blocking, nil when it has none; geoEvents
+	// samples its events.
+	geo       *GeoRules
+	geoEvents *geoSampler
 }
 
 // New returns a pipeline that evaluates requests with eval.
@@ -282,6 +290,8 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 		grpcMessages:   cfg.GRPCMessages,
 		grpcPerMessage: cfg.GRPCMessages && cfg.GRPCPerMessage,
 		limits:         cfg.RateLimits,
+		geo:            cfg.Geo,
+		geoEvents:      &geoSampler{},
 	}
 }
 
@@ -293,6 +303,11 @@ var _ Inspector = (*Pipeline)(nil)
 // before its body is read, and gets 0: a flood over its limit isn't read.
 func (p *Pipeline) BodyLimit(r *request.Request, max int64) int64 {
 	decision, listed := p.routes.Decide(r.RawURI), p.ipListed(r)
+	// A country geo denies in Block isn't read either, nor a request that
+	// fails closed for a missing table.
+	if listed == ReasonNone && p.geo != nil && p.geoCheck(r, time.Now(), false).blocks(p) {
+		return 0
+	}
 	if p.limits != nil && listed == ReasonNone && decision != router.SkipAll && p.limitsFor(r, time.Now()).over != nil {
 		return 0
 	}
@@ -372,8 +387,22 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool, now
 	case ReasonIPAllow:
 		return Verdict{Action: ActionAllow, Reason: ReasonIPAllow}, nil
 	}
+	// Geo (design 0011 §2.3): after the IP lists, before the skipped
+	// paths, which it covers too, and before the rate limits, so a denied
+	// country spends no client's tokens. In Detect it goes on.
+	g := p.geoCheck(r, now, true)
+	if g.blocks(p) {
+		if g.noTable {
+			return g.unavailable(), nil
+		}
+		return g.verdict(), nil
+	}
 	switch p.routes.Decide(r.RawURI) {
 	case router.SkipAll:
+		if g.deny {
+			// Detect: what Block would deny, logged, not "skipped".
+			return g.verdict(), nil
+		}
 		return Verdict{Action: ActionAllow, Reason: ReasonSkipped}, nil
 	case router.SkipBody:
 		withoutBody := *r
@@ -387,7 +416,7 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool, now
 	// flood over its limit costs no rule evaluation.
 	lim := p.limitsFor(r, now)
 	if lim.over != nil {
-		return p.rateLimited(lim), nil
+		return g.mark(p.rateLimited(lim)), nil
 	}
 
 	// A WebSocket handshake that breaks the policy's WebSocket rules is
@@ -395,12 +424,12 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool, now
 	// run, so their matches are logged too.
 	ws := p.ws != nil && WebSocketHandshake(r) && p.ws.violation(r) != ""
 	if ws && p.mode == ModeBlock {
-		return p.enforce(Verdict{Reason: ReasonWebSocket}, http.StatusForbidden), nil
+		return g.mark(p.enforce(Verdict{Reason: ReasonWebSocket}, http.StatusForbidden)), nil
 	}
 	// gRPC on a route that serves none, as the WebSocket rules.
 	grpc := p.denyGRPC && GRPCContentType(r)
 	if grpc && p.mode == ModeBlock {
-		return p.enforce(Verdict{Reason: ReasonGRPC}, http.StatusForbidden), nil
+		return g.mark(p.enforce(Verdict{Reason: ReasonGRPC}, http.StatusForbidden)), nil
 	}
 	v, x := p.inspect(ctx, r, keep)
 	if ws && v.Reason == ReasonNone {
@@ -411,11 +440,18 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool, now
 		v.Reason = ReasonGRPC
 		v = p.enforce(v, http.StatusForbidden)
 	}
+	// Geo in Detect logs what nothing else decided; it comes before a
+	// Detect rate limit in the order, so its reason wins over one.
+	if g.deny && v.Reason == ReasonNone {
+		gv := g.verdict()
+		v.Action, v.Reason, v.SampledEvent, v.SampledCount = gv.Action, gv.Reason, gv.SampledEvent, gv.SampledCount
+	}
+	v = g.mark(v)
 	// A Detect limit over its rate only logs, on a Block policy too; a
 	// rule's reason wins over it.
 	if lim.detect != nil && v.Reason == ReasonNone {
 		v.Action, v.Reason, v.RateLimit, v.RetryAfter = ActionLog, ReasonRateLimit, lim.detect.name, lim.retryAfter
-		v.RateLimitEvent, v.SampledCount = lim.event, lim.sampled
+		v.SampledEvent, v.SampledCount = lim.event, lim.sampled
 	}
 	return v, x
 }

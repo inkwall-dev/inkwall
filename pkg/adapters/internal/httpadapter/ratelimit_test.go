@@ -39,7 +39,7 @@ func TestIsEventRateLimit(t *testing.T) {
 	if IsEvent(v) {
 		t.Error("an unsampled limited request is an event")
 	}
-	v.RateLimitEvent = true
+	v.SampledEvent = true
 	if !IsEvent(v) {
 		t.Error("a sampled limited request isn't an event")
 	}

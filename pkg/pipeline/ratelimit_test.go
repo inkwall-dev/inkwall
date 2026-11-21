@@ -63,10 +63,10 @@ func TestRateLimitBlock(t *testing.T) {
 	if eval.got != nil {
 		t.Error("a limited request was evaluated: limits run before the rules")
 	}
-	if !v.RateLimitEvent || v.SampledCount != 1 {
-		t.Errorf("first limited request: event %v, sampled %d; want an event of 1", v.RateLimitEvent, v.SampledCount)
+	if !v.SampledEvent || v.SampledCount != 1 {
+		t.Errorf("first limited request: event %v, sampled %d; want an event of 1", v.SampledEvent, v.SampledCount)
 	}
-	if v := check(p, req("198.51.100.7", "POST", "/login")); v.RateLimitEvent {
+	if v := check(p, req("198.51.100.7", "POST", "/login")); v.SampledEvent {
 		t.Error("the second limited request within the minute is an event too")
 	}
 	// Another client has its own bucket.
@@ -307,7 +307,7 @@ func TestRateLimitBodyLimit(t *testing.T) {
 	if got := p.BodyLimit(r, 100); got != 0 {
 		t.Fatalf("over the limit: body limit %d, want 0 (the body isn't read)", got)
 	}
-	if v := check(p, r); v.Status != http.StatusTooManyRequests || !v.RateLimitEvent {
+	if v := check(p, r); v.Status != http.StatusTooManyRequests || !v.SampledEvent {
 		t.Fatalf("over the limit: %+v, want 429 decided in BodyLimit", v)
 	}
 	if !p.RateLimited(r) {

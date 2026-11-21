@@ -100,8 +100,9 @@ func IsEvent(v pipeline.Verdict) bool {
 	// Limited requests are sampled per client and capped, so a flood
 	// doesn't push other events out of the buffer (pkg/ratelimit): the
 	// pipeline says which become events.
-	if v.Reason == pipeline.ReasonRateLimit {
-		return v.RateLimitEvent
+	switch v.Reason {
+	case pipeline.ReasonRateLimit, pipeline.ReasonGeoDeny, pipeline.ReasonGeoUnavailable:
+		return v.SampledEvent
 	}
 	if v.Action != pipeline.ActionAllow {
 		return true
