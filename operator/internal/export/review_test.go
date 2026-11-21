@@ -216,7 +216,9 @@ func TestInvalidSinkDoesNotSpin(t *testing.T) {
 	s := h.exp.sinks["a"].sender
 	before := s.loops.Load()
 	time.Sleep(300 * time.Millisecond)
-	if n := s.loops.Load() - before; n > 30 {
+	// The test polls the configuration every 20 ms, each a pass or two; a
+	// spin makes thousands.
+	if n := s.loops.Load() - before; n > 100 {
 		t.Errorf("%d loop passes in 300ms with the sink invalid: it spins", n)
 	}
 	t0 := time.Now()

@@ -108,6 +108,11 @@ type buffer struct {
 	memBytes, allBytes  int64
 	events, totalEvents uint64 // events held; events ever added (and loaded)
 	cursors             map[string]*sinkCursor
+	// midDropped counts the events of the batches dropped from the middle
+	// of the log (dropAt); gaps lists those still ahead of the oldest
+	// batch, gapBase the count before them.
+	midDropped, gapBase uint64
+	gaps                []gap
 	// configured: the sinks are known (setSinks ran). Before, batches are
 	// kept for the cursors loaded from disk.
 	configured bool
@@ -369,18 +374,75 @@ func (b *buffer) enforce() {
 	for b.memBytes > b.memMax && len(b.batches) > 0 {
 		if b.memIdx < len(b.batches) {
 			s := b.batches[b.memIdx]
-			if b.diskOK && s.seq <= b.written {
-				// On disk already: memory keeps the newest.
+			if b.dir != "" && s.seq <= b.written {
+				// On disk already (also if the disk failed since: it stays
+				// readable): memory keeps the newest.
 				s.raw = nil
 				b.memBytes -= s.size
 				b.memIdx++
 				continue
 			}
 		}
+		if b.memIdx >= len(b.batches) {
+			return
+		}
 		// Not on disk (no directory, the disk failed, or the writer is a
-		// whole memory bound behind): the oldest goes.
-		b.dropFront()
+		// whole memory bound behind): the oldest batch in memory goes. The
+		// batches on disk only hold no memory: only the disk bound drops
+		// them.
+		b.dropAt(b.memIdx)
 	}
+}
+
+// dropAt drops batch i for a full buffer: the oldest, or the oldest in
+// memory, which leaves a gap the cursors skip (take looks for the next
+// batch after a position).
+func (b *buffer) dropAt(i int) {
+	if i == 0 {
+		b.dropFront()
+		return
+	}
+	s := b.batches[i]
+	past := position{seq: s.seq + 1}
+	for _, c := range b.cursors {
+		// A cursor before the batch loses its events when it gets there:
+		// they are counted now. One inside it skips the rest.
+		if c.read.less(past) {
+			lost := s.events
+			if c.read.seq == s.seq {
+				lost -= c.read.idx
+				c.read = past
+			}
+			c.dropped += count(lost)
+		}
+		if c.acked.seq == s.seq {
+			c.acked = past
+		}
+	}
+	b.batches = slices.Delete(b.batches, i, i+1)
+	if s.raw != nil {
+		b.memBytes -= s.size
+	}
+	b.allBytes -= s.size
+	b.events -= count(s.events)
+	b.midDropped += count(s.events)
+	b.gaps = append(b.gaps, gap{seq: s.seq, cum: b.midDropped})
+}
+
+// gap is a batch dropped from the middle of the log; cum counts the events
+// of every such batch up to it, for pending.
+type gap struct {
+	seq uint64
+	cum uint64
+}
+
+// droppedBefore counts the events of the gaps before seq, with b.mu held.
+func (b *buffer) droppedBefore(seq uint64) uint64 {
+	i, _ := slices.BinarySearchFunc(b.gaps, seq, func(g gap, s uint64) int { return cmp.Compare(g.seq, s) })
+	if i == 0 {
+		return b.gapBase
+	}
+	return b.gaps[i-1].cum
 }
 
 // dropFront drops the oldest batch for a full buffer.
@@ -415,6 +477,11 @@ func (b *buffer) popFront() {
 	b.allBytes -= s.size
 	b.events -= count(s.events)
 	b.removeBelow = s.seq + 1
+	// Gaps behind the oldest batch count for no cursor any more.
+	for len(b.gaps) > 0 && b.gaps[0].seq < s.seq {
+		b.gapBase = b.gaps[0].cum
+		b.gaps = b.gaps[1:]
+	}
 }
 
 // free removes the batches every sink has passed, with b.mu held.
@@ -564,7 +631,8 @@ func (b *buffer) pending(sink string) uint64 {
 	if found {
 		at += count(min(c.acked.idx, b.batches[i].events))
 	}
-	return b.totalEvents - at
+	// Less the events of the batches dropped from the middle since.
+	return b.totalEvents - at - (b.midDropped - b.droppedBefore(b.batches[i].seq))
 }
 
 // bytes is the buffer's size: every batch, in memory or on disk.
@@ -645,7 +713,21 @@ func (b *buffer) writeBatches(root *os.Root) {
 	if last > b.written {
 		b.written = last
 	}
+	// A batch dropped from memory while it was written leaves a file no
+	// batch owns: remove it. (Those below the oldest go with removeBelow.)
+	var orphans []uint64
+	for _, w := range pending {
+		if w.seq > last || w.seq < b.removeBelow {
+			continue
+		}
+		if _, ok := slices.BinarySearchFunc(b.batches, w.seq, func(s *stored, seq uint64) int { return cmp.Compare(s.seq, seq) }); !ok {
+			orphans = append(orphans, w.seq)
+		}
+	}
 	b.mu.Unlock()
+	for _, seq := range orphans {
+		_ = root.Remove(batchName(seq))
+	}
 }
 
 // persist removes the files of dropped and freed batches and of removed
