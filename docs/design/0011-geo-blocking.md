@@ -663,7 +663,9 @@ How the operator uses it:
    whose shared children all end in pointers to the IPv4 subtree would make that walk skip
    exponentially many aliases unchecked: a first walk follows the aliases, where every path end
    yields, checked and capped at four times the cap (the IPv4 networks under MaxMind's three
-   aliases), and it bounds the path ends of the walk that skips them. A deadline alone can't stop
+   aliases, and past the IPv4 networks to the cap plus 256 times their number), and it bounds the
+   path ends of the walk that skips them. That walk's gaps, one per alias, stop at 256 (`Invalid`)
+   as they are found: a tree of alternating aliases and empty leaves would add one per network. A deadline alone can't stop
    a goroutine, so the loop has to. A cancelled context (leadership lost) and the API server's
    errors are transient: they leave the condition as it is, and are retried. A crafted file that panics, loops or grows makes an `Invalid`
    or `TooLarge` condition, never a crashed or out-of-memory leader.
