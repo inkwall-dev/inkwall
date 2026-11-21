@@ -4,11 +4,18 @@
 package distribution
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 )
@@ -51,5 +58,22 @@ func TestGeoEnforced(t *testing.T) {
 	}
 	if f, v := requirement(p); f != "spec.geo" || v != [3]int{0, 7, 0} {
 		t.Errorf("requirement %s %v", f, v)
+	}
+}
+
+// TestReadEnginesGeoTable: the table an engine holds survives its
+// replica's report, for the leader's GeoDatabaseUnavailable.
+func TestReadEnginesGeoTable(t *testing.T) {
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	data, _ := json.Marshal([]Engine{{ID: "e1", GeoTable: "ab12"}})
+	s := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(s)
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "inkwall-system", Name: reportNamePrefix + "a", Labels: map[string]string{EnginesLabel: "true"}},
+		Data:       map[string]string{enginesKey: string(data), updatedAtKey: now.Format(time.RFC3339Nano)},
+	}).Build()
+	got, _, err := ReadEngines(context.Background(), c, "inkwall-system", time.Minute, now)
+	if err != nil || len(got) != 1 || got[0].GeoTable != "ab12" {
+		t.Fatalf("%+v, %v", got, err)
 	}
 }
