@@ -95,6 +95,8 @@ Every doc in this repository, by topic, with the question each one answers.
   reach a SIEM (Splunk, Elastic, Loki, Datadog), with or without the control plane?
 - [0011 — Geo Blocking](design/0011-geo-blocking.md): how does a policy allow or deny clients by
   country, where does the country database come from, and how does it reach the engines?
+- [0013 — gRPC Messages with Their Schema](design/0013-grpc-schemas.md): how does the engine read
+  gRPC messages by type and name their fields, and why a descriptor set and not server reflection?
 
 ## Contributing
 
