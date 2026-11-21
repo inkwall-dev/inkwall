@@ -1276,48 +1276,129 @@ func result(tx types.Transaction, it *types.Interruption, skip int, score scores
 // variables "@within" the restricted list; 931130 keeps every URL argument in
 // TX:rfi_parameter_<variable>. Level 0 then lists every header, in no
 // particular order, and its first is seldom the one the chain accepted
-// (#762). So, for a chain, the level-0 match that a chained match names wins
-// (see names). This is how chains record matches, as in ModSecurity, not a
-// Coraza bug.
+// (#762). Chains on MATCHED_VARS (942440, 941310, 944110) name the
+// variable itself: MATCHED_VARS:ARGS:a. So, for a chain, the level-0 match
+// a chained match names best wins (see rank). When none does, as for a chain
+// that checks another collection (920180: REQUEST_METHOD, then the headers),
+// or one whose chained rule transforms the value otherwise (941310), the
+// first match is reported. One match is reported per rule: of two
+// restricted headers, the one the first chained match names. This is how
+// chains record matches, as in ModSecurity, not a Coraza bug.
+//
+// The number of matches is the client's to choose (931130 keeps every URL
+// argument), so matchPoint ranks at most chainBudget pairs, in one scan,
+// without allocating, and reports the best found by then (the first match if
+// none). The scan takes each chained match in turn against the level-0
+// matches: the first chained match names its level-0 match within as many
+// pairs as there are level-0 matches.
 func matchPoint(mds []types.MatchData) types.MatchData {
 	var first types.MatchData
-	var chained []types.MatchData
-	for _, md := range mds {
-		switch {
-		case md.Variable().Name() == "UNKNOWN":
-		case md.ChainLevel() > 0:
-			chained = append(chained, md)
-		case first == nil:
-			first = md
+	// Coraza records the chained matches after the first rule's.
+	level0, chained := 0, len(mds)
+	for i, md := range mds {
+		if md.ChainLevel() > 0 {
+			chained = i
+			break
+		}
+		if md.Variable() != variables.Unknown {
+			if first == nil {
+				first = md
+			}
+			level0++
 		}
 	}
-	if first == nil || len(chained) == 0 {
+	if level0 < 2 || chained == len(mds) {
 		return first
 	}
-	for _, md := range mds {
-		if md.ChainLevel() != 0 || md.Variable().Name() == "UNKNOWN" {
+	best, bestRank, bestLen := first, 0, 0
+	budget := chainBudget
+	for _, c := range mds[chained:] {
+		if c.ChainLevel() == 0 || c.Variable() == variables.Unknown {
 			continue
 		}
-		for _, c := range chained {
-			if names(c, md) {
+		for _, md := range mds[:chained] {
+			if md.Variable() == variables.Unknown {
+				continue
+			}
+			if budget--; budget < 0 {
+				return best
+			}
+			r := rank(c, md)
+			switch {
+			case r == rankSure:
 				return md
+			case r > bestRank, r == rankKey && bestRank == rankKey && len(md.Value()) > bestLen:
+				best, bestRank, bestLen = md, r, len(md.Value())
 			}
 		}
 	}
-	return first
+	return best
 }
 
-// names reports whether the chained match c names md, a match of the chain's
-// first rule: c's key ends in _<value> or _<VARIABLE:key> of md, or c's value
-// is md's or /<value>/ (as @within lists are), case aside, as TX keys are
-// lowercase.
-func names(c, md types.MatchData) bool {
-	key, val := strings.ToLower(c.Key()), strings.ToLower(c.Value())
-	if v := strings.ToLower(md.Value()); v != "" &&
-		(strings.HasSuffix(key, "_"+v) || val == v || val == "/"+v+"/") {
-		return true
+// chainBudget is how many pairs of a chained match and a level-0 match
+// matchPoint ranks, at most, for one rule.
+const chainBudget = 1024
+
+// How surely a chained match names a level-0 match (rank).
+const (
+	rankNone = iota
+	// rankValue: the chained match holds the level-0 match's value.
+	rankValue
+	// rankKey: a TX key ends in _<value> of the level-0 match. Of two, the
+	// longer value wins: a header named 920450_x-http-method-override is
+	// a suffix of header_name_920450_x-http-method-override too.
+	rankKey
+	// rankSure: MATCHED_VARS:<VARIABLE:key>, a TX key ending in
+	// _<VARIABLE:key>, or a TX key ending in _<value> whose value holds it
+	// too (header_name_920450_<name> = /<name>/).
+	rankSure
+)
+
+// rank says how surely the chained match c names md, a level-0 match: by a
+// TX variable the first rule set for md (header_name_920450_<name>,
+// rfi_parameter_<variable>), by MATCHED_VARS:<VARIABLE:key>, or by its
+// value. Case aside: TX keys are lowercase.
+func rank(c, md types.MatchData) int {
+	key, name, k := c.Key(), md.Variable().Name(), md.Key()
+	if c.Variable() != variables.TX {
+		if k != "" && len(key) == len(name)+1+len(k) && key[len(name)] == ':' &&
+			strings.EqualFold(key[:len(name)], name) && strings.EqualFold(key[len(name)+1:], k) {
+			return rankSure
+		}
+	} else {
+		if k != "" && suffixAfter(key, k, ':') && suffixAfter(key[:len(key)-len(k)-1], name, '_') {
+			return rankSure
+		}
+		if v := md.Value(); v != "" && suffixAfter(key, v, '_') {
+			if namesByValue(c, md) {
+				return rankSure
+			}
+			return rankKey
+		}
 	}
-	return md.Key() != "" && strings.HasSuffix(key, "_"+strings.ToLower(md.Variable().Name()+":"+md.Key()))
+	if namesByValue(c, md) {
+		return rankValue
+	}
+	return rankNone
+}
+
+// namesByValue reports whether the chained match c holds md's value, or
+// /<value>/ (as @within lists are), case aside.
+func namesByValue(c, md types.MatchData) bool {
+	v, cv := md.Value(), c.Value()
+	if v == "" {
+		return false
+	}
+	if len(cv) == len(v)+2 && cv[0] == '/' && cv[len(cv)-1] == '/' {
+		cv = cv[1 : len(cv)-1]
+	}
+	return strings.EqualFold(cv, v)
+}
+
+// suffixAfter reports whether s ends in suffix, case aside, right after sep.
+func suffixAfter(s, suffix string, sep byte) bool {
+	i := len(s) - len(suffix) - 1
+	return i >= 0 && s[i] == sep && strings.EqualFold(s[i+1:], suffix)
 }
 
 // txInt reads TX:name as an integer, 0 if unset.

@@ -124,6 +124,18 @@ request body, the URI) can only be excluded for the whole path. Then check the e
 it reaches the cluster: the request that matched no longer shows `942100@ARGS:q`, and an attack in
 another argument still gets `deny`.
 
+A REST API's `PUT`, `PATCH` and `DELETE` show up as `911100@REQUEST_METHOD`: the CRS allows only
+GET, HEAD, POST and OPTIONS. No exclusion names a method, and turning 911100 off for a path allows
+every method there. List the methods the application serves in the rule set binding instead:
+
+```yaml
+spec:
+  ruleSets:
+  - ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}
+    crs:
+      allowedMethods: [GET, HEAD, POST, OPTIONS, PUT, PATCH, DELETE]
+```
+
 For one request, `inkwallctl explain request <request-id>` does all this: it finds the event by
 the request ID the client got in `X-Request-Id`, describes each rule, and prints the narrowest
 exclusion, checked as `inkwallctl test --policy` does ([Explain a denied request](troubleshooting.md#explain-a-denied-request)).
