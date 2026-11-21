@@ -9,6 +9,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 )
 
 // Denial is a denied request's answer, the same from every adapter
@@ -76,4 +79,20 @@ func acceptsJSON(values []string) bool {
 		}
 	}
 	return false
+}
+
+// RetryAfter is the Retry-After of a verdict's denial, in whole seconds:
+// set on a rate limit's 429, "" otherwise.
+func RetryAfter(v pipeline.Verdict) string {
+	if v.Status != http.StatusTooManyRequests || v.RetryAfter <= 0 {
+		return ""
+	}
+	return strconv.FormatInt(int64((v.RetryAfter+time.Second-1)/time.Second), 10)
+}
+
+// SetRetryAfter sets h's Retry-After from v, if it has one.
+func SetRetryAfter(h http.Header, v pipeline.Verdict) {
+	if ra := RetryAfter(v); ra != "" {
+		h.Set("Retry-After", ra)
+	}
 }

@@ -68,6 +68,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/adapters/httpcheck"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
+	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
@@ -501,13 +502,30 @@ func newLocalHandler(cfg config, notes io.Writer) (*httpcheck.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return bundleHandler(b, cfg)
+	return bundleHandler(noteRateLimits(b, notes), cfg)
+}
+
+// noteRateLimits says in notes which policies' rate limits go untested:
+// inkwallctl test checks one request at a time and keeps no state, so it
+// can't tell whether a request would be over a limit. They are compiled
+// all the same (policy.Options.IgnoreRateLimits), to catch an error.
+func noteRateLimits(b *bundlev1.Bundle, notes io.Writer) *bundlev1.Bundle {
+	var limited []string
+	for _, p := range b.GetPolicies() {
+		if len(p.GetRateLimits()) > 0 {
+			limited = append(limited, p.GetId())
+		}
+	}
+	if len(limited) > 0 {
+		fmt.Fprintf(notes, "note: rate limits are not tested (one request at a time, no state): %s\n", strings.Join(limited, ", "))
+	}
+	return b
 }
 
 // bundleHandler returns the engine's check API, in-process, inspecting with
 // the bundle's policies, compiled as the engine does.
 func bundleHandler(b *bundlev1.Bundle, cfg config) (*httpcheck.Handler, error) {
-	set, err := policy.Compile(withDeadline(b, cfg.timeout), policy.Options{BodyLimit: cfg.maxBodyBytes})
+	set, err := policy.Compile(withDeadline(b, cfg.timeout), policy.Options{BodyLimit: cfg.maxBodyBytes, RateLimits: ratelimit.New(1024, 0), IgnoreRateLimits: true})
 	if err != nil {
 		return nil, fmt.Errorf("the engine would reject the bundle: %w", err)
 	}

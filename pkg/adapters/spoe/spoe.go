@@ -109,6 +109,9 @@ const (
 	VarAction    = "action"
 	VarStatus    = "status"
 	VarRequestID = "request_id"
+	// VarRetryAfter is set only with status 429, a rate limit's: the
+	// Retry-After to answer with, in seconds.
+	VarRetryAfter = "retry_after"
 	// VarGRPCStatus, VarGRPCMessage and VarGRPCContentType are set only
 	// to deny a gRPC call (by its Content-Type): its gRPC status, the
 	// grpc-message and the Content-Type to answer it with, trailers-only,
@@ -671,6 +674,9 @@ func (s *Server) answer(ctx context.Context, ack *encoder, payload []byte, maxFr
 	}
 	if v.Action == pipeline.ActionDeny {
 		setVerdict(ack, ActionDeny, v.Status, req.ID)
+		if ra := httpadapter.RetryAfter(v); ra != "" {
+			ack.setVar(VarRetryAfter, func(e *encoder) { e.str(ra) })
+		}
 		if g := httpadapter.GRPCOf(req.Headers); g != httpadapter.NotGRPC {
 			setGRPCDenial(ack, g, v.Status, req.ID)
 		}

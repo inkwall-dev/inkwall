@@ -120,3 +120,26 @@ func TestWebSocketHandshake(t *testing.T) {
 		}
 	}
 }
+
+// A rate limit's 429 carries retry_after, for the haproxy.cfg rule that
+// answers it with Retry-After (#705); other denials don't.
+func TestRateLimitRetryAfter(t *testing.T) {
+	for _, tc := range []struct {
+		v    pipeline.Verdict
+		want string
+	}{
+		{pipeline.Verdict{Action: pipeline.ActionDeny, Status: http.StatusTooManyRequests, Reason: pipeline.ReasonRateLimit, RetryAfter: 30 * time.Second}, "30"},
+		{pipeline.Verdict{Action: pipeline.ActionDeny, Status: http.StatusForbidden, Reason: pipeline.ReasonRule}, ""},
+	} {
+		a := startAgent(t, &inspector{verdict: tc.v}, Config{MaxBodyBytes: 1 << 10})
+		h := a.dial(t)
+		h.hello()
+		h.send(notifyFrame(1, 1, argString(ArgMethod, "GET"), argString(ArgPath, "/"), argString(ArgVersion, "1.1"),
+			argBinary(ArgHeaders, hdrs("host", "a.example"))))
+		_, vars := h.ack()
+		got, ok := vars[VarRetryAfter]
+		if vars[VarStatus].u != uint64(tc.v.Status) || ok != (tc.want != "") || ok && got.String() != tc.want {
+			t.Errorf("status %d: retry_after %+v (set %v), want %q", tc.v.Status, got, ok, tc.want)
+		}
+	}
+}

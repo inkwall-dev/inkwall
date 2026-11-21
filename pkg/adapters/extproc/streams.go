@@ -98,7 +98,7 @@ func (s *Server) checkGRPCStatus(ctx context.Context, x *exchange, h http.Header
 		httpadapter.LogEvent(ctx, s.logger, s.events, x.req, x.path, v)
 	}
 	if v.Action == pipeline.ActionDeny {
-		return s.denial(x.req, v.Status)
+		return s.denial(x.req, v)
 	}
 	return nil
 }
@@ -252,7 +252,7 @@ func (s *Server) checkEvents(ctx context.Context, x *exchange, es **eventStream,
 		}
 		if v.Action == pipeline.ActionDeny {
 			*es = nil
-			return s.denial(x.req, v.Status)
+			return s.denial(x.req, v)
 		}
 	}
 	return nil

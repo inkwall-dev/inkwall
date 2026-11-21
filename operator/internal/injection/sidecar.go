@@ -84,6 +84,8 @@ type Sidecar struct {
 	PolicyMetrics bool
 	// JSONDenials passes --json-denials.
 	JSONDenials bool
+	// RateLimitKeys is the engine's --rate-limit-keys, 0 for its default.
+	RateLimitKeys int32
 	// ResponseMessages passes --response-messages (ResponseMessagesFlag):
 	// the proxy sends the responses of the routes whose policies inspect
 	// them (HAProxy, in the inkwall-responses scope of spoe.conf).
@@ -127,6 +129,10 @@ func (s Sidecar) Configured(e wafv1alpha1.EngineSpec) Sidecar {
 	s.LogLevel = strings.ToLower(string(e.LogLevel))
 	s.PolicyMetrics = e.PolicyMetrics
 	s.JSONDenials = e.JSONDenials
+	s.RateLimitKeys = 0
+	if e.RateLimitKeys != nil {
+		s.RateLimitKeys = *e.RateLimitKeys
+	}
 	s.TrustedProxies, s.TrustedHops = nil, 0
 	if c := e.ClientIP; c != nil {
 		for _, p := range c.TrustedProxies {
@@ -252,6 +258,9 @@ func Engine(s Sidecar) (corev1.Container, []corev1.Volume) {
 	}
 	if s.passes(optJSONDenials) {
 		args = append(args, "--json-denials")
+	}
+	if s.passes(optRateLimitKeys) {
+		args = append(args, fmt.Sprintf("--rate-limit-keys=%d", s.RateLimitKeys))
 	}
 	if s.passes(optResponseMessages) {
 		args = append(args, ResponseMessagesFlag)

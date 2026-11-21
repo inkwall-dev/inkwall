@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/utils/ptr"
+
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 )
 
@@ -45,22 +47,27 @@ func TestPinnedEngineFlags(t *testing.T) {
 	hops := int32(2)
 	settings := wafv1alpha1.EngineSpec{
 		LogLevel: wafv1alpha1.LogLevelDebug, PolicyMetrics: true, JSONDenials: true,
-		BootstrapMode: wafv1alpha1.BootstrapDenyAll,
-		ClientIP:      &wafv1alpha1.ClientIPSpec{TrustedProxies: []wafv1alpha1.CIDR{"10.0.0.0/8"}, TrustedHops: &hops},
+		BootstrapMode: wafv1alpha1.BootstrapDenyAll, RateLimitKeys: ptr.To(int32(1 << 20)),
+		ClientIP: &wafv1alpha1.ClientIPSpec{TrustedProxies: []wafv1alpha1.CIDR{"10.0.0.0/8"}, TrustedHops: &hops},
 	}
 	newer := []string{"--log-level=debug", "--policy-metrics", "--json-denials", "--trusted-hops=2"}
-	allSettings := []string{"spec.engine.clientIP.trustedHops", "spec.engine.logLevel", "spec.engine.policyMetrics", "spec.engine.jsonDenials"}
+	allSettings := []string{"spec.engine.clientIP.trustedHops", "spec.engine.logLevel", "spec.engine.policyMetrics", "spec.engine.jsonDenials", "spec.engine.rateLimitKeys"}
+	// --rate-limit-keys is 0.7.0's (#705).
+	const keysFlag = "--rate-limit-keys=1048576"
+	only07 := []string{"spec.engine.rateLimitKeys"}
 	// Flags every release takes, pinned or not.
 	always := []string{"--bootstrap=deny", "--bundle-secret=inkwall-system/inkwall-bundle",
 		"--trusted-proxies=127.0.0.1/32,::1/128,10.0.0.0/8"}
 	for _, tc := range []struct {
 		image   string
 		all     bool
+		keys    bool
 		leftOut []string
 	}{
-		{image: "", all: true},
-		{image: "ghcr.io/inkwall-dev/inkwall-engine:0.5.0", all: true},
-		{image: "ghcr.io/inkwall-dev/inkwall-engine:0.6.0-rc.1@sha256:0123abc", all: true},
+		{image: "", all: true, keys: true},
+		{image: "ghcr.io/inkwall-dev/inkwall-engine:0.7.0", all: true, keys: true},
+		{image: "ghcr.io/inkwall-dev/inkwall-engine:0.5.0", all: true, leftOut: only07},
+		{image: "ghcr.io/inkwall-dev/inkwall-engine:0.6.0-rc.1@sha256:0123abc", all: true, leftOut: only07},
 		{image: "ghcr.io/inkwall-dev/inkwall-engine:0.4.1", leftOut: allSettings},
 		{image: "ghcr.io/inkwall-dev/inkwall-engine:0.3.3", leftOut: allSettings},
 		{image: "registry.local:5000/inkwall-engine:custom", leftOut: allSettings},
@@ -79,6 +86,9 @@ func TestPinnedEngineFlags(t *testing.T) {
 			if got := slices.Contains(engine.Args, f); got != tc.all {
 				t.Errorf("%q: %s passed: %v, want %v", tc.image, f, got, tc.all)
 			}
+		}
+		if got := slices.Contains(engine.Args, keysFlag); got != tc.keys {
+			t.Errorf("%q: %s passed: %v, want %v", tc.image, keysFlag, got, tc.keys)
 		}
 		if got := s.LeftOut(); !slices.Equal(got, tc.leftOut) {
 			t.Errorf("%q: LeftOut() = %v, want %v", tc.image, got, tc.leftOut)

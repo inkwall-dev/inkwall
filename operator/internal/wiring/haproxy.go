@@ -228,6 +228,12 @@ func HAProxySnippet(o HAProxySnippetOptions) string {
 	for _, status := range []int{400, 413, 503} {
 		lines = append(lines, fmt.Sprintf(`http-request deny deny_status %d hdr x-request-id "%%[%s]" if { %s -m int %d }`, status, v("request_id"), v("status"), status))
 	}
+	// A rate limit's 429, with its Retry-After (#705); without this rule
+	// it would be the 403 below.
+	// A SecLang rule's status:429 has no Retry-After: no empty header.
+	lines = append(lines,
+		fmt.Sprintf(`http-request deny deny_status 429 hdr x-request-id "%%[%s]" hdr retry-after "%%[%s]" if { %s -m int 429 } { %s -m found }`, v("request_id"), v("retry_after"), v("status"), v("retry_after")),
+		fmt.Sprintf(`http-request deny deny_status 429 hdr x-request-id "%%[%s]" if { %s -m int 429 }`, v("request_id"), v("status")))
 	lines = append(lines,
 		`http-request deny deny_status 403 hdr x-request-id "%[`+v("request_id")+`]" if { `+v("action")+` -m str deny }`,
 		haproxyUpgradeRule,

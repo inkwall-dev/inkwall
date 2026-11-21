@@ -128,6 +128,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if v.Action == pipeline.ActionDeny {
 		// The proxy denies on any answer but a 2xx, and copies it to the
 		// client: a gRPC client reads the gRPC status in its headers.
+		httpadapter.SetRetryAfter(w.Header(), v)
 		if g := httpadapter.GRPCOf(req.Headers); g != httpadapter.NotGRPC {
 			httpadapter.WriteGRPCDenial(w, g, v.Status, v.Status, req.ID)
 			return

@@ -25,6 +25,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/router"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
@@ -60,6 +61,13 @@ type Options struct {
 	// Stats counts each policy's requests, for the operator (nil: not
 	// counted).
 	Stats *events.Stats
+	// RateLimits holds every policy's rate limit buckets, across bundles
+	// (nil: a bundle with rate limits doesn't compile).
+	RateLimits *ratelimit.Store
+	// IgnoreRateLimits compiles the policies' rate limits, so an error is
+	// still one, but doesn't apply them: for inkwallctl test, which checks
+	// one request at a time.
+	IgnoreRateLimits bool
 }
 
 // Policy is one compiled policy.
@@ -145,6 +153,11 @@ func (s *Set) Check(ctx context.Context, r *request.Request) pipeline.Verdict {
 		ps[0].counter.Observe(v)
 		return v
 	}
+	if p := rateLimited(ps, r); p != nil {
+		v := p.pipeline.Check(ctx, p.view(r))
+		p.counter.Observe(v)
+		return v
+	}
 	var out pipeline.Verdict
 	for i, p := range ps {
 		v := p.pipeline.Check(ctx, p.view(r))
@@ -173,6 +186,11 @@ func (s *Set) CheckExchange(ctx context.Context, r *request.Request) (pipeline.V
 	ps := s.policiesFor(r, buf[:0])
 	if len(ps) == 0 {
 		return observe(s.observer, pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy}), nil
+	}
+	if p := rateLimited(ps, r); p != nil && len(ps) > 1 {
+		v := p.pipeline.Check(ctx, p.view(r))
+		p.counter.Observe(v)
+		return v, nil
 	}
 	var out pipeline.Verdict
 	var xs []*pipeline.Exchange
@@ -237,6 +255,19 @@ func (c countedStream) CheckGRPCMessage(ctx context.Context, call *request.Reque
 
 func (c countedStream) Mode() pipeline.Mode { return c.p.pipeline.Mode() }
 
+// rateLimited is the policy of ps that BodyLimit found r over one of the
+// rate limits of, nil if none: it answers r (429) first, so the others'
+// rules don't run on a body that wasn't read, nor a 403 of theirs replace
+// the 429.
+func rateLimited(ps []*Policy, r *request.Request) *Policy {
+	for _, p := range ps {
+		if p.pipeline.RateLimited(r) {
+			return p
+		}
+	}
+	return nil
+}
+
 // BodyLimit implements pipeline.Inspector: the policy's body limit, at
 // most max (the adapter's own) when max is positive, or 0 when its bodies,
 // or the route's, are not inspected. A request inspected by several
@@ -255,6 +286,11 @@ func (s *Set) BodyLimit(r *request.Request, max int64) int64 {
 		if l = p.pipeline.BodyLimit(r, l); l > limit {
 			limit = l
 		}
+		// Over one of its rate limits: Check denies here, without the
+		// body, and charges no later policy.
+		if p.pipeline.RateLimited(r) {
+			return 0
+		}
 	}
 	return limit
 }
@@ -271,8 +307,9 @@ func Compile(b *bundlev1.Bundle, o Options) (*Set, error) {
 	var routes []route
 	used := map[[sha256.Size]byte]bool{}
 	ids := map[string]bool{}
+	live := ratelimit.NewLive()
 	for _, bp := range b.GetPolicies() {
-		p, key, err := compilePolicy(bp, ruleSets, o)
+		p, key, err := compilePolicy(bp, ruleSets, o, live)
 		if err != nil {
 			return nil, fmt.Errorf("policy %s: %w", bp.GetId(), err)
 		}
@@ -296,7 +333,7 @@ func Compile(b *bundlev1.Bundle, o Options) (*Set, error) {
 	return set, nil
 }
 
-func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o Options) (*Policy, [sha256.Size]byte, error) {
+func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o Options, live *ratelimit.Live) (*Policy, [sha256.Size]byte, error) {
 	var key [sha256.Size]byte
 	cfg, crs, err := rulesConfig(bp, ruleSets, o)
 	if err != nil {
@@ -411,6 +448,12 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 	}
 	if t := bp.GetTimeout(); t != nil {
 		pc.Timeout = t.AsDuration()
+	}
+	if pc.RateLimits, err = pipeline.CompileRateLimits(o.RateLimits, live, bp.GetId(), rateLimits(bp)); err != nil {
+		return nil, key, err
+	}
+	if o.IgnoreRateLimits {
+		pc.RateLimits = nil
 	}
 	return &Policy{ID: bp.GetId(), pipeline: pipeline.New(eval, pc), bodyLimit: bodyLimit}, key, nil
 }
@@ -663,4 +706,24 @@ func (h *Holder) BodyLimit(r *request.Request, max int64) int64 {
 		return 0
 	}
 	return s.BodyLimit(r, max)
+}
+
+// rateLimits is a policy's rate limits, as the pipeline takes them.
+func rateLimits(bp *bundlev1.Policy) []pipeline.RateLimitConfig {
+	var out []pipeline.RateLimitConfig
+	for _, l := range bp.GetRateLimits() {
+		c := pipeline.RateLimitConfig{
+			Name:       l.GetName(),
+			Requests:   int64(l.GetRequests()),
+			Period:     l.GetPeriod().AsDuration(),
+			Burst:      int64(l.GetBurst()),
+			Header:     l.GetKey().GetHeader().GetName(),
+			IPv6Prefix: int(l.GetKey().GetClientIp().GetIpv6PrefixLength()),
+			Paths:      l.GetPaths(),
+			Methods:    l.GetMethods(),
+			Detect:     l.GetDetect(),
+		}
+		out = append(out, c)
+	}
+	return out
 }

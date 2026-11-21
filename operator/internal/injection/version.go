@@ -65,11 +65,12 @@ var (
 	optLogLevel      = option{"spec.engine.logLevel", Version{0, 5, 0}, func(s Sidecar) bool { return s.LogLevel != "" }}
 	optPolicyMetrics = option{"spec.engine.policyMetrics", Version{0, 5, 0}, func(s Sidecar) bool { return s.PolicyMetrics }}
 	optJSONDenials   = option{"spec.engine.jsonDenials", Version{0, 5, 0}, func(s Sidecar) bool { return s.JSONDenials }}
+	optRateLimitKeys = option{"spec.engine.rateLimitKeys", Version{0, 7, 0}, func(s Sidecar) bool { return s.RateLimitKeys > 0 }}
 	// optResponseMessages isn't a spec.engine setting: the HAProxy pods'
 	// engine gets it, for response inspection (#470). Without it, the
 	// policies are ResponsesNotInspected on those pods.
 	optResponseMessages = option{"response inspection through HAProxy (" + ResponseMessagesFlag + ")", Version{0, 6, 0}, func(s Sidecar) bool { return s.ResponseMessages }}
-	options             = []option{optTrustedHops, optLogLevel, optPolicyMetrics, optJSONDenials, optResponseMessages}
+	options             = []option{optTrustedHops, optLogLevel, optPolicyMetrics, optJSONDenials, optRateLimitKeys, optResponseMessages}
 )
 
 // passes reports whether Engine passes o: s sets it, and s's engine knows

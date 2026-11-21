@@ -303,6 +303,9 @@ func TestInkwallConfigValidation(t *testing.T) {
       snippets: false
 `+controlPlane)},
 
+		{name: "rate limit keys", doc: inkwallConfig("default", "  engine: {rateLimitKeys: 1048576}\n")},
+		{name: "too few rate limit keys", doc: inkwallConfig("default", "  engine: {rateLimitKeys: 100}\n"), wantErr: "should be greater than or equal to 1024"},
+		{name: "too many rate limit keys", doc: inkwallConfig("default", "  engine: {rateLimitKeys: 20000000}\n"), wantErr: "should be less than or equal to 16777216"},
 		{name: "not named default", doc: inkwallConfig("prod", "  {}\n"), wantErr: "the InkwallConfig must be named default"},
 		{name: "GitOps without a control plane", doc: inkwallConfig("default", "  mode: GitOps\n"), wantErr: "controlPlane is required in GitOps and Managed mode"},
 		{name: "Managed without a control plane", doc: inkwallConfig("default", "  mode: Managed\n"), wantErr: "controlPlane is required in GitOps and Managed mode"},

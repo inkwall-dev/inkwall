@@ -82,8 +82,10 @@ func GRPCOf(h http.Header) GRPCProtocol {
 // GRPCCode is the gRPC status of a denial with HTTP status code: gRPC's
 // own mapping of HTTP statuses (doc/http-grpc-status-mapping.md), which
 // clients apply to an HTTP answer, so a client sees the same code through
-// every proxy; and RESOURCE_EXHAUSTED for an oversized body (413), which
-// that mapping leaves UNKNOWN.
+// every proxy; RESOURCE_EXHAUSTED for an oversized body (413), which that
+// mapping leaves UNKNOWN, and for a rate limit (429), which it maps to
+// UNAVAILABLE: that tells clients to retry at once, the opposite of what a
+// limit means.
 func GRPCCode(code int) codes.Code {
 	switch code {
 	case http.StatusBadRequest:
@@ -94,9 +96,9 @@ func GRPCCode(code int) codes.Code {
 		return codes.PermissionDenied
 	case http.StatusNotFound:
 		return codes.Unimplemented
-	case http.StatusRequestEntityTooLarge:
+	case http.StatusRequestEntityTooLarge, http.StatusTooManyRequests:
 		return codes.ResourceExhausted
-	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		return codes.Unavailable
 	default:
 		return codes.Unknown

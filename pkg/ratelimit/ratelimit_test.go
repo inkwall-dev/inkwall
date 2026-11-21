@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 	"unsafe"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func ip(s string) Key {
@@ -343,6 +345,7 @@ func TestCapacity(t *testing.T) {
 		}
 	}
 	s := New(DefaultKeys, 460<<20)
+	s.allocate()
 	slots := len(s.shards) * len(s.shards[0].e)
 	if slots*loadPercent/100 < s.Capacity() {
 		t.Errorf("%d slots hold fewer than %d keys at %d%%", slots, s.Capacity(), loadPercent)
@@ -387,4 +390,39 @@ func TestConcurrent(t *testing.T) {
 	if n != 150 {
 		t.Fatalf("loose has %d tokens left, want 150 (refunds lost or doubled)", n)
 	}
+}
+
+// The metrics register together, with one series per eviction kind.
+func TestCollectors(t *testing.T) {
+	s := New(1024, 0)
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(s.Collectors()...)
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	series := map[string]int{}
+	for _, mf := range mfs {
+		series[mf.GetName()] = len(mf.GetMetric())
+	}
+	if series["inkwall_rate_limit_evictions_total"] != 2 || series["inkwall_rate_limit_exceeded_total"] != 2 || series["inkwall_rate_limit_keys"] != 1 || len(series) != 6 {
+		t.Errorf("metrics %v", series)
+	}
+}
+
+// An event the caps dropped gives its count back: the key's next event
+// stands for those requests too.
+func TestUnsample(t *testing.T) {
+	s := New(1024, 0)
+	t0 := s.base.Add(time.Hour)
+	k := ip("192.0.2.1")
+	l := limit(s, "a", 1, time.Hour, 1)
+	s.Take(l, k, t0, nil)
+	d := s.Take(l, k, t0, nil) // the first limited: an event of 1
+	s.Unsample(l, k, d.Sampled)
+	s.Take(l, k, t0.Add(time.Second), nil) // not sampled: within the minute
+	if d := s.Take(l, k, t0.Add(time.Minute), nil); !d.Event || d.Sampled != 3 {
+		t.Errorf("the next event: %+v, want one standing for 3 (1 given back, 2 since)", d)
+	}
+	s.Unsample(l, ip("192.0.2.9"), 5) // a key it doesn't hold: nothing
 }

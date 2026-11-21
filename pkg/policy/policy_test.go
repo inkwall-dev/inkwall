@@ -24,6 +24,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/grpcwire"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/rules"
 	"github.com/inkwall-dev/inkwall/pkg/streams"
@@ -1144,5 +1145,129 @@ func TestGRPCPerMessage(t *testing.T) {
 	h.Store(set)
 	if hs.GRPCStream(call) != nil {
 		t.Error("Holder: messages inspected one by one without grpcPerMessage")
+	}
+}
+
+// TestRateLimits (#705): a bundle's limits are compiled into the shared
+// store and checked per policy; the same limit in the next bundle keeps its
+// buckets; a bundle with limits needs a store.
+func TestRateLimits(t *testing.T) {
+	b := testBundle()
+	b.Policies[0].RateLimits = []*bundlev1.RateLimit{{Name: "site", Requests: 1, Period: durationpb.New(time.Hour), Burst: 1}}
+	store := ratelimit.New(1024, 0)
+	set, err := Compile(b, Options{RateLimits: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := func(host, ip string) *request.Request {
+		r := req(host, "/")
+		r.ClientIP = netip.MustParseAddr(ip)
+		return r
+	}
+	if v := set.Check(context.Background(), from("shop.example.com", "198.51.100.7")); v.Action != pipeline.ActionAllow {
+		t.Fatalf("first: %s/%s", v.Action, v.Reason)
+	}
+	v := set.Check(context.Background(), from("shop.example.com", "198.51.100.7"))
+	if v.Status != 429 || v.Reason != pipeline.ReasonRateLimit || v.Policy != "shop/site" || v.RateLimit != "site" {
+		t.Errorf("second: %d %s %s %q, want 429 rate-limit from shop/site's limit site", v.Status, v.Reason, v.Policy, v.RateLimit)
+	}
+	// Another policy's routes aren't limited.
+	for range 3 {
+		if v := set.Check(context.Background(), from("admin.example.com", "198.51.100.7")); v.Reason == pipeline.ReasonRateLimit {
+			t.Fatal("another policy's route was limited")
+		}
+	}
+	// The next bundle, the same limit: still over.
+	b.Version++
+	if set, err = Compile(b, Options{RateLimits: store}); err != nil {
+		t.Fatal(err)
+	}
+	if v := set.Check(context.Background(), from("shop.example.com", "198.51.100.7")); v.Reason != pipeline.ReasonRateLimit {
+		t.Errorf("the next bundle: %s, want the bucket kept", v.Reason)
+	}
+	if _, err := Compile(b, Options{}); err == nil || !strings.Contains(err.Error(), "shop/site") {
+		t.Errorf("limits without a store: %v, want an error naming the policy", err)
+	}
+}
+
+// A request two policies inspect: once the first denies it by a rate
+// limit, in BodyLimit, its body isn't read and the second isn't charged,
+// as Check stops at the first deny (#705).
+func TestRateLimitsSeveralPolicies(t *testing.T) {
+	b := testBundle()
+	// shop/site (Block) covers /, shop/api (Detect) /api: "/api/../x" is
+	// inspected by both, its raw form and its cleaned one (policiesFor).
+	b.Policies[0].RateLimits = []*bundlev1.RateLimit{{Name: "site", Requests: 1, Period: durationpb.New(time.Hour), Burst: 1}}
+	b.Policies[1].RateLimits = []*bundlev1.RateLimit{{Name: "api", Requests: 1, Period: durationpb.New(time.Hour), Burst: 5}}
+	set, err := Compile(b, Options{RateLimits: ratelimit.New(1024, 0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := func(uri string) *request.Request {
+		r := req("shop.example.com", uri)
+		r.Method, r.ClientIP = "POST", netip.MustParseAddr("198.51.100.7")
+		return r
+	}
+	var buf [4]*Policy
+	if ps := set.policiesFor(from("/api/../x"), buf[:0]); len(ps) != 2 {
+		t.Fatalf("/api/../x is inspected by %d policies, want 2", len(ps))
+	}
+	r := from("/api/../x")
+	if got := set.BodyLimit(r, 1<<10); got == 0 {
+		t.Fatal("first: body limit 0")
+	}
+	set.Check(context.Background(), r) // site: 1 of 1, api: 1 of 5
+	r = from("/api/../x")
+	if got := set.BodyLimit(r, 1<<10); got != 0 {
+		t.Errorf("over site's limit: body limit %d, want 0", got)
+	}
+	if v := set.Check(context.Background(), r); v.Status != 429 || v.RateLimit != "site" {
+		t.Errorf("over site's limit: %d %q, want 429 by site", v.Status, v.RateLimit)
+	}
+	// api was charged once, not for the denied request: 4 tokens left.
+	for i := range 4 {
+		if v := set.Check(context.Background(), from("/api/y")); v.Reason == pipeline.ReasonRateLimit {
+			t.Fatalf("api's request %d of its 4 left: limited (charged for the denied request)", i+1)
+		}
+	}
+	if v := set.Check(context.Background(), from("/api/y")); v.Reason != pipeline.ReasonRateLimit || v.Action != pipeline.ActionLog {
+		t.Errorf("api past its burst: %s/%s, want logged rate-limit (Detect)", v.Action, v.Reason)
+	}
+}
+
+// Two Block policies inspect a request (its raw and decoded paths select
+// both); BodyLimit finds it over the second
+// one's limit. Check answers that 429 first: the first one's rules don't
+// run on a body that wasn't read, and its 403 doesn't replace the 429.
+func TestRateLimitedPolicyAnswersFirst(t *testing.T) {
+	b := testBundle()
+	b.Policies[1].Mode = bundlev1.Mode_MODE_BLOCK
+	b.Policies[1].RateLimits = []*bundlev1.RateLimit{{Name: "api", Requests: 1, Period: durationpb.New(time.Hour), Burst: 1}}
+	set, err := Compile(b, Options{RateLimits: ratelimit.New(1024, 0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := func(query string) *request.Request {
+		r := req("shop.example.com", "/api%2Fx"+query)
+		r.ClientIP = netip.MustParseAddr("198.51.100.7")
+		return r
+	}
+	var buf [4]*Policy
+	if ps := set.policiesFor(from(""), buf[:0]); len(ps) != 2 {
+		t.Fatalf("/api%%2Fx is inspected by %d policies, want 2", len(ps))
+	}
+	// A clean request, without a prior BodyLimit: Check decides, and both
+	// policies pass it, spending api's one token.
+	if v := set.Check(context.Background(), from("")); v.Action != pipeline.ActionAllow {
+		t.Fatalf("first: %s/%s", v.Action, v.Reason)
+	}
+	// An attack the CRS of shop/site denies, now over api's limit.
+	r := from(sqli)
+	set.BodyLimit(r, 1<<10)
+	if v := set.Check(context.Background(), r); v.Status != 429 || v.RateLimit != "api" {
+		t.Errorf("over api's limit: %d %s %q, want 429 by api, not the rules' 403", v.Status, v.Reason, v.RateLimit)
+	}
+	if v, x := set.CheckExchange(context.Background(), r); v.Status != 429 || x != nil {
+		t.Errorf("CheckExchange: %d, exchange %v, want 429 and none", v.Status, x)
 	}
 }

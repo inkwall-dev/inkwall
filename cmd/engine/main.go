@@ -72,6 +72,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
+	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
 	"github.com/inkwall-dev/inkwall/pkg/router"
 	"github.com/inkwall-dev/inkwall/pkg/rules"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
@@ -149,6 +150,8 @@ type engineConfig struct {
 	command      string
 	logLevel     slog.Level
 	eventLogRate int
+	// rateLimitKeys is the rate limit table's capacity.
+	rateLimitKeys int
 	// policyMetrics adds requests by policy, for at most policyMetricsMax
 	// policies.
 	policyMetrics    bool
@@ -350,6 +353,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	skipPaths := fs.String("skip-paths", "", "comma-separated paths never inspected, exact (/healthz) or prefix (/static/*); ambiguous paths are always inspected")
 	disableGroups := fs.String("disable-rule-groups", "", "comma-separated CRS attack families to remove when the application cannot be vulnerable to them: "+strings.Join(coraza.RuleGroupNames(), ", "))
 	logLevel := fs.String("log-level", "info", "log level: debug, info, warn or error (security events are logged at warn)")
+	rateLimitKeys := fs.Int("rate-limit-keys", ratelimit.DefaultKeys, "rate limit buckets held at once, for every policy's spec.rateLimits (about 48 bytes each, allocated with the first bundle that has limits); at most a quarter of the Go memory limit, 64 MiB without one")
 	eventLogRate := fs.Int("event-log-rate", 10, "security event log lines per second for each policy and rule, in bursts of as many; the rest are counted in inkwall_security_event_logs_suppressed_total, and still go to the operator (0 = no limit)")
 	jsonDenials := fs.Bool("json-denials", false, "answer a denied client that accepts application/json with a JSON body ({\"error\",\"status\",\"request_id\"}) instead of text (not spoe: HAProxy writes its denials)")
 	policyMetrics := fs.Bool("policy-metrics", false, "add inkwall_policy_requests_total, requests by policy (bundle mode); off by default for its cardinality")
@@ -383,6 +387,9 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 	if *eventLogRate < 0 {
 		return engineConfig{}, fmt.Errorf("--event-log-rate: %d, want 0 or more", *eventLogRate)
 	}
+	if *rateLimitKeys < 1 {
+		return engineConfig{}, fmt.Errorf("--rate-limit-keys: %d, want 1 or more", *rateLimitKeys)
+	}
 	if *bootstrap != "allow" && *bootstrap != "deny" {
 		return engineConfig{}, fmt.Errorf("--bootstrap: %q, want allow or deny", *bootstrap)
 	}
@@ -410,6 +417,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (engineConfig, 
 		command:          command,
 		logLevel:         level,
 		eventLogRate:     *eventLogRate,
+		rateLimitKeys:    *rateLimitKeys,
 		policyMetrics:    *policyMetrics,
 		jsonDenials:      *jsonDenials,
 		policyMetricsMax: *policyMetricsMax,
@@ -926,6 +934,12 @@ func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logge
 	evaluators := policy.NewEvaluators()
 	metrics.WatchRuleSets(evaluators.Len)
 	stats := events.NewStats()
+	limits := ratelimit.New(cfg.rateLimitKeys, debug.SetMemoryLimit(-1))
+	if limits.Capacity() < cfg.rateLimitKeys {
+		logger.Info("rate limit table capped at a quarter of the Go memory limit",
+			slog.Int("keys", limits.Capacity()), slog.Int("rate_limit_keys", cfg.rateLimitKeys))
+	}
+	metrics.Register(limits.Collectors()...)
 	opts := policy.Options{
 		Admission:  adm,
 		Observer:   metrics,
@@ -933,6 +947,7 @@ func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logge
 		BodyLimit:  cfg.maxBodyBytes,
 		Evaluators: evaluators,
 		Stats:      stats,
+		RateLimits: limits,
 	}
 	holder := &policy.Holder{DenyBeforeFirst: cfg.bootstrapDeny, Observer: metrics}
 	var secret *agent.SecretSource

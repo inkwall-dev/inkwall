@@ -111,6 +111,8 @@ func (l Limit) ID() uint32 { return l.id }
 // bundle's compiled policies, so a bundle swap keeps them. It is safe for
 // concurrent use.
 type Store struct {
+	alloc     sync.Once // the table, at the first Limit
+	perShard  int
 	seed      maphash.Seed
 	base      time.Time // the zero of entries' times, on the monotonic clock
 	shards    []shard
@@ -126,6 +128,8 @@ type Store struct {
 	evictIdle    atomic.Uint64
 	evictActive  atomic.Uint64
 	skippedNoKey atomic.Uint64
+	overDeny     atomic.Uint64 // requests over a Block limit
+	overLog      atomic.Uint64 // over a Detect limit (or on a Detect policy)
 	events       eventCaps
 }
 
@@ -166,6 +170,7 @@ func New(keys int, memLimit int64) *Store {
 	slots := (keys*100/loadPercent + shards - 1) / shards
 	perShard := max(neighbourhood, 1<<bits.Len(uint(max(slots, 1)-1)))
 	s := &Store{
+		perShard:  perShard,
 		seed:      maphash.MakeSeed(),
 		base:      time.Now(),
 		shards:    make([]shard, shards),
@@ -174,11 +179,18 @@ func New(keys int, memLimit int64) *Store {
 		capacity:  keys,
 		ids:       map[Identity]uint32{},
 	}
-	for i := range s.shards {
-		s.shards[i].e = make([]entry, perShard)
-	}
 	s.events.init()
 	return s
+}
+
+// allocate makes the table, once: an engine whose bundles have no limits
+// never holds it.
+func (s *Store) allocate() {
+	s.alloc.Do(func() {
+		for i := range s.shards {
+			s.shards[i].e = make([]entry, s.perShard)
+		}
+	})
 }
 
 // Capacity is the buckets a Store of keys holds under memLimit: keys, or
@@ -224,6 +236,7 @@ func (s *Store) Intern(id Identity) uint32 {
 // of burst (requests when not positive). requests and period are at least
 // 1 and 1ns.
 func (s *Store) Limit(id Identity, requests int64, period time.Duration, burst int64) Limit {
+	s.allocate()
 	requests = max(requests, 1)
 	if burst <= 0 {
 		burst = requests
@@ -243,13 +256,21 @@ type Live struct{ bits []uint64 }
 func NewLive(limits ...Limit) *Live {
 	l := &Live{}
 	for _, lim := range limits {
-		w := int(lim.id / 64)
-		for len(l.bits) <= w {
-			l.bits = append(l.bits, 0)
-		}
-		l.bits[w] |= 1 << (lim.id % 64)
+		l.Add(lim)
 	}
 	return l
+}
+
+// Add adds l to the set.
+func (s *Live) Add(l Limit) {
+	if s == nil {
+		return
+	}
+	w := int(l.id / 64)
+	for len(s.bits) <= w {
+		s.bits = append(s.bits, 0)
+	}
+	s.bits[w] |= 1 << (l.id % 64)
 }
 
 func (l *Live) has(id uint32) bool {
@@ -301,6 +322,25 @@ func (s *Store) Take(l Limit, k Key, t time.Time, live *Live) Decision {
 	return d
 }
 
+// Wait is how long until key k's request at t would be within l, without
+// charging it: 0 when it is now, whole seconds otherwise.
+func (s *Store) Wait(l Limit, k Key, t time.Time) time.Duration {
+	now := int64(t.Sub(s.base))
+	sh, i := s.locate(l.id, k)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	for j := range uint64(neighbourhood) {
+		e := &sh.e[(i+j)&s.slotMask]
+		if e.id == l.id && e.key == k {
+			if over := max(e.tat, now) + l.interval - now - l.burst*l.interval; over > 0 {
+				return ceilSeconds(over)
+			}
+			return 0
+		}
+	}
+	return 0
+}
+
 // Refund gives back the token a request took from l for key k, when a
 // later limit refused it.
 func (s *Store) Refund(l Limit, k Key) {
@@ -319,6 +359,30 @@ func (s *Store) Refund(l Limit, k Key) {
 // SkippedNoKey counts a request an IP limit couldn't count: no valid client
 // address.
 func (s *Store) SkippedNoKey() { s.skippedNoKey.Add(1) }
+
+// Exceeded counts a request over a limit: denied, or logged (detect).
+func (s *Store) Exceeded(detect bool) {
+	if detect {
+		s.overLog.Add(1)
+	} else {
+		s.overDeny.Add(1)
+	}
+}
+
+// Unsample gives back the n limited requests a sampled event stood for,
+// when the event caps dropped it: the key's next event counts them.
+func (s *Store) Unsample(l Limit, k Key, n uint32) {
+	sh, i := s.locate(l.id, k)
+	sh.mu.Lock()
+	for j := range uint64(neighbourhood) {
+		e := &sh.e[(i+j)&s.slotMask]
+		if e.id == l.id && e.key == k {
+			e.limited += n
+			break
+		}
+	}
+	sh.mu.Unlock()
+}
 
 func (s *Store) locate(id uint32, k Key) (*shard, uint64) {
 	var b [21]byte

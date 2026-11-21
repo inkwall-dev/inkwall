@@ -66,6 +66,12 @@ message SecurityEvent {
   // The protocol the request speaks: a WebSocket's handshake and messages
   // are PROTOCOL_WEBSOCKET. Unspecified from engines before v0.5.0.
   Protocol protocol = 22;
+  // With REASON_RATE_LIMIT: the limit's name (spec.rateLimits[].name).
+  string rate_limit = 23;
+  // How many events this one stands for, itself included, when the engine
+  // samples them: a rate limit's, its client's limited requests since its
+  // last event. 0 or 1: itself.
+  uint32 sampled_count = 24;
 }
 
 // Phase is the part of the exchange an event is about.

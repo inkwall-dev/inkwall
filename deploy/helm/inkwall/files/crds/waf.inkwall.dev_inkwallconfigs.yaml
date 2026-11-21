@@ -185,6 +185,19 @@ spec:
                       as policy="other"). Off by default: one series per policy, action and
                       reason. Applies to pods injected from then on.
                     type: boolean
+                  rateLimitKeys:
+                    description: |-
+                      RateLimitKeys is the rate limit buckets each engine holds at once,
+                      for every policy's spec.rateLimits: about 48 bytes each, allocated
+                      with the first bundle that has limits, and at most a quarter of the
+                      engine's memory limit. When the table is full, the buckets closest
+                      to full are forgotten (inkwall_rate_limit_evictions_total{kind="active"}).
+                      Unset: 262,144 (about 12 MiB). Applies to pods injected from then
+                      on. Requires engines 0.7.0 or later.
+                    format: int32
+                    maximum: 16777216
+                    minimum: 1024
+                    type: integer
                   resources:
                     description: |-
                       Resources of the engine container. Setting no CPU limit is

@@ -25,6 +25,8 @@ Every doc in this repository, by topic, with the question each one answers.
 - [Upgrading](upgrading.md): how do I upgrade an installation, and what changes on the way?
 - [Client IP behind a load balancer](client-ip.md): how does the engine see the real client
   address behind a load balancer?
+- [Rate limits](rate-limits.md): how do I limit a client's requests to a policy's routes, what
+  does a limited client get, and why does each engine count on its own?
 - [Rotating the bundle signing key](key-rotation.md): how do I replace the key that signs policy
   bundles, on demand or on a schedule?
 - [Connecting to a control plane](control-plane.md): how do I connect a cluster to a control plane,

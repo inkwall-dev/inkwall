@@ -5,8 +5,9 @@ This guide gets the real client address to the engine when [Traefik](https://doc
 a cloud L7 LB) that adds `X-Forwarded-For`, see [Behind an HTTP load balancer](#behind-an-http-load-balancer).
 
 The engine gives the client's address to the rules ([SecLang](https://coraza.io/docs/seclang/)'s `REMOTE_ADDR`) and records it in
-security events, and a policy's IP lists (`ipLists`, engines 0.5.0 or later) match it; the
-planned rate limits will key on it, and planned [geo blocking](design/0011-geo-blocking.md#9-client-ip) will match it too. Behind a load balancer
+security events, and a policy's IP lists (`ipLists`, engines 0.5.0 or later) match it, its
+[rate limits](rate-limits.md) (engines 0.7.0 or later) count by it, and planned
+[geo blocking](design/0011-geo-blocking.md#9-client-ip) will match it too. Behind a load balancer
 (LB), Traefik sees the LB, or a node, as its peer, and so does the engine, unless the real address
 reaches Traefik. A wrong client IP is worse than none: a rule against one address would block the
 LB, and every client would look like the same one.

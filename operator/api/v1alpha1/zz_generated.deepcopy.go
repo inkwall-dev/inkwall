@@ -282,6 +282,11 @@ func (in *EngineSpec) DeepCopyInto(out *EngineSpec) {
 		*out = new(corev1.ResourceRequirements)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.RateLimitKeys != nil {
+		in, out := &in.RateLimitKeys, &out.RateLimitKeys
+		*out = new(int32)
+		**out = **in
+	}
 	if in.ClientIP != nil {
 		in, out := &in.ClientIP, &out.ClientIP
 		*out = new(ClientIPSpec)

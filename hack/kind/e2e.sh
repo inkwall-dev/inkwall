@@ -705,6 +705,50 @@ untrusted=$(curl -s -o /dev/null -w '%{http_code}' --haproxy-protocol --haproxy-
   -H "Host: $TRAEFIK_HOST" -H "X-Request-Id: $pp_id-d" "http://127.0.0.1:$TRAEFIK_PORT$SQLI" || true)
 check "a PROXY header from an untrusted source: blocked" is_403 "$untrusted"
 pp_check "its address is ignored: the event has the real peer (127.0.0.1)" "$pp_id-d" 127.0.0.1
+
+# Rate limits through Traefik (#705), from two clients the PROXY protocol
+# names: past its burst a client gets 429 with Retry-After, another client
+# and another path don't, the engine logs the limit's event; in Detect
+# mode the requests pass and are logged.
+echo "== rate limits through Traefik"
+web_current() {
+  [[ $(tcondition Enforced status) == True &&
+    $(tcondition Enforced observedGeneration) == $("${KUBECTL[@]}" -n "$NS" get wafpolicy web -o jsonpath='{.metadata.generation}') ]]
+}
+# limited CLIENT PATH: "status retry-after" of a request from CLIENT.
+limited() {
+  "${KUBECTL[@]}" -n "$NS" exec lb -- curl -s -o /dev/null -w '%{http_code} %header{retry-after}' \
+    --haproxy-protocol --haproxy-clientip "$1" -H "Host: $TRAEFIK_HOST" -H "X-Request-Id: $3" \
+    "http://traefik-e2e.$TRAEFIK_NS.svc$2" || true
+}
+limit_event() {
+  "${KUBECTL[@]}" -n "$TRAEFIK_NS" logs deployment/traefik-e2e -c inkwall-engine |
+    grep -F '"msg":"security event"' | grep -F '"reason":"rate-limit"' | grep -F "\"client_ip\":\"$1\"" | grep -qF "\"action\":\"$2\""
+}
+rl_id=e2e-rl-$RANDOM
+"${KUBECTL[@]}" -n "$NS" patch wafpolicy web --type merge \
+  -p '{"spec":{"rateLimits":[{"name":"e2e","requests":1,"period":"1h","burst":3,"match":{"paths":["/limited/*"]}}]}}' >/dev/null
+eventually "a rate limit on the policy is Enforced" web_current
+rl_ok=true
+for i in 1 2 3; do
+  [[ $(limited 198.51.100.10 "/limited/$i" "$rl_id-$i") == "200 " ]] || rl_ok=false
+done
+check "a client's burst of 3 passes" "$rl_ok"
+rl_over=$(limited 198.51.100.10 /limited/4 "$rl_id-4")
+over_429() { [[ $rl_over == "429 "359[0-9] || $rl_over == "429 3600" ]]; }
+check "the 4th gets 429 with Retry-After of about an hour" over_429
+[[ $rl_over == 429* ]] || echo "      got: $rl_over"
+check "another client still passes" bash -c "[[ \"$(limited 198.51.100.11 /limited/1 "$rl_id-5")\" == '200 ' ]]"
+check "a path the limit doesn't name still passes" bash -c "[[ \"$(limited 198.51.100.10 /other "$rl_id-6")\" == '200 ' ]]"
+eventually "the engine logs the limit's event (rate-limit, deny)" limit_event 198.51.100.10 deny
+"${KUBECTL[@]}" -n "$NS" patch wafpolicy web --type json \
+  -p '[{"op":"add","path":"/spec/rateLimits/0/mode","value":"Detect"}]' >/dev/null
+eventually "the limit in Detect mode is Enforced" web_current
+check "in Detect mode, a client over the limit passes" bash -c "[[ \"$(limited 198.51.100.12 /limited/1 x)$(limited 198.51.100.12 /limited/2 x)$(limited 198.51.100.12 /limited/3 x)$(limited 198.51.100.12 /limited/4 "$rl_id-7")\" == '200 200 200 200 ' ]]"
+eventually "and is logged (rate-limit, log)" limit_event 198.51.100.12 log
+"${KUBECTL[@]}" -n "$NS" patch wafpolicy web --type json -p '[{"op":"remove","path":"/spec/rateLimits"}]' >/dev/null
+eventually "the policy without limits is Enforced" web_current
+check "without limits, the limited client passes again" bash -c "[[ \"$(limited 198.51.100.10 /limited/5 "$rl_id-8")\" == '200 ' ]]"
 "${KUBECTL[@]}" -n "$NS" delete pod lb --wait=false >/dev/null
 
 # Signing key rotation (#41), requested on the InkwallConfig with two

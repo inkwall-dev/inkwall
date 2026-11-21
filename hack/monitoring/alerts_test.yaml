@@ -138,6 +138,34 @@ tests:
               description: The forwardauth adapter of the engine in traefik/traefik-1 refuses 1 requests per second (invalid_request).
               runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwalladaptererrors
 
+  - name: rate limit state evicted
+    interval: 1m
+    input_series:
+      # 2 active evictions a second for 20 minutes: the table is full.
+      - series: 'inkwall_rate_limit_evictions_total{namespace="traefik",pod="traefik-0",kind="active"}'
+        values: '0+120x20'
+      # Idle evictions are harmless: no alert.
+      - series: 'inkwall_rate_limit_evictions_total{namespace="traefik",pod="traefik-1",kind="idle"}'
+        values: '0+600x20'
+      # A trickle (one every 4 minutes): no alert.
+      - series: 'inkwall_rate_limit_evictions_total{namespace="traefik",pod="traefik-2",kind="active"}'
+        values: '0+0.25x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: InkwallRateLimitStateEvicted
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: InkwallRateLimitStateEvicted
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: traefik
+              pod: traefik-0
+            exp_annotations:
+              summary: An Inkwall engine is forgetting rate limit state.
+              description: The engine in traefik/traefik-0 forgets 2 rate limit buckets per second in use, so their clients start again with a full burst.
+              runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallratelimitstateevicted
+
   - name: engines behind
     interval: 1m
     input_series:

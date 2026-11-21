@@ -682,3 +682,30 @@ func TestTestPolicyErrors(t *testing.T) {
 		t.Fatalf("bad key file: exit %d, stderr %q", code, errOut)
 	}
 }
+
+// A policy with rate limits compiles as the engine compiles it, but its
+// limits aren't applied: test checks one request at a time and keeps no
+// state, and says so (#705).
+func TestTestPolicyRateLimits(t *testing.T) {
+	objects := writeFile(t, "objects.yaml", `apiVersion: waf.inkwall.dev/v1alpha1
+kind: WAFPolicy
+metadata: {name: api, namespace: shop}
+spec:
+  targetRefs: [{kind: Ingress, name: api}]
+  mode: Block
+  rateLimits: [{name: api, requests: 1, period: 1h, burst: 1}]
+`)
+	req := "GET /api/a HTTP/1.1\r\nHost: shop.example.com\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\n\r\n"
+	requests := writeFile(t, "requests.http", req+req+req)
+	code, out, errOut := runCLI(t, "test", "--request", requests, "--policy", objects, "--ingress", sampleIngresses)
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q, out %q", code, errOut, out)
+	}
+	if strings.Contains(out, "rate_limit") || strings.Count(out, "allow") != 3 {
+		t.Errorf("three requests over a burst of 1: %q, want all allowed (limits not tested)", out)
+	}
+	// Notes go to stderr, as the bundle's.
+	if errOut != "note: rate limits are not tested (one request at a time, no state): shop/api\n" {
+		t.Errorf("stderr %q, want the note about the untested limits", errOut)
+	}
+}
