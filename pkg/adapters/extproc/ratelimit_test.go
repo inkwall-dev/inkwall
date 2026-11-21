@@ -58,4 +58,13 @@ func TestRateLimitDenial(t *testing.T) {
 	if denied(t, resps[0]) != 429 || got["retry-after"] != "60" || got["x-request-id"] == "" {
 		t.Errorf("over the limit: headers %v, want 429 with retry-after 60", got)
 	}
+	// A gRPC call over the limit: RESOURCE_EXHAUSTED (8), Retry-After too.
+	resps = e.exchange(t, headers("POST", "/shop.Cart/Add", false, "content-type", "application/grpc"))
+	got = map[string]string{}
+	for _, h := range resps[0].GetImmediateResponse().GetHeaders().GetSetHeaders() {
+		got[h.GetHeader().GetKey()] = string(h.GetHeader().GetRawValue())
+	}
+	if resps[0].GetImmediateResponse().GetGrpcStatus().GetStatus() != 8 && got["grpc-status"] != "8" || got["retry-after"] == "" {
+		t.Errorf("gRPC over the limit: %v, headers %v; want grpc-status 8 and retry-after", resps[0].GetImmediateResponse().GetGrpcStatus(), got)
+	}
 }

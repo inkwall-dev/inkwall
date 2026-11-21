@@ -1234,3 +1234,40 @@ func TestRateLimitsSeveralPolicies(t *testing.T) {
 		t.Errorf("api past its burst: %s/%s, want logged rate-limit (Detect)", v.Action, v.Reason)
 	}
 }
+
+// Two Block policies inspect a request (its raw and decoded paths select
+// both); BodyLimit finds it over the second
+// one's limit. Check answers that 429 first: the first one's rules don't
+// run on a body that wasn't read, and its 403 doesn't replace the 429.
+func TestRateLimitedPolicyAnswersFirst(t *testing.T) {
+	b := testBundle()
+	b.Policies[1].Mode = bundlev1.Mode_MODE_BLOCK
+	b.Policies[1].RateLimits = []*bundlev1.RateLimit{{Name: "api", Requests: 1, Period: durationpb.New(time.Hour), Burst: 1}}
+	set, err := Compile(b, Options{RateLimits: ratelimit.New(1024, 0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := func(query string) *request.Request {
+		r := req("shop.example.com", "/api%2Fx"+query)
+		r.ClientIP = netip.MustParseAddr("198.51.100.7")
+		return r
+	}
+	var buf [4]*Policy
+	if ps := set.policiesFor(from(""), buf[:0]); len(ps) != 2 {
+		t.Fatalf("/api%%2Fx is inspected by %d policies, want 2", len(ps))
+	}
+	// A clean request, without a prior BodyLimit: Check decides, and both
+	// policies pass it, spending api's one token.
+	if v := set.Check(context.Background(), from("")); v.Action != pipeline.ActionAllow {
+		t.Fatalf("first: %s/%s", v.Action, v.Reason)
+	}
+	// An attack the CRS of shop/site denies, now over api's limit.
+	r := from(sqli)
+	set.BodyLimit(r, 1<<10)
+	if v := set.Check(context.Background(), r); v.Status != 429 || v.RateLimit != "api" {
+		t.Errorf("over api's limit: %d %s %q, want 429 by api, not the rules' 403", v.Status, v.Reason, v.RateLimit)
+	}
+	if v, x := set.CheckExchange(context.Background(), r); v.Status != 429 || x != nil {
+		t.Errorf("CheckExchange: %d, exchange %v, want 429 and none", v.Status, x)
+	}
+}

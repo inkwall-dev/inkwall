@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
 	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
 	"github.com/inkwall-dev/inkwall/pkg/request"
@@ -180,6 +183,19 @@ func TestRateLimitMatch(t *testing.T) {
 		{"POST", "/loginx", false},
 		{"POST", "/api/sessions", false},
 		{"GET", "/login", false},
+		// Methods compare in upper case: an application may serve "post"
+		// as POST.
+		{"post", "/login", true},
+		// Percent-encoding that doesn't change routing is decoded: an é on
+		// another path doesn't count against /login.
+		{"POST", "/search/caf%C3%A9", false},
+		{"POST", "/files/a%20b.pdf", false},
+		{"POST", "/log%69n", true},
+		// Encodings that do change routing: ambiguous, so counted.
+		{"POST", "/x%2F..%2Flogin", true},
+		{"POST", "/x%5Clogin", true},
+		{"POST", "/%EF%BC%ACogin", true},      // a fullwidth L
+		{"POST", "/%C0%AE%C0%AE/login", true}, // overlong dots: invalid UTF-8
 	} {
 		// A fresh client each: its first request passes, a counted second is limited.
 		c := netip.AddrFrom4([4]byte{198, 51, 100, byte(i + 1)}).String()
@@ -294,15 +310,85 @@ func TestRateLimitBodyLimit(t *testing.T) {
 	if v := check(p, r); v.Status != http.StatusTooManyRequests || !v.RateLimitEvent {
 		t.Fatalf("over the limit: %+v, want 429 decided in BodyLimit", v)
 	}
-	// A swap between BodyLimit and Check: the new bundle's pipeline finds
-	// no outcome of its own and decides again.
-	other, _ := limitedPipeline(t, ModeBlock, eval, RateLimitConfig{Name: "upload", Requests: 1, Period: time.Hour, Burst: 2})
-	r = req(c, "POST", "/x")
-	p.BodyLimit(r, 100)
-	if v := check(other, r); v.Action != ActionAllow {
-		t.Errorf("after a swap: %s/%s, want the new store's fresh bucket", v.Action, v.Reason)
-	}
-	if !p.RateLimited(r) || other.RateLimited(r) {
+	if !p.RateLimited(r) {
 		t.Error("RateLimited doesn't name the pipeline that limited")
 	}
+}
+
+// A bundle swap between BodyLimit and Check: the new bundle's pipeline,
+// sharing the store, finds no outcome of its own and decides again,
+// charging the request twice: the rare cost of a swap mid-request
+// (design 0009 §5.1).
+func TestRateLimitBodyLimitSwap(t *testing.T) {
+	store := ratelimit.New(1024, 0)
+	compile := func() *Pipeline {
+		rl, err := CompileRateLimits(store, ratelimit.NewLive(), "shop/web", []RateLimitConfig{{Name: "upload", Requests: 1, Period: time.Hour, Burst: 2}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return New(&recordingEvaluator{}, Config{Mode: ModeBlock, RateLimits: rl})
+	}
+	old, next := compile(), compile()
+	r := req("198.51.100.7", "POST", "/x")
+	old.BodyLimit(r, 100)
+	if v := check(next, r); v.Action != ActionAllow || next.RateLimited(r) {
+		t.Fatalf("after a swap: %s/%s, want allowed by the new pipeline", v.Action, v.Reason)
+	}
+	// Both charged: the burst of 2 is spent.
+	if v := check(next, req("198.51.100.7", "POST", "/x")); v.Reason != ReasonRateLimit {
+		t.Errorf("the next request: %s, want limited (the swapped request was charged twice)", v.Reason)
+	}
+}
+
+// The engine refuses what the CRD refuses, rather than trust the bundle:
+// more than 8 limits (a 9th couldn't be refunded), or two of one name
+// (they'd share buckets).
+func TestCompileRateLimitsBounds(t *testing.T) {
+	store := ratelimit.New(1024, 0)
+	var nine []RateLimitConfig
+	for i := range 9 {
+		nine = append(nine, RateLimitConfig{Name: string(rune('a' + i)), Requests: 1, Period: time.Second})
+	}
+	if _, err := CompileRateLimits(store, nil, "p", nine); err == nil {
+		t.Error("9 limits compiled")
+	}
+	if _, err := CompileRateLimits(store, nil, "p", nine[:8]); err != nil {
+		t.Errorf("8 limits: %v", err)
+	}
+	dup := []RateLimitConfig{{Name: "a", Requests: 1, Period: time.Second}, {Name: "a", Requests: 2, Period: time.Second}}
+	if _, err := CompileRateLimits(store, nil, "p", dup); err == nil {
+		t.Error("two limits of one name compiled")
+	}
+}
+
+// A request without a client address is counted once in skipped, however
+// many IP limits it skips.
+func TestRateLimitNoKeyCountedOnce(t *testing.T) {
+	eval := &recordingEvaluator{}
+	p, store := limitedPipeline(t, ModeBlock, eval,
+		RateLimitConfig{Name: "a", Requests: 1, Period: time.Hour},
+		RateLimitConfig{Name: "b", Requests: 1, Period: time.Hour},
+		RateLimitConfig{Name: "c", Requests: 1, Period: time.Hour, Detect: true})
+	check(p, &request.Request{Method: "GET", RawURI: "/x", Headers: http.Header{}})
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(store.Collectors()...)
+	if n := testutil.ToFloat64(firstCollector(t, reg, "inkwall_rate_limit_skipped_total")); n != 1 {
+		t.Errorf("skipped %v, want 1", n)
+	}
+}
+
+func firstCollector(t *testing.T, reg *prometheus.Registry, name string) prometheus.Collector {
+	t.Helper()
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() == name && len(mf.GetMetric()) > 0 {
+			v := mf.GetMetric()[0].GetCounter().GetValue()
+			return prometheus.NewCounterFunc(prometheus.CounterOpts{Name: "x", Help: "x"}, func() float64 { return v })
+		}
+	}
+	t.Fatalf("no %s", name)
+	return nil
 }

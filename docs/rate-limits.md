@@ -144,8 +144,7 @@ retry at once.
 
 `mode: Detect` on a limit logs the requests over it and lets them through, on a policy already in
 `Block`: the rules still run, and if a rule matches, its reason wins. Watch
-`inkwall_requests_total{reason="rate-limit"}` (`action="log"`) and the `rate-limit` events for a
-few days: real clients
+`inkwall_rate_limit_exceeded_total{action="log"}` and the `rate-limit` events for a few days: real clients
 should stay under the limit, and the events' `client_ip` should be real clients. Then remove
 `mode`.
 
@@ -156,17 +155,19 @@ Each engine holds at most `spec.engine.rateLimitKeys` buckets (`--rate-limit-key
 every policy, and capped at a quarter of the engine's memory limit (64 MiB without one). The
 setting reaches engines when their pods are recreated.
 
-A bucket that is full again is free, so most keys cost nothing once their clients go quiet. When
-the table is full of active buckets, the one closest to full is forgotten: that client gets a fresh
-bucket, so this errs toward letting requests through. `inkwall_rate_limit_evictions_total{kind="active"}`
-counts these, and the alert `InkwallRateLimitStateEvicted` fires when they go on: raise
+A bucket that is full again is free, so most keys cost nothing once their clients go quiet. A key can
+use 8 slots near its hash; when they all hold buckets in use, the one closest to full is
+forgotten: that client gets a fresh bucket, so this errs toward letting requests through. A few
+happen before the table is full; `inkwall_rate_limit_evictions_total{kind="active"}` counts them,
+and the alert `InkwallRateLimitStateEvicted` fires past 6 a minute for 15 minutes: raise
 `rateLimitKeys`, or look for a client cycling addresses.
 
 ## Metrics and events
 
 | Metric | Meaning |
 |---|---|
-| `inkwall_requests_total{reason="rate-limit"}` | Requests over a limit (`action` `deny`, or `log` in `Detect`) |
+| `inkwall_requests_total{reason="rate-limit"}` | Requests a limit decided (`action` `deny`, or `log` in `Detect`) |
+| `inkwall_rate_limit_exceeded_total{action}` | Requests over a limit, also when a rule decided the request (`deny`, `log`) |
 | `inkwall_rate_limit_keys`, `inkwall_rate_limit_key_capacity` | Buckets held, and the table's size |
 | `inkwall_rate_limit_evictions_total{kind}` | `idle` (harmless) and `active` (state forgotten) |
 | `inkwall_rate_limit_skipped_total{reason="no_key"}` | Requests without a valid client address |
@@ -178,6 +179,9 @@ client's first limited request, then one a minute, with `sampled_count` saying h
 it stands for; at most 100 a second per limit and 10 a second per engine. Every limited request is
 still counted in the metrics. So a 429's `X-Request-Id` may have no event: look up the client's
 earlier one.
+
+`inkwallctl test` compiles a policy's limits, so a wrong one is an error there too, but doesn't
+apply them: it checks one request at a time and keeps no state, and says so on stderr.
 
 ## Upgrading and rolling back
 

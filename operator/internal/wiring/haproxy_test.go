@@ -625,9 +625,10 @@ func TestHAProxyReadBodyMatchesEngine(t *testing.T) {
 // catch-all 403 that would otherwise answer it (#705).
 func TestHAProxySnippetRateLimit(t *testing.T) {
 	s := HAProxySnippet(HAProxySnippetOptions{Body: true})
-	rule := `http-request deny deny_status 429 hdr x-request-id "%[var(txn.inkwall.request_id)]" hdr retry-after "%[var(txn.inkwall.retry_after)]" if { var(txn.inkwall.status) -m int 429 }`
-	i, j := strings.Index(s, rule), strings.Index(s, "deny_status 403")
-	if i < 0 || j < 0 || i > j {
-		t.Errorf("the 429 rule is missing or after the 403:\n%s", s)
+	rule := `http-request deny deny_status 429 hdr x-request-id "%[var(txn.inkwall.request_id)]" hdr retry-after "%[var(txn.inkwall.retry_after)]" if { var(txn.inkwall.status) -m int 429 } { var(txn.inkwall.retry_after) -m found }`
+	plain := `http-request deny deny_status 429 hdr x-request-id "%[var(txn.inkwall.request_id)]" if { var(txn.inkwall.status) -m int 429 }`
+	i, k, j := strings.Index(s, rule), strings.Index(s, plain), strings.Index(s, "deny_status 403")
+	if i < 0 || k < i || j < k {
+		t.Errorf("want the 429 rule with Retry-After, then one without (a rule's status:429), then the 403:\n%s", s)
 	}
 }

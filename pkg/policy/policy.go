@@ -64,6 +64,10 @@ type Options struct {
 	// RateLimits holds every policy's rate limit buckets, across bundles
 	// (nil: a bundle with rate limits doesn't compile).
 	RateLimits *ratelimit.Store
+	// IgnoreRateLimits compiles the policies' rate limits, so an error is
+	// still one, but doesn't apply them: for inkwallctl test, which checks
+	// one request at a time.
+	IgnoreRateLimits bool
 }
 
 // Policy is one compiled policy.
@@ -149,6 +153,11 @@ func (s *Set) Check(ctx context.Context, r *request.Request) pipeline.Verdict {
 		ps[0].counter.Observe(v)
 		return v
 	}
+	if p := rateLimited(ps, r); p != nil {
+		v := p.pipeline.Check(ctx, p.view(r))
+		p.counter.Observe(v)
+		return v
+	}
 	var out pipeline.Verdict
 	for i, p := range ps {
 		v := p.pipeline.Check(ctx, p.view(r))
@@ -177,6 +186,11 @@ func (s *Set) CheckExchange(ctx context.Context, r *request.Request) (pipeline.V
 	ps := s.policiesFor(r, buf[:0])
 	if len(ps) == 0 {
 		return observe(s.observer, pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy}), nil
+	}
+	if p := rateLimited(ps, r); p != nil && len(ps) > 1 {
+		v := p.pipeline.Check(ctx, p.view(r))
+		p.counter.Observe(v)
+		return v, nil
 	}
 	var out pipeline.Verdict
 	var xs []*pipeline.Exchange
@@ -240,6 +254,19 @@ func (c countedStream) CheckGRPCMessage(ctx context.Context, call *request.Reque
 }
 
 func (c countedStream) Mode() pipeline.Mode { return c.p.pipeline.Mode() }
+
+// rateLimited is the policy of ps that BodyLimit found r over one of the
+// rate limits of, nil if none: it answers r (429) first, so the others'
+// rules don't run on a body that wasn't read, nor a 403 of theirs replace
+// the 429.
+func rateLimited(ps []*Policy, r *request.Request) *Policy {
+	for _, p := range ps {
+		if p.pipeline.RateLimited(r) {
+			return p
+		}
+	}
+	return nil
+}
 
 // BodyLimit implements pipeline.Inspector: the policy's body limit, at
 // most max (the adapter's own) when max is positive, or 0 when its bodies,
@@ -424,6 +451,9 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 	}
 	if pc.RateLimits, err = pipeline.CompileRateLimits(o.RateLimits, live, bp.GetId(), rateLimits(bp)); err != nil {
 		return nil, key, err
+	}
+	if o.IgnoreRateLimits {
+		pc.RateLimits = nil
 	}
 	return &Policy{ID: bp.GetId(), pipeline: pipeline.New(eval, pc), bodyLimit: bodyLimit}, key, nil
 }

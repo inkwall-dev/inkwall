@@ -147,6 +147,9 @@ tests:
       # Idle evictions are harmless: no alert.
       - series: 'inkwall_rate_limit_evictions_total{namespace="traefik",pod="traefik-1",kind="idle"}'
         values: '0+600x20'
+      # A trickle (one every 4 minutes): no alert.
+      - series: 'inkwall_rate_limit_evictions_total{namespace="traefik",pod="traefik-2",kind="active"}'
+        values: '0+0.25x20'
     alert_rule_test:
       - eval_time: 10m
         alertname: InkwallRateLimitStateEvicted

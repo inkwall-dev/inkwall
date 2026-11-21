@@ -6,15 +6,20 @@ package pipeline
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"path"
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/router"
 )
+
+// MaxRateLimits is the most limits a policy has (spec.rateLimits).
+const MaxRateLimits = 8
 
 // DefaultIPv6Prefix is the prefix IPv6 clients are counted by when a limit
 // doesn't set one: a subscriber holds at least a /64, often a /56 or a /48.
@@ -76,8 +81,19 @@ func CompileRateLimits(store *ratelimit.Store, live *ratelimit.Live, policy stri
 	if store == nil {
 		return nil, fmt.Errorf("rate limits without a rate limit store")
 	}
+	// The CRD allows 8, with unique names; the engine doesn't trust the
+	// bundle for it: a 9th limit couldn't be refunded, and two of one name
+	// would share their buckets.
+	if len(cfgs) > MaxRateLimits {
+		return nil, fmt.Errorf("%d rate limits, at most %d", len(cfgs), MaxRateLimits)
+	}
 	rl := &RateLimits{store: store, live: live}
+	names := map[string]bool{}
 	for _, c := range cfgs {
+		if names[c.Name] {
+			return nil, fmt.Errorf("rate limit %q twice", c.Name)
+		}
+		names[c.Name] = true
 		if c.Requests < 1 || c.Period < time.Second {
 			return nil, fmt.Errorf("rate limit %q: requests and period must be at least 1 and 1s", c.Name)
 		}
@@ -135,11 +151,46 @@ func trimSlash(p string) string {
 	return p
 }
 
-// matches reports whether l counts r: its method, and its path, or any
-// path when r's can't be read one way. path is r's path in lower case,
-// "" when ambiguous.
-func (l *rateLimit) matches(r *request.Request, path string, ambiguous bool) bool {
-	if len(l.methods) > 0 && !slices.Contains(l.methods, r.Method) {
+// limitPath is r's path as limits compare it: decoded and in lower case.
+// ambiguous: the path can be read more than one way by the application,
+// through an encoding that changes routing (an encoded /, . or \, a ;, a
+// //, a dot segment, invalid UTF-8, fullwidth forms some applications fold
+// to ASCII); it then counts against every limit with paths. Other
+// percent-encoding (an é, a space) is decoded and compared as usual.
+func limitPathOf(rawURI string) (p string, ambiguous bool) {
+	if p, ok := router.UnambiguousPath(rawURI); ok {
+		return strings.ToLower(p), false
+	}
+	raw, _, _ := strings.Cut(rawURI, "?")
+	lower := strings.ToLower(raw)
+	if raw == "" || raw[0] != '/' || strings.ContainsAny(raw, ";\\") ||
+		strings.Contains(lower, "%2f") || strings.Contains(lower, "%2e") || strings.Contains(lower, "%5c") || strings.Contains(lower, "%00") {
+		return "", true
+	}
+	dec, err := url.PathUnescape(raw)
+	if err != nil || !utf8.ValidString(dec) || strings.Contains(dec, "//") {
+		return "", true
+	}
+	for _, c := range dec {
+		if c < 0x20 || c == 0x7f || c >= 0xFF01 && c <= 0xFF5E {
+			return "", true
+		}
+	}
+	clean := path.Clean(dec)
+	if strings.HasSuffix(dec, "/") && clean != "/" {
+		clean += "/"
+	}
+	if clean != dec {
+		return "", true // a dot segment
+	}
+	return strings.ToLower(dec), false
+}
+
+// matches reports whether l counts r, whose method is method (upper case):
+// its method, and its path, or any path when r's is ambiguous (path is
+// limitPathOf's).
+func (l *rateLimit) matches(method, path string, ambiguous bool) bool {
+	if len(l.methods) > 0 && !slices.Contains(l.methods, method) {
 		return false
 	}
 	if len(l.paths) == 0 || ambiguous {
@@ -176,6 +227,9 @@ type limited struct {
 	retryAfter time.Duration
 	event      bool
 	sampled    uint32
+	// key is the key of over or detect, for giving back the count of an
+	// event the caps dropped.
+	key ratelimit.Key
 }
 
 // check charges r against the limits at t: the Block ones together, a
@@ -187,72 +241,79 @@ func (rl *RateLimits) check(r *request.Request, t time.Time, block bool) limited
 	if rl == nil {
 		return out
 	}
-	p, ok := router.UnambiguousPath(r.RawURI)
-	p = strings.ToLower(p)
-	var charged [8]struct {
+	p, ambiguous := limitPathOf(r.RawURI)
+	method := strings.ToUpper(r.Method)
+	var charged [MaxRateLimits]struct {
 		l *rateLimit
 		k ratelimit.Key
 	}
 	n := 0
-	refund := func() {
-		for _, c := range charged[:n] {
-			rl.store.Refund(c.l.lim, c.k)
-		}
+	noKey := false
+	key := func(l *rateLimit) (ratelimit.Key, bool) {
+		k, valid := rl.key(l, r)
+		noKey = noKey || !valid
+		return k, valid
 	}
 	for i := range rl.limits {
 		l := &rl.limits[i]
-		if l.detect || !block || !l.matches(r, p, !ok) {
+		if l.detect || !block || !l.matches(method, p, ambiguous) {
 			continue
 		}
-		k, valid := rl.key(l, r)
+		k, valid := key(l)
 		if !valid {
-			rl.store.SkippedNoKey()
 			continue
 		}
 		d := rl.store.Take(l.lim, k, t, rl.live)
 		if d.Allowed {
-			if n < len(charged) {
-				charged[n].l, charged[n].k = l, k
-				n++
-			}
+			charged[n].l, charged[n].k = l, k
+			n++
 			continue
 		}
-		refund()
-		out.over, out.retryAfter, out.event, out.sampled = l, d.RetryAfter, d.Event, d.Sampled
+		for _, c := range charged[:n] {
+			rl.store.Refund(c.l.lim, c.k)
+		}
+		out.over, out.key, out.retryAfter, out.event, out.sampled = l, k, d.RetryAfter, d.Event, d.Sampled
 		// The largest wait of the limits the request would also exceed.
 		for j := i + 1; j < len(rl.limits); j++ {
 			m := &rl.limits[j]
-			if m.detect || !m.matches(r, p, !ok) {
+			if m.detect || !m.matches(method, p, ambiguous) {
 				continue
 			}
 			if mk, valid := rl.key(m, r); valid {
-				if wait := rl.store.Wait(m.lim, mk, t); wait > out.retryAfter {
-					out.retryAfter = wait
-				}
+				out.retryAfter = max(out.retryAfter, rl.store.Wait(m.lim, mk, t))
 			}
 		}
 		break
 	}
-	if out.over != nil {
-		out.event = out.event && rl.store.AllowEvent(out.over.lim, t)
-		return out
-	}
-	for i := range rl.limits {
-		l := &rl.limits[i]
-		if block && !l.detect || !l.matches(r, p, !ok) {
-			continue
-		}
-		k, valid := rl.key(l, r)
-		if !valid {
-			rl.store.SkippedNoKey()
-			continue
-		}
-		if d := rl.store.Take(l.lim, k, t, rl.live); !d.Allowed && out.detect == nil {
-			out.detect, out.retryAfter, out.event, out.sampled = l, d.RetryAfter, d.Event, d.Sampled
+	if out.over == nil {
+		for i := range rl.limits {
+			l := &rl.limits[i]
+			if block && !l.detect || !l.matches(method, p, ambiguous) {
+				continue
+			}
+			k, valid := key(l)
+			if !valid {
+				continue
+			}
+			if d := rl.store.Take(l.lim, k, t, rl.live); !d.Allowed && out.detect == nil {
+				out.detect, out.key, out.retryAfter, out.event, out.sampled = l, k, d.RetryAfter, d.Event, d.Sampled
+			}
 		}
 	}
-	if out.detect != nil {
-		out.event = out.event && rl.store.AllowEvent(out.detect.lim, t)
+	if noKey {
+		rl.store.SkippedNoKey() // once per request, however many limits
+	}
+	limit := out.over
+	if limit == nil {
+		limit = out.detect
+	}
+	if limit != nil {
+		rl.store.Exceeded(out.over == nil)
+		if out.event && !rl.store.AllowEvent(limit.lim, t) {
+			// Dropped by the caps: its count goes to the key's next event.
+			rl.store.Unsample(limit.lim, out.key, out.sampled)
+			out.event, out.sampled = false, 0
+		}
 	}
 	return out
 }
@@ -269,7 +330,11 @@ type decisions struct {
 
 // limitsFor charges r against p's limits at now, once: BodyLimit and Check
 // both ask, and the second gets the first's outcome. A pipeline of another
-// bundle (a swap between the two) finds none of its own and decides again.
+// bundle (a swap between the two) finds none of its own and decides again,
+// charging r twice; and if BodyLimit had found r over (body limit 0) while
+// the new bundle allows it, r is inspected without its body, as for a
+// skip.bodyPaths change in between. Both are rare, and err toward denying
+// or toward the new bundle's settings.
 func (p *Pipeline) limitsFor(r *request.Request, now time.Time) limited {
 	if p.limits == nil {
 		return limited{}

@@ -173,6 +173,7 @@ Engine metrics carry `adapter` where it says so (`proxy`, `forwardauth`, `httpch
 | `inkwall_rate_limit_keys` | gauge | | Rate limit buckets held, full ones included until their entry is reused. |
 | `inkwall_rate_limit_key_capacity` | gauge | | The rate limit table's capacity (`--rate-limit-keys`), after its cap of a quarter of the memory limit. |
 | `inkwall_rate_limit_evictions_total` | counter | `kind` | Rate limit entries reused for a new key: `idle` (a full bucket, or a limit no longer in the bundle: nothing lost) or `active` (the bucket closest to full: its state forgotten, because the table is too small or a client is cycling keys). |
+| `inkwall_rate_limit_exceeded_total` | counter | `action` | Requests over a rate limit: `deny`, or `log` for a `Detect` limit, also when a rule decided the request. |
 | `inkwall_rate_limit_skipped_total` | counter | `reason` | Requests a rate limit couldn't count: `no_key`, no valid client address. |
 | `inkwall_rate_limit_events_dropped_total` | counter | | Rate limit security events left out by the per-limit or engine-wide event cap; the requests are still counted. |
 
@@ -272,9 +273,10 @@ engine's log names each one.
 
 ### InkwallRateLimitStateEvicted
 
-An engine's rate limit table has been full of buckets in use for 15 minutes
-(`inkwall_rate_limit_evictions_total{kind="active"}`): to track a new client it forgets the
-bucket closest to full, and that client starts again with a full burst. Limits still hold for
+An engine has forgotten rate limit buckets in use, more than 6 a minute for 15 minutes
+(`inkwall_rate_limit_evictions_total{kind="active"}`): a new key's slots (a key can use 8 near its
+hash) were all taken by buckets in use, so the one closest to full was forgotten, and its client
+starts again with a full burst. A few happen before the table is full. Limits still hold for
 most clients, but less exactly. Either the table is too small for the clients being limited (raise
 `spec.engine.rateLimitKeys`, then restart the proxy pods; `inkwall_rate_limit_key_capacity` shows
 the size, which is capped at a quarter of the engine's memory limit), or a client is cycling

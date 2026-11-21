@@ -26,6 +26,7 @@ import (
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
+	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
 )
 
 const tuneUsage = "usage: inkwallctl tune [--from-logs] [--policy FILE ...] [--rule-set FILE ...] [--configmap FILE ...] [--ingress FILE ...] [--broad] [-o text|yaml] FILE ..."
@@ -491,7 +492,7 @@ func (rep *tuneReport) validateInput(in resolver.Input, suspended bool, notes io
 	if err != nil {
 		return nil, fmt.Errorf("the policies with the suggestions: %w", err)
 	}
-	if _, err := policy.Compile(b, policy.Options{}); err != nil {
+	if _, err := policy.Compile(b, policy.Options{RateLimits: ratelimit.New(1024, 0)}); err != nil {
 		return nil, fmt.Errorf("the engine would reject the policies with the suggestions: %w", err)
 	}
 	return b, nil

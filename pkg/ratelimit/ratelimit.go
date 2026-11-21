@@ -128,6 +128,8 @@ type Store struct {
 	evictIdle    atomic.Uint64
 	evictActive  atomic.Uint64
 	skippedNoKey atomic.Uint64
+	overDeny     atomic.Uint64 // requests over a Block limit
+	overLog      atomic.Uint64 // over a Detect limit (or on a Detect policy)
 	events       eventCaps
 }
 
@@ -357,6 +359,30 @@ func (s *Store) Refund(l Limit, k Key) {
 // SkippedNoKey counts a request an IP limit couldn't count: no valid client
 // address.
 func (s *Store) SkippedNoKey() { s.skippedNoKey.Add(1) }
+
+// Exceeded counts a request over a limit: denied, or logged (detect).
+func (s *Store) Exceeded(detect bool) {
+	if detect {
+		s.overLog.Add(1)
+	} else {
+		s.overDeny.Add(1)
+	}
+}
+
+// Unsample gives back the n limited requests a sampled event stood for,
+// when the event caps dropped it: the key's next event counts them.
+func (s *Store) Unsample(l Limit, k Key, n uint32) {
+	sh, i := s.locate(l.id, k)
+	sh.mu.Lock()
+	for j := range uint64(neighbourhood) {
+		e := &sh.e[(i+j)&s.slotMask]
+		if e.id == l.id && e.key == k {
+			e.limited += n
+			break
+		}
+	}
+	sh.mu.Unlock()
+}
 
 func (s *Store) locate(id uint32, k Key) (*shard, uint64) {
 	var b [21]byte

@@ -4,7 +4,6 @@
 package ratelimit
 
 import (
-	"github.com/prometheus/client_golang/prometheus"
 	"math"
 	"net/netip"
 	"sync"
@@ -12,6 +11,8 @@ import (
 	"testing"
 	"time"
 	"unsafe"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func ip(s string) Key {
@@ -404,7 +405,24 @@ func TestCollectors(t *testing.T) {
 	for _, mf := range mfs {
 		series[mf.GetName()] = len(mf.GetMetric())
 	}
-	if series["inkwall_rate_limit_evictions_total"] != 2 || series["inkwall_rate_limit_keys"] != 1 || len(series) != 5 {
+	if series["inkwall_rate_limit_evictions_total"] != 2 || series["inkwall_rate_limit_exceeded_total"] != 2 || series["inkwall_rate_limit_keys"] != 1 || len(series) != 6 {
 		t.Errorf("metrics %v", series)
 	}
+}
+
+// An event the caps dropped gives its count back: the key's next event
+// stands for those requests too.
+func TestUnsample(t *testing.T) {
+	s := New(1024, 0)
+	t0 := s.base.Add(time.Hour)
+	k := ip("192.0.2.1")
+	l := limit(s, "a", 1, time.Hour, 1)
+	s.Take(l, k, t0, nil)
+	d := s.Take(l, k, t0, nil) // the first limited: an event of 1
+	s.Unsample(l, k, d.Sampled)
+	s.Take(l, k, t0.Add(time.Second), nil) // not sampled: within the minute
+	if d := s.Take(l, k, t0.Add(time.Minute), nil); !d.Event || d.Sampled != 3 {
+		t.Errorf("the next event: %+v, want one standing for 3 (1 given back, 2 since)", d)
+	}
+	s.Unsample(l, ip("192.0.2.9"), 5) // a key it doesn't hold: nothing
 }

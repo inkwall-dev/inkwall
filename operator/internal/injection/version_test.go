@@ -4,10 +4,11 @@
 package injection
 
 import (
-	"k8s.io/utils/ptr"
 	"slices"
 	"strings"
 	"testing"
+
+	"k8s.io/utils/ptr"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 )
