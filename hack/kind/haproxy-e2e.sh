@@ -25,7 +25,7 @@
 # chart's default since 1.55.0) are wired through the controller's Backend
 # custom resource, 3.1 to 3.2 through backend config snippets, which 3.4
 # dropped (#753); the Ingress then carries a snippet of the user's own,
-# which stays. KEEP=1 leaves the test's objects.
+# which stays, and the controller is upgraded to 3.4 and back mid-test. KEEP=1 leaves the test's objects.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -39,12 +39,19 @@ OPERATOR_NS=inkwall-system
 # and the apps'.
 NS=haproxy-e2e
 # The controller's release, from its chart: 3.4.1 (HAProxy 3.4), the
-# chart's, or 3.2.20 (HAProxy 3.2, make kind-e2e-haproxy-3.2).
+# chart's, or 3.2.20 (HAProxy 3.2, make kind-e2e-haproxy-snippets), which
+# is upgraded to UPGRADE_TAG and back down mid-test.
 HAPROXY_IMAGE_TAG=${HAPROXY_IMAGE_TAG:-3.4.1}
+UPGRADE_TAG=3.4.1
 # v34: wired through the Backend custom resource (3.4 and later).
 v34=false
-IFS=. read -r haproxy_major haproxy_minor _ <<<"$HAPROXY_IMAGE_TAG"
-if ((haproxy_major > 3 || (haproxy_major == 3 && haproxy_minor >= 4))); then v34=true; fi
+is_v34() {
+  local major minor
+  IFS=. read -r major minor _ <<<"$1"
+  ((major > 3 || (major == 3 && minor >= 4)))
+}
+if is_v34 "$HAPROXY_IMAGE_TAG"; then v34=true; fi
+started_v34=$v34
 BACKEND=backends.ingress.v3.haproxy.org/inkwall-waf-app
 GLOBAL=inkwall-e2e-global
 HAPROXY_REPO=https://haproxytech.github.io/helm-charts
@@ -206,17 +213,20 @@ wiring() {
   fi
 }
 # The rules the checks look for, as each writes them.
-if $v34; then
-  RESPONSES_SCOPE='"spoe_engine":"inkwall-responses"' REQUEST_SCOPE='"spoe_engine":"inkwall"'
-  SEND_RESPONSE='"type":"send-spoe-group"' RESPONSE_RULES='http_response_rule_list'
-  FRAME_RULE='"cond_test":"{ var(txn.inkwall.error) -m int 3 259 }","deny_status":413'
-  CLOSED_RULE='"cond_test":"!{ var(txn.inkwall.action) -m found }","deny_status":503'
-else
-  RESPONSES_SCOPE='filter spoe engine inkwall-responses' REQUEST_SCOPE='filter spoe engine inkwall config'
-  SEND_RESPONSE='http-response send-spoe-group' RESPONSE_RULES='http-response'
-  FRAME_RULE='deny_status 413 if { var(txn.inkwall.error) -m int 3 259 }'
-  CLOSED_RULE='deny_status 503 if !{'
-fi
+patterns() {
+  if $v34; then
+    RESPONSES_SCOPE='"spoe_engine":"inkwall-responses"' REQUEST_SCOPE='"spoe_engine":"inkwall"'
+    SEND_RESPONSE='"type":"send-spoe-group"' RESPONSE_RULES='http_response_rule_list'
+    FRAME_RULE='"cond_test":"{ var(txn.inkwall.error) -m int 3 259 }","deny_status":413'
+    CLOSED_RULE='"cond_test":"!{ var(txn.inkwall.action) -m found }","deny_status":503'
+  else
+    RESPONSES_SCOPE='filter spoe engine inkwall-responses' REQUEST_SCOPE='filter spoe engine inkwall config'
+    SEND_RESPONSE='http-response send-spoe-group' RESPONSE_RULES='http-response'
+    FRAME_RULE='deny_status 413 if { var(txn.inkwall.error) -m int 3 259 }'
+    CLOSED_RULE='deny_status 503 if !{'
+  fi
+}
+patterns
 responses_wired() {
   local a
   a=$(wiring)
@@ -248,6 +258,9 @@ wired() {
     [[ $a == *'filter spoe engine inkwall'* && $a == *'X-User-Snippet'* ]]
   fi
 }
+# backend_gone: the operator's Backend custom resource for the Ingress is
+# deleted.
+backend_gone() { ! "${KUBECTL[@]}" -n "$NS" get "$BACKEND" >/dev/null 2>&1; }
 # set_bufsize SIZE: tune.bufsize, in the controller ConfigMap's
 # global-config-snippet (3.2), or the Global custom resource its cr-global
 # names (3.4, which has no snippets).
@@ -426,10 +439,41 @@ eventually "detect mode: Programmed, the response leg answered too (HAProxy wait
 policy Detect
 eventually "responses off: the response rules go" responses_unwired
 
+if ! $started_v34; then
+  # A live upgrade (#753): the controller from 3.2 to 3.4 moves the route
+  # from the snippet to the operator's Backend, protected all along as the
+  # probe proves; and back down to 3.2, back to the snippet.
+  echo "== the controller upgraded to $UPGRADE_TAG, and back to $HAPROXY_IMAGE_TAG"
+  policy
+  controller_release() {
+    "${HELM[@]}" upgrade haproxy kubernetes-ingress --repo "$HAPROXY_REPO" --version "$HAPROXY_CHART_VERSION" \
+      --namespace "$NS" --reuse-values --set controller.image.tag="$1" --wait --timeout 5m >/dev/null
+    "${KUBECTL[@]}" -n "$NS" rollout status deployment/haproxy-kubernetes-ingress --timeout=180s >/dev/null
+    v34=false
+    if is_v34 "$1"; then v34=true; fi
+    patterns
+  }
+  no_snippet() { ! "${KUBECTL[@]}" -n "$NS" get ingress app -o jsonpath='{.metadata.annotations}' | grep -F 'inkwall:begin' >/dev/null; }
+  controller_release "$UPGRADE_TAG"
+  eventually "$UPGRADE_TAG: the controller's pods have the engine" injected
+  eventually "$UPGRADE_TAG: the Ingress names the operator's Backend" wired
+  check "$UPGRADE_TAG: the operator's snippet is gone" no_snippet
+  eventually "$UPGRADE_TAG: Programmed once the probe proved the filter on both pods" programmed
+  forward
+  eventually "$UPGRADE_TAG: the attack is blocked" all_are 403 "$HOST" "$SQLI"
+  check "$UPGRADE_TAG: benign traffic passes" all_are 200 "$HOST" /products/42
+  controller_release "$HAPROXY_IMAGE_TAG"
+  eventually "back to $HAPROXY_IMAGE_TAG: the controller's pods have the engine" injected
+  eventually "back to $HAPROXY_IMAGE_TAG: the snippet is back, the user's kept" wired
+  eventually "back to $HAPROXY_IMAGE_TAG: the operator's Backend is gone" backend_gone
+  eventually "back to $HAPROXY_IMAGE_TAG: Programmed" programmed
+  forward
+  eventually "back to $HAPROXY_IMAGE_TAG: the attack is blocked" all_are 403 "$HOST" "$SQLI"
+fi
+
 echo "== unprotected"
 "${KUBECTL[@]}" -n "$NS" delete wafpolicy shop --timeout=60s >/dev/null
 eventually "the user's Ingress is as it was" as_it_was
-backend_gone() { ! "${KUBECTL[@]}" -n "$NS" get "$BACKEND" >/dev/null 2>&1; }
 if $v34; then eventually "the operator's Backend is gone" backend_gone; fi
 eventually "the attack passes again" all_are 200 "$HOST" "$SQLI"
 
