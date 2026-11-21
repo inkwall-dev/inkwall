@@ -1184,9 +1184,9 @@ func TestExclusionsRejectUnsafeValues(t *testing.T) {
 
 // A chain whose first rule matches every value and whose chained rule picks
 // some reports the value the chain picked, not the first rule's first match
-// (#762). 931130 is at paranoia level 2.
+// (#762, #775), at paranoia level 3 (931130, 942440 and 920451 are above 1).
 func TestChainReportsTheValueItPicked(t *testing.T) {
-	e, err := New(Config{ParanoiaLevel: 2})
+	e, err := New(Config{ParanoiaLevel: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1217,6 +1217,28 @@ func TestChainReportsTheValueItPicked(t *testing.T) {
 			req:  newRequest("GET", "/?a=https://shop.example.com/x&b=https://evil.example.net/x&c=https://shop.example.com/y", nil, ""),
 			id:   931130,
 			want: "ARGS:b",
+		},
+		{
+			name: "920451 restricted header (extended) among others",
+			req:  newRequest("GET", "/", http.Header{"Accept-Charset": {"utf-8"}, "X-Request-Id": {"1"}}, ""),
+			id:   920451,
+			want: "REQUEST_HEADERS_NAMES:Accept-Charset",
+		},
+		{
+			// MATCHED_VARS: only a's comment passes the chain (b's looks
+			// like a token).
+			name: "942440 MATCHED_VARS chain, the second argument",
+			req:  newRequest("GET", "/?b=ab--cd-&a=1%27%3B--", nil, ""),
+			id:   942440,
+			want: "ARGS:a",
+		},
+		{
+			// x's value is the end of do_array_filter's name: not do_array_filter
+			// (#775).
+			name: "933150 MATCHED_VARS chain, a name ending in another's value",
+			req:  newRequest("GET", "/?x=array_filter&do_array_filter=array_filter(1)", nil, ""),
+			id:   933150,
+			want: "ARGS:do_array_filter",
 		},
 	}
 	for _, tt := range tests {
