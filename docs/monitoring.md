@@ -170,6 +170,11 @@ Engine metrics carry `adapter` where it says so (`proxy`, `forwardauth`, `httpch
 | `inkwall_engine_events_total` | counter | | Security events recorded for the operator. |
 | `inkwall_engine_events_dropped_total` | counter | | Security events dropped because the buffer was full. |
 | `inkwall_security_event_logs_suppressed_total` | counter | `policy` | Security event log lines left out by the rate limit (`--event-log-rate`); the events still go to the operator. |
+| `inkwall_rate_limit_keys` | gauge | | Rate limit buckets held, full ones included until their entry is reused. |
+| `inkwall_rate_limit_key_capacity` | gauge | | The rate limit table's capacity (`--rate-limit-keys`), after its cap of a quarter of the memory limit. |
+| `inkwall_rate_limit_evictions_total` | counter | `kind` | Rate limit entries reused for a new key: `idle` (a full bucket, or a limit no longer in the bundle: nothing lost) or `active` (the bucket closest to full: its state forgotten, because the table is too small or a client is cycling keys). |
+| `inkwall_rate_limit_skipped_total` | counter | `reason` | Requests a rate limit couldn't count: `no_key`, no valid client address. |
+| `inkwall_rate_limit_events_dropped_total` | counter | | Rate limit security events left out by the per-limit or engine-wide event cap; the requests are still counted. |
 
 The engine also serves the Go runtime's `go_*` and the `process_*` metrics.
 
