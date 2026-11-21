@@ -4,6 +4,7 @@
 package ratelimit
 
 import (
+	"github.com/prometheus/client_golang/prometheus"
 	"math"
 	"net/netip"
 	"sync"
@@ -387,5 +388,23 @@ func TestConcurrent(t *testing.T) {
 	}
 	if n != 150 {
 		t.Fatalf("loose has %d tokens left, want 150 (refunds lost or doubled)", n)
+	}
+}
+
+// The metrics register together, with one series per eviction kind.
+func TestCollectors(t *testing.T) {
+	s := New(1024, 0)
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(s.Collectors()...)
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	series := map[string]int{}
+	for _, mf := range mfs {
+		series[mf.GetName()] = len(mf.GetMetric())
+	}
+	if series["inkwall_rate_limit_evictions_total"] != 2 || series["inkwall_rate_limit_keys"] != 1 || len(series) != 5 {
+		t.Errorf("metrics %v", series)
 	}
 }

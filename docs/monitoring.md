@@ -270,6 +270,18 @@ a misconfigured integration (for example a forward-auth middleware that doesn't 
 `X-Forwarded-*` headers); `protocol` an ext_proc or SPOE peer that breaks the protocol. The
 engine's log names each one.
 
+### InkwallRateLimitStateEvicted
+
+An engine's rate limit table has been full of buckets in use for 15 minutes
+(`inkwall_rate_limit_evictions_total{kind="active"}`): to track a new client it forgets the
+bucket closest to full, and that client starts again with a full burst. Limits still hold for
+most clients, but less exactly. Either the table is too small for the clients being limited (raise
+`spec.engine.rateLimitKeys`, then restart the proxy pods; `inkwall_rate_limit_key_capacity` shows
+the size, which is capped at a quarter of the engine's memory limit), or a client is cycling
+addresses or header values to escape a limit: look at the `rate-limit` events' `client_ip`, and
+count IPv6 clients by a shorter prefix (`key.clientIP.ipv6PrefixLength`). See [Rate
+limits](rate-limits.md#memory).
+
 ### InkwallEnginesBehind
 
 The operator's leader has seen engines that don't run the current bundle for 15 minutes:

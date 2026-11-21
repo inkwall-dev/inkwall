@@ -56,6 +56,17 @@ groups:
           summary: An Inkwall engine refuses requests it can't read.
           description: The {{ $labels.adapter }} adapter of the engine in {{ $labels.namespace }}/{{ $labels.pod }} refuses {{ $value | humanize }} requests per second ({{ $labels.kind }}).
           runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwalladaptererrors
+      - alert: InkwallRateLimitStateEvicted
+        # The rate limit table is full of buckets in use: the one closest to
+        # full is forgotten, and its client gets a fresh one.
+        expr: sum by (namespace, pod) (rate(inkwall_rate_limit_evictions_total{kind="active"}[5m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: An Inkwall engine is forgetting rate limit state.
+          description: The engine in {{ $labels.namespace }}/{{ $labels.pod }} forgets {{ $value | humanize }} rate limit buckets per second in use, so their clients start again with a full burst.
+          runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallratelimitstateevicted
   - name: inkwall-operator
     rules:
       - alert: InkwallEnginesBehind

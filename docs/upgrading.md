@@ -40,6 +40,14 @@ From 0.1.x, upgrade to 0.2.3 (or 0.2.2) first, then to 0.3.0.
 
 0.7.0 isn't released yet; this section grows as its changes land.
 
+- **Rate limits** (`spec.rateLimits`, [Rate limits](rate-limits.md)). Upgrade the chart first
+  (the CRD field and the operator), then the engines: while an engine before 0.7.0 runs a policy
+  with limits, the policy is `Enforced=False`, `EnginesOutdated`, naming `spec.rateLimits`.
+  Rolling the operator back below 0.7.0 drops the limits without a word. A hand-written HAProxy
+  configuration needs the 429 rule and `retry_after` in `register-var-names`
+  ([HAProxy](haproxy.md)), or limited clients get 403. A SecLang rule that denies with
+  `status:429` now answers gRPC calls with `RESOURCE_EXHAUSTED` instead of `UNAVAILABLE`.
+
 - **Envoy Gateway's routes are proven by the operator's probe**, as Istio's and the HAProxy
   controller's are. After the upgrade, a policy on an HTTPRoute that Envoy Gateway serves is
   `Programmed=False`, reason `Unverified`, until the probe has reached the engine on every Envoy
