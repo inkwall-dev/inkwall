@@ -749,6 +749,65 @@ eventually "and is logged (rate-limit, log)" limit_event 198.51.100.12 log
 "${KUBECTL[@]}" -n "$NS" patch wafpolicy web --type json -p '[{"op":"remove","path":"/spec/rateLimits"}]' >/dev/null
 eventually "the policy without limits is Enforced" web_current
 check "without limits, the limited client passes again" bash -c "[[ \"$(limited 198.51.100.10 /limited/5 "$rl_id-8")\" == '200 ' ]]"
+
+# Geo blocking (#724, design 0011 §10) through Traefik, from clients the
+# PROXY protocol names: a tiny database maps 198.51.100.0/24 to XA and
+# 203.0.113.0/24 to XB, loaded from a Secret. Without a database the
+# policy says so and geo is skipped; with it XA is denied with geo-deny and
+# XB passes; a new database flips them with no engine restart; Detect logs.
+echo "== geo blocking through Traefik"
+geo_dir=$(mktemp -d)
+geo_db() { go run ./operator/internal/geo/mmdbtest/mmdbgen -epoch "$1" "198.51.100.0/24=$2" "203.0.113.0/24=$3" >"$geo_dir/db.mmdb"; }
+geo_secret() {
+  "${KUBECTL[@]}" -n "$OPERATOR_NS" create secret generic e2e-geo-db --from-file=db="$geo_dir/db.mmdb" \
+    --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f - >/dev/null
+}
+geo_loaded() {
+  [[ $("${KUBECTL[@]}" get inkwallconfig default -o jsonpath='{.status.conditions[?(@.type=="GeoDatabaseReady")].reason}') == Loaded ]]
+}
+geo_table() { "${KUBECTL[@]}" get inkwallconfig default -o jsonpath='{.status.geo.sha256}'; }
+geo_event() {
+  "${KUBECTL[@]}" -n "$TRAEFIK_NS" logs deployment/traefik-e2e -c inkwall-engine |
+    grep -F '"msg":"security event"' | grep -F '"reason":"geo-deny"' | grep -F "\"client_ip\":\"$1\"" |
+    grep -F "\"country\":\"$2\"" | grep -qF "\"action\":\"$3\""
+}
+engine_restarts() {
+  "${KUBECTL[@]}" -n "$TRAEFIK_NS" get pods -l app.kubernetes.io/name=traefik -o jsonpath='{range .items[*]}{.status.initContainerStatuses[?(@.name=="inkwall-engine")].restartCount}{.status.containerStatuses[?(@.name=="inkwall-engine")].restartCount}{" "}{end}'
+}
+geo_status() { [[ $(limited "$1" /geo "$2" | cut -d' ' -f1) == "$3" ]]; }
+"${KUBECTL[@]}" -n "$NS" patch wafpolicy web --type merge -p '{"spec":{"geo":{"deny":["XA"]}}}' >/dev/null
+geo_unavailable() { [[ $(tcondition Enforced reason) == GeoDatabaseUnavailable ]]; }
+eventually "without a database, the policy is GeoDatabaseUnavailable" geo_unavailable
+check "and geo is skipped: XA passes" geo_status 198.51.100.7 e2e-geo-0 200
+geo_db 1700000000 XA XB
+geo_secret
+restarts_before=$(engine_restarts)
+"${KUBECTL[@]}" patch inkwallconfig default --type merge \
+  -p '{"spec":{"geo":{"database":{"secretRef":{"name":"e2e-geo-db","key":"db"}}}}}' >/dev/null
+eventually "the database is Loaded" geo_loaded
+first_table=$(geo_table)
+eventually "the policy with geo is Enforced" web_current
+eventually "XA (198.51.100.7) gets 403" geo_status 198.51.100.7 e2e-geo-1 403
+check "XB (203.0.113.7) passes" geo_status 203.0.113.7 e2e-geo-2 200
+eventually "the engine logs geo-deny with the country" geo_event 198.51.100.7 XA deny
+# A new database, the countries swapped: no restart.
+geo_db 1700086400 XB XA
+geo_secret
+eventually "the new database flips them: XA (now 203.0.113.7) gets 403" geo_status 203.0.113.7 e2e-geo-3 403
+check "and 198.51.100.7 (now XB) passes" geo_status 198.51.100.7 e2e-geo-4 200
+no_restart() { [[ $(engine_restarts) == "$restarts_before" ]]; }
+check "with no engine restart" no_restart
+new_table() { [[ -n $(geo_table) && $(geo_table) != "$first_table" ]]; }
+check "the status names the new table" new_table
+"${KUBECTL[@]}" -n "$NS" patch wafpolicy web --type merge -p '{"spec":{"geo":{"mode":"Detect"}}}' >/dev/null
+eventually "geo in Detect mode is Enforced" web_current
+eventually "in Detect mode, XA passes" geo_status 203.0.113.7 e2e-geo-5 200
+eventually "and is logged (geo-deny, log)" geo_event 203.0.113.7 XA log
+"${KUBECTL[@]}" -n "$NS" patch wafpolicy web --type json -p '[{"op":"remove","path":"/spec/geo"}]' >/dev/null
+"${KUBECTL[@]}" patch inkwallconfig default --type json -p '[{"op":"remove","path":"/spec/geo"}]' >/dev/null
+"${KUBECTL[@]}" -n "$OPERATOR_NS" delete secret e2e-geo-db >/dev/null
+eventually "the policy without geo is Enforced" web_current
+rm -rf "$geo_dir"
 "${KUBECTL[@]}" -n "$NS" delete pod lb --wait=false >/dev/null
 
 # Signing key rotation (#41), requested on the InkwallConfig with two

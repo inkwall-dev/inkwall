@@ -273,7 +273,30 @@ func TestWAFPolicyValidation(t *testing.T) {
 		{name: "exclusion cookie with a space", doc: policy(target + "  exclusions: [{ruleIDs: [942100], when: {cookie: \"a b\"}}]\n"), wantErr: "spec.exclusions[0].when.cookie"},
 		// New in 0.7.0, so a set already.
 		{name: "rate limit path twice", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, match: {paths: [/login, /login]}}]\n"), wantErr: "Duplicate value"},
+		// Geo blocking (design 0011 §2.4).
+		{name: "geo deny", doc: policy(target + "  geo: {deny: [RU, KP], unknown: Deny, mode: Detect}\n")},
+		{name: "geo allow", doc: policy(target + "  geo: {allow: [DE, AT, CH, XK, XA]}\n")},
+		{name: "geo both lists", doc: policy(target + "  geo: {deny: [RU], allow: [DE]}\n"), wantErr: "geo needs exactly one of deny and allow"},
+		{name: "geo no list", doc: policy(target + "  geo: {unknown: Deny}\n"), wantErr: "geo needs exactly one of deny and allow"},
+		{name: "geo empty list", doc: policy(target + "  geo: {deny: []}\n"), wantErr: "should have at least 1 items"},
+		{name: "geo lower case", doc: policy(target + "  geo: {deny: [de]}\n"), wantErr: "spec.geo.deny[0]"},
+		{name: "geo three letters", doc: policy(target + "  geo: {deny: [DEU]}\n"), wantErr: "spec.geo.deny[0]"},
+		{name: "geo repeated code", doc: policy(target + "  geo: {deny: [RU, RU]}\n"), wantErr: "Duplicate value"},
+		{name: "geo 251 codes", doc: policy(target + "  geo: {deny: [" + geoCodes(251) + "]}\n"), wantErr: "must have at most 250 items"},
+		{name: "geo unknown value", doc: policy(target + "  geo: {deny: [RU], unknown: Maybe}\n"), wantErr: `Unsupported value: "Maybe"`},
+		{name: "geo Block mode", doc: policy(target + "  geo: {deny: [RU], mode: Block}\n"), wantErr: `Unsupported value: "Block"`},
 	})
+}
+
+// geoCodes is n distinct two-letter codes, comma-separated.
+func geoCodes(n int) string {
+	var codes []string
+	for a := 'A'; a <= 'Z' && len(codes) < n; a++ {
+		for b := 'A'; b <= 'Z' && len(codes) < n; b++ {
+			codes = append(codes, string([]rune{a, b}))
+		}
+	}
+	return strings.Join(codes, ", ")
 }
 
 func TestWAFPolicyDefaults(t *testing.T) {
@@ -316,6 +339,16 @@ const controlPlane = "  controlPlane:\n    endpoint: grpcs://agents.inkwall.exam
 func TestInkwallConfigValidation(t *testing.T) {
 	check(t, []validationCase{
 		{name: "empty", doc: inkwallConfig("default", "  {}\n")},
+		{name: "geo file", doc: inkwallConfig("default", "  geo: {database: {file: /var/lib/inkwall/geo/GeoLite2-Country.mmdb}}\n")},
+		{name: "geo file in a subdirectory", doc: inkwallConfig("default", "  geo: {database: {file: /var/lib/inkwall/geo/maxmind/country.mmdb}}\n")},
+		{name: "geo secret", doc: inkwallConfig("default", "  geo: {database: {secretRef: {name: geo-db, key: country.mmdb}}}\n")},
+		{name: "geo both sources", doc: inkwallConfig("default", "  geo: {database: {file: /var/lib/inkwall/geo/a.mmdb, secretRef: {name: geo-db, key: k}}}\n"), wantErr: "exactly one of file and secretRef"},
+		{name: "geo no source", doc: inkwallConfig("default", "  geo: {database: {}}\n"), wantErr: "exactly one of file and secretRef"},
+		{name: "geo file elsewhere", doc: inkwallConfig("default", "  geo: {database: {file: /var/run/secrets/kubernetes.io/serviceaccount/token}}\n"), wantErr: "spec.geo.database.file"},
+		{name: "geo file escaping", doc: inkwallConfig("default", "  geo: {database: {file: /var/lib/inkwall/geo/../../../etc/passwd}}\n"), wantErr: "spec.geo.database.file"},
+		{name: "geo file the directory", doc: inkwallConfig("default", "  geo: {database: {file: /var/lib/inkwall/geo/}}\n"), wantErr: "spec.geo.database.file"},
+		{name: "geo file relative", doc: inkwallConfig("default", "  geo: {database: {file: GeoLite2-Country.mmdb}}\n"), wantErr: "spec.geo.database.file"},
+		{name: "geo without a database", doc: inkwallConfig("default", "  geo: {}\n"), wantErr: "spec.geo.database: Required value"},
 		{name: "full", doc: inkwallConfig("default", `
   mode: GitOps
   engine:
