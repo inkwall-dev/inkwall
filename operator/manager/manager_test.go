@@ -136,6 +136,7 @@ func startOperator(t *testing.T) (_ context.Context, _ client.Client, _ *warning
 		CRDInterval:          200 * time.Millisecond,
 		// The test runs again in this process under -count.
 		SkipControllerNameValidation: true,
+		AuditLog:                     logr.FromSlogHandler(slog.NewJSONHandler(auditLog, nil)).WithName("audit"),
 		// The wiring's probe answered as the engine would, with a key of
 		// its own, on pods with an address (the Istio tests give theirs
 		// one; HAProxy's pods have none and stay Unverified).
@@ -256,6 +257,7 @@ func TestOperator(t *testing.T) {
 	t.Run("istio ingress", func(t *testing.T) { testIstioIngress(ctx, t, c) })
 	t.Run("failure policy", func(t *testing.T) { testFailurePolicy(ctx, t, c) })
 	t.Run("source guard", func(t *testing.T) { testSourceGuard(ctx, t, c) })
+	t.Run("audit log", func(t *testing.T) { testAuditLog(ctx, t, c) })
 	// Last: it stops the operator.
 	t.Run("uninstall", func(t *testing.T) { testUninstall(ctx, t, c, stop) })
 }

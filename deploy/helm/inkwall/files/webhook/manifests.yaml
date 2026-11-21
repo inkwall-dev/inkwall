@@ -104,6 +104,110 @@ webhooks:
       name: webhook-service
       namespace: system
       path: /validate-waf-inkwall-dev-v1alpha1-clusterwafruleset
+  failurePolicy: Ignore
+  name: audit-delete.clusterwafrulesets.waf.inkwall.dev
+  objectSelector:
+    matchExpressions:
+    - key: inkwall.dev/source
+      operator: NotIn
+      values:
+      - saas
+  rules:
+  - apiGroups:
+    - waf.inkwall.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - DELETE
+    resources:
+    - clusterwafrulesets
+  sideEffects: NoneOnDryRun
+  timeoutSeconds: 2
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-waf-inkwall-dev-v1alpha1-wafiplist
+  failurePolicy: Ignore
+  name: audit-delete.wafiplists.waf.inkwall.dev
+  objectSelector:
+    matchExpressions:
+    - key: inkwall.dev/source
+      operator: NotIn
+      values:
+      - saas
+  rules:
+  - apiGroups:
+    - waf.inkwall.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - DELETE
+    resources:
+    - wafiplists
+  sideEffects: NoneOnDryRun
+  timeoutSeconds: 2
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-waf-inkwall-dev-v1alpha1-wafpolicy
+  failurePolicy: Ignore
+  name: audit-delete.wafpolicies.waf.inkwall.dev
+  objectSelector:
+    matchExpressions:
+    - key: inkwall.dev/source
+      operator: NotIn
+      values:
+      - saas
+  rules:
+  - apiGroups:
+    - waf.inkwall.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - DELETE
+    resources:
+    - wafpolicies
+  sideEffects: NoneOnDryRun
+  timeoutSeconds: 2
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-waf-inkwall-dev-v1alpha1-wafruleset
+  failurePolicy: Ignore
+  name: audit-delete.wafrulesets.waf.inkwall.dev
+  objectSelector:
+    matchExpressions:
+    - key: inkwall.dev/source
+      operator: NotIn
+      values:
+      - saas
+  rules:
+  - apiGroups:
+    - waf.inkwall.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - DELETE
+    resources:
+    - wafrulesets
+  sideEffects: NoneOnDryRun
+  timeoutSeconds: 2
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-waf-inkwall-dev-v1alpha1-clusterwafruleset
   failurePolicy: Fail
   name: clusterwafrulesets.waf.inkwall.dev
   rules:
@@ -116,7 +220,7 @@ webhooks:
     - UPDATE
     resources:
     - clusterwafrulesets
-  sideEffects: None
+  sideEffects: NoneOnDryRun
   timeoutSeconds: 2
 - admissionReviewVersions:
   - v1
@@ -139,7 +243,7 @@ webhooks:
     - DELETE
     resources:
     - clusterwafrulesets
-  sideEffects: None
+  sideEffects: NoneOnDryRun
   timeoutSeconds: 2
 - admissionReviewVersions:
   - v1
@@ -162,7 +266,7 @@ webhooks:
     - DELETE
     resources:
     - wafiplists
-  sideEffects: None
+  sideEffects: NoneOnDryRun
   timeoutSeconds: 2
 - admissionReviewVersions:
   - v1
@@ -185,7 +289,7 @@ webhooks:
     - DELETE
     resources:
     - wafpolicies
-  sideEffects: None
+  sideEffects: NoneOnDryRun
   timeoutSeconds: 2
 - admissionReviewVersions:
   - v1
@@ -208,7 +312,7 @@ webhooks:
     - DELETE
     resources:
     - wafrulesets
-  sideEffects: None
+  sideEffects: NoneOnDryRun
   timeoutSeconds: 2
 - admissionReviewVersions:
   - v1
@@ -227,9 +331,10 @@ webhooks:
     operations:
     - CREATE
     - UPDATE
+    - DELETE
     resources:
     - inkwallconfigs
-  sideEffects: None
+  sideEffects: NoneOnDryRun
   timeoutSeconds: 2
 - admissionReviewVersions:
   - v1
@@ -250,7 +355,7 @@ webhooks:
     - UPDATE
     resources:
     - wafiplists
-  sideEffects: None
+  sideEffects: NoneOnDryRun
   timeoutSeconds: 2
 - admissionReviewVersions:
   - v1
@@ -271,7 +376,7 @@ webhooks:
     - UPDATE
     resources:
     - wafpolicies
-  sideEffects: None
+  sideEffects: NoneOnDryRun
   timeoutSeconds: 2
 - admissionReviewVersions:
   - v1
@@ -292,5 +397,5 @@ webhooks:
     - UPDATE
     resources:
     - wafrulesets
-  sideEffects: None
+  sideEffects: NoneOnDryRun
   timeoutSeconds: 2

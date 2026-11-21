@@ -212,6 +212,7 @@ The engine also serves the Go runtime's `go_*` and the `process_*` metrics.
 | `inkwall_operator_events_export_request_duration_seconds` | histogram | `sink` | Time per request to a sink, retries apart. |
 | `inkwall_operator_request_stats_dropped_total` | counter | `reason` | Policies' request counts dropped (`not_in_bundle`, `latency_buckets`, `evicted`). |
 | `inkwall_operator_state_engines_left_out` | gauge | | Engines left out of the last ClusterState sent to the control plane. |
+| `inkwall_operator_policy_changes_total` | counter | `kind`, `operation` | Changes to the WAF objects this replica's webhook admitted, by kind and `create`, `update` or `delete` ([The audit log](audit-log.md)); dry runs and updates that change no spec field aside. |
 
 The operator also serves controller-runtime's `controller_runtime_*`, `workqueue_*` and
 `rest_client_*` metrics.
@@ -230,6 +231,9 @@ seconds:
 kubectl describe wafpolicy -n shop web
 kubectl get events -n shop --field-selector involvedObject.kind=WAFPolicy
 ```
+
+Each change to a policy, rule set, IP list or `InkwallConfig` is a `Normal` Event too (`Created`,
+`Changed`, `Deleted`), and a line in the operator's log: see [The audit log](audit-log.md).
 
 ## Alerts
 
