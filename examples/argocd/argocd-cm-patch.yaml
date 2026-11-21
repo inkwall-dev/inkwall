@@ -9,7 +9,8 @@
 #     engines catching up, the probe); Suspended while inspection is
 #     suspended; Degraded otherwise (failed wiring, an engine rejecting the
 #     bundle, ...).
-#   WAFRuleSet, ClusterWAFRuleSet: Healthy when Accepted; Degraded when not.
+#   WAFRuleSet, ClusterWAFRuleSet, WAFIPList: Healthy when Accepted; Degraded
+#     when not.
 #   InkwallConfig: Suspended while it suspends inspection; Degraded when it
 #     can't reach its control plane; Healthy otherwise.
 # hack/gitopshealth tests them against tests/<Kind>/*.yaml (make
@@ -54,6 +55,17 @@ data:
     return hs
   resource.customizations.health.waf.inkwall.dev_ClusterWAFRuleSet: |
     hs = {status = "Progressing", message = "Waiting for the operator to check the rule set"}
+    if obj.status == nil then return hs end
+    if obj.metadata.generation ~= nil and (obj.status.observedGeneration or 0) < obj.metadata.generation then return hs end
+    for _, c in ipairs(obj.status.conditions or {}) do
+      if c.type == "Accepted" then
+        if c.status == "True" then return {status = "Healthy", message = c.message or "Accepted"} end
+        return {status = "Degraded", message = (c.reason or "") .. ": " .. (c.message or "")}
+      end
+    end
+    return hs
+  resource.customizations.health.waf.inkwall.dev_WAFIPList: |
+    hs = {status = "Progressing", message = "Waiting for the operator to check the list"}
     if obj.status == nil then return hs end
     if obj.metadata.generation ~= nil and (obj.status.observedGeneration or 0) < obj.metadata.generation then return hs end
     for _, c in ipairs(obj.status.conditions or {}) do

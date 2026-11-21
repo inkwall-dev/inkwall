@@ -370,9 +370,10 @@ spec:
                                   type: integer
                               type: object
                             compression:
-                              default: Gzip
-                              description: 'Compression of the request body. Unset:
-                                Gzip.'
+                              description: |-
+                                Compression of the request body. Unset: Gzip. (No API default: a
+                                default inside a list item makes GitOps diffs show every sink out
+                                of sync.)
                               enum:
                               - Gzip
                               - None
@@ -436,10 +437,10 @@ spec:
                               description: JSON sends the events as JSON over HTTP(S).
                               properties:
                                 framing:
-                                  default: Lines
                                   description: |-
                                     Framing is Lines (one event per line, application/x-ndjson) or
-                                    Array (one JSON array, application/json). Unset: Lines.
+                                    Array (one JSON array, application/json). Unset: Lines (no API
+                                    default, as for compression).
                                   enum:
                                   - Lines
                                   - Array

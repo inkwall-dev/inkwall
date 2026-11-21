@@ -469,19 +469,21 @@ type RuleSetBinding struct {
 
 	// CRS sets the OWASP CRS's own settings. Only used by the built-in CRS:
 	// on another rule set they are ignored, which the Accepted condition
-	// says, and v1 refuses them. Every engine applies paranoiaLevel and
+	// says. Every engine applies paranoiaLevel and
 	// inboundAnomalyThreshold; the other settings require engines 0.5.0 or
 	// later, and older ones ignore them.
 	// +optional
 	CRS *CRSSettings `json:"crs,omitempty"`
 
-	// Placement is where a SecLang rule set loads: AfterCRS or BeforeCRS, before the CRS's initialization, so its rules can set
+	// Placement is where a SecLang rule set loads: AfterCRS (unset) or
+	// BeforeCRS, before the CRS's initialization, so its rules can set
 	// the CRS's tx variables or turn CRS rules off with
 	// ctl:ruleRemoveById. A BeforeCRS rule set can't use SecRuleRemoveBy*
 	// or SecRuleUpdate*, which only reach rules loaded before them. Not
 	// for the built-in CRS. Requires engines 0.6.0 or later: older ones
-	// load the rule set after the CRS.
-	// +kubebuilder:default=AfterCRS
+	// load the rule set after the CRS. No API default: a default inside a
+	// list item makes GitOps diffs (Argo CD's) show every policy with rule
+	// sets out of sync.
 	// +optional
 	Placement RuleSetPlacement `json:"placement,omitempty"`
 }
@@ -549,12 +551,12 @@ type CRSSettings struct {
 	OutboundAnomalyThreshold *int32 `json:"outboundAnomalyThreshold,omitempty"`
 }
 
-// IsZero reports whether s sets none of the settings that need engines
-// 0.5.0 or later (s may be nil): its paranoiaLevel and
+// NeedsEngine050 reports whether s sets any of the settings that need
+// engines 0.5.0 or later (s may be nil): its paranoiaLevel and
 // inboundAnomalyThreshold, which every engine applies, don't count.
-func (s *CRSSettings) IsZero() bool {
-	return s == nil || len(s.AllowedMethods) == 0 && len(s.AllowedRequestContentTypes) == 0 &&
-		s.DetectionParanoiaLevel == nil && s.OutboundAnomalyThreshold == nil
+func (s *CRSSettings) NeedsEngine050() bool {
+	return s != nil && (len(s.AllowedMethods) > 0 || len(s.AllowedRequestContentTypes) > 0 ||
+		s.DetectionParanoiaLevel != nil || s.OutboundAnomalyThreshold != nil)
 }
 
 // CRSParanoiaLevel is b's paranoia level: crs.paranoiaLevel, else the
@@ -578,7 +580,7 @@ func (b *RuleSetBinding) CRSInboundAnomalyThreshold() *int32 {
 
 // SetsCRS reports whether b sets any CRS setting, deprecated or not.
 func (b *RuleSetBinding) SetsCRS() bool {
-	return b.CRSParanoiaLevel() != nil || b.CRSInboundAnomalyThreshold() != nil || !b.CRS.IsZero()
+	return b.CRSParanoiaLevel() != nil || b.CRSInboundAnomalyThreshold() != nil || b.CRS.NeedsEngine050()
 }
 
 // HTTPMethodToken is an HTTP request method, such as PUT.
@@ -696,8 +698,8 @@ type BodySpec struct {
 	Inspect *bool `json:"inspect,omitempty"`
 
 	// MaxBytes is how much of a body is inspected, at most 10 MiB. Unset:
-	// 64 KiB, which the operator writes into the bundle, so an engine's own
-	// default never applies.
+	// the engine's --max-body-bytes (64 KiB unless an engine outside the
+	// operator's wiring sets it), a default that doesn't change within v1.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10485760
 	// +optional
@@ -794,9 +796,10 @@ type ResponsesSpec struct {
 	Inspect bool `json:"inspect,omitempty"`
 
 	// MaxBytes is how much of a response body is inspected, at most 10
-	// MiB. Unset: 64 KiB, which the operator writes into the bundle (each
-	// KiB costs about 0.3 ms of inspection: raise timeout with it). A longer body has this much inspected, and then
-	// gets onOversize.
+	// MiB. Unset: 64 KiB, the engine's default, which doesn't change
+	// within v1 (each KiB costs about 0.3 ms of inspection: raise timeout
+	// with it). A longer body has this much inspected, and then gets
+	// onOversize.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10485760
 	// +optional

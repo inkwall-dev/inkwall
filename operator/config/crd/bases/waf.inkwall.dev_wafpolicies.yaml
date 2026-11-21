@@ -107,8 +107,8 @@ spec:
                   maxBytes:
                     description: |-
                       MaxBytes is how much of a body is inspected, at most 10 MiB. Unset:
-                      64 KiB, which the operator writes into the bundle, so an engine's own
-                      default never applies.
+                      the engine's --max-body-bytes (64 KiB unless an engine outside the
+                      operator's wiring sets it), a default that doesn't change within v1.
                     format: int64
                     maximum: 10485760
                     minimum: 1
@@ -500,9 +500,10 @@ spec:
                   maxBytes:
                     description: |-
                       MaxBytes is how much of a response body is inspected, at most 10
-                      MiB. Unset: 64 KiB, which the operator writes into the bundle (each
-                      KiB costs about 0.3 ms of inspection: raise timeout with it). A longer body has this much inspected, and then
-                      gets onOversize.
+                      MiB. Unset: 64 KiB, the engine's default, which doesn't change
+                      within v1 (each KiB costs about 0.3 ms of inspection: raise timeout
+                      with it). A longer body has this much inspected, and then gets
+                      onOversize.
                     format: int64
                     maximum: 10485760
                     minimum: 1
@@ -552,7 +553,7 @@ spec:
                       description: |-
                         CRS sets the OWASP CRS's own settings. Only used by the built-in CRS:
                         on another rule set they are ignored, which the Accepted condition
-                        says, and v1 refuses them. Every engine applies paranoiaLevel and
+                        says. Every engine applies paranoiaLevel and
                         inboundAnomalyThreshold; the other settings require engines 0.5.0 or
                         later, and older ones ignore them.
                       properties:
@@ -647,14 +648,16 @@ spec:
                       minimum: 1
                       type: integer
                     placement:
-                      default: AfterCRS
                       description: |-
-                        Placement is where a SecLang rule set loads: AfterCRS or BeforeCRS, before the CRS's initialization, so its rules can set
+                        Placement is where a SecLang rule set loads: AfterCRS (unset) or
+                        BeforeCRS, before the CRS's initialization, so its rules can set
                         the CRS's tx variables or turn CRS rules off with
                         ctl:ruleRemoveById. A BeforeCRS rule set can't use SecRuleRemoveBy*
                         or SecRuleUpdate*, which only reach rules loaded before them. Not
                         for the built-in CRS. Requires engines 0.6.0 or later: older ones
-                        load the rule set after the CRS.
+                        load the rule set after the CRS. No API default: a default inside a
+                        list item makes GitOps diffs (Argo CD's) show every policy with rule
+                        sets out of sync.
                       enum:
                       - BeforeCRS
                       - AfterCRS
