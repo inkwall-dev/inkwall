@@ -140,16 +140,58 @@ func TestMatchPoint(t *testing.T) {
 	}
 }
 
-// Past chainBudget comparisons, the first match is reported.
+// The first chained match names its level-0 match within the budget, however
+// many arguments: 931130's first off-site URL is found in n/2+1 pairs. Past
+// chainBudget pairs, the best found so far is reported, or the first match.
 func TestMatchPointBudget(t *testing.T) {
-	mds := rfiMatches(1000)
-	if got := where(matchPoint(mds)); got != "ARGS:a0" {
-		t.Errorf("matchPoint = %s, want the first, ARGS:a0", got)
+	for n, want := range map[int]string{20: "ARGS:a10", 1000: "ARGS:a500"} {
+		if got := where(matchPoint(rfiMatches(n))); got != want {
+			t.Errorf("%d arguments: matchPoint = %s, want %s", n, got, want)
+		}
 	}
-	mds = rfiMatches(20)
-	if got := where(matchPoint(mds)); got != "ARGS:a10" {
-		t.Errorf("matchPoint = %s, want ARGS:a10", got)
+	// Many chained matches that name nothing: the budget runs out.
+	if got := where(matchPoint(nothingNamed(1000))); got != "ARGS:a0" {
+		t.Errorf("nothing named: matchPoint = %s, want the first, ARGS:a0", got)
 	}
+	// What was found before the budget ran out: a value.
+	mds := nothingNamed(1000)
+	mds = append(mds[:1000:1000], append([]types.MatchData{match(variables.TX, "v", "/v3/", 1)}, mds[1000:]...)...)
+	if got := where(matchPoint(mds)); got != "ARGS:a3" {
+		t.Errorf("a value, then nothing: matchPoint = %s, want ARGS:a3", got)
+	}
+}
+
+// A header named after the TX variable of another (920450's
+// header_name_920450_<name>) doesn't steer which header is named: the one
+// the TX value holds wins, and of two TX key suffixes, the longer.
+func TestMatchPointSteering(t *testing.T) {
+	steer := match(variables.RequestHeadersNames, "920450_X-Http-Method-Override", "920450_x-http-method-override", 0)
+	restricted := match(variables.RequestHeadersNames, "X-Http-Method-Override", "x-http-method-override", 0)
+	c := match(variables.TX, "header_name_920450_x-http-method-override", "/x-http-method-override/", 1)
+	for _, mds := range [][]types.MatchData{{steer, restricted, c}, {restricted, steer, c}} {
+		if got := where(matchPoint(mds)); got != "REQUEST_HEADERS_NAMES:X-Http-Method-Override" {
+			t.Errorf("matchPoint = %s, want the restricted header", got)
+		}
+	}
+	// Without the value: the longer suffix.
+	c = match(variables.TX, "header_name_920450_x-http-method-override", "1", 1)
+	for _, mds := range [][]types.MatchData{{steer, restricted, c}, {restricted, steer, c}} {
+		if got := where(matchPoint(mds)); got != "REQUEST_HEADERS_NAMES:920450_X-Http-Method-Override" {
+			t.Errorf("no value: matchPoint = %s, want the longer suffix", got)
+		}
+	}
+}
+
+// nothingNamed is n level-0 matches and n chained ones that name none.
+func nothingNamed(n int) []types.MatchData {
+	var mds []types.MatchData
+	for i := range n {
+		mds = append(mds, match(variables.Args, fmt.Sprintf("a%d", i), fmt.Sprintf("v%d", i), 0))
+	}
+	for i := range n {
+		mds = append(mds, match(variables.TX, fmt.Sprintf("k%d", i), "-", 1))
+	}
+	return mds
 }
 
 // rfiMatches is 931130 with n URL arguments, the first half on-site and the
@@ -165,14 +207,18 @@ func rfiMatches(n int) []types.MatchData {
 	return mds
 }
 
-// 1,000 URL arguments: bounded time, no allocation.
+// 1,000 arguments: bounded time, no allocation, for 931130's URLs and for
+// chained matches that name nothing (the budget runs out).
 func BenchmarkMatchPoint(b *testing.B) {
-	mds := rfiMatches(1000)
-	if n := testing.AllocsPerRun(10, func() { matchPoint(mds) }); n != 0 {
-		b.Fatalf("%v allocations", n)
-	}
-	b.ReportAllocs()
-	for b.Loop() {
-		matchPoint(mds)
+	for name, mds := range map[string][]types.MatchData{"rfi": rfiMatches(1000), "nothing": nothingNamed(1000)} {
+		b.Run(name, func(b *testing.B) {
+			if n := testing.AllocsPerRun(10, func() { matchPoint(mds) }); n != 0 {
+				b.Fatalf("%v allocations", n)
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				matchPoint(mds)
+			}
+		})
 	}
 }
