@@ -71,6 +71,41 @@ func TestBufferMemoryBoundAfterDiskFailure(t *testing.T) {
 	}
 }
 
+// The disk bound counts each batch file in whole 4 KiB blocks, as the
+// kubelet measures the emptyDir: many small batches can't pass its
+// sizeLimit while their bytes stay under the bound.
+func TestBufferDiskBoundCountsBlocks(t *testing.T) {
+	dir := t.TempDir()
+	b := newTestBuffer(t, dir, 1<<20, 40*diskBlock)
+	b.setSinks([]string{"a"})
+	for range 100 {
+		b.add(batchOf(1, numbered("x"))) // a few hundred bytes each
+	}
+	b.writeRound()
+	files, _ := filepath.Glob(filepath.Join(dir, "*"+batchSuffix))
+	var blocks int64
+	for _, f := range files {
+		st, err := os.Stat(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		blocks += (st.Size() + diskBlock - 1) / diskBlock
+	}
+	if len(files) != 40 || blocks*diskBlock > 40*diskBlock {
+		t.Errorf("%d files, %d blocks: want 40, within the bound of 40 blocks", len(files), blocks)
+	}
+	if _, all := b.bytes(); all != 40*diskBlock {
+		t.Errorf("counted %d bytes, want 40 blocks", all)
+	}
+	// In memory, a batch counts as its bytes.
+	m := newTestBuffer(t, "", 1<<20, 1<<20)
+	m.setSinks([]string{"a"})
+	m.add(batchOf(1, numbered("x")))
+	if _, all := m.bytes(); all != batchSize(1) {
+		t.Errorf("in memory, %d bytes for a batch of %d", all, batchSize(1))
+	}
+}
+
 type tookAll struct {
 	seqs    []uint64
 	dropped uint64

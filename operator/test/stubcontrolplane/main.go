@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -64,6 +65,9 @@ type stats struct {
 	Events       int    `json:"events"`
 	EventUploads int    `json:"eventUploads"`
 	EventsDrop   uint64 `json:"eventsDropped"`
+	// EventIDs are the distinct events' IDs, sorted (the newest 1,000):
+	// the export test compares them with a sink's.
+	EventIDs []string `json:"eventIDs"`
 	// Acks are the snapshot versions applied; Nacks, those refused, as
 	// "version: error; Kind namespace/name: error...".
 	Acks  []uint64 `json:"acks"`
@@ -131,6 +135,13 @@ func run() error {
 		}
 		out.States = len(st.States)
 		out.Events, out.EventUploads, out.EventsDrop = st.Events, st.EventUploads, st.EventsDropped
+		out.EventIDs = []string{}
+		for _, ev := range srv.Events() {
+			out.EventIDs = append(out.EventIDs, ev.GetEventId())
+		}
+		// ULIDs sort by time: keep the newest.
+		slices.Sort(out.EventIDs)
+		out.EventIDs = out.EventIDs[max(len(out.EventIDs)-1000, 0):]
 		out.Acks, out.Nacks = append([]uint64{}, st.Acks...), []string{}
 		for _, n := range st.Nacks {
 			msg := fmt.Sprintf("%d: %s", n.GetVersion(), n.GetError())

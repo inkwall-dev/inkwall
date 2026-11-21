@@ -54,7 +54,7 @@ UPGRADE_CLUSTER ?= inkwall-upgrade
 # kubelet's ConfigMap update delay, 10 s in hack/kind/cluster.yaml (1 min by default), and a
 # selector change restarts the replicas within 2 s of each other instead of 30 s.
 OPERATOR_ARGS     ?=
-E2E_OPERATOR_ARGS ?= --signing-key-grace=15s --selector-restart-max-delay=2s
+E2E_OPERATOR_ARGS ?= --signing-key-grace=15s --selector-restart-max-delay=2s --export-status-window=30s
 
 # Benchmarks: set BENCH to a regexp to narrow, COUNT for benchstat-friendly repeats.
 BENCH           ?= .
