@@ -109,13 +109,41 @@ type Server struct {
 // streamGeo is what a stream knows of its engine's country table.
 type streamGeo struct {
 	capable bool
-	// held is the table hash the engine last reported, as a string.
+	// held is the table hash the engine last reported, as a string, or
+	// what the operator knows it holds since: none, after a bundle without
+	// geo.
 	held atomic.Value
+	// changed wakes the send loop when the engine reports another table.
+	changed chan struct{}
+	// since is the bundle version a report must be from to count: a
+	// heartbeat from before the engine applied a bundle without geo still
+	// shows the table it dropped.
+	since atomic.Uint64
+}
+
+func newStreamGeo(capable bool, held []byte) *streamGeo {
+	g := &streamGeo{capable: capable, changed: make(chan struct{}, 1)}
+	g.held.Store(string(held))
+	return g
 }
 
 func (g *streamGeo) holds(hash []byte) bool {
 	h, _ := g.held.Load().(string)
 	return h == string(hash)
+}
+
+// report records the table the engine reports with bundle version
+// running, and wakes the send loop if it changed.
+func (g *streamGeo) report(hash []byte, running uint64) {
+	if running < g.since.Load() {
+		return
+	}
+	if old, _ := g.held.Swap(string(hash)).(string); old != string(hash) {
+		select {
+		case g.changed <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // NewServer returns a Server with the defaults.
@@ -228,8 +256,7 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 	// Bundles are sent from their own goroutine, so the engine's messages
 	// are still read, and its heartbeats still keep the stream alive, while
 	// a send waits for a slot or for the engine to take the bundle (#148).
-	sg := &streamGeo{capable: slices.Contains(hello.GetCapabilities(), CapabilityGeoTable)}
-	sg.held.Store(string(hello.GetGeoTableSha256()))
+	sg := newStreamGeo(slices.Contains(hello.GetCapabilities(), CapabilityGeoTable), hello.GetGeoTableSha256())
 	sendCtx, stopSending := context.WithCancel(ctx)
 	sendErr, sending := make(chan error, 1), make(chan struct{})
 	go func() {
@@ -322,10 +349,24 @@ func (s *Server) sendBundles(ctx context.Context, stream agentv1.BundleService_W
 				return err
 			}
 			sent = version
+			if sg.capable {
+				// What the engine does with its tables on this bundle: one
+				// without geo drops the table it holds; one that names
+				// another table than the one sent drops that one, pending.
+				// Until its next heartbeat, the operator knows that much.
+				if geo == nil {
+					sg.since.Store(version)
+					sg.held.Store("")
+				}
+				if !bytes.Equal(tableSent, geo) {
+					tableSent = nil
+				}
+			}
 		}
 		select {
 		case <-changed:
 		case <-retry:
+		case <-sg.changed:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -513,7 +554,7 @@ func (s *Server) record(key string, conn uint64, msg *agentv1.WatchRequest, sg *
 		if err := checkGeoTable(geo); err != nil {
 			return err
 		}
-		sg.held.Store(string(geo))
+		sg.report(geo, v)
 		s.Engines.Update(key, conn, func(e *Engine) bool {
 			changed := set(&e.Applied, v)
 			if !slices.Equal(e.TrustedKeys, keys) {
