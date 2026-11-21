@@ -718,8 +718,10 @@ database update. The message says which: "no country database: set InkwallConfig
 spec.geo.database", or "2 of 6 engines have no country table (first: …)". `Accepted` stays `True`: the policy is valid, and it will be enforced once the
 table arrives. `EnginesOutdated` ([§2.5](#25-older-engines)) takes precedence.
 
-A policy with `spec.geo` but no database configured gets one Warning event, and the webhook warns
-when it is applied.
+A policy with `spec.geo` but no database configured gets one Warning Event when its `Enforced`
+turns `GeoDatabaseUnavailable`: the operator's policy status Events (`policystatus`), once per
+transition, rate-limited per policy. The webhook doesn't warn of it: it reads no other object than
+the one applied, and the InkwallConfig can be set after the policy.
 
 `inkwallctl status` shows the database line: type, build date, how many engines hold it.
 
