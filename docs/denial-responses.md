@@ -133,7 +133,7 @@ So write the page self-contained: styles in a `<style>` element or `style` attri
 | Envoy Gateway, Istio, raw Envoy (ext_proc) | Yes, in the immediate response |
 | The standalone proxy | Yes |
 | The check API (`POST /v1/check`) | `deny_content_type` and `deny_body` in the answer, and `Cache-Control` and `Content-Security-Policy` in its `response_headers`, for the caller to send; none of them for a gRPC call |
-| HAProxy (SPOE) | No: HAProxy writes its own denials, so its routes keep the fixed body ([HAProxy](haproxy.md)) |
+| HAProxy (SPOE) | No: HAProxy writes its own denials, so its routes keep its error page, and the policy's `Programmed` message says so ([HAProxy](haproxy.md)) |
 
 ## Testing it
 
@@ -176,4 +176,7 @@ every policy that sets none, naming the InkwallConfig's field. Rolling the opera
   so the request path does no lookup.
 - **HAProxy keeps its own denials** for now: its `http-request deny` takes a fixed content type
   per rule, so a body per policy needs a rule per status and type, and a body as large as 8 KiB
-  in a SPOE variable is bounded by the frame size HAProxy is configured with.
+  in a SPOE variable is bounded by the frame size HAProxy is configured with. The policy's
+  `Programmed` message says so for each of its Ingresses HAProxy serves. There is no webhook
+  warning: the webhook reads no other objects, and which proxy serves a route takes the Ingress,
+  its IngressClass and the controllers' pods, which the operator reads when it wires the route.
