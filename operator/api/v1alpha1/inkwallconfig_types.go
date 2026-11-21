@@ -255,6 +255,18 @@ type EngineSpec struct {
 	// +optional
 	JSONDenials bool `json:"jsonDenials,omitempty"`
 
+	// RateLimitKeys is the rate limit buckets each engine holds at once,
+	// for every policy's spec.rateLimits: about 48 bytes each, allocated
+	// with the first bundle that has limits, and at most a quarter of the
+	// engine's memory limit. When the table is full, the buckets closest
+	// to full are forgotten (inkwall_rate_limit_evictions_total{kind="active"}).
+	// Unset: 262,144 (about 12 MiB). Applies to pods injected from then
+	// on. Requires engines 0.7.0 or later.
+	// +kubebuilder:validation:Minimum=1024
+	// +kubebuilder:validation:Maximum=16777216
+	// +optional
+	RateLimitKeys *int32 `json:"rateLimitKeys,omitempty"`
+
 	// ClientIP configures which forwarding headers the engines trust for
 	// the client's address, behind an HTTP load balancer that appends it to
 	// X-Forwarded-For. Unset: only the proxy beside the engine is trusted.
