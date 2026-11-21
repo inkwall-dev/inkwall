@@ -13,16 +13,20 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/flowcontrol"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
@@ -30,9 +34,50 @@ import (
 
 var updateGolden = flag.Bool("update", false, "rewrite the audit log's golden file (testdata/audit.golden)")
 
+// find is the Event f holds that match says.
+func (f *fakeEvents) find(t *testing.T, match func(*eventsv1.Event) bool) *eventsv1.Event {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, e := range f.list {
+		if match(e) {
+			return e
+		}
+	}
+	t.Fatal("no such Event")
+	return nil
+}
+
+// fakeEvents keeps the Events an Auditor creates.
+type fakeEvents struct {
+	mu   sync.Mutex
+	list []*eventsv1.Event
+}
+
+func (f *fakeEvents) Create(_ context.Context, obj client.Object, _ ...client.CreateOption) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.list = append(f.list, obj.(*eventsv1.Event))
+	return nil
+}
+
+// notes are the Events a created, as "type reason note", sorted (they are
+// created in the background), once created.
+func (f *fakeEvents) notes(a *Auditor) []string {
+	a.pending.Wait()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, e := range f.list {
+		out = append(out, e.Type+" "+e.Reason+" "+e.Note)
+	}
+	slices.Sort(out)
+	return out
+}
+
 // auditTest is an Auditor whose log lines, without their time, go to out,
 // and whose Events to rec.
-func auditTest() (*Auditor, *bytes.Buffer, *events.FakeRecorder) {
+func auditTest() (*Auditor, *bytes.Buffer, *fakeEvents) {
 	out := &bytes.Buffer{}
 	h := slog.NewJSONHandler(out, &slog.HandlerOptions{ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 		if len(groups) == 0 && a.Key == slog.TimeKey {
@@ -40,10 +85,11 @@ func auditTest() (*Auditor, *bytes.Buffer, *events.FakeRecorder) {
 		}
 		return a
 	}})
-	rec := events.NewFakeRecorder(10)
+	rec := &fakeEvents{}
 	return &Auditor{
 		Log:      logr.FromSlogHandler(h).WithName("audit"),
-		Recorder: rec,
+		Events:   rec,
+		Instance: "inkwall-operator-0",
 		Operator: "system:serviceaccount:inkwall-system:inkwall-operator",
 	}, out, rec
 }
@@ -122,14 +168,48 @@ func TestAuditGolden(t *testing.T) {
 	if out.String() != string(want) {
 		t.Errorf("the audit log lines changed (go test ./operator/webhook -run TestAuditGolden -update rewrites them, and docs/audit-log.md must follow):\n got:\n%s\nwant:\n%s", out, want)
 	}
-	for _, want := range []string{
+	want = []byte(strings.Join([]string{
 		"Normal Changed Changed by alice: spec.mode, spec.skip.paths",
 		"Normal Created Created by the operator: spec.mode, spec.targetRefs",
 		"Normal Deleted Deleted by alice",
-	} {
-		if got := <-rec.Events; got != want {
-			t.Errorf("Event %q, want %q", got, want)
+	}, "\n"))
+	if got := strings.Join(rec.notes(a), "\n"); got != string(want) {
+		t.Errorf("Events:\n%s\nwant:\n%s", got, want)
+	}
+	e := rec.find(t, func(e *eventsv1.Event) bool { return e.Reason == "Changed" })
+	if e.Namespace != "shop" || e.GenerateName != "checkout.audit-" || e.Action != "Update" || e.Series != nil ||
+		e.ReportingController != "inkwall-operator" || e.ReportingInstance != "inkwall-operator-inkwall-operator-0" || e.EventTime.IsZero() ||
+		e.Regarding != (corev1.ObjectReference{APIVersion: "waf.inkwall.dev/v1alpha1", Kind: "WAFPolicy", Namespace: "shop", Name: "checkout",
+			UID: "6f1c2a4e-0000-4000-8000-000000000001", ResourceVersion: "4711"}) {
+		t.Errorf("Event %+v", e)
+	}
+}
+
+// TestAuditEventsPerChange: each change is an Event of its own, with its
+// user and paths, never merged into another's series (the review of #793).
+func TestAuditEventsPerChange(t *testing.T) {
+	a, _, rec := auditTest()
+	v := audited[*wafv1alpha1.WAFPolicy]{allow[*wafv1alpha1.WAFPolicy]{}, a}
+	bob := authenticationv1.UserInfo{Username: "bob"}
+	for _, u := range []authenticationv1.UserInfo{alice, bob} {
+		if _, err := v.ValidateUpdate(admissionCtx(admissionv1.Update, "WAFPolicy", u, false), policy(wafv1alpha1.PolicyDetect), policy(wafv1alpha1.PolicyBlock)); err != nil {
+			t.Fatal(err)
 		}
+	}
+	got := rec.notes(a)
+	if want := []string{"Normal Changed Changed by alice: spec.mode", "Normal Changed Changed by bob: spec.mode"}; !slices.Equal(got, want) {
+		t.Errorf("Events %q, want %q", got, want)
+	}
+	// A cluster-scoped object's Event is in default.
+	cv := audited[*wafv1alpha1.ClusterWAFRuleSet]{allow[*wafv1alpha1.ClusterWAFRuleSet]{}, a}
+	rs := &wafv1alpha1.ClusterWAFRuleSet{ObjectMeta: metav1.ObjectMeta{Name: "shared"}}
+	rs.Spec.Source.SecLang = `SecRule ARGS "@rx a" "id:1,phase:1,deny"`
+	if _, err := cv.ValidateCreate(admissionCtx(admissionv1.Create, "ClusterWAFRuleSet", alice, false), rs); err != nil {
+		t.Fatal(err)
+	}
+	rec.notes(a)
+	if e := rec.find(t, func(e *eventsv1.Event) bool { return e.Reason == "Created" }); e.Namespace != "default" || e.Regarding.Namespace != "" || e.Regarding.Kind != "ClusterWAFRuleSet" {
+		t.Errorf("cluster-scoped Event %+v", e)
 	}
 }
 
@@ -202,8 +282,8 @@ func TestAuditSkips(t *testing.T) {
 			if out.Len() != 0 {
 				t.Errorf("logged:\n%s", out)
 			}
-			if len(rec.Events) != 0 {
-				t.Errorf("Event %q", <-rec.Events)
+			if n := rec.notes(a); len(n) != 0 {
+				t.Errorf("Events %q", n)
 			}
 			if after := totalChanges(); after != before {
 				t.Errorf("counted: %v, then %v", before, after)
@@ -259,18 +339,21 @@ func TestAuditRedactsExportSinks(t *testing.T) {
 	}
 	log := out.String()
 	for _, secret := range []string{"otlp-query-secret", "api_key", "otlp-headers-secret-name", "basic-pass", "user:", "url-path-token",
-		"sumo-url-secret-name", "path-token", "enrollment-secret-name", "/v1/logs"} {
+		"path-token", "/v1/logs"} {
 		if strings.Contains(log, secret) {
 			t.Errorf("the log holds %q:\n%s", secret, log)
 		}
 	}
-	for _, shown := range []string{`https://collector.example.com:4318`, `https://intake.example.com`, `grpcs://cp.example.com:443`, Redacted} {
+	// Secrets' names aren't credentials: they are shown, but not a sink's
+	// headers.
+	for _, shown := range []string{`https://collector.example.com:4318`, `https://intake.example.com`, `grpcs://cp.example.com:443`,
+		"sumo-url-secret-name", "enrollment-secret-name"} {
 		if !strings.Contains(log, strings.ReplaceAll(shown, "<", `\u003c`)) && !strings.Contains(log, shown) {
 			t.Errorf("the log lacks %q:\n%s", shown, log)
 		}
 	}
-	if e := <-rec.Events; strings.Contains(e, "secret-name") {
-		t.Errorf("the Event holds a Secret's name: %q", e)
+	if n := rec.notes(a); len(n) != 1 || strings.Contains(n[0], "secret-name") {
+		t.Errorf("Events %q", n)
 	}
 }
 
@@ -302,8 +385,20 @@ func TestSummarize(t *testing.T) {
 		{"create", `null`, `{"mode":"Block","paths":["/a"]}`,
 			[]Change{{Path: "spec.mode", New: "Block"}, {Path: "spec.paths", Added: 1, AddedItems: []string{`"/a"`}}}},
 		{"delete", `{"mode":"Block"}`, `null`, []Change{{Path: "spec.mode", Old: "Block"}}},
-		{"secret names", `{"tokenSecretRef":{"name":"a"}}`, `{"tokenSecretRef":{"name":"b"}}`,
-			[]Change{{Path: "spec.tokenSecretRef.name", Old: Redacted, New: Redacted}}},
+		{"credentials", `{"apiToken":"a","auth":{"password":"p"}}`, `{"apiToken":"b","auth":{"password":"q"}}`,
+			[]Change{{Path: "spec.apiToken", Old: Redacted, New: Redacted}, {Path: "spec.auth.password", Old: Redacted, New: Redacted}}},
+		{"secret names are shown", `{"caSecretRef":{"name":"a"}}`, `{"caSecretRef":{"name":"b"}}`,
+			[]Change{{Path: "spec.caSecretRef.name", Old: "a", New: "b"}}},
+		{"keys are not credentials", `{"configMapRef":{"key":"a.conf"},"rateLimitKeys":1024}`, `{"configMapRef":{"key":"b.conf"},"rateLimitKeys":2048}`,
+			[]Change{{Path: "spec.configMapRef.key", Old: "a.conf", New: "b.conf"}, {Path: "spec.rateLimitKeys", Old: "1024", New: "2048"}}},
+		{"rate limit key", `{"rateLimits":[{"name":"login","requests":5,"key":{"clientIP":{}}}]}`, `{"rateLimits":[{"name":"login","requests":5,"key":{"header":{"name":"X-User"}}}]}`,
+			[]Change{{Path: "spec.rateLimits", Added: 1, Removed: 1,
+				AddedItems:   []string{`{"key":{"header":{"name":"X-User"}},"name":"login","requests":5}`},
+				RemovedItems: []string{`{"key":{"clientIP":{}},"name":"login","requests":5}`}}}},
+		{"empty object", `{"engine":{}}`, `{"engine":{"clientIP":{}}}`,
+			[]Change{{Path: "spec.engine.clientIP", New: "{}"}}},
+		{"export headers", `{"events":{"export":{"sinks":[{"name":"a","headersSecretRef":{"name":"h"}}]}}}`, `{"events":{"export":{"sinks":[]}}}`,
+			[]Change{{Path: "spec.events.export.sinks", Removed: 1, RemovedItems: []string{`{"headersSecretRef":{"name":"\u003credacted\u003e"},"name":"a"}`}}}},
 		{"redacted list items", `{"items":[{"password":"x","name":"n"}]}`, `{"items":[{"password":"y","name":"n"}]}`,
 			[]Change{{Path: "spec.items", Added: 1, Removed: 1, AddedItems: []string{`{"name":"n","password":"\u003credacted\u003e"}`}, RemovedItems: []string{`{"name":"n","password":"\u003credacted\u003e"}`}}}},
 		{"urls", `{"url":"https://a.example/x?token=1"}`, `{"url":"not a url"}`,
@@ -345,10 +440,10 @@ func TestSummarizeBounds(t *testing.T) {
 	}
 	got, omitted, paths := Summarize(nil, fields)
 	raw, _ := json.Marshal(got)
-	if len(raw) > maxChanges || omitted == 0 || len(got)+omitted != 500 || len(paths) != 500 {
+	if len(raw) > maxChanges || omitted == 0 || len(got)+omitted != 500 || len(paths) != maxNotePaths {
 		t.Errorf("500 changes: %d bytes, %d shown, %d omitted, %d paths", len(raw), len(got), omitted, len(paths))
 	}
-	r := Record{Operation: "update", User: "alice", Paths: paths}
+	r := Record{Operation: "update", User: "alice", Paths: paths, Changes: got, ChangesOmitted: omitted}
 	if n := r.note(); !strings.HasSuffix(n, "and 492 more") || len(n) > 1000 {
 		t.Errorf("note: %q", n)
 	}
@@ -368,7 +463,7 @@ func TestAuditEventLimit(t *testing.T) {
 	if n := len(lines(t, out)); n != 3 {
 		t.Errorf("%d lines, want 3", n)
 	}
-	if n := len(rec.Events); n != 1 {
+	if n := len(rec.notes(a)); n != 1 {
 		t.Errorf("%d Events, want 1", n)
 	}
 }
@@ -385,10 +480,10 @@ func TestSummarizeHuge(t *testing.T) {
 	}
 	got, omitted, paths := Summarize(oldSpec, newSpec)
 	raw, _ := json.Marshal(got)
-	if len(raw) > maxChanges || len(got)+omitted != 2*n || len(paths) != 2*n {
+	if len(raw) > maxChanges || len(got)+omitted != 2*n || len(paths) != maxNotePaths {
 		t.Errorf("%d bytes, %d shown, %d omitted, %d paths; want at most %d bytes and %d changes", len(raw), len(got), omitted, len(paths), maxChanges, 2*n)
 	}
-	if r := (Record{Operation: "update", User: "alice", Paths: paths}); len(r.note()) > 1000 {
+	if r := (Record{Operation: "update", User: "alice", Paths: paths, Changes: got, ChangesOmitted: omitted}); len(r.note()) > 1000 {
 		t.Errorf("note of %d bytes", len(r.note()))
 	}
 }

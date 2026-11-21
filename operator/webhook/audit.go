@@ -12,14 +12,18 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	"k8s.io/client-go/tools/events"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/flowcontrol"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -40,18 +44,26 @@ const AuditMessage = "policy change"
 // The audit record's bounds: a value longer than maxValue is cut, and a
 // list item longer than maxItem; a list shows at most maxItems of its
 // added and removed items, and the changes take at most maxChanges bytes
-// of JSON: the rest are counted in changesOmitted.
+// of JSON: the rest are counted in changesOmitted. At most maxGroups of
+// the user's groups are listed, the rest counted in groupsOmitted.
 const (
 	maxValue   = 128
 	maxItem    = 256
 	maxItems   = 5
 	maxChanges = 4096
+	maxGroups  = 16
 	// maxNotePaths is how many changed paths an Event names.
 	maxNotePaths = 8
 )
 
 // Redacted replaces a value the audit record never shows.
 const Redacted = "<redacted>"
+
+// The audit Events' reporting controller, and their timeout.
+const (
+	auditController   = "inkwall-operator"
+	auditEventTimeout = 10 * time.Second
+)
 
 // policyChanges counts the changes the webhooks admitted.
 var policyChanges = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -68,12 +80,21 @@ func init() {
 	}
 }
 
+// EventWriter creates the audit Events: a client.Client.
+type EventWriter interface {
+	Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error
+}
+
 // Auditor records the changes the validating webhooks admit.
 type Auditor struct {
 	// Log gets one AuditMessage line per change, at Info.
 	Log logr.Logger
-	// Recorder records an Event on the changed object; nil: none.
-	Recorder events.EventRecorder
+	// Events creates one Event (events.k8s.io/v1) on the object for each
+	// change, of its own: never a series, which an event recorder would
+	// make of two users' changes, under the first one's note. Nil: none.
+	Events EventWriter
+	// Instance names this replica in the Events (reportingInstance).
+	Instance string
 	// EventLimit, if set, limits the Events (TryAccept): a burst of
 	// changes, e.g. a GitOps sync of many objects, records Events up to it,
 	// and is logged and counted in full.
@@ -81,14 +102,17 @@ type Auditor struct {
 	// Operator is the user the operator writes as (OperatorUser): its
 	// changes are marked operator: true.
 	Operator string
+
+	// pending are the Events being created.
+	pending sync.WaitGroup
 }
 
 // Change is one changed field of the spec, or one changed list.
 type Change struct {
 	// Path is the field's, e.g. spec.mode or spec.skip.paths.
 	Path string `json:"path"`
-	// Old and New are a scalar's values, cut to maxValue bytes; absent:
-	// unset.
+	// Old and New are a scalar's values, cut to maxValue bytes, or {} for
+	// an empty object; absent: unset.
 	Old string `json:"old,omitempty"`
 	New string `json:"new,omitempty"`
 	// Added and Removed count a list's items added and removed;
@@ -113,11 +137,13 @@ type Record struct {
 	ResourceVersion string
 	User            string
 	Groups          []string
+	GroupsOmitted   int
 	ServiceAccount  string
 	Operator        bool
 	Changes         []Change
 	ChangesOmitted  int
-	// Paths are every changed path, the omitted ones too.
+	// Paths are the first maxNotePaths changed paths, the omitted ones
+	// too.
 	Paths []string
 }
 
@@ -133,6 +159,7 @@ func (r Record) keysAndValues() []any {
 		"resourceVersion", r.ResourceVersion,
 		"user", r.User,
 		"groups", cmpNil(r.Groups),
+		"groupsOmitted", r.GroupsOmitted,
 		"serviceAccount", r.ServiceAccount,
 		"operator", r.Operator,
 		"changes", cmpNil(r.Changes),
@@ -202,16 +229,18 @@ func (a *Auditor) record(ctx context.Context, op admissionv1.Operation, oldObj, 
 	if obj == nil {
 		obj = oldObj
 	}
+	// userInfo.extra is never read: it may carry credentials.
+	groups := req.UserInfo.Groups
 	r := Record{
-		Operation:  operation(op),
-		Kind:       req.Kind.Kind,
-		Namespace:  obj.GetNamespace(),
-		Name:       obj.GetName(),
-		UID:        string(obj.GetUID()),
-		Generation: obj.GetGeneration(),
-		User:       req.UserInfo.Username,
-		// userInfo.extra is never read: it may carry credentials.
-		Groups:         slices.Clone(req.UserInfo.Groups),
+		Operation:      operation(op),
+		Kind:           req.Kind.Kind,
+		Namespace:      obj.GetNamespace(),
+		Name:           obj.GetName(),
+		UID:            string(obj.GetUID()),
+		Generation:     obj.GetGeneration(),
+		User:           req.UserInfo.Username,
+		Groups:         slices.Clone(groups[:min(len(groups), maxGroups)]),
+		GroupsOmitted:  max(len(groups)-maxGroups, 0),
 		ServiceAccount: serviceAccount(req.UserInfo.Username),
 		Operator:       a.Operator != "" && req.UserInfo.Username == a.Operator,
 	}
@@ -221,10 +250,66 @@ func (a *Auditor) record(ctx context.Context, op admissionv1.Operation, oldObj, 
 	r.Changes, r.ChangesOmitted, r.Paths = Summarize(toJSON(oldSpec), toJSON(newSpec))
 	a.Log.Info(AuditMessage, r.keysAndValues()...)
 	policyChanges.WithLabelValues(r.Kind, r.Operation).Inc()
-	if a.Recorder != nil && (a.EventLimit == nil || a.EventLimit.TryAccept()) {
-		reason, action := eventReason(op)
-		a.Recorder.Eventf(obj, nil, corev1.EventTypeNormal, reason, action, "%s", r.note())
+	if a.Events != nil && (a.EventLimit == nil || a.EventLimit.TryAccept()) {
+		a.createEvent(a.event(obj, schema.GroupVersion{Group: req.Kind.Group, Version: req.Kind.Version}, op, r))
 	}
+}
+
+// event is the Event on obj for the change r.
+func (a *Auditor) event(obj client.Object, gv schema.GroupVersion, op admissionv1.Operation, r Record) *eventsv1.Event {
+	reason, action := eventReason(op)
+	ns := obj.GetNamespace()
+	if ns == "" {
+		ns = metav1.NamespaceDefault // a cluster-scoped object's
+	}
+	instance := auditController
+	if a.Instance != "" {
+		instance += "-" + a.Instance
+	}
+	return &eventsv1.Event{
+		ObjectMeta:          metav1.ObjectMeta{Namespace: ns, GenerateName: eventPrefix(obj.GetName())},
+		EventTime:           metav1.NewMicroTime(time.Now()),
+		ReportingController: auditController,
+		ReportingInstance:   cut(instance, 128),
+		Action:              action,
+		Reason:              reason,
+		Type:                corev1.EventTypeNormal,
+		Note:                r.note(),
+		Regarding: corev1.ObjectReference{
+			APIVersion:      gv.String(),
+			Kind:            r.Kind,
+			Namespace:       obj.GetNamespace(),
+			Name:            obj.GetName(),
+			UID:             obj.GetUID(),
+			ResourceVersion: obj.GetResourceVersion(),
+		},
+	}
+}
+
+// eventPrefix is the generateName of an Event on the object name: name
+// (a DNS subdomain) cut so the prefix fits the 253 characters, ending in
+// ".audit-", which only a trailing dash may (the API server adds five
+// characters, and shortens a long prefix to fit).
+func eventPrefix(name string) string {
+	const suffix = ".audit-"
+	if len(name) > 253-len(suffix)-5 {
+		name = strings.TrimRight(name[:253-len(suffix)-5], ".-")
+	}
+	return name + suffix
+}
+
+// createEvent creates e in the background: the API server waits for the
+// webhook's answer.
+func (a *Auditor) createEvent(e *eventsv1.Event) {
+	a.pending.Add(1)
+	go func() {
+		defer a.pending.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), auditEventTimeout)
+		defer cancel()
+		if err := a.Events.Create(ctx, e); err != nil {
+			a.Log.Error(err, "policy change Event not recorded", "namespace", e.Regarding.Namespace, "name", e.Regarding.Name, "reason", e.Reason)
+		}
+	}()
 }
 
 // operation is op as the record and the metric name it.
@@ -252,11 +337,10 @@ func (r Record) note() string {
 	if r.Operation == "delete" || len(r.Paths) == 0 {
 		return note
 	}
-	paths := r.Paths
+	paths := r.Paths[:min(len(r.Paths), maxNotePaths)]
 	more := ""
-	if len(paths) > maxNotePaths {
-		more = fmt.Sprintf(" and %d more", len(paths)-maxNotePaths)
-		paths = paths[:maxNotePaths]
+	if n := len(r.Changes) + r.ChangesOmitted - len(paths); n > 0 {
+		more = fmt.Sprintf(" and %d more", n)
 	}
 	return cut(note+": "+strings.Join(paths, ", ")+more, 1000)
 }
@@ -293,27 +377,40 @@ func toJSON(v any) any {
 	return out
 }
 
+// summary collects the changes up to the bounds, and counts the rest.
+type summary struct {
+	changes []Change
+	size    int
+	omitted int
+	paths   []string
+}
+
+// full: no more change is shown, only counted.
+func (s *summary) full() bool { return s.omitted > 0 }
+
+func (s *summary) add(c Change) {
+	if len(s.paths) < maxNotePaths {
+		s.paths = append(s.paths, c.Path)
+	}
+	if !s.full() {
+		raw, _ := json.Marshal(c)
+		if s.size+len(raw)+1 <= maxChanges {
+			s.size += len(raw) + 1
+			s.changes = append(s.changes, c)
+			return
+		}
+	}
+	s.omitted++
+}
+
 // Summarize compares two specs as generic JSON (nil: none, on create or
 // delete), and returns the changes that fit in maxChanges bytes, how many
-// more there were, and every changed path. Values are redacted (redact).
+// more there were, and the first maxNotePaths changed paths. Values are
+// redacted (fieldMode).
 func Summarize(oldSpec, newSpec any) (changes []Change, omitted int, paths []string) {
-	var all []Change
-	diff("spec", oldSpec, newSpec, modePlain, &all)
-	size := 0
-	for i, c := range all {
-		paths = append(paths, c.Path)
-		raw, _ := json.Marshal(c)
-		if size+len(raw)+1 > maxChanges {
-			omitted = len(all) - i
-			for _, c := range all[i+1:] {
-				paths = append(paths, c.Path)
-			}
-			break
-		}
-		size += len(raw) + 1
-		changes = append(changes, c)
-	}
-	return changes, omitted, paths
+	var s summary
+	diff("spec", oldSpec, newSpec, modePlain, &s)
+	return s.changes, s.omitted, s.paths
 }
 
 // mode is how a field's values are shown.
@@ -328,21 +425,32 @@ const (
 	modeSecret
 )
 
-// sensitiveName matches field names whose values may be credentials, and
-// urlName those that hold endpoints.
+// The field names whose values are never shown, and those shown as a URL's
+// scheme and host: the names themselves (token, apiKey), and camel-case
+// names ending in them (bearerToken, clientSecret). None of the five kinds
+// holds a credential today, only Secrets' names (caSecretRef, ...), which
+// are shown; these keep a field added later from slipping through, and
+// TestAuditFieldNames lists every field of the kinds' specs. A field named
+// key (a rate limit's, a ConfigMap's or Secret's key) is not one.
 var (
-	sensitiveName = regexp.MustCompile(`(?i)token|password|secret|key`)
-	urlName       = regexp.MustCompile(`(?i)url|endpoint`)
-	exportHeader  = regexp.MustCompile(`(?i)header`)
+	secretName = regexp.MustCompile(`^(?i:token|password|passphrase|secret|apiKey|privateKey|credentials?)$|` +
+		`[a-z0-9](Token|Password|Passphrase|Secret|APIKey|ApiKey|PrivateKey|Credentials?)$`)
+	urlName = regexp.MustCompile(`^(?i:url|uri|endpoint)$|[a-z0-9](URL|Url|URI|Uri|Endpoint)$`)
+	// Under spec.events.export, header fields are never shown: a sink's
+	// headers carry its credentials.
+	exportHeader = regexp.MustCompile(`(?i)header`)
 )
 
+// exportPath is the export sinks' configuration.
+const exportPath = "spec.events.export"
+
 // fieldMode is the mode of path's field name, under parent's: a mode only
-// gets stricter down the tree. An export sink's headers are never shown.
+// gets stricter down the tree.
 func fieldMode(parent mode, path, name string) mode {
 	m := parent
 	switch {
-	case sensitiveName.MatchString(name),
-		strings.HasPrefix(path, "spec.events.export") && exportHeader.MatchString(name):
+	case secretName.MatchString(name),
+		(path == exportPath || strings.HasPrefix(path, exportPath+".")) && exportHeader.MatchString(name):
 		m = max(m, modeSecret)
 	case urlName.MatchString(name):
 		m = max(m, modeURL)
@@ -365,14 +473,20 @@ func quote(s string) string {
 	return string(raw)
 }
 
-// diff appends the changes from old to new under path.
-func diff(path string, old, new any, m mode, out *[]Change) {
+// diff adds the changes from old to new under path to s.
+func diff(path string, old, new any, m mode, s *summary) {
 	oldMap, oldIsMap := old.(map[string]any)
 	newMap, newIsMap := new.(map[string]any)
 	_, oldIsList := old.([]any)
 	_, newIsList := new.([]any)
 	switch {
 	case (oldIsMap || old == nil) && (newIsMap || new == nil) && (oldIsMap || newIsMap):
+		if (old == nil && len(newMap) == 0) || (new == nil && len(oldMap) == 0) {
+			// An empty object set or unset, e.g. a switch such as a rate
+			// limit's key: {clientIP: {}}.
+			s.add(Change{Path: path, Old: show(path, old, m), New: show(path, new, m)})
+			return
+		}
 		// The larger side's keys fit, without a sum that could overflow;
 		// append grows it for the keys only one side has.
 		keys := make([]string, 0, max(len(oldMap), len(newMap)))
@@ -386,62 +500,58 @@ func diff(path string, old, new any, m mode, out *[]Change) {
 		}
 		slices.Sort(keys)
 		for _, k := range keys {
-			diff(child(path, k), oldMap[k], newMap[k], fieldMode(m, path, k), out)
+			diff(child(path, k), oldMap[k], newMap[k], fieldMode(m, path, k), s)
 		}
 	case (oldIsList || old == nil) && (newIsList || new == nil) && (oldIsList || newIsList):
-		if c, ok := diffList(path, old, new, m); ok {
-			*out = append(*out, c)
+		if c, ok := diffList(path, old, new, m, !s.full()); ok {
+			s.add(c)
 		}
 	case !apiequality.Semantic.DeepEqual(old, new):
-		*out = append(*out, Change{Path: path, Old: show(path, old, m), New: show(path, new, m)})
+		s.add(Change{Path: path, Old: show(path, old, m), New: show(path, new, m)})
 	}
 }
 
-// diffList compares two lists as multisets of their items.
-func diffList(path string, old, new any, m mode) (Change, bool) {
+// diffList compares two lists as multisets of their items; it renders the
+// items it shows only if shown.
+func diffList(path string, old, new any, m mode, shown bool) (Change, bool) {
 	oldList, _ := old.([]any)
 	newList, _ := new.([]any)
-	render := func(l []any) []string {
-		out := make([]string, len(l))
-		for i, v := range l {
-			raw, _ := json.Marshal(redactTree(path, v, m))
-			out[i] = string(raw)
-		}
-		return out
+	render := func(v any) string {
+		raw, _ := json.Marshal(redactTree(path, v, m))
+		return cut(string(raw), maxItem)
 	}
 	// Compare the raw items, so a change hidden by redaction still counts.
 	key := func(v any) string {
 		raw, _ := json.Marshal(v)
 		return string(raw)
 	}
-	oldShown, newShown := render(oldList), render(newList)
 	left := map[string]int{}
 	for _, v := range oldList {
 		left[key(v)]++
 	}
 	c := Change{Path: path}
-	for i, v := range newList {
+	for _, v := range newList {
 		if k := key(v); left[k] > 0 {
 			left[k]--
 			continue
 		}
 		c.Added++
-		if len(c.AddedItems) < maxItems {
-			c.AddedItems = append(c.AddedItems, cut(newShown[i], maxItem))
+		if shown && len(c.AddedItems) < maxItems {
+			c.AddedItems = append(c.AddedItems, render(v))
 		}
 	}
 	right := map[string]int{}
 	for _, v := range newList {
 		right[key(v)]++
 	}
-	for i, v := range oldList {
+	for _, v := range oldList {
 		if k := key(v); right[k] > 0 {
 			right[k]--
 			continue
 		}
 		c.Removed++
-		if len(c.RemovedItems) < maxItems {
-			c.RemovedItems = append(c.RemovedItems, cut(oldShown[i], maxItem))
+		if shown && len(c.RemovedItems) < maxItems {
+			c.RemovedItems = append(c.RemovedItems, render(v))
 		}
 	}
 	if c.Added == 0 && c.Removed == 0 {
@@ -461,10 +571,6 @@ func redactTree(path string, v any, m mode) any {
 	case map[string]any:
 		out := make(map[string]any, len(v))
 		for k, e := range v {
-			// An empty object (an unset struct) says nothing.
-			if e, ok := e.(map[string]any); ok && len(e) == 0 {
-				continue
-			}
 			out[k] = redactTree(child(path, k), e, fieldMode(m, path, k))
 		}
 		return out
@@ -486,8 +592,8 @@ func redactTree(path string, v any, m mode) any {
 	return v
 }
 
-// show is v as its mode allows: a scalar, or (where the schema changed
-// its type) a map or list as redacted JSON.
+// show is v as its mode allows: a scalar, or a map or list (an empty
+// object, or where the schema changed its type) as redacted JSON.
 func show(path string, v any, m mode) string {
 	switch v.(type) {
 	case map[string]any, []any:

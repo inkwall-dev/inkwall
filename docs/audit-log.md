@@ -7,6 +7,7 @@ a Kubernetes Event on the object, and counts it in a metric. It is always on, an
 ## Contents
 
 - [Where it comes from](#where-it-comes-from)
+  - [Deletes while the operator is unreachable](#deletes-while-the-operator-is-unreachable)
 - [The log line](#the-log-line)
 - [What is never logged](#what-is-never-logged)
 - [Events](#events)
@@ -30,13 +31,30 @@ served it records the change. It records nothing for:
   subresource, which the webhooks never see.
 
 Deletes of most objects don't need the operator, and still don't: their webhook fails open
-(`failurePolicy: Ignore`). While the operator is down, such a delete goes through after at most the
-webhook's timeout (2 s), and isn't recorded. Deleting the control plane's objects
-(`inkwall.dev/source: saas`) goes to a webhook that fails closed, as before. The `InkwallConfig`
-webhook fails open for every operation. So a change made while the operator is down isn't
-recorded, and a request that a later step refuses (another webhook, a quota) may be recorded
-although it was never saved: the log is the operator's view, not the API server's (see
+(`failurePolicy: Ignore`). Deleting the control plane's objects (`inkwall.dev/source: saas`) goes
+to a webhook that fails closed, as before. The `InkwallConfig` webhook fails open for every
+operation.
+
+What the log can miss, or hold twice: it is the operator's view, not the API server's (see
 [below](#the-api-servers-audit-log)).
+
+- A change made while the operator is down isn't recorded.
+- A request that a later step refuses (another webhook, a quota) may be recorded although it was
+  never saved.
+- One change can be recorded twice. A patch or server-side apply that sends no `resourceVersion` is
+  retried by the API server when another write gets in first, and each try is admitted again.
+  The two lines name the same user, object and change.
+
+### Deletes while the operator is unreachable
+
+A delete waits for the webhook's answer. When the operator's pods are down, the API server
+fails at once (no endpoints, or the connection is refused) and the delete goes through. When the
+operator can't be reached but doesn't refuse (a network partition, a hung pod), each delete of
+these kinds waits the webhook's full timeout, 2 s, before it goes through. A namespace being
+deleted deletes its objects one by one, so a namespace with 1,000 policies, rule sets and IP lists
+takes about 33 minutes to go. To shorten it, lower the chart's `webhook.timeoutSeconds` (1 s at
+least: every Inkwall webhook takes it), or bring the operator back, or scale it up, before
+deleting.
 
 ## The log line
 
@@ -44,7 +62,7 @@ Each change is one JSON line in the operator's log, at `INFO`, with `"msg":"poli
 `"logger":"audit"`:
 
 ```json
-{"time":"2026-11-21T10:04:12.311Z","level":"INFO","msg":"policy change","logger":"audit","operation":"update","kind":"WAFPolicy","namespace":"shop","name":"checkout","uid":"6f1c2a4e-0000-4000-8000-000000000001","generation":3,"resourceVersion":"4711","user":"alice","groups":["system:authenticated","platform"],"serviceAccount":"","operator":false,"changes":[{"path":"spec.mode","old":"Detect","new":"Block"},{"path":"spec.skip.paths","added":1,"addedItems":["\"/static/*\""]}],"changesOmitted":0}
+{"time":"2026-11-21T10:04:12.311Z","level":"INFO","msg":"policy change","logger":"audit","operation":"update","kind":"WAFPolicy","namespace":"shop","name":"checkout","uid":"6f1c2a4e-0000-4000-8000-000000000001","generation":3,"resourceVersion":"4711","user":"alice","groups":["system:authenticated","platform"],"groupsOmitted":0,"serviceAccount":"","operator":false,"changes":[{"path":"spec.mode","old":"Detect","new":"Block"},{"path":"spec.skip.paths","added":1,"addedItems":["\"/static/*\""]}],"changesOmitted":0}
 ```
 
 | Field | |
@@ -53,7 +71,8 @@ Each change is one JSON line in the operator's log, at `INFO`, with `"msg":"poli
 | `kind`, `namespace`, `name`, `uid` | The object (`namespace` is empty for `ClusterWAFRuleSet` and `InkwallConfig`) |
 | `generation` | The object's `metadata.generation` after the change; on a delete, its last |
 | `resourceVersion` | The version the update or delete applied to; empty on a create |
-| `user`, `groups` | Who sent the request, as the API server authenticated them |
+| `user`, `groups` | Who sent the request, as the API server authenticated them: its first 16 groups |
+| `groupsOmitted` | The user's other groups, counted |
 | `serviceAccount` | `namespace/name` when the user is a ServiceAccount, else empty |
 | `operator` | `true` when the operator made the change itself: its control plane's objects in `Managed` mode |
 | `changes` | The spec's changed fields, below |
@@ -62,10 +81,13 @@ Each change is one JSON line in the operator's log, at `INFO`, with `"msg":"poli
 Each entry of `changes` is one changed field of the spec, by its path (`spec.mode`,
 `spec.engine.clientIP.trustedProxies`, `spec.selector.matchLabels["app.kubernetes.io/name"]`):
 
-- a value: `old` and `new`, each absent when unset, cut to 128 bytes;
+- a value: `old` and `new`, each absent when unset, cut to 128 bytes. An empty object set or
+  unset shows as `{}`, so a switch such as `spec.engine.clientIP: {}` is seen;
 - a list: `added` and `removed`, the number of items added and removed, and `addedItems` and
   `removedItems`, the first 5 of each as JSON, each cut to 256 bytes; or `reordered: true` when it
-  holds the same items in another order.
+  holds the same items in another order. A list compares whole items: a field changed inside one
+  item (a rate limit's `requests`, a rule set binding's `crs`) shows as that item removed and the
+  changed one added. In a large item, cut to 256 bytes, the changed field may be past the cut.
 
 A create lists every field it sets as `new`, a delete every field the object had as `old`. Field
 names and their meaning are stable: a new field may be added, none is renamed or removed within
@@ -73,28 +95,37 @@ names and their meaning are stable: a new field may be added, none is renamed or
 
 ## What is never logged
 
-The record never holds a credential, nor a Secret's contents: these kinds only name Secrets, and
-the webhooks don't read them.
+No Secret's contents: these kinds only name Secrets (`caSecretRef`, `enrollmentSecretRef`,
+`urlSecretRef`, ...), and the webhooks don't read them. The names are shown.
 
 - `userInfo.extra` is never read: it can carry tokens or session data.
-- A field whose name contains `token`, `password`, `secret` or `key` (any case) shows
-  `<redacted>` for its value and every value under it, e.g. `headersSecretRef`,
-  `enrollmentSecretRef`, `urlSecretRef`, `signingKey`. Its path is still listed, so you see it
-  changed.
-- A field whose name contains `url` or `endpoint` shows only the URL's scheme and host:
+- The URLs, whose path or query may hold a token, show only their scheme and host:
   `spec.events.export.sinks[].json.url`, `.otlp.endpoint` and `spec.controlPlane.endpoint` become
   `https://intake.example.com`, never their path, query or user information.
-- Under `spec.events.export`, a field whose name contains `header` is never shown.
+- Under `spec.events.export`, a field whose name holds `header` is never shown (`<redacted>`):
+  a sink's headers carry its credentials.
+- No field of the five kinds holds a credential today. One added later, named `token`, `password`,
+  `secret`, `apiKey`, `privateKey` or `credentials`, or ending in one of them (`bearerToken`,
+  `clientSecret`), shows `<redacted>`, with every value under it; its path is still listed.
+  Fields named `key` (a rate limit's key, a ConfigMap's or Secret's key) aren't credentials and
+  are shown.
 - The same rules apply inside list items, such as `spec.events.export.sinks`.
 
-Rules written inline in a rule set (`spec.source.seclang`) are logged, cut to 128 bytes: they are
-part of the spec, which the control plane also gets.
+What the log does hold, from the specs:
+
+- **Rules written inline** in a rule set (`spec.source.seclang`), cut to 128 bytes. They hold what
+  their author wrote, which may include a value a rule compares with, such as a key in an
+  `@streq`. The control plane gets them too.
+- **IP addresses**: a `WAFIPList`'s entries, up to 5 added and 5 removed per change, and the
+  trusted proxies. An address can be personal data: keep the log as you keep other logs that hold
+  client addresses.
 
 ## Events
 
 Each change is also a `Normal` Event on the object, from `inkwall-operator`: reason `Created`,
 `Changed` or `Deleted`, and a short note with the user (`the operator` for its own changes) and up
-to 8 changed paths:
+to 8 changed paths. Each change is an Event of its own, never counted into another one's series,
+so a note always names the change's own user:
 
 ```sh
 kubectl get events -n shop --field-selector reason=Changed,involvedObject.kind=WAFPolicy

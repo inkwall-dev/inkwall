@@ -455,7 +455,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		if auditLog.GetSink() == nil {
 			auditLog = ctrl.Log.WithName("audit")
 		}
-		starter := &webhookStarter{mgr: mgr, ready: ready, inject: injector, auditLog: auditLog}
+		starter := &webhookStarter{mgr: mgr, ready: ready, inject: injector, auditLog: auditLog, replica: replicaName(o)}
 		if err := mgr.Add(starter); err != nil {
 			return nil, err
 		}
@@ -620,6 +620,7 @@ type webhookStarter struct {
 	mgr        manager.Manager
 	inject     *webhook.PodInjector
 	auditLog   logr.Logger
+	replica    string
 	ready      <-chan struct{}
 	registered atomic.Bool
 }
@@ -648,8 +649,11 @@ func (w *webhookStarter) Start(ctx context.Context) error {
 	}
 	guard := &webhook.SourceGuard{Operator: user, Reader: w.mgr.GetClient()}
 	audit := &webhook.Auditor{
-		Log:      w.auditLog,
-		Recorder: w.mgr.GetEventRecorder("inkwall-operator"),
+		Log: w.auditLog,
+		// One Event per change, created directly: an event recorder would
+		// merge two users' changes into a series under the first one's note.
+		Events:   w.mgr.GetClient(),
+		Instance: w.replica,
 		// 100 Events at once, then 5 a second, per replica.
 		EventLimit: flowcontrol.NewTokenBucketRateLimiter(5, 100),
 		Operator:   user,

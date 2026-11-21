@@ -36,6 +36,19 @@ func (b *syncBuffer) Write(p []byte) (int, error) {
 	return b.buf.Write(p)
 }
 
+// errors are the audit log's ERROR lines (Events not recorded).
+func (b *syncBuffer) errors() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []string
+	for _, line := range strings.Split(b.buf.String(), "\n") {
+		if strings.Contains(line, `"level":"ERROR"`) {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
 // records are the audit log's lines about the object namespace/name.
 func (b *syncBuffer) records(t *testing.T, kind, namespace, name string) []map[string]any {
 	t.Helper()
@@ -70,6 +83,14 @@ func testAuditLog(ctx context.Context, t *testing.T, c client.Client) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg, err = env.User("bob", "system:masters")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := client.New(cfg, client.Options{Scheme: c.Scheme()})
+	if err != nil {
+		t.Fatal(err)
+	}
 	p := &wafv1alpha1.WAFPolicy{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "audited"},
 		Spec: wafv1alpha1.WAFPolicySpec{
@@ -94,6 +115,10 @@ func testAuditLog(ctx context.Context, t *testing.T, c client.Client) {
 	}
 	update(ctx, t, alice, p, func(p *wafv1alpha1.WAFPolicy) { p.Labels = map[string]string{"team": "shop"} })
 	update(ctx, t, alice, p, func(p *wafv1alpha1.WAFPolicy) { p.Spec.Mode = wafv1alpha1.PolicyBlock })
+	// Bob's change right after alice's is an Event of its own, with his
+	// name: an event recorder would count it in alice's (the review of
+	// #793).
+	update(ctx, t, bob, p, func(p *wafv1alpha1.WAFPolicy) { p.Spec.FailureMode = wafv1alpha1.FailOpen })
 	if err := alice.Delete(ctx, p); err != nil {
 		t.Fatal(err)
 	}
@@ -135,24 +160,26 @@ func testAuditLog(ctx context.Context, t *testing.T, c client.Client) {
 		if err := c.List(ctx, &list, client.InNamespace("default")); err != nil {
 			return err.Error()
 		}
-		want := map[string]string{
+		want := map[string]bool{
 			// spec.timeout is the CRD's default.
-			"Created": "Created by alice: spec.mode, spec.targetRefs, spec.timeout",
-			"Changed": "Changed by alice: spec.mode",
-			"Deleted": "Deleted by alice",
+			"Created: Created by alice: spec.mode, spec.targetRefs, spec.timeout": true,
+			"Changed: Changed by alice: spec.mode":                                true,
+			"Changed: Changed by bob: spec.failureMode":                           true,
+			"Deleted: Deleted by alice":                                           true,
 		}
 		var seen []string
 		for _, e := range list.Items {
-			if e.Regarding.Kind != "WAFPolicy" || e.Regarding.Name != "audited" {
+			if e.Regarding.Kind != "WAFPolicy" || e.Regarding.Name != "audited" || e.Action == "StatusChanged" {
 				continue
 			}
 			seen = append(seen, e.Reason+": "+e.Note)
-			if note, ok := want[e.Reason]; ok && e.Note == note && e.Type == corev1.EventTypeNormal {
-				delete(want, e.Reason)
+			if e.Type != corev1.EventTypeNormal || e.Series != nil || e.DeprecatedCount > 1 {
+				return fmt.Sprintf("Event %s: type %s, series %v, count %d", e.Name, e.Type, e.Series, e.DeprecatedCount)
 			}
+			delete(want, e.Reason+": "+e.Note)
 		}
-		if len(want) > 0 {
-			return fmt.Sprintf("missing %v; seen %q", want, seen)
+		if len(want) > 0 || len(seen) != 4 {
+			return fmt.Sprintf("missing %v; seen %q; the audit logger's errors: %s", want, seen, auditLog.errors())
 		}
 		return ""
 	})
