@@ -175,6 +175,16 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   only without descriptions (about 4,500 with 256-byte ones), so split longer lists. The
   InkwallConfig's `status.proxies[].ingressClasses` and `gatewayClasses` list at most 64 classes
   each.
+- **A policy's defaults are in the API and the bundle, not only the engine** (#718).
+  `spec.timeout` defaults to `250ms`, `ruleSets[].placement` to `AfterCRS` and
+  `responses.streams` to `Skip`, so `kubectl get -o yaml` and `kubectl explain` show them. The
+  operator writes the 64 KiB body limit into the bundle for every policy that inspects bodies and
+  sets no `body.maxBytes`, and the same for `responses.maxBytes`, instead of leaving it to the
+  engine. Every value is the one that applied before, so nothing behaves differently. The bundle
+  grows by a few bytes per policy, so after the upgrade every policy's `bundleVersion` moves to the
+  operator's first bundle, and policies are `Enforced=False` (`EnginesBehind`) for the seconds the
+  engines take to load it. `responses: {streams: Skip}` without `inspect: true` is now accepted
+  (it is the default).
 
 ## From 0.5.x to 0.6.0
 

@@ -110,8 +110,8 @@ type WAFPolicySpec struct {
 	// +optional
 	FailureMode FailureMode `json:"failureMode,omitempty"`
 
-	// Timeout is the inspection deadline per request, at most 1s. Unset:
-	// the engine's default (250ms).
+	// Timeout is the inspection deadline per request, at most 1s.
+	// +kubebuilder:default="250ms"
 	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s') && duration(self) <= duration('1s')",message="timeout must be more than 0s and at most 1s"
 	// +optional
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
@@ -408,13 +408,13 @@ type RuleSetBinding struct {
 	// +optional
 	CRS *CRSSettings `json:"crs,omitempty"`
 
-	// Placement is where a SecLang rule set loads: AfterCRS (the default)
-	// or BeforeCRS, before the CRS's initialization, so its rules can set
+	// Placement is where a SecLang rule set loads: AfterCRS or BeforeCRS, before the CRS's initialization, so its rules can set
 	// the CRS's tx variables or turn CRS rules off with
 	// ctl:ruleRemoveById. A BeforeCRS rule set can't use SecRuleRemoveBy*
 	// or SecRuleUpdate*, which only reach rules loaded before them. Not
 	// for the built-in CRS. Requires engines 0.6.0 or later: older ones
 	// load the rule set after the CRS.
+	// +kubebuilder:default=AfterCRS
 	// +optional
 	Placement RuleSetPlacement `json:"placement,omitempty"`
 }
@@ -629,7 +629,8 @@ type BodySpec struct {
 	Inspect *bool `json:"inspect,omitempty"`
 
 	// MaxBytes is how much of a body is inspected, at most 10 MiB. Unset:
-	// the engine's default (64 KiB).
+	// 64 KiB, which the operator writes into the bundle, so an engine's own
+	// default never applies.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10485760
 	// +optional
@@ -714,7 +715,7 @@ type WebSocketOrigin string
 type HeaderName string
 
 // ResponsesSpec configures response inspection.
-// +kubebuilder:validation:XValidation:rule="(has(self.inspect) && self.inspect) || (!has(self.maxBytes) && !has(self.onOversize) && !has(self.streams))",message="maxBytes, onOversize and streams need inspect: true"
+// +kubebuilder:validation:XValidation:rule="(has(self.inspect) && self.inspect) || (!has(self.maxBytes) && !has(self.onOversize) && (!has(self.streams) || self.streams == 'Skip'))",message="maxBytes, onOversize and streams: Inspect need inspect: true"
 type ResponsesSpec struct {
 	// Inspect turns response inspection on: the status and headers, and
 	// the body when its media type is text (plain, HTML, XML, CSV),
@@ -726,8 +727,8 @@ type ResponsesSpec struct {
 	Inspect bool `json:"inspect,omitempty"`
 
 	// MaxBytes is how much of a response body is inspected, at most 10
-	// MiB. Unset: 64 KiB (each KiB costs about 0.3 ms of inspection: raise
-	// timeout with it). A longer body has this much inspected, and then
+	// MiB. Unset: 64 KiB, which the operator writes into the bundle (each
+	// KiB costs about 0.3 ms of inspection: raise timeout with it). A longer body has this much inspected, and then
 	// gets onOversize.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10485760
@@ -751,7 +752,7 @@ type ResponsesSpec struct {
 	// HAProxy doesn't send their bodies (the policy is then not Programmed
 	// on its Ingresses, ResponsesNotInspected), and engines before 0.6.0
 	// skip them (the policy is then not Enforced).
-	// Unset: Skip.
+	// +kubebuilder:default=Skip
 	// +optional
 	Streams StreamsAction `json:"streams,omitempty"`
 }

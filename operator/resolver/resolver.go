@@ -32,6 +32,7 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
+	enginepolicy "github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
@@ -769,23 +770,27 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 		}
 		p.Exclusions = append(p.Exclusions, ex)
 	}
-	if b := s.Body; b != nil {
-		body := &bundlev1.BodyConfig{Inspect: b.Inspect == nil || *b.Inspect, OnOversize: oversizeAction(b.OnOversize)}
-		if b.MaxBytes != nil {
-			body.MaxBytes = *b.MaxBytes
-		}
-		body.GrpcMessages = b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect
-		body.GrpcPerMessage = body.GrpcMessages && b.GRPCStreams == wafv1alpha1.GRPCStreamsPerMessage
-		body.DenyGrpc = b.GRPC == wafv1alpha1.GRPCDeny
-		p.Body = body
+	// The body limit is written even when the policy sets none (#718): the
+	// API's default, not the engine's, so that an engine with another
+	// default can't change what a stored policy inspects.
+	b := s.Body
+	if b == nil {
+		b = &wafv1alpha1.BodySpec{}
 	}
+	body := &bundlev1.BodyConfig{Inspect: b.Inspect == nil || *b.Inspect, OnOversize: oversizeAction(b.OnOversize)}
+	body.MaxBytes = deref(b.MaxBytes)
+	if body.Inspect {
+		body.MaxBytes = cmp.Or(body.MaxBytes, enginepolicy.DefaultBodyBytes)
+	}
+	body.GrpcMessages = b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect
+	body.GrpcPerMessage = body.GrpcMessages && b.GRPCStreams == wafv1alpha1.GRPCStreamsPerMessage
+	body.DenyGrpc = b.GRPC == wafv1alpha1.GRPCDeny
+	p.Body = body
 	// Unset when not inspected: the bundles of policies without responses
 	// stay as before 0.4.0.
 	if r := s.Responses; r != nil && r.Inspect {
 		resp := &bundlev1.ResponseConfig{Inspect: true, OnOversize: oversizeAction(r.OnOversize)}
-		if r.MaxBytes != nil {
-			resp.MaxBytes = *r.MaxBytes
-		}
+		resp.MaxBytes = cmp.Or(deref(r.MaxBytes), enginepolicy.DefaultResponseBytes)
 		resp.Streams = r.Streams == wafv1alpha1.StreamsInspect
 		p.Responses = resp
 	}
@@ -914,6 +919,14 @@ func beforeCRS(rs *bundlev1.RuleSet) string {
 		}
 	}
 	return ""
+}
+
+// deref is *n, or 0 when n is nil.
+func deref(n *int64) int64 {
+	if n == nil {
+		return 0
+	}
+	return *n
 }
 
 // crsSettings is a binding's CRS settings in the bundle, nil when it sets
