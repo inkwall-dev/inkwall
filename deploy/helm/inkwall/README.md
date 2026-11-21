@@ -207,8 +207,9 @@ Middlewares, and the references to them in Ingresses, IngressRoutes and HTTPRout
 `EnvoyExtensionPolicy`, `Backend` and `ClientTrafficPolicy` objects and patches Gateways; Istio's
 (`inkwall-operator-istio`) writes its `EnvoyFilter` objects and the ConfigMaps Gateways name in
 their `parametersRef`, and patches Gateways; the HAProxy Kubernetes Ingress Controller's
-(`inkwall-operator-haproxy`) writes the backend snippet annotations of its Ingresses (and reads its
-`Backend` kind, so that the role is its own: Traefik's grants the same Ingress access). Without
+(`inkwall-operator-haproxy`) writes the backend snippet annotations of its Ingresses (controller 3.1
+to 3.2) or its `Backend` objects and the Ingresses' `cr-backend` annotations (3.4 and later), and
+reads its `Global` objects (HAProxy's buffer). Without
 it, the controller's pods don't get the engine. Istio ingress's (`inkwall-operator-istio-ingress`)
 reads VirtualServices and Istio's own Gateways and writes its `EnvoyFilter` objects.
 `rbac.integrations.<integration>` (`traefik`, `envoyGateway`, `istio`, `istioIngress`, `haproxy`) is one of:

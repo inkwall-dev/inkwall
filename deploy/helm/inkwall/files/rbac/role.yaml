@@ -203,13 +203,29 @@ rules:
   verbs:
   - create
 - apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - get
+- apiGroups:
   - ingress.v3.haproxy.org
   resources:
   - backends
   verbs:
+  - create
+  - delete
   - get
   - list
+  - patch
+  - update
   - watch
+- apiGroups:
+  - ingress.v3.haproxy.org
+  resources:
+  - globals
+  verbs:
+  - get
 - apiGroups:
   - networking.k8s.io
   resources:

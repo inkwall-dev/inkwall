@@ -769,8 +769,14 @@ has the decision), for `VirtualService` targets bound to Istio `Gateway` objects
 - **The routes**: each protected Ingress of the class, once a controller pod runs, gets
   `haproxy.org/standalone-backend: "true"` and its operator part of
   `haproxy.org/backend-config-snippet`, first, between `# inkwall:begin` and `# inkwall:end`; the
-  user's lines stay after it. `waf.inkwall.dev/haproxy-wired` marks it (`Wired`), with the previous
-  `standalone-backend`, restored when it is unwired.
+  user's lines stay after it. On controller 3.4 and later, which dropped config snippets (#753),
+  the same rules are the operator's `Backend` custom resource of the controller's
+  (`ingress.v3.haproxy.org/v3`, `inkwall-waf-<ingress>`, owned by the Ingress), which the Ingress
+  names in `haproxy.org/cr-backend`; the operator tells the release from the controller pods'
+  image tag (or their `waf.inkwall.dev/haproxy-controller-version`), and one it can't tell or
+  doesn't wire is `ProxyVersionUnsupported`, its Ingresses left as they are.
+  `waf.inkwall.dev/haproxy-wired` marks it (`Wired`), with the previous `standalone-backend`,
+  restored when it is unwired.
 - **`Programmed`** only once the operator's probe (`Prober`, on the leader) has proven the
   filter on every running pod; `Unverified` until then, and when a probe gets anything but the
   engine's answer. For a policy with `responses.inspect`, also the probe's response leg on every
@@ -1285,8 +1291,10 @@ holds what its wiring writes, and its proxy's own kinds.
 | Istio ingress's: `envoyfilters` (networking.istio.io) | full | Istio ingress gateway wiring |
 | Istio ingress's: `virtualservices`, `gateways` (networking.istio.io) | read | VirtualService targets and the Gateways they bind to |
 | `virtualservices`, `gateways` (networking.istio.io) | read | VirtualService targets ([§4.5](#45-resolver)) |
-| HAProxy's `ClusterRole`: `ingresses` | update, patch | The backend snippet annotations |
-| HAProxy's: `backends` (ingress.v3.haproxy.org) | read | None: makes the role the integration's own |
+| HAProxy's `ClusterRole`: `ingresses` | update, patch | The backend snippet and `cr-backend` annotations |
+| HAProxy's: `backends` (ingress.v3.haproxy.org) | full | The operator's `Backend` per protected Ingress (controller 3.4 and later); makes the role the integration's own |
+| HAProxy's: `globals` (ingress.v3.haproxy.org) | get | HAProxy's buffer on controller 3.4 (`tune.bufsize`) |
+| HAProxy's: `services` | get | A protected Ingress's Services, whose `cr-backend` would take over the operator's (3.4) |
 | `configmaps` | full, cluster-wide | `inkwall-trust` and `inkwall-haproxy` per namespace, engine reports |
 | `secrets` | in `inkwall-system` | Bundle, signing key, certificates |
 | `roles`, `rolebindings` | in `inkwall-system` | Bundle Secret grant ([§4.3](#43-injection-controller)) |

@@ -303,6 +303,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	envoyFilters := crd(wiring.EnvoyFilterGVK, nil)
 	virtualServices := crd(wiring.IstioVirtualServiceGVK, nil)
 	istioGateways := crd(wiring.IstioGatewayGVK, nil)
+	haproxyBackends := crd(wiring.HAProxyBackendGVK, nil)
 	if err := (&controller.BundleReconciler{
 		Client:          mgr.GetClient(),
 		APIReader:       mgr.GetAPIReader(),
@@ -402,6 +403,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		Pods: selectors, IngressRoutes: ingressRoutes, HTTPRoutes: httpRoutes, Gateways: gateways, GatewayClasses: gatewayClasses,
 		EnvoyProxies: envoyProxies, ExtensionPolicies: extensionPolicies, TrafficPolicies: trafficPolicies, EnvoyFilters: envoyFilters,
 		VirtualServices: virtualServices, IstioGateways: istioGateways, Sidecar: sidecar,
+		HAProxyBackends: haproxyBackends, ProxyNamespaces: o.ProxyNamespaces,
 		Prober: prober,
 	}
 	wirings := wiring.Integrations(mgr.GetClient(), mgr.GetAPIReader(), wiringCfg)
@@ -434,7 +436,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	if err := (&proxydiscovery.Reconciler{Client: mgr.GetClient(), GatewayClasses: gatewayClasses, Kinds: kinds, Disabled: denied, Recorder: mgr.GetEventRecorder("inkwall-operator")}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
-	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gateways, gatewayClasses, envoyProxies, extensionPolicies, trafficPolicies, envoyFilters, virtualServices, istioGateways} {
+	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gateways, gatewayClasses, envoyProxies, extensionPolicies, trafficPolicies, envoyFilters, virtualServices, istioGateways, haproxyBackends} {
 		if err := mgr.Add(k); err != nil {
 			return nil, err
 		}

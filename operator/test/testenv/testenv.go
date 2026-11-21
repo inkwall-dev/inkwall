@@ -168,6 +168,11 @@ func InstallEnvoyGateway(e *Env) error { return install(e, "envoy-gateway") }
 // are served.
 func InstallIstio(e *Env) error { return install(e, "istio") }
 
+// InstallHAProxy installs stand-ins for the HAProxy Kubernetes Ingress
+// Controller's Backend and Global CRDs (testenv/haproxy) while the operator
+// runs, and waits until they are served.
+func InstallHAProxy(e *Env) error { return install(e, "haproxy") }
+
 func install(e *Env, dir string) error {
 	_, err := envtest.InstallCRDs(e.Config, envtest.CRDInstallOptions{
 		Paths:              []string{filepath.Join(filepath.Dir(configDir()), "test", "testenv", dir)},

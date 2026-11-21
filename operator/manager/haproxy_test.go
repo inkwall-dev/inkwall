@@ -16,12 +16,14 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
+	"github.com/inkwall-dev/inkwall/operator/test/testenv"
 )
 
 // testHAProxy follows a policy on an Ingress the HAProxy Kubernetes Ingress
@@ -83,12 +85,13 @@ func testHAProxy(ctx context.Context, t *testing.T, c client.Client) {
 	// The controller's pod, as its chart makes it: the webhook injects the
 	// engine and the agent's configuration.
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Namespace: edge, Name: "hap-1", Labels: map[string]string{"app.kubernetes.io/name": "kubernetes-ingress"}},
+		ObjectMeta: metav1.ObjectMeta{Namespace: edge, Name: "hap-1", Labels: map[string]string{"app.kubernetes.io/name": "kubernetes-ingress"},
+			OwnerReferences: haproxyOwner},
 		Spec: corev1.PodSpec{
 			ServiceAccountName: "haproxy",
 			SecurityContext:    &corev1.PodSecurityContext{RunAsUser: new(int64(1000))},
 			Containers: []corev1.Container{{Name: injection.HAProxyContainer, Image: "haproxytech/kubernetes-ingress:3.2.19",
-				Args:  []string{"--configmap=" + edge + "/hap-config", "--http-bind-port=8080"},
+				Args:  []string{"--configmap=" + edge + "/hap-config", "--http-bind-port=8080", "--ingress.class=haproxy-edge"},
 				Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 8080}}}},
 		},
 	}
@@ -219,12 +222,13 @@ func testHAProxy(ctx context.Context, t *testing.T, c client.Client) {
 	// it, until it is restarted.
 	old := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: edge, Name: "hap-old", Labels: map[string]string{"app.kubernetes.io/name": "kubernetes-ingress"},
-			Annotations: map[string]string{injection.InjectedAnnotation: "true", injection.HAProxyConfigAnnotation: injection.HAProxyConfigMounted}},
+			OwnerReferences: haproxyOwner,
+			Annotations:     map[string]string{injection.InjectedAnnotation: "true", injection.HAProxyConfigAnnotation: injection.HAProxyConfigMounted}},
 		Spec: corev1.PodSpec{
 			InitContainers: []corev1.Container{{Name: injection.ContainerName, Image: "ghcr.io/inkwall-dev/inkwall-engine:0.5.0", Args: []string{"spoe"},
 				RestartPolicy: new(corev1.ContainerRestartPolicyAlways)}},
 			Containers: []corev1.Container{{Name: injection.HAProxyContainer, Image: "haproxytech/kubernetes-ingress:3.2.19",
-				Args: []string{"--configmap=" + edge + "/hap-config"}}},
+				Args: []string{"--configmap=" + edge + "/hap-config", "--ingress.class=haproxy-edge"}}},
 		},
 	}
 	if err := c.Create(ctx, old); err != nil {
@@ -263,10 +267,88 @@ func testHAProxy(ctx context.Context, t *testing.T, c client.Client) {
 		}
 		return ""
 	})
+
+	// Controller 3.4 (#753): once the pod says it runs 3.4.1 and the
+	// controller's CRDs are installed, the protected Ingress gets the
+	// operator's Backend custom resource; one deleted is put back at once
+	// (the operator watches them), not at the next resync.
+	if err := testenv.InstallHAProxy(env); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), pod); err != nil {
+		t.Fatal(err)
+	}
+	pod.Annotations[wiring.HAProxyVersionAnnotation] = "3.4.1"
+	if err := c.Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	pol34 := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "haproxy"}, Spec: wafv1alpha1.WAFPolicySpec{
+		Mode: wafv1alpha1.PolicyBlock, TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "shop"}},
+	}}
+	if err := c.Create(ctx, pol34); err != nil {
+		t.Fatal(err)
+	}
+	backend := func() (*unstructured.Unstructured, error) {
+		b := &unstructured.Unstructured{}
+		b.SetGroupVersionKind(wiring.HAProxyBackendGVK)
+		return b, c.Get(ctx, types.NamespacedName{Namespace: ns, Name: "inkwall-waf-shop"}, b)
+	}
+	var uid types.UID
+	eventually(t, "3.4: the Ingress names the operator's Backend", func() string {
+		var got networkingv1.Ingress
+		if err := c.Get(ctx, client.ObjectKeyFromObject(ing), &got); err != nil {
+			return err.Error()
+		}
+		if a := got.Annotations; a[wiring.HAProxyCRBackendAnnotation] != ns+"/inkwall-waf-shop" || strings.Contains(a[wiring.HAProxySnippetAnnotation], "inkwall") {
+			return strings.Join([]string{a[wiring.HAProxyCRBackendAnnotation], a[wiring.HAProxySnippetAnnotation]}, " | ")
+		}
+		b, err := backend()
+		if err != nil {
+			return err.Error()
+		}
+		uid = b.GetUID()
+		return ""
+	})
+	b, _ := backend()
+	if err := c.Delete(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	// Well within the wiring's one-minute resync.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		b, err := backend()
+		if err == nil && b.GetUID() != uid {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the deleted Backend isn't put back: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err := c.Delete(ctx, pol34); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "3.4 unwired: the Ingress as it was, the Backend gone", func() string {
+		var got networkingv1.Ingress
+		if err := c.Get(ctx, client.ObjectKeyFromObject(ing), &got); err != nil {
+			return err.Error()
+		}
+		if a := got.Annotations; a[wiring.HAProxySnippetAnnotation] != userSnippet || a[wiring.HAProxyCRBackendAnnotation] != "" || a[wiring.HAProxyWiredAnnotation] != "" {
+			return strings.Join([]string{a[wiring.HAProxySnippetAnnotation], a[wiring.HAProxyCRBackendAnnotation]}, " | ")
+		}
+		if _, err := backend(); err == nil {
+			return "the Backend stays"
+		}
+		return ""
+	})
 	if err := c.Delete(ctx, pod); err != nil {
 		t.Fatal(err)
 	}
 }
+
+// haproxyOwner makes a pod the chart's Deployment's, whose pods alone say
+// how the controller is wired.
+var haproxyOwner = []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "haproxy-1", UID: "11111111-1111-1111-1111-111111111111", Controller: new(true)}}
 
 // updatePolicy applies change to the latest pol, retrying when the
 // operator's status writes got in between (a conflict).

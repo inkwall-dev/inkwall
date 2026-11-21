@@ -48,11 +48,15 @@ const (
 	ReasonProgrammed            = "Programmed"
 	ReasonControllerUnsupported = "ControllerUnsupported"
 	ReasonWiringFailed          = "WiringFailed"
-	ReasonPendingRestart        = "PendingRestart"
-	ReasonSidecarMissing        = "SidecarMissing"
-	ReasonNoTargets             = "NoTargets"
-	ReasonInjectionDisabled     = "InjectionDisabled"
-	ReasonPending               = "Pending"
+	// ReasonProxyVersionUnsupported: a target's proxy runs a release the
+	// operator can't tell or doesn't wire (the HAProxy Kubernetes Ingress
+	// Controller before 3.1, or a tag that isn't its release).
+	ReasonProxyVersionUnsupported = "ProxyVersionUnsupported"
+	ReasonPendingRestart          = "PendingRestart"
+	ReasonSidecarMissing          = "SidecarMissing"
+	ReasonNoTargets               = "NoTargets"
+	ReasonInjectionDisabled       = "InjectionDisabled"
+	ReasonPending                 = "Pending"
 	// ReasonUnverified: wired, but not proven in force (the operator's
 	// probe, through HAProxy and Istio).
 	ReasonUnverified = "Unverified"
@@ -370,7 +374,7 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 	if rep.disabled {
 		return metav1.ConditionFalse, ReasonInjectionDisabled, "the engine is not injected into proxy pods (injection is off): the routes are not wired"
 	}
-	var unsupported, failed, disabled, pending, unverified, notProbeable, partly, noResponses, notes []string
+	var unsupported, versions, failed, disabled, pending, unverified, notProbeable, partly, noResponses, notes []string
 	responses := p.Spec.Responses != nil && p.Spec.Responses.Inspect
 	streams := responses && p.Spec.Responses.Streams == wafv1alpha1.StreamsInspect
 	// wired counts the wired targets by result, then kind.
@@ -407,6 +411,10 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 			s := rep.results[i].Targets[t]
 			if why := rep.results[i].Disabled; why != "" {
 				disabled = append(disabled, why)
+				continue
+			}
+			if s.VersionUnsupported != "" {
+				versions = append(versions, s.VersionUnsupported)
 				continue
 			}
 			if s.Failed != "" {
@@ -467,7 +475,10 @@ func programmed(p *wafv1alpha1.WAFPolicy, rep *report) (metav1.ConditionStatus, 
 		total++
 	}
 	slices.Sort(failed)
+	slices.Sort(versions)
 	switch {
+	case len(versions) > 0:
+		return metav1.ConditionFalse, ReasonProxyVersionUnsupported, strings.Join(slices.Compact(versions), "; ")
 	case len(failed) > 0:
 		return metav1.ConditionFalse, ReasonWiringFailed, strings.Join(slices.Compact(failed), "; ")
 	case len(disabled) > 0:
