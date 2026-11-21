@@ -65,12 +65,21 @@ func RelativePath(root, name string) (string, error) {
 // StatFile returns the size and the modification time of the database
 // file name under root, to poll it without reading it.
 func StatFile(root, name string) (int64, time.Time, error) {
-	f, err := openFile(root, name)
+	rel, err := RelativePath(root, name)
 	if err != nil {
-		return 0, time.Time{}, err
+		return 0, time.Time{}, fail(ReasonInvalid, "database file: %v", err)
 	}
-	defer func() { _ = f.Close() }()
-	fi, err := f.Stat()
+	// Through the Root, without opening the file: a poll needs no read
+	// access, and a symlink still can't lead out.
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return 0, time.Time{}, fail(ReasonNotFound, "database directory %s: %v", root, err)
+	}
+	defer func() { _ = r.Close() }()
+	fi, err := r.Stat(rel)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, time.Time{}, fail(ReasonNotFound, "database file %s not found", name)
+	}
 	if err != nil {
 		return 0, time.Time{}, fail(ReasonInvalid, "%s: %v", name, err)
 	}

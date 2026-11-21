@@ -156,6 +156,24 @@ message Policy {
   // before 0.7.0 ignore it: the operator doesn't count them as enforcing a
   // policy that sets it.
   DenyResponse deny_response = 16;
+  // Geo blocking (WAFPolicy spec.geo, design 0011 §2): checked after the
+  // IP lists, before the skipped paths, with the country table the bundle
+  // names (geo_table). Unset: none. Engines before 0.7.0 ignore it: the
+  // operator doesn't count them as enforcing a policy that sets it.
+  Geo geo = 17;
+}
+
+// Geo is a policy's geo blocking.
+message Geo {
+  // Country codes (ISO 3166-1 alpha-2, upper case), one of the two: a
+  // client in a deny-listed country is denied; with an allow list, a
+  // client in any other country is.
+  repeated string deny = 1;
+  repeated string allow = 2;
+  // A public address the table has no country for is denied too.
+  bool unknown_deny = 3;
+  // Geo only logs, on a Block policy too.
+  bool detect = 4;
 }
 
 // RateLimit is a token bucket per key: it holds at most burst requests and

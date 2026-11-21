@@ -94,6 +94,16 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   ([HAProxy](haproxy.md)), or limited clients get 403. A SecLang rule that denies with
   `status:429` now answers gRPC calls with `RESOURCE_EXHAUSTED` instead of `UNAVAILABLE`.
 
+- **Geo blocking** (`spec.geo`, [Geo blocking](geo-blocking.md)). Upgrade the chart first (the
+  CRD fields and the operator), then the engines: an engine before 0.7.0 ignores `spec.geo` and
+  gets no country table, and the policy is `Enforced=False`, `EnginesOutdated`. A policy with
+  `spec.geo` and no country database (`InkwallConfig.spec.geo.database`) is `Enforced=False`,
+  `GeoDatabaseUnavailable`, and geo is skipped. Compiling a database takes up to about 100 MiB on the
+  leader, within the chart's default operator `limits.memory` (now 1Gi). Rolling
+  the operator back below 0.7.0 drops geo without a word, and leaves the `inkwall-geo` Secrets
+  behind: `kubectl -n inkwall-system delete secret inkwall-geo` and
+  `kubectl -n inkwall-system delete secret -l waf.inkwall.dev/bundle-chunk=inkwall-geo`. Roll the
+  CRD back last.
 - **Custom denial responses** (`WAFPolicy.spec.denyResponse`, and the default
   `InkwallConfig.spec.engine.denyResponse`, [Denial responses](denial-responses.md)): an HTML page
   or a JSON document of your own, with the request ID in it, in place of `Forbidden`. Upgrade the

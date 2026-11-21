@@ -670,6 +670,53 @@ spec:
                         type: boolean
                     type: object
                 type: object
+              geo:
+                description: |-
+                  Geo configures geo blocking's country database (docs/geo-blocking.md):
+                  the operator compiles it into a country table and sends it to the
+                  engines. Policies with spec.geo need it.
+                properties:
+                  database:
+                    description: |-
+                      Database is the MaxMind DB (MMDB) of countries: GeoLite2 or GeoIP2
+                      Country or City, DB-IP's Country Lite, or a compatible one. Inkwall
+                      ships none: you provide it, under its vendor's terms.
+                    properties:
+                      file:
+                        description: |-
+                          File is a path under /var/lib/inkwall/geo/, where the Helm chart
+                          mounts geo.volume or the geoipupdate sidecar writes. The operator
+                          polls it every minute; replace it atomically (by a rename).
+                        maxLength: 512
+                        pattern: ^/var/lib/inkwall/geo(/[A-Za-z0-9_-][A-Za-z0-9._-]*)+$
+                        type: string
+                      secretRef:
+                        description: |-
+                          SecretRef is a key of a Secret in the operator's namespace, raw or
+                          gzipped: at most 1 MiB, so for small custom databases and tests.
+                        properties:
+                          key:
+                            description: Key in the Secret.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: the database needs exactly one of file and secretRef
+                      rule: has(self.file) != has(self.secretRef)
+                required:
+                - database
+                type: object
               integrations:
                 description: |-
                   Integrations pins how a proxy controller is wired. Controllers are
@@ -922,6 +969,37 @@ spec:
                 - current
                 - outdated
                 - rejected
+                type: object
+              geo:
+                description: Geo is the country table published for geo blocking.
+                properties:
+                  built:
+                    description: Built is when the database was built.
+                    format: date-time
+                    type: string
+                  compressedBytes:
+                    description: CompressedBytes is the table's size as sent and stored,
+                      gzipped.
+                    format: int64
+                    type: integer
+                  databaseType:
+                    description: DatabaseType is the database's type, e.g. GeoLite2-Country.
+                    type: string
+                  ranges:
+                    description: Ranges is the number of address ranges in the table.
+                    format: int64
+                    type: integer
+                  sha256:
+                    description: |-
+                      SHA256 is the table hash, in hex: what the bundle names and the
+                      engines report.
+                    type: string
+                required:
+                - built
+                - compressedBytes
+                - databaseType
+                - ranges
+                - sha256
                 type: object
               observedGeneration:
                 description: ObservedGeneration is the generation the status describes.

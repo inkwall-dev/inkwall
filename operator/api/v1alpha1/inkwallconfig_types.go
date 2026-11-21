@@ -100,6 +100,38 @@ type InkwallConfigSpec struct {
 	// +optional
 	// +kubebuilder:default={}
 	Events EventsSpec `json:"events,omitempty"`
+
+	// Geo configures geo blocking's country database (docs/geo-blocking.md):
+	// the operator compiles it into a country table and sends it to the
+	// engines. Policies with spec.geo need it.
+	// +optional
+	Geo *GeoConfig `json:"geo,omitempty"`
+}
+
+// GeoConfig configures geo blocking.
+type GeoConfig struct {
+	// Database is the MaxMind DB (MMDB) of countries: GeoLite2 or GeoIP2
+	// Country or City, DB-IP's Country Lite, or a compatible one. Inkwall
+	// ships none: you provide it, under its vendor's terms.
+	Database GeoDatabase `json:"database"`
+}
+
+// GeoDatabase is where the operator reads the database: a file in its pod
+// or a Secret in its namespace.
+// +kubebuilder:validation:XValidation:rule="has(self.file) != has(self.secretRef)",message="the database needs exactly one of file and secretRef"
+type GeoDatabase struct {
+	// File is a path under /var/lib/inkwall/geo/, where the Helm chart
+	// mounts geo.volume or the geoipupdate sidecar writes. The operator
+	// polls it every minute; replace it atomically (by a rename).
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^/var/lib/inkwall/geo(/[A-Za-z0-9_-][A-Za-z0-9._-]*)+$`
+	// +optional
+	File string `json:"file,omitempty"`
+
+	// SecretRef is a key of a Secret in the operator's namespace, raw or
+	// gzipped: at most 1 MiB, so for small custom databases and tests.
+	// +optional
+	SecretRef *SecretKeyReference `json:"secretRef,omitempty"`
 }
 
 // EventsSpec configures the engines' security events.
@@ -674,6 +706,29 @@ type InkwallConfigStatus struct {
 	// SigningKey is the bundle signing key and its rotation.
 	// +optional
 	SigningKey *SigningKeyStatus `json:"signingKey,omitempty"`
+
+	// Geo is the country table published for geo blocking.
+	// +optional
+	Geo *GeoStatus `json:"geo,omitempty"`
+}
+
+// GeoStatus describes the published country table.
+type GeoStatus struct {
+	// SHA256 is the table hash, in hex: what the bundle names and the
+	// engines report.
+	SHA256 string `json:"sha256"`
+
+	// DatabaseType is the database's type, e.g. GeoLite2-Country.
+	DatabaseType string `json:"databaseType"`
+
+	// Built is when the database was built.
+	Built metav1.Time `json:"built"`
+
+	// Ranges is the number of address ranges in the table.
+	Ranges int64 `json:"ranges"`
+
+	// CompressedBytes is the table's size as sent and stored, gzipped.
+	CompressedBytes int64 `json:"compressedBytes"`
 }
 
 // BundleStatus describes the published bundle.

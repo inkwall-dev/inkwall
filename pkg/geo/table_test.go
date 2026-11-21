@@ -166,8 +166,8 @@ func TestLookupPrivate(t *testing.T) {
 	if c, res := none.Lookup(netip.MustParseAddr("8.8.8.8")); c != NoCountry || res != ResultNoTable {
 		t.Errorf("nil table: %v, %v", c, res)
 	}
-	if _, res := none.Lookup(netip.Addr{}); res != ResultPrivate {
-		t.Errorf("nil table, zero Addr: %v", res)
+	if _, res := none.Lookup(netip.Addr{}); res != ResultNoTable {
+		t.Errorf("nil table, zero Addr: %v, want no-table", res)
 	}
 }
 

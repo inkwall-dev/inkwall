@@ -144,6 +144,9 @@ type Status struct {
 	Proxies  []ProxyStatus  `json:"proxies"`
 	Policies PoliciesStatus `json:"policies"`
 	Engines  EnginesStatus  `json:"engines"`
+	// Geo is the country table published for geo blocking; nil without
+	// spec.geo or before one is.
+	Geo *GeoStatus `json:"geo,omitempty"`
 	// Export is the export of security events to SIEMs
 	// (spec.events.export); empty without sinks.
 	Export ExportStatus `json:"export"`
@@ -174,6 +177,16 @@ type ConfigStatus struct {
 	Mode       string            `json:"mode"`
 	Suspended  bool              `json:"suspended"`
 	Conditions []ConditionStatus `json:"conditions"`
+}
+
+// GeoStatus is the country table published for geo blocking, and how many
+// connected engines hold it.
+type GeoStatus struct {
+	DatabaseType string    `json:"databaseType"`
+	Built        time.Time `json:"built"`
+	SHA256       string    `json:"sha256"`
+	Engines      int       `json:"engines"`
+	EnginesTotal int       `json:"enginesTotal"`
 }
 
 // ConditionStatus is one condition of an object.
@@ -341,6 +354,12 @@ func clusterStatus(ctx context.Context, c client.Reader, namespace string, stale
 	if st.Config.Suspended {
 		problem("inspection is suspended (InkwallConfig spec.suspend): every engine allows every request")
 	}
+	if g := cfg.Status.Geo; g != nil {
+		st.Geo = &GeoStatus{DatabaseType: g.DatabaseType, Built: g.Built.UTC(), SHA256: g.SHA256}
+	}
+	if cond := meta.FindStatusCondition(cfg.Status.Conditions, wafv1alpha1.ConditionGeoDatabaseReady); cond != nil && cond.Status == "False" {
+		problem("the country database isn't loaded (%s): %s", cond.Reason, cond.Message)
+	}
 	if cond := meta.FindStatusCondition(cfg.Status.Conditions, wafv1alpha1.ConditionControlPlaneConnected); cond != nil &&
 		cond.Status == "False" && st.Config.Mode != string(wafv1alpha1.ModeStandalone) {
 		problem("the control plane is not connected (%s): %s", cond.Reason, cond.Message)
@@ -426,6 +445,14 @@ func clusterStatus(ctx context.Context, c client.Reader, namespace string, stale
 
 	// The engines.
 	engines, leftOut, err := enginereport.Read(ctx, c, namespace, stale, now)
+	if st.Geo != nil && err == nil {
+		st.Geo.EnginesTotal = len(engines)
+		for _, e := range engines {
+			if e.GeoTable == st.Geo.SHA256 {
+				st.Geo.Engines++
+			}
+		}
+	}
 	if err != nil {
 		warn("the engine reports", err)
 		return finish(st), nil
@@ -581,6 +608,10 @@ func printStatus(w io.Writer, st *Status) {
 			fmt.Fprintf(w, " in %d chunks", st.Bundle.Chunks)
 		}
 		fmt.Fprintln(w)
+	}
+
+	if g := st.Geo; g != nil {
+		fmt.Fprintf(w, "Country database: %s built %s, held by %d of %d engines\n", g.DatabaseType, g.Built.Format(time.DateOnly), g.Engines, g.EnginesTotal)
 	}
 
 	fmt.Fprintln(w, "\nProxies:")
