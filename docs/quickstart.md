@@ -18,7 +18,8 @@ see the attack logged in `Detect` mode first, then denied in `Block` mode.
 
 ## Prerequisites
 
-[Docker](https://docs.docker.com/get-started/), [kind](https://kind.sigs.k8s.io/docs/user/quick-start/), [kubectl](https://kubernetes.io/docs/tasks/tools/) and [Helm](https://helm.sh/docs/intro/install/) 3, and `curl`.
+[Docker](https://docs.docker.com/get-started/), [kind](https://kind.sigs.k8s.io/docs/user/quick-start/), [kubectl](https://kubernetes.io/docs/tasks/tools/) and [Helm](https://helm.sh/docs/intro/install/) 3 or 4, and `curl`. For the last check,
+[`inkwallctl`](../README.md#install) too.
 
 ## Create the cluster
 
@@ -108,14 +109,17 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: shop.example.com' 'http://127
 
 ## Checking it worked
 
-`kubectl get wafpolicy -n shop` shows the policy `Ready`, in `Block` mode, and
-`inkwallctl status` ([releases page](https://github.com/inkwall-dev/inkwall/releases)) reports the cluster healthy:
+`kubectl get wafpolicy -n shop` shows the policy `Ready`, in `Block` mode:
 
 ```console
 $ kubectl get wafpolicy -n shop
 NAME   MODE    READY   REASON   BUNDLE   AGE
 web    Block   True    Ready    3        1m
 ```
+
+`inkwallctl status` ([how to install it](../README.md#install)) checks the whole cluster: the
+proxies, the policies and the engines. It exits 0 when nothing needs attention
+([Cluster status](troubleshooting.md#cluster-status)).
 
 ## Clean up
 
@@ -132,3 +136,4 @@ kind delete cluster --name inkwall-quickstart
   [`examples/haproxy`](../examples/haproxy), [`examples/raw-envoy`](../examples/raw-envoy).
 - Test policies before they reach the cluster: [Testing policies](testing-policies.md).
 - When something isn't `Ready`: [Troubleshooting](troubleshooting.md).
+- Before production traffic depends on it: [Running Inkwall in production](production.md).

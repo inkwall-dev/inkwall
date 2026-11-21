@@ -47,9 +47,18 @@ The rollout finishing means the operator is running. Traefik pods created from t
 engine; restart the ones already running. Envoy Gateway and Istio roll a Gateway's pods themselves
 when it gets its first protected route ([Istio](../../../docs/istio.md)). To upgrade, see [upgrading](../../../docs/upgrading.md).
 
-The chart is signed with [cosign](https://docs.sigstore.dev/cosign/signing/overview/) v3: see [CONTRIBUTING.md](../../../CONTRIBUTING.md#cutting-a-release)
-for how to verify it. From a checkout, `make kind-operator` builds the images and installs
-`deploy/helm/inkwall` on the [kind](https://kind.sigs.k8s.io/) cluster of `make kind-up`.
+The chart is signed with [cosign](https://docs.sigstore.dev/cosign/signing/overview/) v3. Verify it with cosign v3 (v2 reports "no signatures
+found"):
+
+```sh
+cosign verify ghcr.io/inkwall-dev/charts/inkwall:<version> \
+  --certificate-identity 'https://github.com/inkwall-dev/inkwall/.github/workflows/release.yaml@refs/tags/v<version>' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Before production traffic depends on it, see [running Inkwall in production](../../../docs/production.md).
+From a checkout, `make kind-operator` builds the images and installs `deploy/helm/inkwall` on the
+[kind](https://kind.sigs.k8s.io/) cluster of `make kind-up`.
 
 ## What it installs
 
@@ -255,6 +264,7 @@ What Inkwall's components connect to, for clusters that deny traffic by default:
 | The operator, the uninstall hook | the API server | 443 or 6443 | |
 | The engines | the API server | 443 or 6443 | The bundle Secret, when the operator is down |
 | The operator | the control plane | 443 | Only when `InkwallConfig.spec.controlPlane` is set |
+| The operator | Envoy Gateway's, Istio's and the HAProxy controller's gateway pods | the ports the pods serve HTTP on | The probe that proves a route is wired ([Istio](../../../docs/istio.md#the-operators-probe), [HAProxy](../../../docs/haproxy.md#the-probe-and-programmed)) |
 | The proxy | the engine | a Unix socket or localhost | In the same pod: no policy applies |
 
 `networkPolicy.enabled: true` creates a NetworkPolicy for the operator's pods that lets the first
@@ -263,8 +273,9 @@ general (`networkPolicy.webhookFrom` narrows it), the distribution server from
 `injection.proxyNamespaces` (every namespace with `*`), and the metrics from anywhere
 (`networkPolicy.metricsFrom` narrows it, e.g. to Prometheus' namespace).
 `networkPolicy.egress.enabled: true` also limits what the chart's pods connect to: DNS, the API
-server's ports, and `networkPolicy.egress.extra` (add the control plane's address there). Engines
-run in the proxies' namespaces, which the chart doesn't own: if those deny by default, let the
+server's ports, and `networkPolicy.egress.extra`: add the control plane's address there, and the
+ports the probe connects to on the proxy pods, or policies on their routes stay `Unverified`.
+Engines run in the proxies' namespaces, which the chart doesn't own: if those deny by default, let the
 engines reach the operator's distribution port and the API server, and Prometheus reach their
 `inkwall-admin` port.
 

@@ -1,7 +1,9 @@
 # Upgrading
 
-This guide upgrades an Inkwall installation from 0.5.x to 0.6.0, from 0.4.x to 0.5.0, from 0.4.0 to 0.4.1, from 0.3.x to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.3) to
-0.3.0, and from 0.1.x (0.1.0 to 0.1.5) to 0.2.2, and lists what changes on the way. 0.2.3, the
+This guide upgrades an Inkwall installation: the steps of [every upgrade](#every-upgrade), then
+what changes on the way from 0.5.x to 0.6.0, from 0.4.x to 0.5.0, from 0.4.0 to 0.4.1, from 0.3.x
+to 0.4.0, from 0.3.0 to 0.3.1, from 0.2.x (0.2.0 to 0.2.3) to 0.3.0, and from 0.1.x (0.1.0 to
+0.1.5) to 0.2.2. 0.2.3, the
 latest 0.2 release, is a security patch of 0.2.2: upgrade to it as to 0.2.2, then remove rules
 that use `@inspectFile` or `@rbl`, which no longer match
 ([its upgrade notes](https://github.com/inkwall-dev/inkwall/blob/v0.2.3/docs/upgrading.md#from-022-to-023)).
@@ -9,6 +11,7 @@ From 0.1.x, upgrade to 0.2.3 (or 0.2.2) first, then to 0.3.0.
 
 ## Contents
 
+- [Every upgrade](#every-upgrade)
 - [From 0.6.x to 0.7.0](#from-06x-to-070)
 - [From 0.5.x to 0.6.0](#from-05x-to-060)
 - [From 0.4.x to 0.5.0](#from-04x-to-050)
@@ -35,6 +38,48 @@ From 0.1.x, upgrade to 0.2.3 (or 0.2.2) first, then to 0.3.0.
   - [Upgrading the chart](#upgrading-the-chart)
   - [Checking it worked](#checking-it-worked)
   - [Rolling back](#rolling-back)
+
+## Every upgrade
+
+Read the section of the version you upgrade to first, then, for every minor or patch release
+(0.6.0 to 0.6.1 needs nothing more than this):
+
+1. Upgrade the chart, with the values you installed it with (`--reset-then-reuse-values` needs
+   Helm 3.14 or later):
+
+   ```sh
+   helm upgrade inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \
+     --namespace inkwall-system --reset-then-reuse-values
+   ```
+
+   The chart upgrades the CRDs too (`crds.install`). If you install the CRDs yourself, apply the
+   new ones first:
+
+   ```sh
+   helm template inkwall oci://ghcr.io/inkwall-dev/charts/inkwall --version <version> \
+     --show-only templates/crds.yaml | kubectl apply --server-side -f -
+   ```
+
+2. Wait for the operator:
+
+   ```sh
+   kubectl -n inkwall-system rollout status deployment/inkwall-operator
+   ```
+
+3. Restart the proxies whose pods the Pod webhook injects, so they run the new engine: Traefik,
+   and the HAProxy Kubernetes Ingress Controller and Istio's ingress gateways if you run them.
+   With `InkwallConfig.spec.engine.rollout: Automatic`, the operator replaces those pods itself,
+   one at a time. Envoy Gateway's and Istio Gateways' pods are updated by the operator.
+
+   ```sh
+   kubectl -n <traefik namespace> rollout restart deployment/<traefik>
+   ```
+
+4. Check: `helm -n inkwall-system list` shows the new chart version, and `kubectl get wafpolicy -A`
+   shows the policies `Ready`. `inkwallctl status` exits 0 when nothing needs attention.
+
+If Argo CD or Flux installs the chart, change the chart version in Git instead: see
+[GitOps](gitops.md#installing-the-chart-with-a-gitops-tool).
 
 ## From 0.6.x to 0.7.0
 

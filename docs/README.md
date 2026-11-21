@@ -20,6 +20,8 @@ Every doc in this repository, by topic, with the question each one answers.
 
 ## Guides
 
+- [Running Inkwall in production](production.md): what do I set and check before production
+  traffic depends on Inkwall?
 - [Upgrading](upgrading.md): how do I upgrade an installation, and what changes on the way?
 - [Client IP behind a load balancer](client-ip.md): how does the engine see the real client
   address behind a load balancer?
