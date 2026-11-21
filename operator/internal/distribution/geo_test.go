@@ -251,3 +251,89 @@ func TestBundleSourceGeo(t *testing.T) {
 		t.Fatal("the table isn't served")
 	}
 }
+
+// TestWatchGeoOffAndOn: geo turned off and on again within one heartbeat
+// interval. The bundle without geo made the engine drop its table, so the
+// next one naming it gets the table first, though the engine's last
+// report, and a heartbeat sent before it applied the bundle without geo,
+// still say it holds it.
+func TestWatchGeoOffAndOn(t *testing.T) {
+	store := NewStore()
+	h, gz := fakeTable("t")
+	store.AddGeoTable(h, gz)
+	store.SetWithGeo(signed(1), 1, h)
+	c := serve(t, NewServer(store, NewTable(), fakeAuth{}, "r", logr.Discard()))
+	s := open(t, c, geoHello("e", h, true))
+	if got := next(t, s); got != "bundle:1" {
+		t.Fatalf("got %s", got)
+	}
+	store.Set(signed(2), 2)
+	if got := next(t, s); got != "bundle:2" {
+		t.Fatalf("got %s", got)
+	}
+	// A heartbeat from before the engine applied bundle 2.
+	if err := s.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Heartbeat{Heartbeat: &agentv1.Heartbeat{BundleVersion: 1, GeoTableSha256: h}}}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	store.SetWithGeo(signed(3), 3, h)
+	if got := []string{next(t, s), next(t, s)}; !slices.Equal(got, []string{tag(h), "bundle:3"}) {
+		t.Fatalf("got %v", got)
+	}
+}
+
+// TestWatchGeoReportWakes: an engine that reports having lost its table
+// is sent it again at once, not after the backoff.
+func TestWatchGeoReportWakes(t *testing.T) {
+	store := NewStore()
+	h, gz := fakeTable("t")
+	store.AddGeoTable(h, gz)
+	store.SetWithGeo(signed(1), 1, h)
+	srv := NewServer(store, NewTable(), fakeAuth{}, "r", logr.Discard())
+	srv.GeoRetry = time.Hour
+	s := open(t, serve(t, srv), geoHello("e", h, true))
+	if got := next(t, s); got != "bundle:1" {
+		t.Fatalf("got %s", got)
+	}
+	if err := s.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Heartbeat{Heartbeat: &agentv1.Heartbeat{BundleVersion: 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := next(t, s); got != tag(h) {
+		t.Fatalf("got %s", got)
+	}
+}
+
+// TestReadGeoTableOtherSlot: the leader wrote a newer table while the
+// bundle still names the current one, which a starting replica finds in
+// the other slot.
+func TestReadGeoTableOtherSlot(t *testing.T) {
+	ctx := context.Background()
+	const ns = "inkwall-system"
+	c := fake.NewClientBuilder().Build()
+	compile := func(code string) *operatorgeo.Table {
+		db, err := mmdbtest.DB{BuildEpoch: uint64(len(code)), Networks: []mmdbtest.Network{{Prefix: netip.MustParsePrefix("1.0.0.0/8"), Record: &mmdbtest.Record{Country: code}}}}.Bytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		tb, err := operatorgeo.Compile(ctx, db, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tb
+	}
+	cur, next := compile("AU"), compile("NZ")
+	for _, tb := range []*operatorgeo.Table{cur, next} {
+		if err := operatorgeo.Store(ctx, c, c, ns, tb); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tb := range []*operatorgeo.Table{cur, next} {
+		gz, err := readGeoTable(ctx, c, ns, tb.Hash[:])
+		if err != nil || !bytes.Equal(gz, tb.Compressed) {
+			t.Errorf("table %x: %v", tb.Hash[:4], err)
+		}
+	}
+	if _, err := readGeoTable(ctx, c, ns, make([]byte, 32)); err == nil {
+		t.Error("read a table no slot holds")
+	}
+}

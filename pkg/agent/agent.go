@@ -196,6 +196,12 @@ type Agent struct {
 	// table it names is held.
 	geoReady chan struct{}
 	geo      geoMetrics
+	// geoWrite is the table to cache once a.mu is released, geoSeq counts
+	// them; geoCacheMu orders the writes, geoCached is the last written.
+	geoWrite   *geoCacheWrite
+	geoSeq     uint64
+	geoCacheMu sync.Mutex
+	geoCached  uint64
 	// applied is closed when the first bundle is applied.
 	applied chan struct{}
 	// cacheOnce loads the cache once: LoadCache, or else Run.
@@ -556,6 +562,8 @@ func sendFirst(stream agentv1.BundleService_WatchClient, m *agentv1.WatchRequest
 // (0 if it can't be read) and why it was rejected. The current set stays
 // active on any error.
 func (a *Agent) apply(signed *bundlev1.SignedBundle, cache bool) (uint64, error) {
+	// After a.mu is released: the country table it loaded, if any.
+	defer a.flushGeoCache()
 	// Verify before decoding: nothing in an unverified bundle, its version
 	// included, can be trusted.
 	keys := a.keys.Load()

@@ -1007,12 +1007,18 @@ func geoCacheFile(bundleCache string) string {
 // cfg.bootstrapTimeout without them. Only at bootstrap: once ready, the
 // engine never turns unready for a table.
 func waitForBundle(ctx context.Context, ag *agent.Agent, cfg engineConfig, ready *atomic.Bool, logger *slog.Logger) {
+	waitForBootstrap(ctx, ag.Applied(), ag.GeoReady(), cfg, ready, logger)
+}
+
+// waitForBootstrap is waitForBundle on the agent's channels: applied, for
+// the first bundle, and geoReady, for its country table.
+func waitForBootstrap(ctx context.Context, applied, geoReady <-chan struct{}, cfg engineConfig, ready *atomic.Bool, logger *slog.Logger) {
 	timeout := time.NewTimer(cfg.bootstrapTimeout)
 	defer timeout.Stop()
 	select {
-	case <-ag.Applied():
+	case <-applied:
 		select {
-		case <-ag.GeoReady():
+		case <-geoReady:
 		case <-timeout.C:
 			logger.Warn("no country table yet for the bundle's geo policies; ready, geo follows each policy's failureMode until it arrives",
 				slog.Duration("waited", cfg.bootstrapTimeout))

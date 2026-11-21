@@ -6,6 +6,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
@@ -28,6 +29,18 @@ const CapabilityGeoTable = "geo-table"
 type pendingTable struct {
 	hash [32]byte
 	gz   []byte
+	// cached: read from the cache, with the size it was checked with. Its
+	// table was loaded for a signed bundle before the restart: if the
+	// cached bundle names another, it is the previous table (design 0011
+	// §4.3), kept until the named one arrives.
+	cached bool
+	size   uint64
+}
+
+// geoCacheWrite is a table to write to the cache, once a.mu is released.
+type geoCacheWrite struct {
+	seq  uint64
+	data []byte
 }
 
 type geoMetrics struct {
@@ -98,6 +111,14 @@ func (a *Agent) attachGeo(set *policy.Set, ref *bundlev1.GeoTableRef) *policy.Se
 				a.markGeoReady()
 				return set.WithGeo(true, t)
 			}
+		} else if p.cached && a.table == nil {
+			// Restarted between a bundle naming a new table and the table:
+			// the cached one is the previous.
+			if t, err := geo.Decode(p.gz, p.hash[:], p.size); err == nil {
+				a.setTable(t)
+				a.log.Info("the bundle names a country table not received yet; enforcing with the cached previous one", slog.Int("previous_ranges", t.Ranges()))
+				return set.WithGeo(true, t)
+			}
 		}
 	}
 	if a.table != nil {
@@ -125,27 +146,65 @@ func (a *Agent) loadTable(gz []byte, ref *bundlev1.GeoTableRef) *geo.Table {
 		a.log.Error("country table rejected; keeping the one held", slog.Any("error", err))
 		return nil
 	}
+	a.setTable(t)
+	a.log.Info("country table loaded", slog.String("database", t.DatabaseType()), slog.Time("built", t.Built()), slog.Int("ranges", t.Ranges()))
+	if a.cfg.GeoCacheFile != "" {
+		// Written by flushGeoCache once a.mu is released: up to 14 MiB.
+		a.geoSeq++
+		data := binary.BigEndian.AppendUint64(make([]byte, 0, 8+len(gz)), ref.GetSize())
+		a.geoWrite = &geoCacheWrite{seq: a.geoSeq, data: append(data, gz...)}
+	}
+	return t
+}
+
+// setTable makes t the table held. a.mu is held.
+func (a *Agent) setTable(t *geo.Table) {
 	a.table = t
 	a.geo.bytes.Set(float64(t.Bytes()))
 	a.geo.built.Set(float64(t.Built().Unix()))
-	a.log.Info("country table loaded", slog.String("database", t.DatabaseType()), slog.Time("built", t.Built()), slog.Int("ranges", t.Ranges()))
-	if a.cfg.GeoCacheFile != "" {
-		if err := replaceFile(a.cfg.GeoCacheFile, ".geo-", gz); err != nil {
-			a.log.Warn("can't cache the country table", slog.Any("error", err))
-		}
+}
+
+// flushGeoCache writes the table loaded last to the cache: the table's size
+// (8 bytes, big-endian), then the gzipped table. Called without a.mu.
+func (a *Agent) flushGeoCache() {
+	a.mu.Lock()
+	w := a.geoWrite
+	a.geoWrite = nil
+	a.mu.Unlock()
+	if w == nil {
+		return
 	}
-	return t
+	a.geoCacheMu.Lock()
+	defer a.geoCacheMu.Unlock()
+	if w.seq <= a.geoCached {
+		return // a newer table was written meanwhile
+	}
+	a.geoCached = w.seq
+	if err := replaceFile(a.cfg.GeoCacheFile, ".geo-", w.data); err != nil {
+		a.log.Warn("can't cache the country table", slog.Any("error", err))
+	}
 }
 
 // offerTable takes a country table from the stream, the Secrets or the
 // cache: used at once if the enforced bundle names it, else held until a
 // bundle does.
-func (a *Agent) offerTable(hash, gz []byte) {
-	if len(gz) > geo.MaxCompressedBytes || len(hash) != 32 {
+func (a *Agent) offerTable(hash, gz []byte) { a.offer(&pendingTable{gz: gz}, hash) }
+
+// offer takes a table: p, with the hash it is offered under.
+func (a *Agent) offer(p *pendingTable, hash []byte) {
+	switch {
+	case len(p.gz) > geo.MaxCompressedBytes:
 		a.geo.failures.Inc()
-		a.log.Error("country table refused", slog.Int("bytes", len(gz)), slog.Int("max", geo.MaxCompressedBytes))
+		a.log.Error("country table refused: too large", slog.Int("bytes", len(p.gz)), slog.Int("max", geo.MaxCompressedBytes))
+		return
+	case len(hash) != 32:
+		a.geo.failures.Inc()
+		a.log.Error("country table refused: its hash isn't a SHA-256", slog.Int("hash_bytes", len(hash)))
 		return
 	}
+	p.hash = [32]byte(hash)
+	gz := p.gz
+	defer a.flushGeoCache()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	ref := a.current.GetGeoTable()
@@ -160,7 +219,7 @@ func (a *Agent) offerTable(hash, gz []byte) {
 		}
 		return
 	}
-	a.pending = &pendingTable{hash: [32]byte(hash), gz: gz}
+	a.pending = p
 }
 
 // needsTable reports whether the enforced bundle names a table the engine
@@ -191,17 +250,21 @@ func (a *Agent) loadGeoCache() {
 	if errors.Is(err, os.ErrNotExist) {
 		return
 	}
-	var gz []byte
+	var data []byte
 	if err == nil {
-		gz, err = io.ReadAll(io.LimitReader(f, geo.MaxCompressedBytes+1))
+		data, err = io.ReadAll(io.LimitReader(f, 8+geo.MaxCompressedBytes+1))
 		_ = f.Close()
+	}
+	if err == nil && len(data) < 8 {
+		err = errors.New("too short")
 	}
 	if err != nil {
 		a.log.Warn("cached country table not usable", slog.String("file", a.cfg.GeoCacheFile), slog.Any("error", err))
 		return
 	}
+	gz := data[8:]
 	h := geo.Hash(gz)
-	a.offerTable(h[:], gz)
+	a.offer(&pendingTable{gz: gz, cached: true, size: binary.BigEndian.Uint64(data)}, h[:])
 }
 
 // loadSecretGeo reads the country table from its Secrets when the enforced

@@ -88,10 +88,7 @@ func (b *BundleSource) Reconcile(ctx context.Context, _ reconcile.Request) (reco
 	}
 	geo := bun.GetGeoTable().GetSha256()
 	if geo != nil && !b.Store.HasGeoTable(geo) {
-		gz, err := readGeoTable(ctx, b.Client, b.Namespace)
-		if err == nil && !bytes.Equal(hashOf(gz), geo) {
-			err = errors.New("the stored table isn't the one the bundle names yet")
-		}
+		gz, err := readGeoTable(ctx, b.Client, b.Namespace, geo)
 		if err != nil {
 			// The leader writes the table before the bundle, but this
 			// replica's cache may see the bundle first: wait for it.
@@ -112,25 +109,53 @@ func (b *BundleSource) Reconcile(ctx context.Context, _ reconcile.Request) (reco
 	return reconcile.Result{}, nil
 }
 
-// readGeoTable reads the gzipped country table from its Secrets, checked
-// against their manifest.
-func readGeoTable(ctx context.Context, c client.Reader, namespace string) ([]byte, error) {
-	var s corev1.Secret
-	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: bundlesecret.Geo.Name}, &s); err != nil {
-		return nil, err
-	}
-	m, err := bundlesecret.Geo.ParseManifest(s.Data[bundlesecret.ManifestKey])
-	if err != nil {
-		return nil, err
-	}
-	return bundlesecret.Join(m, func(name string) ([]byte, error) {
-		var chunk corev1.Secret
-		err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &chunk)
+// readGeoTable reads the gzipped country table of table hash want from
+// its Secrets: the slot the manifest names, or else the other one, which
+// keeps the previous table until the leader prunes it once the bundle has
+// moved on. A replica that starts while the leader has written a newer
+// table, before the bundle that names it, still serves the current one.
+func readGeoTable(ctx context.Context, c client.Reader, namespace string, want []byte) ([]byte, error) {
+	name := bundlesecret.Geo.Name
+	get := func(chunk string) ([]byte, error) {
+		var s corev1.Secret
+		err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: chunk}, &s)
 		if apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("%w: Secret %s not found", bundlesecret.ErrIncomplete, name)
+			return nil, fmt.Errorf("%w: Secret %s not found", bundlesecret.ErrIncomplete, chunk)
 		}
-		return chunk.Data[bundlesecret.ChunkKey], err
-	})
+		return s.Data[bundlesecret.ChunkKey], err
+	}
+	var s corev1.Secret
+	err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &s)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return nil, err
+	}
+	tried := ""
+	if m, merr := bundlesecret.Geo.ParseManifest(s.Data[bundlesecret.ManifestKey]); merr == nil {
+		tried = m.Slot(name)
+		if bytes.Equal(m.SHA256Bytes(), want) {
+			return bundlesecret.Join(m, get)
+		}
+	}
+	for _, slot := range []string{"a", "b"} {
+		if slot == tried {
+			continue
+		}
+		var buf []byte
+		for i := range bundlesecret.Geo.MaxChunks {
+			chunk, err := get(bundlesecret.ChunkName(name, slot, i))
+			if errors.Is(err, bundlesecret.ErrIncomplete) || len(chunk) == 0 {
+				break
+			}
+			if err != nil {
+				return nil, err
+			}
+			buf = append(buf, chunk...)
+			if bytes.Equal(hashOf(buf), want) {
+				return buf, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("no slot of the Secret %s holds the table the bundle names yet", name)
 }
 
 func hashOf(b []byte) []byte {

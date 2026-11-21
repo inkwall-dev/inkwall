@@ -6,9 +6,11 @@ package agent
 import (
 	"bytes"
 	"crypto/ed25519"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	geov1 "github.com/inkwall-dev/inkwall/api/geo/v1"
 	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
+	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 	"github.com/inkwall-dev/inkwall/pkg/geo"
 )
 
@@ -65,7 +68,11 @@ func geoBundle(t *testing.T, key ed25519.PrivateKey, version uint64, table *coun
 
 func enforced(t *testing.T, a *Agent) (string, bool) {
 	t.Helper()
-	tb, named := a.cfg.Holder.Load().GeoTable()
+	set := a.cfg.Holder.Load()
+	if set == nil {
+		return "", false
+	}
+	tb, named := set.GeoTable()
 	if tb == nil {
 		return "", named
 	}
@@ -112,7 +119,7 @@ func TestGeoTableBeforeBundle(t *testing.T) {
 		defer e.op.mu.Unlock()
 		return bytes.Equal(e.op.beatGeo, de.hash[:])
 	})
-	if b, err := os.ReadFile(filepath.Join(e.dir, "geo.table")); err != nil || !bytes.Equal(b, de.gz) {
+	if b, err := os.ReadFile(filepath.Join(e.dir, "geo.table")); err != nil || len(b) < 8 || !bytes.Equal(b[8:], de.gz) {
 		t.Errorf("cache: %v", err)
 	}
 }
@@ -211,6 +218,21 @@ func TestGeoCache(t *testing.T) {
 	if h, _ := enforced(t, b); h != string(de.hash[:]) || !ready(b) {
 		t.Fatalf("cached table not enforced: %x", h)
 	}
+	// Restarted after a bundle naming a new table, before the table: the
+	// cached one is the previous table, enforced until the new one comes,
+	// and the engine isn't ready at bootstrap.
+	fr := newTable(t, "FR")
+	mustApply(t, a, geoBundle(t, e.priv, 2, &fr))
+	p, _, _ := e.agent(t, cache)
+	p.LoadCache()
+	if h, named := enforced(t, p); h != string(de.hash[:]) || !named || ready(p) {
+		t.Fatalf("the cached previous table: %x named %v ready %v", h, named, ready(p))
+	}
+	p.offerTable(fr.hash[:], fr.gz)
+	if h, _ := enforced(t, p); h != string(fr.hash[:]) || !ready(p) {
+		t.Fatalf("the named table after the cached previous one: %x", h)
+	}
+
 	// Without its table, a cached bundle that names one isn't ready.
 	if err := os.Remove(filepath.Join(e.dir, "geo.table")); err != nil {
 		t.Fatal(err)
@@ -229,4 +251,79 @@ func TestGeoReadyWithoutGeo(t *testing.T) {
 	if !ready(a) {
 		t.Error("a bundle without geo isn't ready")
 	}
+}
+
+// TestGeoSecretColdStart: a new engine, no cache, the operator down: it
+// reads the bundle and the country table it names from their Secrets.
+func TestGeoSecretColdStart(t *testing.T) {
+	e := newEnv(t)
+	api := newFakeAPI(t, e.dir)
+	de := newTable(t, "DE")
+	api.set(geoBundle(t, e.priv, 4, &de))
+	m, chunks, err := bundlesecret.Geo.Split("b", de.gz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, _ := m.Marshal()
+	api.mu.Lock()
+	api.extra = map[string]map[string][]byte{"inkwall-geo": {bundlesecret.ManifestKey: manifest}}
+	for i, c := range chunks {
+		api.extra[m.Chunks[i]] = map[string][]byte{bundlesecret.ChunkKey: c}
+	}
+	api.mu.Unlock()
+	a, _, _ := e.agent(t, func(c *Config) {
+		c.Addr = "127.0.0.1:1"
+		c.Secret = api.source(e.dir)
+	})
+	run(t, a)
+	select {
+	case <-a.GeoReady():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the country table wasn't read from its Secrets")
+	}
+	if h, _ := enforced(t, a); h != string(de.hash[:]) {
+		t.Fatalf("enforced %x", h)
+	}
+}
+
+// TestGeoInterleaved: tables and bundles interleaved on a real stream,
+// while requests read the set; under the race detector.
+func TestGeoInterleaved(t *testing.T) {
+	e := newEnv(t)
+	a, holder, _ := e.agent(t, nil)
+	run(t, a)
+	<-e.op.sawHello
+	stop := make(chan struct{})
+	var readers sync.WaitGroup
+	for range 4 {
+		readers.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if s := holder.Load(); s != nil {
+					if tb, _ := s.GeoTable(); tb != nil {
+						tb.Lookup(netip.MustParseAddr("192.0.2.1"))
+					}
+				}
+			}
+		})
+	}
+	tables := []countryTable{newTable(t, "DE"), newTable(t, "FR"), newTable(t, "US")}
+	for v := range uint64(9) {
+		tb := tables[v%3]
+		if v%2 == 0 {
+			e.op.msgs <- tb.msg()
+			e.op.bundles <- geoBundle(t, e.priv, v+1, &tb)
+		} else {
+			e.op.bundles <- geoBundle(t, e.priv, v+1, &tb)
+			e.op.msgs <- tb.msg()
+		}
+	}
+	last := tables[8%3]
+	waitFor(t, "the last table", func() bool { h, _ := enforced(t, a); return a.Version() == 9 && h == string(last.hash[:]) })
+	close(stop)
+	readers.Wait()
 }
