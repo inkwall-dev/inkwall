@@ -137,7 +137,8 @@ spec:
                     ruleIDs:
                       description: |-
                         RuleIDs are the rules to turn off. An ID no rule has is ignored.
-                        Required.
+                        Required. A set: an ID listed twice draws a warning, and v1 refuses
+                        it.
                       items:
                         format: int32
                         minimum: 1
@@ -145,6 +146,7 @@ spec:
                       maxItems: 64
                       minItems: 1
                       type: array
+                      x-kubernetes-list-type: atomic
                     when:
                       description: |-
                         When narrows the exclusion. Unset: the rules are off for every request
@@ -182,6 +184,9 @@ spec:
                             Header is a request header (REQUEST_HEADERS) the rules stop looking
                             at, such as Referer, compared case-insensitively. Requires engines
                             0.5.0 or later.
+                            v1 types it as a header name, refusing [ and ] and allowing the other
+                            token characters (!#$%&'*+^|~): a header that isn't one draws a
+                            warning.
                           maxLength: 256
                           minLength: 1
                           pattern: ^[A-Za-z0-9_.\-\[\]]+$
@@ -207,6 +212,7 @@ spec:
                     rule: has(self.ruleIDs)
                 maxItems: 128
                 type: array
+                x-kubernetes-list-type: atomic
               failureMode:
                 description: |-
                   FailureMode is what happens to a request that can't be inspected in
@@ -363,6 +369,7 @@ spec:
                             type: string
                           maxItems: 16
                           type: array
+                          x-kubernetes-list-type: set
                       type: object
                     mode:
                       description: |-
@@ -406,6 +413,7 @@ spec:
                   type: object
                 maxItems: 8
                 type: array
+                x-kubernetes-list-type: atomic
                 x-kubernetes-validations:
                 - message: rateLimits must not repeat a name
                   rule: self.all(a, self.exists_one(b, b.name == a.name))
@@ -632,13 +640,15 @@ spec:
                       !has(self.crs.inboundAnomalyThreshold)'
                 maxItems: 8
                 type: array
+                x-kubernetes-list-type: atomic
               skip:
                 description: Skip lists requests that are never inspected.
                 properties:
                   bodyPaths:
                     description: |-
                       BodyPaths are paths whose body is not inspected; their headers and URI
-                      still are.
+                      still are. A set: a path listed twice draws a warning, and v1 refuses
+                      it.
                     items:
                       description: |-
                         PathPattern is an exact path ("/healthz") or a prefix ending in "*"
@@ -649,8 +659,11 @@ spec:
                       type: string
                     maxItems: 64
                     type: array
+                    x-kubernetes-list-type: atomic
                   paths:
-                    description: Paths that are never inspected.
+                    description: |-
+                      Paths that are never inspected. A set: a path listed twice draws a
+                      warning, and v1 refuses it.
                     items:
                       description: |-
                         PathPattern is an exact path ("/healthz") or a prefix ending in "*"
@@ -661,6 +674,7 @@ spec:
                       type: string
                     maxItems: 64
                     type: array
+                    x-kubernetes-list-type: atomic
                 type: object
               targetRefs:
                 description: |-
@@ -731,6 +745,7 @@ spec:
                 maxItems: 16
                 minItems: 1
                 type: array
+                x-kubernetes-list-type: atomic
                 x-kubernetes-validations:
                 - message: targetRefs must not repeat a target
                   rule: 'self.all(a, self.exists_one(b, b.kind == a.kind && b.name

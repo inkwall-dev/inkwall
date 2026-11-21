@@ -769,11 +769,19 @@ type ProxyStatus struct {
 	// +optional
 	Integration string `json:"integration,omitempty"`
 
-	// IngressClasses are the IngressClasses of the controller.
+	// IngressClasses are the IngressClasses of the controller, sorted, up
+	// to 64.
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MaxLength=253
+	// +listType=set
 	// +optional
 	IngressClasses []string `json:"ingressClasses,omitempty"`
 
-	// GatewayClasses are the GatewayClasses of the controller.
+	// GatewayClasses are the GatewayClasses of the controller, sorted, up
+	// to 64.
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MaxLength=253
+	// +listType=set
 	// +optional
 	GatewayClasses []string `json:"gatewayClasses,omitempty"`
 

@@ -25,9 +25,15 @@ type IPListEntry struct {
 // WAFIPListSpec is a list of client addresses.
 // +kubebuilder:validation:XValidation:rule="has(self.entries)",message="entries is required"
 type WAFIPListSpec struct {
-	// Entries are the list's addresses and prefixes. Required.
+	// Entries are the list's addresses and prefixes. Required. Up to
+	// 10,000, but the object must also fit etcd's request limit (1.5 MiB by
+	// default): 10,000 entries fit without descriptions, about 4,500 with
+	// 256-byte ones; split a longer list into several WAFIPLists. A CIDR
+	// listed twice draws a warning: v1 keys the entries by cidr
+	// (listType=map) and refuses it.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=10000
+	// +listType=atomic
 	// +optional
 	Entries []IPListEntry `json:"entries,omitempty"`
 }

@@ -201,6 +201,18 @@ func Disable(proxies []wafv1alpha1.ProxyStatus, disabled map[string]string) []wa
 	return proxies
 }
 
+// maxStatusClasses bounds ProxyStatus's class lists (the CRD's MaxItems).
+const maxStatusClasses = 64
+
+// statusClasses sorts names without repeats, and keeps the first
+// maxStatusClasses: how many classes a controller has doesn't change its
+// support, which only needs one of each kind.
+func statusClasses(names []string) []string {
+	slices.Sort(names)
+	names = slices.Compact(names)
+	return names[:min(len(names), maxStatusClasses)]
+}
+
 // Proxies groups the classes by controller, and says how far Inkwall wires
 // each: an IngressClass's routes are wired when its integration wires
 // Ingresses, a GatewayClass's when it wires HTTPRoutes. kinds are the
@@ -230,8 +242,9 @@ func Proxies(ingressClasses, gatewayClasses []Class, kinds map[string][]schema.G
 	var out []wafv1alpha1.ProxyStatus
 	for _, controller := range slices.Sorted(maps.Keys(byController)) {
 		p := byController[controller]
-		slices.Sort(p.IngressClasses)
-		slices.Sort(p.GatewayClasses)
+		// The status lists are sets of at most maxStatusClasses.
+		p.IngressClasses = statusClasses(p.IngressClasses)
+		p.GatewayClasses = statusClasses(p.GatewayClasses)
 		if p.Integration == "" {
 			p.Support = wafv1alpha1.SupportUnsupported
 			p.Message = "Inkwall has no integration for this controller: its routes can't be protected"

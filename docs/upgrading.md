@@ -166,6 +166,15 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   `ClusterWAFRuleSet` for rules several namespaces share. The v1.0 upgrade will refuse to start
   while a policy names another namespace. `spec.ipLists` doesn't change in v1alpha1; v1 turns each
   name into `{kind: WAFIPList, name: ...}`, which the API server converts for you.
+- **Lists that v1 makes sets warn about repeats** (#717): a path listed twice in `skip.paths` or
+  `skip.bodyPaths`, a rule ID twice in an exclusion's `ruleIDs`, and a CIDR twice in a
+  `WAFIPList`'s `entries` (v1 keys them by `cidr`). An exclusion's `when.header` that isn't a header
+  name (it has `[` or `]`) warns too. They're still accepted and behave as before; the v1 schema
+  refuses them, so clean them up. Server-side apply sees no change: the other lists were atomic
+  already and now say so. A `WAFIPList` with 10,000 entries fits etcd's default 1.5 MiB limit
+  only without descriptions (about 4,500 with 256-byte ones), so split longer lists. The
+  InkwallConfig's `status.proxies[].ingressClasses` and `gatewayClasses` list at most 64 classes
+  each.
 
 ## From 0.5.x to 0.6.0
 
