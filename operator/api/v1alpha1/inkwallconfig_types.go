@@ -133,6 +133,7 @@ type ExportSpec struct {
 // +kubebuilder:validation:XValidation:rule="has(self.otlp) != has(self.json)",message="a sink needs exactly one of otlp and json"
 // +kubebuilder:validation:XValidation:rule="(has(self.insecure) && self.insecure) || !((has(self.otlp) && self.otlp.endpoint.matches('^(grpc|http)://')) || (has(self.json) && has(self.json.url) && self.json.url.startsWith('http://')))",message="a plaintext endpoint (http://, grpc://) needs insecure: true"
 // +kubebuilder:validation:XValidation:rule="!has(self.headersSecretRef) || !((has(self.otlp) && self.otlp.endpoint.matches('^(grpc|http)://')) || (has(self.json) && has(self.json.url) && self.json.url.startsWith('http://')))",message="a plaintext endpoint (http://, grpc://) can't have headersSecretRef: credentials never travel in clear"
+// +kubebuilder:validation:XValidation:rule="!(has(self.insecure) && self.insecure && has(self.json) && has(self.json.urlSecretRef))",message="a URL from a Secret holds a credential: it must be https://, without insecure: true"
 type EventSink struct {
 	// Name identifies the sink: the sink label of the export metrics and
 	// the name in the EventsExported condition. Renaming a sink starts it
@@ -219,7 +220,8 @@ type JSONSink struct {
 
 	// URLSecretRef reads the URL from a Secret's key in the operator's
 	// namespace instead, for intakes whose URL holds a token (Sumo Logic,
-	// query-string keys). It gets url's checks when the sink starts.
+	// query-string keys). It gets url's checks when the sink starts, and
+	// must be https://: a URL from a Secret holds a credential.
 	// +optional
 	URLSecretRef *SecretKeyReference `json:"urlSecretRef,omitempty"`
 

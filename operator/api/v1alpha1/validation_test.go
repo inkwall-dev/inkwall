@@ -402,6 +402,8 @@ func TestInkwallConfigExportValidation(t *testing.T) {
 		{name: "plaintext json with insecure", doc: exportConfig("      - {name: a, json: {url: \"http://a/in\"}, insecure: true}\n")},
 		{name: "plaintext with headers", doc: exportConfig("      - {name: a, otlp: {endpoint: \"http://a:4318/v1/logs\"}, insecure: true, headersSecretRef: {name: h}}\n"), wantErr: "can't have headersSecretRef"},
 		{name: "plaintext json with headers", doc: exportConfig("      - {name: a, json: {url: \"http://a/in\"}, insecure: true, headersSecretRef: {name: h}}\n"), wantErr: "can't have headersSecretRef"},
+		{name: "URL Secret with insecure", doc: exportConfig("      - {name: a, json: {urlSecretRef: {name: s, key: url}}, insecure: true}\n"), wantErr: "a URL from a Secret holds a credential"},
+		{name: "URL Secret with headers", doc: exportConfig("      - {name: a, json: {urlSecretRef: {name: s, key: url}}, headersSecretRef: {name: h}}\n")},
 		{name: "TLS with headers", doc: exportConfig("      - {name: a, otlp: {endpoint: \"grpcs://a:4317\"}, headersSecretRef: {name: h}}\n")},
 		{name: "unknown framing", doc: exportConfig("      - {name: a, json: {url: \"https://a\", framing: CSV}}\n"), wantErr: `Unsupported value: "CSV"`},
 		{name: "unknown compression", doc: exportConfig("      - {name: a, json: {url: \"https://a\"}, compression: Zstd}\n"), wantErr: `Unsupported value: "Zstd"`},
