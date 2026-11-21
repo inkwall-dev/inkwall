@@ -373,6 +373,26 @@ func TestAuditEventLimit(t *testing.T) {
 	}
 }
 
+// TestSummarizeHuge: an object as large as the API server takes (about
+// 1.5 MiB) can hold over 100,000 fields; with old and new keys disjoint,
+// each side's keys are listed, and the record stays bounded.
+func TestSummarizeHuge(t *testing.T) {
+	const n = 100_000
+	oldSpec, newSpec := make(map[string]any, n), make(map[string]any, n)
+	for i := range n {
+		oldSpec[fmt.Sprintf("o%06d", i)] = "x"
+		newSpec[fmt.Sprintf("n%06d", i)] = "y"
+	}
+	got, omitted, paths := Summarize(oldSpec, newSpec)
+	raw, _ := json.Marshal(got)
+	if len(raw) > maxChanges || len(got)+omitted != 2*n || len(paths) != 2*n {
+		t.Errorf("%d bytes, %d shown, %d omitted, %d paths; want at most %d bytes and %d changes", len(raw), len(got), omitted, len(paths), maxChanges, 2*n)
+	}
+	if r := (Record{Operation: "update", User: "alice", Paths: paths}); len(r.note()) > 1000 {
+		t.Errorf("note of %d bytes", len(r.note()))
+	}
+}
+
 func TestServiceAccount(t *testing.T) {
 	for user, want := range map[string]string{
 		"system:serviceaccount:argocd:argocd-application-controller": "argocd/argocd-application-controller",

@@ -373,7 +373,9 @@ func diff(path string, old, new any, m mode, out *[]Change) {
 	_, newIsList := new.([]any)
 	switch {
 	case (oldIsMap || old == nil) && (newIsMap || new == nil) && (oldIsMap || newIsMap):
-		keys := make([]string, 0, len(oldMap)+len(newMap))
+		// The larger side's keys fit, without a sum that could overflow;
+		// append grows it for the keys only one side has.
+		keys := make([]string, 0, max(len(oldMap), len(newMap)))
 		for k := range oldMap {
 			keys = append(keys, k)
 		}
