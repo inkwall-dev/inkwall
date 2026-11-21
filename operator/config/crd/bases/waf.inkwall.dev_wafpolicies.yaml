@@ -603,8 +603,13 @@ spec:
                           minLength: 1
                           type: string
                         namespace:
-                          description: 'Namespace of a WAFRuleSet. Unset: the policy''s
-                            namespace.'
+                          description: |-
+                            Namespace of a WAFRuleSet, which can only be the policy's: unset means
+                            that, and another namespace is never resolved (the policy isn't
+                            Accepted; bind a ClusterWAFRuleSet instead). Setting it draws a
+                            warning, and v1 removes it.
+
+                            Deprecated: leave it unset.
                           maxLength: 63
                           minLength: 1
                           type: string

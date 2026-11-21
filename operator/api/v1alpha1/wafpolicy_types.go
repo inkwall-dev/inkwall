@@ -529,7 +529,13 @@ type RuleSetRef struct {
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 
-	// Namespace of a WAFRuleSet. Unset: the policy's namespace.
+	// Namespace of a WAFRuleSet, which can only be the policy's: unset means
+	// that, and another namespace is never resolved (the policy isn't
+	// Accepted; bind a ClusterWAFRuleSet instead). Setting it draws a
+	// warning, and v1 removes it.
+	//
+	// Deprecated: leave it unset.
+	//
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +optional

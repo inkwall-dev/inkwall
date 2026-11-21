@@ -140,6 +140,12 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   the migration writes needs the 0.7.0 CRDs. CRS settings on a binding to a rule set that isn't
   the built-in CRS (SecLang, a ConfigMap) were always ignored; the policy's `Accepted` message now
   says so, and v1 refuses them.
+- **`WAFPolicy.spec.ruleSets[].ref.namespace` is deprecated** (#715). It can only name the policy's
+  own namespace: any other was always refused (`InvalidRef`, "rule sets in other namespaces can't
+  be used yet"). Setting it now draws a warning, and v1 removes it. Remove it, and bind a
+  `ClusterWAFRuleSet` for rules several namespaces share. The v1.0 upgrade will refuse to start
+  while a policy names another namespace. `spec.ipLists` doesn't change in v1alpha1; v1 turns each
+  name into `{kind: WAFIPList, name: ...}`, which the API server converts for you.
 
 ## From 0.5.x to 0.6.0
 
