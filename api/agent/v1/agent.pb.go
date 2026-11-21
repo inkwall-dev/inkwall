@@ -196,6 +196,7 @@ type WatchResponse struct {
 	// Types that are valid to be assigned to Msg:
 	//
 	//	*WatchResponse_Bundle
+	//	*WatchResponse_GeoTable
 	Msg           isWatchResponse_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -247,6 +248,15 @@ func (x *WatchResponse) GetBundle() *v11.SignedBundle {
 	return nil
 }
 
+func (x *WatchResponse) GetGeoTable() *CountryTableMessage {
+	if x != nil {
+		if x, ok := x.Msg.(*WatchResponse_GeoTable); ok {
+			return x.GeoTable
+		}
+	}
+	return nil
+}
+
 type isWatchResponse_Msg interface {
 	isWatchResponse_Msg()
 }
@@ -255,7 +265,17 @@ type WatchResponse_Bundle struct {
 	Bundle *v11.SignedBundle `protobuf:"bytes,1,opt,name=bundle,proto3,oneof"`
 }
 
+type WatchResponse_GeoTable struct {
+	// A country table (design 0011 §4.4), sent only to engines that
+	// advertise the geo-table capability, and on a stream never after a
+	// bundle that names it. The engine holds it, unchecked, until a bundle
+	// names its hash.
+	GeoTable *CountryTableMessage `protobuf:"bytes,3,opt,name=geo_table,json=geoTable,proto3,oneof"`
+}
+
 func (*WatchResponse_Bundle) isWatchResponse_Msg() {}
+
+func (*WatchResponse_GeoTable) isWatchResponse_Msg() {}
 
 // Hello opens the stream.
 type Hello struct {
@@ -275,6 +295,12 @@ type Hello struct {
 	// key_id), so the operator signs with a new key only once every engine
 	// has it. Empty from engines that predate key rotation.
 	TrustedKeyIds []string `protobuf:"bytes,7,rep,name=trusted_key_ids,json=trustedKeyIds,proto3" json:"trusted_key_ids,omitempty"`
+	// The country table the engine holds (its table hash; empty: none).
+	GeoTableSha256 []byte `protobuf:"bytes,8,opt,name=geo_table_sha256,json=geoTableSha256,proto3" json:"geo_table_sha256,omitempty"`
+	// What the engine can take beyond the bundle: geo-table, the country
+	// table messages (0.7.0). The operator sends those only to engines that
+	// say so.
+	Capabilities  []string `protobuf:"bytes,9,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -358,6 +384,76 @@ func (x *Hello) GetTrustedKeyIds() []string {
 	return nil
 }
 
+func (x *Hello) GetGeoTableSha256() []byte {
+	if x != nil {
+		return x.GeoTableSha256
+	}
+	return nil
+}
+
+func (x *Hello) GetCapabilities() []string {
+	if x != nil {
+		return x.Capabilities
+	}
+	return nil
+}
+
+// CountryTableMessage carries a country table.
+type CountryTableMessage struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The table hash: the SHA-256 of table.
+	Sha256 []byte `protobuf:"bytes,1,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	// The gzipped, serialized inkwall.geo.v1.CountryTable, at most 14,400
+	// KiB.
+	Table         []byte `protobuf:"bytes,2,opt,name=table,proto3" json:"table,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CountryTableMessage) Reset() {
+	*x = CountryTableMessage{}
+	mi := &file_agent_v1_agent_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CountryTableMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CountryTableMessage) ProtoMessage() {}
+
+func (x *CountryTableMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_v1_agent_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CountryTableMessage.ProtoReflect.Descriptor instead.
+func (*CountryTableMessage) Descriptor() ([]byte, []int) {
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *CountryTableMessage) GetSha256() []byte {
+	if x != nil {
+		return x.Sha256
+	}
+	return nil
+}
+
+func (x *CountryTableMessage) GetTable() []byte {
+	if x != nil {
+		return x.Table
+	}
+	return nil
+}
+
 // Ack reports a bundle the engine applied.
 type Ack struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -368,7 +464,7 @@ type Ack struct {
 
 func (x *Ack) Reset() {
 	*x = Ack{}
-	mi := &file_agent_v1_agent_proto_msgTypes[3]
+	mi := &file_agent_v1_agent_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -380,7 +476,7 @@ func (x *Ack) String() string {
 func (*Ack) ProtoMessage() {}
 
 func (x *Ack) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[3]
+	mi := &file_agent_v1_agent_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -393,7 +489,7 @@ func (x *Ack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ack.ProtoReflect.Descriptor instead.
 func (*Ack) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{3}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Ack) GetBundleVersion() uint64 {
@@ -416,7 +512,7 @@ type Nack struct {
 
 func (x *Nack) Reset() {
 	*x = Nack{}
-	mi := &file_agent_v1_agent_proto_msgTypes[4]
+	mi := &file_agent_v1_agent_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -428,7 +524,7 @@ func (x *Nack) String() string {
 func (*Nack) ProtoMessage() {}
 
 func (x *Nack) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[4]
+	mi := &file_agent_v1_agent_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -441,7 +537,7 @@ func (x *Nack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Nack.ProtoReflect.Descriptor instead.
 func (*Nack) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{4}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Nack) GetBundleVersion() uint64 {
@@ -474,13 +570,15 @@ type Heartbeat struct {
 	// recent ones, at most 16, none older than a minute, each 32 lowercase
 	// hex digits (pkg/haproxyprobe). Empty from older engines.
 	ProbeReceipts []string `protobuf:"bytes,5,rep,name=probe_receipts,json=probeReceipts,proto3" json:"probe_receipts,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// The country table the engine holds, as in Hello.
+	GeoTableSha256 []byte `protobuf:"bytes,6,opt,name=geo_table_sha256,json=geoTableSha256,proto3" json:"geo_table_sha256,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_agent_v1_agent_proto_msgTypes[5]
+	mi := &file_agent_v1_agent_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -492,7 +590,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_v1_agent_proto_msgTypes[5]
+	mi := &file_agent_v1_agent_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -505,7 +603,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_agent_v1_agent_proto_rawDescGZIP(), []int{5}
+	return file_agent_v1_agent_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Heartbeat) GetBundleVersion() uint64 {
@@ -543,6 +641,13 @@ func (x *Heartbeat) GetProbeReceipts() []string {
 	return nil
 }
 
+func (x *Heartbeat) GetGeoTableSha256() []byte {
+	if x != nil {
+		return x.GeoTableSha256
+	}
+	return nil
+}
+
 var File_agent_v1_agent_proto protoreflect.FileDescriptor
 
 const file_agent_v1_agent_proto_rawDesc = "" +
@@ -555,10 +660,11 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"\theartbeat\x18\x04 \x01(\v2\x1b.inkwall.agent.v1.HeartbeatH\x00R\theartbeat\x127\n" +
 	"\x06events\x18\x05 \x01(\v2\x1d.inkwall.events.v1.EventBatchH\x00R\x06events\x127\n" +
 	"\x05stats\x18\x06 \x01(\v2\x1f.inkwall.events.v1.RequestStatsH\x00R\x05statsB\x05\n" +
-	"\x03msg\"W\n" +
+	"\x03msg\"\x9d\x01\n" +
 	"\rWatchResponse\x129\n" +
-	"\x06bundle\x18\x01 \x01(\v2\x1f.inkwall.bundle.v1.SignedBundleH\x00R\x06bundleB\x05\n" +
-	"\x03msgJ\x04\b\x02\x10\x03\"\xf7\x01\n" +
+	"\x06bundle\x18\x01 \x01(\v2\x1f.inkwall.bundle.v1.SignedBundleH\x00R\x06bundle\x12D\n" +
+	"\tgeo_table\x18\x03 \x01(\v2%.inkwall.agent.v1.CountryTableMessageH\x00R\bgeoTableB\x05\n" +
+	"\x03msgJ\x04\b\x02\x10\x03\"\xc5\x02\n" +
 	"\x05Hello\x12\x1b\n" +
 	"\tengine_id\x18\x01 \x01(\tR\bengineId\x12#\n" +
 	"\rpod_namespace\x18\x02 \x01(\tR\fpodNamespace\x12\x19\n" +
@@ -566,18 +672,24 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"\tnode_name\x18\x04 \x01(\tR\bnodeName\x12%\n" +
 	"\x0ebundle_version\x18\x05 \x01(\x04R\rbundleVersion\x12%\n" +
 	"\x0eengine_version\x18\x06 \x01(\tR\rengineVersion\x12&\n" +
-	"\x0ftrusted_key_ids\x18\a \x03(\tR\rtrustedKeyIds\",\n" +
+	"\x0ftrusted_key_ids\x18\a \x03(\tR\rtrustedKeyIds\x12(\n" +
+	"\x10geo_table_sha256\x18\b \x01(\fR\x0egeoTableSha256\x12\"\n" +
+	"\fcapabilities\x18\t \x03(\tR\fcapabilities\"C\n" +
+	"\x13CountryTableMessage\x12\x16\n" +
+	"\x06sha256\x18\x01 \x01(\fR\x06sha256\x12\x14\n" +
+	"\x05table\x18\x02 \x01(\fR\x05table\",\n" +
 	"\x03Ack\x12%\n" +
 	"\x0ebundle_version\x18\x01 \x01(\x04R\rbundleVersion\"C\n" +
 	"\x04Nack\x12%\n" +
 	"\x0ebundle_version\x18\x01 \x01(\x04R\rbundleVersion\x12\x14\n" +
-	"\x05error\x18\x02 \x01(\tR\x05error\"\xba\x01\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\"\xe4\x01\n" +
 	"\tHeartbeat\x12%\n" +
 	"\x0ebundle_version\x18\x01 \x01(\x04R\rbundleVersion\x12\x1b\n" +
 	"\tin_flight\x18\x02 \x01(\rR\binFlight\x12\x1a\n" +
 	"\bcapacity\x18\x03 \x01(\rR\bcapacity\x12&\n" +
 	"\x0ftrusted_key_ids\x18\x04 \x03(\tR\rtrustedKeyIds\x12%\n" +
-	"\x0eprobe_receipts\x18\x05 \x03(\tR\rprobeReceipts2]\n" +
+	"\x0eprobe_receipts\x18\x05 \x03(\tR\rprobeReceipts\x12(\n" +
+	"\x10geo_table_sha256\x18\x06 \x01(\fR\x0egeoTableSha2562]\n" +
 	"\rBundleService\x12L\n" +
 	"\x05Watch\x12\x1e.inkwall.agent.v1.WatchRequest\x1a\x1f.inkwall.agent.v1.WatchResponse(\x010\x01B5Z3github.com/inkwall-dev/inkwall/api/agent/v1;agentv1b\x06proto3"
 
@@ -593,33 +705,35 @@ func file_agent_v1_agent_proto_rawDescGZIP() []byte {
 	return file_agent_v1_agent_proto_rawDescData
 }
 
-var file_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_agent_v1_agent_proto_goTypes = []any{
-	(*WatchRequest)(nil),     // 0: inkwall.agent.v1.WatchRequest
-	(*WatchResponse)(nil),    // 1: inkwall.agent.v1.WatchResponse
-	(*Hello)(nil),            // 2: inkwall.agent.v1.Hello
-	(*Ack)(nil),              // 3: inkwall.agent.v1.Ack
-	(*Nack)(nil),             // 4: inkwall.agent.v1.Nack
-	(*Heartbeat)(nil),        // 5: inkwall.agent.v1.Heartbeat
-	(*v1.EventBatch)(nil),    // 6: inkwall.events.v1.EventBatch
-	(*v1.RequestStats)(nil),  // 7: inkwall.events.v1.RequestStats
-	(*v11.SignedBundle)(nil), // 8: inkwall.bundle.v1.SignedBundle
+	(*WatchRequest)(nil),        // 0: inkwall.agent.v1.WatchRequest
+	(*WatchResponse)(nil),       // 1: inkwall.agent.v1.WatchResponse
+	(*Hello)(nil),               // 2: inkwall.agent.v1.Hello
+	(*CountryTableMessage)(nil), // 3: inkwall.agent.v1.CountryTableMessage
+	(*Ack)(nil),                 // 4: inkwall.agent.v1.Ack
+	(*Nack)(nil),                // 5: inkwall.agent.v1.Nack
+	(*Heartbeat)(nil),           // 6: inkwall.agent.v1.Heartbeat
+	(*v1.EventBatch)(nil),       // 7: inkwall.events.v1.EventBatch
+	(*v1.RequestStats)(nil),     // 8: inkwall.events.v1.RequestStats
+	(*v11.SignedBundle)(nil),    // 9: inkwall.bundle.v1.SignedBundle
 }
 var file_agent_v1_agent_proto_depIdxs = []int32{
 	2, // 0: inkwall.agent.v1.WatchRequest.hello:type_name -> inkwall.agent.v1.Hello
-	3, // 1: inkwall.agent.v1.WatchRequest.ack:type_name -> inkwall.agent.v1.Ack
-	4, // 2: inkwall.agent.v1.WatchRequest.nack:type_name -> inkwall.agent.v1.Nack
-	5, // 3: inkwall.agent.v1.WatchRequest.heartbeat:type_name -> inkwall.agent.v1.Heartbeat
-	6, // 4: inkwall.agent.v1.WatchRequest.events:type_name -> inkwall.events.v1.EventBatch
-	7, // 5: inkwall.agent.v1.WatchRequest.stats:type_name -> inkwall.events.v1.RequestStats
-	8, // 6: inkwall.agent.v1.WatchResponse.bundle:type_name -> inkwall.bundle.v1.SignedBundle
-	0, // 7: inkwall.agent.v1.BundleService.Watch:input_type -> inkwall.agent.v1.WatchRequest
-	1, // 8: inkwall.agent.v1.BundleService.Watch:output_type -> inkwall.agent.v1.WatchResponse
-	8, // [8:9] is the sub-list for method output_type
-	7, // [7:8] is the sub-list for method input_type
-	7, // [7:7] is the sub-list for extension type_name
-	7, // [7:7] is the sub-list for extension extendee
-	0, // [0:7] is the sub-list for field type_name
+	4, // 1: inkwall.agent.v1.WatchRequest.ack:type_name -> inkwall.agent.v1.Ack
+	5, // 2: inkwall.agent.v1.WatchRequest.nack:type_name -> inkwall.agent.v1.Nack
+	6, // 3: inkwall.agent.v1.WatchRequest.heartbeat:type_name -> inkwall.agent.v1.Heartbeat
+	7, // 4: inkwall.agent.v1.WatchRequest.events:type_name -> inkwall.events.v1.EventBatch
+	8, // 5: inkwall.agent.v1.WatchRequest.stats:type_name -> inkwall.events.v1.RequestStats
+	9, // 6: inkwall.agent.v1.WatchResponse.bundle:type_name -> inkwall.bundle.v1.SignedBundle
+	3, // 7: inkwall.agent.v1.WatchResponse.geo_table:type_name -> inkwall.agent.v1.CountryTableMessage
+	0, // 8: inkwall.agent.v1.BundleService.Watch:input_type -> inkwall.agent.v1.WatchRequest
+	1, // 9: inkwall.agent.v1.BundleService.Watch:output_type -> inkwall.agent.v1.WatchResponse
+	9, // [9:10] is the sub-list for method output_type
+	8, // [8:9] is the sub-list for method input_type
+	8, // [8:8] is the sub-list for extension type_name
+	8, // [8:8] is the sub-list for extension extendee
+	0, // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_agent_v1_agent_proto_init() }
@@ -637,6 +751,7 @@ func file_agent_v1_agent_proto_init() {
 	}
 	file_agent_v1_agent_proto_msgTypes[1].OneofWrappers = []any{
 		(*WatchResponse_Bundle)(nil),
+		(*WatchResponse_GeoTable)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -644,7 +759,7 @@ func file_agent_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agent_v1_agent_proto_rawDesc), len(file_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

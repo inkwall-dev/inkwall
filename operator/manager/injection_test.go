@@ -28,7 +28,6 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/bundle"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/operator/test/fakeengine"
-	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 )
 
 // testInjection creates proxy pods as Traefik's Deployment would: the Pod
@@ -107,7 +106,7 @@ func testInjection(ctx context.Context, t *testing.T, c client.Client) {
 			return err.Error()
 		}
 		// The bundle Secret, and its chunks for a bundle too large for one.
-		if want := append([]string{bundle.BundleSecret}, bundlesecret.ChunkNames(bundle.BundleSecret)...); len(role.Rules) != 1 ||
+		if want := injection.BundleReaderSecrets(); len(role.Rules) != 1 ||
 			!slices.Equal(role.Rules[0].ResourceNames, want) || !slices.Equal(role.Rules[0].Verbs, []string{"get"}) {
 			return fmt.Sprintf("Role rules %v", role.Rules)
 		}

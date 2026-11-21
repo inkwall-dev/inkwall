@@ -55,6 +55,14 @@ var (
 		Name: "inkwall_operator_bundle_version",
 		Help: "Version of the bundle this replica serves.",
 	})
+	geoTableBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "inkwall_operator_geo_table_compressed_bytes",
+		Help: "Size of the country table the bundle this replica serves names, gzip-compressed, as sent and stored in its Secrets; 0 without one.",
+	})
+	geoTablesSent = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "inkwall_operator_geo_tables_sent_total",
+		Help: "Country tables this replica sent to engines.",
+	})
 	bundleBytes = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "inkwall_operator_bundle_compressed_bytes",
 		Help: "Size of the bundle this replica serves, gzip-compressed, as stored in its Secrets: over 900 KiB it is split into chunks, over 7,200 KiB it can't be published.",
@@ -87,7 +95,7 @@ const (
 )
 
 func init() {
-	metrics.Registry.MustRegister(bundleVersion, bundleBytes, engineCount, eventsReceived, eventsDroppedByEngines, RequestStatsDropped)
+	metrics.Registry.MustRegister(bundleVersion, bundleBytes, geoTableBytes, geoTablesSent, engineCount, eventsReceived, eventsDroppedByEngines, RequestStatsDropped)
 }
 
 // Enforced computes a policy's Enforced condition: whether every engine

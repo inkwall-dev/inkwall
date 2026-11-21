@@ -23,6 +23,7 @@ import (
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	"github.com/inkwall-dev/inkwall/pkg/events"
+	"github.com/inkwall-dev/inkwall/pkg/geo"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
@@ -87,9 +88,29 @@ type Set struct {
 	policies  []*Policy
 	match     *matcher
 	observer  pipeline.Observer // told about the verdicts no policy's pipeline gives
+	// geoNamed: the bundle names a country table (design 0011 §4.5);
+	// geoTable is the table the set enforces with: the named one, the
+	// previous bundle's while the named one hasn't arrived, or nil.
+	geoNamed bool
+	geoTable *geo.Table
 }
 
 var _ pipeline.Inspector = (*Set)(nil)
+
+// WithGeo returns a set that shares every compiled policy with s and
+// differs only in its country table: named is whether the bundle names
+// one, t the table to enforce with (nil: none held). A table that arrives
+// after its bundle makes a new set this way, swapped in like any other, so
+// a request never sees a bundle with another bundle's table.
+func (s *Set) WithGeo(named bool, t *geo.Table) *Set {
+	c := *s
+	c.geoNamed, c.geoTable = named, t
+	return &c
+}
+
+// GeoTable returns the country table the set enforces with, and whether
+// its bundle names one.
+func (s *Set) GeoTable() (*geo.Table, bool) { return s.geoTable, s.geoNamed }
 
 // ProbeKey is the key of the operator's HAProxy probe, nil if the bundle
 // has none.

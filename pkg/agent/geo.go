@@ -1,0 +1,240 @@
+// Copyright 2026 The Inkwall Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package agent
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+
+	"github.com/prometheus/client_golang/prometheus"
+
+	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	"github.com/inkwall-dev/inkwall/pkg/geo"
+	"github.com/inkwall-dev/inkwall/pkg/policy"
+)
+
+// CapabilityGeoTable is what an engine that takes country tables on the
+// stream advertises in its Hello (design 0011 §4.4).
+const CapabilityGeoTable = "geo-table"
+
+// pendingTable is a country table received before a bundle names it: held
+// as the compressed bytes, unchecked and unused, one at a time.
+type pendingTable struct {
+	hash [32]byte
+	gz   []byte
+}
+
+type geoMetrics struct {
+	bytes    prometheus.Gauge
+	built    prometheus.Gauge
+	failures prometheus.Counter
+}
+
+func newGeoMetrics() geoMetrics {
+	return geoMetrics{
+		bytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "inkwall_geo_table_bytes",
+			Help: "The size of the country table the engine holds, in memory; 0 without one.",
+		}),
+		built: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "inkwall_geo_table_built_timestamp_seconds",
+			Help: "When the database of the country table the engine holds was built (Unix time); 0 without one.",
+		}),
+		failures: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "inkwall_geo_table_load_failures_total",
+			Help: "Country tables received that failed a check: too large, the wrong hash, or not a valid table. The engine keeps the one it had.",
+		}),
+	}
+}
+
+func (m geoMetrics) collectors() []prometheus.Collector {
+	return []prometheus.Collector{m.bytes, m.built, m.failures}
+}
+
+// GeoTableHash returns the hash of the country table the engine holds, nil
+// if it holds none: what its Hello and heartbeats report.
+func (a *Agent) GeoTableHash() []byte {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.table == nil {
+		return nil
+	}
+	h := a.table.Hash()
+	return h[:]
+}
+
+// GeoReady is closed once the engine enforces a bundle that names no
+// country table, or holds the one it names. The engine waits for it only
+// at bootstrap (design 0011 §4.5), within the time it waits for its first
+// bundle.
+func (a *Agent) GeoReady() <-chan struct{} { return a.geoReady }
+
+// attachGeo returns set with the country table its bundle names: the one
+// held, or the pending one, checked now; else the previous bundle's, kept
+// until the named one arrives, or none. a.mu is held.
+func (a *Agent) attachGeo(set *policy.Set, ref *bundlev1.GeoTableRef) *policy.Set {
+	if ref == nil {
+		// No geo: nothing to hold.
+		a.table, a.pending = nil, nil
+		a.geo.bytes.Set(0)
+		a.geo.built.Set(0)
+		a.markGeoReady()
+		return set.WithGeo(false, nil)
+	}
+	if a.holds(ref) {
+		a.markGeoReady()
+		return set.WithGeo(true, a.table)
+	}
+	if p := a.pending; p != nil {
+		a.pending = nil // used now, or not named: dropped either way
+		if bytes.Equal(p.hash[:], ref.GetSha256()) {
+			if t := a.loadTable(p.gz, ref); t != nil {
+				a.markGeoReady()
+				return set.WithGeo(true, t)
+			}
+		}
+	}
+	if a.table != nil {
+		a.log.Info("the bundle names a country table not received yet; enforcing with the previous one", slog.Int("previous_ranges", a.table.Ranges()))
+	}
+	return set.WithGeo(true, a.table)
+}
+
+// holds reports whether the engine holds the table ref names. a.mu is
+// held.
+func (a *Agent) holds(ref *bundlev1.GeoTableRef) bool {
+	if a.table == nil {
+		return false
+	}
+	h := a.table.Hash()
+	return bytes.Equal(h[:], ref.GetSha256())
+}
+
+// loadTable checks and decodes a table for ref, and makes it the one held;
+// nil if it fails a check, which is logged and counted. a.mu is held.
+func (a *Agent) loadTable(gz []byte, ref *bundlev1.GeoTableRef) *geo.Table {
+	t, err := geo.Decode(gz, ref.GetSha256(), ref.GetSize())
+	if err != nil {
+		a.geo.failures.Inc()
+		a.log.Error("country table rejected; keeping the one held", slog.Any("error", err))
+		return nil
+	}
+	a.table = t
+	a.geo.bytes.Set(float64(t.Bytes()))
+	a.geo.built.Set(float64(t.Built().Unix()))
+	a.log.Info("country table loaded", slog.String("database", t.DatabaseType()), slog.Time("built", t.Built()), slog.Int("ranges", t.Ranges()))
+	if a.cfg.GeoCacheFile != "" {
+		if err := replaceFile(a.cfg.GeoCacheFile, ".geo-", gz); err != nil {
+			a.log.Warn("can't cache the country table", slog.Any("error", err))
+		}
+	}
+	return t
+}
+
+// offerTable takes a country table from the stream, the Secrets or the
+// cache: used at once if the enforced bundle names it, else held until a
+// bundle does.
+func (a *Agent) offerTable(hash, gz []byte) {
+	if len(gz) > geo.MaxCompressedBytes || len(hash) != 32 {
+		a.geo.failures.Inc()
+		a.log.Error("country table refused", slog.Int("bytes", len(gz)), slog.Int("max", geo.MaxCompressedBytes))
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ref := a.current.GetGeoTable()
+	switch {
+	case ref != nil && a.holds(ref) && bytes.Equal(hash, ref.GetSha256()):
+		return // held already
+	case ref != nil && bytes.Equal(hash, ref.GetSha256()) && a.set != nil:
+		if t := a.loadTable(gz, ref); t != nil {
+			a.set = a.set.WithGeo(true, t)
+			a.cfg.Holder.Store(a.set)
+			a.markGeoReady()
+		}
+		return
+	}
+	a.pending = &pendingTable{hash: [32]byte(hash), gz: gz}
+}
+
+// needsTable reports whether the enforced bundle names a table the engine
+// doesn't hold.
+func (a *Agent) needsTable() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ref := a.current.GetGeoTable()
+	return ref != nil && !a.holds(ref)
+}
+
+// markGeoReady closes geoReady once. a.mu is held.
+func (a *Agent) markGeoReady() {
+	select {
+	case <-a.geoReady:
+	default:
+		close(a.geoReady)
+	}
+}
+
+// loadGeoCache reads the cached country table, if any, to hold until a
+// bundle names it.
+func (a *Agent) loadGeoCache() {
+	if a.cfg.GeoCacheFile == "" {
+		return
+	}
+	f, err := os.Open(filepath.Clean(a.cfg.GeoCacheFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	var gz []byte
+	if err == nil {
+		gz, err = io.ReadAll(io.LimitReader(f, geo.MaxCompressedBytes+1))
+		_ = f.Close()
+	}
+	if err != nil {
+		a.log.Warn("cached country table not usable", slog.String("file", a.cfg.GeoCacheFile), slog.Any("error", err))
+		return
+	}
+	h := geo.Hash(gz)
+	a.offerTable(h[:], gz)
+}
+
+// loadSecretGeo reads the country table from its Secrets when the enforced
+// bundle names one the engine doesn't hold: a new engine with no cache,
+// while the operator is unreachable.
+func (a *Agent) loadSecretGeo(ctx context.Context) {
+	if a.cfg.Secret == nil || !a.needsTable() || ctx.Err() != nil {
+		return
+	}
+	gz, err := a.cfg.Secret.fetchGeo(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			a.log.Warn("can't read the country table's Secrets; waiting for the operator", slog.Any("error", err))
+		}
+		return
+	}
+	h := geo.Hash(gz)
+	a.offerTable(h[:], gz)
+}
+
+// replaceFile replaces name atomically.
+func replaceFile(name, prefix string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(name), prefix)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), name)
+}
