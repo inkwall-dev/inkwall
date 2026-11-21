@@ -42,10 +42,12 @@ const RulesLabel = "waf.inkwall.dev/rules"
 
 // Condition reasons for Accepted.
 const (
-	ReasonAccepted          = "Accepted"
-	ReasonInvalidRef        = "InvalidRef"
-	ReasonConflict          = "Conflict"
-	ReasonRuleCompileError  = "RuleCompileError"
+	ReasonAccepted         = "Accepted"
+	ReasonInvalidRef       = "InvalidRef"
+	ReasonConflict         = "Conflict"
+	ReasonRuleCompileError = "RuleCompileError"
+	// ReasonInvalidEntries, on a WAFIPList: an entry the engine can't parse.
+	ReasonInvalidEntries    = "InvalidEntries"
 	ReasonTargetUnsupported = "TargetUnsupported"
 	// ReasonTargetNotAttached: an HTTPRoute target no Gateway of an
 	// integration accepted; the policy doesn't apply to it.
@@ -113,6 +115,8 @@ type Result struct {
 	PolicyStatus map[types.NamespacedName]Status
 	// RuleSetStatus is keyed by RuleSet id (RuleSetID), for every rule set.
 	RuleSetStatus map[string]Status
+	// IPListStatus is keyed by the WAFIPList, for every IP list.
+	IPListStatus map[types.NamespacedName]Status
 }
 
 // PolicyID is a policy's id in the bundle.
@@ -131,7 +135,9 @@ func Resolve(in Input) Result {
 	r := &resolution{in: in, out: Result{
 		PolicyStatus:  map[types.NamespacedName]Status{},
 		RuleSetStatus: map[string]Status{},
+		IPListStatus:  map[types.NamespacedName]Status{},
 	}}
+	r.resolveIPLists()
 	r.resolveRuleSets()
 	r.resolvePolicies()
 	return r.out
@@ -949,6 +955,31 @@ func crsSettings(c *wafv1alpha1.CRSSettings) *bundlev1.CRSSettings {
 		s.OutboundAnomalyThreshold = *c.OutboundAnomalyThreshold
 	}
 	return s
+}
+
+// IPListValid is the Accepted message of a WAFIPList whose entries all
+// parse.
+const IPListValid = "the IP list is valid"
+
+// resolveIPLists checks every WAFIPList's entries as the engine parses them:
+// the webhook does too, but a list written while it was down isn't.
+func (r *resolution) resolveIPLists() {
+	for _, l := range r.in.IPLists {
+		st := Status{Accepted: true, Reason: ReasonAccepted, Message: IPListValid}
+		if err := parseIPList(l); err != nil {
+			st = Status{Reason: ReasonInvalidEntries, Message: err.Error()}
+		}
+		r.out.IPListStatus[types.NamespacedName{Namespace: l.Namespace, Name: l.Name}] = st
+	}
+}
+
+func parseIPList(l wafv1alpha1.WAFIPList) error {
+	entries := make([]string, 0, len(l.Spec.Entries))
+	for _, e := range l.Spec.Entries {
+		entries = append(entries, string(e.CIDR))
+	}
+	_, err := iplist.Parse(entries)
+	return err
 }
 
 // ipList returns the entries of the WAFIPLists names, in namespace ns,

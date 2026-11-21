@@ -59,6 +59,8 @@ Every doc in this repository, by topic, with the question each one answers.
 
 ## Reference
 
+- [API compatibility](api-compatibility.md): what may change in the `waf.inkwall.dev` API between
+  releases, how a change is announced, and what v1.0.0 will freeze?
 - [Chart values](../deploy/helm/inkwall/README.md#values): what does each chart value do?
 - [Operator](../operator/README.md): what does the operator do, and how do I develop it?
 - [Diagrams](diagrams/README.md): which diagrams do the docs use, and how do I change one?

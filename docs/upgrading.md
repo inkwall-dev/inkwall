@@ -185,6 +185,12 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   operator's first bundle, and policies are `Enforced=False` (`EnginesBehind`) for the seconds the
   engines take to load it. `responses: {streams: Skip}` without `inspect: true` is now accepted
   (it is the default).
+- **`WAFIPList` has a status** (#719): an `Accepted` condition, `InvalidEntries` when an entry
+  doesn't parse (only possible for a list written while the webhook was down), and an `Accepted`
+  column in `kubectl get wafiplists`. The operator needs `update` on `wafiplists/status`, which
+  the chart's ClusterRole now grants; with your own RBAC, add it. The
+  [API compatibility](api-compatibility.md) page says what may change in the API from here to
+  v1.0.0, and what v1.0.0 will freeze.
 
 ## From 0.5.x to 0.6.0
 

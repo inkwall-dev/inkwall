@@ -38,18 +38,38 @@ type WAFIPListSpec struct {
 	Entries []IPListEntry `json:"entries,omitempty"`
 }
 
+// WAFIPListStatus says whether the list is usable.
+type WAFIPListStatus struct {
+	// ObservedGeneration is the generation the status describes.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Conditions describe the list's state: Accepted is True when every
+	// entry parses as the engine parses it, and False (InvalidEntries)
+	// naming the first that doesn't; the policies that use the list are
+	// then not Accepted either.
+	// +listType=map
+	// +listMapKey=type
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
 // WAFIPList is a list of client addresses that WAFPolicies in its
 // namespace allow or deny (spec.ipLists). The client address is the one the
 // engine resolves: see docs/client-ip.md.
 //
 // +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
 // +kubebuilder:resource:categories=inkwall,shortName=wafip
+// +kubebuilder:printcolumn:name="Accepted",type=string,JSONPath=`.status.conditions[?(@.type=="Accepted")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type WAFIPList struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	Spec WAFIPListSpec `json:"spec"`
+	// +optional
+	Status WAFIPListStatus `json:"status,omitempty"`
 }
 
 // WAFIPListList is a list of WAFIPList.

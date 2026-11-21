@@ -21,6 +21,7 @@ import (
 const (
 	KindWAFPolicy     = "WAFPolicy"
 	KindInkwallConfig = "InkwallConfig"
+	KindWAFIPList     = "WAFIPList"
 	// KindSecurityEvent entries explain a security event's reason
 	// (condition "reason"), as the engine's log writes it.
 	KindSecurityEvent = "SecurityEvent"
@@ -215,6 +216,12 @@ var entries = []Entry{
 	{Kind: "WAFPolicy", Condition: "Ready", Reason: "NotEnforced",
 		Meaning: "The operator hasn't reported `Enforced` on this generation yet. It lasts seconds.",
 		Fix:     "If it lasts, check that the operator runs: `inkwallctl status`."},
+	{Kind: "WAFIPList", Condition: "Accepted", Reason: "Accepted",
+		Meaning: "Every entry parses as the engines parse it.",
+		Fix:     ""},
+	{Kind: "WAFIPList", Condition: "Accepted", Reason: "InvalidEntries",
+		Meaning: "An entry isn't an address or CIDR prefix the engines can parse (999.1.1.1, a prefix length over 32 or 128). The webhook refuses such entries, so the list was written while it was down. The policies that use the list aren't `Accepted` either (`InvalidRef`).",
+		Fix:     "Fix or remove the entry the message names."},
 	{Kind: "InkwallConfig", Condition: "Suspended", Reason: "Suspended",
 		Meaning: "The bundle the engines get suspends inspection (`spec.suspend`).",
 		Fix:     "Resume when ready."},

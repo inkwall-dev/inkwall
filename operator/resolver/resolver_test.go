@@ -576,4 +576,18 @@ func TestIPLists(t *testing.T) {
 	in.IPLists = []wafv1alpha1.WAFIPList{ipList("monitors", "10.0.0.0/8"), ipList("bad", "lb.example.com"), ipList("worse", "1.2.3.4")}
 	res = Resolve(in)
 	wantStatus(t, res, "shop", false, ReasonInvalidRef, "WAFIPList bad: ")
+
+	// Every list gets its own status, used or not (#719).
+	want := map[string]Status{
+		"monitors": {Accepted: true, Reason: ReasonAccepted, Message: IPListValid},
+		"worse":    {Accepted: true, Reason: ReasonAccepted, Message: IPListValid},
+	}
+	for name, st := range want {
+		if got := res.IPListStatus[key(name)]; got != st {
+			t.Errorf("%s: status %+v, want %+v", name, got, st)
+		}
+	}
+	if got := res.IPListStatus[key("bad")]; got.Accepted || got.Reason != ReasonInvalidEntries || !strings.Contains(got.Message, "lb.example.com") {
+		t.Errorf("bad: status %+v, want InvalidEntries naming lb.example.com", got)
+	}
 }
