@@ -130,6 +130,10 @@ type sender struct {
 	drained chan struct{}
 	// loops counts the run loop's passes (tests check it doesn't spin).
 	loops atomic.Int64
+	// log, if set, logs a key-value message; encodeFailed: it was logged
+	// that a request couldn't be encoded.
+	log          func(msg string, kv ...any)
+	encodeFailed atomic.Bool
 }
 
 func newSender(name string, buf *buffer, hasPolicy func(string) bool, m Metrics, st *sinkState) *sender {
@@ -389,6 +393,9 @@ func encodeParts(cfg *sinkConfig, items []item) []part {
 func (s *sender) deliver(ctx context.Context, f *flight, first part) {
 	parts := []part{first}
 	attempt := 0
+	// reencoded: the head part was encoded again after a client refused
+	// it; refused again, it is dropped.
+	reencoded := false
 	for len(parts) > 0 {
 		rt := s.rt.Load()
 		if rt == nil || rt.client == nil || rt.cfg.err != nil {
@@ -402,7 +409,10 @@ func (s *sender) deliver(ctx context.Context, f *flight, first part) {
 			continue
 		}
 		if parts[0].encoding != rt.cfg.encoding {
-			// Built under the sink's previous configuration.
+			// Built under the sink's previous configuration: filtered and
+			// encoded again. Events the new filters leave out are neither
+			// exported nor counted as dropped, as when filtered at read
+			// time: that is configuration, not loss.
 			parts = append(encodeParts(rt.cfg, parts[0].items), parts[1:]...)
 			continue
 		}
@@ -419,11 +429,22 @@ func (s *sender) deliver(ctx context.Context, f *flight, first part) {
 			return
 		}
 		if r.mismatch {
-			// A request the client can't send: encode it again. Never
-			// happens; tests fail on it (payloadMismatch).
-			parts[0].encoding = ""
+			// A request the client can't send (it didn't encode): encode it
+			// again, once. Refused again, its events are dropped as
+			// rejected, never retried without a wait. Tests fail on the
+			// first (payloadMismatch).
+			if !reencoded {
+				reencoded = true
+				parts[0].encoding = ""
+				continue
+			}
+			s.failed(r)
+			s.metrics.Dropped(s.name, DropRejected, len(pt.items))
+			s.logEncodeFailure(r.detail)
+			parts, reencoded = parts[1:], false
 			continue
 		}
+		reencoded = false
 		if r.verdict != sent && retired {
 			// The transport was rebuilt meanwhile and this one closed under
 			// the request: send it again on the new one, no failure.
@@ -494,6 +515,14 @@ func (s *sender) abandoned(f *flight, parts []part) bool {
 	s.metrics.Dropped(s.name, DropBufferFull, n)
 	s.state.droppedFull(s.now())
 	return true
+}
+
+// logEncodeFailure logs, once per sender, that a request couldn't be
+// encoded and was dropped.
+func (s *sender) logEncodeFailure(detail string) {
+	if s.encodeFailed.CompareAndSwap(false, true) && s.log != nil {
+		s.log("export: a request couldn't be encoded and was dropped", "sink", s.name, "detail", detail)
+	}
 }
 
 func (s *sender) failed(r result) {

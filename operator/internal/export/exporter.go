@@ -202,6 +202,7 @@ func (e *Exporter) apply(buf *buffer, sinks []*sinkConfig) {
 			if e.after != nil {
 				rs.sender.retryAfter = e.after
 			}
+			rs.sender.log = func(msg string, kv ...any) { e.Log.Info(msg, kv...) }
 			e.sinks[sc.name] = rs
 			go rs.sender.run(sctx)
 			e.Log.Info("export sink added", "sink", sc.name)

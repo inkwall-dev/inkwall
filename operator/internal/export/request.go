@@ -99,7 +99,7 @@ func (b *otlpBuilder) len() int         { return b.enc.n }
 func (b *otlpBuilder) payload() payload {
 	p := payload{otlp: b.enc.req, size: b.enc.size}
 	if b.http {
-		raw, err := proto.Marshal(b.enc.req)
+		raw, err := marshalOTLP(b.enc.req)
 		if err == nil {
 			p.body, p.contentType, p.size = raw, "application/x-protobuf", len(raw)
 		}
@@ -108,6 +108,9 @@ func (b *otlpBuilder) payload() payload {
 	}
 	return p
 }
+
+// marshalOTLP is proto.Marshal; tests make it fail.
+var marshalOTLP = proto.Marshal
 
 // encode builds the payload of items, all of them: a request split in half
 // is encoded again from its halves.

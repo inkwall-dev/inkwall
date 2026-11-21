@@ -201,17 +201,21 @@ func TestChangedSinkJSONToGRPC(t *testing.T) {
 // waits: it doesn't spin, and Stop doesn't wait for it.
 func TestInvalidSinkDoesNotSpin(t *testing.T) {
 	sk, _, ca := tlsSink(t)
-	h := start(t, "", config(jsonSink("a", sk.srv.URL, batch(1000, time.Minute), func(s *wafv1alpha1.EventSink) {
+	// A maxDelay that expires within the measurement: without the guard,
+	// its timer fires at once on every pass.
+	h := start(t, "", config(jsonSink("a", sk.srv.URL, batch(1000, 200*time.Millisecond), func(s *wafv1alpha1.EventSink) {
 		s.Insecure = false
 		s.HeadersSecretRef = &wafv1alpha1.LocalSecretReference{Name: "h"}
 		s.TLS = &wafv1alpha1.SinkTLS{CASecretRef: &wafv1alpha1.LocalSecretReference{Name: "ca"}}
 	})), secretObj("h", map[string]string{"Authorization": "Bearer t"}), secretObj("ca", map[string]string{"ca.crt": ca}))
 	h.exp.Add(batchOf(3, numbered("e")))
-	time.Sleep(50 * time.Millisecond)
 	if err := h.c.Delete(context.Background(), &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "h"}}); err != nil {
 		t.Fatal(err)
 	}
 	h.waitFor("the sink invalid", func() bool { return h.status("a").State == StateConfigInvalid })
+	if len(sk.events()) != 0 {
+		t.Fatal("the request was sent before the sink became invalid: no half-built request to test")
+	}
 	h.exp.FlushTimeout = 10 * time.Second
 	s := h.exp.sinks["a"].sender
 	before := s.loops.Load()
