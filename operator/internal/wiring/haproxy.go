@@ -130,6 +130,9 @@ type haproxySettings struct {
 	// maxResponse is the largest responses.maxBytes of the policies that
 	// inspect responses (64 KiB for one that sets none).
 	maxResponse int64
+	// denyResponse: a policy sets spec.denyResponse, which HAProxy, writing
+	// its own denials, doesn't serve.
+	denyResponse bool
 }
 
 func haproxySettingsOf(policies []wafv1alpha1.WAFPolicy, ing types.NamespacedName) haproxySettings {
@@ -159,6 +162,7 @@ func haproxySettingsOf(policies []wafv1alpha1.WAFPolicy, ing types.NamespacedNam
 			s.maxResponse = max(s.maxResponse, limit)
 		}
 		s.block = s.block || p.Spec.Mode == wafv1alpha1.PolicyBlock
+		s.denyResponse = s.denyResponse || p.Spec.DenyResponse != nil
 		mode := cmp.Or(p.Spec.FailureMode, wafv1alpha1.FailOpen)
 		if p.Spec.Mode == wafv1alpha1.PolicyBlock && p.Spec.FailureMode == "" {
 			mode = wafv1alpha1.FailClosed
@@ -700,6 +704,9 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 			if n := haproxyBufferNote(k.Name, g.buffer, mech, settings.body, settings.maxBody, settings.responses && res.Responses, settings.maxResponse); n != "" {
 				notes = append(notes, n)
 			}
+			if settings.denyResponse {
+				notes = append(notes, haproxyDenyResponseNote(k.Name))
+			}
 			if mech == haproxyBackendCR {
 				if n := haproxyIgnoredNote(ing); n != "" {
 					notes = append(notes, n)
@@ -720,6 +727,13 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 		log.FromContext(ctx).Error(errors.Join(errs...), "HAProxy Ingresses not wired")
 	}
 	return res, errors.Join(errs...)
+}
+
+// haproxyDenyResponseNote says that HAProxy writes its own denials, so a
+// policy's spec.denyResponse doesn't reach its clients (#725): its deny and
+// return actions take a fixed status and content type per rule.
+func haproxyDenyResponseNote(ingress string) string {
+	return "Ingress " + ingress + ": HAProxy writes its own denials, so its clients get HAProxy's error page, not spec.denyResponse"
 }
 
 // haproxyBufferNote says when HAProxy's buffer lets the engine see less of

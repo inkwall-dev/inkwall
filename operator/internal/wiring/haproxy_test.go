@@ -544,6 +544,38 @@ func TestHAProxyBufferNote(t *testing.T) {
 	}
 }
 
+// A policy with a denyResponse on an HAProxy route says, on Programmed,
+// that HAProxy's clients don't get it (#725).
+func TestHAProxyDenyResponseNote(t *testing.T) {
+	ctx := context.Background()
+	class := &networkingv1.IngressClass{ObjectMeta: metav1.ObjectMeta{Name: "haproxy"}, Spec: networkingv1.IngressClassSpec{Controller: "haproxy.org/ingress-controller/haproxy"}}
+	policy := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
+		TargetRefs:   []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}},
+		DenyResponse: &wafv1alpha1.DenyResponse{ContentType: "text/html", Body: "<p>blocked</p>"},
+	}}
+	c := fake.NewClientBuilder().WithScheme(haproxyScheme()).
+		WithObjects(class, policy, haproxyControllerPod("hap-1"), haproxyIngress("web", "haproxy")).Build()
+	h := &HAProxy{Client: c, APIReader: c, Pods: integrationsSelector()}
+	web := Target{Kind: ingressKind, Key: types.NamespacedName{Namespace: "shop", Name: "web"}}
+	note := func() string {
+		res, err := h.Wire(ctx, map[Target]bool{web: true}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Targets[web].Note
+	}
+	if n := note(); !strings.Contains(n, "Ingress web: HAProxy writes its own denials") || !strings.Contains(n, "spec.denyResponse") {
+		t.Errorf("note %q", n)
+	}
+	policy.Spec.DenyResponse = nil
+	if err := c.Update(ctx, policy); err != nil {
+		t.Fatal(err)
+	}
+	if n := note(); strings.Contains(n, "denyResponse") {
+		t.Errorf("without a denyResponse: %q", n)
+	}
+}
+
 // A policy that inspects responses, with responses.maxBytes over what
 // HAProxy's buffer lets the engine see of a response, gets a note naming
 // both, as for request bodies; once the buffer is raised, none.
