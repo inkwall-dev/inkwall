@@ -663,7 +663,11 @@ type Policy struct {
 	// The client addresses the policy denies or lets through uninspected,
 	// resolved from its IP lists. Unset: none. Engines before 0.5.0 ignore
 	// it: the operator doesn't count them as enforcing a policy that sets it.
-	IpLists       *IPLists `protobuf:"bytes,14,opt,name=ip_lists,json=ipLists,proto3" json:"ip_lists,omitempty"`
+	IpLists *IPLists `protobuf:"bytes,14,opt,name=ip_lists,json=ipLists,proto3" json:"ip_lists,omitempty"`
+	// Rate limits, checked after the IP lists and the skipped paths, before
+	// the rules. Engines before 0.7.0 ignore them: the operator doesn't count
+	// them as enforcing a policy that sets them.
+	RateLimits    []*RateLimit `protobuf:"bytes,15,rep,name=rate_limits,json=rateLimits,proto3" json:"rate_limits,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -796,6 +800,299 @@ func (x *Policy) GetIpLists() *IPLists {
 	return nil
 }
 
+func (x *Policy) GetRateLimits() []*RateLimit {
+	if x != nil {
+		return x.RateLimits
+	}
+	return nil
+}
+
+// RateLimit is a token bucket per key: it holds at most burst requests and
+// gains requests per period, evenly. Each engine counts on its own.
+type RateLimit struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Unique in the policy. With the policy and the key, it names the
+	// limit's buckets across bundles: a new name starts them full, a new
+	// rate or burst keeps them.
+	Name     string               `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Requests uint32               `protobuf:"varint,2,opt,name=requests,proto3" json:"requests,omitempty"`
+	Period   *durationpb.Duration `protobuf:"bytes,3,opt,name=period,proto3" json:"period,omitempty"`
+	// 0: requests.
+	Burst uint32        `protobuf:"varint,4,opt,name=burst,proto3" json:"burst,omitempty"`
+	Key   *RateLimitKey `protobuf:"bytes,5,opt,name=key,proto3" json:"key,omitempty"`
+	// Paths counted, in the engine router's syntax, compared in ASCII lower
+	// case with one trailing slash ignored. Empty: every path.
+	Paths []string `protobuf:"bytes,6,rep,name=paths,proto3" json:"paths,omitempty"`
+	// Methods counted, upper case. Empty: every method.
+	Methods []string `protobuf:"bytes,7,rep,name=methods,proto3" json:"methods,omitempty"`
+	// Log the requests over the limit instead of denying them.
+	Detect        bool `protobuf:"varint,8,opt,name=detect,proto3" json:"detect,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RateLimit) Reset() {
+	*x = RateLimit{}
+	mi := &file_bundle_v1_bundle_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RateLimit) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RateLimit) ProtoMessage() {}
+
+func (x *RateLimit) ProtoReflect() protoreflect.Message {
+	mi := &file_bundle_v1_bundle_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RateLimit.ProtoReflect.Descriptor instead.
+func (*RateLimit) Descriptor() ([]byte, []int) {
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *RateLimit) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *RateLimit) GetRequests() uint32 {
+	if x != nil {
+		return x.Requests
+	}
+	return 0
+}
+
+func (x *RateLimit) GetPeriod() *durationpb.Duration {
+	if x != nil {
+		return x.Period
+	}
+	return nil
+}
+
+func (x *RateLimit) GetBurst() uint32 {
+	if x != nil {
+		return x.Burst
+	}
+	return 0
+}
+
+func (x *RateLimit) GetKey() *RateLimitKey {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+func (x *RateLimit) GetPaths() []string {
+	if x != nil {
+		return x.Paths
+	}
+	return nil
+}
+
+func (x *RateLimit) GetMethods() []string {
+	if x != nil {
+		return x.Methods
+	}
+	return nil
+}
+
+func (x *RateLimit) GetDetect() bool {
+	if x != nil {
+		return x.Detect
+	}
+	return false
+}
+
+// RateLimitKey is what a limit counts by. Unset: the client IP, IPv6 by
+// its /56.
+type RateLimitKey struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Key:
+	//
+	//	*RateLimitKey_ClientIp
+	//	*RateLimitKey_Header
+	Key           isRateLimitKey_Key `protobuf_oneof:"key"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RateLimitKey) Reset() {
+	*x = RateLimitKey{}
+	mi := &file_bundle_v1_bundle_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RateLimitKey) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RateLimitKey) ProtoMessage() {}
+
+func (x *RateLimitKey) ProtoReflect() protoreflect.Message {
+	mi := &file_bundle_v1_bundle_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RateLimitKey.ProtoReflect.Descriptor instead.
+func (*RateLimitKey) Descriptor() ([]byte, []int) {
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *RateLimitKey) GetKey() isRateLimitKey_Key {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+func (x *RateLimitKey) GetClientIp() *ClientIPKey {
+	if x != nil {
+		if x, ok := x.Key.(*RateLimitKey_ClientIp); ok {
+			return x.ClientIp
+		}
+	}
+	return nil
+}
+
+func (x *RateLimitKey) GetHeader() *HeaderKey {
+	if x != nil {
+		if x, ok := x.Key.(*RateLimitKey_Header); ok {
+			return x.Header
+		}
+	}
+	return nil
+}
+
+type isRateLimitKey_Key interface {
+	isRateLimitKey_Key()
+}
+
+type RateLimitKey_ClientIp struct {
+	ClientIp *ClientIPKey `protobuf:"bytes,1,opt,name=client_ip,json=clientIp,proto3,oneof"`
+}
+
+type RateLimitKey_Header struct {
+	Header *HeaderKey `protobuf:"bytes,2,opt,name=header,proto3,oneof"`
+}
+
+func (*RateLimitKey_ClientIp) isRateLimitKey_Key() {}
+
+func (*RateLimitKey_Header) isRateLimitKey_Key() {}
+
+type ClientIPKey struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// 0: 56.
+	Ipv6PrefixLength uint32 `protobuf:"varint,1,opt,name=ipv6_prefix_length,json=ipv6PrefixLength,proto3" json:"ipv6_prefix_length,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *ClientIPKey) Reset() {
+	*x = ClientIPKey{}
+	mi := &file_bundle_v1_bundle_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ClientIPKey) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ClientIPKey) ProtoMessage() {}
+
+func (x *ClientIPKey) ProtoReflect() protoreflect.Message {
+	mi := &file_bundle_v1_bundle_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ClientIPKey.ProtoReflect.Descriptor instead.
+func (*ClientIPKey) Descriptor() ([]byte, []int) {
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ClientIPKey) GetIpv6PrefixLength() uint32 {
+	if x != nil {
+		return x.Ipv6PrefixLength
+	}
+	return 0
+}
+
+// HeaderKey counts by a header's first value, hashed; a request without it
+// counts by its client IP.
+type HeaderKey struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Lower case.
+	Name          string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HeaderKey) Reset() {
+	*x = HeaderKey{}
+	mi := &file_bundle_v1_bundle_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HeaderKey) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HeaderKey) ProtoMessage() {}
+
+func (x *HeaderKey) ProtoReflect() protoreflect.Message {
+	mi := &file_bundle_v1_bundle_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HeaderKey.ProtoReflect.Descriptor instead.
+func (*HeaderKey) Descriptor() ([]byte, []int) {
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *HeaderKey) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
 // IPLists are a policy's IP lists, as CIDR prefixes (10.0.0.0/8,
 // 2001:db8::/32) or addresses. A client in deny is denied; one in allow
 // and not in deny is not inspected.
@@ -809,7 +1106,7 @@ type IPLists struct {
 
 func (x *IPLists) Reset() {
 	*x = IPLists{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[4]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -821,7 +1118,7 @@ func (x *IPLists) String() string {
 func (*IPLists) ProtoMessage() {}
 
 func (x *IPLists) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[4]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -834,7 +1131,7 @@ func (x *IPLists) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IPLists.ProtoReflect.Descriptor instead.
 func (*IPLists) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{4}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *IPLists) GetAllow() []string {
@@ -871,7 +1168,7 @@ type RouteMatch struct {
 
 func (x *RouteMatch) Reset() {
 	*x = RouteMatch{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[5]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -883,7 +1180,7 @@ func (x *RouteMatch) String() string {
 func (*RouteMatch) ProtoMessage() {}
 
 func (x *RouteMatch) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[5]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -896,7 +1193,7 @@ func (x *RouteMatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RouteMatch.ProtoReflect.Descriptor instead.
 func (*RouteMatch) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{5}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *RouteMatch) GetHost() string {
@@ -939,7 +1236,7 @@ type PathMatch struct {
 
 func (x *PathMatch) Reset() {
 	*x = PathMatch{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[6]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -951,7 +1248,7 @@ func (x *PathMatch) String() string {
 func (*PathMatch) ProtoMessage() {}
 
 func (x *PathMatch) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[6]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -964,7 +1261,7 @@ func (x *PathMatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PathMatch.ProtoReflect.Descriptor instead.
 func (*PathMatch) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{6}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *PathMatch) GetType() PathMatchType {
@@ -1004,7 +1301,7 @@ type RuleSetBinding struct {
 
 func (x *RuleSetBinding) Reset() {
 	*x = RuleSetBinding{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[7]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1016,7 +1313,7 @@ func (x *RuleSetBinding) String() string {
 func (*RuleSetBinding) ProtoMessage() {}
 
 func (x *RuleSetBinding) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[7]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1029,7 +1326,7 @@ func (x *RuleSetBinding) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RuleSetBinding.ProtoReflect.Descriptor instead.
 func (*RuleSetBinding) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{7}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *RuleSetBinding) GetRuleSetId() string {
@@ -1089,7 +1386,7 @@ type CRSSettings struct {
 
 func (x *CRSSettings) Reset() {
 	*x = CRSSettings{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[8]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1101,7 +1398,7 @@ func (x *CRSSettings) String() string {
 func (*CRSSettings) ProtoMessage() {}
 
 func (x *CRSSettings) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[8]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1114,7 +1411,7 @@ func (x *CRSSettings) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CRSSettings.ProtoReflect.Descriptor instead.
 func (*CRSSettings) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{8}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *CRSSettings) GetAllowedMethods() []string {
@@ -1161,7 +1458,7 @@ type RuleSet struct {
 
 func (x *RuleSet) Reset() {
 	*x = RuleSet{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[9]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1173,7 +1470,7 @@ func (x *RuleSet) String() string {
 func (*RuleSet) ProtoMessage() {}
 
 func (x *RuleSet) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[9]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1186,7 +1483,7 @@ func (x *RuleSet) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RuleSet.ProtoReflect.Descriptor instead.
 func (*RuleSet) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{9}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *RuleSet) GetId() string {
@@ -1266,7 +1563,7 @@ type Exclusion struct {
 
 func (x *Exclusion) Reset() {
 	*x = Exclusion{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[10]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1278,7 +1575,7 @@ func (x *Exclusion) String() string {
 func (*Exclusion) ProtoMessage() {}
 
 func (x *Exclusion) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[10]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1291,7 +1588,7 @@ func (x *Exclusion) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Exclusion.ProtoReflect.Descriptor instead.
 func (*Exclusion) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{10}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Exclusion) GetRuleIds() []uint32 {
@@ -1362,7 +1659,7 @@ type BodyConfig struct {
 
 func (x *BodyConfig) Reset() {
 	*x = BodyConfig{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[11]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1374,7 +1671,7 @@ func (x *BodyConfig) String() string {
 func (*BodyConfig) ProtoMessage() {}
 
 func (x *BodyConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[11]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1387,7 +1684,7 @@ func (x *BodyConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BodyConfig.ProtoReflect.Descriptor instead.
 func (*BodyConfig) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{11}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *BodyConfig) GetInspect() bool {
@@ -1452,7 +1749,7 @@ type WebSocketConfig struct {
 
 func (x *WebSocketConfig) Reset() {
 	*x = WebSocketConfig{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[12]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1464,7 +1761,7 @@ func (x *WebSocketConfig) String() string {
 func (*WebSocketConfig) ProtoMessage() {}
 
 func (x *WebSocketConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[12]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1477,7 +1774,7 @@ func (x *WebSocketConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WebSocketConfig.ProtoReflect.Descriptor instead.
 func (*WebSocketConfig) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{12}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *WebSocketConfig) GetAllowedOrigins() []string {
@@ -1526,7 +1823,7 @@ type ResponseConfig struct {
 
 func (x *ResponseConfig) Reset() {
 	*x = ResponseConfig{}
-	mi := &file_bundle_v1_bundle_proto_msgTypes[13]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1538,7 +1835,7 @@ func (x *ResponseConfig) String() string {
 func (*ResponseConfig) ProtoMessage() {}
 
 func (x *ResponseConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_bundle_v1_bundle_proto_msgTypes[13]
+	mi := &file_bundle_v1_bundle_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1551,7 +1848,7 @@ func (x *ResponseConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResponseConfig.ProtoReflect.Descriptor instead.
 func (*ResponseConfig) Descriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{13}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ResponseConfig) GetInspect() bool {
@@ -1609,7 +1906,7 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\x0eredact_headers\x18\x01 \x03(\tR\rredactHeaders\x12)\n" +
 	"\x10redact_arguments\x18\x02 \x03(\tR\x0fredactArguments\x12\x1f\n" +
 	"\vno_snippets\x18\x03 \x01(\bR\n" +
-	"noSnippets\"\xf1\x05\n" +
+	"noSnippets\"\xb0\x06\n" +
 	"\x06Policy\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x125\n" +
 	"\x06routes\x18\x02 \x03(\v2\x1d.inkwall.bundle.v1.RouteMatchR\x06routes\x12+\n" +
@@ -1628,7 +1925,26 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\twebsocket\x18\v \x01(\v2\".inkwall.bundle.v1.WebSocketConfigR\twebsocket\x12?\n" +
 	"\tresponses\x18\f \x01(\v2!.inkwall.bundle.v1.ResponseConfigR\tresponses\x12I\n" +
 	"\x11target_exclusions\x18\r \x03(\v2\x1c.inkwall.bundle.v1.ExclusionR\x10targetExclusions\x125\n" +
-	"\bip_lists\x18\x0e \x01(\v2\x1a.inkwall.bundle.v1.IPListsR\aipLists\"3\n" +
+	"\bip_lists\x18\x0e \x01(\v2\x1a.inkwall.bundle.v1.IPListsR\aipLists\x12=\n" +
+	"\vrate_limits\x18\x0f \x03(\v2\x1c.inkwall.bundle.v1.RateLimitR\n" +
+	"rateLimits\"\xff\x01\n" +
+	"\tRateLimit\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
+	"\brequests\x18\x02 \x01(\rR\brequests\x121\n" +
+	"\x06period\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\x06period\x12\x14\n" +
+	"\x05burst\x18\x04 \x01(\rR\x05burst\x121\n" +
+	"\x03key\x18\x05 \x01(\v2\x1f.inkwall.bundle.v1.RateLimitKeyR\x03key\x12\x14\n" +
+	"\x05paths\x18\x06 \x03(\tR\x05paths\x12\x18\n" +
+	"\amethods\x18\a \x03(\tR\amethods\x12\x16\n" +
+	"\x06detect\x18\b \x01(\bR\x06detect\"\x8c\x01\n" +
+	"\fRateLimitKey\x12=\n" +
+	"\tclient_ip\x18\x01 \x01(\v2\x1e.inkwall.bundle.v1.ClientIPKeyH\x00R\bclientIp\x126\n" +
+	"\x06header\x18\x02 \x01(\v2\x1c.inkwall.bundle.v1.HeaderKeyH\x00R\x06headerB\x05\n" +
+	"\x03key\";\n" +
+	"\vClientIPKey\x12,\n" +
+	"\x12ipv6_prefix_length\x18\x01 \x01(\rR\x10ipv6PrefixLength\"\x1f\n" +
+	"\tHeaderKey\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\"3\n" +
 	"\aIPLists\x12\x14\n" +
 	"\x05allow\x18\x01 \x03(\tR\x05allow\x12\x12\n" +
 	"\x04deny\x18\x02 \x03(\tR\x04deny\"\x9a\x01\n" +
@@ -1721,7 +2037,7 @@ func file_bundle_v1_bundle_proto_rawDescGZIP() []byte {
 }
 
 var file_bundle_v1_bundle_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_bundle_v1_bundle_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_bundle_v1_bundle_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_bundle_v1_bundle_proto_goTypes = []any{
 	(PathMatchType)(0),            // 0: inkwall.bundle.v1.PathMatchType
 	(Mode)(0),                     // 1: inkwall.bundle.v1.Mode
@@ -1733,47 +2049,56 @@ var file_bundle_v1_bundle_proto_goTypes = []any{
 	(*Bundle)(nil),                // 7: inkwall.bundle.v1.Bundle
 	(*EventsConfig)(nil),          // 8: inkwall.bundle.v1.EventsConfig
 	(*Policy)(nil),                // 9: inkwall.bundle.v1.Policy
-	(*IPLists)(nil),               // 10: inkwall.bundle.v1.IPLists
-	(*RouteMatch)(nil),            // 11: inkwall.bundle.v1.RouteMatch
-	(*PathMatch)(nil),             // 12: inkwall.bundle.v1.PathMatch
-	(*RuleSetBinding)(nil),        // 13: inkwall.bundle.v1.RuleSetBinding
-	(*CRSSettings)(nil),           // 14: inkwall.bundle.v1.CRSSettings
-	(*RuleSet)(nil),               // 15: inkwall.bundle.v1.RuleSet
-	(*Exclusion)(nil),             // 16: inkwall.bundle.v1.Exclusion
-	(*BodyConfig)(nil),            // 17: inkwall.bundle.v1.BodyConfig
-	(*WebSocketConfig)(nil),       // 18: inkwall.bundle.v1.WebSocketConfig
-	(*ResponseConfig)(nil),        // 19: inkwall.bundle.v1.ResponseConfig
-	(*timestamppb.Timestamp)(nil), // 20: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),   // 21: google.protobuf.Duration
+	(*RateLimit)(nil),             // 10: inkwall.bundle.v1.RateLimit
+	(*RateLimitKey)(nil),          // 11: inkwall.bundle.v1.RateLimitKey
+	(*ClientIPKey)(nil),           // 12: inkwall.bundle.v1.ClientIPKey
+	(*HeaderKey)(nil),             // 13: inkwall.bundle.v1.HeaderKey
+	(*IPLists)(nil),               // 14: inkwall.bundle.v1.IPLists
+	(*RouteMatch)(nil),            // 15: inkwall.bundle.v1.RouteMatch
+	(*PathMatch)(nil),             // 16: inkwall.bundle.v1.PathMatch
+	(*RuleSetBinding)(nil),        // 17: inkwall.bundle.v1.RuleSetBinding
+	(*CRSSettings)(nil),           // 18: inkwall.bundle.v1.CRSSettings
+	(*RuleSet)(nil),               // 19: inkwall.bundle.v1.RuleSet
+	(*Exclusion)(nil),             // 20: inkwall.bundle.v1.Exclusion
+	(*BodyConfig)(nil),            // 21: inkwall.bundle.v1.BodyConfig
+	(*WebSocketConfig)(nil),       // 22: inkwall.bundle.v1.WebSocketConfig
+	(*ResponseConfig)(nil),        // 23: inkwall.bundle.v1.ResponseConfig
+	(*timestamppb.Timestamp)(nil), // 24: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),   // 25: google.protobuf.Duration
 }
 var file_bundle_v1_bundle_proto_depIdxs = []int32{
-	20, // 0: inkwall.bundle.v1.Bundle.created_at:type_name -> google.protobuf.Timestamp
+	24, // 0: inkwall.bundle.v1.Bundle.created_at:type_name -> google.protobuf.Timestamp
 	9,  // 1: inkwall.bundle.v1.Bundle.policies:type_name -> inkwall.bundle.v1.Policy
-	15, // 2: inkwall.bundle.v1.Bundle.rule_sets:type_name -> inkwall.bundle.v1.RuleSet
+	19, // 2: inkwall.bundle.v1.Bundle.rule_sets:type_name -> inkwall.bundle.v1.RuleSet
 	8,  // 3: inkwall.bundle.v1.Bundle.events:type_name -> inkwall.bundle.v1.EventsConfig
-	11, // 4: inkwall.bundle.v1.Policy.routes:type_name -> inkwall.bundle.v1.RouteMatch
+	15, // 4: inkwall.bundle.v1.Policy.routes:type_name -> inkwall.bundle.v1.RouteMatch
 	1,  // 5: inkwall.bundle.v1.Policy.mode:type_name -> inkwall.bundle.v1.Mode
 	2,  // 6: inkwall.bundle.v1.Policy.failure_mode:type_name -> inkwall.bundle.v1.FailureMode
-	21, // 7: inkwall.bundle.v1.Policy.timeout:type_name -> google.protobuf.Duration
-	13, // 8: inkwall.bundle.v1.Policy.rule_sets:type_name -> inkwall.bundle.v1.RuleSetBinding
-	16, // 9: inkwall.bundle.v1.Policy.exclusions:type_name -> inkwall.bundle.v1.Exclusion
-	17, // 10: inkwall.bundle.v1.Policy.body:type_name -> inkwall.bundle.v1.BodyConfig
-	18, // 11: inkwall.bundle.v1.Policy.websocket:type_name -> inkwall.bundle.v1.WebSocketConfig
-	19, // 12: inkwall.bundle.v1.Policy.responses:type_name -> inkwall.bundle.v1.ResponseConfig
-	16, // 13: inkwall.bundle.v1.Policy.target_exclusions:type_name -> inkwall.bundle.v1.Exclusion
-	10, // 14: inkwall.bundle.v1.Policy.ip_lists:type_name -> inkwall.bundle.v1.IPLists
-	12, // 15: inkwall.bundle.v1.RouteMatch.path:type_name -> inkwall.bundle.v1.PathMatch
-	0,  // 16: inkwall.bundle.v1.PathMatch.type:type_name -> inkwall.bundle.v1.PathMatchType
-	14, // 17: inkwall.bundle.v1.RuleSetBinding.crs:type_name -> inkwall.bundle.v1.CRSSettings
-	3,  // 18: inkwall.bundle.v1.RuleSetBinding.placement:type_name -> inkwall.bundle.v1.RuleSetPlacement
-	4,  // 19: inkwall.bundle.v1.RuleSet.builtin:type_name -> inkwall.bundle.v1.BuiltinRuleSet
-	5,  // 20: inkwall.bundle.v1.BodyConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
-	5,  // 21: inkwall.bundle.v1.ResponseConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
-	22, // [22:22] is the sub-list for method output_type
-	22, // [22:22] is the sub-list for method input_type
-	22, // [22:22] is the sub-list for extension type_name
-	22, // [22:22] is the sub-list for extension extendee
-	0,  // [0:22] is the sub-list for field type_name
+	25, // 7: inkwall.bundle.v1.Policy.timeout:type_name -> google.protobuf.Duration
+	17, // 8: inkwall.bundle.v1.Policy.rule_sets:type_name -> inkwall.bundle.v1.RuleSetBinding
+	20, // 9: inkwall.bundle.v1.Policy.exclusions:type_name -> inkwall.bundle.v1.Exclusion
+	21, // 10: inkwall.bundle.v1.Policy.body:type_name -> inkwall.bundle.v1.BodyConfig
+	22, // 11: inkwall.bundle.v1.Policy.websocket:type_name -> inkwall.bundle.v1.WebSocketConfig
+	23, // 12: inkwall.bundle.v1.Policy.responses:type_name -> inkwall.bundle.v1.ResponseConfig
+	20, // 13: inkwall.bundle.v1.Policy.target_exclusions:type_name -> inkwall.bundle.v1.Exclusion
+	14, // 14: inkwall.bundle.v1.Policy.ip_lists:type_name -> inkwall.bundle.v1.IPLists
+	10, // 15: inkwall.bundle.v1.Policy.rate_limits:type_name -> inkwall.bundle.v1.RateLimit
+	25, // 16: inkwall.bundle.v1.RateLimit.period:type_name -> google.protobuf.Duration
+	11, // 17: inkwall.bundle.v1.RateLimit.key:type_name -> inkwall.bundle.v1.RateLimitKey
+	12, // 18: inkwall.bundle.v1.RateLimitKey.client_ip:type_name -> inkwall.bundle.v1.ClientIPKey
+	13, // 19: inkwall.bundle.v1.RateLimitKey.header:type_name -> inkwall.bundle.v1.HeaderKey
+	16, // 20: inkwall.bundle.v1.RouteMatch.path:type_name -> inkwall.bundle.v1.PathMatch
+	0,  // 21: inkwall.bundle.v1.PathMatch.type:type_name -> inkwall.bundle.v1.PathMatchType
+	18, // 22: inkwall.bundle.v1.RuleSetBinding.crs:type_name -> inkwall.bundle.v1.CRSSettings
+	3,  // 23: inkwall.bundle.v1.RuleSetBinding.placement:type_name -> inkwall.bundle.v1.RuleSetPlacement
+	4,  // 24: inkwall.bundle.v1.RuleSet.builtin:type_name -> inkwall.bundle.v1.BuiltinRuleSet
+	5,  // 25: inkwall.bundle.v1.BodyConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
+	5,  // 26: inkwall.bundle.v1.ResponseConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
+	27, // [27:27] is the sub-list for method output_type
+	27, // [27:27] is the sub-list for method input_type
+	27, // [27:27] is the sub-list for extension type_name
+	27, // [27:27] is the sub-list for extension extendee
+	0,  // [0:27] is the sub-list for field type_name
 }
 
 func init() { file_bundle_v1_bundle_proto_init() }
@@ -1781,7 +2106,11 @@ func file_bundle_v1_bundle_proto_init() {
 	if File_bundle_v1_bundle_proto != nil {
 		return
 	}
-	file_bundle_v1_bundle_proto_msgTypes[9].OneofWrappers = []any{
+	file_bundle_v1_bundle_proto_msgTypes[5].OneofWrappers = []any{
+		(*RateLimitKey_ClientIp)(nil),
+		(*RateLimitKey_Header)(nil),
+	}
+	file_bundle_v1_bundle_proto_msgTypes[13].OneofWrappers = []any{
 		(*RuleSet_Builtin)(nil),
 		(*RuleSet_Seclang)(nil),
 	}
@@ -1791,7 +2120,7 @@ func file_bundle_v1_bundle_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bundle_v1_bundle_proto_rawDesc), len(file_bundle_v1_bundle_proto_rawDesc)),
 			NumEnums:      6,
-			NumMessages:   14,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

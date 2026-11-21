@@ -258,7 +258,7 @@ func TestSnapshotAllOrNothing(t *testing.T) {
 		bad  *controlplanev1.Object
 		want string
 	}{
-		{"an unknown field", obj("WAFPolicy", app, "bad", `{"targetRefs":[{"kind":"Ingress","name":"x"}],"rateLimits":[{}]}`, nil), `unknown field "spec.rateLimits"`},
+		{"an unknown field", obj("WAFPolicy", app, "bad", `{"targetRefs":[{"kind":"Ingress","name":"x"}],"notAField":[{}]}`, nil), `unknown field "spec.notAField"`},
 		{"refused by the schema", obj("WAFPolicy", app, "bad", `{"mode":"Block"}`, nil), "targetRefs"},
 		{"another kind", obj("InkwallConfig", "", "default", `{"mode":"Standalone"}`, nil), `kind "InkwallConfig"`},
 		{"another API version", &controlplanev1.Object{ApiVersion: "waf.inkwall.dev/v2", Kind: "WAFPolicy", Namespace: app, Name: "bad", Spec: []byte(`{}`)}, "apiVersion"},

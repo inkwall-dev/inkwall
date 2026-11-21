@@ -117,6 +117,52 @@ message Policy {
   // resolved from its IP lists. Unset: none. Engines before 0.5.0 ignore
   // it: the operator doesn't count them as enforcing a policy that sets it.
   IPLists ip_lists = 14;
+  // Rate limits, checked after the IP lists and the skipped paths, before
+  // the rules. Engines before 0.7.0 ignore them: the operator doesn't count
+  // them as enforcing a policy that sets them.
+  repeated RateLimit rate_limits = 15;
+}
+
+// RateLimit is a token bucket per key: it holds at most burst requests and
+// gains requests per period, evenly. Each engine counts on its own.
+message RateLimit {
+  // Unique in the policy. With the policy and the key, it names the
+  // limit's buckets across bundles: a new name starts them full, a new
+  // rate or burst keeps them.
+  string name = 1;
+  uint32 requests = 2;
+  google.protobuf.Duration period = 3;
+  // 0: requests.
+  uint32 burst = 4;
+  RateLimitKey key = 5;
+  // Paths counted, in the engine router's syntax, compared in ASCII lower
+  // case with one trailing slash ignored. Empty: every path.
+  repeated string paths = 6;
+  // Methods counted, upper case. Empty: every method.
+  repeated string methods = 7;
+  // Log the requests over the limit instead of denying them.
+  bool detect = 8;
+}
+
+// RateLimitKey is what a limit counts by. Unset: the client IP, IPv6 by
+// its /56.
+message RateLimitKey {
+  oneof key {
+    ClientIPKey client_ip = 1;
+    HeaderKey header = 2;
+  }
+}
+
+message ClientIPKey {
+  // 0: 56.
+  uint32 ipv6_prefix_length = 1;
+}
+
+// HeaderKey counts by a header's first value, hashed; a request without it
+// counts by its client IP.
+message HeaderKey {
+  // Lower case.
+  string name = 1;
 }
 
 // IPLists are a policy's IP lists, as CIDR prefixes (10.0.0.0/8,

@@ -139,6 +139,15 @@ func TestResolvePolicy(t *testing.T) {
 		AllowMissingOrigin: true,
 		RequiredHeaders:    []wafv1alpha1.HeaderName{"Authorization"},
 	}
+	p.Spec.RateLimits = []wafv1alpha1.RateLimit{
+		{Name: "login", Requests: 10, Period: metav1.Duration{Duration: time.Minute}, Burst: ptr(int64(20)),
+			Key:   &wafv1alpha1.RateLimitKey{ClientIP: &wafv1alpha1.ClientIPKey{IPv6PrefixLength: ptr(int32(64))}},
+			Match: &wafv1alpha1.RateLimitMatch{Paths: []wafv1alpha1.PathPattern{"/login", "/api/session/*"}, Methods: []wafv1alpha1.RateLimitMethod{"POST"}}},
+		{Name: "api", Requests: 600, Period: metav1.Duration{Duration: time.Minute}, Mode: wafv1alpha1.PolicyDetect,
+			Key: &wafv1alpha1.RateLimitKey{Header: &wafv1alpha1.HeaderKey{Name: "X-Api-Key"}}},
+		// No key: the client IP, by the engine's default prefix.
+		{Name: "all", Requests: 1, Period: metav1.Duration{Duration: time.Second}, Key: &wafv1alpha1.RateLimitKey{ClientIP: &wafv1alpha1.ClientIPKey{}}},
+	}
 
 	res := Resolve(Input{
 		Policies: []wafv1alpha1.WAFPolicy{p},
@@ -203,6 +212,15 @@ func TestResolvePolicy(t *testing.T) {
 			AllowedOrigins:     []string{"https://shop.example.com", "https://*.shop.example.com"},
 			AllowMissingOrigin: true,
 			RequiredHeaders:    []string{"Authorization"},
+		},
+		RateLimits: []*bundlev1.RateLimit{
+			{Name: "login", Requests: 10, Period: durationpb.New(time.Minute), Burst: 20,
+				Key:   &bundlev1.RateLimitKey{Key: &bundlev1.RateLimitKey_ClientIp{ClientIp: &bundlev1.ClientIPKey{Ipv6PrefixLength: 64}}},
+				Paths: []string{"/login", "/api/session/*"}, Methods: []string{"POST"}},
+			// The header lower case, for the engine's lookup.
+			{Name: "api", Requests: 600, Period: durationpb.New(time.Minute), Detect: true,
+				Key: &bundlev1.RateLimitKey{Key: &bundlev1.RateLimitKey_Header{Header: &bundlev1.HeaderKey{Name: "x-api-key"}}}},
+			{Name: "all", Requests: 1, Period: durationpb.New(time.Second)},
 		},
 	})
 	// Only the rule sets in use are in the bundle; all of them get a status.

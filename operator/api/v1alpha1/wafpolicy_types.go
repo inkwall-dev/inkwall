@@ -162,7 +162,118 @@ type WAFPolicySpec struct {
 	// later.
 	// +optional
 	IPLists *IPListsSpec `json:"ipLists,omitempty"`
+
+	// RateLimits limit how many requests a client may send, per engine:
+	// over a limit, a request is denied with 429 and Retry-After before the
+	// rules (logged in Detect mode). Each engine counts on its own, so a
+	// client spread over N engines gets up to N times the limit
+	// (docs/rate-limits.md). Clients in an IP allow list, and skipped
+	// paths, are never counted. Requires engines 0.7.0 or later.
+	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:XValidation:rule="self.all(a, self.exists_one(b, b.name == a.name))",message="rateLimits must not repeat a name"
+	// +optional
+	RateLimits []RateLimit `json:"rateLimits,omitempty"`
 }
+
+// RateLimit is a token bucket per key: it holds at most burst requests and
+// gains requests per period, evenly.
+type RateLimit struct {
+	// Name names the limit in events and logs; unique in the policy.
+	// Renaming a limit starts its buckets again full.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// Requests are the requests allowed per period, per key, per engine.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1000000
+	Requests int64 `json:"requests"`
+
+	// Period is the period of requests, 1s to 1h.
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('1h')",message="period must be 1s to 1h"
+	Period metav1.Duration `json:"period"`
+
+	// Burst is the requests a key may send at once after being idle.
+	// Unset: requests.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1000000
+	// +optional
+	Burst *int64 `json:"burst,omitempty"`
+
+	// Key is what the limit counts by. Unset: the client IP.
+	// +optional
+	Key *RateLimitKey `json:"key,omitempty"`
+
+	// Match narrows the limit to some of the policy's requests. Unset:
+	// every request of the policy.
+	// +optional
+	Match *RateLimitMatch `json:"match,omitempty"`
+
+	// Mode Detect logs the requests over the limit instead of denying
+	// them, on a Block policy. Unset: the policy's mode. Block isn't
+	// allowed: a limit can't be stricter than its policy.
+	// +kubebuilder:validation:XValidation:rule="self == 'Detect'",message="a rate limit's mode can only be Detect: a limit can't be stricter than its policy"
+	// +optional
+	Mode PolicyMode `json:"mode,omitempty"`
+}
+
+// RateLimitKey is what a limit counts by: exactly one of clientIP and
+// header.
+// +kubebuilder:validation:XValidation:rule="has(self.clientIP) != has(self.header)",message="key needs exactly one of clientIP and header"
+type RateLimitKey struct {
+	// ClientIP counts by the client address the engine resolves
+	// (docs/client-ip.md).
+	// +optional
+	ClientIP *ClientIPKey `json:"clientIP,omitempty"`
+
+	// Header counts by a request header's value, for fairness between
+	// authenticated clients (an API key, a tenant). A client chooses its
+	// header's value, so this doesn't stop an attacker: a request without
+	// the header is counted by its client IP.
+	// +optional
+	Header *HeaderKey `json:"header,omitempty"`
+}
+
+// ClientIPKey counts by the client address.
+type ClientIPKey struct {
+	// IPv6PrefixLength counts IPv6 clients by this prefix, 32 to 128;
+	// IPv4 clients by their address. Unset: 56.
+	// +kubebuilder:validation:Minimum=32
+	// +kubebuilder:validation:Maximum=128
+	// +optional
+	IPv6PrefixLength *int32 `json:"ipv6PrefixLength,omitempty"`
+}
+
+// HeaderKey counts by a request header's value.
+type HeaderKey struct {
+	// Name is the header. Not X-Forwarded-For, Forwarded or Host: count
+	// by the client IP instead.
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:XValidation:rule="!(self.lowerAscii() in ['x-forwarded-for', 'forwarded', 'host'])",message="count by clientIP, not by X-Forwarded-For, Forwarded or Host"
+	Name HeaderName `json:"name"`
+}
+
+// RateLimitMatch narrows a limit to some of the policy's requests.
+type RateLimitMatch struct {
+	// Paths the limit counts: exact paths or prefixes ending in "*",
+	// compared in ASCII lower case with one trailing slash ignored. A path
+	// the engine can't read one way (percent-encoding, ";", "//", dot
+	// segments) counts against every limit with paths.
+	// +kubebuilder:validation:MaxItems=16
+	// +optional
+	Paths []PathPattern `json:"paths,omitempty"`
+
+	// Methods the limit counts.
+	// +kubebuilder:validation:MaxItems=9
+	// +listType=set
+	// +optional
+	Methods []RateLimitMethod `json:"methods,omitempty"`
+}
+
+// RateLimitMethod is a standard HTTP request method.
+// +kubebuilder:validation:Enum=GET;HEAD;POST;PUT;PATCH;DELETE;OPTIONS;CONNECT;TRACE
+type RateLimitMethod string
 
 // IPListsSpec names a policy's IP lists.
 type IPListsSpec struct {
