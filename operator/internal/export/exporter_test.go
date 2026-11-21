@@ -367,7 +367,7 @@ func TestExportHalvesOn413(t *testing.T) {
 	}
 	sk.answer = func(int) int { return http.StatusRequestEntityTooLarge }
 	h.exp.Add(batchOf(2, numbered("f")))
-	h.waitFor("too large dropped", func() bool { return h.rec.get(h.rec.dropped, "a/"+ReasonTooLarge) == 2 })
+	h.waitFor("too large dropped", func() bool { return h.rec.get(h.rec.dropped, "a/"+DropTooLarge) == 2 })
 }
 
 func TestExportRetries(t *testing.T) {
@@ -403,7 +403,7 @@ func TestExportRetries(t *testing.T) {
 	codes = nil
 	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(400) })
 	h.exp.Add(batchOf(2, numbered("f")))
-	h.waitFor("rejected", func() bool { return h.rec.get(h.rec.dropped, "a/"+ReasonRejected) == 2 })
+	h.waitFor("rejected", func() bool { return h.rec.get(h.rec.dropped, "a/"+DropRejected) == 2 })
 }
 
 // A sink that never answers doesn't slow Add: engines' streams never wait
@@ -427,7 +427,7 @@ func TestAddNeverBlocks(t *testing.T) {
 	if _, all := h.exp.buf.Load().bytes(); all > DefaultBufferBytes {
 		t.Errorf("buffer at %d bytes, over its bound", all)
 	}
-	h.waitFor("drops counted", func() bool { return h.rec.get(h.rec.dropped, "a/"+ReasonBufferFull) > 0 })
+	h.waitFor("drops counted", func() bool { return h.rec.get(h.rec.dropped, "a/"+DropBufferFull) > 0 })
 }
 
 // A request retried while the buffer drops its batch is abandoned and
@@ -445,7 +445,7 @@ func TestExportAbandonsDroppedRequests(t *testing.T) {
 	for range 8 {
 		h.exp.Add(batchOf(10, numbered("b")))
 	}
-	h.waitFor("the abandoned request dropped", func() bool { return h.rec.get(h.rec.dropped, "a/"+ReasonBufferFull) >= 10 })
+	h.waitFor("the abandoned request dropped", func() bool { return h.rec.get(h.rec.dropped, "a/"+DropBufferFull) >= 10 })
 	if st := h.status("a"); st.State != StateDropping {
 		t.Errorf("state %s, want Dropping (it hasn't failed for 5 minutes yet)", st.State)
 	}
@@ -696,7 +696,7 @@ func TestExportOTLPgRPC(t *testing.T) {
 	h.exp.Add(&eventsv1.EventBatch{Events: []*eventsv1.SecurityEvent{fullEvent(), oldEvent(), rateLimited()}})
 	h.waitFor("3 records", func() bool { return ls.records() == 3 })
 	h.waitFor("partial success counted", func() bool {
-		return h.rec.get(h.rec.exported, "otel") == 2 && h.rec.get(h.rec.dropped, "otel/"+ReasonRejected) == 1
+		return h.rec.get(h.rec.exported, "otel") == 2 && h.rec.get(h.rec.dropped, "otel/"+DropRejected) == 1
 	})
 }
 

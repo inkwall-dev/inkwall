@@ -22,11 +22,11 @@ const (
 	maxBackoff = time.Minute
 )
 
-// Drop reasons, the reason label of the dropped metric.
+// Why events were never delivered: the reason label of the dropped metric.
 const (
-	ReasonBufferFull = "buffer_full"
-	ReasonRejected   = "rejected"
-	ReasonTooLarge   = "too_large"
+	DropBufferFull = "buffer_full"
+	DropRejected   = "rejected"
+	DropTooLarge   = "too_large"
 )
 
 // Metrics receives what the exporter counts (operator metrics); nil
@@ -168,7 +168,7 @@ func (s *sender) run(ctx context.Context) {
 	inflight := 0
 	for {
 		if n := s.buf.takeDropped(s.name); n > 0 {
-			s.metrics.Dropped(s.name, ReasonBufferFull, asInt(n))
+			s.metrics.Dropped(s.name, DropBufferFull, asInt(n))
 			s.state.droppedFull(s.now())
 		}
 		rt := s.rt.Load()
@@ -289,14 +289,14 @@ func (s *sender) load(t taken) *held {
 		var ok bool
 		if raw, ok = s.buf.readBatch(t.seq); !ok {
 			// Dropped meanwhile, or torn: lost for this sink.
-			s.metrics.Dropped(s.name, ReasonBufferFull, t.events-t.from)
+			s.metrics.Dropped(s.name, DropBufferFull, t.events-t.from)
 			s.state.droppedFull(s.now())
 			return nil
 		}
 	}
 	var batch eventsv1.EventBatch
 	if err := proto.Unmarshal(raw, &batch); err != nil || len(batch.GetEvents()) <= t.from {
-		s.metrics.Dropped(s.name, ReasonBufferFull, t.events-t.from)
+		s.metrics.Dropped(s.name, DropBufferFull, t.events-t.from)
 		s.state.droppedFull(s.now())
 		return nil
 	}
@@ -360,7 +360,7 @@ func (s *sender) deliver(ctx context.Context, f *flight, first payload) {
 			n := len(pt.items) - r.rejected
 			s.metrics.Exported(s.name, max(n, 0))
 			if r.rejected > 0 {
-				s.metrics.Dropped(s.name, ReasonRejected, min(r.rejected, len(pt.items)))
+				s.metrics.Dropped(s.name, DropRejected, min(r.rejected, len(pt.items)))
 			}
 			now := s.now()
 			s.metrics.Succeeded(s.name, now)
@@ -369,13 +369,13 @@ func (s *sender) deliver(ctx context.Context, f *flight, first payload) {
 			continue
 		case drop:
 			s.failed(r)
-			s.metrics.Dropped(s.name, ReasonRejected, len(pt.items))
+			s.metrics.Dropped(s.name, DropRejected, len(pt.items))
 			parts, attempt = parts[1:], 0
 			continue
 		case split:
 			s.failed(r)
 			if len(pt.items) <= 1 {
-				s.metrics.Dropped(s.name, ReasonTooLarge, len(pt.items))
+				s.metrics.Dropped(s.name, DropTooLarge, len(pt.items))
 				parts = parts[1:]
 				continue
 			}
@@ -416,7 +416,7 @@ func (s *sender) abandoned(f *flight, parts []part) bool {
 	for _, p := range parts {
 		n += len(p.items)
 	}
-	s.metrics.Dropped(s.name, ReasonBufferFull, n)
+	s.metrics.Dropped(s.name, DropBufferFull, n)
 	s.state.droppedFull(s.now())
 	return true
 }
