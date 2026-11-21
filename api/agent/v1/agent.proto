@@ -52,6 +52,11 @@ message WatchRequest {
 message WatchResponse {
   oneof msg {
     inkwall.bundle.v1.SignedBundle bundle = 1;
+    // A country table (design 0011 §4.4), sent only to engines that
+    // advertise the geo-table capability, and on a stream never after a
+    // bundle that names it. The engine holds it, unchecked, until a bundle
+    // names its hash.
+    CountryTableMessage geo_table = 3;
   }
   // 2 is reserved for directives to the engine (rotate logs, dump a
   // profile).
@@ -75,6 +80,21 @@ message Hello {
   // key_id), so the operator signs with a new key only once every engine
   // has it. Empty from engines that predate key rotation.
   repeated string trusted_key_ids = 7;
+  // The country table the engine holds (its table hash; empty: none).
+  bytes geo_table_sha256 = 8;
+  // What the engine can take beyond the bundle: geo-table, the country
+  // table messages (0.7.0). The operator sends those only to engines that
+  // say so.
+  repeated string capabilities = 9;
+}
+
+// CountryTableMessage carries a country table.
+message CountryTableMessage {
+  // The table hash: the SHA-256 of table.
+  bytes sha256 = 1;
+  // The gzipped, serialized inkwall.geo.v1.CountryTable, at most 14,400
+  // KiB.
+  bytes table = 2;
 }
 
 // Ack reports a bundle the engine applied.
@@ -105,4 +125,6 @@ message Heartbeat {
   // recent ones, at most 16, none older than a minute, each 32 lowercase
   // hex digits (pkg/haproxyprobe). Empty from older engines.
   repeated string probe_receipts = 5;
+  // The country table the engine holds, as in Hello.
+  bytes geo_table_sha256 = 6;
 }

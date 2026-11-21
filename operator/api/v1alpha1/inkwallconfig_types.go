@@ -158,8 +158,9 @@ type EventSink struct {
 	// +optional
 	JSON *JSONSink `json:"json,omitempty"`
 
-	// Compression of the request body. Unset: Gzip.
-	// +kubebuilder:default=Gzip
+	// Compression of the request body. Unset: Gzip. (No API default: a
+	// default inside a list item makes GitOps diffs show every sink out
+	// of sync.)
 	// +optional
 	Compression ExportCompression `json:"compression,omitempty"`
 
@@ -232,8 +233,8 @@ type JSONSink struct {
 	URLSecretRef *SecretKeyReference `json:"urlSecretRef,omitempty"`
 
 	// Framing is Lines (one event per line, application/x-ndjson) or
-	// Array (one JSON array, application/json). Unset: Lines.
-	// +kubebuilder:default=Lines
+	// Array (one JSON array, application/json). Unset: Lines (no API
+	// default, as for compression).
 	// +optional
 	Framing JSONFraming `json:"framing,omitempty"`
 }

@@ -47,7 +47,7 @@ spec:
   mode: Block
   ruleSets:
     - ref: {kind: ClusterWAFRuleSet, name: owasp-crs-v4}
-      paranoiaLevel: $1
+      crs: {paranoiaLevel: $1}
 YAML
 }
 # POLICY: one run, with that policy as it is.

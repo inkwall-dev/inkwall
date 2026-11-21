@@ -264,7 +264,7 @@ func TestAuditSkips(t *testing.T) {
 		{"source guard", func(a *Auditor) error {
 			// The real validator refuses alice's edit of a control plane
 			// object in Managed mode: nothing is recorded.
-			v := audited[*wafv1alpha1.WAFPolicy]{specValidator[*wafv1alpha1.WAFPolicy]{validateWAFPolicy, managed}, a}
+			v := audited[*wafv1alpha1.WAFPolicy]{specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy, guard: managed}, a}
 			p := policy(wafv1alpha1.PolicyBlock)
 			p.Labels = map[string]string{wafv1alpha1.SourceLabel: wafv1alpha1.SourceSaaS}
 			if _, err := v.ValidateDelete(admissionCtx(admissionv1.Delete, "WAFPolicy", alice, false), p); err == nil {

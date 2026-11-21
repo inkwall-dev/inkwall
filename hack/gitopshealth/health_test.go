@@ -111,7 +111,7 @@ func toLua(L *lua.LState, v any) lua.LValue {
 // Each kind has a check, and each case gets the health it expects.
 func TestArgoCDHealth(t *testing.T) {
 	checks := healthChecks(t)
-	for _, kind := range []string{"WAFPolicy", "WAFRuleSet", "ClusterWAFRuleSet", "InkwallConfig"} {
+	for _, kind := range []string{"WAFPolicy", "WAFRuleSet", "ClusterWAFRuleSet", "WAFIPList", "InkwallConfig"} {
 		script := checks[kind]
 		if script == "" {
 			t.Errorf("no health check for %s", kind)
@@ -189,7 +189,7 @@ func eval(t *testing.T, expr string, obj map[string]any) bool {
 // count a policy without a status yet as current: hence the expressions.
 func TestFluxHealth(t *testing.T) {
 	exprs := fluxExprs(t)
-	for _, kind := range []string{"WAFPolicy", "WAFRuleSet", "ClusterWAFRuleSet"} {
+	for _, kind := range []string{"WAFPolicy", "WAFRuleSet", "ClusterWAFRuleSet", "WAFIPList"} {
 		e := exprs[kind]
 		if e == nil {
 			t.Errorf("no healthCheckExprs for %s", kind)

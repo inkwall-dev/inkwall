@@ -4,11 +4,15 @@
 package distribution
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -33,8 +37,20 @@ const (
 	// for this long; engines send heartbeats every few seconds.
 	DefaultIdleTimeout = 30 * time.Second
 	// DefaultMaxSends bounds concurrent bundle sends, so a new bundle for
-	// hundreds of engines doesn't spike the operator.
+	// hundreds of engines doesn't spike the operator. Country tables share
+	// the slots.
 	DefaultMaxSends = 50
+	// CapabilityGeoTable is what an engine that takes country tables says
+	// in its Hello (design 0011 §4.4): only those are sent one.
+	CapabilityGeoTable = "geo-table"
+)
+
+// DefaultGeoRetry and DefaultGeoRetryMax bound the backoff of sending a
+// country table again to an engine that still reports another one: it
+// refused the table, and keeps the one it had.
+const (
+	DefaultGeoRetry    = 30 * time.Second
+	DefaultGeoRetryMax = 10 * time.Minute
 )
 
 // Limits on what an engine reports, so it can't make the operator store or
@@ -55,6 +71,9 @@ const (
 	// engine keeps (haproxyprobe.MaxReceipts); each is a receipt
 	// (haproxyprobe.ValidReceipt).
 	maxProbeReceipts = haproxyprobe.MaxReceipts
+	// maxCapabilities and maxCapability bound a Hello's capabilities.
+	maxCapabilities = 16
+	maxCapability   = 64
 )
 
 // Server implements BundleService.
@@ -70,6 +89,9 @@ type Server struct {
 
 	HelloTimeout time.Duration
 	IdleTimeout  time.Duration
+	// GeoRetry and GeoRetryMax bound the backoff of a country table's
+	// resends.
+	GeoRetry, GeoRetryMax time.Duration
 
 	// Events receives the engines' security events, stamped with the
 	// stream's engine and pod. Nil: they are counted and discarded.
@@ -80,6 +102,48 @@ type Server struct {
 
 	sends chan struct{}
 	enc   encoder
+	// genc encodes the country tables, apart from the bundles.
+	genc encoder
+}
+
+// streamGeo is what a stream knows of its engine's country table.
+type streamGeo struct {
+	capable bool
+	// held is the table hash the engine last reported, as a string, or
+	// what the operator knows it holds since: none, after a bundle without
+	// geo.
+	held atomic.Value
+	// changed wakes the send loop when the engine reports another table.
+	changed chan struct{}
+	// since is the bundle version a report must be from to count: a
+	// heartbeat from before the engine applied a bundle without geo still
+	// shows the table it dropped.
+	since atomic.Uint64
+}
+
+func newStreamGeo(capable bool, held []byte) *streamGeo {
+	g := &streamGeo{capable: capable, changed: make(chan struct{}, 1)}
+	g.held.Store(string(held))
+	return g
+}
+
+func (g *streamGeo) holds(hash []byte) bool {
+	h, _ := g.held.Load().(string)
+	return h == string(hash)
+}
+
+// report records the table the engine reports with bundle version
+// running, and wakes the send loop if it changed.
+func (g *streamGeo) report(hash []byte, running uint64) {
+	if running < g.since.Load() {
+		return
+	}
+	if old, _ := g.held.Swap(string(hash)).(string); old != string(hash) {
+		select {
+		case g.changed <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // NewServer returns a Server with the defaults.
@@ -92,6 +156,8 @@ func NewServer(bundles *Store, engines *Table, auth Authenticator, replica strin
 		Log:          log,
 		HelloTimeout: DefaultHelloTimeout,
 		IdleTimeout:  DefaultIdleTimeout,
+		GeoRetry:     DefaultGeoRetry,
+		GeoRetryMax:  DefaultGeoRetryMax,
 		sends:        make(chan struct{}, DefaultMaxSends),
 	}
 }
@@ -171,6 +237,7 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 		EngineVersion:  hello.GetEngineVersion(),
 		Applied:        hello.GetBundleVersion(),
 		TrustedKeys:    hello.GetTrustedKeyIds(),
+		GeoTable:       hex.EncodeToString(hello.GetGeoTableSha256()),
 		Replica:        s.Replica,
 		ConnectedAt:    time.Now().UTC(),
 	}
@@ -189,11 +256,12 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 	// Bundles are sent from their own goroutine, so the engine's messages
 	// are still read, and its heartbeats still keep the stream alive, while
 	// a send waits for a slot or for the engine to take the bundle (#148).
+	sg := newStreamGeo(slices.Contains(hello.GetCapabilities(), CapabilityGeoTable), hello.GetGeoTableSha256())
 	sendCtx, stopSending := context.WithCancel(ctx)
 	sendErr, sending := make(chan error, 1), make(chan struct{})
 	go func() {
 		defer close(sending)
-		sendErr <- s.sendBundles(sendCtx, stream, hello.GetBundleVersion())
+		sendErr <- s.sendBundles(sendCtx, stream, hello.GetBundleVersion(), sg)
 	}()
 	// The stream may not be used once Watch returns. A Send stuck on a dead
 	// engine ends when keepalive closes its connection.
@@ -224,7 +292,7 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 				s.stats(counts, st)
 				continue
 			}
-			if err := s.record(key, conn, r.msg, log); err != nil {
+			if err := s.record(key, conn, r.msg, sg, log); err != nil {
 				return status.Error(codes.InvalidArgument, err.Error())
 			}
 		case <-idle.C:
@@ -236,10 +304,43 @@ func (s *Server) Watch(stream agentv1.BundleService_WatchServer) error {
 }
 
 // sendBundles sends the current bundle and every new one, starting from
-// the engine's version sent, until ctx is done or a send fails.
-func (s *Server) sendBundles(ctx context.Context, stream agentv1.BundleService_WatchServer, sent uint64) error {
+// the engine's version sent, until ctx is done or a send fails. To an
+// engine that takes country tables, the table a bundle names goes first,
+// unless the engine holds it: on a stream, never a bundle before its table
+// (design 0011 §4.3). A table the engine doesn't report holding after it
+// is sent is sent again, with backoff.
+func (s *Server) sendBundles(ctx context.Context, stream agentv1.BundleService_WatchServer, sent uint64, sg *streamGeo) error {
+	var tableSent []byte
+	var tableAt time.Time
+	backoff := s.GeoRetry
 	for {
-		signed, version, changed := s.Bundles.Current()
+		signed, version, geo, changed := s.Bundles.current()
+		var retry <-chan time.Time
+		if signed != nil && sg.capable && geo != nil && !sg.holds(geo) {
+			if !bytes.Equal(tableSent, geo) || time.Since(tableAt) >= backoff {
+				msg := s.Bundles.GeoTable(geo)
+				if msg == nil {
+					// Not held yet: the bundle waits for it.
+					select {
+					case <-changed:
+					case <-time.After(time.Second):
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+					continue
+				}
+				if err := s.sendGeo(ctx, stream, msg); err != nil {
+					return err
+				}
+				if bytes.Equal(tableSent, geo) {
+					backoff = min(2*backoff, s.GeoRetryMax)
+				} else {
+					backoff = s.GeoRetry
+				}
+				tableSent, tableAt = geo, time.Now()
+			}
+			retry = time.After(time.Until(tableAt.Add(backoff)))
+		}
 		// Any other version is sent, even an older one: after the operator
 		// lost its bundle Secret, the engine's newer version is not one
 		// this cluster's operator can vouch for.
@@ -248,13 +349,44 @@ func (s *Server) sendBundles(ctx context.Context, stream agentv1.BundleService_W
 				return err
 			}
 			sent = version
+			if sg.capable {
+				// What the engine does with its tables on this bundle: one
+				// without geo drops the table it holds; one that names
+				// another table than the one sent drops that one, pending.
+				// Until its next heartbeat, the operator knows that much.
+				if geo == nil {
+					sg.since.Store(version)
+					sg.held.Store("")
+				}
+				if !bytes.Equal(tableSent, geo) {
+					tableSent = nil
+				}
+			}
 		}
 		select {
 		case <-changed:
+		case <-retry:
+		case <-sg.changed:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
+}
+
+// sendGeo sends a country table's message, sharing the send slots.
+func (s *Server) sendGeo(ctx context.Context, stream agentv1.BundleService_WatchServer, msg *agentv1.WatchResponse) error {
+	select {
+	case s.sends <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-s.sends }()
+	geoTablesSent.Inc()
+	m, err := s.genc.prepared(stream, msg, msg)
+	if err != nil {
+		return err
+	}
+	return stream.SendMsg(m)
 }
 
 func (s *Server) send(ctx context.Context, stream agentv1.BundleService_WatchServer, signed *bundlev1.SignedBundle) error {
@@ -338,7 +470,26 @@ func checkHello(h *agentv1.Hello, podBound bool) error {
 			return errors.New("the pod_name is not a DNS subdomain")
 		}
 	}
+	if err := checkGeoTable(h.GetGeoTableSha256()); err != nil {
+		return err
+	}
+	if len(h.GetCapabilities()) > maxCapabilities {
+		return fmt.Errorf("over %d capabilities", maxCapabilities)
+	}
+	for _, c := range h.GetCapabilities() {
+		if c == "" || len(c) > maxCapability {
+			return fmt.Errorf("a capability is empty or over %d bytes", maxCapability)
+		}
+	}
 	return checkKeyIDs(h.GetTrustedKeyIds())
+}
+
+// checkGeoTable checks a reported table hash: a SHA-256, or empty.
+func checkGeoTable(h []byte) error {
+	if len(h) != 0 && len(h) != sha256.Size {
+		return fmt.Errorf("the geo_table_sha256 has %d bytes, want %d or none", len(h), sha256.Size)
+	}
+	return nil
 }
 
 func checkReceipts(receipts []string) error {
@@ -377,7 +528,7 @@ func truncate(s string, n int) string {
 }
 
 // record takes an engine's Ack, Nack or Heartbeat; an error ends the stream.
-func (s *Server) record(key string, conn uint64, msg *agentv1.WatchRequest, log logr.Logger) error {
+func (s *Server) record(key string, conn uint64, msg *agentv1.WatchRequest, sg *streamGeo, log logr.Logger) error {
 	switch m := msg.GetMsg().(type) {
 	case *agentv1.WatchRequest_Ack:
 		v := m.Ack.GetBundleVersion()
@@ -399,6 +550,11 @@ func (s *Server) record(key string, conn uint64, msg *agentv1.WatchRequest, log 
 		if err := checkReceipts(receipts); err != nil {
 			return err
 		}
+		geo := m.Heartbeat.GetGeoTableSha256()
+		if err := checkGeoTable(geo); err != nil {
+			return err
+		}
+		sg.report(geo, v)
 		s.Engines.Update(key, conn, func(e *Engine) bool {
 			changed := set(&e.Applied, v)
 			if !slices.Equal(e.TrustedKeys, keys) {
@@ -408,6 +564,9 @@ func (s *Server) record(key string, conn uint64, msg *agentv1.WatchRequest, log 
 			// for (#475).
 			if !slices.Equal(e.ProbeReceipts, receipts) {
 				e.ProbeReceipts, changed = receipts, true
+			}
+			if g := hex.EncodeToString(geo); e.GeoTable != g {
+				e.GeoTable, changed = g, true
 			}
 			return changed
 		})

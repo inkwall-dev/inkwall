@@ -964,6 +964,7 @@ func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logge
 		TokenFile:     cfg.operatorToken,
 		PublicKeyFile: cfg.bundleKey,
 		CacheFile:     cfg.bundleCache,
+		GeoCacheFile:  geoCacheFile(cfg.bundleCache),
 		Secret:        secret,
 		// One engine per pod; the operator replaces a restarted engine's
 		// record.
@@ -992,13 +993,38 @@ func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logge
 	return ag, holder, rec, nil
 }
 
+// geoCacheFile is where the country table is cached: beside the bundle's
+// cache, in the same emptyDir (design 0011 §4.4); none without one.
+func geoCacheFile(bundleCache string) string {
+	if bundleCache == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(bundleCache), "geo.table")
+}
+
 // waitForBundle marks the engine ready once the first bundle is applied,
-// or after cfg.bootstrapTimeout without one.
+// with the country table it names (design 0011 §4.5), or after
+// cfg.bootstrapTimeout without them. Only at bootstrap: once ready, the
+// engine never turns unready for a table.
 func waitForBundle(ctx context.Context, ag *agent.Agent, cfg engineConfig, ready *atomic.Bool, logger *slog.Logger) {
+	waitForBootstrap(ctx, ag.Applied(), ag.GeoReady(), cfg, ready, logger)
+}
+
+// waitForBootstrap is waitForBundle on the agent's channels: applied, for
+// the first bundle, and geoReady, for its country table.
+func waitForBootstrap(ctx context.Context, applied, geoReady <-chan struct{}, cfg engineConfig, ready *atomic.Bool, logger *slog.Logger) {
 	timeout := time.NewTimer(cfg.bootstrapTimeout)
 	defer timeout.Stop()
 	select {
-	case <-ag.Applied():
+	case <-applied:
+		select {
+		case <-geoReady:
+		case <-timeout.C:
+			logger.Warn("no country table yet for the bundle's geo policies; ready, geo follows each policy's failureMode until it arrives",
+				slog.Duration("waited", cfg.bootstrapTimeout))
+		case <-ctx.Done():
+			return
+		}
 	case <-timeout.C:
 		action := "allowing requests uninspected"
 		if cfg.bootstrapDeny {

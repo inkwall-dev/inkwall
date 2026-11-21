@@ -266,7 +266,7 @@ func (r *Reconciler) reconcileGrant(ctx context.Context) error {
 		ObjectMeta: metav1.ObjectMeta{Namespace: r.Namespace, Name: GrantName, Labels: managed()},
 		Rules: []rbacv1.PolicyRule{{
 			APIGroups: []string{""}, Resources: []string{"secrets"},
-			ResourceNames: append([]string{bundle.BundleSecret}, bundlesecret.ChunkNames(bundle.BundleSecret)...), Verbs: []string{"get"},
+			ResourceNames: BundleReaderSecrets(), Verbs: []string{"get"},
 		}},
 	}
 	if err := r.apply(ctx, role, func(cur client.Object) bool {
@@ -309,4 +309,13 @@ func (r *Reconciler) apply(ctx context.Context, obj client.Object, update func(c
 		return nil
 	}
 	return r.Client.Update(ctx, cur)
+}
+
+// BundleReaderSecrets are the Secrets engines read at cold start: the
+// bundle Secret and its chunks, and the country table's manifest and
+// chunks (design 0011 §4.4).
+func BundleReaderSecrets() []string {
+	names := append([]string{bundle.BundleSecret}, bundlesecret.ChunkNames(bundle.BundleSecret)...)
+	names = append(names, bundlesecret.Geo.Name)
+	return append(names, bundlesecret.Geo.ChunkNames()...)
 }

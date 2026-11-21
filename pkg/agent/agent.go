@@ -38,6 +38,7 @@ import (
 	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
 	"github.com/inkwall-dev/inkwall/pkg/events"
+	"github.com/inkwall-dev/inkwall/pkg/geo"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
 )
@@ -82,6 +83,9 @@ type Config struct {
 	// CacheFile, if set, keeps the last applied bundle, so a restarted
 	// engine enforces it before the operator is reachable.
 	CacheFile string
+	// GeoCacheFile, if set, keeps the last country table loaded (design
+	// 0011 §4.4), the gzipped bytes, beside the bundle's.
+	GeoCacheFile string
 	// Secret, if set, is read when the engine has no bundle: at startup
 	// without a usable cache, and between attempts to reach the operator
 	// until a bundle is applied.
@@ -180,8 +184,24 @@ type Agent struct {
 	reconnect  chan struct{}
 
 	mu sync.Mutex
-	// current is the applied bundle, nil before the first.
+	// current is the applied bundle, nil before the first; set is its
+	// policy set, as stored in the Holder.
 	current *bundlev1.Bundle
+	set     *policy.Set
+	// table is the country table held (design 0011 §4.3), nil if none;
+	// pending is a table received before a bundle names it.
+	table   *geo.Table
+	pending *pendingTable
+	// geoReady is closed once the bundle enforced names no table, or the
+	// table it names is held.
+	geoReady chan struct{}
+	geo      geoMetrics
+	// geoWrite is the table to cache once a.mu is released, geoSeq counts
+	// them; geoCacheMu orders the writes, geoCached is the last written.
+	geoWrite   *geoCacheWrite
+	geoSeq     uint64
+	geoCacheMu sync.Mutex
+	geoCached  uint64
 	// applied is closed when the first bundle is applied.
 	applied chan struct{}
 	// cacheOnce loads the cache once: LoadCache, or else Run.
@@ -238,6 +258,8 @@ func New(cfg Config) (*Agent, error) {
 		keyFile:   keyFile,
 		reconnect: make(chan struct{}, 1),
 		applied:   make(chan struct{}),
+		geoReady:  make(chan struct{}),
+		geo:       newGeoMetrics(),
 		unsent:    map[string]*eventsv1.PolicyStats{},
 		connected: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "inkwall_operator_connected",
@@ -271,7 +293,7 @@ func (a *Agent) TrustedKeys() []string { return slices.Clone(a.keys.Load().ids) 
 
 // Collectors returns the agent's metrics, to register with the engine's.
 func (a *Agent) Collectors() []prometheus.Collector {
-	return []prometheus.Collector{a.connected, a.version, a.applies, a.compileTime, a.appliedAt}
+	return append([]prometheus.Collector{a.connected, a.version, a.applies, a.compileTime, a.appliedAt}, a.geo.collectors()...)
 }
 
 // Version returns the applied bundle's version, 0 before the first.
@@ -301,6 +323,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.watchKeys(ctx)
 	a.LoadCache()
 	a.loadSecret(ctx)
+	a.loadSecretGeo(ctx)
 	backoff := a.cfg.MinBackoff
 	for {
 		start := time.Now()
@@ -310,8 +333,9 @@ func (a *Agent) Run(ctx context.Context) error {
 			return nil
 		}
 		// Still nothing to enforce, and the operator is unreachable: the
-		// Secret may be readable by now.
+		// Secret may be readable by now; the country table's too.
 		a.loadSecret(ctx)
+		a.loadSecretGeo(ctx)
 		// A stream that lasted resets the backoff.
 		if time.Since(start) > a.cfg.MaxBackoff {
 			backoff = a.cfg.MinBackoff
@@ -384,13 +408,15 @@ func (a *Agent) stream(ctx context.Context) error {
 	default:
 	}
 	if err := sendFirst(stream, &agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{
-		EngineId:      a.cfg.EngineID,
-		PodNamespace:  a.cfg.PodNamespace,
-		PodName:       a.cfg.PodName,
-		NodeName:      a.cfg.NodeName,
-		BundleVersion: a.Version(),
-		EngineVersion: a.cfg.EngineVersion,
-		TrustedKeyIds: a.TrustedKeys(),
+		EngineId:       a.cfg.EngineID,
+		PodNamespace:   a.cfg.PodNamespace,
+		PodName:        a.cfg.PodName,
+		NodeName:       a.cfg.NodeName,
+		BundleVersion:  a.Version(),
+		EngineVersion:  a.cfg.EngineVersion,
+		TrustedKeyIds:  a.TrustedKeys(),
+		GeoTableSha256: a.GeoTableHash(),
+		Capabilities:   []string{CapabilityGeoTable},
 	}}}); err != nil {
 		return err
 	}
@@ -435,7 +461,7 @@ func (a *Agent) stream(ctx context.Context) error {
 		for {
 			select {
 			case <-t.C:
-				hb := &agentv1.Heartbeat{BundleVersion: a.Version(), TrustedKeyIds: a.TrustedKeys()}
+				hb := &agentv1.Heartbeat{BundleVersion: a.Version(), TrustedKeyIds: a.TrustedKeys(), GeoTableSha256: a.GeoTableHash()}
 				if a.cfg.ProbeReceipts != nil {
 					hb.ProbeReceipts = a.cfg.ProbeReceipts()
 				}
@@ -462,6 +488,10 @@ func (a *Agent) stream(ctx context.Context) error {
 			return err
 		}
 		a.connected.Set(1)
+		if t := msg.GetGeoTable(); t != nil {
+			a.offerTable(t.GetSha256(), t.GetTable())
+			continue
+		}
 		signed := msg.GetBundle()
 		if signed == nil {
 			continue
@@ -532,6 +562,8 @@ func sendFirst(stream agentv1.BundleService_WatchClient, m *agentv1.WatchRequest
 // (0 if it can't be read) and why it was rejected. The current set stays
 // active on any error.
 func (a *Agent) apply(signed *bundlev1.SignedBundle, cache bool) (uint64, error) {
+	// After a.mu is released: the country table it loaded, if any.
+	defer a.flushGeoCache()
 	// Verify before decoding: nothing in an unverified bundle, its version
 	// included, can be trusted.
 	keys := a.keys.Load()
@@ -579,7 +611,9 @@ func (a *Agent) apply(signed *bundlev1.SignedBundle, cache bool) (uint64, error)
 		a.applies.WithLabelValues("rejected", "compile").Inc()
 		return b.GetVersion(), err
 	}
+	set = a.attachGeo(set, b.GetGeoTable())
 	a.cfg.Holder.Store(set)
+	a.set = set
 	if a.current == nil {
 		close(a.applied)
 	}
@@ -651,8 +685,10 @@ func (a *Agent) requestReconnect() {
 	}
 }
 
-// loadCache applies the cached bundle, if there is a valid one.
+// loadCache applies the cached bundle, if there is a valid one, with the
+// cached country table.
 func (a *Agent) loadCache() {
+	a.loadGeoCache()
 	if a.cfg.CacheFile == "" {
 		return
 	}

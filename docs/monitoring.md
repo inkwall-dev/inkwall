@@ -167,6 +167,9 @@ Engine metrics carry `adapter` where it says so (`proxy`, `forwardauth`, `httpch
 | `inkwall_bundle_updates_total` | counter | `result`, `reason` | Bundles received: `applied`, or `rejected` with a reason (`signature`, `older`, `compile`, `other`). |
 | `inkwall_bundle_compile_seconds` | histogram | | Time compiling a bundle's policies. |
 | `inkwall_bundle_applied_timestamp_seconds` | gauge | | When the enforced bundle was applied (Unix time): its age is `time()` minus it. |
+| `inkwall_geo_table_bytes` | gauge | | The size in memory of the country table the engine holds for geo blocking; 0 without one. |
+| `inkwall_geo_table_built_timestamp_seconds` | gauge | | When the database of that country table was built (Unix time). |
+| `inkwall_geo_table_load_failures_total` | counter | | Country tables received that failed a check (too large, the wrong hash, not a valid table); the engine keeps the one it had. |
 | `inkwall_engine_events_total` | counter | | Security events recorded for the operator. |
 | `inkwall_engine_events_dropped_total` | counter | | Security events dropped because the buffer was full. |
 | `inkwall_security_event_logs_suppressed_total` | counter | `policy` | Security event log lines left out by the rate limit (`--event-log-rate`); the events still go to the operator. |
@@ -185,6 +188,8 @@ The engine also serves the Go runtime's `go_*` and the `process_*` metrics.
 |---|---|---|---|
 | `inkwall_operator_bundle_version` | gauge | | The bundle this replica serves. |
 | `inkwall_operator_bundle_compressed_bytes` | gauge | | Its size, gzip-compressed: over 900 KiB it is split into chunks, over 7,200 KiB it can't be published. |
+| `inkwall_operator_geo_table_compressed_bytes` | gauge | | Size of the country table the served bundle names (geo blocking), gzip-compressed; 0 without one. |
+| `inkwall_operator_geo_tables_sent_total` | counter | | Country tables this replica sent to engines. |
 | `inkwall_operator_engines` | gauge | `state`, `integration` | Connected engines by whether they run the current bundle (`current`, `behind`, `rejected`), and by the integration whose proxy pod runs them (`unknown` until matched to one). Leader only. |
 | `inkwall_operator_engines_left_out` | gauge | | Engines left out of this replica's engine report (over the ConfigMap limit). |
 | `inkwall_operator_events_received_total` | counter | | Security events received from the engines. |

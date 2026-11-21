@@ -46,8 +46,13 @@ message.
 - **Removals** of a field that does something wait for v1. A field the operator ignores can be
   deprecated in a minor release, and removed at v1.
 - **Behaviour** of an existing object doesn't change on an upgrade unless the release notes say so
-  in [Upgrading](upgrading.md). Defaults that only the engine used to apply move into the API and
-  the bundle with the same values (#718), so that a newer engine can't change a stored policy.
+  in [Upgrading](upgrading.md). Static defaults move into the API with the values that applied
+  before (#718): `timeout` (250ms, which an engine in bundle mode can't override) and
+  `responses.streams`. The body and response limits don't: the bundle carries `body.maxBytes` and
+  `responses.maxBytes` only when the policy sets them, so an engine's `--max-body-bytes` still
+  applies to the policies that don't. Defaults inside list items (`ruleSets[].placement`,
+  `events.sinks[].compression`) stay out of the schema: GitOps tools would show every object
+  that leaves them out as changed.
 
 ## From v1
 
@@ -56,6 +61,10 @@ From v1.0.0, within `v1`:
 - fields, enum values, defaults, list types and condition types aren't removed or renamed, and a
   field's meaning doesn't change;
 - validation doesn't get stricter;
+- the engine's own defaults for what a policy leaves unset don't change: the request body limit
+  (64 KiB, `--max-body-bytes`), the response body limit (64 KiB) and the inspection timeout
+  (250ms). The operator leaves the body and response limits out of the bundle when a policy sets
+  none, so a stored policy can't change with the engine;
 - new optional fields, kinds and enum values may come in minor releases. An enum documented as an
   open set (`status.signingKey.phase`, condition reasons) may get values, so clients should handle
   unknown ones;
@@ -83,7 +92,12 @@ v1.0.0 serves `v1` as the storage version next to `v1alpha1`:
 - **A preflight** (`inkwallctl` or a Helm pre-upgrade hook) lists objects that still use
   deprecated fields, and the upgrade stops until they're moved. It doesn't rewrite them: a GitOps
   tool would put them back. It refuses, for example, `InkwallConfig.spec.engine.jsonDenials` (use
-  `denialFormat`, #713) and a policy whose `ref.namespace` names another namespace.
+  `denialFormat`, #713) and a policy whose `ref.namespace` names another namespace. It also
+  refuses repeats in the lists `v1` makes sets or maps (a path twice in `skip.paths` or
+  `skip.bodyPaths`, an ID twice in an exclusion's `ruleIDs`, a CIDR twice in a `WAFIPList`'s
+  `entries`): validation ratcheting doesn't cover a changed list type, so a stored object with a
+  repeat couldn't be updated at all under `v1`, whatever the update touches. They warn today
+  (#717).
 - **Storage migration**: after the upgrade, every object is rewritten once in `v1` and `v1alpha1`
   is removed from the CRDs' `status.storedVersions`.
 
