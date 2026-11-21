@@ -49,7 +49,7 @@ cleanup() {
 }
 trap cleanup EXIT
 rm -rf "$OUT/recheck"
-rm -f "$OUT"/{base,head}.txt "$OUT"/benchstat.{txt,csv} "$OUT"/{flagged,gate,skipped,compared}.txt "$OUT/summary.md"
+rm -f "$OUT"/{base,head}.txt "$OUT"/benchstat.{txt,csv} "$OUT"/{flagged,gate,skipped,compared,new}.txt "$OUT/summary.md"
 
 summary=$OUT/summary.md
 base=$(git merge-base HEAD "$BASE_REF")
@@ -102,9 +102,14 @@ same_testdata() {
 : >"$work/plan"
 : >"$OUT/skipped.txt"
 : >"$OUT/compared.txt"
+: >"$OUT/new.txt"
 while read -r pkg bin dir; do
+  bbin='' bdir=''
   read -r bbin bdir <<<"$(lookup base "$pkg")" || true
-  if [[ -n ${bbin:-} ]] && cmp -s "$bbin" "$bin" && same_testdata "$bdir/testdata" "$dir/testdata"; then
+  if [[ -z $bbin ]]; then
+    # New in head: nothing to compare it with, so nothing can regress.
+    echo "$pkg" >>"$OUT/new.txt"
+  elif cmp -s "$bbin" "$bin" && same_testdata "$bdir/testdata" "$dir/testdata"; then
     echo "$pkg" >>"$OUT/skipped.txt"
   else
     echo "$pkg" >>"$OUT/compared.txt"
@@ -118,15 +123,20 @@ done <"$work/head.list"
   sed 's/^/- /' "$OUT/skipped.txt"
   [[ -s $OUT/skipped.txt ]] || echo "- none"
   echo
+  echo "New, no base to compare with:"
+  sed 's/^/- /' "$OUT/new.txt"
+  [[ -s $OUT/new.txt ]] || echo "- none"
+  echo
   echo "Compared:"
   sed 's/^/- /' "$OUT/compared.txt"
   [[ -s $OUT/compared.txt ]] || echo "- none"
 } >>"$summary"
 sed 's/^/== skipped, test binary unchanged: /' "$OUT/skipped.txt"
+sed 's/^/== new, no base to compare with: /' "$OUT/new.txt"
 
 if [[ ! -s $work/plan ]]; then
-  echo "== no package with benchmarks changed; nothing to compare"
-  printf '\nNo package with benchmarks changed; nothing to compare.\n' >>"$summary"
+  echo "== no changed package with benchmarks on both sides; nothing to compare"
+  printf '\nNo changed package with benchmarks on both sides; nothing to compare.\n' >>"$summary"
   exit 0
 fi
 
@@ -145,8 +155,7 @@ bench() {
       while read -r pkg re; do
         bin='' pdir=''
         read -r bin pdir <<<"$(lookup "$side" "$pkg")" || true
-        # A package new in head (or gone from it) has one side only;
-        # benchstat shows it without a comparison.
+        # The plan holds packages on both sides; this is a guard.
         [[ -n $bin ]] || continue
         # Tests may read testdata relative to their package directory.
         (cd "$pdir" && "$bin" "${args[@]}" -test.bench="$re" </dev/null) >>"$dir/$side.txt"
