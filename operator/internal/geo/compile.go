@@ -311,12 +311,22 @@ const guardWalks = 4
 // capped, and the walk that skips them ends at no more path ends than it
 // yielded.
 func (c *compiler) walk() error {
+	// The IPv4 networks come first, in ::/96. Past them, the walk yields
+	// at most the networks outside any alias (the cap) and the IPv4
+	// networks again under each alias, of which there are at most
+	// MaxAliases, or the compile fails anyway.
+	limit, v4 := guardWalks*maxNetworks, 0
 	for res := range c.r.Networks(maxminddb.IncludeAliasedNetworks(), maxminddb.IncludeNetworksWithoutData()) {
-		if err := c.stepUpTo(guardWalks * maxNetworks); err != nil {
+		if err := c.stepUpTo(limit); err != nil {
 			return err
 		}
 		if err := res.Err(); err != nil {
 			return fail(ReasonInvalid, "reading the database: %v", err)
+		}
+		if res.Prefix().Addr().Is4() {
+			v4++
+		} else if v4 > 0 {
+			limit = min(limit, maxNetworks+v4+geotable.MaxAliases*v4)
 		}
 	}
 	c.networks = 0
@@ -367,8 +377,22 @@ func (c *compiler) walk() error {
 		}
 	}
 	if c.r.Metadata.IPVersion == 6 && !c.v6.full() {
-		c.gaps = append(c.gaps, span6{c.v6.next, u128{^uint64(0), ^uint64(0)}})
+		if err := c.addGap(span6{c.v6.next, u128{^uint64(0), ^uint64(0)}}); err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+// addGap records a gap of the walk that skips aliases. Each gap holds one
+// alias at least, so more than MaxAliases gaps fail the compile anyway:
+// refused here, before a crafted tree of alternating aliases and empty
+// leaves grows the list by a gap per network.
+func (c *compiler) addGap(g span6) error {
+	if len(c.gaps) >= geotable.MaxAliases {
+		return fail(ReasonInvalid, "more than %d prefixes alias the IPv4 subtree", geotable.MaxAliases)
+	}
+	c.gaps = append(c.gaps, g)
 	return nil
 }
 
@@ -381,7 +405,9 @@ func (c *compiler) add6(p netip.Prefix, code geotable.Country) error {
 	}
 	if c.v6.next.less(lo) {
 		prev, _ := lo.prev()
-		c.gaps = append(c.gaps, span6{c.v6.next, prev})
+		if err := c.addGap(span6{c.v6.next, prev}); err != nil {
+			return err
+		}
 		c.v6.next = lo
 	}
 	if lo.less(c.v6.next) {

@@ -291,7 +291,8 @@ an Envoy you configure yourself, in or out of Kubernetes, see [protecting raw En
 
 - Proxies: **Traefik**, **Envoy Gateway** (v1.9 or later; not with `mergeGateways` or Envoy as a
   DaemonSet), **Istio** (1.28 or later; its Gateway API and its ingress gateways, not mesh
-  sidecars) and the **HAProxy Kubernetes Ingress Controller** (3.1 to 3.2, not 3.4, which dropped config snippets;
+  sidecars) and the **HAProxy Kubernetes Ingress Controller** (3.1 to 3.2, and 3.4 and later through its
+  `Backend` custom resource;
   [with the operator](docs/haproxy.md#with-the-operator-haproxy-kubernetes-ingress-controller)), wired by the operator; **raw [Envoy](https://www.envoyproxy.io/docs/envoy/latest/)** (1.33 or later) that you configure with
   the engine's ext_proc adapter ([protecting raw Envoy](docs/raw-envoy.md)); any other **[HAProxy](https://docs.haproxy.org/)** (3.1 or later) that you
   configure with the engine's SPOE agent ([protecting HAProxy](docs/haproxy.md)); and the standalone

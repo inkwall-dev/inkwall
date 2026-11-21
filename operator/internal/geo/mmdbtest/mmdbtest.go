@@ -264,7 +264,14 @@ func SharedChildren(depth int, withData bool) []byte {
 // and whose 8000::/1 half is a chain of depth nodes, each node's two
 // children the next node, the last one's both the IPv4 subtree: 2^depth
 // aliases, which a walk that skips aliases skips without yielding.
-func SharedAliases(depth int) []byte {
+func SharedAliases(depth int) []byte { return sharedAliases(depth, false) }
+
+// AlternatingAliases is SharedAliases with the last node's children the
+// IPv4 subtree and an empty leaf: 2^depth aliases, each followed by an
+// empty network, so a walk that skips aliases sees a gap per network.
+func AlternatingAliases(depth int) []byte { return sharedAliases(depth, true) }
+
+func sharedAliases(depth int, alternate bool) []byte {
 	const v4 = 96               // the IPv4 subtree's node, at depth 96
 	n := uint32(v4 + 1 + depth) // #nosec G115 -- a test's tree
 	t := Tree{IPVersion: 6}
@@ -279,6 +286,10 @@ func SharedAliases(depth int) []byte {
 	for j := range uint32(depth) { // #nosec G115 -- a test's tree
 		next := v4 + 1 + j + 1
 		if j == uint32(depth)-1 { // #nosec G115 -- a test's tree
+			if alternate {
+				t.Nodes = append(t.Nodes, [2]uint32{v4, n})
+				break
+			}
 			next = v4
 		}
 		t.Nodes = append(t.Nodes, [2]uint32{next, next})

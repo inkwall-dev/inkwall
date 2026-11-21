@@ -260,7 +260,7 @@ release-check: ## Check the goreleaser configuration
 	$(GORELEASER) check
 
 # The kind targets, and the scripts they run, use the kind of KIND_VERSION.
-KIND_TARGETS := kind-quickstart kind-cluster kind-up kind-operator kind-chaos kind-e2e kind-e2e-traefik kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-e2e-networkpolicy kind-response-load kind-soak kind-upgrade kind-down
+KIND_TARGETS := kind-quickstart kind-cluster kind-up kind-operator kind-chaos kind-e2e kind-e2e-traefik kind-e2e-raw-envoy kind-e2e-envoy-gateway kind-e2e-istio kind-e2e-haproxy kind-e2e-haproxy-snippets kind-e2e-networkpolicy kind-response-load kind-soak kind-upgrade kind-down
 $(KIND_TARGETS): export PATH := $(KIND_DIR):$(PATH)
 $(KIND_TARGETS): $(KIND_DIR)/kind
 
@@ -328,8 +328,16 @@ kind-e2e-istio: kind-operator ## End-to-end test on kind through Istio's Gateway
 
 .PHONY: kind-e2e-haproxy
 kind-e2e-haproxy: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
-kind-e2e-haproxy: kind-operator ## End-to-end test on kind through the HAProxy Kubernetes Ingress Controller with one WAFPolicy, ending with an uninstall (installs the operator first)
-	KIND_CLUSTER=$(KIND_CLUSTER) hack/kind/haproxy-e2e.sh
+kind-e2e-haproxy: kind-operator ## End-to-end test on kind through the HAProxy Kubernetes Ingress Controller (3.4, wired with its Backend custom resource) with one WAFPolicy, ending with an uninstall (installs the operator first)
+	KIND_CLUSTER=$(KIND_CLUSTER) HAPROXY_IMAGE_TAG=$(HAPROXY_IMAGE_TAG) hack/kind/haproxy-e2e.sh
+
+# The HAProxy controller's release kind-e2e-haproxy runs; kind-e2e-haproxy-snippets
+# runs the 3.2 line's, wired with backend config snippets (#753).
+HAPROXY_IMAGE_TAG ?= 3.4.1
+.PHONY: kind-e2e-haproxy-snippets
+kind-e2e-haproxy-snippets: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)
+kind-e2e-haproxy-snippets: kind-operator ## kind-e2e-haproxy through controller 3.2, wired with backend config snippets (installs the operator first)
+	KIND_CLUSTER=$(KIND_CLUSTER) HAPROXY_IMAGE_TAG=3.2.20 hack/kind/haproxy-e2e.sh
 
 .PHONY: kind-chaos
 kind-chaos: OPERATOR_ARGS = $(E2E_OPERATOR_ARGS)

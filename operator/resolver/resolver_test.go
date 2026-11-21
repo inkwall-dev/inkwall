@@ -248,7 +248,32 @@ func TestDefaults(t *testing.T) {
 		Id:     "shop/shop",
 		Mode:   bundlev1.Mode_MODE_DETECT,
 		Routes: []*bundlev1.RouteMatch{prefix("", "/")},
+		// The body limit is the API's, not the engine's (#718).
+		Body: &bundlev1.BodyConfig{Inspect: true, MaxBytes: 65536},
 	})
+}
+
+// Every body and response limit the bundle gets is the API's: 64 KiB when
+// the policy sets none (#718); no body limit when bodies aren't inspected.
+func TestBodyLimitDefaults(t *testing.T) {
+	limits := policy("limits", 0)
+	limits.Spec.Body = &wafv1alpha1.BodySpec{OnOversize: wafv1alpha1.OversizeAllow}
+	limits.Spec.Responses = &wafv1alpha1.ResponsesSpec{Inspect: true}
+	set := policy("set", 0)
+	set.Spec.Body = &wafv1alpha1.BodySpec{MaxBytes: ptr(int64(1024))}
+	set.Spec.Responses = &wafv1alpha1.ResponsesSpec{Inspect: true, MaxBytes: ptr(int64(2048))}
+	off := policy("off", 0)
+	off.Spec.Body = &wafv1alpha1.BodySpec{Inspect: ptr(false)}
+	res := Resolve(Input{Policies: []wafv1alpha1.WAFPolicy{limits, set, off}})
+	for name, want := range map[string]*bundlev1.Policy{
+		"limits": {Body: &bundlev1.BodyConfig{Inspect: true, MaxBytes: 65536, OnOversize: bundlev1.OversizeAction_OVERSIZE_ACTION_ALLOW},
+			Responses: &bundlev1.ResponseConfig{Inspect: true, MaxBytes: 65536}},
+		"set": {Body: &bundlev1.BodyConfig{Inspect: true, MaxBytes: 1024}, Responses: &bundlev1.ResponseConfig{Inspect: true, MaxBytes: 2048}},
+		"off": {Body: &bundlev1.BodyConfig{}},
+	} {
+		want.Id, want.Mode = "shop/"+name, bundlev1.Mode_MODE_DETECT
+		wantProto(t, findPolicy(res, "shop/"+name), want)
+	}
 }
 
 func TestDefaultBackend(t *testing.T) {
@@ -425,7 +450,7 @@ func TestResolveCRSSettingsLocation(t *testing.T) {
 		}
 		// No Crs: the bundle is the one the binding-level fields made.
 		wantProto(t, findPolicy(res, "shop/"+name), &bundlev1.Policy{
-			Id: "shop/" + name, Mode: bundlev1.Mode_MODE_DETECT,
+			Id: "shop/" + name, Mode: bundlev1.Mode_MODE_DETECT, Body: &bundlev1.BodyConfig{Inspect: true, MaxBytes: 65536},
 			RuleSets: []*bundlev1.RuleSetBinding{{RuleSetId: "ClusterWAFRuleSet/crs", ParanoiaLevel: 3, InboundAnomalyThreshold: 9}},
 		})
 	}
@@ -473,6 +498,7 @@ func TestResolvePlacement(t *testing.T) {
 	wantProto(t, findPolicy(res, "shop/shop"), &bundlev1.Policy{
 		Id:   "shop/shop",
 		Mode: bundlev1.Mode_MODE_DETECT,
+		Body: &bundlev1.BodyConfig{Inspect: true, MaxBytes: 65536},
 		RuleSets: []*bundlev1.RuleSetBinding{
 			{RuleSetId: "ClusterWAFRuleSet/crs"},
 			{RuleSetId: "WAFRuleSet/shop/tune", Placement: bundlev1.RuleSetPlacement_RULE_SET_PLACEMENT_BEFORE_CRS},
@@ -550,4 +576,18 @@ func TestIPLists(t *testing.T) {
 	in.IPLists = []wafv1alpha1.WAFIPList{ipList("monitors", "10.0.0.0/8"), ipList("bad", "lb.example.com"), ipList("worse", "1.2.3.4")}
 	res = Resolve(in)
 	wantStatus(t, res, "shop", false, ReasonInvalidRef, "WAFIPList bad: ")
+
+	// Every list gets its own status, used or not (#719).
+	want := map[string]Status{
+		"monitors": {Accepted: true, Reason: ReasonAccepted, Message: IPListValid},
+		"worse":    {Accepted: true, Reason: ReasonAccepted, Message: IPListValid},
+	}
+	for name, st := range want {
+		if got := res.IPListStatus[key(name)]; got != st {
+			t.Errorf("%s: status %+v, want %+v", name, got, st)
+		}
+	}
+	if got := res.IPListStatus[key("bad")]; got.Accepted || got.Reason != ReasonInvalidEntries || !strings.Contains(got.Message, "lb.example.com") {
+		t.Errorf("bad: status %+v, want InvalidEntries naming lb.example.com", got)
+	}
 }

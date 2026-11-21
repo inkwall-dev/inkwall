@@ -72,5 +72,9 @@
       }
     ],
     "attention": []
+  },
+  "export": {
+    "condition": null,
+    "sinks": []
   }
 }

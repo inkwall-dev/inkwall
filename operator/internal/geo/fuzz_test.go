@@ -213,6 +213,7 @@ func FuzzCompile(f *testing.F) {
 	f.Add(mmdbtest.SharedChildren(40, true))
 	f.Add(mmdbtest.SharedChildren(126, false))
 	f.Add(mmdbtest.SharedAliases(100))
+	f.Add(mmdbtest.AlternatingAliases(26))
 	f.Add(mmdbtest.Tree{Nodes: [][2]uint32{{1, 2}, {0, 0}, {3, 3}, {3, 3}}}.Bytes())
 	f.Add([]byte("\xab\xcd\xefMaxMind.com"))
 	f.Fuzz(func(t *testing.T, db []byte) {

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -23,7 +24,8 @@ import (
 )
 
 // largeDB is a database of n /24 networks with alternating countries, so
-// nothing merges: n IPv4 ranges.
+// nothing merges: n IPv4 ranges, each with a distinct record, as a City
+// database's are mostly distinct.
 func largeDB(t testing.TB, n int) []byte {
 	t.Helper()
 	nets := make([]mmdbtest.Network, n)
@@ -32,7 +34,8 @@ func largeDB(t testing.TB, n int) []byte {
 		if i%2 == 1 {
 			code = "NZ"
 		}
-		nets[i] = mmdbtest.Network{Prefix: netip.PrefixFrom(netip.AddrFrom4([4]byte{byte(1 + i>>16), byte(i >> 8), byte(i), 0}), 24), Record: cc(code)}
+		rec := &mmdbtest.Record{Country: code, Continent: strconv.Itoa(i)}
+		nets[i] = mmdbtest.Network{Prefix: netip.PrefixFrom(netip.AddrFrom4([4]byte{byte(1 + i>>16), byte(i >> 8), byte(i), 0}), 24), Record: rec}
 	}
 	return must(mmdbtest.DB{Networks: nets}.Bytes())
 }
@@ -75,6 +78,31 @@ func TestNodeCountBound(t *testing.T) {
 	}
 	if MaxNetworks < MaxFileBytes/8 {
 		t.Errorf("MaxNetworks %d refuses trees a file within the bound can hold", MaxNetworks)
+	}
+}
+
+// TestAlternatingAliases: a tree of alternating aliases and empty leaves,
+// under 1 KiB, would grow the walk's gap list by a gap per network, to
+// gigabytes; it is refused at MaxAliases gaps, at once.
+func TestAlternatingAliases(t *testing.T) {
+	db := mmdbtest.AlternatingAliases(26)
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	start := time.Now()
+	_, err := Compile(context.Background(), db, nil)
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	if r := ReasonOf(err); r != ReasonInvalid && r != ReasonTooLarge {
+		t.Errorf("%v, want Invalid or TooLarge", err)
+	}
+	// The guard walk's yields, bounded by the network cap: seconds under
+	// the race detector, well within the deadline.
+	if d := time.Since(start); d > 30*time.Second {
+		t.Errorf("took %v", d)
+	}
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 64<<20 {
+		t.Errorf("allocated %d MiB", grew>>20)
 	}
 }
 

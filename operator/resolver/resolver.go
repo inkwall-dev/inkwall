@@ -32,6 +32,7 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
+	enginepolicy "github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
@@ -41,10 +42,12 @@ const RulesLabel = "waf.inkwall.dev/rules"
 
 // Condition reasons for Accepted.
 const (
-	ReasonAccepted          = "Accepted"
-	ReasonInvalidRef        = "InvalidRef"
-	ReasonConflict          = "Conflict"
-	ReasonRuleCompileError  = "RuleCompileError"
+	ReasonAccepted         = "Accepted"
+	ReasonInvalidRef       = "InvalidRef"
+	ReasonConflict         = "Conflict"
+	ReasonRuleCompileError = "RuleCompileError"
+	// ReasonInvalidEntries, on a WAFIPList: an entry the engine can't parse.
+	ReasonInvalidEntries    = "InvalidEntries"
 	ReasonTargetUnsupported = "TargetUnsupported"
 	// ReasonTargetNotAttached: an HTTPRoute target no Gateway of an
 	// integration accepted; the policy doesn't apply to it.
@@ -112,6 +115,8 @@ type Result struct {
 	PolicyStatus map[types.NamespacedName]Status
 	// RuleSetStatus is keyed by RuleSet id (RuleSetID), for every rule set.
 	RuleSetStatus map[string]Status
+	// IPListStatus is keyed by the WAFIPList, for every IP list.
+	IPListStatus map[types.NamespacedName]Status
 }
 
 // PolicyID is a policy's id in the bundle.
@@ -130,7 +135,9 @@ func Resolve(in Input) Result {
 	r := &resolution{in: in, out: Result{
 		PolicyStatus:  map[types.NamespacedName]Status{},
 		RuleSetStatus: map[string]Status{},
+		IPListStatus:  map[types.NamespacedName]Status{},
 	}}
+	r.resolveIPLists()
 	r.resolveRuleSets()
 	r.resolvePolicies()
 	return r.out
@@ -758,9 +765,9 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 		}
 		if e.When != nil {
 			ex.Path = string(e.When.Path)
-			ex.Argument = e.When.Argument
-			ex.ArgumentName = e.When.ArgumentName
-			ex.Cookie = e.When.Cookie
+			ex.Argument = string(e.When.Argument)
+			ex.ArgumentName = string(e.When.ArgumentName)
+			ex.Cookie = string(e.When.Cookie)
 			ex.Header = e.When.Header
 		}
 		if e.When.Target() {
@@ -769,23 +776,27 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 		}
 		p.Exclusions = append(p.Exclusions, ex)
 	}
-	if b := s.Body; b != nil {
-		body := &bundlev1.BodyConfig{Inspect: b.Inspect == nil || *b.Inspect, OnOversize: oversizeAction(b.OnOversize)}
-		if b.MaxBytes != nil {
-			body.MaxBytes = *b.MaxBytes
-		}
-		body.GrpcMessages = b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect
-		body.GrpcPerMessage = body.GrpcMessages && b.GRPCStreams == wafv1alpha1.GRPCStreamsPerMessage
-		body.DenyGrpc = b.GRPC == wafv1alpha1.GRPCDeny
-		p.Body = body
+	// The body limit is written even when the policy sets none (#718): the
+	// API's default, not the engine's, so that an engine with another
+	// default can't change what a stored policy inspects.
+	b := s.Body
+	if b == nil {
+		b = &wafv1alpha1.BodySpec{}
 	}
+	body := &bundlev1.BodyConfig{Inspect: b.Inspect == nil || *b.Inspect, OnOversize: oversizeAction(b.OnOversize)}
+	body.MaxBytes = deref(b.MaxBytes)
+	if body.Inspect {
+		body.MaxBytes = cmp.Or(body.MaxBytes, enginepolicy.DefaultBodyBytes)
+	}
+	body.GrpcMessages = b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect
+	body.GrpcPerMessage = body.GrpcMessages && b.GRPCStreams == wafv1alpha1.GRPCStreamsPerMessage
+	body.DenyGrpc = b.GRPC == wafv1alpha1.GRPCDeny
+	p.Body = body
 	// Unset when not inspected: the bundles of policies without responses
 	// stay as before 0.4.0.
 	if r := s.Responses; r != nil && r.Inspect {
 		resp := &bundlev1.ResponseConfig{Inspect: true, OnOversize: oversizeAction(r.OnOversize)}
-		if r.MaxBytes != nil {
-			resp.MaxBytes = *r.MaxBytes
-		}
+		resp.MaxBytes = cmp.Or(deref(r.MaxBytes), enginepolicy.DefaultResponseBytes)
 		resp.Streams = r.Streams == wafv1alpha1.StreamsInspect
 		p.Responses = resp
 	}
@@ -916,6 +927,14 @@ func beforeCRS(rs *bundlev1.RuleSet) string {
 	return ""
 }
 
+// deref is *n, or 0 when n is nil.
+func deref(n *int64) int64 {
+	if n == nil {
+		return 0
+	}
+	return *n
+}
+
 // crsSettings is a binding's CRS settings in the bundle, nil when it sets
 // none.
 func crsSettings(c *wafv1alpha1.CRSSettings) *bundlev1.CRSSettings {
@@ -936,6 +955,31 @@ func crsSettings(c *wafv1alpha1.CRSSettings) *bundlev1.CRSSettings {
 		s.OutboundAnomalyThreshold = *c.OutboundAnomalyThreshold
 	}
 	return s
+}
+
+// IPListValid is the Accepted message of a WAFIPList whose entries all
+// parse.
+const IPListValid = "the IP list is valid"
+
+// resolveIPLists checks every WAFIPList's entries as the engine parses them:
+// the webhook does too, but a list written while it was down isn't.
+func (r *resolution) resolveIPLists() {
+	for _, l := range r.in.IPLists {
+		st := Status{Accepted: true, Reason: ReasonAccepted, Message: IPListValid}
+		if err := parseIPList(l); err != nil {
+			st = Status{Reason: ReasonInvalidEntries, Message: err.Error()}
+		}
+		r.out.IPListStatus[types.NamespacedName{Namespace: l.Namespace, Name: l.Name}] = st
+	}
+}
+
+func parseIPList(l wafv1alpha1.WAFIPList) error {
+	entries := make([]string, 0, len(l.Spec.Entries))
+	for _, e := range l.Spec.Entries {
+		entries = append(entries, string(e.CIDR))
+	}
+	_, err := iplist.Parse(entries)
+	return err
 }
 
 // ipList returns the entries of the WAFIPLists names, in namespace ns,

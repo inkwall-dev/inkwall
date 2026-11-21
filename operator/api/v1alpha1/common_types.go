@@ -3,8 +3,10 @@
 
 package v1alpha1
 
-// Condition types. Every WAFPolicy reports all four (0004 §3.2); the other
-// kinds report Accepted.
+// Condition types. Every WAFPolicy reports Accepted, Programmed, Enforced
+// and Ready (0004 §3.2); WAFRuleSets, ClusterWAFRuleSets and WAFIPLists
+// report Accepted; the InkwallConfig reports the conditions below that name
+// it.
 const (
 	// ConditionAccepted is True when the spec is valid and its references
 	// resolve.
@@ -42,6 +44,10 @@ const (
 	// spec.engine settings, because its release (or a custom build) may
 	// not know their flags; the message names them.
 	ConditionEngineConfigured = "EngineConfigured"
+	// ConditionEventsExported, on the InkwallConfig, says whether every
+	// sink of spec.events.export exports from every operator replica;
+	// absent without sinks.
+	ConditionEventsExported = "EventsExported"
 )
 
 // SecretReference names a Secret in the operator's namespace.

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -38,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/bundle"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
@@ -46,6 +48,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/internal/crdwatch"
 	proxydiscovery "github.com/inkwall-dev/inkwall/operator/internal/discovery"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
+	"github.com/inkwall-dev/inkwall/operator/internal/export"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/operator/internal/podcache"
 	"github.com/inkwall-dev/inkwall/operator/internal/policystatus"
@@ -161,6 +164,15 @@ type Options struct {
 	// control plane ("": in memory); EventsBufferBytes bounds it.
 	EventsDir         string
 	EventsBufferBytes int64
+	// ExportBufferBytes and ExportDiskBytes bound the replica's buffer of
+	// security events for the InkwallConfig's export sinks, in memory and
+	// on disk (under EventsDir/export; with no EventsDir, in memory only);
+	// ExportFlushTimeout bounds its flush on shutdown. 0: the defaults.
+	ExportBufferBytes  int64
+	ExportDiskBytes    int64
+	ExportFlushTimeout time.Duration
+	// ExportStatusWindow: a sink failing this long is Failing (0: 5 min).
+	ExportStatusWindow time.Duration
 
 	// SkipControllerNameValidation lets a process create more than one
 	// manager, which controller-runtime refuses by default (its
@@ -293,6 +305,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	envoyFilters := crd(wiring.EnvoyFilterGVK, nil)
 	virtualServices := crd(wiring.IstioVirtualServiceGVK, nil)
 	istioGateways := crd(wiring.IstioGatewayGVK, nil)
+	haproxyBackends := crd(wiring.HAProxyBackendGVK, nil)
 	if err := (&controller.BundleReconciler{
 		Client:          mgr.GetClient(),
 		APIReader:       mgr.GetAPIReader(),
@@ -392,6 +405,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		Pods: selectors, IngressRoutes: ingressRoutes, HTTPRoutes: httpRoutes, Gateways: gateways, GatewayClasses: gatewayClasses,
 		EnvoyProxies: envoyProxies, ExtensionPolicies: extensionPolicies, TrafficPolicies: trafficPolicies, EnvoyFilters: envoyFilters,
 		VirtualServices: virtualServices, IstioGateways: istioGateways, Sidecar: sidecar,
+		HAProxyBackends: haproxyBackends, ProxyNamespaces: o.ProxyNamespaces,
 		Prober: prober,
 	}
 	wirings := wiring.Integrations(mgr.GetClient(), mgr.GetAPIReader(), wiringCfg)
@@ -421,10 +435,11 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	if err := (&policystatus.Watcher{Client: mgr.GetClient(), Recorder: mgr.GetEventRecorder("inkwall-operator")}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
-	if err := (&proxydiscovery.Reconciler{Client: mgr.GetClient(), GatewayClasses: gatewayClasses, Kinds: kinds, Disabled: denied, Recorder: mgr.GetEventRecorder("inkwall-operator")}).SetupWithManager(mgr); err != nil {
+	if err := (&proxydiscovery.Reconciler{Client: mgr.GetClient(), GatewayClasses: gatewayClasses, Kinds: kinds, Disabled: denied, Recorder: mgr.GetEventRecorder("inkwall-operator"),
+		Reports: mgr.GetAPIReader(), Namespace: o.Namespace, ReportStale: engineStale(o)}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
-	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gateways, gatewayClasses, envoyProxies, extensionPolicies, trafficPolicies, envoyFilters, virtualServices, istioGateways} {
+	for _, k := range []*crdwatch.Kind{ingressRoutes, httpRoutes, gateways, gatewayClasses, envoyProxies, extensionPolicies, trafficPolicies, envoyFilters, virtualServices, istioGateways, haproxyBackends} {
 		if err := mgr.Add(k); err != nil {
 			return nil, err
 		}
@@ -532,13 +547,27 @@ func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}, forw
 	}
 	auth := &distribution.KubeAuthenticator{Client: mgr.GetClient(), Namespace: o.Namespace, TTL: time.Minute}
 	service := distribution.NewServer(store, table, auth, replica, ctrl.Log.WithName("distribution"))
-	service.Events, service.Stats = forwarder.Add, forwarder.AddStats
+	// Every replica exports its own engines' events to the InkwallConfig's
+	// sinks, beside the control plane's forwarding: each gets every batch,
+	// read only, and neither waits for the other (design 0010 §6).
+	exporter := &export.Exporter{
+		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Namespace: o.Namespace,
+		Dir: exportDir(o.EventsDir), MemoryBytes: o.ExportBufferBytes, DiskBytes: o.ExportDiskBytes,
+		FlushTimeout: o.ExportFlushTimeout, StatusWindow: o.ExportStatusWindow, HasPolicy: store.HasPolicy,
+		Metrics: export.PrometheusMetrics{}, Log: ctrl.Log.WithName("export"),
+	}
+	service.Events = func(b *eventsv1.EventBatch) {
+		forwarder.Add(b)
+		exporter.Add(b)
+	}
+	service.Stats = forwarder.AddStats
 	forwarder.HasPolicy = store.HasPolicy
 	srv := &distribution.GRPCServer{
-		Port:    o.DistributionPort,
-		CertDir: o.WebhookCertDir,
-		Ready:   ready,
-		Service: service,
+		Port:     o.DistributionPort,
+		CertDir:  o.WebhookCertDir,
+		Ready:    ready,
+		Service:  service,
+		Exporter: exporter,
 	}
 	if err := mgr.Add(srv); err != nil {
 		return err
@@ -555,6 +584,8 @@ func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}, forw
 		Interval:  interval,
 		// The leader ignores a report older than three refreshes.
 		Refresh: 5 * interval,
+		// The export sinks' states, for the leader's EventsExported.
+		Export: exporter.Report,
 	}
 	if o.ReplicaUID != "" {
 		pub.Owner = &metav1.OwnerReference{APIVersion: "v1", Kind: "Pod", Name: replica, UID: o.ReplicaUID}
@@ -658,6 +689,22 @@ func kubernetesVersion(cfg *rest.Config) func() string {
 		return v
 	}
 }
+
+// exportDir is where the export buffer lives: beside the control plane's,
+// in the events directory; "" (memory) without one.
+func exportDir(eventsDir string) string {
+	if eventsDir == "" {
+		return ""
+	}
+	return filepath.Join(eventsDir, "export")
+}
+
+// Defaults of the export buffer (design 0010 §2.4).
+const (
+	DefaultExportBufferBytes  = export.DefaultBufferBytes
+	DefaultExportDiskBytes    = export.DefaultDiskBytes
+	DefaultExportFlushTimeout = export.DefaultFlushTimeout
+)
 
 // DefaultEventsBufferBytes bounds each replica's events buffer by default.
 const DefaultEventsBufferBytes = controlplane.DefaultEventsBufferBytes
