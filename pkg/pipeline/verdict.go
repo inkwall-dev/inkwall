@@ -133,6 +133,10 @@ type Verdict struct {
 	Duration time.Duration
 	// Policy is the policy that decided, in bundle mode ("namespace/name").
 	Policy string
+	// DenyResponse is that policy's denial body (spec.denyResponse, or the
+	// bundle's default), which adapters answer a deny with; nil: their
+	// own.
+	DenyResponse *DenyResponse
 	// RateLimit is, with ReasonRateLimit, the limit the client was over,
 	// and RetryAfter how long until a request would be within it (whole
 	// seconds; the answer's Retry-After).

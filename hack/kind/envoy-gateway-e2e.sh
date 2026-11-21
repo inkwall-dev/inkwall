@@ -811,6 +811,36 @@ logged_limit() {
 }
 eventually "the engines log the limit's event" logged_limit
 
+# A custom denial through Envoy Gateway (#725): the policy's denyResponse is
+# the body of Envoy's local reply, for a rule's 403 and the limit's 429
+# (with its Retry-After: the limit's buckets outlive the new bundle), with
+# Envoy's request ID in it.
+echo "== custom denial"
+policy Block "" '  rateLimits: [{name: e2e, requests: 1, period: 1h, burst: 2, match: {paths: ["/limited/*"]}}]
+  denyResponse: {contentType: application/problem+json, body: "{\"title\":\"Blocked by e2e\",\"request_id\":\"{{request_id}}\"}"}'
+eventually "the policy with a denyResponse is Enforced" enforced
+# denial PATH: the body, then a line "status|content-type|retry-after|x-request-id",
+# through the custom Gateway. Envoy, at the edge, sets the request ID itself.
+denial() {
+  curl -s -w '\n%{http_code}|%header{content-type}|%header{retry-after}|%header{x-request-id}' \
+    -H "Host: $HOST" "http://127.0.0.1:$CUSTOM_PORT$1" || true
+}
+dr_rule=$(denial "$SQLI")
+dr_limit=$(denial /limited/4)
+# custom_denial ANSWER STATUS: the policy's body with the answer's own
+# X-Request-Id in it, the status and the content type.
+custom_denial() {
+  local status ct ra id body=${1%$'\n'*}
+  IFS='|' read -r status ct ra id <<<"${1##*$'\n'}"
+  [[ $status == "$2" && $ct == application/problem+json && -n $id &&
+    $body == "{\"title\":\"Blocked by e2e\",\"request_id\":\"$id\"}" ]] || return 1
+  [[ $2 != 429 || $ra == 3[0-9][0-9][0-9] ]]
+}
+check "an attack gets the policy's body, 403, with Envoy's request ID" custom_denial "$dr_rule" 403
+custom_denial "$dr_rule" 403 || echo "      got: $dr_rule"
+check "a client over the limit gets it too, 429 with Retry-After" custom_denial "$dr_limit" 429
+custom_denial "$dr_limit" 429 || echo "      got: $dr_limit"
+
 echo "== detect mode"
 policy Detect
 eventually "Envoy Gateway accepts the EnvoyExtensionPolicy without responses" responses_off

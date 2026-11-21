@@ -751,6 +751,48 @@ eventually "the policy without limits is Enforced" web_current
 check "without limits, the limited client passes again" bash -c "[[ \"$(limited 198.51.100.10 /limited/5 "$rl_id-8")\" == '200 ' ]]"
 "${KUBECTL[@]}" -n "$NS" delete pod lb --wait=false >/dev/null
 
+# A custom denial through Traefik (#725): the policy's denyResponse is the
+# body Traefik copies to the client, with the 403 and the request ID in it;
+# without it, the engine's own body again.
+echo "== custom denial through Traefik"
+dr_id=e2e-dr-$RANDOM
+"${KUBECTL[@]}" -n "$NS" patch wafpolicy web --type merge \
+  -p '{"spec":{"denyResponse":{"contentType":"text/html","body":"<h1>Blocked by e2e</h1><p>{{request_id}}</p>"}}}' >/dev/null
+eventually "a policy with a denyResponse is Enforced" web_current
+dr_answer() {
+  curl -s -w '\n%{http_code} %header{content-type}' -H "Host: $TRAEFIK_HOST" -H "X-Request-Id: $1" \
+    "http://127.0.0.1:$TRAEFIK_PORT$SQLI" || true
+}
+dr_got=$(dr_answer "$dr_id")
+custom_denial() { [[ $dr_got == "<h1>Blocked by e2e</h1><p>$dr_id</p>"$'\n'"403 text/html; charset=utf-8" ]]; }
+check "an attack gets the policy's page, 403, with its request ID" custom_denial
+custom_denial || echo "      got: $dr_got"
+"${KUBECTL[@]}" -n "$NS" patch wafpolicy web --type json -p '[{"op":"remove","path":"/spec/denyResponse"}]' >/dev/null
+eventually "the policy without a denyResponse is Enforced" web_current
+check "without it, the engine's own body again" bash -c "[[ \"\$(curl -s -H 'Host: $TRAEFIK_HOST' 'http://127.0.0.1:$TRAEFIK_PORT$SQLI')\" == Forbidden ]]"
+# The InkwallConfig's default, for a policy without its own: in the bundle,
+# so no pod restarts.
+dr_created_config=false
+"${KUBECTL[@]}" get inkwallconfig default >/dev/null 2>&1 || dr_created_config=true
+"${KUBECTL[@]}" apply --server-side --field-manager=e2e-deny-response -f - >/dev/null <<'YAML'
+apiVersion: waf.inkwall.dev/v1alpha1
+kind: InkwallConfig
+metadata: {name: default}
+spec:
+  engine:
+    denyResponse: {contentType: text/plain, body: "Blocked by the e2e default: {{request_id}}"}
+YAML
+default_denial() {
+  [[ $(dr_answer "$dr_id-default") == "Blocked by the e2e default: $dr_id-default"$'\n'"403 text/plain; charset=utf-8" ]]
+}
+eventually "the InkwallConfig's default denial reaches Traefik's clients" default_denial
+if $dr_created_config; then
+  "${KUBECTL[@]}" delete inkwallconfig default >/dev/null
+else
+  "${KUBECTL[@]}" patch inkwallconfig default --type json -p '[{"op":"remove","path":"/spec/engine/denyResponse"}]' >/dev/null
+fi
+eventually "without the default, the engine's own body again" bash -c "[[ \"\$(curl -s -H 'Host: $TRAEFIK_HOST' 'http://127.0.0.1:$TRAEFIK_PORT$SQLI')\" == Forbidden ]]"
+
 # Signing key rotation (#41), requested on the InkwallConfig with two
 # engines connected: Traefik's, whose trust ConfigMap the operator keeps,
 # and the app's, whose ConfigMap this test keeps (app_trust). The operator

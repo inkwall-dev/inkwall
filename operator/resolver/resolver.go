@@ -814,7 +814,16 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 	for _, l := range s.RateLimits {
 		p.RateLimits = append(p.RateLimits, rateLimit(l))
 	}
+	p.DenyResponse = DenyResponse(s.DenyResponse)
 	return p
+}
+
+// DenyResponse is a spec.denyResponse in the bundle; nil for none.
+func DenyResponse(d *wafv1alpha1.DenyResponse) *bundlev1.DenyResponse {
+	if d == nil {
+		return nil
+	}
+	return &bundlev1.DenyResponse{ContentType: d.ContentType, Body: d.Body}
 }
 
 func rateLimit(l wafv1alpha1.RateLimit) *bundlev1.RateLimit {

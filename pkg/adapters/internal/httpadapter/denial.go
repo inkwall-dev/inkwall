@@ -22,6 +22,21 @@ import (
 type Denial struct {
 	ContentType string
 	Body        []byte
+	// Custom: the policy's spec.denyResponse, served with the
+	// CustomDenialHeaders too.
+	Custom bool
+}
+
+// DenialCSP is the Content-Security-Policy of a custom denial: an HTML
+// page of the user's may style itself and show inline images, nothing
+// else (no script, no frame, no request anywhere).
+const DenialCSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:"
+
+// CustomDenialHeaders are the headers a custom denial (Denial.Custom) gets
+// beyond the others': not cached (it names one request), and DenialCSP.
+var CustomDenialHeaders = [...][2]string{
+	{"Cache-Control", "no-store"},
+	{"Content-Security-Policy", DenialCSP},
 }
 
 // DenialBody returns the body of a denial with status for the request
@@ -38,15 +53,40 @@ func DenialBody(status int, id string, reqHeaders http.Header, jsonOK bool) Deni
 	return Denial{ContentType: "text/plain; charset=utf-8", Body: []byte(http.StatusText(status) + "\n")}
 }
 
-// WriteDenial answers a denied (or unreadable) request with status: its
-// request ID in X-Request-Id, and DenialBody's body.
+// VerdictDenial returns the body of v's denial for the request ID: the
+// policy's (v.DenyResponse) when it has one, DenialBody's otherwise.
+func VerdictDenial(v pipeline.Verdict, id string, reqHeaders http.Header, jsonOK bool) Denial {
+	if d := v.DenyResponse; d != nil {
+		return Denial{ContentType: d.ContentType(), Body: d.Render(id), Custom: true}
+	}
+	return DenialBody(v.Status, id, reqHeaders, jsonOK)
+}
+
+// WriteDenial answers an unreadable request with status: its request ID in
+// X-Request-Id, and DenialBody's body. A verdict's denial is
+// WriteVerdictDenial's.
 func WriteDenial(w http.ResponseWriter, status int, id string, reqHeaders http.Header, jsonOK bool) {
-	d := DenialBody(status, id, reqHeaders, jsonOK)
+	writeDenial(w, status, id, DenialBody(status, id, reqHeaders, jsonOK))
+}
+
+// WriteVerdictDenial answers a request v denies (or whose response it
+// replaces) with v's status, the request ID in X-Request-Id, and
+// VerdictDenial's body. The caller sets Retry-After (SetRetryAfter).
+func WriteVerdictDenial(w http.ResponseWriter, v pipeline.Verdict, id string, reqHeaders http.Header, jsonOK bool) {
+	writeDenial(w, v.Status, id, VerdictDenial(v, id, reqHeaders, jsonOK))
+}
+
+func writeDenial(w http.ResponseWriter, status int, id string, d Denial) {
 	h := w.Header()
-	h.Del("Content-Length")
+	h.Set("Content-Length", strconv.Itoa(len(d.Body)))
 	h.Set("Content-Type", d.ContentType)
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Request-Id", id)
+	if d.Custom {
+		for _, kv := range CustomDenialHeaders {
+			h.Set(kv[0], kv[1])
+		}
+	}
 	w.WriteHeader(status)
 	_, _ = w.Write(d.Body)
 }

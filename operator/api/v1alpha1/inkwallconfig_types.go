@@ -548,6 +548,13 @@ type EngineSpec struct {
 	// +optional
 	JSONDenials bool `json:"jsonDenials,omitempty"`
 
+	// DenyResponse is the body of the denials of every WAFPolicy that sets
+	// no spec.denyResponse, instead of the engine's own (denialFormat's).
+	// It goes in the bundle, so it applies without restarting a pod.
+	// Requires engines 0.7.0 or later; older ones ignore it.
+	// +optional
+	DenyResponse *DenyResponse `json:"denyResponse,omitempty"`
+
 	// RateLimitKeys is the rate limit buckets each engine holds at once,
 	// for every policy's spec.rateLimits: about 48 bytes each, allocated
 	// with the first bundle that has limits, and at most a quarter of the

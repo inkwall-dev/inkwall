@@ -38,11 +38,11 @@ type exchange struct {
 // deniedResponse is the error inspectResponse returns for a response it
 // replaces: ReverseProxy then calls proxyError, which writes the denial.
 type deniedResponse struct {
-	status int
-	x      *exchange
+	v pipeline.Verdict
+	x *exchange
 }
 
-func (d *deniedResponse) Error() string { return fmt.Sprintf("response denied with %d", d.status) }
+func (d *deniedResponse) Error() string { return fmt.Sprintf("response denied with %d", d.v.Status) }
 
 // inspectResponse is ReverseProxy's ModifyResponse: it runs before any of
 // the response is written to the client. For a request whose policy
@@ -113,7 +113,7 @@ func (h *Handler) decideResponse(ctx context.Context, x *exchange, v pipeline.Ve
 		httpadapter.LogEvent(ctx, h.logger, h.events, x.req, x.path, v)
 	}
 	if v.Action == pipeline.ActionDeny {
-		return &deniedResponse{status: v.Status, x: x}
+		return &deniedResponse{v: v, x: x}
 	}
 	return nil
 }
@@ -125,10 +125,10 @@ func (h *Handler) proxyError(w http.ResponseWriter, r *http.Request, err error) 
 	var d *deniedResponse
 	if errors.As(err, &d) {
 		if g := httpadapter.GRPCOf(d.x.req.Headers); g != httpadapter.NotGRPC {
-			httpadapter.WriteGRPCDenial(w, g, http.StatusOK, d.status, d.x.req.ID)
+			httpadapter.WriteGRPCDenial(w, g, http.StatusOK, d.v.Status, d.x.req.ID)
 			return
 		}
-		httpadapter.WriteDenial(w, d.status, d.x.req.ID, d.x.req.Headers, h.jsonDenials)
+		httpadapter.WriteVerdictDenial(w, d.v, d.x.req.ID, d.x.req.Headers, h.jsonDenials)
 		return
 	}
 	h.proxy.ErrorLog.Printf("http: proxy error: %v", err)

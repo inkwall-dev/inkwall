@@ -66,6 +66,7 @@ func (p *Pipeline) CheckWebSocketMessage(ctx context.Context, handshake *request
 	v.Duration = time.Since(start)
 	v.WebSocketMessage = true
 	v.Policy = p.policy
+	v.DenyResponse = p.denyResponse
 	if p.observer != nil {
 		p.observer.ObserveVerdict(v)
 	}

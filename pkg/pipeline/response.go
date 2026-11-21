@@ -155,6 +155,7 @@ func (e *Exchange) checkResponse(ctx context.Context, resp *request.Response) Ve
 	v.Duration = time.Since(start)
 	v.Response = true
 	v.Policy = e.p.policy
+	v.DenyResponse = e.p.denyResponse
 	if e.p.observer != nil {
 		e.p.observer.ObserveVerdict(v)
 	}
@@ -185,6 +186,7 @@ func (e *Exchange) refused() Verdict {
 	v := e.p.failed(ReasonOverload)
 	v.Response = true
 	v.Policy = e.p.policy
+	v.DenyResponse = e.p.denyResponse
 	if e.p.observer != nil {
 		e.p.observer.ObserveVerdict(v)
 	}

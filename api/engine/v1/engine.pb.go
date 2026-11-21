@@ -435,9 +435,16 @@ type CheckResponse struct {
 	Matches []*RuleMatch `protobuf:"bytes,10,rep,name=matches,proto3" json:"matches,omitempty"`
 	// The request's inbound anomaly score (the Core Rule Set's), 0 when no
 	// rule added to it.
-	AnomalyScore  int32 `protobuf:"varint,11,opt,name=anomaly_score,json=anomalyScore,proto3" json:"anomaly_score,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	AnomalyScore int32 `protobuf:"varint,11,opt,name=anomaly_score,json=anomalyScore,proto3" json:"anomaly_score,omitempty"`
+	// With ACTION_DENY and a policy that sets spec.denyResponse (or an
+	// InkwallConfig that does), the denial's Content-Type and body (UTF-8,
+	// with the request ID in it), for the caller to answer the client with,
+	// as the other adapters do. Empty: the caller writes its own denial.
+	// Engines before 0.7.0 leave them empty.
+	DenyContentType string `protobuf:"bytes,12,opt,name=deny_content_type,json=denyContentType,proto3" json:"deny_content_type,omitempty"`
+	DenyBody        string `protobuf:"bytes,13,opt,name=deny_body,json=denyBody,proto3" json:"deny_body,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *CheckResponse) Reset() {
@@ -547,6 +554,20 @@ func (x *CheckResponse) GetAnomalyScore() int32 {
 	return 0
 }
 
+func (x *CheckResponse) GetDenyContentType() string {
+	if x != nil {
+		return x.DenyContentType
+	}
+	return ""
+}
+
+func (x *CheckResponse) GetDenyBody() string {
+	if x != nil {
+		return x.DenyBody
+	}
+	return ""
+}
+
 // RuleMatch is where a rule matched.
 type RuleMatch struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
@@ -625,7 +646,7 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\x06Header\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value\x12\x1b\n" +
-	"\traw_value\x18\x03 \x01(\fR\brawValue\"\xf8\x03\n" +
+	"\traw_value\x18\x03 \x01(\fR\brawValue\"\xc1\x04\n" +
 	"\rCheckResponse\x121\n" +
 	"\x06action\x18\x01 \x01(\x0e2\x19.inkwall.engine.v1.ActionR\x06action\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\rR\x06status\x12D\n" +
@@ -639,7 +660,9 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\x06policy\x18\t \x01(\tR\x06policy\x126\n" +
 	"\amatches\x18\n" +
 	" \x03(\v2\x1c.inkwall.engine.v1.RuleMatchR\amatches\x12#\n" +
-	"\ranomaly_score\x18\v \x01(\x05R\fanomalyScore\"@\n" +
+	"\ranomaly_score\x18\v \x01(\x05R\fanomalyScore\x12*\n" +
+	"\x11deny_content_type\x18\f \x01(\tR\x0fdenyContentType\x12\x1b\n" +
+	"\tdeny_body\x18\r \x01(\tR\bdenyBody\"@\n" +
 	"\tRuleMatch\x12\x17\n" +
 	"\arule_id\x18\x01 \x01(\rR\x06ruleId\x12\x1a\n" +
 	"\bvariable\x18\x02 \x01(\tR\bvariable*S\n" +

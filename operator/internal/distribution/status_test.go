@@ -124,7 +124,7 @@ func TestEnforcedSuspended(t *testing.T) {
 		{"resumed, status not written yet", 4, false, metav1.ConditionFalse, ReasonEnginesBehind},
 		{"served bundle older than the status", 2, false, metav1.ConditionTrue, ReasonEnforced},
 	} {
-		conds, _ := enforcedConditions(p, tc.served, tc.suspended, engines, nil, 0, 0)
+		conds, _ := enforcedConditions(p, false, tc.served, tc.suspended, engines, nil, 0, 0)
 		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
 		if c == nil || c.Status != tc.status || c.Reason != tc.reason {
 			t.Errorf("%s: Enforced %+v, want %s %s", tc.name, c, tc.status, tc.reason)
@@ -170,7 +170,7 @@ func TestEnforcedOutdatedEngine(t *testing.T) {
 		for i, v := range tc.versions {
 			engines = append(engines, Engine{ID: fmt.Sprintf("e%d", i), PodNamespace: "edge", PodName: fmt.Sprintf("traefik-%d", i), EngineVersion: v, Applied: 3})
 		}
-		conds, _ := enforcedConditions(p, 3, false, engines, nil, 0, 0)
+		conds, _ := enforcedConditions(p, false, 3, false, engines, nil, 0, 0)
 		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
 		if c == nil || c.Status != tc.status || c.Reason != tc.reason {
 			t.Errorf("%s: Enforced %+v, want %s %s", tc.name, c, tc.status, tc.reason)
@@ -203,7 +203,7 @@ func TestEnforcedOutdatedEngine(t *testing.T) {
 		for i, v := range tc.versions {
 			engines = append(engines, Engine{ID: fmt.Sprintf("e%d", i), PodNamespace: "edge", PodName: fmt.Sprintf("envoy-%d", i), EngineVersion: v, Applied: 3})
 		}
-		conds, _ := enforcedConditions(p, 3, false, engines, nil, 0, 0)
+		conds, _ := enforcedConditions(p, false, 3, false, engines, nil, 0, 0)
 		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
 		if c == nil || c.Reason != tc.reason || tc.reason == ReasonEnginesOutdated && !strings.Contains(c.Message, "spec.responses") {
 			t.Errorf("%s: Enforced %+v, want %s", tc.name, c, tc.reason)
@@ -233,7 +233,7 @@ func TestEnforcedOutdatedEngine(t *testing.T) {
 		for i, v := range tc.versions {
 			engines = append(engines, Engine{ID: fmt.Sprintf("e%d", i), PodNamespace: "edge", PodName: fmt.Sprintf("envoy-%d", i), EngineVersion: v, Applied: 3})
 		}
-		conds, _ := enforcedConditions(p, 3, false, engines, nil, 0, 0)
+		conds, _ := enforcedConditions(p, false, 3, false, engines, nil, 0, 0)
 		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
 		if c == nil || c.Reason != tc.reason || tc.reason == ReasonEnginesOutdated && (!strings.Contains(c.Message, "spec.ruleSets[0].crs") || !strings.Contains(c.Message, "0.5.0 or later")) {
 			t.Errorf("%s: Enforced %+v, want %s", tc.name, c, tc.reason)
@@ -263,7 +263,7 @@ func TestEnforcedOutdatedEngine(t *testing.T) {
 		for i, v := range tc.versions {
 			engines = append(engines, Engine{ID: fmt.Sprintf("e%d", i), PodNamespace: "edge", PodName: fmt.Sprintf("envoy-%d", i), EngineVersion: v, Applied: 3})
 		}
-		conds, _ := enforcedConditions(p, 3, false, engines, nil, 0, 0)
+		conds, _ := enforcedConditions(p, false, 3, false, engines, nil, 0, 0)
 		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
 		if c == nil || c.Reason != tc.reason || tc.reason == ReasonEnginesOutdated && (!strings.Contains(c.Message, "spec.ruleSets[1].placement") || !strings.Contains(c.Message, "0.6.0 or later")) {
 			t.Errorf("%s: Enforced %+v, want %s", tc.name, c, tc.reason)
@@ -289,7 +289,7 @@ func TestEnforcedOutdatedEngine(t *testing.T) {
 		for i, v := range tc.versions {
 			engines = append(engines, Engine{ID: fmt.Sprintf("e%d", i), PodNamespace: "edge", PodName: fmt.Sprintf("envoy-%d", i), EngineVersion: v, Applied: 3})
 		}
-		conds, _ := enforcedConditions(p, 3, false, engines, nil, 0, 0)
+		conds, _ := enforcedConditions(p, false, 3, false, engines, nil, 0, 0)
 		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
 		if c == nil || c.Reason != tc.reason || tc.reason == ReasonEnginesOutdated && !strings.Contains(c.Message, "spec.ipLists") {
 			t.Errorf("%s: Enforced %+v, want %s", tc.name, c, tc.reason)
@@ -315,7 +315,7 @@ func TestEnforcedOutdatedEngine(t *testing.T) {
 		for i, v := range tc.versions {
 			engines = append(engines, Engine{ID: fmt.Sprintf("e%d", i), PodNamespace: "edge", PodName: fmt.Sprintf("envoy-%d", i), EngineVersion: v, Applied: 3})
 		}
-		conds, _ := enforcedConditions(p, 3, false, engines, nil, 0, 0)
+		conds, _ := enforcedConditions(p, false, 3, false, engines, nil, 0, 0)
 		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
 		if c == nil || c.Reason != tc.reason || tc.reason == ReasonEnginesOutdated && !strings.Contains(c.Message, "spec.exclusions[1].when") {
 			t.Errorf("%s: Enforced %+v, want %s", tc.name, c, tc.reason)
@@ -326,7 +326,7 @@ func TestEnforcedOutdatedEngine(t *testing.T) {
 	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
 	p.Spec.WebSocket = ws
 	p.Status.BundleVersion = 3
-	conds, _ := enforcedConditions(p, 3, false, []Engine{{ID: "e", EngineVersion: "0.3.1", Applied: 2}}, nil, 0, 0)
+	conds, _ := enforcedConditions(p, false, 3, false, []Engine{{ID: "e", EngineVersion: "0.3.1", Applied: 2}}, nil, 0, 0)
 	if c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced); c == nil || c.Reason != ReasonEnginesBehind {
 		t.Errorf("behind and outdated: Enforced %+v, want EnginesBehind", c)
 	}
@@ -366,7 +366,7 @@ func TestEnforcedOutdatedEngineGRPCMessages(t *testing.T) {
 		for i, v := range tc.versions {
 			engines = append(engines, Engine{ID: fmt.Sprintf("e%d", i), PodNamespace: "edge", PodName: fmt.Sprintf("traefik-%d", i), EngineVersion: v, Applied: 3})
 		}
-		conds, _ := enforcedConditions(p, 3, false, engines, nil, 0, 0)
+		conds, _ := enforcedConditions(p, false, 3, false, engines, nil, 0, 0)
 		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
 		if c == nil || c.Reason != tc.reason {
 			t.Errorf("%s: Enforced %+v, want %s", tc.name, c, tc.reason)
@@ -393,7 +393,7 @@ func TestEnforcedOutdatedNewestField(t *testing.T) {
 	p.Spec.IPLists = &wafv1alpha1.IPListsSpec{Deny: []wafv1alpha1.IPListName{"blocked"}}
 	p.Status.BundleVersion = 3
 	engines := []Engine{{ID: "e0", PodNamespace: "edge", PodName: "traefik-0", EngineVersion: "0.4.1", Applied: 3}}
-	conds, _ := enforcedConditions(p, 3, false, engines, nil, 0, 0)
+	conds, _ := enforcedConditions(p, false, 3, false, engines, nil, 0, 0)
 	c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
 	if c == nil || c.Reason != ReasonEnginesOutdated || !strings.Contains(c.Message, "spec.ipLists") || !strings.Contains(c.Message, "0.5.0 or later") {
 		t.Errorf("a 0.4.1 engine and a policy with webSocket and ipLists: Enforced %+v, want EnginesOutdated naming spec.ipLists", c)
@@ -410,7 +410,7 @@ func TestEnforcedOutdatedNewestFieldPlacement(t *testing.T) {
 	p.Spec.IPLists = &wafv1alpha1.IPListsSpec{Deny: []wafv1alpha1.IPListName{"blocked"}}
 	p.Status.BundleVersion = 3
 	engines := []Engine{{ID: "e0", PodNamespace: "edge", PodName: "traefik-0", EngineVersion: "0.5.0", Applied: 3}}
-	conds, _ := enforcedConditions(p, 3, false, engines, nil, 0, 0)
+	conds, _ := enforcedConditions(p, false, 3, false, engines, nil, 0, 0)
 	c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
 	if c == nil || c.Reason != ReasonEnginesOutdated || !strings.Contains(c.Message, "spec.ruleSets[1].placement") || !strings.Contains(c.Message, "0.6.0 or later") {
 		t.Errorf("a 0.5.0 engine and a policy with crs, ipLists and a BeforeCRS rule set: Enforced %+v, want EnginesOutdated naming spec.ruleSets[1].placement", c)
@@ -428,12 +428,57 @@ func TestEnforcedOutdatedRateLimits(t *testing.T) {
 		outdated bool
 	}{{"0.6.1", true}, {"0.7.0", false}, {"0.7.1", false}} {
 		engines := []Engine{{ID: "e0", PodNamespace: "edge", PodName: "traefik-0", EngineVersion: tc.version, Applied: 3}}
-		conds, _ := enforcedConditions(p, 3, false, engines, nil, 0, 0)
+		conds, _ := enforcedConditions(p, false, 3, false, engines, nil, 0, 0)
 		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
 		outdated := c != nil && c.Reason == ReasonEnginesOutdated
 		if outdated != tc.outdated || outdated && (!strings.Contains(c.Message, "spec.rateLimits") || !strings.Contains(c.Message, "0.7.0 or later")) {
 			t.Errorf("a %s engine and a policy with rate limits: Enforced %+v, outdated %v want %v", tc.version, c, outdated, tc.outdated)
 		}
+	}
+}
+
+// A custom denial needs 0.7.0 (#725): an older engine answers with its own
+// body.
+func TestEnforcedOutdatedDenyResponse(t *testing.T) {
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
+	p.Spec.DenyResponse = &wafv1alpha1.DenyResponse{ContentType: "text/html", Body: "<p>Blocked</p>"}
+	p.Status.BundleVersion = 3
+	for _, tc := range []struct {
+		version  string
+		outdated bool
+	}{{"0.6.1", true}, {"0.7.0", false}} {
+		engines := []Engine{{ID: "e0", PodNamespace: "edge", PodName: "traefik-0", EngineVersion: tc.version, Applied: 3}}
+		conds, _ := enforcedConditions(p, false, 3, false, engines, nil, 0, 0)
+		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
+		outdated := c != nil && c.Reason == ReasonEnginesOutdated
+		if outdated != tc.outdated || outdated && (!strings.Contains(c.Message, "spec.denyResponse") || !strings.Contains(c.Message, "0.7.0 or later")) {
+			t.Errorf("a %s engine and a policy with a denyResponse: Enforced %+v, outdated %v want %v", tc.version, c, outdated, tc.outdated)
+		}
+	}
+}
+
+// The InkwallConfig's default denyResponse needs 0.7.0 too, for every
+// policy that sets none: the field named is the InkwallConfig's (#725).
+func TestEnforcedOutdatedDefaultDenyResponse(t *testing.T) {
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
+	p.Status.BundleVersion = 3
+	engines := []Engine{{ID: "e0", PodNamespace: "edge", PodName: "traefik-0", EngineVersion: "0.6.1", Applied: 3}}
+	conds, _ := enforcedConditions(p, true, 3, false, engines, nil, 0, 0)
+	c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
+	if c == nil || c.Reason != ReasonEnginesOutdated || !strings.Contains(c.Message, "the InkwallConfig's spec.engine.denyResponse") || !strings.Contains(c.Message, "0.7.0 or later") {
+		t.Errorf("a 0.6.1 engine and the InkwallConfig's denyResponse: Enforced %+v", c)
+	}
+	if conds, _ := enforcedConditions(p, false, 3, false, engines, nil, 0, 0); meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced).Reason == ReasonEnginesOutdated {
+		t.Error("EnginesOutdated without a denyResponse")
+	}
+	// The policy's own is the one named.
+	p.Spec.DenyResponse = &wafv1alpha1.DenyResponse{ContentType: "text/plain", Body: "no"}
+	conds, _ = enforcedConditions(p, true, 3, false, engines, nil, 0, 0)
+	if c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced); !strings.Contains(c.Message, "too old to enforce spec.denyResponse") {
+		t.Errorf("the policy's own: %q", c.Message)
+	}
+	if n := engineCounts(engines, 0, 3, []wafv1alpha1.WAFPolicy{{}}, true); n.Outdated != 1 {
+		t.Errorf("engine counts with the default: %+v, want 1 outdated", n)
 	}
 }
 

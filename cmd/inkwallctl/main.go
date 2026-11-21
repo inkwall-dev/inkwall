@@ -466,6 +466,10 @@ func describe(in *enginev1.CheckRequest, out *enginev1.CheckResponse) string {
 	if score := out.GetAnomalyScore(); score != 0 {
 		fmt.Fprintf(&b, "  score=%d", score)
 	}
+	if ct := out.GetDenyContentType(); ct != "" {
+		// The policy's spec.denyResponse (--json has the body).
+		fmt.Fprintf(&b, "  denial=%q,%dB", ct, len(out.GetDenyBody()))
+	}
 	fmt.Fprintf(&b, "  %s", out.GetInspectionTime().AsDuration().Round(time.Microsecond))
 	return b.String()
 }

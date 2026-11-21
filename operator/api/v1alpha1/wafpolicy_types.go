@@ -177,6 +177,16 @@ type WAFPolicySpec struct {
 	// +optional
 	// +listType=atomic
 	RateLimits []RateLimit `json:"rateLimits,omitempty"`
+
+	// DenyResponse is the body of the policy's denials (by a rule, an IP
+	// list, the WebSocket or gRPC checks, a rate limit, a request that
+	// couldn't be inspected in time, a response replaced), instead of the
+	// engine's own text, with the denial's status. Unset: the
+	// InkwallConfig's spec.engine.denyResponse, if set. Through Traefik,
+	// Envoy Gateway, Istio and the engine's check API; HAProxy writes its
+	// own denials. Requires engines 0.7.0 or later.
+	// +optional
+	DenyResponse *DenyResponse `json:"denyResponse,omitempty"`
 }
 
 // RateLimit is a token bucket per key: it holds at most burst requests and

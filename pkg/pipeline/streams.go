@@ -48,6 +48,7 @@ func (e *Exchange) CheckEvent(ctx context.Context, req *request.Request, stream 
 	v.Response = true
 	v.StreamEvent = n
 	v.Policy = p.policy
+	v.DenyResponse = p.denyResponse
 	if p.observer != nil {
 		p.observer.ObserveVerdict(v)
 	}

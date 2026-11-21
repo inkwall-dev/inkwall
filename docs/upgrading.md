@@ -94,6 +94,19 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   ([HAProxy](haproxy.md)), or limited clients get 403. A SecLang rule that denies with
   `status:429` now answers gRPC calls with `RESOURCE_EXHAUSTED` instead of `UNAVAILABLE`.
 
+- **Custom denial responses** (`WAFPolicy.spec.denyResponse`, and the default
+  `InkwallConfig.spec.engine.denyResponse`, [Denial responses](denial-responses.md)): an HTML page
+  or a JSON document of your own, with the request ID in it, in place of `Forbidden`. Upgrade the
+  chart first, then the engines: an engine before 0.7.0 answers with its own body, and while one
+  runs a policy that sets it, the policy is `Enforced=False`, `EnginesOutdated`, naming
+  `spec.denyResponse`; while the InkwallConfig sets the default, every policy without its own is,
+  naming the InkwallConfig's `spec.engine.denyResponse`. HAProxy routes keep HAProxy's own
+  denials. A custom denial carries `Cache-Control: no-store` and a `Content-Security-Policy` that
+  lets a page style itself and show `data:` images, nothing else. The engine's denials now carry
+  `Content-Length` (Go's server set it on them before too); nothing else changes for policies
+  that don't set it. The check API's answer has two new fields, `deny_content_type` and
+  `deny_body`, set only for a policy with a custom denial.
+
 - **The HAProxy Kubernetes Ingress Controller 3.4** (the default of its chart since 1.55.0) is
   wired: 3.4 dropped the config snippets the operator loads the filter with on 3.1 to 3.2, so on
   3.4 each protected Ingress gets a `Backend` custom resource of the controller's
