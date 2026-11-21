@@ -280,9 +280,10 @@ A `POST` of the events in the schema of [§5.1](#51-json), compressed with gzip 
 `compression: None`, in one of two framings:
 
 - **`Lines`** ([NDJSON](https://github.com/ndjson/ndjson-spec), `application/x-ndjson`): one event
-  per line. Splunk's HEC raw endpoint, Logstash's `http` input, Vector and Fluent Bit take it.
-- **`Array`** (`application/json`): one JSON array. Datadog's HTTP logs intake, Sumo Logic and most
-  webhook-style receivers take it.
+  per line. Splunk's HEC raw endpoint, Logstash's `http` input, Vector and Sumo Logic's HTTP
+  source take it.
+- **`Array`** (`application/json`): one JSON array. Datadog's HTTP logs intake, Fluent Bit's
+  `http` input and most webhook-style receivers take it.
 
 Every attacker-controlled field is a JSON string, so a newline in a path or user agent is escaped
 (`\n`) and can't start a fake event in `Lines`. The encoder's fuzz test checks it
@@ -321,7 +322,7 @@ the HTTP sink ([§9](#9-testing)).
 | Elastic | `otlp` to Elastic's OTLP intake (APM Server or the Elastic Distribution of the Collector) | Or `json`, `Lines`, to Logstash's `http` input. Deduplicate by setting the document `_id` to `event_id` in the pipeline |
 | Grafana Loki (3.0 and later) | `otlp`, HTTP, to `/otlp/v1/logs` | Loki turns a default list of resource attributes into labels, `k8s.pod.name` among them; the guide shows how to drop the pod from the labels (its cardinality grows with every rollout) and keep it as structured metadata |
 | Datadog | `otlp` to the Datadog Agent's OTLP receiver, or a Collector with the `datadog` exporter | Or `json`, `Array`, to the HTTP logs intake with `DD-API-KEY` from the Secret |
-| Sumo Logic | `json`, `Array`, to an HTTP source | The source's URL holds its token: give it with `json.urlSecretRef`, not `json.url` |
+| Sumo Logic | `json`, `Lines`, to an HTTP source | The source's URL holds its token: give it with `json.urlSecretRef`, not `json.url`. Sumo Logic documents one event per line, not arrays |
 | Microsoft Sentinel | A Collector with the Azure Monitor exporter | |
 | QRadar, ArcSight and other syslog receivers | A Collector with the syslog exporter | [§3.3](#33-syslog-deferred) |
 | Vector, Fluent Bit, Logstash | `json`, `Lines`, to their HTTP input | Then anywhere they route |

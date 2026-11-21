@@ -217,7 +217,7 @@ func (b *buffer) load() error {
 		s.before = b.totalEvents
 		b.totalEvents += count(s.events)
 		b.events += count(s.events)
-		b.allBytes += s.size
+		b.allBytes += b.footprint(s.size)
 	}
 	b.memIdx = len(b.batches)
 	// A new batch never takes a number a cursor has passed.
@@ -351,7 +351,7 @@ func (b *buffer) add(in *eventsv1.EventBatch) {
 	b.next++
 	b.batches = append(b.batches, s)
 	b.memBytes += size
-	b.allBytes += size
+	b.allBytes += b.footprint(size)
 	b.events += count(n)
 	b.totalEvents += count(n)
 	b.enforce()
@@ -423,7 +423,7 @@ func (b *buffer) dropAt(i int) {
 	if s.raw != nil {
 		b.memBytes -= s.size
 	}
-	b.allBytes -= s.size
+	b.allBytes -= b.footprint(s.size)
 	b.events -= count(s.events)
 	b.midDropped += count(s.events)
 	b.gaps = append(b.gaps, gap{seq: s.seq, cum: b.midDropped})
@@ -474,7 +474,7 @@ func (b *buffer) popFront() {
 	if s.raw != nil {
 		b.memBytes -= s.size
 	}
-	b.allBytes -= s.size
+	b.allBytes -= b.footprint(s.size)
 	b.events -= count(s.events)
 	b.removeBelow = s.seq + 1
 	// Gaps behind the oldest batch count for no cursor any more.
@@ -786,6 +786,20 @@ func batchFile(w toWrite) []byte {
 	binary.BigEndian.PutUint64(out[4:12], uint64(w.observed.UnixNano())) // #nosec G115 -- a time after 1970
 	binary.BigEndian.PutUint32(out[12:], uint32(min(w.events, 1<<31)))   // #nosec G115 -- capped
 	return append(out, w.raw...)
+}
+
+// diskBlock is the unit a file takes on disk: the kubelet measures an
+// emptyDir's use in blocks, so a small file counts as a whole one.
+const diskBlock = 4 << 10
+
+// footprint is what a batch of size bytes counts toward the bounds: with a
+// directory, its file rounded up to whole blocks, so the disk bound holds
+// as the kubelet measures the emptyDir (its sizeLimit); in memory, its size.
+func (b *buffer) footprint(size int64) int64 {
+	if b.dir == "" {
+		return size
+	}
+	return (size + batchHeader + diskBlock - 1) / diskBlock * diskBlock
 }
 
 // count is n as a count: never below 0.

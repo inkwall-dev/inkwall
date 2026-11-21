@@ -170,7 +170,7 @@ cleanup() {
   if $cut_applied; then "${KUBECTL[@]}" -n "$OPERATOR_NS" delete networkpolicy bt-soak-cut --ignore-not-found >/dev/null 2>&1 || true; fi
   stacks_cleanup
   if [[ $SOAK_EXPORT == 1 && -z ${KEEP:-} ]]; then
-    "${KUBECTL[@]}" patch inkwallconfig default --type=json -p '[{"op":"remove","path":"/spec/events/export"}]' >/dev/null 2>&1 || true
+    export_restore
     "${KUBECTL[@]}" delete namespace "$EXPORT_NS" --wait=false >/dev/null 2>&1 || true
   fi
   rm -rf "$work"

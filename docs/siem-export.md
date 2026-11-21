@@ -148,8 +148,9 @@ replica's buffer holds their events:
 
 - Retried: connection, TLS and timeout errors; HTTP 429, 502, 503, 504; gRPC `UNAVAILABLE`,
   `DEADLINE_EXCEEDED`, `ABORTED`, `CANCELLED`, `OUT_OF_RANGE`, `DATA_LOSS`, and
-  `RESOURCE_EXHAUSTED` with `RetryInfo`; and for `json` sinks HTTP 408 and 500 too.
-  `Retry-After` and `RetryInfo` set the wait, up to 5 minutes.
+  `RESOURCE_EXHAUSTED` with `RetryInfo`, or without it on a request of 1 MiB or less (a quota:
+  throttled); and for `json` sinks HTTP 408 and 500 too. `Retry-After` and `RetryInfo` set the
+  wait, up to 5 minutes.
 - Retried with backoff, up to a minute apart: HTTP 401 and 403, gRPC `UNAUTHENTICATED` and
   `PERMISSION_DENIED`, so a fixed Secret resumes the flow without losing what waited.
 - Halved: HTTP 413, and gRPC `RESOURCE_EXHAUSTED` without `RetryInfo` on a request over 1 MiB.
@@ -421,7 +422,7 @@ about 50; at 1,000 a second, about 8 minutes. On shutdown a replica sends what i
 to 15 seconds (`--export-flush-timeout`); the chart's `terminationGracePeriodSeconds` (30) leaves
 room for it.
 
-The memory limit must hold the buffer: the chart's default (768 MiB) and the formula are in its
+The memory limit must hold the buffer: the chart's default (1 GiB) and the formula are in its
 `values.yaml`. Alert on the engines' own drops too
 (`inkwall_operator_engine_events_dropped_total`): a gap no sink sees.
 

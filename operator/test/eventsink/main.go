@@ -13,7 +13,8 @@
 // next answers: POST /mode?status=503, ?status=429&retryAfter=2, ?hang=1
 // (requests wait until the next mode), ?fail=0.5 (that share of the
 // requests, at random, answered 503), or ?status=200 (the default).
-// POST /reset forgets what it saw. It keeps the newest --keep requests, and
+// POST /reset forgets what it saw. It keeps the newest --keep requests, of
+// --keep-bytes of bodies at most, and
 // counts them all (accepted, acceptedEvents: those answered 2xx), so a
 // soak can run it for a day.
 package main
@@ -60,13 +61,16 @@ type request struct {
 	Encoding    string            `json:"encoding"`
 	Headers     map[string]string `json:"headers"`
 	Events      []map[string]any  `json:"events"`
-	Status      int               `json:"status"`
+	size        int
+	Status      int `json:"status"`
 }
 
 type sink struct {
 	mu         sync.Mutex
 	requests   []request
 	keep       int
+	keepBytes  int
+	kept       int // the bytes of the bodies kept
 	received   int
 	accepted   int
 	acceptedEv int
@@ -145,8 +149,11 @@ func (s *sink) intake(w http.ResponseWriter, r *http.Request) {
 		s.acceptedEv += len(req.Events)
 	}
 	s.requests = append(s.requests, req)
-	if len(s.requests) > s.keep {
-		s.requests = s.requests[len(s.requests)-s.keep:]
+	req.size = len(raw)
+	s.kept += req.size
+	for len(s.requests) > s.keep || (s.kept > s.keepBytes && len(s.requests) > 1) {
+		s.kept -= s.requests[0].size
+		s.requests = s.requests[1:]
 	}
 	s.mu.Unlock()
 	if retryAfter != "" {
@@ -165,7 +172,7 @@ func (s *sink) admin() http.Handler {
 	})
 	mux.HandleFunc("POST /reset", func(w http.ResponseWriter, _ *http.Request) {
 		s.mu.Lock()
-		s.requests, s.received, s.accepted, s.acceptedEv = nil, 0, 0, 0
+		s.requests, s.kept, s.received, s.accepted, s.acceptedEv = nil, 0, 0, 0, 0
 		s.mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -249,8 +256,9 @@ func run() error {
 	flag.Var(&headers, "header", "a request header to record (repeatable)")
 	flag.Var(&names, "dns-name", "a name of the TLS certificate (repeatable)")
 	keep := flag.Int("keep", 1000, "the newest requests kept for /stats")
+	keepBytes := flag.Int("keep-bytes", 32<<20, "the most bytes of request bodies kept for /stats")
 	flag.Parse()
-	s := &sink{status: http.StatusOK, headers: headers, keep: max(*keep, 1)}
+	s := &sink{status: http.StatusOK, headers: headers, keep: max(*keep, 1), keepBytes: max(*keepBytes, 1)}
 	cert, caPEM, err := newCertificate(names)
 	if err != nil {
 		return err

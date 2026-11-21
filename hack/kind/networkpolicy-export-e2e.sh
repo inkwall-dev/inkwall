@@ -102,7 +102,7 @@ sleep 20
 np_attack >/dev/null
 sleep 10
 if [[ $(np_sink_requests) == 0 ]]; then
-  ok "the sink gets nothing while the egress policy doesn't list it"
+  ok "the sink gets nothing in 30 s (30 times the batch delay) while the egress policy doesn't list it"
 else
   fail "the sink got $(np_sink_requests) requests through the egress policy"
 fi
