@@ -110,8 +110,20 @@ such an ID. It is escaped for the content type all the same: HTML-escaped for `t
 a JSON string for the JSON types (put the token inside quotes: `"id":"{{request_id}}"`), as it is
 for `text/plain`.
 
+The client chooses the ID, within that alphabet: in HTML, put `{{request_id}}` only in text or in a
+quoted attribute (`<code>{{request_id}}</code>`, `data-ref="{{request_id}}"`), never in an `href`
+or `src` (`javascript:alert` is 16 such characters) nor in a `<script>` or `<style>`.
+
 Every denial also carries `X-Request-Id`, `X-Content-Type-Options: nosniff` and its
-`Content-Length`.
+`Content-Length`. A custom one carries two more:
+
+| Header | Why |
+|---|---|
+| `Cache-Control: no-store` | The page names one request: no cache or proxy keeps it for another |
+| `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:` | The page may style itself and show inline (`data:`) images; no script runs, nothing is loaded from anywhere, no form posts |
+
+So write the page self-contained: styles in a `<style>` element or `style` attributes, images as
+`data:` URLs, no external fonts, scripts or stylesheets.
 
 ## Through each proxy
 
@@ -120,7 +132,7 @@ Every denial also carries `X-Request-Id`, `X-Content-Type-Options: nosniff` and 
 | Traefik (ForwardAuth) | Yes: Traefik copies the engine's answer to the client |
 | Envoy Gateway, Istio, raw Envoy (ext_proc) | Yes, in the immediate response |
 | The standalone proxy | Yes |
-| The check API (`POST /v1/check`) | `deny_content_type` and `deny_body` in the answer, for the caller to send |
+| The check API (`POST /v1/check`) | `deny_content_type` and `deny_body` in the answer, and `Cache-Control` and `Content-Security-Policy` in its `response_headers`, for the caller to send; none of them for a gRPC call |
 | HAProxy (SPOE) | No: HAProxy writes its own denials, so its routes keep the fixed body ([HAProxy](haproxy.md)) |
 
 ## Testing it
@@ -138,9 +150,9 @@ deny  403  GET /search?q=1'%20OR%20'1'='1  policy=shop/storefront  reason=rule  
 Upgrade the chart first (the CRD fields, the webhook, the operator), then the engines. An engine
 before 0.7.0 ignores both fields and answers with its own body: while one runs a policy that sets
 `denyResponse`, the policy is `Enforced=False`, reason `EnginesOutdated`, naming
-`spec.denyResponse`. The InkwallConfig's default isn't a policy's field, so no policy names it:
-check that `inkwallctl status` shows no engine before 0.7.0. Rolling the operator back below 0.7.0
-drops both without a word.
+`spec.denyResponse`. While the InkwallConfig sets `spec.engine.denyResponse`, the same holds for
+every policy that sets none, naming the InkwallConfig's field. Rolling the operator back below
+0.7.0 drops both without a word.
 
 ## Design decisions
 
@@ -154,7 +166,9 @@ drops both without a word.
   type and the size in bytes, the webhook that a JSON body parses, and the engine the type, the
   size and UTF-8 again when it compiles the bundle (a bundle from elsewhere, `inkwallctl test
   --bundle`). The engine serves a JSON body that doesn't parse as it is, rather than refuse a
-  bundle for it.
+  bundle for it. A hand-made bundle with a `deny_response` the engine refuses (another content
+  type, over 8 KiB, not UTF-8) is refused whole, as any invalid bundle is: the engine keeps the
+  bundle it runs and reports the error, so the policy isn't `Enforced` (`EngineNack`).
 - **Every verdict's denial, not the adapter's own.** A 400 for a request an adapter can't read
   has no policy; a gRPC call needs its gRPC status, not a body.
 - **The policy's, then the InkwallConfig's, then the engine's**, resolved when the engine compiles

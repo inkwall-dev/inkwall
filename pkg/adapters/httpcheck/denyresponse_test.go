@@ -33,6 +33,18 @@ func TestDenyResponse(t *testing.T) {
 		out.GetDenyBody() != "<p>Blocked: "+out.GetRequestId()+"</p>" {
 		t.Errorf("deny: %v %d %q %q", out.GetAction(), out.GetStatus(), out.GetDenyContentType(), out.GetDenyBody())
 	}
+	headers := map[string]string{}
+	for _, hd := range out.GetResponseHeaders() {
+		headers[hd.GetName()] = hd.GetValue()
+	}
+	if headers["Cache-Control"] != "no-store" || headers["Content-Security-Policy"] != "default-src 'none'; style-src 'unsafe-inline'; img-src data:" || headers["X-Request-Id"] != out.GetRequestId() {
+		t.Errorf("deny: response headers %v", headers)
+	}
+	// A gRPC call: its gRPC status, no body, as the other adapters answer it.
+	grpc := checkRequest("POST", "/shop.Cart/Add?id=1%27%20OR%20%271%27%3D%271", "application/grpc", "\x00\x00\x00\x00\x00")
+	if out := send(t, h, grpc); out.GetAction() != enginev1.Action_ACTION_DENY || out.GetDenyContentType() != "" || out.GetDenyBody() != "" || len(out.GetResponseHeaders()) != 1 {
+		t.Errorf("gRPC deny: %v %q %q %v", out.GetAction(), out.GetDenyContentType(), out.GetDenyBody(), out.GetResponseHeaders())
+	}
 	if out := send(t, h, checkRequest("GET", "/products?id=1", "", "")); out.GetDenyContentType() != "" || out.GetDenyBody() != "" {
 		t.Errorf("allow: %q %q", out.GetDenyContentType(), out.GetDenyBody())
 	}

@@ -502,8 +502,6 @@ func responseWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
 		"The requests are inspected either way; the policy's Programmed condition says which responses are not (ResponsesNotInspected)"}
 }
 
-// checkWebSocket accepts what the engine compiles: one entry the engine
-// refused would make it refuse the whole bundle.
 // checkDenyResponse rejects a denial body the engine would refuse, and a
 // JSON one that isn't a JSON document (which the engine would serve as it
 // is): the CRD checks its content type and size only.
@@ -521,6 +519,8 @@ func checkDenyResponse(path *field.Path, d *wafv1alpha1.DenyResponse) field.Erro
 	return nil
 }
 
+// checkWebSocket accepts what the engine compiles: one entry the engine
+// refused would make it refuse the whole bundle.
 func checkWebSocket(path *field.Path, w *wafv1alpha1.WebSocketSpec) field.ErrorList {
 	var errs field.ErrorList
 	for i, o := range w.AllowedOrigins {

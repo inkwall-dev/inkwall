@@ -57,12 +57,13 @@ func TestDenyResponse(t *testing.T) {
 	got := immediateHeaders(resps[0])
 	want := `{"type":"about:blank","title":"Too many requests","request_id":"envoy-id-1"}`
 	if denied(t, resps[0]) != 429 || got["content-type"] != "application/problem+json" || got["retry-after"] != "30" ||
-		got["x-request-id"] != "envoy-id-1" || string(resps[0].GetImmediateResponse().GetBody()) != want {
+		got["x-request-id"] != "envoy-id-1" || string(resps[0].GetImmediateResponse().GetBody()) != want ||
+		got["cache-control"] != "no-store" || got["content-security-policy"] != "default-src 'none'; style-src 'unsafe-inline'; img-src data:" {
 		t.Errorf("denial: %d %v %q", denied(t, resps[0]), got, resps[0].GetImmediateResponse().GetBody())
 	}
 
 	resps = e.exchange(t, headers("POST", "/shop.Cart/Add", true, "content-type", "application/grpc"))
-	if ir := resps[0].GetImmediateResponse(); len(ir.GetBody()) != 0 || ir.GetGrpcStatus().GetStatus() != 8 {
+	if ir := resps[0].GetImmediateResponse(); len(ir.GetBody()) != 0 || ir.GetGrpcStatus().GetStatus() != 8 || immediateHeaders(resps[0])["content-security-policy"] != "" {
 		t.Errorf("gRPC denial: body %q, grpc_status %v; want none and 8", ir.GetBody(), ir.GetGrpcStatus())
 	}
 }

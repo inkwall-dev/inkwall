@@ -22,6 +22,21 @@ import (
 type Denial struct {
 	ContentType string
 	Body        []byte
+	// Custom: the policy's spec.denyResponse, served with the
+	// CustomDenialHeaders too.
+	Custom bool
+}
+
+// DenialCSP is the Content-Security-Policy of a custom denial: an HTML
+// page of the user's may style itself and show inline images, nothing
+// else (no script, no frame, no request anywhere).
+const DenialCSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:"
+
+// CustomDenialHeaders are the headers a custom denial (Denial.Custom) gets
+// beyond the others': not cached (it names one request), and DenialCSP.
+var CustomDenialHeaders = [...][2]string{
+	{"Cache-Control", "no-store"},
+	{"Content-Security-Policy", DenialCSP},
 }
 
 // DenialBody returns the body of a denial with status for the request
@@ -42,7 +57,7 @@ func DenialBody(status int, id string, reqHeaders http.Header, jsonOK bool) Deni
 // policy's (v.DenyResponse) when it has one, DenialBody's otherwise.
 func VerdictDenial(v pipeline.Verdict, id string, reqHeaders http.Header, jsonOK bool) Denial {
 	if d := v.DenyResponse; d != nil {
-		return Denial{ContentType: d.ContentType(), Body: d.Render(id)}
+		return Denial{ContentType: d.ContentType(), Body: d.Render(id), Custom: true}
 	}
 	return DenialBody(v.Status, id, reqHeaders, jsonOK)
 }
@@ -67,6 +82,11 @@ func writeDenial(w http.ResponseWriter, status int, id string, d Denial) {
 	h.Set("Content-Type", d.ContentType)
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Request-Id", id)
+	if d.Custom {
+		for _, kv := range CustomDenialHeaders {
+			h.Set(kv[0], kv[1])
+		}
+	}
 	w.WriteHeader(status)
 	_, _ = w.Write(d.Body)
 }

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,7 +42,7 @@ func TestDenyResponse(t *testing.T) {
 	target, _ := url.Parse(up.srv.URL)
 	var logs bytes.Buffer
 	h, err := New(pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 10 * time.Second,
-		Responses: inspect(64 << 10), RateLimits: rl, DenyResponse: deny}),
+		Responses: inspect(64 << 10), RateLimits: rl, Oversize: pipeline.OversizeDeny, DenyResponse: deny}),
 		Config{Upstream: target, MaxBodyBytes: 64 << 10, Logger: slog.New(slog.NewJSONHandler(&logs, nil)), JSONDenials: true})
 	if err != nil {
 		t.Fatal(err)
@@ -54,9 +55,9 @@ func TestDenyResponse(t *testing.T) {
 		StatusCode int
 		Header     http.Header
 	}
-	get := func(path string, header ...string) (answer, string) {
+	send := func(method, path, body string, header ...string) (answer, string) {
 		t.Helper()
-		req, _ := http.NewRequest("GET", srv.URL+path, nil)
+		req, _ := http.NewRequest(method, srv.URL+path, strings.NewReader(body))
 		req.Header.Set("User-Agent", "Mozilla/5.0 inkwall-test")
 		req.Header.Set("Accept", "application/json")
 		for i := 0; i+1 < len(header); i += 2 {
@@ -70,14 +71,25 @@ func TestDenyResponse(t *testing.T) {
 		_ = resp.Body.Close()
 		return answer{resp.StatusCode, resp.Header}, string(b)
 	}
-	custom := func(name string, resp answer, body string, status int) {
+	get := func(path string, header ...string) (answer, string) {
+		t.Helper()
+		return send("GET", path, "", header...)
+	}
+	// custom checks a custom denial; a HEAD's has no body, but the GET's
+	// Content-Length.
+	custom := func(name string, resp answer, body string, status int, head ...bool) {
 		t.Helper()
 		id := resp.Header.Get("X-Request-Id")
 		want := "<h1>Blocked</h1><p>Request " + id + "</p>"
+		length := len(want)
+		if len(head) > 0 && head[0] {
+			want = ""
+		}
 		if resp.StatusCode != status || id == "" || body != want || resp.Header.Get("Content-Type") != "text/html; charset=utf-8" ||
-			resp.Header.Get("Content-Length") != strconv.Itoa(len(want)) || resp.Header.Get("X-Content-Type-Options") != "nosniff" {
-			t.Errorf("%s: %d, X-Request-Id %q, Content-Type %q, Content-Length %q, body %q; want %d and %q", name, resp.StatusCode, id,
-				resp.Header.Get("Content-Type"), resp.Header.Get("Content-Length"), body, status, want)
+			resp.Header.Get("Content-Length") != strconv.Itoa(length) || resp.Header.Get("X-Content-Type-Options") != "nosniff" ||
+			resp.Header.Get("Cache-Control") != "no-store" ||
+			resp.Header.Get("Content-Security-Policy") != "default-src 'none'; style-src 'unsafe-inline'; img-src data:" {
+			t.Errorf("%s: %d, headers %v, body %q; want %d and %q", name, resp.StatusCode, resp.Header, body, status, want)
 		}
 	}
 
@@ -107,10 +119,22 @@ func TestDenyResponse(t *testing.T) {
 		t.Errorf("rate limit: Retry-After %q", resp.Header.Get("Retry-After"))
 	}
 
+	// A HEAD gets the denial's headers, without its body.
+	resp, body = send("HEAD", "/products?id=1%27%20OR%20%271%27%3D%271", "")
+	custom("HEAD", resp, body, 403, true)
+
+	// A body over the limit, with onOversize Deny: 413.
+	resp, body = send("POST", "/upload", strings.Repeat("a", 65<<10), "Content-Type", "text/plain")
+	custom("oversize", resp, body, 413)
+
 	// gRPC: HTTP 200 and the gRPC status, no body.
 	resp, body = get("/shop.Cart/Add?id=1%27%20OR%20%271%27%3D%271", "Content-Type", "application/grpc-web")
 	if resp.StatusCode != 200 || resp.Header.Get("Grpc-Status") != "7" || body != "" {
 		t.Errorf("gRPC-Web: %d, grpc-status %q, body %q; want 200, 7 and none", resp.StatusCode, resp.Header.Get("Grpc-Status"), body)
+	}
+
+	if resp.Header.Get("Content-Security-Policy") != "" {
+		t.Errorf("gRPC-Web: a CSP %q", resp.Header.Get("Content-Security-Policy"))
 	}
 
 	// A request the proxy can't read: the fixed 400.
@@ -118,7 +142,7 @@ func TestDenyResponse(t *testing.T) {
 	r.Host = "bad host"
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
-	if w.Code != 400 || w.Body.String() != "Bad Request\n" {
+	if w.Code != 400 || w.Body.String() != "Bad Request\n" || w.Header().Get("Content-Security-Policy") != "" {
 		t.Errorf("400: %d %q", w.Code, w.Body.String())
 	}
 }

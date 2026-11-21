@@ -45,6 +45,10 @@ func TestDenyResponse(t *testing.T) {
 		t.Errorf("denial: %d, headers %v, body %q; want 429 and %q", w.Code, w.Header(), w.Body.String(), want)
 	}
 
+	if w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Content-Security-Policy") != "default-src 'none'; style-src 'unsafe-inline'; img-src data:" {
+		t.Errorf("denial: Cache-Control %q, Content-Security-Policy %q", w.Header().Get("Cache-Control"), w.Header().Get("Content-Security-Policy"))
+	}
+
 	w = serve(h, grpcSubrequest("/shop.Cart/Add", grpcMessages("x")))
 	if w.Header().Get("Grpc-Status") != "8" || w.Body.Len() != 0 {
 		t.Errorf("gRPC: grpc-status %q, body %q; want 8 and none", w.Header().Get("Grpc-Status"), w.Body.String())

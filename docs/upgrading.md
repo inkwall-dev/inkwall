@@ -98,7 +98,10 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   or a JSON document of your own, with the request ID in it, in place of `Forbidden`. Upgrade the
   chart first, then the engines: an engine before 0.7.0 answers with its own body, and while one
   runs a policy that sets it, the policy is `Enforced=False`, `EnginesOutdated`, naming
-  `spec.denyResponse`. HAProxy routes keep HAProxy's own denials. The engine's denials now carry
+  `spec.denyResponse`; while the InkwallConfig sets the default, every policy without its own is,
+  naming the InkwallConfig's `spec.engine.denyResponse`. HAProxy routes keep HAProxy's own
+  denials. A custom denial carries `Cache-Control: no-store` and a `Content-Security-Policy` that
+  lets a page style itself and show `data:` images, nothing else. The engine's denials now carry
   `Content-Length` (Go's server set it on them before too); nothing else changes for policies
   that don't set it. The check API's answer has two new fields, `deny_content_type` and
   `deny_body`, set only for a policy with a custom denial.
