@@ -121,8 +121,25 @@ it, and the other annotations do nothing without ModSecurity on.
 | `SecRequestBodyAccess`, `SecRequestBodyLimit`, `SecRequestBodyLimitAction` | `body.inspect`, `body.maxBytes`, `body.onOversize` |
 | `SecRequestBodyLimitAction ProcessPartial` without `SecRequestBodyLimit` | `body.onOversize: Allow` and `body.maxBytes` of `modsecurity.conf`'s limit (12.5 MiB) capped at 10 MiB; `TODO` when `modsecurity.conf` isn't loaded |
 | `Include .../modsecurity.conf` after body directives | `TODO`: the file sets them again, so those above it are left out |
-| A `ctl` action in a chained rule (`chain`), on any of its rules | `TODO`: the `ctl` runs only when the whole chain matches, which an exclusion or skipped path can't express |
-| Other `SecRule` and `SecAction` rules (a chain with all its rules), and `SecRuleRemoveById` ranges, tags and messages to remove | Kept as they are in a `WAFRuleSet` named `<ingress>-modsecurity`, loaded after the CRS |
+| A `ctl` action in a chained rule (`chain`), on any of its rules | Kept as it is if ModSecurity ran it before the CRS (see below); otherwise `TODO`: the `ctl` runs only when the whole chain matches, which an exclusion or skipped path can't express |
+| A `ctl` rule that doesn't map to an exclusion (keyed on a header's value, `@rx`...), a `SecAction` setting CRS variables without a `WAFPolicy` field | Kept as it is if ModSecurity ran it before the CRS; otherwise `TODO` |
+| Other `SecRule` and `SecAction` rules (a chain with all its rules), and `SecMarker` | Kept as they are, in the order ModSecurity ran them: those it ran before the CRS in a `WAFRuleSet` named `<ingress>-modsecurity-before-crs` bound with `placement: BeforeCRS`, the others in one named `<ingress>-modsecurity` |
+| `SecRuleRemoveById` ranges, `SecRuleRemoveByTag`, `SecRuleRemoveByMsg`, `SecRuleUpdate*` that don't map to exclusions | Kept as they are in `<ingress>-modsecurity`, after the CRS, wherever they were: they change the rules loaded before them |
+
+Which rules ran before the CRS follows from where ingress-nginx loads them. nginx runs a location's
+ModSecurity rules, from the Ingress's annotations, before the http block's, from the ConfigMap
+(libmodsecurity's nginx module appends the http block's rules when it merges the two). In each, the
+rules run in the order they're read: a `modsecurity-snippet` first, then the CRS of
+`enable-owasp-core-rules` (or `enable-owasp-modsecurity-crs`), and an
+`Include .../nginx-modsecurity.conf` loads the CRS where it is. So an annotation's snippet rules run
+before the CRS, unless the snippet includes the CRS above them, and the ConfigMap's snippet rules run
+before the ConfigMap's CRS but after an annotation's. Each rule kept before the CRS is marked
+`check`: `placement: BeforeCRS` needs engines 0.6.0 or later, and older ones load the rule set after
+the CRS.
+
+A rule set name that would be longer than Kubernetes allows (253 characters) keeps the start of the
+Ingress's name, followed by the first 8 hex digits of its SHA-256: names stay distinct and the same
+from one run to the next.
 
 A policy that tunes the CRS or adds rules refers to a `ClusterWAFRuleSet` named `owasp-crs-v4` with
 the built-in CRS, which is written alongside. Policies that only use the CRS's defaults leave
@@ -144,9 +161,12 @@ Ingress files/cloud: WAFPolicy files/cloud (Detect), WAFRuleSet files/cloud-mods
   `SecRuleEngine` was set, or audit log settings (the engine logs verdicts itself).
 - `TODO`: not migrated; it needs a human. Nothing is dropped or weakened silently: a rule that
   can't be converted faithfully is listed here and left out of the objects. Typical ones are
-  `Include` of other files, exclusions keyed on anything but the path (`@contains`, `@rx`, a header's value), targets named by a pattern (`!REQUEST_COOKIES:/^_ga/`),
-  `ctl:ruleRemoveById` ranges reaching outside the CRS's IDs (900000-999999), `ctl:ruleRemoveByTag`, `ctl` in a chained rule, CRS variables without a `WAFPolicy` field
-  (`tx.restricted_extensions`, `tx.allowed_http_versions`...), and rules the engine rejects.
+  `Include` of other files, targets named by a pattern (`!REQUEST_COOKIES:/^_ga/`), and rules the
+  engine rejects. Rules ModSecurity ran after the CRS are also listed when they would need to run
+  before it: exclusions keyed on anything but the path (`@contains`, `@rx`, a header's value),
+  `ctl:ruleRemoveById` ranges reaching outside the CRS's IDs (900000-999999), `ctl:ruleRemoveByTag`,
+  `ctl` in a chained rule, and CRS variables without a `WAFPolicy` field (`tx.restricted_extensions`,
+  `tx.allowed_http_versions`...).
 
 Each file with something not migrated says so in a comment at the top. `inkwallctl migrate` exits
 0 when everything was converted, 1 when something is marked `TODO`, and 2 on an error.
@@ -190,9 +210,9 @@ the routes instead, and apply once those routes serve the traffic.
   routes that take large uploads.
 - **Rule ranges.** A `ctl:ruleRemoveById` range becomes the IDs of the CRS rules in it today; rules
   a later CRS adds to the range are not excluded (the summary marks these `check`).
-- **Order.** Kept rules load after the CRS, while snippet rules in ingress-nginx could load before
-  it. To load such rules before the CRS, move them to a rule set of their own and bind it with
-  `placement: BeforeCRS` (engines 0.6.0 or later). Path exclusions apply from the start of the request, as `ctl` rules in phase 1 did; a `ctl`
+- **Order.** Kept rules load where ModSecurity ran them, before or after the CRS, except
+  `SecRuleRemoveBy*` and `SecRuleUpdate*`, which load after it. Engines older than 0.6.0 load the
+  `BeforeCRS` rule set after the CRS. Path exclusions apply from the start of the request, as `ctl` rules in phase 1 did; a `ctl`
   rule in phase 2 (`phase:2`, `phase:request` or no `phase`) is marked `check`, since the excluded
   rules' phase 1 checks are now off on its path too.
 - **Failure mode.** In Block mode, a request that can't be inspected in time is rejected (503); see

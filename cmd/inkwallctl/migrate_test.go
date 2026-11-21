@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -51,12 +52,14 @@ func TestMigrateGolden(t *testing.T) {
 		{"httproute", []string{"-f", migrateIngresses, "-f", migrateHTTPRoutes, "--target", "httproute"}, 1},
 		{"ingressroute", []string{"-f", migrateIngresses, "-f", migrateIngressRoutes, "--target", "ingressroute"}, 1},
 		// What ingress-nginx treats specially: canary Ingresses, @streq,
-		// ProcessPartial and phases.
+		// ProcessPartial and phases. The @streq rules that don't map to
+		// exclusions ran before the CRS: kept, bound BeforeCRS.
 		{"canary", []string{"-f", filepath.Join("testdata", "migrate", "canary.yaml")}, 0},
-		{"streq", []string{"-f", filepath.Join("testdata", "migrate", "streq.yaml")}, 1},
+		{"streq", []string{"-f", filepath.Join("testdata", "migrate", "streq.yaml")}, 0},
 		{"partial", []string{"-f", filepath.Join("testdata", "migrate", "partial.yaml")}, 0},
-		// A ctl action in a chain is conditional: not migrated.
-		{"chain", []string{"-f", filepath.Join("testdata", "migrate", "chain.yaml")}, 1},
+		// A ctl action in a chain is conditional: no exclusion can carry
+		// it, but the chains ran before the CRS: kept whole, BeforeCRS.
+		{"chain", []string{"-f", filepath.Join("testdata", "migrate", "chain.yaml")}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			code, out, errOut := runCLI(t, append([]string{"migrate", "ingress-nginx"}, tc.args...)...)
@@ -114,7 +117,7 @@ func TestMigrateStrictRoundTrip(t *testing.T) {
 		code           int
 	}{
 		{"canary", "GET /?q=" + sqli + " HTTP/1.1\nHost: shop.example.com\n\n", 0},
-		{"streq", "GET /staticfoo/x?q=" + sqli + " HTTP/1.1\nHost: shop.example.com\n\n", 1},
+		{"streq", "GET /staticfoo/x?q=" + sqli + " HTTP/1.1\nHost: shop.example.com\n\n", 0},
 		{"partial", form, 0},
 	} {
 		// Each is denied by the main Ingress's policy, shop/web.
@@ -128,6 +131,53 @@ func TestMigrateStrictRoundTrip(t *testing.T) {
 				"--request", writeFile(t, "requests.http", tc.requests))
 			if code != 0 || !strings.HasPrefix(out, "deny") || !strings.Contains(out, "policy=shop/web ") {
 				t.Errorf("test: exit %d, want a deny as ingress-nginx's:\n%s%s", code, out, errOut)
+			}
+		})
+	}
+}
+
+// TestMigrateBeforeCRSRoundTrip replays requests against rules ModSecurity
+// ran before the CRS (#554), kept BeforeCRS: a ctl action keyed on a
+// header still turns the engine off, and a tx variable without a WAFPolicy
+// field still tunes the CRS.
+func TestMigrateBeforeCRSRoundTrip(t *testing.T) {
+	in := writeFile(t, "ingress.yaml", `apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+  namespace: shop
+  annotations:
+    nginx.ingress.kubernetes.io/enable-modsecurity: "true"
+    nginx.ingress.kubernetes.io/enable-owasp-core-rules: "true"
+    nginx.ingress.kubernetes.io/modsecurity-snippet: |
+      SecRuleEngine On
+      SecRule REQUEST_HEADERS:X-Scanner "@streq internal" "id:1001,phase:1,pass,nolog,ctl:ruleEngine=Off"
+      SecAction "id:1002,phase:1,pass,nolog,setvar:'tx.restricted_extensions=.bak/'"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: shop.example.com
+    http:
+      paths:
+      - {path: /, pathType: Prefix, backend: {service: {name: web, port: {number: 80}}}}
+`)
+	dir := t.TempDir()
+	if code, _, errOut := runCLI(t, "migrate", "ingress-nginx", "-f", in, "--output", dir); code != 0 {
+		t.Fatalf("migrate: exit %d, stderr:\n%s", code, errOut)
+	}
+	sqli := "/?q=1%27%20or%201=1--"
+	for _, tc := range []struct{ name, request, want string }{
+		{"attack", "GET " + sqli + " HTTP/1.1\nHost: shop.example.com\n\n", "deny"},
+		{"attack from the scanner", "GET " + sqli + " HTTP/1.1\nHost: shop.example.com\nX-Scanner: internal\n\n", "allow"},
+		// The kept setting replaces the CRS's list of restricted extensions.
+		{"restricted by the crs's default", "GET /dump.sql HTTP/1.1\nHost: shop.example.com\n\n", "allow"},
+		{"restricted by the kept setting", "GET /index.bak HTTP/1.1\nHost: shop.example.com\n\n", "deny"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, out, errOut := runCLI(t, "test", "--policy", dir, "--ingress", in,
+				"--request", writeFile(t, "requests.http", tc.request))
+			if code != 0 || !strings.HasPrefix(out, tc.want) {
+				t.Errorf("test: exit %d, want %s:\n%s%s", code, tc.want, out, errOut)
 			}
 		})
 	}
@@ -327,16 +377,28 @@ func ingressWith(annotations map[string]string) *networkingv1.Ingress {
 // TestMigrateIngress covers each annotation and directive.
 func TestMigrateIngress(t *testing.T) {
 	on := map[string]string{annEnable: "true", annCRS: "true"}
+	// snippet's rules run before the CRS, which enable-owasp-core-rules
+	// loads after them; afterCRS's after it.
 	snippet := func(s string) map[string]string {
 		return map[string]string{annEnable: "true", annCRS: "true", annSnippet: s}
 	}
+	afterCRS := func(s string) map[string]string {
+		return map[string]string{annEnable: "true", annSnippet: "Include " + nginxCRSConf + "\n" + s}
+	}
+	const (
+		noRuleSets    = "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n"
+		beforeCRS     = "mode: Detect\nruleSets:\n- placement: BeforeCRS\n  ref:\n    kind: WAFRuleSet\n    name: app-modsecurity-before-crs\n- ref:\n    kind: ClusterWAFRuleSet\n    name: owasp-crs-v4\ntargetRefs:\n- kind: Ingress\n  name: app\n"
+		afterCRSRules = "mode: Detect\nruleSets:\n- ref:\n    kind: ClusterWAFRuleSet\n    name: owasp-crs-v4\n- ref:\n    kind: WAFRuleSet\n    name: app-modsecurity\ntargetRefs:\n- kind: Ingress\n  name: app\n"
+	)
 	for _, tc := range []struct {
 		name        string
 		annotations map[string]string
 		global      nginxGlobal
 		// want is the policy's spec as YAML; "" for no policy.
 		want    string
-		ruleSet string // the WAFRuleSet's SecLang, without comments
+		ruleSet string // the AfterCRS WAFRuleSet's SecLang, without comments
+		// beforeCRS is the BeforeCRS WAFRuleSet's SecLang, without comments.
+		beforeCRS string
 		// wantExclusions, if set, is the number of exclusions, instead of
 		// comparing the spec with want.
 		wantExclusions int
@@ -406,29 +468,29 @@ func TestMigrateIngress(t *testing.T) {
 		{name: "ctl phase 2", annotations: snippet(`SecRule REQUEST_URI "@beginsWith /api/" "id:1,phase:2,pass,nolog,ctl:ruleRemoveById=942100"`),
 			want:     "exclusions:\n- ruleIDs:\n  - 942100\n  when:\n    path: /api/*\nmode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n",
 			contains: "phase 2"},
-		{name: "ctl streq on uri", annotations: snippet(`SecRule REQUEST_URI "@streq /login" "id:1,phase:1,pass,ctl:ruleRemoveById=942100"`),
+		{name: "ctl streq on uri", annotations: afterCRS(`SecRule REQUEST_URI "@streq /login" "id:1,phase:1,pass,ctl:ruleRemoveById=942100"`),
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1},
 		{name: "ctl range", annotations: snippet(`SecRule REQUEST_FILENAME "@beginsWith /api" "id:1,phase:1,pass,ctl:ruleRemoveById=941100-941130"`),
 			want:     "exclusions:\n- ruleIDs:\n  - 941100\n  - 941101\n  - 941110\n  - 941120\n  - 941130\n  when:\n    path: /api*\nmode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n",
 			contains: "941100-941130 (5 rules) expanded"},
 		{name: "ctl target range", annotations: snippet(`SecRule REQUEST_FILENAME "@streq /login" "id:1,phase:1,pass,ctl:ruleRemoveTargetById=941100-941101;ARGS:q"`),
 			want: "exclusions:\n- ruleIDs:\n  - 941100\n  - 941101\n  when:\n    argument: q\n    path: /login\nmode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n"},
-		{name: "ctl range outside the crs", annotations: snippet(`SecRule REQUEST_FILENAME "@beginsWith /api" "id:1,phase:1,pass,ctl:ruleRemoveById=1-942999"`),
+		{name: "ctl range outside the crs", annotations: afterCRS(`SecRule REQUEST_FILENAME "@beginsWith /api" "id:1,phase:1,pass,ctl:ruleRemoveById=1-942999"`),
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1, contains: "outside the CRS"},
-		{name: "ctl range without rules", annotations: snippet(`SecRule REQUEST_FILENAME "@beginsWith /api" "id:1,phase:1,pass,ctl:ruleRemoveById=941102-941109"`),
+		{name: "ctl range without rules", annotations: afterCRS(`SecRule REQUEST_FILENAME "@beginsWith /api" "id:1,phase:1,pass,ctl:ruleRemoveById=941102-941109"`),
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1},
-		{name: "ctl range reversed", annotations: snippet(`SecRule REQUEST_FILENAME "@beginsWith /api" "id:1,phase:1,pass,ctl:ruleRemoveById=942999-942000"`),
+		{name: "ctl range reversed", annotations: afterCRS(`SecRule REQUEST_FILENAME "@beginsWith /api" "id:1,phase:1,pass,ctl:ruleRemoveById=942999-942000"`),
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1},
 		{name: "ctl large range", annotations: snippet(`SecRule REQUEST_FILENAME "@beginsWith /api" "id:1,phase:1,pass,ctl:ruleRemoveById=942000-942999"`),
 			wantExclusions: 2},
-		{name: "ctl with deny", annotations: snippet(`SecRule REQUEST_FILENAME "@beginsWith /api" "id:1,phase:1,deny,ctl:ruleRemoveById=942100"`),
+		{name: "ctl with deny", annotations: afterCRS(`SecRule REQUEST_FILENAME "@beginsWith /api" "id:1,phase:1,deny,ctl:ruleRemoveById=942100"`),
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1},
-		{name: "ctl path with a query", annotations: snippet(`SecRule REQUEST_FILENAME "@beginsWith /a?b" "id:1,phase:1,pass,ctl:ruleRemoveById=942100"`),
+		{name: "ctl path with a query", annotations: afterCRS(`SecRule REQUEST_FILENAME "@beginsWith /a?b" "id:1,phase:1,pass,ctl:ruleRemoveById=942100"`),
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1},
 		{name: "ctl without phase", annotations: snippet(`SecRule REQUEST_FILENAME "@beginsWith /api/" "id:1,pass,nolog,ctl:ruleRemoveById=942100"`),
 			want:     "exclusions:\n- ruleIDs:\n  - 942100\n  when:\n    path: /api/*\nmode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n",
 			contains: "phase 2"},
-		{name: "ctl streq with a star", annotations: snippet(`SecRule REQUEST_FILENAME "@streq /static*" "id:1,phase:1,pass,nolog,ctl:ruleEngine=Off"`),
+		{name: "ctl streq with a star", annotations: afterCRS(`SecRule REQUEST_FILENAME "@streq /static*" "id:1,phase:1,pass,nolog,ctl:ruleEngine=Off"`),
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1, contains: "literally"},
 		{name: "process partial", annotations: map[string]string{annEnable: "true", annCRS: "true", annSnippet: "SecRuleEngine On\nInclude " + nginxRecommendedConf + "\nSecRequestBodyLimitAction ProcessPartial"},
 			want:     "body:\n  maxBytes: 10485760\n  onOversize: Allow\nmode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n",
@@ -459,19 +521,58 @@ SecRule ARGS:debug "@streq true" "id:1100,phase:1,deny,status:403"`},
 			ruleSet: "SecRule ARGS:debug \"@streq true\" \"id:1100,phase:1,deny,status:403\"\n"},
 		{name: "rule id taken by the crs", annotations: snippet(`SecRule ARGS "@streq x" "id:942100,phase:1,deny"`),
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1},
-		{name: "custom ctl rule", annotations: snippet(`SecRule REQUEST_HEADERS:Host "@streq a" "id:1,phase:1,pass,nolog,ctl:ruleRemoveById=942100"`),
+		{name: "custom ctl rule", annotations: afterCRS(`SecRule REQUEST_HEADERS:Host "@streq a" "id:1,phase:1,pass,nolog,ctl:ruleRemoveById=942100"`),
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1},
-		{name: "chained ctl skip", annotations: snippet("SecRule REQUEST_METHOD \"@streq OPTIONS\" \"id:1000,phase:1,pass,nolog,chain\"\n  SecRule REQUEST_FILENAME \"@beginsWith /api\" \"ctl:ruleEngine=Off\""),
+		{name: "chained ctl skip", annotations: afterCRS("SecRule REQUEST_METHOD \"@streq OPTIONS\" \"id:1000,phase:1,pass,nolog,chain\"\n  SecRule REQUEST_FILENAME \"@beginsWith /api\" \"ctl:ruleEngine=Off\""),
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1, contains: "whole chain matches"},
-		{name: "chained ctl exclusion", annotations: snippet("SecRule ARGS:action \"@streq heartbeat\" \"id:1001,phase:1,pass,nolog,chain\"\n  SecRule REQUEST_FILENAME \"@streq /wp-admin/admin-ajax.php\" \"ctl:ruleRemoveById=942100\""),
+		{name: "chained ctl exclusion", annotations: afterCRS("SecRule ARGS:action \"@streq heartbeat\" \"id:1001,phase:1,pass,nolog,chain\"\n  SecRule REQUEST_FILENAME \"@streq /wp-admin/admin-ajax.php\" \"ctl:ruleRemoveById=942100\""),
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1, contains: "whole chain matches"},
-		{name: "chained ctl on the first rule", annotations: snippet("SecRule REQUEST_FILENAME \"@beginsWith /api\" \"id:1002,phase:1,pass,nolog,ctl:ruleEngine=Off,chain\"\n  SecRule REQUEST_METHOD \"@streq OPTIONS\""),
+		{name: "chained ctl on the first rule", annotations: afterCRS("SecRule REQUEST_FILENAME \"@beginsWith /api\" \"id:1002,phase:1,pass,nolog,ctl:ruleEngine=Off,chain\"\n  SecRule REQUEST_METHOD \"@streq OPTIONS\""),
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1, contains: "whole chain matches"},
-		{name: "chained ctl three rules", annotations: snippet("SecRule REQUEST_METHOD \"@streq OPTIONS\" \"id:1003,phase:1,pass,nolog,chain\"\n  SecRule ARGS:a \"@streq b\" \"chain\"\n  SecRule REQUEST_FILENAME \"@beginsWith /api\" \"ctl:ruleRemoveById=942100\""),
+		{name: "chained ctl three rules", annotations: afterCRS("SecRule REQUEST_METHOD \"@streq OPTIONS\" \"id:1003,phase:1,pass,nolog,chain\"\n  SecRule ARGS:a \"@streq b\" \"chain\"\n  SecRule REQUEST_FILENAME \"@beginsWith /api\" \"ctl:ruleRemoveById=942100\""),
 			want: "mode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1, contains: "whole chain matches"},
-		{name: "chained rule kept whole", annotations: snippet("SecRule ARGS:a \"@streq x\" \"id:1004,phase:1,deny,status:403,chain\"\n  SecRule ARGS:b \"@streq y\""),
-			want:    "mode: Detect\nruleSets:\n- ref:\n    kind: ClusterWAFRuleSet\n    name: owasp-crs-v4\n- ref:\n    kind: WAFRuleSet\n    name: app-modsecurity\ntargetRefs:\n- kind: Ingress\n  name: app\n",
+		{name: "chained rule kept whole", annotations: afterCRS("SecRule ARGS:a \"@streq x\" \"id:1004,phase:1,deny,status:403,chain\"\n  SecRule ARGS:b \"@streq y\""),
+			want:    afterCRSRules,
 			ruleSet: "SecRule ARGS:a \"@streq x\" \"id:1004,phase:1,deny,status:403,chain\"\nSecRule ARGS:b \"@streq y\"\n"},
+		// Rules ModSecurity ran before the CRS (#554).
+		{name: "rule before the crs", annotations: snippet("SecRule ARGS:a \"@streq x\" \"id:1004,phase:1,deny,status:403,chain\"\n  SecRule ARGS:b \"@streq y\""),
+			want: beforeCRS, beforeCRS: "SecRule ARGS:a \"@streq x\" \"id:1004,phase:1,deny,status:403,chain\"\nSecRule ARGS:b \"@streq y\"\n",
+			contains: "engines 0.6.0 or later"},
+		{name: "ctl rule before the crs", annotations: snippet(`SecRule REQUEST_HEADERS:Host "@streq a" "id:1,phase:1,pass,nolog,ctl:ruleRemoveById=942100"`),
+			want: beforeCRS, beforeCRS: "SecRule REQUEST_HEADERS:Host \"@streq a\" \"id:1,phase:1,pass,nolog,ctl:ruleRemoveById=942100\"\n",
+			contains: "kept in the BeforeCRS WAFRuleSet"},
+		{name: "ctl rule without the crs", annotations: map[string]string{annEnable: "true", annSnippet: `SecRule REQUEST_HEADERS:Host "@streq a" "id:1,phase:1,pass,nolog,ctl:ruleRemoveById=942100"`},
+			todo: 1, contains: "only an exclusion keyed on"},
+		{name: "chained ctl before the crs", annotations: snippet("SecRule REQUEST_METHOD \"@streq OPTIONS\" \"id:1000,phase:1,pass,nolog,chain\"\n  SecRule REQUEST_FILENAME \"@beginsWith /api\" \"ctl:ruleEngine=Off\""),
+			want: beforeCRS, beforeCRS: "SecRule REQUEST_METHOD \"@streq OPTIONS\" \"id:1000,phase:1,pass,nolog,chain\"\nSecRule REQUEST_FILENAME \"@beginsWith /api\" \"ctl:ruleEngine=Off\"\n"},
+		{name: "crs variable before the crs", annotations: snippet(`SecAction "id:900240,phase:1,nolog,pass,t:none,setvar:'tx.restricted_extensions=.bak/ .sql/'"`),
+			want: beforeCRS, beforeCRS: "SecAction \"id:900240,phase:1,nolog,pass,t:none,setvar:'tx.restricted_extensions=.bak/ .sql/'\"\n"},
+		{name: "crs variable after the crs", annotations: afterCRS(`SecAction "id:900240,phase:1,nolog,pass,t:none,setvar:'tx.restricted_extensions=.bak/ .sql/',setvar:tx.allowed_http_versions=HTTP/1.1"`),
+			want: noRuleSets, todo: 1, contains: "no WAFPolicy field sets these CRS variables"},
+		{name: "mapped and unmapped crs variables", annotations: snippet(`SecAction "id:900240,phase:1,nolog,pass,setvar:tx.paranoia_level=2,setvar:'tx.restricted_extensions=.bak/'"`),
+			want:      "mode: Detect\nruleSets:\n- placement: BeforeCRS\n  ref:\n    kind: WAFRuleSet\n    name: app-modsecurity-before-crs\n- paranoiaLevel: 2\n  ref:\n    kind: ClusterWAFRuleSet\n    name: owasp-crs-v4\ntargetRefs:\n- kind: Ingress\n  name: app\n",
+			beforeCRS: "SecAction \"id:900240,phase:1,nolog,pass,setvar:tx.paranoia_level=2,setvar:'tx.restricted_extensions=.bak/'\"\n"},
+		{name: "rule changers stay after the crs", annotations: snippet("SecRuleRemoveByTag attack-sqli\nSecRuleRemoveById 942000-942999\nSecRule ARGS:a \"@streq x\" \"id:1,phase:1,deny\""),
+			want:      "mode: Detect\nruleSets:\n- placement: BeforeCRS\n  ref:\n    kind: WAFRuleSet\n    name: app-modsecurity-before-crs\n- ref:\n    kind: ClusterWAFRuleSet\n    name: owasp-crs-v4\n- ref:\n    kind: WAFRuleSet\n    name: app-modsecurity\ntargetRefs:\n- kind: Ingress\n  name: app\n",
+			ruleSet:   "SecRuleRemoveByTag attack-sqli\nSecRuleRemoveById 942000-942999\n",
+			beforeCRS: "SecRule ARGS:a \"@streq x\" \"id:1,phase:1,deny\"\n"},
+		{name: "include in the middle", annotations: map[string]string{annEnable: "true", annSnippet: "SecRule ARGS:a \"@streq x\" \"id:1,phase:1,deny\"\nInclude " + nginxCRSConf + "\nSecRule ARGS:b \"@streq y\" \"id:2,phase:1,deny\""},
+			want:      "mode: Detect\nruleSets:\n- placement: BeforeCRS\n  ref:\n    kind: WAFRuleSet\n    name: app-modsecurity-before-crs\n- ref:\n    kind: ClusterWAFRuleSet\n    name: owasp-crs-v4\n- ref:\n    kind: WAFRuleSet\n    name: app-modsecurity\ntargetRefs:\n- kind: Ingress\n  name: app\n",
+			ruleSet:   "SecRule ARGS:b \"@streq y\" \"id:2,phase:1,deny\"\n",
+			beforeCRS: "SecRule ARGS:a \"@streq x\" \"id:1,phase:1,deny\"\n"},
+		// nginx runs a location's rules (the annotations) before the http
+		// block's (the ConfigMap's).
+		{name: "annotation rule before the global crs", annotations: map[string]string{annSnippet: `SecRule REQUEST_HEADERS:Host "@streq a" "id:1,phase:1,pass,nolog,ctl:ruleRemoveById=942100"`},
+			global: nginxGlobal{enable: true, crs: true, source: "ConfigMap"},
+			want:   beforeCRS, beforeCRS: "SecRule REQUEST_HEADERS:Host \"@streq a\" \"id:1,phase:1,pass,nolog,ctl:ruleRemoveById=942100\"\n"},
+		{name: "global rule before the global crs", global: nginxGlobal{enable: true, crs: true, snippet: `SecRule REQUEST_HEADERS:Host "@streq a" "id:1,phase:1,pass,nolog,ctl:ruleRemoveById=942100"`, source: "ConfigMap"},
+			want: beforeCRS, beforeCRS: "SecRule REQUEST_HEADERS:Host \"@streq a\" \"id:1,phase:1,pass,nolog,ctl:ruleRemoveById=942100\"\n"},
+		{name: "global rule after the annotation crs", annotations: map[string]string{annCRS: "true"},
+			global: nginxGlobal{enable: true, snippet: `SecRule REQUEST_HEADERS:Host "@streq a" "id:1,phase:1,pass,nolog,ctl:ruleRemoveById=942100"`, source: "ConfigMap"},
+			want:   noRuleSets, todo: 1},
+		{name: "annotation rules run before the global ones", annotations: afterCRS(`SecRule ARGS:b "@streq y" "id:2,phase:1,deny"`),
+			global: nginxGlobal{enable: true, snippet: `SecRule ARGS:a "@streq x" "id:1,phase:1,deny"`, source: "ConfigMap"},
+			want:   afterCRSRules, ruleSet: "SecRule ARGS:b \"@streq y\" \"id:2,phase:1,deny\"\nSecRule ARGS:a \"@streq x\" \"id:1,phase:1,deny\"\n"},
 		{name: "chain without its last rule", annotations: snippet("SecRule ARGS:a \"@streq x\" \"id:1005,phase:1,deny,status:403,chain\"\nSecRuleRemoveById 942100"),
 			want: "exclusions:\n- ruleIDs:\n  - 942100\nmode: Detect\ntargetRefs:\n- kind: Ingress\n  name: app\n", todo: 1, contains: "doesn't end in a rule"},
 		{name: "unsupported directives", annotations: snippet("SecRequestBodyNoFilesLimit 1\nSecResponseBodyAccess On\nInclude /x.conf\nSecAuditLog /dev/stdout"),
@@ -522,18 +623,73 @@ SecRule ARGS:debug "@streq true" "id:1100,phase:1,deny,status:403"`},
 			if !found {
 				t.Errorf("no item says %q:\n%s", tc.contains, strings.Join(lines, "\n"))
 			}
-			var rules string
-			if m.ruleSet != nil {
-				for _, l := range strings.SplitAfter(m.ruleSet.Spec.Source.SecLang, "\n") {
+			rules := map[string]string{}
+			for _, rs := range m.ruleSets {
+				for _, l := range strings.SplitAfter(rs.Spec.Source.SecLang, "\n") {
 					if !strings.HasPrefix(l, "#") {
-						rules += l
+						rules[rs.Name] += l
 					}
 				}
 			}
-			if rules != tc.ruleSet {
-				t.Errorf("rule set %q, want %q", rules, tc.ruleSet)
+			if got := rules["app-modsecurity"]; got != tc.ruleSet {
+				t.Errorf("rule set %q, want %q", got, tc.ruleSet)
+			}
+			if got := rules["app-modsecurity-before-crs"]; got != tc.beforeCRS {
+				t.Errorf("BeforeCRS rule set %q, want %q", got, tc.beforeCRS)
 			}
 		})
+	}
+}
+
+// TestDerivedName checks the names of the objects made for an Ingress:
+// valid, stable, and distinct for long names sharing a prefix.
+func TestDerivedName(t *testing.T) {
+	const suffix = "-modsecurity-before-crs"
+	if got := derivedName("app", suffix); got != "app"+suffix {
+		t.Errorf("short name: %q, want it unchanged", got)
+	}
+	long := strings.Repeat("a", 240) + "-1234567890"
+	other := strings.Repeat("a", 240) + "-0987654321"
+	// A cut ending in '.' or '-' is trimmed, to stay a DNS subdomain.
+	dotted := strings.Repeat("a.", 125)
+	names := map[string]string{}
+	for _, name := range []string{long, other, dotted, strings.Repeat("b", 253)} {
+		for _, sfx := range []string{"-modsecurity", suffix} {
+			got := derivedName(name, sfx)
+			if errs := validation.IsDNS1123Subdomain(got); len(errs) > 0 {
+				t.Errorf("%q: %s", got, strings.Join(errs, "; "))
+			}
+			if !strings.HasSuffix(got, sfx) {
+				t.Errorf("%q doesn't end in %s", got, sfx)
+			}
+			if again := derivedName(name, sfx); again != got {
+				t.Errorf("%q, then %q: not stable", got, again)
+			}
+			if prev, ok := names[got]; ok {
+				t.Errorf("%q and %q both give %q", prev, name, got)
+			}
+			names[got] = name
+		}
+	}
+
+	// The objects of a 250-character Ingress name.
+	ing := ingressWith(map[string]string{annEnable: "true", annCRS: "true", annSnippet: "SecRuleRemoveByTag attack-sqli\nSecRule ARGS:a \"@streq x\" \"id:1,phase:1,deny\""})
+	ing.Name = strings.Repeat("x", 250)
+	m := migrateIngress(ing, nginxGlobal{}, "nginx.ingress.kubernetes.io")
+	if m.policy == nil || len(m.ruleSets) != 2 {
+		t.Fatalf("policy %v, %d rule sets, want 2", m.policy, len(m.ruleSets))
+	}
+	refs := map[string]bool{}
+	for _, b := range m.policy.Spec.RuleSets {
+		refs[b.Ref.Name] = true
+	}
+	for _, rs := range m.ruleSets {
+		if errs := validation.IsDNS1123Subdomain(rs.Name); len(errs) > 0 {
+			t.Errorf("rule set %q: %s", rs.Name, strings.Join(errs, "; "))
+		}
+		if !refs[rs.Name] {
+			t.Errorf("rule set %q: the policy doesn't refer to it (%v)", rs.Name, refs)
+		}
 	}
 }
 
