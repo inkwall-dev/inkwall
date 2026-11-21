@@ -70,14 +70,17 @@ type sharedClient struct {
 
 func (c *sharedClient) acquire() { c.mu.Lock(); c.users++; c.mu.Unlock() }
 
-func (c *sharedClient) release() {
+// release reports whether the client was retired meanwhile.
+func (c *sharedClient) release() bool {
 	c.mu.Lock()
 	c.users--
-	done := c.retired && c.users == 0
+	retired := c.retired
+	done := retired && c.users == 0
 	c.mu.Unlock()
 	if done {
 		c.close()
 	}
+	return retired
 }
 
 func (c *sharedClient) retire() {
@@ -113,8 +116,10 @@ type sender struct {
 	metrics   Metrics
 	state     *sinkState
 	now       func() time.Time
-	// after makes timers (a fake clock in tests).
-	after func(time.Duration) <-chan time.Time
+	// after makes the maxDelay timers, retryAfter the waits before
+	// retries (tests shorten them).
+	after      func(time.Duration) <-chan time.Time
+	retryAfter func(time.Duration) <-chan time.Time
 
 	reconfigured chan struct{}
 	// flush asks the sender to send what it has at once, and to stop when
@@ -123,11 +128,13 @@ type sender struct {
 	done  chan struct{}
 	// drained is closed once the sender, flushing, has nothing left.
 	drained chan struct{}
+	// loops counts the run loop's passes (tests check it doesn't spin).
+	loops atomic.Int64
 }
 
 func newSender(name string, buf *buffer, hasPolicy func(string) bool, m Metrics, st *sinkState) *sender {
 	return &sender{
-		name: name, buf: buf, hasPolicy: hasPolicy, metrics: m, state: st, now: time.Now, after: time.After,
+		name: name, buf: buf, hasPolicy: hasPolicy, metrics: m, state: st, now: time.Now, after: time.After, retryAfter: time.After,
 		reconfigured: make(chan struct{}, 1), flush: make(chan struct{}), done: make(chan struct{}), drained: make(chan struct{}),
 	}
 }
@@ -157,6 +164,7 @@ func (s *sender) run(ctx context.Context) {
 	var (
 		cur      *held
 		b        builder
+		bEnc     string // the encoding b was built under
 		reqItems []item
 		first    time.Time
 		consumed = s.buf.acked(s.name)
@@ -167,6 +175,7 @@ func (s *sender) run(ctx context.Context) {
 	)
 	inflight := 0
 	for {
+		s.loops.Add(1)
 		if n := s.buf.takeDropped(s.name); n > 0 {
 			s.metrics.Dropped(s.name, DropBufferFull, asInt(n))
 			s.state.droppedFull(s.now())
@@ -177,6 +186,14 @@ func (s *sender) run(ctx context.Context) {
 		exhausted := rt == nil || rt.cfg.err != nil
 		if !exhausted {
 			cfg := rt.cfg
+			if b != nil && bEnc != cfg.encoding && inflight < cfg.maxInFlight {
+				// The sink changed while a request was being built: send it
+				// now; deliver filters and encodes it again under the new
+				// configuration first.
+				flights = append(flights, s.dispatch(ctx, b, bEnc, reqItems, consumed, answered))
+				inflight++
+				b = nil
+			}
 			// Read and encode while a request may still be sent.
 			for inflight < cfg.maxInFlight {
 				if cur == nil || cur.next >= len(cur.events) {
@@ -204,14 +221,19 @@ func (s *sender) run(ctx context.Context) {
 					consumed = pos
 					continue
 				}
+				if b != nil && bEnc != cfg.encoding {
+					// At the in-flight limit with a request of the old
+					// configuration: wait for a slot to send it.
+					break
+				}
 				if b == nil {
-					b = newBuilder(cfg.format, &cfg.view, maxRequest)
+					b, bEnc = newBuilder(cfg.format, &cfg.view, maxRequest), cfg.encoding
 					reqItems = reqItems[:0:0]
 					first = s.now()
 				}
 				if !b.add(it) {
 					// Full by size: send, and start the next with this event.
-					flights = append(flights, s.dispatch(ctx, rt, b, reqItems, consumed, answered))
+					flights = append(flights, s.dispatch(ctx, b, bEnc, reqItems, consumed, answered))
 					inflight++
 					b = nil
 					continue
@@ -220,13 +242,13 @@ func (s *sender) run(ctx context.Context) {
 				cur.next++
 				consumed = pos
 				if b.len() >= cfg.maxEvents {
-					flights = append(flights, s.dispatch(ctx, rt, b, reqItems, consumed, answered))
+					flights = append(flights, s.dispatch(ctx, b, bEnc, reqItems, consumed, answered))
 					inflight++
 					b = nil
 				}
 			}
 			if b != nil && inflight < cfg.maxInFlight && (flushing || s.now().Sub(first) >= cfg.maxDelay) {
-				flights = append(flights, s.dispatch(ctx, rt, b, reqItems, consumed, answered))
+				flights = append(flights, s.dispatch(ctx, b, bEnc, reqItems, consumed, answered))
 				inflight++
 				b = nil
 			}
@@ -245,15 +267,17 @@ func (s *sender) run(ctx context.Context) {
 			s.buf.commit(s.name, commit)
 		}
 		s.metrics.Pending(s.name, s.buf.pending(s.name))
-		if flushing && !drained && exhausted && len(flights) == 0 && b == nil {
+		// Flushing, done when nothing is left, or when the sink can't send.
+		if flushing && !drained && (rt == nil || rt.cfg.err != nil || exhausted && len(flights) == 0 && b == nil) {
 			drained = true
 			close(s.drained)
 		}
+		// The maxDelay timer, only while a dispatch is possible: not with
+		// the configuration invalid, nor at the in-flight limit (an answer
+		// wakes the loop then), or it would spin.
 		var delay <-chan time.Time
-		if b != nil && !flushing {
-			if rt := s.rt.Load(); rt != nil {
-				delay = s.after(max(rt.cfg.maxDelay-s.now().Sub(first), 0))
-			}
+		if b != nil && !flushing && rt != nil && rt.cfg.err == nil && inflight < rt.cfg.maxInFlight {
+			delay = s.after(max(rt.cfg.maxDelay-s.now().Sub(first), 0))
 		}
 		if changed == nil {
 			// Not reading (configuration invalid, or in flight to the
@@ -304,13 +328,14 @@ func (s *sender) load(t taken) *held {
 }
 
 // dispatch sends a request on its own goroutine, which tells answered
-// when the request is answered for good.
-func (s *sender) dispatch(ctx context.Context, rt *sinkRuntime, b builder, items []item, end position, answered chan<- *flight) *flight {
+// when the request is answered for good. encoding is the configuration's
+// the request was filtered and built under.
+func (s *sender) dispatch(ctx context.Context, b builder, encoding string, items []item, end position, answered chan<- *flight) *flight {
 	f := &flight{items: items, end: end}
 	p := b.payload()
 	f.size = p.size
 	go func() {
-		s.deliver(ctx, f, p)
+		s.deliver(ctx, f, part{items: items, p: p, encoding: encoding})
 		select {
 		case answered <- f:
 		case <-ctx.Done():
@@ -319,23 +344,56 @@ func (s *sender) dispatch(ctx context.Context, rt *sinkRuntime, b builder, items
 	return f
 }
 
-// part is a request, or half of one after a 413.
+// part is a request, or half of one after a 413, and the encoding it was
+// built under.
 type part struct {
-	items []item
-	p     payload
+	items    []item
+	p        payload
+	encoding string
+}
+
+// encodeParts filters items for cfg and encodes them in its format, in
+// requests of at most maxRequest bytes: a request built under another
+// configuration (a sink changed while it waited) is sent as the new one
+// says, never with what it now leaves out.
+func encodeParts(cfg *sinkConfig, items []item) []part {
+	var out []part
+	var b builder
+	var cur []item
+	flush := func() {
+		if b != nil && b.len() > 0 {
+			out = append(out, part{items: cur, p: b.payload(), encoding: cfg.encoding})
+		}
+		b, cur = nil, nil
+	}
+	for _, it := range items {
+		if !cfg.takes(it) {
+			continue
+		}
+		if b == nil {
+			b = newBuilder(cfg.format, &cfg.view, maxRequest)
+		}
+		if !b.add(it) {
+			flush()
+			b = newBuilder(cfg.format, &cfg.view, maxRequest)
+			b.add(it)
+		}
+		cur = append(cur, it)
+	}
+	flush()
+	return out
 }
 
 // deliver sends f until it is answered for good: sent, refused, too large,
 // or dropped from the buffer while it was retried.
-func (s *sender) deliver(ctx context.Context, f *flight, first payload) {
-	parts := []part{{f.items, first}}
+func (s *sender) deliver(ctx context.Context, f *flight, first part) {
+	parts := []part{first}
 	attempt := 0
 	for len(parts) > 0 {
-		pt := parts[0]
 		rt := s.rt.Load()
 		if rt == nil || rt.client == nil || rt.cfg.err != nil {
 			// The sink can't send now: wait for a configuration.
-			if !s.wait(ctx, maxBackoff) {
+			if !s.retryWait(ctx, maxBackoff) {
 				return
 			}
 			if s.abandoned(f, parts) {
@@ -343,16 +401,33 @@ func (s *sender) deliver(ctx context.Context, f *flight, first payload) {
 			}
 			continue
 		}
+		if parts[0].encoding != rt.cfg.encoding {
+			// Built under the sink's previous configuration.
+			parts = append(encodeParts(rt.cfg, parts[0].items), parts[1:]...)
+			continue
+		}
+		pt := parts[0]
 		rt.client.acquire()
 		start := s.now()
 		rctx, cancel := context.WithTimeout(ctx, rt.cfg.timeout)
 		r := rt.client.send(rctx, pt.p, rt.cfg.headers)
 		cancel()
-		rt.client.release()
+		retired := rt.client.release()
 		if ctx.Err() != nil {
 			// Shutting down: unanswered, so not committed; resent after a
 			// restart.
 			return
+		}
+		if r.mismatch {
+			// A request the client can't send: encode it again. Never
+			// happens; tests fail on it (payloadMismatch).
+			parts[0].encoding = ""
+			continue
+		}
+		if r.verdict != sent && retired {
+			// The transport was rebuilt meanwhile and this one closed under
+			// the request: send it again on the new one, no failure.
+			continue
 		}
 		s.metrics.Duration(s.name, s.now().Sub(start))
 		switch r.verdict {
@@ -382,21 +457,21 @@ func (s *sender) deliver(ctx context.Context, f *flight, first payload) {
 			half := len(pt.items) / 2
 			a, b := pt.items[:half], pt.items[half:]
 			parts = append([]part{
-				{a, encode(rt.cfg.format, &rt.cfg.view, a)},
-				{b, encode(rt.cfg.format, &rt.cfg.view, b)},
+				{a, encode(rt.cfg.format, &rt.cfg.view, a), pt.encoding},
+				{b, encode(rt.cfg.format, &rt.cfg.view, b), pt.encoding},
 			}, parts[1:]...)
 			continue
 		}
 		s.failed(r)
 		wait := backoff(attempt)
 		if r.verdict == retrySlow {
-			wait = maxBackoff
+			wait = jitter(maxBackoff)
 		}
 		if r.after > 0 {
 			wait = r.after
 		}
 		attempt++
-		if !s.wait(ctx, wait) {
+		if !s.retryWait(ctx, wait) {
 			return
 		}
 		// Retried for as long as the buffer holds the batch.
@@ -426,21 +501,28 @@ func (s *sender) failed(r result) {
 	s.state.failed(s.now(), r)
 }
 
-func (s *sender) wait(ctx context.Context, d time.Duration) bool {
+// retryWait waits d before a retry.
+func (s *sender) retryWait(ctx context.Context, d time.Duration) bool {
 	select {
 	case <-ctx.Done():
 		return false
-	case <-s.after(d):
+	case <-s.retryAfter(d):
 		return true
 	}
 }
 
 // backoff is the wait before attempt+1: full jitter under an exponential
-// ceiling, from minBackoff to maxBackoff.
+// ceiling, from minBackoff (the first) to maxBackoff.
 func backoff(attempt int) time.Duration {
 	ceiling := maxBackoff
 	if attempt < 6 {
 		ceiling = min(minBackoff<<attempt, maxBackoff)
 	}
-	return minBackoff + rand.N(ceiling-minBackoff+1) // #nosec G404 -- jitter, not security
+	return jitter(ceiling)
+}
+
+// jitter is a wait drawn evenly up to ceiling (full jitter), at least a
+// tenth of minBackoff.
+func jitter(ceiling time.Duration) time.Duration {
+	return max(rand.N(ceiling+1), minBackoff/10) // #nosec G404 -- jitter, not security
 }

@@ -67,7 +67,7 @@ type Exporter struct {
 	cancel  context.CancelFunc
 	loop    chan struct{}
 	stopped atomic.Bool
-	// after makes the senders' timers; tests shorten the backoff.
+	// after makes the senders' waits before retries; tests shorten them.
 	after func(time.Duration) <-chan time.Time
 }
 
@@ -200,7 +200,7 @@ func (e *Exporter) apply(buf *buffer, sinks []*sinkConfig) {
 			sctx, cancel := context.WithCancel(context.Background())
 			rs = &runningSink{sender: newSender(sc.name, buf, e.HasPolicy, e.Metrics, st), state: st, cancel: cancel}
 			if e.after != nil {
-				rs.sender.after = e.after
+				rs.sender.retryAfter = e.after
 			}
 			e.sinks[sc.name] = rs
 			go rs.sender.run(sctx)

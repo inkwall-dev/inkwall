@@ -318,7 +318,7 @@ func TestPartialSuccessOverHTTP(t *testing.T) {
 	}))
 	defer srv.Close()
 	p := encode(formatOTLPHTTP, &testView, items(fullEvent(), oldEvent(), rateLimited()))
-	r := newHTTPClient(transportConfig{url: srv.URL, gzip: true}).send(context.Background(), p, nil)
+	r := newHTTPClient(transportConfig{url: srv.URL, gzip: true, otlp: true}).send(context.Background(), p, nil)
 	if r.verdict != sent || r.rejected != 2 || !strings.Contains(r.detail, "two too old") {
 		t.Errorf("result %+v", r)
 	}

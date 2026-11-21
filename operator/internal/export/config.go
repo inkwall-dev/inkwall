@@ -53,7 +53,16 @@ type sinkConfig struct {
 	namespaces  map[string]bool // nil: every policy, and none
 	plaintext   bool
 	err         error
+	// encoding identifies what a request's body depends on: the format,
+	// what the sink leaves out and what its filters take. A request
+	// encoded under another is filtered and encoded again before it is
+	// sent, so a changed sink never gets what its new configuration
+	// leaves out (design 0010 §4.4).
+	encoding string
 }
+
+// maxSinks is the CRD's bound, kept for objects written before it.
+const maxSinks = 4
 
 // configError is why a sink can't start: ExportConfigInvalid.
 type configError struct{ msg string }
@@ -91,10 +100,11 @@ func resolve(ctx context.Context, c client.Reader, namespace, clusterID string, 
 		return nil
 	}
 	out := make([]*sinkConfig, 0, len(spec.Sinks))
-	for i := range spec.Sinks {
+	for i := range spec.Sinks[:min(len(spec.Sinks), maxSinks)] {
 		s := &spec.Sinks[i]
 		sc := &sinkConfig{name: s.Name}
 		sc.err = sc.fill(ctx, c, namespace, clusterID, spec.ClusterName, s)
+		sc.encoding = sc.encodingKey()
 		out = append(out, sc)
 	}
 	return out
@@ -146,7 +156,7 @@ func (sc *sinkConfig) fill(ctx context.Context, c client.Reader, namespace, clus
 			}
 			tc.url = target
 		default:
-			sc.format, tc.url = formatOTLPHTTP, endpoint
+			sc.format, tc.url, tc.otlp = formatOTLPHTTP, endpoint, true
 		}
 	case s.JSON != nil:
 		sc.format = formatJSONLines
@@ -174,6 +184,10 @@ func (sc *sinkConfig) fill(ctx context.Context, c client.Reader, namespace, clus
 		return invalid("sink %s has neither otlp nor json", s.Name)
 	}
 	sc.plaintext = strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "grpc://")
+	if sc.plaintext && s.JSON != nil && s.JSON.URLSecretRef != nil {
+		// A URL kept in a Secret holds a credential: never in clear.
+		return invalid("the URL in the Secret %s, key %s, is plaintext (http://): a URL from a Secret must be https://", s.JSON.URLSecretRef.Name, s.JSON.URLSecretRef.Key)
+	}
 	if sc.plaintext && !s.Insecure {
 		return invalid("sink %s: a plaintext endpoint needs insecure: true", s.Name)
 	}
@@ -231,7 +245,12 @@ func (sc *sinkConfig) fill(ctx context.Context, c client.Reader, namespace, clus
 			return err
 		}
 		sc.headers = make(map[string]string, len(sec.Data))
+		lower := map[string]string{}
 		for k, v := range sec.Data {
+			if other, ok := lower[strings.ToLower(k)]; ok {
+				return invalid("the Secret %s: headers %q and %q are the same header", ref.Name, min(k, other), max(k, other))
+			}
+			lower[strings.ToLower(k)] = k
 			if err := checkHeader(k, tc.grpc); err != nil {
 				return invalid("the Secret %s: header %q refused: %v", ref.Name, k, err)
 			}
@@ -243,6 +262,16 @@ func (sc *sinkConfig) fill(ctx context.Context, c client.Reader, namespace, clus
 		}
 	}
 	return nil
+}
+
+// encodingKey is sc's encoding: what a request's body depends on.
+func (sc *sinkConfig) encodingKey() string {
+	ns := make([]string, 0, len(sc.namespaces))
+	for n := range sc.namespaces {
+		ns = append(ns, n)
+	}
+	slices.Sort(ns)
+	return fmt.Sprintf("%d|%+v|%t|%t|%t|%v", sc.format, sc.view, sc.deny, sc.log, sc.namespaces == nil, ns)
 }
 
 func ptrOr(p *int32, d int32) int32 {

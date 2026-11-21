@@ -75,6 +75,17 @@ type result struct {
 	// after is the wait the server asked for (Retry-After, RetryInfo).
 	after    time.Duration
 	rejected int
+	// mismatch: the payload doesn't fit the client (a programming error).
+	mismatch bool
+}
+
+// payloadMismatch is called on a payload a client can't send; tests make
+// it fail loudly.
+var payloadMismatch = func(string) {}
+
+func mismatched(what string) result {
+	payloadMismatch(what)
+	return result{verdict: retry, kind: kindClient, detail: "internal: " + what, mismatch: true}
 }
 
 const (
@@ -109,6 +120,8 @@ type sinkClient interface {
 // makes a new client (and closes the old one's connections).
 type transportConfig struct {
 	grpc     bool
+	// otlp: an HTTP sink of OTLP (protobuf), not JSON.
+	otlp     bool
 	url      string // HTTP: the URL; gRPC: host:port
 	insecure bool
 	gzip     bool
@@ -126,6 +139,7 @@ func newClient(tc transportConfig) (sinkClient, error) {
 type httpClient struct {
 	url       string
 	gzip      bool
+	otlp      bool
 	transport *http.Transport
 	client    *http.Client
 }
@@ -145,7 +159,7 @@ func newHTTPClient(tc transportConfig) *httpClient {
 		ResponseHeaderTimeout: 0,
 	}
 	return &httpClient{
-		url: tc.url, gzip: tc.gzip, transport: t,
+		url: tc.url, gzip: tc.gzip, otlp: tc.otlp, transport: t,
 		client: &http.Client{
 			Transport: t,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -169,6 +183,12 @@ func compress(body []byte) []byte {
 }
 
 func (c *httpClient) send(ctx context.Context, p payload, headers map[string]string) result {
+	if p.body == nil {
+		return mismatched("an HTTP sink got a request without a body")
+	}
+	if (p.otlp != nil) != c.otlp {
+		return mismatched("an HTTP sink got a request in another format")
+	}
 	body := p.body
 	if c.gzip {
 		body = compress(body)
@@ -312,6 +332,21 @@ func escape(raw []byte) string {
 
 func (c *httpClient) close() { c.transport.CloseIdleConnections() }
 
+// maxGRPCResponse bounds an Export answer: a partial success's message
+// can be long. Its odd value tells grpc-go's error for it apart from the
+// same error a server sends for a request over its own limit (4 MiB by
+// default), which is a refusal. Tests lower it.
+var maxGRPCResponse = 4<<20 + 4093
+
+// responseOverLimit reports grpc-go's error for an answer over
+// maxGRPCResponse.
+func responseOverLimit(st *status.Status) bool {
+	m := st.Message()
+	limit := strconv.Itoa(maxGRPCResponse)
+	return st.Code() == codes.ResourceExhausted && strings.HasPrefix(m, "grpc: ") && strings.Contains(m, "larger than max") &&
+		(strings.HasSuffix(m, " vs. "+limit+")") || strings.HasSuffix(m, "larger than max "+limit))
+}
+
 // grpcClient calls LogsService/Export: no proxy, the guarded dialer.
 type grpcClient struct {
 	conn *grpc.ClientConn
@@ -331,7 +366,7 @@ func newGRPCClient(tc transportConfig) (*grpcClient, error) {
 			return dialContext(ctx, "tcp", addr)
 		}),
 		grpc.WithUserAgent("inkwall-operator"),
-		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxResponse<<4)),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxGRPCResponse)),
 	)
 	if err != nil {
 		return nil, err
@@ -340,6 +375,9 @@ func newGRPCClient(tc transportConfig) (*grpcClient, error) {
 }
 
 func (c *grpcClient) send(ctx context.Context, p payload, headers map[string]string) result {
+	if p.otlp == nil {
+		return mismatched("a gRPC sink got a request that isn't OTLP")
+	}
 	if len(headers) > 0 {
 		md := metadata.MD{}
 		for k, v := range headers {
@@ -356,7 +394,13 @@ func (c *grpcClient) send(ctx context.Context, p payload, headers map[string]str
 		ps := resp.GetPartialSuccess()
 		return result{verdict: sent, rejected: int(min(ps.GetRejectedLogRecords(), 1<<31-1)), detail: escape([]byte(ps.GetErrorMessage()))}
 	}
-	return classifyGRPC(status.Convert(err), p.size)
+	st := status.Convert(err)
+	if responseOverLimit(st) {
+		// The client's own limit, on the server's answer: the server took
+		// the request. Sending it again would duplicate it.
+		return result{verdict: sent, detail: "the sink's answer was over the response limit"}
+	}
+	return classifyGRPC(st, p.size)
 }
 
 // classifyGRPC maps a status: the OTLP spec's retryable codes, with

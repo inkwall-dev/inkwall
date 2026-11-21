@@ -74,16 +74,13 @@ func (r *recorder) get(m map[string]int, k string) int {
 	return m[k]
 }
 
-// after shortens waits of a second or more a thousandfold, and records
-// them: the backoff, Retry-After, the slow retry of an auth failure.
+// after records the waits before retries (the backoff, Retry-After, the
+// slow retry of an auth failure), and shortens them a thousandfold.
 func (r *recorder) after(d time.Duration) <-chan time.Time {
-	if d >= time.Second {
-		r.mu.Lock()
-		r.waits = append(r.waits, d)
-		r.mu.Unlock()
-		d /= 1000
-	}
-	return time.After(d)
+	r.mu.Lock()
+	r.waits = append(r.waits, d)
+	r.mu.Unlock()
+	return time.After(d / 1000)
 }
 
 func scheme(t *testing.T) *runtime.Scheme {
@@ -388,8 +385,19 @@ func TestExportRetries(t *testing.T) {
 	waits := append([]time.Duration(nil), h.rec.waits...)
 	h.rec.mu.Unlock()
 	// 503: backoff; 429: Retry-After; 401: the slowest pace; 500 (json): backoff.
-	if len(waits) < 4 || waits[1] != 7*time.Second || waits[2] != maxBackoff || waits[0] < minBackoff || waits[0] > 2*minBackoff {
-		t.Errorf("waits %v, want a backoff, 7s, %v, a backoff", waits, maxBackoff)
+	// Full jitter: the first under minBackoff, the auth failure's under
+	// maxBackoff, Retry-After as given.
+	if len(waits) < 4 || waits[0] > minBackoff || waits[0] < minBackoff/10 || waits[1] != 7*time.Second ||
+		waits[2] > maxBackoff || waits[2] < minBackoff/10 || waits[3] > 8*minBackoff {
+		t.Errorf("waits %v, want a jittered backoff under %v, 7s, a jittered wait under %v, a backoff", waits, minBackoff, maxBackoff)
+	}
+	for range 200 {
+		if d := backoff(0); d > minBackoff || d < minBackoff/10 {
+			t.Fatalf("backoff(0) = %v", d)
+		}
+		if d := backoff(10); d > maxBackoff {
+			t.Fatalf("backoff(10) = %v", d)
+		}
 	}
 	for _, k := range []string{"a/" + kindServer, "a/" + kindThrottled, "a/" + kindAuth} {
 		if h.rec.get(h.rec.failed, k) == 0 {
@@ -591,8 +599,8 @@ func TestExportConfigInvalid(t *testing.T) {
 		}), []client.Object{secretObj("cc", map[string]string{"tls.crt": "x"})}, "doesn't hold a client certificate"},
 		{"URL Secret with user info", wafv1alpha1.EventSink{Name: "a", JSON: &wafv1alpha1.JSONSink{URLSecretRef: &wafv1alpha1.SecretKeyReference{Name: "u", Key: "url"}}},
 			[]client.Object{secretObj("u", map[string]string{"url": "https://user:hunter2@x.example/in"})}, "isn't an https:// or http:// URL"},
-		{"URL Secret plaintext without insecure", wafv1alpha1.EventSink{Name: "a", JSON: &wafv1alpha1.JSONSink{URLSecretRef: &wafv1alpha1.SecretKeyReference{Name: "u", Key: "url"}}},
-			[]client.Object{secretObj("u", map[string]string{"url": sk.srv.URL + "/hunter2"})}, "needs insecure: true"},
+		{"URL Secret plaintext, even with insecure", wafv1alpha1.EventSink{Name: "a", Insecure: true, JSON: &wafv1alpha1.JSONSink{URLSecretRef: &wafv1alpha1.SecretKeyReference{Name: "u", Key: "url"}}},
+			[]client.Object{secretObj("u", map[string]string{"url": sk.srv.URL + "/hunter2"})}, "is plaintext (http://)"},
 		{"URL Secret without the key", wafv1alpha1.EventSink{Name: "a", JSON: &wafv1alpha1.JSONSink{URLSecretRef: &wafv1alpha1.SecretKeyReference{Name: "u", Key: "url"}}},
 			[]client.Object{secretObj("u", map[string]string{"other": "x"})}, "has no key url"},
 		{"gRPC without a port", wafv1alpha1.EventSink{Name: "a", OTLP: &wafv1alpha1.OTLPSink{Endpoint: "grpcs://collector"}}, nil, "needs a port"},
@@ -611,12 +619,13 @@ func TestExportConfigInvalid(t *testing.T) {
 // The URL from a Secret is used, and a sink that can't start leaves the
 // others alone.
 func TestExportURLSecret(t *testing.T) {
-	sk := newSink(t)
+	sk, _, ca := tlsSink(t)
 	h := start(t, "", config(
-		wafv1alpha1.EventSink{Name: "sumo", Insecure: true, JSON: &wafv1alpha1.JSONSink{URLSecretRef: &wafv1alpha1.SecretKeyReference{Name: "u", Key: "url"}, Framing: wafv1alpha1.JSONArray},
+		wafv1alpha1.EventSink{Name: "sumo", JSON: &wafv1alpha1.JSONSink{URLSecretRef: &wafv1alpha1.SecretKeyReference{Name: "u", Key: "url"}, Framing: wafv1alpha1.JSONArray},
+			TLS:   &wafv1alpha1.SinkTLS{CASecretRef: &wafv1alpha1.LocalSecretReference{Name: "ca"}},
 			Batch: wafv1alpha1.ExportBatch{MaxDelay: &metav1.Duration{Duration: 10 * time.Millisecond}}},
 		jsonSink("broken", "http://x", func(s *wafv1alpha1.EventSink) { s.TLS = nil; s.Insecure = false }),
-	), secretObj("u", map[string]string{"url": sk.srv.URL + "/receiver/v1/http/TOKEN\n"}))
+	), secretObj("u", map[string]string{"url": sk.srv.URL + "/receiver/v1/http/TOKEN\n"}), secretObj("ca", map[string]string{"ca.crt": ca}))
 	h.exp.Add(batchOf(2, numbered("e")))
 	h.waitFor("the events", func() bool { return len(sk.events()) == 2 })
 	if st := h.status("broken"); st.State != StateConfigInvalid {
