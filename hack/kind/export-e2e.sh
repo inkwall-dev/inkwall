@@ -134,8 +134,11 @@ eventually_long "the sinks export (EventsExported: Exporting)" export_is Exporti
 
 # An attack through Traefik, on a path of its own, with a password
 # argument whose snippet the engine redacts, and another whose it keeps.
+# Each trips rules of its own (SQL injection, XSS): an event names one
+# match per rule, the first in Coraza's argument order, which varies, so
+# the same attack in both would name the password's match only sometimes.
 attack_path=/export-$RANDOM
-attack="$attack_path?password=1%27%20OR%20%271%27%3D%271&q=1%27%20OR%20%271%27%3D%271"
+attack="$attack_path?password=1%27%20OR%20%271%27%3D%271&q=%3Cscript%3Ealert%281%29%3C%2Fscript%3E"
 cluster_uid=$("${KUBECTL[@]}" get namespace kube-system -o jsonpath='{.metadata.uid}')
 eventually "the attack is denied through Traefik" tstatus_is 403 "$attack"
 
