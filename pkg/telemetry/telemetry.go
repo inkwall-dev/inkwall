@@ -17,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/inkwall-dev/inkwall/pkg/geo"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 )
 
@@ -75,6 +76,8 @@ type Metrics struct {
 	wsConnections  prometheus.Gauge
 	wsViolations   *prometheus.CounterVec
 	panics         *prometheus.CounterVec
+	geoDenied      *prometheus.CounterVec
+	geoLookups     *prometheus.CounterVec
 
 	labels      prometheus.Labels
 	mu          sync.Mutex
@@ -164,11 +167,24 @@ func NewMetrics(adapter string) *Metrics {
 			Help:        "Panics recovered in a goroutine that reads a proxy's connection, by component (extproc_stream, spoe_connection, spoe_notify, websocket). Each ended only its stream or connection, failing closed for it.",
 			ConstLabels: labels,
 		}, []string{"component"}),
+		// The country label is bounded: only codes geo denies, at most
+		// 676, and unknown (design 0011 §8).
+		geoDenied: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name:        "inkwall_geo_denied_total",
+			Help:        "Requests geo blocking denied (action deny) or would have (log: in Detect, or decided by something else first), by country: the code, or unknown for a public address without one.",
+			ConstLabels: labels,
+		}, []string{"action", "country"}),
+		geoLookups: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name:        "inkwall_geo_lookups_total",
+			Help:        "Country lookups for geo policies, one per request, by result: country, private (never denied by geo; many of them mean the client IP is a load balancer's), unknown, or no-table (the bundle names a table the engine doesn't hold).",
+			ConstLabels: labels,
+		}, []string{"result"}),
 		rules:  map[int]string{},
 		labels: labels,
 	}
 	reg.MustRegister(m.requests, m.duration, m.responses, m.respTime,
-		m.ruleMatches, m.adapterErrors, m.rulesReloads, m.connections, m.connWaits, m.wsMessages, m.wsConnections, m.wsViolations, m.panics)
+		m.ruleMatches, m.adapterErrors, m.rulesReloads, m.connections, m.connWaits, m.wsMessages, m.wsConnections, m.wsViolations, m.panics,
+		m.geoDenied, m.geoLookups)
 	return m
 }
 
@@ -205,9 +221,23 @@ func (m *Metrics) ObserveVerdict(v pipeline.Verdict) {
 	default:
 		m.requests.WithLabelValues(action, v.Reason.String()).Inc()
 		m.duration.Observe(v.Duration.Seconds())
+		if v.GeoMatch {
+			geoAction := "log"
+			if v.Reason == pipeline.ReasonGeoDeny && v.Action == pipeline.ActionDeny {
+				geoAction = "deny"
+			}
+			m.geoDenied.WithLabelValues(geoAction, v.Country).Inc()
+		}
 		if m.policyRequests != nil {
 			m.policyRequests.WithLabelValues(m.policyLabel(v.Policy), action, v.Reason.String()).Inc()
 		}
+	}
+}
+
+// ObserveGeoLookup counts a geo policy's country lookup (policy.GeoObserver).
+func (m *Metrics) ObserveGeoLookup(r geo.Result) {
+	if m != nil {
+		m.geoLookups.WithLabelValues(r.String()).Inc()
 	}
 }
 

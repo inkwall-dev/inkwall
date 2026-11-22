@@ -140,6 +140,9 @@ type Options struct {
 	// EnginePullSecrets are the Secrets the Pod webhook's injected pods
 	// pull the engine image with.
 	EnginePullSecrets []string
+	// GeoRoot is where country database files are; empty: the chart's
+	// /var/lib/inkwall/geo (tests point it elsewhere).
+	GeoRoot string
 	// Integrations select the proxy pods; nil: read from the InkwallConfig
 	// when the manager is created. The operator restarts when they change
 	// (its cache of proxy pods is built from them), or when an
@@ -322,6 +325,15 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		IngressRoutes:   ingressRoutes,
 		HTTPRoutes:      httpRoutes,
 		VirtualServices: virtualServices,
+	}).SetupWithManager(mgr); err != nil {
+		return nil, err
+	}
+	// The country database, compiled on the leader (design 0011 §4.2).
+	if err := (&controller.GeoReconciler{
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Namespace: o.Namespace,
+		Root:      o.GeoRoot,
 	}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}

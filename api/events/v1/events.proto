@@ -72,6 +72,10 @@ message SecurityEvent {
   // samples them: a rate limit's, its client's limited requests since its
   // last event. 0 or 1: itself.
   uint32 sampled_count = 24;
+  // The client's country (ISO 3166-1 alpha-2), "unknown" for a public
+  // address the country table has none for, empty for a private address
+  // or when the engine holds no table (design 0011 §8).
+  string country = 25;
   // With REASON_LLM: the LLM check that failed, and where. Unset from
   // engines before 0.7.0. (Numbered from 40, apart from the fields other
   // features add meanwhile.)

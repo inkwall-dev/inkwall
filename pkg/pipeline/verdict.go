@@ -76,6 +76,12 @@ const (
 	// ReasonRateLimit means the client was over one of the policy's rate
 	// limits (Verdict.RateLimit).
 	ReasonRateLimit
+	// ReasonGeoDeny means the client's country is denied by the policy's
+	// geo blocking (Verdict.Country).
+	ReasonGeoDeny
+	// ReasonGeoUnavailable means the bundle names a country table the
+	// engine doesn't hold, and the policy fails closed.
+	ReasonGeoUnavailable
 	// ReasonLLM means a request on one of the policy's LLM endpoints
 	// failed an LLM check (Verdict.LLM).
 	ReasonLLM
@@ -113,6 +119,10 @@ func (r Reason) String() string {
 		return "grpc"
 	case ReasonRateLimit:
 		return "rate-limit"
+	case ReasonGeoDeny:
+		return "geo-deny"
+	case ReasonGeoUnavailable:
+		return "geo-unavailable"
 	case ReasonLLM:
 		return "llm"
 	default:
@@ -147,12 +157,19 @@ type Verdict struct {
 	// seconds; the answer's Retry-After).
 	RateLimit  string
 	RetryAfter time.Duration
-	// RateLimitEvent is, with ReasonRateLimit, whether the verdict becomes
-	// a security event: limited requests are sampled per client and capped
-	// (pkg/ratelimit), so a flood can't push other events out. SampledCount
-	// is the limited requests the event stands for, this one included.
-	RateLimitEvent bool
-	SampledCount   uint32
+	// SampledEvent is, with ReasonRateLimit, ReasonGeoDeny or
+	// ReasonGeoUnavailable, whether the verdict becomes a security event:
+	// limited requests are sampled per client and capped (pkg/ratelimit),
+	// geo's per (policy, country), so a flood can't push other events out.
+	// SampledCount is the requests the event stands for, this one included.
+	SampledEvent bool
+	SampledCount uint32
+	// GeoMatch is set when the policy's geo blocking denied the request or
+	// would have (in Detect, also when a rule's reason won), and Country
+	// is the client's country as the metrics label it: the code, or
+	// "unknown".
+	GeoMatch bool
+	Country  string
 	// LLM is, with ReasonLLM, the LLM check the request failed, and where.
 	LLM *LLMVerdict
 	// Response reports a verdict on the upstream's response, not on the

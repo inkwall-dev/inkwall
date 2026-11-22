@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-11-20
-- Updated: 2026-11-20
+- Updated: 2026-11-21
 - Owner: noureldin
 - Depends on: [0001 — Performance-First Architecture](0001-performance-first-architecture.md),
   [0002 — System Architecture](0002-system-architecture.md),
@@ -13,7 +13,7 @@ tier T1 ([0001 §4](0001-performance-first-architecture.md#4-request-pipeline-ti
 next to the IP lists: a cheap check on the client IP, before the rules run. This document decides
 the `WAFPolicy` API, where the country database comes from and how it reaches engines, how the
 engine looks a country up in about 100 ns, what the operator reports, and how it is tested.
-**Nothing here is built yet** (#724).
+**Built in 0.7.0** (#724); the user guide is [Geo blocking](../geo-blocking.md).
 
 [Terms](../glossary.md) used here:
 
@@ -188,7 +188,9 @@ A country is a large population, and a user trying geo wants to see what the rul
 rest of it.
 
 `BodyLimit` (`pkg/pipeline/pipeline.go`) returns 0 for a client the IP lists decide, so adapters
-don't read a body that won't be inspected. It does the same for a geo deny in `Block`.
+don't read a body that won't be inspected. It does the same for a geo deny in `Block`. A request
+several policies inspect follows the same order across them: any policy's geo deny in `Block` (or
+missing table failing closed) answers before any policy's rate limit is charged.
 
 ### 2.4 Validation
 
@@ -596,8 +598,8 @@ table; it is swapped in the same way. Tables outlive sets by being shared betwee
 - **`api/geo/v1/geo.proto`** (new): `CountryTable` ([§4.2](#42-the-operator-compiles-a-country-table)).
 - **`api/bundle/v1/bundle.proto`:** `Bundle.geo_table = 11` (`GeoTableRef { sha256, size }`:
   the table hash, and the decoded size);
-  `Policy.geo = 16` (`Geo { repeated string deny; repeated string allow; bool unknown_deny;
-  bool detect }`; field 15 is the rate limits' in 0009). Engines before 0.7.0 skip both.
+  `Policy.geo = 17` (`Geo { repeated string deny; repeated string allow; bool unknown_deny;
+  bool detect }`; field 15 is the rate limits' in 0009, 16 the custom denial response's, which landed first). Engines before 0.7.0 skip both.
 - **`api/agent/v1`:** `WatchResponse.geo_table = 3`; `Hello.geo_table_sha256 = 8`,
   `Hello.capabilities = 9`; `Heartbeat.geo_table_sha256 = 6`.
 - **`api/engine/v1/engine.proto`:** `REASON_GEO_DENY = 16` and `REASON_GEO_UNAVAILABLE = 17`, the
@@ -720,8 +722,10 @@ database update. The message says which: "no country database: set InkwallConfig
 spec.geo.database", or "2 of 6 engines have no country table (first: …)". `Accepted` stays `True`: the policy is valid, and it will be enforced once the
 table arrives. `EnginesOutdated` ([§2.5](#25-older-engines)) takes precedence.
 
-A policy with `spec.geo` but no database configured gets one Warning event, and the webhook warns
-when it is applied.
+A policy with `spec.geo` but no database configured gets one Warning Event when its `Enforced`
+turns `GeoDatabaseUnavailable`: the operator's policy status Events (`policystatus`), once per
+transition, rate-limited per policy. The webhook doesn't warn of it: it reads no other object than
+the one applied, and the InkwallConfig can be set after the policy.
 
 `inkwallctl status` shows the database line: type, build date, how many engines hold it.
 

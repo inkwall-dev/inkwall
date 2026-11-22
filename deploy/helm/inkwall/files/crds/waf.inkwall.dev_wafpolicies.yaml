@@ -259,6 +259,66 @@ spec:
                 - Open
                 - Closed
                 type: string
+              geo:
+                description: |-
+                  Geo denies clients by country, or lets only some countries in
+                  (docs/geo-blocking.md), checked after the IP lists, before the
+                  skipped paths, the rate limits and the rules. It needs a country
+                  database (InkwallConfig spec.geo.database), and is only as right as
+                  the client IP the engine resolves (docs/client-ip.md). Requires
+                  engines 0.7.0 or later.
+                properties:
+                  allow:
+                    description: |-
+                      Allow lists the only countries whose clients get through geo. Unlike
+                      an IP allow list, it doesn't skip inspection: their requests still go
+                      through the rate limits and the rules.
+                    items:
+                      description: |-
+                        CountryCode is an ISO 3166-1 alpha-2 country code, upper case: DE, US.
+                        Codes the databases use that aren't officially assigned, such as XK
+                        (Kosovo), are accepted; the webhook warns on others.
+                      pattern: ^[A-Z]{2}$
+                      type: string
+                    maxItems: 250
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                  deny:
+                    description: |-
+                      Deny lists the countries whose clients are denied (403, reason
+                      geo-deny).
+                    items:
+                      description: |-
+                        CountryCode is an ISO 3166-1 alpha-2 country code, upper case: DE, US.
+                        Codes the databases use that aren't officially assigned, such as XK
+                        (Kosovo), are accepted; the webhook warns on others.
+                      pattern: ^[A-Z]{2}$
+                      type: string
+                    maxItems: 250
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                  mode:
+                    description: |-
+                      Mode Detect logs what geo would deny instead of denying it, on a
+                      Block policy too. Unset: the policy's mode.
+                    enum:
+                    - Detect
+                    type: string
+                  unknown:
+                    default: Allow
+                    description: |-
+                      Unknown is what to do with a public address the database has no
+                      country for: Allow (the default) or Deny.
+                    enum:
+                    - Allow
+                    - Deny
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: geo needs exactly one of deny and allow
+                  rule: has(self.deny) != has(self.allow)
               ipLists:
                 description: |-
                   IPLists names WAFIPLists in the policy's namespace whose client

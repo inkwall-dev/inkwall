@@ -11,6 +11,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -70,11 +71,24 @@ type Engine struct {
 	// ProbeReceipts, if set, returns the probe receipts each heartbeat
 	// reports (#475).
 	ProbeReceipts func() []string
+	// GeoTables takes country tables (design 0011 §4.4): the Hello
+	// advertises geo-table, a table whose bytes match its hash is held,
+	// and heartbeats report it. OnGeoTable, if set, is called with each.
+	GeoTables  bool
+	OnGeoTable func(hash []byte)
 
 	mu      sync.Mutex
 	applied *bundlev1.Bundle
 	nacks   int
 	err     error
+	geo     []byte
+}
+
+// GeoTable returns the hash of the country table the engine holds.
+func (e *Engine) GeoTable() []byte {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.geo
 }
 
 // SetPublicKeys replaces the trusted keys; heartbeats report them.
@@ -158,7 +172,7 @@ func (e *Engine) run(ctx context.Context) error {
 	}
 	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{
 		EngineId: e.ID, PodNamespace: cmp.Or(e.PodNamespace, "test"), PodName: cmp.Or(e.PodName, e.ID), EngineVersion: cmp.Or(e.EngineVersion, "fake"), BundleVersion: current,
-		TrustedKeyIds: e.TrustedKeys(),
+		TrustedKeyIds: e.TrustedKeys(), Capabilities: e.capabilities(), GeoTableSha256: e.GeoTable(),
 	}}}); err != nil {
 		// The operator may have ended the stream first (rejected the
 		// engine): its status comes with Recv.
@@ -188,7 +202,7 @@ func (e *Engine) run(ctx context.Context) error {
 				if a := e.Applied(); a != nil {
 					v = a.GetVersion()
 				}
-				hb := &agentv1.Heartbeat{BundleVersion: v, TrustedKeyIds: e.TrustedKeys()}
+				hb := &agentv1.Heartbeat{BundleVersion: v, TrustedKeyIds: e.TrustedKeys(), GeoTableSha256: e.GeoTable()}
 				if e.ProbeReceipts != nil {
 					hb.ProbeReceipts = e.ProbeReceipts()
 				}
@@ -205,6 +219,19 @@ func (e *Engine) run(ctx context.Context) error {
 		msg, err := stream.Recv()
 		if err != nil {
 			return err
+		}
+		if t := msg.GetGeoTable(); t != nil && e.GeoTables {
+			// Held at once: the fake checks the bytes against their hash,
+			// not against a bundle.
+			if sum := sha256.Sum256(t.GetTable()); bytes.Equal(sum[:], t.GetSha256()) {
+				e.mu.Lock()
+				e.geo = t.GetSha256()
+				e.mu.Unlock()
+				if e.OnGeoTable != nil {
+					e.OnGeoTable(t.GetSha256())
+				}
+			}
+			continue
 		}
 		signed := msg.GetBundle()
 		if signed == nil {
@@ -240,6 +267,13 @@ func (e *Engine) run(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+func (e *Engine) capabilities() []string {
+	if e.GeoTables {
+		return []string{"geo-table"}
+	}
+	return nil
 }
 
 // verify checks the signature before decoding, as a real engine must: an

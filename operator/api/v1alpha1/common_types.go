@@ -48,6 +48,10 @@ const (
 	// sink of spec.events.export exports from every operator replica;
 	// absent without sinks.
 	ConditionEventsExported = "EventsExported"
+	// ConditionGeoDatabaseReady, on the InkwallConfig, says whether the
+	// country database (spec.geo.database) is compiled and published;
+	// absent without spec.geo.
+	ConditionGeoDatabaseReady = "GeoDatabaseReady"
 )
 
 // SecretReference names a Secret in the operator's namespace.

@@ -188,6 +188,15 @@ type WAFPolicySpec struct {
 	// +optional
 	DenyResponse *DenyResponse `json:"denyResponse,omitempty"`
 
+	// Geo denies clients by country, or lets only some countries in
+	// (docs/geo-blocking.md), checked after the IP lists, before the
+	// skipped paths, the rate limits and the rules. It needs a country
+	// database (InkwallConfig spec.geo.database), and is only as right as
+	// the client IP the engine resolves (docs/client-ip.md). Requires
+	// engines 0.7.0 or later.
+	// +optional
+	Geo *GeoSpec `json:"geo,omitempty"`
+
 	// LLM declares paths of the policy's routes as LLM APIs (OpenAI Chat
 	// Completions, Responses or Embeddings, Anthropic Messages): their
 	// request bodies are read up to maxBodyBytes, parsed strictly, and
@@ -199,6 +208,64 @@ type WAFPolicySpec struct {
 	// (docs/llm-apis.md).
 	// +optional
 	LLM *LLMSpec `json:"llm,omitempty"`
+}
+
+// CountryCode is an ISO 3166-1 alpha-2 country code, upper case: DE, US.
+// Codes the databases use that aren't officially assigned, such as XK
+// (Kosovo), are accepted; the webhook warns on others.
+// +kubebuilder:validation:Pattern=`^[A-Z]{2}$`
+type CountryCode string
+
+// GeoUnknown is what geo does with a public address the database has no
+// country for.
+// +kubebuilder:validation:Enum=Allow;Deny
+type GeoUnknown string
+
+// What geo does with an address without a country.
+const (
+	GeoUnknownAllow GeoUnknown = "Allow"
+	GeoUnknownDeny  GeoUnknown = "Deny"
+)
+
+// GeoMode makes geo only log, on a Block policy too.
+// +kubebuilder:validation:Enum=Detect
+type GeoMode string
+
+// GeoModeDetect logs what geo would deny.
+const GeoModeDetect GeoMode = "Detect"
+
+// GeoSpec is a policy's geo blocking: a deny list or an allow list of
+// countries. Private addresses (and requests with no client IP) are never
+// denied by geo, unless the database maps them.
+// +kubebuilder:validation:XValidation:rule="has(self.deny) != has(self.allow)",message="geo needs exactly one of deny and allow"
+type GeoSpec struct {
+	// Deny lists the countries whose clients are denied (403, reason
+	// geo-deny).
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=250
+	// +listType=set
+	// +optional
+	Deny []CountryCode `json:"deny,omitempty"`
+
+	// Allow lists the only countries whose clients get through geo. Unlike
+	// an IP allow list, it doesn't skip inspection: their requests still go
+	// through the rate limits and the rules.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=250
+	// +listType=set
+	// +optional
+	Allow []CountryCode `json:"allow,omitempty"`
+
+	// Unknown is what to do with a public address the database has no
+	// country for: Allow (the default) or Deny.
+	// +kubebuilder:default=Allow
+	// +optional
+	Unknown GeoUnknown `json:"unknown,omitempty"`
+
+	// Mode Detect logs what geo would deny instead of denying it, on a
+	// Block policy too. Unset: the policy's mode.
+	// +optional
+	Mode GeoMode `json:"mode,omitempty"`
 }
 
 // LLMFormat is the shape of an LLM API's requests.

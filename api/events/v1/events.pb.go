@@ -200,6 +200,10 @@ type SecurityEvent struct {
 	// samples them: a rate limit's, its client's limited requests since its
 	// last event. 0 or 1: itself.
 	SampledCount uint32 `protobuf:"varint,24,opt,name=sampled_count,json=sampledCount,proto3" json:"sampled_count,omitempty"`
+	// The client's country (ISO 3166-1 alpha-2), "unknown" for a public
+	// address the country table has none for, empty for a private address
+	// or when the engine holds no table (design 0011 §8).
+	Country string `protobuf:"bytes,25,opt,name=country,proto3" json:"country,omitempty"`
 	// With REASON_LLM: the LLM check that failed, and where. Unset from
 	// engines before 0.7.0. (Numbered from 40, apart from the fields other
 	// features add meanwhile.)
@@ -404,6 +408,13 @@ func (x *SecurityEvent) GetSampledCount() uint32 {
 		return x.SampledCount
 	}
 	return 0
+}
+
+func (x *SecurityEvent) GetCountry() string {
+	if x != nil {
+		return x.Country
+	}
+	return ""
 }
 
 func (x *SecurityEvent) GetLlm() *LLMEvent {
@@ -646,7 +657,7 @@ var File_events_v1_events_proto protoreflect.FileDescriptor
 
 const file_events_v1_events_proto_rawDesc = "" +
 	"\n" +
-	"\x16events/v1/events.proto\x12\x11inkwall.events.v1\x1a\x16engine/v1/engine.proto\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xab\a\n" +
+	"\x16events/v1/events.proto\x12\x11inkwall.events.v1\x1a\x16engine/v1/engine.proto\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xc5\a\n" +
 	"\rSecurityEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12.\n" +
 	"\x04time\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x04time\x12\x1b\n" +
@@ -675,7 +686,8 @@ const file_events_v1_events_proto_rawDesc = "" +
 	"\bprotocol\x18\x16 \x01(\x0e2\x1b.inkwall.events.v1.ProtocolR\bprotocol\x12\x1d\n" +
 	"\n" +
 	"rate_limit\x18\x17 \x01(\tR\trateLimit\x12#\n" +
-	"\rsampled_count\x18\x18 \x01(\rR\fsampledCount\x12-\n" +
+	"\rsampled_count\x18\x18 \x01(\rR\fsampledCount\x12\x18\n" +
+	"\acountry\x18\x19 \x01(\tR\acountry\x12-\n" +
 	"\x03llm\x18( \x01(\v2\x1b.inkwall.events.v1.LLMEventR\x03llm\"\xca\x01\n" +
 	"\bLLMEvent\x12\x16\n" +
 	"\x06format\x18\x01 \x01(\tR\x06format\x12\x14\n" +

@@ -91,22 +91,24 @@ func actionName(a enginev1.Action) string {
 }
 
 var reasonNames = map[enginev1.Reason]string{
-	enginev1.Reason_REASON_NONE:       "none",
-	enginev1.Reason_REASON_RULE:       "rule",
-	enginev1.Reason_REASON_TIMEOUT:    "timeout",
-	enginev1.Reason_REASON_ERROR:      "error",
-	enginev1.Reason_REASON_CANCELED:   "canceled",
-	enginev1.Reason_REASON_OVERLOAD:   "overload",
-	enginev1.Reason_REASON_OVERSIZE:   "oversize",
-	enginev1.Reason_REASON_SKIPPED:    "skipped",
-	enginev1.Reason_REASON_NO_POLICY:  "no-policy",
-	enginev1.Reason_REASON_SUSPENDED:  "suspended",
-	enginev1.Reason_REASON_WEBSOCKET:  "websocket",
-	enginev1.Reason_REASON_IP_DENY:    "ip-deny",
-	enginev1.Reason_REASON_IP_ALLOW:   "ip-allow",
-	enginev1.Reason_REASON_GRPC:       "grpc",
-	enginev1.Reason_REASON_RATE_LIMIT: "rate-limit",
-	enginev1.Reason_REASON_LLM:        "llm",
+	enginev1.Reason_REASON_NONE:            "none",
+	enginev1.Reason_REASON_RULE:            "rule",
+	enginev1.Reason_REASON_TIMEOUT:         "timeout",
+	enginev1.Reason_REASON_ERROR:           "error",
+	enginev1.Reason_REASON_CANCELED:        "canceled",
+	enginev1.Reason_REASON_OVERLOAD:        "overload",
+	enginev1.Reason_REASON_OVERSIZE:        "oversize",
+	enginev1.Reason_REASON_SKIPPED:         "skipped",
+	enginev1.Reason_REASON_NO_POLICY:       "no-policy",
+	enginev1.Reason_REASON_SUSPENDED:       "suspended",
+	enginev1.Reason_REASON_WEBSOCKET:       "websocket",
+	enginev1.Reason_REASON_IP_DENY:         "ip-deny",
+	enginev1.Reason_REASON_IP_ALLOW:        "ip-allow",
+	enginev1.Reason_REASON_GRPC:            "grpc",
+	enginev1.Reason_REASON_RATE_LIMIT:      "rate-limit",
+	enginev1.Reason_REASON_GEO_DENY:        "geo-deny",
+	enginev1.Reason_REASON_GEO_UNAVAILABLE: "geo-unavailable",
+	enginev1.Reason_REASON_LLM:             "llm",
 }
 
 func reasonName(r enginev1.Reason) string {
@@ -263,6 +265,9 @@ func appendJSON(b []byte, it item, v *view) []byte {
 		{"host", ev.GetHost()},
 		{"path", ev.GetPath()},
 		{"client_ip", v.keep(!v.omitClientIP, ev.GetClientIp())},
+		// The client's country (geo blocking): personal data about the
+		// client, left out with its address.
+		{"country", v.keep(!v.omitClientIP, ev.GetCountry())},
 		{"user_agent", v.keep(!v.omitUserAgent, ev.GetUserAgent())},
 	})
 	if l := ev.GetLatency(); l != nil {

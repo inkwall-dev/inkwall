@@ -429,8 +429,9 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 					"bind the CRS without placement, and the rule set to place before it in its own entry"))
 		}
 	}
-	warnings := append(responseWarnings(p), policyListWarnings(p)...)
-	return append(warnings, llmWarnings(p)...), invalid("WAFPolicy", p.Name, errs)
+	warnings := append(responseWarnings(p), geoWarnings(p)...)
+	warnings = append(warnings, llmWarnings(p)...)
+	return append(warnings, policyListWarnings(p)...), invalid("WAFPolicy", p.Name, errs)
 }
 
 // llmWarnings warns of LLM endpoint paths that skip.paths or

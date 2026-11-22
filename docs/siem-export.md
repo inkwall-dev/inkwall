@@ -377,9 +377,9 @@ it in the SIEM's pipeline (the recipes above give ECS and Splunk CIM).
 | `rule_id`, `anomaly_score` | The rule that interrupted the request, and the CRS anomaly score; left out at 0 |
 | `matches[]` | Every rule that matched: `rule_id`, `variable`, and `snippet` (at most 64 bytes, redacted, left out when there is none) |
 | `phase`, `protocol` | `request`, `response`, `websocket-message`; `http`, `grpc`, `websocket`; left out from engines too old to say |
-| `rate_limit`, `sampled_count` | With `reason: rate-limit`: the limit's name, and how many limited requests the event stands for (left out at 1) |
+| `rate_limit`, `sampled_count` | With `reason: rate-limit`: the limit's name, and how many limited requests the event stands for (left out at 1); with `reason: geo-deny` or `geo-unavailable`, `sampled_count` too ([geo blocking](geo-blocking.md#metrics-alerts-and-events)) |
 | `llm.*` | With `reason: llm` ([LLM APIs](llm-apis.md#metrics-and-events)): `check`, `format`, `model`, `role`, `message_index`, `offset`, `estimated_tokens`; never the prompt |
-| `request.*` | `id`, `method`, `host`, `path` (no query string), `client_ip`, `user_agent` |
+| `request.*` | `id`, `method`, `host`, `path` (no query string), `client_ip`, `country` (the client's, when the engine holds a [country table](geo-blocking.md): the code or `unknown`; left out with `client_ip` by `omit: [ClientIP]`), `user_agent` |
 | `latency_seconds` | Time spent inspecting |
 
 Strings and fields that are empty or zero are left out, but for `event_id`, `action`, `reason`,
@@ -394,7 +394,7 @@ One `LogRecord` per event, in a `ResourceLogs` per engine pod:
 - Scope: `inkwall.dev/events`, version `1`.
 - Record: `event_name` `inkwall.security_event`, severity `WARN` for `deny` and `INFO` for `log`,
   a short body (`deny 403 rule 949110 GET shop.example.com/search`), and attributes:
-  `http.request.method`, `server.address`, `url.path`, `client.address`, `user_agent.original`,
+  `http.request.method`, `server.address`, `url.path`, `client.address`, `client.geo.country.iso_code`, `user_agent.original`,
   `http.response.status_code`, and `inkwall.event_id`, `inkwall.engine.id`,
   `inkwall.policy.namespace`, `inkwall.policy.name`, `inkwall.policy.bundle_version`,
   `inkwall.action`, `inkwall.reason`, `inkwall.rule_id`, `inkwall.anomaly_score`,

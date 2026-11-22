@@ -110,6 +110,8 @@ func TestAuditFieldNames(t *testing.T) {
 		"spec.events.export.sinks.tls.clientCertificateSecretRef",
 		"spec.events.redact.headers",
 		"spec.exclusions.when.header",
+		"spec.geo.database.secretRef",
+		"spec.geo.database.secretRef.key",
 		// LLM API paths and output-token caps: no credential.
 		"spec.llm.endpoints",
 		"spec.llm.request.maxOutputTokens",

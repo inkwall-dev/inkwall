@@ -100,8 +100,9 @@ func IsEvent(v pipeline.Verdict) bool {
 	// Limited requests are sampled per client and capped, so a flood
 	// doesn't push other events out of the buffer (pkg/ratelimit): the
 	// pipeline says which become events.
-	if v.Reason == pipeline.ReasonRateLimit {
-		return v.RateLimitEvent
+	switch v.Reason {
+	case pipeline.ReasonRateLimit, pipeline.ReasonGeoDeny, pipeline.ReasonGeoUnavailable:
+		return v.SampledEvent
 	}
 	if v.Action != pipeline.ActionAllow {
 		return true
@@ -143,9 +144,17 @@ func LogEvent(ctx context.Context, logger *slog.Logger, rec *events.Recorder, re
 		slog.String("request_id", req.ID),
 		slog.Duration("inspection_time", v.Duration),
 	}
-	if v.Reason == pipeline.ReasonRateLimit {
+	if c := req.Geo.Label(); c != "" {
+		// The client's country, when a geo policy looked it up.
+		attrs = append(attrs, slog.String("country", c))
+	}
+	switch v.Reason {
+	case pipeline.ReasonRateLimit:
 		// The limit, and the limited requests the sampled event stands for.
 		attrs = append(attrs, slog.String("rate_limit", v.RateLimit), slog.Uint64("sampled_count", uint64(v.SampledCount)))
+	case pipeline.ReasonGeoDeny, pipeline.ReasonGeoUnavailable:
+		// The requests the sampled event stands for.
+		attrs = append(attrs, slog.Uint64("sampled_count", uint64(v.SampledCount)))
 	}
 	if l := v.LLM; l != nil && v.Reason == pipeline.ReasonLLM {
 		// The check and where in the body, never the prompt (design 0012 §9).
