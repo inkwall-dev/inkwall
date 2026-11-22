@@ -3,9 +3,10 @@
 
 // Package grpcschema holds a policy's gRPC schema as the engine reads
 // messages with it (design 0013 §5, §6): the compiled form the operator puts
-// in the bundle (bundlev1.GRPCSchema), checked and indexed. The engine never
-// parses descriptors: Load checks integers and short strings only, so that
-// a schema that passes can be walked without further checks.
+// in the bundle (bundlev1.GRPCSchema, which pkg/grpcschema/load reads),
+// checked and indexed. The engine never parses descriptors: New checks
+// integers and short strings only, so that a schema that passes can be
+// walked without further checks.
 package grpcschema
 
 import (
@@ -16,13 +17,10 @@ import (
 	"sync/atomic"
 
 	"google.golang.org/protobuf/encoding/protowire"
-	"google.golang.org/protobuf/proto"
-
-	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 )
 
 // Bounds of a compiled schema (design 0013 §5.4), which the operator's
-// compiler and Load both check.
+// compiler and New both check.
 const (
 	MaxMethods         = 4096
 	MaxMessages        = 16384
@@ -35,7 +33,8 @@ const (
 	maxDenseMultiplier = 2
 )
 
-// Kind is how a field's value is read.
+// Kind is how a field's value is read: the values of
+// bundlev1.GRPCFieldKind.
 type Kind uint8
 
 // The kinds of bundlev1.GRPCFieldKind.
@@ -165,18 +164,53 @@ func (s *Schema) AnyType(typeURL string) *Message {
 	return s.Message(typeURL)
 }
 
-// Load checks a compiled schema and indexes it. An error means the schema
+// Def is a compiled schema as plain data (bundlev1.GRPCSchema, which
+// pkg/grpcschema/load reads): what New checks and indexes. The package
+// doesn't import the bundle, so that the reader (pkg/grpcwire) links no
+// protobuf runtime.
+type Def struct {
+	ID, Source string
+	// Size is the compiled size in bytes.
+	Size     int
+	Methods  []MethodDef
+	Messages []MessageDef
+}
+
+// MethodDef is a method: its path, and its input and output types, indexes
+// into Def.Messages.
+type MethodDef struct {
+	Path          string
+	Input, Output uint32
+}
+
+// MessageDef is a message type.
+type MessageDef struct {
+	FullName string
+	Any      bool
+	Fields   []FieldDef
+}
+
+// FieldDef is a field: Message, for KindMessage and KindGroup only, is an
+// index into Def.Messages.
+type FieldDef struct {
+	Number   uint32
+	Name     string
+	Kind     Kind
+	Message  uint32
+	Repeated bool
+}
+
+// New checks a compiled schema and indexes it. An error means the schema
 // can't be read with: the operator compiles only schemas that pass, so the
 // bundle carrying it is invalid.
-func Load(b *bundlev1.GRPCSchema) (*Schema, error) {
-	if b.GetId() == "" {
+func New(d Def) (*Schema, error) {
+	if d.ID == "" {
 		return nil, errors.New("no id")
 	}
-	size := proto.Size(b)
-	if size > MaxCompiledBytes {
-		return nil, fmt.Errorf("%d bytes, over %d", size, MaxCompiledBytes)
+	if d.Size > MaxCompiledBytes {
+		return nil, fmt.Errorf("%d bytes, over %d", d.Size, MaxCompiledBytes)
 	}
-	msgs, methods := b.GetMessages(), b.GetMethods()
+	msgs, methods := d.Messages, d.Methods
 	if len(methods) == 0 {
 		return nil, errors.New("no method")
 	}
@@ -187,37 +221,36 @@ func Load(b *bundlev1.GRPCSchema) (*Schema, error) {
 		return nil, fmt.Errorf("%d messages, over %d", len(msgs), MaxMessages)
 	}
 	s := &Schema{
-		id: b.GetId(), source: b.GetSource(), size: size,
+		id: d.ID, source: d.Source, size: d.Size,
 		messages: make([]Message, len(msgs)),
 		methods:  make(map[string]*Message, len(methods)),
 		byName:   make(map[string]*Message, len(msgs)),
 	}
 	total := 0
-	for i, bm := range msgs {
-		name := bm.GetFullName()
-		if err := checkFullName(name); err != nil {
+	for i := range msgs {
+		md := &msgs[i]
+		if err := checkFullName(md.FullName); err != nil {
 			return nil, fmt.Errorf("message %d: %w", i, err)
 		}
-		if _, dup := s.byName[name]; dup {
-			return nil, fmt.Errorf("message %s twice", name)
+		if _, dup := s.byName[md.FullName]; dup {
+			return nil, fmt.Errorf("message %s twice", md.FullName)
 		}
-		fields := bm.GetFields()
-		if len(fields) > MaxMessageFields {
-			return nil, fmt.Errorf("message %s: %d fields, over %d", name, len(fields), MaxMessageFields)
+		if len(md.Fields) > MaxMessageFields {
+			return nil, fmt.Errorf("message %s: %d fields, over %d", md.FullName, len(md.Fields), MaxMessageFields)
 		}
-		if total += len(fields); total > MaxFields {
+		if total += len(md.Fields); total > MaxFields {
 			return nil, fmt.Errorf("over %d fields", MaxFields)
 		}
 		m := &s.messages[i]
-		m.FullName, m.Any = name, bm.GetAny()
-		m.fields = make([]Field, len(fields))
-		s.byName[name] = m
+		m.FullName, m.Any = md.FullName, md.Any
+		m.fields = make([]Field, len(md.Fields))
+		s.byName[md.FullName] = m
 	}
-	for i, bm := range msgs {
+	for i := range msgs {
 		m := &s.messages[i]
-		for j, bf := range bm.GetFields() {
+		for j := range msgs[i].Fields {
 			f := &m.fields[j]
-			if err := s.field(f, bf); err != nil {
+			if err := s.field(f, &msgs[i].Fields[j]); err != nil {
 				return nil, fmt.Errorf("message %s field %d: %w", m.FullName, j, err)
 			}
 			if j > 0 && f.Number <= m.fields[j-1].Number {
@@ -242,60 +275,44 @@ func Load(b *bundlev1.GRPCSchema) (*Schema, error) {
 		}
 	}
 	prev := ""
-	for i, bm := range methods {
-		path := bm.GetPath()
-		if err := checkPath(path); err != nil {
+	for i, md := range methods {
+		if err := checkPath(md.Path); err != nil {
 			return nil, fmt.Errorf("method %d: %w", i, err)
 		}
-		if i > 0 && path <= prev {
-			return nil, fmt.Errorf("methods not sorted, or %s twice", path)
+		if i > 0 && md.Path <= prev {
+			return nil, fmt.Errorf("methods not sorted, or %s twice", md.Path)
 		}
-		prev = path
-		if int64(bm.GetInput()) >= int64(len(msgs)) || int64(bm.GetOutput()) >= int64(len(msgs)) {
-			return nil, fmt.Errorf("method %s: a type out of range", path)
+		prev = md.Path
+		if int64(md.Input) >= int64(len(msgs)) || int64(md.Output) >= int64(len(msgs)) {
+			return nil, fmt.Errorf("method %s: a type out of range", md.Path)
 		}
-		s.methods[path] = &s.messages[bm.GetInput()]
+		s.methods[md.Path] = &s.messages[md.Input]
 	}
 	return s, nil
 }
 
-// field checks bf and converts it into f.
-func (s *Schema) field(f *Field, bf *bundlev1.GRPCField) error {
-	if bf.GetNumber() > uint32(protowire.MaxValidNumber) {
-		return fmt.Errorf("number %d out of range", bf.GetNumber())
+// field checks fd and converts it into f.
+func (s *Schema) field(f *Field, fd *FieldDef) error {
+	if fd.Number > uint32(protowire.MaxValidNumber) {
+		return fmt.Errorf("number %d out of range", fd.Number)
 	}
-	num := protowire.Number(bf.GetNumber()) // #nosec G115 -- at most MaxValidNumber
+	num := protowire.Number(fd.Number) // #nosec G115 -- at most MaxValidNumber
 	if !num.IsValid() {
-		return fmt.Errorf("number %d out of range", bf.GetNumber())
+		return fmt.Errorf("number %d out of range", fd.Number)
 	}
-	if err := checkFieldName(bf.GetName()); err != nil {
+	if err := checkFieldName(fd.Name); err != nil {
 		return fmt.Errorf("number %d: %w", num, err)
 	}
-	f.Number, f.Name, f.Repeated = num, bf.GetName(), bf.GetRepeated()
-	switch bf.GetKind() {
-	case bundlev1.GRPCFieldKind_GRPC_FIELD_KIND_STRING:
-		f.Kind = KindString
-	case bundlev1.GRPCFieldKind_GRPC_FIELD_KIND_BYTES:
-		f.Kind = KindBytes
-	case bundlev1.GRPCFieldKind_GRPC_FIELD_KIND_MESSAGE:
-		f.Kind = KindMessage
-	case bundlev1.GRPCFieldKind_GRPC_FIELD_KIND_GROUP:
-		f.Kind = KindGroup
-	case bundlev1.GRPCFieldKind_GRPC_FIELD_KIND_VARINT:
-		f.Kind = KindVarint
-	case bundlev1.GRPCFieldKind_GRPC_FIELD_KIND_FIXED32:
-		f.Kind = KindFixed32
-	case bundlev1.GRPCFieldKind_GRPC_FIELD_KIND_FIXED64:
-		f.Kind = KindFixed64
-	default:
-		return fmt.Errorf("%s: unknown kind %d", f.Name, bf.GetKind())
+	f.Number, f.Name, f.Kind, f.Repeated = num, fd.Name, fd.Kind, fd.Repeated
+	if f.Kind < KindString || f.Kind > KindFixed64 {
+		return fmt.Errorf("%s: unknown kind %d", f.Name, fd.Kind)
 	}
 	if f.Kind == KindMessage || f.Kind == KindGroup {
-		if int64(bf.GetMessage()) >= int64(len(s.messages)) {
-			return fmt.Errorf("%s: type %d out of range", f.Name, bf.GetMessage())
+		if int64(fd.Message) >= int64(len(s.messages)) {
+			return fmt.Errorf("%s: type %d out of range", f.Name, fd.Message)
 		}
-		f.Message = &s.messages[bf.GetMessage()]
-	} else if bf.GetMessage() != 0 {
+		f.Message = &s.messages[fd.Message]
+	} else if fd.Message != 0 {
 		return fmt.Errorf("%s: a type for a field that isn't a message", f.Name)
 	}
 	return nil

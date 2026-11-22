@@ -26,6 +26,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/geo"
 	"github.com/inkwall-dev/inkwall/pkg/grpcschema"
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema/load"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
@@ -673,7 +674,7 @@ func NewEvaluators() *Evaluators {
 // id. e may be nil: loaded every time.
 func (e *Evaluators) schema(b *bundlev1.GRPCSchema) (*grpcschema.Schema, error) {
 	if e == nil {
-		return grpcschema.Load(b)
+		return load.Load(b)
 	}
 	e.mu.Lock()
 	s, ok := e.schemas[b.GetId()]
@@ -681,7 +682,7 @@ func (e *Evaluators) schema(b *bundlev1.GRPCSchema) (*grpcschema.Schema, error) 
 	if ok && s.Source() == b.GetSource() {
 		return s, nil
 	}
-	s, err := grpcschema.Load(b)
+	s, err := load.Load(b)
 	if err != nil {
 		return nil, err
 	}
