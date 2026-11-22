@@ -423,7 +423,7 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 					"bind the CRS without placement, and the rule set to place before it in its own entry"))
 		}
 	}
-	warnings := append(responseWarnings(p), geoWarnings(p)...)
+	warnings := append(append(responseWarnings(p), geoWarnings(p)...), grpcSchemaWarnings(p)...)
 	return append(warnings, policyListWarnings(p)...), invalid("WAFPolicy", p.Name, errs)
 }
 

@@ -122,7 +122,7 @@ var entries = []Entry{
 		Fix:     "Fix the rules; `inkwallctl test --rule-set` shows the error before you apply."},
 	{Kind: "WAFPolicy", Condition: "Accepted", Reason: "InvalidGRPCSchema",
 		Meaning: "The descriptor set `spec.body.grpcSchema` names isn't one the operator can compile: not a `FileDescriptorSet` (raw or gzipped), an import it doesn't include, invalid descriptors, no service, or over a bound (1 MiB, 8 MiB gunzipped, 4,096 methods, 4,096 fields per message). The previous version of the policy stays in force.",
-		Fix:     "Build the set with its imports (`buf build`, or `protoc --include_imports --descriptor_set_out`) and update the ConfigMap. The message names what failed. See [gRPC](grpc.md)."},
+		Fix:     "Build the set with its imports (`buf build`, or `protoc --include_imports --descriptor_set_out`) and update the ConfigMap. The message names what failed. See [gRPC](grpc.md#messages-with-their-schema)."},
 	{Kind: "WAFPolicy", Condition: "Accepted", Reason: "Conflict",
 		Meaning: "An older policy targets the same route and applies to it: a route has one policy.",
 		Fix:     "Merge the policies, or target other routes."},
