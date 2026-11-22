@@ -7,6 +7,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -101,6 +102,30 @@ func TestPolicyValidation(t *testing.T) {
 			wantInvalid(t, err, tc.field, "not clean")
 		})
 	}
+	// Rate limit paths the engine wouldn't compile.
+	rl := p.DeepCopy()
+	rl.Spec.RateLimits = []wafv1alpha1.RateLimit{
+		{Name: "all", Requests: 100, Period: metav1.Duration{Duration: time.Minute}},
+		{Name: "login", Requests: 5, Period: metav1.Duration{Duration: time.Minute},
+			Match: &wafv1alpha1.RateLimitMatch{Paths: []wafv1alpha1.PathPattern{"/login", "/api/*", "/a/", "/.well-known/x"}}},
+	}
+	if _, err := v.ValidateCreate(ctx, rl); err != nil {
+		t.Fatalf("valid rate limits: %v", err)
+	}
+	for _, bad := range []wafv1alpha1.PathPattern{"/a/./b", "//login", "/x/../login", "/a/..", "/a/.*", "/a//*"} {
+		t.Run("rate limit path "+string(bad), func(t *testing.T) {
+			q := rl.DeepCopy()
+			q.Spec.RateLimits[1].Match.Paths[2] = bad
+			_, err := v.ValidateCreate(ctx, q)
+			wantInvalid(t, err, "spec.rateLimits[1].match.paths[2]", "not clean")
+		})
+	}
+	// Limits the engine refuses whole: the CRD refuses these too.
+	twice := rl.DeepCopy()
+	twice.Spec.RateLimits[1].Name = "all"
+	_, err := v.ValidateCreate(ctx, twice)
+	wantInvalid(t, err, "spec.rateLimits", `rate limit "all" twice`)
+
 	// WebSocket rules the engine wouldn't compile: the CRD schema rejects
 	// these too, but an engine refusing one entry refuses the whole bundle.
 	ws := p.DeepCopy()
@@ -112,7 +137,7 @@ func TestPolicyValidation(t *testing.T) {
 		t.Fatalf("valid webSocket: %v", err)
 	}
 	ws.Spec.WebSocket.AllowedOrigins[1] = "wss://app.example.com"
-	_, err := v.ValidateCreate(ctx, ws)
+	_, err = v.ValidateCreate(ctx, ws)
 	wantInvalid(t, err, "spec.webSocket.allowedOrigins[1]", "not http or https")
 	ws.Spec.WebSocket.AllowedOrigins[1] = "https://a.example"
 	ws.Spec.WebSocket.RequiredHeaders[0] = "X Api"

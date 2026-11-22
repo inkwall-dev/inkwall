@@ -423,9 +423,11 @@ type TargetRef struct {
 
 // PathPattern is an exact path ("/healthz") or a prefix ending in "*"
 // ("/static/*"), using only plain ASCII path characters, as the engine
-// matches paths (pkg/router).
+// matches paths (pkg/router). It must be clean: no "//" and no "." or ".."
+// segment, which the engine refuses.
 // +kubebuilder:validation:MaxLength=1024
 // +kubebuilder:validation:Pattern=`^/[A-Za-z0-9._~/:@!$&'()+,=-]*\*?$`
+// +kubebuilder:validation:XValidation:rule=`!self.matches('.//|^//[^*]|/[.][.]?(/|[*]?$)')`,message="path must be clean: no // and no . or .. segment"
 type PathPattern string
 
 // SkipSpec lists requests that are never inspected.
