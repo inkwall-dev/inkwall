@@ -288,9 +288,14 @@ func (s *Store) Limit(id Identity, requests int64, period time.Duration, burst i
 	if burst <= 0 {
 		burst = requests
 	}
+	interval := max(int64(period)/requests, 1)
+	// burst × interval, the window, must fit with room for a weighted
+	// request and its debt: a burst of a billion tokens at one an hour
+	// can't.
+	burst = min(burst, math.MaxInt64/4/interval)
 	l := Limit{
 		id:       s.Intern(id),
-		interval: max(int64(period)/requests, 1),
+		interval: interval,
 		burst:    burst,
 	}
 	s.setParams(l)
@@ -414,6 +419,69 @@ func (s *Store) Observe(l Limit, k Key, t time.Time, live *Live) Decision {
 	return d
 }
 
+// weight bounds a request's weight: more than the burst never fits, and
+// the bound keeps n × interval from overflowing.
+func (l Limit) weight(n int64) int64 { return min(max(n, 1), l.burst+1) }
+
+// TakeN is Take for a request that weighs n tokens (an LLM request's
+// estimated tokens, design 0012 §6): GCRA with a weight, the request taking
+// n tokens in one step, or none. A request heavier than the burst never
+// fits.
+func (s *Store) TakeN(l Limit, k Key, t time.Time, live *Live, n int64) Decision {
+	return s.take(l, k, t, live, n, true, false)
+}
+
+// ObserveN is Observe for a request that weighs n tokens.
+func (s *Store) ObserveN(l Limit, k Key, t time.Time, live *Live, n int64) Decision {
+	return s.take(l, k, t, live, n, true, true)
+}
+
+// Peek is Take without the charge: whether key k has a token left at t, a
+// limited request sampled into events as Take samples it. A token limit
+// refuses a key in debt with it before the request's weight is known.
+// observe is the limit's: it only logs (Detect), as Observe.
+func (s *Store) Peek(l Limit, k Key, t time.Time, live *Live, observe bool) Decision {
+	return s.take(l, k, t, live, 1, false, observe)
+}
+
+// take is TakeN (commit: charge it), Peek (not) and ObserveN (observe).
+func (s *Store) take(l Limit, k Key, t time.Time, live *Live, n int64, commit, observe bool) Decision {
+	n = l.weight(n)
+	now := int64(t.Sub(s.base))
+	sh, i, o := s.locate(l.id, k)
+	sh.mu.Lock()
+	e := s.find(sh, i, l.id, k, now, live)
+	if e == nil {
+		sh.mu.Unlock()
+		if commit {
+			s.overflows.Add(1)
+		}
+		if observe {
+			return Decision{Allowed: true}
+		}
+		var b *overflowBuckets
+		if commit {
+			b = s.overflowOf(l.id, now, live)
+		} else {
+			s.overMu.RLock()
+			b = s.overflow[l.id]
+			s.overMu.RUnlock()
+			if b == nil {
+				return Decision{Allowed: true} // nothing counted: nothing owed
+			}
+		}
+		b.mu.Lock()
+		d := chargeN(&b.e[o], l, now, n, commit)
+		b.mu.Unlock()
+		d.overflow = true
+		return d
+	}
+	e.observe = observe
+	d := chargeN(e, l, now, n, commit)
+	sh.mu.Unlock()
+	return d
+}
+
 // charge checks a request at now against e, of limit l, and charges it
 // when it is within the limit. Called with e's lock held.
 func charge(e *entry, l Limit, now int64) Decision {
@@ -421,6 +489,20 @@ func charge(e *entry, l Limit, now int64) Decision {
 	over := tat + l.interval - now - l.burst*l.interval
 	if over <= 0 {
 		e.tat = tat + l.interval
+		return Decision{Allowed: true}
+	}
+	return refuse(e, over, now)
+}
+
+// chargeN is charge for a request of n tokens (a weight), which commit
+// says whether to charge. Called with e's lock held.
+func chargeN(e *entry, l Limit, now, n int64, commit bool) Decision {
+	tat := max(e.tat, now)
+	over := tat + n*l.interval - now - l.burst*l.interval
+	if over <= 0 {
+		if commit {
+			e.tat = tat + n*l.interval
+		}
 		return Decision{Allowed: true}
 	}
 	return refuse(e, over, now)
@@ -500,9 +582,15 @@ func (b *overflowBuckets) full(now int64) bool {
 // Wait is how long until key k's request at t would be within l, without
 // charging it: 0 when it is now, whole seconds otherwise.
 func (s *Store) Wait(l Limit, k Key, t time.Time) time.Duration {
+	return s.WaitN(l, k, t, 1)
+}
+
+// WaitN is Wait for a request of n tokens.
+func (s *Store) WaitN(l Limit, k Key, t time.Time, n int64) time.Duration {
+	n = l.weight(n)
 	now := int64(t.Sub(s.base))
 	wait := func(e *entry) time.Duration {
-		if over := max(e.tat, now) + l.interval - now - l.burst*l.interval; over > 0 {
+		if over := max(e.tat, now) + n*l.interval - now - l.burst*l.interval; over > 0 {
 			return ceilSeconds(over)
 		}
 		return 0
@@ -535,15 +623,44 @@ func (s *Store) Wait(l Limit, k Key, t time.Time) time.Duration {
 
 // Refund gives back the token a request took from l for key k, when a
 // later limit refused it; d is Take's decision for it.
-func (s *Store) Refund(l Limit, k Key, d Decision) {
+func (s *Store) Refund(l Limit, k Key, d Decision) { s.adjust(l, k, d, -1, 0) }
+
+// RefundN gives back the n tokens a request took; d is TakeN's decision
+// for it.
+func (s *Store) RefundN(l Limit, k Key, d Decision, n int64) { s.adjust(l, k, d, -l.weight(n), 0) }
+
+// Settle corrects key k's bucket of l by delta tokens at t, d being
+// TakeN's decision for the request: a request charged an estimate that its
+// response says it used delta more (debt: the bucket fills later) or
+// -delta fewer (a refund). A key in debt is over the limit until the
+// bucket refills past it. A refund is bounded by the burst, a debt by
+// twice the burst, and a bucket's debt by three bursts however many
+// responses settle at once: a key can't be put out for longer than three
+// times the limit's own window.
+func (s *Store) Settle(l Limit, k Key, d Decision, t time.Time, delta int64) {
+	delta = min(max(delta, -l.burst), 2*l.burst)
+	if delta != 0 {
+		s.adjust(l, k, d, delta, int64(t.Sub(s.base))+3*l.burst*l.interval)
+	}
+}
+
+// adjust moves key k's bucket of l (its overflow bucket when d was
+// charged to one) by delta tokens, a debt to no later than most.
+func (s *Store) adjust(l Limit, k Key, d Decision, delta, most int64) {
 	sh, i, o := s.locate(l.id, k)
+	move := func(e *entry) {
+		e.tat += delta * l.interval
+		if delta > 0 {
+			e.tat = min(e.tat, most)
+		}
+	}
 	if d.overflow {
 		s.overMu.RLock()
 		b := s.overflow[l.id]
 		s.overMu.RUnlock()
 		if b != nil {
 			b.mu.Lock()
-			b.e[o].tat -= l.interval
+			move(&b.e[o])
 			b.mu.Unlock()
 		}
 		return
@@ -552,7 +669,7 @@ func (s *Store) Refund(l Limit, k Key, d Decision) {
 	for j := range uint64(neighbourhood) {
 		e := &sh.e[(i+j)&s.slotMask]
 		if e.id == l.id && e.key == k {
-			e.tat -= l.interval
+			move(e)
 			break
 		}
 	}

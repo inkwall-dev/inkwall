@@ -354,6 +354,22 @@ message RateLimit {
   repeated string methods = 7;
   // Log the requests over the limit instead of denying them.
   bool detect = 8;
+  // What a request costs. Engines before 0.7.0 count each request as 1:
+  // the operator doesn't count them as enforcing a policy that sets it.
+  // (Numbered from 40, apart from the fields other features add
+  // meanwhile.)
+  RateLimitCost cost = 40;
+}
+
+// RateLimitCost is what a rate limit counts.
+enum RateLimitCost {
+  // Requests: each takes 1.
+  RATE_LIMIT_COST_UNSPECIFIED = 0;
+  // LLM tokens (design 0012 §6): requests and burst are tokens, a request
+  // on one of the policy's LLM endpoints takes its estimate after the LLM
+  // checks, settled from its response's usage; other requests aren't
+  // counted.
+  RATE_LIMIT_COST_LLM_TOKENS = 1;
 }
 
 // RateLimitKey is what a limit counts by. Unset: the client IP, IPv6 by

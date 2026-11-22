@@ -149,6 +149,8 @@ func TestResolvePolicy(t *testing.T) {
 			Key: &wafv1alpha1.RateLimitKey{Header: &wafv1alpha1.HeaderKey{Name: "X-Api-Key"}}},
 		// No key: the client IP, by the engine's default prefix.
 		{Name: "all", Requests: 1, Period: metav1.Duration{Duration: time.Second}, Key: &wafv1alpha1.RateLimitKey{ClientIP: &wafv1alpha1.ClientIPKey{}}},
+		{Name: "tokens", Requests: 200000, Period: metav1.Duration{Duration: time.Minute}, Cost: wafv1alpha1.RateLimitLLMTokens,
+			Match: &wafv1alpha1.RateLimitMatch{Paths: []wafv1alpha1.PathPattern{"/v1/chat/completions"}}},
 	}
 	// Sorted in the bundle, so a reordered list is the same bundle.
 	p.Spec.Geo = &wafv1alpha1.GeoSpec{Deny: []wafv1alpha1.CountryCode{"RU", "KP"}, Unknown: wafv1alpha1.GeoUnknownDeny, Mode: wafv1alpha1.GeoModeDetect}
@@ -244,6 +246,8 @@ func TestResolvePolicy(t *testing.T) {
 			{Name: "api", Requests: 600, Period: durationpb.New(time.Minute), Detect: true,
 				Key: &bundlev1.RateLimitKey{Key: &bundlev1.RateLimitKey_Header{Header: &bundlev1.HeaderKey{Name: "x-api-key"}}}},
 			{Name: "all", Requests: 1, Period: durationpb.New(time.Second)},
+			{Name: "tokens", Requests: 200000, Period: durationpb.New(time.Minute), Cost: bundlev1.RateLimitCost_RATE_LIMIT_COST_LLM_TOKENS,
+				Paths: []string{"/v1/chat/completions"}},
 		},
 		Geo:          &bundlev1.Geo{Deny: []string{"KP", "RU"}, UnknownDeny: true, Detect: true},
 		DenyResponse: &bundlev1.DenyResponse{ContentType: "text/html", Body: "<p>Blocked: {{request_id}}</p>"},

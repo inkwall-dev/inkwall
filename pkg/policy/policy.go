@@ -1043,6 +1043,9 @@ func rateLimits(bp *bundlev1.Policy) []pipeline.RateLimitConfig {
 			Paths:      l.GetPaths(),
 			Methods:    l.GetMethods(),
 			Detect:     l.GetDetect(),
+			// A cost of a newer operator counts tokens, the stricter
+			// reading of an LLM endpoint's requests.
+			Tokens: l.GetCost() != bundlev1.RateLimitCost_RATE_LIMIT_COST_UNSPECIFIED,
 		}
 		out = append(out, c)
 	}

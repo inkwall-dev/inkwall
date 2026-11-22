@@ -141,6 +141,83 @@ func TestRefund(t *testing.T) {
 	s.Refund(l, ip("192.0.2.9"), Decision{Allowed: true})
 }
 
+// TestWeighted: a request of n tokens takes n at once or none (design
+// 0012 §6); settlement moves the bucket by the difference, a refund or a
+// debt, bounded by the burst.
+func TestWeighted(t *testing.T) {
+	s := New(1024, 0)
+	t0 := s.base.Add(time.Hour)
+	k := ip("192.0.2.1")
+	// 6,000 tokens a minute: one every 10 ms, a burst of 6,000.
+	l := limit(s, "tokens", 6000, time.Minute, 0)
+	if d := s.TakeN(l, k, t0, nil, 4000); !d.Allowed {
+		t.Fatal("4,000 of 6,000 refused")
+	}
+	if d := s.TakeN(l, k, t0, nil, 2001); d.Allowed || d.RetryAfter != time.Second {
+		t.Fatalf("2,001 over the 2,000 left: %+v", d)
+	}
+	// None was taken: the 2,000 left still fit.
+	d := s.TakeN(l, k, t0, nil, 2000)
+	if !d.Allowed {
+		t.Fatal("the 2,000 left refused")
+	}
+	if w := s.WaitN(l, k, t0, 600); w != 6*time.Second {
+		t.Errorf("wait for 600 tokens: %v, want 6s", w)
+	}
+	// The response used 3,000 fewer: refunded.
+	s.Settle(l, k, d, t0, -3000)
+	if d := s.TakeN(l, k, t0, nil, 3000); !d.Allowed {
+		t.Fatal("a refund not given back")
+	}
+	// It used 1,000 more: debt, until the bucket refills past it.
+	s.Settle(l, k, d, t0, 1000)
+	if d := s.TakeN(l, k, t0, nil, 1); d.Allowed {
+		t.Fatal("a key in debt allowed")
+	}
+	if w := s.Wait(l, k, t0); w != 11*time.Second {
+		t.Errorf("in debt by 1,000: wait %v, want 11s (10s and the token)", w)
+	}
+	// A request heavier than the burst never fits, and doesn't overflow.
+	k2 := ip("192.0.2.2")
+	if d := s.TakeN(l, k2, t0, nil, math.MaxInt64); d.Allowed {
+		t.Fatal("more than the burst allowed")
+	}
+	d2 := s.TakeN(l, k2, t0, nil, 6000)
+	if !d2.Allowed {
+		t.Fatal("the burst refused after a refused request")
+	}
+	// Settlement is bounded by the burst.
+	s.Settle(l, k2, d2, t0, math.MaxInt64)
+	if w := s.Wait(l, k2, t0); w > 2*time.Minute+time.Second {
+		t.Errorf("a huge debt: wait %v, want at most the window twice", w)
+	}
+	// However many responses settle at once: at most three windows.
+	s.Settle(l, k2, d2, t0, math.MaxInt64)
+	s.Settle(l, k2, d2, t0, math.MaxInt64)
+	if w := s.Wait(l, k2, t0); w > 3*time.Minute {
+		t.Errorf("debts settled together: wait %v, want at most the window three times", w)
+	}
+	s.RefundN(l, k2, d2, 6000)
+	// Peek charges nothing.
+	k3 := ip("192.0.2.3")
+	for range 3 {
+		if d := s.Peek(l, k3, t0, nil, false); !d.Allowed {
+			t.Fatal("a full bucket refused by Peek")
+		}
+	}
+	if d := s.TakeN(l, k3, t0, nil, 6000); !d.Allowed {
+		t.Fatal("Peek charged the bucket")
+	}
+	if d := s.Peek(l, k3, t0, nil, false); d.Allowed {
+		t.Fatal("an empty bucket allowed by Peek")
+	}
+	// A billion tokens an hour, in bursts of a billion: the window fits.
+	big := limit(s, "big", 1, time.Hour, 1_000_000_000)
+	if big.burst*big.interval <= 0 {
+		t.Errorf("window overflows: burst %d, interval %d", big.burst, big.interval)
+	}
+}
+
 func TestIPKey(t *testing.T) {
 	for _, tc := range []struct {
 		a, b   string

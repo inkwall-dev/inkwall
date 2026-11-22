@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/inkwall-dev/inkwall/pkg/llm"
 	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/router"
@@ -44,6 +45,11 @@ type RateLimitConfig struct {
 	Methods []string
 	// Detect logs the requests over the limit instead of denying them.
 	Detect bool
+	// Tokens counts LLM tokens, not requests (design 0012 §6): Requests and
+	// Burst are tokens, and a request on one of the policy's LLM endpoints
+	// takes its estimate at once, after the LLM checks; other requests
+	// aren't counted. A key in debt is refused before its body is read.
+	Tokens bool
 }
 
 // RateLimits are a policy's compiled limits, all in one Store.
@@ -61,6 +67,7 @@ type rateLimit struct {
 	paths   []limitPath
 	methods []string
 	detect  bool
+	tokens  bool
 }
 
 // limitPath is a path pattern compared in ASCII lower case, with one
@@ -129,6 +136,7 @@ func CompileRateLimits(store *ratelimit.Store, live *ratelimit.Live, policy stri
 			header: strings.ToLower(c.Header),
 			prefix: prefix,
 			detect: c.Detect,
+			tokens: c.Tokens,
 		}
 		for _, p := range c.Paths {
 			lp, _ := compileLimitPath(p) // checked
@@ -300,6 +308,20 @@ func (rl *RateLimits) check(r *request.Request, t time.Time, block bool) limited
 		if !valid {
 			continue
 		}
+		if l.tokens {
+			// A token limit charges after the LLM checks (chargeTokens);
+			// here it refuses only a key that hasn't a token left, in
+			// debt from an earlier answer.
+			d := rl.store.Peek(l.lim, k, t, rl.live, false)
+			if d.Allowed {
+				continue
+			}
+			for _, c := range charged[:n] {
+				rl.store.Refund(c.l.lim, c.k, c.d)
+			}
+			out.over, out.key, out.retryAfter, out.event, out.sampled = l, k, d.RetryAfter, d.Event, d.Sampled
+			break
+		}
 		d := rl.store.Take(l.lim, k, t, rl.live)
 		if d.Allowed {
 			charged[n].l, charged[n].k, charged[n].d = l, k, d
@@ -332,7 +354,13 @@ func (rl *RateLimits) check(r *request.Request, t time.Time, block bool) limited
 			if !valid {
 				continue
 			}
-			if d := rl.store.Observe(l.lim, k, t, rl.live); !d.Allowed && out.detect == nil {
+			d := ratelimit.Decision{}
+			if l.tokens {
+				d = rl.store.Peek(l.lim, k, t, rl.live, true)
+			} else {
+				d = rl.store.Observe(l.lim, k, t, rl.live)
+			}
+			if !d.Allowed && out.detect == nil {
 				out.detect, out.key, out.retryAfter, out.event, out.sampled = l, k, d.RetryAfter, d.Event, d.Sampled
 			}
 		}
@@ -362,6 +390,144 @@ type decisions struct {
 	d [4]struct {
 		p *Pipeline
 		o limited
+		// t: the token limits charged for the request (chargeTokens), for
+		// settling them with its response's usage.
+		t tokenCharges
+	}
+}
+
+// tokenCharges are the token limits of one policy a request was charged,
+// and how much.
+type tokenCharges struct {
+	n      int
+	c      [MaxRateLimits]tokenCharge
+	tokens int64      // the estimate each was charged
+	format llm.Format // the endpoint's, whose response's usage settles them
+}
+
+type tokenCharge struct {
+	l *rateLimit
+	k ratelimit.Key
+	d ratelimit.Decision // TakeN's, for settling the bucket it charged
+}
+
+// entry returns r's decisions entry for p, nil when there is none (r was
+// never charged).
+func (ds *decisions) entry(p *Pipeline) int {
+	if ds == nil {
+		return -1
+	}
+	for i := range ds.d[:ds.n] {
+		if ds.d[i].p == p {
+			return i
+		}
+	}
+	return -1
+}
+
+// chargeTokens charges r, a request on one of p's LLM endpoints that passed
+// its checks, its estimate of tokens (n) against p's token limits at t,
+// as check charges request limits: the Block ones together, all or none,
+// then each Detect one, which only logs. Each charge is kept for settling
+// with the response's usage (tokenChargesOf).
+func (p *Pipeline) chargeTokens(r *request.Request, t time.Time, n int64, f llm.Format) limited {
+	var out limited
+	rl := p.limits
+	if rl == nil || n <= 0 {
+		return out
+	}
+	block := p.mode == ModeBlock
+	ds, _ := r.RateLimits.(*decisions)
+	var charges *tokenCharges
+	if i := ds.entry(p); i >= 0 {
+		charges = &ds.d[i].t
+	} else {
+		charges = &tokenCharges{}
+	}
+	*charges = tokenCharges{tokens: n, format: f}
+	path, ambiguous := limitPathOf(r.RawURI)
+	method := strings.ToUpper(r.Method)
+	matches := func(l *rateLimit) bool { return l.tokens && l.matches(method, path, ambiguous) }
+	for i := range rl.limits {
+		l := &rl.limits[i]
+		if l.detect || !block || !matches(l) {
+			continue
+		}
+		k, valid := rl.key(l, r)
+		if !valid {
+			continue
+		}
+		d := rl.store.TakeN(l.lim, k, t, rl.live, n)
+		if d.Allowed {
+			charges.c[charges.n] = tokenCharge{l, k, d}
+			charges.n++
+			continue
+		}
+		for _, c := range charges.c[:charges.n] {
+			rl.store.RefundN(c.l.lim, c.k, c.d, n)
+		}
+		charges.n = 0
+		out.over, out.key, out.retryAfter, out.event, out.sampled = l, k, d.RetryAfter, d.Event, d.Sampled
+		for j := i + 1; j < len(rl.limits); j++ {
+			m := &rl.limits[j]
+			if m.detect || !matches(m) {
+				continue
+			}
+			if mk, valid := rl.key(m, r); valid {
+				out.retryAfter = max(out.retryAfter, rl.store.WaitN(m.lim, mk, t, n))
+			}
+		}
+		break
+	}
+	if out.over == nil {
+		for i := range rl.limits {
+			l := &rl.limits[i]
+			if block && !l.detect || !matches(l) {
+				continue
+			}
+			k, valid := rl.key(l, r)
+			if !valid {
+				continue
+			}
+			d := rl.store.ObserveN(l.lim, k, t, rl.live, n)
+			if d.Allowed {
+				charges.c[charges.n] = tokenCharge{l, k, d}
+				charges.n++
+			} else if out.detect == nil {
+				out.detect, out.key, out.retryAfter, out.event, out.sampled = l, k, d.RetryAfter, d.Event, d.Sampled
+			}
+		}
+	}
+	limit := out.over
+	if limit == nil {
+		limit = out.detect
+	}
+	if limit != nil {
+		rl.store.Exceeded(out.over == nil)
+		if out.event && !rl.store.AllowEvent(limit.lim, t) {
+			rl.store.Unsample(limit.lim, out.key, out.sampled)
+			out.event, out.sampled = false, 0
+		}
+	}
+	return out
+}
+
+// tokenChargesOf returns the token limits p charged r, for its response.
+func (p *Pipeline) tokenChargesOf(r *request.Request) tokenCharges {
+	ds, _ := r.RateLimits.(*decisions)
+	if i := ds.entry(p); i >= 0 {
+		return ds.d[i].t
+	}
+	return tokenCharges{}
+}
+
+// settle corrects the token limits charged by usage, the tokens the
+// response says the request used: the difference from the estimate is
+// refunded, or added as debt, at t.
+func (rl *RateLimits) settle(c *tokenCharges, used int64, t time.Time) {
+	delta := used - c.tokens
+	for _, ch := range c.c[:c.n] {
+		rl.store.Settle(ch.l.lim, ch.k, ch.d, t, delta)
 	}
 }
 

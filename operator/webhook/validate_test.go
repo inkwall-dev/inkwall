@@ -96,6 +96,36 @@ func TestPolicyLLMCompiles(t *testing.T) {
 	}
 }
 
+// TestPolicyTokenLimitPaths: a token limit's paths must be within the
+// LLM endpoints': it counts nothing else.
+func TestPolicyTokenLimitPaths(t *testing.T) {
+	ctx := context.Background()
+	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy, deprecated: policyDeprecations}
+	for _, tc := range []struct {
+		paths []wafv1alpha1.PathPattern
+		ok    bool
+	}{
+		{nil, true},
+		{[]wafv1alpha1.PathPattern{"/v1/chat/completions", "/V1/Chat/Completions/"}, true},
+		{[]wafv1alpha1.PathPattern{"/openai/deployments/gpt/chat/completions", "/openai/deployments/*"}, true},
+		{[]wafv1alpha1.PathPattern{"/v1/chat/*"}, false},
+		{[]wafv1alpha1.PathPattern{"/login"}, false},
+		{[]wafv1alpha1.PathPattern{"/openai/*"}, false},
+	} {
+		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
+			TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}},
+			LLM: &wafv1alpha1.LLMSpec{Endpoints: []wafv1alpha1.LLMEndpoint{
+				{Paths: []wafv1alpha1.PathPattern{"/v1/chat/completions", "/openai/deployments/*"}, Format: wafv1alpha1.LLMOpenAIChat}}},
+			RateLimits: []wafv1alpha1.RateLimit{{Name: "t", Requests: 1000, Period: metav1.Duration{Duration: time.Minute}, Cost: wafv1alpha1.RateLimitLLMTokens,
+				Match: &wafv1alpha1.RateLimitMatch{Paths: tc.paths}}},
+		}}
+		_, err := v.ValidateCreate(ctx, p)
+		if tc.ok && err != nil || !tc.ok && (err == nil || !strings.Contains(err.Error(), "a token limit counts only the requests of spec.llm's endpoints")) {
+			t.Errorf("%v: %v", tc.paths, err)
+		}
+	}
+}
+
 // TestPolicyLLMWarnings: an endpoint path that a skip path covers draws a
 // warning: the skip wins.
 func TestPolicyLLMWarnings(t *testing.T) {

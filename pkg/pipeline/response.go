@@ -16,8 +16,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/inkwall-dev/inkwall/pkg/llm"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/rules"
+	"github.com/inkwall-dev/inkwall/pkg/streams"
 )
 
 // Exchange is a request's inspection kept for its response, for a policy
@@ -42,6 +44,9 @@ type Exchange struct {
 	// endpoint: the request was on an LLM endpoint: its response's body
 	// is model output, of which events keep no snippet.
 	endpoint bool
+	// tokens: the token limits the request was charged, which its
+	// response's usage settles (design 0012 §6).
+	tokens tokenCharges
 
 	// others are the exchanges of the request's other policies
 	// (JoinExchanges), which inspect the response too.
@@ -87,11 +92,21 @@ func (e *Exchange) maxBytes() int64 {
 	return e.p.responses.MaxBytes
 }
 
+// readBytes is how much of the response body this exchange reads: the
+// rules', or for settling token limits, the policy's limit, the rules or
+// not.
+func (e *Exchange) readBytes() int64 {
+	if e.tokens.n > 0 {
+		return e.p.responses.MaxBytes
+	}
+	return e.maxBytes()
+}
+
 // BodyLimit is how much of the response body is inspected: 0 for none.
 func (e *Exchange) BodyLimit() int64 {
-	limit := e.maxBytes()
+	limit := e.readBytes()
 	for _, o := range e.others {
-		limit = max(limit, o.maxBytes())
+		limit = max(limit, o.readBytes())
 	}
 	return limit
 }
@@ -143,12 +158,12 @@ func partial(resp *request.Response) bool {
 // response in block mode with 502 Bad Gateway. In block mode, a deny
 // replaces the response with the verdict's status.
 func (e *Exchange) CheckResponse(ctx context.Context, resp *request.Response) Verdict {
-	v := e.checkResponse(ctx, cut(resp, e.maxBytes()))
+	v := e.checkResponse(ctx, cut(resp, e.readBytes()))
 	for _, o := range e.others {
 		if v.Action == ActionDeny {
 			break
 		}
-		if ov := o.checkResponse(ctx, cut(resp, o.maxBytes())); Stricter(ov, v) {
+		if ov := o.checkResponse(ctx, cut(resp, o.readBytes())); Stricter(ov, v) {
 			v = ov
 		}
 	}
@@ -226,6 +241,9 @@ func (e *Exchange) check(ctx context.Context, resp *request.Response) Verdict {
 	e.used = true
 	e.mu.Unlock()
 
+	if e.tokens.n > 0 {
+		e.settle(resp)
+	}
 	if e.skipBody {
 		out := *resp
 		out.Body, out.BodyTruncated, out.BodyUninspected = nil, false, false
@@ -261,6 +279,28 @@ func (e *Exchange) check(ctx context.Context, resp *request.Response) Verdict {
 		return p.enforce(v, http.StatusBadGateway)
 	}
 	return v
+}
+
+// settle settles the token limits the request was charged with the usage
+// resp, a whole response, reports; without one (a stream, an error page,
+// a body cut or not read) the estimate stands.
+func (e *Exchange) settle(resp *request.Response) {
+	if e.p.limits == nil || resp.BodyTruncated || resp.BodyUninspected || StreamKind(ResponseContentType(resp.Headers)) != streams.None {
+		return
+	}
+	resp = decodeBody(resp, e.p.responses.MaxBytes)
+	if resp.BodyTruncated || resp.BodyUninspected {
+		return
+	}
+	u, ok := llm.ParseUsage(resp.Body, e.tokens.format)
+	if !ok {
+		return
+	}
+	e.p.limits.settle(&e.tokens, u.Total(), time.Now())
+	if l := e.p.llm; l != nil {
+		l.metrics.Tokens(llm.TokensSettledInput, u.Input)
+		l.metrics.Tokens(llm.TokensSettledOutput, u.Output)
+	}
 }
 
 // release ends the evaluation of the response, and closes it if Close was
