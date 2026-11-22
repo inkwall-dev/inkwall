@@ -6,9 +6,9 @@ package pipeline
 import (
 	"context"
 	"net/http"
-	"strings"
 	"time"
 
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/router"
 	"github.com/inkwall-dev/inkwall/pkg/streams"
@@ -24,6 +24,10 @@ type GRPCStream interface {
 	// Mode is the policy's mode: block mode holds each message until it is
 	// inspected.
 	Mode() Mode
+	// GRPCSchema returns what call's messages are read with: the policy's
+	// schema and the input type of call's method, or nils when it has none
+	// or doesn't describe the method (design 0013 §6.5).
+	GRPCSchema(call *request.Request) (*grpcschema.Schema, *grpcschema.Message)
 }
 
 // GRPCStreamInspector is an Inspector whose policies may inspect gRPC
@@ -84,6 +88,11 @@ func (p *Pipeline) CheckGRPCMessage(ctx context.Context, call *request.Request, 
 		} else {
 			v, _ = p.evaluate(ctx, p.request(&msg, false))
 		}
+		if ev.Described {
+			v.GRPCRead = GRPCRead{Described: 1, Unknown: ev.Unknown}
+		} else {
+			v.GRPCRead = GRPCRead{Undescribed: 1}
+		}
 	}
 	v.Duration = time.Since(start)
 	v.StreamEvent = n
@@ -95,9 +104,17 @@ func (p *Pipeline) CheckGRPCMessage(ctx context.Context, call *request.Request, 
 	return v
 }
 
+// GRPCSchema implements GRPCStream.
+func (p *Pipeline) GRPCSchema(call *request.Request) (*grpcschema.Schema, *grpcschema.Message) {
+	if t := p.grpcSchema.Method(grpcPath(call)); t != nil {
+		return p.grpcSchema, t
+	}
+	return nil, nil
+}
+
 // grpcMessageRequest is the request a message of call is evaluated as.
 func grpcMessageRequest(call *request.Request, ev streams.Event) request.Request {
-	path, _, _ := strings.Cut(call.RawURI, "?")
+	path := grpcPath(call)
 	r := request.Request{
 		ID:       call.ID,
 		Proto:    call.Proto,

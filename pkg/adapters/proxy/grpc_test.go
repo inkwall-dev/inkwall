@@ -6,8 +6,10 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -19,7 +21,9 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema/grpcschematest"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
 // TestGRPCDenial: the reverse proxy answers a denied gRPC call as a gRPC
@@ -67,6 +71,46 @@ func TestGRPCDenial(t *testing.T) {
 				t.Error("the denied call reached the upstream")
 			}
 		})
+	}
+}
+
+// TestGRPCSchema (#316): through the proxy, a policy with a gRPC schema
+// denies an attack in a described field and its event names the field.
+func TestGRPCSchema(t *testing.T) {
+	up := newUpstream(t)
+	eval, err := coraza.New(coraza.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := url.Parse(up.srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	schema := grpcschematest.Schema(t, grpc_health_v1.File_grpc_health_v1_health_proto)
+	h, err := New(pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 10 * time.Second, GRPCMessages: true, GRPCSchema: schema}),
+		Config{Upstream: target, MaxBodyBytes: 1 << 10, Logger: slog.New(slog.NewJSONHandler(&logs, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewUnstartedServer(h)
+	srv.Config.Protocols = new(http.Protocols)
+	srv.Config.Protocols.SetUnencryptedHTTP2(true)
+	srv.Start()
+	t.Cleanup(srv.Close)
+	conn, err := grpc.NewClient("passthrough:///"+srv.Listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = grpc_health_v1.NewHealthClient(conn).Check(ctx, &grpc_health_v1.HealthCheckRequest{Service: "1' OR '1'='1' -- "})
+	if status.Code(err) != codes.PermissionDenied || !strings.Contains(logs.String(), `"variable":"ARGS:service"`) {
+		t.Fatalf("an attack in a described field: %v; events %s", err, logs.String())
+	}
+	if up.hits.Load() != 0 {
+		t.Error("the denied call reached the upstream")
 	}
 }
 

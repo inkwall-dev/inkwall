@@ -158,8 +158,10 @@ func FuzzLoad(f *testing.F) {
 		if err != nil {
 			return
 		}
-		for _, m := range s.messages {
-			for _, f := range m.Fields() {
+		for i := range s.messages {
+			m := &s.messages[i]
+			for j := range m.Fields() {
+				f := m.FieldAt(j)
 				if got := m.Field(f.Number); got == nil || got.Number != f.Number {
 					t.Fatalf("%s: field %d not found", m.FullName, f.Number)
 				}

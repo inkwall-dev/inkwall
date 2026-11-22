@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema/grpcschematest"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
@@ -60,6 +62,33 @@ func TestGRPCMessages(t *testing.T) {
 			t.Errorf("grpcMessages %v: attack in the message %v, want %v; events %s", on, got, want, logs.String())
 		}
 		_ = conn.Close()
+	}
+}
+
+// TestGRPCMessagesWithSchema (#316): with the policy's gRPC schema, the
+// attack's event names the field, ARGS:service.
+func TestGRPCMessagesWithSchema(t *testing.T) {
+	eval, err := coraza.New(coraza.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	schema := grpcschematest.Schema(t, grpc_health_v1.File_grpc_health_v1_health_proto)
+	h, err := New(pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 10 * time.Second, GRPCMessages: true, GRPCSchema: schema}),
+		Config{MaxBodyBytes: 1 << 10, Logger: slog.New(slog.NewJSONHandler(&logs, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := grpc.NewClient("passthrough:///"+traefik(t, h), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = grpc_health_v1.NewHealthClient(conn).Check(ctx, &grpc_health_v1.HealthCheckRequest{Service: "1' OR '1'='1' -- "})
+	if status.Code(err) != codes.PermissionDenied || !strings.Contains(logs.String(), `"variable":"ARGS:service"`) {
+		t.Fatalf("an attack in a described field: %v; events %s", err, logs.String())
 	}
 }
 

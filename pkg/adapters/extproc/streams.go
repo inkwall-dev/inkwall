@@ -164,8 +164,12 @@ func (s *Server) onGRPCStreamHeaders(ctx context.Context, x *exchange, g pipelin
 		return r
 	}
 	req := x.req
+	split := streams.New(streams.GRPC, x.limit, req.Headers.Get("Grpc-Encoding"))
+	if schema, t := g.GRPCSchema(req); t != nil {
+		split.WithGRPCSchema(schema, t)
+	}
 	x.reqStream = &eventStream{
-		split: streams.New(streams.GRPC, x.limit, req.Headers.Get("Grpc-Encoding")),
+		split: split,
 		holds: g.Mode() == pipeline.ModeBlock && !x.observe,
 		check: func(ctx context.Context, ev streams.Event, n int) pipeline.Verdict {
 			return g.CheckGRPCMessage(ctx, req, ev, n)

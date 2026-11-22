@@ -25,6 +25,7 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/geo"
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
@@ -290,6 +291,10 @@ func (c countedStream) CheckGRPCMessage(ctx context.Context, call *request.Reque
 
 func (c countedStream) Mode() pipeline.Mode { return c.p.pipeline.Mode() }
 
+func (c countedStream) GRPCSchema(call *request.Request) (*grpcschema.Schema, *grpcschema.Message) {
+	return c.p.pipeline.GRPCSchema(call)
+}
+
 // rateLimited is the policy of ps that BodyLimit found r over one of the
 // rate limits of, nil if none: it answers r (429) first, so the others'
 // rules don't run on a body that wasn't read, nor a 403 of theirs replace
@@ -353,8 +358,16 @@ func Compile(b *bundlev1.Bundle, o Options) (*Set, error) {
 	if err != nil {
 		return nil, fmt.Errorf("deny response: %w", err)
 	}
+	schemas := map[string]*grpcschema.Schema{}
+	for _, bs := range b.GetGrpcSchemas() {
+		s, err := o.Evaluators.schema(bs)
+		if err != nil {
+			return nil, fmt.Errorf("gRPC schema %s (%s): %w", bs.GetId(), bs.GetSource(), err)
+		}
+		schemas[s.ID()] = s
+	}
 	for _, bp := range b.GetPolicies() {
-		p, key, err := compilePolicy(bp, ruleSets, o, live, deny)
+		p, key, err := compilePolicy(bp, ruleSets, schemas, o, live, deny)
 		if err != nil {
 			return nil, fmt.Errorf("policy %s: %w", bp.GetId(), err)
 		}
@@ -370,7 +383,7 @@ func Compile(b *bundlev1.Bundle, o Options) (*Set, error) {
 	}
 	set.match = newMatcher(routes)
 	if o.Evaluators != nil {
-		o.Evaluators.retain(used)
+		o.Evaluators.retain(used, schemas)
 	}
 	if o.Stats != nil {
 		o.Stats.Retain(ids)
@@ -378,7 +391,8 @@ func Compile(b *bundlev1.Bundle, o Options) (*Set, error) {
 	return set, nil
 }
 
-func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o Options, live *ratelimit.Live, deny *pipeline.DenyResponse) (*Policy, [sha256.Size]byte, error) {
+func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, schemas map[string]*grpcschema.Schema, o Options,
+	live *ratelimit.Live, deny *pipeline.DenyResponse) (*Policy, [sha256.Size]byte, error) {
 	var key [sha256.Size]byte
 	cfg, crs, err := rulesConfig(bp, ruleSets, o)
 	if err != nil {
@@ -473,6 +487,12 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 		GRPCMessages:   bp.GetBody().GetGrpcMessages(),
 		GRPCPerMessage: bp.GetBody().GetGrpcPerMessage(),
 		DenyGRPC:       bp.GetBody().GetDenyGrpc(),
+	}
+	if id := bp.GetBody().GetGrpcSchemaId(); id != "" && pc.GRPCMessages {
+		if pc.GRPCSchema = schemas[id]; pc.GRPCSchema == nil {
+			// The operator puts every schema a policy names in the bundle.
+			return nil, key, fmt.Errorf("gRPC schema %s isn't in the bundle", id)
+		}
 	}
 	if l := bp.GetIpLists(); l != nil {
 		if pc.IPAllow, err = iplist.Parse(l.GetAllow()); err != nil {
@@ -635,14 +655,40 @@ func oversizeAction(a bundlev1.OversizeAction) pipeline.OversizeAction {
 // paranoia level, threshold and body limits, and an unchanged policy isn't
 // recompiled when a new bundle arrives. Cached evaluators have no
 // exclusions, and the CRS settings of the policy that compiled them.
+//
+// It holds gRPC schemas too, by id: a bundle that doesn't change a schema
+// reuses it loaded (design 0013 §7).
 type Evaluators struct {
-	mu    sync.Mutex
-	cache map[[sha256.Size]byte]*coraza.Evaluator
+	mu      sync.Mutex
+	cache   map[[sha256.Size]byte]*coraza.Evaluator
+	schemas map[string]*grpcschema.Schema
 }
 
 // NewEvaluators returns an empty cache.
 func NewEvaluators() *Evaluators {
-	return &Evaluators{cache: map[[sha256.Size]byte]*coraza.Evaluator{}}
+	return &Evaluators{cache: map[[sha256.Size]byte]*coraza.Evaluator{}, schemas: map[string]*grpcschema.Schema{}}
+}
+
+// schema loads a bundle's gRPC schema, or returns the one loaded with that
+// id. e may be nil: loaded every time.
+func (e *Evaluators) schema(b *bundlev1.GRPCSchema) (*grpcschema.Schema, error) {
+	if e == nil {
+		return grpcschema.Load(b)
+	}
+	e.mu.Lock()
+	s, ok := e.schemas[b.GetId()]
+	e.mu.Unlock()
+	if ok && s.Source() == b.GetSource() {
+		return s, nil
+	}
+	s, err := grpcschema.Load(b)
+	if err != nil {
+		return nil, err
+	}
+	e.mu.Lock()
+	e.schemas[b.GetId()] = s
+	e.mu.Unlock()
+	return s, nil
 }
 
 func (e *Evaluators) get(key [sha256.Size]byte, cfg coraza.Config) (*coraza.Evaluator, error) {
@@ -661,13 +707,18 @@ func (e *Evaluators) get(key [sha256.Size]byte, cfg coraza.Config) (*coraza.Eval
 	return ev, nil
 }
 
-// retain drops the rule sets the latest set doesn't use.
-func (e *Evaluators) retain(used map[[sha256.Size]byte]bool) {
+// retain drops the rule sets and gRPC schemas the latest set doesn't use.
+func (e *Evaluators) retain(used map[[sha256.Size]byte]bool, schemas map[string]*grpcschema.Schema) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for k := range e.cache {
 		if !used[k] {
 			delete(e.cache, k)
+		}
+	}
+	for id := range e.schemas {
+		if schemas[id] == nil {
+			delete(e.schemas, id)
 		}
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema"
 	"github.com/inkwall-dev/inkwall/pkg/grpcwire"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 )
@@ -141,10 +142,12 @@ const grpcMaxDecompressed = 1 << 20
 // grpcText returns the text fields of messages, the gRPC messages of r
 // (asGRPC), and reports whether every message was read whole: not cut,
 // not compressed other than with gzip (grpc-encoding), protobuf, and
-// within the limits.
-func grpcText(r *request.Request, messages []byte) ([]request.Arg, bool) {
+// within the limits. Messages of a method schema describes are read with
+// it (design 0013 §6.1), the others without; read counts them.
+func grpcText(r *request.Request, messages []byte, schema *grpcschema.Schema) (args []request.Arg, complete bool, read GRPCRead) {
+	t := schema.Method(grpcPath(r))
 	msgs, ok := grpcwire.Messages(messages, r.BodyTruncated)
-	complete := ok && !r.BodyTruncated
+	complete = ok && !r.BodyTruncated
 	encoding := strings.ToLower(strings.TrimSpace(r.Headers.Get("Grpc-Encoding")))
 	budget := int64(grpcMaxDecompressed)
 	var fields []grpcwire.Field
@@ -163,17 +166,32 @@ func grpcText(r *request.Request, messages []byte) ([]request.Arg, bool) {
 			data = out
 		}
 		var whole bool
-		fields, whole = grpcwire.Strings(data, grpcTextLimits, fields)
+		if t != nil {
+			var unknown int
+			fields, unknown, whole = grpcwire.Fields(data, schema, t, grpcTextLimits, fields)
+			read.Described++
+			read.Unknown += unknown
+		} else {
+			fields, whole = grpcwire.Strings(data, grpcTextLimits, fields)
+			read.Undescribed++
+		}
 		if !whole {
 			complete = false
 		}
 	}
 	if len(fields) == 0 {
-		return nil, complete
+		return nil, complete, read
 	}
-	args := make([]request.Arg, len(fields))
+	args = make([]request.Arg, len(fields))
 	for i, f := range fields {
 		args[i] = request.Arg{Name: f.Name, Value: f.Value}
 	}
-	return args, complete
+	return args, complete, read
+}
+
+// grpcPath is a gRPC call's method, "/package.Service/Method": its path
+// without a query.
+func grpcPath(r *request.Request) string {
+	path, _, _ := strings.Cut(r.RawURI, "?")
+	return path
 }

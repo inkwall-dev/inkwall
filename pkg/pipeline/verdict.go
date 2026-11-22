@@ -172,11 +172,24 @@ type Verdict struct {
 	// WebSocketMessage reports a verdict on a message a client sent on a
 	// WebSocket, not on a request.
 	WebSocketMessage bool
+	// GRPCRead counts the gRPC messages read for the verdict, and the
+	// fields their schema doesn't describe (design 0013 §10).
+	GRPCRead GRPCRead
 	// StreamEvent, with Response, is the index (from 1) of the event or
 	// message of a streamed response the verdict is about; without
 	// Response, of the message of a gRPC call's request stream (#315). 0
 	// for a whole request or response.
 	StreamEvent int
+}
+
+// GRPCRead counts what reading a gRPC call's messages found.
+type GRPCRead struct {
+	// Described: messages read with the policy's schema; Undescribed:
+	// without (the policy has none, or it doesn't describe the method).
+	Described, Undescribed int
+	// Unknown is how many fields of the described messages the schema
+	// doesn't describe, read without it: a set older than the application.
+	Unknown int
 }
 
 // Stricter reports whether verdict a is stricter than b: deny over log

@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/router"
@@ -131,6 +132,11 @@ type Config struct {
 	// streams and bidirectional calls then work (#315, GRPCStream). Other
 	// adapters inspect the buffered body as without it.
 	GRPCPerMessage bool
+	// GRPCSchema, with GRPCMessages, reads the messages of the methods it
+	// describes with their schema (grpcwire.Fields, design 0013): fields by
+	// their types, named by their paths. Nil, or a method it doesn't
+	// describe: without it.
+	GRPCSchema *grpcschema.Schema
 	// WebSocket is what a WebSocket handshake must meet (allowed origins,
 	// required headers), checked before the rules. Nil: nothing more than
 	// any request.
@@ -251,6 +257,8 @@ type Pipeline struct {
 	grpcMessages bool
 	// grpcPerMessage: and one by one, where the adapter can (#315).
 	grpcPerMessage bool
+	// grpcSchema: what they are read with; nil: without a schema.
+	grpcSchema *grpcschema.Schema
 	// limits: the policy's rate limits, nil when it has none.
 	limits *RateLimits
 	// geo: the policy's geo blocking, nil when it has none; geoEvents
@@ -294,6 +302,7 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 		},
 		grpcMessages:   cfg.GRPCMessages,
 		grpcPerMessage: cfg.GRPCMessages && cfg.GRPCPerMessage,
+		grpcSchema:     cfg.GRPCSchema,
 		limits:         cfg.RateLimits,
 		geo:            cfg.Geo,
 		geoEvents:      newGeoSampler(cfg.Geo),
@@ -477,12 +486,17 @@ func (p *Pipeline) inspect(ctx context.Context, r *request.Request, keep bool) (
 		if !p.grpcMessages {
 			return p.evaluate(ctx, p.request(call, keep))
 		}
-		text, complete := grpcText(r, messages)
+		text, complete, read := grpcText(r, messages, p.grpcSchema)
 		call.GRPCText = text
+		var v Verdict
+		var x rules.Exchange
 		if complete {
-			return p.evaluate(ctx, p.request(call, keep))
+			v, x = p.evaluate(ctx, p.request(call, keep))
+		} else {
+			v, x = p.partly(ctx, call, keep)
 		}
-		return p.partly(ctx, call, keep)
+		v.GRPCRead = read
+		return v, x
 	}
 	if !r.BodyTruncated {
 		return p.evaluate(ctx, p.request(r, keep))

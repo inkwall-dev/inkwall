@@ -54,7 +54,7 @@ func FuzzGRPCText(f *testing.F) {
 		} else if !bytes.Equal(messages, body) {
 			t.Fatal("binary messages aren't the body")
 		}
-		args, complete := grpcText(r, messages)
+		args, complete, _ := grpcText(r, messages, nil)
 		if complete && truncated {
 			t.Fatal("a cut body read whole")
 		}

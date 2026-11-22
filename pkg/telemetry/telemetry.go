@@ -78,6 +78,9 @@ type Metrics struct {
 	panics         *prometheus.CounterVec
 	geoDenied      *prometheus.CounterVec
 	geoLookups     *prometheus.CounterVec
+	// grpcRead and grpcUnknown have a policy label with policy metrics.
+	grpcRead    *prometheus.CounterVec
+	grpcUnknown *prometheus.CounterVec
 
 	labels      prometheus.Labels
 	mu          sync.Mutex
@@ -182,10 +185,40 @@ func NewMetrics(adapter string) *Metrics {
 		rules:  map[int]string{},
 		labels: labels,
 	}
+	m.grpcRead, m.grpcUnknown = grpcCounters(labels)
 	reg.MustRegister(m.requests, m.duration, m.responses, m.respTime,
 		m.ruleMatches, m.adapterErrors, m.rulesReloads, m.connections, m.connWaits, m.wsMessages, m.wsConnections, m.wsViolations, m.panics,
-		m.geoDenied, m.geoLookups)
+		m.geoDenied, m.geoLookups, grpcCollector{m})
 	return m
+}
+
+// grpcCollector collects the gRPC read counters, which EnablePolicyMetrics
+// replaces with ones labelled by policy. It is unchecked (it describes
+// nothing): the registry can't take a metric back with other labels.
+type grpcCollector struct{ m *Metrics }
+
+func (grpcCollector) Describe(chan<- *prometheus.Desc) {}
+
+func (c grpcCollector) Collect(ch chan<- prometheus.Metric) {
+	c.m.grpcRead.Collect(ch)
+	c.m.grpcUnknown.Collect(ch)
+}
+
+// grpcCounters returns inkwall_grpc_messages_read_total and
+// inkwall_grpc_unknown_fields_total (design 0013 §10), with a policy label
+// first when labels is followed by "policy".
+func grpcCounters(labels prometheus.Labels, extra ...string) (read, unknown *prometheus.CounterVec) {
+	read = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        "inkwall_grpc_messages_read_total",
+		Help:        "gRPC request messages read for the rules (grpcMessages: Inspect), by schema: described (read with the policy's gRPC schema) or undescribed (its method isn't in the schema, or the policy has none: read without one).",
+		ConstLabels: labels,
+	}, append(extra, "schema"))
+	unknown = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:        "inkwall_grpc_unknown_fields_total",
+		Help:        "Fields of described gRPC messages that the policy's schema doesn't describe (a number it doesn't have, or another wire type), read without it. A rising count means the schema is older than the application.",
+		ConstLabels: labels,
+	}, extra)
+	return read, unknown
 }
 
 // EnablePolicyMetrics adds inkwall_policy_requests_total, requests by
@@ -204,6 +237,7 @@ func (m *Metrics) EnablePolicyMetrics(max int) {
 		ConstLabels: m.labels,
 	}, []string{"policy", "action", "reason"})
 	m.registry.MustRegister(m.policyRequests)
+	m.grpcRead, m.grpcUnknown = grpcCounters(m.labels, "policy")
 }
 
 // ObserveVerdict records one verdict.
@@ -231,6 +265,26 @@ func (m *Metrics) ObserveVerdict(v pipeline.Verdict) {
 		if m.policyRequests != nil {
 			m.policyRequests.WithLabelValues(m.policyLabel(v.Policy), action, v.Reason.String()).Inc()
 		}
+	}
+	if r := v.GRPCRead; r != (pipeline.GRPCRead{}) {
+		m.observeGRPCRead(v.Policy, r)
+	}
+}
+
+// observeGRPCRead counts the gRPC messages a verdict read.
+func (m *Metrics) observeGRPCRead(policy string, r pipeline.GRPCRead) {
+	var labels []string
+	if m.policyRequests != nil {
+		labels = []string{m.policyLabel(policy)}
+	}
+	if r.Described > 0 {
+		m.grpcRead.WithLabelValues(append(labels, "described")...).Add(float64(r.Described))
+	}
+	if r.Undescribed > 0 {
+		m.grpcRead.WithLabelValues(append(labels, "undescribed")...).Add(float64(r.Undescribed))
+	}
+	if r.Unknown > 0 {
+		m.grpcUnknown.WithLabelValues(labels...).Add(float64(r.Unknown))
 	}
 }
 

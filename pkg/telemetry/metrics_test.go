@@ -89,6 +89,39 @@ func TestPolicyRequests(t *testing.T) {
 	}
 }
 
+// gRPC messages read with and without a schema, and the fields it doesn't
+// describe (design 0013 §10), by policy with policy metrics.
+func TestGRPCRead(t *testing.T) {
+	read := pipeline.Verdict{Action: pipeline.ActionAllow, Policy: "shop/api", GRPCRead: pipeline.GRPCRead{Described: 2, Undescribed: 1, Unknown: 3}}
+	m := NewMetrics("proxy")
+	m.ObserveVerdict(read)
+	m.ObserveVerdict(pipeline.Verdict{Action: pipeline.ActionAllow, StreamEvent: 1, GRPCRead: pipeline.GRPCRead{Described: 1}})
+	m.ObserveVerdict(pipeline.Verdict{Action: pipeline.ActionAllow})
+	body := scrape(t, m)
+	for _, want := range []string{
+		`inkwall_grpc_messages_read_total{adapter="proxy",schema="described"} 3`,
+		`inkwall_grpc_messages_read_total{adapter="proxy",schema="undescribed"} 1`,
+		`inkwall_grpc_unknown_fields_total{adapter="proxy"} 3`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics missing %q", want)
+		}
+	}
+
+	m = NewMetrics("proxy")
+	m.EnablePolicyMetrics(10)
+	m.ObserveVerdict(read)
+	body = scrape(t, m)
+	for _, want := range []string{
+		`inkwall_grpc_messages_read_total{adapter="proxy",policy="shop/api",schema="described"} 2`,
+		`inkwall_grpc_unknown_fields_total{adapter="proxy",policy="shop/api"} 3`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics missing %q", want)
+		}
+	}
+}
+
 // In standalone mode, the one pipeline enforces no policy: its requests
 // count under policy="none".
 func TestPolicyRequestsStandalone(t *testing.T) {

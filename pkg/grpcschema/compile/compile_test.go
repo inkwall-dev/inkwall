@@ -220,8 +220,8 @@ func TestCompileKinds(t *testing.T) {
 		7: {"d", grpcschema.KindFixed64, false}, 8: {"labels", grpcschema.KindMessage, true},
 		9: {"grp", grpcschema.KindGroup, false}, 100: {"[p.note]", grpcschema.KindString, false},
 	}
-	if len(o.Fields()) != len(want) {
-		t.Fatalf("%d fields, want %d", len(o.Fields()), len(want))
+	if o.Fields() != len(want) {
+		t.Fatalf("%d fields, want %d", o.Fields(), len(want))
 	}
 	for num, w := range want {
 		fd := o.Field(num)

@@ -9,11 +9,11 @@
 package grpcschema
 
 import (
-	"cmp"
 	"errors"
 	"fmt"
-	"slices"
+	"sort"
 	"strings"
+	"sync/atomic"
 
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
@@ -59,6 +59,26 @@ type Field struct {
 	Message *Message
 	// Repeated: a repeated number may come packed.
 	Repeated bool
+	// path is the last path built for the field (Path).
+	path atomic.Pointer[path]
+}
+
+type path struct{ prefix, path string }
+
+// Path returns the field's path under prefix, the path of its message:
+// prefix + "." + Name, or Name at the top. The last one built is kept, so
+// that a field read under the same prefix again, as the fields of
+// repeated messages are, costs nothing.
+func (f *Field) Path(prefix string) string {
+	if prefix == "" {
+		return f.Name
+	}
+	if p := f.path.Load(); p != nil && p.prefix == prefix {
+		return p.path
+	}
+	p := prefix + "." + f.Name
+	f.path.Store(&path{prefix, p})
+	return p
 }
 
 // Message is a message type.
@@ -83,15 +103,18 @@ func (t *Message) Field(num protowire.Number) *Field {
 		}
 		return nil
 	}
-	i, ok := slices.BinarySearchFunc(t.fields, num, func(f Field, n protowire.Number) int { return cmp.Compare(f.Number, n) })
-	if !ok {
+	i := sort.Search(len(t.fields), func(i int) bool { return t.fields[i].Number >= num })
+	if i == len(t.fields) || t.fields[i].Number != num {
 		return nil
 	}
 	return &t.fields[i]
 }
 
-// Fields returns t's fields, sorted by number.
-func (t *Message) Fields() []Field { return t.fields }
+// Fields returns how many fields t has.
+func (t *Message) Fields() int { return len(t.fields) }
+
+// FieldAt returns t's i-th field, by number.
+func (t *Message) FieldAt(i int) *Field { return &t.fields[i] }
 
 // Schema is a loaded schema. It is immutable and safe for concurrent use.
 type Schema struct {
@@ -193,14 +216,13 @@ func Load(b *bundlev1.GRPCSchema) (*Schema, error) {
 	for i, bm := range msgs {
 		m := &s.messages[i]
 		for j, bf := range bm.GetFields() {
-			f, err := s.field(bf)
-			if err != nil {
+			f := &m.fields[j]
+			if err := s.field(f, bf); err != nil {
 				return nil, fmt.Errorf("message %s field %d: %w", m.FullName, j, err)
 			}
 			if j > 0 && f.Number <= m.fields[j-1].Number {
 				return nil, fmt.Errorf("message %s: fields not sorted by number, or number %d twice", m.FullName, f.Number)
 			}
-			m.fields[j] = f
 		}
 		if m.Any {
 			if f := m.Field(1); f == nil || f.Kind != KindString {
@@ -213,8 +235,8 @@ func Load(b *bundlev1.GRPCSchema) (*Schema, error) {
 		if n := len(m.fields); n > 0 {
 			if largest := int(m.fields[n-1].Number); largest < maxDenseMultiplier*n+8 {
 				m.dense = make([]uint16, largest+1)
-				for k, f := range m.fields {
-					m.dense[f.Number] = uint16(k + 1)
+				for k := range m.fields {
+					m.dense[m.fields[k].Number] = uint16(k + 1) // #nosec G115 -- at most MaxMessageFields
 				}
 			}
 		}
@@ -237,19 +259,19 @@ func Load(b *bundlev1.GRPCSchema) (*Schema, error) {
 	return s, nil
 }
 
-// field checks and converts a field.
-func (s *Schema) field(bf *bundlev1.GRPCField) (Field, error) {
+// field checks bf and converts it into f.
+func (s *Schema) field(f *Field, bf *bundlev1.GRPCField) error {
 	if bf.GetNumber() > uint32(protowire.MaxValidNumber) {
-		return Field{}, fmt.Errorf("number %d out of range", bf.GetNumber())
+		return fmt.Errorf("number %d out of range", bf.GetNumber())
 	}
 	num := protowire.Number(bf.GetNumber()) // #nosec G115 -- at most MaxValidNumber
 	if !num.IsValid() {
-		return Field{}, fmt.Errorf("number %d out of range", bf.GetNumber())
+		return fmt.Errorf("number %d out of range", bf.GetNumber())
 	}
 	if err := checkFieldName(bf.GetName()); err != nil {
-		return Field{}, fmt.Errorf("number %d: %w", num, err)
+		return fmt.Errorf("number %d: %w", num, err)
 	}
-	f := Field{Number: num, Name: bf.GetName(), Repeated: bf.GetRepeated()}
+	f.Number, f.Name, f.Repeated = num, bf.GetName(), bf.GetRepeated()
 	switch bf.GetKind() {
 	case bundlev1.GRPCFieldKind_GRPC_FIELD_KIND_STRING:
 		f.Kind = KindString
@@ -266,17 +288,17 @@ func (s *Schema) field(bf *bundlev1.GRPCField) (Field, error) {
 	case bundlev1.GRPCFieldKind_GRPC_FIELD_KIND_FIXED64:
 		f.Kind = KindFixed64
 	default:
-		return Field{}, fmt.Errorf("%s: unknown kind %d", f.Name, bf.GetKind())
+		return fmt.Errorf("%s: unknown kind %d", f.Name, bf.GetKind())
 	}
 	if f.Kind == KindMessage || f.Kind == KindGroup {
 		if int64(bf.GetMessage()) >= int64(len(s.messages)) {
-			return Field{}, fmt.Errorf("%s: type %d out of range", f.Name, bf.GetMessage())
+			return fmt.Errorf("%s: type %d out of range", f.Name, bf.GetMessage())
 		}
 		f.Message = &s.messages[bf.GetMessage()]
 	} else if bf.GetMessage() != 0 {
-		return Field{}, fmt.Errorf("%s: a type for a field that isn't a message", f.Name)
+		return fmt.Errorf("%s: a type for a field that isn't a message", f.Name)
 	}
-	return f, nil
+	return nil
 }
 
 // checkFieldName checks a field's name: a proto identifier, or an
