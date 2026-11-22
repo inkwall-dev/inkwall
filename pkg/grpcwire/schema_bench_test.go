@@ -47,8 +47,8 @@ func benchFile() *descriptorpb.FileDescriptorProto {
 }
 
 // largestDescriptor is the largest file descriptor linked into the test,
-// serialized: a large message with thousands of text fields (design 0013
-// §6.6 measured a 33 KB one).
+// serialized (descriptor.proto's own): a large message with thousands of
+// text fields, as design 0013 §6.6 measured.
 func largestDescriptor(t testing.TB) []byte {
 	var largest []byte
 	protoregistry.GlobalFiles.RangeFiles(func(f protoreflect.FileDescriptor) bool {
