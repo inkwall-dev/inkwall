@@ -107,6 +107,20 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   that don't set it. The check API's answer has two new fields, `deny_content_type` and
   `deny_body`, set only for a policy with a custom denial.
 
+- **LLM APIs** (`spec.llm`, [LLM APIs](llm-apis.md)): paths a policy declares as OpenAI Chat,
+  Responses or Embeddings, or Anthropic Messages endpoints have their request bodies read up to
+  `llm.maxBodyBytes` (1 MiB), parsed strictly and checked natively (model, prompt size, messages,
+  output limit, roles, tools); a failed check is a 400 (413 for the size caps) in `Block` mode,
+  reason `llm`, with rule IDs 4,800,000 to 4,800,999 for exclusions. Nothing changes for a policy
+  without `spec.llm`. For one that adds it, **the rule sets stop reading the endpoints' bodies**
+  (request and response) unless `ruleSetBody: Inspect`. Upgrade the chart first, then the
+  engines: an engine before 0.7.0 checks none of these requests, and its rule sets read their
+  bodies as before; while one runs a policy with `spec.llm`, the policy is `Enforced=False`,
+  `EnginesOutdated`, naming `spec.llm`. The webhook now refuses SecLang rule sets that use rule
+  IDs 4,800,000 to 4,800,999, reserved for the LLM checks. Envoy Gateway's and Istio's buffer is
+  raised to `llm.maxBodyBytes` on such routes, and their bodies are sent to the engine even with
+  `body.inspect: false`.
+
 - **The HAProxy Kubernetes Ingress Controller 3.4** (the default of its chart since 1.55.0) is
   wired: 3.4 dropped the config snippets the operator loads the filter with on 3.1 to 3.2, so on
   3.4 each protected Ingress gets a `Backend` custom resource of the controller's

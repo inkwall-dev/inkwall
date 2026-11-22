@@ -27,6 +27,8 @@ Every doc in this repository, by topic, with the question each one answers.
   address behind a load balancer?
 - [Rate limits](rate-limits.md): how do I limit a client's requests to a policy's routes, what
   does a limited client get, and why does each engine count on its own?
+- [LLM APIs](llm-apis.md): how do I cap what clients send to an OpenAI-compatible or Anthropic
+  API (models, prompt size, output tokens, roles, tools), and what can't a WAF do for an LLM?
 - [Denial responses](denial-responses.md): how do I give denied clients an HTML page or a JSON
   document of my own, with the request ID in it, and which denials use it?
 - [Rotating the bundle signing key](key-rotation.md): how do I replace the key that signs policy

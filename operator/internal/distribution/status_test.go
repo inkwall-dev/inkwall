@@ -437,6 +437,29 @@ func TestEnforcedOutdatedRateLimits(t *testing.T) {
 	}
 }
 
+// LLM endpoints need 0.7.0 (#277): an older engine checks none of their
+// requests.
+func TestEnforcedOutdatedLLM(t *testing.T) {
+	p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
+	p.Spec.LLM = &wafv1alpha1.LLMSpec{Endpoints: []wafv1alpha1.LLMEndpoint{{Paths: []wafv1alpha1.PathPattern{"/v1/chat/completions"}, Format: wafv1alpha1.LLMOpenAIChat}}}
+	p.Status.BundleVersion = 3
+	for _, tc := range []struct {
+		version  string
+		outdated bool
+	}{{"0.6.1", true}, {"0.7.0", false}, {"0.7.1", false}} {
+		engines := []Engine{{ID: "e0", PodNamespace: "edge", PodName: "envoy-0", EngineVersion: tc.version, Applied: 3}}
+		conds, _ := enforcedConditions(p, false, 3, false, engines, nil, 0, 0)
+		c := meta.FindStatusCondition(conds, wafv1alpha1.ConditionEnforced)
+		outdated := c != nil && c.Reason == ReasonEnginesOutdated
+		if outdated != tc.outdated || outdated && (!strings.Contains(c.Message, "spec.llm") || !strings.Contains(c.Message, "0.7.0 or later")) {
+			t.Errorf("a %s engine and a policy with spec.llm: Enforced %+v, outdated %v want %v", tc.version, c, outdated, tc.outdated)
+		}
+	}
+	if n := engineCounts([]Engine{{EngineVersion: "0.6.1", Applied: 3}}, 0, 3, []wafv1alpha1.WAFPolicy{*p}, false); n.Outdated != 1 {
+		t.Errorf("outdated engines %d, want 1", n.Outdated)
+	}
+}
+
 // A custom denial needs 0.7.0 (#725): an older engine answers with its own
 // body.
 func TestEnforcedOutdatedDenyResponse(t *testing.T) {

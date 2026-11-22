@@ -91,6 +91,20 @@ func rateLimited() *eventsv1.SecurityEvent {
 	}
 }
 
+// llmChecked is a request that failed an LLM check: its event names the
+// check and where, never the prompt.
+func llmChecked() *eventsv1.SecurityEvent {
+	return &eventsv1.SecurityEvent{
+		EventId: "01JD3Q4Z8M2N5X7Y9A1B3C5D7H", Time: timestamppb.New(eventTime), EngineId: "01JDENGINE",
+		Policy: "shop/web", BundleVersion: 42, Action: enginev1.Action_ACTION_DENY, Reason: enginev1.Reason_REASON_LLM,
+		InterruptingRuleId: 4800006, Status: 400, Method: "POST", Host: "ai.example.com", Path: "/v1/chat/completions", ClientIp: "203.0.113.9",
+		Phase: eventsv1.Phase_PHASE_REQUEST, Protocol: eventsv1.Protocol_PROTOCOL_HTTP, Latency: durationpb.New(0),
+		Matches: []*eventsv1.Match{{RuleId: 4800006, Variable: "LLM"}},
+		Llm: &eventsv1.LLMEvent{Format: "OpenAIChat", Model: "llama-3.1-8b-instruct", Check: "llm-client-role", MessageIndex: 0,
+			Role: "system", Offset: 14, EstimatedTokens: 4113},
+	}
+}
+
 // inBundle has shop/web only.
 func inBundle(p string) bool { return p == "shop/web" }
 

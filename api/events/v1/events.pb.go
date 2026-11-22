@@ -199,7 +199,11 @@ type SecurityEvent struct {
 	// How many events this one stands for, itself included, when the engine
 	// samples them: a rate limit's, its client's limited requests since its
 	// last event. 0 or 1: itself.
-	SampledCount  uint32 `protobuf:"varint,24,opt,name=sampled_count,json=sampledCount,proto3" json:"sampled_count,omitempty"`
+	SampledCount uint32 `protobuf:"varint,24,opt,name=sampled_count,json=sampledCount,proto3" json:"sampled_count,omitempty"`
+	// With REASON_LLM: the LLM check that failed, and where. Unset from
+	// engines before 0.7.0. (Numbered from 40, apart from the fields other
+	// features add meanwhile.)
+	Llm           *LLMEvent `protobuf:"bytes,40,opt,name=llm,proto3" json:"llm,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -402,6 +406,122 @@ func (x *SecurityEvent) GetSampledCount() uint32 {
 	return 0
 }
 
+func (x *SecurityEvent) GetLlm() *LLMEvent {
+	if x != nil {
+		return x.Llm
+	}
+	return nil
+}
+
+// LLMEvent is a request on an LLM endpoint that failed an LLM check. It
+// carries no prompt text, ever: the prompt is the user's data; the offset
+// and the message's index find it in the application's own logs.
+type LLMEvent struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The endpoint's format: "OpenAIChat", "OpenAIResponses",
+	// "OpenAIEmbeddings", "AnthropicMessages".
+	Format string `protobuf:"bytes,1,opt,name=format,proto3" json:"format,omitempty"`
+	// The model the request named, at most 128 bytes.
+	Model string `protobuf:"bytes,2,opt,name=model,proto3" json:"model,omitempty"`
+	// The check: "llm-malformed", "llm-model", "llm-max-prompt",
+	// "llm-max-messages", "llm-max-choices", "llm-max-output-tokens",
+	// "llm-client-role", "llm-tools".
+	Check string `protobuf:"bytes,3,opt,name=check,proto3" json:"check,omitempty"`
+	// The message the check is about (from 0; a tool, for llm-tools), -1
+	// for the request as a whole or a top-level field (the instructions,
+	// Anthropic's system).
+	MessageIndex int32 `protobuf:"varint,4,opt,name=message_index,json=messageIndex,proto3" json:"message_index,omitempty"`
+	// The message's role, for llm-client-role.
+	Role string `protobuf:"bytes,5,opt,name=role,proto3" json:"role,omitempty"`
+	// Where in the body the check failed (the malformed byte, the role,
+	// the tool), 0 for the request as a whole.
+	Offset int64 `protobuf:"varint,6,opt,name=offset,proto3" json:"offset,omitempty"`
+	// The request's tokens as charged at request time: prompt bytes / 3
+	// plus its output limit.
+	EstimatedTokens int64 `protobuf:"varint,7,opt,name=estimated_tokens,json=estimatedTokens,proto3" json:"estimated_tokens,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *LLMEvent) Reset() {
+	*x = LLMEvent{}
+	mi := &file_events_v1_events_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LLMEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LLMEvent) ProtoMessage() {}
+
+func (x *LLMEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_events_v1_events_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LLMEvent.ProtoReflect.Descriptor instead.
+func (*LLMEvent) Descriptor() ([]byte, []int) {
+	return file_events_v1_events_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *LLMEvent) GetFormat() string {
+	if x != nil {
+		return x.Format
+	}
+	return ""
+}
+
+func (x *LLMEvent) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
+}
+
+func (x *LLMEvent) GetCheck() string {
+	if x != nil {
+		return x.Check
+	}
+	return ""
+}
+
+func (x *LLMEvent) GetMessageIndex() int32 {
+	if x != nil {
+		return x.MessageIndex
+	}
+	return 0
+}
+
+func (x *LLMEvent) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *LLMEvent) GetOffset() int64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+func (x *LLMEvent) GetEstimatedTokens() int64 {
+	if x != nil {
+		return x.EstimatedTokens
+	}
+	return 0
+}
+
 // Match is one rule that matched.
 type Match struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
@@ -418,7 +538,7 @@ type Match struct {
 
 func (x *Match) Reset() {
 	*x = Match{}
-	mi := &file_events_v1_events_proto_msgTypes[1]
+	mi := &file_events_v1_events_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -430,7 +550,7 @@ func (x *Match) String() string {
 func (*Match) ProtoMessage() {}
 
 func (x *Match) ProtoReflect() protoreflect.Message {
-	mi := &file_events_v1_events_proto_msgTypes[1]
+	mi := &file_events_v1_events_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -443,7 +563,7 @@ func (x *Match) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Match.ProtoReflect.Descriptor instead.
 func (*Match) Descriptor() ([]byte, []int) {
-	return file_events_v1_events_proto_rawDescGZIP(), []int{1}
+	return file_events_v1_events_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *Match) GetRuleId() int32 {
@@ -480,7 +600,7 @@ type EventBatch struct {
 
 func (x *EventBatch) Reset() {
 	*x = EventBatch{}
-	mi := &file_events_v1_events_proto_msgTypes[2]
+	mi := &file_events_v1_events_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -492,7 +612,7 @@ func (x *EventBatch) String() string {
 func (*EventBatch) ProtoMessage() {}
 
 func (x *EventBatch) ProtoReflect() protoreflect.Message {
-	mi := &file_events_v1_events_proto_msgTypes[2]
+	mi := &file_events_v1_events_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -505,7 +625,7 @@ func (x *EventBatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EventBatch.ProtoReflect.Descriptor instead.
 func (*EventBatch) Descriptor() ([]byte, []int) {
-	return file_events_v1_events_proto_rawDescGZIP(), []int{2}
+	return file_events_v1_events_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *EventBatch) GetEvents() []*SecurityEvent {
@@ -526,7 +646,7 @@ var File_events_v1_events_proto protoreflect.FileDescriptor
 
 const file_events_v1_events_proto_rawDesc = "" +
 	"\n" +
-	"\x16events/v1/events.proto\x12\x11inkwall.events.v1\x1a\x16engine/v1/engine.proto\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xfc\x06\n" +
+	"\x16events/v1/events.proto\x12\x11inkwall.events.v1\x1a\x16engine/v1/engine.proto\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xab\a\n" +
 	"\rSecurityEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12.\n" +
 	"\x04time\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x04time\x12\x1b\n" +
@@ -555,7 +675,16 @@ const file_events_v1_events_proto_rawDesc = "" +
 	"\bprotocol\x18\x16 \x01(\x0e2\x1b.inkwall.events.v1.ProtocolR\bprotocol\x12\x1d\n" +
 	"\n" +
 	"rate_limit\x18\x17 \x01(\tR\trateLimit\x12#\n" +
-	"\rsampled_count\x18\x18 \x01(\rR\fsampledCount\"V\n" +
+	"\rsampled_count\x18\x18 \x01(\rR\fsampledCount\x12-\n" +
+	"\x03llm\x18( \x01(\v2\x1b.inkwall.events.v1.LLMEventR\x03llm\"\xca\x01\n" +
+	"\bLLMEvent\x12\x16\n" +
+	"\x06format\x18\x01 \x01(\tR\x06format\x12\x14\n" +
+	"\x05model\x18\x02 \x01(\tR\x05model\x12\x14\n" +
+	"\x05check\x18\x03 \x01(\tR\x05check\x12#\n" +
+	"\rmessage_index\x18\x04 \x01(\x05R\fmessageIndex\x12\x12\n" +
+	"\x04role\x18\x05 \x01(\tR\x04role\x12\x16\n" +
+	"\x06offset\x18\x06 \x01(\x03R\x06offset\x12)\n" +
+	"\x10estimated_tokens\x18\a \x01(\x03R\x0festimatedTokens\"V\n" +
 	"\x05Match\x12\x17\n" +
 	"\arule_id\x18\x01 \x01(\x05R\x06ruleId\x12\x1a\n" +
 	"\bvariable\x18\x02 \x01(\tR\bvariable\x12\x18\n" +
@@ -588,32 +717,34 @@ func file_events_v1_events_proto_rawDescGZIP() []byte {
 }
 
 var file_events_v1_events_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_events_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_events_v1_events_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_events_v1_events_proto_goTypes = []any{
 	(Phase)(0),                    // 0: inkwall.events.v1.Phase
 	(Protocol)(0),                 // 1: inkwall.events.v1.Protocol
 	(*SecurityEvent)(nil),         // 2: inkwall.events.v1.SecurityEvent
-	(*Match)(nil),                 // 3: inkwall.events.v1.Match
-	(*EventBatch)(nil),            // 4: inkwall.events.v1.EventBatch
-	(*timestamppb.Timestamp)(nil), // 5: google.protobuf.Timestamp
-	(v1.Action)(0),                // 6: inkwall.engine.v1.Action
-	(v1.Reason)(0),                // 7: inkwall.engine.v1.Reason
-	(*durationpb.Duration)(nil),   // 8: google.protobuf.Duration
+	(*LLMEvent)(nil),              // 3: inkwall.events.v1.LLMEvent
+	(*Match)(nil),                 // 4: inkwall.events.v1.Match
+	(*EventBatch)(nil),            // 5: inkwall.events.v1.EventBatch
+	(*timestamppb.Timestamp)(nil), // 6: google.protobuf.Timestamp
+	(v1.Action)(0),                // 7: inkwall.engine.v1.Action
+	(v1.Reason)(0),                // 8: inkwall.engine.v1.Reason
+	(*durationpb.Duration)(nil),   // 9: google.protobuf.Duration
 }
 var file_events_v1_events_proto_depIdxs = []int32{
-	5, // 0: inkwall.events.v1.SecurityEvent.time:type_name -> google.protobuf.Timestamp
-	6, // 1: inkwall.events.v1.SecurityEvent.action:type_name -> inkwall.engine.v1.Action
-	7, // 2: inkwall.events.v1.SecurityEvent.reason:type_name -> inkwall.engine.v1.Reason
-	3, // 3: inkwall.events.v1.SecurityEvent.matches:type_name -> inkwall.events.v1.Match
-	8, // 4: inkwall.events.v1.SecurityEvent.latency:type_name -> google.protobuf.Duration
+	6, // 0: inkwall.events.v1.SecurityEvent.time:type_name -> google.protobuf.Timestamp
+	7, // 1: inkwall.events.v1.SecurityEvent.action:type_name -> inkwall.engine.v1.Action
+	8, // 2: inkwall.events.v1.SecurityEvent.reason:type_name -> inkwall.engine.v1.Reason
+	4, // 3: inkwall.events.v1.SecurityEvent.matches:type_name -> inkwall.events.v1.Match
+	9, // 4: inkwall.events.v1.SecurityEvent.latency:type_name -> google.protobuf.Duration
 	0, // 5: inkwall.events.v1.SecurityEvent.phase:type_name -> inkwall.events.v1.Phase
 	1, // 6: inkwall.events.v1.SecurityEvent.protocol:type_name -> inkwall.events.v1.Protocol
-	2, // 7: inkwall.events.v1.EventBatch.events:type_name -> inkwall.events.v1.SecurityEvent
-	8, // [8:8] is the sub-list for method output_type
-	8, // [8:8] is the sub-list for method input_type
-	8, // [8:8] is the sub-list for extension type_name
-	8, // [8:8] is the sub-list for extension extendee
-	0, // [0:8] is the sub-list for field type_name
+	3, // 7: inkwall.events.v1.SecurityEvent.llm:type_name -> inkwall.events.v1.LLMEvent
+	2, // 8: inkwall.events.v1.EventBatch.events:type_name -> inkwall.events.v1.SecurityEvent
+	9, // [9:9] is the sub-list for method output_type
+	9, // [9:9] is the sub-list for method input_type
+	9, // [9:9] is the sub-list for extension type_name
+	9, // [9:9] is the sub-list for extension extendee
+	0, // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_events_v1_events_proto_init() }
@@ -627,7 +758,7 @@ func file_events_v1_events_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_events_v1_events_proto_rawDesc), len(file_events_v1_events_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   3,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

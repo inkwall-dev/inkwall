@@ -32,6 +32,7 @@ import (
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
+	"github.com/inkwall-dev/inkwall/pkg/llm"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/router"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
@@ -387,7 +388,12 @@ func checkSecLang(rules string) field.ErrorList {
 	if rules == "" {
 		return nil
 	}
-	if err := coraza.CheckUserRules(rules); err != nil {
+	err := coraza.CheckUserRules(rules)
+	if err == nil {
+		// The LLM checks' IDs, which exclusions name (design 0012 §3.4).
+		err = coraza.CheckReservedIDs(rules, llm.RuleIDMin, llm.RuleIDMax, "Inkwall's LLM checks")
+	}
+	if err != nil {
 		// The rules can be long: name the line instead of echoing them.
 		return field.ErrorList{field.Invalid(field.NewPath("spec", "source", "seclang"), field.OmitValueType{}, err.Error())}
 	}
@@ -423,7 +429,44 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 					"bind the CRS without placement, and the rule set to place before it in its own entry"))
 		}
 	}
-	return append(responseWarnings(p), policyListWarnings(p)...), invalid("WAFPolicy", p.Name, errs)
+	warnings := append(responseWarnings(p), policyListWarnings(p)...)
+	return append(warnings, llmWarnings(p)...), invalid("WAFPolicy", p.Name, errs)
+}
+
+// llmWarnings warns of LLM endpoint paths that skip.paths or
+// skip.bodyPaths cover: those win, a body not read isn't checked.
+func llmWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
+	l, s := p.Spec.LLM, p.Spec.Skip
+	if l == nil || s == nil {
+		return nil
+	}
+	var warnings admission.Warnings
+	for i, e := range l.Endpoints {
+		for j, ep := range e.Paths {
+			for _, skip := range []struct {
+				name  string
+				paths []wafv1alpha1.PathPattern
+			}{{"skip.paths", s.Paths}, {"skip.bodyPaths", s.BodyPaths}} {
+				if k := slices.IndexFunc(skip.paths, func(sp wafv1alpha1.PathPattern) bool { return covers(sp, ep) }); k >= 0 {
+					warnings = append(warnings, fmt.Sprintf("spec.llm.endpoints[%d].paths[%d]: %s is also in spec.%s (%s), which wins: "+
+						"the bodies of its requests aren't read, so the LLM checks don't run on them", i, j, ep, skip.name, skip.paths[k]))
+				}
+			}
+		}
+	}
+	return warnings
+}
+
+// covers reports whether skip, a skip path, matches some of the requests
+// of ep, an endpoint path: the same path, a prefix of it, or a path its
+// prefix matches.
+func covers(skip, ep wafv1alpha1.PathPattern) bool {
+	sv, sPrefix := strings.CutSuffix(string(skip), "*")
+	ev, ePrefix := strings.CutSuffix(string(ep), "*")
+	if sPrefix && strings.HasPrefix(ev, sv) || ePrefix && strings.HasPrefix(sv, ev) {
+		return true
+	}
+	return strings.TrimSuffix(sv, "/") == strings.TrimSuffix(ev, "/")
 }
 
 // policyDeprecations warns of the deprecated fields p sets that old (nil

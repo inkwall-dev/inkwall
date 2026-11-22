@@ -1,0 +1,1 @@
+{"model":"llama-3.1-8b-instruct","messages":[{"role":"user","content":"Tell me a story"}],"stream":true,"stream_options":{"include_usage":true},"max_tokens":1024,"top_p":0.95,"frequency_penalty":0,"presence_penalty":0,"stop":["\n\n\n"],"seed":42,"user":"user-1234"}

@@ -815,7 +815,77 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 		p.RateLimits = append(p.RateLimits, rateLimit(l))
 	}
 	p.DenyResponse = DenyResponse(s.DenyResponse)
+	p.Llm = llm(s.LLM)
 	return p
+}
+
+// llm is a spec.llm in the bundle; nil for none.
+func llm(l *wafv1alpha1.LLMSpec) *bundlev1.LLM {
+	if l == nil {
+		return nil
+	}
+	out := &bundlev1.LLM{RuleSetBody: l.RuleSetBody == wafv1alpha1.LLMRuleSetBodyInspect}
+	if l.MaxBodyBytes != nil {
+		out.MaxBodyBytes = *l.MaxBodyBytes
+	}
+	for _, e := range l.Endpoints {
+		ep := &bundlev1.LLMEndpoint{Format: llmFormats[e.Format]}
+		for _, p := range e.Paths {
+			ep.Paths = append(ep.Paths, string(p))
+		}
+		out.Endpoints = append(out.Endpoints, ep)
+	}
+	r := l.Request
+	if r == nil {
+		return out
+	}
+	checks := &bundlev1.LLMRequestChecks{RequireOutputTokens: r.RequireOutputTokens, Detect: r.Mode == wafv1alpha1.PolicyDetect}
+	for _, m := range r.Models {
+		checks.Models = append(checks.Models, string(m))
+	}
+	if r.MaxPromptBytes != nil {
+		checks.MaxPromptBytes = *r.MaxPromptBytes
+	}
+	if r.MaxMessages != nil {
+		checks.MaxMessages = int64(*r.MaxMessages)
+	}
+	if r.MaxChoices != nil {
+		checks.MaxChoices = int64(*r.MaxChoices)
+	}
+	if r.MaxOutputTokens != nil {
+		checks.MaxOutputTokens = *r.MaxOutputTokens
+	}
+	for _, ro := range r.ClientRoles {
+		checks.ClientRoles = append(checks.ClientRoles, llmRoles[ro])
+	}
+	if t := r.Tools; t != nil {
+		switch t.Allow {
+		case wafv1alpha1.LLMToolsNone:
+			checks.Tools = bundlev1.LLMToolsAllow_LLM_TOOLS_ALLOW_NONE
+		case wafv1alpha1.LLMToolsListed:
+			checks.Tools = bundlev1.LLMToolsAllow_LLM_TOOLS_ALLOW_LISTED
+			for _, n := range t.Names {
+				checks.ToolNames = append(checks.ToolNames, string(n))
+			}
+		}
+	}
+	out.Request = checks
+	return out
+}
+
+var llmFormats = map[wafv1alpha1.LLMFormat]bundlev1.LLMFormat{
+	wafv1alpha1.LLMOpenAIChat:        bundlev1.LLMFormat_LLM_FORMAT_OPENAI_CHAT,
+	wafv1alpha1.LLMOpenAIResponses:   bundlev1.LLMFormat_LLM_FORMAT_OPENAI_RESPONSES,
+	wafv1alpha1.LLMOpenAIEmbeddings:  bundlev1.LLMFormat_LLM_FORMAT_OPENAI_EMBEDDINGS,
+	wafv1alpha1.LLMAnthropicMessages: bundlev1.LLMFormat_LLM_FORMAT_ANTHROPIC_MESSAGES,
+}
+
+var llmRoles = map[wafv1alpha1.LLMRole]bundlev1.LLMRole{
+	"system":    bundlev1.LLMRole_LLM_ROLE_SYSTEM,
+	"developer": bundlev1.LLMRole_LLM_ROLE_DEVELOPER,
+	"user":      bundlev1.LLMRole_LLM_ROLE_USER,
+	"assistant": bundlev1.LLMRole_LLM_ROLE_ASSISTANT,
+	"tool":      bundlev1.LLMRole_LLM_ROLE_TOOL,
 }
 
 // DenyResponse is a spec.denyResponse in the bundle; nil for none.

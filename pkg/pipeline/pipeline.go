@@ -154,6 +154,10 @@ type Config struct {
 	// DenyResponse is the body of the policy's denials, which its verdicts
 	// carry (Verdict.DenyResponse). Nil: the adapter's own.
 	DenyResponse *DenyResponse
+	// LLM is the policy's LLM endpoints (CompileLLM): their requests are
+	// parsed and checked after the rate limits, before the rules. Nil:
+	// none.
+	LLM *LLM
 }
 
 // ResponseConfig configures response inspection.
@@ -251,6 +255,8 @@ type Pipeline struct {
 	limits *RateLimits
 	// denyResponse: Config.DenyResponse.
 	denyResponse *DenyResponse
+	// llm: the policy's LLM endpoints, nil when it has none.
+	llm *LLM
 }
 
 // New returns a pipeline that evaluates requests with eval.
@@ -288,6 +294,7 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 		grpcPerMessage: cfg.GRPCMessages && cfg.GRPCPerMessage,
 		limits:         cfg.RateLimits,
 		denyResponse:   cfg.DenyResponse,
+		llm:            cfg.LLM,
 	}
 }
 
@@ -352,7 +359,7 @@ func (p *Pipeline) CheckExchange(ctx context.Context, r *request.Request) (Verdi
 	if x == nil {
 		return v, nil
 	}
-	return v, &Exchange{p: p, x: x}
+	return v, &Exchange{p: p, x: x, skipBody: p.llmSkipsBodies(r)}
 }
 
 func (p *Pipeline) checkRequest(ctx context.Context, r *request.Request, keep bool) (Verdict, rules.Exchange) {
@@ -379,7 +386,8 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool, now
 	case ReasonIPAllow:
 		return Verdict{Action: ActionAllow, Reason: ReasonIPAllow}, nil
 	}
-	switch p.routes.Decide(r.RawURI) {
+	decision := p.routes.Decide(r.RawURI)
+	switch decision {
 	case router.SkipAll:
 		return Verdict{Action: ActionAllow, Reason: ReasonSkipped}, nil
 	case router.SkipBody:
@@ -395,6 +403,31 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool, now
 	lim := p.limitsFor(r, now)
 	if lim.over != nil {
 		return p.rateLimited(lim), nil
+	}
+
+	// LLM endpoints (design 0012 §7.1): parsed and checked before the
+	// rules, and before an evaluation slot is taken, like the rate limits:
+	// bounded by the body, and far cheaper. A body skip.bodyPaths skips
+	// isn't read, so isn't checked; one over the limit is oversized, as
+	// any (inspect). The rules then get the request without its body,
+	// unless ruleSetBody: Inspect.
+	var detected *LLMVerdict
+	if formats := p.llm.formats(r); formats != 0 && decision == router.InspectAll && !r.BodyTruncated {
+		lv := p.llm.checkLLM(r, formats)
+		if time.Since(now) > p.timeout {
+			return p.failed(ReasonTimeout), nil
+		}
+		if lv != nil {
+			if p.mode == ModeBlock && !p.llm.detect {
+				return p.llmVerdict(lv, ActionDeny), nil
+			}
+			detected = lv
+		}
+		if !p.llm.rulesBody {
+			withoutBody := *r
+			withoutBody.Body = nil
+			r = &withoutBody
+		}
 	}
 
 	// A WebSocket handshake that breaks the policy's WebSocket rules is
@@ -418,6 +451,7 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool, now
 		v.Reason = ReasonGRPC
 		v = p.enforce(v, http.StatusForbidden)
 	}
+	v = p.llmDetected(v, detected)
 	// A Detect limit over its rate only logs, on a Block policy too; a
 	// rule's reason wins over it.
 	if lim.detect != nil && v.Reason == ReasonNone {

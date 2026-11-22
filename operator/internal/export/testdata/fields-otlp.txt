@@ -9,6 +9,13 @@ record inkwall.anomaly_score
 record inkwall.engine.id
 record inkwall.event_id
 record inkwall.latency_seconds
+record inkwall.llm.check
+record inkwall.llm.estimated_tokens
+record inkwall.llm.format
+record inkwall.llm.message_index
+record inkwall.llm.model
+record inkwall.llm.offset
+record inkwall.llm.role
 record inkwall.matches
 record inkwall.phase
 record inkwall.policy.bundle_version

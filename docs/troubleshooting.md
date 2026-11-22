@@ -421,7 +421,9 @@ The line has:
 - `rule_ids`, `interrupting_rule_id` and `anomaly_score`;
 - `matches`: each rule with the variable it matched (`{"rule_id":942100,"variable":"ARGS:q"}`),
   never the value;
-- `method`, `host`, `path` (without the query string), `client_ip`, `request_id`.
+- `method`, `host`, `path` (without the query string), `client_ip`, `request_id`;
+- with `reason: llm`, `llm_check`, `llm_format`, `llm_message_index` and `llm_offset`: the LLM
+  check that failed and where in the body, never the prompt.
 
 What each `reason` means, and what to do:
 
@@ -437,6 +439,24 @@ What each `reason` means, and what to do:
 | `ip-deny` | The client IP is in a WAFIPList of the policy's `ipLists.deny`. | If the client is legitimate, remove its address from the list; check the client IP the engine resolved (`client_ip`). |
 | `grpc` | A gRPC call, on a policy that refuses them (`body.grpc: Deny`). | Set `body.grpc: Allow` if the route serves gRPC ([gRPC](grpc.md)). |
 | `rate-limit` | The client was over one of the policy's `rateLimits` (the event's `rate_limit`): 429 with `Retry-After` in `Block` mode. Each engine counts on its own, and limited requests are sampled: one event per client a minute, with the count in `sampled_count`. | Check the client IP the engine resolved (`client_ip`): behind a load balancer that hides it, every client shares one limit ([client IP](client-ip.md)). Otherwise raise the limit's `requests` or `burst`, or narrow its `match`. |
+| `llm` | A request on one of the policy's LLM endpoints (`spec.llm`) failed an LLM check, the event's `llm.check` ([below](#llm-checks)): 400, or 413 for the size caps, in `Block` mode. The event says which message and where in the body (`llm.message_index`, `llm.offset`), never the prompt. | The check's entry below says what to change; to turn one check off on a path, exclude its rule ID there ([LLM APIs](llm-apis.md#when-a-check-refuses-a-legitimate-request)). |
+<!-- end reasons -->
+
+#### LLM checks
+
+An `llm` event's `llm.check` ([LLM APIs](llm-apis.md)) is one of these:
+
+<!-- reasons: SecurityEvent llmCheck -->
+| Reason | Meaning | Fix |
+|---|---|---|
+| `llm-malformed` | Rule ID 4800000. The body isn't one the parser reads one way: not JSON, invalid UTF-8, nested deeper than 64, a field the checks read with another type (`"max_tokens": "100"`), a key they read sent twice (two `messages`), or a `Content-Encoding` (the engine doesn't decode request bodies). `llm.offset` is the byte where it failed. | Model servers refuse such bodies too: fix the client. If a server accepts one, it's a bug in the parser: report it, and meanwhile exclude 4800000 on its path. |
+| `llm-model` | Rule ID 4800001. The request named no model, or one not in `request.models` (`llm.model`). | Add the model, or a prefix of it ending in `*`, to `request.models`. |
+| `llm-max-prompt` | Rule ID 4800002. The prompt's text, every message together, is over `request.maxPromptBytes` (413). | Raise `maxPromptBytes` to the prompts your application sends; images and files don't count. |
+| `llm-max-messages` | Rule ID 4800003. More messages, input items or embedding inputs than `request.maxMessages` (413). | Raise `maxMessages`, or have the client trim its history. |
+| `llm-max-choices` | Rule ID 4800004. The request's `n`, the answers it asks for, is over `request.maxChoices`. | Raise `maxChoices`, or have the client ask for fewer. |
+| `llm-max-output-tokens` | Rule ID 4800005. The output limit the request sets (`max_tokens`, `max_completion_tokens`, `max_output_tokens`) is over `request.maxOutputTokens`, or the request sets none and `requireOutputTokens` is on. | Have the client set an output limit within the cap; Inkwall doesn't lower it. Or raise `maxOutputTokens`. |
+| `llm-client-role` | Rule ID 4800006. A message of a role not in `request.clientRoles` (`llm.role`, `llm.message_index`); the Responses API's `instructions` and Anthropic's `system` are `system`. | A client that writes its own system prompt (a gateway's, an SDK's) needs `system` or `developer` in `clientRoles`. A chat front end's client shouldn't: its server adds the system prompt. |
+| `llm-tools` | Rule ID 4800007. The request defines a tool it may not (`llm.message_index` is the tool's): `request.tools.allow` is `None`, or the tool's name (a built-in tool's type) isn't in `tools.names`. | Add the tool's name to `tools.names`, or set `allow: Any`. |
 <!-- end reasons -->
 
 A rule that matched a legitimate value is a false positive: exclude it for that argument, as

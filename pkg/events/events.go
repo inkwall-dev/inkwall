@@ -11,6 +11,7 @@ package events
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"math"
 	"strings"
 	"time"
 	"unicode"
@@ -22,6 +23,7 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	enginev1 "github.com/inkwall-dev/inkwall/api/engine/v1"
 	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
+	"github.com/inkwall-dev/inkwall/pkg/llm"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 )
@@ -195,6 +197,18 @@ func New(src Source, req *request.Request, path string, v pipeline.Verdict, now 
 	if v.Reason == pipeline.ReasonRateLimit {
 		ev.RateLimit, ev.SampledCount = truncate(v.RateLimit, 63), v.SampledCount
 	}
+	if l := v.LLM; l != nil && v.Reason == pipeline.ReasonLLM {
+		// Where the check failed, never the prompt's text (design 0012 §9).
+		ev.Llm = &eventsv1.LLMEvent{
+			Format:          l.Format.String(),
+			Model:           truncate(l.Model, 128),
+			Check:           l.Check.String(),
+			MessageIndex:    int32(min(l.MessageIndex, math.MaxInt32)), // #nosec G115 -- bounded
+			Role:            l.Role.String(),
+			Offset:          int64(l.Offset),
+			EstimatedTokens: l.EstimatedTokens,
+		}
+	}
 	switch {
 	case v.WebSocketMessage:
 		ev.Phase, ev.Protocol = eventsv1.Phase_PHASE_WEBSOCKET_MESSAGE, eventsv1.Protocol_PROTOCOL_WEBSOCKET
@@ -215,11 +229,16 @@ func New(src Source, req *request.Request, path string, v pipeline.Verdict, now 
 		redact = src.Redaction()
 	}
 	for _, m := range v.Matches[:min(len(v.Matches), maxMatches)] {
-		ev.Matches = append(ev.Matches, &eventsv1.Match{
+		match := &eventsv1.Match{
 			RuleId:   int32(m.RuleID), // #nosec G115 -- rule IDs fit
 			Variable: truncate(m.Variable, maxVariable),
-			Snippet:  snippet(redact, m.Variable, m.Value, v.WebSocketMessage),
-		})
+		}
+		// An LLM check's match has no snippet, ever: the prompt is the
+		// user's data.
+		if m.RuleID < llm.RuleIDMin || m.RuleID > llm.RuleIDMax {
+			match.Snippet = snippet(redact, m.Variable, m.Value, v.WebSocketMessage)
+		}
+		ev.Matches = append(ev.Matches, match)
 	}
 	return ev
 }
@@ -393,6 +412,8 @@ func Reason(r pipeline.Reason) enginev1.Reason {
 		return enginev1.Reason_REASON_GRPC
 	case pipeline.ReasonRateLimit:
 		return enginev1.Reason_REASON_RATE_LIMIT
+	case pipeline.ReasonLLM:
+		return enginev1.Reason_REASON_LLM
 	default:
 		return enginev1.Reason_REASON_UNSPECIFIED
 	}

@@ -147,6 +147,11 @@ func LogEvent(ctx context.Context, logger *slog.Logger, rec *events.Recorder, re
 		// The limit, and the limited requests the sampled event stands for.
 		attrs = append(attrs, slog.String("rate_limit", v.RateLimit), slog.Uint64("sampled_count", uint64(v.SampledCount)))
 	}
+	if l := v.LLM; l != nil && v.Reason == pipeline.ReasonLLM {
+		// The check and where in the body, never the prompt (design 0012 §9).
+		attrs = append(attrs, slog.String("llm_check", l.Check.String()), slog.String("llm_format", l.Format.String()),
+			slog.Int("llm_message_index", l.MessageIndex), slog.Int("llm_offset", l.Offset))
+	}
 	if v.StreamEvent > 0 {
 		// The event, or message, of a streamed response (#323).
 		attrs = append(attrs, slog.Int("stream_event", v.StreamEvent))

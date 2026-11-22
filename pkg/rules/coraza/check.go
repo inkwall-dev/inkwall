@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -262,6 +263,67 @@ func actionNames(actions string) []string {
 	}
 	add(len(actions))
 	return names
+}
+
+// actionValue returns the value of the first action called name (lower
+// case) in a rule's action list, split as actionNames splits it, without
+// its quotes.
+func actionValue(actions, name string) (string, bool) {
+	start, inQuotes := 0, false
+	for i := 0; i <= len(actions); i++ {
+		if i < len(actions) {
+			if i > 0 && actions[i-1] == '\\' {
+				continue
+			}
+			if actions[i] == '\'' {
+				inQuotes = !inQuotes
+			}
+			if inQuotes || actions[i] != ',' {
+				continue
+			}
+		}
+		n, v, _ := strings.Cut(actions[start:i], ":")
+		if strings.EqualFold(strings.TrimSpace(n), name) {
+			return strings.Trim(strings.TrimSpace(v), "'"), true
+		}
+		start = i + 1
+	}
+	return "", false
+}
+
+// CheckReservedIDs refuses rules with an ID from lo to hi, which Inkwall
+// reserves for what: an exclusion naming such an ID turns off what it
+// names, not the rule. The error is a *RuleError naming the line.
+func CheckReservedIDs(rules string, lo, hi int, what string) error {
+	dirs, err := SplitDirectives(rules)
+	if err != nil {
+		return err
+	}
+	for _, d := range dirs {
+		var actions string
+		var ok bool
+		switch d.Name {
+		case "secrule":
+			actions, ok = ruleActions(d.Text)
+		case "secaction":
+			_, args, _ := strings.Cut(d.Text, " ")
+			args = strings.TrimSpace(args)
+			if ok = len(args) >= 2 && args[0] == '"' && args[len(args)-1] == '"'; ok {
+				actions = args[1 : len(args)-1]
+			}
+		}
+		if !ok {
+			continue
+		}
+		v, found := actionValue(actions, "id")
+		if !found {
+			continue
+		}
+		if id, err := strconv.Atoi(v); err == nil && id >= lo && id <= hi {
+			return &RuleError{Line: d.Line, Err: fmt.Errorf("rule ID %d is reserved for %s (%d-%d): use another ID", id, what, lo, hi)}
+		}
+	}
+	return nil
 }
 
 // hasChain reports whether a SecRule directive has the chain action.

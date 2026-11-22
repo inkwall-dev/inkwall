@@ -110,6 +110,10 @@ func TestAuditFieldNames(t *testing.T) {
 		"spec.events.export.sinks.tls.clientCertificateSecretRef",
 		"spec.events.redact.headers",
 		"spec.exclusions.when.header",
+		// LLM API paths and output-token caps: no credential.
+		"spec.llm.endpoints",
+		"spec.llm.request.maxOutputTokens",
+		"spec.llm.request.requireOutputTokens",
 		"spec.rateLimits.key",
 		"spec.rateLimits.key.header",
 		"spec.signingKey",

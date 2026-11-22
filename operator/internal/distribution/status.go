@@ -202,6 +202,11 @@ func requirement(p *wafv1alpha1.WAFPolicy, defaultDeny bool) (string, [3]int) {
 		// An older engine limits nothing (#705).
 		set("spec.rateLimits", [3]int{0, 7, 0})
 	}
+	if p.Spec.LLM != nil {
+		// An older engine checks none of the LLM endpoints' requests, and
+		// its rule sets inspect their bodies as any route's (#277).
+		set("spec.llm", [3]int{0, 7, 0})
+	}
 	switch {
 	case p.Spec.DenyResponse != nil:
 		// An older engine answers with its own body (#725).

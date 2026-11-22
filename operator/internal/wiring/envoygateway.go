@@ -724,6 +724,12 @@ func settingsOf(policies []wafv1alpha1.WAFPolicy, kind schema.GroupKind, route t
 			}
 			s.maxBody = max(s.maxBody, limit)
 		}
+		if l := p.Spec.LLM; l != nil {
+			// The LLM endpoints' bodies are read for their checks, whatever
+			// body.inspect, up to llm.maxBodyBytes (design 0012 §3.3).
+			s.body = true
+			s.maxBody = max(s.maxBody, ptr.Deref(l.MaxBodyBytes, pipeline.DefaultLLMBodyBytes))
+		}
 		if b := p.Spec.Body; b != nil && b.GRPCStreams == wafv1alpha1.GRPCStreamsPerMessage && b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect {
 			s.grpcPerMessage = true
 		}

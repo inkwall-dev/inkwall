@@ -101,5 +101,49 @@
     "scope": "inkwall.dev/events/1",
     "severity": "SEVERITY_NUMBER_WARN WARN",
     "time_unix_nano": 1795169702123456789
+  },
+  {
+    "attributes": {
+      "client.address": "203.0.113.9",
+      "http.request.method": "POST",
+      "http.response.status_code": "int 400",
+      "inkwall.action": "deny",
+      "inkwall.engine.id": "01JDENGINE",
+      "inkwall.event_id": "01JD3Q4Z8M2N5X7Y9A1B3C5D7H",
+      "inkwall.latency_seconds": "double 0",
+      "inkwall.llm.check": "llm-client-role",
+      "inkwall.llm.estimated_tokens": "int 4113",
+      "inkwall.llm.format": "OpenAIChat",
+      "inkwall.llm.message_index": "int 0",
+      "inkwall.llm.model": "llama-3.1-8b-instruct",
+      "inkwall.llm.offset": "int 14",
+      "inkwall.llm.role": "system",
+      "inkwall.matches": [
+        {
+          "rule_id": "int 4800006",
+          "variable": "LLM"
+        }
+      ],
+      "inkwall.phase": "request",
+      "inkwall.policy.bundle_version": "int 42",
+      "inkwall.policy.name": "web",
+      "inkwall.policy.namespace": "shop",
+      "inkwall.protocol": "http",
+      "inkwall.reason": "llm",
+      "inkwall.rule_id": "int 4800006",
+      "server.address": "ai.example.com",
+      "url.path": "/v1/chat/completions"
+    },
+    "body": "deny 400 llm 4800006 POST ai.example.com/v1/chat/completions",
+    "event_name": "inkwall.security_event",
+    "observed_time_unix_nano": 1795169702401337000,
+    "resource": {
+      "k8s.cluster.name": "prod-eu-1",
+      "k8s.cluster.uid": "6f1c0d2e-uid",
+      "service.name": "inkwall-engine"
+    },
+    "scope": "inkwall.dev/events/1",
+    "severity": "SEVERITY_NUMBER_WARN WARN",
+    "time_unix_nano": 1795169702123456789
   }
 ]

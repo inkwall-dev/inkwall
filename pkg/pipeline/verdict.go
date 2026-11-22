@@ -76,6 +76,9 @@ const (
 	// ReasonRateLimit means the client was over one of the policy's rate
 	// limits (Verdict.RateLimit).
 	ReasonRateLimit
+	// ReasonLLM means a request on one of the policy's LLM endpoints
+	// failed an LLM check (Verdict.LLM).
+	ReasonLLM
 )
 
 func (r Reason) String() string {
@@ -110,6 +113,8 @@ func (r Reason) String() string {
 		return "grpc"
 	case ReasonRateLimit:
 		return "rate-limit"
+	case ReasonLLM:
+		return "llm"
 	default:
 		return "unknown"
 	}
@@ -148,6 +153,8 @@ type Verdict struct {
 	// is the limited requests the event stands for, this one included.
 	RateLimitEvent bool
 	SampledCount   uint32
+	// LLM is, with ReasonLLM, the LLM check the request failed, and where.
+	LLM *LLMVerdict
 	// Response reports a verdict on the upstream's response, not on the
 	// request: a deny replaces the response, and AnomalyScore is the CRS
 	// outbound score.

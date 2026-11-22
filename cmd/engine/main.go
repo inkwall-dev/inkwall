@@ -70,6 +70,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
+	"github.com/inkwall-dev/inkwall/pkg/llm"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
@@ -940,6 +941,8 @@ func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logge
 			slog.Int("keys", limits.Capacity()), slog.Int("rate_limit_keys", cfg.rateLimitKeys))
 	}
 	metrics.Register(limits.Collectors()...)
+	llmMetrics := llm.NewMetrics()
+	metrics.Register(llmMetrics.Collectors()...)
 	opts := policy.Options{
 		Admission:  adm,
 		Observer:   metrics,
@@ -948,6 +951,7 @@ func bundleMode(cfg engineConfig, metrics *telemetry.Metrics, logger *slog.Logge
 		Evaluators: evaluators,
 		Stats:      stats,
 		RateLimits: limits,
+		LLMMetrics: llmMetrics,
 	}
 	holder := &policy.Holder{DenyBeforeFirst: cfg.bootstrapDeny, Observer: metrics}
 	var secret *agent.SecretSource

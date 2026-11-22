@@ -378,6 +378,7 @@ it in the SIEM's pipeline (the recipes above give ECS and Splunk CIM).
 | `matches[]` | Every rule that matched: `rule_id`, `variable`, and `snippet` (at most 64 bytes, redacted, left out when there is none) |
 | `phase`, `protocol` | `request`, `response`, `websocket-message`; `http`, `grpc`, `websocket`; left out from engines too old to say |
 | `rate_limit`, `sampled_count` | With `reason: rate-limit`: the limit's name, and how many limited requests the event stands for (left out at 1) |
+| `llm.*` | With `reason: llm` ([LLM APIs](llm-apis.md#metrics-and-events)): `check`, `format`, `model`, `role`, `message_index`, `offset`, `estimated_tokens`; never the prompt |
 | `request.*` | `id`, `method`, `host`, `path` (no query string), `client_ip`, `user_agent` |
 | `latency_seconds` | Time spent inspecting |
 
@@ -399,6 +400,8 @@ One `LogRecord` per event, in a `ResourceLogs` per engine pod:
   `inkwall.action`, `inkwall.reason`, `inkwall.rule_id`, `inkwall.anomaly_score`,
   `inkwall.matches` (maps of `rule_id`, `variable`, `snippet`), `inkwall.request.id`,
   `inkwall.phase`, `inkwall.protocol`, `inkwall.rate_limit`, `inkwall.sampled_count`,
+  `inkwall.llm.check`, `inkwall.llm.format`, `inkwall.llm.model`, `inkwall.llm.role`,
+  `inkwall.llm.message_index`, `inkwall.llm.offset`, `inkwall.llm.estimated_tokens`,
   `inkwall.latency_seconds`.
 
 ### Duplicates

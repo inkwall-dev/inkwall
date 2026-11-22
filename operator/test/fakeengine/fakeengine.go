@@ -43,6 +43,9 @@ type Engine struct {
 	PublicKeys []ed25519.PublicKey
 	// Reject, if set, decides whether to refuse a bundle (Nack).
 	Reject func(*bundlev1.Bundle) error
+	// EngineVersion is the release the engine reports; empty: "fake",
+	// which no field's requirement counts as too old.
+	EngineVersion string
 	// Heartbeat is the interval of heartbeats; 0 means 1s.
 	Heartbeat time.Duration
 	// OnApply, if set, is called with each bundle the engine applies,
@@ -154,7 +157,7 @@ func (e *Engine) run(ctx context.Context) error {
 		current = a.GetVersion()
 	}
 	if err := stream.Send(&agentv1.WatchRequest{Msg: &agentv1.WatchRequest_Hello{Hello: &agentv1.Hello{
-		EngineId: e.ID, PodNamespace: cmp.Or(e.PodNamespace, "test"), PodName: cmp.Or(e.PodName, e.ID), EngineVersion: "fake", BundleVersion: current,
+		EngineId: e.ID, PodNamespace: cmp.Or(e.PodNamespace, "test"), PodName: cmp.Or(e.PodName, e.ID), EngineVersion: cmp.Or(e.EngineVersion, "fake"), BundleVersion: current,
 		TrustedKeyIds: e.TrustedKeys(),
 	}}}); err != nil {
 		// The operator may have ended the stream first (rejected the

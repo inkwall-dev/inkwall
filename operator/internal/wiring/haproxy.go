@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -33,6 +34,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/internal/crdwatch"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
 	"github.com/inkwall-dev/inkwall/pkg/haproxyprobe"
+	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	engrules "github.com/inkwall-dev/inkwall/pkg/rules"
 )
 
@@ -125,8 +127,10 @@ type haproxySettings struct {
 	// block: a policy is in Block mode.
 	block bool
 	// maxBody is the largest body.maxBytes of the policies that inspect
-	// bodies (the engine's 64 KiB for one that sets none).
-	maxBody int64
+	// bodies (the engine's 64 KiB for one that sets none), or
+	// llm.maxBodyBytes of those with LLM endpoints; maxBodyField names it.
+	maxBody      int64
+	maxBodyField string
 	// maxResponse is the largest responses.maxBytes of the policies that
 	// inspect responses (64 KiB for one that sets none).
 	maxResponse int64
@@ -151,7 +155,17 @@ func haproxySettingsOf(policies []wafv1alpha1.WAFPolicy, ing types.NamespacedNam
 			if b != nil && b.MaxBytes != nil {
 				limit = *b.MaxBytes
 			}
-			s.maxBody = max(s.maxBody, limit)
+			if limit > s.maxBody {
+				s.maxBody, s.maxBodyField = limit, "body.maxBytes"
+			}
+		}
+		if l := p.Spec.LLM; l != nil {
+			// The LLM endpoints' bodies are read for their checks, whatever
+			// body.inspect (design 0012 §3.3).
+			s.body = true
+			if limit := ptr.Deref(l.MaxBodyBytes, pipeline.DefaultLLMBodyBytes); limit > s.maxBody {
+				s.maxBody, s.maxBodyField = limit, "llm.maxBodyBytes"
+			}
 		}
 		if r := p.Spec.Responses; r != nil && r.Inspect {
 			s.responses = true
@@ -701,7 +715,7 @@ func (h *HAProxy) Wire(ctx context.Context, targets map[Target]bool, off bool) (
 			if g.versionNote != "" {
 				notes = append(notes, g.versionNote)
 			}
-			if n := haproxyBufferNote(k.Name, g.buffer, mech, settings.body, settings.maxBody, settings.responses && res.Responses, settings.maxResponse); n != "" {
+			if n := haproxyBufferNote(k.Name, g.buffer, mech, settings.body, settings.maxBodyField, settings.maxBody, settings.responses && res.Responses, settings.maxResponse); n != "" {
 				notes = append(notes, n)
 			}
 			if settings.denyResponse {
@@ -740,11 +754,11 @@ func haproxyDenyResponseNote(ingress string) string {
 // a request or a response than the policies' body.maxBytes or
 // responses.maxBytes: HAProxy sends no more than its buffer, and a larger
 // body is handled as oversized. "" when it doesn't.
-func haproxyBufferNote(ingress string, buffer haproxyBuffer, m haproxyMechanism, body bool, maxBody int64, responses bool, maxResponse int64) string {
+func haproxyBufferNote(ingress string, buffer haproxyBuffer, m haproxyMechanism, body bool, bodyField string, maxBody int64, responses bool, maxResponse int64) string {
 	var what, limits, actions []string
 	section := "Bodies"
 	if body && maxBody > buffer.visible() {
-		what, limits, actions = append(what, "a request"), append(limits, fmt.Sprintf("body.maxBytes (%d)", maxBody)), append(actions, "body.onOversize")
+		what, limits, actions = append(what, "a request"), append(limits, fmt.Sprintf("%s (%d)", cmp.Or(bodyField, "body.maxBytes"), maxBody)), append(actions, "body.onOversize")
 	}
 	if responses && maxResponse > buffer.visible() {
 		what, limits, actions = append(what, "a response"), append(limits, fmt.Sprintf("responses.maxBytes (%d)", maxResponse)), append(actions, "responses.onOversize")

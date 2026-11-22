@@ -156,6 +156,92 @@ message Policy {
   // before 0.7.0 ignore it: the operator doesn't count them as enforcing a
   // policy that sets it.
   DenyResponse deny_response = 16;
+  // The policy's LLM API endpoints and their request checks (design
+  // 0012). Unset: none. Engines before 0.7.0 ignore it: the operator
+  // doesn't count them as enforcing a policy that sets it. (Numbered from
+  // 40, apart from the fields other features add meanwhile.)
+  LLM llm = 40;
+}
+
+// LLM is a policy's LLM API endpoints: their bodies are read up to
+// max_body_bytes, parsed and checked, and the rule sets skip them unless
+// rule_set_body.
+message LLM {
+  // At most 8, their paths unique across them.
+  repeated LLMEndpoint endpoints = 1;
+  // The body read on an endpoint, instead of body.max_bytes. 0: 1 MiB.
+  int64 max_body_bytes = 2;
+  // The rule sets also inspect the endpoints' request and response
+  // bodies; false: their method, URI, headers and cookies only.
+  bool rule_set_body = 3;
+  // Unset: only that bodies are well-formed.
+  LLMRequestChecks request = 4;
+}
+
+// LLMEndpoint is paths of the policy's routes that serve one LLM API.
+message LLMEndpoint {
+  // Exact paths or prefixes ending in "*", compared as RateLimit.paths.
+  repeated string paths = 1;
+  LLMFormat format = 2;
+}
+
+// LLMFormat is the shape of an endpoint's requests. An engine checks an
+// endpoint of a format it doesn't know as every format it knows.
+enum LLMFormat {
+  LLM_FORMAT_UNSPECIFIED = 0;
+  // OpenAI's Chat Completions, as OpenAI-compatible servers serve it.
+  LLM_FORMAT_OPENAI_CHAT = 1;
+  // OpenAI's Responses.
+  LLM_FORMAT_OPENAI_RESPONSES = 2;
+  // OpenAI's Embeddings.
+  LLM_FORMAT_OPENAI_EMBEDDINGS = 3;
+  // Anthropic's Messages.
+  LLM_FORMAT_ANTHROPIC_MESSAGES = 4;
+}
+
+// LLMRequestChecks are the caps an endpoint's requests must meet. A 0
+// cap is none.
+message LLMRequestChecks {
+  // Exact, or a prefix ending in "*", compared in ASCII lower case.
+  // Empty: any model.
+  repeated string models = 1;
+  // UTF-8 bytes of the prompt's text, every message together.
+  int64 max_prompt_bytes = 2;
+  // Messages, input items or embedding inputs.
+  int64 max_messages = 3;
+  // The output limit the request sets (max_tokens and its kin).
+  int64 max_output_tokens = 4;
+  // Refuse a request that sets no output limit.
+  bool require_output_tokens = 5;
+  // n.
+  int64 max_choices = 6;
+  // The roles a client may send. Empty: every role.
+  repeated LLMRole client_roles = 7;
+  LLMToolsAllow tools = 8;
+  // With LLM_TOOLS_ALLOW_LISTED.
+  repeated string tool_names = 9;
+  // Log the requests that fail a check instead of denying them.
+  bool detect = 10;
+}
+
+// LLMRole is who wrote a message.
+enum LLMRole {
+  LLM_ROLE_UNSPECIFIED = 0;
+  LLM_ROLE_SYSTEM = 1;
+  LLM_ROLE_DEVELOPER = 2;
+  LLM_ROLE_USER = 3;
+  LLM_ROLE_ASSISTANT = 4;
+  LLM_ROLE_TOOL = 5;
+}
+
+// LLMToolsAllow is which tools a client may define.
+enum LLMToolsAllow {
+  // Any.
+  LLM_TOOLS_ALLOW_UNSPECIFIED = 0;
+  // None.
+  LLM_TOOLS_ALLOW_NONE = 1;
+  // Those of tool_names.
+  LLM_TOOLS_ALLOW_LISTED = 2;
 }
 
 // RateLimit is a token bucket per key: it holds at most burst requests and

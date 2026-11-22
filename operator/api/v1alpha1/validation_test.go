@@ -286,7 +286,72 @@ func TestWAFPolicyValidation(t *testing.T) {
 		{name: "deny response over 8 KiB", doc: policy(target + "  denyResponse: {contentType: text/plain, body: " + strings.Repeat("a", 8193) + "}\n"), wantErr: "spec.denyResponse.body"},
 		// Bytes of UTF-8, not characters: 2,731 euro signs are 8,193 bytes.
 		{name: "deny response over 8 KiB of UTF-8", doc: policy(target + "  denyResponse: {contentType: text/plain, body: " + strings.Repeat("€", 2731) + "}\n"), wantErr: "body must be at most 8 KiB"},
+
+		// LLM APIs (#277, design 0012 §3.5).
+		{name: "llm", doc: policy(target + `  llm:
+    endpoints:
+    - {paths: ["/v1/chat/completions", "/openai/deployments/*"], format: OpenAIChat}
+    - {paths: ["/v1/messages"], format: AnthropicMessages}
+    - {paths: ["/v1/responses"], format: OpenAIResponses}
+    - {paths: ["/v1/embeddings"], format: OpenAIEmbeddings}
+    maxBodyBytes: 1048576
+    ruleSetBody: Inspect
+    request:
+      models: ["llama-3.1-8b-instruct", "qwen2.5-*", "meta-llama/Llama-3.1-8B-Instruct", "llama3.2:3b"]
+      maxPromptBytes: 262144
+      maxMessages: 256
+      maxOutputTokens: 4096
+      requireOutputTokens: true
+      maxChoices: 1
+      clientRoles: [user, assistant]
+      tools: {allow: Listed, names: [search_docs, get_weather, web_search_preview]}
+      mode: Detect
+`)},
+		{name: "llm endpoints only", doc: policy(target + "  llm: {endpoints: [{paths: [/v1/*], format: OpenAIChat}]}\n")},
+		{name: "llm eight endpoints of 16 paths", doc: policy(target + "  llm: {endpoints: [" + llmEndpoints(8, 16) + "]}\n")},
+		{name: "llm tools none", doc: policy(target + "  llm: {endpoints: [{paths: [/v1/*], format: OpenAIChat}], request: {tools: {allow: None}}}\n")},
+		{name: "llm without endpoints", doc: policy(target + "  llm: {maxBodyBytes: 2048}\n"), wantErr: "spec.llm.endpoints: Required value"},
+		{name: "llm no endpoint", doc: policy(target + "  llm: {endpoints: []}\n"), wantErr: "spec.llm.endpoints"},
+		{name: "llm nine endpoints", doc: policy(target + "  llm: {endpoints: [" + llmEndpoints(9, 1) + "]}\n"), wantErr: "must have at most 8 items"},
+		{name: "llm path in two endpoints", doc: policy(target + "  llm: {endpoints: [{paths: [/v1/a, /v1/b], format: OpenAIChat}, {paths: [/v1/b], format: AnthropicMessages}]}\n"), wantErr: "an endpoint path can't be in two endpoints"},
+		{name: "llm path twice", doc: policy(target + "  llm: {endpoints: [{paths: [/v1/a, /v1/a], format: OpenAIChat}]}\n"), wantErr: "Duplicate value"},
+		{name: "llm endpoint without paths", doc: policy(target + "  llm: {endpoints: [{format: OpenAIChat}]}\n"), wantErr: "spec.llm.endpoints[0].paths: Required value"},
+		{name: "llm relative path", doc: policy(target + "  llm: {endpoints: [{paths: [v1/chat], format: OpenAIChat}]}\n"), wantErr: "spec.llm.endpoints[0].paths[0]"},
+		{name: "llm unknown format", doc: policy(target + "  llm: {endpoints: [{paths: [/v1/a], format: Gemini}]}\n"), wantErr: `Unsupported value: "Gemini"`},
+		{name: "llm body under 1 KiB", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], maxBodyBytes: 1023}\n"), wantErr: "should be greater than or equal to 1024"},
+		{name: "llm body over 10 MiB", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], maxBodyBytes: 10485761}\n"), wantErr: "should be less than or equal to 10485760"},
+		{name: "llm unknown ruleSetBody", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], ruleSetBody: Some}\n"), wantErr: `Unsupported value: "Some"`},
+		{name: "llm model a lone *", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {models: [\"*\"]}}\n"), wantErr: "spec.llm.request.models[0]"},
+		{name: "llm model * inside", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {models: [\"a*b\"]}}\n"), wantErr: "spec.llm.request.models[0]"},
+		{name: "llm model with a space", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {models: [\"a b\"]}}\n"), wantErr: "spec.llm.request.models[0]"},
+		{name: "llm model twice", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {models: [a, a]}}\n"), wantErr: "Duplicate value"},
+		{name: "llm prompt cap 0", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {maxPromptBytes: 0}}\n"), wantErr: "should be greater than or equal to 1"},
+		{name: "llm prompt cap over 10 MiB", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {maxPromptBytes: 10485761}}\n"), wantErr: "should be less than or equal to 10485760"},
+		{name: "llm messages over 100000", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {maxMessages: 100001}}\n"), wantErr: "should be less than or equal to 100000"},
+		{name: "llm output over 10 million", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {maxOutputTokens: 10000001}}\n"), wantErr: "should be less than or equal to 10000000"},
+		{name: "llm choices over 128", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {maxChoices: 129}}\n"), wantErr: "should be less than or equal to 128"},
+		{name: "llm unknown role", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {clientRoles: [root]}}\n"), wantErr: `Unsupported value: "root"`},
+		{name: "llm role twice", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {clientRoles: [user, user]}}\n"), wantErr: "Duplicate value"},
+		{name: "llm tools listed without names", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {tools: {allow: Listed}}}\n"), wantErr: "names is required with allow: Listed"},
+		{name: "llm tool names without Listed", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {tools: {names: [a]}}}\n"), wantErr: "names is required with allow: Listed, and only allowed with it"},
+		{name: "llm tool names with None", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {tools: {allow: None, names: [a]}}}\n"), wantErr: "only allowed with it"},
+		{name: "llm tool name with a space", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {tools: {allow: Listed, names: [\"a b\"]}}}\n"), wantErr: "spec.llm.request.tools.names[0]"},
+		{name: "llm checks in Block mode", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {mode: Block}}\n"), wantErr: "the LLM checks' mode can only be Detect"},
 	})
+}
+
+// llmEndpoints is n endpoints of paths paths each, all different: the
+// largest the CRD allows must stay within the CEL cost budget.
+func llmEndpoints(n, paths int) string {
+	var es []string
+	for i := range n {
+		var ps []string
+		for j := range paths {
+			ps = append(ps, fmt.Sprintf("/v%d/%s%d", i, strings.Repeat("p", 900), j))
+		}
+		es = append(es, "{paths: ["+strings.Join(ps, ", ")+"], format: OpenAIChat}")
+	}
+	return strings.Join(es, ", ")
 }
 
 func TestWAFPolicyDefaults(t *testing.T) {

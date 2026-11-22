@@ -35,6 +35,11 @@ type Exchange struct {
 
 	observe func(Verdict)
 
+	// skipBody: the request was on an LLM endpoint whose bodies the rules
+	// don't read (ruleSetBody: Skip), so its response's body isn't read
+	// either: its status and headers are inspected.
+	skipBody bool
+
 	// others are the exchanges of the request's other policies
 	// (JoinExchanges), which inspect the response too.
 	others []*Exchange
@@ -70,11 +75,20 @@ func (e *Exchange) FailureMode() FailureMode {
 	return e.p.failure
 }
 
+// maxBytes is how much of the response body this exchange's policy
+// inspects.
+func (e *Exchange) maxBytes() int64 {
+	if e.skipBody {
+		return 0
+	}
+	return e.p.responses.MaxBytes
+}
+
 // BodyLimit is how much of the response body is inspected: 0 for none.
 func (e *Exchange) BodyLimit() int64 {
-	limit := e.p.responses.MaxBytes
+	limit := e.maxBytes()
 	for _, o := range e.others {
-		limit = max(limit, o.p.responses.MaxBytes)
+		limit = max(limit, o.maxBytes())
 	}
 	return limit
 }
@@ -126,12 +140,12 @@ func partial(resp *request.Response) bool {
 // response in block mode with 502 Bad Gateway. In block mode, a deny
 // replaces the response with the verdict's status.
 func (e *Exchange) CheckResponse(ctx context.Context, resp *request.Response) Verdict {
-	v := e.checkResponse(ctx, cut(resp, e.p.responses.MaxBytes))
+	v := e.checkResponse(ctx, cut(resp, e.maxBytes()))
 	for _, o := range e.others {
 		if v.Action == ActionDeny {
 			break
 		}
-		if ov := o.checkResponse(ctx, cut(resp, o.p.responses.MaxBytes)); Stricter(ov, v) {
+		if ov := o.checkResponse(ctx, cut(resp, o.maxBytes())); Stricter(ov, v) {
 			v = ov
 		}
 	}
@@ -207,12 +221,17 @@ func (e *Exchange) check(ctx context.Context, resp *request.Response) Verdict {
 	e.used = true
 	e.mu.Unlock()
 
-	if p.responses.MaxBytes > 0 && partial(resp) {
+	if e.skipBody {
+		out := *resp
+		out.Body, out.BodyTruncated, out.BodyUninspected = nil, false, false
+		resp = &out
+	}
+	if e.maxBytes() > 0 && partial(resp) {
 		out := *resp
 		out.Body, out.BodyTruncated, out.BodyUninspected = nil, false, true
 		resp = &out
 	}
-	resp = decodeBody(resp, p.responses.MaxBytes)
+	resp = decodeBody(resp, e.maxBytes())
 	v, _ := p.evaluate(ctx, func(ctx context.Context) outcome {
 		// busy only once the evaluation runs: refused a slot, it never
 		// does, and Close releases x itself.

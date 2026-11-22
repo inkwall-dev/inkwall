@@ -57,6 +57,41 @@ func TestRuleSetValidation(t *testing.T) {
 	if err != nil || len(warnings) != 1 {
 		t.Errorf("ConfigMap rules: warnings %q, error %v", warnings, err)
 	}
+
+	// The LLM checks' IDs are reserved, for exclusions (design 0012 §3.4).
+	_, err = v.ValidateCreate(ctx, rs(wafv1alpha1.RuleSetSource{SecLang: "SecRule ARGS \"@contains a\" \"id:100001,phase:2,deny\"\nSecRule ARGS \"@contains b\" \"id:4800003,phase:2,deny\""}))
+	wantInvalid(t, err, "spec.source.seclang", "line 2: rule ID 4800003 is reserved for Inkwall's LLM checks")
+}
+
+// TestPolicyLLMWarnings: an endpoint path that a skip path covers draws a
+// warning: the skip wins.
+func TestPolicyLLMWarnings(t *testing.T) {
+	ctx := context.Background()
+	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy, deprecated: policyDeprecations}
+	for _, tc := range []struct {
+		skip     wafv1alpha1.SkipSpec
+		endpoint wafv1alpha1.PathPattern
+		want     string
+	}{
+		{wafv1alpha1.SkipSpec{BodyPaths: []wafv1alpha1.PathPattern{"/v1/chat/completions"}}, "/v1/chat/completions", "spec.llm.endpoints[0].paths[0]: /v1/chat/completions is also in spec.skip.bodyPaths (/v1/chat/completions)"},
+		{wafv1alpha1.SkipSpec{Paths: []wafv1alpha1.PathPattern{"/v1/*"}}, "/v1/chat/completions", "also in spec.skip.paths (/v1/*)"},
+		{wafv1alpha1.SkipSpec{BodyPaths: []wafv1alpha1.PathPattern{"/v1/chat/x"}}, "/v1/chat/*", "also in spec.skip.bodyPaths (/v1/chat/x)"},
+		{wafv1alpha1.SkipSpec{BodyPaths: []wafv1alpha1.PathPattern{"/v1/chat/"}}, "/v1/chat", "also in spec.skip.bodyPaths"},
+		{wafv1alpha1.SkipSpec{Paths: []wafv1alpha1.PathPattern{"/healthz"}, BodyPaths: []wafv1alpha1.PathPattern{"/upload/*"}}, "/v1/chat/completions", ""},
+	} {
+		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
+			TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}}, Skip: &tc.skip,
+			LLM: &wafv1alpha1.LLMSpec{Endpoints: []wafv1alpha1.LLMEndpoint{{Paths: []wafv1alpha1.PathPattern{tc.endpoint}, Format: wafv1alpha1.LLMOpenAIChat}}},
+		}}
+		warnings, err := v.ValidateCreate(ctx, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := strings.Join(warnings, "\n")
+		if tc.want == "" && got != "" || tc.want != "" && !strings.Contains(got, tc.want) {
+			t.Errorf("%v and %s: warnings %q, want %q", tc.skip, tc.endpoint, got, tc.want)
+		}
+	}
 }
 
 func TestClusterRuleSetValidation(t *testing.T) {

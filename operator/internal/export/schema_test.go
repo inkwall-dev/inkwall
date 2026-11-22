@@ -25,7 +25,7 @@ import (
 var testView = newView("6f1c0d2e-uid", "prod-eu-1", nil)
 
 func TestJSONGolden(t *testing.T) {
-	evs := items(fullEvent(), oldEvent(), rateLimited())
+	evs := items(fullEvent(), oldEvent(), rateLimited(), llmChecked())
 	for _, f := range []struct {
 		name string
 		f    format
@@ -38,8 +38,8 @@ func TestJSONGolden(t *testing.T) {
 	}
 	// Each line of Lines is one event, whatever its fields hold.
 	lines := bytes.Split(bytes.TrimSuffix(encode(formatJSONLines, &testView, evs).body, []byte("\n")), []byte("\n"))
-	if len(lines) != 3 {
-		t.Fatalf("%d lines for 3 events", len(lines))
+	if len(lines) != 4 {
+		t.Fatalf("%d lines for 4 events", len(lines))
 	}
 	for _, l := range lines {
 		if !json.Valid(l) {
@@ -99,7 +99,7 @@ func anyValue(v *commonpb.AnyValue) any {
 }
 
 func TestOTLPGolden(t *testing.T) {
-	p := encode(formatOTLPGRPC, &testView, items(fullEvent(), oldEvent(), rateLimited()))
+	p := encode(formatOTLPGRPC, &testView, items(fullEvent(), oldEvent(), rateLimited(), llmChecked()))
 	// Grouped per engine pod: traefik-7d9c (with the third event, whose
 	// pod the stream didn't name, apart), traefik-old.
 	if n := len(p.otlp.GetResourceLogs()); n != 3 {
@@ -140,7 +140,7 @@ func sortedKeys(m map[string]bool) []string {
 // The v1 field list, JSON and OTLP: a rename fails here rather than in a
 // user's saved searches (design 0010 §5.3).
 func TestFieldListGolden(t *testing.T) {
-	all := items(fullEvent(), rateLimited())
+	all := items(fullEvent(), rateLimited(), llmChecked())
 	fields := map[string]bool{}
 	for _, it := range all {
 		var v any
