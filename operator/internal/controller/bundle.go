@@ -47,6 +47,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
 	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema/compile"
 	enginepolicy "github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
@@ -147,6 +148,8 @@ type BundleReconciler struct {
 	checked map[[sha256.Size]byte]error
 	// rules checks that each policy's rule sets compile together.
 	rules *enginepolicy.RuleChecker
+	// schemas compiles each distinct gRPC descriptor set once.
+	schemas *compile.Cache
 }
 
 // SetupWithManager registers the builder with mgr.
@@ -237,7 +240,10 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	if r.rules == nil {
 		r.rules = enginepolicy.NewRuleChecker()
 	}
-	in := resolver.Input{CheckRules: r.checkRules, CheckPolicy: r.rules.Check}
+	if r.schemas == nil {
+		r.schemas = compile.NewCache()
+	}
+	in := resolver.Input{CheckRules: r.checkRules, CheckPolicy: r.rules.Check, GRPCSchemas: r.schemas}
 	var (
 		policies        wafv1alpha1.WAFPolicyList
 		ingresses       networkingv1.IngressList
@@ -300,12 +306,13 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	// bundle the active key signed.
 	resign := current != nil && currentKey != signer.KeyID()
 	next, changed, err := bundle.Next(current, &bundlev1.Bundle{
-		ClusterId: r.clusterID,
-		Policies:  res.Policies,
-		RuleSets:  res.RuleSets,
-		Suspended: suspended,
-		ProbeKey:  signer.ProbeKey(),
-		Events:    eventsConfig(cfg),
+		ClusterId:   r.clusterID,
+		Policies:    res.Policies,
+		RuleSets:    res.RuleSets,
+		Suspended:   suspended,
+		GrpcSchemas: res.GRPCSchemas,
+		ProbeKey:    signer.ProbeKey(),
+		Events:      eventsConfig(cfg),
 		// A policy's own spec.denyResponse wins over it.
 		DenyResponse: denyResponse(cfg),
 	}, r.lastVersion, r.Now(), resign)

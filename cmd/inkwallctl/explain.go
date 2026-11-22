@@ -679,8 +679,8 @@ func explainInput(ctx context.Context, cluster *explainCluster, cfg explainConfi
 	return in, "the cluster", err
 }
 
-// clusterInput reads the policy and the rule sets, ConfigMaps and IP lists
-// it references: only those, by name (get, never list).
+// clusterInput reads the policy and the rule sets, ConfigMaps (its rule
+// sets' and its gRPC schema's) and IP lists it references: only those, by name (get, never list).
 func clusterInput(ctx context.Context, c client.Reader, ns, name string) (resolver.Input, error) {
 	var in resolver.Input
 	var p wafv1alpha1.WAFPolicy
@@ -730,6 +730,11 @@ func clusterInput(ctx context.Context, c client.Reader, ns, name string) (resolv
 					return in, err
 				}
 			}
+		}
+	}
+	if b := p.Spec.Body; b != nil && b.GRPCSchema != nil {
+		if err := configMap(ns, b.GRPCSchema.ConfigMapRef.Name); err != nil {
+			return in, err
 		}
 	}
 	if l := p.Spec.IPLists; l != nil {
