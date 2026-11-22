@@ -1,7 +1,7 @@
 // Copyright 2026 The Inkwall Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package grpcwire
+package schematest
 
 import (
 	"fmt"
@@ -25,6 +25,7 @@ import (
 	_ "google.golang.org/grpc/reflection/grpc_reflection_v1"
 
 	"github.com/inkwall-dev/inkwall/pkg/grpcschema"
+	"github.com/inkwall-dev/inkwall/pkg/grpcwire"
 )
 
 // randomFile returns a random .proto file: proto2 or proto3, messages
@@ -256,20 +257,20 @@ func stringsOf(m protoreflect.Message, values *[]string, unknown *[][]byte) {
 	})
 }
 
-// checkDifferential checks Fields on msg, of type md (t in s), against
-// protobuf-go's own parse: when protobuf-go parses it, Fields reads it
+// checkDifferential checks grpcwire.Fields on msg, of type md (t in s), against
+// protobuf-go's own parse: when protobuf-go parses it, grpcwire.Fields reads it
 // whole, and every string value it gives the application, and the text of
-// its unknown fields as Strings reads them, is among Fields' values. It
+// its unknown fields as grpcwire.Strings reads them, is among Fields' values. It
 // returns how many values it compared, -1 when protobuf-go doesn't parse
 // msg.
 func checkDifferential(t *testing.T, msg []byte, s *grpcschema.Schema, md protoreflect.MessageDescriptor) int {
 	t.Helper()
-	lim := Limits{Depth: 100, Fields: 1 << 20}
-	fields, _, ok := Fields(msg, s, s.Message(string(md.FullName())), lim, nil)
+	lim := grpcwire.Limits{Depth: 100, Fields: 1 << 20}
+	fields, _, ok := grpcwire.Fields(msg, s, s.Message(string(md.FullName())), lim, nil)
 	for _, fd := range fields {
-		// Text is UTF-8, as Strings gives (a string's invalid bytes are
+		// Text is UTF-8, as grpcwire.Strings gives (a string's invalid bytes are
 		// spaces), and names fit an exclusion.
-		if fd.Value == "" || !utf8.ValidString(fd.Value) || len(fd.Name) > MaxName {
+		if fd.Value == "" || !utf8.ValidString(fd.Value) || len(fd.Name) > grpcwire.MaxName {
 			t.Fatalf("field %q = %q", fd.Name, fd.Value)
 		}
 	}
@@ -278,7 +279,7 @@ func checkDifferential(t *testing.T, msg []byte, s *grpcschema.Schema, md protor
 		return -1
 	}
 	if !ok {
-		t.Fatalf("protobuf-go parses %x, Fields doesn't read it whole", msg)
+		t.Fatalf("protobuf-go parses %x, grpcwire.Fields doesn't read it whole", msg)
 	}
 	got := map[string]bool{}
 	for _, fd := range fields {
@@ -289,12 +290,12 @@ func checkDifferential(t *testing.T, msg []byte, s *grpcschema.Schema, md protor
 	stringsOf(m, &values, &unknown)
 	compared := len(values)
 	for _, v := range values {
-		if want := stringText([]byte(v)); want != "" && !got[want] {
-			t.Fatalf("protobuf-go gives %q, Fields doesn't (%q) in %x", v, fields, msg)
+		if want := grpcwireStringText([]byte(v)); want != "" && !got[want] {
+			t.Fatalf("protobuf-go gives %q, grpcwire.Fields doesn't (%q) in %x", v, fields, msg)
 		}
 	}
 	for _, u := range unknown {
-		texts, _ := Strings(u, lim, nil)
+		texts, _ := grpcwire.Strings(u, lim, nil)
 		compared += len(texts)
 		for _, fd := range texts {
 			if !got[fd.Value] {
@@ -370,9 +371,9 @@ func TestFieldsDifferential(t *testing.T) {
 	t.Logf("%d seeds: %d messages parsed, %d values compared", n, parsed, compared)
 }
 
-// TestFieldsDifferentialDescriptors: the descriptors linked into the test,
-// read with descriptor.proto's schema (the 33 KB message of design 0013
-// §6.6 among them), as protobuf-go reads them.
+// TestFieldsDifferentialDescriptors: the descriptors linked into the test
+// (Envoy's, gRPC's, protobuf's own), read with descriptor.proto's schema,
+// as protobuf-go reads them.
 func TestFieldsDifferentialDescriptors(t *testing.T) {
 	s, md := descriptorSchema(t)
 	n := 0
@@ -407,7 +408,7 @@ func descriptorSchema(t testing.TB) (*grpcschema.Schema, protoreflect.MessageDes
 }
 
 // FuzzFields: random schemas and messages (from the seed), mutated (by
-// flips), against protobuf-go; Fields never panics.
+// flips), against protobuf-go; grpcwire.Fields never panics.
 func FuzzFields(fz *testing.F) {
 	fz.Add(uint64(1), []byte(nil))
 	fz.Add(uint64(7), []byte{0x80, 0x01})
@@ -425,13 +426,13 @@ func FuzzFieldsBytes(fz *testing.F) {
 	fz.Add(f(7, wBytes, f(1, wBytes, "t.Item", 2, wBytes, f(1, wBytes, "x"))))
 	fz.Add(f(8, wGroup, f(1, wBytes, "g"), 3, wBytes, f(1, wBytes, "alice")))
 	fz.Fuzz(func(t *testing.T, msg []byte) {
-		lim := Limits{Depth: 8, Fields: 64}
-		fields, _, _ := Fields(msg, s, req, lim, nil)
+		lim := grpcwire.Limits{Depth: 8, Fields: 64}
+		fields, _, _ := grpcwire.Fields(msg, s, req, lim, nil)
 		if len(fields) > lim.Fields {
 			t.Fatalf("%d fields", len(fields))
 		}
 		for _, fd := range fields {
-			if fd.Value == "" || !utf8.ValidString(fd.Value) || len(fd.Name) > MaxName {
+			if fd.Value == "" || !utf8.ValidString(fd.Value) || len(fd.Name) > grpcwire.MaxName {
 				t.Fatalf("field %q = %q", fd.Name, fd.Value)
 			}
 		}
