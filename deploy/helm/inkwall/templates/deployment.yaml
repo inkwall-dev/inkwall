@@ -2,6 +2,9 @@
 {{- $cp := include "inkwall.controlPlane.values" . | fromYaml }}
 {{- $export := include "inkwall.export.values" . | fromYaml }}
 {{- $metrics := include "inkwall.metrics.secure" . | fromYaml }}
+{{- /* geo, as helm upgrade --reuse-values from before 0.7.0 renders it: absent. */}}
+{{- $geo := .Values.geo | default dict }}
+{{- $_ := set $geo "geoipupdate" ($geo.geoipupdate | default dict) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -157,9 +160,47 @@ spec:
               mountPath: /metrics-certs
               readOnly: true
             {{- end }}
+            {{- if or $geo.volume $geo.geoipupdate.enabled }}
+            - name: geo
+              mountPath: /var/lib/inkwall/geo
+              readOnly: true
+            {{- end }}
             {{- with .Values.operator.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+        {{- if $geo.geoipupdate.enabled }}
+        # MaxMind's updater, with its own credentials and no access to the
+        # signing key's volume; writes the database the operator reads.
+        - name: geoipupdate
+          image: {{ $geo.geoipupdate.image }}
+          env:
+            - name: GEOIPUPDATE_ACCOUNT_ID_FILE
+              value: /etc/geoipupdate/account-id
+            - name: GEOIPUPDATE_LICENSE_KEY_FILE
+              value: /etc/geoipupdate/license-key
+            - name: GEOIPUPDATE_EDITION_IDS
+              value: {{ $geo.geoipupdate.editionIDs | quote }}
+            - name: GEOIPUPDATE_FREQUENCY
+              value: {{ $geo.geoipupdate.frequency | quote }}
+            - name: GEOIPUPDATE_DB_DIR
+              value: /var/lib/inkwall/geo
+          resources:
+            {{- toYaml $geo.geoipupdate.resources | nindent 12 }}
+          securityContext:
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: geo
+              mountPath: /var/lib/inkwall/geo
+            - name: geoipupdate-credentials
+              mountPath: /etc/geoipupdate
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+        {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
@@ -183,6 +224,17 @@ spec:
         - name: metrics-certs
           secret:
             secretName: {{ include "inkwall.metrics.secret" . }}
+        {{- end }}
+        {{- if $geo.geoipupdate.enabled }}
+        - name: geo
+          emptyDir:
+            sizeLimit: 512Mi
+        - name: geoipupdate-credentials
+          secret:
+            secretName: {{ required "geo.geoipupdate.secretName: the Secret with your MaxMind account-id and license-key" $geo.geoipupdate.secretName }}
+        {{- else if $geo.volume }}
+        - name: geo
+          {{- toYaml $geo.volume | nindent 10 }}
         {{- end }}
         {{- with .Values.operator.extraVolumes }}
         {{- toYaml . | nindent 8 }}

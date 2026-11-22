@@ -423,7 +423,8 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 					"bind the CRS without placement, and the rule set to place before it in its own entry"))
 		}
 	}
-	return append(responseWarnings(p), policyListWarnings(p)...), invalid("WAFPolicy", p.Name, errs)
+	warnings := append(responseWarnings(p), geoWarnings(p)...)
+	return append(warnings, policyListWarnings(p)...), invalid("WAFPolicy", p.Name, errs)
 }
 
 // policyDeprecations warns of the deprecated fields p sets that old (nil

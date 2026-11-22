@@ -155,7 +155,7 @@ func TestScaleWiring(t *testing.T) {
 	counter := &requestCounter{counts: map[string]int{}}
 	opCfg := rest.CopyConfig(cfg)
 	opCfg.Wrap(func(rt http.RoundTripper) http.RoundTripper { counter.rt = rt; return counter })
-	startOperator(ctx, t, opCfg)
+	startOperator(ctx, t, opCfg, t.TempDir())
 	sampler := startSampler()
 	defer sampler.stop()
 	res := WiringResult{Policies: n, Pods: wiringPods, RolloutPods: rolloutPods}

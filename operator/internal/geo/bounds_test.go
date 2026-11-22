@@ -87,6 +87,15 @@ func TestNodeCountBound(t *testing.T) {
 // gigabytes, and a walk following its 2^26 aliases would yield the cap's
 // worth of networks; the guard refuses it past MaxAliases aliases, at once.
 func TestAlternatingAliases(t *testing.T) {
+	// A lower cap keeps the guard walk's yields (bounded by it) quick
+	// under the race detector; the gaps stop at MaxAliases either way.
+	defer func(n int) { maxNetworks = n }(maxNetworks)
+	maxNetworks = 1 << 21
+	// 1,024 aliases pass the guard walk; the gaps stop at MaxAliases.
+	if _, err := Compile(context.Background(), mmdbtest.AlternatingAliases(10), nil); ReasonOf(err) != ReasonInvalid ||
+		!strings.Contains(err.Error(), "prefixes alias the IPv4 subtree") {
+		t.Errorf("1,024 aliases: %v", err)
+	}
 	db := mmdbtest.AlternatingAliases(26)
 	runtime.GC()
 	var before runtime.MemStats

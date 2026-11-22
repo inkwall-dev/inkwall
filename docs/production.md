@@ -47,7 +47,7 @@ and links to the guide that explains it.
   Give the operator an `operator.priorityClassName` that outranks the workloads it protects.
 - [ ] **Size its memory.** It requests 100m CPU and 128Mi, with a 1Gi limit, and sets
   `GOMEMLIMIT` to 90% of the limit (`operator.resources`). Exporting security events to SIEMs
-  adds its buffer and requests: `values.yaml` gives the formula. Its memory grows with the policies and
+  adds its buffer and requests: `values.yaml` gives the formula; geo blocking adds up to about 100 MiB on the leader while it compiles a country database. Its memory grows with the policies and
   routes, not with the engines: see [Scale](#scale) for the numbers, and raise the limit for a
   cluster near them.
 
