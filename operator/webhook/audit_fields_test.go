@@ -102,6 +102,7 @@ func TestAuditFieldNames(t *testing.T) {
 	slices.Sort(plain)
 	plain = slices.Compact(plain)
 	reviewed := []string{
+		"spec.body.grpcSchema.configMapRef.key",
 		"spec.controlPlane.enrollmentSecretRef",
 		"spec.engine.rateLimitKeys",
 		"spec.events.export.sinks.json.urlSecretRef",
@@ -110,6 +111,8 @@ func TestAuditFieldNames(t *testing.T) {
 		"spec.events.export.sinks.tls.clientCertificateSecretRef",
 		"spec.events.redact.headers",
 		"spec.exclusions.when.header",
+		"spec.geo.database.secretRef",
+		"spec.geo.database.secretRef.key",
 		"spec.rateLimits.key",
 		"spec.rateLimits.key.header",
 		"spec.signingKey",
