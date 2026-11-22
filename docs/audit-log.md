@@ -41,9 +41,18 @@ What the log can miss, or hold twice: it is the operator's view, not the API ser
 - A change made while the operator is down isn't recorded.
 - A request that a later step refuses (another webhook, a quota) may be recorded although it was
   never saved.
-- One change can be recorded twice. A patch or server-side apply that sends no `resourceVersion` is
-  retried by the API server when another write gets in first, and each try is admitted again.
-  The two lines name the same user, object and change.
+- One change can be recorded twice, or more, when another write gets in first, such as the
+  operator's own status writes.
+  - A patch or server-side apply that sends no `resourceVersion` is retried by the API server, and
+    each try is admitted again.
+  - An update that sends one can be admitted and then refused as a conflict. The API server checks
+    the `resourceVersion` against its cache, which can lag, and finds the conflict only when it
+    writes. A client that retries on a conflict (`kubectl edit`, controllers, GitOps tools) is
+    then admitted again.
+
+  The lines name the same user, object and change, with the same `generation`: a spec change saved
+  takes the next generation once. So at most one of the lines with the same `uid` and `generation`
+  was saved: keep the last.
 
 ### Deletes while the operator is unreachable
 
