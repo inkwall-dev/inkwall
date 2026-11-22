@@ -15,7 +15,9 @@
 // it and nothing is allocated per request. A key lives in the 8 slots from
 // its hashed one; when they are all taken, a free entry (a full bucket, or
 // one of a limit no longer in the bundle) is reused first, then the one
-// closest to full.
+// closest to full for its own limit. A bucket over its limit, or limited
+// recently, is never reused: when every entry is one, the new key is
+// counted in its limit's overflow bucket, shared by such keys.
 package ratelimit
 
 import (
@@ -123,10 +125,21 @@ type Store struct {
 	mu     sync.Mutex
 	ids    map[Identity]uint32
 	nextID uint32
+	// params are what eviction needs of each limit, by ID (limitParams):
+	// copied on write, under mu.
+	params atomic.Pointer[[]limitParams]
+
+	// overflow is each limit's shared bucket for the new keys no entry
+	// could be found for (find); overflowing counts them, so that a Store
+	// that never overflowed doesn't look.
+	overMu      sync.Mutex
+	overflow    map[uint32]*entry
+	overflowing atomic.Int32
 
 	keys         atomic.Int64
 	evictIdle    atomic.Uint64
 	evictActive  atomic.Uint64
+	overflows    atomic.Uint64
 	skippedNoKey atomic.Uint64
 	overDeny     atomic.Uint64 // requests over a Block limit
 	overLog      atomic.Uint64 // over a Detect limit (or on a Detect policy)
@@ -148,6 +161,14 @@ type shard struct {
 	mu sync.Mutex
 	e  []entry
 	_  [40]byte // apart from the next shard's mutex
+}
+
+// limitParams are what eviction needs of a limit: over, the debt (TAT −
+// now) past which its next request is refused, (burst − 1) × interval; and
+// its capacity, burst × interval. capacity 0: no such limit.
+type limitParams struct {
+	over     int64
+	capacity float64
 }
 
 // entry is one bucket. id 0 is an empty slot.
@@ -219,6 +240,11 @@ func (s *Store) Evictions() (idle, active uint64) {
 	return s.evictIdle.Load(), s.evictActive.Load()
 }
 
+// Overflows reports the requests of new keys counted in their limit's
+// overflow bucket: every entry of their neighbourhood was over its limit,
+// or limited recently, which are never evicted.
+func (s *Store) Overflows() uint64 { return s.overflows.Load() }
+
 // Intern returns the ID of a limit's identity, the same for the life of the
 // Store. IDs are never reused.
 func (s *Store) Intern(id Identity) uint32 {
@@ -241,11 +267,32 @@ func (s *Store) Limit(id Identity, requests int64, period time.Duration, burst i
 	if burst <= 0 {
 		burst = requests
 	}
-	return Limit{
+	l := Limit{
 		id:       s.Intern(id),
 		interval: max(int64(period)/requests, 1),
 		burst:    burst,
 	}
+	s.setParams(l)
+	return l
+}
+
+// setParams records what eviction needs of l (limitParams): the latest
+// compiled, when a bundle changes the rate.
+func (s *Store) setParams(l Limit) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var ps []limitParams
+	if old := s.params.Load(); old != nil {
+		ps = *old
+	}
+	p := limitParams{over: (l.burst - 1) * l.interval, capacity: float64(l.burst) * float64(l.interval)}
+	if int(l.id) < len(ps) && ps[l.id] == p {
+		return
+	}
+	next := make([]limitParams, max(len(ps), int(l.id)+1))
+	copy(next, ps)
+	next[l.id] = p
+	s.params.Store(&next)
 }
 
 // Live is the set of limit IDs of one compiled bundle: an entry of a limit
@@ -304,41 +351,101 @@ func (s *Store) Take(l Limit, k Key, t time.Time, live *Live) Decision {
 	sh, i := s.locate(l.id, k)
 	sh.mu.Lock()
 	e := s.find(sh, i, l.id, k, now, live)
+	if e == nil {
+		sh.mu.Unlock()
+		return s.takeOverflow(l, now)
+	}
+	d := charge(e, l, now)
+	sh.mu.Unlock()
+	return d
+}
+
+// charge checks a request at now against e, of limit l, and charges it
+// when it is within the limit. Called with e's lock held.
+func charge(e *entry, l Limit, now int64) Decision {
 	tat := max(e.tat, now)
 	over := tat + l.interval - now - l.burst*l.interval
 	if over <= 0 {
 		e.tat = tat + l.interval
-		sh.mu.Unlock()
 		return Decision{Allowed: true}
 	}
+	return refuse(e, over, now)
+}
+
+// refuse is charge's refusal of a request over the limit by over.
+func refuse(e *entry, over, now int64) Decision {
 	d := Decision{RetryAfter: ceilSeconds(over)}
 	e.limited++
-	sec := uint32(min(now/int64(time.Second)+1, math.MaxUint32)) //nolint:gosec // bounded by min
+	sec := seconds(now)
 	if e.sampled == 0 || int64(sec-e.sampled) >= int64(sampleEvery/time.Second) {
 		d.Event, d.Sampled = true, e.limited
 		e.sampled, e.limited = sec, 0
 	}
-	sh.mu.Unlock()
 	return d
+}
+
+// seconds is now as entries' sampled holds it: the second since base, +1.
+func seconds(now int64) uint32 {
+	return uint32(min(now/int64(time.Second)+1, math.MaxUint32)) //nolint:gosec // bounded by min
+}
+
+// takeOverflow charges a request of a new key to its limit's overflow
+// bucket: one bucket for every such key of the limit, so they share the
+// limit's rate (conservative), rather than one of them resetting a bucket
+// that is limiting a client.
+func (s *Store) takeOverflow(l Limit, now int64) Decision {
+	s.overflows.Add(1)
+	s.overMu.Lock()
+	defer s.overMu.Unlock()
+	e := s.overflow[l.id]
+	if e == nil {
+		if s.overflow == nil {
+			s.overflow = map[uint32]*entry{}
+		}
+		e = &entry{id: l.id, tat: now}
+		s.overflow[l.id] = e
+		s.overflowing.Add(1)
+	}
+	return charge(e, l, now)
+}
+
+// overflowEntry calls f with l's overflow bucket, locked, if it has one.
+func (s *Store) overflowEntry(l Limit, f func(*entry)) {
+	if s.overflowing.Load() == 0 {
+		return
+	}
+	s.overMu.Lock()
+	defer s.overMu.Unlock()
+	if e := s.overflow[l.id]; e != nil {
+		f(e)
+	}
 }
 
 // Wait is how long until key k's request at t would be within l, without
 // charging it: 0 when it is now, whole seconds otherwise.
 func (s *Store) Wait(l Limit, k Key, t time.Time) time.Duration {
 	now := int64(t.Sub(s.base))
+	wait := func(e *entry) time.Duration {
+		if over := max(e.tat, now) + l.interval - now - l.burst*l.interval; over > 0 {
+			return ceilSeconds(over)
+		}
+		return 0
+	}
 	sh, i := s.locate(l.id, k)
 	sh.mu.Lock()
-	defer sh.mu.Unlock()
 	for j := range uint64(neighbourhood) {
 		e := &sh.e[(i+j)&s.slotMask]
 		if e.id == l.id && e.key == k {
-			if over := max(e.tat, now) + l.interval - now - l.burst*l.interval; over > 0 {
-				return ceilSeconds(over)
-			}
-			return 0
+			d := wait(e)
+			sh.mu.Unlock()
+			return d
 		}
 	}
-	return 0
+	sh.mu.Unlock()
+	// Not held: counted in the overflow bucket, if anywhere.
+	var d time.Duration
+	s.overflowEntry(l, func(e *entry) { d = wait(e) })
+	return d
 }
 
 // Refund gives back the token a request took from l for key k, when a
@@ -350,10 +457,12 @@ func (s *Store) Refund(l Limit, k Key) {
 		e := &sh.e[(i+j)&s.slotMask]
 		if e.id == l.id && e.key == k {
 			e.tat -= l.interval
-			break
+			sh.mu.Unlock()
+			return
 		}
 	}
 	sh.mu.Unlock()
+	s.overflowEntry(l, func(e *entry) { e.tat -= l.interval })
 }
 
 // SkippedNoKey counts a request an IP limit couldn't count: no valid client
@@ -378,10 +487,12 @@ func (s *Store) Unsample(l Limit, k Key, n uint32) {
 		e := &sh.e[(i+j)&s.slotMask]
 		if e.id == l.id && e.key == k {
 			e.limited += n
-			break
+			sh.mu.Unlock()
+			return
 		}
 	}
 	sh.mu.Unlock()
+	s.overflowEntry(l, func(e *entry) { e.limited += n })
 }
 
 func (s *Store) locate(id uint32, k Key) (*shard, uint64) {
@@ -395,9 +506,21 @@ func (s *Store) locate(id uint32, k Key) (*shard, uint64) {
 
 // find returns the entry of (id, k) in its neighbourhood from slot i,
 // claiming one when there is none: an empty slot, else a free entry, else
-// the one closest to full. Called with the shard locked.
+// the bucket closest to full for its own limit (the least debt for its
+// burst) of those that aren't protected (protected). nil: every entry is
+// protected, and the key isn't held. Called with the shard locked.
 func (s *Store) find(sh *shard, i uint64, id uint32, k Key, now int64, live *Live) *entry {
-	var empty, free, earliest *entry
+	var empty, free, victim *entry
+	var (
+		params         []limitParams
+		victimDebt     int64
+		victimCapacity float64
+		pid            uint32 // the limit p is of; 0: params not loaded yet
+		p              limitParams
+		// An entry limited (sampled) after recent is limited recently:
+		// sampled is the second after the event's.
+		recent = now - int64(recentlyLimited)
+	)
 	for j := range uint64(neighbourhood) {
 		e := &sh.e[(i+j)&s.slotMask]
 		switch {
@@ -411,8 +534,38 @@ func (s *Store) find(sh *shard, i uint64, id uint32, k Key, now int64, live *Liv
 			if free == nil {
 				free = e
 			}
-		case earliest == nil || e.tat < earliest.tat:
-			earliest = e
+		case empty == nil && free == nil:
+			// In use: is it the victim so far? The closest to full for its
+			// own limit (the least debt, TAT − now, for its capacity) that
+			// isn't protected: over its limit (its next request would be
+			// refused), or limited (sampled) within recentlyLimited.
+			// Evicting one of those would give its client a full burst.
+			debt := e.tat - now
+			if victim != nil && e.id == victim.id && debt >= victimDebt {
+				continue // not closer to full than the victim, of one capacity
+			}
+			if pid == 0 {
+				if ps := s.params.Load(); ps != nil {
+					params = *ps
+				}
+			}
+			if e.id != pid {
+				pid, p = e.id, limitParams{over: math.MaxInt64} // unknown: never over, capacity 0
+				if int(pid) < len(params) && params[pid].capacity != 0 {
+					p = params[pid]
+				}
+			}
+			capacity := p.capacity
+			if capacity == 0 { // unknown limit: as full as can be
+				capacity = float64(debt)
+			}
+			switch {
+			case debt > p.over, e.sampled != 0 && int64(e.sampled)*int64(time.Second) > recent:
+				continue // protected
+			case victim != nil && e.id != victim.id && float64(debt)*victimCapacity >= float64(victimDebt)*capacity:
+				continue // not closer to full for its capacity (without dividing)
+			}
+			victim, victimDebt, victimCapacity = e, debt, capacity
 		}
 	}
 	e := empty
@@ -422,13 +575,20 @@ func (s *Store) find(sh *shard, i uint64, id uint32, k Key, now int64, live *Liv
 	case free != nil:
 		e = free
 		s.evictIdle.Add(1)
-	default:
-		e = earliest
+	case victim != nil:
+		e = victim
 		s.evictActive.Add(1)
+	default:
+		return nil
 	}
 	*e = entry{key: k, id: id, tat: now}
 	return e
 }
+
+// recentlyLimited is how long after its last sampled limited request an
+// entry stays protected: a client limited now and again, between events
+// (one a sampleEvery), is still being limited.
+const recentlyLimited = 2 * sampleEvery
 
 // ceilSeconds rounds d up to whole seconds, at least one.
 func ceilSeconds(d int64) time.Duration {

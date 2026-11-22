@@ -177,7 +177,8 @@ Engine metrics carry `adapter` where it says so (`proxy`, `forwardauth`, `httpch
 | `inkwall_security_event_logs_suppressed_total` | counter | `policy` | Security event log lines left out by the rate limit (`--event-log-rate`); the events still go to the operator. |
 | `inkwall_rate_limit_keys` | gauge | | Rate limit buckets held, full ones included until their entry is reused. |
 | `inkwall_rate_limit_key_capacity` | gauge | | The rate limit table's capacity (`--rate-limit-keys`), after its cap of a quarter of the memory limit. |
-| `inkwall_rate_limit_evictions_total` | counter | `kind` | Rate limit entries reused for a new key: `idle` (a full bucket, or a limit no longer in the bundle: nothing lost) or `active` (the bucket closest to full: its state forgotten, because the table is too small or a client is cycling keys). |
+| `inkwall_rate_limit_evictions_total` | counter | `kind` | Rate limit entries reused for a new key: `idle` (a full bucket, or a limit no longer in the bundle: nothing lost) or `active` (the bucket closest to full for its limit, never one over its limit or limited in the last 2 minutes: its state forgotten, because the table is too small or a client is cycling keys). |
+| `inkwall_rate_limit_overflow_total` | counter | | Requests of new rate limit keys counted in their limit's shared overflow bucket: every slot near the key's hash held a bucket over its limit or limited in the last 2 minutes, which are never evicted. The keys share one bucket of the limit's rate, so they are limited more, never less; the table is too small for the clients being limited, or a client is cycling keys. |
 | `inkwall_rate_limit_exceeded_total` | counter | `action` | Requests over a rate limit: `deny`, or `log` for a `Detect` limit, also when a rule decided the request. |
 | `inkwall_rate_limit_skipped_total` | counter | `reason` | Requests a rate limit couldn't count: `no_key`, no valid client address. |
 | `inkwall_rate_limit_events_dropped_total` | counter | | Rate limit security events left out by the per-limit or engine-wide event cap; the requests are still counted. |
@@ -293,8 +294,11 @@ engine's log names each one.
 
 An engine has forgotten rate limit buckets in use, more than 6 a minute for 15 minutes
 (`inkwall_rate_limit_evictions_total{kind="active"}`): a new key's slots (a key can use 8 near its
-hash) were all taken by buckets in use, so the one closest to full was forgotten, and its client
-starts again with a full burst. A few happen before the table is full. Limits still hold for
+hash) were all taken by buckets in use, so the one closest to full for its limit was forgotten,
+and its client starts again with a full burst. A bucket over its limit, or limited in the last 2
+minutes, is never forgotten: when a key's slots hold only those, the new key is counted in its
+limit's shared overflow bucket instead (`inkwall_rate_limit_overflow_total`), which limits such
+keys together. A few happen before the table is full. Limits still hold for
 most clients, but less exactly. Either the table is too small for the clients being limited (raise
 `spec.engine.rateLimitKeys`, then restart the proxy pods; `inkwall_rate_limit_key_capacity` shows
 the size, which is capped at a quarter of the engine's memory limit), or a client is cycling

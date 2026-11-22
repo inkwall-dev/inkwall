@@ -6,6 +6,8 @@ package ratelimit
 import (
 	"math"
 	"net/netip"
+	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -405,7 +407,7 @@ func TestCollectors(t *testing.T) {
 	for _, mf := range mfs {
 		series[mf.GetName()] = len(mf.GetMetric())
 	}
-	if series["inkwall_rate_limit_evictions_total"] != 2 || series["inkwall_rate_limit_exceeded_total"] != 2 || series["inkwall_rate_limit_keys"] != 1 || len(series) != 6 {
+	if series["inkwall_rate_limit_evictions_total"] != 2 || series["inkwall_rate_limit_exceeded_total"] != 2 || series["inkwall_rate_limit_keys"] != 1 || series["inkwall_rate_limit_overflow_total"] != 1 || len(series) != 7 {
 		t.Errorf("metrics %v", series)
 	}
 }
@@ -425,4 +427,120 @@ func TestUnsample(t *testing.T) {
 		t.Errorf("the next event: %+v, want one standing for 3 (1 given back, 2 since)", d)
 	}
 	s.Unsample(l, ip("192.0.2.9"), 5) // a key it doesn't hold: nothing
+}
+
+// headerKey is the i-th of an attacker's header values.
+func headerKey(s *Store, i int) Key { return s.HeaderKey("attacker-" + strconv.Itoa(i)) }
+
+// A bucket over its limit stays limited while an attacker sends one
+// request per new header value of another limit, twice the table's
+// capacity: with a long interval, the attacker's TATs are later than the
+// limited bucket's, which eviction by the earliest TAT would forget. Its
+// keys are either over their own limit (burst 1) and so kept, the overflow
+// counting the rest, or within it and evicted first.
+func TestEvictionKeepsALimitedBucket(t *testing.T) {
+	for _, burst := range []int64{1, 2, 100} {
+		t.Run("attacker burst "+strconv.FormatInt(burst, 10), func(t *testing.T) {
+			s := New(minShards*neighbourhood, 0)
+			t0 := s.base.Add(time.Hour)
+			login := limit(s, "login", 5, time.Hour, 5)
+			flood := s.Limit(Identity{PolicyUID: "uid", Name: "flood", Key: "header/x-key/ip/56"}, 1, time.Hour, burst)
+			victims := make([]Key, 64)
+			for i := range victims {
+				victims[i] = ip(netip.AddrFrom4([4]byte{198, 51, 100, byte(i)}).String())
+				for range 6 {
+					s.Take(login, victims[i], t0, nil)
+				}
+				if s.Take(login, victims[i], t0, nil).Allowed {
+					t.Fatal("the victim isn't over its limit")
+				}
+			}
+			slots := len(s.shards) * len(s.shards[0].e)
+			for i := range 2 * slots {
+				s.Take(flood, headerKey(s, i), t0.Add(time.Duration(i)*time.Microsecond), nil)
+			}
+			_, active := s.Evictions()
+			for i, v := range victims {
+				if s.Take(login, v, t0.Add(time.Second), nil).Allowed {
+					t.Fatalf("victim %d was reset: %d active evictions, %d overflows", i, active, s.Overflows())
+				}
+			}
+			if burst == 1 && s.Overflows() == 0 {
+				t.Error("a table of buckets over their limits overflowed none")
+			}
+			if burst > 1 && active == 0 {
+				t.Error("the attacker's buckets within their limit weren't evicted")
+			}
+		})
+	}
+}
+
+// Fullness is relative to each limit's own capacity: a bucket a tenth
+// into a 10-hour burst goes before one at half of a 2-hour burst, though
+// its TAT is later.
+func TestEvictionRelativeToBurst(t *testing.T) {
+	s := New(1, 0)
+	long := limit(s, "long", 1, time.Hour, 10)  // capacity 10h
+	short := limit(s, "short", 1, time.Hour, 2) // capacity 2h
+	const now = int64(100 * time.Hour)
+	sh := &s.shards[0]
+	for j := range neighbourhood {
+		sh.e[j] = entry{key: Key{tag: tagIPv4, b: [16]byte{byte(j + 1)}}, id: short.id, tat: now + int64(time.Hour)} // half
+	}
+	sh.e[4] = entry{key: Key{tag: tagIPv4, b: [16]byte{5}}, id: long.id, tat: now + int64(time.Hour) + 1} // a tenth
+	if e := s.find(sh, 0, long.id, Key{tag: tagIPv4, b: [16]byte{99}}, now, nil); e != &sh.e[4] {
+		t.Fatal("evicted a bucket fuller for its limit")
+	}
+}
+
+// When every entry is over its limit or was limited recently, a new key
+// is counted in its limit's overflow bucket, shared with the others, and
+// Wait and Refund find it there.
+func TestOverflow(t *testing.T) {
+	s := New(1, 0)
+	l := limit(s, "a", 1, time.Hour, 2)
+	const now = int64(100 * time.Hour)
+	sh := &s.shards[0]
+	sec := seconds(now)
+	var before []entry
+	for si := range s.shards {
+		for j := range s.shards[si].e {
+			e := entry{key: Key{tag: tagIPv6, b: [16]byte{byte(si), byte(j)}}, id: l.id, tat: now + int64(2*time.Hour)} // over
+			if j%2 == 1 {
+				e.tat, e.sampled = now+int64(time.Minute), sec-60 // within, but limited a minute ago
+			}
+			s.shards[si].e[j] = e
+		}
+		before = append(before, s.shards[si].e...)
+	}
+	entries := func() []entry {
+		var all []entry
+		for si := range s.shards {
+			all = append(all, s.shards[si].e...)
+		}
+		return all
+	}
+	t0 := s.base.Add(time.Duration(now))
+	a, b := Key{tag: tagIPv4, b: [16]byte{200}}, Key{tag: tagIPv4, b: [16]byte{201}}
+	if !s.Take(l, a, t0, nil).Allowed || !s.Take(l, b, t0, nil).Allowed {
+		t.Fatal("the overflow bucket starts full")
+	}
+	if d := s.Take(l, a, t0, nil); d.Allowed || d.RetryAfter != time.Hour {
+		t.Fatalf("two new keys share the overflow bucket's burst of 2: %+v", d)
+	}
+	if s.Overflows() != 3 || !slices.Equal(entries(), before) {
+		t.Fatalf("%d overflows, entries changed: %v", s.Overflows(), !slices.Equal(entries(), before))
+	}
+	if w := s.Wait(l, b, t0); w != time.Hour {
+		t.Errorf("Wait %v, want the overflow bucket's hour", w)
+	}
+	s.Refund(l, b)
+	if w := s.Wait(l, b, t0); w != 0 {
+		t.Errorf("Wait after a refund %v, want 0", w)
+	}
+	// Once one ages out of being protected, it is evicted instead.
+	later := now + int64(recentlyLimited) // the sampled ones: no longer recent, still in use
+	if e := s.find(sh, 0, l.id, Key{tag: tagIPv4, b: [16]byte{202}}, later, nil); e == nil {
+		t.Fatal("no entry once some aged out of being protected")
+	}
 }

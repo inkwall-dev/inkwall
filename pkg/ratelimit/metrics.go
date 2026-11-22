@@ -6,7 +6,8 @@ package ratelimit
 import "github.com/prometheus/client_golang/prometheus"
 
 const (
-	evictionsHelp = "Rate limit entries reused for a new key: idle (a full bucket, or a limit no longer in the bundle: nothing lost) or active (the bucket closest to full: its state forgotten; the table is too small, or a client is cycling keys)."
+	evictionsHelp = "Rate limit entries reused for a new key: idle (a full bucket, or a limit no longer in the bundle: nothing lost) or active (the bucket closest to full for its limit, never one over its limit or limited recently: its state forgotten; the table is too small, or a client is cycling keys)."
+	overflowHelp  = "Requests of new rate limit keys counted in their limit's shared overflow bucket: every entry near the key's hash was a bucket over its limit or limited recently, which are never evicted (the table is too small for the clients being limited, or a client is cycling keys)."
 	skippedHelp   = "Requests a rate limit couldn't count: no_key, no valid client address."
 	exceededHelp  = "Requests over a rate limit: deny, or log for a Detect limit (also when a rule decided the request)."
 )
@@ -30,6 +31,9 @@ func (s *Store) Collectors() []prometheus.Collector {
 		prometheus.NewCounterFunc(prometheus.CounterOpts{
 			Name: "inkwall_rate_limit_evictions_total", Help: evictionsHelp, ConstLabels: prometheus.Labels{"kind": "active"},
 		}, read(s.evictActive.Load)),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "inkwall_rate_limit_overflow_total", Help: overflowHelp,
+		}, read(s.Overflows)),
 		prometheus.NewCounterFunc(prometheus.CounterOpts{
 			Name: "inkwall_rate_limit_skipped_total", Help: skippedHelp, ConstLabels: prometheus.Labels{"reason": "no_key"},
 		}, read(s.skippedNoKey.Load)),

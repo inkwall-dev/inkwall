@@ -156,9 +156,13 @@ every policy, and capped at a quarter of the engine's memory limit (64 MiB witho
 setting reaches engines when their pods are recreated.
 
 A bucket that is full again is free, so most keys cost nothing once their clients go quiet. A key can
-use 8 slots near its hash; when they all hold buckets in use, the one closest to full is
-forgotten: that client gets a fresh bucket, so this errs toward letting requests through. A few
-happen before the table is full; `inkwall_rate_limit_evictions_total{kind="active"}` counts them,
+use 8 slots near its hash; when they all hold buckets in use, the one closest to full for its
+own limit (the least used of its burst) is forgotten: that client gets a fresh bucket. A bucket
+over its limit, or limited in the last 2 minutes, is never forgotten, so a client can't reset the
+bucket limiting it by sending new keys. When a key's slots hold only such buckets, the new key
+is counted in its limit's overflow bucket, one for all such keys of the limit: they share its
+rate, so they are limited more, never less (`inkwall_rate_limit_overflow_total`). A few
+evictions happen before the table is full; `inkwall_rate_limit_evictions_total{kind="active"}` counts them,
 and the alert `InkwallRateLimitStateEvicted` fires past 6 a minute for 15 minutes: raise
 `rateLimitKeys`, or look for a client cycling addresses.
 
@@ -170,6 +174,7 @@ and the alert `InkwallRateLimitStateEvicted` fires past 6 a minute for 15 minute
 | `inkwall_rate_limit_exceeded_total{action}` | Requests over a limit, also when a rule decided the request (`deny`, `log`) |
 | `inkwall_rate_limit_keys`, `inkwall_rate_limit_key_capacity` | Buckets held, and the table's size |
 | `inkwall_rate_limit_evictions_total{kind}` | `idle` (harmless) and `active` (state forgotten) |
+| `inkwall_rate_limit_overflow_total` | Requests of new keys counted in their limit's shared overflow bucket |
 | `inkwall_rate_limit_skipped_total{reason="no_key"}` | Requests without a valid client address |
 | `inkwall_rate_limit_events_dropped_total` | Limit events left out by the caps below |
 
