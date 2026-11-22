@@ -9,7 +9,8 @@
 // strings, bytes or nested messages. A field whose bytes are a whole
 // protobuf message is read as one (its fields get their own names); a
 // field whose bytes are UTF-8 is text, whatever its characters. Some bytes
-// are both, and give both. Binary bytes give their runs of readable text.
+// are both, and give both. A group is read as a nested message. Binary
+// bytes give their runs of readable text.
 // Numbers outside a length-delimited field and anything that fails to
 // parse give nothing.
 package grpcwire
@@ -120,26 +121,44 @@ func (w *walker) message(msg []byte, prefix string, depth int) bool {
 			return false
 		}
 		msg = msg[n:]
-		if typ != protowire.BytesType {
+		switch typ {
+		case protowire.BytesType:
+			v, n := protowire.ConsumeBytes(msg)
+			if n < 0 {
+				return false
+			}
+			msg = msg[n:]
+			w.field(v, fieldName(prefix, num), depth)
+		case protowire.StartGroupType:
+			// A group (proto2, or editions' DELIMITED encoding): a nested
+			// message between a start and an end tag. One that doesn't end,
+			// or ends with another field's tag, doesn't parse.
+			v, n := protowire.ConsumeGroup(num, msg)
+			if n < 0 {
+				return false
+			}
+			msg = msg[n:]
+			w.group(v, fieldName(prefix, num), depth)
+		default:
+			// Numbers; an end tag without its start doesn't parse.
 			n = protowire.ConsumeFieldValue(num, typ, msg)
 			if n < 0 {
 				return false
 			}
 			msg = msg[n:]
-			continue
 		}
-		v, n := protowire.ConsumeBytes(msg)
-		if n < 0 {
-			return false
-		}
-		msg = msg[n:]
-		name := strconv.Itoa(int(num))
-		if prefix != "" {
-			name = prefix + "." + name
-		}
-		w.field(v, name, depth)
 	}
 	return true
+}
+
+// fieldName is the name of field num of a message whose fields are named
+// under prefix.
+func fieldName(prefix string, num protowire.Number) string {
+	name := strconv.Itoa(int(num))
+	if prefix != "" {
+		name = prefix + "." + name
+	}
+	return name
 }
 
 // field reads the bytes of a length-delimited field: as text, and as a
@@ -157,27 +176,37 @@ func (w *walker) field(v []byte, name string, depth int) {
 		return
 	}
 	nested, numbersRun := valid(v, minNumbersRun)
+	if nested {
+		w.nested(v, name, depth, numbersRun)
+		return
+	}
+	if utf8.Valid(v) {
+		w.text(spaced(v), name)
+	} else {
+		w.text(runs(v, minBinaryRun), name)
+	}
+}
+
+// group reads a group's fields v, a valid message, as a nested message's:
+// its text, and its fields under name, within the same limits.
+func (w *walker) group(v []byte, name string, depth int) {
+	if len(v) == 0 {
+		return
+	}
+	_, numbersRun := valid(v, minNumbersRun)
+	w.nested(v, name, depth, numbersRun)
+}
+
+// nested reads v, a valid message at depth+1 named name, as text (see
+// field), then its fields; numbersRun: between(v) may hold a run (valid).
+func (w *walker) nested(v []byte, name string, depth int, numbersRun bool) {
 	var value string
-	switch {
-	case nested && printable(v):
+	if printable(v) {
 		value = string(v)
-	case !nested && utf8.Valid(v):
-		value = spaced(v)
-	case nested:
-		if numbersRun {
-			value = runs(between(v), minNumbersRun)
-		}
-	default:
-		value = runs(v, minBinaryRun)
+	} else if numbersRun {
+		value = runs(between(v), minNumbersRun)
 	}
-	if value != "" {
-		if len(w.out) >= w.lim.Fields {
-			w.over = true
-			return
-		}
-		w.out = append(w.out, Field{Name: name, Value: value})
-	}
-	if !nested {
+	if !w.text(value, name) {
 		return
 	}
 	if depth+1 > w.lim.Depth {
@@ -187,20 +216,44 @@ func (w *walker) field(v []byte, name string, depth int) {
 	w.message(v, name, depth+1)
 }
 
+// text adds value, unless it is empty, as the text of field name. It
+// reports false when the fields are over the limit.
+func (w *walker) text(value, name string) bool {
+	if value == "" {
+		return true
+	}
+	if len(w.out) >= w.lim.Fields {
+		w.over = true
+		return false
+	}
+	w.out = append(w.out, Field{Name: name, Value: value})
+	return true
+}
+
 // between returns the bytes of msg, a valid message, but the contents of
-// its length-delimited fields: its tags, lengths and numbers.
+// its length-delimited fields: its tags, lengths and numbers, those of its
+// groups too (whose text fields are read as theirs).
 func between(msg []byte) []byte {
-	var out []byte
+	return appendBetween(nil, msg)
+}
+
+func appendBetween(out, msg []byte) []byte {
 	for len(msg) > 0 {
-		_, typ, n := protowire.ConsumeField(msg)
-		if typ != protowire.BytesType {
+		num, typ, n := protowire.ConsumeField(msg)
+		switch typ {
+		case protowire.BytesType:
+			_, _, tag := protowire.ConsumeTag(msg)
+			v, _ := protowire.ConsumeBytes(msg[tag:])
+			out = append(out, msg[:n-len(v)]...)
+		case protowire.StartGroupType:
+			_, _, tag := protowire.ConsumeTag(msg)
+			v, _ := protowire.ConsumeGroup(num, msg[tag:])
+			out = append(out, msg[:tag]...)
+			out = appendBetween(out, v)
+			out = append(out, msg[tag+len(v):n]...)
+		default:
 			out = append(out, msg[:n]...)
-			msg = msg[n:]
-			continue
 		}
-		_, _, tag := protowire.ConsumeTag(msg)
-		v, _ := protowire.ConsumeBytes(msg[tag:])
-		out = append(out, msg[:n-len(v)]...)
 		msg = msg[n:]
 	}
 	return out
