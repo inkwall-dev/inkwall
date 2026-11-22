@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -447,12 +448,17 @@ func TestManagedRoundTrip(t *testing.T) {
 	// A new stream says which snapshot the cluster has: the control plane
 	// doesn't send it again.
 	hellos := len(cp.Stats().Hellos)
-	var cfg wafv1alpha1.InkwallConfig
-	if err := c.Get(ctx, types.NamespacedName{Name: "default"}, &cfg); err != nil {
-		t.Fatal(err)
-	}
-	cfg.Spec.Suspend = true
-	if err := c.Update(ctx, &cfg); err != nil {
+	// The Connector writes the InkwallConfig's status meanwhile: a conflict
+	// means the read came before that write, so read again (#801).
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var cfg wafv1alpha1.InkwallConfig
+		if err := c.Get(ctx, types.NamespacedName{Name: "default"}, &cfg); err != nil {
+			return err
+		}
+		cfg.Spec.Suspend = true
+		return c.Update(ctx, &cfg)
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "a new Hello", func() bool { return len(cp.Stats().Hellos) > hellos })
