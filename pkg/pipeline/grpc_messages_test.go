@@ -53,6 +53,11 @@ func TestGRPCMessages(t *testing.T) {
 	const svc = "/shop.Catalog/Search"
 	const sqli = "1' OR '1'='1' -- "
 	nested := grpcFrame(append(pbString(1, "books"), pbString(2, string(pbString(3, sqli)))...))
+	// A group (proto2, editions' DELIMITED encoding): fields between a
+	// start and an end tag.
+	group := func(num byte, fields []byte) []byte {
+		return append(append([]byte{num<<3 | 3}, fields...), num<<3|4)
+	}
 	tests := []struct {
 		name    string
 		body    []byte
@@ -68,10 +73,13 @@ func TestGRPCMessages(t *testing.T) {
 		{"sqli in a later message", append(clientStream(), helloRequest(sqli)...), nil, false, 403, 0, 942100},
 		{"xss", helloRequest(`<script>alert(1)</script>`), nil, false, 403, 0, 941100},
 		{"gzip", gzipFrame(t, pbString(1, sqli)), []string{"Grpc-Encoding", "gzip"}, false, 403, 0, 942100},
+		{"sqli in a group", grpcFrame(append(pbString(1, "books"), group(2, pbString(3, sqli))...)), nil, false, 403, 0, 942100},
+		{"xss in nested groups", grpcFrame(group(1, group(2, pbString(1, `<script>alert(1)</script>`)))), nil, false, 403, 0, 941100},
 		// Can't be read: handled as an oversized body, 413 in block mode.
 		{"unknown encoding", gzipFrame(t, pbString(1, "world")), []string{"Grpc-Encoding", "zstd"}, false, 413, 0, 0},
 		{"compressed, no encoding", gzipFrame(t, pbString(1, "world")), nil, false, 413, 0, 0},
 		{"not protobuf", grpcFrame([]byte{0xff, 0xff, 0xff}), nil, false, 413, 0, 0},
+		{"unclosed group", grpcFrame(append([]byte{1<<3 | 3}, pbString(2, "world")...)), nil, false, 413, 0, 0},
 		{"cut", clientStream()[:12], nil, true, 413, 0, 0},
 		// Decompresses past 1 MiB: what fit is read, the rest isn't.
 		{"gzip bomb", gzipFrame(t, protowire.AppendString(protowire.AppendTag(nil, 1, protowire.BytesType),

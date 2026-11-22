@@ -101,6 +101,62 @@ func TestStrings(t *testing.T) {
 	}
 }
 
+// group builds group num of fields (a message): between a start and an
+// end tag.
+func group(num int, fields []byte) []byte {
+	b := protowire.AppendTag(nil, protowire.Number(num), protowire.StartGroupType)
+	b = append(b, fields...)
+	return protowire.AppendTag(b, protowire.Number(num), protowire.EndGroupType)
+}
+
+// TestStringsGroups: a group (proto2, editions' DELIMITED encoding) is read
+// as a nested message: its fields, its text, within the same limits.
+func TestStringsGroups(t *testing.T) {
+	deep := func(levels int) []byte {
+		m := pb(1, "bottom")
+		for range levels {
+			m = group(1, m)
+		}
+		return m
+	}
+	endTag := func(num int) []byte { return protowire.AppendTag(nil, protowire.Number(num), protowire.EndGroupType) }
+	tests := []struct {
+		name string
+		msg  []byte
+		want []Field
+		ok   bool
+	}{
+		{"group", group(2, pb(1, "inner")), []Field{{"2.1", "inner"}}, true},
+		{"nested groups", group(1, group(2, pb(3, "<script>"))), []Field{{"1.2.3", "<script>"}}, true},
+		{"after a string", append(pb(1, "a"), group(2, pb(1, "b"))...), []Field{{"1", "a"}, {"2.1", "b"}}, true},
+		{"empty group", group(1, nil), nil, true},
+		// Text in a group's numbers: fixed64 field 2 (tag 0x11).
+		{"text in numbers", group(1, []byte("\x11' OR 1=1")), []Field{{"1", "' OR 1=1"}}, true},
+		// A group in a length-delimited field: its text is the group's,
+		// not also the field's.
+		{"in a submessage", pb(1, group(2, pb(3, "x' OR 1=1"))), []Field{{"1.2.3", "x' OR 1=1"}}, true},
+		// As deep as nested messages may be, and deeper.
+		{"at the depth limit", deep(DefaultLimits.Depth), []Field{{strings.Repeat("1.", DefaultLimits.Depth) + "1", "bottom"}}, true},
+		{"too deep", deep(DefaultLimits.Depth + 1), nil, false},
+		{"no end", append(protowire.AppendTag(nil, 1, protowire.StartGroupType), pb(2, "x")...), nil, false},
+		{"other end", append(append(protowire.AppendTag(nil, 1, protowire.StartGroupType), pb(2, "x")...), endTag(3)...), nil, false},
+		{"stray end", append(pb(1, "a"), endTag(1)...), []Field{{"1", "a"}}, false},
+	}
+	for _, tt := range tests {
+		got, ok := Strings(tt.msg, DefaultLimits, nil)
+		if ok != tt.ok || !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%s: Strings = %q, %v; want %q, %v", tt.name, got, ok, tt.want, tt.ok)
+		}
+	}
+	var many []byte
+	for i := range 20 {
+		many = append(many, group(i+1, pb(1, "v"))...)
+	}
+	if got, ok := Strings(many, Limits{Depth: 4, Fields: 10}, nil); ok || len(got) != 10 {
+		t.Errorf("too many: %d fields, %v; want 10, false", len(got), ok)
+	}
+}
+
 func TestStringsLimits(t *testing.T) {
 	deep := pb(1, "bottom")
 	for range 20 {
