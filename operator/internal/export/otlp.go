@@ -48,6 +48,8 @@ func logRecord(it item, v *view) *logspb.LogRecord {
 	add("url.path", ev.GetPath())
 	if !v.omitClientIP {
 		add("client.address", ev.GetClientIp())
+		// The client's country, left out with its address.
+		add("client.geo.country.iso_code", ev.GetCountry())
 	}
 	if !v.omitUserAgent {
 		add("user_agent.original", ev.GetUserAgent())

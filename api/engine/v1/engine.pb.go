@@ -122,6 +122,12 @@ const (
 	// The client was over one of the policy's rate limits (spec.rateLimits):
 	// 429 with Retry-After in Block mode.
 	Reason_REASON_RATE_LIMIT Reason = 15
+	// The client's country is denied by the policy's geo blocking
+	// (spec.geo): 403 in Block mode.
+	Reason_REASON_GEO_DENY Reason = 16
+	// The bundle names a country table the engine doesn't hold, and the
+	// policy fails closed: 503.
+	Reason_REASON_GEO_UNAVAILABLE Reason = 17
 )
 
 // Enum value maps for Reason.
@@ -143,24 +149,28 @@ var (
 		13: "REASON_IP_ALLOW",
 		14: "REASON_GRPC",
 		15: "REASON_RATE_LIMIT",
+		16: "REASON_GEO_DENY",
+		17: "REASON_GEO_UNAVAILABLE",
 	}
 	Reason_value = map[string]int32{
-		"REASON_UNSPECIFIED": 0,
-		"REASON_NONE":        1,
-		"REASON_RULE":        2,
-		"REASON_TIMEOUT":     3,
-		"REASON_ERROR":       4,
-		"REASON_CANCELED":    5,
-		"REASON_OVERLOAD":    6,
-		"REASON_OVERSIZE":    7,
-		"REASON_SKIPPED":     8,
-		"REASON_NO_POLICY":   9,
-		"REASON_SUSPENDED":   10,
-		"REASON_WEBSOCKET":   11,
-		"REASON_IP_DENY":     12,
-		"REASON_IP_ALLOW":    13,
-		"REASON_GRPC":        14,
-		"REASON_RATE_LIMIT":  15,
+		"REASON_UNSPECIFIED":     0,
+		"REASON_NONE":            1,
+		"REASON_RULE":            2,
+		"REASON_TIMEOUT":         3,
+		"REASON_ERROR":           4,
+		"REASON_CANCELED":        5,
+		"REASON_OVERLOAD":        6,
+		"REASON_OVERSIZE":        7,
+		"REASON_SKIPPED":         8,
+		"REASON_NO_POLICY":       9,
+		"REASON_SUSPENDED":       10,
+		"REASON_WEBSOCKET":       11,
+		"REASON_IP_DENY":         12,
+		"REASON_IP_ALLOW":        13,
+		"REASON_GRPC":            14,
+		"REASON_RATE_LIMIT":      15,
+		"REASON_GEO_DENY":        16,
+		"REASON_GEO_UNAVAILABLE": 17,
 	}
 )
 
@@ -671,7 +681,7 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\fACTION_ALLOW\x10\x01\x12\x0f\n" +
 	"\vACTION_DENY\x10\x02\x12\x0e\n" +
 	"\n" +
-	"ACTION_LOG\x10\x03*\xce\x02\n" +
+	"ACTION_LOG\x10\x03*\xff\x02\n" +
 	"\x06Reason\x12\x16\n" +
 	"\x12REASON_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vREASON_NONE\x10\x01\x12\x0f\n" +
@@ -689,7 +699,9 @@ const file_engine_v1_engine_proto_rawDesc = "" +
 	"\x0eREASON_IP_DENY\x10\f\x12\x13\n" +
 	"\x0fREASON_IP_ALLOW\x10\r\x12\x0f\n" +
 	"\vREASON_GRPC\x10\x0e\x12\x15\n" +
-	"\x11REASON_RATE_LIMIT\x10\x0f2Z\n" +
+	"\x11REASON_RATE_LIMIT\x10\x0f\x12\x13\n" +
+	"\x0fREASON_GEO_DENY\x10\x10\x12\x1a\n" +
+	"\x16REASON_GEO_UNAVAILABLE\x10\x112Z\n" +
 	"\fCheckService\x12J\n" +
 	"\x05Check\x12\x1f.inkwall.engine.v1.CheckRequest\x1a .inkwall.engine.v1.CheckResponseB7Z5github.com/inkwall-dev/inkwall/api/engine/v1;enginev1b\x06proto3"
 

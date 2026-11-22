@@ -145,6 +145,8 @@ type tuneEvent struct {
 	// requests it stands for.
 	RateLimit string
 	Sampled   int
+	// Country is the client's, when the engine held a country table.
+	Country string
 }
 
 type tuneMatch struct {
@@ -225,6 +227,7 @@ func readEvents(r io.Reader, lines eventLines, keep func(string) bool) ([]tuneEv
 		ev.Interrupting, _ = strconv.Atoi(str(raw, "interrupting_rule_id", "interruptingRuleId"))
 		ev.RateLimit = str(raw, "rate_limit", "rateLimit")
 		ev.Sampled, _ = strconv.Atoi(str(raw, "sampled_count", "sampledCount"))
+		ev.Country = str(raw, "country")
 		var matches []map[string]json.RawMessage
 		if m, ok := raw["matches"]; ok {
 			if err := json.Unmarshal(m, &matches); err != nil {

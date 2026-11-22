@@ -293,6 +293,9 @@ type EventExplanation struct {
 	AllowedWithSuggestions bool `json:"allowedWithSuggestions"`
 	// RateLimit is, for a rate-limit event, the limit and what it allows.
 	RateLimit *RateLimitExplain `json:"rateLimit,omitempty"`
+	// GeoSampled is, for a geo event, the requests of the client's
+	// country it stands for (one event a minute per country).
+	GeoSampled int `json:"geoSampled,omitempty"`
 }
 
 // RateLimitExplain is one of a policy's rate limits.
@@ -342,6 +345,32 @@ func rateLimitExplain(l wafv1alpha1.RateLimit) RateLimitExplain {
 	return re
 }
 
+// geoExplain is spec.geo in a line: what it denies, the unknown
+// addresses, and Detect; "" without it.
+func geoExplain(g *wafv1alpha1.GeoSpec) string {
+	if g == nil {
+		return ""
+	}
+	codes := func(cs []wafv1alpha1.CountryCode) string {
+		out := make([]string, len(cs))
+		for i, c := range cs {
+			out[i] = string(c)
+		}
+		return strings.Join(out, ", ")
+	}
+	s := "denies " + codes(g.Deny)
+	if len(g.Allow) > 0 {
+		s = "allows only " + codes(g.Allow)
+	}
+	if g.Unknown == wafv1alpha1.GeoUnknownDeny {
+		s += "; denies addresses of no country"
+	}
+	if g.Mode == wafv1alpha1.GeoModeDetect {
+		s += " (Detect: logs only)"
+	}
+	return s
+}
+
 // policyRateLimit finds the limit name of policy id in in.
 func policyRateLimit(in resolver.Input, id, name string) (wafv1alpha1.RateLimit, bool) {
 	for _, p := range in.Policies {
@@ -377,12 +406,14 @@ type RuleExplain struct {
 
 // EventRequest is the request, as the event has it: untrusted.
 type EventRequest struct {
-	ID       string       `json:"id"`
-	Method   string       `json:"method"`
-	Host     string       `json:"host"`
-	Path     string       `json:"path"`
-	ClientIP string       `json:"clientIp"`
-	Matches  []MatchPoint `json:"matches"`
+	ID       string `json:"id"`
+	Method   string `json:"method"`
+	Host     string `json:"host"`
+	Path     string `json:"path"`
+	ClientIP string `json:"clientIp"`
+	// Country is the client's, when the engine held a country table.
+	Country string       `json:"country,omitempty"`
+	Matches []MatchPoint `json:"matches"`
 }
 
 // MatchPoint is where a rule matched: the variable's name, never its
@@ -535,7 +566,7 @@ func explainEvent(ctx context.Context, cluster *explainCluster, cfg explainConfi
 	ee := EventExplanation{
 		Source: source, Policy: ev.Policy, Phase: cmp.Or(ev.Phase, "request"), Action: ev.Action, Reason: reason,
 		Status: ev.Status, AnomalyScore: ev.AnomalyScore, Rules: []RuleExplain{}, Suggestions: []Suggestion{}, NotSuggested: []NotSuggested{},
-		Request: EventRequest{ID: ev.RequestID, Method: ev.Method, Host: ev.Host, Path: ev.Path, ClientIP: ev.ClientIP, Matches: []MatchPoint{}},
+		Request: EventRequest{ID: ev.RequestID, Method: ev.Method, Host: ev.Host, Path: ev.Path, ClientIP: ev.ClientIP, Country: ev.Country, Matches: []MatchPoint{}},
 	}
 	switch ev.Action {
 	case "log":
@@ -583,6 +614,11 @@ func explainEvent(ctx context.Context, cluster *explainCluster, cfg explainConfi
 	}
 	for _, id := range order {
 		ee.Rules = append(ee.Rules, *byID[id])
+	}
+
+	if reason == "geo-deny" || reason == "geo-unavailable" {
+		ee.GeoSampled = ev.Sampled
+		return ee
 	}
 
 	// A rate limit's: the limit, from the policy.
@@ -796,7 +832,9 @@ type PolicyExplanation struct {
 	Engines    []EngineRef        `json:"engines"`
 	// RateLimits are the policy's limits, and what each allows.
 	RateLimits []RateLimitExplain `json:"rateLimits,omitempty"`
-	Warnings   []string           `json:"warnings"`
+	// Geo is the policy's spec.geo, in a line.
+	Geo      string   `json:"geo,omitempty"`
+	Warnings []string `json:"warnings"`
 }
 
 // TargetExplain is one of the policy's targets.
@@ -845,6 +883,7 @@ func explainPolicy(ctx context.Context, cluster *explainCluster, namespace, id s
 	for _, l := range p.Spec.RateLimits {
 		pe.RateLimits = append(pe.RateLimits, rateLimitExplain(l))
 	}
+	pe.Geo = geoExplain(p.Spec.Geo)
 	for _, t := range policyConditions {
 		ce := ConditionExplain{Type: t, Status: string(metav1.ConditionUnknown)}
 		c := meta.FindStatusCondition(p.Status.Conditions, t)
@@ -936,6 +975,9 @@ func printPolicyExplanation(w io.Writer, pe *PolicyExplanation) {
 		targets = append(targets, s)
 	}
 	fmt.Fprintf(w, "Targets: %s\n", cmp.Or(strings.Join(targets, ", "), "none"))
+	if pe.Geo != "" {
+		fmt.Fprintf(w, "Geo: %s\n", pe.Geo)
+	}
 	for _, rl := range pe.RateLimits {
 		mode := ""
 		if rl.Detect {
@@ -1011,6 +1053,12 @@ func printRequestExplanation(w io.Writer, re *RequestExplanation) {
 			fmt.Fprintf(w, ": %s", ev.Cause)
 		}
 		fmt.Fprintln(w)
+		if ev.Request.Country != "" {
+			fmt.Fprintf(w, "  Country: %s\n", terminalSafe(ev.Request.Country))
+		}
+		if ev.GeoSampled > 1 {
+			fmt.Fprintf(w, "  This event stands for %d requests of the country (one event a minute per country).\n", ev.GeoSampled)
+		}
 		if rl := ev.RateLimit; rl != nil {
 			fmt.Fprintf(w, "  Rate limit: %s", terminalSafe(rl.Name))
 			if rl.Allows != "" {
