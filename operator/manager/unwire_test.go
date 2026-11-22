@@ -42,6 +42,26 @@ func testUninstall(ctx context.Context, t *testing.T, c client.Client, stop func
 			t.Fatal(err)
 		}
 	}
+	// Deleted once the operator is down: the audit log's delete webhooks
+	// fail open (#726).
+	downRules := &wafv1alpha1.WAFRuleSet{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "down"},
+		Spec:       wafv1alpha1.WAFRuleSetSpec{Source: wafv1alpha1.RuleSetSource{Builtin: wafv1alpha1.BuiltinCRSv4}},
+	}
+	downList := &wafv1alpha1.WAFIPList{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "down"},
+		Spec:       wafv1alpha1.WAFIPListSpec{Entries: []wafv1alpha1.IPListEntry{{CIDR: "203.0.113.0/24"}}},
+	}
+	downCluster := &wafv1alpha1.ClusterWAFRuleSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "down"},
+		Spec:       wafv1alpha1.ClusterWAFRuleSetSpec{Source: wafv1alpha1.ClusterRuleSetSource{SecLang: `SecRule ARGS "@rx down" "id:100900,phase:1,deny"`}},
+	}
+	downObjects := []client.Object{downRules, downList, downCluster}
+	for _, o := range downObjects {
+		if err := c.Create(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
 	held := func(p *wafv1alpha1.WAFPolicy) (bool, error) {
 		var got wafv1alpha1.WAFPolicy
 		err := c.Get(ctx, client.ObjectKeyFromObject(p), &got)
@@ -91,6 +111,14 @@ func testUninstall(ctx context.Context, t *testing.T, c client.Client, stop func
 	}
 	if err := c.Delete(ctx, gone); err != nil {
 		t.Fatal(err)
+	}
+	for _, o := range downObjects {
+		if err := c.Delete(ctx, o); err != nil {
+			t.Errorf("delete %T %s while the operator is down: %v", o, o.GetName(), err)
+		}
+		if err := c.Get(ctx, client.ObjectKeyFromObject(o), o); !apierrors.IsNotFound(err) {
+			t.Errorf("%T %s after its delete: %v, want NotFound", o, o.GetName(), err)
+		}
 	}
 	if h, err := held(gone); err != nil || !h || !wired() {
 		t.Fatalf("deleted while the operator is down: held %v (%v), wired %v; want both", h, err, wired())

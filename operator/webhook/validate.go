@@ -48,51 +48,64 @@ const PolicyWebhookName = "wafpolicies.waf.inkwall.dev"
 // closed can't block anything else in the cluster. A rule that slipped in
 // while the webhook was down would only fail later, in every engine.
 //
+// Every webhook also feeds the audit log (Auditor) once it admits a
+// request: sideEffects=NoneOnDryRun, as a dry run records nothing.
+//
 // +kubebuilder:webhookconfiguration:mutating=false,name=inkwall-operator-validating
-// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafruleset,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=wafrulesets,verbs=create;update,versions=v1alpha1,name=wafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
-// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-clusterwafruleset,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=clusterwafrulesets,verbs=create;update,versions=v1alpha1,name=clusterwafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
-// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafpolicy,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=wafpolicies,verbs=create;update,versions=v1alpha1,name=wafpolicies.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
-// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafiplist,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=wafiplists,verbs=create;update,versions=v1alpha1,name=wafiplists.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
+// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafruleset,mutating=false,failurePolicy=fail,sideEffects=NoneOnDryRun,groups=waf.inkwall.dev,resources=wafrulesets,verbs=create;update,versions=v1alpha1,name=wafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
+// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-clusterwafruleset,mutating=false,failurePolicy=fail,sideEffects=NoneOnDryRun,groups=waf.inkwall.dev,resources=clusterwafrulesets,verbs=create;update,versions=v1alpha1,name=clusterwafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
+// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafpolicy,mutating=false,failurePolicy=fail,sideEffects=NoneOnDryRun,groups=waf.inkwall.dev,resources=wafpolicies,verbs=create;update,versions=v1alpha1,name=wafpolicies.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
+// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafiplist,mutating=false,failurePolicy=fail,sideEffects=NoneOnDryRun,groups=waf.inkwall.dev,resources=wafiplists,verbs=create;update,versions=v1alpha1,name=wafiplists.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
 //
-// Deletes go to the same webhooks only for the control plane's objects (the
-// objectSelector), so deleting any other object never needs the operator.
+// Deletes of the control plane's objects (the objectSelector) go to
+// webhooks that fail closed, for the SourceGuard.
 //
-// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafruleset,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=wafrulesets,verbs=delete,versions=v1alpha1,name=delete.wafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,patch=`{"objectSelector":{"matchLabels":{"inkwall.dev/source":"saas"}}}`
-// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-clusterwafruleset,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=clusterwafrulesets,verbs=delete,versions=v1alpha1,name=delete.clusterwafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,patch=`{"objectSelector":{"matchLabels":{"inkwall.dev/source":"saas"}}}`
-// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafpolicy,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=wafpolicies,verbs=delete,versions=v1alpha1,name=delete.wafpolicies.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,patch=`{"objectSelector":{"matchLabels":{"inkwall.dev/source":"saas"}}}`
-// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafiplist,mutating=false,failurePolicy=fail,sideEffects=None,groups=waf.inkwall.dev,resources=wafiplists,verbs=delete,versions=v1alpha1,name=delete.wafiplists.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,patch=`{"objectSelector":{"matchLabels":{"inkwall.dev/source":"saas"}}}`
+// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafruleset,mutating=false,failurePolicy=fail,sideEffects=NoneOnDryRun,groups=waf.inkwall.dev,resources=wafrulesets,verbs=delete,versions=v1alpha1,name=delete.wafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,patch=`{"objectSelector":{"matchLabels":{"inkwall.dev/source":"saas"}}}`
+// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-clusterwafruleset,mutating=false,failurePolicy=fail,sideEffects=NoneOnDryRun,groups=waf.inkwall.dev,resources=clusterwafrulesets,verbs=delete,versions=v1alpha1,name=delete.clusterwafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,patch=`{"objectSelector":{"matchLabels":{"inkwall.dev/source":"saas"}}}`
+// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafpolicy,mutating=false,failurePolicy=fail,sideEffects=NoneOnDryRun,groups=waf.inkwall.dev,resources=wafpolicies,verbs=delete,versions=v1alpha1,name=delete.wafpolicies.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,patch=`{"objectSelector":{"matchLabels":{"inkwall.dev/source":"saas"}}}`
+// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafiplist,mutating=false,failurePolicy=fail,sideEffects=NoneOnDryRun,groups=waf.inkwall.dev,resources=wafiplists,verbs=delete,versions=v1alpha1,name=delete.wafiplists.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,patch=`{"objectSelector":{"matchLabels":{"inkwall.dev/source":"saas"}}}`
+//
+// Every other delete goes to them only for the audit log, failing open:
+// deleting those objects never needs the operator. While it is down, such
+// a delete waits at most the timeout, and isn't recorded.
+//
+// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafruleset,mutating=false,failurePolicy=ignore,sideEffects=NoneOnDryRun,groups=waf.inkwall.dev,resources=wafrulesets,verbs=delete,versions=v1alpha1,name=audit-delete.wafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,patch=`{"objectSelector":{"matchExpressions":[{"key":"inkwall.dev/source","operator":"NotIn","values":["saas"]}]}}`
+// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-clusterwafruleset,mutating=false,failurePolicy=ignore,sideEffects=NoneOnDryRun,groups=waf.inkwall.dev,resources=clusterwafrulesets,verbs=delete,versions=v1alpha1,name=audit-delete.clusterwafrulesets.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,patch=`{"objectSelector":{"matchExpressions":[{"key":"inkwall.dev/source","operator":"NotIn","values":["saas"]}]}}`
+// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafpolicy,mutating=false,failurePolicy=ignore,sideEffects=NoneOnDryRun,groups=waf.inkwall.dev,resources=wafpolicies,verbs=delete,versions=v1alpha1,name=audit-delete.wafpolicies.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,patch=`{"objectSelector":{"matchExpressions":[{"key":"inkwall.dev/source","operator":"NotIn","values":["saas"]}]}}`
+// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-wafiplist,mutating=false,failurePolicy=ignore,sideEffects=NoneOnDryRun,groups=waf.inkwall.dev,resources=wafiplists,verbs=delete,versions=v1alpha1,name=audit-delete.wafiplists.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2,patch=`{"objectSelector":{"matchExpressions":[{"key":"inkwall.dev/source","operator":"NotIn","values":["saas"]}]}}`
 
 // The InkwallConfig webhook only warns, so it fails open: the
 // InkwallConfig, and its spec.suspend switch, must stay editable while the
-// operator is down.
+// operator is down. It sees deletes for the audit log.
 //
-// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-inkwallconfig,mutating=false,failurePolicy=ignore,sideEffects=None,groups=waf.inkwall.dev,resources=inkwallconfigs,verbs=create;update,versions=v1alpha1,name=inkwallconfigs.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
+// +kubebuilder:webhook:path=/validate-waf-inkwall-dev-v1alpha1-inkwallconfig,mutating=false,failurePolicy=ignore,sideEffects=NoneOnDryRun,groups=waf.inkwall.dev,resources=inkwallconfigs,verbs=create;update;delete,versions=v1alpha1,name=inkwallconfigs.waf.inkwall.dev,admissionReviewVersions=v1,timeoutSeconds=2
 
 // Setup registers the validating webhooks with mgr's webhook server, and
 // the Pod webhook when inject is set. guard keeps the control plane's
-// objects to the operator.
-func Setup(mgr manager.Manager, inject *PodInjector, guard *SourceGuard) error {
+// objects to the operator; audit records the changes the webhooks admit
+// (nil: none).
+func Setup(mgr manager.Manager, inject *PodInjector, guard *SourceGuard, audit *Auditor) error {
 	if inject != nil {
 		mgr.GetWebhookServer().Register(InjectPath, &ctrlwebhook.Admission{Handler: inject})
 	}
 	if err := builder.WebhookManagedBy(mgr, &wafv1alpha1.WAFRuleSet{}).
-		WithValidator(specValidator[*wafv1alpha1.WAFRuleSet]{validate: validateWAFRuleSet, guard: guard}).Complete(); err != nil {
+		WithValidator(audited[*wafv1alpha1.WAFRuleSet]{specValidator[*wafv1alpha1.WAFRuleSet]{validate: validateWAFRuleSet, guard: guard}, audit}).Complete(); err != nil {
 		return err
 	}
 	if err := builder.WebhookManagedBy(mgr, &wafv1alpha1.ClusterWAFRuleSet{}).
-		WithValidator(specValidator[*wafv1alpha1.ClusterWAFRuleSet]{validate: validateClusterWAFRuleSet, guard: guard}).Complete(); err != nil {
+		WithValidator(audited[*wafv1alpha1.ClusterWAFRuleSet]{specValidator[*wafv1alpha1.ClusterWAFRuleSet]{validate: validateClusterWAFRuleSet, guard: guard}, audit}).Complete(); err != nil {
 		return err
 	}
 	if err := builder.WebhookManagedBy(mgr, &wafv1alpha1.WAFIPList{}).
-		WithValidator(specValidator[*wafv1alpha1.WAFIPList]{validate: validateWAFIPList, guard: guard}).Complete(); err != nil {
+		WithValidator(audited[*wafv1alpha1.WAFIPList]{specValidator[*wafv1alpha1.WAFIPList]{validate: validateWAFIPList, guard: guard}, audit}).Complete(); err != nil {
 		return err
 	}
 	if err := builder.WebhookManagedBy(mgr, &wafv1alpha1.WAFPolicy{}).
-		WithValidator(specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy, guard: guard, deprecated: policyDeprecations}).Complete(); err != nil {
+		WithValidator(audited[*wafv1alpha1.WAFPolicy]{specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy, guard: guard, deprecated: policyDeprecations}, audit}).Complete(); err != nil {
 		return err
 	}
 	return builder.WebhookManagedBy(mgr, &wafv1alpha1.InkwallConfig{}).
-		WithValidator(configValidator{}).Complete()
+		WithValidator(audited[*wafv1alpha1.InkwallConfig]{configValidator{}, audit}).Complete()
 }
 
 const socketDirWarning = "spec.engine.socketDir is deprecated and ignored: each integration places the engine's socket itself; remove it"
@@ -280,6 +293,8 @@ func spec(obj any) any {
 	case *wafv1alpha1.WAFPolicy:
 		return o.Spec
 	case *wafv1alpha1.WAFIPList:
+		return o.Spec
+	case *wafv1alpha1.InkwallConfig:
 		return o.Spec
 	}
 	return obj

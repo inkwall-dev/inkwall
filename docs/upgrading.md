@@ -224,6 +224,16 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   the chart's ClusterRole now grants; with your own RBAC, add it. The
   [API compatibility](api-compatibility.md) page says what may change in the API from here to
   v1.0.0, and what v1.0.0 will freeze.
+- **An audit log of policy changes** (#726, [The audit log](audit-log.md)). Each create, update
+  and delete of a `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet`, `WAFIPList` or `InkwallConfig`
+  is a `"msg":"policy change"` line in the operator's log, with the user and the spec's changed
+  fields (credentials redacted), a `Normal` Event on the object (`Created`, `Changed`,
+  `Deleted`), and `inkwall_operator_policy_changes_total`. Updates that change no spec field are
+  not recorded. For it, the validating webhooks now also see the deletes of every object, not
+  only the control plane's: those fail open (`failurePolicy: Ignore`), so deleting your own
+  objects still never needs the operator, and the `InkwallConfig` webhook sees deletes too. Every
+  validating webhook is now `sideEffects: NoneOnDryRun`. The chart's `ValidatingWebhookConfiguration`
+  changes with the upgrade; with your own manifests, take the new webhooks from the chart.
 
 ### Rolling back to 0.6.x
 
