@@ -15,6 +15,7 @@ import (
 func FuzzMessages(f *testing.F) {
 	f.Add([]byte(frame(0, string(pb(1, "world", 2, pb(1, "in"))))), false)
 	f.Add([]byte(frame(1, "x")+frame(0, "\x0a\x02ab")), true)
+	f.Add([]byte(frame(0, string(group(1, pb(2, "in", 3, group(4, pb(1, "deeper"))))))), false)
 	f.Fuzz(func(t *testing.T, body []byte, truncated bool) {
 		msgs, ok := Messages(body, truncated)
 		if !ok {
