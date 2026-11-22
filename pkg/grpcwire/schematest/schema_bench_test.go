@@ -1,7 +1,7 @@
 // Copyright 2026 The Inkwall Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package grpcwire
+package schematest
 
 import (
 	"bytes"
@@ -16,6 +16,7 @@ import (
 	"google.golang.org/protobuf/types/descriptorpb"
 
 	"github.com/inkwall-dev/inkwall/pkg/grpcschema"
+	"github.com/inkwall-dev/inkwall/pkg/grpcwire"
 )
 
 // benchFile describes BenchmarkGRPCMessages' messages:
@@ -47,8 +48,8 @@ func benchFile() *descriptorpb.FileDescriptorProto {
 }
 
 // largestDescriptor is the largest file descriptor linked into the test,
-// serialized (descriptor.proto's own): a large message with thousands of
-// text fields, as design 0013 §6.6 measured.
+// serialized: a large message with thousands of text fields, as design
+// 0013 §6.6 measured.
 func largestDescriptor(t testing.TB) []byte {
 	var largest []byte
 	protoregistry.GlobalFiles.RangeFiles(func(f protoreflect.FileDescriptor) bool {
@@ -96,9 +97,9 @@ func benchCases(b testing.TB) []benchCase {
 }
 
 // read reads c's body, as the pipeline does, with the schema (or without:
-// Strings).
-func (c benchCase) read(b testing.TB, schema bool, out []Field) []Field {
-	msgs, ok := Messages(c.body, false)
+// grpcwire.Strings).
+func (c benchCase) read(b testing.TB, schema bool, out []grpcwire.Field) []grpcwire.Field {
+	msgs, ok := grpcwire.Messages(c.body, false)
 	if !ok {
 		b.Fatal("not gRPC messages")
 	}
@@ -106,14 +107,14 @@ func (c benchCase) read(b testing.TB, schema bool, out []Field) []Field {
 	for _, m := range msgs {
 		data := m.Data
 		if m.Compressed {
-			if data, ok = Gunzip(data, 1<<20); !ok {
+			if data, ok = grpcwire.Gunzip(data, 1<<20); !ok {
 				b.Fatal("gunzip")
 			}
 		}
 		if schema {
-			out, _, ok = Fields(data, c.schema, c.typ, Limits{Depth: 16, Fields: 4096}, out)
+			out, _, ok = grpcwire.Fields(data, c.schema, c.typ, grpcwire.Limits{Depth: 16, Fields: 4096}, out)
 		} else {
-			out, ok = Strings(data, Limits{Depth: 16, Fields: 4096}, out)
+			out, ok = grpcwire.Strings(data, grpcwire.Limits{Depth: 16, Fields: 4096}, out)
 		}
 		if !ok {
 			b.Fatal("not read whole")
@@ -134,7 +135,7 @@ func BenchmarkGRPCFields(b *testing.B) {
 			b.Run(c.name+"/"+reader, func(b *testing.B) {
 				b.ReportAllocs()
 				b.SetBytes(int64(len(c.body)))
-				var out []Field
+				var out []grpcwire.Field
 				for b.Loop() {
 					out = c.read(b, reader == "schema", out)
 				}
@@ -143,19 +144,19 @@ func BenchmarkGRPCFields(b *testing.B) {
 	}
 }
 
-// TestFieldsAllocatesLess holds Fields to design 0013 §7's budget where it
+// TestFieldsAllocatesLess holds grpcwire.Fields to design 0013 §7's budget where it
 // is deterministic: on each benchmark input, at most 0.8 times the
-// allocations of Strings (the times are BenchmarkGRPCFields'). Names are
+// allocations of grpcwire.Strings (the times are BenchmarkGRPCFields'). Names are
 // built once per field and prefix, not once per value.
 func TestFieldsAllocatesLess(t *testing.T) {
 	for _, c := range benchCases(t) {
 		allocs := func(schema bool) float64 {
-			var out []Field
+			var out []grpcwire.Field
 			return testing.AllocsPerRun(50, func() { out = c.read(t, schema, out) })
 		}
 		fields, strings := allocs(true), allocs(false)
 		if fields > 0.8*strings {
-			t.Errorf("%s: Fields %.0f allocations, over 0.8 x Strings' %.0f", c.name, fields, strings)
+			t.Errorf("%s: grpcwire.Fields %.0f allocations, over 0.8 x Strings' %.0f", c.name, fields, strings)
 		}
 	}
 }
