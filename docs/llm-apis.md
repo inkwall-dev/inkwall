@@ -262,6 +262,12 @@ match logged without a snippet too, and a key of the body in the match's variabl
 bytes (the client chooses keys as well); matches in the URI and headers keep theirs. The `model`
 is the client's text too: at most 64 bytes of it.
 
+`inkwallctl explain request <request-id>` names the check, where it failed, its cause and fix,
+and suggests the exclusion of its rule ID on the path (never `llm-malformed`'s), checked against
+the policy; `inkwallctl tune` suggests those for many events at once, and `inkwallctl explain
+policy` lists a policy's endpoints, checks and token limits ([testing
+policies](testing-policies.md)).
+
 ## What a WAF can't do
 
 Inkwall sees the HTTP exchange, not the model, the retrieval store or the tools your application

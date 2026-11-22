@@ -25,6 +25,7 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
+	"github.com/inkwall-dev/inkwall/pkg/llm"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
 )
@@ -147,6 +148,14 @@ type tuneEvent struct {
 	Sampled   int
 	// Country is the client's, when the engine held a country table.
 	Country string
+	// LLM is an llm event's check, and where (design 0012 §9).
+	LLM tuneLLM
+}
+
+// tuneLLM is what an llm event says of the LLM check that failed.
+type tuneLLM struct {
+	Check, Format, Model, Role string
+	MessageIndex, Offset       int
 }
 
 type tuneMatch struct {
@@ -228,6 +237,20 @@ func readEvents(r io.Reader, lines eventLines, keep func(string) bool) ([]tuneEv
 		ev.RateLimit = str(raw, "rate_limit", "rateLimit")
 		ev.Sampled, _ = strconv.Atoi(str(raw, "sampled_count", "sampledCount"))
 		ev.Country = str(raw, "country")
+		// An engine's log line has llm_check and its kin; an event, an llm
+		// object.
+		ev.LLM = tuneLLM{Check: str(raw, "llm_check"), Format: str(raw, "llm_format")}
+		ev.LLM.MessageIndex, _ = strconv.Atoi(str(raw, "llm_message_index"))
+		ev.LLM.Offset, _ = strconv.Atoi(str(raw, "llm_offset"))
+		if l, ok := raw["llm"]; ok {
+			var o map[string]json.RawMessage
+			if err := json.Unmarshal(l, &o); err != nil {
+				return nil, fmt.Errorf("line %d: llm: %w", line, err)
+			}
+			ev.LLM = tuneLLM{Check: str(o, "check"), Format: str(o, "format"), Model: str(o, "model"), Role: str(o, "role")}
+			ev.LLM.MessageIndex, _ = strconv.Atoi(str(o, "message_index", "messageIndex"))
+			ev.LLM.Offset, _ = strconv.Atoi(str(o, "offset"))
+		}
 		var matches []map[string]json.RawMessage
 		if m, ok := raw["matches"]; ok {
 			if err := json.Unmarshal(m, &matches); err != nil {
@@ -339,6 +362,13 @@ func exclusionRule(ruleID int, variable string) int {
 // turn the policy off, and the rules that added to the score are what to
 // tune. Other TX variables are detection rules' (921180's
 // TX:paramcounter_args_names:<name>).
+// llmCheck reports whether id is one of the LLM checks' reserved rule
+// IDs: excluded on a path, as no exclusion field narrows them.
+func llmCheck(id int) bool {
+	_, ok := llm.CheckOf(id)
+	return ok
+}
+
 func scoreRule(id int, variable string) bool {
 	switch id / 1000 {
 	case 949, 959, 980:
@@ -441,7 +471,9 @@ func tune(evs []tuneEvent, broad bool, minCount int) *tuneReport {
 			g.Skip = fmt.Sprintf("seen %d times, under --min-count", g.Count)
 		case !pathRE.MatchString(g.Path):
 			g.Skip = "the path has characters a WAFPolicy path can't hold"
-		case g.Field == "" && !broad:
+		case g.RuleID == llm.CheckMalformed.RuleID():
+			g.Skip = "a malformed body (llm-malformed): fix the client; excluding it lets bodies the checks can't read through"
+		case g.Field == "" && !broad && !llmCheck(g.RuleID):
 			g.Skip = "no exclusion field names " + g.Variable + ": --broad would turn the rule off for every variable on the path"
 		}
 		if g.Skip != "" {
