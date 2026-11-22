@@ -15,6 +15,7 @@ import (
 
 	"github.com/inkwall-dev/inkwall/pkg/grpcschema"
 	"github.com/inkwall-dev/inkwall/pkg/grpcschema/compile"
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema/load"
 )
 
 // Schema returns the schema of files and their imports.
@@ -44,7 +45,7 @@ func Schema(t testing.TB, files ...protoreflect.FileDescriptor) *grpcschema.Sche
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := grpcschema.Load(c)
+	s, err := load.Load(c)
 	if err != nil {
 		t.Fatal(err)
 	}

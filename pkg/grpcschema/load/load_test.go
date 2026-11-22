@@ -1,7 +1,7 @@
 // Copyright 2026 The Inkwall Authors
 // SPDX-License-Identifier: Apache-2.0
 
-package grpcschema
+package load
 
 import (
 	"fmt"
@@ -11,6 +11,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema"
 )
 
 const (
@@ -19,6 +20,20 @@ const (
 	kMessage = bundlev1.GRPCFieldKind_GRPC_FIELD_KIND_MESSAGE
 	kVarint  = bundlev1.GRPCFieldKind_GRPC_FIELD_KIND_VARINT
 )
+
+// The kinds are the bundle's numbers.
+func TestKinds(t *testing.T) {
+	for k, want := range map[bundlev1.GRPCFieldKind]grpcschema.Kind{
+		kString: grpcschema.KindString, kBytes: grpcschema.KindBytes, kMessage: grpcschema.KindMessage,
+		bundlev1.GRPCFieldKind_GRPC_FIELD_KIND_GROUP: grpcschema.KindGroup, kVarint: grpcschema.KindVarint,
+		bundlev1.GRPCFieldKind_GRPC_FIELD_KIND_FIXED32: grpcschema.KindFixed32, bundlev1.GRPCFieldKind_GRPC_FIELD_KIND_FIXED64: grpcschema.KindFixed64,
+		0: 0, 8: 0, 1 << 20: 0,
+	} {
+		if got := kind(k); got != want {
+			t.Errorf("kind(%d) = %d, want %d", k, got, want)
+		}
+	}
+}
 
 // valid is a small schema Load accepts: /p.S/M reads p.Req, whose field 3
 // is a p.Inner, and an Any.
@@ -57,16 +72,16 @@ func TestLoad(t *testing.T) {
 		t.Fatalf("field 3 = %+v", f)
 	}
 	// Field 1000 makes p.Req sparse: searched, not indexed.
-	if req.dense != nil || req.Field(1000).Name != "[p.ext]" || req.Field(999) != nil || req.Field(5) != nil {
+	if req.Field(1000).Name != "[p.ext]" || req.Field(999) != nil || req.Field(5) != nil || req.Field(-1) != nil {
 		t.Fatal("sparse lookup")
 	}
-	if in := s.Message("p.Inner"); in.dense == nil || in.Field(1).Name != "text" || in.Field(2) != nil || in.Field(0) != nil {
+	if in := s.Message("p.Inner"); in.Field(1).Name != "text" || in.Field(2) != nil || in.Field(0) != nil {
 		t.Fatal("dense lookup")
 	}
 	if s.AnyType("type.googleapis.com/p.Inner") != s.Message("p.Inner") || s.AnyType("x/y") != nil {
 		t.Fatal("AnyType")
 	}
-	var none *Schema
+	var none *grpcschema.Schema
 	if none.Method("/p.S/M") != nil || none.Message("p.Req") != nil {
 		t.Fatal("a nil schema describes something")
 	}
@@ -86,7 +101,9 @@ func TestLoadRefuses(t *testing.T) {
 		{"output out of range", func(s *bundlev1.GRPCSchema) { s.Methods[1].Output = 1 << 31 }, "out of range"},
 		{"bad path", func(s *bundlev1.GRPCSchema) { s.Methods[1].Path = "p.S/M" }, "not /package"},
 		{"path without method", func(s *bundlev1.GRPCSchema) { s.Methods[1].Path = "/p.S/" }, "not /package"},
-		{"long path", func(s *bundlev1.GRPCSchema) { s.Methods[1].Path = "/p.S/" + strings.Repeat("m", MaxFullName) }, "over"},
+		{"long path", func(s *bundlev1.GRPCSchema) {
+			s.Methods[1].Path = "/p.S/" + strings.Repeat("m", grpcschema.MaxFullName)
+		}, "over"},
 		{"type out of range", func(s *bundlev1.GRPCSchema) { s.Messages[2].Fields[2].Message = 9 }, "out of range"},
 		{"type for a string", func(s *bundlev1.GRPCSchema) { s.Messages[2].Fields[0].Message = 1 }, "isn't a message"},
 		{"unknown kind", func(s *bundlev1.GRPCSchema) { s.Messages[2].Fields[0].Kind = 42 }, "unknown kind"},
@@ -96,7 +113,9 @@ func TestLoadRefuses(t *testing.T) {
 		{"unsorted fields", func(s *bundlev1.GRPCSchema) { s.Messages[2].Fields[0].Number = 2 }, "not sorted"},
 		{"bad field name", func(s *bundlev1.GRPCSchema) { s.Messages[2].Fields[0].Name = "a b" }, "not an identifier"},
 		{"empty field name", func(s *bundlev1.GRPCSchema) { s.Messages[2].Fields[0].Name = "" }, "not an identifier"},
-		{"long field name", func(s *bundlev1.GRPCSchema) { s.Messages[2].Fields[0].Name = strings.Repeat("n", MaxFieldName+1) }, "over"},
+		{"long field name", func(s *bundlev1.GRPCSchema) {
+			s.Messages[2].Fields[0].Name = strings.Repeat("n", grpcschema.MaxFieldName+1)
+		}, "over"},
 		{"bad extension name", func(s *bundlev1.GRPCSchema) { s.Messages[2].Fields[4].Name = "[p.ext" }, "extension name"},
 		{"bad full name", func(s *bundlev1.GRPCSchema) { s.Messages[1].FullName = "p..Inner" }, "full name"},
 		{"duplicate message", func(s *bundlev1.GRPCSchema) { s.Messages[1].FullName = "p.Req" }, "twice"},
@@ -104,31 +123,31 @@ func TestLoadRefuses(t *testing.T) {
 		{"Any without value", func(s *bundlev1.GRPCSchema) { s.Messages[0].Fields = s.Messages[0].Fields[:1] }, "value"},
 		{"too many methods", func(s *bundlev1.GRPCSchema) {
 			s.Methods = nil
-			for i := range MaxMethods + 1 {
+			for i := range grpcschema.MaxMethods + 1 {
 				s.Methods = append(s.Methods, &bundlev1.GRPCMethod{Path: fmt.Sprintf("/p.S/M%05d", i)})
 			}
 		}, "methods, over"},
 		{"too many messages", func(s *bundlev1.GRPCSchema) {
-			for i := range MaxMessages {
+			for i := range grpcschema.MaxMessages {
 				s.Messages = append(s.Messages, &bundlev1.GRPCMessage{FullName: fmt.Sprintf("p.M%d", i)})
 			}
 		}, "messages, over"},
 		{"too many fields in a message", func(s *bundlev1.GRPCSchema) {
 			s.Messages[1].Fields = nil
-			for i := range MaxMessageFields + 1 {
+			for i := range grpcschema.MaxMessageFields + 1 {
 				s.Messages[1].Fields = append(s.Messages[1].Fields, &bundlev1.GRPCField{Number: uint32(i + 1), Name: "f", Kind: kString})
 			}
 		}, "fields, over"},
 		{"too many fields", func(s *bundlev1.GRPCSchema) {
-			for i := range MaxFields/MaxMessageFields + 1 {
+			for i := range grpcschema.MaxFields/grpcschema.MaxMessageFields + 1 {
 				m := &bundlev1.GRPCMessage{FullName: fmt.Sprintf("p.W%d", i)}
-				for j := range MaxMessageFields {
+				for j := range grpcschema.MaxMessageFields {
 					m.Fields = append(m.Fields, &bundlev1.GRPCField{Number: uint32(j + 1), Name: "f", Kind: kString})
 				}
 				s.Messages = append(s.Messages, m)
 			}
 		}, "over 65536 fields"},
-		{"over 1 MiB", func(s *bundlev1.GRPCSchema) { s.Source = strings.Repeat("s", MaxCompiledBytes) }, "bytes, over"},
+		{"over 1 MiB", func(s *bundlev1.GRPCSchema) { s.Source = strings.Repeat("s", grpcschema.MaxCompiledBytes) }, "bytes, over"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -158,14 +177,14 @@ func FuzzLoad(f *testing.F) {
 		if err != nil {
 			return
 		}
-		for i := range s.messages {
-			m := &s.messages[i]
+		for _, bm := range b.GetMessages() {
+			m := s.Message(bm.GetFullName())
 			for j := range m.Fields() {
 				f := m.FieldAt(j)
 				if got := m.Field(f.Number); got == nil || got.Number != f.Number {
 					t.Fatalf("%s: field %d not found", m.FullName, f.Number)
 				}
-				if (f.Kind == KindMessage || f.Kind == KindGroup) != (f.Message != nil) {
+				if (f.Kind == grpcschema.KindMessage || f.Kind == grpcschema.KindGroup) != (f.Message != nil) {
 					t.Fatalf("%s.%s: kind %d, type %v", m.FullName, f.Name, f.Kind, f.Message)
 				}
 			}

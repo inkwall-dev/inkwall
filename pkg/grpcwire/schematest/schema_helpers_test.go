@@ -15,6 +15,7 @@ import (
 
 	"github.com/inkwall-dev/inkwall/pkg/grpcschema"
 	"github.com/inkwall-dev/inkwall/pkg/grpcschema/compile"
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema/load"
 )
 
 type fdp = descriptorpb.FieldDescriptorProto
@@ -133,7 +134,7 @@ func schemaOf(t testing.TB, files ...*descriptorpb.FileDescriptorProto) *grpcsch
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	s, err := grpcschema.Load(c)
+	s, err := load.Load(c)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}

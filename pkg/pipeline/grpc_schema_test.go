@@ -19,6 +19,7 @@ import (
 
 	"github.com/inkwall-dev/inkwall/pkg/grpcschema"
 	"github.com/inkwall-dev/inkwall/pkg/grpcschema/compile"
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema/load"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/rules"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
@@ -36,7 +37,7 @@ func compiled(t testing.TB, files ...*descriptorpb.FileDescriptorProto) *grpcsch
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := grpcschema.Load(c)
+	s, err := load.Load(c)
 	if err != nil {
 		t.Fatal(err)
 	}
