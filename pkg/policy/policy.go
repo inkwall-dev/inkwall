@@ -503,6 +503,17 @@ func CheckSettings(bp *bundlev1.Policy, ruleSets []*bundlev1.RuleSet) error {
 	return err
 }
 
+// CheckRuleSets checks that ruleSets has the rule sets policy bp binds, as
+// Compile loads them, without compiling them (RuleChecker.Check does).
+func CheckRuleSets(bp *bundlev1.Policy, ruleSets []*bundlev1.RuleSet) error {
+	byID := map[string]*bundlev1.RuleSet{}
+	for _, rs := range ruleSets {
+		byID[rs.GetId()] = rs
+	}
+	_, _, err := rulesConfig(bp, byID, Options{})
+	return err
+}
+
 // RuleChecker checks that a policy's rule sets compile together, as
 // Compile compiles them: rule sets that are valid alone may not be (the
 // same rule ID in two). It remembers each combination's result, not the
@@ -510,14 +521,30 @@ func CheckSettings(bp *bundlev1.Policy, ruleSets []*bundlev1.RuleSet) error {
 type RuleChecker struct {
 	mu   sync.Mutex
 	errs map[[sha256.Size]byte]error
+	// used are the combinations checked since the last Prune.
+	used map[[sha256.Size]byte]bool
+	// compiles counts the combinations compiled, for tests.
+	compiles int
 }
-
-// maxRuleChecks bounds the results a RuleChecker remembers.
-const maxRuleChecks = 4096
 
 // NewRuleChecker returns a RuleChecker that has checked nothing.
 func NewRuleChecker() *RuleChecker {
-	return &RuleChecker{errs: map[[sha256.Size]byte]error{}}
+	return &RuleChecker{errs: map[[sha256.Size]byte]error{}, used: map[[sha256.Size]byte]bool{}}
+}
+
+// Prune forgets the results of the combinations no Check asked for since
+// the last Prune, as Evaluators drops the rule sets a bundle doesn't use:
+// called after each resolution, it keeps the results of the policies there
+// are, however many, and none of those there were.
+func (c *RuleChecker) Prune() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k := range c.errs {
+		if !c.used[k] {
+			delete(c.errs, k)
+		}
+	}
+	clear(c.used)
 }
 
 // Check compiles the rules of policy bp, whose rule sets are among
@@ -561,17 +588,15 @@ func (c *RuleChecker) Check(bp *bundlev1.Policy, ruleSets []*bundlev1.RuleSet) e
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.used[key] = true
 	if err, ok := c.errs[key]; ok {
 		return err
 	}
+	c.compiles++
 	if own {
 		err = checkRules(cfg, crs, exclusions)
 	} else {
 		_, err = coraza.New(cfg)
-	}
-	if len(c.errs) >= maxRuleChecks {
-		// Results of combinations no policy may bind any more: start again.
-		clear(c.errs)
 	}
 	c.errs[key] = err
 	return err
