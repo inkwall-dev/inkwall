@@ -110,6 +110,8 @@ func TestAuditFieldNames(t *testing.T) {
 		"spec.events.export.sinks.tls.clientCertificateSecretRef",
 		"spec.events.redact.headers",
 		"spec.exclusions.when.header",
+		"spec.geo.database.secretRef",
+		"spec.geo.database.secretRef.key",
 		"spec.rateLimits.key",
 		"spec.rateLimits.key.header",
 		"spec.signingKey",
