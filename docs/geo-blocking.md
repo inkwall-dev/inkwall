@@ -130,7 +130,13 @@ Or let only some countries in:
 ```yaml
   geo:
     allow: [DE, AT, CH]
+    unknown: Deny
 ```
+
+**An allow list isn't "only these countries".** Private addresses always get through geo, and
+public addresses the database has no country for get through unless you set `unknown: Deny`: the
+default is `Allow` ([Unknown and private addresses](#unknown-and-private-addresses)). The webhook
+warns of an allow list with `unknown: Allow`.
 
 ## Fields
 
@@ -160,6 +166,22 @@ go through the rate limits and the rules.
 A database that maps a private range to a country is obeyed. A record's country is its
 `country.iso_code`, else its `registered_country.iso_code`; `ZZ` means no country. To deny private
 ranges, use an IP deny list, the tool for addresses.
+
+`unknown` defaults to `Allow` on purpose, for allow lists too ([design 0011
+§2.2](design/0011-geo-blocking.md#22-unknown-and-private-addresses)). Almost every public address
+has a country, and the ones that don't are mostly new or unannounced ranges. Denying them by
+default would deny real users after one database update that drops a range. Private addresses
+pass because a client IP that the load balancer hides shows up as one: denying them would take the
+site down rather than show the misconfiguration. So with an allow list, a client still gets
+through geo from:
+
+- a public address the database has no country for, unless `unknown: Deny`;
+- a private address, which reaches the proxy only from inside your network or through a hop whose
+  client IP the engine doesn't trust ([client IP](client-ip.md)).
+
+For a strict allow list, set `unknown: Deny`, list your private ranges in `ipLists.deny` if no
+client should come from them, and check the `private` and `unknown` lookups of
+`inkwall_geo_lookups_total`.
 
 ## Where geo runs
 
