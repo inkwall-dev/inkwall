@@ -92,9 +92,9 @@ type geoOutcome struct {
 }
 
 // geoCheck applies the policy's geo blocking to r, whose country the
-// policy set looked up. Only a check that decides the request samples its
-// event (sample).
-func (p *Pipeline) geoCheck(r *request.Request, now time.Time, sample bool) geoOutcome {
+// policy set looked up. It samples no event: sample does, for a verdict
+// geo decides.
+func (p *Pipeline) geoCheck(r *request.Request) geoOutcome {
 	g := p.geo
 	if g == nil || !r.Geo.Looked {
 		// No geo, or the bundle names no table: skipped.
@@ -109,7 +109,15 @@ func (p *Pipeline) geoCheck(r *request.Request, now time.Time, sample bool) geoO
 	case geo.ResultUnknown:
 		o.deny = g.UnknownDeny
 	}
-	if sample && (o.deny || o.noTable && !o.detect && p.failure == FailClosed) {
+	return o
+}
+
+// sample samples the event of a verdict o decides, r's at now: the first
+// of its country's, then one a minute, counting the requests in between. A
+// verdict something else decides, such as a rule's detection, makes its
+// own event and isn't counted.
+func (o geoOutcome) sample(p *Pipeline, r *request.Request, now time.Time) geoOutcome {
+	if o.deny || o.noTable && !o.detect && p.failure == FailClosed {
 		o.sampled, o.count = p.geoEvents.sample(sampleKey(r.Geo), now)
 	}
 	return o
@@ -152,5 +160,5 @@ func (o geoOutcome) blocks(p *Pipeline) bool {
 // failing closed. A set of policies asks it before any policy's rate
 // limits, which geo comes before (design 0011 §2.3).
 func (p *Pipeline) GeoBlocks(r *request.Request) bool {
-	return p.geo != nil && p.ipListed(r) == ReasonNone && p.geoCheck(r, time.Time{}, false).blocks(p)
+	return p.geo != nil && p.ipListed(r) == ReasonNone && p.geoCheck(r).blocks(p)
 }

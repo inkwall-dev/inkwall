@@ -174,7 +174,9 @@ In a policy's checks, in this order:
 5. The rules.
 
 In `Detect`, the request goes on: if nothing else decides, the verdict is `log` with reason
-`geo-deny`; if a rule matched, its reason wins (the metric still counts the geo match). On a
+`geo-deny`; if a rule matched or the rules detected an attack, the rules' event wins, one for
+each request, with its rule IDs (the metric still counts the geo match; `geo-deny` events are
+sampled, and a detection never is). On a
 skipped path, `Detect` logs `geo-deny` rather than `skipped`, so it shows what `Block` would deny.
 A request several policies inspect gets each policy's geo; the strictest verdict wins. Suspending
 inspection (`InkwallConfig.spec.suspend`) suspends geo too.

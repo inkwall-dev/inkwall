@@ -143,7 +143,8 @@ retry at once.
 ## Detect first
 
 `mode: Detect` on a limit logs the requests over it and lets them through, on a policy already in
-`Block`: the rules still run, and if a rule matches, its reason wins. Watch
+`Block`: the rules still run, and if a rule matches or detects an attack, its event wins, one for
+each request (`rate-limit` events are sampled, a detection never is). Watch
 `inkwall_rate_limit_exceeded_total{action="log"}` and the `rate-limit` events for a few days: real clients
 should stay under the limit, and the events' `client_ip` should be real clients. Then remove
 `mode`.
