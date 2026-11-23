@@ -815,6 +815,13 @@ func (h *Holder) BodyLimit(r *request.Request, max int64) int64 {
 	return s.BodyLimit(r, max)
 }
 
+// CheckRateLimits checks a policy's rate limits as Compile compiles them,
+// for the operator: it leaves out of the bundle a policy whose limits the
+// engine can't compile.
+func CheckRateLimits(bp *bundlev1.Policy) error {
+	return pipeline.CheckRateLimits(rateLimits(bp))
+}
+
 // rateLimits is a policy's rate limits, as the pipeline takes them.
 func rateLimits(bp *bundlev1.Policy) []pipeline.RateLimitConfig {
 	var out []pipeline.RateLimitConfig
