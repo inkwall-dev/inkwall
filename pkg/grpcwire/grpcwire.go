@@ -202,8 +202,9 @@ func (w *walker) field(v []byte, name string, depth int) (blank bool) {
 		// values into words no one sent (false positives): those messages
 		// give their fields alone.
 		// A printable message is text as it is, to its parent too.
-		blank = w.nested(v, name, depth)
-		if printable(v) {
+		pr := printable(v)
+		blank = w.nested(v, name, depth, pr)
+		if pr {
 			return true
 		}
 		if blank && depth < w.lim.Depth && utf8.Valid(v) {
@@ -226,15 +227,15 @@ func (w *walker) group(v []byte, name string, depth int) bool {
 	if len(v) == 0 {
 		return true
 	}
-	return w.nested(v, name, depth)
+	return w.nested(v, name, depth, printable(v))
 }
 
 // nested reads v, a valid message at depth+1 named name, as text (see
-// field), then its fields. It reports whether v, read whole, is blank
-// (message).
-func (w *walker) nested(v []byte, name string, depth int) bool {
+// field), then its fields; pr: v is printable. It reports whether v, read
+// whole, is blank (message).
+func (w *walker) nested(v []byte, name string, depth int, pr bool) bool {
 	var value string
-	if printable(v) {
+	if pr {
 		value = string(v)
 	} else {
 		value = runs(between(v), minNumbersRun)
@@ -364,12 +365,24 @@ func spaced(v []byte) string {
 // tags and lengths (newline is field 1's tag) aren't the application's
 // line breaks.
 func flat(v []byte) string {
-	return strings.TrimSpace(strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return ' '
+	// Control characters are ASCII, never part of a multi-byte UTF-8
+	// sequence: replacing them byte by byte is exact, in one allocation.
+	blank := func(c byte) bool { return c <= ' ' || c == 0x7f }
+	for len(v) > 0 && blank(v[0]) {
+		v = v[1:]
+	}
+	for len(v) > 0 && blank(v[len(v)-1]) {
+		v = v[:len(v)-1]
+	}
+	var b strings.Builder
+	b.Grow(len(v))
+	for _, c := range v {
+		if blank(c) {
+			c = ' '
 		}
-		return r
-	}, string(v)))
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 // control reports whether r is a C0 control character other than tab,
