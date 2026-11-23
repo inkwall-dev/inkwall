@@ -96,6 +96,55 @@ func TestLLMWithCRS(t *testing.T) {
 	}
 }
 
+// TestLLMAmbiguousPathsKeepTheRules: a path that can't be read one way
+// skips the rules on its body only when every reading of it is an
+// endpoint. One that reads as another route (a login form behind ";", "//",
+// a dot segment, an encoded slash) keeps the CRS on its body, whatever the
+// body looks like, and isn't refused as a malformed LLM request.
+func TestLLMAmbiguousPathsKeepTheRules(t *testing.T) {
+	eval, err := coraza.New(coraza.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 10 * time.Second, LLM: everyCheck(t, false)})
+	attack := []byte(`{"model":"llama-3.1-8b","messages":[{"role":"user","content":"hi"}],"max_tokens":10,"username":"admin' OR '1'='1' --","bio":"<script>alert(document.cookie)</script>"}`)
+	for _, uri := range []string{
+		"/api/login;jsessionid=1", "/api//login", "/api/%2e/login", "/api%2flogin", "/api/x/../login",
+		"/v1/chat/completions/../../../api/login", "/v1/chat/completions;x/../../api/login",
+		// Endpoint readings too, but not only: the rules keep the body.
+		"/v1/chat%2fcompletions", "//v1/chat/completions", "/v1/chat/./completions", "/v1/chat/completions;v=1",
+	} {
+		r := chatRequest(uri, attack)
+		if v := p.Check(context.Background(), r); v.Action != pipeline.ActionDeny || v.Reason != pipeline.ReasonRule {
+			t.Errorf("%s: %s %s (%v), want the rules' deny", uri, v.Action, v.Reason, v.RuleIDs)
+		}
+	}
+	// A form on such a path isn't an LLM request: no llm-malformed.
+	for _, uri := range []string{"/api/login;jsessionid=1", "/api//login", "/api/%2e/login"} {
+		r := chatRequest(uri, []byte("user=alice&remember=on"))
+		r.Headers.Set("Content-Type", "application/x-www-form-urlencoded")
+		if v := p.Check(context.Background(), r); v.Action != pipeline.ActionAllow {
+			t.Errorf("%s: a form: %s %s", uri, v.Action, v.Reason)
+		}
+	}
+	// The rules' verdict on an endpoint's body says so, for events to keep
+	// no snippet of the prompt.
+	if v := p.Check(context.Background(), chatRequest("/v1/chat%2fcompletions", attack)); !v.LLMBody {
+		t.Error("a rule's verdict on an endpoint's body: LLMBody unset")
+	}
+	if v := p.Check(context.Background(), chatRequest("/api/login;jsessionid=1", attack)); v.LLMBody {
+		t.Error("another route's body marked as an endpoint's")
+	}
+	inspect := pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 10 * time.Second, LLM: everyCheck(t, true)})
+	if v := inspect.Check(context.Background(), chatRequest("/v1/chat/completions", attack)); v.Reason != pipeline.ReasonRule || !v.LLMBody {
+		t.Errorf("ruleSetBody: Inspect: %s, LLMBody %v", v.Reason, v.LLMBody)
+	}
+	// An ambiguous reading of an endpoint is still checked as one.
+	if v := p.Check(context.Background(), chatRequest("/v1/chat%2fcompletions", []byte(`{"model":"gpt-4o","messages":[]}`))); v.Reason != pipeline.ReasonLLM {
+		t.Errorf("an encoded endpoint path: %s, want the LLM checks", v.Reason)
+	}
+}
+
 // BenchmarkLLMEndpoint is design 0012 §7.2's budget: the engine time a
 // 32 KiB chat request costs on an endpoint, every check on, ruleSetBody:
 // Skip, the CRS on its URI and headers; against the same request on a

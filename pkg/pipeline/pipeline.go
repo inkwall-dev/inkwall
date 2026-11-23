@@ -441,7 +441,8 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool, now
 	// any (inspect). The rules then get the request without its body,
 	// unless ruleSetBody: Inspect.
 	var detected *LLMVerdict
-	if formats := p.llm.formats(r); formats != 0 && decision == router.InspectAll && !r.BodyTruncated {
+	llmBody := false
+	if formats, alone := p.llm.endpoint(r); formats != 0 && decision == router.InspectAll && !r.BodyTruncated {
 		lv := p.llm.checkLLM(r, formats)
 		if time.Since(now) > p.timeout {
 			return p.failed(ReasonTimeout), nil
@@ -452,7 +453,11 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool, now
 			}
 			detected = lv
 		}
-		if !p.llm.rulesBody {
+		// The rules skip the body only when it is an endpoint's in every
+		// reading of its path: a path also read as another route keeps the
+		// rules on its body, which the application may read as a form.
+		llmBody = true
+		if !p.llm.rulesBody && alone {
 			withoutBody := *r
 			withoutBody.Body = nil
 			r = &withoutBody
@@ -488,6 +493,10 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool, now
 	}
 	v = g.mark(v)
 	v = p.llmDetected(v, detected)
+	// The rules read an endpoint's body (ruleSetBody: Inspect, or a path
+	// read several ways): what they matched in it is prompt text, which
+	// events never carry.
+	v.LLMBody = v.LLMBody || llmBody
 	// A Detect limit over its rate only logs, on a Block policy too; a
 	// rule's reason wins over it.
 	if lim.detect != nil && v.Reason == ReasonNone {

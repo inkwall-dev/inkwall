@@ -172,6 +172,9 @@ type Verdict struct {
 	Country  string
 	// LLM is, with ReasonLLM, the LLM check the request failed, and where.
 	LLM *LLMVerdict
+	// LLMBody: the request's body is an LLM endpoint's, so events keep no
+	// snippet of what the rules matched in it (design 0012 §9).
+	LLMBody bool
 	// Response reports a verdict on the upstream's response, not on the
 	// request: a deny replaces the response, and AnomalyScore is the CRS
 	// outbound score.

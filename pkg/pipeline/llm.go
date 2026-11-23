@@ -6,6 +6,8 @@ package pipeline
 import (
 	"fmt"
 	"net/http"
+	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -153,25 +155,100 @@ func CompileLLM(cfg *LLMConfig) (*LLM, error) {
 	return l, nil
 }
 
-// formats returns the formats r is checked as: its endpoint's, every
-// endpoint's for a path that can't be read one way (a request the
-// application may route to any of them), none for a path of no endpoint
-// or a request that sends no body (a GET). Of an exact path and prefixes
-// that match, the exact one wins, then the longest prefix.
+// formats returns the formats r is checked as, none for a path of no
+// endpoint or a request that sends no body (a GET); see endpoint.
 func (l *LLM) formats(r *request.Request) formatSet {
+	f, _ := l.endpoint(r)
+	return f
+}
+
+// endpoint returns the formats r is checked as, and whether its body is
+// the LLM checks' alone (the rules skip it with ruleSetBody: Skip). A path
+// that can't be read one way (percent-encoding, ";", "//", dot segments,
+// fullwidth letters) is read every way an application or proxy may read
+// it: it is checked as the formats of every reading that is an endpoint,
+// and the rules keep its body unless every reading is one. A path no
+// reading of which is an endpoint isn't one: the rules read its body as
+// any route's. Of an exact path and prefixes that match, the exact one
+// wins, then the longest prefix.
+func (l *LLM) endpoint(r *request.Request) (formatSet, bool) {
 	if l == nil {
-		return 0
+		return 0, false
 	}
 	if len(r.Body) == 0 && !r.BodyTruncated {
 		switch strings.ToUpper(r.Method) {
 		case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodDelete:
-			return 0
+			return 0, false
 		}
 	}
 	path, ambiguous := limitPathOf(r.RawURI)
-	if ambiguous {
-		return l.all
+	if !ambiguous {
+		f := l.match(path)
+		return f, f != 0
 	}
+	var union formatSet
+	every := true
+	for _, reading := range pathReadings(r.RawURI) {
+		f := l.match(reading)
+		union |= f
+		every = every && f != 0
+	}
+	return union, every && union != 0
+}
+
+// pathReadings are the ways a path that can't be read one way may be
+// read, in lower case: as sent, percent-decoded once and twice, and each
+// of those normalised (backslashes as slashes, ";" parameters dropped,
+// fullwidth forms folded to ASCII, repeated slashes and dot segments
+// resolved).
+func pathReadings(rawURI string) []string {
+	raw, _, _ := strings.Cut(rawURI, "?")
+	bases := []string{raw}
+	for b := raw; ; {
+		d, err := url.PathUnescape(b)
+		if err != nil || d == b || len(bases) == 3 {
+			break
+		}
+		bases = append(bases, d)
+		b = d
+	}
+	var out []string
+	for _, b := range bases {
+		out = append(out, strings.ToLower(b), strings.ToLower(normalPath(b)))
+	}
+	return out
+}
+
+// normalPath is p as a lenient application routes it.
+func normalPath(p string) string {
+	p = strings.ReplaceAll(p, "\\", "/")
+	var b strings.Builder
+	param := false
+	for _, c := range p {
+		switch {
+		case c == '/':
+			param = false
+		case c == ';':
+			param = true
+		case param:
+			continue
+		case c >= 0xFF01 && c <= 0xFF5E:
+			c -= 0xFEE0
+		}
+		if !param {
+			b.WriteRune(c)
+		}
+	}
+	clean := path.Clean("/" + b.String())
+	if strings.HasSuffix(p, "/") && clean != "/" {
+		clean += "/"
+	}
+	return clean
+}
+
+// match returns the formats of the endpoint path, a plain lower-case one,
+// belongs to; none for no endpoint.
+func (l *LLM) match(path string) formatSet {
 	var best formatSet
 	bestLen := -1
 	for _, e := range l.endpoints {
@@ -305,7 +382,11 @@ func (p *Pipeline) LLMBodyLimit(r *request.Request) int64 {
 // llmSkipsBodies reports whether r is on an LLM endpoint whose bodies the
 // rules don't read (ruleSetBody: Skip), its response's included.
 func (p *Pipeline) llmSkipsBodies(r *request.Request) bool {
-	return p.llm != nil && !p.llm.rulesBody && p.llm.formats(r) != 0
+	if p.llm == nil || p.llm.rulesBody {
+		return false
+	}
+	_, alone := p.llm.endpoint(r)
+	return alone
 }
 
 // llmVerdict is the verdict of a request that failed an LLM check in

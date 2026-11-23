@@ -251,9 +251,9 @@ func New(src Source, req *request.Request, path string, v pipeline.Verdict, now 
 			RuleId:   int32(m.RuleID), // #nosec G115 -- rule IDs fit
 			Variable: truncate(m.Variable, maxVariable),
 		}
-		// An LLM check's match has no snippet, ever: the prompt is the
-		// user's data.
-		if m.RuleID < llm.RuleIDMin || m.RuleID > llm.RuleIDMax {
+		// An LLM check's match has no snippet, ever, nor a rule's match in
+		// an endpoint's body: the prompt is the user's data.
+		if (m.RuleID < llm.RuleIDMin || m.RuleID > llm.RuleIDMax) && (!v.LLMBody || !bodyVariable(m.Variable)) {
 			match.Snippet = snippet(redact, m.Variable, m.Value, v.WebSocketMessage)
 		}
 		ev.Matches = append(ev.Matches, match)
@@ -308,6 +308,20 @@ func snippet(r *Redaction, variable, value string, webSocket bool) string {
 		}
 	}
 	return truncate(value, maxSnippet)
+}
+
+// bodyVariable reports whether a match of variable is in the request's
+// body: a form's or JSON document's arguments (JSON's are ARGS:json.…),
+// the raw body, its files or XML.
+func bodyVariable(variable string) bool {
+	name, key, _ := strings.Cut(variable, ":")
+	switch strings.ToUpper(name) {
+	case "ARGS_POST", "ARGS_POST_NAMES", "REQUEST_BODY", "FULL_REQUEST", "XML", "FILES", "FILES_NAMES", "MULTIPART_PART_HEADERS":
+		return true
+	case "ARGS", "ARGS_NAMES":
+		return strings.HasPrefix(key, "json")
+	}
+	return false
 }
 
 // fieldNumbers reports whether name is a path of field numbers ("1",

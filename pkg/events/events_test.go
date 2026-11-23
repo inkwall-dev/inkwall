@@ -110,6 +110,32 @@ func TestNewResponse(t *testing.T) {
 	}
 }
 
+// TestNewLLMBody: a rule's match in an LLM endpoint's body (ruleSetBody:
+// Inspect) keeps no snippet: it is prompt text. Other matches keep theirs.
+func TestNewLLMBody(t *testing.T) {
+	req := &request.Request{ID: "req-1", Method: "POST", Host: "ai.example", Headers: http.Header{}}
+	v := pipeline.Verdict{
+		Action: pipeline.ActionDeny, Status: 403, Reason: pipeline.ReasonRule, InterruptingRuleID: 949110, LLMBody: true,
+		Matches: []rules.Match{
+			{RuleID: 942100, Variable: "ARGS_POST:json.messages.0.content", Value: "my diagnosis is ' OR 1=1"},
+			{RuleID: 942100, Variable: "ARGS:json.messages.0.content", Value: "my diagnosis is ' OR 1=1"},
+			{RuleID: 941100, Variable: "REQUEST_BODY", Value: "<script>"},
+			{RuleID: 942100, Variable: "ARGS_GET:id", Value: "1' OR 1=1"},
+			{RuleID: 913100, Variable: "REQUEST_HEADERS:User-Agent", Value: "sqlmap/1.7"},
+		},
+	}
+	ev := New(Source{}, req, "/v1/chat/completions", v, time.Now())
+	for i, want := range []string{"", "", "", "1' OR 1=1", "sqlmap/1.7"} {
+		if got := ev.GetMatches()[i].GetSnippet(); got != want {
+			t.Errorf("%s: snippet %q, want %q", ev.GetMatches()[i].GetVariable(), got, want)
+		}
+	}
+	v.LLMBody = false
+	if s := New(Source{}, req, "/", v, time.Now()).GetMatches()[0].GetSnippet(); s == "" {
+		t.Error("another route's body match lost its snippet")
+	}
+}
+
 func TestNewLimits(t *testing.T) {
 	long := strings.Repeat("é", 2000) // 2 bytes each
 	req := &request.Request{Host: long, ID: long, Headers: http.Header{"User-Agent": {long}}}
