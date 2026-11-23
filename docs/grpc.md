@@ -130,11 +130,20 @@ spec:
 - **The method** is the call's path (`/orders.v1.Orders/Create`): its input type reads every
   message of the call, buffered or [one at a time](#long-streams-one-message-at-a-time). A method
   the set doesn't describe is read without the schema, as before, never denied for it.
-- **Each field by its type:** a `string` is text, whatever its bytes; a `bytes` field gives only
-  its runs of at least 12 readable characters, never its whole value; numbers, enums and bools give nothing; a nested message, a
-  map entry (`labels.key`, `labels.value`), a group and a `google.protobuf.Any` (as the type its
-  `type_url` names, when the set has it) are read by their types, down to 16 levels. Every value
-  sent is read: a field sent twice, and each member of a `oneof`, whichever the application keeps.
+- **Each field by its type:** a `string` is text, whatever its bytes; a `bytes` field is text
+  when it is printable UTF-8 of at least 8 bytes, and otherwise gives its runs of at least 12
+  readable characters only (shorter random bytes are printable too often: they would match the
+  rules); numbers, enums and bools give nothing; a nested message, a map entry (`labels.key`,
+  `labels.value`) and a group are read by their types, down to 16 levels, a message also as text
+  as without the schema (whole when printable, else the runs between its fields). A
+  `google.protobuf.Any` is read as the type its last `type_url` names (the one the application
+  unpacks by), when the set has it, and also without the schema, as `payload.value`.
+- **Every occurrence is read:** a field sent twice, and each member of a `oneof`, whichever the
+  application keeps. Within limits: a message nested over 16 levels, with over 4,096 text fields,
+  or whose reading would go past a budget linear in its size (64 bytes read per byte of the
+  message) isn't read whole, and gets `body.onOversize`. A short `bytes` field (under 8 bytes, or
+  binary with no run of 12) gives nothing, so text an application keeps in a short `bytes` field
+  (`$(id)`) isn't read: such a field is best declared `string`.
 - **What the set doesn't describe is still read**, without it: a field number the type doesn't
   have, or a field sent with another wire type (a string sent as a number), is read as before and
   named by its number under its parent (`user.7`). `inkwall_grpc_unknown_fields_total` counts
@@ -179,7 +188,7 @@ whose client waits for the server stalls. With `PerMessage`:
   Envoy streams its body to the engine, which reads each message as it completes, whatever the
   chunks it comes in.
 - **Each message is inspected on its own**, as its text fields (named by field numbers, as
-  above), with the policy's rules and exclusions, up to `body.maxBytes`. A longer message, or one
+  above, or by their paths with [the schema](#messages-with-their-schema)), with the policy's rules and exclusions, up to `body.maxBytes`. A longer message, or one
   compressed other than with gzip, gets `body.onOversize`. Long client streams and bidirectional
   calls work, however long they last.
 - **Block mode** holds each message until it is inspected; an allowed one goes on to the

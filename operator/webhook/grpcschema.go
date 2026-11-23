@@ -6,6 +6,7 @@ package webhook
 import (
 	"fmt"
 	"regexp"
+	"slices"
 
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -14,8 +15,9 @@ import (
 )
 
 // fieldNumbers is a gRPC message field named by its numbers ("2.1"), as
-// messages read without a schema name them.
-var fieldNumbers = regexp.MustCompile(`^[0-9]+(\.[0-9]+)*$`)
+// messages read without a schema name them, or a part of such a name
+// ("3.", ".1").
+var fieldNumbers = regexp.MustCompile(`^\.?[0-9]+(\.[0-9]+)*\.?$`)
 
 // grpcSchemaWarnings warns of the exclusions of a policy with a gRPC schema
 // whose argument names a message field by numbers (design 0013 §12): with
@@ -27,13 +29,19 @@ func grpcSchemaWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
 	}
 	var warnings admission.Warnings
 	for i, e := range p.Spec.Exclusions {
-		if e.When == nil || !fieldNumbers.MatchString(string(e.When.Argument)) {
+		if e.When == nil {
 			continue
 		}
-		path := field.NewPath("spec", "exclusions").Index(i).Child("when", "argument")
-		warnings = append(warnings, fmt.Sprintf("%s: %q names a gRPC message field by numbers, but with spec.body.grpcSchema the fields "+
-			"the schema describes are named by their paths (user.name): it matches only fields the schema doesn't describe. "+
-			"Read the policy's events in Detect mode for the names (docs/grpc.md)", path, e.When.Argument))
+		for child, name := range map[string]wafv1alpha1.ArgumentPattern{"argument": e.When.Argument, "argumentName": e.When.ArgumentName} {
+			if !fieldNumbers.MatchString(string(name)) {
+				continue
+			}
+			path := field.NewPath("spec", "exclusions").Index(i).Child("when", child)
+			warnings = append(warnings, fmt.Sprintf("%s: %q names a gRPC message field by numbers, but with spec.body.grpcSchema the fields "+
+				"the schema describes are named by their paths (user.name): it matches only fields the schema doesn't describe. "+
+				"Read the policy's events in Detect mode for the names (docs/grpc.md)", path, name))
+		}
 	}
+	slices.Sort(warnings)
 	return warnings
 }

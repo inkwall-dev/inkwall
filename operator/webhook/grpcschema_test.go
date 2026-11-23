@@ -19,11 +19,18 @@ func TestGRPCSchemaWarnings(t *testing.T) {
 	p := &wafv1alpha1.WAFPolicy{Spec: wafv1alpha1.WAFPolicySpec{
 		Body: &wafv1alpha1.BodySpec{GRPCMessages: wafv1alpha1.GRPCMessagesInspect,
 			GRPCSchema: &wafv1alpha1.GRPCSchema{ConfigMapRef: wafv1alpha1.ConfigMapKeyRef{Name: "s", Key: "k"}}},
-		Exclusions: []wafv1alpha1.Exclusion{exclusion("2.1"), exclusion("user.name"), exclusion("7"), {RuleIDs: []int32{1}}},
+		Exclusions: []wafv1alpha1.Exclusion{exclusion("2.1"), exclusion("user.name"), exclusion("7"), {RuleIDs: []int32{1}}, exclusion("3."),
+			{RuleIDs: []int32{1}, When: &wafv1alpha1.ExclusionMatch{ArgumentName: "4.2"}}, exclusion("v1.2x")},
 	}}
 	w := grpcSchemaWarnings(p)
-	if len(w) != 2 || !strings.Contains(w[0], "spec.exclusions[0].when.argument") || !strings.Contains(w[1], "spec.exclusions[2].when.argument") {
+	want := []string{"spec.exclusions[0].when.argument", "spec.exclusions[2].when.argument", "spec.exclusions[4].when.argument", "spec.exclusions[5].when.argumentName"}
+	if len(w) != len(want) {
 		t.Fatalf("warnings %q", w)
+	}
+	for i, path := range want {
+		if !strings.HasPrefix(w[i], path+":") {
+			t.Errorf("warning %d %q, want one for %s", i, w[i], path)
+		}
 	}
 	p.Spec.Body.GRPCSchema = nil
 	if w := grpcSchemaWarnings(p); w != nil {
