@@ -177,7 +177,7 @@ func inputBundle(in resolver.Input, suspended bool, notes io.Writer) (*bundlev1.
 	if len(problems) > 0 {
 		return nil, errors.New(strings.Join(problems, "\n  "))
 	}
-	return &bundlev1.Bundle{Policies: res.Policies, RuleSets: res.RuleSets, Suspended: suspended}, nil
+	return &bundlev1.Bundle{Policies: res.Policies, RuleSets: res.RuleSets, GrpcSchemas: res.GRPCSchemas, Suspended: suspended}, nil
 }
 
 // loadObjects reads the objects in files, or in the files of directories.

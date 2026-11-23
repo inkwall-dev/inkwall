@@ -198,6 +198,11 @@ func requirement(p *wafv1alpha1.WAFPolicy, defaultDeny bool) (string, [3]int) {
 		// bidirectional call fails there (#315).
 		set("spec.body.grpcStreams", [3]int{0, 6, 0})
 	}
+	if b := p.Spec.Body; b != nil && b.GRPCSchema != nil && b.GRPCMessages == wafv1alpha1.GRPCMessagesInspect {
+		// An older engine reads every message without the schema: number
+		// names, which name-based exclusions don't match (design 0013 §4).
+		set("spec.body.grpcSchema", [3]int{0, 7, 0})
+	}
 	if b := p.Spec.Body; b != nil && b.GRPC == wafv1alpha1.GRPCDeny {
 		// An older engine lets gRPC through (#367).
 		set("spec.body.grpc", [3]int{0, 5, 0})

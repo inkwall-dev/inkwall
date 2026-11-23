@@ -63,7 +63,9 @@ spec:
                     description: ConfigMapRef reads the rules from a ConfigMap.
                     properties:
                       key:
-                        description: Key holding the SecLang rules.
+                        description: |-
+                          Key holding the SecLang rules (a rule set's) or the descriptor set (a
+                          policy's grpcSchema).
                         maxLength: 253
                         minLength: 1
                         type: string

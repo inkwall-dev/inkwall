@@ -86,6 +86,41 @@ spec:
                     - Inspect
                     - Skip
                     type: string
+                  grpcSchema:
+                    description: |-
+                      GRPCSchema reads the messages of the methods it describes with their
+                      schema, with grpcMessages: Inspect: fields by their type and named by
+                      their path (user.name), string fields as text, bytes fields by their
+                      readable runs, numbers skipped. Methods and fields it doesn't
+                      describe are read without it. Requires engines 0.7.0 or later: older
+                      ones read every message without it. See docs/grpc.md.
+                    properties:
+                      configMapRef:
+                        description: |-
+                          ConfigMapRef names a key of a ConfigMap in the policy's namespace,
+                          labeled waf.inkwall.dev/rules=true, whose binaryData holds a
+                          FileDescriptorSet with its imports (buf build, or protoc
+                          --include_imports --descriptor_set_out), raw or gzipped.
+                        properties:
+                          key:
+                            description: |-
+                              Key holding the SecLang rules (a rule set's) or the descriptor set (a
+                              policy's grpcSchema).
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          name:
+                            description: Name of the ConfigMap.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    required:
+                    - configMapRef
+                    type: object
                   grpcStreams:
                     description: |-
                       GRPCStreams decides how the messages are read, with grpcMessages:
@@ -129,6 +164,9 @@ spec:
                   rule: '!has(self.grpcStreams) || self.grpcStreams != ''PerMessage''
                     || (has(self.grpcMessages) && self.grpcMessages == ''Inspect''
                     && (!has(self.inspect) || self.inspect))'
+                - message: 'grpcSchema needs grpcMessages: Inspect'
+                  rule: '!has(self.grpcSchema) || (has(self.grpcMessages) && self.grpcMessages
+                    == ''Inspect'')'
               denyResponse:
                 description: |-
                   DenyResponse is the body of the policy's denials (by a rule, an IP

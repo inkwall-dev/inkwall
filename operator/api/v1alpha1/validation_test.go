@@ -197,6 +197,14 @@ func TestWAFPolicyValidation(t *testing.T) {
 		{name: "grpcStreams PerMessage without body inspection", doc: policy(target + "  body: {inspect: false, grpcMessages: Inspect, grpcStreams: PerMessage}\n"),
 			wantErr: "grpcStreams: PerMessage needs grpcMessages: Inspect"},
 		{name: "unknown grpcStreams", doc: policy(target + "  body: {grpcMessages: Inspect, grpcStreams: Stream}\n"), wantErr: `Unsupported value: "Stream"`},
+		// grpcSchema (#316): read with the messages only.
+		{name: "grpcSchema", doc: policy(target + "  body: {grpcMessages: Inspect, grpcSchema: {configMapRef: {name: s, key: set.binpb}}}\n")},
+		{name: "grpcSchema without grpcMessages", doc: policy(target + "  body: {grpcSchema: {configMapRef: {name: s, key: set.binpb}}}\n"),
+			wantErr: "grpcSchema needs grpcMessages: Inspect"},
+		{name: "grpcSchema with Skip", doc: policy(target + "  body: {grpcMessages: Skip, grpcSchema: {configMapRef: {name: s, key: set.binpb}}}\n"),
+			wantErr: "grpcSchema needs grpcMessages: Inspect"},
+		{name: "grpcSchema without a ConfigMap", doc: policy(target + "  body: {grpcMessages: Inspect, grpcSchema: {}}\n"), wantErr: "configMapRef: Required"},
+		{name: "grpcSchema without a key", doc: policy(target + "  body: {grpcMessages: Inspect, grpcSchema: {configMapRef: {name: s}}}\n"), wantErr: "key: Required"},
 
 		{name: "websocket required headers only", doc: policy(target + "  webSocket: {requiredHeaders: [X-Api-Key]}\n")},
 		{name: "websocket origin with a path", doc: policy(target + "  webSocket: {allowedOrigins: [\"https://app.example.com/\"]}\n"), wantErr: "spec.webSocket.allowedOrigins[0]"},

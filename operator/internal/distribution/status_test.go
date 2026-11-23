@@ -358,6 +358,11 @@ func TestEnforcedOutdatedEngineGRPCMessages(t *testing.T) {
 			[]string{"0.6.0"}, ReasonEnforced},
 		{"Buffer, 0.5.0 engine", &wafv1alpha1.BodySpec{GRPCMessages: wafv1alpha1.GRPCMessagesInspect, GRPCStreams: wafv1alpha1.GRPCStreamsBuffer},
 			[]string{"0.5.0"}, ReasonEnforced},
+		// grpcSchema (#316): an engine before 0.7.0 reads without it.
+		{"grpcSchema, 0.6.2 engine", &wafv1alpha1.BodySpec{GRPCMessages: wafv1alpha1.GRPCMessagesInspect, GRPCSchema: &wafv1alpha1.GRPCSchema{}},
+			[]string{"0.7.0", "0.6.2"}, ReasonEnginesOutdated},
+		{"grpcSchema, new engines", &wafv1alpha1.BodySpec{GRPCMessages: wafv1alpha1.GRPCMessagesInspect, GRPCSchema: &wafv1alpha1.GRPCSchema{}},
+			[]string{"0.7.0"}, ReasonEnforced},
 	} {
 		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "web", Name: "p", Generation: 1}}
 		p.Spec.Body = tc.body
@@ -378,6 +383,9 @@ func TestEnforcedOutdatedEngineGRPCMessages(t *testing.T) {
 		}
 		if tc.body != nil && tc.body.GRPCStreams == wafv1alpha1.GRPCStreamsPerMessage {
 			field = "spec.body.grpcStreams,"
+		}
+		if tc.body != nil && tc.body.GRPCSchema != nil {
+			field = "spec.body.grpcSchema,"
 		}
 		if tc.reason == ReasonEnginesOutdated && !strings.Contains(c.Message, field) {
 			t.Errorf("%s: message %q doesn't name the field", tc.name, c.Message)
