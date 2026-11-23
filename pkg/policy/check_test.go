@@ -56,3 +56,35 @@ func TestChecksRefuseWhatCompileRefuses(t *testing.T) {
 		})
 	}
 }
+
+// TestRuleCheckerPrune: a RuleChecker keeps the results the last
+// resolution asked for, however many: a second resolution of 4200
+// combinations compiles none of them again (with a bound, one of more than
+// it would compile them all, each time); Prune drops the others.
+func TestRuleCheckerPrune(t *testing.T) {
+	const n = 4200
+	c := NewRuleChecker()
+	resolve := func(n int) {
+		for i := range n {
+			rs := &bundlev1.RuleSet{Id: fmt.Sprintf("WAFRuleSet/ns/r%d", i),
+				Source: &bundlev1.RuleSet_Seclang{Seclang: fmt.Sprintf(`SecRule ARGS "@contains x" "id:%d,phase:1,pass,nolog"`, 100000+i)}}
+			p := &bundlev1.Policy{Id: fmt.Sprintf("ns/p%d", i), RuleSets: []*bundlev1.RuleSetBinding{{RuleSetId: rs.Id}}}
+			if err := c.Check(p, []*bundlev1.RuleSet{rs}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		c.Prune()
+	}
+	resolve(n)
+	if c.compiles != n {
+		t.Fatalf("%d compiles, want %d", c.compiles, n)
+	}
+	resolve(n)
+	if c.compiles != n {
+		t.Errorf("the second resolution compiled %d combinations again", c.compiles-n)
+	}
+	resolve(n / 2)
+	if len(c.errs) != n/2 {
+		t.Errorf("%d results kept, want the %d asked for", len(c.errs), n/2)
+	}
+}

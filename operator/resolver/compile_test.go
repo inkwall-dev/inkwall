@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -174,6 +175,9 @@ func TestPreviousVersionSharesRuleSet(t *testing.T) {
 		in.Previous = &bundlev1.Bundle{Policies: prev.Policies, RuleSets: prev.RuleSets}
 		res := Resolve(in)
 		wantStatus(t, res, "bad", false, ReasonRuleSetsIncompatible, "so the policy is left out")
+		if msg := res.PolicyStatus[key("bad")].Message; strings.Contains(msg, "stays in force") {
+			t.Errorf("older %v: %q says the previous version stays", badFirst, msg)
+		}
 		wantStatus(t, res, "other", true, ReasonAccepted, PolicyValid)
 		if findPolicy(res, "shop/bad") != nil {
 			t.Fatalf("older %v: the previous version must stay out", badFirst)
