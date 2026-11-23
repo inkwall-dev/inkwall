@@ -91,10 +91,13 @@ spec:
     `account-id` and `license-key`), writing to a volume of that pod. Each replica has its own
     copy. The pod then needs internet egress to MaxMind: the chart's NetworkPolicy opens HTTPS for
     it (`geo.geoipupdate.egressCIDRs`, every IPv4 and IPv6 address by default, since a
-    NetworkPolicy can't name a host). That pod also holds the bundle signing key; the sidecar has
-    its own credentials and no access to the key's volume, but a NetworkPolicy applies to the whole
-    pod: the operator's containers can reach `egressCIDRs` on 443 too. Narrow it to your egress
-    proxy where you can, or use `geo.volume`.
+    NetworkPolicy can't name a host). The sidecar has its own credentials and reaches two things:
+    the geo volume, where it writes the database, and that egress. It doesn't get the operator's
+    ServiceAccount token, which can read the bundle signing key's Secret: the pod sets
+    `automountServiceAccountToken: false` and mounts the token into the operator's container
+    alone. The image is pinned by digest. A NetworkPolicy applies to the whole pod, though: the
+    operator's container, which holds that token, can reach `egressCIDRs` on 443 too. Narrow it to
+    your egress proxy where you can, or use `geo.volume`.
   - `geo.volume`: any volume you fill from outside the cluster, such as a PVC or an image volume.
     The chart runs two operator replicas, and either can lead: a PVC shared by both needs
     `ReadOnlyMany`.
@@ -171,7 +174,9 @@ In a policy's checks, in this order:
 5. The rules.
 
 In `Detect`, the request goes on: if nothing else decides, the verdict is `log` with reason
-`geo-deny`; if a rule matched, its reason wins (the metric still counts the geo match). On a
+`geo-deny`; if a rule matched or the rules detected an attack, the rules' event wins, one for
+each request, with its rule IDs (the metric still counts the geo match; `geo-deny` events are
+sampled, and a detection never is). On a
 skipped path, `Detect` logs `geo-deny` rather than `skipped`, so it shows what `Block` would deny.
 A request several policies inspect gets each policy's geo; the strictest verdict wins. Suspending
 inspection (`InkwallConfig.spec.suspend`) suspends geo too.

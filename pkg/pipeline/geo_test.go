@@ -167,6 +167,49 @@ func TestGeoBeforeRateLimits(t *testing.T) {
 	}
 }
 
+// TestGeoDetectKeepsDetections: a rule's detection from a denied country,
+// geo in Detect, stays the rule's event (log, reason None, its rule IDs),
+// one per request; geo's sampling, and a Detect rate limit's, don't hide
+// it. Geo still marks it, and still samples the requests nothing else
+// logged.
+func TestGeoDetectKeepsDetections(t *testing.T) {
+	detected := rules.Result{Detected: true, MatchedRuleIDs: []int{942100}}
+	limit := RateLimitConfig{Name: "one", Requests: 1, Period: time.Hour, Burst: 1, Detect: true}
+	for _, tc := range []struct {
+		name   string
+		mode   Mode
+		g      *GeoRules
+		limits []RateLimitConfig
+	}{
+		{"Detect policy", ModeDetect, &GeoRules{Countries: countries("RU")}, nil},
+		{"geo.mode Detect on a Block policy", ModeBlock, &GeoRules{Countries: countries("RU"), Detect: true}, nil},
+		{"and a Detect rate limit", ModeDetect, &GeoRules{Countries: countries("RU")}, []RateLimitConfig{limit}},
+	} {
+		p, eval := geoPipeline(t, tc.mode, FailAuto, tc.g, detected, tc.limits...)
+		for i := range 10 {
+			v := check(p, geoReq("198.51.100.1", "/", "RU"))
+			if v.Action != ActionLog || v.Reason != ReasonNone || len(v.RuleIDs) != 1 || v.RuleIDs[0] != 942100 || !v.GeoMatch || v.Country != "RU" {
+				t.Errorf("%s: request %d: %s/%s rules %v geo %v %q, want log/none rules [942100] geo true RU",
+					tc.name, i, v.Action, v.Reason, v.RuleIDs, v.GeoMatch, v.Country)
+			}
+		}
+		// The next clean request from there is geo's: its first event,
+		// standing for itself alone.
+		eval.res = rules.Result{}
+		v := check(p, geoReq("198.51.100.1", "/", "RU"))
+		if v.Reason != ReasonGeoDeny || !v.SampledEvent || v.SampledCount != 1 {
+			t.Errorf("%s: then a clean request: %s, sampled %v (%d), want geo-deny, sampled (1)", tc.name, v.Reason, v.SampledEvent, v.SampledCount)
+		}
+	}
+	// A Detect rate limit alone doesn't hide a detection either.
+	p, _ := geoPipeline(t, ModeDetect, FailAuto, &GeoRules{Countries: countries("RU")}, detected, limit)
+	for i := range 10 {
+		if v := check(p, geoReq("198.51.100.2", "/", "DE")); v.Reason != ReasonNone || v.Action != ActionLog || len(v.RuleIDs) != 1 {
+			t.Errorf("Detect rate limit: request %d: %s/%s rules %v, want log/none [942100]", i, v.Action, v.Reason, v.RuleIDs)
+		}
+	}
+}
+
 // TestGeoSampling: the first geo event of a (policy, country), then at
 // most one a minute, counting the requests it stands for.
 func TestGeoSampling(t *testing.T) {
