@@ -4,6 +4,7 @@
 package resolver
 
 import (
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -96,6 +97,39 @@ func TestGRPCSchema(t *testing.T) {
 	// A set no policy names any more leaves the cache.
 	if cache.Len() != 0 {
 		t.Fatalf("%d cached sets after no policy names one", cache.Len())
+	}
+}
+
+// Policies of two namespaces with the same set: an entry each, naming its
+// own ConfigMap, never the other namespace's.
+func TestGRPCSchemaPerSource(t *testing.T) {
+	other := schemaPolicy("b", 1, "schema", "set.binpb")
+	other.Namespace = "web"
+	cm := schemaConfigMap("schema", "set.binpb", healthSet(t))
+	webCM := *cm.DeepCopy()
+	webCM.Namespace = "web"
+	webIng := ingress("b", rule("b.example.com", ipath("/", networkingv1.PathTypePrefix)))
+	webIng.Namespace = "web"
+	res := Resolve(Input{
+		Policies:   []wafv1alpha1.WAFPolicy{schemaPolicy("a", 0, "schema", "set.binpb"), other},
+		Ingresses:  []networkingv1.Ingress{ingress("a", rule("a.example.com", ipath("/", networkingv1.PathTypePrefix))), webIng},
+		ConfigMaps: []corev1.ConfigMap{cm, webCM},
+	})
+	if len(res.GRPCSchemas) != 2 {
+		t.Fatalf("%d schemas, want one per source", len(res.GRPCSchemas))
+	}
+	for _, id := range []string{"shop/a", "web/b"} {
+		p := findPolicy(res, id)
+		ns, _, _ := strings.Cut(id, "/")
+		found := false
+		for _, s := range res.GRPCSchemas {
+			if s.GetId() == p.GetBody().GetGrpcSchemaId() {
+				found = s.GetSource() == ns+"/schema/set.binpb"
+			}
+		}
+		if !found {
+			t.Errorf("%s doesn't name its own namespace's schema", id)
+		}
 	}
 }
 
