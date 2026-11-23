@@ -43,7 +43,7 @@ From 0.1.x, upgrade to 0.2.3 (or 0.2.2) first, then to 0.3.0.
 ## Every upgrade
 
 Read the section of the version you upgrade to first, then, for every minor or patch release
-(0.6.0 to 0.6.2 needs nothing more than this):
+(0.6.0 to 0.6.3 needs nothing more than this):
 
 1. Upgrade the chart, with the values you installed it with (`--reset-then-reuse-values` needs
    Helm 3.14 or later):
@@ -85,6 +85,15 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
 ## From 0.6.x to 0.7.0
 
 0.7.0 isn't released yet; this section grows as its changes land.
+
+- **Policies the engine can't compile are left out** of the bundle, with `InvalidSpec` or
+  `RuleSetsIncompatible` in their status, checked with the rule sets the bundle ships; the other
+  policies keep reaching the engines
+  ([GHSA-4v7q-753g-p98h](https://github.com/inkwall-dev/inkwall/security/advisories/GHSA-4v7q-753g-p98h)).
+  A previous version is kept only when it compiles with them. Already in 0.6.3, 0.5.6 and 0.4.5,
+  with the gRPC reading fixes of
+  [GHSA-w6pv-4769-xr6f](https://github.com/inkwall-dev/inkwall/security/advisories/GHSA-w6pv-4769-xr6f) and
+  [GHSA-vg43-8vv5-x822](https://github.com/inkwall-dev/inkwall/security/advisories/GHSA-vg43-8vv5-x822).
 
 - **gRPC messages: groups are read** (`body.grpcMessages: Inspect`). A field encoded as a
   protobuf group (proto2 `group`, editions `DELIMITED`) is read as a nested message, with the
