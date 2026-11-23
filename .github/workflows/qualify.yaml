@@ -56,7 +56,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: '1.27.x'
           check-latest: true
@@ -184,7 +184,7 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ matrix.ref }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: '1.27.x'
           check-latest: true
@@ -254,7 +254,7 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ matrix.ref }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: '1.27.x'
           check-latest: true
@@ -350,7 +350,7 @@ jobs:
         with:
           persist-credentials: false
           ref: main
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: '1.27.x'
           check-latest: true
@@ -447,7 +447,7 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ matrix.ref }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: '1.27.x'
           check-latest: true
@@ -492,7 +492,7 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ matrix.ref }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: '1.27.x'
           check-latest: true
@@ -538,7 +538,7 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ matrix.ref }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: '1.27.x'
           check-latest: true
