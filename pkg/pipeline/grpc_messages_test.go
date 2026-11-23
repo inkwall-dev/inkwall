@@ -75,6 +75,10 @@ func TestGRPCMessages(t *testing.T) {
 		{"xss", helloRequest(`<script>alert(1)</script>`), nil, false, 403, 0, 941100},
 		{"gzip", gzipFrame(t, pbString(1, sqli)), []string{"Grpc-Encoding", "gzip"}, false, 403, 0, 942100},
 		{"sqli in a group", grpcFrame(append(pbString(1, "books"), group(2, pbString(3, sqli))...)), nil, false, 403, 0, 942100},
+		// An injection split between the fields of a nested message, its
+		// tags and lengths whitespace and control characters: an
+		// application reading the field as a string gets it whole.
+		{"sqli split between fields", grpcFrame(pbString(1, string(splitSQLi))), nil, false, 403, 0, 942100},
 		{"xss in nested groups", grpcFrame(group(1, group(2, pbString(1, `<script>alert(1)</script>`)))), nil, false, 403, 0, 941100},
 		// Can't be read: handled as an oversized body, 413 in block mode.
 		{"unknown encoding", gzipFrame(t, pbString(1, "world")), []string{"Grpc-Encoding", "zstd"}, false, 413, 0, 0},
@@ -109,6 +113,9 @@ func TestGRPCMessages(t *testing.T) {
 		})
 	}
 }
+
+// splitSQLi is an SQL injection in three fields, none of which is one.
+var splitSQLi = append(append(pbString(1, "1' UNION"), pbString(1, " SELECT password")...), pbString(1, " FROM users --")...)
 
 // truncated marks r's body as cut at the limit.
 func truncated(r *request.Request, cut bool) *request.Request {

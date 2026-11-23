@@ -76,9 +76,18 @@ func TestStrings(t *testing.T) {
 		{"empty", nil, nil, true},
 		{"string", pb(1, "world"), []Field{{"1", "world"}}, true},
 		{"numbers", pb(1, uint64(42), 2, "x"), []Field{{"2", "x"}}, true},
-		// A nested message with control characters in its own bytes
-		// gives their readable runs: here none.
-		{"nested", pb(2, pb(1, "inner", 3, uint64(7)), 4, "outer"), []Field{{"2.1", "inner"}, {"4", "outer"}}, true},
+		// A nested message, UTF-8 whose tags, lengths and numbers are
+		// control characters, gives its fields, then its whole text (flat).
+		{"nested", pb(2, pb(1, "inner", 3, uint64(7)), 4, "outer"), []Field{{"2.1", "inner"}, {"2", "inner"}, {"4", "outer"}}, true},
+		// A word split between nested fields by their tags and lengths
+		// is in the field's text whole.
+		{"split between fields", pb(1, "\n\x05UNION\n\x07 SELECT\n\x09 password"),
+			[]Field{{"1.1", "UNION"}, {"1.1", " SELECT"}, {"1.1", " password"}, {"1", "UNION   SELECT   password"}}, true},
+		// Not UTF-8 (a number from 0x80), or readable tags, lengths or
+		// numbers (field 13 is "j", length 0x41 "A"): its fields, and the
+		// readable runs of its own bytes.
+		{"nested binary", pb(2, pb(1, "inner", 3, uint64(1<<20)), 4, "outer"), []Field{{"2.1", "inner"}, {"4", "outer"}}, true},
+		{"readable tags", pb(2, pb(13, "a", 1, strings.Repeat("b", 0x41))), []Field{{"2.13", "a"}, {"2.1", strings.Repeat("b", 0x41)}}, true},
 		{"printable nested", pb(2, []byte(" (")), []Field{{"2", " ("}}, true},
 		// Text in a nested message's numbers: fixed64 field 2 (tag 0x11).
 		{"text in numbers", pb(1, []byte("\x11' OR 1=1\x11 -- abcd\x08\x00")), []Field{{"1", "' OR 1=1  -- abcd"}}, true},
@@ -133,9 +142,9 @@ func TestStringsGroups(t *testing.T) {
 		{"empty group", group(1, nil), nil, true},
 		// Text in a group's numbers: fixed64 field 2 (tag 0x11).
 		{"text in numbers", group(1, []byte("\x11' OR 1=1")), []Field{{"1", "' OR 1=1"}}, true},
-		// A group in a length-delimited field: its text is the group's,
-		// not also the field's.
-		{"in a submessage", pb(1, group(2, pb(3, "x' OR 1=1"))), []Field{{"1.2.3", "x' OR 1=1"}}, true},
+		// A group in a length-delimited field: the group's fields, then
+		// the field's whole text.
+		{"in a submessage", pb(1, group(2, pb(3, "x' OR 1=1"))), []Field{{"1.2.3", "x' OR 1=1"}, {"1", "x' OR 1=1"}}, true},
 		// As deep as nested messages may be, and deeper.
 		{"at the depth limit", deep(DefaultLimits.Depth), []Field{{strings.Repeat("1.", DefaultLimits.Depth) + "1", "bottom"}}, true},
 		{"too deep", deep(DefaultLimits.Depth + 1), nil, false},
