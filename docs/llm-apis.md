@@ -195,10 +195,16 @@ with the same keys, answers and `Detect` mode:
 
 - **At request time**, once a request on an endpoint passed its checks, it takes its estimate at
   once from the bucket, or none: its prompt's bytes ÷ 3, rounded up, plus its output limit (or
-  `maxOutputTokens`, or 4,096 when neither is set; embeddings have none). Inkwall has no
-  tokenizer: bytes ÷ 3 overestimates English (about 4 bytes a token) and is close for code and CJK
-  text; the output limit is what the client asked for, the worst case. A request a check denies
-  isn't charged, and requests on other paths aren't counted.
+  `maxOutputTokens`, or 4,096 when neither is set; embeddings have none), times `n` for an OpenAI
+  Chat request asking for several choices. Inkwall has no tokenizer: bytes ÷ 3 overestimates
+  English (about 4 bytes a token) and is close for code and CJK text; the output limit is what the
+  client asked for, the worst case. A request a check denies isn't charged, and requests on other
+  paths aren't counted.
+- **A body that can't be estimated** is charged as large as it may be, never nothing: a body cut
+  at the limit (`onOversize: Allow`, or a proxy's smaller buffer), an encoded one with
+  `llm-malformed` excluded, one the parser refuses while the checks only log (`detect`), or one
+  not read at all (`skip.bodyPaths`). It takes the larger of the bytes read and its
+  `Content-Length`, ÷ 3, rounded up, plus `maxOutputTokens`, or 4,096 when unset.
 - **At response time**, when the policy inspects responses (`spec.responses.inspect: true`) and a
   whole (not streamed) response reports its `usage`, the bucket is settled to the actual input
   and output tokens: the difference is refunded, or added as debt (at most twice the burst). A
@@ -210,7 +216,10 @@ with the same keys, answers and `Detect` mode:
   `responses.inspect` off, or for a streamed answer, the estimate stands: short answers to long
   output limits are overcharged. Size the limit from `inkwall_llm_tokens_total`.
 
-`requests` and `burst` go up to 1,000,000,000 tokens. A token limit needs `spec.llm`, and its
+`requests` and `burst` go up to 1,000,000,000 tokens; a burst so large that its window
+(`burst` × `period` ÷ `requests`) wouldn't fit the engine's clock is cut to what does (a burst of a
+billion at 1,000 tokens an hour is about 640 million). A key's debt never passes twice the burst,
+however many responses settle at once. A token limit needs `spec.llm`, and its
 `match.paths` must be the endpoints' paths or under their prefixes. Limits still count per engine
 ([what a limit means](rate-limits.md#what-a-limit-means)), and `Authorization` is a fine key: it's
 hashed, never stored. Per-tenant fairness needs a key the client can't choose freely.

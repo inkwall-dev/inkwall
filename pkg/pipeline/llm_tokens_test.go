@@ -13,6 +13,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/llm"
 	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
 	"github.com/inkwall-dev/inkwall/pkg/request"
+	"github.com/inkwall-dev/inkwall/pkg/router"
 )
 
 // tokenPipeline is a Block policy with a chat endpoint capping output at
@@ -165,5 +166,84 @@ func TestTokenSettlement(t *testing.T) {
 		if v := p.Check(ctx, chat(900)); v.Reason != ReasonRateLimit {
 			t.Errorf("%s %s: settled", resp.Headers.Get("Content-Type"), resp.Body)
 		}
+	}
+}
+
+// TestTokenFallback: a request on an endpoint whose body can't be
+// estimated (not parsed, cut, encoded, or not read) is charged as large as
+// it may be, its bytes ÷ 3 plus the output cap, never nothing.
+func TestTokenFallback(t *testing.T) {
+	ctx := context.Background()
+	limit := RateLimitConfig{Name: "tokens", Requests: 5000, Period: time.Minute, Tokens: true}
+	dup := `{"model":"m","messages":[{"role":"user","content":"abc"}],"max_tokens":1,"max_tokens":1}`
+	for _, tc := range []struct {
+		name   string
+		llm    func(*LLMConfig)
+		routes []string // skip.bodyPaths
+		req    func() *request.Request
+	}{
+		{"unparsed, the LLM checks in Detect", func(c *LLMConfig) { c.Detect = true }, nil,
+			func() *request.Request { return llmRequest("/v1/chat/completions", dup) }},
+		{"cut (onOversize Allow, a proxy's small buffer)", nil, nil, func() *request.Request {
+			r := chat(1)
+			r.Body, r.BodyTruncated = r.Body[:20], true
+			r.Headers.Set("Content-Length", "3000")
+			return r
+		}},
+		{"encoded, llm-malformed excluded", func(c *LLMConfig) {
+			c.Exclusions = []LLMExclusion{{Path: "/v1/chat/completions", Checks: llm.CheckSet(0).With(llm.CheckMalformed)}}
+		}, nil, func() *request.Request {
+			r := chat(1)
+			r.Headers.Set("Content-Encoding", "gzip")
+			return r
+		}},
+		{"not read (skip.bodyPaths)", nil, []string{"/v1/chat/completions"}, func() *request.Request {
+			r := chat(1)
+			r.Headers.Set("Content-Length", "3000")
+			return r
+		}},
+	} {
+		limits, err := CompileRateLimits(ratelimit.New(1024, 0), ratelimit.NewLive(), "ai/chat", []RateLimitConfig{limit})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := LLMConfig{Endpoints: []LLMEndpoint{{Paths: []string{"/v1/chat/completions"}, Format: llm.OpenAIChat}},
+			Checks: llm.Config{MaxOutputTokens: 1000}, Metrics: llm.NewMetrics()}
+		if tc.llm != nil {
+			tc.llm(&cfg)
+		}
+		routes, err := router.New(nil, tc.routes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := New(&exchangeEvaluator{}, Config{Mode: ModeBlock, LLM: compileLLM(t, cfg), RateLimits: limits, Routes: routes, Oversize: OversizeAllow})
+		// At least 1,000 tokens each (the output cap): at most 5 of 20.
+		allowed := 0
+		for range 20 {
+			if v := p.Check(ctx, tc.req()); v.Action == ActionAllow || v.Action == ActionLog {
+				allowed++
+			} else if v.Reason != ReasonRateLimit {
+				t.Fatalf("%s: denied for %s", tc.name, v.Reason)
+			}
+		}
+		if allowed == 0 || allowed > 5 {
+			t.Errorf("%s: %d of 20 allowed, want 1 to 5", tc.name, allowed)
+		}
+	}
+}
+
+// TestTokenChoices: OpenAI Chat's n multiplies the output charged.
+func TestTokenChoices(t *testing.T) {
+	ctx := context.Background()
+	p, _ := tokenPipeline(t, ModeBlock, RateLimitConfig{Name: "tokens", Requests: 5000, Period: time.Minute, Tokens: true})
+	body := `{"model":"m","messages":[{"role":"user","content":"abc"}],"max_tokens":400,"n":4,"stream":true}` // 1,601
+	allowed := 0
+	for range 10 {
+		if v := p.Check(ctx, llmRequest("/v1/chat/completions", body)); v.Action == ActionAllow {
+			allowed++
+		}
+	}
+	if allowed != 3 {
+		t.Errorf("%d of 10 allowed, want 3 (1,601 tokens each of 5,000)", allowed)
 	}
 }

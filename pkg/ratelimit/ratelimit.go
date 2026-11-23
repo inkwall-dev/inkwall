@@ -283,16 +283,28 @@ func (s *Store) Intern(id Identity) uint32 {
 // of burst (requests when not positive). requests and period are at least
 // 1 and 1ns.
 func (s *Store) Limit(id Identity, requests int64, period time.Duration, burst int64) Limit {
+	return s.limit(id, requests, period, burst, false)
+}
+
+// TokenLimit is Limit for a limit of tokens (design 0012 §6), which TakeN,
+// ObserveN, Peek and Settle charge: its burst is at most what keeps the
+// window (burst × interval) within a quarter of the clock's range, so a
+// weighted request on top of the most debt Settle leaves can't overflow it.
+// A burst of a billion tokens at one an hour is cut to about 640 million.
+func (s *Store) TokenLimit(id Identity, tokens int64, period time.Duration, burst int64) Limit {
+	return s.limit(id, tokens, period, burst, true)
+}
+
+func (s *Store) limit(id Identity, requests int64, period time.Duration, burst int64, tokens bool) Limit {
 	s.allocate()
 	requests = max(requests, 1)
 	if burst <= 0 {
 		burst = requests
 	}
 	interval := max(int64(period)/requests, 1)
-	// burst × interval, the window, must fit with room for a weighted
-	// request and its debt: a burst of a billion tokens at one an hour
-	// can't.
-	burst = min(burst, math.MaxInt64/4/interval)
+	if tokens {
+		burst = min(burst, math.MaxInt64/4/interval)
+	}
 	l := Limit{
 		id:       s.Intern(id),
 		interval: interval,
@@ -369,7 +381,14 @@ type Decision struct {
 	Sampled uint32
 	// overflow: the request was charged to an overflow bucket.
 	overflow bool
+	// uncounted: allowed without a bucket (ObserveN of a key the table
+	// can't hold): nothing to refund or settle.
+	uncounted bool
 }
+
+// Counted reports whether the request was charged to a bucket: Allowed and
+// counted, so RefundN and Settle have one to correct.
+func (d Decision) Counted() bool { return d.Allowed && !d.uncounted }
 
 // Take checks the request of key k at t against l and, when it is within
 // the limit, charges it, in one step. live is the compiled bundle's set of
@@ -424,28 +443,20 @@ func (s *Store) Observe(l Limit, k Key, t time.Time, live *Live) Decision {
 func (l Limit) weight(n int64) int64 { return min(max(n, 1), l.burst+1) }
 
 // TakeN is Take for a request that weighs n tokens (an LLM request's
-// estimated tokens, design 0012 §6): GCRA with a weight, the request taking
-// n tokens in one step, or none. A request heavier than the burst never
-// fits.
+// estimated tokens, design 0012 §6), of a TokenLimit: GCRA with a weight,
+// the request taking n tokens in one step, or none. A request heavier than
+// the burst never fits.
 func (s *Store) TakeN(l Limit, k Key, t time.Time, live *Live, n int64) Decision {
-	return s.take(l, k, t, live, n, true, false)
+	return s.takeN(l, k, t, live, n, false)
 }
 
-// ObserveN is Observe for a request that weighs n tokens.
+// ObserveN is Observe for a request that weighs n tokens. A key the table
+// can't hold is let through uncounted: its Decision isn't Counted.
 func (s *Store) ObserveN(l Limit, k Key, t time.Time, live *Live, n int64) Decision {
-	return s.take(l, k, t, live, n, true, true)
+	return s.takeN(l, k, t, live, n, true)
 }
 
-// Peek is Take without the charge: whether key k has a token left at t, a
-// limited request sampled into events as Take samples it. A token limit
-// refuses a key in debt with it before the request's weight is known.
-// observe is the limit's: it only logs (Detect), as Observe.
-func (s *Store) Peek(l Limit, k Key, t time.Time, live *Live, observe bool) Decision {
-	return s.take(l, k, t, live, 1, false, observe)
-}
-
-// take is TakeN (commit: charge it), Peek (not) and ObserveN (observe).
-func (s *Store) take(l Limit, k Key, t time.Time, live *Live, n int64, commit, observe bool) Decision {
+func (s *Store) takeN(l Limit, k Key, t time.Time, live *Live, n int64, observe bool) Decision {
 	n = l.weight(n)
 	now := int64(t.Sub(s.base))
 	sh, i, o := s.locate(l.id, k)
@@ -453,32 +464,55 @@ func (s *Store) take(l Limit, k Key, t time.Time, live *Live, n int64, commit, o
 	e := s.find(sh, i, l.id, k, now, live)
 	if e == nil {
 		sh.mu.Unlock()
-		if commit {
-			s.overflows.Add(1)
-		}
+		s.overflows.Add(1)
 		if observe {
-			return Decision{Allowed: true}
+			return Decision{Allowed: true, uncounted: true}
 		}
-		var b *overflowBuckets
-		if commit {
-			b = s.overflowOf(l.id, now, live)
-		} else {
-			s.overMu.RLock()
-			b = s.overflow[l.id]
-			s.overMu.RUnlock()
-			if b == nil {
-				return Decision{Allowed: true} // nothing counted: nothing owed
-			}
-		}
+		b := s.overflowOf(l.id, now, live)
 		b.mu.Lock()
-		d := chargeN(&b.e[o], l, now, n, commit)
+		d := chargeN(&b.e[o], l, now, n, true)
 		b.mu.Unlock()
 		d.overflow = true
 		return d
 	}
 	e.observe = observe
-	d := chargeN(e, l, now, n, commit)
+	d := chargeN(e, l, now, n, true)
 	sh.mu.Unlock()
+	return d
+}
+
+// Peek is Take without the charge, of a Block TokenLimit: whether key k
+// has a token left at t, a limited request sampled into events as Take
+// samples it. A token limit refuses a key in debt with it before the
+// request's weight is known. It only looks: a key the table doesn't hold
+// is looked for in the limit's overflow bucket, if it has one, and is
+// allowed otherwise (nothing counted, nothing owed); no entry is claimed.
+func (s *Store) Peek(l Limit, k Key, t time.Time) Decision {
+	now := int64(t.Sub(s.base))
+	sh, i, o := s.locate(l.id, k)
+	sh.mu.Lock()
+	for j := range uint64(neighbourhood) {
+		e := &sh.e[(i+j)&s.slotMask]
+		if e.id == l.id && e.key == k {
+			d := chargeN(e, l, now, 1, false)
+			sh.mu.Unlock()
+			return d
+		}
+	}
+	sh.mu.Unlock()
+	if s.overflowing.Load() == 0 {
+		return Decision{Allowed: true}
+	}
+	s.overMu.RLock()
+	b := s.overflow[l.id]
+	s.overMu.RUnlock()
+	if b == nil {
+		return Decision{Allowed: true}
+	}
+	b.mu.Lock()
+	d := chargeN(&b.e[o], l, now, 1, false)
+	b.mu.Unlock()
+	d.overflow = true
 	return d
 }
 
@@ -629,18 +663,18 @@ func (s *Store) Refund(l Limit, k Key, d Decision) { s.adjust(l, k, d, -1, 0) }
 // for it.
 func (s *Store) RefundN(l Limit, k Key, d Decision, n int64) { s.adjust(l, k, d, -l.weight(n), 0) }
 
-// Settle corrects key k's bucket of l by delta tokens at t, d being
-// TakeN's decision for the request: a request charged an estimate that its
-// response says it used delta more (debt: the bucket fills later) or
-// -delta fewer (a refund). A key in debt is over the limit until the
-// bucket refills past it. A refund is bounded by the burst, a debt by
-// twice the burst, and a bucket's debt by three bursts however many
-// responses settle at once: a key can't be put out for longer than three
-// times the limit's own window.
+// Settle corrects key k's bucket of l, a TokenLimit, by delta tokens at t,
+// d being TakeN's or ObserveN's decision for the request: a request
+// charged an estimate that its response says it used delta more (debt:
+// the bucket fills later) or -delta fewer (a refund). A key in debt is
+// over the limit until the bucket refills past it. A refund is bounded by
+// the burst, a debt by twice the burst, and the bucket's whole debt by two
+// bursts however many responses settle at once: a key can't be put out
+// for longer than twice the limit's own window.
 func (s *Store) Settle(l Limit, k Key, d Decision, t time.Time, delta int64) {
 	delta = min(max(delta, -l.burst), 2*l.burst)
-	if delta != 0 {
-		s.adjust(l, k, d, delta, int64(t.Sub(s.base))+3*l.burst*l.interval)
+	if delta != 0 && d.Counted() {
+		s.adjust(l, k, d, delta, int64(t.Sub(s.base))+2*l.burst*l.interval)
 	}
 }
 
@@ -649,9 +683,15 @@ func (s *Store) Settle(l Limit, k Key, d Decision, t time.Time, delta int64) {
 func (s *Store) adjust(l Limit, k Key, d Decision, delta, most int64) {
 	sh, i, o := s.locate(l.id, k)
 	move := func(e *entry) {
-		e.tat += delta * l.interval
-		if delta > 0 {
-			e.tat = min(e.tat, most)
+		by := delta * l.interval // |delta| ≤ 2 bursts: within the clock's range
+		switch {
+		case by <= 0:
+			e.tat = max(e.tat, math.MinInt64-by) + by
+		case e.tat >= most:
+		case by > most-e.tat: // the sum past most, or past the clock's range
+			e.tat = most
+		default:
+			e.tat += by
 		}
 	}
 	if d.overflow {

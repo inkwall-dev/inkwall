@@ -249,6 +249,24 @@ func equalFold(b []byte, s string) bool {
 	return true
 }
 
+// FallbackTokens is the estimate of a request whose body can't be read
+// (cut, encoded, not parsed, or not read at all) of bodyBytes, the larger
+// of what was read and its Content-Length: bodyBytes ÷ 3, rounded up, plus
+// the policy's output cap, or DefaultOutputTokens without one, saturated.
+// A body that can't be read is charged as large as it may be, never
+// nothing.
+func (r *Rules) FallbackTokens(bodyBytes int64) int64 {
+	in := bodyBytes/3 + min(bodyBytes%3, 1)
+	out := int64(DefaultOutputTokens)
+	if r != nil && r.maxOutput > 0 {
+		out = r.maxOutput
+	}
+	if out > math.MaxInt64-in {
+		return math.MaxInt64
+	}
+	return in + out
+}
+
 // OutputTokens is the output tokens a token estimate charges req: its
 // output limit, else the policy's cap, else DefaultOutputTokens; none for
 // embeddings.
@@ -265,12 +283,19 @@ func (r *Rules) OutputTokens(req *Request) int64 {
 }
 
 // EstimatedTokens is req's tokens as charged at request time: its prompt's
-// bytes divided by 3, rounded up, plus its output tokens (OutputTokens),
-// saturated at MaxInt64. Inkwall has no tokenizer: bytes ÷ 3 overestimates
-// English (about 4 bytes a token) and is close for code and CJK text.
+// bytes divided by 3, rounded up, plus its output tokens (OutputTokens)
+// for each of its choices (OpenAI Chat's n), saturated at MaxInt64.
+// Inkwall has no tokenizer: bytes ÷ 3 overestimates English (about 4 bytes
+// a token) and is close for code and CJK text.
 func (r *Rules) EstimatedTokens(req *Request) int64 {
 	in := (req.PromptBytes + 2) / 3
 	out := r.OutputTokens(req)
+	if req.Format == OpenAIChat && req.HasChoices && req.Choices > 1 {
+		if out > math.MaxInt64/req.Choices {
+			return math.MaxInt64
+		}
+		out *= req.Choices
+	}
 	if out > math.MaxInt64-in {
 		return math.MaxInt64
 	}
