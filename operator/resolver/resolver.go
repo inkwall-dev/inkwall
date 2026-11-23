@@ -32,6 +32,7 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
+	enginepolicy "github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
@@ -57,6 +58,10 @@ const (
 	// ReasonRuleSetsIncompatible: the policy's rule sets compile alone but
 	// not together, as the engine loads them.
 	ReasonRuleSetsIncompatible = "RuleSetsIncompatible"
+	// ReasonInvalidSpec: the engine can't compile the policy's spec (a
+	// value admission didn't refuse); in the bundle, it would make every
+	// engine refuse the bundle.
+	ReasonInvalidSpec = "InvalidSpec"
 )
 
 // PolicyValid is the Accepted message of a policy that resolved with
@@ -328,16 +333,16 @@ func (r *resolution) resolvePolicies() {
 	}
 
 	// The policy each candidate puts in the bundle: its spec, or its
-	// previous version; nil: left out. A policy whose rule sets the engine
-	// can't compile together is left out too (or keeps its previous
-	// version, if that compiles): in the bundle, it would make every engine
-	// refuse the bundle, for every policy.
+	// previous version; nil: left out. A policy the engine can't compile
+	// (its rule sets together, or any of its settings) is left out too (or
+	// keeps its previous version, if that compiles): in the bundle, it
+	// would make every engine refuse the bundle, for every policy.
 	pols := make([]*bundlev1.Policy, len(cands))
 	for i, c := range cands {
 		pols[i] = c.policy
 		if !c.failed {
-			if err := r.checkPolicy(c.policy, r.ruleSets); err != nil {
-				c.fail(ReasonRuleSetsIncompatible, fmt.Sprintf("its rule sets don't compile together: %v", err))
+			if reason, err := r.checkPolicy(c.policy, r.ruleSets); err != nil {
+				c.fail(reason, err.Error())
 			}
 		}
 		if c.failed {
@@ -346,7 +351,7 @@ func (r *resolution) resolvePolicies() {
 				pols[i] = nil
 				continue
 			}
-			if err := r.checkPolicy(prev, previousRuleSets); err != nil {
+			if _, err := r.checkPolicy(prev, previousRuleSets); err != nil {
 				c.status.Message += "; its previous version doesn't compile either, so the policy is left out"
 				pols[i] = nil
 				continue
@@ -476,18 +481,25 @@ func (c *candidate) reportOverlaps() {
 }
 
 // checkPolicy compiles a policy with the rule sets it binds (from
-// ruleSets), as the engine does; nil when Input.CheckPolicy isn't set.
-func (r *resolution) checkPolicy(p *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet) error {
-	if r.in.CheckPolicy == nil {
-		return nil
-	}
+// ruleSets), as the engine does: its settings always, its rules when
+// Input.CheckPolicy is set. An error comes with its Accepted reason.
+func (r *resolution) checkPolicy(p *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet) (string, error) {
 	var bound []*bundlev1.RuleSet
 	for _, b := range p.GetRuleSets() {
 		if rs, ok := ruleSets[b.GetRuleSetId()]; ok {
 			bound = append(bound, rs)
 		}
 	}
-	return r.in.CheckPolicy(p, bound)
+	if err := enginepolicy.CheckSettings(p, bound); err != nil {
+		return ReasonInvalidSpec, fmt.Errorf("the engine can't compile it: %w", err)
+	}
+	if r.in.CheckPolicy == nil {
+		return "", nil
+	}
+	if err := r.in.CheckPolicy(p, bound); err != nil {
+		return ReasonRuleSetsIncompatible, fmt.Errorf("its rule sets don't compile together: %w", err)
+	}
+	return "", nil
 }
 
 // overlaps settles the routes of different namespaces that overlap without
@@ -1021,4 +1033,14 @@ func (r *resolution) ipList(ns string, names []wafv1alpha1.IPListName) ([]string
 		}
 	}
 	return out, nil
+}
+
+// CheckSpec compiles what the engine compiles of a policy's spec besides
+// its rules and the objects it names (rule sets, IP lists), as the bundle
+// builder checks it: for admission, so that a spec the bundle would leave
+// out is refused when it is saved.
+func CheckSpec(s wafv1alpha1.WAFPolicySpec) error {
+	p := convertSpec("", s)
+	p.RuleSets = nil // the webhook checks the CRS settings (checkCRS) and doesn't read rule sets
+	return enginepolicy.CheckSettings(p, nil)
 }

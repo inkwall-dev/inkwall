@@ -50,6 +50,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
 	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
+	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	enginepolicy "github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
@@ -315,7 +316,7 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 		Events:    eventsConfig(cfg),
 		GeoTable:  geoRef,
 		// A policy's own spec.denyResponse wins over it.
-		DenyResponse: denyResponse(cfg),
+		DenyResponse: denyResponse(ctx, cfg),
 	}, r.lastVersion, r.Now(), resign)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -901,11 +902,22 @@ func eventsConfig(cfg *wafv1alpha1.InkwallConfig) *bundlev1.EventsConfig {
 
 // denyResponse is the InkwallConfig's spec.engine.denyResponse for the
 // bundle, nil for none.
-func denyResponse(cfg *wafv1alpha1.InkwallConfig) *bundlev1.DenyResponse {
+func denyResponse(ctx context.Context, cfg *wafv1alpha1.InkwallConfig) *bundlev1.DenyResponse {
 	if cfg == nil {
 		return nil
 	}
-	return resolver.DenyResponse(cfg.Spec.Engine.DenyResponse)
+	d := resolver.DenyResponse(cfg.Spec.Engine.DenyResponse)
+	if d == nil {
+		return nil
+	}
+	// Its webhook fails open: a denial the engine can't compile would make
+	// every engine refuse the bundle, so it is left out, and engines deny
+	// with their default.
+	if _, err := pipeline.CompileDenyResponse(d.GetContentType(), d.GetBody()); err != nil {
+		log.FromContext(ctx).Error(err, "spec.engine.denyResponse doesn't compile; the bundle names no denial")
+		return nil
+	}
+	return d
 }
 
 // statusVersion is a bundle version as status.bundleVersion holds it: one

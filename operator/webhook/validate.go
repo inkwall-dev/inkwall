@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
@@ -421,6 +422,14 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 			errs = append(errs, field.Invalid(spec.Child("ruleSets").Index(i).Child("placement"), b.Placement,
 				"BeforeCRS is only for SecLang rule sets, and paranoiaLevel, inboundAnomalyThreshold and crs only for the built-in CRS: "+
 					"bind the CRS without placement, and the rule set to place before it in its own entry"))
+		}
+	}
+	if len(errs) == 0 {
+		// Whatever else the engine refuses (the checks above name the
+		// field): one policy it refused would make it refuse the whole
+		// bundle, so the operator would leave the policy out.
+		if err := resolver.CheckSpec(p.Spec); err != nil {
+			errs = append(errs, field.Invalid(spec, field.OmitValueType{}, "the engine can't compile the policy: "+err.Error()))
 		}
 	}
 	warnings := append(responseWarnings(p), geoWarnings(p)...)

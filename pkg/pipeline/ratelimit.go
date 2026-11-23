@@ -70,6 +70,35 @@ type limitPath struct {
 	prefix bool
 }
 
+// CheckRateLimits checks a policy's limits as CompileRateLimits does,
+// without a store: what it refuses, CompileRateLimits refuses. The
+// operator's webhook and bundle builder check with it, since one limit the
+// engine refuses makes it refuse the whole bundle.
+func CheckRateLimits(cfgs []RateLimitConfig) error {
+	// The CRD allows 8, with unique names; the engine doesn't trust the
+	// bundle for it: a 9th limit couldn't be refunded, and two of one name
+	// would share their buckets.
+	if len(cfgs) > MaxRateLimits {
+		return fmt.Errorf("%d rate limits, at most %d", len(cfgs), MaxRateLimits)
+	}
+	names := map[string]bool{}
+	for _, c := range cfgs {
+		if names[c.Name] {
+			return fmt.Errorf("rate limit %q twice", c.Name)
+		}
+		names[c.Name] = true
+		if c.Requests < 1 || c.Period < time.Second {
+			return fmt.Errorf("rate limit %q: requests and period must be at least 1 and 1s", c.Name)
+		}
+		for _, p := range c.Paths {
+			if _, err := compileLimitPath(p); err != nil {
+				return fmt.Errorf("rate limit %q: %w", c.Name, err)
+			}
+		}
+	}
+	return nil
+}
+
 // CompileRateLimits compiles a policy's limits into store. Their buckets
 // are named by the policy, each limit's name and its key, so the same
 // limit in a later bundle keeps them. live collects every limit of the
@@ -81,22 +110,11 @@ func CompileRateLimits(store *ratelimit.Store, live *ratelimit.Live, policy stri
 	if store == nil {
 		return nil, fmt.Errorf("rate limits without a rate limit store")
 	}
-	// The CRD allows 8, with unique names; the engine doesn't trust the
-	// bundle for it: a 9th limit couldn't be refunded, and two of one name
-	// would share their buckets.
-	if len(cfgs) > MaxRateLimits {
-		return nil, fmt.Errorf("%d rate limits, at most %d", len(cfgs), MaxRateLimits)
+	if err := CheckRateLimits(cfgs); err != nil {
+		return nil, err
 	}
 	rl := &RateLimits{store: store, live: live}
-	names := map[string]bool{}
 	for _, c := range cfgs {
-		if names[c.Name] {
-			return nil, fmt.Errorf("rate limit %q twice", c.Name)
-		}
-		names[c.Name] = true
-		if c.Requests < 1 || c.Period < time.Second {
-			return nil, fmt.Errorf("rate limit %q: requests and period must be at least 1 and 1s", c.Name)
-		}
 		prefix := c.IPv6Prefix
 		if prefix == 0 {
 			prefix = DefaultIPv6Prefix
@@ -113,10 +131,7 @@ func CompileRateLimits(store *ratelimit.Store, live *ratelimit.Live, policy stri
 			detect: c.Detect,
 		}
 		for _, p := range c.Paths {
-			lp, err := compileLimitPath(p)
-			if err != nil {
-				return nil, fmt.Errorf("rate limit %q: %w", c.Name, err)
-			}
+			lp, _ := compileLimitPath(p) // checked
 			l.paths = append(l.paths, lp)
 		}
 		for _, m := range c.Methods {

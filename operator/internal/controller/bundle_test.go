@@ -201,16 +201,23 @@ func TestEventsConfig(t *testing.T) {
 
 // The InkwallConfig's denyResponse is the bundle's default denial (#725).
 func TestDenyResponseDefault(t *testing.T) {
-	if got := denyResponse(nil); got != nil {
+	ctx := context.Background()
+	if got := denyResponse(ctx, nil); got != nil {
 		t.Errorf("no InkwallConfig: %v", got)
 	}
 	cfg := &wafv1alpha1.InkwallConfig{}
-	if got := denyResponse(cfg); got != nil {
+	if got := denyResponse(ctx, cfg); got != nil {
 		t.Errorf("unset: %v", got)
 	}
 	cfg.Spec.Engine.DenyResponse = &wafv1alpha1.DenyResponse{ContentType: "application/json", Body: `{"id":"{{request_id}}"}`}
 	want := &bundlev1.DenyResponse{ContentType: "application/json", Body: `{"id":"{{request_id}}"}`}
-	if got := denyResponse(cfg); !proto.Equal(got, want) {
+	if got := denyResponse(ctx, cfg); !proto.Equal(got, want) {
 		t.Errorf("set: %v, want %v", got, want)
+	}
+	// One the engine can't compile (its webhook fails open) would make every
+	// engine refuse the bundle: left out.
+	cfg.Spec.Engine.DenyResponse = &wafv1alpha1.DenyResponse{ContentType: "image/png", Body: "x"}
+	if got := denyResponse(ctx, cfg); got != nil {
+		t.Errorf("not compiled: %v", got)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -156,6 +157,18 @@ func TestPolicyValidation(t *testing.T) {
 	old.Spec.RuleSets[0].ParanoiaLevel = ptr(int32(4)) //nolint:staticcheck // the deprecated field
 	_, err = v.ValidateCreate(ctx, old)
 	wantInvalid(t, err, "spec.ruleSets[0].crs.detectionParanoiaLevel", "paranoia level")
+
+	// Whatever else the engine wouldn't compile, which the checks above
+	// don't name: an engine refusing one policy refuses the whole bundle.
+	rl := p.DeepCopy()
+	rl.Spec.RateLimits = []wafv1alpha1.RateLimit{{Name: "login", Requests: 10, Period: metav1.Duration{Duration: time.Minute},
+		Match: &wafv1alpha1.RateLimitMatch{Paths: []wafv1alpha1.PathPattern{"/login"}}}}
+	if _, err := v.ValidateCreate(ctx, rl); err != nil {
+		t.Fatalf("valid rate limit: %v", err)
+	}
+	rl.Spec.RateLimits[0].Match.Paths[0] = "/a/../login"
+	_, err = v.ValidateCreate(ctx, rl)
+	wantInvalid(t, err, "spec", "the engine can't compile the policy")
 }
 
 // A rule set reference's namespace draws a warning (#715): another
