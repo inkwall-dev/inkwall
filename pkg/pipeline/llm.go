@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -187,8 +188,11 @@ func (l *LLM) endpoint(r *request.Request) (formatSet, bool) {
 		return f, f != 0
 	}
 	var union formatSet
-	every := true
-	for _, reading := range pathReadings(r.RawURI) {
+	readings, encoded := pathReadings(r.RawURI)
+	// Still encoded after every decoding tried: an application decoding
+	// once more reads a path this engine never saw.
+	every := !encoded
+	for _, reading := range readings {
 		f := l.match(reading)
 		union |= f
 		every = every && f != 0
@@ -196,44 +200,75 @@ func (l *LLM) endpoint(r *request.Request) (formatSet, bool) {
 	return union, every && union != 0
 }
 
+// maxDecodings is how many times pathReadings percent-decodes a path.
+const maxDecodings = 4
+
 // pathReadings are the ways a path that can't be read one way may be
-// read, in lower case: as sent, percent-decoded once and twice, and each
-// of those normalised (backslashes as slashes, ";" parameters dropped,
-// fullwidth forms folded to ASCII, repeated slashes and dot segments
-// resolved).
-func pathReadings(rawURI string) []string {
+// read, in lower case: as sent, percent-decoded (and IIS's %uXXXX) up to
+// maxDecodings times, and each of those normalised (backslashes as
+// slashes, ";" parameters dropped, fullwidth forms and dot and slash
+// lookalikes folded to ASCII, repeated slashes and dot segments
+// resolved). encoded: the last reading still has a "%".
+func pathReadings(rawURI string) (readings []string, encoded bool) {
 	raw, _, _ := strings.Cut(rawURI, "?")
 	bases := []string{raw}
-	for b := raw; ; {
-		d, err := url.PathUnescape(b)
-		if err != nil || d == b || len(bases) == 3 {
+	for b := raw; len(bases) <= maxDecodings; {
+		d, err := url.PathUnescape(iisUnescape(b))
+		if err != nil || d == b {
 			break
 		}
 		bases = append(bases, d)
 		b = d
 	}
-	var out []string
 	for _, b := range bases {
-		out = append(out, strings.ToLower(b), strings.ToLower(normalPath(b)))
+		readings = append(readings, strings.ToLower(b), strings.ToLower(normalPath(b)))
 	}
-	return out
+	return readings, strings.Contains(bases[len(bases)-1], "%")
+}
+
+// iisUnescape decodes IIS's %uXXXX escapes, which url.PathUnescape
+// refuses.
+func iisUnescape(p string) string {
+	if !strings.Contains(strings.ToLower(p), "%u") {
+		return p
+	}
+	var b strings.Builder
+	for i := 0; i < len(p); i++ {
+		if p[i] == '%' && i+5 < len(p) && (p[i+1] == 'u' || p[i+1] == 'U') {
+			if r, err := strconv.ParseUint(p[i+2:i+6], 16, 32); err == nil {
+				b.WriteRune(rune(r)) // #nosec G115 -- four hex digits
+				i += 5
+				continue
+			}
+		}
+		b.WriteByte(p[i])
+	}
+	return b.String()
 }
 
 // normalPath is p as a lenient application routes it.
 func normalPath(p string) string {
-	p = strings.ReplaceAll(p, "\\", "/")
-	var b strings.Builder
-	param := false
+	var folded strings.Builder
 	for _, c := range p {
 		switch {
-		case c == '/':
-			param = false
-		case c == ';':
-			param = true
-		case param:
-			continue
+		case c == '\\':
+			folded.WriteByte('/')
 		case c >= 0xFF01 && c <= 0xFF5E:
-			c -= 0xFEE0
+			folded.WriteRune(c - 0xFEE0)
+		case lookalike(c) != "":
+			folded.WriteString(strings.ReplaceAll(lookalike(c), "\\", "/"))
+		default:
+			folded.WriteRune(c)
+		}
+	}
+	var b strings.Builder
+	param := false
+	for _, c := range folded.String() {
+		switch c {
+		case '/':
+			param = false
+		case ';':
+			param = true
 		}
 		if !param {
 			b.WriteRune(c)

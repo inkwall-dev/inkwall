@@ -119,6 +119,37 @@ func TestLLMAmbiguousPathsKeepTheRules(t *testing.T) {
 			t.Errorf("%s: %s %s (%v), want the rules' deny", uri, v.Action, v.Reason, v.RuleIDs)
 		}
 	}
+	// Encoded twice, split escapes, IIS's %u, Unicode dot and slash
+	// lookalikes: an application decoding twice or normalising (NFKC)
+	// reads /api/login, so the rules keep the body, under a prefix
+	// endpoint too.
+	for _, eps := range [][]string{{"/openai/deployments/*"}, {"/v1/chat/completions"}} {
+		l, err := pipeline.CompileLLM(&pipeline.LLMConfig{Endpoints: []pipeline.LLMEndpoint{{Paths: eps, Format: llm.OpenAIChat}}, RulesReadBodies: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := pipeline.New(eval, pipeline.Config{Mode: pipeline.ModeBlock, Timeout: 10 * time.Second, LLM: l})
+		for _, uri := range []string{
+			"/openai/deployments/.%252e/.%252e/api/login",
+			"/openai/deployments/%252e./%252e./api/login",
+			"/openai/deployments/%25%32%65%25%32%65/%25%32%65%25%32%65/api/login",
+			"/openai/deployments/%25%32e%25%32e/%25%32e%25%32e/api/login",
+			"/openai/deployments/%252E%252E/%252E%252E/api/login",
+			"/openai/deployments/x%25%32%66..%25%32%66..%25%32%66..%25%32%66api/login",
+			"/openai/deployments/x%25%35%63..%25%35%63..%25%35%63..%25%35%63api/login",
+			"/openai/deployments/%25252e%25252e/%25252e%25252e/api/login",
+			"/openai/deployments/x%u002f..%u002f..%u002fapi/login",
+			"/openai/deployments/%u002e%u002e/%u002e%u002e/api/login",
+			"/openai/deployments/‥/‥/api/login",
+			"/openai/deployments/﹒﹒/﹒﹒/api/login",
+			"/openai/deployments/x∕..∕..∕api/login",
+			"/v1/chat/completions/%252e%252e/%252e%252e/%252e%252e/api/login",
+		} {
+			if v := p.Check(context.Background(), chatRequest(uri, attack)); v.Action != pipeline.ActionDeny || v.Reason != pipeline.ReasonRule {
+				t.Errorf("%v %s: %s %s (%v), want the rules' deny", eps, uri, v.Action, v.Reason, v.RuleIDs)
+			}
+		}
+	}
 	// A form on such a path isn't an LLM request: no llm-malformed.
 	for _, uri := range []string{"/api/login;jsessionid=1", "/api//login", "/api/%2e/login"} {
 		r := chatRequest(uri, []byte("user=alice&remember=on"))
