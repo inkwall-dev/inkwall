@@ -599,9 +599,10 @@ func rulesConfig(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o O
 // CheckSettings checks what of policy bp the engine compiles besides its
 // rules and rate limits (CheckRateLimits), as Compile does: its skip paths,
 // WebSocket rules, IP lists, geo rules, denial, CRS settings and
-// exclusions; ruleSets has the rule sets it binds. A policy the engine refuses makes it refuse the whole
-// bundle, every other policy's changes with it: the operator leaves out a
-// policy that fails this (or RuleChecker.Check), whatever admitted it.
+// exclusions; ruleSets has the rule sets it binds. A policy the engine
+// refuses makes it refuse the whole bundle, every other policy's changes
+// with it: the operator leaves out a policy that fails this (or
+// RuleChecker.Check), whatever admitted it.
 func CheckSettings(bp *bundlev1.Policy, ruleSets []*bundlev1.RuleSet) error {
 	byID := map[string]*bundlev1.RuleSet{}
 	for _, rs := range ruleSets {
@@ -626,6 +627,9 @@ type RuleChecker struct {
 	mu   sync.Mutex
 	errs map[[sha256.Size]byte]error
 }
+
+// maxRuleChecks bounds the results a RuleChecker remembers.
+const maxRuleChecks = 4096
 
 // NewRuleChecker returns a RuleChecker that has checked nothing.
 func NewRuleChecker() *RuleChecker {
@@ -680,6 +684,10 @@ func (c *RuleChecker) Check(bp *bundlev1.Policy, ruleSets []*bundlev1.RuleSet) e
 		err = checkRules(cfg, crs, exclusions)
 	} else {
 		_, err = coraza.New(cfg)
+	}
+	if len(c.errs) >= maxRuleChecks {
+		// Results of combinations no policy may bind any more: start again.
+		clear(c.errs)
 	}
 	c.errs[key] = err
 	return err
