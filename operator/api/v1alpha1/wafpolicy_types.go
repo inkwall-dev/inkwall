@@ -187,6 +187,7 @@ type WAFPolicySpec struct {
 	// own denials. Requires engines 0.7.0 or later.
 	// +optional
 	DenyResponse *DenyResponse `json:"denyResponse,omitempty"`
+
 	// Geo denies clients by country, or lets only some countries in
 	// (docs/geo-blocking.md), checked after the IP lists, before the
 	// skipped paths, the rate limits and the rules. It needs a country
@@ -195,6 +196,18 @@ type WAFPolicySpec struct {
 	// engines 0.7.0 or later.
 	// +optional
 	Geo *GeoSpec `json:"geo,omitempty"`
+
+	// LLM declares paths of the policy's routes as LLM APIs (OpenAI Chat
+	// Completions, Responses or Embeddings, Anthropic Messages): their
+	// request bodies are read up to maxBodyBytes, parsed strictly, and
+	// checked natively (the model, the prompt's size, the messages, the
+	// output limit, the roles and tools a client sends). A body that
+	// doesn't parse one way, or fails a check, is denied with 400 (413 for
+	// the size caps) in Block mode. The rule sets skip these bodies unless
+	// ruleSetBody is Inspect. Requires engines 0.7.0 or later
+	// (docs/llm-apis.md).
+	// +optional
+	LLM *LLMSpec `json:"llm,omitempty"`
 }
 
 // CountryCode is an ISO 3166-1 alpha-2 country code, upper case: DE, US.
@@ -254,6 +267,210 @@ type GeoSpec struct {
 	// +optional
 	Mode GeoMode `json:"mode,omitempty"`
 }
+
+// LLMFormat is the shape of an LLM API's requests.
+// +kubebuilder:validation:Enum=OpenAIChat;OpenAIResponses;OpenAIEmbeddings;AnthropicMessages
+type LLMFormat string
+
+const (
+	// LLMOpenAIChat is OpenAI's Chat Completions (/v1/chat/completions),
+	// as OpenAI-compatible servers (vLLM, Ollama, LiteLLM, llama.cpp)
+	// serve it.
+	LLMOpenAIChat LLMFormat = "OpenAIChat"
+	// LLMOpenAIResponses is OpenAI's Responses (/v1/responses).
+	LLMOpenAIResponses LLMFormat = "OpenAIResponses"
+	// LLMOpenAIEmbeddings is OpenAI's Embeddings (/v1/embeddings).
+	LLMOpenAIEmbeddings LLMFormat = "OpenAIEmbeddings"
+	// LLMAnthropicMessages is Anthropic's Messages (/v1/messages).
+	LLMAnthropicMessages LLMFormat = "AnthropicMessages"
+)
+
+// LLMRuleSetBody is whether the rule sets inspect the bodies of LLM
+// endpoints.
+// +kubebuilder:validation:Enum=Skip;Inspect
+type LLMRuleSetBody string
+
+const (
+	// LLMRuleSetBodySkip has the rule sets inspect an endpoint's method, URI,
+	// headers and cookies, not its bodies.
+	LLMRuleSetBodySkip LLMRuleSetBody = "Skip"
+	// LLMRuleSetBodyInspect has them inspect its bodies too, as on any route.
+	LLMRuleSetBodyInspect LLMRuleSetBody = "Inspect"
+)
+
+// LLMSpec declares a policy's LLM API endpoints and their checks.
+type LLMSpec struct {
+	// Endpoints are the policy's paths that serve an LLM API, each with
+	// its format. Declared, not guessed: gateways and Azure OpenAI serve
+	// these APIs on other paths. A path of no endpoint is an ordinary
+	// route to the policy.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:XValidation:rule="self.all(e, e.paths.all(p, self.filter(f, p in f.paths).size() == 1))",message="an endpoint path can't be in two endpoints"
+	// +listType=atomic
+	Endpoints []LLMEndpoint `json:"endpoints"`
+
+	// MaxBodyBytes is the request body read on an endpoint, 1 KiB to 10
+	// MiB, instead of body.maxBytes: chat histories and agents' contexts
+	// are large. A longer body gets body.onOversize (413 in Block mode by
+	// default). The proxy's own buffer still bounds what reaches the
+	// engine (docs/llm-apis.md). Unset: 1 MiB.
+	// +kubebuilder:validation:Minimum=1024
+	// +kubebuilder:validation:Maximum=10485760
+	// +optional
+	MaxBodyBytes *int64 `json:"maxBodyBytes,omitempty"`
+
+	// RuleSetBody is whether the rule sets (the CRS, SecLang) inspect the
+	// endpoints' request and response bodies too. Skip, the default: they
+	// inspect the endpoints' method, URI, headers and cookies, and the LLM
+	// checks the bodies; prose and pasted code trip the CRS's SQL
+	// injection and XSS rules all the time, and its cost on large bodies
+	// is out of every latency budget. This changes what the rule sets read
+	// on a route that adds spec.llm. Inspect: they inspect the bodies, up
+	// to maxBodyBytes, as on any route (unless body.inspect is false).
+	// +optional
+	RuleSetBody LLMRuleSetBody `json:"ruleSetBody,omitempty"`
+
+	// Request sets the request checks. Unset: only that bodies are
+	// well-formed (llm-malformed).
+	// +optional
+	Request *LLMRequestSpec `json:"request,omitempty"`
+}
+
+// LLMEndpoint is paths that serve one LLM API.
+type LLMEndpoint struct {
+	// Paths are exact paths or prefixes ending in "*", compared as rate
+	// limits' match.paths: in ASCII lower case, with one trailing slash
+	// ignored. A path the engine can't read one way (percent-encoding,
+	// ";", "//", dot segments) is checked as an endpoint of each of the
+	// policy's formats. skip.paths and skip.bodyPaths win: a body not read
+	// isn't checked.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=16
+	// +listType=set
+	Paths []PathPattern `json:"paths"`
+
+	// Format is the shape of the endpoint's requests.
+	Format LLMFormat `json:"format"`
+}
+
+// LLMRequestSpec are the checks an endpoint's requests must meet. Each
+// failed check denies, in Block mode, with 400 (413 for maxPromptBytes and
+// maxMessages), in this order: the first decides.
+type LLMRequestSpec struct {
+	// Models are the models allowed: exact, or a prefix ending in "*",
+	// compared in ASCII lower case. A request that names no model, or
+	// another one, fails llm-model. Unset: any.
+	// +kubebuilder:validation:MaxItems=64
+	// +listType=set
+	// +optional
+	Models []LLMModelPattern `json:"models,omitempty"`
+
+	// MaxPromptBytes caps the UTF-8 bytes of the prompt's text, every
+	// message together, 1 to 10 MiB (llm-max-prompt). Images, audio and
+	// files count toward maxBodyBytes only.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10485760
+	// +optional
+	MaxPromptBytes *int64 `json:"maxPromptBytes,omitempty"`
+
+	// MaxMessages caps the messages, input items or embedding inputs of a
+	// request, 1 to 100000 (llm-max-messages).
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100000
+	// +optional
+	MaxMessages *int32 `json:"maxMessages,omitempty"`
+
+	// MaxChoices caps n, the answers a chat request asks for, 1 to 128
+	// (llm-max-choices).
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=128
+	// +optional
+	MaxChoices *int32 `json:"maxChoices,omitempty"`
+
+	// MaxOutputTokens caps the output limit a request sets (max_tokens,
+	// max_completion_tokens, max_output_tokens), 1 to 10000000
+	// (llm-max-output-tokens). Inkwall doesn't lower it: a request over
+	// the cap is denied.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10000000
+	// +optional
+	MaxOutputTokens *int64 `json:"maxOutputTokens,omitempty"`
+
+	// RequireOutputTokens denies a request that sets no output limit
+	// (llm-max-output-tokens): without one, OpenAI-compatible servers
+	// generate up to the model's maximum. Embeddings have none to set.
+	// +optional
+	RequireOutputTokens bool `json:"requireOutputTokens,omitempty"`
+
+	// ClientRoles are the roles of the messages a client may send
+	// (llm-client-role); the Responses API's instructions and Anthropic's
+	// system count as system, and a role none of these as none of them.
+	// A chat front end that adds its own system prompt sets user and
+	// assistant: a client that sends system or developer overrides it.
+	// Unset: every role.
+	// +kubebuilder:validation:MaxItems=5
+	// +listType=set
+	// +optional
+	ClientRoles []LLMRole `json:"clientRoles,omitempty"`
+
+	// Tools are the tools a client may define (llm-tools). Unset: any.
+	// +optional
+	Tools *LLMToolsSpec `json:"tools,omitempty"`
+
+	// Mode Detect logs the requests that fail a check instead of denying
+	// them, on a Block policy. Unset: the policy's mode. Block isn't
+	// allowed: the checks can't be stricter than their policy.
+	// +kubebuilder:validation:XValidation:rule="self == 'Detect'",message="the LLM checks' mode can only be Detect: they can't be stricter than their policy"
+	// +optional
+	Mode PolicyMode `json:"mode,omitempty"`
+}
+
+// LLMModelPattern is a model ("llama-3.1-8b-instruct") or a prefix ending
+// in "*" ("qwen2.5-*"), printable ASCII without spaces.
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:MaxLength=256
+// +kubebuilder:validation:Pattern=`^[!-)+-~]+\*?$`
+type LLMModelPattern string
+
+// LLMRole is who wrote a message.
+// +kubebuilder:validation:Enum=system;developer;user;assistant;tool
+type LLMRole string
+
+// LLMToolsAllow is which tools a client may define.
+// +kubebuilder:validation:Enum=Any;None;Listed
+type LLMToolsAllow string
+
+const (
+	// LLMToolsAny allows any tool.
+	LLMToolsAny LLMToolsAllow = "Any"
+	// LLMToolsNone allows none.
+	LLMToolsNone LLMToolsAllow = "None"
+	// LLMToolsListed allows the tools names lists.
+	LLMToolsListed LLMToolsAllow = "Listed"
+)
+
+// LLMToolsSpec is which tools a client may define.
+// +kubebuilder:validation:XValidation:rule="(has(self.allow) && self.allow == 'Listed') == (has(self.names) && size(self.names) > 0)",message="names is required with allow: Listed, and only allowed with it"
+type LLMToolsSpec struct {
+	// Allow is Any (the default), None, or Listed: the tools names lists.
+	// +optional
+	Allow LLMToolsAllow `json:"allow,omitempty"`
+
+	// Names are the tools a client may define with Listed: a function's
+	// name, or a built-in tool's type when it has no name
+	// ("web_search_preview"), compared exactly.
+	// +kubebuilder:validation:MaxItems=128
+	// +listType=set
+	// +optional
+	Names []LLMToolName `json:"names,omitempty"`
+}
+
+// LLMToolName is a tool's name.
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:MaxLength=256
+// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.:/-]+$`
+type LLMToolName string
 
 // RateLimit is a token bucket per key: it holds at most burst requests and
 // gains requests per period, evenly.

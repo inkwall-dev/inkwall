@@ -1,0 +1,1 @@
+{"model":"gpt-4.1","input":[{"type":"item_reference","id":"msg_1"},{"role":"user","content":"and then?"}],"conversation":"conv_1","max_output_tokens":100,"prompt":{"id":"pmpt_1","variables":{"name":"x"}}}

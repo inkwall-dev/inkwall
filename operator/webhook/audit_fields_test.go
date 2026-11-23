@@ -113,6 +113,10 @@ func TestAuditFieldNames(t *testing.T) {
 		"spec.exclusions.when.header",
 		"spec.geo.database.secretRef",
 		"spec.geo.database.secretRef.key",
+		// LLM API paths and output-token caps: no credential.
+		"spec.llm.endpoints",
+		"spec.llm.request.maxOutputTokens",
+		"spec.llm.request.requireOutputTokens",
 		"spec.rateLimits.key",
 		"spec.rateLimits.key.header",
 		"spec.signingKey",

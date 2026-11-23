@@ -390,6 +390,223 @@ spec:
                     type: array
                     x-kubernetes-list-type: set
                 type: object
+              llm:
+                description: |-
+                  LLM declares paths of the policy's routes as LLM APIs (OpenAI Chat
+                  Completions, Responses or Embeddings, Anthropic Messages): their
+                  request bodies are read up to maxBodyBytes, parsed strictly, and
+                  checked natively (the model, the prompt's size, the messages, the
+                  output limit, the roles and tools a client sends). A body that
+                  doesn't parse one way, or fails a check, is denied with 400 (413 for
+                  the size caps) in Block mode. The rule sets skip these bodies unless
+                  ruleSetBody is Inspect. Requires engines 0.7.0 or later
+                  (docs/llm-apis.md).
+                properties:
+                  endpoints:
+                    description: |-
+                      Endpoints are the policy's paths that serve an LLM API, each with
+                      its format. Declared, not guessed: gateways and Azure OpenAI serve
+                      these APIs on other paths. A path of no endpoint is an ordinary
+                      route to the policy.
+                    items:
+                      description: LLMEndpoint is paths that serve one LLM API.
+                      properties:
+                        format:
+                          description: Format is the shape of the endpoint's requests.
+                          enum:
+                          - OpenAIChat
+                          - OpenAIResponses
+                          - OpenAIEmbeddings
+                          - AnthropicMessages
+                          type: string
+                        paths:
+                          description: |-
+                            Paths are exact paths or prefixes ending in "*", compared as rate
+                            limits' match.paths: in ASCII lower case, with one trailing slash
+                            ignored. A path the engine can't read one way (percent-encoding,
+                            ";", "//", dot segments) is checked as an endpoint of each of the
+                            policy's formats. skip.paths and skip.bodyPaths win: a body not read
+                            isn't checked.
+                          items:
+                            description: |-
+                              PathPattern is an exact path ("/healthz") or a prefix ending in "*"
+                              ("/static/*"), using only plain ASCII path characters, as the engine
+                              matches paths (pkg/router).
+                            maxLength: 1024
+                            pattern: ^/[A-Za-z0-9._~/:@!$&'()+,=-]*\*?$
+                            type: string
+                          maxItems: 16
+                          minItems: 1
+                          type: array
+                          x-kubernetes-list-type: set
+                      required:
+                      - format
+                      - paths
+                      type: object
+                    maxItems: 8
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: atomic
+                    x-kubernetes-validations:
+                    - message: an endpoint path can't be in two endpoints
+                      rule: self.all(e, e.paths.all(p, self.filter(f, p in f.paths).size()
+                        == 1))
+                  maxBodyBytes:
+                    description: |-
+                      MaxBodyBytes is the request body read on an endpoint, 1 KiB to 10
+                      MiB, instead of body.maxBytes: chat histories and agents' contexts
+                      are large. A longer body gets body.onOversize (413 in Block mode by
+                      default). The proxy's own buffer still bounds what reaches the
+                      engine (docs/llm-apis.md). Unset: 1 MiB.
+                    format: int64
+                    maximum: 10485760
+                    minimum: 1024
+                    type: integer
+                  request:
+                    description: |-
+                      Request sets the request checks. Unset: only that bodies are
+                      well-formed (llm-malformed).
+                    properties:
+                      clientRoles:
+                        description: |-
+                          ClientRoles are the roles of the messages a client may send
+                          (llm-client-role); the Responses API's instructions and Anthropic's
+                          system count as system, and a role none of these as none of them.
+                          A chat front end that adds its own system prompt sets user and
+                          assistant: a client that sends system or developer overrides it.
+                          Unset: every role.
+                        items:
+                          description: LLMRole is who wrote a message.
+                          enum:
+                          - system
+                          - developer
+                          - user
+                          - assistant
+                          - tool
+                          type: string
+                        maxItems: 5
+                        type: array
+                        x-kubernetes-list-type: set
+                      maxChoices:
+                        description: |-
+                          MaxChoices caps n, the answers a chat request asks for, 1 to 128
+                          (llm-max-choices).
+                        format: int32
+                        maximum: 128
+                        minimum: 1
+                        type: integer
+                      maxMessages:
+                        description: |-
+                          MaxMessages caps the messages, input items or embedding inputs of a
+                          request, 1 to 100000 (llm-max-messages).
+                        format: int32
+                        maximum: 100000
+                        minimum: 1
+                        type: integer
+                      maxOutputTokens:
+                        description: |-
+                          MaxOutputTokens caps the output limit a request sets (max_tokens,
+                          max_completion_tokens, max_output_tokens), 1 to 10000000
+                          (llm-max-output-tokens). Inkwall doesn't lower it: a request over
+                          the cap is denied.
+                        format: int64
+                        maximum: 10000000
+                        minimum: 1
+                        type: integer
+                      maxPromptBytes:
+                        description: |-
+                          MaxPromptBytes caps the UTF-8 bytes of the prompt's text, every
+                          message together, 1 to 10 MiB (llm-max-prompt). Images, audio and
+                          files count toward maxBodyBytes only.
+                        format: int64
+                        maximum: 10485760
+                        minimum: 1
+                        type: integer
+                      mode:
+                        description: |-
+                          Mode Detect logs the requests that fail a check instead of denying
+                          them, on a Block policy. Unset: the policy's mode. Block isn't
+                          allowed: the checks can't be stricter than their policy.
+                        enum:
+                        - Detect
+                        - Block
+                        type: string
+                        x-kubernetes-validations:
+                        - message: 'the LLM checks'' mode can only be Detect: they
+                            can''t be stricter than their policy'
+                          rule: self == 'Detect'
+                      models:
+                        description: |-
+                          Models are the models allowed: exact, or a prefix ending in "*",
+                          compared in ASCII lower case. A request that names no model, or
+                          another one, fails llm-model. Unset: any.
+                        items:
+                          description: |-
+                            LLMModelPattern is a model ("llama-3.1-8b-instruct") or a prefix ending
+                            in "*" ("qwen2.5-*"), printable ASCII without spaces.
+                          maxLength: 256
+                          minLength: 1
+                          pattern: ^[!-)+-~]+\*?$
+                          type: string
+                        maxItems: 64
+                        type: array
+                        x-kubernetes-list-type: set
+                      requireOutputTokens:
+                        description: |-
+                          RequireOutputTokens denies a request that sets no output limit
+                          (llm-max-output-tokens): without one, OpenAI-compatible servers
+                          generate up to the model's maximum. Embeddings have none to set.
+                        type: boolean
+                      tools:
+                        description: 'Tools are the tools a client may define (llm-tools).
+                          Unset: any.'
+                        properties:
+                          allow:
+                            description: 'Allow is Any (the default), None, or Listed:
+                              the tools names lists.'
+                            enum:
+                            - Any
+                            - None
+                            - Listed
+                            type: string
+                          names:
+                            description: |-
+                              Names are the tools a client may define with Listed: a function's
+                              name, or a built-in tool's type when it has no name
+                              ("web_search_preview"), compared exactly.
+                            items:
+                              description: LLMToolName is a tool's name.
+                              maxLength: 256
+                              minLength: 1
+                              pattern: ^[A-Za-z0-9_.:/-]+$
+                              type: string
+                            maxItems: 128
+                            type: array
+                            x-kubernetes-list-type: set
+                        type: object
+                        x-kubernetes-validations:
+                        - message: 'names is required with allow: Listed, and only
+                            allowed with it'
+                          rule: (has(self.allow) && self.allow == 'Listed') == (has(self.names)
+                            && size(self.names) > 0)
+                    type: object
+                  ruleSetBody:
+                    description: |-
+                      RuleSetBody is whether the rule sets (the CRS, SecLang) inspect the
+                      endpoints' request and response bodies too. Skip, the default: they
+                      inspect the endpoints' method, URI, headers and cookies, and the LLM
+                      checks the bodies; prose and pasted code trip the CRS's SQL
+                      injection and XSS rules all the time, and its cost on large bodies
+                      is out of every latency budget. This changes what the rule sets read
+                      on a route that adds spec.llm. Inspect: they inspect the bodies, up
+                      to maxBodyBytes, as on any route (unless body.inspect is false).
+                    enum:
+                    - Skip
+                    - Inspect
+                    type: string
+                required:
+                - endpoints
+                type: object
               mode:
                 default: Detect
                 description: Mode is Detect (log, let through) or Block (reject).

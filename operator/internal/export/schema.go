@@ -108,6 +108,7 @@ var reasonNames = map[enginev1.Reason]string{
 	enginev1.Reason_REASON_RATE_LIMIT:      "rate-limit",
 	enginev1.Reason_REASON_GEO_DENY:        "geo-deny",
 	enginev1.Reason_REASON_GEO_UNAVAILABLE: "geo-unavailable",
+	enginev1.Reason_REASON_LLM:             "llm",
 }
 
 func reasonName(r enginev1.Reason) string {
@@ -233,6 +234,30 @@ func appendJSON(b []byte, it item, v *view) []byte {
 	if n := ev.GetSampledCount(); n > 1 {
 		b = append(b, `,"sampled_count":`...)
 		b = strconv.AppendUint(b, uint64(n), 10)
+	}
+	if l := ev.GetLlm(); l != nil {
+		// The check and where it failed: an event has no prompt text.
+		b = append(b, `,"llm":{"check":`...)
+		b = appendString(b, l.GetCheck())
+		b = append(b, `,"format":`...)
+		b = appendString(b, l.GetFormat())
+		if m := l.GetModel(); m != "" {
+			b = append(b, `,"model":`...)
+			b = appendString(b, m)
+		}
+		if r := l.GetRole(); r != "" {
+			b = append(b, `,"role":`...)
+			b = appendString(b, r)
+		}
+		b = append(b, `,"message_index":`...)
+		b = strconv.AppendInt(b, int64(l.GetMessageIndex()), 10)
+		b = append(b, `,"offset":`...)
+		b = strconv.AppendInt(b, l.GetOffset(), 10)
+		if t := l.GetEstimatedTokens(); t > 0 {
+			b = append(b, `,"estimated_tokens":`...)
+			b = strconv.AppendInt(b, t, 10)
+		}
+		b = append(b, '}')
 	}
 	b = appendObject(b, "request", []field{
 		{"id", v.keep(!v.omitRequestID, ev.GetRequestId())},

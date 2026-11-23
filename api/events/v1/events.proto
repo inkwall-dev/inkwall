@@ -76,6 +76,37 @@ message SecurityEvent {
   // address the country table has none for, empty for a private address
   // or when the engine holds no table (design 0011 §8).
   string country = 25;
+  // With REASON_LLM: the LLM check that failed, and where. Unset from
+  // engines before 0.7.0. (Numbered from 40, apart from the fields other
+  // features add meanwhile.)
+  LLMEvent llm = 40;
+}
+
+// LLMEvent is a request on an LLM endpoint that failed an LLM check. It
+// carries no prompt text, ever: the prompt is the user's data; the offset
+// and the message's index find it in the application's own logs.
+message LLMEvent {
+  // The endpoint's format: "OpenAIChat", "OpenAIResponses",
+  // "OpenAIEmbeddings", "AnthropicMessages".
+  string format = 1;
+  // The model the request named, at most 64 bytes: text the client chose.
+  string model = 2;
+  // The check: "llm-malformed", "llm-model", "llm-max-prompt",
+  // "llm-max-messages", "llm-max-choices", "llm-max-output-tokens",
+  // "llm-client-role", "llm-tools".
+  string check = 3;
+  // The message the check is about (from 0; a tool, for llm-tools), -1
+  // for the request as a whole or a top-level field (the instructions,
+  // Anthropic's system).
+  int32 message_index = 4;
+  // The message's role, for llm-client-role.
+  string role = 5;
+  // Where in the body the check failed (the malformed byte, the role,
+  // the tool), 0 for the request as a whole.
+  int64 offset = 6;
+  // The request's tokens as charged at request time: prompt bytes / 3
+  // plus its output limit.
+  int64 estimated_tokens = 7;
 }
 
 // Phase is the part of the exchange an event is about.

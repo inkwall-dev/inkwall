@@ -43,7 +43,7 @@ From 0.1.x, upgrade to 0.2.3 (or 0.2.2) first, then to 0.3.0.
 ## Every upgrade
 
 Read the section of the version you upgrade to first, then, for every minor or patch release
-(0.6.0 to 0.6.2 needs nothing more than this):
+(0.6.0 to 0.6.3 needs nothing more than this):
 
 1. Upgrade the chart, with the values you installed it with (`--reset-then-reuse-values` needs
    Helm 3.14 or later):
@@ -86,6 +86,15 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
 
 0.7.0 isn't released yet; this section grows as its changes land.
 
+- **Policies the engine can't compile are left out** of the bundle, with `InvalidSpec` or
+  `RuleSetsIncompatible` in their status, checked with the rule sets the bundle ships; the other
+  policies keep reaching the engines
+  ([GHSA-4v7q-753g-p98h](https://github.com/inkwall-dev/inkwall/security/advisories/GHSA-4v7q-753g-p98h)).
+  A previous version is kept only when it compiles with them. Already in 0.6.3, 0.5.6 and 0.4.5,
+  with the gRPC reading fixes of
+  [GHSA-w6pv-4769-xr6f](https://github.com/inkwall-dev/inkwall/security/advisories/GHSA-w6pv-4769-xr6f) and
+  [GHSA-vg43-8vv5-x822](https://github.com/inkwall-dev/inkwall/security/advisories/GHSA-vg43-8vv5-x822).
+
 - **gRPC messages: groups are read** (`body.grpcMessages: Inspect`). A field encoded as a
   protobuf group (proto2 `group`, editions `DELIMITED`) is read as a nested message, with the
   same depth and field limits; a malformed one gets `body.onOversize`. Before, its text wasn't
@@ -123,6 +132,21 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   `Content-Length` (Go's server set it on them before too); nothing else changes for policies
   that don't set it. The check API's answer has two new fields, `deny_content_type` and
   `deny_body`, set only for a policy with a custom denial.
+
+- **LLM APIs** (`spec.llm`, [LLM APIs](llm-apis.md)): paths a policy declares as OpenAI Chat,
+  Responses or Embeddings, or Anthropic Messages endpoints have their request bodies read up to
+  `llm.maxBodyBytes` (1 MiB), parsed strictly and checked natively (model, prompt size, messages,
+  output limit, roles, tools); a failed check is a 400 (413 for the size caps) in `Block` mode,
+  reason `llm`, with rule IDs 4,800,000 to 4,800,999 for exclusions. Nothing changes for a policy
+  without `spec.llm`. For one that adds it, **the rule sets stop reading the endpoints' bodies**
+  (request and response) unless `ruleSetBody: Inspect`. Upgrade the chart first, then the
+  engines: an engine before 0.7.0 checks none of these requests, and its rule sets read their
+  bodies as before, up to `body.maxBytes` (64 KiB by default; a longer one is 413 in `Block`
+  mode); while one runs a policy with `spec.llm`, the policy is `Enforced=False`,
+  `EnginesOutdated`, naming `spec.llm`. The webhook now refuses SecLang rule sets that use rule
+  IDs 4,800,000 to 4,800,999, reserved for the LLM checks. Envoy Gateway's and Istio's buffer is
+  raised to `llm.maxBodyBytes` on such routes, and their bodies are sent to the engine even with
+  `body.inspect: false`.
 
 - **The HAProxy Kubernetes Ingress Controller 3.4** (the default of its chart since 1.55.0) is
   wired: 3.4 dropped the config snippets the operator loads the filter with on 3.1 to 3.2, so on

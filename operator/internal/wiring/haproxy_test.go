@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -171,6 +172,24 @@ func TestHAProxySettingsBlock(t *testing.T) {
 	}
 	if s := haproxySettingsOf([]wafv1alpha1.WAFPolicy{policy("a", wafv1alpha1.PolicyDetect), policy("b", wafv1alpha1.PolicyBlock)}, ing); !s.block {
 		t.Error("Detect and Block: not block")
+	}
+}
+
+// LLM endpoints' bodies are sent whatever body.inspect, and their limit
+// is the one the buffer note names when it's the largest (design 0012
+// §8).
+func TestHAProxySettingsLLM(t *testing.T) {
+	ing := types.NamespacedName{Namespace: "shop", Name: "web"}
+	p := wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "ai"}, Spec: wafv1alpha1.WAFPolicySpec{
+		TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}}, Body: &wafv1alpha1.BodySpec{Inspect: ptr.To(false)},
+		LLM: &wafv1alpha1.LLMSpec{Endpoints: []wafv1alpha1.LLMEndpoint{{Paths: []wafv1alpha1.PathPattern{"/v1/*"}, Format: wafv1alpha1.LLMOpenAIChat}}}}}
+	s := haproxySettingsOf([]wafv1alpha1.WAFPolicy{p}, ing)
+	if !s.body || s.maxBody != 1<<20 || s.maxBodyField != "llm.maxBodyBytes" {
+		t.Fatalf("%+v", s)
+	}
+	buffer := haproxyBuffer{bufsize: haproxyDefaultBufsize, maxrewrite: haproxyDefaultMaxrewrite, source: "HAProxy's default"}
+	if n := haproxyBufferNote("web", buffer, haproxyBackendCR, s.body, s.maxBodyField, s.maxBody, false, 0); !strings.Contains(n, "llm.maxBodyBytes (1048576)") {
+		t.Errorf("note %q", n)
 	}
 }
 
