@@ -91,10 +91,13 @@ spec:
     `account-id` and `license-key`), writing to a volume of that pod. Each replica has its own
     copy. The pod then needs internet egress to MaxMind: the chart's NetworkPolicy opens HTTPS for
     it (`geo.geoipupdate.egressCIDRs`, every IPv4 and IPv6 address by default, since a
-    NetworkPolicy can't name a host). That pod also holds the bundle signing key; the sidecar has
-    its own credentials and no access to the key's volume, but a NetworkPolicy applies to the whole
-    pod: the operator's containers can reach `egressCIDRs` on 443 too. Narrow it to your egress
-    proxy where you can, or use `geo.volume`.
+    NetworkPolicy can't name a host). The sidecar has its own credentials and reaches two things:
+    the geo volume, where it writes the database, and that egress. It doesn't get the operator's
+    ServiceAccount token, which can read the bundle signing key's Secret: the pod sets
+    `automountServiceAccountToken: false` and mounts the token into the operator's container
+    alone. The image is pinned by digest. A NetworkPolicy applies to the whole pod, though: the
+    operator's container, which holds that token, can reach `egressCIDRs` on 443 too. Narrow it to
+    your egress proxy where you can, or use `geo.volume`.
   - `geo.volume`: any volume you fill from outside the cluster, such as a PVC or an image volume.
     The chart runs two operator replicas, and either can lead: a PVC shared by both needs
     `ReadOnlyMany`.

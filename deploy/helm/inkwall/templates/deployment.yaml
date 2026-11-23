@@ -33,6 +33,10 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "inkwall.serviceAccountName" . }}
+      # The ServiceAccount's token can read and write the Secrets in this
+      # namespace, the bundle signing key among them: only the operator's
+      # container mounts it (the kube-api-access volume), not a sidecar.
+      automountServiceAccountToken: false
       {{- with include "inkwall.pullSecretNames" . }}
       imagePullSecrets:
         {{- range splitList "," . }}
@@ -141,6 +145,9 @@ spec:
             capabilities:
               drop: [ALL]
           volumeMounts:
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
             - name: tmp
               mountPath: /tmp
             - name: events
@@ -169,8 +176,10 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
         {{- if $geo.geoipupdate.enabled }}
-        # MaxMind's updater, with its own credentials and no access to the
-        # signing key's volume; writes the database the operator reads.
+        # MaxMind's updater, with its own credentials: it reaches the geo
+        # volume, where it writes the database the operator reads, and the
+        # egress the NetworkPolicy opens; not the ServiceAccount's token, so
+        # not the API server's Secrets.
         - name: geoipupdate
           image: {{ $geo.geoipupdate.image }}
           env:
@@ -202,6 +211,26 @@ spec:
               mountPath: /tmp
         {{- end }}
       volumes:
+        # What the kubelet mounts when automountServiceAccountToken is on:
+        # a token it renews, the cluster's CA and the namespace.
+        - name: kube-api-access
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3607
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        apiVersion: v1
+                        fieldPath: metadata.namespace
         - name: tmp
           emptyDir: {}
         # Security events waiting for the optional control plane and for
