@@ -324,7 +324,7 @@ func (l *LLM) offFor(rawURI string) llm.CheckSet {
 type LLMVerdict struct {
 	Format llm.Format
 	Check  llm.Check
-	// Model is the model the request named, at most 128 bytes.
+	// Model is the model the request named, at most 64 bytes: the client chooses it.
 	Model string
 	// MessageIndex is the message or tool the check is about, -1 for the
 	// request or a top-level field; Role its role.
@@ -390,7 +390,7 @@ func (l *LLM) checkLLM(r *request.Request, formats formatSet) *LLMVerdict {
 			v := &LLMVerdict{Format: f, Check: fd.Check, MessageIndex: fd.MessageIndex, Role: fd.Role, Offset: fd.Offset}
 			if ok {
 				m := req.Model()
-				v.Model = string(m[:min(len(m), 128)])
+				v.Model = string(m[:min(len(m), 64)])
 				v.EstimatedTokens = l.rules.EstimatedTokens(&req)
 			}
 			found = v

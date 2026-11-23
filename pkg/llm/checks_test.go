@@ -66,6 +66,9 @@ func TestChecks(t *testing.T) {
 		{"output required, anthropic", Config{RequireOutputTokens: true, MaxOutputTokens: 100}, AnthropicMessages, `{"messages":[],"max_tokens":101}`, CheckMaxOutputTokens, -1},
 		{"output not required of embeddings", Config{RequireOutputTokens: true}, OpenAIEmbeddings, `{"input":"x"}`, CheckNone, 0},
 		{"roles allowed", Config{ClientRoles: []Role{RoleSystem, RoleUser}}, OpenAIChat, chat(""), CheckNone, 0},
+		// Only roles this engine doesn't know: none allowed, not every one.
+		{"only unknown roles", Config{ClientRoles: []Role{RoleNone}}, OpenAIChat, chat(""), CheckClientRole, 0},
+		{"unknown roles and user", Config{ClientRoles: []Role{RoleNone, RoleUser, RoleSystem}}, OpenAIChat, chat(""), CheckNone, 0},
 		{"system refused", Config{ClientRoles: []Role{RoleUser, RoleAssistant}}, OpenAIChat, chat(""), CheckClientRole, 0},
 		{"the first refused message", Config{ClientRoles: []Role{RoleSystem}}, OpenAIChat, chat(""), CheckClientRole, 1},
 		{"an unknown role is refused", Config{ClientRoles: []Role{RoleUser}}, OpenAIChat, `{"messages":[{"role":"user"},{"role":"root"}]}`, CheckClientRole, 1},
@@ -144,7 +147,6 @@ func TestCompile(t *testing.T) {
 		{MaxOutputTokens: MaxOutputCap + 1},
 		{MaxChoices: MaxChoicesCap + 1},
 		{ClientRoles: []Role{RoleOther}},
-		{ClientRoles: []Role{RoleNone}},
 		{Tools: ToolsListed},
 		{Tools: ToolsNone, ToolNames: []string{"a"}},
 		{Tools: ToolsListed, ToolNames: []string{""}},

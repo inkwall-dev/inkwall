@@ -876,9 +876,9 @@ func llmConfig(bp *bundlev1.Policy, bodies bool, metrics *llm.Metrics) *pipeline
 		c := llm.Config{Models: rc.GetModels(), MaxPromptBytes: rc.GetMaxPromptBytes(), MaxMessages: rc.GetMaxMessages(),
 			MaxOutputTokens: rc.GetMaxOutputTokens(), RequireOutputTokens: rc.GetRequireOutputTokens(), MaxChoices: rc.GetMaxChoices()}
 		for _, ro := range rc.GetClientRoles() {
-			if r, ok := llmRoles[ro]; ok {
-				c.ClientRoles = append(c.ClientRoles, r)
-			}
+			// A role of a newer operator: listed as none, so a list of
+			// only such roles allows no role rather than every one.
+			c.ClientRoles = append(c.ClientRoles, llmRoles[ro])
 		}
 		switch rc.GetTools() {
 		case bundlev1.LLMToolsAllow_LLM_TOOLS_ALLOW_NONE:

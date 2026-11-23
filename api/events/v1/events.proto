@@ -89,7 +89,7 @@ message LLMEvent {
   // The endpoint's format: "OpenAIChat", "OpenAIResponses",
   // "OpenAIEmbeddings", "AnthropicMessages".
   string format = 1;
-  // The model the request named, at most 128 bytes.
+  // The model the request named, at most 64 bytes: text the client chose.
   string model = 2;
   // The check: "llm-malformed", "llm-model", "llm-max-prompt",
   // "llm-max-messages", "llm-max-choices", "llm-max-output-tokens",

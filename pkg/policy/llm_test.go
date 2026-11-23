@@ -126,6 +126,22 @@ func TestLLMExclusions(t *testing.T) {
 	}
 }
 
+// TestLLMUnknownRoles: client roles of a newer operator this engine
+// doesn't know allow nothing: a list of only those denies every role,
+// rather than, emptied, allowing all.
+func TestLLMUnknownRoles(t *testing.T) {
+	b := llmBundle()
+	b.Policies[2].Llm.Request.ClientRoles = []bundlev1.LLMRole{99}
+	set, err := Compile(b, Options{BodyLimit: 65536})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := set.Check(context.Background(), post("/v1/chat/completions", `{"model":"llama-3","messages":[{"role":"user","content":"hi"}],"max_tokens":10}`))
+	if v.Action != pipeline.ActionDeny || v.LLM == nil || v.LLM.Check != llm.CheckClientRole {
+		t.Errorf("a user message, only unknown roles allowed: %s %s", v.Action, v.Reason)
+	}
+}
+
 // TestLLMCompileErrors: a bundle the CRD would refuse doesn't compile.
 func TestLLMCompileErrors(t *testing.T) {
 	for _, mod := range []func(*bundlev1.LLM){

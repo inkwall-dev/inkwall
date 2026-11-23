@@ -54,6 +54,9 @@ type Config struct {
 	// MaxChoices caps n; 0: no cap.
 	MaxChoices int64
 	// ClientRoles are the roles a client may send; empty: every role.
+	// RoleNone stands for a role this engine doesn't know (of a newer
+	// operator): it allows nothing, but makes the list one, so a list of
+	// unknown roles only allows none rather than every role.
 	ClientRoles []Role
 	// Tools is which tools a client may define, ToolNames the ones
 	// allowed with ToolsListed.
@@ -108,7 +111,7 @@ func Compile(c Config) (*Rules, error) {
 		}
 	}
 	for _, ro := range c.ClientRoles {
-		if ro == RoleNone || ro >= RoleOther {
+		if ro >= RoleOther {
 			return nil, fmt.Errorf("client role %d", ro)
 		}
 		r.roles |= 1 << ro

@@ -432,7 +432,7 @@ type LLMEvent struct {
 	// The endpoint's format: "OpenAIChat", "OpenAIResponses",
 	// "OpenAIEmbeddings", "AnthropicMessages".
 	Format string `protobuf:"bytes,1,opt,name=format,proto3" json:"format,omitempty"`
-	// The model the request named, at most 128 bytes.
+	// The model the request named, at most 64 bytes: text the client chose.
 	Model string `protobuf:"bytes,2,opt,name=model,proto3" json:"model,omitempty"`
 	// The check: "llm-malformed", "llm-model", "llm-max-prompt",
 	// "llm-max-messages", "llm-max-choices", "llm-max-output-tokens",
