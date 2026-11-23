@@ -194,12 +194,19 @@ As for the country table ([0011 §4.2](0011-geo-blocking.md#42-the-operator-comp
 the engine never parses the user's format. The resolver (`operator/resolver`), on every build:
 
 1. reads the ConfigMap value (≤ 1 MiB, ≤ 8 MiB gunzipped) and unmarshals a `FileDescriptorSet`;
-2. builds it with `protodesc.NewFiles`, which checks names, imports, field numbers, types and
-   cycles in imports, behind `recover`;
-3. walks every service's methods and every message reachable from their input and output types,
+2. bounds its imports, names and fields ([§5.4](#54-bounds)), and requires every type a field, an
+   extension or a method names to be fully qualified (`.package.Type`, as protoc and buf write
+   them), so that `protodesc` looks each up once instead of in every enclosing scope;
+3. builds it with `protodesc.NewFiles`, which checks names, imports, field numbers, types and
+   cycles in imports, behind `recover` and a 10 s backstop. A set past the backstop is refused
+   and not cached (tried again on the next build); its check is left to finish, and while it runs
+   no other set is checked (refused the same way), so at most one is ever left running;
+4. walks every service's methods and every message reachable from their input and output types,
    checking the bounds of [§5.4](#54-bounds);
-4. writes the compiled schema ([§5.2](#52-the-compiled-schema)), and caches it by the SHA-256 of the
-   ConfigMap value, so an unchanged set is compiled once per operator process.
+5. writes the compiled schema ([§5.2](#52-the-compiled-schema)), and caches it by the SHA-256 of the
+   ConfigMap value, so an unchanged set is compiled once per operator process;
+6. loads the schema as every engine does (`load.Load`), so that one an engine would refuse fails
+   its policy, `InvalidGRPCSchema`, never the whole bundle.
 
 Cost, measured on the 87 files linked into the engine (Envoy's, gRPC's, protobuf's; 458 messages,
 2,518 fields; 208 KB without source info, 58 KB gzipped), on an i7-1255U: `protodesc.NewFiles` in
@@ -289,7 +296,9 @@ gets there):
 | Messages | 16,384 | |
 | Fields | 65,536 in all, 4,096 per message | Engine memory ([§7](#7-performance-and-memory)) |
 | Name | 128 bytes per field name, 512 per full name and method path | Keep paths excludable |
-| Compiled | 1 MiB serialized per schema | A seventh of the bundle budget |
+| Names in the set | 512 bytes per name (package, message, field, type named, extendee, method input and output), 32 dot-separated parts per package and type named, types named fully qualified | `protodesc` resolves a name in each scope: a long package made it quadratic |
+| Fields in the set | 262,144 fields and extensions declared, read or not | Bound `protodesc`'s work |
+| Compiled | 1 MiB serialized per schema, with its `id` and `source`, as the bundle carries it | A seventh of the bundle budget |
 
 Engine checks: every index in range, methods sorted and unique, fields sorted by number and unique
 per message, kinds known, `message` set exactly for `MESSAGE` and `GROUP`. A recursive type
@@ -320,11 +329,11 @@ come. For each field number the message type knows, by its kind and the wire typ
 | Kind | Wire type | Read as |
 |---|---|---|
 | `STRING` | bytes | Text: as `spaced` today (a control character but tab, CR, LF is a space), whatever its bytes; invalid UTF-8 too, since a proto2 or non-Go application takes it |
-| `BYTES` | bytes | Its runs of ≥ 8 readable characters (`runs(v, minBinaryRun)`); never whole as text, never as a message |
+| `BYTES` | bytes | Whole when it is UTF-8 of ≥ 8 bytes, mostly printable (at least 9 characters in 10), its control characters spaces (as `spaced`): an application may keep text in bytes. Else its runs of ≥ 12 readable characters (`minBytesRun`). Never as a message |
 | `MESSAGE` | bytes | Its type, one level deeper, and whole as text when printable, as today (so a string declared a message can't split an attack across fields). Bytes that don't parse as a message: that field is read schema-less (`grpcwire.field`), and the message still counts as read whole (a newer application may have made it a string) |
 | `GROUP` | start group | Its type, up to the matching end group |
 | `VARINT`, `FIXED32`, `FIXED64` | their own | Nothing |
-| repeated `VARINT`/`FIXED*` | bytes | Packed: nothing |
+| repeated `VARINT`/`FIXED*` | bytes | Packed: read as `BYTES` is, so that a string sent where a repeated number is declared (a stale schema) reads no less than one declared `bytes`. Bytes that aren't a list of the kind's numbers (fixed32s whose length isn't a multiple of 4, a varint that doesn't end): **unknown** |
 | any | another wire type | **Unknown** (next row) |
 | a number the type doesn't have | any | **Unknown:** read schema-less, as `grpcwire` reads it today, named under the parent's path by number (`user.7`) |
 
@@ -343,8 +352,10 @@ schema doesn't list.
 - **Maps:** entries are messages `{key, value}`: `labels.key` and `labels.value`. A key is text the
   rules see as a value, never an argument name.
 - **`Any`:** `type_url` is text (`payload.type_url`). When its last segment names a message the
-  schema kept ([§5.2](#52-the-compiled-schema)), `value` is read as that type, its fields under the
-  `Any`'s path (`payload.sku`); otherwise `value` is read schema-less (`payload.value`, `payload.2.1`).
+  schema kept ([§5.2](#52-the-compiled-schema)) and `value` parses as a message, `value` is read as
+  that type only, its fields under the `Any`'s path (`payload.sku`); otherwise `value` is read
+  schema-less (`payload.value`, `payload.2.1`). Read one way, not both, so that `Any`s nested in
+  `Any`s cost no more than other messages.
   The application unpacks by the same `type_url`, so an attacker who names another type changes
   the application's reading too.
 - **Groups:** both readers read a group like a nested message, by its type when the schema
@@ -358,8 +369,10 @@ schema doesn't list.
 - No `json.`-style prefix: the call has no other body. Extensions: `[package.extension]`, as
   protobuf's text format writes them (`ArgumentPattern` allows brackets).
 - Unknown fields: numbers under the nearest named parent (`user.7`, `7.1` at the top).
-- A path longer than 256 bytes (an exclusion can't name it) keeps its first 256 bytes. Repeated
-  names are fine: `ARGS` holds several values per name.
+- A path longer than 256 bytes (an exclusion can't name it) keeps its first 255 bytes and ends in
+  `~`, which `ArgumentPattern` doesn't allow: deep recursive fields cut to the same name can't
+  all be excluded at once by naming it. Repeated names are fine: `ARGS` holds several values per
+  name.
 - Names are built in a buffer reused through the walk and copied once per argument, as today's
   `prefix + "." + strconv.Itoa(num)` already allocates once.
 
@@ -452,9 +465,11 @@ altogether. What a hostile set can do:
 
 - *Cost:* bounded at compile ([§5.4](#54-bounds)) in the operator, behind `recover`, off the
   request path; in the engine only checked integers and short strings.
-- *Blind the policy:* the only reading a schema can weaken is a `string` declared `bytes`, which
-  then gives runs of 8 or more characters. Declaring it a number or leaving it out makes it
-  unknown, read schema-less; declaring it a message reads it whole when printable. That limit is why
+- *Blind the policy:* the only reading a schema can weaken is a `string` declared `bytes` (or a
+  repeated number, read as `bytes`), which is then read whole only when it is 8 bytes or more and
+  mostly printable, else by its runs of 12 or more characters. Declaring it a singular number or
+  leaving it out makes it unknown, read schema-less; declaring it a message reads it whole when
+  printable. That limit is why
   `bytes` keeps its runs instead of being skipped, and why the schema is the user's reviewed file,
   not the application's answer ([§3.2](#32-why-not-server-reflection)).
 - *Other policies:* none. A schema is referenced from its namespace only and applies to its
@@ -468,7 +483,9 @@ altogether. What a hostile set can do:
 - *Groups:* read like nested messages.
 - *`Any`:* the type the `type_url` names, or schema-less.
 - *Depth, size, count:* the limits of today, with `onOversize` past them; recursion in the schema
-  doesn't matter since the data bounds the walk.
+  doesn't matter since the data bounds the walk. Two budgets linear in the message bound the rest:
+  bytes read (64 times the message, plus 64 KiB) and bytes of text given to the rules (4 times the
+  message, plus 64 KiB); past either, `onOversize`.
 - *Names:* from the schema, never the client; a client can't make an argument name a rule or an
   exclusion matches.
 

@@ -5,6 +5,7 @@ package schematest
 
 import (
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -70,7 +71,12 @@ func TestFields(t *testing.T) {
 		{"binary bytes, a short run", f(2, wBytes, "\x00|W`W\xff"), nil, 0, true},
 		{"bytes run under 12", f(2, wBytes, "\x00' OR 1=1--\xff"), nil, 0, true},
 		{"bytes", f(2, wBytes, "\x00\x01'; DROP TABLE x--\xff"), fl("blob", "'; DROP TABLE x--"), 0, true},
-		{"bytes that are a message", f(2, wBytes, f(1, wBytes, "hidden attack text")), fl("blob", "hidden attack text"), 0, true},
+		// Mostly printable UTF-8 of 8 bytes or more: whole, a control
+		// character a space.
+		{"bytes, a control character in text", f(2, wBytes, "1'/*\x01*/OR/*\x01*/'1'='1'--"), fl("blob", "1'/* */OR/* */'1'='1'--"), 0, true},
+		{"bytes, a trailing NUL", f(2, wBytes, "' OR 1=1--\x00"), fl("blob", "' OR 1=1-- "), 0, true},
+		{"bytes, mostly control characters", f(2, wBytes, "\x01\x02\x03\x04\x05ab=1"), nil, 0, true},
+		{"bytes that are a message", f(2, wBytes, f(1, wBytes, "hidden attack text")), fl("blob", "\n hidden attack text"), 0, true},
 		// A string whose bytes parse as a message with a printable tag ('r',
 		// field 14): read whole by its type. Without the schema, the tag keeps
 		// it from being read whole (#863's known gap).
@@ -84,18 +90,28 @@ func TestFields(t *testing.T) {
 		{"repeated, no index", f(5, wBytes, item, 5, wBytes, f(1, wBytes, "sku-2")), fl("items.sku", "sku-1", "items", "sku-1", "items.sku", "sku-2", "items", "sku-2"), 0, true},
 		{"packed numbers", f(4, wBytes, []byte{1, 2, 0x96, 0x01}), nil, 0, true},
 		{"packed text", f(4, wBytes, "; cat /etc/passwd"), fl("ids", "; cat /etc/passwd"), 0, true},
+		// Packed numbers are read as bytes: whole when printable.
+		{"packed text, short", f(4, wBytes, "' OR 1=1--"), fl("ids", "' OR 1=1--"), 0, true},
+		// Not a list of fixed32s (a length not a multiple of 4): unknown.
+		{"packed fixed32s that aren't", f(15, wBytes, "' OR 1=1#"), fl("fixed", "' OR 1=1#"), 1, true},
+		// A last byte from 0x80 doesn't end a varint: its runs of 8 or more,
+		// as Strings reads binary.
+		{"packed varints that aren't", f(4, wBytes, "' OR 1=1--\x80"), fl("ids", "' OR 1=1--"), 1, true},
 		{"unpacked numbers", f(4, wVar, uint64(1), 4, wVar, uint64(2), 11, wF32, uint64(7), 12, wF64, uint64(9), 13, wVar, uint64(1)), nil, 0, true},
 		{"map", f(6, wBytes, f(1, wBytes, "env", 2, wBytes, "prod")), fl("labels.key", "env", "labels.value", "prod", "labels", "env  prod"), 0, true},
+		// An Any of a type the schema has: its value by that type only.
 		{"Any", f(7, wBytes, anyOf("type.googleapis.com/t.Item", item)), fl("payload.type_url", "type.googleapis.com/t.Item", "payload.sku", "sku-1",
-			"payload.value.1", "sku-1", "payload.value", "sku-1", "payload", "type.googleapis.com/t.Item    sku-1"), 0, true},
-		{"Any, value first", f(7, wBytes, f(2, wBytes, item, 1, wBytes, "t.Item")), fl("payload.sku", "sku-1", "payload.value.1", "sku-1", "payload.value", "sku-1",
+			"payload", "type.googleapis.com/t.Item    sku-1"), 0, true},
+		{"Any, value first", f(7, wBytes, f(2, wBytes, item, 1, wBytes, "t.Item")), fl("payload.sku", "sku-1",
 			"payload.type_url", "t.Item", "payload", "sku-1    t.Item"), 0, true},
+		// Not a message: without the schema.
+		{"Any of a known type, not a message", f(7, wBytes, anyOf("t.Item", []byte("\x0a\x05ab"))), fl("payload.type_url", "t.Item", "payload.value", "\n ab", "payload", "t.Item    ab"), 0, true},
 		{"Any of an unknown type", f(7, wBytes, anyOf("type.googleapis.com/t.Nope", item)),
 			fl("payload.type_url", "type.googleapis.com/t.Nope", "payload.value.1", "sku-1",
 				"payload.value", "sku-1", "payload", "type.googleapis.com/t.Nope    sku-1"), 0, true},
 		{"Any of two types: the last", f(7, wBytes, f(1, wBytes, "t.Item", 1, wBytes, "t.User", 2, wBytes, item)),
 			fl("payload.type_url", "t.Item", "payload.type_url", "t.User", "payload.name", "sku-1",
-				"payload.value.1", "sku-1", "payload.value", "sku-1", "payload", "t.Item  t.User    sku-1"), 1, true},
+				"payload", "t.Item  t.User    sku-1"), 1, true},
 		{"Any, the last type_url unknown", f(7, wBytes, f(1, wBytes, "t.Item", 1, wBytes, "t.Nope", 2, wBytes, item)),
 			fl("payload.type_url", "t.Item", "payload.type_url", "t.Nope", "payload.value.1", "sku-1",
 				"payload.value", "sku-1", "payload", "t.Item  t.Nope    sku-1"), 0, true},
@@ -128,10 +144,15 @@ func TestFields(t *testing.T) {
 		})
 	}
 
-	// A path over grpcwire.MaxName keeps its first grpcwire.MaxName bytes.
+	// A path over grpcwire.MaxName keeps its first grpcwire.MaxName-1
+	// bytes and ends in grpcwire.LongPath, which no exclusion names.
 	got, _, ok := grpcwire.Fields(deep, s, req, grpcwire.Limits{Depth: 64, Fields: 64}, nil)
-	if !ok || len(got) == 0 || len(got[len(got)-1].Name) != grpcwire.MaxName || !strings.HasPrefix(got[len(got)-1].Name, "children.children.") || got[len(got)-1].Value != "x" {
+	if last := got[len(got)-1]; !ok || len(got) == 0 || len(last.Name) != grpcwire.MaxName || !strings.HasPrefix(last.Name, "children.children.") ||
+		!strings.HasSuffix(last.Name, grpcwire.LongPath) || last.Value != "x" {
 		t.Errorf("a long path: %q, %v", got, ok)
+	}
+	if regexp.MustCompile(`^[A-Za-z0-9_.\-\[\]]+$`).MatchString(grpcwire.LongPath) {
+		t.Errorf("an exclusion (ArgumentPattern) can name %q", grpcwire.LongPath)
 	}
 	// Too deep, too many fields: not read whole, with what was read.
 	if _, _, ok := grpcwire.Fields(deep, s, req, grpcwire.Limits{Depth: 16, Fields: 64}, nil); ok {
