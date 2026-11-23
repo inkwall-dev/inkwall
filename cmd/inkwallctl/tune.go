@@ -356,12 +356,6 @@ func exclusionRule(ruleID int, variable string) int {
 	return ruleID
 }
 
-// scoreRule reports a rule that only sums up or checks the anomaly score
-// (the CRS's 949xxx, 959xxx and 980xxx, or a rule that matched a TX
-// anomaly score, as blocking_inbound_anomaly_score): excluding it would
-// turn the policy off, and the rules that added to the score are what to
-// tune. Other TX variables are detection rules' (921180's
-// TX:paramcounter_args_names:<name>).
 // llmCheck reports whether id is one of the LLM checks' reserved rule
 // IDs: excluded on a path, as no exclusion field narrows them.
 func llmCheck(id int) bool {
@@ -369,6 +363,12 @@ func llmCheck(id int) bool {
 	return ok
 }
 
+// scoreRule reports a rule that only sums up or checks the anomaly score
+// (the CRS's 949xxx, 959xxx and 980xxx, or a rule that matched a TX
+// anomaly score, as blocking_inbound_anomaly_score): excluding it would
+// turn the policy off, and the rules that added to the score are what to
+// tune. Other TX variables are detection rules' (921180's
+// TX:paramcounter_args_names:<name>).
 func scoreRule(id int, variable string) bool {
 	switch id / 1000 {
 	case 949, 959, 980:

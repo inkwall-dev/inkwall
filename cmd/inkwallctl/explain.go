@@ -1190,7 +1190,7 @@ func printRequestExplanation(w io.Writer, re *RequestExplanation) {
 		if ev.GeoSampled > 1 {
 			fmt.Fprintf(w, "  This event stands for %d requests of the country (one event a minute per country).\n", ev.GeoSampled)
 		}
-		if l := ev.LLM; l != nil {
+		if l := ev.LLM; l != nil && l.Check != "" {
 			fmt.Fprintf(w, "  LLM check: %s (rule ID %d)", terminalSafe(l.Check), l.RuleID)
 			if l.Cause != "" {
 				fmt.Fprintf(w, ": %s", l.Cause)
