@@ -320,7 +320,7 @@ func (p *Pipeline) BodyLimit(r *request.Request, max int64) int64 {
 	decision, listed := p.routes.Decide(r.RawURI), p.ipListed(r)
 	// A country geo denies in Block isn't read either, nor a request that
 	// fails closed for a missing table.
-	if listed == ReasonNone && p.geo != nil && p.geoCheck(r, time.Now(), false).blocks(p) {
+	if listed == ReasonNone && p.geo != nil && p.geoCheck(r).blocks(p) {
 		return 0
 	}
 	if p.limits != nil && listed == ReasonNone && decision != router.SkipAll && p.limitsFor(r, time.Now()).over != nil {
@@ -351,6 +351,11 @@ type outcome struct {
 	res rules.Result
 	x   rules.Exchange // the evaluation kept for the response, if any
 	err error
+	// partly: the body was only partly inspected; the verdict follows the
+	// oversize action (see partly).
+	partly bool
+	// grpcRead counts the gRPC messages read for the evaluation.
+	grpcRead GRPCRead
 }
 
 // Check inspects r and returns the verdict. It returns within the configured
@@ -406,8 +411,9 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool, now
 	// Geo (design 0011 §2.3): after the IP lists, before the skipped
 	// paths, which it covers too, and before the rate limits, so a denied
 	// country spends no client's tokens. In Detect it goes on.
-	g := p.geoCheck(r, now, true)
+	g := p.geoCheck(r)
 	if g.blocks(p) {
+		g = g.sample(p, r, now)
 		if g.noTable {
 			return g.unavailable(), nil
 		}
@@ -417,7 +423,7 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool, now
 	case router.SkipAll:
 		if g.deny {
 			// Detect: what Block would deny, logged, not "skipped".
-			return g.verdict(), nil
+			return g.sample(p, r, now).verdict(), nil
 		}
 		return Verdict{Action: ActionAllow, Reason: ReasonSkipped}, nil
 	case router.SkipBody:
@@ -457,15 +463,18 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool, now
 		v = p.enforce(v, http.StatusForbidden)
 	}
 	// Geo in Detect logs what nothing else decided; it comes before a
-	// Detect rate limit in the order, so its reason wins over one.
-	if g.deny && v.Reason == ReasonNone {
-		gv := g.verdict()
+	// Detect rate limit in the order, so its reason wins over one. A
+	// verdict that is an event already (a rule's detection, logged with
+	// reason None) keeps its own: geo's events are sampled, a rule's
+	// aren't, and every detection is logged.
+	if g.deny && v.Reason == ReasonNone && v.Action == ActionAllow {
+		gv := g.sample(p, r, now).verdict()
 		v.Action, v.Reason, v.SampledEvent, v.SampledCount = gv.Action, gv.Reason, gv.SampledEvent, gv.SampledCount
 	}
 	v = g.mark(v)
 	// A Detect limit over its rate only logs, on a Block policy too; a
-	// rule's reason wins over it.
-	if lim.detect != nil && v.Reason == ReasonNone {
+	// rule's reason, or a detection, wins over it.
+	if lim.detect != nil && v.Reason == ReasonNone && v.Action == ActionAllow {
 		v.Action, v.Reason, v.RateLimit, v.RetryAfter = ActionLog, ReasonRateLimit, lim.detect.name, lim.retryAfter
 		v.SampledEvent, v.SampledCount = lim.event, lim.sampled
 	}
@@ -486,17 +495,7 @@ func (p *Pipeline) inspect(ctx context.Context, r *request.Request, keep bool) (
 		if !p.grpcMessages {
 			return p.evaluate(ctx, p.request(call, keep))
 		}
-		text, complete, read := grpcText(r, messages, p.grpcSchema)
-		call.GRPCText = text
-		var v Verdict
-		var x rules.Exchange
-		if complete {
-			v, x = p.evaluate(ctx, p.request(call, keep))
-		} else {
-			v, x = p.partly(ctx, call, keep)
-		}
-		v.GRPCRead = read
-		return v, x
+		return p.evaluate(ctx, p.grpcRequest(r, call, messages, keep))
 	}
 	if !r.BodyTruncated {
 		return p.evaluate(ctx, p.request(r, keep))
@@ -507,6 +506,31 @@ func (p *Pipeline) inspect(ctx context.Context, r *request.Request, keep bool) (
 	return p.partly(ctx, &withoutBody, keep)
 }
 
+// grpcRequest returns the evaluation of call, gRPC call r without its
+// body, with the text of messages, r's gRPC messages (grpcText). The
+// messages are read in the evaluation, under admission control and the
+// deadline as the rules are: reading a client's messages takes CPU too.
+// Messages not read whole are decided as partly as a body cut at the limit
+// is.
+func (p *Pipeline) grpcRequest(r, call *request.Request, messages []byte, keep bool) func(context.Context) outcome {
+	eval := p.request(call, keep)
+	return func(ctx context.Context) outcome {
+		text, complete, read := grpcText(r, messages, p.grpcSchema)
+		call.GRPCText = text
+		if complete {
+			o := eval(ctx)
+			o.grpcRead = read
+			return o
+		}
+		if p.oversize == OversizeDeny && p.mode == ModeBlock {
+			return outcome{partly: true, grpcRead: read}
+		}
+		o := eval(ctx)
+		o.partly, o.grpcRead = true, read
+		return o
+	}
+}
+
 // partly decides r, a request whose body was only partly inspected (r
 // holds what was), by the policy's oversize action.
 func (p *Pipeline) partly(ctx context.Context, r *request.Request, keep bool) (Verdict, rules.Exchange) {
@@ -514,6 +538,12 @@ func (p *Pipeline) partly(ctx context.Context, r *request.Request, keep bool) (V
 		return p.enforce(Verdict{Reason: ReasonOversize}, http.StatusRequestEntityTooLarge), nil
 	}
 	v, x := p.evaluate(ctx, p.request(r, keep))
+	return p.oversized(v, x)
+}
+
+// oversized is verdict v, of a request whose body was only partly
+// inspected, by the policy's oversize action.
+func (p *Pipeline) oversized(v Verdict, x rules.Exchange) (Verdict, rules.Exchange) {
 	if v.Reason != ReasonNone {
 		return v, x
 	}
@@ -578,7 +608,12 @@ func (p *Pipeline) evaluate(ctx context.Context, eval func(context.Context) outc
 			closeExchange(o.x)
 			return p.failed(ReasonError), nil
 		}
-		return p.decide(o.res), o.x
+		v := p.decide(o.res)
+		v.GRPCRead = o.grpcRead
+		if o.partly {
+			return p.oversized(v, o.x)
+		}
+		return v, o.x
 	case <-ctx.Done():
 		// The late evaluation's transaction, if it keeps one, is released
 		// when it finishes.

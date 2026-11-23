@@ -259,6 +259,7 @@ func TestWAFPolicyValidation(t *testing.T) {
 		{name: "rate limit by Host", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, key: {header: {name: HOST}}}]\n"), wantErr: "count by clientIP"},
 		{name: "rate limit by a pseudo-header", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, key: {header: {name: \":authority\"}}}]\n"), wantErr: "spec.rateLimits[0].key.header.name"},
 		{name: "rate limit relative path", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, match: {paths: [login]}}]\n"), wantErr: "spec.rateLimits[0].match.paths[0]"},
+		{name: "rate limit clean paths", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, match: {paths: [/, \"/*\", /a/, \"/a/*\", /.well-known/x, /a/...b, /a.b, \"//*\"]}}]\n")},
 		{name: "rate limit unknown method", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, match: {methods: [PURGE]}}]\n"), wantErr: `Unsupported value: "PURGE"`},
 		{name: "rate limit repeated method", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, match: {methods: [GET, GET]}}]\n"), wantErr: "Duplicate value"},
 		{name: "rate limit in Block mode", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, mode: Block}]\n"), wantErr: "a rate limit's mode can only be Detect"},

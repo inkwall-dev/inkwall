@@ -63,7 +63,7 @@ func Fields(msg []byte, s *grpcschema.Schema, t *grpcschema.Message, lim Limits,
 			fields, unknown, ok = w.out, w.unknown, false
 		}
 	}()
-	ok = w.message(msg, t, 0)
+	ok, _ = w.message(msg, t, 0)
 	return w.out, w.unknown, ok && !w.over
 }
 
@@ -104,51 +104,68 @@ func (w *schemaWalker) emit(value, path string) bool {
 }
 
 // message walks msg, a message of type t at depth named w.prefix. It
-// reports whether msg is a valid message.
-func (w *schemaWalker) message(msg []byte, t *grpcschema.Message, depth int) bool {
+// reports whether msg is a valid message, and whether its tags, lengths and
+// numbers, and those of the messages read in it, are blank (as Strings'
+// walker tells them, for a message read whole as text).
+func (w *schemaWalker) message(msg []byte, t *grpcschema.Message, depth int) (ok, blank bool) {
 	if t.Any {
 		return w.anyMessage(msg, t, depth)
 	}
+	blank = true
 	for len(msg) > 0 {
-		num, typ, v, ok := consume(&msg)
+		num, typ, v, framing, ok := consume(&msg)
 		if !ok {
-			return false
+			return false, false
 		}
+		blank = blank && framing
 		f := t.Field(num)
 		if f == nil || !takes(f, typ) {
-			w.unknownField(num, typ, v, depth)
+			blank = w.unknownField(num, typ, v, depth) && blank
 			continue
 		}
-		if !w.known(f, typ, v, depth) {
-			return true
+		more, b := w.known(f, typ, v, depth)
+		if !more {
+			return true, false
 		}
+		blank = blank && b
 	}
-	return true
+	return true, blank
 }
 
 // consume reads the next field of *msg: its number, wire type, and the
-// value of a length-delimited field or the fields of a group.
-func consume(msg *[]byte) (protowire.Number, protowire.Type, []byte, bool) {
+// value of a length-delimited field or the fields of a group; framing
+// reports whether its tag, length or number (and a group's end tag) are
+// blank.
+func consume(msg *[]byte) (num protowire.Number, typ protowire.Type, v []byte, framing, ok bool) {
 	num, typ, n := protowire.ConsumeTag(*msg)
 	if n < 0 {
-		return 0, 0, nil, false
+		return 0, 0, nil, false, false
 	}
+	framing = isBlank((*msg)[:n])
 	*msg = (*msg)[n:]
-	var v []byte
 	switch typ {
 	case protowire.BytesType:
 		v, n = protowire.ConsumeBytes(*msg)
+		if n >= 0 {
+			framing = framing && isBlank((*msg)[:n-len(v)])
+		}
 	case protowire.StartGroupType:
 		v, n = protowire.ConsumeGroup(num, *msg)
+		if n >= 0 {
+			framing = framing && isBlank((*msg)[len(v):n])
+		}
 	default:
 		// Numbers; an end tag without its start doesn't parse.
 		n = protowire.ConsumeFieldValue(num, typ, *msg)
+		if n >= 0 {
+			framing = framing && isBlank((*msg)[:n])
+		}
 	}
 	if n < 0 {
-		return 0, 0, nil, false
+		return 0, 0, nil, false, false
 	}
 	*msg = (*msg)[n:]
-	return num, typ, v, true
+	return num, typ, v, framing, true
 }
 
 // takes reports whether f's kind is sent with wire type typ: any other is
@@ -170,140 +187,159 @@ func takes(f *grpcschema.Field, typ protowire.Type) bool {
 }
 
 // known reads v, the value of field f sent with wire type typ, which its
-// kind takes. It reports false when the fields are over the limit.
-func (w *schemaWalker) known(f *grpcschema.Field, typ protowire.Type, v []byte, depth int) bool {
+// kind takes. It reports false when the fields are over the limit, and
+// whether v is blank (message).
+func (w *schemaWalker) known(f *grpcschema.Field, typ protowire.Type, v []byte, depth int) (more, blank bool) {
 	if len(v) == 0 {
-		return true
+		return true, true
 	}
 	if !w.charge(len(v)) {
-		return false
+		return false, false
 	}
 	path := f.Path(w.prefix)
 	switch f.Kind {
 	case grpcschema.KindString:
-		return w.emit(stringText(v), path)
+		return w.emit(stringText(v), path), true
 	case grpcschema.KindBytes:
 		// Printable UTF-8 is read whole, as Strings reads it: an
 		// application may keep text in bytes. Other bytes give their long
 		// runs only.
 		if len(v) >= minBytesText && printable(v) {
-			return w.emit(string(v), path)
+			return w.emit(string(v), path), true
 		}
-		return w.emit(runs(v, minBytesRun), path)
+		return w.emit(runs(v, minBytesRun), path), true
 	case grpcschema.KindMessage:
 		ok, numbersRun := valid(v, minNumbersRun)
 		if !ok {
 			// Not a message: as Strings reads it (a newer application may
 			// have made it a string). The message is still read whole.
 			w.unknown++
-			w.field(v, path[:min(len(path), MaxName)], depth)
-			return !w.over
+			blank = w.field(v, path[:min(len(path), MaxName)], depth)
+			return !w.over, blank
 		}
 		// As text too, as Strings reads a message: whole when printable (a
 		// string declared a message can't split an attack across its
-		// "fields"), else the runs between its fields, where text an
-		// application reading it otherwise could hide.
-		switch {
-		case printableMessage(v):
+		// "fields"; text to its parent too), else the runs between its
+		// fields, where text an application reading it otherwise could hide.
+		if printableMessage(v) {
 			if !w.emit(string(v), path) {
-				return false
+				return false, false
 			}
-		case numbersRun:
-			if !w.charge(len(v)) || !w.emit(runs(between(v), minNumbersRun), path) {
-				return false
-			}
+			more, _ := w.nested(v, f.Message, path, depth)
+			return more, true
 		}
-		return w.nested(v, f.Message, path, depth)
+		if numbersRun && (!w.charge(len(v)) || !w.emit(runs(between(v), minNumbersRun), path)) {
+			return false, false
+		}
+		more, blank = w.nested(v, f.Message, path, depth)
+		// UTF-8 whose tags, lengths and numbers (and those of the messages
+		// in it) are blank is also read whole, flat, as Strings reads it: an
+		// application that takes it as a string (a schema older than it)
+		// reads words its control characters and spaces split between
+		// "fields".
+		if more && blank && depth < w.lim.Depth && utf8.Valid(v) {
+			more = w.emit(flat(v), path)
+		}
+		return more, blank
 	case grpcschema.KindGroup:
 		return w.nested(v, f.Message, path, depth)
 	default:
 		// A packed repeated number: its runs, as bytes. A string declared
 		// a repeated number reads no less than one declared bytes.
-		return w.emit(runs(v, minBytesRun), path)
+		return w.emit(runs(v, minBytesRun), path), true
 	}
 }
 
 // nested walks v, a valid message (or group fields) of type t named
-// prefix, one level below depth.
-func (w *schemaWalker) nested(v []byte, t *grpcschema.Message, prefix string, depth int) bool {
+// prefix, one level below depth. It reports false when the fields are
+// over the limits, and whether v is blank (message).
+func (w *schemaWalker) nested(v []byte, t *grpcschema.Message, prefix string, depth int) (more, blank bool) {
 	if depth+1 > w.lim.Depth {
 		w.over = true
-		return false
+		return false, false
 	}
 	parent := w.prefix
 	w.prefix = prefix
-	w.message(v, t, depth+1)
+	_, blank = w.message(v, t, depth+1)
 	w.prefix = parent
-	return !w.over
+	return !w.over, blank
 }
 
 // unknownField reads field num, which the schema doesn't describe with
-// wire type typ, as Strings does, named by its number.
-func (w *schemaWalker) unknownField(num protowire.Number, typ protowire.Type, v []byte, depth int) {
+// wire type typ, as Strings does, named by its number. It reports whether
+// v is blank (Strings' walker).
+func (w *schemaWalker) unknownField(num protowire.Number, typ protowire.Type, v []byte, depth int) bool {
 	w.unknown++
 	if len(v) > 0 && !w.charge(2*len(v)) {
-		return
+		return false
 	}
 	switch typ {
 	case protowire.BytesType:
-		w.field(v, fieldName(w.prefix, num), depth)
+		return w.field(v, fieldName(w.prefix, num), depth)
 	case protowire.StartGroupType:
-		w.group(v, fieldName(w.prefix, num), depth)
+		return w.group(v, fieldName(w.prefix, num), depth)
 	}
+	return true
 }
 
 // anyMessage walks msg, a google.protobuf.Any: its type_urls (1) as text,
 // its values (2) as the type its last type_url names (the one the
 // application unpacks by) and without the schema, and anything else as
 // unknown.
-func (w *schemaWalker) anyMessage(msg []byte, t *grpcschema.Message, depth int) bool {
+func (w *schemaWalker) anyMessage(msg []byte, t *grpcschema.Message, depth int) (ok, blank bool) {
 	var named *grpcschema.Message
 	for rest := msg; len(rest) > 0; {
-		num, typ, v, ok := consume(&rest)
+		num, typ, v, _, ok := consume(&rest)
 		if !ok {
-			return false
+			return false, false
 		}
 		if num == 1 && typ == protowire.BytesType {
 			named = w.s.AnyType(string(v))
 		}
 	}
+	blank = true
 	for len(msg) > 0 {
-		num, typ, v, _ := consume(&msg)
+		num, typ, v, framing, _ := consume(&msg)
+		blank = blank && framing
 		switch {
 		case num == 1 && typ == protowire.BytesType:
 			if !w.emit(stringText(v), t.Field(1).Path(w.prefix)) {
-				return true
+				return true, false
 			}
 		case num == 2 && typ == protowire.BytesType:
-			if !w.anyValue(v, t.Field(2).Path(w.prefix), named, depth) {
-				return true
+			more, b := w.anyValue(v, t.Field(2).Path(w.prefix), named, depth)
+			if !more {
+				return true, false
 			}
+			blank = blank && b
 		default:
-			w.unknownField(num, typ, v, depth)
+			blank = w.unknownField(num, typ, v, depth) && blank
 		}
 		if w.over {
-			return true
+			return true, false
 		}
 	}
-	return true
+	return true, blank
 }
 
 // anyValue reads an Any's value: as t, the type its last type_url names
 // (nil: none the schema has), its fields under the Any's name; and as
 // Strings does, named path ("payload.value"), whatever the type_url says:
 // an application may unpack it without checking.
-func (w *schemaWalker) anyValue(v []byte, path string, t *grpcschema.Message, depth int) bool {
+func (w *schemaWalker) anyValue(v []byte, path string, t *grpcschema.Message, depth int) (more, blank bool) {
 	if len(v) == 0 {
-		return true
+		return true, true
 	}
 	if !w.charge(2 * len(v)) {
-		return false
+		return false, false
 	}
-	if t != nil && parses(v) && !w.nested(v, t, w.prefix, depth) {
-		return false
+	if t != nil && parses(v) {
+		if more, _ := w.nested(v, t, w.prefix, depth); !more {
+			return false, false
+		}
 	}
-	w.field(v, path[:min(len(path), MaxName)], depth)
-	return !w.over
+	blank = w.field(v, path[:min(len(path), MaxName)], depth)
+	return !w.over, blank
 }
 
 // parses reports whether v is a protobuf message, one level deep.

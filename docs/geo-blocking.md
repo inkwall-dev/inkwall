@@ -91,10 +91,13 @@ spec:
     `account-id` and `license-key`), writing to a volume of that pod. Each replica has its own
     copy. The pod then needs internet egress to MaxMind: the chart's NetworkPolicy opens HTTPS for
     it (`geo.geoipupdate.egressCIDRs`, every IPv4 and IPv6 address by default, since a
-    NetworkPolicy can't name a host). That pod also holds the bundle signing key; the sidecar has
-    its own credentials and no access to the key's volume, but a NetworkPolicy applies to the whole
-    pod: the operator's containers can reach `egressCIDRs` on 443 too. Narrow it to your egress
-    proxy where you can, or use `geo.volume`.
+    NetworkPolicy can't name a host). The sidecar has its own credentials and reaches two things:
+    the geo volume, where it writes the database, and that egress. It doesn't get the operator's
+    ServiceAccount token, which can read the bundle signing key's Secret: the pod sets
+    `automountServiceAccountToken: false` and mounts the token into the operator's container
+    alone. The image is pinned by digest. A NetworkPolicy applies to the whole pod, though: the
+    operator's container, which holds that token, can reach `egressCIDRs` on 443 too. Narrow it to
+    your egress proxy where you can, or use `geo.volume`.
   - `geo.volume`: any volume you fill from outside the cluster, such as a PVC or an image volume.
     The chart runs two operator replicas, and either can lead: a PVC shared by both needs
     `ReadOnlyMany`.
@@ -127,7 +130,13 @@ Or let only some countries in:
 ```yaml
   geo:
     allow: [DE, AT, CH]
+    unknown: Deny
 ```
+
+**An allow list isn't "only these countries".** Private addresses always get through geo, and
+public addresses the database has no country for get through unless you set `unknown: Deny`: the
+default is `Allow` ([Unknown and private addresses](#unknown-and-private-addresses)). The webhook
+warns of an allow list with `unknown: Allow`.
 
 ## Fields
 
@@ -158,6 +167,22 @@ A database that maps a private range to a country is obeyed. A record's country 
 `country.iso_code`, else its `registered_country.iso_code`; `ZZ` means no country. To deny private
 ranges, use an IP deny list, the tool for addresses.
 
+`unknown` defaults to `Allow` on purpose, for allow lists too ([design 0011
+§2.2](design/0011-geo-blocking.md#22-unknown-and-private-addresses)). Almost every public address
+has a country, and the ones that don't are mostly new or unannounced ranges. Denying them by
+default would deny real users after one database update that drops a range. Private addresses
+pass because a client IP that the load balancer hides shows up as one: denying them would take the
+site down rather than show the misconfiguration. So with an allow list, a client still gets
+through geo from:
+
+- a public address the database has no country for, unless `unknown: Deny`;
+- a private address, which reaches the proxy only from inside your network or through a hop whose
+  client IP the engine doesn't trust ([client IP](client-ip.md)).
+
+For a strict allow list, set `unknown: Deny`, list your private ranges in `ipLists.deny` if no
+client should come from them, and check the `private` and `unknown` lookups of
+`inkwall_geo_lookups_total`.
+
 ## Where geo runs
 
 In a policy's checks, in this order:
@@ -171,7 +196,9 @@ In a policy's checks, in this order:
 5. The rules.
 
 In `Detect`, the request goes on: if nothing else decides, the verdict is `log` with reason
-`geo-deny`; if a rule matched, its reason wins (the metric still counts the geo match). On a
+`geo-deny`; if a rule matched or the rules detected an attack, the rules' event wins, one for
+each request, with its rule IDs (the metric still counts the geo match; `geo-deny` events are
+sampled, and a detection never is). On a
 skipped path, `Detect` logs `geo-deny` rather than `skipped`, so it shows what `Block` would deny.
 A request several policies inspect gets each policy's geo; the strictest verdict wins. Suspending
 inspection (`InkwallConfig.spec.suspend`) suspends geo too.

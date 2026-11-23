@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
@@ -409,6 +410,7 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 	if w := p.Spec.WebSocket; w != nil {
 		errs = append(errs, checkWebSocket(spec.Child("webSocket"), w)...)
 	}
+	errs = append(errs, checkRateLimits(spec.Child("rateLimits"), p.Spec.RateLimits)...)
 	errs = append(errs, checkDenyResponse(spec.Child("denyResponse"), p.Spec.DenyResponse)...)
 	for i, b := range p.Spec.RuleSets {
 		if b.CRS != nil {
@@ -421,6 +423,14 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 			errs = append(errs, field.Invalid(spec.Child("ruleSets").Index(i).Child("placement"), b.Placement,
 				"BeforeCRS is only for SecLang rule sets, and paranoiaLevel, inboundAnomalyThreshold and crs only for the built-in CRS: "+
 					"bind the CRS without placement, and the rule set to place before it in its own entry"))
+		}
+	}
+	if len(errs) == 0 {
+		// Whatever else the engine refuses (the checks above name the
+		// field): one policy it refused would make it refuse the whole
+		// bundle, so the operator would leave the policy out.
+		if err := resolver.CheckSpec(p.Spec); err != nil {
+			errs = append(errs, field.Invalid(spec, field.OmitValueType{}, "the engine can't compile the policy: "+err.Error()))
 		}
 	}
 	warnings := append(append(responseWarnings(p), geoWarnings(p)...), grpcSchemaWarnings(p)...)
@@ -588,6 +598,30 @@ func checkPaths(path *field.Path, patterns []wafv1alpha1.PathPattern) field.Erro
 	var errs field.ErrorList
 	for i, p := range patterns {
 		errs = append(errs, checkPath(path.Index(i), p)...)
+	}
+	return errs
+}
+
+// checkRateLimits accepts the rate limits the engine compiles: a limit it
+// refused would make it refuse the whole bundle. Each path is checked on
+// its own, to name it (clean paths, as skip paths); then the limits are
+// compiled as the bundle has them.
+func checkRateLimits(path *field.Path, limits []wafv1alpha1.RateLimit) field.ErrorList {
+	var errs field.ErrorList
+	for i, l := range limits {
+		if l.Match == nil {
+			continue
+		}
+		for j, p := range l.Match.Paths {
+			if err := pipeline.CheckLimitPath(string(p)); err != nil {
+				errs = append(errs, field.Invalid(path.Index(i).Child("match", "paths").Index(j), string(p), err.Error()))
+			}
+		}
+	}
+	if len(errs) == 0 {
+		if err := resolver.CheckRateLimits(limits); err != nil {
+			errs = append(errs, field.Invalid(path, field.OmitValueType{}, err.Error()))
+		}
 	}
 	return errs
 }

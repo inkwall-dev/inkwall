@@ -66,7 +66,10 @@ spec:
 - **What is read:** the body, up to `body.maxBytes` (gRPC-Web text decoded from base64 first), as
   gRPC messages, each read as protobuf without its schema. A field whose bytes are UTF-8 is text,
   whatever its characters (a control character is read as a space, an invisible one as it is), and a field whose bytes are a protobuf message is
-  read as one, down to 16 levels. A field of binary bytes gives its runs of at least 8 readable
+  read as one, down to 16 levels, as is a group (proto2 `group`, editions `DELIMITED`), from
+  v0.6.2, v0.5.5 and v0.4.4: before, a group's text wasn't read
+  ([GHSA-78c8-6gh2-87hw](https://github.com/inkwall-dev/inkwall/security/advisories/GHSA-78c8-6gh2-87hw)).
+  A field of binary bytes gives its runs of at least 8 readable
   characters (a control character or a byte that isn't UTF-8 ends a run), and what lies between
   the fields of a nested message (its tags, lengths and numbers) its runs of at least 4. Numbers in the message
   itself give nothing.

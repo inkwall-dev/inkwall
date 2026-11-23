@@ -11,6 +11,7 @@ a Kubernetes Event on the object, and counts it in a metric. It is always on, an
 - [The log line](#the-log-line)
 - [What is never logged](#what-is-never-logged)
 - [Events](#events)
+  - [Cluster-scoped objects](#cluster-scoped-objects)
 - [The metric](#the-metric)
 - [Shipping the log](#shipping-the-log)
 - [The API server's audit log](#the-api-servers-audit-log)
@@ -28,7 +29,10 @@ served it records the change. It records nothing for:
   `sideEffects: NoneOnDryRun`;
 - an update that leaves the spec as it was: labels, annotations and finalizers, such as the
   operator's own wiring annotations and its `waf.inkwall.dev/unwire` finalizer. The status is a
-  subresource, which the webhooks never see.
+  subresource, which the webhooks never see. The annotations the operator acts on are the
+  exception: they are recorded like the spec. Today there is one,
+  [`waf.inkwall.dev/rotate-signing-key`](key-rotation.md) on the `InkwallConfig`, which starts a
+  signing key rotation.
 
 Deletes of most objects don't need the operator, and still don't: their webhook fails open
 (`failurePolicy: Ignore`). Deleting the control plane's objects (`inkwall.dev/source: saas`) goes
@@ -84,7 +88,7 @@ Each change is one JSON line in the operator's log, at `INFO`, with `"msg":"poli
 | `groupsOmitted` | The user's other groups, counted |
 | `serviceAccount` | `namespace/name` when the user is a ServiceAccount, else empty |
 | `operator` | `true` when the operator made the change itself: its control plane's objects in `Managed` mode |
-| `changes` | The spec's changed fields, below |
+| `changes` | The spec's changed fields, and the annotations the operator acts on, below |
 | `changesOmitted` | Changes left out to keep `changes` under 4 KiB |
 
 Each entry of `changes` is one changed field of the spec, by its path (`spec.mode`,
@@ -97,6 +101,9 @@ Each entry of `changes` is one changed field of the spec, by its path (`spec.mod
   holds the same items in another order. A list compares whole items: a field changed inside one
   item (a rate limit's `requests`, a rule set binding's `crs`) shows as that item removed and the
   changed one added. In a large item, cut to 256 bytes, the changed field may be past the cut.
+
+An annotation the operator acts on is a value at its own path, such as
+`metadata.annotations["waf.inkwall.dev/rotate-signing-key"]`.
 
 A create lists every field it sets as `new`, a delete every field the object had as `old`. Field
 names and their meaning are stable: a new field may be added, none is renamed or removed within
@@ -144,9 +151,28 @@ kubectl get events -n shop --field-selector reason=Changed,involvedObject.kind=W
 Changed by alice: spec.mode, spec.skip.paths
 ```
 
-Events about cluster-scoped objects go to the `default` namespace. Each replica records at most 100
-at once, then 5 a second; past that, changes are still logged and counted. Events expire (one hour
-by default, the API server's `--event-ttl`): the log line is the record to keep.
+Each replica records at most 100 Events at once in each namespace, then 5 a second, so a burst of
+changes in one namespace (a GitOps sync) leaves the others their Events. It keeps count for 1,024
+namespaces at a time; past that, the others share one limit. Past the limit, changes are still
+logged and counted. Events expire (one hour by default, the API server's `--event-ttl`): the log
+line is the record to keep.
+
+### Cluster-scoped objects
+
+Events about the cluster-scoped kinds, `ClusterWAFRuleSet` and `InkwallConfig`, go to the
+`default` namespace: Kubernetes keeps a cluster-scoped object's Events there, and refuses them in
+another namespace. Anyone who can read Events in `default` sees them, with the user who made each
+change and the changed paths, but no values. A `view` RoleBinding in `default`, or a ClusterRole
+that reads Events everywhere, grants that. Check who can:
+
+```sh
+kubectl auth can-i list events.events.k8s.io -n default --as=<user>
+```
+
+If they shouldn't see who changes the cluster-wide configuration, don't grant `get`, `list` or
+`watch` on `events` in `default`, in either the `events.k8s.io` or the core group, to anyone but
+the people who run the cluster. The log line has the same and more, so keep its readers to the
+same people.
 
 ## The metric
 
