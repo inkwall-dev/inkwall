@@ -212,6 +212,27 @@ func Prune(ctx context.Context, c client.Client, r client.Reader, namespace stri
 	return nil
 }
 
+// Delete deletes the table's Secrets, the manifest first, so no reader
+// sees a manifest without its chunks. r lists the chunks uncached.
+func Delete(ctx context.Context, c client.Client, r client.Reader, namespace string) error {
+	err := c.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: Format.Name}})
+	if client.IgnoreNotFound(err) != nil {
+		return err
+	}
+	var chunks corev1.SecretList
+	if err := r.List(ctx, &chunks, client.InNamespace(namespace), client.MatchingLabels{bundle.ChunkLabel: Format.Name}); err != nil {
+		return err
+	}
+	for i := range chunks.Items {
+		if ch := &chunks.Items[i]; Format.IsChunk(ch.Name) {
+			if err := c.Delete(ctx, ch); client.IgnoreNotFound(err) != nil {
+				return fmt.Errorf("delete chunk %s: %w", ch.Name, err)
+			}
+		}
+	}
+	return nil
+}
+
 func managedLabels() map[string]string {
 	return map[string]string{"app.kubernetes.io/managed-by": "inkwall-operator"}
 }

@@ -263,6 +263,8 @@ like any other policy, and their `Enforced` condition goes back to the control p
 - The IP lists a policy denies or allows (`spec.ipLists`) come in the same snapshot, in the
   policy's namespace, and the webhook checks their addresses as for any `WAFIPList`. Operators
   before 0.6.0 refuse a snapshot with a `WAFIPList`.
+- The operator's [audit log](audit-log.md) records its writes of these objects with
+  `operator: true`; who asked for them is in the control plane's own audit log.
 - To list the control plane's objects:
 
   ```sh

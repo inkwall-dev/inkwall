@@ -120,3 +120,27 @@ groups:
           summary: Inkwall can't export security events to a sink.
           description: The export sink {{ $labels.sink }} of the operator replica {{ $labels.namespace }}/{{ $labels.pod }} has accepted no events for 15 minutes while some wait, or its full buffer drops events.
           runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwalleventexportfailing
+      - alert: InkwallGeoDatabaseStale
+        # GeoLite2's terms ask for an update within 30 days of a release;
+        # countries' ranges move every week.
+        expr: max by (namespace, pod) (time() - inkwall_geo_table_built_timestamp_seconds > 30 * 86400 and inkwall_geo_table_built_timestamp_seconds != 0)
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: Inkwall's country database is more than 30 days old.
+          description: The country table of the engine {{ $labels.namespace }}/{{ $labels.pod }} was built {{ $value | humanizeDuration }} ago; check the database's updater.
+          runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallgeodatabasestale
+      - alert: InkwallGeoClientIPPrivate
+        # More than half of an engine's geo lookups are private addresses:
+        # the client IP is probably a load balancer's, and geo does nothing.
+        expr: |
+          sum by (namespace, pod) (rate(inkwall_geo_lookups_total{result="private"}[15m]))
+            > 0.5 * sum by (namespace, pod) (rate(inkwall_geo_lookups_total[15m]))
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Inkwall's geo blocking sees private client addresses.
+          description: Most country lookups of the engine {{ $labels.namespace }}/{{ $labels.pod }} are for private addresses, which geo never denies; the client IP is probably a load balancer's.
+          runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallgeoclientipprivate

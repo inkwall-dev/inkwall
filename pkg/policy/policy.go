@@ -12,6 +12,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -77,6 +78,7 @@ type Policy struct {
 	pipeline  *pipeline.Pipeline
 	bodyLimit int64 // 0: bodies are not inspected
 	counter   *events.Counter
+	hasGeo    bool // the policy has geo blocking
 }
 
 // Set is a compiled bundle. It is immutable and safe for concurrent use.
@@ -168,13 +170,20 @@ func (s *Set) Check(ctx context.Context, r *request.Request) pipeline.Verdict {
 	if len(ps) == 0 {
 		return observe(s.observer, pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy})
 	}
+	s.lookupGeo(r, ps)
 	if len(ps) == 1 {
 		// The policy's pipeline names it on the verdict and tells the Observer.
 		v := ps[0].pipeline.Check(ctx, r)
 		ps[0].counter.Observe(v)
 		return v
 	}
-	if p := rateLimited(ps, r); p != nil {
+	// Geo comes before the rate limits (design 0011 §2.3): a policy whose
+	// geo decides alone answers before another's limit is charged.
+	p := geoBlocked(ps, r)
+	if p == nil {
+		p = rateLimited(ps, r)
+	}
+	if p != nil {
 		v := p.pipeline.Check(ctx, p.view(r))
 		p.counter.Observe(v)
 		return v
@@ -208,7 +217,12 @@ func (s *Set) CheckExchange(ctx context.Context, r *request.Request) (pipeline.V
 	if len(ps) == 0 {
 		return observe(s.observer, pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy}), nil
 	}
-	if p := rateLimited(ps, r); p != nil && len(ps) > 1 {
+	s.lookupGeo(r, ps)
+	p := geoBlocked(ps, r)
+	if p == nil {
+		p = rateLimited(ps, r)
+	}
+	if p != nil && len(ps) > 1 {
 		v := p.pipeline.Check(ctx, p.view(r))
 		p.counter.Observe(v)
 		return v, nil
@@ -299,7 +313,13 @@ func (s *Set) BodyLimit(r *request.Request, max int64) int64 {
 	}
 	var buf [4]*Policy
 	var limit int64
-	for _, p := range s.policiesFor(r, buf[:0]) {
+	ps := s.policiesFor(r, buf[:0])
+	s.lookupGeo(r, ps)
+	// Geo decides alone: no body is read, and no policy's limit charged.
+	if geoBlocked(ps, r) != nil {
+		return 0
+	}
+	for _, p := range ps {
 		l := p.bodyLimit
 		if max > 0 {
 			l = min(l, max)
@@ -474,6 +494,11 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 	if t := bp.GetTimeout(); t != nil {
 		pc.Timeout = t.AsDuration()
 	}
+	if g := bp.GetGeo(); g != nil {
+		if pc.Geo, err = geoRules(g); err != nil {
+			return nil, key, err
+		}
+	}
 	if pc.RateLimits, err = pipeline.CompileRateLimits(o.RateLimits, live, bp.GetId(), rateLimits(bp)); err != nil {
 		return nil, key, err
 	}
@@ -487,7 +512,7 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 	if pc.DenyResponse == nil {
 		pc.DenyResponse = deny
 	}
-	return &Policy{ID: bp.GetId(), pipeline: pipeline.New(eval, pc), bodyLimit: bodyLimit}, key, nil
+	return &Policy{ID: bp.GetId(), pipeline: pipeline.New(eval, pc), bodyLimit: bodyLimit, hasGeo: pc.Geo != nil}, key, nil
 }
 
 // denyResponse compiles a bundle's DenyResponse; nil for none.
@@ -694,6 +719,15 @@ func (h *Holder) Redaction() *events.Redaction {
 // Load returns the active set, nil before the first.
 func (h *Holder) Load() *Set { return h.set.Load() }
 
+// GeoTable is the active set's country table, nil before the first set or
+// without one: for the country of events (events.Source).
+func (h *Holder) GeoTable() *geo.Table {
+	if s := h.set.Load(); s != nil {
+		return s.geoTable
+	}
+	return nil
+}
+
 // Check implements pipeline.Inspector.
 func (h *Holder) Check(ctx context.Context, r *request.Request) pipeline.Verdict {
 	s := h.set.Load()
@@ -704,6 +738,39 @@ func (h *Holder) Check(ctx context.Context, r *request.Request) pipeline.Verdict
 		return observe(h.Observer, pipeline.Verdict{Action: pipeline.ActionAllow, Reason: pipeline.ReasonNoPolicy})
 	}
 	return s.Check(ctx, r)
+}
+
+// geoBlocked returns the first policy whose geo decides r on its own, nil
+// if none.
+func geoBlocked(ps []*Policy, r *request.Request) *Policy {
+	for _, p := range ps {
+		if p.hasGeo && p.pipeline.GeoBlocks(r) {
+			return p
+		}
+	}
+	return nil
+}
+
+// GeoObserver is an Observer that also counts the country lookups of geo
+// policies (inkwall_geo_lookups_total).
+type GeoObserver interface {
+	ObserveGeoLookup(geo.Result)
+}
+
+// lookupGeo looks the client's country up, once per request, when a
+// policy that matched it has geo blocking and the bundle names a country
+// table (design 0011 §5.1). It is set on r before the policies' views are
+// made, so each policy sees it. A named table the engine doesn't hold is
+// ResultNoTable: each policy's failure mode decides.
+func (s *Set) lookupGeo(r *request.Request, ps []*Policy) {
+	if !s.geoNamed || r.Geo.Looked || !slices.ContainsFunc(ps, func(p *Policy) bool { return p.hasGeo }) {
+		return
+	}
+	c, res := s.geoTable.Lookup(r.ClientIP)
+	r.Geo = request.Geo{Looked: true, Country: c, Result: res}
+	if o, ok := s.observer.(GeoObserver); ok {
+		o.ObserveGeoLookup(res)
+	}
 }
 
 // observe tells o, if set, about v, a verdict no policy's pipeline gave
@@ -766,4 +833,27 @@ func rateLimits(bp *bundlev1.Policy) []pipeline.RateLimitConfig {
 		out = append(out, c)
 	}
 	return out
+}
+
+// geoRules compiles a policy's geo blocking.
+func geoRules(g *bundlev1.Geo) (*pipeline.GeoRules, error) {
+	rules := &pipeline.GeoRules{UnknownDeny: g.GetUnknownDeny(), Detect: g.GetDetect()}
+	codes := g.GetDeny()
+	if len(g.GetAllow()) > 0 {
+		if len(codes) > 0 {
+			return nil, errors.New("geo: both deny and allow")
+		}
+		rules.Allow, codes = true, g.GetAllow()
+	}
+	if len(codes) == 0 {
+		return nil, errors.New("geo: neither deny nor allow")
+	}
+	for _, s := range codes {
+		c, ok := geo.ParseCountry(s)
+		if !ok {
+			return nil, fmt.Errorf("geo: %q is not a country code", s)
+		}
+		rules.Countries.Add(c)
+	}
+	return rules, nil
 }

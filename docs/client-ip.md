@@ -6,8 +6,9 @@ a cloud L7 LB) that adds `X-Forwarded-For`, see [Behind an HTTP load balancer](#
 
 The engine gives the client's address to the rules ([SecLang](https://coraza.io/docs/seclang/)'s `REMOTE_ADDR`) and records it in
 security events, and a policy's IP lists (`ipLists`, engines 0.5.0 or later) match it, its
-[rate limits](rate-limits.md) (engines 0.7.0 or later) count by it, and planned
-[geo blocking](design/0011-geo-blocking.md#9-client-ip) will match it too. Behind a load balancer
+[rate limits](rate-limits.md) (engines 0.7.0 or later) count by it, and
+[geo blocking](geo-blocking.md) (engines 0.7.0 or later) looks its country up: a wrong address
+gives a wrong country. Behind a load balancer
 (LB), Traefik sees the LB, or a node, as its peer, and so does the engine, unless the real address
 reaches Traefik. A wrong client IP is worse than none: a rule against one address would block the
 LB, and every client would look like the same one.

@@ -187,6 +187,13 @@ func (s *Store) AddGeoTable(hash, gz []byte) {
 	}
 }
 
+// GeoNamed reports whether the current bundle names a country table.
+func (s *Store) GeoNamed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.geo != nil
+}
+
 // HasGeoTable reports whether the Store holds the table hash.
 func (s *Store) HasGeoTable(hash []byte) bool {
 	s.mu.Lock()

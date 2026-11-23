@@ -379,6 +379,6 @@ func (p *Pipeline) RateLimited(r *request.Request) bool {
 // Retry-After.
 func (p *Pipeline) rateLimited(o limited) Verdict {
 	v := p.enforce(Verdict{Reason: ReasonRateLimit, RateLimit: o.over.name, RetryAfter: o.retryAfter}, http.StatusTooManyRequests)
-	v.RateLimitEvent, v.SampledCount = o.event, o.sampled
+	v.SampledEvent, v.SampledCount = o.event, o.sampled
 	return v
 }

@@ -10,6 +10,8 @@ package request
 import (
 	"net/http"
 	"net/netip"
+
+	"github.com/inkwall-dev/inkwall/pkg/geo"
 )
 
 // Request is an adapter-independent view of one HTTP request.
@@ -35,6 +37,10 @@ type Request struct {
 
 	// ClientIP is the end client's address, resolved through trusted proxies.
 	ClientIP netip.Addr
+	// Geo is ClientIP's country, looked up once per request by the policy
+	// set when a policy that matched the request has geo blocking
+	// (design 0011 §5.1).
+	Geo Geo
 	// PeerIP is the address of the direct TCP peer.
 	PeerIP netip.Addr
 
@@ -92,4 +98,30 @@ type Response struct {
 	// but couldn't be: an encoding the engine can't decode, or a body the
 	// proxy didn't send. Body is then nil.
 	BodyUninspected bool
+}
+
+// Geo is a request's country lookup.
+type Geo struct {
+	// Looked is set once the policy set looked the country up: the bundle
+	// names a country table. Unset, geo is skipped.
+	Looked bool
+	// Country and Result are what the lookup found; ResultNoTable when the
+	// bundle names a table the engine doesn't hold.
+	Country geo.Country
+	Result  geo.Result
+}
+
+// Label is the country as events and metrics give it: the code, "unknown"
+// for a public address without one, "" for a private address or without
+// a lookup.
+func (g Geo) Label() string {
+	switch {
+	case !g.Looked:
+		return ""
+	case g.Result == geo.ResultCountry:
+		return g.Country.String()
+	case g.Result == geo.ResultUnknown:
+		return "unknown"
+	}
+	return ""
 }

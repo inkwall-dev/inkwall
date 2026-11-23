@@ -43,7 +43,7 @@ From 0.1.x, upgrade to 0.2.3 (or 0.2.2) first, then to 0.3.0.
 ## Every upgrade
 
 Read the section of the version you upgrade to first, then, for every minor or patch release
-(0.6.0 to 0.6.1 needs nothing more than this):
+(0.6.0 to 0.6.2 needs nothing more than this):
 
 1. Upgrade the chart, with the values you installed it with (`--reset-then-reuse-values` needs
    Helm 3.14 or later):
@@ -86,6 +86,13 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
 
 0.7.0 isn't released yet; this section grows as its changes land.
 
+- **gRPC messages: groups are read** (`body.grpcMessages: Inspect`). A field encoded as a
+  protobuf group (proto2 `group`, editions `DELIMITED`) is read as a nested message, with the
+  same depth and field limits; a malformed one gets `body.onOversize`. Before, its text wasn't
+  read
+  ([GHSA-78c8-6gh2-87hw](https://github.com/inkwall-dev/inkwall/security/advisories/GHSA-78c8-6gh2-87hw)).
+  Already in 0.6.2, 0.5.5 and 0.4.4.
+
 - **Rate limits** (`spec.rateLimits`, [Rate limits](rate-limits.md)). Upgrade the chart first
   (the CRD field and the operator), then the engines: while an engine before 0.7.0 runs a policy
   with limits, the policy is `Enforced=False`, `EnginesOutdated`, naming `spec.rateLimits`.
@@ -94,6 +101,16 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   ([HAProxy](haproxy.md)), or limited clients get 403. A SecLang rule that denies with
   `status:429` now answers gRPC calls with `RESOURCE_EXHAUSTED` instead of `UNAVAILABLE`.
 
+- **Geo blocking** (`spec.geo`, [Geo blocking](geo-blocking.md)). Upgrade the chart first (the
+  CRD fields and the operator), then the engines: an engine before 0.7.0 ignores `spec.geo` and
+  gets no country table, and the policy is `Enforced=False`, `EnginesOutdated`. A policy with
+  `spec.geo` and no country database (`InkwallConfig.spec.geo.database`) is `Enforced=False`,
+  `GeoDatabaseUnavailable`, and geo is skipped. Compiling a database takes up to about 100 MiB on the
+  leader, within the chart's default operator `limits.memory` (now 1Gi). Rolling
+  the operator back below 0.7.0 drops geo without a word, and leaves the `inkwall-geo` Secrets
+  behind: `kubectl -n inkwall-system delete secret inkwall-geo` and
+  `kubectl -n inkwall-system delete secret -l waf.inkwall.dev/bundle-chunk=inkwall-geo`. Roll the
+  CRD back last.
 - **Custom denial responses** (`WAFPolicy.spec.denyResponse`, and the default
   `InkwallConfig.spec.engine.denyResponse`, [Denial responses](denial-responses.md)): an HTML page
   or a JSON document of your own, with the request ID in it, in place of `Forbidden`. Upgrade the
@@ -224,6 +241,16 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   the chart's ClusterRole now grants; with your own RBAC, add it. The
   [API compatibility](api-compatibility.md) page says what may change in the API from here to
   v1.0.0, and what v1.0.0 will freeze.
+- **An audit log of policy changes** (#726, [The audit log](audit-log.md)). Each create, update
+  and delete of a `WAFPolicy`, `WAFRuleSet`, `ClusterWAFRuleSet`, `WAFIPList` or `InkwallConfig`
+  is a `"msg":"policy change"` line in the operator's log, with the user and the spec's changed
+  fields (credentials redacted), a `Normal` Event on the object (`Created`, `Changed`,
+  `Deleted`), and `inkwall_operator_policy_changes_total`. Updates that change no spec field are
+  not recorded. For it, the validating webhooks now also see the deletes of every object, not
+  only the control plane's: those fail open (`failurePolicy: Ignore`), so deleting your own
+  objects still never needs the operator, and the `InkwallConfig` webhook sees deletes too. Every
+  validating webhook is now `sideEffects: NoneOnDryRun`. The chart's `ValidatingWebhookConfiguration`
+  changes with the upgrade; with your own manifests, take the new webhooks from the chart.
 
 ### Rolling back to 0.6.x
 

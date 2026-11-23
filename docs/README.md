@@ -27,6 +27,8 @@ Every doc in this repository, by topic, with the question each one answers.
   address behind a load balancer?
 - [Rate limits](rate-limits.md): how do I limit a client's requests to a policy's routes, what
   does a limited client get, and why does each engine count on its own?
+- [Geo blocking](geo-blocking.md): how do I deny clients by country, or let only some countries
+  in, and where does the country database come from?
 - [Denial responses](denial-responses.md): how do I give denied clients an HTML page or a JSON
   document of my own, with the request ID in it, and which denials use it?
 - [Rotating the bundle signing key](key-rotation.md): how do I replace the key that signs policy
@@ -56,6 +58,8 @@ Every doc in this repository, by topic, with the question each one answers.
   client answer questions about my cluster with Inkwall's read-only tools?
 - [Monitoring](monitoring.md): how do I scrape Inkwall's metrics, install its alerts and dashboard,
   and what do I do when an alert fires?
+- [The audit log of policy changes](audit-log.md): who changed which policy, rule set, IP list or
+  `InkwallConfig`, when, and what changed?
 - [Exporting security events to a SIEM](siem-export.md): how do I send blocked and detected
   requests to Splunk, Elastic, Loki, Datadog, Sentinel or an OpenTelemetry Collector?
 - [Running the engine without Kubernetes](standalone-proxy.md): how do I put the engine in front
@@ -95,6 +99,8 @@ Every doc in this repository, by topic, with the question each one answers.
   reach a SIEM (Splunk, Elastic, Loki, Datadog), with or without the control plane?
 - [0011 — Geo Blocking](design/0011-geo-blocking.md): how does a policy allow or deny clients by
   country, where does the country database come from, and how does it reach the engines?
+- [0012 — Protecting LLM APIs](design/0012-llm-api-protection.md): what can Inkwall do for an
+  LLM API against the OWASP Top 10 for LLM Applications, what can't it, and at what cost?
 - [0013 — gRPC Messages with Their Schema](design/0013-grpc-schemas.md): how does the engine read
   gRPC messages by type and name their fields, and why a descriptor set and not server reflection?
 

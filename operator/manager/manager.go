@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-logr/logr"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -29,6 +30,7 @@ import (
 	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/flowcontrol"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -138,6 +140,9 @@ type Options struct {
 	// EnginePullSecrets are the Secrets the Pod webhook's injected pods
 	// pull the engine image with.
 	EnginePullSecrets []string
+	// GeoRoot is where country database files are; empty: the chart's
+	// /var/lib/inkwall/geo (tests point it elsewhere).
+	GeoRoot string
 	// Integrations select the proxy pods; nil: read from the InkwallConfig
 	// when the manager is created. The operator restarts when they change
 	// (its cache of proxy pods is built from them), or when an
@@ -180,6 +185,10 @@ type Options struct {
 	// run again in the same process (go test -count). Never set in a
 	// cluster.
 	SkipControllerNameValidation bool
+
+	// AuditLog gets the audit log's "policy change" lines (#726); unset:
+	// the operator's log, as logger "audit".
+	AuditLog logr.Logger
 }
 
 // skipNameValidation is nil (controller-runtime's default: validate)
@@ -319,6 +328,15 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
+	// The country database, compiled on the leader (design 0011 §4.2).
+	if err := (&controller.GeoReconciler{
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Namespace: o.Namespace,
+		Root:      o.GeoRoot,
+	}).SetupWithManager(mgr); err != nil {
+		return nil, err
+	}
 	ready, err := addCerts(mgr, o)
 	if err != nil {
 		return nil, err
@@ -445,7 +463,11 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 		}
 	}
 	if o.Webhooks {
-		starter := &webhookStarter{mgr: mgr, ready: ready, inject: injector}
+		auditLog := o.AuditLog
+		if auditLog.GetSink() == nil {
+			auditLog = ctrl.Log.WithName("audit")
+		}
+		starter := &webhookStarter{mgr: mgr, ready: ready, inject: injector, auditLog: auditLog, replica: replicaName(o)}
 		if err := mgr.Add(starter); err != nil {
 			return nil, err
 		}
@@ -609,6 +631,8 @@ func addDistribution(mgr manager.Manager, o Options, ready <-chan struct{}, forw
 type webhookStarter struct {
 	mgr        manager.Manager
 	inject     *webhook.PodInjector
+	auditLog   logr.Logger
+	replica    string
 	ready      <-chan struct{}
 	registered atomic.Bool
 }
@@ -636,7 +660,17 @@ func (w *webhookStarter) Start(ctx context.Context) error {
 		return fmt.Errorf("read the InkwallConfig: %w", err)
 	}
 	guard := &webhook.SourceGuard{Operator: user, Reader: w.mgr.GetClient()}
-	if err := webhook.Setup(w.mgr, w.inject, guard); err != nil {
+	audit := &webhook.Auditor{
+		Log: w.auditLog,
+		// One Event per change, created directly: an event recorder would
+		// merge two users' changes into a series under the first one's note.
+		Events:   w.mgr.GetClient(),
+		Instance: w.replica,
+		// 100 Events at once, then 5 a second, per replica.
+		EventLimit: flowcontrol.NewTokenBucketRateLimiter(5, 100),
+		Operator:   user,
+	}
+	if err := webhook.Setup(w.mgr, w.inject, guard, audit); err != nil {
 		return fmt.Errorf("register webhooks: %w", err)
 	}
 	w.registered.Store(true)

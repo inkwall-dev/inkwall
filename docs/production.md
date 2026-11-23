@@ -47,7 +47,7 @@ and links to the guide that explains it.
   Give the operator an `operator.priorityClassName` that outranks the workloads it protects.
 - [ ] **Size its memory.** It requests 100m CPU and 128Mi, with a 1Gi limit, and sets
   `GOMEMLIMIT` to 90% of the limit (`operator.resources`). Exporting security events to SIEMs
-  adds its buffer and requests: `values.yaml` gives the formula. Its memory grows with the policies and
+  adds its buffer and requests: `values.yaml` gives the formula; geo blocking adds up to about 100 MiB on the leader while it compiles a country database. Its memory grows with the policies and
   routes, not with the engines: see [Scale](#scale) for the numbers, and raise the limit for a
   cluster near them.
 
@@ -169,6 +169,10 @@ and links to the guide that explains it.
 - [ ] **Collect the engines' logs.** Each security event is a JSON line, `"msg":"security event"`,
   in the `inkwall-engine` container of the proxy pods. Keep `spec.engine.logLevel` at `Info` or
   `Warn`: `Error` hides the events (they still go to the operator).
+- [ ] **Keep the audit log of policy changes.** Each change of a policy, rule set, IP list or
+  `InkwallConfig` is a `"msg":"policy change"` line in the operator's log, from every replica:
+  ship it with the rest ([The audit log](audit-log.md)). The API server's audit log stays the
+  authoritative record.
 - [ ] **Redact what your events must not carry.** Snippets of credentials, cookies and response
   bodies are never sent; `spec.events.redact` adds header and argument names, or turns snippets
   off ([Redacting security events](../deploy/helm/inkwall/README.md#redacting-security-events)).

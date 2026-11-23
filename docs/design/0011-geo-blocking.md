@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-11-20
-- Updated: 2026-11-20
+- Updated: 2026-11-21
 - Owner: noureldin
 - Depends on: [0001 — Performance-First Architecture](0001-performance-first-architecture.md),
   [0002 — System Architecture](0002-system-architecture.md),
@@ -13,7 +13,7 @@ tier T1 ([0001 §4](0001-performance-first-architecture.md#4-request-pipeline-ti
 next to the IP lists: a cheap check on the client IP, before the rules run. This document decides
 the `WAFPolicy` API, where the country database comes from and how it reaches engines, how the
 engine looks a country up in about 100 ns, what the operator reports, and how it is tested.
-**Nothing here is built yet** (#724).
+**Built in 0.7.0** (#724); the user guide is [Geo blocking](../geo-blocking.md).
 
 [Terms](../glossary.md) used here:
 
@@ -188,7 +188,9 @@ A country is a large population, and a user trying geo wants to see what the rul
 rest of it.
 
 `BodyLimit` (`pkg/pipeline/pipeline.go`) returns 0 for a client the IP lists decide, so adapters
-don't read a body that won't be inspected. It does the same for a geo deny in `Block`.
+don't read a body that won't be inspected. It does the same for a geo deny in `Block`. A request
+several policies inspect follows the same order across them: any policy's geo deny in `Block` (or
+missing table failing closed) answers before any policy's rate limit is charged.
 
 ### 2.4 Validation
 
@@ -596,8 +598,8 @@ table; it is swapped in the same way. Tables outlive sets by being shared betwee
 - **`api/geo/v1/geo.proto`** (new): `CountryTable` ([§4.2](#42-the-operator-compiles-a-country-table)).
 - **`api/bundle/v1/bundle.proto`:** `Bundle.geo_table = 11` (`GeoTableRef { sha256, size }`:
   the table hash, and the decoded size);
-  `Policy.geo = 16` (`Geo { repeated string deny; repeated string allow; bool unknown_deny;
-  bool detect }`; field 15 is the rate limits' in 0009). Engines before 0.7.0 skip both.
+  `Policy.geo = 17` (`Geo { repeated string deny; repeated string allow; bool unknown_deny;
+  bool detect }`; field 15 is the rate limits' in 0009, 16 the custom denial response's, which landed first). Engines before 0.7.0 skip both.
 - **`api/agent/v1`:** `WatchResponse.geo_table = 3`; `Hello.geo_table_sha256 = 8`,
   `Hello.capabilities = 9`; `Heartbeat.geo_table_sha256 = 6`.
 - **`api/engine/v1/engine.proto`:** `REASON_GEO_DENY = 16` and `REASON_GEO_UNAVAILABLE = 17`, the
@@ -661,11 +663,13 @@ How the operator uses it:
    most 32 Mi nodes of 8 bytes, so no database within the file bound is refused for it
    (GeoLite2-City has about 4 million nodes). A skipped alias yields nothing either, so a tree
    whose shared children all end in pointers to the IPv4 subtree would make that walk skip
-   exponentially many aliases unchecked: a first walk follows the aliases, where every path end
-   yields, checked and capped at four times the cap (the IPv4 networks under MaxMind's three
-   aliases, and past the IPv4 networks to the cap plus 256 times their number), and it bounds the
-   path ends of the walk that skips them. That walk's gaps, one per alias, stop at 256 (`Invalid`)
-   as they are found: a tree of alternating aliases and empty leaves would add one per network. A deadline alone can't stop
+   exponentially many aliases unchecked: a first pass walks the search tree's records as the
+   library's walk does, decoding nothing, and counts its path ends (capped at the network cap) and
+   its aliases (records pointing to the IPv4 subtree from outside `::/96`, capped at 256,
+   `Invalid`). Following the aliases instead would yield the cap's worth of networks under a 1 KiB
+   tree of 2^26 aliases: about 30 s under the race detector. The walk that skips them then ends at
+   no more path ends, and its gaps, one per alias at most, stop at 256 too (`Invalid`) as they
+   are found. A deadline alone can't stop
    a goroutine, so the loop has to. A cancelled context (leadership lost) and the API server's
    errors are transient: they leave the condition as it is, and are retried. A crafted file that panics, loops or grows makes an `Invalid`
    or `TooLarge` condition, never a crashed or out-of-memory leader.
@@ -718,8 +722,10 @@ database update. The message says which: "no country database: set InkwallConfig
 spec.geo.database", or "2 of 6 engines have no country table (first: …)". `Accepted` stays `True`: the policy is valid, and it will be enforced once the
 table arrives. `EnginesOutdated` ([§2.5](#25-older-engines)) takes precedence.
 
-A policy with `spec.geo` but no database configured gets one Warning event, and the webhook warns
-when it is applied.
+A policy with `spec.geo` but no database configured gets one Warning Event when its `Enforced`
+turns `GeoDatabaseUnavailable`: the operator's policy status Events (`policystatus`), once per
+transition, rate-limited per policy. The webhook doesn't warn of it: it reads no other object than
+the one applied, and the InkwallConfig can be set after the policy.
 
 `inkwallctl status` shows the database line: type, build date, how many engines hold it.
 
@@ -836,7 +842,7 @@ database is committed to the repository, for their licenses.
 | 8 | The table on the operator stream, to engines that advertise it, never after the bundle that pins its hash on a stream; held compressed until a bundle names it; stored in chunk Secrets (16), written before the bundle's, for cold start and other replicas; the previous table kept until the new one arrives | The table in the bundle; a separately signed manifest; sending to every engine |
 | 9 | No table named: geo skipped, `Enforced=False`. A named table missing: the policy's `failureMode`, except `Detect`. Readiness waits only at bootstrap | Always the `failureMode`; unready mid-life |
 | 10 | `pkg/geo`: sorted ranges and a binary search, a country bitset per policy, one lookup per request in `Set.Check`, the table swapped with the policy set; ≤ 150 ns, 0 allocs; at most 32 MiB | A per-IP cache; `mmap` in the engine; a table swapped on its own |
-| 11 | `maxminddb-golang/v2` (ISC) in the operator only, the leader only, on a mapped file; behind `recover`, walks that yield empty networks and follow aliases first so their deadline and network cap always run (not `Verify`, whose memory nothing bounds); aliases found from the walk's gaps, not assumed; never an older database, without an error for it | Our own MMDB reader; reading the file into the heap |
+| 11 | `maxminddb-golang/v2` (ISC) in the operator only, the leader only, on a mapped file; behind `recover`, walks that yield empty networks, after a pass over the tree that counts its path ends and aliases, so their deadline and caps always run (not `Verify`, whose memory nothing bounds); aliases found from the walk's gaps, not assumed; never an older database, without an error for it | Our own MMDB reader; reading the file into the heap |
 | 12 | `GeoDatabaseReady` on the `InkwallConfig`; `Enforced=False`, `GeoDatabaseUnavailable` on policies, only for engines with no table; `EnginesOutdated` for old engines | `Accepted=False` while the table is missing |
 | 14 | The chart's default operator memory limit goes to 768 MiB, shared with 0010 | Compiling within today's 512 MiB |
 | 13 | Every event carries `country`; geo events sampled per (policy, country), once a minute | An event per denied request |

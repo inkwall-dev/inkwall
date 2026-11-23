@@ -39,8 +39,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -58,6 +60,7 @@ import (
 	eventsv1 "k8s.io/api/events/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -75,6 +78,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/bundle"
 	"github.com/inkwall-dev/inkwall/operator/integrations"
 	"github.com/inkwall-dev/inkwall/operator/internal/distribution"
+	"github.com/inkwall-dev/inkwall/operator/internal/geo/mmdbtest"
 	"github.com/inkwall-dev/inkwall/operator/internal/wiring"
 	"github.com/inkwall-dev/inkwall/operator/manager"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
@@ -103,6 +107,11 @@ const (
 	engineHostEnv = "INKWALL_SCALE_ENGINE_HOST"
 	// responsesEnv, "1", makes every other policy inspect responses.
 	responsesEnv = "INKWALL_SCALE_RESPONSES"
+	// geoEnv, set to 1, gives every policy spec.geo and the cluster a
+	// country database of today's size, compiled by the operator from a
+	// file: the time until every engine holds its table, and a database
+	// update's, under the run's memory measures (design 0011 §10).
+	geoEnv = "INKWALL_SCALE_GEO"
 
 	// routesPerPolicy: 0004 §8 has 50,000 routes for 5,000 policies.
 	routesPerPolicy = 10
@@ -191,7 +200,7 @@ type Result struct {
 	ReconcileSeconds float64 `json:"reconcileSeconds"`
 	// ResolveSeconds: resolver.Resolve alone, on the same objects.
 	ResolveSeconds float64 `json:"resolveSeconds"`
-	// PolicyEvents: the Kubernetes Events recorded on the policies over
+	// PolicyEvents: the status Events recorded on the policies over
 	// the run (#378), at most one per policy every 30 s.
 	PolicyEvents int `json:"policyEvents"`
 	// Bundle sizes in bytes: serialized, and gzipped as in the Secret.
@@ -223,6 +232,13 @@ type Result struct {
 	// and compiling the final bundle once as an engine does (in this
 	// process, after the operator's memory was measured): its time and the
 	// heap it keeps live.
+	// With INKWALL_SCALE_GEO: the country table's size, compressed, and
+	// from the database configured (and then replaced) to every engine
+	// holding its table.
+	GeoTableCompressedBytes int64   `json:"geoTableCompressedBytes,omitempty"`
+	GeoSeconds              float64 `json:"geoSeconds,omitempty"`
+	GeoUpdateSeconds        float64 `json:"geoUpdateSeconds,omitempty"`
+
 	ResponsePolicies    int     `json:"responsePolicies,omitempty"`
 	CompileSeconds      float64 `json:"compileSeconds,omitempty"`
 	CompileHeapBytes    uint64  `json:"compileHeapBytes,omitempty"`
@@ -279,6 +295,21 @@ func TestScale(t *testing.T) {
 	default:
 		t.Fatalf("%s=%q: want 1 or 0", responsesEnv, v)
 	}
+	geoOn := false
+	switch v := os.Getenv(geoEnv); v {
+	case "", "0":
+	case "1":
+		geoOn = true
+	default:
+		t.Fatalf("%s=%q: want 1 or 0", geoEnv, v)
+	}
+	geoRoot := t.TempDir()
+	if geoOn {
+		// Before the operator starts: the writer's garbage isn't the
+		// operator's.
+		writeGeoDB(t, geoRoot, 1, "AU", "NZ")
+		runtime.GC()
+	}
 
 	// The operator's client is not rate limited, as ctrl.GetConfig sets it
 	// up in cmd/operator.
@@ -293,8 +324,9 @@ func TestScale(t *testing.T) {
 	setupEngineAccess(ctx, t, c)
 
 	runStart := time.Now()
-	distAddr := startOperator(ctx, t, cfg)
+	distAddr := startOperator(ctx, t, cfg, geoRoot)
 	engineCfg := engineConfig(ctx, t, c, distAddr, nEngines)
+	engineCfg.Geo = geoOn
 
 	sampler := startSampler()
 	defer sampler.stop()
@@ -311,7 +343,7 @@ func TestScale(t *testing.T) {
 
 	// A GitOps sync of every policy and route.
 	start = time.Now()
-	createObjects(ctx, t, c, nPolicies, responses)
+	createObjects(ctx, t, c, nPolicies, responses, geoOn)
 	created := time.Now()
 	res.CreateSeconds = created.Sub(start).Seconds()
 	t.Logf("%d policies and their routes created in %.1fs", nPolicies, res.CreateSeconds)
@@ -332,6 +364,9 @@ func TestScale(t *testing.T) {
 		_, res.RSSPeakSyncBytes = rss()
 		resetPeakRSS()
 		measureChanges(ctx, t, c, engines, nPolicies, nChanges, &res)
+		if geoOn {
+			measureGeo(ctx, t, c, engines, geoRoot, &res)
+		}
 		res.HeapPeakChangesBytes = sampler.reset()
 		_, res.RSSPeakChangesBytes = rss()
 	}
@@ -349,9 +384,9 @@ func TestScale(t *testing.T) {
 	res.StreamsCut = engines.endedStreams() - endedBefore
 	res.PolicyEvents = policyEvents(ctx, t, c)
 	if most := nPolicies * (1 + int(time.Since(runStart)/(30*time.Second))); res.PolicyEvents > most {
-		t.Errorf("%d Events on the policies, want at most %d (one per policy every 30 s)", res.PolicyEvents, most)
+		t.Errorf("%d status Events on the policies, want at most %d (one per policy every 30 s)", res.PolicyEvents, most)
 	}
-	t.Logf("%d Events on the %d policies", res.PolicyEvents, nPolicies)
+	t.Logf("%d status Events on the %d policies", res.PolicyEvents, nPolicies)
 	b := measureBundle(ctx, t, c, &res)
 	if responses {
 		measureResponses(t, b, nPolicies, &res)
@@ -591,8 +626,10 @@ func report(t *testing.T, r Result) {
 func mib(b uint64) string { return fmt.Sprintf("%.0f MiB", float64(b)/(1<<20)) }
 func kib(b int) string    { return fmt.Sprintf("%.0f KiB", float64(b)/(1<<10)) }
 
-// policyEvents counts the Events on WAFPolicies, in every namespace. An
-// Event repeated (count, series) counts each time.
+// policyEvents counts the status Events on WAFPolicies (action
+// StatusChanged), in every namespace: the audit log's Events, one per
+// change the test makes, aren't throttled per policy. An Event repeated
+// (count, series) counts each time.
 func policyEvents(ctx context.Context, t *testing.T, c client.Client) int {
 	t.Helper()
 	var list eventsv1.EventList
@@ -601,7 +638,7 @@ func policyEvents(ctx context.Context, t *testing.T, c client.Client) int {
 	}
 	n := 0
 	for _, e := range list.Items {
-		if e.Regarding.Kind == "WAFPolicy" {
+		if e.Regarding.Kind == "WAFPolicy" && e.Action == "StatusChanged" {
 			n += 1 + int(max(e.DeprecatedCount-1, 0))
 			if e.Series != nil {
 				n += int(e.Series.Count)
@@ -653,7 +690,7 @@ var scaleProbeKey = bytes.Repeat([]byte{7}, haproxyprobe.KeySize)
 // startOperator runs the operator with its production defaults (debounce,
 // report intervals), until the test ends, and returns its distribution
 // server's address once it is ready and leads.
-func startOperator(ctx context.Context, t *testing.T, cfg *rest.Config) string {
+func startOperator(ctx context.Context, t *testing.T, cfg *rest.Config, geoRoot string) string {
 	t.Helper()
 	probe, dist := freeAddr(t), freeAddr(t)
 	_, port, _ := net.SplitHostPort(dist)
@@ -675,6 +712,7 @@ func startOperator(ctx context.Context, t *testing.T, cfg *rest.Config) string {
 		EngineImage:      "inkwall-engine:test",
 		EnginePullPolicy: corev1.PullNever,
 		Replica:          "operator-0",
+		GeoRoot:          geoRoot,
 		// The wiring's probe (#372), answered as the engine would, on the
 		// gateway pods that have an address (wiring_test.go gives them one).
 		Prober: &wiring.Prober{
@@ -734,6 +772,8 @@ type enginesConfig struct {
 	PublicKey []byte        `json:"publicKey"`
 	Tokens    []string      `json:"tokens"`
 	Heartbeat time.Duration `json:"heartbeat"`
+	// Geo: the engines take country tables.
+	Geo bool `json:"geo"`
 }
 
 // engineConfig issues a token per engine, as each engine pod has its own,
@@ -824,7 +864,7 @@ func routeObject(i, n int) (client.Object, wafv1alpha1.TargetRef) {
 
 // createObjects creates the namespaces, then each route and its policy,
 // concurrently, as a GitOps tool applying a large change would.
-func createObjects(ctx context.Context, t *testing.T, c client.Client, n int, responses bool) {
+func createObjects(ctx context.Context, t *testing.T, c client.Client, n int, responses, geo bool) {
 	t.Helper()
 	for i := range max(1, n/100) {
 		if err := c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace(i, n)}}); err != nil {
@@ -842,6 +882,9 @@ func createObjects(ctx context.Context, t *testing.T, c client.Client, n int, re
 		}
 		if responses && i%2 == 0 {
 			pol.Spec.Responses = &wafv1alpha1.ResponsesSpec{Inspect: true}
+		}
+		if geo {
+			pol.Spec.Geo = &wafv1alpha1.GeoSpec{Deny: []wafv1alpha1.CountryCode{"KP", "RU"}}
 		}
 		if err := c.Create(ctx, pol); err != nil {
 			return fmt.Errorf("create policy %d: %w", i, err)
@@ -1026,6 +1069,8 @@ type engineState struct {
 	routes   int
 	// responses counts the policies that inspect responses.
 	responses int
+	// geo is the hash of the country table held, in hex.
+	geo string
 }
 
 // engineHost is the fake engines' process, and when each reached each
@@ -1084,6 +1129,15 @@ func startEngines(t *testing.T, ec enginesConfig) *engineHost {
 				h.mu.Unlock()
 				continue
 			}
+			var gi int
+			var hash string
+			if _, err := fmt.Sscanf(sc.Text(), "geo %d %s", &gi, &hash); err == nil && gi >= 0 && gi < len(h.states) {
+				h.mu.Lock()
+				h.states[gi].geo = hash
+				h.changed.Broadcast()
+				h.mu.Unlock()
+				continue
+			}
 			var (
 				i    int
 				s    engineState
@@ -1093,6 +1147,7 @@ func startEngines(t *testing.T, ec enginesConfig) *engineHost {
 				continue
 			}
 			h.mu.Lock()
+			s.geo = h.states[i].geo
 			h.states[i] = s
 			h.applied[i] = append(h.applied[i], versionAt{s.version, at})
 			h.changed.Broadcast()
@@ -1225,6 +1280,13 @@ func hostEngines() int {
 			Heartbeat:       ec.Heartbeat,
 			KeepVersionOnly: true,
 			Shared:          shared,
+			GeoTables:       ec.Geo,
+			OnGeoTable: func(hash []byte) {
+				outMu.Lock()
+				defer outMu.Unlock()
+				_, _ = fmt.Fprintf(out, "geo %d %x\n", i, hash)
+				_ = out.Flush()
+			},
 			OnApply: func(b *bundlev1.Bundle) {
 				routes, responses := 0, 0
 				for _, p := range b.GetPolicies() {
@@ -1264,3 +1326,90 @@ func hostEngines() int {
 }
 
 var jsonMarshal = json.Marshal
+
+// geoNetworks is the IPv4 and the IPv6 networks of the scale test's
+// country database: today's country databases have about 200,000 ranges
+// of each family (design 0011 §4.2).
+const geoNetworks = 200_000
+
+// writeGeoDB writes the country database the operator compiles, at
+// geoRoot/country.mmdb: geoNetworks IPv4 /24s and IPv6 /32s, their
+// countries alternating between a and b, so no neighbours merge. The
+// file is replaced by a rename, as geoipupdate does.
+func writeGeoDB(t *testing.T, root string, epoch uint64, a, b string) {
+	t.Helper()
+	db := mmdbtest.DB{BuildEpoch: uint64(time.Now().Unix()) + epoch, Aliases: mmdbtest.MaxMindAliases}
+	for i := range geoNetworks {
+		code := a
+		if i%2 == 1 {
+			code = b
+		}
+		v4 := netip.PrefixFrom(netip.AddrFrom4([4]byte{byte(1 + i>>16), byte(i >> 8), byte(i), 0}), 24)
+		var v6 [16]byte
+		v6[0], v6[1], v6[2], v6[3] = 0x24, byte(i>>16), byte(i>>8), byte(i)
+		db.Networks = append(db.Networks,
+			mmdbtest.Network{Prefix: v4, Record: &mmdbtest.Record{Country: code}},
+			mmdbtest.Network{Prefix: netip.PrefixFrom(netip.AddrFrom16(v6), 32), Record: &mmdbtest.Record{Country: code}})
+	}
+	data, err := db.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(root, ".country.mmdb")
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, filepath.Join(root, "country.mmdb")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// measureGeo configures the country database, and times how long until
+// every engine holds its table; then replaces the database, and times the
+// update.
+func measureGeo(ctx context.Context, t *testing.T, c client.Client, engines *engineHost, root string, res *Result) {
+	t.Helper()
+	published := func(not string) string {
+		deadline := time.Now().Add(5 * time.Minute)
+		for time.Now().Before(deadline) {
+			var cfg wafv1alpha1.InkwallConfig
+			if err := c.Get(ctx, client.ObjectKey{Name: "default"}, &cfg); err == nil && cfg.Status.Geo != nil && cfg.Status.Geo.SHA256 != not {
+				res.GeoTableCompressedBytes = cfg.Status.Geo.CompressedBytes
+				return cfg.Status.Geo.SHA256
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		t.Fatal("no country table published after 5m")
+		return ""
+	}
+	held := func(hash string, since time.Time) float64 {
+		if !engines.wait(func(s engineState) bool { return s.geo == hash }, 10*time.Minute) {
+			t.Errorf("not every engine holds the country table after 10m: %d/%d", engines.count(func(s engineState) bool { return s.geo == hash }), len(engines.states))
+			return 0
+		}
+		return time.Since(since).Seconds()
+	}
+	start := time.Now()
+	var cfg wafv1alpha1.InkwallConfig
+	err := c.Get(ctx, client.ObjectKey{Name: "default"}, &cfg)
+	geoSpec := &wafv1alpha1.GeoConfig{Database: wafv1alpha1.GeoDatabase{File: "/var/lib/inkwall/geo/country.mmdb"}}
+	switch {
+	case apierrors.IsNotFound(err):
+		cfg = wafv1alpha1.InkwallConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"}, Spec: wafv1alpha1.InkwallConfigSpec{Geo: geoSpec}}
+		err = c.Create(ctx, &cfg)
+	case err == nil:
+		cfg.Spec.Geo = geoSpec
+		err = c.Update(ctx, &cfg)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := published("")
+	res.GeoSeconds = held(first, start)
+	t.Logf("every engine holds the country table (%d KiB compressed) %.1fs after the database was configured", res.GeoTableCompressedBytes>>10, res.GeoSeconds)
+
+	start = time.Now()
+	writeGeoDB(t, root, 2, "NZ", "AU")
+	res.GeoUpdateSeconds = held(published(first), start)
+	t.Logf("and the updated one %.1fs after the database was replaced", res.GeoUpdateSeconds)
+}

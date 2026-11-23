@@ -305,3 +305,51 @@ tests:
       - eval_time: 35m
         alertname: InkwallEventExportFailing
         exp_alerts: []
+
+  - name: country database stale
+    interval: 1m
+    input_series:
+      # Built 31 days before the test's clock starts; another engine
+      # without a table (0) never fires.
+      - series: 'inkwall_geo_table_built_timestamp_seconds{namespace="shop",pod="traefik-1"}'
+        values: '-2678400x90'
+      - series: 'inkwall_geo_table_built_timestamp_seconds{namespace="shop",pod="envoy-1"}'
+        values: '0x90'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: InkwallGeoDatabaseStale
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: InkwallGeoDatabaseStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: shop
+              pod: traefik-1
+            exp_annotations:
+              summary: Inkwall's country database is more than 30 days old.
+              description: The country table of the engine shop/traefik-1 was built 31d 1h 10m 0s ago; check the database's updater.
+              runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallgeodatabasestale
+
+  - name: geo sees private client addresses
+    interval: 1m
+    input_series:
+      - series: 'inkwall_geo_lookups_total{namespace="shop",pod="traefik-1",result="private"}'
+        values: '0+90x60'
+      - series: 'inkwall_geo_lookups_total{namespace="shop",pod="traefik-1",result="country"}'
+        values: '0+10x60'
+      - series: 'inkwall_geo_lookups_total{namespace="shop",pod="envoy-1",result="country"}'
+        values: '0+100x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: InkwallGeoClientIPPrivate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: shop
+              pod: traefik-1
+            exp_annotations:
+              summary: Inkwall's geo blocking sees private client addresses.
+              description: Most country lookups of the engine shop/traefik-1 are for private addresses, which geo never denies; the client IP is probably a load balancer's.
+              runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallgeoclientipprivate
+

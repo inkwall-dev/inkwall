@@ -167,6 +167,8 @@ Engine metrics carry `adapter` where it says so (`proxy`, `forwardauth`, `httpch
 | `inkwall_bundle_updates_total` | counter | `result`, `reason` | Bundles received: `applied`, or `rejected` with a reason (`signature`, `older`, `compile`, `other`). |
 | `inkwall_bundle_compile_seconds` | histogram | | Time compiling a bundle's policies. |
 | `inkwall_bundle_applied_timestamp_seconds` | gauge | | When the enforced bundle was applied (Unix time): its age is `time()` minus it. |
+| `inkwall_geo_denied_total` | counter | `action`, `country` | Requests geo blocking denied (`deny`) or would have (`log`), by country: the code, or `unknown`. |
+| `inkwall_geo_lookups_total` | counter | `result` | Country lookups for geo policies, one per request: `country`, `private` (most of them means the client IP is a load balancer's), `unknown`, `no-table`. |
 | `inkwall_geo_table_bytes` | gauge | | The size in memory of the country table the engine holds for geo blocking; 0 without one. |
 | `inkwall_geo_table_built_timestamp_seconds` | gauge | | When the database of that country table was built (Unix time). |
 | `inkwall_geo_table_load_failures_total` | counter | | Country tables received that failed a check (too large, the wrong hash, not a valid table); the engine keeps the one it had. |
@@ -212,6 +214,7 @@ The engine also serves the Go runtime's `go_*` and the `process_*` metrics.
 | `inkwall_operator_events_export_request_duration_seconds` | histogram | `sink` | Time per request to a sink, retries apart. |
 | `inkwall_operator_request_stats_dropped_total` | counter | `reason` | Policies' request counts dropped (`not_in_bundle`, `latency_buckets`, `evicted`). |
 | `inkwall_operator_state_engines_left_out` | gauge | | Engines left out of the last ClusterState sent to the control plane. |
+| `inkwall_operator_policy_changes_total` | counter | `kind`, `operation` | Changes to the WAF objects this replica's webhook admitted, by kind and `create`, `update` or `delete` ([The audit log](audit-log.md)); dry runs and updates that change no spec field aside. |
 
 The operator also serves controller-runtime's `controller_runtime_*`, `workqueue_*` and
 `rest_client_*` metrics.
@@ -230,6 +233,9 @@ seconds:
 kubectl describe wafpolicy -n shop web
 kubectl get events -n shop --field-selector involvedObject.kind=WAFPolicy
 ```
+
+Each change to a policy, rule set, IP list or `InkwallConfig` is a `Normal` Event too (`Created`,
+`Changed`, `Deleted`), and a line in the operator's log: see [The audit log](audit-log.md).
 
 ## Alerts
 
@@ -314,6 +320,20 @@ say why in `Programmed=False`, reason `WiringFailed`:
 The bundle is over 80% of the 7,200 KiB it can be, compressed. Past it, policy changes can't be
 published (`Accepted=False`, `BundleTooLarge`). Rules written inline in many policies are the
 usual cause: put shared rules in one rule set the policies reference.
+
+### InkwallGeoDatabaseStale
+
+An engine's country table was built from a database more than 30 days old, for an hour. Countries'
+ranges move every week, and GeoLite2's terms ask you to move to an update within 30 days. Check the
+database's updater (`geoipupdate`, or whatever fills the volume or the Secret), and the
+InkwallConfig's `GeoDatabaseReady` ([geo blocking](geo-blocking.md#status)).
+
+### InkwallGeoClientIPPrivate
+
+More than half of an engine's country lookups have been for private addresses for 15 minutes. Geo
+never denies a private address, so it does nothing: the client IP the engine resolves is probably
+the load balancer's. Set up the [client IP](client-ip.md), then check the `client_ip` of a few
+events.
 
 ### InkwallEventExportFailing
 

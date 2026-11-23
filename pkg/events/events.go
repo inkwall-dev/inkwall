@@ -22,6 +22,7 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	enginev1 "github.com/inkwall-dev/inkwall/api/engine/v1"
 	eventsv1 "github.com/inkwall-dev/inkwall/api/events/v1"
+	"github.com/inkwall-dev/inkwall/pkg/geo"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 )
@@ -167,6 +168,9 @@ type Source struct {
 	// Redaction returns the bundle's redaction (nil, or nil returned: the
 	// fixed one only).
 	Redaction func() *Redaction
+	// GeoTable returns the country table the engine holds (nil, or nil
+	// returned: none), for the country of events no geo policy looked up.
+	GeoTable func() *geo.Table
 }
 
 // New builds the event for a request and its verdict. path is the request's
@@ -192,8 +196,22 @@ func New(src Source, req *request.Request, path string, v pipeline.Verdict, now 
 		Phase:              eventsv1.Phase_PHASE_REQUEST,
 	}
 	ev.Protocol = protocol(req)
-	if v.Reason == pipeline.ReasonRateLimit {
+	switch v.Reason {
+	case pipeline.ReasonRateLimit:
 		ev.RateLimit, ev.SampledCount = truncate(v.RateLimit, 63), v.SampledCount
+	case pipeline.ReasonGeoDeny, pipeline.ReasonGeoUnavailable:
+		ev.SampledCount = v.SampledCount
+	}
+	// The client's country, when the engine holds a table: looked up for
+	// the request's geo policies, or now (one lookup per event).
+	switch {
+	case req.Geo.Looked:
+		ev.Country = req.Geo.Label()
+	case src.GeoTable != nil:
+		if t := src.GeoTable(); t != nil {
+			c, res := t.Lookup(req.ClientIP)
+			ev.Country = request.Geo{Looked: true, Country: c, Result: res}.Label()
+		}
 	}
 	switch {
 	case v.WebSocketMessage:
@@ -393,6 +411,10 @@ func Reason(r pipeline.Reason) enginev1.Reason {
 		return enginev1.Reason_REASON_GRPC
 	case pipeline.ReasonRateLimit:
 		return enginev1.Reason_REASON_RATE_LIMIT
+	case pipeline.ReasonGeoDeny:
+		return enginev1.Reason_REASON_GEO_DENY
+	case pipeline.ReasonGeoUnavailable:
+		return enginev1.Reason_REASON_GEO_UNAVAILABLE
 	default:
 		return enginev1.Reason_REASON_UNSPECIFIED
 	}
