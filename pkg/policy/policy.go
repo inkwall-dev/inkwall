@@ -71,8 +71,8 @@ type Options struct {
 	// one request at a time.
 	IgnoreRateLimits bool
 
-	// checkOnly checks the rate limits instead of compiling them into a
-	// store (CheckSettings).
+	// checkOnly leaves the rate limits out (CheckSettings: CheckRateLimits
+	// checks them).
 	checkOnly bool
 }
 
@@ -520,13 +520,11 @@ func pipelineConfig(bp *bundlev1.Policy, o Options, live *ratelimit.Live, deny *
 			return pipeline.Config{}, 0, err
 		}
 	}
-	if o.checkOnly {
-		err = pipeline.CheckRateLimits(rateLimits(bp))
-	} else {
-		pc.RateLimits, err = pipeline.CompileRateLimits(o.RateLimits, live, bp.GetId(), rateLimits(bp))
-	}
-	if err != nil {
-		return pipeline.Config{}, 0, err
+	// Checking alone, the rate limits are CheckRateLimits'.
+	if !o.checkOnly {
+		if pc.RateLimits, err = pipeline.CompileRateLimits(o.RateLimits, live, bp.GetId(), rateLimits(bp)); err != nil {
+			return pipeline.Config{}, 0, err
+		}
 	}
 	if o.IgnoreRateLimits {
 		pc.RateLimits = nil
@@ -599,9 +597,9 @@ func rulesConfig(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o O
 }
 
 // CheckSettings checks what of policy bp the engine compiles besides its
-// rules, as Compile does: its skip paths, WebSocket rules, IP lists, geo
-// rules, rate limits, denial, CRS settings and exclusions; ruleSets has the
-// rule sets it binds. A policy the engine refuses makes it refuse the whole
+// rules and rate limits (CheckRateLimits), as Compile does: its skip paths,
+// WebSocket rules, IP lists, geo rules, denial, CRS settings and
+// exclusions; ruleSets has the rule sets it binds. A policy the engine refuses makes it refuse the whole
 // bundle, every other policy's changes with it: the operator leaves out a
 // policy that fails this (or RuleChecker.Check), whatever admitted it.
 func CheckSettings(bp *bundlev1.Policy, ruleSets []*bundlev1.RuleSet) error {
@@ -895,6 +893,13 @@ func (h *Holder) BodyLimit(r *request.Request, max int64) int64 {
 		return 0
 	}
 	return s.BodyLimit(r, max)
+}
+
+// CheckRateLimits checks a policy's rate limits as Compile compiles them,
+// for the operator: it leaves out of the bundle a policy whose limits the
+// engine can't compile.
+func CheckRateLimits(bp *bundlev1.Policy) error {
+	return pipeline.CheckRateLimits(rateLimits(bp))
 }
 
 // rateLimits is a policy's rate limits, as the pipeline takes them.

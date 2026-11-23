@@ -43,3 +43,27 @@ func TestGeoWarnings(t *testing.T) {
 		t.Errorf("without geo: %v", w)
 	}
 }
+
+// An allow list warns that unknown addresses get through, unless unknown
+// is Deny; a deny list doesn't.
+func TestGeoWarningsUnknown(t *testing.T) {
+	const want = "spec.geo.allow: with unknown: Allow (the default), public addresses the database has no country for get through geo"
+	for _, tc := range []struct {
+		name string
+		geo  wafv1alpha1.GeoSpec
+		warn bool
+	}{
+		{"allow, defaulted", wafv1alpha1.GeoSpec{Allow: []wafv1alpha1.CountryCode{"DE"}, Unknown: wafv1alpha1.GeoUnknownAllow}, true},
+		{"allow, unset", wafv1alpha1.GeoSpec{Allow: []wafv1alpha1.CountryCode{"DE"}}, true},
+		{"allow, unknown Deny", wafv1alpha1.GeoSpec{Allow: []wafv1alpha1.CountryCode{"DE"}, Unknown: wafv1alpha1.GeoUnknownDeny}, false},
+		{"deny", wafv1alpha1.GeoSpec{Deny: []wafv1alpha1.CountryCode{"RU"}, Unknown: wafv1alpha1.GeoUnknownAllow}, false},
+	} {
+		warnings, err := validateWAFPolicy(&wafv1alpha1.WAFPolicy{Spec: wafv1alpha1.WAFPolicySpec{Geo: &tc.geo}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(strings.Join(warnings, "\n"), want); got != tc.warn {
+			t.Errorf("%s: warned %v, want %v: %q", tc.name, got, tc.warn, warnings)
+		}
+	}
+}

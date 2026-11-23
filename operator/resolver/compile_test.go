@@ -133,3 +133,19 @@ func TestExclusionOnRemovedRule(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckSpec: what the webhook checks of a spec with CheckSpec, as the
+// bundle builder does: what the engine wouldn't compile, whatever field.
+func TestCheckSpec(t *testing.T) {
+	p := policy("p", 0, "a")
+	p.Spec.Skip = &wafv1alpha1.SkipSpec{Paths: []wafv1alpha1.PathPattern{"/healthz"}}
+	p.Spec.IPLists = &wafv1alpha1.IPListsSpec{Allow: []wafv1alpha1.IPListName{"monitors"}}
+	p.Spec.Exclusions = []wafv1alpha1.Exclusion{{RuleIDs: []int32{942100}, When: &wafv1alpha1.ExclusionMatch{Argument: "q"}}}
+	if err := CheckSpec(p.Spec); err != nil {
+		t.Fatalf("valid spec: %v", err)
+	}
+	p.Spec.Skip.Paths[0] = "/a/../healthz"
+	if err := CheckSpec(p.Spec); err == nil {
+		t.Error("a skip path that isn't clean compiles")
+	}
+}

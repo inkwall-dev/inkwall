@@ -62,6 +62,9 @@ const (
 	// value admission didn't refuse); in the bundle, it would make every
 	// engine refuse the bundle.
 	ReasonInvalidSpec = "InvalidSpec"
+	// ReasonInvalidRateLimits: the engine can't compile the policy's rate
+	// limits.
+	ReasonInvalidRateLimits = "InvalidRateLimits"
 )
 
 // PolicyValid is the Accepted message of a policy that resolved with
@@ -334,20 +337,28 @@ func (r *resolution) resolvePolicies() {
 
 	// The policy each candidate puts in the bundle: its spec, or its
 	// previous version; nil: left out. A policy the engine can't compile
-	// (its rule sets together, or any of its settings) is left out too (or
-	// keeps its previous version, if that compiles): in the bundle, it
-	// would make every engine refuse the bundle, for every policy.
+	// (its rate limits, its rule sets together, or any of its settings) is
+	// left out too (or keeps its previous version, if that compiles): in
+	// the bundle, it would make every engine refuse the bundle, for every
+	// policy.
 	pols := make([]*bundlev1.Policy, len(cands))
 	for i, c := range cands {
 		pols[i] = c.policy
 		if !c.failed {
-			if reason, err := r.checkPolicy(c.policy, r.ruleSets); err != nil {
+			if err := enginepolicy.CheckRateLimits(c.policy); err != nil {
+				c.fail(ReasonInvalidRateLimits, fmt.Sprintf("the engine can't compile its rate limits: %v", err))
+			} else if reason, err := r.checkPolicy(c.policy, r.ruleSets); err != nil {
 				c.fail(reason, err.Error())
 			}
 		}
 		if c.failed {
 			prev, ok := previous[c.policy.GetId()]
 			if !ok {
+				pols[i] = nil
+				continue
+			}
+			if err := enginepolicy.CheckRateLimits(prev); err != nil {
+				c.status.Message += "; its previous version's rate limits don't compile either, so the policy is left out"
 				pols[i] = nil
 				continue
 			}
@@ -1043,4 +1054,15 @@ func CheckSpec(s wafv1alpha1.WAFPolicySpec) error {
 	p := convertSpec("", s)
 	p.RuleSets = nil // the webhook checks the CRS settings (checkCRS) and doesn't read rule sets
 	return enginepolicy.CheckSettings(p, nil)
+}
+
+// CheckRateLimits compiles a policy's rate limits as the engine does: for
+// admission, so that limits the bundle would leave out are refused when
+// they are saved.
+func CheckRateLimits(limits []wafv1alpha1.RateLimit) error {
+	p := &bundlev1.Policy{}
+	for _, l := range limits {
+		p.RateLimits = append(p.RateLimits, rateLimit(l))
+	}
+	return enginepolicy.CheckRateLimits(p)
 }
