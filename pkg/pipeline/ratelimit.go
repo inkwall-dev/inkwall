@@ -106,6 +106,15 @@ func CheckRateLimits(cfgs []RateLimitConfig) error {
 	return nil
 }
 
+// limitOf compiles c's limit in store: of tokens (TokenLimit) for a token
+// limit.
+func limitOf(store *ratelimit.Store, id ratelimit.Identity, c RateLimitConfig) ratelimit.Limit {
+	if c.Tokens {
+		return store.TokenLimit(id, c.Requests, c.Period, c.Burst)
+	}
+	return store.Limit(id, c.Requests, c.Period, c.Burst)
+}
+
 // CompileRateLimits compiles a policy's limits into store. Their buckets
 // are named by the policy, each limit's name and its key, so the same
 // limit in a later bundle keeps them. live collects every limit of the
@@ -132,7 +141,7 @@ func CompileRateLimits(store *ratelimit.Store, live *ratelimit.Live, policy stri
 		}
 		l := rateLimit{
 			name:   c.Name,
-			lim:    store.Limit(ratelimit.Identity{PolicyUID: policy, Name: c.Name, Key: key}, c.Requests, c.Period, c.Burst),
+			lim:    limitOf(store, ratelimit.Identity{PolicyUID: policy, Name: c.Name, Key: key}, c),
 			header: strings.ToLower(c.Header),
 			prefix: prefix,
 			detect: c.Detect,
@@ -312,7 +321,7 @@ func (rl *RateLimits) check(r *request.Request, t time.Time, block bool) limited
 			// A token limit charges after the LLM checks (chargeTokens);
 			// here it refuses only a key that hasn't a token left, in
 			// debt from an earlier answer.
-			d := rl.store.Peek(l.lim, k, t, rl.live, false)
+			d := rl.store.Peek(l.lim, k, t)
 			if d.Allowed {
 				continue
 			}
@@ -354,13 +363,12 @@ func (rl *RateLimits) check(r *request.Request, t time.Time, block bool) limited
 			if !valid {
 				continue
 			}
-			d := ratelimit.Decision{}
 			if l.tokens {
-				d = rl.store.Peek(l.lim, k, t, rl.live, true)
-			} else {
-				d = rl.store.Observe(l.lim, k, t, rl.live)
+				// A Detect token limit logs a key in debt once, when
+				// chargeTokens charges it (ObserveN).
+				continue
 			}
-			if !d.Allowed && out.detect == nil {
+			if d := rl.store.Observe(l.lim, k, t, rl.live); !d.Allowed && out.detect == nil {
 				out.detect, out.key, out.retryAfter, out.event, out.sampled = l, k, d.RetryAfter, d.Event, d.Sampled
 			}
 		}
@@ -490,10 +498,10 @@ func (p *Pipeline) chargeTokens(r *request.Request, t time.Time, n int64, f llm.
 				continue
 			}
 			d := rl.store.ObserveN(l.lim, k, t, rl.live, n)
-			if d.Allowed {
+			if d.Counted() {
 				charges.c[charges.n] = tokenCharge{l, k, d}
 				charges.n++
-			} else if out.detect == nil {
+			} else if !d.Allowed && out.detect == nil {
 				out.detect, out.key, out.retryAfter, out.event, out.sampled = l, k, d.RetryAfter, d.Event, d.Sampled
 			}
 		}
