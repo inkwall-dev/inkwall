@@ -295,6 +295,9 @@ type outcome struct {
 	res rules.Result
 	x   rules.Exchange // the evaluation kept for the response, if any
 	err error
+	// partly: the body was only partly inspected; the verdict follows the
+	// oversize action (see partly).
+	partly bool
 }
 
 // Check inspects r and returns the verdict. It returns within the configured
@@ -392,12 +395,7 @@ func (p *Pipeline) inspect(ctx context.Context, r *request.Request, keep bool) (
 		if !p.grpcMessages {
 			return p.evaluate(ctx, p.request(call, false))
 		}
-		text, complete := grpcText(r, messages)
-		call.GRPCText = text
-		if complete {
-			return p.evaluate(ctx, p.request(call, false))
-		}
-		return p.partly(ctx, call, false)
+		return p.evaluate(ctx, p.grpcRequest(r, call, messages))
 	}
 	if !r.BodyTruncated {
 		return p.evaluate(ctx, p.request(r, keep))
@@ -408,6 +406,29 @@ func (p *Pipeline) inspect(ctx context.Context, r *request.Request, keep bool) (
 	return p.partly(ctx, &withoutBody, keep)
 }
 
+// grpcRequest returns the evaluation of call, gRPC call r without its
+// body, with the text of messages, r's gRPC messages (grpcText). The
+// messages are read in the evaluation, under admission control and the
+// deadline as the rules are: reading a client's messages takes CPU too.
+// Messages not read whole are decided as partly as a body cut at the limit
+// is.
+func (p *Pipeline) grpcRequest(r, call *request.Request, messages []byte) func(context.Context) outcome {
+	eval := p.request(call, false)
+	return func(ctx context.Context) outcome {
+		text, complete := grpcText(r, messages)
+		call.GRPCText = text
+		if complete {
+			return eval(ctx)
+		}
+		if p.oversize == OversizeDeny && p.mode == ModeBlock {
+			return outcome{partly: true}
+		}
+		o := eval(ctx)
+		o.partly = true
+		return o
+	}
+}
+
 // partly decides r, a request whose body was only partly inspected (r
 // holds what was), by the policy's oversize action.
 func (p *Pipeline) partly(ctx context.Context, r *request.Request, keep bool) (Verdict, rules.Exchange) {
@@ -415,6 +436,12 @@ func (p *Pipeline) partly(ctx context.Context, r *request.Request, keep bool) (V
 		return p.enforce(Verdict{Reason: ReasonOversize}, http.StatusRequestEntityTooLarge), nil
 	}
 	v, x := p.evaluate(ctx, p.request(r, keep))
+	return p.oversized(v, x)
+}
+
+// oversized is verdict v, of a request whose body was only partly
+// inspected, by the policy's oversize action.
+func (p *Pipeline) oversized(v Verdict, x rules.Exchange) (Verdict, rules.Exchange) {
 	if v.Reason != ReasonNone {
 		return v, x
 	}
@@ -478,6 +505,9 @@ func (p *Pipeline) evaluate(ctx context.Context, eval func(context.Context) outc
 		if o.err != nil {
 			closeExchange(o.x)
 			return p.failed(ReasonError), nil
+		}
+		if o.partly {
+			return p.oversized(p.decide(o.res), o.x)
 		}
 		return p.decide(o.res), o.x
 	case <-ctx.Done():
