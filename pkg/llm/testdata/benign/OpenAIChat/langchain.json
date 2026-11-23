@@ -1,0 +1,1 @@
+{"messages":[{"content":"You are a helpful assistant that translates English to French.","role":"system"},{"content":"I love programming.","role":"user"}],"model":"gpt-3.5-turbo","n":1,"stream":false,"temperature":0.7,"max_tokens":null}

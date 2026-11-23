@@ -60,6 +60,9 @@ const (
 	// ReasonRuleSetsIncompatible: the policy's rule sets compile alone but
 	// not together, as the engine loads them.
 	ReasonRuleSetsIncompatible = "RuleSetsIncompatible"
+	// ReasonLLMInvalid: the policy's spec.llm doesn't compile as the engine
+	// compiles it (two endpoint paths the engine reads as one).
+	ReasonLLMInvalid = "LLMInvalid"
 	// ReasonInvalidGRPCSchema: the descriptor set spec.body.grpcSchema
 	// names isn't one the operator can compile (design 0013 §8).
 	ReasonInvalidGRPCSchema = "InvalidGRPCSchema"
@@ -371,6 +374,9 @@ func (r *resolution) resolvePolicies() {
 		if !c.failed {
 			if err := enginepolicy.CheckRateLimits(c.policy); err != nil {
 				c.fail(ReasonInvalidRateLimits, fmt.Sprintf("the engine can't compile its rate limits: %v", err))
+			} else if err := enginepolicy.CheckLLM(c.policy); err != nil {
+				// An engine would refuse the bundle, for every policy.
+				c.fail(ReasonLLMInvalid, fmt.Sprintf("its LLM endpoints don't compile as the engine compiles them: %v", err))
 			} else if reason, err := r.checkPolicy(c.policy, r.ruleSets); err != nil {
 				c.fail(reason, err.Error())
 			}
@@ -386,7 +392,7 @@ func (r *resolution) resolvePolicies() {
 				pols[i] = nil
 				continue
 			}
-			if _, err := r.checkPolicy(prev, previousRuleSets); err != nil {
+			if _, err := r.checkPolicy(prev, previousRuleSets); err != nil || enginepolicy.CheckLLM(prev) != nil {
 				c.status.Message += "; its previous version doesn't compile either, so the policy is left out"
 				pols[i] = nil
 				continue
@@ -1001,7 +1007,77 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 		slices.Sort(p.Geo.Deny)
 		slices.Sort(p.Geo.Allow)
 	}
+	p.Llm = LLM(s.LLM)
 	return p
+}
+
+// LLM is a spec.llm in the bundle; nil for none.
+func LLM(l *wafv1alpha1.LLMSpec) *bundlev1.LLM {
+	if l == nil {
+		return nil
+	}
+	out := &bundlev1.LLM{RuleSetBody: l.RuleSetBody == wafv1alpha1.LLMRuleSetBodyInspect}
+	if l.MaxBodyBytes != nil {
+		out.MaxBodyBytes = *l.MaxBodyBytes
+	}
+	for _, e := range l.Endpoints {
+		ep := &bundlev1.LLMEndpoint{Format: llmFormats[e.Format]}
+		for _, p := range e.Paths {
+			ep.Paths = append(ep.Paths, string(p))
+		}
+		out.Endpoints = append(out.Endpoints, ep)
+	}
+	r := l.Request
+	if r == nil {
+		return out
+	}
+	checks := &bundlev1.LLMRequestChecks{RequireOutputTokens: r.RequireOutputTokens, Detect: r.Mode == wafv1alpha1.PolicyDetect}
+	for _, m := range r.Models {
+		checks.Models = append(checks.Models, string(m))
+	}
+	if r.MaxPromptBytes != nil {
+		checks.MaxPromptBytes = *r.MaxPromptBytes
+	}
+	if r.MaxMessages != nil {
+		checks.MaxMessages = int64(*r.MaxMessages)
+	}
+	if r.MaxChoices != nil {
+		checks.MaxChoices = int64(*r.MaxChoices)
+	}
+	if r.MaxOutputTokens != nil {
+		checks.MaxOutputTokens = *r.MaxOutputTokens
+	}
+	for _, ro := range r.ClientRoles {
+		checks.ClientRoles = append(checks.ClientRoles, llmRoles[ro])
+	}
+	if t := r.Tools; t != nil {
+		switch t.Allow {
+		case wafv1alpha1.LLMToolsNone:
+			checks.Tools = bundlev1.LLMToolsAllow_LLM_TOOLS_ALLOW_NONE
+		case wafv1alpha1.LLMToolsListed:
+			checks.Tools = bundlev1.LLMToolsAllow_LLM_TOOLS_ALLOW_LISTED
+			for _, n := range t.Names {
+				checks.ToolNames = append(checks.ToolNames, string(n))
+			}
+		}
+	}
+	out.Request = checks
+	return out
+}
+
+var llmFormats = map[wafv1alpha1.LLMFormat]bundlev1.LLMFormat{
+	wafv1alpha1.LLMOpenAIChat:        bundlev1.LLMFormat_LLM_FORMAT_OPENAI_CHAT,
+	wafv1alpha1.LLMOpenAIResponses:   bundlev1.LLMFormat_LLM_FORMAT_OPENAI_RESPONSES,
+	wafv1alpha1.LLMOpenAIEmbeddings:  bundlev1.LLMFormat_LLM_FORMAT_OPENAI_EMBEDDINGS,
+	wafv1alpha1.LLMAnthropicMessages: bundlev1.LLMFormat_LLM_FORMAT_ANTHROPIC_MESSAGES,
+}
+
+var llmRoles = map[wafv1alpha1.LLMRole]bundlev1.LLMRole{
+	"system":    bundlev1.LLMRole_LLM_ROLE_SYSTEM,
+	"developer": bundlev1.LLMRole_LLM_ROLE_DEVELOPER,
+	"user":      bundlev1.LLMRole_LLM_ROLE_USER,
+	"assistant": bundlev1.LLMRole_LLM_ROLE_ASSISTANT,
+	"tool":      bundlev1.LLMRole_LLM_ROLE_TOOL,
 }
 
 // DenyResponse is a spec.denyResponse in the bundle; nil for none.

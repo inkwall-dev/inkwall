@@ -327,3 +327,41 @@ func TestInvalidRateLimitsLeaveOnlyTheirPolicyOut(t *testing.T) {
 	}
 	compiles(res)
 }
+
+// A policy whose spec.llm the engine can't compile (two endpoint paths it
+// reads as one, which the CRD finds distinct) stays out of the bundle,
+// LLMInvalid: in it, every engine would refuse the bundle (#277).
+func TestLLMInvalidLeftOut(t *testing.T) {
+	p := policy("chat", 0, "web")
+	p.Spec.LLM = &wafv1alpha1.LLMSpec{Endpoints: []wafv1alpha1.LLMEndpoint{
+		{Paths: []wafv1alpha1.PathPattern{"/v1/chat"}, Format: wafv1alpha1.LLMOpenAIChat},
+		{Paths: []wafv1alpha1.PathPattern{"/V1/Chat/"}, Format: wafv1alpha1.LLMAnthropicMessages},
+	}}
+	other := policy("other", 1, "other")
+	in := Input{
+		Policies: []wafv1alpha1.WAFPolicy{p, other},
+		Ingresses: []networkingv1.Ingress{
+			ingress("web", rule("a.example.com", ipath("/", networkingv1.PathTypePrefix))),
+			ingress("other", rule("b.example.com", ipath("/", networkingv1.PathTypePrefix))),
+		},
+	}
+	res := Resolve(in)
+	wantStatus(t, res, "chat", false, ReasonLLMInvalid, "its LLM endpoints don't compile as the engine compiles them")
+	wantStatus(t, res, "other", true, ReasonAccepted, PolicyValid)
+	if findPolicy(res, "shop/chat") != nil {
+		t.Error("the policy whose spec.llm doesn't compile must stay out")
+	}
+	if _, err := enginepolicy.Compile(&bundlev1.Bundle{Version: 2, Policies: res.Policies}, enginepolicy.Options{}); err != nil {
+		t.Fatalf("the bundle doesn't compile: %v", err)
+	}
+	// Its previous version stays in force.
+	valid := p
+	valid.Spec.LLM = &wafv1alpha1.LLMSpec{Endpoints: p.Spec.LLM.Endpoints[:1]}
+	good := Resolve(Input{Policies: []wafv1alpha1.WAFPolicy{valid}, Ingresses: in.Ingresses})
+	in.Previous = &bundlev1.Bundle{Policies: good.Policies}
+	res = Resolve(in)
+	wantStatus(t, res, "chat", false, ReasonLLMInvalid, "the previous version of the policy stays in force")
+	if prev := findPolicy(res, "shop/chat"); prev == nil || len(prev.GetLlm().GetEndpoints()) != 1 {
+		t.Errorf("previous version: %v", prev)
+	}
+}

@@ -16,7 +16,7 @@ import (
 )
 
 func fuzzSeeds(f *testing.F) {
-	for _, ev := range []*eventsv1.SecurityEvent{fullEvent(), oldEvent(), rateLimited(), {}} {
+	for _, ev := range []*eventsv1.SecurityEvent{fullEvent(), oldEvent(), rateLimited(), llmChecked(), {}} {
 		raw, err := proto.Marshal(ev)
 		if err != nil {
 			f.Fatal(err)

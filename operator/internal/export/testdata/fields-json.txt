@@ -7,6 +7,13 @@ engine.namespace
 engine.pod
 event_id
 latency_seconds
+llm.check
+llm.estimated_tokens
+llm.format
+llm.message_index
+llm.model
+llm.offset
+llm.role
 matches.[].rule_id
 matches.[].snippet
 matches.[].variable

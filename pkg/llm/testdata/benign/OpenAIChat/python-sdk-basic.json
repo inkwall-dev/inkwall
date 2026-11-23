@@ -1,0 +1,1 @@
+{"messages":[{"role":"system","content":"You are a helpful assistant."},{"role":"user","content":"Write a haiku about Kubernetes."}],"model":"gpt-4o-mini","max_completion_tokens":256,"temperature":0.2}

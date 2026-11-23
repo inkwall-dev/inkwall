@@ -199,6 +199,34 @@ func testDistribution(ctx context.Context, t *testing.T, c client.Client) {
 	})
 	wantEnforced("edit enforced", metav1.ConditionTrue, distribution.ReasonEnforced, "every engine runs bundle")
 
+	// LLM endpoints (#277) reach the engines in the bundle; an engine
+	// before 0.7.0 would check none of their requests: EnginesOutdated
+	// while it runs.
+	maxTokens := int64(4096)
+	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) {
+		p.Spec.LLM = &wafv1alpha1.LLMSpec{
+			Endpoints: []wafv1alpha1.LLMEndpoint{{Paths: []wafv1alpha1.PathPattern{"/v1/chat/completions"}, Format: wafv1alpha1.LLMOpenAIChat}},
+			Request:   &wafv1alpha1.LLMRequestSpec{MaxOutputTokens: &maxTokens, ClientRoles: []wafv1alpha1.LLMRole{"user", "assistant"}},
+		}
+	})
+	eventually(t, "spec.llm pushed", func() string {
+		for _, p := range good.Applied().GetPolicies() {
+			if l := p.GetLlm(); p.GetId() == "web/web" && len(l.GetEndpoints()) == 1 && l.GetRequest().GetMaxOutputTokens() == 4096 &&
+				len(l.GetRequest().GetClientRoles()) == 2 {
+				return ""
+			}
+		}
+		return "no spec.llm in the bundle"
+	})
+	wantEnforced("spec.llm enforced", metav1.ConditionTrue, distribution.ReasonEnforced, "every engine runs bundle")
+	old := engine("traefik-old", "traefik")
+	old.EngineVersion = "0.6.1"
+	stopOld := run(old)
+	wantEnforced("an engine before 0.7.0", metav1.ConditionFalse, distribution.ReasonEnginesOutdated, "spec.llm")
+	stopOld()
+	wantEnforced("the old engine gone", metav1.ConditionTrue, distribution.ReasonEnforced, "every engine runs bundle")
+	update(ctx, t, c, pol, func(p *wafv1alpha1.WAFPolicy) { p.Spec.LLM = nil })
+
 	// Suspended, nothing is inspected: the policy is neither Enforced nor
 	// Ready, and says why; the InkwallConfig too (#263). Resumed, the
 	// policy is Enforced again once the engine runs the bundle that

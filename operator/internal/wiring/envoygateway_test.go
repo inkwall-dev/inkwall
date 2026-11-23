@@ -25,6 +25,7 @@ import (
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/operator/internal/injection"
+	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
 )
 
@@ -302,6 +303,18 @@ func TestRouteSettings(t *testing.T) {
 			pol("b", wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock, Body: &wafv1alpha1.BodySpec{
 				GRPCMessages: wafv1alpha1.GRPCMessagesInspect, GRPCStreams: wafv1alpha1.GRPCStreamsBuffer}}),
 		}, routeSettings{body: true, maxBody: engineBodyBytes, timeout: def, grpcPerMessage: true}},
+		// LLM endpoints (design 0012 §3.3): their bodies are sent whatever
+		// body.inspect, to llm.maxBodyBytes (1 MiB unset).
+		{"LLM endpoints", []wafv1alpha1.WAFPolicy{
+			pol("a", wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock, Body: noBody,
+				LLM: &wafv1alpha1.LLMSpec{Endpoints: []wafv1alpha1.LLMEndpoint{{Paths: []wafv1alpha1.PathPattern{"/v1/*"}, Format: wafv1alpha1.LLMOpenAIChat}}}}),
+		}, routeSettings{body: true, maxBody: pipeline.DefaultLLMBodyBytes, timeout: def}},
+		{"LLM endpoints' limit", []wafv1alpha1.WAFPolicy{
+			pol("a", wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock, Body: &wafv1alpha1.BodySpec{MaxBytes: ptr.To[int64](3 << 20)},
+				LLM: &wafv1alpha1.LLMSpec{MaxBodyBytes: ptr.To[int64](2 << 20), Endpoints: []wafv1alpha1.LLMEndpoint{{Paths: []wafv1alpha1.PathPattern{"/v1/*"}, Format: wafv1alpha1.LLMOpenAIChat}}}}),
+			pol("b", wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock,
+				LLM: &wafv1alpha1.LLMSpec{MaxBodyBytes: ptr.To[int64](4 << 20), Endpoints: []wafv1alpha1.LLMEndpoint{{Paths: []wafv1alpha1.PathPattern{"/v2/*"}, Format: wafv1alpha1.LLMOpenAIChat}}}}),
+		}, routeSettings{body: true, maxBody: 4 << 20, timeout: def}},
 		{"gRPC buffered", []wafv1alpha1.WAFPolicy{
 			pol("a", wafv1alpha1.WAFPolicySpec{Mode: wafv1alpha1.PolicyBlock, Body: &wafv1alpha1.BodySpec{GRPCMessages: wafv1alpha1.GRPCMessagesInspect}}),
 		}, routeSettings{body: true, maxBody: engineBodyBytes, timeout: def}},

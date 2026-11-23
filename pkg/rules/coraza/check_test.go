@@ -170,6 +170,34 @@ func TestCheckUserRules(t *testing.T) {
 // Before the CRS, the directives that change loaded rules would reach no
 // CRS rule: SecRuleRemoveBy* would silently do nothing, SecRuleUpdate*
 // wouldn't compile (#423).
+func TestCheckReservedIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		rules    string
+		wantLine int
+	}{
+		{name: "empty"},
+		{name: "outside", rules: `SecRule ARGS "@contains x" "id:4799999,phase:2,deny"` + "\n" + `SecRule ARGS "@contains x" "id:4801000,phase:2,deny"`},
+		{name: "low bound", rules: `SecRule ARGS "@contains x" "id:4800000,phase:2,deny"`, wantLine: 1},
+		{name: "high bound, quoted", rules: "SecMarker A\n" + `SecRule ARGS "@contains x" "phase:2,id:'4800999',deny"`, wantLine: 2},
+		{name: "a SecAction", rules: `SecAction "id:4800500,phase:1,pass,nolog"`, wantLine: 1},
+		{name: "spaces and case", rules: `SecRule ARGS "@contains x" "phase:2, ID: 4800001 ,deny"`, wantLine: 1},
+		{name: "continued", rules: "SecRule ARGS \"@contains x\" \\\n  \"id:1,phase:2,deny\"\n" + "SecRule ARGS \"@contains y\" \\\n  \"id:4800002,phase:2,deny\"", wantLine: 3},
+		{name: "an id in a message", rules: `SecRule ARGS "@contains x" "id:1,phase:2,deny,msg:'id:4800000'"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckReservedIDs(tc.rules, 4800000, 4800999, "the LLM checks")
+			var re *RuleError
+			switch {
+			case tc.wantLine == 0 && err != nil:
+				t.Errorf("error %v", err)
+			case tc.wantLine != 0 && (!errors.As(err, &re) || re.Line != tc.wantLine || !strings.Contains(err.Error(), "reserved for the LLM checks")):
+				t.Errorf("error %v, want one on line %d", err, tc.wantLine)
+			}
+		})
+	}
+}
+
 func TestCheckRulesBeforeCRS(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

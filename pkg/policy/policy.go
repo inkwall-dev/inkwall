@@ -26,6 +26,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/events"
 	"github.com/inkwall-dev/inkwall/pkg/geo"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
+	"github.com/inkwall-dev/inkwall/pkg/llm"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
 	"github.com/inkwall-dev/inkwall/pkg/request"
@@ -70,6 +71,8 @@ type Options struct {
 	// still one, but doesn't apply them: for inkwallctl test, which checks
 	// one request at a time.
 	IgnoreRateLimits bool
+	// LLMMetrics, if set, count the LLM endpoints' bodies and checks.
+	LLMMetrics *llm.Metrics
 
 	// checkOnly leaves the rate limits out (CheckSettings: CheckRateLimits
 	// checks them).
@@ -149,17 +152,27 @@ func (s *Set) policiesFor(r *request.Request, buf []*Policy) []*Policy {
 	return ps
 }
 
+// limit is how much of r's body p reads: its LLM endpoints' limit on one
+// of them, its body limit otherwise (0: none).
+func (p *Policy) limit(r *request.Request) int64 {
+	if n := p.pipeline.LLMBodyLimit(r); n > 0 {
+		return n
+	}
+	return p.bodyLimit
+}
+
 // view returns r as p inspects it when r's body was read for another
 // policy too: without its body when p inspects none, cut at p's limit.
 func (p *Policy) view(r *request.Request) *request.Request {
-	if p.bodyLimit > 0 && int64(len(r.Body)) <= p.bodyLimit || p.bodyLimit == 0 && r.Body == nil && !r.BodyTruncated {
+	limit := p.limit(r)
+	if limit > 0 && int64(len(r.Body)) <= limit || limit == 0 && r.Body == nil && !r.BodyTruncated {
 		return r
 	}
 	v := *r
-	if p.bodyLimit == 0 {
+	if limit == 0 {
 		v.Body, v.BodyTruncated = nil, false
 	} else {
-		v.Body, v.BodyTruncated = r.Body[:p.bodyLimit], true
+		v.Body, v.BodyTruncated = r.Body[:limit], true
 	}
 	return &v
 }
@@ -324,7 +337,7 @@ func (s *Set) BodyLimit(r *request.Request, max int64) int64 {
 		return 0
 	}
 	for _, p := range ps {
-		l := p.bodyLimit
+		l := p.limit(r)
 		if max > 0 {
 			l = min(l, max)
 		}
@@ -528,6 +541,9 @@ func pipelineConfig(bp *bundlev1.Policy, o Options, live *ratelimit.Live, deny *
 	}
 	if o.IgnoreRateLimits {
 		pc.RateLimits = nil
+	}
+	if pc.LLM, err = pipeline.CompileLLM(llmConfig(bp, bodyLimit > 0, o.LLMMetrics)); err != nil {
+		return pipeline.Config{}, 0, err
 	}
 	// The policy's own denial, or the bundle's.
 	if pc.DenyResponse, err = denyResponse(bp.GetDenyResponse()); err != nil {
@@ -926,6 +942,84 @@ func (h *Holder) BodyLimit(r *request.Request, max int64) int64 {
 		return 0
 	}
 	return s.BodyLimit(r, max)
+}
+
+// CheckLLM compiles a policy's LLM endpoints and checks as Compile does:
+// an error is one an engine would refuse the bundle for. The operator
+// checks with it before a policy goes into the bundle.
+func CheckLLM(bp *bundlev1.Policy) error {
+	if _, err := pipeline.CompileLLM(llmConfig(bp, true, nil)); err != nil {
+		return fmt.Errorf("spec.llm: %w", err)
+	}
+	return nil
+}
+
+// llmFormats are the bundle's formats in the pipeline's terms; another is
+// llm.FormatUnknown, checked as every format.
+var llmFormats = map[bundlev1.LLMFormat]llm.Format{
+	bundlev1.LLMFormat_LLM_FORMAT_OPENAI_CHAT:        llm.OpenAIChat,
+	bundlev1.LLMFormat_LLM_FORMAT_OPENAI_RESPONSES:   llm.OpenAIResponses,
+	bundlev1.LLMFormat_LLM_FORMAT_OPENAI_EMBEDDINGS:  llm.OpenAIEmbeddings,
+	bundlev1.LLMFormat_LLM_FORMAT_ANTHROPIC_MESSAGES: llm.AnthropicMessages,
+}
+
+var llmRoles = map[bundlev1.LLMRole]llm.Role{
+	bundlev1.LLMRole_LLM_ROLE_SYSTEM:    llm.RoleSystem,
+	bundlev1.LLMRole_LLM_ROLE_DEVELOPER: llm.RoleDeveloper,
+	bundlev1.LLMRole_LLM_ROLE_USER:      llm.RoleUser,
+	bundlev1.LLMRole_LLM_ROLE_ASSISTANT: llm.RoleAssistant,
+	bundlev1.LLMRole_LLM_ROLE_TOOL:      llm.RoleTool,
+}
+
+// llmConfig is a policy's LLM endpoints, as the pipeline takes them; nil
+// for none. bodies: the policy's rules read bodies (body.inspect). Its
+// exclusions of the LLM checks' rule IDs, with a path or none (not those
+// narrowed to an argument, a cookie or a header), turn those checks off.
+func llmConfig(bp *bundlev1.Policy, bodies bool, metrics *llm.Metrics) *pipeline.LLMConfig {
+	l := bp.GetLlm()
+	if l == nil {
+		return nil
+	}
+	cfg := &pipeline.LLMConfig{MaxBodyBytes: min(l.GetMaxBodyBytes(), MaxBodyBytes), RuleSetBody: l.GetRuleSetBody(),
+		RulesReadBodies: bodies, Metrics: metrics}
+	for _, e := range l.GetEndpoints() {
+		cfg.Endpoints = append(cfg.Endpoints, pipeline.LLMEndpoint{Paths: e.GetPaths(), Format: llmFormats[e.GetFormat()]})
+	}
+	if rc := l.GetRequest(); rc != nil {
+		c := llm.Config{Models: rc.GetModels(), MaxPromptBytes: rc.GetMaxPromptBytes(), MaxMessages: rc.GetMaxMessages(),
+			MaxOutputTokens: rc.GetMaxOutputTokens(), RequireOutputTokens: rc.GetRequireOutputTokens(), MaxChoices: rc.GetMaxChoices()}
+		for _, ro := range rc.GetClientRoles() {
+			// A role of a newer operator: listed as none, so a list of
+			// only such roles allows no role rather than every one.
+			c.ClientRoles = append(c.ClientRoles, llmRoles[ro])
+		}
+		switch rc.GetTools() {
+		case bundlev1.LLMToolsAllow_LLM_TOOLS_ALLOW_NONE:
+			c.Tools = llm.ToolsNone
+		case bundlev1.LLMToolsAllow_LLM_TOOLS_ALLOW_LISTED:
+			c.Tools, c.ToolNames = llm.ToolsListed, rc.GetToolNames()
+		case bundlev1.LLMToolsAllow_LLM_TOOLS_ALLOW_UNSPECIFIED:
+		default:
+			// Of a newer operator: allow none, the strictest.
+			c.Tools = llm.ToolsNone
+		}
+		cfg.Checks, cfg.Detect = c, rc.GetDetect()
+	}
+	for _, e := range bp.GetExclusions() {
+		if e.GetArgument() != "" || e.GetArgumentName() != "" || e.GetCookie() != "" || e.GetHeader() != "" {
+			continue // narrowed to a part of the request, which the checks don't read by
+		}
+		var checks llm.CheckSet
+		for _, id := range e.GetRuleIds() {
+			if c, ok := llm.CheckOf(int(id)); ok {
+				checks = checks.With(c)
+			}
+		}
+		if checks != 0 {
+			cfg.Exclusions = append(cfg.Exclusions, pipeline.LLMExclusion{Path: e.GetPath(), Checks: checks})
+		}
+	}
+	return cfg
 }
 
 // CheckRateLimits checks a policy's rate limits as Compile compiles them,
