@@ -15,6 +15,7 @@ package resolver
 
 import (
 	"cmp"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"path"
@@ -31,6 +32,7 @@ import (
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema/compile"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
 	enginepolicy "github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
@@ -58,6 +60,9 @@ const (
 	// ReasonRuleSetsIncompatible: the policy's rule sets compile alone but
 	// not together, as the engine loads them.
 	ReasonRuleSetsIncompatible = "RuleSetsIncompatible"
+	// ReasonInvalidGRPCSchema: the descriptor set spec.body.grpcSchema
+	// names isn't one the operator can compile (design 0013 §8).
+	ReasonInvalidGRPCSchema = "InvalidGRPCSchema"
 	// ReasonInvalidSpec: the engine can't compile the policy's spec (a
 	// value admission didn't refuse); in the bundle, it would make every
 	// engine refuse the bundle.
@@ -87,7 +92,8 @@ type Input struct {
 	ClusterRuleSets []wafv1alpha1.ClusterWAFRuleSet
 	// IPLists are the WAFIPLists policies name in spec.ipLists.
 	IPLists []wafv1alpha1.WAFIPList
-	// ConfigMaps rule sets read rules from (labeled RulesLabel).
+	// ConfigMaps rule sets read rules from, and policies their gRPC
+	// schemas (labeled RulesLabel).
 	ConfigMaps []corev1.ConfigMap
 	// Previous is the bundle in force; nil when there is none.
 	Previous *bundlev1.Bundle
@@ -101,6 +107,9 @@ type Input struct {
 	// (policy.CheckPolicy): rule sets valid alone may not be together
 	// (duplicate rule IDs). Nil: not checked.
 	CheckPolicy func(*bundlev1.Policy, []*bundlev1.RuleSet) error
+	// GRPCSchemas compiles each distinct descriptor set once across
+	// resolutions; nil compiles every one each time.
+	GRPCSchemas *compile.Cache
 }
 
 // Status is a resolved Accepted condition.
@@ -118,6 +127,9 @@ type Result struct {
 	// Policies sorted by id; RuleSets are the ones they use, sorted by id.
 	Policies []*bundlev1.Policy
 	RuleSets []*bundlev1.RuleSet
+	// GRPCSchemas are the gRPC schemas they read messages with, sorted by
+	// id.
+	GRPCSchemas []*bundlev1.GRPCSchema
 	// PolicyStatus is keyed by the WAFPolicy.
 	PolicyStatus map[types.NamespacedName]Status
 	// RuleSetStatus is keyed by RuleSet id (RuleSetID), for every rule set.
@@ -147,6 +159,7 @@ func Resolve(in Input) Result {
 	r.resolveIPLists()
 	r.resolveRuleSets()
 	r.resolvePolicies()
+	r.in.GRPCSchemas.Retain(r.schemaKeys)
 	return r.out
 }
 
@@ -155,6 +168,12 @@ type resolution struct {
 	out Result
 	// ruleSets holds the rule sets that resolved, by id.
 	ruleSets map[string]*bundlev1.RuleSet
+	// configMaps holds the input's ConfigMaps by name.
+	configMaps map[types.NamespacedName]*corev1.ConfigMap
+	// schemas holds the gRPC schemas that compiled, by id; schemaKeys the
+	// cache keys of every descriptor set read.
+	schemas    map[string]*bundlev1.GRPCSchema
+	schemaKeys map[[sha256.Size]byte]bool
 }
 
 func (r *resolution) resolveRuleSets() {
@@ -164,6 +183,7 @@ func (r *resolution) resolveRuleSets() {
 		cm := &r.in.ConfigMaps[i]
 		configMaps[types.NamespacedName{Namespace: cm.Namespace, Name: cm.Name}] = cm
 	}
+	r.configMaps = configMaps
 	add := func(id string, src wafv1alpha1.RuleSetSource, cmNamespace string) {
 		rs, st := r.ruleSet(id, src, configMaps, cmNamespace)
 		r.out.RuleSetStatus[id] = st
@@ -326,12 +346,16 @@ func (r *resolution) resolvePolicies() {
 
 	previous := map[string]*bundlev1.Policy{}
 	previousRuleSets := map[string]*bundlev1.RuleSet{}
+	previousSchemas := map[string]*bundlev1.GRPCSchema{}
 	if p := r.in.Previous; p != nil {
 		for _, pol := range p.GetPolicies() {
 			previous[pol.GetId()] = pol
 		}
 		for _, rs := range p.GetRuleSets() {
 			previousRuleSets[rs.GetId()] = rs
+		}
+		for _, s := range p.GetGrpcSchemas() {
+			previousSchemas[s.GetId()] = s
 		}
 	}
 
@@ -431,6 +455,7 @@ func (r *resolution) resolvePolicies() {
 	removed := r.overlaps(cands, pols, func(i int, m *bundlev1.RouteMatch) bool { return routeOwner[routeKey(m)].i == i })
 
 	used := map[string]*bundlev1.RuleSet{}
+	usedSchemas := map[string]*bundlev1.GRPCSchema{}
 	shipped := map[string]*candidate{} // by policy ID
 	for i, c := range cands {
 		pol := pols[i]
@@ -479,6 +504,19 @@ func (r *resolution) resolvePolicies() {
 				used[id] = usedRuleSets[id]
 			}
 		}
+		if id := pol.GetBody().GetGrpcSchemaId(); id != "" {
+			s := r.schemas[id]
+			if c.failed {
+				s = previousSchemas[id]
+			}
+			if s == nil {
+				// Only a previous bundle without the schema it names: read
+				// without one, as an older engine does.
+				pol.Body.GrpcSchemaId = ""
+			} else {
+				usedSchemas[id] = s
+			}
+		}
 		c.status.Applied = !c.failed
 		r.out.Policies = append(r.out.Policies, pol)
 		shipped[pol.GetId()] = c
@@ -498,6 +536,19 @@ func (r *resolution) resolvePolicies() {
 		}
 	}
 	slices.SortFunc(r.out.RuleSets, func(a, b *bundlev1.RuleSet) int { return cmp.Compare(a.GetId(), b.GetId()) })
+	// The schemas of the policies the bundle keeps (checkBundle may have
+	// left some out).
+	named := map[string]bool{}
+	for _, pol := range r.out.Policies {
+		named[pol.GetBody().GetGrpcSchemaId()] = true
+	}
+	for id, s := range usedSchemas {
+		if !named[id] {
+			continue
+		}
+		r.out.GRPCSchemas = append(r.out.GRPCSchemas, s)
+	}
+	slices.SortFunc(r.out.GRPCSchemas, func(a, b *bundlev1.GRPCSchema) int { return cmp.Compare(a.GetId(), b.GetId()) })
 }
 
 // checkBundle checks each policy of the bundle (r.out.Policies, shipped:
@@ -729,6 +780,8 @@ func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.Nam
 				i, b.Ref.Kind, b.Ref.Name))
 		}
 	}
+
+	r.grpcSchema(c)
 
 	if l := p.Spec.IPLists; l != nil && (len(l.Allow) > 0 || len(l.Deny) > 0) {
 		allow, errA := r.ipList(p.Namespace, l.Allow)

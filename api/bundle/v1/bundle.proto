@@ -68,6 +68,79 @@ message Bundle {
   // (InkwallConfig.spec.engine.denyResponse). Unset: the engine's own.
   // Engines before 0.7.0 ignore it.
   DenyResponse deny_response = 12;
+  // The gRPC schemas the policies read messages with
+  // (BodyConfig.grpc_schema_id), each once, sorted by id (design 0013 §5.3).
+  // Engines before 0.7.0 ignore them and read messages without a schema.
+  repeated GRPCSchema grpc_schemas = 20;
+}
+
+// GRPCSchema is a policy's descriptor set (a FileDescriptorSet the operator
+// validated), compiled into what reading a gRPC message needs (design 0013
+// §5.2): the methods' input and output types and each message's fields, by
+// number. Engines check its integers on load and never parse descriptors.
+message GRPCSchema {
+  // Hex SHA-256 of the SHA-256 of methods and messages as serialized, and
+  // the source: names the schema in BodyConfig.grpc_schema_id, and in the
+  // engine's cache. Policies share an entry when they name the same
+  // ConfigMap key with the same content.
+  string id = 1;
+  // Sorted by path, each once.
+  repeated GRPCMethod methods = 2;
+  // Referenced by index from methods and fields.
+  repeated GRPCMessage messages = 3;
+  // "namespace/configmap/key": where the descriptor set came from, for
+  // inkwallctl explain.
+  string source = 4;
+}
+
+// GRPCMethod is a method of a service the schema describes.
+message GRPCMethod {
+  // "/package.Service/Method", as a call's :path.
+  string path = 1;
+  // The input type: an index into GRPCSchema.messages.
+  uint32 input = 2;
+  // The output type, for responses (later): an index into
+  // GRPCSchema.messages.
+  uint32 output = 3;
+}
+
+// GRPCMessage is a message type.
+message GRPCMessage {
+  // The full name ("package.Message"), which an Any's type_url ends with.
+  string full_name = 1;
+  // Sorted by number, each number once.
+  repeated GRPCField fields = 2;
+  // google.protobuf.Any: field 1 is the type_url, field 2 the value of
+  // the type it names.
+  bool any = 3;
+}
+
+// GRPCField is a field of a message type.
+message GRPCField {
+  uint32 number = 1;
+  // The proto name, or "[package.extension]" for an extension.
+  string name = 2;
+  GRPCFieldKind kind = 3;
+  // For MESSAGE and GROUP only: the field's type, an index into
+  // GRPCSchema.messages.
+  uint32 message = 4;
+  // The field is repeated: a repeated number may come packed.
+  bool repeated = 5;
+}
+
+// GRPCFieldKind is how a field is read.
+enum GRPCFieldKind {
+  GRPC_FIELD_KIND_UNSPECIFIED = 0;
+  GRPC_FIELD_KIND_STRING = 1;
+  GRPC_FIELD_KIND_BYTES = 2;
+  GRPC_FIELD_KIND_MESSAGE = 3;
+  GRPC_FIELD_KIND_GROUP = 4;
+  // int32, int64, uint32, uint64, sint32, sint64, bool, enum.
+  GRPC_FIELD_KIND_VARINT = 5;
+  // fixed32, sfixed32, float.
+  GRPC_FIELD_KIND_FIXED32 = 6;
+  // fixed64, sfixed64, double.
+  GRPC_FIELD_KIND_FIXED64 = 7;
 }
 
 // GeoTableRef names a country table.
@@ -388,6 +461,11 @@ message BodyConfig {
   // ignore it and buffer: the operator doesn't count them as enforcing a
   // policy that sets it.
   bool grpc_per_message = 6;
+  // With grpc_messages, the id of the Bundle.grpc_schemas entry the
+  // messages of described methods are read with (design 0013); empty: read
+  // without a schema. Engines before 0.7.0 ignore it: the operator doesn't
+  // count them as enforcing a policy that sets it.
+  string grpc_schema_id = 20;
 }
 
 // WebSocketConfig is what a WebSocket handshake (a request with an

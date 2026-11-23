@@ -15,14 +15,16 @@ type BuiltinRuleSet string
 // BuiltinCRSv4 is the OWASP Core Rule Set v4.
 const BuiltinCRSv4 BuiltinRuleSet = "crs-v4"
 
-// ConfigMapKeyRef names a key of a ConfigMap in the rule set's namespace.
+// ConfigMapKeyRef names a key of a ConfigMap in the namespace of the object
+// that refers to it.
 type ConfigMapKeyRef struct {
 	// Name of the ConfigMap.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 
-	// Key holding the SecLang rules.
+	// Key holding the SecLang rules (a rule set's) or the descriptor set (a
+	// policy's grpcSchema).
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	Key string `json:"key"`

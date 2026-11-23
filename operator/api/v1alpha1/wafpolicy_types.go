@@ -700,6 +700,7 @@ func (m *ExclusionMatch) Target() bool {
 
 // BodySpec configures request body inspection.
 // +kubebuilder:validation:XValidation:rule="!has(self.grpcStreams) || self.grpcStreams != 'PerMessage' || (has(self.grpcMessages) && self.grpcMessages == 'Inspect' && (!has(self.inspect) || self.inspect))",message="grpcStreams: PerMessage needs grpcMessages: Inspect and body inspection"
+// +kubebuilder:validation:XValidation:rule="!has(self.grpcSchema) || (has(self.grpcMessages) && self.grpcMessages == 'Inspect')",message="grpcSchema needs grpcMessages: Inspect"
 type BodySpec struct {
 	// Inspect turns body inspection on or off.
 	// +kubebuilder:default=true
@@ -740,12 +741,30 @@ type BodySpec struct {
 	// +optional
 	GRPCStreams GRPCStreamsMode `json:"grpcStreams,omitempty"`
 
+	// GRPCSchema reads the messages of the methods it describes with their
+	// schema, with grpcMessages: Inspect: fields by their type and named by
+	// their path (user.name), string fields as text, bytes fields by their
+	// readable runs, numbers skipped. Methods and fields it doesn't
+	// describe are read without it. Requires engines 0.7.0 or later: older
+	// ones read every message without it. See docs/grpc.md.
+	// +optional
+	GRPCSchema *GRPCSchema `json:"grpcSchema,omitempty"`
+
 	// GRPC: Deny refuses requests with a gRPC or gRPC-Web content type
 	// (403, or the gRPC status PermissionDenied to a gRPC client; logged in
 	// Detect mode), for routes that serve no gRPC. Unset: Allow. Requires
 	// engines 0.5.0 or later. See docs/grpc.md.
 	// +optional
 	GRPC GRPCAction `json:"grpc,omitempty"`
+}
+
+// GRPCSchema is where a policy's gRPC schema comes from.
+type GRPCSchema struct {
+	// ConfigMapRef names a key of a ConfigMap in the policy's namespace,
+	// labeled waf.inkwall.dev/rules=true, whose binaryData holds a
+	// FileDescriptorSet with its imports (buf build, or protoc
+	// --include_imports --descriptor_set_out), raw or gzipped.
+	ConfigMapRef ConfigMapKeyRef `json:"configMapRef"`
 }
 
 // WebSocketSpec is what a WebSocket handshake must meet.

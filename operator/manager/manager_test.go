@@ -241,6 +241,7 @@ func TestOperator(t *testing.T) {
 	ctx, c, warn, stop := startOperator(t)
 	t.Run("webhook", func(t *testing.T) { testWebhook(ctx, t, c, warn) })
 	t.Run("bundles", func(t *testing.T) { testBundles(ctx, t, c) })
+	t.Run("grpc schema", func(t *testing.T) { testGRPCSchema(ctx, t, c) })
 	t.Run("distribution", func(t *testing.T) { testDistribution(ctx, t, c) })
 	t.Run("engine", func(t *testing.T) { testEngine(ctx, t, c) })
 	t.Run("bundle chunks", func(t *testing.T) { testBundleChunks(ctx, t, c) })
