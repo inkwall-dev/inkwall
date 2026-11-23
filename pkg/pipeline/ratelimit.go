@@ -246,6 +246,7 @@ func (rl *RateLimits) check(r *request.Request, t time.Time, block bool) limited
 	var charged [MaxRateLimits]struct {
 		l *rateLimit
 		k ratelimit.Key
+		d ratelimit.Decision
 	}
 	n := 0
 	noKey := false
@@ -265,12 +266,12 @@ func (rl *RateLimits) check(r *request.Request, t time.Time, block bool) limited
 		}
 		d := rl.store.Take(l.lim, k, t, rl.live)
 		if d.Allowed {
-			charged[n].l, charged[n].k = l, k
+			charged[n].l, charged[n].k, charged[n].d = l, k, d
 			n++
 			continue
 		}
 		for _, c := range charged[:n] {
-			rl.store.Refund(c.l.lim, c.k)
+			rl.store.Refund(c.l.lim, c.k, c.d)
 		}
 		out.over, out.key, out.retryAfter, out.event, out.sampled = l, k, d.RetryAfter, d.Event, d.Sampled
 		// The largest wait of the limits the request would also exceed.
@@ -295,7 +296,7 @@ func (rl *RateLimits) check(r *request.Request, t time.Time, block bool) limited
 			if !valid {
 				continue
 			}
-			if d := rl.store.Take(l.lim, k, t, rl.live); !d.Allowed && out.detect == nil {
+			if d := rl.store.Observe(l.lim, k, t, rl.live); !d.Allowed && out.detect == nil {
 				out.detect, out.key, out.retryAfter, out.event, out.sampled = l, k, d.RetryAfter, d.Event, d.Sampled
 			}
 		}

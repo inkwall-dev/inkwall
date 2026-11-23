@@ -126,10 +126,11 @@ func TestRefund(t *testing.T) {
 	t0 := s.base.Add(time.Hour)
 	k := ip("192.0.2.1")
 	l := limit(s, "one", 1, time.Minute, 1)
-	if !s.Take(l, k, t0, nil).Allowed {
+	d := s.Take(l, k, t0, nil)
+	if !d.Allowed {
 		t.Fatal("first refused")
 	}
-	s.Refund(l, k)
+	s.Refund(l, k, d)
 	if !s.Take(l, k, t0, nil).Allowed {
 		t.Fatal("the refunded token wasn't given back")
 	}
@@ -137,7 +138,7 @@ func TestRefund(t *testing.T) {
 		t.Fatal("a second token appeared")
 	}
 	// A refund of a key the table doesn't hold does nothing.
-	s.Refund(l, ip("192.0.2.9"))
+	s.Refund(l, ip("192.0.2.9"), Decision{Allowed: true})
 }
 
 func TestIPKey(t *testing.T) {
@@ -369,11 +370,12 @@ func TestConcurrent(t *testing.T) {
 		wg.Go(func() {
 			for range 100 {
 				// Block limits in order, refunding when a later one refuses.
-				if !s.Take(loose, k, t0, nil).Allowed {
+				d := s.Take(loose, k, t0, nil)
+				if !d.Allowed {
 					continue
 				}
 				if !s.Take(tight, k, t0, nil).Allowed {
-					s.Refund(loose, k)
+					s.Refund(loose, k, d)
 					continue
 				}
 				allowed.Add(1)
@@ -407,7 +409,7 @@ func TestCollectors(t *testing.T) {
 	for _, mf := range mfs {
 		series[mf.GetName()] = len(mf.GetMetric())
 	}
-	if series["inkwall_rate_limit_evictions_total"] != 2 || series["inkwall_rate_limit_exceeded_total"] != 2 || series["inkwall_rate_limit_keys"] != 1 || series["inkwall_rate_limit_overflow_total"] != 1 || len(series) != 7 {
+	if series["inkwall_rate_limit_evictions_total"] != 3 || series["inkwall_rate_limit_exceeded_total"] != 2 || series["inkwall_rate_limit_keys"] != 1 || series["inkwall_rate_limit_overflow_total"] != 1 || len(series) != 7 {
 		t.Errorf("metrics %v", series)
 	}
 }
@@ -493,9 +495,69 @@ func TestEvictionRelativeToBurst(t *testing.T) {
 	}
 }
 
-// When every entry is over its limit or was limited recently, a new key
-// is counted in its limit's overflow bucket, shared with the others, and
-// Wait and Refund find it there.
+// The review's scenario: an attacker fills the table with buckets over a
+// cheap header-keyed limit (2 requests a key on 1 an hour: protected for an
+// hour), then floods another limit, M, from one address. M's honest new
+// clients, on any policy sharing the Store, are still counted on their own
+// and allowed: the attacker's limit holds more than its share of every
+// neighbourhood, so its buckets give way.
+func TestFilledTableDoesNotDenyOthers(t *testing.T) {
+	s := New(minShards*neighbourhood, 0)
+	t0 := s.base.Add(time.Hour)
+	cheap := s.Limit(Identity{PolicyUID: "attacker", Name: "cheap", Key: "header/x-key/ip/56"}, 1, time.Hour, 1)
+	m := s.Limit(Identity{PolicyUID: "tenant", Name: "login", Key: "ip/56"}, 5, time.Minute, 5)
+	live := NewLive(cheap, m)
+	slots := len(s.shards) * len(s.shards[0].e)
+	for i := range 2 * slots {
+		k := headerKey(s, i)
+		s.Take(cheap, k, t0, live)
+		s.Take(cheap, k, t0, live) // over: protected
+	}
+	attacker := ip("203.0.113.7")
+	for range 1000 {
+		s.Take(m, attacker, t0, live)
+	}
+	if s.Take(m, attacker, t0, live).Allowed {
+		t.Error("the flooding address isn't limited")
+	}
+	for i := range 500 {
+		honest := ip(netip.AddrFrom4([4]byte{198, 18, byte(i >> 8), byte(i)}).String())
+		if !s.Take(m, honest, t0.Add(time.Second), live).Allowed {
+			t.Fatalf("honest client %d of M refused: %d overflows, %d over-share evictions", i, s.Overflows(), s.EvictionsOverShare())
+		}
+	}
+	if s.EvictionsOverShare() == 0 {
+		t.Error("no over-share eviction")
+	}
+}
+
+// A Detect limit's buckets (Observe) are never protected: an observe-only
+// policy can't push a Block limit's new keys into overflow buckets.
+func TestObservedBucketsAreNotProtected(t *testing.T) {
+	s := New(minShards*neighbourhood, 0)
+	t0 := s.base.Add(time.Hour)
+	detect := limit(s, "detect", 1, time.Hour, 1)
+	block := limit(s, "block", 5, time.Minute, 5)
+	slots := len(s.shards) * len(s.shards[0].e)
+	for i := range 2 * slots {
+		k := headerKey(s, i)
+		s.Observe(detect, k, t0, nil)
+		s.Observe(detect, k, t0, nil) // over, and sampled
+	}
+	for i := range 500 {
+		k := ip(netip.AddrFrom4([4]byte{198, 18, byte(i >> 8), byte(i)}).String())
+		if !s.Take(block, k, t0, nil).Allowed {
+			t.Fatalf("key %d refused", i)
+		}
+	}
+	if s.Overflows() != 0 || s.EvictionsOverShare() != 0 {
+		t.Errorf("%d overflows, %d over-share evictions: observed buckets were protected", s.Overflows(), s.EvictionsOverShare())
+	}
+}
+
+// When every entry is protected and no limit holds more than its share, a
+// new key is counted in the overflow bucket its hash picks, shared only
+// with the keys of that bucket, and Wait and Refund find it there.
 func TestOverflow(t *testing.T) {
 	s := New(1, 0)
 	l := limit(s, "a", 1, time.Hour, 2)
@@ -521,22 +583,50 @@ func TestOverflow(t *testing.T) {
 		return all
 	}
 	t0 := s.base.Add(time.Duration(now))
-	a, b := Key{tag: tagIPv4, b: [16]byte{200}}, Key{tag: tagIPv4, b: [16]byte{201}}
-	if !s.Take(l, a, t0, nil).Allowed || !s.Take(l, b, t0, nil).Allowed {
+	// a and b have one overflow bucket, c another.
+	var a, b, c Key
+	bucket := func(k Key) uint8 { _, _, o := s.locate(l.id, k); return o }
+	for n := 0; c.tag == 0; n++ {
+		k := Key{tag: tagIPv4, b: [16]byte{200, byte(n >> 8), byte(n)}}
+		switch {
+		case a.tag == 0:
+			a = k
+		case b.tag == 0 && bucket(k) == bucket(a):
+			b = k
+		case b.tag != 0 && bucket(k) != bucket(a):
+			c = k
+		}
+	}
+	da, db := s.Take(l, a, t0, nil), s.Take(l, b, t0, nil)
+	if !da.Allowed || !db.Allowed || !da.overflow {
 		t.Fatal("the overflow bucket starts full")
 	}
 	if d := s.Take(l, a, t0, nil); d.Allowed || d.RetryAfter != time.Hour {
-		t.Fatalf("two new keys share the overflow bucket's burst of 2: %+v", d)
+		t.Fatalf("two new keys share their overflow bucket's burst of 2: %+v", d)
 	}
-	if s.Overflows() != 3 || !slices.Equal(entries(), before) {
+	if !s.Take(l, c, t0, nil).Allowed {
+		t.Fatal("a key of another overflow bucket was refused")
+	}
+	if s.Overflows() != 4 || !slices.Equal(entries(), before) {
 		t.Fatalf("%d overflows, entries changed: %v", s.Overflows(), !slices.Equal(entries(), before))
 	}
 	if w := s.Wait(l, b, t0); w != time.Hour {
 		t.Errorf("Wait %v, want the overflow bucket's hour", w)
 	}
-	s.Refund(l, b)
+	s.Refund(l, b, db)
 	if w := s.Wait(l, b, t0); w != 0 {
 		t.Errorf("Wait after a refund %v, want 0", w)
+	}
+	// A refund for a decision the table made (a key since evicted)
+	// doesn't credit the overflow bucket.
+	s.Take(l, b, t0, nil)
+	s.Refund(l, b, Decision{Allowed: true})
+	if w := s.Wait(l, b, t0); w != time.Hour {
+		t.Errorf("a table refund credited the overflow bucket: Wait %v", w)
+	}
+	// A Detect limit's key isn't counted in an overflow bucket.
+	if d := s.Observe(l, a, t0, nil); !d.Allowed {
+		t.Errorf("Observe counted a key in an overflow bucket: %+v", d)
 	}
 	// Once one ages out of being protected, it is evicted instead.
 	later := now + int64(recentlyLimited) // the sampled ones: no longer recent, still in use

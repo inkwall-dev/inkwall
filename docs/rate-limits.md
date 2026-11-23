@@ -159,9 +159,22 @@ A bucket that is full again is free, so most keys cost nothing once their client
 use 8 slots near its hash; when they all hold buckets in use, the one closest to full for its
 own limit (the least used of its burst) is forgotten: that client gets a fresh bucket. A bucket
 over its limit, or limited in the last 2 minutes, is never forgotten, so a client can't reset the
-bucket limiting it by sending new keys. When a key's slots hold only such buckets, the new key
-is counted in its limit's overflow bucket, one for all such keys of the limit: they share its
-rate, so they are limited more, never less (`inkwall_rate_limit_overflow_total`). A few
+bucket limiting it by sending new keys. Only a `Block` limit's buckets are protected this way: a
+`Detect` limit's are not.
+
+When a key's slots hold only protected buckets, a limit holding more than its share of the 8
+slots (8 divided by the limits there, the new key's included) gives way: its bucket closest to
+full is forgotten (`inkwall_rate_limit_evictions_total{kind="over_share"}`). So a client that fills
+the table with buckets over a cheap limit, for example one header value per bucket, can't keep
+other limits' clients out: its own buckets go. When no limit holds more than its share, the new
+key isn't held. A `Block` limit counts it in one of its 256 overflow buckets, picked by the key's
+hash, shared with the other keys there: they are limited more, never less. A `Detect` limit
+lets it through uncounted (`inkwall_rate_limit_overflow_total` counts both).
+
+What remains: a client limited by the same limit as the buckets that fill its slots, holding
+half of them or more, can be pushed into an overflow bucket by the others' keys, and share it
+with them. Clients of one limit compete for its share of the table, and a policy with several
+limits gets a share for each. When the table is that full, raise `rateLimitKeys`. A few
 evictions happen before the table is full; `inkwall_rate_limit_evictions_total{kind="active"}` counts them,
 and the alert `InkwallRateLimitStateEvicted` fires past 6 a minute for 15 minutes: raise
 `rateLimitKeys`, or look for a client cycling addresses.
@@ -173,8 +186,8 @@ and the alert `InkwallRateLimitStateEvicted` fires past 6 a minute for 15 minute
 | `inkwall_requests_total{reason="rate-limit"}` | Requests a limit decided (`action` `deny`, or `log` in `Detect`) |
 | `inkwall_rate_limit_exceeded_total{action}` | Requests over a limit, also when a rule decided the request (`deny`, `log`) |
 | `inkwall_rate_limit_keys`, `inkwall_rate_limit_key_capacity` | Buckets held, and the table's size |
-| `inkwall_rate_limit_evictions_total{kind}` | `idle` (harmless) and `active` (state forgotten) |
-| `inkwall_rate_limit_overflow_total` | Requests of new keys counted in their limit's shared overflow bucket |
+| `inkwall_rate_limit_evictions_total{kind}` | `idle` (harmless), `active` (state forgotten) and `over_share` (a protected bucket of a limit over its share, forgotten) |
+| `inkwall_rate_limit_overflow_total` | Requests of new keys the table couldn't hold: counted in an overflow bucket (`Block`), or not counted (`Detect`) |
 | `inkwall_rate_limit_skipped_total{reason="no_key"}` | Requests without a valid client address |
 | `inkwall_rate_limit_events_dropped_total` | Limit events left out by the caps below |
 
