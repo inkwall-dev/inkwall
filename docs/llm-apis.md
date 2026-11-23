@@ -69,6 +69,13 @@ A path in no endpoint is an ordinary route to the policy. Endpoints are declared
 Azure OpenAI serves chat at `/openai/deployments/{name}/chat/completions`, and gateways rewrite
 paths.
 
+**List every path your server serves an API on**, or those paths get no checks: they are
+ordinary routes. Servers answer the same API on several: LiteLLM's proxy serves chat at
+`/chat/completions`, `/v1/chat/completions`, `/openai/deployments/{model}/chat/completions` and
+`/engines/{model}/chat/completions`, and embeddings at `/embeddings` and `/v1/embeddings`; vLLM and
+llama.cpp's server serve `/v1/...` and some unversioned aliases. Check your server's routes, or
+prefer a prefix that covers them, and close the paths you don't serve at the proxy.
+
 The parser reads only the fields below; every other field is checked to be valid JSON and skipped,
 so new provider fields don't break requests.
 
@@ -83,8 +90,11 @@ Images, audio and files count toward `maxBodyBytes` only. The Responses API's
 `previous_response_id` keeps the history on the provider: only the new turn is sent, and checked.
 A request on an endpoint that sends no body (a `GET`) isn't checked.
 
-A path the engine can't read one way (percent-encoded `/`, `;`, `//`, a dot segment) may reach
-any endpoint: it's checked as every format of the policy, and must parse as each.
+A path the engine can't read one way (percent-encoded `/`, `;`, `//`, a dot segment, fullwidth
+letters) is read every way an application or a proxy may read it. If one of those readings is an
+endpoint, the request is checked as the formats of each such endpoint, and must parse as each;
+the rule sets also keep reading its body, since another reading may route it to another
+application. A path no reading of which is an endpoint is an ordinary route.
 
 ## The rule sets and these bodies
 
@@ -92,7 +102,9 @@ LLM requests are large and full of prose and pasted code, which trip the CRS's S
 XSS rules all the time; the CRS on a 32 KiB chat history takes about 200 ms. So with
 `ruleSetBody: Skip`, the default, the rule sets inspect an endpoint's method, URI, headers and
 cookies, and neither its request body nor its response body: the LLM checks own those. Attacks in
-the URI and headers are still the rules'.
+the URI and headers are still the rules'. **With `Skip`, nothing inspects the body's other
+fields**: `user`, `metadata`, and any field your application adds to the request. If your
+application reads such a field into a database or a page, validate it there, or use `Inspect`.
 
 **This changes what a policy's rules read when you add `llm`.** `ruleSetBody: Inspect` keeps the
 rules on the bodies too, up to `maxBodyBytes` (unless `body.inspect: false`), for an application
@@ -134,7 +146,9 @@ A body is malformed (`llm-malformed`) if it isn't valid JSON or UTF-8, nests dee
 gives a field the checks read another type (`"max_tokens": "100"`, `"n": 1.5`; an integral float
 such as `4096.0` is read as `4096`, as Python servers read it), repeats such a field in one object
 (two `messages`: Python and Go keep the last, other parsers the first, and an attacker hides the
-real prompt in the one Inkwall doesn't read), escapes a lone UTF-16 surrogate, or has a
+real prompt in the one Inkwall doesn't read), has a key that differs from a read one only in case
+(`Messages`, `MAX_TOKENS`, or with a Kelvin sign for the `k`: servers in Go, such as Ollama,
+match keys case-insensitively and keep the last), escapes a lone UTF-16 surrogate, or has a
 `Content-Encoding` other than `identity` (the engine doesn't decode request bodies). A `null`
 field is an absent one. The event's `llm.offset` is the byte where parsing stopped.
 
@@ -167,7 +181,7 @@ through unchecked: the other checks can't read them. Rule sets can't use IDs 4,8
 
 | Proxy | What to know |
 |---|---|
-| Envoy Gateway, Istio (ext_proc) | The operator raises the route's buffer to the largest `maxBodyBytes`, and sends the bodies even with `body.inspect: false` |
+| Envoy Gateway, Istio (ext_proc) | The operator raises the route's buffer to the largest `maxBodyBytes`, and sends the bodies even with `body.inspect: false`. Envoy's buffer and body mode are per route, not per path: every path of an HTTPRoute that has endpoints is buffered up to that limit and sent to the engine, also paths that aren't endpoints, which costs memory per request and latency on large uploads. Give the LLM API its own HTTPRoute, or a `sectionName` rule, to keep other paths as they were |
 | Traefik (forward-auth) | The operator's Buffering Middleware sends bodies up to 10 MiB |
 | HAProxy (SPOE) | HAProxy sends at most `tune.bufsize` less `tune.maxrewrite`, about 15 KiB by default: a longer chat history is oversized. The policy's `Programmed` message names the effective limit; raise `tune.bufsize` ([HAProxy](haproxy.md)) |
 | Raw Envoy | Your own configuration: its buffer bounds the body ([raw Envoy](raw-envoy.md)) |
@@ -203,7 +217,9 @@ A failed check is a security event with reason `llm` and an `llm` object: the `c
 `format`, the `model`, the `message_index` (or the tool's index for `llm-tools`; -1 for the
 request or a top-level field), the `role` for `llm-client-role`, the byte `offset` and the
 `estimated_tokens`. Its match has the check's rule ID and no snippet. **Events carry no prompt
-text, ever**: the prompt is the user's data; the offset and the index find it in your own logs.
+text**: the prompt is the user's data; the offset and the index find it in your own logs. With
+`ruleSetBody: Inspect`, a rule that matches in an endpoint's body has its match logged without a
+snippet too; matches in the URI and headers keep theirs.
 
 ## What a WAF can't do
 
@@ -221,6 +237,8 @@ runs. Against the [OWASP Top 10 for LLM Applications 2025](https://genai.owasp.o
 ## Upgrading and rolling back
 
 Upgrade the chart first, then the engines. An engine before 0.7.0 ignores `llm`: it checks none
-of these requests, and its rule sets read their bodies as before. While one runs a policy with
+of these requests, and its rule sets read their bodies as before, up to `body.maxBytes` (64 KiB
+by default): a longer chat history gets `body.onOversize`, 413 in `Block` mode, until the engines
+are upgraded. While one runs a policy with
 `llm`, the policy is `Enforced=False`, reason `EnginesOutdated`, naming `spec.llm`. Rolling the
 operator back below 0.7.0 drops the field.

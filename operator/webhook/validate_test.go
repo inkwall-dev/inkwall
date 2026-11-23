@@ -63,6 +63,36 @@ func TestRuleSetValidation(t *testing.T) {
 	wantInvalid(t, err, "spec.source.seclang", "line 2: rule ID 4800003 is reserved for Inkwall's LLM checks")
 }
 
+// TestPolicyLLMCompiles: endpoint paths the CRD finds distinct but the
+// engine reads as one are refused at admission, as the engine would refuse
+// the bundle.
+func TestPolicyLLMCompiles(t *testing.T) {
+	ctx := context.Background()
+	v := specValidator[*wafv1alpha1.WAFPolicy]{validate: validateWAFPolicy, deprecated: policyDeprecations}
+	for _, tc := range []struct {
+		paths [][]wafv1alpha1.PathPattern
+		ok    bool
+	}{
+		{[][]wafv1alpha1.PathPattern{{"/v1/chat"}, {"/v1/messages"}}, true},
+		{[][]wafv1alpha1.PathPattern{{"/v1/chat"}, {"/v1/chat/"}}, false},
+		{[][]wafv1alpha1.PathPattern{{"/v1/chat"}, {"/V1/Chat"}}, false},
+		{[][]wafv1alpha1.PathPattern{{"/v1/chat", "/V1/CHAT/"}}, false},
+		{[][]wafv1alpha1.PathPattern{{"/v1/./chat"}}, false},
+		{[][]wafv1alpha1.PathPattern{{"/v1//chat"}}, false},
+	} {
+		var eps []wafv1alpha1.LLMEndpoint
+		for _, ps := range tc.paths {
+			eps = append(eps, wafv1alpha1.LLMEndpoint{Paths: ps, Format: wafv1alpha1.LLMOpenAIChat})
+		}
+		p := &wafv1alpha1.WAFPolicy{ObjectMeta: metav1.ObjectMeta{Name: "p"}, Spec: wafv1alpha1.WAFPolicySpec{
+			TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "web"}}, LLM: &wafv1alpha1.LLMSpec{Endpoints: eps}}}
+		_, err := v.ValidateCreate(ctx, p)
+		if tc.ok && err != nil || !tc.ok && (err == nil || !strings.Contains(err.Error(), "spec.llm")) {
+			t.Errorf("%v: %v", tc.paths, err)
+		}
+	}
+}
+
 // TestPolicyLLMWarnings: an endpoint path that a skip path covers draws a
 // warning: the skip wins.
 func TestPolicyLLMWarnings(t *testing.T) {

@@ -32,6 +32,7 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
+	engpolicy "github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
@@ -57,6 +58,9 @@ const (
 	// ReasonRuleSetsIncompatible: the policy's rule sets compile alone but
 	// not together, as the engine loads them.
 	ReasonRuleSetsIncompatible = "RuleSetsIncompatible"
+	// ReasonLLMInvalid: the policy's spec.llm doesn't compile as the engine
+	// compiles it (two endpoint paths the engine reads as one).
+	ReasonLLMInvalid = "LLMInvalid"
 )
 
 // PolicyValid is the Accepted message of a policy that resolved with
@@ -338,6 +342,9 @@ func (r *resolution) resolvePolicies() {
 		if !c.failed {
 			if err := r.checkPolicy(c.policy, r.ruleSets); err != nil {
 				c.fail(ReasonRuleSetsIncompatible, fmt.Sprintf("its rule sets don't compile together: %v", err))
+			} else if err := engpolicy.CheckLLM(c.policy); err != nil {
+				// An engine would refuse the bundle, for every policy.
+				c.fail(ReasonLLMInvalid, fmt.Sprintf("its LLM endpoints don't compile as the engine compiles them: %v", err))
 			}
 		}
 		if c.failed {
@@ -346,7 +353,7 @@ func (r *resolution) resolvePolicies() {
 				pols[i] = nil
 				continue
 			}
-			if err := r.checkPolicy(prev, previousRuleSets); err != nil {
+			if err := r.checkPolicy(prev, previousRuleSets); err != nil || engpolicy.CheckLLM(prev) != nil {
 				c.status.Message += "; its previous version doesn't compile either, so the policy is left out"
 				pols[i] = nil
 				continue
@@ -827,12 +834,12 @@ func convertSpec(id string, s wafv1alpha1.WAFPolicySpec) *bundlev1.Policy {
 		slices.Sort(p.Geo.Deny)
 		slices.Sort(p.Geo.Allow)
 	}
-	p.Llm = llm(s.LLM)
+	p.Llm = LLM(s.LLM)
 	return p
 }
 
-// llm is a spec.llm in the bundle; nil for none.
-func llm(l *wafv1alpha1.LLMSpec) *bundlev1.LLM {
+// LLM is a spec.llm in the bundle; nil for none.
+func LLM(l *wafv1alpha1.LLMSpec) *bundlev1.LLM {
 	if l == nil {
 		return nil
 	}

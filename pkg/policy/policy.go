@@ -831,6 +831,16 @@ func (h *Holder) BodyLimit(r *request.Request, max int64) int64 {
 	return s.BodyLimit(r, max)
 }
 
+// CheckLLM compiles a policy's LLM endpoints and checks as Compile does:
+// an error is one an engine would refuse the bundle for. The operator
+// checks with it before a policy goes into the bundle.
+func CheckLLM(bp *bundlev1.Policy) error {
+	if _, err := pipeline.CompileLLM(llmConfig(bp, true, nil)); err != nil {
+		return fmt.Errorf("spec.llm: %w", err)
+	}
+	return nil
+}
+
 // llmFormats are the bundle's formats in the pipeline's terms; another is
 // llm.FormatUnknown, checked as every format.
 var llmFormats = map[bundlev1.LLMFormat]llm.Format{

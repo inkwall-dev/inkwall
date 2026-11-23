@@ -129,6 +129,9 @@ var entries = []Entry{
 	{Kind: "WAFPolicy", Condition: "Accepted", Reason: "RuleSetsIncompatible",
 		Meaning: "The policy's rule sets compile alone but not together, as the engine loads them (the same rule ID in two of them, or a rule that changes a rule the policy doesn't load). The policy is left out of the bundle (or keeps its previous version, if that compiles), so the other policies' bundle still applies.",
 		Fix:     "Give the rules distinct IDs, or bind rule sets that load together; the message has the compiler's error."},
+	{Kind: "WAFPolicy", Condition: "Accepted", Reason: "LLMInvalid",
+		Meaning: "The policy's `spec.llm` doesn't compile as the engine compiles it: two endpoint paths the engine reads as one (`/v1/chat` and `/V1/Chat/`), or a path that isn't clean (`/v1/./chat`). The policy is left out of the bundle (or keeps its previous version, if that compiles), so the other policies' bundle still applies.",
+		Fix:     "Give each endpoint path once, clean, in one case; the message names the path."},
 	{Kind: "WAFPolicy", Condition: "Accepted", Reason: "TargetNotAttached",
 		Meaning: "A target HTTPRoute isn't accepted by a Gateway of a proxy Inkwall integrates with: no parent in its `status.parents` has `Accepted` `True`. No proxy routes its requests, so the policy doesn't apply to it.",
 		Fix:     "Fix the route's `parentRefs`, or the Gateway's `allowedRoutes`; `kubectl get httproute -o yaml` shows why the Gateway didn't accept it."},
@@ -369,7 +372,7 @@ var entries = []Entry{
 
 	// The LLM checks (design 0012 §4.2), an llm event's llm.check.
 	{Kind: "SecurityEvent", Condition: "llmCheck", Reason: "llm-malformed",
-		Meaning: "Rule ID 4800000. The body isn't one the parser reads one way: not JSON, invalid UTF-8, nested deeper than 64, a field the checks read with another type (`\"max_tokens\": \"100\"`), a key they read sent twice (two `messages`), or a `Content-Encoding` (the engine doesn't decode request bodies). `llm.offset` is the byte where it failed.",
+		Meaning: "Rule ID 4800000. The body isn't one the parser reads one way: not JSON, invalid UTF-8, nested deeper than 64, a field the checks read with another type (`\"max_tokens\": \"100\"`), a key they read sent twice (two `messages`) or in another case (`Messages`, which servers in Go read as `messages`), or a `Content-Encoding` (the engine doesn't decode request bodies). `llm.offset` is the byte where it failed.",
 		Fix:     "Model servers refuse such bodies too: fix the client. If a server accepts one, it's a bug in the parser: report it, and meanwhile exclude 4800000 on its path."},
 	{Kind: "SecurityEvent", Condition: "llmCheck", Reason: "llm-model",
 		Meaning: "Rule ID 4800001. The request named no model, or one not in `request.models` (`llm.model`).",

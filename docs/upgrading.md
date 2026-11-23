@@ -125,7 +125,8 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   without `spec.llm`. For one that adds it, **the rule sets stop reading the endpoints' bodies**
   (request and response) unless `ruleSetBody: Inspect`. Upgrade the chart first, then the
   engines: an engine before 0.7.0 checks none of these requests, and its rule sets read their
-  bodies as before; while one runs a policy with `spec.llm`, the policy is `Enforced=False`,
+  bodies as before, up to `body.maxBytes` (64 KiB by default; a longer one is 413 in `Block`
+  mode); while one runs a policy with `spec.llm`, the policy is `Enforced=False`,
   `EnginesOutdated`, naming `spec.llm`. The webhook now refuses SecLang rule sets that use rule
   IDs 4,800,000 to 4,800,999, reserved for the LLM checks. Envoy Gateway's and Istio's buffer is
   raised to `llm.maxBodyBytes` on such routes, and their bodies are sent to the engine even with

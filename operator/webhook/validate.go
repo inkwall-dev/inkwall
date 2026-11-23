@@ -29,11 +29,14 @@ import (
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
+	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
 	"github.com/inkwall-dev/inkwall/pkg/llm"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	engpolicy "github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/router"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
@@ -416,6 +419,14 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 		errs = append(errs, checkWebSocket(spec.Child("webSocket"), w)...)
 	}
 	errs = append(errs, checkDenyResponse(spec.Child("denyResponse"), p.Spec.DenyResponse)...)
+	if p.Spec.LLM != nil {
+		// As the engine compiles it: paths the CRD finds distinct may be one
+		// to the engine (/v1/chat and /V1/Chat/), which would make every
+		// engine refuse the bundle.
+		if err := engpolicy.CheckLLM(&bundlev1.Policy{Llm: resolver.LLM(p.Spec.LLM)}); err != nil {
+			errs = append(errs, field.Invalid(spec.Child("llm"), field.OmitValueType{}, err.Error()))
+		}
+	}
 	for i, b := range p.Spec.RuleSets {
 		if b.CRS != nil {
 			errs = append(errs, checkCRS(spec.Child("ruleSets").Index(i), b)...)
