@@ -235,8 +235,8 @@ func iisUnescape(p string) string {
 	var b strings.Builder
 	for i := 0; i < len(p); i++ {
 		if p[i] == '%' && i+5 < len(p) && (p[i+1] == 'u' || p[i+1] == 'U') {
-			if r, err := strconv.ParseUint(p[i+2:i+6], 16, 32); err == nil {
-				b.WriteRune(rune(r)) // #nosec G115 -- four hex digits
+			if r, err := strconv.ParseUint(p[i+2:i+6], 16, 16); err == nil {
+				b.WriteRune(rune(r)) // #nosec G115 -- 16 bits
 				i += 5
 				continue
 			}
