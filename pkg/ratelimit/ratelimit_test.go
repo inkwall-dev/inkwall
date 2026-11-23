@@ -440,6 +440,12 @@ func headerKey(s *Store, i int) Key { return s.HeaderKey("attacker-" + strconv.I
 // limited bucket's, which eviction by the earliest TAT would forget. Its
 // keys are either over their own limit (burst 1) and so kept, the overflow
 // counting the rest, or within it and evicted first.
+//
+// At most half a neighbourhood of victims share a shard, so their limit
+// never holds more than its share of one: there, over-share eviction may
+// reset one of them, as it should (TestOverShareBoundary). Picking the
+// victims by where the Store's seed puts them keeps the test the same
+// whatever the seed.
 func TestEvictionKeepsALimitedBucket(t *testing.T) {
 	for _, burst := range []int64{1, 2, 100} {
 		t.Run("attacker burst "+strconv.FormatInt(burst, 10), func(t *testing.T) {
@@ -448,8 +454,18 @@ func TestEvictionKeepsALimitedBucket(t *testing.T) {
 			login := limit(s, "login", 5, time.Hour, 5)
 			flood := s.Limit(Identity{PolicyUID: "uid", Name: "flood", Key: "header/x-key/ip/56"}, 1, time.Hour, burst)
 			victims := make([]Key, 64)
+			perShard := map[*shard]int{}
+			for i, n := 0, 0; i < len(victims); n++ {
+				k := ip(netip.AddrFrom4([4]byte{198, 51, byte(n >> 8), byte(n)}).String())
+				sh, _, _ := s.locate(login.id, k)
+				if perShard[sh] == neighbourhood/2 {
+					continue
+				}
+				perShard[sh]++
+				victims[i] = k
+				i++
+			}
 			for i := range victims {
-				victims[i] = ip(netip.AddrFrom4([4]byte{198, 51, 100, byte(i)}).String())
 				for range 6 {
 					s.Take(login, victims[i], t0, nil)
 				}
@@ -472,6 +488,40 @@ func TestEvictionKeepsALimitedBucket(t *testing.T) {
 			}
 			if burst > 1 && active == 0 {
 				t.Error("the attacker's buckets within their limit weren't evicted")
+			}
+		})
+	}
+}
+
+// Over-share eviction applies to every limit, a victim's included: in a
+// neighbourhood of protected buckets, a new key of another limit evicts one
+// of a limit holding more than its share (5 of 8 with two limits), and is
+// counted in an overflow bucket when it holds just its share (4 of 8).
+func TestOverShareBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		login   int
+		evicted bool
+	}{{5, true}, {4, false}} {
+		t.Run(strconv.Itoa(tc.login)+" of "+strconv.Itoa(neighbourhood), func(t *testing.T) {
+			s := New(1, 0)
+			login := limit(s, "login", 5, time.Hour, 5)
+			flood := s.Limit(Identity{PolicyUID: "uid", Name: "flood", Key: "header/x-key/ip/56"}, 1, time.Hour, 1)
+			const now = int64(100 * time.Hour)
+			sh := &s.shards[0]
+			for j := range neighbourhood {
+				e := entry{key: Key{tag: tagIPv4, b: [16]byte{byte(j + 1)}}, id: flood.id, tat: now + int64(time.Hour)} // over
+				if j < tc.login {
+					e.id, e.sampled = login.id, seconds(now) // over and limited now
+				}
+				sh.e[j] = e
+			}
+			before := slices.Clone(sh.e)
+			e := s.find(sh, 0, flood.id, Key{tag: tagHeader, b: [16]byte{99}}, now, nil)
+			switch {
+			case tc.evicted && (e == nil || e != &sh.e[0] || s.EvictionsOverShare() != 1):
+				t.Fatalf("login over its share: got %p (slot 0 is %p), %d over-share evictions", e, &sh.e[0], s.EvictionsOverShare())
+			case !tc.evicted && (e != nil || !slices.Equal(sh.e, before) || s.EvictionsOverShare() != 0):
+				t.Fatalf("login at its share lost a bucket: got %p, %d over-share evictions", e, s.EvictionsOverShare())
 			}
 		})
 	}
