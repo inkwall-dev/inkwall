@@ -381,3 +381,31 @@ func compileCause(err error) error {
 	}
 	return errors.New(msg)
 }
+
+// CheckSettings checks a policy's CRS settings and exclusions as WithCRS
+// and WithExclusions do, without compiling rules: what they refuse
+// whatever the rules are.
+func CheckSettings(s CRSSettings, list []Exclusion) error {
+	if _, err := s.vars(); err != nil {
+		return err
+	}
+	_, err := compileExclusions(list)
+	return err
+}
+
+// ExclusionsCompiledIn reports whether exclusions list, with the rules cfg
+// describes, are compiled into rules of their own (WithExclusions: target
+// exclusions on rules that negate their collection). Only those can fail
+// to compile with the rules (one on a rule the rules remove) once
+// CheckSettings accepts the list; checking the others needs no compiling.
+func ExclusionsCompiledIn(cfg Config, list []Exclusion) (bool, error) {
+	x, err := compileExclusions(list)
+	if err != nil || x == nil {
+		return false, err
+	}
+	neg, err := ruleNegations(cfg)
+	if err != nil {
+		return false, err
+	}
+	return neg.compiledIn(x), nil
+}
