@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -151,6 +152,11 @@ type BundleReconciler struct {
 	checked map[[sha256.Size]byte]error
 	// rules checks that each policy's rule sets compile together.
 	rules *enginepolicy.RuleChecker
+	// Recorder records a Warning Event on an InkwallConfig whose
+	// denyResponse the engine can't compile; nil: none.
+	Recorder events.EventRecorder
+	// deniedWarned is the InkwallConfig version last warned of.
+	deniedWarned string
 }
 
 // SetupWithManager registers the builder with mgr.
@@ -316,7 +322,7 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 		Events:    eventsConfig(cfg),
 		GeoTable:  geoRef,
 		// A policy's own spec.denyResponse wins over it.
-		DenyResponse: denyResponse(ctx, cfg),
+		DenyResponse: r.denyResponse(ctx, cfg),
 	}, r.lastVersion, r.Now(), resign)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -902,7 +908,7 @@ func eventsConfig(cfg *wafv1alpha1.InkwallConfig) *bundlev1.EventsConfig {
 
 // denyResponse is the InkwallConfig's spec.engine.denyResponse for the
 // bundle, nil for none.
-func denyResponse(ctx context.Context, cfg *wafv1alpha1.InkwallConfig) *bundlev1.DenyResponse {
+func (r *BundleReconciler) denyResponse(ctx context.Context, cfg *wafv1alpha1.InkwallConfig) *bundlev1.DenyResponse {
 	if cfg == nil {
 		return nil
 	}
@@ -915,6 +921,11 @@ func denyResponse(ctx context.Context, cfg *wafv1alpha1.InkwallConfig) *bundlev1
 	// with their default.
 	if _, err := pipeline.CompileDenyResponse(d.GetContentType(), d.GetBody()); err != nil {
 		log.FromContext(ctx).Error(err, "spec.engine.denyResponse doesn't compile; the bundle names no denial")
+		if v := "v" + cfg.ResourceVersion; r.Recorder != nil && r.deniedWarned != v {
+			r.deniedWarned = v
+			r.Recorder.Eventf(cfg, nil, corev1.EventTypeWarning, "InvalidDenyResponse", "BuildBundle",
+				"spec.engine.denyResponse doesn't compile, so the bundle names no denial and engines deny with their default: %v", err)
+		}
 		return nil
 	}
 	return d
