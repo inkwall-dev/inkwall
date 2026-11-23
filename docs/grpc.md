@@ -138,7 +138,10 @@ spec:
   readable characters only (shorter random bytes are printable too often: they would match the
   rules); numbers, enums and bools give nothing; a nested message, a map entry (`labels.key`,
   `labels.value`) and a group are read by their types, down to 16 levels, a message also as text
-  as without the schema (whole when printable, else the runs between its fields). A
+  as without the schema (whole when printable, whole and flat when its tags, lengths and numbers
+  are blank, and the runs between its fields). A field the schema declares a `string` is read
+  whole whatever its bytes look like, so a printable tag or length byte, which keeps a field
+  from being read whole without the schema, doesn't there. A
   `google.protobuf.Any` is read as the type its last `type_url` names (the one the application
   unpacks by), when the set has it, and also without the schema, as `payload.value`.
 - **Every occurrence is read:** a field sent twice, and each member of a `oneof`, whichever the
