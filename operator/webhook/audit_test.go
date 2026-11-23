@@ -11,12 +11,14 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -25,7 +27,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/util/flowcontrol"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -450,21 +451,107 @@ func TestSummarizeBounds(t *testing.T) {
 }
 
 // TestAuditEventLimit: past the limit, changes are still logged, without
-// an Event.
+// an Event; the limit is each namespace's, so a burst in one leaves the
+// others their Events.
 func TestAuditEventLimit(t *testing.T) {
 	a, out, rec := auditTest()
-	a.EventLimit = flowcontrol.NewTokenBucketRateLimiter(0.001, 1)
+	a.EventLimit = NewEventLimiter(0.001, 1, 16)
 	v := audited[*wafv1alpha1.WAFPolicy]{allow[*wafv1alpha1.WAFPolicy]{}, a}
 	for range 3 {
 		if _, err := v.ValidateCreate(admissionCtx(admissionv1.Create, "WAFPolicy", alice, false), policy(wafv1alpha1.PolicyBlock)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if n := len(lines(t, out)); n != 3 {
-		t.Errorf("%d lines, want 3", n)
+	other := policy(wafv1alpha1.PolicyBlock)
+	other.Namespace = "blog"
+	if _, err := v.ValidateCreate(admissionCtx(admissionv1.Create, "WAFPolicy", alice, false), other); err != nil {
+		t.Fatal(err)
 	}
-	if n := len(rec.notes(a)); n != 1 {
-		t.Errorf("%d Events, want 1", n)
+	if n := len(lines(t, out)); n != 4 {
+		t.Errorf("%d lines, want 4", n)
+	}
+	if n := len(rec.notes(a)); n != 2 {
+		t.Errorf("%d Events, want 2: shop's first, blog's", n)
+	}
+	rec.find(t, func(e *eventsv1.Event) bool { return e.Namespace == "blog" })
+}
+
+// TestEventLimiterBound: the limiter tracks up to its bound of namespaces;
+// past it, the others share one limit, and a namespace whose tokens are
+// all back makes room for a new one.
+func TestEventLimiterBound(t *testing.T) {
+	l := NewEventLimiter(1, 2, 2)
+	now := time.Now()
+	// allowed is which of the Events in namespaces, in turn, l allows at.
+	allowed := func(at time.Time, namespaces ...string) []bool {
+		out := make([]bool, len(namespaces))
+		for i, ns := range namespaces {
+			out[i] = l.Allow(ns, at)
+		}
+		return out
+	}
+	burst := []bool{true, true, false}
+	for _, ns := range []string{"a", "b"} {
+		if got := allowed(now, ns, ns, ns); !slices.Equal(got, burst) {
+			t.Fatalf("%s: %v, want a burst of 2", ns, got)
+		}
+	}
+	// a and b are tracked and busy: c and d share the rest.
+	if got := allowed(now, "c", "d", "c"); !slices.Equal(got, burst) {
+		t.Errorf("c and d: %v, want a burst of 2 between them", got)
+	}
+	if len(l.ns) != 2 {
+		t.Errorf("%d namespaces tracked, want 2", len(l.ns))
+	}
+	// Two seconds on, a and b are full again: c gets one of their places.
+	if got := allowed(now.Add(2*time.Second), "c", "c", "c"); !slices.Equal(got, burst) {
+		t.Errorf("c, later: %v, want its own burst of 2", got)
+	}
+	if _, ok := l.ns["c"]; !ok || len(l.ns) > 2 {
+		t.Errorf("tracked %v, want c among at most 2", slices.Collect(maps.Keys(l.ns)))
+	}
+	var none *EventLimiter
+	if !none.Allow("a", now) {
+		t.Error("no limiter: want every Event")
+	}
+}
+
+// TestAuditAnnotations: the annotations the operator acts on, such as the
+// signing key rotation request on the InkwallConfig, are recorded as a
+// change; the other annotations aren't.
+func TestAuditAnnotations(t *testing.T) {
+	a, out, rec := auditTest()
+	v := audited[*wafv1alpha1.InkwallConfig]{allow[*wafv1alpha1.InkwallConfig]{}, a}
+	cfg := &wafv1alpha1.InkwallConfig{ObjectMeta: metav1.ObjectMeta{Name: "default", Annotations: map[string]string{"note": "x"}}}
+	rotated := cfg.DeepCopy()
+	rotated.Annotations[wafv1alpha1.RotateSigningKeyAnnotation] = "2026-11-23"
+	again := rotated.DeepCopy()
+	again.Annotations[wafv1alpha1.RotateSigningKeyAnnotation] = "2026-11-24"
+	other := again.DeepCopy()
+	other.Annotations["note"] = "y"
+	ctx := admissionCtx(admissionv1.Update, "InkwallConfig", alice, false)
+	for _, step := range [][2]*wafv1alpha1.InkwallConfig{{cfg, rotated}, {rotated, again}, {again, other}} {
+		if _, err := v.ValidateUpdate(ctx, step[0], step[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l := lines(t, out)
+	if len(l) != 2 {
+		t.Fatalf("%d lines, want 2: the two rotation requests, not the other annotation's change", len(l))
+	}
+	path := `metadata.annotations["` + wafv1alpha1.RotateSigningKeyAnnotation + `"]`
+	for i, want := range [][2]string{{"", "2026-11-23"}, {"2026-11-23", "2026-11-24"}} {
+		changes, _ := l[i]["changes"].([]any)
+		if len(changes) != 1 {
+			t.Fatalf("line %d: changes %v", i, l[i]["changes"])
+		}
+		c := changes[0].(map[string]any)
+		if old, _ := c["old"].(string); c["path"] != path || old != want[0] || c["new"] != want[1] {
+			t.Errorf("line %d: change %v, want %s %q to %q", i, c, path, want[0], want[1])
+		}
+	}
+	if got := rec.notes(a); len(got) != 2 || got[0] != "Normal Changed Changed by alice: "+path {
+		t.Errorf("Events %q", got)
 	}
 }
 

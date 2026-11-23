@@ -28,9 +28,11 @@ updates:
         update-types: [minor, patch]
 
   # The base images are pinned by digest (tag@sha256:…); Dependabot bumps
-  # both. /hack/kind holds the e2e stub control plane's Dockerfile.
+  # both. /hack/kind holds the e2e stub control plane's Dockerfile,
+  # /hack/images the Helm chart's third-party images (make helm-lint checks
+  # that values.yaml has the same).
   - package-ecosystem: docker
-    directories: ["/", "/hack/kind"]
+    directories: ["/", "/hack/kind", "/hack/images"]
     schedule: {interval: weekly}
     commit-message: {prefix: build, include: scope}
     groups:

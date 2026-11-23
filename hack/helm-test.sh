@@ -352,4 +352,13 @@ for want in 'name: HTTPS_PROXY' 'value: http://proxy:3128' 'name: corporate-ca' 
   fi
 done
 
+# The geoipupdate image is pinned by digest, the same as the Dockerfile
+# Dependabot bumps (hack/images/geoipupdate.Dockerfile).
+values_image=$(sed -n 's/^ *image: \(ghcr.io\/maxmind\/geoipupdate:.*\)$/\1/p' "$CHART/values.yaml")
+pinned_image=$(sed -n 's/^FROM \(.*\)$/\1/p' hack/images/geoipupdate.Dockerfile)
+if [[ $values_image != *@sha256:* || $values_image != "$pinned_image" ]]; then
+  echo "geo.geoipupdate.image $values_image: want it pinned by digest, as hack/images/geoipupdate.Dockerfile ($pinned_image)" >&2
+  fail=1
+fi
+
 exit $fail

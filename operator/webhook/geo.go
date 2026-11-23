@@ -33,7 +33,11 @@ var isoCountries = func() map[string]bool {
 }()
 
 // geoWarnings warns of a policy's country codes that aren't assigned: UK
-// and EU, the likely mistakes, with their own messages.
+// and EU, the likely mistakes, with their own messages. It also warns of an
+// allow list that lets unknown addresses through (unknown: Allow, the
+// CRD's default, which the webhook can't tell from one set): design 0011
+// §2.2 keeps that default, so a misplaced client IP or a database behind
+// doesn't deny real users, but "only DE" reads stricter than it is.
 func geoWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
 	g := p.Spec.Geo
 	if g == nil {
@@ -55,5 +59,10 @@ func geoWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
 	geo := field.NewPath("spec", "geo")
 	check(geo.Child("deny"), g.Deny)
 	check(geo.Child("allow"), g.Allow)
+	if len(g.Allow) > 0 && g.Unknown != wafv1alpha1.GeoUnknownDeny {
+		warnings = append(warnings, fmt.Sprintf("%s: with unknown: Allow (the default), public addresses the database has no country for "+
+			"get through geo, and private addresses always do; set unknown: Deny to deny the unknown ones, and list private ranges in ipLists.deny "+
+			"(docs/geo-blocking.md)", geo.Child("allow")))
+	}
 	return warnings
 }

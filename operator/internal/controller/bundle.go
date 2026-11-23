@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -51,6 +52,7 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/bundlekey"
 	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 	"github.com/inkwall-dev/inkwall/pkg/grpcschema/compile"
+	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	enginepolicy "github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
@@ -153,6 +155,11 @@ type BundleReconciler struct {
 	rules *enginepolicy.RuleChecker
 	// schemas compiles each distinct gRPC descriptor set once.
 	schemas *compile.Cache
+	// Recorder records a Warning Event on an InkwallConfig whose
+	// denyResponse the engine can't compile; nil: none.
+	Recorder events.EventRecorder
+	// deniedWarned is the InkwallConfig version last warned of.
+	deniedWarned string
 }
 
 // SetupWithManager registers the builder with mgr.
@@ -304,6 +311,9 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	signer := keys.Active
 
 	res := resolver.Resolve(in)
+	// The rule checks this resolution didn't ask for are of rule sets and
+	// policies there aren't any more.
+	r.rules.Prune()
 	// A bundle signed with another key than the active one (it just
 	// rotated) is signed again, as a new version: engines then cache a
 	// bundle the active key signed.
@@ -322,7 +332,7 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 		Events:      eventsConfig(cfg),
 		GeoTable:    geoRef,
 		// A policy's own spec.denyResponse wins over it.
-		DenyResponse: denyResponse(cfg),
+		DenyResponse: r.denyResponse(ctx, cfg),
 	}, r.lastVersion, r.Now(), resign)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -908,11 +918,27 @@ func eventsConfig(cfg *wafv1alpha1.InkwallConfig) *bundlev1.EventsConfig {
 
 // denyResponse is the InkwallConfig's spec.engine.denyResponse for the
 // bundle, nil for none.
-func denyResponse(cfg *wafv1alpha1.InkwallConfig) *bundlev1.DenyResponse {
+func (r *BundleReconciler) denyResponse(ctx context.Context, cfg *wafv1alpha1.InkwallConfig) *bundlev1.DenyResponse {
 	if cfg == nil {
 		return nil
 	}
-	return resolver.DenyResponse(cfg.Spec.Engine.DenyResponse)
+	d := resolver.DenyResponse(cfg.Spec.Engine.DenyResponse)
+	if d == nil {
+		return nil
+	}
+	// Its webhook fails open: a denial the engine can't compile would make
+	// every engine refuse the bundle, so it is left out, and engines deny
+	// with their default.
+	if _, err := pipeline.CompileDenyResponse(d.GetContentType(), d.GetBody()); err != nil {
+		log.FromContext(ctx).Error(err, "spec.engine.denyResponse doesn't compile; the bundle names no denial")
+		if v := "v" + cfg.ResourceVersion; r.Recorder != nil && r.deniedWarned != v {
+			r.deniedWarned = v
+			r.Recorder.Eventf(cfg, nil, corev1.EventTypeWarning, "InvalidDenyResponse", "BuildBundle",
+				"spec.engine.denyResponse doesn't compile, so the bundle names no denial and engines deny with their default: %v", err)
+		}
+		return nil
+	}
+	return d
 }
 
 // statusVersion is a bundle version as status.bundleVersion holds it: one
