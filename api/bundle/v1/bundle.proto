@@ -79,8 +79,10 @@ message Bundle {
 // §5.2): the methods' input and output types and each message's fields, by
 // number. Engines check its integers on load and never parse descriptors.
 message GRPCSchema {
-  // Hex SHA-256 of methods and messages as serialized: names the schema in
-  // BodyConfig.grpc_schema_id, and in the engine's cache.
+  // Hex SHA-256 of the SHA-256 of methods and messages as serialized, and
+  // the source: names the schema in BodyConfig.grpc_schema_id, and in the
+  // engine's cache. Policies share an entry when they name the same
+  // ConfigMap key with the same content.
   string id = 1;
   // Sorted by path, each once.
   repeated GRPCMethod methods = 2;

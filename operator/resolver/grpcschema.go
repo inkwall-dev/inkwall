@@ -53,10 +53,8 @@ func (r *resolution) grpcSchema(c *candidate) {
 	if r.schemas == nil {
 		r.schemas = map[string]*bundlev1.GRPCSchema{}
 	}
-	// Policies with the same set share its entry, which names the first
-	// source in order, whichever policy resolves first.
-	if prev, ok := r.schemas[s.GetId()]; !ok || source < prev.GetSource() {
-		r.schemas[s.GetId()] = s
-	}
+	// Policies that name the same ConfigMap key share its entry (the id
+	// covers the source).
+	r.schemas[s.GetId()] = s
 	c.policy.Body.GrpcSchemaId = s.GetId()
 }

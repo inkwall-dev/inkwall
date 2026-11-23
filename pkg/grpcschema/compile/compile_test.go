@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -350,6 +351,88 @@ func TestCompileRefuses(t *testing.T) {
 	}
 }
 
+// publicChain is n files, each publicly importing every earlier one: the
+// paths protodesc walks double with each file.
+func publicChain(t testing.TB, n int) []byte {
+	var set descriptorpb.FileDescriptorSet
+	for i := range n {
+		f := &descriptorpb.FileDescriptorProto{Name: proto.String(fmt.Sprintf("f%d.proto", i)), Package: proto.String(fmt.Sprintf("p%d", i)),
+			Syntax: proto.String("proto3"), MessageType: []*descriptorpb.DescriptorProto{msg("M")}}
+		for j := range i {
+			f.Dependency = append(f.Dependency, fmt.Sprintf("f%d.proto", j))
+			f.PublicDependency = append(f.PublicDependency, int32(j)) // #nosec G115 -- small
+		}
+		if i == n-1 {
+			f.Service = []*descriptorpb.ServiceDescriptorProto{{Name: proto.String("S"), Method: []*descriptorpb.MethodDescriptorProto{
+				{Name: proto.String("M"), InputType: proto.String(fmt.Sprintf(".p%d.M", i)), OutputType: proto.String(".p0.M")}}}}
+		}
+		set.File = append(set.File, f)
+	}
+	return marshal(t, &set)
+}
+
+// TestCompilePublicImportChain: a chain of public imports that would take
+// protodesc minutes (30 files: 28 s, 40: over 2 min) is refused at once,
+// and a short one still compiles.
+func TestCompilePublicImportChain(t *testing.T) {
+	for _, n := range []int{30, 40} {
+		start := time.Now()
+		_, err := Compile(publicChain(t, n), "ns/cm/key")
+		if err == nil || !strings.Contains(err.Error(), "import paths") && !strings.Contains(err.Error(), "chained over") {
+			t.Errorf("%d files: %v", n, err)
+		}
+		if d := time.Since(start); d > time.Second {
+			t.Errorf("%d files: refused in %v", n, d)
+		}
+	}
+	start := time.Now()
+	if _, err := Compile(publicChain(t, 16), "ns/cm/key"); err != nil {
+		t.Fatalf("16 files, at the bound: %v", err)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("16 files compiled in %v", d)
+	}
+}
+
+// TestCompileImportBounds: a cycle, a public import out of range, too many
+// files, and the timeout backstop.
+func TestCompileImportBounds(t *testing.T) {
+	cycle := marshal(t, &descriptorpb.FileDescriptorSet{File: []*descriptorpb.FileDescriptorProto{
+		{Name: proto.String("a.proto"), Dependency: []string{"b.proto"}, PublicDependency: []int32{0}},
+		{Name: proto.String("b.proto"), Dependency: []string{"a.proto"}, PublicDependency: []int32{0}},
+	}})
+	if _, err := Compile(cycle, "x"); err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("a cycle: %v", err)
+	}
+	outOfRange := marshal(t, &descriptorpb.FileDescriptorSet{File: []*descriptorpb.FileDescriptorProto{
+		{Name: proto.String("a.proto"), PublicDependency: []int32{3}},
+	}})
+	if _, err := Compile(outOfRange, "x"); err == nil || !strings.Contains(err.Error(), "public import") {
+		t.Errorf("a public import out of range: %v", err)
+	}
+	many := &descriptorpb.FileDescriptorSet{}
+	for i := range MaxFiles + 1 {
+		many.File = append(many.File, &descriptorpb.FileDescriptorProto{Name: proto.String(fmt.Sprintf("%d", i))})
+	}
+	if _, err := Compile(marshal(t, many), "x"); err == nil || !strings.Contains(err.Error(), "files, over") {
+		t.Errorf("too many files: %v", err)
+	}
+	// The backstop: a set protodesc doesn't check in time is refused, and
+	// cached as refused.
+	defer func(d time.Duration) { Timeout = d }(Timeout)
+	Timeout = time.Nanosecond
+	cache := NewCache()
+	data := setOf(t, grpc_health_v1.File_grpc_health_v1_health_proto)
+	_, _, err := cache.Compile(data, "x")
+	if err == nil || !strings.Contains(err.Error(), "to check") {
+		t.Fatalf("past the timeout: %v", err)
+	}
+	Timeout = time.Minute
+	if _, _, err := cache.Compile(data, "x"); err == nil {
+		t.Error("a set that timed out is compiled again")
+	}
+}
+
 // TestCompileHugeEnum: enum values aren't kept, so an enum of tens of
 // thousands of values costs nothing in the schema.
 func TestCompileHugeEnum(t *testing.T) {
@@ -379,8 +462,16 @@ func TestCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, kb, err := cache.Compile(data, "b/cm/k")
-	if err != nil || ka != kb || a.GetId() != b.GetId() || a.GetSource() != "a/cm/k" || b.GetSource() != "b/cm/k" || cache.Len() != 1 {
+	// Compiled once; an entry per source, so that one never names another
+	// namespace's ConfigMap.
+	if err != nil || ka != kb || a.GetId() == b.GetId() || a.GetSource() != "a/cm/k" || b.GetSource() != "b/cm/k" || cache.Len() != 1 {
 		t.Fatalf("cached compile: %v, keys equal %v, ids %s %s, sources %s %s, len %d", err, ka == kb, a.GetId(), b.GetId(), a.GetSource(), b.GetSource(), cache.Len())
+	}
+	if again, _, _ := cache.Compile(data, "a/cm/k"); again.GetId() != a.GetId() {
+		t.Fatal("the same set and source compile to another id")
+	}
+	if direct, _ := Compile(data, "a/cm/k"); direct.GetId() != a.GetId() {
+		t.Fatal("cached and uncached ids differ")
 	}
 	if _, _, err := cache.Compile([]byte("bad"), "c/cm/k"); err == nil {
 		t.Fatal("a bad set compiles")
