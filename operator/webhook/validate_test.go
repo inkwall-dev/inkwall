@@ -5,12 +5,14 @@ package webhook
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 )
@@ -639,4 +641,36 @@ func TestDenyResponseValidation(t *testing.T) {
 	wantInvalid(t, err, "spec.engine.denyResponse", "not a JSON document")
 	_, err = cv.ValidateUpdate(ctx, config(nil), config(bad))
 	wantInvalid(t, err, "spec.engine.denyResponse", "not a JSON document")
+}
+
+// unclean is what "clean" means for a path pattern, as a regular
+// expression: a // (but a leading //, or //*, the root), or a . or ..
+// segment.
+var unclean = regexp.MustCompile(`.//|^//[^*]|/[.][.]?(/|[*]?$)`)
+
+// The webhook refuses exactly the rate limit paths that aren't clean, the
+// same ones it refuses for skip paths: on every pattern of up to 7
+// characters of "/", ".", "a" and a trailing "*" the CRD admits.
+func TestLimitPathsClean(t *testing.T) {
+	var patterns []string
+	var grow func(string)
+	grow = func(p string) {
+		patterns = append(patterns, p, p+"*")
+		if len(p) < 7 {
+			for _, c := range []string{"/", ".", "a"} {
+				grow(p + c)
+			}
+		}
+	}
+	grow("/")
+	for _, p := range patterns {
+		refused := len(checkRateLimits(field.NewPath("rateLimits"), []wafv1alpha1.RateLimit{{Name: "a", Requests: 1,
+			Period: metav1.Duration{Duration: time.Second}, Match: &wafv1alpha1.RateLimitMatch{Paths: []wafv1alpha1.PathPattern{wafv1alpha1.PathPattern(p)}}}})) > 0
+		if want := unclean.MatchString(p); refused != want {
+			t.Errorf("%q: refused %v, want %v", p, refused, want)
+		}
+		if skip := len(checkPath(field.NewPath("skip"), wafv1alpha1.PathPattern(p))) > 0; skip != refused {
+			t.Errorf("%q: refused as a rate limit path %v, as a skip path %v", p, refused, skip)
+		}
+	}
 }

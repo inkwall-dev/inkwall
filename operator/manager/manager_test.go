@@ -315,12 +315,12 @@ func testWebhook(ctx context.Context, t *testing.T, c client.Client, warn *warni
 			Skip:       &wafv1alpha1.SkipSpec{Paths: []wafv1alpha1.PathPattern{"/healthz", "/static/../admin/*"}},
 		},
 	}
-	if err := c.Create(ctx, policy); err == nil || !strings.Contains(err.Error(), "spec.skip.paths[1]") || !strings.Contains(err.Error(), "must be clean") {
+	if err := c.Create(ctx, policy); err == nil || !strings.Contains(err.Error(), "spec.skip.paths[1]") || !strings.Contains(err.Error(), "not clean") {
 		t.Fatalf("unclean skip path: got %v", err)
 	}
 	policy.Spec.Skip.Paths[1] = "/static/*"
-	// A rate limit path the engine wouldn't compile: the API server
-	// refuses it (the CRD's rule, then the webhook).
+	// A rate limit path the engine wouldn't compile: the webhook
+	// refuses it.
 	policy.Spec.RateLimits = []wafv1alpha1.RateLimit{{Name: "login", Requests: 5, Period: metav1.Duration{Duration: time.Minute},
 		Match: &wafv1alpha1.RateLimitMatch{Paths: []wafv1alpha1.PathPattern{"/login", "/x/../login"}}}}
 	if err := c.Create(ctx, policy); err == nil || !strings.Contains(err.Error(), "spec.rateLimits[0].match.paths[1]") {

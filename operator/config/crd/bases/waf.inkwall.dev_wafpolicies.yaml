@@ -234,9 +234,6 @@ spec:
                           maxLength: 1024
                           pattern: ^/[A-Za-z0-9._~/:@!$&'()+,=-]*\*?$
                           type: string
-                          x-kubernetes-validations:
-                          - message: 'path must be clean: no // and no . or .. segment'
-                            rule: '!self.matches(''.//|^//[^*]|/[.][.]?(/|[*]?$)'')'
                       type: object
                       x-kubernetes-validations:
                       - message: when needs a path, or what in the request to stop
@@ -464,14 +461,10 @@ spec:
                             description: |-
                               PathPattern is an exact path ("/healthz") or a prefix ending in "*"
                               ("/static/*"), using only plain ASCII path characters, as the engine
-                              matches paths (pkg/router). It must be clean: no "//" and no "." or ".."
-                              segment, which the engine refuses.
+                              matches paths (pkg/router).
                             maxLength: 1024
                             pattern: ^/[A-Za-z0-9._~/:@!$&'()+,=-]*\*?$
                             type: string
-                            x-kubernetes-validations:
-                            - message: 'path must be clean: no // and no . or .. segment'
-                              rule: '!self.matches(''.//|^//[^*]|/[.][.]?(/|[*]?$)'')'
                           maxItems: 16
                           type: array
                           x-kubernetes-list-type: set
@@ -763,14 +756,10 @@ spec:
                       description: |-
                         PathPattern is an exact path ("/healthz") or a prefix ending in "*"
                         ("/static/*"), using only plain ASCII path characters, as the engine
-                        matches paths (pkg/router). It must be clean: no "//" and no "." or ".."
-                        segment, which the engine refuses.
+                        matches paths (pkg/router).
                       maxLength: 1024
                       pattern: ^/[A-Za-z0-9._~/:@!$&'()+,=-]*\*?$
                       type: string
-                      x-kubernetes-validations:
-                      - message: 'path must be clean: no // and no . or .. segment'
-                        rule: '!self.matches(''.//|^//[^*]|/[.][.]?(/|[*]?$)'')'
                     maxItems: 64
                     type: array
                     x-kubernetes-list-type: atomic
@@ -782,14 +771,10 @@ spec:
                       description: |-
                         PathPattern is an exact path ("/healthz") or a prefix ending in "*"
                         ("/static/*"), using only plain ASCII path characters, as the engine
-                        matches paths (pkg/router). It must be clean: no "//" and no "." or ".."
-                        segment, which the engine refuses.
+                        matches paths (pkg/router).
                       maxLength: 1024
                       pattern: ^/[A-Za-z0-9._~/:@!$&'()+,=-]*\*?$
                       type: string
-                      x-kubernetes-validations:
-                      - message: 'path must be clean: no // and no . or .. segment'
-                        rule: '!self.matches(''.//|^//[^*]|/[.][.]?(/|[*]?$)'')'
                     maxItems: 64
                     type: array
                     x-kubernetes-list-type: atomic
