@@ -184,10 +184,33 @@ func TestGRPCMessagesUnderDeadline(t *testing.T) {
 
 	start = time.Now()
 	v := p.Check(context.Background(), grpcCall("/shop.Catalog/Search", "application/grpc", body, "Grpc-Encoding", "gzip"))
-	if d := time.Since(start); d > read/2 {
+	// A fixed bound, far below what reading the messages takes (read), even
+	// with -race.
+	if d := time.Since(start); d > 50*time.Millisecond {
 		t.Errorf("verdict in %v, reading the messages takes %v: not within the deadline", d, read)
 	}
 	if v.Reason != pipeline.ReasonTimeout {
 		t.Errorf("%+v, want a timeout", v)
+	}
+}
+
+// TestGRPCMessagesSplitInjection: an SQL injection split between the
+// fields of a nested message, as an application reading the field as a
+// string gets it, whatever its tags and lengths: blank, a length that is a
+// character (40, "("), a field number whose tag is one (5, "*"). Each is
+// denied.
+func TestGRPCMessagesSplitInjection(t *testing.T) {
+	long := " SELECT password,email,name,id,role,salt" // 40 bytes: length "("
+	for name, inner := range map[string][]byte{
+		"blank":            splitSQLi,
+		"length a char":    append(append(pbString(1, "1' UNION"), pbString(1, long)...), pbString(1, " FROM users) --")...),
+		"tag a char":       append(append(pbString(1, "1' UNION/"), pbString(5, "*/ SELECT password")...), pbString(1, " FROM users --")...),
+		"the whole string": []byte("1' UNION ( SELECT password,email FROM users) --"),
+	} {
+		v := messagesPipeline(t, pipeline.ModeBlock, true).Check(context.Background(),
+			grpcCall("/shop.Catalog/Search", "application/grpc", grpcFrame(pbString(1, string(inner)))))
+		if v.Action != pipeline.ActionDeny {
+			t.Errorf("%s: %+v, want a deny", name, v)
+		}
 	}
 }
