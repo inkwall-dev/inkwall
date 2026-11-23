@@ -229,29 +229,34 @@ func (w *walker) text(value, name string) bool {
 
 // between returns the bytes of msg, a valid message, but the contents of
 // its length-delimited fields: its tags, lengths and numbers, those of its
-// groups too (whose text fields are read as theirs).
+// groups too (whose text fields are read as theirs). It reads msg once,
+// tag by tag: a group's start and end tags are tags like any other, so
+// that groups nested however deep cost no more than their bytes.
 func between(msg []byte) []byte {
-	return appendBetween(nil, msg)
-}
-
-func appendBetween(out, msg []byte) []byte {
+	var out []byte
 	for len(msg) > 0 {
-		num, typ, n := protowire.ConsumeField(msg)
+		num, typ, n := protowire.ConsumeTag(msg)
+		if n < 0 {
+			return out
+		}
+		skip := 0 // the contents of a length-delimited field
 		switch typ {
 		case protowire.BytesType:
-			_, _, tag := protowire.ConsumeTag(msg)
-			v, _ := protowire.ConsumeBytes(msg[tag:])
-			out = append(out, msg[:n-len(v)]...)
-		case protowire.StartGroupType:
-			_, _, tag := protowire.ConsumeTag(msg)
-			v, _ := protowire.ConsumeGroup(num, msg[tag:])
-			out = append(out, msg[:tag]...)
-			out = appendBetween(out, v)
-			out = append(out, msg[tag+len(v):n]...)
+			v, m := protowire.ConsumeBytes(msg[n:])
+			if m < 0 {
+				return out
+			}
+			n, skip = n+m-len(v), len(v)
+		case protowire.StartGroupType, protowire.EndGroupType:
 		default:
-			out = append(out, msg[:n]...)
+			m := protowire.ConsumeFieldValue(num, typ, msg[n:])
+			if m < 0 {
+				return out
+			}
+			n += m
 		}
-		msg = msg[n:]
+		out = append(out, msg[:n]...)
+		msg = msg[n+skip:]
 	}
 	return out
 }
