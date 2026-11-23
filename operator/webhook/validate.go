@@ -441,6 +441,14 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 					"bind the CRS without placement, and the rule set to place before it in its own entry"))
 		}
 	}
+	if len(errs) == 0 {
+		// Whatever else the engine refuses (the checks above name the
+		// field): one policy it refused would make it refuse the whole
+		// bundle, so the operator would leave the policy out.
+		if err := resolver.CheckSpec(p.Spec); err != nil {
+			errs = append(errs, field.Invalid(spec, field.OmitValueType{}, "the engine can't compile the policy: "+err.Error()))
+		}
+	}
 	warnings := append(responseWarnings(p), geoWarnings(p)...)
 	warnings = append(warnings, llmWarnings(p)...)
 	return append(warnings, policyListWarnings(p)...), invalid("WAFPolicy", p.Name, errs)

@@ -61,6 +61,10 @@ const (
 	// ReasonLLMInvalid: the policy's spec.llm doesn't compile as the engine
 	// compiles it (two endpoint paths the engine reads as one).
 	ReasonLLMInvalid = "LLMInvalid"
+	// ReasonInvalidSpec: the engine can't compile the policy's spec (a
+	// value admission didn't refuse); in the bundle, it would make every
+	// engine refuse the bundle.
+	ReasonInvalidSpec = "InvalidSpec"
 	// ReasonInvalidRateLimits: the engine can't compile the policy's rate
 	// limits.
 	ReasonInvalidRateLimits = "InvalidRateLimits"
@@ -335,8 +339,8 @@ func (r *resolution) resolvePolicies() {
 	}
 
 	// The policy each candidate puts in the bundle: its spec, or its
-	// previous version; nil: left out. A policy whose rule sets the engine
-	// can't compile together, or whose rate limits it can't compile, is
+	// previous version; nil: left out. A policy the engine can't compile
+	// (its rate limits, its rule sets together, or any of its settings) is
 	// left out too (or keeps its previous version, if that compiles): in
 	// the bundle, it would make every engine refuse the bundle, for every
 	// policy.
@@ -346,11 +350,11 @@ func (r *resolution) resolvePolicies() {
 		if !c.failed {
 			if err := enginepolicy.CheckRateLimits(c.policy); err != nil {
 				c.fail(ReasonInvalidRateLimits, fmt.Sprintf("the engine can't compile its rate limits: %v", err))
-			} else if err := r.checkPolicy(c.policy, r.ruleSets); err != nil {
-				c.fail(ReasonRuleSetsIncompatible, fmt.Sprintf("its rule sets don't compile together: %v", err))
 			} else if err := enginepolicy.CheckLLM(c.policy); err != nil {
 				// An engine would refuse the bundle, for every policy.
 				c.fail(ReasonLLMInvalid, fmt.Sprintf("its LLM endpoints don't compile as the engine compiles them: %v", err))
+			} else if reason, err := r.checkPolicy(c.policy, r.ruleSets); err != nil {
+				c.fail(reason, err.Error())
 			}
 		}
 		if c.failed {
@@ -364,13 +368,39 @@ func (r *resolution) resolvePolicies() {
 				pols[i] = nil
 				continue
 			}
-			if err := r.checkPolicy(prev, previousRuleSets); err != nil || enginepolicy.CheckLLM(prev) != nil {
+			if _, err := r.checkPolicy(prev, previousRuleSets); err != nil || enginepolicy.CheckLLM(prev) != nil {
 				c.status.Message += "; its previous version doesn't compile either, so the policy is left out"
 				pols[i] = nil
 				continue
 			}
-			c.status.Message += "; the previous version of the policy stays in force"
+			c.status.Message += keptPrevious
 			pols[i] = proto.Clone(prev).(*bundlev1.Policy)
+		}
+	}
+	// The bundle has one version of each rule set: a policy that resolved
+	// ships with the current one. A previous version kept that binds a rule
+	// set that changed since, and that such a policy binds too, would ship
+	// with the new rules it wasn't checked with: it is left out.
+	current := map[string]bool{}
+	for i, c := range cands {
+		if pols[i] != nil && !c.failed {
+			for _, b := range pols[i].GetRuleSets() {
+				current[b.GetRuleSetId()] = true
+			}
+		}
+	}
+	for i, c := range cands {
+		if pols[i] == nil || !c.failed {
+			continue
+		}
+		for _, b := range pols[i].GetRuleSets() {
+			id := b.GetRuleSetId()
+			if current[id] && !proto.Equal(r.ruleSets[id], previousRuleSets[id]) {
+				c.status.Message = strings.Replace(c.status.Message, keptPrevious, fmt.Sprintf(
+					"; its previous version binds rule set %s, which changed since and which other policies use as it is now, so the policy is left out", id), 1)
+				pols[i] = nil
+				break
+			}
 		}
 	}
 
@@ -407,6 +437,7 @@ func (r *resolution) resolvePolicies() {
 	removed := r.overlaps(cands, pols, func(i int, m *bundlev1.RouteMatch) bool { return routeOwner[routeKey(m)].i == i })
 
 	used := map[string]*bundlev1.RuleSet{}
+	shipped := map[string]*candidate{} // by policy ID
 	for i, c := range cands {
 		pol := pols[i]
 		if pol == nil {
@@ -448,11 +479,17 @@ func (r *resolution) resolvePolicies() {
 				c.status.Message, strings.Join(shadowed, ", "))
 		}
 		for _, b := range pol.GetRuleSets() {
-			used[b.GetRuleSetId()] = usedRuleSets[b.GetRuleSetId()]
+			// A rule set a policy that resolved binds ships as it is now,
+			// whatever the order of the policies.
+			if id := b.GetRuleSetId(); !c.failed || !current[id] {
+				used[id] = usedRuleSets[id]
+			}
 		}
 		c.status.Applied = !c.failed
 		r.out.Policies = append(r.out.Policies, pol)
+		shipped[pol.GetId()] = c
 	}
+	r.checkBundle(shipped, used)
 	// After every policy's routes: an overlap is reported on both.
 	for _, c := range cands {
 		c.reportNotes()
@@ -467,6 +504,71 @@ func (r *resolution) resolvePolicies() {
 		}
 	}
 	slices.SortFunc(r.out.RuleSets, func(a, b *bundlev1.RuleSet) int { return cmp.Compare(a.GetId(), b.GetId()) })
+}
+
+// checkBundle checks each policy of the bundle (r.out.Policies, shipped:
+// their candidates by ID) with the rule sets it ships with (used, by ID),
+// as the engine compiles the bundle, and leaves out those that don't
+// compile, and the rule sets no policy left binds: whatever got them
+// there, one would make every engine refuse the bundle. The rule sets
+// don't change with the policies left out, so one pass is enough.
+//
+// It can't leave out a policy that resolved, whose rule sets ship as they
+// are now, nor a previous version kept, whose rule sets ship as they were or
+// it is left out: it guards against what would get there all the same.
+// TODO: a policy it leaves out keeps the routes it took from others, which
+// then go uninspected; route ownership would have to be decided again.
+func (r *resolution) checkBundle(shipped map[string]*candidate, used map[string]*bundlev1.RuleSet) {
+	kept := r.out.Policies[:0]
+	for _, pol := range r.out.Policies {
+		err := r.checkRules(pol, used)
+		if err == nil {
+			kept = append(kept, pol)
+			continue
+		}
+		c := shipped[pol.GetId()]
+		if c.failed {
+			c.status.Message = strings.Replace(c.status.Message, keptPrevious,
+				"; its previous version doesn't compile with the rule sets in the bundle either, so the policy is left out", 1)
+		} else {
+			c.fail(ReasonRuleSetsIncompatible, fmt.Sprintf("it doesn't compile with the rule sets in the bundle, so it is left out: %v", err))
+			c.status.Applied = false
+		}
+	}
+	r.out.Policies = kept
+	bound := map[string]bool{}
+	for _, pol := range kept {
+		for _, b := range pol.GetRuleSets() {
+			bound[b.GetRuleSetId()] = true
+		}
+	}
+	for id := range used {
+		if !bound[id] {
+			delete(used, id)
+		}
+	}
+}
+
+// keptPrevious ends the message of a policy whose previous version stays.
+const keptPrevious = "; the previous version of the policy stays in force"
+
+// checkRules compiles a policy's rules with the rule sets it binds (from
+// ruleSets), as checkPolicy does, but not its settings: those don't depend
+// on the rule sets, and checkPolicy checked them.
+func (r *resolution) checkRules(p *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet) error {
+	var bound []*bundlev1.RuleSet
+	for _, b := range p.GetRuleSets() {
+		if rs, ok := ruleSets[b.GetRuleSetId()]; ok {
+			bound = append(bound, rs)
+		}
+	}
+	if err := enginepolicy.CheckRuleSets(p, bound); err != nil {
+		return err
+	}
+	if r.in.CheckPolicy == nil {
+		return nil
+	}
+	return r.in.CheckPolicy(p, bound)
 }
 
 // reportOverlaps adds the routes the policy shares with policies of other
@@ -494,18 +596,25 @@ func (c *candidate) reportOverlaps() {
 }
 
 // checkPolicy compiles a policy with the rule sets it binds (from
-// ruleSets), as the engine does; nil when Input.CheckPolicy isn't set.
-func (r *resolution) checkPolicy(p *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet) error {
-	if r.in.CheckPolicy == nil {
-		return nil
-	}
+// ruleSets), as the engine does: its settings always, its rules when
+// Input.CheckPolicy is set. An error comes with its Accepted reason.
+func (r *resolution) checkPolicy(p *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet) (string, error) {
 	var bound []*bundlev1.RuleSet
 	for _, b := range p.GetRuleSets() {
 		if rs, ok := ruleSets[b.GetRuleSetId()]; ok {
 			bound = append(bound, rs)
 		}
 	}
-	return r.in.CheckPolicy(p, bound)
+	if err := enginepolicy.CheckSettings(p, bound); err != nil {
+		return ReasonInvalidSpec, fmt.Errorf("the engine can't compile it: %w", err)
+	}
+	if r.in.CheckPolicy == nil {
+		return "", nil
+	}
+	if err := r.in.CheckPolicy(p, bound); err != nil {
+		return ReasonRuleSetsIncompatible, fmt.Errorf("its rule sets don't compile together: %w", err)
+	}
+	return "", nil
 }
 
 // overlaps settles the routes of different namespaces that overlap without
@@ -1109,6 +1218,16 @@ func (r *resolution) ipList(ns string, names []wafv1alpha1.IPListName) ([]string
 		}
 	}
 	return out, nil
+}
+
+// CheckSpec compiles what the engine compiles of a policy's spec besides
+// its rules and the objects it names (rule sets, IP lists), as the bundle
+// builder checks it: for admission, so that a spec the bundle would leave
+// out is refused when it is saved.
+func CheckSpec(s wafv1alpha1.WAFPolicySpec) error {
+	p := convertSpec("", s)
+	p.RuleSets = nil // the webhook checks the CRS settings (checkCRS) and doesn't read rule sets
+	return enginepolicy.CheckSettings(p, nil)
 }
 
 // CheckRateLimits compiles a policy's rate limits as the engine does: for

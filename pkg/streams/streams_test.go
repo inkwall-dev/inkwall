@@ -196,8 +196,9 @@ func TestGRPCFields(t *testing.T) {
 	nested := append([]byte{0x12, byte(len(message("inner")))}, message("inner")...)
 	s := New(GRPC, 1<<10, "")
 	ev := s.Write(frame(false, append(message("outer"), nested...)))
-	if len(ev) != 1 || len(ev[0].Fields) != 2 || ev[0].Fields[0].Name != "1" || ev[0].Fields[1].Name != "2.1" ||
-		ev[0].Fields[1].Value != "inner" || ev[0].Unframed {
+	// The nested message's whole text too (grpcwire.Strings), after its fields.
+	if len(ev) != 1 || len(ev[0].Fields) != 3 || ev[0].Fields[0].Name != "1" || ev[0].Fields[1].Name != "2.1" ||
+		ev[0].Fields[1].Value != "inner" || ev[0].Fields[2].Name != "2" || ev[0].Unframed {
 		t.Fatalf("event %+v", ev)
 	}
 	s = New(GRPC, 8, "")

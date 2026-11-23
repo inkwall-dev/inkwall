@@ -329,7 +329,10 @@ func (s *Splitter) writeGRPC(p []byte) []Event {
 }
 
 // grpcEvent returns the message read: its text fields, joined by
-// newlines. cut: the message wasn't read whole.
+// newlines. cut: the message wasn't read whole. It reads the message on
+// the adapter's goroutine, before the pipeline's admission control and
+// deadline: in time linear in the message, which is at most s.max bytes
+// (the body limit), decompressed too.
 func (s *Splitter) grpcEvent(cut bool) Event {
 	data := s.msg
 	if s.compressed {
