@@ -362,7 +362,7 @@ type outcome struct {
 	// oversize action (see partly).
 	partly bool
 	// grpcRead counts the gRPC messages read for the evaluation.
-	grpcRead GRPCRead
+	grpcRead *GRPCRead
 }
 
 // Check inspects r and returns the verdict. It returns within the configured
@@ -562,14 +562,14 @@ func (p *Pipeline) grpcRequest(r, call *request.Request, messages []byte, keep b
 		call.GRPCText = text
 		if complete {
 			o := eval(ctx)
-			o.grpcRead = read
+			o.grpcRead = &read
 			return o
 		}
 		if p.oversize == OversizeDeny && p.mode == ModeBlock {
-			return outcome{partly: true, grpcRead: read}
+			return outcome{partly: true, grpcRead: &read}
 		}
 		o := eval(ctx)
-		o.partly, o.grpcRead = true, read
+		o.partly, o.grpcRead = true, &read
 		return o
 	}
 }
@@ -652,7 +652,9 @@ func (p *Pipeline) evaluate(ctx context.Context, eval func(context.Context) outc
 			return p.failed(ReasonError), nil
 		}
 		v := p.decide(o.res)
-		v.GRPCRead = o.grpcRead
+		if o.grpcRead != nil {
+			v.GRPCRead = *o.grpcRead
+		}
 		if o.partly {
 			return p.oversized(v, o.x)
 		}
