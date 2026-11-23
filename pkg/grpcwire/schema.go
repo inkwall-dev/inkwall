@@ -26,31 +26,38 @@ const MaxName = 256
 // longer than that.
 const minBytesRun = 12
 
-// maxAnyTypes bounds the types an Any's value is read as: one per distinct
-// type_url it carries (the application keeps the last), up to this many.
-const maxAnyTypes = 4
+// minBytesText is the shortest bytes field read whole when it is printable
+// UTF-8, as text an application keeps in bytes: shorter, random bytes are
+// printable often enough to match the CRS. Of 100,000 messages of four
+// random 1 to 24 byte bytes fields, printable ones read whole at any
+// length had 18 denied, from 8 bytes none (TestGRPCSchemaFalsePositives).
+const minBytesText = 8
 
 // Fields returns the text fields of msg, a protobuf message of type t of
 // schema s, appended to out; unknown, the fields t doesn't describe; and
 // whether the message parsed whole and stayed within lim (design 0013 §6).
 //
 // Each field t describes is read by its kind: a string as text (as
-// Strings reads UTF-8, a byte that isn't UTF-8 a space), bytes by their
-// runs of at least 12 readable characters (minBytesRun), a message or
-// group by its type, one level deeper (a message also whole as text when
-// it is printable), numbers as nothing, and a packed repeated number by
-// its runs, as bytes. Fields are named by
-// their proto names, joined by dots ("user.name"), without indexes; an
-// extension "[package.extension]". An Any's value is read as the type its
-// type_url names, under the Any's name, when s has it.
+// Strings reads UTF-8, a byte that isn't UTF-8 a space), bytes whole when
+// they are printable UTF-8 of at least 8 bytes (minBytesText), else by
+// their runs of at least 12 readable characters (minBytesRun), a message
+// or group by its type, one level deeper (a message also as text, as
+// Strings reads one: whole when printable, else the runs between its
+// fields), numbers as nothing, and a packed repeated number by its runs,
+// as bytes. Fields are named by their proto names, joined by dots
+// ("user.name"), without indexes; an extension "[package.extension]". An
+// Any's value is read as the type its last type_url names, under the
+// Any's name, when s has it, and as Strings reads it.
 //
 // What t doesn't describe is read as Strings reads it, named by number
 // under the nearest name ("user.7"): a field number t doesn't have, a
 // field sent with a wire type its kind doesn't take, and a message field
 // whose bytes aren't a message. Every occurrence of a field is read, and
-// every member of a oneof: a superset of what any application keeps.
+// every member of a oneof. The reading is charged against a budget of
+// bytes read linear in msg (readBudget): past it, the message is over
+// lim.
 func Fields(msg []byte, s *grpcschema.Schema, t *grpcschema.Message, lim Limits, out []Field) (fields []Field, unknown int, ok bool) {
-	w := schemaWalker{walker: walker{lim: lim, out: out}, s: s}
+	w := schemaWalker{walker: walker{lim: lim, out: out}, s: s, budget: readBudget(len(msg))}
 	defer func() {
 		if recover() != nil {
 			fields, unknown, ok = w.out, w.unknown, false
@@ -67,6 +74,27 @@ type schemaWalker struct {
 	s       *grpcschema.Schema
 	prefix  string
 	unknown int
+	// budget is how many more bytes may be read (charge).
+	budget int
+}
+
+// readBudget is how many bytes reading a message of n bytes may read in
+// all, its nested values counted at each level they are read: a
+// message's bytes are read once per level of nesting (16 at most) by
+// their types, and once more without the schema where it reads them too
+// (an Any's value, a field it doesn't describe). Past it, the message is
+// over the limits, whatever its shape: the reading stays linear in the
+// message, and so does its text.
+func readBudget(n int) int { return 64*n + 64<<10 }
+
+// charge counts n bytes read; past the budget, it reports false and the
+// message is over the limits.
+func (w *schemaWalker) charge(n int) bool {
+	if w.budget -= n; w.budget < 0 {
+		w.over = true
+		return false
+	}
+	return true
 }
 
 // emit adds value as the text of path, cut to MaxName bytes. It reports
@@ -147,24 +175,43 @@ func (w *schemaWalker) known(f *grpcschema.Field, typ protowire.Type, v []byte, 
 	if len(v) == 0 {
 		return true
 	}
+	if !w.charge(len(v)) {
+		return false
+	}
 	path := f.Path(w.prefix)
 	switch f.Kind {
 	case grpcschema.KindString:
 		return w.emit(stringText(v), path)
 	case grpcschema.KindBytes:
+		// Printable UTF-8 is read whole, as Strings reads it: an
+		// application may keep text in bytes. Other bytes give their long
+		// runs only.
+		if len(v) >= minBytesText && printable(v) {
+			return w.emit(string(v), path)
+		}
 		return w.emit(runs(v, minBytesRun), path)
 	case grpcschema.KindMessage:
-		if !parses(v) {
+		ok, numbersRun := valid(v, minNumbersRun)
+		if !ok {
 			// Not a message: as Strings reads it (a newer application may
 			// have made it a string). The message is still read whole.
 			w.unknown++
 			w.field(v, path[:min(len(path), MaxName)], depth)
 			return !w.over
 		}
-		// Whole as text when printable, as Strings does: a string declared
-		// a message can't split an attack across its "fields".
-		if printableMessage(v) && !w.emit(string(v), path) {
-			return false
+		// As text too, as Strings reads a message: whole when printable (a
+		// string declared a message can't split an attack across its
+		// "fields"), else the runs between its fields, where text an
+		// application reading it otherwise could hide.
+		switch {
+		case printableMessage(v):
+			if !w.emit(string(v), path) {
+				return false
+			}
+		case numbersRun:
+			if !w.charge(len(v)) || !w.emit(runs(between(v), minNumbersRun), path) {
+				return false
+			}
 		}
 		return w.nested(v, f.Message, path, depth)
 	case grpcschema.KindGroup:
@@ -194,6 +241,9 @@ func (w *schemaWalker) nested(v []byte, t *grpcschema.Message, prefix string, de
 // wire type typ, as Strings does, named by its number.
 func (w *schemaWalker) unknownField(num protowire.Number, typ protowire.Type, v []byte, depth int) {
 	w.unknown++
+	if len(v) > 0 && !w.charge(2*len(v)) {
+		return
+	}
 	switch typ {
 	case protowire.BytesType:
 		w.field(v, fieldName(w.prefix, num), depth)
@@ -203,30 +253,19 @@ func (w *schemaWalker) unknownField(num protowire.Number, typ protowire.Type, v 
 }
 
 // anyMessage walks msg, a google.protobuf.Any: its type_urls (1) as text,
-// its values (2) as the types they name, and anything else as unknown.
-// The application unpacks the value by the last type_url; the engine
-// reads it by each.
+// its values (2) as the type its last type_url names (the one the
+// application unpacks by) and without the schema, and anything else as
+// unknown.
 func (w *schemaWalker) anyMessage(msg []byte, t *grpcschema.Message, depth int) bool {
-	var types []*grpcschema.Message
-	unnamed := false
+	var named *grpcschema.Message
 	for rest := msg; len(rest) > 0; {
 		num, typ, v, ok := consume(&rest)
 		if !ok {
 			return false
 		}
-		if num != 1 || typ != protowire.BytesType {
-			continue
+		if num == 1 && typ == protowire.BytesType {
+			named = w.s.AnyType(string(v))
 		}
-		named := w.s.AnyType(string(v))
-		switch {
-		case named == nil || len(types) == maxAnyTypes:
-			unnamed = true
-		case !containsType(types, named):
-			types = append(types, named)
-		}
-	}
-	if len(types) == 0 {
-		unnamed = true
 	}
 	for len(msg) > 0 {
 		num, typ, v, _ := consume(&msg)
@@ -236,7 +275,7 @@ func (w *schemaWalker) anyMessage(msg []byte, t *grpcschema.Message, depth int) 
 				return true
 			}
 		case num == 2 && typ == protowire.BytesType:
-			if !w.anyValue(v, t.Field(2).Path(w.prefix), types, unnamed, depth) {
+			if !w.anyValue(v, t.Field(2).Path(w.prefix), named, depth) {
 				return true
 			}
 		default:
@@ -249,34 +288,21 @@ func (w *schemaWalker) anyMessage(msg []byte, t *grpcschema.Message, depth int) 
 	return true
 }
 
-func containsType(types []*grpcschema.Message, t *grpcschema.Message) bool {
-	for _, u := range types {
-		if u == t {
-			return true
-		}
-	}
-	return false
-}
-
-// anyValue reads an Any's value: as each type its type_urls name, its
-// fields under the Any's name; and, when a type_url names none (or there
-// are too many), as Strings does, named path ("payload.value").
-func (w *schemaWalker) anyValue(v []byte, path string, types []*grpcschema.Message, unnamed bool, depth int) bool {
+// anyValue reads an Any's value: as t, the type its last type_url names
+// (nil: none the schema has), its fields under the Any's name; and as
+// Strings does, named path ("payload.value"), whatever the type_url says:
+// an application may unpack it without checking.
+func (w *schemaWalker) anyValue(v []byte, path string, t *grpcschema.Message, depth int) bool {
 	if len(v) == 0 {
 		return true
 	}
-	if !parses(v) {
-		unnamed = true
-	} else {
-		for _, t := range types {
-			if !w.nested(v, t, w.prefix, depth) {
-				return false
-			}
-		}
+	if !w.charge(2 * len(v)) {
+		return false
 	}
-	if unnamed {
-		w.field(v, path[:min(len(path), MaxName)], depth)
+	if t != nil && parses(v) && !w.nested(v, t, w.prefix, depth) {
+		return false
 	}
+	w.field(v, path[:min(len(path), MaxName)], depth)
 	return !w.over
 }
 
