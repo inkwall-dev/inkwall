@@ -155,6 +155,7 @@ fix from these tables ([Explaining a policy or a denial](#explaining-a-policy-or
 | `Conflict` | An older policy targets the same route and applies to it: a route has one policy. | Merge the policies, or target other routes. |
 | `TargetUnsupported` | A target's match rules (an IngressRoute's, HTTPRoute's or VirtualService's) aren't ones the router can match, so its requests can't be told apart. | Use the forms the message lists (`Host`, `Path`, `PathPrefix`; exact and prefix paths). |
 | `RuleSetsIncompatible` | The policy's rule sets compile alone but not together, as the engine loads them (the same rule ID in two of them, or a rule that changes a rule the policy doesn't load). The policy is left out of the bundle (or keeps its previous version, if that compiles), so the other policies' bundle still applies. | Give the rules distinct IDs, or bind rule sets that load together; the message has the compiler's error. |
+| `LLMInvalid` | The policy's `spec.llm` doesn't compile as the engine compiles it: two endpoint paths the engine reads as one (`/v1/chat` and `/V1/Chat/`), or a path that isn't clean (`/v1/./chat`). The policy is left out of the bundle (or keeps its previous version, if that compiles), so the other policies' bundle still applies. | Give each endpoint path once, clean, in one case; the message names the path. |
 | `InvalidSpec` | The engine can't compile the policy as it resolves: a value admission didn't refuse (saved while the webhook wasn't checking it, for example), or IP lists with more entries together than the engine takes. In the bundle it would make every engine refuse the bundle, so the policy is left out (or keeps its previous version, if that compiles) and the other policies' bundle still applies. | Fix the value the message names, or split the IP lists between policies. |
 | `InvalidRateLimits` | The engine can't compile the policy's rate limits (a path that isn't clean, for example), so the policy is left out of the bundle (or keeps its previous version, if that compiles) and the other policies' bundle still applies. The webhook refuses such limits; this is for a policy saved before it did. | Fix the limit the message names; [rate limits](rate-limits.md) has the path syntax. |
 | `TargetNotAttached` | A target HTTPRoute isn't accepted by a Gateway of a proxy Inkwall integrates with: no parent in its `status.parents` has `Accepted` `True`. No proxy routes its requests, so the policy doesn't apply to it. | Fix the route's `parentRefs`, or the Gateway's `allowedRoutes`; `kubectl get httproute -o yaml` shows why the Gateway didn't accept it. |
@@ -425,7 +426,9 @@ The line has:
 - `rule_ids`, `interrupting_rule_id` and `anomaly_score`;
 - `matches`: each rule with the variable it matched (`{"rule_id":942100,"variable":"ARGS:q"}`),
   never the value;
-- `method`, `host`, `path` (without the query string), `client_ip`, `request_id`.
+- `method`, `host`, `path` (without the query string), `client_ip`, `request_id`;
+- with `reason: llm`, `llm_check`, `llm_format`, `llm_message_index` and `llm_offset`: the LLM
+  check that failed and where in the body, never the prompt.
 
 What each `reason` means, and what to do:
 
@@ -443,6 +446,24 @@ What each `reason` means, and what to do:
 | `rate-limit` | The client was over one of the policy's `rateLimits` (the event's `rate_limit`): 429 with `Retry-After` in `Block` mode. Each engine counts on its own, and limited requests are sampled: one event per client a minute, with the count in `sampled_count`. | Check the client IP the engine resolved (`client_ip`): behind a load balancer that hides it, every client shares one limit ([client IP](client-ip.md)). Otherwise raise the limit's `requests` or `burst`, or narrow its `match`. |
 | `geo-deny` | The client's country (the event's `country`, `unknown` for a public address the database has none for) is denied by the policy's `geo`: 403 in `Block` mode, logged in `Detect` or with `geo.mode: Detect`. Events are sampled: one per policy and country a minute, with the count in `sampled_count`. | Check the client IP the engine resolved (`client_ip`): it is only as right as that address ([client IP](client-ip.md)). If the country is wrong for the address, the database is out of date. Otherwise change the policy's `geo.deny` or `geo.allow`, or let a partner in through `ipLists.allow`. |
 | `geo-unavailable` | The bundle names a country table this engine doesn't hold yet (it just started without a cache, or every send of the table failed), and the policy fails closed: 503. In `Detect`, or with `failureMode: Open`, geo is skipped instead. | Check that the engine can reach the operator, and the InkwallConfig's `GeoDatabaseReady`; set the policy's `failureMode: Open` to let requests through meanwhile. |
+| `llm` | A request on one of the policy's LLM endpoints (`spec.llm`) failed an LLM check, the event's `llm.check` ([below](#llm-checks)): 400, or 413 for the size caps, in `Block` mode. The event says which message and where in the body (`llm.message_index`, `llm.offset`), never the prompt. | The check's entry below says what to change; to turn one check off on a path, exclude its rule ID there ([LLM APIs](llm-apis.md#when-a-check-refuses-a-legitimate-request)). |
+<!-- end reasons -->
+
+#### LLM checks
+
+An `llm` event's `llm.check` ([LLM APIs](llm-apis.md)) is one of these:
+
+<!-- reasons: SecurityEvent llmCheck -->
+| Reason | Meaning | Fix |
+|---|---|---|
+| `llm-malformed` | Rule ID 4800000. The body isn't one the parser reads one way: not JSON, invalid UTF-8, nested deeper than 64, a field the checks read with another type (`"max_tokens": "100"`), a key they read sent twice (two `messages`) or in another case (`Messages`, which servers in Go read as `messages`), or a `Content-Encoding` (the engine doesn't decode request bodies). `llm.offset` is the byte where it failed. | Model servers refuse such bodies too: fix the client. If a server accepts one, it's a bug in the parser: report it, and meanwhile exclude 4800000 on its path. |
+| `llm-model` | Rule ID 4800001. The request named no model, or one not in `request.models` (`llm.model`). | Add the model, or a prefix of it ending in `*`, to `request.models`. |
+| `llm-max-prompt` | Rule ID 4800002. The prompt's text, every message together, is over `request.maxPromptBytes` (413). | Raise `maxPromptBytes` to the prompts your application sends; images and files don't count. |
+| `llm-max-messages` | Rule ID 4800003. More messages, input items or embedding inputs than `request.maxMessages` (413). | Raise `maxMessages`, or have the client trim its history. |
+| `llm-max-choices` | Rule ID 4800004. The request's `n`, the answers it asks for, is over `request.maxChoices`. | Raise `maxChoices`, or have the client ask for fewer. |
+| `llm-max-output-tokens` | Rule ID 4800005. The output limit the request sets (`max_tokens`, `max_completion_tokens`, `max_output_tokens`) is over `request.maxOutputTokens`, or the request sets none and `requireOutputTokens` is on. | Have the client set an output limit within the cap; Inkwall doesn't lower it. Or raise `maxOutputTokens`. |
+| `llm-client-role` | Rule ID 4800006. A message of a role not in `request.clientRoles` (`llm.role`, `llm.message_index`); the Responses API's `instructions` and Anthropic's `system` are `system`. | A client that writes its own system prompt (a gateway's, an SDK's) needs `system` or `developer` in `clientRoles`. A chat front end's client shouldn't: its server adds the system prompt. |
+| `llm-tools` | Rule ID 4800007. The request defines a tool it may not (`llm.message_index` is the tool's): `request.tools.allow` is `None`, or the tool's name (a built-in tool's type) isn't in `tools.names`. | Add the tool's name to `tools.names`, or set `allow: Any`. |
 <!-- end reasons -->
 
 A rule that matched a legitimate value is a false positive: exclude it for that argument, as

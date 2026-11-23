@@ -115,6 +115,10 @@ enum Reason {
   // The bundle names a country table the engine doesn't hold, and the
   // policy fails closed: 503.
   REASON_GEO_UNAVAILABLE = 17;
+  // A request on one of the policy's LLM endpoints failed an LLM check
+  // (spec.llm): 400, or 413 for the size caps, in Block mode. (Numbered
+  // from 40, apart from the reasons other features add meanwhile.)
+  REASON_LLM = 40;
 }
 
 // CheckResponse is the verdict for one CheckRequest.

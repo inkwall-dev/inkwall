@@ -93,6 +93,16 @@ func logRecord(it item, v *view) *logspb.LogRecord {
 	if n := ev.GetSampledCount(); n > 1 {
 		attrs = append(attrs, num("inkwall.sampled_count", int64(n)))
 	}
+	if l := ev.GetLlm(); l != nil {
+		add("inkwall.llm.check", l.GetCheck())
+		add("inkwall.llm.format", l.GetFormat())
+		add("inkwall.llm.model", l.GetModel())
+		add("inkwall.llm.role", l.GetRole())
+		attrs = append(attrs, num("inkwall.llm.message_index", int64(l.GetMessageIndex())), num("inkwall.llm.offset", l.GetOffset()))
+		if t := l.GetEstimatedTokens(); t > 0 {
+			attrs = append(attrs, num("inkwall.llm.estimated_tokens", t))
+		}
+	}
 	if l := ev.GetLatency(); l != nil {
 		attrs = append(attrs, &commonpb.KeyValue{Key: "inkwall.latency_seconds", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_DoubleValue{DoubleValue: l.AsDuration().Seconds()}}})
 	}

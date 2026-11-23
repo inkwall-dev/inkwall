@@ -121,7 +121,7 @@ func LogMatches(v pipeline.Verdict) []LogMatch {
 	}
 	out := make([]LogMatch, 0, min(len(v.Matches), maxMatches))
 	for _, m := range v.Matches[:min(len(v.Matches), maxMatches)] {
-		out = append(out, LogMatch{RuleID: m.RuleID, Variable: truncate(m.Variable, maxVariable)})
+		out = append(out, LogMatch{RuleID: m.RuleID, Variable: variableOf(v, m.Variable)})
 	}
 	return out
 }

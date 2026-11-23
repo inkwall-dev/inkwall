@@ -14,7 +14,7 @@ import (
 
 // Streams reports whether streamed responses are inspected event by event
 // (ResponseConfig.Streams).
-func (e *Exchange) Streams() bool { return e.p.responses.Streams && e.p.responses.MaxBytes > 0 }
+func (e *Exchange) Streams() bool { return e.p.responses.Streams && e.maxBytes() > 0 }
 
 // HoldsEvents reports whether an adapter holds each event of a stream
 // until it is inspected: in block mode, so a denied event never goes out.
@@ -46,6 +46,7 @@ func (e *Exchange) CheckEvent(ctx context.Context, req *request.Request, stream 
 	// its verdict is the event's.
 	v.Duration = time.Since(start)
 	v.Response = true
+	v.LLMBody = e.endpoint
 	v.StreamEvent = n
 	v.Policy = p.policy
 	v.DenyResponse = p.denyResponse

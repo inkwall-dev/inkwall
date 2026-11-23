@@ -196,6 +196,17 @@ func TestRateLimitMatch(t *testing.T) {
 		{"POST", "/x%5Clogin", true},
 		{"POST", "/%EF%BC%ACogin", true},      // a fullwidth L
 		{"POST", "/%C0%AE%C0%AE/login", true}, // overlong dots: invalid UTF-8
+		// Still encoded once decoded: an application decoding twice reads
+		// /login.
+		{"POST", "/%25%36%63ogin", true},
+		{"POST", "/%256Cogin", true},
+		{"POST", "/x/%252e%252e/login", true},
+		{"POST", "/x%25%32%66..%25%32%66login", true},
+		// IIS's %u, Unicode dot and slash lookalikes.
+		{"POST", "/x%u002f..%u002flogin", true},
+		{"POST", "/x/%E2%80%A5/login", true},          // two dot leader
+		{"POST", "/x/%EF%B9%92%EF%B9%92/login", true}, // small full stops
+		{"POST", "/x%E2%88%95..%E2%88%95login", true}, // division slash
 	} {
 		// A fresh client each: its first request passes, a counted second is limited.
 		c := netip.AddrFrom4([4]byte{198, 51, 100, byte(i + 1)}).String()

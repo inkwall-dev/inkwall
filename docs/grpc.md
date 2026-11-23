@@ -72,7 +72,11 @@ spec:
   A field of binary bytes gives its runs of at least 8 readable
   characters (a control character or a byte that isn't UTF-8 ends a run), and what lies between
   the fields of a nested message (its tags, lengths and numbers) its runs of at least 4. Numbers in the message
-  itself give nothing.
+  itself give nothing. From v0.6.3, v0.5.6 and v0.4.5, a UTF-8 field that also parses as a nested
+  message whose tags, lengths and numbers are all blank is also read as one piece of text
+  ([GHSA-vg43-8vv5-x822](https://github.com/inkwall-dev/inkwall/security/advisories/GHSA-vg43-8vv5-x822)),
+  and groups are read in linear time, inside the evaluation slots and deadline
+  ([GHSA-w6pv-4769-xr6f](https://github.com/inkwall-dev/inkwall/security/advisories/GHSA-w6pv-4769-xr6f)).
 - **What the rules see:** each text field as a form argument (`ARGS`, `ARGS_POST`) named by its
   field numbers (by its path with [the schema](#messages-with-their-schema)): `1` is field 1 of the message, `2.1` field 1 of the message in field 2. An
   attack in a field (`name: "1' OR '1'='1' -- "`) is denied as in a form. `REQUEST_BODY` stays

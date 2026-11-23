@@ -1,0 +1,1 @@
+{"model":"gpt-4o-audio-preview","modalities":["text","audio"],"audio":{"voice":"alloy","format":"wav"},"messages":[{"role":"user","content":[{"type":"text","text":"What is in this recording?"},{"type":"input_audio","input_audio":{"data":"UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=","format":"wav"}}]}],"max_tokens":100}

@@ -179,15 +179,18 @@ func limitPathOf(rawURI string) (p string, ambiguous bool) {
 	raw, _, _ := strings.Cut(rawURI, "?")
 	lower := strings.ToLower(raw)
 	if raw == "" || raw[0] != '/' || strings.ContainsAny(raw, ";\\") ||
-		strings.Contains(lower, "%2f") || strings.Contains(lower, "%2e") || strings.Contains(lower, "%5c") || strings.Contains(lower, "%00") {
+		strings.Contains(lower, "%2f") || strings.Contains(lower, "%2e") || strings.Contains(lower, "%5c") || strings.Contains(lower, "%00") ||
+		strings.Contains(lower, "%u") {
 		return "", true
 	}
 	dec, err := url.PathUnescape(raw)
-	if err != nil || !utf8.ValidString(dec) || strings.Contains(dec, "//") {
+	// Still encoded once decoded (%252e, %25%32%65): an application that
+	// decodes twice reads another path.
+	if err != nil || !utf8.ValidString(dec) || strings.Contains(dec, "//") || strings.Contains(dec, "%") {
 		return "", true
 	}
 	for _, c := range dec {
-		if c < 0x20 || c == 0x7f || c >= 0xFF01 && c <= 0xFF5E {
+		if c < 0x20 || c == 0x7f || c >= 0xFF01 && c <= 0xFF5E || lookalike(c) != "" {
 			return "", true
 		}
 	}
@@ -199,6 +202,24 @@ func limitPathOf(rawURI string) (p string, ambiguous bool) {
 		return "", true // a dot segment
 	}
 	return strings.ToLower(dec), false
+}
+
+// lookalike is what an application that normalises Unicode (NFKC) reads
+// c as when c stands for a dot or a slash: "", for any other.
+func lookalike(c rune) string {
+	switch c {
+	case '\u2024', '\uFE52': // one dot leader, small full stop
+		return "."
+	case '\u2025': // two dot leader
+		return ".."
+	case '\u2026': // ellipsis
+		return "..."
+	case '\u2215', '\u2044', '\u29F8', '\uFF0F': // division and fraction slash, big solidus
+		return "/"
+	case '\uFE68', '\u29F9', '\u2216': // small and big reverse solidus, set minus
+		return "\\"
+	}
+	return ""
 }
 
 // matches reports whether l counts r, whose method is method (upper case):

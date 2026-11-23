@@ -153,6 +153,24 @@ func TestResolvePolicy(t *testing.T) {
 	// Sorted in the bundle, so a reordered list is the same bundle.
 	p.Spec.Geo = &wafv1alpha1.GeoSpec{Deny: []wafv1alpha1.CountryCode{"RU", "KP"}, Unknown: wafv1alpha1.GeoUnknownDeny, Mode: wafv1alpha1.GeoModeDetect}
 	p.Spec.DenyResponse = &wafv1alpha1.DenyResponse{ContentType: "text/html", Body: "<p>Blocked: {{request_id}}</p>"}
+	p.Spec.LLM = &wafv1alpha1.LLMSpec{
+		Endpoints: []wafv1alpha1.LLMEndpoint{
+			{Paths: []wafv1alpha1.PathPattern{"/v1/chat/completions", "/openai/*"}, Format: wafv1alpha1.LLMOpenAIChat},
+			{Paths: []wafv1alpha1.PathPattern{"/v1/messages"}, Format: wafv1alpha1.LLMAnthropicMessages},
+			{Paths: []wafv1alpha1.PathPattern{"/v1/responses"}, Format: wafv1alpha1.LLMOpenAIResponses},
+			{Paths: []wafv1alpha1.PathPattern{"/v1/embeddings"}, Format: wafv1alpha1.LLMOpenAIEmbeddings},
+		},
+		MaxBodyBytes: ptr(int64(2 << 20)),
+		RuleSetBody:  wafv1alpha1.LLMRuleSetBodyInspect,
+		Request: &wafv1alpha1.LLMRequestSpec{
+			Models:         []wafv1alpha1.LLMModelPattern{"llama-3.1-8b-instruct", "qwen2.5-*"},
+			MaxPromptBytes: ptr(int64(262144)), MaxMessages: ptr(int32(256)), MaxChoices: ptr(int32(1)), MaxOutputTokens: ptr(int64(4096)),
+			RequireOutputTokens: true,
+			ClientRoles:         []wafv1alpha1.LLMRole{"user", "assistant"},
+			Tools:               &wafv1alpha1.LLMToolsSpec{Allow: wafv1alpha1.LLMToolsListed, Names: []wafv1alpha1.LLMToolName{"search_docs"}},
+			Mode:                wafv1alpha1.PolicyDetect,
+		},
+	}
 
 	res := Resolve(Input{
 		Policies: []wafv1alpha1.WAFPolicy{p},
@@ -229,6 +247,23 @@ func TestResolvePolicy(t *testing.T) {
 		},
 		Geo:          &bundlev1.Geo{Deny: []string{"KP", "RU"}, UnknownDeny: true, Detect: true},
 		DenyResponse: &bundlev1.DenyResponse{ContentType: "text/html", Body: "<p>Blocked: {{request_id}}</p>"},
+		Llm: &bundlev1.LLM{
+			Endpoints: []*bundlev1.LLMEndpoint{
+				{Paths: []string{"/v1/chat/completions", "/openai/*"}, Format: bundlev1.LLMFormat_LLM_FORMAT_OPENAI_CHAT},
+				{Paths: []string{"/v1/messages"}, Format: bundlev1.LLMFormat_LLM_FORMAT_ANTHROPIC_MESSAGES},
+				{Paths: []string{"/v1/responses"}, Format: bundlev1.LLMFormat_LLM_FORMAT_OPENAI_RESPONSES},
+				{Paths: []string{"/v1/embeddings"}, Format: bundlev1.LLMFormat_LLM_FORMAT_OPENAI_EMBEDDINGS},
+			},
+			MaxBodyBytes: 2 << 20,
+			RuleSetBody:  true,
+			Request: &bundlev1.LLMRequestChecks{
+				Models:         []string{"llama-3.1-8b-instruct", "qwen2.5-*"},
+				MaxPromptBytes: 262144, MaxMessages: 256, MaxChoices: 1, MaxOutputTokens: 4096, RequireOutputTokens: true,
+				ClientRoles: []bundlev1.LLMRole{bundlev1.LLMRole_LLM_ROLE_USER, bundlev1.LLMRole_LLM_ROLE_ASSISTANT},
+				Tools:       bundlev1.LLMToolsAllow_LLM_TOOLS_ALLOW_LISTED, ToolNames: []string{"search_docs"},
+				Detect: true,
+			},
+		},
 	})
 	// Only the rule sets in use are in the bundle; all of them get a status.
 	var ids []string
@@ -241,6 +276,22 @@ func TestResolvePolicy(t *testing.T) {
 	if st := res.RuleSetStatus["WAFRuleSet/shop/unused"]; !st.Accepted {
 		t.Errorf("unused rule set status %+v", st)
 	}
+}
+
+// TestLLMDefaults: an unset maxBodyBytes and ruleSetBody are the engine's
+// defaults (1 MiB, Skip), and no request checks leaves only the parser's.
+func TestLLMDefaults(t *testing.T) {
+	p := policy("shop", 0, "shop")
+	p.Spec.LLM = &wafv1alpha1.LLMSpec{Endpoints: []wafv1alpha1.LLMEndpoint{{Paths: []wafv1alpha1.PathPattern{"/v1/*"}, Format: wafv1alpha1.LLMOpenAIChat}},
+		Request: &wafv1alpha1.LLMRequestSpec{Tools: &wafv1alpha1.LLMToolsSpec{Allow: wafv1alpha1.LLMToolsNone}}}
+	res := Resolve(Input{
+		Policies:  []wafv1alpha1.WAFPolicy{p},
+		Ingresses: []networkingv1.Ingress{ingress("shop", rule("", ipath("", networkingv1.PathTypePrefix)))},
+	})
+	wantProto(t, res.Policies[0].GetLlm(), &bundlev1.LLM{
+		Endpoints: []*bundlev1.LLMEndpoint{{Paths: []string{"/v1/*"}, Format: bundlev1.LLMFormat_LLM_FORMAT_OPENAI_CHAT}},
+		Request:   &bundlev1.LLMRequestChecks{Tools: bundlev1.LLMToolsAllow_LLM_TOOLS_ALLOW_NONE},
+	})
 }
 
 func TestDefaults(t *testing.T) {
