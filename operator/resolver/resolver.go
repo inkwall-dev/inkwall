@@ -342,6 +342,31 @@ func (r *resolution) resolvePolicies() {
 			pols[i] = proto.Clone(prev).(*bundlev1.Policy)
 		}
 	}
+	// The bundle has one version of each rule set: a policy that resolved
+	// ships with the current one. A previous version kept that binds a rule
+	// set that changed since, and that such a policy binds too, would ship
+	// with the new rules it wasn't checked with: it is left out.
+	current := map[string]bool{}
+	for i, c := range cands {
+		if pols[i] != nil && !c.failed {
+			for _, b := range pols[i].GetRuleSets() {
+				current[b.GetRuleSetId()] = true
+			}
+		}
+	}
+	for i, c := range cands {
+		if pols[i] == nil || !c.failed {
+			continue
+		}
+		for _, b := range pols[i].GetRuleSets() {
+			id := b.GetRuleSetId()
+			if current[id] && !proto.Equal(r.ruleSets[id], previousRuleSets[id]) {
+				c.status.Message += fmt.Sprintf("; but its previous version binds rule set %s, which changed since and which other policies use as it is now, so the policy is left out", id)
+				pols[i] = nil
+				break
+			}
+		}
+	}
 
 	// A route of several policies (from routes with the same host and path)
 	// goes to the most specific target, then to the older policy. A route
@@ -376,6 +401,7 @@ func (r *resolution) resolvePolicies() {
 	removed := r.overlaps(cands, pols, func(i int, m *bundlev1.RouteMatch) bool { return routeOwner[routeKey(m)].i == i })
 
 	used := map[string]*bundlev1.RuleSet{}
+	shipped := map[string]*candidate{} // by policy ID
 	for i, c := range cands {
 		pol := pols[i]
 		if pol == nil {
@@ -417,11 +443,17 @@ func (r *resolution) resolvePolicies() {
 				c.status.Message, strings.Join(shadowed, ", "))
 		}
 		for _, b := range pol.GetRuleSets() {
-			used[b.GetRuleSetId()] = usedRuleSets[b.GetRuleSetId()]
+			// A rule set a policy that resolved binds ships as it is now,
+			// whatever the order of the policies.
+			if id := b.GetRuleSetId(); !c.failed || !current[id] {
+				used[id] = usedRuleSets[id]
+			}
 		}
 		c.status.Applied = !c.failed
 		r.out.Policies = append(r.out.Policies, pol)
+		shipped[pol.GetId()] = c
 	}
+	r.checkBundle(shipped, used)
 	// After every policy's routes: an overlap is reported on both.
 	for _, c := range cands {
 		c.reportOverlaps()
@@ -435,6 +467,42 @@ func (r *resolution) resolvePolicies() {
 		}
 	}
 	slices.SortFunc(r.out.RuleSets, func(a, b *bundlev1.RuleSet) int { return cmp.Compare(a.GetId(), b.GetId()) })
+}
+
+// checkBundle checks each policy of the bundle (r.out.Policies, shipped:
+// their candidates by ID) with the rule sets it ships with (used, by ID),
+// as the engine compiles the bundle, and leaves out those that don't
+// compile, and the rule sets no policy left binds: whatever got them
+// there, one would make every engine refuse the bundle. The rule sets
+// don't change with the policies left out, so one pass is enough.
+func (r *resolution) checkBundle(shipped map[string]*candidate, used map[string]*bundlev1.RuleSet) {
+	kept := r.out.Policies[:0]
+	for _, pol := range r.out.Policies {
+		_, err := r.checkPolicy(pol, used)
+		if err == nil {
+			kept = append(kept, pol)
+			continue
+		}
+		c := shipped[pol.GetId()]
+		if c.failed {
+			c.status.Message += "; its previous version doesn't compile with the rule sets in the bundle either, so the policy is left out"
+		} else {
+			c.fail(ReasonRuleSetsIncompatible, fmt.Sprintf("it doesn't compile with the rule sets in the bundle, so it is left out: %v", err))
+			c.status.Applied = false
+		}
+	}
+	r.out.Policies = kept
+	bound := map[string]bool{}
+	for _, pol := range kept {
+		for _, b := range pol.GetRuleSets() {
+			bound[b.GetRuleSetId()] = true
+		}
+	}
+	for id := range used {
+		if !bound[id] {
+			delete(used, id)
+		}
+	}
 }
 
 // reportOverlaps adds the routes the policy shares with policies of other
