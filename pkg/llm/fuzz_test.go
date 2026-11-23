@@ -515,13 +515,62 @@ func seeds() []string {
 		`{"input":["a","b"]}`, `{"input":[[1,2],[3]]}`, `{"input":[1,2]}`, `{"input":"x"}`,
 		`{"system":[{"type":"text","text":"s"}],"messages":[{"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"t"}]}]}],"max_tokens":9}`,
 		`{"max_tokens":4.096e3,"n":1e30}`, `{"model":"a\u00e9\ud83d\ude00"}`, `{"x":[[[{"y":null}]]]}`,
-		`{"model":"a","model":"b"}`, `{"max_tokens":1.5}`, "{\"model\":\"\xff\"}", `{"a":[1,]}`,
+		`{"model":"a","model":"b"}`, `{"max_tokens":1.5}`, `{"Model":"x","MESSAGES":[{"Role":"system"}],"Max_Tokens":5}`, "{\"\u017Ftream\":true,\"max_to\u212Aens\":9}", "{\"model\":\"\xff\"}", `{"a":[1,]}`,
+	}
+}
+
+// goRequest is a request as a model server in Go decodes it into its
+// structs (Ollama, LocalAI): encoding/json matches keys case-insensitively,
+// with Unicode folding, and keeps the last.
+type goRequest struct {
+	Model               *string           `json:"model"`
+	Messages            []json.RawMessage `json:"messages"`
+	MaxTokens           *json.Number      `json:"max_tokens"`
+	MaxCompletionTokens *json.Number      `json:"max_completion_tokens"`
+	MaxOutputTokens     *json.Number      `json:"max_output_tokens"`
+	N                   *json.Number      `json:"n"`
+	Stream              *bool             `json:"stream"`
+}
+
+// goView compares what Parse read of body with what a Go server's structs
+// read: the same model, messages, output limit, n and stream. It skips
+// bodies such a server refuses (a type its struct can't take).
+func goView(t *testing.T, body []byte, f Format, r *Request) {
+	var g goRequest
+	if err := json.Unmarshal(body, &g); err != nil {
+		return
+	}
+	if g.Model != nil && len(*g.Model) <= MaxModelBytes && (!r.HasModel || string(r.Model()) != *g.Model) {
+		t.Fatalf("a Go server reads model %q, Parse %q", *g.Model, r.Model())
+	}
+	if (f == OpenAIChat || f == AnthropicMessages) && int64(len(g.Messages)) != r.Messages {
+		t.Fatalf("a Go server reads %d messages, Parse %d", len(g.Messages), r.Messages)
+	}
+	limit := map[Format]*json.Number{OpenAIResponses: g.MaxOutputTokens, AnthropicMessages: g.MaxTokens}[f]
+	if f == OpenAIChat {
+		limit = g.MaxCompletionTokens
+		if limit == nil {
+			limit = g.MaxTokens
+		}
+	}
+	if limit != nil {
+		if v, ok, err := refInt(*limit); err == nil && ok && (!r.HasOutputTokens || r.OutputTokens < v) {
+			t.Fatalf("a Go server reads an output limit of %d, Parse %d (%v)", v, r.OutputTokens, r.HasOutputTokens)
+		}
+	}
+	if f == OpenAIChat && g.N != nil {
+		if v, ok, err := refInt(*g.N); err == nil && ok && r.Choices != v {
+			t.Fatalf("a Go server reads n %d, Parse %d", v, r.Choices)
+		}
+	}
+	if f != OpenAIEmbeddings && g.Stream != nil && *g.Stream != r.Stream {
+		t.Fatalf("a Go server reads stream %v, Parse %v", *g.Stream, r.Stream)
 	}
 }
 
 // FuzzParse: Parse never panics nor reads out of its bounds, refuses what
 // encoding/json refuses, and on a body it accepts reads what encoding/json
-// reads.
+// reads, into a map and into a Go server's structs.
 func FuzzParse(f *testing.F) {
 	for _, s := range seeds() {
 		for _, format := range Formats {
@@ -544,6 +593,7 @@ func FuzzParse(f *testing.F) {
 		if bytes.Count(body, []byte("[")) > 10000 {
 			return // encoding/json's recursion, not ours
 		}
+		goView(t, body, fm, &r)
 		want, err := refRead(body, fm)
 		if errors.Is(err, errSkip) {
 			return

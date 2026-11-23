@@ -673,6 +673,68 @@ const (
 	fCustom
 )
 
+// The keys each object read has, which a key Go's encoding/json would
+// read as one of them may not imitate (unread).
+var (
+	topKeys = [numFormats][]string{
+		OpenAIChat:        {"model", "messages", "max_tokens", "max_completion_tokens", "n", "stream", "tools", "functions"},
+		OpenAIResponses:   {"model", "input", "instructions", "max_output_tokens", "stream", "tools"},
+		OpenAIEmbeddings:  {"model", "input"},
+		AnthropicMessages: {"model", "messages", "max_tokens", "stream", "tools", "system"},
+	}
+	messageKeys  = []string{"role", "content", "tool_calls", "function_call"}
+	partKeys     = []string{"type", "text", "content", "output"}
+	toolCallKeys = []string{"function"}
+	functionKeys = []string{"arguments"}
+	itemKeys     = []string{"role", "type", "content", "output", "arguments"}
+	toolKeys     = []string{"name", "type", "function", "custom"}
+	nestedKeys   = []string{"name"}
+)
+
+// unread skips the value of k, a key the object's reading doesn't read,
+// at depth, unless Go's encoding/json would read it as one of the keys
+// read: its decoders match keys case-insensitively, with Unicode folding
+// (the Kelvin sign for k, the long s for s), and keep the last, so a
+// server in Go (Ollama, LocalAI) would read "Messages" or "MAX_TOKENS"
+// after this parser read "messages" and "max_tokens". Such a key is
+// malformed.
+func (p *parser) unread(k []byte, depth int, keys []string) {
+	for _, known := range keys {
+		if foldsTo(k, known) {
+			p.fail("a key differing only in case from one read")
+			return
+		}
+	}
+	p.skip(depth)
+}
+
+// foldsTo reports whether k isn't known, an ASCII key, but equals it in
+// Unicode simple case folding, as encoding/json compares keys.
+func foldsTo(k []byte, known string) bool {
+	if string(k) == known || len(k) < len(known) {
+		return false
+	}
+	i := 0
+	for _, c := range []byte(known) {
+		if i >= len(k) {
+			return false
+		}
+		r, size := rune(k[i]), 1
+		if r >= utf8.RuneSelf {
+			r, size = utf8.DecodeRune(k[i:])
+		}
+		i += size
+		switch {
+		case r == rune(c):
+		case 'a' <= c && c <= 'z' && r == rune(c-'a'+'A'):
+		case c == 'k' && r == '\u212A', c == 's' && r == '\u017F':
+		default:
+			return false
+		}
+	}
+	return i == len(k)
+}
+
 // once refuses a key read twice in one object: parsers keep the first or
 // the last, so a server could read the one this parser didn't.
 func (p *parser) once(seen *uint32, f uint32) bool {
@@ -777,7 +839,7 @@ func (p *parser) top() {
 			out.addRole(RoleSystem, -1, keyAt)
 			p.content(2, false)
 		default:
-			p.skip(2)
+			p.unread(k, 2, topKeys[p.format])
 		}
 		if p.err {
 			return
@@ -897,7 +959,7 @@ func (p *parser) message(index int64) {
 			}
 			p.function(4)
 		default:
-			p.skip(4)
+			p.unread(k, 4, messageKeys)
 		}
 		if p.err {
 			return
@@ -1011,7 +1073,7 @@ func (p *parser) part(depth int, inner bool) {
 				p.skip(depth + 1)
 			}
 		default:
-			p.skip(depth + 1)
+			p.unread(k, depth+1, partKeys)
 		}
 		if p.err {
 			return
@@ -1058,7 +1120,7 @@ func (p *parser) toolCalls() {
 				}
 				p.function(6)
 			} else {
-				p.skip(6)
+				p.unread(k, 6, toolCallKeys)
 			}
 			if p.err {
 				return
@@ -1093,7 +1155,7 @@ func (p *parser) function(depth int) {
 				p.out.PromptBytes += n
 			}
 		} else {
-			p.skip(depth + 1)
+			p.unread(k, depth+1, functionKeys)
 		}
 		if p.err {
 			return
@@ -1202,7 +1264,7 @@ func (p *parser) item(index int64) {
 				p.skip(4)
 			}
 		default:
-			p.skip(4)
+			p.unread(k, 4, itemKeys)
 		}
 		if p.err {
 			return
@@ -1402,7 +1464,7 @@ func (p *parser) toolArray(sink *toolSink) int {
 					name, hasName = n, true
 				}
 			default:
-				p.skip(4)
+				p.unread(k, 4, toolKeys)
 			}
 			if p.err {
 				return count
@@ -1461,7 +1523,7 @@ func (p *parser) nested(buf []byte) ([]byte, bool) {
 			}
 			name, has = p.name(buf)
 		} else {
-			p.skip(5)
+			p.unread(k, 5, nestedKeys)
 		}
 		if p.err {
 			return nil, false
