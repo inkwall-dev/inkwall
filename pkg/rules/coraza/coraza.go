@@ -491,6 +491,21 @@ type negations struct {
 	rules map[variableName]map[int]bool
 }
 
+// compiledIn reports whether x has target exclusions on rules that negate
+// their collection, which are compiled in (targetVariants). Most policies
+// have none: it finds out without allocating.
+func (n *negations) compiledIn(x *exclusions) bool {
+	if slices.ContainsFunc(x.targets, n.has) {
+		return true
+	}
+	for i := range x.paths {
+		if slices.ContainsFunc(x.paths[i].targets, n.has) {
+			return true
+		}
+	}
+	return false
+}
+
 // has reports whether t's rule negates targets of t's collection.
 func (n *negations) has(t target) bool {
 	return n.all[t.variable] || n.rules[t.variable][t.rule]
@@ -506,6 +521,20 @@ func userNegations(cfg Config) map[variableName]bool {
 		all[v] = include || rx.MatchString(text)
 	}
 	return all
+}
+
+// ruleNegations are the rules of cfg that negate targets of each
+// collection themselves.
+func ruleNegations(cfg Config) (*negations, error) {
+	neg := &negations{all: userNegations(cfg)}
+	if !cfg.DisableCRS {
+		crs, err := crsNegations()
+		if err != nil {
+			return nil, err
+		}
+		neg.rules = crs.rules
+	}
+	return neg, nil
 }
 
 // crsNegations parses the CRS and coraza.conf-recommended for the rules
@@ -629,13 +658,9 @@ func New(cfg Config) (*Evaluator, error) {
 	if _, err := compileExclusions(list); err != nil {
 		return nil, err
 	}
-	neg := &negations{all: userNegations(cfg)}
-	if !cfg.DisableCRS {
-		crs, err := crsNegations()
-		if err != nil {
-			return nil, err
-		}
-		neg.rules = crs.rules
+	neg, err := ruleNegations(cfg)
+	if err != nil {
+		return nil, err
 	}
 	private := &privateRules{cfg: cfg, ids: map[int]bool{}, negations: neg}
 	waf, err := compile(cfg, func(r types.RuleMetadata) { private.ids[r.ID()] = true })
@@ -762,12 +787,7 @@ type targetVariants struct {
 // variants compiles the rule sets for x's target exclusions on rules that
 // negate their collection, and takes those out of x; nil if it has none.
 func (p *privateRules) variants(x *exclusions) (*targetVariants, error) {
-	// Most policies have no such exclusion: find out without allocating.
-	needed := slices.ContainsFunc(x.targets, p.negations.has)
-	for i := 0; !needed && i < len(x.paths); i++ {
-		needed = slices.ContainsFunc(x.paths[i].targets, p.negations.has)
-	}
-	if !needed {
+	if !p.negations.compiledIn(x) {
 		return nil, nil
 	}
 	split := func(ts []target) (keep, out []target) {
