@@ -661,8 +661,10 @@ func (x *Bundle) GetGrpcSchemas() []*GRPCSchema {
 // number. Engines check its integers on load and never parse descriptors.
 type GRPCSchema struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Hex SHA-256 of methods and messages as serialized: names the schema in
-	// BodyConfig.grpc_schema_id, and in the engine's cache.
+	// Hex SHA-256 of the SHA-256 of methods and messages as serialized, and
+	// the source: names the schema in BodyConfig.grpc_schema_id, and in the
+	// engine's cache. Policies share an entry when they name the same
+	// ConfigMap key with the same content.
 	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	// Sorted by path, each once.
 	Methods []*GRPCMethod `protobuf:"bytes,2,rep,name=methods,proto3" json:"methods,omitempty"`

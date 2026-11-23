@@ -17,6 +17,7 @@ import (
 	"io"
 	"slices"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
@@ -39,13 +40,38 @@ const (
 	gzipMagic1       = 0x8b
 	typeURLFieldName = "type_url"
 	valueFieldName   = "value"
+	// MaxFiles and MaxImports bound a set's files and their imports.
+	MaxFiles   = 4096
+	MaxImports = 65536
+	// MaxImportPaths bounds the import paths protodesc walks: through
+	// public imports, a file sees what its imports publicly import, and so
+	// on, and protodesc walks every path, which a chain of files each
+	// publicly importing all earlier ones makes exponential (30 files of
+	// 6.5 KB took 28 s). Real sets have a handful of public imports.
+	MaxImportPaths = 100000
 )
+
+// Timeout is how long protodesc may take on a set (a backstop past the
+// bounds above): a set it doesn't finish in time is refused, and, as any
+// set that doesn't compile, cached as such.
+var Timeout = 10 * time.Second
 
 // Compile compiles data, a serialized FileDescriptorSet, raw or gzipped,
 // into a schema whose source is source ("namespace/configmap/key"). The
 // set must include its imports and describe at least one service. An error
 // says what failed, naming the file or type where there is one.
-func Compile(data []byte, source string) (s *bundlev1.GRPCSchema, err error) {
+func Compile(data []byte, source string) (*bundlev1.GRPCSchema, error) {
+	s, err := compileContent(data)
+	if err != nil {
+		return nil, err
+	}
+	name(s, source)
+	return s, nil
+}
+
+// compileContent compiles data into a schema without its source, whose Id
+// is its content's hash.
+func compileContent(data []byte) (s *bundlev1.GRPCSchema, err error) {
 	defer func() {
 		// protodesc on a hostile set: a panic is a set that isn't valid.
 		if r := recover(); r != nil {
@@ -59,16 +85,115 @@ func Compile(data []byte, source string) (s *bundlev1.GRPCSchema, err error) {
 	for _, f := range set.GetFile() {
 		f.SourceCodeInfo = nil
 	}
-	files, err := protodesc.NewFiles(set)
+	if err := checkImports(set); err != nil {
+		return nil, err
+	}
+	files, err := newFiles(set)
 	if err != nil {
 		return nil, err
 	}
-	s, err = compileFiles(files)
-	if err != nil {
-		return nil, err
+	return compileFiles(files)
+}
+
+// name sets s's source, and its id from its content (the hash compileFiles
+// left in Id) and its source: policies share an entry only when they name
+// the same ConfigMap key, so an entry never names another namespace's
+// ConfigMap.
+func name(s *bundlev1.GRPCSchema, source string) {
+	sum := sha256.Sum256([]byte(s.GetId() + "\n" + source))
+	s.Id, s.Source = hex.EncodeToString(sum[:]), source
+}
+
+// newFiles is protodesc.NewFiles, within Timeout. On a timeout its
+// goroutine is left to finish: the bounds of checkImports keep that from
+// happening on any set they let through.
+func newFiles(set *descriptorpb.FileDescriptorSet) (*protoregistry.Files, error) {
+	type result struct {
+		files *protoregistry.Files
+		err   error
 	}
-	s.Source = source
-	return s, nil
+	done := make(chan result, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- result{err: fmt.Errorf("not a valid descriptor set: %v", r)}
+			}
+		}()
+		files, err := protodesc.NewFiles(set)
+		done <- result{files, err}
+	}()
+	timer := time.NewTimer(Timeout)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		return r.files, r.err
+	case <-timer.C:
+		return nil, fmt.Errorf("its descriptors take over %v to check", Timeout)
+	}
+}
+
+// checkImports bounds a set's import graph before protodesc walks it
+// (MaxFiles, MaxImports, MaxImportPaths), and refuses an import cycle.
+func checkImports(set *descriptorpb.FileDescriptorSet) error {
+	files := set.GetFile()
+	if len(files) > MaxFiles {
+		return fmt.Errorf("%d files, over %d", len(files), MaxFiles)
+	}
+	byName := make(map[string]*descriptorpb.FileDescriptorProto, len(files))
+	imports := 0
+	for _, f := range files {
+		byName[f.GetName()] = f
+		if imports += len(f.GetDependency()); imports > MaxImports {
+			return fmt.Errorf("over %d imports", MaxImports)
+		}
+	}
+	// visible[f]: the files f makes visible to a file importing it, along
+	// every path: itself, and what its public imports make visible.
+	visible := map[string]int{}
+	const visiting = -1
+	var count func(name string) (int, error)
+	count = func(name string) (int, error) {
+		switch n, ok := visible[name]; {
+		case ok && n == visiting:
+			return 0, fmt.Errorf("file %s: an import cycle", name)
+		case ok:
+			return n, nil
+		}
+		visible[name] = visiting
+		n := 1
+		f := byName[name]
+		deps := f.GetDependency()
+		for _, i := range f.GetPublicDependency() {
+			if i < 0 || int(i) >= len(deps) {
+				return 0, fmt.Errorf("file %s: public import %d out of range", name, i)
+			}
+			m, err := count(deps[i])
+			if err != nil {
+				return 0, err
+			}
+			if n += m; n > MaxImportPaths {
+				return 0, fmt.Errorf("file %s: public imports chained over %d paths", name, MaxImportPaths)
+			}
+		}
+		visible[name] = n
+		return n, nil
+	}
+	paths := 0
+	for _, f := range files {
+		for _, d := range f.GetDependency() {
+			if _, ok := byName[d]; !ok {
+				continue // protodesc names the missing import
+			}
+			n, err := count(d)
+			if err != nil {
+				return err
+			}
+			if paths += n; paths > MaxImportPaths {
+				return fmt.Errorf("file %s: its imports and public imports make over %d import paths", f.GetName(), MaxImportPaths)
+			}
+		}
+	}
+	return nil
 }
 
 // decode reads a FileDescriptorSet, gunzipping it first if it is gzip.
@@ -335,7 +460,7 @@ type Cache struct {
 }
 
 type entry struct {
-	schema *bundlev1.GRPCSchema // without its source
+	schema *bundlev1.GRPCSchema // without its source; Id its content's hash
 	err    error
 }
 
@@ -354,7 +479,7 @@ func (c *Cache) Compile(data []byte, source string) (*bundlev1.GRPCSchema, [sha2
 	e, ok := c.entries[key]
 	c.mu.Unlock()
 	if !ok {
-		e.schema, e.err = Compile(data, "")
+		e.schema, e.err = compileContent(data)
 		c.mu.Lock()
 		c.entries[key] = e
 		c.mu.Unlock()
@@ -363,7 +488,7 @@ func (c *Cache) Compile(data []byte, source string) (*bundlev1.GRPCSchema, [sha2
 		return nil, key, e.err
 	}
 	s := proto.CloneOf(e.schema)
-	s.Source = source
+	name(s, source)
 	return s, key, nil
 }
 
