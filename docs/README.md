@@ -101,6 +101,8 @@ Every doc in this repository, by topic, with the question each one answers.
   reach a SIEM (Splunk, Elastic, Loki, Datadog), with or without the control plane?
 - [0011 — Geo Blocking](design/0011-geo-blocking.md): how does a policy allow or deny clients by
   country, where does the country database come from, and how does it reach the engines?
+- [0012 — Protecting LLM APIs](design/0012-llm-api-protection.md): what can Inkwall do for an
+  LLM API against the OWASP Top 10 for LLM Applications, what can't it, and at what cost?
 
 ## Contributing
 
