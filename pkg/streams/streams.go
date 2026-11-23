@@ -17,6 +17,7 @@ import (
 	"mime"
 	"strings"
 
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema"
 	"github.com/inkwall-dev/inkwall/pkg/grpcwire"
 )
 
@@ -79,6 +80,11 @@ type Event struct {
 	// message in field 2): what a request message's rules see (#315).
 	// Nil for SSE.
 	Fields []grpcwire.Field
+	// Described: the gRPC message was read with its schema
+	// (WithGRPCSchema), and Unknown is how many of its fields the schema
+	// doesn't describe.
+	Described bool
+	Unknown   int
 	// Unframed: the stream isn't gRPC framing (a flag other than 0 or 1),
 	// with Truncated; nothing more of it is inspected. Unlike a message
 	// cut at the limit, it says the body isn't gRPC at all.
@@ -120,12 +126,23 @@ type Splitter struct {
 	compressed bool
 	skipLeft   int64
 	broken     bool
+	// schema, typ: what a gRPC stream's messages are read with; nil:
+	// without a schema.
+	schema *grpcschema.Schema
+	typ    *grpcschema.Message
 }
 
 // New returns a Splitter for a stream of kind, whose events are inspected
 // up to max bytes each; encoding is a gRPC stream's grpc-encoding.
 func New(kind Kind, max int64, encoding string) *Splitter {
 	return &Splitter{kind: kind, max: max, encoding: strings.ToLower(strings.TrimSpace(encoding))}
+}
+
+// WithGRPCSchema reads a gRPC stream's messages as messages of type t of
+// schema s (grpcwire.Fields), and returns the Splitter.
+func (s *Splitter) WithGRPCSchema(schema *grpcschema.Schema, t *grpcschema.Message) *Splitter {
+	s.schema, s.typ = schema, t
+	return s
 }
 
 // Pending returns how many bytes at the end of what was written belong to
@@ -345,7 +362,14 @@ func (s *Splitter) grpcEvent(cut bool) Event {
 		}
 		data = out
 	}
-	fields, whole := grpcwire.Strings(data, grpcLimits, nil)
+	var fields []grpcwire.Field
+	var whole bool
+	var unknown int
+	if s.typ != nil {
+		fields, unknown, whole = grpcwire.Fields(data, s.schema, s.typ, grpcLimits, nil)
+	} else {
+		fields, whole = grpcwire.Strings(data, grpcLimits, nil)
+	}
 	var text []byte
 	for i, f := range fields {
 		if i > 0 {
@@ -353,5 +377,6 @@ func (s *Splitter) grpcEvent(cut bool) Event {
 		}
 		text = append(text, f.Value...)
 	}
-	return Event{Data: text[:min(int64(len(text)), s.max)], Fields: fields, Truncated: cut || !whole && len(data) > 0}
+	return Event{Data: text[:min(int64(len(text)), s.max)], Fields: fields, Truncated: cut || !whole && len(data) > 0,
+		Described: s.typ != nil, Unknown: unknown}
 }

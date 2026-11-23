@@ -167,6 +167,8 @@ Engine metrics carry `adapter` where it says so (`proxy`, `forwardauth`, `httpch
 | `inkwall_bundle_updates_total` | counter | `result`, `reason` | Bundles received: `applied`, or `rejected` with a reason (`signature`, `older`, `compile`, `other`). |
 | `inkwall_bundle_compile_seconds` | histogram | | Time compiling a bundle's policies. |
 | `inkwall_bundle_applied_timestamp_seconds` | gauge | | When the enforced bundle was applied (Unix time): its age is `time()` minus it. |
+| `inkwall_grpc_messages_read_total` | counter | `adapter`, `schema` (and `policy` with policy metrics) | gRPC request messages read for the rules (`grpcMessages: Inspect`): `described`, read with the policy's [gRPC schema](grpc.md), or `undescribed`, read without one (the method isn't in the schema, or the policy has none). |
+| `inkwall_grpc_unknown_fields_total` | counter | `adapter` (and `policy` with policy metrics) | Fields of described messages the schema doesn't describe, read without it: a rising count means the schema is older than the application. |
 | `inkwall_geo_denied_total` | counter | `action`, `country` | Requests geo blocking denied (`deny`) or would have (`log`), by country: the code, or `unknown`. |
 | `inkwall_geo_lookups_total` | counter | `result` | Country lookups for geo policies, one per request: `country`, `private` (most of them means the client IP is a load balancer's), `unknown`, `no-table`. |
 | `inkwall_geo_table_bytes` | gauge | | The size in memory of the country table the engine holds for geo blocking; 0 without one. |

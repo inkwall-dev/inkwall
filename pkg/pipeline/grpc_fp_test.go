@@ -6,6 +6,7 @@ package pipeline_test
 import (
 	"context"
 	"math/rand/v2"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,40 +41,16 @@ const idArgumentsLimit = 200005
 // 1 message in 10,000 with four 1-24 byte fields, which is why
 // GRPCMessages is off by default.
 //
-// Only a rule's match counts as a false positive. A message the rules
-// didn't finish with (the deadline, no free evaluation slot: a loaded
-// machine, #325) is tried again, and fails the test as not inspected,
-// never as denied.
+// Only a rule's match counts as a false positive, and only one on text the
+// reader made up: a whole value the rules deny wherever it is (a field
+// whose JSON name is "builtin", 932260's shell builtin) is CRS's, as it is
+// in a form. A message the rules didn't finish with (the deadline, no free
+// evaluation slot: a loaded machine, #325) is tried again, and fails the
+// test as not inspected, never as denied.
 func TestGRPCMessagesFalsePositives(t *testing.T) {
 	p := messagesPipeline(t, pipeline.ModeBlock, true)
-	check := func(kind string, msg []byte) pipeline.Verdict {
-		t.Helper()
-		return inspected(t, kind, func() pipeline.Verdict {
-			return p.Check(context.Background(), grpcCall("/pkg.Service/Method", "application/grpc", grpcFrame(msg)))
-		})
-	}
-
-	var files, tooMany int
-	protoregistry.GlobalFiles.RangeFiles(func(fd protoreflect.FileDescriptor) bool {
-		msg, err := proto.Marshal(protodesc.ToFileDescriptorProto(fd))
-		if err != nil {
-			t.Fatal(err)
-		}
-		files++
-		v := check(fd.Path(), msg)
-		switch {
-		case v.Action != pipeline.ActionDeny:
-		case v.InterruptingRuleID == idArgumentsLimit:
-			tooMany++
-		default:
-			t.Errorf("%s: a false positive: denied by rules %v, matches %+v", fd.Path(), v.RuleIDs, v.Matches)
-		}
-		return true
-	})
-	if files < 50 {
-		t.Fatalf("%d descriptors, want a corpus", files)
-	}
-	t.Logf("%d descriptors: %d over the argument limit, none denied by CRS", files, tooMany)
+	check := checker(t, p, "/pkg.Service/Method")
+	descriptorFalsePositives(t, check)
 
 	var text []byte
 	for i, s := range everyday {
@@ -111,6 +88,65 @@ func TestGRPCMessagesFalsePositives(t *testing.T) {
 	if denied > n/1000 {
 		t.Errorf("%d of %d messages of random bytes denied, want at most 1 in 1000", denied, n)
 	}
+}
+
+// checker returns how p decides a call of method with one message.
+func checker(t *testing.T, p *pipeline.Pipeline, method string) func(kind string, msg []byte) pipeline.Verdict {
+	return func(kind string, msg []byte) pipeline.Verdict {
+		t.Helper()
+		return inspected(t, kind, func() pipeline.Verdict {
+			return p.Check(context.Background(), grpcCall(method, "application/grpc", grpcFrame(msg)))
+		})
+	}
+}
+
+// descriptorFalsePositives checks every protobuf file linked in the test,
+// as a FileDescriptorProto, with check: none may be denied by CRS for text
+// the reader made up.
+func descriptorFalsePositives(t *testing.T, check func(string, []byte) pipeline.Verdict) {
+	t.Helper()
+	var files, tooMany, anywhere int
+	protoregistry.GlobalFiles.RangeFiles(func(fd protoreflect.FileDescriptor) bool {
+		msg, err := proto.Marshal(protodesc.ToFileDescriptorProto(fd))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files++
+		v := check(fd.Path(), msg)
+		switch {
+		case v.Action != pipeline.ActionDeny:
+		case v.InterruptingRuleID == idArgumentsLimit:
+			tooMany++
+		case deniedAnywhere(check, v):
+			anywhere++
+			t.Logf("%s: denied for text CRS denies in any field: %+v", fd.Path(), v.Matches)
+		default:
+			t.Errorf("%s: a false positive: denied by rules %v, matches %+v", fd.Path(), v.RuleIDs, v.Matches)
+		}
+		return true
+	})
+	if files < 50 {
+		t.Fatalf("%d descriptors, want a corpus", files)
+	}
+	t.Logf("%d descriptors: %d over the argument limit, %d for text denied anywhere, none denied by CRS otherwise", files, tooMany, anywhere)
+}
+
+// deniedAnywhere reports whether every value v's rules matched is denied
+// on its own, as the one string of a message: text the rules deny in any
+// field, as in a form, not text the reader made up.
+func deniedAnywhere(check func(string, []byte) pipeline.Verdict, v pipeline.Verdict) bool {
+	found := false
+	for _, m := range v.Matches {
+		if !strings.HasPrefix(m.Variable, "ARGS") {
+			continue
+		}
+		found = true
+		alone := protowire.AppendString(protowire.AppendTag(nil, 1, protowire.BytesType), m.Value)
+		if check("alone", alone).Action != pipeline.ActionDeny {
+			return false
+		}
+	}
+	return found
 }
 
 // everyday is text that application messages carry.

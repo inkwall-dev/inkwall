@@ -17,11 +17,13 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/known/anypb"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	"github.com/inkwall-dev/inkwall/pkg/grpcschema"
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema/load"
 )
 
 // setOf returns the descriptor set of files and their imports, serialized.
@@ -141,14 +143,14 @@ const (
 	tDouble  = descriptorpb.FieldDescriptorProto_TYPE_DOUBLE
 )
 
-// load compiles data and loads it as an engine does.
-func load(t *testing.T, data []byte) (*bundlev1.GRPCSchema, *grpcschema.Schema) {
+// loadSet compiles data and loads it as an engine does.
+func loadSet(t *testing.T, data []byte) (*bundlev1.GRPCSchema, *grpcschema.Schema) {
 	t.Helper()
 	c, err := Compile(data, "ns/cm/key")
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
-	s, err := grpcschema.Load(c)
+	s, err := load.Load(c)
 	if err != nil {
 		t.Fatalf("Load of a compiled schema: %v", err)
 	}
@@ -157,7 +159,7 @@ func load(t *testing.T, data []byte) (*bundlev1.GRPCSchema, *grpcschema.Schema) 
 
 func TestCompileHealth(t *testing.T) {
 	data := setOf(t, grpc_health_v1.File_grpc_health_v1_health_proto)
-	c, s := load(t, data)
+	c, s := loadSet(t, data)
 	if s.Source() != "ns/cm/key" || len(c.GetId()) != 64 {
 		t.Fatalf("source %q, id %q", s.Source(), c.GetId())
 	}
@@ -172,7 +174,7 @@ func TestCompileHealth(t *testing.T) {
 		t.Fatal("an undescribed method, or another case, is described")
 	}
 	// Gzipped: the same schema.
-	gc, _ := load(t, gz(t, data))
+	gc, _ := loadSet(t, gz(t, data))
 	if gc.GetId() != c.GetId() {
 		t.Fatal("gzipped set compiles to another schema")
 	}
@@ -212,7 +214,7 @@ func TestCompileKinds(t *testing.T) {
 	fp := f.proto()
 	fp.EnumType = []*descriptorpb.EnumDescriptorProto{{Name: proto.String("Color"), Value: []*descriptorpb.EnumValueDescriptorProto{{Name: proto.String("RED"), Number: proto.Int32(0)}}}}
 	data := marshal(t, &descriptorpb.FileDescriptorSet{File: []*descriptorpb.FileDescriptorProto{fp}})
-	c, s := load(t, data)
+	c, s := loadSet(t, data)
 	o := s.Method("/p.Svc/M0")
 	want := map[protowire.Number][3]any{
 		1: {"name", grpcschema.KindString, false}, 2: {"blob", grpcschema.KindBytes, false},
@@ -221,8 +223,8 @@ func TestCompileKinds(t *testing.T) {
 		7: {"d", grpcschema.KindFixed64, false}, 8: {"labels", grpcschema.KindMessage, true},
 		9: {"grp", grpcschema.KindGroup, false}, 100: {"[p.note]", grpcschema.KindString, false},
 	}
-	if len(o.Fields()) != len(want) {
-		t.Fatalf("%d fields, want %d", len(o.Fields()), len(want))
+	if o.Fields() != len(want) {
+		t.Fatalf("%d fields, want %d", o.Fields(), len(want))
 	}
 	for num, w := range want {
 		fd := o.Field(num)
@@ -260,7 +262,7 @@ func TestCompileAnyKeepsEverything(t *testing.T) {
 		s.File = append(s.File, protodesc.ToFileDescriptorProto(anypb.File_google_protobuf_any_proto), f.proto())
 		return marshal(t, &s)
 	}
-	_, s := load(t, data("Item"))
+	_, s := loadSet(t, data("Item"))
 	a := s.Method("/p.Svc/M0").Field(1).Message
 	if !a.Any || a.FullName != "google.protobuf.Any" {
 		t.Fatalf("payload's type %+v", a)
@@ -274,7 +276,7 @@ func TestCompileAnyKeepsEverything(t *testing.T) {
 }
 
 func TestCompileRecursive(t *testing.T) {
-	_, s := load(t, set(t, file{name: "p.proto", pkg: "p", syntax: "proto3",
+	_, s := loadSet(t, set(t, file{name: "p.proto", pkg: "p", syntax: "proto3",
 		messages: []*descriptorpb.DescriptorProto{msg("Node", field("name", 1, tString, ""), repeated(field("children", 2, tMessage, ".p.Node")))},
 		methods:  [][2]string{{".p.Node", ".p.Node"}},
 	}))
@@ -288,8 +290,8 @@ func TestCompileDeterministic(t *testing.T) {
 	a := file{name: "a.proto", pkg: "a", syntax: "proto3", messages: []*descriptorpb.DescriptorProto{msg("A", field("x", 1, tString, ""))}}
 	b := file{name: "b.proto", pkg: "b", syntax: "proto3", deps: []string{"a.proto"},
 		messages: []*descriptorpb.DescriptorProto{msg("B", field("a", 1, tMessage, ".a.A"))}, methods: [][2]string{{".b.B", ".a.A"}}}
-	c1, _ := load(t, set(t, a, b))
-	c2, _ := load(t, set(t, b, a)) // imports after the file: any order
+	c1, _ := loadSet(t, set(t, a, b))
+	c2, _ := loadSet(t, set(t, b, a)) // imports after the file: any order
 	if c1.GetId() != c2.GetId() || !proto.Equal(c1, c2) {
 		t.Fatal("the same set in another order compiles to another schema")
 	}
@@ -420,13 +422,21 @@ func TestCompileImportBounds(t *testing.T) {
 	// The backstop: a set protodesc doesn't check in time is refused, and
 	// cached as refused.
 	defer func(d time.Duration) { Timeout = d }(Timeout)
-	Timeout = time.Nanosecond
+	Timeout = 10 * time.Millisecond
+	release := make(chan struct{})
+	slow := protodescNewFiles
+	protodescNewFiles = func(s *descriptorpb.FileDescriptorSet) (*protoregistry.Files, error) {
+		<-release
+		return slow(s)
+	}
 	cache := NewCache()
 	data := setOf(t, grpc_health_v1.File_grpc_health_v1_health_proto)
 	_, _, err := cache.Compile(data, "x")
 	if err == nil || !strings.Contains(err.Error(), "to check") {
 		t.Fatalf("past the timeout: %v", err)
 	}
+	close(release)
+	protodescNewFiles = slow
 	Timeout = time.Minute
 	if _, _, err := cache.Compile(data, "x"); err == nil {
 		t.Error("a set that timed out is compiled again")
@@ -448,7 +458,7 @@ func TestCompileHugeEnum(t *testing.T) {
 	if len(data) > MaxSourceBytes {
 		t.Fatalf("test set of %d bytes", len(data))
 	}
-	c, _ := load(t, data)
+	c, _ := loadSet(t, data)
 	if n := proto.Size(c); n > 200 {
 		t.Fatalf("compiled %d bytes", n)
 	}
@@ -500,7 +510,7 @@ func FuzzCompile(f *testing.F) {
 		if err != nil {
 			return
 		}
-		if _, err := grpcschema.Load(c); err != nil {
+		if _, err := load.Load(c); err != nil {
 			t.Fatalf("Load of a compiled schema: %v", err)
 		}
 	})

@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 	"github.com/inkwall-dev/inkwall/pkg/router"
@@ -131,6 +132,11 @@ type Config struct {
 	// streams and bidirectional calls then work (#315, GRPCStream). Other
 	// adapters inspect the buffered body as without it.
 	GRPCPerMessage bool
+	// GRPCSchema, with GRPCMessages, reads the messages of the methods it
+	// describes with their schema (grpcwire.Fields, design 0013): fields by
+	// their types, named by their paths. Nil, or a method it doesn't
+	// describe: without it.
+	GRPCSchema *grpcschema.Schema
 	// WebSocket is what a WebSocket handshake must meet (allowed origins,
 	// required headers), checked before the rules. Nil: nothing more than
 	// any request.
@@ -255,6 +261,8 @@ type Pipeline struct {
 	grpcMessages bool
 	// grpcPerMessage: and one by one, where the adapter can (#315).
 	grpcPerMessage bool
+	// grpcSchema: what they are read with; nil: without a schema.
+	grpcSchema *grpcschema.Schema
 	// limits: the policy's rate limits, nil when it has none.
 	limits *RateLimits
 	// geo: the policy's geo blocking, nil when it has none; geoEvents
@@ -300,6 +308,7 @@ func New(eval rules.Evaluator, cfg Config) *Pipeline {
 		},
 		grpcMessages:   cfg.GRPCMessages,
 		grpcPerMessage: cfg.GRPCMessages && cfg.GRPCPerMessage,
+		grpcSchema:     cfg.GRPCSchema,
 		limits:         cfg.RateLimits,
 		geo:            cfg.Geo,
 		geoEvents:      newGeoSampler(cfg.Geo),
@@ -352,6 +361,8 @@ type outcome struct {
 	// partly: the body was only partly inspected; the verdict follows the
 	// oversize action (see partly).
 	partly bool
+	// grpcRead counts the gRPC messages read for the evaluation.
+	grpcRead *GRPCRead
 }
 
 // Check inspects r and returns the verdict. It returns within the configured
@@ -547,16 +558,18 @@ func (p *Pipeline) inspect(ctx context.Context, r *request.Request, keep bool) (
 func (p *Pipeline) grpcRequest(r, call *request.Request, messages []byte, keep bool) func(context.Context) outcome {
 	eval := p.request(call, keep)
 	return func(ctx context.Context) outcome {
-		text, complete := grpcText(r, messages)
+		text, complete, read := grpcText(r, messages, p.grpcSchema)
 		call.GRPCText = text
 		if complete {
-			return eval(ctx)
+			o := eval(ctx)
+			o.grpcRead = &read
+			return o
 		}
 		if p.oversize == OversizeDeny && p.mode == ModeBlock {
-			return outcome{partly: true}
+			return outcome{partly: true, grpcRead: &read}
 		}
 		o := eval(ctx)
-		o.partly = true
+		o.partly, o.grpcRead = true, &read
 		return o
 	}
 }
@@ -638,10 +651,14 @@ func (p *Pipeline) evaluate(ctx context.Context, eval func(context.Context) outc
 			closeExchange(o.x)
 			return p.failed(ReasonError), nil
 		}
-		if o.partly {
-			return p.oversized(p.decide(o.res), o.x)
+		v := p.decide(o.res)
+		if o.grpcRead != nil {
+			v.GRPCRead = *o.grpcRead
 		}
-		return p.decide(o.res), o.x
+		if o.partly {
+			return p.oversized(v, o.x)
+		}
+		return v, o.x
 	case <-ctx.Done():
 		// The late evaluation's transaction, if it keeps one, is released
 		// when it finishes.

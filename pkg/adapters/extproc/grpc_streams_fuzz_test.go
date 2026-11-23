@@ -15,6 +15,7 @@ import (
 	filterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema"
 	"github.com/inkwall-dev/inkwall/pkg/grpcwire"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/request"
@@ -29,6 +30,10 @@ type messageInspector struct{ inspector }
 func (m *messageInspector) GRPCStream(*request.Request) pipeline.GRPCStream { return m }
 
 func (*messageInspector) Mode() pipeline.Mode { return pipeline.ModeBlock }
+
+func (*messageInspector) GRPCSchema(*request.Request) (*grpcschema.Schema, *grpcschema.Message) {
+	return nil, nil
+}
 
 // deniesMessage is what messageInspector denies.
 func deniesMessage(ev streams.Event) bool {
