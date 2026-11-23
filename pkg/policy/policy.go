@@ -70,6 +70,10 @@ type Options struct {
 	// still one, but doesn't apply them: for inkwallctl test, which checks
 	// one request at a time.
 	IgnoreRateLimits bool
+
+	// checkOnly leaves the rate limits out (CheckSettings: CheckRateLimits
+	// checks them).
+	checkOnly bool
 }
 
 // Policy is one compiled policy.
@@ -384,44 +388,14 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 	if err != nil {
 		return nil, key, err
 	}
-	var exclusions []coraza.Exclusion
-	for _, e := range append(bp.GetExclusions(), bp.GetTargetExclusions()...) {
-		ex := coraza.Exclusion{Path: e.GetPath(), Argument: e.GetArgument(),
-			ArgumentName: e.GetArgumentName(), Cookie: e.GetCookie(), Header: e.GetHeader()}
-		for _, id := range e.GetRuleIds() {
-			ex.RuleIDs = append(ex.RuleIDs, int(id))
-		}
-		exclusions = append(exclusions, ex)
-	}
-
-	bodyLimit := o.BodyLimit
-	oversize := pipeline.OversizeAuto
-	if body := bp.GetBody(); body != nil {
-		if !body.GetInspect() {
-			bodyLimit = 0
-		} else if n := body.GetMaxBytes(); n > 0 {
-			// The CRD bounds it, but a bundle from elsewhere may not.
-			bodyLimit = min(n, MaxBodyBytes)
-		}
-		oversize = oversizeAction(body.GetOnOversize())
-	}
-
-	var responses pipeline.ResponseConfig
-	if rc := bp.GetResponses(); rc.GetInspect() {
-		responses.Inspect = true
-		responses.MaxBytes = DefaultResponseBytes
-		if n := rc.GetMaxBytes(); n > 0 {
-			responses.MaxBytes = min(n, MaxBodyBytes)
-		}
-		responses.Oversize = oversizeAction(rc.GetOnOversize())
-		responses.Streams = rc.GetStreams()
-	}
+	exclusions := policyExclusions(bp)
 	// Coraza's body limits are compiled in, so every policy gets the largest
 	// any may have, for one rule set: the pipeline gives the rules no more
 	// of a body than the policy's own limit (and none of a truncated
 	// request body). Same for the CRS settings, which are set on each
-	// transaction. bodyLimit is MaxBodyBytes at most, or the engine's
-	// default (o.BodyLimit), so the largest is the same for every policy.
+	// transaction. The policy's limit is MaxBodyBytes at most, or the
+	// engine's default (o.BodyLimit), so the largest is the same for every
+	// policy.
 	engineLimit := int(max(MaxBodyBytes, o.BodyLimit))
 	cfg.BodyLimit = engineLimit
 	cfg.ResponseBodyLimit = engineLimit
@@ -446,9 +420,56 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 		return nil, key, err
 	}
 
-	routes, err := router.New(bp.GetSkipPaths(), bp.GetSkipBodyPaths())
+	pc, bodyLimit, err := pipelineConfig(bp, o, live, deny)
 	if err != nil {
 		return nil, key, err
+	}
+	return &Policy{ID: bp.GetId(), pipeline: pipeline.New(eval, pc), bodyLimit: bodyLimit, hasGeo: pc.Geo != nil}, key, nil
+}
+
+// policyExclusions are a policy's exclusions, as the rules take them.
+func policyExclusions(bp *bundlev1.Policy) []coraza.Exclusion {
+	var exclusions []coraza.Exclusion
+	for _, e := range append(bp.GetExclusions(), bp.GetTargetExclusions()...) {
+		ex := coraza.Exclusion{Path: e.GetPath(), Argument: e.GetArgument(),
+			ArgumentName: e.GetArgumentName(), Cookie: e.GetCookie(), Header: e.GetHeader()}
+		for _, id := range e.GetRuleIds() {
+			ex.RuleIDs = append(ex.RuleIDs, int(id))
+		}
+		exclusions = append(exclusions, ex)
+	}
+	return exclusions
+}
+
+// pipelineConfig compiles what of a policy isn't its rules: the pipeline's
+// settings, and the request body the policy inspects (0: none).
+func pipelineConfig(bp *bundlev1.Policy, o Options, live *ratelimit.Live, deny *pipeline.DenyResponse) (pipeline.Config, int64, error) {
+	bodyLimit := o.BodyLimit
+	oversize := pipeline.OversizeAuto
+	if body := bp.GetBody(); body != nil {
+		if !body.GetInspect() {
+			bodyLimit = 0
+		} else if n := body.GetMaxBytes(); n > 0 {
+			// The CRD bounds it, but a bundle from elsewhere may not.
+			bodyLimit = min(n, MaxBodyBytes)
+		}
+		oversize = oversizeAction(body.GetOnOversize())
+	}
+
+	var responses pipeline.ResponseConfig
+	if rc := bp.GetResponses(); rc.GetInspect() {
+		responses.Inspect = true
+		responses.MaxBytes = DefaultResponseBytes
+		if n := rc.GetMaxBytes(); n > 0 {
+			responses.MaxBytes = min(n, MaxBodyBytes)
+		}
+		responses.Oversize = oversizeAction(rc.GetOnOversize())
+		responses.Streams = rc.GetStreams()
+	}
+
+	routes, err := router.New(bp.GetSkipPaths(), bp.GetSkipBodyPaths())
+	if err != nil {
+		return pipeline.Config{}, 0, err
 	}
 	var ws *pipeline.WebSocketRules
 	if w := bp.GetWebsocket(); w != nil {
@@ -458,7 +479,7 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 			RequiredHeaders:    w.GetRequiredHeaders(),
 		})
 		if err != nil {
-			return nil, key, fmt.Errorf("websocket: %w", err)
+			return pipeline.Config{}, 0, fmt.Errorf("websocket: %w", err)
 		}
 	}
 	pc := pipeline.Config{
@@ -476,10 +497,10 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 	}
 	if l := bp.GetIpLists(); l != nil {
 		if pc.IPAllow, err = iplist.Parse(l.GetAllow()); err != nil {
-			return nil, key, fmt.Errorf("IP allow list: %w", err)
+			return pipeline.Config{}, 0, fmt.Errorf("IP allow list: %w", err)
 		}
 		if pc.IPDeny, err = iplist.Parse(l.GetDeny()); err != nil {
-			return nil, key, fmt.Errorf("IP deny list: %w", err)
+			return pipeline.Config{}, 0, fmt.Errorf("IP deny list: %w", err)
 		}
 	}
 	if bp.GetMode() == bundlev1.Mode_MODE_BLOCK {
@@ -496,23 +517,26 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 	}
 	if g := bp.GetGeo(); g != nil {
 		if pc.Geo, err = geoRules(g); err != nil {
-			return nil, key, err
+			return pipeline.Config{}, 0, err
 		}
 	}
-	if pc.RateLimits, err = pipeline.CompileRateLimits(o.RateLimits, live, bp.GetId(), rateLimits(bp)); err != nil {
-		return nil, key, err
+	// Checking alone, the rate limits are CheckRateLimits'.
+	if !o.checkOnly {
+		if pc.RateLimits, err = pipeline.CompileRateLimits(o.RateLimits, live, bp.GetId(), rateLimits(bp)); err != nil {
+			return pipeline.Config{}, 0, err
+		}
 	}
 	if o.IgnoreRateLimits {
 		pc.RateLimits = nil
 	}
 	// The policy's own denial, or the bundle's.
 	if pc.DenyResponse, err = denyResponse(bp.GetDenyResponse()); err != nil {
-		return nil, key, fmt.Errorf("deny response: %w", err)
+		return pipeline.Config{}, 0, fmt.Errorf("deny response: %w", err)
 	}
 	if pc.DenyResponse == nil {
 		pc.DenyResponse = deny
 	}
-	return &Policy{ID: bp.GetId(), pipeline: pipeline.New(eval, pc), bodyLimit: bodyLimit, hasGeo: pc.Geo != nil}, key, nil
+	return pc, bodyLimit, nil
 }
 
 // denyResponse compiles a bundle's DenyResponse; nil for none.
@@ -572,6 +596,40 @@ func rulesConfig(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o O
 	return cfg, crs, nil
 }
 
+// CheckSettings checks what of policy bp the engine compiles besides its
+// rules and rate limits (CheckRateLimits), as Compile does: its skip paths,
+// WebSocket rules, IP lists, geo rules, denial, CRS settings and
+// exclusions; ruleSets has the rule sets it binds. A policy the engine
+// refuses makes it refuse the whole bundle, every other policy's changes
+// with it: the operator leaves out a policy that fails this (or
+// RuleChecker.Check), whatever admitted it.
+func CheckSettings(bp *bundlev1.Policy, ruleSets []*bundlev1.RuleSet) error {
+	byID := map[string]*bundlev1.RuleSet{}
+	for _, rs := range ruleSets {
+		byID[rs.GetId()] = rs
+	}
+	_, crs, err := rulesConfig(bp, byID, Options{})
+	if err != nil {
+		return err
+	}
+	if err := coraza.CheckSettings(crs, policyExclusions(bp)); err != nil {
+		return err
+	}
+	_, _, err = pipelineConfig(bp, Options{checkOnly: true}, nil, nil)
+	return err
+}
+
+// CheckRuleSets checks that ruleSets has the rule sets policy bp binds, as
+// Compile loads them, without compiling them (RuleChecker.Check does).
+func CheckRuleSets(bp *bundlev1.Policy, ruleSets []*bundlev1.RuleSet) error {
+	byID := map[string]*bundlev1.RuleSet{}
+	for _, rs := range ruleSets {
+		byID[rs.GetId()] = rs
+	}
+	_, _, err := rulesConfig(bp, byID, Options{})
+	return err
+}
+
 // RuleChecker checks that a policy's rule sets compile together, as
 // Compile compiles them: rule sets that are valid alone may not be (the
 // same rule ID in two). It remembers each combination's result, not the
@@ -579,16 +637,35 @@ func rulesConfig(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o O
 type RuleChecker struct {
 	mu   sync.Mutex
 	errs map[[sha256.Size]byte]error
+	// used are the combinations checked since the last Prune.
+	used map[[sha256.Size]byte]bool
+	// compiles counts the combinations compiled, for tests.
+	compiles int
 }
 
 // NewRuleChecker returns a RuleChecker that has checked nothing.
 func NewRuleChecker() *RuleChecker {
-	return &RuleChecker{errs: map[[sha256.Size]byte]error{}}
+	return &RuleChecker{errs: map[[sha256.Size]byte]error{}, used: map[[sha256.Size]byte]bool{}}
+}
+
+// Prune forgets the results of the combinations no Check asked for since
+// the last Prune, as Evaluators drops the rule sets a bundle doesn't use:
+// called after each resolution, it keeps the results of the policies there
+// are, however many, and none of those there were.
+func (c *RuleChecker) Prune() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k := range c.errs {
+		if !c.used[k] {
+			delete(c.errs, k)
+		}
+	}
+	clear(c.used)
 }
 
 // Check compiles the rules of policy bp, whose rule sets are among
-// ruleSets. A policy without SecLang rule sets runs only the built-in rules
-// and isn't compiled.
+// ruleSets, with its exclusions when they are compiled in. A policy without
+// SecLang rule sets runs only the built-in rules and isn't compiled.
 func (c *RuleChecker) Check(bp *bundlev1.Policy, ruleSets []*bundlev1.RuleSet) error {
 	byID := map[string]*bundlev1.RuleSet{}
 	seclang := false
@@ -603,19 +680,55 @@ func (c *RuleChecker) Check(bp *bundlev1.Policy, ruleSets []*bundlev1.RuleSet) e
 	if !seclang {
 		return nil
 	}
-	cfg, _, err := rulesConfig(bp, byID, Options{})
+	cfg, crs, err := rulesConfig(bp, byID, Options{})
 	if err != nil {
 		return err
 	}
 	cfg.BodyLimit, cfg.ResponseBodyLimit = MaxBodyBytes, MaxBodyBytes
+	// The exclusions too, when they are compiled into rules of their own:
+	// one on a rule the rule sets remove doesn't compile with them
+	// (WithExclusions). The others are checked without the rules
+	// (CheckSettings), and policies that differ only in them share a check,
+	// as they share compiled rules in the engine.
+	exclusions := policyExclusions(bp)
+	own, err := coraza.ExclusionsCompiledIn(cfg, exclusions)
+	if err != nil {
+		return err
+	}
 	key := cfg.Key()
+	if own {
+		h := sha256.New()
+		h.Write(key[:])
+		fmt.Fprintf(h, "%#v %#v", crs, exclusions)
+		h.Sum(key[:0])
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.used[key] = true
 	if err, ok := c.errs[key]; ok {
 		return err
 	}
-	_, err = coraza.New(cfg)
+	c.compiles++
+	if own {
+		err = checkRules(cfg, crs, exclusions)
+	} else {
+		_, err = coraza.New(cfg)
+	}
 	c.errs[key] = err
+	return err
+}
+
+// checkRules compiles rules as compilePolicy does, with the policy's CRS
+// settings and exclusions.
+func checkRules(cfg coraza.Config, crs coraza.CRSSettings, exclusions []coraza.Exclusion) error {
+	eval, err := coraza.New(cfg)
+	if err != nil {
+		return err
+	}
+	if eval, err = eval.WithCRS(crs); err != nil {
+		return err
+	}
+	_, err = eval.WithExclusions(exclusions)
 	return err
 }
 
