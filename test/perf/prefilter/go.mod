@@ -6,7 +6,7 @@ toolchain go1.27.4
 
 require (
 	github.com/corazawaf/coraza-coreruleset/v4 v4.25.0
-	github.com/corazawaf/libinjection-go v0.3.5
+	github.com/corazawaf/libinjection-go v0.3.6
 	gopkg.in/yaml.v3 v3.0.1
 )
 
