@@ -32,7 +32,7 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
-	engpolicy "github.com/inkwall-dev/inkwall/pkg/policy"
+	enginepolicy "github.com/inkwall-dev/inkwall/pkg/policy"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
 
@@ -61,6 +61,9 @@ const (
 	// ReasonLLMInvalid: the policy's spec.llm doesn't compile as the engine
 	// compiles it (two endpoint paths the engine reads as one).
 	ReasonLLMInvalid = "LLMInvalid"
+	// ReasonInvalidRateLimits: the engine can't compile the policy's rate
+	// limits.
+	ReasonInvalidRateLimits = "InvalidRateLimits"
 )
 
 // PolicyValid is the Accepted message of a policy that resolved with
@@ -333,16 +336,19 @@ func (r *resolution) resolvePolicies() {
 
 	// The policy each candidate puts in the bundle: its spec, or its
 	// previous version; nil: left out. A policy whose rule sets the engine
-	// can't compile together is left out too (or keeps its previous
-	// version, if that compiles): in the bundle, it would make every engine
-	// refuse the bundle, for every policy.
+	// can't compile together, or whose rate limits it can't compile, is
+	// left out too (or keeps its previous version, if that compiles): in
+	// the bundle, it would make every engine refuse the bundle, for every
+	// policy.
 	pols := make([]*bundlev1.Policy, len(cands))
 	for i, c := range cands {
 		pols[i] = c.policy
 		if !c.failed {
-			if err := r.checkPolicy(c.policy, r.ruleSets); err != nil {
+			if err := enginepolicy.CheckRateLimits(c.policy); err != nil {
+				c.fail(ReasonInvalidRateLimits, fmt.Sprintf("the engine can't compile its rate limits: %v", err))
+			} else if err := r.checkPolicy(c.policy, r.ruleSets); err != nil {
 				c.fail(ReasonRuleSetsIncompatible, fmt.Sprintf("its rule sets don't compile together: %v", err))
-			} else if err := engpolicy.CheckLLM(c.policy); err != nil {
+			} else if err := enginepolicy.CheckLLM(c.policy); err != nil {
 				// An engine would refuse the bundle, for every policy.
 				c.fail(ReasonLLMInvalid, fmt.Sprintf("its LLM endpoints don't compile as the engine compiles them: %v", err))
 			}
@@ -353,7 +359,12 @@ func (r *resolution) resolvePolicies() {
 				pols[i] = nil
 				continue
 			}
-			if err := r.checkPolicy(prev, previousRuleSets); err != nil || engpolicy.CheckLLM(prev) != nil {
+			if err := enginepolicy.CheckRateLimits(prev); err != nil {
+				c.status.Message += "; its previous version's rate limits don't compile either, so the policy is left out"
+				pols[i] = nil
+				continue
+			}
+			if err := r.checkPolicy(prev, previousRuleSets); err != nil || enginepolicy.CheckLLM(prev) != nil {
 				c.status.Message += "; its previous version doesn't compile either, so the policy is left out"
 				pols[i] = nil
 				continue
@@ -1098,4 +1109,15 @@ func (r *resolution) ipList(ns string, names []wafv1alpha1.IPListName) ([]string
 		}
 	}
 	return out, nil
+}
+
+// CheckRateLimits compiles a policy's rate limits as the engine does: for
+// admission, so that limits the bundle would leave out are refused when
+// they are saved.
+func CheckRateLimits(limits []wafv1alpha1.RateLimit) error {
+	p := &bundlev1.Policy{}
+	for _, l := range limits {
+		p.RateLimits = append(p.RateLimits, rateLimit(l))
+	}
+	return enginepolicy.CheckRateLimits(p)
 }

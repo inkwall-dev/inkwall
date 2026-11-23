@@ -103,6 +103,8 @@ Every doc in this repository, by topic, with the question each one answers.
   country, where does the country database come from, and how does it reach the engines?
 - [0012 — Protecting LLM APIs](design/0012-llm-api-protection.md): what can Inkwall do for an
   LLM API against the OWASP Top 10 for LLM Applications, what can't it, and at what cost?
+- [0013 — gRPC Messages with Their Schema](design/0013-grpc-schemas.md): how does the engine read
+  gRPC messages by type and name their fields, and why a descriptor set and not server reflection?
 
 ## Contributing
 

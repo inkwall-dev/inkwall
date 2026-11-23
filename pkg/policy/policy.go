@@ -909,6 +909,13 @@ func llmConfig(bp *bundlev1.Policy, bodies bool, metrics *llm.Metrics) *pipeline
 	return cfg
 }
 
+// CheckRateLimits checks a policy's rate limits as Compile compiles them,
+// for the operator: it leaves out of the bundle a policy whose limits the
+// engine can't compile.
+func CheckRateLimits(bp *bundlev1.Policy) error {
+	return pipeline.CheckRateLimits(rateLimits(bp))
+}
+
 // rateLimits is a policy's rate limits, as the pipeline takes them.
 func rateLimits(bp *bundlev1.Policy) []pipeline.RateLimitConfig {
 	var out []pipeline.RateLimitConfig

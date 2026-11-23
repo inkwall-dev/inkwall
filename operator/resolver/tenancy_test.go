@@ -11,13 +11,17 @@ import (
 	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+
+	"google.golang.org/protobuf/proto"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	enginepolicy "github.com/inkwall-dev/inkwall/pkg/policy"
+	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 )
 
@@ -260,6 +264,68 @@ func TestIncompatibleRuleSetsLeaveOnlyTheirPolicyOut(t *testing.T) {
 	if findPolicy(res, "shop/both") != nil {
 		t.Error("a previous version that doesn't compile must stay out")
 	}
+}
+
+// A policy whose rate limits the engine can't compile (saved before the
+// webhook checked them) is left out, or keeps its previous version: the
+// other policies' bundle still compiles, with their changes.
+func TestInvalidRateLimitsLeaveOnlyTheirPolicyOut(t *testing.T) {
+	limit := func(path wafv1alpha1.PathPattern) []wafv1alpha1.RateLimit {
+		return []wafv1alpha1.RateLimit{{Name: "login", Requests: 5, Period: metav1.Duration{Duration: time.Hour},
+			Match: &wafv1alpha1.RateLimitMatch{Paths: []wafv1alpha1.PathPattern{path}}}}
+	}
+	bad := policy("bad", 0, "web")
+	bad.Spec.RateLimits = limit("/a/./login")
+	other := policy("other", 1, "other")
+	other.Spec.RateLimits = limit("/login")
+	in := Input{
+		Policies: []wafv1alpha1.WAFPolicy{bad, other},
+		Ingresses: []networkingv1.Ingress{
+			ingress("web", rule("a.example.com", ipath("/", networkingv1.PathTypePrefix))),
+			ingress("other", rule("b.example.com", ipath("/", networkingv1.PathTypePrefix))),
+		},
+		CheckPolicy: enginepolicy.NewRuleChecker().Check,
+	}
+	compiles := func(res Result) {
+		t.Helper()
+		b := &bundlev1.Bundle{Version: 2, Policies: res.Policies, RuleSets: res.RuleSets}
+		if _, err := enginepolicy.Compile(b, enginepolicy.Options{RateLimits: ratelimit.New(100, 0)}); err != nil {
+			t.Fatalf("the bundle doesn't compile: %v", err)
+		}
+	}
+	res := Resolve(in)
+	wantStatus(t, res, "bad", false, ReasonInvalidRateLimits, `path pattern "/a/./login" is not clean`)
+	wantStatus(t, res, "other", true, ReasonAccepted, PolicyValid)
+	if findPolicy(res, "shop/bad") != nil {
+		t.Error("the policy whose rate limits don't compile must stay out")
+	}
+	if findPolicy(res, "shop/other") == nil {
+		t.Fatal("the other policy must stay in")
+	}
+	compiles(res)
+
+	// Its previous version stays when it compiles.
+	good := bad.DeepCopy()
+	good.Spec.RateLimits = limit("/login")
+	prev := Resolve(Input{Policies: []wafv1alpha1.WAFPolicy{*good}, Ingresses: in.Ingresses})
+	in.Previous = &bundlev1.Bundle{Policies: prev.Policies}
+	res = Resolve(in)
+	wantStatus(t, res, "bad", false, ReasonInvalidRateLimits, "the previous version of the policy stays in force")
+	if p := findPolicy(res, "shop/bad"); p == nil || p.GetRateLimits()[0].GetPaths()[0] != "/login" {
+		t.Errorf("the previous version must stay in force: %v", p)
+	}
+	compiles(res)
+
+	// A previous bundle built by hand with a bad limit: not kept either.
+	handBuilt := proto.Clone(prev.Policies[0]).(*bundlev1.Policy)
+	handBuilt.RateLimits[0].Paths = []string{"/x/../login"}
+	in.Previous = &bundlev1.Bundle{Policies: []*bundlev1.Policy{handBuilt}}
+	res = Resolve(in)
+	wantStatus(t, res, "bad", false, ReasonInvalidRateLimits, "its previous version's rate limits don't compile either")
+	if findPolicy(res, "shop/bad") != nil {
+		t.Error("a previous version that doesn't compile must stay out")
+	}
+	compiles(res)
 }
 
 // A policy whose spec.llm the engine can't compile (two endpoint paths it
