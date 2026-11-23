@@ -18,16 +18,18 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/time/rate"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/util/flowcontrol"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 )
 
 // The audit log of policy changes (#726, docs/audit-log.md): the validating
@@ -35,8 +37,10 @@ import (
 // object before and after. Once a request is admitted, the Auditor logs one
 // "policy change" line for it, records an Event on the object and counts
 // it. It never records a dry run, a refused request, or an update that
-// leaves the spec as it was (labels, finalizers, the operator's
-// annotations; the status is a subresource, which the webhooks don't see).
+// leaves the spec and the annotations the operator acts on
+// (auditedAnnotations) as they were: labels, finalizers, other annotations
+// (the operator's wiring ones among them). The status is a subresource,
+// which the webhooks don't see.
 
 // AuditMessage is the audit log line's message.
 const AuditMessage = "policy change"
@@ -56,6 +60,11 @@ const (
 	maxNotePaths = 8
 )
 
+// auditedAnnotations are the annotations of the five kinds the operator
+// acts on: a change to one is recorded as a change to the spec is, at
+// metadata.annotations["name"]. Rotating the signing key is one.
+var auditedAnnotations = []string{wafv1alpha1.RotateSigningKeyAnnotation}
+
 // Redacted replaces a value the audit record never shows.
 const Redacted = "<redacted>"
 
@@ -68,7 +77,7 @@ const (
 // policyChanges counts the changes the webhooks admitted.
 var policyChanges = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "inkwall_operator_policy_changes_total",
-	Help: "Changes to the WAF objects (WAFPolicy, WAFRuleSet, ClusterWAFRuleSet, WAFIPList, InkwallConfig) this replica's webhook admitted, by kind and operation (create, update, delete); dry runs and metadata-only updates aside.",
+	Help: "Changes to the WAF objects (WAFPolicy, WAFRuleSet, ClusterWAFRuleSet, WAFIPList, InkwallConfig) this replica's webhook admitted, by kind and operation (create, update, delete); dry runs and metadata-only updates aside, but for the annotations the operator acts on.",
 }, []string{"kind", "operation"})
 
 func init() {
@@ -95,10 +104,10 @@ type Auditor struct {
 	Events EventWriter
 	// Instance names this replica in the Events (reportingInstance).
 	Instance string
-	// EventLimit, if set, limits the Events (TryAccept): a burst of
+	// EventLimit, if set, limits the Events of each namespace: a burst of
 	// changes, e.g. a GitOps sync of many objects, records Events up to it,
 	// and is logged and counted in full.
-	EventLimit flowcontrol.RateLimiter
+	EventLimit *EventLimiter
 	// Operator is the user the operator writes as (OperatorUser): its
 	// changes are marked operator: true.
 	Operator string
@@ -215,14 +224,15 @@ func (a *Auditor) record(ctx context.Context, op admissionv1.Operation, oldObj, 
 	if err != nil || (req.DryRun != nil && *req.DryRun) {
 		return
 	}
-	var oldSpec, newSpec any
+	var oldSpec, newSpec, oldAnnotations, newAnnotations any
 	if oldObj != nil {
-		oldSpec = spec(oldObj)
+		oldSpec, oldAnnotations = spec(oldObj), actedOn(oldObj)
 	}
 	if newObj != nil {
-		newSpec = spec(newObj)
+		newSpec, newAnnotations = spec(newObj), actedOn(newObj)
 	}
-	if op == admissionv1.Update && apiequality.Semantic.DeepEqual(oldSpec, newSpec) {
+	if op == admissionv1.Update && apiequality.Semantic.DeepEqual(oldSpec, newSpec) &&
+		apiequality.Semantic.DeepEqual(oldAnnotations, newAnnotations) {
 		return
 	}
 	obj := newObj
@@ -247,12 +257,85 @@ func (a *Auditor) record(ctx context.Context, op admissionv1.Operation, oldObj, 
 	if oldObj != nil {
 		r.ResourceVersion = oldObj.GetResourceVersion()
 	}
-	r.Changes, r.ChangesOmitted, r.Paths = Summarize(toJSON(oldSpec), toJSON(newSpec))
+	var s summary
+	diff("spec", toJSON(oldSpec), toJSON(newSpec), modePlain, &s)
+	diff("metadata.annotations", oldAnnotations, newAnnotations, modePlain, &s)
+	r.Changes, r.ChangesOmitted, r.Paths = s.changes, s.omitted, s.paths
 	a.Log.Info(AuditMessage, r.keysAndValues()...)
 	policyChanges.WithLabelValues(r.Kind, r.Operation).Inc()
-	if a.Events != nil && (a.EventLimit == nil || a.EventLimit.TryAccept()) {
+	if a.Events != nil && a.EventLimit.Allow(obj.GetNamespace(), time.Now()) {
 		a.createEvent(a.event(obj, schema.GroupVersion{Group: req.Kind.Group, Version: req.Kind.Version}, op, r))
 	}
+}
+
+// actedOn is obj's auditedAnnotations as generic JSON, nil without any.
+func actedOn(obj client.Object) any {
+	var out map[string]any
+	for _, k := range auditedAnnotations {
+		if v, ok := obj.GetAnnotations()[k]; ok {
+			if out == nil {
+				out = map[string]any{}
+			}
+			out[k] = v
+		}
+	}
+	if out == nil {
+		return nil
+	}
+	return out
+}
+
+// EventLimiter limits the audit Events of each namespace on its own (the
+// cluster-scoped objects' as one more), so a burst in one namespace leaves
+// the others theirs. It tracks up to a bound of namespaces: past it, the
+// namespaces it doesn't track share one limit.
+type EventLimiter struct {
+	every rate.Limit
+	burst int
+	max   int
+
+	mu     sync.Mutex
+	ns     map[string]*rate.Limiter
+	shared *rate.Limiter
+}
+
+// NewEventLimiter limits each namespace's Events to perSecond, burst at
+// once, tracking up to namespaces of them.
+func NewEventLimiter(perSecond float64, burst, namespaces int) *EventLimiter {
+	return &EventLimiter{
+		every: rate.Limit(perSecond), burst: burst, max: namespaces,
+		ns:     map[string]*rate.Limiter{},
+		shared: rate.NewLimiter(rate.Limit(perSecond), burst),
+	}
+}
+
+// Allow reports whether an Event in namespace ("" for a cluster-scoped
+// object) may be created at now, and takes its token; a nil EventLimiter
+// allows every one.
+func (l *EventLimiter) Allow(namespace string, now time.Time) bool {
+	if l == nil {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	lim := l.ns[namespace]
+	if lim == nil {
+		if len(l.ns) >= l.max {
+			// A limiter with all its tokens is as good as a new one.
+			for k, v := range l.ns {
+				if v.TokensAt(now) >= float64(l.burst) {
+					delete(l.ns, k)
+				}
+			}
+		}
+		if len(l.ns) < l.max {
+			lim = rate.NewLimiter(l.every, l.burst)
+			l.ns[namespace] = lim
+		} else {
+			lim = l.shared
+		}
+	}
+	return lim.AllowN(now, 1)
 }
 
 // event is the Event on obj for the change r.
