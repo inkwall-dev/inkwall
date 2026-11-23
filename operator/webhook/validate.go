@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/operator/resolver"
 	"github.com/inkwall-dev/inkwall/pkg/clientip"
 	"github.com/inkwall-dev/inkwall/pkg/iplist"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
@@ -264,6 +265,14 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 	for i, b := range p.Spec.RuleSets {
 		if b.CRS != nil {
 			errs = append(errs, checkCRS(spec.Child("ruleSets").Index(i), b)...)
+		}
+	}
+	if len(errs) == 0 {
+		// Whatever else the engine refuses (the checks above name the
+		// field): one policy it refused would make it refuse the whole
+		// bundle, so the operator would leave the policy out.
+		if err := resolver.CheckSpec(p.Spec); err != nil {
+			errs = append(errs, field.Invalid(spec, field.OmitValueType{}, "the engine can't compile the policy: "+err.Error()))
 		}
 	}
 	return responseWarnings(p), invalid("WAFPolicy", p.Name, errs)
