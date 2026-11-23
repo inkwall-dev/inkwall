@@ -103,7 +103,7 @@ func Strings(msg []byte, lim Limits, out []Field) (fields []Field, ok bool) {
 			fields, ok = w.out, false
 		}
 	}()
-	ok = w.message(msg, "", 0)
+	ok, _ = w.message(msg, "", 0)
 	return w.out, ok && !w.over
 }
 
@@ -114,39 +114,56 @@ type walker struct {
 }
 
 // message walks msg, a message at depth whose fields are named under
-// prefix. It reports whether msg is a valid message.
-func (w *walker) message(msg []byte, prefix string, depth int) bool {
+// prefix. It reports whether msg is a valid message, and whether its tags,
+// lengths and numbers, and those of the messages read in it, are blank:
+// control characters and spaces only.
+func (w *walker) message(msg []byte, prefix string, depth int) (ok, blank bool) {
+	blank = true
 	for len(msg) > 0 {
 		num, typ, n := protowire.ConsumeTag(msg)
 		if n < 0 {
-			return false
+			return false, false
 		}
+		blank = blank && isBlank(msg[:n])
 		msg = msg[n:]
 		switch typ {
 		case protowire.BytesType:
 			v, n := protowire.ConsumeBytes(msg)
 			if n < 0 {
-				return false
+				return false, false
 			}
+			blank = blank && isBlank(msg[:n-len(v)])
 			msg = msg[n:]
-			w.field(v, fieldName(prefix, num), depth)
+			blank = w.field(v, fieldName(prefix, num), depth) && blank
 		case protowire.StartGroupType:
 			// A group (proto2, or editions' DELIMITED encoding): a nested
 			// message between a start and an end tag. One that doesn't end,
 			// or ends with another field's tag, doesn't parse.
 			v, n := protowire.ConsumeGroup(num, msg)
 			if n < 0 {
-				return false
+				return false, false
 			}
+			blank = blank && isBlank(msg[len(v):n])
 			msg = msg[n:]
-			w.group(v, fieldName(prefix, num), depth)
+			blank = w.group(v, fieldName(prefix, num), depth) && blank
 		default:
 			// Numbers; an end tag without its start doesn't parse.
 			n = protowire.ConsumeFieldValue(num, typ, msg)
 			if n < 0 {
-				return false
+				return false, false
 			}
+			blank = blank && isBlank(msg[:n])
 			msg = msg[n:]
+		}
+	}
+	return true, blank
+}
+
+// isBlank reports whether b has only control characters and spaces.
+func isBlank(b []byte) bool {
+	for _, c := range b {
+		if c > ' ' && c != 0x7f {
+			return false
 		}
 	}
 	return true
@@ -168,39 +185,58 @@ func fieldName(prefix string, num protowire.Number) string {
 //   - UTF-8 that isn't a message is text, whatever its characters: a
 //     control character is a space (see spaced), the rest as it is;
 //   - a message is read as one, and as text too: as it is when it is
-//     printable, else the readable runs of its own bytes, those between its
-//     length-delimited fields (tags, lengths, numbers), where text could
-//     otherwise hide;
+//     printable; else whole (flat) when it is UTF-8 whose tags, lengths
+//     and numbers (its own and its messages') are blank; and the readable
+//     runs of its own bytes, those between its length-delimited fields
+//     (tags, lengths, numbers), where text could otherwise hide;
 //   - any other bytes (binary) give their readable runs.
-func (w *walker) field(v []byte, name string, depth int) {
+func (w *walker) field(v []byte, name string, depth int) (blank bool) {
 	if len(v) == 0 {
-		return
+		return true
 	}
 	nested, numbersRun := valid(v, minNumbersRun)
 	if nested {
-		w.nested(v, name, depth, numbersRun)
-		return
+		// UTF-8 that also parses as a message, with no readable character
+		// in its tags, lengths and numbers or its messages', gives both:
+		// its fields, and its whole text (unless nested gives it,
+		// printable), so that the whitespace and control characters there
+		// can't split words between its fields; within the depth read.
+		// Tags and lengths that read as text would join field names and
+		// values into words no one sent (false positives): those messages
+		// give their fields alone.
+		// A printable message is text as it is, to its parent too.
+		blank = w.nested(v, name, depth, numbersRun)
+		if printable(v) {
+			return true
+		}
+		if blank && depth < w.lim.Depth && utf8.Valid(v) {
+			w.text(flat(v), name)
+		}
+		return blank
 	}
 	if utf8.Valid(v) {
 		w.text(spaced(v), name)
 	} else {
 		w.text(runs(v, minBinaryRun), name)
 	}
+	return true
 }
 
 // group reads a group's fields v, a valid message, as a nested message's:
-// its text, and its fields under name, within the same limits.
-func (w *walker) group(v []byte, name string, depth int) {
+// its text, and its fields under name, within the same limits. It reports
+// whether v is blank (message).
+func (w *walker) group(v []byte, name string, depth int) bool {
 	if len(v) == 0 {
-		return
+		return true
 	}
 	_, numbersRun := valid(v, minNumbersRun)
-	w.nested(v, name, depth, numbersRun)
+	return w.nested(v, name, depth, numbersRun)
 }
 
 // nested reads v, a valid message at depth+1 named name, as text (see
 // field), then its fields; numbersRun: between(v) may hold a run (valid).
-func (w *walker) nested(v []byte, name string, depth int, numbersRun bool) {
+// It reports whether v, read whole, is blank (message).
+func (w *walker) nested(v []byte, name string, depth int, numbersRun bool) bool {
 	var value string
 	if printable(v) {
 		value = string(v)
@@ -208,13 +244,14 @@ func (w *walker) nested(v []byte, name string, depth int, numbersRun bool) {
 		value = runs(between(v), minNumbersRun)
 	}
 	if !w.text(value, name) {
-		return
+		return false
 	}
 	if depth+1 > w.lim.Depth {
 		w.over = true
-		return
+		return false
 	}
-	w.message(v, name, depth+1)
+	_, blank := w.message(v, name, depth+1)
+	return blank
 }
 
 // text adds value, unless it is empty, as the text of field name. It
@@ -351,6 +388,19 @@ func spaced(v []byte) string {
 		}
 		return r
 	}, string(v))
+}
+
+// flat returns v, valid UTF-8, with every control character a space (tab,
+// newline and carriage return too), trimmed: the text of a message, whose
+// tags and lengths (newline is field 1's tag) aren't the application's
+// line breaks.
+func flat(v []byte) string {
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, string(v)))
 }
 
 // control reports whether r is a C0 control character other than tab,
