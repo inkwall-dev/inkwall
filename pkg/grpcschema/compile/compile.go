@@ -104,6 +104,9 @@ func name(s *bundlev1.GRPCSchema, source string) {
 	s.Id, s.Source = hex.EncodeToString(sum[:]), source
 }
 
+// protodescNewFiles is protodesc.NewFiles; a test makes it slow.
+var protodescNewFiles = protodesc.NewFiles
+
 // newFiles is protodesc.NewFiles, within Timeout. On a timeout its
 // goroutine is left to finish: the bounds of checkImports keep that from
 // happening on any set they let through.
@@ -113,13 +116,14 @@ func newFiles(set *descriptorpb.FileDescriptorSet) (*protoregistry.Files, error)
 		err   error
 	}
 	done := make(chan result, 1)
+	newFiles := protodescNewFiles
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				done <- result{err: fmt.Errorf("not a valid descriptor set: %v", r)}
 			}
 		}()
-		files, err := protodesc.NewFiles(set)
+		files, err := newFiles(set)
 		done <- result{files, err}
 	}()
 	timer := time.NewTimer(Timeout)

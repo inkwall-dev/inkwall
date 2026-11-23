@@ -17,6 +17,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/known/anypb"
 
@@ -421,13 +422,21 @@ func TestCompileImportBounds(t *testing.T) {
 	// The backstop: a set protodesc doesn't check in time is refused, and
 	// cached as refused.
 	defer func(d time.Duration) { Timeout = d }(Timeout)
-	Timeout = time.Nanosecond
+	Timeout = 10 * time.Millisecond
+	release := make(chan struct{})
+	slow := protodescNewFiles
+	protodescNewFiles = func(s *descriptorpb.FileDescriptorSet) (*protoregistry.Files, error) {
+		<-release
+		return slow(s)
+	}
 	cache := NewCache()
 	data := setOf(t, grpc_health_v1.File_grpc_health_v1_health_proto)
 	_, _, err := cache.Compile(data, "x")
 	if err == nil || !strings.Contains(err.Error(), "to check") {
 		t.Fatalf("past the timeout: %v", err)
 	}
+	close(release)
+	protodescNewFiles = slow
 	Timeout = time.Minute
 	if _, _, err := cache.Compile(data, "x"); err == nil {
 		t.Error("a set that timed out is compiled again")
