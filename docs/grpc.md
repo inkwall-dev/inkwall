@@ -130,28 +130,32 @@ spec:
   services, build one set from all of them.
 - **The operator** compiles the set into the signed bundle; engines never parse descriptors and
   never fetch anything. A set that doesn't compile (not a `FileDescriptorSet`, an import it
-  doesn't include, no service, over a bound) makes the policy `Accepted=False`,
+  doesn't include, no service, over a bound, a name over 512 bytes or of over 32 parts, a type
+  name that isn't fully qualified (`buf` and `protoc` write them so)) makes the policy `Accepted=False`,
   `InvalidGRPCSchema`, and the policy's previous version stays in force; a missing ConfigMap or
   key is `InvalidRef`. Engines before 0.7.0 read every message without the schema, and the policy
   is `Enforced=False`, `EnginesOutdated`.
 - **The method** is the call's path (`/orders.v1.Orders/Create`): its input type reads every
   message of the call, buffered or [one at a time](#long-streams-one-message-at-a-time). A method
   the set doesn't describe is read without the schema, as before, never denied for it.
-- **Each field by its type:** a `string` is text, whatever its bytes; a `bytes` field is text
-  when it is printable UTF-8 of at least 8 bytes, and otherwise gives its runs of at least 12
-  readable characters only (shorter random bytes are printable too often: they would match the
-  rules); numbers, enums and bools give nothing; a nested message, a map entry (`labels.key`,
+- **Each field by its type:** a `string` is text, whatever its bytes; a `bytes` field is text,
+  control characters read as spaces, when it is UTF-8 of at least 8 bytes and at least 90%
+  printable, and otherwise gives its runs of at least 12 readable characters only (shorter random bytes are printable too often: they would match the
+  rules); numbers, enums and bools give nothing, and a packed list of them that is really text (a
+  `string` sent where an older set declares `repeated int64`) is read as a `bytes` field is; a nested message, a map entry (`labels.key`,
   `labels.value`) and a group are read by their types, down to 16 levels, a message also as text
   as without the schema (whole when printable, whole and flat when its tags, lengths and numbers
   are blank, and the runs between its fields). A field the schema declares a `string` is read
   whole whatever its bytes look like, so a printable tag or length byte, which keeps a field
   from being read whole without the schema, doesn't there. A
   `google.protobuf.Any` is read as the type its last `type_url` names (the one the application
-  unpacks by), when the set has it, and also without the schema, as `payload.value`.
+  unpacks by) when the set has it and the value is one, and otherwise without the schema, as
+  `payload.value`.
 - **Every occurrence is read:** a field sent twice, and each member of a `oneof`, whichever the
   application keeps. Within limits: a message nested over 16 levels, with over 4,096 text fields,
   or whose reading would go past a budget linear in its size (64 bytes read per byte of the
-  message) isn't read whole, and gets `body.onOversize`. A short `bytes` field (under 8 bytes, or
+  message), or that would give the rules over 4 times its size in text, isn't read whole, and
+  gets `body.onOversize`. A short `bytes` field (under 8 bytes, or
   binary with no run of 12) gives nothing, so text an application keeps in a short `bytes` field
   (`$(id)`) isn't read: such a field is best declared `string`.
 - **What the set doesn't describe is still read**, without it: a field number the type doesn't
@@ -160,8 +164,8 @@ spec:
   them: a rising count means the set is older than the application.
 - **Names** are the proto field names (not the JSON names) joined by dots, without indexes: every
   element of `items` gives `items.sku`, so one exclusion covers them all
-  (`when: {argument: items.sku}`). An extension is `[package.extension]`. A path is cut at 256
-  bytes.
+  (`when: {argument: items.sku}`). An extension is `[package.extension]`. A path over 256 bytes
+  is cut there and ends in `~`, which no exclusion can name.
 
 **Moving a policy to a schema.** Its exclusions keep their syntax, but the names they match
 change: `when: {argument: "3.1"}` no longer matches once that field is `user.name`. Put the
