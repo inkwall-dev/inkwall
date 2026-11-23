@@ -30,7 +30,6 @@ import (
 	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/util/flowcontrol"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -666,8 +665,9 @@ func (w *webhookStarter) Start(ctx context.Context) error {
 		// merge two users' changes into a series under the first one's note.
 		Events:   w.mgr.GetClient(),
 		Instance: w.replica,
-		// 100 Events at once, then 5 a second, per replica.
-		EventLimit: flowcontrol.NewTokenBucketRateLimiter(5, 100),
+		// 100 Events at once, then 5 a second, per namespace and replica,
+		// for up to 1,024 namespaces at once (the others share a limit).
+		EventLimit: webhook.NewEventLimiter(5, 100, 1024),
 		Operator:   user,
 	}
 	if err := webhook.Setup(w.mgr, w.inject, guard, audit); err != nil {

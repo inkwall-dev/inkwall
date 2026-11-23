@@ -476,17 +476,43 @@ When a key is new and its slot's neighbourhood is full, the engine evicts, in th
 1. **A free entry**: a full bucket (TAT in the past), or one of a limit no longer in the bundle.
    A full bucket is exactly an absent one, so nothing is lost. Most evictions are these: a key idle
    for `burst × period / requests` is full.
-2. **The bucket closest to full** among the neighbourhood (the earliest TAT): a sampled
-   approximation of least-recently-limited, as Redis approximates LRU. This forgets some state:
-   that client gets a fresh bucket.
+2. **The bucket closest to full for its own limit** among the neighbourhood: the least debt
+   (TAT − now) for its limit's capacity (burst × interval), a sampled approximation of
+   least-recently-limited, as Redis approximates LRU. This forgets some state: that client gets
+   a fresh bucket. A bucket **over its limit** (its next request would be refused) or **limited
+   recently** (an event in the last 2 minutes) is never chosen: comparing raw TATs let a client
+   with a long-interval limit push its new keys' TATs past a limited bucket of another limit,
+   and reset it by sending new keys (found in the 0.7.0 pre-release review).
+   Only a `Block` limit's buckets are protected. A `Detect` limit's (charged through `Observe`)
+   are not, so an observe-only policy can't push other keys out.
+3. **A protected bucket of a limit over its share** of the neighbourhood: the slots divided by
+   the limits among them, the new key's included. The closest to full for its capacity is
+   evicted (`inkwall_rate_limit_evictions_total{kind="over_share"}`). An attacker who fills the
+   table with buckets over a cheap limit (burst + 1 requests per header value keeps one
+   protected for up to an hour on `1/h`) holds more than its share wherever another limit's key
+   arrives, so its own buckets give way.
+4. **None: an overflow bucket.** When no limit holds more than its share, the new key isn't
+   stored (`inkwall_rate_limit_overflow_total`). For a `Block` limit, its request is counted in
+   one of the limit's 256 overflow buckets, picked by the key's hash, so one key's flood drains
+   one bucket, not the limit's. For a `Detect` limit, it is let through uncounted, since a shared
+   bucket's refusals would be logged against keys that didn't earn them.
 
-The second kind is counted (`inkwall_rate_limit_evictions_total{kind="active"}`), with an alert:
+The second and third kinds are counted (`inkwall_rate_limit_evictions_total{kind="active"}` and `{kind="over_share"}`), the second with an alert:
 it means the table is too small for the clients being limited, or an attacker is cycling keys
-([§6](#6-observability)). Forgetting state errs toward letting requests through, never toward
-denying a client that stayed within its limit. The alternative, refusing to track new keys when
-the table is full, was rejected: either new clients would go unlimited (an attacker fills the table
-first, then everything passes) or they would share one overflow bucket (one attacker gets everyone
-new denied).
+([§6](#6-observability)). Forgetting the state of a bucket within its limit errs toward letting
+requests through, never toward denying a client that stayed within its limit. A bucket being
+limited is different: forgetting it lets the client it limits through, which an attacker can
+cause, so it is kept. Refusing to track new keys whenever the table is full was rejected: either
+new clients would go unlimited (an attacker fills the table first, then everything passes) or
+they would share one overflow bucket (one attacker gets everyone new denied). The overflow bucket
+of step 4 is a narrow form of that second option. It is used only where 8 protected buckets
+fill a neighbourhood and no limit holds more than its share. A client can then be pushed into it
+only by buckets of its own limit, or of limits that hold no more than their share, when its own
+limit holds an equal share. It is sharded by the key's hash, and it errs toward the limit, not
+toward letting the limited client through. The remaining trade-off: clients of one limit compete
+for that limit's share, the share is per limit (a policy with several limits gets several), and
+a table this full needs a larger `rateLimitKeys`. A global per-limit count of held buckets would
+cap shares exactly, but it would put a shared counter on every new key's path.
 
 The `/56` default for IPv6 ([§3.3](#33-keys)) keeps one subscriber from filling the table alone:
 a holder of a `/48`, the most a provider usually assigns, has 256 keys.
@@ -543,7 +569,8 @@ a holder of a `/48`, the most a provider usually assigns, has 256 keys.
 | `inkwall_rate_limit_exceeded_total` | counter | `adapter`, `action` | Requests over a limit: `deny`, or `log` in `Detect`, also when a rule's reason won the verdict |
 | `inkwall_rate_limit_keys` | gauge | | Buckets held now (full ones included until evicted) |
 | `inkwall_rate_limit_key_capacity` | gauge | | The table's capacity after the memory cap |
-| `inkwall_rate_limit_evictions_total` | counter | `kind` | `idle` (a free entry, harmless) or `active` (state forgotten) |
+| `inkwall_rate_limit_evictions_total` | counter | `kind` | `idle` (a free entry, harmless), `active` (state forgotten) or `over_share` (a protected bucket's state forgotten) |
+| `inkwall_rate_limit_overflow_total` | counter | | Requests of new keys the table couldn't hold ([§5.3](#53-memory-bound-and-eviction)) |
 | `inkwall_rate_limit_skipped_total` | counter | `reason` | Requests a limit couldn't count: `no_key` (no valid client address) |
 | `inkwall_rate_limit_events_dropped_total` | counter | | Limit events past the per-limit or the engine-wide event cap |
 
@@ -606,7 +633,7 @@ step. The guide `docs/client-ip.md` changes "the planned rate limits" to the bui
 
 | Layer | What | Where |
 |---|---|---|
-| Unit | GCRA with a fake clock: burst from idle, steady rate, refill, `Retry-After` rounding, a period of 1 h with `requests: 1`, the clock reading the same twice, a changed rate applied to an existing TAT; charging several limits with a refund when a later one refuses, never more than the rate per limit under concurrent requests; key derivation: IPv4, IPv4-mapped (unmapped by the key), IPv6 masked at each prefix length, no valid address (`no_key`), header missing (falls back to the IP, a different tag), first value of a repeated header; eviction order (free entries first, then the earliest TAT) and the `active` count; the memory cap from `GOMEMLIMIT` and without it; the per-limit and engine-wide event caps; concurrent use under `-race` | `pkg/ratelimit` |
+| Unit | GCRA with a fake clock: burst from idle, steady rate, refill, `Retry-After` rounding, a period of 1 h with `requests: 1`, the clock reading the same twice, a changed rate applied to an existing TAT; charging several limits with a refund when a later one refuses, never more than the rate per limit under concurrent requests; key derivation: IPv4, IPv4-mapped (unmapped by the key), IPv6 masked at each prefix length, no valid address (`no_key`), header missing (falls back to the IP, a different tag), first value of a repeated header; eviction order (free entries first, then the least debt for its limit's capacity, never a `Block` bucket over its limit or limited recently, then a protected bucket of a limit over its share, else the key's overflow bucket) and the `active`, `over_share` and overflow counts; a table filled with buckets over a cheap limit doesn't deny another limit's honest clients; the memory cap from `GOMEMLIMIT` and without it; the per-limit and engine-wide event caps; concurrent use under `-race` | `pkg/ratelimit` |
 | Unit | The pipeline order of [§5.1](#51-where-in-the-pipeline): `ip-deny` before limits, `ip-allow` and `SkipAll` not counted, `SkipBody` counted, `Detect` runs the rules and a rule's reason wins, `mode: Detect` on a `Block` policy, several limits (none left charged when one is over, the largest `Retry-After`), a `Detect` limit over its rate not stopping a `Block` limit, several policies (later ones not charged after a deny, in `BodyLimit` as in `Check`), the decisions made in `BodyLimit` used by `Check` and charged once, a bundle swap between them, a body limit of 0 when denied | `pkg/pipeline`, `pkg/policy` |
 | Unit | Bundle swaps keep a limit's buckets when only its rate or burst changed, and reset it when its name or key spec changed; a renamed limit's old entries reused as `idle`, never `active` | `pkg/policy` |
 | Unit | Each adapter's denial: 429, `Retry-After`, `X-Request-Id`, JSON body; gRPC `RESOURCE_EXHAUSTED` for 429 (`GRPCCode`'s table); SPOE's `retry_after` variable | each adapter's `denial_test.go`, `pkg/adapters/internal/httpadapter/grpc_test.go`, `pkg/adapters/spoe` |
@@ -632,7 +659,7 @@ step. The guide `docs/client-ip.md` changes "the planned rate limits" to the bui
 | 8 | 429 and `Retry-After` from every adapter; 429 maps to gRPC `RESOURCE_EXHAUSTED` | A configurable status; `RateLimit-*` headers; a reason-aware gRPC mapping |
 | 9 | `Detect` counts and logs, the rules still run; `mode: Detect` per limit | A per-limit `Block` on a `Detect` policy |
 | 10 | Sharded, fixed-capacity, pointer-free table; striped mutexes | Per-CPU buckets; `x/time/rate` per key; `sync.Map` |
-| 11 | Fixed capacity (`--rate-limit-keys`, at most a quarter of `GOMEMLIMIT`, 64 MiB without one); evict free entries, then the closest to full | Growing tables; refusing new keys; clearing all |
+| 11 | Fixed capacity (`--rate-limit-keys`, at most a quarter of `GOMEMLIMIT`, 64 MiB without one); evict free entries, then the closest to full for its limit, never one over its limit or limited recently, unless its limit holds more than its share of the slots (then one of the limit's 256 overflow buckets) | Growing tables; refusing new keys; clearing all |
 | 12 | Limit IDs interned by the engine from (policy namespace/name, name, key spec); buckets survive bundle swaps, and rate or burst changes, not restarts | IDs assigned by the operator; persisting buckets |
 | 13 | Old engines: `Enforced=False`, `EnginesOutdated` | A new condition |
 | 14 | Sampled limit events (one per key per minute, with a count, capped at 100 per second per limit and 10 per second per engine); no per-limit metric labels | An event per limited request |

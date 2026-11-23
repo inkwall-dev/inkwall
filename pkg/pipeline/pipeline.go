@@ -311,7 +311,7 @@ func (p *Pipeline) BodyLimit(r *request.Request, max int64) int64 {
 	decision, listed := p.routes.Decide(r.RawURI), p.ipListed(r)
 	// A country geo denies in Block isn't read either, nor a request that
 	// fails closed for a missing table.
-	if listed == ReasonNone && p.geo != nil && p.geoCheck(r, time.Now(), false).blocks(p) {
+	if listed == ReasonNone && p.geo != nil && p.geoCheck(r).blocks(p) {
 		return 0
 	}
 	if p.limits != nil && listed == ReasonNone && decision != router.SkipAll && p.limitsFor(r, time.Now()).over != nil {
@@ -397,8 +397,9 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool, now
 	// Geo (design 0011 §2.3): after the IP lists, before the skipped
 	// paths, which it covers too, and before the rate limits, so a denied
 	// country spends no client's tokens. In Detect it goes on.
-	g := p.geoCheck(r, now, true)
+	g := p.geoCheck(r)
 	if g.blocks(p) {
+		g = g.sample(p, r, now)
 		if g.noTable {
 			return g.unavailable(), nil
 		}
@@ -408,7 +409,7 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool, now
 	case router.SkipAll:
 		if g.deny {
 			// Detect: what Block would deny, logged, not "skipped".
-			return g.verdict(), nil
+			return g.sample(p, r, now).verdict(), nil
 		}
 		return Verdict{Action: ActionAllow, Reason: ReasonSkipped}, nil
 	case router.SkipBody:
@@ -448,15 +449,18 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool, now
 		v = p.enforce(v, http.StatusForbidden)
 	}
 	// Geo in Detect logs what nothing else decided; it comes before a
-	// Detect rate limit in the order, so its reason wins over one.
-	if g.deny && v.Reason == ReasonNone {
-		gv := g.verdict()
+	// Detect rate limit in the order, so its reason wins over one. A
+	// verdict that is an event already (a rule's detection, logged with
+	// reason None) keeps its own: geo's events are sampled, a rule's
+	// aren't, and every detection is logged.
+	if g.deny && v.Reason == ReasonNone && v.Action == ActionAllow {
+		gv := g.sample(p, r, now).verdict()
 		v.Action, v.Reason, v.SampledEvent, v.SampledCount = gv.Action, gv.Reason, gv.SampledEvent, gv.SampledCount
 	}
 	v = g.mark(v)
 	// A Detect limit over its rate only logs, on a Block policy too; a
-	// rule's reason wins over it.
-	if lim.detect != nil && v.Reason == ReasonNone {
+	// rule's reason, or a detection, wins over it.
+	if lim.detect != nil && v.Reason == ReasonNone && v.Action == ActionAllow {
 		v.Action, v.Reason, v.RateLimit, v.RetryAfter = ActionLog, ReasonRateLimit, lim.detect.name, lim.retryAfter
 		v.SampledEvent, v.SampledCount = lim.event, lim.sampled
 	}

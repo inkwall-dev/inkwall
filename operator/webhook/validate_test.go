@@ -5,11 +5,14 @@ package webhook
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 )
@@ -101,6 +104,30 @@ func TestPolicyValidation(t *testing.T) {
 			wantInvalid(t, err, tc.field, "not clean")
 		})
 	}
+	// Rate limit paths the engine wouldn't compile.
+	rl := p.DeepCopy()
+	rl.Spec.RateLimits = []wafv1alpha1.RateLimit{
+		{Name: "all", Requests: 100, Period: metav1.Duration{Duration: time.Minute}},
+		{Name: "login", Requests: 5, Period: metav1.Duration{Duration: time.Minute},
+			Match: &wafv1alpha1.RateLimitMatch{Paths: []wafv1alpha1.PathPattern{"/login", "/api/*", "/a/", "/.well-known/x"}}},
+	}
+	if _, err := v.ValidateCreate(ctx, rl); err != nil {
+		t.Fatalf("valid rate limits: %v", err)
+	}
+	for _, bad := range []wafv1alpha1.PathPattern{"/a/./b", "//login", "/x/../login", "/a/..", "/a/.*", "/a//*"} {
+		t.Run("rate limit path "+string(bad), func(t *testing.T) {
+			q := rl.DeepCopy()
+			q.Spec.RateLimits[1].Match.Paths[2] = bad
+			_, err := v.ValidateCreate(ctx, q)
+			wantInvalid(t, err, "spec.rateLimits[1].match.paths[2]", "not clean")
+		})
+	}
+	// Limits the engine refuses whole: the CRD refuses these too.
+	twice := rl.DeepCopy()
+	twice.Spec.RateLimits[1].Name = "all"
+	_, err := v.ValidateCreate(ctx, twice)
+	wantInvalid(t, err, "spec.rateLimits", `rate limit "all" twice`)
+
 	// WebSocket rules the engine wouldn't compile: the CRD schema rejects
 	// these too, but an engine refusing one entry refuses the whole bundle.
 	ws := p.DeepCopy()
@@ -112,7 +139,7 @@ func TestPolicyValidation(t *testing.T) {
 		t.Fatalf("valid webSocket: %v", err)
 	}
 	ws.Spec.WebSocket.AllowedOrigins[1] = "wss://app.example.com"
-	_, err := v.ValidateCreate(ctx, ws)
+	_, err = v.ValidateCreate(ctx, ws)
 	wantInvalid(t, err, "spec.webSocket.allowedOrigins[1]", "not http or https")
 	ws.Spec.WebSocket.AllowedOrigins[1] = "https://a.example"
 	ws.Spec.WebSocket.RequiredHeaders[0] = "X Api"
@@ -614,4 +641,36 @@ func TestDenyResponseValidation(t *testing.T) {
 	wantInvalid(t, err, "spec.engine.denyResponse", "not a JSON document")
 	_, err = cv.ValidateUpdate(ctx, config(nil), config(bad))
 	wantInvalid(t, err, "spec.engine.denyResponse", "not a JSON document")
+}
+
+// unclean is what "clean" means for a path pattern, as a regular
+// expression: a // (but a leading //, or //*, the root), or a . or ..
+// segment.
+var unclean = regexp.MustCompile(`.//|^//[^*]|/[.][.]?(/|[*]?$)`)
+
+// The webhook refuses exactly the rate limit paths that aren't clean, the
+// same ones it refuses for skip paths: on every pattern of up to 7
+// characters of "/", ".", "a" and a trailing "*" the CRD admits.
+func TestLimitPathsClean(t *testing.T) {
+	var patterns []string
+	var grow func(string)
+	grow = func(p string) {
+		patterns = append(patterns, p, p+"*")
+		if len(p) < 7 {
+			for _, c := range []string{"/", ".", "a"} {
+				grow(p + c)
+			}
+		}
+	}
+	grow("/")
+	for _, p := range patterns {
+		refused := len(checkRateLimits(field.NewPath("rateLimits"), []wafv1alpha1.RateLimit{{Name: "a", Requests: 1,
+			Period: metav1.Duration{Duration: time.Second}, Match: &wafv1alpha1.RateLimitMatch{Paths: []wafv1alpha1.PathPattern{wafv1alpha1.PathPattern(p)}}}})) > 0
+		if want := unclean.MatchString(p); refused != want {
+			t.Errorf("%q: refused %v, want %v", p, refused, want)
+		}
+		if skip := len(checkPath(field.NewPath("skip"), wafv1alpha1.PathPattern(p))) > 0; skip != refused {
+			t.Errorf("%q: refused as a rate limit path %v, as a skip path %v", p, refused, skip)
+		}
+	}
 }

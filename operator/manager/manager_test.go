@@ -320,6 +320,14 @@ func testWebhook(ctx context.Context, t *testing.T, c client.Client, warn *warni
 		t.Fatalf("unclean skip path: got %v", err)
 	}
 	policy.Spec.Skip.Paths[1] = "/static/*"
+	// A rate limit path the engine wouldn't compile: the webhook
+	// refuses it.
+	policy.Spec.RateLimits = []wafv1alpha1.RateLimit{{Name: "login", Requests: 5, Period: metav1.Duration{Duration: time.Minute},
+		Match: &wafv1alpha1.RateLimitMatch{Paths: []wafv1alpha1.PathPattern{"/login", "/x/../login"}}}}
+	if err := c.Create(ctx, policy); err == nil || !strings.Contains(err.Error(), "spec.rateLimits[0].match.paths[1]") {
+		t.Fatalf("unclean rate limit path: got %v", err)
+	}
+	policy.Spec.RateLimits = nil
 	if err := c.Create(ctx, policy); err != nil {
 		t.Fatalf("valid policy: %v", err)
 	}

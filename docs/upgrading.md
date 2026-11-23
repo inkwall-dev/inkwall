@@ -43,7 +43,7 @@ From 0.1.x, upgrade to 0.2.3 (or 0.2.2) first, then to 0.3.0.
 ## Every upgrade
 
 Read the section of the version you upgrade to first, then, for every minor or patch release
-(0.6.0 to 0.6.1 needs nothing more than this):
+(0.6.0 to 0.6.2 needs nothing more than this):
 
 1. Upgrade the chart, with the values you installed it with (`--reset-then-reuse-values` needs
    Helm 3.14 or later):
@@ -85,6 +85,13 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
 ## From 0.6.x to 0.7.0
 
 0.7.0 isn't released yet; this section grows as its changes land.
+
+- **gRPC messages: groups are read** (`body.grpcMessages: Inspect`). A field encoded as a
+  protobuf group (proto2 `group`, editions `DELIMITED`) is read as a nested message, with the
+  same depth and field limits; a malformed one gets `body.onOversize`. Before, its text wasn't
+  read
+  ([GHSA-78c8-6gh2-87hw](https://github.com/inkwall-dev/inkwall/security/advisories/GHSA-78c8-6gh2-87hw)).
+  Already in 0.6.2, 0.5.5 and 0.4.4.
 
 - **Rate limits** (`spec.rateLimits`, [Rate limits](rate-limits.md)). Upgrade the chart first
   (the CRD field and the operator), then the engines: while an engine before 0.7.0 runs a policy
