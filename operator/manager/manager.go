@@ -316,6 +316,7 @@ func New(cfg *rest.Config, o Options) (manager.Manager, error) {
 	haproxyBackends := crd(wiring.HAProxyBackendGVK, nil)
 	if err := (&controller.BundleReconciler{
 		Client:          mgr.GetClient(),
+		Recorder:        mgr.GetEventRecorder("inkwall-operator"),
 		APIReader:       mgr.GetAPIReader(),
 		Namespace:       o.Namespace,
 		Debounce:        o.Debounce,

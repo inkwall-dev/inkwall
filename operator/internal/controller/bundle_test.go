@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
@@ -14,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -201,16 +203,30 @@ func TestEventsConfig(t *testing.T) {
 
 // The InkwallConfig's denyResponse is the bundle's default denial (#725).
 func TestDenyResponseDefault(t *testing.T) {
-	if got := denyResponse(nil); got != nil {
+	ctx := context.Background()
+	rec := events.NewFakeRecorder(4)
+	r := &BundleReconciler{Recorder: rec}
+	if got := r.denyResponse(ctx, nil); got != nil {
 		t.Errorf("no InkwallConfig: %v", got)
 	}
 	cfg := &wafv1alpha1.InkwallConfig{}
-	if got := denyResponse(cfg); got != nil {
+	if got := r.denyResponse(ctx, cfg); got != nil {
 		t.Errorf("unset: %v", got)
 	}
 	cfg.Spec.Engine.DenyResponse = &wafv1alpha1.DenyResponse{ContentType: "application/json", Body: `{"id":"{{request_id}}"}`}
 	want := &bundlev1.DenyResponse{ContentType: "application/json", Body: `{"id":"{{request_id}}"}`}
-	if got := denyResponse(cfg); !proto.Equal(got, want) {
+	if got := r.denyResponse(ctx, cfg); !proto.Equal(got, want) {
 		t.Errorf("set: %v, want %v", got, want)
+	}
+	// One the engine can't compile (its webhook fails open) would make every
+	// engine refuse the bundle: left out.
+	cfg.Spec.Engine.DenyResponse = &wafv1alpha1.DenyResponse{ContentType: "image/png", Body: "x"}
+	if got := r.denyResponse(ctx, cfg); got != nil {
+		t.Errorf("not compiled: %v", got)
+	}
+	// A Warning Event, once for this version of the InkwallConfig.
+	r.denyResponse(ctx, cfg)
+	if len(rec.Events) != 1 || !strings.Contains(<-rec.Events, "Warning InvalidDenyResponse") {
+		t.Errorf("want one Warning Event")
 	}
 }

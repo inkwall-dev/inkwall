@@ -14,13 +14,17 @@ func TestGeoWarnings(t *testing.T) {
 	if len(isoCountries) != 250 {
 		t.Errorf("%d codes, want the 249 assigned and XK", len(isoCountries))
 	}
-	p := &wafv1alpha1.WAFPolicy{Spec: wafv1alpha1.WAFPolicySpec{Geo: &wafv1alpha1.GeoSpec{
-		Deny:  []wafv1alpha1.CountryCode{"RU", "UK", "XK"},
-		Allow: []wafv1alpha1.CountryCode{"EU", "XA"},
-	}}}
-	warnings, err := validateWAFPolicy(p)
-	if err != nil {
-		t.Fatal(err)
+	// One of deny and allow (the CRD's rule), each.
+	var warnings []string
+	for _, g := range []*wafv1alpha1.GeoSpec{
+		{Deny: []wafv1alpha1.CountryCode{"RU", "UK", "XK"}},
+		{Allow: []wafv1alpha1.CountryCode{"EU", "XA"}},
+	} {
+		w, err := validateWAFPolicy(&wafv1alpha1.WAFPolicy{Spec: wafv1alpha1.WAFPolicySpec{Geo: g}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		warnings = append(warnings, w...)
 	}
 	got := strings.Join(warnings, "\n")
 	for _, want := range []string{
