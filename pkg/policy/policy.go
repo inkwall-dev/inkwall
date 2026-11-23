@@ -257,14 +257,7 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 	if err != nil {
 		return nil, key, err
 	}
-	var exclusions []coraza.Exclusion
-	for _, e := range bp.GetExclusions() {
-		ex := coraza.Exclusion{Path: e.GetPath(), Argument: e.GetArgument()}
-		for _, id := range e.GetRuleIds() {
-			ex.RuleIDs = append(ex.RuleIDs, int(id))
-		}
-		exclusions = append(exclusions, ex)
-	}
+	exclusions := policyExclusions(bp)
 
 	bodyLimit := o.BodyLimit
 	oversize := pipeline.OversizeAuto
@@ -306,20 +299,9 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 		return nil, key, err
 	}
 
-	routes, err := router.New(bp.GetSkipPaths(), bp.GetSkipBodyPaths())
+	routes, ws, err := policySettings(bp)
 	if err != nil {
 		return nil, key, err
-	}
-	var ws *pipeline.WebSocketRules
-	if w := bp.GetWebsocket(); w != nil {
-		ws, err = pipeline.CompileWebSocket(pipeline.WebSocketConfig{
-			AllowedOrigins:     w.GetAllowedOrigins(),
-			AllowMissingOrigin: w.GetAllowMissingOrigin(),
-			RequiredHeaders:    w.GetRequiredHeaders(),
-		})
-		if err != nil {
-			return nil, key, fmt.Errorf("websocket: %w", err)
-		}
 	}
 	pc := pipeline.Config{
 		Mode:         pipeline.ModeDetect,
@@ -344,6 +326,39 @@ func compilePolicy(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o
 		pc.Timeout = t.AsDuration()
 	}
 	return &Policy{ID: bp.GetId(), pipeline: pipeline.New(eval, pc), bodyLimit: bodyLimit}, key, nil
+}
+
+// policyExclusions are a policy's exclusions, as the rules take them.
+func policyExclusions(bp *bundlev1.Policy) []coraza.Exclusion {
+	var exclusions []coraza.Exclusion
+	for _, e := range bp.GetExclusions() {
+		ex := coraza.Exclusion{Path: e.GetPath(), Argument: e.GetArgument()}
+		for _, id := range e.GetRuleIds() {
+			ex.RuleIDs = append(ex.RuleIDs, int(id))
+		}
+		exclusions = append(exclusions, ex)
+	}
+	return exclusions
+}
+
+// policySettings compiles a policy's skip paths and WebSocket rules.
+func policySettings(bp *bundlev1.Policy) (*router.Table, *pipeline.WebSocketRules, error) {
+	routes, err := router.New(bp.GetSkipPaths(), bp.GetSkipBodyPaths())
+	if err != nil {
+		return nil, nil, err
+	}
+	var ws *pipeline.WebSocketRules
+	if w := bp.GetWebsocket(); w != nil {
+		ws, err = pipeline.CompileWebSocket(pipeline.WebSocketConfig{
+			AllowedOrigins:     w.GetAllowedOrigins(),
+			AllowMissingOrigin: w.GetAllowMissingOrigin(),
+			RequiredHeaders:    w.GetRequiredHeaders(),
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("websocket: %w", err)
+		}
+	}
+	return routes, ws, nil
 }
 
 // rulesConfig is the rules a policy compiles to: its rule sets in order.
@@ -380,6 +395,38 @@ func rulesConfig(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o O
 	return cfg, nil
 }
 
+// CheckSettings checks what of policy bp the engine compiles besides its
+// rules, as Compile does: its skip paths, WebSocket rules and exclusions;
+// ruleSets has the rule sets it binds. A policy the engine refuses makes it
+// refuse the whole bundle, every other policy's changes with it: the
+// operator leaves out a policy that fails this (or RuleChecker.Check),
+// whatever admitted it.
+func CheckSettings(bp *bundlev1.Policy, ruleSets []*bundlev1.RuleSet) error {
+	byID := map[string]*bundlev1.RuleSet{}
+	for _, rs := range ruleSets {
+		byID[rs.GetId()] = rs
+	}
+	if _, err := rulesConfig(bp, byID, Options{}); err != nil {
+		return err
+	}
+	if err := coraza.CheckExclusions(policyExclusions(bp)); err != nil {
+		return err
+	}
+	_, _, err := policySettings(bp)
+	return err
+}
+
+// CheckRuleSets checks that ruleSets has the rule sets policy bp binds, as
+// Compile loads them, without compiling them (RuleChecker.Check does).
+func CheckRuleSets(bp *bundlev1.Policy, ruleSets []*bundlev1.RuleSet) error {
+	byID := map[string]*bundlev1.RuleSet{}
+	for _, rs := range ruleSets {
+		byID[rs.GetId()] = rs
+	}
+	_, err := rulesConfig(bp, byID, Options{})
+	return err
+}
+
 // RuleChecker checks that a policy's rule sets compile together, as
 // Compile compiles them: rule sets that are valid alone may not be (the
 // same rule ID in two). It remembers each combination's result, not the
@@ -387,16 +434,35 @@ func rulesConfig(bp *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet, o O
 type RuleChecker struct {
 	mu   sync.Mutex
 	errs map[[sha256.Size]byte]error
+	// used are the combinations checked since the last Prune.
+	used map[[sha256.Size]byte]bool
+	// compiles counts the combinations compiled, for tests.
+	compiles int
 }
 
 // NewRuleChecker returns a RuleChecker that has checked nothing.
 func NewRuleChecker() *RuleChecker {
-	return &RuleChecker{errs: map[[sha256.Size]byte]error{}}
+	return &RuleChecker{errs: map[[sha256.Size]byte]error{}, used: map[[sha256.Size]byte]bool{}}
+}
+
+// Prune forgets the results of the combinations no Check asked for since
+// the last Prune, as Evaluators drops the rule sets a bundle doesn't use:
+// called after each resolution, it keeps the results of the policies there
+// are, however many, and none of those there were.
+func (c *RuleChecker) Prune() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k := range c.errs {
+		if !c.used[k] {
+			delete(c.errs, k)
+		}
+	}
+	clear(c.used)
 }
 
 // Check compiles the rules of policy bp, whose rule sets are among
-// ruleSets. A policy without SecLang rule sets runs only the built-in rules
-// and isn't compiled.
+// ruleSets, with its exclusions when they are compiled in. A policy without
+// SecLang rule sets runs only the built-in rules and isn't compiled.
 func (c *RuleChecker) Check(bp *bundlev1.Policy, ruleSets []*bundlev1.RuleSet) error {
 	byID := map[string]*bundlev1.RuleSet{}
 	seclang := false
@@ -416,11 +482,32 @@ func (c *RuleChecker) Check(bp *bundlev1.Policy, ruleSets []*bundlev1.RuleSet) e
 		return err
 	}
 	cfg.BodyLimit, cfg.ResponseBodyLimit = MaxBodyBytes, MaxBodyBytes
+	// The exclusions too, when they are compiled into rules of their own:
+	// one on a rule the rule sets remove doesn't compile with them
+	// (WithExclusions). The others are checked without the rules
+	// (CheckSettings), and policies that differ only in them share a check,
+	// as they share compiled rules in the engine.
+	exclusions := policyExclusions(bp)
+	own, err := coraza.ExclusionsCompiledIn(cfg, exclusions)
+	if err != nil {
+		return err
+	}
 	key := cfg.Key()
+	if own {
+		h := sha256.New()
+		h.Write(key[:])
+		fmt.Fprintf(h, "%#v", exclusions)
+		h.Sum(key[:0])
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.used[key] = true
 	if err, ok := c.errs[key]; ok {
 		return err
+	}
+	c.compiles++
+	if own {
+		cfg.Exclusions = exclusions // New compiles them in, as WithExclusions
 	}
 	_, err = coraza.New(cfg)
 	c.errs[key] = err

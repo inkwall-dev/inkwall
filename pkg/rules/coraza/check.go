@@ -270,3 +270,24 @@ func compileCause(err error) error {
 	}
 	return errors.New(msg)
 }
+
+// CheckExclusions checks exclusions as WithExclusions does, without
+// compiling rules: what it refuses whatever the rules are.
+func CheckExclusions(list []Exclusion) error {
+	_, err := compileExclusions(list)
+	return err
+}
+
+// ExclusionsCompiledIn reports whether exclusions list, with the rules cfg
+// describes, are compiled into rules of their own (WithExclusions: argument
+// exclusions with rules that negate ARGS targets themselves). Only those
+// can fail to compile with the rules (one on a rule the rules remove) once
+// CheckExclusions accepts the list; checking the others needs no compiling.
+func ExclusionsCompiledIn(cfg Config, list []Exclusion) (bool, error) {
+	x, err := compileExclusions(list)
+	if err != nil {
+		return false, err
+	}
+	negates := argsNegation.MatchString(cfg.DirectivesBeforeCRS) || argsNegation.MatchString(cfg.Directives)
+	return negates && x.hasTargets(), nil
+}

@@ -101,7 +101,7 @@ func Strings(msg []byte, lim Limits, out []Field) (fields []Field, ok bool) {
 			fields, ok = w.out, false
 		}
 	}()
-	ok = w.message(msg, "", 0)
+	ok, _ = w.message(msg, "", 0)
 	return w.out, ok && !w.over
 }
 
@@ -112,39 +112,56 @@ type walker struct {
 }
 
 // message walks msg, a message at depth whose fields are named under
-// prefix. It reports whether msg is a valid message.
-func (w *walker) message(msg []byte, prefix string, depth int) bool {
+// prefix. It reports whether msg is a valid message, and whether its tags,
+// lengths and numbers, and those of the messages read in it, are blank:
+// control characters and spaces only.
+func (w *walker) message(msg []byte, prefix string, depth int) (ok, blank bool) {
+	blank = true
 	for len(msg) > 0 {
 		num, typ, n := protowire.ConsumeTag(msg)
 		if n < 0 {
-			return false
+			return false, false
 		}
+		blank = blank && isBlank(msg[:n])
 		msg = msg[n:]
 		switch typ {
 		case protowire.BytesType:
 			v, n := protowire.ConsumeBytes(msg)
 			if n < 0 {
-				return false
+				return false, false
 			}
+			blank = blank && isBlank(msg[:n-len(v)])
 			msg = msg[n:]
-			w.field(v, fieldName(prefix, num), depth)
+			blank = w.field(v, fieldName(prefix, num), depth) && blank
 		case protowire.StartGroupType:
 			// A group (proto2, or editions' DELIMITED encoding): a nested
 			// message between a start and an end tag. One that doesn't end,
 			// or ends with another field's tag, doesn't parse.
 			v, n := protowire.ConsumeGroup(num, msg)
 			if n < 0 {
-				return false
+				return false, false
 			}
+			blank = blank && isBlank(msg[len(v):n])
 			msg = msg[n:]
-			w.group(v, fieldName(prefix, num), depth)
+			blank = w.group(v, fieldName(prefix, num), depth) && blank
 		default:
 			// Numbers; an end tag without its start doesn't parse.
 			n = protowire.ConsumeFieldValue(num, typ, msg)
 			if n < 0 {
-				return false
+				return false, false
 			}
+			blank = blank && isBlank(msg[:n])
 			msg = msg[n:]
+		}
+	}
+	return true, blank
+}
+
+// isBlank reports whether b has only control characters and spaces.
+func isBlank(b []byte) bool {
+	for _, c := range b {
+		if c > ' ' && c != 0x7f {
+			return false
 		}
 	}
 	return true
@@ -166,51 +183,72 @@ func fieldName(prefix string, num protowire.Number) string {
 //   - UTF-8 that isn't a message is text, whatever its characters: a
 //     control character is a space (see spaced), the rest as it is;
 //   - a message is read as one, and as text too: as it is when it is
-//     printable, else the readable runs of its own bytes, those between its
-//     length-delimited fields (tags, lengths, numbers), where text could
-//     otherwise hide;
+//     printable; else whole (flat) when it is UTF-8 whose tags, lengths
+//     and numbers (its own and its messages') are blank; and the readable
+//     runs of its own bytes, those between its length-delimited fields
+//     (tags, lengths, numbers), where text could otherwise hide;
 //   - any other bytes (binary) give their readable runs.
-func (w *walker) field(v []byte, name string, depth int) {
+func (w *walker) field(v []byte, name string, depth int) (blank bool) {
 	if len(v) == 0 {
-		return
+		return true
 	}
 	if valid(v) {
-		w.nested(v, name, depth)
-		return
+		// UTF-8 that also parses as a message, with no readable character
+		// in its tags, lengths and numbers or its messages', gives both:
+		// its fields, and its whole text (unless nested gives it,
+		// printable), so that the whitespace and control characters there
+		// can't split words between its fields; within the depth read.
+		// Tags and lengths that read as text would join field names and
+		// values into words no one sent (false positives): those messages
+		// give their fields alone.
+		// A printable message is text as it is, to its parent too.
+		pr := printable(v)
+		blank = w.nested(v, name, depth, pr)
+		if pr {
+			return true
+		}
+		if blank && depth < w.lim.Depth && utf8.Valid(v) {
+			w.text(flat(v), name)
+		}
+		return blank
 	}
 	if utf8.Valid(v) {
 		w.text(spaced(v), name)
 	} else {
 		w.text(runs(v, minBinaryRun), name)
 	}
+	return true
 }
 
 // group reads a group's fields v, a valid message, as a nested message's:
-// its text, and its fields under name, within the same limits.
-func (w *walker) group(v []byte, name string, depth int) {
+// its text, and its fields under name, within the same limits. It reports
+// whether v is blank (message).
+func (w *walker) group(v []byte, name string, depth int) bool {
 	if len(v) == 0 {
-		return
+		return true
 	}
-	w.nested(v, name, depth)
+	return w.nested(v, name, depth, printable(v))
 }
 
 // nested reads v, a valid message at depth+1 named name, as text (see
-// field), then its fields.
-func (w *walker) nested(v []byte, name string, depth int) {
+// field), then its fields; pr: v is printable. It reports whether v, read
+// whole, is blank (message).
+func (w *walker) nested(v []byte, name string, depth int, pr bool) bool {
 	var value string
-	if printable(v) {
+	if pr {
 		value = string(v)
 	} else {
 		value = runs(between(v), minNumbersRun)
 	}
 	if !w.text(value, name) {
-		return
+		return false
 	}
 	if depth+1 > w.lim.Depth {
 		w.over = true
-		return
+		return false
 	}
-	w.message(v, name, depth+1)
+	_, blank := w.message(v, name, depth+1)
+	return blank
 }
 
 // text adds value, unless it is empty, as the text of field name. It
@@ -229,29 +267,34 @@ func (w *walker) text(value, name string) bool {
 
 // between returns the bytes of msg, a valid message, but the contents of
 // its length-delimited fields: its tags, lengths and numbers, those of its
-// groups too (whose text fields are read as theirs).
+// groups too (whose text fields are read as theirs). It reads msg once,
+// tag by tag: a group's start and end tags are tags like any other, so
+// that groups nested however deep cost no more than their bytes.
 func between(msg []byte) []byte {
-	return appendBetween(nil, msg)
-}
-
-func appendBetween(out, msg []byte) []byte {
+	var out []byte
 	for len(msg) > 0 {
-		num, typ, n := protowire.ConsumeField(msg)
+		num, typ, n := protowire.ConsumeTag(msg)
+		if n < 0 {
+			return out
+		}
+		skip := 0 // the contents of a length-delimited field
 		switch typ {
 		case protowire.BytesType:
-			_, _, tag := protowire.ConsumeTag(msg)
-			v, _ := protowire.ConsumeBytes(msg[tag:])
-			out = append(out, msg[:n-len(v)]...)
-		case protowire.StartGroupType:
-			_, _, tag := protowire.ConsumeTag(msg)
-			v, _ := protowire.ConsumeGroup(num, msg[tag:])
-			out = append(out, msg[:tag]...)
-			out = appendBetween(out, v)
-			out = append(out, msg[tag+len(v):n]...)
+			v, m := protowire.ConsumeBytes(msg[n:])
+			if m < 0 {
+				return out
+			}
+			n, skip = n+m-len(v), len(v)
+		case protowire.StartGroupType, protowire.EndGroupType:
 		default:
-			out = append(out, msg[:n]...)
+			m := protowire.ConsumeFieldValue(num, typ, msg[n:])
+			if m < 0 {
+				return out
+			}
+			n += m
 		}
-		msg = msg[n:]
+		out = append(out, msg[:n]...)
+		msg = msg[n+skip:]
 	}
 	return out
 }
@@ -315,6 +358,31 @@ func spaced(v []byte) string {
 		}
 		return r
 	}, string(v))
+}
+
+// flat returns v, valid UTF-8, with every control character a space (tab,
+// newline and carriage return too), trimmed: the text of a message, whose
+// tags and lengths (newline is field 1's tag) aren't the application's
+// line breaks.
+func flat(v []byte) string {
+	// Control characters are ASCII, never part of a multi-byte UTF-8
+	// sequence: replacing them byte by byte is exact, in one allocation.
+	blank := func(c byte) bool { return c <= ' ' || c == 0x7f }
+	for len(v) > 0 && blank(v[0]) {
+		v = v[1:]
+	}
+	for len(v) > 0 && blank(v[len(v)-1]) {
+		v = v[:len(v)-1]
+	}
+	var b strings.Builder
+	b.Grow(len(v))
+	for _, c := range v {
+		if blank(c) {
+			c = ' '
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 // control reports whether r is a C0 control character other than tab,

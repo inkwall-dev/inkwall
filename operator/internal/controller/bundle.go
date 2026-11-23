@@ -289,6 +289,9 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	signer := keys.Active
 
 	res := resolver.Resolve(in)
+	// The rule checks this resolution didn't ask for are of rule sets and
+	// policies there aren't any more.
+	r.rules.Prune()
 	// A bundle signed with another key than the active one (it just
 	// rotated) is signed again, as a new version: engines then cache a
 	// bundle the active key signed.
