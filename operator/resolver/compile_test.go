@@ -122,3 +122,59 @@ func TestCheckSpec(t *testing.T) {
 		t.Error("a skip path that isn't clean compiles")
 	}
 }
+
+// TestPreviousVersionSharesRuleSet: a policy kept at its previous version
+// and another policy bind the same rule set, which changed: the bundle has
+// one version of it, the new one, which the previous version doesn't
+// compile with (an exclusion on a rule it now removes). The previous version
+// is left out, whichever policy is older, and the bundle compiles.
+func TestPreviousVersionSharesRuleSet(t *testing.T) {
+	for _, badFirst := range []bool{true, false} {
+		mk := func(rules string) Input {
+			in := compileInput()
+			in.RuleSets = []wafv1alpha1.WAFRuleSet{seclangRuleSet("r", rules)}
+			for i := range in.Policies {
+				useRuleSet(&in.Policies[i], "r")
+			}
+			in.Policies[0].Spec.Exclusions = []wafv1alpha1.Exclusion{{RuleIDs: []int32{942100}, When: &wafv1alpha1.ExclusionMatch{Argument: "foo"}}}
+			if !badFirst {
+				in.Policies[0].CreationTimestamp, in.Policies[1].CreationTimestamp = in.Policies[1].CreationTimestamp, in.Policies[0].CreationTimestamp
+			}
+			return in
+		}
+		prev := Resolve(mk("# !args\nSecRule ARGS \"@contains zzz\" \"id:10001,phase:2,deny\""))
+		in := mk("# !args\nSecRuleRemoveById 942100")
+		in.Previous = &bundlev1.Bundle{Policies: prev.Policies, RuleSets: prev.RuleSets}
+		res := Resolve(in)
+		wantStatus(t, res, "bad", false, ReasonRuleSetsIncompatible, "so the policy is left out")
+		wantStatus(t, res, "other", true, ReasonAccepted, PolicyValid)
+		if findPolicy(res, "shop/bad") != nil {
+			t.Fatalf("older %v: the previous version must stay out", badFirst)
+		}
+		// r removes 942100, so the other policy lets the injection
+		// through, but applies.
+		if v := verdictFor(t, res, "b.example.com"); v.Policy != "shop/other" {
+			t.Errorf("older %v: policy %q applies, want shop/other", badFirst, v.Policy)
+		}
+	}
+}
+
+// TestBundleGuard: whatever puts a policy in the bundle that doesn't compile
+// with the rule sets the bundle has, the last check leaves it out: a
+// previous version that shares a rule set ID with another policy, the rule
+// set changed to give a rule ID of another of its rule sets.
+func TestBundleGuard(t *testing.T) {
+	in := compileInput()
+	in.RuleSets = []wafv1alpha1.WAFRuleSet{seclangRuleSet("r", `SecRule ARGS "@contains x" "id:100001,phase:1,pass,nolog"`),
+		seclangRuleSet("s", `SecRule ARGS "@contains y" "id:100002,phase:1,pass,nolog"`)}
+	useRuleSet(&in.Policies[0], "r")
+	useRuleSet(&in.Policies[0], "s")
+	useRuleSet(&in.Policies[1], "s")
+	prev := Resolve(in)
+	in.Previous = &bundlev1.Bundle{Policies: prev.Policies, RuleSets: prev.RuleSets}
+	// bad's spec now fails (a rule set it binds is missing), so its
+	// previous version would stay; s now has r's rule ID.
+	useRuleSet(&in.Policies[0], "missing")
+	in.RuleSets[1] = seclangRuleSet("s", `SecRule ARGS "@contains y" "id:100001,phase:1,pass,nolog"`)
+	wantLeftOut(t, in, ReasonInvalidRef, "so the policy is left out")
+}

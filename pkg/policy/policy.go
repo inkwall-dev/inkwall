@@ -425,6 +425,9 @@ type RuleChecker struct {
 	errs map[[sha256.Size]byte]error
 }
 
+// maxRuleChecks bounds the results a RuleChecker remembers.
+const maxRuleChecks = 4096
+
 // NewRuleChecker returns a RuleChecker that has checked nothing.
 func NewRuleChecker() *RuleChecker {
 	return &RuleChecker{errs: map[[sha256.Size]byte]error{}}
@@ -478,6 +481,10 @@ func (c *RuleChecker) Check(bp *bundlev1.Policy, ruleSets []*bundlev1.RuleSet) e
 		cfg.Exclusions = exclusions // New compiles them in, as WithExclusions
 	}
 	_, err = coraza.New(cfg)
+	if len(c.errs) >= maxRuleChecks {
+		// Results of combinations no policy may bind any more: start again.
+		clear(c.errs)
+	}
 	c.errs[key] = err
 	return err
 }
