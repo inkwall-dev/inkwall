@@ -16,6 +16,7 @@ picture; the [glossary](../glossary.md) defines the terms all of them use.
 | [0009](0009-rate-limits.md) | Rate Limits | Draft | Per-engine rate limits in tier T1: the `WAFPolicy` API, 429 with `Retry-After` per adapter, the engine's bounded table, observability, tests |
 | [0010](0010-siem-export.md) | Exporting Security Events to a SIEM | Draft | Security events from the operator to a SIEM over OTLP or JSON: API, schema, buffering, security, status |
 | [0011](0011-geo-blocking.md) | Geo Blocking | Draft | Allow or deny clients by country in tier T1: the `WAFPolicy` API, the user's MMDB compiled by the operator into a country table, its distribution, lookup cost, status, tests |
+| [0012](0012-llm-api-protection.md) | Protecting LLM APIs | Draft | LLM API endpoints against the OWASP Top 10 for LLM Applications: what a WAF can and can't do per risk, request caps, injection signatures, leak checks on streamed responses, token-weighted rate limits, the false-positive corpus |
 
 There is no 0003: no document with that number was ever published in this repository.
 
