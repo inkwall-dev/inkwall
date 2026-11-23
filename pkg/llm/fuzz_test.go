@@ -283,6 +283,11 @@ func refMessage(out *ref, m any, f Format) (Role, error) {
 	if f != OpenAIChat {
 		return r, nil
 	}
+	for _, k := range []string{"reasoning", "reasoning_content", "refusal"} {
+		if s, ok := msg[k].(string); ok {
+			out.prompt += int64(len(s))
+		}
+	}
 	if tc, ok := msg["tool_calls"]; ok && tc != nil {
 		calls, ok := tc.([]any)
 		if !ok {
@@ -356,6 +361,11 @@ func refPart(out *ref, p any, inner bool) error {
 			return errType
 		}
 		text = len(s) <= 16 && textType([]byte(s), true)
+		if k := s; k == "thinking" || k == "refusal" {
+			if t, ok := part[k].(string); ok {
+				out.prompt += int64(len(t))
+			}
+		}
 	}
 	for _, k := range []string{"content", "output"} {
 		c, ok := part[k]

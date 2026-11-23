@@ -671,6 +671,10 @@ const (
 	fFunction
 	fName
 	fCustom
+	fReasoning
+	fReasoningContent
+	fRefusal
+	fThinking
 )
 
 // The keys each object read has, which a key Go's encoding/json would
@@ -682,8 +686,8 @@ var (
 		OpenAIEmbeddings:  {"model", "input"},
 		AnthropicMessages: {"model", "messages", "max_tokens", "stream", "tools", "system"},
 	}
-	messageKeys  = []string{"role", "content", "tool_calls", "function_call"}
-	partKeys     = []string{"type", "text", "content", "output"}
+	messageKeys  = []string{"role", "content", "tool_calls", "function_call", "reasoning", "reasoning_content", "refusal"}
+	partKeys     = []string{"type", "text", "content", "output", "thinking", "refusal"}
 	toolCallKeys = []string{"function"}
 	functionKeys = []string{"arguments"}
 	itemKeys     = []string{"role", "type", "content", "output", "arguments"}
@@ -958,6 +962,26 @@ func (p *parser) message(index int64) {
 				return
 			}
 			p.function(4)
+		case p.format == OpenAIChat && (string(k) == "reasoning" || string(k) == "reasoning_content" || string(k) == "refusal"):
+			// Text servers give the model back with the history: Ollama's
+			// reasoning, vLLM's reasoning_content, a refusal. Counted when
+			// a string, skipped otherwise (no server reads another type).
+			bit := fRefusal
+			switch string(k) {
+			case "reasoning":
+				bit = fReasoning
+			case "reasoning_content":
+				bit = fReasoningContent
+			}
+			if !p.once(&seen, bit) {
+				return
+			}
+			if p.peek() == '"' {
+				_, _, n, _ := p.str()
+				p.out.PromptBytes += n
+			} else {
+				p.skip(4)
+			}
 		default:
 			p.unread(k, 4, messageKeys)
 		}
@@ -1017,7 +1041,7 @@ func (p *parser) part(depth int, inner bool) {
 	var seen uint32
 	var typ [16]byte
 	typLen, typed, longType := 0, false, false
-	var textLen int64
+	var textLen, thinkingLen, refusalLen int64
 	hasText, badText := false, false
 	first := true
 	for p.next(&first, '}') {
@@ -1056,6 +1080,26 @@ func (p *parser) part(depth int, inner bool) {
 					p.skip(depth + 1)
 				}
 			}
+		case "thinking", "refusal":
+			// An Anthropic thinking block's, a chat refusal part's text,
+			// counted when the part is of that type.
+			bit := fThinking
+			if string(k) == "refusal" {
+				bit = fRefusal
+			}
+			if !p.once(&seen, bit) {
+				return
+			}
+			if p.peek() == '"' {
+				_, _, n, _ := p.str()
+				if string(k) == "thinking" {
+					thinkingLen = n
+				} else {
+					refusalLen = n
+				}
+			} else {
+				p.skip(depth + 1)
+			}
 		case "content", "output":
 			// A tool result's contents (Anthropic's tool_result, the
 			// Responses API's function_call_output): a string or parts, as
@@ -1081,6 +1125,14 @@ func (p *parser) part(depth int, inner bool) {
 	}
 	if p.err {
 		return
+	}
+	if !longType {
+		switch string(typ[:typLen]) {
+		case "thinking":
+			p.out.PromptBytes += thinkingLen
+		case "refusal":
+			p.out.PromptBytes += refusalLen
+		}
 	}
 	if !longType && textType(typ[:typLen], typed) {
 		if badText {

@@ -260,6 +260,9 @@ func TestLLMResponses(t *testing.T) {
 		resp := &request.Response{Status: 200, Headers: http.Header{"Content-Type": {"application/json"}}, Body: []byte(`{"choices":[{"message":{"content":"LEAK"}}]}`)}
 		v = x.CheckResponse(context.Background(), resp)
 		x.Close()
+		if !v.LLMBody {
+			t.Errorf("inspect %v: an endpoint's response verdict: LLMBody unset", inspect)
+		}
 		if want := map[bool]Action{false: ActionAllow, true: ActionDeny}[inspect]; v.Action != want {
 			t.Errorf("inspect %v: response %s, want %s", inspect, v.Action, want)
 		}

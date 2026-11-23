@@ -39,6 +39,9 @@ type Exchange struct {
 	// don't read (ruleSetBody: Skip), so its response's body isn't read
 	// either: its status and headers are inspected.
 	skipBody bool
+	// endpoint: the request was on an LLM endpoint: its response's body
+	// is model output, of which events keep no snippet.
+	endpoint bool
 
 	// others are the exchanges of the request's other policies
 	// (JoinExchanges), which inspect the response too.
@@ -168,6 +171,7 @@ func (e *Exchange) checkResponse(ctx context.Context, resp *request.Response) Ve
 	v := e.check(ctx, resp)
 	v.Duration = time.Since(start)
 	v.Response = true
+	v.LLMBody = e.endpoint
 	v.Policy = e.p.policy
 	v.DenyResponse = e.p.denyResponse
 	if e.p.observer != nil {
@@ -199,6 +203,7 @@ func (e *Exchange) refused() Verdict {
 	e.mu.Unlock()
 	v := e.p.failed(ReasonOverload)
 	v.Response = true
+	v.LLMBody = e.endpoint
 	v.Policy = e.p.policy
 	v.DenyResponse = e.p.denyResponse
 	if e.p.observer != nil {

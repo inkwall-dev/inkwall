@@ -219,7 +219,7 @@ func New(src Source, req *request.Request, path string, v pipeline.Verdict, now 
 		// Where the check failed, never the prompt's text (design 0012 §9).
 		ev.Llm = &eventsv1.LLMEvent{
 			Format:          l.Format.String(),
-			Model:           truncate(l.Model, 128),
+			Model:           truncate(l.Model, 64),
 			Check:           l.Check.String(),
 			MessageIndex:    int32(min(l.MessageIndex, math.MaxInt32)), // #nosec G115 -- bounded
 			Role:            l.Role.String(),
@@ -249,7 +249,7 @@ func New(src Source, req *request.Request, path string, v pipeline.Verdict, now 
 	for _, m := range v.Matches[:min(len(v.Matches), maxMatches)] {
 		match := &eventsv1.Match{
 			RuleId:   int32(m.RuleID), // #nosec G115 -- rule IDs fit
-			Variable: truncate(m.Variable, maxVariable),
+			Variable: variableOf(v, m.Variable),
 		}
 		// An LLM check's match has no snippet, ever, nor a rule's match in
 		// an endpoint's body: the prompt is the user's data.
@@ -310,18 +310,34 @@ func snippet(r *Redaction, variable, value string, webSocket bool) string {
 	return truncate(value, maxSnippet)
 }
 
-// bodyVariable reports whether a match of variable is in the request's
-// body: a form's or JSON document's arguments (JSON's are ARGS:json.…),
-// the raw body, its files or XML.
+// bodyVariable reports whether a match of variable is in a body: the
+// request's (a form's or JSON document's arguments, JSON's being
+// ARGS:json.…, the raw body, its files or XML) or the response's.
 func bodyVariable(variable string) bool {
 	name, key, _ := strings.Cut(variable, ":")
 	switch strings.ToUpper(name) {
-	case "ARGS_POST", "ARGS_POST_NAMES", "REQUEST_BODY", "FULL_REQUEST", "XML", "FILES", "FILES_NAMES", "MULTIPART_PART_HEADERS":
+	case "ARGS_POST", "ARGS_POST_NAMES", "REQUEST_BODY", "FULL_REQUEST", "XML", "FILES", "FILES_NAMES", "MULTIPART_PART_HEADERS",
+		"RESPONSE_BODY", "RESPONSE_ARGS", "RESPONSE_ARGS_NAMES", "RESPONSE_XML":
 		return true
 	case "ARGS", "ARGS_NAMES":
 		return strings.HasPrefix(key, "json")
 	}
 	return false
+}
+
+// maxBodyKey is the most of a key in an LLM endpoint's body an event's
+// variable keeps: the client chooses the keys too.
+const maxBodyKey = 32
+
+// variableOf is a match's variable as events and logs name it: a key in an
+// LLM endpoint's body is cut at maxBodyKey.
+func variableOf(v pipeline.Verdict, variable string) string {
+	if v.LLMBody && bodyVariable(variable) {
+		if name, key, ok := strings.Cut(variable, ":"); ok {
+			return name + ":" + truncate(key, maxBodyKey)
+		}
+	}
+	return truncate(variable, maxVariable)
 }
 
 // fieldNumbers reports whether name is a path of field numbers ("1",

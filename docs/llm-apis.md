@@ -81,10 +81,10 @@ so new provider fields don't break requests.
 
 | `format` | Prompt text | Output limit | Also read |
 |---|---|---|---|
-| `OpenAIChat` | `messages[].content` (a string, or `text` parts), `tool_calls[].function.arguments`, by `role` | `max_completion_tokens` or `max_tokens` (the larger, when a request sets both) | `model`, `n`, `stream`, `tools[]`, `functions[]` |
+| `OpenAIChat` | `messages[].content` (a string, or `text` and `refusal` parts), `tool_calls[].function.arguments`, `function_call.arguments`, and the text servers give the model back with the history: `reasoning` (Ollama), `reasoning_content` (vLLM), `refusal`; by `role` | `max_completion_tokens` or `max_tokens` (the larger, when a request sets both) | `model`, `n`, `stream`, `tools[]`, `functions[]` |
 | `OpenAIResponses` | `instructions` (as `system`), `input` (a string, or items' `input_text` and `output_text` parts, function calls' arguments and outputs), by `role` | `max_output_tokens` | `model`, `stream`, `tools[]` |
 | `OpenAIEmbeddings` | `input` (a string, strings, or token arrays, counted 4 bytes a token) | none | `model` |
-| `AnthropicMessages` | `system` (a string or `text` blocks), `messages[].content` (a string, `text` and `tool_result` blocks) | `max_tokens` | `model`, `stream`, `tools[]` |
+| `AnthropicMessages` | `system` (a string or `text` blocks), `messages[].content` (a string, `text`, `thinking` and `tool_result` blocks) | `max_tokens` | `model`, `stream`, `tools[]` |
 
 Images, audio and files count toward `maxBodyBytes` only. The Responses API's
 `previous_response_id` keeps the history on the provider: only the new turn is sent, and checked.
@@ -218,8 +218,10 @@ A failed check is a security event with reason `llm` and an `llm` object: the `c
 request or a top-level field), the `role` for `llm-client-role`, the byte `offset` and the
 `estimated_tokens`. Its match has the check's rule ID and no snippet. **Events carry no prompt
 text**: the prompt is the user's data; the offset and the index find it in your own logs. With
-`ruleSetBody: Inspect`, a rule that matches in an endpoint's body has its match logged without a
-snippet too; matches in the URI and headers keep theirs.
+`ruleSetBody: Inspect`, a rule that matches in an endpoint's request or response body has its
+match logged without a snippet too, and a key of the body in the match's variable is cut at 32
+bytes (the client chooses keys as well); matches in the URI and headers keep theirs. The `model`
+is the client's text too: at most 64 bytes of it.
 
 ## What a WAF can't do
 

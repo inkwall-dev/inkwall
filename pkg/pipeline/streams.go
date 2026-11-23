@@ -46,6 +46,7 @@ func (e *Exchange) CheckEvent(ctx context.Context, req *request.Request, stream 
 	// its verdict is the event's.
 	v.Duration = time.Since(start)
 	v.Response = true
+	v.LLMBody = e.endpoint
 	v.StreamEvent = n
 	v.Policy = p.policy
 	v.DenyResponse = p.denyResponse

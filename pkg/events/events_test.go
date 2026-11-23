@@ -134,6 +134,25 @@ func TestNewLLMBody(t *testing.T) {
 	if s := New(Source{}, req, "/", v, time.Now()).GetMatches()[0].GetSnippet(); s == "" {
 		t.Error("another route's body match lost its snippet")
 	}
+
+	// A key in an endpoint's body is the client's to choose: cut short,
+	// in the event and the log line. A response's matches keep no snippet.
+	key := "json." + strings.Repeat("secret-in-a-key-", 8)
+	v = pipeline.Verdict{Action: pipeline.ActionLog, Reason: pipeline.ReasonRule, LLMBody: true, Response: true,
+		Matches: []rules.Match{
+			{RuleID: 942100, Variable: "ARGS_NAMES:" + key, Value: key},
+			{RuleID: 951100, Variable: "RESPONSE_ARGS:json.choices.0.message.content", Value: "the patient's record"},
+		}}
+	ev = New(Source{}, req, "/v1/chat/completions", v, time.Now())
+	if m := ev.GetMatches()[0]; len(m.GetVariable()) > len("ARGS_NAMES:")+maxBodyKey || m.GetSnippet() != "" {
+		t.Errorf("a body key: variable %q, snippet %q", m.GetVariable(), m.GetSnippet())
+	}
+	if m := ev.GetMatches()[1]; m.GetSnippet() != "" {
+		t.Errorf("a response's match: snippet %q", m.GetSnippet())
+	}
+	if lm := LogMatches(v); len(lm[0].Variable) > len("ARGS_NAMES:")+maxBodyKey {
+		t.Errorf("log line: variable %q", lm[0].Variable)
+	}
 }
 
 func TestNewLimits(t *testing.T) {

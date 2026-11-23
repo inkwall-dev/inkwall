@@ -374,7 +374,7 @@ func (p *Pipeline) CheckExchange(ctx context.Context, r *request.Request) (Verdi
 	if x == nil {
 		return v, nil
 	}
-	return v, &Exchange{p: p, x: x, skipBody: p.llmSkipsBodies(r)}
+	return v, &Exchange{p: p, x: x, skipBody: p.llmSkipsBodies(r), endpoint: p.llm.formats(r) != 0}
 }
 
 func (p *Pipeline) checkRequest(ctx context.Context, r *request.Request, keep bool) (Verdict, rules.Exchange) {

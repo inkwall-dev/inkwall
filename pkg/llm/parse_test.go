@@ -58,6 +58,20 @@ func TestParseFormats(t *testing.T) {
 			body:   `{"model":null,"messages":null,"max_tokens":null,"n":null,"stream":null,"tools":null}`,
 		},
 		{
+			name:   "chat, reasoning and refusals servers give the model back",
+			format: OpenAIChat,
+			body:   `{"messages":[{"role":"assistant","content":"a","reasoning":"bcd","reasoning_content":"ef","refusal":"g"},{"role":"assistant","reasoning":5}]}`,
+			want:   Request{PromptBytes: 1 + 3 + 2 + 1, Messages: 2},
+			roles:  []Role{RoleAssistant},
+		},
+		{
+			name:   "anthropic thinking blocks",
+			format: AnthropicMessages,
+			body:   `{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"hmm","signature":"s"},{"type":"text","text":"ok","thinking":"not this"}]}]}`,
+			want:   Request{PromptBytes: 3 + 2, Messages: 1},
+			roles:  []Role{RoleAssistant},
+		},
+		{
 			name:   "chat, function role and functions",
 			format: OpenAIChat,
 			body:   `{"messages":[{"role":"function","name":"f","content":"ok"},{"role":"assistant","function_call":{"name":"f","arguments":"xy"}}],"functions":[{"name":"f"},{"name":"g"}]}`,
@@ -72,10 +86,10 @@ func TestParseFormats(t *testing.T) {
 			roles:  []Role{RoleUser},
 		},
 		{
-			name:   "chat, a part without a type counts, refusal does not",
+			name:   "chat, a part without a type counts, refusal too",
 			format: OpenAIChat,
 			body:   `{"messages":[{"role":"user","content":[{"text":"abc"},{"type":"refusal","refusal":"no"},{"type":"input_audio","text":5}]}]}`,
-			want:   Request{PromptBytes: 3, Messages: 1},
+			want:   Request{PromptBytes: 5, Messages: 1},
 			roles:  []Role{RoleUser},
 		},
 		{
