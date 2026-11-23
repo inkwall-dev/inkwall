@@ -338,7 +338,7 @@ func (r *resolution) resolvePolicies() {
 				pols[i] = nil
 				continue
 			}
-			c.status.Message += "; the previous version of the policy stays in force"
+			c.status.Message += keptPrevious
 			pols[i] = proto.Clone(prev).(*bundlev1.Policy)
 		}
 	}
@@ -361,7 +361,8 @@ func (r *resolution) resolvePolicies() {
 		for _, b := range pols[i].GetRuleSets() {
 			id := b.GetRuleSetId()
 			if current[id] && !proto.Equal(r.ruleSets[id], previousRuleSets[id]) {
-				c.status.Message += fmt.Sprintf("; but its previous version binds rule set %s, which changed since and which other policies use as it is now, so the policy is left out", id)
+				c.status.Message = strings.Replace(c.status.Message, keptPrevious, fmt.Sprintf(
+					"; its previous version binds rule set %s, which changed since and which other policies use as it is now, so the policy is left out", id), 1)
 				pols[i] = nil
 				break
 			}
@@ -475,17 +476,24 @@ func (r *resolution) resolvePolicies() {
 // compile, and the rule sets no policy left binds: whatever got them
 // there, one would make every engine refuse the bundle. The rule sets
 // don't change with the policies left out, so one pass is enough.
+//
+// It can't leave out a policy that resolved, whose rule sets ship as they
+// are now, nor a previous version kept, whose rule sets ship as they were or
+// it is left out: it guards against what would get there all the same.
+// TODO: a policy it leaves out keeps the routes it took from others, which
+// then go uninspected; route ownership would have to be decided again.
 func (r *resolution) checkBundle(shipped map[string]*candidate, used map[string]*bundlev1.RuleSet) {
 	kept := r.out.Policies[:0]
 	for _, pol := range r.out.Policies {
-		_, err := r.checkPolicy(pol, used)
+		err := r.checkRules(pol, used)
 		if err == nil {
 			kept = append(kept, pol)
 			continue
 		}
 		c := shipped[pol.GetId()]
 		if c.failed {
-			c.status.Message += "; its previous version doesn't compile with the rule sets in the bundle either, so the policy is left out"
+			c.status.Message = strings.Replace(c.status.Message, keptPrevious,
+				"; its previous version doesn't compile with the rule sets in the bundle either, so the policy is left out", 1)
 		} else {
 			c.fail(ReasonRuleSetsIncompatible, fmt.Sprintf("it doesn't compile with the rule sets in the bundle, so it is left out: %v", err))
 			c.status.Applied = false
@@ -503,6 +511,28 @@ func (r *resolution) checkBundle(shipped map[string]*candidate, used map[string]
 			delete(used, id)
 		}
 	}
+}
+
+// keptPrevious ends the message of a policy whose previous version stays.
+const keptPrevious = "; the previous version of the policy stays in force"
+
+// checkRules compiles a policy's rules with the rule sets it binds (from
+// ruleSets), as checkPolicy does, but not its settings: those don't depend
+// on the rule sets, and checkPolicy checked them.
+func (r *resolution) checkRules(p *bundlev1.Policy, ruleSets map[string]*bundlev1.RuleSet) error {
+	var bound []*bundlev1.RuleSet
+	for _, b := range p.GetRuleSets() {
+		if rs, ok := ruleSets[b.GetRuleSetId()]; ok {
+			bound = append(bound, rs)
+		}
+	}
+	if err := enginepolicy.CheckRuleSets(p, bound); err != nil {
+		return err
+	}
+	if r.in.CheckPolicy == nil {
+		return nil
+	}
+	return r.in.CheckPolicy(p, bound)
 }
 
 // reportOverlaps adds the routes the policy shares with policies of other
