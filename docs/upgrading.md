@@ -169,6 +169,16 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   policy goes `Programmed=False` (`Unverified`), naming the `Backend` to look for in the
   controller's log; alert on `haproxy_rejected_custom_resource_generation` and on policies that
   aren't `Ready`.
+- **gRPC messages with their schema** (`spec.body.grpcSchema`, [gRPC](grpc.md#messages-with-their-schema)):
+  a descriptor set in a ConfigMap labeled `waf.inkwall.dev/rules=true` (the label now marks the
+  ConfigMaps the operator reads, rules or schemas). Upgrade the chart first (the CRD field and the
+  operator), then the engines: an engine before 0.7.0 reads every message without the schema, and
+  the policy is `Enforced=False`, `EnginesOutdated`, naming `spec.body.grpcSchema`. Adding a schema
+  renames the fields it describes, `ARGS:3.1` becoming `ARGS:user.name`: exclusions by number stop
+  matching them, and the webhook warns. Move the policy to `Detect`, add the schema, read the
+  events, rewrite the exclusions, then go back to `Block`. Rolling the operator back below 0.7.0
+  reads messages without the schema again: name-based exclusions stop applying, so more is
+  denied, not less. Policies without `grpcSchema` read messages as before.
 - **Export of security events to SIEMs** (`spec.events.export`, [SIEM export](siem-export.md)).
   Nothing is exported until you add sinks. The chart changes with it, also for clusters that
   don't export:
@@ -292,8 +302,8 @@ Before `helm rollback` (0.6.1's CRDs with it):
 - Set `spec.controlPlane.enrollmentSecretRef.namespace` (the operator's namespace) if the
   InkwallConfig leaves it out: 0.6.x requires it, so the API server refuses every update of an
   InkwallConfig without it, the operator's included.
-- Note what else 0.7.0 added, `spec.rateLimits` and the InkwallConfig's `spec.events.export` among
-  it: it is dropped without a word, and has to be set again after upgrading to 0.7.0 again.
+- Note what else 0.7.0 added, `spec.rateLimits`, `spec.body.grpcSchema` and the InkwallConfig's
+  `spec.events.export` among it: it is dropped without a word, and has to be set again after upgrading to 0.7.0 again.
 
 ## From 0.5.x to 0.6.0
 

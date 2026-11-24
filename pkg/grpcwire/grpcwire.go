@@ -111,6 +111,10 @@ type walker struct {
 	lim  Limits
 	out  []Field
 	over bool
+	// textLeft is how many more bytes of text may be given, when
+	// textBounded (Fields): past it, the message is over the limits.
+	textLeft    int
+	textBounded bool
 }
 
 // message walks msg, a message at depth whose fields are named under
@@ -264,6 +268,12 @@ func (w *walker) text(value, name string) bool {
 	if len(w.out) >= w.lim.Fields {
 		w.over = true
 		return false
+	}
+	if w.textBounded {
+		if w.textLeft -= len(value); w.textLeft < 0 {
+			w.over = true
+			return false
+		}
 	}
 	w.out = append(w.out, Field{Name: name, Value: value})
 	return true

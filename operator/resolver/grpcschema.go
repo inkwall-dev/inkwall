@@ -11,12 +11,14 @@ import (
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema/load"
 )
 
 // grpcSchema compiles the descriptor set c's spec.body.grpcSchema names
 // (design 0013 §5.1), from a ConfigMap in the policy's namespace, and names
 // it in c's policy. A ConfigMap or key that isn't there is InvalidRef, a set
-// that doesn't compile InvalidGRPCSchema: c then fails, and keeps its
+// that doesn't compile, or that an engine wouldn't load, InvalidGRPCSchema:
+// c then fails, and keeps its
 // previous version. A schema without grpcMessages: Inspect (which the CRD
 // refuses) reads nothing, and isn't read.
 func (r *resolution) grpcSchema(c *candidate) {
@@ -46,6 +48,11 @@ func (r *resolution) grpcSchema(c *candidate) {
 		r.schemaKeys = map[[sha256.Size]byte]bool{}
 	}
 	r.schemaKeys[cacheKey] = true
+	if err == nil {
+		// As every engine loads it: a schema one refuses would make the
+		// whole bundle invalid, so only this policy fails.
+		_, err = load.Load(s)
+	}
 	if err != nil {
 		c.fail(ReasonInvalidGRPCSchema, fmt.Sprintf("spec.body.grpcSchema: ConfigMap %s key %q: %v", key, ref.Key, err))
 		return
