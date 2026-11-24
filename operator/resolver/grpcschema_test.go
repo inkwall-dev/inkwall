@@ -19,6 +19,8 @@ import (
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	wafv1alpha1 "github.com/inkwall-dev/inkwall/operator/api/v1alpha1"
 	"github.com/inkwall-dev/inkwall/pkg/grpcschema/compile"
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema/grpcschematest"
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema/load"
 )
 
 // healthSet is grpc.health.v1's descriptor set.
@@ -187,5 +189,36 @@ func TestGRPCSchemaFailures(t *testing.T) {
 	res := Resolve(in)
 	if p := findPolicy(res, "shop/a"); p == nil || p.GetBody().GetGrpcSchemaId() != "" || len(res.GRPCSchemas) != 0 {
 		t.Fatalf("a previous version without its schema: %v, %v", p, res.GRPCSchemas)
+	}
+}
+
+// TestGRPCSchemaOverBound: a set compiled to just under the bound without
+// its id and source, named by a long key, is over it as the bundle carries
+// it, which engines refuse: only its policy fails, InvalidGRPCSchema, and
+// the bundle ships the others.
+func TestGRPCSchemaOverBound(t *testing.T) {
+	key := strings.Repeat("k", 253)
+	in := Input{
+		Policies: []wafv1alpha1.WAFPolicy{schemaPolicy("a", 0, "big", key), schemaPolicy("b", 1, "schema", "set.binpb")},
+		Ingresses: []networkingv1.Ingress{
+			ingress("a", rule("a.example.com", ipath("/", networkingv1.PathTypePrefix))),
+			ingress("b", rule("b.example.com", ipath("/", networkingv1.PathTypePrefix))),
+		},
+		ConfigMaps: []corev1.ConfigMap{
+			schemaConfigMap("big", key, grpcschematest.AtBound(t, len("shop/big/")+len(key)-1)),
+			schemaConfigMap("schema", "set.binpb", healthSet(t)),
+		},
+		GRPCSchemas: compile.NewCache(),
+	}
+	res := Resolve(in)
+	wantStatus(t, res, "a", false, ReasonInvalidGRPCSchema, "over")
+	wantStatus(t, res, "b", true, ReasonAccepted, PolicyValid)
+	if len(res.GRPCSchemas) != 1 || res.GRPCSchemas[0].GetSource() != "shop/schema/set.binpb" {
+		t.Fatalf("schemas %v, want b's alone", res.GRPCSchemas)
+	}
+	for _, s := range res.GRPCSchemas {
+		if _, err := load.Load(s); err != nil {
+			t.Fatalf("the bundle carries a schema engines refuse: %v", err)
+		}
 	}
 }

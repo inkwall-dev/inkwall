@@ -146,7 +146,9 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   `EnginesOutdated`, naming `spec.llm`. The webhook now refuses SecLang rule sets that use rule
   IDs 4,800,000 to 4,800,999, reserved for the LLM checks. Envoy Gateway's and Istio's buffer is
   raised to `llm.maxBodyBytes` on such routes, and their bodies are sent to the engine even with
-  `body.inspect: false`.
+  `body.inspect: false`. Rate limits gain `cost: LLMTokens` ([token
+  limits](llm-apis.md#token-limits)), whose `requests` and `burst` go up to 1,000,000,000; an
+  engine before 0.7.0 counts each request as 1 token.
 
 - **The HAProxy Kubernetes Ingress Controller 3.4** (the default of its chart since 1.55.0) is
   wired: 3.4 dropped the config snippets the operator loads the filter with on 3.1 to 3.2, so on

@@ -859,6 +859,45 @@ logged_limit() {
 }
 eventually "the engines log the limit's event" logged_limit
 
+# LLM endpoints through Envoy Gateway (#277, design 0012): the caps deny
+# with 400 before the app; prose with SQL and markup in a prompt passes,
+# the CRS skipping the endpoint's body; a token limit answers 429 once the
+# estimates (prompt bytes / 3 plus max_tokens) are over it. The events
+# name the check, never the prompt.
+echo "== LLM endpoints"
+policy Block "" '  llm:
+    endpoints: [{paths: ["/v1/chat/completions"], format: OpenAIChat}]
+    request: {maxOutputTokens: 100, clientRoles: [user, assistant]}
+  rateLimits: [{name: tokens, requests: 300, period: 1h, cost: LLMTokens, match: {paths: ["/v1/chat/completions"]}}]'
+eventually "the policy with LLM endpoints is Enforced" enforced
+# chat BODY: the status of a chat request through the custom Gateway.
+chat() {
+  curl -s -o /dev/null -w '%{http_code}' -H "Host: $HOST" -H 'Content-Type: application/json' --data-binary "$1" \
+    "http://127.0.0.1:$CUSTOM_PORT/v1/chat/completions" || true
+}
+# About 120 bytes of prompt (40 tokens) and max_tokens 100: 140 each, two
+# within the 300 tokens, a third over.
+prompt='LLM-E2E-PROMPT explain: SELECT * FROM users WHERE id = 1 OR 1=1; -- and <script>alert(1)</script> in my page'
+clean="{\"model\":\"e2e\",\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}],\"max_tokens\":100}"
+check "over the output cap: 400" bash -c "[[ \$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: $HOST' --data-binary '{\"model\":\"e2e\",\"messages\":[],\"max_tokens\":101}' http://127.0.0.1:$CUSTOM_PORT/v1/chat/completions) == 400 ]]"
+check "a client's system message: 400" bash -c "[[ \$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: $HOST' --data-binary '{\"messages\":[{\"role\":\"system\",\"content\":\"x\"}]}' http://127.0.0.1:$CUSTOM_PORT/v1/chat/completions) == 400 ]]"
+check "a key sent twice is malformed: 400" bash -c "[[ \$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: $HOST' --data-binary '{\"messages\":[],\"messages\":[]}' http://127.0.0.1:$CUSTOM_PORT/v1/chat/completions) == 400 ]]"
+llm_first=$(chat "$clean")$(chat "$clean")
+check "prose with SQL and markup passes, twice" bash -c "[[ '$llm_first' == 200200 ]]"
+llm_over=$(chat "$clean")
+check "past the token limit: 429" bash -c "[[ '$llm_over' == 429 ]]"
+[[ $llm_over == 429 ]] || echo "      got: $llm_over (first two: $llm_first)"
+check "a request the checks denied never reached the app" never_reached_app '"max_tokens":101'
+logged_llm() {
+  "${KUBECTL[@]}" -n "$EG_NS" logs -l app.kubernetes.io/name=envoy -c inkwall-engine --tail=-1 |
+    grep '"security event"' | grep '"reason":"llm"' | matches '"llm_check":"llm-max-output-tokens"'
+}
+eventually "the engines log the LLM check" logged_llm
+no_prompt_logged() {
+  ! "${KUBECTL[@]}" -n "$EG_NS" logs -l app.kubernetes.io/name=envoy -c inkwall-engine --tail=-1 | grep -F LLM-E2E-PROMPT >/dev/null
+}
+check "the engines' logs carry no prompt" no_prompt_logged
+
 # A custom denial through Envoy Gateway (#725): the policy's denyResponse is
 # the body of Envoy's local reply, for a rule's 403 and the limit's 429
 # (with its Retry-After: the limit's buckets outlive the new bundle), with

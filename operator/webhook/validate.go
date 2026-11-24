@@ -428,6 +428,7 @@ func validateWAFPolicy(p *wafv1alpha1.WAFPolicy) (admission.Warnings, error) {
 			errs = append(errs, field.Invalid(spec.Child("llm"), field.OmitValueType{}, err.Error()))
 		}
 	}
+	errs = append(errs, checkTokenLimits(spec, p)...)
 	for i, b := range p.Spec.RuleSets {
 		if b.CRS != nil {
 			errs = append(errs, checkCRS(spec.Child("ruleSets").Index(i), b)...)
@@ -477,6 +478,42 @@ func llmWarnings(p *wafv1alpha1.WAFPolicy) admission.Warnings {
 		}
 	}
 	return warnings
+}
+
+// checkTokenLimits refuses a rate limit with cost: LLMTokens whose
+// match.paths aren't within the LLM endpoints' (design 0012 §3.5): it
+// counts only endpoint requests, so a path elsewhere would count nothing.
+// (The CRD refuses one without spec.llm.)
+func checkTokenLimits(spec *field.Path, p *wafv1alpha1.WAFPolicy) field.ErrorList {
+	if p.Spec.LLM == nil {
+		return nil
+	}
+	var errs field.ErrorList
+	for i, l := range p.Spec.RateLimits {
+		if l.Cost != wafv1alpha1.RateLimitLLMTokens || l.Match == nil {
+			continue
+		}
+		for j, path := range l.Match.Paths {
+			if !slices.ContainsFunc(p.Spec.LLM.Endpoints, func(e wafv1alpha1.LLMEndpoint) bool {
+				return slices.ContainsFunc(e.Paths, func(ep wafv1alpha1.PathPattern) bool { return within(path, ep) })
+			}) {
+				errs = append(errs, field.Invalid(spec.Child("rateLimits").Index(i).Child("match", "paths").Index(j), path,
+					"a token limit counts only the requests of spec.llm's endpoints: the path must be one of their paths, or under one of their prefixes"))
+			}
+		}
+	}
+	return errs
+}
+
+// within reports whether every request path that path (exact or a
+// prefix) matches is matched by ep, an endpoint path.
+func within(path, ep wafv1alpha1.PathPattern) bool {
+	pv, pPrefix := strings.CutSuffix(string(path), "*")
+	ev, ePrefix := strings.CutSuffix(string(ep), "*")
+	if ePrefix {
+		return strings.HasPrefix(strings.ToLower(pv), strings.ToLower(ev))
+	}
+	return !pPrefix && strings.EqualFold(strings.TrimSuffix(pv, "/"), strings.TrimSuffix(ev, "/"))
 }
 
 // covers reports whether skip, a skip path, matches some of the requests

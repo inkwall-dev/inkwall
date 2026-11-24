@@ -20,6 +20,7 @@ and nothing here claims to: see [What a WAF can't do](#what-a-waf-cant-do).
 - [Malformed bodies](#malformed-bodies)
 - [Detect first](#detect-first)
 - [When a check refuses a legitimate request](#when-a-check-refuses-a-legitimate-request)
+- [Token limits](#token-limits)
 - [Through each proxy](#through-each-proxy)
 - [A denial SDKs can read](#a-denial-sdks-can-read)
 - [Metrics and events](#metrics-and-events)
@@ -177,6 +178,52 @@ ambiguous path gets no path exclusion, as for the rules. Excluding 4800000 lets 
 through unchecked: the other checks can't read them. Rule sets can't use IDs 4,800,000 to
 4,800,999: the webhook refuses them.
 
+## Token limits
+
+LLM cost is in tokens: 60 requests a minute lets one client send 60 × 128k tokens. A
+[rate limit](rate-limits.md) with `cost: LLMTokens` counts tokens instead, per API key or tenant,
+with the same keys, answers and `Detect` mode:
+
+```yaml
+  rateLimits:
+    - name: tenant-tokens
+      requests: 200000               # tokens per period
+      period: 1m
+      cost: LLMTokens
+      key: {header: {name: Authorization}}
+```
+
+- **At request time**, once a request on an endpoint passed its checks, it takes its estimate at
+  once from the bucket, or none: its prompt's bytes ÷ 3, rounded up, plus its output limit (or
+  `maxOutputTokens`, or 4,096 when neither is set; embeddings have none), times `n` for an OpenAI
+  Chat request asking for several choices. Inkwall has no tokenizer: bytes ÷ 3 overestimates
+  English (about 4 bytes a token) and is close for code and CJK text; the output limit is what the
+  client asked for, the worst case. A request a check denies isn't charged, and requests on other
+  paths aren't counted.
+- **A body that can't be estimated** is charged as large as it may be, never nothing: a body cut
+  at the limit (`onOversize: Allow`, or a proxy's smaller buffer), an encoded one with
+  `llm-malformed` excluded, one the parser refuses while the checks only log (`detect`), or one
+  not read at all (`skip.bodyPaths`). It takes the larger of the bytes read and its
+  `Content-Length`, ÷ 3, rounded up, plus `maxOutputTokens`, or 4,096 when unset.
+- **At response time**, when the policy inspects responses (`spec.responses.inspect: true`) and a
+  whole (not streamed) response reports its `usage`, the bucket is settled to the actual input
+  and output tokens: the difference is refunded, or added as debt (at most twice the burst). A
+  key in debt is refused, 429 with `Retry-After`, before its next body is read. A `usage` that
+  repeats a key, or has one differing only in case (`Usage`, `PROMPT_TOKENS`, which a client in Go
+  reads as the same), settles nothing: the estimate stands. The rules still don't read the
+  response's body with `ruleSetBody: Skip`.
+- **Without settlement**, through Traefik (which can't send responses), with
+  `responses.inspect` off, or for a streamed answer, the estimate stands: short answers to long
+  output limits are overcharged. Size the limit from `inkwall_llm_tokens_total`.
+
+`requests` and `burst` go up to 1,000,000,000 tokens; a burst so large that its window
+(`burst` × `period` ÷ `requests`) wouldn't fit the engine's clock is cut to what does (a burst of a
+billion at 1,000 tokens an hour is about 640 million). A key's debt never passes twice the burst,
+however many responses settle at once. A token limit needs `spec.llm`, and its
+`match.paths` must be the endpoints' paths or under their prefixes. Limits still count per engine
+([what a limit means](rate-limits.md#what-a-limit-means)), and `Authorization` is a fine key: it's
+hashed, never stored. Per-tenant fairness needs a key the client can't choose freely.
+
 ## Through each proxy
 
 | Proxy | What to know |
@@ -208,8 +255,9 @@ request fails at once.
 ## Metrics and events
 
 The engine counts `inkwall_llm_requests_total` (by `format`), `inkwall_llm_malformed_total`,
-`inkwall_llm_checks_total` (by `check` and `action`), `inkwall_llm_tokens_total{kind="estimated"}`
-(prompt bytes ÷ 3 plus the output limit, of the requests that passed) and
+`inkwall_llm_checks_total` (by `check` and `action`), `inkwall_llm_tokens_total` (`estimated`:
+prompt bytes ÷ 3 plus the output limit, of the requests that passed; `settled_input` and
+`settled_output`: what whole responses reported using) and
 `inkwall_llm_inspect_seconds` ([monitoring](monitoring.md#engine)). None is labelled by model or
 policy.
 
@@ -222,6 +270,12 @@ text**: the prompt is the user's data; the offset and the index find it in your 
 match logged without a snippet too, and a key of the body in the match's variable is cut at 32
 bytes (the client chooses keys as well); matches in the URI and headers keep theirs. The `model`
 is the client's text too: at most 64 bytes of it.
+
+`inkwallctl explain request <request-id>` names the check, where it failed, its cause and fix,
+and suggests the exclusion of its rule ID on the path (never `llm-malformed`'s), checked against
+the policy; `inkwallctl tune` suggests those for many events at once, and `inkwallctl explain
+policy` lists a policy's endpoints, checks and token limits ([testing
+policies](testing-policies.md)).
 
 ## What a WAF can't do
 

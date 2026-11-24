@@ -273,6 +273,58 @@ func (LLMToolsAllow) EnumDescriptor() ([]byte, []int) {
 	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{3}
 }
 
+// RateLimitCost is what a rate limit counts.
+type RateLimitCost int32
+
+const (
+	// Requests: each takes 1.
+	RateLimitCost_RATE_LIMIT_COST_UNSPECIFIED RateLimitCost = 0
+	// LLM tokens (design 0012 §6): requests and burst are tokens, a request
+	// on one of the policy's LLM endpoints takes its estimate after the LLM
+	// checks, settled from its response's usage; other requests aren't
+	// counted.
+	RateLimitCost_RATE_LIMIT_COST_LLM_TOKENS RateLimitCost = 1
+)
+
+// Enum value maps for RateLimitCost.
+var (
+	RateLimitCost_name = map[int32]string{
+		0: "RATE_LIMIT_COST_UNSPECIFIED",
+		1: "RATE_LIMIT_COST_LLM_TOKENS",
+	}
+	RateLimitCost_value = map[string]int32{
+		"RATE_LIMIT_COST_UNSPECIFIED": 0,
+		"RATE_LIMIT_COST_LLM_TOKENS":  1,
+	}
+)
+
+func (x RateLimitCost) Enum() *RateLimitCost {
+	p := new(RateLimitCost)
+	*p = x
+	return p
+}
+
+func (x RateLimitCost) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RateLimitCost) Descriptor() protoreflect.EnumDescriptor {
+	return file_bundle_v1_bundle_proto_enumTypes[4].Descriptor()
+}
+
+func (RateLimitCost) Type() protoreflect.EnumType {
+	return &file_bundle_v1_bundle_proto_enumTypes[4]
+}
+
+func (x RateLimitCost) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RateLimitCost.Descriptor instead.
+func (RateLimitCost) EnumDescriptor() ([]byte, []int) {
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{4}
+}
+
 // PathMatchType is how PathMatch.value is compared.
 type PathMatchType int32
 
@@ -311,11 +363,11 @@ func (x PathMatchType) String() string {
 }
 
 func (PathMatchType) Descriptor() protoreflect.EnumDescriptor {
-	return file_bundle_v1_bundle_proto_enumTypes[4].Descriptor()
+	return file_bundle_v1_bundle_proto_enumTypes[5].Descriptor()
 }
 
 func (PathMatchType) Type() protoreflect.EnumType {
-	return &file_bundle_v1_bundle_proto_enumTypes[4]
+	return &file_bundle_v1_bundle_proto_enumTypes[5]
 }
 
 func (x PathMatchType) Number() protoreflect.EnumNumber {
@@ -324,7 +376,7 @@ func (x PathMatchType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use PathMatchType.Descriptor instead.
 func (PathMatchType) EnumDescriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{4}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{5}
 }
 
 // Mode is what the engine does with a request the rules flag.
@@ -363,11 +415,11 @@ func (x Mode) String() string {
 }
 
 func (Mode) Descriptor() protoreflect.EnumDescriptor {
-	return file_bundle_v1_bundle_proto_enumTypes[5].Descriptor()
+	return file_bundle_v1_bundle_proto_enumTypes[6].Descriptor()
 }
 
 func (Mode) Type() protoreflect.EnumType {
-	return &file_bundle_v1_bundle_proto_enumTypes[5]
+	return &file_bundle_v1_bundle_proto_enumTypes[6]
 }
 
 func (x Mode) Number() protoreflect.EnumNumber {
@@ -376,7 +428,7 @@ func (x Mode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Mode.Descriptor instead.
 func (Mode) EnumDescriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{5}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{6}
 }
 
 // FailureMode is what happens to a request that can't be inspected in time.
@@ -416,11 +468,11 @@ func (x FailureMode) String() string {
 }
 
 func (FailureMode) Descriptor() protoreflect.EnumDescriptor {
-	return file_bundle_v1_bundle_proto_enumTypes[6].Descriptor()
+	return file_bundle_v1_bundle_proto_enumTypes[7].Descriptor()
 }
 
 func (FailureMode) Type() protoreflect.EnumType {
-	return &file_bundle_v1_bundle_proto_enumTypes[6]
+	return &file_bundle_v1_bundle_proto_enumTypes[7]
 }
 
 func (x FailureMode) Number() protoreflect.EnumNumber {
@@ -429,7 +481,7 @@ func (x FailureMode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use FailureMode.Descriptor instead.
 func (FailureMode) EnumDescriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{6}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{7}
 }
 
 // RuleSetPlacement is where a SecLang rule set loads, relative to the
@@ -473,11 +525,11 @@ func (x RuleSetPlacement) String() string {
 }
 
 func (RuleSetPlacement) Descriptor() protoreflect.EnumDescriptor {
-	return file_bundle_v1_bundle_proto_enumTypes[7].Descriptor()
+	return file_bundle_v1_bundle_proto_enumTypes[8].Descriptor()
 }
 
 func (RuleSetPlacement) Type() protoreflect.EnumType {
-	return &file_bundle_v1_bundle_proto_enumTypes[7]
+	return &file_bundle_v1_bundle_proto_enumTypes[8]
 }
 
 func (x RuleSetPlacement) Number() protoreflect.EnumNumber {
@@ -486,7 +538,7 @@ func (x RuleSetPlacement) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RuleSetPlacement.Descriptor instead.
 func (RuleSetPlacement) EnumDescriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{7}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{8}
 }
 
 // BuiltinRuleSet names a rule set shipped in the engine image, pinned to the
@@ -522,11 +574,11 @@ func (x BuiltinRuleSet) String() string {
 }
 
 func (BuiltinRuleSet) Descriptor() protoreflect.EnumDescriptor {
-	return file_bundle_v1_bundle_proto_enumTypes[8].Descriptor()
+	return file_bundle_v1_bundle_proto_enumTypes[9].Descriptor()
 }
 
 func (BuiltinRuleSet) Type() protoreflect.EnumType {
-	return &file_bundle_v1_bundle_proto_enumTypes[8]
+	return &file_bundle_v1_bundle_proto_enumTypes[9]
 }
 
 func (x BuiltinRuleSet) Number() protoreflect.EnumNumber {
@@ -535,7 +587,7 @@ func (x BuiltinRuleSet) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use BuiltinRuleSet.Descriptor instead.
 func (BuiltinRuleSet) EnumDescriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{8}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{9}
 }
 
 // OversizeAction is what happens to a body larger than max_bytes.
@@ -575,11 +627,11 @@ func (x OversizeAction) String() string {
 }
 
 func (OversizeAction) Descriptor() protoreflect.EnumDescriptor {
-	return file_bundle_v1_bundle_proto_enumTypes[9].Descriptor()
+	return file_bundle_v1_bundle_proto_enumTypes[10].Descriptor()
 }
 
 func (OversizeAction) Type() protoreflect.EnumType {
-	return &file_bundle_v1_bundle_proto_enumTypes[9]
+	return &file_bundle_v1_bundle_proto_enumTypes[10]
 }
 
 func (x OversizeAction) Number() protoreflect.EnumNumber {
@@ -588,7 +640,7 @@ func (x OversizeAction) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use OversizeAction.Descriptor instead.
 func (OversizeAction) EnumDescriptor() ([]byte, []int) {
-	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{9}
+	return file_bundle_v1_bundle_proto_rawDescGZIP(), []int{10}
 }
 
 // SignedBundle carries a Bundle with its signature. The signature covers the
@@ -1875,7 +1927,12 @@ type RateLimit struct {
 	// Methods counted, upper case. Empty: every method.
 	Methods []string `protobuf:"bytes,7,rep,name=methods,proto3" json:"methods,omitempty"`
 	// Log the requests over the limit instead of denying them.
-	Detect        bool `protobuf:"varint,8,opt,name=detect,proto3" json:"detect,omitempty"`
+	Detect bool `protobuf:"varint,8,opt,name=detect,proto3" json:"detect,omitempty"`
+	// What a request costs. Engines before 0.7.0 count each request as 1:
+	// the operator doesn't count them as enforcing a policy that sets it.
+	// (Numbered from 40, apart from the fields other features add
+	// meanwhile.)
+	Cost          RateLimitCost `protobuf:"varint,40,opt,name=cost,proto3,enum=inkwall.bundle.v1.RateLimitCost" json:"cost,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1964,6 +2021,13 @@ func (x *RateLimit) GetDetect() bool {
 		return x.Detect
 	}
 	return false
+}
+
+func (x *RateLimit) GetCost() RateLimitCost {
+	if x != nil {
+		return x.Cost
+	}
+	return RateLimitCost_RATE_LIMIT_COST_UNSPECIFIED
 }
 
 // RateLimitKey is what a limit counts by. Unset: the client IP, IPv6 by
@@ -3048,7 +3112,7 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\n" +
 	"tool_names\x18\t \x03(\tR\ttoolNames\x12\x16\n" +
 	"\x06detect\x18\n" +
-	" \x01(\bR\x06detect\"\xff\x01\n" +
+	" \x01(\bR\x06detect\"\xb5\x02\n" +
 	"\tRateLimit\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
 	"\brequests\x18\x02 \x01(\rR\brequests\x121\n" +
@@ -3057,7 +3121,8 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\x03key\x18\x05 \x01(\v2\x1f.inkwall.bundle.v1.RateLimitKeyR\x03key\x12\x14\n" +
 	"\x05paths\x18\x06 \x03(\tR\x05paths\x12\x18\n" +
 	"\amethods\x18\a \x03(\tR\amethods\x12\x16\n" +
-	"\x06detect\x18\b \x01(\bR\x06detect\"\x8c\x01\n" +
+	"\x06detect\x18\b \x01(\bR\x06detect\x124\n" +
+	"\x04cost\x18( \x01(\x0e2 .inkwall.bundle.v1.RateLimitCostR\x04cost\"\x8c\x01\n" +
 	"\fRateLimitKey\x12=\n" +
 	"\tclient_ip\x18\x01 \x01(\v2\x1e.inkwall.bundle.v1.ClientIPKeyH\x00R\bclientIp\x126\n" +
 	"\x06header\x18\x02 \x01(\v2\x1c.inkwall.bundle.v1.HeaderKeyH\x00R\x06headerB\x05\n" +
@@ -3146,7 +3211,10 @@ const file_bundle_v1_bundle_proto_rawDesc = "" +
 	"\rLLMToolsAllow\x12\x1f\n" +
 	"\x1bLLM_TOOLS_ALLOW_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14LLM_TOOLS_ALLOW_NONE\x10\x01\x12\x1a\n" +
-	"\x16LLM_TOOLS_ALLOW_LISTED\x10\x02*g\n" +
+	"\x16LLM_TOOLS_ALLOW_LISTED\x10\x02*P\n" +
+	"\rRateLimitCost\x12\x1f\n" +
+	"\x1bRATE_LIMIT_COST_UNSPECIFIED\x10\x00\x12\x1e\n" +
+	"\x1aRATE_LIMIT_COST_LLM_TOKENS\x10\x01*g\n" +
 	"\rPathMatchType\x12\x1f\n" +
 	"\x1bPATH_MATCH_TYPE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15PATH_MATCH_TYPE_EXACT\x10\x01\x12\x1a\n" +
@@ -3184,98 +3252,100 @@ func file_bundle_v1_bundle_proto_rawDescGZIP() []byte {
 	return file_bundle_v1_bundle_proto_rawDescData
 }
 
-var file_bundle_v1_bundle_proto_enumTypes = make([]protoimpl.EnumInfo, 10)
+var file_bundle_v1_bundle_proto_enumTypes = make([]protoimpl.EnumInfo, 11)
 var file_bundle_v1_bundle_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
 var file_bundle_v1_bundle_proto_goTypes = []any{
 	(GRPCFieldKind)(0),            // 0: inkwall.bundle.v1.GRPCFieldKind
 	(LLMFormat)(0),                // 1: inkwall.bundle.v1.LLMFormat
 	(LLMRole)(0),                  // 2: inkwall.bundle.v1.LLMRole
 	(LLMToolsAllow)(0),            // 3: inkwall.bundle.v1.LLMToolsAllow
-	(PathMatchType)(0),            // 4: inkwall.bundle.v1.PathMatchType
-	(Mode)(0),                     // 5: inkwall.bundle.v1.Mode
-	(FailureMode)(0),              // 6: inkwall.bundle.v1.FailureMode
-	(RuleSetPlacement)(0),         // 7: inkwall.bundle.v1.RuleSetPlacement
-	(BuiltinRuleSet)(0),           // 8: inkwall.bundle.v1.BuiltinRuleSet
-	(OversizeAction)(0),           // 9: inkwall.bundle.v1.OversizeAction
-	(*SignedBundle)(nil),          // 10: inkwall.bundle.v1.SignedBundle
-	(*Bundle)(nil),                // 11: inkwall.bundle.v1.Bundle
-	(*GRPCSchema)(nil),            // 12: inkwall.bundle.v1.GRPCSchema
-	(*GRPCMethod)(nil),            // 13: inkwall.bundle.v1.GRPCMethod
-	(*GRPCMessage)(nil),           // 14: inkwall.bundle.v1.GRPCMessage
-	(*GRPCField)(nil),             // 15: inkwall.bundle.v1.GRPCField
-	(*GeoTableRef)(nil),           // 16: inkwall.bundle.v1.GeoTableRef
-	(*DenyResponse)(nil),          // 17: inkwall.bundle.v1.DenyResponse
-	(*EventsConfig)(nil),          // 18: inkwall.bundle.v1.EventsConfig
-	(*Policy)(nil),                // 19: inkwall.bundle.v1.Policy
-	(*Geo)(nil),                   // 20: inkwall.bundle.v1.Geo
-	(*LLM)(nil),                   // 21: inkwall.bundle.v1.LLM
-	(*LLMEndpoint)(nil),           // 22: inkwall.bundle.v1.LLMEndpoint
-	(*LLMRequestChecks)(nil),      // 23: inkwall.bundle.v1.LLMRequestChecks
-	(*RateLimit)(nil),             // 24: inkwall.bundle.v1.RateLimit
-	(*RateLimitKey)(nil),          // 25: inkwall.bundle.v1.RateLimitKey
-	(*ClientIPKey)(nil),           // 26: inkwall.bundle.v1.ClientIPKey
-	(*HeaderKey)(nil),             // 27: inkwall.bundle.v1.HeaderKey
-	(*IPLists)(nil),               // 28: inkwall.bundle.v1.IPLists
-	(*RouteMatch)(nil),            // 29: inkwall.bundle.v1.RouteMatch
-	(*PathMatch)(nil),             // 30: inkwall.bundle.v1.PathMatch
-	(*RuleSetBinding)(nil),        // 31: inkwall.bundle.v1.RuleSetBinding
-	(*CRSSettings)(nil),           // 32: inkwall.bundle.v1.CRSSettings
-	(*RuleSet)(nil),               // 33: inkwall.bundle.v1.RuleSet
-	(*Exclusion)(nil),             // 34: inkwall.bundle.v1.Exclusion
-	(*BodyConfig)(nil),            // 35: inkwall.bundle.v1.BodyConfig
-	(*WebSocketConfig)(nil),       // 36: inkwall.bundle.v1.WebSocketConfig
-	(*ResponseConfig)(nil),        // 37: inkwall.bundle.v1.ResponseConfig
-	(*timestamppb.Timestamp)(nil), // 38: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),   // 39: google.protobuf.Duration
+	(RateLimitCost)(0),            // 4: inkwall.bundle.v1.RateLimitCost
+	(PathMatchType)(0),            // 5: inkwall.bundle.v1.PathMatchType
+	(Mode)(0),                     // 6: inkwall.bundle.v1.Mode
+	(FailureMode)(0),              // 7: inkwall.bundle.v1.FailureMode
+	(RuleSetPlacement)(0),         // 8: inkwall.bundle.v1.RuleSetPlacement
+	(BuiltinRuleSet)(0),           // 9: inkwall.bundle.v1.BuiltinRuleSet
+	(OversizeAction)(0),           // 10: inkwall.bundle.v1.OversizeAction
+	(*SignedBundle)(nil),          // 11: inkwall.bundle.v1.SignedBundle
+	(*Bundle)(nil),                // 12: inkwall.bundle.v1.Bundle
+	(*GRPCSchema)(nil),            // 13: inkwall.bundle.v1.GRPCSchema
+	(*GRPCMethod)(nil),            // 14: inkwall.bundle.v1.GRPCMethod
+	(*GRPCMessage)(nil),           // 15: inkwall.bundle.v1.GRPCMessage
+	(*GRPCField)(nil),             // 16: inkwall.bundle.v1.GRPCField
+	(*GeoTableRef)(nil),           // 17: inkwall.bundle.v1.GeoTableRef
+	(*DenyResponse)(nil),          // 18: inkwall.bundle.v1.DenyResponse
+	(*EventsConfig)(nil),          // 19: inkwall.bundle.v1.EventsConfig
+	(*Policy)(nil),                // 20: inkwall.bundle.v1.Policy
+	(*Geo)(nil),                   // 21: inkwall.bundle.v1.Geo
+	(*LLM)(nil),                   // 22: inkwall.bundle.v1.LLM
+	(*LLMEndpoint)(nil),           // 23: inkwall.bundle.v1.LLMEndpoint
+	(*LLMRequestChecks)(nil),      // 24: inkwall.bundle.v1.LLMRequestChecks
+	(*RateLimit)(nil),             // 25: inkwall.bundle.v1.RateLimit
+	(*RateLimitKey)(nil),          // 26: inkwall.bundle.v1.RateLimitKey
+	(*ClientIPKey)(nil),           // 27: inkwall.bundle.v1.ClientIPKey
+	(*HeaderKey)(nil),             // 28: inkwall.bundle.v1.HeaderKey
+	(*IPLists)(nil),               // 29: inkwall.bundle.v1.IPLists
+	(*RouteMatch)(nil),            // 30: inkwall.bundle.v1.RouteMatch
+	(*PathMatch)(nil),             // 31: inkwall.bundle.v1.PathMatch
+	(*RuleSetBinding)(nil),        // 32: inkwall.bundle.v1.RuleSetBinding
+	(*CRSSettings)(nil),           // 33: inkwall.bundle.v1.CRSSettings
+	(*RuleSet)(nil),               // 34: inkwall.bundle.v1.RuleSet
+	(*Exclusion)(nil),             // 35: inkwall.bundle.v1.Exclusion
+	(*BodyConfig)(nil),            // 36: inkwall.bundle.v1.BodyConfig
+	(*WebSocketConfig)(nil),       // 37: inkwall.bundle.v1.WebSocketConfig
+	(*ResponseConfig)(nil),        // 38: inkwall.bundle.v1.ResponseConfig
+	(*timestamppb.Timestamp)(nil), // 39: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),   // 40: google.protobuf.Duration
 }
 var file_bundle_v1_bundle_proto_depIdxs = []int32{
-	38, // 0: inkwall.bundle.v1.Bundle.created_at:type_name -> google.protobuf.Timestamp
-	19, // 1: inkwall.bundle.v1.Bundle.policies:type_name -> inkwall.bundle.v1.Policy
-	33, // 2: inkwall.bundle.v1.Bundle.rule_sets:type_name -> inkwall.bundle.v1.RuleSet
-	18, // 3: inkwall.bundle.v1.Bundle.events:type_name -> inkwall.bundle.v1.EventsConfig
-	16, // 4: inkwall.bundle.v1.Bundle.geo_table:type_name -> inkwall.bundle.v1.GeoTableRef
-	17, // 5: inkwall.bundle.v1.Bundle.deny_response:type_name -> inkwall.bundle.v1.DenyResponse
-	12, // 6: inkwall.bundle.v1.Bundle.grpc_schemas:type_name -> inkwall.bundle.v1.GRPCSchema
-	13, // 7: inkwall.bundle.v1.GRPCSchema.methods:type_name -> inkwall.bundle.v1.GRPCMethod
-	14, // 8: inkwall.bundle.v1.GRPCSchema.messages:type_name -> inkwall.bundle.v1.GRPCMessage
-	15, // 9: inkwall.bundle.v1.GRPCMessage.fields:type_name -> inkwall.bundle.v1.GRPCField
+	39, // 0: inkwall.bundle.v1.Bundle.created_at:type_name -> google.protobuf.Timestamp
+	20, // 1: inkwall.bundle.v1.Bundle.policies:type_name -> inkwall.bundle.v1.Policy
+	34, // 2: inkwall.bundle.v1.Bundle.rule_sets:type_name -> inkwall.bundle.v1.RuleSet
+	19, // 3: inkwall.bundle.v1.Bundle.events:type_name -> inkwall.bundle.v1.EventsConfig
+	17, // 4: inkwall.bundle.v1.Bundle.geo_table:type_name -> inkwall.bundle.v1.GeoTableRef
+	18, // 5: inkwall.bundle.v1.Bundle.deny_response:type_name -> inkwall.bundle.v1.DenyResponse
+	13, // 6: inkwall.bundle.v1.Bundle.grpc_schemas:type_name -> inkwall.bundle.v1.GRPCSchema
+	14, // 7: inkwall.bundle.v1.GRPCSchema.methods:type_name -> inkwall.bundle.v1.GRPCMethod
+	15, // 8: inkwall.bundle.v1.GRPCSchema.messages:type_name -> inkwall.bundle.v1.GRPCMessage
+	16, // 9: inkwall.bundle.v1.GRPCMessage.fields:type_name -> inkwall.bundle.v1.GRPCField
 	0,  // 10: inkwall.bundle.v1.GRPCField.kind:type_name -> inkwall.bundle.v1.GRPCFieldKind
-	29, // 11: inkwall.bundle.v1.Policy.routes:type_name -> inkwall.bundle.v1.RouteMatch
-	5,  // 12: inkwall.bundle.v1.Policy.mode:type_name -> inkwall.bundle.v1.Mode
-	6,  // 13: inkwall.bundle.v1.Policy.failure_mode:type_name -> inkwall.bundle.v1.FailureMode
-	39, // 14: inkwall.bundle.v1.Policy.timeout:type_name -> google.protobuf.Duration
-	31, // 15: inkwall.bundle.v1.Policy.rule_sets:type_name -> inkwall.bundle.v1.RuleSetBinding
-	34, // 16: inkwall.bundle.v1.Policy.exclusions:type_name -> inkwall.bundle.v1.Exclusion
-	35, // 17: inkwall.bundle.v1.Policy.body:type_name -> inkwall.bundle.v1.BodyConfig
-	36, // 18: inkwall.bundle.v1.Policy.websocket:type_name -> inkwall.bundle.v1.WebSocketConfig
-	37, // 19: inkwall.bundle.v1.Policy.responses:type_name -> inkwall.bundle.v1.ResponseConfig
-	34, // 20: inkwall.bundle.v1.Policy.target_exclusions:type_name -> inkwall.bundle.v1.Exclusion
-	28, // 21: inkwall.bundle.v1.Policy.ip_lists:type_name -> inkwall.bundle.v1.IPLists
-	24, // 22: inkwall.bundle.v1.Policy.rate_limits:type_name -> inkwall.bundle.v1.RateLimit
-	17, // 23: inkwall.bundle.v1.Policy.deny_response:type_name -> inkwall.bundle.v1.DenyResponse
-	20, // 24: inkwall.bundle.v1.Policy.geo:type_name -> inkwall.bundle.v1.Geo
-	21, // 25: inkwall.bundle.v1.Policy.llm:type_name -> inkwall.bundle.v1.LLM
-	22, // 26: inkwall.bundle.v1.LLM.endpoints:type_name -> inkwall.bundle.v1.LLMEndpoint
-	23, // 27: inkwall.bundle.v1.LLM.request:type_name -> inkwall.bundle.v1.LLMRequestChecks
+	30, // 11: inkwall.bundle.v1.Policy.routes:type_name -> inkwall.bundle.v1.RouteMatch
+	6,  // 12: inkwall.bundle.v1.Policy.mode:type_name -> inkwall.bundle.v1.Mode
+	7,  // 13: inkwall.bundle.v1.Policy.failure_mode:type_name -> inkwall.bundle.v1.FailureMode
+	40, // 14: inkwall.bundle.v1.Policy.timeout:type_name -> google.protobuf.Duration
+	32, // 15: inkwall.bundle.v1.Policy.rule_sets:type_name -> inkwall.bundle.v1.RuleSetBinding
+	35, // 16: inkwall.bundle.v1.Policy.exclusions:type_name -> inkwall.bundle.v1.Exclusion
+	36, // 17: inkwall.bundle.v1.Policy.body:type_name -> inkwall.bundle.v1.BodyConfig
+	37, // 18: inkwall.bundle.v1.Policy.websocket:type_name -> inkwall.bundle.v1.WebSocketConfig
+	38, // 19: inkwall.bundle.v1.Policy.responses:type_name -> inkwall.bundle.v1.ResponseConfig
+	35, // 20: inkwall.bundle.v1.Policy.target_exclusions:type_name -> inkwall.bundle.v1.Exclusion
+	29, // 21: inkwall.bundle.v1.Policy.ip_lists:type_name -> inkwall.bundle.v1.IPLists
+	25, // 22: inkwall.bundle.v1.Policy.rate_limits:type_name -> inkwall.bundle.v1.RateLimit
+	18, // 23: inkwall.bundle.v1.Policy.deny_response:type_name -> inkwall.bundle.v1.DenyResponse
+	21, // 24: inkwall.bundle.v1.Policy.geo:type_name -> inkwall.bundle.v1.Geo
+	22, // 25: inkwall.bundle.v1.Policy.llm:type_name -> inkwall.bundle.v1.LLM
+	23, // 26: inkwall.bundle.v1.LLM.endpoints:type_name -> inkwall.bundle.v1.LLMEndpoint
+	24, // 27: inkwall.bundle.v1.LLM.request:type_name -> inkwall.bundle.v1.LLMRequestChecks
 	1,  // 28: inkwall.bundle.v1.LLMEndpoint.format:type_name -> inkwall.bundle.v1.LLMFormat
 	2,  // 29: inkwall.bundle.v1.LLMRequestChecks.client_roles:type_name -> inkwall.bundle.v1.LLMRole
 	3,  // 30: inkwall.bundle.v1.LLMRequestChecks.tools:type_name -> inkwall.bundle.v1.LLMToolsAllow
-	39, // 31: inkwall.bundle.v1.RateLimit.period:type_name -> google.protobuf.Duration
-	25, // 32: inkwall.bundle.v1.RateLimit.key:type_name -> inkwall.bundle.v1.RateLimitKey
-	26, // 33: inkwall.bundle.v1.RateLimitKey.client_ip:type_name -> inkwall.bundle.v1.ClientIPKey
-	27, // 34: inkwall.bundle.v1.RateLimitKey.header:type_name -> inkwall.bundle.v1.HeaderKey
-	30, // 35: inkwall.bundle.v1.RouteMatch.path:type_name -> inkwall.bundle.v1.PathMatch
-	4,  // 36: inkwall.bundle.v1.PathMatch.type:type_name -> inkwall.bundle.v1.PathMatchType
-	32, // 37: inkwall.bundle.v1.RuleSetBinding.crs:type_name -> inkwall.bundle.v1.CRSSettings
-	7,  // 38: inkwall.bundle.v1.RuleSetBinding.placement:type_name -> inkwall.bundle.v1.RuleSetPlacement
-	8,  // 39: inkwall.bundle.v1.RuleSet.builtin:type_name -> inkwall.bundle.v1.BuiltinRuleSet
-	9,  // 40: inkwall.bundle.v1.BodyConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
-	9,  // 41: inkwall.bundle.v1.ResponseConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
-	42, // [42:42] is the sub-list for method output_type
-	42, // [42:42] is the sub-list for method input_type
-	42, // [42:42] is the sub-list for extension type_name
-	42, // [42:42] is the sub-list for extension extendee
-	0,  // [0:42] is the sub-list for field type_name
+	40, // 31: inkwall.bundle.v1.RateLimit.period:type_name -> google.protobuf.Duration
+	26, // 32: inkwall.bundle.v1.RateLimit.key:type_name -> inkwall.bundle.v1.RateLimitKey
+	4,  // 33: inkwall.bundle.v1.RateLimit.cost:type_name -> inkwall.bundle.v1.RateLimitCost
+	27, // 34: inkwall.bundle.v1.RateLimitKey.client_ip:type_name -> inkwall.bundle.v1.ClientIPKey
+	28, // 35: inkwall.bundle.v1.RateLimitKey.header:type_name -> inkwall.bundle.v1.HeaderKey
+	31, // 36: inkwall.bundle.v1.RouteMatch.path:type_name -> inkwall.bundle.v1.PathMatch
+	5,  // 37: inkwall.bundle.v1.PathMatch.type:type_name -> inkwall.bundle.v1.PathMatchType
+	33, // 38: inkwall.bundle.v1.RuleSetBinding.crs:type_name -> inkwall.bundle.v1.CRSSettings
+	8,  // 39: inkwall.bundle.v1.RuleSetBinding.placement:type_name -> inkwall.bundle.v1.RuleSetPlacement
+	9,  // 40: inkwall.bundle.v1.RuleSet.builtin:type_name -> inkwall.bundle.v1.BuiltinRuleSet
+	10, // 41: inkwall.bundle.v1.BodyConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
+	10, // 42: inkwall.bundle.v1.ResponseConfig.on_oversize:type_name -> inkwall.bundle.v1.OversizeAction
+	43, // [43:43] is the sub-list for method output_type
+	43, // [43:43] is the sub-list for method input_type
+	43, // [43:43] is the sub-list for extension type_name
+	43, // [43:43] is the sub-list for extension extendee
+	0,  // [0:43] is the sub-list for field type_name
 }
 
 func init() { file_bundle_v1_bundle_proto_init() }
@@ -3296,7 +3366,7 @@ func file_bundle_v1_bundle_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bundle_v1_bundle_proto_rawDesc), len(file_bundle_v1_bundle_proto_rawDesc)),
-			NumEnums:      10,
+			NumEnums:      11,
 			NumMessages:   28,
 			NumExtensions: 0,
 			NumServices:   0,

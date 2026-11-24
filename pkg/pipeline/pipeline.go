@@ -388,7 +388,7 @@ func (p *Pipeline) CheckExchange(ctx context.Context, r *request.Request) (Verdi
 	if x == nil {
 		return v, nil
 	}
-	return v, &Exchange{p: p, x: x, skipBody: p.llmSkipsBodies(r), endpoint: p.llm.formats(r) != 0}
+	return v, &Exchange{p: p, x: x, skipBody: p.llmSkipsBodies(r), endpoint: p.llm.formats(r) != 0, tokens: p.tokenChargesOf(r)}
 }
 
 func (p *Pipeline) checkRequest(ctx context.Context, r *request.Request, keep bool) (Verdict, rules.Exchange) {
@@ -457,22 +457,39 @@ func (p *Pipeline) check(ctx context.Context, r *request.Request, keep bool, now
 	// unless ruleSetBody: Inspect.
 	var detected *LLMVerdict
 	llmBody := false
-	if formats, alone := p.llm.endpoint(r); formats != 0 && decision == router.InspectAll && !r.BodyTruncated {
-		lv := p.llm.checkLLM(r, formats)
-		if time.Since(now) > p.timeout {
-			return p.failed(ReasonTimeout), nil
-		}
-		if lv != nil {
-			if p.mode == ModeBlock && !p.llm.detect {
-				return p.llmVerdict(lv, ActionDeny), nil
+	if formats, alone := p.llm.endpoint(r); formats != 0 {
+		estimate, format := int64(-1), formats.first()
+		if decision == router.InspectAll && !r.BodyTruncated {
+			var lv *LLMVerdict
+			lv, estimate, format = p.llm.checkLLM(r, formats)
+			if time.Since(now) > p.timeout {
+				return p.failed(ReasonTimeout), nil
 			}
-			detected = lv
+			if lv != nil {
+				if p.mode == ModeBlock && !p.llm.detect {
+					return p.llmVerdict(lv, ActionDeny), nil
+				}
+				detected = lv
+			}
+			// The rules skip the body only when it is an endpoint's in
+			// every reading of its path: a path also read as another route
+			// keeps the rules on its body, which the application may read
+			// as a form.
+			llmBody = true
 		}
-		// The rules skip the body only when it is an endpoint's in every
-		// reading of its path: a path also read as another route keeps the
-		// rules on its body, which the application may read as a form.
-		llmBody = true
-		if !p.llm.rulesBody && alone {
+		// Token-weighted rate limits (design 0012 §6): the estimate, once
+		// the request passed its checks (a request they denied isn't
+		// charged); a body that can't be estimated (cut, encoded, not
+		// parsed, or not read) is charged as large as it may be.
+		if estimate < 0 {
+			estimate = p.llm.rules.FallbackTokens(bodyBytes(r))
+		}
+		if tl := p.chargeTokens(r, now, estimate, format); tl.over != nil {
+			return p.rateLimited(tl), nil
+		} else if tl.detect != nil && lim.detect == nil {
+			lim = tl
+		}
+		if llmBody && !p.llm.rulesBody && alone {
 			withoutBody := *r
 			withoutBody.Body = nil
 			r = &withoutBody

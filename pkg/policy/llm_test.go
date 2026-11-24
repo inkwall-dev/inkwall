@@ -5,15 +5,19 @@ package policy
 
 import (
 	"context"
+	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	"github.com/inkwall-dev/inkwall/pkg/llm"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
+	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
 	"github.com/inkwall-dev/inkwall/pkg/request"
 )
 
@@ -139,6 +143,33 @@ func TestLLMUnknownRoles(t *testing.T) {
 	v := set.Check(context.Background(), post("/v1/chat/completions", `{"model":"llama-3","messages":[{"role":"user","content":"hi"}],"max_tokens":10}`))
 	if v.Action != pipeline.ActionDeny || v.LLM == nil || v.LLM.Check != llm.CheckClientRole {
 		t.Errorf("a user message, only unknown roles allowed: %s %s", v.Action, v.Reason)
+	}
+}
+
+// TestTokenLimit: a rate limit with the LLM tokens cost counts tokens of
+// the endpoints' requests, not requests.
+func TestTokenLimit(t *testing.T) {
+	b := llmBundle()
+	b.Policies[2].Llm.Request.ClientRoles = nil
+	b.Policies[2].RateLimits = []*bundlev1.RateLimit{{Name: "tokens", Requests: 150, Period: durationpb.New(time.Hour),
+		Cost: bundlev1.RateLimitCost_RATE_LIMIT_COST_LLM_TOKENS}}
+	set, err := Compile(b, Options{BodyLimit: 65536, RateLimits: ratelimit.New(1024, 0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"model":"llama-3","messages":[{"role":"user","content":"hi"}],"max_tokens":60}` // 61 tokens
+	for i, want := range []pipeline.Action{pipeline.ActionAllow, pipeline.ActionAllow, pipeline.ActionDeny} {
+		r := post("/v1/chat/completions", body)
+		r.ClientIP = netip.MustParseAddr("198.51.100.1")
+		if v := set.Check(context.Background(), r); v.Action != want || want == pipeline.ActionDeny && v.Status != 429 {
+			t.Fatalf("request %d: %s %d %s", i, v.Action, v.Status, v.Reason)
+		}
+	}
+	// Other paths aren't counted.
+	r := post("/other", "")
+	r.ClientIP = netip.MustParseAddr("198.51.100.1")
+	if v := set.Check(context.Background(), r); v.Action != pipeline.ActionAllow {
+		t.Errorf("another path: %s %s", v.Action, v.Reason)
 	}
 }
 

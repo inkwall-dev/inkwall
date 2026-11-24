@@ -187,7 +187,7 @@ Engine metrics carry `adapter` where it says so (`proxy`, `forwardauth`, `httpch
 | `inkwall_llm_requests_total` | counter | `format`, `phase` | Bodies read on the policies' [LLM endpoints](llm-apis.md), by format (`openai_chat`, `openai_responses`, `openai_embeddings`, `anthropic_messages`); `phase` is `request`. |
 | `inkwall_llm_malformed_total` | counter | `format`, `phase` | Bodies on LLM endpoints the parser refused (`llm-malformed`): invalid JSON or UTF-8, too deep, a field of another type or sent twice, an encoded body. |
 | `inkwall_llm_checks_total` | counter | `check`, `action` | LLM checks that failed (`llm-model`, `llm-max-output-tokens`, ...): `deny`, or `log` in `Detect` mode. |
-| `inkwall_llm_tokens_total` | counter | `kind` | `estimated`: the tokens of the requests on LLM endpoints that passed their checks, as charged at request time (prompt bytes ÷ 3 plus the output limit), to size token limits. |
+| `inkwall_llm_tokens_total` | counter | `kind` | `estimated`: the tokens of the requests on LLM endpoints that passed their checks, as charged at request time (prompt bytes ÷ 3 plus the output limit); `settled_input`, `settled_output`: the tokens whole responses reported using, which settle [token limits](llm-apis.md#token-limits). |
 | `inkwall_llm_inspect_seconds` | histogram | `phase` | Time reading and checking bodies on LLM endpoints. |
 
 The engine also serves the Go runtime's `go_*` and the `process_*` metrics.
