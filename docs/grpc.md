@@ -1,14 +1,14 @@
 # gRPC
 
 What the engine inspects in a [gRPC](https://grpc.io/docs/what-is-grpc/core-concepts/) call, what
-it doesn't, and how it denies one. Planned: messages read with their schema
-([#316](https://github.com/inkwall-dev/inkwall/issues/316)).
+it doesn't, and how it denies one.
 
 ## Contents
 
 - [Which requests are gRPC calls](#which-requests-are-grpc-calls)
 - [What is inspected](#what-is-inspected)
 - [Inspecting the messages](#inspecting-the-messages)
+- [Messages with their schema](#messages-with-their-schema)
 - [Long streams: one message at a time](#long-streams-one-message-at-a-time)
 - [Server messages](#server-messages)
 - [Denied calls](#denied-calls)
@@ -78,7 +78,7 @@ spec:
   and groups are read in linear time, inside the evaluation slots and deadline
   ([GHSA-w6pv-4769-xr6f](https://github.com/inkwall-dev/inkwall/security/advisories/GHSA-w6pv-4769-xr6f)).
 - **What the rules see:** each text field as a form argument (`ARGS`, `ARGS_POST`) named by its
-  field numbers: `1` is field 1 of the message, `2.1` field 1 of the message in field 2. An
+  field numbers (by its path with [the schema](#messages-with-their-schema)): `1` is field 1 of the message, `2.1` field 1 of the message in field 2. An
   attack in a field (`name: "1' OR '1'='1' -- "`) is denied as in a form. `REQUEST_BODY` stays
   empty. An exclusion names one as any argument (`when: {argument: "2.1"}`).
 - **Compressed messages:** `grpc-encoding: gzip` is decompressed, up to 1 MiB per call. Another
@@ -100,6 +100,84 @@ protobuf messages carrying names, paths and text. That is why it is off by defau
 `Detect` mode first, read the events for a while, and add exclusions (`when: {argument: "3"}`) for binary
 fields that match before `Block`. The measurement and the decision are in
 [0002 §8.7](design/0002-system-architecture.md#87-grpc-messages).
+
+## Messages with their schema
+
+From v0.7.0, a policy that inspects messages can read them with their schema: the
+[descriptor set](https://protobuf.dev/programming-guides/techniques/#self-description) of the
+application's `.proto` files. Fields are then read by their types and named by their paths
+(`ARGS:user.name`), not guessed and named by numbers (`ARGS:3.1`):
+
+```sh
+buf build -o orders.binpb                # or, with protoc:
+protoc --include_imports --descriptor_set_out=orders.binpb orders/v1/*.proto
+kubectl create configmap orders-schema --from-file=orders.binpb
+kubectl label configmap orders-schema waf.inkwall.dev/rules=true
+```
+
+```yaml
+spec:
+  body:
+    grpcMessages: Inspect # needed: a schema doesn't turn message reading on
+    grpcSchema:
+      configMapRef: {name: orders-schema, key: orders.binpb}
+```
+
+- **The ConfigMap** is in the policy's namespace, labeled `waf.inkwall.dev/rules=true` as a rule
+  set's is, and holds the set in `binaryData` (`kubectl create configmap --from-file` puts it
+  there), raw or gzipped: at most 1 MiB, 8 MiB gunzipped. The set must include its imports
+  (`buf build` does; `protoc` with `--include_imports`). One set per policy: for several
+  services, build one set from all of them.
+- **The operator** compiles the set into the signed bundle; engines never parse descriptors and
+  never fetch anything. A set that doesn't compile (not a `FileDescriptorSet`, an import it
+  doesn't include, no service, over a bound, a name over 512 bytes or of over 32 parts, a type
+  name that isn't fully qualified (`buf` and `protoc` write them so)) makes the policy `Accepted=False`,
+  `InvalidGRPCSchema`, and the policy's previous version stays in force; a missing ConfigMap or
+  key is `InvalidRef`. Engines before 0.7.0 read every message without the schema, and the policy
+  is `Enforced=False`, `EnginesOutdated`.
+- **The method** is the call's path (`/orders.v1.Orders/Create`): its input type reads every
+  message of the call, buffered or [one at a time](#long-streams-one-message-at-a-time). A method
+  the set doesn't describe is read without the schema, as before, never denied for it.
+- **Each field by its type:** a `string` is text, whatever its bytes; a `bytes` field is text,
+  control characters read as spaces, when it is UTF-8 of at least 8 bytes and at least 90%
+  printable, and otherwise gives its runs of at least 12 readable characters only (shorter random bytes are printable too often: they would match the
+  rules); numbers, enums and bools give nothing, and a packed list of them that is really text (a
+  `string` sent where an older set declares `repeated int64`) is read as a `bytes` field is; a nested message, a map entry (`labels.key`,
+  `labels.value`) and a group are read by their types, down to 16 levels, a message also as text
+  as without the schema (whole when printable, whole and flat when its tags, lengths and numbers
+  are blank, and the runs between its fields). A field the schema declares a `string` is read
+  whole whatever its bytes look like, so a printable tag or length byte, which keeps a field
+  from being read whole without the schema, doesn't there. A
+  `google.protobuf.Any` is read as the type its last `type_url` names (the one the application
+  unpacks by) when the set has it and the value is one, and otherwise without the schema, as
+  `payload.value`.
+- **Every occurrence is read:** a field sent twice, and each member of a `oneof`, whichever the
+  application keeps. Within limits: a message nested over 16 levels, with over 4,096 text fields,
+  or whose reading would go past a budget linear in its size (64 bytes read per byte of the
+  message), or that would give the rules over 4 times its size in text, isn't read whole, and
+  gets `body.onOversize`. A short `bytes` field (under 8 bytes, or
+  binary with no run of 12) gives nothing, so text an application keeps in a short `bytes` field
+  (`$(id)`) isn't read: such a field is best declared `string`.
+- **What the set doesn't describe is still read**, without it: a field number the type doesn't
+  have, or a field sent with another wire type (a string sent as a number), is read as before and
+  named by its number under its parent (`user.7`). `inkwall_grpc_unknown_fields_total` counts
+  them: a rising count means the set is older than the application.
+- **Names** are the proto field names (not the JSON names) joined by dots, without indexes: every
+  element of `items` gives `items.sku`, so one exclusion covers them all
+  (`when: {argument: items.sku}`). An extension is `[package.extension]`. A path over 256 bytes
+  is cut there and ends in `~`, which no exclusion can name.
+
+**Moving a policy to a schema.** Its exclusions keep their syntax, but the names they match
+change: `when: {argument: "3.1"}` no longer matches once that field is `user.name`. Put the
+policy in `Detect` mode, add the schema, read the events (they name `ARGS:user.name`), rewrite the
+exclusions by name, then go back to `Block`. The webhook warns of an exclusion whose argument is
+only digits and dots on a policy with a schema.
+
+**False positives.** With the schema, `bytes` fields no longer give short runs of random bytes:
+in 100,000 messages of four random 1 to 24 byte `bytes` fields, none was denied (without the
+schema, about 1 in 5,000 is). Text fields match the rules as the same text in a form would. Turn
+it on in `Detect` mode first all the same: the design and the measurement are design 0013
+([#316](https://github.com/inkwall-dev/inkwall/issues/316)).
 
 ## Long streams: one message at a time
 
@@ -124,7 +202,7 @@ whose client waits for the server stalls. With `PerMessage`:
   Envoy streams its body to the engine, which reads each message as it completes, whatever the
   chunks it comes in.
 - **Each message is inspected on its own**, as its text fields (named by field numbers, as
-  above), with the policy's rules and exclusions, up to `body.maxBytes`. A longer message, or one
+  above, or by their paths with [the schema](#messages-with-their-schema)), with the policy's rules and exclusions, up to `body.maxBytes`. A longer message, or one
   compressed other than with gzip, gets `body.onOversize`. Long client streams and bidirectional
   calls work, however long they last.
 - **Block mode** holds each message until it is inspected; an allowed one goes on to the

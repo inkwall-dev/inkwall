@@ -19,6 +19,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -35,6 +36,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/enginereport"
 	"github.com/inkwall-dev/inkwall/operator/reasons"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
+	"github.com/inkwall-dev/inkwall/pkg/grpcschema/compile"
 	"github.com/inkwall-dev/inkwall/pkg/llm"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
@@ -948,9 +950,57 @@ type PolicyExplanation struct {
 	RateLimits []RateLimitExplain `json:"rateLimits,omitempty"`
 	// Geo is the policy's spec.geo, in a line.
 	Geo string `json:"geo,omitempty"`
+	// GRPCSchema is the descriptor set spec.body.grpcSchema names, as
+	// the operator compiles it.
+	GRPCSchema *GRPCSchemaExplain `json:"grpcSchema,omitempty"`
 	// LLM is the policy's spec.llm.
 	LLM      *LLMExplain `json:"llm,omitempty"`
 	Warnings []string    `json:"warnings"`
+}
+
+// GRPCSchemaExplain is a policy's gRPC schema: where it comes from, and
+// what it compiles to, or why it doesn't.
+type GRPCSchemaExplain struct {
+	// Source is "namespace/configmap/key".
+	Source string `json:"source"`
+	// Methods is how many methods it describes, and Bytes its compiled
+	// size in the bundle.
+	Methods int `json:"methods,omitempty"`
+	Bytes   int `json:"bytes,omitempty"`
+	// Error is why it doesn't compile, or can't be read.
+	Error string `json:"error,omitempty"`
+}
+
+// grpcSchemaExplain reads and compiles the descriptor set p's
+// spec.body.grpcSchema names, as the operator does; nil without one.
+func grpcSchemaExplain(ctx context.Context, c client.Reader, p *wafv1alpha1.WAFPolicy) *GRPCSchemaExplain {
+	b := p.Spec.Body
+	if b == nil || b.GRPCSchema == nil {
+		return nil
+	}
+	ref := b.GRPCSchema.ConfigMapRef
+	ge := &GRPCSchemaExplain{Source: p.Namespace + "/" + ref.Name + "/" + ref.Key}
+	var cm corev1.ConfigMap
+	if err := c.Get(ctx, types.NamespacedName{Namespace: p.Namespace, Name: ref.Name}, &cm); err != nil {
+		ge.Error = fmt.Sprintf("read ConfigMap %s/%s: %v", p.Namespace, ref.Name, err)
+		return ge
+	}
+	data, ok := cm.BinaryData[ref.Key]
+	if !ok {
+		text, inData := cm.Data[ref.Key]
+		if !inData {
+			ge.Error = fmt.Sprintf("ConfigMap %s/%s has no key %q", p.Namespace, ref.Name, ref.Key)
+			return ge
+		}
+		data = []byte(text)
+	}
+	s, err := compile.Compile(data, ge.Source)
+	if err != nil {
+		ge.Error = err.Error()
+		return ge
+	}
+	ge.Methods, ge.Bytes = len(s.GetMethods()), proto.Size(s)
+	return ge
 }
 
 // TargetExplain is one of the policy's targets.
@@ -1000,6 +1050,7 @@ func explainPolicy(ctx context.Context, cluster *explainCluster, namespace, id s
 		pe.RateLimits = append(pe.RateLimits, rateLimitExplain(l))
 	}
 	pe.Geo = geoExplain(p.Spec.Geo)
+	pe.GRPCSchema = grpcSchemaExplain(ctx, cluster.c, &p)
 	pe.LLM = llmExplain(p.Spec.LLM)
 	for _, t := range policyConditions {
 		ce := ConditionExplain{Type: t, Status: string(metav1.ConditionUnknown)}
@@ -1094,6 +1145,13 @@ func printPolicyExplanation(w io.Writer, pe *PolicyExplanation) {
 	fmt.Fprintf(w, "Targets: %s\n", cmp.Or(strings.Join(targets, ", "), "none"))
 	if pe.Geo != "" {
 		fmt.Fprintf(w, "Geo: %s\n", pe.Geo)
+	}
+	if g := pe.GRPCSchema; g != nil {
+		if g.Error != "" {
+			fmt.Fprintf(w, "gRPC schema: %s: %s\n", g.Source, g.Error)
+		} else {
+			fmt.Fprintf(w, "gRPC schema: %s, %d methods, %d bytes compiled\n", g.Source, g.Methods, g.Bytes)
+		}
 	}
 	if l := pe.LLM; l != nil {
 		mode := ""
