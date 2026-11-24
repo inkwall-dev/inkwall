@@ -4,6 +4,7 @@
 package ratelimit
 
 import (
+	"fmt"
 	"math"
 	"net/netip"
 	"slices"
@@ -139,6 +140,163 @@ func TestRefund(t *testing.T) {
 	}
 	// A refund of a key the table doesn't hold does nothing.
 	s.Refund(l, ip("192.0.2.9"), Decision{Allowed: true})
+}
+
+// TestWeighted: a request of n tokens takes n at once or none (design
+// 0012 §6); settlement moves the bucket by the difference, a refund or a
+// debt, bounded by the burst.
+func TestWeighted(t *testing.T) {
+	s := New(1024, 0)
+	t0 := s.base.Add(time.Hour)
+	k := ip("192.0.2.1")
+	// 6,000 tokens a minute: one every 10 ms, a burst of 6,000.
+	l := s.TokenLimit(Identity{PolicyUID: "uid", Name: "tokens", Key: "ip/56"}, 6000, time.Minute, 0)
+	if d := s.TakeN(l, k, t0, nil, 4000); !d.Allowed {
+		t.Fatal("4,000 of 6,000 refused")
+	}
+	if d := s.TakeN(l, k, t0, nil, 2001); d.Allowed || d.RetryAfter != time.Second {
+		t.Fatalf("2,001 over the 2,000 left: %+v", d)
+	}
+	// None was taken: the 2,000 left still fit.
+	d := s.TakeN(l, k, t0, nil, 2000)
+	if !d.Allowed {
+		t.Fatal("the 2,000 left refused")
+	}
+	if w := s.WaitN(l, k, t0, 600); w != 6*time.Second {
+		t.Errorf("wait for 600 tokens: %v, want 6s", w)
+	}
+	// The response used 3,000 fewer: refunded.
+	s.Settle(l, k, d, t0, -3000)
+	if d := s.TakeN(l, k, t0, nil, 3000); !d.Allowed {
+		t.Fatal("a refund not given back")
+	}
+	// It used 1,000 more: debt, until the bucket refills past it.
+	s.Settle(l, k, d, t0, 1000)
+	if d := s.TakeN(l, k, t0, nil, 1); d.Allowed {
+		t.Fatal("a key in debt allowed")
+	}
+	if w := s.Wait(l, k, t0); w != 11*time.Second {
+		t.Errorf("in debt by 1,000: wait %v, want 11s (10s and the token)", w)
+	}
+	// A request heavier than the burst never fits, and doesn't overflow.
+	k2 := ip("192.0.2.2")
+	if d := s.TakeN(l, k2, t0, nil, math.MaxInt64); d.Allowed {
+		t.Fatal("more than the burst allowed")
+	}
+	d2 := s.TakeN(l, k2, t0, nil, 6000)
+	if !d2.Allowed {
+		t.Fatal("the burst refused after a refused request")
+	}
+	// Settlement is bounded by the burst.
+	s.Settle(l, k2, d2, t0, math.MaxInt64)
+	if w := s.Wait(l, k2, t0); w > 2*time.Minute+time.Second {
+		t.Errorf("a huge debt: wait %v, want at most the window twice", w)
+	}
+	// However many responses settle at once: at most twice the window.
+	s.Settle(l, k2, d2, t0, math.MaxInt64)
+	s.Settle(l, k2, d2, t0, math.MaxInt64)
+	if w := s.Wait(l, k2, t0); w > 2*time.Minute {
+		t.Errorf("debts settled together: wait %v, want at most the window twice", w)
+	}
+	s.RefundN(l, k2, d2, 6000)
+	// Peek charges nothing.
+	k3 := ip("192.0.2.3")
+	if d := s.TakeN(l, k3, t0, nil, 1); !d.Allowed {
+		t.Fatal("a full bucket refused")
+	}
+	for range 3 {
+		if d := s.Peek(l, k3, t0); !d.Allowed {
+			t.Fatal("a bucket with tokens refused by Peek")
+		}
+	}
+	if d := s.TakeN(l, k3, t0, nil, 5999); !d.Allowed {
+		t.Fatal("Peek charged the bucket")
+	}
+	if d := s.Peek(l, k3, t0); d.Allowed {
+		t.Fatal("an empty bucket allowed by Peek")
+	}
+	// A key never charged is allowed, and Peek claims no entry for it.
+	keys := s.Keys()
+	if d := s.Peek(l, ip("192.0.2.4"), t0); !d.Allowed || s.Keys() != keys {
+		t.Fatalf("an unknown key: %+v, keys %d, were %d", d, s.Keys(), keys)
+	}
+	// A billion tokens an hour, in bursts of a billion: the window fits.
+	big := s.TokenLimit(Identity{PolicyUID: "uid", Name: "big", Key: "ip/56"}, 1, time.Hour, 1_000_000_000)
+	if big.burst*big.interval <= 0 || big.burst*big.interval > math.MaxInt64/4 {
+		t.Errorf("window overflows: burst %d, interval %d", big.burst, big.interval)
+	}
+	// A request limit keeps its burst.
+	if l := limit(s, "requests", 1, time.Hour, 1_000_000); l.burst != 1_000_000 {
+		t.Errorf("a request limit's burst cut to %d", l.burst)
+	}
+}
+
+// TestSettleNoWrap: debts settled one after another on a limit of the
+// largest window never wrap the bucket's time round to full.
+func TestSettleNoWrap(t *testing.T) {
+	s := New(1024, 0)
+	t0 := s.base.Add(time.Hour)
+	k := ip("192.0.2.1")
+	l := s.TokenLimit(Identity{PolicyUID: "uid", Name: "wide", Key: "ip/56"}, 1000, time.Hour, 1_000_000_000)
+	d := s.TakeN(l, k, t0, nil, 10)
+	if !d.Allowed {
+		t.Fatal("10 tokens refused")
+	}
+	for range 3 {
+		s.Settle(l, k, d, t0, 10*l.burst)
+		if p := s.Peek(l, k, t0); p.Allowed {
+			t.Fatal("a key in debt allowed: the debt wrapped")
+		}
+	}
+	if d := s.TakeN(l, k, t0, nil, l.burst); d.Allowed || d.RetryAfter <= 0 {
+		t.Fatalf("a burst on top of the most debt: %+v", d)
+	}
+	if w := s.WaitN(l, k, t0, l.burst); w <= 0 {
+		t.Fatalf("wait %v", w)
+	}
+}
+
+// TestPeekClaimsNothing: Peeks of keys the table doesn't hold neither
+// claim nor evict entries.
+func TestPeekClaimsNothing(t *testing.T) {
+	s := New(64, 0)
+	t0 := s.base.Add(time.Hour)
+	l := s.TokenLimit(Identity{PolicyUID: "uid", Name: "tokens", Key: "ip/56"}, 1000, time.Minute, 0)
+	for i := range 32 {
+		s.TakeN(l, ip(fmt.Sprintf("192.0.2.%d", i)), t0, nil, 10)
+	}
+	keys := s.Keys()
+	idle, active := s.Evictions()
+	for i := range 5000 {
+		if d := s.Peek(l, ip(fmt.Sprintf("2001:db8:%x::1", i)), t0); !d.Allowed {
+			t.Fatal("an unknown key refused")
+		}
+	}
+	if i2, a2 := s.Evictions(); s.Keys() != keys || i2 != idle || a2 != active {
+		t.Errorf("Peek claimed entries: keys %d→%d, evictions %d/%d→%d/%d", keys, s.Keys(), idle, active, i2, a2)
+	}
+}
+
+// TestCounted: a decision is counted when a bucket was charged; ObserveN
+// of a key the table can't hold lets it through uncounted, with nothing to
+// settle.
+func TestCounted(t *testing.T) {
+	if (Decision{}).Counted() || !(Decision{Allowed: true}).Counted() || (Decision{Allowed: true, uncounted: true}).Counted() {
+		t.Error("Counted")
+	}
+	s := New(64, 0)
+	t0 := s.base.Add(time.Hour)
+	l := s.TokenLimit(Identity{PolicyUID: "uid", Name: "tokens", Key: "ip/56"}, 1000, time.Hour, 0)
+	k := ip("192.0.2.1")
+	d := s.ObserveN(l, k, t0, nil, 400)
+	if !d.Counted() {
+		t.Fatal("a held key uncounted")
+	}
+	// Settling an uncounted decision moves nothing.
+	s.Settle(l, k, Decision{Allowed: true, uncounted: true}, t0, 1000)
+	if p := s.Peek(l, k, t0); !p.Allowed {
+		t.Error("an uncounted decision settled")
+	}
 }
 
 func TestIPKey(t *testing.T) {

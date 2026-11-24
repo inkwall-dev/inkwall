@@ -629,12 +629,26 @@ spec:
                   properties:
                     burst:
                       description: |-
-                        Burst is the requests a key may send at once after being idle.
-                        Unset: requests.
+                        Burst is the requests (or tokens) a key may send at once after being
+                        idle. Unset: requests.
                       format: int64
-                      maximum: 1000000
+                      maximum: 1000000000
                       minimum: 1
                       type: integer
+                    cost:
+                      description: |-
+                        Cost is what the limit counts: Requests (the default), or LLMTokens
+                        (docs/llm-apis.md#token-limits): requests and burst are then tokens,
+                        and a request on one of the policy's LLM endpoints (spec.llm), once
+                        it passed its checks, takes its estimate at once (prompt bytes / 3
+                        plus its output limit), corrected by the tokens its response reports
+                        using when the policy inspects responses; other requests aren't
+                        counted. A key in debt is refused before its body is read. Engines
+                        before 0.7.0 count each request as 1.
+                      enum:
+                      - Requests
+                      - LLMTokens
+                      type: string
                     key:
                       description: 'Key is what the limit counts by. Unset: the client
                         IP.'
@@ -753,10 +767,12 @@ spec:
                         rule: duration(self) >= duration('1s') && duration(self) <=
                           duration('1h')
                     requests:
-                      description: Requests are the requests allowed per period, per
-                        key, per engine.
+                      description: |-
+                        Requests are the requests allowed per period, per key, per engine,
+                        at most 1000000; with cost: LLMTokens, the tokens, at most
+                        1000000000.
                       format: int64
-                      maximum: 1000000
+                      maximum: 1000000000
                       minimum: 1
                       type: integer
                   required:
@@ -764,6 +780,11 @@ spec:
                   - period
                   - requests
                   type: object
+                  x-kubernetes-validations:
+                  - message: 'requests and burst are at most 1000000, or 1000000000
+                      tokens with cost: LLMTokens'
+                    rule: (has(self.cost) && self.cost == 'LLMTokens') || (self.requests
+                      <= 1000000 && (!has(self.burst) || self.burst <= 1000000))
                 maxItems: 8
                 type: array
                 x-kubernetes-list-type: atomic
@@ -1177,6 +1198,10 @@ spec:
             required:
             - targetRefs
             type: object
+            x-kubernetes-validations:
+            - message: 'a rate limit with cost: LLMTokens needs spec.llm'
+              rule: has(self.llm) || !has(self.rateLimits) || self.rateLimits.all(l,
+                !has(l.cost) || l.cost != 'LLMTokens')
           status:
             description: |-
               WAFPolicyStatus reports how far the policy got: accepted, programmed into

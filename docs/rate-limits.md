@@ -77,9 +77,10 @@ balancer](client-ip.md) if they show the load balancer.
 | Field | Default | Meaning |
 |---|---|---|
 | `name` | required | A DNS label, unique in the policy: in events, logs and `explain`. Renaming a limit starts its buckets full |
-| `requests` | required | Requests per `period`, per key, per engine: 1 to 1,000,000 |
+| `requests` | required | Requests per `period`, per key, per engine: 1 to 1,000,000; tokens with `cost: LLMTokens`, up to 1,000,000,000 |
 | `period` | required | 1s to 1h |
-| `burst` | `requests` | The most a key may send at once after being idle: 1 to 1,000,000 |
+| `burst` | `requests` | The most a key may send at once after being idle: 1 to 1,000,000 (tokens: 1,000,000,000) |
+| `cost` | `Requests` | `LLMTokens` counts the LLM tokens of the policy's [LLM endpoints](llm-apis.md#token-limits), not requests |
 | `key` | the client IP | [Keys](#keys) |
 | `match.paths` | every path | Up to 16 exact paths (`/login`) or prefixes ending in `*` (`/api/*`), clean as skip paths: no `//` and no `.` or `..` segment (the webhook refuses them) |
 | `match.methods` | every method | `GET`, `POST`, ... |

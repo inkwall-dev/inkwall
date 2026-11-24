@@ -215,6 +215,12 @@ func requirement(p *wafv1alpha1.WAFPolicy, defaultDeny bool) (string, [3]int) {
 		// An older engine limits nothing (#705).
 		set("spec.rateLimits", [3]int{0, 7, 0})
 	}
+	for i, l := range p.Spec.RateLimits {
+		if l.Cost == wafv1alpha1.RateLimitLLMTokens {
+			// An older engine counts each request as 1 token.
+			set(fmt.Sprintf("spec.rateLimits[%d].cost", i), [3]int{0, 7, 0})
+		}
+	}
 	if p.Spec.LLM != nil {
 		// An older engine checks none of the LLM endpoints' requests, and
 		// its rule sets inspect their bodies as any route's (#277).

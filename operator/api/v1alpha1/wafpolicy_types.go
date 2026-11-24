@@ -91,6 +91,7 @@ const (
 )
 
 // WAFPolicySpec is what to enforce on which routes.
+// +kubebuilder:validation:XValidation:rule="has(self.llm) || !has(self.rateLimits) || self.rateLimits.all(l, !has(l.cost) || l.cost != 'LLMTokens')",message="a rate limit with cost: LLMTokens needs spec.llm"
 type WAFPolicySpec struct {
 	// TargetRefs are the routes this policy protects, in the policy's
 	// namespace.
@@ -474,6 +475,7 @@ type LLMToolName string
 
 // RateLimit is a token bucket per key: it holds at most burst requests and
 // gains requests per period, evenly.
+// +kubebuilder:validation:XValidation:rule="(has(self.cost) && self.cost == 'LLMTokens') || (self.requests <= 1000000 && (!has(self.burst) || self.burst <= 1000000))",message="requests and burst are at most 1000000, or 1000000000 tokens with cost: LLMTokens"
 type RateLimit struct {
 	// Name names the limit in events and logs; unique in the policy.
 	// Renaming a limit starts its buckets again full.
@@ -482,21 +484,34 @@ type RateLimit struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
-	// Requests are the requests allowed per period, per key, per engine.
+	// Requests are the requests allowed per period, per key, per engine,
+	// at most 1000000; with cost: LLMTokens, the tokens, at most
+	// 1000000000.
 	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=1000000
+	// +kubebuilder:validation:Maximum=1000000000
 	Requests int64 `json:"requests"`
 
 	// Period is the period of requests, 1s to 1h.
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('1h')",message="period must be 1s to 1h"
 	Period metav1.Duration `json:"period"`
 
-	// Burst is the requests a key may send at once after being idle.
-	// Unset: requests.
+	// Burst is the requests (or tokens) a key may send at once after being
+	// idle. Unset: requests.
 	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=1000000
+	// +kubebuilder:validation:Maximum=1000000000
 	// +optional
 	Burst *int64 `json:"burst,omitempty"`
+
+	// Cost is what the limit counts: Requests (the default), or LLMTokens
+	// (docs/llm-apis.md#token-limits): requests and burst are then tokens,
+	// and a request on one of the policy's LLM endpoints (spec.llm), once
+	// it passed its checks, takes its estimate at once (prompt bytes / 3
+	// plus its output limit), corrected by the tokens its response reports
+	// using when the policy inspects responses; other requests aren't
+	// counted. A key in debt is refused before its body is read. Engines
+	// before 0.7.0 count each request as 1.
+	// +optional
+	Cost RateLimitCost `json:"cost,omitempty"`
 
 	// Key is what the limit counts by. Unset: the client IP.
 	// +optional
@@ -514,6 +529,17 @@ type RateLimit struct {
 	// +optional
 	Mode PolicyMode `json:"mode,omitempty"`
 }
+
+// RateLimitCost is what a rate limit counts.
+// +kubebuilder:validation:Enum=Requests;LLMTokens
+type RateLimitCost string
+
+const (
+	// RateLimitRequests counts requests.
+	RateLimitRequests RateLimitCost = "Requests"
+	// RateLimitLLMTokens counts LLM tokens.
+	RateLimitLLMTokens RateLimitCost = "LLMTokens"
+)
 
 // RateLimitKey is what a limit counts by: exactly one of clientIP and
 // header.

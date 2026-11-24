@@ -248,7 +248,8 @@ func TestWAFPolicyValidation(t *testing.T) {
 		{name: "rate limit name not a DNS label", doc: policy(target + "  rateLimits: [{name: Login_1, requests: 1, period: 1s}]\n"), wantErr: "spec.rateLimits[0].name"},
 		{name: "rate limit without requests", doc: policy(target + "  rateLimits: [{name: a, period: 1s}]\n"), wantErr: "spec.rateLimits[0].requests: Required value"},
 		{name: "rate limit of 0 requests", doc: policy(target + "  rateLimits: [{name: a, requests: 0, period: 1s}]\n"), wantErr: "should be greater than or equal to 1"},
-		{name: "rate limit over a million requests", doc: policy(target + "  rateLimits: [{name: a, requests: 1000001, period: 1s}]\n"), wantErr: "should be less than or equal to 1000000"},
+		{name: "rate limit over a million requests", doc: policy(target + "  rateLimits: [{name: a, requests: 1000001, period: 1s}]\n"), wantErr: "requests and burst are at most 1000000"},
+		{name: "rate limit burst over a million", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, burst: 1000001}]\n"), wantErr: "requests and burst are at most 1000000"},
 		{name: "rate limit period under 1s", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 500ms}]\n"), wantErr: "period must be 1s to 1h"},
 		{name: "rate limit period over 1h", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 2h}]\n"), wantErr: "period must be 1s to 1h"},
 		{name: "rate limit burst of 0", doc: policy(target + "  rateLimits: [{name: a, requests: 1, period: 1s, burst: 0}]\n"), wantErr: "should be greater than or equal to 1"},
@@ -357,6 +358,12 @@ func TestWAFPolicyValidation(t *testing.T) {
 		{name: "llm tool names without Listed", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {tools: {names: [a]}}}\n"), wantErr: "names is required with allow: Listed, and only allowed with it"},
 		{name: "llm tool names with None", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {tools: {allow: None, names: [a]}}}\n"), wantErr: "only allowed with it"},
 		{name: "llm tool name with a space", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {tools: {allow: Listed, names: [\"a b\"]}}}\n"), wantErr: "spec.llm.request.tools.names[0]"},
+		// Token limits (design 0012 §6).
+		{name: "token limit", doc: policy(target + "  llm: {endpoints: [{paths: [/v1/*], format: OpenAIChat}]}\n  rateLimits: [{name: t, requests: 1000000000, burst: 1000000000, period: 1m, cost: LLMTokens, key: {header: {name: Authorization}}}]\n")},
+		{name: "token limit over a billion", doc: policy(target + "  llm: {endpoints: [{paths: [/v1/*], format: OpenAIChat}]}\n  rateLimits: [{name: t, requests: 1000000001, period: 1m, cost: LLMTokens}]\n"), wantErr: "should be less than or equal to 1000000000"},
+		{name: "token limit without spec.llm", doc: policy(target + "  rateLimits: [{name: t, requests: 1000, period: 1m, cost: LLMTokens}]\n"), wantErr: "a rate limit with cost: LLMTokens needs spec.llm"},
+		{name: "request limit, cost Requests", doc: policy(target + "  rateLimits: [{name: r, requests: 10, period: 1m, cost: Requests}]\n")},
+		{name: "unknown cost", doc: policy(target + "  rateLimits: [{name: r, requests: 10, period: 1m, cost: Bytes}]\n"), wantErr: `Unsupported value: "Bytes"`},
 		{name: "llm checks in Block mode", doc: policy(target + "  llm: {endpoints: [{paths: [/a], format: OpenAIChat}], request: {mode: Block}}\n"), wantErr: "the LLM checks' mode can only be Detect"},
 	})
 }

@@ -1095,6 +1095,9 @@ func rateLimit(l wafv1alpha1.RateLimit) *bundlev1.RateLimit {
 		Period:   durationpb.New(l.Period.Duration),
 		Detect:   l.Mode == wafv1alpha1.PolicyDetect,
 	}
+	if l.Cost == wafv1alpha1.RateLimitLLMTokens {
+		r.Cost = bundlev1.RateLimitCost_RATE_LIMIT_COST_LLM_TOKENS
+	}
 	if l.Burst != nil {
 		r.Burst = uint32(*l.Burst) // #nosec G115 -- the CRD bounds it to 1,000,000
 	}

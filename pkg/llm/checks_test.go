@@ -173,6 +173,10 @@ func TestEstimatedTokens(t *testing.T) {
 		{Config{}, OpenAIEmbeddings, `{"input":[1,2,3]}`, 4},
 		{Config{}, OpenAIChat, `{"messages":[{"role":"user","content":"a"}],"max_tokens":1e30}`, math.MaxInt64},
 		{Config{}, AnthropicMessages, `{"messages":[],"max_tokens":7}`, 7},
+		// n choices each take the output limit.
+		{Config{}, OpenAIChat, `{"messages":[{"role":"user","content":"abc"}],"max_tokens":100,"n":128,"stream":true}`, 1 + 12800},
+		{Config{}, OpenAIChat, `{"messages":[{"role":"user","content":"abc"}],"max_tokens":100,"n":1}`, 1 + 100},
+		{Config{}, OpenAIChat, `{"messages":[],"max_tokens":1e18,"n":100}`, math.MaxInt64},
 	} {
 		r, err := Compile(tc.cfg)
 		if err != nil {
@@ -184,6 +188,22 @@ func TestEstimatedTokens(t *testing.T) {
 		}
 		if got := r.EstimatedTokens(&req); got != tc.want {
 			t.Errorf("%s: %d tokens, want %d", tc.body, got, tc.want)
+		}
+	}
+}
+
+func TestFallbackTokens(t *testing.T) {
+	var none *Rules
+	if got := none.FallbackTokens(10); got != 4+DefaultOutputTokens {
+		t.Errorf("no rules: %d", got)
+	}
+	r, err := Compile(Config{MaxOutputTokens: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ bytes, want int64 }{{0, 100}, {3, 101}, {4, 102}, {3000, 1100}, {math.MaxInt64, math.MaxInt64/3 + 1 + 100}} {
+		if got := r.FallbackTokens(tc.bytes); got != tc.want {
+			t.Errorf("%d bytes: %d, want %d", tc.bytes, got, tc.want)
 		}
 	}
 }
