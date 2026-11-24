@@ -9,6 +9,7 @@ and links to the guide that explains it.
 - [The operator](#the-operator)
 - [The engines](#the-engines)
 - [Detect, then Block](#detect-then-block)
+- [False positives](#false-positives)
 - [Failure modes](#failure-modes)
 - [Client IP](#client-ip)
 - [Network policies](#network-policies)
@@ -102,6 +103,26 @@ and links to the guide that explains it.
 - [ ] **Check the status, not only the object.** A policy protects its routes once it is `Ready`
   (`Programmed`: its routes are wired; `Enforced`: every engine runs it). `inkwallctl status`
   exits 1 when something needs attention ([Cluster status](troubleshooting.md#cluster-status)).
+
+## False positives
+
+What a default policy denies of a real application's traffic, nothing excluded: the built-in CRS
+in `Block` mode, `inkwallctl test --har` on recorded traffic (every denial is a false positive).
+
+| Application | Requests | Paranoia level 1 | Paranoia level 2 |
+|---|---|---|---|
+| Juice Shop | 560 | 4.11% | 8.21% |
+| Gitea | 335 | 15.22% | 27.16% |
+| WordPress | 762 | 2.1% | 3.94% |
+| Directus | 147 | 14.29% | 40.14% |
+
+The traffic is each application's users and scripts, with free text, code and JSON that are hard
+on a WAF. At level 1, most of the denials are rule 911100, the CRS's allowed methods
+([above](#detect-then-block)), and [`inkwallctl tune`](testing-policies.md#suggest-exclusions-from-the-events)
+suggests exclusions for the rest. Your own application differs: start in `Detect`
+mode, or replay a HAR file of your traffic with `inkwallctl test --har`. Levels 3 and 4, and the
+rules behind each rate, are in the
+[full tables](../CONTRIBUTING.md#battle-test). Latency per proxy for 0.7.0 is in the release notes.
 
 ## Failure modes
 

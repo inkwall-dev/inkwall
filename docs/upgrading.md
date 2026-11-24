@@ -84,8 +84,6 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
 
 ## From 0.6.x to 0.7.0
 
-0.7.0 isn't released yet; this section grows as its changes land.
-
 - **Policies the engine can't compile are left out** of the bundle, with `InvalidSpec` or
   `RuleSetsIncompatible` in their status, checked with the rule sets the bundle ships; the other
   policies keep reaching the engines
@@ -287,6 +285,20 @@ If Argo CD or Flux installs the chart, change the chart version in Git instead: 
   objects still never needs the operator, and the `InkwallConfig` webhook sees deletes too. Every
   validating webhook is now `sideEffects: NoneOnDryRun`. The chart's `ValidatingWebhookConfiguration`
   changes with the upgrade; with your own manifests, take the new webhooks from the chart.
+  Each replica records at most 100 Events a namespace at once, then 5 a second; Events about
+  `ClusterWAFRuleSet` and `InkwallConfig` go to the `default` namespace, so a user who reads
+  Events there sees who changed them. A signing key rotation request
+  (`waf.inkwall.dev/rotate-signing-key`) is recorded too.
+- **The chart's operator pod mounts the ServiceAccount's token in the operator's container only**
+  (`automountServiceAccountToken: false` on the pod), not in the `geoipupdate` or any other
+  sidecar ([Geo blocking](geo-blocking.md)). Nothing to do with the chart; with your own
+  manifests, do the same.
+- **The `geoipupdate` image is v8.0.0** (`geo.geoipupdate.image`, was v7.1.1), pinned by digest.
+  Nothing changes unless `geo.geoipupdate.enabled`; with `--reuse-values`, the release keeps its
+  `image` value, so set it to take v8.
+- **New RBAC** with your own ClusterRoles (the chart's grant them): `update` on
+  `wafiplists/status`, and for the HAProxy controller 3.4 `get` on `ingress.v3.haproxy.org`
+  `globals` and on Services ([HAProxy](haproxy.md#controller-releases)).
 
 ### Rolling back to 0.6.x
 
