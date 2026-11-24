@@ -347,9 +347,14 @@ func (s formatSet) first() llm.Format {
 }
 
 // bodyBytes is the larger of r's body read and its Content-Length: what a
-// body that can't be estimated is charged for.
-func bodyBytes(r *request.Request) int64 {
+// body that can't be estimated is charged for. A body not read whole (cut,
+// encoded, or not read at all) is charged as maxBody at least: what was
+// read doesn't tell its size, nor does a Content-Length that is missing.
+func bodyBytes(r *request.Request, whole bool, maxBody int64) int64 {
 	n := int64(len(r.Body))
+	if !whole {
+		n = max(n, maxBody)
+	}
 	if v, err := strconv.ParseInt(strings.TrimSpace(r.Headers.Get("Content-Length")), 10, 64); err == nil && v > n {
 		n = v
 	}
@@ -369,6 +374,15 @@ func encodedBody(h http.Header) bool {
 	return false
 }
 
+// tokenEstimate is a request's token estimate, as the first of its
+// formats reads it: tokens, -1 for a body that can't be read (encoded, or
+// not parsed); whole, when it references state the server keeps, so a
+// limit charges it its whole burst.
+type tokenEstimate struct {
+	tokens int64
+	whole  bool
+}
+
 // checkLLM parses r's body as each of formats and runs the checks of each:
 // the first check failed, nil for none, and the request's estimated tokens
 // as the first of formats reads it (-1 for a body it can't read: encoded,
@@ -376,19 +390,19 @@ func encodedBody(h http.Header) bool {
 // formats (more than one only for a path read several ways): the
 // application may read it as any, and a body two parsers read differently
 // is how a prompt gets past one.
-func (l *LLM) checkLLM(r *request.Request, formats formatSet) (*LLMVerdict, int64, llm.Format) {
+func (l *LLM) checkLLM(r *request.Request, formats formatSet) (*LLMVerdict, tokenEstimate, llm.Format) {
 	off := l.offFor(r.RawURI)
 	first := formats.first()
+	estimate := tokenEstimate{tokens: -1}
 	if encodedBody(r.Headers) {
 		l.metrics.Read(first, llm.PhaseRequest, true, 0)
 		if off.Has(llm.CheckMalformed) {
-			return nil, -1, first
+			return nil, estimate, first
 		}
-		return &LLMVerdict{Format: first, Check: llm.CheckMalformed, MessageIndex: -1}, -1, first
+		return &LLMVerdict{Format: first, Check: llm.CheckMalformed, MessageIndex: -1}, estimate, first
 	}
 	var req llm.Request
 	var found *LLMVerdict
-	estimate := int64(-1)
 	for _, f := range llm.Formats {
 		if formats&(1<<f) == 0 {
 			continue
@@ -398,11 +412,11 @@ func (l *LLM) checkLLM(r *request.Request, formats formatSet) (*LLMVerdict, int6
 		l.metrics.Read(f, llm.PhaseRequest, !ok, time.Since(start))
 		fd := l.rules.Check(r.Body, &req, off)
 		if ok && f == first {
-			estimate = l.rules.EstimatedTokens(&req)
+			estimate = tokenEstimate{tokens: l.rules.EstimatedTokens(&req), whole: req.References}
 		}
 		if fd.Check == llm.CheckNone {
 			if ok && f == first {
-				l.metrics.Tokens(llm.TokensEstimated, estimate)
+				l.metrics.Tokens(llm.TokensEstimated, estimate.tokens)
 			}
 			continue
 		}

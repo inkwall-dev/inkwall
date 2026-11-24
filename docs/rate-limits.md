@@ -95,11 +95,12 @@ rate applies at once.
   address, IPv6 by its `/56` (`ipv6PrefixLength`, 32 to 128): one subscriber holds at least a
   `/64`, often a `/56` or a `/48`, so counting by address would give one person billions of keys.
 - **`key: {header: {name: X-Api-Key}}`**: the header's first value, for fairness between
-  authenticated clients (an API key, a tenant ID). The engine keeps only a hash of the value. A
-  request without the header counts by its client IP. A client chooses its header's value, so a
-  header key shares a limit between honest clients; it doesn't stop an attacker, who sends a new
-  value each time: use a client IP limit for that. `X-Forwarded-For`, `Forwarded` and `Host` are
-  refused: count by the client IP instead.
+  authenticated clients (an API key, a tenant ID). The engine keeps only a hash of the value, of
+  `Authorization` as servers read it: its scheme in lower case and its spacing collapsed, so
+  `Bearer k` and `bearer  k` are one key. A request without the header counts by its client IP.
+  A client chooses its header's value, so a header key shares a limit between honest clients;
+  it doesn't stop an attacker, who sends a new value each time: use a client IP limit for that.
+  `X-Forwarded-For`, `Forwarded` and `Host` are refused: count by the client IP instead.
 
 A request with no valid client address (a [`/v1/check`](testing-policies.md) call without
 `client_ip` or `peer_ip`) isn't limited by a client IP key, and is counted in

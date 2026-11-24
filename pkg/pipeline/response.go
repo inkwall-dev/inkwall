@@ -32,8 +32,9 @@ type Exchange struct {
 	mu sync.Mutex
 	x  rules.Exchange
 	// busy: an evaluation of the response is running on x; closed: Close
-	// was called, and the evaluation closes x when it finishes.
-	busy, closed, used bool
+	// was called, and the evaluation closes x when it finishes. metered:
+	// UsageMeter took the token charges.
+	busy, closed, used, metered bool
 
 	observe func(Verdict)
 
@@ -282,8 +283,9 @@ func (e *Exchange) check(ctx context.Context, resp *request.Response) Verdict {
 }
 
 // settle settles the token limits the request was charged with the usage
-// resp, a whole response, reports; without one (a stream, an error page,
-// a body cut or not read) the estimate stands.
+// resp, a whole response, reports; without one (an error page, a body cut,
+// not read, or in an encoding the engine doesn't decode, br or zstd) the
+// estimate stands. A stream is settled by its UsageMeter.
 func (e *Exchange) settle(resp *request.Response) {
 	if e.p.limits == nil || resp.BodyTruncated || resp.BodyUninspected || StreamKind(ResponseContentType(resp.Headers)) != streams.None {
 		return
@@ -296,10 +298,121 @@ func (e *Exchange) settle(resp *request.Response) {
 	if !ok {
 		return
 	}
-	e.p.limits.settle(&e.tokens, u.Total(), time.Now())
-	if l := e.p.llm; l != nil {
+	e.p.settleUsage(&e.tokens, u, false)
+}
+
+// settleUsage settles charges with usage u (debtOnly: the part of a
+// stream so far, which only adds debt).
+func (p *Pipeline) settleUsage(charges *tokenCharges, u llm.Usage, debtOnly bool) {
+	p.limits.settle(charges, u.Total(), time.Now(), debtOnly)
+	if l := p.llm; l != nil {
 		l.metrics.Tokens(llm.TokensSettledInput, u.Input)
 		l.metrics.Tokens(llm.TokensSettledOutput, u.Output)
+	}
+}
+
+// UsageMeter settles the token limits an exchange's request was charged
+// with the usage its streamed response (Server-Sent Events) reports
+// (llm.StreamUsage): an adapter writes it the stream's bytes as they go
+// out, and closes it when the stream ends. It splits the stream into
+// events, holding at most one event's data, up to the response body limit
+// (responses.maxBytes): a longer event is skipped. When the stream gave
+// its final usage, the estimate is settled by it, a refund or a debt;
+// when it ended before (cut, or a client gone), the usage so far only
+// adds debt. Without usage the estimate stands. It is safe for concurrent
+// use.
+type UsageMeter struct {
+	mu      sync.Mutex
+	split   *streams.Splitter
+	targets [4]meterTarget
+	n       int
+	closed  bool
+}
+
+// meterTarget is one policy's charges a UsageMeter settles.
+type meterTarget struct {
+	p       *Pipeline
+	charges tokenCharges
+	usage   llm.StreamUsage
+}
+
+// UsageMeter returns the meter that settles the exchange's token limits
+// with the usage of its streamed response, of headers h; nil when there
+// is none to settle: no token limit charged the request, or the response
+// isn't Server-Sent Events, or is encoded (Content-Encoding). Only the
+// first call returns one.
+func (e *Exchange) UsageMeter(h http.Header) *UsageMeter {
+	if e == nil || StreamKind(ResponseContentType(h)) != streams.SSE {
+		return nil
+	}
+	for _, v := range h.Values("Content-Encoding") {
+		for c := range strings.SplitSeq(v, ",") {
+			if c = strings.TrimSpace(c); c != "" && !strings.EqualFold(c, "identity") {
+				return nil
+			}
+		}
+	}
+	m := &UsageMeter{}
+	var limit int64
+	for _, x := range append([]*Exchange{e}, e.others...) {
+		x.mu.Lock()
+		metered := x.metered
+		x.metered = true
+		x.mu.Unlock()
+		if metered || x.tokens.n == 0 || x.p.limits == nil || x.p.responses.MaxBytes <= 0 || m.n == len(m.targets) {
+			continue
+		}
+		m.targets[m.n] = meterTarget{p: x.p, charges: x.tokens}
+		m.n++
+		limit = max(limit, x.p.responses.MaxBytes)
+	}
+	if m.n == 0 {
+		return nil
+	}
+	m.split = streams.New(streams.SSE, limit, "")
+	return m
+}
+
+// Write reads the next part of the stream.
+func (m *UsageMeter) Write(b []byte) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.closed {
+		m.events(m.split.Write(b))
+	}
+}
+
+// Close ends the stream and settles: once.
+func (m *UsageMeter) Close() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return
+	}
+	m.closed = true
+	m.events(m.split.Close())
+	for i := range m.targets[:m.n] {
+		t := &m.targets[i]
+		if u, ok, final := t.usage.Usage(); ok {
+			t.p.settleUsage(&t.charges, u, !final)
+		}
+	}
+}
+
+func (m *UsageMeter) events(evs []streams.Event) {
+	for _, ev := range evs {
+		if ev.Truncated {
+			continue
+		}
+		for i := range m.targets[:m.n] {
+			m.targets[i].usage.Event(ev.Data, m.targets[i].charges.format)
+		}
 	}
 }
 

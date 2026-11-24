@@ -194,35 +194,72 @@ with the same keys, answers and `Detect` mode:
 ```
 
 - **At request time**, once a request on an endpoint passed its checks, it takes its estimate at
-  once from the bucket, or none: its prompt's bytes ÷ 3, rounded up, plus its output limit (or
-  `maxOutputTokens`, or 4,096 when neither is set; embeddings have none), times `n` for an OpenAI
-  Chat request asking for several choices. Inkwall has no tokenizer: bytes ÷ 3 overestimates
-  English (about 4 bytes a token) and is close for code and CJK text; the output limit is what the
-  client asked for, the worst case. A request a check denies isn't charged, and requests on other
-  paths aren't counted.
+  once from the bucket, or none: its prompt's bytes ÷ 3, rounded up, plus a floor for each part
+  that isn't text, plus its output limit (or `maxOutputTokens`, or 4,096 when neither is set;
+  embeddings have none), times `n` for an OpenAI Chat request asking for several choices.
+  Inkwall has no tokenizer: bytes ÷ 3 overestimates English (about 4 bytes a token) and is close
+  for code and CJK text; the output limit is what the client asked for, the worst case. A request
+  a check denies isn't charged, and requests on other paths aren't counted.
+- **Parts that aren't text** are charged a floor each, by kind, however they are sent (a URL, an
+  ID, inline data), since their bytes don't tell their tokens. The floors are the least such a
+  part costs at a common size, not the most: a whole response's usage settles the rest.
+
+  | Part | Floor | Source |
+  |---|---|---|
+  | An image (`image_url`, `input_image`, Anthropic's `image`) | 1,600 | Anthropic's vision docs: about 1,600 tokens for the largest image it reads unscaled (about 1.15 megapixels, at width × height ÷ 750); OpenAI's high detail counts 1,445 for a 2048 × 768 image |
+  | Audio (`input_audio`, a chat message's earlier `audio`) | 1,920 | A minute at the 32 tokens a second Google documents for Gemini; OpenAI's audio models count fewer |
+  | A file or document (`file`, `input_file`, Anthropic's `document`) | 3,000 | One PDF page at the most Anthropic documents for a page's text (1,500 to 3,000 tokens), not counting the page's image |
+
+- **A request that references state the server keeps** can't be estimated: a Responses request
+  with `previous_response_id`, `conversation` or `prompt`, an `item_reference` input, a file by
+  `file_id` (chat's `file.file_id`, `input_file`'s, a `document` whose `source` is of type
+  `file`), Anthropic's `container_upload`. Each token limit charges it its whole burst (or its
+  estimate, when that is more), so it is let through only on a full bucket; its response's usage
+  settles it, refunding what it didn't use.
 - **A body that can't be estimated** is charged as large as it may be, never nothing: a body cut
   at the limit (`onOversize: Allow`, or a proxy's smaller buffer), an encoded one with
   `llm-malformed` excluded, one the parser refuses while the checks only log (`detect`), or one
-  not read at all (`skip.bodyPaths`). It takes the larger of the bytes read and its
-  `Content-Length`, ÷ 3, rounded up, plus `maxOutputTokens`, or 4,096 when unset.
-- **At response time**, when the policy inspects responses (`spec.responses.inspect: true`) and a
-  whole (not streamed) response reports its `usage`, the bucket is settled to the actual input
-  and output tokens: the difference is refunded, or added as debt (at most twice the burst). A
-  key in debt is refused, 429 with `Retry-After`, before its next body is read. A `usage` that
+  not read at all (`skip.bodyPaths`). It takes its `Content-Length`, or `maxBodyBytes` when the
+  body wasn't read whole and the `Content-Length` is missing or smaller (what was read doesn't
+  tell its size), ÷ 3, rounded up, plus `maxOutputTokens`, or 4,096 when unset. With the default
+  `maxBodyBytes` of 1 MiB that is about 350,000 tokens: a token limit with a smaller burst refuses
+  such a request.
+- **At response time**, when the policy inspects responses (`spec.responses.inspect: true`), the
+  bucket is settled to the actual input and output tokens the response reports: the difference
+  is refunded, or added as debt. A key in debt is refused, 429 with `Retry-After`, before its
+  next body is read. A whole response settles by its `usage`; a streamed one (Server-Sent Events)
+  by its usage events, read as the stream goes out, one event at a time, each up to
+  `responses.maxBytes`: OpenAI Chat's last chunk (sent when the request sets
+  `stream_options: {include_usage: true}`), the Responses API's `response.completed`, Anthropic's
+  `message_start` and `message_delta`. A stream cut before its final usage (Anthropic's
+  `message_start` came, its `message_delta` didn't) only adds debt, never refunds. A `usage` that
   repeats a key, or has one differing only in case (`Usage`, `PROMPT_TOKENS`, which a client in Go
   reads as the same), settles nothing: the estimate stands. The rules still don't read the
   response's body with `ruleSetBody: Skip`.
-- **Without settlement**, through Traefik (which can't send responses), with
-  `responses.inspect` off, or for a streamed answer, the estimate stands: short answers to long
-  output limits are overcharged. Size the limit from `inkwall_llm_tokens_total`.
+- **Without settlement** the estimate stands: through Traefik (which can't send responses),
+  with `responses.inspect` off, for a whole response cut at `responses.maxBytes` (its `usage`
+  comes last), for one encoded in `br` or `zstd` (the engine decodes only `gzip` and `deflate`),
+  for a streamed answer through HAProxy (SPOE), the
+  check endpoint, or Traefik, which don't stream bodies to the engine, for a usage event longer
+  than `responses.maxBytes` (a `response.completed` holding a long answer), and for an OpenAI Chat
+  stream without `include_usage`. Short answers to long output limits are then overcharged, and
+  images, audio and files charged at their floors. Size the limit from
+  `inkwall_llm_tokens_total`.
+- **Requests in flight** are charged their estimates only: requests sent together, before the
+  first of their responses settles, each take their estimate, and are owed the rest once they
+  settle. A debt is owed in full, however many responses settle at once, up to an hour of the
+  limit's rate (or two bursts, when the limit's window is longer than half an hour): one request
+  that used far more than its estimate keeps its key out for up to about that hour.
 
 `requests` and `burst` go up to 1,000,000,000 tokens; a burst so large that its window
 (`burst` × `period` ÷ `requests`) wouldn't fit the engine's clock is cut to what does (a burst of a
-billion at 1,000 tokens an hour is about 640 million). A key's debt never passes twice the burst,
-however many responses settle at once. A token limit needs `spec.llm`, and its
+billion at 1,000 tokens an hour is about 640 million). A token limit needs `spec.llm`, and its
 `match.paths` must be the endpoints' paths or under their prefixes. Limits still count per engine
-([what a limit means](rate-limits.md#what-a-limit-means)), and `Authorization` is a fine key: it's
-hashed, never stored. Per-tenant fairness needs a key the client can't choose freely.
+([what a limit means](rate-limits.md#what-a-limit-means)). Key a limit by the client's API key:
+`x-api-key` for Anthropic's API, `Authorization` for OpenAI's and most OpenAI-compatible
+servers. An `Authorization` key counts as servers read the header: its scheme in any case and
+any spacing (`Bearer sk-1`, `bearer  sk-1`) is one key. A key is hashed, never stored. Per-tenant
+fairness needs a key the client can't choose freely.
 
 ## Through each proxy
 

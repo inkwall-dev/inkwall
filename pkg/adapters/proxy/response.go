@@ -83,7 +83,40 @@ func (h *Handler) inspectResponse(res *http.Response) error {
 		res.Body = &heldBody{Reader: io.MultiReader(bytes.NewReader(prefix), res.Body), body: res.Body,
 			release: func() { h.held.Release(weight) }}
 	}
-	return h.decideResponse(ctx, x, x.ex.CheckResponse(ctx, resp))
+	err := h.decideResponse(ctx, x, x.ex.CheckResponse(ctx, resp))
+	if err == nil && hasBody {
+		meter(x, res)
+	}
+	return err
+}
+
+// meter has a streamed response's usage settle its request's token limits
+// as the stream goes out (pipeline.UsageMeter), when there are any.
+func meter(x *exchange, res *http.Response) {
+	if m := x.ex.UsageMeter(res.Header); m != nil {
+		res.Body = &meteredBody{ReadCloser: res.Body, m: m}
+	}
+}
+
+// meteredBody is a response body whose bytes a UsageMeter reads as they
+// go out: it settles at the end of the body, or when closed before.
+type meteredBody struct {
+	io.ReadCloser
+	m *pipeline.UsageMeter
+}
+
+func (b *meteredBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.m.Write(p[:n])
+	if err != nil {
+		b.m.Close()
+	}
+	return n, err
+}
+
+func (b *meteredBody) Close() error {
+	b.m.Close()
+	return b.ReadCloser.Close()
 }
 
 // inspectStream inspects a streamed response (#323): its status and headers
@@ -99,6 +132,7 @@ func (h *Handler) inspectStream(ctx context.Context, x *exchange, res *http.Resp
 		h.held.Release(weight)
 		return err
 	}
+	meter(x, res)
 	res.Body = &streamBody{ctx: ctx, h: h, x: x, resp: resp, body: res.Body,
 		split: streams.New(kind, x.ex.BodyLimit(), res.Header.Get("Grpc-Encoding")), holds: x.ex.HoldsEvents(),
 		buf: make([]byte, 32<<10), release: func() { h.held.Release(weight) }}

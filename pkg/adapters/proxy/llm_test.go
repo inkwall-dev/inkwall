@@ -68,3 +68,45 @@ func TestLLMEndpoint(t *testing.T) {
 		t.Errorf("log: %s", l)
 	}
 }
+
+// A streamed answer's usage settles the request's token limit as it goes
+// out, whether the stream is inspected event by event or not: the stream that used 5,000 tokens of a 1,000 an hour limit puts
+// the key in debt, so its next request is refused.
+func TestLLMStreamUsage(t *testing.T) {
+	for _, streams := range []bool{false, true} {
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			for ev := range strings.SplitAfterSeq(llmtest.StreamUsage, "\n\n") {
+				_, _ = io.WriteString(w, ev)
+				w.(http.Flusher).Flush()
+			}
+		}))
+		t.Cleanup(up.Close)
+		target, _ := url.Parse(up.URL)
+		h, err := New(llmtest.TokenSet(t, streams), Config{Upstream: target, MaxBodyBytes: policy.MaxBodyBytes, Logger: slog.New(slog.DiscardHandler)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := httptest.NewServer(h)
+		t.Cleanup(srv.Close)
+		post := func() (int, string) {
+			t.Helper()
+			req, _ := http.NewRequest(http.MethodPost, srv.URL+llmtest.Path, strings.NewReader(llmtest.Small))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Api-Key", "k1")
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			b, _ := io.ReadAll(resp.Body)
+			return resp.StatusCode, string(b)
+		}
+		if status, body := post(); status != 200 || body != llmtest.StreamUsage {
+			t.Fatalf("streams %v: the stream: %d %q", streams, status, body)
+		}
+		if status, _ := post(); status != 429 {
+			t.Errorf("streams %v: after a stream that used 5,000 tokens: %d, want 429", streams, status)
+		}
+	}
+}

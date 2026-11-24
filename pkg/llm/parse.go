@@ -67,6 +67,16 @@ type Request struct {
 	Stream bool
 	// Tools are the tools the request defines.
 	Tools int
+	// Images, Audio and Files count the parts of those kinds (an image,
+	// an input_audio, a file or document part, each by reference or
+	// inline), whose tokens the text doesn't tell: each is charged a floor
+	// (ImageTokens, AudioTokens, FileTokens).
+	Images, Audio, Files int64
+	// References: the request names state the server keeps, of tokens
+	// that can't be known here: the Responses API's previous_response_id,
+	// conversation or prompt, an item_reference, a file or document by
+	// file_id, Anthropic's container_upload.
+	References bool
 
 	roles [numRoles]roleSeen
 	seen  uint8 // roles seen, by bit
@@ -648,7 +658,7 @@ func (p *parser) skip(depth int) {
 
 // fields are the keys read, by bit, to refuse a key twice.
 const (
-	fModel uint32 = 1 << iota
+	fModel uint64 = 1 << iota
 	fMessages
 	fMaxTokens
 	fMaxCompletionTokens
@@ -675,19 +685,28 @@ const (
 	fReasoningContent
 	fRefusal
 	fThinking
+	fPreviousResponse
+	fConversation
+	fPrompt
+	fFileID
+	fFile
+	fSource
+	fAudio
 )
 
 // The keys each object read has, which a key Go's encoding/json would
 // read as one of them may not imitate (unread).
 var (
 	topKeys = [numFormats][]string{
-		OpenAIChat:        {"model", "messages", "max_tokens", "max_completion_tokens", "n", "stream", "tools", "functions"},
-		OpenAIResponses:   {"model", "input", "instructions", "max_output_tokens", "stream", "tools"},
+		OpenAIChat: {"model", "messages", "max_tokens", "max_completion_tokens", "n", "stream", "tools", "functions"},
+		OpenAIResponses: {"model", "input", "instructions", "max_output_tokens", "stream", "tools",
+			"previous_response_id", "conversation", "prompt"},
 		OpenAIEmbeddings:  {"model", "input"},
 		AnthropicMessages: {"model", "messages", "max_tokens", "stream", "tools", "system"},
 	}
-	messageKeys  = []string{"role", "content", "tool_calls", "function_call", "reasoning", "reasoning_content", "refusal"}
-	partKeys     = []string{"type", "text", "content", "output", "thinking", "refusal"}
+	messageKeys  = []string{"role", "content", "tool_calls", "function_call", "reasoning", "reasoning_content", "refusal", "audio"}
+	partKeys     = []string{"type", "text", "content", "output", "thinking", "refusal", "file_id", "file", "source"}
+	sourceKeys   = []string{"type", "file_id"}
 	toolCallKeys = []string{"function"}
 	functionKeys = []string{"arguments"}
 	itemKeys     = []string{"role", "type", "content", "output", "arguments"}
@@ -741,7 +760,7 @@ func foldsTo(k []byte, known string) bool {
 
 // once refuses a key read twice in one object: parsers keep the first or
 // the last, so a server could read the one this parser didn't.
-func (p *parser) once(seen *uint32, f uint32) bool {
+func (p *parser) once(seen *uint64, f uint64) bool {
 	if *seen&f != 0 {
 		p.fail("duplicate key")
 		return false
@@ -758,7 +777,7 @@ func (p *parser) top() {
 		}
 		return
 	}
-	var seen uint32
+	var seen uint64
 	var maxTokens, maxCompletion int64
 	var hasMaxTokens, hasMaxCompletion bool
 	out := p.out
@@ -833,6 +852,22 @@ func (p *parser) top() {
 				out.PromptBytes += n
 				out.addRole(RoleSystem, -1, keyAt)
 			}
+		case f == OpenAIResponses && (string(k) == "previous_response_id" || string(k) == "conversation" || string(k) == "prompt"):
+			bit := fPreviousResponse
+			switch string(k) {
+			case "conversation":
+				bit = fConversation
+			case "prompt":
+				bit = fPrompt
+			}
+			if !p.once(&seen, bit) {
+				return
+			}
+			if p.isNull() {
+				break
+			}
+			out.References = true
+			p.skip(2)
 		case string(k) == "system" && f == AnthropicMessages:
 			if !p.once(&seen, fSystem) {
 				return
@@ -924,7 +959,7 @@ func (p *parser) message(index int64) {
 	if !p.open('{', 3) {
 		return
 	}
-	var seen uint32
+	var seen uint64
 	role, roleAt := RoleOther, p.i-1
 	first := true
 	for p.next(&first, '}') {
@@ -962,6 +997,15 @@ func (p *parser) message(index int64) {
 				return
 			}
 			p.function(4)
+		case string(k) == "audio" && p.format == OpenAIChat:
+			// An assistant message's earlier audio answer, by its ID.
+			if !p.once(&seen, fAudio) {
+				return
+			}
+			if !p.isNull() {
+				p.out.Audio++
+				p.skip(4)
+			}
 		case p.format == OpenAIChat && (string(k) == "reasoning" || string(k) == "reasoning_content" || string(k) == "refusal"):
 			// Text servers give the model back with the history: Ollama's
 			// reasoning, vLLM's reasoning_content, a refusal. Counted when
@@ -1029,20 +1073,50 @@ func textType(t []byte, typed bool) bool {
 	return false
 }
 
+// The kinds of parts that aren't text, whose tokens are charged a floor.
+const (
+	partText = iota
+	partImage
+	partAudio
+	partFile
+	partReference
+)
+
+// partKind is the kind of a part of type t: an image (chat's image_url,
+// the Responses API's input_image, Anthropic's image), audio
+// (input_audio), a file (chat's file, input_file, Anthropic's document),
+// a reference to a file the server keeps (Anthropic's container_upload),
+// or text and anything else, counted by its text.
+func partKind(t []byte) int {
+	switch string(t) {
+	case "image_url", "input_image", "image":
+		return partImage
+	case "input_audio":
+		return partAudio
+	case "file", "input_file", "document":
+		return partFile
+	case "container_upload":
+		return partReference
+	}
+	return partText
+}
+
 // part reads a content part at depth: a text part's text counts, as do a
 // tool result's contents (Anthropic's tool_result), and the Responses
 // API's tool outputs, unless inner: the parts of those are read for their
-// text only, so reading never recurses more than once. Other parts
-// (images, audio, files) are skipped.
+// text only, so reading never recurses more than once. An image, audio or
+// file part is counted (partKind) and its data skipped; a file by file_id
+// (the part's, chat's file.file_id, Anthropic's source of type file) is a
+// reference.
 func (p *parser) part(depth int, inner bool) {
 	if !p.open('{', depth) {
 		return
 	}
-	var seen uint32
+	var seen uint64
 	var typ [16]byte
 	typLen, typed, longType := 0, false, false
 	var textLen, thinkingLen, refusalLen int64
-	hasText, badText := false, false
+	hasText, badText, byID := false, false, false
 	first := true
 	for p.next(&first, '}') {
 		k := p.key()
@@ -1116,6 +1190,26 @@ func (p *parser) part(depth int, inner bool) {
 			} else {
 				p.skip(depth + 1)
 			}
+		case "file_id":
+			// The Responses API's input_file and input_image.
+			if !p.once(&seen, fFileID) {
+				return
+			}
+			byID = byID || !p.isNull()
+			p.skipValue(depth + 1)
+		case "file", "source":
+			// Chat's file part ({"file_id"} or {"file_data"}), Anthropic's
+			// source ({"type": "file", "file_id"}, or inline data, a URL).
+			bit := fFile
+			if string(k) == "source" {
+				bit = fSource
+			}
+			if !p.once(&seen, bit) {
+				return
+			}
+			if p.source(depth + 1) {
+				byID = true
+			}
 		default:
 			p.unread(k, depth+1, partKeys)
 		}
@@ -1125,6 +1219,19 @@ func (p *parser) part(depth int, inner bool) {
 	}
 	if p.err {
 		return
+	}
+	if !longType {
+		switch partKind(typ[:typLen]) {
+		case partImage:
+			p.out.Images++
+		case partAudio:
+			p.out.Audio++
+		case partFile:
+			p.out.Files++
+			p.out.References = p.out.References || byID
+		case partReference:
+			p.out.References = true
+		}
 	}
 	if !longType {
 		switch string(typ[:typLen]) {
@@ -1145,6 +1252,70 @@ func (p *parser) part(depth int, inner bool) {
 	}
 }
 
+// skipValue skips a value at depth, which isNull may have read already.
+func (p *parser) skipValue(depth int) {
+	if c := p.peek(); c != ',' && c != '}' && c != ']' {
+		p.skip(depth)
+	}
+}
+
+// source reads a part's file or source object at depth, and reports
+// whether it names a file by ID: a file_id that isn't null, or a type of
+// "file". Anything else (inline data, a URL) is skipped.
+func (p *parser) source(depth int) bool {
+	if p.isNull() {
+		return false
+	}
+	if p.peek() != '{' {
+		p.skip(depth)
+		return false
+	}
+	if !p.open('{', depth) {
+		return false
+	}
+	var seen uint64
+	byID := false
+	first := true
+	for p.next(&first, '}') {
+		k := p.key()
+		if p.err {
+			return false
+		}
+		switch string(k) {
+		case "file_id":
+			if !p.once(&seen, fFileID) {
+				return false
+			}
+			byID = byID || !p.isNull()
+			p.skipValue(depth + 1)
+		case "type":
+			if !p.once(&seen, fType) {
+				return false
+			}
+			if p.peek() != '"' {
+				p.skip(depth + 1)
+				break
+			}
+			start, end, n, esc := p.str()
+			if p.err {
+				return false
+			}
+			var buf [8]byte
+			t := p.b[start:end]
+			if esc && n <= int64(len(buf)) {
+				t = unescape(buf[:0], t)
+			}
+			byID = byID || string(t) == "file"
+		default:
+			p.unread(k, depth+1, sourceKeys)
+		}
+		if p.err {
+			return false
+		}
+	}
+	return byID && !p.err
+}
+
 // toolCalls reads a chat message's tool_calls: their functions' arguments
 // count.
 func (p *parser) toolCalls() {
@@ -1159,7 +1330,7 @@ func (p *parser) toolCalls() {
 		if !p.open('{', 5) {
 			return
 		}
-		var seen uint32
+		var seen uint64
 		f := true
 		for p.next(&f, '}') {
 			k := p.key()
@@ -1192,7 +1363,7 @@ func (p *parser) function(depth int) {
 	if !p.open('{', depth) {
 		return
 	}
-	var seen uint32
+	var seen uint64
 	first := true
 	for p.next(&first, '}') {
 		k := p.key()
@@ -1251,7 +1422,7 @@ func (p *parser) item(index int64) {
 	if !p.open('{', 3) {
 		return
 	}
-	var seen uint32
+	var seen uint64
 	role, roleAt := RoleNone, p.i-1
 	var typ [32]byte
 	typLen := 0
@@ -1324,6 +1495,9 @@ func (p *parser) item(index int64) {
 	}
 	if p.err {
 		return
+	}
+	if string(typ[:typLen]) == "item_reference" {
+		p.out.References = true
 	}
 	if role == RoleNone {
 		switch string(typ[:typLen]) {
@@ -1477,7 +1651,7 @@ func (p *parser) toolArray(sink *toolSink) int {
 		if !p.open('{', 3) {
 			return count
 		}
-		var seen uint32
+		var seen uint64
 		var name, typ []byte
 		var hasName bool
 		f := true
@@ -1560,7 +1734,7 @@ func (p *parser) nested(buf []byte) ([]byte, bool) {
 	if !p.open('{', 4) {
 		return nil, false
 	}
-	var seen uint32
+	var seen uint64
 	var name []byte
 	has := false
 	first := true
