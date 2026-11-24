@@ -53,6 +53,7 @@ func (s *Server) onStreamHeaders(ctx context.Context, x *exchange) *extprocv3.Pr
 			return ex.CheckEvent(ctx, req, resp, ev, n)
 		},
 	}
+	x.respUsage = ex.UsageMeter(resp.Headers)
 	if !x.observe {
 		r.ModeOverride = &filterv3.ProcessingMode{ResponseBodyMode: filterv3.ProcessingMode_STREAMED}
 		if kind == streams.GRPC {

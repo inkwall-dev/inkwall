@@ -1091,7 +1091,7 @@ func DenyResponse(d *wafv1alpha1.DenyResponse) *bundlev1.DenyResponse {
 func rateLimit(l wafv1alpha1.RateLimit) *bundlev1.RateLimit {
 	r := &bundlev1.RateLimit{
 		Name:     l.Name,
-		Requests: uint32(l.Requests), // #nosec G115 -- the CRD bounds it to 1,000,000
+		Requests: uint32(l.Requests), // #nosec G115 -- the CRD bounds it to 1,000,000,000 (1e9), under MaxUint32
 		Period:   durationpb.New(l.Period.Duration),
 		Detect:   l.Mode == wafv1alpha1.PolicyDetect,
 	}
@@ -1099,7 +1099,7 @@ func rateLimit(l wafv1alpha1.RateLimit) *bundlev1.RateLimit {
 		r.Cost = bundlev1.RateLimitCost_RATE_LIMIT_COST_LLM_TOKENS
 	}
 	if l.Burst != nil {
-		r.Burst = uint32(*l.Burst) // #nosec G115 -- the CRD bounds it to 1,000,000
+		r.Burst = uint32(*l.Burst) // #nosec G115 -- the CRD bounds it to 1,000,000,000 (1e9), under MaxUint32
 	}
 	switch k := l.Key; {
 	case k != nil && k.Header != nil:

@@ -510,3 +510,89 @@ func TestModelTooLong(t *testing.T) {
 		t.Errorf("model of %d: too long", MaxModelBytes)
 	}
 }
+
+// TestParseNonText: the parts that aren't text are counted by kind, and a
+// request that names state the server keeps is a reference, in every
+// format; a key that folds to one read is malformed.
+func TestParseNonText(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		format               Format
+		body                 string
+		images, audio, files int64
+		refs, malformed      bool
+	}{
+		{name: "chat image, audio, inline file", format: OpenAIChat, body: `{"messages":[{"role":"user","content":[` +
+			`{"type":"image_url","image_url":{"url":"https://x/a.png","detail":"high"}},` +
+			`{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}},` +
+			`{"type":"file","file":{"file_data":"data:application/pdf;base64,AAAA","filename":"a.pdf"}}]}]}`,
+			images: 1, audio: 1, files: 1},
+		{name: "chat file by ID", format: OpenAIChat, body: `{"messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"file-1"}}]}]}`,
+			files: 1, refs: true},
+		{name: "chat file of a null ID", format: OpenAIChat, body: `{"messages":[{"role":"user","content":[{"type":"file","file":{"file_id":null,"file_data":"x"}}]}]}`,
+			files: 1},
+		{name: "chat assistant audio by ID", format: OpenAIChat, body: `{"messages":[{"role":"assistant","audio":{"id":"audio_1"}}]}`, audio: 1},
+		{name: "chat image in a text type's place", format: OpenAIChat, body: `{"messages":[{"role":"user","content":[{"type":"text","text":"a","file_id":"f"}]}]}`},
+		{name: "responses input_image and input_file", format: OpenAIResponses, body: `{"input":[{"role":"user","content":[` +
+			`{"type":"input_image","image_url":"https://x/a.png"},{"type":"input_image","file_id":"file-1"},` +
+			`{"type":"input_file","file_data":"AAAA","filename":"a.pdf"}]}]}`,
+			images: 2, files: 1},
+		{name: "responses input_file by ID", format: OpenAIResponses, body: `{"input":[{"role":"user","content":[{"type":"input_file","file_id":"file-1"}]}]}`,
+			files: 1, refs: true},
+		{name: "responses previous_response_id", format: OpenAIResponses, body: `{"input":"hi","previous_response_id":"resp_1"}`, refs: true},
+		{name: "responses conversation", format: OpenAIResponses, body: `{"input":"hi","conversation":{"id":"conv_1"}}`, refs: true},
+		{name: "responses prompt", format: OpenAIResponses, body: `{"prompt":{"id":"pmpt_1","variables":{"a":"b"}}}`, refs: true},
+		{name: "responses nulls", format: OpenAIResponses, body: `{"input":"hi","previous_response_id":null,"conversation":null,"prompt":null}`},
+		{name: "responses item_reference", format: OpenAIResponses, body: `{"input":[{"type":"item_reference","id":"msg_1"}]}`, refs: true},
+		{name: "responses image in a tool output", format: OpenAIResponses, body: `{"input":[{"type":"function_call_output","call_id":"c","output":[{"type":"input_image","image_url":"https://x"}]}]}`,
+			images: 1},
+		{name: "chat previous_response_id isn't read", format: OpenAIChat, body: `{"messages":[],"previous_response_id":"resp_1"}`},
+		{name: "anthropic image, inline document, tool result image", format: AnthropicMessages, body: `{"messages":[{"role":"user","content":[` +
+			`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}},` +
+			`{"type":"document","source":{"type":"url","url":"https://x/a.pdf"}},` +
+			`{"type":"tool_result","tool_use_id":"t","content":[{"type":"image","source":{"type":"url","url":"https://x"}}]}]}]}`,
+			images: 2, files: 1},
+		{name: "anthropic document by file ID", format: AnthropicMessages, body: `{"messages":[{"role":"user","content":[{"type":"document","source":{"type":"file","file_id":"file_1"}}]}]}`,
+			files: 1, refs: true},
+		{name: "anthropic document of an escaped file type", format: AnthropicMessages, body: `{"messages":[{"role":"user","content":[{"type":"document","source":{"type":"file"}}]}]}`,
+			files: 1, refs: true},
+		{name: "anthropic container_upload", format: AnthropicMessages, body: `{"messages":[{"role":"user","content":[{"type":"container_upload","file_id":"file_1"}]}]}`, refs: true},
+		{name: "a folded file_id", format: OpenAIResponses, body: `{"input":[{"role":"user","content":[{"type":"input_file","File_ID":"file-1"}]}]}`, malformed: true},
+		{name: "a folded previous_response_id", format: OpenAIResponses, body: `{"input":"hi","Previous_Response_Id":"resp_1"}`, malformed: true},
+		{name: "a folded source type", format: AnthropicMessages, body: `{"messages":[{"role":"user","content":[{"type":"document","source":{"TYPE":"file"}}]}]}`, malformed: true},
+		{name: "a file_id twice", format: OpenAIResponses, body: `{"input":[{"role":"user","content":[{"type":"input_file","file_id":null,"file_id":"f"}]}]}`, malformed: true},
+	} {
+		r := parse(t, tc.format, tc.body)
+		if r.Malformed != tc.malformed {
+			t.Errorf("%s: malformed %v (%s), want %v", tc.name, r.Malformed, r.Why, tc.malformed)
+			continue
+		}
+		if tc.malformed {
+			continue
+		}
+		if r.Images != tc.images || r.Audio != tc.audio || r.Files != tc.files || r.References != tc.refs {
+			t.Errorf("%s: images %d, audio %d, files %d, refs %v; want %d, %d, %d, %v",
+				tc.name, r.Images, r.Audio, r.Files, r.References, tc.images, tc.audio, tc.files, tc.refs)
+		}
+	}
+}
+
+// TestEstimateNonText: each part that isn't text is charged its floor.
+func TestEstimateNonText(t *testing.T) {
+	rules, err := Compile(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"messages":[{"role":"user","content":[{"type":"text","text":"abc"},` +
+		`{"type":"image_url","image_url":{"url":"https://x"}},{"type":"image_url","image_url":{"url":"https://y"}},` +
+		`{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}},{"type":"file","file":{"file_data":"AAAA"}}]}],"max_tokens":10}`
+	r := parse(t, OpenAIChat, body)
+	if got, want := rules.EstimatedTokens(r), int64(1+2*ImageTokens+AudioTokens+FileTokens+10); got != want {
+		t.Errorf("estimate %d, want %d", got, want)
+	}
+	// Saturated.
+	r.Images = math.MaxInt64 / 2
+	if got := rules.EstimatedTokens(r); got != math.MaxInt64 {
+		t.Errorf("a huge count: %d", got)
+	}
+}

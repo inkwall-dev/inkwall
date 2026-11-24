@@ -36,7 +36,7 @@ func ParseUsage(body []byte, f Format) (Usage, bool) {
 	if !p.open('{', 1) {
 		return Usage{}, false
 	}
-	var seen uint32
+	var seen uint64
 	first := true
 	for p.next(&first, '}') {
 		k := p.key()
@@ -49,7 +49,7 @@ func ParseUsage(body []byte, f Format) (Usage, bool) {
 		case !p.once(&seen, fInput):
 			return Usage{}, false
 		default:
-			found = p.usage(&u)
+			_, found = p.usage(&u, 2)
 		}
 		if p.err {
 			return Usage{}, false
@@ -75,7 +75,7 @@ var (
 
 // usage fields, by bit.
 const (
-	uPrompt uint32 = 1 << iota
+	uPrompt uint64 = 1 << iota
 	uCompletion
 	uInput
 	uOutput
@@ -83,17 +83,17 @@ const (
 	uCacheRead
 )
 
-// usage reads the usage object.
-func (p *parser) usage(u *Usage) bool {
+// usage reads the usage object at depth, and returns the fields it read.
+func (p *parser) usage(u *Usage, depth int) (uint64, bool) {
 	if p.isNull() {
-		return false
+		return 0, false
 	}
-	if !p.open('{', 2) {
-		return false
+	if !p.open('{', depth) {
+		return 0, false
 	}
-	var seen uint32
+	var seen uint64
 	read := false
-	add := func(to *int64, bit uint32) {
+	add := func(to *int64, bit uint64) {
 		if !p.once(&seen, bit) {
 			return
 		}
@@ -109,7 +109,7 @@ func (p *parser) usage(u *Usage) bool {
 	for p.next(&first, '}') {
 		k := p.key()
 		if p.err {
-			return false
+			return 0, false
 		}
 		switch f := p.format; {
 		case string(k) == "prompt_tokens" && (f == OpenAIChat || f == OpenAIEmbeddings):
@@ -125,11 +125,118 @@ func (p *parser) usage(u *Usage) bool {
 		case string(k) == "cache_read_input_tokens" && f == AnthropicMessages:
 			add(&u.Input, uCacheRead)
 		default:
-			p.unread(k, 3, usageKeys[p.format])
+			p.unread(k, depth+1, usageKeys[p.format])
 		}
 		if p.err {
-			return false
+			return 0, false
 		}
 	}
-	return read && !p.err
+	return seen, read && !p.err
+}
+
+// StreamUsage is the usage a streamed response (Server-Sent Events)
+// reports, event by event (Event): OpenAI Chat's last chunk's usage (sent
+// when the request sets stream_options.include_usage), the Responses
+// API's response.completed (or incomplete, failed) response's usage,
+// Anthropic's message_start message's usage and message_delta's, which
+// counts the output so far and replaces the start's. Its zero value is
+// ready; it doesn't allocate.
+type StreamUsage struct {
+	u             Usage
+	input, output bool
+	final         bool
+}
+
+// Event reads one event's data, of a stream of format f. An event that
+// isn't valid JSON, or reads as ParseUsage refuses, is ignored.
+func (s *StreamUsage) Event(data []byte, f Format) {
+	var scratch Request
+	p := parser{b: data, out: &scratch, format: f}
+	var u Usage
+	var seen uint64
+	found, final := false, false
+	p.ws()
+	if !p.open('{', 1) {
+		return
+	}
+	var keys uint64
+	first := true
+	for p.next(&first, '}') {
+		k := p.key()
+		if p.err {
+			return
+		}
+		switch {
+		case string(k) == "usage" && (f == OpenAIChat || f == AnthropicMessages):
+			if !p.once(&keys, fInput) {
+				return
+			}
+			seen, found = p.usage(&u, 2)
+			final = true
+		case string(k) == "response" && f == OpenAIResponses || string(k) == "message" && f == AnthropicMessages:
+			if !p.once(&keys, fMessages) {
+				return
+			}
+			seen, found = p.inner(&u)
+			final = f == OpenAIResponses
+		default:
+			p.unread(k, 2, eventKeys[f])
+		}
+		if p.err {
+			return
+		}
+	}
+	if p.ws(); p.err || p.i != len(p.b) || !found {
+		return
+	}
+	if seen&(uPrompt|uInput|uCacheCreation|uCacheRead) != 0 {
+		s.u.Input, s.input = u.Input, true
+	}
+	if seen&(uCompletion|uOutput) != 0 {
+		s.u.Output, s.output = u.Output, true
+	}
+	s.final = s.final || final
+}
+
+// inner reads the object an event wraps its usage in (the Responses
+// API's response, Anthropic's message) at depth 2, for its usage.
+func (p *parser) inner(u *Usage) (seen uint64, found bool) {
+	if p.isNull() || !p.open('{', 2) {
+		return 0, false
+	}
+	var keys uint64
+	first := true
+	for p.next(&first, '}') {
+		k := p.key()
+		if p.err {
+			return 0, false
+		}
+		if string(k) == "usage" {
+			if !p.once(&keys, fInput) {
+				return 0, false
+			}
+			seen, found = p.usage(u, 3)
+		} else {
+			p.unread(k, 3, usageTopKeys)
+		}
+		if p.err {
+			return 0, false
+		}
+	}
+	return seen, found && !p.err
+}
+
+// Usage returns the usage the events read reported, whether any did,
+// and whether it is final: the stream's last usage came (OpenAI's, or
+// Anthropic's message_delta), so it is the whole request's, not the
+// part so far.
+func (s *StreamUsage) Usage() (u Usage, ok, final bool) {
+	return s.u, s.input || s.output, s.final
+}
+
+// eventKeys are the keys StreamUsage reads at the top of an event.
+var eventKeys = [numFormats][]string{
+	OpenAIChat:        {"usage"},
+	OpenAIResponses:   {"response"},
+	AnthropicMessages: {"usage", "message"},
 }

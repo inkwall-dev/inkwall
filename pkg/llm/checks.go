@@ -26,6 +26,25 @@ const (
 // estimate, when neither the request nor its policy sets a limit.
 const DefaultOutputTokens = 4096
 
+// The floors a part that isn't text is charged in a token estimate, which
+// can't read its tokens from its bytes (docs/llm-apis.md). They are
+// floors, not the most a part can cost: a whole response's usage settles
+// the estimate.
+const (
+	// ImageTokens is an image: Anthropic documents about 1,600 tokens for
+	// the largest image it reads unscaled (about 1.15 megapixels, at
+	// width × height ÷ 750 tokens), above OpenAI's high-detail cost of a
+	// 2048 × 768 image (8 tiles of 170, plus 85: 1,445).
+	ImageTokens = 1600
+	// AudioTokens is an audio clip: a minute at the 32 tokens a second
+	// Google documents for Gemini (OpenAI's audio models count fewer).
+	AudioTokens = 1920
+	// FileTokens is a file or document: one PDF page at the most
+	// Anthropic documents for its text (1,500 to 3,000 tokens a page),
+	// not counting the page's image.
+	FileTokens = 3000
+)
+
 // Limits of a Config, as WAFPolicy's spec.llm.request allows them.
 const (
 	MaxModels       = 64
@@ -283,12 +302,21 @@ func (r *Rules) OutputTokens(req *Request) int64 {
 }
 
 // EstimatedTokens is req's tokens as charged at request time: its prompt's
-// bytes divided by 3, rounded up, plus its output tokens (OutputTokens)
-// for each of its choices (OpenAI Chat's n), saturated at MaxInt64.
-// Inkwall has no tokenizer: bytes ÷ 3 overestimates English (about 4 bytes
-// a token) and is close for code and CJK text.
+// bytes divided by 3, rounded up, plus a floor for each part that isn't
+// text (ImageTokens, AudioTokens, FileTokens), plus its output tokens
+// (OutputTokens) for each of its choices (OpenAI Chat's n), saturated at
+// MaxInt64. Inkwall has no tokenizer: bytes ÷ 3 overestimates English
+// (about 4 bytes a token) and is close for code and CJK text. A request
+// that references state the server keeps (req.References) can't be
+// estimated: the pipeline charges it a limit's whole burst.
 func (r *Rules) EstimatedTokens(req *Request) int64 {
 	in := (req.PromptBytes + 2) / 3
+	for _, m := range [...]struct{ n, each int64 }{{req.Images, ImageTokens}, {req.Audio, AudioTokens}, {req.Files, FileTokens}} {
+		if m.n > (math.MaxInt64-in)/m.each {
+			return math.MaxInt64
+		}
+		in += m.n * m.each
+	}
 	out := r.OutputTokens(req)
 	if req.Format == OpenAIChat && req.HasChoices && req.Choices > 1 {
 		if out > math.MaxInt64/req.Choices {

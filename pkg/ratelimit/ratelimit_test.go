@@ -187,16 +187,28 @@ func TestWeighted(t *testing.T) {
 	if !d2.Allowed {
 		t.Fatal("the burst refused after a refused request")
 	}
-	// Settlement is bounded by the burst.
-	s.Settle(l, k2, d2, t0, math.MaxInt64)
-	if w := s.Wait(l, k2, t0); w > 2*time.Minute+time.Second {
-		t.Errorf("a huge debt: wait %v, want at most the window twice", w)
+	// A debt is owed in full up to the debt horizon, an hour of the rate
+	// (MaxDebt): the key waits until the bucket refills past it.
+	s.Settle(l, k2, d2, t0, 30000)
+	if w := s.Wait(l, k2, t0); w != 5*time.Minute+time.Second {
+		t.Errorf("in debt by 30,000: wait %v, want 5m1s (5m and the token)", w)
 	}
-	// However many responses settle at once: at most twice the window.
+	s.Settle(l, k2, d2, t0, math.MaxInt64)
+	if w := s.Wait(l, k2, t0); w > MaxDebt || w < MaxDebt-2*time.Minute {
+		t.Errorf("a huge debt: wait %v, want about MaxDebt, at most", w)
+	}
+	// However many responses settle at once: at most the horizon.
 	s.Settle(l, k2, d2, t0, math.MaxInt64)
 	s.Settle(l, k2, d2, t0, math.MaxInt64)
-	if w := s.Wait(l, k2, t0); w > 2*time.Minute {
-		t.Errorf("debts settled together: wait %v, want at most the window twice", w)
+	if w := s.Wait(l, k2, t0); w > MaxDebt {
+		t.Errorf("debts settled together: wait %v, want at most MaxDebt", w)
+	}
+	// A limit whose window is longer than MaxDebt owes up to two bursts.
+	day := s.TokenLimit(Identity{PolicyUID: "uid", Name: "daily", Key: "ip/56"}, 86400, 24*time.Hour, 0)
+	dd := s.TakeN(day, k2, t0, nil, 86400)
+	s.Settle(day, k2, dd, t0, math.MaxInt64)
+	if w := s.Wait(day, k2, t0); w > 24*time.Hour+time.Second || w < 23*time.Hour {
+		t.Errorf("a daily limit's huge debt: wait %v, want about a day (two bursts, less the window)", w)
 	}
 	s.RefundN(l, k2, d2, 6000)
 	// Peek charges nothing.

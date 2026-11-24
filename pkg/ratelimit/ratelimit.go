@@ -110,6 +110,9 @@ type Limit struct {
 // ID is the limit's ID in its Store.
 func (l Limit) ID() uint32 { return l.id }
 
+// Burst is the most a key may take at once.
+func (l Limit) Burst() int64 { return l.burst }
+
 // Store holds the buckets of every limit of every policy, shared by every
 // bundle's compiled policies, so a bundle swap keeps them. It is safe for
 // concurrent use.
@@ -289,7 +292,8 @@ func (s *Store) Limit(id Identity, requests int64, period time.Duration, burst i
 // TokenLimit is Limit for a limit of tokens (design 0012 §6), which TakeN,
 // ObserveN, Peek and Settle charge: its burst is at most what keeps the
 // window (burst × interval) within a quarter of the clock's range, so a
-// weighted request on top of the most debt Settle leaves can't overflow it.
+// weighted request on top of the most debt Settle leaves (two windows, or
+// MaxDebt) can't overflow it.
 // A burst of a billion tokens at one an hour is cut to about 640 million.
 func (s *Store) TokenLimit(id Identity, tokens int64, period time.Duration, burst int64) Limit {
 	return s.limit(id, tokens, period, burst, true)
@@ -663,18 +667,31 @@ func (s *Store) Refund(l Limit, k Key, d Decision) { s.adjust(l, k, d, -1, 0) }
 // for it.
 func (s *Store) RefundN(l Limit, k Key, d Decision, n int64) { s.adjust(l, k, d, -l.weight(n), 0) }
 
+// MaxDebt is how long a key's debt may keep it over a token limit at
+// most, unless twice the limit's window (two bursts) is longer: one
+// request that used far more than its estimate is owed in full, up to an
+// hour of the limit's rate.
+const MaxDebt = time.Hour
+
+// debtHorizon is how far past now l's bucket may be in debt: MaxDebt, or
+// two bursts' time when longer. It is within the clock's range: a
+// TokenLimit's window is at most a quarter of it.
+func (l Limit) debtHorizon() int64 { return max(2*l.burst*l.interval, int64(MaxDebt)) }
+
 // Settle corrects key k's bucket of l, a TokenLimit, by delta tokens at t,
 // d being TakeN's or ObserveN's decision for the request: a request
 // charged an estimate that its response says it used delta more (debt:
 // the bucket fills later) or -delta fewer (a refund). A key in debt is
 // over the limit until the bucket refills past it. A refund is bounded by
-// the burst, a debt by twice the burst, and the bucket's whole debt by two
-// bursts however many responses settle at once: a key can't be put out
-// for longer than twice the limit's own window.
+// the burst; a debt, and the bucket's whole debt however many responses
+// settle at once, by the debt horizon: MaxDebt of the limit's rate, or two
+// bursts when more. So a key isn't put out for longer than that, and the
+// cap still keeps the clock from overflowing.
 func (s *Store) Settle(l Limit, k Key, d Decision, t time.Time, delta int64) {
-	delta = min(max(delta, -l.burst), 2*l.burst)
+	horizon := l.debtHorizon()
+	delta = min(max(delta, -l.burst), horizon/l.interval)
 	if delta != 0 && d.Counted() {
-		s.adjust(l, k, d, delta, int64(t.Sub(s.base))+2*l.burst*l.interval)
+		s.adjust(l, k, d, delta, int64(t.Sub(s.base))+horizon)
 	}
 }
 
@@ -683,7 +700,7 @@ func (s *Store) Settle(l Limit, k Key, d Decision, t time.Time, delta int64) {
 func (s *Store) adjust(l Limit, k Key, d Decision, delta, most int64) {
 	sh, i, o := s.locate(l.id, k)
 	move := func(e *entry) {
-		by := delta * l.interval // |delta| ≤ 2 bursts: within the clock's range
+		by := delta * l.interval // |delta| × interval ≤ the debt horizon: within the clock's range
 		switch {
 		case by <= 0:
 			e.tat = max(e.tat, math.MinInt64-by) + by

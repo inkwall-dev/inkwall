@@ -261,15 +261,40 @@ func (l *rateLimit) matches(method, path string, ambiguous bool) bool {
 	return false
 }
 
-// key is what l counts r by: its header's value, or its client IP.
+// key is what l counts r by: its header's value, or its client IP. An
+// Authorization header counts as the server reads it (authorizationKey).
 func (rl *RateLimits) key(l *rateLimit, r *request.Request) (ratelimit.Key, bool) {
 	if l.header != "" {
 		if v := r.Headers.Get(l.header); v != "" {
+			if l.header == "authorization" {
+				v = authorizationKey(v)
+			}
 			return rl.store.HeaderKey(v), true
 		}
 	}
 	return ratelimit.IPKey(r.ClientIP, l.prefix)
 }
+
+// authorizationKey is an Authorization value as servers read it, so one
+// credential is one key however it is written (RFC 9110 §11): the scheme in
+// lower case ("Bearer", "bearer" and "BEARER" are one), one space before
+// the credentials, none around. A value of one word, a bare key, keeps
+// its case. It doesn't allocate for a value written so already.
+func authorizationKey(v string) string {
+	t := strings.TrimSpace(v)
+	i := strings.IndexAny(t, " \t")
+	if i < 0 {
+		return t
+	}
+	scheme, rest := t[:i], strings.TrimLeft(t[i:], " \t")
+	if t == v && t[i] == ' ' && len(rest) == len(t)-i-1 && !strings.ContainsAny(rest, " \t") &&
+		strings.IndexFunc(scheme, isUpperASCII) < 0 {
+		return v
+	}
+	return strings.ToLower(scheme) + " " + strings.Join(strings.Fields(rest), " ")
+}
+
+func isUpperASCII(c rune) bool { return 'A' <= c && c <= 'Z' }
 
 // limited is the outcome of a request's limits.
 type limited struct {
@@ -409,7 +434,6 @@ type decisions struct {
 type tokenCharges struct {
 	n      int
 	c      [MaxRateLimits]tokenCharge
-	tokens int64      // the estimate each was charged
 	format llm.Format // the endpoint's, whose response's usage settles them
 }
 
@@ -417,6 +441,17 @@ type tokenCharge struct {
 	l *rateLimit
 	k ratelimit.Key
 	d ratelimit.Decision // TakeN's, for settling the bucket it charged
+	n int64              // the tokens it charged
+}
+
+// charge is what l charges a request estimated at e: its tokens, or l's
+// whole burst when that is more and the request references state the
+// server keeps.
+func (l *rateLimit) charge(e tokenEstimate) int64 {
+	if e.whole {
+		return max(e.tokens, l.lim.Burst())
+	}
+	return e.tokens
 }
 
 // entry returns r's decisions entry for p, nil when there is none (r was
@@ -434,14 +469,15 @@ func (ds *decisions) entry(p *Pipeline) int {
 }
 
 // chargeTokens charges r, a request on one of p's LLM endpoints that passed
-// its checks, its estimate of tokens (n) against p's token limits at t,
+// its checks, its estimate of tokens (e) against p's token limits at t,
 // as check charges request limits: the Block ones together, all or none,
-// then each Detect one, which only logs. Each charge is kept for settling
-// with the response's usage (tokenChargesOf).
-func (p *Pipeline) chargeTokens(r *request.Request, t time.Time, n int64, f llm.Format) limited {
+// then each Detect one, which only logs. A request that references state
+// the server keeps is charged each limit's whole burst (charge). Each
+// charge is kept for settling with the response's usage (tokenChargesOf).
+func (p *Pipeline) chargeTokens(r *request.Request, t time.Time, e tokenEstimate, f llm.Format) limited {
 	var out limited
 	rl := p.limits
-	if rl == nil || n <= 0 {
+	if rl == nil || e.tokens <= 0 {
 		return out
 	}
 	block := p.mode == ModeBlock
@@ -452,7 +488,7 @@ func (p *Pipeline) chargeTokens(r *request.Request, t time.Time, n int64, f llm.
 	} else {
 		charges = &tokenCharges{}
 	}
-	*charges = tokenCharges{tokens: n, format: f}
+	*charges = tokenCharges{format: f}
 	path, ambiguous := limitPathOf(r.RawURI)
 	method := strings.ToUpper(r.Method)
 	matches := func(l *rateLimit) bool { return l.tokens && l.matches(method, path, ambiguous) }
@@ -465,14 +501,15 @@ func (p *Pipeline) chargeTokens(r *request.Request, t time.Time, n int64, f llm.
 		if !valid {
 			continue
 		}
+		n := l.charge(e)
 		d := rl.store.TakeN(l.lim, k, t, rl.live, n)
 		if d.Allowed {
-			charges.c[charges.n] = tokenCharge{l, k, d}
+			charges.c[charges.n] = tokenCharge{l, k, d, n}
 			charges.n++
 			continue
 		}
 		for _, c := range charges.c[:charges.n] {
-			rl.store.RefundN(c.l.lim, c.k, c.d, n)
+			rl.store.RefundN(c.l.lim, c.k, c.d, c.n)
 		}
 		charges.n = 0
 		out.over, out.key, out.retryAfter, out.event, out.sampled = l, k, d.RetryAfter, d.Event, d.Sampled
@@ -482,7 +519,7 @@ func (p *Pipeline) chargeTokens(r *request.Request, t time.Time, n int64, f llm.
 				continue
 			}
 			if mk, valid := rl.key(m, r); valid {
-				out.retryAfter = max(out.retryAfter, rl.store.WaitN(m.lim, mk, t, n))
+				out.retryAfter = max(out.retryAfter, rl.store.WaitN(m.lim, mk, t, m.charge(e)))
 			}
 		}
 		break
@@ -497,9 +534,10 @@ func (p *Pipeline) chargeTokens(r *request.Request, t time.Time, n int64, f llm.
 			if !valid {
 				continue
 			}
+			n := l.charge(e)
 			d := rl.store.ObserveN(l.lim, k, t, rl.live, n)
 			if d.Counted() {
-				charges.c[charges.n] = tokenCharge{l, k, d}
+				charges.c[charges.n] = tokenCharge{l, k, d, n}
 				charges.n++
 			} else if !d.Allowed && out.detect == nil {
 				out.detect, out.key, out.retryAfter, out.event, out.sampled = l, k, d.RetryAfter, d.Event, d.Sampled
@@ -530,12 +568,14 @@ func (p *Pipeline) tokenChargesOf(r *request.Request) tokenCharges {
 }
 
 // settle corrects the token limits charged by usage, the tokens the
-// response says the request used: the difference from the estimate is
-// refunded, or added as debt, at t.
-func (rl *RateLimits) settle(c *tokenCharges, used int64, t time.Time) {
-	delta := used - c.tokens
+// response says the request used: the difference from each charge is
+// refunded, or added as debt, at t. debtOnly settles only a limit charged
+// less than used: the usage is the part of a stream so far.
+func (rl *RateLimits) settle(c *tokenCharges, used int64, t time.Time, debtOnly bool) {
 	for _, ch := range c.c[:c.n] {
-		rl.store.Settle(ch.l.lim, ch.k, ch.d, t, delta)
+		if delta := used - ch.n; delta > 0 || !debtOnly {
+			rl.store.Settle(ch.l.lim, ch.k, ch.d, t, delta)
+		}
 	}
 }
 

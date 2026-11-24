@@ -16,6 +16,7 @@ import (
 
 	bundlev1 "github.com/inkwall-dev/inkwall/api/bundle/v1"
 	"github.com/inkwall-dev/inkwall/pkg/policy"
+	"github.com/inkwall-dev/inkwall/pkg/ratelimit"
 )
 
 // Path is the policy's chat endpoint.
@@ -62,6 +63,33 @@ func Bundle() *bundlev1.Bundle {
 func Set(t testing.TB) *policy.Set {
 	t.Helper()
 	s, err := policy.Compile(Bundle(), policy.Options{BodyLimit: 64 << 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// Small is a chat request of 11 tokens (a 2-byte prompt, 10 output).
+const Small = `{"model":"llama-3","messages":[{"role":"user","content":"hi"}],"max_tokens":10,"stream":true}`
+
+// StreamUsage is a streamed answer (Server-Sent Events) whose last chunk
+// says the request used 5,000 tokens.
+const StreamUsage = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"usage\":null}\n\n" +
+	"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4990,\"completion_tokens\":10}}\n\n" +
+	"data: [DONE]\n\n"
+
+// TokenSet is Bundle with responses inspected (streams event by event
+// too, if streams) and a token limit of 1,000 an hour by the X-Api-Key
+// header, compiled: two Small requests fit, unless the first's streamed
+// usage (StreamUsage) settles it as debt.
+func TokenSet(t testing.TB, streams bool) *policy.Set {
+	t.Helper()
+	b := Bundle()
+	b.Policies[0].Responses = &bundlev1.ResponseConfig{Inspect: true, MaxBytes: 64 << 10, Streams: streams}
+	b.Policies[0].RateLimits = []*bundlev1.RateLimit{{Name: "tokens", Requests: 1000, Period: durationpb.New(time.Hour),
+		Key:  &bundlev1.RateLimitKey{Key: &bundlev1.RateLimitKey_Header{Header: &bundlev1.HeaderKey{Name: "X-Api-Key"}}},
+		Cost: bundlev1.RateLimitCost_RATE_LIMIT_COST_LLM_TOKENS}}
+	s, err := policy.Compile(b, policy.Options{BodyLimit: 64 << 10, RateLimits: ratelimit.New(1024, 0)})
 	if err != nil {
 		t.Fatal(err)
 	}

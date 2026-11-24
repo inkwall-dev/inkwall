@@ -225,13 +225,17 @@ type exchange struct {
 	// (#315); nil when not, or once ended.
 	respStream *eventStream
 	reqStream  *eventStream
+	// respUsage settles the request's token limits with the usage its
+	// streamed response reports, read as Envoy streams it; nil when not,
+	// or once settled.
+	respUsage *pipeline.UsageMeter
 }
 
 // done reports whether nothing more is needed in observability mode: the
 // request was refused uninspected, or it was decided (each message of a
 // call inspected one by one, too) and so was its response, if inspected.
 func (x *exchange) done() bool {
-	return x.req == nil || !x.waiting && x.reqStream == nil && (x.ex == nil || x.respDone && x.respStream == nil)
+	return x.req == nil || !x.waiting && x.reqStream == nil && (x.ex == nil || x.respDone && x.respStream == nil && x.respUsage == nil)
 }
 
 // Process handles the stream of one HTTP request.
@@ -247,8 +251,12 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err 
 		}
 	}()
 	x := &exchange{peer: peerAddr(ctx)}
-	// The response's evaluation, if kept, ends with the stream.
-	defer func() { x.ex.Close() }()
+	// The response's evaluation, if kept, ends with the stream, and so
+	// does a streamed response's usage, settled with what came of it.
+	defer func() {
+		x.ex.Close()
+		x.respUsage.Close()
+	}()
 	for first := true; ; first = false {
 		msg, err := stream.Recv()
 		if err != nil && x.observe && x.waiting {
@@ -351,6 +359,13 @@ func (s *Server) handle(ctx context.Context, x *exchange, msg *extprocv3.Process
 		if r, err := s.onResponse(ctx, x, phaseResponseBody); r != nil || err != nil {
 			return r, err
 		}
+		if x.respUsage != nil {
+			x.respUsage.Write(m.ResponseBody.GetBody())
+			if m.ResponseBody.GetEndOfStream() {
+				x.respUsage.Close()
+				x.respUsage = nil
+			}
+		}
 		if x.respStream != nil {
 			return s.streamChunk(ctx, x, &x.respStream, phaseResponseBody, m.ResponseBody), nil
 		}
@@ -364,6 +379,8 @@ func (s *Server) handle(ctx context.Context, x *exchange, msg *extprocv3.Process
 		if r, err := s.onResponse(ctx, x, phaseResponseTrailers); r != nil || err != nil {
 			return r, err
 		}
+		x.respUsage.Close()
+		x.respUsage = nil
 		if x.respWaiting {
 			x.fillResponse(&extprocv3.HttpBody{EndOfStream: true})
 			return s.responseVerdict(ctx, x, phaseResponseTrailers), nil
@@ -598,6 +615,17 @@ func (s *Server) onResponseHeaders(ctx context.Context, x *exchange, h *extprocv
 		}
 	}
 	r := s.responseVerdict(ctx, x, phaseResponseHeaders)
+	if !eos && r.GetImmediateResponse() == nil {
+		// A streamed response on a token-limited LLM endpoint: Envoy
+		// streams its body for its usage (mode_override, as for a stream
+		// inspected event by event), which passes as it comes.
+		if x.respUsage = x.ex.UsageMeter(x.resp.Headers); x.respUsage != nil {
+			if !x.observe {
+				r.ModeOverride = &filterv3.ProcessingMode{ResponseBodyMode: filterv3.ProcessingMode_STREAMED}
+			}
+			return r
+		}
+	}
 	if !eos && buffered && r.GetImmediateResponse() == nil {
 		// A body the rules don't read: Envoy needn't buffer it, nor send
 		// it (when the filter allows mode_override).

@@ -398,17 +398,28 @@ counts requests; this adds a cost per request, reusing its table, keys and answe
 GCRA with a weight is the same algorithm, `tat + n × T − now > burst × T`
 ([0009 §3.2](0009-rate-limits.md#32-token-bucket-semantics)).
 
-- **At request time** a request is charged an estimate: prompt bytes ÷ 3, rounded up, plus its
-  output limit (or `maxOutputTokens`, or 4,096 when neither is set). Inkwall ships no tokenizer:
-  tokenizers differ per model, cost megabytes and microseconds per KiB. Bytes ÷ 3 overestimates
-  English (about 4 bytes a token) and is close for code and CJK text; the output limit is what
-  the client asked for, the worst case.
+- **At request time** a request is charged an estimate: prompt bytes ÷ 3, rounded up, plus a
+  floor for each image, audio and file part (1,600, 1,920 and 3,000 tokens, whose sources
+  [the LLM docs](../llm-apis.md#token-limits) give), plus its output limit (or `maxOutputTokens`,
+  or 4,096 when neither is set). Inkwall ships no tokenizer: tokenizers differ per model, cost
+  megabytes and microseconds per KiB. Bytes ÷ 3 overestimates English (about 4 bytes a token) and
+  is close for code and CJK text; the output limit is what the client asked for, the worst case.
+  A request that references state the server keeps (`previous_response_id`, `conversation`,
+  `prompt`, an `item_reference`, a file by ID) can't be estimated: each limit charges it its
+  whole burst, which the response settles. A body not read whole is charged as `maxBodyBytes`
+  when its `Content-Length` is missing or smaller.
 - **At response time**, when the response is inspected and reports usage, the bucket is settled to
   the actual `input + output` tokens: the difference is refunded or added as debt (`TAT` moved
   back or forward, which `pkg/ratelimit` already does for refunds and 0009 planned for remote debt).
   A key in debt is refused before its body is read, as with request limits (`BodyLimit` returns 0).
-  For streams, usage comes in the last event: OpenAI sends it only with
-  `stream_options.include_usage`; without usage, output bytes ÷ 3 settle it.
+  A debt is owed up to an hour of the limit's rate (two bursts when longer), however many
+  responses settle at once: the cap keeps the clock in range and a key's wait bounded, and still
+  charges one huge request in full. Requests in flight before the first settles are charged only
+  their estimates. For streams, the adapters that stream bodies to the engine (the proxy,
+  ext_proc) read the usage events as the stream goes out, one event at a time up to
+  `responses.maxBytes`: OpenAI's last chunk (only with `stream_options.include_usage`), the
+  Responses API's `response.completed`, Anthropic's `message_start` and `message_delta`. A stream
+  cut before its final usage only adds debt; without usage the estimate stands.
 - **Without response inspection** (Traefik, or `responses.inspect: false`) the estimate stands.
   The docs say this overcharges short answers to long limits, and to size limits from
   `inkwall_llm_tokens_total`.
@@ -416,8 +427,9 @@ GCRA with a weight is the same algorithm, `tat + n × T − now > burst × T`
   read; token limits need the parsed body, so they run right after the LLM request checks,
   before the rules ([§7.1](#71-where-in-the-pipeline)). A request denied by a check isn't charged.
 
-Keys don't change: client IP, or a header's hashed value ([0009 §3.3](0009-rate-limits.md#33-keys));
-`Authorization` is a fine key, it is hashed and never stored. Per-tenant fairness needs the tenant
+Keys don't change: client IP, or a header's hashed value ([0009 §3.3](0009-rate-limits.md#33-keys)):
+`x-api-key` for Anthropic, `Authorization` for OpenAI, whose scheme's case and spacing are
+normalized first; it is hashed and never stored. Per-tenant fairness needs the tenant
 to be authenticated before Inkwall or the header to be one the client can't choose freely: the
 0009 caveat applies unchanged. Limits stay per engine.
 

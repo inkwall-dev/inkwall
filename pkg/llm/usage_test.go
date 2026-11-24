@@ -127,3 +127,56 @@ func goUsageView(t *testing.T, body []byte, f Format, u Usage) {
 		t.Fatalf("a Go client reads usage %+v, ParseUsage %+v", want, u)
 	}
 }
+
+// TestStreamUsage: a stream's usage events, as each API sends them.
+func TestStreamUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		format    Format
+		events    []string
+		want      Usage
+		ok, final bool
+	}{
+		{"chat, include_usage", OpenAIChat, []string{
+			`{"id":"c","choices":[{"delta":{"content":"hi"}}],"usage":null}`,
+			`{"id":"c","choices":[],"usage":{"prompt_tokens":150000,"completion_tokens":3}}`,
+			`[DONE]`,
+		}, Usage{150000, 3}, true, true},
+		{"chat, no usage", OpenAIChat, []string{`{"choices":[{"delta":{"content":"hi"}}]}`, `[DONE]`}, Usage{}, false, false},
+		{"responses, completed", OpenAIResponses, []string{
+			`{"type":"response.created","response":{"id":"r","usage":null}}`,
+			`{"type":"response.output_text.delta","delta":"hi"}`,
+			`{"type":"response.completed","response":{"id":"r","output":[],"usage":{"input_tokens":40,"output_tokens":7}}}`,
+		}, Usage{40, 7}, true, true},
+		{"anthropic, start and delta", AnthropicMessages, []string{
+			`{"type":"message_start","message":{"id":"m","usage":{"input_tokens":10,"cache_read_input_tokens":90,"output_tokens":1}}}`,
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+			`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":25}}`,
+			`{"type":"message_stop"}`,
+		}, Usage{100, 25}, true, true},
+		{"anthropic, a delta that counts input too", AnthropicMessages, []string{
+			`{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}`,
+			`{"type":"message_delta","usage":{"input_tokens":12,"output_tokens":5}}`,
+		}, Usage{12, 5}, true, true},
+		{"anthropic, cut after the start", AnthropicMessages, []string{
+			`{"type":"message_start","message":{"usage":{"input_tokens":5000,"output_tokens":1}}}`,
+		}, Usage{5000, 1}, true, false},
+		{"a folded usage key is ignored", OpenAIChat, []string{`{"usage":{"prompt_tokens":1},"Usage":{"prompt_tokens":100000}}`}, Usage{}, false, false},
+		{"another format's usage isn't read", OpenAIChat, []string{`{"response":{"usage":{"input_tokens":5}}}`}, Usage{}, false, false},
+	} {
+		var s StreamUsage
+		for _, ev := range tc.events {
+			s.Event([]byte(ev), tc.format)
+		}
+		u, ok, final := s.Usage()
+		if u != tc.want || ok != tc.ok || final != tc.final {
+			t.Errorf("%s: %+v ok %v final %v, want %+v %v %v", tc.name, u, ok, final, tc.want, tc.ok, tc.final)
+		}
+	}
+	if n := testing.AllocsPerRun(100, func() {
+		var s StreamUsage
+		s.Event([]byte(`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":3}}`), OpenAIChat)
+	}); n != 0 {
+		t.Errorf("%v allocations an event", n)
+	}
+}
