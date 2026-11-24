@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
@@ -34,6 +35,7 @@ import (
 	"github.com/inkwall-dev/inkwall/operator/enginereport"
 	"github.com/inkwall-dev/inkwall/operator/reasons"
 	"github.com/inkwall-dev/inkwall/operator/resolver"
+	"github.com/inkwall-dev/inkwall/pkg/llm"
 	"github.com/inkwall-dev/inkwall/pkg/pipeline"
 	"github.com/inkwall-dev/inkwall/pkg/rules/coraza"
 )
@@ -296,6 +298,97 @@ type EventExplanation struct {
 	// GeoSampled is, for a geo event, the requests of the client's
 	// country it stands for (one event a minute per country).
 	GeoSampled int `json:"geoSampled,omitempty"`
+	// LLM is, for an llm event, the LLM check that failed and where.
+	LLM *LLMCheckExplain `json:"llm,omitempty"`
+}
+
+// LLMCheckExplain is an LLM check an event names (design 0012 §9).
+type LLMCheckExplain struct {
+	Check  string `json:"check"`
+	RuleID int    `json:"ruleId,omitempty"`
+	Format string `json:"format,omitempty"`
+	Model  string `json:"model,omitempty"`
+	Role   string `json:"role,omitempty"`
+	// MessageIndex is the message (or the tool, for llm-tools), -1 for the
+	// request or a top-level field; Offset where in the body.
+	MessageIndex int `json:"messageIndex"`
+	Offset       int `json:"offset"`
+	// Cause and Fix are the troubleshooting guide's, for the check.
+	Cause string `json:"cause"`
+	Fix   string `json:"fix"`
+}
+
+// LLMExplain is a policy's spec.llm: its endpoints and checks, in lines.
+type LLMExplain struct {
+	// Endpoints are "OpenAIChat: /v1/chat/completions, /openai/*".
+	Endpoints    []string `json:"endpoints"`
+	MaxBodyBytes int64    `json:"maxBodyBytes"`
+	// RuleSetBody is Skip or Inspect.
+	RuleSetBody string `json:"ruleSetBody"`
+	// Checks are the request checks set, one a line.
+	Checks []string `json:"checks"`
+	Detect bool     `json:"detect,omitempty"`
+}
+
+// llmExplain describes spec.llm; nil without it.
+func llmExplain(l *wafv1alpha1.LLMSpec) *LLMExplain {
+	if l == nil {
+		return nil
+	}
+	le := &LLMExplain{MaxBodyBytes: ptr.Deref(l.MaxBodyBytes, pipeline.DefaultLLMBodyBytes),
+		RuleSetBody: string(cmp.Or(l.RuleSetBody, wafv1alpha1.LLMRuleSetBodySkip)), Endpoints: []string{}, Checks: []string{}}
+	for _, e := range l.Endpoints {
+		paths := make([]string, len(e.Paths))
+		for i, p := range e.Paths {
+			paths[i] = string(p)
+		}
+		le.Endpoints = append(le.Endpoints, string(e.Format)+": "+strings.Join(paths, ", "))
+	}
+	r := l.Request
+	if r == nil {
+		return le
+	}
+	le.Detect = r.Mode == wafv1alpha1.PolicyDetect
+	add := func(f string, a ...any) { le.Checks = append(le.Checks, fmt.Sprintf(f, a...)) }
+	list := func(n int, at func(int) string) string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = at(i)
+		}
+		return strings.Join(out, ", ")
+	}
+	if len(r.Models) > 0 {
+		add("llm-model: only %s", list(len(r.Models), func(i int) string { return string(r.Models[i]) }))
+	}
+	if r.MaxPromptBytes != nil {
+		add("llm-max-prompt: at most %d bytes of prompt text", *r.MaxPromptBytes)
+	}
+	if r.MaxMessages != nil {
+		add("llm-max-messages: at most %d messages", *r.MaxMessages)
+	}
+	if r.MaxChoices != nil {
+		add("llm-max-choices: n at most %d", *r.MaxChoices)
+	}
+	switch {
+	case r.MaxOutputTokens != nil && r.RequireOutputTokens:
+		add("llm-max-output-tokens: an output limit required, at most %d", *r.MaxOutputTokens)
+	case r.MaxOutputTokens != nil:
+		add("llm-max-output-tokens: an output limit at most %d", *r.MaxOutputTokens)
+	case r.RequireOutputTokens:
+		add("llm-max-output-tokens: an output limit required")
+	}
+	if len(r.ClientRoles) > 0 {
+		add("llm-client-role: only %s messages", list(len(r.ClientRoles), func(i int) string { return string(r.ClientRoles[i]) }))
+	}
+	if t := r.Tools; t != nil {
+		switch t.Allow {
+		case wafv1alpha1.LLMToolsNone:
+			add("llm-tools: no client-defined tools")
+		case wafv1alpha1.LLMToolsListed:
+			add("llm-tools: only %s", list(len(t.Names), func(i int) string { return string(t.Names[i]) }))
+		}
+	}
+	return le
 }
 
 // RateLimitExplain is one of a policy's rate limits.
@@ -309,6 +402,8 @@ type RateLimitExplain struct {
 	Paths   []string `json:"paths,omitempty"`
 	Methods []string `json:"methods,omitempty"`
 	Detect  bool     `json:"detect,omitempty"`
+	// Cost is Requests or LLMTokens.
+	Cost string `json:"cost,omitempty"`
 	// Sampled is, for an event, the limited requests it stands for.
 	Sampled int `json:"sampled,omitempty"`
 	// Allows says what the limit allows, and its ceiling over engines.
@@ -318,7 +413,7 @@ type RateLimitExplain struct {
 // rateLimitExplain describes a policy's limit l.
 func rateLimitExplain(l wafv1alpha1.RateLimit) RateLimitExplain {
 	re := RateLimitExplain{Name: l.Name, Requests: l.Requests, Period: l.Period.Duration.String(), Burst: l.Requests,
-		Detect: l.Mode == wafv1alpha1.PolicyDetect}
+		Detect: l.Mode == wafv1alpha1.PolicyDetect, Cost: string(cmp.Or(l.Cost, wafv1alpha1.RateLimitRequests))}
 	if l.Burst != nil {
 		re.Burst = *l.Burst
 	}
@@ -342,6 +437,10 @@ func rateLimitExplain(l wafv1alpha1.RateLimit) RateLimitExplain {
 	}
 	re.Allows = fmt.Sprintf("each engine serving the policy allows %d per %s per %s, in bursts of up to %d; a client whose requests reach N engines gets up to N times that (docs/rate-limits.md)",
 		re.Requests, re.Period, re.Key, re.Burst)
+	if re.Cost == string(wafv1alpha1.RateLimitLLMTokens) {
+		re.Allows = fmt.Sprintf("each engine serving the policy allows %d LLM tokens per %s per %s, in bursts of up to %d: each request on the LLM endpoints is charged its estimate (prompt bytes / 3 plus its output limit), settled from its response's usage; a client whose requests reach N engines gets up to N times that (docs/llm-apis.md#token-limits)",
+			re.Requests, re.Period, re.Key, re.Burst)
+	}
 	return re
 }
 
@@ -621,6 +720,21 @@ func explainEvent(ctx context.Context, cluster *explainCluster, cfg explainConfi
 		return ee
 	}
 
+	// An LLM check's: which, and where; its exclusion below, by its rule
+	// ID on the path.
+	if reason == "llm" {
+		l := ev.LLM
+		ee.LLM = &LLMCheckExplain{Check: l.Check, Format: l.Format, Model: l.Model, Role: l.Role, MessageIndex: l.MessageIndex, Offset: l.Offset}
+		for _, c := range llm.Checks {
+			if c.String() == l.Check {
+				ee.LLM.RuleID = c.RuleID()
+			}
+		}
+		if e, ok := reasons.Lookup(reasons.KindSecurityEvent, "llmCheck", l.Check); ok {
+			ee.LLM.Cause, ee.LLM.Fix = reasons.Text(e.Meaning), reasons.Text(e.Fix)
+		}
+	}
+
 	// A rate limit's: the limit, from the policy.
 	if reason == "rate-limit" {
 		ee.RateLimit = &RateLimitExplain{Name: ev.RateLimit, Sampled: ev.Sampled}
@@ -638,7 +752,7 @@ func explainEvent(ctx context.Context, cluster *explainCluster, cfg explainConfi
 
 	// The narrowest exclusions, by tune's logic, for a request the rules
 	// denied (or would have, in Detect mode).
-	if reason != "rule" || ev.Policy == "" {
+	if reason != "rule" && reason != "llm" || ev.Policy == "" {
 		if ev.Policy == "" {
 			re.Warnings = append(re.Warnings, "the event names no policy: nothing to exclude")
 		}
@@ -833,8 +947,10 @@ type PolicyExplanation struct {
 	// RateLimits are the policy's limits, and what each allows.
 	RateLimits []RateLimitExplain `json:"rateLimits,omitempty"`
 	// Geo is the policy's spec.geo, in a line.
-	Geo      string   `json:"geo,omitempty"`
-	Warnings []string `json:"warnings"`
+	Geo string `json:"geo,omitempty"`
+	// LLM is the policy's spec.llm.
+	LLM      *LLMExplain `json:"llm,omitempty"`
+	Warnings []string    `json:"warnings"`
 }
 
 // TargetExplain is one of the policy's targets.
@@ -884,6 +1000,7 @@ func explainPolicy(ctx context.Context, cluster *explainCluster, namespace, id s
 		pe.RateLimits = append(pe.RateLimits, rateLimitExplain(l))
 	}
 	pe.Geo = geoExplain(p.Spec.Geo)
+	pe.LLM = llmExplain(p.Spec.LLM)
 	for _, t := range policyConditions {
 		ce := ConditionExplain{Type: t, Status: string(metav1.ConditionUnknown)}
 		c := meta.FindStatusCondition(p.Status.Conditions, t)
@@ -978,6 +1095,20 @@ func printPolicyExplanation(w io.Writer, pe *PolicyExplanation) {
 	if pe.Geo != "" {
 		fmt.Fprintf(w, "Geo: %s\n", pe.Geo)
 	}
+	if l := pe.LLM; l != nil {
+		mode := ""
+		if l.Detect {
+			mode = " (Detect: logs only)"
+		}
+		verb := "skip"
+		if l.RuleSetBody == string(wafv1alpha1.LLMRuleSetBodyInspect) {
+			verb = "inspect"
+		}
+		fmt.Fprintf(w, "LLM endpoints%s: %s; bodies up to %d bytes, which the rule sets %s\n", mode, strings.Join(l.Endpoints, "; "), l.MaxBodyBytes, verb)
+		for _, c := range l.Checks {
+			fmt.Fprintf(w, "  %s\n", c)
+		}
+	}
 	for _, rl := range pe.RateLimits {
 		mode := ""
 		if rl.Detect {
@@ -1058,6 +1189,24 @@ func printRequestExplanation(w io.Writer, re *RequestExplanation) {
 		}
 		if ev.GeoSampled > 1 {
 			fmt.Fprintf(w, "  This event stands for %d requests of the country (one event a minute per country).\n", ev.GeoSampled)
+		}
+		if l := ev.LLM; l != nil && l.Check != "" {
+			fmt.Fprintf(w, "  LLM check: %s (rule ID %d)", terminalSafe(l.Check), l.RuleID)
+			if l.Cause != "" {
+				fmt.Fprintf(w, ": %s", l.Cause)
+			}
+			fmt.Fprintln(w)
+			where := fmt.Sprintf("byte %d of the body", l.Offset)
+			if l.MessageIndex >= 0 {
+				where = fmt.Sprintf("message %d (from 0), %s", l.MessageIndex, where)
+			}
+			if l.Role != "" {
+				where += ", role " + terminalSafe(l.Role)
+			}
+			fmt.Fprintf(w, "    Where: %s; format %s, model %s\n", where, terminalSafe(l.Format), terminalSafe(cmp.Or(l.Model, "(none)")))
+			if l.Fix != "" {
+				fmt.Fprintf(w, "    Fix: %s\n", l.Fix)
+			}
 		}
 		if rl := ev.RateLimit; rl != nil {
 			fmt.Fprintf(w, "  Rate limit: %s", terminalSafe(rl.Name))
