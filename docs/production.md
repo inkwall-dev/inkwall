@@ -117,7 +117,9 @@ in `Block` mode, `inkwallctl test --har` on recorded traffic (every denial is a 
 | Directus | 147 | 14.29% | 40.14% |
 
 The traffic is each application's users and scripts, with free text, code and JSON that are hard
-on a WAF; the rates fall as you add exclusions. Your own application differs: start in `Detect`
+on a WAF. At level 1, most of the denials are rule 911100, the CRS's allowed methods
+([above](#detect-then-block)), and [`inkwallctl tune`](testing-policies.md#suggest-exclusions-from-the-events)
+suggests exclusions for the rest. Your own application differs: start in `Detect`
 mode, or replay a HAR file of your traffic with `inkwallctl test --har`. Levels 3 and 4, and the
 rules behind each rate, are in the
 [full tables](../CONTRIBUTING.md#battle-test). Latency per proxy for 0.7.0 is in the release notes.
