@@ -64,6 +64,7 @@ func drepeated(f *fdp) *fdp {
 //	  optional double d = 12;
 //	  optional bool flag = 13;
 //	  repeated Req children = 14;
+//	  repeated fixed32 fixed = 15;
 //	  extensions 100 to 200;
 //	}
 //	message User { optional string name = 1; optional string email = 2; }
@@ -97,6 +98,7 @@ func testFile() *descriptorpb.FileDescriptorProto {
 			dfield("d", 12, tDouble, ""),
 			dfield("flag", 13, tBool, ""),
 			drepeated(dfield("children", 14, tMessage, ".t.Req")),
+			drepeated(dfield("fixed", 15, tFixed32, "")),
 		},
 		NestedType:     []*descriptorpb.DescriptorProto{entry, grp},
 		OneofDecl:      []*descriptorpb.OneofDescriptorProto{{Name: proto.String("choice")}},

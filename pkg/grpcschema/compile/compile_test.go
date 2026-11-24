@@ -17,7 +17,6 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
-	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/known/anypb"
 
@@ -397,7 +396,7 @@ func TestCompilePublicImportChain(t *testing.T) {
 }
 
 // TestCompileImportBounds: a cycle, a public import out of range, too many
-// files, and the timeout backstop.
+// files.
 func TestCompileImportBounds(t *testing.T) {
 	cycle := marshal(t, &descriptorpb.FileDescriptorSet{File: []*descriptorpb.FileDescriptorProto{
 		{Name: proto.String("a.proto"), Dependency: []string{"b.proto"}, PublicDependency: []int32{0}},
@@ -419,28 +418,7 @@ func TestCompileImportBounds(t *testing.T) {
 	if _, err := Compile(marshal(t, many), "x"); err == nil || !strings.Contains(err.Error(), "files, over") {
 		t.Errorf("too many files: %v", err)
 	}
-	// The backstop: a set protodesc doesn't check in time is refused, and
-	// cached as refused.
-	defer func(d time.Duration) { Timeout = d }(Timeout)
-	Timeout = 10 * time.Millisecond
-	release := make(chan struct{})
-	slow := protodescNewFiles
-	protodescNewFiles = func(s *descriptorpb.FileDescriptorSet) (*protoregistry.Files, error) {
-		<-release
-		return slow(s)
-	}
-	cache := NewCache()
-	data := setOf(t, grpc_health_v1.File_grpc_health_v1_health_proto)
-	_, _, err := cache.Compile(data, "x")
-	if err == nil || !strings.Contains(err.Error(), "to check") {
-		t.Fatalf("past the timeout: %v", err)
-	}
-	close(release)
-	protodescNewFiles = slow
-	Timeout = time.Minute
-	if _, _, err := cache.Compile(data, "x"); err == nil {
-		t.Error("a set that timed out is compiled again")
-	}
+	// The backstop past these bounds: TestCompileAbandoned.
 }
 
 // TestCompileHugeEnum: enum values aren't kept, so an enum of tens of

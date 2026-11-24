@@ -16,7 +16,9 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -49,11 +51,28 @@ const (
 	// publicly importing all earlier ones makes exponential (30 files of
 	// 6.5 KB took 28 s). Real sets have a handful of public imports.
 	MaxImportPaths = 100000
+	// MaxName bounds each name in a set (a package, a message, field,
+	// enum, service or method name, a type a field, an extension or a
+	// method names) and MaxNameParts the dot-separated parts of a package
+	// or a type named: protodesc resolves a name by its scopes, which a
+	// long package makes quadratic. Real names are a fraction of these.
+	MaxName      = grpcschema.MaxFullName
+	MaxNameParts = 32
+	// MaxSetFields bounds the fields and extensions declared in a set,
+	// those the methods don't read too.
+	MaxSetFields = 4 * grpcschema.MaxFields
 )
 
+// ErrBusy is a set not compiled because another set's check still runs
+// past its Timeout: it is tried again on the next build, not cached.
+var ErrBusy = errors.New("another descriptor set is still being checked past its timeout; tried again later")
+
+// errTimeout is a set protodesc didn't check within Timeout: refused this
+// time, not cached, since a loaded machine may take longer.
+var errTimeout = errors.New("timeout")
+
 // Timeout is how long protodesc may take on a set (a backstop past the
-// bounds above): a set it doesn't finish in time is refused, and, as any
-// set that doesn't compile, cached as such.
+// bounds above): a set it doesn't finish in time is refused, not cached.
 var Timeout = 10 * time.Second
 
 // Compile compiles data, a serialized FileDescriptorSet, raw or gzipped,
@@ -65,7 +84,16 @@ func Compile(data []byte, source string) (*bundlev1.GRPCSchema, error) {
 	if err != nil {
 		return nil, err
 	}
+	return named(s, source)
+}
+
+// named names s (name), and checks the size of the schema the bundle
+// carries, with its id and source: the size engines check (load.Load).
+func named(s *bundlev1.GRPCSchema, source string) (*bundlev1.GRPCSchema, error) {
 	name(s, source)
+	if n := proto.Size(s); n > grpcschema.MaxCompiledBytes {
+		return nil, fmt.Errorf("compiled to %d bytes with its id and source, over %d", n, grpcschema.MaxCompiledBytes)
+	}
 	return s, nil
 }
 
@@ -88,6 +116,9 @@ func compileContent(data []byte) (s *bundlev1.GRPCSchema, err error) {
 	if err := checkImports(set); err != nil {
 		return nil, err
 	}
+	if err := checkNames(set); err != nil {
+		return nil, err
+	}
 	files, err := newFiles(set)
 	if err != nil {
 		return nil, err
@@ -107,17 +138,43 @@ func name(s *bundlev1.GRPCSchema, source string) {
 // protodescNewFiles is protodesc.NewFiles; a test makes it slow.
 var protodescNewFiles = protodesc.NewFiles
 
+// checking holds one token per protodesc run (newFiles), and abandoned is
+// set while a run newFiles stopped waiting for still runs.
+var (
+	checking  = make(chan struct{}, 1)
+	abandoned atomic.Bool
+)
+
 // newFiles is protodesc.NewFiles, within Timeout. On a timeout its
-// goroutine is left to finish: the bounds of checkImports keep that from
-// happening on any set they let through.
+// goroutine is left to finish (the bounds of checkImports and checkNames
+// keep that from happening on any set they let through), and no other set
+// is checked until it has: at most one run is ever left behind, and the
+// sets refused meanwhile (ErrBusy) are tried again later.
 func newFiles(set *descriptorpb.FileDescriptorSet) (*protoregistry.Files, error) {
+	if abandoned.Load() {
+		return nil, ErrBusy
+	}
+	timer := time.NewTimer(Timeout)
+	defer timer.Stop()
+	select {
+	case checking <- struct{}{}:
+	case <-timer.C:
+		return nil, ErrBusy
+	}
 	type result struct {
 		files *protoregistry.Files
 		err   error
 	}
 	done := make(chan result, 1)
 	newFiles := protodescNewFiles
+	var left atomic.Bool
 	go func() {
+		defer func() {
+			if left.Load() {
+				abandoned.Store(false)
+			}
+			<-checking
+		}()
 		defer func() {
 			if r := recover(); r != nil {
 				done <- result{err: fmt.Errorf("not a valid descriptor set: %v", r)}
@@ -126,14 +183,21 @@ func newFiles(set *descriptorpb.FileDescriptorSet) (*protoregistry.Files, error)
 		files, err := newFiles(set)
 		done <- result{files, err}
 	}()
-	timer := time.NewTimer(Timeout)
-	defer timer.Stop()
 	select {
 	case r := <-done:
 		return r.files, r.err
 	case <-timer.C:
-		return nil, fmt.Errorf("its descriptors take over %v to check", Timeout)
 	}
+	// Set before the run can end, so that the run clears it.
+	abandoned.Store(true)
+	left.Store(true)
+	select {
+	case r := <-done: // it ended meanwhile
+		abandoned.Store(false)
+		return r.files, r.err
+	default:
+	}
+	return nil, fmt.Errorf("its descriptors take over %v to check: %w", Timeout, errTimeout)
 }
 
 // checkImports bounds a set's import graph before protodesc walks it
@@ -195,6 +259,85 @@ func checkImports(set *descriptorpb.FileDescriptorSet) error {
 			if paths += n; paths > MaxImportPaths {
 				return fmt.Errorf("file %s: its imports and public imports make over %d import paths", f.GetName(), MaxImportPaths)
 			}
+		}
+	}
+	return nil
+}
+
+// checkNames bounds a set's names before protodesc resolves them: each
+// name at most MaxName bytes, a package and each type named at most
+// MaxNameParts parts, each type named fully qualified (".pkg.Type", as
+// protoc and buf write them: protodesc then looks it up once, instead of
+// in each scope), and at most MaxSetFields fields and extensions.
+func checkNames(set *descriptorpb.FileDescriptorSet) error {
+	var (
+		fields int
+		err    error
+	)
+	// name checks n, the name of what; parts its parts too, typ that it is
+	// a type named (none, or fully qualified).
+	name := func(what, n string) {
+		if err == nil && len(n) > MaxName {
+			err = fmt.Errorf("%s %.40q...: name over %d bytes", what, n, MaxName)
+		}
+	}
+	parts := func(what, n string) {
+		if name(what, n); err == nil && strings.Count(strings.TrimPrefix(n, "."), ".") >= MaxNameParts {
+			err = fmt.Errorf("%s %.40q...: over %d dot-separated parts", what, n, MaxNameParts)
+		}
+	}
+	typ := func(what, n string) {
+		if err == nil && n != "" && n[0] != '.' {
+			err = fmt.Errorf("%s %.60q: not a fully qualified type name (\".package.Type\")", what, n)
+		}
+		parts(what, n)
+	}
+	declare := func(fs []*descriptorpb.FieldDescriptorProto) {
+		if fields += len(fs); err == nil && fields > MaxSetFields {
+			err = fmt.Errorf("over %d fields and extensions in the set", MaxSetFields)
+		}
+		for _, f := range fs {
+			name("field", f.GetName())
+			typ("field "+f.GetName()[:min(len(f.GetName()), 40)]+": type", f.GetTypeName())
+			typ("field "+f.GetName()[:min(len(f.GetName()), 40)]+": extendee", f.GetExtendee())
+		}
+	}
+	enums := func(es []*descriptorpb.EnumDescriptorProto) {
+		for _, e := range es {
+			name("enum", e.GetName())
+		}
+	}
+	var messages func(msgs []*descriptorpb.DescriptorProto)
+	messages = func(msgs []*descriptorpb.DescriptorProto) {
+		for _, m := range msgs {
+			name("message", m.GetName())
+			for _, o := range m.GetOneofDecl() {
+				name("oneof", o.GetName())
+			}
+			enums(m.GetEnumType())
+			declare(m.GetField())
+			declare(m.GetExtension())
+			if err != nil {
+				return
+			}
+			messages(m.GetNestedType())
+		}
+	}
+	for _, f := range set.GetFile() {
+		parts("file "+f.GetName()[:min(len(f.GetName()), 40)]+": package", f.GetPackage())
+		enums(f.GetEnumType())
+		declare(f.GetExtension())
+		messages(f.GetMessageType())
+		for _, svc := range f.GetService() {
+			name("service", svc.GetName())
+			for _, m := range svc.GetMethod() {
+				name("method", m.GetName())
+				typ("method "+m.GetName()[:min(len(m.GetName()), 40)]+": input", m.GetInputType())
+				typ("method "+m.GetName()[:min(len(m.GetName()), 40)]+": output", m.GetOutputType())
+			}
+		}
+		if err != nil {
+			return err
 		}
 	}
 	return nil
@@ -484,16 +627,19 @@ func (c *Cache) Compile(data []byte, source string) (*bundlev1.GRPCSchema, [sha2
 	c.mu.Unlock()
 	if !ok {
 		e.schema, e.err = compileContent(data)
-		c.mu.Lock()
-		c.entries[key] = e
-		c.mu.Unlock()
+		// A set refused for the time it took, or for another's, may
+		// compile on the next build: not cached.
+		if !errors.Is(e.err, errTimeout) && !errors.Is(e.err, ErrBusy) {
+			c.mu.Lock()
+			c.entries[key] = e
+			c.mu.Unlock()
+		}
 	}
 	if e.err != nil {
 		return nil, key, e.err
 	}
-	s := proto.CloneOf(e.schema)
-	name(s, source)
-	return s, key, nil
+	s, err := named(proto.CloneOf(e.schema), source)
+	return s, key, err
 }
 
 // Retain drops the entries whose keys used doesn't hold: those no policy
