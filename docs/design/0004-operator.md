@@ -186,15 +186,117 @@ Status never claims protection that isn't there:
   Resumed, `Enforced` waits for every engine to run the bundle that resumes inspection: suspending
   and resuming change what every policy enforces, so its `bundleVersion` moves to that bundle.
 - **Bundle too large** (#264). A build whose bundle doesn't fit its Secrets
-  (8 chunks of 900 KiB compressed, [§4.6](#46-bundle-builder-leader-only)) isn't published: engines keep the
-  current bundle. Every policy the new bundle would add or change is `Accepted=False` and
-  `Ready=False`, reason `BundleTooLarge`, for its current generation, with the size and the bundle
-  engines run. Before, the build wrote no status, so such a policy kept the conditions of its
-  previous generation, `Accepted=True` included. The other policies keep theirs: engines run them as
-  they are. Once the bundle fits, it is published and they are `Accepted` again. Suspending still
-  works (#291): when the bundle with `spec.suspend` flipped is too large, the builder publishes the
-  bundle in force with it flipped instead, which fits as it does. Resumed, engines run that bundle
-  again, and the policies it doesn't have as they are now are still `BundleTooLarge`.
+  (8 chunks of 900 KiB compressed, [§4.6](#46-bundle-builder-leader-only), and 64 MiB raw), or in
+  which a namespace grows past its share, isn't published as it is: the builder holds back changes,
+  namespace by namespace, and publishes the others. A change is a policy or a rule set that differs
+  from the bundle in force; a namespace's changes are held together. A namespace's share is what
+  the whole bundle saves without its content (its policies and its WAFRuleSets), raw and
+  compressed; ClusterWAFRuleSets, the CRS among them, stay, and are in nobody's share, so a namespace's share depends only on its own content. The budget,
+  `InkwallConfig` `spec.bundle.namespaceShare` (25% by default, 5 to 100) of each limit, applies
+  only while the bundle with every change would leave less than that share of a limit free, never
+  when one namespace has all the content (a single tenant) and never to a first bundle that fits:
+  otherwise a bundle that fits is published as it is. Under it, a namespace whose share, measured,
+  with its changes is over the budget, and larger than its share of the bundle in force (none, for
+  a namespace new to it), has its changes held: content it published before stays. A raw share is
+  always measured (counted). A compressed share is measured, within the encode cap and for at most
+  16 namespaces, only for a namespace whose raw share could be over the compressed budget: first
+  those whose holding would leave out one of their published policies, then the largest raw shares;
+  a compressed share not measured, now or in the bundle in force, is within the budget. The cluster
+  reserve, `spec.bundle.clusterReserve` (10% by default, 0 to 50) of each limit, is kept for
+  ClusterWAFRuleSet changes, which only an admin makes: a bundle that would leave less than it free
+  fits only if it is no larger, raw and compressed, than the same bundle with every namespace's
+  change held but the prior ones (below), so namespaces' changes can't grow the bundle into it and
+  cluster rule set changes can; and if it releases a prior namespace's change, only if it is larger
+  than the same bundle with every namespace's change held, or than the reserve line, whichever is
+  larger, by at most 4% of each limit (at most half the reserve), so that the changes that adopt a
+  ClusterWAFRuleSet change take at most that part of the reserve together, and in the build after a
+  wait (below) only those that the wait held while protected, which share a part of their own. It never applies to a single tenant, to a first bundle, or to the last
+  resort. If the bundle is still too large, or into the reserve, the other namespaces with a change
+  are held in order of share, the largest first (ties to the namespace created last, then the name;
+  a compressed share that gzip makes negative counts as 0), then the prior namespaces, and
+  ClusterWAFRuleSet changes, such as a CRS upgrade, after every namespace: the builder holds the
+  shortest prefix with which the bundle fits (a binary search), then tries to release each group of
+  it, from the last, keeping a release only if the bundle still fits, and goes over it again until a
+  pass releases nothing (the order isn't monotone). A namespace is *last* when holding it would
+  leave out one of its published policies: that policy's previous version, with its namespace's rule
+  sets as they were, doesn't compile with a ClusterWAFRuleSet as it is now (a rule id a CRS upgrade
+  adds), while its version now does. Its change *fits alone* when it fits on the bundle in force with
+  every other namespace's change held and the ClusterWAFRuleSet changes, which it adopts, published,
+  against the size limits only, not the reserve (in the build after a wait, the reserve too, without
+  the adopting changes' part, but with a part of its own for a namespace the wait held while
+  protected). That costs two encodes per last namespace, before the search, the
+  smallest growth first, as estimated by compressing each one's content alone; not measured within
+  the encode cap, it fits. A last namespace within its share whose change fits alone is *guarded*
+  while the ClusterWAFRuleSet changes may still wait: a try that leaves out its policy doesn't fit.
+  It is *prior* when its change also grows its share by at most 4% of each limit, raw and compressed:
+  fixing a rule id or a rule an upgrade breaks takes a few bytes, rewriting a rule set for it rarely
+  1%, so anything more is ballast, not the adoption. Prior namespaces are released before every
+  other namespace, the smallest growth first, and their changes may take that part of the reserve; a
+  guarded one that is prior is *protected*: a try that holds it and releases another namespace's
+  change doesn't fit. A guarded namespace whose change grows its share by more is ranked by share,
+  like any other, and may not grow the bundle into the reserve. Outside the last resort, a try that
+  leaves out a policy the bundle in force has doesn't fit, unless its namespace is held over its
+  share, or is last and not guarded. So when the guarded namespaces' changes don't all fit, the
+  ClusterWAFRuleSet changes are held for one build: those that fit are published against them as
+  they were, measured with the ClusterWAFRuleSet changes too, so that these fit in the next build,
+  and the other namespaces' changes wait. They are never held that way two builds in a row (the
+  builder remembers which it shipped as they were): in the next build no namespace is guarded, and
+  a last namespace still held, which then no longer fits alone unless the bundle changed, or whose
+  change grows its share by more than 4%, is left out. But the prior namespaces that the wait held
+  while they were protected (the builder remembers them too) are released first in that build, and
+  share another 4% of the reserve of their own, the smallest change first: so a squatter released
+  before an adopter in the wait doesn't take the room its fix needs, unless the wait held the
+  squatter too (a residual, below).
+  The adopting changes take at most 8% of each limit from the reserve per ClusterWAFRuleSet change
+  (4% in each of the two builds, and at most half the reserve each). When the encode cap comes before every
+  release was tried, the last namespaces within their share whose change fits alone and that would
+  stay held untried are tried past it: all together, then with the other namespaces' changes held
+  too (and those the search tried), then the most of them, the prior ones and the smallest growth
+  first, that fit (a binary search), then each one still held once, released from what is then to
+  be published (log2(n) + 3 tries for n of them, until 64 more encodes are spent, 66 at most, only in a build with
+  a ClusterWAFRuleSet change). So the cap never leaves
+  a published policy out, but past those encodes: one is left out only by a try that released
+  it and didn't fit. Holding the other
+  namespaces' changes so, repair can make them wait in the build after the wait too: they wait
+  two builds at most per ClusterWAFRuleSet change, not one. Every try is measured with the published policies it leaves out counted, as they
+  were, so leaving out one policy frees no room for another namespace; it is also measured as
+  published, since gzip isn't monotone. So a tenant that squats a rule id of a coming CRS upgrade
+  can delay the upgrade by one build at most, and jump the queue and use the reserve only with a
+  change that adopts it: one that grows its share by at most 4%. Ballast it adds is held like any
+  other namespace's growth, and its own published policy is then left out after the wait.
+  Residuals: when several changes adopting the same upgrade each fit alone but not together, the
+  ones with the larger growth wait, and those that don't fit even in the second 4% after the wait
+  are left out, so squatters whose changes are each smaller than an adopter's fix can still leave
+  it out, but only by taking the room above the reserve line and both builds' 4% with them; a squatter
+  that the wait held along with an adopter, with a smaller change (or one it shrinks after the
+  wait), takes the carried 4% first and can leave the adopter's policy out the same way; an
+  adoption fix that grows its share by more than 4%, shipped with an upgrade into a
+  bundle with less room than that above the reserve, gets the one-build wait but no priority and no
+  part of the reserve, so its published policy is left out after the wait (any rule that let it
+  take more of the reserve would let a squatter, who can copy any shape a tenant's fix has, take it
+  too, which brings back the reserve drain or the CRS pin): ship the minimal adoption fix, the rule
+  id or rule the upgrade breaks, apart from a larger rewrite, before the upgrade or after it; and
+  the adopting changes can take 8% of each limit from the reserve per ClusterWAFRuleSet change (more
+  across operator restarts, which forget the wait), which then has that much less room for the next
+  upgrade. What is published
+  was encoded as it is published, and fits; at most 64 bundles are encoded per build, and a bundle
+  over 64 MiB raw is never compressed. A held policy keeps its previous version, or is left out when
+  new; a held rule set ships as it was, with the policies that bind it checked against that version.
+  A held policy whose previous version doesn't compile with a rule set of its namespace as it is now
+  holds that rule set too. A ClusterWAFRuleSet is never held for a policy: one that changed and
+  isn't held ships as it is now even when every policy that binds it is held, and a held policy
+  whose previous version doesn't compile with it is left out, and says so; so is a policy whose
+  namespace's rule set is held and that doesn't compile with it as it was and a ClusterWAFRuleSet as
+  it is now. Either says `BundleTooLarge`, never `RuleSetsIncompatible`, and counts in
+  `inkwall_operator_bundle_held_policies`. A changed ClusterWAFRuleSet that isn't published says
+  `BundleTooLarge` too, and counts. Held objects are `Accepted=False` (policies also `Ready=False`),
+  reason `BundleTooLarge`, for their current generation, with the namespace's share. Once the bundle
+  fits with them, they are published and `Accepted` again. When even every change held doesn't fit,
+  the bundle in force is published again with deletions only, with the InkwallConfig settings it
+  has, and the messages say so. Only if that doesn't fit either do engines keep the current bundle,
+  and every policy the new bundle would add or change is `BundleTooLarge`; then suspending still
+  works (#291): the builder publishes the bundle in force with `spec.suspend` flipped, which fits as
+  it does. Content already in the bundle in force is never taken out to make room for a change.
 
 `InkwallConfig.status` has `observedGeneration`, `conditions` (`ControlPlaneConnected`,
 [§4.9](#49-upstream-sync-leader-only); `Suspended`, True while the published bundle suspends
@@ -821,10 +923,11 @@ It runs again when a targeted route changes (routes are indexed by target).
   manifest doesn't use, then the manifest. Chunks the manifest doesn't list are deleted after.
   A reader therefore never sees a manifest before its chunks. It also checks the hash: a reader that
   read the manifest just before the next bundle replaced its chunks fails and retries.
-- **Limits.** At most 8 chunks (7,200 KiB) and 64 MiB decompressed. A bundle over that is not
-  published, and the current one stays; the policies it would add or change report it
-  (`Accepted=False`, `BundleTooLarge`, [§3.2](#32-status-contract)). The builder warns when it
-  publishes a bundle over 75% of the limit. `inkwall_operator_bundle_compressed_bytes` is the size each replica serves.
+- **Limits.** At most 8 chunks (7,200 KiB) and 64 MiB decompressed. A bundle over that is
+  published with changes held back, namespace by namespace, which report it (`Accepted=False`,
+  `BundleTooLarge`, [§3.2](#32-status-contract)). The builder warns when it
+  publishes a bundle over 75% of the limit. `inkwall_operator_bundle_compressed_bytes` and
+  `inkwall_operator_bundle_raw_bytes` are the sizes each replica serves.
 - **Repair.** A chunk deleted or edited makes the builder publish the bundle again, as a new
   version. That new version has no previous version for an unresolvable policy to fall back on.
 - **Access.** `inkwall-bundle-reader` grants `get` on every chunk name. So must the Role of an
@@ -976,7 +1079,8 @@ policies by each of their four conditions (counts, not a label per policy, so 5,
 few dozen series). The signing key has `inkwall_operator_signing_key_age_seconds` and
 `inkwall_operator_signing_key_rotation_phase{phase}` (1 for the current phase), and
 `inkwall_operator_bundle_publish_failures_total{reason}` counts the bundles not published
-(`too_large`, `error`). All are the leader's.
+(`too_large`, `error`), and `inkwall_operator_bundle_held_policies` the policies a bundle too large
+with every change holds back. All are the leader's.
 
 **Events** (#378). A change of a policy's `Ready`, `Programmed` or `Enforced` condition records
 one Kubernetes Event (`events.k8s.io/v1`) on the policy: `Warning` while it isn't `Ready`, the
@@ -1178,7 +1282,7 @@ Removal must never leave a proxy failing closed on a missing engine.
 | Bundle Secret deleted | None | Builder recreates it | Automatic |
 | Signing key Secret deleted while every replica is down | None: engines keep their bundle, and reject the new key's bundles (`EngineNack`) until the kubelet updates their trust ConfigMap with it | The replicas' memory is gone, so the operator creates a new key (with a replica up, it restores the keys it holds) | Automatic, within the kubelet's ConfigMap sync (`make kind-chaos`) |
 | Bundle chunk deleted or edited | None; meanwhile new engines can't cold start from the Secret | Builder logs it | Automatic: published again |
-| Bundle over 7,200 KiB compressed | None: the current bundle stays; changes are not published; `spec.suspend` still suspends and resumes it | Builder error; warning past 75%; `inkwall_operator_bundle_compressed_bytes`; `Accepted=False` (`BundleTooLarge`) on the policies not published | Shrink the policies (fewer, or smaller rule sets) |
+| Bundle over 7,200 KiB compressed or 64 MiB raw, or a namespace over its share | None: while the bundle with every change would leave less than `spec.bundle.namespaceShare` of a limit free (never with one namespace, or in a first bundle that fits), the changes of a namespace that grow its measured share past it are held, and so are namespaces' changes that would grow it into `spec.bundle.clusterReserve`, kept for cluster rule sets; then, until it fits, changes are held back namespace by namespace, the largest share first, cluster rule sets last (held policies keep their previous version, or are left out when new; held rule sets ship as they were; a namespace whose published rules don't compile with a CRS upgrade has its fix shipped with it, if that fits with the upgrade, published before other namespaces' changes, and the upgrade waits one build at most, only when several such fixes don't all fit); every other change is published; `spec.suspend` still suspends and resumes it | Builder error; warning past 75%; `inkwall_operator_bundle_compressed_bytes`, `inkwall_operator_bundle_raw_bytes`, `inkwall_operator_bundle_held_policies`, `inkwall_operator_bundle_namespace_share_percent` (InkwallNamespaceOverShare); `Accepted=False` (`BundleTooLarge`) on the policies and rule sets held back | Shrink the namespace's policies (fewer, or smaller rule sets) |
 | Signing key rotated | None: the operator signs with the new key only once every connected engine trusts it | Secret's `rotation-phase`; operator logs the engines it waits for | Automatic ([§4.6](#46-bundle-builder-leader-only)); replace engines older than rotation |
 | Unknown controller version | Wiring may break | `Programmed=False` | Update or pin the integration |
 | An integration's `ClusterRole` not granted, or revoked | Its proxy's routes aren't wired; the others are | `Programmed=False` (`IntegrationDisabled`), discovery `Unsupported` | Grant it (`rbac.integrations`); the operator restarts with it ([§7](#7-rbac)) |

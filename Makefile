@@ -102,6 +102,10 @@ test: ## Run unit tests with the race detector (operator tests run against a loc
 	@# Adapter parity (#365): every adapter against the reverse proxy, in test/crs's module.
 	cd test/crs && $(GO) test -count=1 -run '^TestAdapterParity$$' .
 
+.PHONY: test-norace
+test-norace: ## The operator controller's tests without the race detector: the full-size bundle tests and the property test's 200 scenarios, which -race skips or shrinks
+	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" $(GO) test -count=1 ./operator/internal/controller/
+
 .PHONY: stress-test
 stress-test: ## Tests under stress, for timing flakes: -race -shuffle -count=10, GOMAXPROCS=2, CPU hogs (STRESS_PACKAGES; SEED, COUNT, HOGS: hack/ci/stress.sh)
 	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" hack/ci/stress.sh $(STRESS_PACKAGES)

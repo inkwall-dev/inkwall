@@ -9,16 +9,21 @@
 #   hack/ci/stress.sh PACKAGE...
 #
 # Environment: COUNT (10), SEED (the shuffle seed; default: the time), HOGS
-# (2), KUBEBUILDER_ASSETS for the operator's envtest packages. The seed is
-# printed first: rerun a failure with SEED=<it> and the failing package.
+# (2), INKWALL_FIT_SEED_BASE (the first scenario of the bundle fit property
+# test; default: random), KUBEBUILDER_ASSETS for the operator's envtest
+# packages. The seeds are printed first: rerun a failure with SEED=<it>,
+# INKWALL_FIT_SEED_BASE=<it> and the failing package.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
 COUNT=${COUNT:-10}
 SEED=${SEED:-$(date +%s)}
+# Each run checks other scenarios than make test's (seed 1 on).
+INKWALL_FIT_SEED_BASE=${INKWALL_FIT_SEED_BASE:-$((RANDOM * 32768 + RANDOM))}
+export INKWALL_FIT_SEED_BASE
 HOGS=${HOGS:-2}
-echo "stress: -shuffle=$SEED -count=$COUNT GOMAXPROCS=2, $HOGS CPU hogs: $*"
+echo "stress: -shuffle=$SEED -count=$COUNT GOMAXPROCS=2, $HOGS CPU hogs, INKWALL_FIT_SEED_BASE=$INKWALL_FIT_SEED_BASE: $*"
 
 hogs=()
 stop_hogs() {
