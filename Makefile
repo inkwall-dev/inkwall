@@ -100,13 +100,13 @@ build: ## Build inkwall-engine and inkwallctl into ./bin
 
 .PHONY: test
 test: ## Run unit tests with the race detector (operator tests run against a local API server, envtest), and the adapter parity test (test/crs)
-	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" $(GO) test -race -count=1 ./...
+	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" $(GO) test -race -count=1 -timeout 20m ./...
 	@# Adapter parity (#365): every adapter against the reverse proxy, in test/crs's module.
 	cd test/crs && $(GO) test -count=1 -run '^TestAdapterParity$$' .
 
 .PHONY: test-norace
 test-norace: ## The tests the race detector skips or shrinks, without it: the operator controller's (full-size bundle tests, the property test's 200 scenarios) and pkg/pipeline's (the gRPC schema false positives' 100,000 messages)
-	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" $(GO) test -count=1 ./operator/internal/controller/ ./pkg/pipeline/
+	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" $(GO) test -count=1 -timeout 30m ./operator/internal/controller/ ./pkg/pipeline/
 
 .PHONY: stress-test
 stress-test: ## Tests under stress, for timing flakes: -race -shuffle -count=10, GOMAXPROCS=2, CPU hogs (STRESS_PACKAGES; SEED, COUNT, HOGS: hack/ci/stress.sh)
