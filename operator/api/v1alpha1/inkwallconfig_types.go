@@ -92,6 +92,48 @@ type InkwallConfigSpec struct {
 	// operator (and on to the control plane, when one is connected).
 	// +optional
 	Events EventsSpec `json:"events,omitempty"`
+
+	// Bundle configures how namespaces share the policy bundle. Omitted,
+	// it is {}, so that its defaults show.
+	// +optional
+	// +kubebuilder:default={}
+	Bundle BundleSpec `json:"bundle,omitempty"`
+}
+
+// BundleSpec configures the policy bundle.
+type BundleSpec struct {
+	// NamespaceShare is the share of each of the bundle's size limits
+	// (7,200 KiB compressed, 64 MiB raw), in percent, that one namespace
+	// may grow to while the bundle with every change would leave less than
+	// that share of a limit free: then a namespace's changes that grow its
+	// share, measured, past it are held back (Accepted=False,
+	// BundleTooLarge). It never applies when one namespace has all the
+	// content, or to a first bundle that fits. A namespace's share is what
+	// the bundle would save without its policies and rule sets;
+	// ClusterWAFRuleSets, such as the CRS, are in nobody's share. A
+	// compressed share not measured (many namespaces changed at once) is
+	// within it. Content already published is never taken out. 0 is 25.
+	// +kubebuilder:validation:Minimum=5
+	// +kubebuilder:validation:Maximum=100
+	// +kubebuilder:default=25
+	// +optional
+	NamespaceShare int32 `json:"namespaceShare,omitempty"`
+
+	// ClusterReserve is the share of each of the bundle's size limits, in
+	// percent, kept free for ClusterWAFRuleSet changes, such as a CRS
+	// upgrade: namespaces' changes that grow the bundle are held back
+	// (Accepted=False, BundleTooLarge) when the bundle after them would
+	// leave less than it free; cluster rule set changes may use it, and so
+	// may a namespace's change that adopts one (a fix shipped with a CRS
+	// upgrade that adds a rule id its published rules use). It never applies
+	// when one namespace has all the content, to a first bundle, or to the
+	// bundle in force published again when even holding every change doesn't
+	// fit. 0 turns it off.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=50
+	// +kubebuilder:default=10
+	// +optional
+	ClusterReserve *int32 `json:"clusterReserve,omitempty"`
 }
 
 // EventsSpec configures the engines' security events.

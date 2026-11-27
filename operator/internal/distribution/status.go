@@ -59,6 +59,10 @@ var (
 		Name: "inkwall_operator_bundle_compressed_bytes",
 		Help: "Size of the bundle this replica serves, gzip-compressed, as stored in its Secrets: over 900 KiB it is split into chunks, over 7,200 KiB it can't be published.",
 	})
+	bundleRawBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "inkwall_operator_bundle_raw_bytes",
+		Help: "Size of the bundle this replica serves, signed and decompressed: over 64 MiB it can't be published.",
+	})
 	engineCount = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "inkwall_operator_engines",
 		Help: "Connected engines, by whether they run the current bundle (current, behind, rejected), and by the integration whose proxy pod runs them (unknown: not matched to one yet). Reported by the leader.",
@@ -87,7 +91,7 @@ const (
 )
 
 func init() {
-	metrics.Registry.MustRegister(bundleVersion, bundleBytes, engineCount, eventsReceived, eventsDroppedByEngines, RequestStatsDropped)
+	metrics.Registry.MustRegister(bundleVersion, bundleBytes, bundleRawBytes, engineCount, eventsReceived, eventsDroppedByEngines, RequestStatsDropped)
 }
 
 // Enforced computes a policy's Enforced condition: whether every engine

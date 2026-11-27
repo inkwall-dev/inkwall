@@ -78,12 +78,34 @@ groups:
           description: '{{ $value }} {{ $labels.integration }} targets couldn''t be wired to the engine (Programmed: WiringFailed): their routes are not protected.'
           runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallwiringfailures
       - alert: InkwallBundleNearSizeLimit
-        # Bundles over 7,200 KiB compressed can't be published.
-        expr: max(inkwall_operator_bundle_compressed_bytes) > 0.8 * 7200 * 1024
-        for: 30m
+        # Bundles over 7,200 KiB compressed or 64 MiB raw can't be
+        # published: the value is the larger fraction of a limit.
+        expr: |
+          max(inkwall_operator_bundle_compressed_bytes) / (7200 * 1024) > 0.8
+          or max(inkwall_operator_bundle_raw_bytes) / (64 * 1024 * 1024) > 0.8
+        for: 10m
         labels:
           severity: warning
         annotations:
           summary: Inkwall's policy bundle is near its size limit.
-          description: The bundle is {{ $value | humanize1024 }}B compressed; past 7,200 KiB, policy changes can't be published.
+          description: The bundle is at {{ $value | humanizePercentage }} of its size limit (7,200 KiB compressed, 64 MiB raw). Changes that would take a namespace over its share of the bundle, or the bundle over its limit, are held back (Accepted=False, BundleTooLarge); the other changes are still published.
           runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallbundlenearsizelimit
+      - alert: InkwallBundleChangesHeld
+        expr: max(inkwall_operator_bundle_held_policies) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Inkwall holds back policy changes, as the bundle would be too large.
+          description: '{{ $value }} policies and rule sets are held back at their previous version, or left out, when new or when they do not compile with a held rule set (Accepted=False, BundleTooLarge): their namespace is over its share of the bundle, the bundle with them is over its size limit, or they would grow it into the cluster reserve.'
+          runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallbundlechangesheld
+      - alert: InkwallNamespaceOverShare
+        # Only the namespaces over their share have a series.
+        expr: max by (policy_namespace) (inkwall_operator_bundle_namespace_share_percent) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: A namespace takes more of Inkwall's policy bundle than its share.
+          description: Namespace {{ $labels.policy_namespace }} takes {{ $value | humanize }}% of the bundle's size limit, more than spec.bundle.namespaceShare, and leaves less room for the other namespaces' changes.
+          runbook_url: https://github.com/inkwall-dev/inkwall/blob/main/docs/monitoring.md#inkwallnamespaceovershare
