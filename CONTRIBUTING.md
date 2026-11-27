@@ -96,6 +96,7 @@ Durations are on a laptop or a CI runner, roughly.
 |---|---|---|---|---|
 | Fast checks | `make check` (`make lint`, `make test`, `make vuln`, `make docs-check`) | 5–10 min | Go | every PR (`lint`, `test`, `vuln`, `docs`) |
 | Unit tests | `make test` (race detector; the operator's against envtest) | 5 min | Go | every PR (`test`) |
+| Without the race detector | `make test-norace` (the tests the race detector skips or shrinks: the operator controller's full-size bundle tests and 200 bundle fit scenarios) | 5 min | Go | every PR (`test`) |
 | Fuzz seeds | in `make test` (each target's `testdata/fuzz`) | | Go | every PR |
 | Fuzzing | `go test -run '^$' -fuzz '^FuzzX$' ./pkg/x` | 5 min per target | Go | nightly (`fuzz`) |
 | Stress | `make stress-test` | an hour | Go | nightly (`stress`) |

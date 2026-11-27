@@ -92,8 +92,9 @@ const warnBytes = bundle.MaxCompressedBytes * 3 / 4
 // Reasons the builder reports.
 const (
 	// ReasonBundleTooLarge: Accepted is False because the bundle with the
-	// policy as it is now doesn't fit its Secrets, so it isn't published.
-	ReasonBundleTooLarge = "BundleTooLarge"
+	// policy as it is now doesn't fit its Secrets, so it isn't published:
+	// it keeps its previous version, or is left out (fit.go).
+	ReasonBundleTooLarge = resolver.ReasonBundleTooLarge
 	// ReasonSuspended and ReasonNotSuspended: the InkwallConfig's
 	// Suspended condition.
 	ReasonSuspended    = "Suspended"
@@ -145,6 +146,18 @@ type BundleReconciler struct {
 	// checked caches CheckUserRules results by rule text: compiling with
 	// the Core Rule Set takes milliseconds, and rules rarely change.
 	checked map[[sha256.Size]byte]error
+	// fitOptions are the tests' (fit.go).
+	fitOptions fitOptions
+	// waited are the cluster rule sets whose change the last build didn't
+	// publish (fitted.waited): none waits two builds in a row for a
+	// namespace (fit.go).
+	waited map[string]*bundlev1.RuleSet
+	// carried are the namespaces the last build held while protected, in
+	// that wait (fitted.carry, fit.go).
+	carried map[string]bool
+	// shares is what bundleNamespaceShare reports, for the bundle and the
+	// spec.bundle.namespaceShare it was measured with.
+	shares sharesSeen
 	// rules checks that each policy's rule sets compile together.
 	rules *enginepolicy.RuleChecker
 }
@@ -295,36 +308,89 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	signer := keys.Active
 
 	res := resolver.Resolve(in)
-	// The rule checks this resolution didn't ask for are of rule sets and
-	// policies there aren't any more.
-	r.rules.Prune()
+	// The rule checks no resolution of this build asks for (see below) are
+	// of rule sets and policies there aren't any more.
+	defer r.rules.Prune()
 	// A bundle signed with another key than the active one (it just
 	// rotated) is signed again, as a new version: engines then cache a
 	// bundle the active key signed.
 	resign := current != nil && currentKey != signer.KeyID()
-	next, changed, err := bundle.Next(current, &bundlev1.Bundle{
-		ClusterId: r.clusterID,
-		Policies:  res.Policies,
-		RuleSets:  res.RuleSets,
-		Suspended: suspended,
-		ProbeKey:  signer.ProbeKey(),
-		Events:    eventsConfig(cfg),
-	}, r.lastVersion, r.Now(), resign)
+	now := r.Now()
+	build := func(res resolver.Result) (*bundlev1.Bundle, bool, error) {
+		return bundle.Next(current, &bundlev1.Bundle{
+			ClusterId: r.clusterID,
+			Policies:  res.Policies,
+			RuleSets:  res.RuleSets,
+			Suspended: suspended,
+			ProbeKey:  signer.ProbeKey(),
+			Events:    eventsConfig(cfg),
+		}, r.lastVersion, now, resign)
+	}
+	// keep builds with the settings of the bundle in force: the last
+	// resort of a bundle too large even with every change held (fit.go).
+	keep := func(res resolver.Result) (*bundlev1.Bundle, bool, error) {
+		return bundle.Next(current, &bundlev1.Bundle{
+			ClusterId: r.clusterID,
+			Policies:  res.Policies,
+			RuleSets:  res.RuleSets,
+			Suspended: suspended,
+			ProbeKey:  signer.ProbeKey(),
+			Events:    current.GetEvents(),
+		}, r.lastVersion, now, resign)
+	}
+	next, changed, err := build(res)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
 	// published is the bundle engines get: next, unless it is too large.
 	published := next
 	var tooLarge error
+	held := 0
 	if changed {
-		err := r.publish(ctx, signer, next)
+		// Hold back the changes of namespaces over their share of the
+		// bundle, and, if it is still too large, changes namespace by
+		// namespace until it fits, not every change (fit.go).
+		f, ok, err := fit(in, res, next, changed, signer, fitParams{share: namespaceShare(bundleSpec(cfg).NamespaceShare),
+			reserve: clusterReserve(bundleSpec(cfg).ClusterReserve), waited: r.waited, carried: r.carried}, build, keep, r.fitOptions)
 		if err != nil {
+			return reconcile.Result{}, err
+		}
+		if !ok {
+			err = f.tooLarge
 			publishFailed(err)
+		} else {
+			if errors.Is(f.tooLarge, bundle.ErrTooLarge) {
+				publishFailed(f.tooLarge)
+			}
+			if f.holds() {
+				msg := "changes of namespaces over their share of the bundle are held back"
+				switch {
+				case f.kept:
+					msg = "bundle not published even with every change held back; the bundle in force is published with deletions only"
+				case errors.Is(f.tooLarge, errReserve):
+					msg = "bundle with every change not published: namespaces' changes are held back, namespace by namespace, " +
+						"until it leaves spec.bundle.clusterReserve free"
+				case f.tooLarge != nil:
+					msg = "bundle with every change not published; changes are held back, namespace by namespace, until it fits"
+				}
+				logger.Error(f.tooLarge, msg, "held", heldNames(f), "encodes", f.encodes)
+			}
+			res, next, held = f.res, f.next, heldCount(f)
+			published = next
+			if f.changed {
+				err = r.publish(ctx, signer, next)
+				if err != nil {
+					publishFailed(err)
+				}
+			}
+			if err == nil {
+				r.waited, r.carried = f.waited, f.carry
+			}
 		}
 		switch {
 		case errors.Is(err, bundle.ErrTooLarge):
-			// Retrying won't help until the policy shrinks; keep the
-			// current bundle, and say so on the policies it doesn't
+			// Even the bundle in force with deletions alone doesn't fit
+			// (fit.go): keep it, and say so on the policies it doesn't
 			// enforce as they are now.
 			logger.Error(err, "bundle not published")
 			tooLarge, published = err, current
@@ -338,6 +404,10 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 		case err != nil:
 			return reconcile.Result{}, err
 		}
+	}
+	bundleHeld.Set(float64(held))
+	if err := r.observeShares(published, signer, namespaceShare(bundleSpec(cfg).NamespaceShare)); err != nil {
+		return reconcile.Result{}, err
 	}
 	if err := bundle.Prune(ctx, r.Client, r.APIReader, r.Namespace); err != nil {
 		return reconcile.Result{}, fmt.Errorf("delete stale bundle chunks: %w", err)
@@ -358,6 +428,15 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 		return reconcile.Result{RequeueAfter: min(rotationPoll, r.RotationGrace)}, nil
 	}
 	return reconcile.Result{RequeueAfter: resync}, nil
+}
+
+// bundleSpec is the InkwallConfig's spec.bundle; its defaults without
+// one.
+func bundleSpec(cfg *wafv1alpha1.InkwallConfig) wafv1alpha1.BundleSpec {
+	if cfg == nil {
+		return wafv1alpha1.BundleSpec{}
+	}
+	return cfg.Spec.Bundle
 }
 
 // publish signs and stores next.
@@ -383,7 +462,7 @@ func (r *BundleReconciler) publish(ctx context.Context, signer *bundle.Signer, n
 		"rule_sets", len(next.GetRuleSets()), "suspended", next.GetSuspended(), "key", signer.KeyID(), "bytes", size, "chunks", chunks)
 	if size > warnBytes {
 		// Warn well before builds fail.
-		logger.Info("bundle nears its size limit: past it, policy changes are not published",
+		logger.Info("bundle nears its size limit: changes of namespaces over their share (spec.bundle.namespaceShare) are held back, and past it, changes that don't fit",
 			"bytes", size, "limit", bundle.MaxCompressedBytes)
 	}
 	return nil
@@ -627,10 +706,12 @@ func (r *BundleReconciler) writeTooLarge(ctx context.Context, res resolver.Resul
 		running = fmt.Sprintf("engines run bundle %d, without this spec", current.GetVersion())
 	}
 	statuses := make(map[types.NamespacedName]resolver.Status, len(res.PolicyStatus))
+	held := 0
 	for key, st := range res.PolicyStatus {
 		id := resolver.PolicyID(key.Namespace, key.Name)
 		if h, ok := now[id]; ok && st.Applied {
 			if w, ok := was[id]; !ok || w != h {
+				held++
 				st = resolver.Status{Reason: ReasonBundleTooLarge, Message: fmt.Sprintf(
 					"not published: %v; %s. Shrink this policy, its rule sets or others until the bundle fits", tooLarge, running)}
 			}
@@ -638,6 +719,7 @@ func (r *BundleReconciler) writeTooLarge(ctx context.Context, res resolver.Resul
 		statuses[key] = st
 	}
 	res.PolicyStatus = statuses
+	bundleHeld.Set(float64(held))
 	return r.writeStatus(ctx, res, current, policies, ruleSets, clusterRuleSets)
 }
 
