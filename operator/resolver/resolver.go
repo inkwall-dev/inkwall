@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"maps"
 	"path"
 	"slices"
 	"strings"
@@ -73,6 +74,9 @@ const (
 	// ReasonInvalidRateLimits: the engine can't compile the policy's rate
 	// limits.
 	ReasonInvalidRateLimits = "InvalidRateLimits"
+	// ReasonBundleTooLarge: the bundle with the policy as it is now
+	// doesn't fit its Secrets, so the policy is held back (Input.Hold).
+	ReasonBundleTooLarge = "BundleTooLarge"
 )
 
 // PolicyValid is the Accepted message of a policy that resolved with
@@ -113,6 +117,23 @@ type Input struct {
 	// GRPCSchemas compiles each distinct descriptor set once across
 	// resolutions; nil compiles every one each time.
 	GRPCSchemas *compile.Cache
+	// Hold names the policies the bundle doesn't take as they are now,
+	// with the message of their BundleTooLarge status: the bundle with
+	// them doesn't fit its Secrets (the builder decides which). Each keeps
+	// its previous version, as a policy that fails does, or is left out
+	// if it has none.
+	Hold map[types.NamespacedName]string
+	// HoldRuleSets names, by id, the rule sets the bundle doesn't take as
+	// they are now, with the message of their BundleTooLarge status: each
+	// ships as it is in Previous, and the policies that bind it are checked
+	// with that version. One Previous doesn't have isn't held.
+	//
+	// A held policy (Hold) whose previous version doesn't compile with the
+	// rule sets of its namespace that changed holds them too: they ship as
+	// they were. A ClusterWAFRuleSet is never held for a policy: when the
+	// previous version doesn't compile with one that changed, the policy is
+	// left out, and its status says so.
+	HoldRuleSets map[string]string
 }
 
 // Status is a resolved Accepted condition.
@@ -177,6 +198,11 @@ type resolution struct {
 	// cache keys of every descriptor set read.
 	schemas    map[string]*bundlev1.GRPCSchema
 	schemaKeys map[[sha256.Size]byte]bool
+	// heldRuleSets are the rule sets of Input.HoldRuleSets, and those a
+	// held policy holds too, that ship as they were; heldNow are those
+	// rule sets as they are now.
+	heldRuleSets map[string]bool
+	heldNow      map[string]*bundlev1.RuleSet
 }
 
 func (r *resolution) resolveRuleSets() {
@@ -205,6 +231,69 @@ func (r *resolution) resolveRuleSets() {
 			ns = ref.Namespace
 		}
 		add(RuleSetID("ClusterWAFRuleSet", "", rs.Name), src, ns)
+	}
+	// A held rule set ships as it is in the bundle in force.
+	previous := map[string]*bundlev1.RuleSet{}
+	for _, rs := range r.in.Previous.GetRuleSets() {
+		previous[rs.GetId()] = rs
+	}
+	hold := func(id, msg string) {
+		now, ok := r.ruleSets[id]
+		if !ok || previous[id] == nil || proto.Equal(now, previous[id]) || r.heldRuleSets[id] {
+			return
+		}
+		if r.heldRuleSets == nil {
+			r.heldRuleSets, r.heldNow = map[string]bool{}, map[string]*bundlev1.RuleSet{}
+		}
+		r.heldRuleSets[id], r.heldNow[id] = true, now
+		r.ruleSets[id] = previous[id]
+		r.out.RuleSetStatus[id] = Status{Reason: ReasonBundleTooLarge, Message: msg + "; its previous version stays in force"}
+	}
+	for _, id := range slices.Sorted(maps.Keys(r.in.HoldRuleSets)) {
+		hold(id, r.in.HoldRuleSets[id])
+	}
+	// A held policy's previous version that doesn't compile with the rule
+	// sets as they are now holds those of its namespace that changed: a
+	// WAFRuleSet is bound only from its own namespace. Never a cluster rule
+	// set (resolvePolicies leaves such a policy out).
+	if len(r.in.Hold) == 0 {
+		return
+	}
+	policies := map[string]*bundlev1.Policy{}
+	for _, p := range r.in.Previous.GetPolicies() {
+		policies[p.GetId()] = p
+	}
+	keys := slices.SortedFunc(maps.Keys(r.in.Hold), func(a, b types.NamespacedName) int {
+		return cmp.Compare(PolicyID(a.Namespace, a.Name), PolicyID(b.Namespace, b.Name))
+	})
+	for _, key := range keys {
+		prev := policies[PolicyID(key.Namespace, key.Name)]
+		var changed []string
+		shipped := map[string]*bundlev1.RuleSet{}
+		for _, b := range prev.GetRuleSets() {
+			id := b.GetRuleSetId()
+			now, old := r.ruleSets[id], previous[id]
+			switch {
+			case now == nil:
+				if old != nil {
+					shipped[id] = old
+				}
+			case old != nil && !proto.Equal(now, old) && strings.HasPrefix(id, "WAFRuleSet/"):
+				changed = append(changed, id)
+				shipped[id] = now
+			default:
+				shipped[id] = now
+			}
+		}
+		if len(changed) == 0 {
+			continue
+		}
+		if _, err := r.checkPolicy(prev, shipped); err != nil {
+			for _, id := range changed {
+				hold(id, fmt.Sprintf("not published: WAFPolicy %s is held back (BundleTooLarge) and its previous version, "+
+					"which stays in force, doesn't compile with this rule set as it is now", prev.GetId()))
+			}
+		}
 	}
 }
 
@@ -256,6 +345,9 @@ type candidate struct {
 	status Status
 	// failed means the policy falls back to its previous version.
 	failed bool
+	// held means the bundle doesn't take the policy as it is now
+	// (Input.Hold): it is failed too.
+	held bool
 	// rank is the precedence of each route (by routeKey), from its most
 	// specific target.
 	rank map[string]int
@@ -371,6 +463,10 @@ func (r *resolution) resolvePolicies() {
 	pols := make([]*bundlev1.Policy, len(cands))
 	for i, c := range cands {
 		pols[i] = c.policy
+		if msg, held := r.in.Hold[c.key]; held && !c.failed {
+			c.fail(ReasonBundleTooLarge, msg)
+			c.held = true
+		}
 		if !c.failed {
 			if err := enginepolicy.CheckRateLimits(c.policy); err != nil {
 				c.fail(ReasonInvalidRateLimits, fmt.Sprintf("the engine can't compile its rate limits: %v", err))
@@ -384,6 +480,9 @@ func (r *resolution) resolvePolicies() {
 		if c.failed {
 			prev, ok := previous[c.policy.GetId()]
 			if !ok {
+				if c.held {
+					c.status.Message += "; it has no previous version, so it is left out until the bundle fits"
+				}
 				pols[i] = nil
 				continue
 			}
@@ -404,12 +503,31 @@ func (r *resolution) resolvePolicies() {
 	// The bundle has one version of each rule set: a policy that resolved
 	// ships with the current one. A previous version kept that binds a rule
 	// set that changed since, and that such a policy binds too, would ship
-	// with the new rules it wasn't checked with: it is left out.
+	// with the new rules it wasn't checked with: it is left out. A held
+	// policy's previous version ships with them if it compiles with them,
+	// as a policy that didn't change does: holding back one policy must not
+	// take its protection away because others use a rule set it binds. If
+	// it doesn't, it is left out (Input.HoldRuleSets).
+	//
+	// A policy that fails only because its namespace's rule set is held
+	// (Input.HoldRuleSets) is held too, here. A changed ClusterWAFRuleSet
+	// that isn't held ships as it is now even when every policy that binds
+	// it is held: holding a policy never holds a cluster rule set.
+	heldLike := func(c *candidate) bool {
+		return c.held || c.failed && slices.ContainsFunc(c.policy.GetRuleSets(), func(b *bundlev1.RuleSetBinding) bool {
+			return r.heldRuleSets[b.GetRuleSetId()]
+		})
+	}
 	current := map[string]bool{}
 	for i, c := range cands {
-		if pols[i] != nil && !c.failed {
-			for _, b := range pols[i].GetRuleSets() {
-				current[b.GetRuleSetId()] = true
+		if pols[i] == nil {
+			continue
+		}
+		for _, b := range pols[i].GetRuleSets() {
+			id := b.GetRuleSetId()
+			if !c.failed || heldLike(c) && strings.HasPrefix(id, "ClusterWAFRuleSet/") && !r.heldRuleSets[id] &&
+				r.ruleSets[id] != nil && previousRuleSets[id] != nil {
+				current[id] = true
 			}
 		}
 	}
@@ -417,14 +535,55 @@ func (r *resolution) resolvePolicies() {
 		if pols[i] == nil || !c.failed {
 			continue
 		}
+		mixed := false
 		for _, b := range pols[i].GetRuleSets() {
 			id := b.GetRuleSetId()
-			if current[id] && !proto.Equal(r.ruleSets[id], previousRuleSets[id]) {
-				c.status.Message = strings.Replace(c.status.Message, keptPrevious, fmt.Sprintf(
-					"; its previous version binds rule set %s, which changed since and which other policies use as it is now, so the policy is left out", id), 1)
-				pols[i] = nil
-				break
+			if !current[id] || proto.Equal(r.ruleSets[id], previousRuleSets[id]) {
+				continue
 			}
+			if heldLike(c) {
+				mixed = true
+				continue
+			}
+			c.status.Message = strings.Replace(c.status.Message, keptPrevious, fmt.Sprintf(
+				"; its previous version binds rule set %s, which changed since and which other policies use as it is now, so the policy is left out", id), 1)
+			pols[i] = nil
+			break
+		}
+		if !mixed {
+			continue
+		}
+		shipped := map[string]*bundlev1.RuleSet{}
+		for _, b := range pols[i].GetRuleSets() {
+			id := b.GetRuleSetId()
+			rs := previousRuleSets[id]
+			if current[id] {
+				rs = r.ruleSets[id]
+			}
+			if rs != nil {
+				shipped[id] = rs
+			}
+		}
+		if _, err := r.checkPolicy(pols[i], shipped); err != nil {
+			// The rule sets of its namespace that changed are held with it
+			// (resolveRuleSets), so a cluster rule set changed: it is never
+			// held for one namespace's policy (Input.HoldRuleSets).
+			var changed []string
+			for _, b := range pols[i].GetRuleSets() {
+				id := b.GetRuleSetId()
+				if current[id] && previousRuleSets[id] != nil && !proto.Equal(r.ruleSets[id], previousRuleSets[id]) {
+					kind, name, _ := strings.Cut(id, "/")
+					changed = append(changed, kind+" "+name)
+				}
+			}
+			names := strings.Join(changed, ", ")
+			if names == "" {
+				names = "the rule sets other policies use" // unreachable: one changed
+			}
+			c.status.Message = strings.Replace(c.status.Message, keptPrevious, fmt.Sprintf(
+				"; and its previous version doesn't compile with %s as it is now, which changed since and which other policies use, "+
+					"so the policy is left out until its change is published", names), 1)
+			pols[i] = nil
 		}
 	}
 
@@ -505,8 +664,12 @@ func (r *resolution) resolvePolicies() {
 		}
 		for _, b := range pol.GetRuleSets() {
 			// A rule set a policy that resolved binds ships as it is now,
-			// whatever the order of the policies.
-			if id := b.GetRuleSetId(); !c.failed || !current[id] {
+			// whatever the order of the policies, and so does a cluster rule
+			// set a held policy binds (current).
+			switch id := b.GetRuleSetId(); {
+			case current[id]:
+				used[id] = r.ruleSets[id]
+			default:
 				used[id] = usedRuleSets[id]
 			}
 		}
@@ -528,6 +691,8 @@ func (r *resolution) resolvePolicies() {
 		shipped[pol.GetId()] = c
 	}
 	r.checkBundle(shipped, used)
+	r.reportHeldOut(cands)
+	r.reportShippedAsWas(cands, used, previous)
 	// After every policy's routes: an overlap is reported on both.
 	for _, c := range cands {
 		c.reportNotes()
@@ -597,6 +762,93 @@ func (r *resolution) checkBundle(shipped map[string]*candidate, used map[string]
 		if !bound[id] {
 			delete(used, id)
 		}
+	}
+}
+
+// reportHeldOut gives BundleTooLarge, not RuleSetsIncompatible, to a
+// policy left out because a rule set it binds is held (Input.HoldRuleSets):
+// as it is now, it compiles with that rule set as it is now, but not as it
+// was with the others as they are now. Holding left it out, not its rules.
+func (r *resolution) reportHeldOut(cands []*candidate) {
+	if len(r.heldRuleSets) == 0 {
+		return
+	}
+	in := map[string]bool{}
+	for _, p := range r.out.Policies {
+		in[p.GetId()] = true
+	}
+	for _, c := range cands {
+		if in[c.policy.GetId()] || c.status.Reason != ReasonRuleSetsIncompatible {
+			continue
+		}
+		var held []string
+		now := map[string]*bundlev1.RuleSet{}
+		for _, b := range c.policy.GetRuleSets() {
+			id := b.GetRuleSetId()
+			now[id] = r.ruleSets[id]
+			if r.heldRuleSets[id] {
+				now[id] = r.heldNow[id]
+				kind, name, _ := strings.Cut(id, "/")
+				if kind == "WAFRuleSet" {
+					_, name, _ = strings.Cut(name, "/")
+				}
+				held = append(held, kind+" "+name)
+			}
+		}
+		if len(held) == 0 {
+			continue
+		}
+		if _, err := r.checkPolicy(c.policy, now); err != nil {
+			continue
+		}
+		c.status = Status{Reason: ReasonBundleTooLarge, Message: fmt.Sprintf(
+			"not published: %s is held back at its previous version (BundleTooLarge; see its status), and the policy doesn't "+
+				"compile with it as it was and the other rule sets as they are now, so it is left out until that change is "+
+				"published (%s)", strings.Join(held, ", "), c.status.Message)}
+	}
+}
+
+// reportShippedAsWas gives BundleTooLarge to a ClusterWAFRuleSet that
+// changed but ships as it was (used, by ID), because every policy that
+// binds it keeps its previous version, one held back (Input.Hold) at
+// least: its change isn't published, so its status mustn't say Accepted.
+func (r *resolution) reportShippedAsWas(cands []*candidate, used map[string]*bundlev1.RuleSet, previous map[string]*bundlev1.Policy) {
+	if len(r.in.Hold) == 0 {
+		return
+	}
+	was := map[string]*bundlev1.RuleSet{}
+	for _, rs := range r.in.Previous.GetRuleSets() {
+		was[rs.GetId()] = rs
+	}
+	binds := func(p *bundlev1.Policy, id string) bool {
+		return slices.ContainsFunc(p.GetRuleSets(), func(b *bundlev1.RuleSetBinding) bool { return b.GetRuleSetId() == id })
+	}
+	for _, id := range slices.Sorted(maps.Keys(used)) {
+		rs, now := used[id], r.ruleSets[id]
+		if !strings.HasPrefix(id, "ClusterWAFRuleSet/") || r.heldRuleSets[id] || was[id] == nil || now == nil ||
+			!proto.Equal(rs, was[id]) || proto.Equal(now, was[id]) {
+			continue
+		}
+		var held []string
+		for _, c := range cands {
+			heldLike := c.held || c.failed && slices.ContainsFunc(c.policy.GetRuleSets(), func(b *bundlev1.RuleSetBinding) bool {
+				return r.heldRuleSets[b.GetRuleSetId()]
+			})
+			if heldLike && (binds(c.policy, id) || binds(previous[c.policy.GetId()], id)) {
+				held = append(held, "WAFPolicy "+c.policy.GetId())
+			}
+		}
+		if len(held) == 0 {
+			continue
+		}
+		slices.Sort(held)
+		if len(held) > 3 {
+			held = append(held[:3], fmt.Sprintf("%d more", len(held)-3))
+		}
+		r.out.RuleSetStatus[id] = Status{Reason: ReasonBundleTooLarge, Message: fmt.Sprintf(
+			"not published: every policy that binds it keeps its previous version, and %s is held back (BundleTooLarge; see "+
+				"its status), so it ships as it was until their change is published; its previous version stays in force",
+			strings.Join(held, ", "))}
 	}
 }
 
@@ -773,6 +1025,9 @@ func (r *resolution) candidate(p *wafv1alpha1.WAFPolicy, ingresses map[types.Nam
 			}
 			c.fail(ReasonInvalidRef, msg)
 			continue
+		}
+		if r.heldRuleSets[id] {
+			c.notes = append(c.notes, fmt.Sprintf("%s %s is held back at its previous version (BundleTooLarge; see its status)", b.Ref.Kind, b.Ref.Name))
 		}
 		if b.Placement == wafv1alpha1.PlacementBeforeCRS {
 			if msg := beforeCRS(rs); msg != "" {

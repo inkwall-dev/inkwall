@@ -273,10 +273,21 @@ func testBundleTooLarge(ctx context.Context, t *testing.T, c client.Client) {
 	// (#304): its engines would get this bundle, megabytes of rules, tests
 	// that count chunks would see these, and a bundle left too large would
 	// keep every later policy change from being published.
+	// One namespace fills the bundle: this test is about the bundle's
+	// limit, not a namespace's share of it (spec.bundle.namespaceShare).
+	share := &wafv1alpha1.InkwallConfig{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(share), share); apierrors.IsNotFound(err) {
+		share.Spec.Bundle.NamespaceShare = 100
+		if err := c.Create(ctx, share); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		update(ctx, t, c, share, func(cfg *wafv1alpha1.InkwallConfig) { cfg.Spec.Bundle.NamespaceShare = 100 })
+	}
 	t.Cleanup(func() {
 		cfg := &wafv1alpha1.InkwallConfig{}
-		if err := c.Get(ctx, client.ObjectKey{Name: "default"}, cfg); err == nil && cfg.Spec.Suspend {
-			update(ctx, t, c, cfg, func(cfg *wafv1alpha1.InkwallConfig) { cfg.Spec.Suspend = false })
+		if err := c.Get(ctx, client.ObjectKey{Name: "default"}, cfg); err == nil && (cfg.Spec.Suspend || cfg.Spec.Bundle.NamespaceShare != 25) {
+			update(ctx, t, c, cfg, func(cfg *wafv1alpha1.InkwallConfig) { cfg.Spec.Suspend, cfg.Spec.Bundle.NamespaceShare = false, 25 })
 		}
 		for _, o := range []client.Object{&wafv1alpha1.WAFPolicy{}, &wafv1alpha1.WAFRuleSet{}, &networkingv1.Ingress{}} {
 			if err := c.DeleteAllOf(ctx, o, client.InNamespace("huge")); err != nil {
@@ -400,6 +411,69 @@ func testBundleTooLarge(ctx context.Context, t *testing.T, c client.Client) {
 	}
 	// The other policies run as they are: their status stays.
 	wantAccepted("a filler, unchanged", "filler-0", metav1.ConditionTrue, "Accepted")
+
+	// Another namespace's change still reaches the engines: only the
+	// policy that grew the bundle is held back.
+	calm := &wafv1alpha1.WAFPolicy{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "calm", Name: "calm"},
+		Spec: wafv1alpha1.WAFPolicySpec{
+			TargetRefs: []wafv1alpha1.TargetRef{{Kind: "Ingress", Name: "calm"}},
+			Mode:       wafv1alpha1.PolicyDetect,
+		},
+	}
+	calmObjs := []client.Object{
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "calm"}},
+		&networkingv1.Ingress{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "calm", Name: "calm"},
+			Spec: networkingv1.IngressSpec{Rules: []networkingv1.IngressRule{{
+				Host: "calm.example.com",
+				IngressRuleValue: networkingv1.IngressRuleValue{HTTP: &networkingv1.HTTPIngressRuleValue{Paths: []networkingv1.HTTPIngressPath{{
+					Path: "/", PathType: &prefix,
+					Backend: networkingv1.IngressBackend{Service: &networkingv1.IngressServiceBackend{Name: "calm", Port: networkingv1.ServiceBackendPort{Number: 80}}},
+				}}}},
+			}}},
+		},
+		calm,
+	}
+	for _, o := range calmObjs {
+		if err := c.Create(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, o := range calmObjs[1:] {
+			if err := c.Delete(ctx, o); err != nil && !apierrors.IsNotFound(err) {
+				t.Errorf("delete %s: %v", client.ObjectKeyFromObject(o), err)
+			}
+		}
+	})
+	wantCalm := func(what string, mode bundlev1.Mode) {
+		t.Helper()
+		eventually(t, what, func() string {
+			b := current(ctx, t, c)
+			if p := findPolicy(b, "calm/calm"); p == nil || p.GetMode() != mode {
+				return fmt.Sprintf("calm/calm in bundle %d: %v", b.GetVersion(), p)
+			}
+			if len(findPolicy(b, "huge/grown").GetRuleSets()) != 0 {
+				return fmt.Sprintf("bundle %d has the grown policy's rule sets", b.GetVersion())
+			}
+			var got wafv1alpha1.WAFPolicy
+			if err := c.Get(ctx, client.ObjectKeyFromObject(calm), &got); err != nil {
+				return err.Error()
+			}
+			cond := meta.FindStatusCondition(got.Status.Conditions, wafv1alpha1.ConditionAccepted)
+			if cond == nil || cond.Status != metav1.ConditionTrue || cond.ObservedGeneration != got.Generation || got.Status.BundleVersion != int64(b.GetVersion()) {
+				return fmt.Sprintf("calm/calm: Accepted %+v, bundleVersion %d", cond, got.Status.BundleVersion)
+			}
+			before = b.GetVersion()
+			return ""
+		})
+	}
+	wantCalm("another namespace's new policy published", bundlev1.Mode_MODE_DETECT)
+	update(ctx, t, c, calm, func(p *wafv1alpha1.WAFPolicy) { p.Spec.Mode = wafv1alpha1.PolicyBlock })
+	wantCalm("another namespace's change published", bundlev1.Mode_MODE_BLOCK)
+	wantAccepted("the grown policy, still held back", "grown", metav1.ConditionFalse, "BundleTooLarge")
+	wantAccepted("a filler, still unchanged", "filler-0", metav1.ConditionTrue, "Accepted")
 
 	// Suspended, the switch works all the same (#291): the bundle in force
 	// is published again with inspection suspended, and fits as it did;

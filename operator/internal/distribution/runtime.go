@@ -106,6 +106,7 @@ func (b *BundleSource) Reconcile(ctx context.Context, _ reconcile.Request) (reco
 	b.Store.SetPolicies(bundle.PolicyVersions(&bun), bun.GetSuspended())
 	bundleVersion.Set(float64(bun.GetVersion()))
 	bundleBytes.Set(float64(bundle.CompressedSize(&s)))
+	bundleRawBytes.Set(float64(proto.Size(signed)))
 	log.FromContext(ctx).V(1).Info("serving bundle", "version", bun.GetVersion())
 	return reconcile.Result{}, nil
 }
