@@ -27,12 +27,12 @@ import (
 	"github.com/inkwall-dev/inkwall/pkg/bundlesecret"
 )
 
-// eventually retries cond until it returns "" or a minute passes: the
+// eventually retries cond until it returns "" or waitFor passes: the
 // operator gets there in a second or two, but a loaded machine has taken
-// more than 20s.
+// more than 20s, and minutes under the race detector.
 func eventually(t *testing.T, what string, cond func() string) {
 	t.Helper()
-	deadline := time.Now().Add(time.Minute)
+	deadline := time.Now().Add(waitFor)
 	for {
 		msg := cond()
 		if msg == "" {
