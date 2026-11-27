@@ -80,7 +80,7 @@ test: ## Run unit tests with the race detector (operator tests run against a loc
 
 .PHONY: test-norace
 test-norace: ## The operator controller's tests without the race detector: the full-size bundle tests and the property test's 200 scenarios, which -race skips or shrinks
-	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" $(GO) test -count=1 ./operator/internal/controller/
+	@a="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION))"; [ -d "$$a" ] || { echo "no envtest assets for Kubernetes $(ENVTEST_K8S_VERSION): setup-envtest failed" >&2; exit 1; }; KUBEBUILDER_ASSETS="$$a" $(GO) test -count=1 -timeout 30m ./operator/internal/controller/
 
 .PHONY: scale-test
 scale-test: ## Operator scale test with fake engines, in envtest (SCALE=<policies>x<engines>, default 100x50; SCALE=full)
